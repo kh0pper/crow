@@ -218,9 +218,9 @@ export const LIMITS = Object.freeze({
   fontsPerSong: 32,
   libraryEntriesPerSong: 256,
   // The mixer (plan 1d, Limits): the effects of one chain, the returns of one
-  // song and the sends of one track. `ampInsertsPerSong` is the one cap the
-  // document does not enforce yet: an amp insert arrives with PR C, and until
-  // then `insert.add` refuses the kind, so nothing can reach it.
+  // song, the sends of one track, and the amp inserts of the whole song — an
+  // amp is the most expensive insert a song can hold (each one loads its own
+  // NAM model), so the cap is the song's, not the chain's.
   insertsPerChain: 8,
   returnsPerSong: 8,
   sendsPerTrack: 8,
@@ -301,9 +301,9 @@ function deepFreeze(value) {
  * summary and a control use: "Added a compressor to Bass", "the reverb's mix".
  *
  * The table's key order is `EFFECT_KINDS`'s order, which is the order a menu
- * lists the effects in. `amp` is deliberately absent: an amp insert arrives
- * with plan 1d's PR C, and `insert.add` refuses that kind with its own sentence
- * until then.
+ * lists the effects in. `amp` is deliberately absent: an amp insert is not an
+ * effect with settings but a capture and a cabinet the operator chose, and its
+ * three numbers are `AMP_PARAMS` below.
  * @type {Readonly<Object<string, Readonly<{label: string, params: Readonly<Object<string, any>>}>>>}
  */
 export const EFFECT_PARAMS = deepFreeze({
@@ -414,6 +414,82 @@ export const EFFECT_PARAMS = deepFreeze({
 
 /** The effects a chain may hold, in the order a menu lists them (see `EFFECT_PARAMS`). */
 export const EFFECT_KINDS = Object.freeze(Object.keys(EFFECT_PARAMS));
+
+/**
+ * The one insert kind whose sound is a file the operator chose: a NAM capture,
+ * played through a cabinet IR (plan 1d, PR C).
+ *
+ * It is NOT in `EFFECT_PARAMS`, and `EFFECT_KINDS` does not list it: the
+ * engines' tables and the mixer's effect menu are the effects, and an amp is not
+ * an effect with settings of its own — it is the capture and the cabinet it
+ * plays, plus three numbers. So its table is its own, right here.
+ * @type {string}
+ */
+export const AMP_KIND = "amp";
+
+/**
+ * An amp insert's numeric settings, in the shape `EFFECT_PARAMS` uses, so the one
+ * editor code reads both tables the same way.
+ *
+ * The two fields that name a file are NOT here: `model_id` and `ir_id` are
+ * library entry ids, not numbers with a range, and they live in
+ * `AMP_REFERENCES` beside this table. Every lookup is an own-property one
+ * (`ampSpec` / `ampParamSpec`): a name from a peer or an agent must never answer
+ * with something `Object.prototype` carries.
+ * @type {Readonly<Object<string, Readonly<{label: string, params: Readonly<Object<string, any>>}>>>}
+ */
+export const AMP_PARAMS = deepFreeze({
+  amp: {
+    label: "amp",
+    params: {
+      input_db: { min: -24, max: 24, default: 0, unit: "dB" },
+      output_db: { min: -24, max: 12, default: 0, unit: "dB" },
+      ir_mix: { min: 0, max: 1, default: 1, unit: "" },
+    },
+  },
+});
+
+/**
+ * The two fields of an amp insert that name a library entry: the capture it
+ * plays (required) and its cabinet (null for none).
+ * @type {Readonly<string[]>}
+ */
+export const AMP_REFERENCES = Object.freeze(["model_id", "ir_id"]);
+
+/**
+ * The amp's table entry, or null. An OWN-property lookup, like `effectSpec`: the
+ * kind comes from a peer or an agent.
+ * @returns {{label: string, params: Object}|null}
+ */
+export function ampSpec() {
+  return Object.hasOwn(AMP_PARAMS, AMP_KIND) ? AMP_PARAMS[AMP_KIND] : null;
+}
+
+/**
+ * One numeric amp setting's range, or null (own properties only).
+ * @param {string} name
+ * @returns {Object|null}
+ */
+export function ampParamSpec(name) {
+  const spec = ampSpec();
+  return spec && typeof name === "string" && Object.hasOwn(spec.params, name) ? spec.params[name] : null;
+}
+
+/** @returns {boolean} whether a kind is the amp's (the one kind with a capture). */
+export function isAmpKind(kind) {
+  return kind === AMP_KIND;
+}
+
+/**
+ * The numeric settings an amp insert starts with: input and output at 0 dB, and
+ * the cabinet at full mix. The capture is the caller's to name.
+ * @returns {Object<string, number>}
+ */
+export function defaultAmpParams() {
+  const params = {};
+  for (const [name, field] of Object.entries(ampSpec()?.params ?? {})) params[name] = field.default;
+  return params;
+}
 
 /**
  * One effect kind's entry in `EFFECT_PARAMS`, or null. An OWN-property lookup:
@@ -1511,9 +1587,10 @@ function readString(object, key) {
  * is asked on its effect: a font is in use exactly while a soundfont track's
  * `font_id` names it.
  *
- * Inserts arrive in PR B and C of plan 1d: an amp insert's `model_id` and
- * `ir_id` name a capture and a cabinet the same way, and they join this list
- * here rather than at each caller.
+ * An amp insert's `model_id` and `ir_id` name a capture and a cabinet the same
+ * way, and they join the answer in `libraryUses` (see `libraryInsertUsers`)
+ * rather than here, because the two users are different objects: this list is
+ * tracks, and a track id is not an insert id.
  * @param {object|Y.Doc} source - a snapshot, or a document (one is taken)
  * @param {string} id - the library entry's id
  * @returns {string[]} the track ids, sorted, each once
@@ -1531,16 +1608,39 @@ export function libraryUsers(source, id) {
 }
 
 /**
- * Whether anything in the song uses one library entry: a track's font_id now,
- * and an amp insert's model_id or ir_id once the mixer exists (see
- * `libraryUsers`). This is the check `library.remove` and the agent sound guard
- * are built on.
+ * The amp inserts that play one library entry: the capture one plays
+ * (`model_id`) or the cabinet it plays through (`ir_id`).
+ *
+ * This is the list `library.remove` refuses on for a capture or a cabinet, and
+ * the one the agent's sound guard reads: an amp insert carries the sound the
+ * operator chose exactly as a soundfont track carries its font.
+ * @param {object|Y.Doc} source - a snapshot, or a document
+ * @param {string} id - the library entry's id
+ * @returns {string[]} the insert ids, sorted, each once
+ */
+export function libraryInsertUsers(source, id) {
+  if (typeof id !== "string" || id === "") return [];
+  const song = songPlain(source);
+  const ids = new Set();
+  for (const insert of Object.values(song.inserts ?? {})) {
+    if (!insert || insert.kind !== AMP_KIND) continue;
+    const params = insert.params && typeof insert.params === "object" ? insert.params : {};
+    if (params.model_id !== id && params.ir_id !== id) continue;
+    if (typeof insert.id === "string" && insert.id !== "") ids.add(insert.id);
+  }
+  return [...ids].sort();
+}
+
+/**
+ * Whether anything in the song uses one library entry: a soundfont track's
+ * `font_id`, or an amp insert's `model_id` or `ir_id`. This is the check
+ * `library.remove` and the agent sound guard are built on.
  * @param {object|Y.Doc} source - a snapshot, or a document
  * @param {string} id
  * @returns {boolean}
  */
 export function libraryUses(source, id) {
-  return libraryUsers(source, id).length > 0;
+  return libraryUsers(source, id).length > 0 || libraryInsertUsers(source, id).length > 0;
 }
 
 /**
@@ -2415,14 +2515,17 @@ export function invariantReasons(doc) {
  * hand-written or restored one can be off in — checked exactly the way a
  * command checks them.
  *
+ * An amp insert is the one kind whose sound is a file: its `model_id` has to
+ * name a capture in the song's library and its `ir_id` a cabinet (or nothing),
+ * which is the same promise `library.remove` and the agent's sound guard keep
+ * (see `libraryUses`). The amp cap is the song's — `LIMITS.ampInsertsPerSong`,
+ * counted over the whole song rather than over one chain, because each amp
+ * loads a capture of its own.
+ *
  * The history dry-runs an undo's plan on a clone and calls this, so a plan that
  * would remove a track's chain without putting the track back, or leave a send
  * pointing at a return that is gone, is refused whole instead of half-landing.
  * Only a reason the plan *creates* blocks it (see `dryRun` in history.js).
- *
- * The amp cap (`LIMITS.ampInsertsPerSong`) is not checked here: no effect of
- * kind `amp` can enter the document until PR C, which adds the cap with the
- * kind.
  * @param {object} song - a snapshot
  * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
  */
@@ -2471,6 +2574,7 @@ function mixerReasons(song) {
   }
 
   const perChain = new Map();
+  let amps = 0;
   for (const insert of inserts) {
     const which = `The insert "${insert.id}"`;
     const owner = insertOwnerOf(insert.owner);
@@ -2504,18 +2608,31 @@ function mixerReasons(song) {
       );
       continue;
     }
-    if (!effectSpec(insert.kind)) {
+    if (isAmpKind(insert.kind)) {
+      reasons.push(...ampParamReasons(which, insert, insert.params, song));
+      amps += 1;
+    } else if (!effectSpec(insert.kind)) {
       reasons.push(
         reason(
           "insert-kind-unknown",
           insert.id,
-          `${which} would be a "${insert.kind}", which is not one of the effects a chain holds (${EFFECT_KINDS.join(", ")}).`,
+          `${which} would be a "${insert.kind}", which is not one of the effects a chain holds (${EFFECT_KINDS.join(", ")}, ${AMP_KIND}).`,
         ),
       );
     } else {
       reasons.push(...insertParamReasons(which, insert, insert.kind, insert.params));
     }
     perChain.set(insert.owner, (perChain.get(insert.owner) ?? 0) + 1);
+  }
+  if (amps > LIMITS.ampInsertsPerSong) {
+    reasons.push(
+      reason(
+        "too-many-amp-inserts",
+        "song",
+        `The song would hold ${amps} amp inserts; a song can hold at most ${LIMITS.ampInsertsPerSong} amp inserts.`,
+        amps,
+      ),
+    );
   }
   for (const [owner, count] of perChain) {
     if (count <= LIMITS.insertsPerChain) continue;
@@ -2659,6 +2776,96 @@ function insertParamReasons(which, insert, kind, params) {
           ),
         );
       }
+      continue;
+    }
+    if (value >= field.min && value <= field.max) continue;
+    reasons.push(
+      reason(
+        "insert-param-range",
+        subject,
+        `${which} would set "${name}" to ${value}; it runs from ${field.min} to ${field.max}${field.unit ? ` ${field.unit}` : ""}.`,
+      ),
+    );
+  }
+  return reasons;
+}
+
+/**
+ * What one kind of library entry is called in a sentence.
+ * @param {unknown} kind
+ * @returns {string}
+ */
+function libraryKindWord(kind) {
+  if (kind === "nam") return "capture";
+  if (kind === "ir") return "cabinet";
+  return "font";
+}
+
+/**
+ * What is wrong with an amp insert's settings, in plain English: a numeric
+ * setting outside `AMP_PARAMS`, a capture that is not a capture, a cabinet that
+ * is not a cabinet, or one of either that the song's library does not hold.
+ *
+ * The two reference fields are checked against the LIBRARY rather than against a
+ * table: an amp plays a file, and a file the song no longer holds leaves the
+ * insert silent — which is exactly what `library.remove` refuses to create.
+ * @param {string} which - what the sentence calls the insert, e.g. `The insert "i1"`
+ * @param {object} insert - the insert itself, for the subject its reasons carry
+ * @param {Object<string, any>} params - the insert's parameters
+ * @param {object} song - a snapshot, whose `library` says what the ids name
+ * @returns {Array<{code: string, subject: string, text: string}>}
+ */
+function ampParamReasons(which, insert, params, song) {
+  const reasons = [];
+  const library = song.library ?? {};
+  for (const [name, value] of Object.entries(params ?? {})) {
+    // One parameter is one subject, as an effect's are.
+    const subject = `${insert.id}/${name}`;
+    if (name === "model_id" || name === "ir_id") {
+      const wanted = name === "model_id" ? "nam" : "ir";
+      const word = libraryKindWord(wanted);
+      if (name === "ir_id" && value === null) continue;
+      if (typeof value !== "string" || value === "") {
+        reasons.push(
+          reason(
+            "insert-amp-reference",
+            subject,
+            `${which} would hold ${typeof value === "string" ? 'an empty id' : String(value)} as its ${word}; it is a library entry's id.`,
+          ),
+        );
+        continue;
+      }
+      const entry = Object.hasOwn(library, value) ? library[value] : null;
+      if (!entry) {
+        reasons.push(
+          reason(
+            `insert-amp-${wanted}-missing`,
+            subject,
+            `${which} would play the ${word} "${value}", which is not in the song's library.`,
+          ),
+        );
+        continue;
+      }
+      if (entry.kind !== wanted) {
+        reasons.push(
+          reason(
+            `insert-amp-${wanted}-kind`,
+            subject,
+            `${which} would play "${value}" as its ${word}, and that entry is a ${libraryKindWord(entry.kind)}, not a ${word}.`,
+          ),
+        );
+      }
+      continue;
+    }
+    const field = ampParamSpec(name);
+    if (!field) {
+      reasons.push(
+        reason(
+          "insert-param-unknown",
+          subject,
+          `${which} would hold a parameter "${name}", which the amp does not have.`,
+        ),
+      );
       continue;
     }
     if (value >= field.min && value <= field.max) continue;
@@ -4751,8 +4958,33 @@ function normalizeInsert(id, value) {
     order: numberOr(plain.order, 0),
     kind,
     bypass: plain.bypass === true,
-    params: normalizeEffectParams(kind, plain.params),
+    params:
+      kind === AMP_KIND
+        ? normalizeAmpParams(plain.params)
+        : normalizeEffectParams(kind, plain.params),
   };
+}
+
+/**
+ * An amp insert's settings as a snapshot carries them: the capture it plays (a
+ * library entry's id, or ""), the cabinet it plays through (an id, or null for
+ * none), and the three numbers at their stored value when that value has the
+ * right type and at its default otherwise — the way `normalizeEffectParams`
+ * reads an effect's.
+ * @param {unknown} stored - the insert's `params`, live or plain
+ * @returns {{model_id: string, ir_id: (string|null), input_db: number, output_db: number, ir_mix: number}}
+ */
+function normalizeAmpParams(stored) {
+  const params = plainParamsOf(stored);
+  const out = {
+    model_id: typeof params.model_id === "string" ? params.model_id : "",
+    ir_id: typeof params.ir_id === "string" ? params.ir_id : ABSENT,
+  };
+  for (const [name, field] of Object.entries(ampSpec()?.params ?? {})) {
+    const value = params[name];
+    out[name] = typeof value === "number" && Number.isFinite(value) ? value : field.default;
+  }
+  return out;
 }
 
 /**

@@ -59,10 +59,15 @@
  *
  * ## The graph
  *
- * `engine.node` has no inputs and one stereo output, and it is NOT connected to
- * anything by this file: the caller connects it to the destination. No Web
- * Audio node shapes sound anywhere in Studio (spec §5.1) — the worklet's output
- * is the engine's mix, hard-clipped, and that is the whole master bus.
+ * `engine.node` has one stereo input and one stereo output, and it is NOT
+ * connected to anything by this file: the caller connects it to the destination.
+ * The input is for MONITORING THROUGH THE CHAIN (plan 1d, Task 13): the page
+ * connects the armed track's live input to it, and `{type:"monitor"}` names the
+ * track whose inserts — amps included — and fader that signal is heard through.
+ * With nothing connected the input is empty and the engine is the source it has
+ * always been. No Web Audio node shapes sound anywhere in Studio (spec §5.1) —
+ * the worklet's output is the engine's mix, hard-clipped, and that is the whole
+ * master bus.
  *
  * ## Ready
  *
@@ -125,17 +130,24 @@
  *   an offline render does): past that the engine drops the least-recently
  *   played one, and `onSampleNeeded(listener)` says which sample a trigger
  *   wanted so the page can load it back.
- * - `loadLibrary(id, kind, bytes)` hands the engine one library FILE — a
- *   SoundFont bank today (`kind: "font"`), a capture or cabinet later —
- *   transferred rather than copied, and resolves with what became of it:
+ * - `loadLibrary(id, kind, bytes, options)` hands the engine one library FILE —
+ *   a SoundFont bank (`kind: "font"`), a NAM capture (`kind: "nam"`, the
+ *   `.nam` file's own bytes) or a cabinet IR (`kind: "ir"`, whose decoded and
+ *   resampled `Float32Array` channels are passed instead of a file, with
+ *   `options.sourceRate`/`options.sourceFrames` naming the rate and length of
+ *   the file they came from so the one-second rule is judged there and not on
+ *   the longer resampled copy) — transferred rather than copied, and resolves
+ *   with what became of it:
  *   `{status: "loaded" | "deferred" | "failed", reason?}`. There is no fetch on
  *   the audio thread, so the page (or a render) reads the file and posts it
- *   here. Banks are parsed ONLY while the transport is stopped (the plan's
- *   loading rule): a load posted while the song plays is answered `deferred` and
- *   parsed on the next `stop()`, which is what the page's "Loads when you stop."
- *   says. `unloadLibrary(id)` drops one file again (and cancels a load of it that
- *   has not been parsed yet), and `onLibraryNeeded(listener)` follows the fonts a
- *   track wanted but the engine does not hold, so the page can load them (or
+ *   here. Banks and captures are parsed ONLY while the transport is stopped (the
+ *   plan's loading rule): a load posted while the song plays is answered
+ *   `deferred` and parsed on the next `stop()`, which is what the page's "Loads
+ *   when you stop." says. A cabinet is not parsed: its PCM is built into
+ *   partitions the moment it arrives. `unloadLibrary(id)` drops one file again
+ *   (and cancels a load of it that has not been parsed yet), and
+ *   `onLibraryNeeded(listener)` follows the files a track or an amp insert
+ *   wanted but the engine does not hold, so the page can load them (or
  *   offer a download). The processor holds at most 1 GiB of banks per page
  *   (`maxFontBytes` on `create()` for a host that knows its own window), counted
  *   as the files plus their decoded sample data: past it the least recently
@@ -149,7 +161,16 @@
  * - `faust-modules` is posted once, by `create()`, after the engine comes up: one
  *   entry per compiled Faust effect — `{<kind>: {wasm, json}}`, the wasm
  *   transferred rather than copied — which the processor compiles once per page
- *   and the chains then instantiate inserts from (plan 1d, Task 7).
+ *   and the chains then instantiate inserts from (plan 1d, Task 7). `nam-wasm`
+ *   is the same for the NAM engine's binary (`vendor/nam/`, Task 13): one
+ *   compile per page, one instance per amp insert inside it.
+ * - `monitor(track_id, on, channels)` runs the signal connected to this node's
+ *   own INPUT through that track's inserts (amps included) and its fader, so the
+ *   operator hears themselves through the chain while the take is still recorded
+ *   dry; `channels` is the armed track's 1b input selection (1 for a
+ *   one-channel input, 2 for a stereo pair) and decides an amp's mono sum.
+ *   `onMonitorLatency(listener)` follows `{track_id, ms}`, the delay the chain
+ *   itself adds, for the page to add to the round trip it shows.
  * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
  *   audition a pad from the panel: straight to the voice, never through a
  *   command or a history step, and never quantized.
@@ -216,6 +237,13 @@
     "dynamics.js",
     "faust-host.js",
     "meter.js",
+    // The vendored NAM engine (one import-free script defining
+    // globalThis.StudioNam), the host that drives it — one compiled module and
+    // one instance per amp insert (plan 1d, Task 13) — and the cabinet
+    // convolver those inserts play through.
+    "nam.js",
+    "nam-host.js",
+    "convolver.js",
     "studio-processor.js",
   ];
 
@@ -229,7 +257,20 @@
   const VENDORED_SOURCES = Object.freeze({
     "sunvox.js": ["..", "vendor", "sunvox", "sunvox.js"],
     "spessasynth.js": ["..", "vendor", "spessasynth", "spessasynth.js"],
+    "nam.js": ["..", "vendor", "nam", "nam.js"],
   });
+
+  /**
+   * The sources this engine can be built WITHOUT. `vendor/nam/` is a checked-in
+   * build output (`tools/build-vendor.mjs`); a checkout that has not built it
+   * still starts an engine — one whose amp inserts play silence and say so —
+   * instead of failing to load at all.
+   * @type {ReadonlySet<string>}
+   */
+  const OPTIONAL_SOURCES = new Set(["nam.js"]);
+
+  /** What a missing optional source is replaced with, so the module still composes. */
+  const OPTIONAL_SOURCE_STUB = "/* not built: see tools/build-vendor.mjs */\n";
 
   /**
    * The audio contexts that already have the Studio processor registered. A
@@ -381,6 +422,37 @@
     return typeof process !== "undefined" && !!(process && process.versions && process.versions.node);
   }
 
+  /**
+   * The cores this PAGE reports, for a NAM capture's slim size (plan 1d,
+   * Task 13). A page with four cores or fewer plays the smallest submodel of an
+   * A2 capture; everything else plays the full one, and a NODE host reports 0 — a
+   * render must not depend on the machine it runs on. The worklet scope has no
+   * `navigator`, which is why this is measured here and handed down.
+   * @returns {number}
+   */
+  function pageCores() {
+    if (isNode()) return 0;
+    try {
+      const cores = Number(globalThis.navigator && globalThis.navigator.hardwareConcurrency);
+      return Number.isFinite(cores) && cores > 0 ? Math.round(cores) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * The core count the engine is built with: a caller's own `namCores` when it
+   * names one (a render and a parity test pin it, so neither depends on the
+   * machine), else this page's.
+   * @param {{namCores?: number}} options
+   * @returns {number}
+   */
+  function namCoresOf(options) {
+    const asked = Number(options && options.namCores);
+    if (Number.isFinite(asked) && asked >= 0) return Math.round(asked);
+    return pageCores();
+  }
+
   /** @returns {Function|null} Node's `require`, when this script has one. */
   function nodeRequire() {
     return typeof require === "function" ? require : null;
@@ -429,10 +501,14 @@
     if (!options.assetBase) {
       const local = readLocalText(name);
       if (local !== null) return local;
+      if (OPTIONAL_SOURCES.has(name)) return OPTIONAL_SOURCE_STUB;
       throw new Error(`StudioEngine: no ${name} in assetBytes and no assetBase`);
     }
     const response = await fetch(joinUrl(options.assetBase, name));
-    if (!response.ok) throw new Error(`StudioEngine: could not load ${name} (${response.status})`);
+    if (!response.ok) {
+      if (OPTIONAL_SOURCES.has(name) && response.status === 404) return OPTIONAL_SOURCE_STUB;
+      throw new Error(`StudioEngine: could not load ${name} (${response.status})`);
+    }
     return response.text();
   }
 
@@ -476,6 +552,18 @@
     const response = await fetch(joinUrl(options.assetBase, WASM_FILE));
     if (!response.ok) throw new Error(`StudioEngine: could not load ${WASM_FILE} (${response.status})`);
     return response.arrayBuffer();
+  }
+
+  /**
+   * The NAM engine's binary (`vendor/nam/nam-engine.wasm`), or null when this
+   * checkout has not built it. It is transferred to the processor through the
+   * port — a worklet has no fetch — and compiled there once per page (plan 1d,
+   * Task 13).
+   * @param {{assetBase?: string, assetBytes?: object}} options
+   * @returns {Promise<ArrayBuffer|null>}
+   */
+  async function readNamEngine(options) {
+    return readOptionalBytes("nam-engine.wasm", ["..", "vendor", "nam", "nam-engine.wasm"], options);
   }
 
   /**
@@ -921,6 +1009,8 @@
   *                    loadLibrary: function(string, string, Uint8Array): Promise<{status: string, reason?: string}>,
  *                    unloadLibrary: function(string): void,
  *                    onLibraryNeeded: function(function): function,
+ *                    monitor: function(string, boolean): void,
+ *                    onMonitorLatency: function(function): function,
    *                    fxHold: function(string, number): void,
    *                    fxRelease: function(string): void,
    *                    looper: function(string): void,
@@ -1355,6 +1445,9 @@
     // The compiled Faust effects: optional, and posted (transferred) once the
     // engine is up. See `readFaustModules`.
     const faustModules = await readFaustModules(opts);
+    // The NAM engine's binary: optional too (a checkout that has not run
+    // `tools/build-vendor.mjs` has none), posted once the engine is up.
+    const namEngine = await readNamEngine(opts);
 
     // Claimed synchronously before the registration (and checked again, since
     // the reads above awaited), so two concurrent calls cannot both get as far
@@ -1377,7 +1470,12 @@
 
     const Node = workletNodeClass();
     const node = new Node(context, PROCESSOR_NAME, {
-      numberOfInputs: 0,
+      // ONE input: the monitored signal. The page connects the armed track's live
+      // input to it when the operator turns Monitor through Studio on, and the
+      // processor runs it through that track's inserts (plan 1d, Task 13). With
+      // nothing connected the input is empty, and the engine is the source it
+      // always was.
+      numberOfInputs: 1,
       numberOfOutputs: 1,
       outputChannelCount: [2],
       // `testHooks` is off unless a caller asks for it; it arms the processor's
@@ -1386,6 +1484,10 @@
       processorOptions: {
         wasmBinary: wasmBinary,
         testHooks: opts.testHooks === true,
+        // The NAM captures' slim size is chosen per PAGE (plan 1d, Task 13): the
+        // worklet scope has no `navigator`, so the count is measured here — or
+        // taken from the caller, which is what makes a render deterministic.
+        namCores: namCoresOf(opts),
         ...(Number(opts.maxSampleBytes) > 0 ? { maxSampleBytes: Number(opts.maxSampleBytes) } : {}),
         ...(Number(opts.maxFontBytes) > 0 ? { maxFontBytes: Number(opts.maxFontBytes) } : {}),
       },
@@ -1402,6 +1504,8 @@
     const masterLatencyListeners = new Set();
     const insertFaultListeners = new Set();
     const insertLoadingListeners = new Set();
+    /** Followers of the monitored track's own chain delay (Task 13). */
+    const monitorLatencyListeners = new Set();
     /**
      * The latest meter reading, kept so a panel that draws after the fact (or a
      * test that asks once) can read it without waiting for the next 100 ms. A
@@ -1523,6 +1627,20 @@
     };
     postFaustModules();
 
+    /**
+     * Hand the processor the NAM engine's binary, transferred rather than copied.
+     * The processor compiles it once, on its port handler — never inside
+     * `process()` — and every amp insert then owns one instance in that one
+     * module. Nothing is posted when this host has no build output, and an amp
+     * insert then plays silence and says so.
+     * @returns {void}
+     */
+    const postNamEngine = () => {
+      if (!namEngine) return;
+      post({ type: "nam-wasm", bytes: namEngine }, [namEngine]);
+    };
+    postNamEngine();
+
     node.port.onmessage = (event) => {
       const message = event && event.data;
       if (!message || typeof message !== "object") return;
@@ -1634,12 +1752,29 @@
       }
       if (message.type === "library_needed") {
         // A track's font is not loaded on this device (never fetched, still
-        // uploading, or dropped by the engine's font cap): the page owns the
-        // bytes, so it loads them — or offers the download.
+        // uploading, or dropped by the engine's font cap), or an amp insert's
+        // capture or cabinet is not: the page owns the bytes, so it loads them —
+        // or offers the download.
         const id = String(message.library_id);
         for (const listener of libraryNeededListeners) {
           try {
             listener(id);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
+        }
+        return;
+      }
+      if (message.type === "monitor_latency") {
+        // The delay the monitored track's own chain adds (plan 1d, Task 13): the
+        // page adds it to the round trip it measured and shows the total.
+        const latency = {
+          track_id: String(message.track_id === undefined || message.track_id === null ? "" : message.track_id),
+          ms: Number(message.ms),
+        };
+        for (const listener of monitorLatencyListeners) {
+          try {
+            listener(latency);
           } catch {
             /* one bad listener must not stop the others hearing about it */
           }
@@ -2090,7 +2225,11 @@
        * @param {string} libraryId
        * @param {string} kind `"font"` (a capture or cabinet is acknowledged and
        *   left to the host that reads them)
-       * @param {Uint8Array|ArrayBuffer|ArrayBufferView} bytes the file itself
+       * @param {Uint8Array|ArrayBuffer|ArrayBufferView|Float32Array[]} bytes the
+       *   file itself, or a cabinet's decoded PCM
+       * @param {{sourceRate?: number, sourceFrames?: number}} [options] for a
+       *   cabinet: the rate and the length of the file the PCM came from, so the
+       *   engine applies the one-second rule once, at that file's own rate
        * @returns {Promise<{status: "loaded"|"deferred"|"failed", reason?: string,
        *   presets?: Array<{bank: number, program: number, name: string}>}>}
        *   `failed` carries why: a bank that will not parse, one with no
@@ -2098,23 +2237,50 @@
        *   that loaded carries the `presets` of the bank it parsed; an
        *   empty id is refused here, before anything is posted
        */
-      loadLibrary(libraryId, kind, bytes) {
+      loadLibrary(libraryId, kind, bytes, options) {
         // An empty id names nothing: answer at once, without posting a message
         // the processor would only have to ignore.
         if (libraryId === undefined || libraryId === null || String(libraryId) === "") {
           return Promise.resolve({ status: "failed", reason: "A library load needs an id." });
         }
         const id = String(libraryId);
+        const what = String(kind || "font");
+        librarySeq += 1;
+        const requestId = librarySeq;
+        // A cabinet arrives as decoded PCM, not as a file: `bytes` may be the
+        // channel array the page (or a render) decoded and resampled the stored
+        // WAV to. It is transferred, so the processor builds its partitions
+        // without ever seeing the WAV. `options.sourceRate`/`sourceFrames` say
+        // what that file held, so the one-second rule is judged where it belongs
+        // — at the file's own rate — instead of on the length resampling gave it
+        // at a higher context rate.
+        if (Array.isArray(bytes) && bytes.length > 0 && bytes[0] instanceof Float32Array) {
+          const channels = bytes.slice(0, 2);
+          const sourceRate = Number(options && options.sourceRate);
+          const sourceFrames = Number(options && options.sourceFrames);
+          const message = {
+            type: "library",
+            request_id: requestId,
+            library_id: id,
+            kind: what,
+            channels: channels,
+            rate: context.sampleRate,
+          };
+          if (Number.isFinite(sourceRate) && sourceRate > 0) message.source_rate = sourceRate;
+          if (Number.isFinite(sourceFrames) && sourceFrames > 0) message.source_frames = sourceFrames;
+          return new Promise((resolve) => {
+            pendingLibrary.set(requestId, resolve);
+            post(message, channels.map((channel) => channel.buffer));
+          });
+        }
         const data = bytesOf(bytes);
         // A view into a larger buffer is copied: transferring it would hand the
         // processor (and detach here) the whole underlying buffer.
         const payload = data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? data : data.slice();
-        librarySeq += 1;
-        const requestId = librarySeq;
         return new Promise((resolve) => {
           pendingLibrary.set(requestId, resolve);
           post(
-            { type: "library", request_id: requestId, library_id: id, kind: String(kind || "font"), bytes: payload },
+            { type: "library", request_id: requestId, library_id: id, kind: what, bytes: payload },
             [payload.buffer],
           );
         });
@@ -2129,6 +2295,43 @@
        */
       unloadLibrary(libraryId) {
         post({ type: "library_unload", library_id: String(libraryId) });
+      },
+
+      /**
+       * Turn monitoring through the chain on or off for one track (plan 1d,
+       * Task 13). While it is on, the signal connected to `node`'s own input is
+       * summed into that track's source, so it is heard through the track's
+       * inserts — amps included — and its fader. The take is still recorded dry:
+       * the recorder taps the input, not this engine.
+       * @param {string} trackId
+       * @param {boolean} on
+       * @param {number} [channels] the armed track's 1b input selection: 1 for a
+       *   one-channel input, anything else (or nothing) for a stereo pair. An
+       *   amp's mono sum is decided from this, never from the signal's peaks.
+       * @returns {void}
+       */
+      monitor(trackId, on, channels) {
+        post({
+          type: "monitor",
+          track_id: String(trackId),
+          on: on === true,
+          channels: Number(channels) === 1 ? 1 : 2,
+        });
+      },
+
+      /**
+       * Follow the delay the monitored track's own chain adds, in ms
+       * (`{track_id, ms}`), posted whenever it changes. The page adds it to the
+       * round trip it measured.
+       * @param {(latency: {track_id: string, ms: number}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onMonitorLatency(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        monitorLatencyListeners.add(listener);
+        return function unsubscribe() {
+          monitorLatencyListeners.delete(listener);
+        };
       },
 
       /**

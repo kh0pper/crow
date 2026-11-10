@@ -20,10 +20,10 @@
  *     stored it; nobody outside the process decides where a library file lives
  *     or what its sha256 says.
  *   - `library.remove` refuses (code "conflict") while anything in the song
- *     still names the entry: a track's `font_id` now, and an amp insert's
- *     `model_id` or `ir_id` once the mixer exists. The question is asked by
- *     `libraryUses` in doc.js, which is where the later kinds join, so no
- *     command grows a second copy of "is this in use?".
+ *     still names the entry: a track's `font_id`, and an amp insert's
+ *     `model_id` or `ir_id`. The question is asked by `libraryUses` in doc.js,
+ *     which is where the later kinds join, so no command grows a second copy of
+ *     "is this in use?".
  *   - the caps are the plan's: 32 fonts and 256 entries per song. The per-kind
  *     file sizes (512 MB for a bank, 20 MB for a capture, 10 MB for a cabinet)
  *     are the upload route's to refuse, at begin and at finish, because a file
@@ -43,6 +43,7 @@ import {
   cloneJson,
   getLibraryEntry,
   libraryEntries,
+  libraryInsertUsers,
   libraryMap,
   libraryUsers,
   objectMap,
@@ -122,6 +123,11 @@ function trackRef(id) {
   return objectRef("track", id);
 }
 
+/** @returns {string} the ref of one amp insert that plays a library entry. */
+function insertRef(id) {
+  return objectRef("insert", id);
+}
+
 /** Refuse with a limit message that names the limit. */
 function refuseLimit(message) {
   throw new StudioError("limit", message);
@@ -158,6 +164,42 @@ function nameOrId(entry, id) {
 /** @returns {object|null} the entry in a snapshot, by id. */
 function entryOf(snap, id) {
   return snap.library?.[id] ?? null;
+}
+
+/** @returns {string} a track's name for a sentence, or its id when it is gone. */
+function trackNameIn(snap, id) {
+  return snap.tracks.find((track) => track.id === id)?.name ?? id;
+}
+
+/**
+ * What one user of a library entry is called in the refusal: a track, or the
+ * amp insert that plays the capture or the cabinet (named by the chain it sits
+ * in, because an insert has no name of its own).
+ * @param {object} snap - a snapshot
+ * @param {string} id - a track id or an insert id
+ * @param {boolean} amp - whether the id names an insert
+ * @returns {string}
+ */
+function userText(snap, id, amp) {
+  if (!amp) return `track "${trackNameIn(snap, id)}"`;
+  const owner = String(snap.inserts?.[id]?.owner ?? "");
+  if (owner.startsWith("track:")) return `an amp on track "${trackNameIn(snap, owner.slice("track:".length))}"`;
+  if (owner.startsWith("return:")) return "an amp on a return";
+  return "an amp on the master";
+}
+
+/**
+ * The users of a library entry as one clause: the single one on its own, or
+ * every one of them joined the way a sentence joins a list. Each part already
+ * reads as a user ("track \"Keys\"", "an amp on track \"Guitar\""), so nothing here
+ * adds a word in front of them.
+ * @param {string[]} parts - one clause per user, tracks first
+ * @returns {string}
+ */
+function usersText(parts) {
+  if (parts.length === 0) return "";
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }
 
 /**
@@ -235,11 +277,16 @@ defineCommand({
     return `Removed the ${kind} "${nameOrId(entry, args.library_id)}" from the library`;
   },
   /**
-   * The tracks that play the entry, as refs the lock check has to see with it:
-   * taking an instrument away is a write to every track that plays it.
+   * The objects that play the entry, as refs the lock check has to see with it:
+   * taking an instrument away is a write to every track that plays it, and to
+   * every amp insert that plays its capture or its cabinet.
    */
   touches(args, snap) {
-    return [libraryRef(args.library_id), ...libraryUsers(snap, args.library_id).map(trackRef)];
+    return [
+      libraryRef(args.library_id),
+      ...libraryUsers(snap, args.library_id).map(trackRef),
+      ...libraryInsertUsers(snap, args.library_id).map(insertRef),
+    ];
   },
   apply(doc, args) {
     const entry = getLibraryEntry(doc, args.library_id);
@@ -247,12 +294,26 @@ defineCommand({
       refuseMissing(`There is no library entry with id "${args.library_id}" in this song.`);
     }
     const users = libraryUsers(doc, args.library_id);
-    if (users.length > 0) {
+    const amps = libraryInsertUsers(doc, args.library_id);
+    if (users.length > 0 || amps.length > 0) {
       const snap = snapshot(doc);
-      const names = users.map((id) => `"${snap.tracks.find((track) => track.id === id)?.name ?? id}"`);
-      const who = users.length === 1 ? `track ${names[0]}` : `the tracks ${names.join(", ")}`;
+      // Name the tracks in the song's own order (libraryUsers sorts by id,
+      // which is not an order a person sees).
+      const position = new Map((snap.tracks ?? []).map((track, index) => [track?.id, index]));
+      users.sort((a, b) => (position.get(a) ?? Infinity) - (position.get(b) ?? Infinity));
+      const parts = [
+        ...users.map((id) => userText(snap, id, false)),
+        ...amps.map((id) => userText(snap, id, true)),
+      ];
+      const who = usersText(parts);
+      const what =
+        parts.length === 1
+          ? users.length === 1
+            ? "what that track plays"
+            : "what that amp plays"
+          : "what they play";
       refuseConflict(
-        `The ${kindWord(entry.get("kind"))} "${nameOrId(toPlain(entry), args.library_id)}" is in use by ${who}; change what ${users.length === 1 ? "that track plays" : "those tracks play"} first.`,
+        `The ${kindWord(entry.get("kind"))} "${nameOrId(toPlain(entry), args.library_id)}" is in use by ${who}; change ${what} first.`,
       );
     }
     const ref = libraryRef(args.library_id);

@@ -46,8 +46,10 @@
  * chop and pad commands to work with them — never a way to add or drop a sound.
  *
  * `studio_library` is the instrument library's read: the banks a song's soundfont
- * tracks can play, with their licences, their credits and the tracks that play
- * them, plus the catalog rows this Crow could download. It is read-only, and it
+ * tracks can play and the captures and cabinets its amps play, with their
+ * licences, their credits and what uses each of them, plus the catalog rows this
+ * Crow could download and the starter sounds the bundle ships
+ * (`available_bundled`). It is read-only, and it
  * has no sibling that downloads or uploads a bank: those are the person's own
  * actions (plan 1d, Global Constraints "Who can change a sound"). What an agent
  * may change about an instrument is the preset, with `studio_track_set_program`.
@@ -55,7 +57,10 @@
  * `studio_mix` is the mixer's read: every chain in the song (each track's, each
  * return's, the master's) with its inserts in the order they run, every send,
  * every return, the master's gain and loudness target, and how the last render
- * of this song measured against that target. It is read-only too — but the
+ * of this song measured against that target. An amp insert reads with the names
+ * and credits of the capture and the cabinet it plays, so the agent knows which
+ * sound it is mixing without ever being offered a way to change it. It is
+ * read-only too — but the
  * mixer is the one part of the song an agent runs as a pass of ordinary steps:
  * the effects (insert.add/set/move/bypass/remove), the sends (send.set), the
  * returns (return.add/set/remove) and the master (master.set) are all tools,
@@ -97,11 +102,11 @@ import "./commands/instruments.js";
 // mix step is an undoable step, never a sound leaving the song.
 import "./commands/mixer.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
-import { libraryUsers, effectLabel } from "./doc.js";
+import { libraryUsers, libraryInsertUsers, effectLabel } from "./doc.js";
 // The vetted instrument catalog: what `studio_library` says this Crow could
 // download. It is the bundle's own module (Node built-ins only), and a caller
 // may inject its own reader so a test never depends on the checked-in file.
-import { readCatalog } from "./library-store.js";
+import { readCatalog, readBundled } from "./library-store.js";
 
 /** The author every call falls back to: an agent, never the person (spec §5.3). */
 export const MCP_AUTHOR = Object.freeze({ kind: "agent", id: "mcp", label: "Agent (MCP)" });
@@ -506,17 +511,30 @@ export function sampleList(snapshot, sampleId = null) {
  * the song. Nothing here is a file path and nothing is a storage key: the file
  * lives on this device and is not the agent's to read or write.
  *
- * `used_by` is `libraryUsers` from the song document, so a second kind of user
- * (an amp insert's capture or cabinet, plan 1d PR C) joins the answer when it
- * joins the document rather than here.
+ * `used_by` is `libraryUsers` and `libraryInsertUsers` from the song document:
+ * a track that plays the entry reads `{track_id, track_name}`, and an amp insert
+ * that plays its capture or its cabinet reads `{insert_id, owner, label}` — the
+ * chain it sits in (`"track:<id>"`, `"return:<id>"` or `"master"`) and the
+ * effect's own label. So a capture or a cabinet an amp plays is never mistaken
+ * for an entry merely sitting in the song.
+ *
+ * `available_bundled` is the starter sounds this bundle ships: the capture and
+ * the cabinets that arrive with Studio rather than by download. Each row says
+ * what it is, its licence and its credit line, and whether this song's library
+ * already holds it. An agent cannot add one — that is a person's own action,
+ * with no tool for it — but it CAN build an amp with a capture the song already
+ * holds, which is why `in_song` matters: a capture marked `in_song: true` is one
+ * an amp insert may name.
  *
  * @param {object} snapshot - the hub's `snapshot()` shape
  * @param {object[]} [catalogEntries] - the catalog rows this Crow could download
- * @returns {{entries: object[], available_catalog: object[]}}
+ * @param {object[]} [bundledEntries] - the starter sounds this bundle ships
+ * @returns {{entries: object[], available_catalog: object[], available_bundled: object[]}}
  */
-export function libraryList(snapshot, catalogEntries = []) {
+export function libraryList(snapshot, catalogEntries = [], bundledEntries = []) {
   const library = snapshot?.library && typeof snapshot.library === "object" ? snapshot.library : {};
   const tracks = Array.isArray(snapshot?.tracks) ? snapshot.tracks : [];
+  const inserts = snapshot?.inserts && typeof snapshot.inserts === "object" ? snapshot.inserts : {};
   /** @returns {string} a track's name, or its id when the song no longer holds it. */
   const trackName = (id) => tracks.find((track) => track?.id === id)?.name ?? id;
 
@@ -536,10 +554,20 @@ export function libraryList(snapshot, catalogEntries = []) {
       source: typeof entry.source === "string" ? entry.source : "",
       licence: typeof entry.licence === "string" ? entry.licence : "",
       credit: typeof entry.credit === "string" ? entry.credit : "",
-      used_by: libraryUsers(snapshot, entry.id).map((trackId) => ({
-        track_id: trackId,
-        track_name: trackName(trackId),
-      })),
+      used_by: [
+        ...libraryUsers(snapshot, entry.id).map((trackId) => ({
+          track_id: trackId,
+          track_name: trackName(trackId),
+        })),
+        ...libraryInsertUsers(snapshot, entry.id).map((insertId) => {
+          const insert = Object.hasOwn(inserts, insertId) ? inserts[insertId] : null;
+          return {
+            insert_id: insertId,
+            owner: typeof insert?.owner === "string" ? insert.owner : "",
+            label: effectLabel(insert?.kind),
+          };
+        }),
+      ],
     }));
 
   const available = (Array.isArray(catalogEntries) ? catalogEntries : [])
@@ -551,7 +579,22 @@ export function libraryList(snapshot, catalogEntries = []) {
       default: row.default === true,
     }));
 
-  return { entries, available_catalog: available };
+  const bundled = (Array.isArray(bundledEntries) ? bundledEntries : [])
+    .filter((row) => row && typeof row === "object" && typeof row.id === "string")
+    .map((row) => ({
+      bundled_id: row.id,
+      kind: typeof row.kind === "string" ? row.kind : "",
+      name: typeof row.name === "string" ? row.name : "",
+      licence: typeof row.licence === "string" ? row.licence : "",
+      credit: typeof row.credit === "string" ? row.credit : "",
+      // Whether this song already holds it: an entry the song holds is one an
+      // amp insert may name, and one it does not hold is the person's to add.
+      // Own properties only: the row's id is the bundle's own string, but
+      // `library` is a plain object and a prototype key is not a held sound.
+      in_song: Object.hasOwn(library, row.id) && Boolean(library[row.id]),
+    }));
+
+  return { entries, available_catalog: available, available_bundled: bundled };
 }
 
 /**
@@ -564,6 +607,13 @@ export function libraryList(snapshot, catalogEntries = []) {
  * the value the engine will use (the document fills a missing one with its own
  * default), so an agent reads the settings it is about to change rather than
  * guessing them.
+ *
+ * An AMP insert also reads with the two sounds it plays: `capture` and `cabinet`,
+ * each `{id, name, credit}` read from the song's own library (null for a cabinet
+ * an amp does not have, and null for a sound the library no longer holds). Those
+ * two are the operator's — the agent may set an amp's input, output and mix, and
+ * may bypass it, but not point it at another capture or cabinet — so the read
+ * names them and no tool offers to change them.
  *
  * A send is `{track_id, return_id, level_db, pre}`, and a return is
  * `{id, name, gain_db, pan, mute}` plus its own chain: returns are not tracks,
@@ -592,6 +642,27 @@ export function mixList(snapshot, lastRender = null) {
   );
   const master = snapshot?.master && typeof snapshot.master === "object" ? snapshot.master : {};
   const target = master.target && typeof master.target === "object" ? master.target : {};
+  const library = snapshot?.library && typeof snapshot.library === "object" ? snapshot.library : {};
+
+  /**
+   * One sound an amp plays, as a person reads it: its id, its name and its
+   * credit line, or null when nothing is named or the library no longer holds it.
+   * @param {unknown} id
+   * @returns {{id: string, name: string, credit: string}|null}
+   */
+  const soundOf = (id) => {
+    if (typeof id !== "string" || id === "") return null;
+    // Own properties only: the id comes out of the document, but `library` is a
+    // plain object, and `library["constructor"]` is not a sound.
+    if (!Object.hasOwn(library, id)) return null;
+    const entry = library[id];
+    if (!entry || typeof entry !== "object") return null;
+    return {
+      id,
+      name: typeof entry.name === "string" ? entry.name : "",
+      credit: typeof entry.credit === "string" ? entry.credit : "",
+    };
+  };
 
   /**
    * One chain's inserts, in the order the engine runs them: `order` first (a
@@ -610,6 +681,11 @@ export function mixList(snapshot, lastRender = null) {
         label: effectLabel(insert.kind),
         bypass: insert.bypass === true,
         params: insert.params && typeof insert.params === "object" ? { ...insert.params } : {},
+        // An amp's two sounds, named. An effect has neither key at all, so a
+        // reader can tell an amp from an effect without knowing the kinds.
+        ...(insert.kind === "amp"
+          ? { capture: soundOf(insert.params?.model_id), cabinet: soundOf(insert.params?.ir_id) }
+          : {}),
       }));
 
   const strips = tracks.map((track) => ({
@@ -842,6 +918,9 @@ async function projectIdFor(hub, songId, opened, author) {
  * @param {() => Promise<{entries: object[]}>} [options.catalog] - the instrument
  *   catalog reader (`library-store.js`'s `readCatalog`); what `studio_library`
  *   says this Crow could download
+ * @param {() => Promise<{entries: object[]}>} [options.bundled] - the bundled
+ *   list reader (`library-store.js`'s `readBundled`); the starter sounds this
+ *   bundle ships, which `studio_library` lists as available
  * @param {NodeJS.ProcessEnv|object} [options.env] - the env the base actor comes from
  * @param {{actorFromEnv: Function, resolveCallActor: Function}|null} [options.actor]
  *   the app's actor helpers; without them every call is the generic MCP agent
@@ -852,6 +931,7 @@ export function createStudioServer({
   renderer,
   catalogue = moduleCatalogue,
   catalog = readCatalog,
+  bundled = readBundled,
   env = process.env,
   actor = null,
 } = {}) {
@@ -1092,12 +1172,26 @@ export function createStudioServer({
     }
   }
 
+  /**
+   * The starter sounds this bundle ships, or none: a bundle without a readable
+   * bundled list answers an empty list instead of failing the read.
+   * @returns {Promise<object[]>}
+   */
+  async function bundledEntries() {
+    try {
+      const read = typeof bundled === "function" ? await bundled() : null;
+      return Array.isArray(read?.entries) ? read.entries : [];
+    } catch {
+      return [];
+    }
+  }
+
   server.registerTool(
     "studio_library",
     {
       title: "List the song's instruments",
       description:
-        "Every instrument the song's library holds — the banks a soundfont track can play: id, kind, name, where it came from (catalog, upload or bundled), its licence and its credit line, and the tracks that play it (track_id, track_name). Also lists available_catalog: the instruments this Crow could download (catalog_id, name, licence, default). Read-only, and it names no file path. Only the operator downloads or uploads a bank — both are their own actions and you have no tool for either — and which bank a track plays (studio_track_set_font) is theirs too. What you may change is the preset that track plays, with studio_track_set_program.",
+        "Every instrument the song's library holds — the banks a soundfont track can play, the captures and cabinets an amp plays: id, kind, name, where it came from (catalog, upload or bundled), its licence and its credit line, and what uses it in used_by — a playing track as {track_id, track_name}, or an amp insert as {insert_id, owner, label}. Also lists available_catalog: the instruments this Crow could download (catalog_id, name, licence, default), and available_bundled: the starter sounds this bundle ships (bundled_id, kind, name, licence, credit, in_song — whether this song already holds it). Read-only, and it names no file path. Only the operator downloads or uploads a file, and only they add a starter sound — all their own actions, with no tool for any of them — and which bank a track plays (studio_track_set_font), like which capture or cabinet an amp plays, is theirs too. What you may change is the preset that track plays (studio_track_set_program), and an amp's input, output and mix: a capture marked in_song is one you may build an amp with (studio_insert_add with kind \"amp\", params {model_id, ir_id, input_db, output_db, ir_mix}), and swapping or removing that capture later needs the operator.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song whose instruments to list"),
       },
@@ -1107,7 +1201,7 @@ export function createStudioServer({
         const opened = await hub.snapshot(args.song_id, authorFor(extra));
         if (isRefusal(opened)) return errorResult(refusalText(opened));
         if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
-        return textResult(libraryList(opened.snapshot, await catalogEntries()));
+        return textResult(libraryList(opened.snapshot, await catalogEntries(), await bundledEntries()));
       } catch (err) {
         return errorResult(errorText(err));
       }
@@ -1121,7 +1215,7 @@ export function createStudioServer({
     {
       title: "Read the song's mixer",
       description:
-        "Every chain in the song with the settings the engine will use: each track's inserts in the order they run {id, kind, label, bypass, params}, its sends {track_id, return_id, level_db, pre}; each return {id, name, gain_db, pan, mute} with its own inserts; and the master {gain_db, target: {lufs, true_peak_db}} with its chain. last_render is how the last render this process made of the song measured (integrated_lufs, true_peak_db, short_term_max_lufs, target, meets_target) — null until one has run. Read-only. What you may change is the mix, one undoable step at a time: effects (studio_insert_add, studio_insert_set, studio_insert_move, studio_insert_bypass, studio_insert_remove), sends (studio_send_set), returns (studio_return_add, studio_return_set, studio_return_remove) and the master (studio_master_set). A run of those steps is a mix pass, outlined in your colour for the person, who may A/B it and undo it (undo one step, or the whole pass); A/B is theirs, never yours, and it never writes the song.",
+        "Every chain in the song with the settings the engine will use: each track's inserts in the order they run {id, kind, label, bypass, params}, its sends {track_id, return_id, level_db, pre}; each return {id, name, gain_db, pan, mute} with its own inserts; and the master {gain_db, target: {lufs, true_peak_db}} with its chain. An amp insert also reads with capture {id, name, credit} and cabinet {id, name, credit}|null: the sounds it plays, which the operator chose and which you may not swap or remove — you may set its input_db, output_db and ir_mix, and bypass it. last_render is how the last render this process made of the song measured (integrated_lufs, true_peak_db, short_term_max_lufs, target, meets_target) — null until one has run. Read-only. What you may change is the mix, one undoable step at a time: effects (studio_insert_add, studio_insert_set, studio_insert_move, studio_insert_bypass, studio_insert_remove), sends (studio_send_set), returns (studio_return_add, studio_return_set, studio_return_remove) and the master (studio_master_set). A run of those steps is a mix pass, outlined in your colour for the person, who may A/B it and undo it (undo one step, or the whole pass); A/B is theirs, never yours, and it never writes the song.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song whose mixer to read"),
       },

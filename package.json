@@ -94,6 +94,7 @@
     "esbuild": "^0.25.10",
     "fflate": "^0.8.3",
     "ical.js": "^2.2.1",
+    "neural-amp-modeler-wasm": "3.0.7",
     "spessasynth_core": "^4.4.7"
   }
 }

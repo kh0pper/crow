@@ -72,7 +72,7 @@ The bot can render the song, one scene, or one clip through the same engine your
 
 Every track, every return and the master has its own strip, and the mixer screen — the **Mixer** button beside Session and Arrangement — draws them in that order: your tracks, then the returns, then the master on the right. At phone width the strips scroll sideways inside their own box.
 
-**Effects.** Each strip holds a **chain** of up to eight effects, run top to bottom. Press **+ effect** to pick one — equalizer, filter, delay, reverb, chorus, phaser, saturation, compressor, limiter, gate, de-esser — and drag to reorder, or use the switch on an effect to **bypass** it without losing its settings. Opening an effect shows its own controls with their real ranges, and each change is one undoable step. A chain edit while the song plays crossfades over 64 frames, so it does not click.
+**Effects.** Each strip holds a **chain** of up to eight effects, run top to bottom. Press **+ effect** to pick one — equalizer, filter, delay, reverb, chorus, phaser, saturation, compressor, limiter, gate, de-esser, or the **Amp** (see **Amp and cabinet** below) — and drag to reorder, or use the switch on an effect to **bypass** it without losing its settings. Opening an effect shows its own controls with their real ranges, and each change is one undoable step. A chain edit while the song plays crossfades over 64 frames, so it does not click.
 
 **Sends and returns.** **+ return** makes a strip of its own (a reverb or a delay, typically) with its own chain and level. Every track's strip has a **Sends** control: pick a return and a level, −60 to +6 dB, and choose whether the send is taken **after** the fader (the usual choice, so pulling the fader down takes the reverb with it) or **before** it. One track can feed up to eight returns, a song holds up to eight returns, and a return still fed by a send cannot be removed until the send is gone.
 
@@ -84,7 +84,22 @@ Every track, every return and the master has its own strip, and the mixer screen
 
 **When an effect fails.** If an effect produces a sample that is not a number — a broken build, a hostile setting — Studio catches it at that effect's output, replaces the block with the signal that went in, bypasses the effect **in the engine** (never in the song) and says so once on the strip: *"<effect> on <track> produced an invalid sample; it is bypassed."* The rest of the chain plays. Moving that effect's own parameters (or its bypass switch) arms it again. A render reports such an effect in its `effect_problems` list rather than failing, and the same goes for a compiled effect this build does not have.
 
-**What the bot cannot do.** It cannot remove a sound: swapping an amp capture (a later Studio version), taking a pad's sample, replacing a track's bank or taking back a library file are all your steps. What it may do is the mix itself, which is why every mixer step is an ordinary undoable field.
+**What the bot cannot do.** It cannot remove a sound: swapping an amp's capture or cabinet (see **Amp and cabinet**), taking a pad's sample, replacing a track's bank or taking back a library file are all your steps. What it may do is the mix itself, which is why every mixer step is an ordinary undoable field.
+
+## Amp and cabinet
+
+**+ effect → Amp** on a guitar's track adds an **amp**: a NAM capture (the amplifier, recorded) played through a cabinet **impulse response** (the speaker, measured). An amp is the one insert whose sound is a *file you chose*, so picking it opens its own editor rather than adding a silent effect: choose a capture and the amp exists, from that one undoable step.
+
+**The starter sounds.** Studio ships one starter capture and five starter cabinets inside the bundle, so a guitar track can sound like a guitar on the first day. The capture is the **NAM example A2 model**, shown as *Starter capture (NAM example model)* — a training example whose source amplifier is unknown, so it carries no amplifier name — by Steven Atkinson (NeuralAmpModelerCore), MIT. The five cabinets are from **"Impulse Responses" by David Fau Casquel** (archive.org/details/ImpulseResponses), **CC BY 3.0**, unmodified: *Cabinet 1 (AmpMix)*, *Cabinet 2 (AmpMix2)*, *Cabinet 3 (Axhom)*, *Cabinet 4 (Bestplugins)* and *Cabinet 5 (Mixxx)*. Each one's credit line rides on its own entry in the picker (the option carries it), the line under the picker names the sound the amp currently plays, and the bundle's `library/files/NOTICES.md` carries every file's source, licence and credit.
+
+**Your own captures and cabinets.** **Add your own capture…** takes a `.nam` file and **Add a cabinet IR…** takes a WAV or AIFF. Both belong to the song's library, both are checked before they are stored, and both are your actions alone. Two rules:
+
+- **A capture must be an A2 model.** Any older NAM format is refused with *"This capture uses an older NAM format; Studio plays A2 captures. Re-export it with a current NAM trainer."*
+- **A cabinet is at most one second long.** The check allows a few frames of tolerance (two at 44.1 kHz, a few more at higher rates, so a one-second file still fits after it is converted to your interface's rate): a 44.1 kHz cabinet of 44101 frames loads; a longer one is refused with its own length in the sentence.
+
+**The amp editor.** The capture picker, the cabinet picker (**No cabinet** is a choice) and three numbers: **input** (−24 to +24 dB, the drive into the capture), **output** (−24 to +12 dB) and **IR mix** (0–1, how much of the cabinet you hear). A capture or a cabinet you chose says **Only you can change this amp's capture.** beside it — the bot may set the three numbers, move the amp, bypass it or build you an amp from a capture the song already holds, but never swap or remove the capture and cabinet you picked.
+
+**Monitoring through the chain.** On an armed audio track, **Hear the chain while recording** sends your input through that track's effects *and its amp*, so you hear the sound you are about to record while you play. Studio is honest about the delay: the switch shows your interface's measured round trip, and **Adds N ms** is what the chain itself adds — the amp's capture and cabinet are why it is not zero. The take is still recorded **dry** (the input, before the amp), so the amp is a choice you can change afterwards and never a decision baked into the recording. On a Chromebook or a phone the page asks the capture engine for its **slim** size, which is lighter on the processor; that choice is a property of the page and is never written into the song.
 
 ## Recording takes
 
@@ -95,7 +110,7 @@ Add an **audio track** (**+ Audio track**) to record a guitar, a voice or anythi
 3. Press **Record**, then launch a scene. Recording starts on that scene's first bar (or on the next bar if the song is already playing). An empty slot gets an audio clip as long as the scene's longest clip.
 4. Press **Stop**. The take ends at the end of the loop pass you are in. If the clip looped while you played, **each pass becomes its own take**.
 
-Hear yourself through your interface's **direct-monitor knob**: it has no delay. **Monitor through Studio** is there too, and tells you how late you would hear yourself.
+Hear yourself through your interface's **direct-monitor knob**: it has no delay. **Hear the chain while recording** is there too — it puts your input through the track's effects and amp — and tells you how late you would hear yourself, and what the chain itself adds.
 
 **Nothing is lost if the connection drops.** Every piece of a take is saved on this device first and then uploaded to the project's storage. A take recorded offline, or interrupted by a reload, uploads (or is recovered) the next time the song is open. Until then its row says so.
 
@@ -196,6 +211,9 @@ Every timeline change is one undoable step, and the bot can do all of it too (pl
 | Banks loaded in a page | 1024 MB | — |
 | Instruments a render holds (all of the song's banks) | 1024 MB, refused before it starts | — |
 | Effects per chain | 8 | — |
+| Amp inserts per song | 16 | — |
+| Capture file (`.nam`, A2) | 20 MB | — |
+| Cabinet impulse response | 10 MB, 1 s (a few frames of tolerance) | — |
 | Returns per song | 8 | — |
 | Sends per track | 8 | — |
 | Master gain / loudness target | −24 to +12 dB / −30 to −6 LUFS, ceiling −6 to −0.1 dBTP | — |
@@ -213,5 +231,9 @@ Every limit refuses with a plain-English error that names it; nothing is ever tr
 > Powered by SunVox (modular synth & tracker) Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.ru>
 >
 > The default instruments are downloaded, not redistributed with Crow: MuseScore General by S. Christian Collins, from FluidR3Mono by Michael Cowgill and FluidR3 by Frank Wen; Temple Blocks by Ethan Winer; Drumline Cymbals by Michael Schorsch — MIT, per its own licence file.
+>
+> The starter capture is the A2 example model from NeuralAmpModelerCore, by Steven Atkinson, MIT (2023), shipped unmodified under a neutral name; its source amplifier is unknown. The starter cabinets are from "Impulse Responses" by David Fau Casquel (archive.org/details/ImpulseResponses), CC BY 3.0, shipped unmodified. Every file's source, licence and credit are in `bundles/studio/library/files/NOTICES.md`.
 
 Studio's engine runs SunVox (the WebAssembly build of the SunVox library) so the browser and the server's offline renders use the same synthesizer. The full licence texts — SunVox's own, plus the tremor.txt, sundog.txt and libflac.txt notices from the SunVox archive — ship with the bundle in `bundles/studio/vendor/sunvox/THIRD-PARTY-NOTICES.txt`.
+
+The amp runs Neural Amp Modeler through the WebAssembly build in neural-amp-modeler-wasm (MIT, TONE3000), which compiles in NeuralAmpModelerCore and AudioDSPTools (MIT, Steven Atkinson), nlohmann/json (MIT) and Eigen (MPL-2.0). Their notices, with Eigen's source link, ship in `bundles/studio/vendor/nam/THIRD-PARTY-NOTICES.txt`.

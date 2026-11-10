@@ -1737,3 +1737,435 @@ test("a bank id that belongs to a sample upload is refused", async () => {
   );
   assert.equal(JSON.parse(readFileSync(join(staging, id, "meta.json"), "utf8")).kind, "sample");
 });
+
+// --- captures and cabinets (plan 1d, Task 12) --------------------------------
+
+/** The plan's two sentences, word for word, and the third a wrong file meets. */
+const LEGACY_CAPTURE_TEXT =
+  "This capture uses an older NAM format; Studio plays A2 captures. Re-export it with a current NAM trainer.";
+const NOT_A_CAPTURE_TEXT = "This file is not a NAM capture.";
+
+/**
+ * A capture as a NAM trainer writes one: a JSON object whose architecture is
+ * the A2 one and that holds weights. Padded with trailing spaces (legal JSON
+ * whitespace) so the file can be longer than one chunk.
+ * @param {number} [length]
+ * @param {object} [overrides] fields to replace, e.g. a legacy architecture
+ * @returns {Buffer}
+ */
+function captureBytes(length = 2000, overrides = {}) {
+  const body = JSON.stringify({
+    version: "0.5.4",
+    architecture: "SlimmableContainer",
+    config: { layers: [{ input_size: 1, condition_size: 1, channels: 8 }] },
+    weights: [0.1, 0.25, -0.5, 0.75],
+    sample_rate: 48000,
+    metadata: { name: "Tiny capture" },
+    ...overrides,
+  });
+  const padding = Math.max(0, length - body.length);
+  return Buffer.from(body + " ".repeat(padding), "latin1");
+}
+
+/** @returns {string} the base64 a capture upload declares as its head. */
+function captureHead(bytes) {
+  return Buffer.from(bytes).subarray(0, 4096).toString("base64");
+}
+
+/** @returns {object} the details a capture upload sends with `begin`. */
+function captureRequest(overrides = {}) {
+  const file = captureBytes(4096);
+  return {
+    kind: "nam",
+    song_id: SONG,
+    project_id: PROJECT,
+    author: AUTHOR,
+    name: "My capture",
+    file_name: "My capture.nam",
+    bytes: file.length,
+    head: captureHead(file),
+    ...overrides,
+  };
+}
+
+/** @returns {string} the storage key a capture is filed under. */
+function captureKeyOf(id) {
+  return `${PREFIX}studio/${SONG}/library/lib-${id}.nam`;
+}
+
+/** @returns {object} the details a cabinet upload sends with `begin`. */
+function irRequest(overrides = {}) {
+  return {
+    kind: "ir",
+    song_id: SONG,
+    project_id: PROJECT,
+    author: AUTHOR,
+    name: "My cabinet",
+    rate: 48000,
+    channels: 2,
+    frames: 4800,
+    ...overrides,
+  };
+}
+
+/** @returns {string} the storage key a cabinet is filed under. */
+function irKeyOf(id) {
+  return `${PREFIX}studio/${SONG}/library/lib-${id}.wav`;
+}
+
+test("a malformed or legacy capture is refused with the re-export sentence", async () => {
+  const { uploads, staging } = setup();
+
+  // A legacy model — another architecture — is a real capture Studio does not
+  // play, and the answer is the plan's sentence: re-export it.
+  const legacy = captureBytes(1024, { architecture: "LSTM" });
+  await assert.rejects(
+    () => uploads.begin(randomUUID(), captureRequest({ bytes: legacy.length, head: captureHead(legacy) })),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.message, LEGACY_CAPTURE_TEXT);
+      return true;
+    },
+  );
+  assert.deepEqual(readdirSync(staging), [], "a legacy capture staged nothing");
+
+  // A file that is not shaped like a capture at all: not an object, no
+  // architecture, or no head to look at.
+  for (const odd of [
+    Buffer.from("this is not a capture at all"),
+    Buffer.from('{"version":"0.5.4","weights":[]}'),
+    Buffer.from('{"architecture":7,"weights":[]}'),
+    Buffer.from(""),
+  ]) {
+    await assert.rejects(
+      () => uploads.begin(randomUUID(), captureRequest({ bytes: 1024, head: captureHead(odd) })),
+      (error) => {
+        assert.equal(error.status, 400);
+        assert.equal(error.message, NOT_A_CAPTURE_TEXT);
+        return true;
+      },
+    );
+  }
+  assert.deepEqual(readdirSync(staging), [], "no malformed file staged anything");
+
+  // A capture past the plan's 20 MB, refused by name before a byte is staged.
+  await assert.rejects(
+    () => uploads.begin(randomUUID(), captureRequest({ bytes: 20971521 })),
+    (error) => {
+      assert.equal(error.status, 413);
+      assert.equal(error.message, "That capture is 21 MB; Studio takes captures up to 20 MB.");
+      return true;
+    },
+  );
+  assert.deepEqual(readdirSync(staging), [], "a capture past the limit staged nothing");
+});
+
+test("a capture's head is checked again at finish", async () => {
+  const { uploads, storage, hub, staging } = setup();
+  const id = randomUUID();
+  const declared = captureBytes(2048);
+
+  // The page declared an A2 capture and then sent a legacy model of the same
+  // size: the head it declared is not the head that arrived, so nothing is
+  // stored and the staging (the only copy) stays.
+  await uploads.begin(id, captureRequest({ bytes: declared.length, head: captureHead(declared) }));
+  const legacy = captureBytes(2048, { architecture: "WaveNet" });
+  assert.equal(legacy.length, declared.length);
+  let hashes = await stageChunks(uploads, id, [legacy]);
+  await assert.rejects(
+    () => uploads.finish(id, { chunk_hashes: hashes }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.message, LEGACY_CAPTURE_TEXT);
+      return true;
+    },
+  );
+  assert.equal(storage.uploads.length, 0, "nothing reached storage");
+  assert.equal(hub.commands.length, 0, "no library entry was added");
+  assert.deepEqual(stagedNames(staging, id), ["000000.pcm", "000000.pcm.sha256", "meta.json"]);
+
+  // An A2 head with no weights anywhere is not a capture either: the finish
+  // streams the whole file once to ask, and never parses it. The head passes,
+  // so this is the second check.
+  const weightless = Buffer.from(
+    JSON.stringify({ version: "0.5.4", architecture: "SlimmableContainer", config: {} }).padEnd(2048, " "),
+  );
+  const second = randomUUID();
+  await uploads.begin(second, captureRequest({ bytes: weightless.length, head: captureHead(weightless) }));
+  const otherHashes = await stageChunks(uploads, second, [weightless]);
+  await assert.rejects(
+    () => uploads.finish(second, { chunk_hashes: otherHashes }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.message, NOT_A_CAPTURE_TEXT);
+      return true;
+    },
+  );
+  assert.equal(storage.uploads.length, 0);
+  assert.equal(hub.commands.length, 0);
+});
+
+test("a capture whose architecture is nested deeper is not taken for A2", async () => {
+  const { uploads, storage, hub, staging } = setup();
+
+  /** @returns {Buffer} a capture-shaped file with `architecture` one level down. */
+  const nestedCapture = (length = 2048) => {
+    const body = JSON.stringify({
+      version: "0.5.4",
+      model: { architecture: "SlimmableContainer" },
+      weights: [0.1, 0.25],
+    });
+    return Buffer.from(body.padEnd(length, " "), "latin1");
+  };
+
+  // A search for the key would find the nested one and take this for an A2
+  // capture; only a top-level `architecture` is the shape Studio plays.
+  const nested = nestedCapture();
+  await assert.rejects(
+    () => uploads.begin(randomUUID(), captureRequest({ bytes: nested.length, head: captureHead(nested) })),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.message, NOT_A_CAPTURE_TEXT);
+      return true;
+    },
+  );
+  assert.deepEqual(readdirSync(staging), [], "a nested architecture staged nothing");
+
+  // The same answer from the bytes that arrived: the page declares a good head,
+  // and the file that lands keeps its architecture one level down.
+  const id = randomUUID();
+  const declared = captureBytes(2048);
+  await uploads.begin(id, captureRequest({ bytes: declared.length, head: captureHead(declared) }));
+  const arrived = nestedCapture(declared.length);
+  assert.equal(arrived.length, declared.length);
+  const hashes = await stageChunks(uploads, id, [arrived]);
+  await assert.rejects(
+    () => uploads.finish(id, { chunk_hashes: hashes }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.message, NOT_A_CAPTURE_TEXT);
+      return true;
+    },
+  );
+  assert.equal(storage.uploads.length, 0, "nothing reached storage");
+  assert.equal(hub.commands.length, 0, "no library entry was added");
+});
+
+test("a tiny first chunk cannot hide the head", async () => {
+  const { uploads, storage, hub } = setup();
+  const id = randomUUID();
+  // Past one chunk, so the client's own cut can leave a first chunk of a few
+  // bytes and still have somewhere to put the rest.
+  const file = captureBytes(1200000);
+  const chunk = 1048576;
+
+  // The head the finish checks is read ACROSS the staged chunks, in order, not
+  // from chunk 0 alone: the three bytes `{"v` are no head at all on their own.
+  await uploads.begin(id, captureRequest({ name: "Split capture", bytes: file.length, head: captureHead(file) }));
+  const hashes = await stageChunks(uploads, id, [
+    file.subarray(0, 3),
+    file.subarray(3, 3 + chunk),
+    file.subarray(3 + chunk),
+  ]);
+  const finished = await uploads.finish(id, { chunk_hashes: hashes });
+
+  assert.equal(finished.library.kind, "nam");
+  assert.equal(storage.uploads.length, 1);
+  assert.deepEqual(storage.uploads[0].bytes, file, "the capture is stored byte for byte");
+  assert.equal(hub.commands.length, 1);
+});
+
+test("a capture uploads as its own bytes and adds one library entry", async () => {
+  const { uploads, storage, db, acl, hub, staging } = setup();
+  const id = randomUUID();
+  const libraryId = `lib-${id}`;
+  const file = captureBytes(3000);
+  const key = captureKeyOf(id);
+
+  await uploads.begin(id, captureRequest({ name: "Tiny capture", bytes: file.length, head: captureHead(file) }));
+  const hashes = await stageChunks(uploads, id, [file]);
+  const finished = await uploads.finish(id, { chunk_hashes: hashes });
+
+  // One `library.add`, internal, with kind "nam" and the file exactly as it
+  // arrived: not a WAV, nothing added.
+  assert.equal(hub.commands.length, 1);
+  const command = hub.commands[0];
+  assert.equal(command.command, "library.add");
+  assert.equal(command.internal, true);
+  assert.match(command.cmd_id, new RegExp(`^${id}:library:[0-9a-f-]{36}$`));
+  assert.deepEqual(command.args.entry, {
+    id: libraryId,
+    kind: "nam",
+    name: "Tiny capture",
+    source: "upload",
+    upload_id: id,
+    storage_key: key,
+    sha256: hashOf(file),
+    bytes: file.length,
+    licence: "",
+    credit: "",
+    author_label: "You",
+  });
+
+  assert.equal(storage.uploads.length, 1);
+  const upload = storage.uploads[0];
+  assert.equal(upload.key, key);
+  assert.match(key, /\/library\/lib-[0-9a-f-]{36}\.nam$/);
+  assert.deepEqual(upload.bytes, file, "the capture is stored byte for byte");
+  assert.deepEqual(upload.options, { bucket: "crow-files", contentType: "application/octet-stream" });
+  const row = db.statements.find(
+    (statement) => statement && statement.sql && /INSERT\s+INTO\s+storage_files/i.test(statement.sql),
+  );
+  assert.equal(row.args[5], "studio_library");
+  assert.equal(row.args[1], `${libraryId}.nam`);
+  assert.equal(acl.audits[0].action, "studio.library");
+  assert.equal(finished.library.id, libraryId);
+  assert.equal(finished.library.kind, "nam");
+  assert.deepEqual(stagedNames(staging, id), ["meta.json"]);
+});
+
+test("an IR uploads as 24-bit WAV through the sample path", async () => {
+  const { uploads, storage, db, hub } = setup();
+  const id = randomUUID();
+  const libraryId = `lib-${id}`;
+  const key = irKeyOf(id);
+  const channels = signal(4800, 2);
+  const pcm = pcm24(channels);
+
+  // A cabinet is PCM, exactly as a sample is: the page decoded it and declares
+  // the rate, channels and frames it measured.
+  await uploads.begin(id, irRequest({ name: "My cabinet" }));
+  const hashes = await stageChunks(uploads, id, [pcm]);
+  const finished = await uploads.finish(id, { chunk_hashes: hashes });
+
+  // What was stored is a real 24-bit WAV that reads back sample for sample.
+  assert.equal(storage.uploads.length, 1);
+  const upload = storage.uploads[0];
+  assert.equal(upload.key, key);
+  assert.match(key, /\/library\/lib-[0-9a-f-]{36}\.wav$/);
+  assert.deepEqual(upload.options, { bucket: "crow-files", contentType: "audio/wav" });
+  assert.equal(upload.size, upload.bytes.length);
+  const wav = decodeWav(upload.bytes);
+  assert.equal(wav.rate, 48000);
+  assert.equal(wav.channels.length, 2);
+  assert.equal(wav.channels[0].length, 4800);
+  assert.deepEqual(wav.channels[0], quantised(channels[0]));
+  assert.deepEqual(wav.channels[1], quantised(channels[1]));
+
+  // One library entry of kind "ir", hashed as the WAV that was stored.
+  const command = hub.commands[0];
+  assert.equal(command.command, "library.add");
+  assert.equal(command.internal, true);
+  assert.equal(command.args.entry.kind, "ir");
+  assert.equal(command.args.entry.name, "My cabinet");
+  assert.equal(command.args.entry.storage_key, key);
+  assert.equal(command.args.entry.sha256, hashOf(upload.bytes));
+  // The entry measures the object storage holds — header and PCM — not just the
+  // PCM that was sent, and says so with a size that matches it.
+  assert.equal(command.args.entry.bytes, upload.bytes.length);
+  assert.notEqual(upload.bytes.length, pcm.length, "the WAV header is part of the object");
+  assert.equal(finished.library.bytes, upload.bytes.length);
+  assert.equal(finished.library.kind, "ir");
+  const row = db.statements.find(
+    (statement) => statement && statement.sql && /INSERT\s+INTO\s+storage_files/i.test(statement.sql),
+  );
+  assert.equal(row.args[2], "audio/wav");
+  assert.equal(row.args[5], "studio_library");
+  assert.equal(storage.uploads[0].key.startsWith(`${PREFIX}studio/${SONG}/library/`), true);
+});
+
+test("an IR over 1 s is refused", async () => {
+  const { uploads, storage, staging } = setup();
+
+  // Two seconds of PCM at 48 kHz, refused from what the page declared, before a
+  // byte is staged, in the plan's own words.
+  await assert.rejects(
+    () => uploads.begin(randomUUID(), irRequest({ frames: 96000 })),
+    (error) => {
+      assert.equal(error.status, 413);
+      assert.equal(error.message, "An impulse response is at most 1 second long; this one is 2.0 s.");
+      return true;
+    },
+  );
+  assert.deepEqual(readdirSync(staging), [], "a cabinet past one second staged nothing");
+
+  // Past the size cap as well, named the same way.
+  await assert.rejects(
+    () => uploads.begin(randomUUID(), irRequest({ frames: 48000, bytes: 10485761 })),
+    (error) => {
+      assert.equal(error.status, 413);
+      assert.equal(error.message, "That cabinet is 11 MB; Studio takes cabinets up to 10 MB.");
+      return true;
+    },
+  );
+
+  // A cabinet that is more than a second long for the rate it declared is
+  // refused as it arrives, not at finish. (Two frames past the rate are allowed
+  // — see the starter-cabinet test below — so this one is a whole 0.1 s over.)
+  const id = randomUUID();
+  await uploads.begin(id, irRequest({ frames: 48000 }));
+  const tooLong = pcm24(signal(52800, 2));
+  await assert.rejects(
+    () => uploads.putChunk(id, 0, tooLong),
+    (error) => {
+      assert.equal(error.status, 413);
+      assert.equal(error.message, "An impulse response is at most 1 second long; this one is 1.1 s.");
+      return true;
+    },
+  );
+  assert.equal(storage.uploads.length, 0);
+});
+
+test("a starter cabinet of 44101 frames at 44.1 kHz loads", async () => {
+  const { uploads, storage } = setup();
+
+  // The five starter cabinets are 24-bit stereo 44.1 kHz and 44101 frames long:
+  // exactly one second plus one frame. The plan allows two frames of tolerance
+  // everywhere the length is checked, and this is the file that needs it.
+  const id = randomUUID();
+  await uploads.begin(id, irRequest({ rate: 44100, channels: 2, frames: 44101 }));
+  const channels = signal(44101, 2);
+  const hashes = await stageChunks(uploads, id, [pcm24(channels)]);
+  const finished = await uploads.finish(id, { chunk_hashes: hashes });
+  assert.equal(finished.library.kind, "ir");
+  const wav = decodeWav(storage.uploads[0].bytes);
+  assert.equal(wav.rate, 44100);
+  assert.equal(wav.channels[0].length, 44101, "the whole starter cabinet is stored");
+
+  // And the engine's own check says the same thing: 44101 frames at 44.1 kHz is
+  // a cabinet, not a file over the limit. (The page's check is the same two
+  // frames.)
+  const convolver = (await import("../bundles/studio/engine/convolver.js")).default;
+  assert.equal(convolver.lengthProblem(44101, 44100), null);
+  // One frame past the tolerance is refused, so the tolerance is a tolerance and
+  // not an absence of a check.
+  assert.match(String(convolver.lengthProblem(44104, 44100)), /at most 1 second long/); // 3 frames of tolerance at 44.1 kHz
+  assert.equal(convolver.lengthProblem(48001, 48000), null);
+});
+
+test("a repeated cabinet begin with other channels or rate is refused", async () => {
+  const { uploads, staging } = setup();
+  const id = randomUUID();
+  await uploads.begin(id, irRequest());
+
+  // The same begin again is the retry it looks like: nothing changes.
+  await uploads.begin(id, irRequest());
+  const meta = () => JSON.parse(readFileSync(join(staging, id, "meta.json"), "utf8"));
+  assert.equal(meta().rate, 48000);
+  assert.equal(meta().channels, 2);
+
+  // But a page that measured another channel count or another rate is another
+  // cabinet under the same id, not this upload sent twice.
+  for (const other of [{ channels: 1 }, { rate: 44100 }]) {
+    await assert.rejects(
+      () => uploads.begin(id, irRequest(other)),
+      (error) => {
+        assert.equal(error.status, 409);
+        assert.match(error.message, /already being uploaded with different details/);
+        return true;
+      },
+    );
+  }
+  assert.equal(meta().rate, 48000, "the refused begins wrote nothing");
+  assert.equal(meta().channels, 2);
+});

@@ -1,22 +1,26 @@
 /**
- * The vendored SoundFont synth: one import-free classic script that runs in a
- * worklet scope, and a build that is up to date with its packages.
+ * The vendored SoundFont synth and the vendored NAM engine: one import-free
+ * classic script each, and a build that is up to date with its packages.
  *
  * Studio's engine is ONE AudioWorklet module glued from classic scripts
  * (`engine/engine-client.js`, `SOURCE_FILES`), and a worklet cannot `import`.
  * So `spessasynth_core` — an ES module with two bare imports of its own — is
  * bundled by `tools/build-vendor.mjs` into `vendor/spessasynth/spessasynth.js`
- * and checked in. These tests pin the two things that check-in depends on:
+ * and checked in, and so is `neural-amp-modeler-wasm`'s engine glue (plan 1d,
+ * Task 13) into `vendor/nam/nam.js`, with its binary copied verbatim beside it.
+ * These tests pin what that check-in depends on:
  *
- *   1. the script is self-contained and evaluates in a scope with no `require`,
- *      no `process`, no `document` and no `window` — an AudioWorkletGlobalScope
- *      — and `StudioSpessa.SpessaSynthProcessor` is there afterwards; and
- *   2. the checked-in file (and each licence copy) is exactly what the build
- *      produces from the installed packages, so a dependency bump nobody
- *      re-vendored fails here and in CI's `build-vendor --check`.
+ *   1. each script is self-contained and evaluates in a scope with no `require`,
+ *      no `process`, no `document` and no `window` — an
+ *      `AudioWorkletGlobalScope` — and the global it promises is there
+ *      afterwards; and
+ *   2. the checked-in files (and each licence copy, and the NAM binary) are
+ *      exactly what the build produces from the installed packages, so a
+ *      dependency bump nobody re-vendored fails here and in CI's
+ *      `build-vendor --check`.
  *
- * The evaluation is a real one: the whole ~2 MB script is compiled and run in a
- * fresh `vm` context, and the class is instantiated, because a bundle that
+ * The evaluation is a real one: each script is compiled and run in a fresh `vm`
+ * context, and the SoundFont processor is instantiated, because a bundle that
  * merely parses is not a bundle that a worklet can load.
  */
 
@@ -32,6 +36,13 @@ const BUNDLE_DIR = fileURLToPath(new URL("../bundles/studio/", import.meta.url))
 const VENDOR_DIR = join(BUNDLE_DIR, "vendor", "spessasynth");
 const SCRIPT = join(VENDOR_DIR, "spessasynth.js");
 const NOTICES = join(BUNDLE_DIR, "vendor", "THIRD-PARTY-NOTICES.md");
+
+/** The vendored NAM engine and the three files it is checked in as. */
+const NAM_VENDOR_DIR = join(BUNDLE_DIR, "vendor", "nam");
+const NAM_SCRIPT = join(NAM_VENDOR_DIR, "nam.js");
+const NAM_WASM = join(NAM_VENDOR_DIR, "nam-engine.wasm");
+const NAM_LICENCE = join(NAM_VENDOR_DIR, "LICENSE-neural-amp-modeler-wasm.txt");
+const NAM_PACKAGE = "neural-amp-modeler-wasm";
 
 /** The root `package.json`, for the versions the banner has to name. */
 const rootPackage = JSON.parse(readFileSync(join(BUNDLE_DIR, "..", "..", "package.json"), "utf8"));
@@ -147,11 +158,68 @@ test("vendor bundles are up to date", () => {
   assert.ok(rootPackage.devDependencies?.esbuild, "esbuild must stay a root devDependency");
 
   // `--check` rebuilds to memory and byte-compares. Its own exit code is the
-  // assertion; the output says which file is stale when it refuses.
+  // assertion; the output says which file is stale when it refuses. It covers
+  // both vendor outputs: the SoundFont synth and the NAM engine.
   const output = execFileSync(process.execPath, [join(BUNDLE_DIR, "tools", "build-vendor.mjs"), "--check"], {
     cwd: BUNDLE_DIR,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
   assert.match(output, /up to date/, "a fresh vendor bundle says so");
+});
+
+test("the vendored NAM engine is one classic script that loads in a worklet scope", () => {
+  const source = readFileSync(NAM_SCRIPT, "utf8");
+
+  // One classic script: no module syntax, no CommonJS, no Node built-ins, and no
+  // `import.meta` — which is a SYNTAX error in a classic script, and is what the
+  // package's own glue is written with (the build neutralises it).
+  assert.doesNotMatch(source, /^\s*import\s/m, "the bundle must not import anything");
+  assert.doesNotMatch(source, /^\s*export\s/m, "the bundle must not export anything");
+  assert.doesNotMatch(source, /\brequire\s*\(/, "the bundle must not call require()");
+  assert.doesNotMatch(source, /(?<![\w$.])process\.[A-Za-z_$]/, "the bundle must not read the Node global process");
+  assert.doesNotMatch(source, /["']node:/, "the bundle must not name a node: module");
+  assert.doesNotMatch(source, /\b__dirname\b/, "the bundle must not use __dirname");
+  assert.doesNotMatch(source, /\bimport\.meta\b/, "a classic script has no import.meta");
+
+  const context = vm.createContext(workletScope());
+  for (const absent of ["process", "require", "module", "window", "document", "global", "Buffer"]) {
+    assert.equal(vm.runInContext(`typeof ${absent}`, context), "undefined", `${absent} must not exist in the scope`);
+  }
+
+  vm.runInContext(source, context, { filename: "nam.js" });
+  assert.equal(typeof context.StudioNam, "object", "the bundle must define globalThis.StudioNam");
+  assert.equal(
+    typeof context.StudioNam.createNamEngine,
+    "function",
+    "StudioNam.createNamEngine must be the factory the host calls",
+  );
+});
+
+test("the NAM bundle names its package, carries its licence, and ships its binary verbatim", () => {
+  const source = readFileSync(NAM_SCRIPT, "utf8");
+  const dir = packageDir(NAM_PACKAGE);
+  const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+  assert.ok(
+    source.slice(0, 2000).includes(`${NAM_PACKAGE} ${manifest.version}`),
+    `the banner must name ${NAM_PACKAGE} ${manifest.version}`,
+  );
+
+  assert.ok(existsSync(NAM_LICENCE), `${NAM_LICENCE} must be there`);
+  assert.equal(
+    readFileSync(NAM_LICENCE, "utf8"),
+    readFileSync(join(dir, "LICENSE"), "utf8"),
+    "the licence copy must be the package's own LICENSE, verbatim",
+  );
+  assert.ok(existsSync(NAM_WASM), `${NAM_WASM} must be there`);
+  assert.ok(
+    readFileSync(NAM_WASM).equals(readFileSync(join(dir, "dist", "engine", "nam-engine.wasm"))),
+    "the engine binary must be the package's own, byte for byte",
+  );
+  // The vendored directory is exactly these three files: no leftovers, and
+  // nothing a worklet would have to fetch.
+  assert.deepEqual(
+    ["nam.js", "nam-engine.wasm", "LICENSE-neural-amp-modeler-wasm.txt"].sort(),
+    ["LICENSE-neural-amp-modeler-wasm.txt", "nam-engine.wasm", "nam.js"].sort(),
+  );
 });

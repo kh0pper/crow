@@ -1,6 +1,6 @@
 ---
 name: studio-mixing
-description: Use when the operator asks about balance, levels or panning in Studio; when a song has to be made louder, quieter or evened out; when an effect, a send, a return or the master chain has to be set; when a render's LUFS or true peak has to be read or explained; or when a mix is being prepared for Spotify, a podcast or a video bed.
+description: Use when the operator asks about balance, levels or panning in Studio; when a song has to be made louder, quieter or evened out; when an effect, a send, a return or the master chain has to be set; when a guitar has to be built an amp chain from the captures and cabinets in the song; when a render's LUFS or true peak has to be read or explained; or when a mix is being prepared for Spotify, a podcast or a video bed.
 triggers:
   - mix the song
   - balance the mix
@@ -16,6 +16,8 @@ triggers:
   - add an EQ
   - add a compressor
   - add some reverb
+  - add an amp
+  - guitar tone
   - set up a send
   - master limiter
   - equilibra la mezcla
@@ -44,7 +46,7 @@ You cannot hear. A render returns `lufs` (integrated), `true_peak_db`, `short_te
 | Available | Not yet |
 |---|---|
 | `gain_db` −60..+12 (0 = unity), `pan` −1..+1, `mute`, `solo` | per-track render, LRA, spectrum, a bounce of one chain |
-| inserts on any track, on any return and on the master: `eq`, `filter`, `delay`, `reverb`, `chorus`, `phaser`, `saturation`, `compressor`, `limiter`, `gate`, `deesser` | sidechain from another track (ducking), an amp insert (a later Studio version) |
+| inserts on any track, on any return and on the master: `eq`, `filter`, `delay`, `reverb`, `chorus`, `phaser`, `saturation`, `compressor`, `limiter`, `gate`, `deesser`, and an `amp` that plays the capture and cabinet the operator chose | sidechain from another track (ducking); choosing, swapping or removing an amp's capture or cabinet |
 | sends to up to 8 returns, and 8 returns of their own | recording by the agent, dither, MP3/AAC export, upload |
 | the master's `gain_db`, its target `{lufs, true_peak_db}`, and a master limiter whose look-ahead holds the ceiling | any look-ahead on a track or return insert: those are zero-latency by rule |
 | `studio_render`: WAV url + integrated LUFS + true peak + highest short-term figure, per song, scene or clip | |
@@ -135,7 +137,7 @@ Checked 2026-11-03. Platforms change these: carry the date whenever you quote on
 
 | Tool | What it does |
 |---|---|
-| `studio_insert_add` | `{owner, kind, params?, after?}` — `owner` is `"track:<id>"`, `"return:<id>"` or `"master"`; without `after` the effect goes to the END of the chain, `after: null` puts it FIRST, and `after: "<insert id>"` puts it just behind that one |
+| `studio_insert_add` | `{owner, kind, params?, after?}` — `owner` is `"track:<id>"`, `"return:<id>"` or `"master"`; `kind` is one of the effects above or `"amp"` (which needs `model_id`, a capture the song holds); without `after` the effect goes to the END of the chain, `after: null` puts it FIRST, and `after: "<insert id>"` puts it just behind that one |
 | `studio_insert_set` | One or more parameters of one insert, by name: `{id, params: {ratio: 4, threshold_db: −18}}`. Every name and range is in the table below |
 | `studio_insert_bypass` | `{id, bypass: true|false}` — the chain skips it without removing it. Prefer this to removing an effect you are unsure of |
 | `studio_insert_move` | `{id, after?}` — same `after` rule as `insert.add` |
@@ -180,6 +182,20 @@ Substitutes that still work when an effect is the wrong tool: an octave up inste
 
 **A master chain.** Last insert first in your head: `eq` with a gentle tilt (`low_gain_db` −1.5 at `low_freq_hz` 120, `high_gain_db` 1 at `high_freq_hz` 9000), then — only if the mix needs it — a `compressor` (`ratio` 2, `threshold_db` −14, `attack_ms` 30, `release_ms` 300, `knee_db` 6), then the `limiter` (`ceiling_db` −1, `release_ms` 50) as the **last** insert of the master chain. Then `studio_master_set {target: {lufs: −14, true_peak_db: −1}}` if the song's target is the streaming reference, and render: `meets_target.lufs` and `.true_peak` say whether the chain did its job.
 
+**A guitar chain (an amp).** An `amp` insert is the one insert whose sound is a FILE the operator chose: a NAM capture, played through a cabinet impulse response. Its settings are four things — `model_id` (the capture, a library entry of kind `nam`), `ir_id` (the cabinet, a library entry of kind `ir`, or `null` for no cabinet), and the three numbers in `AMP_PARAMS`: `input_db` −24..+24 (0), `output_db` −24..+12 (0), `ir_mix` 0–1 (1).
+
+The order that works: `gate` → `amp` → `eq` → send to a delay and a reverb return.
+
+1. `studio_mix` and `studio_library` first: the amp's `capture` and `cabinet` (with their names and credits) are in the mix read, and `studio_library`'s `available_bundled` says which starter sounds the song already holds (`in_song: true`).
+2. Add the amp with a capture the song already holds: `studio_insert_add {owner: "track:<guitar>", kind: "amp", params: {model_id: "<capture id>", ir_id: "<cabinet id>"}}`. An amp with a capture the library does not hold is refused by name.
+3. Gain staging is inside the amp: drive it with `input_db` (more input = more of the capture's distortion character), set the level it hands the chain with `output_db`, and use `ir_mix` under 1 only when you want the cabinet to fade towards no cabinet at all (a bright DI edge). Never do gain staging on the track fader and the amp at once: pick one owner.
+4. After the amp: `eq` for what the cabinet makes too sharp (`high_gain_db` −3 at `high_freq_hz` 4000) or too dull, then the tracks' usual `delay`/`reverb` sends — a guitar wants −18 to −12 dB into a room, −24 into a plate.
+5. A fuzzier part: `saturation` before the amp (`drive_db` 4–8) rather than after it, and a `compressor` after the amp (`ratio` 2–3, `attack_ms` 20) to hold sustained chords.
+
+What you may change on an amp: `input_db`, `output_db`, `ir_mix`, its place in the chain, and whether it is bypassed. What you may NOT change, and no tool of yours will: the capture (`model_id`), the cabinet (`ir_id`), or the amp's existence — swapping or removing one is refused with "Only the operator changes the capture or cabinet an amp plays." / "Only the operator removes an amp." That rule exists because a capture is a sound the operator chose and cannot be re-derived; removing and re-adding the insert would be the same choice one step at a time. If a different sound is wanted, say so and ask them to pick it in the amp editor.
+
+Captures and cabinets are people-only all the way through: the starter sounds in the bundle, and the operator's own `.nam` and IR files, are added by the person at the Studio page (there is no tool for it), a `.nam` must be an A2 model (older formats are refused with a re-export sentence), and a cabinet is at most one second long. A capture or cabinet the song does not hold plays silence and is named in the render's `missing_library`; do not guess why a guitar is quiet — read it.
+
 **A streaming single.** Read `studio_mix` for the song's `master.target` (the −14 LUFS streaming reference unless the operator chose another). Balance by the ladder, pan by the conventions, build the vocal/drum/bass chains above, then render and quote `lufs`, `true_peak_db`, `short_term_max_lufs` and PLR with the span. If `meets_target.lufs` is false, move the master's `gain_db` by the difference (one step), never a track at a time. If the loudness lands but the ceiling binds, the limiter is the tool: lower its `ceiling_db` no further than the platform's row allows, and say what it cost. **−14 LUFS is a normalisation reference, not a delivery rule** — report the figure against Spotify's playback normalisation so the operator knows how far it will be turned down. Close with the figures, the normalisation and its date, and the unprocessed 24-bit WAV.
 
 **A podcast or video music bed.** Studio makes the music only; the voiceover export happens outside Studio today.
@@ -200,6 +216,7 @@ Substitutes that still work when an effect is the wrong tool: an octave up inste
 - Paired parts sit at equal, opposite pans, and both have clips.
 - Each section quotes its own figure (`short_term_max_lufs` per section render), and the chorus wins on two of the four section measures.
 - Every effect you added is in `studio_mix` in the order you meant it to run, and every send names the return you meant.
+- On every amp you touched, the `capture` and `cabinet` in `studio_mix` are still the ones the operator chose, and the amp is still there.
 - No `effect_problems` went unmentioned: an insert this build cannot host, or one the engine bypassed, is said out loud with the sentence the render gave.
 - Every loudness claim carries the figure, the span, the target's source date, and the PLR when two versions are compared.
 - No claim about sound, texture or balance that did not come from a number or the operator.

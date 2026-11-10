@@ -108,7 +108,7 @@ A **soundfont track** (`studio_track_add` with `kind: "soundfont"` and a `font_i
 
 | Tool | What it does |
 |---|---|
-| `studio_library` | The song's library: `{id, kind, name, source, licence, credit, used_by: [{track_id, track_name}]}`, plus `available_catalog` — the banks this Crow could download. Read-only |
+| `studio_library` | The song's library: `{id, kind, name, source, licence, credit, used_by: [{track_id, track_name} | {insert_id, owner, label}]}`, plus `available_catalog` — the banks this Crow could download. `used_by` names a track that plays the entry and an amp insert that plays its capture or cabinet. Read-only |
 | `studio_track_add` | `{kind: "soundfont", font_id}` makes a soundfont track playing program 0 of bank 0 of that bank; `font_id` must already be in the library |
 | `studio_track_set_program` | The preset: `{track_id, bank, program}`, bank 0–128 and program 0–127. ONE step, and one you may always make |
 | `studio_track_set_font` | Which bank a track plays. You may give a bank to a track that has none yet; once a track plays a bank, changing it is refused for you: it is the operator's step |

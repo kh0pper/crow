@@ -1,0 +1,72 @@
+{
+  "_comment": "The starter sounds Crow Studio ships inside the bundle itself, read by server/library-store.js. Each entry is one file under library/files/, with the size and sha256 it is served by: the file route and a render both hash the bytes before anything plays them, so a name this list pins is worth something. `licence` and `credit` are what the picker shows beside the sound, and `source_url` is where the unmodified file came from — library/files/NOTICES.md carries the same facts for every file, plus the licences in full. A bundled entry reaches a song only through the person's own action (POST /api/studio/library/bundled); no agent can add one.",
+  "version": 1,
+  "entries": [
+    {
+      "id": "starter-a2",
+      "kind": "nam",
+      "name": "Starter capture (NAM example model)",
+      "file": "starter-a2.nam",
+      "sha256": "2d2d744516dc0197737a2c5001010429692d4cb20d72b08264781de626fcf4ca",
+      "bytes": 665758,
+      "licence": "MIT",
+      "credit": "NAM example A2 model by Steven Atkinson (NeuralAmpModelerCore), MIT",
+      "source_url": "https://github.com/sdatkinson/NeuralAmpModelerCore/blob/main/example_models/A2.nam"
+    },
+    {
+      "id": "cabinet-ampmix",
+      "kind": "ir",
+      "name": "Cabinet 1 (AmpMix)",
+      "file": "cabinet-ampmix.wav",
+      "sha256": "08bfb52f8699632ecbf7a602dc284327b9a19e6e403b86d6cc42f4d71bda4836",
+      "bytes": 264710,
+      "licence": "CC-BY-3.0",
+      "credit": "\"Impulse Responses\" by David Fau Casquel (archive.org/details/ImpulseResponses), CC BY 3.0",
+      "source_url": "https://archive.org/details/ImpulseResponses"
+    },
+    {
+      "id": "cabinet-ampmix2",
+      "kind": "ir",
+      "name": "Cabinet 2 (AmpMix2)",
+      "file": "cabinet-ampmix2.wav",
+      "sha256": "8951e386bbeb97b03b4b1967e96f11477f697f449c5e2748fa0648c21c849764",
+      "bytes": 264710,
+      "licence": "CC-BY-3.0",
+      "credit": "\"Impulse Responses\" by David Fau Casquel (archive.org/details/ImpulseResponses), CC BY 3.0",
+      "source_url": "https://archive.org/details/ImpulseResponses"
+    },
+    {
+      "id": "cabinet-axhom",
+      "kind": "ir",
+      "name": "Cabinet 3 (Axhom)",
+      "file": "cabinet-axhom.wav",
+      "sha256": "e8b798a01281de27e2daba689e71ad2cbd4ea8c5cb9605bc73efb7c84924e77a",
+      "bytes": 264710,
+      "licence": "CC-BY-3.0",
+      "credit": "\"Impulse Responses\" by David Fau Casquel (archive.org/details/ImpulseResponses), CC BY 3.0",
+      "source_url": "https://archive.org/details/ImpulseResponses"
+    },
+    {
+      "id": "cabinet-bestplugins",
+      "kind": "ir",
+      "name": "Cabinet 4 (Bestplugins)",
+      "file": "cabinet-bestplugins.wav",
+      "sha256": "deef54911626805d592abc96d7c1f3c9b682aee79ba524a6556b9fe81664fc4e",
+      "bytes": 264710,
+      "licence": "CC-BY-3.0",
+      "credit": "\"Impulse Responses\" by David Fau Casquel (archive.org/details/ImpulseResponses), CC BY 3.0",
+      "source_url": "https://archive.org/details/ImpulseResponses"
+    },
+    {
+      "id": "cabinet-mixxx",
+      "kind": "ir",
+      "name": "Cabinet 5 (Mixxx)",
+      "file": "cabinet-mixxx.wav",
+      "sha256": "e645124084b67cf7d6da2e32040e5245bd90c32227773fd2f056ed1653bb24aa",
+      "bytes": 264710,
+      "licence": "CC-BY-3.0",
+      "credit": "\"Impulse Responses\" by David Fau Casquel (archive.org/details/ImpulseResponses), CC BY 3.0",
+      "source_url": "https://archive.org/details/ImpulseResponses"
+    }
+  ]
+}

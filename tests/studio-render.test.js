@@ -1924,3 +1924,170 @@ test("a render whose fonts pass 1 GiB is refused before it starts", async () => 
   assert.equal(rendered.seconds, 1);
   assert.deepEqual(rendered.missing_library, []);
 });
+
+// --- renders with the starter sounds that ship in the bundle ----------------
+
+/**
+ * One starter sound as a song's library entry: the bundled row's own id, name,
+ * hash, size and credit, with `source: "bundled"` and no storage key — the file
+ * lives in the bundle, not in a song's storage.
+ * @param {object} row - one row of `library/bundled.json`
+ * @returns {object}
+ */
+function starterEntry(row) {
+  return {
+    id: row.id,
+    kind: row.kind,
+    name: row.name,
+    source: "bundled",
+    catalog_id: null,
+    storage_key: null,
+    upload_id: null,
+    sha256: row.sha256,
+    bytes: row.bytes,
+    licence: row.licence,
+    credit: row.credit,
+    author_label: "You",
+  };
+}
+
+test("a render plays a starter capture through a starter cabinet", async () => {
+  const { createLibraryStore, readBundled } = await import("../bundles/studio/server/library-store.js");
+  const { entries } = await readBundled();
+  const starter = entries.find((entry) => entry.id === "starter-a2");
+  const cabinet = entries.find((entry) => entry.id === "cabinet-ampmix");
+  assert.ok(starter, "the bundle ships the starter capture");
+  assert.ok(cabinet, "and the starter cabinets");
+
+  // A guitar take through one amp: the capture and the cabinet are the starter
+  // sounds, added to the song by the person (a bundled entry, no storage key).
+  const song = audioSong([{ scene_id: "scene-1", clip_id: "clip-1", take_id: TAKE_ID }]);
+  song.library = { [starter.id]: starterEntry(starter), [cabinet.id]: starterEntry(cabinet) };
+  song.inserts = {
+    "amp-1": {
+      id: "amp-1",
+      owner: "track:audio-1",
+      order: 1,
+      kind: "amp",
+      bypass: false,
+      params: { model_id: starter.id, ir_id: cabinet.id, input_db: 0, output_db: 0, ir_mix: 1 },
+    },
+  };
+
+  // The real renderer, with the real instrument store: a bundled file is read
+  // from the bundle itself and hashed against its own list on the way in.
+  const crowHome = mkdtempSync(join(tmpdir(), "studio-starters-"));
+  const storage = fakeStorage();
+  storage.objects.set(takeKey(TAKE_ID), takeWav());
+  const acl = fakeAcl();
+  const renderer = createRenderer({
+    db: fakeDb(),
+    storage,
+    acl,
+    library: createLibraryStore({ crowHome }),
+    maxSeconds: 300,
+    now: () => CLOCK,
+  });
+
+  const result = await renderer.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: song,
+    scene_id: "scene-1",
+    seconds: 1,
+  });
+  assert.deepEqual(result.missing_library, [], "both starter files were found and loaded");
+  const audio = decodeWav(storage.uploads[0].data);
+  const peak = peakOf(audio.channels[0], audio.channels[1] || audio.channels[0]);
+  assert.ok(peak > 0.001, `the amp has to make sound through the starter cabinet, peak ${peak}`);
+
+  // On a bundle that carries no starter sounds, the same song renders anyway:
+  // the insert is silent and both files are named, never thrown (Review Focus 5).
+  const bareHome = mkdtempSync(join(tmpdir(), "studio-starters-bare-"));
+  const bareList = join(bareHome, "bundled.json");
+  writeFileSync(bareList, JSON.stringify({ version: 1, entries: [] }), "utf8");
+  const bareStorage = fakeStorage();
+  bareStorage.objects.set(takeKey(TAKE_ID), takeWav());
+  const bare = createRenderer({
+    db: fakeDb(),
+    storage: bareStorage,
+    acl: fakeAcl(),
+    library: createLibraryStore({ crowHome: bareHome, bundledPath: bareList }),
+    maxSeconds: 300,
+    now: () => CLOCK,
+  });
+  const missing = await bare.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: song,
+    scene_id: "scene-1",
+    seconds: 1,
+  });
+  assert.deepEqual(
+    missing.missing_library.map((item) => item.id).sort(),
+    [starter.id, cabinet.id].sort(),
+    `both starter sounds have to be reported, got ${JSON.stringify(missing.missing_library)}`,
+  );
+  assert.equal(missing.seconds, 1, "the render still happened");
+});
+
+test("a song entry that names an older bundled file is missing, not the new sound", async () => {
+  // The song's entry names the file it was added with. A bundle that now ships a
+  // DIFFERENT file under that id is not that sound, so the cabinet reads as a file
+  // this device does not hold and is named in `missing_library` — the same rule
+  // the library file route keeps — rather than playing the new file under the old
+  // entry's name.
+  const { createLibraryStore, readBundled } = await import("../bundles/studio/server/library-store.js");
+  const { entries } = await readBundled();
+  const starter = entries.find((entry) => entry.id === "starter-a2");
+  const cabinet = entries.find((entry) => entry.id === "cabinet-ampmix");
+  assert.ok(starter, "the bundle ships the starter capture");
+  assert.ok(cabinet, "and the starter cabinets");
+
+  const song = audioSong([{ scene_id: "scene-1", clip_id: "clip-1", take_id: TAKE_ID }]);
+  const stale = starterEntry(cabinet);
+  // An older file under the same id: what the song was given, before a later
+  // bundle replaced it.
+  stale.sha256 = "0".repeat(64);
+  song.library = { [starter.id]: starterEntry(starter), [cabinet.id]: stale };
+  song.inserts = {
+    "amp-1": {
+      id: "amp-1",
+      owner: "track:audio-1",
+      order: 1,
+      kind: "amp",
+      bypass: false,
+      params: { model_id: starter.id, ir_id: cabinet.id, input_db: 0, output_db: 0, ir_mix: 1 },
+    },
+  };
+
+  const crowHome = mkdtempSync(join(tmpdir(), "studio-stale-starter-"));
+  const storage = fakeStorage();
+  storage.objects.set(takeKey(TAKE_ID), takeWav());
+  const renderer = createRenderer({
+    db: fakeDb(),
+    storage,
+    acl: fakeAcl(),
+    library: createLibraryStore({ crowHome }),
+    maxSeconds: 300,
+    now: () => CLOCK,
+  });
+
+  const result = await renderer.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: song,
+    scene_id: "scene-1",
+    seconds: 1,
+  });
+  assert.deepEqual(
+    result.missing_library.map((item) => item.id),
+    [cabinet.id],
+    `the out-of-date cabinet has to be named, got ${JSON.stringify(result.missing_library)}`,
+  );
+  assert.equal(
+    result.missing_library.some((item) => item.id === starter.id),
+    false,
+    "the capture the song still matches is not reported",
+  );
+});

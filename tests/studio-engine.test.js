@@ -48,6 +48,8 @@ import { compileProgram } from "../bundles/studio/tools/build-faust.mjs";
 const ENGINE_DIR = fileURLToPath(new URL("../bundles/studio/engine/", import.meta.url));
 const BUNDLE_DIR = fileURLToPath(new URL("../bundles/studio/", import.meta.url));
 const VENDOR_DIR = fileURLToPath(new URL("../bundles/studio/vendor/sunvox/", import.meta.url));
+const NAM_DIR = fileURLToPath(new URL("../bundles/studio/vendor/nam/", import.meta.url));
+const A2_CAPTURE_FILE = fileURLToPath(new URL("./fixtures/nam/a2-example.nam", import.meta.url));
 const SYMBOLS_FILE = fileURLToPath(
   new URL("../bundles/studio/node_modules/node-web-audio-api/js/lib/symbols.js", import.meta.url),
 );
@@ -81,6 +83,13 @@ const ASSETS = {
   "dynamics.js": readFileSync(join(ENGINE_DIR, "dynamics.js"), "utf8"),
   "faust-host.js": readFileSync(join(ENGINE_DIR, "faust-host.js"), "utf8"),
   "meter.js": readFileSync(join(ENGINE_DIR, "meter.js"), "utf8"),
+  // The NAM engine (plan 1d, Task 13): the vendored glue, the host that drives
+  // it, the cabinet convolver and the engine binary. All part of the engine
+  // module (engine-client's SOURCE_FILES) or of what it is handed.
+  "nam.js": readFileSync(join(NAM_DIR, "nam.js"), "utf8"),
+  "nam-host.js": readFileSync(join(ENGINE_DIR, "nam-host.js"), "utf8"),
+  "convolver.js": readFileSync(join(ENGINE_DIR, "convolver.js"), "utf8"),
+  "nam-engine.wasm": readFileSync(join(NAM_DIR, "nam-engine.wasm")),
   "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
   "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
 };
@@ -276,10 +285,13 @@ function hashChannels(left, right) {
  * @param {object} song
  * @param {{seconds?: number, sampleRate?: number, audio?: object[],
  *          mode?: "session"|"arrangement", fromBar?: number,
- *          hold?: object[], release?: string[], fonts?: object[]}} [options]
+ *          hold?: object[], release?: string[], fonts?: object[],
+ *          captures?: object[], cabinets?: object[]}} [options]
  *   `audio` is one `{id, channels, rate}` per take to load, and `samples` one
  *   `{id, channels, rate}` per sampled pad's PCM; `fonts` is one `{id, bytes}`
- *   per SoundFont bank the song plays; `hold` is one `{name, amount}` per
+ *   per SoundFont bank the song plays; `captures` one `{id, bytes}` per NAM
+ *   capture an amp insert names and `cabinets` one `{id, channels}` per cabinet
+ *   (plan 1d, Task 13); `hold` is one `{name, amount}` per
  *   performance effect held before the transport starts, and `release` one
  *   effect name per effect let go of (also before it starts)
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number}>}
@@ -296,6 +308,8 @@ async function renderSong(
     hold = [],
     release = [],
     fonts = [],
+    captures = [],
+    cabinets = [],
   } = {},
 ) {
   const context = new OfflineAudioContext({
@@ -306,7 +320,7 @@ async function renderSong(
   let engine = null;
   let rendered = false;
   try {
-    engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    engine = await studioEngine.create(context, { assetBytes: ASSETS, namCores: 0 });
     for (const take of audio) {
       // A fresh copy per render: loadAudio transfers the buffers to the worklet.
       await engine.loadAudio(
@@ -326,6 +340,19 @@ async function renderSong(
     for (const font of fonts) {
       // A fresh copy per render: loadLibrary transfers the bytes to the worklet.
       await engine.loadLibrary(font.id, "font", Uint8Array.from(font.bytes));
+    }
+    for (const capture of captures) {
+      // The NAM engine's own bytes ride in the asset map (nam-engine.wasm), and a
+      // capture is posted as its own file, exactly as the page posts it.
+      await engine.loadLibrary(capture.id, "nam", Uint8Array.from(capture.bytes));
+    }
+    for (const cabinet of cabinets) {
+      // A cabinet arrives as decoded PCM, the page's own two steps done here.
+      await engine.loadLibrary(
+        cabinet.id,
+        "ir",
+        cabinet.channels.map((channel) => Float32Array.from(channel)),
+      );
     }
     engine.setSong(song);
     // The performance effects are live state: held (or let go of) before the
@@ -847,6 +874,35 @@ const PAGE = [
   '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
   "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
   "};",
+  "window.studioRenderAmp = async function (song, captureBase64, cabinet, take, seconds, sampleRate) {",
+  "  var context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(seconds * sampleRate), sampleRate: sampleRate });",
+  '  var engine = await StudioEngine.create(context, { assetBase: "/assets/", namCores: 0 });',
+  '  var binary = atob(captureBase64);',
+  "  var captureBytes = new Uint8Array(binary.length);",
+  "  for (var b = 0; b < binary.length; b++) captureBytes[b] = binary.charCodeAt(b);",
+  '  await engine.loadLibrary(song.capture_id, "nam", captureBytes);',
+  "  var channels = cabinet.map(function (list) { return Float32Array.from(list); });",
+  '  await engine.loadLibrary(song.cabinet_id, "ir", channels);',
+  "  var takeChannels = take.map(function (list) { return Float32Array.from(list); });",
+  '  await engine.loadAudio("take-1", takeChannels, sampleRate);',
+  "  engine.setSong(song.song);",
+  "  engine.launchScene(song.song.scenes[0].id);",
+  "  engine.play();",
+  "  engine.node.connect(context.destination);",
+  "  await engine.flush();",
+  "  var buffer = await context.startRendering();",
+  "  var left = buffer.getChannelData(0);",
+  "  var right = buffer.getChannelData(1);",
+  "  var peak = 0;",
+  "  for (var i = 0; i < left.length; i++) { var value = Math.abs(left[i]); if (value > peak) peak = value; }",
+  "  var all = new Float32Array(left.length + right.length);",
+  "  all.set(left, 0); all.set(right, left.length);",
+  '  var digest = await crypto.subtle.digest("SHA-256", all.buffer);',
+  "  var bytes = new Uint8Array(digest);",
+  '  var hex = "";',
+  '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
+  "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
+  "};",
   "window.studioRenderMixer = async function (song, seconds, sampleRate) {",
   "  var context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(seconds * sampleRate), sampleRate: sampleRate });",
   '  var engine = await StudioEngine.create(context, { assetBase: "/assets/" });',
@@ -885,6 +941,10 @@ const SERVED = {
   "/assets/dynamics.js": ["text/javascript; charset=utf-8", () => ASSETS["dynamics.js"]],
   "/assets/faust-host.js": ["text/javascript; charset=utf-8", () => ASSETS["faust-host.js"]],
   "/assets/meter.js": ["text/javascript; charset=utf-8", () => ASSETS["meter.js"]],
+  "/assets/nam.js": ["text/javascript; charset=utf-8", () => ASSETS["nam.js"]],
+  "/assets/nam-host.js": ["text/javascript; charset=utf-8", () => ASSETS["nam-host.js"]],
+  "/assets/convolver.js": ["text/javascript; charset=utf-8", () => ASSETS["convolver.js"]],
+  "/assets/nam-engine.wasm": ["application/wasm", () => ASSETS["nam-engine.wasm"]],
   "/assets/studio-processor.js": ["text/javascript; charset=utf-8", () => ASSETS["studio-processor.js"]],
   "/assets/sunvox.wasm": ["application/wasm", () => ASSETS["sunvox.wasm"]],
 };
@@ -1856,6 +1916,114 @@ test("sampler pattern bit-identical in Chromium and Node", async (t) => {
       browser.hash,
       nodeHash,
       `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of a sampler render`,
+    );
+  } finally {
+    tab.close();
+  }
+});
+
+test("amp song bit-identical in Chromium and Node", async (t) => {
+  if (!chrome) {
+    t.skip("no headless Chrome");
+    return;
+  }
+
+  // One audio track playing a take through an amp insert: a REAL A2 capture
+  // (tests/fixtures/nam/a2-example.nam) and a cabinet whose IR is longer than one
+  // partition, so the NAM wasm, the insert's mono sum, the partitioned
+  // convolution and the wet/dry mix are all part of what is hashed.
+  const takeFrames = SAMPLE_RATE * 2;
+  const take = new Float32Array(takeFrames);
+  for (let at = 0; at < takeFrames; at += 1) {
+    take[at] =
+      Math.sin((2 * Math.PI * 196 * at) / SAMPLE_RATE) * 0.25 +
+      Math.sin((2 * Math.PI * 587 * at) / SAMPLE_RATE) * 0.08;
+  }
+  const cabinet = new Float32Array(1024);
+  for (let at = 0; at < cabinet.length; at += 1) {
+    cabinet[at] = Math.exp(-at / 180) * Math.sin((2 * Math.PI * 2100 * at) / SAMPLE_RATE) * 0.4;
+  }
+  cabinet[0] = 0.85;
+
+  const captureId = "capture-a2";
+  const cabinetId = "ir-cab";
+  const song = {
+    meta: { title: "Amp parity", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [
+      {
+        id: "track-1",
+        name: "Guitar",
+        color: "#E8C07A",
+        device: { engine: "audio" },
+        mute: false,
+        solo: false,
+        gain_db: -3,
+        pan: -0.2,
+        locked: false,
+      },
+    ],
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {
+      "clip-1": {
+        id: "clip-1",
+        track_id: "track-1",
+        scene_id: "scene-1",
+        name: "DI",
+        length_bars: 1,
+        kind: "audio",
+        notes: [],
+        comp: [{ take_id: "take-1", from_beat: 0, to_beat: 4 }],
+      },
+    },
+    inserts: {
+      "insert-amp": {
+        id: "insert-amp",
+        owner: "track:track-1",
+        kind: "amp",
+        order: 0,
+        bypass: false,
+        params: { model_id: captureId, ir_id: cabinetId, input_db: 3, output_db: -4, ir_mix: 0.8 },
+      },
+    },
+    library: {
+      [captureId]: { id: captureId, kind: "nam", name: "A2 capture", source: "upload" },
+      [cabinetId]: { id: cabinetId, kind: "ir", name: "Cabinet", source: "upload" },
+    },
+  };
+
+  const seconds = 2;
+  const captureBytes = new Uint8Array(readFileSync(A2_CAPTURE_FILE));
+  const node = await renderSong(song, {
+    seconds: seconds,
+    sampleRate: SAMPLE_RATE,
+    audio: [{ id: "take-1", rate: SAMPLE_RATE, channels: [take] }],
+    captures: [{ id: captureId, bytes: captureBytes }],
+    cabinets: [{ id: cabinetId, channels: [cabinet] }],
+  });
+  const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
+  assert.ok(nodePeak > 0.001, `the Node amp render has to be audible, peak was ${nodePeak}`);
+  const nodeHash = hashChannels(node.left, node.right);
+
+  const tab = await openTab();
+  try {
+    await tab.navigate(origin + "/");
+    assert.equal(await tab.evaluate("typeof window.studioRenderAmp"), "function", "the engine page did not load");
+    const payload = JSON.stringify({
+      capture_id: captureId,
+      cabinet_id: cabinetId,
+      song: song,
+    });
+    const browser = await tab.evaluate(
+      `window.studioRenderAmp(${payload}, ${JSON.stringify(Buffer.from(captureBytes).toString("base64"))}, ` +
+        `${JSON.stringify([Array.from(cabinet)])}, ${JSON.stringify([Array.from(take)])}, ${seconds}, ${SAMPLE_RATE})`,
+    );
+    assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
+    assert.equal(browser.sampleRate, SAMPLE_RATE);
+    assert.ok(browser.peak > 0.001, `the Chromium amp render has to be audible, peak was ${browser.peak}`);
+    assert.equal(
+      browser.hash,
+      nodeHash,
+      `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of an amp render`,
     );
   } finally {
     tab.close();

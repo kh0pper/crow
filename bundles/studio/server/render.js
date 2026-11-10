@@ -91,6 +91,14 @@
  * cap is), because the engine's own cap would otherwise evict a font in the
  * middle of a render that has no way to load it back.
  *
+ * The same holds for the amp inserts' files (plan 1d, Task 13): a capture
+ * (`kind: "nam"`) is handed over as its own bytes, and a cabinet (`kind: "ir"`)
+ * is read from its stored 24-bit WAV, resampled to the render's rate with
+ * `engine/resample.js` and handed over as Float32 channels — the page does the
+ * very same two steps, so a render and a page play the same cabinet. A capture
+ * or cabinet this device does not hold leaves its amp insert silent and is
+ * named in `missing_library` with the rest.
+ *
  * The answer also carries `credits`: the credit line of every library entry
  * the render heard, deduped, in the order the song first uses them. Every
  * CC-BY item shows its credit in the picker, the library list and here (plan
@@ -182,6 +190,18 @@ const VENDOR_DIR = join(BUNDLE_DIR, "vendor", "sunvox");
 
 /** The compiled Faust effects (`tools/build-faust.mjs`): one wasm + JSON per kind. */
 const FAUST_DIR = join(BUNDLE_DIR, "vendor", "faust");
+
+/** The vendored NAM engine and its binary (`tools/build-vendor.mjs`). */
+const NAM_DIR = join(BUNDLE_DIR, "vendor", "nam");
+
+/** The one-second ceiling a cabinet is held to (plan 1d, Formats). */
+const CABINET_MAX_SECONDS = 1;
+
+/**
+ * The resampler a render converts a cabinet with: the very module the page runs,
+ * so the PCM the engine hears is the same on both sides.
+ */
+const studioResample = require(join(ENGINE_DIR, "resample.js"));
 
 /**
  * The Faust effects the engine loads, in the order the build writes them: the
@@ -320,6 +340,24 @@ const RENDER_FONT_BUDGET_BYTES = 1024 * 1024 * 1024;
 
 /** The largest a bank file can be (plan 1d's limit table: 512 MB). */
 const MAX_FONT_BYTES = 512 * 1024 * 1024;
+
+/** The largest a capture file can be (plan 1d's limit table: 20 MB). */
+const MAX_CAPTURE_BYTES = 20 * 1024 * 1024;
+
+/** The largest a cabinet file can be (plan 1d's limit table: 10 MB). */
+const MAX_CABINET_BYTES = 10 * 1024 * 1024;
+
+/**
+ * The cap one library kind's file is read under, so a capture is held to its
+ * own size rather than a bank's.
+ * @param {string} kind - "font", "nam" or "ir"
+ * @returns {number}
+ */
+function maxLibraryBytes(kind) {
+  if (kind === "nam") return MAX_CAPTURE_BYTES;
+  if (kind === "ir") return MAX_CABINET_BYTES;
+  return MAX_FONT_BYTES;
+}
 
 /**
  * The device engine that marks a track as a SoundFont one. It is `doc.js`'s
@@ -460,6 +498,12 @@ export async function renderSong(snapshot, options = {}) {
   const baseFontCap = Number.isFinite(askedFontCap) && askedFontCap > 0 ? askedFontCap : RENDER_FONT_BUDGET_BYTES;
   const fontBytes = fontCapFor(fonts, baseFontCap);
 
+  // The amp inserts' files (plan 1d, Task 13): every capture and every cabinet
+  // the song's `amp` inserts name, once each, in the order the inserts run —
+  // muted tracks' inserts included, for the same reason a muted track's font is.
+  const captures = libraryFilesOfKind(snapshot, "nam");
+  const cabinets = libraryFilesOfKind(snapshot, "ir");
+
   // What this host can host: the compiled effects `bundles/studio/vendor/faust`
   // really holds — the very directory `engine-client.js` reads a module from when
   // the asset map does not carry it, so this answer is what the engine will have.
@@ -483,6 +527,9 @@ export async function renderSong(snapshot, options = {}) {
       // Never below what this window's fonts take: a font the cap evicted could
       // not be loaded again, and the render has nowhere to ask.
       maxFontBytes: Math.max(baseFontCap, fontBytes),
+      // A render plays every capture at its FULL size, whatever this machine's
+      // core count is: the sound is the document's (plan 1d, Task 13).
+      namCores: 0,
     });
     if (typeof engine.onMeter === "function") {
       engine.onMeter((reading) => {
@@ -512,6 +559,10 @@ export async function renderSong(snapshot, options = {}) {
     // transport has not started yet: load every font now or its tracks are
     // silent for the whole render.
     const library = await loadFonts(engine, fonts, options.libraryBytes);
+    // The amp inserts' files, the same way and for the same reason: a capture
+    // is posted as its own bytes, a cabinet as decoded PCM at this render's rate.
+    const captureLoad = await loadCaptures(engine, captures, options.libraryBytes);
+    const cabinetLoad = await loadCabinets(engine, cabinets, options.libraryBytes, rate);
     engine.play();
     engine.node.connect(context.destination);
     // Without this the render can begin before the song reaches the processor.
@@ -541,10 +592,15 @@ export async function renderSong(snapshot, options = {}) {
       // which one, and why, so the agent can name it rather than guess.
       missing_samples: [...samples.missing, ...missingSamples],
       // A font this device does not hold costs its own tracks and never the
-      // render (Review Focus 5); this names each one and why.
-      missing_library: library.missing,
+      // render (Review Focus 5); this names each one and why — a capture or a
+      // cabinet the same way (Task 13).
+      missing_library: [...library.missing, ...captureLoad.missing, ...cabinetLoad.missing],
       // Every instrument the render heard, credited the way its licence asks.
-      credits: creditsOf(fonts, library.loaded),
+      credits: [
+        ...creditsOf(fonts, library.loaded),
+        ...creditsOf(captures, captureLoad.loaded),
+        ...creditsOf(cabinets, cabinetLoad.loaded),
+      ],
       // The highest 3 s figure the engine's master meter took during the render
       // (plan 1d, Task 11): the same meter the master strip shows. Null when this
       // host's engine has no meter, or the render was shorter than one hop.
@@ -725,8 +781,9 @@ export function createRenderer({
       const prefix = await storagePrefixFor(db, project_id);
       const takeAudio = (take) => takeAudioFrom({ storage, bucket, prefix, songId: song_id, take });
       const sampleAudio = (sample) => sampleAudioFrom({ storage, bucket, prefix, songId: song_id, sample });
-      // A bank comes from the instrument store (a catalog entry) or from the
-      // upload's own storage key (an upload), never from anywhere else.
+      // A library file comes from the instrument store (a catalog entry), from
+      // the bundle itself (a starter sound), or from the upload's own storage
+      // key (an upload), never from anywhere else.
       const libraryBytes = (entry) =>
         fontBytesFrom({ library: libraryStore(), storage, bucket, prefix, songId: song_id, entry });
       const audio = await renderAudio(snapshot, {
@@ -1296,6 +1353,184 @@ function creditsOf(fonts, loaded) {
 }
 
 /**
+ * Every library entry of one kind that a song's amp inserts name, once each, in
+ * the order the inserts run (a chain's `order`, then its id, as the engine sorts
+ * them), and in track order across the song.
+ *
+ * The field an amp insert names an entry in is its own: `model_id` for a capture
+ * (`kind: "nam"`) and `ir_id` for a cabinet (`kind: "ir"`). A bypassed insert
+ * counts: a render that left its capture out would not be the song the operator
+ * hears the moment they un-bypass it. An id the song's library does not hold is
+ * included with `entry: null`, so it is REPORTED as missing rather than passed
+ * over (Review Focus 5).
+ * @param {object} snapshot the song
+ * @param {"nam"|"ir"} kind
+ * @returns {Array<{id: string, entry: object|null}>}
+ */
+function libraryFilesOfKind(snapshot, kind) {
+  const library = snapshot && snapshot.library && typeof snapshot.library === "object" ? snapshot.library : {};
+  const inserts = snapshot && snapshot.inserts && typeof snapshot.inserts === "object" ? snapshot.inserts : {};
+  const found = [];
+  const seen = new Set();
+  const ordered = Object.values(inserts)
+    .filter((insert) => insert && typeof insert === "object" && insert.kind === "amp")
+    .sort((left, right) => {
+      const orderLeft = Number(left.order);
+      const orderRight = Number(right.order);
+      const a = Number.isFinite(orderLeft) ? orderLeft : 0;
+      const b = Number.isFinite(orderRight) ? orderRight : 0;
+      if (a !== b) return a - b;
+      return String(left.id ?? "") < String(right.id ?? "") ? -1 : 1;
+    });
+  for (const insert of ordered) {
+    const params = insert.params && typeof insert.params === "object" ? insert.params : {};
+    const id = typeof params[kind === "nam" ? "model_id" : "ir_id"] === "string" ? params[kind === "nam" ? "model_id" : "ir_id"] : "";
+    if (id === "" || seen.has(id)) continue;
+    seen.add(id);
+    const entry = library[id] && typeof library[id] === "object" ? library[id] : null;
+    found.push({ id: id, entry: entry });
+  }
+  return found;
+}
+
+/**
+ * Hand the engine every amp capture the song names, as its own `.nam` bytes.
+ *
+ * A capture is parsed by the engine only while the transport is stopped — and an
+ * offline render has not started yet — so a load that comes back `loaded` is the
+ * only one that will play. Everything else (no reader, no file, the engine's own
+ * refusal, the plan's sentence for a legacy model) is reported, never thrown:
+ * the insert plays silence and the render plays on (Review Focus 1 and 5).
+ * @param {object} engine the engine `studioEngine.create()` returned
+ * @param {Array<{id: string, entry: object|null}>} captures
+ * @param {Function|undefined} libraryBytes the caller's reader
+ * @returns {Promise<{missing: Array<{id: string, reason: string}>, loaded: Set<string>}>}
+ */
+async function loadCaptures(engine, captures, libraryBytes) {
+  const missing = [];
+  const loaded = new Set();
+  for (const capture of captures) {
+    if (!capture.entry) {
+      missing.push({ id: capture.id, reason: FONT_NOT_HERE });
+      continue;
+    }
+    if (typeof libraryBytes !== "function" || typeof engine.loadLibrary !== "function") {
+      missing.push({ id: capture.id, reason: FONT_NOT_HERE });
+      continue;
+    }
+    let bytes = null;
+    try {
+      bytes = await libraryBytes(capture.entry);
+    } catch {
+      missing.push({ id: capture.id, reason: FONT_UNREADABLE });
+      continue;
+    }
+    if (!bytes) {
+      missing.push({ id: capture.id, reason: FONT_NOT_HERE });
+      continue;
+    }
+    let answer = null;
+    try {
+      answer = await engine.loadLibrary(capture.id, "nam", bytes);
+    } catch (error) {
+      missing.push({ id: capture.id, reason: engineReasonOf(error) });
+      continue;
+    }
+    if (answer && answer.status === "loaded") {
+      loaded.add(capture.id);
+      continue;
+    }
+    missing.push({ id: capture.id, reason: engineReasonOf(answer) });
+  }
+  return { missing: missing, loaded: loaded };
+}
+
+/**
+ * Hand the engine every cabinet the song names: the stored 24-bit WAV read,
+ * resampled to the render's rate with the page's own resampler, and posted as
+ * Float32 channels — the same two steps `panel/client.js` takes, so a render and
+ * a page convolve the same PCM.
+ *
+ * A cabinet longer than a second AT ITS FILE'S RATE is refused with the plan's
+ * sentence (and reported), never rendered: the check is the page's own, made once
+ * at the rate the file was stored in, and the file's rate and length ride along
+ * with the PCM so the engine judges the same thing rather than the longer
+ * resampled copy.
+ * @param {object} engine the engine `studioEngine.create()` returned
+ * @param {Array<{id: string, entry: object|null}>} cabinets
+ * @param {Function|undefined} libraryBytes the caller's reader
+ * @param {number} rate the render's sample rate, in Hz
+ * @returns {Promise<{missing: Array<{id: string, reason: string}>, loaded: Set<string>}>}
+ */
+async function loadCabinets(engine, cabinets, libraryBytes, rate) {
+  const missing = [];
+  const loaded = new Set();
+  for (const cabinet of cabinets) {
+    if (!cabinet.entry) {
+      missing.push({ id: cabinet.id, reason: FONT_NOT_HERE });
+      continue;
+    }
+    if (typeof libraryBytes !== "function" || typeof engine.loadLibrary !== "function") {
+      missing.push({ id: cabinet.id, reason: FONT_NOT_HERE });
+      continue;
+    }
+    let bytes = null;
+    try {
+      bytes = await libraryBytes(cabinet.entry);
+    } catch {
+      missing.push({ id: cabinet.id, reason: FONT_UNREADABLE });
+      continue;
+    }
+    if (!bytes) {
+      missing.push({ id: cabinet.id, reason: FONT_NOT_HERE });
+      continue;
+    }
+    let channels = null;
+    let sourceFrames = 0;
+    let sourceRate = 0;
+    try {
+      const decoded = decodeWav(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+      const frames = decoded.channels[0] ? decoded.channels[0].length : 0;
+      if (frames === 0) throw new Error("An impulse response holds no audio.");
+      // One second at the file's own rate, with the plan's two-frame tolerance:
+      // a cabinet shipped as exactly 1 s at 44.1 kHz is 44101 frames, and it
+      // loads. The engine and the page take the same tolerance, at the same rate.
+      if (frames > decoded.rate * CABINET_MAX_SECONDS + Math.max(2, Math.ceil((3 * decoded.rate) / 44100))) {
+        const seconds = (Math.round((frames / decoded.rate) * 10) / 10).toFixed(1);
+        throw new Error(
+          `An impulse response is at most 1 second long; this one is ${seconds} s.`,
+        );
+      }
+      sourceFrames = frames;
+      sourceRate = decoded.rate;
+      channels =
+        decoded.rate === rate
+          ? decoded.channels.map((channel) => Float32Array.from(channel))
+          : studioResample.toRate(decoded.channels, decoded.rate, rate);
+    } catch (error) {
+      missing.push({ id: cabinet.id, reason: engineReasonOf(error) });
+      continue;
+    }
+    let answer = null;
+    try {
+      answer = await engine.loadLibrary(cabinet.id, "ir", channels, {
+        sourceRate: sourceRate,
+        sourceFrames: sourceFrames,
+      });
+    } catch (error) {
+      missing.push({ id: cabinet.id, reason: engineReasonOf(error) });
+      continue;
+    }
+    if (answer && answer.status === "loaded") {
+      loaded.add(cabinet.id);
+      continue;
+    }
+    missing.push({ id: cabinet.id, reason: engineReasonOf(answer) });
+  }
+  return { missing: missing, loaded: loaded };
+}
+
+/**
  * The Faust effects one render's engine can host: the kinds whose compiled wasm
  * and factory JSON `bundles/studio/vendor/faust` holds (`tools/build-faust.mjs`'s
  * output, read into the asset map).
@@ -1660,23 +1895,28 @@ async function takeAudioFrom({ storage, bucket, prefix, songId, take }) {
 }
 
 /**
- * Read one library entry's FONT file, the way this instance keeps it.
+ * Read one library entry's FILE, the way this instance keeps it.
+ *
+ * This is the render's one reader for every kind a song's library holds: a bank
+ * (kind "font"), a capture ("nam") and a cabinet ("ir"). The loaders ask it only
+ * for the entries of the kind they want, so the kind is checked here as a
+ * guard, not as a filter.
  *
  * A catalog entry is read from the one verified copy at
  * `<CROW_HOME>/studio/library/<sha256>.<ext>`, and only after the store says
  * those bytes still hash to the name: a file whose name is not what it says is
- * no bank any song may play (`library-store.js`). An uploaded entry is read from
+ * no bank any song may play (`library-store.js`). A bundled entry (a starter
+ * capture or cabinet) is read from the bundle's own `library/files/`, hashed
+ * against `library/bundled.json` on every read. An uploaded entry is read from
  * the exact storage key its upload wrote, and only when that key sits under
  * this song's own `studio/<song_id>/library/`, named for this very entry — the
  * same own-prefix rule the library file route keeps, so a render can read
- * nothing of a song but that song's own files. A bundled file ships inside the
- * bundle and nothing serves one yet, so it reads as a file this Crow does not
- * have.
+ * nothing of a song but that song's own files.
  *
  * `null` means "this device does not hold it" (nothing stored, a key that is
- * not this song's, a storage object that is gone), which the render reports as
- * "not on this device". A read that fails any other way throws, and the render
- * reports "could not be read".
+ * not this song's, a storage object that is gone, a bundle without that file),
+ * which the render reports as "not on this device". A read that fails any other
+ * way throws, and the render reports "could not be read".
  *
  * @param {object} options
  * @param {object|null} options.library the instrument store (`createLibraryStore`)
@@ -1689,8 +1929,25 @@ async function takeAudioFrom({ storage, bucket, prefix, songId, take }) {
  */
 async function fontBytesFrom({ library, storage, bucket, prefix, songId, entry }) {
   if (!entry || typeof entry !== "object") return null;
-  if (entry.kind !== "font") return null;
-  if (entry.source === "bundled") return null;
+  const kind = typeof entry.kind === "string" ? entry.kind : "";
+  if (kind !== "font" && kind !== "nam" && kind !== "ir") return null;
+  const cap = maxLibraryBytes(kind);
+
+  // A starter sound is inside the bundle: the store verifies it against the
+  // bundled list on every read, and a file the bundle does not carry is one
+  // this device does not have.
+  if (entry.source === "bundled") {
+    if (!library || typeof library.bundledFile !== "function") return null;
+    const file = await library.bundledFile(String(entry.id ?? ""));
+    if (!file || !file.bytes) return null;
+    // The entry names the file the song was given. A bundle that now ships a
+    // DIFFERENT file under that id is not that sound, so it reads as a file this
+    // device does not hold (the same rule the library file route keeps), never as
+    // the new one under the old name.
+    if (String(entry.sha256 ?? "").toLowerCase() !== String(file.entry?.sha256 ?? "").toLowerCase()) return null;
+    if (file.bytes.length > cap) throw new Error("its file is larger than its kind can be");
+    return file.bytes;
+  }
 
   const catalogId = typeof entry.catalog_id === "string" ? entry.catalog_id : "";
   if (catalogId !== "") {
@@ -1703,7 +1960,7 @@ async function fontBytesFrom({ library, storage, bucket, prefix, songId, entry }
     if (!path) return null;
     const info = statSync(path);
     if (!info.isFile()) return null;
-    if (info.size > MAX_FONT_BYTES) throw new Error("its file is larger than a bank can be");
+    if (info.size > cap) throw new Error("its file is larger than its kind can be");
     return readFileSync(path);
   }
 
@@ -1711,12 +1968,12 @@ async function fontBytesFrom({ library, storage, bucket, prefix, songId, entry }
   const storedKey = typeof entry.storage_key === "string" ? entry.storage_key : "";
   if (id === "" || storedKey === "") return null;
   if (!storage || typeof storage.getObject !== "function") return null;
-  // An uploaded bank: the exact key its finish wrote, under this song's own
+  // An uploaded file: the exact key its finish wrote, under this song's own
   // `library/` directory, named for this entry. A key anywhere else — another
   // song's, another project's, or one with a `..` in it — is not this song's.
   const ownPrefix = `${prefix}studio/${songId}/library/${id}.`;
   if (!storedKey.startsWith(ownPrefix) || storedKey.slice(ownPrefix.length).includes("/")) return null;
-  return readStoredFile({ storage, bucket, key: storedKey, maxBytes: MAX_FONT_BYTES });
+  return readStoredFile({ storage, bucket, key: storedKey, maxBytes: cap });
 }
 
 /**
@@ -1986,9 +2243,20 @@ function engineAssets() {
     "dynamics.js": readFileSync(join(ENGINE_DIR, "dynamics.js"), "utf8"),
     "faust-host.js": readFileSync(join(ENGINE_DIR, "faust-host.js"), "utf8"),
     "meter.js": readFileSync(join(ENGINE_DIR, "meter.js"), "utf8"),
+    // The NAM host, the cabinet convolver and (below) the vendored NAM engine
+    // with its binary: the amp inserts of plan 1d, Task 13. The vendored script
+    // and its wasm are optional — a checkout that has not run
+    // `tools/build-vendor.mjs` has them missing, and the engine then starts with
+    // amps that play silence and say so, exactly as a page does.
+    "nam.js": existsSync(join(NAM_DIR, "nam.js")) ? readFileSync(join(NAM_DIR, "nam.js"), "utf8") : "",
+    "nam-host.js": readFileSync(join(ENGINE_DIR, "nam-host.js"), "utf8"),
+    "convolver.js": readFileSync(join(ENGINE_DIR, "convolver.js"), "utf8"),
     "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
     "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
   };
+  if (existsSync(join(NAM_DIR, "nam-engine.wasm"))) {
+    cachedAssets["nam-engine.wasm"] = readFileSync(join(NAM_DIR, "nam-engine.wasm"));
+  }
   // The compiled effects: read as the pair `faust-<kind>.wasm` /
   // `faust-<kind>.json` that engine-client.js posts to the processor.
   for (const kind of FAUST_KINDS) {

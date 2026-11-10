@@ -69,6 +69,18 @@
  * bytes have been checked against the same pin; until then it is not a source
  * this module would trust.
  *
+ * ## Bundled starter sounds
+ *
+ * `library/bundled.json` lists the sounds that ship INSIDE the bundle
+ * (`library/files/`): the starter capture and the starter cabinets. They are
+ * never downloaded and never copied into the Crow home — a song's library entry
+ * names one by id, and both the file route and a render hash the bundle's own
+ * bytes against the list before anything plays. A file that no longer matches
+ * its record is refused, and a list this bundle does not have reads as no
+ * starter sounds rather than as a failure. `library/files/NOTICES.md` carries
+ * each file's source, licence and credit; a test pins the list to the files on
+ * disk and to that file.
+ *
  * ## No app modules
  *
  * This file imports only Node built-ins. `CROW_HOME`, `fetch` and the catalog
@@ -92,6 +104,15 @@ const BUNDLE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /** The vetted catalog, as it is checked in. */
 export const DEFAULT_CATALOG_PATH = join(BUNDLE_DIR, "library", "catalog.json");
+
+/** The starter sounds that ship inside the bundle, as they are checked in. */
+export const DEFAULT_BUNDLED_PATH = join(BUNDLE_DIR, "library", "bundled.json");
+
+/** The directory a bundled entry's `file` is relative to (`bundled.json`'s own). */
+const BUNDLED_FILES_DIR = "files";
+
+/** A bundled entry's file name: one plain name under `library/files/`. */
+const BUNDLED_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/;
 
 /** The library entry kinds a catalog row may have. */
 export const CATALOG_KINDS = Object.freeze(["font", "nam", "ir"]);
@@ -264,6 +285,161 @@ export async function catalogEntry(catalogId, options = {}) {
   const found = entries.find((entry) => entry.id === id);
   if (!found) throw noSuchEntry(id);
   return found;
+}
+
+/**
+ * Validate one bundled entry. Like the catalog, this file is checked in, so a
+ * bad row is a programming error — but it must fail before a song's file route
+ * promises a name it cannot serve.
+ * @param {object} row
+ * @param {number} index
+ * @returns {object} the row, with the fields this module reads, normalised
+ */
+function validateBundledEntry(row, index) {
+  const where = `bundled row ${index}`;
+  if (!row || typeof row !== "object") throw badBundled(`${where} is not an object.`);
+  const id = typeof row.id === "string" ? row.id.trim() : "";
+  if (!/^[A-Za-z0-9_-]{1,40}$/.test(id)) {
+    throw badBundled(`${where} needs an id of 1-40 letters, digits, dashes or underscores.`);
+  }
+  if (!CATALOG_KINDS.includes(row.kind)) {
+    throw badBundled(`Bundled entry "${id}" has an unknown kind "${row.kind}".`);
+  }
+  const name = typeof row.name === "string" ? row.name.trim() : "";
+  if (!name || name.length > 80) throw badBundled(`Bundled entry "${id}" needs a name of 1-80 characters.`);
+  const file = typeof row.file === "string" ? row.file.trim() : "";
+  // One plain file name, never a path: nothing a bundle ships is reached by a
+  // name with a slash, a leading dot or anything else that walks upward.
+  if (!BUNDLED_FILE_NAME.test(file)) {
+    throw badBundled(`Bundled entry "${id}" needs a plain file name under library/files/.`);
+  }
+  const sha256 = typeof row.sha256 === "string" ? row.sha256.toLowerCase() : "";
+  if (!/^[0-9a-f]{64}$/.test(sha256)) {
+    throw badBundled(`Bundled entry "${id}" needs a sha256 of 64 hexadecimal characters.`);
+  }
+  const bytes = Number(row.bytes);
+  if (!Number.isInteger(bytes) || bytes <= 0) {
+    throw badBundled(`Bundled entry "${id}" needs a positive byte count.`);
+  }
+  const sourceUrl = typeof row.source_url === "string" ? row.source_url.trim() : "";
+  if (sourceUrl !== "" && !/^https?:\/\//i.test(sourceUrl)) {
+    throw badBundled(`Bundled entry "${id}" has a source URL that is not http(s).`);
+  }
+  return {
+    id,
+    kind: row.kind,
+    name,
+    file,
+    sha256,
+    bytes,
+    licence: typeof row.licence === "string" ? row.licence : "",
+    credit: typeof row.credit === "string" ? row.credit : "",
+    source_url: sourceUrl,
+  };
+}
+
+/** @returns {LibraryError} the bundled list is not something this module can read. */
+function badBundled(message) {
+  return new LibraryError("invalid", message, 500);
+}
+
+/** @returns {LibraryError} this bundle ships no starter sounds. */
+function noBundled() {
+  return new LibraryError("invalid", "This Crow ships no starter sounds.", 503);
+}
+
+/** @returns {LibraryError} a bundled file no longer matches its record. */
+function bundledMismatch(id) {
+  return new LibraryError(
+    "invalid",
+    `The starter sound "${id}" does not match the bundle's own record; nothing was served.`,
+    502,
+  );
+}
+
+/**
+ * Read and validate the bundled list.
+ *
+ * The list is inside the bundle, so its absence is not a caller's mistake: a
+ * bundle shipped without starter sounds answers an empty list rather than
+ * failing a page or a render that never wanted one.
+ * @param {{bundledPath?: string}} [options]
+ * @returns {Promise<{entries: object[]}>}
+ */
+export async function readBundled({ bundledPath = DEFAULT_BUNDLED_PATH } = {}) {
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile(bundledPath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return { entries: [] };
+    console.warn(`[studio] bundled list ${bundledPath}:`, error?.message || error);
+    throw noBundled();
+  }
+  const rows = Array.isArray(parsed?.entries) ? parsed.entries : null;
+  if (!rows) throw badBundled("The bundled list has no entries array.");
+  const entries = rows.map(validateBundledEntry);
+  const seen = new Set();
+  for (const entry of entries) {
+    if (seen.has(entry.id)) throw badBundled(`The bundled list names "${entry.id}" twice.`);
+    seen.add(entry.id);
+  }
+  return { entries };
+}
+
+/**
+ * One bundled row, or a 404 refusal.
+ * @param {string} bundledId
+ * @param {{bundledPath?: string}} [options]
+ * @returns {Promise<object>}
+ */
+export async function bundledEntry(bundledId, options = {}) {
+  const id = String(bundledId ?? "");
+  const { entries } = await readBundled(options);
+  const found = entries.find((entry) => entry.id === id);
+  if (!found) {
+    throw new LibraryError("not_found", `This Crow ships no starter sound "${id}".`, 404);
+  }
+  return found;
+}
+
+/**
+ * The path one bundled entry's file lives at: a plain name under the directory
+ * beside the list (`library/files/`). Only for building a path — the name was
+ * validated against `BUNDLED_FILE_NAME` when the list was read.
+ * @param {object} entry
+ * @param {{bundledPath?: string}} [options]
+ * @returns {string}
+ */
+export function bundledFileFor(entry, { bundledPath = DEFAULT_BUNDLED_PATH } = {}) {
+  return join(dirname(bundledPath), BUNDLED_FILES_DIR, entry.file);
+}
+
+/**
+ * Read one bundled file and VERIFY it against the list before anything serves
+ * it: the size and the sha256 are the record this bundle promises, and a file
+ * that no longer matches it is refused rather than played.
+ *
+ * A file that is not there answers `null` (this bundle is missing a file that
+ * its own list promises — a broken install, not a caller's mistake), so a route
+ * can answer the same "not on this Crow" sentence it answers for any other
+ * missing file.
+ * @param {string} bundledId
+ * @param {{bundledPath?: string}} [options]
+ * @returns {Promise<{entry: object, path: string, bytes: Buffer}|null>}
+ */
+export async function readBundledFile(bundledId, options = {}) {
+  const entry = await bundledEntry(bundledId, options);
+  const path = bundledFileFor(entry, options);
+  let bytes;
+  try {
+    bytes = await readFile(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (bytes.length !== entry.bytes || sha256 !== entry.sha256) throw bundledMismatch(entry.id);
+  return { entry, path, bytes };
 }
 
 /** @returns {string} the library directory for one Crow home. */
@@ -701,11 +877,25 @@ export async function libraryGc({ crowHome, inUse, olderThanDays = GC_AGE_DAYS, 
  *          now?: () => number, deadlineMs?: number, idleMs?: number}} options
  * @returns {object} the bound calls the web layer uses
  */
-export function createLibraryStore({ crowHome, catalogPath, fetchImpl, now, deadlineMs, idleMs } = {}) {
+export function createLibraryStore({ crowHome, catalogPath, bundledPath, fetchImpl, now, deadlineMs, idleMs } = {}) {
   const base = { crowHome, catalogPath, fetchImpl, now, deadlineMs, idleMs };
+  const bundledBase = { bundledPath };
   return {
     crowHome,
     catalogPath: catalogPath ?? DEFAULT_CATALOG_PATH,
+    bundledPath: bundledPath ?? DEFAULT_BUNDLED_PATH,
+    /** @returns {Promise<object[]>} every starter sound this bundle ships */
+    async bundled() {
+      return (await readBundled(bundledBase)).entries;
+    },
+    /** @returns {Promise<object>} one bundled row, or a 404 refusal */
+    async bundledEntry(bundledId) {
+      return bundledEntry(bundledId, bundledBase);
+    },
+    /** @param {string} bundledId @returns {Promise<object|null>} its verified file */
+    async bundledFile(bundledId) {
+      return readBundledFile(bundledId, bundledBase);
+    },
     /** @returns {Promise<object[]>} every catalog row */
     async entries() {
       return (await readCatalog(base)).entries;
