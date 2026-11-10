@@ -27,7 +27,7 @@
   "firstAdmin": {
     "mode": "crow",
     "via": "setup",
-    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 240 },
     "user": "admin",
     "secretEnv": "JELLYFIN_ADMIN_PASSWORD"
   },

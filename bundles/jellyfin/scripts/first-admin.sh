@@ -83,6 +83,10 @@ wizard_state() {
   if [ "$code" = "503" ]; then printf '%s' "LOADING"; return 0; fi
   if [ "$code" != "200" ]; then printf '%s' "UNKNOWN"; return 0; fi
   flag="$(json_flag "$body" StartupWizardCompleted)"
+  # While it starts, Jellyfin first answers from a small start-up server that spells the
+  # key `startupWizardCompleted`; only the real server's `StartupWizardCompleted` counts.
+  # The start-up spelling is "still loading", never an answer.
+  if [ -z "$flag" ] && [ -n "$(json_flag "$body" startupWizardCompleted)" ]; then printf '%s' "LOADING"; return 0; fi
   case "$flag" in
     false) printf '%s' "FRESH" ;;
     true) printf '%s' "DONE" ;;
@@ -119,7 +123,7 @@ state_until() {
 }
 
 # ── wait for the app (a first start prepares its own configuration first) ──────────
-# Bounded twice: a $SECONDS budget well inside the manifest's 180 s, and max-time 10 in
+# Bounded twice: a $SECONDS budget well inside the manifest's 240 s, and max-time 10 in
 # the probe's own config, so a single stuck request cannot outlive the wait.
 wait_deadline=$((SECONDS + 60))
 state="$(state_until "$wait_deadline" 1)"

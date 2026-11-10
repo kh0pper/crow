@@ -612,6 +612,23 @@ test("jellyfin: a 503 between two 200s restarts the wait, and the 200s still set
   assert.equal(toPath(r, "/Startup/Configuration").length, 1, "the wizard is finished after the loading pass");
 });
 
+test("jellyfin: the start-up server's lowercase answer is 'still loading', never a reading", () => {
+  // The real 12.4 sequence on a fresh container: nothing, a start-up 200 with the lowercase
+  // key, 503s, then the real server's answers.
+  const early = '{"localAddress":"http://127.0.0.1:8096","startupWizardCompleted":false}\n200';
+  const loading = '{"message":"Jellyfin Server is loading"}\n503';
+  const r = run("jellyfin", { answers: { FAKE_JELLYFIN_STATE_0: early, FAKE_JELLYFIN_STATE_1: loading, FAKE_JELLYFIN_STATE_2: early } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(/could not be read/.test(r.stderr), false);
+  assert.equal(toPath(r, "/Startup/Configuration").length, 1);
+  // A finished install whose start-up server says lowercase false is never re-run: only the
+  // real server's DONE counts.
+  const done = '{"StartupWizardCompleted":true}\n200';
+  const d = run("jellyfin", { answers: { FAKE_JELLYFIN_STATE_0: early, FAKE_JELLYFIN_STATE_1: done, FAKE_JELLYFIN_STATE_2: done } });
+  assert.equal(d.status, 3, d.stderr);
+  assert.equal(toPath(d, "/Startup/Configuration").length, 0);
+});
+
 test("jellyfin: a Complete that failed is retried once before the wizard's state is asked", () => {
   const r = run("jellyfin", { answers: { FAKE_JELLYFIN_COMPLETE_0: "500" } });
   assert.equal(r.status, 0, r.stderr);
