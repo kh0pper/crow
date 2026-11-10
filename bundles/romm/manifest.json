@@ -2,7 +2,7 @@
   "id": "romm",
   "name": "RoMM",
   "description": "Retro game library and emulator — browse, organize, and play retro games in the browser",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "type": "bundle",
   "author": "Crow",
   "category": "gaming",
@@ -57,6 +57,12 @@
     "label": "RoMM",
     "proxyMode": "direct"
   },
-  "firstAdmin": { "mode": "finish-setup" },
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 240 },
+    "user": "admin",
+    "secretEnv": "ROMM_ADMIN_PASSWORD"
+  },
   "notes": "Organize ROM files into system subdirectories (e.g., roms/gba/, roms/snes/, roms/n64/). IGDB credentials enable automatic cover art and metadata. Get them free at https://api-docs.igdb.com/"
 }

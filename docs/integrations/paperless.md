@@ -27,18 +27,21 @@ Install Paperless-ngx as a Crow bundle. This runs Paperless-ngx in Docker alongs
 
 Or install from the **Extensions** panel in the Crow's Nest.
 
-After installation, set the database password:
+Crow generates both secrets this stack needs — the PostgreSQL password and the Django secret key the app refuses to start without — and creates Paperless-ngx's admin account (`admin`) during the install, saving its password in **Settings** > **Passwords** in the Crow's Nest. There is no superuser to create in the web UI. Log in with that account, then generate an API token from **Administration** > **Users** > **Edit** > **Auth Tokens**.
+
+If you installed Paperless-ngx before this version, its card on the Extensions page offers **Set it up for me**, which creates the account now and keeps the password the same way.
+
+For a hand-written `.env` (rather than the bundle installer), both secrets have to be set — the stack does not start without them:
 
 ```bash
 # In your .env file
 PAPERLESS_DB_PASSWORD=your-secure-password
+PAPERLESS_SECRET_KEY=your-django-secret-key
 ```
 
 Restart the bundle for changes to take effect:
 
 > "Crow, restart the Paperless bundle"
-
-Paperless-ngx will be available at `http://your-server:8000` for initial setup. Create a superuser account via the web UI, then generate an API token from **Administration** > **Users** > **Edit** > **Auth Tokens**.
 
 ### Option B: Connect to existing Paperless-ngx
 
@@ -93,6 +96,7 @@ services:
     environment:
       PAPERLESS_DBHOST: paperless-db
       PAPERLESS_REDIS: redis://paperless-redis:6379
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY}
     depends_on:
       - paperless-db
       - paperless-redis

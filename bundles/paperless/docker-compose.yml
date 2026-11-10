@@ -15,6 +15,9 @@ services:
       - PAPERLESS_DBUSER=paperless
       - PAPERLESS_DBPASS=${PAPERLESS_DB_PASSWORD:-paperless}
       - PAPERLESS_DBNAME=paperless
+      # Django's secret key: the image refuses to start without one (the default
+      # "change-me" is rejected too). Crow generates it at install.
+      - PAPERLESS_SECRET_KEY=${PAPERLESS_SECRET_KEY:?Set PAPERLESS_SECRET_KEY}
     depends_on:
       paperless-db:
         condition: service_healthy

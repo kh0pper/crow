@@ -1,7 +1,7 @@
 {
   "id": "linkding",
   "name": "Linkding",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Lightweight bookmark manager — save, tag, search, and organize web links",
   "type": "bundle",
   "author": "Crow",
@@ -20,6 +20,12 @@
   ],
   "ports": [9090],
   "webUI": { "port": 9090, "path": "/", "label": "Linkding" },
-  "firstAdmin": { "mode": "finish-setup" },
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+    "user": "admin",
+    "secretEnv": "LINKDING_ADMIN_PASSWORD"
+  },
   "notes": "Self-host via Docker or connect to an existing Linkding instance. Generate an API token in Linkding Settings > Integrations."
 }
