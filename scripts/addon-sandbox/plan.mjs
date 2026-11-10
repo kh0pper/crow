@@ -8,8 +8,8 @@
  *
  * Two kinds of refusal:
  *  - a throw (`ContainRefused`) is a refusal that keeps the add-on OFF: its
- *    install folder is missing or cannot be bound, or its data folder cannot
- *    be opened by fd. Fail closed, never unwalled;
+ *    install folder is missing or cannot be bound, its id is not a slug, or its
+ *    data folder cannot be opened read-write by fd. Fail closed, never unwalled;
  *  - an entry in `refused` is something the add-on can start without (one
  *    owner-set file, a sign-in folder, a state folder, the relay socket dir).
  *
@@ -46,6 +46,8 @@ const PROXY_PORT = 39080;
 const DOOR_TOKEN_MOUNT = "/run/crow-addon/door-token";
 /** Crow-home entries that are never a bind source, whatever their owner says. */
 const CROW_HOME_SECRET_NAMES = ["secrets", "env", "peer-tokens.json", "identity.json", "android-keystore", ".keystore-env"];
+/** An add-on id is one lowercase slug: it names a folder, so never a path. */
+const ADDON_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 const expandHome = (p, home) => (p === "~" ? home : typeof p === "string" && p.startsWith("~/") ? home + p.slice(1) : p);
 
@@ -71,9 +73,14 @@ function which(command, pathEnv, exists) {
  * @throws {ContainRefused}
  */
 export function buildAddonPlan(o = {}) {
+  // The id names folders (`<dataDir>/<id>`, `<crowHome>/bundles/<id>`), so it is
+  // one lowercase slug or nothing: no `/`, no `.`/`..`, no path separator.
+  if (typeof o.id !== "string" || !ADDON_ID_RE.test(o.id)) {
+    throw new ContainRefused("add-on refused: invalid add-on id");
+  }
   const exists = o.exists || existsSync;
   const home = resolve(String(o.home));
-  const id = String(o.id);
+  const id = o.id;
   const crowHome = resolve(String(o.crowHome));
   const dataDirIn = resolve(String(o.dataDir));
   const profile = o.profile && typeof o.profile === "object" ? o.profile : {};
@@ -218,7 +225,11 @@ export function buildAddonPlan(o = {}) {
     let addonDataDir;
     if (profile.crowDb) {
       if (!exists(dataReal)) throw new ContainRefused("add-on refused: the Crow data folder " + dataReal + " does not exist");
-      const opened = openCheckedBindSource(dataReal, { uid, home, refuse: (rp) => refusePath(rp), expect: "dir" });
+      // A read-write data bind answers to the write side of the same list: the
+      // checkout, the Crow home and every protected path are never writable.
+      const whyWrite = forbidden(dataReal, { write: true }) || refusePath(dataReal, { write: true });
+      if (whyWrite) throw new ContainRefused("add-on refused: its data folder cannot be bound read-write (" + whyWrite + ")");
+      const opened = openCheckedBindSource(dataReal, { uid, home, refuse: (rp) => refusePath(rp, { write: true }), expect: "dir" });
       openedFds.push(opened.fd);
       bindFd(opened.fd, "crow-data", "--bind-fd", opened.realPath);
       addonDataDir = join(opened.realPath, id);
@@ -234,7 +245,9 @@ export function buildAddonPlan(o = {}) {
     } else {
       const dir = join(dataReal, id);
       if (!exists(dir)) throw new ContainRefused("add-on refused: its data folder " + dir + " does not exist");
-      const opened = openCheckedBindSource(dir, { uid, home, refuse: (rp) => refusePath(rp), expect: "dir" });
+      const whyWrite = forbidden(dir, { write: true }) || refusePath(dir, { write: true });
+      if (whyWrite) throw new ContainRefused("add-on refused: its data folder cannot be bound read-write (" + whyWrite + ")");
+      const opened = openCheckedBindSource(dir, { uid, home, refuse: (rp) => refusePath(rp, { write: true }), expect: "dir" });
       openedFds.push(opened.fd);
       bindFd(opened.fd, "data", "--bind-fd", opened.realPath);
       addonDataDir = opened.realPath;

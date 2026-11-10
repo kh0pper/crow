@@ -618,3 +618,47 @@ test("a missing install folder refuses with a reason naming it", () => {
   assert.throws(() => planOf({ id: "not-installed" }),
     (e) => e instanceof ContainRefused && /does not exist/.test(e.message) && e.message.includes(join(BUNDLES, "not-installed")));
 });
+
+// ---- the id is a slug ----------------------------------------------------
+
+test("an add-on id that is not one lowercase slug is refused before anything is opened", () => {
+  const before = fdCount();
+  for (const bad of ["../x", "a/b", ".", "..", "", "A", undefined]) {
+    assert.throws(() => planOf({ id: bad }),
+      (e) => e instanceof ContainRefused && /invalid add-on id/.test(e.message),
+      "id " + JSON.stringify(bad) + " is refused");
+  }
+  assert.equal(fdCount(), before, "no fd left open by a refused id");
+});
+
+// ---- a read-write data bind answers to the write side of the list --------
+
+test("a data folder whose real path lands on the checkout is refused for the read-write bind", (t) => {
+  // A symlinked dataDir whose target is inside the checkout: code is never
+  // writable, so neither bind may be handed that folder.
+  const target = mk(APP, "rw-data-probe");
+  mk(target, "acme");
+  const link = join(T, "rw-data-link");
+  try {
+    symlinkSync(target, link);
+  } catch (err) {
+    rmSync(target, { recursive: true, force: true });
+    if (err && (err.code === "EPERM" || err.code === "ENOSYS")) { t.skip("this host does not allow symlinks in the scratch dir"); return; }
+    throw err;
+  }
+  try {
+    const before = fdCount();
+    assert.throws(() => planOf({ dataDir: link }),
+      (e) => e instanceof ContainRefused && /cannot be bound read-write/.test(e.message) && /never writable/.test(e.message),
+      "the <id> folder inside the checkout is refused");
+    assert.equal(fdCount(), before, "no fd left open");
+
+    assert.throws(() => planOf({ dataDir: link, profile: profileOf({ crowDb: true }) }),
+      (e) => e instanceof ContainRefused && /cannot be bound read-write/.test(e.message) && /never writable/.test(e.message),
+      "a crow.db profile is refused the same folder");
+    assert.equal(fdCount(), before, "no fd left open");
+  } finally {
+    rmSync(link, { force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
