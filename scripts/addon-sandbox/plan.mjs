@@ -23,8 +23,12 @@
  * Two rules hold for every read-write bind:
  *  - a hidden top-level entry of the home is never writable, except this
  *    add-on's own data folder, its own state folders and the first-party dirs
- *    core lists for it (`ADDON_TOKEN_DIRS`); and no bind is ever writable over
- *    anything that starts a program (`autostart`, `systemd`);
+ *    core lists for it (`ADDON_TOKEN_DIRS`, and only for a repo-sourced
+ *    profile); and no bind is ever writable over anything that starts a
+ *    program (`autostart`, `systemd`) inside the owner's home;
+ *  - nothing under the data dir is a bind source except this add-on's own
+ *    folder (and, for a crow.db profile, the DB files beside it), so another
+ *    add-on's data is reachable only through this add-on's own data bind.
  *  - a folder bound by fd is walked for `.env` files like any path-bound dir
  *    (a `.env` inside a state or sign-in folder is masked too).
  *
@@ -70,6 +74,8 @@ const ADDON_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 const HIDDEN_WRITE_REASON = "a hidden entry of the home is never writable";
 /** Refused for writing: a bind over one of these could start a program on login. */
 const AUTOSTART_WRITE_REASON = "an autostart or systemd folder is never writable";
+/** Refused for reading AND writing: the data dir holds this instance's own state and every other add-on's folder. */
+const DATA_OTHER_REASON = "another add-on's data, or Crow's own data, is never a bind source";
 /** Path components that can start something when the owner logs in. */
 const AUTOSTART_COMPONENTS = new Set(["autostart", "systemd"]);
 
@@ -93,6 +99,9 @@ function which(command, pathEnv, exists) {
  *   id, profile (deriveProfile's output), entry (the mcp-addons.json entry),
  *   home, crowHome, appRoot, nodeBin, dataDir, dbPath, gatewayPort, otherHomes,
  *   selfTargets, relayDir, doorTokenFd, uid, fdBase, pathEnv, exists
+ *
+ *   `tokenDirsTable` is a TEST SEAM and is not passed in production: a plain
+ *   object replaces the shipped `ADDON_TOKEN_DIRS` for that one lookup.
  * @returns {{args: string[], env: object, unsetEnv: string[], fds: {fd, childFd, role}[], refused: {path, reason}[], net: object, addonDataDir: string}}
  * @throws {ContainRefused}
  */
@@ -128,6 +137,12 @@ export function buildAddonPlan(o = {}) {
   const uvPythonRoots = [...new Set([join(home, ".local", "share", "uv", "python"), join(homeReal, ".local", "share", "uv", "python")])];
   const INTERPRETER_OUTSIDE = "the add-on's interpreter is outside the managed Python folders";
   const dataReal = realp(dataDirIn) || dataDirIn;
+  /** The owner's home at both spellings, for the rules that are about the inside of it. */
+  const homeSpellings = [...new Set([home, homeReal])];
+  /** The data dir at both spellings (the lexical input and its real path). */
+  const dataDirRoots = [...new Set([dataReal, dataDirIn])];
+  /** This add-on's own folder below the data dir, at both spellings. */
+  const ownDataRoots = dataDirRoots.map((root) => join(root, id));
   const installDir = join(crowHome, "bundles", id);
   const stateNames = (Array.isArray(files.state) ? files.state : [])
     .filter((n) => typeof n === "string" && n && !n.includes("/") && n !== "." && n !== "..");
@@ -172,8 +187,20 @@ export function buildAddonPlan(o = {}) {
     // writable below a hidden entry: this add-on's own data folder (the data
     // dir itself for a crow.db profile), its own state folders, and the
     // first-party dirs core lists for it.
-    const tokenDirNames = Object.prototype.hasOwnProperty.call(ADDON_TOKEN_DIRS, id) && Array.isArray(ADDON_TOKEN_DIRS[id])
-      ? ADDON_TOKEN_DIRS[id].filter((n) => typeof n === "string" && n && !n.includes(".."))
+    // `o.tokenDirsTable` is a TEST SEAM, never a production input: a plain
+    // object replaces the shipped table for this one lookup, so a test can
+    // exercise the rule while `ADDON_TOKEN_DIRS` itself ships empty.
+    const tokenDirsTable = o.tokenDirsTable && typeof o.tokenDirsTable === "object" && !Array.isArray(o.tokenDirsTable)
+      && (Object.getPrototypeOf(o.tokenDirsTable) === Object.prototype || Object.getPrototypeOf(o.tokenDirsTable) === null)
+      ? o.tokenDirsTable
+      : ADDON_TOKEN_DIRS;
+    // A token dir is a hidden entry of the home made writable, so it takes the
+    // same condition the doors and the state dirs take: a repo-sourced profile
+    // of a first-party id. An installed manifest may have been edited by
+    // unwalled code, and an unknown source is no source at all.
+    const tokenDirNames = profile.source === "repo"
+      && Object.prototype.hasOwnProperty.call(tokenDirsTable, id) && Array.isArray(tokenDirsTable[id])
+      ? tokenDirsTable[id].filter((n) => typeof n === "string" && n && !n.includes(".."))
       : [];
     const hiddenWriteRoots = [];
     const addWriteRoot = (p) => {
@@ -181,6 +208,37 @@ export function buildAddonPlan(o = {}) {
     };
     for (const p of [profile.crowDb ? dataReal : join(dataReal, id), ...statePaths]) addWriteRoot(p);
     for (const n of tokenDirNames) addWriteRoot(join(home, n));
+
+    /**
+     * The components of `p` that lie INSIDE the owner's home, at either
+     * spelling of it. A path outside the home has none: the login-time rules
+     * say nothing about it.
+     */
+    function homeComponents(p) {
+      const out = [];
+      for (const root of homeSpellings) {
+        if (p !== root && under(p, root)) out.push(...p.slice(root.length + 1).split(sep));
+      }
+      return out;
+    }
+
+    /**
+     * Why `p` may not come from the data dir, or null. The add-on's own folder
+     * is its business; a crow.db profile also keeps the data dir itself and the
+     * DB files beside it. Everything else there is another add-on's data or
+     * Crow's own — reachable only through a bind of this add-on's own folder.
+     */
+    function dataDirReason(p) {
+      if (!dataDirRoots.some((root) => under(p, root))) return null;
+      if (ownDataRoots.some((root) => under(p, root))) return null;
+      if (profile.crowDb) {
+        for (const root of dataDirRoots) {
+          if (p === root) return null;
+          if (dirname(p) === root && CROW_DB_KEEP.has(basename(p))) return null;
+        }
+      }
+      return DATA_OTHER_REASON;
+    }
 
     /** The hidden top-level entry of `home` a path sits under, or null. */
     function hiddenEntryOf(p) {
@@ -205,13 +263,20 @@ export function buildAddonPlan(o = {}) {
       for (const n of [...crowSecrets, ...tokenFiles]) {
         if (p === n || under(p, n)) return "a Crow secret is never bound (" + n + ")";
       }
+      // The data dir holds every other add-on's folder and Crow's own DB, at
+      // any location: the Crow-home rule below only covers a data dir INSIDE
+      // the Crow home, so this rule stands on its own and covers reads too.
+      const inDataDir = dataDirReason(p);
+      if (inDataDir) return inDataDir;
       if (under(p, crowHomeReal) && !allowedCrowHomeRoots.some((r) => under(p, r))) {
         return "the Crow home is not a bind source outside this add-on's own folders";
       }
       if (!write) return forbidden(p);
-      // A write bind over a folder that starts something on login, on ANY
-      // component (a unit, a desktop autostart entry), is never made.
-      if (p.split(sep).some((c) => AUTOSTART_COMPONENTS.has(c))) return AUTOSTART_WRITE_REASON;
+      // A write bind over a folder that starts something on login (a unit, a
+      // desktop autostart entry) is never made. Only the components INSIDE the
+      // owner's home count: a folder the owner keeps elsewhere is not a
+      // login-time hook of theirs.
+      if (homeComponents(p).some((c) => AUTOSTART_COMPONENTS.has(c))) return AUTOSTART_WRITE_REASON;
       // The bot's rule first: a hidden top-level entry of the home is never
       // writable from a policy. It exempts the whole data dir, so the narrower
       // allowlist above is applied here instead.
