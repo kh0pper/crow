@@ -16,6 +16,7 @@
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import { readSetting } from "../gateway/dashboard/settings/registry.js";
 import { SYNCED_TABLES, shouldSyncRow, shouldInitInstanceSync, stripLocalOnlyColumns } from "../sharing/instance-sync.js";
+import { eraseSyncEnabled } from "./history/erase.js";
 import {
   ensureSyncTables,
   seedCounterSql,
@@ -178,7 +179,9 @@ async function enforceOutboxCap(db) {
  *   servers/shared/history/erase.js's permanent-erase event: like `delete` it
  *   names a row that is gone (nothing to stamp), and the receiver applies it as
  *   a delete + a history erase + a tombstone. It is queued and drained exactly
- *   like any other op.
+ *   like any other op ONCE erase emission is enabled (the local
+ *   `history.erase_sync` setting, default off — see erase.js ERASE_SYNC_SETTING);
+ *   with the setting off an erase is never queued.
  * @param {object} row
  * @param {object} [opts]
  * @param {number} [opts.lamportTs] - preserve-lamport mode (queue path
@@ -206,6 +209,11 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
     // wedges claimed/reclaimed forever and eventually cap-evicts real rows).
     if (!SYNCED_TABLES.includes(table)) return null;
     if (!shouldSyncRow(table, row)) return null;
+    // An ERASE travels only when the operator turned erase emission on
+    // (history.erase_sync, default off — servers/shared/history/erase.js
+    // ERASE_SYNC_SETTING): the same gate the live manager applies, so the queue
+    // door cannot smuggle past it what emitChange would refuse.
+    if (op === "erase" && !(await eraseSyncEnabled(db))) return null;
     // Local-only columns never enter the queue: the outbox row IS the emitted
     // payload (`row_json`, replayed verbatim by the drain's emitChange), and a
     // providers row's api_key belongs to this instance alone — the same strip

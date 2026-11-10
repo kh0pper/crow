@@ -48,7 +48,7 @@ import {
   tableColumns,
   triggerDefs,
 } from "./covered.js";
-import { ITEM_ERASURES_DDL } from "./erase.js";
+import { ITEM_ERASURES_DDL, PENDING_ERASURES_DDL, PENDING_REMOTE_ERASURES_DDL } from "./erase.js";
 
 const tableExists = (db, table) =>
   Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
@@ -136,6 +136,19 @@ export function ensureHistoryTriggers(db) {
   // purged, so there is nothing else to do with it. It is not a trigger, so it
   // does not join `restored`.
   if (!tableExists(db, "item_erasures")) db.exec(ITEM_ERASURES_DDL);
+  // `erase_lamport` (the erase event's lamport, i.e. the bound below which a peer's
+  // write is the erased item coming back) arrived with a later build of the same
+  // unreleased migration: a dev store that already ran 0024 has the table without
+  // it, and CREATE TABLE IF NOT EXISTS would never add the column.
+  else if (!columnsOf(db, "item_erasures").has("erase_lamport")) {
+    db.exec("ALTER TABLE item_erasures ADD COLUMN erase_lamport INTEGER");
+  }
+  // The Maker Lab learner-delete marker and the "finish this inbound erase" work
+  // queue. Both are local bookkeeping tables beside the tombstones, ensured here
+  // for the same reason (a store that recorded an earlier build of 0024 never runs
+  // it again), and both IF NOT EXISTS.
+  if (!tableExists(db, "pending_erasures")) db.exec(PENDING_ERASURES_DDL);
+  if (!tableExists(db, "pending_remote_erasures")) db.exec(PENDING_REMOTE_ERASURES_DDL);
 
   // A switch still armed at boot belongs to an erase transaction that never
   // committed; leaving it on would let anything rewrite history without the

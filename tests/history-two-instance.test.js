@@ -36,7 +36,7 @@ import { withWriteContext } from "../servers/shared/history/write-context.js";
 import { listVersions, restoreVersion } from "../servers/shared/history/api.js";
 import { listTrash, restoreFromTrash } from "../servers/shared/history/trash.js";
 import { sweep } from "../servers/shared/history/sweep.js";
-import { isErased } from "../servers/shared/history/erase.js";
+import { isErased, eraseItems } from "../servers/shared/history/erase.js";
 
 /** The owner's dashboard session on either machine (each instance has its own). */
 const OWNER = { authorKind: "owner", authorId: "abcd1234", jobId: "session:abcd1234" };
@@ -214,6 +214,108 @@ test(
   },
 );
 
+/** Turn erase emission ON for one instance (the local `history.erase_sync` setting). */
+async function enableEraseSync(db) {
+  await db.execute({
+    sql: `INSERT INTO dashboard_settings (key, value) VALUES ('history.erase_sync', '1')
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    args: [],
+  });
+}
+
+const tombstoneKeys = async (db) =>
+  (await db.execute({ sql: "SELECT item_type, item_id FROM item_erasures", args: [] })).rows
+    .map((row) => `${row.item_type}:${row.item_id}`)
+    .sort();
+
+test("erasing a starter or maker-lab memory sends nothing to the peer", async () => {
+  const fleet = await makeFleet();
+  let link;
+  try {
+    const { a, b } = fleet;
+    migrateSide(a);
+    migrateSide(b);
+    link = await linkPeers(a, b);
+
+    const insert = async (id, content, source = null) => {
+      await writeLocal(a.db, "INSERT INTO memories (id, content, source) VALUES (?, ?, ?)", [id, content, source]);
+      await a.mgr.emitChange("memories", "insert", { id, content, source, lamport_ts: null });
+    };
+    await insert(94, "an ordinary memory");
+    await insert(95, "a starter demo", "starter");
+    await insert(96, "a learner record", "maker-lab");
+    await insert(98, "the gate's control");
+    assert.ok(await until(async () => (await hasMemory(b.db, 94)) !== null), "the ordinary memory reached the peer");
+    assert.ok(await until(async () => (await hasMemory(b.db, 98)) !== null), "and so did the control");
+    assert.equal(await hasMemory(b.db, 95), null, "a starter memory never syncs");
+    assert.equal(await hasMemory(b.db, 96), null, "nor a Maker Lab one");
+
+    // 1. DEFAULT OFF: erase emission is the operator's switch (history.erase_sync).
+    const gated = await eraseItems(
+      a.db,
+      [{ itemType: "memory", itemId: 98 }],
+      OWNER,
+      { syncManager: a.mgr },
+    );
+    assert.equal(gated.emitted, 0, "with the setting off, no erase event leaves the host");
+    assert.equal(gated.eraseLamport, null, "and the tombstone is unbounded");
+    await writeLocal(a.db, "INSERT INTO memories (id, content) VALUES (?, ?)", [99, "a trailing marker"]);
+    await a.mgr.emitChange("memories", "insert", { id: 99, content: "a trailing marker", lamport_ts: null });
+    assert.ok(await until(async () => (await hasMemory(b.db, 99)) !== null), "the feed drained past it");
+    assert.ok(await hasMemory(b.db, 98), "the peer's copy is untouched when emission is off");
+    assert.deepEqual(await tombstoneKeys(b.db), [], "and nothing is tombstoned there");
+
+    // 2. ON: only the item that actually syncs is announced.
+    await enableEraseSync(a.db);
+    const result = await eraseItems(
+      a.db,
+      [
+        { itemType: "memory", itemId: 94 },
+        { itemType: "memory", itemId: 95 },
+        { itemType: "memory", itemId: 96 },
+      ],
+      OWNER,
+      { syncManager: a.mgr },
+    );
+    assert.equal(result.versions, 3, "all three were erased HERE");
+    assert.equal(result.emitted, 1, "only the memory that syncs at all is announced");
+    assert.ok(Number.isFinite(result.eraseLamport), "the erase event's lamport bounds the tombstones");
+
+    assert.ok(
+      await until(async () => (await hasMemory(b.db, 94)) === null),
+      "the peer applied the erase of the ordinary memory",
+    );
+    assert.ok(await isErased(b.db, "memory", "94"), "it recorded its own tombstone for it");
+    assert.deepEqual(
+      await tombstoneKeys(b.db),
+      ["memory:94"],
+      "and NOTHING for the starter or Maker Lab memory — those erases never left the host",
+    );
+    assert.ok(await isErased(a.db, "memory", "95"), "locally, the starter erase is still tombstoned");
+    assert.ok(await isErased(a.db, "memory", "96"), "and the Maker Lab one too");
+
+    // 3. And a Maker Lab LEARNER erase is never announced, whatever the item says.
+    await insert(97, "a memory a learner erase takes");
+    assert.ok(await until(async () => (await hasMemory(b.db, 97)) !== null), "the peer has its copy first");
+    const learnerErase = await eraseItems(
+      a.db,
+      [{ itemType: "memory", itemId: 97 }],
+      { authorKind: "system", authorId: "maker-lab" },
+      { syncManager: a.mgr },
+    );
+    assert.equal(learnerErase.emitted, 0, "a learner erasure never leaves the host (DATA-HANDLING)");
+    await writeLocal(a.db, "INSERT INTO memories (id, content) VALUES (?, ?)", [100, "another trailing marker"]);
+    await a.mgr.emitChange("memories", "insert", { id: 100, content: "another trailing marker", lamport_ts: null });
+    assert.ok(await until(async () => (await hasMemory(b.db, 100)) !== null), "the feed drained past it");
+    assert.ok(await hasMemory(b.db, 97), "the peer's copy of the learner's memory is untouched");
+    assert.deepEqual(await tombstoneKeys(b.db), ["memory:94"], "and no tombstone was learned for it");
+    assert.equal(await isErased(a.db, "memory", "97"), true, "while it IS erased (and tombstoned) here");
+  } finally {
+    link?.close();
+    await fleet.cleanup();
+  }
+});
+
 test("an erase reaches the peer and erases its copy and Trash", async () => {
   const fleet = await makeFleet();
   let link;
@@ -235,7 +337,10 @@ test("an erase reaches the peer and erases its copy and Trash", async () => {
     assert.deepEqual((await listTrash(b.db)).map((e) => e.itemId), ["73"]);
 
     // A's Trash period passes. The erase emits an `erase` event on the item's own
-    // table, through A's real manager (the path the gateway's sweep uses).
+    // table, through A's real manager (the path the gateway's sweep uses). Erase
+    // emission is behind the local `history.erase_sync` setting (default OFF — no
+    // peer capability to gate on yet), so the operator turns it on here.
+    await enableEraseSync(a.db);
     const swept = await sweep(a.db, {
       now: new Date(Date.now() + 40 * 86_400_000),
       trashDays: 30,

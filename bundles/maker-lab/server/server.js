@@ -296,8 +296,38 @@ export function createMakerLabServer(db, options = {}) {
         args: [learner_id],
       });
       if (!r.rows.length && !pending) return mcpError(`Learner ${learner_id} not found`);
-      const name = r.rows[0]?.name ?? null;
-      const projectUuid = r.rows[0]?.uuid ?? pending?.project_uuid ?? null;
+      const profile = r.rows[0] ?? null;
+      const name = profile?.name ?? null;
+      const projectUuid = profile?.uuid ?? pending?.project_uuid ?? null;
+
+      // A RETRY FINISHES ONLY THE RECORDED ERASE — NEVER THE CASCADE AGAIN.
+      //
+      // After a failed history erase the cascade has committed, so the profile row
+      // is already gone; and project_spaces ids are per-instance AUTOINCREMENT and
+      // REUSED, so `learner_id` may name a DIFFERENT learner by now (either no row
+      // at all, or a new row with a new uuid). Re-running the cascade
+      // (`DELETE ... WHERE project_id = ?`) would then delete that other learner's
+      // sessions, transcripts, memories and settings. So when the marker is not
+      // provably about the row we are looking at — the row is gone, or its uuid is
+      // not the one the marker recorded — finish the memory ids and the project
+      // uuid the marker holds, and touch nothing else.
+      const idReused =
+        Boolean(pending) &&
+        (profile === null ||
+          (typeof pending.project_uuid === "string" &&
+            pending.project_uuid !== "" &&
+            pending.project_uuid !== (profile.uuid ?? null)));
+      if (idReused) {
+        try {
+          await finishPendingErasure(db, pending);
+          return mcpOk({ deleted: true, learner_id, name, reason: reason || null, resumed: true });
+        } catch (err) {
+          console.warn(`[maker-lab] learner ${learner_id}: recorded erase could not be finished:`, err?.message || err);
+          return mcpError(
+            "The learner's data could not be fully erased; nothing was reported as deleted. Try again.",
+          );
+        }
+      }
 
       // FAIL CLOSED. A learner delete is a COPPA / GDPR-K promise
       // (DATA-HANDLING.md): if any part of the delete or of the history erase
@@ -344,21 +374,27 @@ export function createMakerLabServer(db, options = {}) {
         );
         const batchResult = await db.batch(statements);
         const psRowsAffected = Number(batchResult.at(-1)?.rowsAffected ?? 0);
-        if (psRowsAffected === 0 && r.rows.length) {
-          // The row was here a moment ago and is not now: refuse (the cascade
-          // rolled back with it) rather than finish an erase nobody asked for.
+        if (psRowsAffected === 0) {
+          // NOTHING ROLLED BACK: this batch is one transaction and it committed —
+          // the marker and the cascade deletes are all on disk. The profile row we
+          // read a moment ago is gone (another session deleted it, or the id was
+          // re-pointed), so the answer is "not found" rather than "deleted"; the
+          // marker stays, and the retry path above (or the 5-minute sweep) finishes
+          // the recorded erase without ever touching a row-keyed cascade again.
           return mcpError(`Learner ${learner_id} not found`);
         }
 
         // Finish the erase from the marker (which is the record of everything the
         // cascade removed, including the ids read before it), then clear it and
-        // confirm none remains. `finishPendingErasure` throws if it cannot.
+        // confirm none remains. `finishPendingErasure` throws if it cannot. The
+        // project id is safe to pass here and only here: the profile row was just
+        // read and IS this learner's (the reuse case returned above).
         const target = {
           learner_id: learner_id,
           project_uuid: projectUuid,
           memory_ids: memoryIds,
         };
-        await finishPendingErasure(db, target);
+        await finishPendingErasure(db, target, { projectId: learner_id });
 
         return mcpOk({ deleted: true, learner_id, name, reason: reason || null });
       } catch (err) {

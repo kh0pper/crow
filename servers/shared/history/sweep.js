@@ -30,12 +30,21 @@
  *       erased for real — every version of it, through erase.js's armed door. The
  *       Trash period is a local setting (history.trash_days, default 30).
  *
- *       AN ERASE LEAVES A TOMBSTONE and (when sync is on) tells the peers
- *       (erase.js): the item must not be re-created here by a peer's restore, and
- *       the peer's own copy and Trash go too. The sweep passes its caller's
- *       InstanceSyncManager through; with none given, erase.js resolves this
- *       process's singleton, and a process without one (the Maker Lab bundle)
- *       queues the event durably for the gateway's drain.
+ *       AN ERASE LEAVES A TOMBSTONE and (when erase emission is on) tells the
+ *       peers (erase.js): the item must not be re-created here by a peer's
+ *       restore, and the peer's own copy and Trash go too. Emission is gated by
+ *       the LOCAL setting `history.erase_sync` (default OFF — see erase.js's
+ *       ERASE_SYNC_SETTING for why a peer capability gate does not exist yet).
+ *       The sweep passes its caller's InstanceSyncManager through; with none
+ *       given, erase.js resolves this process's singleton, and a process without
+ *       one (the Maker Lab bundle) queues the event durably for the gateway's
+ *       drain.
+ *
+ *   (d) FINISH A FAILED INBOUND ERASE. A peer's erase that could not be applied
+ *       atomically left its tombstone (the part that must never be lost) plus a
+ *       marker in pending_remote_erasures (erase.js). This pass retries those
+ *       through the same apply path — the feed loop cannot: it consumes an entry
+ *       whose apply threw, so without this the erase would simply stop halfway.
  *
  * RETENTION. `history.retention` defaults to `forever`, and `forever` keeps
  * everything. Any other value is currently a NO-OP: a thinning schedule is not
@@ -54,7 +63,7 @@
  */
 import { SECRET_PATTERNS } from "../../../scripts/check-public-hygiene.mjs";
 import { withoutWriteContext } from "./write-context.js";
-import { eraseItems, runArmedStatements } from "./erase.js";
+import { eraseItems, finishPendingRemoteErasures, runArmedStatements } from "./erase.js";
 import { trashEntries, normalizeTrashDays, DEFAULT_TRASH_DAYS } from "./trash.js";
 
 /** Rows per pass when the caller does not say. */
@@ -375,6 +384,30 @@ async function erasePass(db, { now, trashDays, batchSize, syncManager }) {
   return { erased: erased.filter((e) => e.versions > 0), versions, emitted, cutoff };
 }
 
+/* -------------------------------------------------------------- (d) retries */
+
+/**
+ * Finish the inbound erases that could not be applied atomically (erase.js's
+ * pending_remote_erasures). Bounded, and a marker that fails again stays for the
+ * next run: one broken erase must not stop the others, and none is deleted
+ * because "we tried".
+ */
+async function pendingErasePass(db, batchSize) {
+  try {
+    const { completed, failed } = await finishPendingRemoteErasures(db, { limit: batchSize });
+    if (failed.length > 0) {
+      console.warn(
+        `[history] sweep: ${failed.length} pending inbound erase(s) still could not be finished: ` +
+          failed.map((entry) => entry.error).join("; ").slice(0, 500),
+      );
+    }
+    return completed;
+  } catch (err) {
+    console.warn("[history] sweep: finishing pending inbound erases failed:", err?.message ?? err);
+    return 0;
+  }
+}
+
 /**
  * One sweep.
  *
@@ -389,8 +422,8 @@ async function erasePass(db, { now, trashDays, batchSize, syncManager }) {
  *   erase pass (see erase.js); undefined resolves this process's singleton.
  * @returns {Promise<{redacted: number, coalesced: number,
  *   erased: Array<{itemType: string, itemId: string, versions: number}>,
- *   erasedVersions: number, eraseEvents: number, retention: {value: string, applied: boolean},
- *   trashDays: number, batchSize: number}>}
+ *   erasedVersions: number, eraseEvents: number, pendingErased: number,
+ *   retention: {value: string, applied: boolean}, trashDays: number, batchSize: number}>}
  */
 export async function sweep(db, { now = new Date(), trashDays = DEFAULT_TRASH_DAYS, retention = RETENTION_FOREVER, batchSize = DEFAULT_BATCH, syncManager = undefined } = {}) {
   const batch = normalizeBatch(batchSize);
@@ -402,6 +435,7 @@ export async function sweep(db, { now = new Date(), trashDays = DEFAULT_TRASH_DA
     erased: [],
     erasedVersions: 0,
     eraseEvents: 0,
+    pendingErased: 0,
     // Only `forever` is applied; anything else is a no-op until a thinning
     // schedule is specified (the design §8.9 / the plan's Task 4 note).
     retention: { value: retentionValue, applied: retentionValue === RETENTION_FOREVER },
@@ -416,10 +450,15 @@ export async function sweep(db, { now = new Date(), trashDays = DEFAULT_TRASH_DA
     const redacted = await redactPass(db, batch);
     const coalesced = await coalescePass(db, batch);
     const erasedResult = await erasePass(db, { now, trashDays: days, batchSize: batch, syncManager });
+    // (d) Finish the inbound erases a failed apply left behind. After the erase
+    // pass on purpose: those items are already tombstoned, so nothing here can be
+    // resurrected while the retry runs.
+    const pendingFinished = await pendingErasePass(db, batch);
     return {
       ...base,
       redacted,
       coalesced,
+      pendingErased: pendingFinished,
       erased: erasedResult.erased,
       erasedVersions: erasedResult.versions,
       eraseEvents: erasedResult.emitted,

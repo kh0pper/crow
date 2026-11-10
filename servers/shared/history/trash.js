@@ -135,10 +135,10 @@ export async function listTrash(db, opts = {}) {
   return trashEntries(db, opts);
 }
 
-/** The item's newest version row (id, op), or null when it has none (erased). */
+/** The item's newest version row (id, op, created_at), or null when it has none (erased). */
 async function newestVersion(db, itemType, itemId) {
   const { rows } = await db.execute({
-    sql: `SELECT id, op FROM item_versions WHERE item_type = ? AND item_id = ? ORDER BY id DESC LIMIT 1`,
+    sql: `SELECT id, op, created_at FROM item_versions WHERE item_type = ? AND item_id = ? ORDER BY id DESC LIMIT 1`,
     args: [itemType, itemId],
   });
   return rows[0] ?? null;
@@ -158,9 +158,12 @@ async function newestVersion(db, itemType, itemId) {
  * a delete (it is live), and restoreVersion's own `redacted` / `conflict` /
  * `invalid_context` / `erased`.
  *
- * ORDER MATTERS: the tombstone is checked FIRST. An erased item usually has no
- * versions left, so the honest answer is 'erased', not 'not_found' — and if a
- * version somehow outlived the erase, restoreVersion's own check catches it.
+ * ORDER MATTERS, and the tombstone is VERSIONED. An erased item usually has no
+ * versions left, so when there is nothing to restore and a tombstone exists the
+ * honest answer is 'erased', not 'not_found'. When a version DOES exist, the
+ * question is restoreVersion's: a version created at or before the tombstone's
+ * `erased_at` is the erased item's and is refused there ('erased'), while a
+ * version written after the erase is a new life of that id and restores normally.
  *
  * SYNC: a Trash restore is a NORMAL write, not a local-only one. It emits through
  * the same door an ordinary edit uses (`{ syncManager }`, see api.js's
@@ -184,15 +187,17 @@ export async function restoreFromTrash(db, item = {}, ctx, { syncManager = null 
   if (itemType === null || itemId === null) {
     throw trashError("invalid_request", "restoreFromTrash needs an itemType and an itemId");
   }
-  // Erased is permanent: its tombstone outlives its versions (see the module
-  // comment). Both key shapes a tombstone may be recorded under are checked;
-  // restoreVersion checks again with the version's own snapshot, which is the
-  // only way to know a context section's scope.
-  if (await findErasedKey(db, itemType, erasureKeys(itemType, { itemId }))) {
-    throw trashError("erased", `${itemType}/${itemId} was erased and cannot be restored`);
-  }
+  // Erased is permanent FOR THE ERASED ITEM: its tombstone outlives its versions
+  // (see the module comment). With nothing left to restore, 'erased' is the
+  // honest answer; with a version left, the version's own age decides, and
+  // restoreVersion asks that (it knows the created_at).
   const newest = await newestVersion(db, itemType, itemId);
-  if (!newest) throw trashError("not_found", `${itemType}/${itemId} has no history: nothing to restore`);
+  if (!newest) {
+    if (await findErasedKey(db, itemType, erasureKeys(itemType, { itemId }))) {
+      throw trashError("erased", `${itemType}/${itemId} was erased and cannot be restored`);
+    }
+    throw trashError("not_found", `${itemType}/${itemId} has no history: nothing to restore`);
+  }
   if (newest.op !== "delete") {
     throw trashError("not_in_trash", `${itemType}/${itemId} is live, not in the Trash`);
   }

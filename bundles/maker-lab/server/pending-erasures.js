@@ -35,21 +35,26 @@
  * would make "an item is erased" answerable only by joining a learner's queue.
  *
  * The table is created by migration 0024 and ensured here as well, so an install
- * whose bundle is newer than its crow.db still deletes a learner correctly.
+ * whose bundle is newer than its crow.db still deletes a learner correctly. Its
+ * DDL is NOT copied by hand: it comes from the app root
+ * (servers/shared/history/erase.js PENDING_ERASURES_DDL), the same constant the
+ * migration uses, so the two shapes cannot drift.
+ *
+ * A RETRY FINISHES THE RECORDED WORK, IT DOES NOT REPEAT THE CASCADE. Once the
+ * cascade has committed the profile row is gone, and project_spaces ids are
+ * REUSED: a `DELETE ... WHERE project_id = <learner id>` on a retry could delete
+ * a DIFFERENT learner's sessions, memories and settings. So a retry (and the
+ * sweep) only finishes what the marker recorded — the memory ids read before the
+ * cascade and the project UUID — never the row-keyed cascade again.
  */
 import { appImport } from "./app-root.js";
 
 /**
- * Verbatim copy of scripts/migrations/0024-item-versions.mjs's DDL — a migration
- * may not import a bundle, so the two shapes are kept identical by hand.
+ * THE definition of the marker table, from the app root (see the module comment).
+ * Migration 0024 imports the same constant, so an installed bundle copy and the
+ * migration can never disagree about the shape.
  */
-export const PENDING_ERASURES_DDL = `
-  CREATE TABLE IF NOT EXISTS pending_erasures (
-    learner_id INTEGER PRIMARY KEY,
-    project_uuid TEXT,
-    memory_ids_json TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-  );`;
+export const { PENDING_ERASURES_DDL } = await appImport("servers/shared/history/erase.js");
 
 /** The context the erase runs as: Crow itself, on the learner delete's behalf. */
 const ERASE_CTX = { authorKind: "system", authorId: "maker-lab" };
@@ -151,9 +156,20 @@ async function markerRemains(db, learnerId) {
  * `eraseItems` names at most 1000 items per call by design: chunk rather than let
  * a big learner skip the erase entirely.
  *
+ * NOTHING IS ANNOUNCED. `syncManager: null` says "do not emit" explicitly, and the
+ * erase runs as `system:maker-lab`, an actor erase.js never emits for — a learner's
+ * data does not leave the host (DATA-HANDLING.md), so neither may the fact that it
+ * was erased.
+ *
+ * `projectId` is the LOCAL project_spaces id and is only safe on the FIRST run,
+ * where the caller has just read that row and knows it is this learner's. A retry
+ * (and the sweep) must pass nothing: ids are reused, so `project_ref = <id>` may
+ * belong to a different learner by then, and the recorded project UUID is the only
+ * portable key the erase may use.
+ *
  * @returns {Promise<{versions: number, items: number}>}
  */
-export async function eraseLearnerHistory(db, { learnerId, projectUuid = null, memoryIds = [] }) {
+export async function eraseLearnerHistory(db, { learnerId, projectUuid = null, memoryIds = [], projectId = null }) {
   const { eraseItems, eraseByProject } = await appImport("servers/shared/history/erase.js");
   const ids = [...new Set(memoryIds.map(String))];
   let versions = 0;
@@ -163,17 +179,23 @@ export async function eraseLearnerHistory(db, { learnerId, projectUuid = null, m
       db,
       ids.slice(i, i + ERASE_CHUNK).map((id) => ({ itemType: "memory", itemId: id })),
       ERASE_CTX,
+      { syncManager: null },
     );
     versions += result.versions;
     items += result.erased.length;
   }
-  const projectResult = await eraseByProject(
-    db,
-    { projectUuid, projectId: learnerId },
-    ERASE_CTX,
-  );
-  versions += projectResult.versions;
-  items += projectResult.erased.length;
+  // The project-wide closure only when there is a key that cannot name a stranger's
+  // project: the recorded uuid, or (first run only) the id the caller just read.
+  if (projectUuid || projectId) {
+    const projectResult = await eraseByProject(
+      db,
+      { projectUuid, projectId },
+      ERASE_CTX,
+      { syncManager: null },
+    );
+    versions += projectResult.versions;
+    items += projectResult.erased.length;
+  }
   return { versions, items };
 }
 
@@ -184,14 +206,19 @@ export async function eraseLearnerHistory(db, { learnerId, projectUuid = null, m
  * it for the next retry (or the next sweep tick). A marker that cannot be cleared
  * throws: the caller must not report success.
  *
+ * `projectId` is passed ONLY by the immediate path, where the caller has just
+ * verified that the local project row is this learner's (see eraseLearnerHistory).
+ * A retry passes nothing: only the recorded memory ids and the project UUID.
+ *
  * @returns {Promise<{learnerId: number, versions: number, items: number}>}
  */
-export async function finishPendingErasure(db, pending) {
+export async function finishPendingErasure(db, pending, { projectId = null } = {}) {
   const learnerId = Number(pending.learner_id);
   const { versions, items } = await eraseLearnerHistory(db, {
     learnerId,
     projectUuid: pending.project_uuid ?? null,
     memoryIds: pending.memory_ids ?? [],
+    projectId,
   });
   await db.execute({ sql: "DELETE FROM pending_erasures WHERE learner_id = ?", args: [learnerId] });
   if (await markerRemains(db, learnerId)) {

@@ -94,7 +94,7 @@
  * section and is never part of the INSERT/UPDATE into the table itself.
  */
 import { COVERED, tableColumns } from "./covered.js";
-import { erasureKeys, findErasedKeySync } from "./erase.js";
+import { erasureKeys, findEraseRefusalSync } from "./erase.js";
 import { AUTHOR_KINDS, withWriteContext } from "./write-context.js";
 import { lineDiff } from "../line-diff.js";
 
@@ -653,6 +653,12 @@ function versionIdAfter(run, watermark, itemType, itemId) {
  * redaction pass) and "not found" would be the wrong answer for what was
  * deliberately forgotten.
  *
+ * The refusal is VERSIONED: it applies to a version created at or before the
+ * tombstone's `erased_at`, i.e. to the erased item's own values. A version
+ * written after the erase is a new life of that id or name (the operator's
+ * "a genuinely new item that reuses a name later is accepted") and the tombstone
+ * has nothing to say about it.
+ *
  * Four paths:
  *
  *   the row is live and differs     UPDATE the snapshotted columns that differ.
@@ -730,15 +736,20 @@ export async function restoreVersion(db, { versionId, syncManager = null } = {},
 
       const snapshot = JSON.parse(version.snapshot_json);
       // An ERASED item is never restored (the tombstone is the operator's ruling
-      // that it is gone for good). Checked BEFORE anything is written, and both
-      // key shapes: the section scope this snapshot describes, and the row id the
-      // tombstone may have been recorded under.
-      const erasedKey = findErasedKeySync(
+      // that it is gone for good) — but only while the version being restored is
+      // the ERASED item's: a version created at or before `erased_at` is, and a
+      // version written after the erase belongs to a new life of that id/name and
+      // the tombstone has nothing to say about it (a genuinely new item that
+      // reuses an id later must be restorable). Checked BEFORE anything is
+      // written, and both key shapes: the section scope this snapshot describes,
+      // and the row id the tombstone may have been recorded under.
+      const erasedTombstone = findEraseRefusalSync(
         run,
         version.item_type,
         erasureKeys(version.item_type, { itemId, snapshot }),
+        version.created_at,
       );
-      if (erasedKey !== null) {
+      if (erasedTombstone !== null) {
         throw historyError(
           "erased",
           `${version.item_type}/${itemId} was erased and cannot be restored`,

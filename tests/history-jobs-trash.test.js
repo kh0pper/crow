@@ -696,16 +696,39 @@ test("a restore of an erased item is refused", async () => {
     assert.equal(await memoryRow(db, id), undefined, "nothing came back");
 
     // A version that outlived the erase (a stale reader, a foreign writer) is not a
-    // loophole either: restoreVersion consults the same tombstone.
+    // loophole either — but the refusal is VERSIONED now: it applies to a version
+    // created at or before the tombstone's erased_at, i.e. to the erased item's
+    // OWN values. This version is stamped before the erase, so restoring it would
+    // be the resurrection the tombstone forbids.
+    const erasedAt = (await db.execute({
+      sql: "SELECT erased_at FROM item_erasures WHERE item_type = 'memory' AND item_id = ?",
+      args: [String(id)],
+    })).rows[0].erased_at;
     const stale = await db.execute({
-      sql: "INSERT INTO item_versions (item_type, item_id, op, snapshot_json) VALUES ('memory', ?, 'insert', ?)",
-      args: [String(id), JSON.stringify({ content: "forget me for good" })],
+      sql: "INSERT INTO item_versions (item_type, item_id, op, snapshot_json, created_at) VALUES ('memory', ?, 'insert', ?, ?)",
+      args: [String(id), JSON.stringify({ content: "forget me for good" }), new Date(Date.parse(erasedAt) - 60_000).toISOString()],
     });
     await assert.rejects(
       () => restoreVersion(db, { versionId: Number(stale.lastInsertRowid) }, OWNER),
       (err) => err.code === "erased",
     );
     assert.equal(await memoryRow(db, id), undefined, "still nothing came back");
+
+    // A version written AFTER the erase is a new life of that id — the operator's
+    // "a genuinely new item that reuses a name/id later is accepted" — and the
+    // tombstone has nothing to say about it. (Its timestamp is explicit so the
+    // assertion does not depend on the test running slower than the erase.)
+    const fresh = await db.execute({
+      sql: "INSERT INTO item_versions (item_type, item_id, op, snapshot_json, created_at) VALUES ('memory', ?, 'insert', ?, ?)",
+      args: [
+        String(id),
+        JSON.stringify({ content: "a new memory that reuses the id" }),
+        new Date(Date.parse(erasedAt) + 60_000).toISOString(),
+      ],
+    });
+    const back = await restoreVersion(db, { versionId: Number(fresh.lastInsertRowid) }, OWNER);
+    assert.equal(back.unchanged, false, "the post-erase version restored");
+    assert.equal((await memoryRow(db, id)).content, "a new memory that reuses the id");
   } finally {
     db.close();
     fx.dispose();
@@ -1002,6 +1025,104 @@ test("a learner delete whose erase failed is completed by a retry", async () => 
     assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM pending_erasures", args: [] })).rows[0].n), 0, "and cleared the marker");
     assert.equal(await isErased(db, "memory", String(memory)), true, "the erase left its tombstone");
     assert.equal(await armed(db), 0);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a retry after the project id was reused never touches the new project", async () => {
+  const fx = fixture("hist-learner-reuse-");
+  const db = fx.open();
+  try {
+    const { initMakerLabTables } = await import("../bundles/maker-lab/server/init-tables.js");
+    await initMakerLabTables(db);
+    const { createMakerLabServer } = await import("../bundles/maker-lab/server/server.js");
+
+    const learner = Number((await db.execute({
+      sql: "INSERT INTO project_spaces (slug, name, type, uuid) VALUES ('learner-reuse', 'Kid', 'learner_profile', 'uuid-old-kid')",
+      args: [],
+    })).lastInsertRowid);
+    const memory = await insertMemory(db, OWNER, { content: "the first kid's record", project_id: learner, source: "maker-lab" });
+
+    // The erase door is broken, so the cascade commits and the marker is left.
+    await db.execute(`CREATE TRIGGER test_block_history_erase
+      BEFORE UPDATE ON item_versions_erase
+      WHEN NEW.armed = 1
+      BEGIN SELECT RAISE(ABORT, 'simulated history erase failure'); END`);
+    const client = new Client({ name: "history-jobs-reuse", version: "0" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await createMakerLabServer(db, {}).connect(st);
+    await client.connect(ct);
+    const first = await client.callTool({
+      name: "maker_delete_learner",
+      arguments: { learner_id: learner, confirm: "DELETE" },
+    });
+    assert.equal(first.isError, true, "the failed erase is reported, never \"deleted\"");
+    await db.execute("DROP TRIGGER test_block_history_erase");
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM pending_erasures", args: [] })).rows[0].n), 1);
+
+    // The id is REUSED: a different learner now holds it (with no uuid of its own,
+    // so its items' project_ref is the bare id — the exact collision this guards
+    // against), with their own sessions, memories, settings and a deleted section
+    // sitting in their Trash.
+    await db.execute({
+      sql: "INSERT INTO project_spaces (id, slug, name, type) VALUES (?, 'learner-new', 'New Kid', 'learner_profile')",
+      args: [learner],
+    });
+    const newMemory = await insertMemory(db, OWNER, { content: "the new kid's record", project_id: learner, source: "maker-lab" });
+    const newSection = Number((await withWriteContext(OWNER, () => db.execute({
+      sql: "INSERT INTO crow_context (section_key, section_title, content, project_id) VALUES ('new-kid-note', 'Note', 'their own notes', ?)",
+      args: [learner],
+    }))).lastInsertRowid);
+    await withWriteContext(OWNER, () => db.execute({ sql: "DELETE FROM crow_context WHERE id = ?", args: [newSection] }));
+    assert.equal(await versionCount(db, "context_section", newSection), 2, "the new learner's section is in THEIR Trash");
+    await db.execute({
+      sql: "INSERT INTO maker_sessions (token, learner_id, expires_at) VALUES ('reuse-session', ?, datetime('now','+1 hour'))",
+      args: [learner],
+    });
+    await db.execute({
+      sql: "INSERT INTO maker_learner_settings (learner_id, age) VALUES (?, 9)",
+      args: [learner],
+    });
+
+    // A retry with the same learner_id: it must finish the RECORDED erase only.
+    const second = await client.callTool({
+      name: "maker_delete_learner",
+      arguments: { learner_id: learner, confirm: "DELETE" },
+    });
+    await client.close();
+    const text = (second.content || []).map((c) => c.text || "").join("\n");
+    assert.equal(second.isError, undefined, text);
+    assert.match(text, /"resumed": true/, text);
+
+    // The old learner's history is finished ...
+    assert.equal(await versionCount(db, "memory", memory), 0, "the recorded erase finished");
+    assert.equal(await isErased(db, "memory", String(memory)), true, "with its tombstone");
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM pending_erasures", args: [] })).rows[0].n), 0);
+
+    // ... and the new learner at that id is untouched, row for row.
+    assert.equal(
+      Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM project_spaces WHERE id = ?", args: [learner] })).rows[0].n),
+      1,
+      "the new learner's profile is still here",
+    );
+    assert.ok(await memoryRow(db, newMemory), "the new learner's memory is still here");
+    assert.equal(
+      await versionCount(db, "context_section", newSection),
+      2,
+      "and the deleted section in THEIR Trash keeps its history — the retry never ran the id-keyed cascade",
+    );
+    assert.equal(
+      Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM maker_sessions WHERE learner_id = ?", args: [learner] })).rows[0].n),
+      1,
+      "and their sessions",
+    );
+    assert.equal(
+      Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM maker_learner_settings WHERE learner_id = ?", args: [learner] })).rows[0].n),
+      1,
+      "and their settings",
+    );
   } finally {
     db.close();
     fx.dispose();

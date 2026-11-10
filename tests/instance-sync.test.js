@@ -2059,7 +2059,7 @@ test("E1. an inbound erase deletes the live row, erases its history and records 
   }
 });
 
-test("E2. after an erase, the peer's later insert and update are refused — no row, no history", async () => {
+test("E2. a peer's restore/insert/update that does not post-date the erase is refused — no row, no history", async () => {
   await ensureHistorySchema();
   const INST = "inst-e2";
   const REMOTE = "remote-e2";
@@ -2071,17 +2071,18 @@ test("E2. after an erase, the peer's later insert and update are refused — no 
       row: { id: 9802, erased_at: "2026-11-10T00:00:00.000Z", erased_by: "system:maker-lab" },
       lamport_ts: 10, instance_id: REMOTE,
     }));
-    // A much newer insert (a restore on the peer) and then an edit — both refused
-    // however high their lamports are: an erase is not a last-write-wins race.
+    // The tombstone is VERSIONED (erase_lamport = 10): an insert or an edit whose
+    // lamport does not post-date the erase IS the erased item coming back — a
+    // restore on the peer, a queued edit, a stale copy — and is refused.
     feed.push(signEntry({
       table: "memories", op: "insert",
       row: { id: 9802, category: "general", content: "restored on the peer", lamport_ts: null },
-      lamport_ts: 9_000_000, instance_id: REMOTE,
+      lamport_ts: 9, instance_id: REMOTE,
     }));
     feed.push(signEntry({
       table: "memories", op: "update",
       row: { id: 9802, content: "edited on the peer", lamport_ts: null },
-      lamport_ts: 9_000_001, instance_id: REMOTE,
+      lamport_ts: 10, instance_id: REMOTE,
     }));
     await mgr._processNewEntries(REMOTE, feed);
 
@@ -2098,6 +2099,45 @@ test("E2. after an erase, the peer's later insert and update are refused — no 
     }));
     await mgr._processNewEntries(REMOTE, feed);
     assert.equal(await memoryExists(db, 9803), true, "an unrelated memory from that peer still lands");
+  } finally {
+    db.close();
+  }
+});
+
+test("E5. a peer insert NEWER than the erase is accepted (a genuinely new item reusing the id)", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e5";
+  const REMOTE = "remote-e5";
+  const { mgr, db } = makeManager(INST);
+  try {
+    const feed = makeStubFeed();
+    feed.push(signEntry({
+      table: "memories", op: "erase",
+      row: { id: 9805, source: "chat", erased_at: "2026-11-10T00:00:00.000Z", erased_by: "owner:abcd1234" },
+      lamport_ts: 500, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+    assert.equal((await tombstoneRows(db, "memory", "9805")).length, 1);
+    const bound = (await db.execute({
+      sql: "SELECT erase_lamport FROM item_erasures WHERE item_type = 'memory' AND item_id = '9805'",
+      args: [],
+    })).rows[0].erase_lamport;
+    assert.equal(Number(bound), 500, "the tombstone records the erase event's lamport");
+    assert.equal(await memoryExists(db, 9805), false);
+
+    // A later, ORDINARY memory that happens to take the same id: its lamport is
+    // above the erase's, so it is a new item, not the erased one returning.
+    feed.push(signEntry({
+      table: "memories", op: "insert",
+      row: { id: 9805, category: "general", content: "a brand new memory with the old id", lamport_ts: null },
+      lamport_ts: 501, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+    assert.equal(await memoryExists(db, 9805), true, "a post-erase insert is accepted");
+    assert.equal(
+      (await db.execute({ sql: "SELECT content FROM memories WHERE id = 9805", args: [] })).rows[0].content,
+      "a brand new memory with the old id",
+    );
   } finally {
     db.close();
   }
@@ -2148,16 +2188,17 @@ test("E4. an erase of a context section deletes it by its scope, erases its hist
     const scopeKey = JSON.stringify({ section_key: "e4-section", device_id: null, project_uuid: "uuid-e4" });
     assert.equal((await tombstoneRows(db, "context_section", scopeKey)).length, 1, "tombstoned under its scope");
 
-    // The peer's restore is an insert of the same section: refused by the tombstone,
-    // which is the only check that can catch it (the rowid is gone, and the scope is
-    // what the table is keyed by).
+    // The peer's restore is an insert of the same section whose lamport does not
+    // post-date the erase (60): refused by the tombstone, which is the only check
+    // that can catch it (the rowid is gone, and the scope is what the table is
+    // keyed by).
     feed.push(signEntry({
       table: "crow_context", op: "insert",
       row: {
         section_key: "e4-section", section_title: "Section", content: "restored on the peer",
         sort_order: 1, enabled: 1, device_id: null, project_uuid: "uuid-e4", lamport_ts: null,
       },
-      lamport_ts: 9_500_000, instance_id: REMOTE,
+      lamport_ts: 60, instance_id: REMOTE,
     }));
     await mgr._processNewEntries(REMOTE, feed);
     assert.equal(
@@ -2193,6 +2234,148 @@ test("E3. an erase event on a table whose erasures do not propagate is ignored",
     assert.equal(rows.length, 1, "a table with no erasure rules keeps its row");
     const after = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM item_erasures", args: [] })).rows[0].n);
     assert.equal(after, before, "and nothing is tombstoned for it");
+  } finally {
+    db.close();
+  }
+});
+
+test("E6. a peer erase never destroys a NEWER local edit (it is not an LWW race)", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e6";
+  const REMOTE = "remote-e6";
+  const { mgr, db } = makeManager(INST);
+  try {
+    // The local copy was edited AFTER the peer's erase: lamport 900 against the
+    // erase's 800.
+    await db.execute({
+      sql: "INSERT INTO memories (id, category, content, lamport_ts) VALUES (9806, 'general', 'a newer local edit', 900)",
+      args: [],
+    });
+    assert.equal(await historyCount(db, "memory", 9806), 1, "the local edit is versioned here");
+
+    const feed = makeStubFeed();
+    feed.push(signEntry({
+      table: "memories", op: "erase",
+      row: { id: 9806, source: "chat", erased_at: "2026-11-10T00:00:00.000Z", erased_by: "owner:abcd1234" },
+      lamport_ts: 800, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+
+    assert.equal(await memoryExists(db, 9806), true, "the newer local row is kept");
+    assert.equal(await historyCount(db, "memory", 9806), 1, "and so is its history");
+    assert.equal((await tombstoneRows(db, "memory", "9806")).length, 0, "and nothing is tombstoned");
+    const conflicts = Number((await db.execute({
+      sql: "SELECT COUNT(*) AS n FROM sync_conflicts WHERE table_name = 'memories' AND row_id = '9806'",
+      args: [],
+    })).rows[0].n);
+    assert.equal(conflicts, 0, "a log line only — nothing is recorded for review");
+  } finally {
+    db.close();
+  }
+});
+
+test("E7. a protected local memory is never erased by a peer", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e7";
+  const REMOTE = "remote-e7";
+  const { mgr, db } = makeManager(INST);
+  try {
+    // A Maker Lab learner record lives here under an id the peer also uses. Memory
+    // ids are per-instance AUTOINCREMENT, so the peer's erase must not reach it.
+    await db.execute({
+      sql: "INSERT INTO memories (id, category, content, source, lamport_ts) VALUES (9807, 'general', 'a learner record', 'maker-lab', 5)",
+      args: [],
+    });
+
+    const feed = makeStubFeed();
+    // The wire row carries no `source` (an older sender): it passes the inbound
+    // syncability gate, so the LOCAL protection check is what must refuse it.
+    feed.push(signEntry({
+      table: "memories", op: "erase",
+      row: { id: 9807, erased_at: "2026-11-10T00:00:00.000Z", erased_by: "owner:abcd1234" },
+      lamport_ts: 9_000, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+
+    assert.equal(await memoryExists(db, 9807), true, "the local-only memory is still here");
+    assert.equal(await historyCount(db, "memory", 9807), 1, "and keeps its history");
+    assert.equal((await tombstoneRows(db, "memory", "9807")).length, 0, "nothing was tombstoned for it");
+  } finally {
+    db.close();
+  }
+});
+
+test("E8. a new context section reusing an erased section's name syncs", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e8";
+  const REMOTE = "remote-e8";
+  const { mgr, db } = makeManager(INST);
+  try {
+    const feed = makeStubFeed();
+    feed.push(signEntry({
+      table: "crow_context", op: "erase",
+      row: { section_key: "e8-section", device_id: null, project_uuid: null, erased_at: "2026-11-10T00:00:00.000Z", erased_by: "owner:abcd1234" },
+      lamport_ts: 60, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+    const scopeKey = JSON.stringify({ section_key: "e8-section", device_id: null, project_uuid: null });
+    assert.equal((await tombstoneRows(db, "context_section", scopeKey)).length, 1, "the section is tombstoned by its scope");
+
+    // A section with the same name, written AFTER the erase: a new item, accepted.
+    feed.push(signEntry({
+      table: "crow_context", op: "insert",
+      row: {
+        section_key: "e8-section", section_title: "A new section", content: "new body",
+        sort_order: 1, enabled: 1, device_id: null, lamport_ts: null,
+      },
+      lamport_ts: 61, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+
+    const { rows } = await db.execute({
+      sql: "SELECT content FROM crow_context WHERE section_key = 'e8-section'",
+      args: [],
+    });
+    assert.equal(rows.length, 1, "the post-erase section syncs in");
+    assert.equal(rows[0].content, "new body");
+  } finally {
+    db.close();
+  }
+});
+
+test("E9. a summary memory's erase is routed by its source, never by the sender's id", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e9";
+  const REMOTE = "remote-e9";
+  const { mgr, db } = makeManager(INST);
+  try {
+    const source = "session-summary:remote-e9:thread-1";
+    await db.execute({
+      sql: "INSERT INTO memories (id, category, content, source) VALUES (9809, 'general', 'the thread summary', ?)",
+      args: [source],
+    });
+    // An unrelated local memory holding the id the sender happens to use.
+    await db.execute({
+      sql: "INSERT INTO memories (id, category, content) VALUES (9912, 'general', 'must survive')",
+      args: [],
+    });
+
+    const feed = makeStubFeed();
+    feed.push(signEntry({
+      table: "memories", op: "erase",
+      row: { id: 9912, source, erased_at: "2026-11-10T00:00:00.000Z", erased_by: "owner:abcd1234" },
+      lamport_ts: 900, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+
+    assert.equal(await memoryExists(db, 9809), false, "the summary the source names is erased");
+    assert.equal(await memoryExists(db, 9912), true, "the id on the wire is the sender's — that row is untouched");
+    assert.equal((await tombstoneRows(db, "memory", "9912")).length, 0, "and it is not tombstoned");
+    assert.equal(
+      (await tombstoneRows(db, "memory", `summary:${source}`)).length,
+      1,
+      "the tombstone is keyed by the summary's source",
+    );
   } finally {
     db.close();
   }

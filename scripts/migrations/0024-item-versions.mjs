@@ -24,9 +24,15 @@
 //   - `pending_erasures` (a Maker Lab learner delete's durable "finish this"
 //     marker: the cascade and the marker commit together, so a failure in the
 //     following history erase leaves a marker a retry — with the profile row
-//     already gone — or the 5-minute sweep can complete). The bundle creates the
-//     same table itself (`CREATE TABLE IF NOT EXISTS`) so an install older than
-//     this migration still works; both shapes are identical on purpose.
+//     already gone — or the 5-minute sweep can complete), and
+//   - `pending_remote_erasures` (an INBOUND erase that could not be applied in one
+//     transaction: its tombstone is already written, and this names the rest of
+//     the work for the 5-minute history sweep).
+//
+// Both of those, and `item_erasures` above, are DEFINED in
+// servers/shared/history/erase.js and imported from there — the Maker Lab bundle
+// imports the same PENDING_ERASURES_DDL through the app root, so the migration and
+// an installed bundle copy cannot drift.
 //
 // Additive only, no SCHEMA_GENERATION bump (init-db.js is untouched): the
 // registry is the rail for schema a running instance can pick up on boot.
@@ -45,9 +51,10 @@
 // earlier run safe to repeat.
 //
 // Idempotent in its own right, because a database restored from backup can lose
-// its schema_migrations row: the table, the indexes, the control table, the two
-// tables added beside it (item_erasures, pending_erasures) and the triggers are
-// all IF NOT EXISTS, and the baseline is per item, so a second run writes nothing.
+// its schema_migrations row: the table, the indexes, the control table, the three
+// tables added beside it (item_erasures, pending_erasures,
+// pending_remote_erasures) and the triggers are all IF NOT EXISTS, and the baseline
+// is per item, so a second run writes nothing.
 //
 // Tolerant of absent tables: memories / blog_posts / crow_context are created by
 // init-db.js, but a store can be missing one (a partial restore, or a bare DB on
@@ -82,25 +89,16 @@ import {
   tableColumns,
   triggerSql,
 } from "../../servers/shared/history/covered.js";
-import { ITEM_ERASURES_DDL } from "../../servers/shared/history/erase.js";
+import { ITEM_ERASURES_DDL, PENDING_ERASURES_DDL, PENDING_REMOTE_ERASURES_DDL } from "../../servers/shared/history/erase.js";
 
 export const id = "0024-item-versions";
 
-/**
- * The Maker Lab learner-delete marker. A local table (never synced): it names a
- * learner whose cascade has committed but whose history erase has not finished,
- * with the memory ids read just before the cascade so the erase can be re-run
- * after the profile row is gone. Duplicated verbatim in
- * bundles/maker-lab/server/pending-erasures.js — the bundle must still work on an
- * install that has not run this migration.
- */
-export const PENDING_ERASURES_DDL = `
-  CREATE TABLE IF NOT EXISTS pending_erasures (
-    learner_id INTEGER PRIMARY KEY,
-    project_uuid TEXT,
-    memory_ids_json TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-  );`;
+// The Maker Lab learner-delete marker and the inbound-erase work queue are
+// DEFINED in servers/shared/history/erase.js and imported from there (the bundle's
+// pending-erasures.js imports the same constant through the app root), so the
+// migration and the bundle copy can never drift into a shape a retry cannot read.
+// Re-exported because it always was part of this migration's surface.
+export { PENDING_ERASURES_DDL };
 
 // rollbackSafe: a new table, its indexes, guards and triggers on existing
 // tables; older code neither reads nor writes any of them.
@@ -194,11 +192,23 @@ export function run({ dbPath, log = () => {} }) {
   try {
     db.exec(ITEM_VERSIONS_DDL);
     // The tombstones an erase leaves behind (and the learner-delete marker the
-    // Maker Lab bundle finishes from). Additive and IF NOT EXISTS, so a store
-    // that already ran an earlier build of this migration picks them up here.
+    // Maker Lab bundle finishes from, and the queue a failed inbound erase leaves
+    // for the sweep). Additive and IF NOT EXISTS, so a store that already ran an
+    // earlier build of this migration picks them up here.
     db.exec(ITEM_ERASURES_DDL);
     db.exec(PENDING_ERASURES_DDL);
-    log("  item_erasures + pending_erasures: ensured");
+    db.exec(PENDING_REMOTE_ERASURES_DDL);
+    log("  item_erasures + pending_erasures + pending_remote_erasures: ensured");
+
+    // The same class of repair as project_ref below: a dev instance that ran an
+    // earlier build of this unreleased migration has item_erasures without
+    // erase_lamport (the erase event's lamport — the bound below which a peer's
+    // write is the erased item coming back), and CREATE TABLE IF NOT EXISTS will
+    // not add the column.
+    if (tableExists(db, "item_erasures") && !columnsOf(db, "item_erasures").has("erase_lamport")) {
+      db.exec("ALTER TABLE item_erasures ADD COLUMN erase_lamport INTEGER");
+      log("  item_erasures: added erase_lamport (an earlier build predated it)");
+    }
 
     // A dev instance that ran an earlier build of this same (unreleased)
     // migration already has the table without project_ref, and CREATE TABLE IF
