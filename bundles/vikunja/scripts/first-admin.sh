@@ -100,12 +100,26 @@ users_state() {
   if ! raw="$(timeout 20 docker exec "$CONTAINER" "$VIKUNJA_BIN" user list 2>/dev/null)"; then
     printf '%s' "UNREADABLE"; return 0
   fi
-  if ! printf '%s\n' "$raw" | grep -E '^(│|\|)' | grep -q -i 'USERNAME'; then
+  # Read the whole list before deciding (no early-exit grep in a pipe, so pipefail can't misfire).
+  local header
+  header="$(printf '%s\n' "$raw" | grep -E '^(│|\|)' | grep -i -c 'USERNAME' || true)"
+  if [ "${header:-0}" -lt 1 ]; then
     printf '%s' "UNREADABLE"; return 0
   fi
   rows="$(printf '%s\n' "$raw" | grep -E '^(│|\|)[[:space:]]*[0-9]+[[:space:]]*(│|\|)' || true)"
   if [ "${1:-}" = "names" ]; then
-    printf '%s\n' "$rows" | awk -F'│|\\|' 'NF>2 { gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 != "") print $3 }'
+    # Second cell of each row (ID │ USERNAME │ …), trimmed, in plain bash.
+    local line cell
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      line="${line//│/|}"
+      line="${line#|}"
+      cell="${line#*|}"
+      cell="${cell%%|*}"
+      cell="${cell#"${cell%%[![:space:]]*}"}"
+      cell="${cell%"${cell##*[![:space:]]}"}"
+      [ -n "$cell" ] && printf '%s\n' "$cell"
+    done <<< "$rows"
     return 0
   fi
   if [ -n "$rows" ]; then printf '%s' "PRESENT"; else printf '%s' "NONE"; fi
