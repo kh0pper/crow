@@ -1000,6 +1000,8 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
       return { oldVersion, newVersion: oldVersion, touched: [...touched, "mcp-addons.json unreadable — will retry"] };
     }
     if (!addons[id]) {
+      // No provenance: this boot/update path registers defaults on behalf of no request
+      // (`owner` stays false), so the entry gets no `ownerSet`.
       addons[id] = mcpAddonEntryFor(repoManifest, null, { bundleDir: destDir });
       writeJsonSafe(MCP_ADDONS_PATH, addons);
       touched.push("mcp-addons entry (restart to load)");
@@ -1413,7 +1415,7 @@ function generatedPlainForMcp(manifest, generated) {
   return Object.fromEntries(Object.entries(generated || {}).filter(([k]) => !hashed.has(k)));
 }
 
-export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null, edited = null, generatedKeys = [] } = {}) {
+export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null, edited = null, generatedKeys = [], owner = false } = {}) {
   const env = {};
   const fromRequest = new Set();
   for (const key of manifest?.server?.envKeys || []) {
@@ -1421,9 +1423,14 @@ export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null, ed
   }
   for (const v of manifest?.env_vars || []) if (v.default && !env[v.name]) env[v.name] = v.default;
   // Which values the OWNER entered (never a manifest default): the form's edited list,
-  // plus a requested value that differs from its manifest default (a generated key is
-  // minted by Crow, not typed). The wall's host/bind rules read only owner-set values.
-  const ownerSet = ownerSetFor({ env, fromRequest, edited, generatedKeys, manifest, priorEnv: null, bundleId: null });
+  // plus a requested value that differs from its manifest default and from every default a
+  // version of the manifest has shipped (a generated key is minted by Crow, not typed).
+  // `owner` is the caller's proof that this write is the local owner's own request — a
+  // caller that passes nothing gets no provenance at all (fail closed), and the wall's
+  // host/bind rules read only owner-set values.
+  const ownerSet = owner === true
+    ? ownerSetFor({ env, fromRequest, edited, generatedKeys, manifest, priorEnv: null, bundleId: null })
+    : [];
   // A launcher outside the root-owned system dirs (a ./run.sh in the bundle)
   // is started only when pinned; the operator's install/update click is the
   // consent for in-bundle code, so the flow that writes the entry pins it.
@@ -1447,23 +1454,60 @@ function pastDefaultsForEntry(bundleId) {
 }
 
 /**
+ * The legacy seed for an entry written before `ownerSet` existed. Without a manifest object
+ * there is nothing to judge a value against, so it seeds nothing (fail closed).
+ */
+function legacyOwnerSet(priorEnv, manifest, pastDefaults) {
+  if (!manifest || typeof manifest !== "object") return [];
+  return legacyOwnerKeys(priorEnv, manifest, pastDefaults);
+}
+
+/**
+ * Whether ONE env value was typed by the owner, or merely written by the server.
+ *
+ * - a key the server filled (`injected`: a generated secret, a `previous_key` slot the
+ *   Configure route carried over) is never owner-typed;
+ * - a key in the form's `edited` list is owner-typed;
+ * - anything else is the form re-sending a filled field, so it counts only when the
+ *   manifest is a real object AND declares a default for the key AND this value differs
+ *   from that default AND from every default any version has shipped. A manifest
+ *   default is not a choice; neither is the absence of one (`manifest === null` can never
+ *   make a key owner-typed).
+ */
+function isOwnerTyped(key, value, { editedSet = new Set(), manifest = null, pastDefaults = {}, injected = new Set() } = {}) {
+  if (injected.has(key)) return false;
+  if (editedSet.has(key)) return true;
+  if (!manifest || typeof manifest !== "object") return false;
+  const defaults = new Map((manifest?.env_vars || [])
+    .filter((v) => v && typeof v.name === "string" && v.default !== undefined && v.default !== null)
+    .map((v) => [v.name, String(v.default)]));
+  if (!defaults.has(key)) return false;
+  const text = String(value);
+  if (defaults.get(key) === text) return false;
+  const past = pastDefaults && Object.prototype.hasOwnProperty.call(pastDefaults, key) ? pastDefaults[key] : null;
+  const known = Array.isArray(past) ? past.map(String) : [];
+  return !known.includes(text);
+}
+
+/**
  * The sorted, unique `ownerSet` for an entry being written.
  *
  * `fromRequest` holds the keys that came from the install request (never a manifest
  * default). `priorEnv` seeds a LEGACY entry (one with no `ownerSet`): a value that equals
  * no default the manifest has ever shipped was owner-entered.
  */
-function ownerSetFor({ env, fromRequest = new Set(), edited = null, generatedKeys = [], manifest, priorEnv, bundleId }) {
+function ownerSetFor({ env, fromRequest = new Set(), edited = null, generatedKeys = [], injected = [], manifest, priorEnv, bundleId }) {
   const editedSet = new Set(Array.isArray(edited) ? edited : []);
-  const generatedSet = new Set(Array.isArray(generatedKeys) ? generatedKeys : []);
-  const defaults = new Map((manifest?.env_vars || [])
-    .filter((v) => v && typeof v.name === "string" && v.default !== undefined && v.default !== null)
-    .map((v) => [v.name, String(v.default)]));
-  const owner = new Set(priorEnv ? legacyOwnerKeys(priorEnv, manifest, pastDefaultsForEntry(bundleId)) : []);
+  const injectedSet = new Set([
+    ...(Array.isArray(generatedKeys) ? generatedKeys : []),
+    ...(Array.isArray(injected) ? injected : []),
+  ]);
+  const pastDefaults = pastDefaultsForEntry(bundleId);
+  const owner = new Set(priorEnv ? legacyOwnerSet(priorEnv, manifest, pastDefaults) : []);
   for (const key of Object.keys(env || {})) {
-    if (editedSet.has(key)) { owner.add(key); continue; }
-    if (!fromRequest.has(key) || generatedSet.has(key)) continue;
-    if (!defaults.has(key) || String(env[key]) !== defaults.get(key)) owner.add(key);
+    // A manifest default that reached `env` on its own is not the owner's.
+    if (!fromRequest.has(key)) continue;
+    if (isOwnerTyped(key, env[key], { editedSet, manifest, pastDefaults, injected: injectedSet })) owner.add(key);
   }
   return [...owner].sort();
 }
@@ -1491,7 +1535,7 @@ function mcpForwardableKeys(manifest) {
  *
  * @returns {boolean} true if the add-on registers an MCP server and the file was written
  */
-export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null, { edited = null } = {}) {
+export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null, { edited = null, injected = [], owner = false } = {}) {
   const mcpAddons = readJsonSafe(path, {});
   const entry = mcpAddons[bundleId];
   if (!entry) return false; // not an MCP add-on — nothing to configure
@@ -1507,21 +1551,27 @@ export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, m
     if (v && (!allowed || allowed(k))) { merged[k] = v; written.push(k); }
   }
   entry.env = merged;
-  // Provenance for the wall's host/bind rules: the keys this save actually wrote that
-  // are not just the manifest default. A legacy entry is seeded from the past-defaults rule.
+  // Provenance for the wall's host/bind rules: only a value the OWNER typed counts, and only
+  // when this save is the local owner's own request (`owner`) — anyone else's write proves
+  // nothing, so it neither adds a key nor leaves a stale claim on one it rewrote. A legacy
+  // entry is seeded from the past-defaults rule.
   if (written.length > 0) {
+    const isOwner = owner === true;
     const editedSet = new Set(Array.isArray(edited) ? edited : []);
-    const defaults = new Map((manifest?.env_vars || [])
-      .filter((v) => v && typeof v.name === "string" && v.default !== undefined && v.default !== null)
-      .map((v) => [v.name, String(v.default)]));
-    const owner = new Set(Array.isArray(entry.ownerSet)
-      ? entry.ownerSet
-      : legacyOwnerKeys(priorEnv, manifest, pastDefaultsForEntry(bundleId)));
+    const injectedSet = new Set(Array.isArray(injected) ? injected : []);
+    const pastDefaults = pastDefaultsForEntry(bundleId);
+    const next = new Set(isOwner
+      ? (Array.isArray(entry.ownerSet) ? entry.ownerSet : legacyOwnerSet(priorEnv, manifest, pastDefaults))
+      : (Array.isArray(entry.ownerSet) ? entry.ownerSet : []));
     for (const k of written) {
-      if (manifest === null || editedSet.has(k) || !defaults.has(k) || String(merged[k]) !== defaults.get(k)) owner.add(k);
+      // A non-owner save drops the claim only on a value it CHANGED: the form re-sends every
+      // filled field, and an unchanged value is still the one the owner typed.
+      if (!isOwner) { if (String(priorEnv[k] ?? "") !== String(merged[k])) next.delete(k); continue; }
+      if (isOwnerTyped(k, merged[k], { editedSet, manifest, pastDefaults, injected: injectedSet })) next.add(k);
     }
-    const sorted = [...owner].sort();
+    const sorted = [...next].sort();
     if (sorted.length > 0) entry.ownerSet = sorted;
+    else delete entry.ownerSet;
   }
   mcpAddons[bundleId] = entry;
   writeJsonSafe(path, mcpAddons);
@@ -3046,7 +3096,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // locked". The MCP child instead inherits the SPAWNING gateway's
         // CROW_DB_PATH via process.env at launch (its own default otherwise),
         // so each gateway's children always use that gateway's DB.
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: editedEnv, generatedKeys: Object.keys(generated || {}) });
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: ownerEnv !== null ? editedEnv : null, owner: ownerEnv !== null, generatedKeys: Object.keys(generated || {}) });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
         needsRestart = true;
@@ -3085,7 +3135,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // Before the entry is written (see the bundle branch above).
         ensureAddonDataDir(bundleId, manifest);
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: editedEnv, generatedKeys: Object.keys(generated || {}) });
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: ownerEnv !== null ? editedEnv : null, owner: ownerEnv !== null, generatedKeys: Object.keys(generated || {}) });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
       }
@@ -4463,6 +4513,9 @@ export default function bundlesRouter() {
       // the slot only still matters if it did not start since the last change — the
       // warning (key names only) says so.
       const keyWarnings = [];
+      // The `previous_key` slots THIS request made the server fill: those values are the
+      // server's, not the owner's, so they are never recorded as owner-entered.
+      const injectedSlots = [];
       {
         const entryEnv = readJsonSafe(MCP_ADDONS_PATH, {})?.[bundle_id]?.env || {};
         for (const v of getInstalledFirstManifest(bundle_id)?.env_vars || []) {
@@ -4473,6 +4526,7 @@ export default function bundlesRouter() {
           if (!old || old === next) continue;
           const kept = entryEnv[prev] || process.env[prev] || existing[prev] || "";
           env_vars[prev] = old;
+          injectedSlots.push(prev);
           if (kept && kept !== old && kept !== next) {
             keyWarnings.push(`${prev} now holds the key you just replaced (it held an older one). Data still on that older key, only if the extension did not restart since the last change, opens only if you enter it in ${prev}.`);
           }
@@ -4533,8 +4587,14 @@ export default function bundlesRouter() {
         ? await recordKeychainForInstall({ bundleId: bundle_id, manifest: getInstalledFirstManifest(bundle_id), env: existing, minted: {}, keychainReq, log: (m) => kcLog.push(m) })
         : null;
 
-      // Also configure the MCP child, which reads mcp-addons.json — not this .env.
-      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars, MCP_ADDONS_PATH, getInstalledFirstManifest(bundle_id), { edited: changedKeys });
+      // Also configure the MCP child, which reads mcp-addons.json — not this .env. `owner` is
+      // the check made at the top of this route: only the local owner's own request leaves
+      // provenance behind (a peer's or a token's save proves nothing about who typed what).
+      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars, MCP_ADDONS_PATH, getInstalledFirstManifest(bundle_id), {
+        edited: owner ? changedKeys : [],
+        injected: injectedSlots,
+        owner,
+      });
 
       // And the gateway's own env, exactly as install does for docker bundles:
       // gateway-side panel routes read their config from process.env (the phone
