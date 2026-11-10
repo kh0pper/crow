@@ -34,10 +34,14 @@ browser-based tool.
 
 ## Security note
 
-Stirling PDF 2.x ships with a login form enabled by default. The first
-admin account is created through the web UI on first visit. The container
-is bound to `127.0.0.1:8092` only — if the user wants to publish it on a
-domain, they should install the caddy bundle and route through it.
+Stirling PDF 2.x ships with its login on by default and the account
+`admin` / `stirling`. Crow replaces that password when the bundle is
+installed and keeps the new one in Settings → Passwords; for an install
+made before this version, use "Set it up for me" on the Extensions card.
+Never tell the user to sign in with Stirling's shipped demo password, and
+never have them try it repeatedly — failed sign-ins lock the account. The
+container is bound to `127.0.0.1:8092` only — if the user wants to publish
+it on a domain, they should install the caddy bundle and route through it.
 
 ## Typical interaction
 

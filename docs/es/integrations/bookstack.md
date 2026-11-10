@@ -38,14 +38,18 @@ Reinicia el bundle para que los cambios surtan efecto:
 
 > "Crow, reinicia el bundle de BookStack"
 
-BookStack estará disponible en `http://tu-servidor:6875` para la configuración inicial. Las credenciales predeterminadas son `admin@admin.com` / `password`. Cámbialas inmediatamente después del primer inicio de sesión.
+BookStack estará disponible en `http://tu-servidor:6875`. Crow le da a su cuenta de administración (una dirección de correo) una contraseña que genera y guarda ese inicio de sesión en **Ajustes → Contraseñas**.
 
 ::: warning Mapeo de puertos
 El puerto predeterminado de BookStack (80) se remapea al **6875** para evitar conflictos con otros servicios.
 :::
 
-::: warning Credenciales predeterminadas
-Cambia el login predeterminado (`admin@admin.com` / `password`) inmediatamente después del primer inicio de sesión.
+::: warning Contraseña de administración
+BookStack incluye un inicio de sesión de demostración (`admin@admin.com` / `password`). Crow reemplaza esa contraseña durante la instalación, y el nuevo inicio de sesión (una dirección de correo) está en **Ajustes → Contraseñas**. Una instalación anterior a la versión 1.0.4 del bundle conserva el inicio de sesión de demostración hasta que pulses **Configúralo por mí** en la tarjeta de Extensiones (o guardes allí tu propio inicio de sesión).
+:::
+
+::: warning Clave de la aplicación
+Crow genera la `APP_KEY` de Laravel de BookStack durante la instalación y la escribe en `BOOKSTACK_APP_KEY`; una instalación que fijó esa clave a mano en el `docker-compose.yml` del bundle debe poner ese mismo valor en los ajustes de la extensión como **BOOKSTACK_APP_KEY** antes de actualizar, porque una actualización reemplaza el archivo compose.
 :::
 
 ### Opción B: Conectar a BookStack existente
@@ -104,6 +108,9 @@ services:
       DB_USER: bookstack
       DB_PASS: ${BOOKSTACK_DB_PASSWORD}
       DB_DATABASE: bookstack
+      # Laravel refuses to start without an application key.
+      APP_KEY: ${BOOKSTACK_APP_KEY}
+      APP_URL: http://tu-servidor:6875
     depends_on:
       - bookstack-db
     restart: unless-stopped

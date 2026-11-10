@@ -1,7 +1,7 @@
 {
   "id": "shiori",
   "name": "Shiori",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Simple bookmark manager — save web pages with cached content for offline reading",
   "type": "bundle",
   "author": "Crow",
@@ -13,14 +13,21 @@
   "panel": "panel/shiori.js",
   "panelRoutes": "panel/routes.js",
   "skills": ["skills/shiori.md"],
-  "requires": { "env": ["SHIORI_USERNAME", "SHIORI_PASSWORD"], "min_ram_mb": 128, "min_disk_mb": 200 },
+  "requires": { "env": ["SHIORI_USERNAME"], "min_ram_mb": 128, "min_disk_mb": 200 },
   "env_vars": [
     { "name": "SHIORI_URL", "description": "Shiori server URL", "default": "http://localhost:8086", "required": true },
     { "name": "SHIORI_USERNAME", "description": "Shiori login username", "default": "shiori", "required": true },
-    { "name": "SHIORI_PASSWORD", "description": "Shiori login password", "required": true, "secret": true }
+    { "name": "SHIORI_PASSWORD", "description": "Shiori login password. Crow generates it at install and keeps it in Settings → Passwords.", "required": false, "secret": true }
   ],
   "ports": [8086],
   "webUI": { "port": 8086, "path": "/", "label": "Shiori" },
-  "firstAdmin": { "mode": "default-login", "user": "shiori", "note": "The default password is in this app's documentation; change it now." },
-  "notes": "Self-host via Docker or connect to an existing Shiori instance. Default credentials are shiori/gopher — change them after first login."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 240 },
+    "user": "shiori",
+    "secretEnv": "SHIORI_PASSWORD",
+    "userEnv": "SHIORI_USERNAME"
+  },
+  "notes": "Crow replaces Shiori's shipped login with a password it generates and saves in Settings → Passwords. Self-host via Docker or connect to an existing Shiori instance."
 }

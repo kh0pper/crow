@@ -1,7 +1,7 @@
 {
   "id": "calibre-web",
   "name": "Calibre-Web",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Web-based ebook reader and library manager for Calibre",
   "type": "bundle",
   "author": "Crow",
@@ -13,15 +13,22 @@
   "panel": "panel/calibre-web.js",
   "panelRoutes": "panel/routes.js",
   "skills": ["skills/calibre-web.md"],
-  "requires": { "env": ["CALIBRE_WEB_USERNAME", "CALIBRE_WEB_PASSWORD", "CALIBRE_WEB_DB_PATH"], "min_ram_mb": 256, "min_disk_mb": 200 },
+  "requires": { "env": ["CALIBRE_WEB_USERNAME", "CALIBRE_WEB_DB_PATH"], "min_ram_mb": 256, "min_disk_mb": 200 },
   "env_vars": [
     { "name": "CALIBRE_WEB_URL", "description": "Calibre-Web server URL", "default": "http://localhost:8083", "required": true },
     { "name": "CALIBRE_WEB_USERNAME", "description": "Calibre-Web user for OPDS Basic auth", "required": true },
-    { "name": "CALIBRE_WEB_PASSWORD", "description": "Password for that Calibre-Web user", "required": true, "secret": true },
+    { "name": "CALIBRE_WEB_PASSWORD", "description": "Password for that Calibre-Web user. Crow generates it at install and keeps it in Settings → Passwords.", "required": false, "secret": true },
     { "name": "CALIBRE_WEB_DB_PATH", "description": "Host path to Calibre metadata.db directory", "required": true }
   ],
   "ports": [8083],
   "webUI": { "port": 8083, "path": "/", "label": "Calibre-Web" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "Self-host via Docker (set CALIBRE_WEB_DB_PATH to directory containing metadata.db) or connect to existing Calibre-Web instance (set CALIBRE_WEB_URL + CALIBRE_WEB_USERNAME/CALIBRE_WEB_PASSWORD — OPDS Basic auth; stock Calibre-Web has no API keys)."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 120 },
+    "user": "admin",
+    "secretEnv": "CALIBRE_WEB_PASSWORD",
+    "userEnv": "CALIBRE_WEB_USERNAME"
+  },
+  "notes": "Crow replaces Calibre-Web's shipped admin password with one it generates and saves in Settings → Passwords. Self-host via Docker (set CALIBRE_WEB_DB_PATH to directory containing metadata.db) or connect to existing Calibre-Web instance (set CALIBRE_WEB_URL + CALIBRE_WEB_USERNAME/CALIBRE_WEB_PASSWORD — OPDS Basic auth; stock Calibre-Web has no API keys)."
 }

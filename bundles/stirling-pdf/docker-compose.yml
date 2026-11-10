@@ -4,8 +4,11 @@
 # in-browser via its web UI. This bundle simply runs the container and links
 # to it from a Crow panel iframe.
 #
-# Stirling PDF 2.x includes a login form by default. The first admin user
-# is created through the web UI on first visit. We bind strictly to
+# Stirling PDF 2.x has its login on by default and ships the account
+# admin / stirling; Crow replaces that password at install and keeps the
+# new one in Settings → Passwords (the bundle's first-admin setup script).
+# A failed sign-in counts towards the account's lockout, so do not sign in
+# repeatedly with the shipped password by hand. We bind strictly to
 # 127.0.0.1 so only the local host can reach it; if you want to publish
 # Stirling on a public domain, route it through the caddy bundle.
 

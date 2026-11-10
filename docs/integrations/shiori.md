@@ -27,14 +27,14 @@ Install Shiori as a Crow bundle. This runs Shiori in Docker alongside your Crow 
 
 Or install from the **Extensions** panel in the Crow's Nest.
 
-Shiori will be available at `http://your-server:8086` for initial setup. The default credentials are `shiori` / `gopher`. Change the password immediately after first login.
+Shiori will be available at `http://your-server:8086`. Crow gives its admin account a password it generates and keeps that login in **Settings → Passwords**.
 
 ::: warning Port mapping
 Shiori's default port (8080) is remapped to **8086** to avoid conflicts with other services.
 :::
 
-::: warning Default credentials
-Change the default password (`shiori` / `gopher`) immediately after first login.
+::: warning Admin password
+Shiori ships a demo login (`shiori` / `gopher`). Crow replaces that password as part of the install, and the new login is in **Settings → Passwords**. An install made before bundle version 1.0.3 keeps the demo login until you press **Set it up for me** on the Extensions card (or save your own login there).
 :::
 
 ### Option B: Connect to existing Shiori
@@ -88,7 +88,7 @@ volumes:
 
 ### Login failed
 
-Check that the username and password are correct. If you are using the default credentials, they are `shiori` / `gopher`. If you changed the password in the Shiori web UI, update `SHIORI_PASSWORD` in your `.env` file.
+Check that the username and password are correct. The Crow bundle's login is the one Crow saved in **Settings → Passwords** when it installed Shiori. If you changed the password in the Shiori web UI, update `SHIORI_PASSWORD` in your `.env` file.
 
 ### "Connection refused" or timeout
 

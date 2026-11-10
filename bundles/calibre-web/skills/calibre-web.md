@@ -66,6 +66,7 @@ tools:
 - Calibre-Web provides an in-browser reader at `/read/BOOK_ID` for EPUB files
 - Download URLs require authentication (the API key handles this)
 - Shelves are user-created collections; suggest creating shelves for organization
+- Crow replaces Calibre-Web's shipped admin password at install and keeps it in Settings → Passwords; for an install made before this version, use "Set it up for me" on the Extensions card. Never tell the user to sign in with Calibre-Web's shipped demo password
 - Store the user's reading preferences and current books in memory
 - The web reader URL is the most convenient option for immediate reading
 - OPDS feeds provide the underlying data; some features depend on Calibre-Web's version and configuration

@@ -38,14 +38,18 @@ Restart the bundle for changes to take effect:
 
 > "Crow, restart the BookStack bundle"
 
-BookStack will be available at `http://your-server:6875` for initial setup. The default credentials are `admin@admin.com` / `password`. Change these immediately after first login.
+BookStack will be available at `http://your-server:6875`. Crow gives its admin account (an email address) a password it generates and keeps that login in **Settings → Passwords**.
 
 ::: warning Port mapping
 BookStack's default port (80) is remapped to **6875** to avoid conflicts with other services.
 :::
 
-::: warning Default credentials
-Change the default login (`admin@admin.com` / `password`) immediately after first login.
+::: warning Admin password
+BookStack ships a demo login (`admin@admin.com` / `password`). Crow replaces that password as part of the install, and the new login (an email address) is in **Settings → Passwords**. An install made before bundle version 1.0.4 keeps the demo login until you press **Set it up for me** on the Extensions card (or save your own login there).
+:::
+
+::: warning App key
+Crow generates BookStack's Laravel `APP_KEY` at install and writes it to `BOOKSTACK_APP_KEY`; an install that set that key by hand in the bundle's `docker-compose.yml` must put that same value in the extension's settings as **BOOKSTACK_APP_KEY** before updating, because an update replaces the compose file.
 :::
 
 ### Option B: Connect to existing BookStack
@@ -104,6 +108,9 @@ services:
       DB_USER: bookstack
       DB_PASS: ${BOOKSTACK_DB_PASSWORD}
       DB_DATABASE: bookstack
+      # Laravel refuses to start without an application key.
+      APP_KEY: ${BOOKSTACK_APP_KEY}
+      APP_URL: http://your-server:6875
     depends_on:
       - bookstack-db
     restart: unless-stopped
