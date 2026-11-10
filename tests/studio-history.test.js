@@ -15,10 +15,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { encodeDocState } from "../bundles/studio/server/doc.js";
-import { checkInvariants, newSongDoc, snapshot } from "../bundles/studio/server/doc.js";
+import {
+  checkInvariants,
+  clipMap,
+  insertMap,
+  newSongDoc,
+  objectMap,
+  sendKey,
+  sendMap,
+  snapshot,
+  trackList,
+} from "../bundles/studio/server/doc.js";
 import { StudioError, runCommand } from "../bundles/studio/server/commands/registry.js";
 import "../bundles/studio/server/commands/core.js";
 import "../bundles/studio/server/commands/arrangement.js";
+import "../bundles/studio/server/commands/mixer.js";
 import {
   OBJECT_GONE,
   REDO_COMMAND,
@@ -868,6 +879,127 @@ test("an unrelated undo is not blocked by a violation already in the song", (t) 
   s.doc.transact(() => applyPlan(s.doc, plan));
   assert.equal(snapshot(s.doc).tracks[0].gain_db, 0);
   assert.match(checkInvariants(s.doc).join(" "), /past its/);
+});
+
+test("an undo that lowers an over-limit count is not blocked", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  const effects = [];
+  for (let index = 1; index <= 8; index += 1) {
+    effects.push(s.run("insert.add", { id: `i${index}`, owner: "master", kind: "eq" }));
+  }
+
+  // Two more effects of one chain than a chain may hold — the shape two peers'
+  // writes merging leaves behind, which no undo put there.
+  s.doc.transact(() => {
+    for (const index of [9, 10]) {
+      insertMap(s.doc).set(
+        `i${index}`,
+        objectMap({ id: `i${index}`, owner: "master", order: index, kind: "eq", bypass: false }),
+      );
+    }
+  });
+  assert.match(checkInvariants(s.doc).join(" "), /would hold 10 effects/);
+
+  // Undoing an effect leaves nine: still over the limit, but not one worse than
+  // the song already was, so the step goes through.
+  const plan = planUndo(s.doc, effects[7].entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.blocked, []);
+  assert.deepEqual([...plan.apply.keys()], ["insert:i8|*"]);
+
+  s.doc.transact(() => applyPlan(s.doc, plan));
+  assert.match(checkInvariants(s.doc).join(" "), /would hold 9 effects/);
+});
+
+test("a second orphan send for the same missing track is still blocked", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("return.add", { id: "a", name: "A" });
+  s.run("return.add", { id: "b", name: "B" });
+  s.run("send.set", { track_id: "bass", return_id: "a", level_db: -6 });
+  s.run("send.set", { track_id: "bass", return_id: "b", level_db: -6 });
+  const off = s.run("send.set", { track_id: "bass", return_id: "a", level_db: null });
+
+  // The track goes, one send stays: exactly what a removal and a write merging
+  // can leave. The song already holds one send whose track is not there.
+  s.doc.transact(() => trackList(s.doc).delete(0, 1));
+  const already = checkInvariants(s.doc);
+  assert.equal(already.length, 1);
+  assert.match(already[0], /without its track/);
+
+  // Undoing the removal puts the other send back — a SECOND send with no track.
+  // The two sentences read exactly alike, which is why they are compared by what
+  // they are about: this one is worse than the song already was.
+  const plan = planUndo(s.doc, off.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /without its track/);
+  assert.equal(checkInvariants(s.doc).length, 1, "a blocked plan wrote nothing");
+});
+
+test("a second out-of-range send from the same track is still blocked", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("return.add", { id: "a", name: "A" });
+  s.run("return.add", { id: "b", name: "B" });
+
+  // Two sends from one track at a level no command would write: an old or
+  // merged document can hold them, which is the shape this guard is for.
+  s.doc.transact(() => {
+    for (const id of ["a", "b"]) {
+      sendMap(s.doc).set(
+        sendKey("bass", id),
+        objectMap({ track_id: "bass", return_id: id, level_db: 12, pre: false }),
+      );
+    }
+  });
+  assert.equal(checkInvariants(s.doc).length, 2);
+
+  // A step brings the second one back into range; undoing it puts it out again.
+  const fixed = s.run("send.set", { track_id: "bass", return_id: "b", level_db: -6 });
+  assert.equal(checkInvariants(s.doc).length, 1);
+
+  // Both sentences name the same track and read alike — the second one is still
+  // a reason the plan makes the song worse.
+  const plan = planUndo(s.doc, fixed.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /would be at 12 dB/);
+  assert.equal(checkInvariants(s.doc).length, 1, "a blocked plan wrote nothing");
+});
+
+test("more notes past a clip end than before is still blocked", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 8,
+    notes: [note(0, 1, 36, 100), note(20, 1, 36, 100), note(24, 1, 36, 100)],
+  });
+  const edited = s.run("clip.edit_notes", { clip_id: "bass-verse", remove: [2] });
+
+  // The clip is shortened under its notes by a merge — a command refuses to do
+  // it — so one note is past its end already, and the song says so.
+  s.doc.transact(() => clipMap(s.doc).get("bass-verse").set("length_bars", 1));
+  const already = checkInvariants(s.doc);
+  assert.equal(already.length, 1);
+  assert.match(already[0], /past its 1 bar/);
+
+  // The undo of the edit puts the third note back: TWO notes past the end, and
+  // the sentence still names the first one, so only the count tells them apart.
+  const plan = planUndo(s.doc, edited.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /past its 1 bar/);
+  assert.equal(checkInvariants(s.doc).length, 1, "a blocked plan wrote nothing");
 });
 
 test("an undo that creates a violation is still blocked", (t) => {

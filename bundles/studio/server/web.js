@@ -738,17 +738,29 @@ export function createStudioWeb({
   /**
    * Push one hub broadcast to the song's clients.
    *
-   * The hub calls this after every applied step (`{update, entry}`) and after
-   * every presence change (`{presence}`). Anything else is ignored, so the hub
-   * can add payloads later without this layer guessing at them.
+   * The hub calls this after every applied step (`{update, entry}`), after
+   * every presence change (`{presence}`) and when a song's document was dropped
+   * and rebuilt, whole (`{state}` — a state frame, which the page answers by
+   * building its document from the server's again). Anything else is ignored, so
+   * the hub can add payloads later without this layer guessing at them.
    * @param {string} song_id
-   * @param {{update?: Uint8Array, entry?: object|null, presence?: object[]}} payload
+   * @param {{update?: Uint8Array, entry?: object|null, presence?: object[],
+   *          state?: Uint8Array, history?: object[]}} payload
    * @returns {void}
    */
   function broadcast(song_id, payload) {
     if (!payload || typeof payload !== "object") return;
-    if ("presence" in payload) {
+    if ("presence" in payload && payload.state == null) {
       sendToSong(song_id, { type: "presence", presence: payload.presence ?? [] });
+      return;
+    }
+    if (payload.state != null) {
+      sendToSong(song_id, {
+        type: "state",
+        update: toBase64(payload.state),
+        history: payload.history ?? [],
+        presence: payload.presence ?? hub.presence(song_id),
+      });
       return;
     }
     if (payload.update != null) {

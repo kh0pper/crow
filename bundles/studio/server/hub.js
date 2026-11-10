@@ -1150,8 +1150,10 @@ function entryFromRow(row) {
  *          appendAudit: Function}} options.acl - the project ACL module
  * @param {() => Date} [options.now] - clock, injectable so de-duplication windows are testable
  * @param {(song_id: string, payload: object) => any} [options.onBroadcast]
- *   called with `{update, entry}` after every applied step and `{presence}`
- *   after every presence change; whatever it returns is awaited
+ *   called with `{update, entry}` after every applied step, `{presence}` after
+ *   every presence change, and `{state, history, presence}` when a song's
+ *   cached document was dropped and the whole document goes out again (see
+ *   `storageRefusal`); whatever it returns is awaited
  * @param {number} [options.snapshotEvery] - write a snapshot every N updates
  * @param {number} [options.dedupeMs] - how long a `cmd_id` stays remembered
  *
@@ -1825,14 +1827,52 @@ export function createHub({
    * The edit is already on the live document by the time the write fails, so
    * the cached document goes with it: whatever reads the song next rebuilds it
    * from the database, which never saw this step.
+   *
+   * A song the hub made containers for while loading (`preloadVector`) is the
+   * one case where that is not enough on its own. Those containers reached the
+   * open pages only through the state frame they joined with — nothing stored
+   * the creation yet — and the rebuild makes a fresh set under a new client id.
+   * The song's room is therefore sent the rebuilt document whole, so every page
+   * rebuilds from it instead of keeping containers the server no longer writes
+   * into (see `resyncSong`).
    * @param {string} song_id
+   * @param {object} row - the song's row, so the rebuild need not read it again
    * @param {unknown} err
-   * @returns {object}
+   * @returns {Promise<object>}
    */
-  function storageRefusal(song_id, err) {
+  async function storageRefusal(song_id, row, err) {
+    const dropped = songs.get(song_id);
+    const preloaded = Boolean(dropped?.preloadVector);
     songs.delete(song_id);
     warn(`saving song ${song_id}`, err);
+    if (preloaded) await resyncSong(song_id, row);
     return refuse("storage", SAVE_FAILED);
+  }
+
+  /**
+   * Push a song's document to its room whole, after the cached one was dropped.
+   *
+   * A full state frame is what the page answers by building its document over
+   * from the server's (`onState` in the panel): an incremental update would be
+   * merged into the containers the page already holds, which are the ones the
+   * dropped document made. Best effort — the step was refused already, and a
+   * page that misses the frame still rebuilds the song the next time it joins.
+   * @param {string} song_id
+   * @param {object} row
+   * @returns {Promise<void>}
+   */
+  async function resyncSong(song_id, row) {
+    try {
+      const state = await ensureDoc(song_id, row);
+      const entries = await history(song_id);
+      await broadcast(song_id, {
+        state: Y.encodeStateAsUpdate(state.doc),
+        history: entries,
+        presence: presence(song_id),
+      });
+    } catch (err) {
+      warn("resync", err);
+    }
   }
 
   /**
@@ -2002,7 +2042,7 @@ export function createHub({
       // step.
       seq = await commitStep(db, { song_id, update, entry });
     } catch (err) {
-      return storageRefusal(song_id, err);
+      return storageRefusal(song_id, row, err);
     }
     entry.seq = seq;
     state.seq = seq;
@@ -2264,7 +2304,7 @@ export function createHub({
         undone: { entry_id: target.id, by_entry_id: entry.id },
       });
     } catch (err) {
-      return storageRefusal(song_id, err);
+      return storageRefusal(song_id, row, err);
     }
     entry.seq = seq;
     target.undone_by = entry.id;

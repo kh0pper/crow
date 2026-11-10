@@ -2210,27 +2210,87 @@ function snapshotArrangement(doc) {
  *     rules the mixer commands enforce on their own edits.
  *
  * The history dry-runs an undo's plan on a clone of the document and calls
- * this, so a plan that would leave the song in one of these states is refused
- * whole instead of leaving a clip pointing at a track that is gone.
+ * `invariantReasons`, so a plan that would leave the song in one of these
+ * states is refused whole instead of leaving a clip pointing at a track that is
+ * gone. Every reason carries the stable id of the check that raised it and of
+ * the object it is about, so the history can tell a violation the plan inherits
+ * from one it makes worse without comparing the sentences (see `dryRun` in
+ * history.js).
  * @param {Y.Doc} doc
  * @returns {string[]} one plain-English reason per problem; empty when the
  *   document is consistent
  */
 export function checkInvariants(doc) {
+  return invariantReasons(doc).map((item) => item.text);
+}
+
+/**
+ * One invariant reason: which check found something (`code`), on what
+ * (`subject`) and how much of it (`count`, for the checks that count).
+ *
+ * `subject` is the object's stable id and never a name — a track, clip, insert,
+ * return, take, sampler object or history-stable key such as a send's track id
+ * or a motion lane's key, and `"song"`/`"master"` for the song's own numbers.
+ * Two reasons share a subject when they are about the same object, which is how
+ * a plan that adds a second offender of one kind is told from one that leaves
+ * the first where it was.
+ * @param {string} code
+ * @param {string} subject
+ * @param {string} text
+ * @param {number} [count]
+ * @returns {{code: string, subject: string, text: string, count?: number}}
+ */
+function reason(code, subject, text, count) {
+  const item = { code, subject, text };
+  if (typeof count === "number") item.count = count;
+  return item;
+}
+
+/**
+ * The same checks as `checkInvariants`, one structured reason each.
+ *
+ * `code` is the check's stable kebab-case id, `subject` the stable id of the
+ * object it is about, and `text` exactly the sentence `checkInvariants`
+ * reports. A count-based check also carries `count`, the number it found, so a
+ * plan that makes the very same violation worse (one more note past a clip's
+ * end, one more effect in an over-full chain) is visible even when the sentence
+ * reads the same.
+ *
+ * The history dry-runs an undo against these keyed by `code` + `subject` — not
+ * by the sentence: two orphan sends from one missing track read alike, and
+ * keying on the text would swallow the second one.
+ * @param {Y.Doc} doc
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
+ */
+export function invariantReasons(doc) {
   const song = snapshot(doc);
   const reasons = [];
 
   if (song.tracks.length > LIMITS.tracks) {
-    reasons.push(`The song would have ${song.tracks.length} tracks; a song can have at most ${LIMITS.tracks} tracks.`);
+    reasons.push(
+      reason(
+        "too-many-tracks",
+        "song",
+        `The song would have ${song.tracks.length} tracks; a song can have at most ${LIMITS.tracks} tracks.`,
+        song.tracks.length,
+      ),
+    );
   }
   if (song.scenes.length > LIMITS.scenes) {
-    reasons.push(`The song would have ${song.scenes.length} scenes; a song can have at most ${LIMITS.scenes} scenes.`);
+    reasons.push(
+      reason(
+        "too-many-scenes",
+        "song",
+        `The song would have ${song.scenes.length} scenes; a song can have at most ${LIMITS.scenes} scenes.`,
+        song.scenes.length,
+      ),
+    );
   }
 
-  reasons.push(...duplicateIdReasons(song.tracks, "track"));
-  reasons.push(...duplicateIdReasons(song.scenes, "scene"));
-  reasons.push(...duplicateIdReasons(Object.values(song.clips), "clip"));
-  reasons.push(...duplicateIdReasons(Object.values(song.takes), "take"));
+  reasons.push(...duplicateIdReasons(song.tracks, "track", "duplicate-track-id"));
+  reasons.push(...duplicateIdReasons(song.scenes, "scene", "duplicate-scene-id"));
+  reasons.push(...duplicateIdReasons(Object.values(song.clips), "clip", "duplicate-clip-id"));
+  reasons.push(...duplicateIdReasons(Object.values(song.takes), "take", "duplicate-take-id"));
 
   const trackIds = new Set(song.tracks.map((track) => track.id));
   const sceneIds = new Set(song.scenes.map((scene) => scene.id));
@@ -2242,39 +2302,80 @@ export function checkInvariants(doc) {
     takesPerClip.set(take.clip_id, (takesPerClip.get(take.clip_id) ?? 0) + 1);
     const owner = song.clips[take.clip_id];
     if (!owner) {
-      reasons.push(`The take "${take.id}" would be left without its clip: there is no clip "${take.clip_id}" in the song.`);
+      reasons.push(
+        reason(
+          "take-without-clip",
+          take.id,
+          `The take "${take.id}" would be left without its clip: there is no clip "${take.clip_id}" in the song.`,
+        ),
+      );
     } else if (owner.kind !== "audio") {
       const ownerLabel = owner.name === "" ? `clip "${owner.id}"` : `clip "${owner.name}"`;
-      reasons.push(`The take "${take.id}" would belong to the ${ownerLabel}, which holds notes rather than a recording.`);
+      reasons.push(
+        reason(
+          "take-on-notes-clip",
+          take.id,
+          `The take "${take.id}" would belong to the ${ownerLabel}, which holds notes rather than a recording.`,
+        ),
+      );
     }
   }
 
   for (const clip of Object.values(song.clips)) {
     const label = clip.name === "" ? `clip "${clip.id}"` : `clip "${clip.name}"`;
     if (!trackIds.has(clip.track_id)) {
-      reasons.push(`The ${label} would be left without its track: there is no track "${clip.track_id}" in the song.`);
+      reasons.push(
+        reason(
+          "clip-without-track",
+          clip.id,
+          `The ${label} would be left without its track: there is no track "${clip.track_id}" in the song.`,
+        ),
+      );
     }
     if (!sceneIds.has(clip.scene_id)) {
-      reasons.push(`The ${label} would be left without its scene: there is no scene "${clip.scene_id}" in the song.`);
+      reasons.push(
+        reason(
+          "clip-without-scene",
+          clip.id,
+          `The ${label} would be left without its scene: there is no scene "${clip.scene_id}" in the song.`,
+        ),
+      );
     }
     const limit = clip.length_bars * BEATS_PER_BAR;
     if (clip.kind === "audio") {
       const count = takesPerClip.get(clip.id) ?? 0;
       if (count > LIMITS.takesPerClip) {
         reasons.push(
-          `The ${label} would have ${count} takes; a clip can have at most ${LIMITS.takesPerClip} takes.`,
+          reason(
+            "too-many-takes",
+            clip.id,
+            `The ${label} would have ${count} takes; a clip can have at most ${LIMITS.takesPerClip} takes.`,
+            count,
+          ),
         );
       }
       reasons.push(...segmentReasons(clip, label, takesById, limit));
     }
+    // The clip's notes are checked for one sentence but counted whole: the
+    // first note past the end is what a reader wants to see, and how many there
+    // are is what tells a plan that adds another from one that leaves them be.
+    let late = 0;
+    let firstLate = null;
     for (let index = 0; index < clip.notes.length; index += 1) {
       const note = clip.notes[index];
-      if (note.t + note.d > limit) {
-        reasons.push(
-          `Note ${index + 1} in the ${label} would end at beat ${beatText(note.t + note.d)}, past its ${barsText(clip.length_bars)}.`,
-        );
-        break;
-      }
+      if (note.t + note.d <= limit) continue;
+      late += 1;
+      if (firstLate === null) firstLate = { index, end: note.t + note.d };
+    }
+    if (firstLate !== null) {
+      reasons.push(
+        reason(
+          "note-past-clip-end",
+          clip.id,
+          `Note ${firstLate.index + 1} in the ${label} would end at beat ${beatText(firstLate.end)}, past its ${barsText(clip.length_bars)}.`,
+          late,
+        ),
+      );
     }
   }
 
@@ -2316,7 +2417,7 @@ export function checkInvariants(doc) {
  * kind `amp` can enter the document until PR C, which adds the cap with the
  * kind.
  * @param {object} song - a snapshot
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
  */
 function mixerReasons(song) {
   const reasons = [];
@@ -2331,20 +2432,33 @@ function mixerReasons(song) {
 
   if (returns.length > LIMITS.returnsPerSong) {
     reasons.push(
-      `The song would hold ${returns.length} returns; a song can hold at most ${LIMITS.returnsPerSong} returns.`,
+      reason(
+        "too-many-returns",
+        "song",
+        `The song would hold ${returns.length} returns; a song can hold at most ${LIMITS.returnsPerSong} returns.`,
+        returns.length,
+      ),
     );
   }
-  reasons.push(...duplicateIdReasons(returns, "return"));
+  reasons.push(...duplicateIdReasons(returns, "return", "duplicate-return-id"));
   for (const item of returns) {
     const which = `The return "${nameOrId(item.name, item.id)}"`;
     if (!(item.gain_db >= returnGainLow && item.gain_db <= returnGainHigh)) {
       reasons.push(
-        `${which} would be at ${item.gain_db} dB; a return runs from ${returnGainLow} to ${returnGainHigh} dB.`,
+        reason(
+          "return-gain-range",
+          item.id,
+          `${which} would be at ${item.gain_db} dB; a return runs from ${returnGainLow} to ${returnGainHigh} dB.`,
+        ),
       );
     }
     if (!(item.pan >= returnPanLow && item.pan <= returnPanHigh)) {
       reasons.push(
-        `${which} would be panned to ${item.pan}; a return's pan runs from ${returnPanLow} to ${returnPanHigh}.`,
+        reason(
+          "return-pan-range",
+          item.id,
+          `${which} would be panned to ${item.pan}; a return's pan runs from ${returnPanLow} to ${returnPanHigh}.`,
+        ),
       );
     }
   }
@@ -2355,24 +2469,44 @@ function mixerReasons(song) {
     const owner = insertOwnerOf(insert.owner);
     if (!owner) {
       reasons.push(
-        `${which} would sit in the chain "${insert.owner}", which is not a track, a return or the master.`,
+        reason(
+          "insert-owner-invalid",
+          insert.id,
+          `${which} would sit in the chain "${insert.owner}", which is not a track, a return or the master.`,
+        ),
       );
       continue;
     }
     if (owner.kind === "track" && !trackIds.has(owner.id)) {
-      reasons.push(`${which} would be left without its track: there is no track "${owner.id}" in the song.`);
+      reasons.push(
+        reason(
+          "insert-without-track",
+          insert.id,
+          `${which} would be left without its track: there is no track "${owner.id}" in the song.`,
+        ),
+      );
       continue;
     }
     if (owner.kind === "return" && !returnIds.has(owner.id)) {
-      reasons.push(`${which} would be left without its return: there is no return "${owner.id}" in the song.`);
+      reasons.push(
+        reason(
+          "insert-without-return",
+          insert.id,
+          `${which} would be left without its return: there is no return "${owner.id}" in the song.`,
+        ),
+      );
       continue;
     }
     if (!effectSpec(insert.kind)) {
       reasons.push(
-        `${which} would be a "${insert.kind}", which is not one of the effects a chain holds (${EFFECT_KINDS.join(", ")}).`,
+        reason(
+          "insert-kind-unknown",
+          insert.id,
+          `${which} would be a "${insert.kind}", which is not one of the effects a chain holds (${EFFECT_KINDS.join(", ")}).`,
+        ),
       );
     } else {
-      reasons.push(...insertParamReasons(which, insert.kind, insert.params));
+      reasons.push(...insertParamReasons(which, insert, insert.kind, insert.params));
     }
     perChain.set(insert.owner, (perChain.get(insert.owner) ?? 0) + 1);
   }
@@ -2380,7 +2514,12 @@ function mixerReasons(song) {
     if (count <= LIMITS.insertsPerChain) continue;
     const where = chainWhere(song, owner);
     reasons.push(
-      `The chain on ${where} would hold ${count} effects; a chain holds at most ${LIMITS.insertsPerChain} effects.`,
+      reason(
+        "chain-over-limit",
+        owner,
+        `The chain on ${where} would hold ${count} effects; a chain holds at most ${LIMITS.insertsPerChain} effects.`,
+        count,
+      ),
     );
   }
 
@@ -2388,19 +2527,31 @@ function mixerReasons(song) {
   for (const send of sends) {
     if (!trackIds.has(send.track_id)) {
       reasons.push(
-        `A send would be left without its track: there is no track "${send.track_id}" in the song.`,
+        reason(
+          "send-without-track",
+          send.track_id,
+          `A send would be left without its track: there is no track "${send.track_id}" in the song.`,
+        ),
       );
       continue;
     }
     if (!returnIds.has(send.return_id)) {
       reasons.push(
-        `The send from "${send.track_id}" would be left without its return: there is no return "${send.return_id}" in the song.`,
+        reason(
+          "send-without-return",
+          send.track_id,
+          `The send from "${send.track_id}" would be left without its return: there is no return "${send.return_id}" in the song.`,
+        ),
       );
       continue;
     }
     if (!(send.level_db >= sendLow && send.level_db <= sendHigh)) {
       reasons.push(
-        `The send from "${send.track_id}" would be at ${send.level_db} dB; a send runs from ${sendLow} to ${sendHigh} dB.`,
+        reason(
+          "send-level-range",
+          send.track_id,
+          `The send from "${send.track_id}" would be at ${send.level_db} dB; a send runs from ${sendLow} to ${sendHigh} dB.`,
+        ),
       );
     }
     perTrack.set(send.track_id, (perTrack.get(send.track_id) ?? 0) + 1);
@@ -2409,7 +2560,12 @@ function mixerReasons(song) {
     if (count <= LIMITS.sendsPerTrack) continue;
     const track = song.tracks.find((item) => item.id === trackId);
     reasons.push(
-      `Track "${nameOrId(track?.name, trackId)}" would feed ${count} returns; a track sends to at most ${LIMITS.sendsPerTrack} returns.`,
+      reason(
+        "too-many-sends",
+        trackId,
+        `Track "${nameOrId(track?.name, trackId)}" would feed ${count} returns; a track sends to at most ${LIMITS.sendsPerTrack} returns.`,
+        count,
+      ),
     );
   }
 
@@ -2417,7 +2573,11 @@ function mixerReasons(song) {
   const gain = master.gain_db;
   if (!(gain >= MIXER_RANGES.master.gain_db[0] && gain <= MIXER_RANGES.master.gain_db[1])) {
     reasons.push(
-      `The master's gain would be ${gain} dB; it runs from ${MIXER_RANGES.master.gain_db[0]} to ${MIXER_RANGES.master.gain_db[1]} dB.`,
+      reason(
+        "master-gain-range",
+        "master",
+        `The master's gain would be ${gain} dB; it runs from ${MIXER_RANGES.master.gain_db[0]} to ${MIXER_RANGES.master.gain_db[1]} dB.`,
+      ),
     );
   }
   const target = master.target ?? DEFAULT_MASTER.target;
@@ -2425,12 +2585,20 @@ function mixerReasons(song) {
   const peak = target.true_peak_db;
   if (!(lufs >= MIXER_RANGES.master.lufs[0] && lufs <= MIXER_RANGES.master.lufs[1])) {
     reasons.push(
-      `The master's target would be ${lufs} LUFS; a target runs from ${MIXER_RANGES.master.lufs[0]} to ${MIXER_RANGES.master.lufs[1]} LUFS.`,
+      reason(
+        "master-lufs-range",
+        "master",
+        `The master's target would be ${lufs} LUFS; a target runs from ${MIXER_RANGES.master.lufs[0]} to ${MIXER_RANGES.master.lufs[1]} LUFS.`,
+      ),
     );
   }
   if (!(peak >= MIXER_RANGES.master.true_peak_db[0] && peak <= MIXER_RANGES.master.true_peak_db[1])) {
     reasons.push(
-      `The master's true-peak ceiling would be ${peak} dBTP; it runs from ${MIXER_RANGES.master.true_peak_db[0]} to ${MIXER_RANGES.master.true_peak_db[1]} dBTP.`,
+      reason(
+        "master-peak-range",
+        "master",
+        `The master's true-peak ceiling would be ${peak} dBTP; it runs from ${MIXER_RANGES.master.true_peak_db[0]} to ${MIXER_RANGES.master.true_peak_db[1]} dBTP.`,
+      ),
     );
   }
 
@@ -2448,29 +2616,44 @@ function mixerReasons(song) {
  * unknown (reported by the caller instead). Each message names the insert, the
  * parameter and the range, the way a command's refusal does.
  * @param {string} which - what the sentence calls the insert, e.g. `The insert "i1"`
+ * @param {object} insert - the insert itself, for the subject its reasons carry
  * @param {string} kind - one of `EFFECT_KINDS`
  * @param {Object<string, any>} params - the insert's parameters
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string}>}
  */
-function insertParamReasons(which, kind, params) {
+function insertParamReasons(which, insert, kind, params) {
   const reasons = [];
   for (const [name, value] of Object.entries(params ?? {})) {
     const field = effectParamSpec(kind, name);
     if (!field) {
-      reasons.push(`${which} would hold a parameter "${name}", which the ${effectLabel(kind)} does not have.`);
+      reasons.push(
+        reason(
+          "insert-param-unknown",
+          insert.id,
+          `${which} would hold a parameter "${name}", which the ${effectLabel(kind)} does not have.`,
+        ),
+      );
       continue;
     }
     if (field.values) {
       if (!field.values.includes(value)) {
         reasons.push(
-          `${which} would set "${name}" to ${typeof value === "string" ? `"${value}"` : String(value)}; it is one of ${field.values.join(", ")}.`,
+          reason(
+            "insert-param-not-a-value",
+            insert.id,
+            `${which} would set "${name}" to ${typeof value === "string" ? `"${value}"` : String(value)}; it is one of ${field.values.join(", ")}.`,
+          ),
         );
       }
       continue;
     }
     if (value >= field.min && value <= field.max) continue;
     reasons.push(
-      `${which} would set "${name}" to ${value}; it runs from ${field.min} to ${field.max}${field.unit ? ` ${field.unit}` : ""}.`,
+      reason(
+        "insert-param-range",
+        insert.id,
+        `${which} would set "${name}" to ${value}; it runs from ${field.min} to ${field.max}${field.unit ? ` ${field.unit}` : ""}.`,
+      ),
     );
   }
   return reasons;
@@ -2504,7 +2687,7 @@ function chainWhere(song, owner) {
  * are found by sorting each track's (or the sections') ranges by start, so a
  * full 2048-placement song is one pass, not a quadratic scan.
  * @param {object} song - a snapshot
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
  */
 function arrangementReasons(song) {
   const arrangement = song.arrangement ?? { placements: {}, markers: {}, sections: {} };
@@ -2515,23 +2698,38 @@ function arrangementReasons(song) {
 
   if (placements.length > LIMITS.placements) {
     reasons.push(
-      `The arrangement would hold ${placements.length} placements; an arrangement can hold at most ${LIMITS.placements} placements.`,
+      reason(
+        "too-many-placements",
+        "arrangement",
+        `The arrangement would hold ${placements.length} placements; an arrangement can hold at most ${LIMITS.placements} placements.`,
+        placements.length,
+      ),
     );
   }
   if (markers.length > LIMITS.markers) {
     reasons.push(
-      `The song would hold ${markers.length} markers; a song can hold at most ${LIMITS.markers} markers.`,
+      reason(
+        "too-many-markers",
+        "song",
+        `The song would hold ${markers.length} markers; a song can hold at most ${LIMITS.markers} markers.`,
+        markers.length,
+      ),
     );
   }
   if (sections.length > LIMITS.sections) {
     reasons.push(
-      `The song would hold ${sections.length} sections; a song can hold at most ${LIMITS.sections} sections.`,
+      reason(
+        "too-many-sections",
+        "song",
+        `The song would hold ${sections.length} sections; a song can hold at most ${LIMITS.sections} sections.`,
+        sections.length,
+      ),
     );
   }
 
-  reasons.push(...duplicateIdReasons(placements, "placement"));
-  reasons.push(...duplicateIdReasons(markers, "marker"));
-  reasons.push(...duplicateIdReasons(sections, "section"));
+  reasons.push(...duplicateIdReasons(placements, "placement", "duplicate-placement-id"));
+  reasons.push(...duplicateIdReasons(markers, "marker", "duplicate-marker-id"));
+  reasons.push(...duplicateIdReasons(sections, "section", "duplicate-section-id"));
 
   const byTrack = new Map();
   for (const placement of placements) {
@@ -2539,28 +2737,56 @@ function arrangementReasons(song) {
     const track = song.tracks.find((item) => item.id === placement.track_id);
     const clip = song.clips[placement.clip_id];
     if (!track) {
-      reasons.push(`${which} would be left without its track: there is no track "${placement.track_id}" in the song.`);
+      reasons.push(
+        reason(
+          "placement-without-track",
+          placement.id,
+          `${which} would be left without its track: there is no track "${placement.track_id}" in the song.`,
+        ),
+      );
     }
     if (!clip) {
-      reasons.push(`${which} would be left without its clip: there is no clip "${placement.clip_id}" in the song.`);
+      reasons.push(
+        reason(
+          "placement-without-clip",
+          placement.id,
+          `${which} would be left without its clip: there is no clip "${placement.clip_id}" in the song.`,
+        ),
+      );
     } else if (clip.track_id !== placement.track_id) {
       reasons.push(
-        `${which} would play clip "${clip.id}", which sits on track "${clip.track_id}", not "${placement.track_id}".`,
+        reason(
+          "placement-clip-other-track",
+          placement.id,
+          `${which} would play clip "${clip.id}", which sits on track "${clip.track_id}", not "${placement.track_id}".`,
+        ),
       );
     }
     if (placement.start_bar + placement.bars > LIMITS.arrangementBars) {
       reasons.push(
-        `${which} would end at bar ${placement.start_bar + placement.bars}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+        reason(
+          "placement-past-end",
+          placement.id,
+          `${which} would end at bar ${placement.start_bar + placement.bars}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+        ),
       );
     }
     if (!onOffsetGrid(placement.offset_beats)) {
       reasons.push(
-        `${which} would start at an offset of ${placement.offset_beats} beats, which is off the sixteenth-of-a-beat grid.`,
+        reason(
+          "placement-offset-grid",
+          placement.id,
+          `${which} would start at an offset of ${placement.offset_beats} beats, which is off the sixteenth-of-a-beat grid.`,
+        ),
       );
     }
     if (placement.fade_in_beats + placement.fade_out_beats > placement.bars * BEATS_PER_BAR) {
       reasons.push(
-        `${which} would fade in over ${placement.fade_in_beats} and out over ${placement.fade_out_beats} beats, longer than its ${barsText(placement.bars)}.`,
+        reason(
+          "placement-fades-too-long",
+          placement.id,
+          `${which} would fade in over ${placement.fade_in_beats} and out over ${placement.fade_out_beats} beats, longer than its ${barsText(placement.bars)}.`,
+        ),
       );
     }
     const lane = byTrack.get(placement.track_id) ?? [];
@@ -2573,14 +2799,24 @@ function arrangementReasons(song) {
       const previous = lane[index - 1];
       const current = lane[index];
       if (current.start_bar >= previous.start_bar + previous.bars) continue;
-      reasons.push(`The placements "${previous.id}" and "${current.id}" would overlap on track "${trackId}".`);
+      reasons.push(
+        reason(
+          "placements-overlap",
+          current.id,
+          `The placements "${previous.id}" and "${current.id}" would overlap on track "${trackId}".`,
+        ),
+      );
     }
   }
 
   for (const marker of markers) {
     if (marker.bar > LIMITS.arrangementBars) {
       reasons.push(
-        `The marker "${marker.id}" would sit at bar ${marker.bar}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+        reason(
+          "marker-past-end",
+          marker.id,
+          `The marker "${marker.id}" would sit at bar ${marker.bar}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+        ),
       );
     }
   }
@@ -2588,10 +2824,22 @@ function arrangementReasons(song) {
   for (const section of sections) {
     const which = `The section "${section.id}"`;
     if (!(section.start_bar < section.end_bar)) {
-      reasons.push(`${which} would end at bar ${section.end_bar}, before it starts at bar ${section.start_bar}.`);
+      reasons.push(
+        reason(
+          "section-empty",
+          section.id,
+          `${which} would end at bar ${section.end_bar}, before it starts at bar ${section.start_bar}.`,
+        ),
+      );
     }
     if (section.end_bar > LIMITS.arrangementBars) {
-      reasons.push(`${which} would end at bar ${section.end_bar}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`);
+      reasons.push(
+        reason(
+          "section-past-end",
+          section.id,
+          `${which} would end at bar ${section.end_bar}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+        ),
+      );
     }
   }
   const ordered = [...sections].sort((a, b) => a.start_bar - b.start_bar);
@@ -2599,7 +2847,9 @@ function arrangementReasons(song) {
     const previous = ordered[index - 1];
     const current = ordered[index];
     if (current.start_bar >= previous.end_bar) continue;
-    reasons.push(`The sections "${previous.id}" and "${current.id}" would overlap.`);
+    reasons.push(
+      reason("sections-overlap", current.id, `The sections "${previous.id}" and "${current.id}" would overlap.`),
+    );
   }
 
   return reasons;
@@ -2630,7 +2880,7 @@ function arrangementReasons(song) {
  * would leave, say, a pad pointing at a slice a newer edit removed is refused
  * whole instead of half-landing.
  * @param {object} song - a snapshot
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
  */
 function samplerReasons(song) {
   const reasons = [];
@@ -2648,7 +2898,12 @@ function samplerReasons(song) {
   // Samples: the rate an import may land at, and the 60-second cap.
   if (samples.length > LIMITS.samplesPerSong) {
     reasons.push(
-      `The song would hold ${samples.length} samples; a song can hold at most ${LIMITS.samplesPerSong} samples.`,
+      reason(
+        "too-many-samples",
+        "song",
+        `The song would hold ${samples.length} samples; a song can hold at most ${LIMITS.samplesPerSong} samples.`,
+        samples.length,
+      ),
     );
   }
   const samplesById = new Map();
@@ -2656,12 +2911,24 @@ function samplerReasons(song) {
     samplesById.set(sample.id, sample);
     const which = `The sample "${nameOrId(sample.name, sample.id)}"`;
     if (!SAMPLE_RATES.includes(sample.rate)) {
-      reasons.push(`${which} would have a rate of ${sample.rate} Hz; a sample's rate is one of ${SAMPLE_RATES.join(", ")}.`);
+      reasons.push(
+        reason(
+          "sample-rate",
+          sample.id,
+          `${which} would have a rate of ${sample.rate} Hz; a sample's rate is one of ${SAMPLE_RATES.join(", ")}.`,
+        ),
+      );
     }
-    if (!(sample.frames > 0)) reasons.push(`${which} would hold no frames.`);
+    if (!(sample.frames > 0)) {
+      reasons.push(reason("sample-empty", sample.id, `${which} would hold no frames.`));
+    }
     if (sample.frames * sample.channels > LIMITS.sampleSamples) {
       reasons.push(
-        `${which} would hold ${sample.frames * sample.channels} samples; a sample can hold at most ${LIMITS.sampleSamples} (frames × channels).`,
+        reason(
+          "sample-too-long",
+          sample.id,
+          `${which} would hold ${sample.frames * sample.channels} samples; a sample can hold at most ${LIMITS.sampleSamples} (frames × channels).`,
+        ),
       );
     }
   }
@@ -2671,16 +2938,27 @@ function samplerReasons(song) {
   const slicesPerSample = new Map();
   for (const slice of slices) {
     const which = `The slice "${slice.id}" of sample "${slice.sample_id}"`;
-    slicesByKey.set(sliceKey(slice.sample_id, slice.id), slice);
+    const key = sliceKey(slice.sample_id, slice.id);
+    slicesByKey.set(key, slice);
     slicesPerSample.set(slice.sample_id, (slicesPerSample.get(slice.sample_id) ?? 0) + 1);
     const sample = samplesById.get(slice.sample_id);
     if (!sample) {
-      reasons.push(`${which} would be left without its sample: there is no sample "${slice.sample_id}" in the song.`);
+      reasons.push(
+        reason(
+          "slice-without-sample",
+          key,
+          `${which} would be left without its sample: there is no sample "${slice.sample_id}" in the song.`,
+        ),
+      );
       continue;
     }
     if (!(slice.start_frame >= 0 && slice.start_frame < slice.end_frame && slice.end_frame <= sample.frames)) {
       reasons.push(
-        `${which} would run from frame ${slice.start_frame} to frame ${slice.end_frame}, outside the ${sample.frames} frames of that sample.`,
+        reason(
+          "slice-outside-sample",
+          key,
+          `${which} would run from frame ${slice.start_frame} to frame ${slice.end_frame}, outside the ${sample.frames} frames of that sample.`,
+        ),
       );
     }
   }
@@ -2688,7 +2966,12 @@ function samplerReasons(song) {
     if (count <= LIMITS.slicesPerSample) continue;
     const label = nameOrId(samplesById.get(sampleId)?.name, sampleId);
     reasons.push(
-      `The sample "${label}" would have ${count} slices; a sample can have at most ${LIMITS.slicesPerSample} slices.`,
+      reason(
+        "too-many-slices",
+        sampleId,
+        `The sample "${label}" would have ${count} slices; a sample can have at most ${LIMITS.slicesPerSample} slices.`,
+        count,
+      ),
     );
   }
 
@@ -2697,48 +2980,91 @@ function samplerReasons(song) {
   const bankKeys = new Set();
   const banksPerTrack = new Map();
   for (const bank of banks) {
-    bankKeys.add(bankKey(bank.track_id, bank.id));
+    const key = bankKey(bank.track_id, bank.id);
+    bankKeys.add(key);
     banksPerTrack.set(bank.track_id, (banksPerTrack.get(bank.track_id) ?? 0) + 1);
     const which = `The bank "${nameOrId(bank.name, bank.id)}"`;
     const track = tracksById.get(bank.track_id);
     if (!track) {
-      reasons.push(`${which} would be left without its track: there is no track "${bank.track_id}" in the song.`);
+      reasons.push(
+        reason(
+          "bank-without-track",
+          key,
+          `${which} would be left without its track: there is no track "${bank.track_id}" in the song.`,
+        ),
+      );
     } else if (track.device?.engine !== SAMPLER_DEVICE.engine) {
-      reasons.push(`${which} would sit on track "${nameOrId(track.name, track.id)}", which is not a sampler track.`);
+      reasons.push(
+        reason(
+          "bank-not-on-sampler-track",
+          key,
+          `${which} would sit on track "${nameOrId(track.name, track.id)}", which is not a sampler track.`,
+        ),
+      );
     }
   }
   for (const [trackId, count] of banksPerTrack) {
     if (count <= LIMITS.banksPerKit) continue;
     const label = nameOrId(tracksById.get(trackId)?.name, trackId);
-    reasons.push(`The kit of track "${label}" would have ${count} banks; a kit can have at most ${LIMITS.banksPerKit} banks.`);
+    reasons.push(
+      reason(
+        "too-many-banks",
+        trackId,
+        `The kit of track "${label}" would have ${count} banks; a kit can have at most ${LIMITS.banksPerKit} banks.`,
+        count,
+      ),
+    );
   }
 
   // Pads: a bank's own pad, playing a sample of the song and a slice of it.
   const padKeys = new Set();
   for (const pad of pads) {
-    padKeys.add(padKey(pad.track_id, pad.bank_id, pad.index));
+    const key = padKey(pad.track_id, pad.bank_id, pad.index);
+    padKeys.add(key);
     const which = `The pad ${Number(pad.index) + 1} of bank "${pad.bank_id}"`;
     if (!bankKeys.has(bankKey(pad.track_id, pad.bank_id))) {
-      reasons.push(`${which} would be left without its bank: track "${pad.track_id}" has no bank "${pad.bank_id}".`);
+      reasons.push(
+        reason(
+          "pad-without-bank",
+          key,
+          `${which} would be left without its bank: track "${pad.track_id}" has no bank "${pad.bank_id}".`,
+        ),
+      );
       continue;
     }
     if (!(Number.isInteger(pad.index) && pad.index >= 0 && pad.index < LIMITS.padsPerBank)) {
       reasons.push(
-        `${which} would sit at index ${pad.index}; a bank holds ${LIMITS.padsPerBank} pads, numbered 0 to ${LIMITS.padsPerBank - 1}.`,
+        reason(
+          "pad-index-range",
+          key,
+          `${which} would sit at index ${pad.index}; a bank holds ${LIMITS.padsPerBank} pads, numbered 0 to ${LIMITS.padsPerBank - 1}.`,
+        ),
       );
     }
     if (pad.sample_id === ABSENT) {
-      if (pad.slice_id !== ABSENT) reasons.push(`${which} would play a slice without a sample.`);
+      if (pad.slice_id !== ABSENT) {
+        reasons.push(reason("pad-slice-without-sample", key, `${which} would play a slice without a sample.`));
+      }
       continue;
     }
     if (!samplesById.has(pad.sample_id)) {
-      reasons.push(`${which} would play sample "${pad.sample_id}", which is not in the song.`);
+      reasons.push(
+        reason(
+          "pad-sample-missing",
+          key,
+          `${which} would play sample "${pad.sample_id}", which is not in the song.`,
+        ),
+      );
       continue;
     }
     if (pad.slice_id === ABSENT) continue;
     if (!slicesByKey.has(sliceKey(pad.sample_id, pad.slice_id))) {
       reasons.push(
-        `${which} would play slice "${pad.slice_id}", which is not a slice of sample "${pad.sample_id}".`,
+        reason(
+          "pad-slice-missing",
+          key,
+          `${which} would play slice "${pad.slice_id}", which is not a slice of sample "${pad.sample_id}".`,
+        ),
       );
     }
   }
@@ -2747,43 +3073,84 @@ function samplerReasons(song) {
   const patternKeys = new Set();
   const patternsPerClip = new Map();
   for (const pattern of patterns) {
-    patternKeys.add(patternKey(pattern.clip_id, pattern.id));
+    const key = patternKey(pattern.clip_id, pattern.id);
+    patternKeys.add(key);
     patternsPerClip.set(pattern.clip_id, (patternsPerClip.get(pattern.clip_id) ?? 0) + 1);
     const clip = song.clips[pattern.clip_id];
     const which = `The pattern "${nameOrId(pattern.name, pattern.id)}"`;
     if (!clip) {
-      reasons.push(`${which} would be left without its clip: there is no clip "${pattern.clip_id}" in the song.`);
+      reasons.push(
+        reason(
+          "pattern-without-clip",
+          key,
+          `${which} would be left without its clip: there is no clip "${pattern.clip_id}" in the song.`,
+        ),
+      );
     } else if (clip.kind !== "pattern") {
-      reasons.push(`${which} would sit on clip "${nameOrId(clip.name, clip.id)}", which holds notes rather than patterns.`);
+      reasons.push(
+        reason(
+          "pattern-on-notes-clip",
+          key,
+          `${which} would sit on clip "${nameOrId(clip.name, clip.id)}", which holds notes rather than patterns.`,
+        ),
+      );
     }
   }
   for (const [clipId, count] of patternsPerClip) {
     if (count <= LIMITS.patternsPerClip) continue;
     const clip = song.clips[clipId];
     const label = nameOrId(clip?.name, clipId);
-    reasons.push(`The clip "${label}" would hold ${count} patterns; a pattern clip can hold at most ${LIMITS.patternsPerClip} patterns.`);
+    reasons.push(
+      reason(
+        "too-many-patterns",
+        clipId,
+        `The clip "${label}" would hold ${count} patterns; a pattern clip can hold at most ${LIMITS.patternsPerClip} patterns.`,
+        count,
+      ),
+    );
   }
   for (const clip of Object.values(song.clips)) {
     if (clip.kind !== "pattern") continue;
     const which = `The clip "${nameOrId(clip.name, clip.id)}"`;
     const chain = Array.isArray(clip.chain) ? clip.chain : [];
     if (chain.length > LIMITS.chainLength) {
-      reasons.push(`${which} would chain ${chain.length} patterns; a chain is at most ${LIMITS.chainLength} long.`);
+      reasons.push(
+        reason(
+          "chain-over-limit",
+          clip.id,
+          `${which} would chain ${chain.length} patterns; a chain is at most ${LIMITS.chainLength} long.`,
+          chain.length,
+        ),
+      );
     }
     for (const entry of chain) {
       if (patternKeys.has(patternKey(clip.id, entry))) continue;
-      reasons.push(`${which} would chain "${entry}", which is not a pattern of that clip.`);
+      reasons.push(
+        reason("chain-missing-pattern", clip.id, `${which} would chain "${entry}", which is not a pattern of that clip.`),
+      );
     }
     if (!(clip.length_steps >= 1 && clip.length_steps <= LIMITS.stepPositions)) {
       reasons.push(
-        `${which} would have ${clip.length_steps} step positions; a pattern holds 1 to ${LIMITS.stepPositions}.`,
+        reason(
+          "step-positions-range",
+          clip.id,
+          `${which} would have ${clip.length_steps} step positions; a pattern holds 1 to ${LIMITS.stepPositions}.`,
+        ),
       );
     }
     if (!STEP_BEATS_VALUES.includes(clip.step_beats)) {
-      reasons.push(`${which} would use a step of ${clip.step_beats} beats; a step is one of ${STEP_BEATS_VALUES.join(", ")}.`);
+      reasons.push(
+        reason(
+          "step-beats",
+          clip.id,
+          `${which} would use a step of ${clip.step_beats} beats; a step is one of ${STEP_BEATS_VALUES.join(", ")}.`,
+        ),
+      );
     }
     if (!(clip.swing >= 0 && clip.swing <= 0.75)) {
-      reasons.push(`${which} would swing ${clip.swing}; swing is between 0 and 0.75.`);
+      reasons.push(
+        reason("swing-range", clip.id, `${which} would swing ${clip.swing}; swing is between 0 and 0.75.`),
+      );
     }
   }
 
@@ -2792,10 +3159,15 @@ function samplerReasons(song) {
   for (const step of steps) {
     const key = patternKey(step.clip_id, step.pattern_id);
     const which = `The step at position ${step.at} of pattern "${step.pattern_id}"`;
+    const where = stepKey(step.clip_id, step.pattern_id, step.at, step.bank_id, step.index);
     stepsPerPattern.set(key, (stepsPerPattern.get(key) ?? 0) + 1);
     if (!patternKeys.has(key)) {
       reasons.push(
-        `${which} would be left without its pattern: clip "${step.clip_id}" has no pattern "${step.pattern_id}".`,
+        reason(
+          "step-without-pattern",
+          where,
+          `${which} would be left without its pattern: clip "${step.clip_id}" has no pattern "${step.pattern_id}".`,
+        ),
       );
       continue;
     }
@@ -2803,23 +3175,43 @@ function samplerReasons(song) {
     const positions = Number(clip?.length_steps) || 0;
     if (!(Number.isInteger(step.at) && step.at >= 0 && step.at < positions)) {
       reasons.push(
-        `${which} would sit outside the ${positions} step positions of clip "${nameOrId(clip?.name, step.clip_id)}".`,
+        reason(
+          "step-past-loop",
+          where,
+          `${which} would sit outside the ${positions} step positions of clip "${nameOrId(clip?.name, step.clip_id)}".`,
+        ),
       );
     }
     if (!padKeys.has(padKey(clip?.track_id ?? "", step.bank_id, step.index))) {
       reasons.push(
-        `${which} would name a pad that is not on the clip's track: there is no pad ${Number(step.index) + 1} in bank "${step.bank_id}".`,
+        reason(
+          "step-pad-missing",
+          where,
+          `${which} would name a pad that is not on the clip's track: there is no pad ${Number(step.index) + 1} in bank "${step.bank_id}".`,
+        ),
       );
     }
     const lockCount = Object.keys(step.locks ?? {}).length;
     if (lockCount > LIMITS.locksPerStep) {
-      reasons.push(`${which} would carry ${lockCount} locks; a step carries at most ${LIMITS.locksPerStep} locks.`);
+      reasons.push(
+        reason(
+          "too-many-locks",
+          where,
+          `${which} would carry ${lockCount} locks; a step carries at most ${LIMITS.locksPerStep} locks.`,
+          lockCount,
+        ),
+      );
     }
   }
   for (const [key, count] of stepsPerPattern) {
     if (count <= LIMITS.stepEntriesPerPattern) continue;
     reasons.push(
-      `A pattern would hold ${count} steps; a pattern can hold at most ${LIMITS.stepEntriesPerPattern} steps.`,
+      reason(
+        "too-many-steps",
+        key,
+        `A pattern would hold ${count} steps; a pattern can hold at most ${LIMITS.stepEntriesPerPattern} steps.`,
+        count,
+      ),
     );
   }
 
@@ -2837,46 +3229,88 @@ function samplerReasons(song) {
     const trackId = typeof clip?.track_id === "string" ? clip.track_id : "";
     for (const lane of lanes) {
       const laneParts = motionLaneParts(lane);
+      const where = motionKey(pattern.clip_id, pattern.id, lane);
       if (!laneParts) {
-        reasons.push(`${which} would hold the motion lane "${lane}", which names no pad and parameter.`);
+        reasons.push(
+          reason(
+            "motion-lane-invalid",
+            where,
+            `${which} would hold the motion lane "${lane}", which names no pad and parameter.`,
+          ),
+        );
         continue;
       }
       const range = MOTION_PARAM_RANGES[laneParts.param];
       if (!range) {
         reasons.push(
-          `${which} would sweep "${laneParts.param}" on pad ${laneParts.index + 1}, which is not one of a pad's numeric fields (${MOTION_PARAMS.join(", ")}).`,
+          reason(
+            "motion-param-unknown",
+            where,
+            `${which} would sweep "${laneParts.param}" on pad ${laneParts.index + 1}, which is not one of a pad's numeric fields (${MOTION_PARAMS.join(", ")}).`,
+          ),
         );
         continue;
       }
       if (trackId !== "" && !padKeys.has(padKey(trackId, laneParts.bankId, laneParts.index))) {
         reasons.push(
-          `${which} would sweep pad ${laneParts.index + 1} of bank "${laneParts.bankId}", which is not on the clip's track.`,
+          reason(
+            "motion-pad-missing",
+            where,
+            `${which} would sweep pad ${laneParts.index + 1} of bank "${laneParts.bankId}", which is not on the clip's track.`,
+          ),
         );
         continue;
       }
       const points = Array.isArray(motion[lane]) ? motion[lane] : [];
       if (points.length > LIMITS.motionPointsPerLane) {
         reasons.push(
-          `${which} would hold ${points.length} motion points on one lane; a lane holds at most ${LIMITS.motionPointsPerLane} motion points.`,
+          reason(
+            "too-many-motion-points",
+            where,
+            `${which} would hold ${points.length} motion points on one lane; a lane holds at most ${LIMITS.motionPointsPerLane} motion points.`,
+            points.length,
+          ),
         );
         continue;
       }
       if (!(positions > 0)) continue;
+      // The lane is counted whole and reported by its first offender, so one
+      // more point off the loop is visible even though the sentence is the same.
+      let outside = 0;
+      let firstOutside = null;
+      let offRange = 0;
+      let firstOffRange = null;
       for (const point of points) {
         const stepFrac = Number(point.step_frac);
         const amount = Number(point.value);
         if (!(stepFrac >= 0 && stepFrac < positions)) {
-          reasons.push(
-            `${which} would put a motion point at step ${beatText(stepFrac)}, outside its ${positions} step positions.`,
-          );
-          break;
+          outside += 1;
+          if (firstOutside === null) firstOutside = stepFrac;
         }
         if (!(amount >= range[0] && amount <= range[1])) {
-          reasons.push(
-            `${which} would sweep "${laneParts.param}" to ${amount} on pad ${laneParts.index + 1}, outside its ${range[0]} to ${range[1]}.`,
-          );
-          break;
+          offRange += 1;
+          if (firstOffRange === null) firstOffRange = amount;
         }
+      }
+      if (firstOutside !== null) {
+        reasons.push(
+          reason(
+            "motion-point-past-loop",
+            where,
+            `${which} would put a motion point at step ${beatText(firstOutside)}, outside its ${positions} step positions.`,
+            outside,
+          ),
+        );
+      }
+      if (firstOffRange !== null) {
+        reasons.push(
+          reason(
+            "motion-point-range",
+            where,
+            `${which} would sweep "${laneParts.param}" to ${firstOffRange} on pad ${laneParts.index + 1}, outside its ${range[0]} to ${range[1]}.`,
+            offRange,
+          ),
+        );
       }
     }
   }
@@ -2892,14 +3326,19 @@ function samplerReasons(song) {
  * message on the same controller — one message has one live action, so the
  * router can never have to choose between two of them.
  * @param {object} song - a snapshot
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
  */
 function midiReasons(song) {
   const mappings = Object.values(song.midi_maps ?? {});
   const reasons = [];
   if (mappings.length > LIMITS.midiMaps) {
     reasons.push(
-      `The song would hold ${mappings.length} MIDI mappings; a song can hold at most ${LIMITS.midiMaps} MIDI mappings.`,
+      reason(
+        "too-many-midi-maps",
+        "song",
+        `The song would hold ${mappings.length} MIDI mappings; a song can hold at most ${LIMITS.midiMaps} MIDI mappings.`,
+        mappings.length,
+      ),
     );
   }
 
@@ -2909,7 +3348,11 @@ function midiReasons(song) {
       if (live[index].device_name !== live[other].device_name) continue;
       if (!sameMessage(live[index].message, live[other].message)) continue;
       reasons.push(
-        `The mappings "${live[index].id}" and "${live[other].id}" would both be live for ${messageName(live[index].message)} on "${live[index].device_name}"; one message has one live action.`,
+        reason(
+          "midi-duplicate-message",
+          `${live[index].id}/${live[other].id}`,
+          `The mappings "${live[index].id}" and "${live[other].id}" would both be live for ${messageName(live[index].message)} on "${live[index].device_name}"; one message has one live action.`,
+        ),
       );
     }
   }
@@ -2933,7 +3376,7 @@ function midiReasons(song) {
  * reported here and is not one of the three.
  * @param {object} song - a snapshot
  * @param {Y.Doc} doc - the live document, read as it stores what it stores
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
  */
 function libraryReasons(song, doc) {
   const reasons = [];
@@ -2941,16 +3384,27 @@ function libraryReasons(song, doc) {
 
   if (entries.length > LIMITS.libraryEntriesPerSong) {
     reasons.push(
-      `The song's library would hold ${entries.length} entries; a song's library holds at most ${LIMITS.libraryEntriesPerSong} entries.`,
+      reason(
+        "too-many-library-entries",
+        "song",
+        `The song's library would hold ${entries.length} entries; a song's library holds at most ${LIMITS.libraryEntriesPerSong} entries.`,
+        entries.length,
+      ),
     );
   }
-  reasons.push(...duplicateIdReasons(entries, "library entry"));
+  reasons.push(...duplicateIdReasons(entries, "library entry", "duplicate-library-entry-id"));
 
   const fontIds = new Set();
   let fonts = 0;
   for (const [id, entry] of storedLibraryEntries(doc)) {
     if (!(entry instanceof Y.Map)) {
-      reasons.push(`The library entry "${id}" would not hold anything; a library entry is a font, a capture or a cabinet.`);
+      reasons.push(
+        reason(
+          "library-entry-empty",
+          id,
+          `The library entry "${id}" would not hold anything; a library entry is a font, a capture or a cabinet.`,
+        ),
+      );
       continue;
     }
     const kind = entry.get("kind");
@@ -2961,11 +3415,22 @@ function libraryReasons(song, doc) {
     }
     if (LIBRARY_KINDS.includes(kind)) continue;
     reasons.push(
-      `The library entry "${nameOrId(entry.get("name"), id)}" would have the kind ${describeValue(kind)}; a library entry is a font, a capture or a cabinet.`,
+      reason(
+        "library-entry-kind",
+        id,
+        `The library entry "${nameOrId(entry.get("name"), id)}" would have the kind ${describeValue(kind)}; a library entry is a font, a capture or a cabinet.`,
+      ),
     );
   }
   if (fonts > LIMITS.fontsPerSong) {
-    reasons.push(`The song's library would hold ${fonts} fonts; a song can hold at most ${LIMITS.fontsPerSong} fonts.`);
+    reasons.push(
+      reason(
+        "too-many-fonts",
+        "song",
+        `The song's library would hold ${fonts} fonts; a song can hold at most ${LIMITS.fontsPerSong} fonts.`,
+        fonts,
+      ),
+    );
   }
 
   for (const track of song.tracks ?? []) {
@@ -2973,7 +3438,13 @@ function libraryReasons(song, doc) {
     const which = `The track "${nameOrId(track.name, track.id)}"`;
     const fontId = track.device.font_id ?? ABSENT;
     if (fontId !== ABSENT && !fontIds.has(fontId)) {
-      reasons.push(`${which} would play the font "${fontId}", which is not in the song's library.`);
+      reasons.push(
+        reason(
+          "track-font-missing",
+          track.id,
+          `${which} would play the font "${fontId}", which is not in the song's library.`,
+        ),
+      );
     }
   }
   return reasons;
@@ -2996,7 +3467,7 @@ function libraryReasons(song, doc) {
  * direction: anything but nothing is an instrument the track plays (see
  * `trackHoldsSound` in hub.js).
  * @param {Y.Doc} doc
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string}>}
  */
 function soundfontDeviceReasons(doc) {
   const reasons = [];
@@ -3008,22 +3479,35 @@ function soundfontDeviceReasons(doc) {
     const plain = device && typeof device === "object" ? device : {};
     if (plain.engine !== SOUNDFONT_DEVICE.engine) continue;
     const which = `The track "${nameOrId(track.get("name"), track.get("id"))}"`;
+    const subject = String(track.get("id") ?? "");
     const fontId = plain.font_id;
     if (!(typeof fontId === "string" || fontId === ABSENT || fontId === undefined)) {
       reasons.push(
-        `${which} would name the font ${describeValue(fontId)}; a font id is a string, or nothing at all.`,
+        reason(
+          "font-id-type",
+          subject,
+          `${which} would name the font ${describeValue(fontId)}; a font id is a string, or nothing at all.`,
+        ),
       );
     }
     const bank = plain.bank;
     if (!(Number.isInteger(bank) && bank >= 0 && bank <= MAX_SOUNDFONT_BANK)) {
       reasons.push(
-        `${which} would play bank ${describeValue(bank)}; a soundfont track plays banks 0 to ${MAX_SOUNDFONT_BANK - 1}, or ${GM_DRUM_BANK} for the drums.`,
+        reason(
+          "font-bank-range",
+          subject,
+          `${which} would play bank ${describeValue(bank)}; a soundfont track plays banks 0 to ${MAX_SOUNDFONT_BANK - 1}, or ${GM_DRUM_BANK} for the drums.`,
+        ),
       );
     }
     const program = plain.program;
     if (!(Number.isInteger(program) && program >= 0 && program <= MAX_SOUNDFONT_PROGRAM)) {
       reasons.push(
-        `${which} would play program ${describeValue(program)}; a soundfont track plays programs 0 to ${MAX_SOUNDFONT_PROGRAM}.`,
+        reason(
+          "font-program-range",
+          subject,
+          `${which} would play program ${describeValue(program)}; a soundfont track plays programs 0 to ${MAX_SOUNDFONT_PROGRAM}.`,
+        ),
       );
     }
   }
@@ -3080,7 +3564,7 @@ function nameOrId(name, id) {
  * @param {string} label - what the messages call the clip
  * @param {Map<string, object>} takesById - every take in the song
  * @param {number} limit - the clip's length in beats
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string}>}
  */
 function segmentReasons(clip, label, takesById, limit) {
   const reasons = [];
@@ -3089,45 +3573,77 @@ function segmentReasons(clip, label, takesById, limit) {
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     const which = `Segment ${index + 1} of the ${label}`;
+    // A segment has no id of its own: its place in the comp is its identity.
+    const subject = `${clip.id}#${index + 1}`;
     if (!(segment.from_beat < segment.to_beat)) {
       reasons.push(
-        `${which} would end at beat ${beatText(segment.to_beat)}, before it starts at beat ${beatText(segment.from_beat)}.`,
+        reason(
+          "segment-empty",
+          subject,
+          `${which} would end at beat ${beatText(segment.to_beat)}, before it starts at beat ${beatText(segment.from_beat)}.`,
+        ),
       );
       continue;
     }
     if (segment.from_beat < 0 || segment.to_beat > limit) {
       reasons.push(
-        `${which} would run from beat ${beatText(segment.from_beat)} to beat ${beatText(segment.to_beat)}, outside the ${barsText(clip.length_bars)} of that clip.`,
+        reason(
+          "segment-outside-clip",
+          subject,
+          `${which} would run from beat ${beatText(segment.from_beat)} to beat ${beatText(segment.to_beat)}, outside the ${barsText(clip.length_bars)} of that clip.`,
+        ),
       );
       continue;
     }
     if (previous && segment.from_beat < previous.from_beat) {
       reasons.push(
-        `${which} would start at beat ${beatText(segment.from_beat)}, before the segment in front of it; segments go in beat order.`,
+        reason(
+          "segment-order",
+          subject,
+          `${which} would start at beat ${beatText(segment.from_beat)}, before the segment in front of it; segments go in beat order.`,
+        ),
       );
       continue;
     }
     if (previous && segment.from_beat < previous.to_beat) {
       reasons.push(
-        `${which} would start at beat ${beatText(segment.from_beat)}, inside the segment that ends at beat ${beatText(previous.to_beat)}.`,
+        reason(
+          "segment-overlap",
+          subject,
+          `${which} would start at beat ${beatText(segment.from_beat)}, inside the segment that ends at beat ${beatText(previous.to_beat)}.`,
+        ),
       );
       continue;
     }
     previous = segment;
     const take = takesById.get(segment.take_id);
     if (!take || take.clip_id !== clip.id) {
-      reasons.push(`${which} would play take "${segment.take_id}", which is not a take of that clip.`);
+      reasons.push(
+        reason(
+          "segment-take-missing",
+          subject,
+          `${which} would play take "${segment.take_id}", which is not a take of that clip.`,
+        ),
+      );
       continue;
     }
     if (take.discarded) {
-      reasons.push(`${which} would play take "${take.id}", which is discarded.`);
+      reasons.push(
+        reason("segment-take-discarded", subject, `${which} would play take "${take.id}", which is discarded.`),
+      );
     }
   }
   return reasons;
 }
 
-/** @returns {string[]} one reason per id that two objects of this list share. */
-function duplicateIdReasons(items, label) {
+/**
+ * One reason per id that two objects of this list share.
+ * @param {Array<object>} items
+ * @param {string} label - what the sentence calls the objects, e.g. `"clip"`
+ * @param {string} code - the check's stable id, e.g. `"duplicate-clip-id"`
+ * @returns {Array<{code: string, subject: string, text: string}>}
+ */
+function duplicateIdReasons(items, label, code) {
   const seen = new Set();
   const reported = new Set();
   const reasons = [];
@@ -3135,7 +3651,7 @@ function duplicateIdReasons(items, label) {
     const id = typeof item?.id === "string" ? item.id : "";
     if (seen.has(id) && !reported.has(id)) {
       reported.add(id);
-      reasons.push(`The song would have two ${label}s with the id "${id}".`);
+      reasons.push(reason(code, id, `The song would have two ${label}s with the id "${id}".`));
     }
     seen.add(id);
   }

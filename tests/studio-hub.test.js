@@ -858,6 +858,110 @@ test("an old song loaded by the hub gets its mixer containers once", async (t) =
   assert.deepEqual(Object.keys(reopened.snapshot.returns), ["plate"]);
 });
 
+/**
+ * A song written before the mixer and the instrument library: the containers 1a
+ * to 1c created, and neither the mixer's nor the library's, so loading it makes
+ * them (see `buildDoc`).
+ * @param {object} db
+ * @returns {Promise<string>} the song's id
+ */
+async function seedOldSong(db) {
+  const old = new Y.Doc();
+  old.transact(() => {
+    const song = old.getMap("song");
+    song.set("meta", { title: "An old song", bpm: 110, meter: [4, 4], key: "A minor" });
+    const tracks = new Y.Array();
+    tracks.push([
+      new Y.Map([
+        ["id", "bass"],
+        ["name", "Bass"],
+        ["color", "#E8C07A"],
+        ["device", { engine: "sunvox", type: "Analog generator", params: {} }],
+        ["mute", false],
+        ["solo", false],
+        ["gain_db", 0],
+        ["pan", 0],
+        ["locked", false],
+      ]),
+    ]);
+    song.set("tracks", tracks);
+    song.set("scenes", new Y.Array());
+    song.set("clips", new Y.Map());
+    song.set("takes", new Y.Map());
+  });
+  const update = Y.encodeStateAsUpdate(old);
+  old.destroy();
+  const { id } = await createSongWithState(db, { project_id: PROJECT, title: "An old song", update });
+  return id;
+}
+
+test("a storage refusal on an old song's first step resyncs connected clients", async (t) => {
+  const { disk, db, acl, hub, broadcasts } = await setupFlaky(t);
+  const song_id = await seedOldSong(disk);
+
+  // A page joins. Its document is the one the hub made while loading the song,
+  // so the containers in it are the ones that never reached the stored log.
+  const opened = await hub.openSong(song_id);
+  const page = new Y.Doc();
+  Y.applyUpdate(page, Y.encodeStateAsUpdate(opened.doc));
+  t.after(() => page.destroy());
+  assert.ok(page.getMap("song").get("inserts") instanceof Y.Map, "the page holds the containers made at load");
+
+  // The first step's save fails, so the hub drops the document. The one it reads
+  // next makes its own containers, under a client id of its own.
+  db.failNextBatch();
+  const seen = broadcasts.length;
+  refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "resync-1",
+      command: "insert.add",
+      args: { id: "eq", owner: "track:bass", kind: "eq" },
+      author: HUMAN,
+    }),
+    "storage",
+  );
+
+  // The song's room is sent the rebuilt document *whole* — a state frame, not an
+  // update: the page answers it by building its document over from the server's
+  // (`onState`), which is the only thing that drops the containers it already
+  // holds. An update would be merged into them.
+  const frames = broadcasts.slice(seen).filter((item) => item.song_id === song_id);
+  const frame = frames.find((item) => item.state);
+  assert.ok(frame, "a state frame was pushed to the song's room");
+  assert.equal(frames.some((item) => item.update), false, "the resync is a state frame, not an update");
+
+  // What a page does with it: a fresh document, from the frame alone. It holds
+  // the server's containers — empty, because the refused step was never stored.
+  const rebuilt = new Y.Doc();
+  Y.applyUpdate(rebuilt, frame.state);
+  t.after(() => rebuilt.destroy());
+  const serverDoc = (await hub.openSong(song_id)).doc;
+  assert.deepEqual(
+    Y.encodeStateVector(rebuilt),
+    Y.encodeStateVector(serverDoc),
+    "the page's document is the server's, container creation and all",
+  );
+  assert.equal(rebuilt.getMap("song").get("inserts").size, 0);
+
+  // And the next step lands in those containers: the update the hub broadcasts
+  // for it is applied to the page the way a client applies one.
+  const kept = await hub.runCommand({
+    song_id,
+    cmd_id: "resync-2",
+    command: "insert.add",
+    args: { id: "filter", owner: "track:bass", kind: "filter" },
+    author: HUMAN,
+  });
+  assert.equal(kept.ok, true, `insert.add was refused: ${kept.error}`);
+  const update = broadcasts.filter((item) => item.song_id === song_id && item.update).pop();
+  assert.ok(update, "the saved step was broadcast as an update");
+  Y.applyUpdate(rebuilt, update.update);
+  const inserts = rebuilt.getMap("song").get("inserts");
+  assert.deepEqual([...inserts.keys()], ["filter"], "the page ends with the server's containers");
+  assert.equal(inserts.size, Object.keys((await hub.openSong(song_id)).snapshot.inserts).length);
+});
+
 test("resent cmd_id returns first result and applies once", async (t) => {
   const { hub, db } = await setup(t);
   const song_id = await seedSong(hub);
