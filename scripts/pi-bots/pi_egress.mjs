@@ -36,7 +36,7 @@
  */
 import { createServer, connect as netConnect, isIP, BlockList } from "node:net";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
-import { isDoorPath, RELAY_SOURCE_V4 } from "../../servers/shared/bot-doors.js";
+import { isDoorPath, RELAY_SOURCE_V4, ADDON_RELAY_SOURCE_V4 } from "../../servers/shared/bot-doors.js";
 import { spawnSync } from "node:child_process";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -539,6 +539,128 @@ const MAX_HEAD = 16 * 1024;
 const MAX_LOGGED = 1000;
 const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
+// ---- add-on mode: per-add-on allow lists -----------------------------------
+// A walled add-on gets its own relay: no bot doors, a list of loopback ports
+// splice-checked against the listener's owner, exact CONNECT entries that may
+// be private, and (D1) absolute-form plain HTTP to those same entries. None of
+// this is reachable when `o.addon` is absent (the bot path).
+
+/** The last N refused targets a relay keeps for the owner's status card. */
+const MAX_DENIALS = 20;
+/** The refusal reasons a listed entry may still override (a private destination is what was listed). */
+const SOFT_REASONS = new Set(["private network", "tailnet/CGNAT", "this host's network"]);
+/** Methods an absolute-form plain-HTTP request may use (D1). */
+const PLAIN_RE = /^(GET|POST|PUT|PATCH|DELETE|HEAD)\s+(http:\/\/[^\s]+)\s+HTTP\/1\.[01]$/;
+/** The same forbidden shapes the door allowlist refuses, kept here so an add-on's door predicate is only ever shown a clean origin-form path. */
+const ADDON_FORBIDDEN = /[\u0000-\u0020\u007f\\*]/;
+
+/** Ranges a listed entry may never reach, whatever reason the closed-network check gives. */
+const HARD_V4 = [["169.254.0.0", 16], ["168.63.129.16", 32], ["100.100.100.0", 24], ["0.0.0.0", 8], ["127.0.0.0", 8], ["224.0.0.0", 4], ["240.0.0.0", 4]];
+const HARD_V6 = [["::", 128], ["::1", 128], ["ff00::", 8], ["fe80::", 10], ["fd00:ec2::", 32], ["fd20:ce::254", 128], ["fd7a:115c:a1e0::53", 128]];
+const v4Int = (a) => a.split(".").reduce((n, o) => n * 256 + Number(o), 0);
+const in4 = (a, net, plen) => plen <= 0 || (v4Int(a) >>> (32 - plen)) === (v4Int(net) >>> (32 - plen));
+const big6 = (g) => g.reduce((acc, x) => (acc << 16n) | BigInt(x), 0n);
+const in6 = (a, net, plen) => {
+  if (plen <= 0) return true;
+  const shift = BigInt(128 - plen);
+  return (big6(expand6(a)) >> shift) === (big6(expand6(net)) >> shift);
+};
+
+/** A host name as an allow list holds it: lower case, no trailing dot. */
+const addonHost = (h) => (typeof h === "string" ? h.trim().toLowerCase().replace(/\.$/, "") : "");
+const isPortNumber = (p) => Number.isInteger(p) && p > 0 && p < 65536;
+
+/** One address spelling for comparison: brackets/zone dropped, v4-mapped becomes its IPv4. */
+function canonTargetAddr(addr) {
+  const s = String(addr ?? "").trim().replace(/^\[(.*)\]$/, "$1").split("%")[0].toLowerCase();
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(s);
+  return mapped ? mapped[1] : s;
+}
+
+/** Is `addr` in the range a listed entry may never reach (also inside a ::ffff: wrapper)? */
+function addonHardDenied(addr) {
+  const a = canonTargetAddr(addr);
+  const fam = isIP(a);
+  if (fam === 4) return HARD_V4.some(([n, p]) => in4(a, n, p));
+  if (fam !== 6) return true;
+  const h = expand6(a);
+  if (h.slice(0, 5).every((x) => x === 0) && h[5] === 0xffff) {
+    const v4 = v4From(h[6], h[7]);
+    if (HARD_V4.some(([n, p]) => in4(v4, n, p))) return true;
+  }
+  return HARD_V6.some(([n, p]) => in6(a, n, p));
+}
+
+/**
+ * A listed entry's address: null when allowed. A private or on-link destination
+ * is allowed (the owner listed it), but never cloud metadata, loopback, the
+ * unspecified/multicast/reserved ranges, or anything while the view is broken.
+ */
+function listedAddrReason(addr, view) {
+  const a = canonTargetAddr(addr);
+  const fam = isIP(a);
+  if (!fam) return "not an IP address";
+  const r = egressDenyReason(a, { view });
+  if (r === null) return null;
+  if (r === "loopback") return "own host";
+  if (!SOFT_REASONS.has(r)) return r;
+  if (addonHardDenied(a)) return "not allowed for a listed host";
+  if (fam === 4 ? view.failed : view.failed || view.failed6) return "own-host view unreadable";
+  return null;
+}
+
+/** The validated view of `o.addon` (nothing here trusts its shape). */
+function normalizeAddon(raw) {
+  const targets = (list) => {
+    const out = new Map();
+    for (const e of Array.isArray(list) ? list : []) {
+      if (!e || typeof e !== "object") continue;
+      const port = Number(e.port);
+      const host = addonHost(e.host);
+      if (!host || !isPortNumber(port)) continue;
+      const key = host + ":" + port;
+      if (!out.has(key)) out.set(key, { host, port });
+    }
+    return out;
+  };
+  const splices = (list) => {
+    const out = new Map();
+    for (const e of Array.isArray(list) ? list : []) {
+      if (!e || typeof e !== "object") continue;
+      const port = Number(e.port);
+      if (!isPortNumber(port) || out.has(port)) continue;
+      const ownerProject = typeof e.ownerProject === "string" && e.ownerProject ? e.ownerProject : null;
+      out.set(port, { port, ownerProject });
+    }
+    return out;
+  };
+  const st = raw.selfTargets && typeof raw.selfTargets === "object" ? raw.selfTargets : {};
+  const names = new Set((Array.isArray(st.names) ? st.names : []).map(addonHost).filter(Boolean));
+  const addrs = new Set((Array.isArray(st.addrs) ? st.addrs : []).map(canonTargetAddr).filter(Boolean));
+  const cacheMs = Number(raw.ownerCacheMs);
+  return {
+    id: String(raw.id ?? "?"),
+    isDoor: typeof raw.isDoor === "function" ? raw.isDoor : () => false,
+    internet: raw.internet === true,
+    loopback: splices(raw.loopback),
+    hosts: targets(raw.hosts),
+    plainHttpHosts: targets(raw.plainHttpHosts),
+    selfNames: names,
+    selfAddrs: addrs,
+    listenerOwner: typeof raw.listenerOwner === "function" ? raw.listenerOwner : null,
+    ownerCacheMs: Number.isFinite(cacheMs) && cacheMs >= 0 ? cacheMs : 2000,
+    httpTarget: typeof raw._httpTarget === "function" ? raw._httpTarget : null,
+  };
+}
+
+/** Origin-form and free of anything that could rewrite the path, before a door predicate sees it. */
+function safeDoorTarget(rawTarget) {
+  if (typeof rawTarget !== "string" || rawTarget === "") return false;
+  if (rawTarget[0] !== "/" || rawTarget[1] === "/") return false;
+  if (ADDON_FORBIDDEN.test(rawTarget)) return false;
+  return !(rawTarget.includes("//") || rawTarget.includes("..") || rawTarget.includes("%"));
+}
+
 /**
  * @param {object} o
  * @param {string} o.dir            fresh dir for the socket (created 0700, removed on close)
@@ -585,6 +707,10 @@ export function createEgressRelay(o) {
   // relay does not proxy. 443 by default.
   const ports = new Set((o.egressPorts || [443]).map(Number));
   const allow = Array.isArray(o.egressAllow) ? o.egressAllow : null;
+  // A walled add-on's relay. Absent for a bot: every `if (addon)` branch below
+  // is then unreachable and the bot path is unchanged.
+  const addon = o.addon && typeof o.addon === "object" ? o.addon : null;
+  const cfg = addon ? normalizeAddon(addon) : null;
   const log = o.log || ((l) => console.error(l));
   const local = { local: o.local, hostAddrs: o.hostAddrs,
     denyNets: o.denyNets || String(process.env.CROW_PI_EGRESS_DENY_NETS || "").split(",").map((x) => x.trim()).filter(Boolean) };
@@ -611,14 +737,24 @@ export function createEgressRelay(o) {
   // hosts must not grow the spawner's memory (one summary line instead).
   const logged = new Set();
   let suppressed = 0;
+  // Add-on mode keeps the last refused targets for the owner's status card.
+  const denials = [];
   const note = (decision, target, reason) => {
     const key = decision + " " + target;
     if (logged.has(key)) return;
     if (logged.size >= MAX_LOGGED) {
-      if (suppressed++ === 0) log(`[pi-egress] bot=${o.botId || "?"} more than ${MAX_LOGGED} distinct targets; further decisions are not logged`);
+      if (suppressed++ === 0) log((addon ? `[addon-egress] addon=${cfg.id}` : `[pi-egress] bot=${o.botId || "?"}`) + ` more than ${MAX_LOGGED} distinct targets; further decisions are not logged`);
       return;
     }
     logged.add(key);
+    if (addon) {
+      if (decision === "deny") {
+        denials.push(String(target).slice(0, 200));
+        if (denials.length > MAX_DENIALS) denials.shift();
+      }
+      log(`[addon-egress] addon=${cfg.id} ${decision} ${target}${reason ? " (" + reason + ")" : ""}`);
+      return;
+    }
     log(`[pi-egress] bot=${o.botId || "?"} ${decision} ${target}${reason ? " (" + reason + ")" : ""}`);
   };
   let live = 0;
@@ -773,7 +909,7 @@ export function createEgressRelay(o) {
     let up;
     try {
       up = httpRequest({
-        host: "127.0.0.1", port: gatewayPort, localAddress: RELAY_SOURCE_V4,
+        host: "127.0.0.1", port: gatewayPort, localAddress: addon ? ADDON_RELAY_SOURCE_V4 : RELAY_SOURCE_V4,
         method: req.method, path: req.url, headers: upstreamHeaders(req),
         // No pooling: the mark belongs to this request's socket, and a pooled
         // socket would outlive the request that earned it.
@@ -820,6 +956,280 @@ export function createEgressRelay(o) {
     req.pipe(up);
   }
 
+  // ---- add-on mode: listed targets, the owner check, D1 plain HTTP --------
+  // A walled add-on's loopback ports are spliced raw (WebSocket upgrades pass:
+  // it is raw TCP) only after the listener's owner is checked, and an
+  // absolute-form plain-HTTP request to a listed host:port gets one HTTP parser
+  // of its own: one request per connection, `Connection: close` on every
+  // answer, and the same target checks a listed CONNECT gets.
+  const plainTargets = new WeakMap(); // socket -> { host, port, addr }
+  const plainUsed = new WeakSet(); // sockets that have already had their one request
+  const ownerCache = new Map(); // "port|ownerProject" -> { at, value }
+  const plain = addon ? createHttpServer({ requestTimeout: 0, headersTimeout: 60000 }) : null;
+  if (plain) {
+    plain.httpAllowHalfOpen = true;
+    plain.maxRequestsPerSocket = 1;
+    plain.keepAliveTimeout = 0;
+    plain.on("request", (req, res) => {
+      const ht = headTimers.get(req.socket);
+      if (ht) { clearTimeout(ht); headTimers.delete(req.socket); }
+      const t = plainTargets.get(req.socket);
+      if (!t) return refusePlain(req, res, "not a checked target");
+      if (plainUsed.has(req.socket)) {
+        refusePlain(req, res, "one request per connection");
+        try { req.socket.destroy(); } catch {}
+        return;
+      }
+      plainUsed.add(req.socket);
+      const upgrade = req.headers.upgrade !== undefined
+        || /(?:^|,)\s*upgrade\s*(?:,|$)/i.test(String(req.headers.connection || ""));
+      if (req.method === "CONNECT" || upgrade) return refusePlain(req, res, "upgrade refused");
+      if (BODILESS.has(req.method)
+        && (req.headers["transfer-encoding"] !== undefined || Number(req.headers["content-length"] || 0) > 0)) {
+        return refusePlain(req, res, "body on a bodiless method", 400);
+      }
+      let u = null;
+      try { u = new URL(String(req.url || "")); } catch { u = null; }
+      if (!u || u.protocol !== "http:") return refusePlain(req, res, "not an absolute-form target");
+      const host = addonHost(u.hostname.replace(/^\[(.*)\]$/, "$1"));
+      const port = u.port ? Number(u.port) : 80;
+      if (host !== t.host || port !== t.port) return refusePlain(req, res, "a different target than was checked");
+      forwardPlain(req, res, t, u.pathname + u.search);
+    });
+    plain.on("upgrade", (req, socket) => refuseRaw(req, socket, "upgrade refused"));
+    plain.on("connect", (req, socket) => refuseRaw(req, socket, "CONNECT refused"));
+    plain.on("clientError", (err, socket) => {
+      if (!socket.writable || (err && err.code === "ECONNRESET")) { try { socket.destroy(); } catch {} return; }
+      try { socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); } catch { try { socket.destroy(); } catch {} }
+    });
+  }
+
+  /** A plain-HTTP refusal: nothing was opened upstream, and the connection does not survive it. */
+  function refusePlain(req, res, reason, status = 403) {
+    note("deny", targetOf(req), reason);
+    const body = JSON.stringify({ error: status === 400 ? "bad request" : status === 502 ? "bad gateway" : status === 503 ? "unavailable" : "forbidden" });
+    try {
+      res.shouldKeepAlive = false;
+      res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body), connection: "close" });
+      res.end(body);
+    } catch { try { req.socket.destroy(); } catch {} }
+  }
+
+  /** Upstream trouble on a plain-HTTP forward: fail closed (502, like a door). */
+  function failPlain(req, res, e) {
+    if (res.headersSent) { try { res.destroy(); } catch {} return; }
+    refusePlain(req, res, "upstream " + ((e && e.code) || "error"), 502);
+  }
+
+  /** Forward one checked plain-HTTP request upstream, streamed both ways. */
+  function forwardPlain(req, res, t, path) {
+    if (upstreamLive >= maxUpstream) return refusePlain(req, res, "relay upstream cap " + maxUpstream, 503);
+    const dest = cfg.httpTarget ? cfg.httpTarget(t.addr, t.port) : { host: t.addr, port: t.port };
+    let up;
+    try {
+      up = httpRequest({ host: dest.host, port: dest.port, method: req.method, path, headers: upstreamHeaders(req), agent: false });
+    } catch (e) { return failPlain(req, res, e); }
+    upstreamLive++;
+    let released = false;
+    const release = () => { if (!released) { released = true; upstreamLive--; } };
+    up.on("error", (e) => { release(); failPlain(req, res, e); });
+    up.on("close", release);
+    up.on("response", (ur) => {
+      try {
+        const headers = endToEnd(ur.headers);
+        headers.connection = "close";
+        res.shouldKeepAlive = false;
+        res.writeHead(ur.statusCode || 502, headers);
+        ur.pipe(res);
+        const cut = () => { if (!ur.complete) { try { res.destroy(); } catch {} } };
+        ur.on("error", cut);
+        ur.on("aborted", cut);
+        ur.on("close", cut);
+      } catch (e) { try { ur.destroy(); } catch {} failPlain(req, res, e); }
+    });
+    res.on("close", () => { try { up.destroy(); } catch {} });
+    req.pipe(up);
+  }
+
+  /** Hand a checked plain-HTTP connection to its parser (the head bytes are already back on the stream). */
+  const enterPlain = (c) => {
+    plain.emit("connection", c);
+    const ht = setTimeout(() => { try { c.destroy(); } catch {} }, headTimeoutMs);
+    if (ht.unref) ht.unref();
+    headTimers.set(c, ht);
+    c.once("close", () => { clearTimeout(ht); headTimers.delete(c); });
+    c.on("timeout", () => { try { c.destroy(); } catch {} });
+    c.resume();
+  };
+
+  /** Resolve and check one listed target: a CONNECT entry or a D1 plain-HTTP entry. */
+  async function checkListedTarget(host) {
+    if (cfg.selfNames.has(host)) return { reason: "own host" };
+    let addrs;
+    if (isIP(host)) addrs = [{ address: host, family: isIP(host) }];
+    else {
+      try { addrs = await lookup(host); } catch { return { reason: "does not resolve", unresolved: true }; }
+    }
+    if (!Array.isArray(addrs) || !addrs.length) return { reason: "no address" };
+    if (addrs.some((a) => cfg.selfAddrs.has(canonTargetAddr(a && a.address)))) return { reason: "own host" };
+    const view = localView(local); // one host view per decision
+    noteOwnHostView(view);
+    for (const a of addrs) {
+      const r = listedAddrReason(a && a.address, view);
+      if (r) return { reason: r };
+    }
+    return { addrs };
+  }
+
+  /** The owner answer for a listed loopback port, cached per port and ownerProject. */
+  async function ownerOf(port, ownerProject) {
+    const key = port + "|" + (ownerProject || "");
+    const now = Date.now();
+    const hit = ownerCache.get(key);
+    if (hit && now - hit.at <= cfg.ownerCacheMs) return hit.value;
+    let value = null;
+    try {
+      value = cfg.listenerOwner ? await cfg.listenerOwner("127.0.0.1", port) : null;
+      if (!value || typeof value !== "object") value = { kind: "denied", reason: "owner check failed" };
+    } catch { value = { kind: "denied", reason: "owner check failed" }; }
+    ownerCache.set(key, { at: now, value });
+    return value;
+  }
+
+  /** Why a listed loopback port may not be spliced (null: it may). */
+  function loopbackVerdict(owner, entry) {
+    const kind = owner && owner.kind;
+    if (kind === "denied") {
+      const r = String(owner.reason || "denied");
+      return r === "gateway" || r === "satellite" ? "a gateway listens there; gateways are reached through doors only" : r;
+    }
+    if (kind === "own-uid") return entry.ownerProject ? "the listener is not published by " + entry.ownerProject : null;
+    if (kind === "docker-publish") {
+      if (!entry.ownerProject || owner.project === entry.ownerProject) return null;
+      return "published by another compose project";
+    }
+    return "owner check failed";
+  }
+
+  /** One raw loopback splice, opened from the add-on mark. */
+  const spliceAddon = (client, port, leftover) => {
+    const target = o._connectOverride ? o._connectOverride("127.0.0.1", port) : { host: "127.0.0.1", port };
+    let up;
+    try {
+      up = netConnect({ host: target.host, port: target.port, localAddress: ADDON_RELAY_SOURCE_V4, allowHalfOpen: true });
+    } catch { try { client.destroy(); } catch {} return; }
+    sockets.add(up);
+    up.once("close", () => { sockets.delete(up); if (!client.destroyed) client.end(); });
+    up.on("error", () => { try { client.destroy(); } catch {} });
+    client.on("error", () => { try { up.destroy(); } catch {} });
+    client.once("close", () => { try { up.destroy(); } catch {} });
+    up.once("connect", () => {
+      if (client.destroyed) { up.destroy(); return; }
+      if (leftover && leftover.length) up.write(leftover);
+      client.pipe(up);
+      up.pipe(client);
+    });
+  };
+
+  /** `PORT n` in add-on mode: the gateway port is doors, a listed port is spliced after the owner check. */
+  const handleAddonPort = (c, port, buf) => {
+    // Paused before any asynchronous owner check: a socket with no 'data'
+    // listener must not keep flowing into nothing.
+    c.pause();
+    if (gatewayPort && port === gatewayPort) {
+      note("allow", "127.0.0.1:" + port);
+      c.pause();
+      if (buf.length) c.unshift(buf);
+      enterDoors(c);
+      return;
+    }
+    const entry = cfg.loopback.get(port);
+    if (!entry) {
+      note("deny", "127.0.0.1:" + port, "not in the add-on's loopback list");
+      c.destroy();
+      return;
+    }
+    ownerOf(port, entry.ownerProject).then((owner) => {
+      if (c.destroyed) return;
+      const why = loopbackVerdict(owner, entry);
+      if (why) {
+        note("deny", "127.0.0.1:" + port, why);
+        c.destroy();
+        return;
+      }
+      note("allow", "127.0.0.1:" + port);
+      c.pause();
+      spliceAddon(c, port, buf);
+    }).catch(() => { try { c.destroy(); } catch {} });
+  };
+
+  /** An absolute-form plain-HTTP request (D1): only a listed host:port, after the listed-entry checks. */
+  async function handleAddonPlain(c, headText) {
+    const line = String(headText).split("\r\n")[0] || "";
+    const m = line.match(PLAIN_RE);
+    let u = null;
+    if (m) { try { u = new URL(m[2]); } catch { u = null; } }
+    if (!m || !u || u.protocol !== "http:") {
+      note("deny", line.slice(0, 80), "only CONNECT or a listed plain-HTTP target");
+      return refuse(c, 405, "Method Not Allowed");
+    }
+    const host = addonHost(u.hostname.replace(/^\[(.*)\]$/, "$1"));
+    const port = u.port ? Number(u.port) : 80;
+    const target = host + ":" + port;
+    if (!isPortNumber(port) || !cfg.plainHttpHosts.has(target)) {
+      note("deny", target, "not in the add-on's plain-HTTP list");
+      return refuse(c, 405, "Method Not Allowed");
+    }
+    const checked = await checkListedTarget(host);
+    if (checked.reason) {
+      note("deny", target, checked.reason);
+      return refuse(c, checked.unresolved ? 502 : 403, checked.unresolved ? "Bad Gateway" : "Forbidden");
+    }
+    note("allow", target, "resolved " + checked.addrs.map((a) => a.address).join(", "));
+    if (c.destroyed) { try { c.destroy(); } catch {} return; }
+    plainTargets.set(c, { host, port, addr: checked.addrs[0].address });
+    c.pause();
+    // The head goes back on the stream AFTER the bytes that came with it, so
+    // the parser sees a whole request and then whatever followed it.
+    c.unshift(Buffer.from(headText + "\r\n\r\n", "latin1"));
+    enterPlain(c);
+  }
+
+  /** CONNECT in add-on mode: an exact listed entry (private allowed), or the internet when the owner allowed it. */
+  async function handleAddonConnect(c, host, port, target) {
+    const listed = cfg.hosts.has(target);
+    if (!listed) {
+      if (!cfg.internet) { note("deny", target, "internet not allowed for this add-on"); return refuse(c, 403, "Forbidden"); }
+      // In add-on mode an unlisted target is always 443, whatever egressPorts says.
+      if (port !== 443) { note("deny", target, "port not allowed"); return refuse(c, 403, "Forbidden"); }
+      if (!hostAllowed(host, allow)) { note("deny", target, "host not in the add-on's egress list"); return refuse(c, 403, "Forbidden"); }
+    }
+    let addrs;
+    if (listed) {
+      const checked = await checkListedTarget(host);
+      if (checked.reason) {
+        note("deny", target, checked.reason);
+        return refuse(c, checked.unresolved ? 502 : 403, checked.unresolved ? "Bad Gateway" : "Forbidden");
+      }
+      addrs = checked.addrs;
+    } else {
+      if (cfg.selfNames.has(host)) { note("deny", target, "own host"); return refuse(c, 403, "Forbidden"); }
+      if (isIP(host)) addrs = [{ address: host, family: isIP(host) }];
+      else {
+        try { addrs = await lookup(host); } catch { note("deny", target, "does not resolve"); return refuse(c, 502, "Bad Gateway"); }
+      }
+      if (!Array.isArray(addrs) || !addrs.length) { note("deny", target, "no address"); return refuse(c, 403, "Forbidden"); }
+      if (addrs.some((a) => cfg.selfAddrs.has(canonTargetAddr(a && a.address)))) { note("deny", target, "own host"); return refuse(c, 403, "Forbidden"); }
+      const view = localView(local);
+      noteOwnHostView(view);
+      const why = addrs.map((a) => egressDenyReason(a && a.address, { view })).find(Boolean);
+      if (why) { note("deny", target, why); return refuse(c, 403, "Forbidden"); }
+    }
+    if (c.destroyed || c.readableEnded) { try { c.destroy(); } catch {} return; }
+    note("allow", target, "resolved " + addrs.map((a) => a.address).join(", "));
+    splice(c, addrs.map((a) => a.address), port, "HTTP/1.1 200 Connection Established\r\n\r\n");
+  }
+
   /**
    * One request in flight per bot connection. Pipelining used to dial one
    * upstream socket per request the moment it arrived (1,500 sockets from one
@@ -849,6 +1259,17 @@ export function createEgressRelay(o) {
     if (BODILESS.has(req.method)
       && (req.headers["transfer-encoding"] !== undefined || Number(req.headers["content-length"] || 0) > 0)) {
       return refuseWith(req, res, 400, "bad request", "body on a bodiless method");
+    }
+    if (addon) {
+      // An add-on gets NO bot doors: only the predicate the wall computed, and
+      // only for a target shape that cannot be rewritten into another route.
+      if (doorFilter) {
+        if (!safeDoorTarget(req.url)) return refuseDoor(req, res, "not a door");
+        let door = false;
+        try { door = cfg.isDoor(req.url, req.method) === true; } catch { door = false; }
+        if (!door) return refuseDoor(req, res, "not a door");
+      }
+      return forwardDoor(req, res);
     }
     if (doorFilter && !isDoorPath(req.url)) return refuseDoor(req, res, "not a door");
     forwardDoor(req, res);
@@ -920,12 +1341,16 @@ export function createEgressRelay(o) {
     const first = head.split("\r\n")[0] || "";
     const m = first.match(/^(\S+)\s+(\S+)\s+HTTP\/1\.[01]$/);
     if (!m) return refuse(c, 400, "Bad Request");
+    // add-on mode (D1): an absolute-form plain-HTTP request arrives through the
+    // same PROXY line the in-namespace forwarder writes for HTTP_PROXY.
+    if (addon && m[1] !== "CONNECT") return handleAddonPlain(c, head);
     if (m[1] !== "CONNECT") { note("deny", m[1] + " " + m[2].slice(0, 80), "only CONNECT"); return refuse(c, 405, "Method Not Allowed"); }
     const hp = m[2].match(/^\[([0-9a-fA-F:.]+)\]:(\d+)$/) || m[2].match(/^([^:\[\]]+):(\d+)$/);
     if (!hp) return refuse(c, 400, "Bad Request");
     const host = norm(hp[1]), port = Number(hp[2]);
     if (!isIP(host) && !HOSTNAME_RE.test(host)) return refuse(c, 400, "Bad Request");
     const target = host + ":" + port;
+    if (addon) return handleAddonConnect(c, host, port, target);
     if (!ports.has(port)) { note("deny", target, "port not allowed"); return refuse(c, 403, "Forbidden"); }
     if (!hostAllowed(host, allow)) { note("deny", target, "host not in the bot's egress list"); return refuse(c, 403, "Forbidden"); }
     let addrs;
@@ -969,6 +1394,7 @@ export function createEgressRelay(o) {
         if (pm) {
           c.removeListener("data", onData); clearTimeout(timer);
           const port = Number(pm[1]);
+          if (addon) { handleAddonPort(c, port, buf); return; }
           if (!gatewayPort || port !== gatewayPort) {
             // No other loopback port is served at all: the one a contained bot
             // reaches is its own gateway's, and there only the doors. With no
@@ -1017,6 +1443,7 @@ export function createEgressRelay(o) {
   ready.catch(() => {});
   return {
     dir, socketPath, ready, _server: server, _sockets: sockets,
+    denials: () => (addon ? [...denials] : []),
     close: () => new Promise((resolve) => {
       for (const s of sockets) { try { s.destroy(); } catch {} }
       server.close(() => { try { rmSync(dir, { recursive: true, force: true }); } catch {} resolve(); });

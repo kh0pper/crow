@@ -50,6 +50,7 @@
  */
 import { isIP } from "node:net";
 import { classifyIp, parseIPv6 } from "./ip-classify.js";
+import { isAddonRelayAddr } from "./bot-doors.js";
 import { servePeerVerified, warnOnce } from "./peer-uid.js";
 
 /** Tailscale's address ranges. P2 replaces this with the overlay provider's list. */
@@ -283,6 +284,9 @@ export function isLocalPeer(remoteAddr, headers = {}) {
   try {
     const sock = normalizeAddr(remoteAddr || "");
     const h = headers || {};
+    // A walled add-on's relay mark is never local: an add-on's socket must not
+    // reach what a loopback caller reaches (the bot mark keeps its own rules).
+    if (isAddonRelayAddr(sock)) return false;
     return !!sock && isLoopbackAddr(sock) && !isTrustedProxy(sock) && !hasForwarding(h) && !hasTailscale(h);
   } catch { return false; }
 }
@@ -309,6 +313,9 @@ export function classifyPeer(req) {
     out.client = proxySocketClient(headers);
   } else if (!sock) {
     // no peer address: stays unverified
+  } else if (isAddonRelayAddr(sock)) {
+    // A walled add-on's relay mark stays `unverified` with the mark itself as
+    // the client: it is not local, and no Serve/Funnel shape is read off it.
   } else if (isTrustedProxy(sock)) {
     out.via = "proxy";
     out.client = proxyClient(sock, headers);

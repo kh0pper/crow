@@ -40,6 +40,15 @@ export const BOT_DOOR_PREFIXES = Object.freeze([
 /** The source address the relay binds for every upstream socket it opens. */
 export const RELAY_SOURCE_V4 = "127.0.77.1";
 
+/**
+ * The same mark for a walled add-on's relay. A separate address, because the
+ * two are classified differently: the bot mark keeps today's loopback rules
+ * (two bot doors, the peer relay and the cloud door, require a local caller),
+ * while peer-class never treats the add-on mark as a local caller. Both marks
+ * are refused /internal and the local token (isRelayedSocket).
+ */
+export const ADDON_RELAY_SOURCE_V4 = "127.0.78.1";
+
 // Anything that could rewrite the path between this check and the gateway's
 // router is refused rather than reasoned about: a ".." segment, a second
 // slash, a backslash, "*" (OPTIONS *), and ANY percent-escape (a normalised
@@ -81,12 +90,19 @@ export function normalizeRelayAddr(addr) {
   return s;
 }
 
+/** Is this address the walled add-on's relay mark, in any spelling? */
+export function isAddonRelayAddr(addr) {
+  return normalizeRelayAddr(addr) === ADDON_RELAY_SOURCE_V4;
+}
+
 /**
- * Did this socket come from the egress relay? True only for the mark, in any
- * spelling the kernel may report it (a dual-stack listener sees the v4-mapped
- * form). Every other peer, loopback ones included, is not relayed.
+ * Did this socket come from an egress relay? True for either mark (a bot's
+ * RELAY_SOURCE_V4 or a walled add-on's ADDON_RELAY_SOURCE_V4), in any spelling
+ * the kernel may report it (a dual-stack listener sees the v4-mapped form).
+ * Every other peer, loopback ones included, is not relayed.
  */
 export function isRelayedSocket(socket) {
   if (!socket || typeof socket !== "object") return false;
-  return normalizeRelayAddr(socket.remoteAddress) === RELAY_SOURCE_V4;
+  const a = normalizeRelayAddr(socket.remoteAddress);
+  return a === RELAY_SOURCE_V4 || a === ADDON_RELAY_SOURCE_V4;
 }
