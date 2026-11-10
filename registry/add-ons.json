@@ -492,7 +492,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.5.2",
+      "version": "1.6.0",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -2753,7 +2753,7 @@
     {
       "id": "kiosk",
       "name": "Kiosk display",
-      "version": "0.5.1",
+      "version": "0.5.2",
       "type": "mcp-server",
       "author": "Crow",
       "category": "hardware",
@@ -6599,7 +6599,7 @@
     {
       "id": "studio",
       "name": "Crow Studio",
-      "version": "0.7.1",
+      "version": "0.7.2",
       "description": "A shared music studio: you in the dashboard and an AI agent over MCP edit one live song together; every edit is tagged and undoable.",
       "type": "mcp-server",
       "author": "Crow",
