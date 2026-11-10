@@ -136,16 +136,25 @@ async function instanceLevel(db, lang, { botId = null, bot = null } = {}) {
     const inst = instanceContainment(bots, { host: { bwrap: probe.ok === true } });
     const level = Object.hasOwn(LEVEL_KEY, inst.level) ? inst.level : LEVEL_NOT;
     const mine = botId ? bots.find((b) => b && String(b.botId) === String(botId)) : null;
-    const enforced = !!mine && (mine.level === LEVEL_CONTAINED || mine.level === LEVEL_PARTLY);
+    // A spawn record is history: if bwrap is not on this host now, nothing is contained
+    // now, whatever an earlier run recorded.
+    const enforced = probe.ok === true && !!mine
+      && (mine.level === LEVEL_CONTAINED || mine.level === LEVEL_PARTLY);
     const dbsOpen = enforced && Array.isArray(mine.open)
       && mine.open.some((line) => String(line).endsWith(OPEN_DATA_DBS));
     // The same key (and the same words) Bot Runtime's own level line uses, so the two
     // surfaces can never drift; "no bots" when this process could observe none.
+    // This page is about ONE bot: when it has its own entry, the line shows that bot's
+    // level (never the instance-wide minimum, which could read "not contained" right
+    // above "containment is on for this bot"); otherwise the instance's level.
+    const shown = mine
+      ? (enforced ? (Object.hasOwn(LEVEL_KEY, mine.level) ? mine.level : LEVEL_NOT) : LEVEL_NOT)
+      : level;
     const text = bots.length > 0
-      ? fill(t("settings.botRuntimeContainmentLevel", lang), { level: t(LEVEL_KEY[level], lang) })
+      ? fill(t("settings.botRuntimeContainmentLevel", lang), { level: t(LEVEL_KEY[shown], lang) })
       : t("settings.containment.noBots", lang);
     const runsChecked = !enforced && !mine && isDisabledPiBot(bot);
-    return { level, enforced, dbsOpen, runsChecked, text };
+    return { level: shown, enforced, dbsOpen, runsChecked, text };
   } catch {
     return {
       level: LEVEL_NOT, enforced: false, dbsOpen: false, runsChecked: false,

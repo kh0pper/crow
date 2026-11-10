@@ -162,6 +162,10 @@ test("a bot outside the contained list is told its folders are not limits", asyn
   // The contained bot's own page still says it — the wording follows the BOT, not the page.
   const mine = await renderSafety(ctx("en", rows));
   assert.ok(mine.includes(translations["botbuilder.sfFoldersEnforcedDbs"].en), "the contained bot keeps its wording");
+  // Its level line is ITS level, not the instance-wide minimum the uncovered bot drags
+  // down — the page must not read "not contained" above "containment is on".
+  const notLine = fill(t("settings.botRuntimeContainmentLevel", "en"), { level: t("settings.containment.levelNot", "en") });
+  assert.ok(!mine.includes(notLine), "no 'not contained' line on a contained bot's page");
 
   const es = await renderSafety({ ...ctx("es", rows), botId: OTHER });
   assert.ok(es.includes(translations["botbuilder.sfFoldersNotLimits"].es), "es folders card");
@@ -205,4 +209,14 @@ test("the Safety tab reads the level from containment-status.mjs, not from its o
   assert.ok(!html.includes(translations["botbuilder.sfFoldersEnforced"].en));
   const unobserved = await containmentBots(dbWith());
   assert.notEqual(unobserved[0].level, LEVEL_PARTLY);
+});
+
+test("a contained record does not claim limits when bwrap is gone from this host", async () => {
+  // A spawn record is history: with no bwrap now, nothing is contained now.
+  recordContainSpawn();
+  _setHostBwrapProbeForTest(() => ({ ok: false }));
+  const html = await renderSafety(ctx("en"));
+  assert.ok(html.includes(translations["botbuilder.sfFoldersNotLimits"].en));
+  assert.ok(!html.includes(translations["botbuilder.sfFoldersEnforced"].en));
+  assert.ok(!html.includes(translations["botbuilder.sfFoldersEnforcedDbs"].en));
 });
