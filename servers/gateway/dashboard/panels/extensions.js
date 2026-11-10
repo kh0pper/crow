@@ -15,6 +15,12 @@ import { buildExtensionsHTML } from "./extensions/html.js";
 import { localModelsCounts } from "./extensions/local-models-card.js";
 import { serversClientJS } from "./extensions/servers-client.js";
 import { serversPanelData } from "./extensions/servers-data.js";
+import { isLocalPasswordSessionOn } from "../local-session.js";
+
+// Test-only: stand in for the invite-state read, which logs in to the app's own
+// admin panel (a test has no container). The session gate in front of it still runs.
+let _inviteStatesForTest = null;
+export function _setInviteStatesForTest(fn) { _inviteStatesForTest = fn || null; }
 
 export default {
   id: "extensions",
@@ -93,19 +99,22 @@ export default {
       // session only; otherwise the card stays "cannot read" (cached ~5 min).
       let inviteStates = {};
       try {
-        if (localInstalled.vaultwarden) {
-          const { isLocalPasswordSessionOn } = await import("../../local-session.js");
-          if (await isLocalPasswordSessionOn(db, req)) {
-            const { getManifest: getReviewedManifest } = await import("../../bundles-config.js");
-            const { inviteStatesFor } = await import("../../first-admin/vaultwarden-invite.js");
-            inviteStates = await inviteStatesFor({
-              installed: localInstalled,
-              manifest: getReviewedManifest("vaultwarden"),
-              db,
-            });
-          }
+        if (localInstalled.vaultwarden && await isLocalPasswordSessionOn(db, req)) {
+          const { getManifest: getReviewedManifest } = await import("../../bundles-config.js");
+          const { inviteStatesFor } = await import("../../first-admin/vaultwarden-invite.js");
+          const readInviteStates = _inviteStatesForTest || inviteStatesFor;
+          inviteStates = await readInviteStates({
+            installed: localInstalled,
+            manifest: getReviewedManifest("vaultwarden"),
+            db,
+          });
         }
-      } catch { inviteStates = {}; }
+      } catch (err) {
+        // No state is the safe direction (the card says it cannot read the app), but
+        // a silent catch hid a broken import once: say so, one line, no secrets.
+        inviteStates = {};
+        console.warn(`[extensions] invite state not computed: ${err?.message ?? err}`);
+      }
       firstAdminPending = pendingFirstAdminNotices({
         installed: localInstalled,
         manifests,

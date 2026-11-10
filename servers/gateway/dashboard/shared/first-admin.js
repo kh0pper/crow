@@ -257,8 +257,9 @@ export function firstAdminInviteReason(reason, name, lang = "en") {
 
 /**
  * The "these are not accounts you made" sentence for an invite card whose app has
- * registered accounts other than the owner's address, or null. `others` comes from
- * the handler (it knows the owner's address); the renderer escapes the result.
+ * registered accounts other than the one Crow invited, or null. `others` comes from
+ * the handler (it reads the recorded invite, never the editable `.env`); the
+ * renderer escapes the result.
  *
  * @param {{others?: string[]}|null} invite
  * @param {string} lang

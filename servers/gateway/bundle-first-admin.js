@@ -92,6 +92,13 @@ export const FIRST_ADMIN_NOTICE_PREFIX = "first_admin_notice:";
 export const FIRST_ADMIN_NOTIFICATION_SOURCE = "bundle-installer";
 /** What Crow's own setup run did for this bundle, at this install (`firstAdmin.via: "setup"`). */
 export const FIRST_ADMIN_AUTO_PREFIX = "first_admin_auto:";
+/**
+ * The address Crow actually invited into this bundle's own admin panel. An
+ * invite-only app's installed `.env` carries an owner email too, but that file is
+ * editable through `POST /bundles/api/env`: only this marker (written here, by
+ * Crow, on a successful invite) says which registered account is the expected one.
+ */
+export const FIRST_ADMIN_INVITED_PREFIX = "first_admin_invited:";
 
 /** The operator pressed Done for this bundle at this install (`<installedAt>`). */
 export const firstAdminDoneKey = (bundleId) => `${FIRST_ADMIN_DONE_PREFIX}${bundleId}`;
@@ -99,6 +106,8 @@ export const firstAdminDoneKey = (bundleId) => `${FIRST_ADMIN_DONE_PREFIX}${bund
 export const firstAdminNoticeKey = (bundleId) => `${FIRST_ADMIN_NOTICE_PREFIX}${bundleId}`;
 /** This bundle's most recent automatic setup outcome (`{install, result}`). */
 export const firstAdminAutoKey = (bundleId) => `${FIRST_ADMIN_AUTO_PREFIX}${bundleId}`;
+/** The address Crow invited into this bundle's admin panel, last time it invited one. */
+export const firstAdminInvitedKey = (bundleId) => `${FIRST_ADMIN_INVITED_PREFIX}${bundleId}`;
 
 /**
  * Every `first_admin_done:<id>` marker, as id → install timestamp. One query;
@@ -130,6 +139,48 @@ async function writeMarker(db, key, value) {
     sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
     args: [key, value, value],
   });
+}
+
+/**
+ * The address Crow last invited into this bundle's own admin panel, or null. Plain
+ * SQL like the other markers; an unreadable table (or no db handed in) is "no
+ * record", which callers must treat as "nothing is expected yet".
+ *
+ * @param {object|null} db libsql-shaped client
+ * @param {string} bundleId
+ * @returns {Promise<string|null>}
+ */
+export async function firstAdminInvitedEmail(db, bundleId) {
+  if (!db || typeof db.execute !== "function" || typeof bundleId !== "string" || !bundleId) return null;
+  try {
+    const { rows } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [firstAdminInvitedKey(bundleId)] });
+    const value = String(rows?.[0]?.value ?? "").trim();
+    return value === "" ? null : value;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remember the address an invite really succeeded for (install path or the owner's
+ * own invite route). Written as plain SQL like the Done marker: per install, local
+ * only, no registry entry (`first_admin_*` is in INSTANCE_SCOPE_KEYS). Never throws.
+ *
+ * @param {object|null} db libsql-shaped client
+ * @param {string} bundleId
+ * @param {string} email the address the app accepted
+ * @returns {Promise<boolean>}
+ */
+export async function recordFirstAdminInvite(db, bundleId, email) {
+  if (!db || typeof bundleId !== "string" || !bundleId) return false;
+  const address = typeof email === "string" ? email.trim() : "";
+  if (address === "") return false;
+  try {
+    await writeMarker(db, firstAdminInvitedKey(bundleId), address);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

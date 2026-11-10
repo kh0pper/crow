@@ -325,7 +325,11 @@ What happens, in order:
    invited address (and only that: a *disabled* account does not count) with no
    account yet says to create it; no account at all asks for the email (**Invite my
    email**); an app Crow cannot read keeps today's card plus one sentence saying why.
-   Accounts registered under addresses other than the owner's are named on the card.
+   Accounts registered under addresses other than the one Crow invited are named on
+   the card. That address is recorded in `dashboard_settings`
+   (`first_admin_invited:<id>`, never synced) when an invite succeeds; the editable
+   `.env` is only the install-time input, so changing it hides nobody. With no
+   recorded invite, every registered address is named.
    **Done** only hides the "Crow could not read the app" card: every state that is a
    live warning (close / create / invite) shows the card again on the next render,
    whether or not Done was pressed.

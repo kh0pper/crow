@@ -50,6 +50,8 @@ execFileSync(process.execPath, ["scripts/init-db.js"], {
 });
 
 const H = await import("../servers/gateway/first-admin/vaultwarden-invite.js");
+const FA_MARKERS = await import("../servers/gateway/bundle-first-admin.js");
+const DB = await import("../servers/db.js");
 const REGISTRY = await import("../servers/gateway/first-admin/registry.js");
 const FA = await import("../servers/gateway/dashboard/shared/first-admin.js");
 const { buildExtensionsHTML } = await import("../servers/gateway/dashboard/panels/extensions/html.js");
@@ -77,6 +79,34 @@ after(() => {
 const INSTALL = "2026-11-09T10:00:00.000Z";
 const TOKEN = "Plain-admin-token_1+2/3=";
 const OWNER = "owner@example.com";
+
+/**
+ * A db that only answers the recorded-invite read (`first_admin_invited:<id>`):
+ * Crow invited `email`, so that registered account is the expected one. No file, no
+ * schema — the real rows are exercised in the marker tests.
+ */
+function recordedInviteDb(email) {
+  const key = FA_MARKERS.firstAdminInvitedKey("vaultwarden");
+  return {
+    execute: async ({ sql, args }) => (/SELECT value FROM dashboard_settings WHERE key = \?/.test(sql) && args?.[0] === key
+      ? { rows: [{ value: email }] }
+      : { rows: [] }),
+  };
+}
+
+/** A real client on the scratch crow.db (what the invite step writes its marker to). */
+function markerDb() { return DB.createDbClient(); }
+
+/** Start from "Crow never invited anyone" for this test file's own marker row. */
+async function forgetInvitedEmail(db, bundleId = "vaultwarden") {
+  await db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = ?", args: [FA_MARKERS.firstAdminInvitedKey(bundleId)] });
+}
+
+/** The recorded invite, read straight from the scratch crow.db. */
+async function recordedInvite(bundleId = "vaultwarden") {
+  const db = markerDb();
+  try { return await FA_MARKERS.firstAdminInvitedEmail(db, bundleId); } finally { db.close(); }
+}
 
 /** A `.env` fixture bundle dir. */
 function envDir(env) {
@@ -250,7 +280,7 @@ test("state: one login, form-encoded token, cookie reused on every call, _status
       { email: "off@example.com", _status: 2, key: "" },
     ],
   });
-  const state = await H.vaultwardenState({ installDir: LOOPBACK_DIR(), fetch: fetchImpl, readAdminToken: async () => TOKEN });
+  const state = await H.vaultwardenState({ installDir: LOOPBACK_DIR(), fetch: fetchImpl, readAdminToken: async () => TOKEN, db: recordedInviteDb(OWNER) });
   assert.equal(loginCalls(calls).length, 1, "exactly one admin login for one operation");
   const login = loginCalls(calls)[0];
   assert.equal(login.headers["content-type"], "application/x-www-form-urlencoded");
@@ -742,7 +772,7 @@ test("S5: registered addresses that are not the owner's are named on the card, c
   assert.doesNotMatch(html, /odd<name>@example\.com/);
 });
 
-test("the handler names the owner's other accounts, not the owner's own", async () => {
+test("the handler names every registered account Crow did not invite", async () => {
   const fake = signedIn({
     signups: "on",
     users: [
@@ -752,11 +782,44 @@ test("the handler names the owner's other accounts, not the owner's own", async 
       { email: "invited@example.com", _status: 1 },
     ],
   });
-  const state = await H.vaultwardenState({ installDir: LOOPBACK_DIR(), fetch: fake.fetchImpl, readAdminToken: async () => TOKEN });
-  assert.deepEqual(state.others, ["someone@example.com"], "the owner's address is expected; a disabled one is not registered");
-  // With no owner address configured, Crow cannot vouch for any registration.
-  const unknownOwner = await H.vaultwardenState({ installDir: envDir({ VAULTWARDEN_URL: "http://localhost:8097" }), fetch: fake.fetchImpl, readAdminToken: async () => TOKEN });
-  assert.deepEqual(unknownOwner.others, [OWNER, "someone@example.com"]);
+  const db = markerDb();
+  try {
+    await forgetInvitedEmail(db);
+    // No recorded invite: Crow cannot vouch for ANY registration, however the .env reads.
+    const noRecord = await H.vaultwardenState({ installDir: LOOPBACK_DIR(), fetch: fake.fetchImpl, readAdminToken: async () => TOKEN, db });
+    assert.deepEqual(noRecord.others, [OWNER, "someone@example.com"], "every registered account needs a check; a disabled one is not registered");
+
+    // An invite really succeeded for OWNER: that address, and only it, is expected.
+    assert.equal(await FA_MARKERS.recordFirstAdminInvite(db, "vaultwarden", "Owner@Example.com"), true);
+    const recorded = await H.vaultwardenState({ installDir: LOOPBACK_DIR(), fetch: fake.fetchImpl, readAdminToken: async () => TOKEN, db });
+    assert.deepEqual(recorded.others, ["someone@example.com"], "the recorded address is expected, case-insensitively");
+    assert.equal(await recordedInvite(), "Owner@Example.com", "the marker is a real dashboard_settings row");
+  } finally {
+    await forgetInvitedEmail(db).catch(() => {});
+    db.close();
+  }
+});
+
+test("round 3: an edited .env cannot hide a stranger — the recorded invite decides", async () => {
+  const STRANGER = "stranger@example.com";
+  const fake = signedIn({
+    signups: "on",
+    users: [{ email: OWNER, _status: 0 }, { email: STRANGER, _status: 0 }],
+  });
+  const db = markerDb();
+  try {
+    await forgetInvitedEmail(db);
+    // Crow's own invite recorded the operator's address earlier.
+    await FA_MARKERS.recordFirstAdminInvite(db, "vaultwarden", OWNER);
+    // A non-owner session rewrote VAULTWARDEN_OWNER_EMAIL through POST /bundles/api/env.
+    const tampered = envDir({ VAULTWARDEN_URL: "http://localhost:8097", VAULTWARDEN_OWNER_EMAIL: STRANGER });
+    const state = await H.vaultwardenState({ installDir: tampered, fetch: fake.fetchImpl, readAdminToken: async () => TOKEN, db });
+    assert.deepEqual(state.others, [STRANGER], "the stranger is still named on the card");
+    assert.equal(state.others.includes(OWNER), false, "the address Crow invited is the expected account");
+  } finally {
+    await forgetInvitedEmail(db).catch(() => {});
+    db.close();
+  }
 });
 
 test("card state 5: unreachable / no-token / unknown keep today's card plus one sentence why", () => {
@@ -1188,21 +1251,31 @@ test("the invite route invites and answers with a plain sentence; a bad address 
   });
   B._setFirstAdminInviteDepsForTest({ fetch: fake.fetchImpl, readAdminToken: async () => TOKEN });
   H.clearInviteStateCache();
+  {
+    const db = markerDb();
+    try { await forgetInvitedEmail(db); } finally { db.close(); }
+  }
   try {
     await withServer({ owner: true }, async (post) => {
       const bad = await post("/bundles/api/first-admin-invite", { bundle_id: ROUTE_ID, email: "nope" });
       assert.equal(bad.status, 400);
       assert.equal(bad.body.result, "invalid-email");
       assert.equal(bad.body.error, "That does not look like an email address.");
+      assert.equal(await recordedInvite(), null, "a refused address records nothing");
       const r = await post("/bundles/api/first-admin-invite", { bundle_id: ROUTE_ID, email: OWNER });
       assert.equal(r.status, 200, JSON.stringify(r.body));
       assert.equal(r.body.ok, true);
       assert.equal(r.body.result, "invited");
       assert.match(r.body.message, /Crow invited owner@example\.com/);
       assert.doesNotMatch(JSON.stringify(r.body), /Plain-admin-token|VW_ADMIN|jwt-value/);
+      // Round 3: the address the app accepted is recorded, so the card never has to
+      // trust the editable VAULTWARDEN_OWNER_EMAIL to know which account is expected.
+      assert.equal(await recordedInvite(), OWNER);
     });
   } finally {
     B._setFirstAdminInviteDepsForTest(null);
+    const db = markerDb();
+    try { await forgetInvitedEmail(db); } finally { db.close(); }
   }
 });
 
@@ -1323,6 +1396,10 @@ test("the install invites the owner's email after compose up when the email is s
     "POST /admin/config": () => { closed = true; return res_({ status: 200 }); },
   });
   B._setFirstAdminInviteDepsForTest({ fetch: fake.fetchImpl, readAdminToken: async () => TOKEN });
+  {
+    const db = markerDb();
+    try { await forgetInvitedEmail(db); } finally { db.close(); }
+  }
   try {
     const { out, job } = await runInstall(id, manifest, { VAULTWARDEN_OWNER_EMAIL: OWNER, VAULTWARDEN_URL: "http://localhost:8097" });
     assert.equal(out.ok, true, out.reason);
@@ -1332,6 +1409,29 @@ test("the install invites the owner's email after compose up when the email is s
     assert.ok(fake.calls.some((c) => c.path === "/alive"), "after the app answered /alive");
     assert.ok(configCalls(fake.calls).length === 1, "the full config was posted once");
     assert.doesNotMatch(log, /Plain-admin-token|VW_ADMIN|jwt-value/);
+    // Round 3: the install's own invite records the address too (the handler has no
+    // db there, so it opens one on CROW_DATA_DIR).
+    assert.equal(await recordedInvite(), OWNER);
+  } finally {
+    B._setFirstAdminInviteDepsForTest(null);
+    const db = markerDb();
+    try { await forgetInvitedEmail(db); } finally { db.close(); }
+  }
+});
+
+test("round 3: a failed install invite records no address", async () => {
+  const id = "vaultwarden";
+  const manifest = installManifest(id);
+  const fake = fakeVaultwarden({ "GET /alive": () => res_({ status: 200 }), "POST /admin": () => res_({ status: 401 }) });
+  B._setFirstAdminInviteDepsForTest({ fetch: fake.fetchImpl, readAdminToken: async () => TOKEN });
+  {
+    const db = markerDb();
+    try { await forgetInvitedEmail(db); } finally { db.close(); }
+  }
+  try {
+    const { out } = await runInstall(id, manifest, { VAULTWARDEN_OWNER_EMAIL: OWNER, VAULTWARDEN_URL: "http://localhost:8097" });
+    assert.equal(out.ok, true, out.reason);
+    assert.equal(await recordedInvite(), null, "a refused token leaves no address recorded");
   } finally {
     B._setFirstAdminInviteDepsForTest(null);
   }

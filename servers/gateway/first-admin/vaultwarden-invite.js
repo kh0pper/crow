@@ -36,6 +36,13 @@
  * file is editable through `POST /bundles/api/env`, so it must not decide where the
  * admin token is sent.
  *
+ * The same goes for which registered account the card treats as the expected one:
+ * `VAULTWARDEN_OWNER_EMAIL` is only the INSTALL-TIME invite input. A successful
+ * invite records the address in the `first_admin_invited:vaultwarden` marker (plain
+ * SQL, like the other `first_admin_*` markers), and only that marker decides who is
+ * "others" — otherwise a non-owner session could point the .env at a stranger's
+ * address and hide that account from the card.
+ *
  * Never logged, never returned: the admin token, the session cookie, or anything
  * Vaultwarden said beyond a fixed status word. Every seam (fetch, keychain reader,
  * clock, sleep) is injectable, so tests need no container and no keychain.
@@ -43,6 +50,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BUNDLES_DIR } from "../bundles-config.js";
+import { firstAdminInvitedEmail, recordFirstAdminInvite } from "../bundle-first-admin.js";
 import { parseEnvText } from "../bundle-env-codec.js";
 import { firstAdminOf } from "../dashboard/shared/first-admin.js";
 import { isInviteHandlerName } from "./registry.js";
@@ -76,9 +84,10 @@ function requestSignal() {
 
 /**
  * The installed bundle's `.env` as an object (empty when absent or unreadable).
- * Used for the operator's own address (the email to invite, and the one account a
- * card treats as expected) — NEVER for where Crow sends the admin token: that is
- * vaultwardenBaseUrl().
+ * Used for the operator's own address at INSTALL time — the email to invite once.
+ * It never decides which registered account is expected (a non-owner session can
+ * rewrite that file): the `first_admin_invited:<id>` marker does. NEVER for where
+ * Crow sends the admin token: that is vaultwardenBaseUrl().
  */
 export function installedVaultwardenEnv(installDir) {
   if (typeof installDir !== "string" || !installDir) return {};
@@ -437,6 +446,35 @@ async function rememberSignupsClosed(installDir) {
   }
 }
 
+/**
+ * Record the address an invite SUCCEEDED for, in the `first_admin_invited:<id>`
+ * marker. This is the one thing that decides which registered account the card
+ * treats as expected — never the installed `.env`, which any non-owner session can
+ * rewrite through `POST /bundles/api/env`. Never throws, never fails the invite.
+ *
+ * @param {object|null} db the caller's client, else one is opened here (the install
+ *   path has none).
+ * @param {string} email the address the app accepted.
+ */
+async function rememberInvitedEmail(db, email) {
+  let client = db;
+  let own = false;
+  try {
+    if (!client) {
+      const { createDbClient } = await import("../../db.js");
+      client = createDbClient();
+      own = true;
+    }
+    await recordFirstAdminInvite(client, VAULTWARDEN_BUNDLE_ID, email);
+  } catch {
+    // No marker means every registered account is listed: the safe direction.
+  } finally {
+    if (own) {
+      try { client?.close?.(); } catch { /* already closed */ }
+    }
+  }
+}
+
 /** Resolve the injectable seams of one operation. */
 function operationDeps({ fetch: fetchImpl, readAdminToken = null, db = null } = {}) {
   return {
@@ -445,14 +483,18 @@ function operationDeps({ fetch: fetchImpl, readAdminToken = null, db = null } = 
   };
 }
 
-/** The registered addresses that are not the owner's own (capped, for the card). */
-function otherRegistered(users, ownerEmail) {
-  const owner = typeof ownerEmail === "string" ? ownerEmail.trim().toLowerCase() : "";
+/**
+ * The registered addresses that are not the recorded owner's own (capped, for the
+ * card). `invitedEmail` is the `first_admin_invited:` marker — the address an invite
+ * really succeeded for — NOT the installed `.env`.
+ */
+function otherRegistered(users, invitedEmail) {
+  const owner = typeof invitedEmail === "string" ? invitedEmail.trim().toLowerCase() : "";
   return users
     .filter((u) => u && u.registered === true && typeof u.email === "string" && u.email !== "")
     .map((u) => u.email)
-    // Without a configured owner email Crow cannot vouch for ANY account, so all of
-    // them are worth naming. With one, the owner's own account is expected.
+    // With no recorded invite Crow cannot vouch for ANY account, so every one of them
+    // is worth naming. With one, the address Crow invited is the expected account.
     .filter((email) => owner === "" || email.toLowerCase() !== owner)
     .slice(0, 5);
 }
@@ -465,6 +507,10 @@ function otherRegistered(users, ownerEmail) {
  *
  * @param {{installDir?: string, manifest?: object|null, fetch?: Function, readAdminToken?: Function, db?: object|null}} [o]
  *   `manifest` is the REVIEWED manifest: it decides the port (see vaultwardenBaseUrl).
+ *   `db` is also where the `first_admin_invited:` marker is read from (the account
+ *   Crow invited, which the card treats as expected); no db = no record. `installDir`
+ *   is still accepted from callers, but the installed `.env` no longer decides which
+ *   account is expected.
  * @returns {Promise<{signups: "on"|"off"|"unknown", users: Array<{email: string, status: number, registered: boolean, invited: boolean, disabled: boolean}>, others: string[], reachable: boolean, reason: string|null}>}
  *   `reason` is null when the account list was really read; otherwise one of
  *   "no-token" (nothing saved, or Vaultwarden refused it), "rate-limited",
@@ -493,8 +539,11 @@ export async function vaultwardenState({ installDir = vaultwardenInstallDir(), m
     return failed(out.error, reachable);
   }
   if (!Array.isArray(out.users)) return failed("unknown", true);
-  const owner = installedVaultwardenEnv(installDir)[OWNER_EMAIL_ENV_KEY];
-  return { signups: out.signups, users: out.users, others: otherRegistered(out.users, owner), reachable: true, reason: null };
+  // Which account is the expected one comes from the marker Crow wrote on a
+  // successful invite, never from the editable `.env` (finding: a non-owner session
+  // could point the .env at a stranger's address and hide that stranger).
+  const invited = await firstAdminInvitedEmail(db, VAULTWARDEN_BUNDLE_ID);
+  return { signups: out.signups, users: out.users, others: otherRegistered(out.users, invited), reachable: true, reason: null };
 }
 
 // ── The state cache (one admin login per five minutes, not per Extensions render) ──
@@ -534,6 +583,9 @@ export async function cachedInviteState({
  * cookie, then re-read to confirm). One login at most for the whole operation.
  *
  * @param {{email?: string, installDir?: string, manifest?: object|null, fetch?: Function, readAdminToken?: Function, db?: object|null}} [o]
+ *   On success the address is recorded in `first_admin_invited:vaultwarden` (with
+ *   `db`, else a client opened here): that marker, not the `.env`, is what the card
+ *   later treats as the expected account.
  * @returns {Promise<{result: "invited"|"already"|"invalid-email"|"unreachable"|"no-token"|"rate-limited"|"failed", signups: "on"|"off"|"unknown"|null}>}
  */
 export async function inviteOwnerResult({ email, installDir = vaultwardenInstallDir(), manifest = null, fetch: fetchImpl, readAdminToken = null, db = null } = {}) {
@@ -583,6 +635,9 @@ export async function inviteOwnerResult({ email, installDir = vaultwardenInstall
   // The card re-renders from a fresh read either way.
   clearInviteStateCache(VAULTWARDEN_BUNDLE_ID);
   if (out.error) return { result: out.error === "no-token" ? "no-token" : out.error, signups: null };
+  // The app accepted the address: record it, so the card knows which registered
+  // account is the operator's from now on (the `.env` value is install input only).
+  if (out.invited === "invited" || out.invited === "already") await rememberInvitedEmail(db, address);
   if (out.signups === "off") await rememberSignupsClosed(installDir);
   return { result: out.invited, signups: out.signups === undefined ? null : out.signups };
 }
