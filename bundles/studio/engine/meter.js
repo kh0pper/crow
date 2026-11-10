@@ -36,9 +36,18 @@
  *   about thirteen years of continuous audio at ten blocks a second (the
  *   momentary and short-term windows are rings, and were always constant).
  *
- * The one thing quantising costs is that a block is judged by its bin's own mean
- * power, which is worth at most half a bin — 0.05 LU. A test holds the whole
- * measurement to `server/loudness.js` within 0.1 LU.
+ * The one thing quantising costs is the gate's precision. A block is stored by the
+ * bin its loudness names and judged by that bin's own mean power, so a block can
+ * land on the wrong side of the relative gate by up to ONE bin — 0.1 LU — and the
+ * error that puts in the integrated reading is not bounded by 0.1 LU at all: it
+ * depends on how many blocks sit within a bin of the gate, because each block the
+ * gate lets in or keeps out moves the mean by its own share of the Play. A steady
+ * signal puts every block in one bin and the reading is exact; a Play whose blocks
+ * straddle the gate can differ from `server/loudness.js` by the loudness of
+ * whichever side of it the bin decides. This is libebur128's own histogram
+ * approximation (`ebur128_relative_threshold` walks the same 0.1 LU bins); the
+ * tests hold a steady signal to 0.1 LU and say what a signal that straddles the
+ * gate actually achieves.
  *
  * ## It is the render's meter, streamed
  *
@@ -56,11 +65,14 @@
  * - the block grid is the same: a 400 ms block is four 100 ms hops counted from
  *   the reset, and the blocks overlap by three quarters exactly as
  *   `integratedLufs()`'s do;
- * - the gates are the same two passes over the same block powers;
+ * - the gates are the same two passes over the same block powers, except that the
+ *   second one judges a BIN rather than each of the blocks inside it (see above);
  * - the true-peak filter is the same 48-tap Blackman-windowed sinc, built from
  *   the same construction.
  *
- * A test compares the two on the same audio and holds them within 0.1 LU.
+ * Tests compare the two on the same audio: a steady signal and a Play whose quiet
+ * sections straddle the relative gate are both held to `server/loudness.js`, and
+ * the test says what each of them actually achieves.
  *
  * ## Nothing allocated, nothing thrown, no Math.random
  *
@@ -383,10 +395,12 @@
     const binCount = new Uint32Array(HISTOGRAM_BINS);
 
     /**
-     * What the histogram holds, for a panel or a test: `blocks` is how many gating
-     * blocks it has taken since the reset, and `lastReadBins` how many bins the
-     * newest integrated reading walked — the cost of a reading, which does not
-     * depend on `blocks`.
+     * What the histogram holds, for a panel or a test: `bins` is the fixed size of
+     * the histogram, `blocks` how many gating blocks it has taken since the reset,
+     * and `lastReadBins` how many bins the newest integrated reading actually
+     * VISITED — the occupied ones, which is the only part of a reading whose cost
+     * can vary with the audio (the two walks of the grid itself are always
+     * `HISTOGRAM_BINS` long). It never grows with the length of a Play.
      */
     const stats = { bins: HISTOGRAM_BINS, blocks: 0, lastReadBins: 0 };
 
@@ -531,19 +545,26 @@
      * (that is everything the histogram holds); the second keeps only the bins
      * whose own mean power clears the relative gate, ten LU below the first
      * pass's mean. Both are walks of `HISTOGRAM_BINS`, so the reading costs the
-     * same after an hour as after a second.
+     * same after an hour as after a second; `stats.lastReadBins` counts the bins
+     * that actually held blocks, which is the part of that cost the audio decides.
+     *
+     * A bin is judged by the mean of the blocks in it, so a block whose own power
+     * is within a bin (0.1 LU) of the gate can be let in or kept out against the
+     * exact answer — the approximation libebur128 makes too (see the header).
      * @returns {number} LUFS, or -Infinity when no block clears the gates
      */
     function integratedLoudness() {
-      stats.lastReadBins = HISTOGRAM_BINS;
+      let visited = 0;
       let above = 0;
       let aboveCount = 0;
       for (let bin = 0; bin < HISTOGRAM_BINS; bin += 1) {
         const count = binCount[bin];
         if (count === 0) continue;
+        visited += 1;
         above += binSum[bin];
         aboveCount += count;
       }
+      stats.lastReadBins = visited;
       if (aboveCount === 0) return -Infinity;
       const threshold = (above / aboveCount) * RELATIVE_GATE_POWER;
       let gated = 0;
@@ -552,8 +573,6 @@
         const count = binCount[bin];
         if (count === 0) continue;
         const sum = binSum[bin];
-        // A bin is judged by the mean of the blocks in it: the only thing the
-        // histogram costs, and at most half a bin (0.05 LU) of it.
         if (sum / count <= threshold) continue;
         gated += sum;
         gatedCount += count;
