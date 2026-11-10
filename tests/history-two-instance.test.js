@@ -27,7 +27,7 @@ import { join } from "node:path";
 import { makeFleet, linkPeers, until, sleep } from "./fixtures/sync-fleet.mjs";
 import { run as migrate } from "../scripts/migrations/0024-item-versions.mjs";
 import { withWriteContext } from "../servers/shared/history/write-context.js";
-import { listVersions } from "../servers/shared/history/api.js";
+import { listVersions, restoreVersion } from "../servers/shared/history/api.js";
 import { listTrash, restoreFromTrash } from "../servers/shared/history/trash.js";
 import { sweep } from "../servers/shared/history/sweep.js";
 
@@ -40,7 +40,7 @@ function migrateSide(side) {
 }
 
 const hasMemory = async (db, id) =>
-  (await db.execute({ sql: "SELECT id, content FROM memories WHERE id = ?", args: [id] })).rows[0] || null;
+  (await db.execute({ sql: "SELECT * FROM memories WHERE id = ?", args: [id] })).rows[0] || null;
 
 const versionCount = async (db, id) =>
   Number((await db.execute({
@@ -52,6 +52,100 @@ const versionCount = async (db, id) =>
 async function writeLocal(db, sql, args = []) {
   return withWriteContext(OWNER, () => db.execute({ sql, args }));
 }
+
+/* ---------------------------------------- a restore is a normal synced write */
+
+test("a restored memory reaches the paired instance and a later peer edit does not silently undo it", async () => {
+  const fleet = await makeFleet();
+  let link;
+  try {
+    const { a, b } = fleet;
+    migrateSide(a);
+    migrateSide(b);
+    link = await linkPeers(a, b);
+
+    // A writes v1 and then v2; both reach B, so both machines hold "draft two".
+    await writeLocal(a.db, "INSERT INTO memories (id, content) VALUES (?, ?)", [81, "draft one"]);
+    await a.mgr.emitChange("memories", "insert", { id: 81, content: "draft one", lamport_ts: null });
+    assert.ok(await until(async () => (await hasMemory(b.db, 81)) !== null), "the peer received the insert");
+    await writeLocal(a.db, "UPDATE memories SET content = ? WHERE id = ?", ["draft two", 81]);
+    await a.mgr.emitChange("memories", "update", { id: 81, content: "draft two", lamport_ts: null });
+    assert.ok(
+      await until(async () => (await hasMemory(b.db, 81))?.content === "draft two"),
+      "the peer received the edit",
+    );
+
+    // A restores v1. A restore is a normal write now, so it emits — and mints the
+    // fresh lamport_ts the row needs to out-rank B's stale copy.
+    const v1 = (await listVersions(a.db, { itemType: "memory", itemId: 81 })).at(-1);
+    assert.equal(v1.snapshot.content, "draft one");
+    const res = await restoreVersion(a.db, { versionId: v1.id, syncManager: a.mgr }, OWNER);
+    assert.equal(res.unchanged, false);
+    assert.ok(
+      await until(async () => (await hasMemory(b.db, 81))?.content === "draft one"),
+      "the peer received the restore",
+    );
+    assert.equal(res.synced, true, "the restore was emitted, not just written locally");
+
+    // B then edits the memory. The emit is a FULL row — what a peer that never saw
+    // the restore sends: its own copy, which would carry "draft two" back over it.
+    const { lamport_ts: _ignored, ...bRow } = (
+      await b.db.execute({ sql: "SELECT * FROM memories WHERE id = ?", args: [81] })
+    ).rows[0];
+    assert.equal(bRow.content, "draft one", "B's copy already holds the restored value");
+    await writeLocal(b.db, "UPDATE memories SET tags = ? WHERE id = ?", ["tagged-on-b", 81]);
+    await b.mgr.emitChange("memories", "update", { ...bRow, tags: "tagged-on-b" });
+    const reached = await until(async () => (await hasMemory(a.db, 81))?.tags === "tagged-on-b");
+    assert.ok(reached, "the peer's later edit reached A");
+
+    const aRow = await hasMemory(a.db, 81);
+    assert.equal(aRow.content, "draft one", "the peer's later edit did not carry the pre-restore value back");
+    assert.equal(aRow.tags, "tagged-on-b", "the later edit itself did apply");
+    assert.equal(
+      await versionCount(a.db, 81),
+      4,
+      "A's history: insert + edit + the restore + the peer's edit (as its own version)",
+    );
+  } finally {
+    link?.close();
+    await fleet.cleanup();
+  }
+});
+
+test("restoring a deleted memory recreates it on the peer", async () => {
+  const fleet = await makeFleet();
+  let link;
+  try {
+    const { a, b } = fleet;
+    migrateSide(a);
+    migrateSide(b);
+    link = await linkPeers(a, b);
+
+    await writeLocal(a.db, "INSERT INTO memories (id, content) VALUES (?, ?)", [82, "restore me"]);
+    await a.mgr.emitChange("memories", "insert", { id: 82, content: "restore me", lamport_ts: null });
+    assert.ok(await until(async () => (await hasMemory(b.db, 82)) !== null), "the peer received the insert");
+
+    // A deletes it and the delete reaches B: the row is gone on both machines.
+    await writeLocal(a.db, "DELETE FROM memories WHERE id = ?", [82]);
+    await a.mgr.emitChange("memories", "delete", { id: 82 });
+    assert.ok(await until(async () => (await hasMemory(b.db, 82)) === null), "the peer received the delete");
+
+    // A restores it from its own Trash. Emitted as an INSERT, so the peer recreates
+    // the row instead of staying empty until someone edits it there.
+    const back = await restoreFromTrash(a.db, { itemType: "memory", itemId: 82 }, OWNER, { syncManager: a.mgr });
+    assert.ok(back.newVersionId, "the restore is a new version");
+    assert.ok(await hasMemory(a.db, 82), "the row is back here");
+
+    assert.ok(
+      await until(async () => (await hasMemory(b.db, 82))?.content === "restore me"),
+      "and the peer has it again, with the value the delete removed",
+    );
+    assert.equal(back.synced, true, "the un-delete was emitted");
+  } finally {
+    link?.close();
+    await fleet.cleanup();
+  }
+});
 
 test("an erased item is not resurrected by a later sync from the peer that still has it", async () => {
   const fleet = await makeFleet();

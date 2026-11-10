@@ -261,17 +261,36 @@ const str = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const colRef = (column, row) => (row ? `${row}."${column}"` : `"${column}"`);
 
 /**
- * One stored value, BLOB-safe.
+ * One stored value, BLOB-safe and TEXT-safe.
  *
  * json_object() raises "JSON cannot hold BLOB values" for a blob, and SQLite
  * does not enforce declared column types — a `content` column can hold one. A
  * raw bot write carrying a blob must not fail its own INSERT (the trigger runs
  * inside the write) and must not fail the migration's baseline, so a blob is
  * stored as the reversible string 'hex:<SQLite hex(), which is UPPERCASE>'.
+ *
+ * TEXT needs the matching escape. A text value may legitimately START with
+ * "hex:" (a memory whose content is "hex:DEADBEEF", a hash written into a
+ * section), and read back that is indistinguishable from a stored blob — so such
+ * a TEXT value is stored as 'txt:<the value>' instead, which api.js strips
+ * again. Every other text value is stored verbatim, so the transpose is exact:
+ * 'hex:' means bytes, 'txt:' means text, anything else is itself.
+ *
+ * Rows written BEFORE this escape existed carry no marker, so a text value that
+ * looked exactly like a blob in one of them is still read back as bytes. That
+ * ambiguity cannot be resolved after the fact and is accepted; it affects only
+ * snapshots taken before the escape (and the triggers of an already-migrated
+ * store keep their old body until they are re-created, which is the same set of
+ * rows).
  */
 export function valueExpr(column, row = null) {
   const ref = colRef(column, row);
-  return `CASE typeof(${ref}) WHEN 'blob' THEN 'hex:' || hex(${ref}) ELSE ${ref} END`;
+  return (
+    `CASE typeof(${ref}) ` +
+    `WHEN 'blob' THEN 'hex:' || hex(${ref}) ` +
+    `WHEN 'text' THEN (CASE WHEN substr(${ref}, 1, 4) = 'hex:' THEN 'txt:' || ${ref} ELSE ${ref} END) ` +
+    `ELSE ${ref} END`
+  );
 }
 
 /** A json_object(...) snapshot of the snapshotted columns of one row (NEW/OLD or bare). */

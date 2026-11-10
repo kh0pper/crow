@@ -78,14 +78,19 @@ function reasonFor(err) {
  * Undo one job.
  *
  * @param {object} db
- * @param {{jobId: string}} job
+ * @param {{jobId: string, syncManager?: object|null}} job `syncManager` is the
+ *   process's InstanceSyncManager when it has one: a restore is an ordinary write,
+ *   so it emits like one (see api.js's restoreVersion). The result follows the
+ *   restore's own SYNC rule: an undo with no emitter still writes, and the caller
+ *   is told `synced: false` rather than being told nothing.
  * @param {{authorKind: string, authorId?: string, jobId?: string}} ctx who is undoing
  *   (a real author: the undo is a write, and it is attributed like any other)
  * @returns {Promise<{restored: Array<{itemType: string, itemId: string,
- *   action: 'restored'|'deleted'|'unchanged', newVersionId: number|null}>,
+ *   action: 'restored'|'deleted'|'unchanged', newVersionId: number|null,
+ *   synced?: boolean, unfiled?: boolean}>,
  *   skipped: Array<{itemType: string, itemId: string, reason: string, message?: string}>}>}
  */
-export async function undoJob(db, { jobId } = {}, ctx) {
+export async function undoJob(db, { jobId, syncManager = null } = {}, ctx) {
   if (!ctx || typeof ctx !== "object" || !AUTHOR_KINDS.includes(ctx.authorKind)) {
     throw jobError(
       "invalid_context",
@@ -168,12 +173,14 @@ export async function undoJob(db, { jobId } = {}, ctx) {
         continue;
       }
 
-      const result = await restoreVersion(db, { versionId: Number(before[0].id) }, ctx);
+      const result = await restoreVersion(db, { versionId: Number(before[0].id), syncManager }, ctx);
       restored.push({
         itemType,
         itemId,
         action: result.unchanged ? "unchanged" : "restored",
         newVersionId: result.newVersionId,
+        synced: result.synced,
+        unfiled: result.unfiled,
       });
     } catch (err) {
       skipped.push({ itemType, itemId, reason: reasonFor(err), message: err?.message });

@@ -147,20 +147,23 @@ async function newestVersion(db, itemType, itemId) {
  * existed), `not_in_trash` when its newest version is not a delete (it is live),
  * and restoreVersion's own `redacted` / `conflict` / `invalid_context`.
  *
- * SYNC, stated plainly: this writes the local row through the ordinary client,
- * exactly like an edit, but the History code base does not yet emit an outbound
- * sync event for a restore (that wiring is not part of Task 4). So a Trash
- * restore is visible on this instance and NOT pushed to peers — the item comes
- * back here and stays deleted there until someone edits it. tests/history-two-
- * instance.test.js records what sync does today.
+ * SYNC: a Trash restore is a NORMAL write, not a local-only one. It emits through
+ * the same door an ordinary edit uses (`{ syncManager }`, see api.js's
+ * restoreVersion), which also mints the fresh lamport_ts the row needs: without
+ * that, a peer's next edit carried the pre-restore value and won last-write-wins
+ * over the restore, and a restored delete came back on this instance only. The
+ * emit is best effort — `synced: false` in the result says the restore stayed
+ * local (a host with sync off, a table that does not sync, an emitter that
+ * failed), never that the restore did not happen.
  *
  * @param {object} db
  * @param {{itemType: string, itemId: string|number}} item
  * @param {{authorKind: string, authorId?: string, jobId?: string}} ctx who restored it
+ * @param {{syncManager?: object|null}} [opts] the process's InstanceSyncManager, when it has one
  * @returns {Promise<{itemType: string, itemId: string, newVersionId: number|null,
- *   unchanged: boolean}>}
+ *   unchanged: boolean, synced: boolean, unfiled: boolean}>}
  */
-export async function restoreFromTrash(db, item = {}, ctx) {
+export async function restoreFromTrash(db, item = {}, ctx, { syncManager = null } = {}) {
   const itemType = str(item.itemType);
   const itemId = str(item.itemId);
   if (itemType === null || itemId === null) {
@@ -171,8 +174,12 @@ export async function restoreFromTrash(db, item = {}, ctx) {
   if (newest.op !== "delete") {
     throw trashError("not_in_trash", `${itemType}/${itemId} is live, not in the Trash`);
   }
-  const { newVersionId, unchanged } = await restoreVersion(db, { versionId: Number(newest.id) }, ctx);
-  return { itemType, itemId, newVersionId, unchanged };
+  const { newVersionId, unchanged, synced, unfiled } = await restoreVersion(
+    db,
+    { versionId: Number(newest.id), syncManager },
+    ctx,
+  );
+  return { itemType, itemId, newVersionId, unchanged, synced, unfiled };
 }
 
 /**
