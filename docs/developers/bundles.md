@@ -133,11 +133,12 @@ Optional fields:
 | Field | Rule |
 |---|---|
 | `path` | the app page to open, starting with `/` (a setup or login page when it is not the root) |
-| `user` | the documented default username — **only** with `default-login` |
+| `user` | the documented default username (`default-login`), or the admin username Crow itself creates (`crow` / `via: "setup"`) |
 | `note` | one short plain sentence added to the notice (e.g. where the app prints its first password) |
-| `via` | **with `crow` only**: `"env"` or `"postInstall"` — how Crow creates the admin |
-| `secretEnv` | with `crow`/`via: "env"`: the `env_vars` entry Crow generates and keeps in the keychain |
-| `userEnv` | with `crow`/`via: "env"`, optional: the `env_vars` entry holding the admin's username |
+| `via` | **with `crow` only**: `"env"`, `"postInstall"` or `"setup"` — how Crow creates the admin |
+| `setup` | with `crow`/`via: "setup"`: `{ "script": "scripts/first-admin.sh", "timeout_s": 180 }` |
+| `secretEnv` | with `crow`: the keychain entry name for the admin password — an `env_vars` entry with `generate: "secret"` + `keychain: true` for `via: "env"`, any name for `via: "setup"` |
+| `userEnv` | with `crow`, optional: the `env_vars` entry holding the admin's username |
 
 Contract rules (`scripts/lib/bundle-contract.mjs`, enforced by `build-registry`):
 
@@ -150,16 +151,94 @@ Contract rules (`scripts/lib/bundle-contract.mjs`, enforced by `build-registry`)
   - `{ "mode": "crow", "via": "postInstall" }` — requires `postInstall`, and
     the script must name at least one `generate: "secret"` + `keychain: true`
     env var: the hook is what turns the generated value into the admin.
+  - `{ "mode": "crow", "via": "setup" }` — see the next section.
   - Saying `crow` with nothing behind it (or a mechanism that only lives in
     `.env`) is refused.
-- `default-login` requires `user`, and `user` is only allowed with that mode.
-- `via`/`secretEnv`/`userEnv` are only allowed with `crow`.
+- `default-login` requires `user`; `user` is allowed with `default-login` and with
+  `crow`/`via: "setup"` (where the script needs a username to create), and nowhere else.
+- `via`/`secretEnv`/`userEnv` are only allowed with `crow`, and `setup` only with
+  `via: "setup"`.
+- With `crow`/`via: "setup"`, `secretEnv` and `userEnv` must be plain uppercase env
+  names (letters, digits and `_`) and must not start with `COMPOSE_`, `DOCKER_` or
+  `CROW_` — Crow and Compose reserve those prefixes.
 - Every manifest with a `webUI` must declare `firstAdmin`.
 
 At runtime the declaration is **fail-safe the other way**: a web UI bundle with
 no usable declaration (a community-store manifest written before this field, or
 a typo'd mode) is treated as `finish-setup`, so the card and the bell still
 appear. Silence has to be an explicit `crow`, `external` or `none`.
+
+### `via: "setup"`: the script that gives the app its admin
+
+For an app that has no environment variable for its admin and whose first-run page
+you do not want to leave open, ship a small script that creates the account:
+
+```json
+"firstAdmin": {
+  "mode": "crow",
+  "via": "setup",
+  "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+  "user": "admin",
+  "secretEnv": "FRIGATE_PASSWORD",
+  "userEnv": "FRIGATE_USER"
+}
+```
+
+Crow runs it once, right after `compose up -d` succeeded, in its own process group
+(the whole group dies on a timeout), with a minimal environment (`PATH`, `HOME`,
+and Crow's usual hook variables) plus `CROW_FIRST_ADMIN_USER=<user>`. The manifest
+and the script are read from Crow's OWN copy of the bundle (the bundle source tree
+`manifest.json` and the `setup.script` it names), never from the installed folder
+`~/.crow/bundles/<id>`: that folder can be mounted into the bundle's own container,
+so nothing in it decides what Crow runs. The installed folder is only the working
+directory (`cwd`, `CROW_BUNDLE_DIR`) and where `.env` is written. A script whose
+real path (symlinks resolved) is outside Crow's copy of the bundle is refused, and
+a bundle whose source manifest Crow cannot read is not set up at all.
+`timeout_s` is 1–600 (default 180). Like `postInstall`, a setup script is honored
+for first-party bundles only: `origin: "community"` is refused.
+
+**The password arrives on stdin, and nowhere else.** Crow generates it, writes one
+line to the script's stdin (`<password>\n`) and closes it. It is never in the
+environment, the arguments or a log, so a script that prints it is the only way it
+can leak. Read it with `read -r PASSWORD` (bash) or `IFS= read -r PASSWORD` (sh).
+The generated value is URL-safe, so it can start with `-`: hand it to another
+program only on a stdin pipe (`printf '%s' "$PASSWORD" | app …`), never as a bare
+argument — `app -x $PASSWORD` reads a leading-`-` value as an option.
+
+The script reports what happened through its exit code:
+
+| exit | meaning | Crow then |
+|---|---|---|
+| `0` | the app's admin `<user>` now has exactly that password | saves it in the keychain (Settings → Passwords) and into the bundle `.env` under `secretEnv`/`userEnv` when those are declared `env_vars` |
+| `3` | the app already has its own admin (set up earlier by the operator); nothing changed | leaves everything alone, and asks the operator to save the login they use |
+| `4` | the app is not running / not answering; nothing changed | tells the operator to use "Set it up for me" on the Extensions card later |
+| anything else, or a timeout | failed | says so on the card and in the install log |
+
+The script's last 20 non-empty stdout lines become part of the install log (and of
+the card's answer when the run is retried from Extensions), so print what you did,
+never the password. On a failure that log also carries a short tail of the script's
+stderr (its last few lines, without the exit line): that is the reason the operator
+reads, on the card and in the install log. Both are scrubbed before they leave
+Crow — every occurrence of the generated password in a log line or a reason becomes
+`[hidden]` — so an accidental `echo` never puts it in front of the operator.
+
+When the keychain save AND the `.env` write both fail after the app's password
+changed, the answer is `failed` with "the app's admin password changed but Crow
+could not keep it; reset it in the app": the login now exists only inside the app,
+so the card and the bell stay until the operator resets it (or saves it by hand).
+
+Two calls in one install are not wasted: Crow never runs the script when the
+keychain already holds this app's admin login, and it makes sure the keychain can be
+written *before* the app's password changes — a password that nothing holds would
+lock the app. Only one run per app is in flight at a time: the install path and the
+Extensions card share that lock, so a second one is refused with "Crow is already
+setting up this app's admin login" (409 on the card's request) instead of racing the
+first.
+In the Extensions card, an app whose setup Crow can do itself offers "Set it up for
+me", and every card offers "Save the login you made" (the operator's own username
+and password, saved under the bundle's admin key) — either one clears the card, and
+so does a keychain entry the operator saved by hand. That form never replaces a
+login Crow already keeps; changing one is done in Settings → Passwords.
 
 **Prefer `crow` whenever the app can take its admin from the environment or a CLI**
 (Miniflux's `ADMIN_USERNAME`/`ADMIN_PASSWORD`, JupyterHub's NativeAuthenticator

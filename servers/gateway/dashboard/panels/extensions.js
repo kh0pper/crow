@@ -74,11 +74,14 @@ export default {
     } catch { needsRepin = {}; }
 
     // Security audit N3-4: installed apps whose OWN first-admin setup the operator
-    // has not said is finished. Read here (fs + db) so html.js stays pure.
+    // has not said is finished. Read here (fs + db) so html.js stays pure. Two extra
+    // inputs decide whether a card is still owed: the keychain holding this app's
+    // admin login (ONE metadata query, no decryption) and what Crow's own setup run
+    // did for this install.
     let firstAdminPending = [];
     try {
       const { getManifest, getLiveProxyIds, getProxyMountFailure } = await import("../../routes/extension-proxy.js");
-      const { pendingFirstAdminNotices, firstAdminDoneValues } = await import("../../bundle-first-admin.js");
+      const { pendingFirstAdminNotices, firstAdminDoneValues, firstAdminAutoResults, firstAdminSavedBundleIds } = await import("../../bundle-first-admin.js");
       const manifests = {};
       for (const id of Object.keys(localInstalled)) manifests[id] = getManifest(id);
       firstAdminPending = pendingFirstAdminNotices({
@@ -88,6 +91,8 @@ export default {
         liveProxyIds: getLiveProxyIds(),
         // A router that failed to mount is not a pending restart (N5).
         proxyMountFailed: !!getProxyMountFailure(),
+        adminSaved: await firstAdminSavedBundleIds(db, manifests),
+        autoResults: await firstAdminAutoResults(db),
       });
     } catch { /* no card rather than no page */ }
 
