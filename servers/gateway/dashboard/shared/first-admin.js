@@ -143,18 +143,20 @@ export function firstAdminNeedsOperator(manifest) {
  * Does this manifest owe the operator a notice (a card, a bell)?
  *
  * `crow`/`via: "setup"` is owed one UNLESS Crow's own setup run for this install
- * returned "ok" — a script that failed, found the app not answering, or left an
- * admin the app already had must not disappear silently.
+ * returned "ok" AND its follow-up step did not fail — a script that failed, found
+ * the app not answering, or left an admin the app already had must not disappear
+ * silently, and neither must an installed app whose registration Crow could not
+ * close afterwards (afterResult).
  *
  * An invite-only app (`firstAdmin.invite`) is owed one UNLESS Crow's invite step
  * for this install invited the owner's email AND confirmed sign-ups off: after
  * that there is no account anyone else could claim.
  *
  * @param {object|null} manifest
- * @param {{autoResult?: string|null, inviteResult?: {result?: string, signups?: string|null}|null}} [o]
- *        the setup run's / invite step's result for this install
+ * @param {{autoResult?: string|null, inviteResult?: {result?: string, signups?: string|null}|null, afterResult?: {ok?: boolean}|null}} [o]
+ *        the setup run's / invite step's / after-step's result for this install
  */
-export function firstAdminNeedsNotice(manifest, { autoResult = null, inviteResult = null } = {}) {
+export function firstAdminNeedsNotice(manifest, { autoResult = null, inviteResult = null, afterResult = null } = {}) {
   const fa = firstAdminOf(manifest);
   if (!fa) return false;
   if (fa.invite) {
@@ -162,8 +164,19 @@ export function firstAdminNeedsNotice(manifest, { autoResult = null, inviteResul
     const invited = !!r && (r.result === "invited" || r.result === "already");
     return !(invited && r.signups === "off");
   }
-  if (firstAdminVia(manifest) === "setup") return autoResult !== "ok";
+  if (firstAdminVia(manifest) === "setup") return autoResult !== "ok" || firstAdminAfterFailed(afterResult);
   return OPERATOR_FIRST_ADMIN_MODES.includes(fa.mode);
+}
+
+/**
+ * Did the install's follow-up step (`firstAdmin.setup.after`) report a failure?
+ * The install path hands over `applyFirstAdminAfter`'s own `{ ok, outcome }`; anything
+ * absent or ok is "nothing went wrong".
+ *
+ * @param {{ok?: boolean}|null} afterResult
+ */
+export function firstAdminAfterFailed(afterResult) {
+  return !!afterResult && typeof afterResult === "object" && afterResult.ok === false;
 }
 
 /**

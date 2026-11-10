@@ -216,7 +216,7 @@ Optional fields:
 | `user` | the documented default username (`default-login`), or the admin username Crow itself creates (`crow` / `via: "setup"`) |
 | `note` | one short plain sentence added to the notice (e.g. where the app prints its first password) |
 | `via` | **with `crow` only**: `"env"`, `"postInstall"` or `"setup"` — how Crow creates the admin |
-| `setup` | with `crow`/`via: "setup"`: `{ "script": "scripts/first-admin.sh", "timeout_s": 180 }` |
+| `setup` | with `crow`/`via: "setup"`: `{ "script": "scripts/first-admin.sh", "timeout_s": 180 }`, optionally with `after` (see "setup.after" below) |
 | `secretEnv` | with `crow`: the keychain entry name for the admin password — an `env_vars` entry with `generate: "secret"` + `keychain: true` for `via: "env"`, any name for `via: "setup"` |
 | `userEnv` | with `crow`, optional: the `env_vars` entry holding the admin's username |
 | `invite` | with `finish-setup` only: the name of a CODE-HELD invite handler (today: `"vaultwarden"`) — see the next section |
@@ -316,6 +316,39 @@ The script reports what happened through its exit code:
 | `4` | the app is not running / not answering; nothing changed | tells the operator to use "Set it up for me" on the Extensions card later |
 | `5` | the app accepted the new password, but logging in with it did not succeed | keeps it exactly like `0` (the app holds that password now), and adds "Crow saved the new login, but could not log in with it to confirm" to the card and the install log |
 | anything else, or a timeout | failed | says so on the card and in the install log |
+
+### `setup.after`: what Crow does once the admin exists
+
+Some apps can be given their admin from a script but keep the door open afterwards — an
+app whose own registration page accepts anyone still does, even with Crow's account in
+place. Those bundles declare the follow-up step beside the script:
+
+```json
+"setup": {
+  "script": "scripts/first-admin.sh",
+  "timeout_s": 180,
+  "after": { "env": { "APP_ENABLE_REGISTRATION": "false" }, "recreate": true }
+}
+```
+
+| field | rule |
+|---|---|
+| `env` | `KEY: value` pairs written into the installed bundle's `.env` after the setup script reports `0` or `5` (that is, once the app really holds the password). Every key must be a plain env name (`A-Z`, digits, `_`) that names an `env_vars` entry the bundle DECLARES — Crow never writes a variable the app's own manifest did not declare — and must not be `COMPOSE_…`/`DOCKER_…` (those change how compose itself runs), `firstAdmin.secretEnv` or `firstAdmin.userEnv` (Crow writes those two itself), or an entry that is `secret: true`, has `generate`, or has `keychain: true` (a value Crow keeps or generates is not a constant to write). Every value is a plain string of at most 200 characters that the `.env` codec can write (no line break or NUL, no backtick next to a quote or a trailing backslash). The write is the line-preserving one every install-time step uses (mode 600, comments and other values untouched). |
+| `recreate` | boolean. `true` recreates the bundle's containers ONCE, through Crow's guarded path (the same consent + compose safety check + ownership check a Start runs, then `up -d --force-recreate`), because a container keeps its old environment until it is re-created. |
+
+No other fields are accepted, and a block that writes nothing and recreates nothing is
+refused: it would do nothing. The step runs only after a successful setup — on exit `3`
+(the app already had its own admin) and `4` (not running) nothing is written and nothing is
+restarted, so an install somebody set up by hand is never touched.
+
+A failure here never undoes the account: the password is already in Crow's keychain and the
+app still holds it. One plain line says what happened — `after: "applied"`, or
+`after: "recreate-failed: <plain reason>"` (a settings file that would not take the value is
+`after: "env-failed: <plain reason>"`) — and the answer adds that registration may still be
+open and to press Restart. The line lands in the install log, and in the Extensions card's
+answer; at install it also rings the owner's bell once (the same notice the card is), because
+an app that still accepts sign-ups is as claimable as one nobody set up. It never fails the
+install. Like every other bundle change, this one needs a `version` bump.
 
 The script's last 20 non-empty stdout lines become part of the install log (and of
 the card's answer when the run is retried from Extensions), so print what you did,

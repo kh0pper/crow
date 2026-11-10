@@ -790,7 +790,7 @@ test("kolibri: an install that predates the mount fix kept no data, and the note
   assert.match(manifest.notes, /never started a container at all, so changing the mount loses no content/);
 });
 
-// ── Vikunja: it starts again, and stays finish-setup ──────────────────────────────
+// ── Vikunja: it starts again, and Crow creates its account then closes registration ─
 
 test("vikunja: the compose carries the public URL Vikunja 2.8 aborts without, and probes with its own binary", () => {
   const compose = readFileSync(join(B("vikunja"), "docker-compose.yml"), "utf8");
@@ -801,14 +801,52 @@ test("vikunja: the compose carries the public URL Vikunja 2.8 aborts without, an
 
   const manifest = manifestOf("vikunja");
   assert.equal(manifest.refreshFiles.includes("docker-compose.yml"), true, "an installed copy receives the fixed compose");
-  assert.deepEqual(manifest.firstAdmin, {
-    mode: "finish-setup",
-    note: "Registration stays open until you turn it off: create your account, then set VIKUNJA_SERVICE_ENABLEREGISTRATION=false.",
-  }, "Vikunja keeps its own registration page, and the card says how to close it");
-  // The env var the note names is deliberately NOT set here: closing registration is a
-  // decision for the operator (a later change decides how Crow does it).
-  assert.equal((manifest.env_vars || []).some((v) => v.name === "VIKUNJA_SERVICE_ENABLEREGISTRATION"), false);
-  assert.equal(compose.includes("ENABLEREGISTRATION"), false);
+  // Crow registers the owner's account, then closes registration (operator ruling
+  // "Crow creates, then closes"): the setup script creates `admin`, and the after-step
+  // writes the switch and recreates the container once so Vikunja reads it.
+  assert.deepEqual(
+    { mode: manifest.firstAdmin.mode, via: manifest.firstAdmin.via, user: manifest.firstAdmin.user, script: manifest.firstAdmin.setup.script },
+    { mode: "crow", via: "setup", user: "admin", script: "scripts/first-admin.sh" },
+    "Crow creates the account itself",
+  );
+  assert.deepEqual(manifest.firstAdmin.setup.after, {
+    env: { VIKUNJA_ENABLE_REGISTRATION: "false" },
+    recreate: true,
+  }, "then turns registration off and restarts Vikunja");
+  // The switch the after-step writes has to be DECLARED, and the compose has to read it.
+  const spec = (manifest.env_vars || []).find((v) => v.name === "VIKUNJA_ENABLE_REGISTRATION");
+  assert.ok(spec, "VIKUNJA_ENABLE_REGISTRATION is a declared env var");
+  assert.equal(spec.default, "true");
+  assert.equal(spec.required, false);
+  assert.equal(spec.secret, undefined);
+  assert.match(compose, /VIKUNJA_SERVICE_ENABLEREGISTRATION=\$\{VIKUNJA_ENABLE_REGISTRATION:-true\}/);
+});
+
+/** The compose text of one service: from its 2-space key to the next top-level service. */
+function serviceText(compose, name) {
+  const start = compose.search(new RegExp(`^  ${name}:$`, "m"));
+  if (start < 0) return null;
+  const rest = compose.slice(start);
+  const next = rest.slice(1).search(/^ {2}\S+:$/m);
+  return next < 0 ? rest : rest.slice(0, next + 1);
+}
+
+test("vikunja: a one-shot step hands both volumes to uid 1000 before Vikunja starts", () => {
+  // Vikunja is distroless and Docker creates named volumes owned by root, so the app
+  // cannot write its files or database until something chowns them. That step is a
+  // separate service the compose runs once, before the app (read as text: no YAML dep).
+  const compose = readFileSync(join(B("vikunja"), "docker-compose.yml"), "utf8");
+  const helper = serviceText(compose, "vikunja-volume-owner");
+  assert.ok(helper, "the one-shot volume-owner service is declared");
+  assert.match(helper, /image: busybox:\S+@sha256:[0-9a-f]{64}/, "its image is pinned by digest");
+  assert.match(helper, /^\s+network_mode: none$/m, "it needs no network");
+  assert.match(helper, /^\s+restart: "no"$/m, "it runs once and is not restarted");
+  assert.match(helper, /command: \["chown", "1000:1000", "\/app\/vikunja\/files", "\/db"\]/, "it chowns both volume targets");
+  assert.match(helper, /^\s+- vikunja-data:\/app\/vikunja\/files$/m, "the files volume is the one Vikunja mounts");
+  assert.match(helper, /^\s+- vikunja-db:\/db$/m, "and so is the database volume");
+  const app = serviceText(compose, "vikunja");
+  assert.ok(app, "the app service is declared");
+  assert.match(app, /depends_on:\n\s+vikunja-volume-owner:\n\s+condition: service_completed_successfully/, "Vikunja starts only once the helper has finished");
 });
 
 // ── nothing may outlive the protocol timeout ──────────────────────────────────────
@@ -950,15 +988,15 @@ test("the docs and skills tell the operator who creates the login, in both langu
     join(REPO, "docs", "es", "integrations", "vikunja.md"),
   ]) {
     const doc = readFileSync(path, "utf8");
-    assert.match(doc, /VIKUNJA_SERVICE_ENABLEREGISTRATION=false/, `${path}: says how to close registration`);
+    assert.match(doc, /VIKUNJA_ENABLE_REGISTRATION=false/, `${path}: says how a hand-set-up install closes registration`);
   }
   // Every converted bundle's skill says where the login now lives.
   for (const app of Object.keys(APPS)) {
     const skill = readFileSync(join(B(app), "skills", `${app}.md`), "utf8");
     assert.match(skill, /Settings → Passwords/, `${app}: the skill names where Crow keeps the login`);
   }
-  // And the one that keeps a hand-set account says plainly how to close registration.
-  assert.match(readFileSync(join(B("vikunja"), "skills", "vikunja.md"), "utf8"), /VIKUNJA_SERVICE_ENABLEREGISTRATION=false/);
+  // And the one that now closes registration itself says how a hand-set-up install does it.
+  assert.match(readFileSync(join(B("vikunja"), "skills", "vikunja.md"), "utf8"), /VIKUNJA_ENABLE_REGISTRATION=false/);
 });
 
 test("every skill these bundles changed is in the ledger (an edited skill needs its new hash recorded)", () => {

@@ -18,14 +18,21 @@ tools:
 
 ## First-run setup
 
-Vikunja has its own registration page, so **you** create the account: open
-`http://localhost:3456`, register, then turn registration off again by setting
-`VIKUNJA_SERVICE_ENABLEREGISTRATION=false` and restarting the bundle. Until you do, anyone
-who can reach that page can create an account.
+Crow creates the account for you at install: the username is `admin`, and its password is in
+Crow's **Settings → Passwords**. Immediately afterwards Crow turns registration off
+(`VIKUNJA_ENABLE_REGISTRATION=false` in the bundle's settings) and restarts Vikunja, so its
+public registration page stops accepting new accounts. Do not reopen it: add more people
+from Vikunja's own admin tools (its user management) once you are signed in as `admin`.
+
+If this install was made before Crow did that, its registration page may still be open. If Fix-it
+shows a Vikunja card, press **Apply the update** on it first — Crow holds the newer compose (the
+one that adds Vikunja's one-shot volume-ownership step) until you do. Then set
+`VIKUNJA_ENABLE_REGISTRATION=false` on its Extensions card and press **Restart**. A script
+that finds accounts already in place leaves everything alone (it never resets an existing
+login), so an install set up by hand keeps the login the operator made.
 
 Then create an API token under **Settings → API Tokens** and put it in
-`VIKUNJA_API_TOKEN` (Crow's integration settings or the bundle's `.env`). The Extensions card
-adds **Finish Vikunja's setup now** with a direct link until you press Done.
+`VIKUNJA_API_TOKEN` (Crow's integration settings or the bundle's `.env`).
 
 ## When to Activate
 

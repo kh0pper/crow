@@ -24,6 +24,7 @@ import {
   firstAdminNoticeKey,
 } from "../servers/gateway/bundle-first-admin.js";
 import { t } from "../servers/gateway/dashboard/shared/i18n.js";
+import { firstAdminAfterFailureSentence, applyFirstAdminAfter } from "../servers/gateway/bundle-first-admin-after.js";
 
 const NOW = Date.parse("2026-11-05T12:00:00Z");
 const INSTALL_A = "2026-11-01T10:00:00.000Z";
@@ -292,6 +293,70 @@ test("reportFirstAdminNotice owns and closes its client, and returns early for c
 
   assert.equal(await reportFirstAdminNotice({ bundleId: "flux", manifest: CROW, installId: INSTALL_A, dbFactory: () => { throw new Error("never opened"); } }), null);
   assert.equal(await reportFirstAdminNotice({ bundleId: "kuma", manifest: FINISH, dbFactory: () => { throw new Error("db down"); }, log: { warn() {} } }), null);
+});
+
+/** A crow/via-setup manifest: the only shape that can carry an after-step. */
+const SETUP = {
+  id: "vik", name: "Vikunja", webUI: { port: 3456, path: "/", label: "Vikunja" },
+  firstAdmin: {
+    mode: "crow", via: "setup", user: "admin", secretEnv: "VIK_ADMIN_PASSWORD",
+    setup: { script: "scripts/first-admin.sh", timeout_s: 30, after: { env: { VIK_CLOSE_SIGNUPS: "false" }, recreate: true } },
+  },
+  env_vars: [{ name: "VIK_CLOSE_SIGNUPS", default: "true" }],
+};
+const AFTER_FAILED = { ok: false, outcome: "recreate-failed: port is already allocated" };
+
+test("a failed after-step rings once with the press-Restart sentence; ok or absent stays silent", async () => {
+  const { db } = makeDb();
+  const { calls, notify } = makeNotify();
+
+  // The setup run was ok and so was the follow-up: silence, as before the step existed.
+  assert.equal(await notifyFirstAdmin({ db, bundleId: "vik", manifest: SETUP, installId: INSTALL_A, autoResult: "ok", afterResult: { ok: true, outcome: "applied" }, notify }), null);
+  // No after-step at all: unchanged too.
+  assert.equal(await notifyFirstAdmin({ db, bundleId: "vik", manifest: SETUP, installId: INSTALL_A, autoResult: "ok", notify }), null);
+  assert.equal(calls.length, 0);
+
+  // The account exists but Crow could not close registration: the owner hears about it.
+  const row = await notifyFirstAdmin({ db, bundleId: "vik", manifest: SETUP, bundleName: "Vikunja", installId: INSTALL_A, autoResult: "ok", afterResult: AFTER_FAILED, notify });
+  assert.ok(row);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body, firstAdminAfterFailureSentence("Vikunja"));
+  assert.match(calls[0].body, /registration may still be open: press Restart on the Extensions card/);
+  assert.equal(calls[0].action_url, "/dashboard/extensions?q=vik", "the Extensions detail, as its other notices");
+  assert.equal(calls[0].type, "system");
+  assert.equal(calls[0].source, "bundle-installer");
+  assert.deepEqual(calls[0].metadata, { kind: "bundle-first-admin", bundle: "vik", mode: "crow" });
+  assert.equal(String(calls[0].body).includes("password"), false, "never the password");
+
+  // Same install: never a second bell, whatever the next call says.
+  await notifyFirstAdmin({ db, bundleId: "vik", manifest: SETUP, bundleName: "Vikunja", installId: INSTALL_A, autoResult: "ok", afterResult: AFTER_FAILED, notify });
+  assert.equal(calls.length, 1, "one per install");
+  // A new install asks again.
+  await notifyFirstAdmin({ db, bundleId: "vik", manifest: SETUP, bundleName: "Vikunja", installId: INSTALL_B, autoResult: "ok", afterResult: AFTER_FAILED, notify });
+  assert.equal(calls.length, 2);
+});
+
+test("reportFirstAdminNotice carries the after-step's failure through to the bell", async () => {
+  const { db } = makeDb();
+  const { calls, notify } = makeNotify();
+  const row = await reportFirstAdminNotice({
+    bundleId: "vik", manifest: SETUP, bundleName: "Vikunja", installId: INSTALL_A,
+    autoResult: "ok", afterResult: { ok: false, outcome: "env-failed: EACCES" },
+    dbFactory: () => ({ ...db, close() {} }), notify, log: { warn() {} },
+  });
+  assert.ok(row);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body, firstAdminAfterFailureSentence("Vikunja"));
+
+  // The shape applyFirstAdminAfter really returns, over its seams.
+  const failed = await applyFirstAdminAfter({
+    bundleId: "vik", manifest: SETUP, destDir: "/tmp/vik",
+    writeEnv: () => {}, recreate: async () => ({ ok: false, reason: "port is already allocated" }),
+  });
+  assert.equal(failed.ok, false);
+  assert.match(failed.outcome, /^recreate-failed: /);
+  const ok = await applyFirstAdminAfter({ bundleId: "vik", manifest: SETUP, destDir: "/tmp/vik", writeEnv: () => {}, recreate: async () => ({ ok: true }) });
+  assert.deepEqual({ ok: ok.ok, outcome: ok.outcome }, { ok: true, outcome: "applied" });
 });
 
 test("Done writes this install's stamp, and firstAdminDoneValues reads every marker back", async () => {

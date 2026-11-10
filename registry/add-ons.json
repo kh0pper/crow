@@ -7414,7 +7414,7 @@
     {
       "id": "vikunja",
       "name": "Vikunja",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
       "type": "bundle",
       "author": "Crow",
@@ -7464,6 +7464,12 @@
           "description": "API token from Vikunja Settings > API Tokens",
           "required": true,
           "secret": true
+        },
+        {
+          "name": "VIKUNJA_ENABLE_REGISTRATION",
+          "description": "Crow turns this off after it creates your account; set true only to let people sign themselves up",
+          "default": "true",
+          "required": false
         }
       ],
       "ports": [
@@ -7475,13 +7481,26 @@
         "label": "Vikunja"
       },
       "firstAdmin": {
-        "mode": "finish-setup",
-        "note": "Registration stays open until you turn it off: create your account, then set VIKUNJA_SERVICE_ENABLEREGISTRATION=false."
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180,
+          "after": {
+            "env": {
+              "VIKUNJA_ENABLE_REGISTRATION": "false"
+            },
+            "recreate": true
+          }
+        },
+        "user": "admin",
+        "secretEnv": "VIKUNJA_ADMIN_PASSWORD",
+        "note": "If you made Vikunja's account before this version, turn registration off: if Fix-it shows a Vikunja card, press Apply the update first, then set VIKUNJA_ENABLE_REGISTRATION=false on its Extensions card and press Restart."
       },
       "refreshFiles": [
         "docker-compose.yml"
       ],
-      "notes": "Self-host via Docker (uses built-in SQLite) or connect to existing (set VIKUNJA_URL + VIKUNJA_API_TOKEN). Create accounts in Vikunja's web UI, then tokens under Settings > API Tokens. The compose derives Vikunja's public URL from VIKUNJA_URL.",
+      "notes": "Self-host via Docker (uses built-in SQLite) or connect to existing (set VIKUNJA_URL + VIKUNJA_API_TOKEN). Crow creates the account `admin` at install (password in Settings → Passwords) and then closes registration; add more people from Vikunja's own admin tools. API tokens live under Settings > API Tokens. The compose derives Vikunja's public URL from VIKUNJA_URL.",
       "official": true
     },
     {

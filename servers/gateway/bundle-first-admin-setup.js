@@ -52,8 +52,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
 import { safeRelPath, spawnGroup, hookEnv, tailLines } from "./bundle-lifecycle.js";
-import { newSecretValue, writePrivateFile } from "./bundle-env-secrets.js";
-import { updateEnvText } from "./bundle-env-codec.js";
+import { newSecretValue, writeBundleEnv } from "./bundle-env-secrets.js";
 import { createDbClient } from "../db.js";
 import { ensureWriteKey, ensureKeychainTable, saveExtensionSecret } from "./keychain/store.js";
 import { writeFirstAdminAutoResult } from "./bundle-first-admin.js";
@@ -196,17 +195,8 @@ function scriptFailureReason(err) {
   return err && err.message ? String(err.message) : "the setup script failed";
 }
 
-/** Write one key/value set into the bundle's own .env: mode 600, line-preserving, atomic. */
-export function writeBundleEnv(destDir, values) {
-  const path = join(destDir, ".env");
-  let text = "";
-  try {
-    if (existsSync(path)) text = readFileSync(path, "utf8");
-  } catch {
-    text = "";
-  }
-  writePrivateFile(path, updateEnvText(text, values));
-}
+/** The line-preserving bundle .env writer, shared with the "after setup" step. */
+export { writeBundleEnv } from "./bundle-env-secrets.js";
 
 function defaultDeps() {
   return {

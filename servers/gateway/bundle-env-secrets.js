@@ -155,6 +155,22 @@ export function writePrivateFile(path, content) {
 }
 
 /**
+ * Write one key/value set into a bundle's own .env: mode 600, line-preserving (every other
+ * line, comment and legacy value stays byte-for-byte) and atomic. The writer every
+ * install-time step uses when it has to leave a value behind for the app to read.
+ */
+export function writeBundleEnv(destDir, values) {
+  const path = join(destDir, ".env");
+  let text = "";
+  try {
+    if (existsSync(path)) text = readFileSync(path, "utf8");
+  } catch {
+    text = "";
+  }
+  writePrivateFile(path, updateEnvText(text, values));
+}
+
+/**
  * The retained copy's record of keys whose value is a compose fallback an old install ran
  * on (a published default): `CROW_LEGACY_FALLBACK_KEYS=A:<hash>,B:<hash>`, each with a short
  * sha256 of that value. Kept so a later install, and the boot backfill, never save that value

@@ -587,6 +587,9 @@
       ]
     },
     "vikunja": {
+      "VIKUNJA_ENABLE_REGISTRATION": [
+        "true"
+      ],
       "VIKUNJA_URL": [
         "http://localhost:3456"
       ]
