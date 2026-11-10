@@ -2009,7 +2009,23 @@ async function ensureHistorySchema() {
   if (_historyReady) return;
   const { run: migrateHistory } = await import("../scripts/migrations/0024-item-versions.mjs");
   migrateHistory({ dbPath: DB_PATH, log: () => {} });
+  // ERASE SYNC IS OPT-IN ON BOTH SIDES: the sender only emits an erase when its own
+  // `history.erase_sync` is on, and the RECEIVER only applies one when its own is.
+  // These cases are about what a receiver that has opted in does; the opted-out
+  // case has its own case below (E10).
+  await eraseSyncOn(createDbClient(DB_PATH));
   _historyReady = true;
+}
+
+/** Turn this instance's `history.erase_sync` on (the local dashboard setting). */
+async function eraseSyncOn(client) {
+  const db = client || createDbClient(DB_PATH);
+  await db.execute({
+    sql: `INSERT INTO dashboard_settings (key, value) VALUES ('history.erase_sync', '1')
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    args: [],
+  });
+  if (!client) db.close();
 }
 
 const historyCount = async (db, itemType, itemId) =>
@@ -2377,6 +2393,108 @@ test("E9. a summary memory's erase is routed by its source, never by the sender'
       "the tombstone is keyed by the summary's source",
     );
   } finally {
+    db.close();
+  }
+});
+
+test("E10. with erase sync OFF here, an inbound erase is logged and only a bounded tombstone is written", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e10";
+  const REMOTE = "remote-e10";
+  const { mgr, db } = makeManager(INST);
+  try {
+    // The RECEIVER's own opt-in is off (erase sync is opt-in on BOTH sides).
+    await db.execute({
+      sql: "UPDATE dashboard_settings SET value = '0' WHERE key = 'history.erase_sync'",
+      args: [],
+    });
+    await db.execute({
+      sql: "INSERT INTO memories (id, category, content, lamport_ts) VALUES (9810, 'general', 'stays here', 5)",
+      args: [],
+    });
+    await db.execute({ sql: "UPDATE memories SET content = 'stays here, edited' WHERE id = 9810", args: [] });
+    assert.equal(await historyCount(db, "memory", 9810), 2, "the local memory has a history here");
+
+    const feed = makeStubFeed();
+    feed.push(signEntry({
+      table: "memories", op: "erase",
+      row: { id: 9810, source: "chat", erased_at: "2026-11-10T00:00:00.000Z", erased_by: "owner:abcd1234" },
+      lamport_ts: 7, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+
+    assert.equal(await memoryExists(db, 9810), true, "no live row is deleted when this instance has not opted in");
+    assert.equal(await historyCount(db, "memory", 9810), 2, "and no version is erased");
+    const tombs = await tombstoneRows(db, "memory", "9810");
+    assert.equal(tombs.length, 1, "the event is still acknowledged with a tombstone");
+    assert.equal(
+      Number((await db.execute({
+        sql: "SELECT erase_lamport FROM item_erasures WHERE item_type = 'memory' AND item_id = '9810'",
+        args: [],
+      })).rows[0].erase_lamport),
+      7,
+      "bounded to the erase's lamport, so a later write that post-dates it still lands",
+    );
+  } finally {
+    await db.execute({
+      sql: `INSERT INTO dashboard_settings (key, value) VALUES ('history.erase_sync', '1')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [],
+    });
+    db.close();
+  }
+});
+
+test("E11. an erase whose apply throws before the transaction still tombstones and queues the work", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e11";
+  const REMOTE = "remote-e11";
+  const { mgr, db } = makeManager(INST);
+  try {
+    await db.execute({
+      sql: "INSERT INTO memories (id, category, content) VALUES (9811, 'general', 'the apply blows up')",
+      args: [],
+    });
+    assert.equal(await historyCount(db, "memory", 9811), 1);
+
+    // The failure happens BEFORE applyRemoteErasure (its own failure path never
+    // runs), and the feed loop consumes the entry either way — so this is the one
+    // case where losing the tombstone would lose the erase entirely.
+    const realApply = mgr._applyErase.bind(mgr);
+    mgr._applyErase = async () => {
+      throw new Error("simulated pre-apply failure");
+    };
+    const feed = makeStubFeed();
+    feed.push(signEntry({
+      table: "memories", op: "erase",
+      row: { id: 9811, source: "chat", erased_at: "2026-11-10T00:00:00.000Z", erased_by: "owner:abcd1234" },
+      lamport_ts: 60, instance_id: REMOTE,
+    }));
+    try {
+      await mgr._processNewEntries(REMOTE, feed);
+    } finally {
+      mgr._applyErase = realApply;
+    }
+
+    assert.equal(await memoryExists(db, 9811), true, "nothing was applied by the failed attempt");
+    const tombs = await tombstoneRows(db, "memory", "9811");
+    assert.equal(tombs.length, 1, "the tombstone is written anyway — it must never be lost");
+    assert.equal(
+      Number((await db.execute({
+        sql: "SELECT erase_lamport FROM item_erasures WHERE item_type = 'memory' AND item_id = '9811'",
+        args: [],
+      })).rows[0].erase_lamport),
+      60,
+      "bounded to the erase event's lamport",
+    );
+    assert.equal(
+      Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM pending_remote_erasures", args: [] })).rows[0].n),
+      1,
+      "and a pending marker names the work the sweep has to finish",
+    );
+  } finally {
+    // This file shares one DB: do not leave the marker for another case to trip on.
+    await db.execute({ sql: "DELETE FROM pending_remote_erasures", args: [] });
     db.close();
   }
 });

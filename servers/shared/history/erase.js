@@ -79,14 +79,25 @@
  * lamport of the erase event it represents — and the refusals are bounded by it:
  *
  *   - sync refuses an inbound insert/update only when its lamport_ts is at or
- *     below `erase_lamport` (erase_lamport NULL = an erase that never travelled,
- *     which refuses everything: nothing a peer sends can post-date it);
+ *     below `erase_lamport`;
  *   - a restore refuses only versions created at or before `erased_at`.
+ *
+ * THE BOUND IS ALWAYS SET (the review's first point). An erase that is NOT
+ * announced — the operator's setting is off, the item never syncs, it is a Maker
+ * Lab erasure, it is a permanent project delete — still binds its tombstone, to
+ * THIS instance's lamport counter read at erase time (readLocalLamportOrNull:
+ * the same `sync_state.local_counter` instance-sync mints from, read and never
+ * minted). So a tombstone means "the item as of that counter may never come
+ * back" rather than "this id/name is dead forever": a section a peer genuinely
+ * writes later carries a higher lamport and is accepted. NULL is reserved for a
+ * store whose counter cannot be read at all, and that unbounded tombstone refuses
+ * everything, which is the safe direction.
  *
  * ONLY ITEMS THAT ACTUALLY SYNC PROPAGATE (same review). A starter or Maker Lab
  * memory, a Maker Lab learner's whole record, a project-scoped section while
- * project-section sync is off: their erasures are tombstoned LOCALLY and never
- * leave the host — see eraseSyncEnabled() and eraseEventsFor().
+ * project-section sync is off, a permanent project delete (spec §15: a purge
+ * emits nothing): their erasures are tombstoned LOCALLY and never leave the
+ * host — see eraseSyncEnabled(), isLocalOnlyEraseActor() and eraseEventsFor().
  */
 import { withoutWriteContext } from "./write-context.js";
 import { readLocalInstanceIdOrNull } from "../crow-home.js";
@@ -205,9 +216,11 @@ export function erasureSyncTable(itemType) {
  * is a new mechanism (hello flag on both transports, a persisted per-peer
  * capability, per-peer entry variants, and a per-peer pending list), which is
  * the operator's call, not this change's. Until then: off means no erase event
- * ever leaves the host, a local tombstone keeps refusing what a peer sends, and
- * turning it on is an explicit fleet-wide decision taken once every peer runs
- * this code.
+ * ever leaves the host (and an INBOUND erase is only recorded as a bounded
+ * tombstone, never applied — see instance-sync's `_tombstoneOnlyErase`), and
+ * turning it on is an explicit fleet-wide decision taken once every peer runs this
+ * code. It is therefore opt-in on BOTH SIDES: the sender needs it on to emit, the
+ * receiver needs it on to apply.
  */
 export const ERASE_SYNC_SETTING = "history.erase_sync";
 
@@ -226,12 +239,18 @@ export async function eraseSyncEnabled(db) {
 }
 
 /**
- * Actor ids whose erasures NEVER leave the host. Maker Lab's learner delete runs
- * as `system:maker-lab` (bundles/maker-lab/server/pending-erasures.js) and its
- * DATA-HANDLING promise is that learner data does not leave the host — so its
- * tombstones stay local whatever the memory's source says.
+ * Actor ids whose erasures NEVER leave the host.
+ *
+ * `maker-lab`     Maker Lab's learner delete runs as `system:maker-lab`
+ *                 (bundles/maker-lab/server/pending-erasures.js) and its
+ *                 DATA-HANDLING promise is that learner data does not leave the
+ *                 host — so its tombstones stay local whatever the memory's
+ *                 source says.
+ * `project-delete` a permanent project delete is a PURGE: spec §15 says a purge
+ *                 emits nothing at all (its tombstone is the local record), so
+ *                 its history erase must not become the one thing it announces.
  */
-export const LOCAL_ONLY_ERASE_ACTORS = Object.freeze(["maker-lab"]);
+export const LOCAL_ONLY_ERASE_ACTORS = Object.freeze(["maker-lab", "project-delete"]);
 
 /** Is this erase one that must never be announced? */
 export function isLocalOnlyEraseActor(by) {
@@ -418,9 +437,12 @@ const DELETE_ITEM_SQL = "DELETE FROM item_versions WHERE item_type = ? AND item_
 /**
  * The BOUNDED version delete for an item that is already in the Trash when a
  * peer's erase arrives: only the versions created at or before the erase's own
- * time. A version written afterwards is a newer local delete (or a local
- * re-create) that the erase knows nothing about; the item stays in the Trash and
- * the local sweep finishes it.
+ * time (the apply's local clock). A version written afterwards is a newer local
+ * fact — a newer local delete or a local re-create — and the caller does not run
+ * this statement at all in that case (see runRemoteEraseTransaction, which
+ * requires the item's newest version to be a `delete` at or before the erase).
+ * The `created_at <= ?` predicate is the second half of that rule, so the
+ * statement is safe on its own too.
  */
 const DELETE_ITEM_VERSIONS_UP_TO_SQL = `
   DELETE FROM item_versions
@@ -461,18 +483,36 @@ const DELETE_TRASH_ITEM_SQL = `
    WHERE item_type = ? AND item_id = ?
      AND ${TRASH_ITEM_STILL_DELETED}`;
 
-/** The unconditional tombstone write (idempotent: the FIRST erase is the fact). */
+/**
+ * The upsert branch every tombstone write shares (the review's fifth point).
+ *
+ * A tombstone is not "written once, once only": an id or a section name can be
+ * reused and erased AGAIN, and the second erase is a later fact than the first.
+ * So a conflicting write moves the bound FORWARD (MAX — a re-erase never lowers a
+ * bound this store already refuses below) and keeps the newest `erased_at` (the
+ * restore gate's window). `MAX` is SQLite's two-argument scalar form, hence the
+ * COALESCE pairing: a NULL bound means "cannot be read/unbounded" and must not
+ * swallow the other side (MAX(x, NULL) is NULL).
+ */
+const TOMBSTONE_UPSERT = `
+  ON CONFLICT(item_type, item_id) DO UPDATE SET
+    erase_lamport = MAX(COALESCE(item_erasures.erase_lamport, excluded.erase_lamport),
+                        COALESCE(excluded.erase_lamport, item_erasures.erase_lamport)),
+    erased_at = CASE WHEN excluded.erased_at > item_erasures.erased_at
+                     THEN excluded.erased_at ELSE item_erasures.erased_at END`;
+
+/** The unconditional tombstone write (moves an existing row forward, see TOMBSTONE_UPSERT). */
 const TOMBSTONE_SQL = `
   INSERT INTO ${ITEM_ERASURES_TABLE} (item_type, item_id, erased_at, erased_by, origin_instance, erase_lamport)
   VALUES (?, ?, ?, ?, ?, ?)
-  ON CONFLICT(item_type, item_id) DO NOTHING`;
+  ${TOMBSTONE_UPSERT}`;
 
 /** The guarded tombstone write: only for an item still in the Trash at the cutoff. */
 const TOMBSTONE_TRASH_SQL = `
   INSERT INTO ${ITEM_ERASURES_TABLE} (item_type, item_id, erased_at, erased_by, origin_instance, erase_lamport)
   SELECT ?, ?, ?, ?, ?, ?
    WHERE ${TRASH_ITEM_STILL_DELETED}
-  ON CONFLICT(item_type, item_id) DO NOTHING`;
+  ${TOMBSTONE_UPSERT}`;
 
 /* ------------------------------------------------------------- tombstones */
 
@@ -501,8 +541,10 @@ function erasedByOf(by) {
  *                    not widen). A session SUMMARY memory is the exception its
  *                    own apply path already makes: it is keyed on its source
  *                    (`session-summary:<origin>:<thread>`), never by an id a
- *                    peer shares, so a tombstone records that source too
- *                    (erasureKeys is given the snapshot).
+ *                    peer shares, so a summary's tombstone carries ONLY that
+ *                    portable key — an id-keyed one would tombstone whichever
+ *                    unrelated local memory happens to hold the sender's id
+ *                    (the review's eighth point);
  *   context_section  the section's own scope — section_key + device_id + the
  *                    PORTABLE project uuid — because crow_context rows are keyed
  *                    by that composite on the wire and their rowids are per
@@ -521,9 +563,11 @@ function erasedByOf(by) {
 export function erasureKeys(itemType, { itemId = null, snapshot = null } = {}) {
   const keys = [];
   if (itemType === "memory" && snapshot && isSummaryMemorySource(snapshot.source)) {
-    // The summary's wire identity, so a peer's re-insert of the same thread
-    // summary (which never shares our id) is refused too.
+    // A summary is named by its SOURCE and nothing else: the numeric id is the
+    // writer's own rowid and means nothing on a peer (and nothing here either
+    // once the row is a different life of that id).
     keys.push(`${SUMMARY_TOMBSTONE_PREFIX}${String(snapshot.source)}`);
+    return keys;
   }
   if (
     itemType === "context_section" &&
@@ -677,12 +721,12 @@ function readTombstonesSync(run, itemType, keys) {
  * The tombstone that must REFUSE an inbound change, or null.
  *
  * Versioned on purpose (the review's point): "never re-create" is about the item
- * that was erased, not about its identity forever. An erase event carries the
- * lamport it was emitted at, recorded as `erase_lamport`:
+ * that was erased, not about its identity forever. Every tombstone records the
+ * lamport it is bounded by, `erase_lamport` — the erase event's own lamport when it
+ * travelled, this instance's counter at erase time when it did not:
  *
- *   erase_lamport NULL      the erase never travelled (a local-only item, Maker
- *                           Lab, Erase-sync off). Nothing a peer sends can
- *                           post-date it, so everything is refused.
+ *   erase_lamport NULL      the counter could not be read at all, so nothing can
+ *                           be shown to post-date the erase: everything is refused.
  *   incomingTs <= it        the change is the erased item coming back: refused.
  *   incomingTs > it         a genuinely NEW item that reuses that id/name later:
  *                           accepted.
@@ -759,12 +803,18 @@ async function latestSnapshot(db, itemType, itemId) {
  * source: an erase row for a starter or Maker Lab memory carries its source, so
  * the SAME gate that keeps the memory off the wire keeps its erasure off it too
  * (emitChange/emitOrQueue ask shouldSyncRow about exactly this row).
+ *
+ * NO SNAPSHOT, NO EVENT (the review's eighth point): an item whose newest
+ * snapshot could not be read cannot be named on the wire with the fields the
+ * gate needs, so the erase stays local. Failing closed here is the safe
+ * direction — the tombstone is still written, only the announcement is dropped.
  */
 function eraseWireRow(itemType, itemId, snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return null;
   if (itemType === "memory") {
-    return { id: itemId, source: snapshot?.source ?? null };
+    return { id: itemId, source: snapshot.source ?? null };
   }
-  if (itemType === "context_section" && snapshot && typeof snapshot.section_key === "string" && snapshot.section_key !== "") {
+  if (itemType === "context_section" && typeof snapshot.section_key === "string" && snapshot.section_key !== "") {
     const row = {
       section_key: snapshot.section_key,
       device_id: snapshot.device_id ?? null,
@@ -784,6 +834,35 @@ let _instanceSyncModule = null;
 async function instanceSyncModule() {
   if (!_instanceSyncModule) _instanceSyncModule = await import("../../sharing/instance-sync.js");
   return _instanceSyncModule;
+}
+
+/**
+ * The memory sources a PEER may never erase (the review's fourth point): a
+ * starter/demo memory and a Maker Lab learner record are per-install, and an
+ * id-keyed erase that happens to name one of their ids is a collision, not an
+ * instruction. A session SUMMARY is the exception that proves the rule: its wire
+ * identity is its source, so an erase that names that source IS about this
+ * summary (and one that names a numeric id is not).
+ *
+ * Resolved from instance-sync (which owns the local-only list) through the cached
+ * dynamic import — never a static one, see above. A store where the list cannot be
+ * read protects nothing (the same read-only failure direction as the rest of this
+ * module: the erase still runs, the protection is what is lost), which is also
+ * what the caller did before this check existed.
+ *
+ * @returns {Promise<{isLocalOnly: (source: unknown) => boolean, isSummary: (source: unknown) => boolean}>}
+ */
+async function memorySourceTests() {
+  try {
+    const { isLocalOnlyMemorySource } = await instanceSyncModule();
+    const { isSummaryMemorySource: isSummary } = await import("../summary-source.js");
+    return {
+      isLocalOnly: (source) => isLocalOnlyMemorySource(source),
+      isSummary: (source) => isSummary(source),
+    };
+  } catch {
+    return { isLocalOnly: () => false, isSummary: () => false };
+  }
 }
 
 /**
@@ -822,17 +901,108 @@ export async function eraseEventsFor(items) {
 }
 
 /**
- * WHY THE TOMBSTONE'S BOUND COMES FROM THE EMITTER, NOT FROM A MINT HERE.
+ * WHERE A TOMBSTONE'S BOUND COMES FROM (two sources, one value).
  *
- * `erase_lamport` must be the lamport of the erase EVENT, and only the sync layer
- * knows what that is: `emitOrQueue`/`emitChange` mint it from the LOCAL instance's
- * counter. A bundle process, a test fleet and the gateway do not share one counter,
- * and minting here from a guessed instance id would bound the tombstone to a value
- * no peer ever sees (a higher peer write would then resurrect the item). So the
- * tombstones are written with a NULL bound and bound afterwards to the lamport the
- * emit reports. A failed or gated emit leaves NULL — the unbounded tombstone, which
- * refuses everything and is the safe direction.
+ * An ANNOUNCED erase's bound must be the lamport of the EVENT, and only the sync
+ * layer knows what that is: `emitOrQueue`/`emitChange` mint it from the LOCAL
+ * instance's counter. A bundle process, a test fleet and the gateway do not share
+ * one counter, and minting here from a guessed instance id would bound the
+ * tombstone to a value no peer ever sees (a higher peer write would then resurrect
+ * the item). So the tombstone is written with the counter read below and RAISED to
+ * the event's lamport afterwards (bindEventTombstones).
+ *
+ * An erase that is NOT announced (setting off, local-only item, Maker Lab, a
+ * permanent project delete) keeps the counter it was written with. That is the
+ * review's first point: an unannounced erase must still be bounded, or its
+ * tombstone (NULL = refuses everything) would keep a peer's genuinely new item —
+ * a section re-created under the same name — from ever arriving.
  */
+
+/**
+ * This instance's Lamport counter, as instance-sync keeps it — read, never minted.
+ *
+ * `sync_state.local_counter` is the one series `mintLamport` (servers/shared/
+ * sync-stamp.js) increments, so it is the highest value this instance has written
+ * or seen. A tombstone bound to it refuses exactly the writes that cannot post-date
+ * the erase.
+ *
+ * NULL ONLY WHEN IT CANNOT BE READ: no `sync_state` table (a bare store), an
+ * unreadable store, or no counter row at all. The tombstone is then unbounded,
+ * which refuses everything — the safe direction.
+ *
+ * The one fallback: a store whose counter row is missing for the id the
+ * instance-id file names (a test fleet whose manager ids are its own, a host whose
+ * file and manager disagree) still has counters under other ids; the greatest one
+ * is the furthest this host has got, so it is the tightest bound this code can
+ * justify without minting.
+ *
+ * @param {{execute: Function}} db
+ * @returns {Promise<number|null>}
+ */
+export async function readLocalLamportOrNull(db) {
+  try {
+    const instanceId = readLocalInstanceIdOrNull();
+    if (instanceId) {
+      const { rows } = await db.execute({
+        sql: "SELECT local_counter FROM sync_state WHERE instance_id = ?",
+        args: [instanceId],
+      });
+      const own = Number(rows[0]?.local_counter);
+      if (rows[0] && Number.isFinite(own)) return own;
+    }
+    const { rows } = await db.execute("SELECT MAX(local_counter) AS top FROM sync_state");
+    const top = rows[0]?.top;
+    return top === null || top === undefined || !Number.isFinite(Number(top)) ? null : Number(top);
+  } catch {
+    return null; // no sync_state table (a test shim, a bare store) = no bound
+  }
+}
+
+/**
+ * The SQL bound an inbound erase's live-row delete compares against: the erase's
+ * own lamport, or "greater than anything a row can carry" when the erase event
+ * arrived without one (an entry with no lamport cannot post-date an erase, so no
+ * row can post-date it either).
+ */
+export function eraseLamportBound(eraseLamport) {
+  const value = Number(eraseLamport);
+  return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+}
+
+/**
+ * The two statements an inbound erase needs for ONE live row, with THE LAMPORT
+ * GATE IN THE SQL ITSELF (the review's second point).
+ *
+ * Reading the local row's lamport before the transaction and then deleting is a
+ * TOCTOU race: a local edit that lands in between is deleted anyway. So the
+ * predicate travels with the statement, and — because the pending-marker row
+ * stores these statements verbatim — a SWEEP RETRY is gated by exactly the same
+ * rule. That is what makes "a retried inbound erase never deletes a section
+ * edited after the erase" true without a second read.
+ *
+ *   deleteRow — removes the row only while it does not post-date the erase;
+ *   newerRow  — matches when such a row IS here, i.e. the local version wins:
+ *               nothing is erased and nothing is tombstoned.
+ *
+ * @param {string} table the item's own table ("memories", "crow_context")
+ * @param {string} where the row's key predicate (e.g. "id = ?")
+ * @param {any[]} args its args
+ * @param {number|null} eraseLamport the erase event's lamport
+ * @returns {{deleteRow: {sql: string, args: any[]}, newerRow: {sql: string, args: any[]}}}
+ */
+export function eraseLiveRowStatements(table, where, args, eraseLamport) {
+  const bound = eraseLamportBound(eraseLamport);
+  return {
+    deleteRow: {
+      sql: `DELETE FROM ${table} WHERE ${where} AND COALESCE(lamport_ts, 0) < ?`,
+      args: [...args, bound],
+    },
+    newerRow: {
+      sql: `SELECT 1 FROM ${table} WHERE ${where} AND COALESCE(lamport_ts, 0) >= ? LIMIT 1`,
+      args: [...args, bound],
+    },
+  };
+}
 
 /**
  * Broadcast erase events, one per item, through the same door every ordinary
@@ -872,9 +1042,10 @@ async function emitEraseEvents(db, events, { syncManager, erasedAt, erasedBy }) 
  *
  * Both halves have to describe ONE event for the versioned refusal to mean
  * anything: the tombstone's bound (below which an inbound write is the erased item
- * coming back) and the entry a peer receives. Only rows still unbounded are
- * touched — a tombstone that already carries a bound (an earlier erase that DID
- * travel) keeps the first erase's fact.
+ * coming back) and the entry a peer receives. The bound only ever moves FORWARD
+ * (MAX): a tombstone that already carries a bound from an earlier erase of a
+ * reused id/name is a fact this store already refuses below, and re-binding it
+ * downward would let the older write back in.
  */
 async function bindEventTombstones(db, items, events, lamports) {
   const keysByItem = new Map(items.map((item) => [`${item.itemType}\u0000${item.itemId}`, item]));
@@ -885,9 +1056,10 @@ async function bindEventTombstones(db, items, events, lamports) {
     if (!Number.isFinite(lamport) || !item) continue;
     for (const key of item.keys ?? []) {
       statements.push({
-        sql: `UPDATE ${ITEM_ERASURES_TABLE} SET erase_lamport = ?
-               WHERE item_type = ? AND item_id = ? AND erase_lamport IS NULL`,
-        args: [Number(lamport), item.itemType, key],
+        sql: `UPDATE ${ITEM_ERASURES_TABLE}
+                 SET erase_lamport = MAX(COALESCE(erase_lamport, ?), ?)
+               WHERE item_type = ? AND item_id = ?`,
+        args: [Number(lamport), Number(lamport), item.itemType, key],
       });
     }
   }
@@ -895,9 +1067,9 @@ async function bindEventTombstones(db, items, events, lamports) {
   try {
     await withoutWriteContext(() => db.batch(statements));
   } catch (err) {
-    // The tombstones stay unbounded, which refuses MORE than intended (never less):
-    // a peer's post-erase reuse of the id will be refused until the next erase. That
-    // is the safe direction, so this is a warning, not a failure.
+    // The tombstones keep the (counter) bound they were written with, which refuses
+    // LESS than the event's lamport would: a peer's write between the two is
+    // accepted. That is a warning, not a failure — the erase itself committed.
     console.warn("[history] could not bind the tombstones to their erase event's lamport:", err?.message ?? err);
   }
 }
@@ -921,14 +1093,17 @@ async function defaultSyncManager() {
  * transaction (see runArmedStatements): the tombstone rows go FIRST, so the
  * guarded variant still sees the Trash state the delete is about to act on.
  *
+ * The tombstones carry `bound` — this instance's counter at erase time (see
+ * readLocalLamportOrNull), or NULL when it cannot be read. An announced erase
+ * raises it to the event's lamport afterwards (bindEventTombstones); one that is
+ * never announced keeps it.
+ *
  * @param {object} db
  * @param {{items: Array<{itemType: string, itemId: string, keys: string[], snapshot: object|null}>,
- *   cutoff: string|null, by: {authorKind: string, authorId: string|null}}} batch
+ *   cutoff: string|null, by: {authorKind: string, authorId: string|null}, bound: number|null}} batch
  * @returns {Promise<{tombstones: number, deleted: Array<{rowsAffected: number}>}>}
- *   The tombstones are written WITHOUT a bound (`erase_lamport` NULL);
- *   bindEventTombstones binds them once the emit reports the event's lamport.
  */
-async function runEraseBatch(db, { items, cutoff, by }) {
+async function runEraseBatch(db, { items, cutoff, by, bound = null }) {
   await ensureErasuresTable(db);
   const erasedAt = new Date().toISOString();
   const erasedBy = erasedByOf(by);
@@ -937,11 +1112,11 @@ async function runEraseBatch(db, { items, cutoff, by }) {
   for (const item of items) {
     for (const key of item.keys) {
       if (cutoff === null) {
-        statements.push({ sql: TOMBSTONE_SQL, args: [item.itemType, key, erasedAt, erasedBy, origin, null] });
+        statements.push({ sql: TOMBSTONE_SQL, args: [item.itemType, key, erasedAt, erasedBy, origin, bound] });
       } else {
         statements.push({
           sql: TOMBSTONE_TRASH_SQL,
-          args: [item.itemType, key, erasedAt, erasedBy, origin, null, item.itemType, item.itemId, cutoff],
+          args: [item.itemType, key, erasedAt, erasedBy, origin, bound, item.itemType, item.itemId, cutoff],
         });
       }
     }
@@ -968,9 +1143,12 @@ async function runEraseBatch(db, { items, cutoff, by }) {
  *   set, erase an item only if its latest version is still a `delete` at or before this
  *   ISO timestamp (the Trash clock). The whole item's versions go when it matches — and
  *   only then is its tombstone written, so a restore that won the race is not tombstoned
- *   either. `syncManager` is the process's InstanceSyncManager when the caller has one;
- *   undefined means "resolve this process's singleton if there is one", null means "do
- *   not emit" (a test, a host with sync off).
+ *   either. `syncManager` is the process's InstanceSyncManager when the caller has
+ *   one; undefined means "resolve this process's singleton if there is one", null
+ *   means "this process has no live manager" — the event then takes the durable
+ *   queue door (servers/shared/sync-emit.js emitOrQueue) instead, which is what a
+ *   bundle's own stdio server needs. NEITHER VALUE SILENCES AN ERASE: that is the
+ *   actor (isLocalOnlyEraseActor) and the `history.erase_sync` setting.
  * @returns {Promise<{erased: Array<{itemType: string, itemId: string, versions: number}>,
  *   versions: number, tombstones: number, emitted: number, eraseLamport: number|null,
  *   by: {authorKind: string, authorId: string|null}}>}
@@ -979,8 +1157,9 @@ async function runEraseBatch(db, { items, cutoff, by }) {
  *   `tombstones` counts the tombstone writes this call issued (one or two per
  *   item), `emitted` the erase events that reached the sync layer, and
  *   `eraseLamport` the lamport the emitted events carry (the greatest, when this
- *   call announced several items) — null when nothing was emitted, which leaves
- *   the tombstones unbounded.
+ *   call announced several items) — null when nothing was emitted. A tombstone is
+ *   bounded either way: to that lamport when it was announced, to this instance's
+ *   counter at erase time when it was not.
  */
 export async function eraseItems(db, items, ctx, { deletedBefore = null, syncManager = undefined } = {}) {
   const by = assertEraseActor(ctx);
@@ -989,6 +1168,11 @@ export async function eraseItems(db, items, ctx, { deletedBefore = null, syncMan
   if (!(await historyInstalled(db))) return { erased: [], versions: 0, tombstones: 0, emitted: 0, eraseLamport: null, by };
 
   const cutoff = typeof deletedBefore === "string" && deletedBefore !== "" ? deletedBefore : null;
+  // The bound every tombstone of this batch is written with: this instance's
+  // lamport counter, read (never minted). An announced erase raises it to the
+  // event's lamport afterwards; an unannounced one keeps it, so a peer's later
+  // re-use of that id/name is not refused forever.
+  const bound = await readLocalLamportOrNull(db);
   // Every item's newest snapshot, read BEFORE the versions are erased: a context
   // section's tombstone key comes from it (its scope on the wire) and a memory's
   // source decides whether the item syncs at all (so whether its erase may).
@@ -1003,7 +1187,7 @@ export async function eraseItems(db, items, ctx, { deletedBefore = null, syncMan
   const allEvents = isLocalOnlyEraseActor(by) ? [] : await eraseEventsFor(ready);
   const mayEmit = allEvents.length > 0 && (await eraseSyncEnabled(db));
 
-  const batch = await runEraseBatch(db, { items: ready, cutoff, by });
+  const batch = await runEraseBatch(db, { items: ready, cutoff, by, bound });
   const erased = wanted.map((item, i) => ({ ...item, versions: Number(batch.deleted[i]?.rowsAffected || 0) }));
 
   // Only the items whose versions were really taken are announced: an item a
@@ -1104,18 +1288,24 @@ export async function eraseByProject(db, project = {}, ctx, { syncManager = unde
            )
      GROUP BY v.item_type, v.item_id
      ORDER BY v.item_type, v.item_id`;
-  const deleteSql = `
+  // ONE item's guarded delete. The closure predicates are re-asserted per item
+  // (rather than once for the whole project) so the erase can tell, item by item,
+  // whether it really took this one: a store that changed between the candidate
+  // read and the transaction then leaves that item wholly alone instead of
+  // reporting it erased and tombstoning it.
+  const itemDeleteSql = `
     DELETE FROM item_versions
-     WHERE EXISTS (
+     WHERE item_type = ? AND item_id = ?
+       AND EXISTS (
              SELECT 1 FROM item_versions p
-              WHERE p.item_type = item_versions.item_type
-                AND p.item_id = item_versions.item_id
+              WHERE p.item_type = ?
+                AND p.item_id = ?
                 AND p.project_ref IN (${placeholders})
            )
        AND EXISTS (
              SELECT 1 FROM item_versions latest
-              WHERE latest.item_type = item_versions.item_type
-                AND latest.item_id = item_versions.item_id
+              WHERE latest.item_type = ?
+                AND latest.item_id = ?
                 AND latest.op = 'delete'
                 AND NOT EXISTS (
                   SELECT 1 FROM item_versions newer
@@ -1124,6 +1314,14 @@ export async function eraseByProject(db, project = {}, ctx, { syncManager = unde
                      AND newer.id > latest.id
                 )
            )`;
+  // AN ITEM'S TOMBSTONE, written only once its versions are really gone — i.e.
+  // only for an item the delete above took. It runs AFTER that delete (same armed
+  // transaction), so "no versions left" is exactly "this erase emptied it".
+  const itemTombstoneSql = `
+    INSERT INTO ${ITEM_ERASURES_TABLE} (item_type, item_id, erased_at, erased_by, origin_instance, erase_lamport)
+    SELECT ?, ?, ?, ?, ?, ?
+     WHERE NOT EXISTS (SELECT 1 FROM item_versions WHERE item_type = ? AND item_id = ?)
+    ${TOMBSTONE_UPSERT}`;
 
   // The candidates, read once to build their tombstones (a context section's key
   // is its scope, taken from its own snapshot) and to report them.
@@ -1149,64 +1347,63 @@ export async function eraseByProject(db, project = {}, ctx, { syncManager = unde
   const erasedAt = new Date().toISOString();
   const erasedBy = erasedByOf(by);
   const origin = readLocalInstanceIdOrNull();
-  // Same rule as eraseItems: only items that sync may be announced, a Maker Lab
-  // erasure never is, and the operator's setting gates the whole thing. The
-  // tombstone is written UNBOUND; bindEventTombstones binds it to the lamport the
-  // emitted event reported.
+  // Same rule as eraseItems: only items that sync may be announced, and neither a
+  // Maker Lab erase nor a permanent project delete ever announces anything (a
+  // purge emits nothing — spec §15). The tombstone is written bounded by this
+  // instance's counter, and raised to the emitted event's lamport if one leaves.
+  const bound = await readLocalLamportOrNull(db);
   const allEvents = isLocalOnlyEraseActor(by) ? [] : await eraseEventsFor(ready);
   const events = allEvents.length > 0 && (await eraseSyncEnabled(db)) ? allEvents : [];
-  // The predicate the tombstone INSERT re-asserts for one item. Its args are
-  // (itemType, itemId, ...refs, itemType, itemId) — see the SELECT's column list.
-  const tombstoneGuard = `
-     EXISTS (SELECT 1 FROM item_versions p
-              WHERE p.item_type = ? AND p.item_id = ? AND p.project_ref IN (${placeholders}))
-       AND EXISTS (SELECT 1 FROM item_versions latest
-                    WHERE latest.item_type = ? AND latest.item_id = ?
-                      AND latest.op = 'delete'
-                      AND NOT EXISTS (SELECT 1 FROM item_versions newer
-                                       WHERE newer.item_type = latest.item_type
-                                         AND newer.item_id = latest.item_id
-                                         AND newer.id > latest.id))`;
-  const tombstoneStatements = [];
+
+  const statements = [];
+  const spans = new Map();
   for (const item of ready) {
+    const span = { deleteIndex: statements.length, tombstoneCount: 0 };
+    statements.push({
+      sql: itemDeleteSql,
+      args: [item.itemType, item.itemId, item.itemType, item.itemId, ...refs, item.itemType, item.itemId],
+    });
     for (const key of item.keys) {
-      tombstoneStatements.push({
-        sql: `INSERT INTO ${ITEM_ERASURES_TABLE} (item_type, item_id, erased_at, erased_by, origin_instance, erase_lamport)
-              SELECT ?, ?, ?, ?, ?, ?
-               WHERE ${tombstoneGuard}
-              ON CONFLICT(item_type, item_id) DO NOTHING`,
-        args: [
-          item.itemType, key, erasedAt, erasedBy, origin, null,
-          item.itemType, item.itemId, ...refs, item.itemType, item.itemId,
-        ],
+      span.tombstoneCount += 1;
+      statements.push({
+        sql: itemTombstoneSql,
+        args: [item.itemType, key, erasedAt, erasedBy, origin, bound, item.itemType, item.itemId],
       });
     }
+    spans.set(`${item.itemType}\u0000${item.itemId}`, span);
   }
 
-  await withoutWriteContext(() =>
-    runArmedStatements(db, [...tombstoneStatements, { sql: deleteSql, args: refs }]),
-  );
+  const results = await withoutWriteContext(() => runArmedStatements(db, statements));
 
-  const erased = ready.map(({ itemType, itemId, versions }) => ({ itemType, itemId, versions }));
+  // Only what the guarded deletes really took is reported AND announced: an item
+  // the store changed under us is left alone (its tombstones were not written
+  // either, see itemTombstoneSql), exactly like eraseItems' `taken`.
+  const taken = new Set();
+  const erased = [];
+  let tombstones = 0;
+  for (const item of ready) {
+    const id = `${item.itemType}\u0000${item.itemId}`;
+    const span = spans.get(id);
+    const versions = Number(results[span?.deleteIndex]?.rowsAffected || 0);
+    if (versions <= 0) continue;
+    taken.add(id);
+    tombstones += span.tombstoneCount;
+    erased.push({ itemType: item.itemType, itemId: item.itemId, versions });
+  }
 
-  const { emitted, lamports } = await emitEraseEvents(db, events, { syncManager, erasedAt, erasedBy });
-  // A tombstone bound is meaningful only for an item whose erase was announced AND
-  // whose versions the guarded delete really took.
-  const taken = new Set(
-    events.filter((event) => lamports.has(`${event.itemType}\u0000${event.itemId}`))
-      .map((event) => `${event.itemType}\u0000${event.itemId}`),
-  );
+  const announced = events.filter((event) => taken.has(`${event.itemType}\u0000${event.itemId}`));
+  const { emitted, lamports } = await emitEraseEvents(db, announced, { syncManager, erasedAt, erasedBy });
   await bindEventTombstones(
     db,
     ready.filter((item) => taken.has(`${item.itemType}\u0000${item.itemId}`)),
-    events,
+    announced,
     lamports,
   );
 
   return {
     erased,
     versions: erased.reduce((sum, e) => sum + e.versions, 0),
-    tombstones: tombstoneStatements.length,
+    tombstones,
     emitted,
     eraseLamport: lamports.size > 0 ? Math.max(...lamports.values()) : null,
     projectRefs: refs,
@@ -1214,26 +1411,54 @@ export async function eraseByProject(db, project = {}, ctx, { syncManager = unde
   };
 }
 
+/** The newest version of one item — read INSIDE a transaction by the gates below. */
+const LATEST_VERSION_SQL = `
+  SELECT op, created_at, snapshot_json FROM item_versions
+   WHERE item_type = ? AND item_id = ?
+   ORDER BY id DESC LIMIT 1`;
+
+/** The tombstone statements for one inbound erase (all of `keys`, one bound). */
+function tombstoneStatementsFor(itemType, keys, at, by, originInstance, lamport) {
+  return keys.map((key) => ({
+    sql: `INSERT INTO ${ITEM_ERASURES_TABLE} (item_type, item_id, erased_at, erased_by, origin_instance, erase_lamport)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ${TOMBSTONE_UPSERT}`,
+    args: [itemType, key, at, by, originInstance, lamport],
+  }));
+}
+
 /**
- * Apply an ERASE that arrived from a peer (instance-sync's `op === "erase"`).
- *
- * The peer's instruction is "this item must not exist on either of us": so the
- * live row goes if it is here, its versions are erased through the same armed
- * door (armed transaction, one commit), and this instance records its OWN
- * tombstone — keyed the way it will later be asked about (erasureKeys), with the
- * erasing instance as the origin. The tombstone is the part that makes the erase
- * stick: a later restore on the peer emits an insert this instance now refuses.
- *
- * Idempotent: a re-delivered erase finds no row, no versions and an existing
- * tombstone, and changes nothing.
- *
- * @param {object} db
- * @param {{itemType: string, itemId: string, keys: string[], snapshot?: object|null}} item
- *   `itemId` is the LOCAL item id whose versions go (the live row's id here, not
- *   the sender's); `keys` are the tombstone keys (see erasureKeys)
- * @param {{originInstance?: string|null, erasedAt?: string|null, erasedBy?: string|null}} [meta]
- * @returns {Promise<{tombstones: number, versions: number}>}
+ * The normalized shape of an inbound erase: what to forget, what to delete, who
+ * asked and at which lamport/time. Shared by applyRemoteErasure and the
+ * failed-apply fallback (queueFailedRemoteErasure) so the two cannot disagree.
  */
+function normalizeRemoteErasure(item, meta = {}) {
+  if (!item || !item.itemType) {
+    throw eraseError("invalid_request", "an inbound erase needs an itemType");
+  }
+  const originInstance = meta.originInstance ?? null;
+  const erasedBy = typeof meta.erasedBy === "string" && meta.erasedBy !== "" ? meta.erasedBy : null;
+  const lamport = Number.isFinite(Number(meta.eraseLamport)) ? Number(meta.eraseLamport) : null;
+  const itemType = String(item.itemType);
+  const keys = Array.isArray(item.keys) && item.keys.length > 0
+    ? item.keys.map(String)
+    : erasureKeys(itemType, { itemId: item.itemId ?? null, snapshot: item.snapshot ?? null });
+  const entries = Array.isArray(item.items) && item.items.length > 0
+    ? item.items
+    : [{ itemId: item.itemId ?? null, deleteRow: item.deleteRow ?? null }];
+  return {
+    itemType,
+    keys,
+    entries,
+    originInstance,
+    erasedBy,
+    lamport,
+    by: erasedBy ?? `peer:${originInstance ?? "unknown"}`,
+    // The local clock, so the restore gate compares like with like. A retry from
+    // the sweep passes the marker's stored value through `applyAt`.
+    at: typeof meta.applyAt === "string" && meta.applyAt !== "" ? meta.applyAt : new Date().toISOString(),
+  };
+}
 /**
  * Apply an ERASE that arrived from a peer (instance-sync's `op === "erase"`).
  *
@@ -1245,21 +1470,39 @@ export async function eraseByProject(db, project = {}, ctx, { syncManager = unde
  * makes the erase stick: a later restore on the peer emits an insert this instance
  * refuses (when that insert does not post-date the erase).
  *
- * ONE SYNCHRONOUS TRANSACTION (the review's second point). The tombstone rows,
- * the live-row DELETE(s) and the version erase all run inside one
- * `db.runTransaction` callback — no await between them, so a failure leaves NONE
- * of them behind and nothing can interleave. The version erase is conditional on
- * the item being (now) in the Trash after that delete: if the live row was here,
- * every version goes (the item is in the Trash, our own delete is its newest
- * version); if it was already in the Trash, only versions created at or before
- * the erase's time go, so a newer local delete survives for the local sweep.
+ * ONE SYNCHRONOUS TRANSACTION, AND EVERY GATE IS INSIDE IT (the review's second
+ * point). The live-row deletes, the version erase and the tombstones run in one
+ * `db.runTransaction` callback — no await between them — and each live-row DELETE
+ * carries its own lamport predicate (see eraseLiveRowStatements), so no local edit
+ * can slip in between a read and a delete, and a RETRY of the same work (from the
+ * pending-marker queue) is gated by exactly the same SQL. Three outcomes:
+ *
+ *   a live row that post-dates the erase   the local version wins: nothing is
+ *                                          erased, nothing is tombstoned;
+ *   a local-only memory (starter, Maker    never a peer's to erase: its newest
+ *   Lab) — and a summary the erase does     version's snapshot says so
+ *   not name by its source,
+ *   otherwise                              the live row goes (its delete trigger
+ *                                          writes this instance's `delete`
+ *                                          version), every version of the item
+ *                                          goes, and the tombstone is written. An
+ *                                          item with no live row of ours left is
+ *                                          touched only when it is ALREADY in this
+ *                                          instance's Trash, its newest version a
+ *                                          `delete` recorded at or before the
+ *                                          erase; a newest version written after
+ *                                          the erase (a newer local delete, a local
+ *                                          re-create) is a newer local fact, so the
+ *                                          erase loses entirely: nothing erased,
+ *                                          nothing tombstoned.
  *
  * A FAILED APPLY IS NOT SILENTLY CONSUMED. instance-sync's feed loop advances its
  * checkpoint past an entry whose apply threw (there is no retry/hold mechanism
  * for an apply — only skip-and-log), so a failed erase would be lost entirely.
  * The fallback writes the TOMBSTONE alone (its own tiny transaction, creating
  * item_erasures if it is missing) plus a row in pending_remote_erasures naming the
- * rest of the work, which the 5-minute history sweep (sweep.js) finishes.
+ * rest of the work, which the 5-minute history sweep (sweep.js) finishes — on a
+ * store with no history at all the queued work is the live-row delete itself.
  *
  * Idempotent: a re-delivered erase finds no row, no versions and an existing
  * tombstone, and changes nothing. Works on a store that has never run migration
@@ -1271,37 +1514,26 @@ export async function eraseByProject(db, project = {}, ctx, { syncManager = unde
  *
  * @param {object} db
  * @param {{itemType: string, keys?: string[], items?: Array<{itemId: string|null,
- *   deleteRow?: {sql: string, args?: any[]}|null}>, itemId?: string|null,
- *   snapshot?: object|null, deleteRow?: {sql: string, args?: any[]}|null}} item
+ *   deleteRow?: {sql: string, args?: any[]}|null, newerRow?: {sql: string, args?: any[]}|null}>,
+ *   itemId?: string|null, snapshot?: object|null,
+ *   deleteRow?: {sql: string, args?: any[]}|null}} item
  *   `items` are the LOCAL items whose versions go (the live rows' ids here, not the
- *   sender's), each with the statement that removes its live row; `keys` are the
- *   tombstone keys (see erasureKeys). The single-item `itemId`/`deleteRow` shape is
- *   accepted for callers that only have one.
+ *   sender's), each with the GATED statements that reach its live row (build them
+ *   with eraseLiveRowStatements: `deleteRow` removes it if it does not post-date the
+ *   erase, `newerRow` matches when one does); `keys` are the tombstone keys (see
+ *   erasureKeys). The single-item `itemId`/`deleteRow` shape is accepted for callers
+ *   that only have one.
  * @param {{originInstance?: string|null, erasedAt?: string|null, erasedBy?: string|null,
- *   eraseLamport?: number|null}} [meta] `erasedAt` here is the peer's timestamp
- *   (logged, never used as the local clock); the marker stores the local one.
- * @returns {Promise<{tombstones: number, versions: number, pending: boolean}>}
+ *   eraseLamport?: number|null, applyAt?: string|null}} [meta] `erasedAt` here is the
+ *   peer's timestamp (logged, never used as the local clock); the marker stores the
+ *   local one.
+ * @returns {Promise<{tombstones: number, versions: number, pending: boolean, kept: boolean}>}
+ *   `kept` means the item is alive here (a newer local version, or a local-only
+ *   memory) and nothing was erased: no row, no version, no tombstone.
  */
 export async function applyRemoteErasure(db, item, meta = {}) {
-  if (!item || !item.itemType) {
-    throw eraseError("invalid_request", "applyRemoteErasure needs an itemType");
-  }
-  const originInstance = meta.originInstance ?? null;
-  const erasedBy = typeof meta.erasedBy === "string" && meta.erasedBy !== "" ? meta.erasedBy : null;
-  const lamport = Number.isFinite(Number(meta.eraseLamport)) ? Number(meta.eraseLamport) : null;
+  const { itemType, keys, entries, originInstance, lamport, by, at } = normalizeRemoteErasure(item, meta);
   await ensureErasuresTable(db);
-
-  const itemType = String(item.itemType);
-  const keys = Array.isArray(item.keys) && item.keys.length > 0
-    ? item.keys.map(String)
-    : erasureKeys(itemType, { itemId: item.itemId ?? null, snapshot: item.snapshot ?? null });
-  const entries = Array.isArray(item.items) && item.items.length > 0
-    ? item.items
-    : [{ itemId: item.itemId ?? null, deleteRow: item.deleteRow ?? null }];
-  const by = erasedBy ?? `peer:${originInstance ?? "unknown"}`;
-  // The local clock, so the restore gate compares like with like. A retry from the
-  // sweep passes the marker's stored value through `applyAt`.
-  const at = typeof meta.applyAt === "string" && meta.applyAt !== "" ? meta.applyAt : new Date().toISOString();
 
   // A store that has not run 0024 has no versions to erase — the tombstone (and
   // the live-row delete) is still the whole record, so the erase sticks there too.
@@ -1314,20 +1546,19 @@ export async function applyRemoteErasure(db, item, meta = {}) {
     installed = false; // versions exist but the switch is missing: tombstone now, finish later
   }
   const versionsExist = installed || (await tableExists(db, "item_versions"));
-
-  const tombstoneStatements = keys.map((key) => ({
-    sql: `INSERT INTO ${ITEM_ERASURES_TABLE} (item_type, item_id, erased_at, erased_by, origin_instance, erase_lamport)
-          VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(item_type, item_id) DO NOTHING`,
-    args: [itemType, key, at, by, originInstance, lamport],
-  }));
-
+  const tombstoneStatements = tombstoneStatementsFor(itemType, keys, at, by, originInstance, lamport);
+  const sourceTests = await memorySourceTests();
   const versionWork = entries.some((entry) => entry?.itemId !== null && entry?.itemId !== undefined);
-  let versions = 0;
+
   try {
-    versions = await runRemoteEraseTransaction(db, {
-      itemType, entries, tombstoneStatements, installed, at,
+    const outcome = await runRemoteEraseTransaction(db, {
+      itemType, entries, tombstoneStatements, installed, at, keys, sourceTests,
     });
+    if (outcome.kept) {
+      // The local item is alive and newer (or local-only): the peer's erase loses,
+      // and nothing — not even a tombstone — is written for it.
+      return { tombstones: 0, versions: 0, pending: false, kept: true };
+    }
     if (!installed && versionsExist && versionWork) {
       // There ARE versions here, and no switch to erase them through (the history
       // tables are half-installed). The tombstone and the delete landed; the queue
@@ -1336,9 +1567,9 @@ export async function applyRemoteErasure(db, item, meta = {}) {
       await queueRemoteErasure(db, { itemType, keys, entries, at, by, originInstance, lamport }).catch((err) => {
         console.warn("[history] could not record a pending inbound erase:", err?.message ?? err);
       });
-      return { tombstones: keys.length, versions, pending: true };
+      return { tombstones: keys.length, versions: outcome.versions, pending: true, kept: false };
     }
-    return { tombstones: keys.length, versions, pending: false };
+    return { tombstones: keys.length, versions: outcome.versions, pending: false, kept: false };
   } catch (err) {
     console.warn(
       `[history] the erase of ${itemType} from ${originInstance ?? "a peer"} could not be applied in one transaction ` +
@@ -1346,92 +1577,194 @@ export async function applyRemoteErasure(db, item, meta = {}) {
     );
     // The tombstone first: it is the part that makes the erase stick, and it must
     // not be lost. Then the marker that names the rest of the work.
-    let tombstoned = false;
-    try {
-      await db.batch(tombstoneStatements);
-      tombstoned = true;
-    } catch (tombstoneErr) {
-      console.error(
-        `[history] the tombstone for an inbound erase of ${itemType} could not be written either: `,
-        tombstoneErr?.message ?? tombstoneErr,
-      );
-    }
-    if (installed || (versionsExist && versionWork)) {
-      try {
-        await queueRemoteErasure(db, { itemType, keys, entries, at, by, originInstance, lamport });
-      } catch (queueErr) {
-        console.error("[history] could not record a pending inbound erase:", queueErr?.message ?? queueErr);
-      }
-    }
-    return { tombstones: tombstoned ? keys.length : 0, versions: 0, pending: true };
+    const tombstones = await writeTombstonesAndQueue(db, {
+      itemType, keys, entries, at, by, originInstance, lamport,
+    });
+    return { tombstones, versions: 0, pending: true, kept: false };
   }
 }
 
 /**
- * The one transaction an inbound erase is: arm → tombstones → live-row deletes →
- * version erase → disarm. `runTransaction` hands a SYNCHRONOUS runner, so nothing
- * can await inside it (see servers/db.js). A client without it falls back to
- * `batch()`, which is the same one-transaction door.
+ * THE FALLBACK FOR AN APPLY THAT COULD NOT EVEN START (the review's eighth point).
  *
- * @returns {Promise<number>} versions removed
+ * instance-sync's `_applyErase` can throw before it ever reaches
+ * applyRemoteErasure — a failed key lookup, an unreadable store — and the feed loop
+ * consumes the entry either way. So the tombstone is written bounded to the event's
+ * lamport (the part that must never be lost) and a pending marker names whatever
+ * work the caller could name, which the sweep retries.
+ *
+ * @param {object} db
+ * @param {object} item see applyRemoteErasure
+ * @param {object} [meta] see applyRemoteErasure
+ * @returns {Promise<{tombstones: number, versions: number, pending: boolean}>}
  */
-async function runRemoteEraseTransaction(db, { itemType, entries, tombstoneStatements, installed, at }) {
+export async function queueFailedRemoteErasure(db, item, meta = {}) {
+  const { itemType, keys, entries, originInstance, lamport, by, at } = normalizeRemoteErasure(item, meta);
+  await ensureErasuresTable(db);
+  const tombstones = await writeTombstonesAndQueue(db, {
+    itemType, keys, entries, at, by, originInstance, lamport,
+  });
+  return { tombstones, versions: 0, pending: true };
+}
+
+/**
+ * The tombstone alone, then a marker for the rest — the failed-apply fallback.
+ * Both halves are best effort: the caller has already logged the failure, and a
+ * tombstone that cannot be written must not throw out of an apply loop.
+ */
+async function writeTombstonesAndQueue(db, { itemType, keys, entries, at, by, originInstance, lamport }) {
+  let tombstoned = false;
+  try {
+    await db.batch(tombstoneStatementsFor(itemType, keys, at, by, originInstance, lamport));
+    tombstoned = true;
+  } catch (err) {
+    console.error(
+      `[history] the tombstone for an inbound erase of ${itemType} could not be written either: `,
+      err?.message ?? err,
+    );
+  }
+  // The LIVE-ROW delete is retried too, whatever the store says about history: on a
+  // store with no history at all that delete IS the whole erase, and its failure is
+  // usually what brought us here.
+  const hasWork = entries.some((entry) => entry?.deleteRow) || entries.some((entry) => entry?.itemId != null);
+  if (hasWork) {
+    try {
+      await queueRemoteErasure(db, { itemType, keys, entries, at, by, originInstance, lamport });
+    } catch (queueErr) {
+      console.error("[history] could not record a pending inbound erase:", queueErr?.message ?? queueErr);
+    }
+  }
+  return tombstoned ? keys.length : 0;
+}
+
+/**
+ * The one transaction an inbound erase is: arm → gates → live-row deletes →
+ * version erase → tombstones → disarm. `runTransaction` hands a SYNCHRONOUS
+ * runner, so nothing can await inside it (see servers/db.js).
+ *
+ * A client without `runTransaction` cannot branch between statements, so it takes
+ * the CONSERVATIVE shape: the gated live-row deletes, only the versions at or
+ * before the erase, then the tombstones. (The production client is servers/db.js,
+ * which always has runTransaction; this keeps a shim working rather than failing
+ * the erase.)
+ *
+ * @returns {Promise<{kept: boolean, versions: number}>}
+ */
+async function runRemoteEraseTransaction(db, { itemType, entries, tombstoneStatements, installed, at, keys, sourceTests }) {
   if (typeof db.runTransaction !== "function") {
-    const statements = [...tombstoneStatements];
-    const deleteRows = entries.filter((entry) => entry?.deleteRow);
-    for (const entry of deleteRows) statements.push(entry.deleteRow);
+    const statements = [];
+    for (const entry of entries) if (entry?.deleteRow) statements.push(entry.deleteRow);
     let versionDeletes = 0;
     if (installed) {
       for (const entry of entries) {
-        if (entry?.itemId == null) continue;
-        statements.push({ sql: DELETE_ITEM_SQL, args: [itemType, String(entry.itemId)] });
+        if (entry?.itemId === null || entry?.itemId === undefined) continue;
+        statements.push({ sql: DELETE_ITEM_VERSIONS_UP_TO_SQL, args: [itemType, String(entry.itemId), at] });
         versionDeletes += 1;
       }
     }
+    statements.push(...tombstoneStatements);
     const results = await withoutWriteContext(() =>
       installed ? runArmedStatements(db, statements) : db.batch(statements),
     );
-    return results
-      .slice(statements.length - versionDeletes)
+    const versions = results
+      .slice(0, versionDeletes)
       .reduce((sum, result) => sum + Number(result?.rowsAffected || 0), 0);
+    return { kept: false, versions };
   }
 
   return withoutWriteContext(() =>
     db.runTransaction((run) => {
       if (installed) run({ sql: "UPDATE item_versions_erase SET armed = 1", args: [] });
-      for (const statement of tombstoneStatements) run(statement);
-      // The live rows first: their delete triggers write the `delete` version that
-      // puts the item in this instance's Trash, which is what the version erase
-      // below is conditioned on.
-      const deleted = new Map();
-      for (let i = 0; i < entries.length; i++) {
-        const entry = entries[i];
-        if (!entry?.deleteRow) continue;
-        const result = run(entry.deleteRow);
-        deleted.set(i, Number(result?.rowsAffected || 0) > 0);
-      }
-      let versions = 0;
-      if (installed) {
-        for (let i = 0; i < entries.length; i++) {
-          const itemId = entries[i]?.itemId;
-          if (itemId === null || itemId === undefined) continue;
-          const latest = run({
-            sql: `SELECT op FROM item_versions WHERE item_type = ? AND item_id = ? ORDER BY id DESC LIMIT 1`,
-            args: [itemType, String(itemId)],
-          }).rows[0];
-          // Only an item that is (now) in the Trash is the erase's to take.
-          if (!latest || latest.op !== "delete") continue;
-          const statement = deleted.get(i)
-            // The live row was here: WE just deleted it, so the item is in the Trash
-            // and the whole history is the erase's (including that delete version).
-            ? { sql: DELETE_ITEM_SQL, args: [itemType, String(itemId)] }
-            // Already in the Trash locally: only versions at or before the erase go.
-            : { sql: DELETE_ITEM_VERSIONS_UP_TO_SQL, args: [itemType, String(itemId), at] };
-          versions += Number(run(statement)?.rowsAffected || 0);
+      try {
+        // (1) A live row that POST-DATES the erase. Its predicate is in the SQL,
+        // so this is the same judgement the DELETE below makes — no window between.
+        for (const entry of entries) {
+          if (entry?.newerRow && run(entry.newerRow).rows.length > 0) return { kept: true, versions: 0 };
         }
-        run({ sql: "UPDATE item_versions_erase SET armed = 0", args: [] });
+        // (2) A local-only memory is never a peer's to erase, and the fact lives in
+        // its newest SNAPSHOT (a trashed row has no live row to read a source from).
+        // Read inside the same transaction, before anything is deleted. A session
+        // SUMMARY is only protected when the erase did NOT name its source: that
+        // source is the summary's portable identity, so an erase that carries it is
+        // about this very item (id-keyed erases and id collisions are not).
+        if (installed && itemType === "memory") {
+          for (const entry of entries) {
+            if (entry?.itemId === null || entry?.itemId === undefined) continue;
+            const latest = run({ sql: LATEST_VERSION_SQL, args: [itemType, String(entry.itemId)] }).rows[0];
+            if (!latest) continue;
+            let snapshot = null;
+            try {
+              snapshot = JSON.parse(latest.snapshot_json);
+            } catch {
+              snapshot = null;
+            }
+            if (!snapshot) continue;
+            const source = snapshot.source;
+            const isSummary = sourceTests.isSummary(source);
+            const namedBySource =
+              isSummary &&
+              erasureKeys("memory", { itemId: entry.itemId, snapshot }).some((key) => keys.includes(key));
+            if (sourceTests.isLocalOnly(source) || (isSummary && !namedBySource)) return { kept: true, versions: 0 };
+          }
+        }
+        // (3) The items ALREADY in this instance's Trash are judged before anything is
+        // written: only an item whose newest version is that `delete`, recorded at or
+        // before the erase, is the erase's to take. A newer local fact (a local
+        // re-create, a newer local delete) makes the erase lose with nothing erased
+        // and nothing tombstoned. (Entries that carry a live-row delete are judged by
+        // its own gate and probe below.)
+        if (installed) {
+          for (const entry of entries) {
+            if (entry?.deleteRow || entry?.itemId === null || entry?.itemId === undefined) continue;
+            const latest = run({ sql: LATEST_VERSION_SQL, args: [itemType, String(entry.itemId)] }).rows[0];
+            if (!latest) continue; // nothing of this item is here: the tombstone is the record
+            if (latest.op !== "delete" || typeof latest.created_at !== "string" || latest.created_at > at) {
+              return { kept: true, versions: 0 };
+            }
+          }
+        }
+        // (4) The live rows: their delete triggers write the `delete` version that
+        // puts the item in this instance's Trash, which is what the version erase
+        // below is conditioned on.
+        const deleted = new Map();
+        for (let i = 0; i < entries.length; i++) {
+          const entry = entries[i];
+          if (!entry?.deleteRow) continue;
+          deleted.set(i, Number(run(entry.deleteRow)?.rowsAffected || 0) > 0);
+        }
+        // (5) Versions. ALL of them when OUR delete just took the live row (the item
+        // is in the Trash and that delete version is its newest); otherwise the ones at
+        // or before the erase, for an item the pre-pass above already cleared.
+        let versions = 0;
+        let kept = false;
+        if (installed) {
+          for (let i = 0; i < entries.length; i++) {
+            const itemId = entries[i]?.itemId;
+            if (itemId === null || itemId === undefined) continue;
+            if (deleted.get(i)) {
+              versions += Number(run({ sql: DELETE_ITEM_SQL, args: [itemType, String(itemId)] })?.rowsAffected || 0);
+              continue;
+            }
+            const latest = run({ sql: LATEST_VERSION_SQL, args: [itemType, String(itemId)] }).rows[0];
+            if (!latest) continue; // nothing of this item is here: the tombstone is the record
+            if (latest.op !== "delete" || typeof latest.created_at !== "string" || latest.created_at > at) {
+              kept = true;
+              continue;
+            }
+            versions += Number(
+              run({ sql: DELETE_ITEM_VERSIONS_UP_TO_SQL, args: [itemType, String(itemId), at] })?.rowsAffected || 0,
+            );
+          }
+        }
+        if (kept) return { kept: true, versions: 0 };
+        // (6) The tombstones, last: whether the erase happened at all is decided above.
+        for (const statement of tombstoneStatements) run(statement);
+        return { kept: false, versions };
+      } finally {
+        // A COMMIT of a kept/erased outcome must never leave the switch armed; a
+        // throw here rolls everything back, arm included.
+        if (installed) run({ sql: "UPDATE item_versions_erase SET armed = 0", args: [] });
       }
-      return versions;
     }),
   );
 }

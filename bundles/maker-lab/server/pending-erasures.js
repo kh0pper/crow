@@ -156,10 +156,17 @@ async function markerRemains(db, learnerId) {
  * `eraseItems` names at most 1000 items per call by design: chunk rather than let
  * a big learner skip the erase entirely.
  *
- * NOTHING IS ANNOUNCED. `syncManager: null` says "do not emit" explicitly, and the
- * erase runs as `system:maker-lab`, an actor erase.js never emits for — a learner's
- * data does not leave the host (DATA-HANDLING.md), so neither may the fact that it
- * was erased.
+ * NOTHING IS ANNOUNCED, AND THE ACTOR IS WHAT DECIDES THAT. The erase runs as
+ * `system:maker-lab`, which is in erase.js's LOCAL_ONLY_ERASE_ACTORS: erase.js
+ * never emits an event for it whatever else is passed. `syncManager: null` is
+ * only "this process has no live sync manager" (a bundle's own stdio server) —
+ * with a manager left undefined erase.js would resolve this process's singleton
+ * instead, and null routes an emitted event through the durable queue door. It is
+ * not a silencer, so the actor stays the guarantee.
+ *
+ * An unannounced erase is still BOUNDED: its tombstone records this instance's
+ * lamport counter at erase time, so a peer's genuinely new item is not refused
+ * forever (and a synced-in copy of the learner's memory still is).
  *
  * `projectId` is the LOCAL project_spaces id and is only safe on the FIRST run,
  * where the caller has just read that row and knows it is this learner's. A retry

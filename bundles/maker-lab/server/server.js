@@ -311,22 +311,36 @@ export function createMakerLabServer(db, options = {}) {
       // provably about the row we are looking at — the row is gone, or its uuid is
       // not the one the marker recorded — finish the memory ids and the project
       // uuid the marker holds, and touch nothing else.
+      const markerUuid = typeof pending?.project_uuid === "string" && pending.project_uuid !== ""
+        ? pending.project_uuid
+        : null;
       const idReused =
         Boolean(pending) &&
-        (profile === null ||
-          (typeof pending.project_uuid === "string" &&
-            pending.project_uuid !== "" &&
-            pending.project_uuid !== (profile.uuid ?? null)));
+        (profile === null || (markerUuid !== null && markerUuid !== (profile.uuid ?? null)));
+      // The id NOW belongs to a DIFFERENT learner (the uuid differs from the one the
+      // marker recorded). Finishing the old erase must never be reported as this
+      // learner's deletion: the row, its sessions, its memories and its settings are
+      // all still here.
+      const otherLearner = Boolean(pending) && profile !== null && markerUuid !== null && markerUuid !== (profile.uuid ?? null);
       if (idReused) {
         try {
           await finishPendingErasure(db, pending);
-          return mcpOk({ deleted: true, learner_id, name, reason: reason || null, resumed: true });
         } catch (err) {
           console.warn(`[maker-lab] learner ${learner_id}: recorded erase could not be finished:`, err?.message || err);
           return mcpError(
             "The learner's data could not be fully erased; nothing was reported as deleted. Try again.",
           );
         }
+        if (otherLearner) {
+          return mcpOk({
+            resumed: true,
+            deleted: false,
+            learner_id,
+            name: null,
+            message: "An earlier deletion was finished. This learner was not deleted; call again to delete them.",
+          });
+        }
+        return mcpOk({ deleted: true, learner_id, name, reason: reason || null, resumed: true });
       }
 
       // FAIL CLOSED. A learner delete is a COPPA / GDPR-K promise

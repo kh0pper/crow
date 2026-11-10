@@ -9,12 +9,12 @@
  * Two questions, and only these two:
  *
  *   1. AN ERASED ITEM IS NOT RESURRECTED. A deletes a memory, B receives the
- *      delete, A's Trash period passes and A erases it. B later brings its own
- *      copy back (B still holds the history) and syncs an edit: A must stay empty.
- *      The operator's ruling of 2026-11-10 is that an erase leaves a permanent
- *      TOMBSTONE and sync refuses to re-create a tombstoned item on either
- *      instance, so this is a hard assertion now (it was a `todo` while history
- *      was local-only and sync had no tombstone to consult).
+ *      delete, A's Trash period passes and A erases it. With erase sync switched
+ *      on at both ends (the operator's fleet-wide decision — it is opt-in on the
+ *      sender AND the receiver), the erase reaches B, so B's copy and Trash go
+ *      too and neither instance can bring the item back. The operator's ruling of
+ *      2026-11-10 is that an erase leaves a permanent TOMBSTONE and sync refuses
+ *      to re-create a tombstoned item on either instance.
  *
  *   2. A TRASH RESTORE IS NOT SILENTLY UNDONE. Both machines delete the item; A
  *      restores it from its Trash, then B's delete (which was in flight) arrives.
@@ -177,24 +177,43 @@ test(
     assert.equal(await versionCount(a.db, 71), 2, "A's own history: insert + delete");
     assert.equal(await versionCount(b.db, 71), 2, "B's own history too: the delete it applied is a version");
 
+    // ERASE SYNC IS THE OPERATOR'S FLEET-WIDE DECISION, TAKEN ON BOTH SIDES: an
+    // erase only travels when the sender emits it AND the receiver applies it, so
+    // both instances are opted in here.
+    await enableEraseSync(a.db);
+    await enableEraseSync(b.db);
+
     // The Trash period passes on A: the item AND its history are erased for good —
-    // and the erase leaves a TOMBSTONE (the operator's ruling, 2026-11-10).
-    const swept = await sweep(a.db, { now: new Date(Date.now() + 40 * 86_400_000), trashDays: 30 });
+    // and the erase leaves a TOMBSTONE (the operator's ruling, 2026-11-10) and
+    // travels to B, whose copy and Trash go too.
+    const swept = await sweep(a.db, {
+      now: new Date(Date.now() + 40 * 86_400_000),
+      trashDays: 30,
+      syncManager: a.mgr,
+    });
     assert.deepEqual(swept.erased.map((e) => e.itemId), ["71"], "A erased the aged Trash item");
+    assert.equal(swept.eraseEvents, 1, "the erase reached the sync layer");
     assert.equal(await versionCount(a.db, 71), 0);
     assert.deepEqual(await listVersions(a.db, { itemType: "memory", itemId: 71 }), []);
     assert.equal(await isErased(a.db, "memory", "71"), true, "A recorded the tombstone");
+    assert.ok(
+      await until(async () => (await versionCount(b.db, 71)) === 0),
+      "the peer erased its own history for the item",
+    );
+    assert.equal(await isErased(b.db, "memory", "71"), true, "the peer recorded the tombstone too");
 
-    // B still has the item's history (its own Trash), and brings the memory back:
-    // a Trash restore plus an edit, then a sync. A restore is a NORMAL write now,
-    // so it emits — the real path passes B's manager. The tombstone refuses both. Whatever sync's tombstone
-    // rule is today, A must not resurrect it.
-    const restored = await restoreFromTrash(b.db, { itemType: "memory", itemId: 71 }, OWNER, { syncManager: b.mgr });
-    assert.ok(restored.newVersionId, "B restored its copy");
-    await writeLocal(b.db, "UPDATE memories SET content = ? WHERE id = ?", ["edited after the erase", 71]);
-    await b.mgr.emitChange("memories", "update", { id: 71, content: "edited after the erase", lamport_ts: null });
+    // B cannot bring it back: its own tombstone refuses the Trash restore, so the
+    // "peer that still has it" no longer does — and nothing it sends can re-create
+    // the item here either.
+    await assert.rejects(
+      () => restoreFromTrash(b.db, { itemType: "memory", itemId: 71 }, OWNER, { syncManager: b.mgr }),
+      (err) => err.code === "erased",
+      "the erased item is not restorable on the peer either",
+    );
 
-    // A trailing unrelated entry proves A drained B's feed past that update.
+    // A re-delivery of B's old copy (a stale entry, at or below the erase's lamport)
+    // is refused by A's tombstone.
+    await b.mgr.emitChange("memories", "insert", { id: 71, content: "a stale copy", lamport_ts: null }, { lamportTs: 3 });
     await writeLocal(a.db, "INSERT INTO memories (id, content) VALUES (?, ?)", [72, "trailing marker"]);
     await a.mgr.emitChange("memories", "insert", { id: 72, content: "trailing marker", lamport_ts: null });
     assert.ok(await until(async () => (await hasMemory(b.db, 72)) !== null), "the trailing entry reached B");
@@ -202,11 +221,7 @@ test(
 
     assert.equal(await hasMemory(a.db, 71), null, "A does not resurrect the erased item");
     assert.equal(await versionCount(a.db, 71), 0, "and it wrote no history for it either");
-
-    // B's copy is a different story: it exists there, with its history. (History is
-    // local-only, so the two instances legitimately disagree after an erase — until
-    // the erasing instance's event reaches the peer; see the test below.)
-    assert.ok(await hasMemory(b.db, 71), "B still has its own copy");
+    assert.equal(await hasMemory(b.db, 71), null, "nor does the peer re-create its own copy");
   } finally {
     link?.close();
     await fleet.cleanup();
@@ -221,6 +236,15 @@ async function enableEraseSync(db) {
           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     args: [],
   });
+}
+
+/** One global (device-less, project-less) context section's content on a side, or null. */
+async function sectionContent(db, sectionKey) {
+  const { rows } = await db.execute({
+    sql: "SELECT content FROM crow_context WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL",
+    args: [sectionKey],
+  });
+  return rows[0] ? rows[0].content : null;
 }
 
 const tombstoneKeys = async (db) =>
@@ -265,8 +289,10 @@ test("erasing a starter or maker-lab memory sends nothing to the peer", async ()
     assert.ok(await hasMemory(b.db, 98), "the peer's copy is untouched when emission is off");
     assert.deepEqual(await tombstoneKeys(b.db), [], "and nothing is tombstoned there");
 
-    // 2. ON: only the item that actually syncs is announced.
+    // 2. ON: only the item that actually syncs is announced. (Erase sync is opt-in
+    // on the RECEIVER too, so B turns it on as well.)
     await enableEraseSync(a.db);
+    await enableEraseSync(b.db);
     const result = await eraseItems(
       a.db,
       [
@@ -316,8 +342,7 @@ test("erasing a starter or maker-lab memory sends nothing to the peer", async ()
   }
 });
 
-test("an erase reaches the peer and erases its copy and Trash", async () => {
-  const fleet = await makeFleet();
+test("an erase reaches the peer and erases its copy and Trash", async () => {  const fleet = await makeFleet();
   let link;
   try {
     const { a, b } = fleet;
@@ -339,8 +364,10 @@ test("an erase reaches the peer and erases its copy and Trash", async () => {
     // A's Trash period passes. The erase emits an `erase` event on the item's own
     // table, through A's real manager (the path the gateway's sweep uses). Erase
     // emission is behind the local `history.erase_sync` setting (default OFF — no
-    // peer capability to gate on yet), so the operator turns it on here.
+    // peer capability to gate on yet), and the RECEIVER requires it too, so the
+    // operator turns it on at BOTH ends.
     await enableEraseSync(a.db);
+    await enableEraseSync(b.db);
     const swept = await sweep(a.db, {
       now: new Date(Date.now() + 40 * 86_400_000),
       trashDays: 30,
@@ -471,3 +498,67 @@ test(
     }
   },
 );
+
+/* ------------------- an UNANNOUNCED erase is still bounded (review item 1) */
+
+test("with erase sync off, a section re-created after its name was erased syncs from the peer", async () => {
+  const fleet = await makeFleet();
+  let link;
+  try {
+    const { a, b } = fleet;
+    migrateSide(a);
+    migrateSide(b);
+    link = await linkPeers(a, b);
+
+    // A writes a global section and edits it; both reach B, so both machines hold it
+    // and A's own Trash later holds its history.
+    const wire = (content) => ({
+      section_key: "reborn-section", section_title: "Section", content,
+      sort_order: 1, enabled: 1, device_id: null, lamport_ts: null,
+    });
+    await writeLocal(a.db, "INSERT INTO crow_context (section_key, section_title, content) VALUES ('reborn-section', 'Section', 'first body')");
+    await a.mgr.emitChange("crow_context", "insert", wire("first body"));
+    assert.ok(
+      await until(async () => (await sectionContent(b.db, "reborn-section")) === "first body"),
+      "the peer received the section",
+    );
+
+    // A deletes it (its own Trash) and the delete reaches B (B's own Trash).
+    await writeLocal(a.db, "DELETE FROM crow_context WHERE section_key = 'reborn-section'");
+    await a.mgr.emitChange("crow_context", "delete", { section_key: "reborn-section", device_id: null, lamport_ts: null });
+    assert.ok(
+      await until(async () => (await sectionContent(b.db, "reborn-section")) === null),
+      "the peer received the delete",
+    );
+
+    // A's Trash period passes. Erase emission is OFF (the default), so the erase is
+    // LOCAL-ONLY — and it must still bound its tombstone, to A's own counter.
+    const swept = await sweep(a.db, {
+      now: new Date(Date.now() + 40 * 86_400_000),
+      trashDays: 30,
+      syncManager: a.mgr,
+    });
+    assert.deepEqual(swept.erased.map((e) => e.itemType), ["context_section"], "A erased the aged Trash section");
+    assert.equal(swept.eraseEvents, 0, "with erase sync off, no erase event leaves the host");
+    const bound = (await a.db.execute({
+      sql: "SELECT erase_lamport FROM item_erasures WHERE item_type = 'context_section'",
+      args: [],
+    })).rows[0];
+    assert.ok(
+      Number.isFinite(Number(bound?.erase_lamport)),
+      `the unannounced erase is still bounded (got ${JSON.stringify(bound)})`,
+    );
+
+    // B writes a genuinely NEW section under that name, AFTER the erase: its lamport
+    // is above the tombstone's bound, so A accepts it instead of refusing it forever.
+    await writeLocal(b.db, "INSERT INTO crow_context (section_key, section_title, content) VALUES ('reborn-section', 'A new section', 'new body')");
+    await b.mgr.emitChange("crow_context", "insert", wire("new body"));
+    assert.ok(
+      await until(async () => (await sectionContent(a.db, "reborn-section")) === "new body"),
+      "a section re-created after its name was erased syncs from the peer",
+    );
+  } finally {
+    link?.close();
+    await fleet.cleanup();
+  }
+});

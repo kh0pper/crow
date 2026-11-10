@@ -773,6 +773,53 @@ test("a tombstone survives a restart", async () => {
   }
 });
 
+test("an unannounced erase is bounded by the local counter, and a re-erase moves the tombstone forward", async () => {
+  const fx = fixture("hist-tomb-bound-");
+  const db = fx.open();
+  try {
+    const tombstone = async (itemId) =>
+      (await db.execute({
+        sql: `SELECT erased_at, erase_lamport FROM item_erasures WHERE item_type = 'memory' AND item_id = ?`,
+        args: [String(itemId)],
+      })).rows[0];
+
+    // The counter instance-sync mints from (no instance-id file in this scratch
+    // store, so the greatest sync_state row is the series this host has reached).
+    await db.execute("INSERT INTO sync_state (instance_id, local_counter) VALUES ('inst-bound', 5)");
+
+    const id = await insertMemory(db, OWNER, { content: "the first life of this id" });
+    await deleteMemory(db, OWNER, id);
+    const first = await eraseItems(db, [{ itemType: "memory", itemId: id }], SYSTEM, { syncManager: null });
+    assert.equal(first.emitted, 0, "nothing was announced (no sync manager, emission off)");
+    assert.equal(first.eraseLamport, null, "nothing to report as an event lamport");
+    const one = await tombstone(id);
+    assert.equal(Number(one.erase_lamport), 5, "the tombstone is still bounded — to this instance's counter");
+
+    // A new life of that id, erased again after the counter moved: the bound moves
+    // FORWARD (a re-erase never lowers what this store already refuses below), and
+    // the newest erased_at is the restore gate's window.
+    await db.execute("UPDATE sync_state SET local_counter = 9 WHERE instance_id = 'inst-bound'");
+    await insertMemory(db, OWNER, { id, content: "the second life of this id" });
+    await deleteMemory(db, OWNER, id);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await eraseItems(db, [{ itemType: "memory", itemId: id }], SYSTEM, { syncManager: null });
+    const two = await tombstone(id);
+    assert.equal(Number(two.erase_lamport), 9, "the bound moved forward to the newer erase's counter");
+    assert.ok(String(two.erased_at) >= String(one.erased_at), "and erased_at is the newer erase's");
+    assert.equal(
+      Number((await db.execute({
+        sql: "SELECT COUNT(*) AS n FROM item_erasures WHERE item_type = 'memory' AND item_id = ?",
+        args: [String(id)],
+      })).rows[0].n),
+      1,
+      "still one tombstone for the item, not a second row",
+    );
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
 /* ------------------------------ the operator's ruling: permanent deletes */
 
 test("deleting a learner erases their memories' history at once (Maker Lab's right to be forgotten)", async () => {
@@ -1095,6 +1142,11 @@ test("a retry after the project id was reused never touches the new project", as
     const text = (second.content || []).map((c) => c.text || "").join("\n");
     assert.equal(second.isError, undefined, text);
     assert.match(text, /"resumed": true/, text);
+    // The id now belongs to a DIFFERENT learner: the tool must never claim it
+    // deleted them. It says plainly what it did and what it did not.
+    assert.match(text, /"deleted": false/, text);
+    assert.match(text, /"name": null/, text);
+    assert.match(text, /An earlier deletion was finished\. This learner was not deleted; call again to delete them\./, text);
 
     // The old learner's history is finished ...
     assert.equal(await versionCount(db, "memory", memory), 0, "the recorded erase finished");
