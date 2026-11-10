@@ -16,17 +16,20 @@
  *   6. an unreadable detection step: exit 4, never a change,
  *   7. a login the app never accepts after the account was created: exit 5 — for Uptime
  *      Kuma only when the app itself said it made the account with Crow's password, and for
- *      the git apps only after a confirmed PATCH; an account that merely appeared is never
+ *      the git apps only once the app has taken Crow's password (a PATCH that answered 200,
+ *      or a proof login that already worked); an account that merely appeared is never
  *      reported as 5,
  *   8. a create step whose answer the script cannot use: the app's own state is asked again,
  *      so an account that exists is proved (0, or the honest failure when its password could
  *      not be set) and one that does not is exit 1,
- *   9. the git apps: the password and the setup token reach the API inside a curl config on
- *      stdin and never on a command line, the token is deleted afterwards and on the failure
- *      paths too, a password that cannot be set deletes the lone account this run created
- *      again (so the next run is not stuck at exit 3), Forgejo mints its token with
- *      --scopes all (its create-time token has none), and both compose files set
- *      INSTALL_LOCK so /install is closed,
+ *   9. the git apps: neither create carries a token flag — each mints its setup token with
+ *      `admin user generate-access-token --scopes all --raw` — and the password and that
+ *      token reach the API inside a curl config on stdin, never on a command line; a first
+ *      attempt whose PATCH or proof fails is retried once with `crow-setup-2`, both are
+ *      deleted again (named in a note when the app refuses, because its token route needs
+ *      the new password), a run where both attempts fail ends at 1 naming the
+ *      change-password command, the account is never deleted (the app refuses to drop its
+ *      last admin), and both compose files set INSTALL_LOCK so /install is closed,
  *  10. Uptime Kuma's in-container snippets (the fake docker never runs them) say what they
  *      must: needSetup, only a real true is FRESH, res.ok === true is CREATED/LOGIN-OK, and
  *      two timers bound every run (a 15 s UNKNOWN and an unconditional exit),
@@ -70,19 +73,17 @@ mkdirSync(NO_DOCKER, { recursive: true });
 /** Gitea's own `admin user list` table: a header and no data rows means no admin yet. */
 const HEADER = "ID   Username   Email   IsActive   IsAdmin";
 const ROW = "1    someone    someone@localhost.localdomain    true    true";
-/** The one data row the rollback is allowed to delete: exactly the account Crow created. */
+/** What the second look after a create finds: the account the create just made. */
 const CROW_ROW = "1    crow-admin    crow-admin@localhost.localdomain    true    true";
-const GITEA_CREATED =
-  `New user crow-admin has been successfully created!\nGenerated random password: Xy9Za8Zt3\nAccess token was successfully created: ${TOKEN}`;
-const GITEA_NO_TOKEN = "New user crow-admin has been successfully created!\nGenerated random password: Xy9Za8Zt3";
 
 /**
  * The stand-in docker. Every call is recorded as `<dir>/call.<n>.argv` (the arguments
  * joined by spaces) plus `<dir>/call.<n>.stdin`, and answered from `FAKE_<KEY>_<i>` env
  * vars — the i-th answer for that KEY, falling back to the KEY's default. An answer of
  * `<<exit1>>` makes the call fail, which is how an app that refuses the CLI is played.
- * The three defaults that are not a single word (the user-list header and the two create
- * outputs) come in as `FAKE_HEADER` / `FAKE_GITEA_CREATED` / `FAKE_TOKEN`, written by run().
+ * The defaults that are not a single word (the two shapes of the admin user list, the raw
+ * token a mint prints) come in as `FAKE_LIST_FRESH` / `FAKE_LIST_EXISTS` / `FAKE_TOKEN`,
+ * written by run(). `GEN_TOKEN` is shared by both apps: only one of them runs per run.
  */
 const FAKE_DOCKER = [
   "#!/usr/bin/env bash",
@@ -102,6 +103,16 @@ const FAKE_DOCKER = [
   '  local var="FAKE_${key}_${i}"',
   '  if [ -n "${!var+x}" ]; then NEXT="${!var}"; else NEXT="$dflt"; fi',
   "}",
+  "# nextd KEY FIRST LATER: like next, but the first call of KEY gets FIRST and every",
+  "# later one LATER. The admin user list is the one step asked twice in a run (before and",
+  "# after the create), and the second look finds the account the create just made.",
+  "nextd() {",
+  '  local key="$1" first="$2" later="$3" cf="$dir/counter.$1" i=0',
+  '  if [ -f "$cf" ]; then i=$(cat "$cf"); fi',
+  '  printf "%s\\n" "$((i + 1))" > "$cf"',
+  '  local var="FAKE_${key}_${i}"',
+  '  if [ -n "${!var+x}" ]; then NEXT="${!var}"; elif [ "$i" = "0" ]; then NEXT="$first"; else NEXT="$later"; fi',
+  "}",
   "# emit: the answer as stdout; <<exit1>> is a call that failed instead.",
   "emit() {",
   '  if [ "$NEXT" = "<<exit1>>" ]; then exit 1; fi',
@@ -120,20 +131,20 @@ const FAKE_DOCKER = [
   // only the spaces inside a multi-word command are quoted.
   'case "$args" in',
   // ── Gitea: the API calls first (they are told apart by their URL), then the CLI.
-  '  *crow-gitea*tokens/crow-setup*) next GITEA_DELETE 204; emit ;;',
+  //    The token mint comes before the DELETE branch: both name a token, only one mints.
+  '  *crow-gitea*"admin user generate-access-token"*) next GEN_TOKEN "${FAKE_TOKEN:-}"; emit ;;',
+  '  *crow-gitea*tokens/*) next GITEA_DELETE 204; emit ;;',
   '  *crow-gitea*admin/users/*) next GITEA_PATCH 200; emit ;;',
-  '  *crow-gitea*"admin user delete"*) next GITEA_USER_DELETE ""; emit ;;',
-  '  *crow-gitea*"admin user create"*) next GITEA_CREATE "${FAKE_GITEA_CREATED:-}"; emit ;;',
-  '  *crow-gitea*"admin user list"*) next GITEA_STATE "${FAKE_HEADER:-}"; emit ;;',
+  '  *crow-gitea*"admin user create"*) next GITEA_CREATE "New user crow-admin has been successfully created!"; emit ;;',
+  '  *crow-gitea*"admin user list"*) nextd GITEA_STATE "${FAKE_LIST_FRESH:-}" "${FAKE_LIST_EXISTS:-}"; emit ;;',
   '  *crow-gitea*api/healthz*) next GITEA_UP 0; exit "$NEXT" ;;',
   '  *crow-gitea*api/v1/user*) next GITEA_LOGIN 200; emit ;;',
-  // ── Forgejo: same shape, plus the separate scoped-token command. ──────────────────
-  '  *crow-forgejo*tokens/crow-setup*) next FORGEJO_DELETE 204; emit ;;',
+  // ── Forgejo: the same shape (its token is minted separately too, with scopes). ─────
+  '  *crow-forgejo*"admin user generate-access-token"*) next GEN_TOKEN "${FAKE_TOKEN:-}"; emit ;;',
+  '  *crow-forgejo*tokens/*) next FORGEJO_DELETE 204; emit ;;',
   '  *crow-forgejo*admin/users/*) next FORGEJO_PATCH 200; emit ;;',
-  '  *crow-forgejo*"admin user delete"*) next FORGEJO_USER_DELETE ""; emit ;;',
-  '  *crow-forgejo*generate-access-token*) next FORGEJO_TOKEN "${FAKE_TOKEN:-}"; emit ;;',
   '  *crow-forgejo*"admin user create"*) next FORGEJO_CREATE "New user crow-admin has been successfully created!"; emit ;;',
-  '  *crow-forgejo*"admin user list"*) next FORGEJO_STATE "${FAKE_HEADER:-}"; emit ;;',
+  '  *crow-forgejo*"admin user list"*) nextd FORGEJO_STATE "${FAKE_LIST_FRESH:-}" "${FAKE_LIST_EXISTS:-}"; emit ;;',
   '  *crow-forgejo*api/healthz*) next FORGEJO_UP 0; exit "$NEXT" ;;',
   '  *crow-forgejo*api/v1/user*) next FORGEJO_LOGIN 200; emit ;;',
   // ── Uptime Kuma: the login proof mentions "login", the health check is its own script,
@@ -185,9 +196,11 @@ function run(bundle, { password = `${PASSWORD}\n`, env = {}, withDocker = true }
       HOME: TMP,
       CROW_FIRST_ADMIN_USER: "crow-admin",
       FAKE_DOCKER_DIR: callsDir,
-      // The defaults the stand-in docker replays for the app's own output.
-      FAKE_HEADER: HEADER,
-      FAKE_GITEA_CREATED: GITEA_CREATED,
+      // The defaults the stand-in docker replays for the app's own output: an empty admin
+      // user list (fresh), the same list with the account Crow just made (after a create),
+      // and a raw token for a mint.
+      FAKE_LIST_FRESH: HEADER,
+      FAKE_LIST_EXISTS: `${HEADER}\n${CROW_ROW}`,
       FAKE_TOKEN: TOKEN,
       ...env,
     },
@@ -415,6 +428,9 @@ test("uptime-kuma: an unclear create with nothing there changes nothing, and an 
 
 for (const app of ["gitea", "forgejo"]) {
   const a = APP[app];
+  const patchKey = app === "gitea" ? "GITEA_PATCH" : "FORGEJO_PATCH";
+  const stateKey = app === "gitea" ? "GITEA_STATE" : "FORGEJO_STATE";
+  const deleteKey = app === "gitea" ? "GITEA_DELETE" : "FORGEJO_DELETE";
 
   test(`${app}: the PATCH config carries the password and the token on stdin, and its argv carries neither`, () => {
     const r = run(app);
@@ -465,54 +481,153 @@ for (const app of ["gitea", "forgejo"]) {
     assert.equal(r.calls.indexOf(del) < r.calls.findIndex((c) => c.argv.endsWith("/api/v1/user")), true, "and before the proof");
   });
 
-  test(`${app}: a token that could not be deleted is a log line, never a failure`, () => {
-    const key = app === "gitea" ? "GITEA_DELETE" : "FORGEJO_DELETE";
-    const r = run(app, { env: { [`FAKE_${key}_0`]: "404" } });
+  test(`${app}: a token that could not be deleted is a note, never a failure`, () => {
+    const r = run(app, { env: { [`FAKE_${deleteKey}_0`]: "404" } });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /the temporary setup token could not be removed/);
+    assert.match(r.stdout, /Note: remove the temporary setup token\(s\) crow-setup from /);
     assertPasswordStayedOutOfSight(r);
   });
 
-  test(`${app}: a create without a usable token is re-checked, and an unstoppable password is refused honestly`, () => {
-    const [stateKey, createKey, noTokenEnv] = app === "gitea"
-      ? ["GITEA_STATE", "GITEA_CREATE", { FAKE_GITEA_CREATE_0: GITEA_NO_TOKEN }]
-      : ["FORGEJO_STATE", "FORGEJO_TOKEN", { FAKE_FORGEJO_TOKEN_0: "" }];
-
-    // The account appeared, but its password cannot be set: say so and name the way out.
-    const exists = run(app, {
-      env: { ...noTokenEnv, [`FAKE_${stateKey}_1`]: `${HEADER}\n${ROW}`, [`FAKE_${APP[app].loginKey}_0`]: "401" },
-    });
-    assert.equal(exists.status, 1, exists.stderr);
-    assert.match(exists.stderr, /created the account 'crow-admin', but Crow could not set its password/);
-    assert.match(exists.stderr, /admin user change-password/);
-    assert.equal(count(exists, "admin/user"), 0);
-    assert.equal(count(exists, "/tokens/crow-setup"), 0, "no token to delete");
-    assertPasswordStayedOutOfSight(exists);
-
-    // Still nothing there: nothing was changed.
-    const fresh = run(app, { env: noTokenEnv });
-    assert.equal(fresh.status, 1, fresh.stderr);
-    assert.match(fresh.stderr, /did not create the account; nothing was changed/);
-
-    // The second look is unreadable too: the operator is told to look at the app.
-    const unreadable = run(app, { env: { ...noTokenEnv, [`FAKE_${stateKey}_1`]: "SOMETHING-ELSE" } });
-    assert.equal(unreadable.status, 1, unreadable.stderr);
-    assert.match(unreadable.stderr, /own user list before trying again/);
-
-    assert.ok(createKey, "each app has its create step keyed");
+  test(`${app}: a PATCH that does not say 200 is settled by one login attempt with the real password`, () => {
+    // The answer was not 200, but the app took the password: the proof login decides, so a
+    // second token is not spent.
+    const written = run(app, { env: { [`FAKE_${patchKey}_0`]: "500" } });
+    assert.equal(written.status, 0, written.stderr);
+    assert.equal(count(written, "generate-access-token"), 1, "one token, and no retry");
+    assert.equal(count(written, "/tokens/"), 1, "and it is still cleaned up");
+    assert.equal(a.proveCalls(written), 2, "the login that settled the answer, then the final proof");
   });
 
-  test(`${app}: a PATCH that does not say 200 is settled by one login attempt with the real password`, () => {
-    const key = app === "gitea" ? "GITEA_PATCH" : "FORGEJO_PATCH";
-    const refused = run(app, { env: { [`FAKE_${key}_0`]: "500", [`FAKE_${APP[app].loginKey}_0`]: "401" } });
-    assert.equal(refused.status, 1, refused.stderr);
-    assert.match(refused.stderr, /created the account 'crow-admin', but Crow could not set its password/);
-    assert.equal(count(refused, "/tokens/crow-setup"), 1, "the setup token is cleaned up on that path too");
+  test(`${app}: a first attempt that fails twice over is retried once with crow-setup-2`, () => {
+    const r = run(app, { env: { [`FAKE_${patchKey}_0`]: "500", [`FAKE_${a.loginKey}_0`]: "401" } });
+    assert.equal(r.status, 0, r.stderr);
+    const mints = r.calls.filter((c) => c.argv.includes("generate-access-token"));
+    assert.equal(mints.length, 2, "a fresh token per attempt");
+    assert.match(mints[1].argv, /--token-name crow-setup-2/);
+    assert.equal(
+      r.calls.filter((c) => c.argv.includes("/api/v1/admin/users/")).length,
+      2,
+      "the second attempt really PATCHed again",
+    );
+    const dels = r.calls.filter((c) => c.argv.includes("/tokens/"));
+    assert.deepEqual(
+      dels.map((c) => c.argv.slice(c.argv.indexOf("/tokens/") + "/tokens/".length)),
+      ["crow-setup", "crow-setup-2"],
+      "both tokens are removed, the retry's included",
+    );
+    assert.equal(r.stdout.includes("temporary setup token"), false, "both went, so none is named in a note");
+    assert.equal(a.proveCalls(r), 2, "the failed attempt's proof, then the one that ends the run");
+    assertPasswordStayedOutOfSight(r);
+  });
 
-    // The password was written even though the answer was not 200: the login proves it.
-    const written = run(app, { env: { [`FAKE_${key}_0`]: "500" } });
-    assert.equal(written.status, 0, written.stderr);
-    assert.equal(count(written, "/tokens/crow-setup"), 1, "the token is still cleaned up");
+  test(`${app}: with both attempts failing the run ends at 1 naming change-password, and the note names both tokens`, () => {
+    const r = run(app, {
+      env: {
+        [`FAKE_${patchKey}_0`]: "500",
+        [`FAKE_${patchKey}_1`]: "500",
+        [`FAKE_${a.loginKey}_0`]: "401",
+        [`FAKE_${a.loginKey}_1`]: "401",
+        // The password was never set, so the token routes refuse the basic auth: the app
+        // itself is why both tokens are left behind.
+        [`FAKE_${deleteKey}_0`]: "401",
+        [`FAKE_${deleteKey}_1`]: "401",
+      },
+    });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /created the admin account 'crow-admin', but Crow could not set its password/);
+    assert.match(
+      r.stderr,
+      new RegExp(`Set one with '${app} admin user change-password --username crow-admin' inside the container`),
+      "the operator is told how to set a password they can keep",
+    );
+    assert.match(r.stderr, /then save that login on the Extensions card/);
+    assert.match(r.stdout, /Note: remove the temporary setup token\(s\) crow-setup crow-setup-2 from /);
+    assert.equal(r.stdout.includes(TOKEN), false, "only the token names are ever printed");
+    assert.equal(count(r, "admin user delete"), 0, "the account stays: the app refuses to delete its last admin");
+    assert.equal(a.proveCalls(r), 2, "one proof per attempt");
+    assertPasswordStayedOutOfSight(r);
+  });
+
+  test(`${app}: a mint that prints nothing usable fails that attempt without a PATCH`, () => {
+    for (const answer of ["", "not a token!"]) {
+      const r = run(app, { env: { FAKE_GEN_TOKEN_0: answer, [`FAKE_${a.loginKey}_0`]: "401" } });
+      assert.equal(r.status, 0, `${JSON.stringify(answer)}: ${r.stderr}`);
+      const mints = r.calls.filter((c) => c.argv.includes("generate-access-token"));
+      assert.equal(mints.length, 2, `${JSON.stringify(answer)}: the run went on to crow-setup-2`);
+      assert.match(mints[1].argv, /--token-name crow-setup-2/);
+      const patches = r.calls.filter((c) => c.argv.includes("/api/v1/admin/users/"));
+      assert.equal(patches.length, 1, `${JSON.stringify(answer)}: the unusable token never reached the API`);
+      assert.equal(
+        r.calls.indexOf(patches[0]) > r.calls.indexOf(mints[1]),
+        true,
+        `${JSON.stringify(answer)}: the only PATCH is the second attempt's`,
+      );
+      const dels = r.calls.filter((c) => c.argv.includes("/tokens/"));
+      assert.equal(dels.length, 1, `${JSON.stringify(answer)}: the first attempt minted nothing, so nothing is named for removal`);
+      assert.match(dels[0].argv, /crow-setup-2$/);
+      assertPasswordStayedOutOfSight(r);
+    }
+  });
+
+  test(`${app}: a create whose second look is FRESH ends at 1, with no token minted`, () => {
+    const r = run(app, { env: { [`FAKE_${stateKey}_1`]: HEADER } });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /did not create the account; nothing was changed/);
+    assert.equal(count(r, "admin user create"), 1, "the create really was attempted");
+    assert.equal(count(r, "generate-access-token"), 0, "no token for an account that is not there");
+    assert.equal(a.proveCalls(r), 0);
+    assertPasswordStayedOutOfSight(r);
+
+    // A second look that cannot be read is not "fresh" either: the operator is told to look.
+    const unreadable = run(app, { env: { [`FAKE_${stateKey}_1`]: "SOMETHING-ELSE" } });
+    assert.equal(unreadable.status, 1, unreadable.stderr);
+    assert.match(unreadable.stderr, /own user list before trying again/);
+    assert.equal(count(unreadable, "generate-access-token"), 0);
+    assert.equal(a.proveCalls(unreadable), 0);
+    assertPasswordStayedOutOfSight(unreadable);
+  });
+
+  test(`${app}: no run deletes the account on any path`, () => {
+    const runs = [
+      run(app),
+      run(app, { env: { [`FAKE_${stateKey}_0`]: `${HEADER}\n${ROW}` } }),
+      run(app, { env: { [`FAKE_${stateKey}_1`]: HEADER } }),
+      run(app, {
+        env: {
+          [`FAKE_${patchKey}_0`]: "500",
+          [`FAKE_${patchKey}_1`]: "500",
+          [`FAKE_${a.loginKey}_0`]: "401",
+          [`FAKE_${a.loginKey}_1`]: "401",
+          [`FAKE_${deleteKey}_0`]: "401",
+          [`FAKE_${deleteKey}_1`]: "401",
+        },
+      }),
+    ];
+    for (const r of runs) {
+      assert.equal(argvText(r).includes("user delete"), false, "the app refuses to drop its last admin, so nothing tries");
+    }
+  });
+
+  test(`${app}: the password and both token values stay out of every argument`, () => {
+    // The second mint prints a different token, so a leak of either one is visible.
+    const TOKEN_2 = "fedcba9876543210fedcba9876543210fedcba98";
+    const r = run(app, {
+      env: { [`FAKE_${patchKey}_0`]: "500", [`FAKE_${a.loginKey}_0`]: "401", FAKE_GEN_TOKEN_1: TOKEN_2 },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const patches = r.calls.filter((c) => c.argv.includes("/api/v1/admin/users/"));
+    assert.equal(patches.length, 2);
+    const authHeader = (call) => (configLines(call.stdin).find((l) => l.key === "header") || {}).value;
+    assert.equal(authHeader(patches[0]), `Authorization: token ${TOKEN}`, "the first attempt's token, on a pipe");
+    assert.equal(authHeader(patches[1]), `Authorization: token ${TOKEN_2}`, "the retry's own token, on a pipe");
+    for (const secret of [PASSWORD, TOKEN, TOKEN_2]) {
+      assert.equal(argvText(r).includes(secret), false, "no docker argument may carry it");
+      assert.equal(r.stdout.includes(secret), false, "the script must not print it");
+      assert.equal(r.stderr.includes(secret), false, "the script must not print it");
+    }
+    assert.equal(stdinText(r).includes(PASSWORD), true, "the password travels on the pipe");
+    assert.equal(stdinText(r).includes(TOKEN), true);
+    assert.equal(stdinText(r).includes(TOKEN_2), true);
   });
 
   test(`${app}: the login proof is a plain GET /api/v1/user with basic auth from the config`, () => {
@@ -525,86 +640,38 @@ for (const app of ["gitea", "forgejo"]) {
   });
 }
 
-// ── Gitea / Forgejo: an account whose password could not be set is rolled back ──────
+// ── Gitea / Forgejo: what the create and the mint themselves carry ────────────────
 
-for (const app of ["gitea", "forgejo"]) {
-  const a = APP[app];
-  const patchKey = app === "gitea" ? "GITEA_PATCH" : "FORGEJO_PATCH";
-  const stateKey = app === "gitea" ? "GITEA_STATE" : "FORGEJO_STATE";
-  // A PATCH that answers 500 and a login that refuses the real password: this run made the
-  // account, and nobody holds a usable password for it.
-  const failedSet = (listAnswer) => ({
-    [`FAKE_${patchKey}_0`]: "500",
-    [`FAKE_${a.loginKey}_0`]: "401",
-    ...(listAnswer === undefined ? {} : { [`FAKE_${stateKey}_1`]: listAnswer }),
-  });
-
-  test(`${app}: a password that could not be set deletes the account this run created`, () => {
-    const r = run(app, { env: failedSet(`${HEADER}\n${CROW_ROW}`) });
-    assert.equal(r.status, 1, r.stderr);
-    assert.match(
-      r.stderr,
-      /Crow could not set the new admin account's password, so it removed the account again; nothing was changed\. Try again\./,
-    );
-    const deletion = r.calls.find((c) => c.argv.includes("admin user delete"));
-    assert.ok(deletion, "the lone admin this run created is deleted again");
-    assert.match(deletion.argv, /--username crow-admin/);
-    assert.equal(deletion.argv.includes(PASSWORD), false);
-    assert.equal(count(r, "/tokens/crow-setup"), 1, "the setup token is removed on the failure path too");
-    assert.equal(r.stdout.includes(TOKEN), false, "the token is never printed");
-    assert.equal(r.stdout.includes("Xy9Za8Zt3"), false, "nor the throwaway password");
-    assertPasswordStayedOutOfSight(r);
-  });
-
-  test(`${app}: after that rollback the next run finds a fresh app and proceeds`, () => {
-    // The rollback really did empty the app: the next run's first look shows the header only.
-    const again = run(app, { env: { [`FAKE_${stateKey}_0`]: HEADER } });
-    assert.equal(again.status, 0, again.stderr);
-    assert.equal(a.createRan(again), true, "the account is created again");
-    assert.equal(count(again, "admin user delete"), 0, "and nothing is deleted on the way");
-  });
-
-  test(`${app}: an admin list that is not exactly this run's lone account is never deleted`, () => {
-    const twoRows = `${HEADER}\n${CROW_ROW}\n2    someone    someone@localhost.localdomain    true    true`;
-    for (const [label, answer] of [
-      ["somebody else's admin", `${HEADER}\n${ROW}`],
-      ["crow-admin plus another admin", twoRows],
-      ["an empty list", HEADER],
-      ["an unreadable list", "SOMETHING-ELSE"],
-    ]) {
-      const r = run(app, { env: failedSet(answer) });
-      assert.equal(r.status, 1, `${label}: ${r.stderr}`);
-      assert.equal(count(r, "admin user delete"), 0, `${label}: not Crow's to delete`);
-      assert.match(r.stderr, /created the account 'crow-admin', but Crow could not set its password/, label);
-      assert.match(r.stderr, /admin user change-password/, `${label}: the honest way out is named`);
-    }
-  });
-}
-
-test("gitea: the account and its setup token come from the CLI's own create flags, never from argv values", () => {
-  const r = run("gitea");
-  const create = r.calls.find((c) => c.argv.includes("admin user create"));
-  assert.ok(create);
-  assert.match(create.argv, /--admin/);
-  assert.match(create.argv, /--username crow-admin/);
-  assert.match(create.argv, /--random-password/, "the CLI mints the throwaway password itself");
-  assert.match(create.argv, /--access-token-name crow-setup/);
-  assert.equal(create.stdin, "", "nothing is written to its stdin");
-  assert.equal(create.argv.includes(PASSWORD), false);
-  assert.equal(count(r, "generate-access-token"), 0, "Gitea's create makes the token");
+test("gitea/forgejo: the create carries no token flag, only the account's own fields", () => {
+  for (const app of ["gitea", "forgejo"]) {
+    const r = run(app);
+    assert.equal(r.status, 0, `${app}: ${r.stderr}`);
+    const create = r.calls.find((c) => c.argv.includes("admin user create"));
+    assert.ok(create, `${app}: the account is made with the app's own CLI`);
+    assert.match(create.argv, /--admin/);
+    assert.match(create.argv, /--username crow-admin/);
+    assert.match(create.argv, /--email crow-admin@localhost\.localdomain/);
+    assert.match(create.argv, /--random-password/, `${app}: the CLI mints the throwaway password itself`);
+    assert.match(create.argv, /--must-change-password=false/, `${app}: the login works on the first try`);
+    assert.equal(create.argv.includes("--access-token"), false, `${app}: no token flag at create time`);
+    assert.equal(create.argv.includes("--token-name"), false, `${app}: and none of the token-name shape`);
+    assert.equal(create.argv.includes("scopes"), false, `${app}: scopes belong to the mint, not the create`);
+    assert.equal(create.stdin, "", `${app}: nothing is written to its stdin`);
+    assert.equal(create.argv.includes(PASSWORD), false, `${app}: and the password is not an argument`);
+  }
 });
 
-test("forgejo: the token is minted separately with --scopes all (a create-time token has none)", () => {
-  const r = run("forgejo");
-  const create = r.calls.find((c) => c.argv.includes("admin user create"));
-  assert.ok(create);
-  assert.equal(create.argv.includes("--access-token"), false, "Forgejo's create-time token has no scopes");
-  const mint = r.calls.find((c) => c.argv.includes("generate-access-token"));
-  assert.ok(mint, "the scoped token is minted by its own command");
-  assert.match(mint.argv, /--username crow-admin/);
-  assert.match(mint.argv, /--token-name crow-setup/);
-  assert.match(mint.argv, /--scopes all/, "without scopes the API refuses with a 403");
-  assert.match(mint.argv, /--raw/, "and the token is printed bare, so it can be parsed");
+test("gitea/forgejo: the setup token is minted by its own command, with --scopes all --raw", () => {
+  for (const app of ["gitea", "forgejo"]) {
+    const r = run(app);
+    const mint = r.calls.find((c) => c.argv.includes("generate-access-token"));
+    assert.ok(mint, `${app}: the token is minted separately`);
+    assert.match(mint.argv, /--username crow-admin/);
+    assert.match(mint.argv, /--token-name crow-setup/);
+    assert.match(mint.argv, /--scopes all/, `${app}: without scopes the admin API answers 403`);
+    assert.match(mint.argv, /--raw/, `${app}: and the token is printed bare, so it can be parsed`);
+    assert.equal(mint.stdin, "", `${app}: the CLI needs nothing on stdin`);
+  }
 });
 
 // ── the web installer is closed in both compose files ──────────────────────────────

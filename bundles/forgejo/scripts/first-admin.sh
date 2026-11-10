@@ -14,18 +14,17 @@
 # password but the login could not be proved, anything else = failed. A create step that
 # answers unclearly is re-checked against Forgejo's own user list: an account that appeared
 # is kept and proved (exit 0, or the honest exit 1 below when its password could not be
-# set), one that did not is exit 1. When the password cannot be set, the account this run
-# created is deleted again — an admin whose password nobody holds would lock the operator
-# out of the next run (exit 3) for good.
+# set), one that did not is exit 1. Forgejo refuses to delete its last admin, so an account
+# whose password could not be set (after one retry with a fresh token) stays: the script
+# exits 1 and says how to set its password by hand.
 #
 # How: the account is made with Forgejo's own admin CLI inside the container, which mints a
-# throwaway random password (printed once, kept nowhere). Forgejo's `create --access-token`
-# makes a token WITHOUT scopes, which the API then refuses with a 403, so the token is
-# minted separately with `generate-access-token --scopes all`. The real password is then
-# set through the API with a curl config on stdin, so neither the password nor the token is
-# ever an argument. The setup token is deleted afterwards — it exists only to set the
-# password, and a scoped-all admin token left behind would be a second way in — and an EXIT
-# trap removes it on every other path too.
+# throwaway random password (printed once, kept nowhere). A setup token is then minted
+# separately with `generate-access-token --scopes all --raw`, and the real password is set
+# through the API with a curl config on stdin, so neither the password nor the token is
+# ever an argument. Setup tokens are deleted afterwards (they exist only to set the
+# password, and a scoped-all admin token left behind would be a second way in); an EXIT
+# trap tries again on every other path and names any token it could not remove.
 #
 # CROW_FA_CONTAINER overrides the container name for tests only; Crow never sets it.
 set -euo pipefail
@@ -101,57 +100,47 @@ prove() {
   if [ "$code" = "200" ]; then printf '%s' "LOGIN-OK"; else printf '%s' "LOGIN-FAIL"; fi
 }
 
-# ── remove the account this run created, when its password could not be set ────────
-# Only when Forgejo's own list shows EXACTLY ONE admin and it is $ADMIN_USER: anything else
-# (another admin, no admin, an unreadable list) is not ours to delete. Deleting the user
-# also removes the setup token it holds. Non-zero = nothing was deleted.
-rollback() {
-  local out name
-  out="$(docker exec -u git "$CONTAINER" "$CLI" admin user list --admin </dev/null 2>/dev/null)" || return 1
-  name="$(printf '%s\n' "$out" | awk '
-    /^[[:space:]]*$/ { next }
-    first == 0 { first = 1; if (toupper($1) != "ID") bad = 1; next }
-    { rows++; uname = $2 }
-    END {
-      if (bad || first == 0 || rows != 1) exit 1;
-      print uname;
-    }
-  ')" || return 1
-  [ "$name" = "$ADMIN_USER" ] || return 1
-  docker exec -u git "$CONTAINER" "$CLI" admin user delete --username "$ADMIN_USER" </dev/null >/dev/null 2>&1
-}
-
-# ── the setup token, removed on every path after it exists ─────────────────────────
-# Installed as an EXIT trap, so a failed token mint, a failed PATCH, a failed proof or an
-# early die cannot leave a scoped-all admin token behind. The token is never printed; only
-# its HTTP status is ever mentioned. Deleting it twice is harmless: the first call clears
-# $TOKEN.
-TOKEN=""
-ACCOUNT_REMOVED=""
-delete_token() {
-  [ -n "$TOKEN" ] || return 0
-  local status
-  status="$(printf 'max-time = 10\nuser = "%s"\nrequest = "DELETE"\n' "$ADMIN_USER:$ESC_PW" \
-    | docker exec -i "$CONTAINER" curl -s -o /dev/null -w '%{http_code}' -K - "http://localhost:3000/api/v1/users/$ADMIN_USER/tokens/crow-setup" 2>/dev/null || true)"
-  TOKEN=""
-  # A failure here is worth a line in the log, never a failed setup — and after the account
-  # was deleted again there is no token left to point the operator at.
-  if [ "$status" != "204" ] && [ -z "$ACCOUNT_REMOVED" ]; then
-    say "Note: the temporary setup token could not be removed from Forgejo (HTTP $status); remove 'crow-setup' under Settings > Applications by hand."
+# ── setup tokens, removed on every path after they exist ───────────────────────────
+# A setup token exists only to set the password through the API. Forgejo's token routes need
+# the account's own password (basic auth), so a token can be removed only once that password
+# is set; the EXIT trap tries every token this run minted, and names any it could not remove.
+# A token is never printed; only its name is ever mentioned.
+MINTED=""
+delete_tokens() {
+  [ -n "$MINTED" ] || return 0
+  local name status left=""
+  for name in $MINTED; do
+    status="$(printf 'max-time = 10\nuser = "%s"\nrequest = "DELETE"\n' "$ADMIN_USER:$ESC_PW" \
+      | docker exec -i "$CONTAINER" curl -s -o /dev/null -w '%{http_code}' -K - "http://localhost:3000/api/v1/users/$ADMIN_USER/tokens/$name" 2>/dev/null || true)"
+    [ "$status" = "204" ] || left="$left $name"
+  done
+  MINTED=""
+  if [ -n "$left" ]; then
+    say "Note: remove the temporary setup token(s)$left from Forgejo under Settings > Applications (signed in as $ADMIN_USER)."
   fi
   return 0
 }
-trap delete_token EXIT
+trap delete_tokens EXIT
 
-# ── what to say when the real password could not be set ────────────────────────────
-# The account is deleted again when it is a lone account this run created — otherwise it
-# is left for the operator with the only honest way out.
-fail_password() {
-  if rollback; then
-    ACCOUNT_REMOVED=1
-    die "Crow could not set the new admin account's password, so it removed the account again; nothing was changed. Try again." 1
-  fi
-  die "Forgejo created the account '$ADMIN_USER', but Crow could not set its password — it was created with a random password that Forgejo printed once and nothing kept. Reset it with '$CLI admin user change-password' or delete the account $ADMIN_USER, then try again." 1
+# Mint a scoped token (--raw prints only the token, never an argument) and set the real
+# password with it through the API (token and password both on stdin, in a curl config).
+# The body is JSON and then a quoted config value: the password is escaped for JSON, the
+# whole text again for curl's config. Returns 0 only on HTTP 200.
+set_password_with() {
+  local name="$1" raw tok body_json body status
+  raw="$(docker exec -u git "$CONTAINER" "$CLI" admin user generate-access-token \
+    --username "$ADMIN_USER" --token-name "$name" --scopes all --raw </dev/null 2>/dev/null || true)"
+  tok="$(printf '%s\n' "$raw" | grep -E '[^[:space:]]' | tail -n 1 | tr -d '[:space:]' || true)"
+  raw=""
+  case "$tok" in "" | *[!A-Za-z0-9_-]*) return 1 ;; esac
+  [ "${#tok}" -ge 20 ] || return 1
+  MINTED="$MINTED $name"
+  body_json="{\"login_name\":\"$ADMIN_USER\",\"source_id\":0,\"password\":\"$(esc "$PW")\",\"must_change_password\":false}"
+  body="$(esc "$body_json")"
+  status="$(printf 'max-time = 10\nheader = "Authorization: token %s"\nheader = "Content-Type: application/json"\nrequest = "PATCH"\ndata = "%s"\n' "$tok" "$body" \
+    | docker exec -i "$CONTAINER" curl -s -o /dev/null -w '%{http_code}' -K - "http://localhost:3000/api/v1/admin/users/$ADMIN_USER" 2>/dev/null || true)"
+  tok=""
+  [ "$status" = "200" ]
 }
 
 state="$(detect)"
@@ -162,63 +151,31 @@ case "$state" in
 esac
 
 # ── create it ──────────────────────────────────────────────────────────────────────
-# No password and no token on the command line: the CLI mints the password itself, and a
-# token made here would carry no scopes. Its output is captured, never echoed.
+# No password and no token on the command line: the CLI mints a random password itself
+# (printed once, captured here and dropped).
 out="$(docker exec -u git "$CONTAINER" "$CLI" admin user create --admin \
   --username "$ADMIN_USER" \
   --email "$ADMIN_USER@localhost.localdomain" \
   --random-password \
   --must-change-password=false </dev/null 2>/dev/null)" || out=""
 out=""
-
-# The scoped setup token, minted separately. --raw prints the token and nothing else.
-raw="$(docker exec -u git "$CONTAINER" "$CLI" admin user generate-access-token \
-  --username "$ADMIN_USER" \
-  --token-name crow-setup \
-  --scopes all \
-  --raw </dev/null 2>/dev/null || true)"
-TOKEN="$(printf '%s\n' "$raw" | grep -E '[^[:space:]]' | tail -n 1 | tr -d '[:space:]' || true)"
-raw=""
-case "$TOKEN" in
-  "" | *[!A-Za-z0-9_-]*) TOKEN="" ;;
+again="$(detect)"
+case "$again" in
+  EXISTS) ;;
+  FRESH) die "Forgejo did not create the account; nothing was changed." ;;
+  *) die "Forgejo did not report whether it created the account, and its user list could not be read afterwards; look at Forgejo's own user list before trying again." ;;
 esac
-[ "${#TOKEN}" -ge 20 ] || TOKEN=""
 
-if [ -z "$TOKEN" ]; then
-  # No usable token: the account may or may not exist, and either way its password cannot
-  # be set through the API. Ask Forgejo itself.
-  again="$(detect)"
-  case "$again" in
-    EXISTS) ;;
-    FRESH) die "Forgejo did not create the account; nothing was changed." ;;
-    *) die "Forgejo did not report whether it created the account, and its user list could not be read afterwards; look at Forgejo's own user list before trying again." ;;
-  esac
-  # The account exists, so its password is the random one Forgejo printed once and nothing
-  # kept. Try the real password anyway (a previous run may have set it), and be honest.
-  if [ "$(prove)" != "LOGIN-OK" ]; then
-    fail_password
+# ── set the real password ──────────────────────────────────────────────────────────
+# A PATCH that did not answer 200 may still have written the password: one login decides.
+# Otherwise one more try with a fresh token. Forgejo refuses to delete its last admin, so
+# there is no rolling back: the only honest end is to say what is left and how to fix it.
+if ! set_password_with crow-setup && [ "$(prove)" != "LOGIN-OK" ]; then
+  if ! set_password_with crow-setup-2 && [ "$(prove)" != "LOGIN-OK" ]; then
+    die "Forgejo created the admin account '$ADMIN_USER', but Crow could not set its password (it has a random one nobody kept). Set one with '$CLI admin user change-password --username $ADMIN_USER' inside the container, then save that login on the Extensions card." 1
   fi
-else
-  # ── set the real password (token and password both on stdin) ─────────────────────
-  # The body is JSON and then a quoted config value: the password is escaped for JSON, the
-  # whole text again for curl's config — otherwise its first `"` would end the value and the
-  # API would receive a truncated body.
-  body_json="{\"login_name\":\"$ADMIN_USER\",\"source_id\":0,\"password\":\"$(esc "$PW")\",\"must_change_password\":false}"
-  body="$(esc "$body_json")"
-  patch_status="$(printf 'max-time = 10\nheader = "Authorization: token %s"\nheader = "Content-Type: application/json"\nrequest = "PATCH"\ndata = "%s"\n' "$TOKEN" "$body" \
-    | docker exec -i "$CONTAINER" curl -s -o /dev/null -w '%{http_code}' -K - "http://localhost:3000/api/v1/admin/users/$ADMIN_USER" 2>/dev/null || true)"
-  if [ "$patch_status" != "200" ]; then
-    # The PATCH may have written the password and failed to answer. One login attempt with
-    # the real password decides it; if that fails, the account goes again.
-    if [ "$(prove)" != "LOGIN-OK" ]; then
-      fail_password
-    fi
-  fi
-  # ── remove the setup token ───────────────────────────────────────────────────────
-  # It only existed to set the password. The EXIT trap is the safety net; this call is the
-  # ordinary path, and it clears $TOKEN so the trap has nothing left to do.
-  delete_token
 fi
+delete_tokens
 say "Forgejo's admin account '$ADMIN_USER' is in place."
 
 # ── prove the new login works ───────────────────────────────────────────────────────
