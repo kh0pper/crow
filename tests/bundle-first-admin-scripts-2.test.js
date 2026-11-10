@@ -13,9 +13,12 @@
  *   4. a password the protocol refuses (short, empty): exit 1, and docker is not even asked,
  *   5. an admin username that is not a plain account name: exit 1, docker not asked either,
  *   6. a login the app never accepts after the account was created: exit 5,
- *   7. a status word the script does not know, before the change: exit 1,
+ *   7. a create status the script does not know: the account is looked for again, so an
+ *      account that exists is proved (0, or 5 when the proof fails) and one that does not is
+ *      exit 1,
  *   8. Paperless-ngx's Django secret key reaching the container (the image refuses to start
- *      without it) and RomM's app container having a name the script can reach,
+ *      without it) and RomM's app container being found by compose's own labels, tied to
+ *      this install's folder,
  *   9. the three manifests carry what the contract, the runner and the card need.
  *
  * No docker here: a `docker` executable written into a temp dir sits first on PATH, records
@@ -24,7 +27,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,7 +74,7 @@ const FAKE_DOCKER = [
   "",
   'case "${1:-}" in',
   '  inspect) next RUNNING true; printf "%s\\n" "$NEXT"; exit 0 ;;',
-  '  compose) next COMPOSE_ID crow-romm; printf "%s\\n" "$NEXT"; exit 0 ;;',
+  '  ps) next PS_ID crow-romm; printf "%s\\n" "$NEXT"; exit 0 ;;',
   "  exec) ;;",
   '  *) printf "fake docker: unsupported: %s\\n" "$*" >&2; exit 99 ;;',
   "esac",
@@ -89,10 +92,11 @@ const FAKE_DOCKER = [
   '  *crow-paperless*check_password*) next PAPERLESS_LOGIN "LOGIN-OK"; printf "%s\\n" "$NEXT"; exit 0 ;;',
   '  *crow-paperless*localhost:8000*) next PAPERLESS_UP 0; exit "$NEXT" ;;',
   // RomM: the heartbeat (twice — detect prints a word, the wait only exits), the create,
-  // the login proof.
+  // the login proof. The proof's snippet also names /api/users/me, so it is matched before
+  // the create's /api/users.
   '  *crow-romm*SHOW_SETUP_WIZARD*) next ROMM_STATE "FRESH"; printf "%s\\n" "$NEXT"; exit 0 ;;',
-  '  *crow-romm*/api/users*) next ROMM_CREATE "CREATED"; printf "%s\\n" "$NEXT"; exit 0 ;;',
   '  *crow-romm*/api/login*) next ROMM_LOGIN "LOGIN-OK"; printf "%s\\n" "$NEXT"; exit 0 ;;',
+  '  *crow-romm*/api/users*) next ROMM_CREATE "CREATED"; printf "%s\\n" "$NEXT"; exit 0 ;;',
   '  *crow-romm*heartbeat*) next ROMM_UP 0; exit "$NEXT" ;;',
   '  *) printf "fake docker: no answer for: %s\\n" "$args" >&2; exit 98 ;;',
   "esac",
@@ -134,7 +138,7 @@ function run(bundle, { password = `${PASSWORD}\n`, env = {}, withDocker = true }
       ...env,
     },
   });
-  return { status: res.status, stdout: res.stdout || "", stderr: res.stderr || "", calls: readCalls(callsDir) };
+  return { status: res.status, stdout: res.stdout || "", stderr: res.stderr || "", calls: readCalls(callsDir), cwd };
 }
 
 const CONTAINERS = { linkding: "crow-linkding", paperless: "crow-paperless", romm: "crow-romm" };
@@ -150,11 +154,35 @@ function assertPasswordStayedOutOfSight(r, password = PASSWORD) {
   assert.equal(String(r.stderr).includes(password), false, "the script must not print the password");
 }
 
+/** The body of one embedded python snippet (`CREATE='…'`), as the script carries it. */
+function snippet(script, name) {
+  const m = new RegExp(`^${name}='([\\s\\S]*?)'$`, "m").exec(script);
+  assert.ok(m, `${name} snippet is in the script`);
+  return m[1];
+}
+
+/** RomM's container: `docker ps` filtered by compose's own labels, for THIS folder only. */
+function assertRommLookup(argv, cwd) {
+  assert.equal(argv.startsWith("ps -q "), true, `the lookup is a docker ps: ${argv}`);
+  assert.equal(
+    argv.includes("--filter label=com.docker.compose.service=romm"),
+    true,
+    "the service label names RomM",
+  );
+  assert.equal(
+    argv.includes(`--filter label=com.docker.compose.project.working_dir=${realpathSync(cwd)}`),
+    true,
+    "and the working_dir label is this install's own folder, resolved",
+  );
+  assert.equal(/compose (ps|up)\b/.test(argv), false, "no compose subcommand: the folder's compose file is never read");
+}
+
 // Per-app markers: what "create" and "prove" look like inside `docker exec`.
 const CREATE = {
   linkding: "create_superuser",
   paperless: "create_superuser",
-  romm: "/api/users",
+  // Only the create snippet carries the bare URL; the proof's is "/api/users/me".
+  romm: '"/api/users"',
 };
 const PROVE = {
   linkding: "authenticate",
@@ -174,10 +202,10 @@ for (const app of ["linkding", "paperless", "romm"]) {
     const r = run(app);
     assert.equal(r.status, 0, r.stderr);
     assertPasswordStayedOutOfSight(r);
-    // RomM first asks compose for its container id (no fixed name); then, like the others,
-    // the container's state is checked before anything runs inside it.
+    // RomM first asks docker which container carries this install's compose labels; then,
+    // like the others, the container's state is checked before anything runs inside it.
     const lookups = app === "romm" ? 1 : 0;
-    if (lookups) assert.equal(r.calls[0].argv.startsWith("compose ps -q romm"), true, "RomM's container comes from compose");
+    if (lookups) assertRommLookup(r.calls[0].argv, r.cwd);
     assert.equal(r.calls[lookups].argv.startsWith("inspect"), true, "the container is checked before it is touched");
     assert.equal(r.calls[lookups].argv.includes(CONTAINERS[app]), true, "and the app's own container is the one named");
     const create = r.calls.find((c) => c.argv.includes(CREATE[app]));
@@ -232,18 +260,51 @@ for (const app of ["linkding", "paperless", "romm"]) {
     assertPasswordStayedOutOfSight(r);
   });
 
-  test(`${app}: a create step that answers with a word the script does not know changes nothing (exit 1)`, () => {
-    const key = app === "linkding" ? "LINKDING_CREATE" : app === "paperless" ? "PAPERLESS_CREATE" : "ROMM_CREATE";
-    const r = run(app, { env: { [`FAKE_${key}_0`]: "TRACEBACK-STUFF" } });
-    assert.equal(r.status, 1, r.stderr);
-    assert.match(r.stderr, /the login could not be confirmed/);
-    assert.equal(ran(r, PROVE[app]), false, "no proof after an unconfirmed create");
-    assertPasswordStayedOutOfSight(r);
+  test(`${app}: a create step whose answer the script cannot use is re-checked against the app, not thrown away`, () => {
+    const key = { linkding: "LINKDING_CREATE", paperless: "PAPERLESS_CREATE", romm: "ROMM_CREATE" }[app];
+    const [stateKey, existsWord] = STATE[app];
+    const detectKey = { linkding: "USERS=", paperless: "USERS=", romm: "SHOW_SETUP_WIZARD" }[app];
+    const unclear = { [`FAKE_${key}_0`]: "Traceback (most recent call last):" };
+
+    // The account appeared (the app wrote the row and then failed to answer): prove it.
+    const created = run(app, { env: { ...unclear, [`FAKE_${stateKey}_1`]: existsWord } });
+    assert.equal(created.status, 0, created.stderr);
+    assert.equal(count(created, detectKey), 2, "the app's own state is asked a second time");
+    assert.equal(ran(created, PROVE[app]), true, "and the new login is proved as if the create had said CREATED");
+    assertPasswordStayedOutOfSight(created);
+
+    // Same, but the proof never succeeds: the app holds the password, so it is kept (exit 5).
+    const loginKey = { linkding: "LINKDING_LOGIN", paperless: "PAPERLESS_LOGIN", romm: "ROMM_LOGIN" }[app];
+    const unproved = run(app, {
+      env: {
+        ...unclear,
+        [`FAKE_${stateKey}_1`]: existsWord,
+        [`FAKE_${loginKey}_0`]: "LOGIN-FAIL",
+        [`FAKE_${loginKey}_1`]: "LOGIN-FAIL",
+        [`FAKE_${loginKey}_2`]: "LOGIN-FAIL",
+      },
+    });
+    assert.equal(unproved.status, 5, unproved.stderr);
+    assert.match(unproved.stderr, /accepted the new password, but logging in with it did not succeed/);
+
+    // Still nothing there: nothing was changed.
+    const fresh = run(app, { env: unclear });
+    assert.equal(fresh.status, 1, fresh.stderr);
+    assert.match(fresh.stderr, /nothing was changed/);
+    assert.equal(ran(fresh, PROVE[app]), false, "no proof when no account was made");
+    assertPasswordStayedOutOfSight(fresh);
+
+    // The second look is unreadable too: we do not know that the app took the password, so
+    // exit 5 is not allowed — the operator is told to look at the app.
+    const unreadable = run(app, { env: { ...unclear, [`FAKE_${stateKey}_1`]: "" } });
+    assert.equal(unreadable.status, 1, unreadable.stderr);
+    assert.match(unreadable.stderr, /look at .*own user list before trying again/);
+    assert.equal(ran(unreadable, PROVE[app]), false);
   });
 
   test(`${app}: a detection step that answers with nothing usable changes nothing (exit 4)`, () => {
     const [key] = STATE[app];
-    for (const answer of ["", "Traceback (most recent call last):", "SOMETHING-ELSE"]) {
+    for (const answer of ["", "Traceback (most recent call last):", "SOMETHING-ELSE", "UNKNOWN"]) {
       const r = run(app, { env: { [`FAKE_${key}_0`]: answer } });
       assert.equal(r.status, 4, `${JSON.stringify(answer)}: ${r.stderr}`);
       assert.match(r.stderr, /could not be read; nothing was changed/);
@@ -290,15 +351,71 @@ test("paperless: the manifest generates PAPERLESS_SECRET_KEY the way it generate
   );
 });
 
-// ── RomM: the app container has a name the script can reach ─────────────────────────
+test("paperless: an install made before this version gets the key minted at the next start", () => {
+  const manifest = JSON.parse(readFileSync(join(B("paperless"), "manifest.json"), "utf8"));
+  const spec = (manifest.env_vars || []).find((v) => v.name === "PAPERLESS_SECRET_KEY");
+  assert.equal(spec.mint_if_missing, true, "an existing install's .env gets a key it never had");
+  assert.equal(
+    (manifest.refreshFiles || []).includes("docker-compose.yml"),
+    true,
+    "and the compose file that passes it to the container is refreshed with it",
+  );
+});
 
-test("romm: the container is found through compose in the installed dir, not a fixed name", () => {
+// ── RomM: the container is found by compose's own labels ────────────────────────────
+
+test("romm: the container is found through its compose labels, for this install's folder only", () => {
   const compose = readFileSync(join(B("romm"), "docker-compose.yml"), "utf8");
   assert.equal(/container_name: crow-romm/.test(compose), false, "existing installs keep their own compose file");
   const script = readFileSync(join(B("romm"), "scripts", "first-admin.sh"), "utf8");
-  assert.match(script, /docker compose ps -q romm/);
-  const r = run("romm", { env: { FAKE_COMPOSE_ID_0: "" } });
-  assert.equal(r.status, 4, "no running romm service → not running");
+  assert.equal(script.includes("docker compose"), false, "no compose file in the folder is read at all");
+  assert.match(script, /docker ps -q --filter label=com\.docker\.compose\.service=romm/);
+  assert.match(script, /--filter "label=com\.docker\.compose\.project\.working_dir=\$\(pwd -P\)"/);
+});
+
+test("romm: no container for this folder is exit 4, and two of them is refused", () => {
+  const none = run("romm", { env: { FAKE_PS_ID_0: "" } });
+  assert.equal(none.status, 4, none.stderr);
+  assert.match(none.stderr, /RomM is not running; nothing was changed/);
+  assert.equal(none.calls.length, 1, "only the lookup ran");
+
+  const two = run("romm", { env: { FAKE_PS_ID_0: "aaa\nbbb" } });
+  assert.equal(two.status, 1, two.stderr);
+  assert.match(two.stderr, /more than one RomM container matches/i);
+  assert.equal(two.calls.length, 1, "nothing was touched");
+});
+
+// ── what the snippets themselves do (the fake docker never runs them) ───────────────
+
+test("each create snippet reports an unclear result instead of a traceback", () => {
+  for (const app of ["linkding", "paperless", "romm"]) {
+    const create = snippet(readFileSync(join(B(app), "scripts", "first-admin.sh"), "utf8"), "CREATE");
+    assert.match(create, /except Exception:/, `${app}: any failure while the row is written is caught`);
+    assert.match(create, /print\("UNKNOWN"\)/, `${app}: and reported as UNKNOWN, so the shell looks again`);
+  }
+});
+
+test("romm: only a 4xx is REFUSED, a 403 is TAKEN, and every other outcome is UNKNOWN", () => {
+  const script = readFileSync(join(B("romm"), "scripts", "first-admin.sh"), "utf8");
+  const create = snippet(script, "CREATE");
+  assert.match(create, /elif code == 403:\s*\n\s+print\("TAKEN"\)/, "an admin that appeared in between is TAKEN");
+  assert.match(create, /elif 400 <= code < 500:\s*\n\s+print\("REFUSED"\)/, "REFUSED only for a 4xx");
+  assert.match(create, /else:\s*\n\s+print\("UNKNOWN"\)/, "a 5xx or anything else may have written the row");
+  assert.equal(script.includes("EXISTS-NOOP"), false, "a word this script never prints is not handled");
+});
+
+test("romm: an unreadable wizard flag is UNKNOWN, never EXISTS", () => {
+  const detect = snippet(readFileSync(join(B("romm"), "scripts", "first-admin.sh"), "utf8"), "DETECT");
+  assert.match(detect, /v = data\.get\("SYSTEM", \{\}\)\.get\("SHOW_SETUP_WIZARD"\)/);
+  assert.match(detect, /v is True/, "only a real true is FRESH");
+  assert.match(detect, /v is False/, "and only a real false is EXISTS");
+  assert.match(detect, /print\("UNKNOWN"\)/, "anything else is UNKNOWN (the shell exits 4)");
+});
+
+test("romm: the proof also requires the account to be an admin", () => {
+  const prove = snippet(readFileSync(join(B("romm"), "scripts", "first-admin.sh"), "utf8"), "PROVE");
+  assert.match(prove, /\/api\/users\/me/);
+  assert.match(prove, /me\.get\("role"\) == "admin"/);
 });
 
 // ── the declarations that put those scripts to work ────────────────────────────────

@@ -10,7 +10,9 @@
 # passed on only through a pipe — never in an argument or the environment, and this script
 # prints no secret. Exit 0 = the admin now has that password, 3 = Linkding already has an
 # account of its own (left alone), 4 = not running / not answering, 5 = Linkding took the
-# new password but the login could not be proved, anything else = failed.
+# new password but the login could not be proved, anything else = failed. A create step that
+# answers unclearly is re-checked against Linkding's own state: if the account appeared, the
+# password is kept and proved (exit 0 or 5); if it did not, nothing was changed (exit 1).
 #
 # How: Linkding ships Django, runs as root and keeps manage.py in the container's workdir,
 # so everything goes through `docker exec` and Django's own shell. The username and the
@@ -63,24 +65,40 @@ users="$(printf '%s\n' "$state" | sed -n 's/^USERS=\([0-9][0-9]*\)$/\1/p' | tail
 [ "$users" = "0" ] || die "Linkding already has an account; left alone." 3
 
 # ── create it (username on the first stdin line, password on the second) ────────────
+# Anything raised while the superuser is written (Django, the database, a timeout after the
+# insert) prints UNKNOWN, so the account is looked for again below instead of the password
+# being thrown away.
 CREATE='import sys
 from django.contrib.auth import get_user_model
 username = sys.stdin.readline().rstrip("\n")
 password = sys.stdin.readline().rstrip("\n")
 users = get_user_model()
-if users.objects.exists():
-    print("EXISTS-NOOP")
-else:
-    users.objects.create_superuser(username=username, email="", password=password)
-    print("CREATED")'
+try:
+    if users.objects.exists():
+        print("EXISTS-NOOP")
+    else:
+        users.objects.create_superuser(username=username, email="", password=password)
+        print("CREATED")
+except Exception:
+    print("UNKNOWN")'
 created="$(printf '%s\n%s\n' "$ADMIN_USER" "$PW" | docker exec -i "$CONTAINER" python manage.py shell -c "$CREATE" 2>/dev/null)" || true
 result="$(printf '%s\n' "$created" | tail -n 1)"
 case "$result" in
   CREATED) ;;
   EXISTS-NOOP) die "Linkding already has an account; left alone." 3 ;;
-  *) die "Linkding did not report whether the account was created; the login could not be confirmed." ;;
+  *)
+    # Unclearly reported create: the row may already be there. Ask Linkding itself rather
+    # than guess — an account that exists means this password is the only one anybody has.
+    again="$(docker exec "$CONTAINER" python manage.py shell -c "$DETECT" </dev/null 2>/dev/null || true)"
+    recheck="$(printf '%s\n' "$again" | sed -n 's/^USERS=\([0-9][0-9]*\)$/\1/p' | tail -n 1)"
+    case "$recheck" in
+      "") die "Linkding did not report whether it created the account, and its user table could not be read afterwards; look at Linkding's own user list before trying again." ;;
+      0) die "Linkding did not create the account; nothing was changed." ;;
+      *) ;;
+    esac
+    ;;
 esac
-say "Created Linkding's admin account '$ADMIN_USER'."
+say "Linkding's admin account '$ADMIN_USER' is in place."
 
 # ── prove the new login works ───────────────────────────────────────────────────────
 PROVE='import sys

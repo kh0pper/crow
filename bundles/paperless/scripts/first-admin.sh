@@ -11,7 +11,9 @@
 # passed on only through a pipe — never in an argument or the environment, and this script
 # prints no secret. Exit 0 = the admin now has that password, 3 = Paperless already has a
 # superuser of its own (left alone), 4 = not running / not answering, 5 = Paperless took the
-# new password but the login could not be proved, anything else = failed.
+# new password but the login could not be proved, anything else = failed. A create step that
+# answers unclearly is re-checked against Paperless's own state: if the account appeared, the
+# password is kept and proved (exit 0 or 5); if it did not, nothing was changed (exit 1).
 #
 # How: the app runs as the `paperless` user under s6 and its Django project lives in
 # /usr/src/paperless/src, so everything goes through `docker exec` + `s6-setuidgid` and
@@ -65,24 +67,40 @@ users="$(printf '%s\n' "$state" | sed -n 's/^USERS=\([0-9][0-9]*\)$/\1/p' | tail
 [ "$users" = "0" ] || die "Paperless-ngx already has an account; left alone." 3
 
 # ── create it (username on the first stdin line, password on the second) ────────────
+# Anything raised while the superuser is written (Django, the database, a timeout after the
+# insert) prints UNKNOWN, so the account is looked for again below instead of the password
+# being thrown away.
 CREATE='import sys
 from django.contrib.auth import get_user_model
 username = sys.stdin.readline().rstrip("\n")
 password = sys.stdin.readline().rstrip("\n")
 users = get_user_model()
-if users.objects.exclude(username="AnonymousUser").exists():
-    print("EXISTS-NOOP")
-else:
-    users.objects.create_superuser(username=username, email="admin@localhost", password=password)
-    print("CREATED")'
+try:
+    if users.objects.exclude(username="AnonymousUser").exists():
+        print("EXISTS-NOOP")
+    else:
+        users.objects.create_superuser(username=username, email="admin@localhost", password=password)
+        print("CREATED")
+except Exception:
+    print("UNKNOWN")'
 created="$(printf '%s\n%s\n' "$ADMIN_USER" "$PW" | docker exec -i "$CONTAINER" sh -c "$MANAGE shell -c '$CREATE'" 2>/dev/null)" || true
 result="$(printf '%s\n' "$created" | tail -n 1)"
 case "$result" in
   CREATED) ;;
   EXISTS-NOOP) die "Paperless-ngx already has an account; left alone." 3 ;;
-  *) die "Paperless-ngx did not report whether the account was created; the login could not be confirmed." ;;
+  *)
+    # Unclearly reported create: the row may already be there. Ask Paperless itself rather
+    # than guess — an account that exists means this password is the only one anybody has.
+    again="$(docker exec "$CONTAINER" sh -c "$MANAGE shell -c '$DETECT'" </dev/null 2>/dev/null || true)"
+    recheck="$(printf '%s\n' "$again" | sed -n 's/^USERS=\([0-9][0-9]*\)$/\1/p' | tail -n 1)"
+    case "$recheck" in
+      "") die "Paperless-ngx did not report whether it created the account, and its user table could not be read afterwards; look at Paperless-ngx's own user list before trying again." ;;
+      0) die "Paperless-ngx did not create the account; nothing was changed." ;;
+      *) ;;
+    esac
+    ;;
 esac
-say "Created Paperless-ngx's admin account '$ADMIN_USER'."
+say "Paperless-ngx's admin account '$ADMIN_USER' is in place."
 
 # ── prove the new login works ───────────────────────────────────────────────────────
 # No authenticate() here: it raises without a request in this project. The stored password
