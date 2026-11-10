@@ -832,7 +832,6 @@
       "requires": {
         "env": [
           "CALIBRE_WEB_USERNAME",
-          "CALIBRE_WEB_PASSWORD",
           "CALIBRE_WEB_DB_PATH"
         ],
         "min_ram_mb": 256,
@@ -852,8 +851,8 @@
         },
         {
           "name": "CALIBRE_WEB_PASSWORD",
-          "description": "Password for that Calibre-Web user",
-          "required": true,
+          "description": "Password for that Calibre-Web user. Crow generates it at install and keeps it in Settings → Passwords.",
+          "required": false,
           "secret": true
         },
         {
@@ -6491,8 +6490,7 @@
       ],
       "requires": {
         "env": [
-          "SHIORI_USERNAME",
-          "SHIORI_PASSWORD"
+          "SHIORI_USERNAME"
         ],
         "min_ram_mb": 128,
         "min_disk_mb": 200
@@ -6512,8 +6510,8 @@
         },
         {
           "name": "SHIORI_PASSWORD",
-          "description": "Shiori login password",
-          "required": true,
+          "description": "Shiori login password. Crow generates it at install and keeps it in Settings → Passwords.",
+          "required": false,
           "secret": true
         }
       ],
@@ -6530,7 +6528,7 @@
         "via": "setup",
         "setup": {
           "script": "scripts/first-admin.sh",
-          "timeout_s": 120
+          "timeout_s": 240
         },
         "user": "shiori",
         "secretEnv": "SHIORI_PASSWORD",
@@ -6627,7 +6625,7 @@
         "via": "setup",
         "setup": {
           "script": "scripts/first-admin.sh",
-          "timeout_s": 120
+          "timeout_s": 240
         },
         "user": "admin",
         "secretEnv": "STIRLING_ADMIN_PASSWORD"

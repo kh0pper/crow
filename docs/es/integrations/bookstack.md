@@ -48,6 +48,10 @@ El puerto predeterminado de BookStack (80) se remapea al **6875** para evitar co
 BookStack incluye un inicio de sesión de demostración (`admin@admin.com` / `password`). Crow reemplaza esa contraseña durante la instalación, y el nuevo inicio de sesión (una dirección de correo) está en **Ajustes → Contraseñas**. Una instalación anterior a la versión 1.0.4 del bundle conserva el inicio de sesión de demostración hasta que pulses **Configúralo por mí** en la tarjeta de Extensiones (o guardes allí tu propio inicio de sesión).
 :::
 
+::: warning Clave de la aplicación
+Crow genera la `APP_KEY` de Laravel de BookStack durante la instalación y la escribe en `BOOKSTACK_APP_KEY`; una instalación que fijó esa clave a mano en el `docker-compose.yml` del bundle debe poner ese mismo valor en los ajustes de la extensión como **BOOKSTACK_APP_KEY** antes de actualizar, porque una actualización reemplaza el archivo compose.
+:::
+
 ### Opción B: Conectar a BookStack existente
 
 Si ya tienes una instancia de BookStack funcionando, conecta Crow directamente a ella.

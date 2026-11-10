@@ -21,31 +21,47 @@
  *      docker not asked either,
  *   6. a detection step that answers with nothing usable: exit 4, never a change,
  *   7. a change the app confirmed but a login it never accepts: exit 5, after three proof
- *      tries,
- *   8. a set step the app refused: exit 1, nothing claimed,
+ *      tries, and the message says the host kept the new password instead of sending the
+ *      operator to set an admin password by hand,
+ *   8. a set step the app refused: exit 1, nothing claimed — and where the answer to a set
+ *      call is unclear (Shiori's PATCH, Stirling's change-password) the confirm logins say
+ *      whether it landed, never a claim that the old login is unchanged,
  *   9. BookStack: the shipped default is checked BEFORE anything is written (its CLI keys
  *      on the email alone and would overwrite an operator's own password), the CLI runs as
- *      uid 1000 with no `--password` argument, and its exit 2 means "already has an admin",
- *   10. Calibre-Web: the `UPDATE` runs only when the database still holds the shipped
- *      password, and every step is a read-only-or-one-row snippet printing one status word,
+ *      uid 1000 with no `--password` argument and under this host's `timeout`, its exit 2
+ *      means "already has an admin", and every login gets a cookie jar of its own — created
+ *      inside the container and removed again, so no run inherits a session or leaves one,
+ *   10. Calibre-Web: one transaction re-reads the hash, checks it is still the shipped
+ *      password, updates exactly that row and commits (CHANGED means "already the
+ *      operator's", exit 3), every snippet prints one status word and runs under the host's
+ *      `timeout`, and the proof is the database's answer rather than a web login,
  *   11. Stirling PDF: exactly ONE sign-in attempt with the shipped password per run (failed
- *      ones lock the account), and a "locked" answer stops the proof loop at once,
- *   12. nothing inside a container or on the wire may outlive the protocol timeout: every
- *      curl config carries max-time and every wait is a $SECONDS budget inside the
- *      manifest's timeout_s,
- *   13. the four manifests carry what the contract, the runner and the card need (including
- *      BookStack's Laravel APP_KEY, which its image now requires to start at all), and the
- *      generated registry carries the same declarations.
+ *      ones lock the account), a "locked" answer stops the proof loop at once and is only
+ *      read from the WORD, at most two confirm logins, and a run that ends at 3 leaves a
+ *      marker so the next run refuses without spending another attempt,
+ *   12. Shiori: the account the login named is the one the PATCH touches (never id 1), and
+ *      an answer that names another account changes nothing,
+ *   13. nothing inside a container or on the wire may outlive the protocol timeout: every
+ *      curl config carries max-time, every wait is a $SECONDS budget, and the budgets plus
+ *      every request bound fit inside the manifest's timeout_s,
+ *   14. the four manifests carry what the contract, the runner and the card need (including
+ *      BookStack's Laravel APP_KEY, which its image now requires to start at all, and the
+ *      admin passwords Crow generates, which an install must not block on), the docs say
+ *      what to do about a hand-set APP_KEY, and the generated registry carries the same
+ *      declarations.
  *
  * No docker and no network here: a `docker` and a `curl` executable written into a temp dir
  * sit first on PATH, record every argv and the stdin they received, and replay canned
  * answers. An answer is handed to the stand-in as a FILE (`<calls>/answers/<KEY>.<i>`), one
  * per call of that kind, which is how a test says "the first attempt works, the retry does
- * not" without ever putting a secret in the environment.
+ * not" without ever putting a secret in the environment. The stand-in docker also keeps a
+ * `jars/` directory as the container's disk, and answers a GET of BookStack's form with a
+ * redirect when the jar it names still holds a session — so a script that reused a jar, or
+ * left one behind, is caught by a second run against the same container.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,8 +88,9 @@ mkdirSync(NO_CURL_BIN, { recursive: true });
 
 // ── the canned answers each app's own tool answers with ────────────────────────────
 
-/** Shiori's login answer: a token, then the status code on its own line. */
-const shioriLogin = (token = TOKEN) => `{"message":"Login success","token":"${token}"}\n200`;
+/** Shiori's login answer: a token and the account it signed in as, then the status code. */
+const shioriLogin = (token = TOKEN, id = 1, user = "shiori") =>
+  `{"message":"Login success","token":"${token}","account":{"id":${id},"username":"${user}"}}\n200`;
 /** Stirling's login answer: the access token inside a session object, then the code. */
 const stirlingLogin = (token = TOKEN) => `{"session":{"access_token":"${token}"}}\n200`;
 /** BookStack's login page: the CSRF token a form login has to send back. */
@@ -134,6 +151,8 @@ const FAKE_DOCKER = [
   "#!/usr/bin/env bash",
   "set -uo pipefail",
   'dir="$FAKE_DOCKER_DIR"',
+  'jars="$FAKE_DOCKER_CONTAINER/jars"',
+  'mkdir -p "$jars"',
   "n=0",
   'while [ -f "$dir/call.$n.argv" ]; do n=$((n + 1)); done',
   'argvf="$dir/call.$n.argv"',
@@ -149,22 +168,41 @@ const FAKE_DOCKER = [
   "}",
   "",
   'args="$*"',
+  'last="${!#}"',
   'case "${1:-}" in',
   '  inspect) next RUNNING true; printf "%s\\n" "$NEXT"; exit 0 ;;',
   "  exec) ;;",
   '  *) printf "fake docker: unsupported: %s\\n" "$*" >&2; exit 99 ;;',
   "esac",
   "",
+  // The container's own mktemp and rm: the login script makes a cookie jar inside the
+  // container for each login and removes it again. `jars/` is this stand-in's container
+  // disk, so a jar a script forgets to remove is still there for the next run to find.
+  'if [ "$last" = "mktemp" ]; then',
+  '  k="$(cat "$jars/.next" 2>/dev/null || printf 0)"',
+  '  printf "%s\\n" "$((k + 1))" > "$jars/.next"',
+  '  : > "$jars/crow-fa-jar.$k"',
+  '  printf "/tmp/crow-fa-jar.%s\\n" "$k"',
+  "  exit 0",
+  "fi",
+  'if [[ "$args" == *" rm -f "* ]]; then rm -f "$jars/$(basename "$last")"; exit 0; fi',
+  "",
   // BookStack: its admin CLI (exits with its own code, so exit 2 can be played), then the
   // app's own form login over curl inside the container.
   'if [[ "$args" == *"bookstack:create-admin"* ]]; then next BOOKSTACK_CREATE 0; exit "$NEXT"; fi',
   'if [[ "$args" == *" -o /dev/null http://localhost:80/login"* ]]; then next BOOKSTACK_UP 0; exit "$NEXT"; fi',
   'if grep -q "localhost:80/login" "$stdinf"; then',
+  '  jar="$(sed -n \'s/^cookie = "\\(.*\\)"$/\\1/p\' "$stdinf" | head -n 1)"',
+  '  jarn="$jars/$(basename "$jar")"',
   '  if grep -q \'request = "POST"\' "$stdinf"; then',
   '    if grep -q "email=admin@admin.com" "$stdinf"; then next BOOKSTACK_LOGIN "$FAKE_BOOKSTACK_LOGIN"; else next BOOKSTACK_PROVE "$FAKE_BOOKSTACK_PROVE"; fi',
-  "  else",
-  '    next BOOKSTACK_PAGE "$FAKE_BOOKSTACK_PAGE"',
+  // A signed-in answer is what puts a session in the jar; a jar that holds one answers the
+  // next GET of the form with a redirect to the app, the way BookStack does.
+  '    case "$NEXT" in "302 "*"/") [ -n "$jar" ] && printf "session\\n" > "$jarn" ;; esac',
+  "    emit",
   "  fi",
+  '  if [ -n "$jar" ] && [ -s "$jarn" ]; then printf "302\\n"; exit 0; fi',
+  '  next BOOKSTACK_PAGE "$FAKE_BOOKSTACK_PAGE"',
   "  emit",
   "fi",
   // Calibre-Web: the health probe, then its three python snippets, told apart by the text
@@ -213,7 +251,7 @@ const FAKE_CURL = [
   '  *:8086/api/v1/auth/login*)',
   '    if grep -q gopher "$stdinf"; then next SHIORI_DEFAULT "$FAKE_SHIORI_DEFAULT"; else next SHIORI_NEWLOGIN "$FAKE_SHIORI_NEWLOGIN"; fi',
   "    emit ;;",
-  '  *:8086/api/v1/accounts/1*) next SHIORI_PATCH "200"; emit ;;',
+  '  *:8086/api/v1/accounts/*) next SHIORI_PATCH "200"; emit ;;',
   '  *:8086/*) next SHIORI_UP "200"; emit ;;',
   '  *:8092/api/v1/auth/login*)',
   '    if grep -q stirling "$stdinf"; then next STIRLING_DEFAULT "$FAKE_STIRLING_DEFAULT"; else next STIRLING_NEWLOGIN "$FAKE_STIRLING_NEWLOGIN"; fi',
@@ -290,10 +328,18 @@ const USERS = {
   "stirling-pdf": "admin",
 };
 
-/** Run a bundle's setup script with the password on stdin, as the installer does. */
-function run(bundle, { password = `${PASSWORD}\n`, answers = {}, mode = "full" } = {}) {
+/**
+ * Run a bundle's setup script with the password on stdin, as the installer does.
+ *
+ * `cwd` and `container` are the two pieces of state that outlive one run: the script's own
+ * directory (where a run may leave a marker) and the stand-in container's disk (where a run
+ * may leave a cookie jar). Both default to fresh ones per run.
+ */
+function run(bundle, { password = `${PASSWORD}\n`, answers = {}, mode = "full", cwd: cwdIn = null, container = null } = {}) {
   const callsDir = mkdtempSync(join(TMP, "calls-"));
-  const cwd = mkdtempSync(join(TMP, "cwd-"));
+  const cwd = cwdIn || mkdtempSync(join(TMP, "cwd-"));
+  const containerDir = container || join(callsDir, "container");
+  mkdirSync(containerDir, { recursive: true });
   const res = spawnSync(BASH, [join(B(bundle), "scripts", "first-admin.sh")], {
     input: password,
     encoding: "utf8",
@@ -304,11 +350,12 @@ function run(bundle, { password = `${PASSWORD}\n`, answers = {}, mode = "full" }
       HOME: TMP,
       CROW_FIRST_ADMIN_USER: USERS[bundle],
       FAKE_DOCKER_DIR: callsDir,
+      FAKE_DOCKER_CONTAINER: containerDir,
       FAKE_CURL_DIR: callsDir,
       ...materialize(callsDir, { ...DEFAULTS, ...answers }),
     },
   });
-  return { status: res.status, stdout: res.stdout || "", stderr: res.stderr || "", calls: readCalls(callsDir) };
+  return { status: res.status, stdout: res.stdout || "", stderr: res.stderr || "", calls: readCalls(callsDir), cwd, container: containerDir };
 }
 
 const argvText = (r) => r.calls.map((c) => c.argv).join("\n");
@@ -426,20 +473,62 @@ test("shiori: a login the app never accepts after the change is kept, not thrown
   assertPasswordStayedOutOfSight(r);
 });
 
-test("shiori: a PATCH that does not say 200 is settled by one login with the real password", () => {
-  // The answer was not 200 but the app took the password: the login decides, and the run
-  // ends at 0 — the honest outcome, not a claim that nothing changed.
+test("shiori: a PATCH that does not say 200 is settled by logins with the real password", () => {
+  // The answer was not 200 but the app took the password: the first confirm login decides, and
+  // the run ends at 0 — the honest outcome, not a claim that nothing changed.
   const written = run("shiori", { answers: { FAKE_SHIORI_PATCH_0: "500" } });
   assert.equal(written.status, 0, written.stderr);
   assert.equal(hostLogins(written, PASSWORD).length, 2, "the deciding login, then the proof");
 
-  // Refused, and the new password does not work either: nothing is claimed.
+  // Refused, and the new password does not work either: nothing is claimed, and the message
+  // says the password may have changed rather than that the default is unchanged — nothing
+  // checked the default after the PATCH.
   const refused = run("shiori", {
-    answers: { FAKE_SHIORI_PATCH_0: "403", FAKE_SHIORI_NEWLOGIN_0: SHIORI_REFUSED },
+    answers: {
+      FAKE_SHIORI_PATCH_0: "403",
+      FAKE_SHIORI_NEWLOGIN_0: SHIORI_REFUSED,
+      FAKE_SHIORI_NEWLOGIN_1: SHIORI_REFUSED,
+      FAKE_SHIORI_NEWLOGIN_2: SHIORI_REFUSED,
+    },
   });
   assert.equal(refused.status, 1, refused.stderr);
-  assert.match(refused.stderr, /did not confirm the new password; the default login is unchanged/);
-  assert.equal(hostCallTo(refused, "/api/v1/accounts/1").length, 1, "one attempt, and no retry");
+  assert.match(refused.stderr, /did not confirm the new password; the password may have changed; check the app's own login/);
+  assert.doesNotMatch(refused.stderr, /default login is unchanged/, "nothing checked the default login");
+  assert.equal(hostLogins(refused, PASSWORD).length, 3, "the confirm login is tried three times, and not once more");
+  assert.equal(hostCallTo(refused, "/api/v1/accounts/1").length, 1, "the PATCH itself is attempted once");
+});
+
+test("shiori: the confirming login is retried up to three times before the run gives up", () => {
+  const r = run("shiori", {
+    answers: {
+      FAKE_SHIORI_PATCH_0: "500",
+      FAKE_SHIORI_NEWLOGIN_0: SHIORI_REFUSED,
+      FAKE_SHIORI_NEWLOGIN_1: SHIORI_REFUSED,
+    },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(hostLogins(r, PASSWORD).length, 4, "two refused confirms, the one that works, then the proof");
+});
+
+test("shiori: the PATCH goes to the account the login named, not to id 1", () => {
+  const r = run("shiori", { answers: { FAKE_SHIORI_DEFAULT_0: shioriLogin(TOKEN, 7) } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(hostCallTo(r, "/api/v1/accounts/7").length, 1, "the account that answered is the one changed");
+  assert.equal(hostCallTo(r, "/api/v1/accounts/1").length, 0, "id 1 is never assumed");
+  const patch = hostCallTo(r, "/api/v1/accounts/7")[0];
+  assert.equal(configValue(patch.stdin, "header"), `Authorization: Bearer ${TOKEN}`, "with the token from that login");
+});
+
+test("shiori: a login answer naming another account changes nothing (exit 4)", () => {
+  // The account object is what says which login answered: another username, or no account at
+  // all, and the app is never written to.
+  const noAccount = `{"message":"Login success","token":"${TOKEN}"}\n200`;
+  for (const answer of [shioriLogin(TOKEN, 1, "someone-else"), noAccount]) {
+    const r = run("shiori", { answers: { FAKE_SHIORI_DEFAULT_0: answer } });
+    assert.equal(r.status, 4, `${answer}: ${r.stderr}`);
+    assert.match(r.stderr, /nothing was changed/);
+    assert.equal(hostCalls(r).filter((c) => c.stdin.includes("/api/v1/accounts/")).length, 0, `${answer}: no PATCH`);
+  }
 });
 
 // ── BookStack: the shipped default first, then its own admin CLI ──────────────────
@@ -468,6 +557,51 @@ test("bookstack: a fresh install gets the generated password, delivered on stdin
   const proof = r.calls.filter((c) => c.stdin.includes("email=admin@localhost.localdomain"));
   assert.equal(proof.length, 1, "the new login is proved once");
   assert.equal(configValue(proof[0].stdin, "request"), "POST", "as a form POST, the way the login page works");
+});
+
+test("bookstack: every login gets a fresh cookie jar, and no jar outlives it", () => {
+  const r = run("bookstack");
+  assert.equal(r.status, 0, r.stderr);
+
+  // The fixed path an older version of this script kept a signed-in session in goes first.
+  assert.equal(
+    r.calls.some((c) => c.argv === "docker exec crow-bookstack rm -f /tmp/crow-fa-cookies.txt"),
+    true,
+    "the jar earlier versions left in the container is removed at the start",
+  );
+
+  // Every request of a login names the jar it reads and writes, and it is one the container
+  // made for that login — never the old fixed path, never another login's jar.
+  const logins = r.calls.filter((c) => c.stdin.includes("localhost:80/login") && configValue(c.stdin, "cookie"));
+  assert.equal(logins.length >= 4, true, "a GET and a POST for the default login, and for the proof");
+  for (const call of logins) {
+    const jar = configValue(call.stdin, "cookie");
+    assert.match(jar, /^\/tmp\/crow-fa-jar\.\d+$/, `a jar made inside the container, not the old fixed path: ${jar}`);
+    assert.equal(configValue(call.stdin, "cookie-jar"), jar, "the same jar is read and written");
+  }
+  const pageJars = logins.filter((c) => configValue(c.stdin, "request") === undefined).map((c) => configValue(c.stdin, "cookie"));
+  assert.equal(new Set(pageJars).size, pageJars.length, "no login reads a jar another login used");
+
+  // One mktemp per login, and every one of those jars removed again: nothing for the next run
+  // to inherit a session from.
+  const made = r.calls.filter((c) => c.argv === "docker exec crow-bookstack mktemp").length;
+  assert.equal(made, pageJars.length, "one jar per login, created in the container");
+  const left = existsSync(join(r.container, "jars")) ? readdirSync(join(r.container, "jars")).filter((n) => n.startsWith("crow-fa-jar.")) : [];
+  assert.deepEqual(left, [], "no cookie jar is left in the container");
+});
+
+test("bookstack: a re-run on the same container reads the form, not an inherited session (exit 3)", () => {
+  const container = mkdtempSync(join(TMP, "container-"));
+  const first = run("bookstack", { container });
+  assert.equal(first.status, 0, first.stderr);
+
+  // The same container, now with the operator's own admin: the shipped login no longer
+  // works. A jar that still held the first run's session would answer the GET of the form
+  // with a redirect, and the run would end at 4 instead of 3.
+  const second = run("bookstack", { container, answers: { FAKE_BOOKSTACK_LOGIN_0: BOOKSTACK_REFUSED } });
+  assert.equal(second.status, 3, second.stderr);
+  assert.match(second.stderr, /already has its own admin/);
+  assert.equal(ran(second, "bookstack:create-admin"), false, "nothing is written on that run");
 });
 
 test("bookstack: an install whose shipped login no longer works is left alone (exit 3)", () => {
@@ -613,10 +747,24 @@ test("calibre-web: an unreadable user table changes nothing (exit 4)", () => {
 test("calibre-web: a proof that never reads LOGIN-OK is kept, not thrown away (exit 5)", () => {
   const r = run("calibre-web", { answers: { FAKE_CALIBRE_PROVE: "LOGIN-FAIL" } });
   assert.equal(r.status, 5, r.stderr);
-  assert.match(r.stderr, /accepted the new password, but logging in with it did not succeed/);
+  assert.match(r.stderr, /accepted the new password, but the database check that proves it did not succeed/);
+  assert.match(r.stderr, /Crow kept the new password; use the login in Settings → Passwords/, "the message says where the login is");
   assert.equal(r.calls.filter((c) => c.argv.includes("LOGIN-OK")).length, 3, "three tries");
   assert.equal(ran(r, "UPDATE user SET password"), true, "the change really happened first");
   assertPasswordStayedOutOfSight(r);
+});
+
+test("calibre-web: a SET that finds the default already gone is exit 3, with nothing proved", () => {
+  const r = run("calibre-web", { answers: { FAKE_CALIBRE_SET_0: "CHANGED" } });
+  assert.equal(r.status, 3, r.stderr);
+  assert.match(r.stderr, /already has its own admin password/);
+  assert.equal(r.calls.filter((c) => c.argv.includes("LOGIN-OK")).length, 0, "no proof after a refusal");
+});
+
+test("calibre-web: every snippet runs under the host's own timeout 30", () => {
+  const script = readFileSync(join(B("calibre-web"), "scripts", "first-admin.sh"), "utf8");
+  const wrapped = script.split('timeout 30 docker exec -i -u 1000 "$CONTAINER" python3 -c').length - 1;
+  assert.equal(wrapped, 3, "the detection, the update and the proof are each bounded");
 });
 
 test("calibre-web: an UPDATE the app did not confirm is exit 1, nothing claimed", () => {
@@ -667,6 +815,52 @@ test("stirling-pdf: a locked account is left alone, and the reason says so (exit
   assert.equal(r.status, 3, r.stderr);
   assert.match(r.stderr, /locked/);
   assert.equal(hostCallTo(r, "/api/v1/user/change-password-on-login").length, 0, "nothing was touched");
+});
+
+test("stirling-pdf: 'locked' is matched as a word, not inside another one", () => {
+  const script = readFileSync(join(B("stirling-pdf"), "scripts", "first-admin.sh"), "utf8");
+  assert.match(script, /grep -qiE '\\blocked\\b'/, "the word only");
+
+  // A 401 whose body carries "unlocked" says nothing about a lock: it is a refusal like any
+  // other, so the reason must be the refusal, not the lockout.
+  const refused = run("stirling-pdf", { answers: { FAKE_STIRLING_DEFAULT_0: '{"message":"the door is unlocked"}\n401' } });
+  assert.equal(refused.status, 3, refused.stderr);
+  assert.match(refused.stderr, /shipped login no longer works/);
+  assert.doesNotMatch(refused.stderr, /account is locked/);
+
+  // And in the proof loop an "unlocked" answer is not a locked one: the loop keeps its three
+  // tries instead of stopping at the first.
+  const proof = run("stirling-pdf", {
+    answers: {
+      FAKE_STIRLING_NEWLOGIN_0: '{"message":"session unlocked"}\n401',
+      FAKE_STIRLING_NEWLOGIN_1: '{"message":"session unlocked"}\n401',
+      FAKE_STIRLING_NEWLOGIN_2: '{"message":"session unlocked"}\n401',
+    },
+  });
+  assert.equal(proof.status, 5, proof.stderr);
+  assert.equal(hostLogins(proof, PASSWORD).length, 3, "three proof tries, none of them read as a lock");
+});
+
+test("stirling-pdf: a run that ends at 3 leaves a marker, and the next run signs in no more", () => {
+  const cwd = mkdtempSync(join(TMP, "cwd-"));
+  const first = run("stirling-pdf", { cwd, answers: { FAKE_STIRLING_DEFAULT_0: STIRLING_REFUSED } });
+  assert.equal(first.status, 3, first.stderr);
+  assert.match(first.stderr, /Each retry costs another sign-in attempt/);
+  assert.equal(existsSync(join(cwd, ".crow-first-admin-kept")), true, "the marker is written where the script runs");
+
+  // Nothing about the install changed: another sign-in attempt would only push the account
+  // towards its lockout, so the run refuses without one.
+  const second = run("stirling-pdf", { cwd });
+  assert.equal(second.status, 3, second.stderr);
+  assert.match(second.stderr, /no sign-in attempt was made this time/);
+  assert.equal(second.calls.length, 0, "not even the container is asked");
+  assert.equal(stdinText(second).includes(PASSWORD), false, "and the password never reaches anything");
+
+  // A locked account writes the marker too: that is a run that spent its attempt.
+  const lockedCwd = mkdtempSync(join(TMP, "cwd-"));
+  const locked = run("stirling-pdf", { cwd: lockedCwd, answers: { FAKE_STIRLING_DEFAULT_0: '{"message":"Account is locked"}\n401' } });
+  assert.equal(locked.status, 3, locked.stderr);
+  assert.equal(existsSync(join(lockedCwd, ".crow-first-admin-kept")), true, "a locked run leaves it as well");
 });
 
 test("stirling-pdf: a container that is not running, no docker, or no host curl is exit 4", () => {
@@ -730,14 +924,30 @@ test("stirling-pdf: a LOCKED answer stops the proof at once instead of deepening
   assert.equal(hostLogins(r).length, 2, "the detection attempt and that one proof attempt, and nothing more");
 });
 
-test("stirling-pdf: a change the app did not confirm is exit 1, nothing claimed", () => {
+test("stirling-pdf: a change the app did not confirm is exit 1 after at most two confirm tries", () => {
+  const r = run("stirling-pdf", {
+    answers: {
+      FAKE_STIRLING_SET_0: "500",
+      FAKE_STIRLING_NEWLOGIN_0: STIRLING_REFUSED,
+      FAKE_STIRLING_NEWLOGIN_1: STIRLING_REFUSED,
+      FAKE_STIRLING_NEWLOGIN_2: STIRLING_REFUSED,
+    },
+  });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /did not confirm the new password; the password may have changed; check the app's own login/);
+  assert.doesNotMatch(r.stderr, /shipped login is unchanged/, "nothing checked the shipped login after the change");
+  assert.equal(hostLogins(r, PASSWORD).length, 2, "two confirm tries, and not one more (each costs a sign-in)");
+});
+
+test("stirling-pdf: the confirming login may succeed on the second try", () => {
   const r = run("stirling-pdf", {
     answers: { FAKE_STIRLING_SET_0: "500", FAKE_STIRLING_NEWLOGIN_0: STIRLING_REFUSED },
   });
-  assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stderr, /did not confirm the new password; the shipped login is unchanged/);
-  assert.equal(hostLogins(r, PASSWORD).length, 1, "only the deciding login ran");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(hostLogins(r, PASSWORD).length, 3, "one refused confirm, the one that works, then the proof");
 });
+
+// ── the snippets the stand-in docker never runs ────────────────────────────────────
 
 // ── the snippets the stand-in docker never runs ────────────────────────────────────
 
@@ -749,13 +959,26 @@ test("calibre-web: the detection snippet is read-only and every snippet prints o
   assert.match(detect, /check_password_hash\(stored, "admin123"\)/, "the shipped password is what is checked");
 
   const set = snippet(script, "SET");
-  assert.match(set, /UPDATE user SET password = \? WHERE id = 1 AND name = \?/, "exactly the shipped account's row");
-  assert.match(set, /print\("UPDATED" if cur\.rowcount == 1 else "UNKNOWN"\)/, "UPDATED only when exactly one row changed");
+  // One transaction: the lock, the re-read of the hash, the check that it is still the shipped
+  // password, the write of exactly that row, and the commit — all of it or none of it.
+  assert.match(set, /db\.execute\("BEGIN IMMEDIATE"\)/, "the transaction takes the write lock first");
+  assert.match(set, /SELECT password FROM user WHERE id = 1 AND name = \?/, "the hash is read under that lock");
+  assert.match(set, /check_password_hash\(stored, "admin123"\)/, "and it has to still be the shipped password");
+  assert.match(
+    set,
+    /UPDATE user SET password = \? WHERE id = 1 AND name = \? AND password = \?/,
+    "exactly the shipped row, and only while it still holds the hash that was read",
+  );
+  assert.match(set, /if cur\.rowcount == 1:\n\s+db\.execute\("COMMIT"\)\n\s+print\("UPDATED"\)/, "UPDATED only after one row changed and committed");
+  assert.match(set, /else:\n\s+db\.execute\("ROLLBACK"\)\n\s+print\("UNKNOWN"\)/, "anything else rolls back and says UNKNOWN");
+  assert.match(set, /if not stored or not check_password_hash[\s\S]*?print\("CHANGED"\)/, "a hash that is no longer the default says CHANGED");
   assert.match(set, /except Exception:\n\s+print\("UNKNOWN"\)/, "anything raised is UNKNOWN, never a traceback");
 
   const prove = snippet(script, "PROVE");
   assert.match(prove, /check_password_hash\(stored, password\)/, "the new password opens the stored hash");
   assert.match(prove, /not check_password_hash\(stored, "admin123"\)/, "and the shipped one no longer does");
+  // The proof is the database's answer, not a web login: say so where a reader looks.
+  assert.match(script, /PROVE reads the stored hash back: this is a DATABASE check, not a web login/);
   for (const [name, code] of [["DETECT", detect], ["SET", set], ["PROVE", prove]]) {
     assert.equal(code.includes(PASSWORD), false, `${name}: no password is baked into a snippet`);
     assert.equal(
@@ -763,6 +986,22 @@ test("calibre-web: the detection snippet is read-only and every snippet prints o
       true,
       `${name}: prints a status word`,
     );
+  }
+});
+
+test("every exit-5 message points at the login Crow kept", () => {
+  for (const app of ["shiori", "bookstack", "calibre-web", "stirling-pdf"]) {
+    const script = readFileSync(join(B(app), "scripts", "first-admin.sh"), "utf8");
+    const exit5 = script.split("\n").filter((line) => /^\s*die ".*" 5$/.test(line));
+    assert.equal(exit5.length > 0, true, `${app}: has an exit-5 path`);
+    for (const line of exit5) {
+      assert.match(
+        line,
+        /Crow kept the new password; use the login in Settings → Passwords/,
+        `${app}: the password is already Crow's, so say where the login is: ${line.trim()}`,
+      );
+      assert.doesNotMatch(line, /set its admin password there/, `${app}: and not to type one in again: ${line.trim()}`);
+    }
   }
 });
 
@@ -776,16 +1015,46 @@ const budgetOf = (script, name) => {
 
 const manifestOf = (id) => JSON.parse(readFileSync(join(B(id), "manifest.json"), "utf8"));
 
+/**
+ * Every per-request time bound the script carries, counted once per request site: the
+ * `max-time` (or `--max-time`) each curl config or probe hands curl. A `timeout 30` in front
+ * of a docker exec bounds that exec on this host, not one HTTP request, and is asserted
+ * separately below.
+ */
+const requestBounds = (script) =>
+  [
+    ...script
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n")
+      .matchAll(/max-time (?:= )?(\d+)/g),
+  ].map((m) => Number(m[1]));
+
 for (const app of ["shiori", "bookstack", "calibre-web", "stirling-pdf"]) {
-  test(`${app}: every wait is bounded, well inside the manifest timeout`, () => {
+  test(`${app}: the waits, the loops and every request bound fit the manifest timeout`, () => {
     const script = readFileSync(join(B(app), "scripts", "first-admin.sh"), "utf8");
     const timeout = manifestOf(app).firstAdmin.setup.timeout_s;
     const wait = budgetOf(script, "wait_deadline");
     const proof = budgetOf(script, "proof_deadline");
     assert.equal(wait < timeout, true, `${app}: the health wait (${wait}s) is inside the ${timeout}s the runner allows`);
-    assert.equal(wait + proof < timeout, true, `${app}: the wait plus the proof loop fit the ${timeout}s`);
+    // The worst case: both $SECONDS budgets run out AND every request that ran can take its
+    // own max-time. It has to fit what the runner allows, or the runner kills a run that is
+    // still working and the operator is told nothing.
+    const bounds = requestBounds(script);
+    assert.equal(bounds.length > 0, true, `${app}: every request carries a max-time`);
+    const worst = wait + proof + bounds.reduce((a, b) => a + b, 0);
+    assert.equal(worst < timeout, true, `${app}: worst case ${wait} + ${proof} + ${bounds.join(" + ")} = ${worst}s inside ${timeout}s`);
   });
 }
+
+test("bookstack: the admin command is bounded by this host's own timeout", () => {
+  const script = readFileSync(join(B("bookstack"), "scripts", "first-admin.sh"), "utf8");
+  assert.match(
+    script,
+    /\| timeout 30 docker exec -i -u 1000 -w \/app\/www "\$CONTAINER" php artisan bookstack:create-admin --initial/,
+    "a stuck admin command cannot outlive 30 s",
+  );
+});
 
 for (const app of ["shiori", "stirling-pdf"]) {
   test(`${app}: every request from this host carries max-time in its config`, () => {
@@ -805,12 +1074,12 @@ for (const app of ["shiori", "stirling-pdf"]) {
 const CONVERTED = {
   // Shiori's own MCP server logs in with the username and password from the bundle's .env,
   // so both names are declared env_vars and the runner writes them there.
-  shiori: { user: "shiori", secretEnv: "SHIORI_PASSWORD", userEnv: "SHIORI_USERNAME", timeout_s: 120 },
+  shiori: { user: "shiori", secretEnv: "SHIORI_PASSWORD", userEnv: "SHIORI_USERNAME", timeout_s: 240 },
   // BookStack's tools use an API token the operator makes, so the admin password lives in
   // the keychain only; the account itself is an email address.
   bookstack: { user: "admin@localhost.localdomain", secretEnv: "BOOKSTACK_ADMIN_PASSWORD", userEnv: undefined, timeout_s: 240 },
   "calibre-web": { user: "admin", secretEnv: "CALIBRE_WEB_PASSWORD", userEnv: "CALIBRE_WEB_USERNAME", timeout_s: 120 },
-  "stirling-pdf": { user: "admin", secretEnv: "STIRLING_ADMIN_PASSWORD", userEnv: undefined, timeout_s: 120 },
+  "stirling-pdf": { user: "admin", secretEnv: "STIRLING_ADMIN_PASSWORD", userEnv: undefined, timeout_s: 240 },
 };
 
 test("each converted manifest passes the bundle contract and declares the setup script", () => {
@@ -883,5 +1152,38 @@ test("the committed registry carries the same declarations (it is generated from
       JSON.stringify({ ...manifestOf(id), official: true }),
       `${id}: the registry entry is what build-registry would write`,
     );
+  }
+});
+
+test("the admin passwords Crow fills are not fields an install blocks on", () => {
+  // The password is generated and saved by the setup script, so demanding one from the
+  // operator would block the very install that creates it (the Frigate shape: optional).
+  for (const [id, name] of [["shiori", "SHIORI_PASSWORD"], ["calibre-web", "CALIBRE_WEB_PASSWORD"]]) {
+    const manifest = manifestOf(id);
+    const spec = (manifest.env_vars || []).find((v) => v.name === name);
+    assert.ok(spec, `${id}: ${name} is still declared, or the app's MCP server never sees the login`);
+    assert.equal(spec.required, false, `${id}: ${name} must not be required`);
+    assert.equal(spec.secret, true, `${id}: ${name} stays a secret`);
+    assert.equal((manifest.requires.env || []).includes(name), false, `${id}: and it is not in requires.env`);
+    assert.match(spec.description, /Crow generates it/, `${id}: the description says where it comes from`);
+  }
+});
+
+test("bookstack: the .env.example says the APP_KEY must never be blank", () => {
+  const example = readFileSync(join(B("bookstack"), ".env.example"), "utf8");
+  assert.match(example, /Crow generates it; never leave it blank when starting by hand/, "the compose file fails on a blank one");
+  assert.match(example, /BOOKSTACK_APP_KEY=/, "the name is there to fill in");
+});
+
+test("bookstack: the docs tell an install with a hand-set APP_KEY what to do before updating", () => {
+  const docs = [
+    { path: join(REPO, "docs", "integrations", "bookstack.md"), before: /before updating/ },
+    { path: join(REPO, "docs", "es", "integrations", "bookstack.md"), before: /antes de actualizar/ },
+  ];
+  for (const { path, before } of docs) {
+    const doc = readFileSync(path, "utf8");
+    assert.match(doc, /BOOKSTACK_APP_KEY/, `${path}: names the setting`);
+    assert.match(doc, /docker-compose\.yml/, `${path}: says where the hand-set key was`);
+    assert.match(doc, before, `${path}: and that it has to be moved before an update`);
   }
 });

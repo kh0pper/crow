@@ -48,6 +48,10 @@ BookStack's default port (80) is remapped to **6875** to avoid conflicts with ot
 BookStack ships a demo login (`admin@admin.com` / `password`). Crow replaces that password as part of the install, and the new login (an email address) is in **Settings → Passwords**. An install made before bundle version 1.0.4 keeps the demo login until you press **Set it up for me** on the Extensions card (or save your own login there).
 :::
 
+::: warning App key
+Crow generates BookStack's Laravel `APP_KEY` at install and writes it to `BOOKSTACK_APP_KEY`; an install that set that key by hand in the bundle's `docker-compose.yml` must put that same value in the extension's settings as **BOOKSTACK_APP_KEY** before updating, because an update replaces the compose file.
+:::
+
 ### Option B: Connect to existing BookStack
 
 If you already run a BookStack instance, connect Crow to it directly.

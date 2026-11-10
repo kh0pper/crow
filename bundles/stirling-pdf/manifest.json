@@ -21,7 +21,7 @@
   "firstAdmin": {
     "mode": "crow",
     "via": "setup",
-    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 120 },
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 240 },
     "user": "admin",
     "secretEnv": "STIRLING_ADMIN_PASSWORD"
   },

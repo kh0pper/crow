@@ -20,6 +20,11 @@
 # alone), 4 = not running / not answering / no curl on this host, 5 = Stirling took the new
 # password but logging in with it did not succeed, anything else = failed.
 #
+# A run that ends at 3 has already spent the one sign-in attempt it may spend, and every
+# retry spends another (5 of them inside the window lock the account for 2 h). So that run
+# leaves `.crow-first-admin-kept` in this directory — the installed bundle's own — and a run
+# that finds it exits 3 at once, without signing in at all.
+#
 # CROW_FA_CONTAINER overrides the container name for tests only; Crow never sets it.
 set -euo pipefail
 
@@ -35,11 +40,22 @@ ADMIN_USER="${CROW_FIRST_ADMIN_USER-admin}"
 say() { printf '%s\n' "$1"; }
 die() { printf '%s\n' "$1" >&2; exit "${2:-1}"; }
 
+# The file this script leaves after a run that ended at 3, next to it in the installed bundle
+# directory: from then on a run refuses without spending another sign-in attempt.
+KEPT_MARKER=".crow-first-admin-kept"
+
 # ── the password, from stdin only ───────────────────────────────────────────────────
 PW=""
 IFS= read -r PW || true
 [ -n "$PW" ] || die "No password arrived on stdin; Stirling PDF was not touched."
 [ "${#PW}" -ge 12 ] || die "The password on stdin is shorter than 12 characters; Stirling PDF was not touched."
+
+# ── a run that already ended at 3 signs in no more ────────────────────────────────
+# Nothing about the install changes between presses of "Set it up for me", so another run
+# would only cost the account another failed sign-in — and five of those lock it for 2 h.
+if [ -e "$KEPT_MARKER" ]; then
+  die "Stirling PDF's shipped login did not work on an earlier run, so this install already has its own admin password; left alone, and no sign-in attempt was made this time (each attempt counts towards the account's lockout; remove $KEPT_MARKER to try again)." 3
+fi
 
 # Escaping for a curl config value (curl reads its config from stdin with `-K -`): a
 # double-quoted value there understands exactly two escapes, `\\` and `\"`.
@@ -82,10 +98,11 @@ token_of() {
 }
 
 # locked BODY: whether this answer says the account is locked (the password did not decide).
-locked() { printf '%s' "$1" | grep -qi 'lock'; }
+# The WORD only: an answer that merely carries it inside another word decided nothing.
+locked() { printf '%s' "$1" | grep -qiE '\blocked\b'; }
 
 # ── wait for the app (a first start prepares its own configuration first) ──────────
-# Bounded twice: a $SECONDS budget well inside the manifest's 120 s, and max-time 5 in the
+# Bounded twice: a $SECONDS budget well inside the manifest's 240 s, and max-time 5 in the
 # probe's own config, so a single stuck request cannot outlive the wait.
 up=""
 wait_deadline=$((SECONDS + 60))
@@ -99,7 +116,8 @@ done
 # Every failed sign-in counts towards the account's lockout, so this run makes exactly one:
 # 200 = the shipped login works, an answer that refuses those credentials = the operator
 # changed it, anything unreadable = not answering. A locked account is left alone too, with
-# an honest reason (nothing was changed either way).
+# an honest reason (nothing was changed either way). Both of those end at 3, so both leave
+# the marker that keeps the next run out of the app's lockout counter.
 resp="$(http "$(cfg_login "$DEFAULT_PW")")"
 code="$(code_of "$resp")"
 body="$(body_of "$resp")"
@@ -107,9 +125,11 @@ case "$code" in
   200) ;;
   400 | 401 | 403)
     if locked "$body"; then
-      die "Stirling PDF's admin account is locked after too many failed sign-ins; nothing was changed. Wait for the lock to expire (or unlock it in Stirling), then use 'Set it up for me'." 3
+      : > "$KEPT_MARKER" 2>/dev/null || true
+      die "Stirling PDF's admin account is locked after too many failed sign-ins; nothing was changed, and no further run signs in until $KEPT_MARKER is removed. Wait for the lock to expire (or unlock it in Stirling), then use 'Set it up for me' again — each retry costs another sign-in attempt." 3
     fi
-    die "Stirling PDF's shipped login no longer works, so this install already has its own admin password; left alone." 3
+    : > "$KEPT_MARKER" 2>/dev/null || true
+    die "Stirling PDF's shipped login no longer works, so this install already has its own admin password; left alone, and no further run signs in until $KEPT_MARKER is removed. Each retry costs another sign-in attempt, and 5 of them lock the account for 2 hours." 3
     ;;
   *) die "Stirling PDF did not answer on its login API; nothing was changed." 4 ;;
 esac
@@ -133,11 +153,17 @@ confirmed=""
 if [ "$set_code" = "200" ]; then
   confirmed=1
 else
-  # A request that did not answer 200 may still have written the password: one login with the
-  # real password decides, and it is also the only attempt this spends.
-  if [ "$(code_of "$(http "$(cfg_login "$PW")")")" = "200" ]; then confirmed=1; fi
+  # A request that did not answer 200 may still have written the password: logins with the real
+  # password decide, and at most TWO of them — every one of them counts towards the lockout.
+  attempt=1
+  while :; do
+    if [ "$(code_of "$(http "$(cfg_login "$PW")")")" = "200" ]; then confirmed=1; break; fi
+    if [ "$attempt" -ge 2 ]; then break; fi
+    attempt=$((attempt + 1))
+    sleep 2
+  done
 fi
-[ -n "$confirmed" ] || die "Stirling PDF did not confirm the new password; the shipped login is unchanged." 1
+[ -n "$confirmed" ] || die "Stirling PDF did not confirm the new password; the password may have changed; check the app's own login." 1
 say "Stirling PDF confirmed the new password for the account '$ADMIN_USER'."
 
 # ── prove the new login works ─────────────────────────────────────────────────────
@@ -167,12 +193,12 @@ done
 if [ "$proof" = "LOCKED" ]; then
   # The app confirmed the change, so the account holds this password; only the sign-in is
   # blocked, and more attempts would make that worse.
-  die "Stirling PDF accepted the new password, but its admin account is now locked after too many sign-ins; wait for the lock to expire before signing in." 5
+  die "Stirling PDF accepted the new password, but its admin account is now locked after too many sign-ins; wait for the lock to expire before signing in. Crow kept the new password; use the login in Settings → Passwords." 5
 fi
 if [ "$proof" != "LOGIN-OK" ]; then
   # The app confirmed the change, so the new password IS its password: Crow keeps it and says
   # it could not log in with it (exit 5).
-  die "Stirling PDF accepted the new password, but logging in with it did not succeed; open Stirling's own login page and set its admin password there." 5
+  die "Stirling PDF accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5
 fi
 
 say "Stirling PDF's admin login for '$ADMIN_USER' now uses the password Crow generated."

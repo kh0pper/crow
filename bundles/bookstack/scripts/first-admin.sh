@@ -51,6 +51,13 @@ command -v docker >/dev/null 2>&1 || die "docker is not available here, so the B
 running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)"
 [ "$running" = "true" ] || die "BookStack is not running; nothing was changed." 4
 
+# ── the fixed cookie jar older versions of this script left behind ─────────────────
+# Every login below makes its own jar inside the container. A run of an older version kept a
+# signed-in session in this one fixed path, and that session is an admin login, so it goes
+# before anything else is read.
+LEGACY_JAR="/tmp/crow-fa-cookies.txt"
+docker exec "$CONTAINER" rm -f "$LEGACY_JAR" </dev/null >/dev/null 2>&1 || true
+
 # ── wait for the app (a first start migrates the database first) ────────────────────
 # Bounded twice: a $SECONDS budget well inside the manifest's 240 s, and --max-time 5 on the
 # probe itself, so a single stuck curl cannot outlive the wait.
@@ -68,8 +75,10 @@ done
 # ── one form login, its config on stdin ────────────────────────────────────────────
 # Everything secret (the CSRF token, the email when it is the operator's, the password)
 # travels inside the curl config on stdin. The cookie jar is a throwaway file in the
-# container: it is a file name, not a secret.
-JAR="/tmp/crow-fa-cookies.txt"
+# container: its NAME is not a secret, but its CONTENT is a session, so every login gets a
+# jar of its own from the container's own mktemp and removes it again before returning. A
+# reused jar would hold the session its last POST left, and the next login's GET of the form
+# would be answered with a redirect to the app instead of the form.
 
 # Escaping for a curl config value (curl reads its config from stdin with `-K -`): a
 # double-quoted value there understands exactly two escapes, `\\` and `\"`. A value written
@@ -84,11 +93,30 @@ token_of() {
     | head -n 1 | tr -d '[:space:]'
 }
 
-# login_with EMAIL PASSWORD: "<status> <redirect URL>", or UNAVAILABLE when the form or the
-# app could not be read at all.
-login_with() {
-  local page token answer
-  page="$(printf 'url = "%s/login"\ncookie-jar = "%s"\ncookie = "%s"\nmax-time = 10\n' "$BASE_URL" "$JAR" "$JAR" \
+# new_jar: the path of a fresh cookie jar inside the container, or nothing when the
+# container would not make one. Only a plain path is used, so nothing else can be named.
+new_jar() {
+  local j
+  j="$(docker exec "$CONTAINER" mktemp 2>/dev/null || true)"
+  case "$j" in
+    /tmp/*) printf '%s' "$j" ;;
+    *) printf '%s' "" ;;
+  esac
+}
+
+# drop_jar PATH: remove that jar inside the container; an empty path is nothing to do.
+drop_jar() {
+  case "${1:-}" in
+    /tmp/*) docker exec "$CONTAINER" rm -f "$1" </dev/null >/dev/null 2>&1 || true ;;
+  esac
+  return 0
+}
+
+# login_form JAR EMAIL PASSWORD: "<status> <redirect URL>", or UNAVAILABLE when the form or
+# the app could not be read at all.
+login_form() {
+  local jar="$1" page token answer
+  page="$(printf 'url = "%s/login"\ncookie-jar = "%s"\ncookie = "%s"\nmax-time = 10\n' "$BASE_URL" "$jar" "$jar" \
     | docker exec -i "$CONTAINER" curl -sS -K - -w '\n%{http_code}' 2>/dev/null || true)"
   [ "$(printf '%s' "${page##*$'\n'}")" = "200" ] || { printf '%s' "UNAVAILABLE"; return 0; }
   token="$(token_of "${page%$'\n'*}")"
@@ -96,9 +124,23 @@ login_with() {
     "" | *[!A-Za-z0-9+/=_.-]*) printf '%s' "UNAVAILABLE"; return 0 ;;
   esac
   answer="$(printf 'url = "%s/login"\ncookie-jar = "%s"\ncookie = "%s"\nmax-time = 10\nrequest = "POST"\ndata-urlencode = "_token=%s"\ndata-urlencode = "email=%s"\ndata-urlencode = "password=%s"\n' \
-    "$BASE_URL" "$JAR" "$JAR" "$token" "$1" "$(esc "$2")" \
+    "$BASE_URL" "$jar" "$jar" "$token" "$2" "$(esc "$3")" \
     | docker exec -i "$CONTAINER" curl -sS -K - -o /dev/null -w '%{http_code} %{redirect_url}' 2>/dev/null || true)"
   printf '%s' "${answer:-UNAVAILABLE}"
+}
+
+# login_with EMAIL PASSWORD: the same answer, with a jar made for this one login and removed
+# before it returns — no run leaves a session behind in the container.
+login_with() {
+  local jar answer
+  jar="$(new_jar)"
+  case "$jar" in
+    /tmp/*) ;;
+    *) printf '%s' "UNAVAILABLE"; return 0 ;;
+  esac
+  answer="$(login_form "$jar" "$1" "$2")"
+  drop_jar "$jar"
+  printf '%s' "$answer"
 }
 
 # redirect_path URL: the URL without its scheme or query, so the app's own APP_URL host
@@ -143,7 +185,7 @@ esac
 # argument. It runs as uid 1000 (the image's own user) in the app directory.
 rc=0
 printf '%s\n' "$PW" \
-  | docker exec -i -u 1000 -w /app/www "$CONTAINER" php artisan bookstack:create-admin --initial \
+  | timeout 30 docker exec -i -u 1000 -w /app/www "$CONTAINER" php artisan bookstack:create-admin --initial \
       --email="$ADMIN_USER" --name="$ADMIN_NAME" >/dev/null 2>&1 || rc=$?
 case "$rc" in
   0) ;;
@@ -169,7 +211,7 @@ done
 if [ "$proof" != "SIGNED-IN" ]; then
   # BookStack itself confirmed the change (its own command exited 0), so the new password IS
   # the account's password: Crow keeps it and says it could not log in with it (exit 5).
-  die "BookStack accepted the new password, but logging in with it did not succeed; open BookStack's own login page and set its admin password there." 5
+  die "BookStack accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5
 fi
 
 say "BookStack's admin login for '$ADMIN_USER' now uses the password Crow generated."

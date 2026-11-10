@@ -14,8 +14,9 @@
 # Protocol (docs/developers/bundles.md): the password arrives as ONE line on stdin. Exit
 # 0 = the admin now has exactly that password, 3 = the default login no longer works
 # (this install already has its own admin password; left alone), 4 = not running / not
-# answering / no curl on this host, 5 = Shiori took the new password but logging in with
-# it did not succeed, anything else = failed.
+# answering / no curl on this host / an answer that does not say which account signed in,
+# 5 = Shiori took the new password but logging in with it did not succeed, anything else =
+# failed.
 #
 # CROW_FA_CONTAINER overrides the container name for tests only; Crow never sets it.
 set -euo pipefail
@@ -82,8 +83,24 @@ token_of() {
   printf '%s' "$t"
 }
 
+# account_obj BODY: the account object from Shiori's login answer, on one line, and nothing
+# when the answer does not carry one (a nested object inside it is not expected).
+account_obj() {
+  printf '%s\n' "$1" | tr -d '\n' | sed -n 's/.*"account"[[:space:]]*:[[:space:]]*{\([^}]*\)}.*/\1/p' | head -n 1 || true
+}
+
+# str_field OBJECT NAME / id_field OBJECT NAME: one value out of that object — the username
+# as a string, the id as digits — and nothing when it is not there. Neither prints the
+# object itself, so no secret can reach this script's output.
+str_field() {
+  printf '%s\n' "$1" | grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n 1 | sed 's/^[^:]*:[[:space:]]*"//; s/"$//' || true
+}
+id_field() {
+  printf '%s\n' "$1" | grep -o "\"$2\"[[:space:]]*:[[:space:]]*[0-9][0-9]*" | head -n 1 | sed 's/^[^:]*:[[:space:]]*//' || true
+}
+
 # ── wait for Shiori (a first start prepares its database first) ─────────────────────
-# Bounded twice: a $SECONDS budget well inside the manifest's 120 s, and max-time 5 in the
+# Bounded twice: a $SECONDS budget well inside the manifest's 240 s, and max-time 5 in the
 # probe's own config, so a single stuck request cannot outlive the wait.
 up=""
 wait_deadline=$((SECONDS + 60))
@@ -106,29 +123,50 @@ case "$code" in
 esac
 
 token="$(token_of "$(body_of "$resp")")"
+account="$(account_obj "$(body_of "$resp")")"
 resp=""
 case "$token" in
   "" | *[!A-Za-z0-9._~+/-]*) die "Shiori accepted the default login but handed back no usable token; nothing was changed." 4 ;;
 esac
 
+# ── which account answered the login? ──────────────────────────────────────────────
+# Shiori's answer carries the account it signed in as, and the PATCH below goes to THAT id —
+# never to a remembered one, because the shipped login is not proof that id 1 is the account
+# it opened. An answer without a usable id, or one naming another account, is refused before
+# the app is written to.
+account_id="$(id_field "$account" id)"
+account_user="$(str_field "$account" username)"
+case "$account_id" in
+  "" | *[!0-9]*) die "Shiori accepted the default login but did not say which account answered; nothing was changed." 4 ;;
+esac
+[ "$account_user" = "$ADMIN_USER" ] || die "Shiori accepted the default login for an account other than '$ADMIN_USER'; nothing was changed." 4
+account=""
+
 # ── set the new password ───────────────────────────────────────────────────────────
-# The token and the password stay inside the curl config on stdin; the account is the
-# shipped one (id 1).
+# The token and the password stay inside the curl config on stdin; the account is the one
+# that answered the login above, by its own id.
 patch_json="{\"old_password\":\"$(esc "$DEFAULT_PW")\",\"new_password\":\"$(esc "$PW")\"}"
-resp="$(http "$(printf 'url = "%s/api/v1/accounts/1"\nmax-time = 10\nrequest = "PATCH"\nheader = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\ndata = "%s"\n' \
-  "$BASE_URL" "$token" "$(esc "$patch_json")")")"
+resp="$(http "$(printf 'url = "%s/api/v1/accounts/%s"\nmax-time = 10\nrequest = "PATCH"\nheader = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\ndata = "%s"\n' \
+  "$BASE_URL" "$account_id" "$token" "$(esc "$patch_json")")")"
 set_code="$(code_of "$resp")"
 resp=""
 token=""
+account_id=""
 confirmed=""
 if [ "$set_code" = "200" ]; then
   confirmed=1
 else
-  # A PATCH that did not answer 200 may still have written the password: one login with the
-  # real password decides, and only that decides.
-  if [ "$(code_of "$(http "$(cfg_login "$PW")")")" = "200" ]; then confirmed=1; fi
+  # A PATCH that did not answer 200 may still have written the password, and nothing else can
+  # tell: logins with the real password decide, up to three of them, 2 s apart.
+  attempt=1
+  while :; do
+    if [ "$(code_of "$(http "$(cfg_login "$PW")")")" = "200" ]; then confirmed=1; break; fi
+    if [ "$attempt" -ge 3 ]; then break; fi
+    attempt=$((attempt + 1))
+    sleep 2
+  done
 fi
-[ -n "$confirmed" ] || die "Shiori did not confirm the new password; the default login is unchanged." 1
+[ -n "$confirmed" ] || die "Shiori did not confirm the new password; the password may have changed; check the app's own login." 1
 say "Shiori confirmed the new password for the account '$ADMIN_USER'."
 
 # ── prove the new login works, and the default does not ────────────────────────────
@@ -155,7 +193,7 @@ done
 if [ "$proof" != "LOGIN-OK" ]; then
   # Shiori confirmed the change, so the new password IS its password: Crow keeps it and says
   # it could not log in with it (exit 5).
-  die "Shiori accepted the new password, but logging in with it did not succeed; open Shiori's own login page and set its admin password there." 5
+  die "Shiori accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5
 fi
 
 say "Shiori's admin login for '$ADMIN_USER' now uses the password Crow generated."
