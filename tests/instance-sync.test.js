@@ -1992,3 +1992,208 @@ test("T3g. setting matrix: owner+feeds-on writes '1'; owner+env-disabled writes 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── Erase tombstones (the operator's ruling, 2026-11-10) ─────────────────────
+//
+// An erase is an op of its own (`op: "erase"`, on the item's own table) and it
+// leaves a permanent tombstone (servers/shared/history/erase.js). These cases
+// drive the apply path directly with stub feeds: what a receiver does with the
+// event, and what it then refuses to do with the peer's later inserts.
+//
+// The history schema (migration 0024) is applied here, on this file's shared
+// scratch DB, because the erase paths read item_versions and item_erasures. It is
+// idempotent and runs inside the first of these cases, which are last in the file.
+
+let _historyReady = false;
+async function ensureHistorySchema() {
+  if (_historyReady) return;
+  const { run: migrateHistory } = await import("../scripts/migrations/0024-item-versions.mjs");
+  migrateHistory({ dbPath: DB_PATH, log: () => {} });
+  _historyReady = true;
+}
+
+const historyCount = async (db, itemType, itemId) =>
+  Number((await db.execute({
+    sql: "SELECT COUNT(*) AS n FROM item_versions WHERE item_type = ? AND item_id = ?",
+    args: [itemType, String(itemId)],
+  })).rows[0].n);
+
+const tombstoneRows = async (db, itemType, itemId) =>
+  (await db.execute({
+    sql: "SELECT item_type, item_id, erased_at, erased_by, origin_instance FROM item_erasures WHERE item_type = ? AND item_id = ?",
+    args: [itemType, String(itemId)],
+  })).rows;
+
+const memoryExists = async (db, id) =>
+  (await db.execute({ sql: "SELECT id FROM memories WHERE id = ?", args: [id] })).rows.length > 0;
+
+test("E1. an inbound erase deletes the live row, erases its history and records a tombstone", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e1";
+  const REMOTE = "remote-e1";
+  const { mgr, db } = makeManager(INST);
+  try {
+    await db.execute({
+      sql: "INSERT INTO memories (id, category, content) VALUES (9801, 'general', 'erased on the peer')",
+      args: [],
+    });
+    await db.execute({ sql: "DELETE FROM memories WHERE id = 9801", args: [] });
+    assert.equal(await historyCount(db, "memory", 9801), 2, "insert + delete captured locally");
+
+    const feed = makeStubFeed();
+    feed.push(signEntry({
+      table: "memories", op: "erase",
+      row: { id: 9801, erased_at: "2026-11-10T00:00:00.000Z", erased_by: "owner:abcd1234" },
+      lamport_ts: 40, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+
+    assert.equal(await historyCount(db, "memory", 9801), 0, "the peer's erase took this instance's history too");
+    assert.equal(await memoryExists(db, 9801), false, "and any live row it had");
+    const tombs = await tombstoneRows(db, "memory", "9801");
+    assert.equal(tombs.length, 1, "this instance keeps its own tombstone");
+    assert.equal(tombs[0].origin_instance, REMOTE, "naming the instance that erased it");
+    assert.equal(tombs[0].erased_by, "owner:abcd1234", "and who did it there");
+  } finally {
+    db.close();
+  }
+});
+
+test("E2. after an erase, the peer's later insert and update are refused — no row, no history", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e2";
+  const REMOTE = "remote-e2";
+  const { mgr, db } = makeManager(INST);
+  try {
+    const feed = makeStubFeed();
+    feed.push(signEntry({
+      table: "memories", op: "erase",
+      row: { id: 9802, erased_at: "2026-11-10T00:00:00.000Z", erased_by: "system:maker-lab" },
+      lamport_ts: 10, instance_id: REMOTE,
+    }));
+    // A much newer insert (a restore on the peer) and then an edit — both refused
+    // however high their lamports are: an erase is not a last-write-wins race.
+    feed.push(signEntry({
+      table: "memories", op: "insert",
+      row: { id: 9802, category: "general", content: "restored on the peer", lamport_ts: null },
+      lamport_ts: 9_000_000, instance_id: REMOTE,
+    }));
+    feed.push(signEntry({
+      table: "memories", op: "update",
+      row: { id: 9802, content: "edited on the peer", lamport_ts: null },
+      lamport_ts: 9_000_001, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+
+    assert.equal(await memoryExists(db, 9802), false, "the erased item is not re-created");
+    assert.equal(await historyCount(db, "memory", 9802), 0, "and writes no history for it either");
+    assert.equal((await tombstoneRows(db, "memory", "9802")).length, 1, "the tombstone is what did it");
+
+    // The gate is about the tombstoned item, not about the peer or the table: an
+    // ordinary insert from the same peer still applies.
+    feed.push(signEntry({
+      table: "memories", op: "insert",
+      row: { id: 9803, category: "general", content: "an unrelated memory", lamport_ts: null },
+      lamport_ts: 9_000_002, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+    assert.equal(await memoryExists(db, 9803), true, "an unrelated memory from that peer still lands");
+  } finally {
+    db.close();
+  }
+});
+
+test("E4. an erase of a context section deletes it by its scope, erases its history and refuses its re-creation", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e4";
+  const REMOTE = "remote-e4";
+  const { mgr, db } = makeManager(INST);
+  try {
+    // crow_context rows are keyed on the wire by their SCOPE (section_key +
+    // device_id + the portable project uuid), never by a per-instance rowid, so a
+    // project has to exist here for the peer's uuid to map onto.
+    await db.execute({
+      sql: "INSERT OR IGNORE INTO project_spaces (slug, name, uuid) VALUES ('e4-project', 'E4', 'uuid-e4')",
+      args: [],
+    });
+    const projectId = Number((await db.execute({
+      sql: "SELECT id FROM project_spaces WHERE uuid = 'uuid-e4'",
+      args: [],
+    })).rows[0].id);
+    const section = Number((await db.execute({
+      sql: `INSERT INTO crow_context (section_key, section_title, content, device_id, project_id)
+            VALUES ('e4-section', 'Section', 'body one', NULL, ?)`,
+      args: [projectId],
+    })).lastInsertRowid);
+    await db.execute({ sql: "UPDATE crow_context SET content = 'body two' WHERE id = ?", args: [section] });
+    assert.equal(await historyCount(db, "context_section", section), 2, "insert + edit captured locally");
+
+    const feed = makeStubFeed();
+    feed.push(signEntry({
+      table: "crow_context", op: "erase",
+      row: {
+        section_key: "e4-section", device_id: null, project_uuid: "uuid-e4",
+        erased_at: "2026-11-10T00:00:00.000Z", erased_by: "system:maker-lab",
+      },
+      lamport_ts: 60, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+
+    assert.equal(
+      (await db.execute({ sql: "SELECT id FROM crow_context WHERE id = ?", args: [section] })).rows.length,
+      0,
+      "the live section is gone",
+    );
+    assert.equal(await historyCount(db, "context_section", section), 0, "and so is its history");
+    const scopeKey = JSON.stringify({ section_key: "e4-section", device_id: null, project_uuid: "uuid-e4" });
+    assert.equal((await tombstoneRows(db, "context_section", scopeKey)).length, 1, "tombstoned under its scope");
+
+    // The peer's restore is an insert of the same section: refused by the tombstone,
+    // which is the only check that can catch it (the rowid is gone, and the scope is
+    // what the table is keyed by).
+    feed.push(signEntry({
+      table: "crow_context", op: "insert",
+      row: {
+        section_key: "e4-section", section_title: "Section", content: "restored on the peer",
+        sort_order: 1, enabled: 1, device_id: null, project_uuid: "uuid-e4", lamport_ts: null,
+      },
+      lamport_ts: 9_500_000, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+    assert.equal(
+      (await db.execute({ sql: "SELECT id FROM crow_context WHERE section_key = 'e4-section'", args: [] })).rows.length,
+      0,
+      "the erased section is not re-created",
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("E3. an erase event on a table whose erasures do not propagate is ignored", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e3";
+  const REMOTE = "remote-e3";
+  const { mgr, db } = makeManager(INST);
+  try {
+    await db.execute({
+      sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, lamport_ts) VALUES ('crow:e3', '', 'p9', 5)",
+      args: [],
+    });
+    const feed = makeStubFeed();
+    const before = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM item_erasures", args: [] })).rows[0].n);
+    feed.push(signEntry({
+      table: "contacts", op: "erase",
+      row: { id: 1, erased_at: "2026-11-10T00:00:00.000Z", erased_by: "owner:abcd1234" },
+      lamport_ts: 50, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
+
+    const { rows } = await db.execute({ sql: "SELECT crow_id FROM contacts WHERE crow_id = 'crow:e3'", args: [] });
+    assert.equal(rows.length, 1, "a table with no erasure rules keeps its row");
+    const after = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM item_erasures", args: [] })).rows[0].n);
+    assert.equal(after, before, "and nothing is tombstoned for it");
+  } finally {
+    db.close();
+  }
+});

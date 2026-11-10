@@ -94,6 +94,7 @@
  * section and is never part of the INSERT/UPDATE into the table itself.
  */
 import { COVERED, tableColumns } from "./covered.js";
+import { erasureKeys, findErasedKeySync } from "./erase.js";
 import { AUTHOR_KINDS, withWriteContext } from "./write-context.js";
 import { lineDiff } from "../line-diff.js";
 
@@ -569,6 +570,7 @@ async function emitRestored(db, syncManager, { spec, itemType, op, row }) {
 
 /** The codes this module raises itself, so a mapped SQLite error cannot masquerade as one. */
 const OWN_CODES = new Set([
+  "erased",
   "invalid_context",
   "invalid_request",
   "not_found",
@@ -641,6 +643,15 @@ function versionIdAfter(run, watermark, itemType, itemId) {
  * honest answer is "pick another version". Task 4 owns the wording a caller
  * shows for it (and what its Trash restore does when a delete version was
  * redacted).
+ *
+ * AN ERASED item is refused too (code 'erased', the operator's ruling of
+ * 2026-11-10). An erase leaves a permanent tombstone in item_erasures — in the
+ * same transaction that removed the versions — and a restore must not undo it:
+ * that row exists precisely so an item the owner erased cannot come back, here
+ * or (via sync) anywhere else. Normally an erased item has no versions left to
+ * restore, but a version can outlive it (a filtered page, a stale reader, a
+ * redaction pass) and "not found" would be the wrong answer for what was
+ * deliberately forgotten.
  *
  * Four paths:
  *
@@ -718,6 +729,21 @@ export async function restoreVersion(db, { versionId, syncManager = null } = {},
       if (itemId === null) throw historyError("invalid_request", `version ${id} has no item id`);
 
       const snapshot = JSON.parse(version.snapshot_json);
+      // An ERASED item is never restored (the tombstone is the operator's ruling
+      // that it is gone for good). Checked BEFORE anything is written, and both
+      // key shapes: the section scope this snapshot describes, and the row id the
+      // tombstone may have been recorded under.
+      const erasedKey = findErasedKeySync(
+        run,
+        version.item_type,
+        erasureKeys(version.item_type, { itemId, snapshot }),
+      );
+      if (erasedKey !== null) {
+        throw historyError(
+          "erased",
+          `${version.item_type}/${itemId} was erased and cannot be restored`,
+        );
+      }
       // Only the columns this snapshot actually carries, and only the ones the
       // TABLE has: a version written from an older field list must not blank the
       // columns it never knew about, and a DERIVED field (a section's

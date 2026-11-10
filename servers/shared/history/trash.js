@@ -12,8 +12,16 @@
  *   - a restore (a new version) takes the item out of the Trash by definition,
  *     and so does a re-create;
  *   - ERASED means GONE: erase (erase.js) removes every version, so an erased
- *     item cannot be listed, restored, or resurrected by anything reading this
- *     module. There is no tombstone row to leak and none to grow.
+ *     item cannot be listed or restored by anything reading this module.
+ *
+ * An erased item leaves ONE durable record — its tombstone in item_erasures
+ * (erase.js), which is exactly what is NOT leaked here: it holds no content, no
+ * snapshot and no name, only (item_type, item_id) and who erased it when. It is
+ * what makes "gone" survive a peer's restore (an erase event tells the peer to
+ * erase its copy and record the same tombstone, and sync then refuses to
+ * re-create the item). This module reads it only to refuse a restore of a
+ * tombstoned item with code 'erased' — the Trash listing never shows one, because
+ * a tombstoned item has no versions left to list.
  *
  * Restore goes through api.js's restoreVersion — the one restore in the code
  * base — so a Trash restore IS a new version (review focus 3), it is attributed,
@@ -24,7 +32,7 @@
  * empty the Trash), and it erases through the same armed door as everything else.
  */
 import { restoreVersion } from "./api.js";
-import { eraseItems } from "./erase.js";
+import { eraseItems, erasureKeys, findErasedKey } from "./erase.js";
 
 /** The default Trash period, in days (the design's §8.8 default). */
 export const DEFAULT_TRASH_DAYS = 30;
@@ -143,9 +151,16 @@ async function newestVersion(db, itemType, itemId) {
  * back as ITSELF (same id, same project filing) and the restore is a new version,
  * so the delete stays in the item's History afterwards (review focus 3).
  *
- * Refusals: `not_found` when the item has no versions at all (erased, or never
- * existed), `not_in_trash` when its newest version is not a delete (it is live),
- * and restoreVersion's own `redacted` / `conflict` / `invalid_context`.
+ * Refusals: `not_found` when the item has no versions at all (never existed),
+ * `erased` when the item was erased (its tombstone is permanent: the operator's
+ * ruling of 2026-11-10 is that an erase is for good, so a restore of one is
+ * refused rather than re-created), `not_in_trash` when its newest version is not
+ * a delete (it is live), and restoreVersion's own `redacted` / `conflict` /
+ * `invalid_context` / `erased`.
+ *
+ * ORDER MATTERS: the tombstone is checked FIRST. An erased item usually has no
+ * versions left, so the honest answer is 'erased', not 'not_found' — and if a
+ * version somehow outlived the erase, restoreVersion's own check catches it.
  *
  * SYNC: a Trash restore is a NORMAL write, not a local-only one. It emits through
  * the same door an ordinary edit uses (`{ syncManager }`, see api.js's
@@ -169,6 +184,13 @@ export async function restoreFromTrash(db, item = {}, ctx, { syncManager = null 
   if (itemType === null || itemId === null) {
     throw trashError("invalid_request", "restoreFromTrash needs an itemType and an itemId");
   }
+  // Erased is permanent: its tombstone outlives its versions (see the module
+  // comment). Both key shapes a tombstone may be recorded under are checked;
+  // restoreVersion checks again with the version's own snapshot, which is the
+  // only way to know a context section's scope.
+  if (await findErasedKey(db, itemType, erasureKeys(itemType, { itemId }))) {
+    throw trashError("erased", `${itemType}/${itemId} was erased and cannot be restored`);
+  }
   const newest = await newestVersion(db, itemType, itemId);
   if (!newest) throw trashError("not_found", `${itemType}/${itemId} has no history: nothing to restore`);
   if (newest.op !== "delete") {
@@ -191,14 +213,21 @@ export async function restoreFromTrash(db, item = {}, ctx, { syncManager = null 
  * with different clocks.
  *
  * @param {object} db
- * @param {{olderThanDays?: number, now?: Date, maxPages?: number}} [opts]
+ * @param {{olderThanDays?: number, now?: Date, maxPages?: number,
+ *   syncManager?: object|null|undefined}} [opts]
  *   `olderThanDays` defaults to 0 (empty it all). `now` is injectable for tests.
  *   `maxPages` bounds one call to that many pages of MAX_TRASH_ROWS items.
+ *   `syncManager` is passed to every erase (see erase.js): undefined resolves
+ *   this process's sync manager, null keeps the erase local.
  * @param {{authorKind: string, authorId?: string}} ctx must be the owner
  * @returns {Promise<{erased: Array<{itemType: string, itemId: string, versions: number}>,
- *   count: number, versions: number, before: string}>}
+ *   count: number, versions: number, emitted: number, before: string}>}
  */
-export async function emptyTrash(db, { olderThanDays = 0, now = new Date(), maxPages = 20 } = {}, ctx) {
+export async function emptyTrash(
+  db,
+  { olderThanDays = 0, now = new Date(), maxPages = 20, syncManager = undefined } = {},
+  ctx,
+) {
   if (!ctx || ctx.authorKind !== "owner") {
     throw trashError("not_owner", "only the owner can empty the Trash");
   }
@@ -214,6 +243,7 @@ export async function emptyTrash(db, { olderThanDays = 0, now = new Date(), maxP
   // store cannot keep one request busy forever.
   const erased = [];
   let versions = 0;
+  let emitted = 0;
   for (let page = 0; page < maxPages; page++) {
     const entries = await trashEntries(db, { before, limit: MAX_TRASH_ROWS });
     if (entries.length === 0) break;
@@ -223,14 +253,15 @@ export async function emptyTrash(db, { olderThanDays = 0, now = new Date(), maxP
       ctx,
       // The conditional is inside the armed transaction: a restore between this
       // page's listing and its erase wrote a newer version, so it survives.
-      { deletedBefore: before },
+      { deletedBefore: before, syncManager },
     );
     erased.push(...result.erased.filter((item) => item.versions > 0));
     versions += result.versions;
+    emitted += result.emitted;
     // `result.erased` is empty only when there was nothing to act on (no history
     // store). An entry with 0 versions is a restore that won the race: it is not
     // in the next listing, so the next page is the right place to continue.
     if (result.erased.length === 0) break;
   }
-  return { erased, count: erased.length, versions, before };
+  return { erased, count: erased.length, versions, emitted, before };
 }

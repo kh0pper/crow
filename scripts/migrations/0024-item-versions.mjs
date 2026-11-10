@@ -11,7 +11,22 @@
 //
 // LOCAL ONLY: item_versions is never added to instance-sync's SYNCED_TABLES. Each
 // instance records the versions of every change it applies, including ones that
-// arrive from a peer, so no new sync surface is created.
+// arrive from a peer, so no new sync surface is created. What DOES cross is the
+// fact of an ERASE: `item_erasures` (below) holds one permanent tombstone per
+// erased item, and an erase event tells a peer to erase its copy and record the
+// same tombstone (servers/shared/history/erase.js ERASURE_SYNC_TABLES). The
+// tombstone table itself is not synced either — each instance keeps its own,
+// and the event is what makes a pair agree.
+//
+// TWO MORE TABLES ride in this migration:
+//   - `item_erasures` (the tombstones; never purged — forgetting one reopens the
+//     door it exists to shut), and
+//   - `pending_erasures` (a Maker Lab learner delete's durable "finish this"
+//     marker: the cascade and the marker commit together, so a failure in the
+//     following history erase leaves a marker a retry — with the profile row
+//     already gone — or the 5-minute sweep can complete). The bundle creates the
+//     same table itself (`CREATE TABLE IF NOT EXISTS`) so an install older than
+//     this migration still works; both shapes are identical on purpose.
 //
 // Additive only, no SCHEMA_GENERATION bump (init-db.js is untouched): the
 // registry is the rail for schema a running instance can pick up on boot.
@@ -30,9 +45,9 @@
 // earlier run safe to repeat.
 //
 // Idempotent in its own right, because a database restored from backup can lose
-// its schema_migrations row: the table, the indexes, the control table and the
-// triggers are all IF NOT EXISTS, and the baseline is per item, so a second run
-// writes nothing.
+// its schema_migrations row: the table, the indexes, the control table, the two
+// tables added beside it (item_erasures, pending_erasures) and the triggers are
+// all IF NOT EXISTS, and the baseline is per item, so a second run writes nothing.
 //
 // Tolerant of absent tables: memories / blog_posts / crow_context are created by
 // init-db.js, but a store can be missing one (a partial restore, or a bare DB on
@@ -67,8 +82,25 @@ import {
   tableColumns,
   triggerSql,
 } from "../../servers/shared/history/covered.js";
+import { ITEM_ERASURES_DDL } from "../../servers/shared/history/erase.js";
 
 export const id = "0024-item-versions";
+
+/**
+ * The Maker Lab learner-delete marker. A local table (never synced): it names a
+ * learner whose cascade has committed but whose history erase has not finished,
+ * with the memory ids read just before the cascade so the erase can be re-run
+ * after the profile row is gone. Duplicated verbatim in
+ * bundles/maker-lab/server/pending-erasures.js — the bundle must still work on an
+ * install that has not run this migration.
+ */
+export const PENDING_ERASURES_DDL = `
+  CREATE TABLE IF NOT EXISTS pending_erasures (
+    learner_id INTEGER PRIMARY KEY,
+    project_uuid TEXT,
+    memory_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  );`;
 
 // rollbackSafe: a new table, its indexes, guards and triggers on existing
 // tables; older code neither reads nor writes any of them.
@@ -161,6 +193,12 @@ export function run({ dbPath, log = () => {} }) {
   db.pragma("busy_timeout = 10000");
   try {
     db.exec(ITEM_VERSIONS_DDL);
+    // The tombstones an erase leaves behind (and the learner-delete marker the
+    // Maker Lab bundle finishes from). Additive and IF NOT EXISTS, so a store
+    // that already ran an earlier build of this migration picks them up here.
+    db.exec(ITEM_ERASURES_DDL);
+    db.exec(PENDING_ERASURES_DDL);
+    log("  item_erasures + pending_erasures: ensured");
 
     // A dev instance that ran an earlier build of this same (unreleased)
     // migration already has the table without project_ref, and CREATE TABLE IF

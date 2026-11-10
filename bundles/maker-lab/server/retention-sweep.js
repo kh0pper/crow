@@ -1,20 +1,48 @@
 /**
- * Maker Lab — transcript retention sweep.
+ * Maker Lab — transcript retention sweep, plus the learner-erase finisher.
  *
  * Periodically deletes maker_transcripts rows older than the owning
  * learner's transcripts_retention_days setting (default 30). Also
  * purges orphaned transcripts whose learner has been deleted (belt +
  * suspenders — ON DELETE CASCADE should already handle that).
  *
- * Runs on bundle boot and then every hour. A process-global flag
- * prevents double-start if both the stdio entry and the gateway's
- * panel routes call startRetentionSweep().
+ * AND, every five minutes, it FINISHES any learner delete whose history erase
+ * did not complete (pending-erasures.js): the cascade wrote a durable marker in
+ * the same batch that removed the learner, so a marker still sitting there means
+ * the erase owes work. Without this a failed erase stayed failed until someone
+ * pressed delete again — and the profile row was already gone, so nobody would.
+ * A marker whose erase fails again is left in place and will be retried.
+ *
+ * Runs on bundle boot and then hourly (retention) / every five minutes (pending
+ * erases). A process-global flag prevents double-start if both the stdio entry
+ * and the gateway's panel routes call startRetentionSweep().
  */
+import { finishPendingErasures } from "./pending-erasures.js";
 
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const PENDING_ERASE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 let started = false;
 let sweepTimer = null;
+let pendingTimer = null;
+
+/** Finish every pending learner erase. Never throws: a timer must not die. */
+async function runPendingErases(db) {
+  try {
+    const { completed, failed } = await finishPendingErasures(db);
+    if (completed.length) {
+      console.log(
+        `[maker-lab] finished ${completed.length} pending learner erase(s): ` +
+          completed.map((c) => `learner ${c.learnerId} (${c.versions} version(s))`).join(", "),
+      );
+    }
+    for (const miss of failed) {
+      console.warn(`[maker-lab] pending learner erase for learner ${miss.learnerId} still failing: ${miss.error}`);
+    }
+  } catch (err) {
+    console.warn("[maker-lab] pending learner erase sweep failed:", err?.message || err);
+  }
+}
 
 async function runOnce(db) {
   // Per-learner retention from maker_learner_settings. Default 30d when unset.
@@ -58,15 +86,22 @@ async function runOnce(db) {
 export function startRetentionSweep(db) {
   if (started) return;
   started = true;
-  // First run soon after boot (5s grace so the DB is warm).
-  const initial = setTimeout(() => { runOnce(db).catch(() => {}); }, 5000);
+  // First run soon after boot (5s grace so the DB is warm). The pending-erase
+  // pass runs first: it is the promise-keeping one.
+  const initial = setTimeout(() => {
+    runPendingErases(db).catch(() => {});
+    runOnce(db).catch(() => {});
+  }, 5000);
   sweepTimer = setInterval(() => { runOnce(db).catch(() => {}); }, SWEEP_INTERVAL_MS);
+  pendingTimer = setInterval(() => { runPendingErases(db).catch(() => {}); }, PENDING_ERASE_INTERVAL_MS);
   // Allow the process to exit cleanly — neither timer keeps it alive.
   if (initial && typeof initial.unref === "function") initial.unref();
   if (sweepTimer && typeof sweepTimer.unref === "function") sweepTimer.unref();
+  if (pendingTimer && typeof pendingTimer.unref === "function") pendingTimer.unref();
 }
 
 // Exposed for direct invocation (e.g., admin panel "Sweep now" button).
 export async function sweepNow(db) {
   await runOnce(db);
+  await runPendingErases(db);
 }

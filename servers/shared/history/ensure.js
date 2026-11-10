@@ -48,6 +48,7 @@ import {
   tableColumns,
   triggerDefs,
 } from "./covered.js";
+import { ITEM_ERASURES_DDL } from "./erase.js";
 
 const tableExists = (db, table) =>
   Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
@@ -89,6 +90,9 @@ const hasBaseline = (db, itemType, recorded) =>
 /**
  * Re-create every missing history trigger on one open crow.db.
  *
+ * Also ensures the tombstone table (item_erasures) and disarms a stuck erase
+ * switch; neither is a trigger, so neither appears in `restored`.
+ *
  * @param {import("better-sqlite3").Database} db
  * @returns {{restored: string[], skipped: string[], awaitingBaseline: string[],
  *   disarmed: number}} `restored` is the trigger names this call created (empty on
@@ -124,6 +128,14 @@ export function ensureHistoryTriggers(db) {
     !tableExists(db, "item_versions_erase") ||
     db.prepare("SELECT COUNT(*) AS n FROM item_versions_erase").get().n === 0;
   if (needsControlTable) db.exec(ITEM_VERSIONS_ERASE_DDL);
+
+  // The TOMBSTONES (migration 0024). Also ensured here, for the same reason: a
+  // store that already recorded 0024 from an earlier build of this unreleased
+  // migration never runs it again, and an erase must be able to write its
+  // tombstone — the row that stops a peer re-creating what was erased. Never
+  // purged, so there is nothing else to do with it. It is not a trigger, so it
+  // does not join `restored`.
+  if (!tableExists(db, "item_erasures")) db.exec(ITEM_ERASURES_DDL);
 
   // A switch still armed at boot belongs to an erase transaction that never
   // committed; leaving it on would let anything rewrite history without the
@@ -168,7 +180,12 @@ export function ensureHistoryTriggers(db) {
     }).immediate();
   }
 
-  return { restored: missingDefs.map((d) => d.name), skipped, awaitingBaseline, disarmed: Number(disarmed) };
+  return {
+    restored: missingDefs.map((d) => d.name),
+    skipped,
+    awaitingBaseline,
+    disarmed: Number(disarmed),
+  };
 }
 
 /**

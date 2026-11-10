@@ -32,6 +32,12 @@ import {
   mintBatchSessions,
 } from "./sessions.js";
 import { appImport } from "./app-root.js";
+import {
+  ensurePendingErasuresTable,
+  finishPendingErasure,
+  pendingErasureStatement,
+  readPendingErasure,
+} from "./pending-erasures.js";
 
 const { createProjectSpace, updateProjectSpaceMeta } = await appImport("servers/shared/project-spaces.js");
 
@@ -278,13 +284,20 @@ export function createMakerLabServer(db, options = {}) {
       reason: z.string().max(500).optional(),
     },
     async ({ learner_id, reason }) => {
+      // The profile row, and any marker an EARLIER attempt left behind. The marker
+      // is what makes this retryable to completion: after a failed history erase
+      // the cascade has committed, so the profile row is already gone — a retry
+      // that only looked at project_spaces would answer "not found" over a
+      // promise it has not kept.
+      await ensurePendingErasuresTable(db);
+      const pending = await readPendingErasure(db, learner_id);
       const r = await db.execute({
         sql: `SELECT name, uuid FROM project_spaces WHERE id=? AND type='learner_profile' AND archived_at IS NULL`,
         args: [learner_id],
       });
-      if (!r.rows.length) return mcpError(`Learner ${learner_id} not found`);
-      const name = r.rows[0].name;
-      const projectUuid = r.rows[0].uuid ?? null;
+      if (!r.rows.length && !pending) return mcpError(`Learner ${learner_id} not found`);
+      const name = r.rows[0]?.name ?? null;
+      const projectUuid = r.rows[0]?.uuid ?? pending?.project_uuid ?? null;
 
       // FAIL CLOSED. A learner delete is a COPPA / GDPR-K promise
       // (DATA-HANDLING.md): if any part of the delete or of the history erase
@@ -300,13 +313,27 @@ export function createMakerLabServer(db, options = {}) {
           args: [learner_id],
         });
         const deletedMemoryIds = found.rows.map((row) => String(row.id));
+        // A retry must forget what the first attempt recorded, not only what is
+        // still visible: the cascade already removed those rows.
+        const memoryIds = [...new Set([...(pending?.memory_ids ?? []), ...deletedMemoryIds])];
 
         // Cascade: sessions → transcripts (FK), codes (FK via session), bound_devices
         // (FK), settings (FK), the learner's memories and project-scoped context
         // sections, then the profile. Child deletes BEFORE the ps delete so the
         // maker_sessions CHECK constraint doesn't abort. (B3b: the legacy
         // research_projects row no longer exists — table dropped.)
-        const batchResult = await db.batch([
+        //
+        // The PENDING MARKER rides FIRST in that same batch: it names the learner,
+        // the project uuid and the memory ids to forget, so the erase below can be
+        // re-run to completion after the profile row is gone (a retry with the
+        // same learner_id, or the 5-minute sweep). It is only written when the
+        // profile row is here — a marker for a learner that never existed would
+        // make the next sweep chase a phantom.
+        const statements = [];
+        if (r.rows.length) {
+          statements.push(pendingErasureStatement({ learnerId: learner_id, projectUuid, memoryIds }));
+        }
+        statements.push(
           { sql: `DELETE FROM maker_sessions WHERE learner_id=?`, args: [learner_id] },
           { sql: `DELETE FROM maker_transcripts WHERE learner_id=?`, args: [learner_id] },
           { sql: `DELETE FROM maker_bound_devices WHERE learner_id=?`, args: [learner_id] },
@@ -314,30 +341,24 @@ export function createMakerLabServer(db, options = {}) {
           { sql: `DELETE FROM memories WHERE project_id=?`, args: [learner_id] },
           { sql: `DELETE FROM crow_context WHERE project_id=?`, args: [learner_id] },
           { sql: `DELETE FROM project_spaces WHERE id=? AND type='learner_profile'`, args: [learner_id] },
-        ]);
+        );
+        const batchResult = await db.batch(statements);
         const psRowsAffected = Number(batchResult.at(-1)?.rowsAffected ?? 0);
-        if (psRowsAffected === 0) {
+        if (psRowsAffected === 0 && r.rows.length) {
+          // The row was here a moment ago and is not now: refuse (the cascade
+          // rolled back with it) rather than finish an erase nobody asked for.
           return mcpError(`Learner ${learner_id} not found`);
         }
 
-        const { eraseItems, eraseByProject } = await appImport("servers/shared/history/erase.js");
-        const ctx = { authorKind: "system", authorId: "maker-lab" };
-
-        // eraseItems names at most 1000 items per call by design: chunk rather
-        // than let a big learner skip the erase entirely.
-        for (let i = 0; i < deletedMemoryIds.length; i += 1000) {
-          await eraseItems(
-            db,
-            deletedMemoryIds.slice(i, i + 1000).map((id) => ({ itemType: "memory", itemId: id })),
-            ctx,
-          );
-        }
-
-        // The closure catches what the id list cannot: a memory already in the
-        // Trash before this delete (its latest version is the earlier delete),
-        // and the context sections just deleted. Only items whose latest version
-        // is a delete go, so nothing merely unfiled loses its history.
-        await eraseByProject(db, { projectUuid, projectId: learner_id }, ctx);
+        // Finish the erase from the marker (which is the record of everything the
+        // cascade removed, including the ids read before it), then clear it and
+        // confirm none remains. `finishPendingErasure` throws if it cannot.
+        const target = {
+          learner_id: learner_id,
+          project_uuid: projectUuid,
+          memory_ids: memoryIds,
+        };
+        await finishPendingErasure(db, target);
 
         return mcpOk({ deleted: true, learner_id, name, reason: reason || null });
       } catch (err) {

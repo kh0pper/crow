@@ -26,8 +26,9 @@ import { createDbClient } from "../servers/db.js";
 import { run as migrate } from "../scripts/migrations/0024-item-versions.mjs";
 import { withWriteContext } from "../servers/shared/history/write-context.js";
 import { undoJob, UNDO_REASONS } from "../servers/shared/history/jobs.js";
+import { listVersions, restoreVersion } from "../servers/shared/history/api.js";
 import { emptyTrash, listTrash, restoreFromTrash } from "../servers/shared/history/trash.js";
-import { eraseItems } from "../servers/shared/history/erase.js";
+import { eraseItems, isErased } from "../servers/shared/history/erase.js";
 import { sweep, COALESCE_WINDOW_MS } from "../servers/shared/history/sweep.js";
 
 const REPO = new URL("..", import.meta.url).pathname;
@@ -676,6 +677,79 @@ test("an erase leaves the guard disarmed even when it fails", async () => {
   }
 });
 
+test("a restore of an erased item is refused", async () => {
+  const fx = fixture("hist-erased-restore-");
+  const db = fx.open();
+  try {
+    const id = await insertMemory(db, OWNER, { content: "forget me for good" });
+    await deleteMemory(db, OWNER, id);
+    const erased = await eraseItems(db, [{ itemType: "memory", itemId: id }], SYSTEM);
+    assert.equal(erased.versions, 2, "insert + delete went");
+    assert.equal(await isErased(db, "memory", String(id)), true, "the erase left a tombstone");
+
+    // The Trash restore: an erased item is not restorable, and the answer is
+    // 'erased', not 'not_found' (the item did exist; it was deliberately forgotten).
+    await assert.rejects(
+      () => restoreFromTrash(db, { itemType: "memory", itemId: id }, OWNER),
+      (err) => err.code === "erased",
+    );
+    assert.equal(await memoryRow(db, id), undefined, "nothing came back");
+
+    // A version that outlived the erase (a stale reader, a foreign writer) is not a
+    // loophole either: restoreVersion consults the same tombstone.
+    const stale = await db.execute({
+      sql: "INSERT INTO item_versions (item_type, item_id, op, snapshot_json) VALUES ('memory', ?, 'insert', ?)",
+      args: [String(id), JSON.stringify({ content: "forget me for good" })],
+    });
+    await assert.rejects(
+      () => restoreVersion(db, { versionId: Number(stale.lastInsertRowid) }, OWNER),
+      (err) => err.code === "erased",
+    );
+    assert.equal(await memoryRow(db, id), undefined, "still nothing came back");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a tombstone survives a restart", async () => {
+  const fx = fixture("hist-tomb-restart-");
+  const first = fx.open();
+  let id;
+  try {
+    id = await insertMemory(first, OWNER, { content: "gone after the restart too" });
+    await deleteMemory(first, OWNER, id);
+    await eraseItems(first, [{ itemType: "memory", itemId: id }], SYSTEM);
+  } finally {
+    first.close();
+  }
+
+  // A new process, a new client, the same store.
+  const db = fx.open();
+  try {
+    assert.equal(await isErased(db, "memory", String(id)), true, "the tombstone is on disk, not in memory");
+    assert.deepEqual(await listVersions(db, { itemType: "memory", itemId: id }), [], "and no versions came back with it");
+    await assert.rejects(
+      () => restoreFromTrash(db, { itemType: "memory", itemId: id }, OWNER),
+      (err) => err.code === "erased",
+      "still refused after the restart",
+    );
+
+    // Erasing again is idempotent: nothing to take, no second tombstone, no error.
+    const again = await eraseItems(db, [{ itemType: "memory", itemId: id }], SYSTEM);
+    assert.equal(again.versions, 0);
+    const tombs = (await db.execute({
+      sql: "SELECT item_type, item_id, erased_by FROM item_erasures WHERE item_type = 'memory' AND item_id = ?",
+      args: [String(id)],
+    })).rows;
+    assert.equal(tombs.length, 1, "one tombstone, unchanged by the repeat");
+    assert.equal(tombs[0].erased_by, "system:test-scheduler", "and it still names who erased it");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
 /* ------------------------------ the operator's ruling: permanent deletes */
 
 test("deleting a learner erases their memories' history at once (Maker Lab's right to be forgotten)", async () => {
@@ -857,6 +931,121 @@ test("a failed erase is reported, never \"deleted\"", async () => {
     assert.doesNotMatch(text, /"deleted": true/, "never a success with history left behind");
     assert.ok((await versionCount(db, "memory", memory)) > 0, "the history really was left behind");
     assert.equal(await armed(db), 0, "the failed armed transaction rolled the switch back shut");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a learner delete whose erase failed is completed by a retry", async () => {
+  const fx = fixture("hist-learner-retry-");
+  const db = fx.open();
+  try {
+    const { initMakerLabTables } = await import("../bundles/maker-lab/server/init-tables.js");
+    await initMakerLabTables(db);
+    const { createMakerLabServer } = await import("../bundles/maker-lab/server/server.js");
+
+    const learner = Number((await db.execute({
+      sql: "INSERT INTO project_spaces (slug, name, type) VALUES ('learner-retry', 'Kid', 'learner_profile')",
+      args: [],
+    })).lastInsertRowid);
+    const memory = await insertMemory(db, OWNER, { content: "still here after the failure", project_id: learner, source: "maker-lab" });
+
+    // The erase door itself is broken: arming the switch aborts. The CASCADE is
+    // untouched, so it commits — which is exactly the case a retry must finish.
+    await db.execute(`CREATE TRIGGER test_block_history_erase
+      BEFORE UPDATE ON item_versions_erase
+      WHEN NEW.armed = 1
+      BEGIN SELECT RAISE(ABORT, 'simulated history erase failure'); END`);
+
+    const client = new Client({ name: "history-jobs-retry", version: "0" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await createMakerLabServer(db, {}).connect(st);
+    await client.connect(ct);
+    const first = await client.callTool({
+      name: "maker_delete_learner",
+      arguments: { learner_id: learner, confirm: "DELETE" },
+    });
+    const firstText = (first.content || []).map((c) => c.text || "").join("\n");
+    assert.equal(first.isError, true, firstText);
+
+    // The cascade committed: the profile and the memory row are gone, the history is
+    // not, and the marker is durable.
+    assert.equal(await memoryRow(db, memory), undefined, "the cascade committed");
+    assert.equal(Number((await db.execute({
+      sql: "SELECT COUNT(*) AS n FROM project_spaces WHERE id = ?",
+      args: [learner],
+    })).rows[0].n), 0, "the profile row is already gone");
+    assert.ok((await versionCount(db, "memory", memory)) > 0, "the history is what is left behind");
+    const markers = (await db.execute({ sql: "SELECT * FROM pending_erasures", args: [] })).rows;
+    assert.equal(markers.length, 1, "a durable pending-erase marker was left");
+    assert.equal(Number(markers[0].learner_id), learner);
+    assert.deepEqual(
+      JSON.parse(markers[0].memory_ids_json),
+      [String(memory)],
+      "and it names the memories the cascade read before it deleted them",
+    );
+
+    await db.execute("DROP TRIGGER test_block_history_erase");
+
+    // A retry with the SAME learner_id, even though the profile row is gone.
+    const second = await client.callTool({
+      name: "maker_delete_learner",
+      arguments: { learner_id: learner, confirm: "DELETE" },
+    });
+    await client.close();
+    const secondText = (second.content || []).map((c) => c.text || "").join("\n");
+    assert.equal(second.isError, undefined, secondText);
+    assert.match(secondText, /"deleted": true/, secondText);
+
+    assert.equal(await versionCount(db, "memory", memory), 0, "the retry finished the erase");
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM pending_erasures", args: [] })).rows[0].n), 0, "and cleared the marker");
+    assert.equal(await isErased(db, "memory", String(memory)), true, "the erase left its tombstone");
+    assert.equal(await armed(db), 0);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("the sweep completes a pending learner erase", async () => {
+  const fx = fixture("hist-learner-sweep-");
+  const db = fx.open();
+  try {
+    const { initMakerLabTables } = await import("../bundles/maker-lab/server/init-tables.js");
+    await initMakerLabTables(db);
+    const { createMakerLabServer } = await import("../bundles/maker-lab/server/server.js");
+    const { sweepNow } = await import("../bundles/maker-lab/server/retention-sweep.js");
+
+    const learner = Number((await db.execute({
+      sql: "INSERT INTO project_spaces (slug, name, type) VALUES ('learner-sweep', 'Kid', 'learner_profile')",
+      args: [],
+    })).lastInsertRowid);
+    const memory = await insertMemory(db, OWNER, { content: "swept away", project_id: learner, source: "maker-lab" });
+
+    await db.execute(`CREATE TRIGGER test_block_history_erase
+      BEFORE UPDATE ON item_versions_erase
+      WHEN NEW.armed = 1
+      BEGIN SELECT RAISE(ABORT, 'simulated history erase failure'); END`);
+    const client = new Client({ name: "history-jobs-sweep", version: "0" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await createMakerLabServer(db, {}).connect(st);
+    await client.connect(ct);
+    await client.callTool({ name: "maker_delete_learner", arguments: { learner_id: learner, confirm: "DELETE" } });
+    await client.close();
+    await db.execute("DROP TRIGGER test_block_history_erase");
+    assert.ok((await versionCount(db, "memory", memory)) > 0, "the erase failed, so the marker is still owed");
+
+    // Nobody presses delete again: the 5-minute sweep finishes it.
+    await sweepNow(db);
+
+    assert.equal(await versionCount(db, "memory", memory), 0, "the sweep completed the erase");
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM pending_erasures", args: [] })).rows[0].n), 0, "and cleared the marker");
+    assert.equal(await armed(db), 0, "with the switch shut again");
+
+    // Idempotent: a second tick has nothing to do.
+    await sweepNow(db);
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM pending_erasures", args: [] })).rows[0].n), 0);
   } finally {
     db.close();
     fx.dispose();

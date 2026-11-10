@@ -174,7 +174,11 @@ async function enforceOutboxCap(db) {
  * @param {object|null} syncManager - an InstanceSyncManager, or null/undefined
  * @param {object} db - db client (used only on the queue path)
  * @param {string} table
- * @param {"insert"|"update"|"delete"} op
+ * @param {"insert"|"update"|"delete"|"erase"} op - `erase` is
+ *   servers/shared/history/erase.js's permanent-erase event: like `delete` it
+ *   names a row that is gone (nothing to stamp), and the receiver applies it as
+ *   a delete + a history erase + a tombstone. It is queued and drained exactly
+ *   like any other op.
  * @param {object} row
  * @param {object} [opts]
  * @param {number} [opts.lamportTs] - preserve-lamport mode (queue path
@@ -228,7 +232,7 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
       // (skipped on delete or shape mismatch, same as the mint path), outbox
       // INSERT — all with the caller's literal value, still one atomic batch.
       const statements = [seedCounterSql(instanceId), floorCounterSql(instanceId, preserveLamport)];
-      if (op !== "delete") {
+      if (op !== "delete" && op !== "erase") {
         const stampStmt = stampSql(table, row, preserveLamport, origin);
         if (stampStmt) statements.push(stampStmt);
       }
@@ -245,7 +249,7 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
     // out (stamped-but-never-queued).
     const statements = [seedCounterSql(instanceId)];
     const bumpIdx = statements.push(bumpCounterSql(instanceId)) - 1;
-    if (op !== "delete") {
+    if (op !== "delete" && op !== "erase") {
       const stampStmt = subselectStampSql(table, row, instanceId, origin);
       if (stampStmt) statements.push(stampStmt);
     }

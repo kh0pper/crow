@@ -10,6 +10,20 @@
  * Conflict resolution: if incoming.lamport_ts > local.lamport_ts → apply;
  * otherwise run the equivalence check — equal data → skip silently; differing
  * data → log to sync_conflicts and notify the operator.
+ *
+ * TWO EXCEPTIONS SIT ABOVE THAT RULE, both from the operator's 2026-11-10 ruling
+ * that an erase is permanent:
+ *
+ *   1. AN ERASE TRAVELS. An erase (servers/shared/history/erase.js) emits
+ *      `{ table, op: "erase", row }` on the item's own table, so it is signed,
+ *      origin-bound and delivered exactly like an ordinary change; the receiver
+ *      deletes its live row, erases its own versions through the same armed door
+ *      and records its own tombstone. No new synced table is introduced (see
+ *      erase.js's ERASURE_SYNC_TABLES for why an op was the smaller change).
+ *   2. AN ERASED ITEM IS NEVER RE-CREATED, on either instance: an inbound
+ *      insert/update naming a tombstoned item is refused (skipped, logged once).
+ *      This applies to the TOMBSTONE, not to the delete-wins rule below —
+ *      concurrent delete vs Trash restore is still resolved exactly as before.
  */
 
 import { SUMMARY_SOURCE_PREFIX, isSummaryMemorySource, parseSummarySource } from "../shared/summary-source.js";
@@ -34,6 +48,12 @@ import { deleteContactArtifactComments } from "../shared/artifact-comment-delete
 import { noticeProviderKeyNeeded } from "../shared/provider-key-need.js";
 import { providerEndpointChanged, noticeProviderEndpointHeld } from "../shared/provider-endpoint.js";
 import { withWriteContext, peerWriteContext } from "../shared/history/write-context.js";
+import {
+  applyRemoteErasure,
+  erasureItemType,
+  erasureKeys,
+  findErasedKey,
+} from "../shared/history/erase.js";
 
 /** How long the re-pair fence waits to learn a peer feed's remote length (PT-1). */
 const REPAIR_FENCE_UPDATE_TIMEOUT_MS = 15_000;
@@ -2718,7 +2738,11 @@ export class InstanceSyncManager {
     // the row keeps its original lamport; 2c C1). Statement built by the shared
     // stamping module (servers/shared/sync-stamp.js) so the stdio door's
     // emitOrQueue (Task 2) stamps rows the same way this manager does.
-    if (op !== "delete" && preservedTs === null) {
+    // A stamp-free op: a delete has no row left to stamp, and neither has an
+    // erase (it removes the row it names, and a tombstone is not a row that
+    // carries a lamport) — stamping would only write a fresh lamport onto
+    // whatever still answers to that id.
+    if (op !== "delete" && op !== "erase" && preservedTs === null) {
       try {
         // An LWW Ramble row also records that THIS instance wrote the
         // Lamport (fix round 2, I-2), so a tie breaks the same everywhere.
@@ -2937,6 +2961,27 @@ export class InstanceSyncManager {
 
     // Advance local counter
     await this._advanceCounter(lamport_ts);
+
+    // AN ERASE IS ITS OWN OP (servers/shared/history/erase.js). It is not a
+    // delete: it also removes the item's whole history and leaves a permanent
+    // tombstone, on both instances. Routed before every per-table path so the
+    // natural-key appliers (which know nothing of it) never see it.
+    if (op === "erase") {
+      try {
+        await this._applyErase(table, row, instance_id);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply erase on ${table}:`, err.message);
+      }
+      return;
+    }
+
+    // AN ERASED ITEM IS NEVER RE-CREATED (the operator's ruling, 2026-11-10). A
+    // tombstone is permanent, so an insert/update for a tombstoned item is
+    // refused here on BOTH instances whatever its lamport says: a peer that
+    // still holds a copy (its own Trash, a restore, a queued edit) cannot bring
+    // back what this instance erased. Deletes are not refused — a delete applied
+    // to nothing is a no-op, and delete-wins stays exactly as it was.
+    if ((op === "insert" || op === "update") && (await this._refuseErased(table, op, row))) return;
 
     // Tables keyed by 'key' instead of 'id' need special-case apply logic.
     if (table === "dashboard_settings") {
@@ -4472,6 +4517,155 @@ export class InstanceSyncManager {
       if (!raced[0]) throw err;
       await updateLocal(raced[0].id);
     }
+  }
+
+  /**
+   * Apply an ERASE that arrived from a peer (`op === "erase"`).
+   *
+   * The instruction is "this item must not exist on either of us": the live row
+   * goes if it is here, the item's versions go through the same armed door every
+   * local erase uses, and this instance records its OWN tombstone (keyed the way
+   * it will later be asked about, with the erasing instance as the origin) — the
+   * tombstone is what makes the erase stick, since the peer's next restore emits
+   * an insert `_refuseErased` then refuses.
+   *
+   * Item identity on the wire is the one that table's ordinary ops use:
+   *   - memories: the row id (its delete path's key — the erase event carries the
+   *     same `{ id }` the delete did, so tombstones and undo stay one key space);
+   *   - crow_context: the composite scope (section_key + device_id + portable
+   *     project uuid), because crow_context rowids are per instance. Its history
+   *     is found by the live row's id and, for a section already in this
+   *     instance's Trash, by the scope recorded in its versions' snapshots.
+   *
+   * Idempotent: a re-delivered erase finds nothing to delete, nothing to erase
+   * and an existing tombstone.
+   *
+   * @param {string} table the item's own table (the entry's `table`)
+   * @param {object} row the wire row ({id} or the section's scope)
+   * @param {string} instanceId the entry's origin instance
+   */
+  async _applyErase(table, row, instanceId) {
+    const itemType = erasureItemType(table);
+    if (!itemType) {
+      console.warn(`[instance-sync] ignored an erase event on ${String(table).slice(0, 64)} (not an erasure-propagating table)`);
+      return;
+    }
+    const meta = {
+      originInstance: instanceId,
+      erasedAt: typeof row?.erased_at === "string" ? row.erased_at : null,
+      erasedBy: typeof row?.erased_by === "string" ? row.erased_by : null,
+    };
+
+    if (itemType === "memory") {
+      if (row?.id === undefined || row?.id === null) return;
+      const itemId = String(row.id);
+      await this.db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [row.id] });
+      await applyRemoteErasure(this.db, { itemType, itemId, keys: erasureKeys(itemType, { itemId }) }, meta);
+      return;
+    }
+
+    // context_section: resolve the scope to THIS instance's project id, then to
+    // the local row(s) and any history a deleted row left behind.
+    const mapped = await mapInboundContextProject(this.db, row ?? {});
+    if (mapped.drop) {
+      console.warn(`[instance-sync] erase of a context section dropped: ${mapped.drop}`);
+      return;
+    }
+    const sk = mapped.row.section_key;
+    if (sk == null) return;
+    const devId = mapped.row.device_id ?? null;
+    const projId = mapped.row.project_id ?? null;
+    const keys = erasureKeys(itemType, { snapshot: row });
+
+    const ids = [];
+    try {
+      const { rows } = await this.db.execute({
+        sql: "SELECT id FROM crow_context WHERE section_key = ? AND device_id IS ? AND project_id IS ?",
+        args: [sk, devId, projId],
+      });
+      for (const found of rows) ids.push(String(found.id));
+      await this.db.execute({
+        sql: "DELETE FROM crow_context WHERE section_key = ? AND device_id IS ? AND project_id IS ?",
+        args: [sk, devId, projId],
+      });
+    } catch (err) {
+      console.warn("[instance-sync] erase: crow_context lookup failed:", err.message);
+    }
+    // A section already in this instance's Trash has no live row, but it still
+    // has versions — find them by the scope their snapshots carry.
+    try {
+      const { rows } = await this.db.execute({
+        sql: `SELECT DISTINCT item_id FROM item_versions
+               WHERE item_type = 'context_section'
+                 AND json_extract(snapshot_json, '$.section_key') = ?
+                 AND json_extract(snapshot_json, '$.device_id') IS ?
+                 AND json_extract(snapshot_json, '$.project_uuid') IS ?`,
+        args: [sk, devId, row?.project_uuid ?? null],
+      });
+      for (const found of rows) if (!ids.includes(String(found.item_id))) ids.push(String(found.item_id));
+    } catch {
+      /* no history table (or no JSON1): the live row's history is still erased */
+    }
+
+    if (ids.length === 0) {
+      // Nothing here to delete or erase — the tombstone is the whole record.
+      await applyRemoteErasure(this.db, { itemType, itemId: null, keys }, meta);
+      return;
+    }
+    for (const itemId of ids) {
+      await applyRemoteErasure(this.db, { itemType, itemId, keys }, meta);
+    }
+  }
+
+  /**
+   * Refuse an inbound insert/update for an item this instance ERASED.
+   *
+   * Logged ONCE per (item_type, tombstone key) per process: a peer that keeps
+   * re-delivering the same restore would otherwise fill the log, and the fact
+   * never changes. Nothing is written — not the row, not a conflict row (there is
+   * nothing to review: the tombstone is the operator's answer) — and the caller's
+   * checkpoint advances past the entry, so it is consumed rather than retried
+   * forever. The log names the table and item type only, never the key (a context
+   * section's key is its section_key, which is user content).
+   *
+   * @returns {Promise<boolean>} true when the entry must not be applied
+   */
+  async _refuseErased(table, op, row) {
+    const itemType = erasureItemType(table);
+    if (!itemType) return false;
+    const keys = [];
+    if (itemType === "memory") {
+      if (row?.id === undefined || row?.id === null) return false;
+      keys.push(...erasureKeys(itemType, { itemId: row.id }));
+    } else {
+      const mapped = await mapInboundContextProject(this.db, row ?? {});
+      if (mapped.drop) return false; // the applier drops it anyway, for its own reason
+      keys.push(...erasureKeys(itemType, { snapshot: row }));
+      // A tombstone recorded under a local row id (the fallback shape) must be
+      // found too, so a live row with this scope contributes its id.
+      try {
+        const { rows } = await this.db.execute({
+          sql: "SELECT id FROM crow_context WHERE section_key = ? AND device_id IS ? AND project_id IS ?",
+          args: [mapped.row.section_key, mapped.row.device_id ?? null, mapped.row.project_id ?? null],
+        });
+        for (const found of rows) keys.push(String(found.id));
+      } catch {
+        /* nothing to add */
+      }
+    }
+    const hit = await findErasedKey(this.db, itemType, keys);
+    if (hit === null) return false;
+
+    if (!this._erasedRefusals) this._erasedRefusals = new Set();
+    const latch = `${itemType}\u0000${hit}`;
+    if (!this._erasedRefusals.has(latch)) {
+      this._erasedRefusals.add(latch);
+      console.warn(
+        `[instance-sync] refused an inbound ${op} on ${table}: the item was erased and is never re-created ` +
+          `(tombstone ${this._erasedRefusals.size}; further entries for it stay silent)`,
+      );
+    }
+    return true;
   }
 
   /**

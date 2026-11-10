@@ -11,14 +11,20 @@
  *   1. AN ERASED ITEM IS NOT RESURRECTED. A deletes a memory, B receives the
  *      delete, A's Trash period passes and A erases it. B later brings its own
  *      copy back (B still holds the history) and syncs an edit: A must stay empty.
+ *      The operator's ruling of 2026-11-10 is that an erase leaves a permanent
+ *      TOMBSTONE and sync refuses to re-create a tombstoned item on either
+ *      instance, so this is a hard assertion now (it was a `todo` while history
+ *      was local-only and sync had no tombstone to consult).
  *
  *   2. A TRASH RESTORE IS NOT SILENTLY UNDONE. Both machines delete the item; A
  *      restores it from its Trash, then B's delete (which was in flight) arrives.
  *
- * Case 2 is marked `todo` when sync's own delete-wins rule removes the restored
- * row again — see the note on the test. Changing sync rules is NOT part of this
- * task: the version history design §8.3 says the sync protocol does not change,
- * and a mutual-case ruling belongs to the operator.
+ * Plus the other half of the erase ruling: THE ERASE ITSELF REACHES THE PEER —
+ * the peer's copy and its Trash go too, not just this instance's.
+ *
+ * Case 2's MUTUAL variant stays `todo`: which side wins with a delete still in
+ * flight is the operator's call, and sync's delete-wins rule is unchanged by
+ * this task (the tombstone above is about erasure, not delete-vs-restore).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -30,6 +36,7 @@ import { withWriteContext } from "../servers/shared/history/write-context.js";
 import { listVersions, restoreVersion } from "../servers/shared/history/api.js";
 import { listTrash, restoreFromTrash } from "../servers/shared/history/trash.js";
 import { sweep } from "../servers/shared/history/sweep.js";
+import { isErased } from "../servers/shared/history/erase.js";
 
 /** The owner's dashboard session on either machine (each instance has its own). */
 const OWNER = { authorKind: "owner", authorId: "abcd1234", jobId: "session:abcd1234" };
@@ -149,10 +156,6 @@ test("restoring a deleted memory recreates it on the peer", async () => {
 
 test(
   "an erased item is not resurrected by a later sync from the peer that still has it",
-  {
-    todo:
-      "A Trash restore is a normal synced write now: B's restore emits an INSERT, and instance-sync has no erase tombstone to refuse it, so A re-creates the erased item from B's feed (then B's edit updates it). History is local-only and erase leaves no tombstone, so refusing resurrection needs a sync rule/tombstone the operator must approve; this task may not change sync rules",
-  },
   async () => {
   const fleet = await makeFleet();
   let link;
@@ -174,15 +177,17 @@ test(
     assert.equal(await versionCount(a.db, 71), 2, "A's own history: insert + delete");
     assert.equal(await versionCount(b.db, 71), 2, "B's own history too: the delete it applied is a version");
 
-    // The Trash period passes on A: the item AND its history are erased for good.
+    // The Trash period passes on A: the item AND its history are erased for good —
+    // and the erase leaves a TOMBSTONE (the operator's ruling, 2026-11-10).
     const swept = await sweep(a.db, { now: new Date(Date.now() + 40 * 86_400_000), trashDays: 30 });
     assert.deepEqual(swept.erased.map((e) => e.itemId), ["71"], "A erased the aged Trash item");
     assert.equal(await versionCount(a.db, 71), 0);
     assert.deepEqual(await listVersions(a.db, { itemType: "memory", itemId: 71 }), []);
+    assert.equal(await isErased(a.db, "memory", "71"), true, "A recorded the tombstone");
 
     // B still has the item's history (its own Trash), and brings the memory back:
     // a Trash restore plus an edit, then a sync. A restore is a NORMAL write now,
-    // so it emits — the real path passes B's manager. Whatever sync's tombstone
+    // so it emits — the real path passes B's manager. The tombstone refuses both. Whatever sync's tombstone
     // rule is today, A must not resurrect it.
     const restored = await restoreFromTrash(b.db, { itemType: "memory", itemId: 71 }, OWNER, { syncManager: b.mgr });
     assert.ok(restored.newVersionId, "B restored its copy");
@@ -199,7 +204,8 @@ test(
     assert.equal(await versionCount(a.db, 71), 0, "and it wrote no history for it either");
 
     // B's copy is a different story: it exists there, with its history. (History is
-    // local-only, so the two instances legitimately disagree after an erase.)
+    // local-only, so the two instances legitimately disagree after an erase — until
+    // the erasing instance's event reaches the peer; see the test below.)
     assert.ok(await hasMemory(b.db, 71), "B still has its own copy");
   } finally {
     link?.close();
@@ -207,6 +213,61 @@ test(
   }
   },
 );
+
+test("an erase reaches the peer and erases its copy and Trash", async () => {
+  const fleet = await makeFleet();
+  let link;
+  try {
+    const { a, b } = fleet;
+    migrateSide(a);
+    migrateSide(b);
+    link = await linkPeers(a, b);
+
+    // Both machines hold memory 73; then both deleted it, so both have it in their
+    // own Trash (each instance keeps its own history).
+    await writeLocal(a.db, "INSERT INTO memories (id, content) VALUES (?, ?)", [73, "erase me everywhere"]);
+    await a.mgr.emitChange("memories", "insert", { id: 73, content: "erase me everywhere", lamport_ts: null });
+    assert.ok(await until(async () => (await hasMemory(b.db, 73)) !== null), "the peer received the insert");
+    await writeLocal(a.db, "DELETE FROM memories WHERE id = ?", [73]);
+    await a.mgr.emitChange("memories", "delete", { id: 73 });
+    assert.ok(await until(async () => (await hasMemory(b.db, 73)) === null), "the peer received the delete");
+    assert.equal(await versionCount(b.db, 73), 2, "B's own Trash holds the item's history");
+    assert.deepEqual((await listTrash(b.db)).map((e) => e.itemId), ["73"]);
+
+    // A's Trash period passes. The erase emits an `erase` event on the item's own
+    // table, through A's real manager (the path the gateway's sweep uses).
+    const swept = await sweep(a.db, {
+      now: new Date(Date.now() + 40 * 86_400_000),
+      trashDays: 30,
+      syncManager: a.mgr,
+    });
+    assert.deepEqual(swept.erased.map((e) => e.itemId), ["73"]);
+    assert.equal(swept.eraseEvents, 1, "the erase reached the sync layer");
+
+    // B deletes its live row (none left) and erases its own versions, and writes
+    // its own tombstone: the item is gone from B's Trash too, not just from A's.
+    assert.ok(
+      await until(async () => (await versionCount(b.db, 73)) === 0),
+      "the peer erased its own history for the item",
+    );
+    assert.deepEqual(await listTrash(b.db), [], "and its Trash no longer lists it");
+    assert.equal(await isErased(b.db, "memory", "73"), true, "the peer recorded the tombstone too");
+
+    // Both tombstones name who erased what, and where it came from.
+    const aTomb = (await a.db.execute({ sql: "SELECT * FROM item_erasures", args: [] })).rows;
+    const bTomb = (await b.db.execute({ sql: "SELECT * FROM item_erasures", args: [] })).rows;
+    assert.equal(aTomb.length, 1);
+    assert.equal(aTomb[0].item_type, "memory");
+    assert.equal(aTomb[0].item_id, "73");
+    assert.equal(aTomb[0].erased_by, "system:history-sweep");
+    assert.equal(bTomb.length, 1, "the peer's tombstone is its own row");
+    assert.equal(bTomb[0].item_id, "73");
+    assert.equal(bTomb[0].origin_instance, a.mgr.localInstanceId, "and records which instance erased it");
+  } finally {
+    link?.close();
+    await fleet.cleanup();
+  }
+});
 
 test("both deletes are exchanged, then A restores from Trash, and B's next (stale) sync does not delete it again (review focus 4, sequential)", async () => {
   const fleet = await makeFleet();
@@ -268,7 +329,7 @@ test("both deletes are exchanged, then A restores from Trash, and B's next (stal
 // does not change in this task), so it is kept as a `todo` rather than asserted.
 test(
   "both delete, A restores from Trash, and B's in-flight delete does not undo it (review focus 4, concurrent)",
-  { todo: "kept as todo by the plan: the mutual-delete ordering is the operator's call. It is not a restore-sync bug — the sequential case above proves a restore out-ranks deletes it has already seen — but with B's delete still in flight the winner depends on counter order, and sync's delete-wins rule may not be changed in this task" },
+  { todo: "the operator's ruling (2026-11-10) covers ERASURE, not concurrent delete-vs-restore: which side wins while B's delete is still in flight depends on counter order, and sync's delete-wins rule is NOT changed by this task. The sequential case above proves a restore out-ranks deletes it has already seen; the mutual ordering is the operator's call" },
   async () => {
     const fleet = await makeFleet();
     let link;

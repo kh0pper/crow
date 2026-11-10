@@ -30,6 +30,13 @@
  *       erased for real — every version of it, through erase.js's armed door. The
  *       Trash period is a local setting (history.trash_days, default 30).
  *
+ *       AN ERASE LEAVES A TOMBSTONE and (when sync is on) tells the peers
+ *       (erase.js): the item must not be re-created here by a peer's restore, and
+ *       the peer's own copy and Trash go too. The sweep passes its caller's
+ *       InstanceSyncManager through; with none given, erase.js resolves this
+ *       process's singleton, and a process without one (the Maker Lab bundle)
+ *       queues the event durably for the gateway's drain.
+ *
  * RETENTION. `history.retention` defaults to `forever`, and `forever` keeps
  * everything. Any other value is currently a NO-OP: a thinning schedule is not
  * specified yet, so this pass reports the value it saw and changes nothing. It
@@ -351,20 +358,21 @@ async function coalescePass(db, batchSize) {
 /* -------------------------------------------------------------- (c) erase */
 
 /** Erase the Trash items older than the period, in one bounded page. */
-async function erasePass(db, { now, trashDays, batchSize }) {
+async function erasePass(db, { now, trashDays, batchSize, syncManager }) {
   const cutoff = new Date(now.getTime() - normalizeTrashDays(trashDays) * MS_PER_DAY).toISOString();
   const entries = await trashEntries(db, { before: cutoff, limit: batchSize });
-  if (entries.length === 0) return { erased: [], versions: 0, cutoff };
-  const { erased, versions } = await eraseItems(
+  if (entries.length === 0) return { erased: [], versions: 0, emitted: 0, cutoff };
+  const { erased, versions, emitted } = await eraseItems(
     db,
     entries.map((e) => ({ itemType: e.itemType, itemId: e.itemId })),
     // The Trash clock is Crow's own unit of work: no person is pressing a button.
     { authorKind: "system", authorId: "history-sweep" },
     // The conditional is inside the armed transaction: a restore that landed
-    // after the listing wrote a newer version, so this item is left alive.
-    { deletedBefore: cutoff },
+    // after the listing wrote a newer version, so this item is left alive (and
+    // its tombstone is not written either).
+    { deletedBefore: cutoff, syncManager },
   );
-  return { erased: erased.filter((e) => e.versions > 0), versions, cutoff };
+  return { erased: erased.filter((e) => e.versions > 0), versions, emitted, cutoff };
 }
 
 /**
@@ -376,13 +384,15 @@ async function erasePass(db, { now, trashDays, batchSize }) {
  * logs them, and a failed pass must not look like a clean one.
  *
  * @param {object} db
- * @param {{now?: Date, trashDays?: number, retention?: string, batchSize?: number}} [opts]
+ * @param {{now?: Date, trashDays?: number, retention?: string, batchSize?: number,
+ *   syncManager?: object|null|undefined}} [opts] `syncManager` is handed to the
+ *   erase pass (see erase.js); undefined resolves this process's singleton.
  * @returns {Promise<{redacted: number, coalesced: number,
  *   erased: Array<{itemType: string, itemId: string, versions: number}>,
- *   erasedVersions: number, retention: {value: string, applied: boolean},
+ *   erasedVersions: number, eraseEvents: number, retention: {value: string, applied: boolean},
  *   trashDays: number, batchSize: number}>}
  */
-export async function sweep(db, { now = new Date(), trashDays = DEFAULT_TRASH_DAYS, retention = RETENTION_FOREVER, batchSize = DEFAULT_BATCH } = {}) {
+export async function sweep(db, { now = new Date(), trashDays = DEFAULT_TRASH_DAYS, retention = RETENTION_FOREVER, batchSize = DEFAULT_BATCH, syncManager = undefined } = {}) {
   const batch = normalizeBatch(batchSize);
   const days = normalizeTrashDays(trashDays);
   const retentionValue = typeof retention === "string" && retention.trim() !== "" ? retention.trim() : RETENTION_FOREVER;
@@ -391,6 +401,7 @@ export async function sweep(db, { now = new Date(), trashDays = DEFAULT_TRASH_DA
     coalesced: 0,
     erased: [],
     erasedVersions: 0,
+    eraseEvents: 0,
     // Only `forever` is applied; anything else is a no-op until a thinning
     // schedule is specified (the design §8.9 / the plan's Task 4 note).
     retention: { value: retentionValue, applied: retentionValue === RETENTION_FOREVER },
@@ -404,13 +415,14 @@ export async function sweep(db, { now = new Date(), trashDays = DEFAULT_TRASH_DA
   return withoutWriteContext(async () => {
     const redacted = await redactPass(db, batch);
     const coalesced = await coalescePass(db, batch);
-    const erasedResult = await erasePass(db, { now, trashDays: days, batchSize: batch });
+    const erasedResult = await erasePass(db, { now, trashDays: days, batchSize: batch, syncManager });
     return {
       ...base,
       redacted,
       coalesced,
       erased: erasedResult.erased,
       erasedVersions: erasedResult.versions,
+      eraseEvents: erasedResult.emitted,
     };
   });
 }

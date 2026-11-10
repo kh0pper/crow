@@ -62,7 +62,9 @@ From the admin AI chat or the MCP tool:
 
 > `maker_delete_learner(learner_id, confirm: "DELETE", reason: "...")`
 
-This cascades across every table: `maker_sessions`, `maker_transcripts`, `maker_bound_devices`, `maker_learner_settings`, `memories WHERE project_id = <learner>`, and `research_projects`. The panel has a two-step confirm (Tier 1).
+This cascades across every table: `maker_sessions`, `maker_transcripts`, `maker_bound_devices`, `maker_learner_settings`, `memories WHERE project_id = <learner>`, `crow_context WHERE project_id = <learner>` and the learner's `project_spaces` row. The panel has a two-step confirm (Tier 1).
+
+The learner's **version history** is erased at the same moment (not after a 30-day Trash): every stored version of their memories and project-scoped context sections is deleted, and each erased item leaves a permanent marker so a paired instance cannot sync it back in. If that erase cannot finish — a busy database, a broken install — the tool reports a failure and never "deleted", and a durable `pending_erasures` marker is left behind: calling `maker_delete_learner` again with the same `learner_id` finishes it (the profile row is already gone by then, which is exactly what the marker is for), and a five-minute background sweep does the same unattended. "Deleted" is only reported when no marker remains.
 
 ### If you stop using Maker Lab
 
