@@ -51,7 +51,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { EFFECT_KINDS, EFFECT_PARAMS } from "../server/doc.js";
 
 /** This file's directory (`<bundle>/panel`, or `<crow-home>/panels` when installed). */
 const here = dirname(fileURLToPath(import.meta.url));
@@ -105,6 +104,13 @@ async function loadPanelScript(name, exportName) {
 
 /** The client script, loaded once when the panel module is imported. */
 const CLIENT_SCRIPT = await loadPanelScript("client.js", "CLIENT_SCRIPT");
+
+// The effect table comes from the bundle's own server/doc.js BY PATH, like the
+// client: an installed copy lives at <crow-home>/panels/studio.js, where a
+// relative "../server/doc.js" would point at a file that is not there.
+const { EFFECT_KINDS, EFFECT_PARAMS } = await import(
+  pathToFileURL(join(findBundleDir(), "server", "doc.js")).href
+);
 
 /**
  * The mixer's one effect table, handed to the page as `window.StudioMixer`.

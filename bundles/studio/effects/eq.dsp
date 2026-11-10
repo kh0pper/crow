@@ -1,6 +1,6 @@
 // Crow Studio — the chain's three-band equalizer (plan 1d, Task 7).
 //
-// A stereo, zero-latency insert with the four controls the song document holds
+// A stereo, zero-latency insert with the seven controls the song document holds
 // (`EFFECT_PARAMS.eq` in server/doc.js): a low shelf, a peaking bell and a high
 // shelf, each at its own corner frequency, with the bell's width set by a Q.
 //

@@ -193,6 +193,21 @@ const FAUST_DIR = join(BUNDLE_DIR, "vendor", "faust");
 export const FAUST_KINDS = ["eq", "filter", "delay", "reverb", "chorus", "phaser", "saturation"];
 
 /**
+ * The word each Faust effect goes by in a sentence — the engine's own
+ * INSERT_LABELS (engine/studio-processor.js), so a render's "could not be
+ * built" names an effect exactly as the live page does. A test pins the two.
+ */
+export const FAUST_LABELS = Object.freeze({
+  eq: "equalizer",
+  filter: "filter",
+  delay: "delay",
+  reverb: "reverb",
+  chorus: "chorus",
+  phaser: "phaser",
+  saturation: "saturation",
+});
+
+/**
  * The master a song without one is measured against: the streaming reference
  * (plan 1d, `doc.js`'s `DEFAULT_MASTER`), spelled here so this file keeps
  * importing no app module of the song document.
@@ -1327,7 +1342,7 @@ export function unhostableInserts(snapshot, hosted) {
     if (!FAUST_KINDS.includes(kind) || hosted.has(kind)) continue;
     problems.push({
       insert_id: String(insert.id ?? ""),
-      message: `${kind} on ${chainLabelOf(snapshot, insert.owner)} could not be built: this render has no compiled "${kind}" effect.`,
+      message: `${FAUST_LABELS[kind] || kind} on ${chainLabelOf(snapshot, insert.owner)} could not be built: this render has no compiled "${kind}" effect.`,
     });
   }
   return problems;

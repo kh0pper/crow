@@ -124,6 +124,9 @@ import { MIDI_NEEDS_A_YES } from "./commands/midi.js";
 // the same reason: a hub started on its own must know every command.
 import "./commands/library.js";
 import "./commands/instruments.js";
+// The 1d mixer commands — effects, sends, returns and the master. Without this
+// import a hub started on its own (the gateway's) refuses every mixer command.
+import "./commands/mixer.js";
 import {
   REDO_COMMAND,
   UNDO_COMMAND,

@@ -50,7 +50,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // agree with — and the engine kinds it lists.
 import { EFFECT_KINDS, EFFECT_PARAMS } from "../bundles/studio/server/doc.js";
 // The render's asset list must ask for the same effects the engine asks for.
-import { FAUST_KINDS as RENDER_FAUST_KINDS } from "../bundles/studio/server/render.js";
+import { FAUST_KINDS as RENDER_FAUST_KINDS, FAUST_LABELS as RENDER_FAUST_LABELS } from "../bundles/studio/server/render.js";
 import {
   COMMENT_ONLY_GPL,
   REVIEWED_UNDECLARED,
@@ -829,4 +829,14 @@ test("an undenied caller two hops out is still refused through the meta", async 
   const program = await compileProgram("two-hop-caller", source);
   assert.equal(program.lint.ok, false, "the meta half must catch the GPL code underneath");
   assert.ok(lintMeta(program.meta).refused.some((item) => item.function === "filters.lib/avg_rect"));
+});
+
+test("a render names each Faust effect as the engine does", () => {
+  // The processor's INSERT_LABELS is inside the worklet script; read it as text.
+  const source = readFileSync(fileURLToPath(new URL("../bundles/studio/engine/studio-processor.js", import.meta.url)), "utf8");
+  for (const kind of RENDER_FAUST_KINDS) {
+    const match = new RegExp(`\\b${kind}: "([^"]+)"`).exec(source.slice(source.indexOf("INSERT_LABELS = Object.freeze")));
+    assert.ok(match, `the engine labels ${kind}`);
+    assert.equal(RENDER_FAUST_LABELS[kind], match[1], `${kind} has one name`);
+  }
 });

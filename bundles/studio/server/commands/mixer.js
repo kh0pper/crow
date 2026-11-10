@@ -381,7 +381,11 @@ defineCommand({
         .min(1)
         .max(40)
         .describe(`the effect, one of ${EFFECT_KINDS.join(", ")}`),
-      after: idSchema
+      // Its own copy of the id schema: reusing `idSchema` twice in one object
+      // publishes a JSON-Schema $ref, which tool-schemas-grammar-safe refuses.
+      after: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{1,40}$/, "an id is 1-40 letters, digits, dashes or underscores")
         .nullable()
         .optional()
         .describe(
