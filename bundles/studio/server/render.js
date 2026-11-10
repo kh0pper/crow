@@ -1495,7 +1495,7 @@ async function loadCabinets(engine, cabinets, libraryBytes, rate) {
       // One second at the file's own rate, with the plan's two-frame tolerance:
       // a cabinet shipped as exactly 1 s at 44.1 kHz is 44101 frames, and it
       // loads. The engine and the page take the same tolerance, at the same rate.
-      if (frames > decoded.rate * CABINET_MAX_SECONDS + 2) {
+      if (frames > decoded.rate * CABINET_MAX_SECONDS + Math.max(2, Math.ceil((3 * decoded.rate) / 44100))) {
         const seconds = (Math.round((frames / decoded.rate) * 10) / 10).toFixed(1);
         throw new Error(
           `An impulse response is at most 1 second long; this one is ${seconds} s.`,

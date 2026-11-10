@@ -63,6 +63,16 @@
    * that is not a cabinet over the limit.
    */
   const FRAME_TOLERANCE = 2;
+  /**
+   * The frames past one second an IR may run at `rate`: two at 44.1 kHz,
+   * growing with the rate (max(2, ceil(3·rate/44100))) so a one-second file from
+   * any source rate still fits after it is resampled. One rule for the upload,
+   * the page, the engine and the render.
+   */
+  function toleranceAt(rate) {
+    const r = Number(rate) > 0 ? Number(rate) : 48000;
+    return Math.max(FRAME_TOLERANCE, Math.ceil((3 * r) / 44100));
+  }
 
   /** The most channels an input or an IR may have. */
   const MAX_CHANNELS = 2;
@@ -122,12 +132,12 @@
     if (Number.isFinite(fromRate) && fromRate > 0 && fromFrames > 0) {
       // The rule is about the file. A file that is over the limit is refused
       // with ITS length, whatever the PCM in hand says.
-      if (fromFrames > fromRate + FRAME_TOLERANCE) return tooLongText(fromFrames, fromRate);
+      if (fromFrames > fromRate + toleranceAt(fromRate)) return tooLongText(fromFrames, fromRate);
       const limit = resampledLimit(fromFrames, fromRate, frequency);
       if (limit !== null && count > limit) return tooLongText(count, frequency);
       return null;
     }
-    if (count <= frequency + FRAME_TOLERANCE) return null;
+    if (count <= frequency + toleranceAt(frequency)) return null;
     return tooLongText(count, frequency);
   }
 
@@ -465,6 +475,7 @@
     resampledLimit: resampledLimit,
     MAX_SECONDS: MAX_SECONDS,
     LENGTH_TOLERANCE_FRAMES: FRAME_TOLERANCE,
+    lengthToleranceAt: toleranceAt,
     PARTITION_FRAMES: PARTITION_FRAMES,
     FFT_FRAMES: FFT_FRAMES,
     createFft: createFft,

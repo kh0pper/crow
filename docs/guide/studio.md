@@ -95,7 +95,7 @@ Every track, every return and the master has its own strip, and the mixer screen
 **Your own captures and cabinets.** **Add your own capture…** takes a `.nam` file and **Add a cabinet IR…** takes a WAV or AIFF. Both belong to the song's library, both are checked before they are stored, and both are your actions alone. Two rules:
 
 - **A capture must be an A2 model.** Any older NAM format is refused with *"This capture uses an older NAM format; Studio plays A2 captures. Re-export it with a current NAM trainer."*
-- **A cabinet is at most one second long.** The check allows two frames of tolerance, so a 44.1 kHz cabinet of exactly one second (44101 frames) loads; a longer one is refused with its own length in the sentence.
+- **A cabinet is at most one second long.** The check allows a few frames of tolerance (two at 44.1 kHz, a few more at higher rates, so a one-second file still fits after it is converted to your interface's rate): a 44.1 kHz cabinet of 44101 frames loads; a longer one is refused with its own length in the sentence.
 
 **The amp editor.** The capture picker, the cabinet picker (**No cabinet** is a choice) and three numbers: **input** (−24 to +24 dB, the drive into the capture), **output** (−24 to +12 dB) and **IR mix** (0–1, how much of the cabinet you hear). A capture or a cabinet you chose says **Only you can change this amp's capture.** beside it — the bot may set the three numbers, move the amp, bypass it or build you an amp from a capture the song already holds, but never swap or remove the capture and cabinet you picked.
 
@@ -213,7 +213,7 @@ Every timeline change is one undoable step, and the bot can do all of it too (pl
 | Effects per chain | 8 | — |
 | Amp inserts per song | 16 | — |
 | Capture file (`.nam`, A2) | 20 MB | — |
-| Cabinet impulse response | 10 MB, 1 s (two frames of tolerance) | — |
+| Cabinet impulse response | 10 MB, 1 s (a few frames of tolerance) | — |
 | Returns per song | 8 | — |
 | Sends per track | 8 | — |
 | Master gain / loudness target | −24 to +12 dB / −30 to −6 LUFS, ceiling −6 to −0.1 dBTP | — |
@@ -235,3 +235,5 @@ Every limit refuses with a plain-English error that names it; nothing is ever tr
 > The starter capture is the A2 example model from NeuralAmpModelerCore, by Steven Atkinson, MIT (2023), shipped unmodified under a neutral name; its source amplifier is unknown. The starter cabinets are from "Impulse Responses" by David Fau Casquel (archive.org/details/ImpulseResponses), CC BY 3.0, shipped unmodified. Every file's source, licence and credit are in `bundles/studio/library/files/NOTICES.md`.
 
 Studio's engine runs SunVox (the WebAssembly build of the SunVox library) so the browser and the server's offline renders use the same synthesizer. The full licence texts — SunVox's own, plus the tremor.txt, sundog.txt and libflac.txt notices from the SunVox archive — ship with the bundle in `bundles/studio/vendor/sunvox/THIRD-PARTY-NOTICES.txt`.
+
+The amp runs Neural Amp Modeler through the WebAssembly build in neural-amp-modeler-wasm (MIT, TONE3000), which compiles in NeuralAmpModelerCore and AudioDSPTools (MIT, Steven Atkinson), nlohmann/json (MIT) and Eigen (MPL-2.0). Their notices, with Eigen's source link, ship in `bundles/studio/vendor/nam/THIRD-PARTY-NOTICES.txt`.

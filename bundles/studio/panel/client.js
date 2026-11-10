@@ -9933,7 +9933,7 @@ export const CLIENT_SCRIPT = [
   "    function irTooLong(frames, rate) {",
   "      var count = Math.max(0, Math.round(Number(frames) || 0));",
   "      var perSecond = Number(rate) > 0 ? Number(rate) : 48000;",
-  "      return count > perSecond + IR_FRAME_TOLERANCE;",
+  "      return count > perSecond + Math.max(IR_FRAME_TOLERANCE, Math.ceil((3 * perSecond) / 44100));",
   "    }",
   "",
   "    // A stored cabinet as PCM: the gateway keeps it as a 24-bit WAV, and this",

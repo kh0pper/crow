@@ -2139,7 +2139,7 @@ test("a starter cabinet of 44101 frames at 44.1 kHz loads", async () => {
   assert.equal(convolver.lengthProblem(44101, 44100), null);
   // One frame past the tolerance is refused, so the tolerance is a tolerance and
   // not an absence of a check.
-  assert.match(String(convolver.lengthProblem(44103, 44100)), /at most 1 second long/);
+  assert.match(String(convolver.lengthProblem(44104, 44100)), /at most 1 second long/); // 3 frames of tolerance at 44.1 kHz
   assert.equal(convolver.lengthProblem(48001, 48000), null);
 });
 

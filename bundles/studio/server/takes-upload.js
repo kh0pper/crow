@@ -277,6 +277,10 @@ const IR_MAX_SECONDS = 1;
  * the engine). A 44.1 kHz IR that is exactly one second long is 44101 frames.
  */
 const IR_FRAME_TOLERANCE = 2;
+/** Frames past one second a cabinet may run at `rate` (engine/convolver.js's rule). */
+function irToleranceAt(rate) {
+  return Math.max(IR_FRAME_TOLERANCE, Math.ceil((3 * Number(rate)) / 44100));
+}
 
 /** The extension a cabinet is stored under: the WAV the sample path writes. */
 const IR_EXTENSION = "wav";
@@ -516,7 +520,7 @@ function uploadCap(kind, takeCap, meta = null) {
     // A cabinet is capped by its LENGTH, with the same two-frame tolerance the
     // length check takes: a 44.1 kHz cabinet of 44101 frames is one second's
     // worth, not a file over the cap.
-    return usable ? (rate + IR_FRAME_TOLERANCE) * channels : 0;
+    return usable ? (rate + irToleranceAt(rate)) * channels : 0;
   }
   return takeCap;
 }
@@ -886,7 +890,7 @@ function irUploadOf(body, rate, channels) {
   if (!Number.isInteger(frames) || frames <= 0) {
     throw badRequest("A cabinet upload needs the number of frames it holds.");
   }
-  if (frames > rate + IR_FRAME_TOLERANCE) throw irLengthRefusal(frames, rate);
+  if (frames > rate + irToleranceAt(rate)) throw irLengthRefusal(frames, rate);
   const bytes = frames * channels * BYTES_PER_SAMPLE;
   if (bytes > IR_MAX_BYTES) {
     throw tooLarge(`That cabinet is ${Math.ceil(bytes / MB_BYTES)} MB; Studio takes cabinets up to 10 MB.`);

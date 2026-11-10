@@ -1831,9 +1831,23 @@ test("reordering an effect with a real drag sends one insert.move", async (t) =>
   assert.ok(menu > 3, `the + effect menu lists the effects the page was handed (${menu})`);
 
   // A real drag: press the second chip, move it above the first one's middle,
-  // and let it go.
-  const from = await chipBox(page, "ins-comp");
-  const first = await chipBox(page, "ins-eq");
+  // and let it go. Under load the strips can still be settling (a late meter
+  // or state redraw), so wait until both chips hold still for two reads before
+  // the press: a press measured against a box that then moves misses the chip.
+  let from = null;
+  let first = null;
+  for (let tries = 0; tries < 50; tries += 1) {
+    const a = await chipBox(page, "ins-comp");
+    const b = await chipBox(page, "ins-eq");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const a2 = await chipBox(page, "ins-comp");
+    const b2 = await chipBox(page, "ins-eq");
+    if (a && b && a2 && b2 && JSON.stringify(a) === JSON.stringify(a2) && JSON.stringify(b) === JSON.stringify(b2)) {
+      from = a2;
+      first = b2;
+      break;
+    }
+  }
   assert.ok(from && from.y > 0, "the chip has a box on screen");
   assert.ok(first && first.y > 0, "so does the one above it");
   const dropY = first.top + 4;
