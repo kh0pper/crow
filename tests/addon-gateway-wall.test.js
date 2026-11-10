@@ -15,6 +15,7 @@ import { join } from "node:path";
 
 import { AddonWallRefused } from "../scripts/addon-sandbox/spawn.mjs";
 import { createWallContext } from "../scripts/addon-sandbox/gateway-wall.mjs";
+import { createDockerView } from "../scripts/addon-sandbox/docker-view.mjs";
 
 const T = realpathSync(mkdtempSync(join(tmpdir(), "addon-gateway-wall-")));
 after(() => rmSync(T, { recursive: true, force: true }));
@@ -205,7 +206,7 @@ test("the docker view gets the ids installed.json lists and the ones mcp-addons.
   assert.equal(ids.has("installed-only"), true, "an id only installed.json lists is configured");
 
   // Read fresh on each call: a new entry counts without a new view.
-  writeFileSync(addonsPath, JSON.stringify({ "linked-one": {}, "linked-two": {} }));
+  writeFileSync(addonsPath, JSON.stringify({ "linked-one": { command: "node" }, "linked-two": { command: "node" } }));
   const later = rec.opts[0].installedIds();
   assert.equal(later.has("linked-two"), true);
   assert.equal(later.has("linked-one"), true);
@@ -219,7 +220,7 @@ test("mcp-addons.json keys that are not one slug never join the ids the view get
   // Written as text so `__proto__` stays an ordinary key of the parsed document.
   writeFileSync(
     join(crowHome, "mcp-addons.json"),
-    '{"../x":{},"Upper":{},"":{},"a/b":{},"__proto__":{},"good-one":{}}',
+    '{"../x":{"command":"node"},"Upper":{"command":"node"},"":{"command":"node"},"a/b":{"command":"node"},"__proto__":{"command":"node"},"good-one":{"command":"node"}}',
   );
 
   const rec = viewRecorder();
@@ -259,6 +260,72 @@ test("an invalid or array-shaped mcp-addons.json adds nothing and does not throw
     assert.equal(ids.has("linked-one"), false, "the broken document adds nothing: " + text);
     assert.equal(ids.size, 1, "the narrower set: " + text);
   }
+});
+
+test("only a local stdio entry counts; a text-to-speech id counts only through installed.json", async () => {
+  const home = freshDir("entry-shape-home");
+  const crowHome = join(home, ".crow");
+  mkdirSync(crowHome, { recursive: true });
+  writeFileSync(join(crowHome, "installed.json"), JSON.stringify(["installed-only"]));
+  writeFileSync(join(crowHome, "mcp-addons.json"), JSON.stringify({
+    "local-one": { command: "node", args: ["server/index.js"] },
+    "no-command": { args: [] },
+    "empty-command": { command: "" },
+    "remote-one": { command: "node", transport: "satellite" },
+    "array-entry": [],
+    "piper": { command: "node" },
+    "kokoro-tts": { command: "node" },
+  }));
+  const rec = viewRecorder();
+  const ctx = context({
+    crowHome,
+    home,
+    deps: quietDeps({ ...rec, identifyListener: async () => ({ kind: "denied" }) }),
+  });
+  await ctx.listenerOwnerFor("kiosk")("127.0.0.1", 8123);
+  const ids = rec.opts[0].installedIds();
+  assert.deepEqual([...ids].sort(), ["installed-only", "local-one"]);
+});
+
+test("through the real docker view: a checkout project of an add-on with only an mcp-addons.json entry is its own", async () => {
+  const home = freshDir("real-view-home");
+  const crowHome = join(home, ".crow");
+  mkdirSync(crowHome, { recursive: true });
+  const appRoot = appRootWith();
+  mkdirSync(join(appRoot, "bundles", "linked-one"), { recursive: true });
+  writeFileSync(join(crowHome, "installed.json"), JSON.stringify([]));
+  writeFileSync(join(crowHome, "mcp-addons.json"), JSON.stringify({ "linked-one": { command: "node", args: [] } }));
+  const inspected = [{
+    Id: "c1",
+    Name: "/linked-one-app",
+    Config: { Labels: {
+      "com.docker.compose.project": "linked-one",
+      "com.docker.compose.project.working_dir": join(appRoot, "bundles", "linked-one"),
+    } },
+    NetworkSettings: { Networks: {}, Ports: { "80/tcp": [{ HostIp: "127.0.0.1", HostPort: "8600" }] } },
+  }];
+  const run = async (args) => {
+    if (args[0] === "ps") return "c1\n";
+    if (args[0] === "network" && args[1] === "ls") return "";
+    if (args[0] === "network") return "[]";
+    if (args[0] === "inspect") return JSON.stringify(inspected);
+    return "";
+  };
+  const seen = [];
+  const ctx = context({
+    crowHome,
+    home,
+    appRoot,
+    deps: quietDeps({
+      dockerView: (o) => createDockerView({ ...o, run, ttlMs: 0 }),
+      identifyListener: async (addr, port, o) => { seen.push(o); return { kind: "denied" }; },
+    }),
+  });
+  await ctx.listenerOwnerFor("linked-one")("127.0.0.1", 8600);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].addonId, "linked-one");
+  assert.equal(seen[0].addonProjects.get("linked-one"), "linked-one", "the checkout project belongs to the configured add-on");
+
 });
 
 // ---- the three spawn kinds ------------------------------------------------
