@@ -18,7 +18,7 @@ import {
   appendAudit,
 } from "../../../shared/project-acl.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/project-spaces.js";
-import { approveBackend, revokeBackendApproval, hasApproval, isLegacyApproval, approvalNotFromThisMachine, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE, refHash, parseStoredSpec, visibleText, pinnedFiles, backendEnvNames } from "../../../shared/data-backend-approval.js";
+import { approveBackend, revokeBackendApproval, hasApproval, isLegacyApproval, approvalNotFromThisMachine, approvalForAnotherBackend, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE, NOT_FOR_THIS_BACKEND_MESSAGE, REVOKE_PARTIAL_MESSAGE, refHash, parseStoredSpec, visibleText, pinnedFiles, backendEnvNames } from "../../../shared/data-backend-approval.js";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
 import { csrfInput } from "../shared/csrf.js";
 import { canOwnProject, assertCanChangeStatus } from "../../../shared/project-lifecycle.js";
@@ -167,8 +167,12 @@ export default {
           await refreshReapprovalCard(db);
           return res.redirectAfterPost(back);
         }
-        await revokeBackendApproval(db, backendId, { crowHome: resolveCrowHome() });
+        const r = await revokeBackendApproval(db, backendId, { crowHome: resolveCrowHome() });
         import("../../proxy.js").then((m) => m.disconnectDynamicBackend(backendId)).catch(() => {});
+        // The value is gone either way; a record write that failed means the stop is not
+        // permanent, and the redirect shows the sentence that says so (the row's last_error
+        // carries it too, for whoever opens the page later).
+        if (r && r.partial) return res.redirectAfterPost(`${back}${sep}error=backend_stop_partial`);
         return res.redirectAfterPost(back);
       }
 
@@ -644,6 +648,12 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
     ? `<div class="alert alert-error" role="alert">${escapeHtml(t("projects.status.notOwner", lang))}</div>`
     : "";
 
+  // A stop that the approval record could not follow: the backend is stopped, the
+  // record still holds its nonce, so the sentence has to reach the owner.
+  const backendNotice = req.query?.error === "backend_stop_partial"
+    ? `<div class="alert alert-error" role="alert">${escapeHtml(REVOKE_PARTIAL_MESSAGE)}</div>`
+    : "";
+
   // M2c: Members section. Shows active members with role + resolved capabilities,
   // plus a small "Add member" form (contacts dropdown + role select).
   // Per-member capability override JSON is rendered as a textarea — M5 will
@@ -759,7 +769,7 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
   }
 
   const content = `
-    ${memberNotice}${statusNotice}
+    ${memberNotice}${statusNotice}${backendNotice}
     ${section("Overview", overviewHtml + workspaceInfo)}
     ${section(`Members (${members.length})`, membersHtml + addMemberForm + c2cOwnerSectionHtml(project.id, c2cContacts, c2cMembers, lang), { delay: 50 })}
     ${section(`Sources (${sourceTotal})`, sourcesHtml, { delay: 100 })}
@@ -803,16 +813,18 @@ export function renderBackendApproval(projectId, b, req = {}) {
     return `<div style="font-size:0.75rem"><div style="${warn}">Cannot be approved: ${prose(parsed.reason)}. Remove it and register it again.</div>${label}</div>`;
   }
   const { command, args, envVars } = parsed.spec;
-  // An approval this machine cannot verify at all (no approval key, or no record
-  // entry for this row — what a restore on another machine leaves behind, since
-  // secrets/ is never backed up) is shown as what it is, not as "Approved": the
-  // row is not running, and pressing Approve again writes a value for here.
-  const machineMismatch = approvalNotFromThisMachine(b);
-  const approved = hasApproval(b) && !machineMismatch;
+  // An approval this machine cannot verify (no approval key, or an empty record — a restore on
+  // another machine — or a value made for a different row) is shown as what it is, not as
+  // "Approved": the row is not running, and pressing Approve again writes a value for here.
+  const otherBackendApproval = approvalForAnotherBackend(b);
+  const machineMismatch = !otherBackendApproval && approvalNotFromThisMachine(b);
+  const approved = hasApproval(b) && !machineMismatch && !otherBackendApproval;
   // An approval from before approvals were keyed is not one: say so, and offer
   // the normal Approve button (pressing it writes the new form).
   const legacyHtml = isLegacyApproval(b) ? `<div style="${warn}">${prose(LEGACY_APPROVAL_MESSAGE)}</div>` : "";
-  const machineHtml = machineMismatch ? `<div style="${warn}">${prose(MACHINE_APPROVAL_MESSAGE)}</div>` : "";
+  const machineHtml = otherBackendApproval
+    ? `<div style="${warn}">${prose(NOT_FOR_THIS_BACKEND_MESSAGE)}</div>`
+    : machineMismatch ? `<div style="${warn}">${prose(MACHINE_APPROVAL_MESSAGE)}</div>` : "";
   const csrf = csrfInput(req);
   const btn = "padding:0.25rem 0.5rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);cursor:pointer;font-size:0.75rem";
   const hidden = `${csrf}<input type="hidden" name="id" value="${Number(projectId)}"><input type="hidden" name="backend_id" value="${Number(b.id)}">`;

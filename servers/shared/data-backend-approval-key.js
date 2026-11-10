@@ -12,7 +12,10 @@
  *   row id, `{ "v": 1, "rows": { "<row id>": "<32 hex>" } }` (0600). The nonce
  *   is part of what the approval HMAC covers, so a stored value belongs to one
  *   row and stops verifying when the owner revokes (the nonce is removed) or
- *   when it is copied onto another row (different id, no nonce).
+ *   when it is copied onto another row (different id, no nonce). A delete path
+ *   removes the row's nonce too, and the gateway prunes any entry whose row is
+ *   no longer in the table, so a deleted row put back with its old id and value
+ *   still verifies for nothing.
  *
  * Both files live in the dir bots cannot see and backups never carry (the
  * peer-token store's rule, peer-credentials.js), and both are reached through
@@ -325,5 +328,29 @@ export function clearApprovalNonce(rowId, { crowHome } = {}) {
     if (!Object.hasOwn(rec.rows, id)) return;
     delete rec.rows[id];
     writeApprovalRecord(rec, { crowHome });
+  });
+}
+
+/**
+ * Drop every nonce whose row id is NOT in `keepIds` — the record entries of
+ * rows that are no longer in the table (a deleted backend). An entry left
+ * behind is what lets a deleted row be put back with its old id, its old
+ * connection_ref and its old `hmac1:` value and verify again, so this is the
+ * backstop for a delete path that could not clear its own entry.
+ *
+ * One read and at most one write (nothing is written when nothing is stale).
+ * Throws when the record cannot be written; the caller treats that as
+ * "nothing pruned" rather than failing its own work.
+ * @returns {Promise<number>} how many entries were dropped
+ */
+export function pruneApprovalNonces(keepIds, { crowHome } = {}) {
+  const keep = new Set([...(keepIds || [])].map((v) => String(v)));
+  return serialized(() => {
+    const rec = readApprovalRecord({ crowHome });
+    const stale = Object.keys(rec.rows).filter((id) => !keep.has(id));
+    if (!stale.length) return 0;
+    for (const id of stale) delete rec.rows[id];
+    writeApprovalRecord(rec, { crowHome });
+    return stale.length;
   });
 }

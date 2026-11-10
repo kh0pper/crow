@@ -36,7 +36,7 @@ import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { resolveAddonCommand, checkLauncherArgs, sha256File } from "./resolve-command.js";
 import { buildBotBaseEnv } from "./bot-env.js";
 import {
-  ensureApprovalKey, readApprovalKey, approvalNonce, newApprovalNonce, setApprovalNonce, clearApprovalNonce,
+  ensureApprovalKey, readApprovalKey, readApprovalRecord, approvalNonce, newApprovalNonce, setApprovalNonce, clearApprovalNonce,
 } from "./data-backend-approval-key.js";
 
 export const PENDING_STATUS = "pending_approval";
@@ -55,6 +55,22 @@ export const LEGACY_APPROVAL_MESSAGE = "Approved before Crow keyed its approvals
  * another machine leaves behind (secrets/ is never backed up).
  */
 export const MACHINE_APPROVAL_MESSAGE = "Its approval does not match this machine's approval key (for example after a restore); approve it again on the Projects page";
+
+/**
+ * What the owner is told about a keyed value that belongs to ANOTHER row: this
+ * machine has the key and has nonces on record — just not for this row, so the
+ * value was copied from a row that was approved, or forged with a nonce of its
+ * own. Distinct from MACHINE_APPROVAL_MESSAGE, which is the restore case (no
+ * key, or a record with nothing in it at all).
+ */
+export const NOT_FOR_THIS_BACKEND_MESSAGE = "Its approval was not made for this backend; approve it again on the Projects page";
+
+/**
+ * What the owner is told when a stop was written but the approval record could
+ * not be: the row's value is gone, its nonce is not, so a value put back into
+ * the row would verify again until the record can be written.
+ */
+export const REVOKE_PARTIAL_MESSAGE = "Stopped, but Crow could not update its approval record; this stop is not permanent until it can. Check the folder permissions of Crow's secrets directory.";
 
 export function refHash(connectionRef) {
   return createHash("sha256").update(String(connectionRef ?? ""), "utf8").digest("hex");
@@ -168,12 +184,30 @@ export function isApproved(row, { crowHome } = {}) {
  * approval key or the row's record entry is missing (a restore on another
  * machine, since secrets/ is never backed up). Two small files outside crow.db,
  * never a pinned file, so the dashboard may call it while rendering to tell this
- * apart from "what it pins changed".
+ * apart from "what it pins changed". A value copied from another row reads as
+ * this too (its own entry is missing); approvalForAnotherBackend tells the two
+ * apart for the sentence the owner sees.
  */
 export function approvalNotFromThisMachine(row, { crowHome } = {}) {
   if (!row || typeof row.approved_ref_sha256 !== "string") return false;
   if (!KEYED_APPROVAL.test(row.approved_ref_sha256)) return false;
   return !readApprovalKey({ crowHome }) || !approvalNonce(row.id, { crowHome });
+}
+
+/**
+ * True when the value is keyed, this machine has its key, and the record holds
+ * nonces for OTHER rows but none for this one: the value was made for a
+ * different row (copied off an approved row, or forged). Reads the same two
+ * small files outside crow.db as approvalNotFromThisMachine, never a pinned
+ * file.
+ */
+export function approvalForAnotherBackend(row, { crowHome } = {}) {
+  if (!row || typeof row.approved_ref_sha256 !== "string") return false;
+  if (!KEYED_APPROVAL.test(row.approved_ref_sha256)) return false;
+  if (!readApprovalKey({ crowHome })) return false;
+  const id = row.id === undefined || row.id === null ? "" : String(row.id);
+  const rec = readApprovalRecord({ crowHome });
+  return Object.keys(rec.rows).length > 0 && !Object.hasOwn(rec.rows, id);
 }
 
 /** Display only (no file reads): a keyed approval is on record; it is re-checked at start. */
@@ -397,19 +431,47 @@ export function prepareSpawn(row, cwd = process.cwd(), { crowHome } = {}) {
 /**
  * Owner action: withdraw an approval (the row stays, it is no longer started).
  * The row's nonce is removed from the record FIRST, so a value copied back into
- * the column afterwards verifies for nothing. If the record cannot be written
- * the column is still cleared (the leftover nonce alone approves nothing) and a
- * warning says so without naming anything secret.
+ * the column afterwards verifies for nothing, and again AFTER the column write,
+ * which closes the window in which an approval lands between the clear and the
+ * UPDATE (that approval's nonce would otherwise stay on record with its value
+ * erased from the row — a value that verifies again if it is written back).
+ *
+ * If the record cannot be written the column is still cleared (a leftover
+ * nonce alone approves nothing) but the stop is not permanent: a value put back
+ * into the row would verify again. The row's last_error says so, and the
+ * `partial` result tells the caller to show it. `clearNonce` is the record
+ * write (a seam for the failure case).
+ * @returns {Promise<boolean | { ok: true, partial: true }>} true when the row was
+ *   stopped; { ok: true, partial: true } when it was stopped but the record write
+ *   failed; false when no such mcp_server row was stopped (nothing changed).
  */
-export async function revokeBackendApproval(db, id, { crowHome } = {}) {
-  try {
-    await clearApprovalNonce(id, { crowHome });
-  } catch {
-    console.warn(`[data-backend-approval] could not update the approval record for backend #${id}; the approval is withdrawn anyway`);
-  }
+export async function revokeBackendApproval(db, id, { crowHome, clearNonce = clearApprovalNonce } = {}) {
+  const dropNonce = async () => {
+    try {
+      await clearNonce(id, { crowHome });
+      return true;
+    } catch {
+      console.warn(`[data-backend-approval] could not update the approval record for backend #${id}; the approval is withdrawn anyway`);
+      return false;
+    }
+  };
+  let recordOk = await dropNonce();
   const r = await db.execute({
     sql: "UPDATE data_backends SET approved_ref_sha256 = NULL, status = ?, updated_at = datetime('now') WHERE id = ? AND backend_type = 'mcp_server'",
     args: [PENDING_STATUS, id],
   });
-  return (r.rowsAffected ?? 0) > 0;
+  const stopped = (r.rowsAffected ?? 0) > 0;
+  if (!stopped) return false;
+  // After the column write, so an approval that landed in between loses its nonce too.
+  // This second attempt is what the result reports on: it ran last, so the record as
+  // it stands now is the one it wrote (or failed to write).
+  recordOk = await dropNonce();
+  if (!recordOk) {
+    await db.execute({
+      sql: "UPDATE data_backends SET last_error = ?, updated_at = datetime('now') WHERE id = ? AND backend_type = 'mcp_server'",
+      args: [REVOKE_PARTIAL_MESSAGE, id],
+    });
+    return { ok: true, partial: true };
+  }
+  return true;
 }

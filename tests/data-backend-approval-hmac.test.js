@@ -37,14 +37,20 @@ const CORE = join(DATA, "crow.db");
 
 const {
   approveBackend, revokeBackendApproval, approvalHash, prepareSpawn, isApproved, hasApproval, isLegacyApproval,
-  approvalNotFromThisMachine, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE,
+  approvalNotFromThisMachine, approvalForAnotherBackend, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE,
+  NOT_FOR_THIS_BACKEND_MESSAGE, REVOKE_PARTIAL_MESSAGE,
 } = await import("../servers/shared/data-backend-approval.js");
 const {
   approvalKeyPath, approvalRecordPath, ensureApprovalKey, readApprovalKey, approvalNonce, setApprovalNonce,
-  clearApprovalNonce, APPROVAL_KEY_BYTES,
+  clearApprovalNonce, pruneApprovalNonces, APPROVAL_KEY_BYTES,
 } = await import("../servers/shared/data-backend-approval-key.js");
 const { createDbClient } = await import("../servers/db.js");
 const { loadDynamicBackends } = await import("../servers/gateway/proxy.js");
+const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+const { deleteProject } = await import("../servers/shared/project-lifecycle.js");
+const { createProjectServer } = await import("../servers/research/server.js");
+const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const fixitStore = await import("../servers/shared/fix-it/store.js");
 const { renderFixItCards, LINK_REMEDIES } = await import("../servers/gateway/fix-it/index.js");
 
@@ -56,13 +62,22 @@ function projectId() {
     return row ? row.id : Number(d.prepare("INSERT INTO project_spaces (name, slug, type) VALUES ('t', 't-hmac', 'data_connector')").run().lastInsertRowid);
   } finally { d.close(); }
 }
-function pendingRow(ref, approved = null) {
+function pendingRow(ref, approved = null, project = projectId()) {
   const d = raw();
   try {
     return Number(d.prepare("INSERT INTO data_backends (project_id, name, backend_type, connection_ref, status, approved_ref_sha256) VALUES (?, 'p', 'mcp_server', ?, 'pending_approval', ?)")
-      .run(projectId(), ref, approved).lastInsertRowid);
+      .run(project, ref, approved).lastInsertRowid);
   } finally { d.close(); }
 }
+/** Put a row back with an explicit id (what a crow.db writer can do after a delete). */
+function putBackRow(id, project, ref, approved) {
+  const d = raw();
+  try {
+    d.prepare("INSERT INTO data_backends (id, project_id, name, backend_type, connection_ref, status, approved_ref_sha256) VALUES (?, ?, 'put back', 'mcp_server', ?, 'pending_approval', ?)")
+      .run(id, project, ref, approved);
+  } finally { d.close(); }
+}
+const text = (r) => (r.content || []).map((c) => c.text).join("\n");
 function rowById(id) {
   const d = raw();
   try { return d.prepare("SELECT * FROM data_backends WHERE id = ?").get(id); } finally { d.close(); }
@@ -425,6 +440,196 @@ test("approving refuses when the key cannot be created, and stores nothing", asy
     db.close();
     rmSync(blocked, { recursive: true, force: true });
   }
+});
+
+// ------------------------------------- a deleted backend's approval cannot come back
+test("a backend removed through the MCP tool cannot be approved again by putting the row back", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const { id: pid } = await createProjectSpace(db, { name: "Remove backend" });
+    const ref = markerRef(join(HOME, "removed-tool"));
+    const id = pendingRow(ref, null, pid);
+    assert.equal((await approveBackend(db, id)).ok, true);
+    const old = rowById(id).approved_ref_sha256;
+    assert.match(String(old), /^hmac1:/);
+    assert.equal(isApproved(rowById(id)), true, "positive control");
+    assert.notEqual(approvalNonce(id), null, "positive control: the nonce is on record");
+
+    // The real tool: preview, then the token it returned.
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await createProjectServer(CORE).connect(st);
+    const client = new Client({ name: "t", version: "0" });
+    await client.connect(ct);
+    const preview = text(await client.callTool({ name: "crow_remove_backend", arguments: { id, confirm_token: "" } }));
+    const token = /confirm_token: "([^"]+)"/.exec(preview)?.[1];
+    assert.ok(token, preview);
+    const done = text(await client.callTool({ name: "crow_remove_backend", arguments: { id, confirm_token: token } }));
+    assert.match(done, /removed/i, done);
+    assert.equal(rowById(id), undefined, "the row was not deleted");
+    assert.equal(approvalNonce(id), null, "the removed backend's nonce is still on record");
+
+    // A crow.db writer puts the row back with its old id, its exact connection_ref
+    // and the value that was approved: SQLite accepts an explicit id.
+    putBackRow(id, pid, ref, old);
+    assert.equal(isApproved(rowById(id)), false, "a deleted backend's old approval verified again");
+    assert.equal(prepareSpawn(rowById(id)).ok, false);
+  } finally { db.close(); }
+});
+
+test("a project delete drops its backends' nonces, so a row put back does not verify", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const { id: pid } = await createProjectSpace(db, { name: "Delete backend project" });
+    const ref = markerRef(join(HOME, "deleted-project"));
+    const id = pendingRow(ref, null, pid);
+    assert.equal((await approveBackend(db, id)).ok, true);
+    const old = rowById(id).approved_ref_sha256;
+    assert.equal(isApproved(rowById(id)), true, "positive control");
+
+    const r = await deleteProject(db, pid, { confirmName: "Delete backend project", disconnectBackend: () => true });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(rowById(id), undefined, "the project's backends were not deleted");
+    assert.equal(approvalNonce(id), null, "the deleted backend's nonce is still on record");
+
+    putBackRow(id, pid, ref, old);
+    assert.equal(isApproved(rowById(id)), false, "a deleted project's backend approval verified again");
+    assert.equal(prepareSpawn(rowById(id)).ok, false);
+  } finally { db.close(); }
+});
+
+test("a record entry for a row that no longer exists is pruned when the gateway loads", async () => {
+  await setApprovalNonce(4242, "c".repeat(32));
+  await setApprovalNonce(4243, "d".repeat(32));
+  const path = approvalRecordPath(CROW_HOME);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(path, "utf8")).rows).sort(), ["4242", "4243"]);
+
+  // No rows at all in the table: every entry is stale, and the load drops them.
+  await loadDynamicBackends();
+  assert.equal(approvalNonce(4242), null, "a stale record entry survived the load");
+  assert.equal(approvalNonce(4243), null);
+
+  // Nothing stale now: a second load does not rewrite the record.
+  const settled = readFileSync(path, "utf8");
+  await loadDynamicBackends();
+  assert.equal(readFileSync(path, "utf8"), settled, "a load with nothing stale rewrote the record");
+});
+
+test("the prune keeps the nonce of a row that still exists", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const id = pendingRow(markerRef(join(HOME, "kept-nonce")));
+    assert.equal((await approveBackend(db, id)).ok, true);
+    await setApprovalNonce(4244, "e".repeat(32));
+    await loadDynamicBackends();
+    assert.notEqual(approvalNonce(id), null, "a live row's nonce was pruned");
+    assert.equal(approvalNonce(4244), null);
+    assert.equal(await pruneApprovalNonces([id]), 0, "nothing is stale now");
+  } finally { db.close(); }
+});
+
+// --------------------------------------------------- a revoke that cannot update the record
+test("a revoke whose record write fails still clears the column, says so, and reports partial", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const id = pendingRow(markerRef(join(HOME, "revoke-partial")));
+    assert.equal((await approveBackend(db, id)).ok, true);
+    const nonce = approvalNonce(id);
+    const old = rowById(id).approved_ref_sha256;
+
+    const r = await revokeBackendApproval(db, id, { clearNonce: async () => { throw new Error("record write refused"); } });
+    assert.equal(r.ok, true);
+    assert.equal(r.partial, true);
+    const row = rowById(id);
+    assert.equal(row.approved_ref_sha256, null, "the column kept an approval the owner just stopped");
+    assert.equal(row.status, "pending_approval");
+    assert.equal(row.last_error, REVOKE_PARTIAL_MESSAGE, "the row does not say the stop is not permanent");
+
+    // Why it is not permanent: the nonce is still on record, so a value put back verifies again.
+    assert.equal(approvalNonce(id), nonce);
+    const d = raw();
+    d.prepare("UPDATE data_backends SET approved_ref_sha256 = ? WHERE id = ?").run(old, id);
+    d.close();
+    assert.equal(isApproved(rowById(id)), true, "the partial stop was described as permanent, but it is not");
+  } finally { db.close(); }
+});
+
+test("a revoke with a working record write returns true and leaves no partial flag", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const id = pendingRow(markerRef(join(HOME, "revoke-clean")));
+    assert.equal((await approveBackend(db, id)).ok, true);
+    assert.equal(await revokeBackendApproval(db, id), true);
+    assert.equal(rowById(id).last_error, null, "a clean stop wrote the partial sentence");
+    assert.equal(approvalNonce(id), null);
+  } finally { db.close(); }
+});
+
+test("the revoke clears the nonce again AFTER the column write", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const id = pendingRow(markerRef(join(HOME, "revoke-twice")));
+    assert.equal((await approveBackend(db, id)).ok, true);
+    // The seam records what the column held at the moment each clear ran.
+    const seen = [];
+    const clearNonce = async (rowId, opts) => {
+      seen.push(rowById(id).approved_ref_sha256);
+      await clearApprovalNonce(rowId, opts);
+    };
+    assert.equal(await revokeBackendApproval(db, id, { clearNonce }), true);
+    assert.equal(seen.length, 2, "the nonce was not cleared again after the column write");
+    assert.match(String(seen[0]), /^hmac1:/, "the first clear ran after the column was already empty");
+    assert.equal(seen[1], null, "the second clear ran before the column write");
+    assert.equal(approvalNonce(id), null);
+  } finally { db.close(); }
+});
+
+test("Projects page: a stop that could not update the record shows the sentence", async () => {
+  const panel = (await import("../servers/gateway/dashboard/panels/projects.js")).default;
+  const db = createDbClient(CORE);
+  try {
+    const { id: pid } = await createProjectSpace(db, { name: "Stop partial" });
+    const layout = ({ content }) => content;
+    const res = { redirectAfterPost: (url) => ({ redirect: url }) };
+    const get = (query) => panel.handler({ method: "GET", query, body: {}, csrfToken: "" }, res, { db, layout, lang: "en" });
+    const html = String(await get({ view: String(pid), error: "backend_stop_partial" }));
+    assert.ok(html.includes(REVOKE_PARTIAL_MESSAGE), "the page does not show why the stop is not permanent");
+    assert.equal(String(await get({ view: String(pid) })).includes(REVOKE_PARTIAL_MESSAGE), false, "the sentence shows without the partial stop");
+  } finally { db.close(); }
+});
+
+// ------------------------------------------------- which sentence a failed check gets
+test("a value made for another row says so; an empty record keeps the restore sentence", async () => {
+  const db = createDbClient(CORE);
+  try {
+    // A row that really was approved here (so the record holds a nonce), taken back out of
+    // the column so nothing is started, and its value copied onto a second, never-approved row.
+    const ref = markerRef(join(HOME, "copied-wording"));
+    const owner = pendingRow(ref);
+    assert.equal((await approveBackend(db, owner)).ok, true);
+    const value = rowById(owner).approved_ref_sha256;
+    const d = raw();
+    d.prepare("UPDATE data_backends SET approved_ref_sha256 = NULL WHERE id = ?").run(owner);
+    d.close();
+    const copy = pendingRow(ref, value);
+    assert.equal(approvalForAnotherBackend(rowById(copy)), true);
+    assert.equal(approvalNotFromThisMachine(rowById(copy)), true, "the copied value is also one this row does not own");
+
+    await loadDynamicBackends();
+    const copied = rowById(copy);
+    assert.equal(copied.status, "pending_approval");
+    assert.equal(copied.last_error, NOT_FOR_THIS_BACKEND_MESSAGE, "a copied value was described as a restore");
+    const html = (await import("../servers/gateway/dashboard/panels/projects.js")).renderBackendApproval(1, copied);
+    assert.ok(html.includes(NOT_FOR_THIS_BACKEND_MESSAGE), "the page does not say the value was made for another backend");
+    assert.equal(html.includes(MACHINE_APPROVAL_MESSAGE), false);
+
+    // The restore case: an approved row whose record (secrets/) did not come along.
+    const restored = pendingRow(markerRef(join(HOME, "restored-wording")));
+    assert.equal((await approveBackend(db, restored)).ok, true);
+    rmSync(approvalRecordPath(CROW_HOME), { force: true });
+    await loadDynamicBackends();
+    assert.equal(rowById(restored).last_error, MACHINE_APPROVAL_MESSAGE, "an empty record lost the restore sentence");
+    assert.equal(approvalForAnotherBackend(rowById(restored)), false, "an empty record is not another row's value");
+  } finally { db.close(); }
 });
 
 // -------------------------------------------------------------- shape helpers
