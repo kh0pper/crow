@@ -406,7 +406,7 @@ function defaultsFingerprint(manifest) {
  *
  * @param {object} manifest  the policy-source manifest
  * @param {object} entry     the mcp-addons.json entry (may be `{}`)
- * @param {object} opts      { composePorts, pastDefaults, crowDbScan, installedManifest, source }
+ * @param {object} opts      { composePorts, pastDefaults, crowDbScan, installedManifest, source, gatewayPort }
  */
 export function deriveProfile(manifest, entry = {}, opts = {}) {
   const {
@@ -415,6 +415,7 @@ export function deriveProfile(manifest, entry = {}, opts = {}) {
     crowDbScan = false,
     installedManifest = null,
     source = "repo",
+    gatewayPort = null,
   } = opts || {};
   const id = typeof manifest?.id === "string" ? manifest.id : "";
   const sandbox = manifest?.sandbox && typeof manifest.sandbox === "object" ? manifest.sandbox : null;
@@ -477,7 +478,23 @@ export function deriveProfile(manifest, entry = {}, opts = {}) {
       continue;
     }
     if (isLoopbackHost(parsed.host) && composePorts.includes(parsed.port)) {
-      hosts.push({ host: parsed.host, port: parsed.port, scheme: parsed.scheme, from: name, source: "default-own-service" });
+      // A default may only name a port this add-on's own compose publishes. For the repo copy
+      // that is this add-on's own service. Any other source (`installed`: a local or
+      // third-party bundle, whose compose and manifest unwalled code could have written) gets
+      // `default-installed-compose` instead: a third-party compose can say anything, so the
+      // wall must then reach it only through a listener published by this add-on's OWN running
+      // compose project, which the relay's owner check enforces for every non-owner entry.
+      if (Number.isInteger(gatewayPort) && parsed.port === gatewayPort) {
+        refused.push({ what: `host:${name}`, reason: "a default address never names Crow's gateway port" });
+        continue;
+      }
+      hosts.push({
+        host: parsed.host,
+        port: parsed.port,
+        scheme: parsed.scheme,
+        from: name,
+        source: source === "repo" ? "default-own-service" : "default-installed-compose",
+      });
       continue;
     }
     const coveredByInternet = internet
@@ -565,6 +582,8 @@ export function deriveProfile(manifest, entry = {}, opts = {}) {
   const labelParts = [];
   if (internet) labelParts.push({ kind: "internet" });
   for (const h of uniqueHosts) {
+    // Both default sources ("default-own-service", "default-installed-compose") label alike: the
+    // label says what the add-on reaches, and the relay's own-service check is what gates it.
     if (isLoopbackHost(h.host)) {
       const label = manifest?.webUI?.port === h.port && typeof manifest?.webUI?.label === "string"
         ? manifest.webUI.label
@@ -611,9 +630,9 @@ const ADDON_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
  * A manifest whose own `id` is different from the one asked for is refused too —
  * policy is keyed by id, so a file claiming another add-on's id must not supply it.
  *
- * @param {object} opts { id, entry, appBundlesDir, installedBundlesDir, pastDefaultsAll }
+ * @param {object} opts { id, entry, appBundlesDir, installedBundlesDir, pastDefaultsAll, gatewayPort }
  */
-export function profileFor({ id, entry = {}, appBundlesDir, installedBundlesDir, pastDefaultsAll = {} }) {
+export function profileFor({ id, entry = {}, appBundlesDir, installedBundlesDir, pastDefaultsAll = {}, gatewayPort = null }) {
   if (typeof id !== "string" || !ADDON_ID_RE.test(id)) throw new Error("invalid add-on id");
   const src = loadPolicySource({ id, appBundlesDir, installedBundlesDir });
   if (src?.manifest?.id !== id) throw new Error("manifest id does not match");
@@ -623,6 +642,9 @@ export function profileFor({ id, entry = {}, appBundlesDir, installedBundlesDir,
     crowDbScan: scanCrowDb(src.serverDir),
     installedManifest: src.installedManifest,
     source: src.source,
+    // Optional: the wall passes the gateway's own port so a manifest default can never
+    // name it. The registry build passes none, so the generated profiles are unchanged.
+    gatewayPort,
   });
 }
 

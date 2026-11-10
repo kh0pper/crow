@@ -53,6 +53,6 @@ test("without a manifest the old behaviour is unchanged (back-compat)", () => {
 
 test("mcpAddonEntryFor mirrors the install shape", () => {
   assert.deepEqual(B.mcpAddonEntryFor({ server: { command: "node", args: ["server/index.js"] }, env_vars: [{ name: "P", default: "8456" }] }),
-    { command: "node", args: ["server/index.js"], env: { P: "8456" } });
-  assert.deepEqual(B.mcpAddonEntryFor({ server: { command: "node" } }), { command: "node", args: [] });
+    { command: "node", args: ["server/index.js"], env: { P: "8456" }, ownerSet: [] });
+  assert.deepEqual(B.mcpAddonEntryFor({ server: { command: "node" } }), { command: "node", args: [], ownerSet: [] });
 });

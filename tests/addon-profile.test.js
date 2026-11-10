@@ -106,6 +106,38 @@ test("a manifest's ports and webUI.port never make a port this add-on's own serv
   assert.equal(own.label.en[1], "reach X on this computer");
 });
 
+test("a compose-published default is this add-on's own service only for a repo-sourced profile", () => {
+  const composePorts = composePortsFrom(composePublishing('"127.0.0.1:8000:8000"'), BASE_MANIFEST);
+  const repo = deriveProfile(BASE_MANIFEST, {}, { composePorts, source: "repo" });
+  assert.deepEqual(repo.network.hosts, [
+    { host: "localhost", port: 8000, scheme: "http", from: "DEMO_URL", source: "default-own-service" },
+  ]);
+  assert.deepEqual(repo.refused, []);
+
+  // The installed copy's compose could have been written by anything: the port is only a
+  // promise, and the wall reaches it through this add-on's own running compose project.
+  const installed = deriveProfile(BASE_MANIFEST, {}, { composePorts, source: "installed" });
+  assert.deepEqual(installed.network.hosts, [
+    { host: "localhost", port: 8000, scheme: "http", from: "DEMO_URL", source: "default-installed-compose" },
+  ]);
+  assert.deepEqual(installed.refused, []);
+  // Both sources label the same way.
+  assert.deepEqual(installed.labelParts.map((p) => p.kind), repo.labelParts.map((p) => p.kind));
+});
+
+test("a default that names Crow's gateway port is refused, whatever the policy source", () => {
+  const manifest = { ...BASE_MANIFEST, env_vars: [{ name: "DEMO_URL", default: "http://localhost:3001" }] };
+  const composePorts = composePortsFrom(composePublishing('"127.0.0.1:3001:3001"'), manifest);
+  assert.deepEqual(composePorts, [3001]);
+  for (const source of ["repo", "installed"]) {
+    const profile = deriveProfile(manifest, {}, { composePorts, source, gatewayPort: 3001 });
+    assert.deepEqual(profile.network.hosts, [], `${source}: not added`);
+    assert.deepEqual(profile.refused, [
+      { what: "host:DEMO_URL", reason: "a default address never names Crow's gateway port" },
+    ], `${source}: refused with its own reason`);
+  }
+});
+
 test("a default naming a port nothing publishes (127.0.0.1:2019) is refused", () => {
   const manifest = { ...BASE_MANIFEST, env_vars: [{ name: "DEMO_URL", default: "http://127.0.0.1:2019" }] };
   const profile = deriveProfile(manifest, {}, { composePorts: composePortsFrom(composePublishing('"127.0.0.1:8000:8000"'), manifest) });
@@ -350,29 +382,37 @@ const OWNER_MANIFEST = {
 };
 
 test("mcpAddonEntryFor records the owner-entered keys only", () => {
-  const edited = B.mcpAddonEntryFor(OWNER_MANIFEST, { X: "typed" }, { edited: ["X"] });
+  const edited = B.mcpAddonEntryFor(OWNER_MANIFEST, { X: "typed" }, { edited: ["X"], owner: true });
   assert.deepEqual(edited.ownerSet, ["X"]);
 
   // A requested value equal to its manifest default, not edited: not the owner's.
-  const atDefault = B.mcpAddonEntryFor(OWNER_MANIFEST, { D: "the-default" }, {});
-  assert.equal("ownerSet" in atDefault, false);
+  const atDefault = B.mcpAddonEntryFor(OWNER_MANIFEST, { D: "the-default" }, { owner: true });
+  assert.deepEqual(atDefault.ownerSet, []);
 
   // A value that differs from the default is owner-entered even without the form's list.
-  const differs = B.mcpAddonEntryFor(OWNER_MANIFEST, { D: "typed-instead" }, {});
+  const differs = B.mcpAddonEntryFor(OWNER_MANIFEST, { D: "typed-instead" }, { owner: true });
   assert.deepEqual(differs.ownerSet, ["D"]);
 
   // A generated key is minted by Crow, never typed.
-  const generated = B.mcpAddonEntryFor(OWNER_MANIFEST, { G: "s3cret-value" }, { generatedKeys: ["G"] });
-  assert.equal("ownerSet" in generated, false);
+  const generated = B.mcpAddonEntryFor(OWNER_MANIFEST, { G: "s3cret-value" }, { generatedKeys: ["G"], owner: true });
+  assert.deepEqual(generated.ownerSet, []);
 
-  // Nothing owner-entered: the field is absent, so old entries keep their shape.
-  assert.equal("ownerSet" in B.mcpAddonEntryFor(OWNER_MANIFEST), false);
+  // A key with no default at all, not edited: the form just re-sent a filled field.
+  const noDefault = B.mcpAddonEntryFor(OWNER_MANIFEST, { X: "typed" }, { owner: true });
+  assert.deepEqual(noDefault.ownerSet, []);
+
+  // Without the caller's proof that this is the local owner's own write: no provenance.
+  assert.deepEqual(B.mcpAddonEntryFor(OWNER_MANIFEST, { X: "typed" }, { edited: ["X"] }).ownerSet, []);
+
+  // Nothing owner-entered: the list is still written, empty (an absent list reads as a
+  // legacy entry on the wall side, where every non-default value counts).
+  assert.deepEqual(B.mcpAddonEntryFor(OWNER_MANIFEST).ownerSet, []);
 });
 
-test("applyEnvToMcpAddons records the keys it writes that are not just a default", () => {
+test("applyEnvToMcpAddons records the owner-typed keys it writes", () => {
   const path = join(scratch, "mcp-addons-configure.json");
   writeFileSync(path, JSON.stringify({ acme: { command: "node", args: [], env: { D: "the-default" } } }));
-  assert.equal(B.applyEnvToMcpAddons("acme", { X: "typed", D: "the-default" }, path, OWNER_MANIFEST, { edited: [] }), true);
+  assert.equal(B.applyEnvToMcpAddons("acme", { X: "typed", D: "the-default" }, path, OWNER_MANIFEST, { edited: ["X"], owner: true }), true);
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).acme.ownerSet, ["X"]);
 });
 
@@ -380,14 +420,15 @@ test("applyEnvToMcpAddons seeds a legacy entry from the past-defaults rule", () 
   // A legacy value that equals the current manifest default is not the owner's.
   const equalsDefault = join(scratch, "mcp-addons-legacy-1.json");
   writeFileSync(equalsDefault, JSON.stringify({ acme: { command: "node", args: [], env: { D: "the-default" } } }));
-  B.applyEnvToMcpAddons("acme", { X: "typed" }, equalsDefault, OWNER_MANIFEST);
-  assert.deepEqual(JSON.parse(readFileSync(equalsDefault, "utf8")).acme.ownerSet, ["X"]);
+  B.applyEnvToMcpAddons("acme", { D: "typed-instead" }, equalsDefault, OWNER_MANIFEST, { owner: true });
+  assert.deepEqual(JSON.parse(readFileSync(equalsDefault, "utf8")).acme.ownerSet, ["D"]);
 
-  // A legacy value matching no default at all was owner-entered.
+  // A legacy value matching no default at all was owner-entered, and survives a save that
+  // writes the current default over it.
   const otherValue = join(scratch, "mcp-addons-legacy-2.json");
   writeFileSync(otherValue, JSON.stringify({ acme: { command: "node", args: [], env: { D: "typed-before-this-change" } } }));
-  B.applyEnvToMcpAddons("acme", { X: "typed" }, otherValue, OWNER_MANIFEST);
-  assert.deepEqual(JSON.parse(readFileSync(otherValue, "utf8")).acme.ownerSet, ["D", "X"]);
+  B.applyEnvToMcpAddons("acme", { D: "the-default" }, otherValue, OWNER_MANIFEST, { owner: true });
+  assert.deepEqual(JSON.parse(readFileSync(otherValue, "utf8")).acme.ownerSet, ["D"]);
 });
 
 test("a legacy value that matches an older shipped default counts as a default, not as owner-set", () => {

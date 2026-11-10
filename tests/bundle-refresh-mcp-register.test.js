@@ -24,7 +24,7 @@ test("a version bump that adds `server` registers the MCP entry for an existing 
   put(HOME, "mcp-addons.json", JSON.stringify({ other: { command: "node", args: ["x.js"] } }));
   const { repaired } = await repair({ appBundles: repo, run });
   const addons = JSON.parse(readFileSync(join(HOME, "mcp-addons.json"), "utf8"));
-  assert.deepEqual(addons.dockerish, { command: "node", args: ["server/index.js"], env: { PORTX: "8456" } });
+  assert.deepEqual(addons.dockerish, { command: "node", args: ["server/index.js"], env: { PORTX: "8456" }, ownerSet: [] });
   assert.deepEqual(addons.other, { command: "node", args: ["x.js"] });
   assert.match(repaired.join(" "), /mcp-addons entry/);
 });

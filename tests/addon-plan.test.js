@@ -30,7 +30,22 @@ after(() => rmSync(T, { recursive: true, force: true }));
 
 const UID = process.getuid();
 const mk = (...p) => { const d = join(...p); mkdirSync(d, { recursive: true }); return d; };
-const fdCount = () => readdirSync("/proc/self/fd").length;
+/**
+ * The fds this process holds on anything inside this test's scratch tree, as sorted
+ * "fd -> target" strings. Only the plan opens files there, so this set is
+ * deterministic, unlike a process-wide count (other threads open and close fds of
+ * their own at any time). An fd that closes between the listing and its readlink is
+ * not one of ours and is skipped.
+ */
+const scratchFds = () => {
+  const out = [];
+  for (const fd of readdirSync("/proc/self/fd")) {
+    let target;
+    try { target = readlinkSync("/proc/self/fd/" + fd); } catch { continue; }
+    if (target === T || target.startsWith(T + "/")) out.push(fd + " -> " + target);
+  }
+  return out.sort();
+};
 
 // ---- a fake host layout --------------------------------------------------
 
@@ -685,7 +700,7 @@ test("a folder bound by fd that is too large to scan is not bound, and its fd is
     writeFileSync(p, "");
     filler.push(p);
   }
-  const before = fdCount();
+  const before = scratchFds();
   let plan;
   try {
     plan = planOf({
@@ -700,7 +715,7 @@ test("a folder bound by fd that is too large to scan is not bound, and its fd is
     if (plan) closePlan(plan);
     for (const p of filler) rmSync(p, { force: true });
   }
-  assert.equal(fdCount(), before, "the dropped fd was closed by the plan");
+  assert.deepEqual(scratchFds(), before, "the dropped fd was closed by the plan");
 });
 
 // ---- the command file ---------------------------------------------------
@@ -873,18 +888,18 @@ test("an absolute command outside /usr and /opt binds the command FILE, not its 
 
 test("a refusal from the plan closes every fd it opened", (t) => {
   try {
-    const before = fdCount();
+    const before = scratchFds();
     assert.throws(() => planOf({ id: "not-installed" }), ContainRefused, "no install folder");
     assert.throws(() => planOf({ dataDir: join(CROW, "no-such-data") }), ContainRefused, "no data folder");
-    assert.equal(fdCount(), before, "a refusal before any open leaks nothing");
+    assert.deepEqual(scratchFds(), before, "a refusal before any open leaks nothing");
 
     // A checked open that walks several components and then refuses the leaf.
     mk(BUNDLES, "linked-data", "server");
     const linked = join(CROW, "linked-data");
     symlinkSync(APP, linked);
-    const beforeWalk = fdCount();
+    const beforeWalk = scratchFds();
     assert.throws(() => planOf({ id: "linked-data", dataDir: CROW }), ContainRefused, "a symlinked data leaf refuses");
-    assert.equal(fdCount(), beforeWalk, "no fd left open by the failed walk");
+    assert.deepEqual(scratchFds(), beforeWalk, "no fd left open by the failed walk");
   } catch (err) {
     if (err && (err.code === "EPERM" || err.code === "ENOSYS")) { t.skip("this host does not allow symlinks in the scratch dir"); return; }
     throw err;
@@ -899,13 +914,13 @@ test("a missing install folder refuses with a reason naming it", () => {
 // ---- the id is a slug ----------------------------------------------------
 
 test("an add-on id that is not one lowercase slug is refused before anything is opened", () => {
-  const before = fdCount();
+  const before = scratchFds();
   for (const bad of ["../x", "a/b", ".", "..", "", "A", undefined]) {
     assert.throws(() => planOf({ id: bad }),
       (e) => e instanceof ContainRefused && /invalid add-on id/.test(e.message),
       "id " + JSON.stringify(bad) + " is refused");
   }
-  assert.equal(fdCount(), before, "no fd left open by a refused id");
+  assert.deepEqual(scratchFds(), before, "no fd left open by a refused id");
 });
 
 // ---- a read-write data bind answers to the write side of the list --------
@@ -924,18 +939,222 @@ test("a data folder whose real path lands on the checkout is refused for the rea
     throw err;
   }
   try {
-    const before = fdCount();
+    const before = scratchFds();
     assert.throws(() => planOf({ dataDir: link }),
       (e) => e instanceof ContainRefused && /cannot be bound read-write/.test(e.message) && /never writable/.test(e.message),
       "the <id> folder inside the checkout is refused");
-    assert.equal(fdCount(), before, "no fd left open");
+    assert.deepEqual(scratchFds(), before, "no fd left open");
 
     assert.throws(() => planOf({ dataDir: link, profile: profileOf({ crowDb: true }) }),
       (e) => e instanceof ContainRefused && /cannot be bound read-write/.test(e.message) && /never writable/.test(e.message),
       "a crow.db profile is refused the same folder");
-    assert.equal(fdCount(), before, "no fd left open");
+    assert.deepEqual(scratchFds(), before, "no fd left open");
   } finally {
     rmSync(link, { force: true });
     rmSync(target, { recursive: true, force: true });
+  }
+});
+
+// ---- ADDON_TOKEN_DIRS: a repo-sourced profile only -----------------------
+
+test("an ADDON_TOKEN_DIRS entry applies only to a profile whose source is the repo copy", () => {
+  // The shipped table is empty by design, so the lookup is fed the same shape
+  // through the injected table.
+  const tokenDir = mk(HOME, ".local", "share", "acme");
+  const out = join(tokenDir, "out.json");
+  writeFileSync(out, "{}");
+  const outReal = realpathSync(out);
+  const files = { read: [], write: [{ from: "ACME_OUT", path: out, source: "owner" }], oauthDir: null, state: [] };
+  const tokenDirsTable = { acme: [".local/share/acme"] };
+  const bound = (plan) => fdOps(plan.args).some((q) => q[0] === "--bind-fd" && q[2] === outReal);
+  try {
+    const fromRepo = planOf({ tokenDirsTable, profile: profileOf({ source: "repo", files }) });
+    try {
+      assert.ok(bound(fromRepo), "a repo-sourced profile binds the token dir file: " + JSON.stringify(fromRepo.refused));
+      assert.ok(!fromRepo.refused.some((r) => r.path === out), "and refuses nothing for it");
+    } finally { closePlan(fromRepo); }
+
+    // Any other source (or none) gets no token dir: a hidden entry of the home
+    // stays unwritable.
+    for (const source of ["installed", undefined]) {
+      const other = planOf({ tokenDirsTable, profile: profileOf({ source, files }) });
+      try {
+        assert.ok(other.refused.some((r) => r.path === out && /hidden entry of the home/.test(r.reason)),
+          "source " + JSON.stringify(source) + ": " + JSON.stringify(other.refused));
+        assert.ok(!bound(other), "source " + JSON.stringify(source) + " does not bind it");
+      } finally { closePlan(other); }
+    }
+  } finally {
+    rmSync(tokenDir, { recursive: true, force: true });
+  }
+});
+
+// ---- nothing under the data dir except the add-on's own folder -----------
+
+test("nothing under the data dir is a bind source except this add-on's own folder (data dir outside the Crow home)", () => {
+  const OUT_DATA = mk(T, "var-data");
+  const ownFolder = mk(OUT_DATA, "acme");
+  mk(OUT_DATA, "other");
+  writeFileSync(join(OUT_DATA, "other", "secret.txt"), "");
+  for (const f of ["crow.db", "crow.db-wal", "crow.db-shm", "tasks.db", "backups"]) writeFileSync(join(OUT_DATA, f), "");
+  const ownFile = join(ownFolder, "x.json");
+  writeFileSync(ownFile, "{}");
+  const OTHER_DATA_REASON = /another add-on's data, or Crow's own data/;
+
+  const planWith = (mode, p, over = {}) => {
+    const files = mode === "read"
+      ? { read: [{ from: "P", path: p, source: "owner" }], write: [], oauthDir: null, state: [] }
+      : { read: [], write: [{ from: "P", path: p, source: "owner" }], oauthDir: null, state: [] };
+    return planOf({ dataDir: OUT_DATA, profile: profileOf({ files, ...over }) });
+  };
+  const boundByFd = (plan, p) => fdOps(plan.args).some((q) => q[2] === realpathSync(p));
+
+  try {
+    // A non-crowDb profile: another add-on's data, the DBs beside it and the
+    // data dir's own entries are never bind sources.
+    for (const [label, mode, p] of [
+      ["an owner-set read of another add-on's data", "read", join(OUT_DATA, "other", "secret.txt")],
+      ["an owner-set write of tasks.db", "write", join(OUT_DATA, "tasks.db")],
+      ["an owner-set read of crow.db", "read", join(OUT_DATA, "crow.db")],
+    ]) {
+      const plan = planWith(mode, p);
+      try {
+        assert.ok(plan.refused.some((r) => r.path === p && OTHER_DATA_REASON.test(r.reason)),
+          label + " is refused: " + JSON.stringify(plan.refused));
+        assert.ok(!boundByFd(plan, p), label + " is not bound");
+      } finally { closePlan(plan); }
+    }
+
+    // A crow.db profile keeps its data-dir bind and its masks unchanged, and
+    // the DB files beside the add-on's own folder stay readable.
+    const dbPlan = planOf({ dataDir: OUT_DATA, profile: profileOf({ crowDb: true }) });
+    try {
+      const op = pairs(dbPlan.args).find((q) => q[0] === "--bind-fd" && q[2] === realpathSync(OUT_DATA));
+      assert.ok(op, "the data dir itself is bound by fd");
+      assert.equal(dbPlan.fds.find((f) => String(f.childFd) === op[1]).role, "crow-data");
+      for (const p of ["tasks.db", "backups", "other"]) assert.ok(masked(dbPlan.args, join(OUT_DATA, p)), p + " masked");
+      for (const p of ["crow.db", "crow.db-wal", "crow.db-shm", "acme"]) assert.ok(!masked(dbPlan.args, join(OUT_DATA, p)), p + " kept");
+    } finally { closePlan(dbPlan); }
+
+    const dbRead = planWith("read", join(OUT_DATA, "crow.db"), { crowDb: true });
+    try {
+      assert.ok(!dbRead.refused.some((r) => OTHER_DATA_REASON.test(r.reason)),
+        "a crow.db profile may read crow.db: " + JSON.stringify(dbRead.refused));
+      assert.ok(boundByFd(dbRead, join(OUT_DATA, "crow.db")), "and it is bound read-only by fd");
+    } finally { closePlan(dbRead); }
+
+    // The add-on's own folder below the data dir is still a bind source.
+    const ownPlan = planWith("write", ownFile);
+    try {
+      assert.ok(boundByFd(ownPlan, ownFile), "its own data file is bound: " + JSON.stringify(ownPlan.refused));
+      assert.ok(!ownPlan.refused.some((r) => OTHER_DATA_REASON.test(r.reason)), "nothing of the data rule fires for it");
+    } finally { closePlan(ownPlan); }
+
+    // The same with the data dir INSIDE the Crow home (the existing layout).
+    const insideOwn = planOf();
+    try {
+      assert.ok(fdOps(insideOwn.args).some((q) => q[2] === ADDON_DATA), "the own data folder is still bound");
+    } finally { closePlan(insideOwn); }
+
+    const insideOther = planOf({
+      profile: profileOf({ files: { read: [{ from: "P", path: join(DATA, "other", ".cache"), source: "owner" }], write: [], oauthDir: null, state: [] } }),
+    });
+    try {
+      assert.ok(insideOther.refused.some((r) => r.path === join(DATA, "other", ".cache") && OTHER_DATA_REASON.test(r.reason)),
+        "another add-on's folder inside the home data dir is refused: " + JSON.stringify(insideOther.refused));
+      assert.ok(!fdOps(insideOther.args).some((q) => q[2] === join(DATA, "other", ".cache")), "and not bound");
+    } finally { closePlan(insideOther); }
+
+    const insideDb = planOf({ profile: profileOf({ crowDb: true }) });
+    try {
+      assert.ok(pairs(insideDb.args).some((q) => q[0] === "--bind-fd" && q[2] === DATA), "the data dir bind is unchanged");
+      assert.ok(masked(insideDb.args, join(DATA, "tasks.db")) && !masked(insideDb.args, join(DATA, "crow.db")), "the masks are unchanged");
+    } finally { closePlan(insideDb); }
+  } finally {
+    rmSync(OUT_DATA, { recursive: true, force: true });
+  }
+});
+
+// ---- a folder that contains the data dir is never a bind source ---------
+
+test("a folder that contains the data dir is refused for a read and a write; a sibling folder is not", () => {
+  const MEDIA = mk(T, "srv", "media");
+  const OUT_DATA = mk(MEDIA, "crow-data");
+  mk(OUT_DATA, "acme");
+  const SIBLING = mk(T, "srv", "other");
+  const siblingFile = join(SIBLING, "notes.txt");
+  writeFileSync(siblingFile, "");
+  const OTHER_DATA_REASON = /another add-on's data, or Crow's own data/;
+  const planWith = (mode, p) => planOf({
+    dataDir: OUT_DATA,
+    profile: profileOf({
+      files: mode === "read"
+        ? { read: [{ from: "P", path: p, source: "owner" }], write: [], oauthDir: null, state: [] }
+        : { read: [], write: [{ from: "P", path: p, source: "owner" }], oauthDir: null, state: [] },
+    }),
+  });
+  const boundByFd = (plan, p) => fdOps(plan.args).some((q) => q[2] === realpathSync(p));
+
+  try {
+    for (const mode of ["read", "write"]) {
+      // An ancestor of the data dir would hand over every add-on's folder and
+      // Crow's own DB through one bind.
+      const plan = planWith(mode, MEDIA);
+      try {
+        assert.ok(plan.refused.some((r) => r.path === MEDIA && OTHER_DATA_REASON.test(r.reason)),
+          mode + ": the containing folder is refused: " + JSON.stringify(plan.refused));
+        assert.ok(!boundByFd(plan, MEDIA), mode + ": never bound by fd");
+        assert.ok(!pathSources(plan.args).includes(realpathSync(MEDIA)), mode + ": never a path-bind source");
+      } finally { closePlan(plan); }
+
+      // A folder beside the data dir says nothing about it.
+      const sibling = planWith(mode, siblingFile);
+      try {
+        assert.ok(!sibling.refused.some((r) => OTHER_DATA_REASON.test(r.reason)),
+          mode + ": the sibling draws no data-dir refusal: " + JSON.stringify(sibling.refused));
+        assert.ok(boundByFd(sibling, siblingFile), mode + ": the sibling is bound");
+      } finally { closePlan(sibling); }
+    }
+  } finally {
+    rmSync(join(T, "srv"), { recursive: true, force: true });
+  }
+});
+
+// ---- the autostart/systemd rule is about the inside of the home ----------
+
+test("the autostart/systemd rule looks only at the part of a path inside the home", () => {
+  // A data dir below a folder named `systemd`, outside the home: still bound.
+  const OUT_DATA = mk(T, "systemd", "data");
+  mk(OUT_DATA, "acme");
+  const dataPlan = planOf({ dataDir: OUT_DATA });
+  try {
+    assert.ok(fdOps(dataPlan.args).some((q) => q[0] === "--bind-fd" && q[2] === realpathSync(join(OUT_DATA, "acme"))),
+      "the own data folder is still bound: " + JSON.stringify(dataPlan.refused));
+  } finally { closePlan(dataPlan); }
+
+  const inside = join(mk(HOME, "projects", "systemd"), "out.txt");
+  const outsideDir = mk(T, "autostart");
+  const outside = join(outsideDir, "out.txt");
+  writeFileSync(inside, "");
+  writeFileSync(outside, "");
+  const plan = planOf({
+    profile: profileOf({
+      files: {
+        read: [],
+        write: [{ from: "IN", path: inside, source: "owner" }, { from: "OUT", path: outside, source: "owner" }],
+        oauthDir: null,
+        state: [],
+      },
+    }),
+  });
+  try {
+    assert.ok(plan.refused.some((r) => r.path === inside && /autostart or systemd/.test(r.reason)),
+      "a systemd component inside the home is refused: " + JSON.stringify(plan.refused));
+    assert.ok(!plan.refused.some((r) => r.path === outside), "outside the home the rule does not fire: " + JSON.stringify(plan.refused));
+    assert.ok(fdOps(plan.args).some((q) => q[2] === realpathSync(outside)), "and the file is bound");
+  } finally {
+    closePlan(plan);
+    rmSync(join(HOME, "projects"), { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
   }
 });

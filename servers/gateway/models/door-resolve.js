@@ -20,6 +20,7 @@ import { isIP } from "node:net";
 import { isExternalEngine } from "../../shared/provider-engine.js";
 import { classifyIp } from "../../shared/ip-classify.js";
 import { forwardedAddrs } from "../../shared/peer-class.js";
+import { isAddonRelayAddr } from "../../shared/bot-doors.js";
 
 export const DOOR_PROVIDER_HEADER = "x-crow-provider";
 export const DOOR_HOP_HEADER = "x-crow-door-hop";
@@ -144,8 +145,12 @@ export function listDoorModels(providers = {}) {
   return out.sort((a, b) => a.id.localeCompare(b.id));
 }
 
-/** Loopback or the tailnet (Tailscale CGNAT 100.64.0.0/10, ULA fd7a:115c:a1e0::/48). */
+/** Loopback or the tailnet (Tailscale CGNAT 100.64.0.0/10, ULA fd7a:115c:a1e0::/48).
+ * A walled add-on's relay mark (127.0.78.1) is loopback by address but is never
+ * a trusted source: it is a socket this instance's relay opened for an add-on,
+ * in any spelling the kernel may report it. */
 export function isTrustedDoorSource(addr) {
+  if (isAddonRelayAddr(addr)) return false;
   const a = String(addr || "").replace(/^::ffff:/i, "");
   if (a === "::1" || /^127\./.test(a)) return true;
   const m = a.match(/^100\.(\d+)\.\d+\.\d+$/);
