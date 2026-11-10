@@ -371,7 +371,7 @@ function composeSpecSchema() {
  *   db() → db client, createNotification, consumeToken, musicConfig(), fetchImpl.
  */
 export function createSunvoxServer(inject = {}) {
-  const server = new McpServer({ name: "sunvox-studio", version: "0.2.0" });
+  const server = new McpServer({ name: "sunvox-studio", version: "0.2.3" });
   let lazy = null;
   const app = async () => (lazy ||= await appDeps());
   const deps = {

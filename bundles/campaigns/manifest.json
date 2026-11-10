@@ -1,7 +1,7 @@
 {
   "id": "campaigns",
   "name": "Campaigns",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Social media campaign manager — draft, schedule, and publish posts across platforms (starting with Reddit)",
   "type": "mcp-server",
   "author": "Crow",
@@ -11,7 +11,7 @@
   "server": {
     "command": "node",
     "args": ["server/index.js"],
-    "envKeys": ["CROW_CAMPAIGNS_ENCRYPTION_KEY"]
+    "envKeys": ["CROW_CAMPAIGNS_ENCRYPTION_KEY", "AI_PROVIDER", "AI_API_KEY", "AI_MODEL", "AI_BASE_URL"]
   },
   "panel": "panel/campaigns.js",
   "panelRoutes": "panel/routes.js",
