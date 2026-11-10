@@ -822,6 +822,33 @@ test("vikunja: the compose carries the public URL Vikunja 2.8 aborts without, an
   assert.match(compose, /VIKUNJA_SERVICE_ENABLEREGISTRATION=\$\{VIKUNJA_ENABLE_REGISTRATION:-true\}/);
 });
 
+/** The compose text of one service: from its 2-space key to the next top-level service. */
+function serviceText(compose, name) {
+  const start = compose.search(new RegExp(`^  ${name}:$`, "m"));
+  if (start < 0) return null;
+  const rest = compose.slice(start);
+  const next = rest.slice(1).search(/^ {2}\S+:$/m);
+  return next < 0 ? rest : rest.slice(0, next + 1);
+}
+
+test("vikunja: a one-shot step hands both volumes to uid 1000 before Vikunja starts", () => {
+  // Vikunja is distroless and Docker creates named volumes owned by root, so the app
+  // cannot write its files or database until something chowns them. That step is a
+  // separate service the compose runs once, before the app (read as text: no YAML dep).
+  const compose = readFileSync(join(B("vikunja"), "docker-compose.yml"), "utf8");
+  const helper = serviceText(compose, "vikunja-volume-owner");
+  assert.ok(helper, "the one-shot volume-owner service is declared");
+  assert.match(helper, /image: busybox:\S+@sha256:[0-9a-f]{64}/, "its image is pinned by digest");
+  assert.match(helper, /^\s+network_mode: none$/m, "it needs no network");
+  assert.match(helper, /^\s+restart: "no"$/m, "it runs once and is not restarted");
+  assert.match(helper, /command: \["chown", "1000:1000", "\/app\/vikunja\/files", "\/db"\]/, "it chowns both volume targets");
+  assert.match(helper, /^\s+- vikunja-data:\/app\/vikunja\/files$/m, "the files volume is the one Vikunja mounts");
+  assert.match(helper, /^\s+- vikunja-db:\/db$/m, "and so is the database volume");
+  const app = serviceText(compose, "vikunja");
+  assert.ok(app, "the app service is declared");
+  assert.match(app, /depends_on:\n\s+vikunja-volume-owner:\n\s+condition: service_completed_successfully/, "Vikunja starts only once the helper has finished");
+});
+
 // ── nothing may outlive the protocol timeout ──────────────────────────────────────
 
 /** Every per-request bound a script hands its tools: host `timeout`, curl max-time, wget -T,

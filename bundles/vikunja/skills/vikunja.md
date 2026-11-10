@@ -24,7 +24,9 @@ Crow's **Settings → Passwords**. Immediately afterwards Crow turns registratio
 public registration page stops accepting new accounts. Do not reopen it: add more people
 from Vikunja's own admin tools (its user management) once you are signed in as `admin`.
 
-If this install was made before Crow did that, its registration page may still be open: set
+If this install was made before Crow did that, its registration page may still be open. If Fix-it
+shows a Vikunja card, press **Apply the update** on it first — Crow holds the newer compose (the
+one that adds Vikunja's one-shot volume-ownership step) until you do. Then set
 `VIKUNJA_ENABLE_REGISTRATION=false` on its Extensions card and press **Restart**. A script
 that finds accounts already in place leaves everything alone (it never resets an existing
 login), so an install set up by hand keeps the login the operator made.

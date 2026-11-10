@@ -1261,6 +1261,34 @@ test("an ok run Crow could not confirm keeps that sentence on the cleared card",
   assert.equal(after.querySelector(".ext-firstadmin__msg").textContent, reason, "a cleared card is never a false 'it works'");
 });
 
+test("a failed after-step shows its own warning on the cleared card, next to the saved line", async () => {
+  const afterFailure = "Crow could not apply the follow-up change to Frigate, so registration may still be open: press Restart on the Extensions card.";
+  const message = "Crow created Frigate's admin login (admin) and saved it in Settings → Passwords.";
+  const { document, settle, click } = boot(renderCards([CARD]), {
+    fetchImpl: () => ({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, result: "ok", after: "recreate-failed: port is already allocated", afterFailure, message, log: [] }) }),
+  });
+  const card = document.querySelector('.ext-firstadmin[data-addon-id="frig"]');
+  click(card.querySelector(".ext-firstadmin-auto"));
+  await settle();
+  const after = document.querySelector('.ext-firstadmin[data-addon-id="frig"]');
+  assert.equal(after.querySelector(".ext-firstadmin__saved").textContent, t("bundles.firstAdmin.savedInPasswords", "en"));
+  const note = after.querySelector(".ext-firstadmin__msg");
+  assert.ok(note, "the warning is shown, not swallowed");
+  assert.equal(note.textContent, afterFailure);
+  assert.match(after.textContent, /registration may still be open/);
+});
+
+test("an ok run that closed registration shows the saved line and no warning", async () => {
+  const { document, settle, click } = boot(renderCards([CARD]), {
+    fetchImpl: () => ({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, result: "ok", after: "applied", message: "saved", log: [] }) }),
+  });
+  const card = document.querySelector('.ext-firstadmin[data-addon-id="frig"]');
+  click(card.querySelector(".ext-firstadmin-auto"));
+  await settle();
+  const after = document.querySelector('.ext-firstadmin[data-addon-id="frig"]');
+  assert.equal(after.querySelector(".ext-firstadmin__msg"), null, "nothing to warn about");
+});
+
 test("a run that did not create the login shows the server's sentence and keeps the card", async () => {
   const message = "Crow could not set up Frigate's admin login: the app is not answering. Use 'Set it up for me' on the Extensions card.";
   const { document, settle, click } = boot(renderCards([CARD]), {

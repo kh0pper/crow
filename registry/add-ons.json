@@ -7495,7 +7495,7 @@
         },
         "user": "admin",
         "secretEnv": "VIKUNJA_ADMIN_PASSWORD",
-        "note": "If you made Vikunja's account before this version, turn registration off: set VIKUNJA_ENABLE_REGISTRATION=false on its Extensions card and press Restart."
+        "note": "If you made Vikunja's account before this version, turn registration off: if Fix-it shows a Vikunja card, press Apply the update first, then set VIKUNJA_ENABLE_REGISTRATION=false on its Extensions card and press Restart."
       },
       "refreshFiles": [
         "docker-compose.yml"

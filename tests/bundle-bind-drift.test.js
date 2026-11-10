@@ -657,6 +657,47 @@ describe("an image-change hold", () => {
     assert.equal(registry.getRemedy(APPLY_UPDATE_ACTION_ID), restoreCompose, "the apply action is the owner-checked compose apply");
   });
 
+  test("an ADDED service is named as a helper step, never as an image swap", async () => {
+    const id = "drift-image-added";
+    bundle(id, IMAGE_HELD_COMPOSE);
+    put(home, `bundles/${id}/.crow-compose.image-change`, `${JSON.stringify([
+      { service: "vikunja-volume-owner", from: null, to: "busybox:1.38.0@sha256:a46257e0" },
+    ])}\n`);
+    setInstalled([{ id }]);
+    const store = fakeStore();
+    const runner = dockerStub({ inspect: inspected({ "5000/tcp": [{ HostIp: "127.0.0.1", HostPort: "8555" }] }) });
+
+    await detector.check(store, { crowHome: home, runner, log: silent });
+
+    const card = store.upserts.find((c) => c.source === COMPOSE_IMAGE_CHANGE_SOURCE);
+    assert.ok(card, "the hold still raises its card");
+    assert.equal(card.why, "Crow keeps Web on its current settings because the update would also add a helper step "
+      + "\"vikunja-volume-owner\" that uses the image \"busybox:1.38.0@sha256:a46257e0\". "
+      + "Back up its data, then press 'Apply the update' to switch, or keep it as it is.");
+    assert.doesNotMatch(card.why, /may be older than what is running/, "an added step has no running image to be older than");
+    assert.doesNotMatch(card.why, /tightens how Web is published/, "the added step publishes nothing");
+  });
+
+  test("a REMOVED service is named as a step the update drops", async () => {
+    const id = "drift-image-removed";
+    bundle(id, IMAGE_HELD_COMPOSE);
+    put(home, `bundles/${id}/.crow-compose.image-change`, `${JSON.stringify([
+      { service: "web-legacy-helper", from: "busybox:1.36.0", to: null },
+    ])}\n`);
+    setInstalled([{ id }]);
+    const store = fakeStore();
+    const runner = dockerStub({ inspect: inspected({ "5000/tcp": [{ HostIp: "127.0.0.1", HostPort: "8555" }] }) });
+
+    await detector.check(store, { crowHome: home, runner, log: silent });
+
+    const card = store.upserts.find((c) => c.source === COMPOSE_IMAGE_CHANGE_SOURCE);
+    assert.ok(card, "the hold still raises its card");
+    assert.equal(card.why, "Crow keeps Web on its current settings because the update would also remove the step "
+      + "\"web-legacy-helper\". Back up its data, then press 'Apply the update' to switch, or keep it as it is.");
+    assert.doesNotMatch(card.why, /may be older than what is running/);
+    assert.doesNotMatch(card.why, /tightens how Web is published/);
+  });
+
   test("the card resolves itself once the note is gone", async () => {
     const id = "drift-image-clean";
     bundle(id, IMAGE_HELD_COMPOSE);

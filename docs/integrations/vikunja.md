@@ -29,7 +29,7 @@ Or install from the **Extensions** panel in the Crow's Nest.
 
 Vikunja will be available at `http://your-server:3456`. Crow creates the account `admin` itself right after the install, keeps its password in **Settings** → **Passwords**, then turns registration off and restarts Vikunja so the page stops accepting new accounts. More people are added from Vikunja's own admin tools, not from a public sign-up page.
 
-If you set Vikunja up before this version, its registration page may still be open: set `VIKUNJA_ENABLE_REGISTRATION=false` on its Extensions card and press **Restart**.
+If you set Vikunja up before this version, its registration page may still be open. If Fix-it shows a Vikunja card, press **Apply the update** on it first — Crow holds the newer compose (with Vikunja's one-shot volume-ownership step) until you do. Then set `VIKUNJA_ENABLE_REGISTRATION=false` on its Extensions card and press **Restart**.
 
 After that, generate an API token from **Settings** > **API Tokens**.
 

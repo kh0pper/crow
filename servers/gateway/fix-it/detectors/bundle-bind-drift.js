@@ -139,13 +139,28 @@ export function composeImageChangeTitle(name) {
  * that image may be older than the one running (a downgrade can migrate the data on
  * the next restart), so Crow kept the old file. "Apply the update" is the owner's way
  * to take it; the restart card then appears as usual.
+ *
+ * The sentence follows the kind of change, because "a new image may be older than the
+ * one running" is only true of a service whose image is swapped. A service the update
+ * ADDS (`from` is null: a helper step such as Vikunja's one-shot volume owner) is named
+ * as an addition, one it REMOVES (`to` is null) as a removal. The port sentence belongs
+ * to the image swap this card was built for (the tightened bind that comes with it); an
+ * added or removed step does not publish the app differently, so it is left out there.
  */
 export function composeImageChangeBody(name, change) {
-  const from = change?.from || "none";
-  const to = change?.to || "none";
-  return `Crow keeps ${name} on its current settings because the update would also change its image (${from} → ${to}; it may be older than what is running). `
+  const from = change?.from || null;
+  const to = change?.to || null;
+  const service = change?.service || "a helper step";
+  const tail = "Back up its data, then press 'Apply the update' to switch, or keep it as it is.";
+  if (!from && to) {
+    return `Crow keeps ${name} on its current settings because the update would also add a helper step "${service}" that uses the image "${to}". ${tail}`;
+  }
+  if (from && !to) {
+    return `Crow keeps ${name} on its current settings because the update would also remove the step "${service}". ${tail}`;
+  }
+  return `Crow keeps ${name} on its current settings because the update would also change its image (${from || "none"} → ${to || "none"}; it may be older than what is running). `
     + `The update also tightens how ${name} is published. `
-    + "Back up its data, then press 'Apply the update' to switch, or keep it as it is.";
+    + tail;
 }
 
 function readJson(path) {

@@ -4211,7 +4211,10 @@ export default function bundlesRouter() {
     // "Crow creates, then closes": the manifest's after-step runs only once the app holds
     // Crow's password. Its own failure is reported, never treated as the setup's: the login
     // is saved either way.
+    const name = manifest?.name || bundleId;
+    const installId = entry.installedAt || entry.installed_at || null;
     let after = null;
+    let afterResult = null;
     const log = [...(out.log || [])];
     if (out.result === "ok" && firstAdminAfterPlan(manifest)) {
       const step = await applyFirstAdminAfter({
@@ -4221,8 +4224,23 @@ export default function bundlesRouter() {
         recreate: recreateBundleGuarded,
       });
       if (step.line) log.push(step.line);
-      if (!step.ok) log.push(firstAdminAfterFailureSentence(manifest?.name || bundleId));
+      if (!step.ok) log.push(firstAdminAfterFailureSentence(name));
       after = step.outcome;
+      afterResult = { ok: step.ok, outcome: step.outcome };
+    }
+    // A follow-up step that failed leaves the app's door open while the card now reads as
+    // finished, so it rings the same one bell the install path rings for this install. It is
+    // stamped per install (an install that already rang stays silent — the card sentence is
+    // the answer there); a follow-up that succeeded rings nothing, as on the install path.
+    if (afterResult && !afterResult.ok) {
+      await reportFirstAdminNotice({
+        bundleId,
+        manifest,
+        bundleName: name,
+        installId,
+        autoResult: out.result,
+        afterResult,
+      });
     }
     // The card shows this sentence as-is; it never carries the password.
     res.json({
@@ -4230,7 +4248,7 @@ export default function bundlesRouter() {
       result: out.result,
       message: firstAdminResultMessage({
         result: out.result,
-        name: manifest?.name || bundleId,
+        name,
         user: typeof manifest?.firstAdmin?.user === "string" ? manifest.firstAdmin.user : null,
         reason: out.reason || null,
       }),
@@ -4239,6 +4257,9 @@ export default function bundlesRouter() {
       ...(out.reason ? { reason: out.reason } : {}),
       // The after-step's own plain outcome (absent when this app declares none).
       ...(after ? { after } : {}),
+      // ...and, when it did not finish, the sentence the card shows so a failed follow-up
+      // never looks like success.
+      ...(afterResult && !afterResult.ok ? { afterFailure: firstAdminAfterFailureSentence(name) } : {}),
       log,
     });
   });

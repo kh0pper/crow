@@ -36,7 +36,7 @@
     },
     "user": "admin",
     "secretEnv": "VIKUNJA_ADMIN_PASSWORD",
-    "note": "If you made Vikunja's account before this version, turn registration off: set VIKUNJA_ENABLE_REGISTRATION=false on its Extensions card and press Restart."
+    "note": "If you made Vikunja's account before this version, turn registration off: if Fix-it shows a Vikunja card, press Apply the update first, then set VIKUNJA_ENABLE_REGISTRATION=false on its Extensions card and press Restart."
   },
   "refreshFiles": ["docker-compose.yml"],
   "notes": "Self-host via Docker (uses built-in SQLite) or connect to existing (set VIKUNJA_URL + VIKUNJA_API_TOKEN). Crow creates the account `admin` at install (password in Settings → Passwords) and then closes registration; add more people from Vikunja's own admin tools. API tokens live under Settings > API Tokens. The compose derives Vikunja's public URL from VIKUNJA_URL."

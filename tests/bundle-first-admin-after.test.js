@@ -540,6 +540,7 @@ test("the card's route reports the after-step's plain outcome and writes the val
       assert.equal(r.status, 200, JSON.stringify(r.body));
       assert.equal(r.body.result, "ok");
       assert.equal(r.body.after, "applied", "the response carries the plain outcome");
+      assert.equal("afterFailure" in r.body, false, "nothing failed, so no warning sentence");
       assert.equal(r.body.log.some((l) => l === 'after: "applied"'), true, "and the log line");
       assert.equal(installedEnv(id)[SWITCH], "false");
     });
@@ -564,10 +565,16 @@ test("the card's route says a failed recreate may have left registration open, a
       assert.equal(r.status, 200, JSON.stringify(r.body));
       assert.equal(r.body.ok, true, "the login was created; only the follow-up failed");
       assert.match(r.body.after, /^recreate-failed: /);
+      assert.equal(r.body.afterFailure, firstAdminAfterFailureSentence("Fx Route App"),
+        "the card gets the sentence, so a failed follow-up never looks like success");
+      assert.match(r.body.afterFailure, /registration may still be open: press Restart on the Extensions card/);
       assert.equal(r.body.log.some((l) => /registration may still be open: press Restart/.test(l)), true);
       assert.equal(r.body.message.includes("Settings → Passwords"), true, "the login sentence is unchanged");
     });
     assert.equal(saves.length, 1, "the password is kept by the keychain save");
+    const bells = await firstAdminBells(id);
+    assert.equal(bells.length, 1, "the failed follow-up rings the same one bell the install path rings");
+    assert.equal(bells[0].body, firstAdminAfterFailureSentence("Fx Route App"));
   } finally {
     unstubDocker();
   }
@@ -586,6 +593,7 @@ test("the route's answer carries no after field for an app that declares none", 
       const r = await post("/bundles/api/first-admin-auto", { bundle_id: id });
       assert.equal(r.status, 200, JSON.stringify(r.body));
       assert.equal("after" in r.body, false, "nothing to report");
+      assert.equal("afterFailure" in r.body, false, "and no follow-up warning either");
       assert.equal(installedEnv(id)?.[SWITCH], undefined, "and nothing written");
     });
     assert.equal(composeCalls.filter((a) => a.includes("--force-recreate")).length, 0, "and nothing restarted");

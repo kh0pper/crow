@@ -2148,6 +2148,15 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
                     why.textContent = d.reason;
                     card.appendChild(why);
                   }
+                  // The account is Crow's either way, but a follow-up step that did not take
+                  // (registration still open) must not look like a finished job.
+                  if (d.afterFailure) {
+                    var afterNote = document.createElement("p");
+                    afterNote.className = "ext-firstadmin__msg";
+                    afterNote.style.margin = "0";
+                    afterNote.textContent = d.afterFailure;
+                    card.appendChild(afterNote);
+                  }
                 }
                 return;
               }
