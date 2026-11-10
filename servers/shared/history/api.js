@@ -246,6 +246,35 @@ export async function listVersions(db, { itemType, itemId, limit = DEFAULT_LIMIT
   return rows.map(toVersion);
 }
 
+/* ---------------------------------------------------------- historySize */
+
+/**
+ * How big the version store is: the row count and an approximate byte size
+ * (SUM(LENGTH(snapshot_json))). The settings section's size line is the whole
+ * caller — a small machine needs to see the number rather than discover it when
+ * the disk fills (the version history design §6).
+ *
+ * APPROXIMATE, and it says so: LENGTH counts characters for a text column, so a
+ * snapshot of multi-byte text takes more bytes on disk than this adds up. It is
+ * the right order of magnitude, which is what the line is for.
+ *
+ * A store that has not run the history migration has no table: zeros, never a
+ * throw, so a settings page can never fail because history is not set up.
+ *
+ * @returns {Promise<{versions: number, bytes: number}>}
+ */
+export async function historySize(db) {
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT COUNT(*) AS versions, COALESCE(SUM(LENGTH(snapshot_json)), 0) AS bytes FROM item_versions",
+      args: [],
+    });
+    return { versions: Number(rows[0]?.versions) || 0, bytes: Number(rows[0]?.bytes) || 0 };
+  } catch {
+    return { versions: 0, bytes: 0 };
+  }
+}
+
 /* ---------------------------------------------------------- diffVersions */
 
 /** Is this snapshot value ordinary text (not a stored blob)? */

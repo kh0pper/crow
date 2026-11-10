@@ -141,6 +141,7 @@ Built-in panels live in `servers/gateway/dashboard/panels/`:
 | Onboarding | `panels/onboarding.js` | (hidden) | First-run setup wizard |
 | Connect | `panels/connect.js` | `/dashboard/connect` | Connect-a-client wizard + local MCP token management |
 | Fediverse Admin | `panels/fediverse.js` | `/dashboard/fediverse` | Fediverse/ActivityPub administration |
+| History | `panels/history.js` | `/dashboard/history` | Version history of covered content (implementation plan Task 5): an item's versions with Restore, the Jobs page with Undo this job, and the Trash. Hidden panel — reached from an item (a memory, a blog post, a context section) and from the two cross-cutting pages (`/dashboard/history/jobs`, `/dashboard/history/trash`); its renderer is `shared/history-view.js` and its settings section is `history` (retention, Trash period, erase sync, size line). Every route is owner-only, GET included, because an item's history is its content |
 
 The largest panels are **module directories** rather than single files: `panels/<name>/` holds `{css,data-queries,client,api-handlers,html}.js` (plus panel-specific modules like `editor.js`), with the top-level `panels/<name>.js` as a thin orchestrator that wires them together. `bot-builder`, `bot-board`, `extensions`, `contacts`, `messages`, and `nest` follow this pattern; smaller panels remain single files.
 

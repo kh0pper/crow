@@ -56,6 +56,7 @@ import remoteInvocationSection from "../settings/sections/remote-invocation.js";
 import remoteBotManagementSection from "../settings/sections/remote-bot-management.js";
 import otherCrowsSharingSection from "../settings/sections/other-crows-sharing.js";
 import botRuntimeSection from "../settings/sections/bot-runtime.js";
+import historySection from "../settings/sections/history.js";
 // NOTE: ai-provider.js + providers.js deleted; their responsibilities are
 // absorbed by llmSection.providers-tab (cloud add + registry view). The
 // four remaining profile sections (ai-profiles, tts-profiles, stt-profiles,
@@ -80,6 +81,7 @@ registerSettingsSection(remoteInvocationSection);
 registerSettingsSection(remoteBotManagementSection);
 registerSettingsSection(otherCrowsSharingSection);
 registerSettingsSection(botRuntimeSection);
+registerSettingsSection(historySection);
 registerSettingsSection(pairedInstancesSection);
 registerSettingsSection(syncConflictsSection);
 registerSettingsSection(sharedStorageSection);

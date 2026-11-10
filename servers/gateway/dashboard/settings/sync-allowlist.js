@@ -171,6 +171,13 @@ export const INSTANCE_SCOPE_KEYS = {
   // Done press and the per-install bell marker for each bundle. Both describe
   // THIS box's installs (a paired instance has its own), so they never sync.
   "first_admin_*":            "Per-install 'finish this app's setup' acknowledgements and bell markers (per install)",
+  // Version history (the version history design §4/§8): `history.erase_sync` is
+  // read DIRECTLY from the global dashboard_settings row (history/erase.js
+  // eraseSyncEnabled), so it has to be routed here rather than downgraded to an
+  // overrides row NO reader consults. History never syncs — a peer-supplied
+  // retention or erase gate would let one machine shorten another's memory — and
+  // nothing here matches SYNC_ALLOWLIST (test-enforced).
+  "history.*":                "Version history settings for this install (never synced)",
 };
 
 /**
