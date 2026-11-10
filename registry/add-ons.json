@@ -1516,6 +1516,12 @@
           "description": "Personal access token (Settings > Applications > Generate New Token)",
           "required": true,
           "secret": true
+        },
+        {
+          "name": "FORGEJO_DISABLE_REGISTRATION",
+          "description": "Leave true so nobody can sign themselves up: with self-registration on and no accounts yet, the first person to register on the web page becomes Forgejo's admin. Crow creates the admin (crow-admin); add other people from the admin panel. Set false only to let people register on their own.",
+          "default": "true",
+          "required": false
         }
       ],
       "ports": [
@@ -2108,6 +2114,12 @@
           "description": "Personal access token (Settings > Applications > Generate New Token)",
           "required": true,
           "secret": true
+        },
+        {
+          "name": "GITEA_DISABLE_REGISTRATION",
+          "description": "Leave true so nobody can sign themselves up: with self-registration on and no accounts yet, the first person to register on the web page becomes Gitea's admin. Crow creates the admin (crow-admin); add other people from the admin panel. Set false only to let people register on their own.",
+          "default": "true",
+          "required": false
         }
       ],
       "ports": [
