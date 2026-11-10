@@ -357,7 +357,8 @@ test("a walled hostile add-on reaches nothing it was not given", { skip, timeout
       assert.equal(visible.includes(process.pid), false, "this test process is not visible inside the wall");
       assert.ok(visible.length >= 1 && visible.length <= 4, "the wall runs a handful of processes, not the host's");
       const comms = result.pids.map((p) => p.comm).filter((c) => typeof c === "string");
-      for (const comm of comms) assert.match(comm, /^(bwrap|node|sh|cat|ls)$/);
+      // Node 24 names its main thread "MainThread", and /proc/<pid>/comm reads that.
+      for (const comm of comms) assert.match(comm, /^(bwrap|node|MainThread|sh|cat|ls)$/);
     });
 
     await t.test("after the fixture exits its cleanup runs, nothing survives, and the mode is unchanged", async () => {
