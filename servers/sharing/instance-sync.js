@@ -1452,6 +1452,73 @@ function eraseItemForId(table, id, lamportTs) {
   return item;
 }
 
+/**
+ * The local items one RESEARCH NOTE's erase names.
+ *
+ * A note is deleted by `uuid` on the wire (DELETE_KEY_POLICY.research_notes), so
+ * the uuid is what a peer's later write for that note arrives under — while the
+ * local rowid may differ between the two instances. So:
+ *
+ *   with a uuid    that note's live row here (if any), plus every item THIS
+ *                  instance's Trash holds whose versions carry that uuid;
+ *   without one    the id the event also carries (an old or hand-built event): the
+ *                  live row by id, and the id itself for the Trash lookup.
+ *
+ * THE ID IS ONLY TRUSTED WHEN NO UUID IS OFFERED (or when the uuid resolved the
+ * very same live row): the id is per instance, and a re-used one on this side would
+ * name an unrelated note. The gated delete still has its lamport predicate, but a
+ * version erase has no gate of its own — so the wrong id is never handed one.
+ *
+ * @param {object} db
+ * @param {{uuid?: string|null, id?: string|number|null}} wireRow
+ * @param {number|null} lamportTs the erase's lamport (the gate in each statement)
+ * @returns {Promise<{error?: string, items: object[]}>}
+ */
+async function noteEraseItems(db, wireRow, lamportTs) {
+  const uuid = typeof wireRow?.uuid === "string" && wireRow.uuid.trim() !== "" ? wireRow.uuid.trim() : null;
+  const wireId =
+    wireRow?.id === undefined || wireRow?.id === null || String(wireRow.id).trim() === "" ? null : String(wireRow.id);
+  const usableId = wireId !== null && /^\d+$/.test(wireId) ? wireId : null;
+
+  const live = [];
+  const lookups = [];
+  if (uuid) lookups.push({ sql: "SELECT id FROM research_notes WHERE uuid = ?", args: [uuid] });
+  if (!uuid && usableId) lookups.push({ sql: "SELECT id FROM research_notes WHERE id = ?", args: [usableId] });
+  for (const lookup of lookups) {
+    try {
+      const { rows } = await db.execute(lookup);
+      for (const found of rows) if (!live.includes(String(found.id))) live.push(String(found.id));
+    } catch (err) {
+      return { error: err.message, items: [] };
+    }
+  }
+
+  const ids = [...live];
+  // A note already in this instance's Trash has no live row, but it still has
+  // versions — by the uuid their snapshots carry, or (with no uuid in the event) by
+  // the id it named.
+  try {
+    const found = [];
+    if (uuid) {
+      const { rows } = await db.execute({
+        sql: `SELECT DISTINCT item_id FROM item_versions
+               WHERE item_type = 'research_note' AND json_extract(snapshot_json, '$.uuid') = ?`,
+        args: [uuid],
+      });
+      for (const row of rows) found.push(String(row.item_id));
+    } else if (usableId) {
+      found.push(usableId);
+    }
+    for (const itemId of found) if (!ids.includes(itemId)) ids.push(itemId);
+  } catch {
+    /* no history table (or no JSON1): the live row's history is still erased */
+  }
+
+  return {
+    items: ids.map((itemId) => (live.includes(itemId) ? eraseItemForId("research_notes", itemId, lamportTs) : { itemId })),
+  };
+}
+
 /** A memory row's own `source` (null when there is no such row). */
 async function memorySourceOf(db, id) {
   try {
@@ -1607,6 +1674,22 @@ export async function resolveQueuedRemoteErasure(db, { itemType, keys = [], lamp
       if (/^\d+$/.test(key)) push(eraseItemForId("crow_context", key, bound));
     }
     return { itemType, keys: wanted, items, protected: false };
+  }
+
+  if (itemType === "research_note") {
+    // A note's tombstone keys are its sync uuid (32 hex characters) and its local
+    // id, in that order (erase.js's erasureKeys). Re-resolve from them: the uuid is
+    // the identity, the id is the fallback for an event that carried only one.
+    const uuid = wanted.find((key) => !/^\d+$/.test(key)) ?? null;
+    const id = wanted.find((key) => /^\d+$/.test(key)) ?? null;
+    const resolved = await noteEraseItems(db, { uuid, id }, bound);
+    if (resolved.error) throw new Error(resolved.error);
+    return {
+      itemType,
+      keys: wanted,
+      items: resolved.items.length > 0 ? resolved.items : [{ itemId: null }],
+      protected: false,
+    };
   }
 
   return { itemType, keys: wanted, items: [], protected: false };
@@ -4817,6 +4900,11 @@ export class InstanceSyncManager {
    *     project uuid), because crow_context rowids are per instance. Its history
    *     is found by the live row's id and, for a section already in this
    *     instance's Trash, by the scope recorded in its versions' snapshots.
+   *   - research_notes: the note's sync uuid (its delete key, so a peer's later
+   *     write for it arrives under the same identity) plus the id the event also
+   *     carries. The local row is found by uuid, and a note already in this
+   *     instance's Trash by the uuid its versions' snapshots carry; the id is only
+   *     trusted when the event offered no uuid (see noteEraseItems).
    *
    * The apply itself (live-row delete + version erase + tombstone, one transaction,
    * and the pending marker a failure leaves for the sweep) is erase.js's
@@ -4846,7 +4934,50 @@ export class InstanceSyncManager {
       await this._applyMemoryErase(row, instanceId, lamportTs, meta);
       return;
     }
+    if (itemType === "research_note") {
+      await this._applyNoteErase(row, instanceId, lamportTs, meta);
+      return;
+    }
     await this._applyContextErase(row, instanceId, lamportTs, meta);
+  }
+
+  /**
+   * The research-note half of _applyErase: resolve the note here, then erase it.
+   *
+   * The wire identity is the uuid (the note's delete key) plus the id the event also
+   * carries; noteEraseItems turns that into the local items whose versions go and the
+   * lamport-gated statements that reach their live rows, so a local edit that landed
+   * after the erase survives (the gate is in the DELETE, inside the apply's one
+   * transaction, exactly as for a memory). No local-only gate applies: notes are not
+   * per-install content (research_notes has no starter/Maker Lab source class), so
+   * every note this instance holds is one a peer legitimately shares.
+   */
+  async _applyNoteErase(row, instanceId, lamportTs, meta) {
+    const itemType = "research_note";
+    const uuid = typeof row?.uuid === "string" && row.uuid.trim() !== "" ? row.uuid.trim() : null;
+    const resolved = await noteEraseItems(this.db, row ?? {}, lamportTs);
+    if (resolved.error) {
+      console.warn("[instance-sync] erase: research_notes lookup failed:", resolved.error);
+      return;
+    }
+    // The tombstone keys this instance records: the portable uuid, and every local id
+    // the erase really resolved (so a restore of one of them is refused by id too).
+    // With neither, the id the event named is all there is.
+    const keys = [];
+    if (uuid) keys.push(uuid);
+    for (const item of resolved.items) {
+      if (item?.itemId === null || item?.itemId === undefined) continue;
+      const key = String(item.itemId);
+      if (!keys.includes(key)) keys.push(key);
+    }
+    if (keys.length === 0 && row?.id !== undefined && row?.id !== null) keys.push(String(row.id));
+    const items = resolved.items.length === 0 ? [{ itemId: null }] : resolved.items;
+    const outcome = await applyRemoteErasure(this.db, { itemType, keys, items }, meta);
+    if (outcome.kept) {
+      console.warn(
+        `[instance-sync] kept a newer local research note instead of applying an erase from ${String(instanceId).slice(0, 12)}…`,
+      );
+    }
   }
 
   /**
@@ -4968,6 +5099,12 @@ export class InstanceSyncManager {
         itemId: isSummaryMemorySource(row.source) ? null : row.id,
         snapshot: { source: row.source ?? null },
       });
+    } else if (itemType === "research_note") {
+      // The same two keys the note's own erase uses (its uuid and its id). An event
+      // that names neither cannot be re-resolved: write no marker rather than one
+      // the sweep would report forever.
+      keys = erasureKeys(itemType, { itemId: row?.id ?? null, snapshot: { uuid: row?.uuid ?? null } });
+      if (keys.length === 0) return;
     } else {
       const mapped = await mapInboundContextProject(this.db, row ?? {});
       if (mapped.drop) return;
@@ -5019,6 +5156,11 @@ export class InstanceSyncManager {
           snapshot: { source: row.source ?? null },
         }),
       );
+    } else if (itemType === "research_note") {
+      // The uuid is the note's delete key and the id is what an ordinary write
+      // carries: an inbound insert/update for an erased note matches one or both.
+      keys.push(...erasureKeys(itemType, { itemId: row?.id ?? null, snapshot: { uuid: row?.uuid ?? null } }));
+      if (keys.length === 0) return false;
     } else {
       const mapped = await mapInboundContextProject(this.db, row ?? {});
       if (mapped.drop) return false; // the applier drops it anyway, for its own reason

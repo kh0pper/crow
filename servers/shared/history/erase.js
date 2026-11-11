@@ -183,6 +183,13 @@ export const PENDING_REMOTE_ERASURES_DDL = `
  * SYNCED_TABLES, so a blog post never rides a peer's feed and there is nothing
  * there to refuse.
  *
+ * research_notes is here because it IS a synced table (its delete key is `uuid`,
+ * DELETE_KEY_POLICY), so an erased note has to stay erased against a peer that
+ * still holds its copy: the erase rides the same `op: "erase"` entry on the note's
+ * own table, keyed by the uuid the note is deleted by on the wire (plus its local
+ * id — see erasureKeys). A note's ordinary writes go out by id; the uuid is the
+ * identity that survives both instances holding different rowids.
+ *
  * WHY AN `erase` OP ON THE ITEM'S OWN TABLE (and not a dedicated synced
  * `item_erasure` entity): an entry already carries (table, op, row), is signed
  * whole and is bound to the feed it arrives on, so an op is the smallest fit —
@@ -197,6 +204,7 @@ export const PENDING_REMOTE_ERASURES_DDL = `
 export const ERASURE_SYNC_TABLES = Object.freeze({
   memories: "memory",
   crow_context: "context_section",
+  research_notes: "research_note",
 });
 
 /** The covered item_type whose erasures ride `table`, or null. */
@@ -564,6 +572,13 @@ function erasedByOf(by) {
  *                    instance. The local item id is recorded as well, so a
  *                    restore of a version of that very row is refused without
  *                    having to reconstruct a snapshot first.
+ *   research_note    the note's SYNC uuid (research_notes is deleted by `uuid` on
+ *                    the wire — DELETE_KEY_POLICY — so that is the identity a peer's
+ *                    later write for the note arrives under) as well as the local
+ *                    item id (which is what its versions are keyed by, and what a
+ *                    restore of one of them is checked against). A version with no
+ *                    uuid to offer (a note restored before its uuid arrived) records
+ *                    the id alone, and the lookup side checks both shapes.
  *
  * A context section whose snapshot is unknown (no version left to read one from)
  * falls back to its local item id, and the lookup side checks both shapes, so the
@@ -595,6 +610,13 @@ export function erasureKeys(itemType, { itemId = null, snapshot = null } = {}) {
         project_uuid: snapshot.project_uuid ?? null,
       }),
     );
+  }
+  if (itemType === "research_note" && snapshot && typeof snapshot.uuid === "string") {
+    // The note's SYNC identity: research_notes is deleted by uuid on the wire, so
+    // that is the key a peer's later insert/update for the same note arrives under.
+    // Recorded first, because it is the one both instances agree on.
+    const uuid = snapshot.uuid.trim();
+    if (uuid !== "") keys.push(uuid);
   }
   if (itemId !== null && itemId !== undefined && String(itemId) !== "") keys.push(String(itemId));
   return keys;
@@ -838,6 +860,16 @@ function eraseWireRow(itemType, itemId, snapshot) {
     // CROW_CONTEXT_PROJECT_SYNC); OUTBOUND_TRANSFORMS strips it on the wire.
     if (snapshot.project_id !== undefined) row.project_id = snapshot.project_id ?? null;
     return row;
+  }
+  if (itemType === "research_note") {
+    // Both identities ride: the uuid is what a peer's later write for that note is
+    // keyed by, the id is what a peer that holds the same rowid (the ordinary case —
+    // notes are inserted by id) can match too. NO UUID, NO EVENT (the same rule as
+    // the memory/section cases): an erase that cannot name the note the way the peer
+    // does stays local, and its tombstone still refuses a re-create here.
+    const uuid = typeof snapshot.uuid === "string" ? snapshot.uuid.trim() : "";
+    if (uuid === "") return null;
+    return { id: itemId, uuid };
   }
   return null;
 }

@@ -40,10 +40,23 @@
  *   exactly as servers/memory/memory-write.js does for a memory and
  *   servers/memory/server.js does for a context section), which also MINTS the
  *   fresh lamport_ts the row needs to out-rank the peer's stale copy — `insert`
- *   for an un-delete, `update` otherwise. blog_posts is deliberately not one of
- *   them: it is not in instance-sync's SYNCED_TABLES, so a blog post restore is
- *   a plain local write and the result says `synced: false`. With no emitter
- *   (a test, a host with sync off) the write still happens and `synced` is false.
+ *   for an un-delete, `update` otherwise. With no emitter (a test, a host with
+ *   sync off) the write still happens and `synced` is false.
+ *
+ *   FOUR TYPES ARE THE EXCEPTION, FOR THE SAME REASON: their ordinary writes do
+ *   not emit today, so their restores are plain local writes and `synced` is
+ *   false (nothing is lost — the peer's own history is its own business, and the
+ *   value it holds is unaffected):
+ *     blog_posts    not in instance-sync's SYNCED_TABLES at all;
+ *     research_notes the research server's add/update/withdraw tools never call
+ *                   emitOrQueue (only the share-import path does), so a note edit
+ *                   does not ride the feed and neither does its restore;
+ *     kb_article    the knowledge-base bundle owns the table and emits nothing;
+ *     bot_def       the Bot Builder's definition writes emit nothing;
+ *     card          tasks.db has no sync feeds of its own (cards are
+ *                   instance-global, and item_versions is local-only).
+ *   emitRestored therefore returns false for them rather than inventing a
+ *   fourth wire shape.
  *
  *   THE FILING IS RESOLVED, NOT REPLAYED. project_spaces.id is a per-instance id
  *   and REUSED after a project is deleted, so a snapshot's project_id can name a
@@ -567,6 +580,11 @@ async function restoreArtifactVersion(db, { itemId, versionId, artifacts }, ctx)
     // baseVersion = the CURRENT version, so the restore becomes current when
     // nothing else moved (the store's compare-and-set makes it a proposal if it
     // did — the owner then decides, exactly as for an ordinary edit).
+    //
+    // changeNote says where the new version came from, in the same stored English
+    // the other notes use (the MCP tools write theirs — "The round's update
+    // landed." — and nothing localizes a change note today, so this adds no es
+    // string), and the version list shows it beside the version number.
     const art = await seams.store.requireAccess(db, actor, id);
     const result = await seams.store.addVersion(
       db,
@@ -576,7 +594,7 @@ async function restoreArtifactVersion(db, { itemId, versionId, artifacts }, ctx)
         source,
         actor,
         baseVersion: Number(art.current_version),
-        changeNote: null,
+        changeNote: `Restored from version ${n}`,
       },
       renderDeps,
     );
@@ -939,12 +957,65 @@ function resolveFiling(run, spec, snapshot, live) {
  */
 const KEEP_CURRENT = Object.freeze({
   memories: Object.freeze(["instance_id"]),
-  // A card's project filing is the same kind of pointer: project_spaces ids are
-  // per-instance and REUSED, tasks.db has no project_spaces to resolve one
-  // against, and a card that moved to another project must not be dragged back by
-  // restoring an old title. The CURRENT project is kept; the snapshot still says
-  // which project the version belonged to.
-  tasks_items: Object.freeze(["project_id"]),
+  // A CARD RESTORES CONTENT ONLY. Title, description and the plan fields
+  // (priority, due_date, phase, owner, tags) come back; everything that says what
+  // the card IS right now stays as it is:
+  //   status / completed_at's terminal state   a restore of an old title must not
+  //                                            reopen a card that is done, nor
+  //                                            mark a live one done because the
+  //                                            version predates its completion;
+  //   assigned_bot / bot_id / autonomy         who is working it, and with what
+  //                                            licence, is a decision someone made
+  //                                            after this version, not content;
+  //   project_id / parent_id / board_id        placement. project_spaces ids are
+  //                                            per-instance and REUSED, tasks.db has
+  //                                            no project_spaces to resolve one
+  //                                            against, and a card that moved to
+  //                                            another project (or under another
+  //                                            parent, or onto another board) must
+  //                                            not be dragged back.
+  // All of them stay IN the snapshot (covered.js), so History still SHOWS who was
+  // assigned and which column the card was in when that version was written — a
+  // restore just never replays them.
+  tasks_items: Object.freeze([
+    "project_id",
+    "status",
+    "assigned_bot",
+    "bot_id",
+    "autonomy",
+    "parent_id",
+    "board_id",
+  ]),
+});
+
+/**
+ * The timestamp column a restore must move, per table, the way that table's own
+ * write path does — as a raw SET expression (no bind arg).
+ *
+ * Only a card needs it: tasks_items.updated_at is what the board's client shows
+ * (routes/bot-board-api.js's `datetime(updated_at) AS updated_at`) and what the
+ * move/lane rails compare, and card-service's updateCard stamps it on every
+ * changed write (`sets.push("updated_at=datetime('now')")`). A restore that left
+ * it alone would change a card's content while every reader that watches the
+ * timestamp still saw the old one. The other covered tables leave their clocks
+ * untouched on purpose (a restore never rewinds a counter or a clock — see the
+ * module comment).
+ */
+const RESTORE_STAMPS = Object.freeze({
+  tasks_items: "updated_at = datetime('now')",
+});
+
+/**
+ * The board_mutations actor for a restore's owner: the same shape the dashboard
+ * writes for its own card edits (bot-board-api.js's DASHBOARD_ACTOR —
+ * `{kind:'human', id:null, jobId:null}`), because a restore from the History page
+ * IS an operator action there.
+ */
+const BOARD_MUTATION_ACTOR = Object.freeze({
+  owner: "human",
+  bot: "bot",
+  peer: "session",
+  system: "session",
 });
 
 /**
@@ -980,6 +1051,18 @@ const RESTORE_PROJECTIONS = Object.freeze({
  * or as its JSON TEXT (a snapshot written before that). Both are accepted; nothing
  * else is.
  *
+ * A NULL IN THE STORED PROJECTION MEANS "THE OLD VERSION HAD NO SUCH KEY".
+ * json_object('fallback', json_extract(definition, '$.fallback')) writes null when
+ * the key is absent, so a version taken before a key existed carries null for it.
+ * Writing that null back would ADD a key the bot never had — a definition a reader
+ * (the Bot Builder's own form, the engine) would then have to special-case — so a
+ * stored null is treated as absent and the LIVE key is left exactly as it is
+ * (absent stays absent). A key present with a real value is written, including an
+ * empty object or array. The one consequence worth naming: a definition that
+ * really did hold `"key": null` at that version restores as "leave the live key
+ * alone" rather than as a null, because the two shapes are indistinguishable in a
+ * projection.
+ *
  * A live definition that is not a JSON object cannot be merged without dropping
  * whatever text is there, so the restore is refused (`conflict`) rather than
  * half-applied: the operator repairs the definition and restores again.
@@ -1011,7 +1094,12 @@ function mergeBotDefinition(live, snapshot) {
   }
   const merged = { ...current };
   for (const key of BOT_DEFINITION_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(wanted, key)) merged[key] = wanted[key];
+    if (!Object.prototype.hasOwnProperty.call(wanted, key)) continue;
+    // See the doc comment: a stored null is the projection's "this version had no
+    // such key", so the live key is left untouched (absent stays absent, and a
+    // live value is never replaced by a null that only meant "unset then").
+    if (wanted[key] === null || wanted[key] === undefined) continue;
+    merged[key] = wanted[key];
   }
   return JSON.stringify(merged);
 }
@@ -1059,7 +1147,9 @@ function memoryWireRow(row) {
  * never throws anyway. Returns whether the row actually left this instance.
  *
  * A blog post is NOT synced (instance-sync's SYNCED_TABLES has no blog_posts), so
- * a plain local write is the whole story there and nothing is emitted.
+ * a plain local write is the whole story there and nothing is emitted; the same is
+ * true of the other three types whose ordinary writes emit nothing (research
+ * notes, KB articles and cards) — see the module header for the list.
  *
  * @returns {Promise<boolean>}
  */
@@ -1109,7 +1199,6 @@ const OWN_CODES = new Set([
   "unsupported",
   "untrusted",
   "unavailable",
-  "not_owner",
 ]);
 
 /**
@@ -1149,6 +1238,61 @@ function asHistoryError(err) {
     return historyError("conflict", err.message);
   }
   return err;
+}
+
+/**
+ * Record a CARD restore the way the board records its own edits.
+ *
+ * card-service.js's recordMutation is the board's single provenance write (verb,
+ * reporting actor, job id, and a per-field `{column: [old, new]}` diff), and every
+ * card mutation since Track 1 goes through it. The History restore cannot CALL it:
+ * updateCard is async and a restore is one synchronous transaction (nothing may
+ * await inside it), so this writes the same row, with the same shape, by hand —
+ * the INSERT statement is card-service's own.
+ *
+ * `actor_kind` follows board_mutations' CHECK (human | session | bot): an owner's
+ * restore is `human` with a null id, exactly as the dashboard's DASHBOARD_ACTOR
+ * writes it; a bot's is `bot` with its id; a peer's or a schedule's is `session`
+ * (the same choice decision-service.js's expiry makes for a write no person
+ * pressed). `job_id` is the History context's job (`session:<hash8>`, `card:<id>`, …).
+ *
+ * `detail` carries `restored_from_version` beside `fields`, and `fields` is the
+ * `{column: [old, new]}` map recordMutation already stores (each entry IS the
+ * [old, new] pair) — one diff vocabulary for the whole board rather than a second
+ * one only restore rows would use. Nothing renders detail_json today (the board's
+ * History strip shows verb, actor and time), so this is provenance for a reader to
+ * come.
+ *
+ * A store without board_mutations (a bare tasks.db that never ran migration 0004,
+ * a per-project card store) records nothing here: the restore itself still stands,
+ * which is the honest direction — losing provenance beats refusing the restore.
+ *
+ * @returns {boolean} whether a row was written
+ */
+function recordCardRestore(run, { itemId, ctx, versionId, row, values, columns, changed }) {
+  const boardItemId = Number(itemId);
+  if (!Number.isInteger(boardItemId)) return false;
+  const present = run({
+    sql: "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'board_mutations' LIMIT 1",
+    args: [],
+  });
+  if (present.rows.length === 0) return false;
+  const fields = {};
+  for (const column of changed) {
+    fields[column] = [row[column] ?? null, values[columns.indexOf(column)] ?? null];
+  }
+  run({
+    sql: "INSERT INTO board_mutations (item_id, verb, actor_kind, actor_id, job_id, detail_json) VALUES (?,?,?,?,?,?)",
+    args: [
+      boardItemId,
+      "update",
+      BOARD_MUTATION_ACTOR[ctx.authorKind] ?? "session",
+      ctx.authorId ?? null,
+      ctx.jobId ?? null,
+      JSON.stringify({ restored_from_version: Number(versionId), fields }),
+    ],
+  });
+  return true;
 }
 
 /** The item's newest version id, when it is newer than `watermark`; else null. */
@@ -1387,8 +1531,13 @@ export async function restoreVersion(
         if (changed.length === 0) return report({ newVersionId: null, unchanged: true, row: null, op: null });
 
         const watermark = maxVersionId(run);
+        // The stamp is a raw SET expression (see RESTORE_STAMPS): a card's restore
+        // has to move updated_at the way updateCard does, or every reader watching
+        // that timestamp misses the change.
+        const stamp = RESTORE_STAMPS[spec.table];
+        const setClauses = [...changed.map((c) => `${quote(c)} = ?`), ...(stamp ? [stamp] : [])];
         const sql =
-          `UPDATE ${quote(spec.table)} SET ${changed.map((c) => `${quote(c)} = ?`).join(", ")} ` +
+          `UPDATE ${quote(spec.table)} SET ${setClauses.join(", ")} ` +
           `WHERE ${quote(spec.idColumn)} = ?`;
         const args = [...changed.map((column) => values[columns.indexOf(column)]), itemId];
         const written = run({ sql, args });
@@ -1396,6 +1545,14 @@ export async function restoreVersion(
         // it — but a restore that updates nothing must never look like success.
         if (Number(written.rowsAffected || 0) === 0) {
           throw historyError("conflict", `${spec.table}/${itemId} disappeared while version ${id} was being restored`);
+        }
+        // A CARD's restore is a card change, so it is recorded on the board exactly
+        // as an ordinary edit is (one board_mutations row, in this same transaction).
+        // A re-created card (the INSERT path below) records none: that is the card
+        // coming back as itself, not an edit of what is there, and the version the
+        // restore wrote is the record of it.
+        if (spec.table === "tasks_items") {
+          recordCardRestore(run, { itemId, ctx, versionId: id, row, values, columns, changed });
         }
         const newVersionId = versionIdAfter(run, watermark, version.item_type, itemId);
         return report({ newVersionId, unchanged: false, row: readRow(run, spec, itemId), op: "update" });

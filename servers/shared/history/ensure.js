@@ -42,15 +42,22 @@
  * `crow`), and only that store's covered types are looked at: a card's table
  * lives in the instance-global tasks.db, whose own item_versions and triggers are
  * migration 0025's to install (a SQLite trigger cannot write across databases).
+ * The BOOT entry point below therefore runs this twice — once against crow.db,
+ * once against tasks.db (when that file exists), including the disarm of a stuck
+ * item_versions_erase on each — because one call can only see one file. The
+ * "has the migration applied" question is answered from crow.db's
+ * schema_migrations in both cases: the registry keeps ONE book for the instance.
  */
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
 import { resolveDbPath } from "../../db.js";
+import { tasksDbPath as defaultTasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import {
   COVERED,
   ITEM_VERSIONS_ERASE_DDL,
   ITEM_VERSIONS_TRASH_INDEX_SQL,
   STORE_CROW,
+  STORE_TASKS,
   guardTriggerDefs,
   tableColumns,
   triggerDefs,
@@ -84,6 +91,23 @@ const migrationRecorded = (db, migrationId = BASELINE_MIGRATION_ID) => {
 };
 
 /**
+ * The migration ids recorded as applied in ONE store's `schema_migrations` (an
+ * empty set when the table is absent).
+ *
+ * The registry keeps its bookkeeping in crow.db even for a migration that writes
+ * to tasks.db (scripts/migrations/runner.mjs: one `book` handle, the instance's
+ * dbPath), so tasks.db has NO schema_migrations of its own and must be told what
+ * has already run — see ensureHistoryTriggers's `baselineRecorded`.
+ */
+export function recordedMigrations(db) {
+  try {
+    return new Set(db.prepare("SELECT id FROM schema_migrations").all().map((row) => String(row.id)));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
  * Does this item type have a baseline yet? Either the migration that owns the
  * type (spec.migration — 0024 for memories/posts/sections, 0025 for the rest) is
  * recorded as applied, or a 'system' version (the baseline's author) of that item
@@ -110,10 +134,14 @@ const hasBaseline = (db, itemType, recorded) =>
  * none of those is a trigger, so none appears in `restored`.
  *
  * @param {import("better-sqlite3").Database} db
- * @param {{store?: string}} [opts] `store` names which store this handle IS
- *   (default `crow`): a crow.db handle must never look for tasks.db's table, and
- *   a type whose covered table lives in another store is left to that store's own
- *   ensure (migration 0025 installs the card triggers in tasks.db).
+ * @param {{store?: string, baselineRecorded?: (migrationId: string) => boolean}} [opts]
+ *   `store` names which store this handle IS (default `crow`): a crow.db handle must
+ *   never look for tasks.db's table, and a type whose covered table lives in another
+ *   store is left to that store's own ensure (migration 0025 installs the card
+ *   triggers in tasks.db). `baselineRecorded` answers "has this migration been
+ *   recorded as applied" for the store being ensured; it defaults to THIS handle's
+ *   own schema_migrations — which is right for crow.db and wrong for tasks.db, whose
+ *   registry rows live in crow.db (so the boot caller passes the crow.db set there).
  * @returns {{restored: string[], skipped: string[], awaitingBaseline: string[],
  *   disarmed: number}} `restored` is the trigger names this call created (empty on
  *   a healthy store); `skipped` is the covered tables left alone because they are
@@ -122,7 +150,7 @@ const hasBaseline = (db, itemType, recorded) =>
  *   capture is left to the migration because no baseline exists yet; `disarmed` is
  *   the number of erase-switch rows reset to 0.
  */
-export function ensureHistoryTriggers(db, { store = STORE_CROW } = {}) {
+export function ensureHistoryTriggers(db, { store = STORE_CROW, baselineRecorded = null } = {}) {
   const skipped = [];
   const awaitingBaseline = [];
   // Nothing to guard or capture yet: migration 0024 owns creation, and a store
@@ -211,7 +239,7 @@ export function ensureHistoryTriggers(db, { store = STORE_CROW } = {}) {
       skipped.push(spec.table);
       continue;
     }
-    if (!hasBaseline(db, itemType, migrationRecorded(db, spec.migration))) {
+    if (!hasBaseline(db, itemType, baselineRecorded ? baselineRecorded(spec.migration) : migrationRecorded(db, spec.migration))) {
       awaitingBaseline.push(spec.table);
       continue;
     }
@@ -235,50 +263,109 @@ export function ensureHistoryTriggers(db, { store = STORE_CROW } = {}) {
 }
 
 /**
- * Boot entry point: ensure against THIS instance's crow.db (CROW_DB_PATH →
- * <resolveDataDir()>/crow.db, exactly as the migration registry resolves it).
- * Called from servers/gateway/index.js immediately after the registry runs, so
- * a rebuilt table is covered by the same boot that rebuilt it.
+ * Boot entry point: ensure against THIS instance's TWO history stores.
  *
- * Never creates the database file: if crow.db is absent the schema guard and the
+ *   crow.db   CROW_DB_PATH → <resolveDataDir()>/crow.db, exactly as the migration
+ *             registry resolves it;
+ *   tasks.db  tasksDbPath() (CROW_TASKS_DB_PATH, else <data dir>/tasks.db) — the
+ *             instance-global store the board reads. It is a SEPARATE database with
+ *             its own item_versions, its own guards and its own erase switch
+ *             (migration 0025), and a SQLite trigger cannot write across databases,
+ *             so a card's capture can only be re-armed by an ensure run against
+ *             THAT file. A rebuilt/lost tasks_items therefore needs this pass as
+ *             much as crow.db's tables do.
+ *
+ * Called from servers/gateway/index.js immediately after the registry runs, so a
+ * rebuilt table is covered by the same boot that rebuilt it.
+ *
+ * Never creates a database file: if crow.db is absent the schema guard and the
  * registry have already failed loudly, and an empty file here would only confuse
- * the next boot.
+ * the next boot. tasks.db is ensured only when it already exists, for the same
+ * reason (a tasks.db with no tasks_items is a board that has never run, not a
+ * broken store).
+ *
+ * WHICH MIGRATION COUNTS AS "RECORDED" ON tasks.db: crow.db's schema_migrations.
+ * The registry keeps one book for the whole instance, in crow.db, even for the
+ * migrations that write to tasks.db (scripts/migrations/runner.mjs), so tasks.db has
+ * no schema_migrations of its own — the crow.db set is read ONCE and handed to the
+ * tasks pass, which is what tells "0025 has applied, arm the card triggers" apart
+ * from "0025 has not, leave it alone".
  *
  * Non-fatal by contract (the gateway wraps it): a failure to re-ensure capture is
  * reported to the log, and the gateway also drops an alert-spool entry so "history
  * capture is off" shows up in the bell.
  *
- * @param {{log?: (message: string) => void, dbPath?: string}} [opts]
+ * @param {{log?: (message: string) => void, dbPath?: string, tasksDbPath?: string}} [opts]
  */
-export function ensureHistoryTriggersAtBoot({ log = console.log, dbPath } = {}) {
+export function ensureHistoryTriggersAtBoot({ log = console.log, dbPath, tasksDbPath } = {}) {
   const path = dbPath || resolveDbPath();
   if (!existsSync(path)) return { restored: [], skipped: ["crow.db absent"], awaitingBaseline: [], disarmed: 0 };
 
   const db = new Database(path, { fileMustExist: true });
   db.pragma("busy_timeout = 10000");
+  let result;
+  let recorded;
   try {
-    const result = ensureHistoryTriggers(db);
-    if (result.restored.length) {
-      log(`[history] re-created ${result.restored.length} trigger(s): ${result.restored.join(", ")}`);
-    }
-    if (result.disarmed) {
-      log(
-        `[history] disarmed the erase switch left armed by an erase that never committed (${result.disarmed} row(s) reset) — history is append-only again`,
-      );
-    }
-    // "item_versions absent" just means migration 0024 has not applied yet (it
-    // defers until the covered tables exist) — the registry already reports that
-    // once per boot, so repeating it here would only add noise.
-    const notable = result.skipped.filter((s) => s !== "item_versions absent");
-    if (notable.length) log(`[history] capture not ensured for: ${notable.join(", ")}`);
-    // No baseline yet: the migration installs the capture triggers together with
-    // the baselines, so this is "wait for 0024", not "capture is broken" — but it
-    // is worth one line, because until it applies those writes are unrecorded.
-    if (result.awaitingBaseline.length) {
-      log(`[history] capture not armed yet (no baseline; waiting for ${BASELINE_MIGRATION_ID}): ${result.awaitingBaseline.join(", ")}`);
-    }
-    return result;
+    result = ensureHistoryTriggers(db);
+    recorded = recordedMigrations(db);
+    report(result, log);
   } finally {
     db.close();
+  }
+
+  // tasks.db, the card store: its own item_versions, guards, erase switch and
+  // capture triggers, and its own stuck-switch disarm. Skipped when the file is not
+  // there yet (a board that has never run) — opening it would CREATE it.
+  const tasksPath = tasksDbPath || defaultTasksDbPath();
+  if (existsSync(tasksPath)) {
+    let tdb;
+    try {
+      tdb = new Database(tasksPath, { fileMustExist: true });
+      tdb.pragma("busy_timeout = 10000");
+      const tasksResult = ensureHistoryTriggers(tdb, {
+        store: STORE_TASKS,
+        baselineRecorded: (migrationId) => recorded.has(String(migrationId)),
+      });
+      report(tasksResult, log, "tasks.db");
+    } catch (err) {
+      // A board store that is busy or being migrated (the tasks addon child holds it
+      // open) must not fail the boot over a re-ensure the next boot repeats.
+      log(`[history] tasks.db capture not ensured this boot: ${err?.message ?? err}`);
+    } finally {
+      try {
+        tdb?.close();
+      } catch {
+        /* a stuck close must not fail the boot */
+      }
+    }
+  }
+  return result;
+}
+
+/** The per-store report, in one place so both stores say the same things. */
+function report(result, log, storeName = null) {
+  const where = storeName ? ` (${storeName})` : "";
+  if (result.restored.length) {
+    log(`[history] re-created ${result.restored.length} trigger(s)${where}: ${result.restored.join(", ")}`);
+  }
+  if (result.disarmed) {
+    log(
+      `[history] disarmed the erase switch left armed by an erase that never committed${where} ` +
+        `(${result.disarmed} row(s) reset) — history is append-only again`,
+    );
+  }
+  // "item_versions absent" just means the history migration has not applied yet (it
+  // defers until the covered tables exist) — the registry already reports that once
+  // per boot, so repeating it here would only add noise.
+  const notable = result.skipped.filter((s) => s !== "item_versions absent");
+  if (notable.length) log(`[history] capture not ensured${where} for: ${notable.join(", ")}`);
+  // No baseline yet: the migration installs the capture triggers together with the
+  // baselines, so this is "wait for the migration", not "capture is broken" — but it
+  // is worth one line, because until it applies those writes are unrecorded.
+  if (result.awaitingBaseline.length) {
+    log(
+      `[history] capture not armed yet${where} (no baseline; waiting for the history migration): ` +
+        result.awaitingBaseline.join(", "),
+    );
   }
 }

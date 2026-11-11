@@ -963,3 +963,43 @@ export function triggerDefs(itemType) {
 export function triggerSql(itemType) {
   return triggerDefs(itemType).map((d) => d.sql);
 }
+
+/* ------------------------------------------------------------- the baseline */
+
+/**
+ * One `insert` baseline version per existing row of a covered table that has no
+ * version yet, authored by whoever installs the triggers ('system'), so an
+ * instance that gains history has a starting point for content that predates it.
+ *
+ * Guarded per ITEM (`v.item_id = CAST(t.<id> AS TEXT)`), not per item type: a row
+ * already captured by a live trigger keeps its real versions instead of gaining a
+ * second 'insert', and a partially completed earlier run fills only the gaps.
+ * Every value goes through valueExpr's BLOB-safe expression, and `project_ref` is
+ * filled the same way the triggers fill it.
+ *
+ * IT LIVES HERE, BESIDE THE TRIGGER SQL, because a second installer needs it too:
+ * kb_articles is a BUNDLE-owned table, so migration 0025 skips it and
+ * bundles/knowledge-base/server/init-tables.js installs its triggers — and it must
+ * baseline whatever rows that table already holds BEFORE those triggers exist, or
+ * their pre-history is lost for good (the per-item guard would then skip them
+ * forever). 0024 re-exports this function, so the migration and the bundle cannot
+ * drift into two baseline shapes.
+ *
+ * @param {string} itemType a COVERED item type
+ * @param {object} [spec] its COVERED spec (defaults to COVERED[itemType])
+ * @returns {string} the INSERT statement, runnable inside the installer's transaction
+ */
+export function baselineSql(itemType, spec = COVERED[itemType]) {
+  if (!spec) throw new Error(`history: unknown item_type ${str(itemType)}`);
+  const quoted = (s) => `'${String(s).replace(/'/g, "''")}'`;
+  const idOf = `CAST(t."${spec.idColumn}" AS TEXT)`;
+  return `INSERT INTO item_versions (item_type, item_id, op, snapshot_json, project_ref, author_kind)
+    SELECT ${quoted(itemType)}, ${idOf}, 'insert', ${snapshotExpr(spec, "t")},
+           ${projectRefExpr(spec, "t")}, 'system'
+      FROM ${spec.table} t
+     WHERE NOT EXISTS (
+       SELECT 1 FROM item_versions v
+        WHERE v.item_type = ${quoted(itemType)}
+          AND v.item_id = ${idOf})
+     ORDER BY t."${spec.idColumn}"`;
+}

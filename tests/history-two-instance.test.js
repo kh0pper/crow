@@ -32,6 +32,7 @@ import { join } from "node:path";
 
 import { makeFleet, linkPeers, until, sleep } from "./fixtures/sync-fleet.mjs";
 import { run as migrate } from "../scripts/migrations/0024-item-versions.mjs";
+import { run as migrateMore } from "../scripts/migrations/0025-item-versions-more.mjs";
 import { withWriteContext } from "../servers/shared/history/write-context.js";
 import { listVersions, restoreVersion } from "../servers/shared/history/api.js";
 import { listTrash, restoreFromTrash } from "../servers/shared/history/trash.js";
@@ -41,9 +42,17 @@ import { isErased, eraseItems } from "../servers/shared/history/erase.js";
 /** The owner's dashboard session on either machine (each instance has its own). */
 const OWNER = { authorKind: "owner", authorId: "abcd1234", jobId: "session:abcd1234" };
 
-/** Migration 0024 on one side's store, so its writes are captured from now on. */
+/**
+ * Both history migrations on one side's store, so its writes are captured from now
+ * on: 0024 owns memories/posts/sections, 0025 owns the rest of the covered content
+ * (research notes among them). 0025 with no `tasksDbPath` installs the crow.db types
+ * and defers the card half, which is all this file needs — the card store is another
+ * database and is covered by tests/history-tasks-store.test.js.
+ */
 function migrateSide(side) {
-  migrate({ dbPath: join(side.dir, "crow.db"), log: () => {} });
+  const dbPath = join(side.dir, "crow.db");
+  migrate({ dbPath, log: () => {} });
+  migrateMore({ dbPath, log: () => {} });
 }
 
 const hasMemory = async (db, id) =>
@@ -228,6 +237,170 @@ test(
   }
   },
 );
+
+/* ------------ a RESEARCH NOTE's erase travels and sticks (its sync uuid) ---- */
+
+/** One note row on a side, by its sync uuid (the key it is deleted by on the wire). */
+async function noteByUuid(db, uuid) {
+  const { rows } = await db.execute({ sql: "SELECT * FROM research_notes WHERE uuid = ?", args: [uuid] });
+  return rows[0] || null;
+}
+
+const noteVersionCount = async (db, id) =>
+  Number((await db.execute({
+    sql: "SELECT COUNT(*) AS n FROM item_versions WHERE item_type = 'research_note' AND item_id = ?",
+    args: [String(id)],
+  })).rows[0].n);
+
+test("an erased research note stays erased against the peer, keyed by its sync uuid", async () => {
+  const fleet = await makeFleet();
+  let link;
+  try {
+    const { a, b } = fleet;
+    migrateSide(a);
+    migrateSide(b);
+    link = await linkPeers(a, b);
+
+    // A note syncs by its own uuid on the delete path (DELETE_KEY_POLICY), so that is
+    // the identity a peer's later write for it arrives under — and therefore the key
+    // the tombstone has to carry.
+    const NOTE_UUID = "0123456789abcdef0123456789abcdef";
+    const wire = (content) => ({
+      id: 91,
+      uuid: NOTE_UUID,
+      title: "A note",
+      content,
+      note_type: "note",
+      lamport_ts: null,
+    });
+    await writeLocal(a.db, "INSERT INTO research_notes (id, uuid, title, content) VALUES (?, ?, 'A note', ?)", [
+      91,
+      NOTE_UUID,
+      "the first body",
+    ]);
+    await a.mgr.emitChange("research_notes", "insert", wire("the first body"));
+    assert.ok(await until(async () => (await noteByUuid(b.db, NOTE_UUID)) !== null), "the peer received the note");
+
+    // Both machines delete it (each keeps its own Trash), and A's Trash period passes.
+    await writeLocal(a.db, "DELETE FROM research_notes WHERE id = ?", [91]);
+    await a.mgr.emitChange("research_notes", "delete", { uuid: NOTE_UUID });
+    assert.ok(await until(async () => (await noteByUuid(b.db, NOTE_UUID)) === null), "the peer received the delete");
+    assert.equal(await noteVersionCount(a.db, 91), 2, "A's history: insert + delete");
+    assert.equal(await noteVersionCount(b.db, 91), 2, "B's own history too");
+
+    // Erase sync is the operator's fleet-wide decision, taken on BOTH sides.
+    await enableEraseSync(a.db);
+    await enableEraseSync(b.db);
+    const swept = await sweep(a.db, {
+      now: new Date(Date.now() + 40 * 86_400_000),
+      trashDays: 30,
+      syncManager: a.mgr,
+    });
+    assert.deepEqual(swept.erased.map((e) => e.itemType), ["research_note"], "A erased the aged note");
+    assert.equal(swept.eraseEvents, 1, "the erase reached the sync layer");
+    assert.equal(await noteVersionCount(a.db, 91), 0);
+    // The tombstone is keyed by the note's SYNC UUID as well as its local id, which is
+    // what makes a peer write that names the note by uuid refusable.
+    assert.equal(await isErased(a.db, "research_note", NOTE_UUID), true, "A tombstoned the note under its uuid");
+    assert.equal(await isErased(a.db, "research_note", "91"), true, "and under its local id");
+
+    // The peer applied the erase: its own copy and Trash go, and it records its own
+    // tombstone (keyed the same way).
+    assert.ok(
+      await until(async () => (await noteVersionCount(b.db, 91)) === 0),
+      "the peer erased its own history for the note",
+    );
+    assert.equal(await isErased(b.db, "research_note", NOTE_UUID), true, "the peer recorded the uuid tombstone too");
+    await assert.rejects(
+      () => restoreFromTrash(b.db, { itemType: "research_note", itemId: 91 }, OWNER, { syncManager: b.mgr }),
+      (err) => err.code === "erased",
+      "and a Trash restore of it is refused on the peer",
+    );
+
+    // The peer then sends the note again — under a DIFFERENT local id, but the same
+    // uuid (its portable identity), and at a STALE lamport (the entry a peer that
+    // still holds its copy re-delivers). A must not re-create it: the tombstone is
+    // keyed by the uuid, not only by the rowid the two instances happened to share.
+    await b.mgr.emitChange("research_notes", "insert", { ...wire("the peer's stale copy"), id: 99 }, { lamportTs: 3 });
+    // A trailing entry on another item proves the feed was drained past it.
+    await writeLocal(a.db, "INSERT INTO memories (id, content) VALUES (?, ?)", [95, "trailing marker"]);
+    await a.mgr.emitChange("memories", "insert", { id: 95, content: "trailing marker", lamport_ts: null });
+    assert.ok(await until(async () => (await hasMemory(b.db, 95)) !== null), "the trailing entry reached the peer");
+    await sleep(300);
+
+    assert.equal(await noteByUuid(a.db, NOTE_UUID), null, "A does not re-create the erased note");
+    assert.equal(await noteVersionCount(a.db, 99), 0, "and it wrote no history for it either");
+    assert.equal(await noteVersionCount(a.db, 91), 0);
+
+    // AND WITH EMISSION OFF (the default) THE TOMBSTONE IS UNBOUNDED, exactly as for a
+    // memory: a genuinely LATER write from the peer for that uuid is refused too,
+    // because nothing was ever announced (the operator's ruling, 2026-11-10).
+    const SECOND_UUID = "fedcba9876543210fedcba9876543210";
+    await writeLocal(a.db, "INSERT INTO research_notes (id, uuid, title, content) VALUES (?, ?, 'Another note', ?)", [
+      92,
+      SECOND_UUID,
+      "the second note",
+    ]);
+    await a.mgr.emitChange("research_notes", "insert", {
+      id: 92,
+      uuid: SECOND_UUID,
+      title: "Another note",
+      content: "the second note",
+      note_type: "note",
+      lamport_ts: null,
+    });
+    assert.ok(await until(async () => (await noteByUuid(b.db, SECOND_UUID)) !== null), "the peer has the second note too");
+    await writeLocal(a.db, "DELETE FROM research_notes WHERE id = ?", [92]);
+    await a.mgr.emitChange("research_notes", "delete", { uuid: SECOND_UUID });
+    assert.ok(await until(async () => (await noteByUuid(b.db, SECOND_UUID)) === null), "and applied the delete");
+    await setEraseSync(a.db, "0");
+    const gated = await sweep(a.db, {
+      now: new Date(Date.now() + 40 * 86_400_000),
+      trashDays: 30,
+      syncManager: a.mgr,
+    });
+    assert.deepEqual(gated.erased.map((e) => e.itemId), ["92"], "with erase sync off, A still erases its own copy");
+    assert.equal(gated.eraseEvents, 0, "but announces nothing");
+    assert.equal(await isErased(a.db, "research_note", SECOND_UUID), true);
+
+    // The peer's copy comes back with a FRESH lamport (a genuinely later write). An
+    // unbounded tombstone refuses it: the peers were told nothing, so "erased" means
+    // erased here for good.
+    await writeLocal(b.db, "INSERT INTO research_notes (id, uuid, title, content) VALUES (?, ?, 'Another note', ?)", [
+      100,
+      SECOND_UUID,
+      "the peer's new copy",
+    ]);
+    await b.mgr.emitChange("research_notes", "insert", {
+      id: 100,
+      uuid: SECOND_UUID,
+      title: "Another note",
+      content: "the peer's new copy",
+      note_type: "note",
+      lamport_ts: null,
+    });
+    await writeLocal(a.db, "INSERT INTO memories (id, content) VALUES (?, ?)", [96, "another trailing marker"]);
+    await a.mgr.emitChange("memories", "insert", { id: 96, content: "another trailing marker", lamport_ts: null });
+    assert.ok(await until(async () => (await hasMemory(b.db, 96)) !== null), "the feed drained past it");
+    await sleep(300);
+
+    assert.equal(await noteByUuid(a.db, SECOND_UUID), null, "an unannounced erase refuses a genuinely later peer write");
+    assert.equal(await noteVersionCount(a.db, 100), 0);
+    assert.equal((await noteByUuid(b.db, SECOND_UUID))?.content, "the peer's new copy", "the peer's copy stays on the peer");
+  } finally {
+    link?.close();
+    await fleet.cleanup();
+  }
+});
+
+/** Set one instance's erase-emission setting (the local `history.erase_sync`). */
+async function setEraseSync(db, value) {
+  await db.execute({
+    sql: `INSERT INTO dashboard_settings (key, value) VALUES ('history.erase_sync', ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    args: [String(value)],
+  });
+}
 
 /** Turn erase emission ON for one instance (the local `history.erase_sync` setting). */
 async function enableEraseSync(db) {

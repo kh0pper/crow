@@ -81,8 +81,29 @@
  * window starts at the newest batch (so the first pass covers exactly what the
  * old code covered). The BACKLOG walk is unchanged: it is what covers versions
  * written before the mark existed.
+ *
+ * ONE STORE PER PASS (`store`, default `crow`; the card store is `tasks`). The
+ * instance has TWO item_versions tables — crow.db's, and tasks.db's own (board
+ * cards; a SQLite trigger cannot write across databases) — so a pass names the
+ * store it sweeps and touches ONLY that store's covered types: a crow.db pass can
+ * never read or delete a card's versions, and a tasks.db pass can never touch a
+ * memory's. `typesForStore` (covered.js) is the one list of which type lives
+ * where. Everything a pass does is keyed the same way: the redaction walks, the
+ * coalescing walk and the Trash listing all carry `item_type IN (…)` for the
+ * store's types.
+ *
+ * THE SCAN MARK IS PER STORE (a crow.db mark cannot describe tasks.db's ids — two
+ * independent AUTOINCREMENT series). It is still kept in crow.db's
+ * dashboard_settings, the one place this instance keeps history settings (tasks.db
+ * has no settings table), under `history.redact_scanned_to` for the crow store and
+ * `history.redact_scanned_to.tasks` for the card store: two keys, so neither store's
+ * pass can overwrite the other's mark. The pass writes it through `settingsDb` — the
+ * crow.db client the caller already holds — which is why a tasks pass takes one
+ * (see the `settingsDb` option); without it the tasks pass has no mark and re-covers
+ * its newest batch each run, the safe (re-scanned) direction.
  */
 import { SECRET_PATTERNS } from "./secret-patterns.js";
+import { STORE_CROW, STORE_TASKS, typesForStore } from "./covered.js";
 import { withoutWriteContext } from "./write-context.js";
 import { eraseItems, finishPendingRemoteErasures, runArmedStatements } from "./erase.js";
 import { trashEntries, normalizeTrashDays, DEFAULT_TRASH_DAYS } from "./trash.js";
@@ -90,8 +111,36 @@ import { trashEntries, normalizeTrashDays, DEFAULT_TRASH_DAYS } from "./trash.js
 /** Rows per pass when the caller does not say. */
 export const DEFAULT_BATCH = 500;
 
-/** The local setting that records how far the fresh-window scan has got. */
+/** The local setting that records how far the fresh-window scan has got (crow store). */
 export const REDACT_SCAN_SETTING = "history.redact_scanned_to";
+
+/**
+ * The scan-mark key for one store. The crow store keeps the original key (so a
+ * store that has been sweeping since Task 4 keeps its mark); every other store gets
+ * its own suffixed key, so the two series of version ids can never overwrite each
+ * other's progress.
+ */
+export function redactScanSetting(store = STORE_CROW) {
+  return store === STORE_CROW ? REDACT_SCAN_SETTING : `${REDACT_SCAN_SETTING}.${store}`;
+}
+
+/** The stores a sweep may name, and the covered item types each one holds. */
+function typesOfStore(store) {
+  if (store !== STORE_CROW && store !== STORE_TASKS) {
+    throw new Error(`history: sweep store must be ${STORE_CROW} or ${STORE_TASKS}, not ${JSON.stringify(store)}`);
+  }
+  return typesForStore(store);
+}
+
+/**
+ * The `item_type IN (…)` predicate for one store's types, or "1 = 0" for a store
+ * with no covered type (no pass may then touch any row). The values are the frozen
+ * COVERED keys, quoted as SQL literals — never caller input.
+ */
+function typesPredicate(types) {
+  if (types.length === 0) return "1 = 0";
+  return `item_type IN (${types.map((t) => `'${String(t).replace(/'/g, "''")}'`).join(", ")})`;
+}
 
 /** The only retention value that is applied today. */
 export const RETENTION_FOREVER = "forever";
@@ -240,12 +289,17 @@ async function historyReady(db) {
  * `history.trash_days` and `history.erase_sync` in — under a key the sync
  * allowlist does not carry, so it is per-instance and never travels. A store with
  * no settings table (a bare test shim) simply has no mark.
+ *
+ * `settingsDb` is the client that OWNS dashboard_settings (crow.db). It is the same
+ * handle for the crow pass, and the caller's crow.db client for a tasks pass (that
+ * store has no settings table); `key` is the per-store key (see
+ * redactScanSetting), so neither store's pass can move the other's mark.
  */
-async function readRedactScanMark(db) {
+async function readRedactScanMark(settingsDb, key) {
   try {
-    const { rows } = await db.execute({
+    const { rows } = await settingsDb.execute({
       sql: "SELECT value FROM dashboard_settings WHERE key = ?",
-      args: [REDACT_SCAN_SETTING],
+      args: [key],
     });
     const value = Number(rows[0]?.value);
     return rows.length > 0 && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null;
@@ -255,15 +309,15 @@ async function readRedactScanMark(db) {
 }
 
 /** Move the mark forward (never back). A store that cannot keep it re-scans — safe. */
-async function writeRedactScanMark(db, id) {
+async function writeRedactScanMark(settingsDb, key, id) {
   const value = Math.trunc(Number(id));
   if (!Number.isFinite(value) || value < 0) return;
   try {
-    await db.execute({
+    await settingsDb.execute({
       sql: `INSERT INTO dashboard_settings (key, value) VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
              WHERE CAST(excluded.value AS INTEGER) > CAST(dashboard_settings.value AS INTEGER)`,
-      args: [REDACT_SCAN_SETTING, String(value)],
+      args: [key, String(value)],
     });
   } catch (err) {
     // A store with no settings table (a bare test shim) has nowhere to keep the
@@ -275,9 +329,15 @@ async function writeRedactScanMark(db, id) {
   }
 }
 
-/** Where the fresh window starts on this pass (see readRedactScanMark). */
-async function redactWindowStart(db, batchSize) {
-  const mark = await readRedactScanMark(db);
+/**
+ * Where the fresh window starts on this pass (see readRedactScanMark).
+ *
+ * The MARK comes from the settings store (crow.db); the NEWEST ID comes from the
+ * store being swept, because the two stores' version ids are independent series —
+ * `settingsDb`'s MAX(id) says nothing about tasks.db's rows.
+ */
+async function redactWindowStart(db, settingsDb, batchSize, key) {
+  const mark = await readRedactScanMark(settingsDb, key);
   if (mark !== null) return mark;
   // Never scanned here: cover the newest batch, exactly what "scan the newest N
   // rows" used to cover, and let the mark take it from there.
@@ -316,11 +376,12 @@ async function redactPage(db, rows) {
  * "scanned up to" mark — so a secret written since the last run is caught at
  * once and none of those rows is scanned twice.
  */
-async function redactPass(db, batchSize) {
+async function redactPass(db, batchSize, { types, key, settingsDb }) {
   const cursor = cursorFor(db);
+  const scope = typesPredicate(types);
   const backlog = await db.execute({
     sql: `SELECT id, snapshot_json FROM item_versions
-           WHERE redacted = 0 AND id > ?
+           WHERE redacted = 0 AND ${scope} AND id > ?
            ORDER BY id ASC LIMIT ?`,
     args: [cursor.redact, batchSize],
   });
@@ -333,14 +394,14 @@ async function redactPass(db, batchSize) {
     cursor.redact = 0;
   }
 
-  const from = await redactWindowStart(db, batchSize);
+  const from = await redactWindowStart(db, settingsDb, batchSize, key);
   // The window scans by ID, redacted rows included: they are skipped for the work
   // but still count as scanned, so the mark stays a contiguous "everything up to
   // here has been looked at" (a row that matched nothing, or was already redacted,
   // must not pin the mark forever).
   const fresh = await db.execute({
     sql: `SELECT id, snapshot_json, redacted FROM item_versions
-           WHERE id > ?
+           WHERE ${scope} AND id > ?
            ORDER BY id ASC LIMIT ?`,
     args: [from, batchSize],
   });
@@ -351,7 +412,7 @@ async function redactPass(db, batchSize) {
   // Persist the mark even when the page was empty (a store whose ids are sparse
   // would otherwise restart from the same place forever), and only forwards.
   const highest = fresh.rows.length > 0 ? Number(fresh.rows[fresh.rows.length - 1].id) : null;
-  await writeRedactScanMark(db, highest === null ? from : Math.max(from, highest));
+  await writeRedactScanMark(settingsDb, key, highest === null ? from : Math.max(from, highest));
   return redacted;
 }
 
@@ -376,12 +437,13 @@ export function coalescible(older, newer) {
 }
 
 /** One coalescing pass. @returns {Promise<number>} versions removed */
-async function coalescePass(db, batchSize) {
+async function coalescePass(db, batchSize, { types }) {
   const cursor = cursorFor(db);
+  const scope = typesPredicate(types);
   const { rows } = await db.execute({
     sql: `SELECT id, item_type, item_id, op, author_id, job_id, created_at, redacted
             FROM item_versions
-           WHERE id > ?
+           WHERE ${scope} AND id > ?
            ORDER BY id ASC LIMIT ?`,
     args: [cursor.coalesce, batchSize],
   });
@@ -463,9 +525,11 @@ async function coalescePass(db, batchSize) {
 /* -------------------------------------------------------------- (c) erase */
 
 /** Erase the Trash items older than the period, in one bounded page. */
-async function erasePass(db, { now, trashDays, batchSize, syncManager }) {
+async function erasePass(db, { now, trashDays, batchSize, syncManager, types }) {
   const cutoff = new Date(now.getTime() - normalizeTrashDays(trashDays) * MS_PER_DAY).toISOString();
-  const entries = await trashEntries(db, { before: cutoff, limit: batchSize });
+  // `itemTypes` keeps the pass inside this store's types: a tasks pass must never
+  // list (and so never erase) a crow.db item that shares tasks.db's id space.
+  const entries = await trashEntries(db, { before: cutoff, limit: batchSize, itemTypes: types });
   if (entries.length === 0) return { erased: [], versions: 0, emitted: 0, cutoff };
   const { erased, versions, emitted } = await eraseItems(
     db,
@@ -512,20 +576,39 @@ async function pendingErasePass(db, batchSize) {
  * applied. Errors from the database DO propagate — the boot caller catches and
  * logs them, and a failed pass must not look like a clean one.
  *
- * @param {object} db
+ * ONE STORE, BY NAME. `store` says which item_versions this handle's file holds:
+ * `crow` (the default: memories, posts, sections, notes, articles, bot defs) or
+ * `tasks` (board cards, in the instance-global tasks.db). The pass touches ONLY
+ * that store's covered types — see the module comment — and writes its scan mark
+ * under that store's own key.
+ *
+ * @param {object} db the client for the store being swept
  * @param {{now?: Date, trashDays?: number, retention?: string, batchSize?: number,
- *   syncManager?: object|null|undefined}} [opts] `syncManager` is handed to the
- *   erase pass (see erase.js); undefined resolves this process's singleton.
- * @returns {Promise<{redacted: number, coalesced: number,
+ *   store?: string, settingsDb?: object|null,
+ *   syncManager?: object|null|undefined}} [opts]
+ *   `store` is `crow` or `tasks` (default `crow`). `settingsDb` is the client that
+ *   OWNS dashboard_settings (crow.db) — the same handle for a crow pass, and the
+ *   caller's crow.db client for a tasks pass, because tasks.db has no settings
+ *   table and the scan mark must live where the settings live; without it a pass
+ *   reads and writes only its own handle (right for crow, mark-less for tasks).
+ *   `syncManager` is handed to the erase pass (see erase.js); undefined resolves
+ *   this process's singleton.
+ * @returns {Promise<{store: string, redacted: number, coalesced: number,
  *   erased: Array<{itemType: string, itemId: string, versions: number}>,
  *   erasedVersions: number, eraseEvents: number, pendingErased: number,
  *   retention: {value: string, applied: boolean}, trashDays: number, batchSize: number}>}
  */
-export async function sweep(db, { now = new Date(), trashDays = DEFAULT_TRASH_DAYS, retention = RETENTION_FOREVER, batchSize = DEFAULT_BATCH, syncManager = undefined } = {}) {
+export async function sweep(db, { now = new Date(), trashDays = DEFAULT_TRASH_DAYS, retention = RETENTION_FOREVER, batchSize = DEFAULT_BATCH, store = STORE_CROW, settingsDb = null, syncManager = undefined } = {}) {
   const batch = normalizeBatch(batchSize);
   const days = normalizeTrashDays(trashDays);
+  const types = typesOfStore(store);
+  // The settings store: this handle for the crow store, the caller's crow.db client
+  // for any other store (see the option's doc).
+  const settings = settingsDb || db;
+  const markKey = redactScanSetting(store);
   const retentionValue = typeof retention === "string" && retention.trim() !== "" ? retention.trim() : RETENTION_FOREVER;
   const base = {
+    store,
     redacted: 0,
     coalesced: 0,
     erased: [],
@@ -543,13 +626,16 @@ export async function sweep(db, { now = new Date(), trashDays = DEFAULT_TRASH_DA
   // A sweep is nobody's unit of work: nothing it writes is attributed to whoever
   // happened to be on the stack when the interval fired.
   return withoutWriteContext(async () => {
-    const redacted = await redactPass(db, batch);
-    const coalesced = await coalescePass(db, batch);
-    const erasedResult = await erasePass(db, { now, trashDays: days, batchSize: batch, syncManager });
+    const redacted = await redactPass(db, batch, { types, key: markKey, settingsDb: settings });
+    const coalesced = await coalescePass(db, batch, { types });
+    const erasedResult = await erasePass(db, { now, trashDays: days, batchSize: batch, syncManager, types });
     // (d) Finish the inbound erases a failed apply left behind. After the erase
     // pass on purpose: those items are already tombstoned, so nothing here can be
-    // resurrected while the retry runs.
-    const pendingFinished = await pendingErasePass(db, batch);
+    // resurrected while the retry runs. CROW STORE ONLY: an inbound erase arrives
+    // over instance sync, whose tables are all crow.db's — the card store never
+    // carries a pending_remote_erasures row, and a tasks pass has no business
+    // looking for one.
+    const pendingFinished = store === STORE_CROW ? await pendingErasePass(db, batch) : 0;
     return {
       ...base,
       redacted,

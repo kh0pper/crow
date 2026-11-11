@@ -714,6 +714,140 @@ test("a job that touched a Studio song lists it as skipped own_undo with a link"
   }
 });
 
+test("the bundle init baselines an already-populated kb_articles BEFORE it installs the triggers", async () => {
+  const f = await fixture();
+  try {
+    // The bundle's own DDL first (it also installs the triggers), then the state a
+    // host that installed the bundle BEFORE history existed is in: a populated
+    // kb_articles with item_versions present and no capture triggers. (The init runs
+    // on every boot, so it — not 0025, which already ran — is what must baseline.)
+    await initKbTables(f.db);
+    for (const suffix of ["ai", "au", "ad"]) {
+      await f.db.execute(`DROP TRIGGER hist_kb_articles_${suffix}`);
+    }
+    const collectionId = Number(
+      (await f.db.execute({ sql: "INSERT INTO kb_collections (slug, name) VALUES ('c', 'C') RETURNING id" })).rows[0].id,
+    );
+    // Two articles written while nothing was watching: their pre-history exists only
+    // in the table.
+    const first = Number((await f.db.execute({
+      sql: `INSERT INTO kb_articles (collection_id, pair_id, language, slug, title, content)
+            VALUES (?, 'pair-a', 'en', 'a', 'Article A', 'the body of A')`,
+      args: [collectionId],
+    })).lastInsertRowid);
+    const second = Number((await f.db.execute({
+      sql: `INSERT INTO kb_articles (collection_id, pair_id, language, slug, title, content)
+            VALUES (?, 'pair-b', 'en', 'b', 'Article B', 'the body of B')`,
+      args: [collectionId],
+    })).lastInsertRowid);
+    assert.equal((await versionsOf(f.db, "kb_article", first)).length, 0, "nothing was captured before the init ran");
+
+    await initKbTables(f.db);
+
+    const triggers = (await f.db.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")).rows.map((r) => r.name);
+    for (const suffix of ["ai", "au", "ad"]) {
+      assert.ok(triggers.includes(`hist_kb_articles_${suffix}`), `hist_kb_articles_${suffix} is installed`);
+    }
+    for (const [id, body] of [[first, "the body of A"], [second, "the body of B"]]) {
+      const versions = await versionsOf(f.db, "kb_article", id);
+      assert.equal(versions.length, 1, `article ${id}: exactly one baseline version`);
+      assert.equal(versions[0].op, "insert");
+      assert.equal(
+        JSON.parse(versions[0].snapshot_json).content,
+        body,
+        "the baseline holds the article's PRE-history body",
+      );
+    }
+    const baselines = (await f.db.execute({
+      sql: "SELECT author_kind FROM item_versions WHERE item_type = 'kb_article' ORDER BY id",
+      args: [],
+    })).rows;
+    assert.deepEqual(baselines.map((r) => r.author_kind), ["system", "system"], "baselines are the installer's ('system')");
+
+    // Running the init again (what every boot and every bundle start does) changes nothing.
+    await initKbTables(f.db);
+    assert.equal((await versionsOf(f.db, "kb_article", first)).length, 1, "a second init writes no second baseline");
+    assert.equal(await countVersions(f.db, "kb_article"), 2);
+
+    // An edit AFTER the install records a version whose previous state exists (the
+    // whole point of baselining first: the new version is not the item's only one).
+    await update(f.db, OWNER, "kb_articles", "id", first, { content: "the body of A, revised" });
+    const after = await versionsOf(f.db, "kb_article", first);
+    assert.equal(after.length, 2, "baseline + the edit");
+    assert.equal(JSON.parse(after[1].snapshot_json).content, "the body of A, revised");
+    const restored = await restoreVersion(f.db, { versionId: Number(after[0].id) }, OWNER);
+    assert.ok(restored.newVersionId, "and the baseline is restorable");
+    assert.equal(
+      (await f.db.execute({ sql: "SELECT content FROM kb_articles WHERE id = ?", args: [first] })).rows[0].content,
+      "the body of A",
+    );
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("restoring a bot definition from before a key existed adds no null key and keeps the live credentials", async () => {
+  const f = await fixture();
+  try {
+    // A definition WITHOUT the allow-listed keys the Bot Builder adds later, and with
+    // credential keys in it: the projection stores the missing keys as null.
+    await insert(f.db, OWNER, "pi_bot_defs", {
+      bot_id: "hank",
+      display_name: "Hank",
+      definition: JSON.stringify(botDefinition()),
+      enabled: 1,
+    });
+    const first = (await versionsOf(f.db, "bot_def", "hank"))[0];
+    const storedProjection = JSON.parse(first.snapshot_json).definition;
+    assert.equal(storedProjection.companion_features, null, "the projection holds an absent key as null (the test is not vacuous)");
+    assert.equal(storedProjection.tracker_config, null);
+
+    // The operator then adds those keys and rotates a credential.
+    const later = botDefinition({ prompt: "You are Hank, with a companion.", token: "rotated-discord-token" });
+    later.companion_features = { avatar: "heron" };
+    later.tracker_config = { board: "work" };
+    await update(f.db, OWNER, "pi_bot_defs", "bot_id", "hank", { definition: JSON.stringify(later) });
+
+    await restoreVersion(f.db, { versionId: Number(first.id) }, OWNER);
+    const live = JSON.parse(
+      (await f.db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id = 'hank'" })).rows[0].definition,
+    );
+    assert.equal(live.system_prompt, "You are Hank.", "a key present with a real value is restored");
+    assert.deepEqual(live.companion_features, { avatar: "heron" }, "a stored null leaves the live key alone");
+    assert.deepEqual(live.tracker_config, { board: "work" }, "and the same for every other absent-then key");
+    assert.equal(live.gateways[0].token, "rotated-discord-token", "the live credential keys are kept");
+    assert.equal(live.session_dir, "/workspace/bots/hank", "keys outside the allow-list are untouched");
+    // And no key was ADDED as a null: the stored projection's null meant "absent then",
+    // not "set it to null now".
+    assert.ok(
+      !/"(companion_features|tracker_config|fallback)"\s*:\s*null/.test(JSON.stringify(live)),
+      "the merge added no null key",
+    );
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("restoring an artifact version records where it came from in the new version's change note", async () => {
+  const f = await fixture();
+  try {
+    const { artifactId, blobs } = await artifactFixture(f);
+    const result = await restoreVersion(
+      f.db,
+      { itemType: ARTIFACT_ITEM_TYPE, itemId: artifactId, versionId: 1, artifacts: { blobs } },
+      OWNER,
+    );
+    const row = (await f.db.execute({
+      sql: "SELECT change_note FROM artifact_versions WHERE artifact_id = ? ORDER BY n DESC LIMIT 1",
+      args: [artifactId],
+    })).rows[0];
+    assert.equal(Number(result.newVersionId), 3);
+    assert.equal(row.change_note, "Restored from version 1", "the note says which version was put back");
+  } finally {
+    await f.dispose();
+  }
+});
+
 /* --------------------------------------------------- the rules that hold */
 
 test("the COVERED import rules still hold for the new entries", async () => {

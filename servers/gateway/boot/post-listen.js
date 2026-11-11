@@ -18,6 +18,8 @@ import { initProxyServers, loadRemoteInstances, resolveCrowHome } from "../proxy
 import { startAutoUpdate } from "../auto-update.js";
 import { startScheduler } from "../scheduler.js";
 import { createDbClient } from "../../db.js";
+import { tasksDbPath as instanceTasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
+import { existsSync } from "node:fs";
 import { upgradeLocalMarksAtBoot } from "./admin-api.js";
 
 // QW1 (Crow Messages usability arc, Phase 0): a gateway started with
@@ -95,17 +97,30 @@ export async function runSyncConflictExpirySweep(dbFactory = createDbClient) {
  * not cascade into an outage, and the next run picks up whatever this one could
  * not finish.
  *
+ * TWO STORES, TWO PASSES. Board cards live in the instance-global tasks.db, whose
+ * item_versions is its OWN table (a SQLite trigger cannot write across databases),
+ * so the card store is swept by a pass against THAT file — with the crow.db client
+ * as its `settingsDb`, because the redaction scan mark lives in crow.db's
+ * dashboard_settings under its own per-store key (see sweep.js). The same settings
+ * drive both passes. The tasks pass is skipped when the file does not exist (a
+ * board that never ran) and reports nothing when its item_versions is absent.
+ *
  * `db` is passed in by the timer so the sweep keeps ONE handle for the life of
  * the process: its scan cursors live with the handle (sweep.js), and a fresh
- * handle every five minutes would restart the backlog walk from the top.
+ * handle every five minutes would restart the backlog walk from the top. The same
+ * goes for `tasksDb`; without it the card pass opens and closes one handle per
+ * cycle (still correct — its persisted mark keeps the fresh window small).
  *
- * @param {{db?: object, dbFactory?: () => object}} [opts]
- * @returns {Promise<object|null>} the sweep's counts, or null when it failed
+ * @param {{db?: object, tasksDb?: object, dbFactory?: (path?: string) => object}} [opts]
+ * @returns {Promise<object|null>} the crow sweep's counts (with the card pass's
+ *   under `cards`), or null when it failed
  */
-export async function runHistorySweep({ db = null, dbFactory = createDbClient } = {}) {
+export async function runHistorySweep({ db = null, tasksDb = null, dbFactory = createDbClient } = {}) {
   let owned = false;
+  let ownedTasks = false;
   try {
     const { sweep } = await import("../../shared/history/sweep.js");
+    const { STORE_TASKS } = await import("../../shared/history/covered.js");
     const { readSetting } = await import("../dashboard/settings/registry.js");
     if (!db) {
       db = dbFactory();
@@ -122,11 +137,49 @@ export async function runHistorySweep({ db = null, dbFactory = createDbClient } 
           `${result.erased.length} Trash item(s) erased (Trash period ${result.trashDays} days)`,
       );
     }
-    return result;
+
+    // The card store. Its own pass, its own types; the crow.db handle keeps the
+    // scan marks (one key per store, so the two passes cannot overwrite each other).
+    let cardResult = null;
+    let tdb = tasksDb;
+    if (!tdb) {
+      const path = instanceTasksDbPath();
+      if (existsSync(path)) {
+        try {
+          tdb = dbFactory(path);
+          ownedTasks = true;
+        } catch (err) {
+          console.warn("[history] card sweep skipped: no tasks.db handle:", err?.message || err);
+        }
+      }
+    }
+    if (tdb) {
+      // A card-store failure is its own line, not the whole cycle's: the crow.db
+      // pass above has already committed its work, and the next tick retries.
+      try {
+        cardResult = await sweep(tdb, { trashDays, retention, store: STORE_TASKS, settingsDb: db });
+      } catch (err) {
+        console.warn("[history] card sweep cycle failed:", err?.message || err);
+      }
+      if (cardResult && (cardResult.redacted > 0 || cardResult.coalesced > 0 || cardResult.erased.length > 0)) {
+        console.log(
+          `[history] card sweep: ${cardResult.redacted} version(s) redacted, ${cardResult.coalesced} coalesced, ` +
+            `${cardResult.erased.length} Trash card(s) erased (Trash period ${cardResult.trashDays} days)`,
+        );
+      }
+    }
+    return { ...result, cards: cardResult };
   } catch (err) {
     console.warn("[history] sweep cycle failed:", err?.message || err);
     return null;
   } finally {
+    if (ownedTasks) {
+      try {
+        tasksDb?.close?.();
+      } catch {
+        /* a stuck close must not fail the cycle */
+      }
+    }
     if (owned) {
       try {
         db?.close?.();
@@ -846,6 +899,10 @@ export async function runPostListenSetup(server, app, deps) {
     const HISTORY_SWEEP_INTERVAL_MS = 5 * 60 * 1000;      // 5 min
     // One handle for the process: the sweep's scan cursors live with it.
     let sweepDb = null;
+    // And one for the card store (tasks.db): its own scan cursor lives with it, so
+    // a fresh handle per cycle would restart the card walk from the top. Opened
+    // lazily, only when that file exists — the board creates it, not the gateway.
+    let sweepTasksDb = null;
     // A tick that lands while a run is still in flight is skipped, not queued:
     // two overlapping passes would fight over the same coalescing cursor and
     // could delete a version the other one just decided to keep.
@@ -858,9 +915,19 @@ export async function runPostListenSetup(server, app, deps) {
         console.warn("[history] sweep skipped: no database handle:", err?.message || err);
         return;
       }
+      if (!sweepTasksDb) {
+        try {
+          const tasksPath = instanceTasksDbPath();
+          if (existsSync(tasksPath)) sweepTasksDb = createDbClient(tasksPath);
+        } catch (err) {
+          // A busy task store is not fatal: the crow.db pass runs, and the card
+          // pass retries on the next tick.
+          console.warn("[history] card sweep handle not opened this cycle:", err?.message || err);
+        }
+      }
       historySweepInFlight = true;
       try {
-        await runHistorySweep({ db: sweepDb });
+        await runHistorySweep({ db: sweepDb, tasksDb: sweepTasksDb });
       } catch (err) {
         // runHistorySweep already logs; this only guarantees no unhandled rejection.
         console.warn("[history] sweep cycle failed:", err?.message || err);

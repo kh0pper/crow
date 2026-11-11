@@ -29,6 +29,82 @@ async function eraseProjectHistory(db, project) {
   );
 }
 
+/** The actor a permanent project delete erases as, in EITHER store. */
+const PROJECT_DELETE_ERASE_CTX = Object.freeze({ authorKind: "system", authorId: "project-delete" });
+
+/**
+ * Erase the versions of the cards a permanent project delete just removed, in the
+ * store the cards live in (tasks.db's OWN item_versions: a SQLite trigger cannot
+ * write across databases, so a card's history is a row of that file, never of
+ * crow.db's).
+ *
+ * Through the existing erase machinery (erase.js's eraseItems), so the tombstones
+ * and the armed-erase pattern are exactly crow.db's: the purge deletes the rows in
+ * one batch (which the capture triggers turn into `delete` versions), and this then
+ * takes every version of those ids and leaves a tombstone, in one armed
+ * transaction. NO project scope is needed (unlike eraseByProject): the ids were in
+ * hand — a card has no portable project key, and tasks.db has no project_spaces to
+ * resolve one against anyway.
+ *
+ * NEVER EMITTED TO SYNC: tasks_items is not in ERASURE_SYNC_TABLES (it is not a
+ * synced table at all), so eraseEventsFor produces nothing for a card and the erase
+ * stays local — which is also what a purge promises (it announces nothing).
+ */
+async function eraseCardHistory(tdb, ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return { versions: 0, erased: [], tombstones: 0, emitted: 0 };
+  const { eraseItems } = await import("./history/erase.js");
+  return eraseItems(
+    tdb,
+    ids.map((id) => ({ itemType: "card", itemId: String(id) })),
+    PROJECT_DELETE_ERASE_CTX,
+  );
+}
+
+/**
+ * The SAME erase on the finish path, where the card ids are no longer in hand (the
+ * rows are gone, and nothing recorded them). They are read back out of the versions
+ * themselves: every `card` whose newest version is a `delete` and whose snapshot was
+ * filed under this project.
+ *
+ * That is the card-store twin of eraseByProject's rule, and it is why the closure is
+ * safe: only an item whose latest version is a delete is taken (a card that still
+ * exists has a newer version, so it is left alone), and a project id is never reused
+ * (project_spaces rows become tombstones; deleteProject never deletes them). A store
+ * without history (a per-project tasks.db, which 0025 never installs triggers in) is
+ * an empty set, not a failure; so is a project that had no cards.
+ */
+async function eraseProjectCardHistory(project, { tasksDbPath } = {}) {
+  const store = resolveCardsStore(project, { tasksDbPath });
+  if (!store.global || !store.path) return { versions: 0, erased: [] };
+  const tdb = openExisting(store.path);
+  if (!tdb) return { versions: 0, erased: [] };
+  try {
+    if (!(await tableExists(tdb, "item_versions"))) return { versions: 0, erased: [] };
+    const { rows } = await tdb.execute({
+      sql: `SELECT DISTINCT v.item_id AS id
+              FROM item_versions v
+             WHERE v.item_type = 'card'
+               AND json_extract(v.snapshot_json, '$.project_id') = ?
+               AND EXISTS (
+                     SELECT 1 FROM item_versions latest
+                      WHERE latest.item_type = v.item_type
+                        AND latest.item_id = v.item_id
+                        AND latest.op = 'delete'
+                        AND NOT EXISTS (
+                          SELECT 1 FROM item_versions newer
+                           WHERE newer.item_type = latest.item_type
+                             AND newer.item_id = latest.item_id
+                             AND newer.id > latest.id
+                        )
+                   )`,
+      args: [Number(project.id)],
+    }).catch(() => ({ rows: [] })); // a pre-history store has no JSON1 use for this
+    return await eraseCardHistory(tdb, rows.map((r) => Number(r.id)));
+  } finally {
+    tdb.close();
+  }
+}
+
 /**
  * canManageProject's rule (live row, local owner member, not revoked, role owner), except that
  * status='archived' is allowed. archived_at set and learner_profile rows are always false.
@@ -390,6 +466,28 @@ async function purgeCards(project, { tasksDbPath }, partial) {
         await tdb.batch(stmts);
         deleted.cards = ids.length;
         deleted.ids = ids;
+        // ... AND THEIR HISTORY, AT ONCE, IN THIS STORE. The batch above is a real
+        // DELETE, so the card capture triggers (installed in tasks.db by migration
+        // 0025) wrote a `delete` version for each card: the project's cards are now
+        // in tasks.db's own Trash with their whole history. A permanent project
+        // delete erases rather than waiting out a Trash period (the operator's
+        // 2026-11-10 ruling), so every version of those ids goes through erase.js's
+        // armed door here, with the same actor as crow.db's erase. Global store only:
+        // a per-project tasks.db has no capture triggers, so it has no history.
+        if (store.global && ids.length) {
+          try {
+            const erased = await eraseCardHistory(tdb, ids);
+            if (erased.versions > 0) {
+              console.log(`[project-lifecycle] delete ${id}: erased ${erased.versions} card version(s)`);
+            }
+          } catch (err) {
+            // The card rows are already gone, so this is not a `cards` failure: it is
+            // the SAME at-once history erase crow.db's half records, and
+            // resumeProjectDelete re-runs it (see eraseProjectCardHistory).
+            console.warn(`[project-lifecycle] delete ${id}: card history erase failed:`, err?.message || err);
+            partial.push("history-erase");
+          }
+        }
       }
     } catch (err) {
       console.warn(`[project-lifecycle] delete ${id}: cards purge failed:`, err?.message || err);
@@ -547,7 +645,10 @@ export async function deleteProject(db, projectId, {
   // version is a delete, so the context sections this purge deleted lose every version while
   // the memories it merely UNFILED keep theirs — they still exist, the user still has them.
   // A failure is a partial step: it is recorded (and re-run by resumeProjectDelete), never
-  // silently swallowed, and the tombstone stands either way.
+  // silently swallowed, and the tombstone stands either way. The CARD half of that step is not
+  // here: the cards live in tasks.db and are removed by purgeCards below (their rows and their
+  // versions together), and a failure there records the SAME "history-erase" step, which the
+  // finish path re-runs for both stores.
   const partial = [];
   try {
     const erased = await _eraseHistory(db, project);
@@ -723,11 +824,22 @@ export async function resumeProjectDelete(db, projectId, {
   const partial = [];
   const untraceable = [];
   if (wanted.has("history-erase")) {
+    let erasedOk = true;
     try { await _eraseHistory(db, project); }
     catch (err) {
       console.warn(`[project-lifecycle] resume ${id}: history erase failed:`, err?.message || err);
-      partial.push("history-erase");
+      erasedOk = false;
     }
+    // The CARD half of the same step: the cards' versions live in tasks.db's own
+    // item_versions, so crow.db's erase cannot reach them. The ids are read back out
+    // of the versions (their rows are gone, and did not record them), which is why
+    // this is a project-scoped sweep rather than the id list the first delete had.
+    try { await eraseProjectCardHistory(project, { tasksDbPath }); }
+    catch (err) {
+      console.warn(`[project-lifecycle] resume ${id}: card history erase failed:`, err?.message || err);
+      erasedOk = false;
+    }
+    if (!erasedOk) partial.push("history-erase");
   }
   if (wanted.has("history-workspace")) {
     try {
