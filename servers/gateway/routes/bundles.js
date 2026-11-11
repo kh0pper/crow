@@ -4373,6 +4373,8 @@ export default function bundlesRouter() {
     if (!bundleId || !isValidBundleId(bundleId)) return res.status(400).json({ error: "Invalid bundle ID" });
     const entry = getInstalled().find((i) => i && i.id === bundleId);
     if (!entry) return res.status(404).json({ error: `Bundle '${bundleId}' is not installed` });
+    // Hosted on another box (satellite): its key is set there, never from this card.
+    if (entry.mode === "satellite") return res.status(400).json({ error: "This extension runs on another machine, so its key is set there." });
     const saved = await saveApiKey({
       bundleId,
       manifest: getManifest(bundleId) || null,

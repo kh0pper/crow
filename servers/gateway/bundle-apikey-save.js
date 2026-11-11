@@ -38,7 +38,7 @@
  *      so a docker bundle's container gets the key too. A bundle without a .env is not
  *      given one.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { updateEnvText } from "./bundle-env-codec.js";
 import { writePrivateFile, envPatternViolation } from "./bundle-env-secrets.js";
@@ -57,10 +57,13 @@ const DENIED_EXACT = Object.freeze([
   "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
   "BASH_ENV", "ENV", "PATH", "HOME", "IFS", "SHELL",
   "GCONV_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR",
+  "SSLKEYLOGFILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "PROMPT_COMMAND", "PS4", "SHELLOPTS", "BASHOPTS",
+  "PAGER", "EDITOR", "VISUAL", "LESSOPEN", "TMPDIR", "LOCPATH", "HOSTALIASES", "RES_OPTIONS", "LANG",
 ]);
 const DENIED_PREFIXES = Object.freeze([
   "LD_", "DYLD_", "PYTHON", "PERL5", "RUBY", "JAVA_", "_JAVA_", "JDK_JAVA_",
   "CROW_", "COMPOSE_", "DOCKER_",
+  "NODE_", "OPENSSL_", "GIT_", "GLIBC_", "MALLOC_", "BASH_FUNC_", "NPM_CONFIG_", "PIP_", "UV_", "XDG_", "LC_",
 ]);
 
 /** The rule, as data, for a reader (or a test) that wants the whole list at once. */
@@ -161,6 +164,8 @@ export async function saveApiKey({ bundleId, manifest, envKey, value, crowHome =
   if (spec.generate) return refuse("generated");
   if (spec.secret !== true) return refuse("not_secret");
   if (isDeniedApiKeyEnvName(key)) return refuse("denied");
+  // A key with a previous-key slot has its own rotation rule in Configure's save: not here.
+  if (typeof spec.previous_key === "string" && spec.previous_key) return refuse("undeclared");
 
   if (typeof value !== "string" || value.trim() === "") return refuse("empty");
   if (value.length > API_KEY_MAX_LENGTH) return refuse("too_long");
@@ -212,6 +217,9 @@ export async function saveApiKey({ bundleId, manifest, envKey, value, crowHome =
   try {
     const envPath = join(d.bundleDir, ".env");
     if (existsSync(envPath)) {
+      // Only a regular file: a symlink planted from inside the container must not make this
+      // write copy (or overwrite) a file elsewhere.
+      if (!lstatSync(envPath).isFile()) throw Object.assign(new Error("not a regular file"), { code: "ENOTREG" });
       const text = readFileSync(envPath, "utf8");
       writePrivateFile(envPath, updateEnvText(text, values));
       envWritten = true;

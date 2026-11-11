@@ -55,6 +55,7 @@ test("contract: signup_url is https only, with no user info, whitespace, ${} or 
     "https://user@keys.example.com/",
     "https://keys.example.com/a b",
     "https://keys.example.com/${X}",
+    "https:\\\\keys.example.com/",
     `https://keys.example.com/${"a".repeat(520)}`,
     "keys.example.com",
   ]) {
@@ -126,4 +127,8 @@ test("contract: the six manifests that carry API-key help stay valid", () => {
 
 test("contract: a manifest without help fields is unaffected", () => {
   assert.equal(check({ name: "DEMO_PLAIN" }).ok, true);
+});
+test("contract: a key with a previous_key slot cannot carry the help (its rotation rule lives in Configure)", () => {
+  const errs = errorsFor({ name: "DEMO_KEY", secret: true, previous_key: "DEMO_KEY_PREVIOUS", explain: "x" });
+  assert.match(errs, /previous_key/);
 });

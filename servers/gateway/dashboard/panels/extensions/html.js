@@ -706,7 +706,7 @@ export function buildExtensionsHTML({
       addonMap[addon.id]._wallOwnerUnwalled = wall.ownerUnwalled === true;
     }
   }
-  const addonRegistryJson = JSON.stringify(addonMap).replace(/<\//g, "<\\/");
+  const addonRegistryJson = JSON.stringify(addonMap).replace(/</g, "\\u003c");
   const addonRegistryScript = `<script id="addon-registry" type="application/json">${addonRegistryJson}<\/script>`;
 
   // ─── Collection blob for the client-side install-set modal (Task 11) ───

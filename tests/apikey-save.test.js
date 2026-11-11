@@ -19,7 +19,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -492,4 +492,35 @@ test("the keychain table is on the never-sync list, so a saved key reaches no pe
   assert.ok(start > 0, "instance-sync still declares the local-only tables");
   const list = src.slice(start, src.indexOf("]);", start));
   assert.match(list, /"crow_keychain"/, "crow_keychain is never replicated");
+});
+test("review fixes: more runtime-control names are denied, a satellite install and a previous_key slot are refused, a symlinked .env is not followed", async () => {
+  for (const n of ["NODE_TLS_REJECT_UNAUTHORIZED", "OPENSSL_CONF", "GIT_SSH_COMMAND", "GLIBC_TUNABLES", "MALLOC_CONF", "BASH_FUNC_x%%", "PROMPT_COMMAND", "NPM_CONFIG_REGISTRY", "XDG_CONFIG_HOME", "REQUESTS_CA_BUNDLE", "SSLKEYLOGFILE", "OPENSSL_MODULES"]) {
+    assert.equal(isDeniedApiKeyEnvName(n), true, n);
+  }
+  assert.equal(isDeniedApiKeyEnvName("DEMO_API_KEY"), false);
+  const manifest = { ...DEMO, id: "apikey-review", name: "Review App", env_vars: [...DEMO.env_vars, { name: "DEMO_ROTATING", required: false, secret: true, previous_key: "DEMO_ROTATING_PREV" }] };
+  const dir = seed("apikey-review", manifest, { dotEnv: "DEMO_API_KEY=\n" });
+  // satellite entry
+  const cur = JSON.parse(readFileSync(INSTALLED, "utf8"));
+  cur.push({ id: "apikey-sat", type: "bundle", version: "1.0.0", installedAt: INSTALL, mode: "satellite" });
+  writeFileSync(INSTALLED, JSON.stringify(cur, null, 2));
+  seed("apikey-sat", { ...DEMO, id: "apikey-sat", name: "Sat" });
+  const cur2 = JSON.parse(readFileSync(INSTALLED, "utf8")).map((e) => (e.id === "apikey-sat" ? { ...e, mode: "satellite" } : e));
+  writeFileSync(INSTALLED, JSON.stringify(cur2, null, 2));
+  await withServer({ owner: true }, async (post) => {
+    const sat = await save(post, { bundle_id: "apikey-sat", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(sat.status, 400);
+    assert.equal(JSON.stringify(sat.body).includes(VALUE), false);
+    const rot = await save(post, { bundle_id: "apikey-review", env_key: "DEMO_ROTATING", value: VALUE });
+    assert.equal(rot.status, 400);
+    // a symlinked .env: refused, and the link target is never written
+    const target = join(TMP_HOME, "symlink-target.txt");
+    writeFileSync(target, "UNTOUCHED=1\n");
+    rmSync(join(dir, ".env"));
+    symlinkSync(target, join(dir, ".env"));
+    const link = await save(post, { bundle_id: "apikey-review", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(link.status, 500);
+    assert.equal(readFileSync(target, "utf8"), "UNTOUCHED=1\n");
+    assert.equal(JSON.stringify(link.body).includes(VALUE), false);
+  });
 });

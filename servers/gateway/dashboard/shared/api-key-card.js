@@ -61,7 +61,8 @@ export function safeSignupUrl(raw) {
   if (parsed.protocol !== "https:") return null;
   if (parsed.username || parsed.password) return null;
   if (!parsed.host) return null;
-  return { href: raw, host: parsed.host };
+  if (raw.includes("\\")) return null;
+  return { href: parsed.href, host: parsed.host };
 }
 
 /**

@@ -411,6 +411,7 @@ export function validateEnvVarHelp(ev) {
 
   if (ev.secret !== true) errors.push(`${where}: explain/signup_url/signup_label need secret: true (the operator types it)`);
   if (ev.generate !== undefined) errors.push(`${where}: explain/signup_url/signup_label are not allowed on a generate key (Crow mints it)`);
+  if (typeof ev.previous_key === "string" && ev.previous_key) errors.push(`${where}: explain/signup_url/signup_label are not allowed on a key with previous_key (its rotation rule lives in Configure)`);
   if (isDeniedApiKeyEnvName(name)) {
     errors.push(`${where}: "${name}" controls how programs run, so it cannot be set from an API-key card`);
   }
