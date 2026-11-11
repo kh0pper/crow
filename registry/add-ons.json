@@ -3806,7 +3806,7 @@
     {
       "id": "matrix-bridges",
       "name": "Matrix Bridges",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Meta-bundle for Matrix appservice bridges (Signal, Telegram, WhatsApp, custom crow-matrix-bridge). Opt-in per bridge; each has its own consent text and hardware requirements. Installs appservice registrations into Dendrite and restarts the homeserver.",
       "type": "bundle",
       "author": "Crow",
@@ -3875,13 +3875,23 @@
           "name": "BRIDGE_TELEGRAM_API_ID",
           "description": "Telegram API ID from my.telegram.org/apps.",
           "required": false,
-          "secret": true
+          "secret": true,
+          "explain": {
+            "en": "The Telegram API id the Telegram bridge uses. Log in at my.telegram.org/apps with your phone number and create an application; its id and hash are on that page.",
+            "es": "El id de la API de Telegram que usa el puente de Telegram. Entra en my.telegram.org/apps con tu número de teléfono y crea una aplicación; el id y el hash aparecen en esa página."
+          },
+          "signup_url": "https://my.telegram.org/apps"
         },
         {
           "name": "BRIDGE_TELEGRAM_API_HASH",
           "description": "Telegram API hash.",
           "required": false,
-          "secret": true
+          "secret": true,
+          "explain": {
+            "en": "The Telegram API hash that belongs to the API id. It comes from the application you create at my.telegram.org/apps.",
+            "es": "El hash de la API de Telegram que corresponde al id. Viene de la aplicación que creas en my.telegram.org/apps."
+          },
+          "signup_url": "https://my.telegram.org/apps"
         },
         {
           "name": "BRIDGE_WHATSAPP_ENABLED",
@@ -4001,7 +4011,7 @@
     {
       "id": "media",
       "name": "Media Hub",
-      "version": "1.2.9",
+      "version": "1.2.10",
       "description": "News aggregation, RSS feeds, YouTube channels, podcasts, a daily spoken briefing read by the local voice, playlists, smart folders, email digests",
       "type": "mcp-server",
       "author": "Crow",
@@ -4240,7 +4250,12 @@
           "name": "BRAVE_API_KEY",
           "description": "Brave Search API key for RSS feed discovery",
           "required": false,
-          "secret": true
+          "secret": true,
+          "explain": {
+            "en": "The Brave Search API key used to discover RSS feeds for a site. Includes $5/month free credit.",
+            "es": "La clave de la API de Brave Search que se usa para descubrir fuentes RSS de un sitio. Incluye 5 $/mes de crédito gratuito."
+          },
+          "signup_url": "https://brave.com/search/api/"
         }
       ],
       "official": true
@@ -5619,7 +5634,7 @@
     {
       "id": "plex",
       "name": "Plex",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "privileged": true,
       "install_consent_messages": {
         "en": "Crow does not start a Plex server at install: it runs only if you start it from Extensions. If you do, the self-hosted Plex server uses host networking (Plex's own recommendation) so devices on your local network can discover it. It listens on every network interface of this machine (port 32400 and Plex's discovery ports) and mounts your media folder read-write. Until you claim it with your Plex account (PLEX_CLAIM_TOKEN), the first person who opens it can claim it.",
@@ -5674,7 +5689,11 @@
           "name": "PLEX_TOKEN",
           "description": "Plex authentication token (see skill for how to find it)",
           "required": true,
-          "secret": true
+          "secret": true,
+          "explain": {
+            "en": "The token Plex uses to prove this connection is yours. Find it through your Plex account.",
+            "es": "El token con el que Plex comprueba que esta conexión es tuya. Encuéntralo en tu cuenta de Plex."
+          }
         },
         {
           "name": "PLEX_MACHINE_ID",
@@ -6865,7 +6884,7 @@
     {
       "id": "tailscale",
       "name": "Tailscale",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "privileged": true,
       "install_consent_messages": {
         "en": "The Tailscale container joins this machine to your tailnet. It uses host networking, the NET_ADMIN capability and the /dev/net/tun device, so it creates a network interface and changes this machine's routing and firewall rules. Do not install it on a machine that already runs Tailscale.",
@@ -6901,7 +6920,12 @@
           "name": "TS_AUTHKEY",
           "description": "Tailscale reusable auth key — generate at https://login.tailscale.com/admin/settings/keys (select 'Reusable')",
           "required": true,
-          "secret": true
+          "secret": true,
+          "explain": {
+            "en": "Lets this machine join your Tailscale network. Create a reusable auth key on the Keys page (Generate auth key).",
+            "es": "Permite que esta máquina se una a tu red de Tailscale. Crea una clave de autenticación reutilizable en la página Keys (Generate auth key)."
+          },
+          "signup_url": "https://console.tailscale.com/admin/settings/keys"
         },
         {
           "name": "TS_HOSTNAME",
@@ -7137,7 +7161,7 @@
     {
       "id": "unsloth",
       "name": "Unsloth Studio (AMD ROCm)",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Fine-tune and chat with open models on an AMD GPU: Unsloth's ROCm image with the Unsloth Studio web UI and JupyterLab notebooks. AMD ROCm hosts only.",
       "type": "bundle",
       "author": "Crow",
@@ -7204,7 +7228,12 @@
           "description": "Hugging Face token, only needed for gated models (Llama, Gemma). Leave blank for public models.",
           "required": false,
           "secret": true,
-          "propagate": false
+          "propagate": false,
+          "explain": {
+            "en": "A Hugging Face token, only needed for gated models (Llama, Gemma). Create one on your Hugging Face tokens page.",
+            "es": "Un token de Hugging Face, solo necesario para modelos con acceso restringido (Llama, Gemma). Crea uno en tu página de tokens de Hugging Face."
+          },
+          "signup_url": "https://huggingface.co/settings/tokens"
         },
         {
           "name": "UNSLOTH_SHM_SIZE",
@@ -7519,7 +7548,7 @@
     {
       "id": "vllm",
       "name": "vLLM",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "description": "GPU-accelerated local LLM inference server — OpenAI-compatible endpoint backed by vLLM's continuous batching and PagedAttention. Recommended classroom engine for Maker Lab: the Phase 0 Ollama benchmark hit unusable p95 latencies at N=25 concurrent learners; vLLM is architecturally the right shape for that scale.",
       "type": "bundle",
       "author": "Crow",
@@ -7589,7 +7618,12 @@
           "name": "VLLM_HF_TOKEN",
           "description": "HuggingFace token for gated models (Llama, Mistral instruct tunes). Leave blank for public models.",
           "required": false,
-          "secret": true
+          "secret": true,
+          "explain": {
+            "en": "A Hugging Face token, only needed to download gated models (Llama, Mistral instruct tunes). Create one on your Hugging Face tokens page.",
+            "es": "Un token de Hugging Face, solo necesario para descargar modelos con acceso restringido (Llama, Mistral instruct tunes). Crea uno en tu página de tokens de Hugging Face."
+          },
+          "signup_url": "https://huggingface.co/settings/tokens"
         },
         {
           "name": "VLLM_MODEL_CACHE_PATH",

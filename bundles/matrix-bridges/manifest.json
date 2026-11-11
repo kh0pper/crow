@@ -1,7 +1,7 @@
 {
   "id": "matrix-bridges",
   "name": "Matrix Bridges",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Meta-bundle for Matrix appservice bridges (Signal, Telegram, WhatsApp, custom crow-matrix-bridge). Opt-in per bridge; each has its own consent text and hardware requirements. Installs appservice registrations into Dendrite and restarts the homeserver.",
   "type": "bundle",
   "author": "Crow",
@@ -29,8 +29,8 @@
     { "name": "MATRIX_BRIDGE_DOMAIN", "description": "MATRIX_SERVER_NAME from the matrix-dendrite bundle (appears in bridge bot MXIDs as @signalbot:<this>).", "required": true },
     { "name": "BRIDGE_SIGNAL_ENABLED", "description": "Enable mautrix-signal. RISK: Signal ToS prohibits automated clients — number may be terminated.", "default": "false", "required": false },
     { "name": "BRIDGE_TELEGRAM_ENABLED", "description": "Enable mautrix-telegram. Requires a Telegram API ID + hash.", "default": "false", "required": false },
-    { "name": "BRIDGE_TELEGRAM_API_ID", "description": "Telegram API ID from my.telegram.org/apps.", "required": false, "secret": true },
-    { "name": "BRIDGE_TELEGRAM_API_HASH", "description": "Telegram API hash.", "required": false, "secret": true },
+    { "name": "BRIDGE_TELEGRAM_API_ID", "description": "Telegram API ID from my.telegram.org/apps.", "required": false, "secret": true, "explain": { "en": "The Telegram API id the Telegram bridge uses. Log in at my.telegram.org/apps with your phone number and create an application; its id and hash are on that page.", "es": "El id de la API de Telegram que usa el puente de Telegram. Entra en my.telegram.org/apps con tu número de teléfono y crea una aplicación; el id y el hash aparecen en esa página." }, "signup_url": "https://my.telegram.org/apps" },
+    { "name": "BRIDGE_TELEGRAM_API_HASH", "description": "Telegram API hash.", "required": false, "secret": true, "explain": { "en": "The Telegram API hash that belongs to the API id. It comes from the application you create at my.telegram.org/apps.", "es": "El hash de la API de Telegram que corresponde al id. Viene de la aplicación que creas en my.telegram.org/apps." }, "signup_url": "https://my.telegram.org/apps" },
     { "name": "BRIDGE_WHATSAPP_ENABLED", "description": "Enable mautrix-whatsapp. RISK: WhatsApp may ban the linked phone number.", "default": "false", "required": false }
   ],
   "ports": [],

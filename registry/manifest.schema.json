@@ -274,6 +274,19 @@
               { "type": "object", "required": ["en"], "properties": { "en": { "type": "string" }, "es": { "type": "string" } }, "additionalProperties": false }
             ]
           },
+          "explain": {
+            "oneOf": [
+              { "type": "string", "maxLength": 600 },
+              { "type": "object", "required": ["en"], "properties": { "en": { "type": "string", "maxLength": 600 }, "es": { "type": "string", "maxLength": 600 } }, "additionalProperties": false }
+            ]
+          },
+          "signup_url": { "type": "string", "maxLength": 512 },
+          "signup_label": {
+            "oneOf": [
+              { "type": "string", "maxLength": 60 },
+              { "type": "object", "required": ["en"], "properties": { "en": { "type": "string", "maxLength": 60 }, "es": { "type": "string", "maxLength": 60 } }, "additionalProperties": false }
+            ]
+          },
           "default": {}
         }
       }

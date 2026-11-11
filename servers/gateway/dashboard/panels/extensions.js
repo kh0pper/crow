@@ -128,6 +128,20 @@ export default {
       });
     } catch { /* no card rather than no page */ }
 
+    // API-key cards: an installed add-on whose REQUIRED, typed secret env var is still
+    // empty and whose manifest explains where the key comes from. Emptiness is the same
+    // needsConfig map the page already computed; both the fields and the manifest are read
+    // from the REVIEWED repo copy (getManifest), never the installed one. A card disappears
+    // by itself once the key is set, so nothing is stored.
+    let apiKeyCards = [];
+    try {
+      const { getManifest: getReviewedManifest } = await import("../../bundles-config.js");
+      const { pendingApiKeyCards } = await import("../shared/api-key-card.js");
+      const apiKeyManifests = {};
+      for (const id of Object.keys(localInstalled)) apiKeyManifests[id] = getReviewedManifest(id);
+      apiKeyCards = pendingApiKeyCards({ installed: localInstalled, manifests: apiKeyManifests, needsConfig });
+    } catch { apiKeyCards = []; }
+
     // The Local models card's counts come from the lifecycle listing
     // (provider rows), computed here so html.js stays pure.
     let localModels = { registered: 0, resident: 0 };
@@ -154,6 +168,7 @@ export default {
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
       installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, needsRepin, legacyAccounts, dockerOk, keychainPending, vaultSecure, localModels, lang,
       firstAdminPending,
+      apiKeyCards,
       satellites, satelliteEligibleIds, offsite,
       addonWall,
       addonWallStatusHtml,
