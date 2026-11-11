@@ -61,19 +61,32 @@ site_address() {
   awk '
     /^[[:space:]]*#/ { next }
     /^[[:space:]]*$/ { next }
-    index($0, "{") > 0 {
+    {
       line = $0
-      sub(/\{.*/, "", line)
-      n = split(line, parts, /[[:space:]]+/)
-      for (i = 1; i <= n; i++) {
-        addr = parts[i]
-        if (addr == "") continue
-        sub(/^[a-z]+:\/\//, "", addr)
-        sub(/\/.*$/, "", addr)
-        print addr
-        exit
+      sub(/[ \t]+#.*$/, "", line)
+      # The first block of a Caddyfile may be the global options block: a bare
+      # `{`. Its nested options (`log {`, `servers {`) are not sites, so skip the
+      # whole block by its brace depth.
+      if (depth == 0 && first && line ~ /^[ \t]*\{[ \t]*$/) is_global = 1
+      first = 0
+      if (depth == 0 && !is_global && index(line, "{") > 0) {
+        sub(/\{.*/, "", line)
+        n = split(line, parts, /[[:space:]]+/)
+        for (i = 1; i <= n; i++) {
+          addr = parts[i]
+          if (addr == "") continue
+          sub(/^[a-z]+:\/\//, "", addr)
+          sub(/\/.*$/, "", addr)
+          print addr
+          exit
+        }
       }
+      o = gsub(/\{/, "{", line)
+      c = gsub(/\}/, "}", line)
+      depth += o - c
+      if (depth <= 0) { depth = 0; is_global = 0 }
     }
+    BEGIN { first = 1 }
   ' "$CADDYFILE"
 }
 
@@ -101,8 +114,9 @@ ADMIN_OPTIONS="$(grep -E "$ADMIN_OPTION_RE" "$CADDYFILE" || true)"
 
 DROP_IN_ONLY=0
 if [ -n "$ADMIN_OPTIONS" ]; then
-  FIRST_ADMIN="$(printf '%s\n' "$ADMIN_OPTIONS" | head -n 1 \
-    | sed -E 's/^[[:space:]]*admin[[:space:]]+//; s/[[:space:]]+$//')"
+  # Only the first word after `admin` counts: a trailing `{` or `# comment` on
+  # the line does not change which address it names.
+  FIRST_ADMIN="$(printf '%s\n' "$ADMIN_OPTIONS" | head -n 1 | awk '{ print $2 }')"
   case "$FIRST_ADMIN" in
     off)
       log "Already set up: $CADDYFILE has 'admin off', so nothing on this machine can reach Caddy's admin API — nothing to do."
@@ -140,8 +154,17 @@ restore_file() {
   if [ -f "$1" ]; then cp -a "$1" "$2"; else rm -f "$2"; fi
 }
 
-cp -a "$CADDYFILE" "$BACKUP_DIR/Caddyfile"
-if [ -f "$DROP_IN" ]; then cp -a "$DROP_IN" "$BACKUP_DIR/crow-admin-socket.conf"; fi
+# No backup, no change: these run before the ERR trap exists, so a failed copy
+# must stop the script here, not leave a restore that has nothing to restore.
+if ! cp -a "$CADDYFILE" "$BACKUP_DIR/Caddyfile"; then
+  echo "Could not back up $CADDYFILE — nothing was changed." >&2
+  exit 1
+fi
+if [ -f "$DROP_IN" ] && ! cp -a "$DROP_IN" "$BACKUP_DIR/crow-admin-socket.conf"; then
+  echo "Could not back up $DROP_IN — nothing was changed." >&2
+  exit 1
+fi
+SERVICES_TOUCHED=0
 
 restore() {
   local rc=$?
@@ -150,8 +173,12 @@ restore() {
   echo "FAILED (exit $rc) — restoring the previous setup." >&2
   cp -a "$BACKUP_DIR/Caddyfile" "$CADDYFILE"
   restore_file "$BACKUP_DIR/crow-admin-socket.conf" "$DROP_IN"
-  systemctl daemon-reload >/dev/null 2>&1
-  systemctl restart "$CADDY_UNIT_NAME" >/dev/null 2>&1
+  # A failure before any service was touched (a failed assertion or validate)
+  # restarts nothing: Caddy was never stopped, so a restart would only be an outage.
+  if [ "$SERVICES_TOUCHED" -eq 1 ]; then
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl restart "$CADDY_UNIT_NAME" >/dev/null 2>&1
+  fi
   echo "The Caddyfile and the caddy.service drop-in are back the way they were." >&2
   exit "$rc"
 }
@@ -174,7 +201,9 @@ if [ "$DROP_IN_ONLY" -eq 0 ]; then
         first = i
         break
       }
-      if (first > 0 && lines[first] ~ /^[[:space:]]*\{[[:space:]]*$/) {
+      g = (first > 0) ? lines[first] : ""
+      sub(/[ \t]+#.*$/, "", g)
+      if (first > 0 && g ~ /^[[:space:]]*\{[[:space:]]*$/) {
         for (i = 1; i <= NR; i++) {
           print lines[i]
           if (i == first) print "\t" line
@@ -225,6 +254,7 @@ fi
 #    restart: a reload goes through the old admin address and cannot move it.
 caddy validate --config "$CADDYFILE"
 
+SERVICES_TOUCHED=1
 systemctl daemon-reload
 systemctl restart "$CADDY_UNIT_NAME"
 

@@ -371,7 +371,7 @@ function world(caddyfileText, { dropIn = false } = {}) {
   // `id -u` says root; everything else is the real tool.
   stub("id", ['if [ "$1" = "-u" ]; then echo 0; else /usr/bin/id "$@"; fi']);
   stub("getent", []); // the caddy user exists
-  stub("caddy", []);
+  stub("caddy", ['if [ "$1" = "validate" ]; then exit "${STUB_VALIDATE_RC:-0}"; fi']);
   stub("systemctl", ['if [ "$1" = "reload" ]; then exit "${STUB_RELOAD_RC:-0}"; fi']);
   stub("curl", ['printf "%s" "${STUB_CURL_CODE:-200}"']);
 
@@ -399,6 +399,7 @@ function world(caddyfileText, { dropIn = false } = {}) {
       STUB_LOG: log,
       STUB_CURL_CODE: "200",
       STUB_RELOAD_RC: "0",
+      STUB_VALIDATE_RC: "0",
     },
   };
 }
@@ -518,4 +519,45 @@ test("repair: a Caddyfile without a Crow upstream is still handled — the rewri
   const after = readFileSync(w.caddyfile, "utf-8");
   assert.ok(after.startsWith(`{\n\tadmin unix/${ADMIN_SOCKET_PATH}\n}\n\n`));
   assert.ok(after.includes('other.local {\n    respond "hi"\n}\n'));
+});
+test("repair: a failed caddy validate changes nothing and restarts nothing", () => {
+  const original = "example.local {\n    reverse_proxy unix//run/crow-proxy/gateway.sock\n}\n";
+  const w = world(original);
+  const r = runFix(w, { STUB_VALIDATE_RC: "1" });
+  assert.notEqual(r.status, 0);
+  assert.equal(readFileSync(w.caddyfile, "utf-8"), original);
+  assert.equal(existsSync(w.dropInPath), false);
+  assert.deepEqual(serviceCalls(r.calls), [], `Caddy was never touched, calls: ${r.calls.join(" | ")}`);
+});
+
+test("repair: no socket after the restart restores everything and restarts Caddy again", () => {
+  const original = "example.local {\n    reverse_proxy unix//run/crow-proxy/gateway.sock\n}\n";
+  const w = world(original);
+  const r = runFix(w, { CROW_CADDY_ADMIN_SOCKET: join(w.dir, "never-created.sock") });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /No socket at/);
+  assert.equal(readFileSync(w.caddyfile, "utf-8"), original);
+  assert.equal(existsSync(w.dropInPath), false);
+  assert.equal(r.calls.filter((c) => c.startsWith("systemctl restart caddy")).length, 2);
+});
+
+test("repair: a nested option in the existing global block does not fool the site-address read", () => {
+  const w = world("{\n\tlog {\n\t\tlevel INFO\n\t}\n}\n\nexample.local {\n    reverse_proxy unix//run/crow-proxy/gateway.sock\n}\n");
+  const r = runFix(w);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Verifying https:\/\/example\.local:443\/health/);
+});
+
+test("repair: an `admin` line with a trailing `{` or comment is still recognised as Crow's, and a `{ # note` global line is reused", () => {
+  const sock = ADMIN_SOCKET_PATH;
+  const w1 = world(`{\n\tadmin unix/${sock} # mine\n}\nexample.local {\n}\n`);
+  const r1 = runFix(w1);
+  assert.equal(r1.status, 0, r1.stderr);
+  assert.match(r1.stdout, /installing the systemd drop-in/, "the drop-in is still installed");
+  const w2 = world("{ # global options\n\temail a@example.com\n}\nexample.local {\n}\n");
+  const r2 = runFix(w2);
+  assert.equal(r2.status, 0, r2.stderr);
+  const after = readFileSync(w2.caddyfile, "utf-8");
+  assert.equal((after.match(/^\{/gm) || []).length, 1, "one global block only");
+  assert.match(after, /admin unix\//);
 });

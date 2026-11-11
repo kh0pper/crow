@@ -1396,9 +1396,10 @@ CADDYADMINEOF
 #
 # The global block comes FIRST, because a global options block must, and it pins
 # the admin API to a unix socket the drop-in above gives a directory for. No
-# `|mode` suffix on purpose: Caddy's default mode for a unix listen address is
-# 0200 — owner write only — and the process that creates the socket is the caddy
-# user, so only that user and root can open it. `caddy reload` reads that
+# `|mode` suffix on purpose: in current Caddy the default mode for a unix listen
+# address is 0200 — owner write only — and the process that creates the socket is
+# the caddy user, so only that user and root can open it (the 0750 /run/caddy
+# directory keeps every other account out whatever the mode). `caddy reload` reads that
 # address from this same file, so the reload keeps working.
 sudo tee /etc/caddy/Caddyfile > /dev/null << EOF
 {
@@ -1433,6 +1434,8 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
 done
 if [ "$ADMIN_SOCKET_READY" -eq 1 ]; then
   log "Caddy's admin API is on unix//run/caddy/admin.sock (owner: the caddy user)"
+  # The packaged unit's reload goes through that address; prove it still works.
+  sudo systemctl reload caddy || warn "'systemctl reload caddy' failed with the admin socket — a Caddy restart still works"
 else
   warn "Caddy's admin socket /run/caddy/admin.sock has not appeared — try: sudo systemctl restart caddy"
 fi
