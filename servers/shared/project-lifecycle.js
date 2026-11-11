@@ -29,6 +29,9 @@ async function eraseProjectHistory(db, project) {
   );
 }
 
+/** "Any delete, however recent": the cutoff that makes eraseItems require a still-deleted latest version. */
+const STILL_DELETED_CUTOFF = "9999-12-31T23:59:59.999Z";
+
 /** The actor a permanent project delete erases as, in EITHER store. */
 const PROJECT_DELETE_ERASE_CTX = Object.freeze({ authorKind: "system", authorId: "project-delete" });
 
@@ -53,11 +56,18 @@ const PROJECT_DELETE_ERASE_CTX = Object.freeze({ authorKind: "system", authorId:
 async function eraseCardHistory(tdb, ids) {
   if (!Array.isArray(ids) || ids.length === 0) return { versions: 0, erased: [], tombstones: 0, emitted: 0 };
   const { eraseItems } = await import("./history/erase.js");
-  return eraseItems(
+  // FAIL-CLOSED: `deletedBefore` far in the future turns on erase.js's "latest version must
+  // still be a delete, with nothing newer" guard INSIDE the armed transaction (the same one
+  // the Trash sweep uses). A card restored or re-created between the purge and a resumed
+  // erase has a newer version, so it keeps its history and is never tombstoned; it comes
+  // back with 0 versions and is counted as skipped, never erased.
+  const result = await eraseItems(
     tdb,
     ids.map((id) => ({ itemType: "card", itemId: String(id) })),
     PROJECT_DELETE_ERASE_CTX,
+    { deletedBefore: STILL_DELETED_CUTOFF },
   );
+  return { ...result, skipped: result.erased.filter((e) => e.versions === 0).length };
 }
 
 /**
@@ -84,7 +94,21 @@ async function eraseProjectCardHistory(project, { tasksDbPath, ids = null } = {}
     // The LATEST version decides: it must be a delete AND its own snapshot must name this
     // project. An older version in this project proves nothing (a card moved on to another
     // project and later deleted normally sits in Trash and must keep its history).
-    if (Array.isArray(ids) && ids.length) return await eraseCardHistory(tdb, ids);
+    if (Array.isArray(ids) && ids.length) {
+      // Re-check each recorded id against its NEWEST version: it must be a delete that was
+      // filed under THIS project. Anything else (restored, re-created, moved) is skipped.
+      const ok = [];
+      for (const id of ids) {
+        const { rows: latest } = await tdb.execute({
+          sql: `SELECT op, json_extract(snapshot_json, '$.project_id') AS pid
+                  FROM item_versions WHERE item_type = 'card' AND item_id = ?
+                 ORDER BY id DESC LIMIT 1`,
+          args: [String(id)],
+        });
+        if (latest[0] && latest[0].op === "delete" && Number(latest[0].pid) === Number(project.id)) ok.push(id);
+      }
+      return await eraseCardHistory(tdb, ok);
+    }
     const { rows } = await tdb.execute({
       sql: `SELECT latest.item_id AS id
               FROM item_versions latest

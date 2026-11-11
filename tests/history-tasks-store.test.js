@@ -419,6 +419,48 @@ for (const failFirst of [false, true]) {
   });
 }
 
+test("a resumed card erase skips a recorded card that was restored in between, and erases the rest", async () => {
+  const f = await fixture();
+  try {
+    const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+    const L = await import("../servers/shared/project-lifecycle.js");
+    const { createCard } = await import("../servers/gateway/board/card-service.js");
+    const x = Number((await createProjectSpace(f.db, { name: "Race X" })).id);
+    const a = Number((await createCard(f.tdb, { title: "a", project_id: x }, BOT)).id);
+    const b = Number((await createCard(f.tdb, { title: "b", project_id: x }, BOT)).id);
+    await f.tdb.execute(`CREATE TRIGGER test_block_card_erase3
+      BEFORE UPDATE ON item_versions_erase
+      WHEN NEW.armed = 1
+      BEGIN SELECT RAISE(ABORT, 'simulated card history erase failure'); END`);
+    const outcome = await L.deleteProject(f.db, x, {
+      confirmName: "Race X",
+      tasksDbPath: f.tasksDbPath,
+      dataDir: INSTANCE_DATA,
+      storageDelete: async () => {},
+      disconnectBackend: async () => true,
+    });
+    assert.deepEqual(outcome.partial, ["history-erase"]);
+    await f.tdb.execute("DROP TRIGGER test_block_card_erase3");
+    // Between the purge and the resume, card `a` is brought back (same id, newest version
+    // is no longer a delete).
+    // (Re-inserting its row is what the capture trigger records as a newer, non-delete version.)
+    await f.tdb.execute({ sql: "INSERT INTO tasks_items (id, title, project_id) VALUES (?, 'a back', ?)", args: [a, x] });
+    const before = (await versionsOf(f.tdb, "card", a)).length;
+    const resumed = await L.resumeProjectDelete(f.db, x, {
+      dataDir: INSTANCE_DATA,
+      tasksDbPath: f.tasksDbPath,
+      storageDelete: async () => {},
+    });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed));
+    assert.equal((await versionsOf(f.tdb, "card", a)).length, before, "the restored card keeps its history");
+    assert.equal(await isErased(f.tdb, "card", String(a)), false, "and gets no tombstone");
+    assert.deepEqual(await versionsOf(f.tdb, "card", b), [], "the other card is erased");
+    assert.equal(await isErased(f.tdb, "card", String(b)), true);
+  } finally {
+    await f.dispose();
+  }
+});
+
 /* ---------------------- R1c: a job's card goes to the Trash, then is erased */
 
 test("a card deleted by a job undo keeps its versions until a card sweep past the Trash period erases them", async () => {
