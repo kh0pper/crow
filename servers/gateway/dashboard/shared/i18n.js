@@ -3161,8 +3161,8 @@ export const translations = {
   // not; without it the bot keeps the operator's groups and sudo works (mode
   // off is always the plain case — pi spawns unwrapped then).
   "settings.sandboxStatus.sandboxed": {
-    en: "Bots run inside the bubblewrap sandbox. It hides the instance's key files and most add-on settings. The browser and workspace add-on settings, the sharing identity, ~/.ssh and the database stay readable unless the contain tier is on.",
-    es: "Los bots se ejecutan dentro del entorno aislado bubblewrap. Oculta los archivos de claves de la instancia y la mayoría de los ajustes de los complementos. Los ajustes de los complementos de navegador y espacio de trabajo, la identidad para compartir, ~/.ssh y la base de datos siguen siendo legibles a menos que el nivel de contención esté activado.",
+    en: "Bots run inside the bubblewrap sandbox. It hides the instance's key files, most add-on settings and the ~/.ssh folder. The browser and workspace add-on settings, the sharing identity and the database stay readable unless the contain tier is on.",
+    es: "Los bots se ejecutan dentro del entorno aislado bubblewrap. Oculta los archivos de claves de la instancia, la mayoría de los ajustes de los complementos y la carpeta ~/.ssh. Los ajustes de los complementos de navegador y espacio de trabajo, la identidad para compartir y la base de datos siguen siendo legibles a menos que el nivel de contención esté activado.",
   },
   "settings.sandboxStatus.unsandboxed": {
     en: "Bots run WITHOUT the bubblewrap sandbox: {reason}. {exposure}",

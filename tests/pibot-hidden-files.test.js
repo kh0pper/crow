@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from "node:fs";
+import { symlinkSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { secretFilesFor, BUNDLE_ENV_READABLE, ROOT_SECRET_FILES } from "../scripts/pi-bots/hidden_files.mjs";
@@ -88,7 +88,15 @@ test("sandboxed spawn: root secrets and other bundles' .env are masked; models-t
   const dir = mkdtempSync(join(tmpdir(), "crow-hidden-spawn-"));
   mkdirSync(join(dir, "sessions"), { recursive: true });
   const stub = join(dir, "stub-pi.mjs");
-  const files = { dotenv, keystore, board, models, browserEnv, otherEnv };
+  // ~/.ssh is hidden as a dir; a symlinked bundle dir is not followed (its .env stays readable)
+  mkdirSync(join(USER_HOME, ".ssh"), { recursive: true });
+  const sshKey = join(USER_HOME, ".ssh", "id_fake");
+  writeFileSync(sshKey, "fake-ssh-key\n", { mode: 0o600 });
+  const linkTarget = mkdtempSync(join(tmpdir(), "crow-hidden-linktarget-"));
+  writeFileSync(join(linkTarget, ".env"), "fake-linked-env\n");
+  symlinkSync(linkTarget, join(CROW, "bundles", "linked"));
+  const linkedEnv = join(CROW, "bundles", "linked", ".env");
+  const files = { dotenv, keystore, board, models, browserEnv, otherEnv, sshKey, linkedEnv };
   writeFileSync(stub, [
     'import { readFileSync } from "node:fs";',
     `const files = ${JSON.stringify(files)};`,
@@ -107,6 +115,8 @@ test("sandboxed spawn: root secrets and other bundles' .env are masked; models-t
     for (const k of ["dotenv", "keystore", "board", "otherEnv"]) {
       assert.equal(r.len[k], 0, k + " reads empty inside");
     }
+    assert.equal(r.len.sshKey, "ENOENT", "~/.ssh is hidden");
+    assert.equal(r.len.linkedEnv, readFileSync(linkedEnv).length, "a symlinked bundle dir is skipped, not followed");
     assert.equal(r.len.models, readFileSync(models).length, "models-token stays readable");
     assert.equal(r.len.browserEnv, readFileSync(browserEnv).length, "the browser bundle's .env stays readable");
     const masked = pi.sandboxMaskedFiles;

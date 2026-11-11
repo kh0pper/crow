@@ -58,9 +58,9 @@
  * What it does not stop (known escape routes, all need a dedicated user):
  *  - the writable filesystem: ~/.bashrc and other rc files, ~/crow (the
  *    gateway's own source, run on the next restart/auto-update), autostart
- *    entries, ~/.ssh/authorized_keys, any script a privileged process runs;
- *  - `ssh localhost` (or another lab host) with a readable private key in
- *    ~/.ssh, which gives an unsandboxed shell;
+ *    entries, any script a privileged process runs;
+ *  - `ssh localhost` (or another lab host) with a private key kept outside
+ *    ~/.ssh (that dir is hidden now), which gives an unsandboxed shell;
  *  - abstract unix sockets (no network namespace), e.g. @/tmp/.X11-unix/X*;
  *  - the user-unit dirs are only not DIRECTLY writable: renaming an ancestor
  *    (mv ~/.config ~/.config.x; mkdir -p ~/.config/systemd/user) moves the
@@ -73,8 +73,8 @@
  *    (hideFiles, see hidden_files.mjs): each Crow home's .env, .keystore-env,
  *    board-token, phone-token and artifacts-token, every bundle .env except
  *    the browser and workspace bundles', and the app root's .env. They read
- *    empty inside. Still readable: crow.db, the sharing identity
- *    (data/identity.json), ~/.ssh, ~/.claude, the browser and workspace .env
+ *    empty inside. ~/.ssh is hidden as a dir. Still readable: crow.db, the
+ *    sharing identity (data/identity.json), ~/.claude, the browser and workspace .env
  *    files, and the tokens that something inside the sandbox reads
  *    (models-token, llm-cloud-token, kiosk-announce-token, studio-agent-token).
  *
@@ -404,24 +404,40 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   // Secret FILES (hideFiles) are single files masked with --dev-bind /dev/null
   // (a --ro-bind would be nodev, and reading it would fail with EACCES instead
   // of reading empty, which tools that load a missing .env handle better).
-  // Their ancestors are pinned like a hidden dir's, or a bot could rename one
-  // away and plant a decoy. A host-side rewrite by rename un-masks the path
-  // for the rest of that spawn. A bot inside cannot rename over a mask: EBUSY.
+  // The paths come from the gateway, never from a bot, but the tree under
+  // them is bot-writable, so nothing is followed: a symlink is skipped, and so
+  // is any file with a symlink between it and its root (a bot could plant one
+  // to steer a bind at /proc, /dev or a tmpfs mask). A file must sit under one
+  // of opts.hideFileRoots (each Crow home and the app root; no roots, no
+  // masks), and its ancestors are pinned only from its dir up to and
+  // including that root, so a bot cannot rename a folder away and plant a
+  // decoy. Masks are applied at spawn time: a bot that renames a .env away
+  // before a later spawn makes that spawn mask the new file at the old name,
+  // not the moved one. A host-side rewrite by rename un-masks the path for the
+  // rest of that spawn. A bot inside cannot rename over a mask: EBUSY.
+  const noPinRoots = new Set(["/", "/proc", "/dev", "/sys", "/run", "/tmp", "/var", "/home", "/usr", "/etc", "/bin", "/lib", "/sbin", "/root"]);
+  const forbidden = (d) => noPinRoots.has(d) || ["/proc/", "/dev/", "/sys/", "/run/"].some((x) => d.startsWith(x)) ||
+    tmpfs.some((t) => d === t || d.startsWith(t + "/")) || hideDirs.some((t) => d === t || d.startsWith(t + "/"));
+  const realDir = (d) => { try { return lstatSync(d).isDirectory(); } catch { return false; } };
+  const fileRoots = (opts.hideFileRoots || []).filter((r) => typeof r === "string" && r.startsWith("/") && !forbidden(r) && realDir(r));
   const maskedFiles = [];
-  for (const given of opts.hideFiles || []) {
-    if (typeof given !== "string" || !given.startsWith("/")) continue;
-    let f = given;
-    try {
-      // Always the resolved path: the file itself may be a symlink, and so
-      // may a bundle dir above it (an install can link a bundle into
-      // <CROW_HOME>/bundles). Pinning or binding onto a symlink fails.
-      lstatSync(given);
-      f = realpathSync(given);
-      if (!statSync(f).isFile()) continue;
-    } catch { continue; }
-    // Already empty or masked: a bind there would fail.
-    if (tmpfs.some((d) => f === d || f.startsWith(d + "/")) || hideDirs.some((d) => f === d || f.startsWith(d + "/"))) continue;
-    if (!maskedFiles.includes(f)) maskedFiles.push(f);
+  const filePins = [];
+  for (const f of opts.hideFiles || []) {
+    if (typeof f !== "string" || !f.startsWith("/") || maskedFiles.includes(f)) continue;
+    if (f.split("/").includes("..")) continue;
+    const root = fileRoots.filter((r) => f.startsWith(r + "/")).sort((x, y) => y.length - x.length)[0];
+    if (!root || forbidden(f)) continue;
+    try { if (!lstatSync(f).isFile()) continue; } catch { continue; }   // lstat: a symlink is not a file
+    const chain = [];
+    let ok = true;
+    for (let a = dirname(f); ; a = dirname(a)) {
+      if (!realDir(a) || forbidden(a)) { ok = false; break; }
+      chain.push(a);
+      if (a === root) break;
+    }
+    if (!ok) continue;
+    maskedFiles.push(f);
+    for (const a of chain) if (!filePins.includes(a)) filePins.push(a);
   }
   // Pin EVERY ancestor of a hidden dir below / (bound onto itself it is a
   // mountpoint, and renaming a mountpoint fails, EBUSY). Not only those whose
@@ -431,11 +447,12 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   // anchors a planted decoy at the old path while the real dir sits visible
   // elsewhere. A bind costs nothing.
   const pins = [];
-  for (const d of [...hideDirs, ...maskedFiles]) {
+  for (const d of hideDirs) {
     for (let a = dirname(d); a && a !== "/" && a !== opts.pinStop; a = dirname(a)) {
       if (!pins.includes(a)) pins.push(a);
     }
   }
+  for (const a of filePins) if (!pins.includes(a)) pins.push(a);
   // A probe without a pidns field (older callers, test stubs) means the full tier.
   const pidNamespace = probe.pidns !== false;
   if (!pidNamespace && !warnedNoPidns) {

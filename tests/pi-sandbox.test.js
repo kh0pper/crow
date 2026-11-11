@@ -436,7 +436,7 @@ test("wrapPiSpawn: hideFiles masks a file with /dev/null, after the roDirs binds
   try {
     const probe = { ok: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null };
     const l = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe, sockets: [], runtimeDirs: [],
-      roDirs: ["/h/.config/systemd"], hideFiles: [f], pinStop: root, infoFd: 3 });
+      roDirs: ["/h/.config/systemd"], hideFiles: [f], hideFileRoots: [cfg], pinStop: root, infoFd: 3 });
     const a = l.args;
     const maskAt = a.findIndex((x, i) => x === "--dev-bind" && a[i + 1] === "/dev/null" && a[i + 2] === f);
     const roDirAt = a.findIndex((x, i) => x === "--ro-bind" && a[i + 1] === "/h/.config/systemd");
@@ -445,11 +445,8 @@ test("wrapPiSpawn: hideFiles masks a file with /dev/null, after the roDirs binds
     assert.ok(maskAt > 0, "the file is masked: " + f);
     assert.ok(roDirAt >= 0 && roDirAt < maskAt, "the mask comes after every roDirs ro-bind");
     assert.ok(infoAt >= 0 && maskAt < infoAt, "the mask comes before --info-fd");
-    for (const p of [cfg, home]) {
-      assert.ok(bindAt(p) >= 0, "pinned: " + p);
-      assert.ok(bindAt(p) < maskAt, "pinned before the mask: " + p);
-    }
-    assert.equal(bindAt(root), -1, "pinning stops at pinStop");
+    assert.ok(bindAt(cfg) >= 0 && bindAt(cfg) < maskAt, "the root is pinned before the mask");
+    assert.equal(bindAt(home), -1, "pins stop at the root the file belongs to");
     assert.ok(l.masked.includes(f));
     assert.deepEqual(l.maskedFiles, [f]);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -467,43 +464,52 @@ test("wrapPiSpawn: hideFiles skips a missing path, a relative path, a directory 
     const probe = { ok: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null };
     const l = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe, sockets: [], runtimeDirs: [], roDirs: [],
       hideDirs: [secrets], pinStop: root,
-      hideFiles: [join(cfg, "missing-file"), "relative/.env", cfg, inSecrets] });
+      hideFiles: [join(cfg, "missing-file"), "relative/.env", cfg, inSecrets], hideFileRoots: [cfg] });
     assert.deepEqual(l.maskedFiles, []);
     assert.ok(!l.args.some((x) => x === "/dev/null"), "no file mask emitted");
     assert.ok(l.masked.includes(secrets), "the hidden dir is still masked");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("wrapPiSpawn: a symlinked hideFiles entry masks the resolved target and pins the target's ancestors", () => {
+test("wrapPiSpawn: hideFiles never follows a symlink, never leaves its roots, never pins /proc-style paths", () => {
   _resetPiSandboxForTest();
   const root = mkdtempSync(join(tmpdir(), "crow-hidefiles-link-"));
-  const home = join(root, "home");
-  const cfg = join(home, ".crow");
-  const realDir = join(root, "elsewhere");
-  const real = join(realDir, "real.env");
-  const dirTarget = join(root, "dir-target");
-  mkdirSync(cfg, { recursive: true });
-  mkdirSync(realDir, { recursive: true });
-  mkdirSync(dirTarget, { recursive: true });
+  const cfg = join(root, "home", ".crow");
+  const outside = join(root, "elsewhere");
+  mkdirSync(join(cfg, "bundles"), { recursive: true });
+  mkdirSync(outside, { recursive: true });
+  const real = join(outside, "real.env");
   writeFileSync(real, "fake-env\n");
-  const link = join(cfg, "env-link");
-  symlinkSync(real, link);
-  const dirLink = join(cfg, "dir-link");
-  symlinkSync(dirTarget, dirLink);
+  const fileLink = join(cfg, "env-link");
+  symlinkSync(real, fileLink);
+  const procLink = join(cfg, "proc-link");
+  symlinkSync("/proc/self/environ", procLink);
+  // a bundle dir that is a symlink (a bot could plant one): the .env under it is skipped
+  symlinkSync("/proc", join(cfg, "bundles", "planted"));
+  const linkedDir = join(cfg, "bundles", "linked");
+  symlinkSync(outside, linkedDir);
+  const good = join(cfg, "good.env");
+  writeFileSync(good, "fake\n");
   try {
     const probe = { ok: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null };
-    const l = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe, sockets: [], runtimeDirs: [], roDirs: [],
-      hideFiles: [link, dirLink], pinStop: root });
-    const a = l.args;
-    const target = realpathSync(real);
-    const maskAt = a.findIndex((x, i) => x === "--dev-bind" && a[i + 1] === "/dev/null" && a[i + 2] === target);
-    const bindAt = (p) => a.findIndex((x, i) => x === "--bind" && a[i + 1] === p && a[i + 2] === p);
-    assert.deepEqual(l.maskedFiles, [target], "a symlink to a dir is skipped");
-    assert.ok(maskAt > 0, "the resolved target is masked");
-    assert.ok(!a.includes(link), "the link path itself is not masked");
-    assert.ok(bindAt(realDir) >= 0 && bindAt(realDir) < maskAt, "the target's ancestor is pinned before the mask");
-    assert.equal(bindAt(cfg), -1, "the link's own dir is not pinned");
-    assert.equal(bindAt(home), -1);
+    const run = (o) => wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe, sockets: [], runtimeDirs: [], roDirs: [], pinStop: root, ...o });
+    const l = run({ hideFileRoots: [cfg, "/proc", "/dev", "/"],
+      hideFiles: [fileLink, procLink, join(cfg, "bundles", "planted", "environ"), join(linkedDir, "real.env"), real, "/proc/self/environ", "/dev/null", good] });
+    assert.deepEqual(l.maskedFiles, [good], "only the plain file under the root is masked");
+    assert.ok(!l.args.includes(real) && !l.args.includes(fileLink) && !l.args.includes(procLink), "no symlink or outside path in the argv");
+    const bound = (p) => l.args.some((x, i) => x === "--bind" && l.args[i + 1] === p && l.args[i + 2] === p);
+    for (const bad of ["/", "/proc", "/dev", "/sys", "/run", "/tmp", outside, linkedDir, join(cfg, "bundles", "planted")]) {
+      assert.ok(!bound(bad) && !l.pinned.includes(bad), "no pin for " + bad);
+    }
+    assert.deepEqual(l.pinned.filter((p) => !p.startsWith(cfg)), [], "pins stay at or under the root");
+    // no roots given, no masks
+    assert.deepEqual(run({ hideFiles: [good] }).maskedFiles, []);
+    // a root under /proc is refused
+    assert.deepEqual(run({ hideFileRoots: ["/proc/self"], hideFiles: ["/proc/self/environ"] }).maskedFiles, []);
+    // a root that is itself a symlink is refused
+    const rootLink = join(root, "root-link");
+    symlinkSync(cfg, rootLink);
+    assert.deepEqual(run({ hideFileRoots: [rootLink], hideFiles: [join(rootLink, "good.env")] }).maskedFiles, []);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -526,7 +532,7 @@ test("integration: a masked file reads empty inside, and neither it nor its dir 
       'console.log(JSON.stringify({ inside, over, anc }));',
     ].join("\n");
     const launch = wrapPiSpawn(process.execPath, ["-e", script, f, other, dir],
-      { mode: "auto", sockets: [], runtimeDirs: [], roDirs: [], hideFiles: [f], pinStop: root });
+      { mode: "auto", sockets: [], runtimeDirs: [], roDirs: [], hideFiles: [f], hideFileRoots: [dir], pinStop: root });
     assert.equal(launch.wrapper, "bwrap");
     assert.deepEqual(launch.maskedFiles, [f]);
     const res = await new Promise((resolve) => {

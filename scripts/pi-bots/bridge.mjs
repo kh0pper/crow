@@ -850,8 +850,13 @@ export class PiRpc {
         ...secretFilesFor({ crowHome: dirname(secretsHere), appRoot: BRIDGE_APP_ROOT }),
         ...otherHomes.flatMap((h) => secretFilesFor({ crowHome: h })),
       ];
+      // Files are masked only under these roots (wrapPiSpawn refuses any other).
+      const hideFileRoots = [dirname(secretsHere), BRIDGE_APP_ROOT, ...otherHomes];
+      // The operator's ssh keys: no Crow code reads ~/.ssh. Hidden as a dir (tmpfs)
+      // so a bot cannot use them, or `ssh localhost`, to leave the sandbox.
+      const sshDir = join(HOME, ".ssh");
       launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain,
-        hideDirs: [secretsHere, ...others], hideFiles, seccompFd: contain ? SECCOMP_FD : null, passFds });
+        hideDirs: [secretsHere, ...others, ...(contain ? [] : [sshDir])], hideFiles, hideFileRoots, seccompFd: contain ? SECCOMP_FD : null, passFds });
     } catch (e) {
       // A contain spawn that was REFUSED still gets its one line, naming the
       // provider with no door (or the refusal the caller sees). When the
