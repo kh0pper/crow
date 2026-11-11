@@ -116,13 +116,19 @@ async function handleBoardOn(req, res, { db }) {
   let projectId = row.project_id == null ? null : Number(row.project_id);
   let created = null, carried = [], carry = null, madePaths = [];
   // Removes what THIS request made: the carry-over links/dirs, then the
-  // project row (nothing references it yet).
+  // project row (nothing references it yet) and its just-made file history,
+  // which creation set up beside the data dir.
   const undo = async () => {
     undoCarryOver(madePaths);
     madePaths = [];
     if (!created) return;
     try { await db.execute({ sql: "DELETE FROM project_members WHERE project_id=?", args: [created.id] }); } catch {}
     try { await db.execute({ sql: "DELETE FROM project_spaces WHERE id=?", args: [created.id] }); } catch {}
+    try {
+      // Lazy, and best effort: an undo must never fail on a history module.
+      const { removeWorkspaceHistory } = await import("../../../../shared/history/workspace-history.js");
+      await removeWorkspaceHistory(created.id);
+    } catch { /* the id is not reused for a history dir, so a leftover is harmless */ }
   };
   if (projectId == null) {
     const crowHome = resolveCrowHome();

@@ -559,6 +559,25 @@ export async function deleteProject(db, projectId, {
     partial.push("history-erase");
   }
 
+  // A permanent project delete also removes the project's own file history AT ONCE (the
+  // operator's ruling): nothing about a deleted project should linger under history/workspaces.
+  // EXACTLY the directories the project id derives (its uuid-suffixed name, or a leftover under
+  // the older id-only name), never a path read from a column, so a stale repo_path can never make
+  // a delete remove another project's history — and the id is safe to reuse afterwards because no
+  // directory carrying it survives. The removal waits for the project's write lock, so an
+  // in-flight commit is not pulled out from under. The data dir is resolved the way creation
+  // resolved it (workspace-history's own rule). Archiving keeps the history.
+  try {
+    const { removeWorkspaceHistory } = await import("./history/workspace-history.js");
+    if (!(await removeWorkspaceHistory(id, { dataDir }))) {
+      console.warn(`[project-lifecycle] delete ${id}: the project's file history could not be removed`);
+      partial.push("history-workspace");
+    }
+  } catch (err) {
+    console.warn(`[project-lifecycle] delete ${id}: file history removal failed:`, err?.message || err);
+    partial.push("history-workspace");
+  }
+
   // The backends are gone for good, so their approval nonces go too: with one on record, a
   // writer that put a row back with the same id, connection_ref and old value would have that
   // value verify again. The delete stands either way — a record that cannot be written leaves
@@ -601,7 +620,7 @@ export function deletedProjectsDir(dataDir) {
 // ---------------------------------------------------------------------------------------------
 
 /** The steps a partial delete can list (the ones deleteProject runs after its commit). */
-const RESUME_STEPS = Object.freeze(["history-erase", "cards", "board_defs", "jobs", "files", "workspace"]);
+const RESUME_STEPS = Object.freeze(["history-erase", "history-workspace", "cards", "board_defs", "jobs", "files", "workspace"]);
 
 /** What a uuid has to look like to name a folder under deleted-projects (hex digits and dashes). */
 const AUDIT_UUID_RE = /^[0-9a-f-]{36}$/i;
@@ -708,6 +727,15 @@ export async function resumeProjectDelete(db, projectId, {
     catch (err) {
       console.warn(`[project-lifecycle] resume ${id}: history erase failed:`, err?.message || err);
       partial.push("history-erase");
+    }
+  }
+  if (wanted.has("history-workspace")) {
+    try {
+      const { removeWorkspaceHistory } = await import("./history/workspace-history.js");
+      if (!(await removeWorkspaceHistory(id, { dataDir, uuid }))) throw new Error("could not be removed");
+    } catch (err) {
+      console.warn(`[project-lifecycle] resume ${id}: file history removal failed:`, err?.message || err);
+      partial.push("history-workspace");
     }
   }
   // The ids first: purgeCards removes the rows they name. A card id is per store, so a store with
