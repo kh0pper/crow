@@ -933,10 +933,57 @@ test("driver_opts o: mount options apply in order, so an `ro` followed by `rw` i
   const rw = c("bind,ro,rw");
   assert.equal(rw.valid, false, "bind,ro,rw is read-write (the last option wins)");
   assert.match(rw.reason, /mounts its own bundle folder read-write/);
-  for (const o of ["bind,rw,ro", "ro", "bind,ro", "bind, ro, rw, ro"]) assert.equal(c(o).valid, true, `${o} is read-only`);
+  for (const o of ["bind,rw,ro", "ro", "bind,ro"]) assert.equal(c(o).valid, true, `${o} is read-only`);
   for (const o of ["bind", "bind,rw", "rw,ro,rw"]) assert.equal(c(o).valid, false, `${o} is read-write`);
   // The same last-wins reading feeds the "a container of this bundle can write here" list.
   assert.equal(c("bind,rw,ro").valid, true);
+  // Docker does not trim, so `" ro"` is an unknown option and the mount is read-write.
+  assert.equal(c("bind, ro, rw, ro").valid, false, "whitespace is refused, never read as read-only");
+});
+
+test("driver_opts read-only matches Docker exactly: no trimming, no case folding, no empty entries", () => {
+  const slug = `fx-exact-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CROW_HOME, "bundles", slug);
+  mkdirSync(join(dir, "data"), { recursive: true });
+  const c = (o) => check({ ...svc(), volumes: { v: { driver_opts: { type: "none", o, device: join(dir, "data") } } } }, { dir, manifest: { id: slug } });
+  const bad = c("bind, ro");
+  assert.equal(bad.valid, false, "` ro` is not `ro`: Docker leaves this mount read-write");
+  assert.match(bad.reason, /its mount options must not contain spaces or empty entries/);
+  const empty = c("bind,,ro");
+  assert.equal(empty.valid, false, "an empty option entry");
+  assert.match(empty.reason, /its mount options must not contain spaces or empty entries/);
+  // `RO` is not a read-only option Docker knows: the mount is read-write, so the bundle's own
+  // folder is refused; the exact lowercase `ro` is the only spelling that makes it read-only.
+  const upper = c("bind,RO");
+  assert.equal(upper.valid, false, "bind,RO is read-write to Docker");
+  assert.match(upper.reason, /mounts its own bundle folder read-write/);
+  assert.equal(c("bind,ro").valid, true, "bind,ro is read-only");
+});
+
+test("driver_opts: a bind/rbind option decides first, whatever `type` says (the kernel ignores the fs type under MS_BIND)", () => {
+  const slug = `fx-bind-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CROW_HOME, "bundles", slug);
+  mkdirSync(dir, { recursive: true });
+  const own = join(CROW_HOME, slug);
+  const c = (driver_opts, opts = {}) => check({ ...svc(), volumes: { v: { driver_opts } } }, { dir, manifest: { id: slug }, ...opts });
+  const t = (o, device) => c({ type: "tmpfs", o, device });
+  // `type: tmpfs` with a bind option is a plain host bind of `device`, not a tmpfs.
+  const bundle = t("bind", dir);
+  assert.equal(bundle.valid, false, "tmpfs with bind on the bundle folder");
+  assert.match(bundle.reason, /mounts its own bundle folder read-write/);
+  const root = t("size=1m,rbind", "/");
+  assert.equal(root.valid, false, "tmpfs with size=1m,rbind on /");
+  assert.match(root.reason, /mounts a sensitive host path/);
+  // A read-write rbind of its own data folder is an ordinary own-data bind, allowed.
+  assert.equal(t("rbind", own).valid, true, "tmpfs with rbind on CROW_HOME/<id>, read-write");
+  // An unknown type with bind is judged as the bind it is: `/` is refused even with consent.
+  for (const opts of [{}, { manifest: PRIV, consent: true }]) {
+    const ext4 = c({ type: "ext4", o: "bind", device: "/" }, opts);
+    assert.equal(ext4.valid, false, `ext4 with bind on / ${opts.consent ? "with" : "without"} consent`);
+    assert.match(ext4.reason, /mounts a sensitive host path/);
+  }
+  // Without a bind option, tmpfs still holds no host path.
+  assert.equal(t("size=1m").valid, true, "tmpfs without a bind option");
 });
 
 test("driver_opts type: none/bind and tmpfs pass without consent; overlay, unknown types and host-folder options are refused", () => {
@@ -984,6 +1031,13 @@ test("a bind inside a read-write bind-device volume is refused (volume devices j
   assert.equal(check(svc({ volumes: [bind(join(outer, "w", "sub"))] }), { manifest: { id } }).valid, true, "the bind alone is fine");
   const roDevice = { ...svc({ volumes: [bind(join(outer, "w", "sub"), true)] }), volumes: { v: { driver_opts: { type: "none", o: "bind,ro", device: outer } } } };
   assert.equal(check(roDevice, { manifest: { id } }).valid, true, "a read-only volume device does not make the bind unsafe");
+  // A READ-ONLY volume device still joins the check as the INNER mount: the read-write bind of
+  // its parent can swap it for a symlink, so it is refused.
+  const innerRo = { ...svc({ volumes: [bind(join(outer, "w"))] }), volumes: { v: { driver_opts: { type: "none", o: "bind,ro", device: join(outer, "w", "sub") } } } };
+  const innerR = check(innerRo, { manifest: { id } });
+  assert.equal(innerR.valid, false, "a read-only volume device inside a read-write bind");
+  assert.match(innerR.reason, /sits inside another read-write/);
+  assert.equal(check(svc({ volumes: [bind(join(outer, "w"), true)] }), { manifest: { id } }).valid, true, "the read-only bind alone is fine");
 });
 
 test("declared paths: the version refresh reads the manifest's declared roots (shared/bundle-declared-paths.js)", async () => {
