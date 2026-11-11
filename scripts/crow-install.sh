@@ -968,6 +968,405 @@ install_ufw_docker() {
   log "ufw-docker installed (Docker/UFW conflict resolved)"
 }
 
+# ─── Third-party apt repositories, keyed by fingerprint (security audit K7) ──
+# Node.js, Docker and Tailscale each come from their own apt repository, and
+# that repository's signing key is what apt trusts when it installs packages AS
+# ROOT. All three used to be wired up by piping a vendor script off the network
+# into a root shell (`curl … | sudo sh` / `| sudo -E bash -`), which lets
+# upstream — or whoever answers that request — decide what runs as root on this
+# machine. Nothing is piped into a shell any more: the key is downloaded by the
+# INVOKING USER into a temp file, its primary-key fingerprint is compared with a
+# constant below, and only a matching key is installed (through sudo_cmd) before
+# the apt source file is written. A key that does not match refuses the whole
+# step and leaves no source file behind, so the repository is never trusted just
+# because its download happened to succeed.
+#
+# A fingerprint and the URL it belongs to are bumped TOGETHER, in one edit: the
+# fingerprint is what makes a new or replaced key visible instead of silently
+# trusted. The constants below are plain assignments, so a stray exported
+# variable can never change which key is pinned; only the suite swaps in its own
+# throwaway fixture key, through the separately named CROW_TEST_*_KEY_FPR
+# variables read right after the seams below.
+DOCKER_KEY_URL_BASE="https://download.docker.com/linux"
+DOCKER_KEY_FPR="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+NODESOURCE_KEY_URL="https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key"
+NODESOURCE_KEY_FPR="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
+TAILSCALE_REPO_BASE="https://pkgs.tailscale.com/stable"
+TAILSCALE_KEY_FPR="2596A99EAAB33821893C0A79458CA832957F5868"
+
+# Test seams of the same kind as UFW_DOCKER_DEST and APT_CONF_DIR: the suite
+# points every one of them into a scratch directory, so no test can read the
+# real /etc/os-release, write under /etc/apt or /usr/share/keyrings, or reach
+# the network. The defaults are the real ones. CROW_CURL, CROW_SUDO and
+# CROW_APT come from the steps above.
+DOCKER_KEY_FPR="${CROW_TEST_DOCKER_KEY_FPR:-$DOCKER_KEY_FPR}"
+NODESOURCE_KEY_FPR="${CROW_TEST_NODESOURCE_KEY_FPR:-$NODESOURCE_KEY_FPR}"
+TAILSCALE_KEY_FPR="${CROW_TEST_TAILSCALE_KEY_FPR:-$TAILSCALE_KEY_FPR}"
+CROW_GPG="${CROW_GPG:-gpg}"
+CROW_OS_RELEASE="${CROW_OS_RELEASE:-/etc/os-release}"
+VENDOR_KEY_DIR="${VENDOR_KEY_DIR:-/etc/apt/keyrings}"
+USR_KEYRING_DIR="${USR_KEYRING_DIR:-/usr/share/keyrings}"
+APT_SOURCES_DIR="${APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
+CROW_DPKG_ARCH_CMD="${CROW_DPKG_ARCH_CMD:-dpkg --print-architecture}"
+
+# crow_gpg_stop <gnupg_home> — stop the gpg-agent/dirmngr helpers a private
+# GNUPGHOME started, so removing the directory leaves no process behind.
+crow_gpg_stop() {
+  gpgconf --homedir "$1" --kill all >/dev/null 2>&1 || true
+}
+
+# os_release_field <file> <KEY> — the value of KEY= in an os-release file, with
+# the quotes stripped; empty when the file or the key is absent.
+os_release_field() {
+  local file="$1" key="$2" line="" value=""
+  [ -r "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value="${line#"$key="}"; break ;;
+    esac
+  done < "$file"
+  value="${value%\"}"; value="${value#\"}"
+  value="${value%\'}"; value="${value#\'}"
+  printf '%s' "$value"
+}
+
+# vendor_repo_target [os_release_file] — prints "<flavor> <codename>" for the
+# vendor apt repositories, where flavor is ubuntu, debian or raspbian; returns 1
+# and prints nothing when those repositories do not serve this distribution.
+# Derivative distributions are resolved through ID_LIKE only when the vendor
+# also sets the codename variable that goes with it (Mint and Pop set
+# UBUNTU_CODENAME, LMDE sets DEBIAN_CODENAME): a guessed codename is a
+# repository that 404s, so anything else — Kali, a rolling codename such as
+# kali-rolling, an empty codename — is refused here instead.
+# shellcheck disable=SC2120  # the file is a test seam; the prod call passes none
+vendor_repo_target() {
+  local file="${1:-$CROW_OS_RELEASE}"
+  local id="" id_like="" ubuntu_codename="" debian_codename="" codename="" flavor=""
+  id="$(os_release_field "$file" ID)"
+  id_like="$(os_release_field "$file" ID_LIKE)"
+  ubuntu_codename="$(os_release_field "$file" UBUNTU_CODENAME)"
+  debian_codename="$(os_release_field "$file" DEBIAN_CODENAME)"
+  case "$id" in
+    ubuntu)
+      flavor="ubuntu"
+      codename="${ubuntu_codename:-$(os_release_field "$file" VERSION_CODENAME)}" ;;
+    debian)
+      flavor="debian"
+      codename="$(os_release_field "$file" VERSION_CODENAME)" ;;
+    raspbian)
+      flavor="raspbian"
+      codename="$(os_release_field "$file" VERSION_CODENAME)" ;;
+    *)
+      if [[ " $id_like " == *" ubuntu "* ]] && [ -n "$ubuntu_codename" ]; then
+        flavor="ubuntu"; codename="$ubuntu_codename"
+      elif [[ " $id_like " == *" debian "* ]] && [ -n "$debian_codename" ]; then
+        flavor="debian"; codename="$debian_codename"
+      fi ;;
+  esac
+  [ -n "$flavor" ] || return 1
+  # A codename apt can use is a plain lowercase word.
+  case "$codename" in
+    ""|*[!a-z]*) return 1 ;;
+  esac
+  printf '%s %s\n' "$flavor" "$codename"
+}
+
+# fetch_verified_key <url> <expected_fpr> <dest> — download a repository signing
+# key, refuse it unless it holds EXACTLY ONE primary key and that key's
+# fingerprint is <expected_fpr>, and only then install it (mode 644) at <dest>.
+# The download and the inspection both run as the INVOKING USER, in temp
+# locations; root only ever `install`s a file whose bytes were checked here. The
+# key is inspected in a fresh private GNUPGHOME, so nothing in the operator's
+# own keyring can add, hide or vouch for a key. Every failure path prints an
+# `error` naming the URL and the expected/got fingerprint, removes its temp
+# files, and returns 1 WITHOUT touching <dest>.
+fetch_verified_key() {
+  local url="$1" expected="$2" dest="$3"
+  local tmp="" gnupg_home="" cols="" pub_count=0 first_fpr="" got="" line=""
+
+  if ! tmp="$(mktemp)"; then
+    error "Could not create a temp file to download the signing key $url, so its apt repository was not added. Check the machine, then run the installer again"
+    return 1
+  fi
+  if ! "$CROW_CURL" -fsSL --proto '=https' --tlsv1.2 -o "$tmp" "$url"; then
+    rm -f "$tmp"
+    error "Could not download the signing key $url (expected fingerprint $expected), so its apt repository was not added. Check your network, then run the installer again"
+    return 1
+  fi
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    error "The download from $url was empty (expected fingerprint $expected), so its apt repository was not added"
+    return 1
+  fi
+  if ! gnupg_home="$(mktemp -d)"; then
+    rm -f "$tmp"
+    error "Could not create a temp keyring to inspect the signing key $url, so its apt repository was not added"
+    return 1
+  fi
+  # IMPORT into the private home and read the keys back from there (not
+  # `--show-keys` on the raw file): the installed bytes below are an EXPORT of
+  # the one verified key, never the downloaded file. A download that carried
+  # extra packets after the vendor key (a secret-key block that gpg lists
+  # without counting as a primary, or a key version gpg skips but apt's own
+  # verifier accepts) would otherwise be trusted by apt under Signed-By.
+  if ! GNUPGHOME="$gnupg_home" "$CROW_GPG" --batch --import "$tmp" >/dev/null 2>&1; then
+    crow_gpg_stop "$gnupg_home"; rm -rf "$gnupg_home"; rm -f "$tmp"
+    error "gpg could not import the signing key from $url (expected fingerprint ${expected^^}), so its apt repository was not added. Check your network or gpg, then run the installer again"
+    return 1
+  fi
+  cols="$(GNUPGHOME="$gnupg_home" "$CROW_GPG" --batch --with-colons --list-keys 2>/dev/null || true)"
+  # `pub:` counts primary keys; the FIRST `fpr:` line is the primary key's own
+  # fingerprint (a subkey's fpr line comes after it), and field 10 of a colon
+  # record is the fingerprint itself.
+  while IFS= read -r line; do
+    case "$line" in
+      pub:*) pub_count=$((pub_count + 1)) ;;
+      fpr:*)
+        if [ -z "$first_fpr" ]; then
+          first_fpr="$(printf '%s\n' "$line" | cut -d: -f10)"
+        fi ;;
+    esac
+  done <<< "$cols"
+  if [ "$pub_count" -eq 1 ] && [ -n "$first_fpr" ]; then
+    got="${first_fpr^^}"
+  fi
+  if [ "$pub_count" -ne 1 ] || [ "$got" != "${expected^^}" ]; then
+    crow_gpg_stop "$gnupg_home"; rm -rf "$gnupg_home"; rm -f "$tmp"
+    error "The signing key at $url was refused: expected fingerprint ${expected^^}, got ${got:-nothing} in $pub_count primary key(s). Its apt repository was not added, so nothing installs from it. Check your network or gpg, then run the installer again"
+    return 1
+  fi
+  # Re-export ONLY the verified key (public parts, minimal): armored for a .asc
+  # destination, binary for a .gpg one. That file replaces the download.
+  local exported="" armor_flag=""
+  case "$dest" in *.asc) armor_flag="--armor" ;; esac
+  if ! exported="$(mktemp)"; then
+    crow_gpg_stop "$gnupg_home"; rm -rf "$gnupg_home"; rm -f "$tmp"
+    error "Could not create a temp file for the signing key from $url, so its apt repository was not added"
+    return 1
+  fi
+  # shellcheck disable=SC2086  # armor_flag is empty or one fixed flag
+  if ! GNUPGHOME="$gnupg_home" "$CROW_GPG" --batch --export-options export-minimal $armor_flag --export "${expected^^}" > "$exported" 2>/dev/null || [ ! -s "$exported" ]; then
+    crow_gpg_stop "$gnupg_home"; rm -rf "$gnupg_home"; rm -f "$tmp" "$exported"
+    error "gpg could not export the verified signing key from $url, so its apt repository was not added"
+    return 1
+  fi
+  crow_gpg_stop "$gnupg_home"; rm -rf "$gnupg_home"
+  rm -f "$tmp"
+  tmp="$exported"
+  if ! sudo_cmd install -d -m 0755 "$(dirname "$dest")"; then
+    rm -f "$tmp"
+    error "Could not create $(dirname "$dest"), so the signing key from $url was not installed and its apt repository was not added"
+    return 1
+  fi
+  if ! sudo_cmd install -m 644 "$tmp" "$dest"; then
+    rm -f "$tmp"
+    error "Could not install the signing key from $url at $dest, so its apt repository was not added"
+    return 1
+  fi
+  rm -f "$tmp"
+  return 0
+}
+
+# install_docker_repo — Docker's official apt repository: verified key first,
+# then the deb822 source file, then the packages. Writes no source file (and so
+# trusts no repository) when the key does not match or the distribution is not
+# one Docker serves.
+install_docker_repo() {
+  local target="" flavor="" codename="" repo_path="debian" arch=""
+  local key_path="$VENDOR_KEY_DIR/docker.asc" src_path="$APT_SOURCES_DIR/docker.sources" tmp=""
+
+  if ! apt_install ca-certificates curl gnupg; then
+    error "Could not install ca-certificates, curl and gnupg, which are needed to add Docker's apt repository"
+    return 1
+  fi
+
+  # shellcheck disable=SC2119  # defaults (the real os-release) are intended here
+  if ! target="$(vendor_repo_target)"; then
+    error "Docker has no apt repository for this distribution (ID '$(os_release_field "$CROW_OS_RELEASE" ID)', codename '$(os_release_field "$CROW_OS_RELEASE" VERSION_CODENAME)'), so Docker was not installed."
+    error "Install Docker from the instructions at https://docs.docker.com/engine/install/, then run the installer again."
+    return 1
+  fi
+  flavor="${target%% *}"
+  codename="${target#* }"
+  # Docker's own repository is published as `ubuntu` and `debian`; Raspberry Pi
+  # OS takes the Debian one (its arm packages live there).
+  # Raspberry Pi OS is always 32-bit armhf (a 64-bit one reports itself as
+  # Debian); Docker still publishes a raspbian repository for the releases up to
+  # bookworm and none for trixie, which takes the Debian one.
+  case "$flavor:$codename" in
+    ubuntu:*) repo_path="ubuntu" ;;
+    raspbian:bullseye|raspbian:bookworm) repo_path="raspbian" ;;
+  esac
+
+  # deb822 lets the architecture be cast explicitly, so apt resolves the same
+  # architectures dpkg reports for this machine. Word-split on purpose: the seam
+  # carries the probe command AND its flag.
+  # shellcheck disable=SC2086
+  arch="$($CROW_DPKG_ARCH_CMD 2>/dev/null || true)"
+  if [ -z "$arch" ]; then
+    error "Could not read this machine's dpkg architecture, so the Docker apt repository was not added; install Docker from https://docs.docker.com/engine/install/ instead"
+    return 1
+  fi
+
+  fetch_verified_key "$DOCKER_KEY_URL_BASE/$repo_path/gpg" "$DOCKER_KEY_FPR" "$key_path" || return 1
+
+  if ! tmp="$(mktemp)"; then
+    error "Could not create a temp file for $src_path, so the Docker apt repository was not added"
+    return 1
+  fi
+  if ! cat > "$tmp" <<CRODOCKEREOF
+Types: deb
+URIs: $DOCKER_KEY_URL_BASE/$repo_path
+Suites: $codename
+Components: stable
+Architectures: $arch
+Signed-By: $key_path
+CRODOCKEREOF
+  then
+    rm -f "$tmp"
+    error "Could not write the Docker apt source to a temp file, so its repository was not added"
+    return 1
+  fi
+  if ! sudo_cmd install -d -m 0755 "$APT_SOURCES_DIR" || ! sudo_cmd install -m 644 "$tmp" "$src_path"; then
+    rm -f "$tmp"
+    error "Could not write $src_path, so the Docker apt repository was not added"
+    return 1
+  fi
+  rm -f "$tmp"
+
+  if ! sudo_cmd "$CROW_APT" update; then
+    error "apt update failed after Docker's repository was added"
+    return 1
+  fi
+  if ! apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+    error "apt could not install Docker from its official repository"
+    return 1
+  fi
+  log "Docker apt repository added (signing key $DOCKER_KEY_FPR)"
+  return 0
+}
+
+# install_nodesource_repo <major> — NodeSource's apt repository for Node <major>.
+# The old path piped NodeSource's setup script into a root bash, which also left
+# a nodesource.list + nodesource.gpg pair behind; those are removed so apt has
+# exactly one NodeSource source and one key. The downloaded key stays armored:
+# apt reads it as well from a file named .asc, and upstream ships it that way.
+install_nodesource_repo() {
+  local major="${1:-}"
+  local key_path="$VENDOR_KEY_DIR/nodesource.asc" src_path="$APT_SOURCES_DIR/nodesource.sources" tmp=""
+  local legacy=""
+
+  case "$major" in
+    ""|*[!0-9]*)
+      error "install_nodesource_repo needs a numeric Node.js major version (got '${major}'), so the NodeSource repository was not added"
+      return 1 ;;
+  esac
+
+  if ! apt_install ca-certificates curl gnupg; then
+    error "Could not install ca-certificates, curl and gnupg, which are needed to add NodeSource's apt repository"
+    return 1
+  fi
+  fetch_verified_key "$NODESOURCE_KEY_URL" "$NODESOURCE_KEY_FPR" "$key_path" || return 1
+
+  # The key is checked before anything of the old setup is taken away: a failed
+  # download must not leave this host without a Node repository at all.
+  for legacy in "$APT_SOURCES_DIR/nodesource.list" "$VENDOR_KEY_DIR/nodesource.gpg" "$USR_KEYRING_DIR/nodesource.gpg"; do
+    if [ -e "$legacy" ] || [ -L "$legacy" ]; then
+      if sudo_cmd rm -f "$legacy"; then
+        log "Removed the legacy NodeSource file $legacy"
+      else
+        warn "Could not remove the legacy NodeSource file $legacy"
+      fi
+    fi
+  done
+
+  if ! tmp="$(mktemp)"; then
+    error "Could not create a temp file for $src_path, so the NodeSource apt repository was not added"
+    return 1
+  fi
+  if ! cat > "$tmp" <<CRONODEEOF
+Types: deb
+URIs: https://deb.nodesource.com/node_${major}.x
+Suites: nodistro
+Components: main
+Signed-By: $key_path
+CRONODEEOF
+  then
+    rm -f "$tmp"
+    error "Could not write the NodeSource apt source to a temp file, so its repository was not added"
+    return 1
+  fi
+  if ! sudo_cmd install -d -m 0755 "$APT_SOURCES_DIR" || ! sudo_cmd install -m 644 "$tmp" "$src_path"; then
+    rm -f "$tmp"
+    error "Could not write $src_path, so the NodeSource apt repository was not added"
+    return 1
+  fi
+  rm -f "$tmp"
+
+  if ! sudo_cmd "$CROW_APT" update; then
+    error "apt update failed after NodeSource's repository was added"
+    return 1
+  fi
+  if ! apt_install nodejs; then
+    error "apt could not install Node.js from NodeSource's repository"
+    return 1
+  fi
+  log "Node.js ${major} apt repository added (signing key $NODESOURCE_KEY_FPR)"
+  return 0
+}
+
+# install_tailscale_repo — Tailscale's official apt repository. Its key is the
+# binary (dearmored) file upstream publishes per distribution and codename, so
+# it lands at the .gpg path apt expects, and the source file is the one-line
+# style Tailscale documents.
+install_tailscale_repo() {
+  local target="" flavor="" codename=""
+  local key_path="$USR_KEYRING_DIR/tailscale-archive-keyring.gpg" src_path="$APT_SOURCES_DIR/tailscale.list" tmp=""
+
+  if ! apt_install ca-certificates curl gnupg; then
+    error "Could not install ca-certificates, curl and gnupg, which are needed to add Tailscale's apt repository"
+    return 1
+  fi
+
+  # shellcheck disable=SC2119  # defaults (the real os-release) are intended here
+  if ! target="$(vendor_repo_target)"; then
+    error "Tailscale has no apt repository for this distribution (ID '$(os_release_field "$CROW_OS_RELEASE" ID)', codename '$(os_release_field "$CROW_OS_RELEASE" VERSION_CODENAME)'), so Tailscale was not installed."
+    error "Install Tailscale from https://tailscale.com/download, then run the installer again."
+    return 1
+  fi
+  flavor="${target%% *}"
+  codename="${target#* }"
+
+  fetch_verified_key "$TAILSCALE_REPO_BASE/$flavor/$codename.noarmor.gpg" "$TAILSCALE_KEY_FPR" "$key_path" || return 1
+
+  if ! tmp="$(mktemp)"; then
+    error "Could not create a temp file for $src_path, so the Tailscale apt repository was not added"
+    return 1
+  fi
+  if ! printf 'deb [signed-by=%s] %s/%s %s main\n' "$key_path" "$TAILSCALE_REPO_BASE" "$flavor" "$codename" > "$tmp"; then
+    rm -f "$tmp"
+    error "Could not write the Tailscale apt source to a temp file, so its repository was not added"
+    return 1
+  fi
+  if ! sudo_cmd install -d -m 0755 "$APT_SOURCES_DIR" || ! sudo_cmd install -m 644 "$tmp" "$src_path"; then
+    rm -f "$tmp"
+    error "Could not write $src_path, so the Tailscale apt repository was not added"
+    return 1
+  fi
+  rm -f "$tmp"
+
+  if ! sudo_cmd "$CROW_APT" update; then
+    error "apt update failed after Tailscale's repository was added"
+    return 1
+  fi
+  if ! apt_install tailscale tailscale-archive-keyring; then
+    error "apt could not install Tailscale from its official repository"
+    return 1
+  fi
+  log "Tailscale apt repository added (signing key $TAILSCALE_KEY_FPR)"
+  return 0
+}
+
 # ─── The `crow` command on PATH (install re-run N4-1) ─────
 # ONE exact line, compared whole. The old guard grepped for "crow/scripts",
 # which the line it writes never contains ($CROW_APP is ~/.crow/app), so every
@@ -1062,6 +1461,10 @@ sudo apt upgrade -y
 log "System updated"
 
 # ─── Step 2: Install Node.js ─────────────────────────────
+# Node.js comes from NodeSource's apt repository, wired up by
+# install_nodesource_repo: its signing key is checked against a pinned
+# fingerprint before the source file exists (security audit K7 — the vendor
+# setup script is no longer downloaded and piped into a root shell).
 
 header "Step 2/10: Node.js ${NODE_MAJOR}"
 
@@ -1071,13 +1474,11 @@ if command -v node >/dev/null 2>&1; then
     log "Node.js $(node --version) already installed"
   else
     warn "Node.js $(node --version) is too old, upgrading..."
-    curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | sudo -E bash -
-    sudo apt install -y nodejs
+    install_nodesource_repo "$NODE_MAJOR" || exit 1
     log "Node.js $(node --version) installed"
   fi
 else
-  curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | sudo -E bash -
-  sudo apt install -y nodejs
+  install_nodesource_repo "$NODE_MAJOR" || exit 1
   log "Node.js $(node --version) installed"
 fi
 
@@ -1100,13 +1501,15 @@ sudo apt install -y bubblewrap
 install_bwrap_apparmor
 
 # ─── Step 3: Install Docker ──────────────────────────────
+# Docker comes from its own apt repository, wired up by install_docker_repo with
+# the same pinned-key check as Node.js (security audit K7).
 
 header "Step 3/10: Docker"
 
 if command -v docker >/dev/null 2>&1; then
   log "Docker already installed: $(docker --version)"
 else
-  curl -fsSL https://get.docker.com | sudo sh
+  install_docker_repo || exit 1
   sudo usermod -aG docker "$USER"
   log "Docker installed"
 fi
@@ -1512,15 +1915,23 @@ if command -v tailscale &>/dev/null; then
 else
   echo ""
   warn "Tailscale is not installed"
-  # Item 4-PR5: offer the official installer. Default Y is safe headlessly —
+  # Item 4-PR5: offer Tailscale's own apt repository (security audit K7: the
+  # repository is wired from a fingerprint-checked key instead of a downloaded
+  # install script piped into a root shell). Default Y is safe headlessly —
   # installing is additive and inert until `sudo tailscale up` (no tailnet
   # mutation without authentication; contrast the rename prompts, default N).
   if ask_yn "Install Tailscale now (recommended for secure remote access)?" Y; then
-    if curl -fsSL https://tailscale.com/install.sh | sudo sh; then
+    # Tailscale is optional here: Crow runs without it, so a failed install is
+    # still only a warning. Its own `error` lines are counted and then taken
+    # back out of INSTALL_ERRORS, so the closing "Crow is ready!" banner stays
+    # reachable (an optional step that failed must not fail the whole install).
+    ERRORS_BEFORE_TAILSCALE=$INSTALL_ERRORS
+    if install_tailscale_repo; then
       log "Tailscale installed"
       warn "Tailscale is installed but not authenticated"
       warn "Run 'sudo tailscale up' to log in, then re-run this script to wire the hostname + HTTPS dashboard"
     else
+      INSTALL_ERRORS=$ERRORS_BEFORE_TAILSCALE
       warn "Tailscale install failed — install manually later: https://tailscale.com/download"
     fi
   else

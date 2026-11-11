@@ -44,6 +44,18 @@ function runWithHelpers(snippet, env = {}, scriptArgs = []) {
       if (!env[key]) throw new Error(`${key} is required to run the ufw-docker step in a test`);
     }
   }
+  if (/install_docker_repo|install_nodesource_repo|install_tailscale_repo|fetch_verified_key/.test(snippet)) {
+    // These three wire apt repositories: they download a signing key, inspect it
+    // with gpg, and write under /etc/apt + /usr/share/keyrings through sudo. A
+    // snippet that can reach them may only run with the scratch seams, so a
+    // regression here can never read the real /etc/os-release, write into the
+    // real keyring/sources dirs, or reach the network.
+    for (const key of ["CROW_CURL", "CROW_SUDO", "CROW_APT", "CROW_GPG", "VENDOR_KEY_DIR",
+      "USR_KEYRING_DIR", "APT_SOURCES_DIR", "CROW_OS_RELEASE", "CROW_TEST_DOCKER_KEY_FPR", "CROW_TEST_NODESOURCE_KEY_FPR",
+      "CROW_TEST_TAILSCALE_KEY_FPR"]) {
+      if (!env[key]) throw new Error(`${key} is required to run the vendor repository steps in a test`);
+    }
+  }
   const args = scriptArgs.map((a) => ` ${a}`).join("");
   return spawnSync("bash", ["-c", `set -euo pipefail; CROW_INSTALL_SOURCE_ONLY=1 source "${SCRIPT}"${args}; ${snippet}`], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -234,11 +246,15 @@ test("4c: platform gate is defined above the source-only seam and CALLED below i
   assert.match(refusal, /exit 1/);
 });
 
-test("4c: Tailscale-not-installed branch offers the official installer (default Y), keeping the tip when declined", () => {
+test("4c: Tailscale-not-installed branch offers Tailscale's apt repository (default Y), keeping the tip when declined", () => {
   const s = src();
   assert.match(s, /ask_yn "Install Tailscale now \(recommended for secure remote access\)\?" Y/);
-  // Official installer, sudo semantics consistent with get.docker.com (`| sudo sh`).
-  assert.match(s, /curl -fsSL https:\/\/tailscale\.com\/install\.sh \| sudo sh/);
+  // Security audit K7: the vendor install script is no longer piped into a root
+  // shell — the branch calls the repository helper, whose signing key is checked
+  // against a pinned fingerprint before any apt source is written.
+  assert.match(s, /^install_tailscale_repo\(\) \{$/m, "the repository helper is defined");
+  assert.match(s, /if install_tailscale_repo; then/, "and the not-installed branch calls it");
+  assert.doesNotMatch(s, /tailscale\.com\/install\.sh/, "the downloaded install script is gone");
   // The offer lives inside the not-installed else branch.
   const afterWarn = s.split('warn "Tailscale is not installed"')[1] || "";
   assert.match(afterWarn.slice(0, 1200), /ask_yn "Install Tailscale now/);
@@ -246,6 +262,8 @@ test("4c: Tailscale-not-installed branch offers the official installer (default 
   assert.match(afterWarn.slice(0, 1200), /tailscale up/);
   // Declining keeps the existing tip.
   assert.match(afterWarn, /tailscale-setup\.md/);
+  // A failed install still only warns, and still points at the download page.
+  assert.match(afterWarn, /https:\/\/tailscale\.com\/download/);
 });
 
 test("4c MUTATION (tailscale offer default): headless resolution of the exact offer prompt is YES", () => {
