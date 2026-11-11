@@ -535,13 +535,70 @@ export async function deliverResult(job, text, { log = () => {}, deliverChannel 
 }
 
 /**
+ * Record a job's effect on its bot's project workspace, at the two moments it
+ * matters: `phase === "start"` commits whatever was already lying in the folder
+ * (an outside edit, attributed `unattributed` / `outside-crow`) BEFORE the job
+ * runs, so the job's own commit holds exactly its change; `phase === "end"`
+ * commits the job's result with the bot's context and its job id (`card:<id>`
+ * when the job carries a card, else `turn:job-<id>`), so the version is grouped
+ * with everything else that job did.
+ *
+ * Lazy-imports the file-history module, so every other test of this module runs
+ * without loading it. Wrapped whole: a bot with no project, a host without the
+ * file history, a slow disk — none of it may fail or hold up the job. The only
+ * cost a caller can see is the git timeouts.
+ *
+ * @param {object} job        the claimed bot_jobs row
+ * @param {"start"|"end"} phase
+ * @param {{bridge?: object|null, log?: Function}} [opts]
+ * @returns {Promise<string|null>} the new version id, or null when nothing was recorded
+ */
+export async function commitJobWorkspace(job, phase, { bridge = null, log = () => {} } = {}) {
+  try {
+    if (!job || !job.bot_id) return null;
+    if (phase !== "start" && phase !== "end") return null;
+    const b = bridge || (await import("./bridge.mjs"));
+    if (typeof b.loadBot !== "function" || typeof b.loadProjectSpace !== "function") return null;
+    const bot = b.loadBot(job.bot_id); // throws on unknown/disabled
+    if (!bot || bot.project_id == null) return null;
+    const space = b.loadProjectSpace(Number(bot.project_id));
+    if (!space || !space.workspace_dir) return null;
+
+    const project = {
+      id: Number(space.id == null ? bot.project_id : space.id),
+      workspace_dir: space.workspace_dir,
+    };
+    const ctx = phase === "start"
+      ? { authorKind: "unattributed", authorId: "outside-crow" }
+      : {
+          authorKind: "bot",
+          authorId: job.bot_id,
+          jobId: job.card_id != null ? `card:${job.card_id}` : `turn:job-${job.job_id}`,
+        };
+    const message = phase === "start"
+      ? "Update"
+      : `${bot.display_name || job.bot_id} finished a job`;
+    const { commitWorkspace } = await import("../../servers/shared/history/workspace-history.js");
+    return (await commitWorkspace(project, ctx, message)) || null;
+  } catch (e) {
+    try { log("job workspace history skipped (non-fatal): " + ((e && e.message) || e)); } catch { /* log is best effort */ }
+    return null;
+  }
+}
+
+/**
  * Run one claimed job to completion and finalize it — the body shared by
  * tickJobs and the --run-once CLI branch, so the terminal-path handling
  * exists exactly once. A failed card job needs no card rescue (Track 0: the
  * dispatcher never wrote the card; going terminal releases the lock).
+ *
+ * A project bot's workspace is committed on both sides of the turn: before it
+ * runs (the outside edits belong to nobody in Crow) and after it ends, success
+ * or failure, before the job is finalized.
  * @returns {Promise<{status:string, result:string|null, error:string|null}>}
  */
 async function runAndFinalize(job, { log = () => {}, bridge = null } = {}) {
+  await commitJobWorkspace(job, "start", { bridge, log });
   let outcome;
   try {
     const r = await runJob(job, { log, bridge });
@@ -549,6 +606,7 @@ async function runAndFinalize(job, { log = () => {}, bridge = null } = {}) {
   } catch (e) {
     outcome = { status: "failed", result: null, error: String((e && e.message) || e), tool_calls: null, pi_session_id: null };
   }
+  await commitJobWorkspace(job, "end", { bridge, log });
   finalizeJob(job.job_id, outcome);
   if (outcome.status === "failed" && job.card_id != null) {
     // Track 0: no card rescue (dispatch never wrote the card) — but the BOT

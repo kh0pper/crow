@@ -117,6 +117,8 @@ export async function createProjectSpace(db, opts = {}) {
       });
     }
 
+    await ensureHistory(db, { id, workspace_dir: workspaceDir }, dataDir);
+
     return { id, slug: explicitSlug, workspaceDir, storagePrefix };
   }
 
@@ -161,7 +163,32 @@ export async function createProjectSpace(db, opts = {}) {
   const workspaceDir = workspacePathFor(dataDir, slug);
   const storagePrefix = storagePrefixFor(slug);
 
+  await ensureHistory(db, { id, workspace_dir: workspaceDir }, dataDir);
+
   return { id, slug, workspaceDir, storagePrefix };
+}
+
+/**
+ * Give a freshly created project its own file history (see
+ * servers/shared/history/workspace-history.js).
+ *
+ * Awaited, but it can NEVER fail the creation: the helper reports
+ * `{ disabled: true }` instead of throwing, and this wrapper additionally swallows
+ * anything the import or the call could still raise (a host without git, a
+ * missing module). The import is lazy so a broken or absent history module can
+ * never stop this file — and therefore project creation — from loading.
+ *
+ * @param {object} db       — a createDbClient()-shaped DB handle
+ * @param {{id: number, workspace_dir: string}} project
+ * @param {string} dataDir  — the data dir this creation already resolved
+ */
+async function ensureHistory(db, project, dataDir) {
+  try {
+    const { ensureWorkspaceHistory } = await import("./history/workspace-history.js");
+    await ensureWorkspaceHistory(db, project, { dataDir });
+  } catch (err) {
+    console.warn("[project-spaces] the project's file history was not set up:", err?.message || err);
+  }
 }
 
 /**

@@ -73,6 +73,15 @@
  *   recorded as 'unattributed', because the one write a person explicitly asked
  *   for is the last one that should lose its author.
  *
+ *   PROJECT WORKSPACE FILES JOIN THE SAME VIEW, FROM ANOTHER STORE. The item type
+ *   `workspace_file` (item id `<project id>:<relative path>`) reads a project's
+ *   own file history through workspace-history.js and answers in exactly this
+ *   list's shape, with the commit id as the version id;
+ *   restoreWorkspaceFileVersion puts one back. It is deliberately NOT in COVERED:
+ *   a file is not a table, so every function that works on tables (specFor,
+ *   diffVersions, restoreVersion) keeps refusing it and none of its versions
+ *   ever lands in item_versions.
+ *
  * BLOBs: the triggers store a blob as the reversible string 'hex:<UPPERCASE HEX>'
  * (covered.js valueExpr — json_object cannot hold a blob). Reading decodes it
  * back to bytes on the way into a restore, so a restored blob is bytes again.
@@ -97,6 +106,9 @@ import { COVERED, tableColumns } from "./covered.js";
 import { erasureKeys, findEraseRefusalSync } from "./erase.js";
 import { AUTHOR_KINDS, withWriteContext } from "./write-context.js";
 import { lineDiff } from "../line-diff.js";
+
+/** The item type project workspace FILES answer to (not a table — see listVersions). */
+export const WORKSPACE_FILE_ITEM_TYPE = "workspace_file";
 
 /** Versions per page when the caller does not say. */
 export const DEFAULT_LIMIT = 100;
@@ -212,6 +224,110 @@ function toVersion(row) {
 const VERSION_COLUMNS = `id, item_type, item_id, op, snapshot_json,
        author_kind, author_id, job_id, origin_instance, redacted, created_at`;
 
+/* -------------------------------------------------- workspace file items */
+
+/** A git commit id, the only kind of version id a workspace file has. */
+const SHA_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * A workspace file's item id is `<project id>:<relative path>`. The split is at
+ * the FIRST colon because project ids are digits and a path may contain colons.
+ */
+function parseWorkspaceItemId(itemId) {
+  const id = normalizeItemId(itemId);
+  if (id === null) throw historyError("invalid_request", "listVersions needs an itemId");
+  const at = id.indexOf(":");
+  if (at <= 0) throw historyError("invalid_request", "a workspace file id is <project id>:<path>");
+  const projectId = id.slice(0, at);
+  const relPath = id.slice(at + 1);
+  if (!/^[0-9]+$/.test(projectId) || Number(projectId) <= 0) {
+    throw historyError("invalid_request", "a workspace file id starts with a project id");
+  }
+  if (relPath === "") throw historyError("invalid_request", "a workspace file id ends with a file path");
+  return { projectId: Number(projectId), relPath };
+}
+
+/** The project a workspace file belongs to, or null when there is no such row. */
+async function loadWorkspaceProject(db, projectId) {
+  const { rows } = await db.execute({
+    sql: "SELECT id, workspace_dir FROM project_spaces WHERE id = ?",
+    args: [projectId],
+  });
+  const row = rows[0];
+  if (!row) return null;
+  return { id: Number(row.id), workspace_dir: row.workspace_dir ?? null };
+}
+
+/**
+ * A workspace file's versions, in the SAME shape as the database item types'
+ * versions: `id` is the commit id (a string, not an integer), the snapshot
+ * carries the file's size at that version and the path, and the database-only
+ * fields (`originInstance`, `redacted`) are the constants a local file store
+ * always answers with.
+ */
+async function listWorkspaceFileVersions(db, { itemId, limit, before, dataDir }) {
+  const { projectId, relPath } = parseWorkspaceItemId(itemId);
+  let cursor = null;
+  if (before !== null && before !== undefined) {
+    cursor = String(before).trim();
+    if (!SHA_RE.test(cursor)) throw historyError("invalid_request", "before must be a version id");
+  }
+  const project = await loadWorkspaceProject(db, projectId);
+  // A project that is gone has no versions left to show (a delete removes its
+  // file history at once); an empty list is the honest answer, not an error.
+  if (!project) return [];
+  const { listWorkspaceVersions } = await import("./workspace-history.js");
+  const versions = await listWorkspaceVersions(project, relPath, {
+    limit: normalizeLimit(limit),
+    before: cursor,
+    dataDir,
+  });
+  return versions.map((version) => ({
+    id: version.id,
+    itemType: WORKSPACE_FILE_ITEM_TYPE,
+    itemId: normalizeItemId(itemId),
+    op: version.op,
+    authorKind: version.authorKind,
+    authorId: version.authorId,
+    jobId: version.jobId,
+    originInstance: null,
+    redacted: false,
+    createdAt: version.createdAt,
+    snapshot: { size: version.size, path: relPath },
+  }));
+}
+
+/**
+ * Put one version of a project workspace file back: the file bytes as they were,
+ * written through a temporary file and then recorded as a NEW version by the file
+ * history's own commit (a restore never rewrites what came after it).
+ *
+ * `ctx` must name a real author kind, refused exactly as restoreVersion refuses a
+ * missing one: the one write a person explicitly asked for is the last one that
+ * should lose its author.
+ *
+ * `dataDir` is optional (the instance's own data dir by default) and exists for
+ * tests that keep their data somewhere else.
+ *
+ * @returns {Promise<{newVersionId: string|null, unchanged: boolean}>}
+ */
+export async function restoreWorkspaceFileVersion(db, { projectId, path, versionId } = {}, ctx, { dataDir } = {}) {
+  if (!isObject(ctx) || !AUTHOR_KINDS.includes(ctx.authorKind)) {
+    throw historyError(
+      "invalid_context",
+      "a restore must name who is restoring it (authorKind owner, bot, peer or system)",
+    );
+  }
+  const id = normalizeVersionId(projectId);
+  if (id === null) throw historyError("invalid_request", "restoreWorkspaceFileVersion needs a project id");
+  const sha = typeof versionId === "string" ? versionId.trim() : "";
+  if (!SHA_RE.test(sha)) throw historyError("invalid_request", "a workspace file version id is a version string");
+  const project = await loadWorkspaceProject(db, id);
+  if (!project) throw historyError("not_found", `no project ${id}`);
+  const { restoreWorkspaceFile } = await import("./workspace-history.js");
+  return restoreWorkspaceFile(project, path, sha, ctx, { dataDir });
+}
+
 /* ---------------------------------------------------------- listVersions */
 
 /**
@@ -226,7 +342,13 @@ const VERSION_COLUMNS = `id, item_type, item_id, op, snapshot_json,
  * crow_context both have id 3), so a query on item_id alone would mix two items'
  * histories together.
  */
-export async function listVersions(db, { itemType, itemId, limit = DEFAULT_LIMIT, before = null } = {}) {
+export async function listVersions(db, { itemType, itemId, limit = DEFAULT_LIMIT, before = null, dataDir } = {}) {
+  // A project workspace file is not a table: its versions live in the project's
+  // own file history, and its version id is a commit id rather than an integer.
+  // Everything else keeps the item_versions path below, unchanged.
+  if (itemType === WORKSPACE_FILE_ITEM_TYPE) {
+    return listWorkspaceFileVersions(db, { itemId, limit, before, dataDir });
+  }
   specFor(itemType);
   const id = normalizeItemId(itemId);
   if (id === null) throw historyError("invalid_request", "listVersions needs an itemId");

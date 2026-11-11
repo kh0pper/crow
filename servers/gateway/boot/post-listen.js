@@ -138,6 +138,55 @@ export async function runHistorySweep({ db = null, dbFactory = createDbClient } 
 }
 
 /**
+ * One project-file sweep (servers/shared/history/workspace-history.js): commit
+ * what changed in a project's workspace OUTSIDE Crow (a terminal session, a bot
+ * running a tool), attributed `unattributed` / `outside-crow`, and erase files
+ * that have sat in a project's Trash past the Trash period. The Trash period is
+ * the same LOCAL setting the version sweep reads (history.trash_days, default
+ * 30). NEVER throws: a boot interval must not cascade into an outage, and the
+ * next pass picks up whatever this one could not finish.
+ *
+ * `db` is passed in by the timer so the sweep keeps ONE handle for the life of
+ * the process: its round-robin cursor lives with the handle, and a fresh handle
+ * every ten minutes would restart the walk from the first project.
+ *
+ * @param {{db?: object, dbFactory?: () => object}} [opts]
+ * @returns {Promise<object|null>} the sweep's counts, or null when it failed
+ */
+export async function runWorkspaceSweep({ db = null, dbFactory = createDbClient } = {}) {
+  let owned = false;
+  try {
+    const { sweepWorkspaces } = await import("../../shared/history/workspace-history.js");
+    const { readSetting } = await import("../dashboard/settings/registry.js");
+    if (!db) {
+      db = dbFactory();
+      owned = true;
+    }
+    const rawDays = await readSetting(db, "history.trash_days");
+    const trashDays = rawDays === null || rawDays === undefined || rawDays === "" ? 30 : Number(rawDays);
+    const result = await sweepWorkspaces(db, { trashDays });
+    if (result.ensured > 0 || result.committed > 0 || result.erased > 0 || result.failed > 0) {
+      console.log(
+        `[history] project files: ${result.ensured} newly covered, ${result.committed} change(s) recorded, ` +
+          `${result.erased} Trash file(s) erased, ${result.failed} project(s) skipped`,
+      );
+    }
+    return result;
+  } catch (err) {
+    console.warn("[history] project-file sweep cycle failed:", err?.message || err);
+    return null;
+  } finally {
+    if (owned) {
+      try {
+        db?.close?.();
+      } catch {
+        /* a stuck close must not fail the cycle */
+      }
+    }
+  }
+}
+
+/**
  * Create the reserved Crow voice bot once (servers/shared/voice-bot.js
  * ensureVoiceBot). Skipped on a --no-auth gateway: a loopback secondary
  * gateway is never the operator's dashboard. Opens a fresh db client via the
@@ -812,6 +861,47 @@ export async function runPostListenSetup(server, app, deps) {
       setInterval(historySweepCycle, HISTORY_SWEEP_INTERVAL_MS).unref();
     }, HISTORY_SWEEP_FIRST_RUN_MS).unref();
     console.log("[history] sweep armed (5-min interval, first run in 1 min)");
+  }
+
+  // Project file history (the version history design, Task 6): record what
+  // changed in each project's workspace outside Crow, pick up projects that
+  // predate the feature (bounded batches), and erase files past the Trash
+  // period. Every ten minutes, first run two minutes after boot; the interval is
+  // unref'd and each cycle is fully try/caught, so a failing pass can never take
+  // the gateway down. Runs on EVERY gateway (--no-auth included): a project's
+  // file history is local to the machine that holds the files.
+  {
+    const WORKSPACE_SWEEP_FIRST_RUN_MS = 2 * 60 * 1000;   // 2 min
+    const WORKSPACE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;    // 10 min
+    // One handle for the process: the sweep's round-robin cursor lives with it.
+    let workspaceSweepDb = null;
+    // A tick that lands while a pass is still in flight is skipped, not queued:
+    // two overlapping passes would walk the same projects and race for the same
+    // index (each project is locked, but the cursor would advance twice).
+    let workspaceSweepInFlight = false;
+    const workspaceSweepCycle = async () => {
+      if (workspaceSweepInFlight) return;
+      try {
+        if (!workspaceSweepDb) workspaceSweepDb = createDbClient();
+      } catch (err) {
+        console.warn("[history] project-file sweep skipped: no database handle:", err?.message || err);
+        return;
+      }
+      workspaceSweepInFlight = true;
+      try {
+        await runWorkspaceSweep({ db: workspaceSweepDb });
+      } catch (err) {
+        // runWorkspaceSweep already logs; this only guarantees no unhandled rejection.
+        console.warn("[history] project-file sweep cycle failed:", err?.message || err);
+      } finally {
+        workspaceSweepInFlight = false;
+      }
+    };
+    setTimeout(() => {
+      workspaceSweepCycle();
+      setInterval(workspaceSweepCycle, WORKSPACE_SWEEP_INTERVAL_MS).unref();
+    }, WORKSPACE_SWEEP_FIRST_RUN_MS).unref();
+    console.log("[history] project-file sweep armed (10-min interval, first run in 2 min)");
   }
 
   // Old sync conflicts expire on their own (operator ruling): the winner is
