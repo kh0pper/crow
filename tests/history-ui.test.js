@@ -649,7 +649,8 @@ test("the Settings section renders for the owner with the size line and the read
     const html = await historySection.render({ req: markFromLaptop(fromLaptop({ query: {}, csrfToken: CSRF, dashboardSession: OWN })), db: s.db, lang: "en" });
     assert.match(html, /Forever/);
     assert.match(html, /Days a deleted item stays in the Trash/);
-    assert.match(html, /Turn this on only when every paired Crow runs this version\./);
+    assert.match(html, /Turn this on only when every paired Crow runs Crow from the version history update that added notes, articles, bots, cards and artifacts\./);
+    assert.match(html, /A paired Crow applies an erase only if it has this setting on too\./);
     assert.match(html, /Not used yet\./);
     const size = await historySize(s.db);
     assert.ok(size.versions > 0);
