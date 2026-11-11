@@ -38,6 +38,9 @@
  * the lock the normal way. A live lock is never moved or renamed, so the lock name
  * is never briefly empty while someone holds it. A breaker whose holder is dead is
  * removed (again only if it is still the file judged) and the takeover retries.
+ * Known gap (parked): a crash inside the breaker section, plus two dead-breaker
+ * clearers racing, can still produce two holders, because a clearer's re-check and
+ * its unlink are not atomic.
  *
  * release() removes the file only while it still holds OUR token, so a lock that
  * was already taken over is never deleted out from under its new owner. It never
@@ -239,7 +242,11 @@ export async function acquireGitDirLock(repoDir, opts = {}) {
     const verdict = judgeFile(lockPath, ctx);
     if (verdict.state !== "missing" && verdict.stale) {
       if (typeof opts._beforeBreaker === "function") opts._beforeBreaker(lockPath);
-      await breakStaleLock(lockPath, breakerPath, verdict, ctx, opts);
+      const removed = await breakStaleLock(lockPath, breakerPath, verdict, ctx, opts);
+      // Removed: go straight back and create. Not removed (a live or unreadable
+      // breaker, a swapped file): wait a poll, or this loop would spin without
+      // yielding and freeze the process until the deadline.
+      if (!removed) await sleep(Math.min(pollMs, Math.max(1, deadline - clock())));
       continue;
     }
     if (verdict.state === "missing") continue; // released between our create and our look
@@ -252,22 +259,24 @@ export async function acquireGitDirLock(repoDir, opts = {}) {
  * Remove a lock judged stale, serialized by the breaker file. Returns after one
  * attempt either way; the caller loops and tries to create the lock again.
  */
+/** @returns {Promise<boolean>} whether the lock file was removed */
 async function breakStaleLock(lockPath, breakerPath, verdict, ctx, opts) {
   const breakerToken = randomBytes(16).toString("hex");
   try {
     createWhole(breakerPath, { pid: process.pid, pidStart: ctx.getPidStart(process.pid), startedAt: ctx.clock(), token: breakerToken });
   } catch (err) {
-    if (!err || err.code !== "EEXIST") return; // gone, or something we cannot fix here
+    if (!err || err.code !== "EEXIST") return false; // gone, or something we cannot fix here
     // Another waiter is breaking. If that breaker's holder is dead, clear it.
     const breaker = judgeFile(breakerPath, ctx);
     if (breaker.state !== "missing" && breaker.stale) unlinkIfSame(breakerPath, breaker, ctx);
-    return;
+    return false;
   }
   try {
     if (typeof opts._underBreaker === "function") opts._underBreaker(lockPath);
     // Still the file we judged, and still stale? Only then does it go.
     const removed = unlinkIfSame(lockPath, verdict, ctx);
     if (typeof opts._afterBreak === "function") opts._afterBreak(removed);
+    return removed;
   } finally {
     releaseLock(breakerPath, breakerToken);
   }

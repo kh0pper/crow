@@ -1642,3 +1642,19 @@ test("a sweep removes hour-old temp and moved-aside names in the git dir, not fr
   assert.equal(existsSync(oldStale), false);
   assert.equal(existsSync(freshTmp), true, "a fresh one may belong to a live writer");
 });
+
+test("a too-old git also makes the commit path return cleanly, with no git dir made", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-oldgit-commit-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  writeFileSync(join(ws, "a.txt"), "a\n");
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const sha = await commitWorkspace(projectFor(63, ws), OWNER, "Start", { dataDir: fx.dataDir, _gitVersion: () => [2, 20] });
+    assert.equal(sha, null);
+    assert.equal(existsSync(gitDirFor(projectFor(63, ws), fx.dataDir)), false);
+  } finally {
+    console.warn = realWarn;
+  }
+});

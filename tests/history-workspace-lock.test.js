@@ -98,7 +98,7 @@ const sleepMs = (ms) => new Promise((done) => setTimeout(done, ms));
 // Our own pid is the only live one; its start time is a fixed fake.
 const liveUs = { isPidAlive: (pid) => pid === process.pid, getPidStart: () => "7" };
 
-test("two waiters on one dead lock: exactly one holds it", async () => {
+test("two waiters on one dead lock: exactly one holds it (smoke)", async () => {
   const dir = freshDir();
   try {
     writeLock(dir, DEAD);
@@ -329,3 +329,32 @@ test("a lock that cannot be read is busy, never removed", { skip: process.getuid
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+for (const [label, setup] of [
+  ["a live breaker", (dir) => writeFileSync(breakerFile(dir), JSON.stringify({ pid: process.pid, pidStart: "7", startedAt: Date.now(), token: "B" }))],
+  ["a fresh garbage breaker", (dir) => writeFileSync(breakerFile(dir), "")],
+  ["an unreadable breaker", (dir) => { writeFileSync(breakerFile(dir), "{}"); chmodSync(breakerFile(dir), 0o000); }],
+]) {
+  const skip = label.startsWith("an unreadable") && process.getuid && process.getuid() === 0;
+  test(`the event loop keeps running while acquire waits on ${label}`, { skip }, async () => {
+    const dir = freshDir();
+    try {
+      writeLock(dir, DEAD);
+      setup(dir);
+      let ticks = 0;
+      const timer = setInterval(() => { ticks += 1; }, 5);
+      try {
+        await assert.rejects(
+          acquireGitDirLock(dir, { waitMs: 300, pollMs: 10, ...liveUs }),
+          (err) => err.code === "busy",
+        );
+      } finally {
+        clearInterval(timer);
+      }
+      assert.ok(ticks >= 10, `timers ran while waiting (ticks=${ticks})`);
+    } finally {
+      try { chmodSync(breakerFile(dir), 0o600); } catch { /* may not exist */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

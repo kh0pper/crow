@@ -569,6 +569,7 @@ async function initGitDir(project, opts) {
   const id = projectIdOf(project);
   const repoDir = workspaceGitDir(project, opts);
   if (!existsSync(join(repoDir, "HEAD"))) {
+    await assertGitNewEnough(opts);
     // A history under another name for this id is a leftover, never a base.
     removeStaleSiblings(repoDir, id);
     mkdirSync(dirname(repoDir), { recursive: true });
@@ -594,6 +595,29 @@ async function installedGitVersion(opts) {
   }
 }
 
+/** Real `git --version` lookups, once per git binary. */
+const gitVersionCache = new Map();
+
+/**
+ * `init --object-format=sha1` needs git 2.29; an older git cannot make a history,
+ * and saying so (code `git_too_old`) beats a confusing init failure. Called before
+ * any git dir is created, from both ensure and the sweep/commit paths. An
+ * unreadable version passes (the real call reports its own failure).
+ */
+async function assertGitNewEnough(opts) {
+  let version;
+  if (typeof opts._gitVersion === "function") {
+    version = await opts._gitVersion();
+  } else {
+    const key = gitBinOf(opts);
+    if (!gitVersionCache.has(key)) gitVersionCache.set(key, await installedGitVersion(opts));
+    version = gitVersionCache.get(key);
+  }
+  if (version !== null && versionBelow(version, [2, 29])) {
+    throw workspaceError("git_too_old", `git ${version.join(".")} is too old for file history (need 2.29 or newer)`);
+  }
+}
+
 function versionBelow(version, min) {
   return version[0] < min[0] || (version[0] === min[0] && version[1] < min[1]);
 }
@@ -610,20 +634,13 @@ function versionBelow(version, min) {
  * @returns {Promise<{repoDir: string} | {disabled: true, reason: string}>}
  */
 export async function ensureWorkspaceHistory(db, project, { dataDir, env, gitBin, isLive, lockWaitMs, clock, _gitVersion } = {}) {
-  const opts = { dataDir, env, gitBin, isLive, lockWaitMs, clock };
+  const opts = { dataDir, env, gitBin, isLive, lockWaitMs, clock, _gitVersion };
   try {
     const id = projectIdOf(project);
     if (project && project.type === "learner_profile") {
       return { disabled: true, reason: "not_covered" };
     }
-    // `init --object-format=sha1` needs git 2.29; an older git cannot make the
-    // history, and saying so beats a confusing init failure.
-    const version = typeof _gitVersion === "function" ? await _gitVersion() : await installedGitVersion(opts);
-    if (version !== null && versionBelow(version, [2, 29])) {
-      const reason = `git_too_old (found ${version.join(".")}, need 2.29 or newer)`;
-      noteFailure(reason);
-      return { disabled: true, reason };
-    }
+    await assertGitNewEnough(opts);
     let uuid = projectUuidOf(project);
     if (uuid === null && db && typeof db.execute === "function") {
       const { rows } = await db.execute({ sql: "SELECT uuid FROM project_spaces WHERE id = ?", args: [id] });
@@ -778,9 +795,9 @@ async function makeCommit(run, tree, parent, message, opts) {
  * @returns {Promise<string|null>}
  */
 export async function commitWorkspace(project, ctx, message, {
-  dataDir, env, gitBin, isLive, lockWaitMs, clock, onResult, onNote, _afterWalk,
+  dataDir, env, gitBin, isLive, lockWaitMs, clock, onResult, onNote, _afterWalk, _gitVersion,
 } = {}) {
-  const opts = { dataDir, env, gitBin, isLive, lockWaitMs, clock, onResult, onNote, _afterWalk };
+  const opts = { dataDir, env, gitBin, isLive, lockWaitMs, clock, onResult, onNote, _afterWalk, _gitVersion };
   try {
     if (workspaceDirOf(project) === null) return null; // no folder on disk: nothing to record
     projectIdOf(project);
