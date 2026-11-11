@@ -161,7 +161,7 @@ function collect(workspaceDir, maxEntries) {
           skippedLarge += 1;
           continue;
         }
-        files.push({ path: rel, abs, mode: fileMode(st), dev: st.dev, ino: st.ino, size: st.size, mtimeNs: st.mtimeNs });
+        files.push({ path: rel, abs, mode: fileMode(st), dev: st.dev, ino: st.ino, size: st.size, mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs });
       } else if (isSpecial(st)) {
         continue;
       } else {
@@ -229,7 +229,7 @@ function readWalkedFile(workspaceReal, entry) {
     if (Number(st.size) > MAX_FILE_BYTES) return null;
     const bytes = readFileSync(fd);
     if (bytes.length > MAX_FILE_BYTES) return null;
-    return { bytes, mtimeNs: st.mtimeNs, size: st.size };
+    return { bytes, mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs, size: st.size };
   } catch {
     return null;
   } finally {
@@ -241,9 +241,12 @@ function loadCache(cacheFile) {
   if (!cacheFile) return {};
   try {
     const parsed = JSON.parse(readFileSync(cacheFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    if (parsed && typeof parsed === "object" && parsed.entries && typeof parsed.entries === "object" && Number.isFinite(parsed.at)) {
+      return parsed;
+    }
+    return { at: 0, entries: {} };
   } catch {
-    return {};
+    return { at: 0, entries: {} };
   }
 }
 
@@ -251,7 +254,7 @@ function saveCache(cacheFile, cache) {
   if (!cacheFile) return;
   const temp = `${cacheFile}.${process.pid}.tmp`;
   try {
-    writeFileSync(temp, JSON.stringify(cache));
+    writeFileSync(temp, JSON.stringify({ at: Date.now(), entries: cache }));
     renameSync(temp, cacheFile);
   } catch { /* the cache is an optimisation only */ }
 }
@@ -292,9 +295,14 @@ export async function buildWorkspaceTree(run, workspaceDir, { indexFile, objects
   const oldCache = loadCache(cacheFile);
   const newCache = {};
   for (const entry of files) {
-    const key = [String(entry.dev), String(entry.ino), String(entry.size), String(entry.mtimeNs)].join(":");
-    const hit = oldCache[entry.path];
-    if (hit && hit.key === key && /^[0-9a-f]{40}$/.test(hit.sha) && existsSync(blobPath(objectsDir, hit.sha))) {
+    const key = [String(entry.dev), String(entry.ino), String(entry.size), String(entry.mtimeNs), String(entry.ctimeNs)].join(":");
+    const hit = oldCache.entries[entry.path];
+    // ctime cannot be set by unprivileged code, so a same-size edit with the
+    // mtime reset still changes the key; and a file touched within two seconds of
+    // the previous cache write is re-read (git's "racy clean" rule).
+    const newestMs = Number((entry.mtimeNs > entry.ctimeNs ? entry.mtimeNs : entry.ctimeNs) / 1_000_000n);
+    const racy = newestMs >= oldCache.at - 2000;
+    if (hit && !racy && hit.key === key && /^[0-9a-f]{40}$/.test(hit.sha) && existsSync(blobPath(objectsDir, hit.sha))) {
       // Same file (device, inode, size, mtime to the nanosecond): reuse its blob.
       // Identity was checked by the walk's lstat; no path is opened.
       records.push({ mode: entry.mode, sha: hit.sha, path: entry.path });
@@ -309,7 +317,7 @@ export async function buildWorkspaceTree(run, workspaceDir, { indexFile, objects
     const sha = writeBlob(objectsDir, read.bytes);
     records.push({ mode: entry.mode, sha, path: entry.path });
     // Cache only when the file did not change between the walk and the read.
-    if (String(read.mtimeNs) === String(entry.mtimeNs) && String(read.size) === String(entry.size)) {
+    if (String(read.mtimeNs) === String(entry.mtimeNs) && String(read.ctimeNs) === String(entry.ctimeNs) && String(read.size) === String(entry.size)) {
       newCache[entry.path] = { key, sha };
     }
   }

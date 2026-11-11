@@ -31,6 +31,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -1383,4 +1384,26 @@ test("a file or folder swapped for a symlink after the walk never pulls outside 
   assert.match(tree, /plain\.txt/);
   assert.doesNotMatch(tree, /swapped\.txt/, "the swapped file is dropped for this commit");
   assert.doesNotMatch(tree, /sub\/inner\.txt/, "the swapped folder's files are dropped");
+});
+
+test("a same-size edit with the mtime put back is still recorded as a new version", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-utimes-");
+  const ws = join(fx.dataDir, "projects", "utimes", "workspace");
+  mkdirSync(ws, { recursive: true });
+  const file = join(ws, "a.txt");
+  writeFileSync(file, "AAAA\n");
+  const old = new Date(Date.now() - 3600_000);
+  utimesSync(file, old, old);
+  const project = projectFor(52, ws, uuidFor(52));
+  const gitDir = gitDirFor(project, fx.dataDir);
+  assert.ok(await commitWorkspace(project, OWNER, "first", { dataDir: fx.dataDir }));
+  // Let the cache age past the racy window so only the key can protect us.
+  const cacheFile = join(gitDir, "crow-hash-cache.json");
+  const cache = JSON.parse(readFileSync(cacheFile, "utf8"));
+  cache.at = Date.now() + 3600_000;
+  writeFileSync(cacheFile, JSON.stringify(cache));
+  writeFileSync(file, "BBBB\n");
+  utimesSync(file, old, old);
+  assert.ok(await commitWorkspace(project, OWNER, "second", { dataDir: fx.dataDir }), "the edit is a new version");
+  assert.equal(gitText(gitDir, ws, ["show", "HEAD:a.txt"]), "BBBB\n");
 });
