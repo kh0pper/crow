@@ -578,7 +578,9 @@ test("Use saved key: one click POSTs {serviceId, useSavedKey} and re-renders; a 
   const btn = s.sheet().querySelector('[data-svc-use-saved="github"]');
   assert.equal(btn.textContent, "Use saved key");
   assert.equal(btn.getAttribute("aria-label"), "Use saved key GitHub");
-  assert.equal(s.sheet().querySelector('[data-svc-connect="github"]'), null, "one click replaces Connect");
+  const typeKey = s.sheet().querySelector('[data-svc-connect="github"]');
+  assert.equal(typeKey.textContent, "Type a key", "a different key for this project is still typed in the sheet");
+  assert.equal(typeKey.getAttribute("aria-label"), "Type a key GitHub");
   assert.equal(s.sheet().querySelector('[data-svc-connect="canvas-lms"]').textContent, "Connect", "other services keep it");
   s.click(btn);
   await s.settle();
