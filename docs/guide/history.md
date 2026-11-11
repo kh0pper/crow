@@ -50,7 +50,7 @@ Other kinds of items (notes, articles, bots, cards, artifacts) keep their versio
 
 A job is one piece of work: a board card, a voice hand-off, a chat turn, a schedule, or your own sign-in. **Undo this job**, on the Jobs page, puts back the memories, context sections, blog posts, notes, articles and bot settings that job changed. Project files, board cards and artifacts are not part of an undo yet; restore them one at a time.
 
-An undo can be partial. If something else has changed an item since (you, or another job), the undo leaves that item alone, so it never overwrites newer work, and lists what it skipped by name. Memories, context sections and blog posts can each be restored from the History link on their own screen. An undo cannot itself be undone from that page; restore the items one by one instead.
+An undo can be partial. If something else has changed an item since (you, or another job), the undo leaves that item alone, so it never overwrites newer work, and lists what it skipped, by type and number; the job's list on the Jobs page shows each one by name. Memories, context sections and blog posts can each be restored from the History link on their own screen, and notes, articles and bot settings from the job's list on the Jobs page. An undo cannot itself be undone from that page; restore the items one by one instead.
 
 ## Trash and erase
 

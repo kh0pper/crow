@@ -50,7 +50,7 @@ Otros tipos de elementos (notas, artículos, bots, tarjetas, artefactos) tambié
 
 Un trabajo es una pieza de trabajo: una tarjeta del tablero, un encargo de voz, un turno de chat, una programación o tu propio inicio de sesión. **Deshacer este trabajo**, en la página Trabajos, repone los recuerdos, las secciones de contexto, las entradas del blog, las notas, los artículos y los ajustes de bots que ese trabajo cambió. Los archivos de proyecto, las tarjetas del tablero y los artefactos todavía no forman parte de un deshacer; restáuralos uno por uno.
 
-Deshacer puede ser parcial. Si algo más cambió un elemento después (tú u otro trabajo), deshacer lo deja como está, así que nunca sobrescribe trabajo más nuevo, y enumera por su nombre lo que omitió. Los recuerdos, las secciones de contexto y las entradas del blog se pueden restaurar desde el enlace Historial de su propia pantalla. Un deshacer no se puede deshacer desde esa página; restaura los elementos uno por uno.
+Deshacer puede ser parcial. Si algo más cambió un elemento después (tú u otro trabajo), deshacer lo deja como está, así que nunca sobrescribe trabajo más nuevo, y enumera lo que omitió, por tipo y número; la lista del trabajo en la página Trabajos muestra cada uno por su nombre. Los recuerdos, las secciones de contexto y las entradas del blog se pueden restaurar desde el enlace Historial de su propia pantalla, y las notas, los artículos y los ajustes de bots desde la lista del trabajo en la página Trabajos. Un deshacer no se puede deshacer desde esa página; restaura los elementos uno por uno.
 
 ## Papelera y borrado
 
