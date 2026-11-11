@@ -21,6 +21,24 @@ import {
 } from "../scripts/pi-bots/pi_sandbox.mjs";
 import { listBridgePi, reapStalePi } from "../scripts/pi-bots/pi_lifecycle.mjs";
 
+// A scratch HOME with an empty home in it for this file's PiRpc spawns, set
+// BEFORE bridge.mjs is imported: the bridge freezes HOME at import and the
+// co-host scan reads the process env at each spawn, so a real ~/.crow holding
+// a bundle link into another checkout would otherwise be found through the
+// real HOME and refuse these spawns. Nothing else in this file needs the real
+// HOME (bwrap, git and the XDG paths all take what the env names).
+const SCRATCH_HOME = mkdtempSync(join(tmpdir(), "crow-pi-sandbox-home-"));
+process.env.HOME = SCRATCH_HOME;
+process.env.CROW_HOME = join(SCRATCH_HOME, ".crow");
+mkdirSync(process.env.CROW_HOME, { recursive: true });
+process.env.CROW_DATA_DIR = join(process.env.CROW_HOME, "data");
+mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
+// The user unit dir exists in the scratch home, so a write there inside the
+// sandbox hits the read-only bind rather than a missing parent.
+mkdirSync(join(SCRATCH_HOME, ".config", "systemd", "user"), { recursive: true });
+delete process.env.CROW_DB_PATH;
+process.on("exit", () => { try { rmSync(SCRATCH_HOME, { recursive: true, force: true }); } catch { /* gone */ } });
+
 const { PiRpc, filterSpawnEnv } = await import("../scripts/pi-bots/bridge.mjs");
 
 function dockerGid() {

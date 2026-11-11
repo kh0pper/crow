@@ -32,7 +32,8 @@ test("secretFilesFor: root token files, the appRoot .env and every non-allow-lis
     for (const n of [".env", ".keystore-env", "board-token", "phone-token", "artifacts-token"]) {
       assert.ok(files.includes(join(crowHome, n)), "root file " + n);
     }
-    assert.ok(ROOT_SECRET_FILES.includes(".env") && ROOT_SECRET_FILES.includes("artifacts-token"));
+    assert.ok(!ROOT_SECRET_FILES.includes(".env"), "the plain .env is handled by the .env* name rule");
+    assert.ok(ROOT_SECRET_FILES.includes("artifacts-token"));
     assert.ok(files.includes(join(appRoot, ".env")), "the repo checkout's .env");
     assert.ok(files.includes(join(crowHome, "bundles", "other", ".env")), "a bundle with no in-sandbox reader");
     assert.ok(files.includes(join(crowHome, "bundles", "x.migrated-2026", ".env")), "a stale bundle copy is a secret too");
@@ -44,6 +45,30 @@ test("secretFilesFor: root token files, the appRoot .env and every non-allow-lis
     }
     assert.equal(new Set(files).size, files.length, "deduped");
     assert.deepEqual(BUNDLE_ENV_READABLE, ["browser", "workspace"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("secretFilesFor: a .env backup at each ROOT is listed (and refused if it is a link), a .env.example at each root and in a bundle is not", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-hidden-rootevns-"));
+  const crowHome = join(root, ".crow");
+  const appRoot = join(root, "app");
+  try {
+    for (const r of [crowHome, appRoot]) {
+      mkdirSync(join(r, "bundles", "alpha"), { recursive: true });
+      writeFileSync(join(r, ".env.bak-20260929-x"), "fake-root-backup\n");
+      writeFileSync(join(r, ".env.example"), "FAKE_KEY=\n");
+      writeFileSync(join(r, "bundles", "alpha", ".env.bak-20260929-x"), "fake-bundle-backup\n");
+      writeFileSync(join(r, "bundles", "alpha", ".env.example"), "FAKE_KEY=\n");
+    }
+    const files = secretFilesFor({ crowHome, appRoot });
+    for (const r of [crowHome, appRoot]) {
+      assert.ok(files.includes(join(r, ".env.bak-20260929-x")), "a backup copy at the root is a secret: " + r);
+      assert.ok(files.includes(join(r, ".env")), "and the plain .env is still listed: " + r);
+      assert.ok(files.includes(join(r, "bundles", "alpha", ".env.bak-20260929-x")), "and in a bundle dir: " + r);
+      assert.ok(!files.includes(join(r, ".env.example")), "a .example template is documentation, not a secret: " + r);
+      assert.ok(!files.includes(join(r, "bundles", "alpha", ".env.example")), "in a bundle dir too: " + r);
+    }
+    assert.equal(new Set(files).size, files.length, "deduped");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -205,7 +230,7 @@ test("a bundle link into a hidden folder (env/, secrets/) refuses with the plain
   } finally { rmSync(link, { force: true }); rmSync(join(CROW, "env"), { recursive: true, force: true }); }
 });
 
-test("a bundle dir swapped for a symlink to a dir with a .env refuses the spawn, naming the path below its root and no content", { skip: noSandbox }, async () => {
+test("a bundle dir swapped for a symlink to a dir with a .env refuses the spawn, naming the link folder and its home, and no content", { skip: noSandbox }, async () => {
   const target = mkdtempSync(join(tmpdir(), "crow-hidden-linktarget-"));
   writeFileSync(join(target, ".env"), "fake-linked-env-content\n");
   const link = join(CROW, "bundles", "swapped");
@@ -213,10 +238,30 @@ test("a bundle dir swapped for a symlink to a dir with a .env refuses the spawn,
   try {
     const e = await spawnOutcome();
     assert.ok(e, "the spawn is refused");
-    assert.match(e.message, /A bot could not start: bundles\/swapped\/\.env is a link that leads outside the Crow folders, so Crow can't hide it\. Remove the link\.$/);
+    assert.equal(e.message, "A bot could not start: bundles/swapped is a link that leads outside the Crow folders, so Crow can't hide it. It is in the Crow home " + REAL_CROW + ". Remove the link.");
     assert.ok(!e.message.includes("fake-linked-env-content"), "no content in the message");
-    assert.ok(!e.message.includes(REAL_CROW), "the path is relative to its root");
   } finally { rmSync(link, { force: true }); rmSync(target, { recursive: true, force: true }); }
+});
+
+test("a bundle-folder link in a SECOND Crow home names the link folder and that home", { skip: noSandbox }, async () => {
+  // A co-hosted home is found by the shape of its secrets dir under $HOME.
+  const otherHome = join(USER_HOME, ".crow-r4");
+  const target = mkdtempSync(join(tmpdir(), "crow-hidden-secondtarget-"));
+  mkdirSync(join(otherHome, "secrets"), { recursive: true });
+  mkdirSync(join(otherHome, "bundles"), { recursive: true });
+  writeFileSync(join(target, ".env"), "fake-second-home-env\n");
+  const link = join(otherHome, "bundles", "x");
+  symlinkSync(target, link);
+  try {
+    const e = await spawnOutcome();
+    assert.ok(e, "the spawn is refused");
+    assert.equal(e.message, "A bot could not start: bundles/x is a link that leads outside the Crow folders, so Crow can't hide it. It is in the Crow home " + realpathSync(otherHome) + ". Remove the link.");
+    assert.ok(!e.message.includes("fake-second-home-env"), "no content in the message");
+  } finally {
+    rmSync(link, { force: true });
+    rmSync(otherHome, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
 });
 
 test("a bundle symlink with nothing behind it is ignored", { skip: noSandbox }, async () => {
@@ -279,8 +324,11 @@ test("unmaskableRefusal: one plain sentence per cause (hard link, outside, hidde
     "A bot could not start: /outside/.env is outside the Crow folders, so Crow can't hide it.");
   assert.equal(unmaskableRefusal("env/sub/.env", "hidden-dir"),
     "A bot could not start: env/sub/.env is a link into a hidden folder, so Crow can't hide it. Remove the link.");
-  assert.equal(unmaskableRefusal(".env", "link-out"),
-    "A bot could not start: .env is a link that leads outside the Crow folders, so Crow can't hide it. Remove the link.");
+  assert.equal(unmaskableRefusal("bundles/x", "link-out"),
+    "A bot could not start: bundles/x is a link that leads outside the Crow folders, so Crow can't hide it. Remove the link.",
+    "no home known: the sentence leaves it out");
+  assert.equal(unmaskableRefusal("bundles/x", "link-out", { home: "/home/u/.crow" }),
+    "A bot could not start: bundles/x is a link that leads outside the Crow folders, so Crow can't hide it. It is in the Crow home /home/u/.crow. Remove the link.");
   assert.equal(unmaskableRefusal(".env", "link-inside"),
     "A bot could not start: .env is a link or sits behind one, so Crow can't hide it. Remove the link.");
   assert.equal(unmaskableRefusal(".env", undefined), unmaskableRefusal(".env", "link-inside"),
@@ -465,7 +513,7 @@ test("two refused spawns at one path log the journal line once, and both still r
   writeFileSync(join(target, ".env"), "fake-logonce-env\n");
   const link = join(CROW, "bundles", "logonce");
   symlinkSync(target, link);
-  const expected = "A bot could not start: bundles/logonce/.env is a link that leads outside the Crow folders, so Crow can't hide it. Remove the link.";
+  const expected = "A bot could not start: bundles/logonce is a link that leads outside the Crow folders, so Crow can't hide it. It is in the Crow home " + REAL_CROW + ". Remove the link.";
   const lines = [];
   const orig = console.error;
   console.error = (...a) => { lines.push(a.map(String).join(" ")); };
@@ -476,7 +524,7 @@ test("two refused spawns at one path log the journal line once, and both still r
     assert.ok(second, "the second spawn is refused too");
     assert.equal(first.message, expected);
     assert.equal(second.message, expected, "the error still reaches the failed turn");
-    const logged = lines.filter((l) => l.includes("A bot could not start: bundles/logonce/.env"));
+    const logged = lines.filter((l) => l.includes("A bot could not start: bundles/logonce is a link"));
     assert.equal(logged.length, 1, "the journal line is written once for both spawns: " + JSON.stringify(logged));
   } finally {
     console.error = orig;

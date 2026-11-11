@@ -27,11 +27,23 @@ export const BUNDLE_ENV_READABLE = ["browser", "workspace"];
  *    (bundles/kiosk/server/server.js).
  *  - studio-agent-token: the studio MCP server reads it on each call
  *    (bundles/studio/server/hub-client.js).
+ *
+ * `.env` and its copies at a root are not named here: they are picked up by
+ * the `.env*` name rule (isSecretEnvName), which masks every one of them.
  */
-export const ROOT_SECRET_FILES = [".env", ".keystore-env", "board-token", "phone-token", "artifacts-token"];
+export const ROOT_SECRET_FILES = [".keystore-env", "board-token", "phone-token", "artifacts-token"];
 
-/** A secrets-bearing env file name in a bundle dir: `.env` or `.env.<anything>` (a .env.bak-2026... too). */
+/** A `.env` name: `.env` or `.env.<anything>` (a .env.bak-2026... copy too). */
 export const BUNDLE_ENV_NAME_RE = /^\.env(\..*)?$/;
+
+/**
+ * True for a name whose CONTENT is a secret: BUNDLE_ENV_NAME_RE minus the
+ * `.example` templates (`.env.example`, `.env.garage.example`), which are
+ * documentation and stay readable — at a bundle dir and at a root.
+ */
+export function isSecretEnvName(n) {
+  return BUNDLE_ENV_NAME_RE.test(n) && !n.endsWith(".example");
+}
 
 /**
  * Absolute paths of the secret files to mask, for one Crow home (and the
@@ -39,12 +51,20 @@ export const BUNDLE_ENV_NAME_RE = /^\.env(\..*)?$/;
  * its roots first). Existence is not checked for the plain candidates:
  * wrapPiSpawn skips a file it cannot stat.
  *
+ * Each root — the Crow home and the repo checkout at appRoot — contributes
+ * every regular file or symlink directly in it named `.env` or `.env.*` (a
+ * backup copy `.env.bak-<date>` too), except the `.example` templates, so a
+ * copy beside the real file is masked as well. `.env` itself is listed at
+ * both roots whether it exists or not: the plain file is the one secret that
+ * must never be missed.
+ *
  * Bundles are enumerated in `<crowHome>/bundles` and `<appRoot>/bundles`: every
- * regular file named `.env` or `.env.*` in a bundle dir, except the bundles
- * whose server reads its own. A bundle entry that is a symlink is resolved:
- * landing under a trusted root (crowHome or appRoot) its `.env*` files are
- * listed at their real path (the other root's enumeration covers the same
- * files); landing outside every root with an `.env*` behind it, the files are
+ * regular file or symlink named `.env` or `.env.*` (except `.example`) in a
+ * bundle dir, except the bundles whose server reads its own. A bundle entry
+ * that is a symlink is resolved: landing under a trusted root (crowHome or
+ * appRoot) its `.env*` files are listed at their real path (the other root's
+ * enumeration covers the same files); landing outside every root with an
+ * `.env*` behind it, the files are
  * listed under the link's own path, which wrapPiSpawn never follows, so the
  * caller refuses the spawn. A symlink with nothing behind it, and anything
  * that is not a dir, is ignored.
@@ -60,6 +80,7 @@ export function secretFilesFor({ crowHome, appRoot, hiddenDirs = [], readdir = r
   const out = [];
   const add = (p) => { if (!out.includes(p)) out.push(p); };
   for (const n of ROOT_SECRET_FILES) add(join(crowHome, n));
+  add(join(crowHome, ".env"));
   if (appRoot) add(join(appRoot, ".env"));
   const roots = [crowHome, appRoot].filter(Boolean);
   const underRoot = (p) => roots.some((r) => p === r || p.startsWith(r + "/"));
@@ -72,6 +93,12 @@ export function secretFilesFor({ crowHome, appRoot, hiddenDirs = [], readdir = r
     let isFile = false; try { isFile = lstatSync(t).isFile(); } catch { /* gone */ }
     if (isFile && underRoot(t)) add(t); else add(f);
   };
+  // Every `.env*` file directly in a root (a backup copy too), through the
+  // bundle rule's symlink handling: resolved under a root it is listed at its
+  // real path, behind a hidden dir it is already hidden, dangling it is
+  // ignored, and one leaving the roots is listed under its own name so the
+  // caller refuses the spawn.
+  for (const root of roots) for (const n of envNamesIn(root, readdir)) addEnv(root, n);
   // Every bundle dir, including a stale copy (x.migrated-...): its .env files
   // are secrets too. A missing bundles dir means none.
   for (const root of roots) {
@@ -124,13 +151,20 @@ export function secretPinDirsFor({ crowHome, appRoot, readdir = readdirSync }) {
  *  - "link-out": the first link on the way up leads outside every root;
  *  - "link-inside": a link, or a path through one, that stays inside the roots.
  * An unknown cause falls back to "link-inside" (the vaguer link sentence).
+ *
+ * `extra.home` is the Crow home the link path sits in; a link-out sentence
+ * adds which home that is (and leaves it out when the caller knows none).
  */
-export function unmaskableRefusal(rel, cause) {
+export function unmaskableRefusal(rel, cause, extra = {}) {
   const start = "A bot could not start: " + rel;
   if (cause === "hardlink") return start + " has another name on disk, so Crow can't hide it. Remove the extra link.";
   if (cause === "outside") return start + " is outside the Crow folders, so Crow can't hide it.";
   if (cause === "hidden-dir") return start + " is a link into a hidden folder, so Crow can't hide it. Remove the link.";
-  if (cause === "link-out") return start + " is a link that leads outside the Crow folders, so Crow can't hide it. Remove the link.";
+  if (cause === "link-out") {
+    const home = extra && extra.home;
+    return start + " is a link that leads outside the Crow folders, so Crow can't hide it." +
+      (home ? " It is in the Crow home " + home + "." : "") + " Remove the link.";
+  }
   return start + " is a link or sits behind one, so Crow can't hide it. Remove the link.";
 }
 
@@ -141,11 +175,11 @@ export const SSH_NOT_HIDDEN_REFUSAL = "A bot could not start: Crow could not hid
 function bundleIds(root, readdir) {
   try { return readdir(join(root, "bundles")); } catch { return []; }
 }
-/** Names of the `.env*` files directly in dir: regular files, and symlinks too (never masked, so the caller refuses the spawn). */
+/** Names of the secret `.env*` files directly in dir: regular files, and symlinks too (never masked, so the caller refuses the spawn). `.example` templates are not secrets. */
 function envNamesIn(dir, readdir) {
   let names;
   try { names = readdir(dir); } catch { return []; }
-  return names.filter((n) => BUNDLE_ENV_NAME_RE.test(n) && (() => { try { const st = lstatSync(join(dir, n)); return st.isFile() || st.isSymbolicLink(); } catch { return false; } })());
+  return names.filter((n) => isSecretEnvName(n) && (() => { try { const st = lstatSync(join(dir, n)); return st.isFile() || st.isSymbolicLink(); } catch { return false; } })());
 }
 function entryKind(p) {
   try { const st = lstatSync(p); return st.isSymbolicLink() ? "link" : st.isDirectory() ? "dir" : "other"; } catch { return "none"; }
