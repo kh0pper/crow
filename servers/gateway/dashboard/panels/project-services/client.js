@@ -65,7 +65,7 @@ export const ERROR_CODES = [
 ];
 const STATIC_KEYS = [
   "services.add.title", "services.add.search", "services.add.searchPlaceholder", "services.add.browse",
-  "services.add.connect", "services.add.install", "services.add.useSaved",
+  "services.add.connect", "services.add.install", "services.add.useSaved", "services.add.typeKey",
   "services.connect.for", "services.connect.label", "services.connect.labelHelp", "services.connect.labelDefault",
   "services.connect.labelHere", "services.connect.submit",
   "services.error.generic", "common.close", "common.back",
@@ -447,6 +447,14 @@ export function projectServicesClientJs() {
         else btn.setAttribute(it.installed ? 'data-svc-connect' : 'data-svc-install', it.serviceId);
         btn.setAttribute('aria-label', T(label) + ' ' + it.name);
         li.appendChild(btn);
+        if (useSaved) {
+          // A different key for this project (another account) is still typed in the sheet.
+          var other = el('button', 'svc-pick-btn svc-pick-btn--install', T('services.add.typeKey'));
+          other.type = 'button';
+          other.setAttribute('data-svc-connect', it.serviceId);
+          other.setAttribute('aria-label', T('services.add.typeKey') + ' ' + it.name);
+          li.appendChild(other);
+        }
         ul.appendChild(li);
       }
       sec.appendChild(ul);

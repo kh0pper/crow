@@ -319,6 +319,9 @@ test("useSavedKey refuses typed values, a non-boolean flag, a service with a non
       assert.equal(r.status, status, JSON.stringify(body) + " → " + r.text);
       assert.deepEqual(r.json, { error: code }, JSON.stringify(body));
     }
+    const labelled = await call(s, "POST", connectPath("home"), { body: { serviceId: "github", useSavedKey: true, accountLabel: "Other" }, headers: OWNER });
+    assert.equal(labelled.status, 400, "a saved-key connect takes no account label");
+    assert.deepEqual(labelled.json, { error: "bad_value", field: "accountLabel" });
     assert.equal(ctx.test.calls.length, 0, "nothing left Crow");
     assert.equal(await connCount(ctx.db), before, "nothing was created");
     assert.deepEqual(await savedSecret(ctx.db), { [GH]: CANARY }, "the remembered key is untouched");
@@ -431,4 +434,17 @@ test("the client offers Use saved key only for a savedKey card and falls back to
   assert.equal(isOneClickEligible(serviceById("home-assistant")), false, "an address field needs the sheet");
   assert.equal(isOneClickEligible(serviceById("obsidian")), false);
   assert.equal(isOneClickEligible(null), false);
+});
+
+test("a saved key sealed under a key this machine lacks answers no_saved_key (the sheet opens), never a 500", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  await withApp(ctx, async (s) => {
+    assert.equal((await typedGh(s, "spring", "Main", CANARY)).status, 201);
+    await ctx.db.execute({ sql: "UPDATE crow_keychain SET key_id = 'some-other-key' WHERE kind = 'extension' AND env_key = ?", args: [GH] });
+    ctx.test.calls.length = 0;
+    const r = await savedGh(s, "home");
+    assert.equal(r.status, 400, r.text);
+    assert.deepEqual(r.json, { error: "no_saved_key" });
+    assert.equal(ctx.test.calls.length, 0);
+  });
 });

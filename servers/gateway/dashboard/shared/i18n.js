@@ -5077,6 +5077,7 @@ export const translations = {
   "services.add.browse": { en: "Browse everything", es: "Ver todo" },
   "services.add.connect": { en: "Connect", es: "Conectar" },
   "services.add.install": { en: "Install", es: "Instalar" },
+  "services.add.typeKey": { en: "Type a key", es: "Escribir una clave" },
   "services.add.useSaved": { en: "Use saved key", es: "Usar la clave guardada" },
   "services.connect.for": { en: "For: {project} · Only your bots use it", es: "Para: {project} · Solo tus bots lo usan" },
   "services.connect.label": { en: "Account name", es: "Nombre de la cuenta" },

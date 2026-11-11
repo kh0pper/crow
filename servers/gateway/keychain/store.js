@@ -194,7 +194,7 @@ export async function serviceSecretsFor(db, key, connectionUuid, { allowedKeys }
  * Gateway-internal: the keys the owner saved for a whole service (kind 'extension', one row per
  * bundle id + env key), as {envKey: plaintext}. Only the connect route reads this, and only for
  * a request the owner made with useSavedKey: the service's own declared env keys are the only
- * ones returned (allowedKeys), never a row's other key or a Crow-wide one. Active rows only: an
+ * ones returned (allowedKeys), never a row's other key. Active rows only: an
  * uninstall (extension_removed) or a deleted row leaves nothing to read. No bundle id, no
  * allowedKeys or no rows → {}. A missing key, or rows that exist but none sealed under this key
  * (a crow.db restored without its key file), throws KeychainKeyMissingError (code
@@ -203,7 +203,7 @@ export async function serviceSecretsFor(db, key, connectionUuid, { allowedKeys }
  */
 export async function extensionSecretsFor(db, key, bundleId, allowedKeys) {
   await ensureKeychainTable(db);
-  if (typeof bundleId !== "string" || bundleId === "" || !Array.isArray(allowedKeys) || allowedKeys.length === 0) return {};
+  if (typeof bundleId !== "string" || bundleId === "" || isSystemBundleId(bundleId) || !Array.isArray(allowedKeys) || allowedKeys.length === 0) return {};
   if (!key || typeof key.id !== "string" || !Buffer.isBuffer(key.seed)) throw new KeychainKeyMissingError();
   const allowed = new Set(allowedKeys.filter((k) => typeof k === "string" && k));
   const { rows } = await db.execute({

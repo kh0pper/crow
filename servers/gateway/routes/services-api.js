@@ -374,6 +374,7 @@ export function servicesApiRouter({
     let key = null;
     if (useSavedKey) {
       if (!isOneClickEligible(service)) return fail(res, "bad_value");
+      if (body.accountLabel != null && typeof body.accountLabel === "string" && body.accountLabel.trim() !== "") return fail(res, "bad_value", { field: "accountLabel" });
       const typed = body.values;
       if (typed != null && (typeof typed !== "object" || Array.isArray(typed) || Object.keys(typed).length > 0)) return fail(res, "bad_value");
       // A missing key is a metadata fact, answered before a key is even loaded (a Crow with no
@@ -384,7 +385,14 @@ export function servicesApiRouter({
       // this project's own copy with the same key.
       const readKey = loadKeychainKey({ crowHome: home() });
       const names = service.fields.map((f) => f.name);
-      const saved = await extensionSecretsFor(db, readKey, service.bundleId, names);
+      let saved;
+      try {
+        saved = await extensionSecretsFor(db, readKey, service.bundleId, names);
+      } catch (err) {
+        // A row sealed under a key this machine lacks is no usable saved key: the sheet opens.
+        if (KEY_FAULTS.has(err?.code)) return fail(res, "no_saved_key");
+        throw err;
+      }
       if (names.some((n) => typeof saved[n] !== "string" || saved[n] === "")) return fail(res, "no_saved_key");
       key = readKey;
       values = { config: {}, secrets: saved };

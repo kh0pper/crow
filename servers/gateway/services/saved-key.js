@@ -24,7 +24,7 @@
  *    answers no_saved_key; the connection that was made from it keeps working.
  */
 
-import { ensureKeychainTable, saveExtensionSecret } from "../keychain/store.js";
+import { ensureKeychainTable, isSystemBundleId, saveExtensionSecret } from "../keychain/store.js";
 
 /** The label shape of a remembered key: the service, then the field it fills. */
 const labelFor = (service, envKey) => `${service.name} - ${envKey}`;
@@ -67,7 +67,7 @@ export async function savedKeyServiceIds(db, catalog, installedIds) {
   }
   if (byBundle.size === 0) return out;
   for (const service of Array.isArray(catalog) ? catalog : []) {
-    if (!isOneClickEligible(service) || !installed.has(service.bundleId)) continue;
+    if (!isOneClickEligible(service) || isSystemBundleId(service.bundleId) || !installed.has(service.bundleId)) continue;
     const saved = byBundle.get(service.bundleId);
     if (!saved) continue;
     if (service.fields.every((f) => saved.has(f.name))) out.add(service.id);
