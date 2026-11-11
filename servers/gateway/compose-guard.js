@@ -23,10 +23,18 @@ import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+// The escaping the shared refusal helper applies to an attacker-controlled name (shared, leaf
+// module: it imports nothing, so it can be read from both here and routes/bundles.js).
+import { refusalName } from "../shared/bundle-declared-paths.js";
 
 // A value Compose sees for a `${VAR:?}` the install left blank (a collection member,
-// finished later with Configure): relative, so it resolves inside the bundle dir.
-export const UNSET_SENTINEL = "./crow-unset-value";
+// finished later with Configure) so the REST of the model can still be checked. It must be a
+// place the check allows for every bundle: a relative value lands inside the bundle folder,
+// which is never mountable read-write now, while Crow's media folder (library defaults) is
+// allowed for everyone — so nothing is widened by a compose that spells this path itself.
+export function unsetSentinel(crowHome) {
+  return join(crowHome || join(homedir(), ".crow"), "media", "crow-unset-value");
+}
 
 /**
  * realpath of p, or of its nearest existing ancestor + the rest (a path Docker would create).
@@ -57,6 +65,55 @@ export function resolveHostPath(p, depth = 0) {
 }
 
 const under = (p, root) => p === root || p.startsWith(root.endsWith(sep) ? root : root + sep);
+
+/**
+ * A volume's `o` option list, each entry trimmed, for the questions asked LENIENTLY only
+ * (does an entry name an overlayfs folder, does one bind?). Never for read-only: Docker
+ * splits `o` on "," and trims nothing, so this view is wider than the one Docker applies.
+ */
+function mountOpts(o) {
+  return String(o ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+}
+
+/**
+ * Read-only exactly as Docker reads it: split on "," with NO trimming and NO case folding.
+ * `bind, ro` has an option `" ro"` Docker does not know, so that mount is READ-WRITE, and
+ * `RO` is not `ro`. Order matters — a later `rw` undoes an earlier `ro` — so read-only only
+ * when the LAST exact `ro`/`rw` entry says so (`bind,ro,rw` is read-write, `bind,rw,ro` ro).
+ */
+function optsReadOnly(o) {
+  let readOnly = false;
+  for (const opt of String(o ?? "").split(",")) {
+    if (opt === "ro") readOnly = true;
+    else if (opt === "rw") readOnly = false;
+  }
+  return readOnly;
+}
+
+/**
+ * An `o` Docker would not read as written: an empty entry (`bind,,ro`, a trailing `,`) or an
+ * entry with surrounding whitespace (` ro`), both of which silently mean something else.
+ */
+function hasBadOptionEntry(o) {
+  return String(o).split(",").some((x) => x === "" || x !== x.trim());
+}
+
+/**
+ * Does an `o` option list bind a host path (`bind` / `rbind`)? Lenient on purpose — trimmed,
+ * any case — because reading "it binds" when it might not is the safe side: the bind branch
+ * then puts the device through the host-path and nesting checks whatever `type` says.
+ */
+function bindsHostPath(o) {
+  return String(o ?? "").split(",").some((x) => {
+    const opt = x.trim().toLowerCase();
+    return opt === "bind" || opt === "rbind";
+  });
+}
+
+/** A mount option that names a host folder: overlayfs ignores `device` and uses these. */
+const MOUNT_DIR_OPT = /^(?:lowerdir|upperdir|workdir)=/;
+// Filesystem types that mount a host export over the network rather than a local device.
+const NETWORK_FS_TYPES = new Set(["nfs", "nfs4", "cifs", "smb", "smb3"]);
 
 /**
  * @param {object} ctx
@@ -163,13 +220,15 @@ const SERVICE_OK = new Set([
 export const SERVICE_PRIV = new Set(["cgroup_parent", "device_cgroup_rules", "external_links", "isolation", "storage_opt",
   "credential_spec", "oom_kill_disable", "use_api_socket", "post_start", "pre_stop", "develop", "models", "provider"]);
 const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "configs"]);
-// Top-level entries of a bundle folder that the gateway reads or runs.
-// `.crow-compose.*` is Crow's own record of the installed compose (bundle-compose-state.js):
-// read by the version refresh and the bind-drift card, so never mountable read-write.
-const BUNDLE_CONTROL = new Set(["manifest.json", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
-  "docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml",
-  ".crow-compose.sha256", ".crow-compose.edited", ".crow-compose.image-change",
-  ".env", ".env.example", "package.json", "package-lock.json", "node_modules", "server", "panel", "scripts", "ops", "skills", "public", "bin"]);
+// Crow's own bookkeeping of an installed compose (bundle-compose-state.js: .crow-compose.sha256,
+// .crow-compose.edited, .crow-compose.state.json, .crow-compose.needs-config,
+// .crow-compose.image-change, and whatever it adds next) is a PREFIX, not a list: read by the
+// version refresh and the bind-drift card. Every one of them is protected by the rule below
+// (no read-write mount of the bundle folder at all, so a container can never rewrite the record
+// those two trust), and this prefix stays as the one name they all share: bundle-compose-state.js
+// reaches this module through bundles-config → folder-grants, so it cannot be imported from
+// there. tests/compose-guard.test.js fails if a COMPOSE_*_FILE export stops starting with it.
+export const COMPOSE_STATE_PREFIX = ".crow-compose.";
 // The only "<id><suffix>" names a bundle owns beside <id> itself (a fixed set, so id "rook"
 // never reaches bundle "rook-x"'s folder). No bundle id may end in one (tested).
 export const OWN_SUFFIXES = ["-downloads", "-workspaces", "-data", "-cache"];
@@ -290,11 +349,6 @@ function isShippedPreviewSeccomp(opt) {
   }
 }
 
-/**
- * Check a Compose model (the parsed `docker compose config --format json` output).
- * `coreAllowance` names a core allowance (above); bundles never pass one.
- * @returns {{valid: true} | {valid: false, reason: string}}
- */
 /** True when a bundle `id` may own compose project `project` (<id>, crow-<id>, or either + "-suffix"). */
 export function ownableProject(id, project) {
   const p = String(project || "");
@@ -355,6 +409,11 @@ export function reservedCommunityId(id) {
   return id === "crow" || String(id).startsWith("crow-");
 }
 
+/**
+ * Check a Compose model (the parsed `docker compose config --format json` output).
+ * `coreAllowance` names a core allowance (above); bundles never pass one.
+ * @returns {{valid: true} | {valid: false, reason: string}}
+ */
 export function checkComposeModel(model, { bundleDir, manifest, consentVerified = false, ctx, coreAllowance }) {
   if (coreAllowance !== undefined && !CORE_ALLOWANCES.has(coreAllowance)) return { valid: false, reason: `unknown core allowance '${String(coreAllowance).slice(0, 40)}'` };
   const isPrivilegedAllowed = !!(manifest?.privileged && consentVerified && manifest?.origin !== "community");
@@ -419,12 +478,16 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
       const rel = p.slice(roots.crowHome.length + 1);
       const first = rel.split(sep)[0];
       if (under(p, bundleReal)) {
-        // The bundle's own folder, but never the folder itself or its control files read-write:
-        // the gateway reads the manifest, compose file and .env, and runs server/ code, so a
-        // container that could rewrite them could grant itself privileges at the next Start.
-        const top = p.slice(bundleReal.length + 1).split(sep)[0];
-        if (!readOnly && (p === bundleReal || BUNDLE_CONTROL.has(top) || (ctx.shipped && ctx.shipped.has(top)))) {
-          return refuse(`${what}: mounts the bundle's own control files read-write`);
+        // The bundle's own folder, read-only ONLY (operator ruling: no read-write bind into
+        // your own folder). The gateway reads the manifest, the compose file and .env there and
+        // runs server/ code, so a container that could write ANY file there could swap one for
+        // a symlink or an edit and grant itself privileges at the next Start — and guessing
+        // which names count as code is what kept missing routes. Data belongs in a named volume
+        // or in Crow's data folder (<CROW_HOME>/<id>, allowed above), never here.
+        // `.` names the folder itself.
+        const top = p === bundleReal ? "." : p.slice(bundleReal.length + 1).split(sep)[0];
+        if (!readOnly) {
+          return refuse(`${what}: mounts its own bundle folder read-write (${refusalName(top)}) — use a named volume or Crow's data folder for data; files in the bundle folder may only be mounted read-only`);
         }
         return null;
       }
@@ -502,30 +565,78 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     return null;
   };
 
-  // A bind source inside another READ-WRITE bind of this project: the container can swap it
-  // for a symlink after this check, and Docker follows it at the next (re)start, which
-  // nothing re-checks (restart: unless-stopped). Refused.
-  const binds = [];
+  // A top-level volume's driver_opts, read the way Docker's local driver applies them.
+  // A `bind`/`rbind` option decides FIRST, whatever `type` says: the kernel ignores the
+  // filesystem type under MS_BIND, so `type: tmpfs` (or any unknown type) with `o: bind` is
+  // a plain host bind — and the device is judged as one (host-path check plus the nesting
+  // check with its read-only flag). Without such an option: `none` with a device is a bind,
+  // `tmpfs` holds no host path, the network filesystems (nfs, cifs…) mount a host export and
+  // need the same verified consent as other host-reaching options, and every other type
+  // (overlay…) is outside what this check understands and needs that consent too.
+  // Whatever the type, an option that names a host folder (overlayfs lowerdir=/upperdir=/
+  // workdir=) is refused: `device` may be ignored then, so no bind check would ever see it.
+  const volumeBind = (name, vol) => {
+    const dopts = isObj(vol?.driver_opts) ? vol.driver_opts : {};
+    const o = String(dopts.o ?? "");
+    const type = String(dopts.type ?? "");
+    const dev = dopts.device;
+    // First the option list as Docker reads it: an empty entry or one with surrounding
+    // whitespace is not an option Docker knows, so the mount is not what the text suggests
+    // (`bind, ro` is read-write). Refuse instead of guessing.
+    if (o !== "" && hasBadOptionEntry(o)) return refuse(`volume ${name}: its mount options must not contain spaces or empty entries`);
+    // `BIND`/`Rbind` are not options Docker knows: the guard would read a bind (and skip a
+    // type's consent) while Docker mounts the declared type. Only the exact spelling counts.
+    const misBind = String(o).split(",").find((x) => /^r?bind$/i.test(x) && x !== "bind" && x !== "rbind");
+    if (misBind !== undefined) return refuse(`volume ${name}: mount option '${misBind}' must be written 'bind' or 'rbind'`);
+    const dirOpt = mountOpts(o).find((x) => MOUNT_DIR_OPT.test(x));
+    if (dirOpt) return refuse(`volume ${name}: mount option '${dirOpt.slice(0, 60)}' names a host folder`);
+    // How a bind device is judged, wherever the bind comes from (an `o` option under any type,
+    // or a plain `none` volume): the host-path check with the read-only Docker really applies.
+    const judgeDevice = () => {
+      if (dev === undefined || dev === null) return null;
+      if (typeof dev !== "string" || !dev.startsWith("/")) return refuse(`volume ${name}: a bind device that is not an absolute path`);
+      // `rbind,ro` makes only the top mount read-only; mounts beneath the device stay
+      // writable, so a recursive bind is judged read-write whatever `ro` says.
+      const readOnly = optsReadOnly(o) && !String(o).split(",").includes("rbind");
+      const bad = checkHostPath(dev, { readOnly, what: `volume ${name}` });
+      return bad || { bind: { p: resolveHostPath(dev), rw: !readOnly, kind: "volume" } };
+    };
+    if (bindsHostPath(o)) {
+      if (dev === undefined || dev === null || dev === "") return refuse(`volume ${name}: a bind needs a device`);
+      return judgeDevice();
+    }
+    if (type === "" || type === "none") return judgeDevice();
+    if (type === "tmpfs") return null;
+    if (NETWORK_FS_TYPES.has(type)) return needPriv(`a ${type} filesystem volume (it mounts a host export)`);
+    return needPriv(`volume ${name}: driver_opts type '${type}'`);
+  };
+  // A mount inside another READ-WRITE mount of this project: the container can swap it for a
+  // symlink after this check, and Docker follows it at the next (re)start, which nothing
+  // re-checks (restart: unless-stopped). Refused.
+  const mounts = [];
   for (const s of Object.values(model.services || {})) {
-    for (const v of (s && s.volumes) || []) if (v && v.type === "bind" && typeof v.source === "string" && isAbsolute(v.source)) binds.push({ p: resolveHostPath(v.source), rw: v.read_only !== true });
+    for (const v of (s && s.volumes) || []) if (v && v.type === "bind" && typeof v.source === "string" && isAbsolute(v.source)) mounts.push({ p: resolveHostPath(v.source), rw: v.read_only !== true, kind: "bind" });
+  }
+  // A local volume on a bind device is a host folder too: its device joins the same lists with
+  // its real read-write flag, so it nests (and is nested in) exactly like a bind — a
+  // READ-ONLY device inside a read-write bind of its parent is still swapped by the parent's
+  // container, so it must be seen as the inner mount.
+  for (const [name, vol] of Object.entries(isObj(model.volumes) ? model.volumes : {})) {
+    const one = volumeBind(name, vol);
+    if (one && one.valid === false) return one;
+    if (one?.bind) mounts.push(one.bind);
   }
   // Host folders a container of this project can write: read-write binds and local
   // volumes on a bind device (not read-only). A file the gateway or Compose reads there
   // could be swapped for a symlink or a FIFO after this check.
-  const writable = binds.filter((b) => b.rw).map((b) => b.p);
-  for (const vol of Object.values(isObj(model.volumes) ? model.volumes : {})) {
-    const dev = vol?.driver_opts?.device;
-    if (typeof dev === "string" && isAbsolute(dev) && !/(?:^|,)ro(?:,|$)/.test(String(vol.driver_opts.o || ""))) writable.push(resolveHostPath(dev));
-  }
+  const writable = mounts.filter((m) => m.rw).map((m) => m.p);
   const containerWritable = (path) => {
     const p = resolveHostPath(path);
     return writable.some((w) => under(p, w));
   };
-  {
-    for (const a of binds) {
-      for (const b of binds) {
-        if (a !== b && a.rw && a.p !== b.p && under(b.p, a.p)) return refuse(`a bind mount sits inside another read-write bind mount (${b.p.slice(-60)})`);
-      }
+  for (const a of mounts) {
+    for (const b of mounts) {
+      if (a !== b && a.rw && a.p !== b.p && under(b.p, a.p)) return refuse(`a ${b.kind} mount sits inside another read-write ${a.kind} mount (${b.p.slice(-60)})`);
     }
   }
 
@@ -700,16 +811,8 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     // An external volume is another project's data (another extension's database…).
     if (vol.external && (r = needPriv(`the external volume '${vol.name || name}'`))) return r;
     if (vol.driver !== undefined && vol.driver !== "local" && (r = needPriv(`volume driver ${vol.driver}`))) return r;
-    const dev = vol.driver_opts?.device;
-    if (dev !== undefined) {
-      const o = String(vol.driver_opts.o || "");
-      const type = String(vol.driver_opts.type || "");
-      const remote = /^(nfs4?|cifs|smb3?)$/.test(type) && !/(?:^|,)r?bind(?:,|$)/.test(o);
-      if (!remote) {
-        if (typeof dev !== "string" || !dev.startsWith("/")) return refuse(`volume ${name}: a bind device that is not an absolute path`);
-        if ((r = checkHostPath(dev, { readOnly: /(?:^|,)ro(?:,|$)/.test(o), what: `volume ${name}` }))) return r;
-      }
-    }
+    // driver_opts (type, device, o) are read above, before any service's mounts and
+    // env_files are judged.
   }
   for (const [kind, items] of [["secrets", model.secrets], ["configs", model.configs]]) {
     for (const [name, it] of Object.entries(items || {})) {
@@ -1154,8 +1257,9 @@ export function parseDotEnv(path) {
 /**
  * The model `docker compose up` would apply in bundleDir. `runConfig(args, {cwd, env})`
  * runs `docker compose <args>` and resolves {stdout}. A `${VAR:?}` left blank (collection
- * installs leave required keys for "Finish setup") gets UNSET_SENTINEL so the rest of the
- * model can still be checked; Start re-runs this check once the real value is set.
+ * installs leave required keys for "Finish setup") gets unsetSentinel(CROW_HOME from the env)
+ * so the rest of the model can still be checked; Start re-runs this check once the real value
+ * is set.
  * @returns {Promise<{model: object} | {error: string}>}
  */
 export async function loadComposeModel(bundleDir, { env, runConfig, composeFile = null, cwd = bundleDir }) {
@@ -1180,9 +1284,10 @@ export async function loadComposeModel(bundleDir, { env, runConfig, composeFile 
     }
     const dot = parseDotEnv(join(bundleDir, ".env"));
     const filled = { ...env };
+    const sentinel = unsetSentinel(typeof filled.CROW_HOME === "string" && filled.CROW_HOME ? filled.CROW_HOME : null);
     let changed = false;
     for (const k of requiredComposeVars(text)) {
-      if (!filled[k] && !dot[k]) { filled[k] = UNSET_SENTINEL; changed = true; }
+      if (!filled[k] && !dot[k]) { filled[k] = sentinel; changed = true; }
     }
     if (changed) {
       try {

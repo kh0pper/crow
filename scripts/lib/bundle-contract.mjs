@@ -11,6 +11,10 @@ import { join, isAbsolute, basename } from "node:path";
 import Ajv from "ajv";
 import { INVITE_HANDLER_NAMES, isInviteHandlerName } from "../../servers/gateway/first-admin/registry.js";
 import { firstAdminAfterProblems } from "../../servers/gateway/bundle-first-admin-after.js";
+// The "is this a plain path inside the bundle" rule and the panel-id rule live in one leaf
+// module, shared with routes/bundles.js (which skips such a value at install) and
+// compose-guard.js: a manifest the contract refuses is the same value the runtime refuses.
+import { badBundlePath, badPanelId } from "../../servers/shared/bundle-declared-paths.js";
 
 const schema = JSON.parse(
   readFileSync(new URL("../../registry/manifest.schema.json", import.meta.url), "utf8"),
@@ -435,8 +439,10 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
   }
 
   // 3. Referential integrity per declared surface
-  if (manifest && manifest.docker && !fileExists(bundleDir, manifest.docker.composefile)) {
-    errors.push(`docker.composefile "${manifest.docker && manifest.docker.composefile}" not found`);
+  if (manifest && manifest.docker) {
+    const composefile = manifest.docker.composefile;
+    if (badBundlePath(composefile)) errors.push(`docker.composefile "${composefile}" must be a relative path inside the bundle`);
+    else if (!fileExists(bundleDir, composefile)) errors.push(`docker.composefile "${composefile}" not found`);
   }
   // server entry-file: only local node scripts with a non-flag path arg.
   // (typeof null === "object", so `manifest.server &&` correctly skips null.)
@@ -448,11 +454,19 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
     }
   }
   // panel: file-check only the string form; object panels resolve at runtime.
-  if (manifest && typeof manifest.panel === "string" && !fileExists(bundleDir, manifest.panel)) {
-    errors.push(`panel "${manifest.panel}" not found`);
+  if (manifest && typeof manifest.panel === "string") {
+    if (badBundlePath(manifest.panel)) errors.push(`panel "${manifest.panel}" must be a relative path inside the bundle`);
+    else if (!fileExists(bundleDir, manifest.panel)) errors.push(`panel "${manifest.panel}" not found`);
   }
-  if (manifest && typeof manifest.panelRoutes === "string" && !fileExists(bundleDir, manifest.panelRoutes)) {
-    errors.push(`panelRoutes "${manifest.panelRoutes}" not found`);
+  // An object panel's code is panel/<id>.js (routes/bundles.js resolvePanelPath), so its id is a
+  // file name: a plain name, never a path that separates or climbs.
+  if (manifest && manifest.panel && typeof manifest.panel === "object" && !Array.isArray(manifest.panel) && manifest.panel.id !== undefined) {
+    const panelId = manifest.panel.id;
+    if (badPanelId(panelId)) errors.push(`panel.id "${panelId}" must match ^[a-z0-9][a-z0-9-]*$`);
+  }
+  if (manifest && typeof manifest.panelRoutes === "string") {
+    if (badBundlePath(manifest.panelRoutes)) errors.push(`panelRoutes "${manifest.panelRoutes}" must be a relative path inside the bundle`);
+    else if (!fileExists(bundleDir, manifest.panelRoutes)) errors.push(`panelRoutes "${manifest.panelRoutes}" not found`);
   }
   // widgets: each declaration's code is ALWAYS widgets/<id>.js beside the manifest, so the only
   // referential work is the duplicate check and the file check. The shape (id pattern, title,
@@ -468,11 +482,14 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
   }
   if (manifest && Array.isArray(manifest.skills)) {
     for (const sk of manifest.skills) {
-      if (!fileExists(bundleDir, sk)) errors.push(`skill "${sk}" not found`);
+      if (badBundlePath(sk)) errors.push(`skill "${sk}" must be a relative path inside the bundle`);
+      else if (!fileExists(bundleDir, sk)) errors.push(`skill "${sk}" not found`);
     }
   }
-  if (manifest && manifest.postInstall && !fileExists(bundleDir, manifest.postInstall.script)) {
-    errors.push(`postInstall.script "${manifest.postInstall.script}" not found`);
+  if (manifest && manifest.postInstall) {
+    const script = manifest.postInstall.script;
+    if (badBundlePath(script)) errors.push(`postInstall.script "${script}" must be a relative path inside the bundle`);
+    else if (!fileExists(bundleDir, script)) errors.push(`postInstall.script "${script}" not found`);
   }
   for (const p of (manifest && manifest.docker && Array.isArray(manifest.docker.precreate)) ? manifest.docker.precreate : []) {
     if (typeof p !== "string" || p === "" || isAbsolute(p) || p.split(/[\\/]/).includes("..")) {

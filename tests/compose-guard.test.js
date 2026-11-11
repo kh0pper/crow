@@ -26,6 +26,7 @@ const REPO = fileURLToPath(new URL("..", import.meta.url));
 
 const G = await import("../servers/gateway/compose-guard.js");
 const B = await import("../servers/gateway/routes/bundles.js");
+const S = await import("../servers/gateway/bundle-compose-state.js");
 const { trackedBundleSet } = await import("../scripts/build-registry.mjs");
 
 const FIXTURES = mkdtempSync(join(tmpdir(), "crow-cguard-app-"));
@@ -89,7 +90,8 @@ test("model: the narrow exceptions — /etc/localtime read-only; crow.db and the
   assert.equal(check(svc({ volumes: [bind(bundles, true)] }), { manifest: PRIV, consent: true }).valid, true);
   assert.equal(check(svc({ volumes: [bind(bundles, true)] })).valid, false);
   const dir = bundleDir();
-  assert.equal(check(svc({ volumes: [bind(join(dir, "data"))] }), { dir }).valid, true, "the bundle's own folder");
+  assert.equal(check(svc({ volumes: [bind(join(dir, "data"), true)] }), { dir }).valid, true, "the bundle's own folder, read-only");
+  assert.equal(check(svc({ volumes: [bind(join(dir, "data"))] }), { dir }).valid, false, "the bundle's own folder is never mounted read-write");
   assert.equal(check(svc({ volumes: [bind(join(bundles, "other", ".env"), true)] }), { dir }).valid, false, "another bundle's folder");
 });
 
@@ -177,7 +179,7 @@ dockerTest("Start-time sources: an override file and COMPOSE_FILE in .env are pa
   assert.equal((await gateDir(renamed, { textCheck: false, manifest: { id: "fx-r" } })).valid, false, "COMPOSE_PROJECT_NAME can't take another bundle's project");
   const swapped = project({ "docker-compose.yml": C(""), "evil.yml": C("    network_mode: host\n"), ".env": "COMPOSE_FILE=evil.yml\n" });
   assert.equal((await gateDir(swapped, { textCheck: false })).valid, false);
-  const benign = project({ "docker-compose.yml": C("    volumes:\n      - ./data:/d\n"), "docker-compose.override.yml": "services:\n  app:\n    volumes: !override\n      - ./data:/var/lib/x\n" });
+  const benign = project({ "docker-compose.yml": C("    volumes:\n      - ./data:/d:ro\n"), "docker-compose.override.yml": "services:\n  app:\n    volumes: !override\n      - ./data:/var/lib/x:ro\n" });
   assert.equal((await gateDir(benign, { textCheck: false })).valid, true, "an operator's benign override still starts");
 });
 
@@ -212,8 +214,7 @@ dockerTest("every tracked first-party compose passes the model check (with its m
       cpSync(src, dir, { recursive: true, filter: (f) => !f.includes("node_modules") });
       const loaded = await G.loadComposeModel(dir, { env, runConfig: run });
       if (loaded.error) { bad.push(`${id}: ${loaded.error}`); continue; }
-      const { readdirSync } = await import("node:fs");
-      const r = G.checkComposeModel(loaded.model, { bundleDir: dir, manifest, consentVerified: true, ctx: { crowHome: ch, dataDir: join(ch, "data"), appRoot: REPO, home, shipped: new Set(readdirSync(src)) } });
+      const r = G.checkComposeModel(loaded.model, { bundleDir: dir, manifest, consentVerified: true, ctx: { crowHome: ch, dataDir: join(ch, "data"), appRoot: REPO, home } });
       if (!r.valid) bad.push(`${id}: ${r.reason}`);
     }
   } finally { rmSync(home, { recursive: true, force: true }); }
@@ -509,7 +510,7 @@ test("host_grants.env_files: a declared shared env file in ~/.crow/env (or CROW_
 
 test("model: a named volume binding a relative device is refused", () => {
   assert.equal(check({ ...svc(), volumes: { v: { driver_opts: { type: "none", o: "bind", device: "../../data" } } } }).valid, false);
-  assert.equal(check({ ...svc(), volumes: { v: { driver_opts: { type: "nfs", o: "addr=10.0.0.1", device: ":/export" } } } }).valid, true, "a remote NFS volume reads nothing local");
+  assert.equal(check({ ...svc(), volumes: { v: { driver_opts: { type: "nfs", o: "addr=10.0.0.1", device: ":/export" } } } }).valid, false, "a remote NFS volume reaches a host export: it needs privileged consent");
 });
 
 dockerTest("review fixtures: privileged via interpolation/yes/!!bool, long-syntax socket, // and ${R:-/} roots, COMPOSE_FILE colon form", async () => {
@@ -639,15 +640,18 @@ test("Start takes trust flags from the repo manifest, never the installed copy (
   assert.equal(g.manifest.origin, "community");
 });
 
-test("a bundle can't mount its own control files read-write, nor claim a Crow name or file in CROW_HOME by its id", () => {
+test("a bundle can't mount its own folder read-write (its bookkeeping files included), nor claim a Crow name or file in CROW_HOME by its id", () => {
   const dir = join(CROW_HOME, "bundles", "fx-ctl");
   mkdirSync(join(dir, "data"), { recursive: true });
   const m = { manifest: { id: "fx-ctl" }, dir };
-  for (const rel of ["", "manifest.json", "docker-compose.yml", ".env", "server", "panel", ".crow-compose.image-change"]) {
+  // Every bookkeeping file bundle-compose-state.js writes (the version refresh and the
+  // bind-drift card trust these), plus one no version writes yet: the whole-folder rule covers it.
+  const bookkeeping = [S.COMPOSE_SHA_FILE, S.COMPOSE_EDITED_FILE, S.COMPOSE_STATE_FILE, S.COMPOSE_NEEDS_CONFIG_FILE, S.COMPOSE_IMAGE_CHANGE_FILE, ".crow-compose.future"];
+  for (const rel of ["", "manifest.json", "docker-compose.yml", ".env", "server", "panel", "data", ...bookkeeping]) {
     assert.equal(check(svc({ volumes: [bind(join(dir, rel))] }), m).valid, false, `rw ${rel || "(the folder)"}`);
+    assert.equal(check(svc({ volumes: [bind(join(dir, rel), true)] }), m).valid, true, `ro ${rel || "(the folder)"}`);
   }
   assert.equal(check(svc({ volumes: [bind(dir, true)] }), m).valid, true, "read-only is fine");
-  assert.equal(check(svc({ volumes: [bind(join(dir, "data"))] }), m).valid, true, "a data subfolder is fine");
   for (const id of ["mcp", "peer", "secrets", "backups", "panels", "skills", "data", "bundles"]) {
     for (const f of [id, `${id}-addons.json`, `${id}-tokens.json`]) {
       assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, f))] }), { manifest: { id } }).valid, false, `${id} → ${f}`);
@@ -663,6 +667,16 @@ test("no tracked compose bundle's id is a name Crow reserves in CROW_HOME", asyn
   const { RESERVED_HOME_NAMES } = G;
   const clash = [...trackedBundleSet()].filter((id) => existsSync(join(REPO, "bundles", id, "docker-compose.yml")) && RESERVED_HOME_NAMES.has(id));
   assert.deepEqual(clash, []);
+});
+
+test("every compose bookkeeping file bundle-compose-state.js names starts with the guard's prefix", () => {
+  // compose-guard.js cannot import the prefix from bundle-compose-state.js (that module
+  // reaches the guard through bundles-config → folder-grants), so the guard owns it and
+  // this keeps a new COMPOSE_*_FILE export inside the read-write refusal.
+  const named = Object.entries(S).filter(([k, v]) => /^COMPOSE_.*_FILE$/.test(k) && typeof v === "string");
+  assert.ok(named.length >= 5, `expected the bookkeeping file exports, saw ${named.map(([k]) => k).join(", ")}`);
+  for (const [key, name] of named) assert.ok(name.startsWith(G.COMPOSE_STATE_PREFIX), `${key} (${name}) is outside ${G.COMPOSE_STATE_PREFIX}`);
+  assert.equal(G.COMPOSE_STATE_PREFIX, ".crow-compose.");
 });
 
 dockerTest("Compose never sees the gateway's secrets: ${ANY_VAR} interpolates to empty", async () => {
@@ -865,15 +879,192 @@ test("no tracked compose bundle's id is a name Crow's data folder reserves", () 
   assert.deepEqual(clash, []);
 });
 
-test("anything the bundle ships (settings-section.js, run.sh, src/…) is never mountable read-write", () => {
-  const dir = join(CROW_HOME, "bundles", "fx-ship");
-  mkdirSync(dir, { recursive: true });
-  const ctx = { ...CTX, shipped: new Set(["settings-section.js", "run.sh", "src", ".venv"]) };
-  for (const rel of ["settings-section.js", "run.sh", "src", ".venv"]) {
-    assert.equal(G.checkComposeModel(svc({ volumes: [bind(join(dir, rel))] }), { bundleDir: dir, manifest: { id: "fx-ship" }, ctx }).valid, false, rel);
-    assert.equal(G.checkComposeModel(svc({ volumes: [bind(join(dir, rel), true)] }), { bundleDir: dir, manifest: { id: "fx-ship" }, ctx }).valid, true, `${rel} ro`);
+test("model: no read-write bind into the bundle's own folder — read-only only (the operator's rule)", () => {
+  const slug = `fx-own-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CROW_HOME, "bundles", slug);
+  mkdirSync(join(dir, "a", "b", "c"), { recursive: true });
+  mkdirSync(join(dir, "data"), { recursive: true });
+  for (const f of ["main.js", "settings-section.js", ".crow-compose.state.json", join("data", "x.db")]) writeFileSync(join(dir, f), "x");
+  // A symlink inside the folder that leads to another folder inside it…
+  symlinkSync(join(dir, "data"), join(dir, "alias"));
+  // …and one OUTSIDE the folder that leads into it (its written path is a granted folder, so
+  // that pair exercises the read-only side of the rule).
+  const outside = mkdtempSync(join(tmpdir(), "crow-cguard-link-"));
+  symlinkSync(join(dir, "data"), join(outside, "into"));
+  try {
+    const c = (model, ctx = CTX) => G.checkComposeModel(model, { bundleDir: dir, manifest: { id: slug }, consentVerified: false, ctx });
+    const granted = (model) => c(model, { ...CTX, operatorRoots: [outside] });
+    const rw = (p) => svc({ volumes: [bind(p)] });
+    const ro = (p) => svc({ volumes: [bind(p, true)] });
+    // The folder itself, a data folder, a file, the compose bookkeeping, a nested folder and
+    // both kinds of symlink: every read-write mount is refused, every read-only one is allowed.
+    for (const p of [dir, join(dir, "data"), join(dir, "main.js"), join(dir, ".crow-compose.state.json"),
+      join(dir, "settings-section.js"), join(dir, "a", "b", "c"), join(dir, "alias"), join(dir, "alias", "x.db")]) {
+      const r = c(rw(p));
+      assert.equal(r.valid, false, `rw ${p}`);
+      assert.match(r.reason, /mounts its own bundle folder read-write/);
+      assert.equal(c(ro(p)).valid, true, `ro ${p}`);
+    }
+    for (const p of [join(outside, "into"), join(outside, "into", "x.db")]) {
+      assert.equal(granted(rw(p)).valid, false, `rw through a link outside the folder: ${p}`);
+      assert.equal(granted(ro(p)).valid, true, `ro through a link outside the folder: ${p}`);
+    }
+    // The refusal names the entry the mount lands in; the folder itself is ".".
+    assert.match(c(rw(join(dir, "a", "b", "c"))).reason, /read-write \(a\)/);
+    assert.match(c(rw(dir)).reason, /read-write \(\.\)/);
+    // A driver_opts device volume follows the same rule: refused unless `o` says ro.
+    const device = (o) => ({ ...svc(), volumes: { v: { driver_opts: { type: "none", o, device: join(dir, "data") } } } });
+    assert.equal(c(device("bind")).valid, false);
+    assert.match(c(device("bind")).reason, /mounts its own bundle folder read-write/);
+    assert.equal(c(device("bind,ro")).valid, true);
+    // Data belongs in Crow's data folder or a named volume, which stay writable.
+    assert.equal(c(svc({ volumes: [bind(join(CROW_HOME, slug))] })).valid, true);
+    assert.equal(c({ ...svc(), volumes: { v: {} } }).valid, true, "a named volume is fine");
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
   }
-  assert.equal(G.checkComposeModel(svc({ volumes: [bind(join(dir, "data"))] }), { bundleDir: dir, manifest: { id: "fx-ship" }, ctx }).valid, true, "a runtime data folder");
+});
+
+test("driver_opts o: mount options apply in order, so an `ro` followed by `rw` is read-write", () => {
+  const slug = `fx-ro-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CROW_HOME, "bundles", slug);
+  mkdirSync(join(dir, "data"), { recursive: true });
+  const c = (o) => check({ ...svc(), volumes: { v: { driver_opts: { type: "none", o, device: join(dir, "data") } } } }, { dir, manifest: { id: slug } });
+  const rw = c("bind,ro,rw");
+  assert.equal(rw.valid, false, "bind,ro,rw is read-write (the last option wins)");
+  assert.match(rw.reason, /mounts its own bundle folder read-write/);
+  for (const o of ["bind,rw,ro", "ro", "bind,ro"]) assert.equal(c(o).valid, true, `${o} is read-only`);
+  for (const o of ["bind", "bind,rw", "rw,ro,rw"]) assert.equal(c(o).valid, false, `${o} is read-write`);
+  // The same last-wins reading feeds the "a container of this bundle can write here" list.
+  assert.equal(c("bind,rw,ro").valid, true);
+  // Docker does not trim, so `" ro"` is an unknown option and the mount is read-write.
+  assert.equal(c("bind, ro, rw, ro").valid, false, "whitespace is refused, never read as read-only");
+});
+
+test("driver_opts read-only matches Docker exactly: no trimming, no case folding, no empty entries", () => {
+  const slug = `fx-exact-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CROW_HOME, "bundles", slug);
+  mkdirSync(join(dir, "data"), { recursive: true });
+  const c = (o) => check({ ...svc(), volumes: { v: { driver_opts: { type: "none", o, device: join(dir, "data") } } } }, { dir, manifest: { id: slug } });
+  const bad = c("bind, ro");
+  assert.equal(bad.valid, false, "` ro` is not `ro`: Docker leaves this mount read-write");
+  assert.match(bad.reason, /its mount options must not contain spaces or empty entries/);
+  const empty = c("bind,,ro");
+  assert.equal(empty.valid, false, "an empty option entry");
+  assert.match(empty.reason, /its mount options must not contain spaces or empty entries/);
+  // `RO` is not a read-only option Docker knows: the mount is read-write, so the bundle's own
+  // folder is refused; the exact lowercase `ro` is the only spelling that makes it read-only.
+  const upper = c("bind,RO");
+  assert.equal(upper.valid, false, "bind,RO is read-write to Docker");
+  assert.match(upper.reason, /mounts its own bundle folder read-write/);
+  assert.equal(c("bind,ro").valid, true, "bind,ro is read-only");
+});
+
+test("driver_opts: a bind/rbind option decides first, whatever `type` says (the kernel ignores the fs type under MS_BIND)", () => {
+  const slug = `fx-bind-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CROW_HOME, "bundles", slug);
+  mkdirSync(dir, { recursive: true });
+  const own = join(CROW_HOME, slug);
+  const c = (driver_opts, opts = {}) => check({ ...svc(), volumes: { v: { driver_opts } } }, { dir, manifest: { id: slug }, ...opts });
+  const t = (o, device) => c({ type: "tmpfs", o, device });
+  // `type: tmpfs` with a bind option is a plain host bind of `device`, not a tmpfs.
+  const bundle = t("bind", dir);
+  assert.equal(bundle.valid, false, "tmpfs with bind on the bundle folder");
+  assert.match(bundle.reason, /mounts its own bundle folder read-write/);
+  const root = t("size=1m,rbind", "/");
+  assert.equal(root.valid, false, "tmpfs with size=1m,rbind on /");
+  assert.match(root.reason, /mounts a sensitive host path/);
+  // A read-write rbind of its own data folder is an ordinary own-data bind, allowed.
+  assert.equal(t("rbind", own).valid, true, "tmpfs with rbind on CROW_HOME/<id>, read-write");
+  // An unknown type with bind is judged as the bind it is: `/` is refused even with consent.
+  for (const opts of [{}, { manifest: PRIV, consent: true }]) {
+    const ext4 = c({ type: "ext4", o: "bind", device: "/" }, opts);
+    assert.equal(ext4.valid, false, `ext4 with bind on / ${opts.consent ? "with" : "without"} consent`);
+    assert.match(ext4.reason, /mounts a sensitive host path/);
+  }
+  // Without a bind option, tmpfs still holds no host path.
+  assert.equal(t("size=1m").valid, true, "tmpfs without a bind option");
+});
+
+test("driver_opts type: none/bind and tmpfs pass without consent; overlay, unknown types and host-folder options are refused", () => {
+  const slug = `fx-typ-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CROW_HOME, "bundles", slug);
+  mkdirSync(dir, { recursive: true });
+  const c = (driver_opts, opts = {}) => check({ ...svc(), volumes: { v: { driver_opts } } }, { dir, manifest: { id: slug }, ...opts });
+  const upper = join(dir, "data");
+  // overlay ignores `device` and writes to upperdir= / workdir=, which are never bind devices.
+  for (const o of [`lowerdir=${upper},upperdir=${upper}`, "upperdir=/etc", "workdir=/etc"]) {
+    assert.equal(c({ type: "overlay", o }).valid, false, `overlay: ${o}`);
+    assert.equal(c({ type: "overlay", o }, { manifest: PRIV, consent: true }).valid, false, `consent does not open a host folder named in o: ${o}`);
+  }
+  assert.equal(c({ type: "overlay", device: "/dev/null" }).valid, false, "an unknown type without consent");
+  assert.equal(c({ type: "overlay", device: "/dev/null" }, { manifest: PRIV, consent: true }).valid, true, "a privileged bundle may use another type");
+  assert.equal(c({ type: "ext4", device: "/dev/sda1" }).valid, false, "an unknown type");
+  for (const o of ["bind,upperdir=/etc", "bind,lowerdir=/etc", "bind,workdir=/etc"]) {
+    assert.equal(c({ type: "none", o, device: upper }).valid, false, `a host-folder option on a none volume: ${o}`);
+  }
+  assert.equal(c({ type: "tmpfs", o: "size=64m" }).valid, true, "tmpfs holds no host path");
+  // A plain none/bind volume on the bundle's own CROW_HOME/<id> folder stays allowed.
+  assert.equal(c({ type: "none", o: "bind", device: join(CROW_HOME, slug) }).valid, true);
+  assert.equal(c({ type: "none", o: "bind,ro,rw", device: join(CROW_HOME, slug) }).valid, true, "its own data folder stays writable");
+});
+
+test("network filesystem volumes (nfs/nfs4/cifs/smb) need verified privileged consent", () => {
+  for (const type of ["nfs", "nfs4", "cifs", "smb"]) {
+    for (const o of ["addr=127.0.0.1", "addr=127.0.0.1,ro"]) {
+      const m = { ...svc(), volumes: { v: { driver_opts: { type, o, device: ":/export" } } } };
+      assert.equal(check(m).valid, false, `${type} ${o} without consent`);
+      assert.equal(check(m, { manifest: PRIV, consent: true }).valid, true, `${type} ${o} with consent`);
+      assert.equal(check(m, { manifest: { ...PRIV, origin: "community" }, consent: true }).valid, false, `${type}: never for a community bundle`);
+    }
+  }
+  assert.equal(check({ ...svc(), volumes: { v: { driver_opts: { type: "nfs", o: "bind,ro", device: "/etc" } } } }).valid, false, "a network type with bind is a local bind mount, checked as one");
+});
+
+test("a bind inside a read-write bind-device volume is refused (volume devices join the nesting check)", () => {
+  const id = "nest-vol";
+  const outer = join(CROW_HOME, id);
+  const m = { ...svc({ volumes: [bind(join(outer, "w", "sub"))] }), volumes: { v: { driver_opts: { type: "none", o: "bind", device: outer } } } };
+  const r = check(m, { manifest: { id } });
+  assert.equal(r.valid, false);
+  assert.match(r.reason, /sits inside another read-write/);
+  assert.equal(check(svc({ volumes: [bind(join(outer, "w", "sub"))] }), { manifest: { id } }).valid, true, "the bind alone is fine");
+  const roDevice = { ...svc({ volumes: [bind(join(outer, "w", "sub"), true)] }), volumes: { v: { driver_opts: { type: "none", o: "bind,ro", device: outer } } } };
+  assert.equal(check(roDevice, { manifest: { id } }).valid, true, "a read-only volume device does not make the bind unsafe");
+  // A READ-ONLY volume device still joins the check as the INNER mount: the read-write bind of
+  // its parent can swap it for a symlink, so it is refused.
+  const innerRo = { ...svc({ volumes: [bind(join(outer, "w"))] }), volumes: { v: { driver_opts: { type: "none", o: "bind,ro", device: join(outer, "w", "sub") } } } };
+  const innerR = check(innerRo, { manifest: { id } });
+  assert.equal(innerR.valid, false, "a read-only volume device inside a read-write bind");
+  assert.match(innerR.reason, /sits inside another read-write/);
+  assert.equal(check(svc({ volumes: [bind(join(outer, "w"), true)] }), { manifest: { id } }).valid, true, "the read-only bind alone is fine");
+});
+
+test("declared paths: the version refresh reads the manifest's declared roots (shared/bundle-declared-paths.js)", async () => {
+  const D = await import("../servers/shared/bundle-declared-paths.js");
+  // The paths a manifest declares: what the version refresh copies, and what the contract's
+  // badBundlePath check reads. A plain relative declaration names its top-level entry; one that
+  // climbs out or is absolute names no root (and the contract refuses it).
+  const manifest = { id: "fx-one-list", server: { command: "node", args: ["dist/index.js"] }, panel: "ui/panel.js", panelRoutes: "ui/routes.js",
+    widgets: [{ id: "w", title: "W" }], postInstall: { script: "bootstrap/setup.sh" }, skills: ["docs/skill.md"] };
+  assert.deepEqual([...D.declaredRoots(manifest)].sort(), ["bootstrap", "dist", "docs", "ui", "widgets"]);
+  // An object panel's code lives in panel/; a climbing or absolute declaration names no root.
+  assert.deepEqual([...D.declaredRoots({ id: "x", panel: { id: "gis" } })], ["panel"]);
+  assert.deepEqual([...D.declaredRoots({ id: "x", panelRoutes: "../outside/r.js" })], []);
+  assert.deepEqual([...D.declaredRoots({ id: "x", skills: ["/etc/hostname"] })], []);
+});
+
+test("model: the entry named in the read-write refusal is escaped (a newline or ESC never reaches it raw)", () => {
+  const dir = bundleDir();
+  const entry = "data\nfake line\u001b[31m";
+  mkdirSync(join(dir, entry), { recursive: true });
+  const r = G.checkComposeModel(svc({ volumes: [bind(join(dir, entry))] }), { bundleDir: dir, manifest: {}, consentVerified: false, ctx: CTX });
+  assert.equal(r.valid, false);
+  assert.match(r.reason, /mounts its own bundle folder read-write/);
+  assert.doesNotMatch(r.reason, /\n/, "the newline is escaped, not echoed");
+  assert.ok(!r.reason.includes("\u001b"), "the ESC is escaped, not echoed");
+  assert.match(r.reason, /\\u000a/);
+  assert.match(r.reason, /\\u001b/);
 });
 
 test("cross-bundle: no other bundle's project, volume or network names, and no prefix-sibling folders", () => {
@@ -897,4 +1088,36 @@ test("the 35B model bundle no longer asks for the host IPC namespace", () => {
   const compose = readFileSync(join(REPO, "bundles", "llamacpp-vulkan-qwen36-35b-a3b", "docker-compose.yml"), "utf8");
   assert.doesNotMatch(compose.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n"), /^\s*ipc:\s*host/m);
   assert.match(compose, /^\s*shm_size:\s*16g/m);
+});
+
+// Final review follow-ups (round 10): option spelling, recursive binds, a bind with no device.
+test("driver_opts: a mis-cased bind is refused, rbind is read-write, a bind needs a device", async () => {
+  const G = await import("../servers/gateway/compose-guard.js");
+  const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = mkdtempSync(join(tmpdir(), "crow-guard-r10-"));
+  try {
+    const bundleDir = join(home, "bundles", "r10b");
+    mkdirSync(bundleDir, { recursive: true });
+    const own = join(home, "r10b");
+    mkdirSync(own, { recursive: true });
+    const ctx = { crowHome: home, dataDir: join(home, "data"), appRoot: home, volumeInfo: () => null, knownBundleIds: () => ["r10b"] };
+    const model = (driver_opts) => ({ name: "r10b", services: { app: { image: "busybox", volumes: [{ type: "volume", source: "v", target: "/v" }] } }, volumes: { v: { driver_opts } } });
+    const check = (o) => G.checkComposeModel(model(o), { bundleDir, manifest: { id: "r10b" }, consentVerified: false, ctx });
+    // Docker does not read BIND/Rbind as a bind: the declared type would mount without consent.
+    assert.equal(check({ type: "nfs", o: "BIND", device: own }).valid, false);
+    assert.equal(check({ type: "nfs", o: "addr=127.0.0.1,Rbind", device: own }).valid, false);
+    // rbind,ro leaves submounts writable: judged read-write, so the bundle folder is refused.
+    assert.equal(check({ type: "none", o: "rbind,ro", device: bundleDir }).valid, false);
+    assert.equal(check({ type: "none", o: "bind,ro", device: bundleDir }).valid, true);
+    // A bind with no device is refused with a plain sentence.
+    const r = check({ type: "none", o: "bind" });
+    assert.equal(r.valid, false);
+    assert.match(r.reason, /a bind needs a device/);
+    // A plain named volume (no driver_opts) is unaffected.
+    assert.equal(G.checkComposeModel({ name: "r10b", services: { app: { image: "busybox", volumes: [{ type: "volume", source: "v", target: "/v" }] } }, volumes: { v: {} } }, { bundleDir, manifest: { id: "r10b" }, consentVerified: false, ctx }).valid, true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

@@ -158,7 +158,6 @@ export function createBundleManager({
 
   const ctxFor = (id) => ({
     crowHome: satHome, dataDir: join(satHome, "data"), appRoot: join(satHome, "app"),
-    shipped: (() => { try { return new Set(readdirSync(join(appBundlesDir, id))); } catch { return null; } })(),
     operatorRoots: [], otherRoots: [], home: process.env.HOME || homedir(),
   });
   const runConfig = (args, { cwd, env }) => compose(args, { cwd, env, timeout: 60_000 });

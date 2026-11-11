@@ -28,7 +28,7 @@ A surface is "declared" by the presence of its key. Each declared surface is val
 | Surface | Shape | Integrity |
 |---|---|---|
 | `docker` | `{ "composefile": "docker-compose.yml" }` | the composefile exists |
-| `server` | `{ "command": "node", "args": ["server/index.js"], "envKeys": [...] }`, or `null` | entry file checked **only** when `command` is `node` and `args[0]` is a path (external `npx`/`uv` servers are exempt) |
+| `server` | `{ "command": "node", "args": ["server/index.js"], "envKeys": [...] }`, or `null` | entry file checked **only** when `command` is `node` and `args[0]` is a path |
 | `panel` | `"panel/<id>.js"` **or** `{ "id": "...", "extends": "..." }` | string form: the file exists; object form: shape-only (resolved at runtime) |
 | `panelRoutes` | `"panel/routes.js"` | the file exists |
 | `widgets` | `[{ "id": "…", "title": "…", "sizes": [[2, 2]] }]` | each declaration's `widgets/<id>.js` exists |
@@ -36,6 +36,8 @@ A surface is "declared" by the presence of its key. Each declared surface is val
 | `ports` / `port` / `webUI.port` | integers (1–65535); `webUI` may also be `null` | — |
 | `requires.bundles` / `optional_bundles` | `["<bundle-id>", ...]` | each id is a `bundles/<id>` dir with a `manifest.json` (a real bundle) |
 | `env_vars` | `[{ "name": "X", "description": "...", "required": false, "secret": false, "default": "" }]` | each entry has a `name` |
+
+**No read-write bind into your own folder.** A compose may mount paths inside its own installed folder (`~/.crow/bundles/<id>/`) read-only only — every read-write bind whose path is that folder or anything under it is refused, whatever it is meant to hold. Put data in a named volume or in Crow's data folder (`<CROW_HOME>/<id>`), which are allowed.
 
 **Refresh on a version bump.** When a bundle's `version` changes, the gateway re-copies its code into the installed copy (`~/.crow/bundles/<id>/`). Docker bundles get a narrow set (`server/`, `panel/`, `skills/`, `package*.json`, declared roots) plus their compose file (next paragraph) — never anything a container mounts. A docker bundle that needs more opts in with `"refreshFiles": ["<plugin dir>"]`: plain bundle-relative paths, never `.env*`, `data`, `node_modules`, `.git`, `manifest.json`, or a path a read-write bind mount reaches (those are refused). Running containers keep the old files until the bundle is restarted.
 

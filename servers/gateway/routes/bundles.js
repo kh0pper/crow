@@ -18,6 +18,7 @@
 
 import { invalidateAppCatalog } from "../apps/catalog.js";
 import { launcherPin } from "../../shared/resolve-command.js";
+import { declaredRoots as bundleDeclaredRoots, badBundlePath, badPanelId, refusalName } from "../../shared/bundle-declared-paths.js";
 import { trustedBinsMissing } from "../../shared/trusted-bins.js";
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
@@ -312,11 +313,65 @@ function resolveManifestHost(bundleId) {
   return { host, trusted: false, reason: "untrusted_manifest_host" };
 }
 
-function resolvePanelPath(manifest, bundleId) {
+// ---- panel / panel routes: the two files the gateway copies into PANELS_DIR and RUNS ----
+// Defence in depth beside the manifest contract (which reads the same two rules from
+// shared/bundle-declared-paths.js): a value that is absolute, climbs with a `..` segment or
+// carries a `\` would be copied with `join(destDir, value)` — which keeps all three INSIDE the
+// folder — and then imported, so a hand-edited or pre-contract manifest could put arbitrary
+// bundle files on the panel surface. Install and refresh SKIP such a declaration with one log
+// line (never throw: a broken manifest must not take an install or a boot down).
+// One line per manifest value, however many copy sites ask (the install calls the resolver once
+// per branch): a mistake is reported once.
+//
+// It is reported on the console AND, when the caller has a job, in that job's own log: the
+// operator watching an install sees the job, not the gateway's stderr — a panel silently
+// skipped there is a bundle that installs "fine" and has no panel.
+const warnedPanelDeclarations = new Set();
+const warnedPanelDeclarationsByJob = new WeakMap();
+function warnRefusedPanel(key, value, why, job) {
+  const k = `${key}\u0000${String(value)}`;
+  // The value is attacker-controlled: escape control characters and cap it before it reaches
+  // the console or the job log (shared/bundle-declared-paths.js refusalName, the same helper
+  // the compose guard's refusal uses).
+  const line = `${key} '${refusalName(value)}' ${why} — not installed`;
+  if (!warnedPanelDeclarations.has(k)) {
+    warnedPanelDeclarations.add(k);
+    console.warn(`[bundles] ${line}`);
+  }
+  if (job && typeof job === "object") {
+    let seen = warnedPanelDeclarationsByJob.get(job);
+    if (!seen) { seen = new Set(); warnedPanelDeclarationsByJob.set(job, seen); }
+    if (!seen.has(k)) {
+      seen.add(k);
+      appendLog(job, `Warning: ${line}`);
+    }
+  }
+}
+
+/** True when the declared panel path is refused (and logged once); false when it may be copied. */
+function panelPathRefused(value, key, job) {
+  if (!badBundlePath(value)) return false;
+  warnRefusedPanel(key, value, "is not a relative path inside the bundle", job);
+  return true;
+}
+
+function resolvePanelPath(manifest, bundleId, job) {
   if (!manifest?.panel) return null;
-  if (typeof manifest.panel === "string") return manifest.panel;
-  const panelId = manifest.panel.id || bundleId;
-  return `panel/${panelId}.js`;
+  if (typeof manifest.panel === "string") return panelPathRefused(manifest.panel, "manifest.panel", job) ? null : manifest.panel;
+  // The gateway builds `panel/<id>.js`: the id is a file name, so a path that separates or
+  // climbs (or an id of the wrong TYPE — a number, an array, an object) is refused rather than
+  // stringified into a path (the contract refuses the same values).
+  if (manifest.panel.id !== undefined && badPanelId(manifest.panel.id)) {
+    warnRefusedPanel("manifest.panel.id", manifest.panel.id, "is not a plain name (^[a-z0-9][a-z0-9-]*$)", job);
+    return null;
+  }
+  return `panel/${manifest.panel.id || bundleId}.js`;
+}
+
+/** `manifest.panelRoutes` as a checked bundle-relative path, or null when it may not be copied. */
+function resolvePanelRoutesPath(manifest, job) {
+  if (!manifest?.panelRoutes) return null;
+  return panelPathRefused(manifest.panelRoutes, "manifest.panelRoutes", job) ? null : manifest.panelRoutes;
 }
 
 // The job registry (jobs, createJob, appendLog, finishJob, JOB_TTL_MS) lives in
@@ -394,24 +449,6 @@ function emitJobChanged(job) {
   } catch {}
 }
 setJobChangedHook(emitJobChanged);
-
-/** Read installed.json as array */
-/**
- * First path segment of a manifest-declared path, or null for a falsy/non-string
- * input. Used to derive extra refresh-eligible roots from manifest.server.args[0],
- * .panel, .panelRoutes, .skills[] — see isValidPathSegment for the guard that
- * keeps a hostile declared path (e.g. "../x") from ever being joined.
- */
-function firstPathSegment(p) {
-  if (!p || typeof p !== "string") return null;
-  const seg = p.split("/")[0];
-  return seg || null;
-}
-
-/** A single, plain, non-traversal path segment (no "/", not "." or ".."). */
-function isValidPathSegment(seg) {
-  return typeof seg === "string" && seg.length > 0 && seg !== "." && seg !== ".." && !seg.includes("/") && !seg.includes("\\");
-}
 
 /**
  * Replace one file at `dst` with a copy of `src` WITHOUT ever writing into the
@@ -1017,28 +1054,13 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner, log = (m) =
   // read-only-mounted plugin dir — still never .env*, data, node_modules, .git
   // or anything a read-write bind mount reaches.
 
-  // Manifest-declared roots: the bundle contract is manifest-declaration-
-  // driven, so any path a manifest names is code by definition. Each is
-  // reduced to its first path segment and validated to a single plain segment
-  // before any join (R2 minor — same traversal class F-HEALTH-1 fixed for
-  // bundleId elsewhere in this file).
-  const declaredRoots = new Set();
-  const declare = (p) => {
-    const seg = firstPathSegment(p);
-    if (seg && isValidPathSegment(seg)) declaredRoots.add(seg);
-  };
-  if (repoManifest.server?.args?.[0]) declare(repoManifest.server.args[0]);
-  if (typeof repoManifest.panel === "string") declare(repoManifest.panel);
-  else if (repoManifest.panel && typeof repoManifest.panel === "object") declaredRoots.add("panel");
-  if (repoManifest.panelRoutes) declare(repoManifest.panelRoutes);
-  // A bundle's widgets are code: widgets/<id>.js files the gateway imports at page time. The
-  // contract has no path key for them (the file is always widgets/<id>.js), so the root is literal.
-  if (Array.isArray(repoManifest.widgets) && repoManifest.widgets.length) declaredRoots.add("widgets");
-  // The post-install hook's directory is code — refreshed on a version bump like panel/.
-  if (repoManifest.postInstall?.script) declare(repoManifest.postInstall.script);
-  if (Array.isArray(repoManifest.skills)) {
-    for (const s of repoManifest.skills) declare(s);
-  }
+  // Manifest-declared roots (shared/bundle-declared-paths.js): the bundle contract is
+  // manifest-declaration-driven, so any path a manifest names is code by definition.
+  // Each is reduced to its first path segment and validated to a single plain segment
+  // before any join (R2 minor — same traversal class F-HEALTH-1 fixed for bundleId
+  // elsewhere in this file). The install security check reads the same list, so the
+  // two can never disagree about what a manifest declares.
+  const declaredRoots = bundleDeclaredRoots(repoManifest);
 
   // manifest.json is the refresh's commit marker: the version it carries is
   // what makes the NEXT boot skip this bundle. It is copied LAST (below), so
@@ -1087,8 +1109,9 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner, log = (m) =
       touched.push(`panels/${id}.js`);
     }
   }
-  if (repoManifest.panelRoutes) {
-    const routesSrc = join(destDir, repoManifest.panelRoutes);
+  const routesRelPath = resolvePanelRoutesPath(repoManifest);
+  if (routesRelPath) {
+    const routesSrc = join(destDir, routesRelPath);
     if (existsSync(routesSrc)) {
       const routesDst = join(PANELS_DIR, `${id}-routes.js`);
       rmSync(routesDst, { force: true });
@@ -2189,16 +2212,12 @@ export async function checkBundleCompose(bundleDir, { bundleId, manifest, consen
   }
   const loaded = await loadComposeModel(bundleDir, { env: composeEnv(), runConfig: runComposeConfig });
   if (loaded.error) return { valid: false, reason: loaded.error };
-  // Everything the bundle ships (settings-section.js, run.sh, src/ …) is code or config the
-  // gateway may load: never mountable read-write.
-  let shipped = null;
-  try { shipped = new Set(readdirSync(join(APP_BUNDLES, bundleId || basename(bundleDir)))); } catch { /* not in the repo */ }
   // Folders outside Crow's home: given by the install (its owner-typed folders, nothing
   // from .env or a record), else the bundle's live grants (Start, shared-storage re-apply).
   const id = bundleId || basename(bundleDir);
   const g = grantRootsFor(id, bundleDir, { exclude: operatorRoots !== undefined ? id : null });
   const roots = operatorRoots !== undefined ? operatorRoots : g.operatorRoots;
-  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: guardCtx({ crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, shipped, operatorRoots: roots, otherRoots: g.otherRoots, home: process.env.HOME || homedir() }) });
+  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: guardCtx({ crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, operatorRoots: roots, otherRoots: g.otherRoots, home: process.env.HOME || homedir() }) });
 }
 
 // --- PR 0: Consent token helpers (server-validated install consent) ---
@@ -3521,14 +3540,15 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // Bundle types can also have panels — install them
       if (manifest?.panel) {
         mkdirSync(PANELS_DIR, { recursive: true });
-        const panelPath = resolvePanelPath(manifest, bundleId);
-        const panelSrc = join(destDir, panelPath);
-        if (existsSync(panelSrc)) {
+        const panelPath = resolvePanelPath(manifest, bundleId, job);
+        const panelSrc = panelPath ? join(destDir, panelPath) : null;
+        if (panelSrc && existsSync(panelSrc)) {
           cpSync(panelSrc, join(PANELS_DIR, `${bundleId}.js`));
           appendLog(job, `Installed panel: ${bundleId}`);
         }
-        if (manifest.panelRoutes) {
-          const routesSrc = join(destDir, manifest.panelRoutes);
+        const routesRel = resolvePanelRoutesPath(manifest, job);
+        if (routesRel) {
+          const routesSrc = join(destDir, routesRel);
           if (existsSync(routesSrc)) {
             cpSync(routesSrc, join(PANELS_DIR, `${bundleId}-routes.js`));
             appendLog(job, `Installed panel routes: ${bundleId}-routes`);
@@ -3586,14 +3606,15 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // Install panel + routes if present in manifest
       if (manifest?.panel) {
         mkdirSync(PANELS_DIR, { recursive: true });
-        const panelPath = resolvePanelPath(manifest, bundleId);
-        const panelSrc = join(destDir, panelPath);
-        if (existsSync(panelSrc)) {
+        const panelPath = resolvePanelPath(manifest, bundleId, job);
+        const panelSrc = panelPath ? join(destDir, panelPath) : null;
+        if (panelSrc && existsSync(panelSrc)) {
           cpSync(panelSrc, join(PANELS_DIR, `${bundleId}.js`));
           appendLog(job, `Installed panel: ${bundleId}`);
         }
-        if (manifest.panelRoutes) {
-          const routesSrc = join(destDir, manifest.panelRoutes);
+        const routesRel = resolvePanelRoutesPath(manifest, job);
+        if (routesRel) {
+          const routesSrc = join(destDir, routesRel);
           if (existsSync(routesSrc)) {
             cpSync(routesSrc, join(PANELS_DIR, `${bundleId}-routes.js`));
             appendLog(job, `Installed panel routes: ${bundleId}-routes`);
@@ -3621,10 +3642,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // Panel — copy panel file to ~/.crow/panels/ and register
       mkdirSync(PANELS_DIR, { recursive: true });
       if (manifest?.panel) {
-        const panelPath = resolvePanelPath(manifest, bundleId);
-        const src = join(destDir, panelPath);
-        const dest = join(PANELS_DIR, panelPath.split("/").pop());
-        if (existsSync(src)) {
+        const panelPath = resolvePanelPath(manifest, bundleId, job);
+        const src = panelPath ? join(destDir, panelPath) : null;
+        const dest = panelPath ? join(PANELS_DIR, panelPath.split("/").pop()) : null;
+        if (src && dest && existsSync(src)) {
           cpSync(src, dest);
           addPanelEnabled(bundleId);
           appendLog(job, `Installed panel: ${panelPath.split("/").pop()}`);
@@ -3634,9 +3655,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
 
     // 3b. Handle panel field on any add-on type
     if (manifest.panel && addonType !== "panel") {
-      const panelPath = resolvePanelPath(manifest, bundleId);
-      const panelSourceDir = join(APP_BUNDLES, bundleId, panelPath.replace(/[^a-zA-Z0-9_\-\/\.]/g, ""));
-      if (existsSync(panelSourceDir)) {
+      const panelPath = resolvePanelPath(manifest, bundleId, job);
+      const panelSourceDir = panelPath ? join(APP_BUNDLES, bundleId, panelPath.replace(/[^a-zA-Z0-9_\-\/\.]/g, "")) : null;
+      if (panelSourceDir && existsSync(panelSourceDir)) {
         const panelFilename = panelPath.split("/").pop();
         const panelDest = join(CROW_HOME, "panels", panelFilename);
         // Ensure panels directory exists
@@ -4803,9 +4824,9 @@ export default function bundlesRouter() {
           // Remove from panels.json and delete panel file
           removePanelEnabled(bundle_id);
           if (manifest?.panel) {
-            const panelPath = resolvePanelPath(manifest, bundle_id);
-            const panelFile = join(PANELS_DIR, panelPath.split("/").pop());
-            if (existsSync(panelFile)) rmSync(panelFile);
+            const panelPath = resolvePanelPath(manifest, bundle_id, job);
+            const panelFile = panelPath ? join(PANELS_DIR, panelPath.split("/").pop()) : null;
+            if (panelFile && existsSync(panelFile)) rmSync(panelFile);
             appendLog(job, "Removed panel file and registration");
           }
         }
@@ -4813,18 +4834,24 @@ export default function bundlesRouter() {
         // 1b. Handle panel cleanup for any add-on type
         let needsRestart = false;
         if (manifest && manifest.panel && addonType !== "panel") {
-          const panelPath = resolvePanelPath(manifest, bundle_id);
-          const panelFilename = panelPath.split("/").pop();
-          const panelDest = join(CROW_HOME, "panels", panelFilename);
-          const panelId = panelFilename.replace(/\.js$/, "");
+          const panelPath = resolvePanelPath(manifest, bundle_id, job);
+          const panelFilename = panelPath ? panelPath.split("/").pop() : null;
+          const panelDest = panelFilename ? join(CROW_HOME, "panels", panelFilename) : null;
+          const panelId = panelFilename ? panelFilename.replace(/\.js$/, "") : null;
           // Remove panel file
-          if (existsSync(panelDest)) {
+          if (panelDest && existsSync(panelDest)) {
             unlinkSync(panelDest);
           }
-          // Remove from panels.json (either shape)
-          removePanelEnabled(panelId);
+          // Remove from panels.json (either shape). When the declaration is refused NOW
+          // (resolvePanelPath returns null: an id that is no longer a plain name), there is
+          // no panel id to derive — but the install enabled this bundle's id in panels.json,
+          // so an old copied panel would stay enabled forever. Remove that registration.
+          if (panelId) removePanelEnabled(panelId);
+          // Install enables the BUNDLE id (an object panel's file is named after its own id), so
+          // that registration goes too, whatever the file is called.
+          if (panelId !== bundle_id && removePanelEnabled(bundle_id)) appendLog(job, `Removed panel registration: ${bundle_id}`);
           needsRestart = true;
-          appendLog(job, `Removed panel: ${panelFilename}`);
+          if (panelFilename) appendLog(job, `Removed panel: ${panelFilename}`);
         }
 
         // 2. Remove associated skills (all types can have skills)
