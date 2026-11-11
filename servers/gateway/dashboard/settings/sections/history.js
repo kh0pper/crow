@@ -38,7 +38,7 @@ import { fill, t } from "../../shared/i18n.js";
 import { readSetting, writeSetting } from "../registry.js";
 import { isLocalPasswordSessionOn } from "../../local-session.js";
 import { DEFAULT_TRASH_DAYS, normalizeTrashDays } from "../../../../shared/history/trash.js";
-import { historySize } from "../../../../shared/history/api.js";
+import { historyFootprint } from "../../../../shared/history/size.js";
 
 const BASE = "/dashboard/settings?section=history";
 
@@ -79,6 +79,35 @@ function flash(req, lang) {
   return "";
 }
 
+/** The size line, the project-file line and the warning (each degrades alone). */
+export function sizeLines(size, lang) {
+  const muted = "font-size:0.85rem;color:var(--crow-text-muted)";
+  if (!size) {
+    return `<p id="history-size" style="${muted};margin:0 0 1rem">${escapeHtml(t("settings.historySizeUnknown", lang))}</p>`;
+  }
+  const items = (size.versions || 0) + (size.cards ? size.cards.versions : 0);
+  const itemBytes = size.bytes + (size.cards ? size.cards.bytes : 0);
+  const ws = size.workspaceBytes;
+  const wsLine = ws === null
+    ? t("settings.historyWorkspaceUnknown", lang)
+    : ws === 0
+      ? t("settings.historyWorkspaceNone", lang)
+      : fill(t("settings.historyWorkspaceSize", lang), { size: formatBytes(ws) });
+  const warn = size.warn
+    ? `<div id="history-size-warning" class="alert alert-error" style="margin:1rem 0 0">${escapeHtml(
+      fill(t("settings.historySizeWarn", lang), { size: formatBytes(size.totalBytes), free: formatBytes(size.freeBytes) }),
+    )}</div>`
+    : "";
+  const partial = size.partial
+    ? `<p id="history-size-partial" style="${muted};margin:0.5rem 0 0">${escapeHtml(t("settings.historySizePartial", lang))}</p>`
+    : "";
+  return `<p id="history-size" style="${muted};margin:0 0 1rem">${escapeHtml(
+    fill(t("settings.historySize", lang), { n: items, size: formatBytes(itemBytes) }),
+  )}</p>
+    <p style="${muted};margin:0 0 0.35rem">${escapeHtml(t("settings.historyWorkspaceLabel", lang))}</p>
+    <p id="history-workspace" style="${muted};margin:0">${escapeHtml(wsLine)}</p>${partial}${warn}`;
+}
+
 export default {
   id: "history",
   group: "backup",
@@ -102,7 +131,7 @@ export default {
     const rawDays = await readSetting(db, HISTORY_SETTINGS.trashDays).catch(() => null);
     const days = effectiveTrashDays(rawDays);
     const eraseSync = eraseSyncOn(await readSetting(db, HISTORY_SETTINGS.eraseSync).catch(() => null));
-    const size = await historySize(db);
+    const size = await historyFootprint(db).catch(() => null);
     const csrf = escapeHtml(req?.csrfToken || "");
     const retentionRaw = await readSetting(db, HISTORY_SETTINGS.retention).catch(() => null);
     // The retention line is honest about today: `forever` is the only value the
@@ -140,13 +169,7 @@ export default {
     </form>
 
     <h3 style="font-size:1rem;margin:0 0 0.35rem">${escapeHtml(t("settings.historySizeLabel", lang))}</h3>
-    <p id="history-size" style="font-size:0.85rem;color:var(--crow-text-muted);margin:0 0 1rem">${escapeHtml(
-      fill(t("settings.historySize", lang), { n: size.versions, size: formatBytes(size.bytes) }),
-    )}</p>
-    <p style="font-size:0.85rem;color:var(--crow-text-muted);margin:0 0 0.35rem">${escapeHtml(t("settings.historyWorkspaceLabel", lang))}</p>
-    <p id="history-workspace" style="font-size:0.85rem;color:var(--crow-text-muted);margin:0">${escapeHtml(
-      t("settings.historyWorkspaceNone", lang),
-    )}</p>`;
+    ${sizeLines(size, lang)}`;
   },
 
   async handleAction({ req, res, db, action }) {
