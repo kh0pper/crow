@@ -49,6 +49,7 @@ import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVoc
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
+import { secretFilesFor } from "./hidden_files.mjs";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
 import { containSelected, prepareAgentShadow, sweepStaleContainDirs, ContainRefused } from "./pi_contain.mjs";
 import { containedClassifierBlock, containedCloudTokenPath } from "./pi_contain_agent.mjs";
@@ -842,8 +843,15 @@ export class PiRpc {
         if (fdMode) passFds.push(MCP_CONFIG_FD);
         if (piLabSupportsSecretValuesFd()) { passFds.push(SECRET_VALUES_FD); this._passedSecretFd = true; }
       }
+      // Secret files the default tier masks by file (hideFiles): this
+      // instance's Crow home and, with no appRoot, every co-host's. The repo
+      // checkout's .env is masked as well.
+      const hideFiles = [
+        ...secretFilesFor({ crowHome: dirname(secretsHere), appRoot: BRIDGE_APP_ROOT }),
+        ...otherHomes.flatMap((h) => secretFilesFor({ crowHome: h })),
+      ];
       launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain,
-        hideDirs: [secretsHere, ...others], seccompFd: contain ? SECCOMP_FD : null, passFds });
+        hideDirs: [secretsHere, ...others], hideFiles, seccompFd: contain ? SECCOMP_FD : null, passFds });
     } catch (e) {
       // A contain spawn that was REFUSED still gets its one line, naming the
       // provider with no door (or the refusal the caller sees). When the
@@ -921,6 +929,7 @@ export class PiRpc {
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
     this.sandboxTier = launch.tier;
+    this.sandboxMaskedFiles = launch.maskedFiles || [];
     this.piPid = null;
     this.sandboxInitPid = null;
     // S6-CROW: in fd mode the child gets one more pipe at MCP_CONFIG_FD (4;

@@ -245,6 +245,12 @@ The two systemd dirs are created empty when missing.
 
   The child env also loses `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`, `TMUX`, `TMUX_PANE`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY` and every `*_SOCK`, `*_SOCKET` and `*_SOCKET_PATH`.
 - **User unit dirs are not directly writable.** This is not a guarantee: a bot can rename an ancestor directory (see the remaining routes below).
+- **Key files are hidden, with exceptions.** A bot's shell and tool servers read these as empty files; a bot cannot rename over them or move their folders away:
+  - `<CROW_HOME>/.env` and the app root's `.env`;
+  - `.keystore-env`, `board-token`, `phone-token` and `artifacts-token` in `<CROW_HOME>` (the gateway hands the bot these values in the MCP block headers, so the bot never needs the files);
+  - every `<CROW_HOME>/bundles/<id>/.env`, listed at spawn time, except the bundles in `BUNDLE_ENV_READABLE` (`scripts/pi-bots/hidden_files.mjs`: `browser` and `workspace`). Their tool servers read their own `.env` inside the sandbox. The Phase 2 browser door is the fix.
+
+  The same is done for every other Crow home on the host. Left readable on purpose, because something inside the sandbox reads each one: `models-token` (pi-lab's local-models extension), `llm-cloud-token` (pi runs `cat` on it as a provider key), `kiosk-announce-token` and `studio-agent-token` (read by those add-on tool servers). A symlinked file is resolved and its target is hidden. If the gateway rewrites a hidden file by rename while a bot is running, that bot sees the new file until its next spawn. The contain tier does not use this list: it starts from an empty root.
 - **No privilege raises:** `no_new_privs` is set, so sudo and setuid/setgid binaries (crontab, at, pkexec) cannot raise privilege.
 - **No other processes at all (`pidns` tier):** pi runs in its own PID namespace, so the gateway and other bots are not even visible inside. In the `userns` tier their `/proc/<pid>/{root,environ,mem}` are still refused by user-namespace rules.
 - **The masks are locked mounts.** The child cannot unmount them, even from a nested user namespace.
@@ -262,7 +268,7 @@ The two systemd dirs are created empty when missing.
 - **Renaming an ancestor of the user unit dirs.** `mv ~/.config ~/.config.x && mkdir -p ~/.config/systemd/user` moves the read-only mount away. A unit written to the fresh dir (or to `~/.config/environment.d`) is loaded at the next reload or boot. This is the same persistence class as rc files.
 - **The system D-Bus** (`/run/dbus/system_bus_socket`). Privileged methods are polkit-gated, and the setuid polkit helper cannot run under `no_new_privs`, so no escalation is known. It is still open.
 - **Abstract unix sockets**, because there is no network namespace (for example `@/tmp/.X11-unix/X*`).
-- **Reading anything the uid can read:** crow.db, tokens, `~/.claude`. That is S6, which is pi-lab read confinement.
+- **Reading what is not on the hidden list above:** `crow.db`, `data/identity.json` (the sharing identity), `~/.ssh`, `~/.claude`, the `browser` and `workspace` add-on `.env` files and the four token files named above. That is S6, which is pi-lab read confinement. The contain tier starts from an empty root instead; its section says what it still binds (the database is one).
 
 Groups cannot be dropped without privilege (`setpriv --clear-groups` needs CAP_SETGID). `id -G` inside shows the docker gid as 65534, but the group is still in the credential; only the objects it opens are masked.
 

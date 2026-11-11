@@ -69,7 +69,14 @@
  *  - the system D-Bus (/run/dbus/system_bus_socket): reachable; privileged
  *    methods are polkit-gated and the setuid polkit helper cannot run under
  *    no_new_privs, so no escalation was found, but it stays open;
- *  - reading anything the uid can read (crow.db, tokens, ~/.claude) - S6.
+ *  - reading most of what the uid can read - S6. Only these files are hidden
+ *    (hideFiles, see hidden_files.mjs): each Crow home's .env, .keystore-env,
+ *    board-token, phone-token and artifacts-token, every bundle .env except
+ *    the browser and workspace bundles', and the app root's .env. They read
+ *    empty inside. Still readable: crow.db, the sharing identity
+ *    (data/identity.json), ~/.ssh, ~/.claude, the browser and workspace .env
+ *    files, and the tokens that something inside the sandbox reads
+ *    (models-token, llm-cloud-token, kiosk-announce-token, studio-agent-token).
  *
  * Without bubblewrap (e.g. the cloud VM), the fallback is
  * `setpriv --no-new-privs`: no masks, but sudo/setuid are still blocked.
@@ -85,7 +92,7 @@
  * to spawn pi without bwrap), "off" (never wrap).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { containSelected, buildContainPlan, ContainRefused } from "./pi_contain.mjs";
@@ -394,6 +401,28 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   // a file: a file bind would come off the moment the file is replaced by
   // rename, while the tmpfs over its dir stays.
   const hideDirs = (opts.hideDirs || []).filter((d) => typeof d === "string" && d.startsWith("/") && isDir(d));
+  // Secret FILES (hideFiles) are single files masked with --dev-bind /dev/null
+  // (a --ro-bind would be nodev, and reading it would fail with EACCES instead
+  // of reading empty, which tools that load a missing .env handle better).
+  // Their ancestors are pinned like a hidden dir's, or a bot could rename one
+  // away and plant a decoy. A host-side rewrite by rename un-masks the path
+  // for the rest of that spawn. A bot inside cannot rename over a mask: EBUSY.
+  const maskedFiles = [];
+  for (const given of opts.hideFiles || []) {
+    if (typeof given !== "string" || !given.startsWith("/")) continue;
+    let f = given;
+    try {
+      // Always the resolved path: the file itself may be a symlink, and so
+      // may a bundle dir above it (an install can link a bundle into
+      // <CROW_HOME>/bundles). Pinning or binding onto a symlink fails.
+      lstatSync(given);
+      f = realpathSync(given);
+      if (!statSync(f).isFile()) continue;
+    } catch { continue; }
+    // Already empty or masked: a bind there would fail.
+    if (tmpfs.some((d) => f === d || f.startsWith(d + "/")) || hideDirs.some((d) => f === d || f.startsWith(d + "/"))) continue;
+    if (!maskedFiles.includes(f)) maskedFiles.push(f);
+  }
   // Pin EVERY ancestor of a hidden dir below / (bound onto itself it is a
   // mountpoint, and renaming a mountpoint fails, EBUSY). Not only those whose
   // parent is writable now: the bot owns ~ and can chmod it unwritable for
@@ -402,7 +431,7 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   // anchors a planted decoy at the old path while the real dir sits visible
   // elsewhere. A bind costs nothing.
   const pins = [];
-  for (const d of hideDirs) {
+  for (const d of [...hideDirs, ...maskedFiles]) {
     for (let a = dirname(d); a && a !== "/" && a !== opts.pinStop; a = dirname(a)) {
       if (!pins.includes(a)) pins.push(a);
     }
@@ -422,9 +451,12 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   for (const d of hideDirs) if (!tmpfs.some((t) => d === t || d.startsWith(t + "/"))) pre.push("--tmpfs", d, "--remount-ro", d);
   for (const s of sockets) if (!tmpfs.some((d) => s === d || s.startsWith(d + "/"))) pre.push("--ro-bind", "/dev/null", s);
   for (const d of roDirs) pre.push("--ro-bind", d, d);
+  // After the roDirs binds, so no earlier bind can cover a masked file.
+  for (const f of maskedFiles) pre.push("--dev-bind", "/dev/null", f);
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
   return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: scrubSandboxEnv(env),
-    tier: pidNamespace ? "pidns" : "userns", sandboxed: true, wrapper: "bwrap", pidNamespace, reason: null, masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs], pinned: pins };
+    tier: pidNamespace ? "pidns" : "userns", sandboxed: true, wrapper: "bwrap", pidNamespace, reason: null,
+    masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs, ...maskedFiles], maskedFiles, pinned: pins };
 }
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */

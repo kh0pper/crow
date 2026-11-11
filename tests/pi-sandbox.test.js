@@ -9,9 +9,9 @@
 // holds in the PARENT, so each assertion proves the sandbox took it away.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, statSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { connect, createServer } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -423,6 +423,125 @@ test("wrapPiSpawn pins EVERY ancestor below the stop, even past a parent the bot
     assert.ok(l.pinned.includes(join(home, ".crow")), "pinned although its parent is not writable right now");
     assert.ok(l.pinned.includes(home));
   } finally { chmodSync(home, 0o755); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("wrapPiSpawn: hideFiles masks a file with /dev/null, after the roDirs binds and after its ancestor pins", () => {
+  _resetPiSandboxForTest();
+  const root = mkdtempSync(join(tmpdir(), "crow-hidefiles-"));
+  const home = join(root, "home");
+  const cfg = join(home, ".crow");
+  mkdirSync(cfg, { recursive: true });
+  const f = join(cfg, "board-token");
+  writeFileSync(f, "fake-board-token\n");
+  try {
+    const probe = { ok: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null };
+    const l = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe, sockets: [], runtimeDirs: [],
+      roDirs: ["/h/.config/systemd"], hideFiles: [f], pinStop: root, infoFd: 3 });
+    const a = l.args;
+    const maskAt = a.findIndex((x, i) => x === "--dev-bind" && a[i + 1] === "/dev/null" && a[i + 2] === f);
+    const roDirAt = a.findIndex((x, i) => x === "--ro-bind" && a[i + 1] === "/h/.config/systemd");
+    const infoAt = a.findIndex((x) => x === "--info-fd");
+    const bindAt = (p) => a.findIndex((x, i) => x === "--bind" && a[i + 1] === p && a[i + 2] === p);
+    assert.ok(maskAt > 0, "the file is masked: " + f);
+    assert.ok(roDirAt >= 0 && roDirAt < maskAt, "the mask comes after every roDirs ro-bind");
+    assert.ok(infoAt >= 0 && maskAt < infoAt, "the mask comes before --info-fd");
+    for (const p of [cfg, home]) {
+      assert.ok(bindAt(p) >= 0, "pinned: " + p);
+      assert.ok(bindAt(p) < maskAt, "pinned before the mask: " + p);
+    }
+    assert.equal(bindAt(root), -1, "pinning stops at pinStop");
+    assert.ok(l.masked.includes(f));
+    assert.deepEqual(l.maskedFiles, [f]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("wrapPiSpawn: hideFiles skips a missing path, a relative path, a directory and a file inside a hidden dir", () => {
+  _resetPiSandboxForTest();
+  const root = mkdtempSync(join(tmpdir(), "crow-hidefiles-skip-"));
+  const cfg = join(root, "home", ".crow");
+  const secrets = join(cfg, "secrets");
+  mkdirSync(secrets, { recursive: true });
+  const inSecrets = join(secrets, "keychain.key");
+  writeFileSync(inSecrets, "fake-key\n");
+  try {
+    const probe = { ok: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null };
+    const l = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe, sockets: [], runtimeDirs: [], roDirs: [],
+      hideDirs: [secrets], pinStop: root,
+      hideFiles: [join(cfg, "missing-file"), "relative/.env", cfg, inSecrets] });
+    assert.deepEqual(l.maskedFiles, []);
+    assert.ok(!l.args.some((x) => x === "/dev/null"), "no file mask emitted");
+    assert.ok(l.masked.includes(secrets), "the hidden dir is still masked");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("wrapPiSpawn: a symlinked hideFiles entry masks the resolved target and pins the target's ancestors", () => {
+  _resetPiSandboxForTest();
+  const root = mkdtempSync(join(tmpdir(), "crow-hidefiles-link-"));
+  const home = join(root, "home");
+  const cfg = join(home, ".crow");
+  const realDir = join(root, "elsewhere");
+  const real = join(realDir, "real.env");
+  const dirTarget = join(root, "dir-target");
+  mkdirSync(cfg, { recursive: true });
+  mkdirSync(realDir, { recursive: true });
+  mkdirSync(dirTarget, { recursive: true });
+  writeFileSync(real, "fake-env\n");
+  const link = join(cfg, "env-link");
+  symlinkSync(real, link);
+  const dirLink = join(cfg, "dir-link");
+  symlinkSync(dirTarget, dirLink);
+  try {
+    const probe = { ok: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null };
+    const l = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe, sockets: [], runtimeDirs: [], roDirs: [],
+      hideFiles: [link, dirLink], pinStop: root });
+    const a = l.args;
+    const target = realpathSync(real);
+    const maskAt = a.findIndex((x, i) => x === "--dev-bind" && a[i + 1] === "/dev/null" && a[i + 2] === target);
+    const bindAt = (p) => a.findIndex((x, i) => x === "--bind" && a[i + 1] === p && a[i + 2] === p);
+    assert.deepEqual(l.maskedFiles, [target], "a symlink to a dir is skipped");
+    assert.ok(maskAt > 0, "the resolved target is masked");
+    assert.ok(!a.includes(link), "the link path itself is not masked");
+    assert.ok(bindAt(realDir) >= 0 && bindAt(realDir) < maskAt, "the target's ancestor is pinned before the mask");
+    assert.equal(bindAt(cfg), -1, "the link's own dir is not pinned");
+    assert.equal(bindAt(home), -1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("integration: a masked file reads empty inside, and neither it nor its dir can be renamed over", { skip: noSandbox }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-hidefiles-real-"));
+  const dir = join(root, "home", ".crow");
+  mkdirSync(dir, { recursive: true });
+  const f = join(dir, "board-token");
+  writeFileSync(f, "fake-secret-value\n");
+  const other = join(root, "other-file");
+  writeFileSync(other, "replacement\n");
+  try {
+    assert.ok(readFileSync(f, "utf8").length > 0, "precondition: readable outside");
+    const script = [
+      'const fs = require("fs");',
+      'const f = process.argv[1], other = process.argv[2], dir = process.argv[3];',
+      'let inside = -1; try { inside = fs.readFileSync(f).length; } catch (e) { inside = e.code; }',
+      'let over = "renamed"; try { fs.renameSync(other, f); } catch (e) { over = e.code || "refused"; }',
+      'let anc = "renamed"; try { fs.renameSync(dir, dir + ".x"); } catch (e) { anc = e.code || "refused"; }',
+      'console.log(JSON.stringify({ inside, over, anc }));',
+    ].join("\n");
+    const launch = wrapPiSpawn(process.execPath, ["-e", script, f, other, dir],
+      { mode: "auto", sockets: [], runtimeDirs: [], roDirs: [], hideFiles: [f], pinStop: root });
+    assert.equal(launch.wrapper, "bwrap");
+    assert.deepEqual(launch.maskedFiles, [f]);
+    const res = await new Promise((resolve) => {
+      const c = spawn(launch.cmd, launch.args, { env: launch.env });
+      let o = "", e = ""; c.stdout.on("data", (d) => (o += d)); c.stderr.on("data", (d) => (e += d));
+      c.on("exit", (code) => resolve({ code, o: o.trim(), e }));
+    });
+    assert.equal(res.code, 0, res.e);
+    const r = JSON.parse(res.o.split("\n").pop());
+    assert.equal(r.inside, 0, "inside: the file reads empty");
+    assert.notEqual(r.over, "renamed", "inside: no rename over the mask (" + r.over + ")");
+    assert.notEqual(r.anc, "renamed", "inside: no rename of the masked file's dir (" + r.anc + ")");
+    assert.equal(readFileSync(f, "utf8"), "fake-secret-value\n", "outside: the content is unchanged");
+    assert.equal(existsSync(dir), true, "outside: the dir is still there");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 // ---- PID namespace sandbox ----
