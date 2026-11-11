@@ -448,8 +448,11 @@ async function withGitWriteLock(project, opts, work) {
   const budget = lockBudgetOf(opts);
   const startedAt = clock();
   return withProjectLock(id, async () => {
-    if ((await isLiveNow(opts, project)) !== true) return { live: false };
+    const early = await isLiveNow(opts, project);
     const repoDir = workspaceGitDir(project, opts);
+    // A confirmed purge with a folder still on disk goes on to the lock, which
+    // removes it; every other not-live answer touches nothing.
+    if (early !== true && !(early === "gone" && existsSync(repoDir))) return { live: false };
     mkdirSync(dirname(repoDir), { recursive: true });
     mkdirSync(repoDir, { recursive: true });
     const remaining = Math.max(0, budget - (clock() - startedAt));
