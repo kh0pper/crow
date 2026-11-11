@@ -566,3 +566,62 @@ test("Private copy: en + es, the plan's voice", () => {
   assert.equal(t("services.private.label", "en"), "Treat as private");
   assert.equal(t("services.private.label", "es"), "Tratar como privado");
 });
+
+// ---- The saved key: one click ---------------------------------------------------------------
+
+test("Use saved key: one click POSTs {serviceId, useSavedKey} and re-renders; a missing key opens the sheet with the reason", async () => {
+  const p = page();
+  p.groups.paste.find((c) => c.serviceId === "github").savedKey = true;
+  let answer = { status: 201, body: { ok: true, connection: { uuid: UUID } } };
+  const s = boot({ pageData: p, fetchImpl: () => answer });
+  s.click(s.document.querySelector("[data-svc-add]"));
+  const btn = s.sheet().querySelector('[data-svc-use-saved="github"]');
+  assert.equal(btn.textContent, "Use saved key");
+  assert.equal(btn.getAttribute("aria-label"), "Use saved key GitHub");
+  const typeKey = s.sheet().querySelector('[data-svc-connect="github"]');
+  assert.equal(typeKey.textContent, "Type a key", "a different key for this project is still typed in the sheet");
+  assert.equal(typeKey.getAttribute("aria-label"), "Type a key GitHub");
+  assert.equal(s.sheet().querySelector('[data-svc-connect="canvas-lms"]').textContent, "Connect", "other services keep it");
+  s.click(btn);
+  await s.settle();
+  assert.equal(s.calls.length, 1);
+  assert.equal(s.calls[0].method, "POST");
+  assert.equal(s.calls[0].url, "/dashboard/services/api/project/spring/connect?lang=en");
+  assert.equal(s.calls[0].headers["X-Crow-Csrf"], "csrf-abc");
+  assert.deepEqual(JSON.parse(s.calls[0].body), { serviceId: "github", useSavedKey: true });
+  assert.equal(s.reloads(), 1, "the new connection shows on the page");
+
+  // No saved key any more: the sheet opens to type one, with the reason on it.
+  answer = { status: 400, body: { error: "no_saved_key" } };
+  const s2 = boot({ pageData: p, fetchImpl: () => answer });
+  s2.click(s2.document.querySelector("[data-svc-add]"));
+  s2.click(s2.sheet().querySelector('[data-svc-use-saved="github"]'));
+  await s2.settle();
+  const form = s2.sheet().querySelector("form.svc-connect");
+  assert.ok(form, "the connect sheet, not the list");
+  assert.equal(form.querySelector("[data-svc-error]").textContent, "There is no saved key for GitHub. Type it in to connect.");
+  assert.equal(s2.reloads(), 0);
+
+  // Any other refusal keeps the list, with the line under it.
+  answer = { status: 400, body: { error: "busy" } };
+  const s3 = boot({ pageData: p, fetchImpl: () => answer });
+  s3.click(s3.document.querySelector("[data-svc-add]"));
+  s3.click(s3.sheet().querySelector('[data-svc-use-saved="github"]'));
+  await s3.settle();
+  assert.ok(s3.sheet().querySelector("#svc-q"), "still the Add list");
+  assert.equal(s3.sheet().querySelector("[data-svc-add-error]").textContent, t("services.error.busy", "en"));
+  assert.equal(s3.sheet().querySelector("[data-svc-use-saved='github']").hasAttribute("disabled"), false, "the button works again");
+  assert.equal(s3.reloads(), 0);
+});
+
+test("Use saved key copy: en + es, and the data block carries the flag only when true", () => {
+  assert.equal(t("services.add.useSaved", "en"), "Use saved key");
+  assert.equal(t("services.add.useSaved", "es"), "Usar la clave guardada");
+  assert.ok(translations["services.error.no_saved_key"]?.en && translations["services.error.no_saved_key"]?.es);
+  const p = page();
+  p.groups.paste.find((c) => c.serviceId === "github").savedKey = true;
+  const d = projectServicesData(p, "en");
+  assert.equal(d.groups.paste.find((c) => c.serviceId === "github").savedKey, true);
+  assert.equal(d.groups.paste.find((c) => c.serviceId === "canvas-lms").savedKey, undefined);
+  assert.equal(d.strings["services.add.useSaved"], "Use saved key");
+});

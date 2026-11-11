@@ -2,8 +2,11 @@
  * Crow keychain — human-facing passwords, sealed with secret-box under the keychain's OWN
  * key (keychain/key.js), LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES). Secrets leave this
  * module only through openEntrySecret / consumeFirstView / exportableEntries, whose callers
- * gate and audit them, and serviceSecretsFor, which only the gateway's own connection test and
- * child spawn read (a project connection's secrets, kind 'service', keyed by connection uuid). Rows sealed under another key (a crow.db restored onto a machine
+ * gate and audit them; through serviceSecretsFor, which only the gateway's own connection test
+ * and child spawn read (a project connection's secrets, kind 'service', keyed by connection
+ * uuid); and through extensionSecretsFor, which only the gateway's own project connect route
+ * reads when the owner picks a key they already saved for that service (kind 'extension',
+ * bundle id + env key). Rows sealed under another key (a crow.db restored onto a machine
  * without the key file) are listed as readable:false and throw KeychainKeyMissingError on
  * open — never a crash, never a wrong plaintext.
  */
@@ -173,6 +176,39 @@ export async function serviceSecretsFor(db, key, connectionUuid, { allowedKeys }
   const { rows } = await db.execute({
     sql: "SELECT env_key, key_id, secret_sealed FROM crow_keychain WHERE kind = 'service' AND connection_uuid = ? AND status = 'active' ORDER BY id",
     args: [connectionUuid],
+  });
+  const mine = rows.filter((r) => r.key_id === key.id);
+  if (rows.length > 0 && mine.length === 0) throw new KeychainKeyMissingError();
+  const out = {};
+  for (const r of mine) {
+    if (!allowed.has(r.env_key)) continue;
+    try {
+      const v = openSecret(r.secret_sealed, box(key));
+      if (typeof v === "string" && v) out[r.env_key] = v;
+    } catch { /* damaged row: skip, never log */ }
+  }
+  return out;
+}
+
+/**
+ * Gateway-internal: the keys the owner saved for a whole service (kind 'extension', one row per
+ * bundle id + env key), as {envKey: plaintext}. Only the connect route reads this, and only for
+ * a request the owner made with useSavedKey: the service's own declared env keys are the only
+ * ones returned (allowedKeys), never a row's other key. Active rows only: an
+ * uninstall (extension_removed) or a deleted row leaves nothing to read. No bundle id, no
+ * allowedKeys or no rows → {}. A missing key, or rows that exist but none sealed under this key
+ * (a crow.db restored without its key file), throws KeychainKeyMissingError (code
+ * KEYCHAIN_KEY_MISSING), the same way serviceSecretsFor does: the fault is the key, not the
+ * token. A row that fails to open is skipped, never logged.
+ */
+export async function extensionSecretsFor(db, key, bundleId, allowedKeys) {
+  await ensureKeychainTable(db);
+  if (typeof bundleId !== "string" || bundleId === "" || isSystemBundleId(bundleId) || !Array.isArray(allowedKeys) || allowedKeys.length === 0) return {};
+  if (!key || typeof key.id !== "string" || !Buffer.isBuffer(key.seed)) throw new KeychainKeyMissingError();
+  const allowed = new Set(allowedKeys.filter((k) => typeof k === "string" && k));
+  const { rows } = await db.execute({
+    sql: "SELECT env_key, key_id, secret_sealed FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND status = 'active' ORDER BY id",
+    args: [bundleId],
   });
   const mine = rows.filter((r) => r.key_id === key.id);
   if (rows.length > 0 && mine.length === 0) throw new KeychainKeyMissingError();

@@ -135,7 +135,7 @@ export function projectServicesCss() {
     border: 0; border-radius: var(--crow-radius-pill, 999px); background: var(--crow-accent); color: var(--crow-accent-contrast);
     font: inherit; font-weight: 600; cursor: pointer;
   }
-  body.shell .svc-pick-btn--install { background: var(--crow-bg-elevated); color: var(--crow-text-primary); }
+  body.shell .svc-pick-btn--install, body.shell .svc-pick-btn--secondary { background: var(--crow-bg-elevated); color: var(--crow-text-primary); }
   body.shell .svc-browse {
     display: inline-flex; align-items: center; min-height: 44px; font-weight: 600; color: var(--crow-accent);
   }

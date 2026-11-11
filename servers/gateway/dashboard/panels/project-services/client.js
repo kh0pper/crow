@@ -28,6 +28,12 @@
  * install lands, the button only connects: a failed connect leaves the extension installed and
  * pressing again never reinstalls.
  *
+ * The one-click connect: an installed service whose key was saved once (card `savedKey: true`, the
+ * server's own metadata-only answer for the owner) shows "Use saved key" instead of Connect. It
+ * POSTs {serviceId, useSavedKey: true} and re-renders the page on 201; a refusal keeps the list
+ * with the error line under it, and a missing, taken or refused key opens the connect sheet to
+ * type one. No value is ever sent to this page or posted by it on that path.
+ *
  * The Private switch (Task 16c): a row's [data-svc-private] checkbox POSTs
  * .../connection/<uuid>/sensitive {sensitive} with the CSRF token. The answer's effective state
  * sets the box and its note; a refusal puts the box back and shows the not-owner line (403) or
@@ -54,11 +60,12 @@ const GROUP_ORDER = ["network", "signin", "paste", "builtin"];
 const STATUSES = ["active", "needs_reauth", "error", "needs_install", "disconnected", "not_tested"];
 export const ERROR_CODES = [
   "unreachable", "auth_failed", "timeout", "bad_address", "redirect", "unexpected_response", "forbidden_target",
-  "not_found", "not_a_vault", "label_taken", "missing_field", "bad_value", "not_installed", "child_unavailable", "busy",
+  "not_found", "not_a_vault", "label_taken", "missing_field", "bad_value", "not_installed", "no_saved_key",
+  "child_unavailable", "busy",
 ];
 const STATIC_KEYS = [
   "services.add.title", "services.add.search", "services.add.searchPlaceholder", "services.add.browse",
-  "services.add.connect", "services.add.install",
+  "services.add.connect", "services.add.install", "services.add.useSaved", "services.add.typeKey",
   "services.connect.for", "services.connect.label", "services.connect.labelHelp", "services.connect.labelDefault",
   "services.connect.labelHere", "services.connect.submit",
   "services.error.generic", "common.close", "common.back",
@@ -95,6 +102,7 @@ export function projectServicesData(page, lang = "en") {
         installed: c.installed === true,
         labelFrom: c.labelFrom || null,
         ...(c.found === true ? { found: true } : {}),
+        ...(c.savedKey === true ? { savedKey: true } : {}),   // one click: the key is already saved
         fields: (c.fields || []).map((f) => ({ name: f.name, kind: f.kind, labelKey: f.labelKey || null, helpKey: f.helpKey || null })),
         steps: [...(c.steps || [])],
         stepLinks: { ...(c.stepLinks || {}) },
@@ -174,7 +182,7 @@ export function projectServicesClientJs() {
 
   var ERRORS = { unreachable: 1, auth_failed: 1, timeout: 1, bad_address: 1, redirect: 1, unexpected_response: 1,
     forbidden_target: 1, not_found: 1, not_a_vault: 1, label_taken: 1, missing_field: 1, bad_value: 1,
-    not_installed: 1, child_unavailable: 1, busy: 1 };
+    not_installed: 1, no_saved_key: 1, child_unavailable: 1, busy: 1 };
   // The copy for an error class; an answer with no class (a keychain key fault, a dropped
   // connection) gets the generic line.
   function errorText(code, fieldLabel, serviceName) {
@@ -430,18 +438,34 @@ export function projectServicesClientJs() {
         ic.setAttribute('aria-hidden', 'true');
         li.appendChild(ic);
         li.appendChild(el('span', 'svc-pick-name', it.name));
-        var btn = el('button', 'svc-pick-btn' + (it.installed ? '' : ' svc-pick-btn--install'),
-          T(it.installed ? 'services.add.connect' : 'services.add.install'));
+        // A key this Crow already saved for the service (never a value, only the flag): one click.
+        var useSaved = it.installed === true && it.savedKey === true;
+        var label = useSaved ? 'services.add.useSaved' : (it.installed ? 'services.add.connect' : 'services.add.install');
+        var btn = el('button', 'svc-pick-btn' + (it.installed ? '' : ' svc-pick-btn--install'), T(label));
         btn.type = 'button';
-        btn.setAttribute(it.installed ? 'data-svc-connect' : 'data-svc-install', it.serviceId);
-        btn.setAttribute('aria-label', T(it.installed ? 'services.add.connect' : 'services.add.install') + ' ' + it.name);
+        if (useSaved) btn.setAttribute('data-svc-use-saved', it.serviceId);
+        else btn.setAttribute(it.installed ? 'data-svc-connect' : 'data-svc-install', it.serviceId);
+        btn.setAttribute('aria-label', T(label) + ' ' + it.name);
         li.appendChild(btn);
+        if (useSaved) {
+          // A different key for this project (another account) is still typed in the sheet.
+          var other = el('button', 'svc-pick-btn svc-pick-btn--secondary', T('services.add.typeKey'));
+          other.type = 'button';
+          other.setAttribute('data-svc-connect', it.serviceId);
+          other.setAttribute('aria-label', T('services.add.typeKey') + ' ' + it.name);
+          li.appendChild(other);
+        }
         ul.appendChild(li);
       }
       sec.appendChild(ul);
       wrap.appendChild(sec);
     }
     sheet.appendChild(wrap);
+    // The one-click answer's failure line, under the list (the sheet's own line is for the form).
+    var addErr = el('p', 'svc-error');
+    addErr.setAttribute('role', 'alert');
+    addErr.setAttribute('data-svc-add-error', '');
+    sheet.appendChild(addErr);
     var browse = el('a', 'svc-browse', T('services.add.browse'));
     browse.setAttribute('href', '/dashboard/extensions');
     sheet.appendChild(browse);
@@ -519,11 +543,43 @@ export function projectServicesClientJs() {
     return '';
   }
 
+  // The one-click connect: the key this Crow already saved for the service. It never carries a
+  // value, so a refusal can only be about the key that is stored. On 201 the page re-renders; a
+  // missing, taken or refused key falls back to the sheet so the owner can type one.
+  function useSavedKey(svc, btn) {
+    if (!DATA || busy) return;
+    var mine = view;
+    busy = true;
+    btn.setAttribute('disabled', '');
+    var line = sheet.querySelector('[data-svc-add-error]');
+    if (line) line.textContent = '';
+    var url = '/dashboard/services/api/project/' + encodeURIComponent(DATA.project.slug) +
+      '/connect?lang=' + encodeURIComponent(DATA.lang || 'en');
+    fetch(url, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': csrf() },
+      body: JSON.stringify({ serviceId: svc.serviceId, useSavedKey: true })
+    }).then(function (r) {
+      return r.json().then(function (j) { return { status: r.status, j: j }; }, function () { return { status: r.status, j: null }; });
+    }, function () { return { status: 0, j: null }; }).then(function (res) {
+      busy = false;
+      btn.removeAttribute('disabled');
+      if (mine !== view) return;
+      if (res.status === 201 && res.j && res.j.ok === true) { connected = true; reload(); return; }
+      var code = res.j && typeof res.j.error === 'string' ? res.j.error : null;
+      if (code === 'no_saved_key' || code === 'label_taken' || code === 'auth_failed') {
+        openConnect(svc, errorText(code, '', svc.name));
+        return;
+      }
+      if (line) line.textContent = errorText(code, '', svc.name);
+    });
+  }
+
   // The connect sheet, and (svc not installed) the Install sheet: step 1 adds the extension to
   // Crow through the store's own path (consent-challenge, install, job poll), step 2 is the same
   // connect form, and Install and connect runs both. A connect that fails after the install
   // leaves the extension installed; pressing the button again only connects.
-  function openConnect(svc) {
+  function openConnect(svc, initialError) {
     ensureSheet();
     wipeSecrets();
     var mine = ++view;
@@ -669,6 +725,7 @@ export function projectServicesClientJs() {
     var err = el('p', 'svc-error');
     err.setAttribute('role', 'alert');
     err.setAttribute('data-svc-error', '');
+    if (initialError) err.textContent = initialError;
     form.appendChild(err);
     var ok = el('p', 'svc-ok');
     ok.setAttribute('role', 'status');
@@ -853,10 +910,15 @@ export function projectServicesClientJs() {
 
   root.addEventListener('click', function (e) {
     if (!sheet || !e.target || !e.target.closest) return;
-    var t = e.target.closest('[data-svc-close], [data-svc-back], [data-svc-connect], [data-svc-install]');
+    var t = e.target.closest('[data-svc-close], [data-svc-back], [data-svc-connect], [data-svc-install], [data-svc-use-saved]');
     if (!t || !sheet.contains(t)) return;
     if (t.hasAttribute('data-svc-close')) { closeSheet(); return; }
     if (t.hasAttribute('data-svc-back')) { openAdd(); return; }
+    if (t.hasAttribute('data-svc-use-saved')) {
+      var one = byId(t.getAttribute('data-svc-use-saved'));
+      if (one) useSavedKey(one, t);
+      return;
+    }
     if (t.hasAttribute('data-svc-connect')) {
       var svc = byId(t.getAttribute('data-svc-connect'));
       if (svc && svc.installed) openConnect(svc);

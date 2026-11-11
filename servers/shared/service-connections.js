@@ -72,6 +72,9 @@ export class ConnectionError extends Error {
 }
 
 const STATUSES = new Set(["active", "error", "needs_install", "needs_reauth", "disconnected"]);
+/** Where the secrets a connection was made with came from: typed in its own sheet, or the key the
+ *  owner saved for that service (the one-click connect). Only the audit payload names it. */
+const KEY_SOURCES = new Set(["typed", "saved"]);
 const LIVE = "status != 'disconnected'";
 const AUDIT_ACTORS = new Set(["local", "contact", "bot", "system"]);
 const COLS = `id, uuid, project_id, owner_contact_id, service_id, bundle_id, method, account_label, label_slug,
@@ -242,13 +245,16 @@ function splitValues(service, config, secrets) {
  * Test seams (tests only; production callers must not pass them): `saveServiceSecret`,
  * `deleteServiceSecrets`, `_registryForTest` (handed to serviceById, so it can invent a service).
  * A KeychainKeyMissingError from the keychain is thrown unchanged (checked before the insert).
+ * `keySource` ("typed" default, or "saved" for a connection made from the owner's remembered
+ * key) is recorded in the service.connect audit payload as key_source, and only then: existing
+ * payloads stay exactly as they were, and no value is ever in one.
  * @returns {Promise<Connection>} never a secret
  */
 export async function createConnection(
   db,
   { projectId, ownerContactId = null, serviceId, accountLabel, config = {}, secrets = {}, testedAt = null, sourceConnectionId = null } = {},
   {
-    key, actor = "local", reservedNames = new Set(),
+    key, actor = "local", reservedNames = new Set(), keySource = "typed",
     saveServiceSecret = defaultSaveServiceSecret, deleteServiceSecrets = defaultDeleteServiceSecrets, _registryForTest,
   } = {},
 ) {
@@ -257,6 +263,7 @@ export async function createConnection(
   // Local user only (spec §6.6): nothing creates a contact-owned row yet.
   if (ownerContactId != null) throw new ConnectionError("bad_value");
   if (!AUDIT_ACTORS.has(actor)) throw new ConnectionError("bad_value");
+  if (!KEY_SOURCES.has(keySource)) throw new ConnectionError("bad_value");
   if (sourceConnectionId != null && !Number.isInteger(sourceConnectionId)) throw new ConnectionError("bad_value");
   const testedText = testedAt == null ? null : iso(testedAt);
   await requireLiveProject(db, projectId);
@@ -302,7 +309,10 @@ export async function createConnection(
     await undoCreate(db, uuid, deleteServiceSecrets);
     throw err;
   }
-  await appendAudit(db, { project_id: projectId, actor_type: actor, action: "service.connect", target: uuid, payload: { service_id: service.id } });
+  await appendAudit(db, {
+    project_id: projectId, actor_type: actor, action: "service.connect", target: uuid,
+    payload: keySource === "saved" ? { service_id: service.id, key_source: "saved" } : { service_id: service.id },
+  });
   return getConnection(db, uuid);
 }
 

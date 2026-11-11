@@ -355,8 +355,12 @@ test("rulings 1 + 6: the gateway's masks change at once on connect; after discon
     assert.deepEqual(await K.serviceSecretsFor(ctx.db, loadKeychainKey({ crowHome: HOME }), uuid, { allowedKeys: [GH] }), {}, "never served");
     const row = (await ctx.db.execute({ sql: "SELECT id, status FROM crow_keychain WHERE connection_uuid = ?", args: [uuid] })).rows[0];
     assert.equal(row.status, "disconnected");
+    // The same value is also remembered for the whole Crow (a key typed once), so the owner's
+    // purge from the keychain page is both rows: every row holding it goes.
+    const remembered = (await ctx.db.execute({ sql: "SELECT id FROM crow_keychain WHERE kind = 'extension' AND env_key = ?", args: [GH] })).rows;
     // The owner purges it from the keychain page; the next refresh drops it.
     assert.equal(await K.deleteEntry(ctx.db, Number(row.id)), true);
+    for (const r of remembered) assert.equal(await K.deleteEntry(ctx.db, Number(r.id)), true);
     refreshGatewaySecretValues({ env: maskEnv(ctx), dbPath: ctx.path });
     assert.equal(SV.getApprovalCardValues().includes(TOKEN), false, "gone from the card mask");
     SV.invalidateSecretValues();
