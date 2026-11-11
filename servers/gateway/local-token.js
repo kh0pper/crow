@@ -8,7 +8,7 @@
  */
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { resolveCrowHome } from "../shared/crow-home.js";
-import { writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, unlinkSync, readFileSync } from "node:fs";
+import { writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, unlinkSync, readFileSync, lstatSync, openSync, writeSync, closeSync, fchmodSync, constants } from "node:fs";
 import { join, dirname } from "node:path";
 import { ensureSecretsDir, migrateLegacySecretFile } from "../shared/peer-credentials.js";
 import { isRelayedSocket } from "../shared/bot-doors.js";
@@ -130,20 +130,25 @@ export function applyLocalTokenAuth(req) {
   return true;
 }
 
-/** Write a token file as a NEW inode: a 0600 temp file in the same dir, then an
- *  atomic rename. A bot sandbox masks a token file by hiding the inode it found
- *  at spawn; rewriting in place would keep a second name for it (a hard link)
- *  readable, so every rotation must land on a fresh inode. */
-function writeTokenFile(path, token) {
-  const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-  try {
-    writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
-    chmodSync(tmp, 0o600);
-    renameSync(tmp, path);
-  } catch (err) {
-    try { unlinkSync(tmp); } catch { /* already gone */ }
-    throw err;
+/** Write a token file IN PLACE on its existing inode (open, truncate, write), so
+ *  a running bot sandbox's mask over it (a bind mount on that inode) stays
+ *  attached: a rename over a mount point would detach it and the bot would read
+ *  the new token mid-turn. The exception is a path that is not a plain file of
+ *  ours with one name (a symlink, a directory, a hard link, another owner's
+ *  file): it is unlinked and created fresh (O_EXCL, 0600), so another name for
+ *  the old inode never sees the new token, and a symlink is never followed.
+ *  Such a file cannot have been masked at spawn anyway. */
+export function writeTokenFile(path, token) {
+  let st = null;
+  try { st = lstatSync(path); } catch { /* absent: created below */ }
+  const ours = typeof process.getuid === "function" ? process.getuid() : null;
+  if (st && (!st.isFile() || st.nlink > 1 || (ours !== null && st.uid !== ours))) {
+    if (st.isDirectory()) throw new Error("token path is a directory: " + path);
+    unlinkSync(path);
+    st = null;
   }
+  const fd = openSync(path, st ? (constants.O_WRONLY | constants.O_TRUNC) : (constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL), 0o600);
+  try { writeSync(fd, token); fchmodSync(fd, 0o600); } finally { closeSync(fd); }
 }
 
 /** Generate a new board token, overwriting any existing one. Stores only the

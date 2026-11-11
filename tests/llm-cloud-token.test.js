@@ -4,7 +4,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, statSync, readFileSync, readdirSync, chmodSync, rmSync, mkdirSync, writeFileSync, linkSync } from "node:fs";
+import { mkdtempSync, statSync, readFileSync, readdirSync, chmodSync, rmSync, mkdirSync, writeFileSync, linkSync, symlinkSync, lstatSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
@@ -57,41 +57,43 @@ test("the file is 0600, holds the latest token, and lives outside <crowHome>/sec
   assert.deepEqual(leftovers, [], "no temp file left behind by the atomic write");
 });
 
-test("each board and phone token rotation lands on a new inode; an extra hard link keeps the OLD bytes", async () => {
+test("a board and phone token rotation rewrites in place (same inode); a file with another name is replaced and the other name keeps the OLD bytes", async () => {
   const boardPath = join(home, "board-token");
   const phonePath = join(home, "phone-token");
   const board1 = await generateBoardToken(db);
   const phone1 = await generatePhoneToken(db);
   const boardIno1 = statSync(boardPath).ino;
   const phoneIno1 = statSync(phonePath).ino;
-  // A second name for the first board token, taken before the next rotation: an
-  // in-place rewrite would make the new token readable through it, so the
-  // rotation has to land on a fresh file.
-  const boardExtra = join(home, "board-token.extra-name-for-test");
-  linkSync(boardPath, boardExtra);
   const board2 = await generateBoardToken(db);
   const phone2 = await generatePhoneToken(db);
-  const boardIno2 = statSync(boardPath).ino;
-  const phoneIno2 = statSync(phonePath).ino;
-  const board3 = await generateBoardToken(db);
-  const phone3 = await generatePhoneToken(db);
-  const boardIno3 = statSync(boardPath).ino;
-  const phoneIno3 = statSync(phonePath).ino;
-  assert.notEqual(boardIno2, boardIno1, "a rotation is a new file");
-  assert.notEqual(boardIno3, boardIno2, "and so is the next one");
-  assert.notEqual(phoneIno2, phoneIno1, "a rotation is a new file");
-  assert.notEqual(phoneIno3, phoneIno2, "and so is the next one");
+  assert.equal(statSync(boardPath).ino, boardIno1, "an in-place rewrite keeps the inode (a running sandbox's mask stays attached)");
+  assert.equal(statSync(phonePath).ino, phoneIno1);
   assert.notEqual(board2, board1);
   assert.notEqual(phone2, phone1);
-  for (const [p, tok] of [[boardPath, board3], [phonePath, phone3]]) {
-    assert.equal(statSync(p).mode & 0o777, 0o600, p + " is 0600");
-    assert.equal(readFileSync(p, "utf8").trim(), tok, p + " holds the token that was returned");
-    assert.equal(statSync(p).nlink, 1, p + " has no other name after the rotation");
-  }
-  assert.equal(statSync(boardExtra).ino, boardIno1, "the extra name still points at the first file");
-  assert.equal(readFileSync(boardExtra, "utf8").trim(), board1, "and it still holds the OLD token");
+  // A second name taken now: the next write must not reach it.
+  const boardExtra = join(home, "board-token.extra-name-for-test");
+  linkSync(boardPath, boardExtra);
+  const board3 = await generateBoardToken(db);
+  assert.notEqual(statSync(boardPath).ino, boardIno1, "a file with nlink 2 is replaced by a fresh inode");
+  assert.equal(statSync(boardPath).nlink, 1);
+  assert.equal(readFileSync(boardPath, "utf8").trim(), board3);
+  assert.equal(readFileSync(boardExtra, "utf8").trim(), board2, "the other name keeps the OLD content only");
+  for (const p of [boardPath, phonePath]) assert.equal(statSync(p).mode & 0o777, 0o600, p + " is 0600");
   assert.deepEqual(readdirSync(home).filter((n) => n.endsWith(".tmp")), [], "no temp file left behind");
   rmSync(boardExtra, { force: true });
+});
+
+test("a symlink at a token path is replaced, not followed", async () => {
+  const phonePath = join(home, "phone-token");
+  const decoy = join(home, "symlink-target-for-test");
+  writeFileSync(decoy, "untouched\n");
+  rmSync(phonePath, { force: true });
+  symlinkSync(decoy, phonePath);
+  const tok = await generatePhoneToken(db);
+  assert.ok(lstatSync(phonePath).isFile(), "the path is now a regular file");
+  assert.equal(readFileSync(phonePath, "utf8").trim(), tok);
+  assert.equal(readFileSync(decoy, "utf8"), "untouched\n", "the old target was not written");
+  rmSync(decoy, { force: true });
 });
 
 test("no other token kind validates at the cloud door, the models token included", async () => {
