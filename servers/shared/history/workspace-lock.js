@@ -8,18 +8,26 @@
  * for no good reason. This is the lock they share instead.
  *
  * The lock is a FILE inside the git dir (`crow-history.lock`), created with
- * O_CREAT|O_EXCL and holding `{ pid, startedAt, token }`. A lock is STALE — and
- * may be taken over — when
+ * O_CREAT|O_EXCL and holding `{ pid, pidStart, startedAt, token }`. A lock is
+ * STALE — and may be taken over — only when its HOLDER IS DEAD:
  *
- *   - its pid is not alive (no signal-0 target; EPERM counts as alive),
- *   - its `startedAt` is older than `staleMs` (the process died without
- *     unlinking it, or a pid was reused long after),
- *   - or the file cannot be read as a lock at all and is older than 5 seconds
- *     (a half-written file from a process that died mid-write).
+ *   - its pid is not alive (no signal-0 target; EPERM counts as alive), or
+ *   - the pid is alive but its process start time (field 22 of /proc/<pid>/stat)
+ *     differs from the `pidStart` the lock recorded: the pid was reused by an
+ *     unrelated process, so the real holder is gone.
  *
- * Taking over renames the stale file to a unique name and removes THAT name: the
- * rename is atomic, so exactly one of several waiters wins it and the losers get
- * ENOENT and simply loop. The winner then races for the O_EXCL create again.
+ * Never by age while the holder is alive: a long erase (rewrite, reflog expire,
+ * gc) is slow but alive, and taking its lock mid-gc could prune a new writer's
+ * objects. A lock file that cannot be read as a lock at all and is older than 5
+ * seconds is also taken over (a half-written file from a process that died
+ * mid-write); there is no holder to ask.
+ *
+ * Taking over renames the stale file to a unique name, then CHECKS that the file
+ * it moved is the one it judged stale (same token). Two waiters can both judge the
+ * same dead lock stale; the first renames it away and creates a fresh live lock,
+ * and the second's rename would then move that LIVE lock. So a mismatch puts the
+ * moved file back (a hard link, which fails safely if the name is taken again) and
+ * loops. The rename is atomic, so exactly one waiter wins the stale file.
  *
  * release() removes the file only while it still holds OUR token, so a lock that
  * was already taken over is never deleted out from under its new owner. It never
@@ -29,7 +37,7 @@
  * `.code` is "busy". A missing git dir throws `.code` "gone" instead (the project
  * was purged while we waited for it).
  */
-import { closeSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, linkSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
@@ -62,6 +70,22 @@ function defaultIsPidAlive(pid) {
   }
 }
 
+/**
+ * The start time of a process (field 22 of /proc/<pid>/stat, in clock ticks since
+ * boot), or null when it cannot be read (not Linux, or the process is gone). The
+ * comm field may hold spaces and parens, so the fields are counted after the LAST ")".
+ */
+function defaultPidStart(pid) {
+  try {
+    const stat = readFileSync(`/proc/${Number(pid)}/stat`, "utf8");
+    const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    // rest[0] is field 3 (state), so field 22 is rest[19].
+    return rest[19] && /^\d+$/.test(rest[19]) ? rest[19] : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The lock's parsed content, or null when the file is missing or unreadable. */
 function readLock(lockPath) {
   try {
@@ -82,40 +106,41 @@ function lockMtime(lockPath) {
 }
 
 /**
- * Whether an existing lock may be taken over.
+ * Whether an existing lock may be taken over, and which lock it judged.
  *
- * @param {string} lockPath
- * @param {{staleMs: number, isPidAlive: Function, clock: Function}} opts
+ * @returns {{stale: boolean, token: string|null}}
  */
-function isStale(lockPath, { staleMs, isPidAlive, clock }) {
+function judgeLock(lockPath, { isPidAlive, getPidStart, clock }) {
   const now = clock();
   const held = readLock(lockPath);
-  if (!held) {
+  if (!held || typeof held.token !== "string") {
+    // Nothing to ask: a half-written or foreign file. Old enough means dead.
     const mtime = lockMtime(lockPath);
-    return mtime !== null && now - mtime > 5000;
+    return { stale: mtime !== null && now - mtime > 5000, token: null };
   }
-  const startedAt = Number(held.startedAt);
-  if (!Number.isFinite(startedAt)) {
-    const mtime = lockMtime(lockPath);
-    return mtime === null || now - mtime > 5000;
+  const token = held.token;
+  if (!isPidAlive(held.pid)) return { stale: true, token };
+  // Alive: stale only when the pid now belongs to a different process.
+  if (held.pidStart != null) {
+    const nowStart = getPidStart(held.pid);
+    if (nowStart !== null && String(nowStart) !== String(held.pidStart)) return { stale: true, token };
   }
-  if (!isPidAlive(held.pid)) return true;
-  return now - startedAt > staleMs;
+  return { stale: false, token };
 }
 
 /**
  * Take the cross-process lock for one git dir.
  *
  * @param {string} repoDir  the project's Crow git dir
- * @param {{waitMs?: number, staleMs?: number, pollMs?: number,
- *   isPidAlive?: Function, clock?: Function}} [opts]
+ * @param {{waitMs?: number, pollMs?: number, isPidAlive?: Function,
+ *   getPidStart?: Function, clock?: Function, _beforeStaleRename?: Function}} [opts]
  * @returns {Promise<{release: () => void}>}
  */
 export async function acquireGitDirLock(repoDir, opts = {}) {
   const waitMs = Number.isFinite(Number(opts.waitMs)) ? Math.max(0, Number(opts.waitMs)) : 120_000;
-  const staleMs = Number.isFinite(Number(opts.staleMs)) ? Math.max(0, Number(opts.staleMs)) : 15 * 60 * 1000;
   const pollMs = Number.isFinite(Number(opts.pollMs)) ? Math.max(1, Number(opts.pollMs)) : 50;
   const isPidAlive = typeof opts.isPidAlive === "function" ? opts.isPidAlive : defaultIsPidAlive;
+  const getPidStart = typeof opts.getPidStart === "function" ? opts.getPidStart : defaultPidStart;
   const clock = typeof opts.clock === "function" ? opts.clock : Date.now;
   const lockPath = join(repoDir, "crow-history.lock");
   const token = randomBytes(16).toString("hex");
@@ -131,7 +156,7 @@ export async function acquireGitDirLock(repoDir, opts = {}) {
     let fd = -1;
     try {
       fd = openSync(lockPath, "wx", 0o600);
-      const body = Buffer.from(JSON.stringify({ pid: process.pid, startedAt: clock(), token }), "utf8");
+      const body = Buffer.from(JSON.stringify({ pid: process.pid, pidStart: getPidStart(process.pid), startedAt: clock(), token }), "utf8");
       try {
         writeSync(fd, body);
       } finally {
@@ -151,13 +176,26 @@ export async function acquireGitDirLock(repoDir, opts = {}) {
     }
 
     waited = true;
-    if (isStale(lockPath, { staleMs, isPidAlive, clock })) {
+    const verdict = judgeLock(lockPath, { isPidAlive, getPidStart, clock });
+    if (verdict.stale) {
+      if (typeof opts._beforeStaleRename === "function") opts._beforeStaleRename(lockPath);
       const aside = `${lockPath}.stale-${process.pid}-${randomBytes(4).toString("hex")}`;
+      let moved = false;
       try {
         renameSync(lockPath, aside);
-        try { rmSync(aside, { force: true }); } catch { /* another sweep will find it */ }
+        moved = true;
       } catch {
         // Another waiter won the rename (ENOENT): loop and race the create again.
+      }
+      if (moved) {
+        const taken = readLock(aside);
+        const takenToken = taken && typeof taken.token === "string" ? taken.token : null;
+        if (takenToken !== null && takenToken !== verdict.token) {
+          // We moved a lock another waiter created after our check: it is live.
+          // Put it back (EEXIST if the name was taken again, which is safe) and loop.
+          try { linkSync(aside, lockPath); } catch { /* the name is taken again */ }
+        }
+        try { rmSync(aside, { force: true }); } catch { /* another sweep will find it */ }
       }
       continue;
     }

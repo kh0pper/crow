@@ -43,6 +43,19 @@ test("a bot's carried entries are denied, except the user's own outputs", () => 
   assert.equal(isDeniedEntry("nested/sessions", true), false);
 });
 
+test("ssh, cloud, gpg, kube, docker and password-vault secrets are denied", () => {
+  for (const rel of [".ssh", ".aws", ".gnupg", ".kube", "home/.ssh", "deep/.AWS"]) {
+    assert.equal(isDeniedEntry(rel, true), true, `${rel}/ must be denied`);
+  }
+  for (const rel of ["credentials.json", "deep/credentials.json", "vault.kdbx", "a/Vault.KDBX", ".docker/config.json", "deep/.docker/config.json"]) {
+    assert.equal(isDeniedEntry(rel, false), true, `${rel} must be denied`);
+  }
+  // Only Docker's one credentials file is a secret, not the folder or its siblings.
+  assert.equal(isDeniedEntry(".docker", true), false);
+  assert.equal(isDeniedEntry(".docker/other.json", false), false);
+  assert.equal(isDeniedEntry("config.json", false), false);
+});
+
 test("credentials, keys, bot worlds and build output are denied at any depth", () => {
   const denied = [
     ".env", ".env.local", ".env.example", ".mcp.json", ".netrc", ".npmrc", ".pypirc", ".git-credentials",

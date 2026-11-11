@@ -33,11 +33,11 @@
  * then `write-tree`. Nothing is checked out and nothing reads the work tree again.
  */
 import {
-  closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync,
-  readFileSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync,
+  closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync,
+  readFileSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync, writeSync,
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { deflateSync } from "node:zlib";
+import { deflateSync, inflateSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { isDeniedEntry, MAX_FILE_BYTES } from "./workspace-deny.js";
 
@@ -189,16 +189,55 @@ function writeBlob(objectsDir, bytes) {
   const sha = createHash("sha1").update(header).update(bytes).digest("hex");
   const dir = join(objectsDir, sha.slice(0, 2));
   const path = join(dir, sha.slice(2));
-  if (existsSync(path)) return sha;
+  // An object already on disk is trusted only after it checks out: a crash can
+  // leave an empty or partial file under the right name.
+  if (existsSync(path) && objectIsIntact(path, header, bytes)) return sha;
   mkdirSync(dir, { recursive: true });
   const temp = join(dir, `tmp_obj_${process.pid}_${randomBytes(6).toString("hex")}`);
-  writeFileSync(temp, deflateSync(Buffer.concat([header, bytes])), { flag: "wx", mode: 0o444 });
+  const fd = openSync(temp, "wx", 0o444);
   try {
-    renameSync(temp, path);
-  } catch (err) {
-    if (!existsSync(path)) throw err;
+    writeSync(fd, deflateSync(Buffer.concat([header, bytes])));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
   }
+  // rename() replaces a damaged object atomically.
+  renameSync(temp, path);
+  fsyncDir(dir);
   return sha;
+}
+
+/** Does this loose object inflate to exactly the blob we expect? */
+function objectIsIntact(path, header, bytes) {
+  try {
+    const raw = inflateSync(readFileSync(path));
+    return raw.length === header.length + bytes.length && raw.subarray(0, header.length).equals(header)
+      && raw.subarray(header.length).equals(bytes);
+  } catch {
+    return false;
+  }
+}
+
+/** fsync a directory so a rename into it survives a crash. Best effort. */
+function fsyncDir(dir) {
+  let fd = -1;
+  try {
+    fd = openSync(dir, "r");
+    fsyncSync(fd);
+  } catch {
+    /* some filesystems refuse a directory fsync */
+  } finally {
+    if (fd >= 0) { try { closeSync(fd); } catch { /* nothing to close */ } }
+  }
+}
+
+/** A cached blob counts as present only when its file exists and is not empty. */
+function blobLooksPresent(path) {
+  try {
+    return statSync(path).size > 0;
+  } catch {
+    return false;
+  }
 }
 
 /** The object file a blob id lives in (loose objects only; used for the cache). */
@@ -302,7 +341,7 @@ export async function buildWorkspaceTree(run, workspaceDir, { indexFile, objects
     // the previous cache write is re-read (git's "racy clean" rule).
     const newestMs = Number((entry.mtimeNs > entry.ctimeNs ? entry.mtimeNs : entry.ctimeNs) / 1_000_000n);
     const racy = newestMs >= oldCache.at - 2000;
-    if (hit && !racy && hit.key === key && /^[0-9a-f]{40}$/.test(hit.sha) && existsSync(blobPath(objectsDir, hit.sha))) {
+    if (hit && !racy && hit.key === key && /^[0-9a-f]{40}$/.test(hit.sha) && blobLooksPresent(blobPath(objectsDir, hit.sha))) {
       // Same file (device, inode, size, mtime to the nanosecond): reuse its blob.
       // Identity was checked by the walk's lstat; no path is opened.
       records.push({ mode: entry.mode, sha: hit.sha, path: entry.path });

@@ -464,6 +464,8 @@ async function withGitWriteLock(project, opts, work) {
       if (err && (err.code === "gone" || err.code === "ENOENT")) return { live: false };
       throw err;
     }
+    // The erase's wall-clock cap runs from here: the whole hold stays bounded.
+    const lockedAt = clock();
     try {
       const verdict = await isLiveNow(opts, project);
       if (verdict !== true) {
@@ -476,7 +478,7 @@ async function withGitWriteLock(project, opts, work) {
       }
       await initGitDir(project, opts);
       await recoverPendingGc(repoDir, opts);
-      return { live: true, value: await work(repoDir) };
+      return { live: true, value: await work(repoDir, lockedAt) };
     } finally {
       try { lock.release(); } catch { /* never let the release fail the work */ }
     }
@@ -544,7 +546,7 @@ async function initGitDir(project, opts) {
     // An EMPTY template: no sample hooks can end up in a directory Crow's own
     // calls use. --bare puts the repository AT this path (not a .git inside it),
     // and the next call turns it back into a work-tree-backed repository.
-    await runGit([...COMMON_CONFIG, "init", "--bare", "--template=", repoDir], opts);
+    await runGit([...COMMON_CONFIG, "init", "--bare", "--object-format=sha1", "--template=", repoDir], opts);
     await runGit([...COMMON_CONFIG, `--git-dir=${repoDir}`, "config", "core.bare", "false"], opts);
   }
   mkdirSync(join(repoDir, "info"), { recursive: true });
@@ -1480,7 +1482,7 @@ export async function eraseWorkspacePaths(project, relPaths, opts = {}) {
     if (!existsSync(join(repoDir, "HEAD"))) {
       return { erased: false, reason: "no_history", erasedPaths: [], skipped };
     }
-    const gate = await withGitWriteLock(project, settings, (dir) => eraseInRepo(project, dir, targets, settings));
+    const gate = await withGitWriteLock(project, settings, (dir, lockedAt) => eraseInRepo(project, dir, targets, { ...settings, lockedAt }));
     if (!gate.live) return { erased: false, reason: "gone", erasedPaths: [], skipped };
     return { ...gate.value, skipped: [...skipped, ...(gate.value.skipped || [])] };
   } catch (err) {
@@ -1543,7 +1545,8 @@ async function eraseInRepo(project, repoDir, targets, opts) {
   const indexFile = join(repoDir, "crow-erase.index");
   const marker = join(repoDir, "crow-pending-gc");
   try { rmSync(indexFile, { force: true }); } catch { /* stale scratch index */ }
-  const deadline = clock() + capMs;
+  // The cap counts from when the lock was taken, not from the rewrite's start.
+  const deadline = (Number.isFinite(Number(opts.lockedAt)) ? Number(opts.lockedAt) : clock()) + capMs;
 
   try {
     let parentId = startAt > 0 ? order[startAt - 1] : null;
@@ -1667,7 +1670,7 @@ export async function eraseExpiredWorkspaceFiles(project, trashDays, opts = {}) 
     projectIdOf(project);
     const days = Number(trashDays);
     if (!Number.isFinite(days) || days <= 0) return [];
-    const gate = await withGitWriteLock(project, settings, (repoDir) => eraseExpiredInRepo(project, repoDir, days, settings, opts.now));
+    const gate = await withGitWriteLock(project, settings, (repoDir, lockedAt) => eraseExpiredInRepo(project, repoDir, days, { ...settings, lockedAt }, opts.now));
     return gate.live ? gate.value : [];
   } catch (err) {
     noteFailure(failureReason(err));
@@ -1773,7 +1776,7 @@ export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, tr
     const isNew = setupNow.includes(row);
     const settings = { ...base, isLive };
     try {
-      const gate = await withGitWriteLock(project, settings, async (repoDir) => {
+      const gate = await withGitWriteLock(project, settings, async (repoDir, lockedAt) => {
         let committed = 0;
         let erased = 0;
         if (String(row.repo_path || "") !== repoDir) {
@@ -1793,7 +1796,7 @@ export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, tr
           settings,
         );
         if (sha) committed += 1;
-        if (eraseOn) erased += (await eraseExpiredInRepo(project, repoDir, trashDays, settings, now)).length;
+        if (eraseOn) erased += (await eraseExpiredInRepo(project, repoDir, trashDays, { ...settings, lockedAt }, now)).length;
         return { committed, erased };
       });
       if (!gate.live) continue;

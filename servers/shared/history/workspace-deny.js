@@ -9,7 +9,10 @@
  * The rule of the list is the ENTRY NAME, at any depth (case-insensitive):
  *
  *   credentials and local misfiles   `.env`, `.env.*`, `.mcp.json`, `.netrc`,
- *                                    `.npmrc`, `.pypirc`, `.git-credentials`
+ *                                    `.npmrc`, `.pypirc`, `.git-credentials`,
+ *                                    `credentials.json`, `*.kdbx`, and the
+ *                                    folders `.ssh`, `.aws`, `.gnupg`, `.kube`,
+ *                                    and `.docker/config.json`
  *   keys                             `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`,
  *                                    `id_ecdsa*`, `*.p12`, `*.pfx`
  *   a bot's own private world        `.pi` (pi session files)
@@ -54,6 +57,12 @@ export const DENIED_ANY_NAME = Object.freeze([
   ".npmrc",
   ".pypirc",
   ".git-credentials",
+  ".ssh",
+  ".aws",
+  ".gnupg",
+  ".kube",
+  "credentials.json",
+  "*.kdbx",
 ]);
 
 /** Denied FOLDER names (a file of the same name is ordinary content). */
@@ -101,6 +110,11 @@ function baseName(relPath) {
 export function isDeniedEntry(relPath, isDir) {
   const name = baseName(relPath).toLowerCase();
   if (name === "") return false;
+  // Docker's registry credentials: only this one file of `.docker` is a secret.
+  if (!isDir) {
+    const lowered = String(relPath == null ? "" : relPath).toLowerCase();
+    if (lowered === ".docker/config.json" || lowered.endsWith("/.docker/config.json")) return true;
+  }
   for (const pattern of DENIED_ANY_NAME) {
     if (nameMatches(pattern, name)) return true;
   }

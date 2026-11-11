@@ -1227,18 +1227,42 @@ test("a job-end commit and a workspace commit racing both land", { skip: NO_GIT 
   mkdirSync(ws);
   const project = projectFor(25, ws);
   writeFileSync(join(ws, "one.txt"), "v0\n");
-  writeFileSync(join(ws, "two.txt"), "v0\n");
   await commitWorkspace(project, OWNER, "Start", { dataDir: fx.dataDir });
 
+  // A barrier directory makes the overlap REAL, not lucky. Child one takes the lock
+  // and, from inside it (the _afterWalk seam), writes `holding` and waits until
+  // child two has written `attempting` and had time to queue on the lock. Child
+  // two does not start its attempt until `holding` exists. So child two's commit
+  // provably waited for child one's lock, and must land on top of it.
+  const barrier = join(fx.root, "barrier");
+  mkdirSync(barrier);
   const moduleUrl = new URL("../servers/shared/history/workspace-history.js", import.meta.url).href;
-  const childScript = (fileName, text, authorId) => `
-import { writeFileSync } from "node:fs";
+  const common = `
+import { writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { commitWorkspace } from ${JSON.stringify(moduleUrl)};
 const project = ${JSON.stringify(project)};
-writeFileSync(join(project.workspace_dir, ${JSON.stringify(fileName)}), ${JSON.stringify(text)});
-const sha = await commitWorkspace(project, { authorKind: "bot", authorId: ${JSON.stringify(authorId)} }, "child save", { dataDir: ${JSON.stringify(fx.dataDir)} });
-process.stdout.write(sha == null ? "" : String(sha));
+const barrier = ${JSON.stringify(barrier)};
+const until = async (name) => { for (let i = 0; i < 600 && !existsSync(join(barrier, name)); i++) await new Promise((r) => setTimeout(r, 25)); if (!existsSync(join(barrier, name))) throw new Error("barrier " + name + " never appeared"); };
+`;
+  const childOne = `${common}
+writeFileSync(join(project.workspace_dir, "one.txt"), "from the first child\\n");
+const sha = await commitWorkspace(project, { authorKind: "bot", authorId: "hank" }, "child one", {
+  dataDir: ${JSON.stringify(fx.dataDir)},
+  _afterWalk: async () => {
+    writeFileSync(join(barrier, "holding"), "1");
+    await until("attempting");
+    await new Promise((r) => setTimeout(r, 400)); // child two is now queued on the lock
+  },
+});
+process.stdout.write(String(sha));
+`;
+  const childTwo = `${common}
+await until("holding");
+writeFileSync(join(project.workspace_dir, "two.txt"), "from the second child\\n");
+writeFileSync(join(barrier, "attempting"), "1");
+const sha = await commitWorkspace(project, { authorKind: "bot", authorId: "ivy" }, "child two", { dataDir: ${JSON.stringify(fx.dataDir)} });
+process.stdout.write(String(sha));
 `;
   const runChild = (script) => new Promise((done, fail) => {
     execFile(
@@ -1252,30 +1276,90 @@ process.stdout.write(sha == null ? "" : String(sha));
     );
   });
 
-  const [one, two] = await Promise.all([
-    runChild(childScript("one.txt", "from the first child\n", "hank")),
-    runChild(childScript("two.txt", "from the second child\n", "hank")),
-  ]);
-  // Each child writes its own file and commits; whichever wins the lock second
-  // sees both. What matters is that nothing was lost and nothing failed.
-  assert.match(String(one), /^([0-9a-f]{40})?$/, `first child: ${one}`);
-  assert.match(String(two), /^([0-9a-f]{40})?$/, `second child: ${two}`);
+  const [one, two] = await Promise.all([runChild(childOne), runChild(childTwo)]);
+  assert.match(String(one), /^[0-9a-f]{40}$/, `first child: ${one}`);
+  assert.match(String(two), /^[0-9a-f]{40}$/, `second child: ${two}`);
+  assert.ok(existsSync(join(barrier, "holding")) && existsSync(join(barrier, "attempting")), "both sides reached the barrier");
 
   const gitDir = gitDirFor(project, fx.dataDir);
-  assert.equal(readFileSync(join(ws, "one.txt"), "utf8"), "from the first child\n");
-  assert.equal(readFileSync(join(ws, "two.txt"), "utf8"), "from the second child\n");
   assert.equal(
-    gitText(gitDir, ws, ["cat-file", "blob", "HEAD:one.txt"]),
-    "from the first child\n",
-    "the first child's write is in the newest recorded tree",
+    gitText(gitDir, ws, ["rev-parse", `${String(two).trim()}^`]).trim(),
+    String(one).trim(),
+    "the second commit waited for the first lock and sits directly on top of it",
   );
-  assert.equal(
-    gitText(gitDir, ws, ["cat-file", "blob", "HEAD:two.txt"]),
-    "from the second child\n",
-    "the second child's write is in the newest recorded tree",
-  );
-  assert.match(gitText(gitDir, ws, ["log", "--format=%H", "--", "one.txt"]).trim(), /^[0-9a-f]{40}/);
-  assert.match(gitText(gitDir, ws, ["log", "--format=%H", "--", "two.txt"]).trim(), /^[0-9a-f]{40}/);
+  assert.equal(gitText(gitDir, ws, ["rev-parse", "HEAD"]).trim(), String(two).trim());
+  assert.equal(gitText(gitDir, ws, ["cat-file", "blob", "HEAD:one.txt"]), "from the first child\n");
+  assert.equal(gitText(gitDir, ws, ["cat-file", "blob", "HEAD:two.txt"]), "from the second child\n");
+});
+
+test("a history is created as sha1 whatever git's default becomes", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-sha1-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(41, ws);
+  writeFileSync(join(ws, "a.txt"), "a\n");
+  await commitWorkspace(project, OWNER, "Start", { dataDir: fx.dataDir });
+  const gitDir = gitDirFor(project, fx.dataDir);
+  const config = readFileSync(join(gitDir, "config"), "utf8");
+  assert.equal(/objectformat\s*=\s*sha256/i.test(config), false, "no sha256 object format");
+  assert.match(gitText(gitDir, ws, ["rev-parse", "HEAD"]).trim(), /^[0-9a-f]{40}$/, "a 40-hex sha1 id");
+});
+
+test("a damaged loose object already on disk is rewritten, not trusted", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-badobj-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(42, ws);
+  writeFileSync(join(ws, "keep.txt"), "keep\n");
+  await commitWorkspace(project, OWNER, "Start", { dataDir: fx.dataDir });
+  const gitDir = gitDirFor(project, fx.dataDir);
+
+  // The id the next file's blob will get, and an EMPTY file squatting at its path
+  // (what a crash after the rename can leave).
+  const text = "fresh content that was never recorded\n";
+  const blobId = execFileSync("git", ["hash-object", "--stdin"], { input: text }).toString("utf8").trim();
+  const objectPath = join(gitDir, "objects", blobId.slice(0, 2), blobId.slice(2));
+  mkdirSync(join(gitDir, "objects", blobId.slice(0, 2)), { recursive: true });
+  writeFileSync(objectPath, "");
+
+  writeFileSync(join(ws, "fresh.txt"), text);
+  const sha = await commitWorkspace(project, OWNER, "Add fresh", { dataDir: fx.dataDir });
+  assert.match(sha, /^[0-9a-f]{40}$/);
+  assert.equal(gitText(gitDir, ws, ["cat-file", "blob", blobId]), text, "the object was rewritten whole");
+  assert.equal(gitText(gitDir, ws, ["cat-file", "blob", "HEAD:fresh.txt"]), text);
+});
+
+test("the erase cap counts from when the lock was taken, not from the rewrite", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-lockcap-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(43, ws);
+  writeFileSync(join(ws, "keep.txt"), "keep\n");
+  writeFileSync(join(ws, "drop.txt"), "drop\n");
+  await commitWorkspace(project, OWNER, "Add both", { dataDir: fx.dataDir });
+  unlinkSync(join(ws, "drop.txt"));
+  await commitWorkspace(project, OWNER, "Delete drop", { dataDir: fx.dataDir });
+
+  const gitDir = gitDirFor(project, fx.dataDir);
+  const headBefore = gitText(gitDir, ws, ["rev-parse", "HEAD"]).trim();
+  // The clock jumps an hour on the first git call the erase makes AFTER the lock
+  // is held (its HEAD lookup), long before the rewrite loop starts. A cap measured
+  // from the loop's start would not notice; one measured from the lock does.
+  let now = 1_000_000;
+  let jumped = false;
+  const result = await eraseWorkspaceFile(project, "drop.txt", {
+    dataDir: fx.dataDir,
+    clock: () => now,
+    onSpawn: (argv) => {
+      if (!jumped && argv.includes("rev-parse") && argv.includes("--verify")) {
+        jumped = true;
+        now += 60 * 60 * 1000;
+      }
+    },
+  });
+  assert.equal(jumped, true, "the erase's first call was seen");
+  assert.deepEqual(result, { erased: false, reason: "timeout" });
+  assert.equal(gitText(gitDir, ws, ["rev-parse", "HEAD"]).trim(), headBefore, "HEAD did not move");
 });
 
 test("control characters in a bot's name cannot forge who made a change", { skip: NO_GIT }, async () => {
