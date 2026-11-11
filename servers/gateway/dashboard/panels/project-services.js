@@ -9,14 +9,19 @@
  * (shell/request.js SLUG_SCOPED_PANELS: the slug wins over the cookie and nothing is written; the
  * GET is read-only because Turbo prefetches it). An unknown or archived slug is a 404.
  * The Add and Connect sheets (Task 11) read the page's JSON block: catalog cards and copy, no value.
+ * A card whose key this Crow already saved for that service (owner sessions only, metadata only)
+ * offers the one-click connect instead of Connect; no value is in the payload either way.
  * Hidden from the classic sidebar; reached only through the route above.
  */
 
 import { t } from "../shared/i18n.js";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
+import { serviceCatalog } from "../../../shared/service-catalog.js";
 import { installedBundleIds } from "../../skills-catalog.js";
 import { loadServicesPage } from "../../routes/services-api.js";
+import { savedKeyServiceIds } from "../../services/saved-key.js";
 import { servicesUiEnabled } from "../../services/ui-flag.js";
+import { isLocalPasswordSessionOn } from "../local-session.js";
 import { projectMissingHtml } from "./project-home/html.js";
 import { projectHomeCss } from "./project-home/css.js";
 import { projectServicesHtml } from "./project-services/html.js";
@@ -40,8 +45,13 @@ export default {
     if (!req.crowMode || req.crowMode.mode !== "new") return res.redirect(302, "/dashboard/projects");
     const slug = req.params && typeof req.params.slug === "string" ? req.params.slug : null;
     const scope = req.crowScope;
-    const page = slug && scope && scope.projectId != null && scope.slug === slug
-      ? await loadServicesPage(db, slug, { installedIds: installedBundleIds(resolveCrowHome()), lang })
+    const live = slug && scope && scope.projectId != null && scope.slug === slug;
+    const installed = installedBundleIds(resolveCrowHome());
+    // The one-click connect is the owner's alone: a deputy or a peer session gets no savedKey flag,
+    // so the page offers the sheet to type a key (never a value, and never the owner's key).
+    const saved = live && await isLocalPasswordSessionOn(db, req) ? await savedKeyServiceIds(db, serviceCatalog(), installed) : undefined;
+    const page = live
+      ? await loadServicesPage(db, slug, { installedIds: installed, lang, savedKeyServiceIds: saved })
       : null;
     if (!page) {
       res.status(404);

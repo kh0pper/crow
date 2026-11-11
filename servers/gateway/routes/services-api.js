@@ -4,6 +4,10 @@
  *
  *   GET  /dashboard/services/api/project/:slug                  the page's data (loadServicesPage)
  *   POST /dashboard/services/api/project/:slug/connect          {serviceId, accountLabel, values}
+ *                                                               or {serviceId, useSavedKey: true}
+ *                                                               (the key the owner saved for that
+ *                                                               service, one click; no value is
+ *                                                               ever sent to the browser)
  *   POST /dashboard/services/api/connection/:uuid/test          test again
  *   POST /dashboard/services/api/connection/:uuid/disconnect    idempotent; stops the connection's child
  *   POST /dashboard/services/api/connection/:uuid/restart       Settings → Advanced (R8): stop the child,
@@ -25,12 +29,15 @@
  * NEVER add this prefix to PUBLIC_FUNNEL_PREFIXES.
  *
  * Secrets: a value typed into the connect sheet goes to the live test and then to the keychain,
- * nowhere else. No answer carries a value (fields read "set" / "unset" from keychain metadata,
- * never decrypted), and nothing here logs a body, a value or an upstream message: the logs are
- * fixed lines ("[services] connect failed: <class>"). The connect body has its own small parser
- * (the gateway's global parser skips this prefix, index.js `_hasOwnParser`), whose failures
- * answer `bad_value` and log only "[services] bad body". Each saved secret's hash is recorded for
- * masking (recordServiceSecretValues) before it is saved.
+ * nowhere else. A `useSavedKey` connect reads the service's remembered extension rows instead
+ * (extensionSecretsFor, gateway-internal) and then takes the SAME path as a typed one. No answer
+ * carries a value (fields read "set" / "unset" from keychain metadata, never decrypted), and
+ * nothing here logs a body, a value or an upstream message: the logs are fixed lines ("[services]
+ * connect failed: <class>"). The connect body has its own small parser (the gateway's global
+ * parser skips this prefix, index.js `_hasOwnParser`), whose failures answer `bad_value` and log
+ * only "[services] bad body". Each saved secret's hash is recorded for masking
+ * (recordServiceSecretValues) before it is saved, and the first typed key of a service is
+ * remembered for its other projects (saved-key.js).
  *
  * Errors: only the plan's classes. A keychain key fault answers 500 with no class and a fixed
  * log line.
@@ -49,8 +56,9 @@ import {
 import { recordServiceSecretValues } from "../../shared/secret-values.js";
 import { refreshGatewaySecretValues } from "../../shared/secret-values-collect.js";
 import { keyCreatedHook } from "../keychain/api.js";
-import { ensureWriteKey, serviceSecretKeys, serviceSecretsFor } from "../keychain/store.js";
+import { ensureWriteKey, extensionSecretsFor, serviceSecretKeys, serviceSecretsFor } from "../keychain/store.js";
 import { loadKeychainKey } from "../keychain/key.js";
+import { isOneClickEligible, rememberTypedKeys, savedKeyServiceIds } from "../services/saved-key.js";
 import { csrfMiddleware } from "../dashboard/shared/csrf.js";
 import { SUPPORTED_LANGS, t } from "../dashboard/shared/i18n.js";
 import { installedBundleIds } from "../skills-catalog.js";
@@ -143,13 +151,14 @@ function privateView(conn, { crowHome, overrides, bindings }) {
   }
 }
 
-function serviceCard(s, installed) {
+function serviceCard(s, installed, savedKeyIds) {
   return {
     serviceId: s.id,
     bundleId: s.bundleId,                  // the Install sheet installs this extension (Task 12)
     name: s.name,
     installed: installed.has(s.bundleId),
     labelFrom: s.labelFrom || null,        // the connect sheet suggests the account name the same way
+    ...(savedKeyIds.has(s.id) ? { savedKey: true } : {}),   // one click: its key is already saved
     fields: (s.fields || []).map((f) => ({ name: f.name, kind: f.kind, labelKey: f.label_key || null, helpKey: f.help_key || null })),
     steps: [...(s.steps || [])],
     stepLinks: { ...(s.stepLinks || {}) },
@@ -159,15 +168,19 @@ function serviceCard(s, installed) {
 /**
  * The Services page's data for one project (shared with the page, Task 10). null when the slug
  * names no live project. Reads are active-only: disconnected rows never show.
+ * `savedKeyServiceIds` (optional) is the owner-only Set from saved-key.js: a card whose id is in
+ * it carries `savedKey: true` and the page offers the one-click connect. A caller that does not
+ * compute it (a non-owner session) passes nothing, so no card ever carries the flag.
  * @param {object} db
  * @param {string} slug
- * @param {{installedIds?: Set<string>|string[], lang?: string}} [opts]
+ * @param {{installedIds?: Set<string>|string[], lang?: string, savedKeyServiceIds?: Set<string>}} [opts]
  */
-export async function loadServicesPage(db, slug, { installedIds = new Set(), lang = "en", crowHome = resolveCrowHome() } = {}) {
+export async function loadServicesPage(db, slug, { installedIds = new Set(), lang = "en", crowHome = resolveCrowHome(), savedKeyServiceIds: savedKeyIds } = {}) {
   void lang; // the payload carries i18n keys; the page renders them in its language
   const project = await findProject(db, slug);
   if (!project) return null;
   const installed = toSet(installedIds);
+  const withSavedKey = toSet(savedKeyIds);
   const catalog = serviceCatalog();
   const byId = new Map(catalog.map((s) => [s.id, s]));
   const conns = await listConnections(db, { projectId: project.id, ownerContactId: null });
@@ -189,7 +202,7 @@ export async function loadServicesPage(db, slug, { installedIds = new Set(), lan
   const groups = Object.fromEntries(GROUPS.map((g) => [g, []]));
   for (const s of catalog) {
     if (s.crowWide || !groups[s.group]) continue;          // a toggle is a Crow-wide source, not a connection
-    groups[s.group].push(serviceCard(s, installed));
+    groups[s.group].push(serviceCard(s, installed, withSavedKey));
   }
   return {
     project: { slug: project.slug, name: project.name },
@@ -320,8 +333,16 @@ export function servicesApiRouter({
     return res.status(code === "unknown_project" ? 404 : 400).json({ error: code, ...extra });
   };
 
+  /** Whether this request is the owner's. Never a reason to refuse a read: it only decides the one-click flag. */
+  const isOwner = async (db, req) => {
+    try { return (await ownerCheck(db, req)) === true; } catch { return false; }
+  };
+
   router.get(`${SERVICES_API_BASE}/project/:slug`, withDb(async (req, res, db) => {
-    const page = await loadServicesPage(db, req.params.slug, { installedIds: installed(), lang: langOf(req), crowHome: home() });
+    const installedSet = installed();
+    // The one-click flag is computed from keychain metadata, for the owner alone (never a value).
+    const savedKeyIds = (await isOwner(db, req)) ? await savedKeyServiceIds(db, serviceCatalog(), installedSet) : undefined;
+    const page = await loadServicesPage(db, req.params.slug, { installedIds: installedSet, lang: langOf(req), crowHome: home(), savedKeyServiceIds: savedKeyIds });
     if (!page) return res.status(404).json({ error: "unknown_project" });
     res.json(page);
   }));
@@ -331,12 +352,13 @@ export function servicesApiRouter({
   // The owner's turn, for every mutating route (review I1): a peer SSO session, a session minted
   // by a login on this machine and any request from this machine are refused before anything else.
   const ownerOnly = (handler) => withDb(async (req, res, db) => {
-    let owner = false;
-    try { owner = (await ownerCheck(db, req)) === true; } catch { owner = false; }
-    if (!owner) return res.status(403).json({ error: "not_owner" });
+    if (!(await isOwner(db, req))) return res.status(403).json({ error: "not_owner" });
     return handler(req, res, db);
   });
 
+  // A connect carries either the values the owner typed in the sheet or, with `useSavedKey: true`,
+  // the key already saved for that service (the one-click path). Both feed everything below: one
+  // label rule, one live test, one save, one binding, one audit.
   router.post(`${SERVICES_API_BASE}/project/:slug/connect`, jsonBody, ownerOnly(async (req, res, db) => {
     const project = await findProject(db, req.params.slug);
     if (!project) return fail(res, "unknown_project");
@@ -344,12 +366,35 @@ export function servicesApiRouter({
     const service = typeof body.serviceId === "string" && body.serviceId ? serviceById(body.serviceId) : null;
     if (!service || service.crowWide) return fail(res, "unknown_service");
     if (!installed().has(service.bundleId)) return fail(res, "not_installed");
+    // Opting into the saved key is exact: the flag itself must be true, and it never travels with
+    // typed values, so a saved key can't be combined with anything a caller chose.
+    const useSavedKey = Object.hasOwn(body, "useSavedKey");
+    if (useSavedKey && body.useSavedKey !== true) return fail(res, "bad_value");
     let values;
-    try {
-      values = readValues(service, body.values);
-    } catch (err) {
-      if (err instanceof ConnectionError) return fail(res, err.code, err.field ? { field: err.field } : {});
-      throw err;
+    let key = null;
+    if (useSavedKey) {
+      if (!isOneClickEligible(service)) return fail(res, "bad_value");
+      const typed = body.values;
+      if (typed != null && (typeof typed !== "object" || Array.isArray(typed) || Object.keys(typed).length > 0)) return fail(res, "bad_value");
+      // A missing key is a metadata fact, answered before a key is even loaded (a Crow with no
+      // keychain key and no saved key has nothing to read).
+      const ready = await savedKeyServiceIds(db, [service], new Set([service.bundleId]));
+      if (!ready.has(service.id)) return fail(res, "no_saved_key");
+      // Read with the key already on this machine (a saved row can only exist under it), then seal
+      // this project's own copy with the same key.
+      const readKey = loadKeychainKey({ crowHome: home() });
+      const names = service.fields.map((f) => f.name);
+      const saved = await extensionSecretsFor(db, readKey, service.bundleId, names);
+      if (names.some((n) => typeof saved[n] !== "string" || saved[n] === "")) return fail(res, "no_saved_key");
+      key = readKey;
+      values = { config: {}, secrets: saved };
+    } else {
+      try {
+        values = readValues(service, body.values);
+      } catch (err) {
+        if (err instanceof ConnectionError) return fail(res, err.code, err.field ? { field: err.field } : {});
+        throw err;
+      }
     }
     if (body.accountLabel != null && typeof body.accountLabel !== "string") return fail(res, "bad_value", { field: "accountLabel" });
     // An empty label is filled before the label check (no network): an address service suggests
@@ -366,9 +411,9 @@ export function servicesApiRouter({
       throw err;
     }
     // The key before anything leaves Crow: a key fault is the keychain's, not the token's.
-    const key = Object.keys(values.secrets).length
-      ? await ensureWriteKey(db, { crowHome: home(), onNewKey: keyCreatedHook({ db, ip: req.ip, ...hookDeps }) })
-      : null;
+    if (!useSavedKey && Object.keys(values.secrets).length) {
+      key = await ensureWriteKey(db, { crowHome: home(), onNewKey: keyCreatedHook({ db, ip: req.ip, ...hookDeps }) });
+    }
 
     const result = await testConnection(service, { values: { ...values.config, ...values.secrets }, crowHome: home(), lang: langOf(req) });
     if (!result || result.ok !== true) {
@@ -394,7 +439,7 @@ export function servicesApiRouter({
       conn = await createConnection(db, {
         projectId: project.id, serviceId: service.id, accountLabel,
         config: values.config, secrets: values.secrets, testedAt: new Date(),
-      }, { key, actor: "local", reservedNames: reservedSet });
+      }, { key, actor: "local", reservedNames: reservedSet, keySource: useSavedKey ? "saved" : "typed" });
     } catch (err) {
       if (err instanceof ConnectionError) return fail(res, err.code);
       throw err;
@@ -412,6 +457,10 @@ export function servicesApiRouter({
       try { await rollbackNewConnection(db, conn.uuid); } catch { console.error("[services] connect rollback failed"); }
       return res.status(500).json({ ok: false });
     }
+    // A typed key is remembered for the whole Crow (first typed key wins), so another project can
+    // connect this service with one click. Never fatal: a keychain fault here leaves the connect
+    // as it is, and nothing about it is written to mcp-addons.json or an .env.
+    if (!useSavedKey) await rememberTypedKeys(db, key, service, values.secrets);
     refresh();
     res.status(201).json({ ok: true, connection: await connectionView(db, conn, service, { installed: true, crowHome: home() }) });
   }));
