@@ -9,7 +9,8 @@ import { symlinkSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSyn
   existsSync, linkSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { secretFilesFor, secretPinDirsFor, BUNDLE_ENV_READABLE, ROOT_SECRET_FILES } from "../scripts/pi-bots/hidden_files.mjs";
+import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REFUSAL,
+  BUNDLE_ENV_READABLE, ROOT_SECRET_FILES } from "../scripts/pi-bots/hidden_files.mjs";
 
 test("secretFilesFor: root token files, the appRoot .env and every non-allow-listed bundle .env", () => {
   const root = mkdtempSync(join(tmpdir(), "crow-hidden-files-"));
@@ -73,12 +74,46 @@ delete process.env.CROW_DB_PATH;
 mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 const REAL_CROW = realpathSync(CROW);
 
-const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
+const { PiRpc, homeMatchesResolved, logUnhideableOnce, _resetUnhideableLogForTest } = await import("../scripts/pi-bots/bridge.mjs");
 const { probePiSandbox, _resetPiSandboxForTest } = await import("../scripts/pi-bots/pi_sandbox.mjs");
 
 _resetPiSandboxForTest();
 const SANDBOX = probePiSandbox({ force: true });
 const noSandbox = SANDBOX.ok ? false : "pi sandbox unavailable here: " + SANDBOX.reason;
+
+test("homeMatchesResolved: two nulls are a refusal, not agreement", () => {
+  assert.equal(homeMatchesResolved("/home/u/.crow", "/home/u/.crow"), true);
+  assert.equal(homeMatchesResolved("/home/u/.crow", "/home/u/.crow-r4"), false, "a moved home");
+  assert.equal(homeMatchesResolved(null, null), false, "both unresolved is not a match");
+  assert.equal(homeMatchesResolved(null, "/home/u/.crow"), false, "nothing resolved is not a match");
+  assert.equal(homeMatchesResolved("/home/u/.crow", null), false, "a home the resolver cannot see is not a match");
+});
+
+test("logUnhideableOnce: one line per path per hour, and the entry is dropped once an hour has passed", () => {
+  _resetUnhideableLogForTest();
+  const lines = [];
+  const orig = console.error;
+  console.error = (...a) => { lines.push(a.map(String).join(" ")); };
+  const t0 = 1_700_000_000_000;
+  const HOUR = 3600_000;
+  try {
+    logUnhideableOnce("/a/.env", "line one", t0);
+    logUnhideableOnce("/a/.env", "line one", t0 + 60_000);
+    assert.equal(lines.length, 1, "the same path within the hour logs once");
+    logUnhideableOnce("/b/.env", "line two", t0 + 60_001);
+    assert.equal(lines.length, 2, "a different path has its own entry");
+    logUnhideableOnce("/a/.env", "line one", t0 + HOUR - 1);
+    assert.equal(lines.length, 2, "just inside the hour still logs nothing");
+    logUnhideableOnce("/a/.env", "line one", t0 + HOUR);
+    assert.equal(lines.length, 3, "an hour later the old entry is dropped and it logs again");
+    logUnhideableOnce("/a/.env", "line one", t0 + HOUR + 60_000);
+    assert.equal(lines.length, 3, "and the fresh entry is within the hour again");
+    assert.ok(lines.every((l) => l.startsWith("[pi-bots] ")), "every line is the bridge's journal prefix");
+  } finally {
+    console.error = orig;
+    _resetUnhideableLogForTest();
+  }
+});
 
 test("sandboxed spawn: root secrets and other bundles' .env are masked; models-token and browser/.env stay readable", { skip: noSandbox }, async () => {
   const dotenv = join(CROW, ".env");
@@ -153,6 +188,23 @@ async function spawnOutcome() {
   }
 }
 
+test("a bundle link into a hidden folder (env/, secrets/) refuses with the plain sentence about the hidden folder", { skip: noSandbox }, async () => {
+  // The target is a dir under env/, which is hidden WHOLE: the .env behind the
+  // link is never maskable there, so the link itself is the refusal.
+  const target = join(CROW, "env", "sub");
+  mkdirSync(target, { recursive: true });
+  mkdirSync(join(CROW, "bundles"), { recursive: true });
+  writeFileSync(join(target, ".env"), "fake-hidden-folder-env\n");
+  const link = join(CROW, "bundles", "viasecret");
+  symlinkSync(target, link);
+  try {
+    const e = await spawnOutcome();
+    assert.ok(e, "the spawn is refused");
+    assert.equal(e.message, "A bot could not start: env/sub/.env is a link into a hidden folder, so Crow can't hide it. Remove the link.");
+    assert.ok(!e.message.includes("fake-hidden-folder-env"), "no content in the message");
+  } finally { rmSync(link, { force: true }); rmSync(join(CROW, "env"), { recursive: true, force: true }); }
+});
+
 test("a bundle dir swapped for a symlink to a dir with a .env refuses the spawn, naming the path below its root and no content", { skip: noSandbox }, async () => {
   const target = mkdtempSync(join(tmpdir(), "crow-hidden-linktarget-"));
   writeFileSync(join(target, ".env"), "fake-linked-env-content\n");
@@ -189,12 +241,15 @@ test("a symlinked .env refuses the spawn", { skip: noSandbox }, async () => {
   } finally { rmSync(link, { force: true }); rmSync(target, { recursive: true, force: true }); }
 });
 
-test("secretFilesFor / secretPinDirsFor: a symlinked bundle is listed only with a .env behind it; real dirs and the bundles dir are pinned", () => {
+test("secretFilesFor / secretPinDirsFor: a symlinked bundle is listed only with a .env behind it; the bundles dir and each real bundle dir of BOTH roots are pinned", () => {
   const root = mkdtempSync(join(tmpdir(), "crow-hidden-pins-"));
   const crowHome = join(root, ".crow");
+  const appRoot = join(root, "app");
   const elsewhere = join(root, "elsewhere");
   mkdirSync(join(crowHome, "bundles", "real"), { recursive: true });
   mkdirSync(join(crowHome, "bundles", "browser"), { recursive: true });
+  mkdirSync(join(appRoot, "bundles", "real"), { recursive: true });
+  mkdirSync(join(appRoot, "bundles", "browser"), { recursive: true });
   mkdirSync(elsewhere, { recursive: true });
   mkdirSync(join(root, "empty"), { recursive: true });
   symlinkSync(elsewhere, join(crowHome, "bundles", "withenv"));
@@ -206,8 +261,57 @@ test("secretFilesFor / secretPinDirsFor: a symlinked bundle is listed only with 
     assert.ok(files.includes(join(crowHome, "bundles", "real", ".env")));
     assert.ok(files.includes(join(crowHome, "bundles", "withenv", ".env")), "listed so the spawn is refused");
     assert.ok(!files.includes(join(crowHome, "bundles", "noenv", ".env")));
-    const pins = secretPinDirsFor({ crowHome });
-    assert.deepEqual(pins.sort(), [join(crowHome, "bundles"), join(crowHome, "bundles", "browser"), join(crowHome, "bundles", "real")].sort());
+    const pins = secretPinDirsFor({ crowHome, appRoot });
+    assert.deepEqual(pins.sort(), [
+      join(crowHome, "bundles"), join(crowHome, "bundles", "browser"), join(crowHome, "bundles", "real"),
+      join(appRoot, "bundles"), join(appRoot, "bundles", "browser"), join(appRoot, "bundles", "real"),
+    ].sort());
+    assert.deepEqual(secretPinDirsFor({ crowHome }), [join(crowHome, "bundles"), join(crowHome, "bundles", "browser"), join(crowHome, "bundles", "real")],
+      "no appRoot: only the Crow home's are pinned");
+    assert.equal(new Set(pins).size, pins.length, "deduped");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("unmaskableRefusal: one plain sentence per cause (hard link, outside, hidden folder, link out, link inside)", () => {
+  assert.equal(unmaskableRefusal("bundles/x/.env", "hardlink"),
+    "A bot could not start: bundles/x/.env has another name on disk, so Crow can't hide it. Remove the extra link.");
+  assert.equal(unmaskableRefusal("/outside/.env", "outside"),
+    "A bot could not start: /outside/.env is outside the Crow folders, so Crow can't hide it.");
+  assert.equal(unmaskableRefusal("env/sub/.env", "hidden-dir"),
+    "A bot could not start: env/sub/.env is a link into a hidden folder, so Crow can't hide it. Remove the link.");
+  assert.equal(unmaskableRefusal(".env", "link-out"),
+    "A bot could not start: .env is a link that leads outside the Crow folders, so Crow can't hide it. Remove the link.");
+  assert.equal(unmaskableRefusal(".env", "link-inside"),
+    "A bot could not start: .env is a link or sits behind one, so Crow can't hide it. Remove the link.");
+  assert.equal(unmaskableRefusal(".env", undefined), unmaskableRefusal(".env", "link-inside"),
+    "an unknown cause falls back to the plain link sentence");
+  assert.equal(SSH_NOT_HIDDEN_REFUSAL, "A bot could not start: Crow could not hide ~/.ssh.");
+  // The bridge throws that exported sentence rather than a copy of its own
+  // (the ~/.ssh refusal is not reachable in a unit test: forcing bwrap to fail
+  // one mask needs a host that has bwrap).
+  const bridge = readFileSync(join(import.meta.dirname, "..", "scripts", "pi-bots", "bridge.mjs"), "utf8");
+  assert.ok(bridge.includes("new Error(SSH_NOT_HIDDEN_REFUSAL)"), "the bridge throws the shared sentence");
+  assert.ok(!bridge.includes("Crow could not hide ~/.ssh."), "and holds no copy of it");
+});
+
+test("secretFilesFor: a CO-HOSTED home's bundle link into appRoot/bundles lists the resolved .env under appRoot when appRoot is passed", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-hidden-cohost-"));
+  const appRoot = join(root, "app");
+  const coHome = join(root, "co-home");
+  mkdirSync(join(appRoot, "bundles", "shared"), { recursive: true });
+  writeFileSync(join(appRoot, "bundles", "shared", ".env"), "fake\n");
+  mkdirSync(join(coHome, "bundles"), { recursive: true });
+  symlinkSync(join(appRoot, "bundles", "shared"), join(coHome, "bundles", "alias"));
+  try {
+    // Without appRoot the link target is outside every root the caller trusts,
+    // so the file is listed at the link path and the spawn would be refused.
+    assert.ok(secretFilesFor({ crowHome: coHome }).includes(join(coHome, "bundles", "alias", ".env")));
+    // With appRoot (bridge passes it for every home) the same file is listed at
+    // its resolved path, which is under a trusted root: masked, not refused.
+    const files = secretFilesFor({ crowHome: coHome, appRoot });
+    assert.ok(files.includes(join(appRoot, "bundles", "shared", ".env")));
+    assert.ok(!files.includes(join(coHome, "bundles", "alias", ".env")), "not under the link path");
+    assert.equal(files.filter((f) => f === join(appRoot, "bundles", "shared", ".env")).length, 1, "deduped");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

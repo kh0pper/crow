@@ -8,7 +8,7 @@
  */
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { resolveCrowHome } from "../shared/crow-home.js";
-import { writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, unlinkSync, readFileSync, lstatSync, openSync, writeSync, closeSync, fchmodSync, constants } from "node:fs";
+import { writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, unlinkSync, readFileSync, lstatSync, openSync, writeSync, closeSync, fchmodSync, fstatSync, ftruncateSync, constants } from "node:fs";
 import { join, dirname } from "node:path";
 import { ensureSecretsDir, migrateLegacySecretFile } from "../shared/peer-credentials.js";
 import { isRelayedSocket } from "../shared/bot-doors.js";
@@ -130,25 +130,82 @@ export function applyLocalTokenAuth(req) {
   return true;
 }
 
-/** Write a token file IN PLACE on its existing inode (open, truncate, write), so
- *  a running bot sandbox's mask over it (a bind mount on that inode) stays
+/** Write a token file IN PLACE on its existing inode (truncate, write), so a
+ *  running bot sandbox's mask over it (a bind mount on that inode) stays
  *  attached: a rename over a mount point would detach it and the bot would read
  *  the new token mid-turn. The exception is a path that is not a plain file of
- *  ours with one name (a symlink, a directory, a hard link, another owner's
- *  file): it is unlinked and created fresh (O_EXCL, 0600), so another name for
- *  the old inode never sees the new token, and a symlink is never followed.
- *  Such a file cannot have been masked at spawn anyway. */
+ *  ours with one name (a symlink, a directory, a FIFO, a hard link, another
+ *  owner's file): it is unlinked and created fresh (O_EXCL, 0600), so another
+ *  name for the old inode never sees the new token and a symlink is never
+ *  followed. Such a file cannot have been masked at spawn anyway.
+ *  The in-place path opens with O_NOFOLLOW and O_NONBLOCK and WITHOUT O_TRUNC
+ *  or O_CREAT, then proves from the fd itself that it holds the very inode lstat
+ *  saw (same dev+ino), a regular file, one name, our uid — and only then
+ *  truncates and writes. A path swapped between the lstat and the open
+ *  (a symlink, a FIFO, another file) therefore costs a replaced path, never a
+ *  write through it. */
 export function writeTokenFile(path, token) {
-  let st = null;
-  try { st = lstatSync(path); } catch { /* absent: created below */ }
   const ours = typeof process.getuid === "function" ? process.getuid() : null;
-  if (st && (!st.isFile() || st.nlink > 1 || (ours !== null && st.uid !== ours))) {
-    if (st.isDirectory()) throw new Error("token path is a directory: " + path);
-    unlinkSync(path);
-    st = null;
+  // Two passes at most: a racer that recreates the path between our unlink and
+  // the O_EXCL create just makes the second pass look at the new entry.
+  for (let pass = 0; ; pass++) {
+    const st = lstatOrNull(path);
+    if (st) {
+      if (st.isDirectory()) throw new Error("token path is a directory: " + path);
+      if (isPlainFileOfOurs(st, ours)) {
+        const fd = openSameInode(path, st, ours);
+        if (fd !== null) {
+          try { ftruncateSync(fd, 0); writeSync(fd, token); fchmodSync(fd, 0o600); } finally { closeSync(fd); }
+          return;
+        }
+      }
+      // A symlink, a FIFO, a second name for the inode, another owner's file:
+      // replaced, never written through.
+      try { unlinkSync(path); } catch { /* already gone: the create below decides */ }
+    }
+    let fd;
+    try {
+      fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    } catch (err) {
+      if (err && err.code === "EEXIST" && pass < 2) continue;
+      throw err;
+    }
+    try { writeSync(fd, token); fchmodSync(fd, 0o600); } finally { closeSync(fd); }
+    return;
   }
-  const fd = openSync(path, st ? (constants.O_WRONLY | constants.O_TRUNC) : (constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL), 0o600);
-  try { writeSync(fd, token); fchmodSync(fd, 0o600); } finally { closeSync(fd); }
+}
+
+/** lstat, or null when the path is absent. Any other failure is thrown: nothing
+ *  was written, and a path we could not even look at is not ours to replace. */
+function lstatOrNull(path) {
+  try { return lstatSync(path); } catch (err) { if (err && err.code === "ENOENT") return null; throw err; }
+}
+
+/** One name, a regular file, our uid (when the platform has one). */
+function isPlainFileOfOurs(st, ours) {
+  return st.isFile() && st.nlink === 1 && (ours === null || st.uid === ours);
+}
+
+/** An fd on `path` only when it still holds the inode `st` describes and is
+ *  still a plain file of ours; null when the caller must replace the path.
+ *  O_NOFOLLOW: a symlink at the path fails instead of being followed.
+ *  O_NONBLOCK: a FIFO with no reader fails with ENXIO instead of hanging.
+ *  No O_TRUNC and no O_CREAT: nothing is written or created until the inode is
+ *  confirmed. A resource failure (EMFILE/ENFILE) is not about the path and is
+ *  thrown rather than costing a file we could have rewritten. */
+function openSameInode(path, st, ours) {
+  let fd;
+  try {
+    fd = openSync(path, constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (err) {
+    if (err && (err.code === "EMFILE" || err.code === "ENFILE")) throw err;
+    return null;                                                    // ELOOP, ENXIO, EACCES, ENOENT, …
+  }
+  let fst = null;
+  try { fst = fstatSync(fd); } catch { /* treated as a mismatch below */ }
+  if (fst && fst.dev === st.dev && fst.ino === st.ino && isPlainFileOfOurs(fst, ours)) return fd;
+  closeSync(fd);
+  return null;
 }
 
 /** Generate a new board token, overwriting any existing one. Stores only the
@@ -163,9 +220,6 @@ export async function generateBoardToken(db) {
   const path = boardTokenPath();
   mkdirSync(dirname(path), { recursive: true });
   writeTokenFile(path, token);
-  // writeFileSync's `mode` is honored only when it CREATES the file; an
-  // existing-but-empty file would keep whatever perms it had.
-  try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
 }
 
@@ -207,7 +261,6 @@ export async function generatePhoneToken(db) {
   const path = phoneTokenPath();
   mkdirSync(dirname(path), { recursive: true });
   writeTokenFile(path, token);
-  try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
 }
 
@@ -237,7 +290,6 @@ export async function generateArtifactsToken(db) {
   const path = artifactsTokenPath();
   mkdirSync(dirname(path), { recursive: true });
   writeTokenFile(path, token);
-  try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
 }
 
@@ -284,7 +336,6 @@ export async function generatePeerRelayToken(db) {
   const path = peerRelayTokenPath();
   ensureSecretsDir(dirname(path));
   writeTokenFile(path, token);
-  try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
 }
 
@@ -336,7 +387,6 @@ export async function generateKioskAnnounceToken(db) {
   const path = kioskAnnounceTokenPath();
   mkdirSync(dirname(path), { recursive: true });
   writeTokenFile(path, token);
-  try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
 }
 
@@ -375,7 +425,6 @@ export async function generateModelsToken(db) {
   const path = modelsTokenPath();
   mkdirSync(dirname(path), { recursive: true });
   writeTokenFile(path, token);
-  try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
 }
 

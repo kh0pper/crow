@@ -93,19 +93,50 @@ export function secretFilesFor({ crowHome, appRoot, hiddenDirs = [], readdir = r
 
 /**
  * The dirs wrapPiSpawn pins (hidePinDirs) so a bot cannot swap one for a
- * symlink or rename it between the listing and the mount: `<crowHome>/bundles`
- * and every bundle dir that is a real dir, with or without a `.env`.
+ * symlink or rename it between the listing and the mount: `<root>/bundles` and
+ * every bundle dir that is a real dir, with or without a `.env` — for the Crow
+ * home AND the repo checkout at appRoot, since both are enumerated and masked.
+ * Deduped, so a root listed twice (or one that is the other) is pinned once.
  */
-export function secretPinDirsFor({ crowHome, readdir = readdirSync }) {
+export function secretPinDirsFor({ crowHome, appRoot, readdir = readdirSync }) {
   const out = [];
-  if (entryKind(join(crowHome, "bundles")) !== "dir") return out;
-  out.push(join(crowHome, "bundles"));
-  for (const id of bundleIds(crowHome, readdir)) {
-    const dir = join(crowHome, "bundles", id);
-    if (entryKind(dir) === "dir") out.push(dir);
+  for (const root of [crowHome, appRoot].filter(Boolean)) {
+    const bundles = join(root, "bundles");
+    if (entryKind(bundles) !== "dir") continue;
+    if (!out.includes(bundles)) out.push(bundles);
+    for (const id of bundleIds(root, readdir)) {
+      const dir = join(bundles, id);
+      if (entryKind(dir) === "dir" && !out.includes(dir)) out.push(dir);
+    }
   }
   return out;
 }
+
+/**
+ * The refusal shown on a failed turn when a secret file exists but the default
+ * tier could not mask it: one sentence, naming the path below its trusted root
+ * and never any content. `cause` is what the caller measured:
+ *  - "hardlink": another name on disk (masking one leaves the other readable);
+ *  - "outside": the path sits under none of the trusted roots;
+ *  - "hidden-dir": the path — or the link it is listed through — lands in a
+ *    folder already hidden whole (a secrets dir, env/, android-keystore/), so
+ *    the link itself is the problem;
+ *  - "link-out": the first link on the way up leads outside every root;
+ *  - "link-inside": a link, or a path through one, that stays inside the roots.
+ * An unknown cause falls back to "link-inside" (the vaguer link sentence).
+ */
+export function unmaskableRefusal(rel, cause) {
+  const start = "A bot could not start: " + rel;
+  if (cause === "hardlink") return start + " has another name on disk, so Crow can't hide it. Remove the extra link.";
+  if (cause === "outside") return start + " is outside the Crow folders, so Crow can't hide it.";
+  if (cause === "hidden-dir") return start + " is a link into a hidden folder, so Crow can't hide it. Remove the link.";
+  if (cause === "link-out") return start + " is a link that leads outside the Crow folders, so Crow can't hide it. Remove the link.";
+  return start + " is a link or sits behind one, so Crow can't hide it. Remove the link.";
+}
+
+/** The refusal when ~/.ssh could not be masked at all (it is hidden whole on
+ *  every default-tier spawn). */
+export const SSH_NOT_HIDDEN_REFUSAL = "A bot could not start: Crow could not hide ~/.ssh.";
 
 function bundleIds(root, readdir) {
   try { return readdir(join(root, "bundles")); } catch { return []; }
