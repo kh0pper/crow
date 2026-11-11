@@ -414,16 +414,20 @@ async function withProjectLock(projectId, work, { waitMs = DEFAULT_LOCK_WAIT_MS,
 }
 
 /**
- * A live check that never turns a database hiccup into a deletion: only a
- * definite "no" from the query is a no. A thrown error counts as live, because
- * removing a project's history over a transient error would lose it for good.
+ * The live verdict: `true` (record), `false` (not live right now: archived, or
+ * the check could not answer — nothing is written and NOTHING IS DELETED), or
+ * `"gone"` (the check read the table and the row is missing or carries another
+ * uuid: a confirmed purge, the only verdict that may remove a history folder).
+ * A thrown error is `false`, never `"gone"`.
  */
 async function isLiveNow(opts, project) {
   if (typeof opts.isLive !== "function") return true;
   try {
-    return (await opts.isLive(project)) !== false;
+    const verdict = await opts.isLive(project);
+    if (verdict === "gone") return "gone";
+    return verdict !== false;
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -444,7 +448,7 @@ async function withGitWriteLock(project, opts, work) {
   const budget = lockBudgetOf(opts);
   const startedAt = clock();
   return withProjectLock(id, async () => {
-    if (!(await isLiveNow(opts, project))) return { live: false };
+    if ((await isLiveNow(opts, project)) !== true) return { live: false };
     const repoDir = workspaceGitDir(project, opts);
     mkdirSync(dirname(repoDir), { recursive: true });
     mkdirSync(repoDir, { recursive: true });
@@ -458,8 +462,13 @@ async function withGitWriteLock(project, opts, work) {
       throw err;
     }
     try {
-      if (!(await isLiveNow(opts, project))) {
-        try { rmSync(repoDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      const verdict = await isLiveNow(opts, project);
+      if (verdict !== true) {
+        // Only a confirmed purge removes the folder; an archived project or an
+        // unanswered check keeps its history (archive never erases).
+        if (verdict === "gone") {
+          try { rmSync(repoDir, { recursive: true, force: true }); } catch { /* best effort */ }
+        }
         return { live: false };
       }
       await initGitDir(project, opts);
@@ -508,6 +517,7 @@ async function recoverPendingGc(repoDir, opts) {
   try {
     await run(["reflog", "expire", "--expire=now", "--all"], { timeout: GIT_SLOW_TIMEOUT_MS });
     await run(["gc", "--prune=now", "--quiet"], { timeout: GIT_SLOW_TIMEOUT_MS });
+    try { rmSync(join(repoDir, "crow-hash-cache.json"), { force: true }); } catch { /* best effort */ }
     rmSync(marker, { force: true });
   } catch (err) {
     // Leave the marker: the next write to this git dir tries again.
@@ -711,9 +721,9 @@ async function makeCommit(run, tree, parent, message, opts) {
  * @returns {Promise<string|null>}
  */
 export async function commitWorkspace(project, ctx, message, {
-  dataDir, env, gitBin, isLive, lockWaitMs, clock, onResult, onNote,
+  dataDir, env, gitBin, isLive, lockWaitMs, clock, onResult, onNote, _afterWalk,
 } = {}) {
-  const opts = { dataDir, env, gitBin, isLive, lockWaitMs, clock, onResult, onNote };
+  const opts = { dataDir, env, gitBin, isLive, lockWaitMs, clock, onResult, onNote, _afterWalk };
   try {
     if (workspaceDirOf(project) === null) return null; // no folder on disk: nothing to record
     projectIdOf(project);
@@ -740,7 +750,12 @@ async function commitInRepo(project, repoDir, ctx, message, opts) {
   const indexFile = join(repoDir, "crow-commit-" + process.pid + ".index");
   const zeros = "0".repeat(40);
   try {
-    const built = await buildWorkspaceTree(run, workspaceDir, { indexFile });
+    const built = await buildWorkspaceTree(run, workspaceDir, {
+      indexFile,
+      objectsDir: join(repoDir, "objects"),
+      cacheFile: join(repoDir, "crow-hash-cache.json"),
+      _afterWalk: opts._afterWalk,
+    });
     const tree = built.tree;
     const report = (sha) => {
       if (typeof opts.onResult === "function") {
@@ -1587,6 +1602,7 @@ async function eraseInRepo(project, repoDir, targets, opts) {
     }
     await run(["reflog", "expire", "--expire=now", "--all"], { timeout: GIT_SLOW_TIMEOUT_MS });
     await run(["gc", "--prune=now", "--quiet"], { timeout: GIT_SLOW_TIMEOUT_MS });
+    try { rmSync(join(repoDir, "crow-hash-cache.json"), { force: true }); } catch { /* best effort */ }
     try { rmSync(marker, { force: true }); } catch { /* the next write clears it */ }
     return { erased: true, erasedPaths: paths, skipped };
   } finally {
@@ -1671,14 +1687,15 @@ export function makeDbLiveCheck(db) {
   return async (project) => {
     try {
       const { rows } = await db.execute({
-        sql: "SELECT 1 AS live FROM project_spaces WHERE id = ? AND uuid = ? AND archived_at IS NULL",
-        args: [Number(project.id), String(project.uuid)],
+        sql: "SELECT uuid, archived_at FROM project_spaces WHERE id = ?",
+        args: [Number(project.id)],
       });
-      return rows.length > 0;
+      const row = rows[0];
+      if (!row || String(row.uuid) !== String(project.uuid)) return "gone";
+      return row.archived_at == null || row.archived_at === "" ? true : false;
     } catch {
-      // A database hiccup must not cost a project its history: only a definite
-      // "not there" removes anything.
-      return true;
+      // A database hiccup is "cannot tell": nothing is written, nothing removed.
+      return false;
     }
   };
 }

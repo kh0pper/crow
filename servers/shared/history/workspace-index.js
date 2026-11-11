@@ -32,8 +32,13 @@
  * `update-index --replace -z --index-info` fed `<mode> <sha>\t<path>\0` records,
  * then `write-tree`. Nothing is checked out and nothing reads the work tree again.
  */
-import { lstatSync, readdirSync, readlinkSync, statSync } from "node:fs";
-import { join } from "node:path";
+import {
+  closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync,
+  readFileSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync,
+} from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { deflateSync } from "node:zlib";
+import { dirname, join } from "node:path";
 import { isDeniedEntry, MAX_FILE_BYTES } from "./workspace-deny.js";
 
 /** How many file paths one hash-object call is fed. */
@@ -73,7 +78,7 @@ export function stdinPath(path) {
 
 /** The mode a regular file is recorded with: any exec bit set means 100755. */
 function fileMode(st) {
-  const exec = (st.mode & 0o111) !== 0;
+  const exec = (Number(st.mode) & 0o111) !== 0;
   return exec ? MODE_EXECUTABLE : MODE_FILE;
 }
 
@@ -107,7 +112,7 @@ function collect(workspaceDir, maxEntries) {
   let skippedOther = 0;
   let rootDev;
   try {
-    rootDev = statSync(workspaceDir).dev;
+    rootDev = statSync(workspaceDir, { bigint: true }).dev;
   } catch {
     rootDev = null;
   }
@@ -129,7 +134,7 @@ function collect(workspaceDir, maxEntries) {
       const abs = join(dir.abs, name);
       let st;
       try {
-        st = lstatSync(abs);
+        st = lstatSync(abs, { bigint: true });
       } catch {
         skippedOther += 1;
         continue;
@@ -152,11 +157,11 @@ function collect(workspaceDir, maxEntries) {
         }
         links.push({ path: rel, target });
       } else if (st.isFile()) {
-        if (st.size > MAX_FILE_BYTES) {
+        if (Number(st.size) > MAX_FILE_BYTES) {
           skippedLarge += 1;
           continue;
         }
-        files.push({ path: rel, abs, mode: fileMode(st) });
+        files.push({ path: rel, abs, mode: fileMode(st), dev: st.dev, ino: st.ino, size: st.size, mtimeNs: st.mtimeNs });
       } else if (isSpecial(st)) {
         continue;
       } else {
@@ -173,19 +178,82 @@ function collect(workspaceDir, maxEntries) {
   return { files, links, skippedLarge, skippedOther };
 }
 
-/** Hash one batch of absolute paths; one object id per line, in order. */
-async function hashFiles(run, batch, indexFile) {
-  const res = await run(["hash-object", "-w", "--no-filters", "--stdin-paths"], {
-    indexFile,
-    stdin: batch.map((entry) => stdinPath(entry.abs)).join("\n") + "\n",
-  });
-  const lines = res.text.split("\n").map((line) => line.trim()).filter(Boolean);
-  if (lines.length !== batch.length) {
-    const err = new Error("the workspace files could not be stored");
-    err.code = "git_failed";
-    throw err;
+/**
+ * Write one blob as a loose object ourselves (sha1, zlib, temp file + rename) and
+ * return its id. Git never opens a workspace path: Node reads the bytes (below)
+ * and this stores them, so a bot swapping a file or a folder for a symlink cannot
+ * make git read anything outside the workspace.
+ */
+function writeBlob(objectsDir, bytes) {
+  const header = Buffer.from(`blob ${bytes.length}\0`);
+  const sha = createHash("sha1").update(header).update(bytes).digest("hex");
+  const dir = join(objectsDir, sha.slice(0, 2));
+  const path = join(dir, sha.slice(2));
+  if (existsSync(path)) return sha;
+  mkdirSync(dir, { recursive: true });
+  const temp = join(dir, `tmp_obj_${process.pid}_${randomBytes(6).toString("hex")}`);
+  writeFileSync(temp, deflateSync(Buffer.concat([header, bytes])), { flag: "wx", mode: 0o444 });
+  try {
+    renameSync(temp, path);
+  } catch (err) {
+    if (!existsSync(path)) throw err;
   }
-  return lines;
+  return sha;
+}
+
+/** The object file a blob id lives in (loose objects only; used for the cache). */
+function blobPath(objectsDir, sha) {
+  return join(objectsDir, sha.slice(0, 2), sha.slice(2));
+}
+
+/**
+ * Read one walked file safely. The folder must still resolve (realpath) to the
+ * place the walk found it inside the workspace; the file is opened O_NOFOLLOW; the
+ * opened descriptor must be a regular file with the SAME device and inode the walk
+ * recorded and within the size cap. Anything else returns null (the entry is
+ * dropped): a swapped file or folder never redirects the read.
+ */
+function readWalkedFile(workspaceReal, entry) {
+  const relDir = entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/")) : "";
+  const expected = relDir === "" ? workspaceReal : join(workspaceReal, ...relDir.split("/"));
+  try {
+    if (realpathSync(dirname(entry.abs)) !== expected) return null;
+  } catch {
+    return null;
+  }
+  let fd = null;
+  try {
+    fd = openSync(entry.abs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const st = fstatSync(fd, { bigint: true });
+    if (!st.isFile() || st.dev !== entry.dev || st.ino !== entry.ino) return null;
+    if (Number(st.size) > MAX_FILE_BYTES) return null;
+    const bytes = readFileSync(fd);
+    if (bytes.length > MAX_FILE_BYTES) return null;
+    return { bytes, mtimeNs: st.mtimeNs, size: st.size };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+function loadCache(cacheFile) {
+  if (!cacheFile) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(cacheFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCache(cacheFile, cache) {
+  if (!cacheFile) return;
+  const temp = `${cacheFile}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temp, JSON.stringify(cache));
+    renameSync(temp, cacheFile);
+  } catch { /* the cache is an optimisation only */ }
 }
 
 /**
@@ -197,7 +265,7 @@ async function hashFiles(run, batch, indexFile) {
  * @param {{indexFile: string, maxEntries?: number}} opts
  * @returns {Promise<{tree: string, skippedLarge: number, skippedOther: number, entries: number}>}
  */
-export async function buildWorkspaceTree(run, workspaceDir, { indexFile, maxEntries = 200000 } = {}) {
+export async function buildWorkspaceTree(run, workspaceDir, { indexFile, objectsDir, cacheFile, maxEntries = 200000, _afterWalk } = {}) {
   if (typeof workspaceDir !== "string" || workspaceDir === "") {
     const err = new Error("a workspace folder is required");
     err.code = "invalid_path";
@@ -206,23 +274,50 @@ export async function buildWorkspaceTree(run, workspaceDir, { indexFile, maxEntr
   const max = Number.isFinite(Number(maxEntries)) ? Math.max(1, Math.trunc(Number(maxEntries))) : 200000;
   const { files, links, skippedLarge, skippedOther } = collect(workspaceDir, max);
 
-  const records = [];
-  const batches = chunked(files, HASH_BATCH);
-  for (const batch of batches) {
-    const shas = await hashFiles(run, batch, indexFile);
-    for (let i = 0; i < batch.length; i++) {
-      records.push({ mode: batch[i].mode, sha: shas[i], path: batch[i].path });
-    }
+  if (typeof objectsDir !== "string" || objectsDir === "") {
+    const err = new Error("an objects folder is required");
+    err.code = "invalid_path";
+    throw err;
+  }
+  if (typeof _afterWalk === "function") await _afterWalk({ files, links });
+  let workspaceReal;
+  try {
+    workspaceReal = realpathSync(workspaceDir);
+  } catch {
+    workspaceReal = workspaceDir;
   }
 
-  // A symlink's blob is its target string; the same target is hashed once.
-  const linkBlobs = new Map();
-  for (const link of links) {
-    if (!linkBlobs.has(link.target)) {
-      const res = await run(["hash-object", "-w", "--no-filters", "--stdin"], { indexFile, stdin: link.target });
-      linkBlobs.set(link.target, res.text.trim());
+  const records = [];
+  let dropped = 0;
+  const oldCache = loadCache(cacheFile);
+  const newCache = {};
+  for (const entry of files) {
+    const key = [String(entry.dev), String(entry.ino), String(entry.size), String(entry.mtimeNs)].join(":");
+    const hit = oldCache[entry.path];
+    if (hit && hit.key === key && /^[0-9a-f]{40}$/.test(hit.sha) && existsSync(blobPath(objectsDir, hit.sha))) {
+      // Same file (device, inode, size, mtime to the nanosecond): reuse its blob.
+      // Identity was checked by the walk's lstat; no path is opened.
+      records.push({ mode: entry.mode, sha: hit.sha, path: entry.path });
+      newCache[entry.path] = hit;
+      continue;
     }
-    records.push({ mode: MODE_SYMLINK, sha: linkBlobs.get(link.target), path: link.path });
+    const read = readWalkedFile(workspaceReal, entry);
+    if (read === null) {
+      dropped += 1;
+      continue;
+    }
+    const sha = writeBlob(objectsDir, read.bytes);
+    records.push({ mode: entry.mode, sha, path: entry.path });
+    // Cache only when the file did not change between the walk and the read.
+    if (String(read.mtimeNs) === String(entry.mtimeNs) && String(read.size) === String(entry.size)) {
+      newCache[entry.path] = { key, sha };
+    }
+  }
+  saveCache(cacheFile, newCache);
+
+  // A symlink's blob is its target string.
+  for (const link of links) {
+    records.push({ mode: MODE_SYMLINK, sha: writeBlob(objectsDir, Buffer.from(link.target)), path: link.path });
   }
 
   await run(["read-tree", "--empty"], { indexFile });
@@ -231,5 +326,5 @@ export async function buildWorkspaceTree(run, workspaceDir, { indexFile, maxEntr
     await run(["update-index", "--replace", "-z", "--index-info"], { indexFile, stdin: info });
   }
   const tree = (await run(["write-tree"], { indexFile })).text.trim();
-  return { tree, skippedLarge, skippedOther, entries: records.length };
+  return { tree, skippedLarge, skippedOther: skippedOther + dropped, entries: records.length };
 }

@@ -1194,7 +1194,7 @@ test("a project that is gone gets no git dir, and one purged mid-write loses it"
   let calls = 0;
   const goneAfterTheLock = async () => {
     calls += 1;
-    return calls === 1;
+    return calls === 1 ? true : "gone";
   };
   assert.equal(await commitWorkspace(project, OWNER, "nothing", { dataDir: fx.dataDir, isLive: goneAfterTheLock }), null);
   assert.equal(calls, 2, "the check runs before and inside the lock");
@@ -1299,4 +1299,88 @@ test("control characters in a bot's name cannot forge who made a change", { skip
   const subject = message.split("\n")[0];
   assert.equal(/[\u0000-\u001f\u007f]/.test(subject), false, "the subject is one clean line");
   assert.equal((message.match(/^Crow-Author-Kind: /gm) || []).length, 1, "exactly one author-kind trailer");
+});
+test("only a confirmed purge removes a history folder: archive and a database error keep it", { skip: NO_GIT }, async () => {
+  const fx = await dbFixture("hist-ws-keep-");
+  const ws = join(fx.dataDir, "projects", "keep-1", "workspace");
+  mkdirSync(ws, { recursive: true });
+  await fx.db.execute({
+    sql: "INSERT INTO project_spaces (id, slug, name, workspace_dir) VALUES (41, 'keep-1', 'Keep', ?)",
+    args: [ws],
+  });
+  const uuid = (await fx.db.execute({ sql: "SELECT uuid FROM project_spaces WHERE id = 41", args: [] })).rows[0].uuid;
+  const project = projectFor(41, ws, uuid);
+  const gitDir = gitDirFor(project, fx.dataDir);
+  const { makeDbLiveCheck } = await import("../servers/shared/history/workspace-history.js");
+  const isLive = makeDbLiveCheck(fx.db);
+  writeFileSync(join(ws, "a.txt"), "one\n");
+  assert.ok(await commitWorkspace(project, OWNER, "first", { dataDir: fx.dataDir, isLive }));
+  const tip = gitText(gitDir, ws, ["rev-parse", "HEAD"]).trim();
+
+  // Archived: not live, nothing recorded, nothing removed.
+  await fx.db.execute({ sql: "UPDATE project_spaces SET archived_at = '2026-11-11T00:00:00Z' WHERE id = 41", args: [] });
+  assert.equal(await isLive(project), false);
+  writeFileSync(join(ws, "b.txt"), "two\n");
+  assert.equal(await commitWorkspace(project, OWNER, "while archived", { dataDir: fx.dataDir, isLive }), null);
+  assert.equal(existsSync(gitDir), true, "archive never erases");
+  assert.equal(gitText(gitDir, ws, ["rev-parse", "HEAD"]).trim(), tip);
+
+  // A database error: no write, no removal.
+  const broken = makeDbLiveCheck({ execute: async () => { throw new Error("database is locked"); } });
+  assert.equal(await commitWorkspace(project, OWNER, "db error", { dataDir: fx.dataDir, isLive: broken }), null);
+  assert.equal(existsSync(gitDir), true, "an unanswered check keeps the history");
+  assert.equal(gitText(gitDir, ws, ["rev-parse", "HEAD"]).trim(), tip);
+
+  // A uuid mismatch is a confirmed purge (the id was reused by a new project).
+  await fx.db.execute({ sql: "UPDATE project_spaces SET archived_at = NULL WHERE id = 41", args: [] });
+  const stranger = { ...project, uuid: "ffffffffffffffffffffffffffffffff" };
+  assert.equal(await isLive(stranger), "gone");
+  assert.equal(await commitWorkspace(stranger, OWNER, "stranger", { dataDir: fx.dataDir, isLive }), null);
+  assert.equal(existsSync(gitDir), true, "the real project's folder is a different name");
+  assert.equal(existsSync(gitDirFor(stranger, fx.dataDir)), false);
+
+  // A missing row is a confirmed purge: the folder is removed.
+  await fx.db.execute({ sql: "DELETE FROM project_spaces WHERE id = 41", args: [] });
+  assert.equal(await isLive(project), "gone");
+  assert.equal(await commitWorkspace(project, OWNER, "purged", { dataDir: fx.dataDir, isLive }), null);
+  assert.equal(existsSync(gitDir), false, "a purged project loses its folder");
+});
+
+test("a file or folder swapped for a symlink after the walk never pulls outside bytes into history", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-swap-index-");
+  const ws = join(fx.dataDir, "projects", "swap-index", "workspace");
+  mkdirSync(join(ws, "sub"), { recursive: true });
+  const outside = join(fx.dataDir, "outside-secret.txt");
+  const SECRET = "TOP-SECRET-OUTSIDE-BYTES-12345";
+  writeFileSync(outside, SECRET + "\n");
+  writeFileSync(join(ws, "plain.txt"), "plain\n");
+  writeFileSync(join(ws, "swapped.txt"), "original\n");
+  writeFileSync(join(ws, "sub", "inner.txt"), "inner\n");
+  const outsideDir = join(fx.dataDir, "outside-dir");
+  mkdirSync(outsideDir, { recursive: true });
+  writeFileSync(join(outsideDir, "inner.txt"), SECRET + " via folder\n");
+  const project = projectFor(51, ws, uuidFor(51));
+  const gitDir = gitDirFor(project, fx.dataDir);
+
+  const _afterWalk = async () => {
+    // The file becomes a symlink to a file outside the workspace.
+    rmSync(join(ws, "swapped.txt"));
+    symlinkSync(outside, join(ws, "swapped.txt"));
+    // The folder becomes a symlink to a folder outside the workspace.
+    rmSync(join(ws, "sub"), { recursive: true });
+    symlinkSync(outsideDir, join(ws, "sub"));
+  };
+  assert.ok(await commitWorkspace(project, OWNER, "swap", { dataDir: fx.dataDir, _afterWalk }));
+
+  // No blob in the whole object store holds the outside bytes.
+  const objects = gitText(gitDir, ws, ["cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)"])
+    .split("\n").filter((l) => l.endsWith(" blob")).map((l) => l.split(" ")[0]);
+  for (const sha of objects) {
+    const text = gitText(gitDir, ws, ["cat-file", "blob", sha]);
+    assert.equal(text.includes("TOP-SECRET-OUTSIDE-BYTES"), false, "outside bytes never enter a blob");
+  }
+  const tree = gitText(gitDir, ws, ["ls-tree", "-r", "HEAD"]);
+  assert.match(tree, /plain\.txt/);
+  assert.doesNotMatch(tree, /swapped\.txt/, "the swapped file is dropped for this commit");
+  assert.doesNotMatch(tree, /sub\/inner\.txt/, "the swapped folder's files are dropped");
 });
