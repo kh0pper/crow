@@ -37,9 +37,11 @@ if (nodeVersion < 18) {
 log(`Node.js ${process.version} - OK`);
 
 // Step 2: Install dependencies
+// package-lock.json is committed, so `npm ci` installs exactly the locked tree;
+// `npm install` stays the fallback for a checkout without a lockfile.
 log("Installing npm dependencies...");
 try {
-  execSync("npm install", { cwd: ROOT, stdio: "inherit" });
+  execSync(existsSync(resolve(ROOT, "package-lock.json")) ? "npm ci" : "npm install", { cwd: ROOT, stdio: "inherit" });
 } catch {
   console.error("Failed to install dependencies.");
   process.exit(1);
