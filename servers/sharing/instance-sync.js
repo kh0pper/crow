@@ -5159,7 +5159,11 @@ export class InstanceSyncManager {
     } else if (itemType === "research_note") {
       // The uuid is the note's delete key and the id is what an ordinary write
       // carries: an inbound insert/update for an erased note matches one or both.
-      keys.push(...erasureKeys(itemType, { itemId: row?.id ?? null, snapshot: { uuid: row?.uuid ?? null } }));
+      // A note that carries a uuid is matched by the uuid ONLY: its numeric id is
+      // local to the sender, so another peer's note can share an erased note's id.
+      // The id is the fallback for a row that has no uuid.
+      const noteUuid = row?.uuid ?? null;
+      keys.push(...erasureKeys(itemType, { itemId: noteUuid ? null : (row?.id ?? null), snapshot: { uuid: noteUuid } }));
       if (keys.length === 0) return false;
     } else {
       const mapped = await mapInboundContextProject(this.db, row ?? {});

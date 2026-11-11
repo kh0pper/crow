@@ -118,6 +118,8 @@ export async function runSyncConflictExpirySweep(dbFactory = createDbClient) {
 export async function runHistorySweep({ db = null, tasksDb = null, dbFactory = createDbClient } = {}) {
   let owned = false;
   let ownedTasks = false;
+  // Declared out here so `finally` can close the handle this call opened itself.
+  let tdb = tasksDb;
   try {
     const { sweep } = await import("../../shared/history/sweep.js");
     const { STORE_TASKS } = await import("../../shared/history/covered.js");
@@ -141,7 +143,6 @@ export async function runHistorySweep({ db = null, tasksDb = null, dbFactory = c
     // The card store. Its own pass, its own types; the crow.db handle keeps the
     // scan marks (one key per store, so the two passes cannot overwrite each other).
     let cardResult = null;
-    let tdb = tasksDb;
     if (!tdb) {
       const path = instanceTasksDbPath();
       if (existsSync(path)) {
@@ -175,7 +176,7 @@ export async function runHistorySweep({ db = null, tasksDb = null, dbFactory = c
   } finally {
     if (ownedTasks) {
       try {
-        tasksDb?.close?.();
+        tdb?.close?.();
       } catch {
         /* a stuck close must not fail the cycle */
       }

@@ -387,6 +387,29 @@ test("an erased research note stays erased against the peer, keyed by its sync u
     assert.equal(await noteByUuid(a.db, SECOND_UUID), null, "an unannounced erase refuses a genuinely later peer write");
     assert.equal(await noteVersionCount(a.db, 100), 0);
     assert.equal((await noteByUuid(b.db, SECOND_UUID))?.content, "the peer's new copy", "the peer's copy stays on the peer");
+
+    // A DIFFERENT note (another uuid) from the peer that merely carries the erased
+    // note's numeric id is a different note: the id is local to its sender, so a note
+    // that has a uuid is matched by the uuid alone and this one is accepted.
+    const THIRD_UUID = "aaaabbbbccccddddeeeeffff00001111";
+    await writeLocal(b.db, "INSERT INTO research_notes (id, uuid, title, content) VALUES (?, ?, 'Third note', ?)", [
+      101,
+      THIRD_UUID,
+      "same id, other note",
+    ]);
+    await b.mgr.emitChange("research_notes", "insert", {
+      id: 92,
+      uuid: THIRD_UUID,
+      title: "Third note",
+      content: "same id, other note",
+      note_type: "note",
+      lamport_ts: null,
+    });
+    assert.ok(
+      await until(async () => (await noteByUuid(a.db, THIRD_UUID)) !== null),
+      "a peer note with another uuid but an erased note's id is accepted",
+    );
+    assert.equal(await noteByUuid(a.db, SECOND_UUID), null, "while the erased uuid stays refused");
   } finally {
     link?.close();
     await fleet.cleanup();

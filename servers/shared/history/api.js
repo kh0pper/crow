@@ -43,7 +43,7 @@
  *   for an un-delete, `update` otherwise. With no emitter (a test, a host with
  *   sync off) the write still happens and `synced` is false.
  *
- *   FOUR TYPES ARE THE EXCEPTION, FOR THE SAME REASON: their ordinary writes do
+ *   FIVE TYPES ARE THE EXCEPTION, FOR THE SAME REASON: their ordinary writes do
  *   not emit today, so their restores are plain local writes and `synced` is
  *   false (nothing is lost — the peer's own history is its own business, and the
  *   value it holds is unaffected):
@@ -56,7 +56,7 @@
  *     card          tasks.db has no sync feeds of its own (cards are
  *                   instance-global, and item_versions is local-only).
  *   emitRestored therefore returns false for them rather than inventing a
- *   fourth wire shape.
+ *   new wire shape.
  *
  *   THE FILING IS RESOLVED, NOT REPLAYED. project_spaces.id is a per-instance id
  *   and REUSED after a project is deleted, so a snapshot's project_id can name a
@@ -1148,8 +1148,8 @@ function memoryWireRow(row) {
  *
  * A blog post is NOT synced (instance-sync's SYNCED_TABLES has no blog_posts), so
  * a plain local write is the whole story there and nothing is emitted; the same is
- * true of the other three types whose ordinary writes emit nothing (research
- * notes, KB articles and cards) — see the module header for the list.
+ * true of the other four types whose ordinary writes emit nothing (research
+ * notes, KB articles, bot definitions and cards) — see the module header for the list.
  *
  * @returns {Promise<boolean>}
  */
@@ -1290,6 +1290,64 @@ function recordCardRestore(run, { itemId, ctx, versionId, row, values, columns, 
       ctx.authorId ?? null,
       ctx.jobId ?? null,
       JSON.stringify({ restored_from_version: Number(versionId), fields }),
+    ],
+  });
+  return true;
+}
+
+/**
+ * Defang a card that is being re-created from a version: no assignee, gated, and the
+ * board's first status (the project's board_defs row, else the default one, else
+ * "pending"). Mutates `values` in place, aligned with `columns`. Items on a tracker
+ * board (board_id set) keep their status: it is that tracker's own vocabulary.
+ */
+function neutraliseRestoredCard(run, columns, values) {
+  const set = (name, value) => {
+    const i = columns.indexOf(name);
+    if (i >= 0) values[i] = value;
+  };
+  set("assigned_bot", null);
+  set("bot_id", null);
+  set("autonomy", "gated");
+  const boardIdx = columns.indexOf("board_id");
+  if (boardIdx >= 0 && values[boardIdx] != null) return;
+  let status = "pending"; // the legacy first status, and the column default
+  try {
+    const projectIdx = columns.indexOf("project_id");
+    const projectId = projectIdx >= 0 ? values[projectIdx] : null;
+    const { rows } = run({
+      sql: `SELECT status_values FROM board_defs
+             WHERE project_id IS ? OR project_id IS NULL
+             ORDER BY (project_id IS NULL) ASC, id ASC LIMIT 1`,
+      args: [projectId ?? null],
+    });
+    const first = rows[0] ? JSON.parse(rows[0].status_values)[0] : null;
+    if (typeof first === "string" && first !== "") status = first;
+  } catch {
+    /* a store without board_defs keeps the plain default */
+  }
+  set("status", status);
+}
+
+/** The board_mutations row for a card brought back from nothing (verb `create`). */
+function recordCardReinsert(run, { itemId, ctx, versionId, values, columns }) {
+  const boardItemId = Number(itemId);
+  if (!Number.isInteger(boardItemId)) return false;
+  const present = run({
+    sql: "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'board_mutations' LIMIT 1",
+    args: [],
+  });
+  if (present.rows.length === 0) return false;
+  const at = (name) => (columns.indexOf(name) >= 0 ? values[columns.indexOf(name)] : null);
+  run({
+    sql: "INSERT INTO board_mutations (item_id, verb, actor_kind, actor_id, job_id, detail_json) VALUES (?,?,?,?,?,?)",
+    args: [
+      boardItemId,
+      "create",
+      BOARD_MUTATION_ACTOR[ctx.authorKind] ?? "session",
+      ctx.authorId ?? null,
+      ctx.jobId ?? null,
+      JSON.stringify({ restored_from_version: Number(versionId), status: at("status"), autonomy: at("autonomy") }),
     ],
   });
   return true;
@@ -1548,9 +1606,8 @@ export async function restoreVersion(
         }
         // A CARD's restore is a card change, so it is recorded on the board exactly
         // as an ordinary edit is (one board_mutations row, in this same transaction).
-        // A re-created card (the INSERT path below) records none: that is the card
-        // coming back as itself, not an edit of what is there, and the version the
-        // restore wrote is the record of it.
+        // A card re-created from nothing (the INSERT path below) records a `create`
+        // row of its own, and comes back defanged.
         if (spec.table === "tasks_items") {
           recordCardRestore(run, { itemId, ctx, versionId: id, row, values, columns, changed });
         }
@@ -1559,12 +1616,26 @@ export async function restoreVersion(
       }
 
       // The row is gone: put it back as itself, id and filing included.
+      // A CARD, though, comes back DEFANGED (the operator's ruling, same spirit as the
+      // content-only UPDATE restore): its title, body and plan fields return, but it
+      // is unassigned, gated and on the board's first status, so bringing a card back
+      // can never start a bot on its own (an `auto` card for a bot, deleted by a job
+      // undo, would otherwise be re-dispatched).
+      if (spec.table === "tasks_items") neutraliseRestoredCard(run, columns, values);
       const insertColumns = [spec.idColumn, ...columns];
       const watermark = maxVersionId(run);
       const sql =
         `INSERT INTO ${quote(spec.table)} (${insertColumns.map(quote).join(", ")}) ` +
         `VALUES (${insertColumns.map(() => "?").join(", ")})`;
       run({ sql, args: [itemId, ...values] });
+      // Recorded on the board like any other card change (one board_mutations row, in
+      // this same transaction). NOT done here: the widgets "what needs me" push that
+      // recordMutation fires. It lives in a gateway module, and importing gateway
+      // wiring into shared history code would drag it into every importer; the
+      // widgets pick the card up on their next refresh.
+      if (spec.table === "tasks_items") {
+        recordCardReinsert(run, { itemId, ctx, versionId: id, values, columns });
+      }
       const newVersionId = versionIdAfter(run, watermark, version.item_type, itemId);
       return report({ newVersionId, unchanged: false, row: readRow(run, spec, itemId), op: "insert" });
     }).catch((err) => {

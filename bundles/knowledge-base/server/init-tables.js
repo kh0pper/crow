@@ -74,6 +74,10 @@ async function ensureArticleHistory(db) {
     // BEGIN IMMEDIATE, not a bare sequence of statements: the baseline and the
     // triggers must land together (see the header), and a deferred transaction can
     // upgrade to a write lock halfway through and see a competing save.
+    // NOTE: this transaction runs through db.execute on a SHARED @libsql client, so
+    // the statements between BEGIN and COMMIT would interleave with anyone else
+    // using that client. That is fine here: this is bundle init, before the server
+    // takes any request, so nothing else runs on the client yet.
     await db.execute("BEGIN IMMEDIATE");
     try {
       await db.execute(baselineSql("kb_article", COVERED.kb_article));

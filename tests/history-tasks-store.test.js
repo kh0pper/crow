@@ -688,3 +688,49 @@ test("a card restore keeps an archived card archived", async () => {
     await f.dispose();
   }
 });
+test("a deleted card restored from nothing comes back unassigned, gated and on the board's first status, with a create row", async () => {
+  const f = await fixture();
+  try {
+    const cardId = await insert(f.tdb, BOT, "tasks_items", {
+      title: "auto card",
+      description: "a body",
+      project_id: 11,
+      status: "in_progress",
+      assigned_bot: "hank",
+      bot_id: "hank",
+      autonomy: "auto",
+    });
+    await withWriteContext(OWNER, () => f.tdb.execute({ sql: "DELETE FROM tasks_items WHERE id = ?", args: [cardId] }));
+    const versions = await versionsOf(f.tdb, "card", cardId);
+    const deleteVersion = versions.at(-1);
+    assert.equal(deleteVersion.op, "delete");
+    assert.equal(
+      Number((await f.tdb.execute({ sql: "SELECT COUNT(*) AS n FROM tasks_items WHERE id = ?", args: [cardId] })).rows[0].n),
+      0,
+    );
+
+    const before = Number((await f.tdb.execute("SELECT COUNT(*) AS n FROM board_mutations")).rows[0].n);
+    await restoreVersion(f.tdb, { versionId: Number(deleteVersion.id) }, OWNER);
+    const card = (await f.tdb.execute({ sql: "SELECT * FROM tasks_items WHERE id = ?", args: [cardId] })).rows[0];
+    assert.equal(card.title, "auto card", "the content comes back");
+    assert.equal(card.description, "a body");
+    assert.equal(card.assigned_bot, null, "unassigned");
+    assert.equal(card.bot_id, null);
+    assert.equal(card.autonomy, "gated", "and gated, so no bot starts on it");
+    // This fixture's tasks.db has no board_defs table, so the plain default applies.
+    const expected = "pending";
+    assert.equal(card.status, expected, "the board's first status");
+    assert.notEqual(card.status, "in_progress");
+
+    const rows = (await f.tdb.execute({
+      sql: "SELECT verb, actor_kind, detail_json FROM board_mutations WHERE item_id = ? ORDER BY id DESC LIMIT 1",
+      args: [cardId],
+    })).rows;
+    assert.equal(Number((await f.tdb.execute("SELECT COUNT(*) AS n FROM board_mutations")).rows[0].n), before + 1);
+    assert.equal(rows[0].verb, "create");
+    assert.equal(rows[0].actor_kind, "human");
+    assert.equal(JSON.parse(rows[0].detail_json).restored_from_version, Number(deleteVersion.id));
+  } finally {
+    await f.dispose();
+  }
+});
