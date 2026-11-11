@@ -5,7 +5,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { symlinkSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from "node:fs";
+import { symlinkSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync,
+  existsSync, linkSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { secretFilesFor, secretPinDirsFor, BUNDLE_ENV_READABLE, ROOT_SECRET_FILES } from "../scripts/pi-bots/hidden_files.mjs";
@@ -18,8 +19,14 @@ test("secretFilesFor: root token files, the appRoot .env and every non-allow-lis
   mkdirSync(join(crowHome, "bundles", "workspace"), { recursive: true });
   mkdirSync(join(crowHome, "bundles", "other"), { recursive: true });
   mkdirSync(join(crowHome, "bundles", "x.migrated-2026"), { recursive: true });
+  mkdirSync(join(crowHome, "bundles", "nodotenv"), { recursive: true });
   mkdirSync(appRoot, { recursive: true });
   try {
+    // Only .env files that really exist are candidates now: a bundle dir
+    // without one contributes nothing.
+    for (const id of ["browser", "workspace", "other", "x.migrated-2026"]) {
+      writeFileSync(join(crowHome, "bundles", id, ".env"), "fake-bundle-env\n");
+    }
     const files = secretFilesFor({ crowHome, appRoot });
     for (const n of [".env", ".keystore-env", "board-token", "phone-token", "artifacts-token"]) {
       assert.ok(files.includes(join(crowHome, n)), "root file " + n);
@@ -30,6 +37,7 @@ test("secretFilesFor: root token files, the appRoot .env and every non-allow-lis
     assert.ok(files.includes(join(crowHome, "bundles", "x.migrated-2026", ".env")), "a stale bundle copy is a secret too");
     assert.ok(!files.includes(join(crowHome, "bundles", "browser", ".env")), "the browser tool reads its own .env");
     assert.ok(!files.includes(join(crowHome, "bundles", "workspace", ".env")), "the workspace tool reads its own .env");
+    assert.ok(!files.some((f) => f.startsWith(join(crowHome, "bundles", "nodotenv") + "/")), "a bundle dir with no .env has nothing to mask");
     for (const n of ["models-token", "llm-cloud-token", "kiosk-announce-token", "studio-agent-token"]) {
       assert.ok(!files.includes(join(crowHome, n)), n + " has a reader inside the sandbox");
     }
@@ -153,7 +161,7 @@ test("a bundle dir swapped for a symlink to a dir with a .env refuses the spawn,
   try {
     const e = await spawnOutcome();
     assert.ok(e, "the spawn is refused");
-    assert.match(e.message, /A bot could not start: bundles\/swapped\/\.env is a link or sits behind one/);
+    assert.match(e.message, /A bot could not start: bundles\/swapped\/\.env is a link that leads outside the Crow folders, so Crow can't hide it\. Remove the link\.$/);
     assert.ok(!e.message.includes("fake-linked-env-content"), "no content in the message");
     assert.ok(!e.message.includes(REAL_CROW), "the path is relative to its root");
   } finally { rmSync(link, { force: true }); rmSync(target, { recursive: true, force: true }); }
@@ -192,6 +200,7 @@ test("secretFilesFor / secretPinDirsFor: a symlinked bundle is listed only with 
   symlinkSync(elsewhere, join(crowHome, "bundles", "withenv"));
   writeFileSync(join(elsewhere, ".env"), "fake\n");
   symlinkSync(join(root, "empty"), join(crowHome, "bundles", "noenv"));
+  writeFileSync(join(crowHome, "bundles", "real", ".env"), "fake-real-env\n");
   try {
     const files = secretFilesFor({ crowHome });
     assert.ok(files.includes(join(crowHome, "bundles", "real", ".env")));
@@ -199,5 +208,199 @@ test("secretFilesFor / secretPinDirsFor: a symlinked bundle is listed only with 
     assert.ok(!files.includes(join(crowHome, "bundles", "noenv", ".env")));
     const pins = secretPinDirsFor({ crowHome });
     assert.deepEqual(pins.sort(), [join(crowHome, "bundles"), join(crowHome, "bundles", "browser"), join(crowHome, "bundles", "real")].sort());
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---- app-root bundles, resolved bundle links (unit level) ----
+
+test("secretFilesFor: appRoot bundles are listed too, .env and .env.<tag>, but not .environment or x.env", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-hidden-approot-"));
+  const crowHome = join(root, ".crow");
+  const appRoot = join(root, "app");
+  try {
+    for (const r of [crowHome, appRoot]) {
+      for (const id of ["alpha", ...BUNDLE_ENV_READABLE]) {
+        mkdirSync(join(r, "bundles", id), { recursive: true });
+        writeFileSync(join(r, "bundles", id, ".env"), "fake-env\n");
+      }
+      writeFileSync(join(r, "bundles", "alpha", ".env.bak-20260929"), "fake-env-backup\n");
+      writeFileSync(join(r, "bundles", "alpha", ".environment"), "fake-not-an-env-file\n");
+      writeFileSync(join(r, "bundles", "alpha", "x.env"), "fake-wrong-name\n");
+    }
+    const files = secretFilesFor({ crowHome, appRoot });
+    for (const r of [crowHome, appRoot]) {
+      assert.ok(files.includes(join(r, "bundles", "alpha", ".env")), "the bundle .env under " + r);
+      assert.ok(files.includes(join(r, "bundles", "alpha", ".env.bak-20260929")), "a .env.<tag> copy is a secret too under " + r);
+      for (const id of BUNDLE_ENV_READABLE) {
+        assert.ok(!files.includes(join(r, "bundles", id, ".env")), id + " reads its own .env under " + r);
+      }
+    }
+    assert.ok(!files.some((f) => f.endsWith(".environment")), ".environment is not an env file");
+    assert.ok(!files.some((f) => f.endsWith("x.env")), "only a name starting with .env counts");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("secretFilesFor: a bundle link into another trusted root lists the resolved path once; one leading outside lists the link path only with a .env behind it", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-hidden-bundlelink-"));
+  const crowHome = join(root, ".crow");
+  const appRoot = join(root, "app");
+  const outsideEnv = join(root, "outside-env");
+  const outsideEmpty = join(root, "outside-empty");
+  try {
+    mkdirSync(join(appRoot, "bundles", "real"), { recursive: true });
+    writeFileSync(join(appRoot, "bundles", "real", ".env"), "fake-app-env\n");
+    writeFileSync(join(appRoot, "bundles", "real", ".env.bak-20260929"), "fake-app-env-backup\n");
+    mkdirSync(join(crowHome, "bundles"), { recursive: true });
+    mkdirSync(outsideEnv, { recursive: true });
+    mkdirSync(outsideEmpty, { recursive: true });
+    writeFileSync(join(outsideEnv, ".env"), "fake-outside-env\n");
+    symlinkSync(join(appRoot, "bundles", "real"), join(crowHome, "bundles", "alias"));
+    symlinkSync(outsideEnv, join(crowHome, "bundles", "outside"));
+    symlinkSync(outsideEmpty, join(crowHome, "bundles", "outside-empty"));
+    const files = secretFilesFor({ crowHome, appRoot });
+    for (const n of [".env", ".env.bak-20260929"]) {
+      const resolved = join(appRoot, "bundles", "real", n);
+      assert.ok(files.includes(resolved), "listed at its resolved path: " + n);
+      assert.equal(files.filter((f) => f === resolved).length, 1, "and only once: " + n);
+      assert.ok(!files.includes(join(crowHome, "bundles", "alias", n)), "not under a link that stays inside the roots: " + n);
+    }
+    assert.ok(files.includes(join(crowHome, "bundles", "outside", ".env")), "outside every root: the link path, so the spawn is refused");
+    assert.ok(!files.includes(join(outsideEnv, ".env")), "never the path behind an outside link");
+    assert.ok(!files.some((f) => f.includes("outside-empty")), "an outside link with no .env behind it is ignored");
+    assert.equal(new Set(files).size, files.length, "deduped");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---- bridge level: hard links, links inside a root, the dir masks, the journal line ----
+
+/** Spawn with a stub pi that reports the byte length of each file and the listing of each dir it sees inside. */
+async function spawnReport({ files = {}, dirs = {} } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-hidden-report-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { readFileSync, readdirSync } from "node:fs";',
+    `const files = ${JSON.stringify(files)};`,
+    `const dirs = ${JSON.stringify(dirs)};`,
+    'const len = (p) => { try { return readFileSync(p).length; } catch (e) { return e.code || -1; } };',
+    'const list = (p) => { try { return readdirSync(p); } catch (e) { return e.code || -1; } };',
+    'const out = { len: {}, list: {} };',
+    'for (const [k, p] of Object.entries(files)) out.len[k] = len(p);',
+    'for (const [k, p] of Object.entries(dirs)) out.list[k] = list(p);',
+    'process.stdout.write(JSON.stringify({ type: "report", len: out.len, list: out.list }) + "\\n");',
+    "setTimeout(() => process.exit(0), 50);",
+  ].join("\n"));
+  const prev = process.env.CROW_PI_SANDBOX;
+  process.env.CROW_PI_SANDBOX = "auto";
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" },
+      nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+    const r = await pi.waitFor((m) => m.type === "report", 10000, "report");
+    await pi.exited;
+    return { report: r, masked: pi.sandboxMaskedFiles };
+  } finally {
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("a bundle .env with another hard link refuses the spawn, naming the path and no content", { skip: noSandbox }, async () => {
+  const bundleDir = join(CROW, "bundles", "hardlinked");
+  mkdirSync(bundleDir, { recursive: true });
+  const envFile = join(bundleDir, ".env");
+  writeFileSync(envFile, "fake-hardlinked-secret\n", { mode: 0o600 });
+  // A second name on disk (masking one leaves the other readable).
+  linkSync(envFile, join(bundleDir, "env-extra-name"));
+  try {
+    const e = await spawnOutcome();
+    assert.ok(e, "the spawn is refused");
+    assert.equal(e.message, "A bot could not start: bundles/hardlinked/.env has another name on disk, so Crow can't hide it. Remove the extra link.");
+    assert.ok(!e.message.includes("fake-hardlinked-secret"), "no content in the message");
+  } finally { rmSync(bundleDir, { recursive: true, force: true }); }
+});
+
+test("a bundle link resolving inside the Crow home is not refused, and the resolved .env reads empty inside", { skip: noSandbox }, async () => {
+  const real = join(CROW, "bundles", "real");
+  const alias = join(CROW, "bundles", "alias");
+  mkdirSync(real, { recursive: true });
+  writeFileSync(join(real, ".env"), "fake-linked-real-env\n", { mode: 0o600 });
+  symlinkSync(real, alias);
+  try {
+    const { report, masked } = await spawnReport({ files: { viaAlias: join(alias, ".env"), viaReal: join(real, ".env") } });
+    assert.equal(report.len.viaReal, 0, "the real .env reads empty inside");
+    assert.equal(report.len.viaAlias, 0, "and through the link too");
+    assert.ok(masked.includes(join(REAL_CROW, "bundles", "real", ".env")), "masked at its resolved path");
+  } finally { rmSync(alias, { force: true }); rmSync(real, { recursive: true, force: true }); }
+});
+
+test("~/.ssh is created 0700 when it is missing and lists empty inside", { skip: noSandbox }, async () => {
+  const sshDir = join(USER_HOME, ".ssh");
+  rmSync(sshDir, { recursive: true, force: true });
+  const { report } = await spawnReport({ dirs: { ssh: sshDir } });
+  assert.ok(existsSync(sshDir), "the bridge created the folder before the spawn");
+  assert.equal(statSync(sshDir).mode & 0o777, 0o700, "0700");
+  assert.deepEqual(report.list.ssh, [], "empty inside");
+});
+
+test("the instance env/ and android-keystore/ folders list empty inside", { skip: noSandbox }, async () => {
+  const envDir = join(CROW, "env");
+  const keyDir = join(CROW, "android-keystore");
+  mkdirSync(envDir, { recursive: true });
+  mkdirSync(keyDir, { recursive: true });
+  writeFileSync(join(envDir, "compose.env"), "fake-compose-value\n", { mode: 0o600 });
+  writeFileSync(join(keyDir, "fake-release.jks"), "fake-keystore-bytes\n", { mode: 0o600 });
+  try {
+    const { report } = await spawnReport({ dirs: { env: envDir, keystore: keyDir } });
+    assert.deepEqual(report.list.env, [], "env/ is empty inside");
+    assert.deepEqual(report.list.keystore, [], "android-keystore/ is empty inside");
+  } finally { rmSync(envDir, { recursive: true, force: true }); rmSync(keyDir, { recursive: true, force: true }); }
+});
+
+test("two refused spawns at one path log the journal line once, and both still refuse", { skip: noSandbox }, async () => {
+  const target = mkdtempSync(join(tmpdir(), "crow-hidden-logonce-"));
+  writeFileSync(join(target, ".env"), "fake-logonce-env\n");
+  const link = join(CROW, "bundles", "logonce");
+  symlinkSync(target, link);
+  const expected = "A bot could not start: bundles/logonce/.env is a link that leads outside the Crow folders, so Crow can't hide it. Remove the link.";
+  const lines = [];
+  const orig = console.error;
+  console.error = (...a) => { lines.push(a.map(String).join(" ")); };
+  try {
+    const first = await spawnOutcome();
+    const second = await spawnOutcome();
+    assert.ok(first, "the first spawn is refused");
+    assert.ok(second, "the second spawn is refused too");
+    assert.equal(first.message, expected);
+    assert.equal(second.message, expected, "the error still reaches the failed turn");
+    const logged = lines.filter((l) => l.includes("A bot could not start: bundles/logonce/.env"));
+    assert.equal(logged.length, 1, "the journal line is written once for both spawns: " + JSON.stringify(logged));
+  } finally {
+    console.error = orig;
+    rmSync(link, { force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test("secretFilesFor: a symlinked .env is masked at its real path, skipped behind a hidden dir, ignored when dangling, listed by name when it leaves the roots", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-hidden-envlink-"));
+  const crowHome = join(root, ".crow");
+  const outside = join(root, "outside");
+  mkdirSync(join(crowHome, "env"), { recursive: true });
+  mkdirSync(join(crowHome, "shared"), { recursive: true });
+  mkdirSync(outside, { recursive: true });
+  for (const id of ["viahidden", "inroot", "dangling", "leaves"]) mkdirSync(join(crowHome, "bundles", id), { recursive: true });
+  writeFileSync(join(crowHome, "env", "cuda.env"), "fake\n");
+  writeFileSync(join(crowHome, "shared", "x.env"), "fake\n");
+  writeFileSync(join(outside, "y.env"), "fake\n");
+  symlinkSync(join(crowHome, "env", "cuda.env"), join(crowHome, "bundles", "viahidden", ".env"));
+  symlinkSync(join(crowHome, "shared", "x.env"), join(crowHome, "bundles", "inroot", ".env"));
+  symlinkSync(join(root, "nowhere"), join(crowHome, "bundles", "dangling", ".env"));
+  symlinkSync(join(outside, "y.env"), join(crowHome, "bundles", "leaves", ".env"));
+  try {
+    const files = secretFilesFor({ crowHome, hiddenDirs: [join(crowHome, "env")] });
+    assert.ok(!files.some((f) => f.includes("viahidden")) && !files.includes(join(crowHome, "env", "cuda.env")), "already behind a hidden dir");
+    assert.ok(files.includes(join(crowHome, "shared", "x.env")), "masked at the real path");
+    assert.ok(!files.some((f) => f.includes("dangling")));
+    assert.ok(files.includes(join(crowHome, "bundles", "leaves", ".env")), "listed by its own name, so the spawn is refused");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

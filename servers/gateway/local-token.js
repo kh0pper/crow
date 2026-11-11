@@ -130,6 +130,22 @@ export function applyLocalTokenAuth(req) {
   return true;
 }
 
+/** Write a token file as a NEW inode: a 0600 temp file in the same dir, then an
+ *  atomic rename. A bot sandbox masks a token file by hiding the inode it found
+ *  at spawn; rewriting in place would keep a second name for it (a hard link)
+ *  readable, so every rotation must land on a fresh inode. */
+function writeTokenFile(path, token) {
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* already gone */ }
+    throw err;
+  }
+}
+
 /** Generate a new board token, overwriting any existing one. Stores only the
  *  hash (local-scope setting) plus persists the raw value to
  *  <crowHome>/board-token mode 0600 (bot configs read the raw file directly,
@@ -141,7 +157,7 @@ export async function generateBoardToken(db) {
   await writeSetting(db, BOARD_CREATED_KEY, new Date().toISOString(), { scope: "local" });
   const path = boardTokenPath();
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, token, { mode: 0o600 });
+  writeTokenFile(path, token);
   // writeFileSync's `mode` is honored only when it CREATES the file; an
   // existing-but-empty file would keep whatever perms it had.
   try { chmodSync(path, 0o600); } catch { /* best effort */ }
@@ -185,7 +201,7 @@ export async function generatePhoneToken(db) {
   await writeSetting(db, PHONE_CREATED_KEY, new Date().toISOString(), { scope: "local" });
   const path = phoneTokenPath();
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, token, { mode: 0o600 });
+  writeTokenFile(path, token);
   try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
 }
@@ -215,7 +231,7 @@ export async function generateArtifactsToken(db) {
   await writeSetting(db, ARTIFACTS_CREATED_KEY, new Date().toISOString(), { scope: "local" });
   const path = artifactsTokenPath();
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, token, { mode: 0o600 });
+  writeTokenFile(path, token);
   try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
 }
@@ -262,7 +278,7 @@ export async function generatePeerRelayToken(db) {
   await writeSetting(db, PEER_RELAY_CREATED_KEY, new Date().toISOString(), { scope: "local" });
   const path = peerRelayTokenPath();
   ensureSecretsDir(dirname(path));
-  writeFileSync(path, token, { mode: 0o600 });
+  writeTokenFile(path, token);
   try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
 }
@@ -314,7 +330,7 @@ export async function generateKioskAnnounceToken(db) {
   await writeSetting(db, KIOSK_ANNOUNCE_CREATED_KEY, new Date().toISOString(), { scope: "local" });
   const path = kioskAnnounceTokenPath();
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, token, { mode: 0o600 });
+  writeTokenFile(path, token);
   try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
 }
@@ -353,7 +369,7 @@ export async function generateModelsToken(db) {
   await writeSetting(db, MODELS_CREATED_KEY, new Date().toISOString(), { scope: "local" });
   const path = modelsTokenPath();
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, token, { mode: 0o600 });
+  writeTokenFile(path, token);
   try { chmodSync(path, 0o600); } catch { /* best effort */ }
   return token;
 }

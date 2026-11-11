@@ -50,6 +50,7 @@ import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
 import { secretFilesFor, secretPinDirsFor } from "./hidden_files.mjs";
+import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
 import { containSelected, prepareAgentShadow, sweepStaleContainDirs, ContainRefused } from "./pi_contain.mjs";
 import { containedClassifierBlock, containedCloudTokenPath } from "./pi_contain_agent.mjs";
@@ -481,8 +482,18 @@ const SECRET_VALUES_FD = 5;
 /** Most other-instance secrets dirs a spawn will hide; past it, it refuses. */
 const MAX_HIDDEN_INSTANCE_DIRS = 512;
 
-/** path -> last time its "could not hide" line was logged (once per path per hour). */
+/** absolute path -> last time its "could not hide" line was logged. */
 const unhideableLogged = new Map();
+/** realpath, or null when the path is gone. */
+const realRoot = (d) => { try { return realpathSync(d); } catch { return null; } };
+const UNHIDEABLE_LOG_MS = 3600_000;
+/** Log a refusal line once per absolute path per hour; entries older than an hour are dropped. */
+function logUnhideableOnce(absPath, msg, now = Date.now()) {
+  for (const [k, t] of unhideableLogged) if (now - t >= UNHIDEABLE_LOG_MS) unhideableLogged.delete(k);
+  if (unhideableLogged.has(absPath)) return;
+  unhideableLogged.set(absPath, now);
+  console.error("[pi-bots] " + msg);
+}
 
 export class PiRpc {
   constructor(opts) {
@@ -853,20 +864,38 @@ export class PiRpc {
       // at its real path); wrapPiSpawn masks only under them and never follows
       // a symlink. A candidate that exists but was not masked refuses the spawn
       // (below).
-      const realRoot = (d) => { try { return realpathSync(d); } catch { return null; } };
       const homeReal = realRoot(dirname(secretsHere));
-      const hideFileRoots = [homeReal, realRoot(BRIDGE_APP_ROOT), ...otherHomes.map(realRoot)].filter(Boolean);
+      // The home the candidate list is built from is the one this gateway
+      // resolves (resolveCrowHome), not merely where the anchored secrets dir
+      // is now; if the two disagree (a swapped ancestor, a moved home) the
+      // masks could land on the wrong tree, so the spawn is refused.
+      if (!contain && homeReal !== realRoot(resolveCrowHome())) {
+        throw new Error("A bot could not start: Crow's home folder is not where this gateway expects it, so Crow can't hide its secret files.");
+      }
+      const appReal = realRoot(BRIDGE_APP_ROOT);
+      const otherHomesReal = otherHomes.map(realRoot).filter(Boolean);
+      const hideFileRoots = [homeReal, appReal, ...otherHomesReal].filter(Boolean);
+      // Instance secret dirs no code inside the sandbox reads (env/ holds
+      // compose env files the gateway reads; android-keystore/ the release
+      // keys): hidden as dirs, tmpfs, when they exist.
+      const instanceSecretDirs = [homeReal, ...otherHomesReal].filter(Boolean).flatMap((h) => [join(h, "env"), join(h, "android-keystore")]);
       const hideFiles = [
-        ...(homeReal ? secretFilesFor({ crowHome: homeReal, appRoot: realRoot(BRIDGE_APP_ROOT) || undefined }) : []),
-        ...otherHomes.map(realRoot).filter(Boolean).flatMap((h) => secretFilesFor({ crowHome: h })),
+        ...(homeReal ? secretFilesFor({ crowHome: homeReal, appRoot: appReal || undefined, hiddenDirs: instanceSecretDirs }) : []),
+        ...otherHomesReal.flatMap((h) => secretFilesFor({ crowHome: h, hiddenDirs: instanceSecretDirs })),
       ];
-      const hidePinDirs = [homeReal, ...otherHomes.map(realRoot)].filter(Boolean).flatMap((h) => secretPinDirsFor({ crowHome: h }));
+      const hidePinDirs = [homeReal, ...otherHomesReal].filter(Boolean).flatMap((h) => secretPinDirsFor({ crowHome: h }));
       hiddenCandidates = { hideFiles, hideFileRoots };
-      // The operator's ssh keys: no Crow code reads ~/.ssh. Hidden as a dir (tmpfs)
-      // so a bot cannot use them, or `ssh localhost`, to leave the sandbox.
+      // The operator's ssh keys: no Crow code reads ~/.ssh. Always hidden (a dir,
+      // tmpfs), so a bot cannot use the keys, or `ssh localhost`, to leave the
+      // sandbox, nor plant authorized_keys under it. Created empty when absent,
+      // so the mask always applies.
       const sshDir = join(HOME, ".ssh");
+      if (!contain) {
+        try { mkdirSync(sshDir, { mode: 0o700 }); } catch (e) { if (e && e.code !== "EEXIST") throw new Error("A bot could not start: Crow could not create " + sshDir + " to keep it hidden."); }
+        hiddenCandidates.sshDir = sshDir;
+      }
       launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain,
-        hideDirs: [secretsHere, ...others, ...(contain ? [] : [sshDir])], hideFiles, hideFileRoots, hidePinDirs, seccompFd: contain ? SECCOMP_FD : null, passFds });
+        hideDirs: [secretsHere, ...others, ...(contain ? [] : [sshDir, ...instanceSecretDirs])], hideFiles, hideFileRoots, hidePinDirs, seccompFd: contain ? SECCOMP_FD : null, passFds });
     } catch (e) {
       // A contain spawn that was REFUSED still gets its one line, naming the
       // provider with no door (or the refusal the caller sees). When the
@@ -890,23 +919,41 @@ export class PiRpc {
     // does. Both are reported by wrapPiSpawn, and a dir that a bound path
     // contains and cannot be masked refuses the spawn there. Nothing is
     // assumed hidden: a contain spawn with no report for a dir is not trusted.
-    // Fail closed on a secret FILE too: one that exists (a regular file, or a
-    // symlink or a path through one) and was not masked, because a symlink is
-    // never followed or it sits outside the roots, refuses the spawn. The
-    // message names the path below its root, never any content.
+    // Fail closed on a secret FILE too. A candidate with another hard link
+    // refuses the spawn (masking one name leaves the other readable); one that
+    // exists but was not masked (a symlink, a path through one, or outside the
+    // roots) refuses it too. The message names the path below its root and the
+    // actual cause, never any content.
     if (!isContainTier(launch.tier) && launch.wrapper === "bwrap" && hiddenCandidates) {
       const maskedSet = new Set(launch.maskedFiles || []);
-      const unmasked = hiddenCandidates.hideFiles.find((f) => !maskedSet.has(f) && (() => { try { return lstatSync(f).isFile() || lstatSync(f).isSymbolicLink(); } catch { return false; } })());
-      if (unmasked) {
-        const root = hiddenCandidates.hideFileRoots.filter((r) => unmasked.startsWith(r + "/")).sort((x, y) => y.length - x.length)[0];
-        const rel = root ? unmasked.slice(root.length + 1) : "(outside the Crow roots)";
-        const msg = "A bot could not start: " + rel + " is a link or sits behind one, so Crow can't hide it. Remove the link.";
-        // The journal line is once per path per hour; the error itself reaches
-        // the operator on the failed turn, the surface a failed spawn already has.
-        const now = Date.now();
-        if (!(now - (unhideableLogged.get(rel) || 0) < 3600_000)) { unhideableLogged.set(rel, now); console.error("[pi-bots] " + msg); }
+      const relOf = (f) => {
+        const root = hiddenCandidates.hideFileRoots.filter((r) => f.startsWith(r + "/")).sort((x, y) => y.length - x.length)[0];
+        return root ? f.slice(root.length + 1) : null;
+      };
+      const refuse = (f, msg) => {
+        logUnhideableOnce(f, msg);
         this._runContainCleanup();
         throw new Error(msg);
+      };
+      for (const f of hiddenCandidates.hideFiles) {
+        let st;
+        try { st = lstatSync(f); } catch { continue; }
+        const rel = relOf(f) || f;
+        if (st.isFile() && st.nlink > 1) refuse(f, "A bot could not start: " + rel + " has another name on disk, so Crow can't hide it. Remove the extra link.");
+        if (maskedSet.has(f) || !(st.isFile() || st.isSymbolicLink())) continue;
+        if (!relOf(f)) refuse(f, "A bot could not start: " + f + " is outside the Crow folders, so Crow can't hide it.");
+        // Walk up from the file: a link on the way that leads outside every
+        // root is a different fix from one that stays inside.
+        let leadsOut = false;
+        for (let a = f; a && hiddenCandidates.hideFileRoots.every((r) => a !== r); a = dirname(a)) {
+          let lst; try { lst = lstatSync(a); } catch { break; }
+          if (lst.isSymbolicLink()) { const t = realRoot(a); if (!t || !hiddenCandidates.hideFileRoots.some((r) => t === r || t.startsWith(r + "/"))) leadsOut = true; break; }
+        }
+        refuse(f, "A bot could not start: " + rel + (leadsOut ? " is a link that leads outside the Crow folders, so Crow can't hide it. Remove the link." : " is a link or sits behind one, so Crow can't hide it. Remove the link."));
+      }
+      if (hiddenCandidates.sshDir && !launch.masked.includes(hiddenCandidates.sshDir)) {
+        this._runContainCleanup();
+        throw new Error("A bot could not start: Crow could not hide ~/.ssh.");
       }
     }
     if (!isContainTier(launch.tier) && launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {

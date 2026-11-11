@@ -60,7 +60,9 @@
  *    gateway's own source, run on the next restart/auto-update), autostart
  *    entries, any script a privileged process runs;
  *  - `ssh localhost` (or another lab host) with a private key kept outside
- *    ~/.ssh (that dir is hidden now), which gives an unsandboxed shell;
+ *    ~/.ssh (that dir is hidden on every spawn, and created empty when it is
+ *    missing, so a key inside it or a planted authorized_keys is out of
+ *    reach), which gives an unsandboxed shell;
  *  - abstract unix sockets (no network namespace), e.g. @/tmp/.X11-unix/X*;
  *  - the user-unit dirs are only not DIRECTLY writable: renaming an ancestor
  *    (mv ~/.config ~/.config.x; mkdir -p ~/.config/systemd/user) moves the
@@ -69,14 +71,19 @@
  *  - the system D-Bus (/run/dbus/system_bus_socket): reachable; privileged
  *    methods are polkit-gated and the setuid polkit helper cannot run under
  *    no_new_privs, so no escalation was found, but it stays open;
- *  - reading most of what the uid can read - S6. Only these files are hidden
+ *  - reading most of what the uid can read - S6. Most key files are hidden
  *    (hideFiles, see hidden_files.mjs): each Crow home's .env, .keystore-env,
- *    board-token, phone-token and artifacts-token, every bundle .env except
- *    the browser and workspace bundles', and the app root's .env. They read
- *    empty inside. ~/.ssh is hidden as a dir. Still readable: crow.db, the
- *    sharing identity (data/identity.json), ~/.claude, the browser and workspace .env
- *    files, and the tokens that something inside the sandbox reads
- *    (models-token, llm-cloud-token, kiosk-announce-token, studio-agent-token).
+ *    board-token, phone-token and artifacts-token, the app root's .env, and
+ *    every .env / .env.* file in a bundle folder of each Crow home and of the
+ *    app root, except the browser and workspace bundles'. They read empty
+ *    inside. ~/.ssh is hidden as a dir always (created 0700 when it is
+ *    missing), and so are the instance's env/ and android-keystore/ folders.
+ *    Still readable, because something inside the sandbox reads each one:
+ *    the cloud model key (llm-cloud-token), the local models token
+ *    (models-token), the kiosk and studio tokens (kiosk-announce-token,
+ *    studio-agent-token), the browser and workspace add-on settings, the
+ *    sharing identity (data/identity.json), the database (crow.db) and
+ *    ~/.claude.
  *
  * Without bubblewrap (e.g. the cloud VM), the fallback is
  * `setpriv --no-new-privs`: no masks, but sudo/setuid are still blocked.
