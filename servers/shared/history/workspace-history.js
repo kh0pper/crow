@@ -2,18 +2,18 @@
  * workspace-history.js — a project's file history, kept in its OWN git dir.
  *
  * Every project's workspace gets a separate git directory under
- * `<data dir>/history/workspaces/<project_id>.git`, driven with
+ * `<data dir>/history/workspaces/<project id>-<project uuid>.git`, driven with
  * `--work-tree=<workspace_dir>`. That is true WHETHER OR NOT the workspace is
  * already a repository (the operator's ruling): a bot works inside the
  * workspace, so a `.git` placed there would let it plant hooks, an fsmonitor, a
  * filter/textconv driver or configuration that Crow's own git calls would then
  * execute. Keeping the git dir outside means Crow never reads anything the bot
  * can write, and a workspace that is already its own repository keeps its HEAD,
- * its branch, its log and its index completely untouched (review focus 5 of the
- * version history design). The chosen directory is recorded in
- * project_spaces.repo_path, which is a note for the owner (and for backup), never
- * a path this module trusts: `workspaceGitDir(id)` derives it from the project
- * id every time.
+ * its branch, its log and its index completely untouched. The directory is
+ * derived from the project id AND its portable uuid every time (a deleted
+ * project's id is reused by the next one, so the id alone would eventually name
+ * a stranger's history); project_spaces.repo_path records it as a note for the
+ * owner and for backup, never as a path this module trusts.
  *
  * HARDENED INVOCATION, ONE PLACE. Every git call goes through `runGit`, which
  * uses execFile with an argv array — there is no shell anywhere, so no path, ref
@@ -22,41 +22,81 @@
  * GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null, GIT_TERMINAL_PROMPT=0 and a
  * C locale, with no inherited GIT_* variable. Every call carries the same -c
  * overrides (hooks off, no fsmonitor, no signing, literal pathspecs, no
- * autocrlf/quotepath surprises, gc.auto=0) and an explicit --git-dir /
- * --work-tree, and every call has a timeout. The git dir is created with
- * `init --bare --template=` (an EMPTY template, so no sample hooks exist) and
- * then told `core.bare=false`; the Crow ignore list goes to its `info/exclude`
- * and `info/attributes` pins `* -text -filter -diff -merge -ident
- * -working-tree-encoding`, so a `.gitattributes` INSIDE the workspace cannot make
- * a filter run or rewrite bytes on the way into the object database.
+ * autocrlf/quotepath surprises, gc.auto=0, no NTFS/HFS name protection) and an
+ * explicit --git-dir / --work-tree, and every call has a timeout. The git dir is
+ * created with `init --bare --template=` (an EMPTY template, so no sample hooks
+ * exist) and then told `core.bare=false`; `info/attributes` pins `* -text -filter
+ * -diff -merge -ident -working-tree-encoding`, so a `.gitattributes` INSIDE the
+ * workspace cannot make a filter run or rewrite bytes on the way into the object
+ * database.
  *
- * ONE LOCK PER PROJECT. The sweep, a job-end commit, a restore and an erase all
- * want the same index, so each works inside a per-project promise chain
- * (`withProjectLock`). Without it, two of them race on index.lock and one call
- * loses for no good reason.
+ * THE COMMIT'S TREE IS OURS, NOT GIT'S. `git add -A` let the workspace decide
+ * what history held: an empty nested repository broke it outright, a nested repo
+ * with commits became a gitlink, and a `.gitignore` a bot wrote hid its own
+ * edits. So the walker in workspace-index.js selects the files (its deny list is
+ * workspace-deny.js), hashes them in batches, and assembles a SCRATCH index —
+ * the real index is never read or written, and nothing is checked out. The commit
+ * is `commit-tree` plus `update-ref HEAD <new> <old>`, a compare-and-swap, so a
+ * commit that lands between our read and our write is never overwritten.
+ *
+ * ONE LOCK PER PROJECT, IN EVERY PROCESS. The sweep, a job-end commit, a restore
+ * and an erase all want the same git dir, and they run in different processes
+ * (the gateway and the pi-bots runners). So every write takes the in-process
+ * promise chain (withProjectLock) AND the cross-process lock file inside the git
+ * dir (workspace-lock.js), in that order, through `withGitWriteLock`.
+ *
+ * A PROJECT THAT IS GONE IS NEVER RECORDED. `opts.isLive` is checked before the
+ * lock and again inside it; a project that fails it gets no git dir at all, and
+ * one that fails the second check has its git dir removed rather than left
+ * behind by a sweep racing a permanent delete.
  *
  * NOTHING HERE MAY BREAK THE CALLER. A missing binary, a timeout, a permission
- * error: `ensureWorkspaceHistory` reports `{ disabled: true, reason }` once,
- * `commitWorkspace` returns null, and the list functions return []. Project
- * creation and gateway boot must never fail because file history is unavailable.
+ * error, a busy lock: `ensureWorkspaceHistory` reports `{ disabled: true, reason }`
+ * once, `commitWorkspace` returns null, and the list functions return []. Project
+ * creation, a bot's job and gateway boot must never fail because file history is
+ * unavailable.
  *
  * ERASE WITHOUT A HISTORY REWRITE TOOL. History here is Crow's alone and linear,
- * so erasing one path is done with plumbing and a temporary index: replay each
- * commit oldest to newest in a scratch index, drop the path, write the tree, and
- * re-create the commit with its original author, committer, dates and message.
- * Commits whose tree did not change collapse into their parent. The work tree is
- * never touched (only the real index is refreshed, without -u), no shell is
- * involved, and the path never becomes part of a command line that a shell could
- * see. Only a DELETED file is erased: if the path exists on disk or in the newest
+ * so erasing paths is done with plumbing and a scratch index: replay the history
+ * from the first commit that touched any of them, drop every target from each
+ * tree, write the tree, and re-create the commit with its original author,
+ * committer, dates and message. Commits whose tree did not change collapse into
+ * their parent, the whole set of paths is one rewrite, and a wall-clock cap
+ * aborts cleanly with the ref unmoved. Earlier names of a deleted file (a rename)
+ * are erased too — but a name that is live again is somebody else's file and is
+ * left alone. The work tree is never touched and no shell is involved. Before the
+ * ref moves a marker is written, so a crash between the ref move and the prune is
+ * finished by the next write to the same git dir instead of leaving the erased
+ * bytes in the object database for good.
+ *
+ * Only a DELETED file is erased: if the path exists on disk or in the newest
  * tree, the erase is refused.
  */
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { resolveDataDir } from "../../db.js";
 import { AUTHOR_KINDS } from "./write-context.js";
+import { buildWorkspaceTree, EMPTY_TREE_ID } from "./workspace-index.js";
+import { acquireGitDirLock } from "./workspace-lock.js";
 
 /** Every author kind a commit trailer may name; anything else is unattributed. */
 const COMMIT_KINDS = [...AUTHOR_KINDS, "unattributed"];
@@ -68,6 +108,15 @@ const RESTORE_CODES = new Set(["invalid_path", "not_found", "unsupported", "outs
 const ERASE_PATH_CODES = new Set(["invalid_path"]);
 
 const MS_PER_DAY = 86_400_000;
+
+/** The default whole-wait budget for a write's locks (ms). */
+const DEFAULT_LOCK_WAIT_MS = 120_000;
+
+/** The default wall-clock cap for one erase rewrite (ms). */
+const DEFAULT_ERASE_CAP_MS = 10 * 60 * 1000;
+
+/** The longest string a project uuid may be, and the shortest. */
+const UUID_RE = /^[0-9a-f-]{16,64}$/;
 
 /** A plain refusal with a machine-readable code (the History API passes it on). */
 function workspaceError(code, message) {
@@ -91,18 +140,36 @@ export function historyDataDir() {
   return resolveDataDir();
 }
 
+/** The folder every project's history lives under. */
+function workspacesRoot(opts = {}) {
+  const root = opts.dataDir ? resolve(opts.dataDir) : historyDataDir();
+  return join(root, "history", "workspaces");
+}
+
+/** The name every git dir of one project must match (a uuid is optional). */
+function gitDirNameMatcher(id) {
+  return new RegExp(`^${String(id)}(-[0-9a-f-]+)?\\.git$`);
+}
+
 /**
- * The Crow git dir for one project. Derived from the project id EVERY time —
- * never read from a column, so a stale or hand-edited repo_path can never point
- * an erase (or a delete) at another directory.
+ * The Crow git dir for one project. Derived from the project id AND uuid EVERY
+ * time — never read from a column, so a stale or hand-edited repo_path can never
+ * point an erase (or a delete) at another directory, and an id reused by a
+ * deleted project's successor can never inherit the old history.
+ *
+ * @param {{id: number, uuid: string}} project
+ * @param {{dataDir?: string}} [opts]
  */
-export function workspaceGitDir(projectId, { dataDir } = {}) {
-  const id = Number(projectId);
+export function workspaceGitDir(project, { dataDir } = {}) {
+  const id = Number(project && project.id);
   if (!Number.isInteger(id) || id <= 0) {
     throw workspaceError("invalid_project", "a project's file history needs a positive project id");
   }
-  const root = dataDir ? resolve(dataDir) : historyDataDir();
-  return join(root, "history", "workspaces", `${id}.git`);
+  const uuid = project && typeof project.uuid === "string" ? project.uuid.trim() : "";
+  if (!UUID_RE.test(uuid)) {
+    throw workspaceError("invalid_project", "a project's file history needs the project's portable id");
+  }
+  return join(dataDir ? resolve(dataDir) : historyDataDir(), "history", "workspaces", `${id}-${uuid}.git`);
 }
 
 /** The project id as a positive integer, or a refusal. */
@@ -112,6 +179,12 @@ function projectIdOf(project) {
     throw workspaceError("invalid_project", "a project's file history needs a positive project id");
   }
   return id;
+}
+
+/** The project's portable uuid, or null when the caller did not pass one. */
+function projectUuidOf(project) {
+  const uuid = project && typeof project.uuid === "string" ? project.uuid.trim() : "";
+  return UUID_RE.test(uuid) ? uuid : null;
 }
 
 /** The workspace dir when it exists and is a directory; null otherwise. */
@@ -143,20 +216,11 @@ const COMMON_CONFIG = Object.freeze([
   "-c", "core.safecrlf=false",
   "-c", "gc.auto=0",
   "-c", "safe.directory=*",
+  // Names are recorded, never checked out, so a name that looks odd to NTFS or
+  // HFS must not make the index load fail.
+  "-c", "core.protectNTFS=false",
+  "-c", "core.protectHFS=false",
 ]);
-
-/** The Crow ignore list, written to the git dir's own info/exclude. */
-const IGNORE_LIST = [
-  "# Crow's own list for this project's file history. Not a workspace file.",
-  ".venv/",
-  "node_modules/",
-  "__pycache__/",
-  "*.db",
-  "*.db-wal",
-  "*.db-shm",
-  ".cache/",
-  "",
-].join("\n");
 
 /** info/attributes outranks a .gitattributes in the workspace, so bytes stay bytes. */
 const ATTRIBUTES = "* -text -filter -diff -merge -ident -working-tree-encoding\n";
@@ -204,7 +268,8 @@ function noteFailure(reason) {
  *
  * The `env` option is the test seam: it is merged OVER the from-scratch base, so
  * a test can point PATH somewhere empty and prove a missing binary degrades
- * quietly. Nothing else is inherited.
+ * quietly. `onSpawn` is called with the argv before every spawn, so a test can
+ * count the calls a rewrite makes. Nothing else is inherited.
  */
 async function runGit(argv, opts = {}) {
   const home = join(gitRoot(opts), "history", "home");
@@ -224,6 +289,14 @@ async function runGit(argv, opts = {}) {
   };
   if (opts.indexFile) base.GIT_INDEX_FILE = opts.indexFile;
   const env = { ...base, ...(opts.env || {}) };
+
+  if (typeof opts.onSpawn === "function") {
+    try {
+      opts.onSpawn(argv);
+    } catch {
+      /* a counting seam must never change the outcome */
+    }
+  }
 
   const res = await new Promise((done) => {
     let child;
@@ -250,11 +323,11 @@ async function runGit(argv, opts = {}) {
       done({ err, stdout: Buffer.alloc(0), stderr: "" });
       return;
     }
-    // commit and commit-tree read their message from stdin; everything else gets
-    // an immediately closed stdin so git never waits on a terminal. A command
-    // that exited without reading it (init, add, ...) makes the write raise EPIPE
-    // asynchronously — swallow it on the stream itself, because the call's own
-    // result is what the caller cares about.
+    // commit-tree reads its message from stdin; everything else gets an
+    // immediately closed stdin so git never waits on a terminal. A command that
+    // exited without reading it makes the write raise EPIPE asynchronously —
+    // swallow it on the stream itself, because the call's own result is what the
+    // caller cares about.
     try {
       child.stdin.on("error", () => {});
       child.stdin.end(opts.stdin == null ? "" : String(opts.stdin));
@@ -281,13 +354,49 @@ async function runGit(argv, opts = {}) {
 /** The per-project promise chain that serializes every write to one git dir. */
 const projectLocks = new Map();
 
+/** The clock a caller injected, or the wall clock. */
+function clockOf(opts) {
+  return typeof opts?.clock === "function" ? opts.clock : Date.now;
+}
+
+/** The whole-wait budget a caller asked for. */
+function lockBudgetOf(opts) {
+  const n = Number(opts?.lockWaitMs);
+  return Number.isFinite(n) ? Math.max(0, n) : DEFAULT_LOCK_WAIT_MS;
+}
+
 /**
- * Run `work` with no other work for this project in flight. A Map of promise
- * chains keyed by project id: each caller waits for the one before it and holds
- * the next slot until its own promise settles. The entry is dropped when it is
- * the tail again, so the map does not grow with every project that ever ran.
+ * Wait for a promise, but not past `waitMs`: resolves true when it settled and
+ * false when the budget ran out. The timer is NOT unref'd: a short-lived process
+ * (a bot's job-end commit) whose only remaining work is this wait must stay up
+ * for it rather than exit with an unsettled await.
  */
-async function withProjectLock(projectId, work) {
+function waitForSettle(promise, waitMs, clock) {
+  return new Promise((done) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      done(value);
+    };
+    const timer = setTimeout(() => finish(false), Math.max(0, waitMs));
+    promise.then(() => finish(true), () => finish(true));
+  });
+}
+
+/**
+ * Run `work` with no other work for this project in flight IN THIS PROCESS.
+ *
+ * A Map of promise chains keyed by project id: each caller waits for the one
+ * before it and holds the next slot until its own promise settles. The wait is
+ * bounded by `waitMs` — a predecessor that never settles (a hung git call) must
+ * not park every later job behind it. When the budget runs out this call throws
+ * `busy` and releases its own gate at once, so the chain continues without it.
+ * The entry is dropped when it is the tail again, so the map does not grow with
+ * every project that ever ran.
+ */
+async function withProjectLock(projectId, work, { waitMs = DEFAULT_LOCK_WAIT_MS, clock = Date.now } = {}) {
   const key = String(projectId);
   const previous = projectLocks.get(key) || Promise.resolve();
   let release;
@@ -295,7 +404,8 @@ async function withProjectLock(projectId, work) {
   const chained = previous.then(() => gate, () => gate);
   projectLocks.set(key, chained);
   try {
-    await previous.catch(() => {});
+    const free = await waitForSettle(previous.catch(() => {}), waitMs, clock);
+    if (!free) throw workspaceError("busy", "another change to this project's files is still running");
     return await work();
   } finally {
     release();
@@ -303,18 +413,120 @@ async function withProjectLock(projectId, work) {
   }
 }
 
+/**
+ * A live check that never turns a database hiccup into a deletion: only a
+ * definite "no" from the query is a no. A thrown error counts as live, because
+ * removing a project's history over a transient error would lose it for good.
+ */
+async function isLiveNow(opts, project) {
+  if (typeof opts.isLive !== "function") return true;
+  try {
+    return (await opts.isLive(project)) !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Everything that writes takes this: the in-process lock, then the live check,
+ * then the cross-process lock file inside the git dir, then the live check again
+ * (a purge may have won the race while we waited). A project that is gone gets no
+ * git dir at all, and one that has just gone has the directory removed.
+ *
+ * Step (5) prepares the git dir and step (6) finishes a prune a crash left behind;
+ * only then does `work(repoDir)` run.
+ *
+ * @returns {Promise<{live: false} | {live: true, value: any}>}
+ */
+async function withGitWriteLock(project, opts, work) {
+  const id = projectIdOf(project);
+  const clock = clockOf(opts);
+  const budget = lockBudgetOf(opts);
+  const startedAt = clock();
+  return withProjectLock(id, async () => {
+    if (!(await isLiveNow(opts, project))) return { live: false };
+    const repoDir = workspaceGitDir(project, opts);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    mkdirSync(repoDir, { recursive: true });
+    const remaining = Math.max(0, budget - (clock() - startedAt));
+    let lock;
+    try {
+      lock = await acquireGitDirLock(repoDir, { waitMs: remaining, clock });
+    } catch (err) {
+      // The directory vanished between our mkdir and the lock: a purge won.
+      if (err && (err.code === "gone" || err.code === "ENOENT")) return { live: false };
+      throw err;
+    }
+    try {
+      if (!(await isLiveNow(opts, project))) {
+        try { rmSync(repoDir, { recursive: true, force: true }); } catch { /* best effort */ }
+        return { live: false };
+      }
+      await initGitDir(project, opts);
+      await recoverPendingGc(repoDir, opts);
+      return { live: true, value: await work(repoDir) };
+    } finally {
+      try { lock.release(); } catch { /* never let the release fail the work */ }
+    }
+  }, { waitMs: budget, clock });
+}
+
 /* ------------------------------------------------------------ init + ensure */
 
 /**
+ * Remove another directory under history/workspaces that carries this project's
+ * id but a different (or absent) uuid: the leftover of a deleted project whose id
+ * this one now holds, or of a history created before the uuid was in the name.
+ * It is never reused — it holds a stranger's files.
+ */
+function removeStaleSiblings(repoDir, id) {
+  const root = dirname(repoDir);
+  const matcher = gitDirNameMatcher(id);
+  let names;
+  try {
+    names = readdirSync(root);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const full = join(root, name);
+    if (full === repoDir) continue;
+    if (!matcher.test(name)) continue;
+    try { rmSync(full, { recursive: true, force: true }); } catch { /* reported by the next ensure */ }
+  }
+}
+
+/**
+ * Finish a prune a crash interrupted: the marker is written before an erase moves
+ * the ref and removed after the gc, so finding it means the erased objects are
+ * still reachable through the reflog and must be dropped now.
+ */
+async function recoverPendingGc(repoDir, opts) {
+  const marker = join(repoDir, "crow-pending-gc");
+  if (!existsSync(marker)) return;
+  const run = (rest, extra) => runGit(gitArgv(repoDir, null, rest), { ...opts, ...extra });
+  try {
+    await run(["reflog", "expire", "--expire=now", "--all"], { timeout: GIT_SLOW_TIMEOUT_MS });
+    await run(["gc", "--prune=now", "--quiet"], { timeout: GIT_SLOW_TIMEOUT_MS });
+    rmSync(marker, { force: true });
+  } catch (err) {
+    // Leave the marker: the next write to this git dir tries again.
+    noteFailure(failureReason(err));
+  }
+}
+
+/**
  * Create (or refresh) the Crow git dir for a project. Idempotent: an existing
- * HEAD is left alone, the ignore list and the attributes file are rewritten (they
- * are Crow's own settings, not workspace content), and the workspace dir is never
- * created — a project can have its history ready before it has any files.
+ * HEAD is left alone, the attributes file is rewritten (it is Crow's own
+ * setting, not workspace content), and the workspace dir is never created — a
+ * project can have its history ready before it has any files.
  */
 async function initGitDir(project, opts) {
   const id = projectIdOf(project);
-  const repoDir = workspaceGitDir(id, opts);
+  const repoDir = workspaceGitDir(project, opts);
   if (!existsSync(join(repoDir, "HEAD"))) {
+    // A history under another name for this id is a leftover, never a base.
+    removeStaleSiblings(repoDir, id);
     mkdirSync(dirname(repoDir), { recursive: true });
     // An EMPTY template: no sample hooks can end up in a directory Crow's own
     // calls use. --bare puts the repository AT this path (not a .git inside it),
@@ -323,7 +535,6 @@ async function initGitDir(project, opts) {
     await runGit([...COMMON_CONFIG, `--git-dir=${repoDir}`, "config", "core.bare", "false"], opts);
   }
   mkdirSync(join(repoDir, "info"), { recursive: true });
-  writeFileSync(join(repoDir, "info", "exclude"), IGNORE_LIST, { mode: 0o600 });
   writeFileSync(join(repoDir, "info", "attributes"), ATTRIBUTES, { mode: 0o600 });
   return repoDir;
 }
@@ -331,17 +542,31 @@ async function initGitDir(project, opts) {
 /**
  * Give one project a file history, and record where it is on the project row.
  *
- * Idempotent, and safe to call before the workspace exists. Never throws: a
- * missing binary or a failing call comes back as `{ disabled: true, reason }`
- * and is logged once, so project creation and boot carry on.
+ * Idempotent, and safe to call before the workspace exists. The uuid is read
+ * from project_spaces when the caller did not pass one (a project's creation path
+ * knows only its id and workspace dir). Never throws: a missing binary or a
+ * failing call comes back as `{ disabled: true, reason }` and is logged once, so
+ * project creation and boot carry on.
  *
  * @returns {Promise<{repoDir: string} | {disabled: true, reason: string}>}
  */
-export async function ensureWorkspaceHistory(db, project, { dataDir, env, gitBin } = {}) {
-  const opts = { dataDir, env, gitBin };
+export async function ensureWorkspaceHistory(db, project, { dataDir, env, gitBin, isLive, lockWaitMs, clock } = {}) {
+  const opts = { dataDir, env, gitBin, isLive, lockWaitMs, clock };
   try {
     const id = projectIdOf(project);
-    const repoDir = await withProjectLock(id, () => initGitDir(project, opts));
+    if (project && project.type === "learner_profile") {
+      return { disabled: true, reason: "not_covered" };
+    }
+    let uuid = projectUuidOf(project);
+    if (uuid === null && db && typeof db.execute === "function") {
+      const { rows } = await db.execute({ sql: "SELECT uuid FROM project_spaces WHERE id = ?", args: [id] });
+      uuid = projectUuidOf({ uuid: rows[0]?.uuid });
+    }
+    if (uuid === null) throw workspaceError("invalid_project", "a project's file history needs the project's portable id");
+    const full = { id, uuid, workspace_dir: project?.workspace_dir ?? null };
+    const gate = await withGitWriteLock(full, opts, (repoDir) => repoDir);
+    if (!gate.live) return { disabled: true, reason: "gone" };
+    const repoDir = gate.value;
     if (db && typeof db.execute === "function") {
       try {
         await db.execute({ sql: "UPDATE project_spaces SET repo_path = ? WHERE id = ?", args: [repoDir, id] });
@@ -363,11 +588,18 @@ export async function ensureWorkspaceHistory(db, project, { dataDir, env, gitBin
 
 /* ------------------------------------------------------------- the commit */
 
-/** A value as one line: CR/LF stripped, trimmed, empty as null. */
+/**
+ * A value as one line: EVERY C0 control character and DEL becomes a space (not
+ * only CR/LF — a stray \x01 or \x1f is how a display name could otherwise forge
+ * a record boundary in a listing), then trimmed and collapsed.
+ */
 function singleLine(value) {
   if (value === null || value === undefined) return null;
-  const line = String(value).replace(/[\r\n]+/g, " ").trim();
-  return line === "" ? null : line;
+  const clean = String(value)
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+  return clean === "" ? null : clean;
 }
 
 /** The author a commit records: a known kind, plus one-line ids. */
@@ -381,90 +613,177 @@ function normalizeCtx(ctx) {
 /**
  * The message a Crow commit carries: a one-line subject, a blank line, then the
  * trailers `Crow-Author-Kind`, `Crow-Author` and `Crow-Job` (the latter two only
- * when the context names them). Trailer values are one line each, always.
+ * when the context names them), plus `Crow-Mass-Delete: yes` when this commit
+ * deleted most of what was tracked (the guard that keeps a mistaken commit from
+ * being erased automatically). Trailer values are one line each, always.
  */
-function commitMessage(message, ctx) {
+function commitMessage(message, ctx, { massDelete = false } = {}) {
   const subject = (singleLine(message) || "Update").slice(0, 200);
   const { authorKind, authorId, jobId } = normalizeCtx(ctx);
   const lines = [`Crow-Author-Kind: ${authorKind}`];
   if (authorId) lines.push(`Crow-Author: ${authorId}`);
   if (jobId) lines.push(`Crow-Job: ${jobId}`);
+  if (massDelete) lines.push("Crow-Mass-Delete: yes");
   return `${subject}\n\n${lines.join("\n")}\n`;
 }
 
 /**
  * The trailers a stored message carries: ONLY the last paragraph's lines of the
- * form `Crow-Author-Kind: v`, `Crow-Author: v`, `Crow-Job: v`. A message with no
- * trailers is unattributed — never the owner (the design's rule).
+ * form `Crow-Author-Kind: v`, `Crow-Author: v`, `Crow-Job: v` and
+ * `Crow-Mass-Delete: v`. A message with no trailers is unattributed — never the
+ * owner (the design's rule).
  */
 function parseTrailers(message) {
+  const out = { authorKind: "unattributed", authorId: null, jobId: null, massDelete: false };
   const text = String(message || "").replace(/\s+$/, "");
-  if (text === "") return { authorKind: "unattributed", authorId: null, jobId: null };
+  if (text === "") return out;
   const paragraphs = text.split(/\n[ \t]*\n/);
   const last = paragraphs[paragraphs.length - 1] || "";
   let authorKind = null;
-  let authorId = null;
-  let jobId = null;
   for (const raw of last.split("\n")) {
-    const m = /^(Crow-Author-Kind|Crow-Author|Crow-Job):[ \t]*(.*)$/.exec(raw.trim());
+    const m = /^(Crow-Author-Kind|Crow-Author|Crow-Job|Crow-Mass-Delete):[ \t]*(.*)$/.exec(raw.trim());
     if (!m) continue;
     const value = singleLine(m[2]);
     if (m[1] === "Crow-Author-Kind") authorKind = value;
-    else if (m[1] === "Crow-Author") authorId = value;
-    else jobId = value;
+    else if (m[1] === "Crow-Author") out.authorId = value;
+    else if (m[1] === "Crow-Job") out.jobId = value;
+    else out.massDelete = String(value || "").toLowerCase() === "yes";
   }
-  if (authorKind === null || !COMMIT_KINDS.includes(authorKind)) authorKind = "unattributed";
-  return { authorKind, authorId, jobId };
+  out.authorKind = authorKind !== null && COMMIT_KINDS.includes(authorKind) ? authorKind : "unattributed";
+  return out;
+}
+
+/** The number of NUL-separated names in a `-z` listing. */
+function countNulNames(buffer) {
+  const text = Buffer.isBuffer(buffer) ? buffer.toString("utf8") : String(buffer ?? "");
+  return text.split("\0").filter((name) => name !== "").length;
+}
+
+/** The number of `-z` name-status tokens that are exactly `status`. */
+function countStatusTokens(buffer, status) {
+  const text = Buffer.isBuffer(buffer) ? buffer.toString("utf8") : String(buffer ?? "");
+  return text.split("\0").filter((token) => token === status).length;
+}
+
+/**
+ * Would this commit delete most of what was tracked? More than half of the
+ * tracked files AND more than 20 of them: the shape of a workspace that was
+ * unmounted, emptied or copied over, not of a person tidying up.
+ */
+async function isMassDelete(run, old, tree) {
+  const tracked = countNulNames((await run(["ls-tree", "-r", "--name-only", "-z", "HEAD"])).stdout);
+  if (tracked === 0) return false;
+  const diff = await run(["diff-tree", "-r", "--name-status", "-z", "HEAD", tree]);
+  const deleted = countStatusTokens(diff.stdout, "D");
+  return deleted > 20 && deleted * 2 > tracked;
+}
+
+/** One `commit-tree` call with the given parent (none for a root commit). */
+async function makeCommit(run, tree, parent, message, opts) {
+  const args = ["commit-tree", tree];
+  if (parent) args.push("-p", parent);
+  args.push("-F", "-");
+  const made = await run(args, {
+    stdin: message,
+    env: {
+      ...(opts.env || {}),
+      GIT_AUTHOR_NAME: "Crow",
+      GIT_AUTHOR_EMAIL: "history@localhost",
+      GIT_COMMITTER_NAME: "Crow",
+      GIT_COMMITTER_EMAIL: "history@localhost",
+    },
+  });
+  return made.text.trim();
 }
 
 /**
  * Commit the workspace as it is now, as `ctx`, with `message`.
  *
- * Lazily creates the git dir (no database needed), runs `add -A`, and commits only
- * when the index actually differs from the newest commit (or when there is no
- * commit yet and the index is not empty) — so a sweep over an idle project writes
- * nothing. Returns the new commit's id, or null when there was nothing to record
- * or the history is unavailable. Never throws.
+ * Lazily creates the git dir (no database needed), builds the tree from the
+ * workspace walk, and commits only when the tree differs from the newest commit
+ * (or when there is no commit yet and the tree is not empty) — so a sweep over an
+ * idle project writes nothing. The ref moves with a compare-and-swap; a commit
+ * that landed in between is retried once, and a second loss is reported as a
+ * conflict rather than overwriting it. Returns the new commit's id, or null when
+ * there was nothing to record, the history is unavailable, or the project is
+ * gone. Never throws.
+ *
+ * @returns {Promise<string|null>}
  */
-export async function commitWorkspace(project, ctx, message, { dataDir, env, gitBin } = {}) {
-  const opts = { dataDir, env, gitBin };
+export async function commitWorkspace(project, ctx, message, {
+  dataDir, env, gitBin, isLive, lockWaitMs, clock, onResult, onNote,
+} = {}) {
+  const opts = { dataDir, env, gitBin, isLive, lockWaitMs, clock, onResult, onNote };
   try {
-    const id = projectIdOf(project);
-    return await withProjectLock(id, () => commitUnlocked(project, ctx, message, opts));
+    if (workspaceDirOf(project) === null) return null; // no folder on disk: nothing to record
+    projectIdOf(project);
+    const gate = await withGitWriteLock(project, opts, (repoDir) => commitInRepo(project, repoDir, ctx, message, opts));
+    return gate.live ? gate.value : null;
   } catch (err) {
-    noteFailure(failureReason(err));
+    const reason = failureReason(err);
+    if (reason === "busy" && typeof onNote === "function") {
+      try { onNote("busy"); } catch { /* a note must never fail a commit */ }
+    }
+    noteFailure(reason);
     return null;
   }
 }
 
-/** commitWorkspace's body, already inside the project's lock. */
-async function commitUnlocked(project, ctx, message, opts) {
+/**
+ * commitWorkspace's body, already inside the git write lock: the whole commit is
+ * one tree, one compare-and-swap and (after one retry) the new id or null.
+ */
+async function commitInRepo(project, repoDir, ctx, message, opts) {
   const workspaceDir = workspaceDirOf(project);
-  if (workspaceDir === null) return null; // no folder on disk: nothing to record
-  const repoDir = await initGitDir(project, opts);
+  if (workspaceDir === null) return null;
   const run = (rest, extra) => runGit(gitArgv(repoDir, workspaceDir, rest), { ...opts, ...extra });
+  const indexFile = join(repoDir, "crow-commit-" + process.pid + ".index");
+  const zeros = "0".repeat(40);
+  try {
+    const built = await buildWorkspaceTree(run, workspaceDir, { indexFile });
+    const tree = built.tree;
+    const report = (sha) => {
+      if (typeof opts.onResult === "function") {
+        try { opts.onResult({ sha, skippedLarge: built.skippedLarge, skippedOther: built.skippedOther }); } catch { /* best effort */ }
+      }
+      return sha;
+    };
 
-  await run(["add", "-A"]);
+    let parent = null;
+    const head = await run(["rev-parse", "--verify", "HEAD"], { allowFail: true });
+    if (head.code === 0) {
+      parent = head.text.trim() || null;
+      const headTree = (await run(["rev-parse", "HEAD^{tree}"])).text.trim();
+      if (headTree === tree) return report(null);
+    } else if (tree === EMPTY_TREE_ID) {
+      return report(null);
+    }
 
-  const head = await run(["rev-parse", "--verify", "HEAD"], { allowFail: true });
-  if (head.code === 0) {
-    // --cached: compare the INDEX with the newest commit only. The index is what
-    // add -A just wrote, so work-tree stat noise cannot fake a change.
-    const diff = await run(["diff-index", "--cached", "--quiet", "HEAD", "--"], { allowFail: true });
-    if (diff.code === 0) return null;
-    if (diff.code !== 1) throw Object.assign(new Error("the file history could not be compared"), { code: "git_failed" });
-  } else {
-    const staged = await run(["ls-files", "--cached"]);
-    if (staged.text.trim() === "") return null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const massDelete = parent ? await isMassDelete(run, parent, tree) : false;
+      const body = commitMessage(message, ctx, { massDelete });
+      const newSha = await makeCommit(run, tree, parent, body, opts);
+      const moved = await run(["update-ref", "HEAD", newSha, parent || zeros], { allowFail: true });
+      if (moved.code === 0) return report(newSha);
+
+      // Someone else moved HEAD between our read and our write.
+      const again = await run(["rev-parse", "--verify", "HEAD"], { allowFail: true });
+      const now = again.code === 0 ? (again.text.trim() || null) : null;
+      if (now) {
+        const nowTree = (await run(["rev-parse", "HEAD^{tree}"])).text.trim();
+        if (nowTree === tree) return report(null); // it recorded the same thing
+      } else if (tree === EMPTY_TREE_ID) {
+        return report(null);
+      }
+      parent = now;
+    }
+    if (typeof opts.onNote === "function") {
+      try { opts.onNote("conflict"); } catch { /* a note must never fail a commit */ }
+    }
+    return report(null);
+  } finally {
+    try { rmSync(indexFile, { force: true }); } catch { /* a leftover scratch index is harmless */ }
   }
-
-  await run(
-    ["-c", "user.name=Crow", "-c", "user.email=history@localhost",
-      "commit", "--no-verify", "--no-gpg-sign", "--cleanup=verbatim", "-F", "-"],
-    { stdin: commitMessage(message, ctx) },
-  );
-  const tip = await run(["rev-parse", "--verify", "HEAD"]);
-  return tip.text.trim() || null;
 }
 
 /* -------------------------------------------------------------- the reader */
@@ -488,9 +807,9 @@ function normalizeRelPath(relPath) {
   return parts;
 }
 
-/** The op a `--name-status` entry maps to (anything not A or D is an update). */
+/** The op one parsed status entry maps to (anything not A or D is an update). */
 function statusOp(status) {
-  const code = String(status || "").charAt(0);
+  const code = String((status && status.status) || "").charAt(0);
   if (code === "A") return "insert";
   if (code === "D") return "delete";
   return "update";
@@ -498,52 +817,67 @@ function statusOp(status) {
 
 /** The path a status entry names IN THAT COMMIT (the destination of a rename). */
 function statusPath(status, fallback) {
-  const fields = String(status || "").split("\t");
-  if (fields.length >= 3) return fields[fields.length - 1];
-  if (fields.length === 2) return fields[1];
-  return fallback;
+  const path = status && typeof status.path === "string" ? status.path : "";
+  return path === "" ? fallback : path;
 }
 
 /**
- * Parse `--format=%H%x1f%cI%x1f%B%x1e --name-status` output into commits, oldest
- * last (git's own order). The status lines follow the message and precede the
- * next header, which is why they are recognised by shape rather than position.
+ * Parse the real bytes of `git log [--follow] -z --format=… --name-status`
+ * positionally: NOT by splitting on sentinel characters, because a path may
+ * contain one and the only thing that cannot appear in a path is NUL.
+ *
+ * Each record is `<header fields, NUL separated>` then a run of NUL/LF, then
+ * name-status tokens, each NUL-terminated, until the next `\x01` (or the end):
+ * `A\0<path>\0`, `D\0<path>\0`, `M\0<path>\0`, `R100\0<old>\0<new>\0` (a rename
+ * or copy has TWO paths; the destination is `path`, the source `oldPath`).
+ *
+ * @param {Buffer|string} input
+ * @param {{fields?: string[]}} [opts] the header field names, in git's order
+ * @returns {{sha: string, createdAt: string, message: string,
+ *   statuses: {status: string, path: string, oldPath?: string}[]}[]}
  */
-function parseLog(text) {
+function parseLog(input, { fields = ["sha", "createdAt", "message"] } = {}) {
+  const data = Buffer.isBuffer(input) ? input : Buffer.from(String(input ?? ""), "utf8");
+  const SOH = 0x01;
+  const NUL = 0x00;
+  const LF = 0x0a;
   const out = [];
-  let rest = String(text || "");
-  while (rest.length) {
-    const header = /^([0-9a-f]{40})\x1f/.exec(rest);
-    if (!header) break;
-    rest = rest.slice(41);
-    const isoAt = rest.indexOf("\x1f");
-    if (isoAt < 0) break;
-    const createdAt = rest.slice(0, isoAt);
-    rest = rest.slice(isoAt + 1);
-    const messageAt = rest.indexOf("\x1e");
-    if (messageAt < 0) break;
-    const message = rest.slice(0, messageAt);
-    rest = rest.slice(messageAt + 1);
-    const statuses = [];
-    for (;;) {
-      const nl = rest.indexOf("\n");
-      const line = nl < 0 ? rest : rest.slice(0, nl);
-      if (/^[A-Z][0-9]*\t/.test(line)) {
-        statuses.push(line);
-        rest = nl < 0 ? "" : rest.slice(nl + 1);
-        continue;
-      }
-      if (line.trim() === "") {
-        if (nl < 0) {
-          rest = "";
-          break;
-        }
-        rest = rest.slice(nl + 1);
-        continue;
-      }
-      break;
+  let i = 0;
+  const readTo = (byte) => {
+    const start = i;
+    while (i < data.length && data[i] !== byte) i++;
+    const slice = data.subarray(start, i);
+    if (i < data.length) i++;
+    return slice;
+  };
+  while (i < data.length) {
+    if (data[i] !== SOH) break;
+    i++;
+    const record = { sha: "", createdAt: "", message: "", statuses: [] };
+    for (const field of fields) {
+      const value = readTo(NUL).toString("utf8");
+      record[field] = value;
     }
-    out.push({ sha: header[1], createdAt, message, statuses });
+    if (!/^[0-9a-f]{40}$/.test(record.sha)) break;
+    while (i < data.length && (data[i] === NUL || data[i] === LF)) i++;
+    let done = false;
+    while (i < data.length && data[i] !== SOH) {
+      const token = readTo(NUL).toString("utf8");
+      if (!/^[A-Z][0-9]*$/.test(token)) {
+        // Anything else is not a record we understand: stop, keep what we have.
+        done = true;
+        break;
+      }
+      if (token.startsWith("R") || token.startsWith("C")) {
+        const oldPath = readTo(NUL).toString("utf8");
+        const path = readTo(NUL).toString("utf8");
+        record.statuses.push({ status: token, path, oldPath });
+      } else {
+        record.statuses.push({ status: token, path: readTo(NUL).toString("utf8") });
+      }
+    }
+    out.push(record);
+    if (done) break;
   }
   return out;
 }
@@ -567,33 +901,40 @@ async function blobSize(repoDir, workTree, commit, path, opts) {
  * One file's versions, newest first.
  *
  * `before` is the id of the oldest version the caller already has (a commit id,
- * not an offset), so a page never skips or repeats a version. Every entry carries
- * the op, the trailers' author and job, the commit's time and the size of the
- * file at that version (null for the commit that deleted it).
+ * not an offset), so a page never skips or repeats a version; the page always
+ * keeps its `--max-count`, and a `before` that is not a commit id (or whose
+ * parent does not resolve) is an empty page rather than the whole log. Every
+ * entry carries the op, the trailers' author and job, the commit's time and the
+ * size of the file at that version (null for the commit that deleted it).
  */
 export async function listWorkspaceVersions(project, relPath, { limit = 100, before = null, dataDir, env, gitBin } = {}) {
   const opts = { dataDir, env, gitBin };
   try {
-    const id = projectIdOf(project);
-    const parts = normalizeRelPath(relPath);
-    const path = parts.join("/");
-    const repoDir = workspaceGitDir(id, opts);
+    projectIdOf(project);
+    const path = normalizeRelPath(relPath).join("/");
+    const repoDir = workspaceGitDir(project, opts);
     if (!existsSync(join(repoDir, "HEAD"))) return [];
     const max = Math.max(1, Math.min(Math.trunc(Number(limit)) || 100, 500));
-    const args = ["log", "--follow", "--format=%H%x1f%cI%x1f%B%x1e", "--name-status"];
-    if (!before) args.push(`--max-count=${max}`);
-    args.push("--", path);
     const workTree = workspaceDirOf(project);
-    const res = await runGit(gitArgv(repoDir, workTree, args), opts);
-    let commits = parseLog(res.text);
-    if (before) {
-      const at = commits.findIndex((c) => c.sha === String(before));
-      commits = at < 0 ? [] : commits.slice(at + 1);
+    const run = (rest, extra) => runGit(gitArgv(repoDir, workTree, rest), { ...opts, ...extra });
+
+    let start = null;
+    if (before !== null && before !== undefined && String(before) !== "") {
+      const cursor = String(before).trim();
+      if (!/^[0-9a-f]{40}$/.test(cursor)) return [];
+      const parent = await run(["rev-parse", "--verify", `${cursor}^`], { allowFail: true });
+      if (parent.code !== 0) return [];
+      start = `${cursor}^`;
     }
-    commits = commits.slice(0, max);
+
+    const args = ["log", "--follow", "-z", "--format=%x01%H%x00%cI%x00%B%x00", "--name-status", `--max-count=${max}`];
+    if (start) args.push(start);
+    args.push("--", path);
+
+    const res = await run(args);
     const out = [];
-    for (const commit of commits) {
-      const status = commit.statuses[0] || "";
+    for (const commit of parseLog(res.stdout).slice(0, max)) {
+      const status = commit.statuses[0] || null;
       const op = statusOp(status);
       const at = statusPath(status, path);
       const size = op === "delete" ? null : await blobSize(repoDir, workTree, commit.sha, at, opts);
@@ -616,43 +957,64 @@ export async function listWorkspaceVersions(project, relPath, { limit = 100, bef
 }
 
 /**
+ * listDeletedWorkspaceFiles' body, already past the git-dir resolution: every
+ * path whose newest commit deleted it and that is not in the newest tree — the
+ * project's Trash. Each entry carries whether that commit deleted most of what
+ * was tracked (`massDelete`), which the automatic erase refuses.
+ */
+async function listDeletedInRepo(project, repoDir, opts) {
+  const workTree = workspaceDirOf(project);
+  const run = (rest, extra) => runGit(gitArgv(repoDir, workTree, rest), { ...opts, ...extra });
+  const head = await run(["rev-parse", "--verify", "HEAD"], { allowFail: true });
+  if (head.code !== 0) return [];
+
+  const names = await run(["log", "--all", "--diff-filter=D", "--name-only", "-z", "--format="], { allowFail: true });
+  if (names.code !== 0) return [];
+  const candidates = [...new Set(
+    names.stdout.toString("utf8")
+      .split("\0")
+      .map((name) => name.replace(/^[\r\n]+|[\r\n]+$/g, ""))
+      .filter(Boolean),
+  )].sort();
+
+  const out = [];
+  for (const path of candidates) {
+    if (out.length >= 200) break;
+    // A file that is back in the newest tree is not in the Trash.
+    const inHead = await run(["cat-file", "-e", `HEAD:${path}`], { allowFail: true });
+    if (inHead.code === 0) continue;
+    const last = await run([
+      "log", "-1", "-z", "--format=%x01%H%x00%cI%x00%B%x00", "--name-status", "--", path,
+    ], { allowFail: true });
+    if (last.code !== 0) continue;
+    const [commit] = parseLog(last.stdout);
+    if (!commit) continue;
+    const first = commit.statuses[0] || null;
+    if (!String((first && first.status) || "").startsWith("D")) continue;
+    const trailers = parseTrailers(commit.message);
+    out.push({
+      path,
+      deletedAt: commit.createdAt,
+      authorKind: trailers.authorKind,
+      authorId: trailers.authorId,
+      massDelete: trailers.massDelete === true,
+    });
+  }
+  return out;
+}
+
+/**
  * Files whose newest commit deleted them and that are not in the newest tree —
  * the project's Trash. Nothing here reads or writes the work tree.
  */
 export async function listDeletedWorkspaceFiles(project, { dataDir, env, gitBin, limit = 200 } = {}) {
   const opts = { dataDir, env, gitBin };
   try {
-    const id = projectIdOf(project);
-    const repoDir = workspaceGitDir(id, opts);
+    projectIdOf(project);
+    const repoDir = workspaceGitDir(project, opts);
     if (!existsSync(join(repoDir, "HEAD"))) return [];
-    const workTree = workspaceDirOf(project);
-    const run = (rest, extra) => runGit(gitArgv(repoDir, workTree, rest), { ...opts, ...extra });
-    const head = await run(["rev-parse", "--verify", "HEAD"], { allowFail: true });
-    if (head.code !== 0) return [];
     const max = Math.max(1, Math.trunc(Number(limit)) || 200);
-
-    const names = await run(["log", "--all", "--diff-filter=D", "--name-only", "--format="]);
-    const candidates = [...new Set(names.text.split("\n").map((s) => s.trim()).filter(Boolean))].sort();
-
-    const out = [];
-    for (const path of candidates) {
-      if (out.length >= max) break;
-      // A file that is back in the newest tree is not in the Trash.
-      const inHead = await run(["cat-file", "-e", `HEAD:${path}`], { allowFail: true });
-      if (inHead.code === 0) continue;
-      const last = await run(["log", "-1", "--format=%H%x1f%cI%x1f%B%x1e", "--name-status", "--", path]);
-      const [commit] = parseLog(last.text);
-      if (!commit) continue;
-      if (!String(commit.statuses[0] || "").startsWith("D")) continue;
-      const trailers = parseTrailers(commit.message);
-      out.push({
-        path,
-        deletedAt: commit.createdAt,
-        authorKind: trailers.authorKind,
-        authorId: trailers.authorId,
-      });
-    }
-    return out;
+    return (await listDeletedInRepo(project, repoDir, opts)).slice(0, max);
   } catch (err) {
     noteFailure(failureReason(err));
     return [];
@@ -661,11 +1023,97 @@ export async function listDeletedWorkspaceFiles(project, { dataDir, env, gitBin,
 
 /* -------------------------------------------------------------- the restore */
 
+/** Is this real path the workspace root or inside it? */
+function insideWorkspace(real, workspaceReal) {
+  return real === workspaceReal || real.startsWith(workspaceReal + sep);
+}
+
+/** The real path of the folder a write would land in, refused unless contained. */
+function writeParentReal(workspaceReal, target, expectedReal) {
+  let now;
+  try {
+    now = realpathSync(dirname(target));
+  } catch {
+    throw workspaceError("outside_workspace", "that path leads outside the workspace folder");
+  }
+  if (!insideWorkspace(now, workspaceReal)) {
+    throw workspaceError("outside_workspace", "that path leads outside the workspace folder");
+  }
+  if (expectedReal !== undefined && now !== expectedReal) {
+    throw workspaceError("outside_workspace", "the folder holding that path changed while it was being written");
+  }
+  return now;
+}
+
+/**
+ * The ancestor the containment check ran against must still BE that folder: a
+ * parent swapped for a link resolves somewhere else, and then the write could
+ * leave the workspace.
+ */
+function checkBaseReal(baseReal, workspaceReal) {
+  let now;
+  try {
+    now = realpathSync(baseReal);
+  } catch {
+    throw workspaceError("outside_workspace", "that path leads outside the workspace folder");
+  }
+  if (now !== baseReal || !insideWorkspace(now, workspaceReal)) {
+    throw workspaceError("outside_workspace", "the folder holding that path changed while it was being written");
+  }
+}
+
+/**
+ * Create the folders a restored file needs, ONE component at a time (never
+ * recursive), checking each component: a link is allowed only while it resolves
+ * inside the workspace, and a path that is not a folder is refused.
+ *
+ * @returns {string} the real path of the folder the file will be written into
+ */
+function ensureParentChain(workspaceReal, parts) {
+  let cur = workspaceReal;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur = join(cur, parts[i]);
+    let st = null;
+    try {
+      st = lstatSync(cur);
+    } catch (err) {
+      if (!err || err.code !== "ENOENT") throw workspaceError("invalid_path", "a folder in that path cannot be read");
+    }
+    if (st === null) {
+      try {
+        mkdirSync(cur);
+      } catch (err) {
+        if (!err || err.code !== "EEXIST") throw workspaceError("invalid_path", "a folder in that path could not be made");
+      }
+      try {
+        st = lstatSync(cur);
+      } catch {
+        throw workspaceError("invalid_path", "a folder in that path could not be read");
+      }
+    }
+    if (st.isSymbolicLink()) {
+      let real;
+      try {
+        real = realpathSync(cur);
+      } catch {
+        throw workspaceError("invalid_path", "a folder in that path cannot be resolved");
+      }
+      if (!insideWorkspace(real, workspaceReal)) {
+        throw workspaceError("outside_workspace", "that path leads outside the workspace folder");
+      }
+      continue;
+    }
+    if (!st.isDirectory()) throw workspaceError("invalid_path", "a folder in that path is not a folder");
+  }
+  return writeParentReal(workspaceReal, join(workspaceReal, ...parts));
+}
+
 /**
  * The absolute target of a restore inside the workspace, with every escape
  * checked: the path is already relative and normalized, the target itself must
  * not be a link, and the deepest ancestor that EXISTS must resolve to a place
- * inside the workspace (a symlinked folder may not lead out of it).
+ * inside the workspace (a symlinked folder may not lead out of it). The resolved
+ * ancestor is returned so the write can re-check that it is still that folder.
  */
 function containedTarget(project, parts) {
   const ws = project && project.workspace_dir;
@@ -690,20 +1138,20 @@ function containedTarget(project, parts) {
     if (existing.isDirectory()) throw workspaceError("invalid_path", "that path is a folder");
   }
   let probe = dirname(target);
-  let probeReal = null;
-  while (probeReal === null) {
+  let baseReal = null;
+  while (baseReal === null) {
     try {
-      probeReal = realpathSync(probe);
+      baseReal = realpathSync(probe);
     } catch {
       const up = dirname(probe);
       if (up === probe) throw workspaceError("invalid_path", "that path cannot be resolved");
       probe = up;
     }
   }
-  if (probeReal !== workspaceReal && !probeReal.startsWith(workspaceReal + sep)) {
+  if (!insideWorkspace(baseReal, workspaceReal)) {
     throw workspaceError("outside_workspace", "that path leads outside the workspace folder");
   }
-  return { workspaceReal, target };
+  return { workspaceReal, target, baseReal };
 }
 
 /** A blob's tree mode and object id at one commit, or null when absent there. */
@@ -722,19 +1170,30 @@ async function blobAt(repoDir, workTree, commit, path, opts) {
  * Path safety first: the path must be relative and normalized, must not lead out
  * of the workspace (through `..` or a link), and must not presently be a link or
  * a folder. The version must be a commit that is an ancestor of the newest one
- * and that actually touched the path; a stored link or a nested-repository entry
- * is refused as unsupported. Pending outside changes are committed first
+ * and that actually touched the path; a stored link or a nested-folder entry is
+ * refused as unsupported. Pending outside changes are committed first
  * (unattributed / outside-crow), so the restore's own commit holds exactly its
- * change; then the bytes are written through a temporary file in the same folder
- * and renamed into place, and the result is committed as `ctx`. Restoring what is
- * already there writes and commits nothing (`unchanged: true`).
+ * change; then the folder holding the file is re-resolved, the bytes are written
+ * through a temporary file created with O_NOFOLLOW inside the REAL parent, the
+ * parent is checked once more and the temporary file is renamed into place. A
+ * folder swapped for a link in between refuses the restore and writes nothing.
+ * Restoring what is already there writes and commits nothing (`unchanged: true`).
  *
  * @returns {Promise<{newVersionId: string|null, unchanged: boolean}>}
  */
-export async function restoreWorkspaceFile(project, relPath, sha, ctx, { dataDir, env, gitBin } = {}) {
-  const opts = { dataDir, env, gitBin };
+export async function restoreWorkspaceFile(project, relPath, sha, ctx, opts = {}) {
+  const settings = {
+    dataDir: opts.dataDir,
+    env: opts.env,
+    gitBin: opts.gitBin,
+    isLive: opts.isLive,
+    lockWaitMs: opts.lockWaitMs,
+    clock: opts.clock,
+    _beforeWrite: opts._beforeWrite,
+    _beforeRename: opts._beforeRename,
+  };
   try {
-    const id = projectIdOf(project);
+    projectIdOf(project);
     if (!isObject(ctx) || !AUTHOR_KINDS.includes(ctx.authorKind)) {
       throw workspaceError(
         "invalid_context",
@@ -743,7 +1202,10 @@ export async function restoreWorkspaceFile(project, relPath, sha, ctx, { dataDir
     }
     const version = String(sha == null ? "" : sha).trim();
     if (!/^[0-9a-f]{40}$/.test(version)) throw workspaceError("not_found", "that is not a version of this file");
-    return await withProjectLock(id, () => restoreUnlocked(project, relPath, version, ctx, opts));
+    const parts = normalizeRelPath(relPath);
+    const gate = await withGitWriteLock(project, settings, (repoDir) => restoreInRepo(project, repoDir, parts, version, ctx, settings));
+    if (!gate.live) throw workspaceError("not_found", "this project has no file history yet");
+    return gate.value;
   } catch (err) {
     if (err && RESTORE_CODES.has(err.code)) throw err;
     noteFailure(failureReason(err));
@@ -751,15 +1213,10 @@ export async function restoreWorkspaceFile(project, relPath, sha, ctx, { dataDir
   }
 }
 
-/** restoreWorkspaceFile's body, already inside the project's lock. */
-async function restoreUnlocked(project, relPath, version, ctx, opts) {
-  const id = projectIdOf(project);
-  const parts = normalizeRelPath(relPath);
+/** restoreWorkspaceFile's body, already inside the git write lock. */
+async function restoreInRepo(project, repoDir, parts, version, ctx, opts) {
   const path = parts.join("/");
-  const { target } = containedTarget(project, parts);
-
-  const repoDir = workspaceGitDir(id, opts);
-  if (!existsSync(join(repoDir, "HEAD"))) throw workspaceError("not_found", "this project has no file history yet");
+  const { workspaceReal, target, baseReal } = containedTarget(project, parts);
   const workTree = project.workspace_dir;
   const run = (rest, extra) => runGit(gitArgv(repoDir, workTree, rest), { ...opts, ...extra });
 
@@ -781,7 +1238,7 @@ async function restoreUnlocked(project, relPath, version, ctx, opts) {
   const bytes = (await run(["cat-file", "blob", at.blob])).stdout;
 
   // Pending outside changes belong to their own earlier version, not to this one.
-  await commitUnlocked(project, { authorKind: "unattributed", authorId: "outside-crow" }, "Update", opts);
+  await commitInRepo(project, repoDir, { authorKind: "unattributed", authorId: "outside-crow" }, "Update", opts);
 
   let unchanged = false;
   try {
@@ -791,19 +1248,39 @@ async function restoreUnlocked(project, relPath, version, ctx, opts) {
   }
   if (unchanged) return { newVersionId: null, unchanged: true };
 
+  if (typeof opts._beforeWrite === "function") await opts._beforeWrite();
+
   const mode = at.mode === "100755" ? 0o755 : 0o644;
-  mkdirSync(dirname(target), { recursive: true });
-  const temp = join(dirname(target), `.crow-restore-${randomBytes(6).toString("hex")}`);
+  checkBaseReal(baseReal, workspaceReal);
+  const parentReal = ensureParentChain(workspaceReal, parts);
+
+  const temp = join(parentReal, `.crow-restore-${randomBytes(6).toString("hex")}`);
+  let fd = -1;
   try {
-    writeFileSync(temp, bytes, { flag: "wx" });
+    fd = openSync(
+      temp,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+      mode,
+    );
+    writeSync(fd, bytes);
+    closeSync(fd);
+    fd = -1;
     chmodSync(temp, mode);
+
+    if (typeof opts._beforeRename === "function") await opts._beforeRename();
+    checkBaseReal(baseReal, workspaceReal);
+    writeParentReal(workspaceReal, target, parentReal);
     renameSync(temp, target);
   } catch (err) {
-    try { rmSync(temp, { force: true }); } catch {}
+    if (fd >= 0) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+    try { rmSync(temp, { force: true }); } catch { /* nothing was written */ }
+    if (err && RESTORE_CODES.has(err.code)) throw err;
     throw workspaceError("invalid_path", `that file could not be written (${failureReason(err)})`);
   }
 
-  const newVersionId = await commitUnlocked(project, ctx, `Restored ${path}`, opts);
+  const newVersionId = await commitInRepo(project, repoDir, ctx, `Restored ${path}`, opts);
   return { newVersionId, unchanged: false };
 }
 
@@ -820,188 +1297,363 @@ function nowMs(now) {
   return Date.now();
 }
 
-/** Parse `%H %an %ae %aI %cn %ce %cI %B` records into commit metadata. */
-function parseCommitMeta(text) {
+/**
+ * Parse `git log --reverse -z --format=%H%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B`
+ * output: exactly eight NUL-terminated fields per commit, the last terminator
+ * supplied by -z. A chunk whose first field is not a commit id means the stream
+ * is not what we asked for, so the rewrite refuses rather than guessing.
+ */
+function parseCommitMeta(input) {
+  const data = Buffer.isBuffer(input) ? input : Buffer.from(String(input ?? ""), "utf8");
+  const fields = data.toString("utf8").split("\0");
+  if (fields.length > 0 && fields[fields.length - 1] === "") fields.pop();
   const out = [];
-  for (const part of String(text || "").split("\x1e")) {
-    const block = part.replace(/^\n+/, "");
-    if (block === "") continue;
-    const m = /^([0-9a-f]{40})\x1f([^\x1f]*)\x1f([^\x1f]*)\x1f([^\x1f]*)\x1f([^\x1f]*)\x1f([^\x1f]*)\x1f([^\x1f]*)\x1f([\s\S]*)$/.exec(block);
-    if (!m) continue;
+  for (let i = 0; i + 7 < fields.length; i += 8) {
+    const chunk = fields.slice(i, i + 8);
+    if (!/^[0-9a-f]{40}$/.test(chunk[0])) {
+      throw Object.assign(new Error("the file history could not be read"), { code: "git_failed" });
+    }
     out.push({
-      sha: m[1],
-      authorName: m[2],
-      authorEmail: m[3],
-      authorDate: m[4],
-      committerName: m[5],
-      committerEmail: m[6],
-      committerDate: m[7],
-      message: m[8],
+      sha: chunk[0],
+      authorName: chunk[1],
+      authorEmail: chunk[2],
+      authorDate: chunk[3],
+      committerName: chunk[4],
+      committerEmail: chunk[5],
+      committerDate: chunk[6],
+      message: chunk[7],
     });
   }
   return out;
 }
 
-/**
- * Remove one deleted path from Crow's history for this project, and from nothing
- * else.
- *
- * Refused unless the path is a DELETED file: present in the work tree, or present
- * in the newest tree, means it is not in the Trash and stays. The rewrite replays
- * the linear history with plumbing and a temporary index — the work tree is never
- * touched — re-creating each kept commit with its original author, committer,
- * dates and message, and dropping the commits whose tree did not change. Then the
- * old objects are made unreachable and pruned, and only the real index is
- * refreshed (without -u).
- *
- * @returns {Promise<{erased: boolean, reason?: string}>}
- */
-export async function eraseWorkspaceFile(project, relPath, { dataDir, env, gitBin } = {}) {
-  const opts = { dataDir, env, gitBin };
-  try {
-    const id = projectIdOf(project);
-    return await withProjectLock(id, () => eraseUnlocked(project, relPath, opts));
-  } catch (err) {
-    const reason = failureReason(err);
-    noteFailure(reason);
-    return { erased: false, reason };
-  }
+/** Paths in chunks of at most `size`. */
+function chunked(items, size) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
-/** eraseWorkspaceFile's body, already inside the project's lock. */
-async function eraseUnlocked(project, relPath, opts) {
-  const id = projectIdOf(project);
-  let parts;
-  try {
-    parts = normalizeRelPath(relPath);
-  } catch (err) {
-    if (err && ERASE_PATH_CODES.has(err.code)) return { erased: false, reason: err.code };
-    throw err;
+/**
+ * Every name one path has had, following renames back through the history: the
+ * path itself plus each `path`/`oldPath` a status entry names. Erasing a renamed
+ * file must erase the names it used to have, or the blob stays reachable under
+ * the original one.
+ */
+async function followNames(run, path) {
+  const names = new Set([path]);
+  const res = await run(["log", "--follow", "-M", "-z", "--format=%x01%H%x00", "--name-status", "--", path], {
+    allowFail: true,
+  });
+  if (res.code !== 0) return [...names];
+  for (const commit of parseLog(res.stdout, { fields: ["sha"] })) {
+    for (const status of commit.statuses) {
+      if (status.oldPath) names.add(status.oldPath);
+      if (status.path) names.add(status.path);
+    }
   }
-  const path = parts.join("/");
-  const repoDir = workspaceGitDir(id, opts);
-  if (!existsSync(join(repoDir, "HEAD"))) return { erased: false, reason: "no_history" };
-  const workTree = project && project.workspace_dir;
+  return [...names];
+}
 
-  // Only a DELETED file is erased: anything still on disk stays, untouched.
+/** Is this path in the work tree, or in the newest tree? Then it is not deleted. */
+async function livePath(run, workTree, name) {
   if (typeof workTree === "string" && workTree !== "") {
     try {
-      lstatSync(join(workTree, ...parts));
-      return { erased: false, reason: "exists" };
+      lstatSync(join(workTree, ...name.split("/")));
+      return true;
     } catch {
       /* absent from the work tree: good */
     }
   }
-  const inHead = await runGit(gitArgv(repoDir, workTree, ["cat-file", "-e", `HEAD:${path}`]), { ...opts, allowFail: true });
-  if (inHead.code === 0) return { erased: false, reason: "exists" };
+  const inHead = await run(["cat-file", "-e", `HEAD:${name}`], { allowFail: true });
+  return inHead.code === 0;
+}
 
-  const indexFile = join(repoDir, "crow-erase.index");
-  try { rmSync(indexFile, { force: true }); } catch {}
+/** The earliest commit (in `rev-list --reverse HEAD` order) touching any path. */
+async function firstTouchingCommit(run, paths, order) {
+  const position = new Map(order.map((sha, i) => [sha, i]));
+  let best = null;
+  let bestAt = Infinity;
+  for (const chunk of chunked(paths, 200)) {
+    const res = await run(["rev-list", "--reverse", "HEAD", "--", ...chunk], { allowFail: true });
+    if (res.code !== 0) continue;
+    const first = res.text.split("\n").map((s) => s.trim()).find(Boolean);
+    if (!first) continue;
+    const at = position.has(first) ? position.get(first) : Infinity;
+    if (at < bestAt) {
+      bestAt = at;
+      best = first;
+    }
+  }
+  return best;
+}
+
+/** One re-created commit with its original author, committer, dates and message. */
+async function rewriteCommit(run, tree, parentId, info, opts) {
+  const args = ["commit-tree", tree];
+  if (parentId) args.push("-p", parentId);
+  args.push("-F", "-");
+  const made = await run(args, {
+    stdin: info.message,
+    env: {
+      ...(opts.env || {}),
+      GIT_AUTHOR_NAME: info.authorName,
+      GIT_AUTHOR_EMAIL: info.authorEmail,
+      GIT_AUTHOR_DATE: info.authorDate,
+      GIT_COMMITTER_NAME: info.committerName,
+      GIT_COMMITTER_EMAIL: info.committerEmail,
+      GIT_COMMITTER_DATE: info.committerDate,
+    },
+  });
+  return made.text.trim();
+}
+
+/**
+ * Remove a set of deleted paths from a project's file history, in ONE rewrite.
+ *
+ * Per path: refused unless it is DELETED (not on disk, not in the newest tree).
+ * Refused paths are reported in `skipped` with their reason; the rest proceed.
+ * Every earlier name of a path (a rename) is a target too — unless that name is
+ * live again, in which case it is another file's history and is reported as
+ * `name_in_use` and left alone.
+ *
+ * The rewrite starts at the first commit that touches any target: commits before
+ * it are reused untouched, and every commit from there is replayed in a scratch
+ * index with all targets dropped, re-created with its original metadata, and
+ * collapsed into its parent when its tree did not change. A wall-clock cap
+ * (`eraseCapMs`) throws `timeout` with the ref unmoved. The ref then moves with a
+ * compare-and-swap (`changed` when someone else moved it first), the erased
+ * objects are pruned, and a pending-gc marker covers a crash in between. The work
+ * tree is never touched.
+ *
+ * @returns {Promise<{erased: boolean, reason?: string, erasedPaths: string[],
+ *   skipped: {path: string, reason: string}[]}>}
+ */
+export async function eraseWorkspacePaths(project, relPaths, opts = {}) {
+  const settings = {
+    dataDir: opts.dataDir,
+    env: opts.env,
+    gitBin: opts.gitBin,
+    isLive: opts.isLive,
+    lockWaitMs: opts.lockWaitMs,
+    clock: opts.clock,
+    eraseCapMs: opts.eraseCapMs,
+    onSpawn: opts.onSpawn,
+    _afterRefMove: opts._afterRefMove,
+  };
+  const list = Array.isArray(relPaths) ? relPaths : [relPaths];
+  const skipped = [];
+  const targets = [];
+  for (const rel of list) {
+    try {
+      targets.push(normalizeRelPath(rel).join("/"));
+    } catch (err) {
+      const reason = err && ERASE_PATH_CODES.has(err.code) ? err.code : "invalid_path";
+      skipped.push({ path: String(rel), reason });
+    }
+  }
+  if (targets.length === 0) {
+    return { erased: false, reason: skipped[0]?.reason || "invalid_path", erasedPaths: [], skipped };
+  }
   try {
-    const listed = await runGit(gitArgv(repoDir, workTree, ["rev-list", "--reverse", "HEAD"]), opts);
-    const order = listed.text.split("\n").map((s) => s.trim()).filter(Boolean);
-    if (order.length === 0) return { erased: false, reason: "no_history" };
+    // Nothing has ever been recorded for this project: no rewrite, and no git dir
+    // created just to find that out.
+    const repoDir = workspaceGitDir(project, settings);
+    if (!existsSync(join(repoDir, "HEAD"))) {
+      return { erased: false, reason: "no_history", erasedPaths: [], skipped };
+    }
+    const gate = await withGitWriteLock(project, settings, (dir) => eraseInRepo(project, dir, targets, settings));
+    if (!gate.live) return { erased: false, reason: "gone", erasedPaths: [], skipped };
+    return { ...gate.value, skipped: [...skipped, ...(gate.value.skipped || [])] };
+  } catch (err) {
+    const reason = failureReason(err);
+    noteFailure(reason);
+    return { erased: false, reason, erasedPaths: [], skipped };
+  }
+}
 
-    const meta = await runGit(
-      gitArgv(repoDir, workTree, [
-        "log", "--reverse", "--format=%H%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%B%x1e",
-      ]),
-      opts,
-    );
-    const bySha = new Map(parseCommitMeta(meta.text).map((c) => [c.sha, c]));
+/** eraseWorkspacePaths' body, already inside the git write lock. */
+async function eraseInRepo(project, repoDir, targets, opts) {
+  const workTree = project && project.workspace_dir;
+  const run = (rest, extra) => runGit(gitArgv(repoDir, workTree, rest), { ...opts, ...extra });
+  const clock = clockOf(opts);
+  const capMs = Number.isFinite(Number(opts.eraseCapMs)) ? Math.max(0, Number(opts.eraseCapMs)) : DEFAULT_ERASE_CAP_MS;
 
-    let parentId = null;
-    let parentTree = null;
-    for (const sha of order) {
-      const info = bySha.get(sha);
-      if (!info) throw Object.assign(new Error("the file history could not be read"), { code: "git_failed" });
-      // A scratch index per commit: replay that commit's tree, drop the path,
-      // write the tree back. Nothing here can update a work-tree file.
-      await runGit(gitArgv(repoDir, workTree, ["read-tree", sha]), { ...opts, indexFile });
-      await runGit(gitArgv(repoDir, workTree, ["rm", "--cached", "--ignore-unmatch", "--", path]), { ...opts, indexFile });
-      const tree = (await runGit(gitArgv(repoDir, workTree, ["write-tree"]), { ...opts, indexFile })).text.trim();
+  const head = await run(["rev-parse", "--verify", "HEAD"], { allowFail: true });
+  if (head.code !== 0) {
+    return { erased: false, reason: "no_history", erasedPaths: [], skipped: targets.map((path) => ({ path, reason: "no_history" })) };
+  }
+  const oldTip = head.text.trim();
 
-      const isRoot = parentId === null;
-      if (!isRoot && tree === parentTree) {
-        // This commit held nothing but the erased path: it collapses into its
-        // parent, i.e. it keeps pointing at the last KEPT commit's new id.
+  const skipped = [];
+  const dead = new Set();
+  for (const target of targets) {
+    if (await livePath(run, workTree, target)) {
+      skipped.push({ path: target, reason: "exists" });
+      continue;
+    }
+    for (const name of await followNames(run, target)) {
+      if (name === target) {
+        dead.add(name);
         continue;
       }
-      const args = ["commit-tree", tree];
-      if (!isRoot) args.push("-p", parentId);
-      args.push("-F", "-");
-      const made = await runGit(gitArgv(repoDir, workTree, args), {
-        ...opts,
-        indexFile,
-        stdin: info.message,
-        env: {
-          ...(opts.env || {}),
-          GIT_AUTHOR_NAME: info.authorName,
-          GIT_AUTHOR_EMAIL: info.authorEmail,
-          GIT_AUTHOR_DATE: info.authorDate,
-          GIT_COMMITTER_NAME: info.committerName,
-          GIT_COMMITTER_EMAIL: info.committerEmail,
-          GIT_COMMITTER_DATE: info.committerDate,
-        },
-      });
-      parentId = made.text.trim();
-      parentTree = tree;
+      if (await livePath(run, workTree, name)) {
+        skipped.push({ path: name, reason: "name_in_use" });
+        continue;
+      }
+      dead.add(name);
     }
-    if (!parentId) return { erased: false, reason: "no_history" };
+  }
+  if (dead.size === 0) {
+    return { erased: false, reason: skipped[0]?.reason || "no_history", erasedPaths: [], skipped };
+  }
+  const paths = [...dead];
 
-    await runGit(gitArgv(repoDir, workTree, ["update-ref", "HEAD", parentId]), opts);
+  const listed = await run(["rev-list", "--reverse", "HEAD"]);
+  const order = listed.text.split("\n").map((s) => s.trim()).filter(Boolean);
+  if (order.length === 0) return { erased: false, reason: "no_history", erasedPaths: [], skipped };
+
+  const firstSha = await firstTouchingCommit(run, paths, order);
+  if (!firstSha) return { erased: false, reason: "no_history", erasedPaths: [], skipped };
+  const startAt = order.indexOf(firstSha);
+
+  const meta = await run([
+    "log", "--reverse", "-z", "--format=%H%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B",
+  ]);
+  const bySha = new Map(parseCommitMeta(meta.stdout).map((commit) => [commit.sha, commit]));
+
+  const indexFile = join(repoDir, "crow-erase.index");
+  const marker = join(repoDir, "crow-pending-gc");
+  try { rmSync(indexFile, { force: true }); } catch { /* stale scratch index */ }
+  const deadline = clock() + capMs;
+
+  try {
+    let parentId = startAt > 0 ? order[startAt - 1] : null;
+    let parentTree = parentId === null
+      ? null
+      : (await run(["rev-parse", `${parentId}^{tree}`])).text.trim();
+    let made = 0;
+
+    for (let i = startAt; i < order.length; i++) {
+      if (clock() > deadline) {
+        throw workspaceError("timeout", "erasing that file history took too long and was stopped");
+      }
+      const sha = order[i];
+      const info = bySha.get(sha);
+      if (!info) throw Object.assign(new Error("the file history could not be read"), { code: "git_failed" });
+
+      // A scratch index per commit: replay that commit's tree, drop every target,
+      // write the tree back. Nothing here can update a work-tree file.
+      await run(["read-tree", sha], { indexFile });
+      await run(["update-index", "--force-remove", "-z", "--stdin"], {
+        indexFile,
+        stdin: paths.map((path) => `${path}\0`).join(""),
+      });
+      const tree = (await run(["write-tree"], { indexFile })).text.trim();
+
+      const isRoot = parentId === null;
+      if (!isRoot && tree === parentTree) continue; // held nothing but erased paths
+      parentId = await rewriteCommit(run, tree, parentId, info, opts);
+      parentTree = tree;
+      made += 1;
+    }
+
+    if (made === 0 || parentId === null || parentId === oldTip) {
+      return { erased: false, reason: "no_change", erasedPaths: [], skipped };
+    }
+
+    // A crash between the ref move and the prune must not leave the erased bytes
+    // reachable for good, so the marker goes down first.
+    writeFileSync(marker, String(clock()), { mode: 0o600 });
+    const moved = await run(["update-ref", "HEAD", parentId, oldTip], { allowFail: true });
+    if (moved.code !== 0) {
+      try { rmSync(marker, { force: true }); } catch { /* nothing moved */ }
+      return { erased: false, reason: "changed", erasedPaths: [], skipped };
+    }
+
+    try {
+      if (typeof opts._afterRefMove === "function") await opts._afterRefMove();
+    } catch {
+      // Stop here, leaving the marker behind exactly as a crash would: the next
+      // write to this git dir finishes the prune.
+      return { erased: false, reason: "interrupted", erasedPaths: [], skipped };
+    }
+
     // Never created by this code (there is no rewrite helper involved), but a
     // leftover backup ref would keep the erased object alive: delete any.
-    const backups = await runGit(gitArgv(repoDir, workTree, ["for-each-ref", "--format=%(refname)", "refs/original/"]), opts);
+    const backups = await run(["for-each-ref", "--format=%(refname)", "refs/original/"]);
     for (const ref of backups.text.split("\n").map((s) => s.trim()).filter(Boolean)) {
-      await runGit(gitArgv(repoDir, workTree, ["update-ref", "-d", ref]), opts);
+      await run(["update-ref", "-d", ref]);
     }
-    await runGit(gitArgv(repoDir, workTree, ["reflog", "expire", "--expire=now", "--all"]), {
-      ...opts,
-      timeout: GIT_SLOW_TIMEOUT_MS,
-    });
-    await runGit(gitArgv(repoDir, workTree, ["gc", "--prune=now", "--quiet"]), {
-      ...opts,
-      timeout: GIT_SLOW_TIMEOUT_MS,
-    });
-    // Only the real index is refreshed, and WITHOUT -u: the work tree is untouched.
-    await runGit(gitArgv(repoDir, workTree, ["read-tree", "HEAD"]), opts);
-    return { erased: true };
+    await run(["reflog", "expire", "--expire=now", "--all"], { timeout: GIT_SLOW_TIMEOUT_MS });
+    await run(["gc", "--prune=now", "--quiet"], { timeout: GIT_SLOW_TIMEOUT_MS });
+    try { rmSync(marker, { force: true }); } catch { /* the next write clears it */ }
+    return { erased: true, erasedPaths: paths, skipped };
   } finally {
-    try { rmSync(indexFile, { force: true }); } catch {}
+    try { rmSync(indexFile, { force: true }); } catch { /* best effort */ }
   }
 }
 
 /**
- * Erase every file already in the Trash longer than the Trash period. A file that
- * still exists is never touched (eraseUnlocked refuses it). Returns the paths
- * erased, oldest first.
+ * Remove ONE deleted path from Crow's history for this project, and from nothing
+ * else. A thin wrapper over eraseWorkspacePaths, which does the rewrite.
+ *
+ * @returns {Promise<{erased: boolean, reason?: string}>}
  */
-export async function eraseExpiredWorkspaceFiles(project, trashDays, { dataDir, env, gitBin, now } = {}) {
-  const opts = { dataDir, env, gitBin };
+export async function eraseWorkspaceFile(project, relPath, opts = {}) {
+  const result = await eraseWorkspacePaths(project, [relPath], opts);
+  if (result.erased) return { erased: true };
+  const firstSkipped = (result.skipped || []).find((entry) => entry.reason) || null;
+  return { erased: false, reason: result.reason || firstSkipped?.reason || "no_history" };
+}
+
+/** Every path already in the Trash longer than `trashDays`, one rewrite. */
+async function eraseExpiredInRepo(project, repoDir, trashDays, opts, now) {
+  const days = Number(trashDays);
+  if (!Number.isFinite(days) || days <= 0) return [];
+  const cutoff = nowMs(now) - days * MS_PER_DAY;
+  const deleted = await listDeletedInRepo(project, repoDir, opts);
+  const expired = [];
+  for (const file of deleted) {
+    // A commit that deleted most of what was tracked is never the basis for an
+    // automatic erase: that is how a workspace emptied by mistake would vanish.
+    if (file.massDelete === true) continue;
+    const at = Date.parse(file.deletedAt);
+    if (!Number.isFinite(at) || at > cutoff) continue;
+    expired.push(file.path);
+  }
+  if (expired.length === 0) return [];
+  const outcome = await eraseInRepo(project, repoDir, expired, opts);
+  return outcome.erased ? outcome.erasedPaths : [];
+}
+
+/**
+ * Erase every file already in the Trash longer than the Trash period, in ONE
+ * rewrite for the whole set (never one replay per file). A file that still exists
+ * is never touched, and a file whose deleting commit took most of the workspace
+ * with it is held back for good. Returns the paths erased, oldest first.
+ */
+export async function eraseExpiredWorkspaceFiles(project, trashDays, opts = {}) {
+  const settings = {
+    dataDir: opts.dataDir,
+    env: opts.env,
+    gitBin: opts.gitBin,
+    isLive: opts.isLive,
+    lockWaitMs: opts.lockWaitMs,
+    clock: opts.clock,
+    eraseCapMs: opts.eraseCapMs,
+    onSpawn: opts.onSpawn,
+  };
   try {
-    const id = projectIdOf(project);
-    return await withProjectLock(id, () => eraseExpiredUnlocked(project, trashDays, opts, now));
+    projectIdOf(project);
+    const days = Number(trashDays);
+    if (!Number.isFinite(days) || days <= 0) return [];
+    const gate = await withGitWriteLock(project, settings, (repoDir) => eraseExpiredInRepo(project, repoDir, days, settings, opts.now));
+    return gate.live ? gate.value : [];
   } catch (err) {
     noteFailure(failureReason(err));
     return [];
   }
-}
-
-/** eraseExpiredWorkspaceFiles' body, already inside the project's lock. */
-async function eraseExpiredUnlocked(project, trashDays, opts, now) {
-  const days = Number(trashDays);
-  if (!Number.isFinite(days) || days <= 0) return [];
-  const cutoff = nowMs(now) - days * MS_PER_DAY;
-  const deleted = await listDeletedWorkspaceFiles(project, opts);
-  const erased = [];
-  for (const file of deleted) {
-    const at = Date.parse(file.deletedAt);
-    if (!Number.isFinite(at) || at > cutoff) continue;
-    const outcome = await eraseUnlocked(project, file.path, opts);
-    if (outcome.erased) erased.push(file.path);
-  }
-  return erased;
 }
 
 /* -------------------------------------------------------------- the sweep */
@@ -1010,28 +1662,55 @@ async function eraseExpiredUnlocked(project, trashDays, opts, now) {
 const sweepCursors = new WeakMap();
 
 /**
+ * A live check over the project table for the sweep and the History API: the row
+ * must exist, carry the same portable id, and not be archived. Nothing is created
+ * for a project this says no to.
+ */
+export function makeDbLiveCheck(db) {
+  if (!db || typeof db.execute !== "function") return null;
+  return async (project) => {
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT 1 AS live FROM project_spaces WHERE id = ? AND uuid = ? AND archived_at IS NULL",
+        args: [Number(project.id), String(project.uuid)],
+      });
+      return rows.length > 0;
+    } catch {
+      // A database hiccup must not cost a project its history: only a definite
+      // "not there" removes anything.
+      return true;
+    }
+  };
+}
+
+/**
  * One bounded pass over the projects that have a workspace.
  *
- * Projects whose history is not set up yet (no repo_path, or no git dir on disk)
- * go FIRST, so a project that predates this feature is picked up on the next
- * sweep — and the pass commits its current files as the unattributed baseline.
- * The rest go round-robin from an in-process cursor, so a host with more projects
- * than `batch` still covers them all over successive passes. Each project stands
- * alone: one failure is counted and the pass carries on. When `trashDays` is a
- * number, each visited project also erases the files that have been in its Trash
- * longer than that.
+ * Projects whose history is not set up yet (no repo_path, or no git dir under its
+ * exact name) go FIRST, so a project that predates this feature is picked up on
+ * the next sweep — and the pass commits its current files as the unattributed
+ * baseline. The rest go round-robin from an in-process cursor, so a host with more
+ * projects than `batch` still covers them all over successive passes. Each project
+ * stands alone: one failure is counted and the pass carries on, and a project that
+ * is gone by the time its turn comes gets no git dir at all.
+ *
+ * `trashDays` alone does not erase anything: the automatic erase is OFF unless
+ * `autoErase === true` (the local `history.workspace_auto_erase` setting), because
+ * until the Trash page lists workspace files the history copy is the only copy.
  *
  * @returns {Promise<{ensured: number, committed: number, erased: number, failed: number}>}
  */
-export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, trashDays, now } = {}) {
+export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, trashDays, autoErase = false, now, lockWaitMs } = {}) {
   const result = { ensured: 0, committed: 0, erased: 0, failed: 0 };
-  const opts = { dataDir, env, gitBin };
   if (!db || typeof db.execute !== "function") return result;
+  const base = { dataDir, env, gitBin, lockWaitMs };
+  const isLive = makeDbLiveCheck(db);
+  const eraseOn = autoErase === true && typeof trashDays === "number" && Number.isFinite(trashDays);
 
   let rows = [];
   try {
     const res = await db.execute({
-      sql: `SELECT id, workspace_dir, repo_path FROM project_spaces
+      sql: `SELECT id, uuid, workspace_dir, repo_path FROM project_spaces
              WHERE workspace_dir IS NOT NULL AND workspace_dir != ''
                AND archived_at IS NULL
                AND (type IS NULL OR type != 'learner_profile')
@@ -1051,7 +1730,7 @@ export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, tr
   for (const row of rows) {
     let canonical = null;
     try {
-      canonical = workspaceGitDir(Number(row.id), opts);
+      canonical = workspaceGitDir({ id: Number(row.id), uuid: row.uuid }, base);
     } catch {
       canonical = null;
     }
@@ -1070,12 +1749,13 @@ export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, tr
   }
 
   for (const row of picked) {
-    const project = { id: Number(row.id), workspace_dir: row.workspace_dir };
+    const project = { id: Number(row.id), uuid: row.uuid, workspace_dir: row.workspace_dir };
     const isNew = setupNow.includes(row);
+    const settings = { ...base, isLive };
     try {
-      await withProjectLock(project.id, async () => {
-        const repoDir = await initGitDir(project, opts);
-        if (isNew) result.ensured += 1;
+      const gate = await withGitWriteLock(project, settings, async (repoDir) => {
+        let committed = 0;
+        let erased = 0;
         if (String(row.repo_path || "") !== repoDir) {
           try {
             await db.execute({ sql: "UPDATE project_spaces SET repo_path = ? WHERE id = ?", args: [repoDir, project.id] });
@@ -1085,17 +1765,21 @@ export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, tr
         }
         // The baseline for a project picked up now, and any outside edit for one
         // already covered: unattributed, never the owner.
-        const sha = await commitUnlocked(
+        const sha = await commitInRepo(
           project,
+          repoDir,
           { authorKind: "unattributed", authorId: "outside-crow" },
           "Update",
-          opts,
+          settings,
         );
-        if (sha) result.committed += 1;
-        if (typeof trashDays === "number" && Number.isFinite(trashDays)) {
-          result.erased += (await eraseExpiredUnlocked(project, trashDays, opts, now)).length;
-        }
+        if (sha) committed += 1;
+        if (eraseOn) erased += (await eraseExpiredInRepo(project, repoDir, trashDays, settings, now)).length;
+        return { committed, erased };
       });
+      if (!gate.live) continue;
+      if (isNew) result.ensured += 1;
+      result.committed += gate.value.committed;
+      result.erased += gate.value.erased;
     } catch (err) {
       result.failed += 1;
       noteFailure(failureReason(err));
@@ -1107,15 +1791,52 @@ export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, tr
 /* ------------------------------------------------------------- the removal */
 
 /**
- * Delete one project's file history. EXACTLY `workspaceGitDir(projectId)` — never
- * a path from a column — so a permanent project delete can never remove anything
- * else. Returns false when the directory could not be removed.
+ * Delete one project's file history: EVERY directory under history/workspaces
+ * whose name is that project id (with a uuid, or without one from before the uuid
+ * was in the name) and nothing else. A permanent project delete must leave
+ * nothing behind, including a leftover under an older name; the directory is
+ * removed under its own cross-process lock, so an in-flight commit is not pulled
+ * out from under, and a lock that cannot be taken means "try again later" rather
+ * than a half delete.
+ *
+ * @param {number} projectId
+ * @param {{dataDir?: string, uuid?: string, lockWaitMs?: number}} [opts]
+ * @returns {Promise<boolean>} true when none remains
  */
-export function removeWorkspaceHistory(projectId, { dataDir } = {}) {
+export async function removeWorkspaceHistory(projectId, { dataDir, lockWaitMs } = {}) {
+  const id = Number(projectId);
+  if (!Number.isInteger(id) || id <= 0) return false;
+  const root = workspacesRoot({ dataDir });
+  const matcher = gitDirNameMatcher(id);
+  let names = [];
   try {
-    rmSync(workspaceGitDir(projectId, { dataDir }), { recursive: true, force: true });
-    return true;
-  } catch {
+    names = readdirSync(root);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return true;
     return false;
+  }
+  for (const name of names) {
+    if (!matcher.test(name)) continue;
+    const dir = join(root, name);
+    let lock = null;
+    try {
+      lock = await acquireGitDirLock(dir, { waitMs: lockWaitMs });
+    } catch (err) {
+      if (err && err.code === "gone") continue; // already removed
+      if (err && err.code === "busy") return false; // a write is in flight
+      return false;
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      return false;
+    } finally {
+      try { lock.release(); } catch { /* the directory is already gone */ }
+    }
+  }
+  try {
+    return readdirSync(root).every((name) => !matcher.test(name));
+  } catch (err) {
+    return Boolean(err) && err.code === "ENOENT";
   }
 }

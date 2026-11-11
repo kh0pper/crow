@@ -1280,7 +1280,7 @@ export function loadProjectSpace(projectId) {
   if (projectId == null) return null;
   const c = db(CROW_DB);
   const r = c.prepare(
-    "SELECT id, slug, name, workspace_dir, storage_prefix, tasks_db_uri, archived_at FROM project_spaces WHERE id=?"
+    "SELECT id, uuid, slug, name, workspace_dir, storage_prefix, tasks_db_uri, archived_at FROM project_spaces WHERE id=?"
   ).get(projectId);
   c.close();
   if (!r || r.archived_at) return null;

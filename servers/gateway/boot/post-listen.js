@@ -140,11 +140,18 @@ export async function runHistorySweep({ db = null, dbFactory = createDbClient } 
 /**
  * One project-file sweep (servers/shared/history/workspace-history.js): commit
  * what changed in a project's workspace OUTSIDE Crow (a terminal session, a bot
- * running a tool), attributed `unattributed` / `outside-crow`, and erase files
- * that have sat in a project's Trash past the Trash period. The Trash period is
- * the same LOCAL setting the version sweep reads (history.trash_days, default
- * 30). NEVER throws: a boot interval must not cascade into an outage, and the
- * next pass picks up whatever this one could not finish.
+ * running a tool), attributed `unattributed` / `outside-crow`.
+ *
+ * The SCHEDULED ERASE IS OFF. The Trash period is the same LOCAL setting the
+ * version sweep reads (history.trash_days, default 30), but erasing a project's
+ * deleted files from the history is behind its own LOCAL setting,
+ * `history.workspace_auto_erase` (default off, never synced, no UI yet): while the
+ * Trash page does not list workspace files, the history copy is the only copy of
+ * a file a bot deleted, and a scheduled erase would destroy it unseeably. On-
+ * demand erase and purge-on-delete are unaffected.
+ *
+ * NEVER throws: a boot interval must not cascade into an outage, and the next
+ * pass picks up whatever this one could not finish.
  *
  * `db` is passed in by the timer so the sweep keeps ONE handle for the life of
  * the process: its round-robin cursor lives with the handle, and a fresh handle
@@ -164,7 +171,12 @@ export async function runWorkspaceSweep({ db = null, dbFactory = createDbClient 
     }
     const rawDays = await readSetting(db, "history.trash_days");
     const trashDays = rawDays === null || rawDays === undefined || rawDays === "" ? 30 : Number(rawDays);
-    const result = await sweepWorkspaces(db, { trashDays });
+    const rawAutoErase = await readSetting(db, "history.workspace_auto_erase");
+    const autoEraseValue = rawAutoErase === null || rawAutoErase === undefined
+      ? ""
+      : String(rawAutoErase).trim().toLowerCase();
+    const autoErase = autoEraseValue === "true" || autoEraseValue === "1" || autoEraseValue === "on";
+    const result = await sweepWorkspaces(db, { trashDays, autoErase });
     if (result.ensured > 0 || result.committed > 0 || result.erased > 0 || result.failed > 0) {
       console.log(
         `[history] project files: ${result.ensured} newly covered, ${result.committed} change(s) recorded, ` +

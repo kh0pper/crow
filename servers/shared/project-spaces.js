@@ -117,7 +117,7 @@ export async function createProjectSpace(db, opts = {}) {
       });
     }
 
-    await ensureHistory(db, { id, workspace_dir: workspaceDir }, dataDir);
+    await ensureHistory(db, { id, workspace_dir: workspaceDir, type }, dataDir);
 
     return { id, slug: explicitSlug, workspaceDir, storagePrefix };
   }
@@ -163,7 +163,7 @@ export async function createProjectSpace(db, opts = {}) {
   const workspaceDir = workspacePathFor(dataDir, slug);
   const storagePrefix = storagePrefixFor(slug);
 
-  await ensureHistory(db, { id, workspace_dir: workspaceDir }, dataDir);
+  await ensureHistory(db, { id, workspace_dir: workspaceDir, type }, dataDir);
 
   return { id, slug, workspaceDir, storagePrefix };
 }
@@ -179,10 +179,13 @@ export async function createProjectSpace(db, opts = {}) {
  * never stop this file — and therefore project creation — from loading.
  *
  * @param {object} db       — a createDbClient()-shaped DB handle
- * @param {{id: number, workspace_dir: string}} project
+ * @param {{id: number, workspace_dir: string, type?: string}} project
  * @param {string} dataDir  — the data dir this creation already resolved
  */
 async function ensureHistory(db, project, dataDir) {
+  // A learner profile is not a project with files of its own: it never gets a git
+  // dir (the sweep skips the same type), so its delete paths need no change.
+  if (project && project.type === "learner_profile") return;
   try {
     const { ensureWorkspaceHistory } = await import("./history/workspace-history.js");
     await ensureWorkspaceHistory(db, project, { dataDir });

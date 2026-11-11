@@ -51,6 +51,12 @@ export const HISTORY_SETTINGS = Object.freeze({
   retention: "history.retention",
   trashDays: "history.trash_days",
   eraseSync: "history.erase_sync",
+  // The scheduled erase of a project's deleted WORKSPACE files. DEFAULT OFF, no
+  // UI yet: until the Trash page lists workspace files, the history copy is the
+  // only copy of a file a bot deleted (the review that blocked Task 6, H5), so
+  // only the boot sweep reads this and only an operator who sets it by hand turns
+  // it on. Instance-scope through the `history.*` pattern, so it never syncs.
+  workspaceAutoErase: "history.workspace_auto_erase",
 });
 
 /** `history.erase_sync` as a boolean (the same values erase.js accepts). */

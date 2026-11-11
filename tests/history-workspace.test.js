@@ -3,19 +3,34 @@
  *
  * Every test drives the real `git` binary against real temp directories: a
  * workspace folder, and a data dir holding the project's own git dir under
- * history/workspaces/<id>.git. Nothing here needs a gateway. Tests that need a
- * project row build a real crow.db with scripts/init-db.js (plus the
+ * history/workspaces/<id>-<uuid>.git. Nothing here needs a gateway. Tests that
+ * need a project row build a real crow.db with scripts/init-db.js (plus the
  * project_spaces.repo_path column the board migration adds), the same way
  * tests/history-api.test.js and tests/project-spaces-helper.test.js do.
  *
  * When git is not installed every test skips with a plain message instead of
  * failing: file history is optional at runtime, so it must not be a hard test
  * dependency either.
+ *
+ * The tests that run no git at all (the deny list, the settings scope and the
+ * job runner's commit hook) live in tests/history-workspace-hardening.test.js.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync, existsSync, lstatSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -35,6 +50,9 @@ const NO_GIT = GIT_OK ? false : "git is not installed on this machine";
 
 const OWNER = { authorKind: "owner", authorId: "abcd1234", jobId: "session:abcd1234" };
 const BOT = { authorKind: "bot", authorId: "hank", jobId: "card:7" };
+
+/** A project's portable id for a synthetic row: 16 hex digits, one per id. */
+const uuidFor = (id) => Number(id).toString(16).padStart(16, "0");
 
 /* ------------------------------------------------------------ environment */
 
@@ -124,8 +142,37 @@ const plainCommit = (cwd, message) => plainGit(cwd, [
   "commit", "-m", message,
 ]);
 
+/** Move the Crow history's HEAD from outside the module: the racing writer. */
+function externalCommit(gitDir, workTree, message) {
+  const tree = gitText(gitDir, workTree, ["rev-parse", "HEAD^{tree}"]).trim();
+  const parent = gitText(gitDir, workTree, ["rev-parse", "HEAD"]).trim();
+  const made = execFileSync(
+    "git",
+    [
+      "-c", "user.name=Outside", "-c", "user.email=outside@example.invalid",
+      "--git-dir=" + gitDir, "--work-tree=" + workTree,
+      "commit-tree", tree, "-p", parent, "-F", "-",
+    ],
+    { input: message, stdio: ["pipe", "pipe", "pipe"] },
+  ).toString("utf8").trim();
+  gitText(gitDir, workTree, ["update-ref", "HEAD", made, parent]);
+  return made;
+}
+
 /** A synthetic project row: the git side never reads anything else. */
-const projectFor = (id, workspaceDir) => ({ id, workspace_dir: workspaceDir });
+const projectFor = (id, workspaceDir, uuid = uuidFor(id)) => ({ id, uuid, workspace_dir: workspaceDir });
+
+/** The project object for a project a test just created through the DB. */
+async function projectOf(fx, created) {
+  const row = (await fx.db.execute({
+    sql: "SELECT uuid FROM project_spaces WHERE id = ?",
+    args: [created.id],
+  })).rows[0];
+  return projectFor(created.id, created.workspaceDir, row.uuid);
+}
+
+/** The git dir a project's history lives in. */
+const gitDirFor = (project, dataDir) => workspaceGitDir({ id: project.id, uuid: project.uuid }, { dataDir });
 
 /** Write a workspace file and commit it as `ctx`. */
 async function save(project, name, text, ctx, opts) {
@@ -153,9 +200,14 @@ test("a new project gets its own file history beside the data dir, and two saves
   const fx = await dbFixture("hist-ws-new-");
   const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
   const created = await createProjectSpace(fx.db, { name: "Workspace History" });
+  const project = await projectOf(fx, created);
 
-  const gitDir = workspaceGitDir(created.id, { dataDir: fx.dataDir });
-  assert.equal(gitDir, join(fx.dataDir, "history", "workspaces", `${created.id}.git`), "the git dir is derived from the project id");
+  const gitDir = gitDirFor(project, fx.dataDir);
+  assert.equal(
+    gitDir,
+    join(fx.dataDir, "history", "workspaces", `${created.id}-${project.uuid}.git`),
+    "the git dir is derived from the project id AND its portable id",
+  );
   assert.ok(existsSync(join(gitDir, "HEAD")), "the file history exists");
   assert.equal(existsSync(join(gitDir, "hooks")), false, "an empty template means no sample hooks at all");
 
@@ -164,7 +216,6 @@ test("a new project gets its own file history beside the data dir, and two saves
 
   mkdirSync(created.workspaceDir, { recursive: true });
   assert.equal(existsSync(join(created.workspaceDir, ".git")), false, "no .git inside the workspace");
-  const project = projectFor(created.id, created.workspaceDir);
 
   const first = await save(project, "notes.txt", "first version\n", OWNER, { dataDir: fx.dataDir });
   assert.match(first, /^[0-9a-f]{40}$/);
@@ -213,13 +264,17 @@ test("an outside edit is swept in, attributed unattributed / outside-crow", { sk
     sql: "INSERT INTO project_spaces (id, slug, name, workspace_dir) VALUES (1, 'swept-1', 'Swept', ?)",
     args: [ws],
   });
-  const project = projectFor(1, ws);
+  const project = projectFor(
+    1,
+    ws,
+    (await fx.db.execute({ sql: "SELECT uuid FROM project_spaces WHERE id = 1", args: [] })).rows[0].uuid,
+  );
   writeFileSync(join(ws, "a.txt"), "before\n");
 
   const first = await sweepWorkspaces(fx.db, { dataDir: fx.dataDir, trashDays: 30 });
   assert.deepEqual(first, { ensured: 1, committed: 1, erased: 0, failed: 0 });
   const row = (await fx.db.execute({ sql: "SELECT repo_path FROM project_spaces WHERE id = 1" })).rows[0];
-  assert.equal(row.repo_path, workspaceGitDir(1, { dataDir: fx.dataDir }));
+  assert.equal(row.repo_path, gitDirFor(project, fx.dataDir));
 
   let versions = await listWorkspaceVersions(project, "a.txt", { dataDir: fx.dataDir });
   assert.deepEqual(versions.map((v) => [v.op, v.authorKind, v.authorId]), [["insert", "unattributed", "outside-crow"]]);
@@ -294,7 +349,7 @@ test("a workspace that is its own repository keeps its HEAD, branch, log and ind
   assert.equal(plainGit(ws, ["ls-files", "-s"]), index, "the workspace's own index is untouched");
   assert.ok(lstatSync(join(ws, ".git")).isDirectory(), "the workspace keeps its own .git");
 
-  const gitDir = workspaceGitDir(project.id, { dataDir: fx.dataDir });
+  const gitDir = gitDirFor(project, fx.dataDir);
   assert.ok(existsSync(join(gitDir, "HEAD")), "Crow's history lives in its own git dir");
   assert.equal(existsSync(join(gitDir, "worktrees")), false);
   const crowTree = gitText(gitDir, ws, ["ls-tree", "-r", "--name-only", "HEAD"]);
@@ -322,7 +377,147 @@ test("a workspace inside an outer repository leaves that repository alone", { sk
   assert.equal(plainGit(outer, ["rev-parse", "HEAD"]), head, "the outer repository's HEAD is untouched");
   assert.equal(plainGit(outer, ["ls-files", "-s"]), index, "the outer repository's index is untouched");
   assert.equal(existsSync(join(ws, ".git")), false, "no .git anywhere inside the workspace");
-  assert.ok(existsSync(join(workspaceGitDir(project.id, { dataDir: fx.dataDir }), "HEAD")));
+  assert.ok(existsSync(join(gitDirFor(project, fx.dataDir), "HEAD")));
+});
+
+test("an empty nested repository, a .git FILE and a bot-written .gitignore hide nothing", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-nested-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(13, ws);
+
+  // H1: `git init` (or cargo new / npm create) in a subfolder leaves a .git with
+  // no commit. It must not stop the project's history.
+  mkdirSync(join(ws, "crate", ".git"), { recursive: true });
+  writeFileSync(join(ws, "crate", ".git", "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(join(ws, "crate", "main.rs"), "fn main() {}\n");
+  writeFileSync(join(ws, "top.txt"), "top\n");
+
+  // H2: a `.git` FILE pointing at another repository, with real files beside it.
+  mkdirSync(join(ws, "imported"));
+  writeFileSync(join(ws, "imported", ".git"), "gitdir: /somewhere/else/.git\n");
+  writeFileSync(join(ws, "imported", "inner.txt"), "beside the git file\n");
+
+  // H2: a .gitignore a bot wrote cannot hide the bot's own edits.
+  writeFileSync(join(ws, ".gitignore"), "*.log\nhidden.txt\n");
+  writeFileSync(join(ws, "hidden.txt"), "recorded all the same\n");
+  writeFileSync(join(ws, "build.log"), "recorded too\n");
+
+  const first = await commitWorkspace(project, BOT, "First save", { dataDir: fx.dataDir });
+  assert.match(first, /^[0-9a-f]{40}$/, "the nested repository does not break the commit");
+  const gitDir = gitDirFor(project, fx.dataDir);
+  const tree = gitText(gitDir, ws, ["ls-tree", "-r", "--name-only", "HEAD"]).split("\n").filter(Boolean).sort();
+  assert.deepEqual(tree, [
+    ".gitignore",
+    "build.log",
+    "crate/main.rs",
+    "hidden.txt",
+    "imported/inner.txt",
+    "top.txt",
+  ]);
+
+  // And a later edit inside the nested folder is still a new version.
+  writeFileSync(join(ws, "crate", "main.rs"), "fn main() { println!(\"hi\"); }\n");
+  const second = await commitWorkspace(project, BOT, "Second save", { dataDir: fx.dataDir });
+  assert.match(second, /^[0-9a-f]{40}$/);
+  assert.deepEqual(
+    (await listWorkspaceVersions(project, "crate/main.rs", { dataDir: fx.dataDir })).map((v) => v.op),
+    ["update", "insert"],
+  );
+});
+
+test("secrets, bot session files and build caches are never recorded", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-deny-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(14, ws);
+
+  writeFileSync(join(ws, ".env"), "SECRET=1\n");
+  writeFileSync(join(ws, ".env.local"), "SECRET=2\n");
+  writeFileSync(join(ws, ".mcp.json"), "{}\n");
+  writeFileSync(join(ws, "x.pem"), "key-ish\n");
+  writeFileSync(join(ws, "id_rsa"), "key-ish\n");
+  mkdirSync(join(ws, ".pi", "sessions"), { recursive: true });
+  writeFileSync(join(ws, ".pi", "sessions", "s.json"), "{}\n");
+  mkdirSync(join(ws, "sessions"), { recursive: true });
+  writeFileSync(join(ws, "sessions", "s.jsonl"), "{}\n");
+  mkdirSync(join(ws, "nested", "sessions"), { recursive: true });
+  writeFileSync(join(ws, "nested", "sessions", "kept.txt"), "ordinary content\n");
+  mkdirSync(join(ws, "node_modules", "pkg"), { recursive: true });
+  writeFileSync(join(ws, "node_modules", "pkg", "index.js"), "dep\n");
+  writeFileSync(join(ws, "keep.txt"), "kept\n");
+
+  const sha = await commitWorkspace(project, OWNER, "Record everything", { dataDir: fx.dataDir });
+  assert.match(sha, /^[0-9a-f]{40}$/);
+  const gitDir = gitDirFor(project, fx.dataDir);
+  const tree = gitText(gitDir, ws, ["ls-tree", "-r", "--name-only", "HEAD"]).split("\n").filter(Boolean).sort();
+  assert.deepEqual(tree, ["keep.txt", "nested/sessions/kept.txt"], "only ordinary content is recorded");
+});
+
+test("a file name with a quote, a backslash and a control character is recorded verbatim", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-oddname-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(27, ws);
+
+  // git reads `--stdin-paths` line by line and unquotes a line that starts with a
+  // quote, so these names are fed C-quoted; a wrong quoting would lose the file.
+  const names = [
+    'quote"name.txt',
+    "back\\slash.txt",
+    `tab\there.txt`,
+    `newline\nthere.txt`,
+    "plain.txt",
+  ];
+  for (const name of names) writeFileSync(join(ws, name), `${name} bytes\n`);
+
+  const sha = await commitWorkspace(project, OWNER, "Odd names", { dataDir: fx.dataDir });
+  assert.match(sha, /^[0-9a-f]{40}$/);
+  const gitDir = gitDirFor(project, fx.dataDir);
+  const tree = gitText(gitDir, ws, ["ls-tree", "-r", "--name-only", "-z", "HEAD"])
+    .split("\0")
+    .filter(Boolean)
+    .sort();
+  assert.deepEqual(tree, [...names].sort(), "every odd name is in the tree");
+  for (const name of names) {
+    assert.equal(
+      gitText(gitDir, ws, ["cat-file", "blob", `${sha}:${name}`]),
+      `${name} bytes\n`,
+      `the bytes of ${JSON.stringify(name)} are exact`,
+    );
+  }
+
+  // And a symlink is recorded as a symlink, with its target as the blob.
+  symlinkSync("plain.txt", join(ws, "alias.txt"));
+  const withLink = await commitWorkspace(project, OWNER, "Add a link", { dataDir: fx.dataDir });
+  const entry = gitText(gitDir, ws, ["ls-tree", withLink, "--", "alias.txt"]).trim();
+  assert.match(entry, /^120000 blob [0-9a-f]{40}\talias\.txt$/, "the link keeps its mode");
+  assert.equal(gitText(gitDir, ws, ["cat-file", "blob", `${withLink}:alias.txt`]), "plain.txt");
+});
+
+test("a file over the size cap is skipped and counted for the caller", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-big-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(15, ws);
+
+  writeFileSync(join(ws, "big.bin"), Buffer.alloc(26 * 1024 * 1024, 7));
+  writeFileSync(join(ws, "small.txt"), "small\n");
+
+  let seen = null;
+  const sha = await commitWorkspace(project, OWNER, "A big file landed", {
+    dataDir: fx.dataDir,
+    onResult: (result) => { seen = result; },
+  });
+  assert.match(sha, /^[0-9a-f]{40}$/);
+  assert.equal(seen.sha, sha);
+  assert.equal(seen.skippedLarge, 1, "the oversized file is counted, not recorded");
+  assert.equal(seen.skippedOther, 0);
+  const gitDir = gitDirFor(project, fx.dataDir);
+  assert.deepEqual(
+    gitText(gitDir, ws, ["ls-tree", "-r", "--name-only", "HEAD"]).split("\n").filter(Boolean),
+    ["small.txt"],
+  );
 });
 
 test("a Trash file past the period is erased from history and from nowhere else", { skip: NO_GIT }, async () => {
@@ -334,7 +529,7 @@ test("a Trash file past the period is erased from history and from nowhere else"
   writeFileSync(join(ws, "keep.txt"), "keep me\n");
   writeFileSync(join(ws, "drop.txt"), "erase me entirely\n");
   const withBoth = await commitWorkspace(project, OWNER, "Add both", { dataDir: fx.dataDir });
-  const gitDir = workspaceGitDir(project.id, { dataDir: fx.dataDir });
+  const gitDir = gitDirFor(project, fx.dataDir);
   const oldBlob = gitText(gitDir, ws, ["rev-parse", `${withBoth}:drop.txt`]).trim();
 
   unlinkSync(join(ws, "drop.txt"));
@@ -344,6 +539,7 @@ test("a Trash file past the period is erased from history and from nowhere else"
   const trashed = await listDeletedWorkspaceFiles(project, { dataDir: fx.dataDir });
   assert.deepEqual(trashed.map((entry) => entry.path), ["drop.txt"]);
   assert.equal(trashed[0].authorKind, "owner");
+  assert.equal(trashed[0].massDelete, false);
 
   // A file that still exists is never erased.
   assert.deepEqual(await eraseWorkspaceFile(project, "keep.txt", { dataDir: fx.dataDir }), { erased: false, reason: "exists" });
@@ -370,7 +566,7 @@ test("a Trash file past the period is erased from history and from nowhere else"
   assert.equal(existsSync(join(ws, "drop.txt")), false, "the erase never re-creates a file");
 });
 
-test("the ignore list keeps caches, dependencies and databases out of the history", { skip: NO_GIT }, async () => {
+test("the deny list keeps caches, dependencies and databases out of the history", { skip: NO_GIT }, async () => {
   const fx = fixture("hist-ws-ignore-");
   const ws = join(fx.root, "ws");
   mkdirSync(ws);
@@ -385,7 +581,7 @@ test("the ignore list keeps caches, dependencies and databases out of the histor
 
   const sha = await commitWorkspace(project, OWNER, "Add everything", { dataDir: fx.dataDir });
   assert.match(sha, /^[0-9a-f]{40}$/);
-  const gitDir = workspaceGitDir(project.id, { dataDir: fx.dataDir });
+  const gitDir = gitDirFor(project, fx.dataDir);
   const tree = gitText(gitDir, ws, ["ls-tree", "-r", "--name-only", "HEAD"]).split("\n").filter(Boolean);
   assert.deepEqual(tree, ["notes.md"], "only the real file is recorded");
 });
@@ -415,7 +611,7 @@ test("a planted hook or attributes file in the workspace runs nothing and change
 
   assert.equal(existsSync(hookMarker), false, "the planted hook never ran");
   assert.equal(existsSync(filterMarker), false, "the planted filter never ran");
-  const gitDir = workspaceGitDir(project.id, { dataDir: fx.dataDir });
+  const gitDir = gitDirFor(project, fx.dataDir);
   const stored = gitIn(gitDir, ws, ["cat-file", "blob", `${sha}:crlf.txt`]);
   assert.deepEqual(Buffer.from(stored), Buffer.from(crlf), "the stored bytes are byte-exact");
   assert.equal(readFileSync(join(ws, "crlf.txt"), "utf8"), crlf);
@@ -450,6 +646,45 @@ test("a restore refuses paths that could escape the workspace, and writes nothin
   assert.equal(existsSync(join(fx.root, "escape.txt")), false);
   assert.equal(existsSync(join(fx.root, "absolute.txt")), false);
   assert.equal(readFileSync(join(ws, "notes.txt"), "utf8"), "second version\n", "a refused restore changes nothing");
+});
+
+test("a parent folder swapped for a link between the flush commit and the write refuses the restore", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-swap-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(join(ws, "sub"), { recursive: true });
+  const project = projectFor(16, ws);
+  const first = await save(project, "sub/notes.txt", "first version\n", OWNER, { dataDir: fx.dataDir });
+  await save(project, "sub/notes.txt", "second version\n", OWNER, { dataDir: fx.dataDir });
+
+  const outside = join(fx.root, "outside");
+  mkdirSync(outside);
+  const swap = () => {
+    renameSync(join(ws, "sub"), join(ws, "sub-moved"));
+    symlinkSync(outside, join(ws, "sub"), "dir");
+  };
+
+  await assert.rejects(
+    () => restoreWorkspaceFile(project, "sub/notes.txt", first, OWNER, {
+      dataDir: fx.dataDir,
+      _beforeWrite: async () => { swap(); },
+    }),
+    (err) => err.code === "outside_workspace",
+  );
+  assert.equal(existsSync(join(outside, "notes.txt")), false, "nothing was written outside the workspace");
+  assert.deepEqual(readdirSync(outside), [], "no temporary file was left outside either");
+
+  // Put the real folder back, then swap it at the LAST moment instead.
+  rmSync(join(ws, "sub"), { force: true });
+  renameSync(join(ws, "sub-moved"), join(ws, "sub"));
+  await assert.rejects(
+    () => restoreWorkspaceFile(project, "sub/notes.txt", first, OWNER, {
+      dataDir: fx.dataDir,
+      _beforeRename: async () => { swap(); },
+    }),
+    (err) => err.code === "outside_workspace",
+  );
+  assert.equal(existsSync(join(outside, "notes.txt")), false, "the rename never wrote outside the workspace");
+  assert.equal(readFileSync(join(ws, "sub-moved", "notes.txt"), "utf8"), "second version\n", "the file is untouched");
 });
 
 test("a version that holds a link cannot be restored", { skip: NO_GIT }, async () => {
@@ -513,14 +748,33 @@ test("removing a project's file history removes only that project's", { skip: NO
     const ensured = await ensureWorkspaceHistory(null, project, { dataDir: fx.dataDir });
     assert.ok(ensured.repoDir);
   }
-  const dirOne = workspaceGitDir(21, { dataDir: fx.dataDir });
-  const dirTwo = workspaceGitDir(22, { dataDir: fx.dataDir });
+  const dirOne = gitDirFor(projectFor(21, one), fx.dataDir);
+  const dirTwo = gitDirFor(projectFor(22, two), fx.dataDir);
   assert.ok(existsSync(dirOne) && existsSync(dirTwo));
 
-  assert.equal(removeWorkspaceHistory(21, { dataDir: fx.dataDir }), true);
+  assert.equal(await removeWorkspaceHistory(21, { dataDir: fx.dataDir }), true);
   assert.equal(existsSync(dirOne), false, "the named project's history is gone");
   assert.ok(existsSync(dirTwo), "the other project's history is untouched");
-  assert.equal(removeWorkspaceHistory(999, { dataDir: fx.dataDir }), true, "an absent one is not a failure");
+  assert.equal(await removeWorkspaceHistory(999, { dataDir: fx.dataDir }), true, "an absent one is not a failure");
+});
+
+test("a git dir under another name for the same id is a leftover, never reused", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-stale-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const stale = join(fx.dataDir, "history", "workspaces", "77-cafebabecafebabe.git");
+  mkdirSync(stale, { recursive: true });
+  writeFileSync(join(stale, "stale.txt"), "a deleted project's leftover\n");
+
+  const project = projectFor(77, ws, uuidFor(99));
+  const ensured = await ensureWorkspaceHistory(null, project, { dataDir: fx.dataDir });
+  assert.ok(ensured.repoDir, "the history is set up");
+  assert.equal(ensured.repoDir, gitDirFor(project, fx.dataDir));
+  assert.equal(existsSync(stale), false, "the leftover is removed");
+
+  await save(project, "new.txt", "a new project's work\n", OWNER, { dataDir: fx.dataDir });
+  const tree = gitText(ensured.repoDir, ws, ["ls-tree", "-r", "--name-only", "HEAD"]).split("\n").filter(Boolean);
+  assert.deepEqual(tree, ["new.txt"], "nothing of the leftover was carried over");
 });
 
 test("the sweep covers projects in bounded batches, newest setups first", { skip: NO_GIT }, async () => {
@@ -541,7 +795,9 @@ test("the sweep covers projects in bounded batches, newest setups first", { skip
   const third = await sweepWorkspaces(fx.db, { dataDir: fx.dataDir, batch: 1 });
   assert.equal(third.ensured, 0, "nothing left to set up");
   for (const id of [1, 2]) {
-    assert.ok(existsSync(join(workspaceGitDir(id, { dataDir: fx.dataDir }), "HEAD")), `project ${id} has its history`);
+    const row = (await fx.db.execute({ sql: "SELECT uuid FROM project_spaces WHERE id = ?", args: [id] })).rows[0];
+    const project = projectFor(id, join(fx.dataDir, "projects", `batch-${id}`, "workspace"), row.uuid);
+    assert.ok(existsSync(join(gitDirFor(project, fx.dataDir), "HEAD")), `project ${id} has its history`);
   }
 });
 
@@ -550,9 +806,9 @@ test("a permanent project delete removes its file history", { skip: NO_GIT }, as
   const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
   const lifecycle = await import("../servers/shared/project-lifecycle.js");
   const created = await createProjectSpace(fx.db, { name: "History Delete" });
-  const gitDir = workspaceGitDir(created.id, { dataDir: fx.dataDir });
+  const project = await projectOf(fx, created);
+  const gitDir = gitDirFor(project, fx.dataDir);
   mkdirSync(created.workspaceDir, { recursive: true });
-  const project = projectFor(created.id, created.workspaceDir);
   await save(project, "notes.txt", "some work\n", OWNER, { dataDir: fx.dataDir });
   assert.ok(existsSync(join(gitDir, "HEAD")), "the history exists before the delete");
 
@@ -572,8 +828,8 @@ test("the History API lists and restores a workspace file, and leaves the table 
   const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
   const { listVersions, restoreWorkspaceFileVersion } = await import("../servers/shared/history/api.js");
   const created = await createProjectSpace(fx.db, { name: "API Workspace" });
+  const project = await projectOf(fx, created);
   mkdirSync(created.workspaceDir, { recursive: true });
-  const project = projectFor(created.id, created.workspaceDir);
 
   await save(project, "notes.txt", "first version\n", BOT, { dataDir: fx.dataDir });
   await save(project, "notes.txt", "second!\n", OWNER, { dataDir: fx.dataDir });
@@ -631,4 +887,416 @@ test("the History API lists and restores a workspace file, and leaves the table 
     () => restoreWorkspaceFileVersion(fx.db, { projectId: 999999, path: "x", versionId: "0".repeat(40) }, OWNER),
     (err) => err.code === "not_found",
   );
+});
+
+test("an archived project has no workspace file history to list or restore", { skip: NO_GIT }, async () => {
+  const fx = await dbFixture("hist-ws-archived-");
+  const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+  const { listVersions, restoreWorkspaceFileVersion } = await import("../servers/shared/history/api.js");
+  const created = await createProjectSpace(fx.db, { name: "Archived Workspace" });
+  const project = await projectOf(fx, created);
+  mkdirSync(created.workspaceDir, { recursive: true });
+  const first = await save(project, "notes.txt", "first version\n", OWNER, { dataDir: fx.dataDir });
+
+  await fx.db.execute({
+    sql: "UPDATE project_spaces SET archived_at = datetime('now') WHERE id = ?",
+    args: [created.id],
+  });
+
+  const itemId = `${created.id}:notes.txt`;
+  assert.deepEqual(await listVersions(fx.db, { itemType: "workspace_file", itemId, dataDir: fx.dataDir }), []);
+  await assert.rejects(
+    () => restoreWorkspaceFileVersion(fx.db, { projectId: created.id, path: "notes.txt", versionId: first }, OWNER, { dataDir: fx.dataDir }),
+    (err) => err.code === "not_found",
+  );
+});
+
+test("`before` paging keeps its page size and refuses an unusable cursor", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-paging-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(17, ws);
+  const ids = [];
+  for (let i = 1; i <= 6; i++) {
+    ids.push(await save(project, "notes.txt", `version ${i}\n`, OWNER, { dataDir: fx.dataDir }));
+  }
+
+  const newestPage = await listWorkspaceVersions(project, "notes.txt", { dataDir: fx.dataDir, limit: 2 });
+  assert.deepEqual(newestPage.map((v) => v.id), [ids[5], ids[4]]);
+
+  const nextPage = await listWorkspaceVersions(project, "notes.txt", {
+    dataDir: fx.dataDir,
+    limit: 2,
+    before: ids[4],
+  });
+  assert.equal(nextPage.length, 2, "the page size is kept, not the whole log");
+  assert.deepEqual(nextPage.map((v) => v.id), [ids[3], ids[2]]);
+
+  assert.deepEqual(
+    await listWorkspaceVersions(project, "notes.txt", { dataDir: fx.dataDir, before: "not-a-version" }),
+    [],
+    "a cursor that is not a version id is an empty page",
+  );
+  assert.deepEqual(
+    await listWorkspaceVersions(project, "notes.txt", { dataDir: fx.dataDir, before: "f".repeat(40) }),
+    [],
+    "a cursor that is not in this history is an empty page",
+  );
+});
+
+test("erasing many expired files is ONE rewrite", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-one-rewrite-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(18, ws);
+
+  writeFileSync(join(ws, "keep.txt"), "keep\n");
+  const drops = ["one.txt", "two.txt", "three.txt", "four.txt"];
+  for (const name of drops) writeFileSync(join(ws, name), `${name}\n`);
+  await commitWorkspace(project, OWNER, "Add everything", { dataDir: fx.dataDir });
+  for (const name of drops) unlinkSync(join(ws, name));
+  await commitWorkspace(project, OWNER, "Delete them all", { dataDir: fx.dataDir });
+
+  let commitTrees = 0;
+  let readTrees = 0;
+  const shaBefore = gitText(gitDirFor(project, fx.dataDir), ws, ["rev-parse", "HEAD"]).trim();
+  const commitsBefore = Number(gitText(gitDirFor(project, fx.dataDir), ws, ["rev-list", "--count", "HEAD"]).trim());
+  const inAMonth = () => new Date(Date.now() + 31 * 86_400_000);
+  const erased = await eraseExpiredWorkspaceFiles(project, 30, {
+    dataDir: fx.dataDir,
+    now: inAMonth,
+    onSpawn: (argv) => {
+      if (argv.includes("commit-tree")) commitTrees += 1;
+      if (argv.includes("read-tree")) readTrees += 1;
+    },
+  });
+  assert.deepEqual([...erased].sort(), [...drops].sort(), "every expired file is gone");
+  assert.ok(commitTrees <= commitsBefore, `one replay: ${commitTrees} re-created commits for ${commitsBefore} original commits`);
+  assert.ok(readTrees <= commitsBefore, `one replay: ${readTrees} replayed trees for ${commitsBefore} original commits`);
+  assert.equal(readFileSync(join(ws, "keep.txt"), "utf8"), "keep\n");
+  assert.notEqual(gitText(gitDirFor(project, fx.dataDir), ws, ["rev-parse", "HEAD"]).trim(), shaBefore);
+});
+
+test("an erase past its time cap stops with HEAD untouched", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-cap-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(19, ws);
+  writeFileSync(join(ws, "keep.txt"), "keep\n");
+  writeFileSync(join(ws, "drop.txt"), "drop\n");
+  await commitWorkspace(project, OWNER, "Add both", { dataDir: fx.dataDir });
+  unlinkSync(join(ws, "drop.txt"));
+  await commitWorkspace(project, OWNER, "Delete drop", { dataDir: fx.dataDir });
+
+  const gitDir = gitDirFor(project, fx.dataDir);
+  const headBefore = gitText(gitDir, ws, ["rev-parse", "HEAD"]).trim();
+  let ticks = 0;
+  const result = await eraseWorkspaceFile(project, "drop.txt", {
+    dataDir: fx.dataDir,
+    eraseCapMs: 10,
+    clock: () => {
+      ticks += 100;
+      return ticks;
+    },
+  });
+  assert.deepEqual(result, { erased: false, reason: "timeout" });
+  assert.equal(gitText(gitDir, ws, ["rev-parse", "HEAD"]).trim(), headBefore, "HEAD did not move");
+  assert.equal(existsSync(join(gitDir, "crow-pending-gc")), false, "no prune marker was left behind");
+});
+
+test("a commit that lands during an erase is never overwritten", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-race-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(20, ws);
+  writeFileSync(join(ws, "keep.txt"), "keep\n");
+  writeFileSync(join(ws, "drop.txt"), "drop\n");
+  await commitWorkspace(project, OWNER, "Add both", { dataDir: fx.dataDir });
+  unlinkSync(join(ws, "drop.txt"));
+  await commitWorkspace(project, OWNER, "Delete drop", { dataDir: fx.dataDir });
+
+  const gitDir = gitDirFor(project, fx.dataDir);
+  let racedInto = null;
+  const result = await eraseWorkspaceFile(project, "drop.txt", {
+    dataDir: fx.dataDir,
+    onSpawn: (argv) => {
+      // The compare-and-swap is about to run: another writer moves HEAD first.
+      if (racedInto === null && argv.includes("update-ref")) {
+        racedInto = externalCommit(gitDir, ws, "a commit made during the erase");
+      }
+    },
+  });
+  assert.notEqual(racedInto, null, "the racing commit happened");
+  assert.equal(result.erased, false);
+  assert.equal(result.reason, "changed", "the erase aborts rather than overwriting the other commit");
+  assert.equal(gitText(gitDir, ws, ["rev-parse", "HEAD"]).trim(), racedInto, "the racing commit survived");
+});
+
+test("rename-then-delete-then-erase removes the original blob too", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-rename-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(23, ws);
+
+  writeFileSync(join(ws, "a.txt"), "the original bytes\n");
+  const first = await commitWorkspace(project, OWNER, "Add a", { dataDir: fx.dataDir });
+  const gitDir = gitDirFor(project, fx.dataDir);
+  const oldBlob = gitText(gitDir, ws, ["rev-parse", `${first}:a.txt`]).trim();
+
+  renameSync(join(ws, "a.txt"), join(ws, "b.txt"));
+  await commitWorkspace(project, OWNER, "Rename a to b", { dataDir: fx.dataDir });
+  unlinkSync(join(ws, "b.txt"));
+  await commitWorkspace(project, OWNER, "Delete b", { dataDir: fx.dataDir });
+
+  const inAMonth = () => new Date(Date.now() + 31 * 86_400_000);
+  const erased = await eraseExpiredWorkspaceFiles(project, 30, { dataDir: fx.dataDir, now: inAMonth });
+  assert.deepEqual([...erased].sort(), ["a.txt", "b.txt"], "both names are erased");
+  assert.equal(gitText(gitDir, ws, ["log", "--all", "--format=%H", "--", "a.txt"]).trim(), "");
+  assert.equal(gitText(gitDir, ws, ["log", "--all", "--format=%H", "--", "b.txt"]).trim(), "");
+  let objectGone = false;
+  try {
+    gitIn(gitDir, ws, ["cat-file", "-e", oldBlob]);
+  } catch {
+    objectGone = true;
+  }
+  assert.equal(objectGone, true, "the original blob is gone, not just the new name");
+});
+
+test("an earlier name that is live again is not erased", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-name-in-use-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(24, ws);
+
+  writeFileSync(join(ws, "a.txt"), "the original bytes\n");
+  await commitWorkspace(project, OWNER, "Add a", { dataDir: fx.dataDir });
+  renameSync(join(ws, "a.txt"), join(ws, "b.txt"));
+  await commitWorkspace(project, OWNER, "Rename a to b", { dataDir: fx.dataDir });
+  // A NEW file takes the old name and is recorded: it is not the erased one.
+  writeFileSync(join(ws, "a.txt"), "a different file entirely\n");
+  await commitWorkspace(project, OWNER, "Add a new a", { dataDir: fx.dataDir });
+  unlinkSync(join(ws, "b.txt"));
+  await commitWorkspace(project, OWNER, "Delete b", { dataDir: fx.dataDir });
+
+  const inAMonth = () => new Date(Date.now() + 31 * 86_400_000);
+  const erased = await eraseExpiredWorkspaceFiles(project, 30, { dataDir: fx.dataDir, now: inAMonth });
+  assert.deepEqual(erased, ["b.txt"], "only the deleted name is erased");
+  const gitDir = gitDirFor(project, fx.dataDir);
+  assert.match(
+    gitText(gitDir, ws, ["log", "--format=%H", "--", "a.txt"]).trim(),
+    /^[0-9a-f]{40}/,
+    "the live file's history is kept",
+  );
+});
+
+test("a pending-gc marker left by an interrupted erase is cleared by the next sweep", { skip: NO_GIT }, async () => {
+  const fx = await dbFixture("hist-ws-marker-");
+  const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+  const created = await createProjectSpace(fx.db, { name: "Interrupted Erase" });
+  const project = await projectOf(fx, created);
+  mkdirSync(created.workspaceDir, { recursive: true });
+
+  writeFileSync(join(created.workspaceDir, "keep.txt"), "keep\n");
+  writeFileSync(join(created.workspaceDir, "drop.txt"), "drop\n");
+  const withBoth = await commitWorkspace(project, OWNER, "Add both", { dataDir: fx.dataDir });
+  const gitDir = gitDirFor(project, fx.dataDir);
+  const oldBlob = gitText(gitDir, created.workspaceDir, ["rev-parse", `${withBoth}:drop.txt`]).trim();
+  unlinkSync(join(created.workspaceDir, "drop.txt"));
+  await commitWorkspace(project, OWNER, "Delete drop", { dataDir: fx.dataDir });
+
+  const result = await eraseWorkspaceFile(project, "drop.txt", {
+    dataDir: fx.dataDir,
+    _afterRefMove: async () => { throw new Error("the process died here"); },
+  });
+  assert.deepEqual(result, { erased: false, reason: "interrupted" });
+  assert.ok(existsSync(join(gitDir, "crow-pending-gc")), "the marker is left behind, exactly like a crash");
+
+  const swept = await sweepWorkspaces(fx.db, { dataDir: fx.dataDir });
+  assert.equal(swept.failed, 0);
+  assert.equal(existsSync(join(gitDir, "crow-pending-gc")), false, "the next write finishes the prune");
+  let objectGone = false;
+  try {
+    gitIn(gitDir, created.workspaceDir, ["cat-file", "-e", oldBlob]);
+  } catch {
+    objectGone = true;
+  }
+  assert.equal(objectGone, true, "the erased bytes are pruned by the recovery");
+});
+
+test("the scheduled erase is off by default, and the mass-delete guard holds", { skip: NO_GIT }, async () => {
+  const fx = await dbFixture("hist-ws-autoerase-");
+  const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+  const created = await createProjectSpace(fx.db, { name: "Auto Erase" });
+  const project = await projectOf(fx, created);
+  const ws = created.workspaceDir;
+  mkdirSync(ws, { recursive: true });
+
+  writeFileSync(join(ws, "keep.txt"), "keep\n");
+  writeFileSync(join(ws, "drop.txt"), "drop\n");
+  await commitWorkspace(project, OWNER, "Add both", { dataDir: fx.dataDir });
+  unlinkSync(join(ws, "drop.txt"));
+  await commitWorkspace(project, OWNER, "Delete drop", { dataDir: fx.dataDir });
+
+  const inAMonth = () => new Date(Date.now() + 31 * 86_400_000);
+  const off = await sweepWorkspaces(fx.db, { dataDir: fx.dataDir, trashDays: 30, now: inAMonth });
+  assert.equal(off.erased, 0, "the scheduled erase is off unless it is switched on");
+  assert.deepEqual(
+    (await listDeletedWorkspaceFiles(project, { dataDir: fx.dataDir })).map((file) => file.path),
+    ["drop.txt"],
+    "the file is still restorable",
+  );
+
+  const on = await sweepWorkspaces(fx.db, { dataDir: fx.dataDir, trashDays: 30, autoErase: true, now: inAMonth });
+  assert.equal(on.erased, 1, "switched on, it erases past the Trash period");
+  assert.deepEqual(await listDeletedWorkspaceFiles(project, { dataDir: fx.dataDir }), []);
+});
+
+test("a commit that deletes most of the workspace is never erased automatically", { skip: NO_GIT }, async () => {
+  const fx = await dbFixture("hist-ws-massdelete-");
+  const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+  const created = await createProjectSpace(fx.db, { name: "Mass Delete" });
+  const project = await projectOf(fx, created);
+  const ws = created.workspaceDir;
+  mkdirSync(ws, { recursive: true });
+
+  const names = Array.from({ length: 22 }, (_, i) => `file-${i + 1}.txt`);
+  for (const name of names) writeFileSync(join(ws, name), `${name}\n`);
+  await commitWorkspace(project, OWNER, "Add twenty-two files", { dataDir: fx.dataDir });
+  for (const name of names) unlinkSync(join(ws, name));
+  await commitWorkspace(project, OWNER, "Everything is gone", { dataDir: fx.dataDir });
+
+  const gitDir = gitDirFor(project, fx.dataDir);
+  assert.match(gitText(gitDir, ws, ["log", "-1", "--format=%B"]), /Crow-Mass-Delete: yes/, "the trailer is recorded");
+  const trashed = await listDeletedWorkspaceFiles(project, { dataDir: fx.dataDir });
+  assert.equal(trashed.length, names.length);
+  assert.equal(trashed.every((file) => file.massDelete === true), true, "every file carries the deleting commit's flag");
+
+  const inAMonth = () => new Date(Date.now() + 31 * 86_400_000);
+  const swept = await sweepWorkspaces(fx.db, { dataDir: fx.dataDir, trashDays: 30, autoErase: true, now: inAMonth });
+  assert.equal(swept.erased, 0, "the guard holds the whole set back");
+  assert.equal((await listDeletedWorkspaceFiles(project, { dataDir: fx.dataDir })).length, names.length);
+});
+
+test("a project that is gone gets no git dir, and one purged mid-write loses it", { skip: NO_GIT }, async () => {
+  const fx = await dbFixture("hist-ws-gone-");
+  const ws = join(fx.dataDir, "projects", "gone-1", "workspace");
+  mkdirSync(ws, { recursive: true });
+  const project = projectFor(31, ws, uuidFor(31));
+  const gitDir = gitDirFor(project, fx.dataDir);
+  const { makeDbLiveCheck } = await import("../servers/shared/history/workspace-history.js");
+
+  // No row at all: nothing is created.
+  const missing = makeDbLiveCheck(fx.db);
+  assert.equal(await commitWorkspace(project, OWNER, "nothing", { dataDir: fx.dataDir, isLive: missing }), null);
+  assert.equal(existsSync(gitDir), false);
+
+  // The row disappears while the write waits for the lock: the just-made dir goes.
+  let calls = 0;
+  const goneAfterTheLock = async () => {
+    calls += 1;
+    return calls === 1;
+  };
+  assert.equal(await commitWorkspace(project, OWNER, "nothing", { dataDir: fx.dataDir, isLive: goneAfterTheLock }), null);
+  assert.equal(calls, 2, "the check runs before and inside the lock");
+  assert.equal(existsSync(gitDir), false, "no directory is left behind");
+});
+
+test("a sweep and a purge that run together leave no git dir", { skip: NO_GIT }, async () => {
+  const fx = await dbFixture("hist-ws-purge-race-");
+  const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+  const created = await createProjectSpace(fx.db, { name: "Purged" });
+  const project = await projectOf(fx, created);
+  mkdirSync(created.workspaceDir, { recursive: true });
+  await save(project, "notes.txt", "some work\n", OWNER, { dataDir: fx.dataDir });
+  const gitDir = gitDirFor(project, fx.dataDir);
+  assert.ok(existsSync(join(gitDir, "HEAD")));
+
+  await fx.db.execute({ sql: "DELETE FROM project_members WHERE project_id = ?", args: [created.id] });
+  await fx.db.execute({ sql: "DELETE FROM project_spaces WHERE id = ?", args: [created.id] });
+  await Promise.all([
+    sweepWorkspaces(fx.db, { dataDir: fx.dataDir }),
+    removeWorkspaceHistory(created.id, { dataDir: fx.dataDir }),
+  ]);
+  assert.equal(existsSync(gitDir), false, "nothing is left under history/workspaces");
+});
+
+test("a job-end commit and a workspace commit racing both land", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-children-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(25, ws);
+  writeFileSync(join(ws, "one.txt"), "v0\n");
+  writeFileSync(join(ws, "two.txt"), "v0\n");
+  await commitWorkspace(project, OWNER, "Start", { dataDir: fx.dataDir });
+
+  const moduleUrl = new URL("../servers/shared/history/workspace-history.js", import.meta.url).href;
+  const childScript = (fileName, text, authorId) => `
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { commitWorkspace } from ${JSON.stringify(moduleUrl)};
+const project = ${JSON.stringify(project)};
+writeFileSync(join(project.workspace_dir, ${JSON.stringify(fileName)}), ${JSON.stringify(text)});
+const sha = await commitWorkspace(project, { authorKind: "bot", authorId: ${JSON.stringify(authorId)} }, "child save", { dataDir: ${JSON.stringify(fx.dataDir)} });
+process.stdout.write(sha == null ? "" : String(sha));
+`;
+  const runChild = (script) => new Promise((done, fail) => {
+    execFile(
+      process.execPath,
+      ["--input-type=module", "-e", script],
+      { cwd: REPO, env: { ...process.env, CROW_DB_PATH: "" } },
+      (err, stdout, stderr) => {
+        if (err) fail(new Error(`${err.message}\n${stderr}`));
+        else done(stdout);
+      },
+    );
+  });
+
+  const [one, two] = await Promise.all([
+    runChild(childScript("one.txt", "from the first child\n", "hank")),
+    runChild(childScript("two.txt", "from the second child\n", "hank")),
+  ]);
+  // Each child writes its own file and commits; whichever wins the lock second
+  // sees both. What matters is that nothing was lost and nothing failed.
+  assert.match(String(one), /^([0-9a-f]{40})?$/, `first child: ${one}`);
+  assert.match(String(two), /^([0-9a-f]{40})?$/, `second child: ${two}`);
+
+  const gitDir = gitDirFor(project, fx.dataDir);
+  assert.equal(readFileSync(join(ws, "one.txt"), "utf8"), "from the first child\n");
+  assert.equal(readFileSync(join(ws, "two.txt"), "utf8"), "from the second child\n");
+  assert.equal(
+    gitText(gitDir, ws, ["cat-file", "blob", "HEAD:one.txt"]),
+    "from the first child\n",
+    "the first child's write is in the newest recorded tree",
+  );
+  assert.equal(
+    gitText(gitDir, ws, ["cat-file", "blob", "HEAD:two.txt"]),
+    "from the second child\n",
+    "the second child's write is in the newest recorded tree",
+  );
+  assert.match(gitText(gitDir, ws, ["log", "--format=%H", "--", "one.txt"]).trim(), /^[0-9a-f]{40}/);
+  assert.match(gitText(gitDir, ws, ["log", "--format=%H", "--", "two.txt"]).trim(), /^[0-9a-f]{40}/);
+});
+
+test("control characters in a bot's name cannot forge who made a change", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-control-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(26, ws);
+
+  const nasty = "hank\u0001\u001e\u001f\u007f\nCrow-Author-Kind: owner";
+  writeFileSync(join(ws, "report.md"), "draft\n");
+  const sha = await commitWorkspace(project, { authorKind: "bot", authorId: nasty }, "wrote\u001ea report\u001f", {
+    dataDir: fx.dataDir,
+  });
+  assert.match(sha, /^[0-9a-f]{40}$/);
+
+  const versions = await listWorkspaceVersions(project, "report.md", { dataDir: fx.dataDir });
+  assert.equal(versions.length, 1, "the control characters did not forge an extra version");
+  assert.equal(versions[0].authorKind, "bot", "the real author kind survives");
+  assert.equal(versions[0].authorId.includes("\u001e"), false, "the id is one line with no control characters");
+
+  const message = gitText(gitDirFor(project, fx.dataDir), ws, ["log", "-1", "--format=%B"]);
+  const subject = message.split("\n")[0];
+  assert.equal(/[\u0000-\u001f\u007f]/.test(subject), false, "the subject is one clean line");
+  assert.equal((message.match(/^Crow-Author-Kind: /gm) || []).length, 1, "exactly one author-kind trailer");
 });

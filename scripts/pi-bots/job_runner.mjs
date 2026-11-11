@@ -548,12 +548,22 @@ export async function deliverResult(job, text, { log = () => {}, deliverChannel 
  * file history, a slow disk — none of it may fail or hold up the job. The only
  * cost a caller can see is the git timeouts.
  *
+ * The commit is a TRY, not a wait: a 30-second lock budget, and a busy lock is
+ * noted and skipped (`onNote` → `log`) so an in-flight erase can never park a bot
+ * job behind it. The project is passed with its portable uuid so the history is
+ * the CURRENT project's, and `isLive` re-reads the project row, so a job whose
+ * project was purged mid-turn never re-creates its history.
+ *
+ * `commit` is the test seam: a caller (a test) may inject the commit function so
+ * attribution and the busy path are provable without a git binary. It defaults to
+ * the real `commitWorkspace`.
+ *
  * @param {object} job        the claimed bot_jobs row
  * @param {"start"|"end"} phase
- * @param {{bridge?: object|null, log?: Function}} [opts]
+ * @param {{bridge?: object|null, log?: Function, commit?: Function}} [opts]
  * @returns {Promise<string|null>} the new version id, or null when nothing was recorded
  */
-export async function commitJobWorkspace(job, phase, { bridge = null, log = () => {} } = {}) {
+export async function commitJobWorkspace(job, phase, { bridge = null, log = () => {}, commit = null } = {}) {
   try {
     if (!job || !job.bot_id) return null;
     if (phase !== "start" && phase !== "end") return null;
@@ -566,7 +576,13 @@ export async function commitJobWorkspace(job, phase, { bridge = null, log = () =
 
     const project = {
       id: Number(space.id == null ? bot.project_id : space.id),
+      uuid: space.uuid == null ? null : space.uuid,
       workspace_dir: space.workspace_dir,
+    };
+    // Never record into a project that was purged while this job ran.
+    const isLive = async (candidate) => {
+      const row = b.loadProjectSpace(Number(candidate.id));
+      return Boolean(row) && String(row.uuid) === String(candidate.uuid);
     };
     const ctx = phase === "start"
       ? { authorKind: "unattributed", authorId: "outside-crow" }
@@ -578,8 +594,15 @@ export async function commitJobWorkspace(job, phase, { bridge = null, log = () =
     const message = phase === "start"
       ? "Update"
       : `${bot.display_name || job.bot_id} finished a job`;
-    const { commitWorkspace } = await import("../../servers/shared/history/workspace-history.js");
-    return (await commitWorkspace(project, ctx, message)) || null;
+    const doCommit = commit || (await import("../../servers/shared/history/workspace-history.js")).commitWorkspace;
+    const sha = await doCommit(project, ctx, message, {
+      isLive,
+      lockWaitMs: 30_000,
+      onNote: (note) => {
+        try { log(`job ${job.job_id} workspace history skipped (${note})`); } catch { /* log is best effort */ }
+      },
+    });
+    return sha || null;
   } catch (e) {
     try { log("job workspace history skipped (non-fatal): " + ((e && e.message) || e)); } catch { /* log is best effort */ }
     return null;

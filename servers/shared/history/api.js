@@ -250,12 +250,12 @@ function parseWorkspaceItemId(itemId) {
 /** The project a workspace file belongs to, or null when there is no such row. */
 async function loadWorkspaceProject(db, projectId) {
   const { rows } = await db.execute({
-    sql: "SELECT id, workspace_dir FROM project_spaces WHERE id = ?",
+    sql: "SELECT id, uuid, workspace_dir FROM project_spaces WHERE id = ? AND archived_at IS NULL",
     args: [projectId],
   });
   const row = rows[0];
   if (!row) return null;
-  return { id: Number(row.id), workspace_dir: row.workspace_dir ?? null };
+  return { id: Number(row.id), uuid: row.uuid ?? null, workspace_dir: row.workspace_dir ?? null };
 }
 
 /**
@@ -324,8 +324,11 @@ export async function restoreWorkspaceFileVersion(db, { projectId, path, version
   if (!SHA_RE.test(sha)) throw historyError("invalid_request", "a workspace file version id is a version string");
   const project = await loadWorkspaceProject(db, id);
   if (!project) throw historyError("not_found", `no project ${id}`);
-  const { restoreWorkspaceFile } = await import("./workspace-history.js");
-  return restoreWorkspaceFile(project, path, sha, ctx, { dataDir });
+  const { restoreWorkspaceFile, makeDbLiveCheck } = await import("./workspace-history.js");
+  // The project row may be purged while the restore waits for the git dir: the
+  // live check is what stops a restore from re-creating a deleted project's
+  // history (or writing into its old workspace).
+  return restoreWorkspaceFile(project, path, sha, ctx, { dataDir, isLive: makeDbLiveCheck(db) });
 }
 
 /* ---------------------------------------------------------- listVersions */

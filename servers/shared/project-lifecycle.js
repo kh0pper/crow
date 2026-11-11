@@ -561,12 +561,15 @@ export async function deleteProject(db, projectId, {
 
   // A permanent project delete also removes the project's own file history AT ONCE (the
   // operator's ruling): nothing about a deleted project should linger under history/workspaces.
-  // EXACTLY the directory the project id derives, never a path read from a column, so a stale
-  // repo_path can never make a delete remove another project's history. The data dir is
-  // resolved the way creation resolved it (workspace-history's own rule). Archiving keeps it.
+  // EXACTLY the directories the project id derives (its uuid-suffixed name, or a leftover under
+  // the older id-only name), never a path read from a column, so a stale repo_path can never make
+  // a delete remove another project's history — and the id is safe to reuse afterwards because no
+  // directory carrying it survives. The removal waits for the project's write lock, so an
+  // in-flight commit is not pulled out from under. The data dir is resolved the way creation
+  // resolved it (workspace-history's own rule). Archiving keeps the history.
   try {
     const { removeWorkspaceHistory } = await import("./history/workspace-history.js");
-    if (!removeWorkspaceHistory(id, { dataDir })) {
+    if (!(await removeWorkspaceHistory(id, { dataDir }))) {
       console.warn(`[project-lifecycle] delete ${id}: the project's file history could not be removed`);
       partial.push("history-workspace");
     }
@@ -729,7 +732,7 @@ export async function resumeProjectDelete(db, projectId, {
   if (wanted.has("history-workspace")) {
     try {
       const { removeWorkspaceHistory } = await import("./history/workspace-history.js");
-      if (!removeWorkspaceHistory(id, { dataDir })) throw new Error("could not be removed");
+      if (!(await removeWorkspaceHistory(id, { dataDir, uuid }))) throw new Error("could not be removed");
     } catch (err) {
       console.warn(`[project-lifecycle] resume ${id}: file history removal failed:`, err?.message || err);
       partial.push("history-workspace");
