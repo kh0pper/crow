@@ -102,8 +102,8 @@ export async function rememberTypedKeys(db, key, service, secrets, { now, save =
       const secret = secrets && Object.hasOwn(secrets, f.name) ? secrets[f.name] : null;
       if (typeof secret !== "string" || secret === "") continue;
       const active = (await db.execute({
-        sql: "SELECT 1 FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ? AND status = 'active' LIMIT 1",
-        args: [service.bundleId, f.name],
+        sql: "SELECT 1 FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ? AND status = 'active' AND key_id = ? LIMIT 1",
+        args: [service.bundleId, f.name, key.id],
       })).rows.length > 0;
       if (active) continue;
       await save(db, key, {

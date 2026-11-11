@@ -448,3 +448,14 @@ test("a saved key sealed under a key this machine lacks answers no_saved_key (th
     assert.equal(ctx.test.calls.length, 0);
   });
 });
+
+test("a remembered row sealed under a key this machine lacks is replaced by the next typed connect", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  await withApp(ctx, async (s) => {
+    assert.equal((await typedGh(s, "spring", "Main", CANARY)).status, 201);
+    await ctx.db.execute({ sql: "UPDATE crow_keychain SET key_id = 'some-other-key' WHERE kind = 'extension' AND env_key = ?", args: [GH] });
+    assert.equal((await typedGh(s, "home", "Main", "second-canary-1")).status, 201);
+    assert.deepEqual(await savedSecret(ctx.db), { [GH]: "second-canary-1" });
+  });
+});
+

@@ -449,7 +449,7 @@ export function projectServicesClientJs() {
         li.appendChild(btn);
         if (useSaved) {
           // A different key for this project (another account) is still typed in the sheet.
-          var other = el('button', 'svc-pick-btn svc-pick-btn--install', T('services.add.typeKey'));
+          var other = el('button', 'svc-pick-btn svc-pick-btn--secondary', T('services.add.typeKey'));
           other.type = 'button';
           other.setAttribute('data-svc-connect', it.serviceId);
           other.setAttribute('aria-label', T('services.add.typeKey') + ' ' + it.name);
