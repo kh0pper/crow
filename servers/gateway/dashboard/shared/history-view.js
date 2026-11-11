@@ -74,23 +74,43 @@ function clip(text, max) {
 
 /** The covered item type as a person reads it ("memory" → "Memory"). */
 export function typeWord(itemType, lang = "en") {
-  const known = ["memory", "blog_post", "context_section"];
+  // The types that HAVE a History page of their own (COVERED's, plus the two
+  // read-through stores, plus the Studio song an undo result can name). A type
+  // outside this list renders as its raw name, which is the honest fallback.
+  const known = [
+    "memory",
+    "blog_post",
+    "context_section",
+    "research_note",
+    "kb_article",
+    "bot_def",
+    "card",
+    "artifact",
+    "studio_song",
+  ];
   if (known.includes(itemType)) return t(`history.type.${itemType}`, lang);
   return String(itemType == null ? "" : itemType);
 }
 
 /**
  * The one-line label of an item, from its snapshot: a memory's content, a blog
- * post's title, a context section's title (or its key). Untrusted by definition —
- * callers must escape it (this returns the RAW string on purpose, because the
- * Trash and job lists clip it before escaping and the caller may want a full
- * version elsewhere).
+ * post's title, a context section's title (or its key), a note's title or text,
+ * a KB article's title, a bot's display name, a card's title, an artifact's
+ * title. Untrusted by definition — callers must escape it (this returns the RAW
+ * string on purpose, because the Trash and job lists clip it before escaping and
+ * the caller may want a full version elsewhere).
  */
 export function itemLabel(itemType, snapshot) {
   const s = snapshot && typeof snapshot === "object" ? snapshot : {};
   if (itemType === "memory") return clip(s.content ?? "", MAX_PREVIEW_CHARS) || "—";
   if (itemType === "blog_post") return clip(s.title ?? "", MAX_PREVIEW_CHARS) || "—";
   if (itemType === "context_section") return clip(s.section_title || s.section_key || "", MAX_PREVIEW_CHARS) || "—";
+  if (itemType === "research_note") return clip(s.title || s.content || "", MAX_PREVIEW_CHARS) || "—";
+  if (itemType === "kb_article") return clip(s.title ?? "", MAX_PREVIEW_CHARS) || "—";
+  if (itemType === "bot_def") return clip(s.display_name ?? "", MAX_PREVIEW_CHARS) || "—";
+  if (itemType === "card") return clip(s.title ?? "", MAX_PREVIEW_CHARS) || "—";
+  if (itemType === "artifact") return clip(s.title ?? "", MAX_PREVIEW_CHARS) || "—";
+  if (itemType === "studio_song") return clip(s.title || s.label || "", MAX_PREVIEW_CHARS) || "—";
   return "—";
 }
 
@@ -99,6 +119,10 @@ function backHref(itemType) {
   if (itemType === "memory") return { href: "/dashboard/memory", key: "history.back.memory" };
   if (itemType === "blog_post") return { href: "/dashboard/blog", key: "history.back.blog" };
   if (itemType === "context_section") return { href: "/dashboard/settings?section=shared-context", key: "history.back.context" };
+  if (itemType === "card") return { href: "/dashboard/board", key: "history.back.card" };
+  if (itemType === "bot_def") return { href: "/dashboard/bot-builder", key: "history.back.bot" };
+  if (itemType === "artifact") return { href: "/dashboard/artifacts", key: "history.back.artifact" };
+  if (itemType === "kb_article") return { href: "/dashboard/knowledge-base", key: "history.back.kb" };
   return null;
 }
 

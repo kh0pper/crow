@@ -77,14 +77,24 @@ export function normalizeTrashDays(days) {
  * LATEST version is a delete": if the newest version is not a delete, the newest
  * delete is older and the anti-join fails it.
  *
+ * `itemTypes` narrows the listing to those covered types. The sweep uses it to stay
+ * inside ONE store: a tasks pass must list only cards (a crow.db item cannot be
+ * erased through tasks.db's item_versions, and vice versa) — see sweep.js's erase
+ * pass. The page's own listing passes nothing and lists every type of its store.
+ * The values are COVERED's frozen item types, never caller input.
+ *
  * Exported so a test can EXPLAIN the very statement the page runs (and assert it
  * stays on the Trash index) without keeping a second copy of the query.
  *
- * @param {{before?: string|null}} [opts]
+ * @param {{before?: string|null, itemTypes?: string[]|null}} [opts]
  * @returns {string}
  */
-export function trashEntriesSql({ before = null } = {}) {
+export function trashEntriesSql({ before = null, itemTypes = null } = {}) {
   const ageFilter = typeof before === "string" && before !== "" ? " AND v.created_at <= ?" : "";
+  const typeFilter =
+    Array.isArray(itemTypes) && itemTypes.length > 0
+      ? ` AND d.item_type IN (${itemTypes.map((t) => `'${String(t).replace(/'/g, "''")}'`).join(", ")})`
+      : "";
   return `SELECT v.item_type, v.item_id, v.op, v.created_at, v.author_kind, v.author_id,
                  v.job_id, v.origin_instance, v.redacted, v.snapshot_json
             FROM (
@@ -99,7 +109,7 @@ export function trashEntriesSql({ before = null } = {}) {
                     WHERE newer.item_type = d.item_type
                       AND newer.item_id = d.item_id
                       AND newer.id > d.delete_id
-                 )${ageFilter}
+                 )${typeFilter}${ageFilter}
            ORDER BY d.delete_id DESC
            LIMIT ?`;
 }
@@ -118,13 +128,15 @@ export function trashEntriesSql({ before = null } = {}) {
  * Trash page shows — one query, two callers, no chance of the two drifting.
  *
  * @param {object} db
- * @param {{before?: string|null, limit?: number}} [opts]
+ * @param {{before?: string|null, limit?: number, itemTypes?: string[]|null}} [opts]
+ *   `itemTypes` narrows the listing to one store's covered types (see
+ *   trashEntriesSql); the page passes nothing.
  * @returns {Promise<Array<{itemType: string, itemId: string, deletedAt: string,
  *   deletedBy: {authorKind: string, authorId: string|null},
  *   jobId: string|null, originInstance: string|null, redacted: boolean,
  *   snapshot: object}>>}
  */
-export async function trashEntries(db, { before = null, limit = MAX_TRASH_ROWS } = {}) {
+export async function trashEntries(db, { before = null, limit = MAX_TRASH_ROWS, itemTypes = null } = {}) {
   const args = [];
   if (typeof before === "string" && before !== "") {
     // `<=`, not `<`: an age filter of 0 days means "everything deleted up to now",
@@ -132,7 +144,7 @@ export async function trashEntries(db, { before = null, limit = MAX_TRASH_ROWS }
     args.push(before);
   }
   args.push(normalizeLimit(limit));
-  const { rows } = await db.execute({ sql: trashEntriesSql({ before }), args });
+  const { rows } = await db.execute({ sql: trashEntriesSql({ before, itemTypes }), args });
   return rows.map((row) => ({
     itemType: row.item_type,
     itemId: String(row.item_id),

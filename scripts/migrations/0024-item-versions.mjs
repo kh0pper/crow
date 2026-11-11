@@ -84,11 +84,11 @@ import {
   ITEM_VERSIONS_ERASE_DDL,
   ITEM_VERSIONS_TRASH_INDEX_SQL,
   SECRET_COLUMN,
+  baselineSql,
   guardTriggerSql,
-  projectRefExpr,
-  snapshotExpr,
   tableColumns,
   triggerSql,
+  typesForMigration,
 } from "../../servers/shared/history/covered.js";
 import { ITEM_ERASURES_DDL, PENDING_ERASURES_DDL, PENDING_REMOTE_ERASURES_DDL } from "../../servers/shared/history/erase.js";
 
@@ -158,29 +158,16 @@ export const ITEM_VERSIONS_DDL =
   ";\n";
 
 /**
- * One `insert` baseline version per existing row of a covered table that has no
- * version yet, authored by the migration ('system'), so an upgraded instance has
- * a starting point for content that predates history.
+ * The per-item baseline statement, re-exported from covered.js.
  *
- * Guarded per ITEM (`v.item_id = CAST(t.<id> AS TEXT)`), not per item type: a row
- * already captured by a live trigger keeps its real versions instead of gaining a
- * second 'insert', and a partially completed earlier run fills only the gaps.
- * Every value goes through covered.js's BLOB-safe expression, and `project_ref`
- * is filled the same way the triggers fill it.
+ * It moved there when the BUNDLE-owned kb_articles type needed the same read:
+ * bundles/knowledge-base/server/init-tables.js baselines whatever rows that table
+ * already holds before it installs the capture triggers, and a bundle may import
+ * an app module only through its app root. One definition, two installers, no
+ * chance of the two writing different baselines (0025 imports it from here, so
+ * this re-export keeps that import working unchanged).
  */
-export function baselineSql(itemType, spec) {
-  const quoted = (s) => `'${String(s).replace(/'/g, "''")}'`;
-  const idOf = `CAST(t."${spec.idColumn}" AS TEXT)`;
-  return `INSERT INTO item_versions (item_type, item_id, op, snapshot_json, project_ref, author_kind)
-    SELECT ${quoted(itemType)}, ${idOf}, 'insert', ${snapshotExpr(spec, "t")},
-           ${projectRefExpr(spec, "t")}, 'system'
-      FROM ${spec.table} t
-     WHERE NOT EXISTS (
-       SELECT 1 FROM item_versions v
-        WHERE v.item_type = ${quoted(itemType)}
-          AND v.item_id = ${idOf})
-     ORDER BY t."${spec.idColumn}"`;
-}
+export { baselineSql };
 
 const tableExists = (db, table) =>
   Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
@@ -224,7 +211,12 @@ export function run({ dbPath, log = () => {} }) {
     log("  item_versions: ensured (table, 4 indexes, append-only guards, erase control)");
 
     const unready = [];
-    for (const [itemType, spec] of Object.entries(COVERED)) {
+    // THIS migration's types only. COVERED grew when 0025 shipped the rest of
+    // the covered content (notes, KB articles, bot definitions, board cards), and
+    // this migration must not start installing triggers or baselines for a type
+    // another migration owns — 0025 does that, in the right database each.
+    for (const itemType of typesForMigration(id)) {
+      const spec = COVERED[itemType];
       if (!tableExists(db, spec.table)) {
         unready.push(spec.table);
         log(`  ${spec.table}: absent — ${itemType} triggers skipped, will retry`);

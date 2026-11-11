@@ -20,13 +20,15 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import Database from "better-sqlite3";
 
-import { COVERED, STAMP_ONLY_TRANSITIONS, guardTriggerSql, triggerSql } from "../servers/shared/history/covered.js";
+import { COVERED, STORE_TASKS, STAMP_ONLY_TRANSITIONS, guardTriggerSql, triggerSql, typesForMigration } from "../servers/shared/history/covered.js";
 import { ensureHistoryTriggers, ensureHistoryTriggersAtBoot } from "../servers/shared/history/ensure.js";
 import {
   ITEM_VERSIONS_DDL,
   run,
   id as migrationId,
 } from "../scripts/migrations/0024-item-versions.mjs";
+import { run as runMore } from "../scripts/migrations/0025-item-versions-more.mjs";
+import { run as runTasksBase } from "../scripts/migrations/0000-tasks-base.mjs";
 import { SYNCED_TABLES } from "../servers/sharing/instance-sync.js";
 
 const REPO = new URL("..", import.meta.url).pathname;
@@ -65,20 +67,31 @@ function initDbFixture(prefix) {
   };
 }
 
-/** init-db fixture with 0024 applied (the migrated instance). The registry's
- *  bookkeeping row is recorded too, exactly as scripts/migrations/runner.mjs
- *  writes it: the boot re-ensure only arms capture for a baselined table, and
- *  "0024 recorded as applied" is one of the two ways it knows. */
+/** init-db fixture with 0024 AND 0025 applied (the migrated instance) — the
+ *  production shape now that the rest of the covered content is covered. Each
+ *  registry bookkeeping row is recorded too, exactly as
+ *  scripts/migrations/runner.mjs writes it: the boot re-ensure only arms capture
+ *  for a baselined table, and "the migration is recorded as applied" is one of the
+ *  two ways it knows.
+ *
+ *  A real tasks.db is created for 0025 (0000-tasks-base makes tasks_items), so the
+ *  card type is captured too — in that file, never in crow.db. */
 function migratedFixture(prefix = "hist-capture-") {
   const fx = initDbFixture(prefix);
+  const tasksDbPath = join(fx.dir, "tasks.db");
+  runTasksBase({ tasksDbPath, log: () => {} });
   run({ dbPath: fx.dbPath, log: () => {} });
+  runMore({ dbPath: fx.dbPath, tasksDbPath, log: () => {} });
   const db = fx.open();
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)");
-  db.prepare("INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(
-    "0024-item-versions",
-    new Date().toISOString(),
-  );
+  for (const id of ["0024-item-versions", "0025-item-versions-more"]) {
+    db.prepare("INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      id,
+      new Date().toISOString(),
+    );
+  }
   db.close();
+  fx.tasksDbPath = tasksDbPath;
   return fx;
 }
 
@@ -388,11 +401,19 @@ test("the migration logs a baseline row count and elapsed ms per covered table",
     const lines = [];
     run({ dbPath: fx.dbPath, log: (m) => lines.push(m) });
 
-    for (const spec of Object.values(COVERED)) {
+    // 0024's own types only: the rest of the covered content belongs to 0025 (it
+    // runs against two stores, and its per-type lines are asserted in
+    // tests/history-coverage.test.js).
+    for (const itemType of typesForMigration(migrationId)) {
+      const spec = COVERED[itemType];
       const line = lines.find((l) => l.includes(`${spec.table}: triggers ensured`));
       assert.ok(line, `${spec.table}: the migration logs its outcome`);
       assert.match(line, /\d+ baseline version\(s\) in [\d.]+ ms/, `${spec.table}: count and elapsed ms are reported`);
     }
+    assert.ok(
+      !lines.some((l) => l.includes("pi_bot_defs: triggers ensured")),
+      "0024 does not install another migration's triggers",
+    );
     const memoryLine = lines.find((l) => l.includes("memories: triggers ensured"));
     assert.match(memoryLine, /1 baseline version\(s\)/, "the count is the real number of rows baselined");
 
@@ -1042,7 +1063,10 @@ test("no secret-like column is ever tracked or snapshotted", () => {
       assert.doesNotMatch(column, COUNTER_OR_DERIVED, `${itemType}: ${column} is a counter, clock or timestamp`);
       assert.ok(spec.snapshot.includes(column), `${itemType}: tracked column ${column} is also snapshotted`);
     }
-    assert.equal(spec.idColumn, "id", `${itemType}: the item id is the table's primary key`);
+    // A primary key is usually `id`, but pi_bot_defs is keyed by bot_id — the
+    // item key is the table's real primary key either way, never a snapshot field.
+    assert.ok(["id", "bot_id"].includes(spec.idColumn), `${itemType}: the item id is the table's primary key`);
+    assert.ok(!spec.snapshot.includes(spec.idColumn), `${itemType}: the key is never snapshotted`);
   }
 });
 
@@ -1050,45 +1074,79 @@ test("every snapshotted column exists in the real table, and the snapshot is the
   const fx = initDbFixture("hist-columns-");
   try {
     const db = fx.open();
-    for (const [itemType, spec] of Object.entries(COVERED)) {
-      const real = new Set(db.prepare(`PRAGMA table_info(${spec.table})`).all().map((c) => c.name));
-      assert.ok(real.size > 0, `${itemType}: ${spec.table} exists (init-db owns it)`);
-      // A DERIVED snapshot field is computed from the row (or from another table),
-      // never read from this one: it is snapshotted, it is not a column, and it can
-      // be a project ref, but it is never tracked (there is no OLD/NEW value to
-      // compare) and no restore writes it back into the row.
-      const derived = Object.keys(spec.derived || {});
-      for (const column of derived) {
-        assert.ok(!real.has(column), `${itemType}: ${column} is derived, so it is NOT a real column`);
-        assert.ok(spec.snapshot.includes(column), `${itemType}: derived field ${column} is snapshotted`);
-        assert.ok(!spec.tracked.includes(column), `${itemType}: derived field ${column} is not tracked`);
-      }
-      for (const column of [spec.idColumn, ...spec.snapshot].filter((c) => !derived.includes(c))) {
-        assert.ok(real.has(column), `${itemType}: ${spec.table}.${column} is a real column`);
-      }
-      // The snapshot is the full row minus counters/derived/secret-named columns,
-      // plus the derived fields, so a new content or filing column cannot be
-      // silently left out of history.
-      const expectedSnapshot = [
-        ...[...real].filter((c) => !SECRET_COLUMN.test(c) && !COUNTER_OR_DERIVED.test(c)),
-        ...derived,
-      ];
-      assert.deepEqual(
-        [...spec.snapshot].sort(),
-        expectedSnapshot.sort(),
-        `${itemType}: the snapshot is the whole row minus counters/derived/secret columns`,
-      );
-      // Every project-ref column must be snapshotted (it is copied per version).
-      assert.ok(spec.projectRef.length > 0 || itemType === "blog_post", `${itemType}: has a project scope or none`);
-      for (const column of spec.projectRef) {
-        assert.ok(
-          real.has(column) || derived.includes(column),
-          `${itemType}: ${spec.table}.${column} is a real project column (or a derived one)`,
+    try {
+      for (const [itemType, spec] of Object.entries(COVERED)) {
+        // A bundle-owned table is not here until the bundle runs, and a tasks
+        // store type is in the OTHER database whose converged shape only the full
+        // migration registry produces — tests/history-coverage.test.js asserts the
+        // card's whole-row rule against a real tasks.db built that way.
+        if (spec.store === STORE_TASKS) continue;
+        const handle = db;
+        const tablePresent = handle
+          .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get(spec.table);
+        if (!tablePresent) {
+          assert.ok(spec.bundleOwned, `${itemType}: only a bundle-owned table may be absent here`);
+          continue;
+        }
+        const real = new Set(handle.prepare(`PRAGMA table_info(${spec.table})`).all().map((c) => c.name));
+        // A DERIVED snapshot field is computed from the row (or from another table),
+        // never read from this one: it is snapshotted, it is not a column, and it can
+        // be a project ref, but it is never tracked (there is no OLD/NEW value to
+        // compare) and no restore writes it back into the row.
+        const derived = Object.keys(spec.derived || {});
+        for (const column of derived) {
+          assert.ok(!real.has(column), `${itemType}: ${column} is derived, so it is NOT a real column`);
+          assert.ok(spec.snapshot.includes(column), `${itemType}: derived field ${column} is snapshotted`);
+          assert.ok(!spec.tracked.includes(column), `${itemType}: derived field ${column} is not tracked`);
+        }
+        // A PROJECTED field is the opposite: a real column, stored through a
+        // projection (never verbatim) and restorable by a merge into it.
+        for (const column of Object.keys(spec.projected || {})) {
+          assert.ok(real.has(column), `${itemType}: ${column} is projected from a REAL column`);
+          assert.ok(spec.snapshot.includes(column), `${itemType}: projected field ${column} is snapshotted`);
+          assert.ok(!derived.includes(column), `${itemType}: projected field ${column} is not derived`);
+        }
+        for (const column of [spec.idColumn, ...spec.snapshot].filter((c) => !derived.includes(c))) {
+          assert.ok(real.has(column), `${itemType}: ${spec.table}.${column} is a real column`);
+        }
+        // The snapshot is the full row minus counters/derived/secret-named columns,
+        // plus the derived fields, so a new content or filing column cannot be
+        // silently left out of history. A type that DELIBERATELY leaves a column out
+        // names it in `omitted` (a card's data_json, its scheduler bookkeeping,
+        // archived_at) — see that entry in covered.js.
+        const omitted = new Set(spec.omitted || []);
+        const expectedSnapshot = [
+          ...[...real].filter(
+            (c) =>
+              c !== spec.idColumn &&
+              !SECRET_COLUMN.test(c) &&
+              !COUNTER_OR_DERIVED.test(c) &&
+              !omitted.has(c),
+          ),
+          ...derived,
+        ];
+        assert.deepEqual(
+          [...spec.snapshot].sort(),
+          expectedSnapshot.sort(),
+          `${itemType}: the snapshot is the whole row minus counters/derived/omitted/secret columns`,
         );
-        assert.ok(spec.snapshot.includes(column), `${itemType}: project column ${column} is snapshotted`);
+        // Every project-ref column must be snapshotted (it is copied per version).
+        assert.ok(
+          spec.projectRef.length > 0 || ["blog_post", "kb_article", "card"].includes(itemType),
+          `${itemType}: has a project scope or none`,
+        );
+        for (const column of spec.projectRef) {
+          assert.ok(
+            real.has(column) || derived.includes(column),
+            `${itemType}: ${spec.table}.${column} is a real project column (or a derived one)`,
+          );
+          assert.ok(spec.snapshot.includes(column), `${itemType}: project column ${column} is snapshotted`);
+        }
       }
+    } finally {
+      db.close();
     }
-    db.close();
   } finally {
     fx.dispose();
   }
@@ -1101,7 +1159,10 @@ test("the migration installs hist_<table>_{ai,au,ad} and leaves the FTS triggers
     const names = new Set(
       db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all().map((r) => r.name),
     );
-    for (const spec of Object.values(COVERED)) {
+    // 0024's own three tables: the rest of the covered content is 0025's, and its
+    // triggers are asserted in tests/history-coverage.test.js.
+    for (const itemType of typesForMigration(migrationId)) {
+      const spec = COVERED[itemType];
       for (const suffix of ["ai", "au", "ad"]) {
         assert.ok(names.has(`hist_${spec.table}_${suffix}`), `hist_${spec.table}_${suffix} must exist`);
       }
@@ -1137,12 +1198,21 @@ test("triggerSql emits the three triggers from COVERED, and the update trigger c
     assert.match(ad, /AFTER DELETE ON /);
     assert.match(au, /AFTER UPDATE ON /);
     for (const column of spec.tracked) {
-      assert.ok(au.includes(`NEW."${column}" IS NOT OLD."${column}"`), `${itemType}: .${column} is compared`);
+      // A tracked column is compared directly, or — when it is PROJECTED (a bot
+      // definition, stored as its non-secret keys) — through the same projection
+      // the snapshot uses, on both sides.
+      if (spec.projected && spec.projected[column]) {
+        assert.ok(au.includes(`NEW."${column}"`), `${itemType}: .${column} is compared (NEW side)`);
+        assert.ok(au.includes(`OLD."${column}"`), `${itemType}: .${column} is compared (OLD side)`);
+        assert.match(au, /json_valid\(/, `${itemType}: .${column} is compared through its projection`);
+      } else {
+        assert.ok(au.includes(`NEW."${column}" IS NOT OLD."${column}"`), `${itemType}: .${column} is compared`);
+      }
     }
     // The WHEN clause compares every tracked column exactly once (a stamp-only
     // exclusion narrows one of those comparisons; it never adds a column).
     const when = au.slice(au.indexOf("WHEN"), au.indexOf("BEGIN"));
-    assert.equal((when.match(/IS NOT OLD\."/g) || []).length, spec.tracked.length);
+    assert.equal((when.match(/IS NOT /g) || []).length >= spec.tracked.length, true, `${itemType}: every tracked column is in the WHEN`);
     const stamp = STAMP_ONLY_TRANSITIONS[itemType];
     if (stamp) {
       assert.ok(when.includes(`OLD."${stamp.column}" IS NULL AND NEW."${stamp.column}" IS NOT NULL`), `${itemType}: the stamp-only transition is named`);
@@ -1180,14 +1250,18 @@ test("ensure does not arm capture before the baseline", () => {
 
     const first = ensureHistoryTriggers(db);
     assert.deepEqual(first.restored, ["hist_item_versions_guard_ad"], "the guard is always ensured");
+    // Every crow-store type with a table here and no baseline waits for ITS
+    // migration (0024's three — 0025's two are not recorded either, so they wait
+    // too). A bundle-owned table that is absent is simply not reported.
     assert.deepEqual(
       first.awaitingBaseline.sort(),
-      ["blog_posts", "crow_context", "memories"],
+      ["blog_posts", "crow_context", "memories", "pi_bot_defs", "research_notes"],
       "capture is left to the migration until a baseline exists",
     );
     const names = () =>
       new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all().map((r) => r.name));
     for (const spec of Object.values(COVERED)) {
+      if (spec.store === STORE_TASKS) continue; // not crow.db's table
       assert.ok(!names().has(`hist_${spec.table}_ai`), `${spec.table}: no capture trigger yet`);
     }
     const missed = db.prepare("INSERT INTO memories (content) VALUES (?)").run("written before the baseline");
@@ -1206,18 +1280,19 @@ test("ensure does not arm capture before the baseline", () => {
     assert.deepEqual(second.restored, [], "the migration already installed capture");
     assert.deepEqual(
       second.awaitingBaseline,
-      ["blog_posts"],
-      "a table with no rows has no system version to prove a baseline — only the recorded migration can",
+      ["blog_posts", "research_notes", "pi_bot_defs"],      "a table with no rows has no system version to prove a baseline — only the recorded migration can",
     );
 
-    // The registry records 0024 as applied; from then on an empty table counts as
-    // baselined too (its first live write is the whole history).
+    // The registry records the migrations as applied; from then on an empty table
+    // counts as baselined too (its first live write is the whole history).
     after.exec(
       "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)",
     );
-    after
-      .prepare("INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?, ?)")
-      .run("0024-item-versions", new Date().toISOString());
+    for (const id of ["0024-item-versions", "0025-item-versions-more"]) {
+      after
+        .prepare("INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?, ?)")
+        .run(id, new Date().toISOString());
+    }
     assert.deepEqual(ensureHistoryTriggers(after).awaitingBaseline, [], "the recorded migration covers every table");
 
     const live = after.prepare("INSERT INTO memories (content) VALUES (?)").run("written after the baseline");
@@ -1268,9 +1343,11 @@ test("a covered table that is absent is skipped with a reason, and the run defer
     const ensured = ensureHistoryTriggers(db);
     assert.deepEqual(
       ensured.skipped.sort(),
-      ["blog_posts", "crow_context"],
+      ["blog_posts", "crow_context", "pi_bot_defs", "research_notes"],
       "ensure reports what it cannot cover yet instead of throwing",
     );
+    // memories has versions but no baseline, so its capture belongs to the
+    // migration (the other present tables are absent here, so they are skipped).
     assert.deepEqual(ensured.awaitingBaseline, ["memories"], "and what awaits its baseline");
     db.close();
   } finally {

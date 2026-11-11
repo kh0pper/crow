@@ -142,6 +142,7 @@ const APP_MODULES = {
   "servers/shared/project-spaces.js": { keys: ["CROW_DB_PATH"], exempt: {} },
   "servers/shared/rate-limiter.js": { keys: [], exempt: {} },
   "servers/shared/notifications.js": { keys: [], exempt: {} },
+  "servers/shared/history/covered.js": { keys: [], exempt: {} },
   "servers/shared/sync-emit.js": { keys: [], exempt: {} },
   "servers/shared/bot-mention.js": { keys: [], exempt: {} },
   "servers/shared/fetch-page.js": { keys: [], exempt: {} },
