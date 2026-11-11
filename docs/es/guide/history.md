@@ -10,7 +10,7 @@ Crow conserva las versiones anteriores de lo que guardas en él. Si tú, un bot 
 
 - Recuerdos y secciones de contexto (de todos los ámbitos)
 - Entradas del blog y borradores
-- Notas de proyecto y artículos de la base de conocimiento
+- Notas de proyecto, fuentes de investigación y artículos de la base de conocimiento
 - Ajustes e instrucciones de los bots. Los campos de credenciales de un bot nunca se conservan. En cualquier cosa que el Historial conserve, un valor que parece una clave o un token se guarda con el secreto tapado.
 - Tarjetas del tablero: título, descripción y plan
 - Artefactos, mediante su propia lista de versiones. Restaurar agrega una versión nueva hecha a partir de la anterior.
@@ -36,7 +36,7 @@ Un cambio nunca se registra a nombre de otra persona, y un autor desconocido nun
 
 Abre el botón **Historial** en un recuerdo, una sección de contexto o una entrada del blog y verás sus versiones, de la más reciente a la más antigua, con la hora, el autor y qué cambió: texto agregado y texto quitado en lo escrito, antes y después en ajustes y números. Los guardados del mismo autor con pocos minutos de diferencia cuentan como una sola versión.
 
-Otros tipos de elementos (notas, artículos, bots, tarjetas, artefactos) también conservan sus versiones, pero todavía no todos aparecen en las páginas **Trabajos** y **Papelera**. Allí se listan las notas, los artículos y los ajustes de bots, junto con los recuerdos, las secciones de contexto y las entradas del blog. Los artefactos conservan su propia lista de versiones en la vista del artefacto. Las versiones de una tarjeta se conservan, pero todavía no hay una página para explorarlas. Por ahora solo los recuerdos, las secciones de contexto y las entradas del blog tienen un enlace Historial en su propia pantalla.
+Otros tipos de elementos (notas, fuentes de investigación, artículos, bots, tarjetas, artefactos) también conservan sus versiones, pero todavía no todos aparecen en las páginas **Trabajos** y **Papelera**. Allí se listan las notas, las fuentes de investigación, los artículos y los ajustes de bots, junto con los recuerdos, las secciones de contexto y las entradas del blog. Los artefactos conservan su propia lista de versiones en la vista del artefacto. Las versiones de una tarjeta se conservan, pero todavía no hay una página para explorarlas. Por ahora solo los recuerdos, las secciones de contexto y las entradas del blog tienen un enlace Historial en su propia pantalla.
 
 ## Restaurar
 
@@ -48,13 +48,13 @@ Otros tipos de elementos (notas, artículos, bots, tarjetas, artefactos) tambié
 
 ## Deshacer este trabajo
 
-Un trabajo es una pieza de trabajo: una tarjeta del tablero, un encargo de voz, un turno de chat, una programación o tu propio inicio de sesión. **Deshacer este trabajo**, en la página Trabajos, repone los recuerdos, las secciones de contexto, las entradas del blog, las notas, los artículos y los ajustes de bots que ese trabajo cambió. Los archivos de proyecto, las tarjetas del tablero y los artefactos todavía no forman parte de un deshacer; restáuralos uno por uno.
+Un trabajo es una pieza de trabajo: una tarjeta del tablero, un encargo de voz, un turno de chat, una programación o tu propio inicio de sesión. **Deshacer este trabajo**, en la página Trabajos, repone los recuerdos, las secciones de contexto, las entradas del blog, las notas, las fuentes de investigación, los artículos y los ajustes de bots que ese trabajo cambió. Los archivos de proyecto, las tarjetas del tablero y los artefactos todavía no forman parte de un deshacer; restáuralos uno por uno.
 
-Deshacer puede ser parcial. Si algo más cambió un elemento después (tú u otro trabajo), deshacer lo deja como está, así que nunca sobrescribe trabajo más nuevo, y enumera lo que omitió, por tipo y número; la lista del trabajo en la página Trabajos muestra cada uno por su nombre. Los recuerdos, las secciones de contexto y las entradas del blog se pueden restaurar desde el enlace Historial de su propia pantalla, y las notas, los artículos y los ajustes de bots desde la lista del trabajo en la página Trabajos. Un deshacer no se puede deshacer desde esa página; restaura los elementos uno por uno.
+Deshacer puede ser parcial. Si algo más cambió un elemento después (tú u otro trabajo), deshacer lo deja como está, así que nunca sobrescribe trabajo más nuevo, y enumera lo que omitió, por tipo y número; la lista del trabajo en la página Trabajos muestra cada uno por su nombre. Los recuerdos, las secciones de contexto y las entradas del blog se pueden restaurar desde el enlace Historial de su propia pantalla, y las notas, las fuentes de investigación, los artículos y los ajustes de bots desde la lista del trabajo en la página Trabajos. Un deshacer no se puede deshacer desde esa página; restaura los elementos uno por uno.
 
 ## Papelera y borrado
 
-Un elemento borrado va a la **papelera** con todo su historial. Puedes restaurarlo desde allí. Permanece **30 días** de forma predeterminada, y puedes cambiar los días en Ajustes, en Historial. Pasado ese tiempo se **borra para siempre**, junto con su historial, del almacén en uso. También puedes vaciar la papelera antes. Las ediciones nunca se borran de esta manera. Todavía no todos los tipos de elementos aparecen en la papelera: las notas, los artículos y los ajustes de bots sí, las tarjetas no.
+Un elemento borrado va a la **papelera** con todo su historial. Puedes restaurarlo desde allí. Permanece **30 días** de forma predeterminada, y puedes cambiar los días en Ajustes, en Historial. Pasado ese tiempo se **borra para siempre**, junto con su historial, del almacén en uso. También puedes vaciar la papelera antes. Las ediciones nunca se borran de esta manera. Todavía no todos los tipos de elementos aparecen en la papelera: las notas, las fuentes de investigación, los artículos y los ajustes de bots sí, las tarjetas no.
 
 Los respaldos son aparte. Las copias de tus respaldos desaparecen cuando esos respaldos caducan, y cuánto tarda depende de tu calendario de respaldos.
 

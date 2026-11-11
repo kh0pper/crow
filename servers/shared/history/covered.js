@@ -274,6 +274,113 @@ export const COVERED = Object.freeze({
     // still exists" rule — the same one memories use when they carry no uuid.
     projectRef: Object.freeze(["project_id"]),
   }),
+  research_source: Object.freeze({
+    store: STORE_CROW,
+    migration: "0026-item-versions-sources",
+    table: "research_sources",
+    idColumn: "id",
+    // A source's content is what a person supplied or curated: the citation, the
+    // summary, the authors and publisher, the full text they pasted, the tags, the
+    // score, its FILING, and where it stands in the verification workflow. NOT
+    // uuid / origin_instance_id (identity and origin pointers), NOT backend_id (a
+    // placement pointer to a data backend), NOT created_at / retrieval_date
+    // (timestamps) and NOT retrieval_method (how it was found, not what it says).
+    //
+    // THE FETCH FACTS ARE A RE-FETCHABLE CACHE, NOT CONTENT — the operator's call
+    // for this table, and the reason they are in neither list: fetched_text,
+    // fetch_status, fetched_at, final_url, http_status, content_sha256 and
+    // fetch_error all describe one attempt to open the page. They are large
+    // (fetched_text can be hundreds of KB) and Crow can produce them again from
+    // the URL, so a version does not keep them and a restore does not write them:
+    // a restored source comes back UNFETCHED (every fetch column at its default)
+    // and can be fetched again. full_text is the opposite — a person supplied it
+    // or approved it, nothing can regenerate it — so it is tracked and
+    // snapshotted with no cap.
+    //
+    // No credential-named column exists on this table, and the import rules below
+    // refuse one if it ever appears.
+    // What a row CAN carry by accident — a key pasted into abstract, summary, full
+    // text or a URL — is caught by the existing snapshot secret scrub (sweep.js,
+    // the same pass the other types get; see the redaction note in triggerDefs).
+    tracked: Object.freeze([
+      "title",
+      "source_type",
+      "url",
+      "authors",
+      "publication_date",
+      "publisher",
+      "doi",
+      "isbn",
+      "abstract",
+      "content_summary",
+      "full_text",
+      "citation_apa",
+      "tags",
+      "relevance_score",
+      "project_id",
+      "verified",
+      "verification_notes",
+      "verification_method",
+      "verified_by",
+    ]),
+    // The whole row minus the key, the clocks, the fetch cache and the two legacy
+    // host-local pointers. uuid / origin_instance_id / backend_id ride along so a
+    // version says which source it was and where it came from (exactly as a note's
+    // uuid does), and retrieval_date / retrieval_method are kept because a reader
+    // wants to know how and when the source was found even though neither is a
+    // change on its own.
+    //
+    // LEFT OUT OF BOTH LISTS on purpose: the fetch cache (fetched_text,
+    // fetch_status, fetched_at, final_url, http_status, content_sha256,
+    // fetch_error — re-fetchable, large, and a restore comes back unfetched;
+    // fetched_text deliberately is NOT in sources_fts either), and file_path /
+    // s3_key, two legacy host-local columns an OLD host still carries (init-db's
+    // FK rebuild knows them; a fresh install does not create them). They point at
+    // bytes on one machine, so they are placement, not content.
+    // The fetch cache is re-fetchable and large; file_path and s3_key are legacy
+    // host-local columns an old host still carries.
+    omitted: Object.freeze([
+      "fetched_text",
+      "fetch_status",
+      "fetched_at",
+      "final_url",
+      "http_status",
+      "content_sha256",
+      "fetch_error",
+      "file_path",
+      "s3_key",
+    ]),
+    snapshot: Object.freeze([
+      "project_id",
+      "title",
+      "source_type",
+      "url",
+      "authors",
+      "publication_date",
+      "publisher",
+      "doi",
+      "isbn",
+      "abstract",
+      "content_summary",
+      "full_text",
+      "citation_apa",
+      "retrieval_date",
+      "retrieval_method",
+      "verified",
+      "verification_notes",
+      "verification_method",
+      "verified_by",
+      "tags",
+      "relevance_score",
+      "uuid",
+      "origin_instance_id",
+      "backend_id",
+    ]),
+    // research_sources.uuid is the SOURCE's own identity (addUuidColumn), never the
+    // project's, so the project ref is the local project id alone — the same rule
+    // research_note follows, and the same filing a restored source gets.
+    projectRef: Object.freeze(["project_id"]),
+  }),
   kb_article: Object.freeze({
     store: STORE_CROW,
     migration: "0025-item-versions-more",

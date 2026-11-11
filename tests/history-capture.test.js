@@ -28,6 +28,7 @@ import {
   id as migrationId,
 } from "../scripts/migrations/0024-item-versions.mjs";
 import { run as runMore } from "../scripts/migrations/0025-item-versions-more.mjs";
+import { run as runSources } from "../scripts/migrations/0026-item-versions-sources.mjs";
 import { run as runTasksBase } from "../scripts/migrations/0000-tasks-base.mjs";
 import { SYNCED_TABLES } from "../servers/sharing/instance-sync.js";
 
@@ -67,12 +68,12 @@ function initDbFixture(prefix) {
   };
 }
 
-/** init-db fixture with 0024 AND 0025 applied (the migrated instance) — the
- *  production shape now that the rest of the covered content is covered. Each
- *  registry bookkeeping row is recorded too, exactly as
- *  scripts/migrations/runner.mjs writes it: the boot re-ensure only arms capture
- *  for a baselined table, and "the migration is recorded as applied" is one of the
- *  two ways it knows.
+/** init-db fixture with 0024, 0025 AND 0026 applied (the migrated instance) — the
+ *  production shape now that the rest of the covered content is covered (and the
+ *  research source after it). Each registry bookkeeping row is recorded too,
+ *  exactly as scripts/migrations/runner.mjs writes it: the boot re-ensure only arms
+ *  capture for a baselined table, and "the migration is recorded as applied" is one
+ *  of the two ways it knows.
  *
  *  A real tasks.db is created for 0025 (0000-tasks-base makes tasks_items), so the
  *  card type is captured too — in that file, never in crow.db. */
@@ -82,9 +83,10 @@ function migratedFixture(prefix = "hist-capture-") {
   runTasksBase({ tasksDbPath, log: () => {} });
   run({ dbPath: fx.dbPath, log: () => {} });
   runMore({ dbPath: fx.dbPath, tasksDbPath, log: () => {} });
+  runSources({ dbPath: fx.dbPath, log: () => {} });
   const db = fx.open();
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)");
-  for (const id of ["0024-item-versions", "0025-item-versions-more"]) {
+  for (const id of ["0024-item-versions", "0025-item-versions-more", "0026-item-versions-sources"]) {
     db.prepare("INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(
       id,
       new Date().toISOString(),
@@ -1114,7 +1116,7 @@ test("every snapshotted column exists in the real table, and the snapshot is the
         // plus the derived fields, so a new content or filing column cannot be
         // silently left out of history. A type that DELIBERATELY leaves a column out
         // names it in `omitted` (a card's data_json, its scheduler bookkeeping,
-        // archived_at) — see that entry in covered.js.
+        // archived_at) — so a decision on record is not mistaken for an oversight.
         const omitted = new Set(spec.omitted || []);
         const expectedSnapshot = [
           ...[...real].filter(
@@ -1251,11 +1253,11 @@ test("ensure does not arm capture before the baseline", () => {
     const first = ensureHistoryTriggers(db);
     assert.deepEqual(first.restored, ["hist_item_versions_guard_ad"], "the guard is always ensured");
     // Every crow-store type with a table here and no baseline waits for ITS
-    // migration (0024's three — 0025's two are not recorded either, so they wait
-    // too). A bundle-owned table that is absent is simply not reported.
+    // migration (0024's three — 0025's and 0026's are not recorded either, so they
+    // wait too). A bundle-owned table that is absent is simply not reported.
     assert.deepEqual(
       first.awaitingBaseline.sort(),
-      ["blog_posts", "crow_context", "memories", "pi_bot_defs", "research_notes"],
+      ["blog_posts", "crow_context", "memories", "pi_bot_defs", "research_notes", "research_sources"],
       "capture is left to the migration until a baseline exists",
     );
     const names = () =>
@@ -1280,7 +1282,7 @@ test("ensure does not arm capture before the baseline", () => {
     assert.deepEqual(second.restored, [], "the migration already installed capture");
     assert.deepEqual(
       second.awaitingBaseline,
-      ["blog_posts", "research_notes", "pi_bot_defs"],      "a table with no rows has no system version to prove a baseline — only the recorded migration can",
+      ["blog_posts", "research_notes", "research_sources", "pi_bot_defs"],      "a table with no rows has no system version to prove a baseline — only the recorded migration can",
     );
 
     // The registry records the migrations as applied; from then on an empty table
@@ -1288,7 +1290,7 @@ test("ensure does not arm capture before the baseline", () => {
     after.exec(
       "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)",
     );
-    for (const id of ["0024-item-versions", "0025-item-versions-more"]) {
+    for (const id of ["0024-item-versions", "0025-item-versions-more", "0026-item-versions-sources"]) {
       after
         .prepare("INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?, ?)")
         .run(id, new Date().toISOString());
@@ -1343,7 +1345,7 @@ test("a covered table that is absent is skipped with a reason, and the run defer
     const ensured = ensureHistoryTriggers(db);
     assert.deepEqual(
       ensured.skipped.sort(),
-      ["blog_posts", "crow_context", "pi_bot_defs", "research_notes"],
+      ["blog_posts", "crow_context", "pi_bot_defs", "research_notes", "research_sources"],
       "ensure reports what it cannot cover yet instead of throwing",
     );
     // memories has versions but no baseline, so its capture belongs to the

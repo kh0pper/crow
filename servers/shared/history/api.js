@@ -43,20 +43,23 @@
  *   for an un-delete, `update` otherwise. With no emitter (a test, a host with
  *   sync off) the write still happens and `synced` is false.
  *
- *   FIVE TYPES ARE THE EXCEPTION, FOR THE SAME REASON: their ordinary writes do
+ *   SIX TYPES ARE THE EXCEPTION, FOR THE SAME REASON: their ordinary writes do
  *   not emit today, so their restores are plain local writes and `synced` is
  *   false (nothing is lost — the peer's own history is its own business, and the
  *   value it holds is unaffected):
- *     blog_posts    not in instance-sync's SYNCED_TABLES at all;
- *     research_notes the research server's add/update/withdraw tools never call
- *                   emitOrQueue (only the share-import path does), so a note edit
- *                   does not ride the feed and neither does its restore;
- *     kb_article    the knowledge-base bundle owns the table and emits nothing;
- *     bot_def       the Bot Builder's definition writes emit nothing;
- *     card          tasks.db has no sync feeds of its own (cards are
- *                   instance-global, and item_versions is local-only).
- *   emitRestored therefore returns false for them rather than inventing a
- *   new wire shape.
+ *     blog_posts      not in instance-sync's SYNCED_TABLES at all;
+ *     research_notes   the research server's add/update/withdraw tools never call
+ *                     emitOrQueue (only the share-import path does), so a note edit
+ *                     does not ride the feed and neither does its restore;
+ *     research_sources not in instance-sync's SYNCED_TABLES at all either — a source
+ *                     row never rides a peer's feed (see the comment beside
+ *                     SYNCED_TABLES), so there is no wire shape for its restore;
+ *     kb_article      the knowledge-base bundle owns the table and emits nothing;
+ *     bot_def         the Bot Builder's definition writes emit nothing;
+ *     card            tasks.db has no sync feeds of its own (cards are
+ *                     instance-global, and item_versions is local-only).
+ *   emitRestored therefore returns false for them (RESTORE_NOT_SYNCED) rather
+ *   than inventing a new wire shape.
  *
  *   THE FILING IS RESOLVED, NOT REPLAYED. project_spaces.id is a per-instance id
  *   and REUSED after a project is deleted, so a snapshot's project_id can name a
@@ -153,6 +156,30 @@ export const ARTIFACT_ITEM_TYPE = "artifact";
 
 /** Versions per page when the caller does not say. */
 export const DEFAULT_LIMIT = 100;
+
+/**
+ * The covered item types whose RESTORE is a plain local write: their ordinary
+ * writes do not ride instance sync, so a restore emits nothing and reports
+ * `synced: false` (see the module header). One list, used by emitRestored and
+ * asserted by the tests, so the reason a type is here is written down once:
+ *
+ *   blog_post        not in instance-sync's SYNCED_TABLES;
+ *   research_note    its own writes never call emitOrQueue (only the share-import
+ *                    path does);
+ *   research_source  not in SYNCED_TABLES either (a source row never rides a
+ *                    peer's feed — see the comment at SYNCED_TABLES);
+ *   kb_article       a bundle-owned table that emits nothing;
+ *   bot_def          the Bot Builder's definition writes emit nothing;
+ *   card             tasks.db has no sync feeds of its own.
+ */
+export const RESTORE_NOT_SYNCED = Object.freeze([
+  "blog_post",
+  "research_note",
+  "research_source",
+  "kb_article",
+  "bot_def",
+  "card",
+]);
 
 /** The cap a caller cannot raise: a history view is a page, not an export. */
 export const MAX_LIMIT = 500;
@@ -1148,13 +1175,22 @@ function memoryWireRow(row) {
  *
  * A blog post is NOT synced (instance-sync's SYNCED_TABLES has no blog_posts), so
  * a plain local write is the whole story there and nothing is emitted; the same is
- * true of the other four types whose ordinary writes emit nothing (research
- * notes, KB articles, bot definitions and cards) — see the module header for the list.
+ * true of the other five types whose ordinary writes emit nothing (research notes,
+ * research sources, KB articles, bot definitions and cards) — see the module
+ * header for the list, and RESTORE_NOT_SYNCED below for the one place it is
+ * written down.
  *
  * @returns {Promise<boolean>}
  */
 async function emitRestored(db, syncManager, { spec, itemType, op, row }) {
   try {
+    // The types whose ordinary writes emit nothing: a restore of one stays local,
+    // and saying so with a named set keeps the module header, this branch and the
+    // tests from drifting apart. research_source is here because
+    // research_sources is NOT in instance-sync's SYNCED_TABLES (the note that
+    // references a source syncs; the source itself does not) — so there is no wire
+    // shape to invent, and nothing is lost: a peer's copy is its own business.
+    if (RESTORE_NOT_SYNCED.includes(itemType)) return false;
     let wireRow;
     if (itemType === "memory") {
       wireRow = memoryWireRow(row);

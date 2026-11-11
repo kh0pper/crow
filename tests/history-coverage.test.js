@@ -35,6 +35,11 @@ import {
   id as MIGRATION_0025,
 } from "../scripts/migrations/0025-item-versions-more.mjs";
 import {
+  ITEM_TYPES as SOURCE_ITEM_TYPES,
+  run as runSources,
+  id as MIGRATION_0026,
+} from "../scripts/migrations/0026-item-versions-sources.mjs";
+import {
   BOT_DEFINITION_KEYS,
   COVERED,
   SECRET_COLUMN,
@@ -86,9 +91,10 @@ async function fixture(prefix = "hist-coverage-") {
   await runCardModel({ dbPath, tasksDbPath, log: quiet });
   runItemVersions({ dbPath, log: quiet });
   runMore({ dbPath, tasksDbPath, log: quiet });
+  runSources({ dbPath, log: quiet });
   const book = new Database(dbPath);
   book.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)");
-  for (const id of [MIGRATION_0024, MIGRATION_0025]) {
+  for (const id of [MIGRATION_0024, MIGRATION_0025, MIGRATION_0026]) {
     book.prepare("INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(id, new Date().toISOString());
   }
   book.close();
@@ -852,11 +858,19 @@ test("restoring an artifact version records where it came from in the new versio
 
 test("the COVERED import rules still hold for the new entries", async () => {
   // Every COVERED type is claimed by exactly one migration, and each migration's
-  // list is its own (0024's never grows).
-  const claimed = [...typesForMigration(MIGRATION_0024), ...typesForMigration(MIGRATION_0025)];
+  // list is its own (0024's never grows, and neither does 0025's now that 0026
+  // owns the research source).
+  const claimed = [
+    ...typesForMigration(MIGRATION_0024),
+    ...typesForMigration(MIGRATION_0025),
+    ...typesForMigration(MIGRATION_0026),
+  ];
   assert.deepEqual(claimed.sort(), Object.keys(COVERED).sort(), "every covered type names its migration");
+  assert.equal(claimed.length, Object.keys(COVERED).length, "and each is claimed by exactly one migration");
   assert.equal(typesForMigration(MIGRATION_0024).length, 3, "0024 keeps its own three types");
-  assert.deepEqual(typesForMigration(MIGRATION_0025), [...ITEM_TYPES], "0025 owns the rest");
+  assert.deepEqual(typesForMigration(MIGRATION_0025), [...ITEM_TYPES], "0025 owns its own list");
+  assert.deepEqual(typesForMigration(MIGRATION_0026), [...SOURCE_ITEM_TYPES], "0026 owns the research source");
+  assert.deepEqual(SOURCE_ITEM_TYPES, ["research_source"], "and nothing else");
   assert.deepEqual(
     typesForStore(STORE_TASKS),
     ["card"],
