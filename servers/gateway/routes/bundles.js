@@ -2908,13 +2908,14 @@ function openAndRecordAddonDataDir(bundleId, dir, { crowHome = CROW_HOME, ownFol
   let fd;
   try {
     fd = openSync(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
-    fchmodSync(fd, 0o700);
     const st = fstatSync(fd, { bigint: true });
     if (!st.isDirectory()) throw new Error("the add-on's data folder is not a directory");
     const uid = process.getuid?.();
     if (ownFolder && uid !== undefined && Number(st.uid) !== uid) {
       throw new Error("the add-on's data folder is not owned by Crow's own user");
     }
+    // The mode is set only after the type and owner checks, so a folder that is refused is never touched.
+    fchmodSync(fd, 0o700);
     try {
       recordKeptData(crowHome, bundleId, st);
     } catch (err) {
@@ -2975,7 +2976,7 @@ const ADDON_DATA_DIR_NOT_PLAIN_LINE = "An add-on data folder was left as it is: 
  *  - `<dataDir>` itself must already exist — the mkdir is never `recursive`, so a missing data
  *    dir is a skip, not a new tree;
  *  - a folder this makes is 0700, made Crow's own kept data (recordKeptData, from the fd's own
- *    fstat), and the install-time refusal then allows the add-on to start in it.
+ *    fstat), and the install-time refusal then allows a reinstall over it.
  *
  * Gated on the per-host switches FIRST, exactly like migrateLinkedAddons: with walls off (or
  * the kill switch set) this reads nothing, creates nothing and writes nothing.
@@ -2999,7 +3000,10 @@ export function repairMissingAddonDataDirs({ installed, appBundles = APP_BUNDLES
       if (isSatelliteEntry(entry)) { skipped.push({ id, reason: "hosted on a satellite" }); continue; }
       // The REPO manifest decides: only a stdio add-on owns a data folder (a docker-only,
       // remote or skill bundle has no child process to give one to).
-      const manifest = readJsonSafe(join(appBundles, id, "manifest.json"), null);
+      // A community add-on has no repo copy: its installed manifest decides (it can only ever
+      // cause an empty 0700 folder Crow owns to be made here).
+      const manifest = readJsonSafe(join(appBundles, id, "manifest.json"), null)
+        ?? readJsonSafe(join(BUNDLES_DIR, id, "manifest.json"), null);
       if (!isStdioAddonManifest(manifest)) continue;
       const dir = join(dataDir, id);
       let st = null;
