@@ -137,6 +137,10 @@ A proxy on the same machine as Crow (loopback, one of the machine's own addresse
 On a machine set up by `crow-install.sh`, Caddy dials Crow on a unix socket that systemd owns — the `crow-gateway-proxy.socket` unit listens on `/run/crow-proxy/gateway.sock` as `root:caddy` with mode `0660`, and `crow-gateway.service` receives that listening fd by socket activation (`Sockets=crow-gateway-proxy.socket`). Only the local Caddy can open it, so its visitors are a verified proxy with the client Caddy names — no `CROW_TRUSTED_PROXIES` entry, no group membership, and no owner's turn lost. An install that still has `reverse_proxy localhost:3001` in `/etc/caddy/Caddyfile` and no socket unit gets a Fix-it card on the Nest; the fix is `sudo bash scripts/fix-caddy-proxy-socket.sh` in the app directory. It installs the unit, rewrites that one line, restarts the gateway and Caddy, and only reports success once `https://<your site>/health` answers 200 through Caddy.
 :::
 
+::: tip The installer's Caddy admin API is a unix socket too
+`crow-install.sh` also pins Caddy's own admin API to `/run/caddy/admin.sock` — a unix socket owned by the `caddy` service user, in a `/run/caddy` directory a `caddy.service` drop-in has systemd create on every start. Only Caddy's user and root can open it, so a local account or a bot on the machine cannot post a new config and rewrite the front door Caddy serves. `sudo systemctl reload caddy` still works: it reads the admin address out of that same Caddyfile. An install from before this change gets a Fix-it card on the Nest; the fix is `sudo bash scripts/fix-caddy-admin-socket.sh` in the app directory.
+:::
+
 On Linux, Crow honours Tailscale Serve's headers only on connections opened by tailscaled's user (`CROW_SERVE_PEER_UIDS`, default `0`, read from `/proc/net/tcp`). On a host without `/proc` (macOS, Windows native) that check cannot run, so it fails closed and tailnet users through Serve are refused. To accept them anyway, set `CROW_SERVE_PEER_UIDS=off` (logged as a warning: any local process could then forge a tailnet identity).
 
 ## Step 4: Set the Public URL

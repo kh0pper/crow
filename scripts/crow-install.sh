@@ -1372,13 +1372,39 @@ Environment=$(sd_quote "CROW_DB_PATH=$CROW_DATA/crow.db")
 WantedBy=multi-user.target
 EOF
 
+# Caddy's own admin API, moved off its default local TCP address (127.0.0.1,
+# port 2019). That default has no authentication at all, so any local account —
+# a default-tier bot included — could POST /load and rewrite the HTTPS front door
+# this machine serves, which would undo the proxy socket's whole premise. Caddy
+# runs as user `caddy` and cannot create a directory under /run, so systemd makes
+# /run/caddy for it on every start: owned by the service user, mode 0750.
+# `admin off` is deliberately NOT used — that would make `caddy reload` (the
+# packaged unit's ExecReload, behind `sudo systemctl reload caddy`) impossible.
+sudo mkdir -p /etc/systemd/system/caddy.service.d
+sudo tee /etc/systemd/system/caddy.service.d/crow-admin-socket.conf > /dev/null << 'CADDYADMINEOF'
+[Service]
+RuntimeDirectory=caddy
+RuntimeDirectoryMode=0750
+CADDYADMINEOF
+
 # Caddy reverse proxy with self-signed cert for the actual hostname.
 # Caddy dials the gateway's dedicated proxy socket (the security audit's
 # finding) rather than loopback: on a unix socket the gateway can tell Caddy's
 # visitors apart from any other same-box caller and classifies them `proxy` with
 # the client Caddy names. Caddy 2 ignores a client-sent X-Forwarded-For unless
 # trusted_proxies is configured, so the rightmost hop it sends is the real client.
+#
+# The global block comes FIRST, because a global options block must, and it pins
+# the admin API to a unix socket the drop-in above gives a directory for. No
+# `|mode` suffix on purpose: Caddy's default mode for a unix listen address is
+# 0200 — owner write only — and the process that creates the socket is the caddy
+# user, so only that user and root can open it. `caddy reload` reads that
+# address from this same file, so the reload keeps working.
 sudo tee /etc/caddy/Caddyfile > /dev/null << EOF
+{
+	admin unix//run/caddy/admin.sock
+}
+
 ${MDNS_HOST} {
     tls internal
     reverse_proxy unix//run/crow-proxy/gateway.sock
@@ -1393,6 +1419,23 @@ sudo systemctl restart crow-gateway
 sudo systemctl restart caddy
 log "Gateway service enabled and started"
 log "Caddy configured for https://${MDNS_HOST}"
+
+# The admin socket is created by Caddy itself as it starts, so it appears a
+# moment after the service does. A socket that never appears still leaves the
+# front door serving, so this is a warning, not a failed install — existing
+# installs get a Fix-it card for it, and scripts/fix-caddy-admin-socket.sh is
+# the one command behind that card.
+ADMIN_SOCKET_READY=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  # /run/caddy is 0750 caddy:caddy, so only root can look inside it.
+  if sudo test -S /run/caddy/admin.sock; then ADMIN_SOCKET_READY=1; break; fi
+  sleep 0.5
+done
+if [ "$ADMIN_SOCKET_READY" -eq 1 ]; then
+  log "Caddy's admin API is on unix//run/caddy/admin.sock (owner: the caddy user)"
+else
+  warn "Caddy's admin socket /run/caddy/admin.sock has not appeared — try: sudo systemctl restart caddy"
+fi
 
 # ─── Step 10: Tailscale Hostname ──────────────────────────
 

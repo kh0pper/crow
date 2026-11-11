@@ -343,11 +343,13 @@ test("libatomic1 is installed in the Node step, before any npm install/ci (rocks
 const FIX_SCRIPT = resolve(import.meta.dirname, "..", "scripts", "fix-caddy-proxy-socket.sh");
 const fixSrc = () => readFileSync(FIX_SCRIPT, "utf-8");
 
-/** The text between the gateway unit's `tee` and the Caddyfile's. */
+/** The text between the gateway unit's `tee` and the next thing Step 9 writes
+ *  (the caddy.service drop-in, or the Caddyfile when there is none). */
 function gatewayUnitBlock(s) {
+  const end = s.indexOf("# Caddy's own admin API");
   return s.slice(
     s.indexOf("sudo tee /etc/systemd/system/crow-gateway.service"),
-    s.indexOf("# Caddy reverse proxy"),
+    end === -1 ? s.indexOf("# Caddy reverse proxy") : end,
   );
 }
 
@@ -386,8 +388,10 @@ test("proxy socket: the gateway unit takes it by activation and owns no runtime 
   assert.match(unit, /^Requires=crow-gateway-proxy\.socket$/m);
   assert.match(unit, /^After=crow-gateway-proxy\.socket$/m);
   // The old gateway-owned socket setup is gone: no runtime dir, no env path.
-  assert.doesNotMatch(s, /^RuntimeDirectory=crow$/m);
-  assert.doesNotMatch(s, /^RuntimeDirectoryMode=0750$/m);
+  // (The caddy.service drop-in does set RuntimeDirectory=caddy — that directory
+  // is Caddy's, not the gateway's, and systemd creates it for the caddy user.)
+  assert.doesNotMatch(unit, /^RuntimeDirectory=crow$/m);
+  assert.doesNotMatch(unit, /^RuntimeDirectoryMode=0750$/m);
   assert.doesNotMatch(unit, /RuntimeDirectory=crow/);
   assert.doesNotMatch(s, /CROW_PROXY_SOCKET/);
   // ...and the gateway's user is never added to the caddy service user's group.

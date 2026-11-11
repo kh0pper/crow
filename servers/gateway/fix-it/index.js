@@ -8,6 +8,7 @@ import * as registry from "../../shared/fix-it/registry.js";
 import * as store from "../../shared/fix-it/store.js";
 import remoteExposureDetector from "./detectors/remote-exposure.js";
 import caddyProxySocketDetector from "./detectors/caddy-proxy-socket.js";
+import caddyAdminSocketDetector from "./detectors/caddy-admin-socket.js";
 import bootGuardDetector from "./detectors/boot-guard.js";
 import dataBackendReapprovalDetector from "./detectors/data-backend-reapproval.js";
 import bundleBindDriftDetector from "./detectors/bundle-bind-drift.js";
@@ -47,6 +48,7 @@ export function wireFixIt() {
   if (wired) return;
   registry.registerDetector(remoteExposureDetector);
   registry.registerDetector(caddyProxySocketDetector);
+  registry.registerDetector(caddyAdminSocketDetector);
   registry.registerDetector(bootGuardDetector);
   registry.registerDetector(dataBackendReapprovalDetector);
   registry.registerDetector(bundleBindDriftDetector);
@@ -74,7 +76,7 @@ export function wireFixIt() {
  * The detectors runBootChecks() drives. A condition no request emits an event for
  * belongs here; the list is exported so the set can be asserted, not grepped.
  */
-export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, bootGuardDetector, dataBackendReapprovalDetector, bundleBindDriftDetector]);
+export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, caddyAdminSocketDetector, bootGuardDetector, dataBackendReapprovalDetector, bundleBindDriftDetector]);
 
 /**
  * Where a `kind: "link"` remedy may point, held HERE and never read from the
@@ -184,10 +186,13 @@ export async function runBootCheck(db, source, opts = {}) {
 }
 
 /**
- * Boot checks — conditions no request emits an event for. Two: a Caddyfile on
- * this machine that still dials the gateway over loopback (the security audit's
- * finding), and a boot guard that is installed but did not run (N1c-3 L1).
- * Fire-and-forget: never throws, and one broken detector never hides the other.
+ * Boot checks — conditions no request emits an event for. Two of them are about
+ * this machine's Caddy, decided from its Caddyfile alone: one that still dials
+ * the gateway over loopback (the security audit's finding), and one whose admin
+ * API is Caddy's unauthenticated localhost default. The rest are a boot guard
+ * that is installed but did not run (N1c-3 L1), a data backend waiting to be
+ * approved again, and a bundle bind mount that drifted from its compose file.
+ * Fire-and-forget: never throws, and one broken detector never hides another.
  */
 export async function runBootChecks(db, opts = {}) {
   wireFixIt();
