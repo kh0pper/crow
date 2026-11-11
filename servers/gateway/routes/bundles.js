@@ -86,6 +86,7 @@ import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
 import { recordKeptData, clearKeptData, keptDataMatches, recordKeptDataOnUninstall, setWallMode, ADDON_WALL_SWITCH_KEYS } from "../../shared/addon-walls-file.js";
 import { legacyOwnerKeys, profileFor, pendingHostFields } from "../../../scripts/addon-sandbox/profile.mjs";
+import { wallsOnForHost } from "../../../scripts/addon-sandbox/host-switch.mjs";
 import { pinEntryIfWalled, PinRefused } from "../../../scripts/addon-sandbox/pin.mjs";
 import { sandboxLine } from "../../../scripts/addon-sandbox/words.mjs";
 import { addonWallStatus } from "../dashboard/shared/addon-wall-status.js";
@@ -1334,6 +1335,18 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
   }
   if (!Array.isArray(installed) || installed.length === 0) {
     return { repaired, errors, skillLines, skillsKept };
+  }
+
+  // Add-on walls: an add-on installed before its wall existed has no data folder, and a
+  // walled spawn is then refused without one (scripts/addon-sandbox/plan.mjs,
+  // bindDataFolder: "its data folder … does not exist"). Make only the missing ones,
+  // before the per-bundle loop below, so a folder exists before this boot's first start.
+  // Its own catch: a data-folder problem never blocks the rest of the repair.
+  try {
+    const dirs = repairMissingAddonDataDirs({ installed, appBundles, crowHome: CROW_HOME, dataDir: resolveDataDir(), env, log });
+    for (const id of dirs.created) repaired.push(`${id}: data folder created for its wall`);
+  } catch (err) {
+    errors.push({ id: "*", error: `data folder repair: ${err?.message || err}` });
   }
 
   for (const entry of installed) {
@@ -2882,6 +2895,38 @@ export function addonDataDirRefusal(manifest, bundleId, { dataDir, crowHome }) {
 }
 
 /**
+ * The tail every data-folder path shares: open the folder ONCE with O_NOFOLLOW (a symlink
+ * swapped in after the mkdir is refused, never followed), pin the mode on that fd, check
+ * what the fd actually is, and record the fd's own `fstat` as Crow's own kept data — so
+ * nothing between the mkdir and the record can swap a different directory in at the path.
+ * `ownFolder` additionally requires the folder to be the gateway user's own.
+ *
+ * Returns the bigint fstat. Throws when the fd is not a directory (or, with `ownFolder`,
+ * not owned by Crow's own user); a record that cannot be written only warns.
+ */
+function openAndRecordAddonDataDir(bundleId, dir, { crowHome = CROW_HOME, ownFolder = false } = {}) {
+  let fd;
+  try {
+    fd = openSync(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    fchmodSync(fd, 0o700);
+    const st = fstatSync(fd, { bigint: true });
+    if (!st.isDirectory()) throw new Error("the add-on's data folder is not a directory");
+    const uid = process.getuid?.();
+    if (ownFolder && uid !== undefined && Number(st.uid) !== uid) {
+      throw new Error("the add-on's data folder is not owned by Crow's own user");
+    }
+    try {
+      recordKeptData(crowHome, bundleId, st);
+    } catch (err) {
+      console.warn(`[bundles] could not record the data folder for '${bundleId}': ${err?.message || err}`);
+    }
+    return st;
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch {} }
+  }
+}
+
+/**
  * Review item 5: create the add-on's own data folder, BEFORE its MCP entry is
  * registered, so a folder that cannot be made fails the install with no entry left
  * behind. `<dataDir>` itself already exists (Crow's home); the folder is made 0700
@@ -2911,21 +2956,89 @@ export function ensureAddonDataDir(bundleId, manifest) {
     if (keptDataMatches(CROW_HOME, bundleId, dir)) return;
     throw new Error("a folder for this add-on appeared during the install; remove or rename it, then install again");
   }
-  let fd;
-  try {
-    // O_NOFOLLOW: a symlink swapped in after the mkdir is refused, never followed.
-    fd = openSync(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
-    fchmodSync(fd, 0o700);
-    const st = fstatSync(fd, { bigint: true });
-    if (!st.isDirectory()) throw new Error("the add-on's data folder is not a directory");
+  openAndRecordAddonDataDir(bundleId, dir);
+}
+
+/** The one line logged when a folder the repair will not touch is already at the path. */
+const ADDON_DATA_DIR_NOT_PLAIN_LINE = "An add-on data folder was left as it is: it is not a plain folder Crow made";
+
+/**
+ * Boot repair for add-on walls: an add-on installed BEFORE add-on walls existed has no
+ * `<dataDir>/<id>` folder, and a walled spawn is refused without one (plan.mjs's
+ * bindDataFolder, "its data folder … does not exist"). This makes the missing folder for
+ * every installed stdio add-on — and only that:
+ *
+ *  - an existing plain folder is the owner's (or an earlier boot's), so it is left exactly
+ *    as it is: not chmodded, not recorded, nothing inside it read;
+ *  - a symlink (or anything else) at the path is never replaced: it is reported as a skip and
+ *    one fixed line is logged (never the path);
+ *  - `<dataDir>` itself must already exist — the mkdir is never `recursive`, so a missing data
+ *    dir is a skip, not a new tree;
+ *  - a folder this makes is 0700, made Crow's own kept data (recordKeptData, from the fd's own
+ *    fstat), and the install-time refusal then allows the add-on to start in it.
+ *
+ * Gated on the per-host switches FIRST, exactly like migrateLinkedAddons: with walls off (or
+ * the kill switch set) this reads nothing, creates nothing and writes nothing.
+ *
+ * Never throws: a folder that cannot be made is a skip, never a failed boot.
+ *
+ * @returns {{created: string[], skipped: Array<{id: string, reason: string}>}}
+ */
+export function repairMissingAddonDataDirs({ installed, appBundles = APP_BUNDLES, crowHome = CROW_HOME, dataDir = resolveDataDir(), env = process.env, log = (m) => console.log(m) } = {}) {
+  const created = [];
+  const skipped = [];
+  if (!wallsOnForHost(env)) return { created, skipped };
+  for (const entry of Array.isArray(installed) ? installed : []) {
+    const id = typeof entry === "string" ? entry : entry?.id;
     try {
-      recordKeptData(CROW_HOME, bundleId, st);
-    } catch (err) {
-      console.warn(`[bundles] could not record the data folder for '${bundleId}': ${err?.message || err}`);
+      if (typeof id !== "string" || !isValidBundleId(id)) {
+        skipped.push({ id: typeof id === "string" ? id : "", reason: "not a valid bundle id" });
+        continue;
+      }
+      // A satellite-hosted bundle runs on the satellite: it has no data folder here (SAT-5).
+      if (isSatelliteEntry(entry)) { skipped.push({ id, reason: "hosted on a satellite" }); continue; }
+      // The REPO manifest decides: only a stdio add-on owns a data folder (a docker-only,
+      // remote or skill bundle has no child process to give one to).
+      const manifest = readJsonSafe(join(appBundles, id, "manifest.json"), null);
+      if (!isStdioAddonManifest(manifest)) continue;
+      const dir = join(dataDir, id);
+      let st = null;
+      try {
+        st = lstatSync(dir);
+      } catch (err) {
+        if (err?.code !== "ENOENT") { skipped.push({ id, reason: "its data folder path could not be read" }); continue; }
+      }
+      if (st) {
+        if (st.isDirectory()) continue; // a plain folder: left exactly as it is, never recorded
+        skipped.push({ id, reason: "a symlink or a file is already at its data folder path" });
+        log(ADDON_DATA_DIR_NOT_PLAIN_LINE);
+        continue;
+      }
+      try {
+        // Never `recursive`: the data dir is the instance's own and must already exist.
+        mkdirSync(dir, { mode: 0o700 });
+      } catch (err) {
+        skipped.push({
+          id,
+          reason: err?.code === "ENOENT" ? "its data folder's parent does not exist" : "its data folder could not be made",
+        });
+        continue;
+      }
+      try {
+        openAndRecordAddonDataDir(id, dir, { crowHome, ownFolder: true });
+      } catch {
+        // Made but not provably Crow's own: left in place (the next boot leaves a plain
+        // folder alone), never recorded, and never a failed boot.
+        skipped.push({ id, reason: "its data folder could not be made Crow's own" });
+        continue;
+      }
+      created.push(id);
+      log(`${id}: data folder created for its wall`);
+    } catch {
+      skipped.push({ id: typeof id === "string" ? id : "", reason: "the data folder check failed" });
     }
-  } finally {
-    if (fd !== undefined) { try { closeSync(fd); } catch {} }
   }
+  return { created, skipped };
 }
 
 /**
