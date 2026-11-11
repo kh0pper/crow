@@ -122,14 +122,13 @@ test("K7/N4-2: every *_FPR constant in the installer is 40 uppercase hex, and th
     const m = /^([A-Z][A-Z0-9_]*_FPR)=(.*)$/.exec(line);
     if (m && !defs.has(m[1])) defs.set(m[1], m[2].replace(/^"|"$/g, ""));
   }
-  const defaultValue = (raw) => raw;
   for (const [name, raw] of defs) {
     assert.ok(/^[0-9A-F]{40}$/.test(raw),
       `${name} must be a plain assignment of exactly 40 uppercase hex (no env default): ${raw}`);
   }
-  assert.equal(defaultValue(defs.get("DOCKER_KEY_FPR")), "9DC858229FC7DD38854AE2D88D81803C0EBFCD88");
-  assert.equal(defaultValue(defs.get("NODESOURCE_KEY_FPR")), "6F71F525282841EEDAF851B42F59B5F99B1BE0B4");
-  assert.equal(defaultValue(defs.get("TAILSCALE_KEY_FPR")), "2596A99EAAB33821893C0A79458CA832957F5868");
+  assert.equal(defs.get("DOCKER_KEY_FPR"), "9DC858229FC7DD38854AE2D88D81803C0EBFCD88");
+  assert.equal(defs.get("NODESOURCE_KEY_FPR"), "6F71F525282841EEDAF851B42F59B5F99B1BE0B4");
+  assert.equal(defs.get("TAILSCALE_KEY_FPR"), "2596A99EAAB33821893C0A79458CA832957F5868");
 });
 
 /** The text of one function definition (`name() {` … the closing `}` line). */
@@ -381,8 +380,11 @@ test("K7/N4-2: Tailscale — a matching key writes the one-line source and insta
 
   const keyPath = join(s.usrKeyringDir, "tailscale-archive-keyring.gpg");
   // A .gpg destination gets the BINARY export of the verified key, not the armored download.
+  const showHome = mkdtempSync(join(tmpdir(), "crow-gpgshow-"));
   const shown = spawnSync("gpg", ["--batch", "--show-keys", "--with-colons", keyPath],
-    { encoding: "utf-8", env: { ...process.env, GNUPGHOME: mkdtempSync(join(tmpdir(), "crow-gpgshow-")) } });
+    { encoding: "utf-8", env: { ...process.env, GNUPGHOME: showHome } });
+  spawnSync("gpgconf", ["--homedir", showHome, "--kill", "all"], { stdio: "ignore" });
+  rmSync(showHome, { recursive: true, force: true });
   assert.equal(shown.stdout.split("\n").filter((l) => l.startsWith("pub:")).length, 1);
   assert.ok(shown.stdout.includes(`fpr:::::::::${keys.fpr}:`), "the installed binary key is the verified one");
   assert.ok(!read(keyPath).includes("BEGIN PGP"), "binary, not armored");
@@ -507,17 +509,10 @@ test("K7/N4-2: a secret-key block appended to the vendor key never reaches apt's
   const keys = throwawayKeys();
   const s = vendorScratch({ served: keys.secretTailArmor, fpr: keys.fpr });
   const r = runVendor(s, outcome("install_nodesource_repo 24"));
-  const keyPath = join(s.vendorKeyDir, "nodesource.asc");
-  if (existsSync(keyPath)) {
-    // If it was accepted at all, only the verified public key may have been installed.
-    const g = spawnSync("gpg", ["--batch", "--show-keys", "--with-colons", keyPath],
-      { encoding: "utf-8", env: { ...process.env, GNUPGHOME: mkdtempSync(join(tmpdir(), "crow-gpgshow-")) } });
-    const recs = g.stdout.split("\n").map((l) => l.split(":")[0]);
-    assert.equal(recs.filter((k) => k === "pub").length, 1);
-    assert.equal(recs.filter((k) => k === "sec" || k === "ssb").length, 0, "no secret packets in the installed key");
-  } else {
-    assert.match(r.stdout, /STEP_FAIL/, r.stdout + r.stderr);
-  }
+  assert.match(r.stdout, /STEP_FAIL/, r.stdout + r.stderr);
+  assert.match(r.stdout, /2 primary key\(s\)/, "the secret import adds a second primary, so the key is refused");
+  assert.equal(existsSync(join(s.vendorKeyDir, "nodesource.asc")), false, "no key file is installed");
+  assert.equal(existsSync(join(s.sourcesDir, "nodesource.sources")), false, "no source file is written");
   assert.deepEqual(readdirSync(s.tmpDir), []);
 });
 
