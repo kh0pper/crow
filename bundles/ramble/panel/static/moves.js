@@ -1099,4 +1099,51 @@
   refreshToday();
   loadPrefs();
   refreshLibrary();
+
+  /* ------------------------------------------------------- deep links in */
+
+  /* For You (and the widgets page) link here with ?moves=start|log|prefs. This
+   * runs on a full load AND on a Turbo visit, because Turbo re-runs a page's
+   * body scripts on every visit. It opens the matching screen straight from
+   * the moves client, so it does not depend on the pet view, which a player
+   * with no hatched bird cannot reach. The parameter is removed from the URL
+   * once it has been read, so a reload or Back does not fire it again. */
+  function takeMovesParam() {
+    var want = null;
+    try {
+      var loc = window.location;
+      var params = new URLSearchParams(loc.search || "");
+      want = params.get("moves");
+      if (want === null) return null;
+      params.delete("moves");
+      var qs = params.toString();
+      if (window.history && typeof window.history.replaceState === "function") {
+        window.history.replaceState(window.history.state, "", loc.pathname + (qs ? "?" + qs : "") + (loc.hash || ""));
+      }
+    } catch (e) { /* no URL to read: nothing to do */ }
+    return want === "start" || want === "log" || want === "prefs" ? want : null;
+  }
+
+  function openFromLink(want) {
+    if (want === "log") {
+      setText($("rb-else-status"), "");
+      setHidden($("rb-else-reading"), true);
+      setHidden($("rb-else-pickers"), true);
+      openSheet("rb-else-sheet");
+    } else if (want === "prefs") {
+      openSheet("rb-customize-sheet");
+      loadPrefs();
+    } else {
+      /* Start: needs the day's challenge, so wait for the snapshot. With no
+       * challenge to start (paused, or nothing fits) show the Learn list. */
+      refreshToday().then(function () {
+        var c = today && today.challenge;
+        if (c && !c.off && c.entry) startChallenge();
+        else showLearn();
+      });
+    }
+  }
+
+  var linked = takeMovesParam();
+  if (linked) openFromLink(linked);
 })();
