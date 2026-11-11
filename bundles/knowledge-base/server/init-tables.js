@@ -3,7 +3,23 @@
  *
  * Creates all KB-related tables and indexes.
  * Safe to re-run (uses CREATE TABLE IF NOT EXISTS everywhere).
+ *
+ * kb_articles also gets ITS VERSION-HISTORY TRIGGERS here (the version history
+ * design; implementation plan Task 7). The table is BUNDLE-OWNED, so migration
+ * 0025 cannot install them on a fresh install: it runs before this bundle creates
+ * the table, logs the skip with that reason and applies the rest of its types.
+ * This is the same ensure path every other covered type gets — the trigger SQL
+ * comes from servers/shared/history/covered.js (`triggerSql("kb_article")`)
+ * through the app root, so a bundle copy and the migration cannot drift, and
+ * CREATE TRIGGER IF NOT EXISTS makes a re-run a no-op.
+ *
+ * NO BASELINE IS NEEDED HERE: a table this function just created has no rows, so
+ * there is no pre-history to record. A kb_articles that already existed is
+ * baselined by 0025 itself. If crow.db has never had history installed (0024
+ * deferred), the trigger install is skipped: a trigger with no item_versions to
+ * write into would fail every article save.
  */
+import { appImport } from "./app-root.js";
 
 async function initTable(db, label, sql) {
   try {
@@ -11,6 +27,26 @@ async function initTable(db, label, sql) {
   } catch (err) {
     console.error(`Failed to initialize ${label}:`, err.message);
     throw err;
+  }
+}
+
+/**
+ * Install the kb_article capture triggers, if history is installed on this store.
+ *
+ * Never fatal: an article that cannot be versioned is worth more than a bundle
+ * that refuses to start, and the reason is logged so "history is off for the KB"
+ * is visible rather than silent.
+ */
+async function ensureArticleHistory(db) {
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('item_versions', 'item_versions_erase')",
+    });
+    if (rows.length !== 2) return; // 0024 has not applied here: nothing to write into yet
+    const { triggerSql } = await appImport("servers/shared/history/covered.js");
+    for (const sql of triggerSql("kb_article")) await db.execute(sql);
+  } catch (err) {
+    console.warn(`[knowledge-base] article history triggers were not installed: ${err.message}`);
   }
 }
 
@@ -115,6 +151,11 @@ export async function initKbTables(db) {
       VALUES (new.id, new.title, new.content, new.excerpt, new.tags);
     END;
   `);
+
+  // The version-history capture triggers for kb_articles (see the header). After
+  // the table and its FTS triggers, so a failure here can never cost the article
+  // index; nothing else in this file depends on them.
+  await ensureArticleHistory(db);
 
   await initTable(db, "kb_resources", `
     CREATE TABLE IF NOT EXISTS kb_resources (

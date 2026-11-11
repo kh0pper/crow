@@ -82,6 +82,20 @@
  *   diffVersions, restoreVersion) keeps refusing it and none of its versions
  *   ever lands in item_versions.
  *
+ *   ARTIFACTS JOIN IT THE SAME WAY, AND WRITE NOTHING. The item type `artifact`
+ *   reads through the artifacts bundle's own `artifact_versions` (which already
+ *   keeps every version, immutably) and restores by asking that bundle's store for
+ *   a NEW version from the old one's source. No item_versions row, no trigger on
+ *   `artifacts`, and no direct write to `artifact_versions` — the bundle stays the
+ *   one writer of its own store.
+ *
+ *   A CARD'S HISTORY LIVES IN ANOTHER DATABASE. `card` is a COVERED type whose
+ *   table (tasks_items) is in the instance-global tasks.db, so its versions are
+ *   rows of THAT file's item_versions: this module works on whichever client it is
+ *   handed, and a caller must hand it the tasks.db client for a card (the History
+ *   panel does, through historyDbFor). Nothing here ever tries to read a card from
+ *   crow.db.
+ *
  * BLOBs: the triggers store a blob as the reversible string 'hex:<UPPERCASE HEX>'
  * (covered.js valueExpr — json_object cannot hold a blob). Reading decodes it
  * back to bytes on the way into a restore, so a restored blob is bytes again.
@@ -102,13 +116,27 @@
  * `derived`), not a column of crow_context: it decides the FILING of a restored
  * section and is never part of the INSERT/UPDATE into the table itself.
  */
-import { COVERED, tableColumns } from "./covered.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { BOT_DEFINITION_KEYS, COVERED, columnValueExpr, tableColumns } from "./covered.js";
 import { erasureKeys, findEraseRefusalSync } from "./erase.js";
 import { AUTHOR_KINDS, withWriteContext } from "./write-context.js";
 import { lineDiff } from "../line-diff.js";
 
 /** The item type project workspace FILES answer to (not a table — see listVersions). */
 export const WORKSPACE_FILE_ITEM_TYPE = "workspace_file";
+
+/**
+ * The item type ARTIFACTS answer to (not a table of ours — see listVersions).
+ *
+ * An artifact already keeps its versions in the artifacts bundle's
+ * `artifact_versions` (one row per version, immutable, with the source it was
+ * rendered from), so History READS THROUGH it and writes nothing of its own: no
+ * item_versions row, no trigger on `artifacts`. Its version id is that row's `n`.
+ * Restoring goes through the bundle's own store (addVersion), which is the one
+ * path that can write a new current version safely.
+ */
+export const ARTIFACT_ITEM_TYPE = "artifact";
 
 /** Versions per page when the caller does not say. */
 export const DEFAULT_LIMIT = 100;
@@ -187,7 +215,9 @@ function decodeValue(value) {
 /**
  * A comparable form of one value. Two values are "the same" for restore purposes
  * only when they would be written identically: 7 and '7' are not, a NULL and a
- * missing value are, and a blob compares by its bytes.
+ * missing value are, and a blob compares by its bytes. An OBJECT or an array (a
+ * bot definition's stored projection) compares by its JSON, so two versions whose
+ * only difference is inside it are seen as different.
  */
 function canonical(value) {
   if (value === undefined || value === null) return "null";
@@ -195,6 +225,13 @@ function canonical(value) {
   if (value instanceof Uint8Array) return `blob:${Buffer.from(value).toString("hex").toUpperCase()}`;
   if (typeof value === "number") return `number:${value}`;
   if (typeof value === "boolean") return `boolean:${value}`;
+  if (typeof value === "object") {
+    try {
+      return `json:${JSON.stringify(value)}`;
+    } catch {
+      return `object:${String(value)}`;
+    }
+  }
   return `string:${String(value)}`;
 }
 
@@ -331,6 +368,244 @@ export async function restoreWorkspaceFileVersion(db, { projectId, path, version
   return restoreWorkspaceFile(project, path, sha, ctx, { dataDir, isLive: makeDbLiveCheck(db) });
 }
 
+/* ---------------------------------------------------------- artifact items */
+
+/**
+ * The artifacts bundle's own code, loaded lazily and memoized.
+ *
+ * The bundle is always in the checkout (`bundles/artifacts`), but nothing in
+ * `servers/` may import it statically: a bundle is a thing a user installs, and a
+ * static import would make the gateway fail to boot on a tree where it is gone.
+ * A dynamic import that fails is reported as `unavailable`, never as a crash.
+ */
+const ARTIFACT_BUNDLE_DIR = new URL("../../../bundles/artifacts/server/", import.meta.url);
+
+let artifactModules = null;
+
+async function loadArtifactModules() {
+  if (artifactModules) return artifactModules;
+  const [store, blobMinio, design, renderer, dbModule] = await Promise.all([
+    import(new URL("store.js", ARTIFACT_BUNDLE_DIR).href),
+    import(new URL("blob-store-minio.js", ARTIFACT_BUNDLE_DIR).href),
+    import(new URL("design.js", ARTIFACT_BUNDLE_DIR).href).catch(() => null),
+    import("../../blog/renderer.js"),
+    import("../../db.js"),
+  ]);
+  artifactModules = { store, blobMinio, design, markdownBlocks: renderer.markdownBlocks, resolveDataDir: dbModule.resolveDataDir };
+  return artifactModules;
+}
+
+/**
+ * The seams an artifact read/restore needs: the bundle's store, a blob store and
+ * the render deps (the markdown renderer and the optional Design kit). A caller
+ * may pass its own (`{store, blobs, renderDeps}`) — that is how a test drives it
+ * without a gateway — and anything it omits is built the same way the artifacts
+ * panel builds it (bundleImport/createBlobStore + `renderDeps`).
+ */
+async function artifactSeams(seams = {}) {
+  let mods = null;
+  const need = () => (mods ||= loadArtifactModules());
+  const db = seams.db || null;
+  const store = seams.store || (await need()).store;
+  let blobs = seams.blobs || null;
+  let renderDeps = seams.renderDeps || null;
+  return {
+    store,
+    async blobs(dbClient) {
+      if (blobs) return blobs;
+      const m = await need();
+      blobs = await m.blobMinio.createBlobStore(dbClient ?? db, m.resolveDataDir());
+      return blobs;
+    },
+    async renderDeps(dbClient) {
+      if (renderDeps) return renderDeps;
+      const m = await need();
+      let design = null;
+      if (m.design) {
+        try {
+          design = m.design.createDesign({
+            crowHome: process.env.CROW_HOME || join(homedir(), ".crow"),
+            db: dbClient ?? db,
+          });
+        } catch {
+          design = null; // no Design kit: a version that used libs refuses, which is honest
+        }
+      }
+      renderDeps = { markdownBlocks: m.markdownBlocks, design };
+      return renderDeps;
+    },
+  };
+}
+
+/**
+ * An artifact's versions, in the SAME shape as the database item types' versions:
+ * `id` is the artifact version number `n`, the snapshot carries what a reader
+ * needs to tell two versions apart (title, state, the note, the content hash), and
+ * nothing is written — `artifact_versions` is the store, and History only reads it.
+ *
+ * A version made from untrusted input, or flagged, is listed (it happened) with
+ * `untrusted: true` so a caller can refuse to restore it.
+ */
+async function listArtifactVersions(db, { itemId, limit, before }) {
+  const id = normalizeItemId(itemId);
+  if (id === null) throw historyError("invalid_request", "listVersions needs an itemId");
+  let cut = null;
+  if (before !== null && before !== undefined) {
+    cut = normalizeVersionId(before);
+    if (cut === null) throw historyError("invalid_request", "before must be a version id");
+  }
+  let artRows;
+  try {
+    ({ rows: artRows } = await db.execute({
+      sql: "SELECT id, title, current_version FROM artifacts WHERE id = ? AND deleted_at IS NULL",
+      args: [id],
+    }));
+  } catch (err) {
+    // No artifacts tables on this instance (the bundle was never installed): there
+    // is no such artifact, which is the honest answer, not a crash.
+    if (/no such table/i.test(String(err?.message))) throw historyError("not_found", `no artifact ${id}`);
+    throw err;
+  }
+  const artifact = artRows[0];
+  if (!artifact) throw historyError("not_found", `no artifact ${id}`);
+  const args = [id];
+  let sql =
+    "SELECT n, state, made_by, made_by_bot, change_note, content_hash, source_json, created_at, " +
+    "untrusted_input, trust_cleared_at, flagged_reason FROM artifact_versions WHERE artifact_id = ?";
+  if (cut !== null) {
+    sql += " AND n < ?";
+    args.push(cut);
+  }
+  sql += " ORDER BY n DESC LIMIT ?";
+  args.push(normalizeLimit(limit));
+  const { rows } = await db.execute({ sql, args });
+  return rows.map((row) => {
+    const n = Number(row.n);
+    const untrusted = Number(row.untrusted_input) === 1 && !row.trust_cleared_at;
+    return {
+      id: n,
+      itemType: ARTIFACT_ITEM_TYPE,
+      itemId: id,
+      // The artifacts store has no insert/update/delete vocabulary: n=1 is the
+      // artifact's own creation and everything after it is an edit.
+      op: n === 1 ? "insert" : "update",
+      authorKind: row.made_by === "bot" ? "bot" : "owner",
+      authorId: row.made_by === "bot" ? (row.made_by_bot ?? null) : null,
+      jobId: null,
+      originInstance: null,
+      redacted: false,
+      untrusted: untrusted || Boolean(row.flagged_reason),
+      createdAt: row.created_at,
+      snapshot: {
+        title: artifact.title ?? null,
+        version: n,
+        state: row.state ?? null,
+        changed: row.change_note ?? null,
+        content_hash: row.content_hash ?? null,
+      },
+    };
+  });
+}
+
+/**
+ * Put one artifact version back, THROUGH THE ARTIFACT STORE.
+ *
+ * There is no `revert` in that store, and there should not be one: a restore is
+ * `addVersion` with the old version's SOURCE, which renders a NEW current version
+ * (so nothing after the restored one is deleted — the same rule the table types
+ * follow). `never write artifact_versions directly` is kept: this function only
+ * reads the old row and hands its source to the store.
+ *
+ * OWNER ONLY (actor `{kind:'session'}`), and refused for:
+ *   - a RECEIVED artifact (the store refuses it: it is not ours to edit),
+ *   - an UNTRUSTED version (made from non-owner text) or a FLAGGED one — replaying
+ *     one as a new current version would launder text the owner never approved,
+ *   - a version whose source no longer parses.
+ * The store's own errors are surfaced in the History API's shape (not_found,
+ * untrusted, conflict, …) so a caller maps them exactly as it maps the rest.
+ *
+ * `synced` is always false: artifacts do not ride instance sync.
+ */
+async function restoreArtifactVersion(db, { itemId, versionId, artifacts }, ctx) {
+  if (!isObject(ctx) || ctx.authorKind !== "owner") {
+    throw historyError("invalid_context", "an artifact version is restored by the owner only");
+  }
+  const id = normalizeItemId(itemId);
+  if (id === null) throw historyError("invalid_request", "restoring an artifact version needs its artifact id");
+  const n = normalizeVersionId(versionId);
+  if (n === null) throw historyError("invalid_request", "restoreVersion needs a version id");
+
+  const { rows } = await db.execute({
+    sql: "SELECT n, source_json, untrusted_input, trust_cleared_at, flagged_reason FROM artifact_versions WHERE artifact_id = ? AND n = ?",
+    args: [id, n],
+  });
+  const version = rows[0];
+  if (!version) throw historyError("not_found", `no artifact version ${n}`);
+  if (artifactVersionRefused(version)) {
+    throw historyError(
+      "untrusted",
+      `artifact version ${n} was made from content the owner has not approved, so it cannot be put back`,
+    );
+  }
+  let source;
+  try {
+    source = version.source_json ? JSON.parse(version.source_json) : null;
+  } catch {
+    source = null;
+  }
+  if (!isObject(source)) throw historyError("conflict", `artifact version ${n} has no source to put back`);
+
+  let seams;
+  try {
+    seams = await artifactSeams({ ...(artifacts || {}), db });
+  } catch (err) {
+    throw historyError("unavailable", `the artifacts bundle is not available here (${err?.message ?? err})`);
+  }
+  const [blobs, renderDeps] = await Promise.all([seams.blobs(db), seams.renderDeps(db)]);
+  const actor = { kind: "session", id: null };
+  try {
+    // baseVersion = the CURRENT version, so the restore becomes current when
+    // nothing else moved (the store's compare-and-set makes it a proposal if it
+    // did — the owner then decides, exactly as for an ordinary edit).
+    const art = await seams.store.requireAccess(db, actor, id);
+    const result = await seams.store.addVersion(
+      db,
+      blobs,
+      {
+        artifactId: id,
+        source,
+        actor,
+        baseVersion: Number(art.current_version),
+        changeNote: null,
+      },
+      renderDeps,
+    );
+    return { newVersionId: Number(result.n), unchanged: false, synced: false, unfiled: false };
+  } catch (err) {
+    throw asHistoryError(artifactError(err));
+  }
+}
+
+/** A stored artifact version the History API refuses to replay. */
+function artifactVersionRefused(version) {
+  if (version.flagged_reason) return true;
+  return Number(version.untrusted_input) === 1 && !version.trust_cleared_at;
+}
+
+/** The artifacts store's error → a History API error (the code a page already maps). */
+function artifactError(err) {
+  const code = err && typeof err.code === "string" ? err.code : null;
+  if (code === "not_found") return historyError("not_found", err.message);
+  // A received artifact (the store's "cannot be edited") and a tainted input are
+  // both "this is not the owner's own content": one refusal word for both.
+  if (code === "forbidden" || code === "flagged") return historyError("untrusted", err.message);
+  if (code === "bad_source" || code === "bad_request") return historyError("invalid_request", err.message);
+  if (code === "quota_full" || code === "stale" || code === "cas_lost" || code === "busy") {
+    return historyError("conflict", err.message);
+  }
+  return err;
+}
+
 /* ---------------------------------------------------------- listVersions */
 
 /**
@@ -345,12 +620,18 @@ export async function restoreWorkspaceFileVersion(db, { projectId, path, version
  * crow_context both have id 3), so a query on item_id alone would mix two items'
  * histories together.
  */
-export async function listVersions(db, { itemType, itemId, limit = DEFAULT_LIMIT, before = null, dataDir } = {}) {
+export async function listVersions(db, { itemType, itemId, limit = DEFAULT_LIMIT, before = null, dataDir, artifacts } = {}) {
   // A project workspace file is not a table: its versions live in the project's
   // own file history, and its version id is a commit id rather than an integer.
+  // An ARTIFACT is not one of OUR tables either: it already keeps its versions
+  // in the bundle's artifact_versions, so History reads through and stores
+  // nothing (no item_versions row, no trigger on `artifacts`).
   // Everything else keeps the item_versions path below, unchanged.
   if (itemType === WORKSPACE_FILE_ITEM_TYPE) {
     return listWorkspaceFileVersions(db, { itemId, limit, before, dataDir });
+  }
+  if (itemType === ARTIFACT_ITEM_TYPE) {
+    return listArtifactVersions(db, { itemId, limit, before });
   }
   specFor(itemType);
   const id = normalizeItemId(itemId);
@@ -658,7 +939,102 @@ function resolveFiling(run, spec, snapshot, live) {
  */
 const KEEP_CURRENT = Object.freeze({
   memories: Object.freeze(["instance_id"]),
+  // A card's project filing is the same kind of pointer: project_spaces ids are
+  // per-instance and REUSED, tasks.db has no project_spaces to resolve one
+  // against, and a card that moved to another project must not be dragged back by
+  // restoring an old title. The CURRENT project is kept; the snapshot still says
+  // which project the version belonged to.
+  tasks_items: Object.freeze(["project_id"]),
 });
+
+/**
+ * The columns a restore cannot write verbatim, per table: a PROJECTED column is
+ * kept in the version as a projection (a bot definition's non-secret keys), so a
+ * restore MERGES it into the live value instead of overwriting it — otherwise it
+ * would blank every key the projection deliberately omits (the credentials).
+ *
+ * `merge(live, snapshot)` gets the live raw value and the stored projection (both
+ * already decoded) and returns what to write. `unchanged` compares the stored
+ * projection with the live value's projection, so a restore that changes nothing
+ * still writes nothing.
+ */
+const RESTORE_PROJECTIONS = Object.freeze({
+  pi_bot_defs: Object.freeze({
+    definition: Object.freeze({
+      merge: mergeBotDefinition,
+    }),
+  }),
+});
+
+/**
+ * Merge one version's allow-listed definition keys into the LIVE definition.
+ *
+ * The live document keeps every key it already has — including the credential
+ * keys (gateway tokens, env blobs) that the version never stored — and only the
+ * allow-listed keys the version carries are put back. So restoring an old bot
+ * definition restores its persona, tools and policy and CANNOT blank or overwrite
+ * a token.
+ *
+ * The stored value arrives as a JSON OBJECT when SQLite kept the projection's JSON
+ * subtype (the normal case, which is what makes the history view able to show it)
+ * or as its JSON TEXT (a snapshot written before that). Both are accepted; nothing
+ * else is.
+ *
+ * A live definition that is not a JSON object cannot be merged without dropping
+ * whatever text is there, so the restore is refused (`conflict`) rather than
+ * half-applied: the operator repairs the definition and restores again.
+ */
+function mergeBotDefinition(live, snapshot) {
+  let wanted = snapshot;
+  if (typeof wanted === "string") {
+    try {
+      wanted = wanted.trim() === "" ? null : JSON.parse(wanted);
+    } catch {
+      throw historyError("conflict", "the stored definition in this version cannot be read");
+    }
+  }
+  if (!isObject(wanted)) throw historyError("conflict", "this version holds no bot definition to put back");
+  let current = {};
+  const raw = live === null || live === undefined ? "" : String(live);
+  if (raw !== "") {
+    try {
+      current = JSON.parse(raw);
+    } catch {
+      throw historyError(
+        "conflict",
+        "this bot's stored definition cannot be read, so nothing can be merged into it",
+      );
+    }
+    if (!isObject(current)) {
+      throw historyError("conflict", "this bot's stored definition is not an object, so nothing can be merged into it");
+    }
+  }
+  const merged = { ...current };
+  for (const key of BOT_DEFINITION_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(wanted, key)) merged[key] = wanted[key];
+  }
+  return JSON.stringify(merged);
+}
+
+/**
+ * A comparable form of one JSON-ish value: a JSON TEXT is parsed, then both sides
+ * are compared as their canonical JSON. Used where the same value arrives in two
+ * shapes (a SQL projection read back as text, and the same projection stored
+ * inside a snapshot as a nested object).
+ */
+function normalizeJsonValue(value) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+/** Are two JSON-ish values the same document? */
+function sameJson(a, b) {
+  return JSON.stringify(normalizeJsonValue(a)) === JSON.stringify(normalizeJsonValue(b));
+}
 
 /**
  * The wire row for a restored memory: { id } plus the snapshotted columns the row
@@ -731,6 +1107,9 @@ const OWN_CODES = new Set([
   "redacted",
   "conflict",
   "unsupported",
+  "untrusted",
+  "unavailable",
+  "not_owner",
 ]);
 
 /**
@@ -855,12 +1234,29 @@ function versionIdAfter(run, watermark, itemType, itemId) {
  * A restore that succeeds partially is reported, never hidden.
  *
  * @param {object} db
- * @param {{versionId: number|string, syncManager?: object|null}} options
+ * @param {{versionId: number|string, itemType?: string, itemId?: string|number,
+ *   syncManager?: object|null,
+ *   artifacts?: {store?: object, blobs?: object, renderDeps?: object, db?: object}}} options
+ *   `itemType` names the artifact path (`itemType: "artifact"`); an artifact
+ *   version's id is the bundle's own version number, so the artifact has to be
+ *   named too, and the bundle seams default to the installed bundle's own (see
+ *   artifactSeams).
  * @param {{authorKind: string, authorId?: string, jobId?: string}} ctx who is restoring
  * @returns {Promise<{newVersionId: number|null, unchanged: boolean, synced: boolean,
  *   unfiled: boolean}>}
  */
-export async function restoreVersion(db, { versionId, syncManager = null } = {}, ctx) {
+export async function restoreVersion(
+  db,
+  { versionId, itemType = null, itemId = null, syncManager = null, artifacts = null } = {},
+  ctx,
+) {
+  // An ARTIFACT does not restore through item_versions at all: its versions are
+  // the artifacts bundle's own, and putting one back is a NEW version made by the
+  // bundle's store (never a write into artifact_versions). It has its own owner
+  // check and its own refusal rules — see restoreArtifactVersion.
+  if (itemType === ARTIFACT_ITEM_TYPE) {
+    return restoreArtifactVersion(db, { itemId, versionId, artifacts }, ctx);
+  }
   if (!isObject(ctx) || !AUTHOR_KINDS.includes(ctx.authorKind)) {
     throw historyError(
       "invalid_context",
@@ -919,6 +1315,30 @@ export async function restoreVersion(db, { versionId, syncManager = null } = {},
       const values = columns.map((column) => decodeValue(snapshot[column]));
       const row = readRow(run, spec, itemId);
 
+      // A PROJECTED column is never written verbatim: the version holds a
+      // projection of it (a bot definition's non-secret keys), so it is compared
+      // by that projection and written as a MERGE into the live value — which is
+      // what leaves the live credential keys alone.
+      const unchangedProjections = new Set();
+      const projections = RESTORE_PROJECTIONS[spec.table] || {};
+      for (const column of columns) {
+        if (!projections[column]) continue;
+        const at = columns.indexOf(column);
+        if (row) {
+          const { rows: liveProjection } = run({
+            sql: `SELECT ${columnValueExpr(spec, column)} AS p FROM ${quote(spec.table)} WHERE ${quote(spec.idColumn)} = ?`,
+            args: [itemId],
+          });
+          if (sameJson(liveProjection[0]?.p ?? null, values[at])) {
+            // The live row already says exactly what this version says: nothing to
+            // write, and the column must not be part of the UPDATE either.
+            unchangedProjections.add(column);
+            continue;
+          }
+        }
+        values[at] = projections[column].merge(row ? row[column] : null, values[at]);
+      }
+
       // The filing is resolved against today's project table, never replayed: a
       // project's integer id can belong to a different project by now.
       const filing = resolveFiling(run, spec, snapshot, row);
@@ -959,7 +1379,10 @@ export async function restoreVersion(db, { versionId, syncManager = null } = {},
 
         const keep = KEEP_CURRENT[spec.table] || [];
         const changed = columns.filter(
-          (column, i) => !keep.includes(column) && canonical(row[column]) !== canonical(values[i]),
+          (column, i) =>
+            !keep.includes(column) &&
+            !unchangedProjections.has(column) &&
+            canonical(row[column]) !== canonical(values[i]),
         );
         if (changed.length === 0) return report({ newVersionId: null, unchanged: true, row: null, op: null });
 

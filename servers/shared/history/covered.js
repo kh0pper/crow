@@ -37,6 +37,25 @@
  * expects to exist in the table, and never something a restore writes back into
  * the row.
  *
+ * `projected` is for a column that EXISTS but must never be stored verbatim: the
+ * version keeps a PROJECTION of it (a bot definition's non-secret keys — see
+ * bot_def below), and the update trigger compares the projection, so a change
+ * only a credential can see writes no version. A projected column is always a
+ * real column, is snapshotted, may be tracked, and is restored by a MERGE into
+ * the live value (api.js RESTORE_PROJECTIONS), never by writing the projection
+ * over it — that would blank the keys the snapshot deliberately omits.
+ *
+ * `store` says WHICH DATABASE the covered table lives in: `crow` (this
+ * instance's crow.db) or `tasks` (the instance-global tasks.db — board cards).
+ * SQLite triggers cannot write across databases, so tasks.db gets its OWN
+ * item_versions (migration 0025) and every consumer asks `typesForStore` which
+ * database a type's triggers belong to.
+ *
+ * `migration` names the one migration that installs a type's triggers and its
+ * baseline. It is explicit rather than inferred so a new covered type cannot be
+ * added without deciding which migration owns it; a test asserts every COVERED
+ * type is claimed by exactly one migration (0024's own list never grows).
+ *
  * Nothing else is special. Two rules the lists obey, both asserted at import
  * below and by tests/history-capture.test.js:
  *   - every column the WHEN clause names is also snapshotted (a change that is
@@ -86,8 +105,17 @@
  * memories carries its filing (project_id, project_uuid), blog_posts carries
  * published_at and nostr_event_id, and crow_context keeps its list.
  */
+
+/** The instance's own database (init-db.js builds it; migrations 0024/0025 add history to it). */
+export const STORE_CROW = "crow";
+
+/** The instance-global tasks.db (board cards; migration 0025 adds history to it). */
+export const STORE_TASKS = "tasks";
+
 export const COVERED = Object.freeze({
   memory: Object.freeze({
+    store: STORE_CROW,
+    migration: "0024-item-versions",
     table: "memories",
     idColumn: "id",
     tracked: Object.freeze([
@@ -116,6 +144,8 @@ export const COVERED = Object.freeze({
     projectRef: Object.freeze(["project_uuid", "project_id"]),
   }),
   blog_post: Object.freeze({
+    store: STORE_CROW,
+    migration: "0024-item-versions",
     table: "blog_posts",
     idColumn: "id",
     tracked: Object.freeze([
@@ -146,6 +176,8 @@ export const COVERED = Object.freeze({
     projectRef: Object.freeze([]),
   }),
   context_section: Object.freeze({
+    store: STORE_CROW,
+    migration: "0024-item-versions",
     table: "crow_context",
     idColumn: "id",
     tracked: Object.freeze([
@@ -191,6 +223,205 @@ export const COVERED = Object.freeze({
     // memories do NOT set this: project_id-only versions are a normal pre-uuid
     // shape there, and the live row's own project_uuid is a second opinion.
     filingRequiresUuid: true,
+  }),
+  research_note: Object.freeze({
+    store: STORE_CROW,
+    migration: "0025-item-versions-more",
+    table: "research_notes",
+    idColumn: "id",
+    // The note's own content, its provenance (what a quote note claims and where
+    // it was found) and its FILING: a note moved between projects, re-pointed at
+    // another source, or withdrawn is a change worth a version. NOT uuid /
+    // origin_instance_id / created_by (identity, origin and authorship pointers)
+    // and NOT created_at / updated_at / withdrawn_at / lamport_ts (timestamps).
+    tracked: Object.freeze([
+      "title",
+      "content",
+      "note_type",
+      "tags",
+      "project_id",
+      "source_id",
+      "provenance",
+      "quote_found",
+      "locator",
+      "withdrawn_by",
+      "withdrawn_reason",
+    ]),
+    // The whole row minus the key and the clocks/pointers: uuid and
+    // origin_instance_id ride along so a version says which note it was and where
+    // it came from, exactly as a memory's filing does, and withdrawn_at is kept so
+    // restoring a withdrawn note comes back as a live one.
+    snapshot: Object.freeze([
+      "project_id",
+      "source_id",
+      "title",
+      "content",
+      "note_type",
+      "tags",
+      "uuid",
+      "origin_instance_id",
+      "created_by",
+      "provenance",
+      "quote_found",
+      "locator",
+      "withdrawn_at",
+      "withdrawn_by",
+      "withdrawn_reason",
+    ]),
+    // research_notes.uuid is the NOTE's own identity (addUuidColumn), never the
+    // project's, so the project ref is the local project id alone. A restored note
+    // is therefore filed by resolveFiling's "keep the id only while that project
+    // still exists" rule — the same one memories use when they carry no uuid.
+    projectRef: Object.freeze(["project_id"]),
+  }),
+  kb_article: Object.freeze({
+    store: STORE_CROW,
+    migration: "0025-item-versions-more",
+    table: "kb_articles",
+    idColumn: "id",
+    // The BUNDLE owns this table: it does not exist until the knowledge-base bundle
+    // runs, so migration 0025 skips it with a reason and the bundle's own init
+    // installs `triggerSql("kb_article")` right after creating it. An absent
+    // kb_articles is therefore NORMAL (every instance without the bundle), not a
+    // half-built store to retry or a line to log on every boot.
+    bundleOwned: true,
+    // The bundle owns this table, so 0025 skips it with a reason when it is
+    // absent and bundles/knowledge-base/server/init-tables.js installs the
+    // triggers itself once it has created them (see that file). Everything a
+    // person writes is tracked: the pair/collection placement, the copy and the
+    // publishing state. NOT created_at / updated_at, and NOT published_at /
+    // last_verified_at (timestamps — snapshotted, never a change on their own).
+    tracked: Object.freeze([
+      "collection_id",
+      "category_id",
+      "pair_id",
+      "language",
+      "slug",
+      "title",
+      "content",
+      "excerpt",
+      "author",
+      "status",
+      "tags",
+      "verified_by",
+    ]),
+    // The whole row minus id/created_at/updated_at. published_at and
+    // last_verified_at stay IN the snapshot (a version must keep the publishing
+    // facts, the way blog_posts does) without being changes of their own.
+    snapshot: Object.freeze([
+      "collection_id",
+      "category_id",
+      "pair_id",
+      "language",
+      "slug",
+      "title",
+      "content",
+      "excerpt",
+      "author",
+      "status",
+      "tags",
+      "last_verified_at",
+      "verified_by",
+      "published_at",
+    ]),
+    // A KB article belongs to the instance (its collection), not to a project.
+    projectRef: Object.freeze([]),
+  }),
+  bot_def: Object.freeze({
+    store: STORE_CROW,
+    migration: "0025-item-versions-more",
+    table: "pi_bot_defs",
+    idColumn: "bot_id",
+    // Who the bot is, whether it is on, which project it works in, and its
+    // DEFINITION (compared by projection — see `projected`).
+    tracked: Object.freeze(["display_name", "definition", "enabled", "project_id"]),
+    // pi_bot_defs carries no credential-named COLUMN at all: the credentials live
+    // inside the `definition` JSON. So the row's other columns are snapshotted
+    // whole, and `definition` is snapshotted as an allow-listed projection that
+    // cannot carry one (BOT_DEFINITION_KEYS).
+    snapshot: Object.freeze(["display_name", "definition", "enabled", "project_id"]),
+    // The definition is stored as its non-secret projection, and COMPARED the
+    // same way: a change only a token can see (an operator rotating a Discord
+    // token) must not write a version, and a version must never hold the token.
+    projected: Object.freeze({
+      definition: definitionProjection,
+    }),
+    projectRef: Object.freeze(["project_id"]),
+  }),
+  card: Object.freeze({
+    // Board cards live in the instance-global tasks.db, a SEPARATE database: its
+    // triggers live there (migration 0025) and its versions are rows of
+    // tasks.db's own item_versions. A caller holding crow.db's client must never
+    // read or restore them.
+    store: STORE_TASKS,
+    migration: "0025-item-versions-more",
+    table: "tasks_items",
+    idColumn: "id",
+    // The plan's "title, body and the plan fields" (the card model of migrations
+    // 0000/0001/0003/0004): the text, where the card sits, who it is for and when
+    // it is due, and the machine fields that decide what happens to it. NOT
+    // updated_at / completed_at / created_at, NOT the scheduler's bookkeeping
+    // (action_needed, next_followup_date, processing_lease*), and NOT
+    // archived_at — an archived card STAYS archived, so a restore must not be
+    // able to unarchive one (it is in neither list, so no restore names it).
+    // `stage` is absent because the migrated shape does not have it: 0001 added it
+    // and 0002's rebuild dropped it again.
+    tracked: Object.freeze([
+      "title",
+      "description",
+      "status",
+      "priority",
+      "due_date",
+      "phase",
+      "owner",
+      "tags",
+      "project_id",
+      "parent_id",
+      "board_id",
+      "bot_id",
+      "assigned_bot",
+      "autonomy",
+    ]),
+    // data_json (a board's custom-field blob, whose shape each board defines) is
+    // left OUT for the same fail-safe reason gateways and spawn_env are left out
+    // of a bot definition: it is the one column that can hold whatever a board's
+    // fields were defined to hold. The scheduler's bookkeeping, the terminal
+    // timestamp, the recurrence pointer and archived_at are out for the reasons in
+    // `tracked` above; `omitted` states that for the whole-row check in
+    // tests/history-capture.test.js, so a NEW column cannot be left out by
+    // accident.
+    omitted: Object.freeze([
+      "data_json",
+      "completed_at",
+      "archived_at",
+      "recurrence_id",
+      "action_needed",
+      "next_followup_date",
+      "processing_lease",
+      "processing_lease_status",
+    ]),
+    snapshot: Object.freeze([
+      "title",
+      "description",
+      "status",
+      "priority",
+      "due_date",
+      "phase",
+      "owner",
+      "tags",
+      "project_id",
+      "parent_id",
+      "board_id",
+      "bot_id",
+      "assigned_bot",
+      "autonomy",
+    ]),
+    // A card has no portable project key, and tasks.db has no project_spaces
+    // table to resolve one against, so it declares no project scope. Restoring a
+    // card keeps the project it is in NOW (api.js KEEP_CURRENT): moving a card
+    // between projects is a change worth a version, but not something a restore
+    // replays.
+    projectRef: Object.freeze([]),
   }),
 });
 
@@ -291,8 +522,29 @@ for (const [itemType, spec] of Object.entries(COVERED)) {
       }
     }
   }
+  // A PROJECTED column is a real column stored through a projection, so it must
+  // be in the snapshot (that projection IS what a version keeps) and it may be
+  // tracked (the trigger compares two projections). It cannot also be derived:
+  // a derived field is not a column at all.
+  for (const column of Object.keys(spec.projected || {})) {
+    if (!spec.snapshot.includes(column)) {
+      throw new Error(`history: ${itemType}.${column} is projected but not snapshotted`);
+    }
+    if (spec.derived && spec.derived[column]) {
+      throw new Error(`history: ${itemType}.${column} is both projected and derived`);
+    }
+  }
+  // The whole point of a projection list is that a credential key cannot reach
+  // the version table: every projected KEY is checked against SECRET_COLUMN in
+  // the projection's own definition below (BOT_DEFINITION_KEYS).
   if (spec.snapshot.includes(spec.idColumn)) {
     throw new Error(`history: ${itemType}.${spec.idColumn} is the item key, never a snapshot field`);
+  }
+  if (!Object.values([STORE_CROW, STORE_TASKS]).includes(spec.store)) {
+    throw new Error(`history: ${itemType}.store must be ${STORE_CROW} or ${STORE_TASKS}`);
+  }
+  if (typeof spec.migration !== "string" || spec.migration === "") {
+    throw new Error(`history: ${itemType} must name the migration that installs its triggers`);
   }
 }
 
@@ -307,12 +559,100 @@ const str = (s) => `'${String(s).replace(/'/g, "''")}'`;
 // A column reference: `NEW."content"`, or `"content"` for a bare SELECT.
 const colRef = (column, row) => (row ? `${row}."${column}"` : `"${column}"`);
 
+/* ------------------------------------ the bot definition's safe projection */
+
+/**
+ * The pi_bot_defs.definition keys a version MAY keep.
+ *
+ * An ALLOW-list, deliberately: the definition is one JSON blob and a new
+ * credential-bearing key can appear in it without any change here (a new gateway
+ * type, an operator pasting a key into an advanced field). An allow-list fails
+ * SAFE when that happens — the new key is simply not versioned — where a
+ * deny-list (json_remove of the keys we know today) would start copying the new
+ * secret into item_versions the day it appears. Every key below is content the
+ * Bot Builder edits; nothing below can authenticate anything.
+ *
+ * What is NOT here, and why (each one read from the code that writes it):
+ *   gateways            scripts/pi-bots/gateways/index.mjs:87 (discord `token`),
+ *                       gateways/telegram.mjs:38 (`token`),
+ *                       gateways/slack.mjs:37-38 (`bot_token`, `app_token`) — and
+ *                       the editor's own secret set in
+ *                       servers/gateway/bot-federation.js:19 adds `password` and
+ *                       `secret`, so the whole subtree is out.
+ *   spawn_env           an env blob: servers/gateway/dashboard/panels/bot-builder/
+ *                       data-queries.js:374 writes it, and
+ *                       servers/gateway/bot-federation.js:23 redacts any key
+ *                       matching /(TOKEN|KEY|SECRET|PASSWORD|CRED)/i because such
+ *                       keys DO occur there. A blob with arbitrary keys cannot be
+ *                       allow-listed per key, so it is out.
+ *   session_dir         a placement pointer (where the bot works), not content.
+ *
+ * The projection is also what the update trigger COMPARES, so rotating a token
+ * (or setting an env key) writes no version at all: the definition a version
+ * describes did not change.
+ */
+export const BOT_DEFINITION_KEYS = Object.freeze([
+  "engine",
+  "models",
+  "fast_voice_model",
+  "tools",
+  "skills",
+  "permission_policy",
+  "triggers",
+  "tracker_config",
+  "system_prompt",
+  "description",
+  "persona",
+  "companion_features",
+]);
+
+for (const key of BOT_DEFINITION_KEYS) {
+  if (SECRET_COLUMN.test(key)) {
+    throw new Error(`history: bot_def.definition key ${key} looks like a credential and must never be versioned`);
+  }
+}
+
+/**
+ * The allow-listed projection of one pi_bot_defs row's `definition`, as a SQL
+ * expression: a json_object of exactly BOT_DEFINITION_KEYS, or NULL when the
+ * column does not hold a JSON document.
+ *
+ * The json_valid/typeof guard is load-bearing: json_extract raises "malformed
+ * JSON" on a broken document, and a trigger that raised would fail the bot's own
+ * write (the capture trigger runs INSIDE it). A corrupt definition is therefore
+ * versioned as NULL — visible as "the definition changed" with nothing to show,
+ * which is the honest reading — instead of breaking the write.
+ */
+function definitionProjection(row) {
+  const ref = colRef("definition", row);
+  const pairs = BOT_DEFINITION_KEYS.map((key) => `${str(key)}, json_extract(${ref}, '$.${key}')`).join(", ");
+  return `(CASE WHEN typeof(${ref}) = 'text' AND json_valid(${ref}) THEN json_object(${pairs}) ELSE NULL END)`;
+}
+
+/** SQL expression for one column's value: its projection, its derived lookup, or itself. */
+function columnSource(spec, column, row = null) {
+  const projected = spec.projected && spec.projected[column];
+  if (projected) return projected(row);
+  const derived = spec.derived && spec.derived[column];
+  if (derived) return derived(row);
+  return colRef(column, row);
+}
+
+/** True when a snapshot column is computed (projected or derived), never read raw. */
+export function isComputed(spec, column) {
+  return Boolean((spec.projected && spec.projected[column]) || (spec.derived && spec.derived[column]));
+}
+
 /**
  * The columns of `spec` a covered TABLE must actually have: its key plus every
  * snapshotted column that is not derived (a derived one is computed, never
  * selected). Used by the migration and the boot re-ensure to decide whether a
  * table is ready for its triggers, and by the History API to decide what to
  * read and what to write.
+ *
+ * A PROJECTED column is a real column of the table, so it stays in this list: the
+ * trigger reads it (through the projection), and a restore writes the merged
+ * value back into it.
  */
 export function tableColumns(spec) {
   return [spec.idColumn, ...spec.snapshot].filter((column) => !(spec.derived && spec.derived[column]));
@@ -361,12 +701,22 @@ export function valueExpr(column, row = null) {
 }
 
 /**
- * One snapshot column's stored value: a real column read from the row, or a
- * derived field computed from it (spec.derived — crow_context.project_uuid).
+ * One snapshot column's stored value: a real column read from the row, a
+ * PROJECTED column's projection of it (bot_def.definition — never the raw JSON),
+ * or a derived field computed from it (crow_context.project_uuid).
  */
 export function columnValueExpr(spec, column, row = null) {
-  const derived = spec.derived && spec.derived[column];
-  return derived ? storeValue(derived(row)) : valueExpr(column, row);
+  return storeValue(columnSource(spec, column, row));
+}
+
+/**
+ * The update trigger's comparison for one tracked column: the plain column for an
+ * ordinary one, or the PROJECTION on both sides for a projected one (so a token
+ * rotation, which the projection cannot see, is not a version).
+ */
+export function compareExpr(spec, column) {
+  if (!(spec.projected && spec.projected[column])) return `NEW."${column}" IS NOT OLD."${column}"`;
+  return `(${columnValueExpr(spec, column, "NEW")}) IS NOT (${columnValueExpr(spec, column, "OLD")})`;
 }
 
 /** A json_object(...) snapshot of the snapshotted columns of one row (NEW/OLD or bare). */
@@ -385,11 +735,25 @@ export function projectRefExpr(spec, row = null) {
   const columns = spec.projectRef || [];
   if (!columns.length) return "NULL";
   const parts = columns.map((c) => {
-    const derived = spec.derived && spec.derived[c];
-    const expr = derived ? derived(row) : colRef(c, row);
-    return `NULLIF(CAST(${expr} AS TEXT), '')`;
+    return `NULLIF(CAST(${columnSource(spec, c, row)} AS TEXT), '')`;
   });
   return parts.length === 1 ? parts[0] : `COALESCE(${parts.join(", ")})`;
+}
+
+/* ------------------------------------------ which migration, which database */
+
+/** The item types one migration installs triggers and baselines for, in COVERED order. */
+export function typesForMigration(migrationId) {
+  return Object.entries(COVERED)
+    .filter(([, spec]) => spec.migration === migrationId)
+    .map(([itemType]) => itemType);
+}
+
+/** The item types whose covered table lives in one store (`crow` or `tasks`). */
+export function typesForStore(store) {
+  return Object.entries(COVERED)
+    .filter(([, spec]) => spec.store === store)
+    .map(([itemType]) => itemType);
 }
 
 /* ------------------------------------------------------- append-only guards */
@@ -570,7 +934,7 @@ export function triggerDefs(itemType) {
   const stamp = STAMP_ONLY_TRANSITIONS[itemType];
   const changeExpr = spec.tracked
     .map((c) => {
-      const cmp = `NEW."${c}" IS NOT OLD."${c}"`;
+      const cmp = compareExpr(spec, c);
       if (!stamp || stamp.column !== c) return cmp;
       const unchanged = stamp.unchanged.map((u) => `NEW."${u}" IS OLD."${u}"`).join(" AND ");
       return `(${cmp}\n        AND NOT (OLD."${c}" IS NULL AND NEW."${c}" IS NOT NULL AND ${unchanged}))`;

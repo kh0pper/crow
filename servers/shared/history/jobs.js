@@ -26,6 +26,23 @@
  *
  * A version written by a peer (`peer`) or a schedule (`system`) is a "later
  * version from someone else" like any other: the undo stops there.
+ *
+ * STUDIO SONGS ARE LISTED AND NEVER RESTORED. A song keeps its own, richer edit
+ * log (Yjs plus the bundle's studio_history, with inverse operations), so History
+ * does not hold its versions and must not try to put one back: the undo result
+ * names the song with reason `own_undo` and a link to the song's own page, where
+ * the operator undoes an edit on the song itself (the same rule the design gives
+ * artifacts and Studio: §8.7).
+ *
+ * AND ITS ONE HONEST LIMIT: studio_history records WHICH BOT edited a song
+ * (`author_id` = `bot:<id>`) but not WHICH JOB it was working on — the Studio MCP
+ * server runs in its own process and never sees a card, hand-off or turn id. So a
+ * job's songs are found by the tightest linkage that exists: rows written by the
+ * job's OWN bot inside the job's OWN write window (the span of the versions that
+ * job wrote here). Two jobs of the same bot running at overlapping moments can
+ * therefore list each other's song, which is why this is a READ-ONLY report of
+ * "log in and undo it there" and never a write. Nothing is invented: no table, no
+ * column, and no attribution Crow does not already have.
  */
 import { COVERED } from "./covered.js";
 import { AUTHOR_KINDS, withWriteContext } from "./write-context.js";
@@ -43,9 +60,19 @@ export const UNDO_REASONS = Object.freeze({
   UNSUPPORTED: "unsupported",
   /** the job's oldest version for the item is an update with nothing before it */
   NO_PRIOR_VERSION: "no_prior_version",
+  /** a Studio song: its own History has the undo, so this one never restores it */
+  OWN_UNDO: "own_undo",
   /** anything unexpected: the item is reported, never silently counted as undone */
   FAILED: "failed",
 });
+
+/** The item type a Studio song is reported under (never a COVERED type). */
+export const STUDIO_SONG_ITEM_TYPE = "studio_song";
+
+/** Where a song's own page lives (its History and its per-step Undo). */
+export function studioSongLink(songId) {
+  return `/dashboard/studio?song=${encodeURIComponent(String(songId))}`;
+}
 
 function jobError(code, message) {
   const err = new Error(message);
@@ -75,6 +102,67 @@ function reasonFor(err) {
 }
 
 /**
+ * The Studio songs a job touched, as entries for the undo result.
+ *
+ * `studio_history` (the Studio bundle's table, in crow.db) records the author of
+ * every song edit but no job id, so the linkage is the narrowest one available:
+ * rows authored by the JOB's own bot (`bot:<authorId>`) whose `created_at` falls
+ * inside the window the job's own versions span. See the module comment for the
+ * limit that implies; the entry is read-only, so a false positive only offers a
+ * link to the song.
+ *
+ * Never throws: a store without the Studio tables (the bundle is not installed)
+ * has no songs, which is the honest answer, not an error.
+ *
+ * @param {object} db
+ * @param {{authorId: string|null, from: string|null, to: string|null}} window
+ * @returns {Promise<Array<{itemType: string, itemId: string, skipped: true,
+ *   reason: string, link: string, label: string}>>}
+ */
+export async function studioSongsTouchedBy(db, { authorId = null, from = null, to = null } = {}) {
+  const bot = str(authorId);
+  if (bot === null || typeof from !== "string" || typeof to !== "string") return [];
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT song_id, MAX(created_at) AS at
+              FROM studio_history
+             WHERE author_id = ? AND created_at >= ? AND created_at <= ?
+             GROUP BY song_id
+             ORDER BY at DESC
+             LIMIT 50`,
+      args: [`bot:${bot}`, from, to],
+    });
+    const out = [];
+    for (const row of rows) {
+      const songId = str(row.song_id);
+      if (songId === null) continue;
+      let label = songId;
+      try {
+        const { rows: songRows } = await db.execute({
+          sql: "SELECT title FROM studio_songs WHERE id = ?",
+          args: [songId],
+        });
+        const title = str(songRows[0]?.title);
+        if (title !== null) label = title;
+      } catch {
+        // no studio_songs table: the id is the label, which is honest
+      }
+      out.push({
+        itemType: STUDIO_SONG_ITEM_TYPE,
+        itemId: songId,
+        skipped: true,
+        reason: UNDO_REASONS.OWN_UNDO,
+        link: studioSongLink(songId),
+        label,
+      });
+    }
+    return out;
+  } catch {
+    return []; // no studio tables on this instance: no songs, not a failure
+  }
+}
+
+/**
  * Undo one job.
  *
  * @param {object} db
@@ -88,7 +176,10 @@ function reasonFor(err) {
  * @returns {Promise<{restored: Array<{itemType: string, itemId: string,
  *   action: 'restored'|'deleted'|'unchanged', newVersionId: number|null,
  *   synced?: boolean, unfiled?: boolean}>,
- *   skipped: Array<{itemType: string, itemId: string, reason: string, message?: string}>}>}
+ *   skipped: Array<{itemType: string, itemId: string, reason: string, message?: string,
+ *   skipped?: true, link?: string, label?: string}>}>} a Studio song appears in
+ *   `skipped` with reason `own_undo`, `skipped: true` and a `link` to the song's
+ *   own page — History never restores one (see studioSongsTouchedBy).
  */
 export async function undoJob(db, { jobId, syncManager = null } = {}, ctx) {
   if (!ctx || typeof ctx !== "object" || !AUTHOR_KINDS.includes(ctx.authorKind)) {
@@ -191,5 +282,33 @@ export async function undoJob(db, { jobId, syncManager = null } = {}, ctx) {
     }
   }
 
-  return { restored, skipped };
+  return { restored, skipped: [...skipped, ...(await studioSongEntries(db, job))] };
+}
+
+/**
+ * The Studio song entries for one job's undo result (see studioSongsTouchedBy).
+ *
+ * A job of the owner's, a schedule's or a peer's has no bot to match on, so it
+ * lists no song: only a `bot` job's edits are attributable to that bot in
+ * studio_history at all.
+ */
+async function studioSongEntries(db, jobId) {
+  let window = null;
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT MIN(created_at) AS from_at, MAX(created_at) AS to_at, MAX(author_id) AS author_id
+              FROM item_versions
+             WHERE job_id = ? AND author_kind = 'bot'`,
+      args: [jobId],
+    });
+    window = rows[0] ?? null;
+  } catch {
+    return [];
+  }
+  if (!window) return [];
+  return studioSongsTouchedBy(db, {
+    authorId: window.author_id ?? null,
+    from: typeof window.from_at === "string" ? window.from_at : null,
+    to: typeof window.to_at === "string" ? window.to_at : null,
+  });
 }

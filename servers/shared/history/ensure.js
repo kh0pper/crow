@@ -37,6 +37,11 @@
  * committing, so a row still armed at boot means that transaction never
  * committed — leaving the switch on would silently permit history rewrites for
  * the life of the process.
+ *
+ * ONE DATABASE PER CALL. `store` names which database this handle is (default
+ * `crow`), and only that store's covered types are looked at: a card's table
+ * lives in the instance-global tasks.db, whose own item_versions and triggers are
+ * migration 0025's to install (a SQLite trigger cannot write across databases).
  */
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
@@ -45,6 +50,7 @@ import {
   COVERED,
   ITEM_VERSIONS_ERASE_DDL,
   ITEM_VERSIONS_TRASH_INDEX_SQL,
+  STORE_CROW,
   guardTriggerDefs,
   tableColumns,
   triggerDefs,
@@ -63,14 +69,14 @@ const columnsOf = (db, table) =>
 const triggerNamesIn = (db) =>
   new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all().map((r) => r.name));
 
-/** The migration that owns capture triggers and baselines. */
+/** The migration that owns capture triggers and baselines for crow.db's first three types. */
 export const BASELINE_MIGRATION_ID = "0024-item-versions";
 
-/** Has the migration registry recorded 0024? (No registry table = no.) */
-const migrationRecorded = (db) => {
+/** Has the migration registry recorded `migrationId` in this store? (No registry table = no.) */
+const migrationRecorded = (db, migrationId = BASELINE_MIGRATION_ID) => {
   try {
     return Boolean(
-      db.prepare("SELECT 1 FROM schema_migrations WHERE id = ?").get(BASELINE_MIGRATION_ID),
+      db.prepare("SELECT 1 FROM schema_migrations WHERE id = ?").get(migrationId),
     );
   } catch {
     return false;
@@ -78,10 +84,15 @@ const migrationRecorded = (db) => {
 };
 
 /**
- * Does this item type have a baseline yet? Either the migration that writes the
- * baselines is recorded as applied, or a 'system' version (the baseline's author)
- * of that item type is present — which covers a store restored from a backup that
- * lost its schema_migrations row.
+ * Does this item type have a baseline yet? Either the migration that owns the
+ * type (spec.migration — 0024 for memories/posts/sections, 0025 for the rest) is
+ * recorded as applied, or a 'system' version (the baseline's author) of that item
+ * type is present — which covers a store restored from a backup that lost its
+ * schema_migrations row.
+ *
+ * Per TYPE, not per store: a store that has run 0024 but where 0025 deferred has
+ * captured memories and no baselined notes, and arming the notes' capture before
+ * their baseline is exactly the loss this check exists to prevent.
  */
 const hasBaseline = (db, itemType, recorded) =>
   recorded ||
@@ -99,6 +110,10 @@ const hasBaseline = (db, itemType, recorded) =>
  * none of those is a trigger, so none appears in `restored`.
  *
  * @param {import("better-sqlite3").Database} db
+ * @param {{store?: string}} [opts] `store` names which store this handle IS
+ *   (default `crow`): a crow.db handle must never look for tasks.db's table, and
+ *   a type whose covered table lives in another store is left to that store's own
+ *   ensure (migration 0025 installs the card triggers in tasks.db).
  * @returns {{restored: string[], skipped: string[], awaitingBaseline: string[],
  *   disarmed: number}} `restored` is the trigger names this call created (empty on
  *   a healthy store); `skipped` is the covered tables left alone because they are
@@ -107,7 +122,7 @@ const hasBaseline = (db, itemType, recorded) =>
  *   capture is left to the migration because no baseline exists yet; `disarmed` is
  *   the number of erase-switch rows reset to 0.
  */
-export function ensureHistoryTriggers(db) {
+export function ensureHistoryTriggers(db, { store = STORE_CROW } = {}) {
   const skipped = [];
   const awaitingBaseline = [];
   // Nothing to guard or capture yet: migration 0024 owns creation, and a store
@@ -166,11 +181,18 @@ export function ensureHistoryTriggers(db) {
   // audited door. Reset it before anything can write.
   const disarmed = db.prepare("UPDATE item_versions_erase SET armed = 0 WHERE armed <> 0").run().changes;
 
-  const recorded = migrationRecorded(db);
   const wanted = [...guardTriggerDefs()];
   for (const [itemType, spec] of Object.entries(COVERED)) {
+    // This handle is ONE database. A type whose table lives in the other store is
+    // that store's own ensure's business (0025 installs the card triggers in
+    // tasks.db); looking for it here would only report it "absent" forever.
+    if ((spec.store || STORE_CROW) !== store) continue;
     if (!tableExists(db, spec.table)) {
-      skipped.push(spec.table);
+      // A bundle-owned table that is not here yet is not a problem to report: its
+      // bundle installs its own triggers when it creates it (and this ensure
+      // re-creates them for a table that IS here). Anything else really is a table
+      // this store is missing.
+      if (!spec.bundleOwned) skipped.push(spec.table);
       continue;
     }
     const columns = columnsOf(db, spec.table);
@@ -189,7 +211,7 @@ export function ensureHistoryTriggers(db) {
       skipped.push(spec.table);
       continue;
     }
-    if (!hasBaseline(db, itemType, recorded)) {
+    if (!hasBaseline(db, itemType, migrationRecorded(db, spec.migration))) {
       awaitingBaseline.push(spec.table);
       continue;
     }

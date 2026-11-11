@@ -89,6 +89,7 @@ import {
   snapshotExpr,
   tableColumns,
   triggerSql,
+  typesForMigration,
 } from "../../servers/shared/history/covered.js";
 import { ITEM_ERASURES_DDL, PENDING_ERASURES_DDL, PENDING_REMOTE_ERASURES_DDL } from "../../servers/shared/history/erase.js";
 
@@ -224,7 +225,12 @@ export function run({ dbPath, log = () => {} }) {
     log("  item_versions: ensured (table, 4 indexes, append-only guards, erase control)");
 
     const unready = [];
-    for (const [itemType, spec] of Object.entries(COVERED)) {
+    // THIS migration's types only. COVERED grew when 0025 shipped the rest of
+    // the covered content (notes, KB articles, bot definitions, board cards), and
+    // this migration must not start installing triggers or baselines for a type
+    // another migration owns — 0025 does that, in the right database each.
+    for (const itemType of typesForMigration(id)) {
+      const spec = COVERED[itemType];
       if (!tableExists(db, spec.table)) {
         unready.push(spec.table);
         log(`  ${spec.table}: absent — ${itemType} triggers skipped, will retry`);

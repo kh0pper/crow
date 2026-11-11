@@ -46,11 +46,13 @@
  * MCP tools and the sweep use. The UI is a face on them, not a second engine.
  */
 import { SUPPORTED_LANGS, fill, t } from "../shared/i18n.js";
-import { COVERED } from "../../../shared/history/covered.js";
-import { listVersions, restoreVersion } from "../../../shared/history/api.js";
+import { COVERED, STORE_TASKS } from "../../../shared/history/covered.js";
+import { ARTIFACT_ITEM_TYPE, listVersions, restoreVersion } from "../../../shared/history/api.js";
 import { undoJob } from "../../../shared/history/jobs.js";
 import { emptyTrash, listTrash, normalizeTrashDays, restoreFromTrash, DEFAULT_TRASH_DAYS } from "../../../shared/history/trash.js";
 import { withWriteContext } from "../../../shared/history/write-context.js";
+import { createDbClient } from "../../../db.js";
+import { tasksDbPath } from "../../../../scripts/pi-bots/instance-paths.mjs";
 import { isLocalPasswordSessionOn } from "../local-session.js";
 import { ownerRequestWriteContext } from "../auth.js";
 import { readSetting } from "../settings/registry.js";
@@ -112,6 +114,28 @@ export function mountHistoryRoutes(router, dispatch) {
   router.all(`${HISTORY_ROOT}/:itemType/:itemId`, dispatch);
 }
 
+/**
+ * The database a covered item's History lives in.
+ *
+ * Almost every type is a table of crow.db, which is the client the dashboard
+ * already handed this panel. A BOARD CARD is not: tasks_items lives in the
+ * instance-global tasks.db (a separate file, with its own item_versions — a
+ * SQLite trigger cannot write across databases), so a card's page opens that store
+ * for the length of one request and closes it again. This is the ONE place that
+ * decision is made, so no query in this panel has to know about it.
+ *
+ * `null` means "use the request's own crow.db client".
+ *
+ * @param {string} itemType
+ * @returns {{db: object, close: () => void}|null}
+ */
+export function historyDbFor(itemType) {
+  const spec = Object.hasOwn(COVERED, itemType) ? COVERED[itemType] : null;
+  if (!spec || spec.store !== STORE_TASKS) return null;
+  const db = createDbClient(tasksDbPath());
+  return { db, close: () => { try { db.close(); } catch { /* already closed */ } } };
+}
+
 /** The owner's context, or null. The same rule the restore itself needs. */
 function ownerContext(req) {
   const ctx = ownerRequestWriteContext(req);
@@ -131,6 +155,7 @@ function refusalNotice(err, lang) {
   if (code === "redacted") return notice("error", t("history.result.redacted", lang));
   if (code === "not_found") return notice("error", t("history.result.notFound", lang));
   if (code === "not_in_trash") return notice("error", t("history.result.notInTrash", lang));
+  if (code === "untrusted") return notice("error", t("history.result.untrusted", lang));
   if (code === "invalid_context" || code === "not_owner") return notice("error", t("history.result.notOwner", lang));
   return notice("error", t("history.result.failed", lang));
 }
@@ -160,7 +185,11 @@ async function handlePost({ req, db, ctx, lang }) {
     // A version is restored only from its own item's page.
     const pathType = req.params?.itemType;
     const pathId = req.params?.itemId;
-    if (pathType && pathId) {
+    // An ARTIFACT's versions are the artifacts bundle's own rows, so there is no
+    // item_versions row to cross-check against (the version id is the bundle's
+    // version number, which means nothing outside its artifact).
+    const isArtifact = pathType === ARTIFACT_ITEM_TYPE;
+    if (pathType && pathId && !isArtifact) {
       const own = await db.execute({
         sql: "SELECT 1 FROM item_versions WHERE id = ? AND item_type = ? AND item_id = ?",
         args: [versionId, String(pathType), String(pathId)],
@@ -169,7 +198,11 @@ async function handlePost({ req, db, ctx, lang }) {
     }
     try {
       const result = await withWriteContext(ctx, () =>
-        restoreVersion(db, { versionId, syncManager }, ctx),
+        restoreVersion(
+          db,
+          { versionId, itemType: isArtifact ? ARTIFACT_ITEM_TYPE : null, itemId: isArtifact ? pathId : null, syncManager },
+          ctx,
+        ),
       );
       if (result.unchanged) return { notice: notice("info", t("history.result.unchanged", lang)) };
       // An item that came back without its project is reported, never hidden.
@@ -272,79 +305,93 @@ async function handler(req, res, { db, layout, lang: rawLang }) {
   // exist must not be able to carry out a restore on its way to a 404.
   const itemType = view === "item" ? String(req.params?.itemType || "") : null;
   const itemId = view === "item" ? String(req.params?.itemId || "") : null;
-  if (view === "item" && (!Object.hasOwn(COVERED, itemType) || !ITEM_ID_RE.test(itemId))) {
+  // An artifact is not one of COVERED's tables (its versions are the artifacts
+  // bundle's own), so it is accepted by name alongside them.
+  const knownType = itemType === ARTIFACT_ITEM_TYPE || Object.hasOwn(COVERED, itemType);
+  if (view === "item" && (!knownType || !ITEM_ID_RE.test(itemId))) {
     res.status(404);
     return layout({ title, content: renderNotFound(lang) });
   }
 
-  let result = { notice: null, confirming: false };
-  if (req.method === "POST") result = await handlePost({ req, db, ctx, lang });
+  // A board card's versions are rows of tasks.db's OWN item_versions, so its page
+  // runs on that store's client (and closes it): every other type keeps the
+  // request's crow.db client. See historyDbFor.
+  const itemStore = view === "item" || req.method === "POST" ? historyDbFor(itemType) : null;
+  const dbFor = itemStore ? itemStore.db : db;
+  try {
+    let result = { notice: null, confirming: false };
+    if (req.method === "POST") result = await handlePost({ req, db: dbFor, ctx, lang });
 
-  const csrf = req.csrfToken || "";
-  const who = await authorMaps(db);
-  // The page cursor is a version id. Anything else is ignored rather than passed
-  // to the reader (listVersions refuses a malformed cursor, and a page must not
-  // be able to turn a bad link into a 500).
-  const rawBefore = typeof req.query?.before === "string" ? req.query.before.trim() : "";
-  const before = /^\d{1,18}$/.test(rawBefore) ? rawBefore : null;
+    const csrf = req.csrfToken || "";
+    const who = await authorMaps(db);
+    // The page cursor is a version id. Anything else is ignored rather than passed
+    // to the reader (listVersions refuses a malformed cursor, and a page must not
+    // be able to turn a bad link into a 500).
+    const rawBefore = typeof req.query?.before === "string" ? req.query.before.trim() : "";
+    const before = /^\d{1,18}$/.test(rawBefore) ? rawBefore : null;
 
-  if (view === "index") {
-    return layout({ title, content: renderHistoryIndex({ banner, lang }) });
-  }
-
-  if (view === "jobs") {
-    const { jobs, hasMore } = await listJobs(db, { before, limit: HISTORY_PAGE_SIZE });
-    return layout({
-      title,
-      content: renderJobsPage({ jobs, hasMore, before, who, csrf, notice: result.notice, banner, lang }),
-    });
-  }
-
-  if (view === "trash") {
-    let trashDays = DEFAULT_TRASH_DAYS;
-    try {
-      const raw = await readSetting(db, "history.trash_days");
-      trashDays = raw === null || raw === undefined || raw === "" ? DEFAULT_TRASH_DAYS : normalizeTrashDays(Number(raw));
-    } catch {
-      trashDays = DEFAULT_TRASH_DAYS;
+    if (view === "index") {
+      return layout({ title, content: renderHistoryIndex({ banner, lang }) });
     }
-    const items = await listTrash(db, { limit: 200 });
+
+    if (view === "jobs") {
+      const { jobs, hasMore } = await listJobs(db, { before, limit: HISTORY_PAGE_SIZE });
+      return layout({
+        title,
+        content: renderJobsPage({ jobs, hasMore, before, who, csrf, notice: result.notice, banner, lang }),
+      });
+    }
+
+    if (view === "trash") {
+      let trashDays = DEFAULT_TRASH_DAYS;
+      try {
+        const raw = await readSetting(db, "history.trash_days");
+        trashDays = raw === null || raw === undefined || raw === "" ? DEFAULT_TRASH_DAYS : normalizeTrashDays(Number(raw));
+      } catch {
+        trashDays = DEFAULT_TRASH_DAYS;
+      }
+      const items = await listTrash(db, { limit: 200 });
+      return layout({
+        title,
+        content: renderTrashPage({
+          items: items.map((item) => ({ ...item, who })),
+          trashDays,
+          csrf,
+          notice: result.notice,
+          banner,
+          confirming: result.confirming === true,
+          lang,
+        }),
+      });
+    }
+
+    // The item page.
+    // One extra row: each version's change is computed against the next-older one,
+    // so the last version on the page needs its own neighbour to compare with.
+    const versions = await listVersions(dbFor, { itemType, itemId, limit: HISTORY_PAGE_SIZE + 1, before });
+    const hasMore = versions.length > HISTORY_PAGE_SIZE;
+    const shown = Math.min(versions.length, HISTORY_PAGE_SIZE);
     return layout({
       title,
-      content: renderTrashPage({
-        items: items.map((item) => ({ ...item, who })),
-        trashDays,
+      content: renderItemPage({
+        itemType,
+        itemId,
+        versions,
+        shown,
+        hasMore,
+        before,
+        who,
         csrf,
         notice: result.notice,
         banner,
-        confirming: result.confirming === true,
         lang,
       }),
     });
+  } finally {
+    // A store opened for this request only (a card's tasks.db) is closed here,
+    // whatever the page did.
+    if (itemStore) itemStore.close();
   }
-
-  // The item page.
-  // One extra row: each version's change is computed against the next-older one,
-  // so the last version on the page needs its own neighbour to compare with.
-  const versions = await listVersions(db, { itemType, itemId, limit: HISTORY_PAGE_SIZE + 1, before });
-  const hasMore = versions.length > HISTORY_PAGE_SIZE;
-  const shown = Math.min(versions.length, HISTORY_PAGE_SIZE);
-  return layout({
-    title,
-    content: renderItemPage({
-      itemType,
-      itemId,
-      versions,
-      shown,
-      hasMore,
-      before,
-      who,
-      csrf,
-      notice: result.notice,
-      banner,
-      lang,
-    }),
-  });
 }
 
 export default {
