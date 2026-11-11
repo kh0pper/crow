@@ -107,7 +107,7 @@ You only need port 22 (SSH, already open) and port 443 (HTTPS, for public blog i
 ### UFW (on-instance firewall)
 
 ::: tip
-Skip this if you used Option A: the installer already did it. It opens 22 and 443 only.
+Skip this if you used the installer (Step 5, Option A): it already set up the firewall. It opens 22, and 443 only if you answer yes at its prompt. On Oracle it defaults to no.
 :::
 
 Defense in depth — a second firewall on the instance itself, in case Oracle's security list is misconfigured.
@@ -125,7 +125,7 @@ sudo ufw enable
 ### fail2ban (blocks brute-force SSH attempts)
 
 ::: tip
-Skip this if you used Option A: the installer already did it.
+Skip this if you used the installer (Step 5, Option A): it already did it.
 :::
 
 fail2ban watches your login logs and temporarily blocks IP addresses that fail too many login attempts. This stops automated password-guessing attacks.
@@ -191,10 +191,10 @@ For advanced Tailscale configuration, see the [Tailscale Setup Guide](./tailscal
 ## Step 8: Create a systemd Service
 
 ::: warning
-Skip this step if you used Option A. The installer already wrote this service, with the proxy socket and the boot guard. Running the block below would overwrite it.
+Skip this step if you used the installer (Step 5, Option A). The installer already wrote this service, with the proxy socket and the boot guard. Running the block below would overwrite it.
 :::
 
-The unit below is the plain manual version, for Option B. Run the Crow gateway as a background service that starts automatically on boot:
+The unit below is the plain manual version, for the manual install (Step 5, Option B). Run the Crow gateway as a background service that starts automatically on boot:
 
 ```bash
 sudo tee /etc/systemd/system/crow-gateway.service > /dev/null << 'EOF'
@@ -277,13 +277,15 @@ Your blog is now at `https://crow.your-tailnet.ts.net/blog`. The Crow's Nest rem
 
 For a professional URL like `blog.yourdomain.com`.
 
-**If you used Option A**, Caddy and its Caddyfile already exist. Do not replace the file. Open `/etc/caddy/Caddyfile` and change only the site name on the line that opens the block to your domain (for example `blog.yourdomain.com`). Remove the `tls internal` line in that block, so Caddy gets a Let's Encrypt certificate for your domain. Keep the `reverse_proxy unix//run/crow-proxy/gateway.sock` line and the global `admin` block. Then reload Caddy:
+**If you used the installer** (Step 5, Option A), Caddy and its Caddyfile already exist. Do not replace the file. Run `sudo nano /etc/caddy/Caddyfile`. Change only the site name, which is the first line of the block (the machine's `.local` name), to your domain (for example `blog.yourdomain.com`). Remove the `tls internal` line in that block, so Caddy gets a Let's Encrypt certificate for your domain. Keep the `reverse_proxy unix//run/crow-proxy/gateway.sock` line and the global `admin` block. Then reload Caddy:
 
 ```bash
 sudo systemctl reload caddy
 ```
 
-**If you used the manual path** (Option B in Step 5), install Caddy first:
+The installer may have left port 443 closed on Oracle. If so, open it with `sudo ufw allow 443/tcp`. Port 80 is optional: it is only needed for the redirect from HTTP to HTTPS.
+
+**If you used the manual install** (Step 5, Option B), install Caddy first (443 is already open from Step 6):
 
 ```bash
 # Install Caddy
@@ -306,11 +308,11 @@ EOF
 sudo systemctl restart caddy
 ```
 
-::: warning Caddy on localhost:3001 is turned away
-A Caddy that dials `localhost:3001` reaches the gateway as an unverified loopback connection, and the Crow's Nest turns it away. Once Caddy is running, run `sudo bash scripts/fix-caddy-proxy-socket.sh` in `~/.crow/app`. That switches it to the proxy socket.
-:::
-
 Point your domain's DNS A record to your Oracle instance's public IP. Caddy automatically provisions Let's Encrypt certificates. For detailed DNS setup instructions, see [Custom Domain Setup](./custom-domain).
+
+::: warning Caddy on localhost:3001 is turned away
+A Caddy that dials `localhost:3001` reaches the gateway as an unverified loopback connection, and the Crow's Nest turns it away. Your domain's DNS must already point at this server, because the script checks `/health` through the domain. Once Caddy is running, run `sudo bash scripts/fix-caddy-proxy-socket.sh` in `~/.crow/app`. That switches it to the proxy socket.
+:::
 
 Set the public URL in your `.env`:
 
