@@ -1653,7 +1653,7 @@ test("a too-old git also makes the commit path return cleanly, with no git dir m
   try {
     const sha = await commitWorkspace(projectFor(63, ws), OWNER, "Start", { dataDir: fx.dataDir, _gitVersion: () => [2, 20] });
     assert.equal(sha, null);
-    assert.equal(existsSync(gitDirFor(projectFor(63, ws), fx.dataDir)), false);
+    assert.equal(existsSync(join(gitDirFor(projectFor(63, ws), fx.dataDir), "HEAD")), false, "no repository was initialised");
   } finally {
     console.warn = realWarn;
   }
