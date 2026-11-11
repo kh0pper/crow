@@ -6,7 +6,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -20,7 +20,7 @@ delete process.env.CROW_TASKS_DB_PATH;
 after(() => rmSync(root, { recursive: true, force: true }));
 
 const { createDbClient } = await import("../servers/db.js");
-const { historyFootprint, folderBytes, WARN_SHARE_OF_FREE } = await import("../servers/shared/history/size.js");
+const { historyFootprint, folderBytes, clearFootprintCache, WARN_SHARE_OF_FREE, FOOTPRINT_TTL_MS } = await import("../servers/shared/history/size.js");
 const { translations, t, fill } = await import("../servers/gateway/dashboard/shared/i18n.js");
 const { sizeLines } = await import("../servers/gateway/dashboard/settings/sections/history.js");
 
@@ -35,6 +35,9 @@ function storeWith(path, snapshots) {
 }
 
 function freshDir(name) {
+  // Every test starts from an empty folder cache: several tests share a data dir
+  // shape and the cache is keyed by path (the whole point of F5).
+  clearFootprintCache();
   const d = join(root, name);
   mkdirSync(join(d, "history", "workspaces"), { recursive: true });
   return d;
@@ -124,6 +127,126 @@ test("an unreadable card store marks the total partial instead of reading as emp
     assert.equal(fp.cards, null);
     assert.equal(fp.partial, true);
     assert.ok(Number.isFinite(fp.totalBytes));
+  } finally {
+    db.close();
+  }
+});
+
+test("a tasks.db that exists without an item_versions table is zeros, not partial", async () => {
+  const dir = freshDir("notable");
+  const raw = new Database(join(dir, "tasks.db"));
+  raw.exec("CREATE TABLE some_other_table (id INTEGER PRIMARY KEY)");
+  raw.close();
+  const db = createDbClient(join(dir, "crow.db"));
+  try {
+    const fp = await historyFootprint(db, { tasksDbPath: join(dir, "tasks.db"), dataDir: dir, free: null });
+    assert.deepEqual(fp.cards, { versions: 0, bytes: 0 }, "no history table means no card history yet");
+    assert.equal(fp.partial, false, "a missing table is a known zero, not an unknown");
+    assert.equal(fp.versions, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test("the card store is opened read-only: the file is unchanged and no journal appears", async () => {
+  const dir = freshDir("readonly");
+  // Own folder, so the only files that could show up beside tasks.db are its own.
+  const cardsDir = join(dir, "cards");
+  mkdirSync(cardsDir, { recursive: true });
+  const cardsPath = join(cardsDir, "tasks.db");
+  storeWith(cardsPath, ["d".repeat(10)]);
+  const before = statSync(cardsPath);
+  const db = createDbClient(join(dir, "crow.db"));
+  try {
+    const fp = await historyFootprint(db, { tasksDbPath: cardsPath, dataDir: dir, free: null });
+    assert.deepEqual(fp.cards, { versions: 1, bytes: 10 });
+  } finally {
+    db.close();
+  }
+  const after = statSync(cardsPath);
+  assert.equal(after.mtimeMs, before.mtimeMs, "a read-only open must not touch the card store");
+  assert.equal(after.size, before.size);
+  assert.deepEqual(
+    readdirSync(cardsDir).filter((n) => /^tasks\.db-(journal|wal|shm)$/.test(n)),
+    [],
+    "a read-only open must not leave a journal, WAL or shared-memory file",
+  );
+});
+
+test("a directory on another filesystem is skipped and its bytes are not counted", () => {
+  const dir = freshDir("onedev");
+  const workspaces = join(dir, "history", "workspaces");
+  const mount = join(workspaces, "mount");
+  mkdirSync(mount, { recursive: true });
+  writeFileSync(join(mount, "big"), Buffer.alloc(100000));
+  writeFileSync(join(workspaces, "own"), Buffer.alloc(10));
+  const rootDev = lstatSync(workspaces).dev;
+  // A seam, not a real mount: this subdirectory reports another device.
+  const otherDevice = (path, opts) => {
+    const st = lstatSync(path, opts);
+    if (!st) return st;
+    if (path === mount) return { isDirectory: () => st.isDirectory(), dev: rootDev + 1, size: st.size };
+    return st;
+  };
+  assert.equal(folderBytes(workspaces), 100010, "without the seam both folders count");
+  assert.equal(folderBytes(workspaces, { lstat: otherDevice }), 10, "the other device is skipped, not entered, not counted");
+});
+
+test("an unreadable crow.db marks the total partial instead of reading as zero versions", async () => {
+  const dir = freshDir("badown");
+  writeFileSync(join(dir, "history", "workspaces", "f"), Buffer.alloc(10));
+  const failing = { execute: async () => { throw new Error("database disk image is malformed"); } };
+  const fp = await historyFootprint(failing, { tasksDbPath: join(dir, "none.db"), dataDir: dir, free: null });
+  assert.equal(fp.versions, 0);
+  assert.equal(fp.bytes, 0);
+  assert.equal(fp.partial, true, "a crow.db that cannot be read is unknown, not empty");
+  assert.equal(fp.workspaceBytes, 10, "the other parts are still measured");
+});
+
+test("the folder walk is cached for 60 s, per path, and walks again after the window", async () => {
+  const dir = freshDir("cache");
+  writeFileSync(join(dir, "history", "workspaces", "f"), Buffer.alloc(20));
+  const db = createDbClient(join(dir, "crow.db"));
+  let walks = 0;
+  const countingWalk = (path, walkOpts) => {
+    walks += 1;
+    return folderBytes(path, walkOpts);
+  };
+  const opts = { tasksDbPath: join(dir, "none.db"), dataDir: dir, free: null, folderWalk: countingWalk };
+  try {
+    assert.equal((await historyFootprint(db, opts)).workspaceBytes, 20);
+    assert.equal((await historyFootprint(db, opts)).workspaceBytes, 20);
+    assert.equal(walks, 1, "a second visit inside the 60 s window must not walk again");
+
+    const clock = Date.now();
+    clearFootprintCache();
+    assert.equal((await historyFootprint(db, { ...opts, now: () => clock })).workspaceBytes, 20);
+    assert.equal(walks, 2, "after clearFootprintCache() the walk runs again");
+
+    // Same path, a clock past the window: the cached figure is stale.
+    assert.equal((await historyFootprint(db, { ...opts, now: () => clock + FOOTPRINT_TTL_MS + 1 })).workspaceBytes, 20);
+    assert.equal(walks, 3);
+  } finally {
+    db.close();
+  }
+});
+
+test("a capped (unknown) walk is cached too, so it is not retried on every visit", async () => {
+  const dir = freshDir("cachecap");
+  const db = createDbClient(join(dir, "crow.db"));
+  let walks = 0;
+  const cappedWalk = () => {
+    walks += 1;
+    return null;
+  };
+  const opts = { tasksDbPath: join(dir, "none.db"), dataDir: dir, free: null, folderWalk: cappedWalk };
+  try {
+    const first = await historyFootprint(db, opts);
+    assert.equal(first.workspaceBytes, null);
+    assert.equal(first.partial, true);
+    const second = await historyFootprint(db, opts);
+    assert.equal(second.workspaceBytes, null);
+    assert.equal(walks, 1, "a capped walk is not retried inside the 60 s window");
   } finally {
     db.close();
   }

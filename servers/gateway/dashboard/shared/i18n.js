@@ -5513,7 +5513,7 @@ export const translations = {
   "settings.historyTrashDaysLabel": { en: "Days a deleted item stays in the Trash", es: "Días que un elemento borrado permanece en la papelera" },
   "settings.historyTrashDaysHelp": { en: "From 1 to 365. After that many days the item and its versions are erased for good.", es: "De 1 a 365. Después de esos días, el elemento y sus versiones se borran para siempre." },
   "settings.historyEraseSyncLabel": { en: "Tell paired Crows when something is erased", es: "Avisar a los Crows emparejados cuando algo se borra" },
-  "settings.historyEraseSyncHelp": { en: "Turn this on only when every paired Crow runs this version.", es: "Actívalo solo cuando cada Crow emparejado ejecute esta versión." },
+  "settings.historyEraseSyncHelp": { en: "Turn this on only when every paired Crow runs Crow from the version history update that added notes, articles, bots, cards and artifacts. A paired Crow applies an erase only if it has this setting on too.", es: "Actívalo solo cuando cada Crow emparejado ejecute Crow desde la actualización del historial de versiones que agregó notas, artículos, bots, tarjetas y artefactos. Un Crow emparejado solo aplica un borrado si también tiene este ajuste activado." },
   "settings.historySizeLabel": { en: "Space used by History", es: "Espacio usado por el Historial" },
   "settings.historySize": { en: "{n} versions, about {size}.", es: "{n} versiones, unos {size}." },
   "settings.historyWorkspaceLabel": { en: "Project file history", es: "Historial de archivos de proyectos" },

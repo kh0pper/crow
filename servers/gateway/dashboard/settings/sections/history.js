@@ -94,7 +94,7 @@ export function sizeLines(size, lang) {
       ? t("settings.historyWorkspaceNone", lang)
       : fill(t("settings.historyWorkspaceSize", lang), { size: formatBytes(ws) });
   const warn = size.warn
-    ? `<div id="history-size-warning" class="alert alert-error" style="margin:1rem 0 0">${escapeHtml(
+    ? `<div id="history-size-warning" class="callout callout-warning" role="status" style="margin:1rem 0 0">${escapeHtml(
       fill(t("settings.historySizeWarn", lang), { size: formatBytes(size.totalBytes), free: formatBytes(size.freeBytes) }),
     )}</div>`
     : "";
