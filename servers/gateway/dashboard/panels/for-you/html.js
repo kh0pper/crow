@@ -221,7 +221,9 @@ export function todayHtml(data, lang = "en", now = Date.now()) {
     if (mood) lines.push(line("mood", t("widgets.today.moodLabel", lang), t(mood, lang)));
   }
   if (!lines.length) return "";
-  return `<a class="fy-card fy-today" href="/dashboard/ramble" data-fy-today-card>
+  // With a move on the card, the tap starts it (Ramble reads ?moves=start); otherwise it just opens Ramble.
+  const href = move && move.title ? "/dashboard/ramble?moves=start" : "/dashboard/ramble";
+  return `<a class="fy-card fy-today" href="${href}" data-fy-today-card>
       <span class="fy-kicker">${e(t("widgets.today.title", lang))}</span>
       ${lines.join("\n      ")}
       <span class="fy-more-link">${e(t("widgets.today.open", lang))}</span>

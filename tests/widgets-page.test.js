@@ -399,3 +399,10 @@ test("390×844: the widgets page is two columns wide and does not scroll sideway
     }
   });
 });
+test("the Today card starts the move when it carries one, and plainly opens Ramble when it does not", () => {
+  const withMove = todayHtml({ move: { title: "A ten minute walk", minutes: 10 } }, "en", NOW);
+  assert.match(withMove, /href="\/dashboard\/ramble\?moves=start"/, "Ramble reads moves=start, so a tap lands on the move");
+  const without = todayHtml({ calendar: { summary: "Dentist" } }, "en", NOW);
+  assert.match(without, /href="\/dashboard\/ramble"/);
+  assert.doesNotMatch(without, /moves=/);
+});

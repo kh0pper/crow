@@ -200,7 +200,7 @@ const TODAY = {
 
 const PREFS = { prefs: { on: true, kinds: [], equipment: ["none"], limits: [], level: 2, weather: true } };
 
-function bootMoves(beforeRun) {
+function bootMoves(beforeRun, search) {
   const els = new Map();
   const el = (id) => {
     if (!els.has(id)) els.set(id, new FakeEl(id));
@@ -261,6 +261,9 @@ function bootMoves(beforeRun) {
       setItem(k, v) { this.store[k] = String(v); },
     },
   };
+  sandbox.location = { pathname: "/dashboard/ramble", search: search || "", hash: "" };
+  sandbox.history = { state: null, replaced: [], replaceState(st, t, url) { this.replaced.push(url); } };
+  sandbox.URLSearchParams = URLSearchParams;
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   if (typeof beforeRun === "function") beforeRun(sandbox);
@@ -346,4 +349,48 @@ test("guidance 'first' plays one pose and asks the memory question", () => {
   assert.equal(moves.parseFallback("unclear"), true);
   assert.equal(moves.parseFallback("ok"), false);
   assert.equal(moves.transitionMs, 1200, "transitions are 1.2 s, doubled at half speed");
+});
+// For You links here with ?moves=start|log|prefs; the panel must act on it.
+// A player with no hatched bird cannot reach the pet view, so each of these
+// must work straight from the moves client, from any view.
+
+test("?moves=start opens the day's challenge in the Learn view, with no bird needed, and cleans the URL", async () => {
+  const { el, calls, sandbox, root } = bootMoves((sb) => sb.localStorage.setItem("ramble.moves.safetySeen", "1"), "?moves=start");
+  await flush();
+  assert.equal(root.getAttribute("data-view"), "learn", "it left the map for the Learn view");
+  assert.ok(calls.some((c) => c.url === "/api/ramble/moves/library/walk-10"), "it opened today's entry");
+  assert.deepEqual(sandbox.history.replaced, ["/dashboard/ramble"], "the parameter is removed so a reload does not re-fire");
+});
+
+test("?moves=start shows the safety note first when it has not been seen", async () => {
+  const { el, calls, root } = bootMoves(null, "?moves=start");
+  await flush();
+  assert.equal(el("rb-safety-sheet").hasAttribute("hidden"), false, "the safety note opens first");
+  assert.equal(calls.some((c) => c.url.startsWith("/api/ramble/moves/library/")), false, "the entry waits for Got it");
+  el("rb-safety-gotit").click();
+  await flush();
+  assert.equal(root.getAttribute("data-view"), "learn");
+});
+
+test("?moves=log opens the something-else sheet; ?moves=prefs opens Customize", async () => {
+  const log = bootMoves(null, "?moves=log&x=1");
+  await flush();
+  assert.equal(log.el("rb-else-sheet").hasAttribute("hidden"), false);
+  assert.deepEqual(log.sandbox.history.replaced, ["/dashboard/ramble?x=1"], "other parameters survive");
+
+  const prefs = bootMoves(null, "?moves=prefs");
+  await flush();
+  assert.equal(prefs.el("rb-customize-sheet").hasAttribute("hidden"), false);
+  assert.ok(prefs.calls.filter((c) => c.url === "/api/ramble/moves/prefs").length >= 1, "the prefs are loaded");
+});
+
+test("no or unknown moves parameter changes nothing", async () => {
+  const none = bootMoves(null, "");
+  await flush();
+  assert.equal(none.root.getAttribute("data-view"), null);
+  assert.deepEqual(none.sandbox.history.replaced, []);
+  const odd = bootMoves(null, "?moves=bogus");
+  await flush();
+  assert.equal(odd.root.getAttribute("data-view"), null);
+  assert.equal(odd.calls.some((c) => c.url.startsWith("/api/ramble/moves/library/")), false, "nothing was opened");
 });
