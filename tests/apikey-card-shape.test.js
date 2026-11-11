@@ -264,12 +264,12 @@ test("the card posts the key to apikey-save, clears the field and says a restart
     answer: { ok: true, needs_restart: true, needs_config: [] },
   });
   const card = document.querySelector('.ext-apikey[data-addon-id="demo"]');
-  const form = submitKey(document, window, card, "sk-typed-by-the-operator");
+  const form = submitKey(document, window, card, "typed-by-the-operator-key");
   await settle();
   const posted = calls.find((c) => c.url.endsWith("/apikey-save"));
   assert.ok(posted, "the form posts the key");
   assert.equal(posted.method, "POST");
-  assert.deepEqual(posted.body, { bundle_id: "demo", env_key: "DEMO_API_KEY", value: "sk-typed-by-the-operator" });
+  assert.deepEqual(posted.body, { bundle_id: "demo", env_key: "DEMO_API_KEY", value: "typed-by-the-operator-key" });
   assert.equal(form.querySelector(".ext-apikey-save-input").value, "", "the field is cleared once saved");
   const note = card.querySelector(".ext-apikey__msg");
   assert.equal(note.hidden, false);
@@ -284,7 +284,7 @@ test("the card shows the server's sentence on a refusal, and an empty field is n
   await settle();
   assert.equal(calls.filter((c) => c.url.endsWith("/apikey-save")).length, 0, "a blank field never leaves the browser");
   assert.equal(card.querySelector(".ext-apikey__msg").textContent, t("bundles.apiKey.required", "en"));
-  submitKey(document, window, card, "sk-typed-by-the-operator");
+  submitKey(document, window, card, "typed-by-the-operator-key");
   await settle();
   assert.equal(card.querySelector(".ext-apikey__msg").textContent, "This extension does not declare that setting.");
 });
