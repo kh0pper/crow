@@ -91,7 +91,7 @@ import {
 } from "node:fs";
 import { constants as fsConstants } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { resolveDataDir } from "../../db.js";
 import { AUTHOR_KINDS } from "./write-context.js";
@@ -1190,7 +1190,9 @@ function ensureParentChain(workspaceReal, parts) {
       if (!insideWorkspace(real, workspaceReal)) {
         throw workspaceError("outside_workspace", "that path leads outside the workspace folder");
       }
-      continue;
+      // Even a link that stays inside the workspace is refused: the folder it
+      // names can be re-pointed between this check and the write.
+      throw workspaceError("invalid_path", "a folder in that path is a link, which a restore will not write through");
     }
     if (!st.isDirectory()) throw workspaceError("invalid_path", "a folder in that path is not a folder");
   }
@@ -1329,6 +1331,14 @@ async function restoreInRepo(project, repoDir, parts, version, ctx, opts) {
   // Pending outside changes belong to their own earlier version, not to this one.
   await commitInRepo(project, repoDir, { authorKind: "unattributed", authorId: "outside-crow" }, "Update", opts);
 
+  // The final component is never a link either (a rename would replace the link,
+  // but a restore does not touch one it did not make).
+  try {
+    if (lstatSync(target).isSymbolicLink()) throw workspaceError("invalid_path", "that path is a link, which a restore will not write over");
+  } catch (err) {
+    if (err && err.code === "invalid_path") throw err;
+  }
+
   let unchanged = false;
   try {
     unchanged = readFileSync(target).equals(bytes);
@@ -1359,7 +1369,9 @@ async function restoreInRepo(project, repoDir, parts, version, ctx, opts) {
     if (typeof opts._beforeRename === "function") await opts._beforeRename();
     checkBaseReal(baseReal, workspaceReal);
     writeParentReal(workspaceReal, target, parentReal);
-    renameSync(temp, target);
+    // Into the folder we resolved and wrote the temp file in, never through the
+    // unresolved path: a component swapped after the check cannot redirect it.
+    renameSync(temp, join(parentReal, basename(target)));
   } catch (err) {
     if (fd >= 0) {
       try { closeSync(fd); } catch { /* already closed */ }

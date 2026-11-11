@@ -688,6 +688,40 @@ test("a parent folder swapped for a link between the flush commit and the write 
   assert.equal(readFileSync(join(ws, "sub-moved", "notes.txt"), "utf8"), "second version\n", "the file is untouched");
 });
 
+test("a restore refuses to write through a folder link even when it stays inside the workspace", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-insidelink-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(join(ws, "sub"), { recursive: true });
+  const project = projectFor(17, ws);
+  const first = await save(project, "sub/notes.txt", "first version\n", OWNER, { dataDir: fx.dataDir });
+  await save(project, "sub/notes.txt", "second version\n", OWNER, { dataDir: fx.dataDir });
+  // The folder is now a link to another folder INSIDE the workspace.
+  renameSync(join(ws, "sub"), join(ws, "sub-real"));
+  symlinkSync(join(ws, "sub-real"), join(ws, "sub"), "dir");
+  await assert.rejects(
+    () => restoreWorkspaceFile(project, "sub/notes.txt", first, OWNER, { dataDir: fx.dataDir }),
+    (err) => err.code === "invalid_path" && /link/.test(err.message),
+  );
+  assert.equal(readFileSync(join(ws, "sub-real", "notes.txt"), "utf8"), "second version\n", "nothing was written through the link");
+});
+
+test("a restore refuses when the file itself has become a link", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-finallink-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const project = projectFor(18, ws);
+  const first = await save(project, "notes.txt", "first version\n", OWNER, { dataDir: fx.dataDir });
+  await save(project, "notes.txt", "second version\n", OWNER, { dataDir: fx.dataDir });
+  writeFileSync(join(ws, "other.txt"), "other\n");
+  rmSync(join(ws, "notes.txt"));
+  symlinkSync(join(ws, "other.txt"), join(ws, "notes.txt"));
+  await assert.rejects(
+    () => restoreWorkspaceFile(project, "notes.txt", first, OWNER, { dataDir: fx.dataDir }),
+    (err) => err.code === "invalid_path" && /link/.test(err.message),
+  );
+  assert.equal(readFileSync(join(ws, "other.txt"), "utf8"), "other\n");
+});
+
 test("a version that holds a link cannot be restored", { skip: NO_GIT }, async () => {
   const fx = fixture("hist-ws-linkversion-");
   const ws = join(fx.root, "ws");
