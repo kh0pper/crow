@@ -61,10 +61,11 @@ async function eraseCardHistory(tdb, ids) {
 }
 
 /**
- * The SAME erase on the finish path, where the card ids are no longer in hand (the
- * rows are gone, and nothing recorded them). They are read back out of the versions
- * themselves: every `card` whose newest version is a `delete` and whose snapshot was
- * filed under this project.
+ * The SAME erase on the finish path. `ids` are the exact card ids the purge removed (the
+ * failed first attempt recorded them in the audit entry): when given, ONLY those are
+ * erased. Without them (an entry that predates the record, or a crash before it), the ids
+ * are read back out of the versions: every `card` whose newest version is a `delete` and
+ * whose NEWEST snapshot was filed under this project.
  *
  * That is the card-store twin of eraseByProject's rule, and it is why the closure is
  * safe: only an item whose latest version is a delete is taken (a card that still
@@ -73,29 +74,28 @@ async function eraseCardHistory(tdb, ids) {
  * without history (a per-project tasks.db, which 0025 never installs triggers in) is
  * an empty set, not a failure; so is a project that had no cards.
  */
-async function eraseProjectCardHistory(project, { tasksDbPath } = {}) {
+async function eraseProjectCardHistory(project, { tasksDbPath, ids = null } = {}) {
   const store = resolveCardsStore(project, { tasksDbPath });
   if (!store.global || !store.path) return { versions: 0, erased: [] };
   const tdb = openExisting(store.path);
   if (!tdb) return { versions: 0, erased: [] };
   try {
     if (!(await tableExists(tdb, "item_versions"))) return { versions: 0, erased: [] };
+    // The LATEST version decides: it must be a delete AND its own snapshot must name this
+    // project. An older version in this project proves nothing (a card moved on to another
+    // project and later deleted normally sits in Trash and must keep its history).
+    if (Array.isArray(ids) && ids.length) return await eraseCardHistory(tdb, ids);
     const { rows } = await tdb.execute({
-      sql: `SELECT DISTINCT v.item_id AS id
-              FROM item_versions v
-             WHERE v.item_type = 'card'
-               AND json_extract(v.snapshot_json, '$.project_id') = ?
-               AND EXISTS (
-                     SELECT 1 FROM item_versions latest
-                      WHERE latest.item_type = v.item_type
-                        AND latest.item_id = v.item_id
-                        AND latest.op = 'delete'
-                        AND NOT EXISTS (
-                          SELECT 1 FROM item_versions newer
-                           WHERE newer.item_type = latest.item_type
-                             AND newer.item_id = latest.item_id
-                             AND newer.id > latest.id
-                        )
+      sql: `SELECT latest.item_id AS id
+              FROM item_versions latest
+             WHERE latest.item_type = 'card'
+               AND latest.op = 'delete'
+               AND json_extract(latest.snapshot_json, '$.project_id') = ?
+               AND NOT EXISTS (
+                     SELECT 1 FROM item_versions newer
+                      WHERE newer.item_type = latest.item_type
+                        AND newer.item_id = latest.item_id
+                        AND newer.id > latest.id
                    )`,
       args: [Number(project.id)],
     }).catch(() => ({ rows: [] })); // a pre-history store has no JSON1 use for this
@@ -486,6 +486,7 @@ async function purgeCards(project, { tasksDbPath }, partial) {
             // resumeProjectDelete re-runs it (see eraseProjectCardHistory).
             console.warn(`[project-lifecycle] delete ${id}: card history erase failed:`, err?.message || err);
             partial.push("history-erase");
+            deleted.eraseFailedIds = ids;
           }
         }
       }
@@ -696,9 +697,12 @@ export async function deleteProject(db, projectId, {
   const movedTo = moveWorkspace(project, projectsDataDir(dataDir), now(), partial);
   const workspaceMoved = !!movedTo;
   const result = { ...counts, workspaceMoved };
+  // The exact card ids whose history erase failed, so a resume erases THIS set and never
+  // guesses a project's cards from older versions.
+  const cardEraseIds = cards.eraseFailedIds?.length ? { card_erase_ids: cards.eraseFailedIds } : {};
   await auditLog(db, "project.delete", {
     actor,
-    details: { project_id: id, uuid: project.uuid, slug: project.slug, name: project.name, counts: result, ...(partial.length ? { partial } : {}) },
+    details: { project_id: id, uuid: project.uuid, slug: project.slug, name: project.name, counts: result, ...(partial.length ? { partial } : {}), ...cardEraseIds },
   });
   return { ok: true, counts: result, ...(movedTo ? { movedTo } : {}), ...(partial.length ? { partial } : {}) };
 }
@@ -808,6 +812,8 @@ export async function resumeProjectDelete(db, projectId, {
   // (which carries the steps it could not finish). None left means the delete is already complete.
   const latest = await latestAuditOf(db, id, ["project.delete", "project.delete.resume"]);
   const listed = latest && latest.event === "project.delete.resume" ? latest.details.remaining_partial : del.details.partial;
+  const recordedRaw = latest && latest.event === "project.delete.resume" ? latest.details.remaining_card_erase_ids : del.details.card_erase_ids;
+  const recordedCardIds = (Array.isArray(recordedRaw) ? recordedRaw : []).map(Number).filter(Number.isInteger);
   const wanted = new Set((Array.isArray(listed) ? listed : []).filter((s) => RESUME_STEPS.includes(s)));
   if (!wanted.size) return { ok: false, code: "not_partial" };
 
@@ -823,6 +829,7 @@ export async function resumeProjectDelete(db, projectId, {
   const project = { ...tomb, id, slug: String(del.details.slug), uuid };
   const partial = [];
   const untraceable = [];
+  let carryCardIds = [];
   if (wanted.has("history-erase")) {
     let erasedOk = true;
     try { await _eraseHistory(db, project); }
@@ -834,12 +841,12 @@ export async function resumeProjectDelete(db, projectId, {
     // item_versions, so crow.db's erase cannot reach them. The ids are read back out
     // of the versions (their rows are gone, and did not record them), which is why
     // this is a project-scoped sweep rather than the id list the first delete had.
-    try { await eraseProjectCardHistory(project, { tasksDbPath }); }
+    try { await eraseProjectCardHistory(project, { tasksDbPath, ids: recordedCardIds }); }
     catch (err) {
       console.warn(`[project-lifecycle] resume ${id}: card history erase failed:`, err?.message || err);
       erasedOk = false;
     }
-    if (!erasedOk) partial.push("history-erase");
+    if (!erasedOk) { partial.push("history-erase"); if (recordedCardIds.length) carryCardIds = recordedCardIds; }
   }
   if (wanted.has("history-workspace")) {
     try {
@@ -853,7 +860,10 @@ export async function resumeProjectDelete(db, projectId, {
   // The ids first: purgeCards removes the rows they name. A card id is per store, so a store with
   // no rows for the project has no queued job that can be tied to it any more (nothing to cancel).
   const cards = wanted.has("jobs") ? await cardsLeft(project, { tasksDbPath }) : null;
-  if (wanted.has("cards") || wanted.has("board_defs")) await purgeCards(project, { tasksDbPath }, partial);
+  if (wanted.has("cards") || wanted.has("board_defs")) {
+    const purged = await purgeCards(project, { tasksDbPath }, partial);
+    if (purged.eraseFailedIds?.length) carryCardIds = purged.eraseFailedIds;
+  }
   if (cards) {
     // No card rows left: no queued job can be tied to the project, so the step cannot run. Report
     // it instead of counting it as done — and leave it out of remaining_partial, which is what a
@@ -864,7 +874,7 @@ export async function resumeProjectDelete(db, projectId, {
   if (wanted.has("files")) await purgeFiles(db, id, storageDelete || defaultStorageDeleteFor(db), partial);
   if (wanted.has("workspace")) moveWorkspace(project, projectsDataDir(dataDir), now(), partial);
 
-  const extra = untraceable.length ? { untraceable } : {};
+  const extra = { ...(untraceable.length ? { untraceable } : {}), ...(carryCardIds.length ? { remaining_card_erase_ids: carryCardIds } : {}) };
   await appendAudit(db, {
     project_id: id, actor_type: actor, action: "project.delete.resume", payload: { remaining_partial: partial, ...extra },
   });

@@ -360,6 +360,65 @@ test("a failed card-history erase is the same recorded partial step, and the fin
   }
 });
 
+/* ----------- R7: a purge erases exactly the cards it removed, never a moved one */
+
+for (const failFirst of [false, true]) {
+  test(`a purge ${failFirst ? "whose card erase fails, then resumes," : ""} erases only the project's own cards, and keeps a card that moved on and was deleted`, async () => {
+    const f = await fixture();
+    try {
+      const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+      const L = await import("../servers/shared/project-lifecycle.js");
+      const { createCard, updateCard } = await import("../servers/gateway/board/card-service.js");
+      const x = Number((await createProjectSpace(f.db, { name: "Purge X" })).id);
+      const y = Number((await createProjectSpace(f.db, { name: "Keep Y" })).id);
+      // Moved X -> Y, then deleted normally while it lived in Y: it sits in Trash.
+      const movedId = Number((await createCard(f.tdb, { title: "moved on", project_id: x }, BOT)).id);
+      await f.tdb.execute({ sql: "UPDATE tasks_items SET project_id = ? WHERE id = ?", args: [y, movedId] });
+      await f.tdb.execute({ sql: "DELETE FROM tasks_items WHERE id = ?", args: [movedId] });
+      const movedBefore = (await versionsOf(f.tdb, "card", movedId)).length;
+      assert.ok(movedBefore >= 3, "insert, move and delete versions exist");
+      // X's own card, and one already in X's Trash.
+      const ownId = Number((await createCard(f.tdb, { title: "own", project_id: x }, BOT)).id);
+      await updateCard(f.tdb, ownId, { description: "edited" }, BOT);
+
+      if (failFirst) {
+        await f.tdb.execute(`CREATE TRIGGER test_block_card_erase2
+          BEFORE UPDATE ON item_versions_erase
+          WHEN NEW.armed = 1
+          BEGIN SELECT RAISE(ABORT, 'simulated card history erase failure'); END`);
+      }
+      const outcome = await L.deleteProject(f.db, x, {
+        confirmName: "Purge X",
+        tasksDbPath: f.tasksDbPath,
+        dataDir: INSTANCE_DATA,
+        storageDelete: async () => {},
+        disconnectBackend: async () => true,
+      });
+      assert.equal(outcome.ok, true, JSON.stringify(outcome));
+      if (failFirst) {
+        assert.deepEqual(outcome.partial, ["history-erase"]);
+        assert.ok((await versionsOf(f.tdb, "card", ownId)).length > 0, "the failed erase left the versions");
+        await f.tdb.execute("DROP TRIGGER test_block_card_erase2");
+        const resumed = await L.resumeProjectDelete(f.db, x, {
+          dataDir: INSTANCE_DATA,
+          tasksDbPath: f.tasksDbPath,
+          storageDelete: async () => {},
+        });
+        assert.equal(resumed.ok, true, JSON.stringify(resumed));
+        assert.deepEqual(resumed.partial, []);
+      } else {
+        assert.equal(outcome.partial, undefined);
+      }
+      assert.deepEqual(await versionsOf(f.tdb, "card", ownId), [], "X's own purged card is erased");
+      assert.equal(await isErased(f.tdb, "card", String(ownId)), true);
+      assert.equal((await versionsOf(f.tdb, "card", movedId)).length, movedBefore, "the moved card keeps its whole history");
+      assert.equal(await isErased(f.tdb, "card", String(movedId)), false, "and has no tombstone");
+    } finally {
+      await f.dispose();
+    }
+  });
+}
+
 /* ---------------------- R1c: a job's card goes to the Trash, then is erased */
 
 test("a card deleted by a job undo keeps its versions until a card sweep past the Trash period erases them", async () => {
