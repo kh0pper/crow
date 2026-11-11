@@ -487,6 +487,35 @@ async function withGitWriteLock(project, opts, work) {
 
 /* ------------------------------------------------------------ init + ensure */
 
+/** After a scheduled erase times out, skip that project's scheduled erase this long. */
+const ERASE_BACKOFF_MS = 24 * 60 * 60 * 1000;
+/** repoDir -> clock time before which its scheduled erase is skipped (in memory only). */
+const eraseBackoff = new Map();
+/** A temp or moved-aside file in a git dir this old is an interrupted writer's. */
+const LEFTOVER_MAX_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * Remove `.tmp-*` and `.stale-*` files (lock temp files and old moved-aside locks)
+ * older than an hour from a git dir. Called with the lock held.
+ */
+function removeOldLeftovers(repoDir, nowMs) {
+  let names;
+  try {
+    names = readdirSync(repoDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!/\.(tmp|stale)-/.test(name)) continue;
+    const full = join(repoDir, name);
+    try {
+      if (nowMs - statSync(full).mtimeMs > LEFTOVER_MAX_AGE_MS) rmSync(full, { force: true });
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
 /**
  * Remove another directory under history/workspaces that carries this project's
  * id but a different (or absent) uuid: the leftover of a deleted project whose id
@@ -554,6 +583,21 @@ async function initGitDir(project, opts) {
   return repoDir;
 }
 
+/** `git --version` as [major, minor], or null when it cannot be told. */
+async function installedGitVersion(opts) {
+  try {
+    const res = await runGit(["--version"], { ...opts, allowFail: true });
+    const m = /(\d+)\.(\d+)/.exec(String(res.text ?? res.stdout ?? ""));
+    return m ? [Number(m[1]), Number(m[2])] : null;
+  } catch {
+    return null; // a missing binary is reported by the real call below
+  }
+}
+
+function versionBelow(version, min) {
+  return version[0] < min[0] || (version[0] === min[0] && version[1] < min[1]);
+}
+
 /**
  * Give one project a file history, and record where it is on the project row.
  *
@@ -565,12 +609,20 @@ async function initGitDir(project, opts) {
  *
  * @returns {Promise<{repoDir: string} | {disabled: true, reason: string}>}
  */
-export async function ensureWorkspaceHistory(db, project, { dataDir, env, gitBin, isLive, lockWaitMs, clock } = {}) {
+export async function ensureWorkspaceHistory(db, project, { dataDir, env, gitBin, isLive, lockWaitMs, clock, _gitVersion } = {}) {
   const opts = { dataDir, env, gitBin, isLive, lockWaitMs, clock };
   try {
     const id = projectIdOf(project);
     if (project && project.type === "learner_profile") {
       return { disabled: true, reason: "not_covered" };
+    }
+    // `init --object-format=sha1` needs git 2.29; an older git cannot make the
+    // history, and saying so beats a confusing init failure.
+    const version = typeof _gitVersion === "function" ? await _gitVersion() : await installedGitVersion(opts);
+    if (version !== null && versionBelow(version, [2, 29])) {
+      const reason = `git_too_old (found ${version.join(".")}, need 2.29 or newer)`;
+      noteFailure(reason);
+      return { disabled: true, reason };
     }
     let uuid = projectUuidOf(project);
     if (uuid === null && db && typeof db.execute === "function") {
@@ -1726,7 +1778,7 @@ export function makeDbLiveCheck(db) {
  *
  * @returns {Promise<{ensured: number, committed: number, erased: number, eraseTimedOut: number, failed: number}>}
  */
-export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, trashDays, autoErase = false, now, lockWaitMs, clock, eraseCapMs, onSpawn } = {}) {
+export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, trashDays, autoErase = false, now, lockWaitMs, clock, eraseCapMs, onSpawn, eraseBackoffMs = ERASE_BACKOFF_MS } = {}) {
   const result = { ensured: 0, committed: 0, erased: 0, eraseTimedOut: 0, failed: 0 };
   if (!db || typeof db.execute !== "function") return result;
   const base = { dataDir, env, gitBin, lockWaitMs, clock, eraseCapMs, onSpawn };
@@ -1800,7 +1852,11 @@ export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, tr
         );
         if (sha) committed += 1;
         let eraseTimedOut = 0;
-        if (eraseOn) {
+        // Housekeeping under the lock: temp and moved-aside names an interrupted
+        // writer left behind (a crash between create and link).
+        removeOldLeftovers(repoDir, clockOf(settings)());
+        const backoffUntil = eraseBackoff.get(repoDir) || 0;
+        if (eraseOn && clockOf(settings)() >= backoffUntil) {
           // The erase's cap starts here, so a slow commit above never eats it.
           try {
             erased += (await eraseExpiredInRepo(project, repoDir, trashDays, { ...settings, lockedAt: clockOf(settings)() }, now)).length;
@@ -1808,7 +1864,10 @@ export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, tr
             if (!err || err.code !== "timeout") throw err;
             // Never silent: the erase did not happen, and the next sweep retries.
             eraseTimedOut = 1;
-            console.warn(`[history] a scheduled erase of workspace files timed out for project ${project.id}; it will be retried`);
+            // Without a pause a project whose rewrite always runs long would be
+            // retried (and hold its lock for the whole cap) on every sweep.
+            eraseBackoff.set(repoDir, clockOf(settings)() + eraseBackoffMs);
+            console.warn(`[history] a scheduled erase of workspace files timed out for project ${project.id}; it will be retried after a pause`);
           }
         }
         return { committed, erased, eraseTimedOut };

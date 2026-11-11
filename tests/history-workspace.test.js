@@ -1376,7 +1376,8 @@ test("a history is created as sha1 whatever git's default becomes", { skip: NO_G
   mkdirSync(ws);
   const project = projectFor(41, ws);
   writeFileSync(join(ws, "a.txt"), "a\n");
-  await commitWorkspace(project, OWNER, "Start", { dataDir: fx.dataDir });
+  // Ask git for sha256 by default: the history must still come out sha1.
+  await commitWorkspace(project, OWNER, "Start", { dataDir: fx.dataDir, env: { GIT_DEFAULT_HASH: "sha256" } });
   const gitDir = gitDirFor(project, fx.dataDir);
   const config = readFileSync(join(gitDir, "config"), "utf8");
   assert.equal(/objectformat\s*=\s*sha256/i.test(config), false, "no sha256 object format");
@@ -1568,4 +1569,76 @@ test("a same-size edit with the mtime put back is still recorded as a new versio
   utimesSync(file, old, old);
   assert.ok(await commitWorkspace(project, OWNER, "second", { dataDir: fx.dataDir }), "the edit is a new version");
   assert.equal(gitText(gitDir, ws, ["show", "HEAD:a.txt"]), "BBBB\n");
+});
+
+test("a git older than 2.29 disables file history with a reason, and says so", { skip: NO_GIT }, async () => {
+  const fx = fixture("hist-ws-oldgit-");
+  const ws = join(fx.root, "ws");
+  mkdirSync(ws);
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => { warnings.push(args.join(" ")); };
+  try {
+    const res = await ensureWorkspaceHistory(null, { ...projectFor(61, ws) }, { dataDir: fx.dataDir, _gitVersion: () => [2, 28] });
+    assert.equal(res.disabled, true);
+    assert.match(res.reason, /git_too_old/);
+    assert.ok(warnings.some((line) => /git_too_old/.test(line)), "and it was logged");
+    assert.equal(existsSync(join(fx.dataDir, "history", "workspaces")), false, "no git dir was made");
+    const ok = await ensureWorkspaceHistory(null, { ...projectFor(62, ws) }, { dataDir: fx.dataDir, _gitVersion: () => [2, 29] });
+    assert.ok(ok.repoDir, "2.29 is enough");
+  } finally {
+    console.warn = realWarn;
+  }
+});
+
+test("after a scheduled erase times out the project's scheduled erase pauses for 24 hours", { skip: NO_GIT }, async () => {
+  const { fx, project } = await trashedFixture("hist-ws-backoff-", "Backoff");
+  const inAMonth = () => new Date(Date.now() + 31 * 86_400_000);
+  let now = 5_000_000;
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    let heads = 0;
+    const slow = {
+      dataDir: fx.dataDir, trashDays: 30, autoErase: true, now: inAMonth, clock: () => now,
+      onSpawn: (argv) => {
+        if (argv.includes("rev-parse") && argv.includes("--verify")) {
+          heads += 1;
+          if (heads === 2) now += 60 * 60 * 1000;
+        }
+      },
+    };
+    const first = await sweepWorkspaces(fx.db, slow);
+    assert.equal(first.eraseTimedOut, 1);
+    // An hour on: paused, so no erase is even attempted.
+    const second = await sweepWorkspaces(fx.db, { dataDir: fx.dataDir, trashDays: 30, autoErase: true, now: inAMonth, clock: () => now });
+    assert.equal(second.erased, 0);
+    assert.equal(second.eraseTimedOut, 0);
+    assert.deepEqual((await listDeletedWorkspaceFiles(project, { dataDir: fx.dataDir })).map((f) => f.path), ["drop.txt"], "still restorable");
+    // A day and an hour later it tries again, and now it works.
+    now += 24 * 60 * 60 * 1000;
+    const third = await sweepWorkspaces(fx.db, { dataDir: fx.dataDir, trashDays: 30, autoErase: true, now: inAMonth, clock: () => now });
+    assert.equal(third.erased, 1);
+  } finally {
+    console.warn = realWarn;
+  }
+});
+
+test("a sweep removes hour-old temp and moved-aside names in the git dir, not fresh ones", { skip: NO_GIT }, async () => {
+  const { fx, project } = await trashedFixture("hist-ws-leftovers-", "Leftovers");
+  const gitDir = gitDirFor(project, fx.dataDir);
+  const mk = (name, ageMs) => {
+    const p = join(gitDir, name);
+    writeFileSync(p, "x");
+    const when = new Date(Date.now() - ageMs);
+    utimesSync(p, when, when);
+    return p;
+  };
+  const oldTmp = mk("crow-history.lock.tmp-1-aa", 2 * 3600_000);
+  const oldStale = mk("crow-history.lock.stale-1-aa", 2 * 3600_000);
+  const freshTmp = mk("crow-history.lock.tmp-2-bb", 60_000);
+  await sweepWorkspaces(fx.db, { dataDir: fx.dataDir });
+  assert.equal(existsSync(oldTmp), false);
+  assert.equal(existsSync(oldStale), false);
+  assert.equal(existsSync(freshTmp), true, "a fresh one may belong to a live writer");
 });

@@ -8,7 +8,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -91,42 +91,115 @@ test("a real lock records the holder's own start time", async () => {
   }
 });
 
-test("two waiters that judge the same dead lock stale never both hold a lock", async () => {
+
+const DEAD = { pid: 999999, pidStart: "1", startedAt: 1, token: "L1" };
+const breakerFile = (dir) => join(dir, "crow-history.lock.break");
+const sleepMs = (ms) => new Promise((done) => setTimeout(done, ms));
+// Our own pid is the only live one; its start time is a fixed fake.
+const liveUs = { isPidAlive: (pid) => pid === process.pid, getPidStart: () => "7" };
+
+test("two waiters on one dead lock: exactly one holds it", async () => {
   const dir = freshDir();
   try {
-    writeLock(dir, { pid: 999999, pidStart: "1", startedAt: Date.now(), token: "L1" });
-    const aliveOnlyUs = (pid) => pid === process.pid;
-    let bLock = null;
-    let interleaved = false;
-    // Waiter A reaches its takeover; just before it renames, waiter B does the
-    // whole takeover (moves L1 away, creates its own fresh lock) and holds it.
-    const aPromise = acquireGitDirLock(dir, {
-      waitMs: 3000,
-      pollMs: 5,
-      isPidAlive: aliveOnlyUs,
-      getPidStart: () => "7",
-      _beforeStaleRename: () => {
-        if (interleaved) return;
-        interleaved = true;
-        // B's takeover, performed synchronously inside A's seam.
-        writeFileSync(lockFile(dir), JSON.stringify({ pid: process.pid, pidStart: "7", startedAt: Date.now(), token: "B-LIVE" }));
-        bLock = { release: () => rmSync(lockFile(dir), { force: true }) };
+    writeLock(dir, DEAD);
+    const a = acquireGitDirLock(dir, { waitMs: 400, pollMs: 5, ...liveUs });
+    const b = acquireGitDirLock(dir, { waitMs: 400, pollMs: 5, ...liveUs });
+    const results = await Promise.allSettled([a, b]);
+    const won = results.filter((r) => r.status === "fulfilled");
+    const lost = results.filter((r) => r.status === "rejected");
+    assert.equal(won.length, 1, "exactly one holder");
+    assert.equal(lost.length, 1);
+    assert.equal(lost[0].reason.code, "busy");
+    won[0].value.release();
+    assert.equal(existsSync(lockFile(dir)), false);
+    assert.equal(existsSync(breakerFile(dir)), false, "the breaker is gone too");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a waiter that judged a dead lock stale never wedges the project when the new holder releases mid-takeover", async () => {
+  const dir = freshDir();
+  try {
+    writeLock(dir, DEAD);
+    let bToken = null;
+    const swapInB = () => {
+      // B finishes its own takeover first and holds a live lock.
+      rmSync(lockFile(dir), { force: true });
+      bToken = "B-LIVE";
+      writeLock(dir, { pid: process.pid, pidStart: "7", startedAt: Date.now(), token: bToken });
+    };
+    const releaseB = () => rmSync(lockFile(dir), { force: true });
+    let swapped = false;
+    let released = false;
+    const before = () => { if (!swapped) { swapped = true; swapInB(); } };
+    const under = () => { if (!released) { released = true; releaseB(); } };
+    const a = await acquireGitDirLock(dir, {
+      waitMs: 1000, pollMs: 5, ...liveUs,
+      // both the old and the new seam names, so the same test can be run on either design
+      _beforeStaleRename: before, _beforeBreaker: before,
+      _afterStaleRename: under, _underBreaker: under,
+    });
+    assert.equal(swapped && released, true, "the interleaving happened");
+    assert.notEqual(readLockFile(dir).token, "B-LIVE");
+    a.release();
+    // After everybody has released, a fresh acquirer succeeds at once.
+    const fresh = await acquireGitDirLock(dir, { waitMs: 200, pollMs: 5, ...liveUs });
+    fresh.release();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("while one waiter holds the breaker a third process never takes over or co-holds", async () => {
+  const dir = freshDir();
+  try {
+    writeLock(dir, DEAD);
+    let third = null;
+    let breakerSeen = null;
+    const a = await acquireGitDirLock(dir, {
+      waitMs: 1000, pollMs: 5, ...liveUs,
+      _underBreaker: () => {
+        breakerSeen = JSON.parse(readFileSync(breakerFile(dir), "utf8"));
+        // A third process arrives right now (waitMs 0: one pass, no waiting).
+        third = acquireGitDirLock(dir, { waitMs: 0, pollMs: 1, ...liveUs });
       },
     });
-    // Give A time to run its stale pass and (wrongly) take B's lock, if it would.
-    await new Promise((done) => setTimeout(done, 150));
-    assert.equal(interleaved, true, "the seam ran");
-    assert.equal(existsSync(lockFile(dir)), true, "B's lock file still exists");
-    assert.equal(readLockFile(dir).token, "B-LIVE", "and it is still B's");
-    let aGot = false;
-    aPromise.then(() => { aGot = true; }, () => {});
-    await new Promise((done) => setTimeout(done, 100));
-    assert.equal(aGot, false, "A has not acquired while B holds the lock");
-    // B releases; now A may take it.
-    bLock.release();
-    const aLock = await aPromise;
-    assert.notEqual(readLockFile(dir).token, "B-LIVE");
-    aLock.release();
+    assert.ok(third, "the seam ran");
+    assert.equal(typeof breakerSeen.token, "string", "the breaker is whole and has a token");
+    await assert.rejects(third, (err) => err.code === "busy");
+    assert.equal(readLockFile(dir).token !== "L1", true);
+    a.release();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a breaker left by a dead process is cleared and the takeover still completes", async () => {
+  const dir = freshDir();
+  try {
+    writeLock(dir, DEAD);
+    writeFileSync(breakerFile(dir), JSON.stringify({ pid: 999998, pidStart: "1", startedAt: 1, token: "OLD-BREAKER" }));
+    const lock = await acquireGitDirLock(dir, { waitMs: 1000, pollMs: 5, ...liveUs });
+    assert.notEqual(readLockFile(dir).token, "L1");
+    lock.release();
+    assert.equal(existsSync(breakerFile(dir)), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a live breaker held by another process is waited out, never removed", async () => {
+  const dir = freshDir();
+  try {
+    writeLock(dir, DEAD);
+    writeFileSync(breakerFile(dir), JSON.stringify({ pid: process.pid, pidStart: "7", startedAt: Date.now(), token: "LIVE-BREAKER" }));
+    await assert.rejects(
+      acquireGitDirLock(dir, { waitMs: 150, pollMs: 5, ...liveUs }),
+      (err) => err.code === "busy",
+    );
+    assert.equal(JSON.parse(readFileSync(breakerFile(dir), "utf8")).token, "LIVE-BREAKER");
+    assert.equal(readLockFile(dir).token, "L1", "the dead lock was left alone while the breaker was live");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -159,77 +232,100 @@ test("a lock created by us is whole from the first moment it exists", async () =
   }
 });
 
-test("a token-less file judged stale but swapped for a live lock is put back, not deleted", async () => {
+test("the lock name is never observed absent-with-an-incomplete-temp, or empty, before the link", async () => {
   const dir = freshDir();
   try {
-    // An old empty file: judged stale (no token, older than 5 s).
-    writeFileSync(lockFile(dir), "");
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(lockFile(dir), old, old);
-    let swapped = false;
-    let heldLock = null;
-    const waiter = acquireGitDirLock(dir, {
-      waitMs: 2000,
-      pollMs: 5,
-      isPidAlive: (pid) => pid === process.pid,
-      getPidStart: () => "9",
-      _beforeStaleRename: () => {
-        if (swapped) return;
-        swapped = true;
-        // Another process finishes its own takeover first and now holds a live lock.
-        rmSync(lockFile(dir), { force: true });
-        writeFileSync(lockFile(dir), JSON.stringify({ pid: process.pid, pidStart: "9", startedAt: Date.now(), token: "LIVE" }));
-        heldLock = () => rmSync(lockFile(dir), { force: true });
+    let calls = 0;
+    const lock = await acquireGitDirLock(dir, {
+      waitMs: 1000,
+      _beforeLink: (temp, lockPath) => {
+        calls += 1;
+        assert.equal(existsSync(lockPath), false, "the lock name does not exist yet");
+        const body = JSON.parse(readFileSync(temp, "utf8"));
+        assert.equal(typeof body.token, "string", "the temp already holds the whole lock");
+        assert.equal(body.pid, process.pid);
       },
     });
-    await new Promise((done) => setTimeout(done, 200));
-    assert.equal(swapped, true);
-    assert.equal(readLockFile(dir).token, "LIVE", "the live lock is back in place");
-    let got = false;
-    waiter.then(() => { got = true; }, () => {});
-    await new Promise((done) => setTimeout(done, 100));
-    assert.equal(got, false, "the waiter does not hold the lock while the live holder does");
-    heldLock();
-    (await waiter).release();
+    assert.equal(calls, 1, "the writer seam ran");
+    lock.release();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("a failed put-back keeps the moved-aside file", async () => {
+test("a lock judged stale (had a token) but replaced by a token-less file is not removed", async () => {
   const dir = freshDir();
-  const realWarn = console.warn;
-  const warned = [];
-  console.warn = (...args) => { warned.push(args.join(" ")); };
   try {
-    writeLock(dir, { pid: 999999, pidStart: "1", startedAt: Date.now(), token: "L1" });
-    let done = false;
-    const waiter = acquireGitDirLock(dir, {
-      waitMs: 500,
-      pollMs: 5,
-      isPidAlive: (pid) => pid === process.pid,
-      getPidStart: () => "3",
-      _beforeStaleRename: () => {
-        if (done) return;
-        // Replace L1 with a live lock, then (below) a THIRD lock takes the name
-        // right after our rename, so the put-back cannot succeed.
-        rmSync(lockFile(dir), { force: true });
-        writeFileSync(lockFile(dir), JSON.stringify({ pid: process.pid, pidStart: "3", startedAt: Date.now(), token: "LIVE" }));
-      },
-      _afterStaleRename: () => {
-        if (done) return;
-        done = true;
-        writeFileSync(lockFile(dir), JSON.stringify({ pid: process.pid, pidStart: "3", startedAt: Date.now(), token: "THIRD" }));
-      },
-    });
-    await assert.rejects(waiter, (err) => err.code === "busy");
-    const leftovers = readdirSync(dir).filter((name) => name.includes(".stale-"));
-    assert.equal(leftovers.length, 1, "the moved lock was kept");
-    assert.equal(JSON.parse(readFileSync(join(dir, leftovers[0]), "utf8")).token, "LIVE");
-    assert.equal(readLockFile(dir).token, "THIRD", "the third lock was not disturbed");
-    assert.ok(warned.some((line) => /kept, not deleted/.test(line)), "and it was logged");
+    writeLock(dir, DEAD);
+    let removed = "never ran";
+    let swapped = false;
+    const swap = () => {
+      if (swapped) return;
+      swapped = true;
+      rmSync(lockFile(dir), { force: true });
+      writeFileSync(lockFile(dir), ""); // fresh, token-less
+    };
+    await assert.rejects(
+      acquireGitDirLock(dir, {
+        waitMs: 100, pollMs: 5, ...liveUs,
+        _beforeStaleRename: swap, _underBreaker: swap,
+        _afterBreak: (r) => { if (removed === "never ran") removed = r; },
+      }),
+      (err) => err.code === "busy",
+    );
+    assert.equal(removed, false, "the breaker did not remove the swapped file");
+    assert.equal(existsSync(lockFile(dir)), true);
   } finally {
-    console.warn = realWarn;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("two token-less files with different inodes: the judged one is not the one removed", async () => {
+  const dir = freshDir();
+  try {
+    const age = () => {
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(lockFile(dir), old, old);
+    };
+    writeFileSync(lockFile(dir), "");
+    age();
+    let removed = "never ran";
+    let swapped = false;
+    const swap = () => {
+      if (swapped) return;
+      swapped = true;
+      // Create the new file while the old one still exists (so the inode number
+      // cannot be reused), then rename it over the old one.
+      writeFileSync(`${lockFile(dir)}.new`, "");
+      renameSync(`${lockFile(dir)}.new`, lockFile(dir));
+      age();
+    };
+    const lock = await acquireGitDirLock(dir, {
+      waitMs: 1000, pollMs: 5, ...liveUs,
+      _beforeStaleRename: swap, _underBreaker: swap,
+      _afterBreak: (r) => { if (removed === "never ran") removed = r; },
+    });
+    assert.equal(removed, false, "the first attempt left the different file alone");
+    lock.release();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a lock that cannot be read is busy, never removed", { skip: process.getuid && process.getuid() === 0 }, async () => {
+  const dir = freshDir();
+  try {
+    writeLock(dir, DEAD);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockFile(dir), old, old);
+    chmodSync(lockFile(dir), 0o000);
+    await assert.rejects(
+      acquireGitDirLock(dir, { waitMs: 150, pollMs: 5, ...liveUs }),
+      (err) => err.code === "busy",
+    );
+    chmodSync(lockFile(dir), 0o600);
+    assert.equal(readLockFile(dir).token, "L1", "the aged unreadable lock is untouched");
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
