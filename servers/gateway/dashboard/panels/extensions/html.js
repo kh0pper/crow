@@ -8,6 +8,7 @@
 import { escapeHtml, badge, formatDate } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { firstAdminBody, firstAdminTitle, firstAdminInviteBody, firstAdminInviteReason, firstAdminInviteOthers } from "../../shared/first-admin.js";
+import { localizedText, safeSignupUrl } from "../../shared/api-key-card.js";
 import { getAddonLogo } from "../../shared/logos.js";
 import { appIconSvg } from "../../shared/app-icons.js";
 import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../../gpu-arch.js";
@@ -162,6 +163,10 @@ export function renderIcon(addon, size) {
  *   pure render tests and any legacy caller show no banner.
  * @param {Array<object>} [firstAdminPending] the cards pendingFirstAdminNotices()
  *   produced (`invite` entries included: an invite-only app's card, N3-4 phase 2e).
+ * @param {Array<object>} [apiKeyCards] pendingApiKeyCards() output: an installed add-on
+ *   whose required, typed secret env var is still empty and whose manifest has an
+ *   `explain`. The explanation is the manifest's own text, so it is escaped here, and
+ *   `signup_url` is re-checked here too (a manifest is third-party input).
  * @returns {{viewsHtml:string, addonRegistryScript:string, collectionsScript:string}}
  */
 
@@ -189,6 +194,9 @@ export function buildExtensionsHTML({
   // panels/extensions.js (fs + db + live proxy routes, see
   // servers/gateway/bundle-first-admin.js); html.js stays pure.
   firstAdminPending = [],
+  // API-key cards: computed in panels/extensions.js from the reviewed manifests and that
+  // same needsConfig map (html.js stays pure and reads no ~/.crow).
+  apiKeyCards = [],
   vaultSecure = false,
   localModels = null,
   searchQuery = "",
@@ -382,6 +390,37 @@ export function buildExtensionsHTML({
         </div>
         ${inviteForm}
         ${save}
+      </div>`;
+  }).join("");
+  // ─── API-key cards ───
+  // One card per installed add-on whose REQUIRED, typed secret env var is still empty
+  // and whose manifest explains where the key comes from (`env_vars[].explain`). Optional
+  // keys get only the field's help in Install/Configure — never a card.
+  // Everything from the manifest is third-party text: the explanation and the button's
+  // label go through escapeHtml, and the URL is re-checked at render (https only, no
+  // user name or password, no whitespace) with its HOST shown beside the button, so a
+  // look-alike link cannot hide behind a field that asks for a secret.
+  const apiKeyCardsHtml = (apiKeyCards || []).map((e) => {
+    const explain = localizedText(e.explain, lang);
+    if (!explain) return "";
+    const link = safeSignupUrl(e.signup_url);
+    const label = localizedText(e.signup_label, lang) || t("bundles.apiKey.getKey", lang);
+    const signup = link
+      ? `<div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;margin-bottom:0.5rem">
+          <a class="btn btn-sm btn-secondary ext-apikey-signup" href="${escapeHtml(link.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>
+          <span class="ext-apikey-host" style="font-size:0.8rem;color:var(--crow-text-tertiary)">${escapeHtml(link.host)}</span>
+        </div>`
+      : "";
+    const fieldLabel = escapeHtml(t("bundles.apiKey.fieldLabel", lang));
+    return `<div class="callout callout-warning ext-apikey" data-addon-id="${escapeHtml(e.id)}" data-env-key="${escapeHtml(e.envKey)}" role="status">
+        <strong>${escapeHtml(fill(t("bundles.apiKey.title", lang), { name: e.name }))}</strong>
+        <p style="margin:0.25rem 0 0.5rem">${escapeHtml(explain)}</p>
+        ${signup}
+        <form class="ext-apikey-save" data-id="${escapeHtml(e.id)}" data-env-key="${escapeHtml(e.envKey)}" style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+          <input class="ext-apikey-save-input" type="password" autocomplete="off" maxlength="1024" required aria-label="${fieldLabel}" placeholder="${escapeHtml(e.envKey)}" style="font-size:0.85rem;padding:0.25rem 0.4rem;max-width:16rem;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control)">
+          <button type="submit" class="btn btn-sm btn-primary ext-apikey-save-btn">${escapeHtml(t("bundles.apiKey.save", lang))}</button>
+        </form>
+        <p class="ext-apikey__msg" style="margin:0.25rem 0 0;font-size:0.9rem" hidden></p>
       </div>`;
   }).join("");
   // ─── Crow's off-site backup line (SAT-8, spec §12.3) ───
@@ -594,7 +633,7 @@ export function buildExtensionsHTML({
       ${t("extensions.toCreateOwn", lang)} <a href="/crow/developers/creating-addons" style="color:var(--crow-accent)">${t("extensions.devGuide", lang)}</a>.
     </div>`;
 
-  const viewsHtml = `${keychainConfigHtml}${firstViewHtml}${firstAdminHtml}${dockerBannerHtml}${viewTabsHtml}
+  const viewsHtml = `${keychainConfigHtml}${firstViewHtml}${firstAdminHtml}${apiKeyCardsHtml}${dockerBannerHtml}${viewTabsHtml}
     <div class="ext-view" id="ext-view-browse" role="tabpanel">
       ${searchHtml}
       ${collectionsHtml}

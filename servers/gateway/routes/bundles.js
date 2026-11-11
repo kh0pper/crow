@@ -26,6 +26,7 @@ import { reportImagePullFailure } from "../bundle-pull-alert.js";
 import { markFirstAdminDone, reportFirstAdminNotice, firstAdminVia, clearFirstAdminNotice } from "../bundle-first-admin.js";
 import { runFirstAdminSetup, saveFirstAdminLogin, firstAdminSetupPlan, firstAdminResultMessage, SETUP_UNAVAILABLE } from "../bundle-first-admin-setup.js";
 import { applyFirstAdminAfter, firstAdminAfterPlan, firstAdminAfterFailureSentence } from "../bundle-first-admin-after.js";
+import { saveApiKey } from "../bundle-apikey-save.js";
 import {
   inviteHandlerFor,
   inviteFirstAdminOnInstall,
@@ -1553,6 +1554,18 @@ export function _setFirstAdminSetupDepsForTest(d) { _firstAdminSetupDepsForTest 
 // Test-only: seams for the first-admin INVITE step (fetch, keychain reader, clock).
 let _firstAdminInviteDepsForTest = null;
 export function _setFirstAdminInviteDepsForTest(d) { _firstAdminInviteDepsForTest = d || null; }
+
+// Test-only: seams for an API-key card's save (keychain, db, env writers).
+let _apiKeySaveDepsForTest = null;
+export function _setApiKeySaveDepsForTest(d) { _apiKeySaveDepsForTest = d || null; }
+/**
+ * What the API-key save route hands bundle-apikey-save.js on top of its own defaults.
+ * The defaults resolve the bundle dir, the MCP entry path and the writers from the real
+ * modules; a test replaces the ones it needs to observe or break.
+ */
+function apiKeySaveDeps() {
+  return { ...(_apiKeySaveDepsForTest || {}) };
+}
 
 /**
  * Ownership of this bundle's compose project. refusal: another Crow install of the SAME
@@ -4343,6 +4356,41 @@ export default function bundlesRouter() {
     // The operator's login also went into the bundle's MCP entry when it was written: the card
     // asks for the restart, this route never starts one (review round 3, finding 1).
     res.json({ ok: true, needs_restart: !!saved.mcpEnvUpdated });
+  });
+
+  // POST /bundles/api/apikey-save — an API-key card's save: ONE typed, user-supplied
+  // third-party key for a declared secret env var of an installed add-on. Owner at this
+  // machine's dashboard only (a peer, a token or a satellite request never reaches the
+  // write), and the env name comes from the REVIEWED manifest (getManifest) — the
+  // installed copy can be rewritten from inside the bundle's container. What may be set,
+  // what it writes, and the fixed refusal sentences live in bundle-apikey-save.js; the
+  // answer carries no value, ever.
+  router.post("/bundles/api/apikey-save", async (req, res) => {
+    if (!(await isLocalOwner(req))) {
+      return res.status(403).json({ error: "Only the owner at this machine's dashboard can save an API key", code: "owner_only" });
+    }
+    const bundleId = req.body && req.body.bundle_id;
+    if (!bundleId || !isValidBundleId(bundleId)) return res.status(400).json({ error: "Invalid bundle ID" });
+    const entry = getInstalled().find((i) => i && i.id === bundleId);
+    if (!entry) return res.status(404).json({ error: `Bundle '${bundleId}' is not installed` });
+    const saved = await saveApiKey({
+      bundleId,
+      manifest: getManifest(bundleId) || null,
+      envKey: req.body && req.body.env_key,
+      value: req.body && req.body.value,
+      crowHome: CROW_HOME,
+      deps: apiKeySaveDeps(),
+    }).catch((err) => {
+      // Express 4 does not catch a rejected handler promise: a throw here would be an
+      // unhandled rejection the crash guard re-throws. The sentence is fixed and the log
+      // names the bundle and the error's own code — never the value.
+      console.warn(`[bundles] ${bundleId}: apikey-save failed (${err && err.code ? err.code : "error"})`);
+      return { ok: false, status: 500, error: "Crow could not save the key. Try again." };
+    });
+    if (!saved.ok) return res.status(saved.status || 400).json({ error: saved.error });
+    // The two facts the card needs, and nothing else: whether a restart applies the key to
+    // the bundle's MCP child, and the config state re-derived from the files just written.
+    res.json({ ok: true, needs_restart: !!saved.needs_restart, needs_config: saved.needs_config });
   });
 
   // POST /bundles/api/first-admin-invite — the operator's own email, invited through

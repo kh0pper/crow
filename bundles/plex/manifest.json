@@ -1,7 +1,7 @@
 {
   "id": "plex",
   "name": "Plex",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "privileged": true,
   "install_consent_messages": {
     "en": "Crow does not start a Plex server at install: it runs only if you start it from Extensions. If you do, the self-hosted Plex server uses host networking (Plex's own recommendation) so devices on your local network can discover it. It listens on every network interface of this machine (port 32400 and Plex's discovery ports) and mounts your media folder read-write. Until you claim it with your Plex account (PLEX_CLAIM_TOKEN), the first person who opens it can claim it.",
@@ -21,7 +21,7 @@
   "requires": { "env": ["PLEX_URL", "PLEX_TOKEN"], "min_ram_mb": 64, "min_disk_mb": 50 },
   "env_vars": [
     { "name": "PLEX_URL", "description": "Plex Media Server URL (e.g., http://localhost:32400)", "required": true },
-    { "name": "PLEX_TOKEN", "description": "Plex authentication token (see skill for how to find it)", "required": true, "secret": true },
+    { "name": "PLEX_TOKEN", "description": "Plex authentication token (see skill for how to find it)", "required": true, "secret": true, "explain": { "en": "The token Plex uses to prove this connection is yours. Find it through your Plex account.", "es": "El token con el que Plex comprueba que esta conexión es tuya. Encuéntralo en tu cuenta de Plex." } },
     { "name": "PLEX_MACHINE_ID", "description": "Plex server machine identifier (optional, for multi-server setups)", "required": false },
     { "name": "PLEX_MEDIA_PATH", "description": "Host path for media files (Docker self-host mode)", "required": true },
     { "name": "PLEX_CONFIG_PATH", "description": "Host path for Plex config/database (Docker self-host mode)", "required": false },

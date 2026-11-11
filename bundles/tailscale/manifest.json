@@ -1,7 +1,7 @@
 {
   "id": "tailscale",
   "name": "Tailscale",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "privileged": true,
   "install_consent_messages": {
     "en": "The Tailscale container joins this machine to your tailnet. It uses host networking, the NET_ADMIN capability and the /dev/net/tun device, so it creates a network interface and changes this machine's routing and firewall rules. Do not install it on a machine that already runs Tailscale.",
@@ -27,7 +27,12 @@
       "name": "TS_AUTHKEY",
       "description": "Tailscale reusable auth key — generate at https://login.tailscale.com/admin/settings/keys (select 'Reusable')",
       "required": true,
-      "secret": true
+      "secret": true,
+      "explain": {
+        "en": "Lets this machine join your Tailscale network. Create a reusable auth key on the Keys page (Generate auth key).",
+        "es": "Permite que esta máquina se una a tu red de Tailscale. Crea una clave de autenticación reutilizable en la página Keys (Generate auth key)."
+      },
+      "signup_url": "https://console.tailscale.com/admin/settings/keys"
     },
     {
       "name": "TS_HOSTNAME",

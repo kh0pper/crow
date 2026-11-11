@@ -1,7 +1,7 @@
 {
   "id": "unsloth",
   "name": "Unsloth Studio (AMD ROCm)",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Fine-tune and chat with open models on an AMD GPU: Unsloth's ROCm image with the Unsloth Studio web UI and JupyterLab notebooks. AMD ROCm hosts only.",
   "type": "bundle",
   "author": "Crow",
@@ -68,7 +68,12 @@
       "description": "Hugging Face token, only needed for gated models (Llama, Gemma). Leave blank for public models.",
       "required": false,
       "secret": true,
-      "propagate": false
+      "propagate": false,
+      "explain": {
+        "en": "A Hugging Face token, only needed for gated models (Llama, Gemma). Create one on your Hugging Face tokens page.",
+        "es": "Un token de Hugging Face, solo necesario para modelos con acceso restringido (Llama, Gemma). Crea uno en tu página de tokens de Hugging Face."
+      },
+      "signup_url": "https://huggingface.co/settings/tokens"
     },
     {
       "name": "UNSLOTH_SHM_SIZE",

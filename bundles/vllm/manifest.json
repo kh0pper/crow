@@ -1,7 +1,7 @@
 {
   "id": "vllm",
   "name": "vLLM",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "GPU-accelerated local LLM inference server \u2014 OpenAI-compatible endpoint backed by vLLM's continuous batching and PagedAttention. Recommended classroom engine for Maker Lab: the Phase 0 Ollama benchmark hit unusable p95 latencies at N=25 concurrent learners; vLLM is architecturally the right shape for that scale.",
   "type": "bundle",
   "author": "Crow",
@@ -68,7 +68,12 @@
       "name": "VLLM_HF_TOKEN",
       "description": "HuggingFace token for gated models (Llama, Mistral instruct tunes). Leave blank for public models.",
       "required": false,
-      "secret": true
+      "secret": true,
+      "explain": {
+        "en": "A Hugging Face token, only needed to download gated models (Llama, Mistral instruct tunes). Create one on your Hugging Face tokens page.",
+        "es": "Un token de Hugging Face, solo necesario para descargar modelos con acceso restringido (Llama, Mistral instruct tunes). Crea uno en tu página de tokens de Hugging Face."
+      },
+      "signup_url": "https://huggingface.co/settings/tokens"
     },
     {
       "name": "VLLM_MODEL_CACHE_PATH",

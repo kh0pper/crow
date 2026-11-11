@@ -211,6 +211,15 @@ export const translations = {
   "bundles.firstAdmin.linkUnavailable": { en: "The app link is unavailable; check the gateway log.", es: "El enlace de la aplicación no está disponible; revisa el registro del gateway." },
   "bundles.firstAdmin.open": { en: "Open the app", es: "Abrir la aplicación" },
   "bundles.firstAdmin.done": { en: "Done", es: "Listo" },
+  // An API-key card: a required secret the operator buys or creates elsewhere (manifest
+  // env_vars `explain`/`signup_url`). The explanation itself is the manifest's text —
+  // these are only the card's own frame, and the field's help relies on them too.
+  "bundles.apiKey.title": { en: "Add your {name} key", es: "Añade tu clave de {name}" },
+  "bundles.apiKey.fieldLabel": { en: "Paste the key", es: "Pega la clave" },
+  "bundles.apiKey.save": { en: "Save key", es: "Guardar clave" },
+  "bundles.apiKey.saved": { en: "Key saved.", es: "Clave guardada." },
+  "bundles.apiKey.required": { en: "Enter the key first.", es: "Escribe primero la clave." },
+  "bundles.apiKey.getKey": { en: "Get a key", es: "Obtén una clave" },
   // N3-4 phase 2e: an INVITE-ONLY app (firstAdmin.invite). Crow invites the
   // operator's own email through the app's admin API and closes sign-ups; these
   // are the card's sentences, decided by what that admin API reported.

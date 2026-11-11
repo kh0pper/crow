@@ -58,6 +58,12 @@ export function formEnvVar(ev) {
     keychain: ev.keychain === true,
     keychain_configure: ev.keychain_configure === false ? false : undefined,
     pattern: typeof ev.pattern === "string" ? ev.pattern : undefined,
+    // A typed third-party API key: what it is for and where it comes from. Raw here —
+    // formEnvVar only carries the manifest's own values to the browser; the renderer
+    // escapes the text (and re-checks the URL) wherever it shows them.
+    explain: ev.explain,
+    signup_url: typeof ev.signup_url === "string" ? ev.signup_url : undefined,
+    signup_label: ev.signup_label,
   };
 }
 

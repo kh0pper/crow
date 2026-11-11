@@ -1,0 +1,495 @@
+/**
+ * POST /bundles/api/apikey-save and its module (servers/gateway/bundle-apikey-save.js).
+ *
+ * An API-key card writes ONE typed, user-supplied third-party key for a declared secret
+ * env var of an installed add-on. What this file pins down:
+ *
+ *   1. owner only — a peer, a token or a satellite request never reaches the write;
+ *   2. the env name comes from the REVIEWED manifest (getManifest), and may only be a
+ *      declared, secret, non-generated var, and never one that controls how a program runs;
+ *   3. value checks (type, empty, length, CR/LF, the manifest's own pattern);
+ *   4. the writes: keychain first (always, sealed, kind 'extension'), then the add-on's
+ *      mcp-addons.json entry (owner provenance), then an existing bundle .env + the
+ *      gateway env; a keychain failure writes nothing else;
+ *   5. the value never appears in a response, a thrown error, a log line or a bell;
+ *   6. nothing is synced (crow_keychain is on the never-sync list).
+ *
+ * Scratch CROW_HOME/CROW_DATA_DIR/CROW_APP_ENV_PATH before anything Crow-side is
+ * imported, so this file never reads or writes the operator's ~/.crow.
+ */
+import { test, after } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
+import express from "express";
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+const TMP_HOME = mkdtempSync(join(tmpdir(), "crow-apikey-save-home-"));
+const TMP_DATA = join(TMP_HOME, "data");
+const TMP_BUNDLES = mkdtempSync(join(tmpdir(), "crow-apikey-save-src-"));
+const GATEWAY_ENV = join(TMP_HOME, "gateway.env");
+mkdirSync(TMP_DATA, { recursive: true });
+process.env.CROW_HOME = TMP_HOME;
+process.env.CROW_DATA_DIR = TMP_DATA;
+process.env.CROW_APP_ENV_PATH = GATEWAY_ENV;
+process.env.CROW_AUTO_UPDATE = "0";
+process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
+process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
+process.env.CROW_DISABLE_NOSTR = "1";
+execFileSync(process.execPath, ["scripts/init-db.js"], {
+  env: { ...process.env, CROW_DATA_DIR: TMP_DATA },
+  stdio: "pipe",
+  cwd: REPO,
+});
+
+const B = await import("../servers/gateway/routes/bundles.js");
+const { saveApiKey, isDeniedApiKeyEnvName, API_KEY_ENV_DENY, API_KEY_MAX_LENGTH, API_KEY_SAVE_REFUSALS } =
+  await import("../servers/gateway/bundle-apikey-save.js");
+const { parseEnvText } = await import("../servers/gateway/bundle-env-codec.js");
+const { createDbClient } = await import("../servers/db.js");
+const { listEntries, openEntrySecret } = await import("../servers/gateway/keychain/store.js");
+const { loadKeychainKey } = await import("../servers/gateway/keychain/key.js");
+
+B._setAppBundlesForTest(TMP_BUNDLES);
+B._setAppEnvPathForTest(GATEWAY_ENV);
+
+const INSTALLED = join(TMP_HOME, "installed.json");
+const MCP_ADDONS = join(TMP_HOME, "mcp-addons.json");
+const INSTALL = "2026-11-01T10:00:00.000Z";
+/** A value distinctive enough that any leak is unmistakable. */
+const VALUE = "sk-test-VALUE-123456";
+const VALUE2 = "sk-test-VALUE-654321";
+
+after(() => {
+  B._setOwnerCheckForTest(null);
+  B._setApiKeySaveDepsForTest(null);
+  B._setAppEnvPathForTest(null);
+  for (const d of [TMP_HOME, TMP_BUNDLES]) { try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
+});
+
+const DEMO = {
+  id: "apikey-demo",
+  name: "Demo App",
+  version: "1.0.0",
+  description: "d",
+  type: "mcp-server",
+  category: "misc",
+  server: { command: "node", args: ["server/index.js"], envKeys: ["DEMO_API_KEY"] },
+  env_vars: [
+    { name: "DEMO_API_KEY", description: "demo key", required: true, secret: true, explain: { en: "the demo key" }, signup_url: "https://keys.example.com/" },
+    { name: "DEMO_GENERATED", description: "minted", required: false, secret: true, generate: "secret" },
+    { name: "DEMO_PLAIN", description: "not a secret", required: false },
+    { name: "DEMO_PATTERN_KEY", description: "patterned", required: false, secret: true, pattern: "^sk-[a-z0-9]+$" },
+  ],
+};
+
+/** Write a bundle into the repo copy and the installed tree, and record the install. */
+function seed(id, manifest, { installedManifest = null, dotEnv = null, mcp = true } = {}) {
+  const repoDir = join(TMP_BUNDLES, id);
+  mkdirSync(repoDir, { recursive: true });
+  writeFileSync(join(repoDir, "manifest.json"), JSON.stringify(manifest, null, 2));
+  const dir = join(TMP_HOME, "bundles", id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(installedManifest || manifest, null, 2));
+  if (dotEnv !== null) writeFileSync(join(dir, ".env"), dotEnv, { mode: 0o600 });
+  const current = existsSync(INSTALLED) ? JSON.parse(readFileSync(INSTALLED, "utf8")) : [];
+  const rest = current.filter((e) => e && e.id !== id);
+  rest.push({ id, type: manifest.type || "bundle", version: manifest.version || "1.0.0", installedAt: INSTALL });
+  writeFileSync(INSTALLED, JSON.stringify(rest, null, 2));
+  if (mcp) {
+    const all = existsSync(MCP_ADDONS) ? JSON.parse(readFileSync(MCP_ADDONS, "utf8")) : {};
+    all[id] = { command: "node", args: ["server/index.js"], env: {} };
+    writeFileSync(MCP_ADDONS, JSON.stringify(all, null, 2), { mode: 0o600 });
+  }
+  return dir;
+}
+
+const readMcp = (id) => (JSON.parse(readFileSync(MCP_ADDONS, "utf8"))[id] || {}).env || {};
+const readMcpEntry = (id) => JSON.parse(readFileSync(MCP_ADDONS, "utf8"))[id] || {};
+const readDotEnv = (dir) => (existsSync(join(dir, ".env")) ? parseEnvText(readFileSync(join(dir, ".env"), "utf8")) : {});
+
+/** The keychain rows for one bundle, decrypted with this scratch home's key. */
+async function keychainRows(bundleId) {
+  const db = createDbClient();
+  try {
+    const key = loadKeychainKey({ crowHome: TMP_HOME });
+    const rows = (await listEntries(db, { keyId: key?.id ?? null })).filter((e) => e.bundle_id === bundleId);
+    const out = [];
+    for (const row of rows) out.push({ ...row, secret: await openEntrySecret(db, key, row.id) });
+    return out;
+  } finally {
+    db.close();
+  }
+}
+
+/** Capture every console.warn/log line, so a leak into a log is caught here. */
+function captureConsole() {
+  const lines = [];
+  const realWarn = console.warn;
+  const realLog = console.log;
+  console.warn = (...a) => lines.push(a.map(String).join(" "));
+  console.log = (...a) => lines.push(a.map(String).join(" "));
+  return { lines, restore: () => { console.warn = realWarn; console.log = realLog; } };
+}
+
+async function withServer({ owner = true } = {}, fn) {
+  const app = express();
+  app.use(express.json());
+  B._setOwnerCheckForTest(() => owner);
+  app.use(B.default());
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = (path, body) => fetch(base + path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body || {}),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  try {
+    return await fn(post);
+  } finally {
+    server.close();
+    B._setOwnerCheckForTest(null);
+  }
+}
+
+const save = (post, body) => post("/bundles/api/apikey-save", body);
+
+// ── 1. owner only ───────────────────────────────────────────────────────────────────
+
+test("the route is owner-only: a request without the local owner's session never reaches the write", async () => {
+  const dir = seed("apikey-owner", { ...DEMO, id: "apikey-owner", name: "Owner Only" }, { dotEnv: "OTHER=1\n" });
+  await withServer({ owner: false }, async (post) => {
+    const r = await save(post, { bundle_id: "apikey-owner", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.code, "owner_only");
+    assert.equal(r.body.ok, undefined, "a refusal carries no success field");
+  });
+  assert.deepEqual(readMcp("apikey-owner"), {}, "nothing was written into the MCP entry");
+  assert.deepEqual(readDotEnv(dir), { OTHER: "1" }, "nothing was written into the .env");
+  assert.deepEqual(await keychainRows("apikey-owner"), [], "and nothing into the keychain");
+});
+
+// ── 2. what may be set ──────────────────────────────────────────────────────────────
+
+test("undeclared, generated, non-secret and unknown keys are refused with a fixed sentence", async () => {
+  seed("apikey-shapes", { ...DEMO, id: "apikey-shapes", name: "Shapes" });
+  await withServer({ owner: true }, async (post) => {
+    const cases = [
+      [{ bundle_id: "apikey-shapes", env_key: "NOT_DECLARED", value: VALUE }, /does not declare/],
+      [{ bundle_id: "apikey-shapes", env_key: "DEMO_GENERATED", value: VALUE }, /generates that value/],
+      [{ bundle_id: "apikey-shapes", env_key: "DEMO_PLAIN", value: VALUE }, /not a secret/],
+      [{ bundle_id: "apikey-shapes", env_key: "", value: VALUE }, /does not declare/],
+      [{ bundle_id: "apikey-shapes", env_key: ["DEMO_API_KEY"], value: VALUE }, /does not declare/],
+    ];
+    for (const [body, re] of cases) {
+      const r = await save(post, body);
+      assert.equal(r.status, 400, JSON.stringify(body));
+      assert.match(r.body.error, re);
+      assert.equal(JSON.stringify(r.body).includes(VALUE), false, "a refusal never echoes the value");
+    }
+    const badId = await save(post, { bundle_id: "not a bundle id", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(badId.status, 400);
+    assert.match(badId.body.error, /Invalid bundle ID/);
+    const missing = await save(post, { bundle_id: "apikey-not-installed", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(missing.status, 404);
+    assert.match(missing.body.error, /is not installed/);
+  });
+  assert.deepEqual(readMcp("apikey-shapes"), {});
+});
+
+test("value checks: empty, whitespace, too long, a line break and a pattern violation are refused", async () => {
+  const dotEnv = "OTHER=1\n";
+  const dir = seed("apikey-values", { ...DEMO, id: "apikey-values", name: "Values" }, { dotEnv });
+  await withServer({ owner: true }, async (post) => {
+    const cases = [
+      [undefined, /Enter the key/],
+      [null, /Enter the key/],
+      [42, /Enter the key/],
+      ["", /Enter the key/],
+      ["   ", /Enter the key/],
+      ["x".repeat(API_KEY_MAX_LENGTH + 1), /too long/],
+      [`${VALUE}\nSECOND=1`, /line break/],
+      [`${VALUE}\rX`, /line break/],
+    ];
+    for (const [value, re] of cases) {
+      const r = await save(post, { bundle_id: "apikey-values", env_key: "DEMO_API_KEY", value });
+      assert.equal(r.status, 400, String(value).slice(0, 20));
+      assert.match(r.body.error, re);
+    }
+    // A value the manifest's own `pattern` refuses.
+    const off = await save(post, { bundle_id: "apikey-values", env_key: "DEMO_PATTERN_KEY", value: VALUE });
+    assert.equal(off.status, 400);
+    assert.match(off.body.error, /format this extension expects/);
+    // ...and one it accepts.
+    const on = await save(post, { bundle_id: "apikey-values", env_key: "DEMO_PATTERN_KEY", value: "sk-abc123" });
+    assert.equal(on.status, 200, JSON.stringify(on.body));
+    // The maximum length itself is allowed.
+    const max = await save(post, { bundle_id: "apikey-values", env_key: "DEMO_API_KEY", value: "k".repeat(API_KEY_MAX_LENGTH) });
+    assert.equal(max.status, 200, JSON.stringify(max.body));
+  });
+  assert.deepEqual(readMcp("apikey-values"), { DEMO_PATTERN_KEY: "sk-abc123", DEMO_API_KEY: "k".repeat(API_KEY_MAX_LENGTH) });
+  assert.equal(readDotEnv(dir).OTHER, "1", "the other line survived");
+});
+
+test("every denied env name is refused, in the route and in the shared rule", async () => {
+  const denied = [
+    "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+    "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+    "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+    "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+    "BASH_ENV", "ENV", "PATH", "HOME", "IFS", "SHELL", "GCONV_PATH",
+    "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "PROXY_HOST",
+    "CROW_SMTP_PASS", "COMPOSE_FILE", "DOCKER_HOST",
+    // Case does not matter.
+    "node_options", "http_proxy",
+  ];
+  for (const name of denied) assert.equal(isDeniedApiKeyEnvName(name), true, name);
+  for (const name of ["DEMO_API_KEY", "TS_AUTHKEY", "VLLM_HF_TOKEN", "BRAVE_API_KEY", "OPENAI_API_KEY"]) {
+    assert.equal(isDeniedApiKeyEnvName(name), false, name);
+  }
+  assert.ok(API_KEY_ENV_DENY.exact.includes("NODE_OPTIONS"));
+  assert.ok(API_KEY_ENV_DENY.prefixes.includes("LD_"));
+
+  const manifest = {
+    ...DEMO,
+    id: "apikey-denied",
+    name: "Denied",
+    env_vars: denied.map((name) => ({ name, required: true, secret: true, explain: "x" })),
+  };
+  seed("apikey-denied", manifest);
+  await withServer({ owner: true }, async (post) => {
+    for (const name of denied) {
+      const r = await save(post, { bundle_id: "apikey-denied", env_key: name, value: VALUE });
+      assert.equal(r.status, 400, name);
+      assert.match(r.body.error, /controls how programs run/, name);
+    }
+  });
+  assert.deepEqual(readMcp("apikey-denied"), {});
+});
+
+test("the key and its help come from the REVIEWED manifest, never the installed copy", async () => {
+  const installedCopy = {
+    ...DEMO,
+    id: "apikey-reviewed",
+    env_vars: [...DEMO.env_vars, { name: "INSTALLED_ONLY_KEY", required: true, secret: true, explain: "added in the installed tree" }],
+  };
+  seed("apikey-reviewed", { ...DEMO, id: "apikey-reviewed", name: "Reviewed" }, { installedManifest: installedCopy });
+  await withServer({ owner: true }, async (post) => {
+    const tampered = await save(post, { bundle_id: "apikey-reviewed", env_key: "INSTALLED_ONLY_KEY", value: VALUE });
+    assert.equal(tampered.status, 400, "the installed copy's extra key is not a declaration");
+    assert.match(tampered.body.error, /does not declare/);
+    const real = await save(post, { bundle_id: "apikey-reviewed", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(real.status, 200, JSON.stringify(real.body));
+  });
+  assert.deepEqual(Object.keys(readMcp("apikey-reviewed")), ["DEMO_API_KEY"]);
+});
+
+// ── 3. the writes ───────────────────────────────────────────────────────────────────
+
+test("a save writes the keychain, the MCP entry and an existing .env, and says a restart applies it", async () => {
+  const dir = seed(
+    "apikey-writes",
+    { ...DEMO, id: "apikey-writes", name: "Writes App" },
+    { dotEnv: "# kept by the operator\nOTHER=1\nDEMO_API_KEY=\n" },
+  );
+  writeFileSync(GATEWAY_ENV, "# gateway env\n");
+  await withServer({ owner: true }, async (post) => {
+    const r = await save(post, { bundle_id: "apikey-writes", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(Object.keys(r.body).sort(), ["needs_config", "needs_restart", "ok"], "the answer carries the two facts only");
+    assert.equal(r.body.ok, true);
+    assert.equal(r.body.needs_restart, true, "the MCP entry was written, so a spawned child needs a restart");
+    assert.deepEqual(r.body.needs_config, [], "the required key is no longer missing");
+    assert.equal(JSON.stringify(r.body).includes(VALUE), false);
+  });
+
+  // (a) the keychain: one sealed 'extension' row under this bundle and env key.
+  const rows = await keychainRows("apikey-writes");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, "extension");
+  assert.equal(rows[0].bundle_id, "apikey-writes");
+  assert.equal(rows[0].env_key, "DEMO_API_KEY");
+  assert.equal(rows[0].label, "Writes App - DEMO_API_KEY");
+  assert.equal(rows[0].origin, "typed");
+  assert.equal(rows[0].status, "active");
+  assert.equal(rows[0].secret, VALUE, "the stored value is the one that was typed");
+  assert.equal(rows[0].first_view_pending, false);
+  // Sealed at rest: the column holds a sealed blob, not the key.
+  const sealedDb = createDbClient();
+  try {
+    const sealed = await sealedDb.execute({
+      sql: "SELECT secret_sealed FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ?",
+      args: ["apikey-writes", "DEMO_API_KEY"],
+    });
+    const blob = String((sealed.rows || [])[0]?.secret_sealed ?? "");
+    assert.ok(blob.length > 0);
+    assert.equal(blob.includes(VALUE), false, "the key is not stored in the clear");
+  } finally {
+    sealedDb.close();
+  }
+
+  // (b) the MCP entry (what the bundle's own tools read) with owner provenance.
+  assert.equal(readMcp("apikey-writes").DEMO_API_KEY, VALUE);
+  assert.deepEqual(readMcpEntry("apikey-writes").ownerSet, ["DEMO_API_KEY"]);
+  assert.equal(statSync(MCP_ADDONS).mode & 0o777, 0o600, "the file holding the key stays private");
+
+  // (c) the .env, line-preserving, at mode 600.
+  const envText = readFileSync(join(dir, ".env"), "utf8");
+  assert.match(envText, /# kept by the operator/);
+  assert.equal(readDotEnv(dir).OTHER, "1");
+  assert.equal(readDotEnv(dir).DEMO_API_KEY, VALUE);
+  assert.equal(statSync(join(dir, ".env")).mode & 0o777, 0o600);
+});
+
+test("re-saving a key overwrites the same keychain row and the same files", async () => {
+  const dir = seed("apikey-resave", { ...DEMO, id: "apikey-resave", name: "Resave" }, { dotEnv: "DEMO_API_KEY=\n" });
+  await withServer({ owner: true }, async (post) => {
+    const first = await save(post, { bundle_id: "apikey-resave", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const second = await save(post, { bundle_id: "apikey-resave", env_key: "DEMO_API_KEY", value: VALUE2 });
+    assert.equal(second.status, 200, JSON.stringify(second.body));
+  });
+  const rows = await keychainRows("apikey-resave");
+  assert.equal(rows.length, 1, "a rotated key updates the one row");
+  assert.equal(rows[0].secret, VALUE2);
+  assert.equal(readMcp("apikey-resave").DEMO_API_KEY, VALUE2);
+  assert.equal(readDotEnv(dir).DEMO_API_KEY, VALUE2);
+});
+
+test("a docker bundle's own gateway env gets the key too; a bundle without a .env is not given one", async () => {
+  writeFileSync(GATEWAY_ENV, "# gateway env\n");
+  seed("apikey-docker", { ...DEMO, id: "apikey-docker", name: "Docker App", type: "bundle" }, { dotEnv: "DEMO_API_KEY=\n" });
+  seed("apikey-noenv", { ...DEMO, id: "apikey-noenv", name: "No Env" });
+  await withServer({ owner: true }, async (post) => {
+    const docker = await save(post, { bundle_id: "apikey-docker", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(docker.status, 200, JSON.stringify(docker.body));
+    assert.equal(docker.body.needs_restart, true);
+    const plain = await save(post, { bundle_id: "apikey-noenv", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(plain.status, 200, JSON.stringify(plain.body));
+  });
+  assert.equal(parseEnvText(readFileSync(GATEWAY_ENV, "utf8")).DEMO_API_KEY, VALUE);
+  assert.equal(existsSync(join(TMP_HOME, "bundles", "apikey-noenv", ".env")), false, "a bundle with no .env gets none");
+});
+
+// ── 4. failures ─────────────────────────────────────────────────────────────────────
+
+test("a keychain that will not open answers 500 and writes nothing else", async () => {
+  const dotEnv = "OTHER=1\nDEMO_API_KEY=\n";
+  const dir = seed("apikey-kcfail", { ...DEMO, id: "apikey-kcfail", name: "Keychain Fail" }, { dotEnv });
+  const before = readFileSync(MCP_ADDONS, "utf8");
+  const captured = captureConsole();
+  B._setApiKeySaveDepsForTest({ ensureWriteKey: async () => { throw Object.assign(new Error("damaged key file"), { code: "KEY_DAMAGED" }); } });
+  try {
+    await withServer({ owner: true }, async (post) => {
+      const r = await save(post, { bundle_id: "apikey-kcfail", env_key: "DEMO_API_KEY", value: VALUE });
+      assert.equal(r.status, 500);
+      assert.equal(r.body.error, API_KEY_SAVE_REFUSALS.keychain);
+      assert.equal(JSON.stringify(r.body).includes(VALUE), false);
+    });
+  } finally {
+    B._setApiKeySaveDepsForTest(null);
+    captured.restore();
+  }
+  assert.equal(readFileSync(MCP_ADDONS, "utf8"), before, "the MCP entry was not touched");
+  assert.deepEqual(readDotEnv(dir), { OTHER: "1", DEMO_API_KEY: "" }, "the .env was not touched");
+  assert.deepEqual(await keychainRows("apikey-kcfail"), []);
+  assert.equal(captured.lines.join("\n").includes(VALUE), false, "the log line names the key, never its value");
+  assert.match(captured.lines.join("\n"), /apikey-kcfail: DEMO_API_KEY/);
+});
+
+test("no response, error sentence or log line from any refusal carries the value", async () => {
+  seed("apikey-quiet", { ...DEMO, id: "apikey-quiet", name: "Quiet" }, { dotEnv: "DEMO_API_KEY=\n" });
+  const captured = captureConsole();
+  try {
+    await withServer({ owner: true }, async (post) => {
+      const bodies = [
+        { bundle_id: "apikey-quiet", env_key: "NOT_DECLARED", value: VALUE },
+        { bundle_id: "apikey-quiet", env_key: "DEMO_GENERATED", value: VALUE },
+        { bundle_id: "apikey-quiet", env_key: "DEMO_PLAIN", value: VALUE },
+        { bundle_id: "apikey-quiet", env_key: "DEMO_API_KEY", value: `${VALUE}\nX=1` },
+        { bundle_id: "apikey-quiet", env_key: "DEMO_API_KEY", value: "k".repeat(API_KEY_MAX_LENGTH + 1) },
+        { bundle_id: "apikey-quiet", env_key: "DEMO_PATTERN_KEY", value: VALUE },
+        { bundle_id: "nope", env_key: "DEMO_API_KEY", value: VALUE },
+      ];
+      for (const body of bodies) {
+        const r = await save(post, body);
+        assert.equal(JSON.stringify(r.body).includes(VALUE), false);
+      }
+    });
+  } finally {
+    captured.restore();
+  }
+  assert.equal(captured.lines.join("\n").includes(VALUE), false);
+});
+
+test("the module refuses without a reviewed manifest, and reports a keychain failure as an answer", async () => {
+  const none = await saveApiKey({ bundleId: "apikey-x", manifest: null, envKey: "DEMO_API_KEY", value: VALUE });
+  assert.equal(none.ok, false);
+  assert.equal(none.status, 400);
+  assert.equal(none.error, API_KEY_SAVE_REFUSALS.no_manifest);
+
+  let applied = 0;
+  const deps = {
+    findInvalidEnv: () => null,
+    envPatternViolation: () => null,
+    openDb: () => ({ close() {} }),
+    ensureWriteKey: async () => ({ id: "k1", seed: Buffer.alloc(32) }),
+    save: async () => { throw new Error("seal failed"); },
+    applyEnv: async () => { applied++; return true; },
+    propagate: () => { applied++; return true; },
+    needsConfig: () => [],
+    bundleDir: join(TMP_HOME, "bundles", "apikey-y"),
+    warn: () => {},
+  };
+  const failed = await saveApiKey({ bundleId: "apikey-y", manifest: DEMO, envKey: "DEMO_API_KEY", value: VALUE, deps });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.status, 500);
+  assert.equal(failed.error, API_KEY_SAVE_REFUSALS.keychain);
+  assert.equal(applied, 0, "nothing else is written when the keychain fails");
+  assert.equal(JSON.stringify(failed).includes(VALUE), false);
+});
+
+test("the module's seams see the exact keychain entry, MCP write and restart answer", async () => {
+  const calls = { saved: [], env: [], propagated: [] };
+  const deps = {
+    findInvalidEnv: () => null,
+    envPatternViolation: () => null,
+    openDb: () => ({ close() {} }),
+    ensureWriteKey: async () => ({ id: "k1", seed: Buffer.alloc(32) }),
+    save: async (_db, _key, entry) => { calls.saved.push(entry); return { id: 1 }; },
+    applyEnv: async (id, values, manifest) => { calls.env.push({ id, values, manifest }); return true; },
+    propagate: (id, values) => { calls.propagated.push({ id, values }); return false; },
+    needsConfig: () => ["DEMO_API_KEY"],
+    bundleDir: TMP_BUNDLES,
+    now: () => Date.parse("2026-11-05T12:00:00Z"),
+    warn: () => {},
+  };
+  const out = await saveApiKey({ bundleId: "apikey-demo", manifest: DEMO, envKey: "DEMO_API_KEY", value: VALUE, deps });
+  assert.deepEqual(out, { ok: true, needs_restart: true, needs_config: ["DEMO_API_KEY"] });
+  assert.deepEqual(calls.saved.map((s) => ({ bundleId: s.bundleId, envKey: s.envKey, label: s.label, origin: s.origin, secret: s.secret })), [{
+    bundleId: "apikey-demo",
+    envKey: "DEMO_API_KEY",
+    label: "Demo App - DEMO_API_KEY",
+    origin: "typed",
+    secret: VALUE,
+  }]);
+  assert.deepEqual(calls.env, [{ id: "apikey-demo", values: { DEMO_API_KEY: VALUE }, manifest: DEMO }]);
+  assert.equal(calls.propagated.length, 0, "no .env in that dir, so the gateway env is not touched");
+});
+
+// ── 5. nothing is synced ────────────────────────────────────────────────────────────
+
+test("the keychain table is on the never-sync list, so a saved key reaches no peer", () => {
+  const src = readFileSync(join(REPO, "servers/sharing/instance-sync.js"), "utf8");
+  const start = src.indexOf("export const LOCAL_ONLY_TABLES");
+  assert.ok(start > 0, "instance-sync still declares the local-only tables");
+  const list = src.slice(start, src.indexOf("]);", start));
+  assert.match(list, /"crow_keychain"/, "crow_keychain is never replicated");
+});

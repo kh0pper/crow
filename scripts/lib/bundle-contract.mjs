@@ -15,6 +15,12 @@ import { firstAdminAfterProblems } from "../../servers/gateway/bundle-first-admi
 // module, shared with routes/bundles.js (which skips such a value at install) and
 // compose-guard.js: a manifest the contract refuses is the same value the runtime refuses.
 import { badBundlePath, badPanelId } from "../../servers/shared/bundle-declared-paths.js";
+// One API-key rule, one place: the env names that control how a program runs
+// (bundle-apikey-save.js) and the https-only link check the Extensions card also uses
+// at render time (dashboard/shared/api-key-card.js). A manifest the contract refuses is
+// exactly what the card's own save route would refuse.
+import { isDeniedApiKeyEnvName } from "../../servers/gateway/bundle-apikey-save.js";
+import { safeSignupUrl } from "../../servers/gateway/dashboard/shared/api-key-card.js";
 
 const schema = JSON.parse(
   readFileSync(new URL("../../registry/manifest.schema.json", import.meta.url), "utf8"),
@@ -374,6 +380,76 @@ function validateSetupFirstAdmin(manifest, bundleDir, fa) {
   return errors;
 }
 
+/**
+ * `env_vars[].explain` / `signup_url` / `signup_label`: the API-key card's help — what a
+ * third-party key is for, and where the operator gets one.
+ *
+ * They are allowed only on a key the operator TYPES and Crow keeps: `secret: true` and no
+ * `generate` (a generated value is Crow's, and a non-secret one is not a secret).
+ *
+ *   explain       what the key is for and where it comes from: a string, or
+ *                 `{ en (required), es? }` like `pattern_hint`; 600 characters each.
+ *   signup_label  the button's own words, same shape; 60 characters each.
+ *   signup_url    where the operator creates the key, https only, no user name or
+ *                 password, no whitespace or control characters, no `${`, at most 512
+ *                 characters. It must come with an `explain`: a bare link next to a
+ *                 secret field is a phishing shape, not help.
+ *
+ * An env name that changes how a program RUNS (NODE_OPTIONS, LD_PRELOAD, PYTHONPATH,
+ * *_PROXY, CROW_* …) may never carry this help, because it may never be set from the
+ * card: refusing it here means the card can never be built for one.
+ *
+ * @returns {string[]} errors (empty when the entry declares no help at all)
+ */
+export function validateEnvVarHelp(ev) {
+  const errors = [];
+  if (!ev || typeof ev !== "object") return errors;
+  const name = typeof ev.name === "string" ? ev.name : "(unnamed)";
+  const where = `env_vars ${name}`;
+  const has = (f) => ev[f] !== undefined;
+  if (!has("explain") && !has("signup_url") && !has("signup_label")) return errors;
+
+  if (ev.secret !== true) errors.push(`${where}: explain/signup_url/signup_label need secret: true (the operator types it)`);
+  if (ev.generate !== undefined) errors.push(`${where}: explain/signup_url/signup_label are not allowed on a generate key (Crow mints it)`);
+  if (isDeniedApiKeyEnvName(name)) {
+    errors.push(`${where}: "${name}" controls how programs run, so it cannot be set from an API-key card`);
+  }
+
+  const textProblem = (field, max) => {
+    const v = ev[field];
+    if (typeof v === "string") {
+      if (v.trim() === "") return `${where}: ${field} must not be empty`;
+      if (v.length > max) return `${where}: ${field} must be at most ${max} characters`;
+      return null;
+    }
+    if (!v || typeof v !== "object" || Array.isArray(v)) return `${where}: ${field} must be a string or an { en, es } object`;
+    if (typeof v.en !== "string" || v.en.trim() === "") return `${where}: ${field}.en is required`;
+    for (const [lang, text] of Object.entries(v)) {
+      if (lang !== "en" && lang !== "es") return `${where}: ${field} only carries en and es`;
+      if (typeof text !== "string") return `${where}: ${field}.${lang} must be a string`;
+      if (text.trim() === "") return `${where}: ${field}.${lang} must not be empty`;
+      if (text.length > max) return `${where}: ${field}.${lang} must be at most ${max} characters`;
+    }
+    return null;
+  };
+
+  if (has("explain")) {
+    const problem = textProblem("explain", 600);
+    if (problem) errors.push(problem);
+  }
+  if (has("signup_label")) {
+    const problem = textProblem("signup_label", 60);
+    if (problem) errors.push(problem);
+  }
+  if (has("signup_url")) {
+    if (!has("explain")) errors.push(`${where}: signup_url needs explain (a link alone is not help)`);
+    if (!safeSignupUrl(ev.signup_url)) {
+      errors.push(`${where}: signup_url must be an https address of at most 512 characters, with no user name, password, whitespace or \${…}`);
+    }
+  }
+  return errors;
+}
+
 /** Referential checks for the `connect` block (the ajv shape already passed). */
 function validateConnect(manifest) {
   const errors = [];
@@ -543,6 +619,8 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
         errors.push(`env_vars ${v.name}: default_in_crow_home must be a plain relative path inside CROW_HOME`);
       }
     }
+    // The API-key card's help (see validateEnvVarHelp).
+    errors.push(...validateEnvVarHelp(v));
     if (v.generatable === true) {
       if (v.secret !== true) errors.push(`env_vars ${v.name}: generatable needs secret: true`);
       if (v.generate !== undefined) errors.push(`env_vars ${v.name}: generatable is for typed fields; it cannot be combined with generate`);

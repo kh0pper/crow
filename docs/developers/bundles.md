@@ -408,6 +408,62 @@ claimed by the first Plex account that reaches it unless a claim token was set).
 Like every other bundle change, a new or edited `firstAdmin` needs a `version`
 bump: the installed copy refreshes only when the version differs.
 
+## Third-party API keys: `explain`, `signup_url`, `signup_label`
+
+When a secret `env_vars` entry is a key the operator buys or creates somewhere else
+(a Tailscale auth key, a Hugging Face token), say so on the entry itself:
+
+```json
+{
+  "name": "TS_AUTHKEY",
+  "required": true,
+  "secret": true,
+  "explain": {
+    "en": "Lets this machine join your Tailscale network. Create a reusable auth key on the Keys page (Generate auth key).",
+    "es": "Permite que esta máquina se una a tu red de Tailscale. Crea una clave de autenticación reutilizable en la página Keys (Generate auth key)."
+  },
+  "signup_url": "https://console.tailscale.com/admin/settings/keys",
+  "signup_label": { "en": "Create an auth key" }
+}
+```
+
+| Field | Rule |
+|---|---|
+| `explain` | What the key is for and where it comes from, in plain language: a string, or `{ "en": "…", "es": "…" }` like `pattern_hint` (`en` required, `es` optional, 600 characters each). |
+| `signup_url` | Where the operator creates the key. **https only**, no user name or password in it, no whitespace or control characters, no `${`, at most 512 characters. It needs an `explain` — a bare link beside a field that asks for a secret is a phishing shape, not help. |
+| `signup_label` | The link's own words, same shape as `explain` (60 characters each). Optional; without it the button says "Get a key". |
+
+All three are allowed only on an entry with `secret: true` and no `generate`: a generated
+value is Crow's, and a non-secret one is not a secret. They are refused outright on names
+that control how a program runs rather than what it talks to (`NODE_OPTIONS`, `LD_PRELOAD`,
+`PYTHONPATH`, `PERL5OPT`, `JAVA_TOOL_OPTIONS`, `PATH`, `*_PROXY`, `CROW_*`, `COMPOSE_*`,
+`DOCKER_*` and the rest of the list in `servers/gateway/bundle-apikey-save.js`), because
+such a name may never be set by the card that renders this help.
+
+Where it shows:
+
+- **Install and Configure** show the explanation under the secret field, with a button-link
+to `signup_url` and the link's HOST beside it. This applies to optional keys too.
+- The **Extensions** page adds a small card for an installed add-on whose **required**,
+typed secret is still empty and has an `explain`: a password field and a Save button. The
+card is derived from the same "needs setup" keys the rest of the page uses, so it appears
+for add-ons installed before the field existed and disappears by itself once the key is
+set — nothing is stored and there is no Done button. Optional keys never get a card, and a
+satellite-hosted install has none (its own box owns its config).
+
+The card saves through `POST /bundles/api/apikey-save {bundle_id, env_key, value}`. It is
+owner-only, takes `env_key` from the REVIEWED manifest (never the installed copy), and
+refuses anything that is not a declared, typed secret, a value that is empty, over 1024
+characters, adds a line to a `.env` file or breaks the entry's `pattern`. A successful save
+always records the key in Crow's keychain (Settings → Passwords) and writes it into the
+add-on's `mcp-addons.json` entry and, when the bundle already has one, its `.env` — the
+same writes Configure's save makes, with the owner recorded as the source. A restart is
+needed to apply it to a running MCP child; the card says so and never restarts the gateway
+itself. Neither the answer nor any log line carries the value.
+
+Every one of these strings is third-party input: the renderers escape it, and the link is
+re-checked at render time with the same https-only rule.
+
 ## Invite-only apps: `firstAdmin.invite`
 
 A few apps can be closed off completely without Crow ever creating an account:

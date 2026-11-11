@@ -10,6 +10,7 @@ import { generatePassword, PASSWORD_LENGTH } from "../../shared/password-generat
  */
 
 import { tJs } from "../../shared/i18n.js";
+import { localizedText, safeSignupUrl } from "../../shared/api-key-card.js";
 import { servicesUiEnabled } from "../../../services/ui-flag.js";
 
 /**
@@ -29,6 +30,13 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
         // --- Crow keychain helpers (password-generator.js is ES5 + backtick-free) ---
         var crowGeneratePassword = ${generatePassword.toString()};
         var CROW_PW_LENGTH = ${PASSWORD_LENGTH};
+        // --- API-key help: what a third-party key is for, and where it comes from ---
+        // Both functions are copied in as source (like generatePassword above), so the
+        // page re-checks a manifest's signup URL at render time with the same rule the
+        // server and the manifest contract use. ES5, no outer references.
+        var apiKeyText = ${localizedText.toString()};
+        var apiKeyUrl = ${safeSignupUrl.toString()};
+        var LANG = '${String(lang || "en").replace(/[^a-zA-Z-]/g, "")}';
         var CAN_GENERATE = typeof crypto !== "undefined" && !!crypto.getRandomValues;
         function crowRandomUint32() { var a = new Uint32Array(1); crypto.getRandomValues(a); return a[0]; }
         function vaultInstalled() {
@@ -493,6 +501,39 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
                 input.placeholder = ev.description || "";
                 input.style.cssText = "width:100%;padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg-deep);color:var(--crow-text-primary);font-family:JetBrains Mono,monospace;font-size:0.85rem;box-sizing:border-box";
                 wrap.appendChild(input);
+                // A typed third-party key with a manifest 'explain': say what it is for and
+                // link to where it comes from (with the link's host visible, so a look-alike
+                // cannot hide). Text via textContent; the URL is re-checked by apiKeyUrl. Optional
+                // keys get this help too — they just never get a card of their own.
+                var helpText = ev.secret ? apiKeyText(ev.explain, LANG) : null;
+                if (helpText) {
+                  var help = document.createElement("div");
+                  help.className = "ext-env-help";
+                  help.style.cssText = "font-size:0.8rem;line-height:1.4;color:var(--crow-text-secondary);margin-top:0.35rem";
+                  var helpP = document.createElement("p");
+                  helpP.style.margin = "0";
+                  helpP.textContent = helpText;
+                  help.appendChild(helpP);
+                  var signup = ev.signup_url ? apiKeyUrl(ev.signup_url) : null;
+                  if (signup) {
+                    var signupRow = document.createElement("div");
+                    signupRow.style.cssText = "display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;margin-top:0.35rem";
+                    var signupLink = document.createElement("a");
+                    signupLink.className = "btn btn-sm btn-secondary ext-signup-link";
+                    signupLink.href = signup.href;
+                    signupLink.target = "_blank";
+                    signupLink.rel = "noopener noreferrer";
+                    signupLink.textContent = apiKeyText(ev.signup_label, LANG) || '${tJs("bundles.apiKey.getKey", lang)}';
+                    var signupHost = document.createElement("span");
+                    signupHost.className = "ext-signup-host";
+                    signupHost.style.cssText = "font-size:0.75rem;color:var(--crow-text-muted)";
+                    signupHost.textContent = signup.host;
+                    signupRow.appendChild(signupLink);
+                    signupRow.appendChild(signupHost);
+                    help.appendChild(signupRow);
+                  }
+                  wrap.appendChild(help);
+                }
                 if (ev.secret && !ev.generate) {
                   // Show/Hide/Copy on every typed secret; Generate and "Save to Crow keychain"
                   // only where the manifest opts in (generatable / keychain — review C1, Casey Q1).
@@ -2223,6 +2264,50 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
             }).catch(function() {
               if (btn) btn.disabled = false;
               showFirstAdminMessage(card, '${tJs("extensions.networkError", lang)}');
+            });
+          });
+        });
+        // --- API-key cards: save the key the operator pasted ---
+        // The request body is the only place the value goes. On success the input is
+        // cleared and the card shows its own sentence; when the key also reached the
+        // bundle's MCP settings, Configure's restart sentence follows, because an MCP
+        // child reads those only when it is spawned (nothing restarts the gateway here).
+        function showApiKeyMessage(card, text) {
+          var note = card ? card.querySelector(".ext-apikey__msg") : null;
+          if (!note) return;
+          note.textContent = text;
+          note.hidden = false;
+        }
+        document.querySelectorAll(".ext-apikey-save").forEach(function(form) {
+          form.addEventListener("submit", function(ev) {
+            if (ev && ev.preventDefault) ev.preventDefault();
+            var id = form.getAttribute("data-id");
+            var envKey = form.getAttribute("data-env-key");
+            var card = form.closest ? form.closest(".ext-apikey") : null;
+            var input = form.querySelector(".ext-apikey-save-input");
+            var btn = form.querySelector("button[type=submit]");
+            var value = input ? input.value : "";
+            if (!value.trim()) {
+              showApiKeyMessage(card, '${tJs("bundles.apiKey.required", lang)}');
+              if (input) input.focus();
+              return;
+            }
+            if (btn) btn.disabled = true;
+            apiCall("apikey-save", { bundle_id: id, env_key: envKey, value: value }).then(function(res) {
+              if (res.ok && res.data && res.data.ok) {
+                var d = res.data;
+                if (input) input.value = "";
+                // The card goes away on the next render (the key is no longer missing), so
+                // nothing here has to remember it was saved.
+                showApiKeyMessage(card, '${tJs("bundles.apiKey.saved", lang)}' + (d.needs_restart ? " " + '${tJs("extensions.configureNeedsRestart", lang)}' : ""));
+                if (btn) btn.disabled = false;
+                return;
+              }
+              if (btn) btn.disabled = false;
+              showApiKeyMessage(card, (res.data && res.data.error) || '${tJs("extensions.failed", lang)}');
+            }).catch(function() {
+              if (btn) btn.disabled = false;
+              showApiKeyMessage(card, '${tJs("extensions.networkError", lang)}');
             });
           });
         });

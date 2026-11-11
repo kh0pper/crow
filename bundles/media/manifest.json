@@ -1,7 +1,7 @@
 {
   "id": "media",
   "name": "Media Hub",
-  "version": "1.2.9",
+  "version": "1.2.10",
   "description": "News aggregation, RSS feeds, YouTube channels, podcasts, a daily spoken briefing read by the local voice, playlists, smart folders, email digests",
   "type": "mcp-server",
   "author": "Crow",
@@ -59,6 +59,6 @@
     { "name": "CROW_SMTP_USER", "description": "SMTP username", "required": false },
     { "name": "CROW_SMTP_PASS", "description": "SMTP password", "required": false, "secret": true },
     { "name": "CROW_SMTP_FROM", "description": "Sender email", "required": false },
-    { "name": "BRAVE_API_KEY", "description": "Brave Search API key for RSS feed discovery", "required": false, "secret": true }
+    { "name": "BRAVE_API_KEY", "description": "Brave Search API key for RSS feed discovery", "required": false, "secret": true, "explain": { "en": "The Brave Search API key used to discover RSS feeds for a site. Includes $5/month free credit.", "es": "La clave de la API de Brave Search que se usa para descubrir fuentes RSS de un sitio. Incluye 5 $/mes de crédito gratuito." }, "signup_url": "https://brave.com/search/api/" }
   ]
 }
