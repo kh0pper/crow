@@ -1673,6 +1673,9 @@ export async function eraseExpiredWorkspaceFiles(project, trashDays, opts = {}) 
     const gate = await withGitWriteLock(project, settings, (repoDir, lockedAt) => eraseExpiredInRepo(project, repoDir, days, { ...settings, lockedAt }, opts.now));
     return gate.live ? gate.value : [];
   } catch (err) {
+    if (err && err.code === "timeout") {
+      console.warn("[history] erasing expired workspace files timed out and was stopped; it will be retried");
+    }
     noteFailure(failureReason(err));
     return [];
   }
@@ -1721,12 +1724,12 @@ export function makeDbLiveCheck(db) {
  * `autoErase === true` (the local `history.workspace_auto_erase` setting), because
  * until the Trash page lists workspace files the history copy is the only copy.
  *
- * @returns {Promise<{ensured: number, committed: number, erased: number, failed: number}>}
+ * @returns {Promise<{ensured: number, committed: number, erased: number, eraseTimedOut: number, failed: number}>}
  */
-export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, trashDays, autoErase = false, now, lockWaitMs } = {}) {
-  const result = { ensured: 0, committed: 0, erased: 0, failed: 0 };
+export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, trashDays, autoErase = false, now, lockWaitMs, clock, eraseCapMs, onSpawn } = {}) {
+  const result = { ensured: 0, committed: 0, erased: 0, eraseTimedOut: 0, failed: 0 };
   if (!db || typeof db.execute !== "function") return result;
-  const base = { dataDir, env, gitBin, lockWaitMs };
+  const base = { dataDir, env, gitBin, lockWaitMs, clock, eraseCapMs, onSpawn };
   const isLive = makeDbLiveCheck(db);
   const eraseOn = autoErase === true && typeof trashDays === "number" && Number.isFinite(trashDays);
 
@@ -1796,13 +1799,25 @@ export async function sweepWorkspaces(db, { dataDir, env, gitBin, batch = 20, tr
           settings,
         );
         if (sha) committed += 1;
-        if (eraseOn) erased += (await eraseExpiredInRepo(project, repoDir, trashDays, { ...settings, lockedAt }, now)).length;
-        return { committed, erased };
+        let eraseTimedOut = 0;
+        if (eraseOn) {
+          // The erase's cap starts here, so a slow commit above never eats it.
+          try {
+            erased += (await eraseExpiredInRepo(project, repoDir, trashDays, { ...settings, lockedAt: clockOf(settings)() }, now)).length;
+          } catch (err) {
+            if (!err || err.code !== "timeout") throw err;
+            // Never silent: the erase did not happen, and the next sweep retries.
+            eraseTimedOut = 1;
+            console.warn(`[history] a scheduled erase of workspace files timed out for project ${project.id}; it will be retried`);
+          }
+        }
+        return { committed, erased, eraseTimedOut };
       });
       if (!gate.live) continue;
       if (isNew) result.ensured += 1;
       result.committed += gate.value.committed;
       result.erased += gate.value.erased;
+      result.eraseTimedOut += gate.value.eraseTimedOut;
     } catch (err) {
       result.failed += 1;
       noteFailure(failureReason(err));

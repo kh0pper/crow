@@ -96,6 +96,15 @@ function readLock(lockPath) {
   }
 }
 
+/** The lock file's inode (as a string), or null when it is gone. */
+function lockIno(lockPath) {
+  try {
+    return String(statSync(lockPath).ino);
+  } catch {
+    return null;
+  }
+}
+
 /** The lock file's mtime in ms, or null when it is gone. */
 function lockMtime(lockPath) {
   try {
@@ -108,24 +117,26 @@ function lockMtime(lockPath) {
 /**
  * Whether an existing lock may be taken over, and which lock it judged.
  *
- * @returns {{stale: boolean, token: string|null}}
+ * @returns {{stale: boolean, token: string|null, ino: string|null}}
  */
 function judgeLock(lockPath, { isPidAlive, getPidStart, clock }) {
   const now = clock();
+  const ino = lockIno(lockPath);
   const held = readLock(lockPath);
   if (!held || typeof held.token !== "string") {
-    // Nothing to ask: a half-written or foreign file. Old enough means dead.
+    // Nothing to ask: a foreign or damaged file (our own locks are linked into
+    // place whole, so they are never empty). Old enough means dead.
     const mtime = lockMtime(lockPath);
-    return { stale: mtime !== null && now - mtime > 5000, token: null };
+    return { stale: mtime !== null && now - mtime > 5000, token: null, ino };
   }
   const token = held.token;
-  if (!isPidAlive(held.pid)) return { stale: true, token };
+  if (!isPidAlive(held.pid)) return { stale: true, token, ino };
   // Alive: stale only when the pid now belongs to a different process.
   if (held.pidStart != null) {
     const nowStart = getPidStart(held.pid);
-    if (nowStart !== null && String(nowStart) !== String(held.pidStart)) return { stale: true, token };
+    if (nowStart !== null && String(nowStart) !== String(held.pidStart)) return { stale: true, token, ino };
   }
-  return { stale: false, token };
+  return { stale: false, token, ino };
 }
 
 /**
@@ -133,7 +144,8 @@ function judgeLock(lockPath, { isPidAlive, getPidStart, clock }) {
  *
  * @param {string} repoDir  the project's Crow git dir
  * @param {{waitMs?: number, pollMs?: number, isPidAlive?: Function,
- *   getPidStart?: Function, clock?: Function, _beforeStaleRename?: Function}} [opts]
+ *   getPidStart?: Function, clock?: Function, _beforeStaleRename?: Function,
+ *   _afterStaleRename?: Function}} [opts]
  * @returns {Promise<{release: () => void}>}
  */
 export async function acquireGitDirLock(repoDir, opts = {}) {
@@ -153,21 +165,23 @@ export async function acquireGitDirLock(repoDir, opts = {}) {
     if (waited && clock() >= deadline) {
       throw lockError("busy", "another change to this project's files is still running");
     }
-    let fd = -1;
+    // The lock is written whole to a private temp file and LINKED into place, so
+    // the lock file is never visible empty or half-written (a reader that finds
+    // an empty file can only be looking at something that is not one of ours).
+    const body = Buffer.from(JSON.stringify({ pid: process.pid, pidStart: getPidStart(process.pid), startedAt: clock(), token }), "utf8");
+    const temp = `${lockPath}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
     try {
-      fd = openSync(lockPath, "wx", 0o600);
-      const body = Buffer.from(JSON.stringify({ pid: process.pid, pidStart: getPidStart(process.pid), startedAt: clock(), token }), "utf8");
+      const fd = openSync(temp, "wx", 0o600);
       try {
         writeSync(fd, body);
       } finally {
         closeSync(fd);
-        fd = -1;
       }
+      linkSync(temp, lockPath);
+      try { rmSync(temp, { force: true }); } catch { /* the lock stands; the temp is only a name */ }
       return { release: () => releaseLock(lockPath, token) };
     } catch (err) {
-      if (fd >= 0) {
-        try { closeSync(fd); } catch { /* nothing left to close */ }
-      }
+      try { rmSync(temp, { force: true }); } catch { /* nothing to remove */ }
       if (!err || err.code === "ENOENT") {
         // The git dir itself is gone: the project was purged while we waited.
         throw lockError("gone", "the project's file history directory is gone");
@@ -184,18 +198,29 @@ export async function acquireGitDirLock(repoDir, opts = {}) {
       try {
         renameSync(lockPath, aside);
         moved = true;
+        if (typeof opts._afterStaleRename === "function") opts._afterStaleRename(lockPath, aside);
       } catch {
         // Another waiter won the rename (ENOENT): loop and race the create again.
       }
       if (moved) {
+        // Provably the file we judged: the same inode and, when the judged file
+        // had a token, the same token. Anything else is not ours to destroy.
         const taken = readLock(aside);
         const takenToken = taken && typeof taken.token === "string" ? taken.token : null;
-        if (takenToken !== null && takenToken !== verdict.token) {
-          // We moved a lock another waiter created after our check: it is live.
-          // Put it back (EEXIST if the name was taken again, which is safe) and loop.
-          try { linkSync(aside, lockPath); } catch { /* the name is taken again */ }
+        const sameFile = lockIno(aside) === verdict.ino && takenToken === verdict.token;
+        if (sameFile) {
+          try { rmSync(aside, { force: true }); } catch { /* another sweep will find it */ }
+        } else {
+          // We moved something else, quite possibly a live lock another waiter
+          // just made. Put it back. If the name is taken again, keep the moved
+          // file where it is rather than delete what may be a live holder's lock.
+          try {
+            linkSync(aside, lockPath);
+            try { rmSync(aside, { force: true }); } catch { /* a leftover name only */ }
+          } catch {
+            console.warn(`[history] a lock moved aside during a takeover was kept, not deleted: ${aside}`);
+          }
         }
-        try { rmSync(aside, { force: true }); } catch { /* another sweep will find it */ }
       }
       continue;
     }

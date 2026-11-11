@@ -177,10 +177,10 @@ export async function runWorkspaceSweep({ db = null, dbFactory = createDbClient 
       : String(rawAutoErase).trim().toLowerCase();
     const autoErase = autoEraseValue === "true" || autoEraseValue === "1" || autoEraseValue === "on";
     const result = await sweepWorkspaces(db, { trashDays, autoErase });
-    if (result.ensured > 0 || result.committed > 0 || result.erased > 0 || result.failed > 0) {
+    if (result.ensured > 0 || result.committed > 0 || result.erased > 0 || result.eraseTimedOut > 0 || result.failed > 0) {
       console.log(
         `[history] project files: ${result.ensured} newly covered, ${result.committed} change(s) recorded, ` +
-          `${result.erased} Trash file(s) erased, ${result.failed} project(s) skipped`,
+          `${result.erased} Trash file(s) erased, ${result.eraseTimedOut} erase(s) timed out, ${result.failed} project(s) skipped`,
       );
     }
     return result;

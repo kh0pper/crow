@@ -8,7 +8,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -128,6 +128,108 @@ test("two waiters that judge the same dead lock stale never both hold a lock", a
     assert.notEqual(readLockFile(dir).token, "B-LIVE");
     aLock.release();
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a fresh empty lock file is never taken over", async () => {
+  const dir = freshDir();
+  try {
+    writeFileSync(lockFile(dir), "");
+    await assert.rejects(
+      acquireGitDirLock(dir, { waitMs: 150, pollMs: 5, isPidAlive: () => true }),
+      (err) => err.code === "busy",
+    );
+    assert.equal(existsSync(lockFile(dir)), true, "the file is untouched");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a lock created by us is whole from the first moment it exists", async () => {
+  const dir = freshDir();
+  try {
+    const lock = await acquireGitDirLock(dir, { waitMs: 1000 });
+    const body = readLockFile(dir);
+    assert.equal(typeof body.token, "string");
+    assert.deepEqual(readdirSync(dir), ["crow-history.lock"], "no temp name is left behind");
+    lock.release();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a token-less file judged stale but swapped for a live lock is put back, not deleted", async () => {
+  const dir = freshDir();
+  try {
+    // An old empty file: judged stale (no token, older than 5 s).
+    writeFileSync(lockFile(dir), "");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockFile(dir), old, old);
+    let swapped = false;
+    let heldLock = null;
+    const waiter = acquireGitDirLock(dir, {
+      waitMs: 2000,
+      pollMs: 5,
+      isPidAlive: (pid) => pid === process.pid,
+      getPidStart: () => "9",
+      _beforeStaleRename: () => {
+        if (swapped) return;
+        swapped = true;
+        // Another process finishes its own takeover first and now holds a live lock.
+        rmSync(lockFile(dir), { force: true });
+        writeFileSync(lockFile(dir), JSON.stringify({ pid: process.pid, pidStart: "9", startedAt: Date.now(), token: "LIVE" }));
+        heldLock = () => rmSync(lockFile(dir), { force: true });
+      },
+    });
+    await new Promise((done) => setTimeout(done, 200));
+    assert.equal(swapped, true);
+    assert.equal(readLockFile(dir).token, "LIVE", "the live lock is back in place");
+    let got = false;
+    waiter.then(() => { got = true; }, () => {});
+    await new Promise((done) => setTimeout(done, 100));
+    assert.equal(got, false, "the waiter does not hold the lock while the live holder does");
+    heldLock();
+    (await waiter).release();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed put-back keeps the moved-aside file", async () => {
+  const dir = freshDir();
+  const realWarn = console.warn;
+  const warned = [];
+  console.warn = (...args) => { warned.push(args.join(" ")); };
+  try {
+    writeLock(dir, { pid: 999999, pidStart: "1", startedAt: Date.now(), token: "L1" });
+    let done = false;
+    const waiter = acquireGitDirLock(dir, {
+      waitMs: 500,
+      pollMs: 5,
+      isPidAlive: (pid) => pid === process.pid,
+      getPidStart: () => "3",
+      _beforeStaleRename: () => {
+        if (done) return;
+        // Replace L1 with a live lock, then (below) a THIRD lock takes the name
+        // right after our rename, so the put-back cannot succeed.
+        rmSync(lockFile(dir), { force: true });
+        writeFileSync(lockFile(dir), JSON.stringify({ pid: process.pid, pidStart: "3", startedAt: Date.now(), token: "LIVE" }));
+      },
+      _afterStaleRename: () => {
+        if (done) return;
+        done = true;
+        writeFileSync(lockFile(dir), JSON.stringify({ pid: process.pid, pidStart: "3", startedAt: Date.now(), token: "THIRD" }));
+      },
+    });
+    await assert.rejects(waiter, (err) => err.code === "busy");
+    const leftovers = readdirSync(dir).filter((name) => name.includes(".stale-"));
+    assert.equal(leftovers.length, 1, "the moved lock was kept");
+    assert.equal(JSON.parse(readFileSync(join(dir, leftovers[0]), "utf8")).token, "LIVE");
+    assert.equal(readLockFile(dir).token, "THIRD", "the third lock was not disturbed");
+    assert.ok(warned.some((line) => /kept, not deleted/.test(line)), "and it was logged");
+  } finally {
+    console.warn = realWarn;
     rmSync(dir, { recursive: true, force: true });
   }
 });

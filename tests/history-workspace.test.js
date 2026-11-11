@@ -273,7 +273,7 @@ test("an outside edit is swept in, attributed unattributed / outside-crow", { sk
   writeFileSync(join(ws, "a.txt"), "before\n");
 
   const first = await sweepWorkspaces(fx.db, { dataDir: fx.dataDir, trashDays: 30 });
-  assert.deepEqual(first, { ensured: 1, committed: 1, erased: 0, failed: 0 });
+  assert.deepEqual(first, { ensured: 1, committed: 1, erased: 0, eraseTimedOut: 0, failed: 0 });
   const row = (await fx.db.execute({ sql: "SELECT repo_path FROM project_spaces WHERE id = 1" })).rows[0];
   assert.equal(row.repo_path, gitDirFor(project, fx.dataDir));
 
@@ -1150,6 +1150,84 @@ test("the scheduled erase is off by default, and the mass-delete guard holds", {
   const on = await sweepWorkspaces(fx.db, { dataDir: fx.dataDir, trashDays: 30, autoErase: true, now: inAMonth });
   assert.equal(on.erased, 1, "switched on, it erases past the Trash period");
   assert.deepEqual(await listDeletedWorkspaceFiles(project, { dataDir: fx.dataDir }), []);
+});
+
+/** A project with one file in its Trash, ready for a scheduled erase a month on. */
+async function trashedFixture(prefix, name) {
+  const fx = await dbFixture(prefix);
+  const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+  const created = await createProjectSpace(fx.db, { name });
+  const project = await projectOf(fx, created);
+  const ws = created.workspaceDir;
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(ws, "keep.txt"), "keep\n");
+  writeFileSync(join(ws, "drop.txt"), "drop\n");
+  await commitWorkspace(project, OWNER, "Add both", { dataDir: fx.dataDir });
+  unlinkSync(join(ws, "drop.txt"));
+  await commitWorkspace(project, OWNER, "Delete drop", { dataDir: fx.dataDir });
+  return { fx, project };
+}
+
+test("a slow commit before the scheduled erase does not eat the erase's time cap", { skip: NO_GIT }, async () => {
+  const { fx, project } = await trashedFixture("hist-ws-sweepcap-", "Sweep Cap");
+  const inAMonth = () => new Date(Date.now() + 31 * 86_400_000);
+  let now = 5_000_000;
+  let heads = 0;
+  const swept = await sweepWorkspaces(fx.db, {
+    dataDir: fx.dataDir,
+    trashDays: 30,
+    autoErase: true,
+    now: inAMonth,
+    clock: () => now,
+    onSpawn: (argv) => {
+      // The sweep's own commit step looks up HEAD first: make it take an hour.
+      if (argv.includes("rev-parse") && argv.includes("--verify")) {
+        heads += 1;
+        if (heads === 1) now += 60 * 60 * 1000;
+      }
+    },
+  });
+  assert.equal(swept.eraseTimedOut, 0, "the erase was not starved by the commit");
+  assert.equal(swept.erased, 1, "and it happened");
+  assert.deepEqual(await listDeletedWorkspaceFiles(project, { dataDir: fx.dataDir }), []);
+});
+
+test("a scheduled erase that times out is warned about and counted, not silent", { skip: NO_GIT }, async () => {
+  const { fx, project } = await trashedFixture("hist-ws-sweeptimeout-", "Sweep Timeout");
+  const inAMonth = () => new Date(Date.now() + 31 * 86_400_000);
+  let now = 5_000_000;
+  let heads = 0;
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => { warnings.push(args.join(" ")); };
+  let swept;
+  try {
+    swept = await sweepWorkspaces(fx.db, {
+      dataDir: fx.dataDir,
+      trashDays: 30,
+      autoErase: true,
+      now: inAMonth,
+      clock: () => now,
+      onSpawn: (argv) => {
+        // The second HEAD lookup is the erase's own: the rewrite then runs an hour late.
+        if (argv.includes("rev-parse") && argv.includes("--verify")) {
+          heads += 1;
+          if (heads === 2) now += 60 * 60 * 1000;
+        }
+      },
+    });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(swept.eraseTimedOut, 1, "the timeout is counted");
+  assert.equal(swept.erased, 0);
+  assert.equal(swept.failed, 0, "it is not mistaken for a failed project");
+  assert.ok(warnings.some((line) => /timed out/.test(line)), `a warning was logged: ${warnings.join(" | ")}`);
+  assert.deepEqual(
+    (await listDeletedWorkspaceFiles(project, { dataDir: fx.dataDir })).map((file) => file.path),
+    ["drop.txt"],
+    "nothing was erased, so the file is still restorable",
+  );
 });
 
 test("a commit that deletes most of the workspace is never erased automatically", { skip: NO_GIT }, async () => {
