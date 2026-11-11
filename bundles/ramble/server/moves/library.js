@@ -21,7 +21,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ENTRY_KINDS = Object.freeze(["pose", "exercise", "flow", "walk"]);
+export const ENTRY_KINDS = Object.freeze([
+  "pose", "exercise", "flow", "walk", "routine", "landmark",
+]);
 export const LIMIT_TAGS = Object.freeze([
   "knee", "lower_back", "neck", "shoulder", "wrist",
   "hip", "ankle", "balance", "pregnancy", "high_blood_pressure",
@@ -31,16 +33,73 @@ export const ACTIVITY_KINDS = Object.freeze([
   "yoga", "walk", "jog", "run", "cycle", "band", "bodyweight", "swim", "sport", "other",
 ]);
 
+/** The five areas an entry may train (moves design §5.1). */
+export const AREAS = Object.freeze(["upper", "core", "lower", "heart", "mobility"]);
+/** The areas a balance-flavoured walk leans on, in picker order. */
+export const BALANCE_AREAS = Object.freeze(["mobility", "core", "upper", "lower"]);
+/** The two shared block kinds: an opener and a closer, never a card alone. */
+export const BLOCK_KINDS = Object.freeze(["warmup", "cooldown"]);
+/** What a landmark entry may stand for (§4.5). */
+export const LANDMARK_KINDS = Object.freeze([
+  "park", "trail", "stairs", "hill", "water", "track",
+  "playground", "bench", "plaza", "nest", "heart", "fog",
+]);
+
 /** A flow is a short sequence: 5-7 poses, each held. */
 export const FLOW_MIN = 5;
 export const FLOW_MAX = 7;
 
+/** The shortest chunk the picker may offer as a card. */
+export const CHUNK_MIN_MINUTES = 10;
+/** A routine may carry at most this many stages. */
+export const STAGES_MAX = 4;
+/** How many times a main block runs before "one more round". */
+export const DEFAULT_MAX_ROUNDS = 2;
+
 const MINUTES_MAX = 600;
+/** A cue is one line on the player. */
+const CUE_MAX_CHARS = 60;
 const DEFAULT_DIR = fileURLToPath(new URL("./library/", import.meta.url));
 
 const isStr = (v) => typeof v === "string" && v.trim() !== "";
 /** An array of non-empty strings (possibly empty unless the caller checks length). */
 const isStrArray = (v) => Array.isArray(v) && v.every(isStr);
+const isPlainObject = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+const isPositiveInt = (v) => Number.isInteger(v) && v >= 1;
+
+/**
+ * Normalize one step to { text, cue, say, at }. A plain string is treated as
+ * its own text: cue falls back to text, say to cue, and at to 0.
+ */
+export function stepOf(step) {
+  const raw = isPlainObject(step) ? step : {};
+  const text = typeof step === "string" ? step
+    : (typeof raw.text === "string" ? raw.text : "");
+  const cue = typeof raw.cue === "string" ? raw.cue : text;
+  const say = typeof raw.say === "string" ? raw.say : cue;
+  const at = Number.isInteger(raw.at) && raw.at >= 0 ? raw.at : 0;
+  return { text, cue, say, at };
+}
+
+/** Every problem with one step, as messages that all name `steps`. */
+function stepProblems(step, i) {
+  const at = `steps[${i}]`;
+  if (typeof step === "string") return isStr(step) ? [] : [`${at} must be a non-empty string`];
+  if (!isPlainObject(step)) return [`${at} must be a string or a { text, cue, say, at } object`];
+  const problems = [];
+  if (!isStr(step.text)) problems.push(`${at}.text must be a non-empty string`);
+  if (step.cue !== undefined
+    && (typeof step.cue !== "string" || step.cue.length > CUE_MAX_CHARS)) {
+    problems.push(`${at}.cue must be a string of at most ${CUE_MAX_CHARS} characters`);
+  }
+  if (step.say !== undefined && !isStr(step.say)) {
+    problems.push(`${at}.say must be a non-empty string when present`);
+  }
+  if (step.at !== undefined && (!Number.isInteger(step.at) || step.at < 0)) {
+    problems.push(`${at}.at must be a whole number of 0 or more`);
+  }
+  return problems;
+}
 
 /** Normalize the optional second validateEntry argument to an id->entry Map. */
 function idLookup(lib) {
@@ -80,11 +139,35 @@ export function validateEntry(obj, lib = null) {
   if (!isStrArray(obj.tags)) errors.push("tags must be an array of non-empty strings");
 
   // Teaching.
-  if (!Array.isArray(obj.steps) || obj.steps.length === 0 || !obj.steps.every(isStr)) {
-    errors.push("steps must be a non-empty array of non-empty strings");
+  if (!Array.isArray(obj.steps) || obj.steps.length === 0) {
+    errors.push("steps must be a non-empty array of step strings or { text, cue, say, at } objects");
+  } else {
+    obj.steps.forEach((step, i) => { errors.push(...stepProblems(step, i)); });
   }
   for (const field of ["works", "stretches", "mistakes"]) {
     if (!isStrArray(obj[field])) errors.push(`${field} must be an array of non-empty strings`);
+  }
+  // The trained areas, when an entry names them at all.
+  if (obj.areas !== undefined) {
+    if (!Array.isArray(obj.areas) || obj.areas.length === 0
+      || !obj.areas.every((a) => AREAS.includes(a))) {
+      errors.push(`areas must be a non-empty array drawn from ${AREAS.join(", ")}`);
+    }
+  }
+  // Lifted out of the prose steps (exercises).
+  for (const field of ["sets", "reps", "tempoSeconds"]) {
+    if (obj[field] !== undefined && !isPositiveInt(obj[field])) {
+      errors.push(`${field} must be a whole number of 1 or more when present`);
+    }
+  }
+  if (obj.perSide !== undefined && typeof obj.perSide !== "boolean") {
+    errors.push("perSide must be true or false when present");
+  }
+  // Two key positions so the figure can move between them.
+  if (obj.poses !== undefined) {
+    if (!Array.isArray(obj.poses) || obj.poses.length !== 2 || !obj.poses.every(isPlainObject)) {
+      errors.push("poses must be exactly two objects [start, end] when present");
+    }
   }
   if (!Array.isArray(obj.skipIf)) {
     errors.push("skipIf is required (use [] when no limitation applies)");
