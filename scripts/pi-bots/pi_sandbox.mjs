@@ -453,6 +453,21 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
     }
   }
   for (const a of filePins) if (!pins.includes(a)) pins.push(a);
+  // opts.hidePinDirs: real dirs under a root pinned for their own sake (the
+  // bundles dir and each bundle dir, with or without a .env), by the same rules.
+  for (const d of opts.hidePinDirs || []) {
+    if (typeof d !== "string" || !d.startsWith("/") || d.split("/").includes("..")) continue;
+    const root = fileRoots.filter((r) => d === r || d.startsWith(r + "/")).sort((x, y) => y.length - x.length)[0];
+    if (!root) continue;
+    const chain = [];
+    let ok = true;
+    for (let a = d; ; a = dirname(a)) {
+      if (!realDir(a) || forbidden(a)) { ok = false; break; }
+      chain.push(a);
+      if (a === root) break;
+    }
+    if (ok) for (const a of chain) if (!pins.includes(a)) pins.push(a);
+  }
   // A probe without a pidns field (older callers, test stubs) means the full tier.
   const pidNamespace = probe.pidns !== false;
   if (!pidNamespace && !warnedNoPidns) {

@@ -513,6 +513,23 @@ test("wrapPiSpawn: hideFiles never follows a symlink, never leaves its roots, ne
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("wrapPiSpawn: hidePinDirs pins real dirs under a root, never a symlink or an outside dir", () => {
+  _resetPiSandboxForTest();
+  const root = mkdtempSync(join(tmpdir(), "crow-hidepins-"));
+  const cfg = join(root, "home", ".crow");
+  const b = join(cfg, "bundles");
+  mkdirSync(join(b, "real"), { recursive: true });
+  mkdirSync(join(root, "elsewhere"), { recursive: true });
+  symlinkSync(join(root, "elsewhere"), join(b, "linked"));
+  try {
+    const probe = { ok: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null };
+    const l = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe, sockets: [], runtimeDirs: [], roDirs: [], pinStop: root,
+      hideFileRoots: [cfg], hidePinDirs: [b, join(b, "real"), join(b, "linked"), join(root, "elsewhere"), "/proc"] });
+    for (const p of [cfg, b, join(b, "real")]) assert.ok(l.pinned.includes(p), "pinned: " + p);
+    for (const p of [join(b, "linked"), join(root, "elsewhere"), "/proc", join(root, "home")]) assert.ok(!l.pinned.includes(p), "not pinned: " + p);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("integration: a masked file reads empty inside, and neither it nor its dir can be renamed over", { skip: noSandbox }, async () => {
   const root = mkdtempSync(join(tmpdir(), "crow-hidefiles-real-"));
   const dir = join(root, "home", ".crow");

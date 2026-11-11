@@ -38,7 +38,7 @@ import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
@@ -49,7 +49,7 @@ import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVoc
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
-import { secretFilesFor } from "./hidden_files.mjs";
+import { secretFilesFor, secretPinDirsFor } from "./hidden_files.mjs";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
 import { containSelected, prepareAgentShadow, sweepStaleContainDirs, ContainRefused } from "./pi_contain.mjs";
 import { containedClassifierBlock, containedCloudTokenPath } from "./pi_contain_agent.mjs";
@@ -821,6 +821,7 @@ export class PiRpc {
     // (the outer bwrap can exit while pi still drains inside its namespace).
     this._containCleanups = [];
     let launch;
+    let hiddenCandidates = null;
     try {
       if (containedSpawn) {
         contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, modelInputs: containModels, otherHomes });
@@ -843,20 +844,26 @@ export class PiRpc {
         if (fdMode) passFds.push(MCP_CONFIG_FD);
         if (piLabSupportsSecretValuesFd()) { passFds.push(SECRET_VALUES_FD); this._passedSecretFd = true; }
       }
-      // Secret files the default tier masks by file (hideFiles): this
-      // instance's Crow home and, with no appRoot, every co-host's. The repo
-      // checkout's .env is masked as well.
+      // Secret files the default tier masks by file (hideFiles). The roots are
+      // this instance's Crow home, the repo checkout and every co-host's home,
+      // resolved first (a Crow home linked onto another disk is still masked,
+      // at its real path); wrapPiSpawn masks only under them and never follows
+      // a symlink. A candidate that exists but was not masked refuses the spawn
+      // (below).
+      const realRoot = (d) => { try { return realpathSync(d); } catch { return null; } };
+      const homeReal = realRoot(dirname(secretsHere));
+      const hideFileRoots = [homeReal, realRoot(BRIDGE_APP_ROOT), ...otherHomes.map(realRoot)].filter(Boolean);
       const hideFiles = [
-        ...secretFilesFor({ crowHome: dirname(secretsHere), appRoot: BRIDGE_APP_ROOT }),
-        ...otherHomes.flatMap((h) => secretFilesFor({ crowHome: h })),
+        ...(homeReal ? secretFilesFor({ crowHome: homeReal, appRoot: realRoot(BRIDGE_APP_ROOT) || undefined }) : []),
+        ...otherHomes.map(realRoot).filter(Boolean).flatMap((h) => secretFilesFor({ crowHome: h })),
       ];
-      // Files are masked only under these roots (wrapPiSpawn refuses any other).
-      const hideFileRoots = [dirname(secretsHere), BRIDGE_APP_ROOT, ...otherHomes];
+      const hidePinDirs = [homeReal, ...otherHomes.map(realRoot)].filter(Boolean).flatMap((h) => secretPinDirsFor({ crowHome: h }));
+      hiddenCandidates = { hideFiles, hideFileRoots };
       // The operator's ssh keys: no Crow code reads ~/.ssh. Hidden as a dir (tmpfs)
       // so a bot cannot use them, or `ssh localhost`, to leave the sandbox.
       const sshDir = join(HOME, ".ssh");
       launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain,
-        hideDirs: [secretsHere, ...others, ...(contain ? [] : [sshDir])], hideFiles, hideFileRoots, seccompFd: contain ? SECCOMP_FD : null, passFds });
+        hideDirs: [secretsHere, ...others, ...(contain ? [] : [sshDir])], hideFiles, hideFileRoots, hidePinDirs, seccompFd: contain ? SECCOMP_FD : null, passFds });
     } catch (e) {
       // A contain spawn that was REFUSED still gets its one line, naming the
       // provider with no door (or the refusal the caller sees). When the
@@ -880,6 +887,20 @@ export class PiRpc {
     // does. Both are reported by wrapPiSpawn, and a dir that a bound path
     // contains and cannot be masked refuses the spawn there. Nothing is
     // assumed hidden: a contain spawn with no report for a dir is not trusted.
+    // Fail closed on a secret FILE too: one that exists (a regular file, or a
+    // symlink or a path through one) and was not masked, because a symlink is
+    // never followed or it sits outside the roots, refuses the spawn. The
+    // message names the path below its root, never any content.
+    if (!isContainTier(launch.tier) && launch.wrapper === "bwrap" && hiddenCandidates) {
+      const maskedSet = new Set(launch.maskedFiles || []);
+      const unmasked = hiddenCandidates.hideFiles.find((f) => !maskedSet.has(f) && (() => { try { return lstatSync(f).isFile() || lstatSync(f).isSymbolicLink(); } catch { return false; } })());
+      if (unmasked) {
+        const root = hiddenCandidates.hideFileRoots.filter((r) => unmasked.startsWith(r + "/")).sort((x, y) => y.length - x.length)[0];
+        this._runContainCleanup();
+        throw new Error("pi sandbox: the secret file " + (root ? unmasked.slice(root.length + 1) : "(outside the Crow roots)") +
+          " could not be hidden (a symlink is never followed); refusing to start pi");
+      }
+    }
     if (!isContainTier(launch.tier) && launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
       this._runContainCleanup();
       throw new Error("pi sandbox: a Crow instance secrets dir could not be hidden; refusing to start pi");

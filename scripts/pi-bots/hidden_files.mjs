@@ -3,7 +3,7 @@
  * (pi_sandbox.mjs hideFiles). Built here, per spawn, from the instance's Crow
  * home and the repo checkout.
  */
-import { readdirSync } from "node:fs";
+import { readdirSync, lstatSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -32,8 +32,12 @@ export const ROOT_SECRET_FILES = [".env", ".keystore-env", "board-token", "phone
 
 /**
  * Absolute paths of the secret files to mask, for one Crow home (and the
- * repo checkout at appRoot, when given). Existence is not checked here:
- * wrapPiSpawn skips a file it cannot stat.
+ * repo checkout at appRoot, when given). Pass REAL paths (the caller resolves
+ * its roots first). Existence is not checked for the plain candidates:
+ * wrapPiSpawn skips a file it cannot stat. A bundle entry that is a symlink is
+ * listed only when a `.env` really sits behind it (the caller then refuses the
+ * spawn, since a symlink is never followed and so cannot be masked); a symlink
+ * with nothing behind it, and anything that is not a dir, is ignored.
  * @param {{crowHome:string, appRoot?:string, readdir?:Function}} opts
  * @returns {string[]}
  */
@@ -44,11 +48,38 @@ export function secretFilesFor({ crowHome, appRoot, readdir = readdirSync }) {
   if (appRoot) add(join(appRoot, ".env"));
   // Every bundle dir, including a stale copy (x.migrated-...): its .env is a
   // secret too. A missing bundles dir means none.
-  let entries = [];
-  try { entries = readdir(join(crowHome, "bundles")); } catch { entries = []; }
-  for (const id of entries) {
+  for (const id of bundleIds(crowHome, readdir)) {
     if (BUNDLE_ENV_READABLE.includes(id)) continue;
-    add(join(crowHome, "bundles", id, ".env"));
+    const dir = join(crowHome, "bundles", id);
+    const kind = entryKind(dir);
+    if (kind === "dir") add(join(dir, ".env"));
+    else if (kind === "link" && fileBehind(join(dir, ".env"))) add(join(dir, ".env"));
   }
   return out;
+}
+
+/**
+ * The dirs wrapPiSpawn pins (hidePinDirs) so a bot cannot swap one for a
+ * symlink or rename it between the listing and the mount: `<crowHome>/bundles`
+ * and every bundle dir that is a real dir, with or without a `.env`.
+ */
+export function secretPinDirsFor({ crowHome, readdir = readdirSync }) {
+  const out = [];
+  if (entryKind(join(crowHome, "bundles")) !== "dir") return out;
+  out.push(join(crowHome, "bundles"));
+  for (const id of bundleIds(crowHome, readdir)) {
+    const dir = join(crowHome, "bundles", id);
+    if (entryKind(dir) === "dir") out.push(dir);
+  }
+  return out;
+}
+
+function bundleIds(crowHome, readdir) {
+  try { return readdir(join(crowHome, "bundles")); } catch { return []; }
+}
+function entryKind(p) {
+  try { const st = lstatSync(p); return st.isSymbolicLink() ? "link" : st.isDirectory() ? "dir" : "other"; } catch { return "none"; }
+}
+function fileBehind(p) {
+  try { return statSync(p).isFile(); } catch { return false; }
 }
