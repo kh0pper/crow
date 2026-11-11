@@ -16,10 +16,10 @@
  * this test's own GNUPGHOME; the gpg-dependent tests skip when gpg is absent.
  */
 
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -31,7 +31,7 @@ const src = () => readFileSync(INSTALLER, "utf-8");
 
 /** A pipeline into a shell: `… | sh`, `… | bash`, `… | sudo sh`,
  *  `… | sudo -E bash -`. Comment lines are handled by the caller. */
-const PIPE_TO_SHELL = /\|\s*(?:sudo\s+(?:-E\s+)?)?(?:ba)?sh\b/;
+const PIPE_TO_SHELL = /\|\s*(?:sudo\s+(?:-E\s+)?)?(?:ba)?sh\b|<\(\s*(?:curl|wget)\b|\b(?:ba)?sh\s+-c\s+"?\$\(\s*(?:curl|wget)\b/;
 
 /** Lines that are not a comment (first non-space character is '#'). */
 const codeLines = (text) => text.split("\n").filter((line) => !/^\s*#/.test(line));
@@ -52,7 +52,7 @@ function shim(dir, name, body) {
 function runWithHelpers(snippet, env = {}) {
   if (/install_docker_repo|install_nodesource_repo|install_tailscale_repo|fetch_verified_key/.test(snippet)) {
     for (const key of ["CROW_CURL", "CROW_SUDO", "CROW_APT", "CROW_GPG", "VENDOR_KEY_DIR", "USR_KEYRING_DIR",
-      "APT_SOURCES_DIR", "CROW_OS_RELEASE", "DOCKER_KEY_FPR", "NODESOURCE_KEY_FPR", "TAILSCALE_KEY_FPR"]) {
+      "APT_SOURCES_DIR", "CROW_OS_RELEASE", "CROW_TEST_DOCKER_KEY_FPR", "CROW_TEST_NODESOURCE_KEY_FPR", "CROW_TEST_TAILSCALE_KEY_FPR"]) {
       if (!env[key]) throw new Error(`${key} is required to run the vendor repository steps in a test`);
     }
   }
@@ -120,17 +120,12 @@ test("K7/N4-2: every *_FPR constant in the installer is 40 uppercase hex, and th
   const defs = new Map();
   for (const line of s.split("\n")) {
     const m = /^([A-Z][A-Z0-9_]*_FPR)=(.*)$/.exec(line);
-    if (m) defs.set(m[1], m[2].replace(/^"|"$/g, ""));
+    if (m && !defs.has(m[1])) defs.set(m[1], m[2].replace(/^"|"$/g, ""));
   }
-  // The suite pins its own throwaway keys through the same env-default pattern
-  // the ufw-docker checksum uses; the DEFAULT is what production gets.
-  const defaultValue = (raw) => {
-    const m = /^\$\{[A-Z0-9_]+:-(.*)\}$/.exec(raw);
-    return m ? m[1].replace(/^"|"$/g, "") : raw;
-  };
+  const defaultValue = (raw) => raw;
   for (const [name, raw] of defs) {
-    assert.ok(/^(?:[0-9A-F]{40}|\$\{[A-Z0-9_]+:-[0-9A-F]{40}\})$/.test(raw),
-      `${name} must be exactly 40 uppercase hex (or the env-default form of exactly that): ${raw}`);
+    assert.ok(/^[0-9A-F]{40}$/.test(raw),
+      `${name} must be a plain assignment of exactly 40 uppercase hex (no env default): ${raw}`);
   }
   assert.equal(defaultValue(defs.get("DOCKER_KEY_FPR")), "9DC858229FC7DD38854AE2D88D81803C0EBFCD88");
   assert.equal(defaultValue(defs.get("NODESOURCE_KEY_FPR")), "6F71F525282841EEDAF851B42F59B5F99B1BE0B4");
@@ -190,16 +185,25 @@ function throwawayKeys() {
     const cols = gpg(["--with-colons", "--list-keys", uid]);
     const fpr = cols.split("\n").find((line) => line.startsWith("fpr:"));
     assert.ok(fpr, `no fpr line for ${uid}`);
-    return { uid, fpr: fpr.split(":")[9], armor: gpg(["--armor", "--export", uid]) };
+    return { uid, fpr: fpr.split(":")[9], armor: gpg(["--armor", "--export", uid]), secretArmor: gpg(["--armor", "--export-secret-keys", uid]) };
   };
   const one = make("crow test one <t1@example.invalid>");
   const two = make("crow test two <t2@example.invalid>");
   assert.match(one.fpr, /^[0-9A-F]{40}$/);
   assert.notEqual(one.fpr, two.fpr);
   assert.ok(one.armor.includes("BEGIN PGP PUBLIC KEY BLOCK"));
-  keysCache = { home, ...one, otherFpr: two.fpr, multiArmor: one.armor + two.armor };
+  keysCache = { home, ...one, otherFpr: two.fpr, multiArmor: one.armor + two.armor,
+    // the vendor key with an attacker's SECRET-key block appended
+    secretTailArmor: one.armor + two.secretArmor };
   return keysCache;
 }
+
+// The throwaway keys live in a private GNUPGHOME whose gpg-agent must not outlive the suite.
+after(() => {
+  if (keysCache === undefined) return;
+  spawnSync("gpgconf", ["--homedir", keysCache.home, "--kill", "all"], { stdio: "ignore" });
+  rmSync(keysCache.home, { recursive: true, force: true });
+});
 
 const UBUNTU_NOBLE = [
   'PRETTY_NAME="Ubuntu 24.04 LTS"',
@@ -281,9 +285,9 @@ function vendorScratch({ osRelease = UBUNTU_NOBLE, served = "", fpr, downloadOk 
       APT_SOURCES_DIR: sourcesDir,
       CROW_OS_RELEASE: osReleasePath,
       CROW_DPKG_ARCH_CMD: archCmd,
-      DOCKER_KEY_FPR: fpr,
-      NODESOURCE_KEY_FPR: fpr,
-      TAILSCALE_KEY_FPR: fpr,
+      CROW_TEST_DOCKER_KEY_FPR: fpr,
+      CROW_TEST_NODESOURCE_KEY_FPR: fpr,
+      CROW_TEST_TAILSCALE_KEY_FPR: fpr,
       TMPDIR: tmpDir,
     },
   };
@@ -376,7 +380,12 @@ test("K7/N4-2: Tailscale — a matching key writes the one-line source and insta
   assert.match(r.stdout, /STEP_OK/, r.stdout + r.stderr);
 
   const keyPath = join(s.usrKeyringDir, "tailscale-archive-keyring.gpg");
-  assert.equal(read(keyPath), keys.armor);
+  // A .gpg destination gets the BINARY export of the verified key, not the armored download.
+  const shown = spawnSync("gpg", ["--batch", "--show-keys", "--with-colons", keyPath],
+    { encoding: "utf-8", env: { ...process.env, GNUPGHOME: mkdtempSync(join(tmpdir(), "crow-gpgshow-")) } });
+  assert.equal(shown.stdout.split("\n").filter((l) => l.startsWith("pub:")).length, 1);
+  assert.ok(shown.stdout.includes(`fpr:::::::::${keys.fpr}:`), "the installed binary key is the verified one");
+  assert.ok(!read(keyPath).includes("BEGIN PGP"), "binary, not armored");
   assert.equal(read(join(s.sourcesDir, "tailscale.list")),
     `deb [signed-by=${keyPath}] https://pkgs.tailscale.com/stable/ubuntu noble main\n`);
   assert.deepEqual(logLines(s.aptLog),
@@ -391,7 +400,7 @@ test("K7/N4-2: a key with the wrong fingerprint is refused — no source file, n
   if (!hasGpg()) return t.skip("gpg is not installed");
   const keys = throwawayKeys();
   const s = vendorScratch({ served: keys.armor, fpr: keys.fpr });
-  const r = runVendor(s, outcome("install_docker_repo"), { DOCKER_KEY_FPR: keys.otherFpr });
+  const r = runVendor(s, outcome("install_docker_repo"), { CROW_TEST_DOCKER_KEY_FPR: keys.otherFpr });
   assert.match(r.stdout, /STEP_FAIL/, "a fingerprint mismatch must fail the step");
 
   assert.equal(existsSync(join(s.sourcesDir, "docker.sources")), false, "no sources file is written");
@@ -467,7 +476,7 @@ test("K7/N4-2: vendor_repo_target maps the supported distributions and refuses t
   });
 });
 
-test("K7/N4-2: Raspberry Pi OS takes the Debian Docker repo but the raspbian Tailscale one", (t) => {
+test("K7/N4-2: Raspberry Pi OS bookworm takes Docker's raspbian repo and Tailscale's raspbian one; trixie falls back to Docker's debian one", (t) => {
   if (!hasGpg()) return t.skip("gpg is not installed");
   const keys = throwawayKeys();
   const s = vendorScratch({ osRelease: RASPBIAN_BOOKWORM, served: keys.armor, fpr: keys.fpr });
@@ -475,12 +484,41 @@ test("K7/N4-2: Raspberry Pi OS takes the Debian Docker repo but the raspbian Tai
   assert.doesNotMatch(r.stdout, /STEP_FAIL/, r.stdout + r.stderr);
 
   assert.match(read(join(s.sourcesDir, "docker.sources")),
-    /^URIs: https:\/\/download\.docker\.com\/linux\/debian$/m, "Docker's Debian repository serves Raspberry Pi OS");
+    /^URIs: https:\/\/download\.docker\.com\/linux\/raspbian$/m, "Docker's raspbian repository serves Raspberry Pi OS bookworm");
   assert.equal(read(join(s.sourcesDir, "tailscale.list")),
     `deb [signed-by=${join(s.usrKeyringDir, "tailscale-archive-keyring.gpg")}] https://pkgs.tailscale.com/stable/raspbian bookworm main\n`);
   const curlCalls = logLines(s.curlLog);
-  assert.match(curlCalls.map((c) => c).join("\n"), /download\.docker\.com\/linux\/debian\/gpg/);
+  assert.match(curlCalls.map((c) => c).join("\n"), /download\.docker\.com\/linux\/raspbian\/gpg/);
   assert.match(curlCalls.map((c) => c).join("\n"), /pkgs\.tailscale\.com\/stable\/raspbian\/bookworm\.noarmor\.gpg/);
+});
+
+test("K7/N4-2: Raspberry Pi OS trixie has no Docker raspbian repo, so it takes the debian one", (t) => {
+  if (!hasGpg()) return t.skip("gpg is not installed");
+  const keys = throwawayKeys();
+  const s = vendorScratch({ osRelease: RASPBIAN_BOOKWORM.replaceAll("bookworm", "trixie"), served: keys.armor, fpr: keys.fpr });
+  const r = runVendor(s, outcome("install_docker_repo"));
+  assert.doesNotMatch(r.stdout, /STEP_FAIL/, r.stdout + r.stderr);
+  assert.match(read(join(s.sourcesDir, "docker.sources")), /^URIs: https:\/\/download\.docker\.com\/linux\/debian$/m);
+  assert.match(read(join(s.sourcesDir, "docker.sources")), /^Suites: trixie$/m);
+});
+
+test("K7/N4-2: a secret-key block appended to the vendor key never reaches apt's keyring", (t) => {
+  if (!hasGpg()) return t.skip("gpg is not installed");
+  const keys = throwawayKeys();
+  const s = vendorScratch({ served: keys.secretTailArmor, fpr: keys.fpr });
+  const r = runVendor(s, outcome("install_nodesource_repo 24"));
+  const keyPath = join(s.vendorKeyDir, "nodesource.asc");
+  if (existsSync(keyPath)) {
+    // If it was accepted at all, only the verified public key may have been installed.
+    const g = spawnSync("gpg", ["--batch", "--show-keys", "--with-colons", keyPath],
+      { encoding: "utf-8", env: { ...process.env, GNUPGHOME: mkdtempSync(join(tmpdir(), "crow-gpgshow-")) } });
+    const recs = g.stdout.split("\n").map((l) => l.split(":")[0]);
+    assert.equal(recs.filter((k) => k === "pub").length, 1);
+    assert.equal(recs.filter((k) => k === "sec" || k === "ssb").length, 0, "no secret packets in the installed key");
+  } else {
+    assert.match(r.stdout, /STEP_FAIL/, r.stdout + r.stderr);
+  }
+  assert.deepEqual(readdirSync(s.tmpDir), []);
 });
 
 test("K7/N4-2: an unsupported distribution refuses both steps and names them", (t) => {

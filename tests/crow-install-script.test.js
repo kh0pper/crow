@@ -51,8 +51,8 @@ function runWithHelpers(snippet, env = {}, scriptArgs = []) {
     // regression here can never read the real /etc/os-release, write into the
     // real keyring/sources dirs, or reach the network.
     for (const key of ["CROW_CURL", "CROW_SUDO", "CROW_APT", "CROW_GPG", "VENDOR_KEY_DIR",
-      "USR_KEYRING_DIR", "APT_SOURCES_DIR", "CROW_OS_RELEASE", "DOCKER_KEY_FPR", "NODESOURCE_KEY_FPR",
-      "TAILSCALE_KEY_FPR"]) {
+      "USR_KEYRING_DIR", "APT_SOURCES_DIR", "CROW_OS_RELEASE", "CROW_TEST_DOCKER_KEY_FPR", "CROW_TEST_NODESOURCE_KEY_FPR",
+      "CROW_TEST_TAILSCALE_KEY_FPR"]) {
       if (!env[key]) throw new Error(`${key} is required to run the vendor repository steps in a test`);
     }
   }

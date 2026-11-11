@@ -983,27 +983,37 @@ install_ufw_docker() {
 #
 # A fingerprint and the URL it belongs to are bumped TOGETHER, in one edit: the
 # fingerprint is what makes a new or replaced key visible instead of silently
-# trusted. Each one is overridable only for the suite (the same env-default
-# pattern as UFW_DOCKER_SHA256), which pins its own throwaway fixture key; the
-# default below is what production gets.
+# trusted. The constants below are plain assignments, so a stray exported
+# variable can never change which key is pinned; only the suite swaps in its own
+# throwaway fixture key, through the separately named CROW_TEST_*_KEY_FPR
+# variables read right after the seams below.
 DOCKER_KEY_URL_BASE="https://download.docker.com/linux"
-DOCKER_KEY_FPR="${DOCKER_KEY_FPR:-9DC858229FC7DD38854AE2D88D81803C0EBFCD88}"
+DOCKER_KEY_FPR="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 NODESOURCE_KEY_URL="https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key"
-NODESOURCE_KEY_FPR="${NODESOURCE_KEY_FPR:-6F71F525282841EEDAF851B42F59B5F99B1BE0B4}"
+NODESOURCE_KEY_FPR="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
 TAILSCALE_REPO_BASE="https://pkgs.tailscale.com/stable"
-TAILSCALE_KEY_FPR="${TAILSCALE_KEY_FPR:-2596A99EAAB33821893C0A79458CA832957F5868}"
+TAILSCALE_KEY_FPR="2596A99EAAB33821893C0A79458CA832957F5868"
 
 # Test seams of the same kind as UFW_DOCKER_DEST and APT_CONF_DIR: the suite
 # points every one of them into a scratch directory, so no test can read the
 # real /etc/os-release, write under /etc/apt or /usr/share/keyrings, or reach
 # the network. The defaults are the real ones. CROW_CURL, CROW_SUDO and
 # CROW_APT come from the steps above.
+DOCKER_KEY_FPR="${CROW_TEST_DOCKER_KEY_FPR:-$DOCKER_KEY_FPR}"
+NODESOURCE_KEY_FPR="${CROW_TEST_NODESOURCE_KEY_FPR:-$NODESOURCE_KEY_FPR}"
+TAILSCALE_KEY_FPR="${CROW_TEST_TAILSCALE_KEY_FPR:-$TAILSCALE_KEY_FPR}"
 CROW_GPG="${CROW_GPG:-gpg}"
 CROW_OS_RELEASE="${CROW_OS_RELEASE:-/etc/os-release}"
 VENDOR_KEY_DIR="${VENDOR_KEY_DIR:-/etc/apt/keyrings}"
 USR_KEYRING_DIR="${USR_KEYRING_DIR:-/usr/share/keyrings}"
 APT_SOURCES_DIR="${APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
 CROW_DPKG_ARCH_CMD="${CROW_DPKG_ARCH_CMD:-dpkg --print-architecture}"
+
+# crow_gpg_stop <gnupg_home> — stop the gpg-agent/dirmngr helpers a private
+# GNUPGHOME started, so removing the directory leaves no process behind.
+crow_gpg_stop() {
+  gpgconf --homedir "$1" --kill all >/dev/null 2>&1 || true
+}
 
 # os_release_field <file> <KEY> — the value of KEY= in an os-release file, with
 # the quotes stripped; empty when the file or the key is absent.
@@ -1093,8 +1103,18 @@ fetch_verified_key() {
     error "Could not create a temp keyring to inspect the signing key $url, so its apt repository was not added"
     return 1
   fi
-  cols="$(GNUPGHOME="$gnupg_home" "$CROW_GPG" --batch --show-keys --with-colons "$tmp" 2>/dev/null || true)"
-  rm -rf "$gnupg_home"
+  # IMPORT into the private home and read the keys back from there (not
+  # `--show-keys` on the raw file): the installed bytes below are an EXPORT of
+  # the one verified key, never the downloaded file. A download that carried
+  # extra packets after the vendor key (a secret-key block that gpg lists
+  # without counting as a primary, or a key version gpg skips but apt's own
+  # verifier accepts) would otherwise be trusted by apt under Signed-By.
+  if ! GNUPGHOME="$gnupg_home" "$CROW_GPG" --batch --import "$tmp" >/dev/null 2>&1; then
+    crow_gpg_stop "$gnupg_home"; rm -rf "$gnupg_home"; rm -f "$tmp"
+    error "gpg could not import the signing key from $url (expected fingerprint ${expected^^}), so its apt repository was not added. Check your network or gpg, then run the installer again"
+    return 1
+  fi
+  cols="$(GNUPGHOME="$gnupg_home" "$CROW_GPG" --batch --with-colons --list-keys 2>/dev/null || true)"
   # `pub:` counts primary keys; the FIRST `fpr:` line is the primary key's own
   # fingerprint (a subkey's fpr line comes after it), and field 10 of a colon
   # record is the fingerprint itself.
@@ -1111,10 +1131,28 @@ fetch_verified_key() {
     got="${first_fpr^^}"
   fi
   if [ "$pub_count" -ne 1 ] || [ "$got" != "${expected^^}" ]; then
-    rm -f "$tmp"
+    crow_gpg_stop "$gnupg_home"; rm -rf "$gnupg_home"; rm -f "$tmp"
     error "The signing key at $url was refused: expected fingerprint ${expected^^}, got ${got:-nothing} in $pub_count primary key(s). Its apt repository was not added, so nothing installs from it. Check your network or gpg, then run the installer again"
     return 1
   fi
+  # Re-export ONLY the verified key (public parts, minimal): armored for a .asc
+  # destination, binary for a .gpg one. That file replaces the download.
+  local exported="" armor_flag=""
+  case "$dest" in *.asc) armor_flag="--armor" ;; esac
+  if ! exported="$(mktemp)"; then
+    crow_gpg_stop "$gnupg_home"; rm -rf "$gnupg_home"; rm -f "$tmp"
+    error "Could not create a temp file for the signing key from $url, so its apt repository was not added"
+    return 1
+  fi
+  # shellcheck disable=SC2086  # armor_flag is empty or one fixed flag
+  if ! GNUPGHOME="$gnupg_home" "$CROW_GPG" --batch --export-options export-minimal $armor_flag --export "${expected^^}" > "$exported" 2>/dev/null || [ ! -s "$exported" ]; then
+    crow_gpg_stop "$gnupg_home"; rm -rf "$gnupg_home"; rm -f "$tmp" "$exported"
+    error "gpg could not export the verified signing key from $url, so its apt repository was not added"
+    return 1
+  fi
+  crow_gpg_stop "$gnupg_home"; rm -rf "$gnupg_home"
+  rm -f "$tmp"
+  tmp="$exported"
   if ! sudo_cmd install -d -m 0755 "$(dirname "$dest")"; then
     rm -f "$tmp"
     error "Could not create $(dirname "$dest"), so the signing key from $url was not installed and its apt repository was not added"
@@ -1152,7 +1190,13 @@ install_docker_repo() {
   codename="${target#* }"
   # Docker's own repository is published as `ubuntu` and `debian`; Raspberry Pi
   # OS takes the Debian one (its arm packages live there).
-  if [ "$flavor" = "ubuntu" ]; then repo_path="ubuntu"; fi
+  # Raspberry Pi OS is always 32-bit armhf (a 64-bit one reports itself as
+  # Debian); Docker still publishes a raspbian repository for the releases up to
+  # bookworm and none for trixie, which takes the Debian one.
+  case "$flavor:$codename" in
+    ubuntu:*) repo_path="ubuntu" ;;
+    raspbian:bullseye|raspbian:bookworm) repo_path="raspbian" ;;
+  esac
 
   # deb822 lets the architecture be cast explicitly, so apt resolves the same
   # architectures dpkg reports for this machine. Word-split on purpose: the seam
@@ -1170,7 +1214,7 @@ install_docker_repo() {
     error "Could not create a temp file for $src_path, so the Docker apt repository was not added"
     return 1
   fi
-  cat > "$tmp" <<CRODOCKEREOF
+  if ! cat > "$tmp" <<CRODOCKEREOF
 Types: deb
 URIs: $DOCKER_KEY_URL_BASE/$repo_path
 Suites: $codename
@@ -1178,6 +1222,11 @@ Components: stable
 Architectures: $arch
 Signed-By: $key_path
 CRODOCKEREOF
+  then
+    rm -f "$tmp"
+    error "Could not write the Docker apt source to a temp file, so its repository was not added"
+    return 1
+  fi
   if ! sudo_cmd install -d -m 0755 "$APT_SOURCES_DIR" || ! sudo_cmd install -m 644 "$tmp" "$src_path"; then
     rm -f "$tmp"
     error "Could not write $src_path, so the Docker apt repository was not added"
@@ -1235,13 +1284,18 @@ install_nodesource_repo() {
     error "Could not create a temp file for $src_path, so the NodeSource apt repository was not added"
     return 1
   fi
-  cat > "$tmp" <<CRONODEEOF
+  if ! cat > "$tmp" <<CRONODEEOF
 Types: deb
 URIs: https://deb.nodesource.com/node_${major}.x
 Suites: nodistro
 Components: main
 Signed-By: $key_path
 CRONODEEOF
+  then
+    rm -f "$tmp"
+    error "Could not write the NodeSource apt source to a temp file, so its repository was not added"
+    return 1
+  fi
   if ! sudo_cmd install -d -m 0755 "$APT_SOURCES_DIR" || ! sudo_cmd install -m 644 "$tmp" "$src_path"; then
     rm -f "$tmp"
     error "Could not write $src_path, so the NodeSource apt repository was not added"
@@ -1289,7 +1343,11 @@ install_tailscale_repo() {
     error "Could not create a temp file for $src_path, so the Tailscale apt repository was not added"
     return 1
   fi
-  printf 'deb [signed-by=%s] %s/%s %s main\n' "$key_path" "$TAILSCALE_REPO_BASE" "$flavor" "$codename" > "$tmp"
+  if ! printf 'deb [signed-by=%s] %s/%s %s main\n' "$key_path" "$TAILSCALE_REPO_BASE" "$flavor" "$codename" > "$tmp"; then
+    rm -f "$tmp"
+    error "Could not write the Tailscale apt source to a temp file, so its repository was not added"
+    return 1
+  fi
   if ! sudo_cmd install -d -m 0755 "$APT_SOURCES_DIR" || ! sudo_cmd install -m 644 "$tmp" "$src_path"; then
     rm -f "$tmp"
     error "Could not write $src_path, so the Tailscale apt repository was not added"

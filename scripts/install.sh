@@ -61,7 +61,8 @@ cd "$INSTALL_DIR"
 
 # Step 3: Install dependencies
 # package-lock.json is committed, so `npm ci` installs exactly the locked tree;
-# `npm install` stays the fallback for a checkout without a lockfile.
+# `npm install` stays the fallback for a checkout without a lockfile. (`npm ci`
+# clears node_modules first, so a re-run should happen with the gateway stopped.)
 echo "  Installing dependencies..."
 if [ -f package-lock.json ]; then
   npm ci --silent
