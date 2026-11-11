@@ -34,9 +34,9 @@ Un cambio nunca se registra a nombre de otra persona, y un autor desconocido nun
 
 ## Ver el Historial de un elemento
 
-Abre el botón **Historial** en un recuerdo o una entrada del blog y verás sus versiones, de la más reciente a la más antigua, con la hora, el autor y qué cambió: texto agregado y texto quitado en lo escrito, antes y después en ajustes y números. Los guardados del mismo autor con pocos minutos de diferencia cuentan como una sola versión.
+Abre el botón **Historial** en un recuerdo, una sección de contexto o una entrada del blog y verás sus versiones, de la más reciente a la más antigua, con la hora, el autor y qué cambió: texto agregado y texto quitado en lo escrito, antes y después en ajustes y números. Los guardados del mismo autor con pocos minutos de diferencia cuentan como una sola versión.
 
-Otros tipos de elementos (notas, artículos, bots, tarjetas, artefactos) también conservan sus versiones, y lo que cambió aparece en las páginas **Trabajos** y **Papelera**. Por ahora solo los recuerdos y las entradas del blog tienen un botón Historial en su propia pantalla.
+Otros tipos de elementos (notas, artículos, bots, tarjetas, artefactos) también conservan sus versiones, y lo que cambió aparece en las páginas **Trabajos** y **Papelera**. Por ahora solo los recuerdos, las secciones de contexto y las entradas del blog tienen un enlace Historial en su propia pantalla.
 
 ## Restaurar
 
@@ -50,13 +50,13 @@ Otros tipos de elementos (notas, artículos, bots, tarjetas, artefactos) tambié
 
 Un trabajo es una pieza de trabajo: una tarjeta del tablero, un encargo de voz, un turno de chat, una programación o tu propio inicio de sesión. **Deshacer este trabajo**, en la página Trabajos, repone todo lo que ese trabajo cambió.
 
-Deshacer puede ser parcial. Si otra persona o trabajo cambió un elemento después (tú u otro trabajo), deshacer lo deja como está, así que nunca sobrescribe trabajo más nuevo, y enumera lo que omitió con un enlace Restaurar en cada uno. Un deshacer no se puede deshacer desde esa página; restaura los elementos uno por uno.
+Deshacer puede ser parcial. Si algo más cambió un elemento después (tú u otro trabajo), deshacer lo deja como está, así que nunca sobrescribe trabajo más nuevo, y enumera lo que omitió con un enlace Restaurar en cada uno. Un deshacer no se puede deshacer desde esa página; restaura los elementos uno por uno.
 
 ## Papelera y borrado
 
 Un elemento borrado va a la **papelera** con todo su historial. Puedes restaurarlo desde allí. Permanece **30 días** de forma predeterminada, y puedes cambiar los días en Ajustes, en Historial. Pasado ese tiempo se **borra para siempre**, junto con su historial, del almacén en uso. También puedes vaciar la papelera antes. Las ediciones nunca se borran de esta manera.
 
-Los respaldos son aparte. Los respaldos nocturnos conservan las 14 copias más recientes y la primera copia de cada uno de los últimos seis meses, así que la copia de un elemento borrado desaparece cuando caducan los respaldos que la contienen, lo que puede tardar hasta unos seis meses en las copias mensuales de archivos de proyecto.
+Los respaldos son aparte. Los respaldos de la base de datos conservan las 14 copias nocturnas más recientes, y los respaldos de archivos de proyecto conservan además la primera copia de cada uno de los últimos seis meses, así que la copia de un elemento borrado desaparece cuando caducan los respaldos que la contienen, lo que puede tardar hasta unos seis meses en las copias mensuales de archivos de proyecto.
 
 ### Borrado en las máquinas emparejadas
 
@@ -75,7 +75,7 @@ El historial de archivos registra lo que tú o un bot dejan en la carpeta de un 
 - bases de datos locales (`*.db`)
 - archivos de más de 25 MB, porque el historial no es una segunda copia de un video o un modelo
 
-Un `.gitignore` dentro de un proyecto no oculta nada del historial.
+El archivo de exclusión propio de un proyecto no oculta nada del historial.
 
 Un propietario técnico puede clonar el historial de archivos de un proyecto desde el `repo_path` del proyecto.
 

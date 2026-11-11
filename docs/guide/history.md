@@ -34,9 +34,9 @@ A change is never recorded under someone else's name, and an unknown author is n
 
 ## Looking at an item's History
 
-Open the **History** button on a memory or a blog post and you see its versions, newest first, with the time, the author and what changed: added text and removed text for writing, before and after for settings and numbers. Saves by the same author within a couple of minutes count as one version.
+Open the **History** button on a memory, a context section or a blog post and you see its versions, newest first, with the time, the author and what changed: added text and removed text for writing, before and after for settings and numbers. Saves by the same author within a couple of minutes count as one version.
 
-Other kinds of items (notes, articles, bots, cards, artifacts) keep their versions too, and what changed shows up on the **Jobs** and **Trash** pages. Only memories and blog posts have a History button on their own screen so far.
+Other kinds of items (notes, articles, bots, cards, artifacts) keep their versions too, and what changed shows up on the **Jobs** and **Trash** pages. So far only memories, context sections and blog posts have a History link on their own screen.
 
 ## Restore
 
@@ -56,7 +56,7 @@ An undo can be partial. If something else has changed an item since (you, or ano
 
 A deleted item goes to the **Trash** with its whole history. You can restore it from there. It stays for **30 days** by default, and you can change the number of days in Settings, under History. After that it is **erased for good**, together with its history, from the live store. You can also empty the Trash earlier. Edits are never erased this way.
 
-Backups are separate. The nightly backups keep the 14 newest copies plus the first copy of each of the last six months, so a copy of an erased item disappears as the backups holding it expire, which can take up to about six months for the monthly project-file copies.
+Backups are separate. Database backups keep the 14 newest nightly copies, and project-file backups also keep the first copy of each of the last six months, so a copy of an erased item disappears as the backups holding it expire, which can take up to about six months for the monthly project-file copies.
 
 ### Erase on paired machines
 
@@ -75,7 +75,7 @@ File history records what a bot or you leave in a project folder, except:
 - local databases (`*.db`)
 - files over 25 MB, because history is not a second copy of a video or a model
 
-A `.gitignore` inside a project does not hide anything from the history.
+A project's own ignore file does not hide anything from the history.
 
 A technical owner can clone a project's file history from the project's `repo_path`.
 

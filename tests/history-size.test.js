@@ -151,3 +151,14 @@ test("the page lines: card versions join the count, the warning and unknown part
   assert.match(sizeLines({ ...base, workspaceBytes: 0 }, "en"), /Not used yet\./);
   assert.match(sizeLines(null, "en"), /could not be measured/);
 });
+
+test("without an injected free value the real data volume is measured", async () => {
+  const dir = freshDir("statfs");
+  const db = createDbClient(join(dir, "crow.db"));
+  try {
+    const fp = await historyFootprint(db, { tasksDbPath: join(dir, "none.db"), dataDir: dir });
+    assert.ok(fp.freeBytes > 0, `expected a positive free-space figure, got ${fp.freeBytes}`);
+  } finally {
+    db.close();
+  }
+});

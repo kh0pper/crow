@@ -23,7 +23,7 @@
  */
 import { existsSync, lstatSync, readdirSync, statfsSync } from "node:fs";
 import { join } from "node:path";
-import { createDbClient } from "../../db.js";
+import Database from "better-sqlite3";
 import { tasksDbPath as defaultTasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { historySize } from "./api.js";
 import { historyDataDir } from "./workspace-history.js";
@@ -87,20 +87,24 @@ async function strictSize(db) {
   }
 }
 
-/** The card history in tasks.db: {versions, bytes}, zeros when absent, null when unreadable. */
+/**
+ * The card history in tasks.db: {versions, bytes}, zeros when absent, null when
+ * unreadable. A path is opened READ-ONLY and never created (the Settings page
+ * must not write to a live store just to count rows).
+ */
 async function cardHistory({ tasksDb, tasksDbPath }) {
   if (tasksDb) return strictSize(tasksDb);
   const path = tasksDbPath || defaultTasksDbPath();
-  // Never create a tasks.db just to look at it.
   if (!existsSync(path)) return { versions: 0, bytes: 0 };
-  let client = null;
+  let raw = null;
   try {
-    client = createDbClient(path);
-    return await strictSize(client);
-  } catch {
-    return null;
+    raw = new Database(path, { readonly: true, fileMustExist: true });
+    const row = raw.prepare("SELECT COUNT(*) AS versions, COALESCE(SUM(LENGTH(snapshot_json)), 0) AS bytes FROM item_versions").get();
+    return { versions: Number(row?.versions) || 0, bytes: Number(row?.bytes) || 0 };
+  } catch (err) {
+    return /no such table/i.test(String(err && err.message)) ? { versions: 0, bytes: 0 } : null;
   } finally {
-    try { client?.close(); } catch { /* already closed */ }
+    try { raw?.close(); } catch { /* already closed */ }
   }
 }
 
