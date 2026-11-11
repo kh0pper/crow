@@ -153,7 +153,7 @@ test("a bundle dir swapped for a symlink to a dir with a .env refuses the spawn,
   try {
     const e = await spawnOutcome();
     assert.ok(e, "the spawn is refused");
-    assert.match(e.message, /bundles\/swapped\/\.env could not be hidden/);
+    assert.match(e.message, /A bot could not start: bundles\/swapped\/\.env is a link or sits behind one/);
     assert.ok(!e.message.includes("fake-linked-env-content"), "no content in the message");
     assert.ok(!e.message.includes(REAL_CROW), "the path is relative to its root");
   } finally { rmSync(link, { force: true }); rmSync(target, { recursive: true, force: true }); }
@@ -176,7 +176,7 @@ test("a symlinked .env refuses the spawn", { skip: noSandbox }, async () => {
   try {
     const e = await spawnOutcome();
     assert.ok(e, "the spawn is refused");
-    assert.match(e.message, /secret file \.env could not be hidden/);
+    assert.match(e.message, /A bot could not start: \.env is a link/);
     assert.ok(!e.message.includes("fake-env-content"));
   } finally { rmSync(link, { force: true }); rmSync(target, { recursive: true, force: true }); }
 });

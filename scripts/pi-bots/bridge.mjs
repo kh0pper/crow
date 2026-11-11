@@ -481,6 +481,9 @@ const SECRET_VALUES_FD = 5;
 /** Most other-instance secrets dirs a spawn will hide; past it, it refuses. */
 const MAX_HIDDEN_INSTANCE_DIRS = 512;
 
+/** path -> last time its "could not hide" line was logged (once per path per hour). */
+const unhideableLogged = new Map();
+
 export class PiRpc {
   constructor(opts) {
     const def = opts.def, sessionDir = opts.sessionDir;
@@ -896,9 +899,14 @@ export class PiRpc {
       const unmasked = hiddenCandidates.hideFiles.find((f) => !maskedSet.has(f) && (() => { try { return lstatSync(f).isFile() || lstatSync(f).isSymbolicLink(); } catch { return false; } })());
       if (unmasked) {
         const root = hiddenCandidates.hideFileRoots.filter((r) => unmasked.startsWith(r + "/")).sort((x, y) => y.length - x.length)[0];
+        const rel = root ? unmasked.slice(root.length + 1) : "(outside the Crow roots)";
+        const msg = "A bot could not start: " + rel + " is a link or sits behind one, so Crow can't hide it. Remove the link.";
+        // The journal line is once per path per hour; the error itself reaches
+        // the operator on the failed turn, the surface a failed spawn already has.
+        const now = Date.now();
+        if (!(now - (unhideableLogged.get(rel) || 0) < 3600_000)) { unhideableLogged.set(rel, now); console.error("[pi-bots] " + msg); }
         this._runContainCleanup();
-        throw new Error("pi sandbox: the secret file " + (root ? unmasked.slice(root.length + 1) : "(outside the Crow roots)") +
-          " could not be hidden (a symlink is never followed); refusing to start pi");
+        throw new Error(msg);
       }
     }
     if (!isContainTier(launch.tier) && launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
