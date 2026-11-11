@@ -584,6 +584,10 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     // whitespace is not an option Docker knows, so the mount is not what the text suggests
     // (`bind, ro` is read-write). Refuse instead of guessing.
     if (o !== "" && hasBadOptionEntry(o)) return refuse(`volume ${name}: its mount options must not contain spaces or empty entries`);
+    // `BIND`/`Rbind` are not options Docker knows: the guard would read a bind (and skip a
+    // type's consent) while Docker mounts the declared type. Only the exact spelling counts.
+    const misBind = String(o).split(",").find((x) => /^r?bind$/i.test(x) && x !== "bind" && x !== "rbind");
+    if (misBind !== undefined) return refuse(`volume ${name}: mount option '${misBind}' must be written 'bind' or 'rbind'`);
     const dirOpt = mountOpts(o).find((x) => MOUNT_DIR_OPT.test(x));
     if (dirOpt) return refuse(`volume ${name}: mount option '${dirOpt.slice(0, 60)}' names a host folder`);
     // How a bind device is judged, wherever the bind comes from (an `o` option under any type,
@@ -591,11 +595,16 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     const judgeDevice = () => {
       if (dev === undefined || dev === null) return null;
       if (typeof dev !== "string" || !dev.startsWith("/")) return refuse(`volume ${name}: a bind device that is not an absolute path`);
-      const readOnly = optsReadOnly(o);
+      // `rbind,ro` makes only the top mount read-only; mounts beneath the device stay
+      // writable, so a recursive bind is judged read-write whatever `ro` says.
+      const readOnly = optsReadOnly(o) && !String(o).split(",").includes("rbind");
       const bad = checkHostPath(dev, { readOnly, what: `volume ${name}` });
       return bad || { bind: { p: resolveHostPath(dev), rw: !readOnly, kind: "volume" } };
     };
-    if (bindsHostPath(o)) return judgeDevice();
+    if (bindsHostPath(o)) {
+      if (dev === undefined || dev === null || dev === "") return refuse(`volume ${name}: a bind needs a device`);
+      return judgeDevice();
+    }
     if (type === "" || type === "none") return judgeDevice();
     if (type === "tmpfs") return null;
     if (NETWORK_FS_TYPES.has(type)) return needPriv(`a ${type} filesystem volume (it mounts a host export)`);

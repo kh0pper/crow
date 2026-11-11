@@ -1089,3 +1089,35 @@ test("the 35B model bundle no longer asks for the host IPC namespace", () => {
   assert.doesNotMatch(compose.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n"), /^\s*ipc:\s*host/m);
   assert.match(compose, /^\s*shm_size:\s*16g/m);
 });
+
+// Final review follow-ups (round 10): option spelling, recursive binds, a bind with no device.
+test("driver_opts: a mis-cased bind is refused, rbind is read-write, a bind needs a device", async () => {
+  const G = await import("../servers/gateway/compose-guard.js");
+  const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = mkdtempSync(join(tmpdir(), "crow-guard-r10-"));
+  try {
+    const bundleDir = join(home, "bundles", "r10b");
+    mkdirSync(bundleDir, { recursive: true });
+    const own = join(home, "r10b");
+    mkdirSync(own, { recursive: true });
+    const ctx = { crowHome: home, dataDir: join(home, "data"), appRoot: home, volumeInfo: () => null, knownBundleIds: () => ["r10b"] };
+    const model = (driver_opts) => ({ name: "r10b", services: { app: { image: "busybox", volumes: [{ type: "volume", source: "v", target: "/v" }] } }, volumes: { v: { driver_opts } } });
+    const check = (o) => G.checkComposeModel(model(o), { bundleDir, manifest: { id: "r10b" }, consentVerified: false, ctx });
+    // Docker does not read BIND/Rbind as a bind: the declared type would mount without consent.
+    assert.equal(check({ type: "nfs", o: "BIND", device: own }).valid, false);
+    assert.equal(check({ type: "nfs", o: "addr=127.0.0.1,Rbind", device: own }).valid, false);
+    // rbind,ro leaves submounts writable: judged read-write, so the bundle folder is refused.
+    assert.equal(check({ type: "none", o: "rbind,ro", device: bundleDir }).valid, false);
+    assert.equal(check({ type: "none", o: "bind,ro", device: bundleDir }).valid, true);
+    // A bind with no device is refused with a plain sentence.
+    const r = check({ type: "none", o: "bind" });
+    assert.equal(r.valid, false);
+    assert.match(r.reason, /a bind needs a device/);
+    // A plain named volume (no driver_opts) is unaffected.
+    assert.equal(G.checkComposeModel({ name: "r10b", services: { app: { image: "busybox", volumes: [{ type: "volume", source: "v", target: "/v" }] } }, volumes: { v: {} } }, { bundleDir, manifest: { id: "r10b" }, consentVerified: false, ctx }).valid, true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
