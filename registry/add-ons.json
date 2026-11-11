@@ -7929,7 +7929,7 @@
     {
       "id": "workspace",
       "name": "Crow Workspace",
-      "version": "0.4.5",
+      "version": "0.4.6",
       "description": "Your own private office on this machine: files, documents you can edit together (ONLYOFFICE), calendars and contacts that sync to your phones, and forms, built on Nextcloud. Tailnet only, never public.",
       "type": "bundle",
       "author": "Crow",
@@ -7967,6 +7967,7 @@
         "configureEnv": "envKeys-only"
       },
       "sandbox": {
+        "ownEnvFile": true,
         "network": {
           "internet": true,
           "hosts": [

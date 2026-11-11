@@ -130,3 +130,10 @@ test("the old nextcloud bundle is a deprecated connect-only entry with no compos
   assert.equal(nc.deprecated.superseded_by, "workspace");
   assert.equal(JSON.parse(readFileSync(join(ROOT, "scripts", "known-port-conflicts.json"), "utf8"))["8080"], undefined);
 });
+
+test("the manifest lets the walled server read its own .env (config.js reads <bundle>/.env)", () => {
+  assert.equal(manifest.sandbox?.ownEnvFile, true);
+  const profiles = JSON.parse(readFileSync(join(ROOT, "registry", "addon-profiles.json"), "utf8"));
+  const p = (profiles.profiles || profiles)["workspace"];
+  assert.equal(p?.ownEnvFile, true);
+});
