@@ -24,10 +24,11 @@
 // type owned by this migration that lived in the other store would be an error at
 // load time rather than a silent no-op (see the check below).
 //
-// WHAT IS DELIBERATELY OUT OF HISTORY (the operator's call, recorded in
-// covered.js): the fetch columns — fetched_text and the bookkeeping beside it —
-// are a re-fetchable cache, so they are in neither `tracked` nor `snapshot`, and
-// full_text (person-supplied, nothing can regenerate it) is in both, uncapped.
+// WHAT IS DELIBERATELY OUT OF HISTORY (the controller's ruling under the version
+// history design — large re-fetchable fields stay out; recorded in covered.js): the
+// fetch columns — fetched_text and the bookkeeping beside it — are a re-fetchable
+// cache, so they are in neither `tracked` nor `snapshot`, and full_text
+// (person-supplied, nothing can regenerate it) is in both, uncapped.
 //
 // ATOMIC PER TABLE, exactly as 0024/0025: for each table the triggers and the
 // baseline are ONE BEGIN IMMEDIATE transaction (db.transaction(...).immediate()),

@@ -16,6 +16,11 @@
  *       "[redacted]" in place of each match and the row is marked redacted = 1 —
  *       which api.js then refuses to restore, because the row no longer holds the
  *       item's value.
+ *       ONE SHAPE IS HISTORY-ONLY: a credential in a URL query string
+ *       (`?api_key=…`, `&token=…`, `&access_token=…`) — URL_CREDENTIAL_QUERY in
+ *       this file. A documentation URL with a placeholder `?token=…` is ordinary
+ *       in a tracked file, while a source's stored `url` is exactly how a pasted
+ *       key reaches history, and no SECRET_PATTERN recognizes a short value there.
  *       LIVE DATA IS NOT HISTORY'S BUSINESS: the memory, post or section itself
  *       keeps its text. Only the stored versions are rewritten.
  *       Rewriting a version is a history edit, so it goes through the armed
@@ -178,6 +183,29 @@ const PEM_PRIVATE_KEY_HEADER = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
 const PGP_PRIVATE_KEY_HEADER = /-{5}BEGIN PGP PRIVATE KEY BLOCK-{5}/;
 
 /**
+ * A credential carried in a URL QUERY STRING (`?api_key=…`, `&token=…`,
+ * `&access_token=…`): the whole parameter, name and value, becomes the
+ * placeholder.
+ *
+ * HISTORY-ONLY, deliberately not in SECRET_PATTERNS (the list CI's hygiene check
+ * shares): a documentation URL carrying `?token=…` is normal in a tracked file,
+ * while a STORED VERSION with one holds a second copy of a real key forever —
+ * which is exactly what this sweep exists to prevent. A source's `url` is the
+ * column a pasted credential reaches history through, and the value in it looks
+ * like no known token shape (`SECRET_PATTERNS` never sees it).
+ *
+ * The `[?&;]` (or start-of-fragment) prefix is what keeps this off SQL text and
+ * prose: a bare `token=` is a column name in a statement or a sentence, not a URL
+ * parameter. A value of `${…}`/`<…>` (a template or a placeholder) is left alone,
+ * and so is an already-redacted one.
+ */
+const URL_CREDENTIAL_QUERY = new RegExp(
+  String.raw`[?&;](?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|client[_-]?secret|password|passwd)=` +
+    String.raw`(?![\[$<{]|%)[^&#\s"'<>]{3,}`,
+  "gi",
+);
+
+/**
  * Replace every secret-shaped match in one DECODED string with the placeholder.
  *
  * The snapshot is JSON, so its stored strings are escaped (`\n`, `\"`, ...).
@@ -188,6 +216,10 @@ const PGP_PRIVATE_KEY_HEADER = /-{5}BEGIN PGP PRIVATE KEY BLOCK-{5}/;
  * A private key is not just its header: the body is the secret. PEM/PGP blocks
  * are redacted from BEGIN through the matching END; an unmatched header (no END)
  * redacts the WHOLE value, because the field cannot be trusted to end anywhere.
+ *
+ * A credential in a URL query string is redacted as its whole parameter
+ * (URL_CREDENTIAL_QUERY): no secret pattern recognizes a short `?api_key=…`
+ * value on its own, and a URL is a place a person pastes one by accident.
  *
  * @returns {string|null} the rewritten text, or null when nothing matched
  */
@@ -204,6 +236,11 @@ export function redactText(text) {
   }
   if (PEM_PRIVATE_KEY_HEADER.test(out) || PGP_PRIVATE_KEY_HEADER.test(out)) {
     out = REDACTION_PLACEHOLDER;
+    hit = true;
+  }
+  const withoutUrlCredentials = out.replace(URL_CREDENTIAL_QUERY, REDACTION_PLACEHOLDER);
+  if (withoutUrlCredentials !== out) {
+    out = withoutUrlCredentials;
     hit = true;
   }
   for (const [, pattern] of SECRET_PATTERNS) {

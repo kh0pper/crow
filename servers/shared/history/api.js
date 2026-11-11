@@ -51,9 +51,10 @@
  *     research_notes   the research server's add/update/withdraw tools never call
  *                     emitOrQueue (only the share-import path does), so a note edit
  *                     does not ride the feed and neither does its restore;
- *     research_sources not in instance-sync's SYNCED_TABLES at all either — a source
- *                     row never rides a peer's feed (see the comment beside
- *                     SYNCED_TABLES), so there is no wire shape for its restore;
+ *     research_sources absent from instance-sync's SYNCED_TABLES entirely — a
+ *                     source row never rides a peer's feed (see LOCAL_ONLY_COLUMNS
+ *                     and OUTBOUND_TRANSFORMS there), so there is no wire shape
+ *                     for its restore;
  *     kb_article      the knowledge-base bundle owns the table and emits nothing;
  *     bot_def         the Bot Builder's definition writes emit nothing;
  *     card            tasks.db has no sync feeds of its own (cards are
@@ -80,9 +81,10 @@
  *   anything outside the snapshot: access_count, accessed_at, created_at /
  *   updated_at, lamport_ts, sort_order. A counter is not content, so a restore
  *   never rewinds one (the operator's ruling; the plan's "an untracked column is
- *   untouched by a restore" is exactly this list). One snapshotted column is
- *   neither content nor counter — a memory's instance_id placement pointer — and
- *   it is kept as it is too (see KEEP_CURRENT).
+ *   untouched by a restore" is exactly this list). Some snapshotted columns are
+ *   neither content nor counter — a memory's instance_id placement pointer, a
+ *   source's verification standing and its backend_id pointer — and they are kept
+ *   as they are too (see KEEP_CURRENT).
  *
  *   A RESTORE IS ALWAYS ATTRIBUTED. `ctx` must name a real author kind
  *   (owner | bot | peer | system). A missing one is refused rather than silently
@@ -166,8 +168,9 @@ export const DEFAULT_LIMIT = 100;
  *   blog_post        not in instance-sync's SYNCED_TABLES;
  *   research_note    its own writes never call emitOrQueue (only the share-import
  *                    path does);
- *   research_source  not in SYNCED_TABLES either (a source row never rides a
- *                    peer's feed — see the comment at SYNCED_TABLES);
+ *   research_source  absent from SYNCED_TABLES (a source row never rides a
+ *                    peer's feed — see LOCAL_ONLY_COLUMNS and OUTBOUND_TRANSFORMS
+ *                    in servers/sharing/instance-sync.js);
  *   kb_article       a bundle-owned table that emits nothing;
  *   bot_def          the Bot Builder's definition writes emit nothing;
  *   card             tasks.db has no sync feeds of its own.
@@ -984,6 +987,33 @@ function resolveFiling(run, spec, snapshot, live) {
  */
 const KEEP_CURRENT = Object.freeze({
   memories: Object.freeze(["instance_id"]),
+  // A SOURCE RESTORES CONTENT, NOT ITS STANDING OR ITS PLACEMENT.
+  //   verified / verification_method / verified_by / verification_notes
+  //                                            the verification workflow's verdict, bound to the
+  //                                            fetched_text and content_sha256 the source carries
+  //                                            TODAY: the research server clears it whenever a
+  //                                            re-fetch or re-check stops matching the quotes. A
+  //                                            restore never puts an old verdict back over text
+  //                                            that no longer contains the quotes (that would
+  //                                            make a source citable without its evidence), so
+  //                                            these stay as they are now — 0 and NULL after a
+  //                                            check cleared them.
+  //   backend_id                               a host-local PLACEMENT pointer (REFERENCES
+  //                                            data_backends(id) ON DELETE SET NULL): the backend
+  //                                            it named may have been removed since, and a
+  //                                            restore must neither fail on that foreign key nor
+  //                                            drag the source back onto a backend it left — the
+  //                                            same reason memories.instance_id is here.
+  // They stay IN the snapshot (covered.js), so History still SHOWS the verdict and the backend a
+  // version had; a restore just never replays them. A version differing only in these is an
+  // unchanged restore (the trigger watches content).
+  research_sources: Object.freeze([
+    "verified",
+    "verification_method",
+    "verified_by",
+    "verification_notes",
+    "backend_id",
+  ]),
   // A CARD RESTORES CONTENT ONLY. Title, description and the plan fields
   // (priority, due_date, phase, owner, tags) come back; everything that says what
   // the card IS right now stays as it is:
@@ -1365,6 +1395,70 @@ function neutraliseRestoredCard(run, columns, values) {
   set("status", status);
 }
 
+/** Does the live table have this column? A store older than a provenance column
+ *  (fetch_status) has no such column, and the restore must not name one it lacks. */
+function tableHasColumn(run, table, column) {
+  const { rows } = run({ sql: "SELECT name FROM pragma_table_info(?)", args: [table] });
+  return rows.some((row) => row.name === column);
+}
+
+/**
+ * Clean a source that is being re-created from a version (the INSERT path). The
+ * UPDATE path leaves the same columns alone (KEEP_CURRENT); a row that does not
+ * exist yet has no current value to keep, so what it comes back with is decided
+ * here.
+ *
+ *   the VERIFICATION comes back EMPTY — verified = 0, verification_method /
+ *   verified_by / verification_notes NULL. A restored source holds no fetched
+ *   page at all (the fetch cache is not in history), so an old verdict cannot be
+ *   carried over: it would make the source citable without the evidence the
+ *   verdict claims. This is what add_source leaves behind too, and the person
+ *   verifies again against a fresh fetch.
+ *
+ *   backend_id is written only when the backend still EXISTS. It is a host-local
+ *   pointer, and the backend may have been removed while the source waited in the
+ *   Trash; the gateway's connections run with foreign_keys ON, so writing a dead
+ *   id would fail the whole restore. A store with no data_backends table at all
+ *   has no such foreign key either, so the value is left as recorded.
+ *
+ * Mutates `values` in place, aligned with `columns`.
+ */
+function neutraliseRestoredSource(run, columns, values) {
+  const set = (name, value) => {
+    const i = columns.indexOf(name);
+    if (i >= 0) values[i] = value;
+  };
+  set("verified", 0);
+  set("verification_method", null);
+  set("verified_by", null);
+  set("verification_notes", null);
+  const at = columns.indexOf("backend_id");
+  if (at < 0) return;
+  const backendId = values[at];
+  if (backendId === null || backendId === undefined) return;
+  let exists;
+  try {
+    exists = run({ sql: `SELECT 1 AS ok FROM ${quote("data_backends")} WHERE id = ? LIMIT 1`, args: [backendId] }).rows.length > 0;
+  } catch {
+    return; // no data_backends table: nothing can be dangling
+  }
+  if (!exists) values[at] = null;
+}
+
+/**
+ * The fetch_status a restored source starts at: 'not_applicable' when it has no
+ * URL to fetch, the way add_source files one, and NULL (unfetched) otherwise.
+ *
+ * NULL is the research server's "shared or cloned from another instance" mark,
+ * and no tool path clears it for a source that cannot be fetched: a URL-less row
+ * restored with NULL would stay uncitable forever with nothing saying why.
+ */
+function sourceFetchStatusOnRestore(columns, values) {
+  const at = columns.indexOf("url");
+  const url = at >= 0 ? values[at] : null;
+  return typeof url === "string" && url.trim() !== "" ? null : "not_applicable";
+}
+
 /** The board_mutations row for a card brought back from nothing (verb `create`). */
 function recordCardReinsert(run, { itemId, ctx, versionId, values, columns }) {
   const boardItemId = Number(itemId);
@@ -1657,13 +1751,26 @@ export async function restoreVersion(
       // is unassigned, gated and on the board's first status, so bringing a card back
       // can never start a bot on its own (an `auto` card for a bot, deleted by a job
       // undo, would otherwise be re-dispatched).
+      //
+      // A SOURCE likewise comes back UNVERIFIED, with no dead backend pointer, and —
+      // when it has no URL to fetch — filed the way add_source files it (see
+      // neutraliseRestoredSource / sourceFetchStatusOnRestore).
       if (spec.table === "tasks_items") neutraliseRestoredCard(run, columns, values);
+      if (spec.table === "research_sources") neutraliseRestoredSource(run, columns, values);
       const insertColumns = [spec.idColumn, ...columns];
+      const insertValues = [...values];
+      // fetch_status is not in the source's snapshot (it is fetch bookkeeping), so a
+      // restored source would otherwise fall to its NULL default — the research
+      // server's "shared or cloned from another instance" mark.
+      if (spec.table === "research_sources" && tableHasColumn(run, spec.table, "fetch_status")) {
+        insertColumns.push("fetch_status");
+        insertValues.push(sourceFetchStatusOnRestore(columns, values));
+      }
       const watermark = maxVersionId(run);
       const sql =
         `INSERT INTO ${quote(spec.table)} (${insertColumns.map(quote).join(", ")}) ` +
         `VALUES (${insertColumns.map(() => "?").join(", ")})`;
-      run({ sql, args: [itemId, ...values] });
+      run({ sql, args: [itemId, ...insertValues] });
       // Recorded on the board like any other card change (one board_mutations row, in
       // this same transaction). NOT done here: the widgets "what needs me" push that
       // recordMutation fires. It lives in a gateway module, and importing gateway

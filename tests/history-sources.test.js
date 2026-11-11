@@ -17,6 +17,17 @@
  *   SYNCED_TABLES (only the notes that reference a source ride the feed), so
  *   nothing here is added to a sync list and a restore reports `synced: false`.
  *
+ *   A RESTORE DOES NOT REPLAY STANDING. The verification workflow's verdict
+ *   (verified, verification_method, verified_by, verification_notes) is bound to
+ *   the fetched text the source holds TODAY, and backend_id is a host-local
+ *   pointer to a data backend. Both are snapshotted so History still SHOWS them,
+ *   but they are kept current: an edit restore leaves them as they are now, and a
+ *   Trash restore writes them empty (unverified, no dead backend), so no source
+ *   comes back citable without the evidence a verdict claims.
+ *
+ *   A URL-LESS SOURCE COMES BACK 'not_applicable' from the Trash, the way
+ *   add_source files one. Only a source with a URL can be fetched again.
+ *
  * Every fixture is a real crow.db from scripts/init-db.js in its own temp dir,
  * brought to the production shape by migrations 0024 (item_versions) and 0026
  * (this type) through their own `run()`, with the registry rows recorded the way
@@ -457,6 +468,7 @@ test("a restored source comes back unfetched — the fetch columns are the row's
   try {
     const id = await insertSource(db, OWNER, {
       title: "Fetched then deleted",
+      url: "https://example.com/refetchable",
       fetched_text: "the page as it was",
       fetch_status: "fetched",
       fetched_at: new Date().toISOString(),
@@ -472,6 +484,198 @@ test("a restored source comes back unfetched — the fetch columns are the row's
       assert.equal(row[column] ?? null, null, `${column} came back empty, so the page can be fetched again`);
     }
     assert.equal(row.title, "Fetched then deleted", "and its content came back");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+/* ------------------------------------------- the standing is not replayed */
+
+test("an edit restore never brings a cleared verification back, and the old verdict stays visible", async () => {
+  const fx = await fixture();
+  const db = fx.open();
+  try {
+    const id = await insertSource(db, OWNER, {
+      title: "A source with quotes",
+      url: "https://example.com/quotes",
+      content_summary: "the owner's summary",
+    });
+    // The owner verifies it against the page Crow holds (the research server's
+    // verify_source write: verified, the method, who checked, and the note).
+    await updateSource(db, OWNER, id, {
+      verified: 1,
+      verification_method: "quotes_checked",
+      verified_by: "owner",
+      verification_notes: "every quote found on the page",
+    });
+    // A bot job re-fetches the page; the quotes no longer match, so the re-check
+    // CLEARS the verification (the same UPDATE servers/research/server.js runs).
+    await updateSource(db, BOT, id, {
+      content_summary: "the bot's re-fetched summary",
+      verified: 0,
+      verification_method: null,
+      verified_by: null,
+      verification_notes: null,
+    });
+    assert.equal(Number((await sourceRowOf(db, id)).verified), 0, "the re-check cleared it");
+
+    // Undo the job: the job's content edit goes back, the verification does NOT.
+    const undo = await undoJob(db, { jobId: BOT.jobId }, OWNER);
+    assert.deepEqual(undo.skipped, []);
+    assert.equal(undo.restored[0]?.action, "restored");
+    let row = await sourceRowOf(db, id);
+    assert.equal(row.content_summary, "the owner's summary", "the job's content edit is undone");
+    assert.equal(Number(row.verified), 0, "the cleared verification stays cleared");
+    assert.equal(row.verification_method, null, "and no method is replayed");
+    assert.equal(row.verified_by, null);
+    assert.equal(row.verification_notes, null);
+
+    // The verdict is still IN history (tracked and snapshotted), so the person can
+    // see the source was once verified — a restore just never replays it.
+    const versions = await versionsOf(db, "research_source", id);
+    const verifiedVersion = versions.find((v) => JSON.parse(v.snapshot_json).verified === 1);
+    assert.ok(verifiedVersion, "the verified version is still in History");
+    assert.equal(JSON.parse(verifiedVersion.snapshot_json).verification_method, "quotes_checked");
+
+    // Restoring that version directly, after a later edit, still leaves the
+    // standing alone while the content comes back.
+    await updateSource(db, OWNER, id, { title: "A later title" });
+    await restoreVersion(db, { versionId: Number(verifiedVersion.id) }, OWNER);
+    row = await sourceRowOf(db, id);
+    assert.equal(row.title, "A source with quotes", "the content is restored");
+    assert.equal(Number(row.verified), 0, "and the source stays unverified");
+    assert.equal(row.verification_method, null);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a source restored from the Trash comes back unverified, and a row with a URL stays unfetched", async () => {
+  const fx = await fixture();
+  const db = fx.open();
+  try {
+    const id = await insertSource(db, OWNER, {
+      title: "Verified before the bin",
+      url: "https://example.com/verified",
+      verified: 1,
+      verification_method: "manual_owner",
+      verified_by: "owner",
+      verification_notes: "checked by hand",
+    });
+    await deleteSource(db, OWNER, id);
+    const trashed = (await versionsOf(db, "research_source", id)).at(-1);
+    assert.equal(
+      Number(JSON.parse(trashed.snapshot_json).verified),
+      1,
+      "the Trash keeps the verdict it removed",
+    );
+
+    const restored = await restoreFromTrash(db, { itemType: "research_source", itemId: id }, OWNER);
+    assert.ok(restored.newVersionId);
+    const row = await sourceRowOf(db, id);
+    assert.equal(row.title, "Verified before the bin", "the content is back");
+    assert.equal(Number(row.verified), 0, "an un-delete comes back unverified");
+    assert.equal(row.verification_method, null);
+    assert.equal(row.verified_by, null);
+    assert.equal(row.verification_notes, null);
+    assert.equal(row.fetch_status, null, "a source with a URL is simply unfetched, so it can be fetched again");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a URL-less source restored from the Trash is fetch_status 'not_applicable', the way add_source files one", async () => {
+  const fx = await fixture();
+  const db = fx.open();
+  try {
+    // A book a person typed in (no URL), one cited with only whitespace, and one
+    // that really has a page behind it.
+    const noUrl = await insertSource(db, OWNER, { title: "A book on the shelf", source_type: "book" });
+    const emptyUrl = await insertSource(db, OWNER, { title: "A typed citation", url: "   " });
+    const withUrl = await insertSource(db, OWNER, { title: "A real page", url: "https://example.com/page" });
+    for (const id of [noUrl, emptyUrl, withUrl]) await deleteSource(db, OWNER, id);
+
+    for (const id of [noUrl, emptyUrl]) {
+      await restoreFromTrash(db, { itemType: "research_source", itemId: id }, OWNER);
+      assert.equal(
+        (await sourceRowOf(db, id)).fetch_status,
+        "not_applicable",
+        `source ${id}: there is nothing to fetch, so it is not left looking like another instance's copy`,
+      );
+    }
+    await restoreFromTrash(db, { itemType: "research_source", itemId: withUrl }, OWNER);
+    assert.equal(
+      (await sourceRowOf(db, withUrl)).fetch_status,
+      null,
+      "a source with a URL comes back unfetched (NULL), not 'not_applicable'",
+    );
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("backend_id is kept current on an edit restore, and a removed backend leaves the source unplaced", async () => {
+  const fx = await fixture();
+  const db = fx.open();
+  try {
+    const { rows: fk } = await db.execute("PRAGMA foreign_keys");
+    assert.equal(Number(fk[0].foreign_keys), 1, "the gateway's connections enforce foreign keys");
+
+    const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+    const project = await createProjectSpace(db, { name: "Sources with backends" });
+    const newBackend = async (name) => {
+      const info = await withWriteContext(OWNER, () =>
+        db.execute({
+          sql: "INSERT INTO data_backends (project_id, name, connection_ref) VALUES (?, ?, ?)",
+          args: [Number(project.id), name, `mcp://example.invalid/${name}`],
+        }),
+      );
+      return Number(info.lastInsertRowid);
+    };
+    const dropBackend = (backendId) =>
+      withWriteContext(OWNER, () => db.execute({ sql: "DELETE FROM data_backends WHERE id = ?", args: [backendId] }));
+
+    // 1. AN EDIT RESTORE keeps the live value: the version named a backend that
+    //    has since been removed, and replaying it would fail the foreign key (or
+    //    point at a backend this host no longer has).
+    const editBackend = await newBackend("edit-arm");
+    const edited = await insertSource(db, OWNER, { title: "On a backend", backend_id: editBackend });
+    await updateSource(db, OWNER, edited, { title: "On a backend, v2" });
+    await updateSource(db, OWNER, edited, { title: "On a backend, v3" });
+    const editVersions = await versionsOf(db, "research_source", edited);
+    const v2 = editVersions.find((v) => JSON.parse(v.snapshot_json).title === "On a backend, v2");
+    assert.equal(JSON.parse(v2.snapshot_json).backend_id, editBackend, "the version records the backend");
+
+    await dropBackend(editBackend);
+    assert.equal((await sourceRowOf(db, edited)).backend_id, null, "removing the backend unplaces the source");
+    await restoreVersion(db, { versionId: Number(v2.id) }, OWNER);
+    let row = await sourceRowOf(db, edited);
+    assert.equal(row.title, "On a backend, v2", "the content comes back");
+    assert.equal(row.backend_id, null, "but not the backend the version named");
+
+    // 2. A TRASH RESTORE writes the pointer only when the backend still exists:
+    //    here the source was binned while it had one, and the backend went while
+    //    the source waited, so the re-insert would fail on the foreign key.
+    const trashBackend = await newBackend("trash-arm");
+    const binned = await insertSource(db, OWNER, { title: "Binned with a backend", backend_id: trashBackend });
+    await deleteSource(db, OWNER, binned);
+    const deleteVersion = (await versionsOf(db, "research_source", binned)).at(-1);
+    assert.equal(
+      JSON.parse(deleteVersion.snapshot_json).backend_id,
+      trashBackend,
+      "the Trash version records the backend it removed",
+    );
+    await dropBackend(trashBackend);
+
+    const restored = await restoreFromTrash(db, { itemType: "research_source", itemId: binned }, OWNER);
+    assert.ok(restored.newVersionId, "the restore succeeded with foreign keys ON");
+    row = await sourceRowOf(db, binned);
+    assert.equal(row.title, "Binned with a backend");
+    assert.equal(row.backend_id, null, "a backend that no longer exists is not written back");
   } finally {
     db.close();
     fx.dispose();
@@ -567,6 +771,84 @@ test("a secret-shaped token in a source never survives in snapshot_json, listVer
       "the redacted version no longer holds the source's value",
     );
     assert.equal(await ftsHits(db, "clean"), 1, "and the clean text is what the index holds");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a credential in a source's URL query string is scrubbed from snapshot_json, listVersions and diffVersions", async () => {
+  const fx = await fixture();
+  const db = fx.open();
+  try {
+    // Three shapes a pasted link carries a key in. The values are obviously fake
+    // (this file is tracked in a public repository) but long enough that they are
+    // not a placeholder.
+    const credentials = {
+      api_key: "q7FakeValueForAnApiKey001",
+      token: "tokFakeValue000000002",
+      access_token: "accFakeValue00000003",
+    };
+    const ids = [];
+    for (const [param, value] of Object.entries(credentials)) {
+      ids.push(
+        await insertSource(db, OWNER, {
+          title: `A source behind ${param}`,
+          url: `https://example.com/private/report?${param}=${value}&page=2`,
+        }),
+      );
+    }
+
+    // 1. The capture is real: the trigger stores the URL as the row held it (the
+    //    redaction sweep, not the trigger, is what scrubs it).
+    for (let i = 0; i < ids.length; i++) {
+      const value = Object.values(credentials)[i];
+      const stored = (await versionsOf(db, "research_source", ids[i])).at(-1);
+      assert.ok(stored.snapshot_json.includes(value), "the version captured the URL as written");
+    }
+
+    // 2. The sweep's scrub — no SECRET_PATTERN matches `?api_key=<value>`, so a
+    //    URL query credential is its own shape (see sweep.js).
+    await withWriteContext(SYSTEM, () => sweep(db, { batchSize: 500 }));
+    const stored = (await db.execute({
+      sql: "SELECT id, snapshot_json, redacted FROM item_versions WHERE item_type = 'research_source' ORDER BY id",
+      args: [],
+    })).rows;
+    assert.equal(stored.length, ids.length);
+    for (const row of stored) {
+      for (const value of Object.values(credentials)) {
+        assert.ok(!row.snapshot_json.includes(value), "the key is gone from the stored snapshot");
+      }
+      assert.equal(Number(row.redacted), 1, "the version is marked redacted");
+      assert.ok(row.snapshot_json.includes("[redacted]"), "replaced with the placeholder");
+      assert.ok(row.snapshot_json.includes("page=2"), "the harmless part of the query is kept");
+    }
+    // LIVE DATA IS NOT HISTORY'S BUSINESS: the source rows still hold their URLs.
+    assert.match((await sourceRowOf(db, ids[0])).url, /api_key=q7FakeValueForAnApiKey001/);
+
+    // 3. The History API's own output never carries them: a later clean edit gives
+    //    listVersions and diffVersions a second version to compare against. That
+    //    edit's own version captured the URL as the row held it, so one more sweep
+    //    scrubs it — the same pass every other type gets.
+    await updateSource(db, OWNER, ids[0], {
+      url: "https://example.com/public/report?page=2",
+      content_summary: "a later, clean summary",
+    });
+    await withWriteContext(SYSTEM, () => sweep(db, { batchSize: 500 }));
+    const listed = await listVersions(db, { itemType: "research_source", itemId: ids[0] });
+    assert.ok(listed.length >= 2, "the edit is a second version");
+    const diff = diffVersions(listed[1], listed[0]);
+    assert.ok(diff.length > 0, "the edit is visible as a change");
+    for (const value of Object.values(credentials)) {
+      assert.ok(!JSON.stringify(listed).includes(value), "listVersions never returns the key");
+      assert.ok(!JSON.stringify(diff).includes(value), "diffVersions never returns the key");
+    }
+    // And the redacted version is refused rather than pasting the placeholder into
+    // a URL someone would click.
+    await assert.rejects(
+      () => restoreVersion(db, { versionId: Number(listed[1].id) }, OWNER),
+      (err) => err.code === "redacted",
+    );
   } finally {
     db.close();
     fx.dispose();
@@ -833,9 +1115,10 @@ test("the research_source entry follows the COVERED rules and owns its migration
     assert.doesNotMatch(column, SECRET_COLUMN, `${column} looks like a credential`);
   }
 
-  // The decision the operator made for this table: the fetch cache and the two
-  // legacy host-local pointers are out of both content lists, named in `omitted`
-  // (see the comment above `snapshot` in covered.js), and full_text is in both.
+  // The controller's ruling under the version history design (large re-fetchable
+  // fields stay out): the fetch cache and the two legacy host-local pointers are
+  // out of both content lists, named in `omitted` (see the comment above
+  // `snapshot` in covered.js), and full_text is in both.
   for (const column of [
     "fetched_text",
     "fetch_status",

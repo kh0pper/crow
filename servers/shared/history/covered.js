@@ -286,14 +286,17 @@ export const COVERED = Object.freeze({
     // placement pointer to a data backend), NOT created_at / retrieval_date
     // (timestamps) and NOT retrieval_method (how it was found, not what it says).
     //
-    // THE FETCH FACTS ARE A RE-FETCHABLE CACHE, NOT CONTENT — the operator's call
-    // for this table, and the reason they are in neither list: fetched_text,
-    // fetch_status, fetched_at, final_url, http_status, content_sha256 and
-    // fetch_error all describe one attempt to open the page. They are large
-    // (fetched_text can be hundreds of KB) and Crow can produce them again from
-    // the URL, so a version does not keep them and a restore does not write them:
-    // a restored source comes back UNFETCHED (every fetch column at its default)
-    // and can be fetched again. full_text is the opposite — a person supplied it
+    // THE FETCH FACTS ARE A RE-FETCHABLE CACHE, NOT CONTENT — the controller's
+    // ruling under the version history design (large re-fetchable fields stay
+    // out), and the reason they are in neither list: fetched_text, fetch_status,
+    // fetched_at, final_url, http_status, content_sha256 and fetch_error all
+    // describe one attempt to open the page. They are large (fetched_text can be
+    // hundreds of KB) and Crow can produce them again from the URL, so a version
+    // does not keep them and a restore does not write them: a restored source
+    // comes back UNFETCHED (every fetch column at its default). Only a source with
+    // a URL can be fetched again; one without a URL is restored the way add_source
+    // files it, with fetch_status 'not_applicable' (api.js).
+    // full_text is the opposite — a person supplied it
     // or approved it, nothing can regenerate it — so it is tracked and
     // snapshotted with no cap.
     //
@@ -324,11 +327,13 @@ export const COVERED = Object.freeze({
       "verified_by",
     ]),
     // The whole row minus the key, the clocks, the fetch cache and the two legacy
-    // host-local pointers. uuid / origin_instance_id / backend_id ride along so a
-    // version says which source it was and where it came from (exactly as a note's
-    // uuid does), and retrieval_date / retrieval_method are kept because a reader
-    // wants to know how and when the source was found even though neither is a
-    // change on its own.
+    // host-local byte pointers (file_path, s3_key). uuid / origin_instance_id /
+    // backend_id ride along so a version says which source it was and where it
+    // came from (exactly as a note's uuid does) — backend_id is a host-local
+    // PLACEMENT pointer (a data_backends id): snapshot-only, and kept current by a
+    // restore, see KEEP_CURRENT — and retrieval_date / retrieval_method are kept
+    // because a reader wants to know how and when the source was found even though
+    // neither is a change on its own.
     //
     // LEFT OUT OF BOTH LISTS on purpose: the fetch cache (fetched_text,
     // fetch_status, fetched_at, final_url, http_status, content_sha256,
@@ -337,8 +342,6 @@ export const COVERED = Object.freeze({
     // s3_key, two legacy host-local columns an OLD host still carries (init-db's
     // FK rebuild knows them; a fresh install does not create them). They point at
     // bytes on one machine, so they are placement, not content.
-    // The fetch cache is re-fetchable and large; file_path and s3_key are legacy
-    // host-local columns an old host still carries.
     omitted: Object.freeze([
       "fetched_text",
       "fetch_status",
