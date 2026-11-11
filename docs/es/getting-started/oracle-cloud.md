@@ -62,7 +62,7 @@ npm --version
 
 Puedes usar el instalador de un comando o instalar manualmente.
 
-**Opción A: Instalador de un comando**
+**Opción A: Instalador de un comando (Recomendado)**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
@@ -75,6 +75,10 @@ git clone https://github.com/kh0pper/crow.git ~/.crow/app
 cd ~/.crow/app
 npm run setup
 ```
+
+::: warning La Opción B deja cosas fuera
+La Opción B no configura el socket de proxy que usa Caddy, ni el sandbox de bubblewrap para los bots, ni las actualizaciones automáticas de Node, Docker y Caddy, ni el guardia de arranque que revierte una actualización mala, ni el firewall que sube primero, ni el socket de administración de Caddy. La Opción B es para quien sabe que quiere eso.
+:::
 
 No necesitas base de datos externa — Crow usa SQLite local en el volumen de disco de Oracle automáticamente.
 
@@ -96,6 +100,10 @@ Oracle tiene su propio firewall que controla qué tráfico puede llegar a tu ins
 
 ### UFW (firewall en la instancia)
 
+::: tip
+Sáltate esto si usaste el instalador (Paso 5, Opción A): ya configuró el firewall. Abre el 22, y el 443 solo si respondes que sí a su pregunta. En Oracle la respuesta por defecto es no.
+:::
+
 Defensa en profundidad — un segundo firewall en la instancia misma.
 
 ```bash
@@ -109,6 +117,10 @@ sudo ufw enable
 ```
 
 ### fail2ban (bloquea intentos de fuerza bruta)
+
+::: tip
+Sáltate esto si usaste el instalador (Paso 5, Opción A): ya lo hizo.
+:::
 
 fail2ban observa tus registros de inicio de sesión y bloquea temporalmente las direcciones IP que fallan demasiados intentos. Esto detiene los ataques automatizados de adivinación de contraseñas.
 
@@ -167,7 +179,11 @@ Tu servidor ahora es accesible en `https://crow.tu-tailnet.ts.net:8444` desde cu
 
 ## Paso 8: Crear un Servicio systemd
 
-Ejecuta el gateway de Crow como un servicio en segundo plano que inicia automáticamente al arrancar:
+::: warning
+Sáltate este paso si usaste el instalador (Paso 5, Opción A). El instalador ya escribió este servicio, con el socket de proxy y el guardia de arranque. Ejecutar el bloque de abajo lo sobrescribiría.
+:::
+
+La unidad de abajo es la versión manual simple, para la instalación manual (Paso 5, Opción B). Ejecuta el gateway de Crow como un servicio en segundo plano que inicia automáticamente al arrancar:
 
 ```bash
 sudo tee /etc/systemd/system/crow-gateway.service > /dev/null << 'EOF'
@@ -180,8 +196,9 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/.crow/app
 ExecStart=/usr/bin/node servers/gateway/index.js
-Restart=unless-stopped
+Restart=on-failure
 RestartSec=5
+RestartPreventExitStatus=78
 Environment=NODE_ENV=production
 
 [Install]
@@ -241,7 +258,17 @@ Tu blog estará en `https://crow.tu-tailnet.ts.net/blog`. El Crow's Nest permane
 
 ### Opción B: Caddy + Dominio personalizado
 
-Para una URL profesional como `blog.tudominio.com`:
+Para una URL profesional como `blog.tudominio.com`.
+
+**Si usaste el instalador** (Paso 5, Opción A), Caddy y su Caddyfile ya existen. No reemplaces el archivo. Ejecuta `sudo nano /etc/caddy/Caddyfile`. Cambia solo el nombre del sitio, que es la primera línea del bloque (el nombre `.local` de la máquina), por tu dominio (por ejemplo `blog.tudominio.com`). Quita la línea `tls internal` de ese bloque, para que Caddy obtenga un certificado de Let's Encrypt para tu dominio. Deja la línea `reverse_proxy unix//run/crow-proxy/gateway.sock` y el bloque global `admin`. Luego recarga Caddy:
+
+```bash
+sudo systemctl reload caddy
+```
+
+En Oracle, el instalador pudo dejar cerrado el puerto 443. Si es así, ábrelo con `sudo ufw allow 443/tcp`. El puerto 80 es opcional: solo hace falta para la redirección de HTTP a HTTPS.
+
+**Si usaste la instalación manual** (Paso 5, Opción B), instala Caddy primero (el 443 ya está abierto desde el Paso 6):
 
 ```bash
 # Instalar Caddy
@@ -250,8 +277,11 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --d
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
 sudo apt update
 sudo apt install caddy
+```
 
-# Configurar proxy reverso
+Luego escribe el Caddyfile con el mismo bloque de sitio, apuntando a `localhost:3001`:
+
+```bash
 sudo tee /etc/caddy/Caddyfile > /dev/null << 'EOF'
 blog.tudominio.com {
     reverse_proxy localhost:3001
@@ -261,4 +291,15 @@ EOF
 sudo systemctl restart caddy
 ```
 
-Apunta el registro DNS A de tu dominio a la IP pública de tu instancia de Oracle. Caddy obtiene automáticamente certificados Let's Encrypt.
+Apunta el registro DNS A de tu dominio a la IP pública de tu instancia de Oracle. Caddy obtiene automáticamente certificados Let's Encrypt. Para los detalles del DNS, consulta [Dominio Personalizado](./custom-domain).
+
+::: warning Caddy en localhost:3001 no pasa
+Un Caddy que apunta a `localhost:3001` llega al gateway como una conexión de loopback no verificada, y el Crow's Nest la rechaza. El DNS de tu dominio ya debe apuntar a este servidor, porque el script revisa `/health` a través del dominio. Cuando Caddy esté funcionando, ejecuta `sudo bash scripts/fix-caddy-proxy-socket.sh` en `~/.crow/app`. Eso lo cambia al socket de proxy.
+:::
+
+Define la URL pública en tu `.env`:
+
+```bash
+echo 'CROW_GATEWAY_URL=https://blog.tudominio.com' >> ~/.crow/app/.env
+sudo systemctl restart crow-gateway
+```
