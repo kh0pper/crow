@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { statSync, readdirSync, utimesSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { statSync, readdirSync, utimesSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { startFakeNextcloud } from "./helpers/workspace-fake-nextcloud.js";
 import { installFakePim } from "./helpers/workspace-fake-pim.js";
@@ -100,7 +100,7 @@ test("update + delete are journaled and undoable; undo refuses after a human edi
   assert.equal((await call("ws_undo_last_change", { path: c2.data.ref, version_id: c2.data.version_id })).data.undone, "removed");
   assert.equal((await call("ws_cal_get_event", { calendar: "Menu", uid: c2.data.uid })).code, "event_not_found");
   assert.equal((await call("ws_undo_last_change", { path: c2.data.ref, version_id: "j1.zzzzzz-000000000000" })).code, "version_gone");
-  const dir = join(home, "data", "workspace-tools", "journal");
+  const dir = join(home, "data", "workspace", "journal");
   assert.equal(statSync(dir).mode & 0o777, 0o700);
   const files = readdirSync(dir); assert.ok(files.length >= 6);
   for (const f of files) assert.equal(statSync(join(dir, f)).mode & 0o777, 0o600);
@@ -144,7 +144,7 @@ test("hrefs from the server are validated: an encoded '..' or a foreign collecti
 
 test("journal first (review I12): if the journal cannot be written, the delete does not happen", async () => {
   const c = await call("ws_cal_create_event", { calendar: "Menu", summary: "No borrar", start: "2026-10-19", end: "2026-10-19" });
-  const broken = join(home, "broken-data"); mkdirSync(broken); writeFileSync(join(broken, "workspace-tools"), "not a directory");
+  const broken = join(home, "broken-data"); mkdirSync(broken); writeFileSync(join(broken, "workspace"), "not a directory");
   const saved = process.env.CROW_DATA_DIR; process.env.CROW_DATA_DIR = broken; // the server runs in-process
   try {
     const d = await call("ws_cal_delete_event", { calendar: "Menu", uid: c.data.uid });
@@ -156,7 +156,7 @@ test("journal first (review I12): if the journal cannot be written, the delete d
 
 test("pruneJournal drops entries older than 30 days and keeps at most maxEntries", async () => {
   const { recordChange, pruneJournal, loadChange } = await import("../bundles/workspace/server/pim/journal.js");
-  const dir = join(home, "data", "workspace-tools", "journal");
+  const dir = join(home, "data", "workspace", "journal");
   const old = recordChange({ kind: "cal", ref: "cal:x/old", href: "/x", op: "update", before_text: "a", after_etag: "e" });
   const oldFile = join(dir, `${old.slice(3)}.json`); const t = (Date.now() - 31 * 86400000) / 1000; utimesSync(oldFile, t, t);
   const fresh = recordChange({ kind: "cal", ref: "cal:x/new", href: "/x", op: "update", before_text: "b", after_etag: "e" });
@@ -168,7 +168,34 @@ test("pruneJournal drops entries older than 30 days and keeps at most maxEntries
   assert.equal(loadChange(fresh).ref, "cal:x/new", "the newest entry is the one kept");
 });
 
-const journalEntry = (versionId) => JSON.parse(readFileSync(join(home, "data", "workspace-tools", "journal", `${versionId.slice(3)}.json`), "utf8"));
+test("an entry left under workspace-tools is still found (legacy fallback) while new writes go to workspace", async () => {
+  const { recordChange, loadChange } = await import("../bundles/workspace/server/pim/journal.js");
+  const legacy = join(home, "data", "workspace-tools", "journal"); mkdirSync(legacy, { recursive: true, mode: 0o700 });
+  const id = "legacy-0123456789ab";
+  const entry = { id, kind: "cal", ref: "cal:x/legacy", href: "/x", op: "update", before_text: "viejo", after_etag: "e", at: new Date().toISOString() };
+  writeFileSync(join(legacy, `${id}.json`), JSON.stringify(entry), { mode: 0o600 });
+  assert.equal(loadChange(`j1.${id}`).ref, "cal:x/legacy", "the legacy entry is still readable for undo");
+  const fresh = recordChange({ kind: "cal", ref: "cal:x/fresh", href: "/x", op: "update", before_text: "b", after_etag: "e" });
+  assert.equal(loadChange(fresh).ref, "cal:x/fresh");
+  assert.ok(readFileSync(join(home, "data", "workspace", "journal", `${fresh.slice(3)}.json`), "utf8"), "the new entry is in the add-on's own folder");
+  assert.deepEqual(readdirSync(legacy), [`${id}.json`], "a new change never writes into the legacy dir");
+});
+
+test("pruneJournal prunes the legacy dir too and stays quiet when it is missing", async () => {
+  const { pruneJournal } = await import("../bundles/workspace/server/pim/journal.js");
+  const legacy = join(home, "data", "workspace-tools", "journal"); mkdirSync(legacy, { recursive: true, mode: 0o700 });
+  const id = "oldone-0123456789ab";
+  const file = join(legacy, `${id}.json`);
+  writeFileSync(file, JSON.stringify({ id, kind: "cal", ref: "cal:x/oldlegacy", href: "/x", op: "update", before_text: null, after_etag: null, at: new Date().toISOString() }), { mode: 0o600 });
+  const t = (Date.now() - 31 * 86400000) / 1000; utimesSync(file, t, t);
+  assert.ok(pruneJournal() >= 1, "the 31-day-old legacy entry is removed");
+  assert.equal(readdirSync(legacy).includes(`${id}.json`), false);
+  rmSync(join(home, "data", "workspace-tools"), { recursive: true, force: true });
+  assert.doesNotThrow(() => pruneJournal(), "a missing legacy dir is not an error");
+  assert.equal(pruneJournal(), 0);
+});
+
+const journalEntry = (versionId) => JSON.parse(readFileSync(join(home, "data", "workspace", "journal", `${versionId.slice(3)}.json`), "utf8"));
 
 test("T10-I2: a daily series since 2010 lists the window's 7 occurrences (TZID wall time kept); an hourly series since 2010 too", async () => {
   pim.addEvent("menu_shared_by_admin", "diario.ics", cal("BEGIN:VEVENT", "UID:diario-1", "DTSTAMP:20261001T000000Z", "DTSTART;TZID=America/Chicago:20100104T073000", "DTEND;TZID=America/Chicago:20100104T080000", "RRULE:FREQ=DAILY", "SUMMARY:Desayuno diario", "END:VEVENT"));
