@@ -88,7 +88,7 @@ function fixture() {
   t.close();
 
   const c = new Database(crowDb);
-  c.exec(`CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, slug TEXT, name TEXT,
+  c.exec(`CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, uuid TEXT, slug TEXT, name TEXT,
     workspace_dir TEXT, storage_prefix TEXT, tasks_db_uri TEXT, archived_at TEXT, repo_path TEXT);
   CREATE TABLE pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT, definition TEXT,
     enabled INTEGER, project_id INTEGER, created_at TEXT, updated_at TEXT);
