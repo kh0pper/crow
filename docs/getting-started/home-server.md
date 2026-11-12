@@ -24,7 +24,7 @@ Common choices:
 One command installs Crow and all dependencies:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash
 ```
 
 ::: warning Supported platforms
@@ -33,7 +33,7 @@ The install script supports **Debian/Ubuntu family systems only** (Debian, Ubunt
 
 ::: tip Prefer to inspect the script first?
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh -o crow-install.sh
+curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh -o crow-install.sh
 less crow-install.sh   # Review the script
 bash crow-install.sh   # Run it
 ```

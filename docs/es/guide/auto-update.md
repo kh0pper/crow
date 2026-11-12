@@ -530,8 +530,8 @@ o no, y si además cubre los repositorios que Crow añadió.
   documentado le envía el script a bash por stdin, así que la opción va a bash:
 
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash -s -- --no-auto-updates
-  curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | CROW_NO_AUTO_UPDATES=1 bash
+  curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash -s -- --no-auto-updates
+  curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | CROW_NO_AUTO_UPDATES=1 bash
   ```
 
   No se cambia nada bajo `/etc/apt/apt.conf.d`: no se escribe ni

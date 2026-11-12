@@ -69,7 +69,7 @@ You can use the one-command installer or install manually.
 **Option A: One-command installer (Recommended)**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash
 ```
 
 **Option B: Manual install**
