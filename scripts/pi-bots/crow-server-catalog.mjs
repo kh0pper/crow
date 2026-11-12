@@ -35,6 +35,9 @@ import { isLegacyConfiguredAddon, addonDerivedEnv } from "../../servers/gateway/
 // Leaf module (no imports): loader/injection names a child must never inherit from the
 // addon entry — NODE_OPTIONS --require and LD_PRELOAD run code before the server does.
 import { withoutLoaderEnv } from "../../servers/shared/loader-env.js";
+// Names only, never a value: this module resolves no keychain handle and unseals nothing
+// (the spawning process hydrates; see addonKeychainNeeds below).
+import { ADDON_KEYCHAIN_FIELD, ADDON_SECRET_SHARES, keychainEnvNames } from "../../servers/shared/addon-secrets.js";
 
 /**
  * The env vars that name an instance. r4-deploy.sh warns that a child missing
@@ -224,6 +227,55 @@ function applyJournalGuard(env) {
 }
 
 /**
+ * The env NAMES an add-on cannot start without, read from the entry alone — never a value.
+ *
+ * Two sources: the entry's own `keychainEnv` (its sealed settings) and ADDON_SECRET_SHARES
+ * (another add-on's settings this one reads, R6 — e.g. sunvox-studio reading Funkwhale's
+ * URL and access token). Producing the values is the CALLER's business (the gateway hydrates
+ * from its own keychain); a bot config only learns which names are owed.
+ *
+ * Empty for an add-on with neither, which is what keeps today's entries byte-identical.
+ */
+export function addonKeychainNeeds(id, entry) {
+  const names = [...keychainEnvNames(entry)];
+  const shares = typeof id === "string" && Object.prototype.hasOwnProperty.call(ADDON_SECRET_SHARES, id)
+    ? ADDON_SECRET_SHARES[id]
+    : null;
+  if (shares && typeof shares === "object") {
+    for (const wanted of Object.values(shares)) {
+      for (const name of Array.isArray(wanted) ? wanted : []) {
+        if (typeof name === "string" && name !== "" && !names.includes(name)) names.push(name);
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * A block's env with the plain value of every keychain-listed name removed.
+ *
+ * A listed name is authoritative at spawn: its value comes from the keychain, so any plain
+ * copy left in the entry is stale by definition and must not board a bot's MCP config.
+ * An entry with no listed names gets the SAME object back (today's behaviour, byte for
+ * byte). Instance-scoped keys are never stripped: they name the instance, not a secret,
+ * and removing one would let the child inherit whatever ambient value the caller has.
+ *
+ * `listed` is the caller's already-read keychainEnvNames() result when it has one (a
+ * caller that reads the names twice would log a malformed entry's warning twice);
+ * omitted, the entry is read here.
+ */
+export function withoutKeychainValues(entry, env, listed) {
+  const source = env && typeof env === "object" ? env : null;
+  if (!source) return env;
+  const names = (Array.isArray(listed) ? listed : keychainEnvNames(entry))
+    .filter((n) => !INSTANCE_ENV_KEYS.includes(n));
+  if (names.length === 0) return env;
+  const out = { ...source };
+  for (const name of names) delete out[name];
+  return out;
+}
+
+/**
  * Rebind a server block that did NOT come from the catalog — a third-party or
  * `crow-browser` entry out of the homedir config — onto this instance.
  *
@@ -323,6 +375,9 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   const servers = {};
   const unconfigured = {};
   const coreNames = [];
+  // id -> the env names it owes the keychain. Names only, and only for blocks this catalog
+  // actually emitted: the caller hydrates them (or refuses the spawn) — this module never does.
+  const needsKeys = {};
 
   // Board entry FIRST (Track 1 Task 7) — the one {url, headers} block in an
   // otherwise all-stdio catalog. See boardBlock() above.
@@ -360,6 +415,9 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
       unconfigured[id] = "satellite: its tools come from the paired server";
       continue;
     }
+    // The names this entry seals in the keychain (never a value). Read once, before the
+    // block is built: a listed name's plain copy is dropped and no derived env is rendered.
+    const listed = keychainEnvNames(addon);
     if (!isLegacyConfiguredAddon(id, addon, undefined, addonEnv)) {
       unconfigured[id] = "service: its account fields are not set";
       continue;
@@ -384,12 +442,22 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
       // from the entry's own env ONLY: those values are already in this block, so nothing new
       // is written. A field the child would inherit from the environment is never rendered into
       // the block (that would copy a gateway .env secret into the bot's MCP config).
-      const derived = addonDerivedEnv(id, addon.env, undefined, {});
+      // A SEALED add-on (keychainEnv lists a name) gets no derived env at all: `derived` is
+      // rendered from the entry's plain values, so a listed name's stale plaintext could come
+      // back through a derived header (Render's `AUTH_HEADER: Bearer ${...}`) even after the
+      // plain value itself was stripped below.
+      const derived = listed.length > 0 ? {} : addonDerivedEnv(id, addon.env, undefined, {});
       // Loader names (NODE_OPTIONS, LD_PRELOAD, …) are stripped from BOTH sides: the block's
       // env is cloned from the addon entry, and `derived` is rendered from that same entry's
       // env, so a loader name can reach the child through either. CROW_HOME is added here by
       // the catalog itself and is never stripped.
-      r.block.env = { ...withoutLoaderEnv(r.block.env), ...withoutLoaderEnv(derived), CROW_HOME: crowHome };
+      // A listed name is authoritative at spawn (its value comes from the keychain), so its
+      // plain copy is removed — the value is unsealed by the spawning process, never here.
+      r.block.env = { ...withoutLoaderEnv(withoutKeychainValues(addon, r.block.env, listed)),
+        ...withoutLoaderEnv(derived), CROW_HOME: crowHome };
+      // The list itself is not part of a spawn block: no `keychainEnv` field ever reaches a
+      // bot's MCP config (only the names the caller still owes travel, via needsKeys).
+      delete r.block[ADDON_KEYCHAIN_FIELD];
       // A bare command (uvx, uv, npx) is resolved to an absolute path here:
       // the gateway's systemd PATH usually lacks ~/.local/bin, so the bot's
       // pi child failed with ENOENT and the server silently dropped.
@@ -407,7 +475,11 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
         if (rc.sha256) r.block.command_sha256 = rc.sha256; else delete r.block.command_sha256;
       }
       servers[id] = r.block;
+      // Only an EMITTED block owes keys: an unconfigured or unusable add-on is not in the
+      // config at all, so there is nothing for the caller to hydrate.
+      const needs = addonKeychainNeeds(id, addon);
+      if (needs.length > 0) needsKeys[id] = needs;
     }
   }
-  return { servers, unconfigured, coreNames };
+  return { servers, unconfigured, coreNames, needsKeys };
 }

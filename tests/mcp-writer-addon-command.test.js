@@ -25,7 +25,7 @@ test("an unresolvable bare launcher is omitted, not passed through for a PATH lo
   const logs = [];
   const orig = console.warn; console.warn = (m) => logs.push(String(m));
   try {
-    const s = extraServersFromExtensions(def(["ghost"]), h, { canonical });
+    const { servers: s } = extraServersFromExtensions(def(["ghost"]), h, { canonical });
     assert.equal("ghost" in s, false);
   } finally { console.warn = orig; }
   assert.ok(logs.some((l) => /ghost/.test(l) && /not found/.test(l)), logs.join("\n"));
@@ -39,7 +39,7 @@ test("a user-owned absolute launcher without a pin is omitted; with a matching p
   const orig = console.warn; console.warn = () => {};
   try {
     const h = home({ a: { command: bin, args: [] }, b: { command: bin, command_sha256: pin, args: [] }, c: { command: "node", args: ["x.js"] } });
-    const s = extraServersFromExtensions(def(["a", "b", "c"]), h, { canonical });
+    const { servers: s } = extraServersFromExtensions(def(["a", "b", "c"]), h, { canonical });
     assert.equal("a" in s, false);
     assert.equal(s.b.command, bin);
     assert.equal(s.b.command_sha256, pin, "the pin rides along for pi-lab's spawn-time re-check");
@@ -54,7 +54,7 @@ test("a spawn block drops loader names from the entry env, keeping its other var
       ldr: { command: "node", args: ["x.js"], env: { FOO: "bar", NODE_OPTIONS: "--require /tmp/evil.js", LD_PRELOAD: "/tmp/evil.so" } },
       bare: { command: "node", args: ["x.js"] },
     });
-    const s = extraServersFromExtensions(def(["ldr", "bare"]), h, { canonical });
+    const { servers: s } = extraServersFromExtensions(def(["ldr", "bare"]), h, { canonical });
     assert.equal(s.ldr.env.FOO, "bar", "an ordinary env var survives");
     assert.equal(s.ldr.env.NODE_OPTIONS, undefined, "NODE_OPTIONS would --require code before the server runs");
     assert.equal(s.ldr.env.LD_PRELOAD, undefined, "LD_PRELOAD would load a library before the server runs");
@@ -76,7 +76,7 @@ test("pin-addon-command writes the launcher's SHA-256 (and an absolute command) 
   assert.equal(saved.command_sha256, createHash("sha256").update("#!/bin/sh\necho hi\n").digest("hex"));
   assert.deepEqual(saved.args, ["--from", "x"]);
   assert.equal(r.sha256, saved.command_sha256);
-  const s = extraServersFromExtensions(def(["gw"]), h, { canonical });
+  const { servers: s } = extraServersFromExtensions(def(["gw"]), h, { canonical });
   assert.equal(s.gw.command, bin);
 });
 
@@ -92,7 +92,7 @@ test("a pinned uvx that fetches a floating git ref is omitted; a commit-pinned o
       floating: { command: bin, command_sha256: pin, args: ["--from", "git+https://github.com/x/y", "y"] },
       fixed: { command: bin, command_sha256: pin, args: ["--from", `git+https://github.com/x/y@${SHA}`, "y"] },
     });
-    const s = extraServersFromExtensions(def(["floating", "fixed"]), h, { canonical });
+    const { servers: s } = extraServersFromExtensions(def(["floating", "fixed"]), h, { canonical });
     assert.equal("floating" in s, false);
     assert.ok(s.fixed);
   } finally { console.warn = orig; }
