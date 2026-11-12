@@ -50,24 +50,29 @@ export function isSecretEnvName(n) {
 }
 
 /**
- * A `mcp-addons.json` name at the Crow home root: the file itself, or any copy
- * `mcp-addons.json.<anything>` (`.bak`, `.bak-<date>`, `.bak.<epoch>`,
- * `.pre-<tag>-<date>`) — every suffix counts, not only `.bak`. The leading dot
- * is optional, so the temp file the writers create beside it and rename over it
- * is masked too: `.mcp-addons.json.tmp-<pid>-<hex>` (the gateway's
+ * An add-on registry name at the Crow home root: any name starting with
+ * `mcp-addons` or `.mcp-addons`, except `mcp-addons.example.json`. That covers
+ * the file itself, its backup copies in every shape a writer or an operator
+ * leaves (`mcp-addons.json.bak`, `mcp-addons.json.bak-<date>`,
+ * `mcp-addons.json.bak.<epoch>`, `mcp-addons.json.pre-<tag>-<date>`,
+ * `mcp-addons.bak.json`, `mcp-addons-old.json`, `mcp-addons.json-<date>`, an
+ * editor's `mcp-addons.json~`), and the temp files held beside it until one is
+ * renamed over it: `.mcp-addons.json.tmp-<pid>-<hex>` (the gateway's
  * writePrivateFile) and `.mcp-addons.json.tmp-<pid>-<base36>`
- * (scripts/addon-sandbox/migrate-linked.mjs writeAtomicPrivate) hold the full
- * add-on env until the rename. `mcp-addons.example.json` is documentation, not
- * a secret.
+ * (scripts/addon-sandbox/migrate-linked.mjs writeAtomicPrivate), and the no-dot
+ * `mcp-addons.json.tmp-<pid>` (scripts/ops/pin-addon-command.mjs). All of them
+ * hold the full add-on env. The exemption is the `.example.json` suffix, not the
+ * name: `mcp-addons.example.json` is documentation, not a secret, and so is a
+ * dotted `.mcp-addons.example.json`, which the lookahead exempts the same way.
  */
-export const ADDONS_FILE_NAME_RE = /^\.?mcp-addons\.json(\..*)?$/;
+export const ADDONS_FILE_NAME_RE = /^\.?mcp-addons(?!\.example\.json$)[^/]*$/;
 
 /**
- * True for a name whose CONTENT is the add-on registry with its env values.
- * `.mcp-addons.json` and `.mcp-addons.json.<anything>` match for the temp files
- * a writer creates beside the file before renaming it into place.
- * `mcp-addons.example.json` is documentation and does not match the pattern,
- * so it needs no exemption and stays readable.
+ * True for a name whose CONTENT is the add-on registry with its env values:
+ * any name at the home root starting with `mcp-addons` or `.mcp-addons`,
+ * except a `.example.json` name (the templates, which stay readable).
+ * Over-masking is the safe direction, so every other suffix — `.bak`, a date,
+ * another `.json` segment, a `~`, and the writers' temp names — matches.
  */
 export function isAddonsFileName(n) {
   return ADDONS_FILE_NAME_RE.test(n);

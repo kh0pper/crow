@@ -72,17 +72,26 @@ test("secretFilesFor: a .env backup at each ROOT is listed (and refused if it is
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("isAddonsFileName: mcp-addons.json and every mcp-addons.json.<suffix> copy, the writers' .mcp-addons.json.tmp-* files, but not the .example template or a look-alike", () => {
+test("isAddonsFileName: any name starting with mcp-addons (or .mcp-addons) at the root, every copy shape and temp file included, but not the .example template or a look-alike", () => {
   for (const n of ["mcp-addons.json", "mcp-addons.json.bak", "mcp-addons.json.bak-20261111",
     "mcp-addons.json.bak.1781654126", "mcp-addons.json.pre-fed-gov-data-20260511",
     "mcp-addons.json.pre-test-contamination-20260711",
+    // Copies in other shapes, and an editor's backup.
+    "mcp-addons.json~", "mcp-addons.json-2026-11-01", "mcp-addons.bak.json", "mcp-addons-old.json",
     // A temp file the gateway's writePrivateFile, or migrate-linked's
-    // writeAtomicPrivate, holds beside the file until it renames it over it.
-    ".mcp-addons.json.tmp-12345-ab12cd34", ".mcp-addons.json.tmp-12345-lx9k2"]) {
+    // writeAtomicPrivate, holds beside the file until it renames it over it,
+    // and the no-dot one scripts/ops/pin-addon-command.mjs writes.
+    ".mcp-addons.json.tmp-12345-ab12cd34", ".mcp-addons.json.tmp-12345-lx9k2",
+    "mcp-addons.json.tmp-1234",
+    // Over-masking is the safe direction: a look-alike suffix inside the name
+    // still counts.
+    "mcp-addons.jsonx"]) {
     assert.equal(isAddonsFileName(n), true, n);
   }
+  // The exemption is on the `.example.json` suffix, not on the name, so the
+  // dotted template is exempt as well.
   for (const n of ["mcp-addons.example.json", ".mcp-addons.example.json", "xmcp-addons.json",
-    "mcp-addons.jsonx", ".env"]) {
+    ".env"]) {
     assert.equal(isAddonsFileName(n), false, n);
   }
 });
@@ -575,22 +584,42 @@ test("the add-on registry and its backups read empty inside a sandboxed spawn; m
   const addons = join(CROW, "mcp-addons.json");
   const addonsBackup = join(CROW, "mcp-addons.json.bak-20261111");
   const addonsExample = join(CROW, "mcp-addons.example.json");
+  const addonsTmp = join(CROW, ".mcp-addons.json.tmp-x");
+  const addonsTmpNoDot = join(CROW, "mcp-addons.json.tmp-1234");
   const fake = '{"fake-addon":{"env":{"FAKE_KEY":"fake-value"}}}\n';
-  for (const p of [addons, addonsBackup, addonsExample]) writeFileSync(p, fake, { mode: 0o600 });
+  for (const p of [addons, addonsBackup, addonsExample, addonsTmp, addonsTmpNoDot]) writeFileSync(p, fake, { mode: 0o600 });
   try {
-    const { report, masked } = await spawnReport({ files: { addons, addonsBackup, addonsExample } });
+    const { report, masked } = await spawnReport({ files: { addons, addonsBackup, addonsExample, addonsTmp, addonsTmpNoDot } });
     assert.equal(report.len.addons, 0, "mcp-addons.json reads empty inside");
     assert.equal(report.len.addonsBackup, 0, "its .bak-<date> copy reads empty inside");
+    assert.equal(report.len.addonsTmp, 0, "its temp file reads empty inside");
+    assert.equal(report.len.addonsTmpNoDot, 0, "its no-dot temp file reads empty inside");
     assert.equal(report.len.addonsExample, readFileSync(addonsExample).length,
       "the .example template is documentation and stays readable");
-    for (const p of ["mcp-addons.json", "mcp-addons.json.bak-20261111"]) {
+    for (const p of ["mcp-addons.json", "mcp-addons.json.bak-20261111", ".mcp-addons.json.tmp-x",
+      "mcp-addons.json.tmp-1234"]) {
       assert.ok(masked.includes(join(REAL_CROW, p)), "masked: " + p);
     }
     assert.equal(masked.includes(join(REAL_CROW, "mcp-addons.example.json")), false,
       "the .example template is not masked");
   } finally {
-    for (const p of [addons, addonsBackup, addonsExample]) rmSync(p, { force: true });
+    for (const p of [addons, addonsBackup, addonsExample, addonsTmp, addonsTmpNoDot]) rmSync(p, { force: true });
   }
+});
+
+test("mcp-addons.json with another hard link refuses the spawn, naming it and no content", { skip: noSandbox }, async () => {
+  const addons = join(CROW, "mcp-addons.json");
+  const extra = join(CROW, "mcp-addons-extra-name");
+  const fake = '{"fake-addon":{"env":{"FAKE_KEY":"fake-hardlinked-value"}}}\n';
+  writeFileSync(addons, fake, { mode: 0o600 });
+  // A second name on disk (masking one leaves the other readable).
+  linkSync(addons, extra);
+  try {
+    const e = await spawnOutcome();
+    assert.ok(e, "the spawn is refused");
+    assert.equal(e.message, "A bot could not start: mcp-addons.json has another name on disk, so Crow can't hide it. Remove the extra link.");
+    assert.ok(!e.message.includes("fake-hardlinked-value"), "no content in the message");
+  } finally { rmSync(extra, { force: true }); rmSync(addons, { force: true }); }
 });
 
 test("two refused spawns at one path log the journal line once, and both still refuse", { skip: noSandbox }, async () => {

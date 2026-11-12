@@ -73,10 +73,12 @@
  *    no_new_privs, so no escalation was found, but it stays open;
  *  - reading most of what the uid can read - S6. Most key files are hidden
  *    (hideFiles, see hidden_files.mjs): each Crow home's .env, .keystore-env,
- *    board-token, phone-token and artifacts-token, the app root's .env, and
- *    every .env / .env.* file in a bundle folder of each Crow home and of the
- *    app root, except the browser and workspace bundles'. They read empty
- *    inside. ~/.ssh is hidden as a dir always (created 0700 when it is
+ *    board-token, phone-token and artifacts-token, each Crow home's
+ *    mcp-addons.json and its copies (every name there starting with
+ *    mcp-addons or .mcp-addons, dotted temp files included), the app root's
+ *    .env, and every .env / .env.* file in a bundle folder of each Crow home
+ *    and of the app root, except the browser and workspace bundles'. They read
+ *    empty inside. ~/.ssh is hidden as a dir always (created 0700 when it is
  *    missing), and so are the instance's env/ and android-keystore/ folders.
  *    Still readable, because something inside the sandbox reads each one:
  *    the cloud model key (llm-cloud-token), the local models token
