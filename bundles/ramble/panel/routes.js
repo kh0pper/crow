@@ -270,7 +270,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   async function ensureMovesMods(res) {
     if (movesMods) return true;
     try {
-      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod] = await Promise.all([
+      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod] = await Promise.all([
         bundleImport("server/moves/library.js"),
         bundleImport("server/moves/picker.js"),
         bundleImport("server/moves/ledger.js"),
@@ -278,8 +278,11 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/moves/streak.js"),
         bundleImport("server/moves/learning.js"),
         bundleImport("server/moves/parse.js"),
+        bundleImport("server/moves/progress.js"),
       ]);
-      movesMods = { libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod };
+      movesMods = {
+        libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod,
+      };
       return true;
     } catch (err) {
       console.warn(`[ramble routes] moves modules unavailable: ${err.message}`);
@@ -1372,6 +1375,83 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     } catch (err) { movesInput(err); }
     await movesMods.streakMod.awardStreakHeart(db, { now, emit });
     res.json({ ...(await movesSnapshot(now)), done });
+  }));
+
+  /**
+   * The day's own card slots. Until a card can be played beyond today's cards, a
+   * start names one of these and the SERVER builds the full wallet key from
+   * today's day (`todayCard`), never from the client's clock.
+   */
+  const MOVE_CARD_SLOTS = ["early", "day", "evening"];
+  /**
+   * A progress post carries the FULL key a start answered with:
+   * `<day>:<slot>`. An extra's key (and a day other than the card's) is the
+   * caller's rule to add, not this one's.
+   */
+  const MOVE_CARD_KEY_RE = /^\d{4}-\d{2}-\d{2}:(early|day|evening)$/;
+  /** The most active seconds one post may claim (six hours). */
+  const MOVE_ACTIVE_MAX = 21600;
+
+  router.post("/api/ramble/moves/start", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const b = req.body || {};
+    const slot = requireText(b.cardKey, 80, "cardKey");
+    if (!MOVE_CARD_SLOTS.includes(slot)) bad("cardKey must be one of " + MOVE_CARD_SLOTS.join(", "));
+    const entryId = requireText(b.entryId, 80, "entryId");
+    const library = servedMoves();
+    const entry = movesMods.libraryMod.entryById(library, entryId);
+    if (!entry) return res.status(404).json({ error: "not found" });
+    // Only the card actually on screen can be played: the client names it, and a
+    // start for any other entry would open a session nothing can mark Done.
+    const today = await todayCard(now);
+    if (!today || today.off || !today.entry || today.entry.id !== entry.id) {
+      bad("entryId must be today's card");
+    }
+    const plannedSeconds = movesMods.progressMod.plannedSecondsFor({
+      chain: b.chain, entryId, library, entry,
+    });
+    const cardKey = today.day + ":" + slot;
+    const started = await movesMods.progressMod.startChunk(db, {
+      day: today.day, cardKey, plannedSeconds, now,
+    });
+    res.json({ cardKey, startedAt: started.startedAt });
+  }));
+
+  router.post("/api/ramble/moves/progress", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const b = req.body || {};
+    const cardKey = requireText(b.cardKey, 80, "cardKey");
+    if (!MOVE_CARD_KEY_RE.test(cardKey)) bad("cardKey must be the key a start answered with");
+    if (!Number.isInteger(b.chunkIndex) || b.chunkIndex < 0) {
+      bad("chunkIndex must be a non-negative whole number");
+    }
+    const activeSeconds = b.activeSeconds;
+    if (typeof activeSeconds !== "number" || !Number.isFinite(activeSeconds)
+        || activeSeconds < 0 || activeSeconds > MOVE_ACTIVE_MAX) {
+      bad(`activeSeconds must be a number from 0 to ${MOVE_ACTIVE_MAX}`);
+    }
+    const entryId = requireText(b.entryId, 80, "entryId");
+    const entry = movesMods.libraryMod.entryById(servedMoves(), entryId);
+    if (!entry) return res.status(404).json({ error: "not found" });
+
+    // The card key carries its day, and that is the day the minutes, the pay and
+    // the Done are filed under.
+    const day = cardKey.slice(0, 10);
+    let progress;
+    try {
+      progress = await movesMods.progressMod.recordProgress(db, {
+        day, cardKey, entry, activeSeconds, now, emit,
+      });
+    } catch (err) { movesInput(err); }
+    // The chunk pay has already happened, so a passed half-way mark is marked —
+    // `markChallengeDone`, never `recordChallengeDone`, which would pay again.
+    if (progress.done) {
+      await movesMods.ledgerMod.markChallengeDone(db, { day, entry, now, emit });
+      await movesMods.streakMod.awardStreakHeart(db, { now, emit });
+    }
+    res.json({ ...(await movesSnapshot(now)), progress });
   }));
 
   router.post("/api/ramble/moves/swap", handle(async (req, res) => {

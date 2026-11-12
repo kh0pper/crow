@@ -27,6 +27,7 @@ import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createRambleServer } from "../bundles/ramble/server/server.js";
 import { localDay } from "../bundles/ramble/server/eggs.js";
+import { chunkPoints } from "../bundles/ramble/server/moves/ledger.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dir, "..");
@@ -237,6 +238,113 @@ test("POST /moves/parse: with no model it falls back, and the request's words ar
 
   assert.equal((await send("POST", "/api/ramble/moves/parse", {})).status, 400);
   assert.equal((await send("POST", "/api/ramble/moves/parse", { text: "   " })).status, 400);
+});
+
+/* ------------------------------------------------- chunk progress (4.1) */
+
+/**
+ * The scratch db the router itself is using, opened with the same (core) client
+ * factory the router opened, so these assertions read the rows the routes wrote.
+ */
+async function scratchDb() {
+  const { createDbClient } = await import("../bundles/ramble/server/db.js");
+  return createDbClient(join(SCRATCH, "crow.db"));
+}
+
+async function walletTotal(db, day) {
+  const { rows } = await db.execute({
+    sql: `SELECT COALESCE(SUM(delta), 0) AS n FROM ramble_wallet
+          WHERE kind IN ('moveindoor', 'moveoutdoor') AND key = ?`,
+    args: [day],
+  });
+  return Number(rows[0]?.n) || 0;
+}
+
+async function doneCount(db, day) {
+  const { rows } = await db.execute({
+    sql: "SELECT count(*) AS n FROM ramble_wallet WHERE kind = 'movedone' AND key = ?",
+    args: [day],
+  });
+  return Number(rows[0]?.n) || 0;
+}
+
+/** Age the start record the route just wrote: the route has no clock seam. */
+async function ageStartRecord(db, cardKey, ms) {
+  const key = "local.moves.started." + cardKey;
+  const { rows } = await db.execute({ sql: "SELECT value FROM ramble_settings WHERE key = ?", args: [key] });
+  assert.ok(rows[0], "the start route wrote a record for this card");
+  const record = JSON.parse(String(rows[0].value));
+  await db.execute({
+    sql: "UPDATE ramble_settings SET value = ? WHERE key = ?",
+    args: [JSON.stringify({ ...record, startedAt: Date.now() - ms }), key],
+  });
+}
+
+test("POST /moves/start then /moves/progress: a ten-minute chunk leaves the day exactly one chunk better off", async () => {
+  const db = await scratchDb();
+  const card = (await (await get("/api/ramble/moves/today")).json()).challenge;
+  assert.ok(card, "there is a card to play");
+
+  const started = await send("POST", "/api/ramble/moves/start", { cardKey: "day", entryId: card.entry.id });
+  assert.equal(started.status, 200);
+  const start = await started.json();
+  assert.equal(start.cardKey, card.day + ":day", "the server builds the wallet key from its own day");
+  assert.ok(Number.isFinite(start.startedAt));
+
+  await ageStartRecord(db, start.cardKey, 11 * 60000);
+  const before = await walletTotal(db, card.day);
+
+  const posted = await send("POST", "/api/ramble/moves/progress", {
+    cardKey: start.cardKey, chunkIndex: 0, entryId: card.entry.id, activeSeconds: 600,
+  });
+  assert.equal(posted.status, 200);
+  const body = await posted.json();
+  assert.equal(body.progress.done, true, "ten minutes of a ten-minute card is done");
+  assert.equal(body.progress.accepted, 600);
+
+  // The chunk pay and the Done mark are two different writes: the mark pays
+  // nothing, so the day moves by exactly one chunk.
+  const gain = (await walletTotal(db, card.day)) - before;
+  assert.equal(gain, chunkPoints(10), "the wallet is exactly chunkPoints(10) higher");
+  assert.equal(body.progress.paid, gain, "and that is what the post says it paid");
+  assert.equal(await doneCount(db, card.day), 1, "exactly one movedone row for the day");
+  assert.equal(body.challenge.done, true);
+  db.close?.();
+});
+
+test("POST /moves/start and /moves/progress refuse junk: slots, key shape, and an unstarted card", async () => {
+  const db = await scratchDb();
+  const card = (await (await get("/api/ramble/moves/today")).json()).challenge;
+
+  assert.equal((await send("POST", "/api/ramble/moves/start", { cardKey: "extra", entryId: card.entry.id })).status, 400,
+    "a slot other than early/day/evening is refused for now");
+  assert.equal((await send("POST", "/api/ramble/moves/start", { cardKey: "day" })).status, 400,
+    "entryId is required");
+  assert.equal((await send("POST", "/api/ramble/moves/start", { cardKey: "day", entryId: "no-such-entry" })).status, 404,
+    "an entry the served library does not have is a 404, like the detail route");
+
+  for (const cardKey of ["day", card.day, card.day + ":bonus", card.day + ":x:walk-10:1"]) {
+    const r = await send("POST", "/api/ramble/moves/progress", {
+      cardKey, chunkIndex: 0, entryId: card.entry.id, activeSeconds: 60,
+    });
+    assert.equal(r.status, 400, `a card key that is not <day>:<slot> is refused: ${cardKey}`);
+  }
+  assert.equal((await send("POST", "/api/ramble/moves/progress", {
+    cardKey: card.day + ":early", chunkIndex: -1, entryId: card.entry.id, activeSeconds: 60,
+  })).status, 400, "chunkIndex must be a non-negative whole number");
+  assert.equal((await send("POST", "/api/ramble/moves/progress", {
+    cardKey: card.day + ":early", chunkIndex: 0, entryId: card.entry.id, activeSeconds: 21601,
+  })).status, 400, "activeSeconds is bounded");
+  assert.equal((await send("POST", "/api/ramble/moves/progress", {
+    cardKey: card.day + ":early", chunkIndex: 0, entryId: "no-such-entry", activeSeconds: 60,
+  })).status, 404, "an entry the served library does not have is a 404");
+
+  const before = await walletTotal(db, card.day);
+  assert.equal((await send("POST", "/api/ramble/moves/progress", {
+    cardKey: card.day + ":early", chunkIndex: 0, entryId: card.entry.id, activeSeconds: 600,
+  })).status, 400, "a card that was never started cannot be paid");
+  assert.equal(await walletTotal(db, card.day), before, "and the refused post wrote nothing");
+  db.close?.();
 });
 
 /* --------------------------------------------------------------- MCP tools */
