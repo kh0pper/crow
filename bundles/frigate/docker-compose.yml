@@ -1,6 +1,9 @@
 services:
   frigate:
-    image: ghcr.io/blakeblackshear/frigate:stable
+    # Pinned to the release tag AND the digest of the build in use (security audit
+    # N7-1): the registry's 0.18.2 tag resolves to this exact digest, so a tag
+    # re-point upstream cannot silently upgrade an installed Frigate.
+    image: ghcr.io/blakeblackshear/frigate:0.18.2@sha256:fd60f99ffd4eb6c42360ed4e14953e270586f239309ab3983e55b2e97ffac09a
     container_name: crow-frigate
     ports:
       # Authenticated UI + REST API — exposed on loopback; proxied through Crow gateway routes.js

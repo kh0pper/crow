@@ -36,7 +36,7 @@ Pick **Frigate** if you have RTSP cameras and want "who was at the front door at
 
 Or via **Extensions** in the Crow's Nest → find Frigate under **Cameras**.
 
-This runs Frigate in Docker using the official `ghcr.io/blakeblackshear/frigate:stable` image and exposes:
+This runs Frigate in Docker using the official `ghcr.io/blakeblackshear/frigate:0.18.2` image (digest-pinned in the compose file, so a restart never drifts to a different build) and exposes:
 
 - `:8971` — authenticated UI + REST API (loopback only)
 - `:8554` — RTSP restreamer (loopback only)

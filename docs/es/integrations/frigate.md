@@ -36,7 +36,7 @@ Elige **Frigate** si tienes cámaras RTSP y quieres que "¿quién estuvo en la p
 
 O vía **Extensiones** en el Crow's Nest → busca Frigate bajo **Cámaras**.
 
-Esto ejecuta Frigate en Docker usando la imagen oficial `ghcr.io/blakeblackshear/frigate:stable` y expone:
+Esto ejecuta Frigate en Docker usando la imagen oficial `ghcr.io/blakeblackshear/frigate:0.18.2` (fijada por digest en el archivo compose, así que un reinicio nunca pasa a otra compilación) y expone:
 
 - `:8971` — interfaz + API REST autenticadas (solo loopback)
 - `:8554` — restreamer RTSP (solo loopback)

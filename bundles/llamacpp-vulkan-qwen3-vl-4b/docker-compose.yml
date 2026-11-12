@@ -24,7 +24,9 @@ services:
     #   mkdir -p $LLM_CACHE/qwen3-vl-4b-instruct && cd $LLM_CACHE/qwen3-vl-4b-instruct
     #   curl -L -O $base/Qwen3-VL-4B-Instruct-Q8_0.gguf && curl -L -O $base/mmproj-F16.gguf
     #   sha256sum Qwen3-VL-4B-Instruct-Q8_0.gguf mmproj-F16.gguf
-    image: kyuz0/amd-strix-halo-toolboxes:vulkan-radv-mtp
+    # The upstream tag is rolling (it moves to a new build); the digest is the
+    # build crow runs. Bump both toolboxes together — they must stay on one image.
+    image: kyuz0/amd-strix-halo-toolboxes:vulkan-radv-mtp@sha256:7537b55fa3e1120a09522aa581bb94b6db311ef7fcec1f68b76b71ad4652cc9e
     container_name: llamacpp-vulkan-qwen3-vl-4b
     # Vulkan needs only the DRM render node (no /dev/kfd: no ROCm/HIP compute
     # queues, so it adds nothing to the host's KFD queue budget).

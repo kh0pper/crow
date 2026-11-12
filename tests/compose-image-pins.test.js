@@ -6,6 +6,12 @@
  * chose to update, and an image with no tag at all is `:latest` spelled
  * differently. A digest pin (`repo@sha256:…`) is pinned by definition.
  *
+ * A tag also has to LOOK like a version: `stable`, `server`, `edge`, `nightly`
+ * and friends are rolling tags, a silent upgrade under another name (security
+ * audit N7-1). The rule is deliberately mechanical — a tag with at least one
+ * digit in it is a version, a tag without one is not — because a per-image
+ * list of "known rolling tags" rots the moment upstream adds another.
+ *
  * Every `docker-compose*.yml` / `compose*.y*ml` in the repo (root and
  * bundles/**, node_modules skipped) is checked. Compose values are read as
  * written: `${VAR:-default}` resolves to its default (that is what compose does
@@ -105,7 +111,7 @@ export function resolveImageVars(raw) {
 
 /**
  * The pin verdict for one already-resolved image reference.
- * @returns {{ok: boolean, code?: "latest-tag"|"no-tag"|"unresolved-variable", detail?: string}}
+ * @returns {{ok: boolean, code?: "latest-tag"|"floating-tag"|"no-tag"|"unresolved-variable", detail?: string}}
  */
 export function checkImagePin(value) {
   const ref = String(value ?? "").trim();
@@ -121,6 +127,10 @@ export function checkImagePin(value) {
   const tag = tail.slice(colon + 1);
   if (!tag) return { ok: false, code: "no-tag", detail: "empty tag" };
   if (tag.toLowerCase() === "latest") return { ok: false, code: "latest-tag", detail: "tag is :latest" };
+  // A rolling tag (`stable`, `server`, `edge`, `nightly`, `vulkan-radv-mtp`, …)
+  // is :latest wearing another name: it moves upstream with no change here.
+  // A version tag carries a digit (`0.18.2`, `v2.1.0-cpu`, `server-b4500`).
+  if (!/\d/.test(tag)) return { ok: false, code: "floating-tag", detail: `tag ${tag} has no version; pin a versioned tag or add @sha256:` };
   return { ok: true };
 }
 
@@ -264,6 +274,33 @@ test("red: an image that is only a variable (no default) is reported, not passed
   const findings = checkComposeText("services:\n  app:\n    image: ${SOME_IMAGE}\n");
   assert.equal(findings.length, 1);
   assert.equal(findings[0].code, "unresolved-variable");
+});
+
+test("red: a rolling tag with no version in it fails even though it is not :latest", () => {
+  for (const tag of ["stable", "server", "latest-cpu", "vulkan-radv-mtp", "edge", "nightly"]) {
+    const findings = checkComposeText(`services:\n  app:\n    image: ghcr.io/example/app:${tag}\n`);
+    assert.equal(findings.length, 1, `:${tag} is reported`);
+    assert.equal(findings[0].code, "floating-tag", `:${tag} is a floating tag`);
+  }
+  assert.deepEqual(checkImagePin("ghcr.io/example/app:stable"), {
+    ok: false,
+    code: "floating-tag",
+    detail: "tag stable has no version; pin a versioned tag or add @sha256:",
+  });
+  // `latest` keeps its own code: it is the one tag worth naming separately.
+  assert.equal(checkImagePin("ghcr.io/example/app:latest").code, "latest-tag");
+});
+
+test("green: a versioned tag or a digest passes", () => {
+  const digest = "sha256:" + "0123456789abcdef".repeat(4);
+  for (const ref of [
+    "ghcr.io/example/app:0.18.2",
+    "localai/localai:v2.1.0-cpu",
+    "ghcr.io/ggml-org/llama.cpp:server-b4500",
+    `example/app:stable@${digest}`,
+  ]) {
+    assert.deepEqual(checkImagePin(ref), { ok: true }, ref);
+  }
 });
 
 test("red: a flow-style image is caught too (it does not start with `image:`)", () => {
