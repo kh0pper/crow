@@ -183,6 +183,29 @@ function declaredHomes(dirs, depth = 2) {
   return out;
 }
 
+/** The host-wide half of the co-host scan: where a Crow home outside $HOME is
+ * declared. Only these two are overridable by the test seam below; the
+ * per-user unit dir always comes from the caller's $HOME. */
+const SYSTEM_UNIT_DIRS = ["/etc/systemd/system"];
+const SYSTEM_ENV_FILE_DIRS = ["/etc/crow"];
+let systemScanDirs = null;   // null in production: the real /etc dirs
+
+/**
+ * TEST ONLY. Point the /etc half of the co-host scan (instanceSecretsDirs) at
+ * scratch dirs, so a dev box whose /etc declares an extra Crow home cannot
+ * change a test's spawn. The per-user dir ($HOME/.config/systemd/user) is
+ * still built from the caller's env, so a scratch HOME already controls it.
+ * Call with no arguments to restore the real defaults: production behaviour
+ * with no override is unchanged.
+ */
+export function _setSystemScanDirsForTest({ unitDirs, envFileDirs } = {}) {
+  if (unitDirs === undefined && envFileDirs === undefined) { systemScanDirs = null; return; }
+  systemScanDirs = {
+    unitDirs: unitDirs ?? SYSTEM_UNIT_DIRS,
+    envFileDirs: envFileDirs ?? SYSTEM_ENV_FILE_DIRS,
+  };
+}
+
 /**
  * The secrets dirs of EVERY other Crow home on this host, found by shape (a
  * `secrets/` dir, keychain.key or not), whatever the home is called: children of
@@ -194,8 +217,8 @@ function declaredHomes(dirs, depth = 2) {
  */
 export function instanceSecretsDirs(env = process.env, {
   home = env.HOME || homedir(),
-  unitDirs = [join(env.HOME || homedir(), ".config", "systemd", "user"), "/etc/systemd/system"],
-  envFileDirs = ["/etc/crow"],
+  unitDirs = [join(env.HOME || homedir(), ".config", "systemd", "user"), ...(systemScanDirs ? systemScanDirs.unitDirs : SYSTEM_UNIT_DIRS)],
+  envFileDirs = systemScanDirs ? systemScanDirs.envFileDirs : SYSTEM_ENV_FILE_DIRS,
   knownHomes = [],
 } = {}) {
   let self = secretsDir(env);

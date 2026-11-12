@@ -25,6 +25,15 @@ process.env.CROW_HOME = HOME;
 process.env.CROW_DATA_DIR = join(HOME, "data");
 delete process.env.CROW_DB_PATH;
 mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
+// The co-host scan must not read the HOST's /etc (a dev box with a declared
+// extra Crow home would change these spawns): point its /etc half at scratch,
+// empty dirs. $HOME is the scratch home above, so the per-user unit dir stays.
+const SCAN_UNITS = join(USER_HOME, "scan-units");
+const SCAN_ENV = join(USER_HOME, "scan-etc-crow");
+mkdirSync(SCAN_UNITS, { recursive: true });
+mkdirSync(SCAN_ENV, { recursive: true });
+const { _setSystemScanDirsForTest } = await import("../servers/shared/secret-values.js");
+_setSystemScanDirsForTest({ unitDirs: [SCAN_UNITS], envFileDirs: [SCAN_ENV] });
 const FAKE = "fakeGenSpawn" + "Ab3x".repeat(9);      // generated-secret shaped
 // a trusted card source: a manual keychain entry (sealed under a scratch key)
 const { sealSecret } = await import("../servers/sharing/secret-box.js");

@@ -969,24 +969,29 @@ export class PiRpc {
       // Already behind a folder hidden whole (secrets/, env/, android-keystore/).
       const hiddenWhole = (p) => hiddenWholeDirs.some((d) => p === d || p.startsWith(d + "/"));
       // Why a candidate could not be masked: the plain sentence for it, never
-      // its content. The FIRST link on the way up decides link-out vs
-      // link-inside; a path in (or a link into) a folder hidden whole says so.
-      // The link path itself comes back too: the sentence must name the link
-      // (a bundle FOLDER, say), not the file it leads to, and say which Crow
-      // home that link sits in (the repo checkout is a root, but no home).
+      // its content, plus the path that sentence must name. A file that is
+      // itself inside a folder hidden whole (secrets/, env/, android-keystore/)
+      // names its OWN path below its root: nothing was linked, so there is no
+      // link to show. Every other candidate is decided by the FIRST link on the
+      // way up — a link whose target is a folder hidden whole is a "hidden-dir"
+      // too — and that sentence names THE LINK'S path below its root (a bundle
+      // FOLDER, say), never the file it leads to, the way the link-out sentence
+      // names its link. The link's Crow home comes back too (the repo checkout
+      // is a trusted root, but no home).
       const causeOf = (f, rel) => {
         if (!rel) return { cause: "outside" };
-        if (hiddenWhole(f)) return { cause: "hidden-dir" };
+        if (hiddenWhole(f)) return { cause: "hidden-dir", name: rel };
         for (let a = f; a && hiddenCandidates.hideFileRoots.every((r) => a !== r); a = dirname(a)) {
           let lst; try { lst = lstatSync(a); } catch { break; }
           if (!lst.isSymbolicLink()) continue;
           const t = realRoot(a);
           const home = hiddenCandidates.hideFileRoots.filter((r) => a.startsWith(r + "/")).sort((x, y) => y.length - x.length)[0];
-          const link = { linkPath: a, home: hiddenCandidates.homes.includes(home) ? home : null };
-          if (t && hiddenWhole(t)) return { cause: "hidden-dir", ...link };
-          return { cause: t && hiddenCandidates.hideFileRoots.some((r) => t === r || t.startsWith(r + "/")) ? "link-inside" : "link-out", ...link };
+          // The link's own path below its root; the file is the link when a === f.
+          const named = { name: relOf(a) || rel, home: hiddenCandidates.homes.includes(home) ? home : null };
+          if (t && hiddenWhole(t)) return { cause: "hidden-dir", ...named };
+          return { cause: t && hiddenCandidates.hideFileRoots.some((r) => t === r || t.startsWith(r + "/")) ? "link-inside" : "link-out", ...named };
         }
-        return { cause: "link-inside" };
+        return { cause: "link-inside", name: rel };
       };
       for (const f of hiddenCandidates.hideFiles) {
         let st;
@@ -995,11 +1000,10 @@ export class PiRpc {
         if (st.isFile() && st.nlink > 1) refuse(f, unmaskableRefusal(rel || f, "hardlink"));
         if (maskedSet.has(f) || !(st.isFile() || st.isSymbolicLink())) continue;
         const why = causeOf(f, rel);
-        // A link on the way up is the name to show; the file itself is the
-        // link when it IS the link. No trusted root: the absolute path is the
-        // only name it has.
-        const linkRel = why.linkPath && why.linkPath !== f ? relOf(why.linkPath) : null;
-        refuse(f, unmaskableRefusal(linkRel || rel || f, why.cause, { home: why.home }));
+        // The cause says which name to show: the link on the way up, the file
+        // itself when there is no link. No trusted root: the absolute path is
+        // the only name it has.
+        refuse(f, unmaskableRefusal(why.name || rel || f, why.cause, { home: why.home }));
       }
       if (hiddenCandidates.sshDir && !launch.masked.includes(hiddenCandidates.sshDir)) {
         this._runContainCleanup();

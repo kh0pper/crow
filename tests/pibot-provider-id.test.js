@@ -21,6 +21,15 @@ mkdirSync(join(HOME, "data"), { recursive: true });
 process.env.CROW_HOME = HOME;
 process.env.CROW_DATA_DIR = join(HOME, "data");
 delete process.env.CROW_DB_PATH;
+// The co-host scan must not read the HOST's /etc (a dev box with a declared
+// extra Crow home would change these spawns): point its /etc half at scratch,
+// empty dirs. $HOME is the scratch home above, so the per-user unit dir stays.
+const SCAN_UNITS = join(USER_HOME, "scan-units");
+const SCAN_ENV = join(USER_HOME, "scan-etc-crow");
+mkdirSync(SCAN_UNITS, { recursive: true });
+mkdirSync(SCAN_ENV, { recursive: true });
+const { _setSystemScanDirsForTest } = await import("../servers/shared/secret-values.js");
+_setSystemScanDirsForTest({ unitDirs: [SCAN_UNITS], envFileDirs: [SCAN_ENV] });
 // Never the operator's real file: the engine reads this scratch one.
 const MODELS = join(USER_HOME, "scratch-models.json");
 process.env.PI_MODELS_JSON = MODELS;
