@@ -12,6 +12,7 @@ import {
   SERVICE_CONNECTIONS_DDL, CHAT_PROJECT_COLUMN, KEYCHAIN_CONNECTION_COLUMN, KEYCHAIN_SERVICE_INDEX_DDL,
 } from "../servers/shared/project-services-schema.js";
 import { SATELLITE_DDL } from "../servers/shared/satellite-schema.js";
+import { MAIL_DDL } from "../servers/shared/mail-schema.js";
 import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL, NOTE_WITHDRAWAL_COLUMNS } from "../servers/research/provenance-schema.js";
 
 // Ensure data directory exists
@@ -3055,6 +3056,14 @@ await initTable("voice_handoffs table", `
   CREATE INDEX IF NOT EXISTS idx_voice_handoffs_status ON voice_handoffs(status, expires_at);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_handoffs_phone_open ON voice_handoffs(device_id, kind) WHERE status = 'awaiting_phone';
 `);
+
+// mail tables: the user's mailboxes, folders, threads and messages, the FTS5 index over them, the
+// per-account sync state and the remote-image allow list (servers/gateway/mail/store/*). Epoch-ms
+// times; statuses are validated in the store (no CHECK). LOCAL ONLY (instance-sync
+// LOCAL_ONLY_TABLES): this is the user's mail. Same DDL as MAIL_DDL in
+// servers/shared/mail-schema.js, which scripts/migrations/0027-mail-store.mjs also runs — one shape,
+// two rails; additive, no SCHEMA_GENERATION bump.
+await initTable("mail tables", MAIL_DDL);
 
 // staged_sends: one row per provider draft a bot staged for the operator's yes (spec §12;
 // servers/gateway/staged/store.js). LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES): it holds the
