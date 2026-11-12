@@ -15,8 +15,9 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ENTRY_KINDS, LIMIT_TAGS, EQUIPMENT, ACTIVITY_KINDS,
-  FLOW_MIN, FLOW_MAX,
-  validateEntry, loadLibrary, servedLibrary, entryById,
+  AREAS, BALANCE_AREAS, BLOCK_KINDS, LANDMARK_KINDS,
+  FLOW_MIN, FLOW_MAX, CHUNK_MIN_MINUTES, STAGES_MAX, DEFAULT_MAX_ROUNDS,
+  stepOf, validateEntry, loadLibrary, servedLibrary, entryById,
 } from "../bundles/ramble/server/moves/library.js";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "ramble-moves-library");
@@ -83,7 +84,17 @@ function tempDir() {
 after(() => { for (const d of TEMP_DIRS) rmSync(d, { recursive: true, force: true }); });
 
 test("the vocabularies are the fixed lists", () => {
-  assert.deepEqual([...ENTRY_KINDS], ["pose", "exercise", "flow", "walk"]);
+  assert.deepEqual([...ENTRY_KINDS], ["pose", "exercise", "flow", "walk", "routine", "landmark"]);
+  assert.deepEqual([...AREAS], ["upper", "core", "lower", "heart", "mobility"]);
+  assert.deepEqual([...BALANCE_AREAS], ["mobility", "core", "upper", "lower"]);
+  assert.deepEqual([...BLOCK_KINDS], ["warmup", "cooldown"]);
+  assert.deepEqual([...LANDMARK_KINDS], [
+    "park", "trail", "stairs", "hill", "water", "track",
+    "playground", "bench", "plaza", "nest", "heart", "fog",
+  ]);
+  assert.equal(CHUNK_MIN_MINUTES, 10);
+  assert.equal(STAGES_MAX, 4);
+  assert.equal(DEFAULT_MAX_ROUNDS, 2);
   assert.deepEqual([...LIMIT_TAGS], [
     "knee", "lower_back", "neck", "shoulder", "wrist",
     "hip", "ankle", "balance", "pregnancy", "high_blood_pressure",
@@ -223,6 +234,109 @@ test("loadLibrary skips broken, invalid and dangling entries, naming each in a w
 test("a missing directory loads as an empty library rather than throwing", () => {
   const [lib] = captureWarnings(() => loadLibrary(join(FIXTURES, "no-such-dir")));
   assert.deepEqual(lib, []);
+});
+
+test("areas: a non-empty subset of AREAS, and optional", () => {
+  assert.equal(validateEntry(base({ areas: ["lower", "mobility"] })).ok, true);
+  assert.equal(validateEntry(base({ areas: ["heart"] })).ok, true);
+
+  const empty = validateEntry(base({ areas: [] }));
+  assert.equal(empty.ok, false);
+  assert.ok(empty.errors.some((e) => e.includes("areas")), empty.errors.join("; "));
+
+  const unknown = validateEntry(base({ areas: ["lower", "elbow"] }));
+  assert.equal(unknown.ok, false);
+  assert.ok(unknown.errors.some((e) => e.includes("areas")), unknown.errors.join("; "));
+
+  const absent = base();
+  delete absent.areas;
+  assert.equal(validateEntry(absent).ok, true, "an entry without areas still validates");
+});
+
+test("sets, reps and tempoSeconds are positive whole numbers; perSide is a boolean", () => {
+  for (const field of ["sets", "reps", "tempoSeconds"]) {
+    assert.equal(validateEntry(base({ [field]: 1 })).ok, true, `${field} accepts 1`);
+    assert.equal(validateEntry(base({ [field]: 12 })).ok, true, `${field} accepts 12`);
+    for (const bad of [0, -1, 1.5, "3"]) {
+      const v = validateEntry(base({ [field]: bad }));
+      assert.equal(v.ok, false, `${field} rejects ${String(bad)}`);
+      assert.ok(v.errors.some((e) => e.includes(field)), v.errors.join("; "));
+    }
+    const absent = base();
+    delete absent[field];
+    assert.equal(validateEntry(absent).ok, true, `${field} is optional`);
+  }
+
+  assert.equal(validateEntry(base({ perSide: true })).ok, true);
+  assert.equal(validateEntry(base({ perSide: false })).ok, true);
+  for (const bad of [1, "true", null]) {
+    const v = validateEntry(base({ perSide: bad }));
+    assert.equal(v.ok, false, `perSide rejects ${String(bad)}`);
+    assert.ok(v.errors.some((e) => e.includes("perSide")), v.errors.join("; "));
+  }
+});
+
+test("steps may be objects, and each part is checked", () => {
+  assert.equal(validateEntry(base({ steps: [{ text: "Press the floor away." }] })).ok, true);
+  assert.equal(validateEntry(base({ steps: ["Stand tall.", { text: "Lift your hips." }] })).ok, true);
+  assert.equal(validateEntry(base({
+    steps: [{ text: "Press the floor away.", cue: "Hips up and back.", say: "Press the floor away, and send your hips up and back.", at: 1 }],
+  })).ok, true);
+  assert.equal(validateEntry(base({ steps: [{ text: "Settle.", at: 0 }] })).ok, true, "at 0 is fine");
+
+  const emptyText = validateEntry(base({ steps: [{ text: "" }] }));
+  assert.equal(emptyText.ok, false);
+  assert.ok(emptyText.errors.some((e) => e.includes("steps")), emptyText.errors.join("; "));
+
+  const noText = validateEntry(base({ steps: [{ cue: "Just a cue." }] }));
+  assert.equal(noText.ok, false);
+  assert.ok(noText.errors.some((e) => e.includes("steps")), noText.errors.join("; "));
+
+  assert.equal(validateEntry(base({ steps: [{ text: "t", cue: "x".repeat(60) }] })).ok, true, "60 characters is the most a cue may hold");
+  const longCue = validateEntry(base({ steps: [{ text: "t", cue: "x".repeat(61) }] }));
+  assert.equal(longCue.ok, false);
+  assert.ok(longCue.errors.some((e) => e.includes("steps")), longCue.errors.join("; "));
+
+  const emptySay = validateEntry(base({ steps: [{ text: "t", say: "" }] }));
+  assert.equal(emptySay.ok, false);
+  assert.ok(emptySay.errors.some((e) => e.includes("steps")), emptySay.errors.join("; "));
+
+  for (const bad of [-1, 1.5, "1"]) {
+    const v = validateEntry(base({ steps: [{ text: "t", at: bad }] }));
+    assert.equal(v.ok, false, `at rejects ${String(bad)}`);
+    assert.ok(v.errors.some((e) => e.includes("steps")), v.errors.join("; "));
+  }
+
+  const emptyList = validateEntry(base({ steps: [] }));
+  assert.equal(emptyList.ok, false);
+  assert.ok(emptyList.errors.some((e) => e.includes("steps")), emptyList.errors.join("; "));
+});
+
+test("stepOf fills text, cue, say and at", () => {
+  assert.deepEqual(stepOf("x"), { text: "x", cue: "x", say: "x", at: 0 });
+  assert.deepEqual(stepOf({ text: "t", cue: "c" }), { text: "t", cue: "c", say: "c", at: 0 });
+  assert.deepEqual(stepOf({ text: "t" }), { text: "t", cue: "t", say: "t", at: 0 });
+  assert.deepEqual(stepOf({ text: "t", cue: "c", say: "s", at: 2 }), { text: "t", cue: "c", say: "s", at: 2 });
+});
+
+test("poses must be exactly two key positions", () => {
+  assert.equal(validateEntry(base({ poses: [{}, {}] })).ok, true);
+  assert.equal(validateEntry(base({ poses: [{ support: "feet" }, { support: "knees" }] })).ok, true);
+
+  const one = validateEntry(base({ poses: [{}] }));
+  assert.equal(one.ok, false);
+  assert.ok(one.errors.some((e) => e.includes("poses")), one.errors.join("; "));
+
+  const three = validateEntry(base({ poses: [{}, {}, {}] }));
+  assert.equal(three.ok, false);
+  assert.ok(three.errors.some((e) => e.includes("poses")), three.errors.join("; "));
+
+  const arrays = validateEntry(base({ poses: [[], []] }));
+  assert.equal(arrays.ok, false, "each position is an object, not an array");
+  assert.ok(arrays.errors.some((e) => e.includes("poses")), arrays.errors.join("; "));
+
+  const absent = base();
+  assert.equal(validateEntry(absent).ok, true, "poses is optional");
 });
 
 // Task 10: every entry that ships in the bundle validates, and every pose
