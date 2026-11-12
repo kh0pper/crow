@@ -30,5 +30,8 @@
   "player.sessionCap": "That's an hour. Plenty for one session.",
   "settings.slot.morning": "Morning",
   "settings.slot.midday": "Midday",
-  "settings.slot.evening": "Evening"
+  "settings.slot.evening": "Evening",
+  "player.voice": "Voice",
+  "player.sound": "Sounds",
+  "player.voiceUnavailable": "Voice isn't available on this device"
 }

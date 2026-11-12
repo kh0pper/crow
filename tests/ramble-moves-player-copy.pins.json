@@ -30,5 +30,8 @@
   "player.sessionCap": "939f2047b9b75705d37c3a9cdfbedfcd04bef665743e45eb8644995753c98fec",
   "settings.slot.morning": "e9376a281aac57bb78e2c769584e5eda9bb93699d299c3a42adc46b7b8e1ccd6",
   "settings.slot.midday": "66c33cf7da9929614324662525a8d4891b9cc7156047ed5746f0edd1f71f6598",
-  "settings.slot.evening": "458c1fed574354042397e664d6dabe58415c8ab629f052db5723fb42b490d280"
+  "settings.slot.evening": "458c1fed574354042397e664d6dabe58415c8ab629f052db5723fb42b490d280",
+  "player.voice": "87bf2bc08589f0bd4a078db145c34ad5e14b8fda53c3ae65b78601294913df95",
+  "player.sound": "6f305c4b18748376b835adf8bf633e2c633814744a5c363583103a0e3a8308fb",
+  "player.voiceUnavailable": "1d00ea75a1963792f5aa50e4f5d5e3fb254869e999445ed632353a69a4f17dab"
 }
