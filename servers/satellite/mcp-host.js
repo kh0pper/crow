@@ -41,6 +41,7 @@ import { checkLauncherArgs, resolveAddonCommand } from "../shared/resolve-comman
 import { installedPath, readInstalled } from "../gateway/bundle-core.js";
 import { memAvailableMb } from "./gate.js";
 import { readTextOrNull } from "./status.js";
+import { withoutLoaderEnv } from "../shared/loader-env.js";
 
 export const IDLE_STOP_MS = 10 * 60000;
 export const KILL_GRACE_MS = 5000;
@@ -59,6 +60,21 @@ const BUNDLE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const CROW_META = "crow.dev/";
 
 const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * A satellite child's environment: whatever it inherits (`baseEnv`), the add-on entry's own env
+ * without the loader names (a manifest-declared LD_PRELOAD or NODE_OPTIONS --require would run
+ * code before the server itself), then this host's own NODE_OPTIONS and the host mark, set last
+ * so neither the base nor the entry can claim or drop them.
+ */
+export function satelliteChildEnv(baseEnv = {}, entryEnv = null) {
+  return {
+    ...baseEnv,
+    ...withoutLoaderEnv(isObj(entryEnv) ? entryEnv : {}),
+    NODE_OPTIONS: CHILD_NODE_OPTIONS,
+    CROW_ADDON_HOST: "satellite",
+  };
+}
 const readJson = (p, fallback) => { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return fallback; } };
 const errorText = (text) => ({ content: [{ type: "text", text }], isError: true });
 
@@ -212,7 +228,7 @@ export function createMcpHost({
     const rc = resolveAddonCommand(config.command, { sha256: config.command_sha256, cwd });
     const argProblem = rc.missing ? null : checkLauncherArgs(rc.command, config.args);
     if (rc.missing || argProblem) throw new Error(`command '${config.command}' not usable: ${argProblem || rc.reason || "not found"}`);
-    const env = { ...baseEnv, ...(isObj(config.env) ? config.env : {}), NODE_OPTIONS: CHILD_NODE_OPTIONS, CROW_ADDON_HOST: "satellite" };
+    const env = satelliteChildEnv(baseEnv, config.env);
     const transport = new BoundedStdioTransport({ command: rc.command, args: Array.isArray(config.args) ? config.args : [], env, cwd });
     const entry = { id, transport, client: null, pid: null, inflight: 0, lastUsed: ++clock, idleTimer: null, stopping: null };
     entry.exited = new Promise((resolve) => { entry.markExited = resolve; });

@@ -21,6 +21,9 @@ import { badBundlePath, badPanelId } from "../../servers/shared/bundle-declared-
 // exactly what the card's own save route would refuse.
 import { isDeniedApiKeyEnvName } from "../../servers/gateway/bundle-apikey-save.js";
 import { safeSignupUrl } from "../../servers/gateway/dashboard/shared/api-key-card.js";
+// The loader/injection env names live in one import-free leaf module, shared with
+// routes/bundles.js (which never copies one into an mcp-addons entry).
+import { isLoaderEnvName } from "../../servers/shared/loader-env.js";
 
 const schema = JSON.parse(
   readFileSync(new URL("../../registry/manifest.schema.json", import.meta.url), "utf8"),
@@ -81,32 +84,9 @@ const TS_NET_RE = /\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.ts\.net\b/i;
 const INSTANCE_ID_HEX32_RE = /^[0-9a-f]{32}$/i;
 const ALLOWED_HOST_VALUES = new Set(["local", "cloud"]);
 
-/**
- * Env names that make a loader or interpreter run other code, or load other libraries,
- * before the program itself starts (NODE_OPTIONS' --require, PYTHONSTARTUP's file,
- * LD_PRELOAD's library). A bundle that could set one in a child's environment would be
- * injecting code into a process Crow starts, so the list lives here once and both ends
- * read it: validateManifest refuses a manifest declaring one, and routes/bundles.js
- * (mcpAddonEntryFor) never copies one into an mcp-addons entry.
- */
-export const LOADER_ENV_NAMES = Object.freeze([
-  "NODE_OPTIONS",
-  "NODE_PATH",
-  "PYTHONPATH",
-  "PYTHONSTARTUP",
-  "PYTHONHOME",
-  "LD_PRELOAD",
-  "LD_LIBRARY_PATH",
-  "DYLD_INSERT_LIBRARIES",
-  "PERL5OPT",
-  "RUBYOPT",
-]);
-const LOADER_ENV_NAME_SET = new Set(LOADER_ENV_NAMES);
-
-/** Is `name` one of LOADER_ENV_NAMES? Case-insensitive: a manifest may write `node_options`. */
-export function isLoaderEnvName(name) {
-  return typeof name === "string" && LOADER_ENV_NAME_SET.has(name.toUpperCase());
-}
+// The loader/injection env name list itself lives in servers/shared/loader-env.js:
+// validateManifest refuses a manifest declaring one (env_vars and server.envKeys), and
+// routes/bundles.js (mcpAddonEntryFor) never copies one into an mcp-addons entry.
 
 /** The sentence both loader-name refusals use, so the reason reads the same everywhere. */
 const LOADER_ENV_REASON = "loader/injection variable names (NODE_OPTIONS, LD_PRELOAD, ...) are not allowed";
