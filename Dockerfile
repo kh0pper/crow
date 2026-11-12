@@ -20,11 +20,10 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# Copy server code and scripts needed at runtime
-COPY servers/ servers/
-COPY scripts/init-db.js scripts/init-db.js
-COPY scripts/server-registry.js scripts/server-registry.js
-COPY scripts/generate-mcp-config.js scripts/generate-mcp-config.js
+# Copy the whole build context: init-db and the gateway reach well beyond
+# servers/ — scripts/, the migrations it walks, bundles/ and registry/ are all
+# imported at runtime. .dockerignore keeps secrets, data and junk out.
+COPY . .
 
 # Initialize database
 RUN mkdir -p data && node scripts/init-db.js

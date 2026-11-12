@@ -1022,9 +1022,20 @@ TAILSCALE_KEY_FPR="2596A99EAAB33821893C0A79458CA832957F5868"
 # real /etc/os-release, write under /etc/apt or /usr/share/keyrings, or reach
 # the network. The defaults are the real ones. CROW_CURL, CROW_SUDO and
 # CROW_APT come from the steps above.
-DOCKER_KEY_FPR="${CROW_TEST_DOCKER_KEY_FPR:-$DOCKER_KEY_FPR}"
-NODESOURCE_KEY_FPR="${CROW_TEST_NODESOURCE_KEY_FPR:-$NODESOURCE_KEY_FPR}"
-TAILSCALE_KEY_FPR="${CROW_TEST_TAILSCALE_KEY_FPR:-$TAILSCALE_KEY_FPR}"
+#
+# The three CROW_TEST_*_KEY_FPR overrides are read only inside the guard below,
+# and that guard is a test seam, not a security boundary. It is not claimed to be
+# unbypassable: an EXECUTED run with CROW_INSTALL_SOURCE_ONLY=1 stops at the
+# source-only seam further down, before any install step runs, so an exported
+# override cannot reach a real host that way. The BASH_SOURCE test in the same
+# guard is extra defence — a normally run installer (`bash crow-install.sh` or
+# the documented `curl … | bash`) therefore always uses the pinned constants
+# above, even if those variables are exported.
+if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  DOCKER_KEY_FPR="${CROW_TEST_DOCKER_KEY_FPR:-$DOCKER_KEY_FPR}"
+  NODESOURCE_KEY_FPR="${CROW_TEST_NODESOURCE_KEY_FPR:-$NODESOURCE_KEY_FPR}"
+  TAILSCALE_KEY_FPR="${CROW_TEST_TAILSCALE_KEY_FPR:-$TAILSCALE_KEY_FPR}"
+fi
 CROW_GPG="${CROW_GPG:-gpg}"
 CROW_OS_RELEASE="${CROW_OS_RELEASE:-/etc/os-release}"
 VENDOR_KEY_DIR="${VENDOR_KEY_DIR:-/etc/apt/keyrings}"
@@ -1197,6 +1208,7 @@ fetch_verified_key() {
 install_docker_repo() {
   local target="" flavor="" codename="" repo_path="debian" arch=""
   local key_path="$VENDOR_KEY_DIR/docker.asc" src_path="$APT_SOURCES_DIR/docker.sources" tmp=""
+  local legacy_list="$APT_SOURCES_DIR/docker.list"
 
   if ! apt_install ca-certificates curl gnupg; then
     error "Could not install ca-certificates, curl and gnupg, which are needed to add Docker's apt repository"
@@ -1256,6 +1268,38 @@ CRODOCKEREOF
     return 1
   fi
   rm -f "$tmp"
+
+  # A leftover docker.list (Docker's older install instructions) and our
+  # docker.sources describe the same repository with different Signed-By
+  # keyrings, and apt then refuses to update at all with "Conflicting values set
+  # for option Signed-By". Same rule as the NodeSource cleanup below: only after
+  # the key above was verified AND the new source file was written successfully,
+  # so a failed write never leaves the host with no Docker repository at all.
+  #
+  # Only an UNCOMMENTED line counts: a docker.list whose only mention of
+  # download.docker.com is commented out is not an active Docker source, so it is
+  # left alone. A file the invoking user cannot read is read through sudo_cmd
+  # instead of being called "not Docker's" on the strength of a failed read; if
+  # it cannot be read even that way, it is kept and the operator is told.
+  if [ -e "$legacy_list" ] || [ -L "$legacy_list" ]; then
+    local legacy_body="" legacy_readable=1
+    if [ -r "$legacy_list" ] && legacy_body="$(cat "$legacy_list" 2>/dev/null)"; then
+      :
+    elif ! legacy_body="$(sudo_cmd cat "$legacy_list" 2>/dev/null)"; then
+      legacy_readable=0
+    fi
+    if [ "$legacy_readable" = "0" ]; then
+      warn "Kept the legacy file $legacy_list: it could not be read, so it is not known whether it is Docker's"
+    elif printf '%s\n' "$legacy_body" | grep -qE '^[[:space:]]*[^#[:space:]].*download\.docker\.com'; then
+      if sudo_cmd rm -f "$legacy_list"; then
+        log "Removed the legacy Docker file $legacy_list"
+      else
+        warn "Could not remove the legacy Docker file $legacy_list"
+      fi
+    else
+      warn "Kept the legacy file $legacy_list: it has no active (uncommented) line with download.docker.com, so it is not Docker's"
+    fi
+  fi
 
   if ! sudo_cmd "$CROW_APT" update; then
     error "apt update failed after Docker's repository was added"

@@ -9,6 +9,13 @@ import { join, resolve } from "node:path";
 const SCRIPT = resolve(import.meta.dirname, "..", "scripts", "crow-install.sh");
 const src = () => readFileSync(SCRIPT, "utf-8");
 
+/** Index of the installer's source-only seam — the line that ends the helper
+ *  layer and starts the install body. A bare indexOf("CROW_INSTALL_SOURCE_ONLY")
+ *  no longer finds it: the test-only fingerprint overrides above the seam
+ *  reference the same variable in their own guard. */
+const SEAM = 'if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then';
+const seamIndex = (s) => s.indexOf(SEAM);
+
 /** Source the installer's helper layer (CROW_INSTALL_SOURCE_ONLY=1) and run a
  *  snippet against it. detached:true puts the child in a new session with no
  *  controlling terminal, so the /dev/tty open-probe fails → HAS_TTY=false and
@@ -231,7 +238,7 @@ test("4c MUTATION (platform gate): check_platform REJECTS non-Debian os-release,
 
 test("4c: platform gate is defined above the source-only seam and CALLED below it, before Step 1 / any system mutation", () => {
   const s = src();
-  const seamIdx = s.indexOf('CROW_INSTALL_SOURCE_ONLY');
+  const seamIdx = seamIndex(s);
   const defIdx = s.indexOf("check_platform()");
   const callMatch = s.match(/^if ! check_platform(;| )/m);
   assert.ok(defIdx !== -1, "check_platform() must be defined");
@@ -794,7 +801,7 @@ test("N1c-15: the firewall is up BEFORE crow-gateway and Caddy are enabled/start
   // (defined above the source-only seam) does the work; the call in the body has
   // to sit above every unit start.
   const dockerFixIdx = s.indexOf("\ninstall_ufw_docker\n");
-  assert.ok(dockerFixIdx > s.indexOf("CROW_INSTALL_SOURCE_ONLY"), "the ufw-docker step must still be CALLED in the install body");
+  assert.ok(dockerFixIdx > seamIndex(s), "the ufw-docker step must still be CALLED in the install body");
   // The audit's finding: the units were enabled and restarted first, so a
   // half-finished install listened on 3001/443 with no firewall in front of it.
   for (const re of [
@@ -821,7 +828,7 @@ test("N1c-15: the port precheck runs before Step 1 — nothing is installed or s
   const firstApt = s.search(/^sudo apt update$/m);
   assert.ok(firstApt > -1 && callIdx < firstApt, "…and above the first apt call");
   // Below the source-only seam, i.e. this is the executed body, not the helper.
-  assert.ok(callIdx > s.indexOf("CROW_INSTALL_SOURCE_ONLY"), "the call must be in the install body");
+  assert.ok(callIdx > seamIndex(s), "the call must be in the install body");
   assert.match(s.slice(callIdx, s.indexOf("\nfi\n", callIdx)), /exit 1/);
 });
 
@@ -1676,7 +1683,7 @@ test("N1b-2: bubblewrap is installed from apt before the auto-update timer turns
   assert.ok(idx > s.indexOf('header "Step 2/10: Node.js'), "in the Node variable step, before any use of a bot");
   assert.ok(idx < s.search(/header "Step \d+\/10: System Services"/), "before the gateway starts");
   // Defined above the source-only seam (so tests can drive it) and CALLED below it.
-  const seamIdx = s.indexOf("CROW_INSTALL_SOURCE_ONLY");
+  const seamIdx = seamIndex(s);
   assert.ok(s.indexOf("install_bwrap_apparmor()") > -1 && s.indexOf("install_bwrap_apparmor()") < seamIdx);
   const callIdx = s.indexOf("\ninstall_bwrap_apparmor\n");
   assert.ok(callIdx > seamIdx, "the install body really calls it");
@@ -2131,7 +2138,7 @@ test("N4-1: the old substring guard and the inline append are gone; the helper i
   assert.doesNotMatch(s, /grep -q "crow\/scripts"/, "the guard that never matched the line it wrote");
   assert.doesNotMatch(s, /echo "export PATH=/, "the inline append is gone too");
   assert.match(s, /grep -qxF -- "\$CROW_PATH_LINE" "\$HOME\/\.bashrc"/, "the guard compares the exact line");
-  const seamIdx = s.indexOf("CROW_INSTALL_SOURCE_ONLY");
+  const seamIdx = seamIndex(s);
   const defIdx = s.indexOf("add_crow_to_path() {");
   const callIdx = s.indexOf("\nadd_crow_to_path\n");
   assert.ok(defIdx > -1 && defIdx < seamIdx, "defined above the seam so tests can source it");
@@ -2212,7 +2219,7 @@ test("N1c-19: the installer summary carries the WSL note only on WSL", () => {
   // (so it is testable), and the install body only CALLS it, inside the closing
   // summary — no inlined copy, no prompt, and nothing WSL-specific earlier.
   const s = src();
-  const seamIdx = s.indexOf("CROW_INSTALL_SOURCE_ONLY");
+  const seamIdx = seamIndex(s);
   const noteIdxs = [...s.matchAll(new RegExp(NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))].map((m) => m.index);
   assert.equal(noteIdxs.length, 1, "the note text must exist exactly once (in the helper)");
   assert.ok(noteIdxs[0] < seamIdx, "and be defined above the seam so tests can drive it");
