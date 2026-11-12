@@ -10,7 +10,7 @@ import { symlinkSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REFUSAL,
-  BUNDLE_ENV_READABLE, ROOT_SECRET_FILES } from "../scripts/pi-bots/hidden_files.mjs";
+  BUNDLE_ENV_READABLE, ROOT_SECRET_FILES, isAddonsFileName } from "../scripts/pi-bots/hidden_files.mjs";
 
 test("secretFilesFor: root token files, the appRoot .env and every non-allow-listed bundle .env", () => {
   const root = mkdtempSync(join(tmpdir(), "crow-hidden-files-"));
@@ -69,6 +69,69 @@ test("secretFilesFor: a .env backup at each ROOT is listed (and refused if it is
       assert.ok(!files.includes(join(r, "bundles", "alpha", ".env.example")), "in a bundle dir too: " + r);
     }
     assert.equal(new Set(files).size, files.length, "deduped");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("isAddonsFileName: mcp-addons.json and every mcp-addons.json.<suffix> copy, the writers' .mcp-addons.json.tmp-* files, but not the .example template or a look-alike", () => {
+  for (const n of ["mcp-addons.json", "mcp-addons.json.bak", "mcp-addons.json.bak-20261111",
+    "mcp-addons.json.bak.1781654126", "mcp-addons.json.pre-fed-gov-data-20260511",
+    "mcp-addons.json.pre-test-contamination-20260711",
+    // A temp file the gateway's writePrivateFile, or migrate-linked's
+    // writeAtomicPrivate, holds beside the file until it renames it over it.
+    ".mcp-addons.json.tmp-12345-ab12cd34", ".mcp-addons.json.tmp-12345-lx9k2"]) {
+    assert.equal(isAddonsFileName(n), true, n);
+  }
+  for (const n of ["mcp-addons.example.json", ".mcp-addons.example.json", "xmcp-addons.json",
+    "mcp-addons.jsonx", ".env"]) {
+    assert.equal(isAddonsFileName(n), false, n);
+  }
+});
+
+test("secretFilesFor: mcp-addons.json, every backup copy and a writer's temp file at the CROW HOME root only, not the .example template and never at appRoot", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-hidden-addons-"));
+  const crowHome = join(root, ".crow");
+  const appRoot = join(root, "app");
+  mkdirSync(crowHome, { recursive: true });
+  mkdirSync(appRoot, { recursive: true });
+  const fake = '{"fake-addon":{"env":{"FAKE_KEY":"fake-value"}}}\n';
+  const copies = ["mcp-addons.json", "mcp-addons.json.bak-20261111", "mcp-addons.json.bak.1781654126",
+    "mcp-addons.json.pre-test-contamination-20260711"];
+  // The gateway's writer (writePrivateFile) holds this name until it renames it
+  // over mcp-addons.json: full add-on env, so it is a secret of its own.
+  const tmpName = ".mcp-addons.json.tmp-12345-ab12cd34";
+  try {
+    for (const n of [...copies, "mcp-addons.example.json", tmpName]) writeFileSync(join(crowHome, n), fake);
+    // The repo checkout never holds one, so even one sitting there is not ours to mask.
+    writeFileSync(join(appRoot, "mcp-addons.json"), fake);
+    writeFileSync(join(appRoot, tmpName), fake);
+    const files = secretFilesFor({ crowHome, appRoot });
+    for (const n of copies) assert.ok(files.includes(join(crowHome, n)), "listed: " + n);
+    assert.ok(files.includes(join(crowHome, tmpName)), "the writer's temp file is listed: " + tmpName);
+    assert.ok(!files.includes(join(crowHome, "mcp-addons.example.json")), "the .example template is documentation");
+    assert.ok(!files.some((f) => f.startsWith(appRoot + "/") && f.includes("mcp-addons")),
+      "nothing named mcp-addons* under appRoot");
+    assert.equal(new Set(files).size, files.length, "deduped");
+    // Listed even when it does not exist: wrapPiSpawn skips a file it cannot stat.
+    const emptyHome = join(root, "empty-crow");
+    mkdirSync(emptyHome, { recursive: true });
+    assert.ok(secretFilesFor({ crowHome: emptyHome }).includes(join(emptyHome, "mcp-addons.json")),
+      "the plain file is listed whether it exists or not");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("secretFilesFor: a symlinked mcp-addons.json backup leaving the roots is listed under its own name, so the spawn is refused", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-hidden-addonslink-"));
+  const crowHome = join(root, ".crow");
+  const outside = join(root, "outside");
+  mkdirSync(crowHome, { recursive: true });
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "real.json"), '{"fake-addon":{"env":{"FAKE_KEY":"fake-value"}}}\n');
+  const link = join(crowHome, "mcp-addons.json.bak-x");
+  symlinkSync(join(outside, "real.json"), link);
+  try {
+    const files = secretFilesFor({ crowHome });
+    assert.ok(files.includes(link), "listed under its own link name");
+    assert.ok(!files.includes(join(outside, "real.json")), "never the path behind an outside link");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -506,6 +569,28 @@ test("the instance env/ and android-keystore/ folders list empty inside", { skip
     assert.deepEqual(report.list.env, [], "env/ is empty inside");
     assert.deepEqual(report.list.keystore, [], "android-keystore/ is empty inside");
   } finally { rmSync(envDir, { recursive: true, force: true }); rmSync(keyDir, { recursive: true, force: true }); }
+});
+
+test("the add-on registry and its backups read empty inside a sandboxed spawn; mcp-addons.example.json stays readable", { skip: noSandbox }, async () => {
+  const addons = join(CROW, "mcp-addons.json");
+  const addonsBackup = join(CROW, "mcp-addons.json.bak-20261111");
+  const addonsExample = join(CROW, "mcp-addons.example.json");
+  const fake = '{"fake-addon":{"env":{"FAKE_KEY":"fake-value"}}}\n';
+  for (const p of [addons, addonsBackup, addonsExample]) writeFileSync(p, fake, { mode: 0o600 });
+  try {
+    const { report, masked } = await spawnReport({ files: { addons, addonsBackup, addonsExample } });
+    assert.equal(report.len.addons, 0, "mcp-addons.json reads empty inside");
+    assert.equal(report.len.addonsBackup, 0, "its .bak-<date> copy reads empty inside");
+    assert.equal(report.len.addonsExample, readFileSync(addonsExample).length,
+      "the .example template is documentation and stays readable");
+    for (const p of ["mcp-addons.json", "mcp-addons.json.bak-20261111"]) {
+      assert.ok(masked.includes(join(REAL_CROW, p)), "masked: " + p);
+    }
+    assert.equal(masked.includes(join(REAL_CROW, "mcp-addons.example.json")), false,
+      "the .example template is not masked");
+  } finally {
+    for (const p of [addons, addonsBackup, addonsExample]) rmSync(p, { force: true });
+  }
 });
 
 test("two refused spawns at one path log the journal line once, and both still refuse", { skip: noSandbox }, async () => {
