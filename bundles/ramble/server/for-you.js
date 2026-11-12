@@ -20,8 +20,10 @@
  * disagree. The day's cards are drawn first (moves/slots.js dayCards) for the same reason the
  * panel draws them: that draw mirrors the day's Now card into `moves.today`, so the legacy single
  * card here IS the Now card of the day's slots. `weather` is the weather the For You page already
- * loaded ({ rain, temp, code }), passed in by the gateway — this module fetches nothing, and
- * todayForSurface drops it when the user turned weather off. `library` is a seam for tests;
+ * loaded ({ rain, temp, code }), passed in by the gateway — this module fetches nothing. Turning
+ * weather off (prefs.weather === false) means the picker never sees a forecast on EITHER draw: the
+ * day's cards below drop it and so does todayForSurface, the way Ramble's own panel does. Neither
+ * surface can be handed a forecast the other ignores. `library` is a seam for tests;
  * production passes none and the picker reads the served (reviewed, licensed) library. `lang`
  * picks the language of the why line.
  *
@@ -34,7 +36,7 @@
  * Ramble's own routes'); without one the writes stay local and nothing fails. Works without a
  * model.
  */
-import { todayForSurface } from "./moves/today.js";
+import { readPrefs, todayForSurface } from "./moves/today.js";
 import { dayCards } from "./moves/slots.js";
 import { streakState } from "./moves/streak.js";
 import { petState } from "./pet.js";
@@ -43,12 +45,17 @@ import { stepsState } from "./steps.js";
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 export async function forYouMoves(db, { now = Date.now(), weather = null, library, lang = "en", emit } = {}) {
+  // The live prefs are read once, here, so the day's cards are drawn with the
+  // same weather switch todayForSurface applies: weather off means the picker
+  // is handed no forecast at all, never the page's raw one.
+  const prefs = await readPrefs(db);
+  const dayWeather = prefs.weather === false ? null : weather;
   // The day's cards are drawn first (moves/slots.js dayCards), because that
   // draw is what mirrors the Now card into the one card `moves.today` carries —
   // the row todayForSurface reads back. A failure drawing them is logged and
   // the card below is still assembled from the stored one.
   try {
-    await dayCards(db, { now, weather, emit, library });
+    await dayCards(db, { now, weather: dayWeather, emit, library });
   } catch (err) {
     try { console.warn(`[ramble for-you] moves day cards unavailable: ${err?.message ?? err}`); } catch {}
   }

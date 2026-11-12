@@ -249,6 +249,62 @@ test("Ramble's module: read first, the card is the day's Now slot; the day after
   } finally { db.close(); }
 });
 
+/**
+ * A library whose heart slot can go either way: one heart chunk needs the outdoors, one does not,
+ * and every other chunk is indoor. The outdoor one also trains upper, so it is the picker's
+ * preferred heart chunk while the forecast lets it through.
+ */
+function weatherChunks() {
+  return [
+    entry({ id: "heart-out", title: "A heart walk in the park", areas: ["heart", "upper"], indoor: false }),
+    entry({ id: "heart-in", title: "A heart chunk indoors", areas: ["heart"] }),
+    entry({ id: "mobility-1", title: "A mobility chunk", areas: ["mobility"] }),
+    entry({ id: "upper-1", title: "An upper chunk", areas: ["upper"] }),
+    entry({ id: "lower-1", title: "A lower chunk", areas: ["lower"] }),
+    entry({ id: "core-1", title: "A core chunk", areas: ["core"] }),
+  ];
+}
+
+test("Ramble's module: the weather switch reaches the day's cards, so a forecast the user turned off draws no slot", async () => {
+  const now = new Date(2026, 9, 30, 12, 0, 0).getTime(); // local noon: the picker's midday, the heart slot
+  const rain = { rain: 90, temp: 14, code: 61 };
+  const lib = weatherChunks();
+  const { dayCards } = await import("../bundles/ramble/server/moves/slots.js");
+  const { writePrefs } = await import("../bundles/ramble/server/moves/today.js");
+  const middayOf = (day) => day.slots.find((item) => item.slot === "midday");
+
+  // Weather on (the default): the rain keeps every slot of the day indoors.
+  const wet = await rambleDb();
+  try {
+    const card = await B.forYouMoves(wet, { now, weather: rain, library: lib });
+    const day = await dayCards(wet, { now, weather: rain, library: lib });
+    for (const item of day.slots) {
+      assert.notEqual(item.entryId, null, item.slot);
+      assert.equal(lib.find((e) => e.id === item.entryId).indoor, true, item.slot);
+    }
+    assert.equal(middayOf(day).entryId, "heart-in", "the heart slot takes the indoor chunk");
+    assert.equal(card.challenge.entryId, middayOf(day).entryId, "the card is the day's Now slot");
+  } finally { wet.close(); }
+
+  // Weather off: the page's rain never reaches the picker, so the day is drawn as it is with no
+  // weather at all — the picker's own no-weather draw on a second fresh db is the expectation.
+  const none = await rambleDb();
+  const off = await rambleDb();
+  try {
+    const noWeather = await dayCards(none, { now, weather: null, library: lib });
+    assert.equal(middayOf(noWeather).entryId, "heart-out",
+      "with no weather the picker is free to take the outdoor heart chunk");
+
+    await writePrefs(off, { weather: false });
+    const card = await B.forYouMoves(off, { now, weather: rain, library: lib });
+    const stored = JSON.parse(await readMovesSetting(off, "moves.slot.midday"));
+    assert.equal(stored.entryId, middayOf(noWeather).entryId,
+      "the heart slot is drawn exactly as it is with weather null");
+    assert.notEqual(stored.entryId, "heart-in", "the rain no longer reaches the slot");
+    assert.equal(card.challenge.entryId, stored.entryId, "and the card is that slot");
+  } finally { none.close(); off.close(); }
+});
+
 // ---- the card's markup -------------------------------------------------------
 
 const movesOk = () => ({
