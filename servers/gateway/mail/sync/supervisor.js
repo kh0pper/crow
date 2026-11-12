@@ -342,20 +342,29 @@ export function createMailSupervisor(options = {}) {
    * The sync worker's connection, made on demand and kept for the next run.
    *
    * A connection is adopted only while it is still wanted. A run that was closed out while its
-   * handshake was in flight (its deadline fired, or `stop()` closed it) must not store the connection
-   * it finally got: that would resurrect a stopped worker and could replace the connection a later
-   * run already opened. Such a late connection is closed here instead.
+   * handshake was in flight (its deadline fired, `stop()`, or `restartAccount`) must not store the
+   * connection it finally got: that would resurrect a stopped worker, and by then a later run may
+   * already hold its own connection. Such a late connection is closed here instead.
    */
   async function workerAdapter(worker, run = null) {
     if (worker.adapter) return worker.adapter;
     const account = await accountOrNull(worker.accountId);
     if (!account) throw new MailError("NOT_FOUND", "account");
     const adapter = await openAdapter(account);
-    const closedOut = run != null && run.closedOut === true;
-    if (closedOut || !live() || worker.adapter != null) {
+    // A run closed out while its handshake was in flight (a restart, `stop()`, the deadline) never
+    // adopts the connection it finally got — not even when a later run has already stored one, which
+    // is that later run's connection and not this run's. It is closed here and the late run ends with
+    // NETWORK/`run_closed`, so it can never carry on into a pass beside the fresh run.
+    if (run != null && run.closedOut === true) {
       await closeAdapterValue(adapter, worker.accountId);
+      throw new MailError("NETWORK", "run_closed");
+    }
+    if (!live() || worker.adapter != null) {
+      await closeAdapterValue(adapter, worker.accountId);
+      // A run-less caller (ensureWatch) or a live run that lost a benign race takes the connection
+      // the worker already holds instead of replacing it.
       if (worker.adapter != null) return worker.adapter;
-      throw new MailError("NETWORK", closedOut ? "run_closed" : "stopped");
+      throw new MailError("NETWORK", "stopped");
     }
     worker.adapter = adapter;
     return adapter;
@@ -1241,6 +1250,9 @@ export function createMailSupervisor(options = {}) {
    * when the run settles and never rejects because the sync failed: a failure is reported in
    * `status()` and `mail_sync_state`, not thrown at the caller who asked for it (plan 2's callers
    * read `status()`). After `stop()` it is a no-op.
+   *
+   * A caller joined to a run that `restartAccount` ends resolves at the restart, not when the fresh
+   * full sync that follows settles: the fresh run covers the joined caller's request.
    */
   async function syncNow(accountId) {
     const worker = await prepare(accountId, { resume: true });

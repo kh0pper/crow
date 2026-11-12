@@ -1382,6 +1382,64 @@ test("a late-connecting adapter from a timed-out run replaces and closes nothing
   await h.supervisor.stop();
 });
 
+/* -------------------- a closed-out run never adopts a fresh connection (B1) */
+
+test("a run closed out by restartAccount never adopts the fresh run's connection", async () => {
+  let inner = null;
+  let firstCall = true;
+  let releaseFirst = null;
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const h = await setup({
+    start: false,
+    adapterFactory: async (args) => {
+      // Only the FIRST factory call is parked, and it is parked before any view exists: the run is
+      // held in its connect handshake.
+      if (firstCall) {
+        firstCall = false;
+        await firstGate;
+      }
+      return inner(args);
+    },
+  });
+  inner = h.factory;
+
+  const runA = h.supervisor.syncNow(h.accountId);
+  await flush(20);
+  assert.equal(h.views.length, 0);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+
+  // The owner stored a new password while that handshake was still hanging: the run in flight is
+  // closed out, and the fresh full sync goes out through the factory's second call and settles.
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(200);
+  const listsAfterRestart = callsOf(h.fake, "listFolders").length;
+  const folderListingsAfterRestart = callsOf(h.fake, "list").length;
+  assert.equal(listsAfterRestart, 1);
+  assert.equal(h.views.length, 1);
+  assert.equal(h.secrets.at(-1), "second-secret");
+  // The caller joined to the run the restart ended resolves at the restart, not with the fresh run.
+  await runA;
+
+  // Now the abandoned handshake finally lands. It must not be given the fresh run's connection: that
+  // would run a second full pass beside the fresh one on one connection.
+  releaseFirst();
+  await flush(200);
+
+  assert.equal(callsOf(h.fake, "listFolders").length, listsAfterRestart);
+  assert.equal(callsOf(h.fake, "list").length, folderListingsAfterRestart);
+  assert.equal(h.views.length, 2);
+  assert.equal(h.views.at(-1).state.closed, true);
+  assert.equal(h.views[0].state.closed, false);
+  const state = await getSyncState(h.db, h.accountId);
+  assert.equal(state.failures, 0);
+  assert.notEqual(state.state, "backoff");
+  assert.equal(state.state, "idle");
+  await h.supervisor.stop();
+});
+
 /* -------------------------------- the action deadline covers the connect (S5) */
 
 test("withAdapter times out a hanging connect and the next call proceeds", async () => {
