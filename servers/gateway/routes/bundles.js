@@ -87,6 +87,7 @@ import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
 import { recordKeptData, clearKeptData, keptDataMatches, recordKeptDataOnUninstall, setWallMode, ADDON_WALL_SWITCH_KEYS } from "../../shared/addon-walls-file.js";
 import { legacyOwnerKeys, profileFor, pendingHostFields } from "../../../scripts/addon-sandbox/profile.mjs";
+import { LOADER_ENV_NAMES } from "../../../scripts/lib/bundle-contract.mjs";
 import { wallsOnForHost } from "../../../scripts/addon-sandbox/host-switch.mjs";
 import { pinEntryIfWalled, PinRefused } from "../../../scripts/addon-sandbox/pin.mjs";
 import { sandboxLine } from "../../../scripts/addon-sandbox/words.mjs";
@@ -1673,6 +1674,7 @@ export function removePanelEnabled(panelId, path = PANELS_CONFIG_PATH) {
  * The mcp-addons.json entry for a manifest that declares `server` — the single shape both
  * install (either branch) and the version refresh write. envKeys values come only from an
  * install request; every truthy env_vars default rides along (unchanged install behaviour).
+ * A loader name (LOADER_ENV_NAMES) never rides along, whatever the manifest asks for.
  */
 // `reqEnv` may carry generated values (runInstallJob passes them): only keys the manifest
 // lists in server.envKeys reach the entry, so a generated secret reaches its own MCP child
@@ -1687,10 +1689,17 @@ function generatedPlainForMcp(manifest, generated) {
 export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null, edited = null, generatedKeys = [], owner = false, priorEntry = null, bundleId = null } = {}) {
   const env = {};
   const fromRequest = new Set();
+  // A loader name (NODE_OPTIONS, LD_PRELOAD, ...) never enters the entry: the child would
+  // run whatever the value points at before its own code. Same list the manifest contract
+  // refuses (scripts/lib/bundle-contract.mjs), compared case-insensitively.
   for (const key of manifest?.server?.envKeys || []) {
+    if (typeof key === "string" && LOADER_ENV_NAMES.includes(key.toUpperCase())) continue;
     if (reqEnv && reqEnv[key]) { env[key] = reqEnv[key]; fromRequest.add(key); }
   }
-  for (const v of manifest?.env_vars || []) if (v.default && !env[v.name]) env[v.name] = v.default;
+  for (const v of manifest?.env_vars || []) {
+    if (!v || (typeof v.name === "string" && LOADER_ENV_NAMES.includes(v.name.toUpperCase()))) continue;
+    if (v.default && !env[v.name]) env[v.name] = v.default;
+  }
   // Which values the OWNER entered (never a manifest default): the form's edited list,
   // plus a requested value that differs from its manifest default and from every default a
   // version of the manifest has shipped (a generated key is minted by Crow, not typed).

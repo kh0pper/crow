@@ -82,6 +82,36 @@ const INSTANCE_ID_HEX32_RE = /^[0-9a-f]{32}$/i;
 const ALLOWED_HOST_VALUES = new Set(["local", "cloud"]);
 
 /**
+ * Env names that make a loader or interpreter run other code, or load other libraries,
+ * before the program itself starts (NODE_OPTIONS' --require, PYTHONSTARTUP's file,
+ * LD_PRELOAD's library). A bundle that could set one in a child's environment would be
+ * injecting code into a process Crow starts, so the list lives here once and both ends
+ * read it: validateManifest refuses a manifest declaring one, and routes/bundles.js
+ * (mcpAddonEntryFor) never copies one into an mcp-addons entry.
+ */
+export const LOADER_ENV_NAMES = Object.freeze([
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "PYTHONHOME",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "PERL5OPT",
+  "RUBYOPT",
+]);
+const LOADER_ENV_NAME_SET = new Set(LOADER_ENV_NAMES);
+
+/** Is `name` one of LOADER_ENV_NAMES? Case-insensitive: a manifest may write `node_options`. */
+export function isLoaderEnvName(name) {
+  return typeof name === "string" && LOADER_ENV_NAME_SET.has(name.toUpperCase());
+}
+
+/** The sentence both loader-name refusals use, so the reason reads the same everywhere. */
+const LOADER_ENV_REASON = "loader/injection variable names (NODE_OPTIONS, LD_PRELOAD, ...) are not allowed";
+
+/**
  * Recursively scan every string value in a manifest for a leaked Tailscale
  * identity: a tailnet IP, a *.ts.net hostname, or (scoped to keys literally
  * named "host") a 32-hex instance-id string other than "local"/"cloud".
@@ -576,6 +606,7 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
 
   for (const v of (manifest && Array.isArray(manifest.env_vars)) ? manifest.env_vars : []) {
     if (!v || typeof v !== "object") continue;
+    if (isLoaderEnvName(v.name)) errors.push(`env_vars ${v.name}: ${LOADER_ENV_REASON}`);
     if (v.store_as !== undefined) {
       if (v.store_as !== "argon2id") errors.push(`env_vars ${v.name}: store_as must be "argon2id"`);
       if (v.generate !== "secret") errors.push(`env_vars ${v.name}: store_as needs generate: "secret"`);
@@ -627,6 +658,13 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
       if (v.generate !== undefined) errors.push(`env_vars ${v.name}: generatable is for typed fields; it cannot be combined with generate`);
       if (v.propagate !== false) errors.push(`env_vars ${v.name}: generatable needs propagate: false (a human password must not be copied into the gateway .env)`);
     }
+  }
+
+  // A loader name the server would hand its own MCP child is refused at the manifest too,
+  // not only skipped at entry-build time: the manifest is the declaration, and a bundle
+  // asking for NODE_OPTIONS is asking for code injection.
+  for (const key of (manifest && manifest.server && Array.isArray(manifest.server.envKeys)) ? manifest.server.envKeys : []) {
+    if (isLoaderEnvName(key)) errors.push(`server.envKeys ${key}: ${LOADER_ENV_REASON}`);
   }
 
   // 3b. firstAdmin (security audit N3-4): how the bundle's own first admin is created.

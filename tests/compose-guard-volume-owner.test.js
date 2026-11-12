@@ -8,6 +8,9 @@
 //   - a community bundle may not take the id "crow" or a "crow-" prefix, nor a compose
 //     project another known bundle could own (crow-browser-r4 fits browser too);
 //   - a docker error while checking fails closed.
+// An external volume gets the same owner check (its real name is the declared name, not
+// `<project>_<name>`), before the consent gate: verified consent does not say whose data
+// an existing volume holds.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, readFileSync } from "node:fs";
@@ -26,6 +29,11 @@ const CTX = (vols = {}, known = KNOWN) => ({
 const dir = (id) => { const d = join(home, "bundles", id); mkdirSync(d, { recursive: true }); return d; };
 const model = (project, volumes) => ({ name: project, services: { app: { image: "busybox", volumes: Object.keys(volumes).map((k) => ({ type: "volume", source: k, target: "/data/" + k })) } }, volumes });
 const check = (id, m, vols, manifest = {}, known) => G.checkComposeModel(m, { bundleDir: dir(id), manifest: { id, origin: "community", ...manifest }, consentVerified: false, ctx: CTX(vols, known) });
+// Verified consent: only a non-community manifest carrying 'privileged: true' can have it.
+const consenting = (id) => ({ id, privileged: true });
+const consented = (id, m, vols, known) => G.checkComposeModel(m, { bundleDir: dir(id), manifest: consenting(id), consentVerified: true, ctx: CTX(vols, known) });
+const gated = (id, m, vols, known) => G.checkComposeModel(m, { bundleDir: dir(id), manifest: consenting(id), consentVerified: false, ctx: CTX(vols, known) });
+const ext = (name, extra = {}) => ({ ...(name ? { name } : {}), external: true, ...extra });
 const BROWSER = { project: "browser", bundle: "browser" };
 const R4 = { project: "crow-browser-r4", bundle: "browser" };
 const VOLS = { "browser_chromium-profile": BROWSER, "crow-browser-r4_chromium-profile": R4 };
@@ -134,4 +142,49 @@ test("the repo's browser compose names and labels the volume; the migration labe
   const s = readFileSync(new URL("../scripts/ops/browser-profile-to-volume.sh", import.meta.url), "utf8");
   assert.match(s, /^VOLUME="\$\{PROJECT\}_\$\{VOLUME_KEY\}"$/m);
   assert.match(s, /volume create .*--label crow\.bundle=browser "\$VOLUME"/);
+});
+
+test("an external volume is refused even with verified consent when its owner is another bundle's", () => {
+  const m = model("thing", { data: ext("nextcloud_data") });
+  const r = consented("thing", m, { nextcloud_data: { project: "nextcloud", bundle: "nextcloud" } });
+  assert.equal(r.valid, false);
+  assert.match(r.reason, /volume 'nextcloud_data' already exists and belongs to the 'nextcloud' bundle/);
+  assert.match(r.reason, /another bundle's data/);
+  // The project label alone is enough (a volume with no crow.bundle label).
+  const p = consented("thing", m, { nextcloud_data: { project: "nextcloud", bundle: "" } });
+  assert.equal(p.valid, false);
+  assert.match(p.reason, /belongs to compose project 'nextcloud'/);
+  // A docker error while looking the external volume up fails closed too.
+  const e = consented("thing", m, { nextcloud_data: new Error("Cannot connect to the Docker daemon") });
+  assert.equal(e.valid, false);
+  assert.match(e.reason, /could not check who owns volume 'nextcloud_data'.*refusing/);
+});
+
+test("an external volume this bundle's own project created passes with consent and is consent-gated without", () => {
+  const m = model("browser", { profile: ext("browser_r4-profile") });
+  const vols = { "browser_r4-profile": { project: "crow-browser-r4", bundle: "browser" } };
+  assert.deepEqual(consented("browser", m, vols), { valid: true });
+  const r = gated("browser", m, vols);
+  assert.equal(r.valid, false, "no verified consent: the external volume still needs it");
+  assert.match(r.reason, /the external volume 'browser_r4-profile'/);
+});
+
+test("an unknown external volume (not created yet) stays consent-gated", () => {
+  const m = model("thing", { data: ext("thing-shared-data") });
+  const r = gated("thing", m, {});
+  assert.equal(r.valid, false);
+  assert.match(r.reason, /the external volume 'thing-shared-data'/);
+  assert.deepEqual(consented("thing", m, {}), { valid: true });
+  assert.deepEqual(consented("thing", m, { "thing-shared-data": { project: "", bundle: "" } }), { valid: true }, "unlabelled: still consent-gated only");
+  // A default-named external volume is looked up (consent, no owner label): allowed.
+  assert.deepEqual(consented("thing", model("thing", { data: ext() }), {}), { valid: true });
+});
+
+test("without a volume lookup in ctx an external volume is consent-gated exactly as before", () => {
+  const ctx = { crowHome: home, dataDir: join(home, "data"), appRoot: home };
+  const m = model("thing", { data: ext("thing_shared", { labels: { "crow.bundle": "thing" } }) });
+  const noConsent = G.checkComposeModel(m, { bundleDir: dir("thing"), manifest: consenting("thing"), consentVerified: false, ctx });
+  assert.equal(noConsent.valid, false);
+  assert.match(noConsent.reason, /the external volume 'thing_shared'/);
+  assert.deepEqual(G.checkComposeModel(m, { bundleDir: dir("thing"), manifest: consenting("thing"), consentVerified: true, ctx }), { valid: true });
 });
