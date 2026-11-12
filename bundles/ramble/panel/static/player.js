@@ -77,6 +77,19 @@
     return out;
   }
 
+  /* The library's entries by id, whichever way the library was handed in. The
+   * sheet reads one entry's own steps from here. */
+  function entriesById(library) {
+    var byId = Object.create(null);
+    var entries = entriesOf(library);
+    for (var i = 0; i < entries.length; i += 1) {
+      var entry = entries[i];
+      if (!entry || typeof entry.id !== "string" || entry.id === "") continue;
+      byId[entry.id] = entry;
+    }
+    return byId;
+  }
+
   /* The entries' own titles, by id. A title is library data, never copy. */
   function titlesOf(library) {
     var byId = Object.create(null);
@@ -138,14 +151,18 @@
       return {
         destroy: function () {},
         state: function () {
-          return { layout: null, started: false, segmentIndex: 0, paused: true, ended: false };
+          return {
+            layout: null, started: false, segmentIndex: 0, paused: true,
+            ended: false, sheetOpen: false
+          };
         }
       };
     }
 
     var copy = (options.copy && typeof options.copy === "object") ? options.copy : {};
-    /* Accepted for the steps after this one; this player neither posts, stores,
-     * holds a wake lock nor reports yet. */
+    /* The controls ask the page for a wake lock while the session runs and
+     * report each move to a page-supplied listener; posting and storing come
+     * later. */
     var hooks = {
       post: typeof options.post === "function" ? options.post : null,
       storage: options.storage === undefined ? null : options.storage,
@@ -165,6 +182,7 @@
     });
     var segments = Array.isArray(timeline.segments) ? timeline.segments : [];
     var titleById = titlesOf(options.library);
+    var entryById = entriesById(options.library);
 
     var timeSource = (options.clock && typeof options.clock === "object") ? options.clock : null;
     var nowFn = timeSource && typeof timeSource.now === "function"
@@ -200,6 +218,14 @@
       nodes.push(node);
     }
 
+    /* Put a node that comes and goes (the sheet) back on screen, without ever
+     * listing it twice for destroy(). */
+    function attach(node) {
+      if (!node) return;
+      if (node.parentNode !== host) host.appendChild(node);
+      if (nodes.indexOf(node) < 0) nodes.push(node);
+    }
+
     function copyString(key) {
       return typeof copy[key] === "string" ? copy[key] : "";
     }
@@ -212,6 +238,23 @@
 
     var safetyText = copyString("safety");
     var startText = copyString("start");
+    var pauseText = copyString("player.pause");
+    var keepGoingText = copyString("player.keepGoing");
+    var pausedText = copyString("player.paused");
+    var backText = copyString("player.back");
+    var skipText = copyString("player.skip");
+    var setDoneText = copyString("player.setDone");
+    var skipRestText = copyString("player.rest.skip");
+    var moreText = copyString("player.more");
+
+    /* A control exists only when the page's copy carries its word. */
+    function makeButton(role, label) {
+      if (label === "") return null;
+      var node = build("button", role);
+      node.setAttribute("type", "button");
+      node.textContent = label;
+      return node;
+    }
 
     els.safety = safetyText === "" ? null : build("div", "safety");
     if (els.safety) els.safety.textContent = safetyText;
@@ -224,7 +267,27 @@
     els.clock = build("div", "clock");
     els.next = build("div", "next");
     els.progress = build("div", "progress");
+    els.transport = build("div", "transport");
+    els.back = makeButton("back", backText);
+    els.skip = makeButton("skip", skipText);
+    els.setDone = makeButton("set-done", setDoneText);
+    els.skipRest = makeButton("skip-rest", skipRestText);
+    els.more = makeButton("more", moreText);
+    els.pause = makeButton("pause", pauseText);
+    els.status = pausedText === "" ? null : build("div", "status");
+    if (els.status) els.status.textContent = pausedText;
     els.strip = build("div", "strip");
+    /* The sheet's own words are the entry's title and its steps (library data)
+     * plus the page's Back. It is put on the host when it opens. */
+    els.sheet = build("div", "sheet");
+    els.sheet.setAttribute("role", "dialog");
+    els.sheet.setAttribute("aria-modal", "true");
+    els.sheetTitle = build("div", "sheet-title");
+    els.sheetSteps = build("div", "sheet-steps");
+    els.sheetClose = makeButton("sheet-close", backText);
+    els.sheet.appendChild(els.sheetTitle);
+    els.sheet.appendChild(els.sheetSteps);
+    if (els.sheetClose) els.sheet.appendChild(els.sheetClose);
 
     append(els.safety);
     if (startText !== "") append(els.start);
@@ -234,6 +297,7 @@
     append(els.clock);
     append(els.next);
     append(els.progress);
+    append(els.transport);
     append(els.strip);
 
     /* ---------- what the clock says ---------- */
@@ -367,11 +431,216 @@
       els.clock.textContent = "";
     }
 
+    /* ---------- the controls ---------- */
+
+    var lastReportedIndex = 0;
+    var sheetOpen = false;
+    var stripHandlers = [];
+
+    /* A page listener that throws is its own problem; the session goes on. */
+    function report(event) {
+      if (!hooks.onEvent) return;
+      try {
+        hooks.onEvent(event);
+      } catch (err) {
+        /* swallowed on purpose */
+      }
+    }
+
+    function segmentTypeNow() {
+      var segment = segmentAt(clock.state().segmentIndex);
+      return segment ? segment.type : null;
+    }
+
+    /* ---------- the wake lock ---------- */
+
+    var wakeWanted = false;
+    var wakeHandle = null;
+
+    function releaseWakeHandle(handle) {
+      if (!handle || typeof handle.release !== "function") return;
+      try {
+        handle.release();
+      } catch (err) {
+        /* its own problem */
+      }
+    }
+
+    /* A page that offers no wake lock, or refuses one, never hears about it. */
+    function takeWakeLock() {
+      wakeWanted = true;
+      var lock = hooks.wakeLock;
+      if (!lock || typeof lock.request !== "function") return;
+      var result;
+      try {
+        result = lock.request();
+      } catch (err) {
+        return;
+      }
+      if (!result || typeof result.then !== "function") {
+        if (wakeWanted) wakeHandle = result;
+        else releaseWakeHandle(result);
+        return;
+      }
+      try {
+        result.then(function (handle) {
+          if (!wakeWanted) {
+            releaseWakeHandle(handle);
+            return;
+          }
+          wakeHandle = handle;
+        }, function () {
+          return undefined;
+        });
+      } catch (err) {
+        return;
+      }
+    }
+
+    function dropWakeLock() {
+      wakeWanted = false;
+      var handle = wakeHandle;
+      wakeHandle = null;
+      releaseWakeHandle(handle);
+    }
+
+    /* ---------- pause and play ---------- */
+
+    function pauseNow() {
+      if (!started) return;
+      if (clock.state().paused) return;
+      clock.pause();
+      dropWakeLock();
+      report({ type: "pause" });
+    }
+
+    function playNow(asking) {
+      clock.play();
+      takeWakeLock();
+      if (asking) report({ type: "resume" });
+    }
+
+    function onPauseClick() {
+      if (!started) return;
+      if (clock.state().paused) playNow(true);
+      else pauseNow();
+    }
+
+    function onBackClick() {
+      clock.back();
+    }
+
+    function onSkipClick() {
+      clock.skip();
+    }
+
+    function onSetDoneClick() {
+      clock.skip();
+    }
+
+    function onSkipRestClick() {
+      clock.skip();
+    }
+
+    /* ---------- the sheet ---------- */
+
+    function clearChildren(node) {
+      if (!node) return;
+      while (node.firstChild) node.removeChild(node.firstChild);
+    }
+
+    /* A library step is a string or { text, cue, say, at }; its text is its own
+     * data, never copy. */
+    function stepTextOf(step) {
+      if (typeof step === "string") return step;
+      if (step && typeof step.text === "string") return step.text;
+      return "";
+    }
+
+    function entryAt(index) {
+      var segment = segmentAt(index);
+      if (!segment || typeof segment.entryId !== "string") return null;
+      var entry = entryById[segment.entryId];
+      return entry && typeof entry === "object" ? entry : null;
+    }
+
+    function openSheet() {
+      var entry = entryAt(clock.state().segmentIndex);
+      els.sheetTitle.textContent = entry && typeof entry.title === "string" ? entry.title : "";
+      clearChildren(els.sheetSteps);
+      var steps = entry && Array.isArray(entry.steps) ? entry.steps : [];
+      for (var i = 0; i < steps.length; i += 1) {
+        var step = build("div", "sheet-step");
+        step.textContent = stepTextOf(steps[i]);
+        els.sheetSteps.appendChild(step);
+      }
+      attach(els.sheet);
+      sheetOpen = true;
+      if (!clock.state().paused) pauseNow();
+      paint();
+    }
+
+    function onMoreClick() {
+      openSheet();
+    }
+
+    /* Closing never starts the clock again: the person says when to go on. */
+    function onSheetCloseClick() {
+      if (!sheetOpen) return;
+      sheetOpen = false;
+      removeNode(els.sheet, host);
+      paint();
+    }
+
+    /* The row of controls holds exactly the buttons this segment offers, in
+     * one order, so a repaint never reshuffles them. */
+    function paintTransport() {
+      var snap = clock.state();
+      var type = segmentTypeNow();
+      var wanted = [];
+      if (els.back) wanted.push(els.back);
+      if (els.skip) wanted.push(els.skip);
+      if (els.setDone && started && type === "reps") wanted.push(els.setDone);
+      if (els.skipRest && started && type === "rest") wanted.push(els.skipRest);
+      if (els.more) wanted.push(els.more);
+      if (els.pause && started) wanted.push(els.pause);
+      if (els.status && started && snap.paused) wanted.push(els.status);
+      if (els.pause) {
+        var label = snap.paused && keepGoingText !== "" ? keepGoingText : pauseText;
+        if (els.pause.textContent !== label) els.pause.textContent = label;
+        els.pause.setAttribute("aria-pressed", snap.paused ? "true" : "false");
+      }
+      var current = [];
+      for (var c = 0; c < els.transport.children.length; c += 1) {
+        current.push(els.transport.children[c]);
+      }
+      var same = current.length === wanted.length;
+      for (var i = 0; same && i < wanted.length; i += 1) {
+        if (current[i] !== wanted[i]) same = false;
+      }
+      if (same) return;
+      clearChildren(els.transport);
+      for (var j = 0; j < wanted.length; j += 1) els.transport.appendChild(wanted[j]);
+    }
+
+    /* One strip child per work segment, carrying its place in the timeline: a
+     * tap on one goes there. */
+    function stripClick(index) {
+      return function () {
+        clock.seek(index);
+      };
+    }
+
     function buildStrip() {
       for (var i = 0; i < segments.length; i += 1) {
         if (!isWork(segments[i])) continue;
-        var node = doc.createElement("span");
+        var node = doc.createElement("button");
+        node.setAttribute("type", "button");
+        node.setAttribute("data-index", String(i));
         node.textContent = titleOf(segments[i].entryId);
+        var handler = stripClick(i);
+        node.addEventListener("click", handler);
+        stripHandlers.push({ node: node, handler: handler });
         els.strip.appendChild(node);
         stripNodes.push(node);
         stripIndexes.push(i);
@@ -386,7 +655,13 @@
     }
 
     function paint() {
-      if (!started) return;
+      paintTransport();
+      if (!started) {
+        /* Nothing else is on screen yet, but a tap on the strip still marks the
+         * step it went to. */
+        paintStrip(clock.state().segmentIndex);
+        return;
+      }
       var snap = clock.state();
       var index = snap.segmentIndex;
       paintFigure(index, snap.segmentElapsed);
@@ -417,18 +692,47 @@
       removeNode(els.safety, host);
       removeNode(els.start, host);
       els.safety = null;
-      clock.play();
+      playNow(false);
       startInterval();
       paint();
     }
 
+    /* A tab that goes away while the session runs is a pause, the same one the
+     * pause button makes. */
+    function onVisibilityChange() {
+      var shown = documentOf();
+      if (!shown || !shown.hidden) return;
+      pauseNow();
+    }
+
     els.start.addEventListener("click", onStart);
-    /* Every clock event (a new segment, play, pause, the end) repaints. Tick
-     * itself is never called from here: a tick that is running would only
-     * read a zero-length stretch. */
-    unsubscribe = clock.on(function () { paint(); });
+    if (els.pause) els.pause.addEventListener("click", onPauseClick);
+    if (els.back) els.back.addEventListener("click", onBackClick);
+    if (els.skip) els.skip.addEventListener("click", onSkipClick);
+    if (els.setDone) els.setDone.addEventListener("click", onSetDoneClick);
+    if (els.skipRest) els.skipRest.addEventListener("click", onSkipRestClick);
+    if (els.more) els.more.addEventListener("click", onMoreClick);
+    if (els.sheetClose) els.sheetClose.addEventListener("click", onSheetCloseClick);
+    if (typeof doc.addEventListener === "function") {
+      doc.addEventListener("visibilitychange", onVisibilityChange);
+    }
+    /* Every clock event (a new segment, play, pause, the end) repaints, and a
+     * move to another segment is the page's to hear. Tick itself is never
+     * called from here: a tick that is running would only read a zero-length
+     * stretch. */
+    unsubscribe = clock.on(function (event) {
+      paint();
+      if (!event || event.type !== "segment") return;
+      var at = event.state && Number.isInteger(event.state.segmentIndex)
+        ? event.state.segmentIndex
+        : clock.state().segmentIndex;
+      if (at === lastReportedIndex) return;
+      lastReportedIndex = at;
+      report({ type: "segment", index: at });
+    });
 
     buildStrip();
+    paintTransport();
 
     function state() {
       var snap = clock.state();
@@ -437,7 +741,8 @@
         started: started,
         segmentIndex: snap.segmentIndex,
         paused: snap.paused,
-        ended: snap.ended
+        ended: snap.ended,
+        sheetOpen: sheetOpen
       };
     }
 
@@ -451,7 +756,22 @@
         unsubscribe();
         unsubscribe = null;
       }
+      dropWakeLock();
       els.start.removeEventListener("click", onStart);
+      if (els.pause) els.pause.removeEventListener("click", onPauseClick);
+      if (els.back) els.back.removeEventListener("click", onBackClick);
+      if (els.skip) els.skip.removeEventListener("click", onSkipClick);
+      if (els.setDone) els.setDone.removeEventListener("click", onSetDoneClick);
+      if (els.skipRest) els.skipRest.removeEventListener("click", onSkipRestClick);
+      if (els.more) els.more.removeEventListener("click", onMoreClick);
+      if (els.sheetClose) els.sheetClose.removeEventListener("click", onSheetCloseClick);
+      for (var s = 0; s < stripHandlers.length; s += 1) {
+        stripHandlers[s].node.removeEventListener("click", stripHandlers[s].handler);
+      }
+      stripHandlers.length = 0;
+      if (typeof doc.removeEventListener === "function") {
+        doc.removeEventListener("visibilitychange", onVisibilityChange);
+      }
       for (var i = 0; i < nodes.length; i += 1) removeNode(nodes[i], host);
       nodes.length = 0;
       stripNodes.length = 0;

@@ -54,7 +54,7 @@ const LIB = [
     minutes: 1,
     reps: 8,
     poses: [{ shoulderL: 20, shoulderR: 20 }, { shoulderL: 120, shoulderR: 120 }],
-    steps: [{ text: "Small circles", cue: "Small circles", say: "Small circles" }],
+    steps: [{ text: "Small circles", cue: "Small circles", say: "Small circles" }, "Then shake them out"],
     anatomy: [{ main: "shoulders" }],
   },
   {
@@ -133,7 +133,7 @@ class FakeEl {
   }
 }
 
-/* Every element carrying this data-role, in tree order (first one wins). */
+/* Every element carrying this data-role, in tree order. */
 function byRole(host, role) {
   const queue = host.children.slice();
   while (queue.length > 0) {
@@ -142,6 +142,18 @@ function byRole(host, role) {
     if (node.children.length > 0) queue.push(...node.children);
   }
   return null;
+}
+
+/* Every element carrying this data-role, all of them. */
+function allByRole(host, role) {
+  const found = [];
+  const queue = host.children.slice();
+  while (queue.length > 0) {
+    const node = queue.shift();
+    if (node.getAttribute("data-role") === role) found.push(node);
+    if (node.children.length > 0) queue.push(...node.children);
+  }
+  return found;
 }
 
 function fakeClock() {
@@ -165,14 +177,23 @@ function boot(settings) {
   const host = new FakeEl("div");
   if (typeof options.clientWidth === "number") host.clientWidth = options.clientWidth;
   const clock = fakeClock();
+  const docListeners = Object.create(null);
+  const doc = {
+    hidden: false,
+    createElement: (tag) => new FakeEl(tag),
+    querySelectorAll: () => [],
+    addEventListener(type, fn) {
+      const list = docListeners[type] || (docListeners[type] = []);
+      list.push(fn);
+    },
+    removeEventListener(type, fn) {
+      const list = docListeners[type] || [];
+      docListeners[type] = list.filter((one) => one !== fn);
+    },
+  };
   const sandbox = {
     console,
-    document: {
-      hidden: false,
-      createElement: (tag) => new FakeEl(tag),
-      querySelectorAll: () => [],
-      addEventListener() {},
-    },
+    document: doc,
     matchMedia: () => ({ matches: options.prefersReducedMotion === true }),
   };
   sandbox.window = sandbox;
@@ -180,7 +201,13 @@ function boot(settings) {
   new vm.Script(SESSION_SRC, { filename: "session.cjs" }).runInContext(sandbox);
   new vm.Script(FIGURE_SRC, { filename: "figure.cjs" }).runInContext(sandbox);
   new vm.Script(PLAYER_SRC, { filename: "player.js" }).runInContext(sandbox);
-  return { host, clock, sandbox };
+  return { host, clock, sandbox, doc, docListeners };
+}
+
+/* A tab going away (or coming back) is one document event. */
+function fireVisibility(booted, hidden) {
+  booted.doc.hidden = hidden === true;
+  (booted.docListeners.visibilitychange || []).slice().forEach((fn) => fn({ type: "visibilitychange" }));
 }
 
 function mountPlayer(booted, over) {
@@ -233,7 +260,7 @@ test("render: after Start the figure, name, cue and next show segment 0, and a b
   assert.equal(player.state().segmentIndex, 0);
   const plainState = JSON.parse(JSON.stringify(player.state()));
   assert.deepEqual(plainState, {
-    layout: "kiosk", started: true, segmentIndex: 0, paused: false, ended: false,
+    layout: "kiosk", started: true, segmentIndex: 0, paused: false, ended: false, sheetOpen: false,
   });
   assert.equal(segments[0].type, "hold", "the fixture opens on a hold");
   assert.equal(figure.innerHTML, booted.sandbox.RambleFigure.poseSvg(segments[0].toPose));
@@ -384,4 +411,298 @@ test("render: destroy clears the interval, the listener and the host", () => {
   assert.equal(booted.host.children.length, 0, "the player leaves the host empty");
   assert.deepEqual(booted.clock.cleared, [1], "the interval it started is cleared");
   assert.equal(start.listenerCount("click"), 0, "the start listener is taken off");
+});
+
+/* ---------- the controls ---------- */
+
+test("controls: tapping a strip step seeks there and the figure, name, cue and next follow", () => {
+  const booted = boot();
+  const segments = segmentsOf(booted.sandbox);
+  const { player } = mountPlayer(booted);
+  byRole(booted.host, "start").click();
+
+  const strip = byRole(booted.host, "strip");
+  assert.deepEqual(strip.children.map((one) => one.tagName), ["BUTTON", "BUTTON", "BUTTON"],
+    "every strip step is a button");
+  assert.deepEqual(strip.children.map((one) => one.getAttribute("data-index")), ["0", "2", "5"]);
+  assert.equal(strip.children[0].getAttribute("data-current"), "1");
+
+  strip.children[2].click();
+
+  assert.equal(player.state().segmentIndex, 5);
+  assert.equal(byRole(booted.host, "figure").innerHTML,
+    booted.sandbox.RambleFigure.poseSvg(segments[5].toPose));
+  assert.equal(byRole(booted.host, "name").textContent, entryTitle("pose-fold"));
+  assert.equal(byRole(booted.host, "cue").textContent, segments[5].cue);
+  assert.equal(byRole(booted.host, "next").textContent, "");
+  assert.equal(strip.children[2].getAttribute("data-current"), "1", "the current step moves");
+  assert.equal(strip.children[0].hasAttribute("data-current"), false);
+
+  /* The clock runs on from the step that was tapped. */
+  advance(booted.clock, 5);
+  assert.equal(byRole(booted.host, "clock").textContent, "25");
+
+  /* A step in the middle: the name, cue and next line are that step's own. */
+  strip.children[1].click();
+  assert.equal(player.state().segmentIndex, 2);
+  assert.equal(byRole(booted.host, "name").textContent, entryTitle("ex-arms"));
+  assert.equal(byRole(booted.host, "cue").textContent, segments[2].cue);
+  assert.equal(byRole(booted.host, "next").textContent,
+    fillCopy(COPY["player.rest.next"], { name: entryTitle("pose-fold") }));
+});
+
+test("controls: Set done moves a reps segment on", () => {
+  const booted = boot();
+  const segments = segmentsOf(booted.sandbox);
+  const { player } = mountPlayer(booted);
+  byRole(booted.host, "start").click();
+
+  assert.equal(segments[0].type, "hold");
+  assert.equal(byRole(booted.host, "set-done"), null, "a hold offers no Set done");
+
+  advance(booted.clock, 63);
+  assert.equal(segments[2].type, "reps");
+  const setDone = byRole(booted.host, "set-done");
+  assert.ok(setDone, "a reps step offers Set done");
+  assert.equal(setDone.tagName, "BUTTON");
+  assert.equal(setDone.getAttribute("type"), "button");
+  assert.equal(setDone.textContent, COPY["player.setDone"]);
+
+  setDone.click();
+
+  assert.equal(player.state().segmentIndex, 3);
+  assert.equal(segments[3].type, "rest");
+  assert.equal(byRole(booted.host, "set-done"), null, "Set done goes with the reps step");
+});
+
+test("controls: a rest offers Skip rest and pressing it moves on", () => {
+  const booted = boot();
+  const segments = segmentsOf(booted.sandbox);
+  const { player } = mountPlayer(booted);
+  byRole(booted.host, "start").click();
+
+  advance(booted.clock, 63);
+  assert.equal(segments[2].type, "reps");
+  assert.equal(byRole(booted.host, "skip-rest"), null, "a reps step offers no Skip rest");
+
+  advance(booted.clock, 30);
+  assert.equal(segments[3].type, "rest");
+  const skipRest = byRole(booted.host, "skip-rest");
+  assert.ok(skipRest, "a rest offers Skip rest");
+  assert.equal(skipRest.tagName, "BUTTON");
+  assert.equal(skipRest.getAttribute("type"), "button");
+  assert.equal(skipRest.textContent, COPY["player.rest.skip"]);
+
+  skipRest.click();
+
+  assert.equal(player.state().segmentIndex, 4);
+  assert.equal(byRole(booted.host, "skip-rest"), null, "Skip rest goes with the rest");
+});
+
+test("controls: Back, Pause, Keep going and Skip work", () => {
+  const booted = boot();
+  const { player } = mountPlayer(booted);
+
+  assert.equal(byRole(booted.host, "pause"), null, "the pause control waits for Start");
+  assert.equal(byRole(booted.host, "status"), null);
+
+  byRole(booted.host, "start").click();
+  const pause = byRole(booted.host, "pause");
+  assert.ok(pause, "after Start there is a pause control");
+  assert.equal(pause.tagName, "BUTTON");
+  assert.equal(pause.getAttribute("type"), "button");
+  assert.equal(pause.textContent, COPY["player.pause"]);
+  assert.equal(pause.getAttribute("aria-pressed"), "false");
+  assert.equal(byRole(booted.host, "status"), null, "nothing is paused yet");
+
+  advance(booted.clock, 63);
+  assert.equal(player.state().segmentIndex, 2);
+
+  byRole(booted.host, "back").click();
+  assert.equal(player.state().segmentIndex, 0, "Back returns to the step before");
+
+  byRole(booted.host, "skip").click();
+  assert.equal(player.state().segmentIndex, 1, "Skip moves on one segment");
+
+  byRole(booted.host, "pause").click();
+  assert.equal(player.state().paused, true);
+  assert.equal(byRole(booted.host, "pause").textContent, COPY["player.keepGoing"]);
+  assert.equal(byRole(booted.host, "pause").getAttribute("aria-pressed"), "true");
+  assert.equal(byRole(booted.host, "status").textContent, COPY["player.paused"]);
+
+  byRole(booted.host, "pause").click();
+  assert.equal(player.state().paused, false, "Keep going runs the clock again");
+  assert.equal(byRole(booted.host, "pause").textContent, COPY["player.pause"]);
+  assert.equal(byRole(booted.host, "status"), null);
+
+  byRole(booted.host, "skip").click();
+  assert.equal(player.state().segmentIndex, 2);
+});
+
+test("controls: More opens the sheet and pauses, and closing it does not resume", () => {
+  const booted = boot();
+  const { player } = mountPlayer(booted);
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 63);
+
+  assert.equal(player.state().sheetOpen, false);
+  assert.equal(byRole(booted.host, "sheet"), null, "the sheet is not on screen until it opens");
+
+  const more = byRole(booted.host, "more");
+  assert.ok(more);
+  assert.equal(more.textContent, COPY["player.more"]);
+  more.click();
+
+  const sheet = byRole(booted.host, "sheet");
+  assert.ok(sheet, "the sheet is on screen");
+  assert.equal(sheet.getAttribute("role"), "dialog");
+  assert.equal(sheet.getAttribute("aria-modal"), "true");
+  assert.equal(player.state().sheetOpen, true);
+  assert.equal(player.state().paused, true, "opening the sheet pauses the clock");
+  assert.equal(byRole(booted.host, "status").textContent, COPY["player.paused"]);
+
+  assert.equal(byRole(booted.host, "sheet-title").textContent, entryTitle("ex-arms"));
+  const steps = allByRole(booted.host, "sheet-step");
+  const entry = LIB.find((one) => one.id === "ex-arms");
+  assert.equal(steps.length, entry.steps.length, "one child per library step");
+  assert.equal(steps[0].textContent, entry.steps[0].text);
+  assert.equal(steps[1].textContent, entry.steps[1], "a step written as a plain string is its own text");
+
+  const close = byRole(booted.host, "sheet-close");
+  assert.ok(close);
+  assert.equal(close.textContent, COPY["player.back"]);
+  close.click();
+
+  assert.equal(byRole(booted.host, "sheet"), null, "the sheet goes");
+  assert.equal(player.state().sheetOpen, false);
+  assert.equal(player.state().paused, true, "closing the sheet never starts the clock again");
+  assert.equal(player.state().segmentIndex, 2);
+});
+
+test("controls: a hidden tab pauses the session", () => {
+  const booted = boot();
+  const { player } = mountPlayer(booted);
+  byRole(booted.host, "start").click();
+  assert.equal(player.state().paused, false);
+
+  fireVisibility(booted, true);
+
+  assert.equal(player.state().paused, true, "a tab that goes away is a pause");
+  assert.equal(byRole(booted.host, "pause").textContent, COPY["player.keepGoing"]);
+  assert.equal(byRole(booted.host, "status").textContent, COPY["player.paused"]);
+
+  fireVisibility(booted, false);
+  assert.equal(player.state().paused, true, "coming back never starts the clock by itself");
+});
+
+test("controls: the wake lock is asked for on play and handed back on pause", async () => {
+  const booted = boot();
+  const asked = [];
+  const handedBack = [];
+  const handle = { release() { handedBack.push("released"); } };
+  const { player } = mountPlayer(booted, {
+    wakeLock: { request() { asked.push("request"); return handle; } },
+  });
+
+  assert.equal(asked.length, 0, "nothing is asked for before Start");
+  byRole(booted.host, "start").click();
+  assert.equal(asked.length, 1);
+
+  byRole(booted.host, "pause").click();
+  assert.equal(handedBack.length, 1, "a pause hands the lock back");
+
+  byRole(booted.host, "pause").click();
+  assert.equal(asked.length, 2, "Keep going asks for it again");
+
+  player.destroy();
+  assert.equal(handedBack.length, 2, "destroy hands the lock back");
+
+  /* A request that answers with a promise: a lock that lands after the pause is
+   * handed straight back, and one that lands while running is released on the
+   * next pause. */
+  const late = boot();
+  const lateEvents = [];
+  const lateHandle = { release() { lateEvents.push("late"); } };
+  mountPlayer(late, { wakeLock: { request() { return Promise.resolve(lateHandle); } } });
+  byRole(late.host, "start").click();
+  byRole(late.host, "pause").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(lateEvents, ["late"], "a lock that lands after the pause goes back");
+
+  const live = boot();
+  const liveEvents = [];
+  const liveHandle = { release() { liveEvents.push("live"); } };
+  mountPlayer(live, { wakeLock: { request() { return Promise.resolve(liveHandle); } } });
+  byRole(live.host, "start").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  byRole(live.host, "pause").click();
+  assert.deepEqual(liveEvents, ["live"], "a lock that landed while running is released");
+});
+
+test("controls: a missing, a throwing or a rejecting wake lock is not an error", async () => {
+  const none = boot();
+  const bare = mountPlayer(none);
+  assert.doesNotThrow(() => byRole(none.host, "start").click());
+  assert.doesNotThrow(() => byRole(none.host, "pause").click());
+  bare.player.destroy();
+
+  const throwing = boot();
+  const threw = mountPlayer(throwing, { wakeLock: { request() { throw new Error("no lock here"); } } });
+  assert.doesNotThrow(() => byRole(throwing.host, "start").click());
+  assert.equal(threw.player.state().paused, false, "a lock that cannot be asked for leaves the session running");
+  assert.doesNotThrow(() => byRole(throwing.host, "pause").click());
+  assert.equal(threw.player.state().paused, true);
+
+  const rejecting = boot();
+  const { player } = mountPlayer(rejecting, {
+    wakeLock: { request() { return Promise.reject(new Error("no lock here")); } },
+  });
+  assert.doesNotThrow(() => byRole(rejecting.host, "start").click());
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(player.state().paused, false, "a refused lock leaves the session running");
+  assert.doesNotThrow(() => byRole(rejecting.host, "pause").click());
+});
+
+test("controls: onEvent hears segment, pause and resume in the order they happened", () => {
+  const booted = boot();
+  const heard = [];
+  mountPlayer(booted, {
+    onEvent: (event) => { heard.push(event.type === "segment" ? "segment:" + event.index : event.type); },
+  });
+  byRole(booted.host, "start").click();
+  assert.deepEqual(heard, [], "the first Start is not a resume");
+
+  const strip = byRole(booted.host, "strip");
+  strip.children[1].click();
+  byRole(booted.host, "pause").click();
+  byRole(booted.host, "pause").click();
+  byRole(booted.host, "skip").click();
+  byRole(booted.host, "back").click();
+
+  assert.deepEqual(heard, ["segment:2", "pause", "resume", "segment:3", "segment:2"]);
+
+  /* A listener that throws is its own problem. */
+  const angry = boot();
+  mountPlayer(angry, { onEvent: () => { throw new Error("listener trouble"); } });
+  byRole(angry.host, "start").click();
+  assert.doesNotThrow(() => byRole(angry.host, "strip").children[2].click());
+  assert.doesNotThrow(() => byRole(angry.host, "pause").click());
+});
+
+test("controls: destroy takes the visibilitychange listener off", () => {
+  const booted = boot();
+  const { player } = mountPlayer(booted);
+  assert.equal((booted.docListeners.visibilitychange || []).length, 1,
+    "the player listens for the tab going away");
+
+  byRole(booted.host, "start").click();
+  player.destroy();
+
+  assert.equal((booted.docListeners.visibilitychange || []).length, 0);
+  fireVisibility(booted, true);
+  assert.equal(player.state().paused, false, "nothing hears the hidden tab any more");
+  assert.equal(booted.host.children.length, 0);
 });
