@@ -328,6 +328,26 @@ test("a 30-minute walk fills the heart card and one more, and leaves a balancing
   assert.equal(open[0].slot, "evening");
 });
 
+test("a filled card's stand-in row is written before the card's slot row", async () => {
+  const db = await freshDb();
+  const cards = await cardsFor(db);
+  const { calls, emit } = collector();
+  await startOutdoor(db, { day: DAY, entryId: "walk-1", now: AT(9) });
+  const out = await finishOutdoor(db, { day: DAY, now: AT(9, 30), emit, cards });
+  assert.deepEqual(out.filled, ["midday", "morning"]);
+
+  const at = (kind, key) => calls.findIndex((call) => call.table === "ramble_wallet"
+    && call.row?.kind === kind && call.row?.key === key);
+  for (const slot of out.filled) {
+    const stand = at(MOVE_STAND_KIND, `${DAY}:${slot}`);
+    const filled = at(MOVE_SLOT_KIND, `${DAY}:${slot}`);
+    assert.ok(stand >= 0, "the stand-in row is written: " + slot);
+    assert.ok(filled >= 0, "the slot row is written: " + slot);
+    assert.ok(stand < filled,
+      "the stand-in mark lands first, so the day's stand-in count already holds the card: " + slot);
+  }
+});
+
 test("on a day planned mobility, core and lower a 30-minute walk fills two of them", async () => {
   const db = await freshDb();
   const cards = await cardsFor(db, AT(9), heartlessLibrary());

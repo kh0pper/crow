@@ -370,9 +370,20 @@ const byWalkOrder = (a, b) => walkRank(a.area) - walkRank(b.area) || bySlotOrder
  * first, then free, then in slot order — MINUS the last open card a balancing
  * chunk fits (BALANCE_AREAS), which a walk never takes.
  *
- * Each filled card is recorded through `recordSlotDone` with a `walk` entry (so
- * it trains the heart and never balances the day) and one `movestand` row,
- * which is the approved mark of a stand-in such as a walk.
+ * `need - 1` IS EACH INSTANCE'S OWN VIEW. The stand-ins counted against it are
+ * the `movestand` rows this instance holds right now, and `need` is the card
+ * count it read, so two instances that both fill cards offline can between them
+ * exceed the `need - 1` either one of them left room for. That number is a
+ * floor on what a walk may take, never a ceiling on the day: the day still
+ * cannot complete without a `movebal` row, and a balancing extra chunk — one
+ * that closes the card the walks left open and works a balancing area —
+ * completes it.
+ *
+ * Each filled card gets one `movestand` row FIRST, the approved mark of a
+ * stand-in such as a walk, and then its slot through `recordSlotDone` with a
+ * `walk` entry (so it trains the heart and never balances the day) — the same
+ * order `assignStandIn` writes — so a crash between the two cannot leave a
+ * filled card the stand-in count cannot see.
  */
 async function fillCards(db, { day, cards, minutes, stands, now, emit }) {
   const filled = [];
@@ -396,6 +407,10 @@ async function fillCards(db, { day, cards, minutes, stands, now, emit }) {
 
   const count = Math.max(0, Math.min(Math.floor(minutes / CARD_MIN_MINUTES), room, eligible.length));
   for (const item of eligible.slice(0, count)) {
+    // The stand-in mark goes first, so the count already holds the card the
+    // slot write below is about to fill.
+    // eslint-disable-next-line no-await-in-loop
+    await insertOnce(db, MOVE_STAND_KIND, `${day}:${item.slot}`, 1, now, emit);
     // eslint-disable-next-line no-await-in-loop
     await recordSlotDone(db, {
       day,
@@ -406,8 +421,6 @@ async function fillCards(db, { day, cards, minutes, stands, now, emit }) {
       emit,
       need: cards.need,
     });
-    // eslint-disable-next-line no-await-in-loop
-    await insertOnce(db, MOVE_STAND_KIND, `${day}:${item.slot}`, 1, now, emit);
     filled.push(item.slot);
   }
   return filled;
@@ -545,7 +558,31 @@ async function readStandInFlags(db, day) {
   } catch { return { log: false, steps: false }; }
 }
 
-/** Mark one stand-in as used. Plain setting SQL, and NO emit: a local key. */
+/** The local day before `dayStr`, from its noon so DST cannot shift the day. */
+function dayBefore(dayStr) {
+  const [y, m, d] = String(dayStr).split("-").map(Number);
+  return localDay(new Date(y, m - 1, d - 1, 12, 0, 0, 0).getTime());
+}
+
+/**
+ * Forget the stand-in flags of days older than yesterday: only today's and
+ * yesterday's matter, and the rows would otherwise sit in the settings table
+ * for good. Plain SQL on the `local.` prefix, and NO emit: these keys never
+ * leave this instance. The day part of the key is a `YYYY-MM-DD` string, so one
+ * string comparison covers every older day.
+ */
+async function pruneStandInFlags(db, day) {
+  await db.execute({
+    sql: `DELETE FROM ramble_settings
+          WHERE key LIKE ? AND substr(key, ?) < ?`,
+    args: [`${STANDIN_DAY_KEY}%`, STANDIN_DAY_KEY.length + 1, dayBefore(day)],
+  });
+}
+
+/**
+ * Mark one stand-in as used. Plain setting SQL, and NO emit: a local key.
+ * Writing a day's flags also prunes the flags of days older than yesterday.
+ */
 async function writeStandInFlag(db, day, field) {
   const flags = await readStandInFlags(db, day);
   flags[field] = true;
@@ -554,6 +591,7 @@ async function writeStandInFlag(db, day, field) {
           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     args: [STANDIN_DAY_KEY + day, JSON.stringify(flags)],
   });
+  await pruneStandInFlags(db, day);
 }
 
 /** The day's cards as a stand-in may use them, or null when they state no card count. */
@@ -633,7 +671,13 @@ function stepsSlot(slots, open) {
  * is not balancing is allowed only while it leaves one card of `need` open, and
  * never on the last open card a balancing chunk fits (BALANCE_AREAS) while the
  * day has no `movebal` row — so walks, steps and other movement can never fill a
- * day by themselves.
+ * day by themselves. That count is this instance's own view of the merged rows,
+ * so two instances that both fill cards offline can between them exceed
+ * `need - 1`; the day still cannot complete without a `movebal` row.
+ *
+ * The once-per-day `log` and `steps` flags live in the LOCAL setting
+ * STANDIN_DAY_KEY, so each instance keeps its own record of which source it has
+ * already used today; they are not a fact about the player and never sync.
  *
  * WHICH SLOT. A log fills the caller's named slot when one is given, else the
  * open card of its own area (the caller's `area` when it is one of AREAS, else
@@ -649,8 +693,9 @@ function stepsSlot(slots, open) {
  *
  * Writes, in order: the balance row (balancing logs only), the `movestand` row
  * (once — a second assign for a slot writes nothing), the slot row and the areas
- * through `recordSlotDone`, and the local flag. A stand-in never pays: no budget
- * claim is made and the pet is never fed.
+ * through `recordSlotDone`, and the local flag — whose write also drops the
+ * flags of days older than yesterday. A stand-in never pays: no budget claim is
+ * made and the pet is never fed.
  */
 export async function assignStandIn(db, {
   day, slot, source, logKey, area, now = Date.now(), emit, cards,

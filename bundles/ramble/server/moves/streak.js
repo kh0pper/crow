@@ -20,6 +20,14 @@
  * With no `movestreakv2` row at all the old rule holds for every day, and a day
  * before the oldest one keeps it too, so an upgrade never rewrites the past.
  *
+ * A `movestreakv2` ROW THAT ARRIVES LATER, carrying an EARLIER day, moves the
+ * start of the all-cards rule earlier on every instance that receives it — the
+ * reader takes the smallest key, whichever instance wrote it — so the days
+ * between that day and this instance's own are re-judged by the all-cards rule
+ * from then on. A heart already paid is NEVER taken back: the award is a
+ * `streak:<day>` row that only grows, so a day a later start re-judges as a
+ * break leaves the heart it already earned in place.
+ *
  * A `moveoff` day (the user paused challenges) is SKIPPED: it neither counts
  * nor breaks. Today counts as soon as it qualifies, and a today that has not
  * qualified yet does not break the streak — the day is not over.

@@ -33,6 +33,11 @@
  *     either instance while a Done-only day before it keeps the old rule,
  *   - a merged and settled day is still a read: a further settle and a further
  *     open write nothing on either instance, so nothing can ping-pong,
+ *   - two instances filling cards offline each count against their OWN view of
+ *     the `movestand` rows, so the merged day still owes a `movebal` row and
+ *     only a balancing chunk finishes it on both,
+ *   - a heart already paid survives a later `moveneed` that raises the day's
+ *     card count, and both instances then read the same streak,
  *   - a `local.` settings row (the outdoor session, the stand-in flags) never
  *     leaves the box that wrote it.
  *
@@ -686,6 +691,162 @@ describe("the streak's start day across a sync", () => {
       assert.deepEqual(at22[0], { days: 4, nextHeartAt: STREAK_HEART_EVERY, todayGood: true },
         "four days, so the Done-only 19th still counts under the old rule");
       assert.ok(NOON19 < NOON20, "the 19th is before both start days");
+    });
+  }
+});
+
+/**
+ * Two instances each run their own 30-minute session before either has seen a
+ * row of the other's day. The `need - 1` a walk fills against is each
+ * instance's OWN view of the `movestand` rows it holds, the merged day still
+ * has no `movebal` row, and only the player's own balancing chunk — the one
+ * that closes the card the walks left open — finishes it on both.
+ */
+describe("two instances filling cards offline", () => {
+  for (const [order, label] of ORDERS) {
+    test(`the need - 1 count is per-instance, so the merged day still owes a balance (${label})`, async () => {
+      const lib = library();
+      const A = await instance("A");
+      const B = await instance("B");
+      const cardsA = await openDay(A, lib);
+      const cardsB = await openDay(B, lib);
+      assert.deepEqual(cardsA.slots.map((item) => item.area), ["mobility", "heart", "lower"],
+        "the fixed Thursday's plan, the same on both instances");
+      assert.equal(cardsA.need, 3);
+
+      await startOutdoor(A.db, { day: DAY, entryId: "walk-a", now: THURSDAY });
+      const walkA = await finishOutdoor(A.db, {
+        day: DAY, now: THURSDAY + 30 * M, emit: A.emit, cards: cardsA,
+      });
+      await startOutdoor(B.db, { day: DAY, entryId: "walk-b", now: THURSDAY + 31 * M });
+      const walkB = await finishOutdoor(B.db, {
+        day: DAY, now: THURSDAY + 61 * M, emit: B.emit, cards: cardsB,
+      });
+      assert.deepEqual(walkA.filled, ["midday", "morning"],
+        "two cards, counted against the stand-ins A's own db holds");
+      assert.deepEqual(walkB.filled, ["midday", "morning"],
+        "and two against B's, which has seen none of A's rows");
+      assert.equal(walkA.needsBalance, true, "the third card is kept for a balance on A");
+      assert.equal(walkB.needsBalance, true, "and on B");
+
+      const pair = { A, B };
+      for (const inst of [A, B]) {
+        assert.equal(await isDayComplete(inst.db, DAY), false,
+          "no day yet: " + inst.name);
+        assert.equal(await rowDelta(inst.db, MOVE_BAL_KIND, DAY), null,
+          "and no balance row of either instance's own: " + inst.name);
+        assert.deepEqual(await standKeys(inst.db), [`${DAY}:midday`, `${DAY}:morning`],
+          "each instance holds its own two stand-in rows: " + inst.name);
+      }
+
+      await exchange(pair, order);
+
+      assert.deepEqual(await standKeys(A.db), await standKeys(B.db),
+        "both instances agree on the merged stand-in rows");
+      for (const inst of [A, B]) {
+        assert.equal((await standKeys(inst.db)).length, 2,
+          "two merged stand-in rows: " + inst.name);
+        assert.equal(await rowDelta(inst.db, MOVE_BAL_KIND, DAY), null,
+          "the merge brought no balance row: " + inst.name);
+        assert.equal(await isDayComplete(inst.db, DAY), false,
+          "and the walk-filled day is not finished: " + inst.name);
+      }
+
+      // The card the walks left open is the balancing one; the player's own
+      // chunk on it both closes the card and balances the day.
+      const leftOpen = cardsA.slots.find((item) => item.slot === "evening");
+      assert.equal(leftOpen.area, "lower", "the card left open is one a balancing chunk fits");
+      const balanced = await recordSlotDone(A.db, {
+        day: DAY,
+        slot: leftOpen.slot,
+        entry: { kind: "routine", areas: ["mobility"] },
+        via: "player",
+        now: THURSDAY + 70 * M,
+        emit: A.emit,
+        need: cardsA.need,
+      });
+      assert.equal(balanced.all, true, "the player's own balancing chunk finishes the day on A");
+      assert.equal(await rowDelta(A.db, MOVE_BAL_KIND, DAY), 1);
+
+      await exchange(pair, order);
+
+      for (const inst of [A, B]) {
+        assert.equal(await isDayComplete(inst.db, DAY), true,
+          "the balancing chunk finished the day on both: " + inst.name);
+        assert.equal(await rowCount(inst.db, MOVE_BAL_KIND, DAY), 1,
+          "one balance row: " + inst.name);
+        assert.deepEqual(await standKeys(inst.db), [`${DAY}:midday`, `${DAY}:morning`],
+          "the player's own chunk is no stand-in: " + inst.name);
+        assertNoLocalEmit(inst);
+      }
+    });
+  }
+});
+
+/**
+ * A settles a one-card day and pays the seventh-day heart; B then widens the day
+ * to three cards without seeing any of A's rows. The wider count is the one
+ * that survives, and the heart already paid stays on both.
+ */
+describe("a heart paid before a wider card count arrives", () => {
+  for (const [order, label] of ORDERS) {
+    test(`the heart is never taken back and the day stops being complete (${label})`, async () => {
+      const lib = library();
+      const A = await instance("A");
+      const B = await instance("B");
+      await writePrefs(A.db, { cards: 1 });
+      await writePrefs(B.db, { cards: 3 });
+      for (const inst of [A, B]) {
+        // eslint-disable-next-line no-await-in-loop
+        await seedRun(inst.db);
+      }
+      const one = await dayCards(A.db, { now: THURSDAY, library: lib, emit: A.emit });
+      assert.deepEqual([one.need, one.slots.map((item) => item.slot)], [1, ["midday"]],
+        "A's day asks for one card");
+
+      const playedA = await recordSlotDone(A.db, {
+        day: DAY,
+        slot: "midday",
+        entry: { kind: "routine", areas: ["mobility"] },
+        via: "player",
+        now: THURSDAY,
+        emit: A.emit,
+        need: one.need,
+      });
+      assert.equal(playedA.all, true, "one card and the player's own balance finish A's day");
+      assert.equal(await rowCount(A.db, HEART_KIND, "streak:" + DAY), 1,
+        "the seventh day of the run pays a heart on A");
+      assert.equal(await heartsBalance(A.db), 1);
+      assert.deepEqual(await streakState(A.db, { now: THURSDAY }),
+        { days: 7, nextHeartAt: STREAK_HEART_EVERY, todayGood: true });
+
+      // B, offline, asks the same day for three cards.
+      const three = await dayCards(B.db, { now: THURSDAY, library: lib, emit: B.emit });
+      assert.equal(three.need, 3);
+      assert.deepEqual(await needDeltas(B.db), [3], "B's own count is three");
+      assert.equal(await rowCount(B.db, HEART_KIND, "streak:" + DAY), 0,
+        "B has not seen A's heart yet");
+
+      const pair = { A, B };
+      await exchange(pair, order);
+
+      for (const inst of [A, B]) {
+        assert.equal(await rowCount(inst.db, HEART_KIND, "streak:" + DAY), 1,
+          "the heart already paid is still there: " + inst.name);
+        assert.equal(await heartsBalance(inst.db), 1, "and the balance is unchanged: " + inst.name);
+        assert.deepEqual(await needDeltas(inst.db), [3],
+          "the wider count is the one that survives: " + inst.name);
+        assert.equal(await isDayComplete(inst.db, DAY), false,
+          "the day now asks for three cards: " + inst.name);
+      }
+
+      const read = [];
+      for (const inst of [A, B]) read.push(await streakState(inst.db, { now: THURSDAY }));
+      assert.deepEqual(read[1], read[0], "both instances read the same streak");
+      assert.deepEqual(read[0], { days: 6, nextHeartAt: STREAK_HEART_EVERY, todayGood: false },
+        "the reopened day counts for nothing, and the six days before it still do");
+      assertNoLocalEmit(A);
+      assertNoLocalEmit(B);
     });
   }
 });

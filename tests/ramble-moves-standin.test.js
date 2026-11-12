@@ -17,7 +17,9 @@
  *   - the stand-ins a day already carries count against `need - 1`, so steps, a
  *     walk and a walk log together leave the day unfinished;
  *   - a stand-in writes one `movestand` row and never pays: no budget row, no
- *     pet feed.
+ *     pet feed;
+ *   - the day's flags are a local setting, and writing today's prunes the flags
+ *     of the days older than yesterday.
  *
  * The shipped library is filled elsewhere, so every test injects its own
  * chunks. The clocks are fixed local days (a Monday, a Tuesday, a Saturday), so
@@ -514,4 +516,38 @@ test("the same day completed by a yoga log whose area is a balancing one", async
   });
   assert.deepEqual(JSON.parse(String(rows[0].value)), { steps: true, log: true },
     "both stand-ins the day used are kept in the one local row");
+});
+
+/* ------------------------------------------------------ the local flag rows */
+
+test("writing today's flags prunes the stand-in rows older than yesterday", async () => {
+  const db = await freshDb();
+  const cards = await cardsFor(db);
+  const seedFlag = (dayStr, value) => db.execute({
+    sql: "INSERT INTO ramble_settings (key, value) VALUES (?, ?)",
+    args: [STANDIN_DAY_KEY + dayStr, JSON.stringify(value)],
+  });
+  await seedFlag("2026-09-28", { steps: true });
+  await seedFlag("2026-10-03", { log: true });
+  await seedFlag("2026-10-04", { steps: true, log: true });
+
+  const writes = [];
+  const emit = async (table, op, row) => { writes.push({ table, op, row }); };
+  await stepsReading(db, AT(9));
+  const out = await assignStandIn(db, { day: DAY, source: "steps", now: AT(10), cards, emit });
+  assert.deepEqual(out, { ok: true, slot: "midday", all: false });
+
+  const { rows } = await db.execute({
+    sql: "SELECT key, value FROM ramble_settings WHERE key LIKE ? ORDER BY key",
+    args: [STANDIN_DAY_KEY + "%"],
+  });
+  assert.deepEqual(rows.map((row) => String(row.key).slice(STANDIN_DAY_KEY.length)),
+    ["2026-10-04", DAY],
+    "yesterday's flag and today's stay, and the two older days are gone");
+  assert.deepEqual(JSON.parse(String(rows[0].value)), { steps: true, log: true },
+    "yesterday's own flags are left as they were");
+  assert.deepEqual(JSON.parse(String(rows[1].value)), { log: false, steps: true },
+    "and today carries the stand-in just used");
+  assert.deepEqual(writes.filter((call) => call.table === "ramble_settings"), [],
+    "a local key and its pruning never leave the box");
 });
