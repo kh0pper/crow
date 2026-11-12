@@ -15,13 +15,18 @@
 // run in a fresh process and must keep calling runMigrations directly.
 //
 // The child's stdout is NDJSON: {"log"}, then exactly one of {"result"} or
-// {"error"}. The child points console.log/info/debug at stderr before it starts
-// the runner, so a migration that logs with console.* never reaches this
-// stream; a migration that writes to process.stdout directly is not blocked, so
-// every line's shape is checked here as well — a result needs all four arrays, an
-// error needs a string. A line that looks like protocol but does not have the
-// shape is a stray line and is ignored, like anything else on stdout.
+// {"error"}. console.log/info/debug — and the console methods built on them —
+// are pointed at stderr by the child before it starts the runner, so a migration
+// that logs that way does not reach this stream. A direct write to stdout
+// (console.dir included: it is not redirected) is not blocked, so every final
+// line also has to carry the nonce this parent minted for this run and passed in
+// the child's environment: the child reads it at startup, removes it from its own
+// `process.env`, and repeats it on its result or error line. A final line without
+// this run's nonce is a stray line, like anything else on stdout, however
+// protocol-shaped it looks. The shape is checked too — a result needs all four
+// arrays, an error needs a string.
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -108,12 +113,16 @@ export async function runMigrationsInChild({
 
   const limitMs = resolveMigrationTimeoutMs(timeoutMs);
   const payload = JSON.stringify({ migrationsDir, dbPath, tasksDbPath, sha });
+  // One unguessable nonce per run: the child echoes it on its final line and
+  // nothing else can, so a stray direct write to stdout cannot settle this run.
+  const nonce = randomBytes(16).toString("hex");
 
   return new Promise((resolve, reject) => {
     let child;
     try {
       child = spawn(process.execPath, [script, payload], {
-        env: process.env, stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, CROW_MIGRATION_CHILD_NONCE: nonce },
+        stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (err) {
       reject(new Error(`migration process failed to start: ${err?.message || err}`));
@@ -165,13 +174,17 @@ export async function runMigrationsInChild({
       try { obj = JSON.parse(text); } catch { return false; } // never trust a stray line
       if (!obj || typeof obj !== "object") return false;
       if (typeof obj.log === "string") { log(obj.log); return false; }
+      // Only this run's own final line settles it: a line without the nonce is a
+      // stray line, whether or not it has the protocol's keys.
       if ("error" in obj) {
+        if (obj.nonce !== nonce) return false; // not this run's line
         if (typeof obj.error !== "string") return false; // not this protocol
         // The migration's own message, unchanged — the caller wraps it textually.
         done(new Error(obj.error));
         return true;
       }
       if ("result" in obj) {
+        if (obj.nonce !== nonce) return false; // not this run's line
         if (!isResult(obj.result)) return false; // a stray line that merely looks like one
         done(null, obj.result);
         reapAfterResult();

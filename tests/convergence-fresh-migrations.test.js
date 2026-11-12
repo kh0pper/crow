@@ -314,8 +314,12 @@ test("a child that lingers after reporting success is killed", async () => {
   writeFileSync(scriptPath, `
 import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(pidFile)}, String(process.pid) + "\\n");
-process.stdout.write(JSON.stringify({ result: { applied: [], skipped: [], deferred: [], newlyDeferred: [] } }) + "\\n");
+const nonce = process.env.CROW_MIGRATION_CHILD_NONCE ?? "";
+process.stdout.write(JSON.stringify({ result: { applied: [], skipped: [], deferred: [], newlyDeferred: [] }, nonce }) + "\\n");
 setInterval(() => {}, 1000);
+// Leave on its own as well, so a regression in the grace kill fails the
+// assertion below instead of holding this file's pipes open for ever.
+setTimeout(() => process.exit(0), 10000);
 `);
 
   const res = await runMigrationsInChild({
@@ -360,8 +364,9 @@ export function run() {
 
 test("a stray protocol-looking line from a migration is ignored", async () => {
   const f = fixture();
-  // console.* goes to stderr, so these two lines never reach the protocol stream
-  // at all; the run must still apply the migration that printed them.
+  // console.log/info/debug (and the console methods built on them) go to stderr,
+  // so these two lines do not reach the protocol stream; the run must still
+  // apply the migration that printed them.
   f.write("scripts/migrations/0002-chatty.mjs", `
 import Database from ${JSON.stringify(BS3)};
 export const id = "0002-chatty";
@@ -400,6 +405,80 @@ export function run({ tasksDbPath }) {
   const tables = f.tasksTables();
   assert.ok(tables.includes("chatty_probe"), `the first migration really ran: ${JSON.stringify(tables)}`);
   assert.ok(tables.includes("writer_probe"), `the second migration really ran: ${JSON.stringify(tables)}`);
+});
+
+test("a stray line with the protocol keys but no nonce cannot settle the run", async () => {
+  const f = fixture();
+  // What a structured logger writes straight to fd 1: the protocol's own keys,
+  // valid shapes, no nonce. None of it may end this run.
+  f.write("scripts/migrations/0002-hijack.mjs", `
+import Database from ${JSON.stringify(BS3)};
+export const id = "0002-hijack";
+export function run({ tasksDbPath }) {
+  process.stdout.write(JSON.stringify({ error: "x" }) + "\\n");
+  process.stdout.write(JSON.stringify({ level: "error", error: "disk warn" }) + "\\n");
+  process.stdout.write(JSON.stringify({ result: { applied: ["fake"], skipped: [], deferred: [], newlyDeferred: [] } }) + "\\n");
+  const d = new Database(tasksDbPath);
+  d.prepare("CREATE TABLE IF NOT EXISTS hijack_probe (v TEXT)").run();
+  d.close();
+}
+`);
+  f.commit("hijack");
+
+  const logs = [];
+  const res = await runMigrationsInChild({
+    migrationsDir: f.migrationsDir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath,
+    log: (m) => logs.push(m),
+  });
+
+  assert.deepEqual(res.applied, ["0002-hijack"],
+    `only the real migration counts (logs: ${JSON.stringify(logs)})`);
+  assert.deepEqual(f.appliedIds(), ["0002-hijack"], "and it was recorded");
+  assert.ok(f.tasksTables().includes("hijack_probe"), "the migration really ran");
+});
+
+test("a partial line a migration left on stdout does not swallow the result", async () => {
+  const f = fixture();
+  f.write("scripts/migrations/0002-partial.mjs", `
+import Database from ${JSON.stringify(BS3)};
+export const id = "0002-partial";
+export function run({ tasksDbPath }) {
+  process.stdout.write("checking..."); // no newline
+  const d = new Database(tasksDbPath);
+  d.prepare("CREATE TABLE IF NOT EXISTS partial_probe (v TEXT)").run();
+  d.close();
+}
+`);
+  f.commit("partial line");
+
+  const res = await runMigrationsInChild({
+    migrationsDir: f.migrationsDir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath,
+  });
+
+  assert.deepEqual(res.applied, ["0002-partial"],
+    "the final line is readable even though an earlier line was left open");
+  assert.ok(f.tasksTables().includes("partial_probe"), "the migration really applied");
+});
+
+test("a final line with no trailing newline still settles the run on close", async () => {
+  const f = fixture();
+  // A stand-in, not run-child.mjs: it writes this run's nonce on the last line
+  // without terminating it and then lets the process end by itself, so only the
+  // parent's read on close can see that line.
+  const scriptPath = join(f.root, "unterminated-child.mjs");
+  writeFileSync(scriptPath, `
+const nonce = process.env.CROW_MIGRATION_CHILD_NONCE ?? "";
+const result = { applied: ["0002-unterminated"], skipped: [], deferred: [], newlyDeferred: [] };
+process.stdout.write(JSON.stringify({ result, nonce }));
+`);
+
+  const res = await runMigrationsInChild({
+    migrationsDir: f.migrationsDir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath,
+    scriptPath,
+  });
+
+  assert.deepEqual(res.applied, ["0002-unterminated"],
+    "the unterminated last line is consumed when the child closes");
 });
 
 test("CROW_MIGRATION_CHILD_TIMEOUT_MS overrides the default", async () => {
