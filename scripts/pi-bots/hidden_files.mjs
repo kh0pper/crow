@@ -52,13 +52,20 @@ export function isSecretEnvName(n) {
 /**
  * A `mcp-addons.json` name at the Crow home root: the file itself, or any copy
  * `mcp-addons.json.<anything>` (`.bak`, `.bak-<date>`, `.bak.<epoch>`,
- * `.pre-<tag>-<date>`) — every suffix counts, not only `.bak`.
- * `mcp-addons.example.json` is documentation, not a secret.
+ * `.pre-<tag>-<date>`) — every suffix counts, not only `.bak`. The leading dot
+ * is optional, so the temp file the writers create beside it and rename over it
+ * is masked too: `.mcp-addons.json.tmp-<pid>-<hex>` (the gateway's
+ * writePrivateFile) and `.mcp-addons.json.tmp-<pid>-<base36>`
+ * (scripts/addon-sandbox/migrate-linked.mjs writeAtomicPrivate) hold the full
+ * add-on env until the rename. `mcp-addons.example.json` is documentation, not
+ * a secret.
  */
-export const ADDONS_FILE_NAME_RE = /^mcp-addons\.json(\..*)?$/;
+export const ADDONS_FILE_NAME_RE = /^\.?mcp-addons\.json(\..*)?$/;
 
 /**
  * True for a name whose CONTENT is the add-on registry with its env values.
+ * `.mcp-addons.json` and `.mcp-addons.json.<anything>` match for the temp files
+ * a writer creates beside the file before renaming it into place.
  * `mcp-addons.example.json` is documentation and does not match the pattern,
  * so it needs no exemption and stays readable.
  */
@@ -99,8 +106,9 @@ export function isAddonsFileName(n) {
  * registry) also contributes `<crowHome>/mcp-addons.json` whether it exists or
  * not, plus every regular file or symlink directly in the home root matching
  * isAddonsFileName (`mcp-addons.json.<anything>`: the `.bak`, `.bak-<date>`,
- * `.pre-<tag>-<date>` backups), through the same symlink handling as the
- * `.env*` names. The add-on env values carry keys and the gateway side reads
+ * `.pre-<tag>-<date>` backups, and the `.mcp-addons.json.tmp-*` file a writer
+ * holds while it renames one into place), through the same symlink handling as
+ * the `.env*` names. The add-on env values carry keys and the gateway side reads
  * the file and hands the bot the env in its `.mcp.json` blocks, so the file
  * itself is never needed inside the sandbox.
  * @param {{crowHome:string, appRoot?:string, hiddenDirs?:string[], readdir?:Function}} opts
@@ -130,8 +138,9 @@ export function secretFilesFor({ crowHome, appRoot, hiddenDirs = [], readdir = r
   // ignored, and one leaving the roots is listed under its own name so the
   // caller refuses the spawn.
   for (const root of roots) for (const n of maskedNamesIn(root, readdir, isSecretEnvName)) addEnv(root, n);
-  // The add-on registry and its backup copies, at the Crow home root only:
-  // the repo checkout never holds one, and its env values carry keys.
+  // The add-on registry, its backup copies and a writer's `.mcp-addons.json.tmp-*`
+  // file, at the Crow home root only: the repo checkout never holds one, and its
+  // env values carry keys.
   for (const n of maskedNamesIn(crowHome, readdir, isAddonsFileName)) addEnv(crowHome, n);
   // Every bundle dir, including a stale copy (x.migrated-...): its .env files
   // are secrets too. A missing bundles dir means none.
