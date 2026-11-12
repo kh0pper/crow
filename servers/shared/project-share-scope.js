@@ -14,6 +14,10 @@
 //   OWNER_ONLY_TOOLS       refused for any bot, shares or not
 //   PROJECT_NEUTRAL_TOOLS  touches no project-scoped row at all (instance-wide or no rows)
 //
+// One name is in a sixth, narrower list: `crow_list_context_sections` is a scoped listing that
+// also takes a `project_id` filter (SCOPED_LISTING_PROJECT_TOOLS). A listing is not one of the four
+// families a share covers, so a bot naming any project but its own is refused `home_only` there.
+//
 // `crow_dream` is the one name in two entries: with `dry_run` true it is a cross-project report
 // (SCOPED_LISTING_TOOLS), with it false it can update or delete memories (OWNER_ONLY_TOOLS).
 // `toolPolicyFor(tool, args)` resolves that per call; the collections stay the static inventory.
@@ -128,9 +132,6 @@ export const HOME_ONLY_TOOLS = Object.freeze([
   "crow_update_context_section",
   "crow_add_context_section",
   "crow_delete_context_section",
-  "crow_create_schedule",
-  "crow_list_schedules",
-  "crow_update_schedule",
 ]);
 
 /**
@@ -147,23 +148,46 @@ export const SCOPED_LISTING_TOOLS = Object.freeze([
   "crow_dream",
 ]);
 
-/** Refused for any bot actor regardless of shares (crow_dream only when it may mutate). */
+/**
+ * The listed tools that also take a `project_id` filter: the ones a bot could otherwise use to
+ * read a shared project's row names, which no share covers.
+ */
+export const SCOPED_LISTING_PROJECT_TOOLS = Object.freeze([
+  "crow_list_context_sections",
+]);
+
+/**
+ * Refused for any bot actor regardless of shares (crow_dream only when it may mutate; the voice bot
+ * is exempt because the bot rules never bind it).
+ *
+ * The three schedule tools are here because the schedules table has no project column: a schedule
+ * belongs to this instance, not to a project, so there is nothing to scope it to — home-only would
+ * have let a bot manage the operator's whole schedule list.
+ *
+ * The three notification read/dismiss tools are here because notification text carries other
+ * projects' names and card titles, and dismissing one clears the operator's own alerts.
+ */
 export const OWNER_ONLY_TOOLS = Object.freeze([
   "crow_create_project",
   "crow_regenerate_embeddings",
   "crow_dream",
+  "crow_create_schedule",
+  "crow_list_schedules",
+  "crow_update_schedule",
+  "crow_check_notifications",
+  "crow_dismiss_notification",
+  "crow_dismiss_all_notifications",
 ]);
 
 /**
- * Nine project-neutral tools, listed so that no existing bot silently loses them: they touch no
- * project-scoped row (notifications and backgrounds are instance-wide, web search writes nothing).
+ * Six project-neutral tools, listed so that no existing bot silently loses them: they touch no
+ * project-scoped row (backgrounds are instance-wide, web search writes nothing). Reading or
+ * dismissing a notification is NOT neutral — see OWNER_ONLY_TOOLS.
  */
 export const PROJECT_NEUTRAL_TOOLS = Object.freeze([
   "crow_web_search",
-  "crow_check_notifications",
+  // Sending a notification is a message to the operator, never a read of another project's rows.
   "crow_create_notification",
-  "crow_dismiss_notification",
-  "crow_dismiss_all_notifications",
   "crow_notification_settings",
   "crow_generate_background",
   "crow_list_backgrounds",
@@ -172,6 +196,7 @@ export const PROJECT_NEUTRAL_TOOLS = Object.freeze([
 
 const HOME_ONLY = new Set(HOME_ONLY_TOOLS);
 const SCOPED_LISTING = new Set(SCOPED_LISTING_TOOLS);
+const SCOPED_LISTING_PROJECT = new Set(SCOPED_LISTING_PROJECT_TOOLS);
 const OWNER_ONLY = new Set(OWNER_ONLY_TOOLS);
 const NEUTRAL = new Set(PROJECT_NEUTRAL_TOOLS);
 
@@ -242,7 +267,8 @@ async function homeProjectId(db, botId) {
  * `OWNER_ONLY_TOOLS` (and any unlisted name) are refused `owner_only`; no project is allowed for a
  * covered tool, a `PROJECT_NEUTRAL_TOOLS` or a `SCOPED_LISTING_TOOLS` entry, and for a HOME_ONLY
  * tool only when the bot has a home project; a named project is allowed when it is the home
- * project, refused `home_only` for a HOME_ONLY tool, and otherwise decided by `resolveBotAccess`.
+ * project, refused `home_only` for a HOME_ONLY tool and for a `SCOPED_LISTING_PROJECT_TOOLS` entry,
+ * and otherwise decided by `resolveBotAccess`.
  *
  * `args` is the call's own arguments (only `dry_run` is read: it picks which of `crow_dream`'s two
  * entries applies); `deviceId` is the call's `device_id`.
@@ -268,6 +294,7 @@ export async function decideProjectAccess(db, actor, { tool, projectId, args = {
 
   if (home != null && home === requested) return { allowed: true, projectId: requested };
   if (policy.kind === "home_only") return deny("home_only");
+  if (SCOPED_LISTING_PROJECT.has(String(tool))) return deny("home_only");
 
   const access = await resolveBotAccess(db, actor.id, requested);
   if (access.kind === "none") return deny("no_share");
@@ -348,12 +375,17 @@ function windowFor(db) {
 
 /**
  * Record a refusal in the project's own log: action `share.refused`, target `tool:<name>`, payload
- * `{code}`. A project that does not exist takes no row (silently), and repeats of the same
+ * `{code}`. A refusal that names no project (an `owner_only` refusal with no project, an unverified
+ * bot) is logged on the bot's HOME project when it has one, and dropped silently when it has none.
+ * A project that does not exist takes no row (silently), and repeats of the same
  * (bot, project, tool, code) inside 60 s collapse into the first, so a retry loop cannot flood the
  * log. `now` is the clock (a function or a millisecond value) for tests.
  */
 export async function auditRefusal(db, actor, { tool, projectId, code, now = Date.now } = {}) {
-  const id = asId(projectId);
+  const named = asId(projectId);
+  const id = named != null ? named
+    : isBot(actor) && actor.id ? await homeProjectId(db, actor.id)
+      : null;
   if (id == null) return;
 
   const exists = await db.execute({
@@ -384,11 +416,18 @@ export async function auditRefusal(db, actor, { tool, projectId, code, now = Dat
 /**
  * One gate per tool call, and the only copy of these decisions: it resolves the actor from the
  * construction-time base and the call's `extra`, and answers with the tool-result shape the project
- * tools already use for an ACL error. A pass is `null`, so a handler reads:
+ * tools already use for an ACL error.
  *
- *   const gate = makeShareGate(db, "crow_get_memory", { baseActor, extra });
- *   const refusal = await gate.checkRow(row.project_id, args);
- *   if (refusal) return refusal;
+ * `check` passes `{ projectId }` — the project the gate RESOLVED, which is the home project when the
+ * call omitted one and the bot has a home — so a handler writes and reads against the project the
+ * gate resolved rather than the one the call happened to name. `checkRow` passes `null`: the row's
+ * own project is already the caller's, there is nothing left to resolve. A refusal from either is
+ * the tool-result object (`isError: true`), so a handler reads:
+ *
+ *   const gate = makeShareGate(db, "crow_store_memory", { baseActor, extra });
+ *   const pass = await gate.check(args.project_id, args);
+ *   if (pass && pass.isError) return pass;
+ *   const projectId = pass.projectId;
  *
  * The handler passes the call's own arguments as the second parameter: only `device_id` and
  * `dry_run` are read (a bot naming a device is refused, and `dry_run` picks which of `crow_dream`'s
@@ -406,7 +445,7 @@ export function makeShareGate(db, tool, { extra, baseActor } = {}) {
     async check(projectId, callArgs = {}) {
       const args = callArgs && typeof callArgs === "object" ? callArgs : {};
       const decision = await decideProjectAccess(db, actor, { tool, projectId, args, deviceId: args.device_id });
-      if (decision.allowed) return null;
+      if (decision.allowed) return { projectId: decision.projectId ?? null };
       await audit(projectId ?? null, decision.code);
       return refusalResult(decision.message);
     },

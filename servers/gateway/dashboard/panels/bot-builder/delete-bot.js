@@ -225,9 +225,16 @@ export async function handleDeleteConfirm(req, res, { db, lang = "en" } = {}) {
 
   // Shares granted TO this bot die with it. `project_bot_shares.bot_id` has no foreign key
   // (bot definitions are text keys), so this is the integrity step: without it a bot later
-  // created with the same id would inherit every project the old one could reach. Best-effort
-  // like the steps above — each shared project gets the revoke in its own audit log.
-  try { await revokeAllSharesForBot(db, botId, { reason: "bot_deleted" }); } catch { /* per-step best-effort */ }
+  // created with the same id would inherit every project the old one could reach. Each shared
+  // project gets the revoke in its own audit log. A revoke that fails stops the delete BEFORE the
+  // def row goes: a def that outlives its revoke is a bot that still reaches the projects it was
+  // shared into, and the owner can retry the delete once the store answers.
+  try {
+    await revokeAllSharesForBot(db, botId, { reason: "bot_deleted" });
+  } catch (e) {
+    return res.redirectAfterPost(
+      `/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=review&error=` + encodeURIComponent(String(e.message || e)));
+  }
 
   // The def row LAST: if anything above hard-fails, the bot still exists and
   // the operator can retry; a half-deleted def with live children is worse.
