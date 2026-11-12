@@ -13,20 +13,29 @@
  * Every later sync lists `afterUid: highest_uid` and advances the watermark batch by batch, so a
  * failure halfway through a large arrival keeps the progress the batches before it made. UIDVALIDITY
  * is compared only after that list has succeeded, and a change empties the folder and starts over as a
- * first sync (the UIDs mean something else now, so nothing may be matched against them).
+ * first sync (the UIDs mean something else now, so nothing may be matched against them). Unknown is
+ * never a change: only two positive integers are compared, so a listing that omits the value leaves
+ * the stored one exactly as it was — a server that says nothing about UIDVALIDITY must not empty a
+ * folder whose rows are still keyed on the UIDs it holds.
  *
  * Two behaviours of a real adapter shape the rest. `get()` may omit a UID it was asked for — one
- * expunged between the listing and the body fetch, or one left outside a download budget. An omitted
- * UID is retried once on its own; when it is still missing the pass STOPS there and persists
- * `lowest omitted UID - 1`, because advancing past a UID that was never delivered would lose it
- * forever (the next listing starts above the watermark). The same stop applies when one message
- * cannot be stored. And a message the listing reports above MAX_RAW_BYTES, or one whose bytes come
- * back empty, is stored as a `too_large` placeholder without its bytes ever being held.
+ * expunged between the listing and the body fetch, or one left outside a download budget — and an
+ * answer without the raw bytes is an omission too. An omitted UID is retried once on its own; when it
+ * is still missing the pass STOPS there (`uid_omitted`), persists `lowest omitted UID - 1`, and still
+ * reconciles flags and expunges below that line, because advancing past a UID that was never
+ * delivered would lose it forever (the next listing starts above the watermark). The same stop
+ * applies when one message cannot be stored. One UID nothing ever delivers must not freeze a folder
+ * for ever, though, so a UID still missing on the third consecutive pass is `uid_skipped` instead:
+ * nothing is stored for it, the pass advances past it, and the count behind that decision lives in
+ * memory only (see `noteOmitted`). And a message the listing reports above MAX_RAW_BYTES, or one
+ * whose bytes come back empty, is stored as a `too_large` placeholder without its bytes ever being
+ * held.
  *
  * Everything reaching a log line is a code, a count or an id: a folder path is an opaque string that
  * may carry a mailbox name, and a message's subject, addresses and bytes belong to the sender. An
- * adapter failure aborts its folder with nothing deleted, and only the four failures that end the whole
- * pass (AUTH_FAILED, NETWORK, TLS and a deadline TIMEOUT) travel further than their own folder.
+ * adapter failure aborts its folder with nothing deleted, and the four failures that end the whole
+ * account pass (AUTH_FAILED, NETWORK, TLS and the pass's own deadline TIMEOUT) travel further than
+ * their own folder: the folders after it are abandoned and the account is not stamped.
  *
  * Two on-demand reads reach outside the window without moving it. `fetchOlder` pages a folder's
  * history backwards from `floor_uid` by UID (never by date, which would skip a run of messages sharing
@@ -72,8 +81,19 @@ const DEFAULT_OLDER_LIMIT = 50;
 /** The skipped three, lower-cased once: a special-use flag is case-insensitive (RFC 6154). */
 const SKIPPED_SPECIAL_USE = new Set(SKIP_SPECIAL_USE.map((flag) => flag.toLowerCase()));
 
-/** The codes that end the whole pass when the folder LISTING itself fails. */
+/** The codes that mean the connection itself is unusable, wherever the pass meets them. */
 const PASS_ENDING_CODES = new Set(["AUTH_FAILED", "NETWORK", "TLS", "TIMEOUT"]);
+
+/**
+ * Does this failure end the whole account pass rather than one folder? The connection codes do — from
+ * the folder listing or from any folder's own pass — and so does the engine's deadline TIMEOUT: that
+ * one is the pass's clock, not a folder's, and its detail is `sync_deadline`. Any other TIMEOUT (a
+ * socket an adapter gave up on) stays the folder's own, like every other code.
+ */
+function endsPass(mailErr) {
+  return PASS_ENDING_CODES.has(mailErr.code)
+    && (mailErr.code !== "TIMEOUT" || mailErr.detail === "sync_deadline");
+}
 
 /** A context's log default: a sync that was given no log sink says nothing. */
 function noop() {}
@@ -139,6 +159,17 @@ function folderIdOf(folder) {
   const id = Number(folder?.id);
   if (!Number.isInteger(id) || id <= 0) throw new MailError("BAD_INPUT", "folder");
   return id;
+}
+
+/**
+ * A UIDVALIDITY as the engine compares it: a positive integer, or null for "nothing was said". Called
+ * on BOTH sides before any Number() sees the value, because `Number(null)` is 0 — and a 0 that reads
+ * as a validity is a folder emptied for a value the server never reported.
+ */
+function uidValidityOf(value) {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 function sizeOf(item) {
@@ -238,6 +269,53 @@ function internalDateOf(entry) {
   return Number.isFinite(value) ? value : null;
 }
 
+/* --------------------------------------------------- liveness for a stuck UID */
+
+/**
+ * Consecutive passes that stopped on the same omitted (folder, uid), keyed `folderId:uid`. Memory
+ * only: this is the engine's own note about its progress, not mailbox state, so it never reaches a
+ * table and it starts empty on every process start.
+ */
+const STUCK_OMISSIONS = new Map();
+
+/** Consecutive passes one omitted UID may stop before the pass gives up on that one UID. */
+const LIVENESS_PASSES = 3;
+
+const stuckKey = (folderId, uid) => `${folderId}:${uid}`;
+
+/**
+ * Note one pass that asked for `uid` and did not get it back, and answer how many passes in a row
+ * have now done so. Without this a mailbox that never answers for one UID would hold that folder's
+ * watermark for ever; on the third consecutive pass `fetchBatch` skips the UID instead of stopping.
+ */
+function noteOmitted(folderId, uid) {
+  const key = stuckKey(folderId, uid);
+  const passes = (STUCK_OMISSIONS.get(key) ?? 0) + 1;
+  STUCK_OMISSIONS.set(key, passes);
+  return passes;
+}
+
+/** The UID arrived (or was given up on): its count starts again from nothing. */
+function clearOmitted(folderId, uid) {
+  STUCK_OMISSIONS.delete(stuckKey(folderId, uid));
+}
+
+/** A pass that finished with nothing stuck leaves no count behind: delivered, or no longer listed. */
+function clearFolderOmitted(folderId) {
+  const prefix = `${folderId}:`;
+  for (const key of [...STUCK_OMISSIONS.keys()]) {
+    if (key.startsWith(prefix)) STUCK_OMISSIONS.delete(key);
+  }
+}
+
+/**
+ * Forget every stuck count. Tests only: the map is per process, and a folder id from one test's
+ * scratch database must never lend its count to the next test's.
+ */
+export function resetSyncLivenessForTests() {
+  STUCK_OMISSIONS.clear();
+}
+
 /* ------------------------------------------------------------------ the pass */
 
 /**
@@ -245,14 +323,20 @@ function internalDateOf(entry) {
  * already, marked so: its body is never asked for, and it is stored as too_large. A UID the first
  * get() left out gets exactly one more call on its own — an expunged message simply stays absent, and
  * one the adapter merely did not reach usually arrives there. A UID still missing after that is the
- * batch's `stopAtUid`: nothing at or above it may be stored.
+ * batch's `stopAtUid`: nothing at or above it may be stored. An answer without the raw bytes is an
+ * omission too — a message with no body is not a message, and it is certainly not a too_large one.
+ *
+ * With `liveness` set (a sync pass), a UID that has now been missing on LIVENESS_PASSES consecutive
+ * passes is logged as uid_skipped and passed over instead of stopping the pass. Nothing is stored for
+ * it either way.
  *
  * @param {object} c the resolved context
  * @param {object} folder the stored folder row
  * @param {object[]} batch ascending items (`{uid, size}` from a listing, or `{uid}` from a search)
+ * @param {{liveness?: boolean}} [options]
  * @returns {Promise<{delivered: Map<number, object>, stopAtUid: number|null}>}
  */
-async function fetchBatch(c, folder, batch) {
+async function fetchBatch(c, folder, batch, { liveness = false } = {}) {
   const delivered = new Map();
   const wanted = [];
   for (const item of batch) {
@@ -262,21 +346,39 @@ async function fetchBatch(c, folder, batch) {
 
   let stopAtUid = null;
   if (wanted.length > 0) {
+    const folderId = liveness ? folderIdOf(folder) : null;
     const got = new Map();
     for (const message of await getOrThrow(c, folder.path, wanted.map((item) => item.uid))) {
-      if (!got.has(message.uid)) got.set(message.uid, message);
+      // The UID is the key whatever type an implementation answered with, and a message that came
+      // back without its bytes is not delivered: it is what an omission looks like from here.
+      const uid = Number(message.uid);
+      if (!Number.isInteger(uid) || uid <= 0 || !Buffer.isBuffer(message.raw)) continue;
+      if (!got.has(uid)) got.set(uid, message);
     }
     for (const item of wanted) {
       if (got.has(item.uid)) continue;
       checkDeadline(c);
       const again = await getOrThrow(c, folder.path, [item.uid]);
-      const found = again.find((message) => message.uid === item.uid);
+      const found = again.find((message) => Number(message.uid) === item.uid
+        && Buffer.isBuffer(message.raw));
       if (found) got.set(item.uid, found);
     }
     for (const item of wanted) {
       const message = got.get(item.uid);
-      if (message) delivered.set(item.uid, { item, message });
-      else if (stopAtUid == null || item.uid < stopAtUid) stopAtUid = item.uid;
+      if (message) {
+        if (liveness) clearOmitted(folderId, item.uid);
+        delivered.set(item.uid, { item, message });
+        continue;
+      }
+      // The third pass in a row that asked for this UID and got nothing: the mailbox is not going to
+      // answer for it, so the folder moves on rather than never moving again. Nothing is stored for
+      // the UID, and the count is forgotten so the next decision starts fresh.
+      if (liveness && noteOmitted(folderId, item.uid) >= LIVENESS_PASSES) {
+        clearOmitted(folderId, item.uid);
+        c.log({ event: "uid_skipped", folderId, uid: item.uid, code: "omitted" });
+        continue;
+      }
+      if (stopAtUid == null || item.uid < stopAtUid) stopAtUid = item.uid;
     }
   }
 
@@ -287,20 +389,23 @@ async function fetchBatch(c, folder, batch) {
  * Store the delivered members of one batch in UID order, each in its own try/catch, because a hostile
  * message must never take its folder with it. Nothing at or above a UID this pass could not deliver or
  * store is written: the caller decides what that means for its watermark, but the hole is never closed
- * over.
+ * over. `stopReason` says which of the two it was — an omission from the adapter (`omitted`) or a write
+ * that failed (`store_failed`) — so the caller can log the right thing.
  *
  * @param {object} c the resolved context
  * @param {object} folder the stored folder row
  * @param {object[]} batch ascending items
  * @param {Map<number, object>} delivered the batch's bytes, by UID (see fetchBatch)
  * @param {number|null} stopAtUid a UID fetchBatch could not deliver, if any
- * @returns {Promise<{added: number, lowestStoredUid: number|null, stopAtUid: number|null}>}
+ * @returns {Promise<{added: number, lowestStoredUid: number|null, stopAtUid: number|null,
+ *                    stopReason: string|null}>}
  */
 async function storeBatch(c, folder, batch, delivered, stopAtUid) {
   const folderId = folderIdOf(folder);
   let added = 0;
   let lowestStoredUid = null;
   let stop = stopAtUid ?? null;
+  let stopReason = stop == null ? null : "omitted";
 
   for (const item of batch) {
     if (stop != null && item.uid >= stop) break;
@@ -311,9 +416,10 @@ async function storeBatch(c, folder, batch, delivered, stopAtUid) {
     await c.yieldFn();
 
     try {
-      const raw = entry.tooLarge ? null : entry.message?.raw;
-      // An empty body is how the adapter reports a message above the raw cap, so it is a too_large
-      // row too — never an empty message that reads as one the sender left blank.
+      // fetchBatch only delivers bytes, so a null raw here is the listing's own too_large marker. An
+      // empty body is how the adapter reports a message above the raw cap, so it is a too_large row
+      // too — never an empty message that reads as one the sender left blank.
+      const raw = entry.tooLarge ? null : entry.message.raw;
       const parsed = raw == null || raw.length === 0
         ? placeholderMessage("too_large")
         : await parseRawMessage(raw);
@@ -331,12 +437,15 @@ async function storeBatch(c, folder, batch, delivered, stopAtUid) {
       // A message that cannot be stored holds the watermark, exactly like one get() left out: the
       // code is all a log may say about it.
       c.log({ event: "message_failed", folderId, uid: item.uid, code: toMailError(err).code });
-      if (stop == null || item.uid < stop) stop = item.uid;
+      if (stop == null || item.uid < stop) {
+        stop = item.uid;
+        stopReason = "store_failed";
+      }
       break;
     }
   }
 
-  return { added, lowestStoredUid, stopAtUid: stop };
+  return { added, lowestStoredUid, stopAtUid: stop, stopReason };
 }
 
 /**
@@ -345,23 +454,26 @@ async function storeBatch(c, folder, batch, delivered, stopAtUid) {
  * `afterBatch(batchTop)` runs after each completed batch, so a caller that owns a watermark can
  * persist its progress there: an interruption then leaves progress rather than work to redo. A pass
  * that stopped writes nothing for the batches after it, and nothing at or above its stop UID.
+ * `liveness` is the sync pass's own rule (see fetchBatch): for the on-demand reads it stays off, so
+ * they keep stopping on the first UID they cannot get.
  *
  * @param {object} c the resolved context
  * @param {object} folder the stored folder row
  * @param {object[][]} batches ascending items, grouped as batchItems returned them
- * @param {{afterBatch?: Function|null}} [options]
- * @returns {Promise<{added: number, stopAtUid: number|null, lowestStoredUid: number|null,
- *                    highestUid: number}>}
+ * @param {{afterBatch?: Function|null, liveness?: boolean}} [options]
+ * @returns {Promise<{added: number, stopAtUid: number|null, stopReason: string|null,
+ *                    lowestStoredUid: number|null, highestUid: number}>}
  */
-async function storeBatches(c, folder, batches, { afterBatch = null } = {}) {
+async function storeBatches(c, folder, batches, { afterBatch = null, liveness = false } = {}) {
   let added = 0;
   let lowestStoredUid = null;
   let stopAtUid = null;
+  let stopReason = null;
   let highestUid = 0;
 
   for (const batch of batches) {
     checkDeadline(c);
-    const fetched = await fetchBatch(c, folder, batch);
+    const fetched = await fetchBatch(c, folder, batch, { liveness });
     const stored = await storeBatch(c, folder, batch, fetched.delivered, fetched.stopAtUid);
     added += stored.added;
     if (stored.lowestStoredUid != null
@@ -370,6 +482,7 @@ async function storeBatches(c, folder, batches, { afterBatch = null } = {}) {
     }
     if (stored.stopAtUid != null) {
       stopAtUid = stored.stopAtUid;
+      stopReason = stored.stopReason;
       break;
     }
 
@@ -378,7 +491,7 @@ async function storeBatches(c, folder, batches, { afterBatch = null } = {}) {
     if (afterBatch) await afterBatch(batchTop);
   }
 
-  return { added, stopAtUid, lowestStoredUid, highestUid };
+  return { added, stopAtUid, stopReason, lowestStoredUid, highestUid };
 }
 
 /**
@@ -392,14 +505,15 @@ async function storeBatches(c, folder, batches, { afterBatch = null } = {}) {
  * @param {object} c the resolved context
  * @param {object} folder the stored folder row
  * @param {object[]} items the listing's items
- * @param {{first: boolean}} options a first sync writes its state once, at the end
- * @returns {Promise<{added: number, stopAtUid: number|null, lowestStoredUid: number|null,
- *                    highestUid: number}>}
+ * @param {{first: boolean, liveness?: boolean}} options a first sync writes its state once, at the end
+ * @returns {Promise<{added: number, stopAtUid: number|null, stopReason: string|null,
+ *                    lowestStoredUid: number|null, highestUid: number}>}
  */
-async function storeItems(c, folder, items, { first }) {
+async function storeItems(c, folder, items, { first, liveness = false }) {
   const folderId = folderIdOf(folder);
   const watermark = Math.max(0, Number(folder.highestUid) || 0);
   const outcome = await storeBatches(c, folder, batchItems(ascending(items)), {
+    liveness,
     afterBatch: first
       ? null
       : (batchTop) => setFolderSyncState(c.db, folderId, { highestUid: Math.max(watermark, batchTop) }),
@@ -408,14 +522,25 @@ async function storeItems(c, folder, items, { first }) {
 }
 
 /**
+ * One line for the UID a pass stopped on when the reason was an omission. Only ids and a code: the
+ * UID names no content, and the message that never arrived was never seen at all.
+ */
+function logOmitted(c, folderId, outcome) {
+  if (outcome.stopAtUid == null || outcome.stopReason !== "omitted") return;
+  c.log({ event: "uid_omitted", folderId, uid: outcome.stopAtUid, code: "omitted" });
+}
+
+/**
  * Rule 1, the first sync: the account's window, in batches, then one state write. An abort writes no
  * state at all (the next run is a first sync again, and the upserts make it idempotent); a pass that
  * stopped on an undeliverable UID writes what it did reach, so it does not fetch the window again.
+ * The UIDVALIDITY is stored only when the listing reported one — a positive integer, never a 0 read
+ * out of a null — so a server that says nothing leaves the column null for a later pass to fill.
  */
 async function firstSync(c, folder, { windowDays, nowMs }) {
   const listing = await listOrThrow(c, folder.path, { sinceDate: nowMs - windowDays * DAY_MS });
   const uidNext = uidNextOf(listing, listing.items);
-  const outcome = await storeItems(c, folder, listing.items, { first: true });
+  const outcome = await storeItems(c, folder, listing.items, { first: true, liveness: true });
 
   const highestUid = outcome.stopAtUid == null
     ? Math.max(outcome.highestUid, uidNext - 1)
@@ -425,9 +550,13 @@ async function firstSync(c, folder, { windowDays, nowMs }) {
     floorUid: outcome.lowestStoredUid ?? uidNext,
     lastSyncedAt: nowMs,
   };
-  const uidValidity = Number(listing.uidValidity);
-  if (Number.isInteger(uidValidity)) patch.uidValidity = uidValidity;
+  const uidValidity = uidValidityOf(listing.uidValidity);
+  if (uidValidity != null) patch.uidValidity = uidValidity;
   await setFolderSyncState(c.db, folder.id, patch);
+  logOmitted(c, folderIdOf(folder), outcome);
+
+  // Nothing is stuck if the window went through clean; a stop keeps its own count for the next pass.
+  if (outcome.stopAtUid == null) clearFolderOmitted(folderIdOf(folder));
 
   return { added: outcome.added };
 }
@@ -435,8 +564,13 @@ async function firstSync(c, folder, { windowDays, nowMs }) {
 /**
  * Rule 3: flags and expunges by UID, from the floor up. The listing is compared with the UIDVALIDITY
  * this pass already saw; a change here is a mailbox that moved under the pass, so the folder aborts
- * with nothing deleted. Rows below the floor are not asked about and never removed.
+ * with nothing deleted. Only two positive integers are compared — the stored value and the listed one
+ * are both normalised by uidValidityOf, so neither a null nor a 0 the server never sent can look like
+ * a change. Rows below the floor are not asked about and never removed.
  *
+ * @param {object} c the resolved context
+ * @param {object} folder the stored folder row
+ * @param {number|null} uidValidity this pass's UIDVALIDITY, a positive integer or null when unknown
  * @returns {Promise<number>} how many rows the expunge scan removed
  */
 async function reconcileFlags(c, folder, uidValidity) {
@@ -445,8 +579,8 @@ async function reconcileFlags(c, folder, uidValidity) {
   if (lo == null) return 0;
 
   const listing = await listOrThrow(c, folder.path, { fromUid: lo });
-  const seen = Number(listing.uidValidity);
-  if (Number.isInteger(seen) && Number.isInteger(uidValidity) && seen !== uidValidity) {
+  const seen = uidValidityOf(listing.uidValidity);
+  if (seen != null && uidValidity != null && seen !== uidValidity) {
     throw new MailError("PROTOCOL", "uidvalidity_changed");
   }
   checkDeadline(c);
@@ -458,6 +592,10 @@ async function reconcileFlags(c, folder, uidValidity) {
 /**
  * Sync one folder. The result counts what this pass changed: `added` is newly created rows, `removed`
  * is rows the expunge scan dropped, `reset` says a UIDVALIDITY change emptied the folder first.
+ *
+ * A pass that stops (a UID the adapter never delivered, or a message that could not be stored) still
+ * reconciles flags and expunges: that scan only ever touches rows below the watermark, so it can
+ * settle what this pass did store without reaching past the hole.
  *
  * @param {object} ctx `{db, adapter, now?, deadlineAt?, log?, yieldFn?}`
  * @param {string} accountId the account the folder belongs to
@@ -482,11 +620,12 @@ export async function syncFolder(ctx, accountId, folder) {
   }
 
   // Rule 2: everything above the watermark. UIDVALIDITY is compared only once this list succeeded —
-  // a listing that failed says nothing about the mailbox.
+  // a listing that failed says nothing about the mailbox — and only when both sides reported a
+  // positive integer, because "unknown" is never a change.
   const listing = await listOrThrow(c, folder.path, { afterUid: folder.highestUid });
-  const storedValidity = Number(folder.uidValidity);
-  const listedValidity = Number(listing.uidValidity);
-  if (Number.isInteger(storedValidity) && Number.isInteger(listedValidity) && listedValidity !== storedValidity) {
+  const storedValidity = uidValidityOf(folder.uidValidity);
+  const listedValidity = uidValidityOf(listing.uidValidity);
+  if (storedValidity != null && listedValidity != null && listedValidity !== storedValidity) {
     // Every UID this folder holds means something else now: empty it and start over as a first sync.
     await resetFolder(c.db, folderIdOf(folder), listedValidity);
     counts.reset = true;
@@ -494,26 +633,32 @@ export async function syncFolder(ctx, accountId, folder) {
     counts.added = (await firstSync(c, restart, { windowDays, nowMs })).added;
     return counts;
   }
-  const uidValidity = Number.isInteger(listedValidity) ? listedValidity : storedValidity;
+  const uidValidity = listedValidity ?? storedValidity;
   const uidNext = uidNextOf(listing, listing.items);
 
   const newItems = listing.items.filter((item) => Number(item.uid) > Number(folder.highestUid));
-  const outcome = await storeItems(c, folder, newItems, { first: false });
+  const outcome = await storeItems(c, folder, newItems, { first: false, liveness: true });
   counts.added = outcome.added;
+  const folderId = folderIdOf(folder);
 
   if (outcome.stopAtUid != null) {
     // An undeliverable UID (or a store that failed) is where the watermark stops. The rows below it
-    // are on disk and the next pass re-lists from here; nothing is ever skipped over.
-    await setFolderSyncState(c.db, folderIdOf(folder), {
+    // are on disk and the next pass re-lists from here; nothing is ever skipped over. Only ids and a
+    // code reach the log line: the uid names no content.
+    await setFolderSyncState(c.db, folderId, {
       highestUid: Math.max(outcome.highestUid, outcome.stopAtUid - 1),
     });
+    logOmitted(c, folderId, outcome);
+    counts.removed = await reconcileFlags(c, folder, uidValidity);
     return counts;
   }
 
-  await setFolderSyncState(c.db, folderIdOf(folder), {
+  await setFolderSyncState(c.db, folderId, {
     highestUid: Math.max(outcome.highestUid, uidNext - 1),
     lastSyncedAt: nowMs,
   });
+  // The pass finished with nothing stuck: no omitted-UID count outlives it.
+  clearFolderOmitted(folderId);
   counts.removed = await reconcileFlags(c, folder, uidValidity);
   return counts;
 }
@@ -563,9 +708,9 @@ export async function fetchOlder(ctx, accountId, folderId, { limit = DEFAULT_OLD
   checkDeadline(c);
 
   const listing = await listOrThrow(c, folder.path, { beforeUid: lo, limit: wanted, newestFirst: true });
-  const storedValidity = folder.uidValidity;
-  const listedValidity = Number(listing.uidValidity);
-  if (storedValidity != null && Number.isInteger(listedValidity) && listedValidity !== storedValidity) {
+  const storedValidity = uidValidityOf(folder.uidValidity);
+  const listedValidity = uidValidityOf(listing.uidValidity);
+  if (storedValidity != null && listedValidity != null && listedValidity !== storedValidity) {
     throw new MailError("PROTOCOL", "uidvalidity_changed");
   }
 
@@ -657,8 +802,10 @@ export async function searchRemote(ctx, accountId, query, { limit } = {}) {
  *
  * The folder listing is refreshed first (`upsertFolders` owns which folders may be deleted), then each
  * stored folder the listing still offers — selectable, and not one of the three virtual views — is
- * synced in turn. One folder's failure is a log line and the next folder still runs; only the four
- * codes that mean the connection itself is unusable (and this pass's own deadline) travel further.
+ * synced in turn. One folder's own failure is a log line and the next folder still runs; a failure
+ * that means the connection itself is unusable, or that the pass ran out of its own time, ends the
+ * whole pass instead: the folders after it are abandoned and `last_sync_at` is not stamped, because a
+ * pass that stopped early is not a pass that succeeded.
  *
  * @param {object} ctx `{db, adapter, now?, deadlineAt?, log?, yieldFn?}`
  * @param {string} accountId
@@ -674,7 +821,7 @@ export async function syncAccount(ctx, accountId) {
     listing = await c.adapter.listFolders();
   } catch (err) {
     const mailErr = toMailError(err);
-    if (PASS_ENDING_CODES.has(mailErr.code)) throw mailErr;
+    if (endsPass(mailErr)) throw mailErr;
     c.log({ event: "folders_failed", code: mailErr.code });
     return { folders: 0, added: 0 };
   }
@@ -719,7 +866,7 @@ export async function syncAccount(ctx, accountId) {
       });
     } catch (err) {
       const mailErr = toMailError(err);
-      if (PASS_ENDING_CODES.has(mailErr.code) && mailErr.detail === "sync_deadline") throw mailErr;
+      if (endsPass(mailErr)) throw mailErr;
       c.log({ event: "folder_failed", folderId: folder.id, code: mailErr.code });
     }
   }

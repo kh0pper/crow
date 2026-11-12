@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { MAIL_DDL } from "../servers/shared/mail-schema.js";
-import { createAccount, updateAccount } from "../servers/gateway/mail/store/accounts.js";
+import { createAccount, getAccount, updateAccount } from "../servers/gateway/mail/store/accounts.js";
 import {
   getFolder,
   listFolders,
@@ -27,6 +27,7 @@ import {
   SKIP_SPECIAL_USE,
   SYNC_BATCH_BYTES,
   SYNC_BATCH_MAX,
+  resetSyncLivenessForTests,
   syncAccount,
   syncFolder,
 } from "../servers/gateway/mail/sync/engine.js";
@@ -56,6 +57,9 @@ async function freshDb() {
 
 /** A scratch DB with one account and one fake adapter whose clock is the test's. */
 async function setup(accountPatch = {}) {
+  // The omitted-UID liveness count is module state keyed by folder id, and every scratch DB numbers
+  // its folders from 1: one test's stuck count must never reach the next test's folder.
+  resetSyncLivenessForTests();
   const db = await freshDb();
   const account = await createAccount(db, {
     address: ALEX,
@@ -107,6 +111,25 @@ async function messageRows(db, folderId) {
 function deliver(adapter, mailbox, options, internalDate = T0) {
   return adapter.deliver(mailbox, makeRaw(options), { internalDate });
 }
+
+/**
+ * A db identical to the real one, with every statement shown to `onStatement` first — the hook the
+ * yield and mid-pass tests use to watch (or interrupt) a write while a pass is running.
+ */
+function watchedDb(db, onStatement) {
+  const see = (statement) => onStatement(typeof statement === "string" ? null : statement);
+  return {
+    execute: (statement) => { see(statement); return db.execute(statement); },
+    batch: (statements) => db.batch(statements),
+    executeMultiple: (sql) => db.executeMultiple(sql),
+    runTransaction: (work) => db.runTransaction((run) => work((statement) => {
+      see(statement);
+      return run(statement);
+    })),
+  };
+}
+
+const isMessageInsert = (statement) => Boolean(statement) && /INSERT INTO mail_messages/.test(statement.sql);
 
 /* --------------------------------------------------------------- first sync */
 
@@ -281,6 +304,45 @@ test("a UIDVALIDITY change empties the folder and re-runs the first sync", async
   assert.equal(folder.highestUid, 2);
 });
 
+test("a listing with no UIDVALIDITY never empties the folder", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "one" });
+  deliver(adapter, "INBOX", { subject: "two" });
+  const { folder } = await syncOne(db, adapter, accountId);
+  assert.equal(folder.uidValidity, 71);
+
+  // A server that answers without UIDVALIDITY. `Number(null)` is 0, which is not a validity: an
+  // unknown on either side is never a change.
+  const realList = adapter.list;
+  adapter.list = async (path, options) => {
+    const listing = await realList(path, options);
+    return path === "INBOX" ? { ...listing, uidValidity: null } : listing;
+  };
+  deliver(adapter, "INBOX", { subject: "three" });
+  const { result, folder: after } = await syncOne(db, adapter, accountId);
+
+  assert.equal(result.reset, false, "a value nobody reported is not a change");
+  assert.deepEqual(await storedUids(db, after.id), [1, 2, 3], "the rows it held were not emptied");
+  assert.equal(after.uidValidity, 71, "the stored validity is left exactly as it was");
+  assert.equal(after.highestUid, 3);
+});
+
+test("a first sync stores UIDVALIDITY only when the listing reported a positive integer", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "Archive", { subject: "archived" });
+  const realList = adapter.list;
+  adapter.list = async (path, options) => {
+    const listing = await realList(path, options);
+    return path === "Archive" ? { ...listing, uidValidity: null } : listing;
+  };
+
+  const { folder } = await syncOne(db, adapter, accountId, "Archive");
+
+  assert.equal(folder.uidValidity, null, "the column stays null, not 0");
+  assert.equal(folder.highestUid, 1);
+  assert.deepEqual(await storedUids(db, folder.id), [1]);
+});
+
 /* ----------------------------------------------------------------- failures */
 
 test("a failed listing deletes nothing and leaves the watermark where it was", async () => {
@@ -361,6 +423,154 @@ test("a UID get() leaves out holds the watermark, stores nothing for it, and the
   assert.equal(recovered.added, 2);
   assert.deepEqual(await storedUids(db, finished.id), [1, 2, 3]);
   assert.equal(finished.highestUid, 3);
+});
+
+test("a pass that stops on an omitted UID still applies flags and expunges below it", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "flag me" });
+  deliver(adapter, "INBOX", { subject: "gone from the server" });
+  const { folder } = await syncOne(db, adapter, accountId);
+  assert.deepEqual(await storedUids(db, folder.id), [1, 2]);
+
+  // The stop path must not lose rule 3: an expunge below the watermark and a flag on the row the
+  // folder keeps are both settled below the hole, so the same pass applies them.
+  adapter.expunge("INBOX", 2);
+  deliver(adapter, "INBOX", { subject: "never delivered" }); // uid 3
+  const realList = adapter.list;
+  adapter.list = async (path, options) => {
+    const listing = await realList(path, options);
+    if (path !== "INBOX") return listing;
+    return {
+      ...listing,
+      items: listing.items.map((item) => (item.uid === 1 ? { ...item, flags: ["\\Seen"] } : item)),
+    };
+  };
+  const realGet = adapter.get;
+  adapter.get = async (path, uids) => (await realGet(path, uids)).filter((message) => message.uid !== 3);
+
+  const logs = [];
+  const folderRow = await prepareFolder(db, adapter, accountId, "INBOX");
+  const result = await syncFolder(ctxFor(db, adapter, { log: (entry) => logs.push(entry) }), accountId, folderRow);
+
+  assert.equal(result.added, 0);
+  assert.equal(result.removed, 1, "the expunge below the hole was applied in the same pass");
+  const rows = await messageRows(db, folderRow.id);
+  assert.deepEqual(rows.map((row) => row.uid), [1]);
+  assert.deepEqual(rows[0].flags, ["\\Seen"], "the flag change was applied in the same pass");
+  assert.equal((await getFolder(db, folderRow.id)).highestUid, 2, "the watermark stops below the hole");
+  assert.ok(logs.some((entry) => entry.event === "uid_omitted" && entry.uid === 3 && entry.code === "omitted"));
+});
+
+test("a get() that answers with a string uid is still matched to its message", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "one" });
+  deliver(adapter, "INBOX", { subject: "two" });
+  const realGet = adapter.get;
+  adapter.get = async (path, uids) => [
+    ...(await realGet(path, uids)).map((message) => ({ ...message, uid: String(message.uid) })),
+    // A result naming no UID at all is not a message and is dropped, never stored under NaN.
+    { uid: "seven", flags: [], internalDate: T0, raw: Buffer.from(makeRaw({ subject: "ghost" })) },
+  ];
+
+  const { result, folder } = await syncOne(db, adapter, accountId);
+
+  assert.equal(result.added, 2, "both messages were delivered, not read as omissions");
+  assert.deepEqual(await storedUids(db, folder.id), [1, 2]);
+  assert.equal(folder.highestUid, 2);
+});
+
+test("a get() answer without raw bytes is an omission, and an empty body is a too_large row", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "one" });
+  deliver(adapter, "INBOX", { subject: "no bytes came back" }); // uid 2
+  adapter.deliver("INBOX", Buffer.alloc(0)); // uid 3: a body the adapter reported as empty
+
+  const realGet = adapter.get;
+  const withoutBytes = (message) => {
+    if (message.uid !== 2) return message;
+    const { raw, ...rest } = message;
+    return rest;
+  };
+  let stripped = true;
+  adapter.get = async (path, uids) => (await realGet(path, uids))
+    .map((message) => (stripped ? withoutBytes(message) : message));
+
+  const logs = [];
+  const { folder: stopped } = await syncOne(db, adapter, accountId, "INBOX", { log: (entry) => logs.push(entry) });
+  assert.equal(stopped.highestUid, 1, "a message with no bytes is missing, not too large");
+  assert.deepEqual(await storedUids(db, stopped.id), [1]);
+  assert.ok(logs.some((entry) => entry.event === "uid_omitted" && entry.uid === 2));
+
+  stripped = false;
+  const { folder: finished } = await syncOne(db, adapter, accountId, "INBOX");
+  assert.deepEqual(await storedUids(db, finished.id), [1, 2, 3]);
+  const rows = await messageRows(db, finished.id);
+  assert.equal(rows[1].parseError, null, "the message the adapter did deliver was parsed");
+  assert.equal(rows[2].parseError, "too_large", "only a zero-length body is a too_large row");
+});
+
+/* --------------------------------------------------- a UID nothing ever delivers */
+
+test("a UID no pass ever receives is skipped on the third stuck pass and the folder advances", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "one" });
+  await syncOne(db, adapter, accountId);
+  deliver(adapter, "INBOX", { subject: "never delivered" }); // uid 2
+  deliver(adapter, "INBOX", { subject: "three" }); // uid 3
+
+  const realGet = adapter.get;
+  adapter.get = async (path, uids) => (await realGet(path, uids)).filter((message) => message.uid !== 2);
+
+  const first = await syncOne(db, adapter, accountId);
+  assert.equal(first.folder.highestUid, 1, "pass 1 stops below the UID it never got");
+  assert.equal(first.result.added, 0);
+
+  const second = await syncOne(db, adapter, accountId);
+  assert.equal(second.folder.highestUid, 1, "pass 2 is stuck at the same UID");
+  assert.deepEqual(await storedUids(db, second.folder.id), [1]);
+
+  const logs = [];
+  const folderRow = await prepareFolder(db, adapter, accountId, "INBOX");
+  const third = await syncFolder(ctxFor(db, adapter, { log: (entry) => logs.push(entry) }), accountId, folderRow);
+
+  assert.equal(third.added, 1, "the messages after the stuck UID are stored");
+  const after = await getFolder(db, folderRow.id);
+  assert.equal(after.highestUid, 3, "the watermark moves past it");
+  assert.deepEqual(await storedUids(db, folderRow.id), [1, 3], "nothing is stored for the skipped UID");
+  const skipped = logs.find((entry) => entry.event === "uid_skipped");
+  assert.ok(skipped, "the give-up is a log line, not a silent hole");
+  assert.deepEqual(skipped, { event: "uid_skipped", folderId: folderRow.id, uid: 2, code: "omitted" });
+});
+
+test("a delivered UID clears its stuck count, so a later omission starts again from one", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "one" });
+  await syncOne(db, adapter, accountId);
+  deliver(adapter, "INBOX", { subject: "sometimes delivered" }); // uid 2
+  deliver(adapter, "INBOX", { subject: "fine" }); // uid 3
+
+  const realGet = adapter.get;
+  let omitting = new Set([2]);
+  adapter.get = async (path, uids) => (await realGet(path, uids))
+    .filter((message) => !omitting.has(message.uid));
+
+  assert.equal((await syncOne(db, adapter, accountId)).folder.highestUid, 1, "pass 1 stops");
+  assert.equal((await syncOne(db, adapter, accountId)).folder.highestUid, 1, "pass 2 stops too");
+
+  // uid 2 arrives, but the pass stops on uid 3 — so the delivery itself is what clears uid 2's
+  // count; the clearing a completed pass does for the whole folder never runs here.
+  omitting = new Set([3]);
+  const delivered = await syncOne(db, adapter, accountId);
+  assert.deepEqual(await storedUids(db, delivered.folder.id), [1, 2]);
+  assert.equal(delivered.folder.highestUid, 2);
+
+  // uid 2 missing again, from a watermark wound back (what an interrupted run leaves behind): the
+  // count starts from one, so this pass STOPS at it instead of skipping it on the third go.
+  await setFolderSyncState(db, delivered.folder.id, { highestUid: 1 });
+  omitting = new Set([2]);
+  const stuckAgain = await syncOne(db, adapter, accountId);
+  assert.equal(stuckAgain.folder.highestUid, 1, "the delivery cleared the count");
+  assert.deepEqual(await storedUids(db, stuckAgain.folder.id), [1, 2], "nothing past the stop was stored");
 });
 
 /* -------------------------------------------------------- the account pass */
@@ -452,16 +662,61 @@ test("one failing folder does not stop the others", async () => {
   deliver(adapter, "Drafts", { subject: "draft one" }, T0);
   const realList = adapter.list;
   adapter.list = async (path, options) => {
-    if (path === "Sent") throw new MailError("NETWORK", "ECONNRESET");
+    if (path === "Sent") throw new MailError("PROTOCOL", "list");
     return realList(path, options);
   };
 
-  const result = await syncAccount(ctxFor(db, adapter), accountId);
+  const logs = [];
+  const result = await syncAccount(ctxFor(db, adapter, { log: (entry) => logs.push(entry) }), accountId);
 
   assert.equal(result.folders, 3);
   assert.equal(result.added, 2);
   const inbox = (await listFolders(db, accountId)).find((folder) => folder.path === "INBOX");
   assert.deepEqual(await storedUids(db, inbox.id), [1]);
+  // A folder's own failure is a log line and the pass carries on: only the connection codes and the
+  // pass's own deadline travel further.
+  assert.ok(logs.some((entry) => entry.event === "folder_failed" && entry.code === "PROTOCOL"));
+});
+
+test("a NETWORK failure in a later folder ends the whole pass and stamps no lastSyncAt", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "inbox one" });
+  const realList = adapter.list;
+  // Folders are synced in path order: Archive, Drafts, INBOX, Sent. Drafts is the second one.
+  adapter.list = async (path, options) => {
+    if (path === "Drafts") throw new MailError("NETWORK", "ECONNRESET");
+    return realList(path, options);
+  };
+
+  const logs = [];
+  await assert.rejects(
+    syncAccount(ctxFor(db, adapter, { log: (entry) => logs.push(entry) }), accountId),
+    (err) => err instanceof MailError && err.code === "NETWORK",
+  );
+
+  assert.equal((await getAccount(db, accountId)).lastSyncAt, null, "a pass that ended early is not stamped");
+  const inbox = (await listFolders(db, accountId)).find((folder) => folder.path === "INBOX");
+  assert.equal(inbox.highestUid, 0, "the folders after the failing one never ran");
+  assert.deepEqual(await storedUids(db, inbox.id), []);
+  assert.ok(!logs.some((entry) => entry.event === "folder_failed"), "the failure was not swallowed");
+});
+
+test("the pass's own deadline inside a folder ends the whole pass too", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "inbox one" });
+
+  // The clock jumps past the deadline at the first stored row, so it is a folder pass that meets it.
+  let expired = false;
+  const watched = watchedDb(db, (statement) => {
+    if (isMessageInsert(statement)) expired = true;
+  });
+  const ctx = { db: watched, adapter, now: () => (expired ? T0 + 60_000 : T0), deadlineAt: T0 + 1000 };
+
+  await assert.rejects(
+    syncAccount(ctx, accountId),
+    (err) => err instanceof MailError && err.code === "TIMEOUT" && err.detail === "sync_deadline",
+  );
+  assert.equal((await getAccount(db, accountId)).lastSyncAt, null);
 });
 
 /* ------------------------------------------------------- hostile and large */
@@ -534,36 +789,52 @@ test("batches stay inside 25 UIDs and 16 MiB, and a message over the budget goes
 
 /* ----------------------------------------------------- yielding & deadlines */
 
-test("RF8: the loop yields to the event loop between the messages of one batch", async () => {
+/**
+ * Watch one 25-message batch being stored, answering how many rows were written after a real yield.
+ * The probe is scheduled while the batch is being downloaded and RESET after every stored row, so a
+ * single early yield cannot satisfy it: every row needs a yield of its own.
+ */
+async function probeYields(extra) {
   const { db, accountId, adapter } = await setup();
   for (let i = 1; i <= 25; i += 1) deliver(adapter, "INBOX", { subject: `yield ${i}` });
   const folder = await prepareFolder(db, adapter, accountId, "INBOX");
 
-  // A probe scheduled while the batch is being downloaded, read again at every row the engine writes:
-  // a loop that never yielded would never let the probe run, so every read would still be false.
   let probeRan = false;
+  const arm = () => { setImmediate(() => { probeRan = true; }); };
   const realGet = adapter.get;
   adapter.get = async (path, uids) => {
     const messages = await realGet(path, uids);
-    setImmediate(() => { probeRan = true; });
+    arm();
     return messages;
   };
   const probeAtStore = [];
-  const watchedDb = {
-    execute: (statement) => db.execute(statement),
-    batch: (statements) => db.batch(statements),
-    executeMultiple: (sql) => db.executeMultiple(sql),
-    runTransaction: (work) => db.runTransaction((run) => work((statement) => {
-      if (/INSERT INTO mail_messages/.test(statement.sql)) probeAtStore.push(probeRan);
-      return run(statement);
-    })),
-  };
+  const watched = watchedDb(db, (statement) => {
+    if (!isMessageInsert(statement)) return;
+    probeAtStore.push(probeRan);
+    probeRan = false;
+    // Re-armed for the NEXT row, so one early yield cannot satisfy every later read: each row needs
+    // a yield of its own between the previous row and itself.
+    arm();
+  });
 
-  const result = await syncFolder({ db: watchedDb, adapter, now: () => T0 }, accountId, folder);
+  const result = await syncFolder({ db: watched, adapter, now: () => T0, ...extra }, accountId, folder);
+  return { result, probeAtStore };
+}
+
+test("RF8: the loop yields to the event loop between the messages of one batch", async () => {
+  const { result, probeAtStore } = await probeYields({});
 
   assert.equal(result.added, 25);
   assert.equal(probeAtStore.length, 25);
-  assert.ok(probeAtStore.every(Boolean), "every message was stored after a yield");
+  assert.ok(probeAtStore.every(Boolean), "every message was stored after a yield of its own");
+});
+
+test("RF8: the same probe fails with a no-op yieldFn, so it really is testing the yield", async () => {
+  const { result, probeAtStore } = await probeYields({ yieldFn: () => Promise.resolve() });
+
+  assert.equal(result.added, 25);
+  assert.equal(probeAtStore.length, 25);
+  assert.ok(!probeAtStore.every(Boolean), "without a yield the probe never gets to run");
 });
 
 test("a deadline that has passed aborts with a TIMEOUT and changes nothing", async () => {
@@ -588,6 +859,128 @@ test("a deadline that has passed aborts with a TIMEOUT and changes nothing", asy
   assert.equal(unchanged.uidValidity, null);
 });
 
+test("a deadline that passes mid-pass keeps the progress the completed batches made", async () => {
+  const { db, accountId, adapter } = await setup();
+  for (let i = 1; i <= 5; i += 1) deliver(adapter, "INBOX", { subject: `seed ${i}` });
+  const { folder } = await syncOne(db, adapter, accountId);
+  assert.equal(folder.highestUid, 5);
+  for (let i = 6; i <= 35; i += 1) deliver(adapter, "INBOX", { subject: `arrival ${i}` });
+
+  // The clock jumps past the deadline as soon as the first batch's watermark is persisted, so the
+  // SECOND batch's own checkDeadline is what ends the pass.
+  let expired = false;
+  const watched = watchedDb(db, (statement) => {
+    if (statement && /UPDATE mail_folders SET highest_uid = \?/.test(statement.sql)) expired = true;
+  });
+
+  await assert.rejects(
+    syncFolder({ db: watched, adapter, now: () => (expired ? T0 + 60_000 : T0), deadlineAt: T0 + 1000 },
+      accountId, folder),
+    (err) => err instanceof MailError && err.code === "TIMEOUT" && err.detail === "sync_deadline",
+  );
+
+  const interrupted = await getFolder(db, folder.id);
+  assert.equal(interrupted.highestUid, 30, "the watermark of the batch that finished (uids 6..30)");
+  assert.equal((await storedUids(db, folder.id)).length, 30);
+});
+
+test("a deadline that passes during a first sync stores rows and writes no state at all", async () => {
+  const { db, accountId, adapter } = await setup();
+  for (let i = 1; i <= 30; i += 1) deliver(adapter, "INBOX", { subject: `arrival ${i}` });
+  const folder = await prepareFolder(db, adapter, accountId, "INBOX");
+
+  let expired = false;
+  let inserted = 0;
+  const watched = watchedDb(db, (statement) => {
+    if (!isMessageInsert(statement)) return;
+    inserted += 1;
+    if (inserted === 25) expired = true; // the first batch is done: the pass runs out of time
+  });
+
+  await assert.rejects(
+    syncFolder({ db: watched, adapter, now: () => (expired ? T0 + 60_000 : T0), deadlineAt: T0 + 1000 },
+      accountId, folder),
+    (err) => err instanceof MailError && err.code === "TIMEOUT" && err.detail === "sync_deadline",
+  );
+
+  assert.equal((await storedUids(db, folder.id)).length, 25, "the rows of the batch that finished");
+  const after = await getFolder(db, folder.id);
+  assert.equal(after.highestUid, 0, "a first sync writes its state once, at the end");
+  assert.equal(after.floorUid, null);
+  assert.equal(after.uidValidity, null);
+  assert.equal(after.lastSyncedAt, null);
+});
+
+test("a first sync that stops on an omitted UID writes the state it reached, below the hole", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "one" });
+  deliver(adapter, "INBOX", { subject: "never delivered" }); // uid 2
+  deliver(adapter, "INBOX", { subject: "three" });
+  const realGet = adapter.get;
+  adapter.get = async (path, uids) => (await realGet(path, uids)).filter((message) => message.uid !== 2);
+
+  const logs = [];
+  const { result, folder } = await syncOne(db, adapter, accountId, "INBOX", { log: (entry) => logs.push(entry) });
+
+  assert.equal(result.added, 1);
+  assert.equal(folder.highestUid, 1, "lowest omitted UID (2) - 1");
+  assert.equal(folder.floorUid, 1, "the lowest UID the window did store");
+  assert.equal(folder.uidValidity, 71);
+  assert.equal(folder.lastSyncedAt, T0, "what it reached is written, so the window is not fetched again");
+  assert.deepEqual(await storedUids(db, folder.id), [1]);
+  assert.ok(logs.some((entry) => entry.event === "uid_omitted" && entry.uid === 2));
+});
+
+test("a message that cannot be stored holds the watermark instead of being stepped over", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "seed" });
+  const { folder } = await syncOne(db, adapter, accountId);
+  deliver(adapter, "INBOX", { subject: "cannot be stored" }); // uid 2
+  deliver(adapter, "INBOX", { subject: "after it" }); // uid 3
+
+  // The store refuses the row for uid 2: the pass must stop there, never close the hole over it.
+  const poisoned = watchedDb(db, (statement) => {
+    if (isMessageInsert(statement) && Number(statement.args?.[2]) === 2) {
+      throw new MailError("TOO_LARGE", "store");
+    }
+  });
+  const logs = [];
+  const folderRow = await prepareFolder(db, adapter, accountId, "INBOX");
+  const result = await syncFolder(
+    { db: poisoned, adapter, now: () => T0, log: (entry) => logs.push(entry) },
+    accountId,
+    folderRow,
+  );
+
+  assert.equal(result.added, 0);
+  assert.equal((await getFolder(db, folderRow.id)).highestUid, 1, "the watermark stops below the failed row");
+  assert.deepEqual(await storedUids(db, folderRow.id), [1]);
+  assert.ok(logs.some((entry) => entry.event === "message_failed" && entry.uid === 2));
+  assert.ok(!logs.some((entry) => entry.event === "uid_omitted"), "a store failure is not an omission");
+});
+
+test("a UIDVALIDITY change between the two listings aborts the folder and deletes nothing", async () => {
+  const { db, accountId, adapter } = await setup();
+  for (const subject of ["one", "two", "three"]) deliver(adapter, "INBOX", { subject });
+  const { folder } = await syncOne(db, adapter, accountId);
+  // uid 2 is gone on the server, so rule 3 would drop its row — if rule 3 ever got to run.
+  adapter.expunge("INBOX", 2);
+
+  const realList = adapter.list;
+  adapter.list = async (path, options) => {
+    // The mailbox moves between the rule-2 listing and the rule-3 one.
+    if (path === "INBOX" && options?.fromUid != null) adapter.bumpUidValidity("INBOX");
+    return realList(path, options);
+  };
+
+  await assert.rejects(
+    syncFolder(ctxFor(db, adapter), accountId, folder),
+    (err) => err instanceof MailError && err.code === "PROTOCOL" && err.detail === "uidvalidity_changed",
+  );
+
+  assert.deepEqual(await storedUids(db, folder.id), [1, 2, 3], "nothing was deleted");
+});
+
 /* -------------------------------------------------------------------- logs */
 
 test("logs carry only codes, counts and folder ids", async () => {
@@ -596,7 +989,7 @@ test("logs carry only codes, counts and folder ids", async () => {
   deliver(adapter, "INBOX", { subject: "Salary review", body: `Ask ${ALEX} about the numbers.` });
   const realList = adapter.list;
   adapter.list = async (path, options) => {
-    if (path === "Sent") throw new MailError("NETWORK", "ECONNRESET");
+    if (path === "Sent") throw new MailError("PROTOCOL", "list");
     return realList(path, options);
   };
 
@@ -614,7 +1007,7 @@ test("logs carry only codes, counts and folder ids", async () => {
   for (const entry of logs) {
     for (const key of Object.keys(entry)) assert.ok(allowed.has(key), `unexpected log field ${key}`);
   }
-  assert.ok(logs.some((entry) => entry.event === "folder_failed" && entry.code === "NETWORK"));
+  assert.ok(logs.some((entry) => entry.event === "folder_failed" && entry.code === "PROTOCOL"));
 });
 
 /* ------------------------------------------------------------- end to end */

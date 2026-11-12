@@ -188,7 +188,7 @@ function idList(value, detail, keep) {
 /**
  * A subject's CR/LF runs collapse to one space, the same way `canonicalSnapshot` writes it. A TAB —
  * alone or in a run with CR/LF — also becomes one space here, rather than reaching the header as it
- * stands; `canonicalSnapshot` does NOT do that (it collapses only `/\r\n+/`), so a staged draft whose
+ * stands; `canonicalSnapshot` does NOT do that — its regex is `/[\r\n]+/` — so a staged draft whose
  * subject carries a TAB would hash differently from the sent header. That divergence is known, and the
  * staged-send path has to normalise a TAB out before hashing. A C1 control or a Unicode line separator
  * is dropped instead. A subject is not a place to repair beyond that: any C0 control left (NUL first
