@@ -201,8 +201,14 @@ test("mcp-addons.json (it carries MCP children's generated keys) is written at m
   assert.equal(out.ok, true, out.reason);
   const path = join(CROW_HOME, "mcp-addons.json");
   assert.equal(statSync(path).mode & 0o777, 0o600);
-  const entryEnv = JSON.parse(readFileSync(path, "utf8"))[id].env;
-  assert.equal(entryEnv.DEMO_MCP_KEY, (await entry(id, "DEMO_MCP_KEY")).plain, "the MCP child gets the keychain's plaintext");
+  // Sealing is ON: the generated key is in the keychain and the entry only NAMES it, so the
+  // file never holds the value; the MCP child gets it at spawn from the keychain.
+  const text = readFileSync(path, "utf8");
+  const entryObj = JSON.parse(text)[id];
+  const plain = (await entry(id, "DEMO_MCP_KEY")).plain;
+  assert.equal("DEMO_MCP_KEY" in (entryObj.env || {}), false, "no plain value in the entry");
+  assert.deepEqual(entryObj.keychainEnv, ["DEMO_MCP_KEY"], "the entry names the keychain key");
+  assert.equal(text.includes(plain), false, "and the value is not in the file");
 });
 
 test("crow.db restored on a machine with no keychain key file at all: the install is refused, not minted over", async () => {

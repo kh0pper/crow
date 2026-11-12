@@ -127,23 +127,27 @@ test("sealableEnv: nothing to do for an empty or missing env", () => {
 
 // ─── addonSecretsSealingOn ──────────────────────────────────────────────────
 
-test("sealing predicate: PR1 ships OFF, the operator can say 0, and a split-DB host is off even when it says 1", () => {
+test("sealing predicate: ON by default, the operator can say 0, and a split-DB host is off whatever the flag says", () => {
   const dir = tmp();
-  assert.equal(addonSecretsSealingOn({}), false, "PR1: nothing seals until the switch is explicitly 1");
+  assert.equal(addonSecretsSealingOn({}), true, "sealing ships ON: nothing has to be set for a secret to be sealed");
+  assert.equal(addonSecretsSealingOn({ CROW_HOME: join(dir, "home") }), true);
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "0" }), false);
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "0", CROW_HOME: join(dir, "home") }), false, "0 wins everywhere");
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "1" }), true);
-  assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "yes" }), false, "only the exact 1 enables it");
+  assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "yes" }), true, "only the exact 0 turns it off");
 });
 
 test("sealing predicate: a DB that is not the data dir's own crow.db on the host-default home is a split-DB host", () => {
   const dir = tmp();
   // Host-default home (no CROW_HOME) with the DB somewhere else: two gateways could share
   // the home while writing different crow.db files, so no seal could be proven.
+  assert.equal(addonSecretsSealingOn({ CROW_DB_PATH: join(dir, "other", "crow.db") }), false, "the split rule needs no flag: it is not an opt-in");
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "1", CROW_DB_PATH: join(dir, "other", "crow.db") }), false);
   // The DB in the instance's own data dir is fine.
+  assert.equal(addonSecretsSealingOn({ CROW_DATA_DIR: dir, CROW_DB_PATH: join(dir, "crow.db") }), true);
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "1", CROW_DATA_DIR: dir, CROW_DB_PATH: join(dir, "crow.db") }), true);
   // A separate CROW_HOME is a separate instance: no split.
+  assert.equal(addonSecretsSealingOn({ CROW_HOME: join(dir, "home"), CROW_DB_PATH: join(dir, "db", "crow.db") }), true);
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "1", CROW_HOME: join(dir, "home"), CROW_DB_PATH: join(dir, "db", "crow.db") }), true);
 });
 

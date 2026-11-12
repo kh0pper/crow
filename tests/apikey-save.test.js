@@ -236,7 +236,11 @@ test("value checks: empty, whitespace, too long, a line break and a pattern viol
     const max = await save(post, { bundle_id: "apikey-values", env_key: "DEMO_API_KEY", value: "k".repeat(API_KEY_MAX_LENGTH) });
     assert.equal(max.status, 200, JSON.stringify(max.body));
   });
-  assert.deepEqual(readMcp("apikey-values"), { DEMO_PATTERN_KEY: "sk-abc123", DEMO_API_KEY: "k".repeat(API_KEY_MAX_LENGTH) });
+  assert.deepEqual(readMcp("apikey-values"), {}, "both typed keys are sealed, so neither stays plain in the entry");
+  assert.deepEqual(readMcpEntry("apikey-values").keychainEnv, ["DEMO_API_KEY", "DEMO_PATTERN_KEY"], "the entry names them instead");
+  const sealedValues = Object.fromEntries((await keychainRows("apikey-values")).map((r) => [r.env_key, r.secret]));
+  assert.deepEqual(sealedValues, { DEMO_API_KEY: "k".repeat(API_KEY_MAX_LENGTH), DEMO_PATTERN_KEY: "sk-abc123" });
+  assert.equal(readFileSync(MCP_ADDONS, "utf8").includes("sk-abc123"), false, "a sealed key is not in the file");
   assert.equal(readDotEnv(dir).OTHER, "1", "the other line survived");
 });
 
@@ -292,7 +296,8 @@ test("the key and its help come from the REVIEWED manifest, never the installed 
     const real = await save(post, { bundle_id: "apikey-reviewed", env_key: "DEMO_API_KEY", value: VALUE });
     assert.equal(real.status, 200, JSON.stringify(real.body));
   });
-  assert.deepEqual(Object.keys(readMcp("apikey-reviewed")), ["DEMO_API_KEY"]);
+  assert.deepEqual(readMcp("apikey-reviewed"), {}, "the reviewed key is sealed, so no plain value lands in the entry");
+  assert.deepEqual(readMcpEntry("apikey-reviewed").keychainEnv, ["DEMO_API_KEY"], "only the reviewed, declared key is listed");
 });
 
 // ── 3. the writes ───────────────────────────────────────────────────────────────────
@@ -339,9 +344,14 @@ test("a save writes the keychain, the MCP entry and an existing .env, and says a
     sealedDb.close();
   }
 
-  // (b) the MCP entry (what the bundle's own tools read) with owner provenance.
-  assert.equal(readMcp("apikey-writes").DEMO_API_KEY, VALUE);
-  assert.deepEqual(readMcpEntry("apikey-writes").ownerSet, ["DEMO_API_KEY"]);
+  // (b) the MCP entry (what the bundle's own tools read) lists the key by NAME — the value is
+  // sealed in the keychain, and the owner provenance is recorded on the save.
+  const entry = readMcpEntry("apikey-writes");
+  assert.equal("DEMO_API_KEY" in readMcp("apikey-writes"), false, "the entry holds no plain value");
+  assert.deepEqual(entry.keychainEnv, ["DEMO_API_KEY"], "it lists the key's name");
+  assert.equal(readFileSync(MCP_ADDONS, "utf8").includes(VALUE), false, "the key is not in the file");
+  assert.equal(hydrateAddonEntry("apikey-writes", entry, { unsealer: "gateway", ...gatewayKeychainPaths() }).env.DEMO_API_KEY, VALUE, "and the keychain holds it");
+  assert.deepEqual(entry.ownerSet, ["DEMO_API_KEY"]);
   assert.equal(statSync(MCP_ADDONS).mode & 0o777, 0o600, "the file holding the key stays private");
 
   // (c) the .env, line-preserving, at mode 600.
@@ -363,7 +373,10 @@ test("re-saving a key overwrites the same keychain row and the same files", asyn
   const rows = await keychainRows("apikey-resave");
   assert.equal(rows.length, 1, "a rotated key updates the one row");
   assert.equal(rows[0].secret, VALUE2);
-  assert.equal(readMcp("apikey-resave").DEMO_API_KEY, VALUE2);
+  const resaved = readMcpEntry("apikey-resave");
+  assert.deepEqual(resaved.keychainEnv, ["DEMO_API_KEY"]);
+  assert.equal(hydrateAddonEntry("apikey-resave", resaved, { unsealer: "gateway", ...gatewayKeychainPaths() }).env.DEMO_API_KEY, VALUE2, "the rotated value is what the child gets");
+  assert.equal(readFileSync(MCP_ADDONS, "utf8").includes(VALUE2), false, "no plain copy in the entry");
   assert.equal(readDotEnv(dir).DEMO_API_KEY, VALUE2);
 });
 
@@ -516,13 +529,26 @@ test("the module's seams see the exact keychain entry, MCP write and restart ans
   assert.equal(calls.propagated.length, 0, "no .env in that dir, so the gateway env is not touched");
 });
 
+test("sealing off (CROW_ADDON_SECRETS_KEYCHAIN=0): the card writes the key plain into the entry and lists nothing", async () => {
+  const dir = seed("apikey-off", { ...DEMO, id: "apikey-off", name: "Off App" }, { dotEnv: "DEMO_API_KEY=\n" });
+  await withSealing(false, () => withServer({ owner: true }, async (post) => {
+    const r = await save(post, { bundle_id: "apikey-off", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+  }));
+  const entry = readMcpEntry("apikey-off");
+  assert.equal(entry.env.DEMO_API_KEY, VALUE, "the operator opted out: today's plain shape");
+  assert.equal("keychainEnv" in entry, false, "and the entry lists nothing");
+  assert.equal(readDotEnv(dir).DEMO_API_KEY, VALUE);
+  // The keychain row is still written (the card always keeps a typed key) — only the entry is plain.
+  assert.equal((await keychainRows("apikey-off")).length, 1);
+});
+
 // ── 6. sealing ON (task 1.5b: the card's key goes to the keychain, not the file) ─────
 
-/** Run `fn` with the add-on-secrets sealing switch at `on`; restores it afterwards. */
+/** Run `fn` with the add-on-secrets sealing switch at `on` (off is the operator's explicit "0"). */
 async function withSealing(on, fn) {
   const before = process.env.CROW_ADDON_SECRETS_KEYCHAIN;
-  if (on) process.env.CROW_ADDON_SECRETS_KEYCHAIN = "1";
-  else delete process.env.CROW_ADDON_SECRETS_KEYCHAIN;
+  process.env.CROW_ADDON_SECRETS_KEYCHAIN = on ? "1" : "0";
   try {
     return await fn();
   } finally {
