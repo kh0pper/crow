@@ -3461,6 +3461,7 @@ export const translations = {
   "keychain.firstViewBody": { en: "It is shown here once. It is also saved in Settings → Security & passwords → Saved passwords & keys.", es: "Se muestra aquí una sola vez. También queda guardada en Ajustes → Seguridad y contraseñas → Contraseñas y claves guardadas." },
   "keychain.showOnce": { en: "Show once", es: "Mostrar una vez" },
   "keychain.firstViewSpent": { en: "Already shown. Open Settings → Security & passwords → Saved passwords & keys to see it again.", es: "Ya se mostró. Abre Ajustes → Seguridad y contraseñas → Contraseñas y claves guardadas para verla de nuevo." },
+  "keychain.firstViewOwnerOnly": { en: "Only the owner, signed in with their password from their own device, can see this. Open this page from your own device to see it.", es: "Solo el propietario, con su contraseña y desde su propio dispositivo, puede ver esto. Abre esta página desde tu propio dispositivo para verlo." },
   "keychain.openPasswords": { en: "Open Passwords", es: "Abrir Contraseñas" },
   "settings.section.passwords": { en: "Saved passwords & keys", es: "Contraseñas y claves guardadas" },
   "passwords.preview": { en: "{n} saved", es: "{n} guardadas" },

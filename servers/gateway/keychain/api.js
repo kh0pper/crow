@@ -165,7 +165,14 @@ export function keychainApiRouter({
     res.json({ secret });
   }));
 
+  // One-time first-view grant. It reveals a plaintext WITHOUT a re-auth grant (that is the
+  // point: a credential the install just generated), but it is still the owner's own act, so
+  // it carries the same owner gate as /reveal: a peer SSO sign-in, a session minted by a login
+  // from this machine, and any request from this machine itself are refused BEFORE a grant can
+  // be spent — otherwise anyone on the box, or a paired instance, could burn a credential's
+  // one view (or read it) without the owner's password.
   router.post(`${BASE}/first-view`, withDb(async (req, res, db) => {
+    if (!(await ownerTurn(db, req))) return res.status(403).json(OWNER_ONLY);
     const entry = await getEntry(db, Number(req.body?.id));
     if (!entry) return res.status(404).json({ error: "No such password." });
     const secret = await consumeFirstView(db, readKey(), entry.id);
@@ -174,7 +181,11 @@ export function keychainApiRouter({
     res.json({ secret });
   }));
 
+  // Adding a saved password is the owner's own act as well (same rule as /reveal): neither a
+  // paired instance's sign-in nor a request from this Crow's own machine (the shared browser, a
+  // bot with a shell) may plant an entry in the keychain, which every later reveal would show.
   router.post(`${BASE}/add`, withDb(async (req, res, db) => {
+    if (!(await ownerTurn(db, req))) return res.status(403).json(OWNER_ONLY);
     const label = str(req.body?.label?.trim?.(), 200);
     const secret = str(req.body?.secret, 1024);
     if (!label || !secret || /[\0]/.test(secret)) return res.status(400).json({ error: "A label and a password are required." });

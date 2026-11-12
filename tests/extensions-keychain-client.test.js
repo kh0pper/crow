@@ -223,6 +223,26 @@ test("R-B — secure Vaultwarden renders data-vault-secure=1; no Vaultwarden ren
   assert.equal(b.document.getElementById("ext-keychain-config").getAttribute("data-vault-secure"), "0");
 });
 
+test("first-view 403 owner_only is not 'Already shown': nothing was shown, so Show stays and the note says who can open it", async () => {
+  const s = boot({
+    keychainPending: [{ id: 7, label: "Vaultwarden — admin token" }],
+    fetchImpl: (url) => (url.endsWith("/dashboard/keychain/api/first-view")
+      ? { ok: false, status: 403, json: () => Promise.resolve({ code: "owner_only", error: "Owner only." }) }
+      : { ok: true, status: 200, json: () => Promise.resolve({}) }),
+  });
+  const banner = s.document.querySelector('.ext-firstview[data-entry-id="7"]');
+  const btn = banner.querySelector(".ext-firstview-show");
+  const note = banner.querySelector(".ext-firstview__note");
+  s.click(btn);
+  await s.settle();
+  assert.equal(btn.hidden, false, "the one view is still on offer");
+  assert.equal(btn.disabled, false, "the button is left usable, not stuck disabled");
+  assert.match(note.textContent, /Only the owner/);
+  assert.doesNotMatch(note.textContent, /Already shown/);
+  assert.equal(banner.querySelector(".ext-firstview__secret").hidden, true, "no plaintext, and no code cell");
+  assert.equal(banner.querySelector(".ext-firstview-copy").hidden, true);
+});
+
 test("hidden really hides in the first-view banner: scoped rule beats .btn display, and the banner carries the scoped class", () => {
   assert.match(extensionStyles(), /\.ext-firstview \[hidden\]\s*\{\s*display:\s*none\s*!important/);
   const { document } = boot({ keychainPending: [{ id: 7, label: "X" }] });
