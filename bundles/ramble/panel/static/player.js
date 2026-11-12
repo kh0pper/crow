@@ -18,6 +18,12 @@
   var WORK_TYPES = { hold: true, timed: true, reps: true };
   var TICK_MS = 250;
   var TWEEN_SECONDS = 1.2;
+  /* Where a report that could not be made waits, and how often the beat retries
+   * it: every tenth tick, and never sooner than ten seconds after the last
+   * try. */
+  var QUEUE_KEY = "ramble.player.queue";
+  var RETRY_TICKS = 10;
+  var RETRY_MS = 10000;
 
   /* ---------- the page around us ---------- */
 
@@ -161,8 +167,10 @@
 
     var copy = (options.copy && typeof options.copy === "object") ? options.copy : {};
     /* The page supplies the wake lock, the listener that hears each move, the
-     * posting that decides Done and the storage a resume record lives in. */
+     * start that hands a chunk its card, the posting that decides Done and the
+     * storage a resume record lives in. */
     var hooks = {
+      start: typeof options.start === "function" ? options.start : null,
       post: typeof options.post === "function" ? options.post : null,
       storage: options.storage === undefined ? null : options.storage,
       wakeLock: options.wakeLock === undefined ? null : options.wakeLock,
@@ -470,6 +478,8 @@
     /* ---------- the controls ---------- */
 
     var lastReportedIndex = 0;
+    /* The chunk the clock is in now; a move out of it is a report. */
+    var chunkSeen = 0;
     var sheetOpen = false;
     var stripHandlers = [];
 
@@ -571,6 +581,314 @@
       }
     }
 
+    /* ---------- the card a chunk posts against ---------- */
+
+    /* One card per chunk of the chain, as the page's start answered it. */
+    var cardKeys = [];
+    var startWaiting = [];
+    /* The highest count each card has had acknowledged, so a report never says
+     * less than one before it. */
+    var lastAck = Object.create(null);
+    /* The highest count already on its way to the page for a card, so the same
+     * report is never sent twice while the first one is still out. */
+    var lastSent = Object.create(null);
+    var inFlight = Object.create(null);
+    var lastDoneAck = Object.create(null);
+    /* Reports that could not be made, keyed by card: storage when the page has
+     * any, this visit's memory when it has none. */
+    var queue = readQueue();
+    var ticks = 0;
+    var lastRetryTick = 0;
+    var lastRetryAt = nowFn();
+    var destroyed = false;
+    /* The chain being run: what the page handed in, or the longer one an
+     * addition made. A start carries it, because the server plans a chunk's
+     * time from the session that chunk belongs to. */
+    var currentChain = Array.isArray(options.chain) ? options.chain : [];
+
+    /* A chunk's place in the queue and in the ack list: the card the page's
+     * start answered with, or a chunk of this visit that has no card yet. */
+    function queueIdOf(item) {
+      if (item && typeof item.cardKey === "string" && item.cardKey !== "") return item.cardKey;
+      var index = item && Number.isInteger(item.chunkIndex) ? item.chunkIndex : -1;
+      return "#" + index;
+    }
+
+    function ackKeyOf(index) {
+      var key = cardKeys[index];
+      return typeof key === "string" && key !== "" ? key : "#" + index;
+    }
+
+    /* The slot a chunk's start names: the page's own slot for the first chunk,
+     * an extra for every chunk after it and for everything an addition adds. */
+    function slotFor(index) {
+      if (index === 0 && typeof options.cardSlot === "string" && options.cardSlot !== "") {
+        return options.cardSlot;
+      }
+      return "extra";
+    }
+
+    function secondsOrNull(value) {
+      return typeof value === "number" && isFinite(value) ? value : null;
+    }
+
+    /* The queue as storage kept it. Anything whose shape is not one this player
+     * wrote is dropped. */
+    function readQueue() {
+      var raw = storageGet(QUEUE_KEY);
+      if (raw === null || raw === "") return [];
+      var data;
+      try {
+        data = JSON.parse(raw);
+      } catch (err) {
+        return [];
+      }
+      if (!Array.isArray(data)) return [];
+      var out = [];
+      for (var i = 0; i < data.length; i += 1) {
+        var item = data[i];
+        if (!item || typeof item !== "object") continue;
+        if (!Number.isInteger(item.chunkIndex) || item.chunkIndex < 0) continue;
+        var seconds = secondsOrNull(item.activeSeconds);
+        if (seconds === null || seconds <= 0) continue;
+        out.push({
+          cardKey: typeof item.cardKey === "string" && item.cardKey !== "" ? item.cardKey : undefined,
+          chunkIndex: item.chunkIndex,
+          entryId: typeof item.entryId === "string" ? item.entryId : "",
+          activeSeconds: seconds
+        });
+      }
+      return out;
+    }
+
+    function saveQueue() {
+      if (queue.length === 0) {
+        storageDrop(QUEUE_KEY);
+        return;
+      }
+      var plain = [];
+      for (var i = 0; i < queue.length; i += 1) {
+        var item = queue[i];
+        var one = {
+          chunkIndex: item.chunkIndex,
+          entryId: item.entryId,
+          activeSeconds: item.activeSeconds
+        };
+        if (typeof item.cardKey === "string" && item.cardKey !== "") one.cardKey = item.cardKey;
+        plain.push(one);
+      }
+      storageSet(QUEUE_KEY, JSON.stringify(plain));
+    }
+
+    /* One item per card: the larger count wins, because a report never goes
+     * backwards. */
+    function enqueue(item) {
+      var id = queueIdOf(item);
+      var kept = [];
+      var merged = item;
+      for (var i = 0; i < queue.length; i += 1) {
+        var one = queue[i];
+        if (!one) continue;
+        if (queueIdOf(one) === id) {
+          if (one.activeSeconds > merged.activeSeconds) merged = one;
+          continue;
+        }
+        kept.push(one);
+      }
+      var key = typeof merged.cardKey === "string" && merged.cardKey !== "" ? merged.cardKey : undefined;
+      if (key === undefined && typeof item.cardKey === "string" && item.cardKey !== "") {
+        key = item.cardKey;
+      }
+      kept.push({
+        cardKey: key,
+        chunkIndex: merged.chunkIndex,
+        entryId: merged.entryId,
+        activeSeconds: merged.activeSeconds
+      });
+      queue = kept;
+      saveQueue();
+    }
+
+    /* The item has been carried: it leaves the queue. */
+    function dropQueued(index, key) {
+      var kept = [];
+      for (var i = 0; i < queue.length; i += 1) {
+        var one = queue[i];
+        if (!one) continue;
+        var sameKey = typeof key === "string" && key !== ""
+          ? one.cardKey === key
+          : (one.cardKey === undefined || one.cardKey === "");
+        if (sameKey && one.chunkIndex === index) continue;
+        kept.push(one);
+      }
+      if (kept.length === queue.length) return;
+      queue = kept;
+      saveQueue();
+    }
+
+    /* A count never goes backwards: what an earlier report said about a card,
+     * or is saying now, is the floor for every later one. */
+    function lastTold(key) {
+      var sent = lastSent[key];
+      var ack = lastAck[key];
+      if (typeof sent === "number" && typeof ack === "number") return sent > ack ? sent : ack;
+      if (typeof sent === "number") return sent;
+      return typeof ack === "number" ? ack : null;
+    }
+
+    function raiseTo(key, seconds) {
+      var told = lastTold(key);
+      if (typeof told === "number" && seconds < told) return told;
+      return seconds;
+    }
+
+    function acked(key, seconds) {
+      var told = lastTold(key);
+      return typeof told === "number" && told >= seconds;
+    }
+
+    function acknowledge(key, seconds) {
+      if (typeof lastAck[key] !== "number" || seconds > lastAck[key]) lastAck[key] = seconds;
+      delete lastSent[key];
+    }
+
+    /* A report that never landed says nothing about the card, so the count it
+     * carried is not treated as told. */
+    function forgetSent(key) {
+      delete lastSent[key];
+    }
+
+    /* The card a chunk reports against. The page's start answers it once per
+     * chunk; a start that refuses or says nothing is asked again at the next
+     * report for that chunk, never twice at once. */
+    function beginStart(index) {
+      if (!hooks.start) return null;
+      if (startWaiting[index]) return startWaiting[index];
+      var body = {
+        cardKey: slotFor(index),
+        entryId: chunkIdOf(index),
+        chain: currentChain
+      };
+      var answer;
+      try {
+        answer = hooks.start(body);
+      } catch (err) {
+        answer = null;
+      }
+      var waiting = Promise.resolve(answer).then(function (value) {
+        startWaiting[index] = null;
+        if (value && typeof value.cardKey === "string" && value.cardKey !== "") {
+          cardKeys[index] = value.cardKey;
+        }
+        var key = cardKeys[index];
+        return typeof key === "string" && key !== "" ? key : null;
+      }, function () {
+        startWaiting[index] = null;
+        return null;
+      });
+      startWaiting[index] = waiting;
+      return waiting;
+    }
+
+    /* The start a report for this chunk is still waiting for, or null when the
+     * card is already in hand (or the page has no start to ask). */
+    function startFor(index) {
+      if (!hooks.start) return null;
+      var key = cardKeys[index];
+      if (typeof key === "string" && key !== "") return null;
+      return beginStart(index);
+    }
+
+    /* The result a report's answer carries, whether the page answered with it
+     * or wrapped it in a progress field. */
+    function progressOf(answer) {
+      if (answer && typeof answer === "object" && answer.progress
+          && typeof answer.progress === "object") {
+        return answer.progress;
+      }
+      return answer;
+    }
+
+    function acceptQueued(item, carried, answer) {
+      acknowledge(item.cardKey, carried);
+      var progress = progressOf(answer);
+      if (progress && typeof progress === "object" && typeof progress.done === "boolean") {
+        lastDoneAck[item.cardKey] = progress.done;
+      }
+      dropQueued(item.chunkIndex, item.cardKey);
+    }
+
+    /* One queued item, sent against the card it was first refused for. An item
+     * with no card yet waits for its chunk's own report, which asks the page
+     * for a card first. */
+    function sendQueued(item) {
+      if (!item || typeof item.cardKey !== "string" || item.cardKey === "") return;
+      if (chunkIdOf(item.chunkIndex) === item.entryId) {
+        var known = cardKeys[item.chunkIndex];
+        if (typeof known !== "string" || known === "") cardKeys[item.chunkIndex] = item.cardKey;
+      }
+      var carried = raiseTo(item.cardKey, item.activeSeconds);
+      if (acked(item.cardKey, carried)) {
+        dropQueued(item.chunkIndex, item.cardKey);
+        return;
+      }
+      var answer;
+      try {
+        answer = hooks.post({
+          cardKey: item.cardKey,
+          chunkIndex: item.chunkIndex,
+          entryId: item.entryId,
+          activeSeconds: carried
+        });
+      } catch (err) {
+        return;
+      }
+      if (!answer || typeof answer.then !== "function") {
+        acceptQueued(item, carried, answer);
+        return;
+      }
+      Promise.resolve(answer).then(function (value) {
+        acceptQueued(item, carried, value);
+      }, function () {
+        return undefined;
+      });
+    }
+
+    /* The queue is retried whole: at mount, on the beat, and before every fresh
+     * report. */
+    function retryQueue() {
+      if (destroyed || !hooks.post || queue.length === 0) return;
+      var items = queue.slice();
+      for (var i = 0; i < items.length; i += 1) sendQueued(items[i]);
+    }
+
+    /* The beat retries the queue on every tenth tick, and never sooner than ten
+     * seconds of the page's clock after the last try. */
+    function retryDue() {
+      if (queue.length === 0) return;
+      var sinceTicks = ticks - lastRetryTick;
+      var sinceMs = nowFn() - lastRetryAt;
+      if (sinceTicks < RETRY_TICKS && sinceMs < RETRY_MS) return;
+      lastRetryTick = ticks;
+      lastRetryAt = nowFn();
+      retryQueue();
+    }
+
+    /* The chunk a step belongs to (a chunk-break belongs to the chunk it
+     * follows). */
+    function chunkOfSegment(index) {
+      var segment = segmentAt(index);
+      if (!segment || !Number.isInteger(segment.chunkIndex) || segment.chunkIndex < 0) return chunkSeen;
+      return segment.chunkIndex;
+    }
+
+    /* The clock has left a chunk: what it counted there is reported now, once. */
+    function leaveChunk(index) {
+      var active = activeAt(index, clock.state());
+      if (!(active > 0)) return;
+      postOne(index, active);
+    }
+
     /* The resume record, when its shape is one this player wrote. Anything else
      * is no record at all and is ignored. */
     function readResumeRecord() {
@@ -624,33 +942,103 @@
       return fallback;
     }
 
-    /* One chunk's report to the page. A page with no posting, a post that
-     * throws and a post that rejects all leave the local rule deciding, and a
-     * page whose post answers at once is answered at once. */
+    /* One chunk's report to the page: that chunk's own card, its own seconds,
+     * never a session total. A page with no posting, a report that throws and a
+     * report that rejects all leave the local rule deciding, a page whose
+     * posting answers at once is answered at once, and a report that needs the
+     * page's start first waits for it. */
     function postOne(index, active) {
-      var payload = { chunkIndex: index, entryId: chunkIdOf(index), activeSeconds: active };
       var fallback = locallyDone(index, active);
-      var answer = null;
-      if (hooks.post) {
-        try {
-          answer = hooks.post(payload);
-        } catch (err) {
-          answer = null;
+      function settled(done) {
+        return { index: index, activeSeconds: active, done: done };
+      }
+      if (!hooks.post) return settled(fallback);
+      retryQueue();
+      var waiting = startFor(index);
+      if (waiting) {
+        return waiting.then(function () {
+          return sendOne(index, active, fallback, settled);
+        }, function () {
+          return settled(fallback);
+        });
+      }
+      return sendOne(index, active, fallback, settled);
+    }
+
+    function sendOne(index, active, fallback, settled) {
+      var entryId = chunkIdOf(index);
+      var key = cardKeys[index];
+      key = typeof key === "string" && key !== "" ? key : undefined;
+      if (key === undefined && hooks.start) {
+        /* No card to report against yet: the attempt waits its turn. */
+        enqueue({
+          cardKey: undefined,
+          chunkIndex: index,
+          entryId: entryId,
+          activeSeconds: active
+        });
+        return settled(fallback);
+      }
+      var ackKey = ackKeyOf(index);
+      var carried = raiseTo(ackKey, active);
+      if (acked(ackKey, carried)) {
+        /* Nothing new to say about this card. A report already out is waited
+         * for, so the page's own answer still decides Done. */
+        var flying = inFlight[ackKey];
+        if (flying) {
+          return flying.then(function (value) {
+            return settled(doneFrom(progressOf(value), fallback));
+          });
         }
+        var known = lastDoneAck[ackKey];
+        return settled(typeof known === "boolean" ? known : fallback);
+      }
+      var answer;
+      try {
+        lastSent[ackKey] = carried;
+        answer = hooks.post({
+          cardKey: key,
+          chunkIndex: index,
+          entryId: entryId,
+          activeSeconds: carried
+        });
+      } catch (err) {
+        forgetSent(ackKey);
+        enqueue({ cardKey: key, chunkIndex: index, entryId: entryId, activeSeconds: carried });
+        return settled(fallback);
       }
       if (!answer || typeof answer.then !== "function") {
-        return { index: index, activeSeconds: active, done: doneFrom(answer, fallback) };
+        return acceptOne(index, key, carried, answer, fallback, settled);
       }
-      return Promise.resolve(answer).then(function (value) {
-        return { index: index, activeSeconds: active, done: doneFrom(value, fallback) };
+      var pending = Promise.resolve(answer).then(function (value) {
+        if (inFlight[ackKey] === pending) delete inFlight[ackKey];
+        acceptOne(index, key, carried, value, fallback, settled);
+        return value;
       }, function () {
-        return { index: index, activeSeconds: active, done: fallback };
+        if (inFlight[ackKey] === pending) delete inFlight[ackKey];
+        forgetSent(ackKey);
+        enqueue({ cardKey: key, chunkIndex: index, entryId: entryId, activeSeconds: carried });
+        return null;
       });
+      inFlight[ackKey] = pending;
+      return pending.then(function (value) {
+        return settled(doneFrom(progressOf(value), fallback));
+      });
+    }
+
+    function acceptOne(index, key, carried, answer, fallback, settled) {
+      var ackKey = ackKeyOf(index);
+      acknowledge(ackKey, carried);
+      var done = doneFrom(progressOf(answer), fallback);
+      lastDoneAck[ackKey] = done;
+      dropQueued(index, key);
+      return settled(done);
     }
 
     /* Hand the finished reports to the caller: at once when every page answer
      * was already in hand, otherwise once the last one lands. */
     function settleJobs(jobs, onDone) {
+      var finish = typeof onDone === "function" ? onDone : function () {};
       var waiting = false;
       var all = [];
       for (var i = 0; i < jobs.length; i += 1) {
@@ -660,11 +1048,11 @@
         all.push(pending ? job : Promise.resolve(job));
       }
       if (!waiting) {
-        onDone(jobs);
+        finish(jobs);
         return;
       }
-      Promise.all(all).then(function (values) { onDone(values); }, function () {
-        onDone(jobs);
+      Promise.all(all).then(function (values) { finish(values); }, function () {
+        finish(jobs);
       });
     }
 
@@ -748,6 +1136,7 @@
       leaveRunning();
       hideTransport();
       postCounted(function (list) {
+        if (destroyed) return;
         showResults(list);
         if (everyChunkDone(list)) dropResume();
         else saveResume();
@@ -831,6 +1220,9 @@
       if (!next || !Array.isArray(next.segments) || next.segments.length === 0) return;
       timeline = next;
       segments = next.segments;
+      /* A chunk an addition brought in is started as an extra, and its start
+       * carries the chain it now belongs to. */
+      if (Array.isArray(next.chain)) currentChain = next.chain;
       try {
         clock.setTimeline(timeline);
       } catch (err) {
@@ -898,6 +1290,7 @@
       addOptionsShown = false;
       terminal = true;
       hideTransport();
+      postCounted();
       clearChildren(els.end);
       removeNode(els.end, host);
       dropResume();
@@ -958,6 +1351,7 @@
       terminal = true;
       hideTransport();
       postCounted(function (list) {
+        if (destroyed) return;
         showEnd(clock.state());
         showResults(list);
         report({ type: "ended" });
@@ -1210,6 +1604,8 @@
     function onTick() {
       clock.tick();
       paint();
+      ticks += 1;
+      retryDue();
     }
 
     function startInterval() {
@@ -1241,6 +1637,10 @@
       playNow(false);
       startInterval();
       paint();
+      /* The first chunk's card is asked for now; every later chunk asks when
+       * its own report needs one. A refusal costs nothing here: the next
+       * report asks again. */
+      startFor(0);
     }
 
     /* A tab that goes away while the session runs is a pause, the same one the
@@ -1278,6 +1678,15 @@
       var at = event.state && Number.isInteger(event.state.segmentIndex)
         ? event.state.segmentIndex
         : clock.state().segmentIndex;
+      /* A step in another chunk means the clock has left one behind, whether it
+       * walked there, skipped, went back or was tapped there: that chunk's own
+       * count is reported now. */
+      var chunkAt = chunkOfSegment(at);
+      if (chunkAt !== chunkSeen) {
+        var left = chunkSeen;
+        chunkSeen = chunkAt;
+        leaveChunk(left);
+      }
       if (at === lastReportedIndex) return;
       lastReportedIndex = at;
       report({ type: "segment", index: at });
@@ -1285,6 +1694,8 @@
 
     rebuildStrip();
     paintTransport();
+    /* What an earlier visit could not report is tried again straight away. */
+    retryQueue();
 
     function state() {
       var snap = clock.state();
@@ -1309,6 +1720,10 @@
         unsubscribe();
         unsubscribe = null;
       }
+      /* Whatever the clock counted and no report has carried yet goes now,
+       * before the page takes the player away. */
+      postCounted();
+      destroyed = true;
       dropWakeLock();
       els.start.removeEventListener("click", onStart);
       if (els.finish) els.finish.removeEventListener("click", onFinishClick);

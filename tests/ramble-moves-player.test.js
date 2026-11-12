@@ -1249,3 +1249,322 @@ test("finish: a page whose post answers at once is answered at once", () => {
   assert.deepEqual(heard, ["left"]);
 });
 
+/* ---------- posting a chunk against its own card ---------- */
+
+const QUEUE_KEY = "ramble.player.queue";
+
+/* What the player left in storage for a later visit to retry. */
+function queueOf(storage) {
+  const raw = storage.getItem(QUEUE_KEY);
+  if (raw === null || raw === "") return [];
+  return JSON.parse(raw);
+}
+
+/* Plain copies of what a recorder collected, so a deep equal reads it. */
+function plain(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+test("posting: the first Start sends exactly one start call with the slot and the chain", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }, { chunkId: "walk-10" }];
+  const starts = [];
+  const posted = [];
+  mountOn(booted, chain, {
+    cardSlot: "day",
+    start: (body) => {
+      starts.push(body);
+      return Promise.resolve({ cardKey: "card-for-chunk-" + starts.length });
+    },
+    post: (payload) => { posted.push(payload); return Promise.resolve({ done: false }); },
+  });
+
+  assert.equal(starts.length, 0, "nothing is asked for before Start");
+  byRole(booted.host, "start").click();
+  await settle();
+
+  assert.equal(starts.length, 1, "the first Start asks for one card, for the first chunk only");
+  assert.deepEqual(plain(starts[0]), { cardKey: "day", entryId: "walk-10", chain: chain });
+
+  advance(booted.clock, 5);
+  advance(booted.clock, 5);
+  await settle();
+  assert.equal(starts.length, 1, "a running chunk is asked for its card once");
+  assert.deepEqual(posted, [], "nothing leaves the chunk yet, so nothing is posted");
+});
+
+test("posting: a chunk boundary posts the chunk the clock left, with that chunk's own seconds", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }, { chunkId: "walk-10" }];
+  const starts = [];
+  const posted = [];
+  mountOn(booted, chain, {
+    cardSlot: "day",
+    start: (body) => {
+      starts.push(body);
+      return Promise.resolve({ cardKey: body.cardKey === "day" ? "2026-01-01:day" : "2026-01-01:x:walk-10:1" });
+    },
+    post: (payload) => { posted.push(payload); return Promise.resolve({ done: true }); },
+  });
+
+  byRole(booted.host, "start").click();
+  await settle();
+  advance(booted.clock, 700);
+  await settle();
+
+  assert.equal(posted.length, 1, "one report for the chunk the clock left");
+  assert.deepEqual(plain(posted[0]), {
+    cardKey: "2026-01-01:day",
+    chunkIndex: 0,
+    entryId: "walk-10",
+    activeSeconds: 600,
+  });
+  assert.equal(starts.length, 1, "the chunk now running has no card yet");
+
+  advance(booted.clock, 100);
+  await settle();
+  assert.equal(posted.length, 1, "a step inside the next chunk reports nothing");
+  assert.equal(posted[0].activeSeconds, 600, "the next chunk's seconds are never added to it");
+});
+
+test("posting: Finish here at 12 of 20 minutes posts each chunk on its own card", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }, { chunkId: "walk-10" }];
+  const starts = [];
+  const posted = [];
+  mountOn(booted, chain, {
+    cardSlot: "day",
+    start: (body) => {
+      starts.push(body);
+      return Promise.resolve({ cardKey: body.cardKey === "day" ? "2026-01-01:day" : "2026-01-01:x:walk-10:1" });
+    },
+    post: (payload) => {
+      posted.push(payload);
+      return Promise.resolve({ progress: { done: payload.chunkIndex === 0 } });
+    },
+  });
+
+  byRole(booted.host, "start").click();
+  await settle();
+  /* Twelve active minutes of a twenty minute chain: ten in the first chunk,
+   * two in the second (the five second break is nobody's active time). */
+  advance(booted.clock, 725);
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  const forChunk = (index) => posted.filter((one) => one.chunkIndex === index);
+  assert.equal(forChunk(0).length, 1, "the finished chunk is reported once");
+  assert.equal(forChunk(0)[0].activeSeconds, 600);
+  assert.equal(forChunk(0)[0].cardKey, "2026-01-01:day");
+  assert.equal(forChunk(1).length, 1);
+  assert.equal(forChunk(1)[0].activeSeconds, 120, "only the second chunk's own two minutes");
+  assert.equal(forChunk(1)[0].cardKey, "2026-01-01:x:walk-10:1");
+
+  assert.equal(starts.length, 2, "the second chunk is started once, when its report needs a card");
+  assert.equal(starts[1].cardKey, "extra");
+  assert.equal(starts[1].entryId, "walk-10");
+
+  const lines = allByRole(booted.host, "chunk-result");
+  assert.equal(lines[0].textContent, COPY["today.card.isDone"]);
+  assert.equal(lines[1].textContent, COPY["today.card.resume"], "the page's progress answer decides Done");
+});
+
+test("posting: a rejected post waits in storage and is retried on a later tick", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }];
+  const storage = fakeStorage();
+  const posted = [];
+  let calls = 0;
+  mountOn(booted, chain, {
+    storage,
+    cardSlot: "day",
+    start: () => Promise.resolve({ cardKey: "2026-01-01:day" }),
+    post: (payload) => {
+      posted.push(payload);
+      calls += 1;
+      if (calls === 1) return Promise.reject(new Error("offline"));
+      return Promise.resolve({ done: true });
+    },
+  });
+
+  byRole(booted.host, "start").click();
+  await settle();
+  advance(booted.clock, 120);
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  assert.equal(posted.length, 1);
+  assert.deepEqual(queueOf(storage), [{
+    cardKey: "2026-01-01:day",
+    chunkIndex: 0,
+    entryId: "walk-10",
+    activeSeconds: 120,
+  }], "the report that could not be made waits in storage");
+
+  advance(booted.clock, 12);
+  await settle();
+
+  assert.equal(posted.length, 2, "the beat retried it");
+  assert.equal(posted[1].activeSeconds, 120);
+  assert.deepEqual(queueOf(storage), [], "an item leaves the queue once its post resolves");
+});
+
+test("posting: a queued post survives a remount and is retried by the next visit", async () => {
+  const chain = [{ chunkId: "walk-10" }];
+  const storage = fakeStorage();
+  const first = boot();
+  const firstPosted = [];
+  mountOn(first, chain, {
+    storage,
+    cardSlot: "day",
+    start: () => Promise.resolve({ cardKey: "2026-01-01:day" }),
+    post: (payload) => {
+      firstPosted.push(payload);
+      return Promise.reject(new Error("offline"));
+    },
+  });
+
+  byRole(first.host, "start").click();
+  await settle();
+  advance(first.clock, 90);
+  byRole(first.host, "finish").click();
+  await settle();
+
+  assert.equal(firstPosted.length, 1);
+  assert.deepEqual(queueOf(storage), [{
+    cardKey: "2026-01-01:day",
+    chunkIndex: 0,
+    entryId: "walk-10",
+    activeSeconds: 90,
+  }]);
+
+  const second = boot();
+  const secondPosted = [];
+  mountOn(second, chain, {
+    storage,
+    cardSlot: "day",
+    start: () => Promise.resolve({ cardKey: "2026-01-01:day" }),
+    post: (payload) => { secondPosted.push(payload); return Promise.resolve({ done: true }); },
+  });
+  await settle();
+
+  assert.equal(secondPosted.length, 1, "the new visit retries what the last one could not report");
+  assert.deepEqual(plain(secondPosted[0]), {
+    cardKey: "2026-01-01:day",
+    chunkIndex: 0,
+    entryId: "walk-10",
+    activeSeconds: 90,
+  });
+  assert.deepEqual(queueOf(storage), [], "and the item leaves the queue");
+});
+
+test("posting: a retry never carries fewer seconds than the acknowledged report", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }, { chunkId: "walk-10" }];
+  const storage = fakeStorage({
+    [QUEUE_KEY]: JSON.stringify([
+      { cardKey: "2026-01-01:day", chunkIndex: 1, entryId: "walk-10", activeSeconds: 50 },
+    ]),
+  });
+  const posted = [];
+  let calls = 0;
+  mountOn(booted, chain, {
+    storage,
+    cardSlot: "day",
+    start: () => Promise.resolve({ cardKey: "2026-01-01:day" }),
+    post: (payload) => {
+      posted.push(payload);
+      calls += 1;
+      if (calls <= 2) return Promise.reject(new Error("offline"));
+      return Promise.resolve({ done: true });
+    },
+  });
+
+  await settle();
+  assert.equal(posted.length, 1, "the mount retried the item and could not post it");
+  assert.equal(posted[0].activeSeconds, 50);
+
+  byRole(booted.host, "start").click();
+  await settle();
+  advance(booted.clock, 605);
+  await settle();
+
+  assert.equal(posted.length, 3, "the retry, then the first chunk's own report");
+  assert.equal(posted[2].chunkIndex, 0);
+  assert.equal(posted[2].activeSeconds, 600, "the card has now been acknowledged at ten minutes");
+
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  const forCard = posted.filter((one) => one.cardKey === "2026-01-01:day");
+  for (let i = 1; i < forCard.length; i += 1) {
+    assert.ok(forCard[i].activeSeconds >= forCard[i - 1].activeSeconds,
+      "a report about a card never carries fewer seconds than one before it");
+  }
+  assert.equal(posted.filter((one) => one.activeSeconds === 50).length, 2,
+    "the waiting item is never sent again with fewer seconds than the card acknowledged");
+  assert.deepEqual(queueOf(storage), [], "the acknowledged count already covers it");
+});
+
+test("posting: a rejected start is not an error and the next post asks again", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }];
+  const storage = fakeStorage();
+  const starts = [];
+  const posted = [];
+  mountOn(booted, chain, {
+    storage,
+    cardSlot: "day",
+    start: (body) => {
+      starts.push(body);
+      if (starts.length === 1) return Promise.reject(new Error("no card today"));
+      return Promise.resolve({ cardKey: "2026-01-01:day" });
+    },
+    post: (payload) => { posted.push(payload); return Promise.resolve({ done: true }); },
+  });
+
+  assert.doesNotThrow(() => byRole(booted.host, "start").click());
+  await settle();
+  assert.equal(starts.length, 1);
+  assert.equal(posted.length, 0);
+
+  advance(booted.clock, 200);
+  assert.doesNotThrow(() => byRole(booted.host, "finish").click());
+  await settle();
+
+  assert.equal(starts.length, 2, "the next report asks for the card again");
+  assert.equal(starts[1].cardKey, "day");
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].cardKey, "2026-01-01:day");
+  assert.equal(posted[0].activeSeconds, 200);
+  assert.equal(allByRole(booted.host, "chunk-result")[0].textContent, COPY["today.card.isDone"],
+    "the page's answer still decides Done");
+});
+
+test("posting: destroy reports the time the beat counted and no post carried", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }];
+  const posted = [];
+  const { player } = mountOn(booted, chain, {
+    cardSlot: "day",
+    start: () => Promise.resolve({ cardKey: "2026-01-01:day" }),
+    post: (payload) => { posted.push(payload); return Promise.resolve({ done: false }); },
+  });
+
+  byRole(booted.host, "start").click();
+  await settle();
+  advance(booted.clock, 100);
+  assert.deepEqual(posted, [], "a step inside the chunk says nothing yet");
+
+  player.destroy();
+  await settle();
+
+  assert.equal(posted.length, 1);
+  assert.deepEqual(plain(posted[0]), {
+    cardKey: "2026-01-01:day",
+    chunkIndex: 0,
+    entryId: "walk-10",
+    activeSeconds: 100,
+  });
+});
+
