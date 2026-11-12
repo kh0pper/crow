@@ -429,7 +429,8 @@ export function forYouPageHtml(data, lang = "en", now = Date.now()) {
   const anyOn = SECTIONS.some((k) => settings.sections[k]);
   // The generic widget page sits one swipe (or one tap) further in: its link is what the shell's
   // reveal uses as the swipe's forward target on this page (shell/client.js), so it is rendered on
-  // the page itself, not in the drawer.
+  // the page itself, not in the drawer. It is the swipe target one step further in on the strip that
+  // continues through the Chat, Board and Make tabs.
   const widgets = `<a class="fy-icon-btn" href="/dashboard/widgets" aria-label="${e(t("widgets.page.title", lang))}" data-widgets-entry>${GRID}</a>`;
   return `<div class="fy" data-fy${fyMessageAttrs(lang)}>
     <header class="fy-head">

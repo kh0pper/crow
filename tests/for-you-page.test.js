@@ -368,7 +368,8 @@ test("the page's client JS carries no backtick (it is emitted inside a template 
 
 /**
  * The drag reveal block alone, run in a vm over a linkedom page: a phone-width shell page with its
- * .main-content, tab bar and (flag on) the drawer's For You link. Time, animation frames and timers
+ * .main-content, its tab bar (the real Chat/Board/Make links, which the strip's tab steps follow) and
+ * (flag on) the drawer's For You link. Time, animation frames and timers
  * are driven by hand, so a test says exactly how fast the finger moved. Assertions never compare a
  * linkedom node itself (assert.ok(!node), not equal(node, null)): a failure would inspect the whole
  * document graph and hang the run instead of failing it.
@@ -378,12 +379,16 @@ async function revealRig({
   path = "/dashboard/perch", hash = "", search = "", view = "list", selection = "", kiosk = false, overlay = false,
   draft = "", width = 390, link = true, reduce = false, fetchHtml = null, fetchOk = true, styles = null, prevPath = null,
   href = "/dashboard/for-you", referrer = "", talk = false, talkOpen = false,
+  chatHref = "/dashboard/perch", boardHref = "/dashboard/board", makeHref = "/dashboard/make",
 } = {}) {
   const { shellClientJs } = await import("../servers/gateway/dashboard/shell/client.js");
   const js = shellClientJs();
   const a = js.indexOf("// ─── For You: the drag reveal");
   assert.ok(a >= 0, "the block is there");
   const block = js.slice(a, js.indexOf("// ─── The apps launcher", a));
+  // The tab the page's own render lights, as the server-side aria-current does.
+  const lit = path === "/dashboard/board" ? "board" : path === "/dashboard/make" ? "make" : "chat";
+  const tab = (id, tabHref, text) => `<a class="shell-tab" data-shell-tab="${id}" href="${tabHref}"${id === lit ? ' aria-current="page"' : ""}>${text}</a>`;
   const { document } = parseHTML(`<!doctype html><html><body class="shell" data-view="${view}">
     <div class="dashboard">
       <main class="main-content">
@@ -396,7 +401,7 @@ async function revealRig({
           <canvas class="cv"></canvas><video class="vid"></video><div class="ns" data-no-swipe><span class="in">x</span></div>
         </div>
       </main>
-      <nav class="shell-tabs"><a href="/dashboard/perch" aria-current="page">Chat</a></nav>
+      <nav class="shell-tabs">${tab("chat", chatHref, "Chat")}${tab("board", boardHref, "Board")}${tab("make", makeHref, "Make")}</nav>
     </div>
     <dialog id="shell-drawer">${link ? '<a href="' + href + '" class="shell-more-item" data-for-you-entry>For You</a>' : ""}</dialog>
     ${overlay ? "<dialog open></dialog>" : ""}
@@ -562,9 +567,9 @@ test("the drag reveal: a flick lands on For You even short of 35%; a slow short 
 });
 
 test("the drag reveal: the wrong way never takes over, and a second finger springs it back", async () => {
-  const r = await revealRig();
+  const r = await revealRig({ path: "/dashboard/make" });
   r.down(300);
-  assert.equal(r.move(280), false, "right to left on the Chat list: not cancelled");
+  assert.equal(r.move(280), false, "right to left on Make: the end of the strip, not cancelled");
   assert.equal(r.move(200), false);
   assert.ok(!r.panel(), "and no panel");
   const two = await revealRig();
@@ -609,20 +614,23 @@ test("the drag reveal keeps every guard: only the Chat list or a project home, p
   assert.equal(tooNear.drag(40, 300), 0, "inside 48 px of the left edge: the system Back gesture's");
   assert.ok(!tooNear.panel());
   assert.equal((await revealRig()).drag(48, 300), 1, "48 px in is far enough");
-  assert.equal((await revealRig()).drag(300, 60), 0, "right to left on the Chat list");
+  const left = await revealRig();
+  left.drag(300, 60);
+  assert.deepEqual(left.visits, ["/dashboard/board"], "right to left on the Chat list: the Board tab");
   assert.equal((await revealRig({ hash: "#perchlive-0000000a" })).drag(60, 300), 0, "an open chat");
+  assert.equal((await revealRig({ hash: "#perchlive-0000000a" })).drag(300, 60), 0, "an open chat, either way");
   assert.equal((await revealRig({ view: "chat" })).drag(60, 300), 0, "the chat view");
-  assert.equal((await revealRig({ path: "/dashboard/board" })).drag(60, 300), 0, "any other page");
+  assert.equal((await revealRig({ path: "/dashboard/settings" })).drag(60, 300), 0, "a page off the strip");
   assert.equal((await revealRig({ selection: "some text" })).drag(60, 300), 0, "text is selected");
   assert.equal((await revealRig({ overlay: true })).drag(60, 300), 0, "a drawer, sheet or dialog is open");
   assert.equal((await revealRig({ draft: "half a thought" })).drag(60, 300), 0, "a draft would be lost");
   assert.equal((await revealRig({ kiosk: true })).drag(60, 300), 0, "a paired kiosk display");
   assert.equal((await revealRig({ width: 1280 })).drag(60, 300), 0, "desktop");
   const off = await revealRig({ link: false });
-  assert.equal(off.drag(60, 300), 0, "flag off: no link, no target");
+  assert.equal(off.drag(60, 300), 0, "flag off: no link, no step in to For You");
   assert.ok(!off.panel());
-  assert.equal(off.listeners["main:touchmove"], undefined, "flag off: no touchmove listener at all");
-  assert.equal(off.document.querySelector(".content-body").style.touchAction || "", "", "flag off: touch-action untouched");
+  assert.ok(off.listeners["main:touchmove"], "flag off: the Board step is still there, so the listener is too");
+  assert.equal(off.document.querySelector(".content-body").style.touchAction, "pan-y pinch-zoom");
   for (const sel of [".draft", ".field", ".cv", ".vid", ".in"]) {
     const r = await revealRig();
     assert.equal(r.drag(60, 300, { target: r.document.querySelector(sel) }), 0, `starting on ${sel}`);
@@ -649,6 +657,186 @@ test("the drag reveal works over the page's own scroller, and a real sideways sc
   const tiny = await revealRig({ path: "/dashboard/project/garden", styles });
   widen(tiny.document.querySelector(".row"), 395, 390);
   assert.equal(tiny.drag(60, 300), 1, "a few pixels of overflow is not a scroller");
+});
+
+test("the strip: every page swipes to its neighbours, and the tab steps use the tab bar's own hrefs", async () => {
+  const chatLeft = await revealRig();
+  chatLeft.drag(300, 60, { pause: 200 });
+  assert.deepEqual(chatLeft.visits, ["/dashboard/board"], "the Chat list, finger left: the Board tab");
+  assert.deepEqual(chatLeft.backs, []);
+
+  const home = await revealRig({
+    path: "/dashboard/project/garden", chatHref: "/dashboard/project/garden",
+    boardHref: "/dashboard/board?project=garden", makeHref: "/dashboard/make?project=garden",
+  });
+  home.drag(300, 60, { pause: 200 });
+  assert.deepEqual(home.visits, ["/dashboard/board?project=garden"], "a project home, finger left: its scoped Board tab");
+
+  const boardLeft = await revealRig({ path: "/dashboard/board" });
+  boardLeft.drag(300, 60, { pause: 200 });
+  assert.deepEqual(boardLeft.visits, ["/dashboard/make"], "Board, finger left: Make");
+
+  const boardRight = await revealRig({ path: "/dashboard/board" });
+  boardRight.drag(60, 300, { pause: 200 });
+  assert.deepEqual(boardRight.visits, ["/dashboard/perch"], "Board, finger right: the Chat tab");
+
+  const scoped = await revealRig({
+    path: "/dashboard/board", chatHref: "/dashboard/project/garden",
+    boardHref: "/dashboard/board?project=garden", makeHref: "/dashboard/make?project=garden",
+  });
+  scoped.drag(60, 300, { pause: 200 });
+  assert.deepEqual(scoped.visits, ["/dashboard/project/garden"], "a scoped Board, finger right: the project's home, not the Chat list");
+
+  const makeRight = await revealRig({ path: "/dashboard/make" });
+  makeRight.drag(60, 300, { pause: 200 });
+  assert.deepEqual(makeRight.visits, ["/dashboard/board"], "Make, finger right: Board");
+
+  const chatRight = await revealRig();
+  chatRight.drag(60, 300, { pause: 200 });
+  assert.deepEqual(chatRight.visits, ["/dashboard/for-you"], "the Chat list, finger right: For You, as before");
+
+  // A page that only lights a tab is not on the strip: the Board's own sub-page stays put.
+  const sub = await revealRig({ path: "/dashboard/board/card/1" });
+  sub.drag(300, 60, { pause: 200 });
+  assert.deepEqual(sub.visits, [], "a sub-page of Board does not swipe");
+});
+
+test("the strip's ends: left of Make is the end, and that is no gesture at all", async () => {
+  const make = await revealRig({ path: "/dashboard/make" });
+  assert.equal(make.drag(300, 60, { pause: 200 }), 0, "right to left on Make: the end of the strip");
+  assert.ok(!make.panel(), "and no panel");
+  assert.deepEqual(make.visits, []);
+  assert.deepEqual(make.backs, []);
+  assert.equal(make.main.style.transform || "", "", "the page never moved");
+});
+
+test("the strip's tab steps keep the blockers: a sideways scroller, a field and [data-no-swipe]", async () => {
+  const styles = () => ({ overflowX: "auto" });
+  const widen = (el, sw, cw) => { Object.defineProperty(el, "scrollWidth", { value: sw }); Object.defineProperty(el, "clientWidth", { value: cw }); };
+  for (const path of ["/dashboard/board", "/dashboard/perch"]) {
+    const r = await revealRig({ path, styles });
+    widen(r.document.querySelector(".strip"), 900, 390);
+    assert.equal(r.drag(300, 60, { target: r.document.querySelector(".strip .chip"), pause: 200 }), 0, `a sideways scroller keeps its own swipe on ${path}`);
+    assert.deepEqual(r.visits, []);
+    assert.ok(!r.panel());
+  }
+  const blocked = await revealRig({ path: "/dashboard/board" });
+  for (const sel of [".ns .in", ".draft", ".field"]) {
+    assert.equal(blocked.drag(300, 60, { pause: 200, target: blocked.document.querySelector(sel) }), 0, `starting on ${sel} on Board`);
+    assert.ok(!blocked.panel());
+  }
+  const blockedChat = await revealRig();
+  assert.equal(blockedChat.drag(300, 60, { pause: 200, target: blockedChat.document.querySelector(".ns .in") }), 0, "starting on [data-no-swipe] on the Chat list");
+});
+
+test("the strip's tab steps keep the edge exemption on both sides", async () => {
+  const rightEdge = await revealRig({ path: "/dashboard/board" });
+  assert.equal(rightEdge.drag(370, 60, { pause: 200 }), 0, "within 48 px of the right edge: the system Back gesture's");
+  assert.ok(!rightEdge.panel());
+  const allowed = await revealRig({ path: "/dashboard/board" });
+  assert.equal(allowed.drag(342, 60, { pause: 200 }), 1, "width - 48 is far enough in");
+  const chatEdge = await revealRig();
+  assert.equal(chatEdge.drag(370, 60, { pause: 200 }), 0, "the same on the Chat list");
+  for (const path of ["/dashboard/board", "/dashboard/make"]) {
+    const r = await revealRig({ path });
+    assert.equal(r.drag(30, 300, { pause: 200 }), 0, `within 48 px of the left edge on ${path}`);
+    assert.ok(!r.panel());
+  }
+});
+
+test("a tab step keeps every guard: phone width, no overlay, no kiosk, no selection", async () => {
+  assert.equal((await revealRig({ path: "/dashboard/board" })).drag(300, 60, { pause: 200 }), 1, "phone width: the tab step happens");
+  assert.equal((await revealRig({ path: "/dashboard/board", width: 1280 })).drag(300, 60, { pause: 200 }), 0, "desktop");
+  assert.equal((await revealRig({ path: "/dashboard/board", kiosk: true })).drag(300, 60, { pause: 200 }), 0, "a paired kiosk display");
+  assert.equal((await revealRig({ path: "/dashboard/board", selection: "some text" })).drag(300, 60, { pause: 200 }), 0, "text is selected");
+  const overlay = await revealRig({ path: "/dashboard/board", overlay: true });
+  assert.equal(overlay.drag(300, 60, { pause: 200 }), 0, "a drawer, sheet or dialog is open");
+  assert.ok(!overlay.panel());
+});
+
+test("a tab step lands with a plain visit: no marker, no Back, and its panel carries a page", async () => {
+  const r = await revealRig({ path: "/dashboard/board" });
+  r.down(330);
+  r.move(300); r.move(250); r.frame();
+  const p = r.panel();
+  assert.ok(p, "the panel is in");
+  assert.ok(p.classList.contains("dashboard"), "laid out like the page");
+  assert.equal(p.querySelectorAll(".fy-reveal-card").length, 3, "the skeleton until the copy arrives");
+  assert.equal(p.querySelector(".fy-reveal-title").textContent, "Make", "named by the tab it is going to");
+  assert.equal(r.main.style.transform, "translate3d(-50px,0,0)", "the page follows the finger");
+  assert.equal(p.style.transform, "translate3d(340px,0,0)", "and Make sits just right of it");
+  r.up(250);
+  r.wait(1000);
+  assert.deepEqual(r.visits, ["/dashboard/make"]);
+  assert.deepEqual(r.backs, [], "a tab step never calls history.back()");
+  assert.equal(r.store.size, 0, "and leaves no sessionStorage marker");
+  assert.equal(r.panel().style.transform, "translate3d(0px,0,0)", "Make fills the screen");
+
+  const fetched = await revealRig({
+    path: "/dashboard/board",
+    fetchHtml: '<html><body class="shell"><div class="dashboard"><main class="main-content"><header class="content-header"><h2>Make</h2></header><div class="content-body"><p class="mk">Make things</p></div></main><nav class="shell-tabs"><a class="shell-tab" data-shell-tab="make" href="/dashboard/make" aria-current="page">Make</a></nav></div></body></html>',
+  });
+  fetched.down(330);
+  await new Promise((res) => setImmediate(res));
+  fetched.move(300); fetched.move(250); fetched.frame();
+  assert.ok(fetched.panel().querySelector(".mk"), "the real page's own markup when the fetch has landed");
+
+  const short = await revealRig({ path: "/dashboard/board" });
+  assert.equal(short.drag(330, 290, { pause: 200 }), 0, "40 px, then a stop: springs back");
+  assert.ok(!short.panel());
+  assert.equal(short.main.style.transform, "");
+  assert.equal(short.store.size, 0);
+});
+
+test("a tab step's preview needs the shell's frame: a .main-content and its .shell-tabs", async () => {
+  // Board's step to the left is the Chat tab: a fetched page with both parts is a real page of the
+  // shell, whatever its content (no data-fy of its own to look for).
+  const chat = await revealRig({
+    path: "/dashboard/board",
+    fetchHtml: '<html><body class="shell"><div class="dashboard"><main class="main-content"><header class="content-header"><h2>Chat</h2></header><div class="content-body"><p class="chat-real">Today\u2019s chats</p></div></main><nav class="shell-tabs"><a class="shell-tab" data-shell-tab="chat" href="/dashboard/perch" aria-current="page">Chat</a></nav></div></body></html>',
+  });
+  chat.down(60);
+  await new Promise((res) => setImmediate(res));
+  chat.move(100); chat.move(160); chat.frame();
+  const p = chat.panel();
+  assert.ok(p, "the panel is in");
+  assert.ok(p.querySelector(".chat-real"), "the fetched Chat page itself, not the skeleton");
+  assert.equal(p.querySelectorAll(".fy-reveal-card").length, 0, "no skeleton cards");
+  assert.ok(p.querySelector(".shell-tabs"), "and its tab bar comes along");
+
+  // A page with a .main-content but no tab bar is not a page of the shell (a sign-in page, an error):
+  // on a tab step it is never shown as the preview, the skeleton stands in.
+  const noTabs = await revealRig({
+    path: "/dashboard/board",
+    fetchHtml: '<html><body><main class="main-content"><div class="content-body"><p class="mk-real">Make things</p></div></main></body></html>',
+  });
+  noTabs.down(60);
+  await new Promise((res) => setImmediate(res));
+  noTabs.move(100); noTabs.move(160); noTabs.frame();
+  const sk = noTabs.panel();
+  assert.ok(!sk.querySelector(".mk-real"), "the fetched page is not shown");
+  assert.equal(sk.querySelectorAll(".fy-reveal-card").length, 3, "the skeleton instead");
+  assert.equal(sk.querySelector(".fy-reveal-title").textContent, "Chat", "named by the tab it is going to");
+});
+
+test("a tab step leaves the real tab bar's aria-current alone", async () => {
+  const litOf = (path) => (path === "/dashboard/board" ? "board" : path === "/dashboard/make" ? "make" : "chat");
+  for (const path of ["/dashboard/perch", "/dashboard/board", "/dashboard/make"]) {
+    const r = await revealRig({ path });
+    r.drag(300, 60, { pause: 200 });
+    const lit = litOf(path);
+    for (const id of ["chat", "board", "make"]) {
+      const link = r.document.querySelector('.shell-tabs a[data-shell-tab="' + id + '"]');
+      assert.equal(link.getAttribute("aria-current"), id === lit ? "page" : null, `${id} tab after the drag on ${path}`);
+    }
+  }
+  // The panel's cloned bar carries no lit tab: the destination page lights its own on render.
+  const r = await revealRig({ path: "/dashboard/board" });
+  r.down(330); r.move(300); r.move(250); r.frame();
+  const cloned = r.panel().querySelector(".shell-tabs");
+  assert.ok(cloned, "the panel carries a tab bar");
+  assert.ok(!cloned.querySelector("[aria-current]"), "no tab lit in the copy");
+  assert.equal(r.document.querySelector('.shell-tabs a[data-shell-tab="board"]').getAttribute("aria-current"), "page", "the real bar keeps its own");
 });
 
 test("the reverse drag on For You: right to left pushes it out to the page you came from", async () => {
@@ -722,13 +910,14 @@ test("the drag reveal's panel: a For You copy with nothing that runs, or a skele
     <script>window.pwned = 3</script></body></html>`;
   const r = await revealRig({ fetchHtml });
   r.down(60);
-  assert.equal(r.fetched.length, 1, "fetched on the first eligible touch");
+  assert.equal(r.fetched.length, 2, "both steps of the strip are fetched on the first eligible touch");
   assert.equal(r.fetched[0].url, "/dashboard/for-you");
   assert.equal(r.fetched[0].opts.credentials, "same-origin");
+  assert.equal(r.fetched[1].url, "/dashboard/board", "and the step out to the Board tab");
   await new Promise((res) => setImmediate(res));
   r.up(60);
   r.down(60);
-  assert.equal(r.fetched.length, 1, "once per page view");
+  assert.equal(r.fetched.length, 2, "once per target per page view");
   r.move(80); r.move(150); r.frame();
   const p = r.panel();
   assert.ok(p.classList.contains("dashboard"), "laid out like the page");
@@ -825,7 +1014,7 @@ test("the drag reveal fetches at most once per page view, even on failure; a new
   failed.up(60);
   failed.down(70);
   failed.up(70);
-  assert.equal(failed.fetched.length, 1, "a failure is not retried on every touch");
+  assert.equal(failed.fetched.length, 2, "a failure is not retried on every touch");
   failed.down(60); failed.move(80); failed.move(150); failed.frame(); // the skeleton still shows
   assert.equal(failed.panel().querySelectorAll(".fy-reveal-card").length, 3);
 
@@ -836,10 +1025,25 @@ test("the drag reveal fetches at most once per page view, even on failure; a new
   slow.listeners["turbo:before-render"]({ detail: { newBody: slow.document.body.cloneNode(true) } });
   assert.equal(signal.aborted, true, "Turbo rendering another page aborts it");
 
+  // On Board both steps are tab steps, so the first touch prefetches twice: a new render aborts both
+  // pending fetches and the next page view's first touch fetches again.
+  const tabbed = await revealRig({
+    path: "/dashboard/board",
+    fetchHtml: '<html><body class="shell"><div class="dashboard"><main class="main-content"><div class="content-body"><p>a page</p></div></main><nav class="shell-tabs"><a class="shell-tab" data-shell-tab="chat" href="/dashboard/perch">Chat</a></nav></div></body></html>',
+  });
+  tabbed.down(60);
+  assert.equal(tabbed.fetched.length, 2, "both tab steps fetched on the first eligible touch");
+  const pending = tabbed.fetched.map((f) => f.opts.signal);
+  assert.deepEqual(pending.map((s) => s.aborted), [false, false], "still in flight");
+  tabbed.visitTo("/dashboard/board");
+  assert.deepEqual(pending.map((s) => s.aborted), [true, true], "a new render aborts both");
+  tabbed.down(60);
+  assert.equal(tabbed.fetched.length, 4, "and the next first touch fetches both again");
+
   for (const href of ["https://evil.example/dashboard/for-you", "//evil.example/dashboard/for-you", "/elsewhere", "/dashboard\\..\\x", "javascript:alert(1)"]) {
     const r = await revealRig({ href, fetchHtml: "<html></html>" });
     assert.equal(r.drag(60, 300, { pause: 200 }), 0, `no landing on ${href}`);
-    assert.equal(r.fetched.length, 0, `no fetch of ${href}`);
+    assert.ok(!r.fetched.some((f) => f.url === href), `no fetch of ${href}`);
     assert.ok(!r.panel());
   }
 });
