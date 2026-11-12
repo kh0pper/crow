@@ -26,7 +26,7 @@ import express from "express";
 import { randomUUID } from "node:crypto";
 import { join, resolve, normalize, dirname, sep } from "node:path";
 import { homedir } from "node:os";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -61,6 +61,26 @@ let birdEngine = null;
 function loadBirdEngine() {
   if (!birdEngine) birdEngine = requireBundleFile(join(SERVER_DIR, "bird-svg.cjs"));
   return birdEngine;
+}
+
+/**
+ * The player's approved words, read once from the bundle and cached. The panel
+ * is installed as a single file and cannot see `server/moves/*`, so the client
+ * fetches the table from /api/ramble/moves/copy instead of the page carrying
+ * it. A missing or unreadable table is an empty object: the player then says
+ * nothing of its own rather than inventing a word.
+ */
+let playerCopy = null;
+function loadPlayerCopy() {
+  if (playerCopy) return playerCopy;
+  try {
+    const table = JSON.parse(readFileSync(join(SERVER_DIR, "moves", "player-copy.en.json"), "utf8"));
+    playerCopy = table && typeof table === "object" && !Array.isArray(table) ? table : {};
+  } catch (err) {
+    console.warn(`[ramble routes] player copy unavailable: ${err?.message ?? err}`);
+    playerCopy = {};
+  }
+  return playerCopy;
 }
 
 /* ------------------------------------------------------------- validation */
@@ -1570,6 +1590,13 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     try { prefs = await movesMods.todayMod.writePrefs(db, patch, { emit }); }
     catch (err) { movesInput(err); }
     res.json({ prefs });
+  }));
+
+  // The player's words. The panel is copied alone into an install, so this is
+  // the only way it can reach the approved table — one file, no db, no moves
+  // modules.
+  router.get("/api/ramble/moves/copy", handle(async (req, res) => {
+    res.json({ copy: loadPlayerCopy() });
   }));
 
   // Only reviewed, licensed entries are served, and the joint-angle data is a

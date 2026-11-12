@@ -4,7 +4,7 @@
  *
  * Four layers, like the rest of the Ramble tests:
  *   1. the server-rendered panel (panel/ramble.js) — copy, ids, vocabularies,
- *      the figure/session/player scripts, the player's copy table and the en/es
+ *      the figure/session/player scripts, the player's Start label and the en/es
  *      safety note;
  *   2. the client (panel/static/moves.js) run in a vm against a tiny DOM, so
  *      a real click posts the real route with the day the card carries, and a
@@ -163,8 +163,8 @@ test("the panel loads the figure, the session and the player engines before the 
     "the player stylesheet is linked");
 });
 
-/** The panel escapes the copy table for a double-quoted attribute; this is the
- * browser's half of that round trip. */
+/** The panel escapes the Start label for a double-quoted attribute; this is
+ * the browser's half of that round trip. */
 function attrText(value) {
   return value
     .replace(/&quot;/g, '"')
@@ -174,28 +174,35 @@ function attrText(value) {
     .replace(/&amp;/g, "&");
 }
 
-test("the player host carries the approved copy table as data-copy", async () => {
-  const html = await render("en");
-  const tag = /<div id="rb-player"[^>]*>/.exec(html);
-  assert.ok(tag, "the player host is a div with an id");
-  const attr = /data-copy="([^"]*)"/.exec(tag[0]);
-  assert.ok(attr, "the host carries a data-copy attribute");
-  const copy = JSON.parse(attrText(attr[1]));
-  assert.equal(typeof copy, "object");
-  for (const key of ["player.pause", "player.back", "player.more", "player.end.title"]) {
-    assert.equal(typeof copy[key], "string", key + " is in the table");
-    assert.ok(copy[key].length > 0, key + " is not empty");
-  }
-  assert.equal(copy.start, "Start", "the page's own Start label is part of the copy");
-  assert.equal(copy.safety, undefined, "the panel's safety sheet is shown before the player, so it carries no safety note");
+test("the player host carries the page's own Start label, not a copy table", async () => {
+  const hostTag = (html) => {
+    const tag = /<div id="rb-player"[^>]*>/.exec(html);
+    assert.ok(tag, "the player host is a div with an id");
+    return tag[0];
+  };
+  const startOf = (tag) => {
+    const attr = /data-start="([^"]*)"/.exec(tag);
+    assert.ok(attr, "the host carries the page's Start label as data-start");
+    const label = attrText(attr[1]);
+    assert.ok(label.length > 0, "the Start label is not empty");
+    return label;
+  };
 
-  // Spanish is served the same approved English player copy for now.
-  const es = await render("es");
-  const esTag = /<div id="rb-player"[^>]*>/.exec(es);
-  assert.ok(esTag, "the Spanish panel has the player host too");
-  const esCopy = JSON.parse(attrText(/data-copy="([^"]*)"/.exec(esTag[0])[1]));
-  assert.equal(esCopy["player.pause"], copy["player.pause"], "the player copy is the same in both languages");
-  assert.equal(esCopy.start, "Empezar", "but Start is the page's own word");
+  const enTag = hostTag(await render("en"));
+  assert.equal(/data-copy=/.test(enTag), false, "the copy table is not baked into the page any more");
+  assert.equal(startOf(enTag), "Start", "the page's own Start label rides on the host");
+
+  // Spanish has no player table of its own, but its Start is its own word.
+  const esTag = hostTag(await render("es"));
+  assert.equal(/data-copy=/.test(esTag), false, "nor in Spanish");
+  assert.equal(startOf(esTag), "Empezar", "but Start is the page's own word");
+});
+
+test("the panel reads no bundle file: the player's words come from the routes", () => {
+  const src = PANEL_SRC();
+  assert.equal(src.includes("player-copy.en.json"), false, "a single-file panel cannot see server/moves");
+  assert.equal(src.includes("readFileSync"), false, "the panel reads no file from the bundle");
+  assert.ok(CLIENT_SRC().includes("/api/ramble/moves/copy"), "the client fetches the table from its route");
 });
 
 test("the old flow player is gone from the client", () => {
@@ -304,6 +311,7 @@ function bootMoves(beforeRun, search) {
     if (u === "/api/ramble/moves/parse") return json({ ok: false, reason: "no_model" });
     if (u === "/api/ramble/moves/log") return json({ ...TODAY, log: { paid: 5, points: 5, already: false } });
     if (u === "/api/ramble/moves/prefs") return json(PREFS);
+    if (u === "/api/ramble/moves/copy") return json({ copy: { "player.pause": "Pause", "player.next": "Next: {name}" } });
     if (u === "/api/ramble/moves/library") return json({ entries: [WALK_ENTRY] });
     if (u === "/api/ramble/moves/library/walk-10") return json({ entry: WALK_ENTRY });
     if (u === "/api/ramble/moves/start") return json({ cardKey: "2026-10-30:day", startedAt: 1 });
@@ -492,7 +500,7 @@ test("a chunk opened from Today mounts the player on the day's card", async () =
       },
     };
   }, "?moves=start");
-  booted.el("rb-player").setAttribute("data-copy", JSON.stringify({ "player.pause": "Pause", start: "Start" }));
+  booted.el("rb-player").setAttribute("data-start", "Start");
   await flush();
 
   assert.equal(mounted.count, 1, "the player was mounted once");
@@ -502,7 +510,8 @@ test("a chunk opened from Today mounts the player on the day's card", async () =
   assert.equal(mounted.opts.cardSlot, "day", "Today's Start names the day's card");
   assert.ok(mounted.opts.library.some((entry) => entry && entry.id === "walk-10"),
     "the library carries the chunk itself, so its poses can be drawn");
-  assert.equal(mounted.opts.copy["player.pause"], "Pause", "the copy is read off the host's data-copy attribute");
+  assert.equal(mounted.opts.copy["player.pause"], "Pause", "the copy is fetched from /api/ramble/moves/copy");
+  assert.equal(mounted.opts.copy.start, "Start", "and the page's Start label rides along from data-start");
   assert.equal(mounted.opts.guidance, "full", "the level the detail route answered with is the one played");
   assert.equal(typeof mounted.opts.post, "function");
   assert.equal(typeof mounted.opts.start, "function");

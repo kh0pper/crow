@@ -17,10 +17,9 @@
  * a radar strip when the camera or compass is missing).
  *
  * COPIED ALONE to `$CROW_HOME/panels/ramble.js` at install, so it imports no
- * relative `../server/*` module; anything it needs from the bundle is resolved
- * through BUNDLE_DIR at request time, and the one relative READ it does make
- * (the player's copy table) is optional — a copy with no table beside it gets
- * `{}`. Every HTTP surface it talks to lives in the companion `panel/routes.js`
+ * relative `../server/*` module and reads no bundle file at all; anything it
+ * needs from the bundle is resolved through BUNDLE_DIR at request time. Every
+ * HTTP surface it talks to lives in the companion `panel/routes.js`
  * (STRICT_PANEL_MOUNT contract).
  *
  * The page is rendered static: grid state, marks, the egg and the pet are all
@@ -38,24 +37,10 @@
  * and `server/moves/session.cjs` the server builds and tests against. Every new
  * string is rendered here from STRINGS via the dashboard's `lang` (en/es); the
  * client's runtime strings are its own small table, keyed off `data-lang`, and
- * the player's are the approved table in `server/moves/player-copy.en.json`.
+ * the player's are the approved table the routes serve at
+ * /api/ramble/moves/copy. This file reads no bundle file at all: a panel is
+ * installed as a single file, so the table is fetched by the client.
  */
-
-import { readFileSync } from "node:fs";
-
-/**
- * The player's own words, read once. A panel installed as a single file has no
- * table next to it, and then the player keeps its words to itself rather than
- * inventing any: it still draws the figure and the library's own step text.
- */
-const PLAYER_COPY = (() => {
-  try {
-    const table = JSON.parse(readFileSync(new URL("../server/moves/player-copy.en.json", import.meta.url), "utf8"));
-    return table && typeof table === "object" && !Array.isArray(table) ? table : {};
-  } catch {
-    return {};
-  }
-})();
 
 const OSM_ATTRIBUTION = "&copy; OpenStreetMap contributors";
 
@@ -297,9 +282,8 @@ export default {
     const S = textFor(lang);
     const L = lang === "es" ? "es" : "en";
     // The player's words are the approved English table (Spanish has none of
-    // its own yet). Today's Start label is the one word that comes from this
-    // page, so the two can never disagree about it.
-    const playerCopy = JSON.stringify({ ...PLAYER_COPY, start: S.start });
+    // its own yet), served by the routes; Today's Start label is the one word
+    // that comes from this page, so the host carries just that one.
     // Spec §11: OpenStreetMap public tiles are the phase-1 default, with the
     // tile URL configurable in settings. The URL itself is NOT rendered here:
     // the dashboard CSP is img-src 'self', so the client always draws from the
@@ -640,9 +624,9 @@ export default {
 
             <!-- The player. static/player.js draws one step at a time from the
                  timeline static/session.js compiles, and the figure engine
-                 draws the poses. Its words are the approved table the handler
-                 read, handed over as data-copy. -->
-            <div id="rb-player" class="rb-player" data-copy="${esc(playerCopy)}" hidden></div>
+                 draws the poses. Its words are the approved table the routes
+                 serve; only the page's own Start label rides along here. -->
+            <div id="rb-player" class="rb-player" data-start="${esc(S.start)}" hidden></div>
           </section>
 
           <div class="rb-row rb-actions">

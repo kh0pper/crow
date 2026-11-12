@@ -965,19 +965,33 @@
     return take();
   }
 
-  /* The player's own words, as the panel wrote them onto #rb-player. No table
-   * (or a broken one) is no copy at all: the player then draws the figure and
-   * the library's own text, and says nothing of its own. */
-  function playerCopy() {
-    var host = $("rb-player");
-    var raw = host && typeof host.getAttribute === "function" ? host.getAttribute("data-copy") : null;
-    if (typeof raw !== "string" || raw === "") return {};
-    try {
-      var parsed = JSON.parse(raw);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-    } catch (e) {
+  /* The player's own words. The panel is copied alone into an install, so the
+   * approved table is fetched from the routes, once per page, and the page's
+   * own Start label from #rb-player rides along. No table (or a broken one) is
+   * no copy at all: the player then draws the figure and the library's own
+   * text, and says nothing of its own. */
+  var copyPromise = null;
+  function playerCopyTable() {
+    if (copyPromise) return copyPromise;
+    copyPromise = jsonFetch("/api/ramble/moves/copy").then(function (out) {
+      var table = out && out.copy ? out.copy : {};
+      return table && typeof table === "object" && !Array.isArray(table) ? table : {};
+    }).catch(function () {
       return {};
-    }
+    });
+    return copyPromise;
+  }
+
+  function playerStartLabel() {
+    var host = $("rb-player");
+    var raw = host && typeof host.getAttribute === "function" ? host.getAttribute("data-start") : null;
+    return typeof raw === "string" ? raw : "";
+  }
+
+  function loadPlayerCopy() {
+    return playerCopyTable().then(function (table) {
+      return Object.assign({}, table, { start: playerStartLabel() });
+    });
   }
 
   /* The guidance a chunk is mounted with. The server's level is used as it
@@ -1001,13 +1015,13 @@
   /* Mount over the static page. Anything the player refuses (a chain the
    * compiler will not take, a host that cannot hold it) leaves the page the
    * reader already has exactly as it was. */
-  function mountPlayer(host, entries, chain, entry, level, ctx) {
+  function mountPlayer(host, entries, chain, entry, level, ctx, copy) {
     var Player = window.RamblePlayer;
     if (!Player || typeof Player.mount !== "function") return;
     var options = {
       chain: chain,
       library: entries,
-      copy: playerCopy(),
+      copy: copy || {},
       guidance: guidanceFor(entry.kind, level),
       post: function (payload) {
         return jsonFetch("/api/ramble/moves/progress", { method: "POST", body: payload });
@@ -1049,7 +1063,10 @@
     loadLibraryFor([entry.id].concat(referencedIds(entry))).then(function (entries) {
       if (token !== playerToken) return;
       if (!Array.isArray(entries) || entries.length === 0) return;
-      mountPlayer(host, entries, chain, entry, level, ctx);
+      return loadPlayerCopy().then(function (copy) {
+        if (token !== playerToken) return;
+        mountPlayer(host, entries, chain, entry, level, ctx, copy);
+      });
     }).catch(function () { /* the static page stays */ });
   }
 
