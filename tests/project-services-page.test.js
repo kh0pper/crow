@@ -129,7 +129,7 @@ test("a GitHub connection shows its service, account name, On and when it was te
     assert.match(row, /<span class="svc-sub">work · Tested today<\/span>/);
     assert.match(row, /<span class="svc-pill svc-pill--active">On<\/span>/);
     assert.match(row, /data-svc-retest>Test again</);
-    assert.match(row, /data-svc-disconnect data-confirm="Disconnect GitHub \(work\) from Spring\? This project's bots stop using it\. Other projects keep theirs\.">Disconnect</);
+    assert.match(row, /data-svc-disconnect data-confirm="Disconnect GitHub \(work\) from Spring\? This project's bots stop using it\. Other projects keep theirs\. The saved key stays in Crow's keychain; remove it in Settings → Saved passwords &amp; keys\.">Disconnect</);
     assert.match(row, /<summary aria-label="GitHub \(work\)">/);
     // The drawer marks Spring as the scope, not as this page (that is the project home's link).
     assert.match(r.body, /<a href="\/dashboard\/project\/spring" class="shell-project is-current" aria-current="true">/);
@@ -231,6 +231,7 @@ test("Spanish: the page's copy follows the language", async () => {
       const s = await get("/dashboard/project/spring/services");
       assert.match(s.body, /<span class="svc-sub">work · Probado hoy<\/span>/);
       assert.match(s.body, /svc-pill--active">Activo</);
+      assert.match(s.body, /data-confirm="¿Desconectar GitHub \(work\) de Spring\? Los bots de este proyecto dejan de usarlo\. Los demás proyectos conservan el suyo\. La clave guardada sigue en el llavero de Crow; bórrala en Ajustes → Contraseñas y claves guardadas\."/);
     } finally {
       await writeSetting(db, "language", "en");
       db.close();
@@ -275,4 +276,7 @@ test("the confirm text fills its placeholders in one pass: a label holding {proj
     hasMembers: false, alsoOnCrow: [],
   }, "en");
   assert.match(html, /data-confirm="Disconnect GitHub \(\{project\}\) from Spring\?/);
+  // The full sentence, including where the key that stays saved can be removed (the Settings
+  // section is "Saved passwords & keys", settings.section.passwords).
+  assert.match(html, /\. The saved key stays in Crow's keychain; remove it in Settings → Saved passwords &amp; keys\."/);
 });

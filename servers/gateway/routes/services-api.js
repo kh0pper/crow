@@ -267,7 +267,8 @@ function langOf(req) {
  * @param {() => Set<string>|string[]} [o.reservedNames] block names a label may not take (tests inject them)
  * @param {(values: string[]) => void} [o.recordSecrets] masking record (default recordServiceSecretValues)
  * @param {() => void} [o.refreshMasking] re-collect this gateway's in-memory masking sets (default refreshGatewaySecretValues)
- * @param {Function} [o.audit] / [o.notify] the keychain's new-key audit and notice (keyCreatedHook)
+ * @param {Function} [o.audit] / [o.notify] the keychain's new-key audit and notice (keyCreatedHook);
+ *   `audit` also takes the remembered typed key's keychain_save row (default auditLog)
  * @param {(conn: object, opts: object) => void} [o.recordBinding] the binding writer (default
  *   recordConnectionBinding; tests make it throw)
  * @param {(db: object, req: object) => Promise<boolean>} [o.ownerCheck] the owner rule for the
@@ -467,8 +468,9 @@ export function servicesApiRouter({
     }
     // A typed key is remembered for the whole Crow (first typed key wins), so another project can
     // connect this service with one click. Never fatal: a keychain fault here leaves the connect
-    // as it is, and nothing about it is written to mcp-addons.json or an .env.
-    if (!useSavedKey) await rememberTypedKeys(db, key, service, values.secrets);
+    // as it is, and nothing about it is written to mcp-addons.json or an .env. Each row actually
+    // written is audited (keychain_save, no value) through this router's own audit dependency.
+    if (!useSavedKey) await rememberTypedKeys(db, key, service, values.secrets, audit ? { audit } : {});
     refresh();
     res.status(201).json({ ok: true, connection: await connectionView(db, conn, service, { installed: true, crowHome: home() }) });
   }));

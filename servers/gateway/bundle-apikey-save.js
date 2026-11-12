@@ -91,6 +91,7 @@ export function isDeniedApiKeyEnvName(name) {
 export const API_KEY_SAVE_REFUSALS = Object.freeze({
   no_manifest: "Crow has no reviewed manifest for this extension, so it cannot save a key for it.",
   undeclared: "This extension does not declare that setting.",
+  rotating: "This key is rotated from the extension's Configure page, so it cannot be saved from this card. Open Configure for this extension to change it.",
   generated: "Crow generates that value itself, so it cannot be set here.",
   not_secret: "That setting is not a secret, so it is not saved here.",
   denied: "That setting controls how programs run, so Crow will not set it.",
@@ -165,7 +166,7 @@ export async function saveApiKey({ bundleId, manifest, envKey, value, crowHome =
   if (spec.secret !== true) return refuse("not_secret");
   if (isDeniedApiKeyEnvName(key)) return refuse("denied");
   // A key with a previous-key slot has its own rotation rule in Configure's save: not here.
-  if (typeof spec.previous_key === "string" && spec.previous_key) return refuse("undeclared");
+  if (typeof spec.previous_key === "string" && spec.previous_key) return refuse("rotating");
 
   if (typeof value !== "string" || value.trim() === "") return refuse("empty");
   if (value.length > API_KEY_MAX_LENGTH) return refuse("too_long");

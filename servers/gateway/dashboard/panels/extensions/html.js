@@ -166,7 +166,9 @@ export function renderIcon(addon, size) {
  * @param {Array<object>} [apiKeyCards] pendingApiKeyCards() output: an installed add-on
  *   whose required, typed secret env var is still empty and whose manifest has an
  *   `explain`. The explanation is the manifest's own text, so it is escaped here, and
- *   `signup_url` is re-checked here too (a manifest is third-party input).
+ *   `signup_url` is re-checked here too (a manifest is third-party input). When the
+ *   add-on is not Crow-maintained (`available` entry `_community`, i.e. registry
+ *   `official: false`) the text is introduced with bundles.apiKey.fromAddon.
  * @returns {{viewsHtml:string, addonRegistryScript:string, collectionsScript:string}}
  */
 
@@ -403,6 +405,12 @@ export function buildExtensionsHTML({
   const apiKeyCardsHtml = (apiKeyCards || []).map((e) => {
     const explain = localizedText(e.explain, lang);
     if (!explain) return "";
+    // Whose words the explanation is: a COMMUNITY add-on (registry `official: false`) is
+    // not maintained by Crow, so its text is introduced as its own. The flag is the same
+    // `_community` the Community badge reads; an add-on the registry does not list keeps
+    // Crow's unattributed voice, matching withProvenance()'s absent-field default.
+    const community = !!(available.find((a) => a.id === e.id) || {})._community;
+    const explainText = community ? `${t("bundles.apiKey.fromAddon", lang)} ${explain}` : explain;
     const link = safeSignupUrl(e.signup_url);
     const label = localizedText(e.signup_label, lang) || t("bundles.apiKey.getKey", lang);
     const signup = link
@@ -414,7 +422,7 @@ export function buildExtensionsHTML({
     const fieldLabel = escapeHtml(t("bundles.apiKey.fieldLabel", lang));
     return `<div class="callout callout-warning ext-apikey" data-addon-id="${escapeHtml(e.id)}" data-env-key="${escapeHtml(e.envKey)}" role="status">
         <strong>${escapeHtml(fill(t("bundles.apiKey.title", lang), { name: e.name }))}</strong>
-        <p style="margin:0.25rem 0 0.5rem">${escapeHtml(explain)}</p>
+        <p style="margin:0.25rem 0 0.5rem">${escapeHtml(explainText)}</p>
         ${signup}
         <form class="ext-apikey-save" data-id="${escapeHtml(e.id)}" data-env-key="${escapeHtml(e.envKey)}" style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
           <input class="ext-apikey-save-input" type="password" autocomplete="off" maxlength="1024" required aria-label="${fieldLabel}" placeholder="${escapeHtml(e.envKey)}" style="font-size:0.85rem;padding:0.25rem 0.4rem;max-width:16rem;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control)">

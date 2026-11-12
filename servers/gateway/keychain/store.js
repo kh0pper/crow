@@ -100,28 +100,74 @@ export async function ensureWriteKey(db, { crowHome, onNewKey } = {}) {
 export const SYSTEM_BUNDLE_IDS = Object.freeze(new Set(["offsite-backup"]));
 export const isSystemBundleId = (id) => SYSTEM_BUNDLE_IDS.has(String(id));
 
-export async function saveExtensionSecret(db, key, { bundleId, envKey, label, username = null, url = null, secret, origin, firstView = false, now, systemOwner = false }) {
+/** The reserved-id refusal, kept ahead of any DB work, exactly as saveExtensionSecret had it. */
+function assertExtensionOwner(bundleId, systemOwner) {
   if (isSystemBundleId(bundleId) && systemOwner !== true) throw new Error("keychain: that id is reserved for Crow itself");
-  await ensureKeychainTable(db);
+}
+
+/** The validation + sealing both extension writers do, so neither can drift from the other. */
+function extensionValues(key, { bundleId, envKey, label, username = null, url = null, secret, origin, firstView = false, now }) {
   requireKey(key);
   if (!bundleId || !envKey || typeof secret !== "string" || secret === "") throw new Error("keychain: bundleId, envKey and a secret are required");
   if (!ORIGINS.has(origin) || origin === "manual") throw new Error("keychain: origin must be typed or generated");
-  const sealed = sealSecret(secret, box(key));
-  const ts = iso(now);
-  const fvu = firstView ? new Date((now || new Date()).getTime() + FIRST_VIEW_MS).toISOString() : null;
+  return {
+    label: cleanText(label) || envKey,
+    username: cleanText(username),
+    url: cleanText(url, 2048),
+    sealed: sealSecret(secret, box(key)),
+    ts: iso(now),
+    fvu: firstView ? new Date((now || new Date()).getTime() + FIRST_VIEW_MS).toISOString() : null,
+  };
+}
+
+export async function saveExtensionSecret(db, key, opts = {}) {
+  const { bundleId, envKey } = opts;
+  assertExtensionOwner(bundleId, opts.systemOwner);
+  await ensureKeychainTable(db);
+  const v = extensionValues(key, opts);
+  const { label, username, url, sealed, ts, fvu } = v;
   const existing = (await db.execute({ sql: "SELECT id FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ?", args: [bundleId, envKey] })).rows[0];
   if (existing) {
     await db.execute({
       sql: "UPDATE crow_keychain SET label = ?, username = ?, url = ?, secret_sealed = ?, key_id = ?, origin = ?, status = 'active', first_view_until = ?, updated_at = ? WHERE id = ?",
-      args: [cleanText(label) || envKey, cleanText(username), cleanText(url, 2048), sealed, key.id, origin, fvu, ts, existing.id],
+      args: [label, username, url, sealed, key.id, opts.origin, fvu, ts, existing.id],
     });
     return { id: Number(existing.id), created: false };
   }
   const r = await db.execute({
     sql: "INSERT INTO crow_keychain (kind, label, bundle_id, env_key, username, url, secret_sealed, key_id, origin, first_view_until, created_at, updated_at) VALUES ('extension', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    args: [cleanText(label) || envKey, bundleId, envKey, cleanText(username), cleanText(url, 2048), sealed, key.id, origin, fvu, ts, ts],
+    args: [label, bundleId, envKey, username, url, sealed, key.id, opts.origin, fvu, ts, ts],
   });
   return { id: Number(r.lastInsertRowid), created: true };
+}
+
+/**
+ * The atomic "first typed key wins" write of one extension row (kind 'extension', bundle id +
+ * env key): ONE INSERT … ON CONFLICT on the partial unique index idx_crow_keychain_ext, so two
+ * concurrent saves of the same pair can neither both insert (one unique-constraint throw) nor
+ * overwrite each other's first value. The DO UPDATE's WHERE leaves an ACTIVE row sealed under the
+ * SAME key id untouched; a missing row is inserted; a row that is not active (extension_removed)
+ * or sealed under a different key id is overwritten and becomes active. Validation and sealing
+ * are saveExtensionSecret's own (reserved id, key required, origin, seal).
+ * @returns {Promise<boolean>} whether a row was written — never the value
+ */
+export async function rememberExtensionSecret(db, key, opts = {}) {
+  const { bundleId, envKey } = opts;
+  assertExtensionOwner(bundleId, opts.systemOwner);
+  await ensureKeychainTable(db);
+  const v = extensionValues(key, opts);
+  const r = await db.execute({
+    sql: `INSERT INTO crow_keychain (kind, label, bundle_id, env_key, username, url, secret_sealed, key_id, origin, status, first_view_until, created_at, updated_at)
+          VALUES ('extension', ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+          ON CONFLICT (bundle_id, env_key) WHERE kind = 'extension' DO UPDATE SET
+            label = excluded.label, username = excluded.username, url = excluded.url, secret_sealed = excluded.secret_sealed,
+            key_id = excluded.key_id, origin = excluded.origin, status = 'active',
+            first_view_until = excluded.first_view_until, updated_at = excluded.updated_at
+          WHERE crow_keychain.status != 'active' OR crow_keychain.key_id != excluded.key_id
+          RETURNING id`,
+    args: [v.label, bundleId, envKey, v.username, v.url, v.sealed, key.id, opts.origin, v.fvu, v.ts, v.ts],
+  });
+  return r.rows.length > 0;
 }
 
 /**

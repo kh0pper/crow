@@ -15,8 +15,10 @@
  *
  * What changes a saved key and what it reaches:
  *  - Saving a key again (a later connect that types a different one, or the keychain page) never
- *    replaces the saved row while it is active: the first typed key wins, so a per-project
- *    override stays a project-level thing.
+ *    replaces an active row that holds a key this machine can read: the first typed key wins, so a
+ *    per-project override stays a project-level thing. A row that is not active (an uninstall's
+ *    extension_removed) is replaced, and so is one sealed under a key this machine lacks (a
+ *    crow.db restored without its key file).
  *  - A changed key in Settings > Passwords never touches an existing project's connection: each
  *    connection holds its own sealed copy. A rotated key reaches a project only by disconnecting
  *    and connecting it again (or by typing the new key in that project's sheet).
@@ -24,10 +26,20 @@
  *    answers no_saved_key; the connection that was made from it keeps working.
  */
 
-import { ensureKeychainTable, isSystemBundleId, saveExtensionSecret } from "../keychain/store.js";
+import { auditLog } from "../../db.js";
+import { ensureKeychainTable, isSystemBundleId, rememberExtensionSecret } from "../keychain/store.js";
 
 /** The label shape of a remembered key: the service, then the field it fills. */
 const labelFor = (service, envKey) => `${service.name} - ${envKey}`;
+
+/** The id of the row just written for this pair: an audit detail only, never the value. */
+async function entryIdFor(db, bundleId, envKey) {
+  const { rows } = await db.execute({
+    sql: "SELECT id FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ?",
+    args: [bundleId, envKey],
+  });
+  return rows[0] ? Number(rows[0].id) : null;
+}
 
 /**
  * Whether a service can even offer the one-click connect: a real connection service (not a
@@ -77,21 +89,30 @@ export async function savedKeyServiceIds(db, catalog, installedIds) {
 
 /**
  * Remembers the secrets the owner just typed for a service, so another project can connect it
- * with one click. One keychain extension row per declared secret field, origin 'typed', only
- * while no ACTIVE row exists for that bundle + env key ("first typed key wins"): a later connect
- * that types a different key — another account of the same service, a rotated token — leaves the
- * remembered value alone. A row an uninstall left as extension_removed is not active, so the next
- * typed connect after a reinstall saves over it and it becomes active again.
+ * with one click. One keychain extension row per declared secret field, origin 'typed', first
+ * typed key wins: the write is one atomic INSERT … ON CONFLICT (rememberExtensionSecret), so a
+ * concurrent typed connect can neither duplicate the row nor overwrite the remembered value while
+ * that row is active under this machine's key — unless it was sealed under a key this machine
+ * lacks. Two kinds of row are saved over instead: one an uninstall left as extension_removed (not
+ * active), so the next typed connect after a reinstall writes it and it becomes active again, and
+ * one sealed under another key id (a crow.db restored without its key file), which is replaced the
+ * same way.
+ *
+ * Every row a call actually writes is audited as `keychain_save` (entry id, bundle id, env key,
+ * origin 'typed'), the same event the keychain install path writes; a row the atomic write skipped
+ * (an active row already holds that key) is not audited. The details never carry a value.
  *
  * Never fatal: a keychain fault here must not fail a connect that already succeeded, so failures
- * are swallowed after one fixed log line (never a value, never an error message).
+ * are swallowed after one fixed log line (never a value, never an error message). An audit fault
+ * is swallowed on its own, after the row is written: it can neither undo nor hide a saved key.
  * @param {object} db
  * @param {{id:string, seed:Buffer}|null} key the keychain write key (an existing key is fine)
  * @param {object} service a service-catalog entry
  * @param {Record<string,string>} secrets the typed secret values, by field name
- * @param {{now?: Date, save?: Function}} [opts] `save` is a test seam (default saveExtensionSecret)
+ * @param {{now?: Date, save?: Function, audit?: Function}} [opts] `save` is a test seam (default
+ *   rememberExtensionSecret); `audit` is the caller's audit dependency (default auditLog)
  */
-export async function rememberTypedKeys(db, key, service, secrets, { now, save = saveExtensionSecret } = {}) {
+export async function rememberTypedKeys(db, key, service, secrets, { now, save = rememberExtensionSecret, audit = auditLog } = {}) {
   try {
     if (!service || !key || typeof key.id !== "string" || !Buffer.isBuffer(key.seed)) return;
     const fields = Array.isArray(service.fields) ? service.fields : [];
@@ -101,12 +122,7 @@ export async function rememberTypedKeys(db, key, service, secrets, { now, save =
       if (!f || f.kind !== "secret") continue;
       const secret = secrets && Object.hasOwn(secrets, f.name) ? secrets[f.name] : null;
       if (typeof secret !== "string" || secret === "") continue;
-      const active = (await db.execute({
-        sql: "SELECT 1 FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ? AND status = 'active' AND key_id = ? LIMIT 1",
-        args: [service.bundleId, f.name, key.id],
-      })).rows.length > 0;
-      if (active) continue;
-      await save(db, key, {
+      const wrote = await save(db, key, {
         bundleId: service.bundleId,
         envKey: f.name,
         label: labelFor(service, f.name),
@@ -114,6 +130,13 @@ export async function rememberTypedKeys(db, key, service, secrets, { now, save =
         origin: "typed",
         ...(now ? { now } : {}),
       });
+      // `false` from the atomic write: an active row already holds this key, nothing was written.
+      if (wrote === false) continue;
+      try {
+        await audit(db, "keychain_save", {
+          details: { entry_id: await entryIdFor(db, service.bundleId, f.name), bundle_id: service.bundleId, env_key: f.name, origin: "typed" },
+        });
+      } catch { /* the key is saved: an audit fault must not undo or hide it */ }
     }
   } catch {
     console.warn("[services] saved key not remembered");

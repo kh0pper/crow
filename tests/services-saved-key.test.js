@@ -127,6 +127,7 @@ const connectPath = (slug) => `/dashboard/services/api/project/${slug}/connect`;
 const typedGh = (s, slug, label, token, headers = OWNER) => call(s, "POST", connectPath(slug), { body: { serviceId: "github", accountLabel: label, values: { [GH]: token } }, headers });
 const savedGh = (s, slug, headers = OWNER, extra = {}) => call(s, "POST", connectPath(slug), { body: { serviceId: "github", useSavedKey: true, ...extra }, headers });
 const extensionRows = async (db) => (await db.execute("SELECT * FROM crow_keychain WHERE kind = 'extension' ORDER BY id")).rows;
+const saveAudits = async (db) => (await db.execute("SELECT event_type, details FROM audit_log WHERE event_type = 'keychain_save' ORDER BY id")).rows;
 const connCount = async (db) => Number((await db.execute("SELECT COUNT(*) AS n FROM service_connections")).rows[0].n);
 const savedSecret = (db, bundle = "github") => K.extensionSecretsFor(db, KEY(), bundle, [GH, HA_TOKEN]);
 
@@ -161,6 +162,44 @@ test("a typed connect remembers the key for the whole Crow: one active sealed ex
   }
 });
 
+// ---- 1b. the audit row ----------------------------------------------------------------------
+
+test("remembering a typed key writes one keychain_save audit row naming the row, never the value", async () => {
+  const ctx = { ...(await freshDb()), test: fakeTest() };
+  const SECOND = "second-canary-audit-2";
+  await withApp(ctx, async (s) => {
+    assert.equal((await typedGh(s, "spring", "Main", CANARY)).status, 201);
+    // The second connect's key is skipped (first typed key wins): no write, so no second audit row.
+    assert.equal((await typedGh(s, "home", "Main", SECOND)).status, 201);
+  });
+  const rows = await saveAudits(ctx.db);
+  assert.equal(rows.length, 1, "one audit row per key actually written");
+  const [row] = await extensionRows(ctx.db);
+  assert.deepEqual(JSON.parse(rows[0].details), { entry_id: Number(row.id), bundle_id: "github", env_key: GH, origin: "typed" });
+  const blob = JSON.stringify(rows);
+  assert.ok(!blob.includes(CANARY) && !blob.includes(SECOND), "the audit carries metadata only: " + blob);
+  ctx.db.close();
+});
+
+test("a skipped remembered key is not audited; a row that is not active is written and audited again", async () => {
+  const ctx = await freshDb();
+  const svc = serviceById("github");
+  const key = await K.ensureWriteKey(ctx.db, { crowHome: HOME });
+  await rememberTypedKeys(ctx.db, key, svc, { [GH]: CANARY });
+  assert.equal((await saveAudits(ctx.db)).length, 1);
+  await rememberTypedKeys(ctx.db, key, svc, { [GH]: "skipped-canary-2" });
+  assert.equal((await saveAudits(ctx.db)).length, 1, "nothing was written, so nothing was audited");
+  assert.deepEqual(await savedSecret(ctx.db), { [GH]: CANARY });
+  // An uninstall marks the row extension_removed: the next typed connect writes (and audits) it.
+  await K.markBundleRemoved(ctx.db, "github");
+  await rememberTypedKeys(ctx.db, key, svc, { [GH]: "reactivated-canary-3" });
+  const rows = await saveAudits(ctx.db);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => JSON.parse(r.details).env_key), [GH, GH]);
+  assert.ok(!JSON.stringify(rows).includes("reactivated-canary-3"));
+  ctx.db.close();
+});
+
 // ---- 2. first typed key wins ---------------------------------------------------------------
 
 test("a later connect that types a different key never replaces the remembered one; a failed connect remembers nothing", async () => {
@@ -184,6 +223,29 @@ test("a later connect that types a different key never replaces the remembered o
   assert.deepEqual(await savedSecret(ctx.db), { [GH]: CANARY });
   assert.equal((await extensionRows(ctx.db)).length, 1, "still one remembered row");
   assert.equal(await connCount(ctx.db), 2, "the failed connect created no connection");
+});
+
+// ---- 2b. two saves at once ------------------------------------------------------------------
+
+test("two interleaved typed saves of one key: neither throws, one row, and the first value is the one kept", async () => {
+  const ctx = await freshDb();
+  const svc = serviceById("github");
+  const key = await K.ensureWriteKey(ctx.db, { crowHome: HOME });
+  const FIRST = "interleaved-first-1";
+  const SECOND = "interleaved-second-2";
+  // Both calls are in flight at once (Promise.all): the remember write is ONE statement, so the
+  // second one finds the first one's row instead of raising the unique index or overwriting it.
+  const { result, out } = await capture(() => Promise.all([
+    rememberTypedKeys(ctx.db, key, svc, { [GH]: FIRST }),
+    rememberTypedKeys(ctx.db, key, svc, { [GH]: SECOND }),
+  ]));
+  assert.deepEqual(out, [], "neither save failed: no swallowed-failure line, and no log carries a value");
+  assert.deepEqual(result, [undefined, undefined]);
+  const rows = await extensionRows(ctx.db);
+  assert.equal(rows.length, 1, "one remembered row: no unique-index throw and no duplicate");
+  assert.equal(rows[0].status, "active");
+  assert.deepEqual(await savedSecret(ctx.db), { [GH]: FIRST }, "the first typed key won");
+  ctx.db.close();
 });
 
 // ---- 3. the page data ----------------------------------------------------------------------
@@ -405,6 +467,22 @@ test("a keychain failure while remembering the typed key does not fail the conne
   const quiet = await capture(() => rememberTypedKeys(ctx.db, null, svc, { [GH]: CANARY }));
   assert.deepEqual(quiet.out, []);
   assert.equal((await extensionRows(ctx.db)).length, 0);
+});
+
+test("an audit failure never undoes or hides a remembered key: it is swallowed on its own", async () => {
+  const ctx = await freshDb();
+  const svc = serviceById("github");
+  const key = await K.ensureWriteKey(ctx.db, { crowHome: HOME });
+  const { result, out } = await capture(async () => {
+    await rememberTypedKeys(ctx.db, key, svc, { [GH]: CANARY }, { audit: async () => { throw new Error("audit unavailable"); } });
+    return "done";
+  });
+  assert.equal(result, "done", "never throws");
+  assert.deepEqual(out, [], "not reported as a keychain failure: the key was saved");
+  assert.equal((await extensionRows(ctx.db)).length, 1, "the row stays");
+  assert.deepEqual(await savedSecret(ctx.db), { [GH]: CANARY }, "and still opens to the typed key");
+  assert.equal((await saveAudits(ctx.db)).length, 0);
+  ctx.db.close();
 });
 
 // ---- 10. nothing is synced ------------------------------------------------------------------

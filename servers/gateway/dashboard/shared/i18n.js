@@ -220,6 +220,9 @@ export const translations = {
   "bundles.apiKey.saved": { en: "Key saved.", es: "Clave guardada." },
   "bundles.apiKey.required": { en: "Enter the key first.", es: "Escribe primero la clave." },
   "bundles.apiKey.getKey": { en: "Get a key", es: "Obtén una clave" },
+  // A COMMUNITY add-on's `explain` is its own words, not Crow's: this lead-in says so.
+  // Official (Crow-authored) manifest text stays unattributed.
+  "bundles.apiKey.fromAddon": { en: "From the add-on:", es: "Del complemento:" },
   // N3-4 phase 2e: an INVITE-ONLY app (firstAdmin.invite). Crow invites the
   // operator's own email through the app's admin API and closes sign-ups; these
   // are the card's sentences, decided by what that admin API reported.
@@ -5022,7 +5025,7 @@ export const translations = {
   "services.tested": { en: "Tested {when}", es: "Probado {when}" },
   "services.retest": { en: "Test again", es: "Probar de nuevo" },
   "services.disconnect": { en: "Disconnect", es: "Desconectar" },
-  "services.disconnect.confirm": { en: "Disconnect {service} ({label}) from {project}? This project's bots stop using it. Other projects keep theirs.", es: "¿Desconectar {service} ({label}) de {project}? Los bots de este proyecto dejan de usarlo. Los demás proyectos conservan el suyo." },
+  "services.disconnect.confirm": { en: "Disconnect {service} ({label}) from {project}? This project's bots stop using it. Other projects keep theirs. The saved key stays in Crow's keychain; remove it in Settings → Saved passwords & keys.", es: "¿Desconectar {service} ({label}) de {project}? Los bots de este proyecto dejan de usarlo. Los demás proyectos conservan el suyo. La clave guardada sigue en el llavero de Crow; bórrala en Ajustes → Contraseñas y claves guardadas." },
   "services.field.HA_URL": { en: "Address", es: "Dirección" },
   "services.field.HA_TOKEN": { en: "Token", es: "Token" },
   "services.field.GITHUB_PERSONAL_ACCESS_TOKEN": { en: "Token", es: "Token" },

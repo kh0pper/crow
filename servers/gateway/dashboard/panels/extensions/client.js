@@ -506,6 +506,9 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
                 // cannot hide). Text via textContent; the URL is re-checked by apiKeyUrl. Optional
                 // keys get this help too — they just never get a card of their own.
                 var helpText = ev.secret ? apiKeyText(ev.explain, LANG) : null;
+                // A COMMUNITY add-on's help is its own words, not Crow's: isCommunity
+                // is the same registry official:false flag the Community badge uses.
+                if (helpText && isCommunity) helpText = '${tJs("bundles.apiKey.fromAddon", lang)}' + " " + helpText;
                 if (helpText) {
                   var help = document.createElement("div");
                   help.className = "ext-env-help";
@@ -958,7 +961,11 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
 
             showInstallModal(
               id, addon.name || id, scopedEnvVars,
-              0, 0, false,
+              // Configure keeps the add-on's provenance too: a community add-on's field help
+              // is introduced as its own words. official:false is the registry's flag;
+              // an unregistered bundle stays unattributed. (The community warning above is
+              // gated on !configureOnly, so nothing else changes here.)
+              0, 0, addon.official === false,
               true, // configureOnly → writes through /bundles/api/env, never /install
               function onSaved(resp) {
                 applyNeedsConfig(id, resp && resp.needs_config);
@@ -2004,7 +2011,9 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
                 entry.id,
                 addon.name || entry.id,
                 scopedEnvVars,
-                0, 0, false,
+                // Same provenance rule as the Installed view's Configure (a community
+                // add-on's help is its own words); unregistered → unattributed.
+                0, 0, addon.official === false,
                 true, // configureOnly
                 function onSaved(resp) {
                   // The card behind this modal shows the same state — repaint it from
