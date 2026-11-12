@@ -157,6 +157,7 @@ test("REVIEW 2 — first view is single-use and expires", async () => {
 });
 
 const fvuOf = async (db, id) => (await db.execute({ sql: "SELECT first_view_until FROM crow_keychain WHERE id = ?", args: [id] })).rows[0].first_view_until;
+const sealedOf = async (db, id) => (await db.execute({ sql: "SELECT secret_sealed FROM crow_keychain WHERE id = ?", args: [id] })).rows[0].secret_sealed;
 const fvuAt = (t) => new Date(t.getTime() + K.FIRST_VIEW_MS).toISOString();
 const T0 = new Date("2026-10-03T12:00:00Z");
 const T1 = new Date(T0.getTime() + 10 * 60_000);
@@ -208,12 +209,33 @@ test("REVIEW 2 — keepFirstView still keeps a LIVE window, and a spent one stay
   const { id } = await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: true, now: T0 });
   const fvu = await fvuOf(db, id);
 
-  await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: false, keepFirstView: true, now: T1 });
+  await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: false, keepFirstView: true, keepFirstViewPinnedTo: await sealedOf(db, id), now: T1 });
   assert.equal(await fvuOf(db, id), fvu, "the live window survives a re-save of the same value");
 
   assert.equal(await K.consumeFirstView(db, key, id, { now: T1 }), "one");
-  await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: false, keepFirstView: true, now: T1 });
+  await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: false, keepFirstView: true, keepFirstViewPinnedTo: await sealedOf(db, id), now: T1 });
   assert.equal(await fvuOf(db, id), null, "the keep copies the CURRENT value: a spent window is not re-granted");
+});
+
+test("REVIEW 2 — keepFirstView without keepFirstViewPinnedTo is REFUSED before any write, and the row is unchanged", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  const { id } = await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: true, now: T0 });
+  const sealed = await sealedOf(db, id);
+  const fvu = await fvuOf(db, id);
+
+  for (const pinned of [undefined, null, ""]) {
+    await assert.rejects(
+      K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "changed", secret: "two", origin: "generated", firstView: false, keepFirstView: true, keepFirstViewPinnedTo: pinned, now: T1 }),
+      /keepFirstView needs keepFirstViewPinnedTo/,
+      `a keep pinned to ${JSON.stringify(pinned)} would only ever match this call's own read`,
+    );
+  }
+  assert.equal(await sealedOf(db, id), sealed, "nothing was written");
+  assert.equal(await fvuOf(db, id), fvu, "the window was not touched");
+  assert.equal(await K.openEntrySecret(db, key, id), "one", "the stored value is still the old one");
+  const rows = (await db.execute({ sql: "SELECT id FROM crow_keychain WHERE bundle_id = 'frigate' AND env_key = 'FRIGATE_PASSWORD'", args: [] })).rows;
+  assert.equal(rows.length, 1, "no row was inserted either");
 });
 
 test("REVIEW 2 — the keep is PINNED to the row it was decided on: a value replaced between the read and the UPDATE is not kept", async () => {
@@ -239,7 +261,7 @@ test("REVIEW 2 — the keep is PINNED to the row it was decided on: a value repl
     async executeMultiple(sql) { return db.executeMultiple(sql); },
   };
 
-  await K.saveExtensionSecret(racing, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: false, keepFirstView: true });
+  await K.saveExtensionSecret(racing, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: false, keepFirstView: true, keepFirstViewPinnedTo: await sealedOf(db, id) });
   assert.equal(replaced, 1, "positive control: the value was replaced between the read and the UPDATE");
   assert.equal(await fvuOf(db, id), null, "the blob changed, so the window is fvu (null), never a window for a value the keeper never looked at");
 });
