@@ -184,7 +184,7 @@ For secure remote access, install Tailscale on the host machine (not inside Dock
 The first time you visit the Crow's Nest (`/dashboard`), you'll be prompted to set a password. You can also set it from the `/setup` page or by asking your AI: "Set my Crow's Nest password."
 
 ::: tip First-run setup link
-Until a password exists, the first-run pages ask for a one-time setup token, so someone else on your network cannot set the password first. The installer prints the setup URL with `?token=…` already in it; the same token is saved in `~/.crow/setup-token` (readable only by your account) if you need it again. Opening the page on the machine itself — `http://localhost:3001/setup`, or through an SSH tunnel — needs no token. The token stops working once the password is set.
+Until a password exists, the first-run pages ask for a one-time setup token, so someone else on your network cannot set the password first. The installer prints the setup URL with `?token=…` already in it; the same token is saved in `~/.crow/setup-token` (readable only by your account) if you need it again. Opening the page on the machine itself — `http://localhost:3001/setup`, or through an SSH tunnel — needs no token, but only when that machine has a single login account; with more than one, the token is needed there too. The token stops working once the password is set.
 :::
 
 ### Two-Factor Authentication (Optional)
