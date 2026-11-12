@@ -30,7 +30,9 @@ import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createRambleServer } from "../bundles/ramble/server/server.js";
 import { localDay } from "../bundles/ramble/server/eggs.js";
-import { chunkPoints } from "../bundles/ramble/server/moves/ledger.js";
+import { chunkPoints, MOVE_OUTDOOR_KIND } from "../bundles/ramble/server/moves/ledger.js";
+import { rowDelta } from "../bundles/ramble/server/steps.js";
+import { OUTDOOR_SESSION_KEY, outdoorPoints } from "../bundles/ramble/server/moves/day.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dir, "..");
@@ -146,6 +148,7 @@ test("auth: the moves API sits behind dashboardAuth", async () => {
   for (const p of [
     "/api/ramble/moves/today", "/api/ramble/moves/prefs", "/api/ramble/moves/library",
     "/api/ramble/moves/copy", "/api/ramble/moves/voice",
+    "/api/ramble/moves/day", "/api/ramble/moves/outdoor/start", "/api/ramble/moves/outdoor/done",
   ]) {
     assert.equal((await fetch(base + p)).status, 401, p);
   }
@@ -1055,6 +1058,98 @@ test("GET /moves/day: every slot finished by the player completes the day, once"
       assert.equal(again.complete, true);
       assert.equal((await walletKeys(db, "moveall", day.day)).length, 1,
         "a second read settles nothing new");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+/* ----------------------------------------------- outdoor sessions (5.x) */
+
+/** Age the open outdoor session: the routes have no clock seam of their own. */
+async function ageOutdoorSession(db, ms) {
+  const { rows } = await db.execute({
+    sql: "SELECT value FROM ramble_settings WHERE key = ?", args: [OUTDOOR_SESSION_KEY],
+  });
+  assert.ok(rows[0], "the outdoor start wrote a session row");
+  const row = JSON.parse(String(rows[0].value));
+  await db.execute({
+    sql: "UPDATE ramble_settings SET value = ? WHERE key = ?",
+    args: [JSON.stringify({ ...row, startedAt: Date.now() - ms }), OUTDOOR_SESSION_KEY],
+  });
+}
+
+test("POST /moves/outdoor/start: a walk opens one session, and a retried start keeps its anchor", async () => {
+  const mount = await freshMount();
+  try {
+    const first = await dayPost(mount.url, "/api/ramble/moves/outdoor/start", { entryId: "walk-10" });
+    assert.equal(first.status, 200);
+    const body = await first.json();
+    assert.ok(Number.isFinite(body.startedAt));
+    assert.equal(body.entryId, "walk-10");
+    assert.match(body.sessionKey, /^\d{4}-\d{2}-\d{2}:o:\d+$/);
+    assert.ok(body.sessionKey.startsWith(localDay(body.startedAt) + ":o:"));
+
+    const again = await (await dayPost(mount.url, "/api/ramble/moves/outdoor/start", { entryId: "walk-10" })).json();
+    assert.equal(again.startedAt, body.startedAt, "a retried or reloaded start keeps the original anchor");
+    assert.equal(again.sessionKey, body.sessionKey, "and the same session key");
+
+    const pose = await dayPost(mount.url, "/api/ramble/moves/outdoor/start", { entryId: "pose-test" });
+    assert.equal(pose.status, 400, "only a walk opens a session");
+    assert.match((await pose.json()).error, /walk/);
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/outdoor/start", { entryId: "no-such-entry" })).status, 404,
+      "an entry the served library does not have is a 404");
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/outdoor/start", {})).status, 400,
+      "an entry is required");
+  } finally { await mount.close(); }
+});
+
+test("GET /moves/day carries the open outdoor session so a reload can resume it", async () => {
+  const mount = await freshMount();
+  try {
+    const before = await (await dayGet(mount.url)).json();
+    assert.equal(before.outdoor, null, "no session before one is started");
+
+    const start = await (await dayPost(mount.url, "/api/ramble/moves/outdoor/start", { entryId: "walk-10" })).json();
+    const body = await (await dayGet(mount.url)).json();
+    assert.ok(body.outdoor, "the day carries the session");
+    assert.equal(body.outdoor.startedAt, start.startedAt);
+    assert.equal(body.outdoor.sessionKey, start.sessionKey);
+    assert.equal(body.outdoor.entryId, "walk-10");
+    assert.equal(body.outdoor.finished, false);
+  } finally { await mount.close(); }
+});
+
+test("POST /moves/outdoor/done: pays by the minutes, fills cards, and answers the fresh day", async () => {
+  const mount = await freshMount();
+  try {
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/outdoor/done", {})).status, 400,
+      "there is no session to finish");
+
+    const db = await mountDb(mount.dir);
+    try {
+      await dayPost(mount.url, "/api/ramble/moves/outdoor/start", { entryId: "walk-10" });
+      await ageOutdoorSession(db, 20 * 60000);
+
+      const r = await dayPost(mount.url, "/api/ramble/moves/outdoor/done", {});
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.equal(body.minutes, 20);
+      assert.equal(body.paid, outdoorPoints(20), "the session pays its minutes through the outdoor budget");
+      assert.equal(body.walkedNew, true, "twenty minutes badges the walk");
+      assert.equal(body.filled.length, 2, "a twenty minute walk stands in for two of the day's three cards");
+      assert.equal(body.needsBalance, true, "one card is always left for a balancing chunk");
+      assert.ok(body.day, "the answer carries the fresh day payload");
+      assert.equal(body.day.day, localDay(Date.now()));
+      assert.equal(body.day.slots.filter((s) => s.done).length, body.filled.length,
+        "the day shows the cards the walk filled");
+      assert.equal(body.day.outdoor.finished, true, "and the session reads as finished");
+      assert.equal(await rowDelta(db, MOVE_OUTDOOR_KIND, body.day.day), outdoorPoints(20));
+
+      const paid = await rowDelta(db, MOVE_OUTDOOR_KIND, body.day.day);
+      const again = await (await dayPost(mount.url, "/api/ramble/moves/outdoor/done", {})).json();
+      assert.equal(again.minutes, 20);
+      assert.equal(again.paid, 0, "a second finish of the same session pays nothing more");
+      assert.equal(again.filled.length, body.filled.length, "and fills nothing more");
+      assert.equal(await rowDelta(db, MOVE_OUTDOOR_KIND, body.day.day), paid, "and moves no row");
     } finally { db.close?.(); }
   } finally { await mount.close(); }
 });

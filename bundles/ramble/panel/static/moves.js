@@ -448,12 +448,154 @@
       swap.disabled = off || usedUp;
       swap.textContent = usedUp ? t("noSwaps") : t("swap");
     }
+
+    /* A walk's own Done label outlives a repaint of the card. The timer line
+     * itself is left alone here: a status the player just read stays put. */
+    if (outdoor && done) {
+      var walkDone = copyText("outdoor.done");
+      if (walkDone !== "") done.textContent = walkDone;
+    }
   }
 
   function refreshToday() {
     return jsonFetch("/api/ramble/moves/today")
       .then(paintToday)
       .catch(function () { setText($("rb-today-status"), t("offline")); });
+  }
+
+  /* ---------------------------------------------------- outdoor sessions */
+
+  /* A walk is a Start/Done session of its own, not a chunk. Its minutes are
+   * measured from the SERVER's startedAt, so a reload resumes the same timer and
+   * a client clock can neither shorten nor stretch it. Every line comes from the
+   * approved copy table; a key the table does not carry says nothing at all. */
+
+  var copyReady = null;
+  var copyTable = {};
+
+  function whenCopy() {
+    if (!copyReady) {
+      copyReady = playerCopyTable().then(function (table) {
+        copyTable = table && typeof table === "object" ? table : {};
+        return copyTable;
+      });
+    }
+    return copyReady;
+  }
+
+  function copyText(key) {
+    return typeof copyTable[key] === "string" ? copyTable[key] : "";
+  }
+
+  /** One table line with its {name} placeholders filled from the values given. */
+  function copyFill(key, values) {
+    var line = copyText(key);
+    if (line === "") return "";
+    return line.replace(/\{([a-z]+)\}/g, function (whole, name) {
+      return Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : whole;
+    });
+  }
+
+  /* The running session, or null. Only the server's answer ever sets it. */
+  var outdoor = null;
+  var outdoorTick = null;
+
+  function outdoorMinutes() {
+    if (!outdoor) return 0;
+    var started = Number(outdoor.startedAt);
+    if (!isFinite(started)) return 0;
+    return Math.max(0, Math.floor((Date.now() - started) / 60000));
+  }
+
+  function stopOutdoorTick() {
+    if (outdoorTick !== null && typeof clearInterval === "function") {
+      try { clearInterval(outdoorTick); } catch (e) { /* nothing to clear */ }
+    }
+    outdoorTick = null;
+  }
+
+  function paintOutdoor() {
+    if (!outdoor) return;
+    var minutes = outdoorMinutes();
+    var doneBtn = $("rb-challenge-done");
+    var doneLabel = copyText("outdoor.done");
+    if (doneBtn && doneLabel !== "") doneBtn.textContent = doneLabel;
+    var lines = [];
+    var running = copyFill("outdoor.running", { minutes: minutes });
+    if (running !== "") lines.push(running);
+    var counts = copyText("outdoor.counts");
+    if (counts !== "") lines.push(counts);
+    if (minutes >= 60) {
+      var cap = copyText("outdoor.cap");
+      if (cap !== "") lines.push(cap);
+    }
+    setText($("rb-today-status"), lines.join(" "));
+  }
+
+  function clearOutdoor() {
+    stopOutdoorTick();
+    outdoor = null;
+  }
+
+  function beginOutdoor(state) {
+    var started = Number(state && state.startedAt);
+    if (!isFinite(started)) return;
+    outdoor = { startedAt: started, entryId: state.entryId || null };
+    stopOutdoorTick();
+    if (typeof setInterval === "function") outdoorTick = setInterval(paintOutdoor, 20000);
+    paintOutdoor();
+  }
+
+  function startOutdoorSession(id) {
+    var btn = $("rb-challenge-start");
+    if (btn) btn.disabled = true;
+    jsonFetch("/api/ramble/moves/outdoor/start", { method: "POST", body: { entryId: id } })
+      .then(function (out) {
+        if (btn) btn.disabled = false;
+        if (!out) return null;
+        return whenCopy().then(function () {
+          beginOutdoor({ startedAt: out.startedAt, entryId: out.entryId || id });
+        });
+      })
+      .catch(function (err) {
+        if (btn) btn.disabled = false;
+        setText($("rb-today-status"), err.message);
+      });
+  }
+
+  function postOutdoorDone() {
+    var btn = $("rb-challenge-done");
+    if (btn) btn.disabled = true;
+    setText($("rb-today-status"), t("saving"));
+    jsonFetch("/api/ramble/moves/outdoor/done", { method: "POST", body: {} })
+      .then(function (out) {
+        clearOutdoor();
+        var filled = out && Array.isArray(out.filled) ? out.filled : [];
+        var minutes = out && Number.isFinite(Number(out.minutes)) ? Number(out.minutes) : 0;
+        var lines = [];
+        var result = copyFill("outdoor.result", { minutes: minutes, done: filled.length });
+        if (result !== "") lines.push(result);
+        if (out && out.needsBalance === true) {
+          var balancing = copyText("today.balancing");
+          if (balancing !== "") lines.push(balancing);
+        }
+        setText($("rb-today-status"), lines.join(" "));
+        refreshToday();
+      })
+      .catch(function (err) {
+        setText($("rb-today-status"), err.message);
+        if (btn) btn.disabled = false;
+      });
+  }
+
+  /* The day's own read, so a reload picks a running session back up. A finished
+   * session (or none at all) leaves no timer behind. */
+  function loadOutdoor() {
+    return jsonFetch("/api/ramble/moves/day").then(function (dayOut) {
+      var state = dayOut && dayOut.outdoor ? dayOut.outdoor : null;
+      if (!state || state.finished === true) { clearOutdoor(); return null; }
+      return whenCopy().then(function () { beginOutdoor(state); });
+    }).catch(function () { /* no day read: no timer to resume */ });
   }
 
   /* --------------------------------------------------------------- safety */
@@ -487,6 +629,13 @@
     var c = today && today.challenge;
     if (!c || c.off || !c.entry) return;
     var id = c.entry.id;
+    /* A walk is a session of its own: Start opens the clock instead of the
+     * player, and the server decides whether this start resumes one already
+     * running. Every other kind opens the player, exactly as before. */
+    if (c.entry.kind === "walk") {
+      startOutdoorSession(id);
+      return;
+    }
     /* The card the session starts under: the challenge's own slot when it
      * carries one, Today's otherwise. */
     var slot = typeof c.slot === "string" && c.slot !== "" ? c.slot : "day";
@@ -537,7 +686,11 @@
   var startBtn = $("rb-challenge-start");
   if (startBtn) startBtn.addEventListener("click", startChallenge);
   var doneBtn = $("rb-challenge-done");
-  if (doneBtn) doneBtn.addEventListener("click", postDone);
+  if (doneBtn) doneBtn.addEventListener("click", function () {
+    /* A walk with a clock running finishes through its own route. */
+    if (outdoor) { postOutdoorDone(); return; }
+    postDone();
+  });
   var swapBtn = $("rb-challenge-swap");
   if (swapBtn) swapBtn.addEventListener("click", postSwap);
 
@@ -1189,6 +1342,7 @@
   /* --------------------------------------------------------------- startup */
 
   refreshToday();
+  loadOutdoor();
   loadPrefs();
   refreshLibrary();
 

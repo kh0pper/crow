@@ -477,6 +477,9 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         : await movesMods.dayCompleteMod.isDayComplete(db, out.day, { need: out.need }),
     };
     if (refused !== undefined) payload.refused = !!refused;
+    // The open (or last finished) outdoor session, so a reload resumes a walk's
+    // timer from the SERVER's start rather than a client clock.
+    payload.outdoor = await movesMods.dayMod.outdoorState(db);
     return payload;
   }
 
@@ -1699,6 +1702,58 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     }
     await settleRecent(now, dayOut);
     res.json({ ...(await movesSnapshot(now)), progress, dayDone });
+  }));
+
+  /*
+   * An outdoor session: a walk measured by its own Start/Done rather than a
+   * chunk. The client names only the entry; the day and the session key are the
+   * SERVER's (moves/day.js startOutdoor), so a retried or reloaded start keeps
+   * its original anchor and a walk cannot be restarted to shorten itself.
+   */
+  router.post("/api/ramble/moves/outdoor/start", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const entryId = requireText((req.body || {}).entryId, 80, "entryId");
+    const entry = movesMods.libraryMod.entryById(servedMoves(), entryId);
+    if (!entry) return res.status(404).json({ error: "not found" });
+    if (entry.kind !== "walk") bad("entryId must be a walk");
+    let started;
+    try {
+      started = await movesMods.dayMod.startOutdoor(db, {
+        day: mods.eggsMod.localDay(now), entryId, now,
+      });
+    } catch (err) { movesInput(err); }
+    res.json({ startedAt: started.startedAt, sessionKey: started.sessionKey, entryId });
+  }));
+
+  /**
+   * Finish the open outdoor session. The day's cards are handed in as the
+   * caller's own read (moves/day.js never imports slots.js), so a session of ten
+   * minutes or more stands in for the cards still open — never for the one a
+   * balancing chunk is kept for — and a paused day has none to fill.
+   */
+  router.post("/api/ramble/moves/outdoor/done", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    // The day's own cards, read once before the finish: a session of ten
+    // minutes or more stands in for the cards still open, and a paused day has
+    // none to fill. `day` travels with them because moves/day.js refuses a set
+    // drawn for another day.
+    const dayOut = await daySlots(now);
+    let finished;
+    try {
+      finished = await movesMods.dayMod.finishOutdoor(db, {
+        day: dayOut.day,
+        now,
+        emit,
+        cards: dayOut.off ? undefined : { day: dayOut.day, need: dayOut.need, slots: dayOut.slots },
+      });
+    } catch (err) { movesInput(err); }
+    // Core repaints the profile picture, coalesced (profile-avatar.js).
+    if (finished.walkedNew) poke("ramble:walked-changed", { day: dayOut.day });
+    await settleRecent(now, await daySlots(now));
+    await movesMods.streakMod.awardStreakHeart(db, { now, emit });
+    res.json({ ...finished, day: await dayPayload(now) });
   }));
 
   // The one-card Swap the old strip and the MCP tool still call: it re-rolls the

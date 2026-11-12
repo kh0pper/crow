@@ -290,6 +290,17 @@ const TODAY = {
   streak: { days: 3, nextHeartAt: 7, todayGood: false },
 };
 
+/* Today's card as a chunk rather than a walk: the same entry id the detail
+ * route serves, so a Start mounts the player. The entry's kind is what decides
+ * the path — only a card whose entry kind is walk opens an outdoor session. */
+const CHUNK_TODAY = {
+  ...TODAY,
+  challenge: {
+    ...TODAY.challenge,
+    entry: { id: "walk-10", kind: "landmark", title: "A ten minute walk", minutes: 10, level: 1, activity: "walk" },
+  },
+};
+
 const PREFS = { prefs: { on: true, kinds: [], equipment: ["none"], limits: [], level: 2, weather: true } };
 
 /* The one entry the detail route answers with: today's challenge, a walk of ten
@@ -314,8 +325,9 @@ const CORE_ENTRY = {
   skipIf: ["lowerback", "hip"],
 };
 
-function bootMoves(beforeRun, search, detail) {
+function bootMoves(beforeRun, search, detail, extra) {
   const answered = detail || WALK_ENTRY;
+  const todayFixture = (extra && extra.today) || TODAY;
   const els = new Map();
   const el = (id) => {
     if (!els.has(id)) els.set(id, new FakeEl(id));
@@ -323,6 +335,11 @@ function bootMoves(beforeRun, search, detail) {
   };
   const calls = [];
   const docListeners = Object.create(null);
+  /* Timers are recorded, never run: a test advances the clock and calls the
+   * refresh itself, so nothing outlives the test. */
+  const intervals = [];
+  const clearedIntervals = [];
+  const clock = { now: Date.now() };
 
   function json(body, status = 200) {
     return Promise.resolve({ status, ok: status < 400, json: () => Promise.resolve(body) });
@@ -334,11 +351,15 @@ function bootMoves(beforeRun, search, detail) {
     const body = typeof opts.body === "string" ? JSON.parse(opts.body) : opts.body;
     calls.push({ url: String(url), method, body });
     const u = String(url);
-    if (u === "/api/ramble/moves/today") return json(TODAY);
-    if (u === "/api/ramble/moves/done") return json({ ...TODAY, challenge: { ...TODAY.challenge, done: true }, done: { already: false, paid: 8, points: 8, day: "2026-10-30" } });
-    if (u === "/api/ramble/moves/swap") return json({ ...TODAY, challenge: { ...TODAY.challenge, swap: 1 } });
+    if (extra && extra.routes && Object.prototype.hasOwnProperty.call(extra.routes, u)) {
+      const hit = extra.routes[u];
+      return json(typeof hit === "function" ? hit(body, method) : hit);
+    }
+    if (u === "/api/ramble/moves/today") return json(todayFixture);
+    if (u === "/api/ramble/moves/done") return json({ ...todayFixture, challenge: { ...todayFixture.challenge, done: true }, done: { already: false, paid: 8, points: 8, day: "2026-10-30" } });
+    if (u === "/api/ramble/moves/swap") return json({ ...todayFixture, challenge: { ...todayFixture.challenge, swap: 1 } });
     if (u === "/api/ramble/moves/parse") return json({ ok: false, reason: "no_model" });
-    if (u === "/api/ramble/moves/log") return json({ ...TODAY, log: { paid: 5, points: 5, already: false } });
+    if (u === "/api/ramble/moves/log") return json({ ...todayFixture, log: { paid: 5, points: 5, already: false } });
     if (u === "/api/ramble/moves/prefs") return json(PREFS);
     if (u === "/api/ramble/moves/copy") return json({ copy: { "player.pause": "Pause", "player.next": "Next: {name}" } });
     if (u === "/api/ramble/moves/voice") return json({ lines: { paused: "Paused.", resume: "Carrying on." } });
@@ -362,6 +383,8 @@ function bootMoves(beforeRun, search, detail) {
     fetch: fetchStub,
     setTimeout,
     clearTimeout,
+    setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
+    clearInterval: (id) => { clearedIntervals.push(id); },
     Promise,
     Date,
     JSON,
@@ -384,6 +407,14 @@ function bootMoves(beforeRun, search, detail) {
   sandbox.location = { pathname: "/dashboard/ramble", search: search || "", hash: "" };
   sandbox.history = { state: null, replaced: [], replaceState(st, t, url) { this.replaced.push(url); } };
   sandbox.URLSearchParams = URLSearchParams;
+  if (extra && Number.isFinite(extra.now)) {
+    clock.now = extra.now;
+    class FixedDate extends Date {
+      constructor(...args) { if (args.length === 0) super(clock.now); else super(...args); }
+      static now() { return clock.now; }
+    }
+    sandbox.Date = FixedDate;
+  }
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   if (typeof beforeRun === "function") beforeRun(sandbox);
@@ -392,7 +423,7 @@ function bootMoves(beforeRun, search, detail) {
   root.setAttribute("data-lang", "en");
   const script = new vm.Script(CLIENT_SRC(), { filename: "moves.js" });
   script.runInContext(sandbox);
-  return { el, calls, sandbox, root, docListeners };
+  return { el, calls, sandbox, root, docListeners, clock, intervals, clearedIntervals };
 }
 
 async function flush() {
@@ -475,7 +506,7 @@ test("guidance 'first' plays one pose and asks the memory question", () => {
 // must work straight from the moves client, from any view.
 
 test("?moves=start opens the day's challenge in the Learn view, with no bird needed, and cleans the URL", async () => {
-  const { el, calls, sandbox, root } = bootMoves((sb) => sb.localStorage.setItem("ramble.moves.safetySeen", "1"), "?moves=start");
+  const { el, calls, sandbox, root } = bootMoves((sb) => sb.localStorage.setItem("ramble.moves.safetySeen", "1"), "?moves=start", undefined, { today: CHUNK_TODAY });
   await flush();
   assert.equal(root.getAttribute("data-view"), "learn", "it left the map for the Learn view");
   assert.ok(calls.some((c) => c.url === "/api/ramble/moves/library/walk-10"), "it opened today's entry");
@@ -483,7 +514,7 @@ test("?moves=start opens the day's challenge in the Learn view, with no bird nee
 });
 
 test("?moves=start shows the safety note first when it has not been seen", async () => {
-  const { el, calls, root } = bootMoves(null, "?moves=start");
+  const { el, calls, root } = bootMoves(null, "?moves=start", undefined, { today: CHUNK_TODAY });
   await flush();
   assert.equal(el("rb-safety-sheet").hasAttribute("hidden"), false, "the safety note opens first");
   assert.equal(calls.some((c) => c.url.startsWith("/api/ramble/moves/library/")), false, "the entry waits for Got it");
@@ -529,7 +560,7 @@ test("a chunk opened from Today mounts the player on the day's card", async () =
         return { destroy() { mounted.destroyed = true; }, state() { return {}; } };
       },
     };
-  }, "?moves=start");
+  }, "?moves=start", undefined, { today: CHUNK_TODAY });
   booted.el("rb-player").setAttribute("data-start", "Start");
   await flush();
 
@@ -609,7 +640,7 @@ test("the mounted player is given the voice, fed by the lines route, and every s
         };
       },
     };
-  }, "?moves=start");
+  }, "?moves=start", undefined, { today: CHUNK_TODAY });
   booted.el("rb-player").setAttribute("data-start", "Start");
   await flush();
 
@@ -649,7 +680,7 @@ test("leaving the player takes the voice down with it", async () => {
         return { onEvent() {}, destroy() { voice.destroyed += 1; } };
       },
     };
-  }, "?moves=start");
+  }, "?moves=start", undefined, { today: CHUNK_TODAY });
   await flush();
   assert.equal(voice.attaches, 1);
 
@@ -675,7 +706,7 @@ test("a voice script that throws on attach leaves the player mounted and the pag
         return { destroy() {}, state() { return {}; } };
       },
     };
-  }, "?moves=start");
+  }, "?moves=start", undefined, { today: CHUNK_TODAY });
   booted.el("rb-player").setAttribute("data-start", "Start");
   await flush();
 
@@ -702,7 +733,7 @@ test("a voice that throws on a step does not take the session with it", async ()
         return { destroy() {}, state() { return {}; } };
       },
     };
-  }, "?moves=start");
+  }, "?moves=start", undefined, { today: CHUNK_TODAY });
   await flush();
   assert.equal(mounted.count, 1);
   assert.doesNotThrow(() => mounted.opts.onEvent({ type: "segment", index: 0 }));
@@ -790,4 +821,153 @@ test("a step object and every list item read as their own line on the entry page
 test("each entry-page list item is styled onto a line of its own", () => {
   assert.match(CSS_SRC(), /#ramble \.rb-step-txt > \.rb-fine\s*\{[^}]*display:\s*block/,
     "the list items are block elements, so they never run together");
+});
+
+/* ------------------------------------------- the walk card's own timer (5.x) */
+
+/** The approved words a walk card draws, key for key. */
+const OUTDOOR_COPY = {
+  "outdoor.start": "Start",
+  "outdoor.done": "Done",
+  "outdoor.running": "{minutes} min so far",
+  "outdoor.counts": "Each full 10 minutes counts toward a card.",
+  "outdoor.result": "{minutes} minutes. That covers {done} of today's cards.",
+  "outdoor.cap": "Up to 60 minutes count in a day.",
+  "today.balancing": "A walk covers part of today. One card is for stretching or strength.",
+};
+
+const DAY_PAYLOAD = {
+  day: "2026-10-30", need: 3, nowSlot: "morning", off: false, slots: [], complete: false, outdoor: null,
+};
+
+/** The outdoor routes, with a startedAt `startedAgoMs` before `now`. */
+function outdoorRoutes(now, startedAgoMs, day) {
+  return {
+    "/api/ramble/moves/copy": { copy: OUTDOOR_COPY },
+    "/api/ramble/moves/day": { ...DAY_PAYLOAD, ...(day || {}) },
+    "/api/ramble/moves/outdoor/start": {
+      startedAt: now - startedAgoMs, sessionKey: "2026-10-30:o:1", entryId: "walk-10",
+    },
+    "/api/ramble/moves/outdoor/done": {
+      minutes: 20, filled: ["morning", "midday"], paid: 24, needsBalance: true, walkedNew: true,
+      day: DAY_PAYLOAD,
+    },
+  };
+}
+
+function timerLine(...lines) {
+  return lines.join(" ");
+}
+
+test("a walk card's Start opens an outdoor session instead of the player", async () => {
+  const now = Date.parse("2026-10-30T10:00:00");
+  const booted = bootMoves((sb) => { sb.localStorage.setItem("ramble.moves.safetySeen", "1"); },
+    "", undefined, { now, routes: outdoorRoutes(now, 5 * 60000) });
+  await flush();
+
+  booted.el("rb-challenge-start").click();
+  await flush();
+
+  const start = booted.calls.find((c) => c.url === "/api/ramble/moves/outdoor/start");
+  assert.ok(start, "a walk's Start opens a session");
+  assert.equal(start.method, "POST");
+  assert.deepEqual(start.body, { entryId: "walk-10" });
+  assert.equal(booted.calls.some((c) => c.url.startsWith("/api/ramble/moves/library/")), false,
+    "a walk never opens the player");
+
+  assert.equal(booted.el("rb-today-status").textContent,
+    timerLine(OUTDOOR_COPY["outdoor.running"].replace("{minutes}", "5"), OUTDOOR_COPY["outdoor.counts"]),
+    "the timer reads the copy table, with the minutes the server's startedAt gives");
+  assert.equal(booted.el("rb-challenge-done").textContent, OUTDOOR_COPY["outdoor.done"],
+    "the walk card's Done is the table's word");
+  assert.ok(booted.intervals.some((i) => i.ms === 20000), "the timer refreshes every 20 seconds");
+
+  booted.clock.now = now + 20 * 60000;
+  booted.intervals[0].fn();
+  assert.match(booted.el("rb-today-status").textContent, /^25 min so far/,
+    "the minutes keep coming from the server's start, not from a client clock");
+
+  booted.clock.now = now + 65 * 60000;
+  booted.intervals[0].fn();
+  const late = booted.el("rb-today-status").textContent;
+  assert.match(late, /^70 min so far/);
+  assert.ok(late.includes(OUTDOOR_COPY["outdoor.cap"]), "the cap line shows once the hour is up");
+  assert.equal(late.includes("\n"), false, "the lines sit on one line");
+});
+
+test("a reload resumes the walk timer from the server's startedAt", async () => {
+  const now = Date.parse("2026-10-30T10:00:00");
+  const startedAt = now - 8 * 60000;
+  const booted = bootMoves(null, "", undefined, {
+    now,
+    routes: outdoorRoutes(now, 0, {
+      outdoor: { day: "2026-10-30", startedAt, entryId: "walk-10", sessionKey: "2026-10-30:o:1", finished: false },
+    }),
+  });
+  await flush();
+
+  assert.ok(booted.calls.some((c) => c.url === "/api/ramble/moves/day"),
+    "the page reads the day so a running session can be picked back up");
+  assert.equal(booted.el("rb-today-status").textContent,
+    timerLine(OUTDOOR_COPY["outdoor.running"].replace("{minutes}", "8"), OUTDOOR_COPY["outdoor.counts"]),
+    "the timer survives the reload, anchored on the server's start");
+  assert.equal(booted.calls.some((c) => c.url === "/api/ramble/moves/outdoor/start"), false,
+    "a reload does not start a second session");
+
+  booted.clock.now = now + 60000;
+  booted.intervals[0].fn();
+  assert.match(booted.el("rb-today-status").textContent, /^9 min so far/);
+});
+
+test("a finished session leaves no timer behind", async () => {
+  const now = Date.parse("2026-10-30T10:00:00");
+  const booted = bootMoves(null, "", undefined, {
+    now,
+    routes: outdoorRoutes(now, 0, {
+      outdoor: { day: "2026-10-30", startedAt: now - 60000, entryId: "walk-10", sessionKey: "k", finished: true },
+    }),
+  });
+  await flush();
+  assert.equal(booted.el("rb-today-status").textContent, "", "a finished session leaves no timer behind");
+  assert.equal(booted.intervals.length, 0);
+});
+
+test("the walk card's Done posts the outdoor route and shows the result line", async () => {
+  const now = Date.parse("2026-10-30T10:00:00");
+  const booted = bootMoves((sb) => { sb.localStorage.setItem("ramble.moves.safetySeen", "1"); },
+    "", undefined, {
+      now,
+      routes: outdoorRoutes(now, 0, {
+        outdoor: { day: "2026-10-30", startedAt: now - 9 * 60000, entryId: "walk-10", sessionKey: "k", finished: false },
+      }),
+    });
+  await flush();
+  assert.match(booted.el("rb-today-status").textContent, /^9 min so far/);
+
+  booted.el("rb-challenge-done").click();
+  await flush();
+
+  const done = booted.calls.find((c) => c.url === "/api/ramble/moves/outdoor/done");
+  assert.ok(done, "a running walk finishes through its own route");
+  assert.equal(done.method, "POST");
+  assert.equal(booted.calls.some((c) => c.url === "/api/ramble/moves/done"), false,
+    "the walk does not post the indoor Done");
+
+  assert.equal(booted.el("rb-today-status").textContent,
+    timerLine(OUTDOOR_COPY["outdoor.result"].replace("{minutes}", "20").replace("{done}", "2"),
+      OUTDOOR_COPY["today.balancing"]),
+    "the result and the balancing line come from the copy table");
+  assert.ok(booted.clearedIntervals.length >= 1, "the timer is cleared once the session is finished");
+});
+
+test("a walk card's Done with no session running is the plain Done", async () => {
+  const booted = bootMoves((sb) => { sb.localStorage.setItem("ramble.moves.safetySeen", "1"); });
+  await flush();
+
+  booted.el("rb-challenge-done").click();
+  await flush();
+
+  assert.ok(booted.calls.some((c) => c.url === "/api/ramble/moves/done"),
+    "with no clock running the card keeps the Done it always had");
+  assert.equal(booted.calls.some((c) => c.url === "/api/ramble/moves/outdoor/done"), false);
 });
