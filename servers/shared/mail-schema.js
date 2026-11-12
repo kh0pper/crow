@@ -13,12 +13,19 @@
  * mail_messages_fts follows the memories_fts pattern: an external-content index over the four
  * searchable columns, kept in step by its own triggers. The update trigger is `AFTER UPDATE OF` those
  * four columns only, so flag and read-state writes never touch the index.
+ *
+ * Writes to mail_messages must be `INSERT ... ON CONFLICT(folder_id, uid) DO UPDATE`, never
+ * `INSERT OR REPLACE` / `REPLACE` (and never a bare DELETE + INSERT for a row that keeps its uid):
+ * crow does not turn on SQLite's recursive_triggers, so the implicit DELETE that REPLACE performs to
+ * clear the conflicting row does NOT fire mail_messages_ad. The old row's terms stay in
+ * mail_messages_fts, pointing at a rowid the content table no longer has. The upsert is a real
+ * UPDATE, so mail_messages_au re-indexes the row.
  */
 
 export const MAIL_DDL = `
   CREATE TABLE IF NOT EXISTS mail_accounts (
     id TEXT PRIMARY KEY,
-    address TEXT NOT NULL UNIQUE,
+    address TEXT NOT NULL UNIQUE COLLATE NOCASE,
     label TEXT NOT NULL,
     provider TEXT,
     imap_host TEXT NOT NULL,
@@ -65,6 +72,8 @@ export const MAIL_DDL = `
     UNIQUE (account_id, thread_key)
   );
 
+  CREATE INDEX IF NOT EXISTS idx_mail_threads_account_last ON mail_threads(account_id, last_date DESC);
+
   CREATE TABLE IF NOT EXISTS mail_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT NOT NULL,
@@ -99,6 +108,7 @@ export const MAIL_DDL = `
   CREATE INDEX IF NOT EXISTS idx_mail_messages_account_date ON mail_messages(account_id, date DESC, id DESC);
   CREATE INDEX IF NOT EXISTS idx_mail_messages_thread ON mail_messages(thread_id);
   CREATE INDEX IF NOT EXISTS idx_mail_messages_message_id ON mail_messages(account_id, message_id);
+  CREATE INDEX IF NOT EXISTS idx_mail_messages_in_reply_to ON mail_messages(account_id, in_reply_to);
 
   CREATE VIRTUAL TABLE IF NOT EXISTS mail_messages_fts USING fts5(
     subject, from_text, to_text, body_text,
@@ -136,8 +146,8 @@ export const MAIL_DDL = `
 
   CREATE TABLE IF NOT EXISTS mail_image_allow (
     account_id TEXT NOT NULL,
-    sender TEXT NOT NULL,
-    created_at INTEGER,
+    sender TEXT NOT NULL COLLATE NOCASE,
+    created_at INTEGER NOT NULL,
     PRIMARY KEY (account_id, sender)
   );
 `;

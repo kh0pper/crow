@@ -43,7 +43,7 @@ function initDbDir() {
 }
 
 /** Every sqlite_master object that belongs to the mail tables: the tables themselves, the unique
- *  autoindexes, the four declared indexes, the fts5 virtual table and its shadow tables/triggers. */
+ *  autoindexes, the declared indexes, the fts5 virtual table and its shadow tables/triggers. */
 function mailObjects(dbPath) {
   const d = new Database(dbPath, { readonly: true });
   try {
@@ -94,6 +94,22 @@ function find(db, term) {
     .map((r) => r.rowid);
 }
 
+/** The fts5 full check for an external-content index: it re-reads mail_messages and throws when the
+ *  index disagrees with it (a stale entry, a missing row, a wrong column value). */
+function assertFtsIntegrity(db) {
+  assert.doesNotThrow(
+    () => db.prepare("INSERT INTO mail_messages_fts(mail_messages_fts, rank) VALUES('integrity-check', 1)").run(),
+    "the index agrees with the content table",
+  );
+}
+
+function ftsIntegrityThrows(db) {
+  assert.throws(
+    () => db.prepare("INSERT INTO mail_messages_fts(mail_messages_fts, rank) VALUES('integrity-check', 1)").run(),
+    "the index disagrees with the content table",
+  );
+}
+
 test("the module id matches its filename", () => {
   assert.equal(id, "0027-mail-store");
   assert.ok(discoverMigrations(join(REPO, "scripts", "migrations")).some((p) => p.endsWith("/0027-mail-store.mjs")));
@@ -109,7 +125,8 @@ test("the shape matches what init-db produces", () => {
   const names = want.map((o) => o.name);
   for (const t of MAIL_TABLES) assert.ok(names.includes(t), `init-db created ${t}`);
   for (const i of ["idx_mail_messages_folder_date", "idx_mail_messages_account_date",
-    "idx_mail_messages_thread", "idx_mail_messages_message_id"]) {
+    "idx_mail_messages_thread", "idx_mail_messages_message_id", "idx_mail_messages_in_reply_to",
+    "idx_mail_threads_account_last"]) {
     assert.ok(names.includes(i), `init-db created index ${i}`);
   }
   for (const t of ["mail_messages_ai", "mail_messages_ad", "mail_messages_au"]) {
@@ -198,6 +215,7 @@ test("FTS finds a message by subject, sender, recipient and body, and forgets it
     for (const term of ["subjecttoken", "alex", "sam", "bodytoken"]) {
       assert.deepEqual(find(db, term), [], `${term} is gone from the index`);
     }
+    assertFtsIntegrity(db);
   } finally { db.close(); }
 });
 
@@ -219,6 +237,7 @@ test("an update of body_text or from_text re-indexes the row", () => {
     assert.deepEqual(find(db, "kim"), [rowid], "the new sender term is indexed");
 
     assert.deepEqual(find(db, "subjecttoken"), [rowid], "the untouched columns stay indexed");
+    assertFtsIntegrity(db);
   } finally { db.close(); }
 });
 
@@ -252,5 +271,77 @@ test("an is_read update does not touch the FTS index", () => {
     db.prepare("UPDATE mail_messages SET body_text = ? WHERE id = ?").run("readdedterm", rowid);
     assert.deepEqual(find(db, "sentinelterm"), [], "the old body term is gone");
     assert.deepEqual(find(db, "readdedterm"), [rowid], "the new body term is indexed");
+    assertFtsIntegrity(db);
+  } finally { db.close(); }
+});
+
+test("ON CONFLICT upsert keeps the index consistent", () => {
+  const dbPath = freshDb("mail-upsert-");
+  run({ dbPath, log: () => {} });
+  const db = new Database(dbPath);
+  try {
+    const rowid = db.prepare(INSERT).run(
+      ROW.account_id, ROW.folder_id, ROW.uid, ROW.subject, ROW.from_text, ROW.to_text, ROW.body_text, ROW.date,
+    ).lastInsertRowid;
+    assert.deepEqual(find(db, "bodytoken"), [rowid], "the first write is indexed");
+
+    db.prepare(`INSERT INTO mail_messages
+        (account_id, folder_id, uid, subject, from_text, to_text, body_text, date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(folder_id, uid) DO UPDATE
+          SET subject = excluded.subject, body_text = excluded.body_text`)
+      .run(ROW.account_id, ROW.folder_id, ROW.uid, "upsertsubject", ROW.from_text, ROW.to_text,
+        "upsertbody", ROW.date);
+
+    assert.deepEqual(find(db, "bodytoken"), [], "the old body term is gone");
+    assert.deepEqual(find(db, "subjecttoken"), [], "the old subject term is gone");
+    assert.deepEqual(find(db, "upsertbody"), [rowid], "the new body term is indexed");
+    assert.deepEqual(find(db, "upsertsubject"), [rowid], "the new subject term is indexed");
+    assert.deepEqual(find(db, "alex"), [rowid], "an untouched column stays indexed");
+    assert.equal(db.prepare("SELECT count(*) AS n FROM mail_messages").get().n, 1, "the upsert updated the row");
+    assertFtsIntegrity(db);
+  } finally { db.close(); }
+});
+
+// Why the store never writes mail_messages with INSERT OR REPLACE / REPLACE: with recursive_triggers
+// off, REPLACE's implicit DELETE does not fire mail_messages_ad, so the old row's index entries
+// survive while the content table has only the new rowid. The index is then corrupt.
+test("INSERT OR REPLACE of the same (folder_id, uid) breaks the index", () => {
+  const dbPath = freshDb("mail-replace-");
+  run({ dbPath, log: () => {} });
+  const db = new Database(dbPath);
+  try {
+    const oldRowid = db.prepare(INSERT).run(
+      ROW.account_id, ROW.folder_id, ROW.uid, ROW.subject, ROW.from_text, ROW.to_text, ROW.body_text, ROW.date,
+    ).lastInsertRowid;
+    assertFtsIntegrity(db);
+
+    db.prepare(INSERT.replace("INSERT INTO", "INSERT OR REPLACE INTO")).run(
+      ROW.account_id, ROW.folder_id, ROW.uid, "replacesubject", ROW.from_text, ROW.to_text, "replacebody", ROW.date,
+    );
+    assert.deepEqual(find(db, "replacebody").length, 1, "the replacement row is indexed");
+    assert.equal(db.prepare("SELECT count(*) AS n FROM mail_messages").get().n, 1, "the row was replaced");
+    assert.deepEqual(find(db, "bodytoken"), [oldRowid],
+      "the replaced row's terms survive: REPLACE's implicit DELETE never fired the delete trigger");
+    ftsIntegrityThrows(db);
+  } finally { db.close(); }
+});
+
+test("mail_accounts and mail_image_allow treat addresses case-insensitively", () => {
+  const dbPath = freshDb("mail-nocase-");
+  run({ dbPath, log: () => {} });
+  const db = new Database(dbPath);
+  try {
+    const account = db.prepare(`INSERT INTO mail_accounts
+      (id, address, label, imap_host, imap_port, smtp_host, smtp_port, created_at, updated_at)
+      VALUES (?, ?, 'Alex', 'mail.example.test', 993, 'mail.example.test', 465, 1, 1)`);
+    account.run("ma-0123456789abcdef", "alex@example.com");
+    assert.throws(() => account.run("ma-fedcba9876543210", "Alex@Example.com"), /UNIQUE/,
+      "a second account with the same address in another case is refused");
+
+    const allow = db.prepare("INSERT INTO mail_image_allow (account_id, sender, created_at) VALUES (?, ?, 1)");
+    allow.run("ma-0123456789abcdef", "alex@example.com");
+    assert.throws(() => allow.run("ma-0123456789abcdef", "Alex@Example.com"), /UNIQUE/,
+      "the allow entry is keyed case-insensitively too");
   } finally { db.close(); }
 });
