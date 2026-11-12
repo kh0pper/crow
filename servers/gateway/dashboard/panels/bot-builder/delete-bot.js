@@ -47,6 +47,7 @@ import { isVoiceBotId } from "../../../../shared/voice-bot.js";
 import { isFingerprint } from "../../../../shared/bot-git/host-keys.js";
 import { botGitDirReal } from "../../../../shared/bot-git/paths.js";
 import { botKeyStatus, removeBotKey } from "../../../../shared/bot-git/store.js";
+import { revokeAllSharesForBot } from "../../../../shared/project-bot-shares.js";
 
 // One seam, for the two key-store calls the delete path makes: a test needs to
 // prove the handler survives a removal that throws, without planting a real
@@ -221,6 +222,12 @@ export async function handleDeleteConfirm(req, res, { db, lang = "en" } = {}) {
       }
     }
   } catch { /* bundle may be absent — best-effort */ }
+
+  // Shares granted TO this bot die with it. `project_bot_shares.bot_id` has no foreign key
+  // (bot definitions are text keys), so this is the integrity step: without it a bot later
+  // created with the same id would inherit every project the old one could reach. Best-effort
+  // like the steps above — each shared project gets the revoke in its own audit log.
+  try { await revokeAllSharesForBot(db, botId, { reason: "bot_deleted" }); } catch { /* per-step best-effort */ }
 
   // The def row LAST: if anything above hard-fails, the bot still exists and
   // the operator can retry; a half-deleted def with live children is worse.
