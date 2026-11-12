@@ -64,6 +64,13 @@ import {
 export const SYNC_BATCH_MAX = 25;
 
 /**
+ * How long the on-demand read waits before one UID's stuck count may move again. `fetchOlder` is a
+ * person clicking a button, and three quick clicks at a merely slow message are not three passes of a
+ * stuck mailbox; a regular sync is spaced by the poll interval and counts every pass.
+ */
+export const LIVENESS_MIN_GAP_MS = 60 * 1000;
+
+/**
  * UIDs per get() call for a search hit set, which carries no sizes at all: only a count bounds it, so
  * a batch of 25 could ask for 625 MB of bodies in one call. Four is the count a sizeless listing gets.
  */
@@ -279,9 +286,9 @@ function internalDateOf(entry) {
 /* --------------------------------------------------- liveness for a stuck UID */
 
 /**
- * Consecutive passes that stopped on the same omitted (folder, uid), keyed `folderId:uid`. Memory
- * only: this is the engine's own note about its progress, not mailbox state, so it never reaches a
- * table and it starts empty on every process start.
+ * Consecutive passes that stopped on the same omitted (folder, uid), keyed `folderId:uid`, each with
+ * the time its count last moved. Memory only: this is the engine's own note about its progress, not
+ * mailbox state, so it never reaches a table and it starts empty on every process start.
  */
 const STUCK_OMISSIONS = new Map();
 
@@ -293,12 +300,22 @@ const stuckKey = (folderId, uid) => `${folderId}:${uid}`;
 /**
  * Note one pass that asked for `uid` and did not get it back, and answer how many passes in a row
  * have now done so. Without this a mailbox that never answers for one UID would hold that folder's
- * watermark for ever; on the third consecutive pass `fetchBatch` skips the UID instead of stopping.
+ * watermark for ever; on the third counted pass `fetchBatch` skips the UID instead of stopping.
+ *
+ * `minGapMs` is the on-demand read's own rule: the count only moves when at least that long has
+ * passed since it last moved for this UID (its time from `ctx.now()`), so a person clicking `fetchOlder`
+ * three times in a minute does not skip a message the server is merely slow about. A pass inside the
+ * gap is not counted at all — it still stops at the UID — and the count stays where it was. A sync
+ * pass is spaced by the poll interval, so it passes no gap and every pass counts.
+ *
+ * @returns {number} the counted consecutive passes (unchanged when the gap has not passed)
  */
-function noteOmitted(folderId, uid) {
+function noteOmitted(folderId, uid, { minGapMs = 0, nowMs = 0 } = {}) {
   const key = stuckKey(folderId, uid);
-  const passes = (STUCK_OMISSIONS.get(key) ?? 0) + 1;
-  STUCK_OMISSIONS.set(key, passes);
+  const entry = STUCK_OMISSIONS.get(key);
+  if (entry && minGapMs > 0 && nowMs - entry.at < minGapMs) return entry.passes;
+  const passes = (entry?.passes ?? 0) + 1;
+  STUCK_OMISSIONS.set(key, { passes, at: nowMs });
   return passes;
 }
 
@@ -334,8 +351,9 @@ export function resetSyncLivenessForTests() {
  * omission too — a message with no body is not a message, and it is certainly not a too_large one.
  *
  * With `liveness` set (a sync pass), a UID that has now been missing on LIVENESS_PASSES consecutive
- * passes is logged as uid_skipped and passed over instead of stopping the pass. Nothing is stored for
- * it either way.
+ * counted passes is logged as uid_skipped and passed over instead of stopping the pass. Nothing is
+ * stored for it either way. `livenessGapMs` is `fetchOlder`'s slower clock (see `noteOmitted`): with
+ * it set, a pass inside the gap stops at the UID without counting.
  *
  * With `skipOmissions` set (a search answer), a UID still missing after its one retry is passed over
  * and reported in `omitted` instead of stopping the batch: a search hit is not a watermark, so one it
@@ -344,10 +362,12 @@ export function resetSyncLivenessForTests() {
  * @param {object} c the resolved context
  * @param {object} folder the stored folder row
  * @param {object[]} batch ascending items (`{uid, size}` from a listing, or `{uid}` from a search)
- * @param {{liveness?: boolean, skipOmissions?: boolean}} [options]
+ * @param {{liveness?: boolean, skipOmissions?: boolean, livenessGapMs?: number}} [options]
  * @returns {Promise<{delivered: Map<number, object>, stopAtUid: number|null, omitted: number[]}>}
  */
-async function fetchBatch(c, folder, batch, { liveness = false, skipOmissions = false } = {}) {
+async function fetchBatch(c, folder, batch, {
+  liveness = false, skipOmissions = false, livenessGapMs = 0,
+} = {}) {
   const delivered = new Map();
   const omitted = [];
   const wanted = [];
@@ -385,7 +405,8 @@ async function fetchBatch(c, folder, batch, { liveness = false, skipOmissions = 
       // The third pass in a row that asked for this UID and got nothing: the mailbox is not going to
       // answer for it, so the folder moves on rather than never moving again. Nothing is stored for
       // the UID, and the count is forgotten so the next decision starts fresh.
-      if (liveness && noteOmitted(folderId, item.uid) >= LIVENESS_PASSES) {
+      if (liveness && noteOmitted(folderId, item.uid, { minGapMs: livenessGapMs, nowMs: c.now() })
+        >= LIVENESS_PASSES) {
         clearOmitted(folderId, item.uid);
         c.log({ event: "uid_skipped", folderId, uid: item.uid, code: "omitted" });
         continue;
@@ -473,16 +494,20 @@ async function storeBatch(c, folder, batch, delivered, stopAtUid) {
  * that stopped writes nothing for the batches after it, and nothing at or above its stop UID.
  * `liveness` is the sync pass's own rule (see fetchBatch): for the on-demand reads it stays off, so
  * they keep stopping on the first UID they cannot get — except a search answer, whose `skipOmissions`
- * passes the missing hits over and reports them in `omittedUids`.
+ * passes the missing hits over and reports them in `omittedUids`, and `fetchOlder`, which turns it on
+ * with `livenessGapMs` so a person's quick clicks never add up to a give-up.
  *
  * @param {object} c the resolved context
  * @param {object} folder the stored folder row
  * @param {object[][]} batches ascending items, grouped as batchItems returned them
- * @param {{afterBatch?: Function|null, liveness?: boolean, skipOmissions?: boolean}} [options]
+ * @param {{afterBatch?: Function|null, liveness?: boolean, skipOmissions?: boolean,
+ *          livenessGapMs?: number}} [options]
  * @returns {Promise<{added: number, stopAtUid: number|null, stopReason: string|null,
  *                    lowestStoredUid: number|null, highestUid: number, omittedUids: number[]}>}
  */
-async function storeBatches(c, folder, batches, { afterBatch = null, liveness = false, skipOmissions = false } = {}) {
+async function storeBatches(c, folder, batches, {
+  afterBatch = null, liveness = false, skipOmissions = false, livenessGapMs = 0,
+} = {}) {
   let added = 0;
   let lowestStoredUid = null;
   let stopAtUid = null;
@@ -492,7 +517,7 @@ async function storeBatches(c, folder, batches, { afterBatch = null, liveness = 
 
   for (const batch of batches) {
     checkDeadline(c);
-    const fetched = await fetchBatch(c, folder, batch, { liveness, skipOmissions });
+    const fetched = await fetchBatch(c, folder, batch, { liveness, skipOmissions, livenessGapMs });
     if (fetched.omitted.length > 0) omittedUids = omittedUids.concat(fetched.omitted);
     const stored = await storeBatch(c, folder, batch, fetched.delivered, fetched.stopAtUid);
     added += stored.added;
@@ -555,7 +580,8 @@ function logOmitted(c, folderId, outcome) {
  * state at all (the next run is a first sync again, and the upserts make it idempotent); a pass that
  * stopped on an undeliverable UID writes what it did reach, so it does not fetch the window again.
  * The UIDVALIDITY is stored only when the listing reported one — a positive integer, never a 0 read
- * out of a null — so a server that says nothing leaves the column null for a later pass to fill.
+ * out of a null — so a server that says nothing leaves the column null; a later pass whose listing
+ * DOES report one fills it in (see the state writes in `syncFolder`).
  */
 async function firstSync(c, folder, { windowDays, nowMs }) {
   const listing = await listOrThrow(c, folder.path, { sinceDate: nowMs - windowDays * DAY_MS });
@@ -648,6 +674,9 @@ export async function syncFolder(ctx, accountId, folder) {
   if (storedValidity != null && listedValidity != null && listedValidity !== storedValidity) {
     // Every UID this folder holds means something else now: empty it and start over as a first sync.
     await resetFolder(c.db, folderIdOf(folder), listedValidity);
+    // The new epoch's UIDs say nothing about the old one's, so a stuck count left behind would skip a
+    // UID of the new epoch on that epoch's first pass. The count starts again from nothing.
+    clearFolderOmitted(folderIdOf(folder));
     counts.reset = true;
     const restart = { ...folder, uidValidity: listedValidity, highestUid: 0, floorUid: null };
     counts.added = (await firstSync(c, restart, { windowDays, nowMs })).added;
@@ -661,11 +690,17 @@ export async function syncFolder(ctx, accountId, folder) {
   counts.added = outcome.added;
   const folderId = folderIdOf(folder);
 
+  // A UIDVALIDITY the listing reported but the column does not hold yet (a first sync ran against a
+  // server that stayed quiet) is written by whichever state write this pass makes: once it is known,
+  // a later change can be compared against it.
+  const validity = listedValidity != null ? { uidValidity: listedValidity } : {};
+
   if (outcome.stopAtUid != null) {
     // An undeliverable UID (or a store that failed) is where the watermark stops. The rows below it
     // are on disk and the next pass re-lists from here; nothing is ever skipped over. Only ids and a
     // code reach the log line: the uid names no content.
     await setFolderSyncState(c.db, folderId, {
+      ...validity,
       highestUid: Math.max(outcome.highestUid, outcome.stopAtUid - 1),
     });
     logOmitted(c, folderId, outcome);
@@ -674,6 +709,7 @@ export async function syncFolder(ctx, accountId, folder) {
   }
 
   await setFolderSyncState(c.db, folderId, {
+    ...validity,
     highestUid: Math.max(outcome.highestUid, uidNext - 1),
     lastSyncedAt: nowMs,
   });
@@ -704,7 +740,10 @@ export async function syncFolder(ctx, accountId, folder) {
  * Otherwise the floor follows the lowest UID of the page, which with no stop is a UID this call either
  * stored — fetched and stored, or deliberately stored as a `too_large` placeholder — or skipped by the
  * liveness escape below; and it never rises. That escape is the only way past a permanent hole: a UID
- * still missing on the third consecutive pass is skipped, and the page below it then completes.
+ * still missing on the third COUNTED pass is skipped, and the page below it then completes. This read
+ * is triggered by a person, so a pass only counts when LIVENESS_MIN_GAP_MS has passed since the last
+ * count for that UID (see `noteOmitted`): three quick clicks at a slow message still stop, and the
+ * message is never given up on for being slow once.
  * A UID a search stored far below the window lowers nothing, because the range between it and the
  * window is still a hole. Nothing here touches `highest_uid`, `uid_validity`, an existing row or
  * anything else.
@@ -744,8 +783,12 @@ export async function fetchOlder(ctx, accountId, folderId, { limit = DEFAULT_OLD
   checkDeadline(c);
 
   // A backfill goes through the same liveness counter a sync pass does: one UID nothing ever delivers
-  // must not hold the floor for ever.
-  const outcome = await storeBatches(c, folder, batchItems(ascending(listing.items)), { liveness: true });
+  // must not hold the floor for ever. It counts on its own slower clock, though — this read is a
+  // person clicking, and quick repeated clicks at a merely slow message must not skip it.
+  const outcome = await storeBatches(c, folder, batchItems(ascending(listing.items)), {
+    liveness: true,
+    livenessGapMs: LIVENESS_MIN_GAP_MS,
+  });
 
   // A pass that stopped for ANY reason leaves the floor untouched: the UIDs above the hole in this
   // page were never stored, so a floor there would claim rows nothing wrote.

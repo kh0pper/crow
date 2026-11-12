@@ -343,6 +343,39 @@ test("a first sync stores UIDVALIDITY only when the listing reported a positive 
   assert.deepEqual(await storedUids(db, folder.id), [1]);
 });
 
+test("a later pass fills in a UIDVALIDITY the first sync could not report, and a change after that resets", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "one" });
+  deliver(adapter, "INBOX", { subject: "two" });
+
+  // The first sync runs against a server that says nothing about UIDVALIDITY: unknown, never a 0.
+  const realList = adapter.list;
+  let quiet = true;
+  adapter.list = async (path, options) => {
+    const listing = await realList(path, options);
+    return quiet && path === "INBOX" ? { ...listing, uidValidity: null } : listing;
+  };
+
+  const { folder } = await syncOne(db, adapter, accountId);
+  assert.equal(folder.uidValidity, null, "nothing was reported, so nothing was stored");
+  assert.equal(folder.highestUid, 2);
+
+  // A later pass whose listing DOES report one writes it, and only then can a change be compared.
+  quiet = false;
+  deliver(adapter, "INBOX", { subject: "three" });
+  const { result, folder: filled } = await syncOne(db, adapter, accountId);
+  assert.equal(result.reset, false, "unknown is still not a change");
+  assert.equal(filled.uidValidity, 71, "the value the listing reported is now stored");
+  assert.equal(filled.highestUid, 3);
+  assert.deepEqual(await storedUids(db, filled.id), [1, 2, 3]);
+
+  const validity = adapter.bumpUidValidity("INBOX");
+  const { result: reset, folder: after } = await syncOne(db, adapter, accountId);
+  assert.equal(reset.reset, true, "from here a change IS a change");
+  assert.equal(after.uidValidity, validity);
+  assert.deepEqual(await storedUids(db, after.id), [1, 2, 3], "re-created, not duplicated");
+});
+
 /* ----------------------------------------------------------------- failures */
 
 test("a failed listing deletes nothing and leaves the watermark where it was", async () => {
@@ -571,6 +604,35 @@ test("a delivered UID clears its stuck count, so a later omission starts again f
   const stuckAgain = await syncOne(db, adapter, accountId);
   assert.equal(stuckAgain.folder.highestUid, 1, "the delivery cleared the count");
   assert.deepEqual(await storedUids(db, stuckAgain.folder.id), [1, 2], "nothing past the stop was stored");
+});
+
+test("a UIDVALIDITY reset drops the old epoch's stuck count, so the new epoch stops instead of skipping", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "one" });
+  await syncOne(db, adapter, accountId);
+  deliver(adapter, "INBOX", { subject: "never delivered" }); // uid 2
+  deliver(adapter, "INBOX", { subject: "three" }); // uid 3
+
+  const realGet = adapter.get;
+  adapter.get = async (path, uids) => (await realGet(path, uids)).filter((message) => message.uid !== 2);
+
+  // Two passes in the old epoch leave uid 2 stuck at count 2.
+  assert.equal((await syncOne(db, adapter, accountId)).folder.highestUid, 1, "pass 1 stops");
+  assert.equal((await syncOne(db, adapter, accountId)).folder.highestUid, 1, "pass 2 is stuck at count 2");
+
+  // The mailbox's UIDs all mean something else now. The new epoch omits uid 2 once too: that first
+  // pass must STOP at it, because the old epoch's count said nothing about these UIDs.
+  const validity = adapter.bumpUidValidity("INBOX");
+  const logs = [];
+  const { result, folder } = await syncOne(db, adapter, accountId, "INBOX", { log: (entry) => logs.push(entry) });
+
+  assert.equal(result.reset, true);
+  assert.equal(folder.uidValidity, validity);
+  assert.equal(result.added, 1, "the row below the hole was re-created");
+  assert.equal(folder.highestUid, 1, "the new epoch's first pass stops at uid 2 instead of skipping it");
+  assert.deepEqual(await storedUids(db, folder.id), [1], "nothing past the stop was stored");
+  assert.ok(!logs.some((entry) => entry.event === "uid_skipped"),
+    "the old epoch's count did not carry into the new one");
 });
 
 /* -------------------------------------------------------- the account pass */
@@ -957,6 +1019,47 @@ test("a message that cannot be stored holds the watermark instead of being stepp
   assert.deepEqual(await storedUids(db, folderRow.id), [1]);
   assert.ok(logs.some((entry) => entry.event === "message_failed" && entry.uid === 2));
   assert.ok(!logs.some((entry) => entry.event === "uid_omitted"), "a store failure is not an omission");
+});
+
+test("a store_failed stop below an omitted UID of the same batch loses nothing", async () => {
+  const { db, accountId, adapter } = await setup();
+  deliver(adapter, "INBOX", { subject: "seed" });
+  const { folder } = await syncOne(db, adapter, accountId);
+  deliver(adapter, "INBOX", { subject: "cannot be stored" }); // uid 2 = X
+  deliver(adapter, "INBOX", { subject: "never delivered" }); // uid 3 = Y > X
+
+  // One batch (2 and 3) with two different holes: uid 2 comes back but the store refuses it, uid 3
+  // never comes back at all. The lower UID is the stop, so the pass counts a store_failed stop at 2,
+  // never closes over 3, and writes a watermark below 2.
+  const realGet = adapter.get;
+  adapter.get = async (path, uids) => (await realGet(path, uids)).filter((message) => message.uid !== 3);
+  const poisoned = watchedDb(db, (statement) => {
+    if (isMessageInsert(statement) && Number(statement.args?.[2]) === 2) {
+      throw new MailError("TOO_LARGE", "store");
+    }
+  });
+  const logs = [];
+  const folderRow = await prepareFolder(db, adapter, accountId, "INBOX");
+  const result = await syncFolder(
+    { db: poisoned, adapter, now: () => T0, log: (entry) => logs.push(entry) },
+    accountId,
+    folderRow,
+  );
+
+  assert.equal(result.added, 0, "neither hole is closed by a row");
+  assert.equal((await getFolder(db, folderRow.id)).highestUid, 2 - 1, "the watermark stops below X");
+  assert.deepEqual(await storedUids(db, folderRow.id), [1], "nothing was stored at or above the stop");
+  assert.ok(logs.some((entry) => entry.event === "message_failed" && entry.uid === 2),
+    "the lower hole is the one the pass stopped on");
+  assert.ok(!logs.some((entry) => entry.event === "uid_omitted"),
+    "the store failure is the stop, not the omission above it");
+
+  // Nothing is lost: the next pass re-lists from the untouched watermark and stores both.
+  adapter.get = realGet;
+  const { result: recovered, folder: finished } = await syncOne(db, adapter, accountId);
+  assert.equal(recovered.added, 2);
+  assert.deepEqual(await storedUids(db, finished.id), [1, 2, 3]);
+  assert.equal(finished.highestUid, 3);
 });
 
 test("a UIDVALIDITY change between the two listings aborts the folder and deletes nothing", async () => {

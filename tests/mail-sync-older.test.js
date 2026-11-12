@@ -26,6 +26,7 @@ import {
   upsertFolders,
 } from "../servers/gateway/mail/store/messages.js";
 import {
+  LIVENESS_MIN_GAP_MS,
   SEARCH_BATCH_MAX,
   fetchOlder,
   resetSyncLivenessForTests,
@@ -278,19 +279,25 @@ test("three stuck passes on one UID skip it, and only then does the floor move b
 
   const logs = [];
   const log = (entry) => logs.push(entry);
+  // The count moves at most once per LIVENESS_MIN_GAP_MS: these three passes are a minute apart.
+  let clock = T0;
+  const ctx = () => ctxFor(db, adapter, { log, now: () => clock });
+  const later = () => { clock += LIVENESS_MIN_GAP_MS + 1000; };
 
-  const first = await fetchOlder(ctxFor(db, adapter, { log }), accountId, folder.id);
+  const first = await fetchOlder(ctx(), accountId, folder.id);
   assert.equal(first.added, 44);
   assert.equal(first.reachedStart, false);
   assert.equal((await getFolder(db, folder.id)).floorUid, 101, "pass 1 stops below the hole");
 
-  const second = await fetchOlder(ctxFor(db, adapter, { log }), accountId, folder.id);
+  later();
+  const second = await fetchOlder(ctx(), accountId, folder.id);
   assert.equal(second.added, 0, "nothing below the hole was new");
   assert.equal(second.reachedStart, false);
   assert.equal((await getFolder(db, folder.id)).floorUid, 101, "pass 2 is stuck at the same UID");
   assert.equal(logs.filter((entry) => entry.event === "uid_skipped").length, 0);
 
-  const third = await fetchOlder(ctxFor(db, adapter, { log }), accountId, folder.id);
+  later();
+  const third = await fetchOlder(ctx(), accountId, folder.id);
   assert.equal(third.added, 5, "96..100: the page finishes past the UID nobody ever delivers");
   assert.equal(third.reachedStart, false);
 
@@ -303,6 +310,49 @@ test("three stuck passes on one UID skip it, and only then does the floor move b
 
   const skipped = logs.filter((entry) => entry.event === "uid_skipped");
   assert.deepEqual(skipped, [{ event: "uid_skipped", folderId: folder.id, uid: omit, code: "omitted" }]);
+});
+
+test("three quick fetchOlder clicks at the same moment never count past the first, so a slow message is not skipped", async () => {
+  const { db, accountId, adapter } = await setup();
+  seed(adapter, "INBOX", 100, { internalDate: OLD });
+  seed(adapter, "INBOX", 50, { internalDate: T0 });
+  const folder = await firstSync(db, adapter, accountId);
+
+  const realGet = adapter.get;
+  const omit = 95;
+  adapter.get = async (path, uids) => (await realGet(path, uids))
+    .filter((message) => message.uid !== omit);
+
+  // This read is user-triggered: three clicks inside one minute at a message the server is merely
+  // slow about are ONE stuck pass, never three. Every click stops, none of them skips.
+  const logs = [];
+  const ctx = ctxFor(db, adapter, { log: (entry) => logs.push(entry) });
+  for (let click = 1; click <= 3; click += 1) {
+    const result = await fetchOlder(ctx, accountId, folder.id);
+    assert.equal(result.reachedStart, false, `click ${click} neither finished nor skipped the page`);
+    assert.equal((await getFolder(db, folder.id)).floorUid, 101, `click ${click} left the floor alone`);
+  }
+
+  assert.equal(logs.filter((entry) => entry.event === "uid_skipped").length, 0,
+    "three quick clicks are not three stuck passes");
+  // Nothing was given up on: the message is still missing and still holds the floor.
+  assert.deepEqual(await storedUids(db, folder.id), [...range(51, 94), ...range(101, 150)]);
+
+  // The gap passes: the very next click is the second counted pass, and the one after it the third,
+  // so a UID that really never arrives is still escaped.
+  let clock = T0 + LIVENESS_MIN_GAP_MS;
+  const slowCtx = () => ctxFor(db, adapter, { log: (entry) => logs.push(entry), now: () => clock });
+  const second = await fetchOlder(slowCtx(), accountId, folder.id);
+  assert.equal(second.added, 0, "still stuck on the second counted pass");
+  assert.equal((await getFolder(db, folder.id)).floorUid, 101);
+
+  clock += LIVENESS_MIN_GAP_MS;
+  const third = await fetchOlder(slowCtx(), accountId, folder.id);
+  assert.equal(third.added, 5, "96..100: the third counted pass skips the stuck UID");
+  assert.equal((await getFolder(db, folder.id)).floorUid, 51);
+  assert.deepEqual(await storedUids(db, folder.id), [...range(51, 94), ...range(96, 150)]);
+  assert.deepEqual(logs.filter((entry) => entry.event === "uid_skipped"),
+    [{ event: "uid_skipped", folderId: folder.id, uid: omit, code: "omitted" }]);
 });
 
 test("a folder path with spaces and unicode reaches the adapter byte for byte", async () => {
