@@ -288,3 +288,27 @@ test("import drops a non-http(s) url but still imports the entry", async () => {
   assert.equal(list.find((e) => e.label === "Evil link").url, null);
   assert.equal(list.find((e) => e.label === "Good link").url, "HTTPS://ok.example");
 });
+
+test("S5 — a live mail password is not a purgeable orphan; once its account is gone it is", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  // The mail tables exist on every current database; only mail_accounts is read by the guard. A
+  // service_connections table is there too (init-db creates it), with no row for this uuid.
+  await db.execute("CREATE TABLE mail_accounts (id TEXT PRIMARY KEY)");
+  await db.execute("CREATE TABLE service_connections (uuid TEXT PRIMARY KEY, status TEXT DEFAULT 'active')");
+  const accountId = "ma-0123456789abcdef";
+  await db.execute({ sql: "INSERT INTO mail_accounts (id) VALUES (?)", args: [accountId] });
+  const saved = await K.saveServiceSecret(db, key, {
+    connectionUuid: accountId, bundleId: "crow-mail", envKey: "MAIL_PASSWORD",
+    label: "Mail: alex@example.com", secret: "app-password",
+  });
+
+  // No service_connections row names it, so the orphan rule alone would delete a live password.
+  await assert.rejects(() => K.deleteEntry(db, saved.id), (err) => err.code === "KEYCHAIN_SERVICE_ROW");
+  assert.equal((await K.listEntries(db)).length, 1, "the live password is still there");
+  assert.equal(await K.openEntrySecret(db, key, saved.id), "app-password");
+
+  await db.execute({ sql: "DELETE FROM mail_accounts WHERE id = ?", args: [accountId] });
+  assert.equal(await K.deleteEntry(db, saved.id), true, "an account-less mail row is purgeable as before");
+  assert.equal((await K.listEntries(db)).length, 0);
+});

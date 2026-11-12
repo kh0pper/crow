@@ -430,6 +430,11 @@ export async function consumeFirstView(db, key, id, { now } = {}) {
  * Deletes one entry. A service row of a live (not-disconnected) connection is refused (KeychainServiceRowError):
  * disconnect its connection first. A disconnected service row may be deleted: that is how the
  * owner purges a disconnected connection's secret for good (it then stops being masked).
+ *
+ * A Crow Mail password is a `service` row with no `service_connections` row (its connection is a
+ * `mail_accounts` row), so the orphan rule below would call a LIVE mailbox password purgeable from the
+ * keychain page. While that account row exists the row is refused, like any other live connection's;
+ * once the account is gone the secret is an orphan again and stays purgeable.
  */
 export async function deleteEntry(db, id) {
   await ensureKeychainTable(db);
@@ -438,7 +443,11 @@ export async function deleteEntry(db, id) {
   const orphan = hasConnections
     ? "NOT EXISTS (SELECT 1 FROM service_connections c WHERE c.uuid = crow_keychain.connection_uuid AND c.status != 'disconnected')"
     : "0"; // no table: nothing proves it an orphan
-  const r = await db.execute({ sql: `DELETE FROM crow_keychain WHERE id = ? AND (kind != 'service' OR status = 'disconnected' OR ${orphan})`, args: [Number(id)] });
+  const hasMailAccounts = (await db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mail_accounts'")).rows.length > 0;
+  const liveMail = hasMailAccounts
+    ? "NOT (kind = 'service' AND bundle_id = 'crow-mail' AND EXISTS (SELECT 1 FROM mail_accounts m WHERE m.id = crow_keychain.connection_uuid))"
+    : "1"; // no mail table: no live mailbox to protect
+  const r = await db.execute({ sql: `DELETE FROM crow_keychain WHERE id = ? AND (kind != 'service' OR status = 'disconnected' OR ${orphan}) AND ${liveMail}`, args: [Number(id)] });
   if (r.rowsAffected > 0) return true;
   const svc = await db.execute({ sql: "SELECT 1 FROM crow_keychain WHERE id = ? AND kind = 'service'", args: [Number(id)] });
   if (svc.rows.length) throw new KeychainServiceRowError();
