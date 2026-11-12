@@ -218,7 +218,8 @@ Optional fields:
 | `user` | the documented default username (`default-login`), or the admin username Crow itself creates (`crow` / `via: "setup"`) |
 | `note` | one short plain sentence added to the notice (e.g. where the app prints its first password) |
 | `via` | **with `crow` only**: `"env"`, `"postInstall"` or `"setup"` — how Crow creates the admin |
-| `setup` | with `crow`/`via: "setup"`: `{ "script": "scripts/first-admin.sh", "timeout_s": 180 }`, optionally with `after` (see "setup.after" below) |
+| `setup` | with `crow`/`via: "setup"`: `{ "script": "scripts/first-admin.sh", "timeout_s": 180 }`, optionally with `after` (see "setup.after" below) and/or `token` (see "setup.token" below) |
+| `token` | with `crow`/`via: "env"`: `{ "script": "scripts/api-token.sh", "env": "APP_API_KEY" }` — the app's own API token, minted for Crow after the admin exists (see "setup.token" below) |
 | `secretEnv` | with `crow`: the keychain entry name for the admin password — an `env_vars` entry with `generate: "secret"` + `keychain: true` for `via: "env"`, any name for `via: "setup"` |
 | `userEnv` | with `crow`, optional: the `env_vars` entry holding the admin's username |
 | `urlEnv` | with `crow`, optional: a declared, NON-SECRET `env_vars` entry whose installed `.env` value is the app's own address — the saved keychain row then carries that URL (only when it is an `http(s)` URL of at most 512 characters), so Settings → Passwords can link to the app |
@@ -407,6 +408,92 @@ claimed by the first Plex account that reaches it unless a claim token was set).
 
 Like every other bundle change, a new or edited `firstAdmin` needs a `version`
 bump: the installed copy refreshes only when the version differs.
+
+### `setup.token` / `firstAdmin.token`: the API token the app mints for Crow
+
+Many apps can only be talked to with a token they mint INSIDE themselves: you sign in,
+create a token, and the app shows it once. That is the last "Finish setup" item such a
+bundle leaves the operator — so a bundle can ship a small script that does it, and Crow
+keeps the result where a typed key would go:
+
+```json
+"firstAdmin": {
+  "mode": "crow", "via": "setup",
+  "setup": {
+    "script": "scripts/first-admin.sh", "timeout_s": 240,
+    "token": { "script": "scripts/api-token.sh", "env": "APP_API_TOKEN", "timeout_s": 120 }
+  },
+  "user": "admin", "secretEnv": "APP_ADMIN_PASSWORD"
+}
+```
+
+An app whose admin Crow creates from the ENVIRONMENT (`via: "env"`) has no setup script
+to hang the block under, so there it is a sibling of `secretEnv`:
+
+```json
+"firstAdmin": {
+  "mode": "crow", "via": "env",
+  "secretEnv": "APP_ADMIN_PASSWORD", "userEnv": "APP_ADMIN_USER",
+  "token": { "script": "scripts/api-token.sh", "env": "APP_API_KEY", "stdin": "admin-password" }
+}
+```
+
+The two locations are not interchangeable: `setup.token` is only allowed with
+`via: "setup"`, `firstAdmin.token` only with `via: "env"`.
+
+| field | rule |
+|---|---|
+| `script` | a relative `.sh` path that really ships in the bundle. First-party bundles only: a token script is host shell code. |
+| `env` | one env name, or an ARRAY of them (at most 8). Every name must be a declared `env_vars` entry with `secret: true` and no `generate` — Crow's own values and public settings are not places for a minted token — and must not be the name Crow itself writes (`secretEnv`, `userEnv`, `urlEnv`), a name that changes how a program RUNS (`NODE_OPTIONS`, `LD_PRELOAD`, …), or a reserved `COMPOSE_`/`DOCKER_`/`CROW_` name. A `pattern` on the entry is enforced on that value. |
+| `stdin` | optional, and the only value it may have is `"admin-password"`: Crow passes the keychain's admin password for this bundle (`firstAdmin.secretEnv`) as ONE line on the script's stdin. Without it stdin stays closed. |
+| `timeout_s` | 1–600 (default 120). |
+
+**The protocol.** Crow runs `bash <its own copy of the bundle>/<script>` with `cwd` = the
+installed bundle dir, in its own process group, with the same minimal environment the
+first-admin script gets and `CROW_FIRST_ADMIN_USER=<firstAdmin.user>` when the manifest
+names one. The password (only with `stdin`) arrives as one line and nowhere else. The
+result comes BACK on file descriptor 3 — stdout and stderr are the run's log:
+
+| fd 3 | when |
+|---|---|
+| `<value>\n` | `env` names ONE var: the value itself, one line |
+| `NAME=value\n` per name | `env` is an ARRAY: exactly one line per declared name, every declared name exactly once, nothing else |
+
+Nothing partial is ever accepted: a missing line, an extra line, a repeated or undeclared
+name, or a value that fails its own entry's rules refuses the whole answer — so Crow can
+never save a fresh value beside a half-read one. At most 4096 bytes are read.
+
+| exit | meaning | Crow then |
+|---|---|---|
+| `0` | fd 3 holds the value(s) | saves every one of them exactly where a typed key goes: the keychain, the extension's own `mcp-addons.json` entry and an existing `.env` |
+| `4` | the app is not running / not answering; nothing changed | records "not running" and tries again on the next boot, without a bell |
+| other | failed (a timeout counts) | says so in the install log and rings one bell |
+
+Saving uses the API-key card's own save with a different policy: the keychain row records
+`origin: "generated"`, the gateway's own environment is never touched (`propagate: false`),
+and a value the extension already holds is NEVER replaced (`firstWriterWins: true`) — that
+answer is `skipped-has-value`, not a failure. A save is only made while the extension is
+still installed under the same install stamp: a bundle removed (or reinstalled) while the
+script runs gets nothing.
+
+**When it runs.** At install, right after the admin exists — a `via: "setup"` run's `ok`,
+or, for `via: "env"`, once `compose up` succeeded (the generated admin password is already
+in the keychain, so the admin is the app's own). And once per gateway boot, after the
+add-ons settle, the catch-up gives the token to every installed bundle that does not have
+one yet: an install made before the version that shipped the step, or one whose app was not
+up yet. The catch-up skips a bundle whose reviewed manifest cannot run the step, a
+satellite-hosted add-on, one whose admin Crow did not create for THIS install, and one that
+already holds a value for ANY of the names (`first_admin_auto:<id>` / the keychain row for
+`via: "env"`).
+
+The script's last 20 non-empty stdout lines go into the install log (and the card's
+answer), and one plain sentence says what happened — `Connected Crow to <app> with an API
+token it created`, `<app> already had an API token; Crow left it alone`, or `Crow could not
+create <app>'s API token; you can paste one in Configure`. Both are scrubbed: every
+occurrence of a value — and of the admin password — becomes `[hidden]`. Never print either
+anyway.
+
+Like every other bundle change, this one needs a `version` bump.
 
 ## Third-party API keys: `explain`, `signup_url`, `signup_label`
 

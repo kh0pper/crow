@@ -17,13 +17,22 @@
  *      returned field or a log line, even when the script echoes it to stdout;
  *   4b. the stillInstalled guard fails CLOSED: no install stamp, or a seam that cannot
  *      answer, means nothing is saved (the default seam answers false);
+ *   4c. several values (`token.env` as an array): every value accepted before any is saved, a
+ *      half-filled extension left alone before the script runs, and a save that does not land
+ *      taking back what the run had already written (never "ok" over a mixed set);
+ *   4d. `stdin: "admin-password"`: the keychain's password on the script's stdin, nowhere else;
+ *      a refused multi-value answer's bare values are scrubbed from the log and the reason;
+ *   4e. the block only exists for a `mode: "crow"` admin, in the location its `via` names
+ *      (and the bundle contract refuses the other location);
  *   5. spawnGroup's `secretFd`: fd 3 collected apart from stdout/stderr, capped at 4096
  *      bytes (an overflow is refused, never truncated-and-accepted), and a rejection whose
  *      `secret` is non-enumerable (Object.keys(err) does not list it);
  *   6. the manifest schema can express the step at all (registry/manifest.schema.json).
  *
- * No database, no docker, no real app: every seam is injected, and the script cases use
- * small temporary bash files.
+ * No database CONTENTS are needed, no docker, no real app: the seams are injected, and the
+ * all-or-nothing pre-check has its own `mcpValue` / `hasKeychainRow` seams (a test that does
+ * not inject them gets the real answer for this scratch home: no value, no row). The script
+ * cases use small temporary bash files.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -31,7 +40,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { apiTokenPlan, apiTokenProblems, acceptToken, scrubAll, runApiToken } =
+const { apiTokenPlan, apiTokenProblems, acceptToken, acceptTokenValues, apiTokenEnvNames, scrubAll, runApiToken } =
   await import("../servers/gateway/bundle-api-token.js");
 const { spawnGroup, SECRET_FD_MAX_BYTES } = await import("../servers/gateway/bundle-lifecycle.js");
 const { API_KEY_SAVE_REFUSALS } = await import("../servers/gateway/bundle-apikey-save.js");
@@ -582,6 +591,619 @@ test("runApiToken: a declaration that cannot run is refused, and a script that e
   assert.equal(readFileSync(escapeScript, "utf8").includes("exit 0"), true, "the real file was untouched");
 });
 
+// ── 4c. several values: `token.env` as an array ────────────────────────────────
+
+/** Crow-generated admin password shape (base64url). */
+const PASSWORD = "gen-Secret_ABC123xy-z45";
+const CLIENT_ID = "3pbcwp0qzw0ss8c4k0kskw0ws0w0sw0";
+const CLIENT_SECRET = "zyxwvu9876543210zyxwvu9876543210";
+
+/** MANIFEST plus two secret env vars, filled from ONE multi-value answer. */
+const MULTI = {
+  ...MANIFEST,
+  env_vars: [
+    ...MANIFEST.env_vars,
+    { name: "APP_CLIENT_ID", description: "client id", required: true, secret: true },
+    { name: "APP_CLIENT_SECRET", description: "client secret", required: true, secret: true, pattern: "^[A-Za-z0-9]{20,64}$" },
+  ],
+  firstAdmin: {
+    ...MANIFEST.firstAdmin,
+    setup: {
+      ...MANIFEST.firstAdmin.setup,
+      token: { script: "scripts/api-token.sh", env: ["APP_CLIENT_ID", "APP_CLIENT_SECRET"], stdin: "admin-password" },
+    },
+  },
+};
+const MULTI_ANSWER = `APP_CLIENT_ID=${CLIENT_ID}\nAPP_CLIENT_SECRET=${CLIENT_SECRET}\n`;
+
+/** The same token block, declared beside `secretEnv` because the admin comes from the env. */
+const ENV_ADMIN = {
+  ...MANIFEST,
+  firstAdmin: {
+    mode: "crow",
+    via: "env",
+    secretEnv: "APP_ADMIN_PASSWORD",
+    userEnv: "APP_ADMIN_USER",
+    token: { script: "scripts/api-token.sh", env: "APP_API_TOKEN", stdin: "admin-password" },
+  },
+};
+
+test("an array `env` resolves to every name, and `stdin` says the admin password comes in", () => {
+  assert.deepEqual(apiTokenProblems(MULTI), [], "two declared secrets, one line each: allowed");
+  const plan = apiTokenPlan(MULTI);
+  assert.deepEqual(plan.env, ["APP_CLIENT_ID", "APP_CLIENT_SECRET"]);
+  assert.equal(plan.stdin, "admin-password");
+  assert.deepEqual(apiTokenEnvNames(plan), ["APP_CLIENT_ID", "APP_CLIENT_SECRET"]);
+  // A single string keeps today's plan shape exactly (no `stdin` unless declared).
+  assert.deepEqual(apiTokenEnvNames(apiTokenPlan(MANIFEST)), ["APP_API_TOKEN"]);
+  assert.equal("stdin" in apiTokenPlan(MANIFEST), false);
+});
+
+test("an array `env` is checked name by name: declared, secret, unique, and never Crow's own", () => {
+  const withEnv = (env, extra = {}) => apiTokenProblems({
+    ...MULTI,
+    firstAdmin: {
+      ...MULTI.firstAdmin,
+      setup: { ...MULTI.firstAdmin.setup, token: { script: "scripts/api-token.sh", env, ...extra } },
+    },
+  }).join("\n");
+  assert.match(withEnv([]), /must name at least one env var/);
+  assert.match(withEnv(["APP_CLIENT_ID", "APP_CLIENT_ID"]), /names "APP_CLIENT_ID" twice/);
+  assert.match(withEnv(["APP_CLIENT_ID", "NOT_DECLARED"]), /must name a declared env_vars entry/);
+  assert.match(withEnv(["APP_CLIENT_ID", "APP_PLAIN"]), /must be declared with secret: true/);
+  assert.match(withEnv(["APP_CLIENT_ID", "APP_GENERATED_TOKEN"]), /is a value Crow generates/);
+  assert.match(withEnv(["APP_CLIENT_ID", "APP_ADMIN_PASSWORD"]), /must not be the same as firstAdmin\.secretEnv/);
+  assert.match(withEnv(["APP_CLIENT_ID", "app_client_secret"]), /must be a plain uppercase env name/);
+  assert.match(withEnv(Array.from({ length: 9 }, (_, i) => `APP_X${i}`)), /may name at most 8 env vars/);
+  // `stdin` is the one value Crow passes in, and nothing else is accepted.
+  assert.match(withEnv(["APP_CLIENT_ID"], { stdin: "password" }), /setup\.token\.stdin must be "admin-password"/);
+});
+
+test("a via \"env\" admin declares its token as firstAdmin.token, and nowhere else", () => {
+  assert.deepEqual(apiTokenProblems(ENV_ADMIN), []);
+  const plan = apiTokenPlan(ENV_ADMIN);
+  assert.equal(plan.env, "APP_API_TOKEN");
+  assert.equal(plan.user, "", "via \"env\" names no admin user: the app created it from the environment");
+  assert.equal(plan.stdin, "admin-password");
+
+  // The setup location is refused for an env admin (there is no setup script to hang it under).
+  const inSetup = { ...ENV_ADMIN, firstAdmin: { mode: "crow", via: "env", secretEnv: "APP_ADMIN_PASSWORD", setup: MANIFEST.firstAdmin.setup } };
+  assert.equal(apiTokenPlan(inSetup), null, "no block where it belongs, so nothing runs");
+  assert.match(apiTokenProblems(inSetup).join("\n"), /setup\.token is only allowed with via "setup"/);
+
+  // ...and the env location is refused for a setup admin.
+  const atFirstAdmin = { ...MANIFEST, firstAdmin: { ...MANIFEST.firstAdmin, token: { script: "scripts/api-token.sh", env: "APP_API_TOKEN" } } };
+  assert.match(apiTokenProblems(atFirstAdmin).join("\n"), /firstAdmin\.token is only allowed with via "env"/);
+  assert.match(apiTokenPlan(atFirstAdmin).refused, /only allowed with via "env"/);
+
+  // A setup.token with NO mechanism at all is not that mechanism's declaration either.
+  const noVia = { ...MANIFEST, firstAdmin: { mode: "none", setup: MANIFEST.firstAdmin.setup } };
+  assert.match(apiTokenProblems(noVia).join("\n"), /setup\.token is only allowed with via "setup"/);
+  assert.equal(apiTokenPlan(noVia), null, "no plan, so nothing runs");
+  const otherVia = { ...MANIFEST, firstAdmin: { ...MANIFEST.firstAdmin, via: "postInstall" } };
+  assert.match(apiTokenProblems(otherVia).join("\n"), /setup\.token is only allowed with via "setup"/);
+});
+
+test("only a `mode: \"crow\"` admin has a token step: another mode's admin is not Crow's", () => {
+  // The block sits in the right place, but Crow never made this admin (the install path's own
+  // firstAdminVia rule): there is no login to sign in with, so nothing may run.
+  for (const firstAdmin of [
+    { ...MANIFEST.firstAdmin, mode: "none" },
+    { ...MANIFEST.firstAdmin, mode: "finish-setup" },
+    { ...MANIFEST.firstAdmin, mode: "default-login" },
+  ]) {
+    const manifest = { ...MANIFEST, firstAdmin };
+    assert.equal(apiTokenPlan(manifest), null, JSON.stringify(firstAdmin.mode));
+    assert.deepEqual(apiTokenProblems(manifest), [], "not declared where Crow would look for a run");
+  }
+});
+
+test("the bundle contract refuses a token block declared for the wrong mechanism", async () => {
+  const { validateManifest } = await import("../scripts/lib/bundle-contract.mjs");
+  const repo = join(import.meta.dirname, "..");
+  const load = (id) => JSON.parse(readFileSync(join(repo, "bundles", id, "manifest.json"), "utf8"));
+  const firstAdminErrors = (manifest, dir) => (validateManifest(manifest, dir).errors || []).filter((e) => e.startsWith("firstAdmin"));
+  const paperless = load("paperless");
+  const paperlessDir = join(repo, "bundles", "paperless");
+  const miniflux = load("miniflux");
+  const minifluxDir = join(repo, "bundles", "miniflux");
+  // The two real declarations, each where its own mechanism puts it.
+  assert.deepEqual(firstAdminErrors(paperless, paperlessDir), [], "paperless: via setup, setup.token");
+  assert.deepEqual(firstAdminErrors(miniflux, minifluxDir), [], "miniflux: via env, firstAdmin.token");
+
+  // Moved to the other location, each is refused (Crow would never run it there).
+  const { token: setupToken, ...setupWithout } = paperless.firstAdmin.setup;
+  const up = { ...paperless, firstAdmin: { ...paperless.firstAdmin, setup: setupWithout, token: setupToken } };
+  assert.match(firstAdminErrors(up, paperlessDir).join("\n"), /firstAdmin\.token is only allowed with via "env"/);
+
+  const { token: siblingToken, ...siblingless } = miniflux.firstAdmin;
+  const down = { ...miniflux, firstAdmin: { ...siblingless, setup: { script: "scripts/first-admin.sh", token: siblingToken } } };
+  assert.match(firstAdminErrors(down, minifluxDir).join("\n"), /firstAdmin\.setup\.token is only allowed with via "setup"/);
+});
+
+test("acceptTokenValues: one name keeps today's one-line protocol, unchanged", () => {
+  assert.deepEqual(acceptTokenValues(`${TOKEN}\n`, MANIFEST, ["APP_API_TOKEN"]), { values: { APP_API_TOKEN: TOKEN } });
+  assert.equal(acceptTokenValues(`APP_API_TOKEN=${TOKEN}\n`, MANIFEST, ["APP_API_TOKEN"]), null, "NAME=value is the array protocol only");
+  assert.equal(acceptTokenValues("\n", MANIFEST, ["APP_API_TOKEN"]), null);
+  assert.equal(acceptTokenValues(`${TOKEN}\n`, MANIFEST, []), null);
+  // An ARRAY declaration of ONE name answers the named way: the declaration's shape, not the count.
+  assert.deepEqual(acceptTokenValues(`APP_API_TOKEN=${TOKEN}\n`, MANIFEST, ["APP_API_TOKEN"], { named: true }), { values: { APP_API_TOKEN: TOKEN } });
+  assert.equal(acceptTokenValues(`${TOKEN}\n`, MANIFEST, ["APP_API_TOKEN"], { named: true }), null);
+});
+
+test("acceptTokenValues: an array answer is one NAME=value line per name, all of them or nothing", () => {
+  const names = ["APP_CLIENT_ID", "APP_CLIENT_SECRET"];
+  assert.deepEqual(acceptTokenValues(MULTI_ANSWER, MULTI, names), { values: { APP_CLIENT_ID: CLIENT_ID, APP_CLIENT_SECRET: CLIENT_SECRET } });
+  assert.deepEqual(
+    acceptTokenValues(`APP_CLIENT_SECRET=${CLIENT_SECRET}\nAPP_CLIENT_ID=${CLIENT_ID}\n`, MULTI, names),
+    { values: { APP_CLIENT_ID: CLIENT_ID, APP_CLIENT_SECRET: CLIENT_SECRET } },
+    "the order of the lines is the script's business",
+  );
+  for (const bad of [
+    `APP_CLIENT_ID=${CLIENT_ID}\n`,                                              // a missing line
+    `APP_CLIENT_ID=${CLIENT_ID}\nAPP_CLIENT_SECRET=${CLIENT_SECRET}\nEXTRA=x\n`,  // one line too many
+    `APP_CLIENT_ID=${CLIENT_ID}\nAPP_CLIENT_ID=${CLIENT_ID}\n`,                 // a repeated name
+    `APP_CLIENT_ID=${CLIENT_ID}\nNOPE=${CLIENT_SECRET}\n`,                      // an undeclared name
+    `${CLIENT_ID}\n${CLIENT_SECRET}\n`,                                          // no names at all
+    `APP_CLIENT_ID=${CLIENT_ID}\nAPP_CLIENT_SECRET=short\n`,                    // fails its own pattern
+    `APP_CLIENT_ID=${CLIENT_ID}\nAPP_CLIENT_SECRET=${CLIENT_SECRET}\n\n`,       // a blank extra line
+    `APP_CLIENT_ID=${CLIENT_ID}\r\nAPP_CLIENT_SECRET=${CLIENT_SECRET}\r\n`,     // CRLF
+    "",
+    "\n",
+  ]) {
+    assert.equal(acceptTokenValues(bad, MULTI, names), null, JSON.stringify(bad));
+  }
+});
+
+test("runApiToken: an array answer saves every value, each with its own generated policy", async () => {
+  const { scriptDir, destDir } = dirs();
+  const saves = [];
+  const out = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => ({ stdout: "minted two\n", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }),
+      save: async (o) => { saves.push(o); return { ok: true, needs_restart: o.envKey === "APP_CLIENT_SECRET" }; },
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      warn: () => {},
+    },
+  });
+  assert.equal(out.result, "ok");
+  assert.equal(out.mcpEnvUpdated, true, "a save that wrote the MCP entry asks for the restart");
+  assert.deepEqual(saves.map((s) => [s.envKey, s.value]), [
+    ["APP_CLIENT_ID", CLIENT_ID],
+    ["APP_CLIENT_SECRET", CLIENT_SECRET],
+  ]);
+  for (const s of saves) {
+    assert.equal(s.origin, "generated");
+    assert.equal(s.propagate, false);
+    assert.equal(s.firstWriterWins, true);
+  }
+  assert.equal(JSON.stringify(out).includes(CLIENT_SECRET), false, "no value is ever a field of the answer");
+});
+
+test("runApiToken: a partial array answer saves NOTHING — all values are accepted first", async () => {
+  const { scriptDir, destDir } = dirs();
+  let saves = 0;
+  for (const secret of [
+    `APP_CLIENT_ID=${CLIENT_ID}\n`,
+    `APP_CLIENT_ID=${CLIENT_ID}\nAPP_CLIENT_SECRET=short\n`,
+    `APP_CLIENT_ID=${CLIENT_ID}\nNOPE=x\n`,
+  ]) {
+    const out = await runApiToken({
+      bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+      deps: {
+        runner: async () => ({ stdout: "", stderr: "", secret, secretOverflow: false }),
+        save: async () => { saves += 1; return { ok: true, needs_restart: false }; },
+        stillInstalled: STILL,
+        adminPassword: async () => PASSWORD,
+        warn: () => {},
+      },
+    });
+    assert.equal(out.result, "failed", JSON.stringify(secret));
+    assert.equal(out.reason, "the app answered with something that is not an API token");
+  }
+  assert.equal(saves, 0, "a half-read answer writes nothing at all");
+});
+
+test("runApiToken: every key already valued is skipped; a half-old half-new set is never ok", async () => {
+  const { scriptDir, destDir } = dirs();
+  const removed = [];
+  const runWith = (refusals, { removable = true } = {}) => runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => ({ stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }),
+      save: async (o) => (refusals.includes(o.envKey)
+        ? { ok: false, status: 409, error: API_KEY_SAVE_REFUSALS.has_value }
+        : { ok: true, needs_restart: false }),
+      removeValue: async (o) => { removed.push(o.envKey); return removable; },
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      warn: () => {},
+    },
+  });
+  assert.equal((await runWith(["APP_CLIENT_ID", "APP_CLIENT_SECRET"])).result, "skipped-has-value");
+  assert.deepEqual(removed, [], "nothing of this run's was saved, so there is nothing to take back");
+  // One name already had a value while the other was saved by this run: a mixed set is not a
+  // connection Crow made, so the value it wrote comes back out and the run says failed.
+  const mixed = await runWith(["APP_CLIENT_ID"]);
+  assert.equal(mixed.result, "failed");
+  assert.equal(
+    mixed.reason,
+    "Some of this extension's API settings already had a value while others did not, so Crow took back the values it had just saved",
+  );
+  assert.deepEqual(removed, ["APP_CLIENT_SECRET"], "exactly the value this run saved");
+  assert.equal(JSON.stringify(mixed).includes(CLIENT_SECRET), false, "no value in the answer");
+  // The same mixed set when the value cannot be taken back: still failed, and it says so.
+  removed.length = 0;
+  const stuck = await runWith(["APP_CLIENT_ID"], { removable: false });
+  assert.equal(stuck.result, "failed");
+  assert.equal(
+    stuck.reason,
+    "Crow saved some of this extension's API settings but could not take them back, so some of them are filled in and others are not",
+  );
+  assert.deepEqual(removed, ["APP_CLIENT_SECRET"]);
+  // Any OTHER refusal is a failure, with the save's own fixed sentence (and any earlier value
+  // this run had written is taken back too).
+  const failed = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => ({ stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }),
+      save: async (o) => (o.envKey === "APP_CLIENT_SECRET"
+        ? { ok: false, status: 500, error: API_KEY_SAVE_REFUSALS.keychain }
+        : { ok: true, needs_restart: false }),
+      removeValue: async () => true,
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      warn: () => {},
+    },
+  });
+  assert.equal(failed.result, "failed");
+  assert.equal(failed.reason, API_KEY_SAVE_REFUSALS.keychain);
+  assert.equal(JSON.stringify(failed).includes(CLIENT_SECRET), false);
+});
+
+// ── 4e. a two-value save is all or nothing, from both ends ───────────────────
+
+/** `deps` for a pre-check test: which names already hold a value, and what the run does. */
+function prefillDeps({ inEntry = [], inKeychain = [] } = {}) {
+  const calls = { ran: 0, saved: [] };
+  return {
+    calls,
+    deps: {
+      runner: async () => { calls.ran += 1; return { stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }; },
+      save: async (o) => { calls.saved.push(o.envKey); return { ok: true, needs_restart: false }; },
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      mcpValue: (id, envKey) => (inEntry.includes(envKey) ? CLIENT_ID : ""),
+      hasKeychainRow: async (id, envKey) => inKeychain.includes(envKey),
+      warn: () => {},
+    },
+  };
+}
+
+const PREFILLED_SENTENCE = "Some of this extension's API settings are already filled in and others are not, so Crow left them alone.";
+
+test("runApiToken: a half-filled two-value extension is left alone BEFORE the script runs", async () => {
+  const { scriptDir, destDir } = dirs();
+  // Either source counts as "it already holds a value": its own MCP entry, or an active row.
+  for (const sources of [{ inEntry: ["APP_CLIENT_ID"] }, { inKeychain: ["APP_CLIENT_SECRET"] }]) {
+    const { calls, deps } = prefillDeps(sources);
+    const out = await runApiToken({ bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP, deps });
+    assert.equal(out.result, "failed", JSON.stringify(sources));
+    assert.equal(out.reason, PREFILLED_SENTENCE, JSON.stringify(sources));
+    assert.deepEqual(out.log, []);
+    assert.equal(calls.ran, 0, "the script never runs: there is nothing it could do that is safe");
+    assert.deepEqual(calls.saved, [], "and nothing is saved");
+    assert.equal(JSON.stringify(out).includes(CLIENT_ID), false);
+  }
+});
+
+test("runApiToken: a two-value extension that already holds every value is skipped, script not run", async () => {
+  const { scriptDir, destDir } = dirs();
+  const { calls, deps } = prefillDeps({ inEntry: ["APP_CLIENT_ID"], inKeychain: ["APP_CLIENT_SECRET"] });
+  const out = await runApiToken({ bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP, deps });
+  assert.deepEqual(out, { result: "skipped-has-value", log: [] });
+  assert.equal(calls.ran, 0);
+  assert.deepEqual(calls.saved, []);
+});
+
+test("runApiToken: a PLACEHOLDER is not a value, so a two-value run still goes ahead", async () => {
+  const { scriptDir, destDir } = dirs();
+  let runnerRan = 0;
+  const out = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => { runnerRan += 1; return { stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }; },
+      save: async () => ({ ok: true, needs_restart: false }),
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      mcpValue: () => "change-me",
+      hasKeychainRow: () => false,
+      warn: () => {},
+    },
+  });
+  assert.equal(runnerRan, 1, "a placeholder is what Crow itself wrote as a default, not the owner's value");
+  assert.equal(out.result, "ok");
+});
+
+test("runApiToken: a later save that answers has_value takes the earlier value back", async () => {
+  const { scriptDir, destDir } = dirs();
+  const removed = [];
+  const out = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => ({ stdout: "minted two\n", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }),
+      save: async (o) => (o.envKey === "APP_CLIENT_SECRET"
+        ? { ok: false, status: 409, error: API_KEY_SAVE_REFUSALS.has_value }
+        : { ok: true, needs_restart: true }),
+      removeValue: async (o) => { removed.push(o); return true; },
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      warn: () => {},
+    },
+  });
+  assert.equal(out.result, "failed", "never ok: the extension would hold a new id beside an old secret");
+  assert.equal(
+    out.reason,
+    "Some of this extension's API settings already had a value while others did not, so Crow took back the values it had just saved",
+  );
+  assert.deepEqual(removed.map((r) => [r.bundleId, r.envKey]), [["demo-app", "APP_CLIENT_ID"]], "the value this run saved, and only that one");
+  assert.equal("mcpEnvUpdated" in out, false, "nothing was left written, so nothing needs a restart");
+  assert.equal(JSON.stringify(out).includes(CLIENT_ID), false);
+  assert.equal(JSON.stringify(out).includes(CLIENT_SECRET), false);
+});
+
+test("runApiToken: a later save that THROWS takes the earlier value back too", async () => {
+  const { scriptDir, destDir } = dirs();
+  for (const removal of [{ seam: async () => true, reason: "Crow could not save the app's API token" }, { seam: async () => false, reason: null }]) {
+    const removed = [];
+    const out = await runApiToken({
+      bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+      deps: {
+        runner: async () => ({ stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }),
+        save: async (o) => {
+          if (o.envKey === "APP_CLIENT_SECRET") throw new Error("boom");
+          return { ok: true, needs_restart: false };
+        },
+        removeValue: async (o) => { removed.push(o.envKey); return removal.seam(); },
+        stillInstalled: STILL,
+        adminPassword: async () => PASSWORD,
+        warn: () => {},
+      },
+    });
+    assert.equal(out.result, "failed");
+    assert.deepEqual(removed, ["APP_CLIENT_ID"], "the id this run had already saved is removed");
+    assert.equal(
+      out.reason,
+      removal.reason ?? "Crow saved some of this extension's API settings but could not take them back, so some of them are filled in and others are not",
+    );
+  }
+  // A removal seam that itself throws is the same answer, never a half-reported ok.
+  const out = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => ({ stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }),
+      save: async (o) => (o.envKey === "APP_CLIENT_SECRET" ? { ok: false, status: 500, error: API_KEY_SAVE_REFUSALS.keychain } : { ok: true }),
+      removeValue: async () => { throw new Error("keychain closed"); },
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      warn: () => {},
+    },
+  });
+  assert.equal(out.result, "failed");
+  assert.match(out.reason, /could not take them back/);
+});
+
+test("runApiToken: a refused multi-value answer hides each bare value, not only whole lines", async () => {
+  const { scriptDir, destDir } = dirs();
+  // The answer is unusable (a line too many), so `values` stays null: nothing but the fd-3
+  // text knows the values, while the script's own stdout and stderr quote one of them.
+  const out = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => {
+        throw Object.assign(new Error("exit 1"), {
+          exitCode: 1,
+          stdout: `minted ${CLIENT_SECRET}\n`,
+          stderr: `could not use ${CLIENT_SECRET}\n`,
+          secret: `APP_CLIENT_ID=${CLIENT_ID}\nAPP_CLIENT_SECRET=${CLIENT_SECRET}\nEXTRA=x\n`,
+        });
+      },
+      save: async () => ({ ok: true, needs_restart: false }),
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      warn: () => {},
+    },
+  });
+  assert.equal(out.result, "failed");
+  assert.equal(out.log.join("\n").includes(CLIENT_SECRET), false, out.log.join("\n"));
+  assert.equal(String(out.reason).includes(CLIENT_SECRET), false, out.reason);
+  assert.match(out.reason, /\[hidden\]/, "the value's place in the reason is kept, the value is not");
+  assert.equal(JSON.stringify(out).includes(CLIENT_SECRET), false);
+});
+
+// ── 4d. `stdin: "admin-password"`: the keychain's admin password, one line ─────
+
+test("runApiToken: the keychain's admin password is written to stdin, and nowhere else", async () => {
+  const { scriptDir, destDir } = dirs();
+  const calls = { runner: [], asked: [] };
+  const captured = captureWarn();
+  let out;
+  try {
+    out = await runApiToken({
+      bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, crowHome: "/tmp/scratch-home", installStamp: STAMP,
+      deps: {
+        runner: async (cmd, args, opts) => {
+          calls.runner.push({ cmd, args, opts });
+          return { stdout: "signed in\n", stderr: "", secret: MULTI_ANSWER, secretOverflow: false };
+        },
+        save: async () => ({ ok: true, needs_restart: false }),
+        stillInstalled: STILL,
+        adminPassword: async (o) => { calls.asked.push(o); return PASSWORD; },
+        warn: (m) => console.warn(m),
+      },
+    });
+  } finally {
+    captured.restore();
+  }
+  assert.equal(out.result, "ok");
+  assert.equal(calls.runner.length, 1);
+  assert.equal(calls.runner[0].opts.input, `${PASSWORD}\n`, "ONE line on stdin, exactly like the first-admin protocol");
+  assert.deepEqual(calls.asked, [{ bundleId: "demo-app", envKey: "APP_ADMIN_PASSWORD", crowHome: "/tmp/scratch-home" }]);
+  // Nowhere near an environment variable, an argument, a log line or the answer.
+  assert.equal(Object.values(calls.runner[0].opts.env).includes(PASSWORD), false);
+  assert.equal(calls.runner[0].args.join(" ").includes(PASSWORD), false);
+  assert.equal(JSON.stringify(out).includes(PASSWORD), false);
+  assert.equal(captured.lines.join("\n").includes(PASSWORD), false, "the password never reaches a log line");
+});
+
+test("runApiToken: a password the script prints is scrubbed out of the log and the reason", async () => {
+  const { scriptDir, destDir } = dirs();
+  const out = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => ({ stdout: `signing in as admin with ${PASSWORD}\n`, stderr: `debug: ${PASSWORD}\n`, secret: MULTI_ANSWER, secretOverflow: false }),
+      save: async () => ({ ok: true, needs_restart: false }),
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      warn: () => {},
+    },
+  });
+  assert.equal(out.result, "ok");
+  assert.deepEqual(out.log, ["signing in as admin with [hidden]", "debug: [hidden]"]);
+  assert.equal(JSON.stringify(out).includes(PASSWORD), false);
+  // ...and on a failure path too, where the script names it in the reason.
+  const failed = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => { throw Object.assign(new Error("exit 1"), { exitCode: 1, stdout: "", stderr: `login refused for ${PASSWORD}` }); },
+      save: async () => ({ ok: true, needs_restart: false }),
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      warn: () => {},
+    },
+  });
+  assert.equal(failed.result, "failed");
+  assert.equal(failed.reason.includes(PASSWORD), false, failed.reason);
+  assert.match(failed.reason, /\[hidden\]/);
+});
+
+test("runApiToken: no admin password in the keychain means nothing runs, and no value is guessed", async () => {
+  const { scriptDir, destDir } = dirs();
+  for (const answer of [null, "", undefined]) {
+    let runnerRan = 0;
+    const out = await runApiToken({
+      bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+      deps: {
+        runner: async () => { runnerRan += 1; return { stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }; },
+        save: async () => { throw new Error("must not be called"); },
+        stillInstalled: STILL,
+        adminPassword: async () => answer,
+        warn: () => {},
+      },
+    });
+    assert.equal(out.result, "failed", String(answer));
+    assert.match(out.reason, /no admin password saved for this app/);
+    assert.equal(out.log.length, 0);
+    assert.equal(runnerRan, 0, "the script is not run without a password to sign in with");
+  }
+  // A keychain reader that cannot answer is the same answer, never a throw.
+  const broken = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => { throw new Error("must not run"); },
+      save: async () => ({}),
+      stillInstalled: STILL,
+      adminPassword: async () => { throw new Error("keychain closed"); },
+      warn: () => {},
+    },
+  });
+  assert.equal(broken.result, "failed");
+  assert.match(broken.reason, /no admin password saved for this app/);
+});
+
+test("runApiToken: an env-admin manifest without a user names none, and stdin stays closed without `stdin`", async () => {
+  const { scriptDir, destDir } = dirs();
+  const calls = [];
+  const manifest = {
+    ...ENV_ADMIN,
+    firstAdmin: { ...ENV_ADMIN.firstAdmin, token: { script: "scripts/api-token.sh", env: "APP_API_TOKEN" } },
+  };
+  const out = await runApiToken({
+    bundleId: "demo-app", manifest, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async (cmd, args, opts) => { calls.push(opts); return { stdout: "", stderr: "", secret: `${TOKEN}\n`, secretOverflow: false }; },
+      save: async () => ({ ok: true, needs_restart: false }),
+      stillInstalled: STILL,
+      warn: () => {},
+    },
+  });
+  assert.equal(out.result, "ok");
+  assert.equal("input" in calls[0], false, "no stdin without the declaration");
+  assert.equal("CROW_FIRST_ADMIN_USER" in calls[0].env, false, "an empty username is not passed as a default to fall back from");
+});
+
+test("runApiToken: the real keychain reader hands the admin password to the script on stdin", async () => {
+  // No injected reader: the default one opens this instance's crow.db, loads the keychain key
+  // from CROW_HOME and opens the bundle's `firstAdmin.secretEnv` row — the same reader the
+  // first-admin path keeps its password with.
+  const Database = (await import("better-sqlite3")).default;
+  const { KEYCHAIN_DDL } = await import("../servers/gateway/keychain/schema.js");
+  const { createKeychainKey } = await import("../servers/gateway/keychain/key.js");
+  const { saveExtensionSecret } = await import("../servers/gateway/keychain/store.js");
+
+  const home = mkdtempSync(join(TMP, "home-"));
+  const dbDir = mkdtempSync(join(TMP, "db-"));
+  const dbPath = join(dbDir, "crow.db");
+  const raw = new Database(dbPath);
+  try {
+    raw.exec(KEYCHAIN_DDL);
+    const wrapper = {
+      async execute(q) {
+        const { sql, args = [] } = typeof q === "string" ? { sql: q } : q;
+        const st = raw.prepare(sql);
+        if (st.reader) return { rows: st.all(...args) };
+        const r = st.run(...args);
+        return { rows: [], lastInsertRowid: r.lastInsertRowid, rowsAffected: r.changes };
+      },
+      async executeMultiple(sql) { raw.exec(sql); },
+    };
+    const key = createKeychainKey({ crowHome: home });
+    await saveExtensionSecret(wrapper, key, {
+      bundleId: "demo-app",
+      envKey: "APP_ADMIN_PASSWORD",
+      label: "Demo App — admin login",
+      secret: PASSWORD,
+      origin: "generated",
+    });
+
+    const previous = process.env.CROW_DB_PATH;
+    process.env.CROW_DB_PATH = dbPath;
+    try {
+      const { scriptDir, destDir } = dirs();
+      const seen = [];
+      const out = await runApiToken({
+        bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, crowHome: home, installStamp: STAMP,
+        deps: {
+          runner: async (cmd, args, opts) => { seen.push(opts); return { stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }; },
+          save: async () => ({ ok: true, needs_restart: false }),
+          stillInstalled: STILL,
+          warn: () => {},
+        },
+      });
+      assert.equal(out.result, "ok");
+      assert.equal(seen[0].input, `${PASSWORD}\n`, "the keychain row really is what the script gets");
+      assert.equal(JSON.stringify(out).includes(PASSWORD), false);
+    } finally {
+      if (previous === undefined) delete process.env.CROW_DB_PATH;
+      else process.env.CROW_DB_PATH = previous;
+    }
+  } finally {
+    try { raw.close(); } catch { /* already closed */ }
+  }
+});
+
 // ── 5. the contract can express a token step ───────────────────────────────────────
 
 test("the manifest schema carries firstAdmin.setup.token, so a bundle can declare one", () => {
@@ -589,7 +1211,12 @@ test("the manifest schema carries firstAdmin.setup.token, so a bundle can declar
   const setup = schema.properties.firstAdmin.properties.setup;
   assert.ok(setup.properties.token, "firstAdmin.setup.token is declared");
   assert.deepEqual(setup.properties.token.required, ["script", "env"]);
-  assert.deepEqual(Object.keys(setup.properties.token.properties).sort(), ["env", "script", "timeout_s"]);
+  assert.deepEqual(Object.keys(setup.properties.token.properties).sort(), ["env", "script", "stdin", "timeout_s"]);
+  // ...and so is the via "env" location, beside secretEnv.
+  const fa = schema.properties.firstAdmin.properties;
+  assert.ok(fa.token, "firstAdmin.token is declared for a via \"env\" admin");
+  assert.deepEqual(fa.token.required, ["script", "env"]);
+  assert.deepEqual(Object.keys(fa.token.properties).sort(), ["env", "script", "stdin", "timeout_s"]);
 });
 
 // ── 6. spawnGroup's secretFd ───────────────────────────────────────────────────────

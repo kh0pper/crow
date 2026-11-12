@@ -320,6 +320,9 @@ function validateCrowFirstAdmin(manifest, bundleDir, fa) {
       const declared = typeof fa.userEnv === "string" && envVars.some((v) => v && v.name === fa.userEnv);
       if (!declared) errors.push(`firstAdmin: userEnv must name a declared env_vars entry`);
     }
+    // The app's own API token (`firstAdmin.token`, the sibling of secretEnv): an env-admin app
+    // has no setup script to hang the block under, so it lives one level up.
+    errors.push(...validateApiTokenStep(manifest, bundleDir));
   } else {
     if (!manifest.postInstall) {
       errors.push(`firstAdmin: mode "crow" via "postInstall" needs a postInstall script`);
@@ -388,16 +391,29 @@ function validateSetupFirstAdmin(manifest, bundleDir, fa) {
     errors.push(...firstAdminAfterProblems(manifest));
     // `setup.token` (the app's own API token): the declaration's rules, and the script it
     // names has to ship in the bundle like every other declared script.
-    errors.push(...apiTokenProblems(manifest));
-    const tokenSetup = setup.token && typeof setup.token === "object" && !Array.isArray(setup.token) ? setup.token : null;
-    const tokenScript = tokenSetup ? tokenSetup.script : undefined;
-    if (typeof tokenScript === "string" && !isAbsolute(tokenScript) && !tokenScript.split(/[\\/]/).includes("..") && tokenScript.endsWith(".sh") && !fileExists(bundleDir, tokenScript)) {
-      errors.push(`firstAdmin: setup.token.script "${tokenScript}" not found`);
-    }
+    errors.push(...validateApiTokenStep(manifest, bundleDir));
   }
   if (fa.userEnv !== undefined) {
     const declared = typeof fa.userEnv === "string" && envVars.some((v) => v && v.name === fa.userEnv);
     if (!declared) errors.push(`firstAdmin: userEnv must name a declared env_vars entry`);
+  }
+  return errors;
+}
+
+/**
+ * The app's own API token (`firstAdmin.setup.token` for a `via: "setup"` admin,
+ * `firstAdmin.token` for a `via: "env"` one): the declaration's own rules (apiTokenProblems —
+ * one env name or an array of them, `stdin`, the timeout) plus the script having to ship in
+ * the bundle like every other declared script.
+ */
+function validateApiTokenStep(manifest, bundleDir) {
+  const errors = [...apiTokenProblems(manifest)];
+  const fa = manifest && manifest.firstAdmin && typeof manifest.firstAdmin === "object" ? manifest.firstAdmin : {};
+  const block = fa.via === "env" ? fa.token : fa.setup && typeof fa.setup === "object" ? fa.setup.token : undefined;
+  const label = fa.via === "env" ? "token" : "setup.token";
+  const script = block && typeof block === "object" && !Array.isArray(block) ? block.script : undefined;
+  if (typeof script === "string" && !isAbsolute(script) && !script.split(/[\\/]/).includes("..") && script.endsWith(".sh") && !fileExists(bundleDir, script)) {
+    errors.push(`firstAdmin: ${label}.script "${script}" not found`);
   }
   return errors;
 }
