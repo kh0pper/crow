@@ -1013,6 +1013,144 @@ test("closeWorkerAdapter drops the watch with the connection, so a restart re-ar
   await h.supervisor.stop();
 });
 
+/* ----------------------------------- a stale failure handler has no effect (m1) */
+
+/**
+ * One supervisor whose FIRST adapter's `close()` parks on a promise the test releases, and whose
+ * start has already settled: `releaseClose()` is how a test suspends a failure handler at its first
+ * await — `recordFailure` and `recordAuthFailure` both close the worker's connection before they
+ * write anything — and then pokes at the supervisor while the handler is held there.
+ */
+async function setupHeldClose(options = {}) {
+  let inner = null;
+  let hold = true;
+  let release = null;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const h = await setup({
+    ...options,
+    start: false,
+    adapterFactory: async (args) => {
+      const view = await inner(args);
+      const realClose = view.close.bind(view);
+      view.close = async () => {
+        if (hold) {
+          hold = false;
+          await gate;
+        }
+        return realClose();
+      };
+      return view;
+    },
+  });
+  inner = h.factory;
+  await h.supervisor.start();
+  return { ...h, releaseClose: () => release() };
+}
+
+test("a stale recordFailure arms no back-off and leaves the fresh run's state alone", async () => {
+  const h = await setupHeldClose();
+  const state = () => getSyncState(h.db, h.accountId);
+
+  // The first failure of the run is parked inside the close its handler starts with, so the run is
+  // still the worker's in-flight one when the restart lands.
+  h.fake.failNext("listFolders", netError());
+  const failing = h.supervisor.syncNow(h.accountId);
+  await flush(40);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(300);
+  const fresh = h.views.at(-1);
+  assert.equal(h.secrets.at(-1), "second-secret");
+  assert.equal(fresh.state.closed, false);
+  const timers = h.clock.pending();
+  const notices = h.notices.length;
+
+  h.releaseClose();
+  await failing;
+  await flush(200);
+
+  // The stale handler wrote nothing over the fresh run and armed nothing behind it.
+  const current = await state();
+  assert.equal(current.state, "idle");
+  assert.equal(current.errorCode, null);
+  assert.equal(current.failures, 0);
+  assert.equal(current.backoffUntil, null);
+  assert.equal(h.clock.pending(), timers);
+  assert.equal(h.notices.length, notices);
+  assert.equal(fresh.state.closed, false);
+});
+
+test("a stale recordAuthFailure does not mark the fresh run's account auth_failed", async () => {
+  const h = await setupHeldClose();
+
+  h.fake.failNext("listFolders", new MailError("AUTH_FAILED"));
+  const failing = h.supervisor.syncNow(h.accountId);
+  await flush(40);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(300);
+  const fresh = h.views.at(-1);
+  assert.equal(fresh.state.closed, false);
+  const timers = h.clock.pending();
+  assert.equal(h.notices.length, 0);
+
+  h.releaseClose();
+  await failing;
+  await flush(200);
+
+  const account = await getAccount(h.db, h.accountId);
+  assert.equal(account.status, "active");
+  assert.equal(account.statusDetail, null);
+  const current = await getSyncState(h.db, h.accountId);
+  assert.equal(current.state, "idle");
+  assert.equal(current.errorCode, null);
+  assert.equal(h.notices.length, 0);
+  assert.equal(h.clock.pending(), timers);
+  assert.equal(fresh.state.closed, false);
+});
+
+test("a stale deadline handler writes no back-off over the fresh run", async () => {
+  const h = await setupHeldClose();
+
+  h.fake.hangNext("list");
+  const hung = h.supervisor.syncNow(h.accountId);
+  await flush(20);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+
+  await h.clock.advance(SYNC_DEADLINE_MS);
+  await flush(40);
+  assert.equal((await h.supervisor.status(h.accountId)).running, false);
+
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(300);
+  const fresh = h.views.at(-1);
+  assert.equal(fresh.state.closed, false);
+  const listsBeforeRelease = callsOf(h.fake, "listFolders").length;
+  const timers = h.clock.pending();
+  const notices = h.notices.length;
+
+  h.releaseClose();
+  await hung;
+  await flush(200);
+
+  const current = await getSyncState(h.db, h.accountId);
+  assert.equal(current.state, "idle");
+  assert.equal(current.errorCode, null);
+  assert.equal(current.failures, 0);
+  assert.equal(current.backoffUntil, null);
+  assert.equal(h.clock.pending(), timers);
+  assert.equal(h.notices.length, notices);
+  assert.equal(fresh.state.closed, false);
+  assert.equal(callsOf(h.fake, "listFolders").length, listsBeforeRelease);
+});
+
 /* ------------------------------------------------------------------ no leakage */
 
 test("start never throws: a factory that cannot connect is a code in the log and a back-off", async () => {
@@ -1329,6 +1467,8 @@ test("a connection that lands after the run timed out is closed, never adopted",
   await flush(120);
   assert.equal(h.views.length, 1);
   assert.equal(h.views[0].state.closed, true);
+  // The late connection never carried a pass: no listing was asked of it after the deadline.
+  assert.deepEqual(h.views[0].state.calls.filter((method) => method === "listFolders" || method === "list"), []);
   assert.equal((await h.supervisor.status(h.accountId)).watching, false);
 
   // The next run builds its own connection instead of inheriting the abandoned one.

@@ -51,6 +51,14 @@
  * `ACTION_DEADLINE_MS` timer too, armed before the connection is opened — a handshake that never
  * answers is bounded like a call that never does, and the connection it finally gets is closed.
  *
+ * **A handler that was overtaken does nothing.** Every failure path awaits — a close, a state read, a
+ * write, a notice — and any of those may span a `restartAccount`, a `stop()` or a lost claim. A
+ * worker therefore carries an `epoch`: `restartAccount`, `stop()` and `becomeClaimed` bump it, and a
+ * handler that captured it at entry returns without further effect the moment it no longer matches
+ * (or the supervisor is no longer live). A stale handler never counts a failure on top of the fresh
+ * worker's state, never arms a back-off, never writes a status and never notifies; it never closes
+ * the connection either, because `worker.adapter` is the fresh run's by then.
+ *
  * **A stopped supervisor opens nothing.** After `stop()` the adapters, watchers and timers are gone
  * for good: `syncNow`, `requestSync` and `restartAccount` resolve without touching an account,
  * `withAdapter` refuses with NETWORK/`stopped` before it connects, and a connection that finishes
@@ -211,6 +219,16 @@ export function createMailSupervisor(options = {}) {
   const live = () => stopped !== true;
   const running = () => started === true && stopped !== true;
 
+  /** This worker is being torn down and started over: everything suspended in it is stale now. */
+  function supersede(worker) {
+    worker.epoch += 1;
+  }
+
+  /** Whether a failure handler that captured `epoch` may still act on this worker. */
+  function current(worker, epoch) {
+    return live() && worker.epoch === epoch;
+  }
+
   function logEvent(event, extra = {}) {
     try {
       logSink({ event, ...extra });
@@ -255,6 +273,9 @@ export function createMailSupervisor(options = {}) {
         authFailed: account.status === "auth_failed",
         syncable: account.status === "active",
         tick: 0,
+        // Bumped whenever this worker is torn down and started over (a restart, `stop()`, a lost
+        // claim): a failure handler that captured an older value is stale and must not write again.
+        epoch: 0,
         // Per-kind notice stamps in memory, beside the one persisted `last_notice_at` column.
         noticeAt: { failing: null, auth: null },
       };
@@ -494,10 +515,11 @@ export function createMailSupervisor(options = {}) {
    * outcome (and a success re-arms the watch), so it is left alone here.
    */
   async function onWatchError(worker, err) {
+    const epoch = worker.epoch;
     stopWatcher(worker);
     if (!live() || worker.claimed || worker.authFailed || !worker.syncable) return;
     if (worker.inflight != null) return;
-    await recordFailure(worker, toMailError(err));
+    await recordFailure(worker, toMailError(err), epoch);
   }
 
   /* ----------------------------------------------------------------------- runs */
@@ -655,16 +677,20 @@ export function createMailSupervisor(options = {}) {
 
   /** A run failed: the connection is dropped and the code decides between AUTH_FAILED and the ladder. */
   async function onRunFailure(worker, mailErr) {
-    if (worker.claimed) return;
+    const epoch = worker.epoch;
+    if (!current(worker, epoch) || worker.claimed) return;
     await closeWorkerAdapter(worker);
+    // The close may have spanned a restart or a stop: the connection it dropped was the old run's,
+    // and nothing about the worker that replaced it may be touched from here.
+    if (!current(worker, epoch)) return;
     if (mailErr.code === "AUTH_FAILED") {
-      await recordAuthFailure(worker, mailErr);
+      await recordAuthFailure(worker, mailErr, epoch);
       return;
     }
     // Everything else — a connection fault, a bad setting, a missing item, a changed message — takes
     // the same ladder. A fault that does not clear on its own then still gets a retry and, at the
     // threshold, one notice, instead of being logged once and forgotten.
-    await recordFailure(worker, mailErr);
+    await recordFailure(worker, mailErr, epoch);
   }
 
   /** The hard deadline: close the adapter (unblocking a hung socket) and take the back-off path. */
@@ -675,10 +701,11 @@ export function createMailSupervisor(options = {}) {
     if (worker.inflight === run) worker.inflight = null;
     // The pending flag is kept, exactly as for a run that threw: the retry after the back-off is a
     // full sync, so a request that arrived during the hung run is covered by it.
+    const epoch = worker.epoch;
     void (async () => {
       try {
         if (worker.claimed) return;
-        await recordFailure(worker, new MailError("TIMEOUT", "sync_deadline"));
+        await recordFailure(worker, new MailError("TIMEOUT", "sync_deadline"), epoch);
       } catch (err) {
         logError("deadline_failed", err, { accountId: worker.accountId });
       } finally {
@@ -712,12 +739,19 @@ export function createMailSupervisor(options = {}) {
   /**
    * Count one consecutive failure, persist the ladder, write the one notice that is due, and arm the
    * retry. Nothing here deletes, resets or re-reads stored mail.
+   *
+   * `epoch` is the worker's at the moment the failing run was reported; every await below can span a
+   * restart, a stop or a lost claim, and each one is followed by the same guard. A superseded handler
+   * stops there: the fresh worker's state, timers and connection are not its to touch.
    */
-  async function recordFailure(worker, mailErr) {
+  async function recordFailure(worker, mailErr, epoch = worker.epoch) {
+    if (!current(worker, epoch)) return;
     stopWatcher(worker);
     await closeWorkerAdapter(worker);
+    if (!current(worker, epoch)) return;
 
     const previous = await stateOrNull(worker.accountId);
+    if (!current(worker, epoch)) return;
     const failures = Number(previous?.failures ?? 0) + 1;
     const delay = backoffDelay(failures, random);
     await writeState(worker.accountId, {
@@ -726,16 +760,22 @@ export function createMailSupervisor(options = {}) {
       failures,
       backoffUntil: now() + delay,
     });
+    if (!current(worker, epoch)) return;
     // At the threshold and on every failure after it: from here on the gap is what decides whether a
     // notice goes out (see maybeFailingNotice), so a long outage is mentioned about once a day.
-    if (failures >= FAILURES_BEFORE_NOTICE) await maybeFailingNotice(worker, previous);
+    if (failures >= FAILURES_BEFORE_NOTICE) {
+      await maybeFailingNotice(worker, previous, epoch);
+      if (!current(worker, epoch)) return;
+    }
     armBackoff(worker, delay);
     logEvent("sync_backoff", { accountId: worker.accountId, code: mailErr.code, failures });
   }
 
   /** A refused sign-in is terminal until the owner acts: marked, noticed once, and never retried. */
-  async function recordAuthFailure(worker, mailErr) {
+  async function recordAuthFailure(worker, mailErr, epoch = worker.epoch) {
+    if (!current(worker, epoch)) return;
     const before = await accountOrNull(worker.accountId);
+    if (!current(worker, epoch)) return;
     // The notice belongs to the transition into auth_failed, not to the outage the account was
     // already in: a password the owner has just re-entered gets its own notice, even when a
     // "sync is failing" notice went out a minute earlier.
@@ -746,13 +786,17 @@ export function createMailSupervisor(options = {}) {
     worker.backoffTimer = disarm(worker.backoffTimer);
     stopWatcher(worker);
     await closeWorkerAdapter(worker);
+    if (!current(worker, epoch)) return;
     await writeAccount(worker.accountId, { status: "auth_failed", statusDetail: "AUTH_FAILED" });
+    if (!current(worker, epoch)) return;
     await writeState(worker.accountId, {
       state: "auth_failed",
       errorCode: "AUTH_FAILED",
       backoffUntil: null,
     });
-    if (enteringAuthFailed) await sendNotice(worker, "auth");
+    if (!current(worker, epoch)) return;
+    if (enteringAuthFailed) await sendNotice(worker, "auth", epoch);
+    if (!current(worker, epoch)) return;
     logEvent("sync_auth_failed", { accountId: worker.accountId, code: mailErr.code });
   }
 
@@ -763,13 +807,16 @@ export function createMailSupervisor(options = {}) {
    * transition into `auth_failed` only and never consults the gap. Both kinds write that one shared
    * `last_notice_at` column.
    */
-  async function sendNotice(worker, kind) {
+  async function sendNotice(worker, kind, epoch = worker.epoch) {
+    if (!current(worker, epoch)) return;
     // The in-memory stamp goes down BEFORE the first await. Two failures recorded at the same moment
     // both reach the gate before either has written the persisted stamp, and this is what makes the
     // second one see that the notice is already going out and stay quiet.
     const stampAt = now();
     worker.noticeAt[kind] = stampAt;
     const account = await accountOrNull(worker.accountId);
+    // A restart or a stop while the label was read: a notice about a run that is over is not sent.
+    if (!current(worker, epoch)) return;
     const label = typeof account?.label === "string" && account.label !== "" ? account.label : "this account";
     const title = kind === "auth" ? "Crow Mail cannot sign in" : "Mail sync is failing";
     const body = kind === "auth"
@@ -779,6 +826,7 @@ export function createMailSupervisor(options = {}) {
     // The stamps are written before the notice: a notice that cannot be delivered must not be repeated
     // on every failure for the next twenty-four hours.
     await writeState(worker.accountId, { lastNoticeAt: stampAt });
+    if (!current(worker, epoch)) return;
     try {
       await notifyOwner(title, body);
       logEvent("notice_sent", { accountId: worker.accountId, kind });
@@ -800,12 +848,13 @@ export function createMailSupervisor(options = {}) {
    * column and does not change): this gate compares it (and its own in-memory stamp) against the gap;
    * the AUTH_FAILED notice never consults them, so a "sync is failing" notice cannot silence it.
    */
-  async function maybeFailingNotice(worker, previous) {
+  async function maybeFailingNotice(worker, previous, epoch = worker.epoch) {
+    if (!current(worker, epoch)) return;
     const stored = Number(previous?.lastNoticeAt);
     const memory = Number(worker.noticeAt?.failing);
     const last = Math.max(Number.isFinite(stored) ? stored : 0, Number.isFinite(memory) ? memory : 0);
     if (last > 0 && now() - last < NOTICE_GAP_MS) return;
-    await sendNotice(worker, "failing");
+    await sendNotice(worker, "failing", epoch);
   }
 
   /* ---------------------------------------------------------------------- claim */
@@ -826,6 +875,8 @@ export function createMailSupervisor(options = {}) {
   }
 
   async function becomeClaimed(worker) {
+    // This worker is being torn down for good: a failure handler suspended in it has no effect now.
+    supersede(worker);
     worker.claimed = true;
     worker.syncable = false;
     worker.pollTimer = disarm(worker.pollTimer);
@@ -1180,6 +1231,9 @@ export function createMailSupervisor(options = {}) {
     const account = await getAccount(db, accountId);
     if (!account) throw new MailError("NOT_FOUND", "account");
     const worker = workerFor(account);
+    // Everything the old worker had in flight is stale from here: a failure handler suspended in it
+    // must not count its failure, arm its back-off or write its status over the run below.
+    supersede(worker);
     await closeActionAdapter(accountId);
     worker.backoffTimer = disarm(worker.backoffTimer);
     // The run in flight belongs to the OLD password, so it is ended here, before its connection is
@@ -1309,6 +1363,7 @@ export function createMailSupervisor(options = {}) {
 
     const closes = [];
     for (const worker of workers.values()) {
+      supersede(worker);
       worker.pollTimer = disarm(worker.pollTimer);
       worker.backoffTimer = disarm(worker.backoffTimer);
       stopWatcher(worker);
