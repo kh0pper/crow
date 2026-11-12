@@ -164,6 +164,22 @@ const blocksOf = (timeline) => activeSegments(timeline).map((s) => s.block);
 const typesOf = (timeline) => timeline.segments.map((s) => s.type);
 const deep = (value) => JSON.parse(JSON.stringify(value));
 
+/** A segment with the block it belongs to left out. */
+const withoutBlock = (segment) => {
+  const copy = { ...segment };
+  delete copy.block;
+  return copy;
+};
+
+/** Where a recompiled timeline parts company with an old one, block aside. */
+function firstChangedIgnoringBlock(fresh, old) {
+  const common = Math.min(fresh.length, old.length);
+  for (let i = 0; i < common; i += 1) {
+    if (JSON.stringify(withoutBlock(fresh[i])) !== JSON.stringify(withoutBlock(old[i]))) return i;
+  }
+  return old.length;
+}
+
 /* ---------- tests ---------- */
 
 test("the same input compiles to a deep-equal timeline and leaves the library alone", () => {
@@ -716,6 +732,64 @@ test("running through everything ends the clock, once", () => {
   assert.equal(types.filter((t) => t === "end").length, 1, "the end is announced once");
 });
 
+test("a stretch that runs past the end adds only the time it spent", () => {
+  const timeline = compileTimeline("routine-a", LIB);
+  const { clock, advance } = makeClock(timeline);
+  clock.play();
+
+  advance(timeline.totalSeconds + 10);
+  const state = clock.tick();
+  const last = timeline.segments[timeline.segments.length - 1];
+
+  assert.equal(state.ended, true);
+  assert.equal(state.elapsed, timeline.totalSeconds, "the ten seconds after the end are dropped");
+  assert.equal(state.activeSeconds[0], activeTotalOf(timeline.segments));
+  assert.equal(state.segmentElapsed, last.seconds);
+});
+
+test("play and setTimeline account for the time since the last read", () => {
+  const timeline = compileTimeline("routine-a", LIB);
+
+  const again = makeClock(timeline);
+  again.clock.play();
+  again.advance(5);
+  again.clock.play();
+  again.advance(3);
+  assert.equal(again.clock.tick().elapsed, 8, "the five seconds before a second play() still count");
+
+  const swapped = makeClock(timeline);
+  swapped.clock.play();
+  swapped.advance(5);
+  swapped.clock.setTimeline(timeline);
+  swapped.advance(3);
+  assert.equal(swapped.clock.tick().elapsed, 8, "the five seconds before the swap still count");
+});
+
+test("setTimeline never drops a count already earned", () => {
+  const twoChunks = compileSession([{ chunkId: "routine-a" }, { chunkId: "walk-a" }], LIB);
+  const oneChunk = compileTimeline("routine-a", LIB);
+
+  const { clock, advance } = makeClock(twoChunks);
+  clock.play();
+  advance(twoChunks.segments[0].seconds + twoChunks.segments[1].seconds);
+  const running = clock.tick();
+  assert.equal(running.activeSeconds.length, 2);
+  const earned = running.activeSeconds.slice();
+  assert.ok(earned[0] > 0);
+
+  const shrunk = clock.setTimeline(oneChunk);
+  assert.equal(shrunk.activeSeconds.length, 2, "the longer of the two arrays is kept");
+  assert.deepEqual(shrunk.activeSeconds, earned, "no earned second is dropped");
+
+  // The other way round: the array grows, by zeros, to the new chunk count.
+  const grown = makeClock(oneChunk);
+  grown.clock.play();
+  grown.advance(10);
+  grown.clock.tick();
+  const wider = grown.clock.setTimeline(twoChunks);
+  assert.deepEqual(wider.activeSeconds, [10, 0]);
+});
+
 test("extend with a round mid-session keeps elapsed and activeSeconds", () => {
   const base = compileSession([{ chunkId: "routine-a" }], LIB);
   const { clock, advance } = makeClock(base);
@@ -793,7 +867,7 @@ test("extend at the end appends a chunk and setTimeline un-ends at the first new
 });
 
 test("extend never mutates the timeline it is given", () => {
-  const base = compileSession([{ chunkId: "routine-a" }, { chunkId: "walk-a" }], LIB);
+  const base = compileSession([{ chunkId: "walk-a" }, { chunkId: "routine-a" }], LIB);
   const before = deep(base);
 
   const byRound = extend(base, { segmentIndex: 2 }, LIB, { addRound: true });
@@ -808,6 +882,139 @@ test("extend never mutates the timeline it is given", () => {
   assert.notEqual(byRound.segments, base.segments);
   assert.deepEqual(byChunk.opts, base.opts, "the timeline's own opts carry over");
   assert.notEqual(byChunk.chain[0], base.chain[0], "the chain items are copies too");
+});
+
+test("a round added to a finished flow never replays its closing hold", () => {
+  const old = compileTimeline("flow-a", LIB);
+  const fresh = compileSession([{ chunkId: "flow-a", extraRounds: 1 }], LIB);
+  const last = old.segments.length - 1;
+
+  // The closing hold of the old flow is a plain hold once a round follows it,
+  // and that is the only thing about it that changes.
+  assert.equal(old.segments[last].type, "hold");
+  assert.equal(old.segments[last].block, "cooldown");
+  assert.equal(fresh.segments[last].type, "hold");
+  assert.equal(fresh.segments[last].block, "main");
+  assert.deepEqual(withoutBlock(fresh.segments[last]), withoutBlock(old.segments[last]));
+
+  const extended = extend(old, { segmentIndex: last }, LIB, { addRound: true });
+
+  assert.equal(extended.segments.length, fresh.segments.length, "the fresh compile, no hold twice");
+  assert.deepEqual(
+    extended.segments.slice(0, old.segments.length).map(withoutBlock),
+    old.segments.map(withoutBlock),
+    "what was played is still the old timeline's own holds",
+  );
+  assert.deepEqual(extended.segments.map(withoutBlock), fresh.segments.map(withoutBlock));
+
+  const COUNTED = new Set(["hold", "reps", "timed", "rest"]);
+  const countedSum = extended.segments
+    .filter((s) => COUNTED.has(s.type))
+    .reduce((total, s) => total + s.seconds, 0);
+  assert.equal(extended.chunks[0].plannedSeconds, fresh.chunks[0].plannedSeconds);
+  assert.equal(countedSum, extended.chunks[0].plannedSeconds, "every hold in the result counted once");
+});
+
+test("a round added to a finished routine keeps every old segment and adds a main round", () => {
+  const old = compileTimeline("routine-a", LIB);
+  const fresh = compileSession([{ chunkId: "routine-a", extraRounds: 1 }], LIB);
+  const at = old.segments.findIndex((s) => s.block === "cooldown");
+  assert.ok(at > 0, "the routine cools down at all");
+
+  const extended = extend(old, { segmentIndex: old.segments.length - 1 }, LIB, { addRound: true });
+
+  assert.deepEqual(
+    extended.segments.slice(0, old.segments.length),
+    old.segments,
+    "every played segment is kept exactly as played, block included",
+  );
+  assert.equal(extended.segments[old.segments.length].block, "main", "the new round follows");
+  assert.equal(extended.segments[extended.segments.length - 1].block, "cooldown");
+  assert.equal(
+    extended.segments.length,
+    old.segments.length + (fresh.segments.length - at),
+    "only the part from the old cool-down onwards is recompiled",
+  );
+});
+
+test("a round added at the first cool-down segment carries on into a main round", () => {
+  const old = compileTimeline("routine-a", LIB);
+  const at = old.segments.findIndex((s) => s.block === "cooldown");
+
+  const extended = extend(old, { segmentIndex: at }, LIB, { addRound: true });
+
+  assert.deepEqual(extended.segments.slice(0, at + 1), old.segments.slice(0, at + 1));
+  assert.equal(extended.segments[at + 1].block, "main");
+  assert.ok(extended.segments.length > old.segments.length);
+});
+
+test("a routine added after a finished flow repeats no played segment", () => {
+  const old = compileSession([{ chunkId: "routine-a" }, { chunkId: "flow-a" }], LIB);
+  const fresh = compileSession(
+    [{ chunkId: "routine-a" }, { chunkId: "flow-a" }, { chunkId: "routine-b" }],
+    LIB,
+  );
+  const at = firstChangedIgnoringBlock(fresh.segments, old.segments);
+  assert.equal(at, old.segments.length, "the played segment range is a prefix, block aside");
+
+  const extended = extend(old, { segmentIndex: old.segments.length - 1 }, LIB, { addChunk: "routine-b" });
+
+  assert.equal(extended.segments.length, old.segments.length + (fresh.segments.length - at));
+  assert.equal(extended.segments.length, fresh.segments.length);
+
+  for (let i = 1; i < extended.segments.length; i += 1) {
+    const before = extended.segments[i - 1];
+    const after = extended.segments[i];
+    const repeat = before.type === "hold" && after.type === "hold"
+      && before.chunkIndex === after.chunkIndex
+      && before.entryId === after.entryId
+      && before.stepIndex === after.stepIndex;
+    assert.equal(repeat, false, "segment " + i + " repeats the segment before it");
+  }
+
+  // The flow's closing hold is now a plain hold, but it is still one hold.
+  const holdsOf = (timeline) => timeline.segments.filter(
+    (s) => s.type === "hold" && s.chunkIndex === 1 && s.entryId === "pose-d",
+  ).length;
+  assert.equal(holdsOf(extended), holdsOf(old));
+});
+
+test("a round cannot be added to a walk or a landmark", () => {
+  for (const chunkId of ["walk-a", "landmark-a"]) {
+    const timeline = compileTimeline(chunkId, LIB);
+    assert.throws(
+      () => extend(timeline, { segmentIndex: 0 }, LIB, { addRound: true }),
+      (err) => {
+        assert.ok(err instanceof SessionError, chunkId + " raises a SessionError");
+        assert.equal(err.code, "no_rounds");
+        return true;
+      },
+    );
+    assert.deepEqual(
+      canExtend(timeline, { segmentIndex: 0 }, LIB, { addRound: true }),
+      { ok: false, reason: "max_rounds" },
+      chunkId + " is still refused as having no rounds",
+    );
+  }
+});
+
+test("a flow of two rounds takes one more and refuses a fourth", () => {
+  const flow = compileTimeline("flow-a", LIB);
+  assert.equal(flow.chain[0].extraRounds, 0);
+
+  assert.deepEqual(
+    canExtend(flow, { segmentIndex: 0 }, LIB, { addRound: true }),
+    { ok: true, reason: null },
+    "two rounds may become three",
+  );
+
+  const threeRounds = compileSession([{ chunkId: "flow-a", extraRounds: 1 }], LIB);
+  assert.equal(threeRounds.chain[0].extraRounds, 1);
+  assert.deepEqual(
+    canExtend(threeRounds, { segmentIndex: 0 }, LIB, { addRound: true }),
+    { ok: false, reason: "max_rounds" },
+    "three may not become four",
+  );
 });
 
 test("canExtend refuses at the cap, past maxRounds and for hard back-to-back areas", () => {

@@ -640,9 +640,12 @@
     }
 
     /* Spend a stretch of running time: every boundary it covers becomes a
-     * "segment" event, and the last segment's end is the session's end. */
+     * "segment" event, and the last segment's end is the session's end. It
+     * returns the seconds it really spent, so a stretch that runs past the end
+     * of the timeline leaves the remainder unspent. */
     function advance(seconds) {
       var remaining = seconds;
+      var consumed = 0;
       var guard = 0;
       while (!ended && guard < CLOCK_GUARD) {
         guard += 1;
@@ -653,6 +656,7 @@
         addActive(segment.chunkIndex, segment.active ? step : 0);
         segmentElapsed += step;
         remaining -= step;
+        consumed += step;
         if (segmentElapsed + CLOCK_EPSILON >= segment.seconds) {
           if (segmentIndex >= timeline.segments.length - 1) {
             segmentIndex = timeline.segments.length - 1;
@@ -660,16 +664,17 @@
             ended = true;
             paused = true;
             emit("end", null);
-            return;
+            return consumed;
           }
           segmentIndex += 1;
           segmentElapsed = 0;
           emit("segment", "tick");
-          if (!(remaining > 0)) return;
+          if (!(remaining > 0)) return consumed;
           continue;
         }
-        return;
+        return consumed;
       }
+      return consumed;
     }
 
     /* Read the injected clock. Time only moves the session while it is both
@@ -680,14 +685,15 @@
       var deltaMs = read - lastRead;
       lastRead = read;
       if (!paused && !ended && deltaMs > 0) {
-        var seconds = deltaMs / 1000;
-        elapsed += seconds;
-        advance(seconds);
+        elapsed += advance(deltaMs / 1000);
       }
       return state();
     }
 
     function play() {
+      /* A second play() while running still owes the session the time since
+       * the last read; only then does a fresh read start the next stretch. */
+      if (!paused && !ended) tick();
       lastRead = now();
       if (ended) return state();
       if (paused) {
@@ -766,13 +772,17 @@
      * and the counts are the player's, the segments are the new ones. */
     function setTimeline(next) {
       requireTimeline(next, "setTimeline");
+      /* The stretch run so far belongs to the old timeline; account for it
+       * before the segments are swapped. */
+      if (!paused && !ended) tick();
       var wasEnded = ended;
       var oldLength = timeline.segments.length;
       timeline = next;
       lastRead = now();
+      /* A count already earned is never dropped: the array only ever grows, by
+       * zeros, to reach the new chunk count. */
       var wanted = chunksLengthOf(next);
       while (activeSeconds.length < wanted) activeSeconds.push(0);
-      if (activeSeconds.length > wanted) activeSeconds = activeSeconds.slice(0, wanted);
       if (segmentIndex > next.segments.length - 1) {
         segmentIndex = next.segments.length - 1;
         segmentElapsed = 0;
@@ -812,12 +822,25 @@
 
   /* ---------- adding to a running session ---------- */
 
+  /* Every key of a segment but `block`: an addition turns the last hold of a
+   * flow from its closing block back into a plain one, and that hold was
+   * already played as it was then. */
+  function withoutBlock(segment) {
+    var copy = {};
+    for (var key in segment) {
+      if (key !== "block") copy[key] = segment[key];
+    }
+    return JSON.stringify(copy);
+  }
+
   /* The first index where the recompiled segments part company with the ones
-   * already played, or the old length when the old ones are a prefix. */
+   * already played, or the old length when the old ones are a prefix.
+   * Segments are compared without their `block`, so a segment whose only change
+   * is the block it belongs to counts as unchanged and is never played twice. */
   function firstChangedIndex(freshSegments, oldSegments) {
     var common = Math.min(freshSegments.length, oldSegments.length);
     for (var i = 0; i < common; i += 1) {
-      if (JSON.stringify(freshSegments[i]) !== JSON.stringify(oldSegments[i])) return i;
+      if (withoutBlock(freshSegments[i]) !== withoutBlock(oldSegments[i])) return i;
     }
     return oldSegments.length;
   }
@@ -834,6 +857,10 @@
     if (isStr(add.addChunk)) {
       chain.push({ chunkId: add.addChunk, extraRounds: 0 });
     } else if (add.addRound === true) {
+      var tail = resolveChunk(chain[chain.length - 1], toLibrary(library));
+      if (tail.kind === "walk" || tail.kind === "landmark") {
+        throw new SessionError("no_rounds", tail.id + " is one stretch of time, not rounds to add");
+      }
       chain[chain.length - 1].extraRounds += 1;
     }
 
