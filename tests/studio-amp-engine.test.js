@@ -1978,3 +1978,439 @@ test("monitor latency re-posts when an amp's latency changes outside a snapshot"
   await host.flush();
   assert.equal(last().ms, 0, "Stop applies the change and re-posts the amp's new latency");
 });
+
+// --- delay compensation (plugin delay compensation for track chains) ---------
+
+/** How many frames a chain edit's crossfade runs (`CHAIN_FADE_FRAMES`). */
+const CHAIN_FADE = 64;
+
+/**
+ * One click in a take: one loud frame and two decaying ones after it. Where a
+ * track's click comes out is what compensation is about, so the shape of it only
+ * has to be short.
+ * @param {number} frames
+ * @param {number} at
+ * @param {number} [level]
+ * @returns {Float32Array}
+ */
+function clickTake(frames, at, level = 0.5) {
+  const take = new Float32Array(frames);
+  take[at] = level;
+  take[at + 1] = level * 0.5;
+  take[at + 2] = level * 0.25;
+  return take;
+}
+
+/** @returns {number} the frame the largest |sample| of a run sits on. */
+function peakFrameOf(samples) {
+  let frame = -1;
+  let peak = 0;
+  for (let at = 0; at < samples.length; at += 1) {
+    const value = Math.abs(samples[at]);
+    if (value > peak) {
+      peak = value;
+      frame = at;
+    }
+  }
+  return frame;
+}
+
+/**
+ * The largest frame-to-frame step of a stretch of a run: what a click in the
+ * signal would be, and what a fade must not make.
+ * @param {Float32Array} samples
+ * @param {number} from
+ * @param {number} to
+ * @returns {number}
+ */
+function largestStepOf(samples, from, to) {
+  let step = 0;
+  const end = Math.min(to === undefined ? samples.length : to, samples.length);
+  for (let at = Math.max(1, from); at < end; at += 1) {
+    const value = Math.abs(samples[at] - samples[at - 1]);
+    if (value > step) step = value;
+  }
+  return step;
+}
+
+/**
+ * One tap's blocks as one timeline. A track tap is stamped with the frame its
+ * first sample sits on and the blocks arrive one per block in order, so an index
+ * in this array IS the processor frame the tapped track played that sample at.
+ * @param {object[]} posts
+ * @param {string} target
+ * @returns {Float32Array}
+ */
+function tapTimeline(posts, target) {
+  const blocks = postsOfType(posts, "tap_block").filter((message) => message.target === target);
+  const samples = new Float32Array(blocks.length * BLOCK);
+  for (let index = 0; index < blocks.length; index += 1) samples.set(blocks[index].channels[0], index * BLOCK);
+  return samples;
+}
+
+/**
+ * Play one song whose every track plays the same click take, with one target
+ * tapped, and hand back where that target's click came out.
+ * @param {object} song
+ * @param {{rate?: number, at?: number, tap?: string, blocks?: number, take?: Float32Array,
+ *          monitor?: string, disableCompensation?: boolean}} [options]
+ *   `disableCompensation` zeroes every track's compensation before the first
+ *   block, which is the engine as it was before compensation existed: it is how a
+ *   test proves its own assertion can fail
+ * @returns {Promise<{host: object, samples: Float32Array, peak: number, rate: number, at: number}>}
+ */
+async function clickRun(song, options = {}) {
+  const rate = options.rate === undefined ? 44100 : options.rate;
+  const at = options.at === undefined ? 1000 : options.at;
+  const target = options.tap === undefined ? "track-1" : options.tap;
+  const take = options.take === undefined ? clickTake(Math.round(rate * 0.25), at) : options.take;
+  const host = await processorHost(rate);
+  postCapture(host, `pdc-${target}`);
+  await host.flush();
+  host.post({ type: "song", snapshot: song });
+  host.post({ type: "audio", take_id: "take-1", channels: [take] });
+  await host.flush();
+  if (options.monitor !== undefined) host.post({ type: "monitor", track_id: options.monitor, on: true });
+  host.post({ type: "tap", target: target, on: true });
+  await host.flush();
+  if (options.disableCompensation === true) {
+    for (const record of host.processor.slots) {
+      record.compensation = 0;
+      record.compensationFrom = 0;
+      record.compensationFade = 0;
+    }
+    host.processor.mixDelayFrames = 0;
+  }
+  host.post({ type: "launchScene", id: "scene-1" });
+  host.post({ type: "play" });
+  await host.flush();
+  host.run(options.blocks === undefined ? 64 : options.blocks);
+  const samples = tapTimeline(host.posts, target);
+  return { host: host, samples: samples, peak: peakFrameOf(samples), rate: rate, at: at };
+}
+
+/** @returns {number[]} every `master_latency` number a run posted, in order. */
+function masterLatencyPosts(host) {
+  return postsOfType(host.posts, "master_latency").map((message) => message.ms);
+}
+
+/** @returns {number} the last `monitor_latency` number posted for one track. */
+function lastMonitorMs(host, trackId) {
+  const posted = postsOfType(host.posts, "monitor_latency").filter((message) => message.track_id === trackId);
+  assert.ok(posted.length > 0, `the engine has to post the monitor delay of ${trackId}`);
+  return posted[posted.length - 1].ms;
+}
+
+/**
+ * The master limiter's lookahead, in frames, at a rate.
+ * @param {number} rate
+ * @returns {number}
+ */
+function limiterFramesAt(rate) {
+  return Math.max(1, Math.round(0.0015 * rate));
+}
+
+test("delay compensation holds a dry track back by exactly an amp's reported latency", async () => {
+  // A 48 kHz capture played in a 44.1 kHz context goes through two rate bridges,
+  // and both of them look ahead: the amp reports that as its `latencyFrames` and
+  // its own track really carries it. Plugin delay compensation puts the SAME
+  // number of frames on every other track's delay line, so a dry doubled track
+  // leaves the mixer on the amp's click line instead of arriving ~0.7 ms early
+  // and combing with it.
+  //
+  // Measured on the frame the click lands on, never on the posted number. What a
+  // capture does to the sound ON TOP of its reported latency (a NAM model has a
+  // receptive field of its own, which no rate report knows) is why the amp's own
+  // click is compared only to itself: it is the same samples either way.
+  const rate = 44100;
+  const song = twoTrackAmpSong([ampInsert()]);
+
+  const amp = await clickRun(song, { rate: rate, tap: "track-1" });
+  const latency = ampStateOf(amp.host, "insert-amp", "track-1").latency_frames;
+  assert.ok(latency > 0, `a 48 kHz capture in a 44.1 kHz context converts and reports its delay, got ${latency}`);
+  assert.equal(
+    amp.host.processor.slots[0].compensation,
+    0,
+    "the track with the longest chain is what the others are measured against, so nothing is put back on it",
+  );
+
+  const dry = await clickRun(song, { rate: rate, tap: "track-2" });
+  assert.equal(
+    dry.host.processor.slots[1].compensation,
+    latency,
+    `the dry track's own line holds back the amp's reported latency (${latency} frames)`,
+  );
+  assert.equal(
+    dry.peak,
+    dry.at + latency,
+    `the dry track's click has to land ${latency} frames after the take's (frame ${dry.at}), it landed at ${dry.peak}`,
+  );
+
+  // The amp's own click does not move when another track joins the song: it
+  // holds the longest chain in both, so its compensation is 0 in both.
+  const alone = await clickRun(ampSong([ampInsert()]), { rate: rate, tap: "track-1" });
+  assert.equal(amp.peak, alone.peak, "the longest chain's own click is the same with and without the dry track beside it");
+
+  // And the assertion can fail: with the compensation taken out, the dry track is
+  // where the take put it, so the frames the compensation adds ARE the reported
+  // latency — the offset the dry track had before it.
+  const uncompensated = await clickRun(song, { rate: rate, tap: "track-2", disableCompensation: true });
+  assert.equal(uncompensated.peak, uncompensated.at, "without compensation the dry click is not held back at all");
+  assert.equal(
+    dry.peak - uncompensated.peak,
+    latency,
+    "the frames compensation adds to the dry track are exactly the amp's reported latency",
+  );
+
+  // How far apart the two clicks still are: the capture's own delay, which is
+  // not part of the chain's latency report — and far less than what was put back.
+  const captureDelay = amp.peak - (amp.at + latency);
+  assert.ok(
+    captureDelay >= 0 && captureDelay < latency,
+    `the capture's own shift (${captureDelay} frames) is not the chain's reported delay (${latency}), so it is left over`,
+  );
+});
+
+test("the reported master latency is the limiter plus the tracks' compensation", async () => {
+  const rate = 44100;
+  const limiterFrames = limiterFramesAt(rate);
+
+  // No amp anywhere: no track chain delays anything, so the whole path's delay is
+  // 0 and there is nothing to post.
+  const plain = await clickRun(twoTrackAmpSong([]), { rate: rate, tap: "track-2", blocks: 8 });
+  assert.equal(plain.host.processor.mixDelayFrames, 0, "nothing on any track chain delays anything");
+  assert.deepEqual(masterLatencyPosts(plain.host), [], "a path with no delay posts no latency at all");
+
+  // One converted amp on one track: the whole mix runs that many frames late.
+  const ampOnly = await clickRun(twoTrackAmpSong([ampInsert()]), { rate: rate, tap: "track-1", blocks: 8 });
+  const latency = ampStateOf(ampOnly.host, "insert-amp", "track-1").latency_frames;
+  assert.equal(ampOnly.host.processor.masterLatencyFrames, 0, "no limiter, so the master chain adds nothing");
+  assert.equal(ampOnly.host.processor.mixDelayFrames, latency, "the mix runs the longest chain's latency late");
+  const ampMs = masterLatencyPosts(ampOnly.host);
+  assert.equal(ampMs.length, 1, `the number is posted once per change, got ${JSON.stringify(ampMs)}`);
+  assert.ok(
+    Math.abs(ampMs[0] - (latency / rate) * 1000) < 1e-9,
+    `the amp's chain is the whole path's delay: ${latency} frames is ${(latency / rate) * 1000} ms, got ${ampMs[0]} ms`,
+  );
+
+  // The master limiter's lookahead is on top of that, not instead of it.
+  const limitedSong = twoTrackAmpSong([ampInsert()]);
+  limitedSong.inserts["insert-limiter"] = {
+    id: "insert-limiter",
+    owner: "master",
+    kind: "limiter",
+    order: 0,
+    bypass: false,
+    params: {},
+  };
+  const limited = await clickRun(limitedSong, { rate: rate, tap: "track-1", blocks: 8 });
+  const total = limited.host.processor.masterLatencyFrames + limited.host.processor.mixDelayFrames;
+  assert.equal(limited.host.processor.masterLatencyFrames, limiterFrames, "the master chain's own delay is the limiter's lookahead");
+  assert.equal(limited.host.processor.mixDelayFrames, latency, "and the mix's is the amp's chain");
+  const limitedMs = masterLatencyPosts(limited.host);
+  const latest = limitedMs[limitedMs.length - 1];
+  assert.ok(
+    Math.abs(latest - (total / rate) * 1000) < 1e-9,
+    `the posted number is the whole path (${limiterFrames} + ${latency} = ${total} frames is ${(total / rate) * 1000} ms), got ${latest} ms`,
+  );
+});
+
+test("the meter reading and a master tap carry the whole path's delay", async () => {
+  const rate = 44100;
+  const limiterFrames = limiterFramesAt(rate);
+  const song = twoTrackAmpSong([ampInsert()]);
+  song.inserts["insert-limiter"] = {
+    id: "insert-limiter",
+    owner: "master",
+    kind: "limiter",
+    order: 0,
+    bypass: false,
+    params: {},
+  };
+  const run = await clickRun(song, { rate: rate, tap: "master", blocks: 40 });
+  const total = run.host.processor.masterLatencyFrames + run.host.processor.mixDelayFrames;
+  assert.ok(total > limiterFrames, `the tracks' compensation is part of the total, which is ${total} frames`);
+
+  // A master tap is moved back by the whole path's delay: its first block sits
+  // before the song started, on the pre-roll the master chain and the tracks'
+  // lines are still filling.
+  const taps = postsOfType(run.host.posts, "tap_block").filter((message) => message.target === "master");
+  assert.ok(taps.length > 0, "a master tap posts one block per block");
+  assert.equal(taps[0].frame, -total, `the tap's first frame is the whole path's delay back (-${total})`);
+
+  // A meter reading names the same number, so the strip and a take agree.
+  const readings = postsOfType(run.host.posts, "meter");
+  assert.ok(readings.length > 0, `a playing song meters, it posted ${JSON.stringify(run.host.posts.slice(-4))}`);
+  const latest = readings[readings.length - 1];
+  assert.ok(
+    Math.abs(latest.latency_ms - (total / rate) * 1000) < 1e-9,
+    `a reading names the whole path (${(total / rate) * 1000} ms), got ${latest.latency_ms} ms`,
+  );
+});
+
+test("monitoring keeps reporting its own path, never the mix's compensation", async () => {
+  const rate = 44100;
+  const limiterFrames = limiterFramesAt(rate);
+  // The monitored track has ONE amp; the other track has TWO in series, so the
+  // mix runs later than the monitored track's own chain: the two numbers differ.
+  const song = twoTrackAmpSong([
+    ampInsert({}, { id: "insert-amp", owner: "track:track-1", order: 0 }),
+    ampInsert({}, { id: "insert-amp-2a", owner: "track:track-2", order: 0 }),
+    ampInsert({}, { id: "insert-amp-2b", owner: "track:track-2", order: 1 }),
+  ]);
+  song.inserts["insert-limiter"] = {
+    id: "insert-limiter",
+    owner: "master",
+    kind: "limiter",
+    order: 0,
+    bypass: false,
+    params: {},
+  };
+  const run = await clickRun(song, { rate: rate, tap: "track-1", monitor: "track-1", blocks: 8 });
+  const own = ampStateOf(run.host, "insert-amp", "track-1").latency_frames;
+  const mix = run.host.processor.mixDelayFrames;
+  assert.equal(mix, 2 * own, `the longest chain is the other track's two amps (${2 * own} frames)`);
+
+  // What the operator hears is the input through the armed track AND the master,
+  // so the monitor's number is its own chain plus the limiter — a track that is
+  // being monitored holds no compensation back, so there is none to add.
+  const monitorMs = lastMonitorMs(run.host, "track-1");
+  assert.ok(
+    Math.abs(monitorMs - ((own + limiterFrames) / rate) * 1000) < 1e-9,
+    `the monitor's number is the track's own chain plus the limiter (${own} + ${limiterFrames} frames), got ${monitorMs} ms`,
+  );
+
+  const latencies = masterLatencyPosts(run.host);
+  const totalMs = latencies[latencies.length - 1];
+  assert.ok(
+    Math.abs(totalMs - ((mix + limiterFrames) / rate) * 1000) < 1e-9,
+    `the whole path is the mix's compensation plus the limiter (${mix} + ${limiterFrames} frames), got ${totalMs} ms`,
+  );
+  assert.ok(totalMs > monitorMs, "the mix's number is the larger one, so the monitor's is not it");
+});
+
+test("a monitored track's backing runs early by the longest chain minus its own", async () => {
+  const rate = 44100;
+
+  // ONE amp in the song: the monitored track holds the longest chain, so its own
+  // backing waits for nothing and its compensation is 0 with monitoring on and off.
+  const oneAmp = twoTrackAmpSong([ampInsert()]);
+  const monitoredOne = await clickRun(oneAmp, { rate: rate, tap: "track-1", monitor: "track-1" });
+  const own = ampStateOf(monitoredOne.host, "insert-amp", "track-1").latency_frames;
+  assert.equal(monitoredOne.host.processor.mixDelayFrames, own, "the monitored track holds the song's longest chain");
+  assert.equal(
+    monitoredOne.host.processor.slots[0].compensation,
+    0,
+    "a monitored track sits behind no delay line of its own",
+  );
+  const freeOne = await clickRun(oneAmp, { rate: rate, tap: "track-1" });
+  assert.equal(
+    freeOne.peak,
+    monitoredOne.peak,
+    "with one amp in the song, monitoring changes nothing: the compensation is 0 either way",
+  );
+  // And that click is where the same amp track puts it with no other track in the
+  // song at all: its own chain's delay, and nothing added to it.
+  const alone = await clickRun(ampSong([ampInsert()]), { rate: rate, tap: "track-1" });
+  assert.equal(monitoredOne.peak, alone.peak, "monitoring adds nothing to the track's own chain's delay");
+
+  // A SECOND track whose chain is longer: the mix now runs later than this
+  // track's own chain, and its backing runs exactly that much early.
+  const longer = twoTrackAmpSong([
+    ampInsert({}, { id: "insert-amp", owner: "track:track-1", order: 0 }),
+    ampInsert({}, { id: "insert-amp-2a", owner: "track:track-2", order: 0 }),
+    ampInsert({}, { id: "insert-amp-2b", owner: "track:track-2", order: 1 }),
+  ]);
+  const monitored = await clickRun(longer, { rate: rate, tap: "track-1", monitor: "track-1" });
+  const longest = monitored.host.processor.mixDelayFrames;
+  assert.equal(longest, 2 * own, `the longest chain is the other track's two amps (${2 * own} frames)`);
+  assert.equal(
+    monitored.host.processor.slots[0].compensation,
+    0,
+    "monitoring keeps its own track at minimum latency, whatever the others cost",
+  );
+  assert.equal(
+    monitored.peak,
+    monitoredOne.peak,
+    "monitored, the track's own output is not moved by what the other track's chain costs",
+  );
+
+  // Without monitoring the same track waits for the longest chain, so it is late
+  // by the difference — exactly `Lmax − its own`.
+  const free = await clickRun(longer, { rate: rate, tap: "track-1" });
+  assert.equal(
+    free.host.processor.slots[0].compensation,
+    longest - own,
+    `the track is held back by Lmax − its own chain (${longest} − ${own} frames)`,
+  );
+  assert.equal(
+    free.peak - monitored.peak,
+    longest - own,
+    `the monitored backing runs early by Lmax − its own chain (${longest - own} frames), it ran early by ${free.peak - monitored.peak}`,
+  );
+});
+
+test("a compensation that moves is a crossfade, not a click", async () => {
+  const rate = 44100;
+  const host = await processorHost(rate);
+  postCapture(host, "fade-capture");
+  await host.flush();
+  const song = twoTrackAmpSong([ampInsert({}, { owner: "track:track-2", id: "insert-amp" })]);
+  // Track 2 plays a silent take of its own: the only audible signal is track 1's
+  // tone, so the only thing the edit changes in the audio is track 1's delay.
+  song.clips["clip-2"].comp = [{ take_id: "take-2", from_beat: 0, to_beat: 4 }];
+  host.post({ type: "song", snapshot: song });
+  const tone = new Float32Array(rate);
+  for (let at = 0; at < tone.length; at += 1) tone[at] = Math.sin((2 * Math.PI * 220 * at) / rate) * 0.3;
+  host.post({ type: "audio", take_id: "take-1", channels: [tone] });
+  host.post({ type: "audio", take_id: "take-2", channels: [new Float32Array(rate)] });
+  await host.flush();
+  host.post({ type: "launchScene", id: "scene-1" });
+  host.post({ type: "play" });
+  await host.flush();
+
+  const record = host.processor.slots[0];
+  const latency = ampStateOf(host, "insert-amp", "track-2").latency_frames;
+  assert.ok(latency > 0, `the amp has to report a delay to compensate, got ${latency}`);
+  assert.equal(record.compensation, latency, "while the song plays, the dry track waits for the amp's chain");
+
+  // The signal's own slope, measured on the steady tone the edit will move.
+  const before = host.run(20);
+  assert.equal(record.compensationFade, 0, "a settled compensation runs no fade");
+  const songStep = largestStepOf(before.left, 10 * BLOCK, 20 * BLOCK);
+
+  // Bypassing the amp takes its latency out of the song, so the dry track's
+  // compensation has to move back to 0 — while the transport is playing.
+  const bypassed = JSON.parse(JSON.stringify(song));
+  bypassed.inserts["insert-amp"].bypass = true;
+  host.post({ type: "song", snapshot: bypassed });
+  await host.flush();
+  assert.equal(record.compensation, 0, "with the amp bypassed nothing delays the song, so nothing is compensated");
+  assert.equal(record.compensationFrom, latency, "the fade starts at the tap the track was at");
+  assert.equal(record.compensationFade, CHAIN_FADE, `the fade runs ${CHAIN_FADE} frames`);
+
+  const edited = host.run(4);
+  assert.equal(record.compensationFade, 0, `one block is longer than the ${CHAIN_FADE}-frame fade, so it has finished`);
+  const fadeStep = largestStepOf(edited.left, 1, CHAIN_FADE);
+  assert.ok(
+    fadeStep <= songStep * 2,
+    `the fade has to be no steeper than the signal's own slope (${fadeStep} against ${songStep} per frame)`,
+  );
+
+  // The step a switch would have been: the two taps are the same tone this far
+  // apart, and the ramp spreads it over the fade instead.
+  let tapGap = 0;
+  for (let at = latency; at < 20 * BLOCK; at += 1) {
+    const gap = Math.abs(before.left[at] - before.left[at - latency]);
+    if (gap > tapGap) tapGap = gap;
+  }
+  assert.ok(
+    tapGap > songStep * 10,
+    `a switch between the two taps would be a click (${tapGap} against the tone's ${songStep} per frame)`,
+  );
+  assert.deepEqual(
+    masterLatencyPosts(host).slice(-1),
+    [0],
+    "the whole path's delay follows the compensation back to 0",
+  );
+});

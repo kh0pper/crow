@@ -76,9 +76,11 @@ const BUNDLED_STARTERS = [
  * A song with one audio track playing an amp: the operator's own capture in the
  * library, their own cabinet, and an amp insert that names both. This is what
  * the amp editor edits (plan 1d, Task 15).
+ * @param {{proposal?: boolean}} [options] `proposal` adds the agent's SECOND amp
+ *   on that same chain, which arrives as a proposal
  * @returns {Promise<{doc: object, history: object[]}>}
  */
-async function ampSong() {
+async function ampSong(options = {}) {
   const { newSongDoc } = await import("../bundles/studio/server/doc.js");
   const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
   await import("../bundles/studio/server/commands/core.js");
@@ -149,6 +151,15 @@ async function ampSong() {
     { id: "ins-amp", owner: "track:guitar", kind: "amp", params: { model_id: "lib-cap", ir_id: "lib-cab" } },
     HUMAN,
   );
+  if (options.proposal === true) {
+    // The agent's second amp on a chain that already has one: a proposal, which
+    // plays nothing until the operator accepts it.
+    step(
+      "insert.add",
+      { id: "ins-amp-2", owner: "track:guitar", kind: "amp", params: { model_id: "lib-cap", ir_id: null } },
+      AGENT,
+    );
+  }
   return { doc, history };
 }
 
@@ -1289,6 +1300,65 @@ test("picking a cabinet sends one insert.set", async () => {
   sets = ui.commands("insert.set");
   assert.equal(sets.length, 2);
   assert.deepEqual(sets[1].args, { id: "ins-amp", params: { ir_id: null } });
+});
+
+test("a proposed second amp is drawn as a proposal, with Accept and Decline and no bypass", async () => {
+  const ui = await bootMixer({ fixture: await ampSong({ proposal: true }) });
+  await ui.openMixer();
+
+  // The chain has both amps: the operator's live one and the agent's proposal.
+  assert.deepEqual([...ui.chain("track:guitar").querySelectorAll("[data-act=insert-chip]")]
+    .map((node) => node.getAttribute("data-insert-id")), ["ins-amp", "ins-amp-2"]);
+
+  const proposed = ui.chip("ins-amp-2");
+  assert.equal(String(proposed.textContent), "Proposed amp", "the chip says what it is");
+  assert.ok(String(proposed.className).includes("st-mix-chip-proposed"), "and is drawn dimmed as one");
+  assert.equal(
+    ui.mixer().querySelector('[data-act=insert-bypass][data-insert-id="ins-amp-2"]'),
+    null,
+    "a proposal is not in the chain, so it has no bypass switch",
+  );
+  const accept = ui.mixer().querySelector('[data-act=insert-accept][data-insert-id="ins-amp-2"]');
+  assert.ok(accept, "the row offers Accept");
+  assert.equal(String(accept.textContent), "Accept");
+  const decline = ui.mixer().querySelector('[data-act=insert-remove][data-insert-id="ins-amp-2"]');
+  assert.ok(decline, "and Decline");
+  assert.equal(String(decline.textContent), "Decline");
+
+  // The operator's live amp on the same chain is drawn as it always was.
+  const live = ui.chip("ins-amp");
+  assert.equal(String(live.textContent), "amp");
+  assert.equal(String(live.className).includes("st-mix-chip-proposed"), false);
+  assert.ok(
+    ui.mixer().querySelector('[data-act=insert-bypass][data-insert-id="ins-amp"]'),
+    "a live amp keeps its bypass switch",
+  );
+  assert.equal(ui.mixer().querySelector('[data-act=insert-accept][data-insert-id="ins-amp"]'), null);
+  const remove = ui.mixer().querySelector('[data-act=insert-remove][data-insert-id="ins-amp"]');
+  assert.ok(remove, "and its own remove");
+  assert.equal(String(remove.textContent), "\u00d7", "which is the chain's own remove, not a Decline");
+});
+
+test("Accept sends the proposal the row was drawn with, and Decline removes it", async () => {
+  const ui = await bootMixer({ fixture: await ampSong({ proposal: true }) });
+  await ui.openMixer();
+
+  // Accept: one insert.accept, carrying the chain, capture and cabinet the row
+  // was DRAWN with — never a fresh read of the snapshot.
+  ui.click('[data-act=insert-accept][data-insert-id="ins-amp-2"]');
+  const accepts = ui.commands("insert.accept");
+  assert.equal(accepts.length, 1, "Accept is one insert.accept");
+  assert.deepEqual(accepts[0].args, {
+    id: "ins-amp-2",
+    expect: { owner: "track:guitar", model_id: "lib-cap", ir_id: null },
+  });
+
+  // Decline is the chain's ordinary remove, sent for that insert alone.
+  ui.click('[data-act=insert-remove][data-insert-id="ins-amp-2"]');
+  const removes = ui.commands("insert.remove");
+  assert.equal(removes.length, 1, "Decline is one insert.remove");
+  assert.deepEqual(removes[0].args, { id: "ins-amp-2" });
+  assert.equal(ui.commands("insert.accept").length, 1, "and it is not an accept as well");
 });
 
 test("the monitor switch hears the chain while recording", async () => {

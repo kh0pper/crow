@@ -6,7 +6,8 @@
  * Importing this module registers them, exactly as `core.js` does. The ids are
  * the contract between the mixer screen, the MCP tools and the shared history:
  *
- *   insert.add  insert.remove  insert.move  insert.set  insert.bypass
+ *   insert.add  insert.accept (people only)  insert.remove  insert.move
+ *   insert.set  insert.bypass
  *   return.add  return.set  return.remove
  *   send.set
  *   master.set
@@ -43,9 +44,19 @@
  *     because an amp that names a file nothing holds is silent, and `amp` is
  *     not in `EFFECT_KINDS`/`EFFECT_PARAMS` at all: the effects' tables and the
  *     mixer's menu are the effects.
+ *   - the FIRST amp on a chain is an ordinary edit for an agent. Any further amp
+ *     on a chain that already holds one — live or bypassed — is a PROPOSAL:
+ *     `insert.add` run by an agent stores it with `proposed: true` and
+ *     `set_by: "agent"`, it plays nothing until the operator accepts it with
+ *     `insert.accept`, and an agent may take it away again or retune it. The
+ *     same rule covers the back doors: no command turns `proposed` off, nothing
+ *     changes an insert's `kind`, a move keeps a proposal a proposal, and the
+ *     hub refuses any agent step whose effective writes would leave a chain
+ *     holding two amps that are not proposals (see the amp gate there).
  *   - a song holds at most `LIMITS.ampInsertsPerSong` amp inserts, counted over
  *     the whole song rather than over one chain: every amp loads a capture of
- *     its own, so the cap is the song's.
+ *     its own, so the cap is the song's. A proposal counts against it: it holds
+ *     a library reference, and an operator's yes cannot exceed the cap.
  *   - `limiter` may sit on any owner. On the master the engine gives it its
  *     lookahead; on a track or a return it runs at zero latency as a clipper
  *     (plan 1d, DSP rules). Nothing in the document tells the two apart.
@@ -117,6 +128,17 @@ const ABSENT = null;
 const idSchema = z
   .string()
   .regex(/^[A-Za-z0-9_-]{1,40}$/, "an id is 1-40 letters, digits, dashes or underscores");
+
+/**
+ * What an agent is told when a step would make a chain hold a second live amp.
+ *
+ * A second amp on a chain is the operator's to accept — the first one it may
+ * build itself — so an agent may only propose one. The hub answers with this
+ * same sentence for an agent's command, its undo and its redo (see the amp gate
+ * in hub.js).
+ */
+export const AMP_SECOND_NEEDS_A_YES =
+  "A second amp on a track is the operator's to accept; an agent can only propose one.";
 
 /**
  * The chain an effect belongs to: a track's, a return's, or the song's master.
@@ -191,6 +213,33 @@ function refuseConflict(message) {
 /** @returns {string} a track's name for a summary, or its id when unknown. */
 function labelOfTrack(snap, id) {
   return snap.tracks.find((track) => track.id === id)?.name ?? id;
+}
+
+/** @returns {boolean} whether the caller of this step is the operator. */
+function callerIsOperator(context) {
+  return context?.author?.kind === "human";
+}
+
+/**
+ * Whether an agent's `insert.add` is a PROPOSAL rather than an ordinary edit:
+ * a further amp on a chain that already holds one.
+ *
+ * The first amp an agent adds to a chain that has none is live, as it always
+ * was. Beyond that the chain has a sound the operator chose, and a second amp
+ * would change what the track is heard through — so the agent proposes one and
+ * the operator's `insert.accept` is the yes. A bypassed amp still counts: it is
+ * in the chain, and un-bypassing it is one field away.
+ * @param {object} snap - the song as the step was prepared on
+ * @param {{owner: string, kind: string}} args
+ * @param {{author?: object}|undefined} context
+ * @returns {boolean}
+ */
+function isAmpProposal(snap, args, context) {
+  if (callerIsOperator(context)) return false;
+  if (!isAmpKind(args.kind)) return false;
+  return Object.values(snap?.inserts ?? {}).some(
+    (insert) => insert?.owner === args.owner && isAmpKind(insert?.kind),
+  );
 }
 
 /** @returns {string} a return's name for a summary, or its id when unknown. */
@@ -505,7 +554,7 @@ defineCommand({
         .min(1)
         .max(40)
         .describe(
-          `the effect, one of ${EFFECT_KINDS.join(", ")}, or "${AMP_KIND}" for an amp that plays a capture`,
+          `the effect, one of ${EFFECT_KINDS.join(", ")}, or "${AMP_KIND}" for an amp that plays a capture; a second amp on a chain that already has one is a proposal when an agent adds it, and the operator accepts it`,
         ),
       // Its own copy of the id schema: reusing `idSchema` twice in one object
       // publishes a JSON-Schema $ref, which tool-schemas-grammar-safe refuses.
@@ -520,7 +569,10 @@ defineCommand({
       params: paramsSchema.optional().describe("the parameters that differ from their defaults"),
     })
     .strict(),
-  summary(args, snap) {
+  summary(args, snap, context) {
+    if (isAmpProposal(snap, args, context)) {
+      return `Proposed a second amp on ${ownerLabel(snap, args.owner)}`;
+    }
     return `Added ${withArticle(effectLabel(args.kind))} to ${ownerLabel(snap, args.owner)}`;
   },
   touches(args) {
@@ -529,7 +581,13 @@ defineCommand({
     // touched: a chain edit never rolls anything else back.
     return [insertRef(args.id), args.owner];
   },
-  apply(doc, args) {
+  /**
+   * A live insert for the operator and for an agent's first amp on a chain; a
+   * PROPOSAL for an agent's further amp on a chain that already holds one (see
+   * `isAmpProposal`). The whole object carries `proposed` and `set_by`, so what
+   * the step made is one object in the history and reads the same after a load.
+   */
+  apply(doc, args, _snap, context) {
     const amp = isAmpKind(args.kind);
     if (!amp && !effectSpec(args.kind)) {
       refuseInvalid(
@@ -556,6 +614,7 @@ defineCommand({
       }
     }
     const snap = snapshot(doc);
+    const proposed = isAmpProposal(snap, args, context);
     let order = appendOrder(chain);
     // `after: null` and no `after` mean different things, the same way they do
     // in `insert.move`: null puts the effect first, and leaving it out appends
@@ -577,13 +636,24 @@ defineCommand({
     const params = amp
       ? { ...defaultAmpParams(), model_id: "", ir_id: ABSENT, ...checkAmpParams(doc, args.params) }
       : { ...defaultEffectParams(args.kind), ...checkParams(args.kind, args.params) };
-    const insert = { id: args.id, owner: args.owner, order, kind: args.kind, bypass: false, params };
+    const insert = {
+      id: args.id,
+      owner: args.owner,
+      order,
+      kind: args.kind,
+      bypass: false,
+      proposed,
+      set_by: callerIsOperator(context) ? "operator" : "agent",
+      params,
+    };
     const stored = objectMap({
       id: insert.id,
       owner: insert.owner,
       order: insert.order,
       kind: insert.kind,
       bypass: insert.bypass,
+      proposed: insert.proposed,
+      set_by: insert.set_by,
     });
     stored.set("params", objectMap(params));
     insertMap(doc).set(insert.id, stored);
@@ -591,6 +661,76 @@ defineCommand({
     return {
       before: { [fieldKey(ref, "*")]: ABSENT },
       after: { [fieldKey(ref, "*")]: cloneJson(insert) },
+    };
+  },
+});
+
+defineCommand({
+  id: "insert.accept",
+  // Only the operator accepts a second amp: an agent may propose as many as the
+  // cap allows, and the operator's yes is what makes one live.
+  humanOnly: true,
+  title: "Accept a proposed second amp (people only)",
+  schema: z
+    .object({
+      id: idSchema.describe("the proposed insert to accept"),
+      // What the operator was shown when they said yes. A proposal can be
+      // removed and proposed again under the same id with another capture, so
+      // the yes is bound to what was reviewed, not to the id alone.
+      expect: z
+        .object({
+          owner: ownerSchema.describe('the chain it was proposed for: "track:<id>", "return:<id>" or "master"'),
+          model_id: z.string().describe("the capture the proposal names"),
+          ir_id: z.string().nullable().describe("the cabinet the proposal names, or null for none"),
+        })
+        .strict()
+        .describe("the chain, capture and cabinet the operator reviewed"),
+    })
+    .strict(),
+  summary(args, snap) {
+    // The summary is written from the snapshot the step was prepared on, so the
+    // insert is still a proposal here and still names the chain it was made for.
+    const insert = snap?.inserts?.[args.id];
+    return `Accepted the second amp on ${ownerLabel(snap, insert?.owner ?? args.expect.owner)}`;
+  },
+  touches(args) {
+    return [insertRef(args.id), args.expect.owner];
+  },
+  /**
+   * The operator's yes, and one field: the proposal becomes live where it stands,
+   * with the capture and the cabinet it was reviewed with. It is the twin of
+   * `midi.accept`, down to the sentence an agent meets.
+   *
+   * The library reference is checked once more on the way in: a proposal does not
+   * count as playing its capture (see `libraryUses`), so the file can have been
+   * removed since, and an amp accepted without one would be silent for no reason
+   * a reader could see.
+   */
+  apply(doc, args, _snap, context) {
+    if (!callerIsOperator(context)) throw new StudioError("human_only", AMP_SECOND_NEEDS_A_YES);
+    const insert = requireInsert(doc, args.id);
+    if (insert.get("proposed") !== true) {
+      refuseConflict(`The insert "${args.id}" is live already; only a proposal is accepted.`);
+    }
+    const params = insertParamsMap(insert);
+    const modelId = typeof params.get("model_id") === "string" ? params.get("model_id") : "";
+    const irId = params.get("ir_id") ?? ABSENT;
+    if (
+      insert.get("owner") !== args.expect.owner ||
+      modelId !== args.expect.model_id ||
+      (irId ?? ABSENT) !== (args.expect.ir_id ?? ABSENT)
+    ) {
+      refuseConflict(
+        `The insert "${args.id}" is not the proposal you were shown any more; look at it again before accepting it.`,
+      );
+    }
+    checkAmpParams(doc, { model_id: modelId, ir_id: irId });
+    const ref = insertRef(args.id);
+    const before = insert.get("proposed");
+    insert.set("proposed", false);
+    return {
+      before: { [fieldKey(ref, "proposed")]: before === undefined ? ABSENT : cloneJson(before) },
+      after: { [fieldKey(ref, "proposed")]: false },
     };
   },
 });
@@ -607,6 +747,11 @@ defineCommand({
     const insert = snap.inserts?.[args.id];
     return insert ? [insertRef(args.id), insert.owner] : [insertRef(args.id)];
   },
+  /**
+   * Declining a proposal is exactly this: the agent takes its own proposal away,
+   * which is an ordinary edit because a proposal plays nothing (the sound guard
+   * has nothing to lose on it). Removing a LIVE amp stays the operator's.
+   */
   apply(doc, args) {
     const insert = requireInsert(doc, args.id);
     const ref = insertRef(args.id);
@@ -640,7 +785,9 @@ defineCommand({
   },
   touches(args, snap) {
     // The moved effect and its chain: `order` is the only field written, so the
-    // effect it moves behind is left exactly as it is.
+    // effect it moves behind is left exactly as it is. A proposal moved within
+    // its chain stays a proposal: nothing here writes `proposed`, and the owner a
+    // proposal belongs to never changes without a new proposal.
     const insert = snap.inserts?.[args.id];
     return insert ? [insertRef(args.id), insert.owner] : [insertRef(args.id)];
   },
@@ -705,6 +852,11 @@ defineCommand({
     const insert = snap.inserts?.[args.id];
     return insert ? [insertRef(args.id), insert.owner] : [insertRef(args.id)];
   },
+  /**
+   * One parameter is one key of the insert's `params` map, so nothing here writes
+   * `kind` or `proposed`: a proposal an agent retunes is still the proposal the
+   * operator has not accepted yet, and no parameter turns an effect into an amp.
+   */
   apply(doc, args) {
     const insert = requireInsert(doc, args.id);
     const kind = String(insert.get("kind") ?? "");
@@ -756,6 +908,12 @@ defineCommand({
     const insert = snap.inserts?.[args.id];
     return insert ? [insertRef(args.id), insert.owner] : [insertRef(args.id)];
   },
+  /**
+   * Bypassing is an ordinary agent edit, first amp included: a bypassed amp is
+   * still in the chain, still the sound the operator chose, and still an amp the
+   * amp gate counts — a second amp beside it is a proposal, not a way around the
+   * operator's choice.
+   */
   apply(doc, args) {
     const insert = requireInsert(doc, args.id);
     const ref = insertRef(args.id);

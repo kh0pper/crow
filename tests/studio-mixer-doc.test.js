@@ -41,6 +41,7 @@ import {
   insertOwnerOf,
   isAmpKind,
   libraryMap,
+  libraryUses,
   masterMap,
   masterSettings,
   newSongDoc,
@@ -79,6 +80,9 @@ const SONG_ID = "song-1";
 
 /** A GUI command's author, per the plan's attribution rule. */
 const HUMAN = { kind: "human", id: "local", label: "You" };
+
+/** An MCP command's author, per the plan's attribution rule. */
+const AGENT = { kind: "agent", id: "mcp", label: "Agent (MCP)" };
 
 /**
  * A scratch song plus the two calls a hub makes: run a command and record its
@@ -891,6 +895,8 @@ test("an amp insert needs a capture of kind nam", (t) => {
     order: 0,
     kind: "amp",
     bypass: false,
+    proposed: false,
+    set_by: "operator",
     params: { model_id: "cap-a", ir_id: null, input_db: 0, output_db: 0, ir_mix: 1 },
   });
   assert.deepEqual(checkInvariants(s.doc), []);
@@ -980,6 +986,92 @@ test("17th amp insert refused", (t) => {
   const reasons = checkInvariants(s.doc);
   assert.equal(reasons.length, 1, `unexpected reasons: ${reasons.join(" | ")}`);
   assert.match(reasons[0], /would hold 17 amp inserts; a song can hold at most 16 amp inserts/);
+});
+
+test("a proposed amp is written as a proposal, and is not a library use", (t) => {
+  const s = studio(t);
+  const track = addTrack(s.doc, "Guitar");
+  addLibraryFile(s.doc, "cap-a", "nam");
+
+  // An insert written before proposals existed has no `proposed` field at all,
+  // and reads as the live insert it is, set by the operator.
+  s.doc.transact(() => {
+    insertMap(s.doc).set(
+      "amp-old",
+      objectMap({
+        id: "amp-old",
+        owner: trackOwner(track),
+        order: 0,
+        kind: "amp",
+        bypass: false,
+        params: { model_id: "cap-a", ir_id: null, input_db: 0, output_db: 0, ir_mix: 1 },
+      }),
+    );
+  });
+  const old = snapshot(s.doc).inserts["amp-old"];
+  assert.equal(old.proposed, false, "an insert with no proposed field is live");
+  assert.equal(old.set_by, "operator");
+  assert.equal(libraryUses(s.doc, "cap-a"), true, "a live amp plays its capture");
+
+  // The agent's second amp on that chain is a proposal: it carries its two
+  // fields, and it names the capture without playing it.
+  const proposed = runCommand(
+    s.doc,
+    "insert.add",
+    { id: "amp-2", owner: trackOwner(track), kind: "amp", params: { model_id: "cap-a" } },
+    { author: AGENT },
+  );
+  assert.equal(proposed.summary, "Proposed a second amp on Guitar");
+  const insert = snapshot(s.doc).inserts["amp-2"];
+  assert.equal(insert.proposed, true);
+  assert.equal(insert.set_by, "agent");
+  assert.equal(insert.params.model_id, "cap-a", "a proposal still holds the library reference it was made with");
+  assert.equal(libraryUses(s.doc, "cap-a"), true, "the live amp still plays it");
+
+  // With only the proposal left, nothing plays the entry: it cannot block the
+  // library file's removal, and the song's own reference check still passes.
+  runCommand(s.doc, "insert.remove", { id: "amp-old" });
+  assert.equal(libraryUses(s.doc, "cap-a"), false, "a proposal is not a use of the library entry");
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("a proposed amp counts against the song's amp cap", (t) => {
+  const s = studio(t);
+  const first = addTrack(s.doc, "Guitar 1");
+  const second = addTrack(s.doc, "Guitar 2");
+  addLibraryFile(s.doc, "cap-a", "nam");
+
+  // Fifteen amps: seven on one chain and eight on the other, which is the chain
+  // cap exactly. The sixteenth is an agent's second amp on the first chain, so
+  // it is a proposal — and a proposal holds a library reference, so it counts.
+  const addAmp = (owner, id) =>
+    runCommand(s.doc, "insert.add", { id, owner, kind: "amp", params: { model_id: "cap-a" } }, { author: HUMAN });
+  let made = 0;
+  for (let index = 0; index < 7; index += 1) {
+    addAmp(trackOwner(first), `amp-a-${index}`);
+    made += 1;
+  }
+  for (let index = 0; index < 8; index += 1) {
+    addAmp(trackOwner(second), `amp-b-${index}`);
+    made += 1;
+  }
+  const proposed = runCommand(
+    s.doc,
+    "insert.add",
+    { id: "amp-proposed", owner: trackOwner(first), kind: "amp", params: { model_id: "cap-a" } },
+    { author: AGENT },
+  );
+  assert.match(proposed.summary, /Proposed a second amp/);
+  made += 1;
+  assert.equal(made, LIMITS.ampInsertsPerSong);
+  assert.equal(snapshot(s.doc).inserts["amp-proposed"].proposed, true);
+
+  const over = refuses(
+    () => addAmp(trackOwner(second), "amp-16"),
+    "limit",
+  );
+  assert.equal(over.message, "A song holds at most 16 amp inserts.");
+  assert.deepEqual(checkInvariants(s.doc), []);
 });
 
 test("a chain's owner is a bare master, a track or a return and nothing else", (t) => {

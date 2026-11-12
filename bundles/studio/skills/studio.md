@@ -64,7 +64,7 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 | Audio tracks | A track is either a SunVox instrument or an audio track (`studio_track_add` with `kind: "audio"`). An audio clip holds **takes** the operator recorded and a **comp**: which take plays over which beats (`from_beat`–`to_beat`, sorted, never overlapping). |
 | Takes | Only the operator records. You can read takes (`studio_takes`), keep one (`studio_take_keep`: it alone plays over the whole clip), comp (`studio_clip_set_comp`), restore a discarded one (`studio_take_restore`) and fix its timing (`studio_take_set_offset`). You cannot add or discard a take, and you cannot remove a clip, track or scene that holds takes — ask the operator. |
 | Timeline | The arrangement: clips **placed** on bars, one lane per track, plus **markers** and **sections** on the ruler. A placement longer than its clip loops it; `offset_beats` starts it part-way into the clip; audio placements can fade in and out. The operator switches Session / Arrangement; you edit either. |
-| Missing | An amp insert (a NAM capture with a cabinet) arrives in a later Studio version, and there is no sidechain from another track and no look-ahead on a track insert. Say "Studio cannot yet …" rather than improvising. |
+| Missing | There is no sidechain from another track and no look-ahead on a track insert (only the master limiter looks ahead). An amp on a return is not delay-compensated. Say "Studio cannot yet …" rather than improvising. |
 
 ## Request → tools
 
@@ -151,16 +151,26 @@ Every track, every return and the master has its own **chain** of effects, its o
 | Tool | What it does |
 |---|---|
 | `studio_mix` | Read the mixer: each track's inserts in order `{id, kind, label, bypass, params}` and its sends, each return with its own chain, the master's `gain_db` and `target`, and the last render's figures. Read this before you change a chain |
-| `studio_insert_add` | Add an effect to a chain: `owner` is `"track:<id>"`, `"return:<id>"` or `"master"`, `kind` is one of `eq`, `filter`, `delay`, `reverb`, `chorus`, `phaser`, `saturation`, `compressor`, `limiter`, `gate`, `deesser`; `after` places it, and leaving `after` out appends it to the end |
+| `studio_insert_add` | Add an effect to a chain: `owner` is `"track:<id>"`, `"return:<id>"` or `"master"`, `kind` is one of `eq`, `filter`, `delay`, `reverb`, `chorus`, `phaser`, `saturation`, `compressor`, `limiter`, `gate`, `deesser`, or `amp` for an amp that plays a capture (see **Amps**); `after` places it, and leaving `after` out appends it to the end |
 | `studio_insert_set` | One or more parameters of one insert by name (`{ratio: 4, threshold_db: -18}`); the names and ranges are `EFFECT_PARAMS`'s, and a value outside its range is refused with the range |
 | `studio_insert_move` / `studio_insert_bypass` / `studio_insert_remove` | Reorder a chain, switch one effect out without losing its settings, or take it away |
 | `studio_return_add` / `studio_return_set` / `studio_return_remove` | The returns: their own name, level, pan, mute and chain. A return a send still feeds cannot be removed |
 | `studio_send_set` | `{track_id, return_id, level_db, pre}` — −60..+6 dB, `null` takes the send away, `pre: false` is after the track's fader (what a reverb wants) |
 | `studio_master_set` | The master's `gain_db` (−24..+12) and the song's `target` `{lufs, true_peak_db}`: one step sets both |
 
-A chain holds at most 8 effects and a song 8 returns. A **master limiter** is the only insert with look-ahead (1.5 ms, shown in the master strip as the master's delay); every track and return insert is zero-latency, so a limiter there is a clipper. An insert the engine cannot run — a compiled effect this build does not have, or one that produced an invalid sample — is bypassed in the ENGINE and reported once ("… produced an invalid sample; it is bypassed."), and a render names it in `effect_problems`; the song is never edited for it.
+A chain holds at most 8 effects and a song 8 returns. A **master limiter** is the only insert with look-ahead (1.5 ms, shown in the master strip as the master's delay); every effect an insert can be is zero-latency, so a limiter on a track or a return is a clipper — the one exception is an amp whose capture has to be converted, which Studio compensates (see **Amps**). An insert the engine cannot run — a compiled effect this build does not have, or one that produced an invalid sample — is bypassed in the ENGINE and reported once ("… produced an invalid sample; it is bypassed."), and a render names it in `effect_problems`; the song is never edited for it.
 
 **A mix pass is yours to make, and the person's to judge.** Consecutive mixer steps are outlined in your colour as one pass, with **A/B** (hear the song as it was before the pass, without writing anything) and **Undo pass** (take the pass back, newest step first, stopping at the first step the person changed since). A/B and Undo pass are theirs: you cannot run either, so say how many steps a pass costs before you start, and prefer 3–4 to 12. The song's target is the person's too (`master.set` is yours, but a target they picked is not yours to move without asking).
+
+## Amps
+
+An **amp** is not an effect with settings: it plays a NAM capture (a recorded real amplifier) through a cabinet — an impulse response — with an input trim, an output trim and a cabinet mix. Its sound is a file in the song's library, so both the capture and the cabinet are ids from `studio_library`, and only the operator chooses or changes them. Read the library before you touch an amp, and read the chain with `studio_mix`: an amp reads with the name and credit of the capture and the cabinet it plays.
+
+A capture recorded at another sample rate than the session has to be converted, and that conversion delays the track that carries the amp by about 0.7 ms. Studio compensates: when a rate-converted amp is anywhere in the song, the other tracks are delayed to match, so a dry doubled part and its amped copy stay in time. The whole mix therefore runs about 0.7 ms late, the master's latency line reports it, and a take recorded now is cut by it so it lands where it was played. Nothing of this is a setting to make — it is what the engine does.
+
+**A second amp on a chain is a proposal.** The first amp on a chain is an ordinary edit you may make; any further amp on a chain that already has one — live or bypassed — arrives as a proposal. A proposal plays nothing, loads nothing and adds no latency until the operator accepts it in that track's chain, and accepting is a people-only command, so you have no tool for it. Propose it, say which capture and cabinet you proposed and why, then let the operator decide; you may still take your own proposal away or retune its trims.
+
+**Known gap:** an amp on a **return** is not delay-compensated. A send-return path is two paths through the mixer, and Studio compensates track chains only — so an amp on a return that converts rate can push that return's signal late against the tracks feeding it. Prefer an amp on the track itself when timing matters, and tell the operator about the gap if they want one on a return.
 
 ## Sampler
 

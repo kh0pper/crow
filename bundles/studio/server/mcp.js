@@ -99,7 +99,9 @@ import "./commands/library.js";
 import "./commands/instruments.js";
 // The 1d mixer commands: the effects of a chain, the sends, the returns and the
 // master. An agent may run every one of them (plan 1d, Global Constraints): a
-// mix step is an undoable step, never a sound leaving the song.
+// mix step is an undoable step, never a sound leaving the song — except
+// `insert.accept`, which is people-only (the yes to a proposed second amp), so
+// mcp.js builds no tool for it.
 import "./commands/mixer.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 import { libraryUsers, libraryInsertUsers, effectLabel } from "./doc.js";
@@ -127,9 +129,16 @@ const UNDO_LINE = "Every change shows up live for the operator, tagged as yours,
  * no tool for `midi.accept` at all, because the loop below skips a people-only
  * command.
  *
+ * The mixer's `insert.add` needs it for the same reason: a SECOND amp on a chain
+ * that already holds one is a proposal, and the operator's yes is the only way it
+ * becomes part of the sound. `insert.accept` is people-only too, so it gets no
+ * tool either.
+ *
  * @type {Readonly<Object<string, string>>}
  */
 const COMMAND_NOTES = Object.freeze({
+  "insert.add":
+    "You propose; the operator accepts. A SECOND amp on a track that already has one is always a proposal; it plays nothing until the operator accepts it in the track's chain, and there is no tool for accepting.",
   "midi.map":
     "You propose; the operator accepts. A mapping you make is always a proposal — it plays nothing until the operator accepts it on the MIDI page — and an accepted mapping is theirs, so your next midi.map makes a new proposal instead of editing one. There is no tool for accepting: that yes is the operator's own click.",
   "midi.remove":

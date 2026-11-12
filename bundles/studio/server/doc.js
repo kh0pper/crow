@@ -110,7 +110,7 @@
  * touching two of them never overwrite each other:
  *
  *   inserts  Y.Map of insert id → Y.Map {id, owner, order, kind, bypass,
- *                     params: Y.Map (one field per parameter)}
+ *                     proposed, set_by, params: Y.Map (one field per parameter)}
  *   sends    Y.Map of "<track_id>/<return_id>" → Y.Map {track_id, return_id,
  *                     level_db, pre}
  *   returns  Y.Map of return id → Y.Map {id, name, gain_db, pan, mute}
@@ -123,6 +123,15 @@
  * field per parameter, so two peers editing two parameters of one insert both
  * win and one parameter is one undoable field. The parameters and their ranges
  * are the `EFFECT_PARAMS` table below, which the engine and the panel read too.
+ *
+ * An insert is normally live the moment it is written. The one exception is a
+ * PROPOSAL: `proposed: true` marks a second amp an agent suggested on a chain
+ * that already holds one, and only the operator's `insert.accept` makes it
+ * live. `set_by` says who put the insert there, the way it does for a MIDI
+ * mapping. A proposed insert still owns its place in the chain, its own library
+ * reference and its count against `LIMITS.ampInsertsPerSong`, but it is not
+ * live: the engine skips it, a render loads nothing for it, and it does not
+ * count as playing the library entry it names (see `libraryInsertUsers`).
  *
  * Returns are NOT tracks: they live in `returns`, no track reader sees them,
  * and `LIMITS.tracks` never counts them. A send is keyed by the pair it joins,
@@ -556,6 +565,9 @@ export const MIDI_MESSAGE_TYPES = Object.freeze(["note", "cc", "pc"]);
 
 /** Who set one MIDI mapping: the operator, or an agent proposing one. */
 export const MIDI_SET_BY = Object.freeze(["operator", "agent"]);
+
+/** Who set one insert: the operator, or the agent that added or proposed it. */
+export const INSERT_SET_BY = Object.freeze(["operator", "agent"]);
 
 /** The filter kinds one pad may use; "off" is a pad that filters nothing. */
 export const PAD_FILTER_TYPES = Object.freeze(["off", "lp", "hp", "bp"]);
@@ -1614,6 +1626,11 @@ export function libraryUsers(source, id) {
  * This is the list `library.remove` refuses on for a capture or a cabinet, and
  * the one the agent's sound guard reads: an amp insert carries the sound the
  * operator chose exactly as a soundfont track carries its font.
+ *
+ * A PROPOSAL is not a user: it holds the id it was proposed with (and the song's
+ * own reference check still asks that the entry is there), but it plays
+ * nothing, so it cannot block a library file's removal — the operator's yes to
+ * the amp is what would.
  * @param {object|Y.Doc} source - a snapshot, or a document
  * @param {string} id - the library entry's id
  * @returns {string[]} the insert ids, sorted, each once
@@ -1624,6 +1641,7 @@ export function libraryInsertUsers(source, id) {
   const ids = new Set();
   for (const insert of Object.values(song.inserts ?? {})) {
     if (!insert || insert.kind !== AMP_KIND) continue;
+    if (insert.proposed === true) continue;
     const params = insert.params && typeof insert.params === "object" ? insert.params : {};
     if (params.model_id !== id && params.ir_id !== id) continue;
     if (typeof insert.id === "string" && insert.id !== "") ids.add(insert.id);
@@ -4948,6 +4966,10 @@ function normalizeLibraryEntry(id, value) {
  * field. A number that IS a number is kept as it is, even out of range, which
  * is what lets a hand-written or restored value be reported instead of quietly
  * tidied into a valid one.
+ *
+ * `proposed` is true only when it is exactly `true`, so an insert written before
+ * proposals existed reads as the live insert it is. `set_by` is who put it
+ * there, defaulting to the operator for the same reason.
  */
 function normalizeInsert(id, value) {
   const plain = stripHints(value);
@@ -4958,6 +4980,8 @@ function normalizeInsert(id, value) {
     order: numberOr(plain.order, 0),
     kind,
     bypass: plain.bypass === true,
+    proposed: plain.proposed === true,
+    set_by: INSERT_SET_BY.includes(plain.set_by) ? plain.set_by : INSERT_SET_BY[0],
     params:
       kind === AMP_KIND
         ? normalizeAmpParams(plain.params)

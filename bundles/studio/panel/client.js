@@ -44,7 +44,10 @@
  * loop pass ends on. While the clip loops, every pass is split into its own take
  * (`recorder.splitAt`), and the interface's calibrated round trip
  * (`offset_frames`) both keeps the tail of the last pass and is recorded on the
- * take.
+ * take. A take armed now is cut by the engine's whole master delay as well — the
+ * limiter's look-ahead and the mix delay a converted amp's compensation adds, as
+ * the page tracks it in `view.mix.latency` — so it lands where it was played; a
+ * take recorded before that is never moved.
  *
  * The take is local first: every chunk is written to IndexedDB
  * (`panel/take-store.js`) before anything is sent, the upload begins when the
@@ -293,6 +296,13 @@
  * number) shows the engine's own sentence on its chip, and one whose effect is
  * still loading says `Loading…`. Neither is a document change.
  *
+ * A SECOND amp on a chain that already holds one is a proposal: the agent made
+ * it, and it plays nothing until the operator says yes. Its chip is dimmed and
+ * says `Proposed amp`, and instead of a bypass switch the row offers **Accept**
+ * (the people-only `insert.accept`, sent with the chain, capture and cabinet the
+ * row was DRAWN with, so a proposal that moved since the draw is refused rather
+ * than accepted unseen) and **Decline** (the ordinary `insert.remove`).
+ *
  * ## The amp (plan 1d, Task 15)
  *
  * "Amp" is the last row of the "+ effect" menu. An amp is not an effect with
@@ -365,7 +375,10 @@
  * effect chain, `return.add`, `return.set` and `return.remove` are the returns,
  * `send.set` is one track's send to one return, and `master.set` is the master
  * strip. Each is one field write of one object, which is what makes a control
- * move one undoable step (Task 10).
+ * move one undoable step (Task 10). `insert.accept` is here beside them for the
+ * reason `midi.accept` is: it is people-only, and the **Accept** button on a
+ * proposed second amp is the only way to run it — the row sends the chain,
+ * capture and cabinet it was drawn with.
  * @type {readonly string[]}
  */
 export const COMMANDS = Object.freeze([
@@ -433,6 +446,7 @@ export const COMMANDS = Object.freeze([
   "midi.propose_profile",
   "library.remove",
   "insert.add",
+  "insert.accept",
   "insert.remove",
   "insert.move",
   "insert.set",
@@ -888,6 +902,12 @@ export const CLIENT_SCRIPT = [
   "  var MIX_TARGET_CUSTOM = 'Custom';",
   "  var MIX_LOADING_TEXT = 'Loading\u2026';",
   "  var MIX_FAULT_FALLBACK = 'This effect produced an invalid sample; it is bypassed.';",
+  "  // What a chip says while the insert it draws is still a proposal: the agent",
+  "  // suggested a second amp on a chain that already has one, and it plays",
+  "  // nothing until the operator accepts it.",
+  "  var MIX_PROPOSED_TEXT = 'Proposed amp';",
+  "  var MIX_PROPOSED_ACCEPT_TEXT = 'Accept';",
+  "  var MIX_PROPOSED_DECLINE_TEXT = 'Decline';",
   "  var MIX_LIMITER_PREFIX = 'Limiter look-ahead: ';",
   "  var MIX_AB_BEFORE_TEXT = 'Hear: before (A/B)';",
   "  var MIX_AB_AFTER_TEXT = 'Hear: after (A/B)';",
@@ -1734,6 +1754,11 @@ export const CLIENT_SCRIPT = [
   "        // Task 15). starterBusy is a starter sound on its way into the song.",
   "        newAmp: null,",
   "        starterBusy: false,",
+  "        // What each proposed insert's row was DRAWN with (chain, capture,",
+  "        // cabinet): Accept sends those, never a fresh read of the snapshot, so a",
+  "        // proposal that moved after this draw is refused by the hub instead of",
+  "        // being accepted as something nobody looked at (see insertAccept).",
+  "        drawnProposals: {},",
   "        meter: null,",
   "        meterTick: 0,",
   "        latency: null,",
@@ -4040,7 +4065,19 @@ export const CLIENT_SCRIPT = [
   "          });",
   "        })",
   "        .then(function (ready) {",
-  "          var offset = ready.record ? Math.max(0, Math.round(Number(ready.record.latency_frames) || 0)) : 0;",
+  "          // The interface's round trip, and the engine's whole master path: the",
+  "          // limiter's look-ahead plus the mix delay a rate-converted amp's",
+  "          // compensation adds. Both are what the take is late by at the output, so",
+  "          // a NEW take is cut by both and lands where it was played. Only the take",
+  "          // armed here is offset: a take already in the song keeps the",
+  "          // offset_frames it was recorded with, and nothing re-offsets it.",
+  "          var roundTrip = ready.record ? Math.max(0, Math.round(Number(ready.record.latency_frames) || 0)) : 0;",
+  "          var engineMs = view.mix.latency ? Number(view.mix.latency.ms) : NaN;",
+  "          var engineRate = Number(rec.rate) || 0;",
+  "          var engineFrames = Number.isFinite(engineMs) && engineMs > 0 && engineRate > 0",
+  "            ? Math.round((engineMs / 1000) * engineRate)",
+  "            : 0;",
+  "          var offset = roundTrip + engineFrames;",
   "          return ready.engine.createRecorder({ input: ready.stream, channels: entry.channels }).then(function (recorder) {",
   "            return { recorder: recorder, record: ready.record, offset: offset };",
   "          });",
@@ -6783,6 +6820,7 @@ export const CLIENT_SCRIPT = [
   "      // engine below, and nothing of this page's own mixer state is kept.",
   "      view.mix = {",
   "        editor: '',",
+  "        drawnProposals: {},",
   "        meter: null,",
   "        meterTick: 0,",
   "        latency: null,",
@@ -11371,6 +11409,9 @@ export const CLIENT_SCRIPT = [
   "      reconcileInsertMarks(snap);",
   "      mixerHost.hidden = false;",
   "      clear(mixerHost);",
+  "      // Every chip is drawn again below, so what a previous draw kept for Accept",
+  "      // goes with it.",
+  "      view.mix.drawnProposals = {};",
   "      var pass = mixerPass();",
   "      var refs = passRefs(pass);",
   "      mixerHost.appendChild(mixerHead());",
@@ -11529,13 +11570,20 @@ export const CLIENT_SCRIPT = [
   "    // One effect's chip, its bypass switch and its remove. The chip is a real",
   "    // button: a press on it starts a drag, its click opens the editor, and a drag",
   "    // that moved swallows that click.",
+  "    //",
+  "    // A PROPOSAL (a second amp an agent suggested on a chain that already holds",
+  "    // one) is drawn dimmed, says so, and offers Accept and Decline where a live",
+  "    // insert offers its bypass switch and its remove: it is not in the chain, so",
+  "    // there is nothing to bypass yet.",
   "    function insertRow(insert, owner, refs) {",
   "      var id = String(insert.id);",
-  "      var row = el('div', 'st-mix-fx-row');",
+  "      var proposed = insert.proposed === true;",
+  "      var row = el('div', 'st-mix-fx-row' + (proposed ? ' st-mix-fx-row-proposed' : ''));",
   "      var label = effectLabel(insert.kind);",
   "      // An effect the agent's pass wrote wears the pass's outline, as its strip does.",
   "      var inPass = !!(refs && refs['insert:' + id] === true);",
   "      var chip = button('st-mix-chip' + (insert.bypass === true ? ' st-mix-chip-off' : '')",
+  "        + (proposed ? ' st-mix-chip-proposed' : '')",
   "        + (view.mix.faults[id] ? ' st-mix-chip-fault' : '') + (inPass ? ' st-agent-edit' : ''),",
   "        insertChipText(insert), {",
   "        'data-act': 'insert-chip',",
@@ -11545,9 +11593,33 @@ export const CLIENT_SCRIPT = [
   "        // the chip itself may truncate it.",
   "        title: view.mix.faults[id]",
   "          ? String(view.mix.faults[id])",
-  "          : 'Open the ' + label + ': drag it to reorder the chain'",
+  "          : (proposed",
+  "            ? 'Open the proposed ' + label + ': it plays nothing until you accept it'",
+  "            : 'Open the ' + label + ': drag it to reorder the chain')",
   "      });",
   "      row.appendChild(chip);",
+  "      if (proposed) {",
+  "        // What the operator is looking at, kept as it was drawn: Accept sends",
+  "        // exactly these three values (see insertAccept).",
+  "        view.mix.drawnProposals[id] = {",
+  "          owner: String(insert.owner),",
+  "          model_id: insert.params && typeof insert.params.model_id === 'string' ? insert.params.model_id : '',",
+  "          ir_id: insert.params && typeof insert.params.ir_id === 'string' ? insert.params.ir_id : null",
+  "        };",
+  "        row.appendChild(button('st-btn st-small st-mix-mini', MIX_PROPOSED_ACCEPT_TEXT, {",
+  "          'data-act': 'insert-accept',",
+  "          'data-insert-id': id,",
+  "          'aria-label': 'Accept the proposed ' + label + ' on this chain',",
+  "          title: 'Make this second ' + label + ' live in the chain'",
+  "        }));",
+  "        row.appendChild(button('st-btn st-small st-mix-mini st-danger', MIX_PROPOSED_DECLINE_TEXT, {",
+  "          'data-act': 'insert-remove',",
+  "          'data-insert-id': id,",
+  "          'aria-label': 'Decline the proposed ' + label + ' on this chain',",
+  "          title: 'Take the proposal away; it never played anything'",
+  "        }));",
+  "        return row;",
+  "      }",
   "      var bypass = button('st-toggle st-mix-mini' + (insert.bypass === true ? '' : ' st-on')",
   "        , insert.bypass === true ? 'Off' : 'On', {",
   "        'data-act': 'insert-bypass',",
@@ -11567,13 +11639,27 @@ export const CLIENT_SCRIPT = [
   "    }",
   "",
   "    // What a chip says: the engine's own sentence for an insert it had to",
-  "    // bypass, Loading while its effect is on its way, and otherwise the effect's",
-  "    // own name.",
+  "    // bypass, Loading while its effect is on its way, Proposed amp while it is",
+  "    // still a proposal, and otherwise the effect's own name.",
   "    function insertChipText(insert) {",
   "      var id = String(insert.id);",
+  "      if (insert.proposed === true) return MIX_PROPOSED_TEXT;",
   "      if (view.mix.faults[id]) return String(view.mix.faults[id]);",
   "      if (view.mix.loading[id]) return MIX_LOADING_TEXT;",
   "      return effectLabel(insert.kind);",
+  "    }",
+  "",
+  "    // Accept one proposed amp: the yes is bound to the chain, capture and cabinet",
+  "    // its row was DRAWN with, never a fresh read of the snapshot. A proposal the",
+  "    // agent removed and made again under the same id, with another capture, is",
+  "    // therefore not accepted unseen: the hub refuses an expect that moved.",
+  "    function insertAccept(id) {",
+  "      var drawn = view.mix.drawnProposals[String(id)];",
+  "      if (!drawn) return;",
+  "      send('insert.accept', {",
+  "        id: String(id),",
+  "        expect: { owner: drawn.owner, model_id: drawn.model_id, ir_id: drawn.ir_id }",
+  "      });",
   "    }",
   "",
   "    // The menu a chain adds an effect from: one row per effect the table holds,",
@@ -14757,8 +14843,9 @@ export const CLIENT_SCRIPT = [
   "      }",
   "",
   "      // The mixer: a return, the agent's pass (A/B and Undo pass), a chip's",
-  "      // editor, an effect's bypass or removal, a send's removal, and a strip's",
-  "      // mute. Every one is one command, except A/B, which writes nothing.",
+  "      // editor, an effect's bypass or removal, a proposed amp's yes, a send's",
+  "      // removal, and a strip's mute. Every one is one command, except A/B, which",
+  "      // writes nothing.",
   "      if (act === 'mix-add-return') {",
   "        send('return.add', { id: 'ret-' + uuid(), name: 'Return ' + String(returnList(snap).length + 1) });",
   "        return;",
@@ -14770,6 +14857,10 @@ export const CLIENT_SCRIPT = [
   "        if (view.mix.swallowChipClick) { view.mix.swallowChipClick = false; return; }",
   "        view.mix.editor = String(target.getAttribute('data-insert-id') || '');",
   "        render();",
+  "        return;",
+  "      }",
+  "      if (act === 'insert-accept') {",
+  "        insertAccept(String(target.getAttribute('data-insert-id') || ''));",
   "        return;",
   "      }",
   "      if (act === 'insert-bypass') {",

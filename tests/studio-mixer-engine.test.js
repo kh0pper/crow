@@ -188,7 +188,6 @@ function stubDynamicsSource(factor, nanKinds = [], extra = {}) {
 
 /** The composed processor classes, one per set of sources (composed once each). */
 const CLASSES = new Map();
-
 /**
  * Which sources were evaluated LAST. Each composition assigns the engine
  * modules' globals (`StudioDynamics`, `StudioFaustHost`, …) on the real global
@@ -319,6 +318,14 @@ function insertOf(id, owner, order, kind, params, bypass = false) {
   return { id: id, owner: owner, order: order, kind: kind, bypass: bypass, params: params };
 }
 
+/**
+ * One insert that is still a PROPOSAL: the agent's second amp on a chain.
+ * @returns {object}
+ */
+function proposedInsertOf(id, owner, order, kind, params) {
+  return { id: id, owner: owner, order: order, kind: kind, bypass: false, proposed: true, params: params };
+}
+
 /** @returns {Float32Array} one bar of a constant level, at the context's rate. */
 function takeOf(level) {
   const samples = new Float32Array(BAR_FRAMES);
@@ -383,6 +390,7 @@ async function host(song, plan = {}) {
     post: post,
     flush: flush,
     posts: posts,
+    processor: processor,
     /**
      * Render `blocks` blocks and hand back the master.
      *
@@ -2257,4 +2265,253 @@ test("the engine's duplicated tables match the document's", () => {
     ["compressor", "limiter", "gate", "deesser"],
     "the four JavaScript dynamics are the ones the processor routes to StudioDynamics",
   );
+});
+
+/**
+ * A stand-in for `engine/dynamics.js` whose inserts are REAL delay lines: every
+ * insert delays its input by `frames` and reports that very number as its
+ * `latencyFrames`, the way the master limiter's lookahead does. It is how a test
+ * puts a known number of frames on one track's chain without a capture. NOT
+ * product code.
+ * @param {number} frames
+ * @returns {string} one classic script, ready to be concatenated into the module
+ */
+function delayDynamicsSource(frames) {
+  return [
+    "(function () {",
+    '  "use strict";',
+    '  const KINDS = Object.freeze(["compressor", "limiter", "gate", "deesser"]);',
+    `  const FRAMES = ${frames};`,
+    "  function create(kind, rate) {",
+    "    const left = new Float32Array(FRAMES);",
+    "    const right = new Float32Array(FRAMES);",
+    "    let write = 0;",
+    "    return {",
+    "      kind: kind,",
+    "      rate: rate,",
+    "      latencyFrames: FRAMES,",
+    "      setParams: function setParams() {},",
+    "      reset: function reset() { left.fill(0); right.fill(0); write = 0; },",
+    "      params: function params() { return {}; },",
+    "      process: function process(blockLeft, blockRight, frames) {",
+    "        for (let at = 0; at < frames; at += 1) {",
+    "          const inLeft = blockLeft[at];",
+    "          const inRight = blockRight ? blockRight[at] : inLeft;",
+    "          blockLeft[at] = left[write];",
+    "          if (blockRight) blockRight[at] = right[write];",
+    "          left[write] = inLeft;",
+    "          right[write] = inRight;",
+    "          write = write + 1 >= FRAMES ? 0 : write + 1;",
+    "        }",
+    "      },",
+    "    };",
+    "  }",
+    "  globalThis.StudioDynamics = { create: create, KINDS: KINDS };",
+    "})();",
+  ].join("\n");
+}
+
+/** @returns {number} the frame the largest |sample| of a run sits on. */
+function peakFrameOf(samples) {
+  let frame = -1;
+  let peak = 0;
+  for (let at = 0; at < samples.length; at += 1) {
+    const value = Math.abs(samples[at]);
+    if (value > peak) {
+      peak = value;
+      frame = at;
+    }
+  }
+  return frame;
+}
+
+/**
+ * One tap's blocks as one timeline: the blocks arrive one per block, in order,
+ * so an index in this array is the frame the tapped owner played it at.
+ * @param {object[]} posts
+ * @param {string} target
+ * @returns {Float32Array}
+ */
+function tapTimeline(posts, target) {
+  const blocks = posts.filter((message) => message.type === "tap_block" && message.target === target);
+  const samples = new Float32Array(blocks.length * BLOCK);
+  for (let index = 0; index < blocks.length; index += 1) samples.set(blocks[index].channels[0], index * BLOCK);
+  return samples;
+}
+
+test("plugin delay compensation leaves a dry track on the delayed track's click frame", async () => {
+  // One track's chain delays its audio by 37 frames and says so; the other
+  // track's chain delays nothing. Each track's own delay line holds back exactly
+  // what it is short of, so the two clicks leave the mixer on the SAME frame.
+  // Without the compensation the dry one is 37 frames early — the offset that
+  // combs a doubled part — which is what this test has to be able to see.
+  const frames = 37;
+  const dynamics = delayDynamicsSource(frames);
+  const song = audioSong({
+    tracks: [audioTrack(1), audioTrack(2)],
+    inserts: { "ins-delay": insertOf("ins-delay", "track:track-1", 0, "compressor", {}) },
+  });
+  const at = 100;
+  const take = new Float32Array(BAR_FRAMES);
+  take[at] = 0.5;
+  take[at + 1] = 0.25;
+  take[at + 2] = 0.125;
+
+  /**
+   * Where one track's click comes out.
+   * @param {string} target
+   * @param {boolean} [disableCompensation] render the engine as it was before
+   *   there was any compensation, by zeroing every track's own delay
+   * @returns {Promise<{peak: number, host: object}>}
+   */
+  const clickOf = async (target, disableCompensation = false) => {
+    const probe = await host(song, { dynamics: dynamics, takeSamples: take });
+    if (disableCompensation) {
+      for (const record of probe.processor.slots) {
+        record.compensation = 0;
+        record.compensationFrom = 0;
+        record.compensationFade = 0;
+      }
+      probe.processor.mixDelayFrames = 0;
+    }
+    probe.post({ type: "tap", target: target, on: true });
+    await probe.flush();
+    probe.run(4);
+    const samples = tapTimeline(probe.posts, target);
+    return { peak: peakFrameOf(samples), host: probe };
+  };
+
+  const delayed = await clickOf("track-1");
+  const dry = await clickOf("track-2");
+  assert.equal(delayed.host.processor.slots[0].compensation, 0, "the longest chain waits for nobody");
+  assert.equal(
+    dry.host.processor.slots[1].compensation,
+    frames,
+    `the dry track's line holds back the other chain's ${frames} frames`,
+  );
+  assert.equal(
+    delayed.peak,
+    at + frames,
+    `the delayed track's click lands ${frames} frames after the take's (frame ${at}), it landed at ${delayed.peak}`,
+  );
+  assert.ok(
+    Math.abs(dry.peak - delayed.peak) <= 1,
+    `the two clicks have to land on the same frame, they landed at ${dry.peak} and ${delayed.peak}`,
+  );
+
+  // The assertion can fail: with no compensation the dry click is where the take
+  // put it, so the frames the compensation adds are exactly the reported delay.
+  const uncompensated = await clickOf("track-2", true);
+  assert.equal(uncompensated.peak, at, `without compensation the dry click is at frame ${at}`);
+  assert.equal(
+    dry.peak - uncompensated.peak,
+    frames,
+    "the frames the compensation adds are the chain's reported latency",
+  );
+});
+
+test("a song whose tracks have no latency is compensated by nothing, bit for bit", async () => {
+  const song = audioSong({ tracks: [audioTrack(1), audioTrack(2)] });
+  const plain = await host(song, { takeSamples: toneTake(0.4) });
+  const again = await host(song, { takeSamples: toneTake(0.4) });
+  const first = plain.run(40);
+  const second = again.run(40);
+  assert.equal(firstDifference(first, second), -1, "two renders of the same song are the same samples");
+  assert.deepEqual(
+    plain.posts.filter((message) => message.type === "master_latency"),
+    [],
+    "nothing on any track or on the master delays anything, so the whole path's delay is 0 and nothing is posted",
+  );
+  const readings = plain.posts.filter((message) => message.type === "meter");
+  assert.ok(readings.length > 0, "the song meters");
+  for (const reading of readings) {
+    assert.equal(reading.latency_ms, 0, "a reading names the whole path's delay, which is 0 here");
+  }
+  assert.equal(plain.processor.mixDelayFrames, 0, "no track chain delays anything, so nothing is compensated");
+  for (const record of plain.processor.slots) {
+    assert.equal(record.compensation, 0, `track ${record.track_id} is held back by nothing`);
+    assert.ok(
+      record.delayLeft instanceof Float32Array && record.delayLeft.length === record.delayRight.length,
+      `${record.track_id} still carries its own delay line, primed for a compensation that arrives later`,
+    );
+  }
+});
+
+test("a proposed insert is not built, adds no latency, and is built once it is accepted", async () => {
+  // The chain on track 1 already has the operator's amp on it, so the amp the
+  // agent adds there is a PROPOSAL. The delayed dynamics stub stands in for the
+  // only latency a track chain can carry here (a rate-converted amp's two
+  // bridges), because no capture can be attached without the NAM module.
+  const frames = 37;
+  const dynamics = delayDynamicsSource(frames);
+  const liveChain = {
+    "ins-amp": insertOf("ins-amp", "track:track-1", 0, "amp", {
+      model_id: "",
+      ir_id: null,
+      input_db: 0,
+      output_db: 0,
+      ir_mix: 1,
+    }),
+    "ins-delay": insertOf("ins-delay", "track:track-1", 1, "compressor", {}),
+  };
+  const proposal = proposedInsertOf("ins-amp-2", "track:track-1", 2, "amp", {
+    model_id: "lib-cap",
+    ir_id: "lib-cab",
+    input_db: 0,
+    output_db: 0,
+    ir_mix: 1,
+  });
+  const takes = toneTake(0.4);
+
+  const plain = await host(audioSong({ tracks: [audioTrack(1), audioTrack(2)], inserts: { ...liveChain } }), {
+    dynamics: dynamics,
+    takeSamples: takes,
+  });
+  const proposed = await host(
+    audioSong({ tracks: [audioTrack(1), audioTrack(2)], inserts: { ...liveChain, "ins-amp-2": proposal } }),
+    { dynamics: dynamics, takeSamples: takes },
+  );
+  const accepted = await host(
+    audioSong({
+      tracks: [audioTrack(1), audioTrack(2)],
+      inserts: { ...liveChain, "ins-amp-2": { ...proposal, proposed: false } },
+    }),
+    { dynamics: dynamics, takeSamples: takes },
+  );
+
+  // The proposal is not in the chain the engine built, so the song plays — and
+  // delays — exactly as it did without it: same samples, same latency report,
+  // same compensation.
+  assert.equal(
+    proposed.processor.mixer.chains.get("track:track-1").length,
+    2,
+    "the proposed amp is no insert of the chain it was proposed for",
+  );
+  assert.equal(proposed.processor.slots[0].chain.length, 2, "no runner was built for it");
+  assert.equal(proposed.processor.mixDelayFrames, frames, "it counts for no part of Lmax");
+  assert.equal(proposed.processor.slots[1].compensation, frames, "the dry track waits for the delay it does not have");
+  assert.deepEqual(
+    proposed.posts.filter((message) => message.type === "master_latency"),
+    plain.posts.filter((message) => message.type === "master_latency"),
+    "the whole path's delay is unchanged by a proposal",
+  );
+  const plainOut = plain.run(4);
+  const proposedOut = proposed.run(4);
+  assert.equal(firstDifference(proposedOut, plainOut), -1, "a proposal changes nothing the operator hears");
+  assert.ok(peakOf(proposedOut.left) > 0, "and the song still plays");
+
+  // Accepting it (the operator's yes clears `proposed`) makes it an ordinary
+  // insert: it is built, it is in the chain, and the chain sounds different.
+  assert.equal(accepted.processor.mixer.chains.get("track:track-1").length, 3, "the accepted amp is an insert");
+  assert.equal(accepted.processor.slots[0].chain.length, 3, "with a runner of its own");
+  const acceptedOut = accepted.run(4);
+  assert.ok(
+    firstDifference(acceptedOut, plainOut) >= 0,
+    "an accepted amp is live, so the chain it joined is not the chain that played before",
+  );
+  // The capture is not on this device, so the live amp plays the silence a
+  // missing capture plays: track 1's half of the mix is gone, and the two
+  // identical tracks no longer sum to twice one of them.
+  const ratio = peakOf(acceptedOut.left) / peakOf(plainOut.left);
+  assert.ok(Math.abs(ratio - 0.5) < 0.01, `only the other track is left in the mix (ratio ${ratio})`);
 });

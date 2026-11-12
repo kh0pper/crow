@@ -258,6 +258,13 @@
  * with its parameters), and it is built and edited on the message path — never in
  * a block.
  *
+ * **A proposal is not an insert.** A second amp an agent suggests carries
+ * `proposed: true`, and `insertSpecsFor` leaves it out of the chain it was
+ * proposed for: nothing is built for it, no capture or module is loaded, it adds
+ * no latency and it does not count towards `Lmax`. The operator's accept (a
+ * people-only command) clears the flag, and the next snapshot builds it exactly
+ * as any other insert of that chain.
+ *
  * A snapshot is compared by SHAPE (each insert's id and kind, in order, with its
  * bypass flag). A chain whose shape is unchanged only had parameters turned:
  * every runner takes its own `setParams`, keeps its insert, its state and its
@@ -319,15 +326,34 @@
  * insert is the exception the other way: a bad sample stops it SILENT, because
  * the dry signal is not something an amp may fall back to (see below).
  *
- * **Latency.** Every track and return insert is zero-latency except an amp whose
- * capture is at another rate than the context's; only the master limiter has its
- * 1.5 ms lookahead, applied after everything else. The master path is delayed by
- * the master chain's total latency and nothing else, and the RUNNING delay — the
- * one the audio being handed out really has, so a fade that moves the limiter in
- * or out crosses it at its midpoint, and a limiter the NaN guard has bypassed
- * does not count — is posted as `{type:"master_latency", ms}` whenever it changes
- * (never twice for the same number) and repeated in every meter reading as
- * `latency_ms`.
+ * **Latency, and plugin delay compensation.** Every track and return insert is
+ * zero-latency except an amp whose capture is at another rate than the context's;
+ * only the master limiter has its 1.5 ms lookahead, applied after everything
+ * else. A converted amp delays its own track by its two rate bridges'
+ * look-ahead, so the tracks are delay-compensated: `Lmax` is the longest track
+ * chain's latency, and every track is delayed by `Lmax − its own chain` in a
+ * delay line of its own, right after its chain and before its sends, its fader
+ * and its tap — so a dry doubled track and its amped copy stay in time, and the
+ * sends and the tap of a track line up with that track. The whole mix therefore
+ * runs `Lmax` late (`this.mixDelayFrames`), and a compensation that moves fades
+ * the old tap into the new one over 64 frames instead of stepping.
+ *
+ * Two delays are deliberately NOT compensated. A MONITORED track's compensation
+ * is 0: the live input is summed into that track's source before its chain, so a
+ * delay line would put the player's own playing behind it. That track's backing
+ * can therefore run early by `Lmax − its own chain` (0 when it holds the longest
+ * chain, which is the one-amp case). An amp on a RETURN is not compensated
+ * either: a send-return path is two paths through the graph, and this engine
+ * compensates track chains only — a KNOWN GAP (see `recomputeCompensation`).
+ *
+ * The master chain's own delay is `masterLatencyFrames` (`masterLatencyMs`) and
+ * nothing else. Everything that describes the whole path from the track sources
+ * to the output uses `masterLatencyFrames + mixDelayFrames`: the
+ * `{type:"master_latency", ms}` message, the meter's `latency_ms` and a master
+ * tap's frame. The RUNNING delay — the one the audio being handed out really
+ * has, so a fade that moves the limiter in or out crosses it at its midpoint, and
+ * a limiter the NaN guard has bypassed does not count — is what is posted,
+ * whenever it changes (never twice for the same number).
  *
  * ## Amp inserts: captures and cabinets (plan 1d, Task 13)
  *
@@ -388,7 +414,10 @@
  * The insert's own latency is the rate converters' look-ahead: a capture at the
  * context's rate needs no conversion and delays nothing, one at another rate
  * delays by what the two bridges really delay (`latencyFrames`, which the runner
- * primes for and the monitor's number includes).
+ * primes for, the monitor's number includes and a track's compensation is made
+ * of). A capture's model delays its own audio a little besides — its receptive
+ * field — and no rate report covers that: it belongs to the capture, not to the
+ * chain, so compensation neither knows it nor cancels it.
  *
  * ## Monitoring through the chain
  *
@@ -400,7 +429,11 @@
  * as its recorded audio will. The recorder taps the input itself, OUTSIDE the
  * engine, so a take is still the dry signal. The delay the chain adds is posted
  * as `{type:"monitor_latency", track_id, ms}` whenever it changes, and the page
- * adds it to the measured round trip it shows.
+ * adds it to the measured round trip it shows. That number is the track's own
+ * chain plus the master's, and never the tracks' compensation delay: the
+ * monitored track's compensation is 0 while it is monitored, so the player's own
+ * playing is not put behind a delay line (see "Latency, and plugin delay
+ * compensation").
  *
  * ## The meter
  *
@@ -425,13 +458,14 @@
  * `nextBarFrame` report). Record-into-pad and resampling use it. A tap is off by
  * default, and off costs nothing at all.
  *
- * A track tap reads AFTER that track's inserts and its fader, so a resample of a
- * track is what you hear from it. A master tap copies the master AFTER the
- * performance bus, the master chain and the clip, so what it records is what
- * the room hears; because the master chain delays the master by its own latency
- * (the limiter's lookahead), a MASTER tap's `frame` is stamped that many frames
- * back, so a resample of the master lines up with a resample of a track instead
- * of leading it by 1.5 ms. (A tap armed on the very first block therefore starts
+ * A track tap reads AFTER that track's inserts, its compensation delay and its
+ * fader, so a resample of a track is what you hear from it. A master tap copies
+ * the master AFTER the performance bus, the master chain and the clip, so what it
+ * records is what the room hears; because the path from the track sources to the
+ * master is delayed by the master chain's own latency (the limiter's lookahead)
+ * plus the tracks' compensation delay, a MASTER tap's `frame` is stamped that
+ * many frames back, so a resample of the master lines up with a resample of a
+ * track instead of leading it. (A tap armed on the very first block therefore starts
  * at a negative context frame: those first samples are the master chain's
  * pre-roll, and they belong where they will be heard.)
  *
@@ -544,8 +578,9 @@
  * `{type:"meter", momentary, short_term, integrated, true_peak_db, latency_ms}`
  * (the master's loudness and true peak after the master inserts, every 100 ms of
  * audio while the transport runs and once when it stops — see "The meter"),
- * `{type:"master_latency", ms}` (once per master chain build that moves it: the
- * delay the master chain — the limiter's lookahead — puts on the master path),
+ * `{type:"master_latency", ms}` (once per change: the delay the whole path from
+ * the track sources to the output has — the master chain's own, the limiter's
+ * lookahead, plus the tracks' compensation delay),
  * `{type:"insert_fault", insert_id, message}` (an insert that produced a
  * non-finite sample: it is bypassed in the engine and this is said once — see
  * "The mixer"), `{type:"insert_loading", insert_id, message}` (a Faust insert
@@ -559,8 +594,8 @@
  * global every processor on one AudioContext shares, so a recorder built as a
  * second worklet on the same context arms on the very frame the engine's
  * launch took effect. A `tap_block` carries its own `frame` in the same clock —
- * the context frame of its first sample, moved back by the master chain's
- * latency for a master tap (see "Taps") — so a resample can cut what it keeps
+ * the context frame of its first sample, moved back by the whole path's latency
+ * (master chain plus the tracks' compensation) for a master tap (see "Taps") — so a resample can cut what it keeps
  * exactly on a bar line instead of counting blocks. `bar` is 0-based. The
  * translation from the sequencer's
  * own frames is measured once, at the first block (see `contextOffset()`).
@@ -793,6 +828,16 @@
    * it is the same ramp whatever block size the host asks for.
    */
   const CHAIN_FADE_FRAMES = 64;
+
+  /**
+   * How many frames one track's compensation delay line holds, per channel —
+   * a power of two, so the ring's wrap is one mask. A chain that would need more
+   * (an amp whose two rate bridges look further ahead than this) is compensated
+   * by the cap instead: the clamp costs alignment, never sound, and is not an
+   * error.
+   */
+  const COMPENSATION_CAPACITY = 2048;
+  const COMPENSATION_MASK = COMPENSATION_CAPACITY - 1;
 
   /**
    * How many blends may be nested inside one another. A blend holds the chain an
@@ -1330,6 +1375,13 @@
    * The inserts of ONE chain as the engine runs them: the song's `inserts`
    * container read into plain specs, filtered to that owner and sorted by
    * `order` then id — the same order `doc.js`'s `byInsertOrder` gives.
+   *
+   * A PROPOSAL (`proposed === true`) is left out here, which is the whole of what
+   * a proposal is on this side: the chain it was proposed for runs without it, no
+   * capture or module is loaded for it, it adds no latency, and it never counts
+   * towards `Lmax` — so a second amp an agent suggested changes nothing the
+   * operator hears until they accept it, when their yes makes it an ordinary
+   * insert of the chain.
    * @param {object} inserts the snapshot's `inserts` container
    * @param {string} owner `"track:<id>"`, `"return:<id>"` or `"master"`
    * @returns {Array<{id: string, kind: string, bypass: boolean, params: object}>}
@@ -1340,6 +1392,7 @@
     for (const key of Object.keys(inserts)) {
       const insert = inserts[key];
       if (!insert || typeof insert !== "object") continue;
+      if (insert.proposed === true) continue;
       if (asId(insert.owner) !== owner) continue;
       const order = Number(insert.order);
       specs.push({
@@ -1471,13 +1524,17 @@
    * only the master limiter looks ahead) — plus any amp insert whose capture has
    * to be converted, which reports the rate bridges' real delay.
    *
-   * NOTE (a design question for the operator, deliberately NOT implemented): a
-   * rate-converted amp delays its track by ~0.7 ms (the two bridges' look-ahead,
-   * reported here and primed for) but a track has no delay COMPENSATION. A
-   * parallel or doubled track that does not go through the same converted amp
-   * therefore arrives earlier, and the two can comb. Whether a track should be
-   * delayed to match its amp's latency — and where that delay belongs — is the
-   * operator's call; this function only reports the number.
+   * A track chain's total is what the tracks' delay compensation is built from:
+   * `Lmax` is the greatest of them (`recomputeCompensation`) and every track is
+   * delayed by `Lmax −` its own, so a rate-converted amp (~0.7 ms, the two
+   * bridges' look-ahead) no longer makes the track that carries it arrive late
+   * against a parallel or doubled dry one and comb with it. The whole mix runs
+   * `Lmax` late, which is what `mixDelayFrames` reports. A MONITORED track's
+   * compensation is forced to 0 (its live input is summed into its source, so it
+   * may not sit behind a delay line) and its backing can therefore run early by
+   * `Lmax −` its own chain; an amp on a RETURN is not compensated at all, because
+   * a send-return path would need delay compensation over the whole graph (a
+   * KNOWN GAP — see `recomputeCompensation`, the one place this is decided).
    *
    * A runner an edit has retired does not count — the chain that stays is the one
    * the number is about — and neither does one the NaN guard has bypassed: a
@@ -2185,6 +2242,26 @@
       /** That latency in frames: what a master tap is moved back by (see `postTap`). */
       this.masterLatencyFrames = 0;
       /**
+       * The tracks' delay compensation as a whole, in frames: `Lmax`, the longest
+       * track chain's latency, which is how late the whole mix runs (see
+       * `recomputeCompensation`). The master chain's own delay is NOT part of it.
+       */
+      this.mixDelayFrames = 0;
+      /**
+       * The delay of the whole path from the track sources to the output, in
+       * frames and in ms: `masterLatencyFrames + mixDelayFrames`. Posted as
+       * `master_latency` when it moves, repeated in a meter reading as
+       * `latency_ms`, and what a master tap's frame is moved back by.
+       */
+      this.totalLatencyFrames = 0;
+      this.totalLatencyMs = 0;
+      /**
+       * Whether `applyMixer` is building the mixer right now. The chains are built
+       * one at a time, so the tracks' compensation is worked out once at the end
+       * of the build rather than after every chain (see `recomputeCompensation`).
+       */
+      this.mixerBuilding = false;
+      /**
        * One scratch pair per nesting level a blend may hold, made with the rest of
        * the mixer's scratch (`ensureScratch`, once per block size).
        */
@@ -2482,6 +2559,9 @@
      */
     enqueue(task) {
       this.queue = this.queue.then(task).catch((error) => {
+        // A build that threw left nothing to finish, so it is no longer in
+        // progress: the next recompute has to look at the mixer again.
+        this.mixerBuilding = false;
         this.report(error);
       });
     }
@@ -3292,6 +3372,11 @@
       // snapshot is involved. The page's round-trip number has to hear about it
       // now, exactly as it does after a snapshot (plan 1d, Task 13).
       this.postMonitorLatency();
+      // An amp's own latency is what a track's compensation is made of, so the
+      // tracks' compensations are worked out again here too: a capture that
+      // finished loading outside a snapshot moves `Lmax` and every track's share
+      // of it (see `recomputeCompensation`).
+      this.recomputeCompensation();
     }
 
     /**
@@ -3388,6 +3473,10 @@
       }
       this.applyAmpInputChannels();
       this.postMonitorLatency();
+      // The monitored track's compensation is 0 and every other track's is what
+      // it holds back against `Lmax`, so monitoring turning on or off moves them
+      // (see `recomputeCompensation`).
+      this.recomputeCompensation();
     }
 
     /**
@@ -4056,6 +4145,10 @@
      */
     applyMixer() {
       const mixer = this.mixer && typeof this.mixer === "object" ? this.mixer : NO_MIXER;
+      // Every track's compensation is worked out once, at the END of this build:
+      // the chains are built one at a time, so an early pass would be looking at
+      // half a mixer (and would start fades the finished build has to replace).
+      this.mixerBuilding = true;
 
       // Returns first: a track's sends point at them.
       const previous = this.returnRecords;
@@ -4095,6 +4188,9 @@
         const record = slots[index];
         if (!record) continue;
         const trackId = asId(record.track_id);
+        // The track's compensation delay line is made here, on the message path:
+        // the audio thread only ever writes into one and reads two taps out of it.
+        this.prepareDelayLine(record);
         this.applyChain(record, mixer.chains.get(`track:${trackId}`) || NO_INSERTS, record.label || trackId);
         // The sends are read here, once per song: one gain per send, already
         // gated by the track's own mute and solo, split by where it taps.
@@ -4130,7 +4226,123 @@
       this.rebindAmps();
       this.bindAmps();
       this.pruneAmpInstances();
+      this.mixerBuilding = false;
       this.postMonitorLatency();
+      // Every chain is built and every amp attached, so the tracks' delay
+      // compensation can be worked out from the finished mixer (see
+      // `recomputeCompensation`).
+      this.recomputeCompensation();
+    }
+
+    /**
+     * Give one track record its compensation delay line: a stereo ring, made on
+     * the message path so the audio thread never allocates one. A record keeps
+     * its line — and so its history — for as long as the song keeps the track.
+     * @param {object} record
+     * @returns {void}
+     */
+    prepareDelayLine(record) {
+      if (record.delayLeft === null || record.delayLeft === undefined) {
+        record.delayLeft = new Float32Array(COMPENSATION_CAPACITY);
+        record.delayRight = new Float32Array(COMPENSATION_CAPACITY);
+        record.delayWrite = 0;
+      }
+      if (typeof record.compensation !== "number") {
+        record.compensation = 0;
+        record.compensationFrom = 0;
+        record.compensationFade = 0;
+        record.compensationPending = 0;
+      }
+    }
+
+    /**
+     * Work out every track's delay compensation (plugin delay compensation), on
+     * the message path, wherever the tracks' chains or monitoring can change what
+     * a track's own latency is: the end of the mixer build (which is where every
+     * chain build and chain edit — a bypass included — lands), an amp attachment
+     * finishing outside a snapshot (`rebindAmps`), and monitoring going on or off
+     * (`setMonitor`).
+     *
+     * `Lmax` is the longest track chain's settled latency (`chainLatencyOf`), and
+     * track i is delayed by `Lmax − Li`, so every track's own output leaves the
+     * mixer at the same time whatever its inserts cost. The whole mix therefore
+     * runs `Lmax` late — `this.mixDelayFrames` — which is what the master latency
+     * message, the meter and a master tap add to the master chain's own delay.
+     *
+     * Two things are deliberately not compensated:
+     *
+     *  - The MONITORED track's compensation is 0, whatever its chain costs: the
+     *    live input is summed into that track's source BEFORE its chain, so a
+     *    delay line there would put the player's own playing behind it. Its
+     *    backing can therefore run early by `Lmax − L_T` frames — 0 when the
+     *    monitored track holds the longest chain, which is the one-amp case.
+     *  - An amp on a RETURN is not compensated at all: a send and its return are
+     *    two paths through the graph, so making the return up would need delay
+     *    compensation over the whole graph, not per track chain. A KNOWN GAP: a
+     *    rate-converted amp on a return makes that return late by its own
+     *    look-ahead and nothing puts it back.
+     *
+     * A compensation that moves is a tap that moves, so it CROSSFADES: the old
+     * tap and the new one are read from the same ring over `CHAIN_FADE_FRAMES`
+     * frames in `applyCompensation`. A stopped transport has nothing to blend and
+     * nothing to be heard, so there the tap simply moves.
+     * @returns {void}
+     */
+    recomputeCompensation() {
+      // A build in progress is half a mixer: it recomputes once, at its end.
+      if (this.mixerBuilding) return;
+      const slots = this.slots;
+      const latencies = [];
+      let longest = 0;
+      for (let index = 0; index < slots.length; index += 1) {
+        const record = slots[index];
+        const latency = record && record.chain ? chainLatencyOf(record.chain) : 0;
+        latencies.push(latency);
+        if (latency > longest) longest = latency;
+      }
+      this.mixDelayFrames = longest;
+      const fade = this.sequencer.isPlaying() ? CHAIN_FADE_FRAMES : 0;
+      for (let index = 0; index < slots.length; index += 1) {
+        const record = slots[index];
+        if (!record || !record.delayLeft) continue;
+        let frames = longest - latencies[index];
+        // Live monitoring stays at minimum latency: the input is summed into this
+        // track's source, so the track itself may not sit behind a delay line.
+        if (this.monitorTrackId !== null && asId(record.track_id) === this.monitorTrackId) frames = 0;
+        if (frames > COMPENSATION_CAPACITY) frames = COMPENSATION_CAPACITY;
+        if (frames < 0) frames = 0;
+        this.setCompensation(record, frames, fade);
+      }
+      // `Lmax` is part of the whole path's delay, so this is one of the places the
+      // posted master latency can move (it de-dups).
+      this.postTotalLatency();
+    }
+
+    /**
+     * Move one track's compensation to `frames`, crossfading from the tap it is at
+     * when `fade` frames are asked for (see `applyCompensation`). A number that did
+     * not move neither re-arms a fade that is still running nor touches anything,
+     * and a move that lands while a fade IS running waits for it to arrive (see
+     * `compensationPending`) instead of jumping between two taps the audio is
+     * between.
+     * @param {object} record
+     * @param {number} frames
+     * @param {number} fade frames of crossfade, 0 to move the tap at once
+     * @returns {void}
+     */
+    setCompensation(record, frames, fade) {
+      if (frames === record.compensation) {
+        record.compensationPending = frames;
+        return;
+      }
+      if (fade > 0 && record.compensationFade > 0) {
+        record.compensationPending = frames;
+        return;
+      }
+      record.compensationFrom = record.compensation;
+      record.compensationFade = fade > 0 ? fade : 0;
+      record.compensation = frames;
+      record.compensationPending = frames;
     }
 
     /**
@@ -5747,23 +5959,48 @@
      * an edit, and again after every run of the master chain, so the number a tap
      * and a meter reading carry is the one the audio really has.
      *
-     * The frame count is kept too: a master tap is stamped with the block's frame
-     * moved back by it, so a resample taken from the tap lines up with the song
-     * (see `postTap`).
+     * What is POSTED is the whole path's delay, though
+     * (`masterLatencyFrames + mixDelayFrames`): the tracks' compensation is how
+     * much later the whole mix runs, so it belongs to the number the page adds to
+     * what it measured (see `postTotalLatency`). The frame count kept here is the
+     * master chain's alone, because that is the part a fade can be in the middle
+     * of.
      * @param {object[]} chain
      * @returns {void}
      */
     postMasterLatency(chain) {
       const frames = runningLatencyOf(chain);
-      if (frames === this.masterLatencyFrames) return;
-      this.masterLatencyFrames = frames;
-      this.masterLatencyMs = (frames / sampleRate) * 1000;
-      this.port.postMessage({ type: "master_latency", ms: this.masterLatencyMs });
+      const moved = frames !== this.masterLatencyFrames;
+      if (moved) {
+        this.masterLatencyFrames = frames;
+        this.masterLatencyMs = (frames / sampleRate) * 1000;
+      }
+      this.postTotalLatency();
       // A monitored track is heard THROUGH the master, so a master whose delay
       // just moved (a limiter arriving, or one the NaN guard bypassed) changes
       // what the page has to add to the round trip it measured. The message is
       // only sent when the number really changed, so this is not a per-block post.
-      this.postMonitorLatency();
+      if (moved) this.postMonitorLatency();
+    }
+
+    /**
+     * Post the delay of the WHOLE path from the track sources to the output, once
+     * per change: the master chain's own delay (the limiter's lookahead) plus
+     * `mixDelayFrames`, the tracks' compensation, which the whole mix runs late by
+     * (see `recomputeCompensation`).
+     *
+     * It is what a recorder has to shift a take by and what a master tap's frame is
+     * moved back by; the monitor's number is NOT this one (`postMonitorLatency`
+     * reports the monitored signal's own path — a track chain and the master, never
+     * the tracks' mix delay).
+     * @returns {void}
+     */
+    postTotalLatency() {
+      const frames = this.masterLatencyFrames + this.mixDelayFrames;
+      if (frames === this.totalLatencyFrames) return;
+      this.totalLatencyFrames = frames;
+      this.totalLatencyMs = (frames / sampleRate) * 1000;
+      this.port.postMessage({ type: "master_latency", ms: this.totalLatencyMs });
     }
 
     /**
@@ -6049,7 +6286,7 @@
         short_term: reading.short_term,
         integrated: reading.integrated,
         true_peak_db: reading.true_peak_db,
-        latency_ms: this.masterLatencyMs,
+        latency_ms: this.totalLatencyMs,
       });
     }
 
@@ -6185,12 +6422,12 @@
      * Every block names the CONTEXT frame its first sample sits on, so the
      * caller can cut what it keeps on the frame itself instead of counting.
      *
-     * A MASTER tap is moved back by the master chain's own latency: the samples a
-     * master tap carries at context frame F are the ones the master chain took in
-     * at F − its lookahead, so an untrimmed tap is stamped with `F − latency` and
-     * a resample of the master lines up with one of a track (which no insert
-     * delays). The track tap is stamped where it is: nothing on a track's path
-     * delays it.
+     * A MASTER tap is moved back by the whole path's delay: the samples a master
+     * tap carries at context frame F are the ones the track sources sent in at
+     * F − (the master chain's lookahead + the tracks' compensation), so an
+     * untrimmed tap is stamped with `F − that total` and a resample of the master
+     * lines up with one of a track. A track tap is stamped where it is: its own
+     * path is compensated, and the compensation is part of the track's output.
      * @param {Float32Array} left the master's left channel
      * @param {Float32Array|null} right the master's right channel
      * @param {number} count the frames this block holds
@@ -6206,7 +6443,7 @@
         this.port.postMessage({
           type: "tap_block",
           target: "master",
-          frame: frame - this.masterLatencyFrames,
+          frame: frame - this.masterLatencyFrames - this.mixDelayFrames,
           channels: channels,
         });
       }
@@ -6330,7 +6567,7 @@
      * Render `frames` of the song through the mixer, in the order the plan's
      * Task 9 fixes (one final signal path):
      *
-     *     track: source → inserts → fader/pan → sends (pre or post fader)
+     *     track: source → inserts → compensation → fader/pan → sends (pre or post fader)
      *     return: inserts → fader
      *     tracks + returns → master sum → looper → performance bus
      *       → master gain → master inserts → clip → output
@@ -6403,13 +6640,16 @@
 
     /**
      * One track through the mixer for a run: its source at unity gain into the
-     * scratch, its chain, its sends (pre and post fader), then its fader and pan
-     * into the master — and its own tap, when it is the tapped track, which is
-     * its output after the inserts and the fader.
+     * scratch, its chain, its compensation delay, its sends (pre and post fader),
+     * then its fader and pan into the master — and its own tap, when it is the
+     * tapped track, which is its output after the inserts, the compensation and the
+     * fader.
      *
      * The source is summed into the scratch before the chain because nothing may
      * reach the master without going through its inserts, and a track's fader is
-     * a gain on the CHAIN's output, not a gain on its source.
+     * a gain on the CHAIN's output, not a gain on its source. The compensation sits
+     * between those two so that the sends, the fader, the tap and the master sum all
+     * line up with the track's own output (see `recomputeCompensation`).
      * @param {object} record
      * @param {number} frames
      * @param {Float32Array} left
@@ -6445,6 +6685,12 @@
         }
       }
       this.runChain(record, mixLeft, mixRight, frames);
+      // Plugin delay compensation: this track's own inserts may have cost it some
+      // frames (a converted amp's two rate bridges), so its line holds back what
+      // the longest chain on any track has over it — after the chain and before the
+      // sends, the fader, the tap and the master, so all of them are in time with
+      // the track (`recomputeCompensation`).
+      this.applyCompensation(record, mixLeft, mixRight, frames);
 
       const gainLeft = record.left;
       const gainRight = record.right;
@@ -6506,9 +6752,95 @@
     }
 
     /**
+     * One track's compensation delay line over a run: put back the frames the
+     * longest chain on any track has over this one (`recomputeCompensation`), or
+     * crossfade from the tap it was at to the tap it has just moved to.
+     *
+     * The line takes every run's input, because that is the history a tap reads
+     * from and the compensation a later edit arrives at has to be there already:
+     * a track whose compensation is 0 and whose fade has finished therefore costs
+     * one store per channel per frame and nothing else.
+     *
+     * A fade reads the OLD tap and the NEW tap out of the same ring and blends
+     * them linearly over `CHAIN_FADE_FRAMES` frames, so a tap that moves is a ramp
+     * and not a step. Both taps are read before this frame is written, so a tap of
+     * exactly the line's length is the frame about to leave the ring.
+     *
+     * A move that arrives while a fade is still running cannot start where the
+     * audio is (two taps are being blended, and no third one is where they are), so
+     * it waits in `compensationPending` and starts its OWN fade from the tap this
+     * one arrives at. Every transition is therefore a ramp, however many edits
+     * land inside one fade.
+     * @param {object} record
+     * @param {Float32Array} left
+     * @param {Float32Array} right
+     * @param {number} frames
+     * @returns {void}
+     */
+    applyCompensation(record, left, right, frames) {
+      const ringLeft = record.delayLeft;
+      if (ringLeft === null || ringLeft === undefined) return;
+      const ringRight = record.delayRight;
+      const target = record.compensation;
+      let fade = record.compensationFade;
+      let write = record.delayWrite;
+      if (fade <= 0 && target === 0) {
+        for (let at = 0; at < frames; at += 1) {
+          ringLeft[write] = left[at];
+          ringRight[write] = right[at];
+          write = (write + 1) & COMPENSATION_MASK;
+        }
+        record.delayWrite = write;
+        return;
+      }
+      const from = fade > 0 ? record.compensationFrom : target;
+      for (let at = 0; at < frames; at += 1) {
+        const inLeft = left[at];
+        const inRight = right[at];
+        const oldLeft = from === 0 ? inLeft : ringLeft[(write - from) & COMPENSATION_MASK];
+        const oldRight = from === 0 ? inRight : ringRight[(write - from) & COMPENSATION_MASK];
+        const newLeft = target === 0 ? inLeft : ringLeft[(write - target) & COMPENSATION_MASK];
+        const newRight = target === 0 ? inRight : ringRight[(write - target) & COMPENSATION_MASK];
+        ringLeft[write] = inLeft;
+        ringRight[write] = inRight;
+        if (fade > 0) {
+          fade -= 1;
+          // 1/64 on the fade's first frame and 1 on its last, so the arriving tap
+          // is the whole signal from that frame on.
+          const weight = (CHAIN_FADE_FRAMES - fade) / CHAIN_FADE_FRAMES;
+          left[at] = oldLeft + (newLeft - oldLeft) * weight;
+          right[at] = oldRight + (newRight - oldRight) * weight;
+        } else {
+          left[at] = newLeft;
+          right[at] = newRight;
+        }
+        write = (write + 1) & COMPENSATION_MASK;
+      }
+      record.delayWrite = write;
+      if (fade > 0) {
+        record.compensationFade = fade;
+      } else {
+        record.compensationFade = 0;
+        record.compensationFrom = target;
+        // A move that arrived while this fade was running takes its turn now,
+        // from the tap the track has just arrived at.
+        const pending = record.compensationPending;
+        if (typeof pending === "number" && pending !== target) {
+          record.compensation = pending;
+          record.compensationFade = CHAIN_FADE_FRAMES;
+        }
+      }
+    }
+
+    /**
      * One return through the mixer for a run: its inserts on what the sends gave
      * it, then its fader and pan into the master. Returns are never muted by a
      * solo (they are not tracks).
+     *
+     * A return is NOT delay-compensated: a send and its return are two paths
+     * through the graph, so an amp on a return that converts delays that return
+     * by its look-ahead and nothing puts it back — a KNOWN GAP (see
+     * `recomputeCompensation`).
      * @param {object} record
      * @param {number} frames
      * @param {Float32Array} left
@@ -6536,9 +6868,11 @@
      * stage takes over.
      *
      * The master path is delayed by the master chain's total latency and nothing
-     * else: a zero-latency chain changes nothing, and the limiter's lookahead
-     * moves the master by exactly its own delay, which the meter reading and the
-     * `master_latency` message both report.
+     * else: a zero-latency chain changes nothing, and the limiter's lookahead moves
+     * the master by exactly its own delay. What the meter reading and the
+     * `master_latency` message report is the WHOLE path's delay — that lookahead
+     * plus the tracks' compensation, which every track already ran through before
+     * the sum.
      * @param {Float32Array} left
      * @param {Float32Array} right
      * @param {number} frames
