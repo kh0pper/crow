@@ -63,9 +63,12 @@ export const MOVE_OFF_KIND = "moveoff";
 export const MAX_SWAPS = 3;
 
 /**
- * The defaults from the design. `equipment: ["none"]` means "no equipment":
- * every entry that needs a mat, band, chair or wall is out until the user says
- * they have one. Limits come from library.js's LIMIT_TAGS only.
+ * The defaults from the design. `equipment` defaults to "none" plus the wall:
+ * "none" marks the entries that need nothing, and the wall is the one thing a
+ * plain room already has, so every entry that needs a mat, band or chair is out
+ * until the user says they have one. A stored prefs row is never rewritten, so
+ * this list only applies where nothing is saved yet. Limits come from
+ * library.js's LIMIT_TAGS only.
  */
 export const DEFAULT_PREFS = Object.freeze({
   on: true,
@@ -140,8 +143,9 @@ function normalizePrefs(raw) {
   if (Array.isArray(raw.equipment)) {
     out.equipment = raw.equipment.filter((e) => isVocab(e, EQUIPMENT));
     // Every value unknown (this build cannot read what the peer wrote) is the
-    // same statement as none at all: "no equipment". An empty list would rule
-    // nothing in or out in the picker and lie to the settings UI.
+    // same statement as no list at all, so it falls back to the defaults
+    // ("none" plus the wall). An empty list would rule nothing in or out in
+    // the picker and lie to the settings UI.
     if (out.equipment.length === 0) out.equipment = [...DEFAULT_PREFS.equipment];
   }
   if (Array.isArray(raw.limits)) {
