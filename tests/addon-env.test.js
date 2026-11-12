@@ -369,6 +369,21 @@ test("an entry's own loader names are stripped at spawn, and its ordinary keys a
   assert.equal(addonOwnEnv({ env: null }, GATEWAY_ENV, null).LD_PRELOAD, undefined);
 });
 
+test("a service add-on's derived env is rendered without any loader name", () => {
+  // addonDerivedEnv renders only the tracked registry's own derived_env keys, so a service with a
+  // loader-named derived key cannot be set up from a test (and no registry file is rewritten here).
+  // The reachable edge is asserted instead: the ordinary derived key still arrives, and the entry's
+  // own loader name never does, for both helpers.
+  const render = { command: "npx", args: [], env: { RENDER_API_KEY: "test-token-9", NODE_OPTIONS: "--require /x.js" } };
+  for (const [name, env] of [
+    ["addonStdioEnv", addonStdioEnv(render, GATEWAY_ENV, "render")],
+    ["addonOwnEnv", addonOwnEnv(render, GATEWAY_ENV, "render")],
+  ]) {
+    assert.equal(env.AUTH_HEADER, "Bearer test-token-9", `${name}: the derived key is gone`);
+    assert.equal(env.NODE_OPTIONS, undefined, `${name}: a loader name reached the child`);
+  }
+});
+
 test("storage env goes only to the published first-party bundle under a consumer id", () => {
   const base = { MINIO_ROOT_PASSWORD: "root", S3_SECRET_KEY: "s3" };
   assert.deepEqual(storagePassthrough("studio", base, { registryFor: () => null }), {}, "unlisted id got storage keys");

@@ -87,7 +87,7 @@ import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
 import { recordKeptData, clearKeptData, keptDataMatches, recordKeptDataOnUninstall, setWallMode, ADDON_WALL_SWITCH_KEYS } from "../../shared/addon-walls-file.js";
 import { legacyOwnerKeys, profileFor, pendingHostFields } from "../../../scripts/addon-sandbox/profile.mjs";
-import { isLoaderEnvName } from "../../shared/loader-env.js";
+import { isLoaderEnvName, withoutLoaderEnv } from "../../shared/loader-env.js";
 import { wallsOnForHost } from "../../../scripts/addon-sandbox/host-switch.mjs";
 import { pinEntryIfWalled, PinRefused } from "../../../scripts/addon-sandbox/pin.mjs";
 import { sandboxLine } from "../../../scripts/addon-sandbox/words.mjs";
@@ -1875,7 +1875,11 @@ export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, m
   if (!entry) return false; // not an MCP add-on — nothing to configure
   const allowed = mcpForwardableKeys(manifest);
   const priorEnv = { ...(entry.env || {}) };
-  const merged = { ...(entry.env || {}) };
+  // Start from the entry's env with every loader name scrubbed: an entry written before this
+  // rule (or hand-edited) must not keep NODE_OPTIONS/LD_PRELOAD, and the child would run what
+  // they point at before its own code. `priorEnv` above stays the unscrubbed pre-change
+  // snapshot — it is what provenance is judged against.
+  const merged = withoutLoaderEnv(entry.env);
   // Skip falsy values: proxy.js merges the child's entry env last (over the base allowlist
   // and the declared passthrough), so a blank here would SHADOW a working ambient value that
   // the bundle's registry entry declares rather than clear it. The two
@@ -1891,6 +1895,9 @@ export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, m
     if (v && (!allowed || allowed(k))) { merged[k] = v; written.push(k); }
   }
   entry.env = merged;
+  // The file is written unconditionally below, so a save whose only effect is dropping a
+  // loader name still persists the scrub (there is no "nothing changed, skip the write" gate
+  // here, and the provenance loop iterates `written`, which never contains a loader name).
   // Provenance for the wall's host/bind rules: only a value the OWNER typed counts, and only
   // when this save is the local owner's own request (`owner`) — anyone else's write proves
   // nothing, so it neither adds a key nor leaves a stale claim on one it rewrote. A legacy

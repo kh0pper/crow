@@ -486,7 +486,12 @@ function validateConnect(manifest) {
     }
   };
   for (const [key, url] of Object.entries(c.step_links || {})) checkTemplate(`step_links ${key}`, url);
-  for (const [env, d] of Object.entries(c.derived_env || {})) checkTemplate(`derived_env ${env}`, d.template);
+  for (const [env, d] of Object.entries(c.derived_env || {})) {
+    checkTemplate(`derived_env ${env}`, d.template);
+    // A derived key is handed to the child as env like any other: a loader name here would
+    // run code before the server itself, so the manifest declaration is refused outright.
+    if (isLoaderEnvName(env)) errors.push(`connect.derived_env ${env}: ${LOADER_ENV_REASON}`);
+  }
   const t = c.test;
   if (t && t.kind === "http") {
     checkTemplate("test.url", t.url);

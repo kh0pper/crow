@@ -72,6 +72,30 @@ test("an add-on with no MCP server registration is a no-op (returns false)", () 
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {});
 });
 
+test("a save scrubs loader names already sitting in an entry's env, keeping every other key", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crowmcp-"));
+  const path = join(dir, "mcp-addons.json");
+  // An entry written before the loader rule (or hand-edited): it already carries both names.
+  writeFileSync(path, JSON.stringify({
+    "home-assistant": {
+      command: "node",
+      args: ["server/index.js"],
+      env: { LD_PRELOAD: "/x.so", NODE_OPTIONS: "--require /x.js", HA_URL: "http://ha.local:8123" },
+    },
+  }));
+
+  const wrote = applyEnvToMcpAddons("home-assistant", { HA_TOKEN: "tok" }, path);
+  assert.equal(wrote, true);
+
+  const after = JSON.parse(readFileSync(path, "utf8"));
+  const entry = after["home-assistant"];
+  assert.ok(!("LD_PRELOAD" in entry.env), "LD_PRELOAD must not survive a save");
+  assert.ok(!("NODE_OPTIONS" in entry.env), "NODE_OPTIONS must not survive a save");
+  assert.equal(entry.env.HA_URL, "http://ha.local:8123", "an unrelated key survives the scrub");
+  assert.equal(entry.env.HA_TOKEN, "tok", "the key just saved lands");
+  assert.equal(entry.command, "node", "existing config fields survive");
+});
+
 test("findInvalidEnv refuses a loader/injection name and leaves ordinary names alone", () => {
   for (const k of ["NODE_OPTIONS", "LD_PRELOAD", "PYTHONSTARTUP", "DYLD_INSERT_LIBRARIES"]) {
     const r = findInvalidEnv({ [k]: "x" });

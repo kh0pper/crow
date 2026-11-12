@@ -490,7 +490,7 @@ async function connectToServer(integration) {
 /** A walled add-on's own env: its entry env, its derived keys, and the gateway host mark. */
 export function addonOwnEnv(config = {}, base = process.env, id = null) {
   const derived = id ? addonDerivedEnv(id, config.env, undefined, withoutCredentialKeys(base)) : {};
-  return { ...withoutLoaderEnv(config.env), ...derived, CROW_ADDON_HOST: "gateway" };
+  return { ...withoutLoaderEnv(config.env), ...withoutLoaderEnv(derived), CROW_ADDON_HOST: "gateway" };
 }
 
 /**
@@ -514,7 +514,7 @@ export function addonStdioEnv(config = {}, base = process.env, id = null, opts =
     ...declaredPassthrough(id, gate, opts),
     ...storagePassthrough(id, gate),
     ...withoutLoaderEnv(config.env),
-    ...derived,
+    ...withoutLoaderEnv(derived),
     CROW_ADDON_HOST: "gateway",
   };
 }

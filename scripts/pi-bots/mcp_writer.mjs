@@ -35,6 +35,7 @@
  */
 import { resolveAddonCommand, checkLauncherArgs } from "../../servers/shared/resolve-command.js";
 import { buildBotBaseEnv } from "../../servers/shared/bot-env.js";
+import { withoutLoaderEnv } from "../../servers/shared/loader-env.js";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -185,8 +186,12 @@ function addonSpawnBlock(serverId, block, crowHome) {
     return null;
   }
   const { command_sha256: _pin, ...rest } = block;
+  // The entry's env is handed to the child as-is EXCEPT loader/injection names
+  // (NODE_OPTIONS, LD_PRELOAD, …): those run code before the server itself does.
+  // A block with no env stays without one.
+  const env = rest.env && typeof rest.env === "object" ? { env: withoutLoaderEnv(rest.env) } : {};
   // The pin rides along so pi-lab re-verifies it at spawn time.
-  return { ...rest, ...(rc.resolved ? { command: rc.command } : {}), ...(rc.sha256 ? { command_sha256: rc.sha256 } : {}),
+  return { ...rest, ...env, ...(rc.resolved ? { command: rc.command } : {}), ...(rc.sha256 ? { command_sha256: rc.sha256 } : {}),
     cwd };
 }
 
