@@ -9,9 +9,10 @@
  *    REPLACE's implicit DELETE does not fire mail_messages_ad and the replaced row's terms stay in the
  *    FTS index pointing at a rowid the content table no longer has (the schema header explains it).
  *
- * 2. The same message in several folders (a Gmail label copy) is ONE logical message. Counts, thread
- *    counts and search dedupe by (account_id, message_id) with a null id counting alone; search returns
- *    the newest row of each group. A folder's own list still shows every row it holds.
+ * 2. The same message in several folders (a Gmail label copy) is ONE logical message. Search and
+ *    thread counts dedupe by (account_id, message_id) with a null id counting alone, and search
+ *    returns the newest row of each group. A folder's counts dedupe within that folder, so a folder
+ *    counts exactly what it lists; its message list still shows every row it holds.
  *
  * Read-then-write units (allocating a thread id, detecting `created`, collecting the threads a delete
  * touched) run in db.runTransaction: one synchronous transaction on one connection, no await in the
@@ -98,6 +99,20 @@ function hasSeen(flags) {
   return Array.isArray(flags) && flags.some((flag) => typeof flag === "string" && flag.toLowerCase() === "\\seen");
 }
 
+/**
+ * `flags_json` with `\Seen` added (read) or removed (unread), the other flags kept in order. A row
+ * whose flags were never written is tolerated: marking it read writes `["\\Seen"]`, marking it unread
+ * leaves the null as it was.
+ */
+function flagsForRead(flagsJson, isRead) {
+  if ((flagsJson == null || flagsJson === "") && !isRead) return flagsJson ?? null;
+  const parsed = parseJson(flagsJson, []);
+  const flags = (Array.isArray(parsed) ? parsed : []).filter((flag) => typeof flag === "string");
+  const seen = flags.some((flag) => flag.toLowerCase() === "\\seen");
+  if (isRead === seen) return JSON.stringify(flags);
+  return JSON.stringify(isRead ? [...flags, "\\Seen"] : flags.filter((flag) => flag.toLowerCase() !== "\\seen"));
+}
+
 function parseJson(text, fallback) {
   if (typeof text !== "string" || text === "") return fallback;
   try {
@@ -174,13 +189,13 @@ const UPSERT_FOLDER_SQL = `INSERT INTO mail_folders (account_id, path, name, spe
 const SELECT_FOLDERS_SQL = `SELECT ${FOLDER_COLUMNS} FROM mail_folders WHERE account_id = ? ORDER BY path`;
 
 /**
- * How many logical messages the account holds per folder, and how many of them are unread.
+ * How many logical messages each folder holds, and how many of them are unread.
  *
- * Rows are grouped by message_id (a row with no message_id groups alone), so the same message in
- * several folders is ONE logical message and is counted once, in the folder that holds its newest
- * row; that row also decides unread. The sum of a mailbox's folder counts is therefore the number
- * of logical messages it holds, and a label copy never inflates an inbox. A folder's own message
- * list still shows every row it holds.
+ * The dedupe is per folder: a message re-delivered into one folder under several uids (the same
+ * message_id) is counted once there, and a Gmail label copy in another folder is counted in that
+ * folder too, so a folder's counts describe exactly the rows it lists. A row with no message_id
+ * groups alone. Cross-folder dedupe stays where the reader is a mailbox-wide view (search) or a
+ * conversation (mail_threads).
  */
 const FOLDER_COUNTS_SQL = `
   SELECT folder_id,
@@ -189,7 +204,8 @@ const FOLDER_COUNTS_SQL = `
     FROM (
       SELECT folder_id, is_read,
              ROW_NUMBER() OVER (
-               PARTITION BY CASE WHEN message_id IS NULL THEN 'row:' || id ELSE 'msg:' || message_id END
+               PARTITION BY folder_id,
+                 CASE WHEN message_id IS NULL THEN 'row:' || id ELSE 'msg:' || message_id END
                ORDER BY date DESC, id DESC) AS rn
         FROM mail_messages
        WHERE account_id = ?
@@ -289,7 +305,7 @@ export async function upsertFolders(db, accountId, folders = []) {
   };
 }
 
-/** Every folder of one account, with its deduped unread and total message counts. */
+/** Every folder of one account, with unread and total counts deduped within each folder. */
 export async function listFolders(db, accountId) {
   const id = accountIdOf(accountId);
   const { rows } = await db.execute({ sql: SELECT_FOLDERS_SQL, args: [id] });
@@ -524,7 +540,9 @@ function rowToMessage(row) {
 
 /**
  * Store one synced message. The thread is assigned first (assignThread may merge threads, which is
- * its own transaction), then the row is written and the thread's counts are recomputed.
+ * its own transaction), then the row is written and the thread's counts are recomputed. A re-upsert
+ * that moves the row to a different thread (another message_id at the same uid) drops the thread it
+ * left when the write emptied it, and refreshes its counts when it did not.
  *
  * `created` is true only for the first write of a (folder, uid): the row is read inside the same
  * transaction as the upsert, so the answer cannot come from a read that raced another writer.
@@ -592,14 +610,22 @@ export async function upsertMessage(db, stored = {}) {
     const id = previous
       ? Number(previous.id)
       : Number(rowsOf(run, MESSAGE_BY_FOLDER_UID_SQL, [folderId, uid])[0].id);
-    return {
-      id,
-      created: !previous,
-      previousThreadId: previous?.thread_id == null ? null : Number(previous.thread_id),
-    };
+    // A row that moved to another thread leaves the old one behind: delete it when the write left
+    // it empty, otherwise hand it back so its counts are recomputed after the transaction.
+    let survivingPreviousThreadId = null;
+    if (previous?.thread_id != null) {
+      const previousThreadId = Number(previous.thread_id);
+      if (previousThreadId !== threadId) {
+        const left = Number(rowsOf(run, "SELECT COUNT(*) AS n FROM mail_messages WHERE thread_id = ?",
+          [previousThreadId])[0].n);
+        if (left === 0) run({ sql: "DELETE FROM mail_threads WHERE id = ?", args: [previousThreadId] });
+        else survivingPreviousThreadId = previousThreadId;
+      }
+    }
+    return { id, created: !previous, survivingPreviousThreadId };
   });
 
-  await refreshThreads(db, [threadId, written.previousThreadId]);
+  await refreshThreads(db, [threadId, written.survivingPreviousThreadId]);
   return { id: written.id, threadId, created: written.created };
 }
 
@@ -656,11 +682,12 @@ export async function deleteMessageRow(db, id) {
 }
 
 /**
- * Mark every copy of one message read or unread (see copyRows for what a copy is). A row that only
- * shares the Message-ID — another sender, another date, a reused id — is a different message and is
- * left alone.
+ * Mark every copy of one message read or unread (see copyRows for what a copy is), keeping flags_json
+ * in step: `\Seen` is added when a copy is marked read and removed when it is marked unread. A row
+ * that only shares the Message-ID — another sender, another date, a reused id — is a different
+ * message and is left alone.
  *
- * @returns {Promise<number>} how many rows actually changed
+ * @returns {Promise<number>} how many rows changed read state
  */
 export async function setReadForCopies(db, row, isRead) {
   const copies = await copyRows(db, row);
@@ -671,11 +698,16 @@ export async function setReadForCopies(db, row, isRead) {
   const changed = await db.runTransaction((run) => {
     let n = 0;
     for (const id of ids) {
-      const result = run({
-        sql: "UPDATE mail_messages SET is_read = ? WHERE id = ? AND is_read <> ?",
-        args: [value, id, value],
+      const current = rowsOf(run, "SELECT is_read, flags_json FROM mail_messages WHERE id = ?", [id])[0];
+      if (!current) continue;
+      const readChanged = Number(current.is_read) !== value;
+      const nextFlags = flagsForRead(current.flags_json, isRead);
+      if (readChanged) n += 1;
+      if (!readChanged && nextFlags === current.flags_json) continue;
+      run({
+        sql: "UPDATE mail_messages SET is_read = ?, flags_json = ? WHERE id = ?",
+        args: [value, nextFlags, id],
       });
-      n += Number(result.rowsAffected ?? 0);
     }
     return n;
   });
@@ -729,6 +761,10 @@ const ABSENT_UIDS_SQL = `folder_id = ? AND uid >= ?
  * minUid are not looked at — they are older mail the caller did not ask the server about. FTS entries
  * go with their rows through the delete trigger.
  *
+ * `options.minUid` is the lower bound of the scan. When it is given it must be a non-negative
+ * integer: a caller that hands over `"12"` or `-1` has a bug, and treating it as 0 would delete a
+ * folder's whole history, so it is refused (BAD_INPUT) instead. Null and undefined mean 0.
+ *
  * @returns {Promise<number>} how many rows were removed
  */
 export async function deleteMissing(db, folderId, presentUids, options = {}) {
@@ -736,7 +772,12 @@ export async function deleteMissing(db, folderId, presentUids, options = {}) {
   const present = (Array.isArray(presentUids) ? presentUids : [])
     .map((uid) => Number(uid))
     .filter((uid) => Number.isInteger(uid) && uid > 0);
-  const minUid = Number.isInteger(options?.minUid) ? Number(options.minUid) : 0;
+  const given = options?.minUid;
+  let minUid = 0;
+  if (given != null) {
+    if (typeof given !== "number" || !Number.isInteger(given) || given < 0) fail("min_uid");
+    minUid = given;
+  }
 
   const outcome = await db.runTransaction((run) => {
     const threadIds = rowsOf(run,
@@ -816,8 +857,10 @@ const LIST_SQL = (where) => `SELECT ${SUMMARY_COLUMNS} FROM mail_messages
  *
  * `folderId` is one folder; `role` is every folder with that role (with an `accountId`: that
  * account's; without one: every account's — the unified view); `accountId` alone is every folder of
- * the account. The cursor is the `(date, id)` pair of the last item, so a message arriving between
- * pages never shifts an older page: the comparison is strict and both keys descend together.
+ * the account. A `folderId` that names another account's folder (or no folder at all) answers an
+ * empty page, never that folder's mail. The cursor is the `(date, id)` pair of the last item, so a
+ * message arriving between pages never shifts an older page: the comparison is strict and both keys
+ * descend together.
  *
  * @returns {Promise<{items: object[], nextCursor: string|null}>}
  */
@@ -829,8 +872,16 @@ export async function listMessages(db, { accountId = null, folderId = null, role
   const args = [];
 
   if (folderId != null) {
+    const folder = positiveInt(folderId, "folder_id");
+    if (account) {
+      const { rows: owner } = await db.execute({
+        sql: "SELECT account_id FROM mail_folders WHERE id = ?",
+        args: [folder],
+      });
+      if (!owner[0] || owner[0].account_id !== account) return { items: [], nextCursor: null };
+    }
     where.push("folder_id = ?");
-    args.push(positiveInt(folderId, "folder_id"));
+    args.push(folder);
   } else if (role != null) {
     if (typeof role !== "string" || !ROLE_NAMES.has(role)) fail("role");
     const folderIds = await folderIdsForRole(db, role, account);
@@ -883,7 +934,7 @@ export function toFtsQuery(q) {
 /*
  * Search: FTS5 rank first, then the newest row. Rows are grouped into logical messages (account_id
  * plus message_id; a row with no message_id groups alone) and the group's best rank orders it; within
- * a group the newest row stands for it, so a Gmail label copy is one result, not two.
+ * a group the newest row (date, then id) stands for it, so a Gmail label copy is one result, not two.
  */
 const SEARCH_SQL = `
   WITH hits AS (
@@ -902,7 +953,7 @@ const SEARCH_SQL = `
            MIN(rank) OVER (PARTITION BY account_id, grp) AS group_rank,
            ROW_NUMBER() OVER (
              PARTITION BY account_id, grp
-             ORDER BY rank ASC, date DESC, id DESC) AS rn
+             ORDER BY date DESC, id DESC, rank ASC) AS rn
       FROM hits
   )
   SELECT id, account_id, folder_id, thread_id, message_id, from_name, from_addr, subject, snippet,

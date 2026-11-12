@@ -280,6 +280,41 @@ test("re-upserting a row keeps the FTS index consistent and re-indexes the chang
   assert.equal(await count(db), 0);
 });
 
+test("re-upserting a uid into another thread drops an emptied thread and refreshes a surviving one", async () => {
+  const db = await freshDb();
+  const [inbox] = await addFolders(db, ACCOUNT, [{ path: "INBOX", name: "Inbox" }]);
+  const parent = await upsertMessage(db, msg({
+    folderId: inbox.id, uid: 1, messageId: "<p@mail.example.test>", subject: "Thread parent",
+  }));
+  const child = await upsertMessage(db, msg({
+    folderId: inbox.id,
+    uid: 2,
+    messageId: "<c@mail.example.test>",
+    inReplyTo: "<p@mail.example.test>",
+    references: ["<p@mail.example.test>"],
+    subject: "Re: Thread parent",
+    date: T0 + 1000,
+  }));
+  assert.equal(parent.threadId, child.threadId);
+
+  // The same (folder, uid) now carries another id: it moves to a new thread.
+  const moved = await upsertMessage(db, msg({
+    folderId: inbox.id, uid: 2, messageId: "<c2@mail.example.test>", subject: "Something else", date: T0 + 1000,
+  }));
+  assert.notEqual(moved.threadId, parent.threadId);
+  const survived = await db.execute({ sql: "SELECT * FROM mail_threads WHERE id = ?", args: [parent.threadId] });
+  assert.equal(survived.rows.length, 1, "the old thread still holds the parent");
+  assert.equal(Number(survived.rows[0].message_count), 1, "and its counts followed the move");
+
+  // Move the parent's row too: the thread it leaves is empty and its row goes.
+  const lone = await upsertMessage(db, msg({
+    folderId: inbox.id, uid: 1, messageId: "<p2@mail.example.test>", subject: "Alone now",
+  }));
+  assert.notEqual(lone.threadId, parent.threadId);
+  const gone = await db.execute({ sql: "SELECT id FROM mail_threads WHERE id = ?", args: [parent.threadId] });
+  assert.equal(gone.rows.length, 0, "the emptied thread row is gone");
+});
+
 test("storedDate keeps a parsed date within two days and falls back to internalDate outside", async () => {
   assert.equal(storedDate(T0 - DAY, T0), T0 - DAY, "inside the window the parsed date wins");
   assert.equal(storedDate(T0 + 2 * DAY, T0), T0 + 2 * DAY, "the window is inclusive");
@@ -460,14 +495,42 @@ test("the same message in two folders counts once and searches once", async () =
   assert.equal(hits.length, 1, "the label copy is the same message");
   assert.equal(hits[0].folderId, labelId, "the newest row stands for the group");
 
-  // Counted once across the whole mailbox, in the folder holding the newest row.
+  // Per-folder counts: each folder counts the logical messages it lists, so the label copy is
+  // counted in the label folder and the inbox row in INBOX (both read, so nothing is unread).
   folders = await listFolders(db, ACCOUNT);
-  assert.equal(folders.reduce((sum, f) => sum + f.totalCount, 0), 1);
+  assert.equal(folders.find((f) => f.path === "INBOX").totalCount, 1);
+  assert.equal(folders.find((f) => f.path === "Label").totalCount, 1);
   assert.equal(folders.reduce((sum, f) => sum + f.unreadCount, 0), 0);
 
   // A folder list still shows every row it holds; only the counts dedupe.
   const messageIds = (await listMessages(db, { folderId: inbox.id })).items.map((i) => i.id);
   assert.equal(messageIds.length, 2);
+});
+
+test("a folder's counts read its own rows, even when a newer label copy exists", async () => {
+  const db = await freshDb();
+  const folders = await addFolders(db, ACCOUNT, [{ path: "INBOX", name: "Inbox" }, { path: "Label", name: "Label" }]);
+  const inboxId = folders.find((f) => f.path === "INBOX").id;
+  const labelId = folders.find((f) => f.path === "Label").id;
+  const messageId = "<labelled@mail.example.test>";
+
+  // The inbox row is older and unread; the label copy is newer and read.
+  await upsertMessage(db, msg({ folderId: inboxId, uid: 1, messageId, date: T0, subject: "labelled" }));
+  await upsertMessage(db, msg({
+    folderId: labelId, uid: 5, messageId, date: T0 + 1000, flags: ["\\Seen"], subject: "labelled",
+  }));
+
+  const listed = await listFolders(db, ACCOUNT);
+  assert.equal(listed.find((f) => f.path === "INBOX").totalCount, 1);
+  assert.equal(listed.find((f) => f.path === "Label").totalCount, 1);
+  assert.equal(listed.find((f) => f.path === "INBOX").unreadCount, 1, "the INBOX row decides INBOX's unread count");
+  assert.equal(listed.find((f) => f.path === "Label").unreadCount, 0);
+
+  // Search still dedupes across folders and reports the newest row of the group.
+  const hits = await searchLocal(db, { q: "labelled" });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].folderId, labelId);
+  assert.equal(hits[0].isRead, true);
 });
 
 test("listMessages pages by date and id with no repeat and no gap", async () => {
@@ -510,6 +573,18 @@ test("listMessages clamps the limit and refuses a broken cursor", async () => {
 
   await assert.rejects(() => listMessages(db, { folderId: inbox.id, cursor: "not-a-cursor" }), /not valid/);
   await assert.rejects(() => listMessages(db, { role: "nowhere" }), /not valid/);
+});
+
+test("listMessages answers an empty page when the folder is not that account's", async () => {
+  const db = await freshDb();
+  const [inbox] = await addFolders(db, ACCOUNT, [{ path: "INBOX", name: "Inbox" }]);
+  await addFolders(db, OTHER, [{ path: "INBOX", name: "Inbox" }]);
+  await upsertMessage(db, msg({ folderId: inbox.id, uid: 1, subject: "mine" }));
+
+  assert.deepEqual(await listMessages(db, { accountId: OTHER, folderId: inbox.id }), { items: [], nextCursor: null });
+  assert.deepEqual(await listMessages(db, { accountId: OTHER, folderId: 9999 }), { items: [], nextCursor: null });
+  assert.equal((await listMessages(db, { accountId: ACCOUNT, folderId: inbox.id })).items.length, 1);
+  assert.equal((await listMessages(db, { folderId: inbox.id })).items.length, 1, "no account given still lists it");
 });
 
 test("a role view without an account is the unified view across accounts", async () => {
@@ -557,6 +632,33 @@ test("summaries carry messageId, null when the message has none", async () => {
 
   const second = await searchLocal(db, { q: "topictwo" });
   assert.equal(second[0].messageId, null);
+});
+
+test("searchLocal's representative row is the group's newest, not its best ranked", async () => {
+  const db = await freshDb();
+  const folders = await addFolders(db, ACCOUNT, [{ path: "INBOX", name: "Inbox" }, { path: "Label", name: "Label" }]);
+  const inboxId = folders.find((f) => f.path === "INBOX").id;
+  const labelId = folders.find((f) => f.path === "Label").id;
+  const messageId = "<ranked@mail.example.test>";
+  const term = "rankword";
+
+  // The older label row mentions the term ten times (a better rank); the newer inbox row once.
+  const older = await upsertMessage(db, msg({
+    folderId: labelId,
+    uid: 1,
+    messageId,
+    date: T0,
+    subject: "topic",
+    text: Array.from({ length: 10 }, () => term).join(" "),
+  }));
+  const newer = await upsertMessage(db, msg({
+    folderId: inboxId, uid: 1, messageId, date: T0 + 1000, subject: "topic", text: `one ${term}`,
+  }));
+
+  const hits = await searchLocal(db, { q: term });
+  assert.equal(hits.length, 1, "one logical message");
+  assert.equal(hits[0].id, newer.id, "the newest row stands for the group");
+  assert.notEqual(hits[0].id, older.id);
 });
 
 /* ---------------------------------------------------------- copies and deletes */
@@ -654,12 +756,39 @@ test("setReadForCopies flips every copy and the unread counts follow", async () 
 
   let listed = await listFolders(db, ACCOUNT);
   assert.equal(listed.reduce((sum, f) => sum + f.unreadCount, 0), 0);
-  assert.equal(listed.reduce((sum, f) => sum + f.totalCount, 0), 1, "still one logical message");
+  assert.equal(listed.reduce((sum, f) => sum + f.totalCount, 0), 2, "one logical message in each folder");
 
   assert.equal(await setReadForCopies(db, await getMessage(db, inboxCopy.id), false), 2);
   listed = await listFolders(db, ACCOUNT);
-  assert.equal(listed.find((f) => f.path === "INBOX").unreadCount, 1, "the newest copy is unread again");
-  assert.equal(listed.reduce((sum, f) => sum + f.totalCount, 0), 1);
+  assert.equal(listed.find((f) => f.path === "INBOX").unreadCount, 1, "the INBOX copy is unread again");
+  assert.equal(listed.reduce((sum, f) => sum + f.totalCount, 0), 2);
+});
+
+test("setReadForCopies keeps flags_json in step with is_read", async () => {
+  const db = await freshDb();
+  const folders = await addFolders(db, ACCOUNT, [
+    { path: "INBOX", name: "Inbox" },
+    { path: "Label", name: "Label" },
+  ]);
+  const inboxId = folders.find((f) => f.path === "INBOX").id;
+  const labelId = folders.find((f) => f.path === "Label").id;
+  const messageId = "<flagged-copy@mail.example.test>";
+
+  const labelCopy = await upsertMessage(db, msg({
+    folderId: labelId, uid: 1, messageId, date: T0, flags: ["\\Flagged"], subject: "copy",
+  }));
+  const inboxCopy = await upsertMessage(db, msg({ folderId: inboxId, uid: 1, messageId, date: T0, subject: "copy" }));
+  // A row whose flags were never written: a null flags_json must not throw.
+  await db.execute({ sql: "UPDATE mail_messages SET flags_json = NULL WHERE id = ?", args: [inboxCopy.id] });
+
+  assert.equal(await setReadForCopies(db, await getMessage(db, inboxCopy.id), true), 2);
+  assert.deepEqual((await getMessage(db, inboxCopy.id)).flags, ["\\Seen"]);
+  assert.deepEqual((await getMessage(db, labelCopy.id)).flags, ["\\Flagged", "\\Seen"]);
+
+  assert.equal(await setReadForCopies(db, await getMessage(db, labelCopy.id), false), 2);
+  assert.deepEqual((await getMessage(db, labelCopy.id)).flags, ["\\Flagged"]);
+  assert.deepEqual((await getMessage(db, inboxCopy.id)).flags, []);
+  assert.equal((await getMessage(db, inboxCopy.id)).isRead, false);
 });
 
 /* --------------------------------------------------------------- reconciliation */
@@ -715,6 +844,21 @@ test("deleteMissing removes only absent uids at or above minUid and drops emptie
   assert.equal(await deleteMissing(db, inbox.id, [1, 3], { minUid: 1 }), 2);
   assert.deepEqual(await storedUids(db, inbox.id), [1, 3]);
   await assertFtsIntegrity(db);
+});
+
+test("deleteMissing refuses a minUid that is not a non-negative integer", async () => {
+  const db = await freshDb();
+  const [inbox] = await addFolders(db, ACCOUNT, [{ path: "INBOX", name: "Inbox" }]);
+  for (const uid of [1, 2]) await upsertMessage(db, msg({ folderId: inbox.id, uid, subject: `uid ${uid}` }));
+
+  await assert.rejects(() => deleteMissing(db, inbox.id, [1, 2], { minUid: "12" }), /not valid/);
+  await assert.rejects(() => deleteMissing(db, inbox.id, [1, 2], { minUid: -1 }), /not valid/);
+  await assert.rejects(() => deleteMissing(db, inbox.id, [1, 2], { minUid: 1.5 }), /not valid/);
+  assert.deepEqual(await storedUids(db, inbox.id), [1, 2], "a refused call deletes nothing");
+
+  // null and undefined still mean "no lower bound".
+  assert.equal(await deleteMissing(db, inbox.id, [1, 2], { minUid: null }), 0);
+  assert.equal(await deleteMissing(db, inbox.id, [1, 2], {}), 0);
 });
 
 test("resetFolder clears messages, FTS, UID bookkeeping and emptied threads", async () => {
