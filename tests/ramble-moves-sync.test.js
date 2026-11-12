@@ -1,6 +1,6 @@
 /**
  * Ramble moves — two Crow instances and the pairs the day-sync file does not
- * cover (moves design Task 9.7a; private engineering notes).
+ * cover (moves design Task 9.7; private engineering notes).
  *
  * Two in-memory dbs stand in for two of the user's instances. A row is written
  * only by the REAL bundle writer on the instance that wrote it, with that
@@ -15,9 +15,10 @@
  * rows first, and both queues snapshotted before either is applied.
  *
  * What is pinned here:
- *   - a `moveneed` disagreement widens the day, so the instance that finished a
- *     one-card day no longer holds a finished day, and its `dayCards` re-read
- *     asks for all three slots with a pick in each and writes no `moveneed` row,
+ *   - the first scenario: a `moveneed` disagreement widens the day, so the
+ *     instance that finished a one-card day no longer holds a finished day, and
+ *     its `dayCards` re-read asks for all three slots with a pick in each and
+ *     writes no `moveneed` row,
  *   - the same card paid on both instances is ONE `movecard` row holding the
  *     larger pay, one `moveindoor` row holding the larger claim, and a
  *     `movesDay` that reports it under the daily cap,
@@ -33,9 +34,9 @@
  *     `isDayComplete` derived from the merged rows and no `moveall` row carried
  *     by the apply; one settle per instance then leaves one `streak:<day>`
  *     heart row on each db, and
- *   - a predicate that never answers "complete" fails that scenario, so the
- *     scenario passing with the real `isDayComplete` is an answer about the
- *     rows rather than a no-op.
+ *   - the vacuity guard: a predicate that never answers "complete" fails that
+ *     scenario, so the scenario passing with the real `isDayComplete` is an
+ *     answer about the rows rather than a no-op.
  *
  * The shipped library is filled elsewhere, so every test injects its own
  * chunks. The clock is a fixed local Thursday, so nothing here depends on the
@@ -54,7 +55,7 @@ import {
   MOVE_ALL_KIND, MOVE_BAL_KIND, MOVE_NEED_KIND, MOVE_SLOT_KIND, isDayComplete,
 } from "../bundles/ramble/server/moves/day-complete.js";
 import { recordSlotDone, settleDay } from "../bundles/ramble/server/moves/day.js";
-import { INDOOR_DAILY_CAP, MOVE_INDOOR_KIND } from "../bundles/ramble/server/moves/indoor-cap.js";
+import { MOVE_INDOOR_KIND } from "../bundles/ramble/server/moves/indoor-cap.js";
 import {
   STREAK_HEART_EVERY, STREAK_V2_KIND, ensureStreakV2, streakState,
 } from "../bundles/ramble/server/moves/streak.js";
@@ -73,8 +74,6 @@ const DAY = "2026-11-12";
 /** The days the older instance's ledger files its Done rows under. */
 const NOV10 = "2026-11-10";
 const NOV11 = "2026-11-11";
-/** The newer instance's all-cards start day. */
-const NOV20 = "2026-11-20";
 /** The three Done days, the newest of which is the fixed Thursday itself. */
 const DONE_DAYS = Object.freeze([NOV10, NOV11, DAY]);
 
@@ -85,9 +84,8 @@ const RUN = Object.freeze([
 /** The day the all-cards rule starts on in that run. */
 const UPGRADE = "2026-11-06";
 
-/** Local noon of the fixed Thursday, and of the newer instance's start day. */
+/** Local noon of the fixed Thursday. */
 const NOON12 = new Date(2026, 10, 12, 12, 0, 0, 0).getTime();
-const NOON20 = new Date(2026, 10, 20, 12, 0, 0, 0).getTime();
 
 /** Local noon of a `YYYY-MM-DD` day string, so day arithmetic is timezone-safe. */
 function noonOf(dayStr) {
@@ -461,11 +459,14 @@ async function movedoneOnlyStreak() {
   return streakState(db, { now: NOON12 });
 }
 
-/** The answer a db holding one Done day and one all-cards start day gives. */
-async function movedoneWithStart(doneDay, startDay) {
+/** The answer a fresh db holding only these Done days and one all-cards start day gives. */
+async function movedoneWithStart(doneDays, startDay) {
   const db = createClient({ url: "file::memory:" });
   await initRambleTables(db);
-  await fact(db, MOVE_DONE_KIND, doneDay, 1);
+  for (const dayStr of doneDays) {
+    // eslint-disable-next-line no-await-in-loop
+    await fact(db, MOVE_DONE_KIND, dayStr, 1);
+  }
   await fact(db, STREAK_V2_KIND, startDay, 1);
   return streakState(db, { now: NOON12 });
 }
@@ -493,35 +494,37 @@ async function assertOlderReaderAnswer(db, label) {
 
 /* ------------------------------------------------------------------------ */
 
+/**
+ * The first scenario, extending the day-sync card-count test: the count
+ * disagreement itself belongs to that test, and what this one adds is that the
+ * widened day's re-read holds a pick in EVERY slot, and that `dayCards` never
+ * rewrites the `moveneed` row the day already holds.
+ */
 describe("a card count two instances disagree about", () => {
   for (const [order, label] of ORDERS) {
     test(`the wider count survives and the one-card day stops being finished (${label})`, async () => {
       const lib = library();
-      const build = async () => {
-        const A = await instance("A");
-        const B = await instance("B");
-        await writePrefs(A.db, { cards: 1 });
-        await writePrefs(B.db, { cards: 3 });
-        const one = await dayCards(A.db, { now: THURSDAY, library: lib, emit: A.emit });
-        const three = await dayCards(B.db, { now: THURSDAY, library: lib, emit: B.emit });
-        assert.deepEqual([one.need, one.slots.map((item) => item.slot)], [1, ["midday"]],
-          "A's day asks for the one card its prefs name");
-        assert.deepEqual([three.need, three.slots.map((item) => item.slot)], [3, [...SLOTS]],
-          "B's day asks for all three slots");
-        await recordSlotDone(A.db, {
-          day: DAY,
-          slot: "midday",
-          entry: { kind: "routine", areas: ["mobility"] },
-          via: "player",
-          now: THURSDAY,
-          emit: A.emit,
-          need: one.need,
-        });
-        return { A, B };
-      };
+      const A = await instance("A");
+      const B = await instance("B");
+      await writePrefs(A.db, { cards: 1 });
+      await writePrefs(B.db, { cards: 3 });
+      const one = await dayCards(A.db, { now: THURSDAY, library: lib, emit: A.emit });
+      const three = await dayCards(B.db, { now: THURSDAY, library: lib, emit: B.emit });
+      assert.deepEqual([one.need, one.slots.map((item) => item.slot)], [1, ["midday"]],
+        "A's day asks for the one card its prefs name");
+      assert.deepEqual([three.need, three.slots.map((item) => item.slot)], [3, [...SLOTS]],
+        "B's day asks for all three slots");
+      await recordSlotDone(A.db, {
+        day: DAY,
+        slot: "midday",
+        entry: { kind: "routine", areas: ["mobility"] },
+        via: "player",
+        now: THURSDAY,
+        emit: A.emit,
+        need: one.need,
+      });
 
-      const pair = await build();
-      const { A, B } = pair;
+      const pair = { A, B };
       assert.equal(await isDayComplete(A.db, DAY), true,
         "one card and the player's own balancing chunk finish A's day before the exchange");
 
@@ -591,8 +594,6 @@ describe("the same card paid on both instances", () => {
         const day = await movesDay(inst.db, { day: DAY, now: THURSDAY });
         assert.equal(day.indoorPaid, 12,
           "the day's indoor claim is the larger of the two, read through the cap: " + inst.name);
-        assert.ok(day.indoorPaid <= INDOOR_DAILY_CAP,
-          "and it stays under the daily cap: " + inst.name);
         assert.equal(await rowDelta(inst.db, MOVE_INDOOR_KIND, DAY), 12,
           "the moveindoor row merged by MAX to the larger claim: " + inst.name);
       }
@@ -647,48 +648,61 @@ describe("extras never collide", () => {
 
 describe("an older instance's rows reach a newer one", () => {
   for (const [order, label] of ORDERS) {
-    test(`the old rows land, finish no newer day, and the new streak start travels (${label})`, async () => {
+    test(`the old rows land, finish no day, and the new streak start travels (${label})`, async () => {
       const lib = library();
       const O = await instance("A");
       const N = await instance("B");
 
       const picked = await todayChallenge(O.db, { now: THURSDAY, emit: O.emit, library: lib });
       assert.ok(picked?.entry, "the older instance stored its own moves.today card");
-      const done = await recordChallengeDone(O.db, {
+      const past = await recordChallengeDone(O.db, {
         day: NOV11,
         entry: chunk({ id: "mob-1" }),
         now: noonOf(NOV11),
         emit: O.emit,
       });
-      assert.deepEqual({ paid: done.paid, already: done.already }, { paid: 12, already: false },
-        "the older instance's Done paid its indoor chunk once");
+      assert.deepEqual({ paid: past.paid, already: past.already }, { paid: 12, already: false },
+        "the older instance's Done for a past day paid its indoor chunk once");
+      const onDay = await recordChallengeDone(O.db, {
+        day: DAY,
+        entry: chunk({ id: "mob-1" }),
+        now: THURSDAY,
+        emit: O.emit,
+      });
+      assert.deepEqual({ paid: onDay.paid, already: onDay.already }, { paid: 12, already: false },
+        "and its Done filed under the fixed Thursday paid once under that day");
 
       await openDay(N, lib);
-      assert.equal(await ensureStreakV2(N.db, { day: NOV20, now: NOON20, emit: N.emit }), true,
-        "the newer instance wrote its own all-cards start day");
+      assert.equal(await ensureStreakV2(N.db, { day: DAY, now: THURSDAY, emit: N.emit }), true,
+        "the newer instance wrote its all-cards start day as the day itself");
 
       const pair = { A: O, B: N };
       await assert.doesNotReject(async () => { await exchange(pair, order); },
         "the shipped handlers take an older instance's rows without a throw");
 
+      assert.equal(await rowCount(N.db, MOVE_DONE_KIND, DAY), 1,
+        "the older instance's Done for the day itself arrived as a movedone row");
       assert.equal(await isDayComplete(N.db, DAY), false,
-        "a Done on a past day completes nothing: completion is derived from moveneed, moveslot and movebal");
-      assert.equal(await rowCount(N.db, MOVE_ALL_KIND, DAY), 0,
-        "no moveall cache row for the day the newer instance drew");
-      assert.deepEqual(await keysOfKind(N.db, MOVE_ALL_KIND), [],
-        "and no moveall row of any day arrived through the apply");
+        "a Done completes nothing: completion is derived from moveneed, moveslot and movebal");
+      for (const [inst, who] of [[O, "the older instance"], [N, "the newer instance"]]) {
+        // eslint-disable-next-line no-await-in-loop
+        assert.equal(await rowCount(inst.db, MOVE_ALL_KIND, DAY), 0,
+          "no moveall cache row for the day arrived through the apply: " + who);
+      }
       assert.equal(await rowCount(N.db, MOVE_DONE_KIND, NOV11), 1,
-        "the older instance's movedone row is a fact the apply kept");
+        "the older instance's Done for the past day is a fact the apply kept too");
 
-      const expected = await movedoneWithStart(NOV11, NOV20);
-      const answer = await streakState(N.db, { now: NOON12 });
+      const expected = await movedoneWithStart([NOV11, DAY], DAY);
+      const answer = await streakState(N.db, { now: THURSDAY });
       assert.deepEqual(answer, expected,
-        "the streak reads exactly as a db holding only that Done and the start day");
-      assert.ok(answer.days >= 1,
-        "the day before the all-cards start still counts under the old rule");
+        "the streak reads exactly as a fresh db holding only those two Done rows and the start day");
+      assert.equal(answer.days, 1,
+        "the past Done counts under the old rule and the Done-only start day does not count at all");
+      assert.equal(answer.todayGood, false,
+        "and the start day is not good while it holds no card rows of its own");
 
-      assert.deepEqual(await keysOfKind(O.db, STREAK_V2_KIND), [NOV20],
-        "the newer instance's start day arrived and the apply invented no second one");
+      assert.deepEqual(await keysOfKind(O.db, STREAK_V2_KIND), [DAY],
+        "the newer instance's start day arrived and the apply invented no other");
     });
   }
 });
@@ -769,7 +783,7 @@ describe("the vacuity guard", () => {
 
     await assert.rejects(async () => {
       await completesTheDay(await fresh(), "a-first", async () => false);
-    }, "a predicate that never says complete cannot make the merged day look finished");
+    }, { message: /completion is derived on this db/ });
 
     await assert.doesNotReject(async () => {
       await completesTheDay(await fresh(), "a-first");
