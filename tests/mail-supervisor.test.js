@@ -17,6 +17,8 @@ import {
   createAccount,
   getAccount,
   getSyncState,
+  listAccounts,
+  setSyncState,
   updateAccount,
 } from "../servers/gateway/mail/store/accounts.js";
 import { listFolders } from "../servers/gateway/mail/store/messages.js";
@@ -943,4 +945,407 @@ test("stop clears every timer, stops the watcher and closes every adapter, twice
 
   await h.supervisor.stop();
   assert.equal(h.clock.pending(), 0);
+});
+
+/* --------------------------------------------- after stop() nothing opens (S1) */
+
+test("after stop() syncNow, requestSync and restartAccount open nothing and withAdapter is refused", async () => {
+  let inner = null;
+  let opened = 0;
+  const h = await setup({
+    start: false,
+    adapterFactory: async (args) => {
+      opened += 1;
+      return inner(args);
+    },
+  });
+  inner = h.factory;
+  await h.supervisor.start();
+  const before = opened;
+  assert.equal(before, 1);
+
+  await h.supervisor.stop();
+  await h.supervisor.syncNow(h.accountId);
+  await h.supervisor.requestSync(h.accountId);
+  await h.supervisor.restartAccount(h.accountId);
+  await assert.rejects(
+    h.supervisor.withAdapter(h.accountId, () => {
+      throw new Error("must not run");
+    }),
+    (err) => {
+      assert.ok(err instanceof MailError);
+      assert.equal(err.code, "NETWORK");
+      assert.equal(err.detail, "stopped");
+      return true;
+    },
+  );
+  // A late open would land here: give every pending promise room to misbehave.
+  await flush(60);
+
+  assert.equal(opened, before);
+  assert.equal(h.views.length, before);
+  assert.equal((await getSyncState(h.db, h.accountId)).state, "idle");
+});
+
+test("stop() during ensureWatch stops the watcher it was arming and keeps no connection", async () => {
+  let inner = null;
+  let watchEntered = false;
+  let lateWatcherStopped = false;
+  let releaseWatch = null;
+  const watchGate = new Promise((resolve) => {
+    releaseWatch = resolve;
+  });
+  const h = await setup({
+    start: false,
+    adapterFactory: async (args) => {
+      const view = await inner(args);
+      view.watch = async (paths, handlers) => {
+        watchEntered = true;
+        await watchGate;
+        const watcher = await h.fake.watch(paths, handlers);
+        return {
+          stop() {
+            lateWatcherStopped = true;
+            watcher.stop();
+          },
+        };
+      };
+      return view;
+    },
+  });
+  inner = h.factory;
+
+  const starting = h.supervisor.start();
+  await flush(100);
+  assert.equal(watchEntered, true);
+  assert.equal(h.views.length, 1);
+
+  await h.supervisor.stop();
+  releaseWatch();
+  await starting;
+  await flush(100);
+
+  assert.equal(lateWatcherStopped, true);
+  assert.equal(h.views[0].state.closed, true);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+  assert.equal(h.clock.pending(), 0);
+});
+
+/* -------------------------------------- restartAccount prepares like syncNow (S2) */
+
+test("restartAccount on an account that is still claimed elsewhere syncs nothing", async () => {
+  const h = await setup({ start: false, isClaimedElsewhere: async () => true });
+  await h.supervisor.start();
+  assert.equal((await getAccount(h.db, h.accountId)).status, "claimed_elsewhere");
+  assert.equal(h.views.length, 0);
+
+  // Nothing to do, and nothing thrown: the claim is re-checked, not assumed.
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(40);
+
+  assert.equal(h.views.length, 0);
+  assert.equal(callsOf(h.fake, "listFolders").length, 0);
+  assert.equal((await getAccount(h.db, h.accountId)).status, "claimed_elsewhere");
+});
+
+test("restartAccount retries a signed-out account with the new password and marks it active", async () => {
+  const h = await setup();
+  h.fake.failNext("listFolders", new MailError("AUTH_FAILED"));
+  await h.supervisor.syncNow(h.accountId);
+  assert.equal((await getAccount(h.db, h.accountId)).status, "auth_failed");
+  const viewsBefore = h.views.length;
+
+  // The owner re-entered the app password: a restart is the password-change path.
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(100);
+
+  assert.equal(h.views.length, viewsBefore + 1);
+  assert.equal(h.secrets.at(-1), "second-secret");
+  const account = await getAccount(h.db, h.accountId);
+  assert.equal(account.status, "active");
+  assert.equal(account.statusDetail, null);
+  const state = await getSyncState(h.db, h.accountId);
+  assert.equal(state.state, "idle");
+  assert.equal(state.errorCode, null);
+  assert.equal(state.failures, 0);
+  assert.equal(state.backoffUntil, null);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+});
+
+/* ----------------------------------- every non-auth code takes the ladder (S3) */
+
+test("a BAD_INPUT failure backs off, notices at the threshold, and IDLE is re-armed afterwards", async () => {
+  const h = await setup();
+  const folders = await folderRows(h.db, h.accountId);
+  const drafts = folders.find((folder) => folder.path === "Drafts");
+  const state = () => getSyncState(h.db, h.accountId);
+  const watchBefore = callsOf(h.fake, "watch").length;
+  const badInput = () => new MailError("BAD_INPUT", "window_days");
+  const runFolder = (folderId) => h.supervisor.requestSync(h.accountId, { folderIds: [folderId] });
+
+  // A code the ladder never singled out: the server refuses the folder listing's shape.
+  h.fake.failNext("list", badInput());
+  await runFolder(drafts.id);
+  let current = await state();
+  assert.equal(current.state, "backoff");
+  assert.equal(current.errorCode, "BAD_INPUT");
+  assert.equal(current.failures, 1);
+  assert.equal(current.backoffUntil, h.clock.now() + 5000);
+  // The failed run closed the connection it had and dropped the watch it carried.
+  assert.equal(h.views.at(-1).state.closed, true);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    h.fake.failNext("list", badInput());
+    await runFolder(drafts.id);
+  }
+  current = await state();
+  assert.equal(current.errorCode, "BAD_INPUT");
+  assert.equal(current.failures, FAILURES_BEFORE_NOTICE);
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.notices[0].title, "Mail sync is failing");
+  assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+
+  // The ladder's next retry (a full sync) succeeds: the watch comes back on its own.
+  await h.clock.advance(80000);
+  current = await state();
+  assert.equal(current.state, "idle");
+  assert.equal(current.failures, 0);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  assert.equal(callsOf(h.fake, "watch").length, watchBefore + 1);
+});
+
+/* ---------------------------------- a late connection is never adopted (S4) */
+
+test("a connection that lands after the run timed out is closed, never adopted", async () => {
+  let inner = null;
+  let firstCall = true;
+  let releaseLate = null;
+  const lateGate = new Promise((resolve) => {
+    releaseLate = resolve;
+  });
+  const h = await setup({
+    start: false,
+    adapterFactory: async (args) => {
+      if (firstCall) {
+        firstCall = false;
+        await lateGate;
+      }
+      return inner(args);
+    },
+  });
+  inner = h.factory;
+
+  const runA = h.supervisor.syncNow(h.accountId);
+  await flush(20);
+  // A's handshake never lands: the deadline closes the run out from under it.
+  await h.clock.advance(SYNC_DEADLINE_MS);
+  await runA;
+  assert.equal((await getSyncState(h.db, h.accountId)).errorCode, "TIMEOUT");
+
+  // Now A finally connects, with nobody waiting for it: it is closed, not kept.
+  releaseLate();
+  await flush(120);
+  assert.equal(h.views.length, 1);
+  assert.equal(h.views[0].state.closed, true);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+
+  // The next run builds its own connection instead of inheriting the abandoned one.
+  await h.supervisor.syncNow(h.accountId);
+  assert.equal(h.views.length, 2);
+  assert.equal(h.views.at(-1).state.closed, false);
+  await h.supervisor.stop();
+});
+
+test("a late-connecting adapter from a timed-out run replaces and closes nothing", async () => {
+  let inner = null;
+  let firstCall = true;
+  let releaseLate = null;
+  const lateGate = new Promise((resolve) => {
+    releaseLate = resolve;
+  });
+  const h = await setup({
+    start: false,
+    adapterFactory: async (args) => {
+      if (firstCall) {
+        firstCall = false;
+        await lateGate;
+      }
+      return inner(args);
+    },
+  });
+  inner = h.factory;
+
+  const runA = h.supervisor.syncNow(h.accountId);
+  await flush(20);
+  // A's handshake never lands: the deadline closes the run out from under it.
+  await h.clock.advance(SYNC_DEADLINE_MS);
+  await runA;
+  assert.equal((await getSyncState(h.db, h.accountId)).errorCode, "TIMEOUT");
+
+  // A later run opens B and keeps it.
+  await h.supervisor.syncNow(h.accountId);
+  assert.equal(h.views.length, 1);
+  const adapterB = h.views[0];
+  assert.equal(adapterB.state.closed, false);
+
+  // Now A finally connects. It must be closed, and B must be untouched and still the worker's.
+  releaseLate();
+  await flush(120);
+
+  assert.equal(h.views.length, 2);
+  assert.notEqual(h.views.at(-1), adapterB);
+  assert.equal(h.views.at(-1).state.closed, true);
+  assert.equal(adapterB.state.closed, false);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  await h.supervisor.stop();
+});
+
+/* -------------------------------- the action deadline covers the connect (S5) */
+
+test("withAdapter times out a hanging connect and the next call proceeds", async () => {
+  let inner = null;
+  let firstCall = true;
+  let releaseOpen = null;
+  const openGate = new Promise((resolve) => {
+    releaseOpen = resolve;
+  });
+  const h = await setup({
+    start: false,
+    adapterFactory: async (args) => {
+      if (firstCall) {
+        firstCall = false;
+        await openGate;
+      }
+      return inner(args);
+    },
+  });
+  inner = h.factory;
+
+  let ran = false;
+  const call = h.supervisor.withAdapter(h.accountId, () => {
+    ran = true;
+  });
+  await flush(20);
+  await h.clock.advance(ACTION_DEADLINE_MS);
+
+  const err = await call.then(() => null, (rejection) => rejection);
+  assert.ok(err instanceof MailError);
+  assert.equal(err.code, "TIMEOUT");
+  assert.equal(err.detail, "action_deadline");
+  assert.equal(ran, false);
+
+  // The account's queue was released: the next call connects and runs at once.
+  const kept = await h.supervisor.withAdapter(h.accountId, (adapter) => adapter.listFolders());
+  assert.ok(Array.isArray(kept));
+  assert.equal(h.views.length, 1);
+  const keptView = h.views[0];
+  assert.equal(keptView.state.closed, false);
+
+  // The connection the abandoned call finally got is closed, and the kept one is not.
+  releaseOpen();
+  await flush(120);
+  assert.equal(h.views.length, 2);
+  assert.equal(h.views.at(-1).state.closed, true);
+  assert.equal(keptView.state.closed, false);
+  await h.supervisor.stop();
+});
+
+/* --------------------------------------- the auth notice has its own gate (S6) */
+
+test("a failing-sync notice does not silence the AUTH_FAILED notice that follows it", async () => {
+  const h = await setup();
+
+  h.fake.failNext("listFolders", netError());
+  await h.supervisor.syncNow(h.accountId);
+  for (const delay of [5000, 10000, 20000, 40000]) {
+    h.fake.failNext("listFolders", netError());
+    await h.clock.advance(delay);
+  }
+  let state = await getSyncState(h.db, h.accountId);
+  assert.equal(state.failures, FAILURES_BEFORE_NOTICE);
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.notices[0].title, "Mail sync is failing");
+  const firstNoticeAt = state.lastNoticeAt;
+
+  // The next attempt is refused on the credential, minutes after the failing-sync notice.
+  h.fake.failNext("listFolders", new MailError("AUTH_FAILED"));
+  await h.clock.advance(80000);
+
+  assert.equal((await getAccount(h.db, h.accountId)).status, "auth_failed");
+  assert.equal(h.notices.length, 2);
+  assert.equal(h.notices[1].title, "Crow Mail cannot sign in");
+  state = await getSyncState(h.db, h.accountId);
+  assert.equal(state.state, "auth_failed");
+  assert.ok(state.lastNoticeAt > firstNoticeAt);
+});
+
+/* --------------------------------------------------- start: back-off and speed (M) */
+
+test("a persisted backoff_until in the future delays the first sync after start", async () => {
+  const h = await setup({ start: false });
+  await setSyncState(h.db, h.accountId, {
+    state: "backoff",
+    errorCode: "NETWORK",
+    failures: 3,
+    backoffUntil: T0 + 60000,
+  });
+
+  await h.supervisor.start();
+  assert.equal(h.views.length, 0);
+  assert.equal((await h.supervisor.status(h.accountId)).running, false);
+
+  await h.clock.advance(59999);
+  assert.equal(h.views.length, 0);
+
+  await h.clock.advance(1);
+  assert.equal(h.views.length, 1);
+  const state = await getSyncState(h.db, h.accountId);
+  assert.equal(state.state, "idle");
+  assert.equal(state.failures, 0);
+  assert.equal(state.backoffUntil, null);
+  await h.supervisor.stop();
+});
+
+test("start() starts every account at once: a hung server does not delay the others", async () => {
+  let inner = null;
+  let others = new Set();
+  const never = new Promise(() => {});
+  const h = await setup({
+    start: false,
+    extraAccounts: [{ address: "sam@example.com", label: "Sam" }],
+    adapterFactory: async (args) => {
+      if (others.has(args.account.id)) await never;
+      return inner(args);
+    },
+  });
+  inner = h.factory;
+  // Every account but the one start() reaches last hangs: a start that worked through the list one
+  // account at a time would never reach the last one.
+  const order = (await listAccounts(h.db)).map((account) => account.id);
+  const lastId = order.at(-1);
+  others = new Set(order.slice(0, -1));
+  assert.equal(order.length, 2);
+
+  const starting = h.supervisor.start();
+  await flush(300);
+
+  // The last account synced and is watching while the servers before it have not answered at all.
+  const lastState = await getSyncState(h.db, lastId);
+  assert.equal(lastState?.state, "idle");
+  assert.equal(lastState?.lastSuccessAt, T0);
+  assert.equal((await h.supervisor.status(lastId)).watching, true);
+  assert.equal(callsOf(h.fake, "watch").length, 1);
+  for (const hungId of others) {
+    assert.equal((await h.supervisor.status(hungId)).running, true);
+  }
+
+  await h.supervisor.stop();
+  await flush(20);
+  // The hung runs are closed out; start() itself is still parked on the server that never answers.
+  for (const hungId of others) {
+    assert.equal((await h.supervisor.status(hungId)).running, false);
+  }
+  starting.catch(() => {});
 });
