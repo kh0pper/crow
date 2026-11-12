@@ -2111,6 +2111,14 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ id: Number(showBtn.getAttribute("data-id")) }),
             }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); }).then(function(res) {
+              // A refusal that spent nothing — owner_only: a paired sign-in, or this Crow's own
+              // machine — must not claim the one view is gone. Nothing was shown and the window
+              // is still open, so say who can open it and leave Show where it is.
+              if (!res.ok && res.d && res.d.code === "owner_only") {
+                note.textContent = '${tJs("keychain.firstViewOwnerOnly", lang)}';
+                showBtn.disabled = false;
+                return;
+              }
               showBtn.hidden = true;
               if (res.ok && res.d && typeof res.d.secret === "string") {
                 code.textContent = res.d.secret;

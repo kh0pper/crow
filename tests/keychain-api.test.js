@@ -18,7 +18,7 @@ const K = await import("../servers/gateway/keychain/store.js");
 
 const AUDIT_DDL = "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, actor TEXT, ip_address TEXT, details TEXT, created_at TEXT DEFAULT (datetime('now')))";
 
-async function setup({ twoFa = false, hasPassword = true, verifier, clock = { t: Date.parse("2026-10-03T12:00:00Z") }, vault } = {}) {
+async function setup({ twoFa = false, hasPassword = true, verifier, clock = { t: Date.parse("2026-10-03T12:00:00Z") }, vault, isOwner } = {}) {
   const dbPath = join(mkdtempSync(join(tmpdir(), "crow-kcapi-db-")), "crow.db");
   const crowHome = mkdtempSync(join(tmpdir(), "crow-kcapi-home-"));
   const seedDb = createDbClient(dbPath);
@@ -39,8 +39,9 @@ async function setup({ twoFa = false, hasPassword = true, verifier, clock = { t:
     openDb: () => createDbClient(dbPath),
     crowHome,
     gate,
-    // The owner's turn is exercised in tests/self-origin.test.js; here every session is the owner.
-    isOwner: async () => true,
+    // The owner's turn is exercised in tests/self-origin.test.js; here every session is the owner
+    // unless a test passes its own rule.
+    isOwner: isOwner || (async () => true),
     notify: async (_db, n) => { notes.push(n); },
     vault: vault || { status: () => ({ installed: true, cliPath: "/x/bw.js", serverUrl: "http://localhost:18097" }), save: async (o) => { vaultCalls.push(o); return { ok: true }; } },
   }));
@@ -152,6 +153,45 @@ test("REVIEW FOCUS 2 (API) — first-view works once without re-auth, then 410",
   } finally { s.close(); }
 });
 
+test("first-view is the OWNER's act: a non-owner session is refused before the one view is spent", async () => {
+  // The route reveals a plaintext without a re-auth grant (the credential was just generated),
+  // but it must not be readable — or burnable — by a peer SSO sign-in or a request from this
+  // machine. It carries the same owner rule /reveal does. The rule is flippable here so the
+  // refusal can be shown to cost nothing: the owner's own turn still gets the one view.
+  let owner = false;
+  const s = await setup({ isOwner: async () => owner });
+  try {
+    const { id } = await K.saveExtensionSecret(s.db, s.key(), { bundleId: "vaultwarden", envKey: "VAULTWARDEN_ADMIN_TOKEN", label: "Vaultwarden admin token", secret: "tok-1", origin: "generated", firstView: true });
+    const refused = await s.call("/first-view", { body: { id } });
+    assert.equal(refused.status, 403);
+    assert.equal(refused.body.code, "owner_only");
+    assert.equal(JSON.stringify(refused.body).includes("tok-1"), false);
+    assert.deepEqual((await s.audits()).map((e) => e.event_type), [], "nothing was revealed, so nothing is audited as a view");
+    // The window is untouched: the owner can still see it once.
+    assert.ok((await s.db.execute("SELECT first_view_until FROM crow_keychain WHERE id = " + id)).rows[0].first_view_until);
+    owner = true;
+    const mine = await s.call("/first-view", { body: { id } });
+    assert.equal(mine.status, 200, "the refused attempt did not spend the view");
+    assert.equal(mine.body.secret, "tok-1");
+    assert.deepEqual((await s.audits()).map((e) => e.event_type), ["keychain_first_view"], "audited once, on the reveal");
+    const again = await s.call("/first-view", { body: { id } });
+    assert.equal(again.status, 410);
+    assert.equal(again.body.code, "first_view_spent");
+  } finally { s.close(); }
+});
+
+test("add is the OWNER's act too: a non-owner session cannot plant a keychain entry", async () => {
+  const s = await setup({ isOwner: async () => false });
+  try {
+    const r = await s.call("/add", { body: { label: "Planted", username: "casey", url: "https://ws:8456", secret: "planted-value-1" } });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.code, "owner_only");
+    assert.equal(JSON.stringify(r.body).includes("planted-value-1"), false);
+    assert.deepEqual((await s.call("/entries")).body.entries, [], "nothing was added");
+    assert.deepEqual((await s.audits()).map((e) => e.event_type), [], "and nothing is audited as an add");
+  } finally { s.close(); }
+});
+
 test("C7 — entries sealed under a missing key list as unreadable and reveal answers 409 key_missing", async () => {
   const s = await setup();
   try {
@@ -209,7 +249,7 @@ test("Export then Import (re-auth required): the file round-trips; a wrong passp
   } finally { s.close(); }
 });
 
-test("add needs no grant; delete needs one; both audited", async () => {
+test("add needs the owner's turn but no grant; delete needs a grant; both audited", async () => {
   const s = await setup();
   try {
     const add = await s.call("/add", { body: { label: "Workspace phone (Casey)", username: "casey", url: "https://ws:8456", secret: "abcd-efgh-ijkl" } });
