@@ -36,6 +36,10 @@ export function validateAudioParams({ cap, id, codec } = {}) {
  * listed keychain names with THIS process's role (the gateway registers one; a child gets null
  * and falls back to the plain values + its own env). A key that cannot be produced keeps
  * today's answer: the plain entry env only — never half a secret.
+ *
+ * The result is the usable pair { url, token } plus `hostname` — the label the panel prints.
+ * `hostname` is carried non-enumerably: it is not part of the pair a caller streams with, so a
+ * consumer that copies the answer (spread, JSON) keeps getting exactly the two values it uses.
  */
 export function readFunkwhaleEnv(crowHome = resolveCrowHome()) {
   let entry = null;
@@ -57,8 +61,14 @@ export function readFunkwhaleEnv(crowHome = resolveCrowHome()) {
   const fw = hydrated?.env || hydrated || {};
   const url = fw.FUNKWHALE_URL;
   const token = fw.FUNKWHALE_ACCESS_TOKEN;
-  if (url && token) return { url: String(url).replace(/\/+$/, ""), token: String(token) };
-  return null;
+  if (!(url && token)) return null;
+  const out = { url: String(url).replace(/\/+$/, ""), token: String(token) };
+  Object.defineProperty(out, "hostname", {
+    value: fw.FUNKWHALE_HOSTNAME ? String(fw.FUNKWHALE_HOSTNAME) : "",
+    enumerable: false,
+    writable: false,
+  });
+  return out;
 }
 
 export default function audioProxyRouter({ createDbClient, fetchImpl = fetch, fwEnv = readFunkwhaleEnv, getExposed = getExposedCapabilities, isExposedToPeer = isCapabilityExposedToPeer, now = () => Date.now() } = {}) {
