@@ -17,13 +17,22 @@
  *      returned field or a log line, even when the script echoes it to stdout;
  *   4b. the stillInstalled guard fails CLOSED: no install stamp, or a seam that cannot
  *      answer, means nothing is saved (the default seam answers false);
+ *   4c. several values (`token.env` as an array): every value accepted before any is saved, a
+ *      half-filled extension left alone before the script runs, and a save that does not land
+ *      taking back what the run had already written (never "ok" over a mixed set);
+ *   4d. `stdin: "admin-password"`: the keychain's password on the script's stdin, nowhere else;
+ *      a refused multi-value answer's bare values are scrubbed from the log and the reason;
+ *   4e. the block only exists for a `mode: "crow"` admin, in the location its `via` names
+ *      (and the bundle contract refuses the other location);
  *   5. spawnGroup's `secretFd`: fd 3 collected apart from stdout/stderr, capped at 4096
  *      bytes (an overflow is refused, never truncated-and-accepted), and a rejection whose
  *      `secret` is non-enumerable (Object.keys(err) does not list it);
  *   6. the manifest schema can express the step at all (registry/manifest.schema.json).
  *
- * No database, no docker, no real app: every seam is injected, and the script cases use
- * small temporary bash files.
+ * No database CONTENTS are needed, no docker, no real app: the seams are injected, and the
+ * all-or-nothing pre-check has its own `mcpValue` / `hasKeychainRow` seams (a test that does
+ * not inject them gets the real answer for this scratch home: no value, no row). The script
+ * cases use small temporary bash files.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -666,6 +675,50 @@ test("a via \"env\" admin declares its token as firstAdmin.token, and nowhere el
   const atFirstAdmin = { ...MANIFEST, firstAdmin: { ...MANIFEST.firstAdmin, token: { script: "scripts/api-token.sh", env: "APP_API_TOKEN" } } };
   assert.match(apiTokenProblems(atFirstAdmin).join("\n"), /firstAdmin\.token is only allowed with via "env"/);
   assert.match(apiTokenPlan(atFirstAdmin).refused, /only allowed with via "env"/);
+
+  // A setup.token with NO mechanism at all is not that mechanism's declaration either.
+  const noVia = { ...MANIFEST, firstAdmin: { mode: "none", setup: MANIFEST.firstAdmin.setup } };
+  assert.match(apiTokenProblems(noVia).join("\n"), /setup\.token is only allowed with via "setup"/);
+  assert.equal(apiTokenPlan(noVia), null, "no plan, so nothing runs");
+  const otherVia = { ...MANIFEST, firstAdmin: { ...MANIFEST.firstAdmin, via: "postInstall" } };
+  assert.match(apiTokenProblems(otherVia).join("\n"), /setup\.token is only allowed with via "setup"/);
+});
+
+test("only a `mode: \"crow\"` admin has a token step: another mode's admin is not Crow's", () => {
+  // The block sits in the right place, but Crow never made this admin (the install path's own
+  // firstAdminVia rule): there is no login to sign in with, so nothing may run.
+  for (const firstAdmin of [
+    { ...MANIFEST.firstAdmin, mode: "none" },
+    { ...MANIFEST.firstAdmin, mode: "finish-setup" },
+    { ...MANIFEST.firstAdmin, mode: "default-login" },
+  ]) {
+    const manifest = { ...MANIFEST, firstAdmin };
+    assert.equal(apiTokenPlan(manifest), null, JSON.stringify(firstAdmin.mode));
+    assert.deepEqual(apiTokenProblems(manifest), [], "not declared where Crow would look for a run");
+  }
+});
+
+test("the bundle contract refuses a token block declared for the wrong mechanism", async () => {
+  const { validateManifest } = await import("../scripts/lib/bundle-contract.mjs");
+  const repo = join(import.meta.dirname, "..");
+  const load = (id) => JSON.parse(readFileSync(join(repo, "bundles", id, "manifest.json"), "utf8"));
+  const firstAdminErrors = (manifest, dir) => (validateManifest(manifest, dir).errors || []).filter((e) => e.startsWith("firstAdmin"));
+  const paperless = load("paperless");
+  const paperlessDir = join(repo, "bundles", "paperless");
+  const miniflux = load("miniflux");
+  const minifluxDir = join(repo, "bundles", "miniflux");
+  // The two real declarations, each where its own mechanism puts it.
+  assert.deepEqual(firstAdminErrors(paperless, paperlessDir), [], "paperless: via setup, setup.token");
+  assert.deepEqual(firstAdminErrors(miniflux, minifluxDir), [], "miniflux: via env, firstAdmin.token");
+
+  // Moved to the other location, each is refused (Crow would never run it there).
+  const { token: setupToken, ...setupWithout } = paperless.firstAdmin.setup;
+  const up = { ...paperless, firstAdmin: { ...paperless.firstAdmin, setup: setupWithout, token: setupToken } };
+  assert.match(firstAdminErrors(up, paperlessDir).join("\n"), /firstAdmin\.token is only allowed with via "env"/);
+
+  const { token: siblingToken, ...siblingless } = miniflux.firstAdmin;
+  const down = { ...miniflux, firstAdmin: { ...siblingless, setup: { script: "scripts/first-admin.sh", token: siblingToken } } };
+  assert.match(firstAdminErrors(down, minifluxDir).join("\n"), /firstAdmin\.setup\.token is only allowed with via "setup"/);
 });
 
 test("acceptTokenValues: one name keeps today's one-line protocol, unchanged", () => {
@@ -753,23 +806,45 @@ test("runApiToken: a partial array answer saves NOTHING — all values are accep
   assert.equal(saves, 0, "a half-read answer writes nothing at all");
 });
 
-test("runApiToken: an array where every key already has a value is skipped, one fresh value is ok", async () => {
+test("runApiToken: every key already valued is skipped; a half-old half-new set is never ok", async () => {
   const { scriptDir, destDir } = dirs();
-  const runWith = (refusals) => runApiToken({
+  const removed = [];
+  const runWith = (refusals, { removable = true } = {}) => runApiToken({
     bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
     deps: {
       runner: async () => ({ stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }),
       save: async (o) => (refusals.includes(o.envKey)
         ? { ok: false, status: 409, error: API_KEY_SAVE_REFUSALS.has_value }
         : { ok: true, needs_restart: false }),
+      removeValue: async (o) => { removed.push(o.envKey); return removable; },
       stillInstalled: STILL,
       adminPassword: async () => PASSWORD,
       warn: () => {},
     },
   });
   assert.equal((await runWith(["APP_CLIENT_ID", "APP_CLIENT_SECRET"])).result, "skipped-has-value");
-  assert.equal((await runWith(["APP_CLIENT_ID"])).result, "ok", "the missing half is filled in");
-  // Any OTHER refusal is a failure, with the save's own fixed sentence.
+  assert.deepEqual(removed, [], "nothing of this run's was saved, so there is nothing to take back");
+  // One name already had a value while the other was saved by this run: a mixed set is not a
+  // connection Crow made, so the value it wrote comes back out and the run says failed.
+  const mixed = await runWith(["APP_CLIENT_ID"]);
+  assert.equal(mixed.result, "failed");
+  assert.equal(
+    mixed.reason,
+    "Some of this extension's API settings already had a value while others did not, so Crow took back the values it had just saved",
+  );
+  assert.deepEqual(removed, ["APP_CLIENT_SECRET"], "exactly the value this run saved");
+  assert.equal(JSON.stringify(mixed).includes(CLIENT_SECRET), false, "no value in the answer");
+  // The same mixed set when the value cannot be taken back: still failed, and it says so.
+  removed.length = 0;
+  const stuck = await runWith(["APP_CLIENT_ID"], { removable: false });
+  assert.equal(stuck.result, "failed");
+  assert.equal(
+    stuck.reason,
+    "Crow saved some of this extension's API settings but could not take them back, so some of them are filled in and others are not",
+  );
+  assert.deepEqual(removed, ["APP_CLIENT_SECRET"]);
+  // Any OTHER refusal is a failure, with the save's own fixed sentence (and any earlier value
+  // this run had written is taken back too).
   const failed = await runApiToken({
     bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
     deps: {
@@ -777,6 +852,7 @@ test("runApiToken: an array where every key already has a value is skipped, one 
       save: async (o) => (o.envKey === "APP_CLIENT_SECRET"
         ? { ok: false, status: 500, error: API_KEY_SAVE_REFUSALS.keychain }
         : { ok: true, needs_restart: false }),
+      removeValue: async () => true,
       stillInstalled: STILL,
       adminPassword: async () => PASSWORD,
       warn: () => {},
@@ -785,6 +861,166 @@ test("runApiToken: an array where every key already has a value is skipped, one 
   assert.equal(failed.result, "failed");
   assert.equal(failed.reason, API_KEY_SAVE_REFUSALS.keychain);
   assert.equal(JSON.stringify(failed).includes(CLIENT_SECRET), false);
+});
+
+// ── 4e. a two-value save is all or nothing, from both ends ───────────────────
+
+/** `deps` for a pre-check test: which names already hold a value, and what the run does. */
+function prefillDeps({ inEntry = [], inKeychain = [] } = {}) {
+  const calls = { ran: 0, saved: [] };
+  return {
+    calls,
+    deps: {
+      runner: async () => { calls.ran += 1; return { stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }; },
+      save: async (o) => { calls.saved.push(o.envKey); return { ok: true, needs_restart: false }; },
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      mcpValue: (id, envKey) => (inEntry.includes(envKey) ? CLIENT_ID : ""),
+      hasKeychainRow: async (id, envKey) => inKeychain.includes(envKey),
+      warn: () => {},
+    },
+  };
+}
+
+const PREFILLED_SENTENCE = "Some of this extension's API settings are already filled in and others are not, so Crow left them alone.";
+
+test("runApiToken: a half-filled two-value extension is left alone BEFORE the script runs", async () => {
+  const { scriptDir, destDir } = dirs();
+  // Either source counts as "it already holds a value": its own MCP entry, or an active row.
+  for (const sources of [{ inEntry: ["APP_CLIENT_ID"] }, { inKeychain: ["APP_CLIENT_SECRET"] }]) {
+    const { calls, deps } = prefillDeps(sources);
+    const out = await runApiToken({ bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP, deps });
+    assert.equal(out.result, "failed", JSON.stringify(sources));
+    assert.equal(out.reason, PREFILLED_SENTENCE, JSON.stringify(sources));
+    assert.deepEqual(out.log, []);
+    assert.equal(calls.ran, 0, "the script never runs: there is nothing it could do that is safe");
+    assert.deepEqual(calls.saved, [], "and nothing is saved");
+    assert.equal(JSON.stringify(out).includes(CLIENT_ID), false);
+  }
+});
+
+test("runApiToken: a two-value extension that already holds every value is skipped, script not run", async () => {
+  const { scriptDir, destDir } = dirs();
+  const { calls, deps } = prefillDeps({ inEntry: ["APP_CLIENT_ID"], inKeychain: ["APP_CLIENT_SECRET"] });
+  const out = await runApiToken({ bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP, deps });
+  assert.deepEqual(out, { result: "skipped-has-value", log: [] });
+  assert.equal(calls.ran, 0);
+  assert.deepEqual(calls.saved, []);
+});
+
+test("runApiToken: a PLACEHOLDER is not a value, so a two-value run still goes ahead", async () => {
+  const { scriptDir, destDir } = dirs();
+  let runnerRan = 0;
+  const out = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => { runnerRan += 1; return { stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }; },
+      save: async () => ({ ok: true, needs_restart: false }),
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      mcpValue: () => "change-me",
+      hasKeychainRow: () => false,
+      warn: () => {},
+    },
+  });
+  assert.equal(runnerRan, 1, "a placeholder is what Crow itself wrote as a default, not the owner's value");
+  assert.equal(out.result, "ok");
+});
+
+test("runApiToken: a later save that answers has_value takes the earlier value back", async () => {
+  const { scriptDir, destDir } = dirs();
+  const removed = [];
+  const out = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => ({ stdout: "minted two\n", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }),
+      save: async (o) => (o.envKey === "APP_CLIENT_SECRET"
+        ? { ok: false, status: 409, error: API_KEY_SAVE_REFUSALS.has_value }
+        : { ok: true, needs_restart: true }),
+      removeValue: async (o) => { removed.push(o); return true; },
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      warn: () => {},
+    },
+  });
+  assert.equal(out.result, "failed", "never ok: the extension would hold a new id beside an old secret");
+  assert.equal(
+    out.reason,
+    "Some of this extension's API settings already had a value while others did not, so Crow took back the values it had just saved",
+  );
+  assert.deepEqual(removed.map((r) => [r.bundleId, r.envKey]), [["demo-app", "APP_CLIENT_ID"]], "the value this run saved, and only that one");
+  assert.equal("mcpEnvUpdated" in out, false, "nothing was left written, so nothing needs a restart");
+  assert.equal(JSON.stringify(out).includes(CLIENT_ID), false);
+  assert.equal(JSON.stringify(out).includes(CLIENT_SECRET), false);
+});
+
+test("runApiToken: a later save that THROWS takes the earlier value back too", async () => {
+  const { scriptDir, destDir } = dirs();
+  for (const removal of [{ seam: async () => true, reason: "Crow could not save the app's API token" }, { seam: async () => false, reason: null }]) {
+    const removed = [];
+    const out = await runApiToken({
+      bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+      deps: {
+        runner: async () => ({ stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }),
+        save: async (o) => {
+          if (o.envKey === "APP_CLIENT_SECRET") throw new Error("boom");
+          return { ok: true, needs_restart: false };
+        },
+        removeValue: async (o) => { removed.push(o.envKey); return removal.seam(); },
+        stillInstalled: STILL,
+        adminPassword: async () => PASSWORD,
+        warn: () => {},
+      },
+    });
+    assert.equal(out.result, "failed");
+    assert.deepEqual(removed, ["APP_CLIENT_ID"], "the id this run had already saved is removed");
+    assert.equal(
+      out.reason,
+      removal.reason ?? "Crow saved some of this extension's API settings but could not take them back, so some of them are filled in and others are not",
+    );
+  }
+  // A removal seam that itself throws is the same answer, never a half-reported ok.
+  const out = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => ({ stdout: "", stderr: "", secret: MULTI_ANSWER, secretOverflow: false }),
+      save: async (o) => (o.envKey === "APP_CLIENT_SECRET" ? { ok: false, status: 500, error: API_KEY_SAVE_REFUSALS.keychain } : { ok: true }),
+      removeValue: async () => { throw new Error("keychain closed"); },
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      warn: () => {},
+    },
+  });
+  assert.equal(out.result, "failed");
+  assert.match(out.reason, /could not take them back/);
+});
+
+test("runApiToken: a refused multi-value answer hides each bare value, not only whole lines", async () => {
+  const { scriptDir, destDir } = dirs();
+  // The answer is unusable (a line too many), so `values` stays null: nothing but the fd-3
+  // text knows the values, while the script's own stdout and stderr quote one of them.
+  const out = await runApiToken({
+    bundleId: "demo-app", manifest: MULTI, scriptDir, destDir, installStamp: STAMP,
+    deps: {
+      runner: async () => {
+        throw Object.assign(new Error("exit 1"), {
+          exitCode: 1,
+          stdout: `minted ${CLIENT_SECRET}\n`,
+          stderr: `could not use ${CLIENT_SECRET}\n`,
+          secret: `APP_CLIENT_ID=${CLIENT_ID}\nAPP_CLIENT_SECRET=${CLIENT_SECRET}\nEXTRA=x\n`,
+        });
+      },
+      save: async () => ({ ok: true, needs_restart: false }),
+      stillInstalled: STILL,
+      adminPassword: async () => PASSWORD,
+      warn: () => {},
+    },
+  });
+  assert.equal(out.result, "failed");
+  assert.equal(out.log.join("\n").includes(CLIENT_SECRET), false, out.log.join("\n"));
+  assert.equal(String(out.reason).includes(CLIENT_SECRET), false, out.reason);
+  assert.match(out.reason, /\[hidden\]/, "the value's place in the reason is kept, the value is not");
+  assert.equal(JSON.stringify(out).includes(CLIENT_SECRET), false);
 });
 
 // ── 4d. `stdin: "admin-password"`: the keychain's admin password, one line ─────

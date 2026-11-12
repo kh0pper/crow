@@ -45,6 +45,16 @@
  *                                         entry, and nothing is saved unless every value was
  *                                         answered and accepted.
  *
+ * A two-value save is ALL OR NOTHING, from both ends. Before the script runs, an array
+ * declaration whose settings are already half-filled is left alone (result "failed" with a
+ * fixed sentence, the script never runs) instead of being mixed with fresh values. And once a
+ * value is saved, a later save that fails (or answers "already has a value") takes the values
+ * THIS run saved back out again and answers "failed": a run never reports "ok" over a set
+ * that is half new and half old. Crow has no per-value remover today (the keychain store
+ * deletes by row id or for a whole bundle, and the MCP-entry and .env writers have no removal
+ * path), so when nothing can take a value back the run says that in its own fixed sentence
+ * rather than claim a clean result.
+ *
  * `"stdin": "admin-password"` makes Crow pass the keychain's admin password for this bundle
  * (`firstAdmin.secretEnv`) as ONE line on the script's stdin — exactly as the first-admin
  * protocol passes a password. Only that one value is allowed; without it stdin stays closed
@@ -53,7 +63,8 @@
  * A token that is saved goes exactly where the API-key card's save puts a typed one, with a
  * different policy: origin "generated", `propagate: false` (the gateway's own env is not a
  * place for it) and `firstWriterWins: true` — a value the extension already has is NEVER
- * replaced, and that answer is `skipped-has-value`, not a failure. A refused save is the
+ * replaced, and when that is the whole job the answer is `skipped-has-value`, not a failure
+ * (with several values, a set that is half old is a failure: see above). A refused save is the
  * save's own fixed sentence.
  *
  * Saving is CONFIRMED first, and fails closed: the caller's `installStamp` is compared with
@@ -110,6 +121,21 @@ const OVERFLOW_REASON = "the app answered with more than an API token (the answe
 const SAVE_FAILED_REASON = "Crow could not save the app's API token";
 /** `token.stdin: "admin-password"` with nothing in the keychain to pass in: nothing ran. */
 const PASSWORD_MISSING_REASON = "Crow has no admin password saved for this app, so it could not sign in to create the token";
+/**
+ * A two-value declaration the extension has already half-filled: the script does not run at
+ * all, so nothing can be mixed. Fixed text, no value in it.
+ */
+const PREFILLED_PARTIAL_REASON = "Some of this extension's API settings are already filled in and others are not, so Crow left them alone.";
+/**
+ * The saves in one run disagreed with each other: the values this run wrote were taken back
+ * out again, so the extension keeps whatever it had before the run.
+ */
+const MIXED_SAVE_REASON = "Some of this extension's API settings already had a value while others did not, so Crow took back the values it had just saved";
+/**
+ * A run could not take back the values it had already saved: the extension may now hold some
+ * of them and not others. Never "ok": the half-filled state is what the operator has to fix.
+ */
+const NO_TAKEBACK_REASON = "Crow saved some of this extension's API settings but could not take them back, so some of them are filled in and others are not";
 const UNEXPECTED_REASON = "Crow's own token setup stopped unexpectedly";
 const NOT_DECLARED_REASON = "this app's API token is not minted by a setup script";
 const REMOVED_REASON = "the extension was removed while Crow was creating its token";
@@ -150,10 +176,15 @@ export const API_TOKEN_MAX_VALUES = 8;
  * The token block a manifest declares: `firstAdmin.setup.token` for a `via: "setup"` admin
  * (there is a setup script to hang it under), `firstAdmin.token` — the sibling of
  * `secretEnv` — for a `via: "env"` one. Null when the declaration is absent.
+ *
+ * Only a `mode: "crow"` first admin has a mechanism Crow runs, so a block declared beside
+ * any other mode is no token step at all: the same rule the install path applies through
+ * firstAdminVia.
  */
 function tokenOf(manifest) {
   const fa = manifest && typeof manifest === "object" ? manifest.firstAdmin : null;
   if (!fa || typeof fa !== "object" || Array.isArray(fa)) return null;
+  if (fa.mode !== "crow") return null;
   if (fa.via === "env") {
     const token = fa.token;
     return token === undefined || token === null ? null : token;
@@ -177,10 +208,12 @@ function tokenMisplaced(manifest) {
   if (!fa) return null;
   const inSetup = fa.setup && typeof fa.setup === "object" && fa.setup.token !== undefined && fa.setup.token !== null;
   const atFirstAdmin = fa.token !== undefined && fa.token !== null;
-  if (fa.via === "env" && inSetup) {
+  // Each location belongs to exactly one mechanism: a setup.token with any other via (or none)
+  // and a firstAdmin.token outside via "env" are declarations Crow would never run.
+  if (inSetup && fa.via !== "setup") {
     return 'firstAdmin.setup.token is only allowed with via "setup"; a via "env" admin declares the app\'s token as firstAdmin.token';
   }
-  if (fa.via !== "env" && atFirstAdmin) {
+  if (atFirstAdmin && fa.via !== "env") {
     return 'firstAdmin.token is only allowed with via "env"; a via "setup" admin declares the app\'s token as firstAdmin.setup.token';
   }
   return null;
@@ -418,9 +451,14 @@ export function acceptTokenValues(raw, manifest, names, { named = null } = {}) {
 }
 
 /**
- * `text` with every trimmed, non-empty line of `raw` replaced by `[hidden]`. Lines shorter
- * than 4 characters are ignored: replacing a stray "ok" would shred the log for nothing,
- * and a secret that short is refused by acceptToken anyway.
+ * `text` with every trimmed, non-empty line of `raw` replaced by `[hidden]`, and — for every
+ * raw line of the `NAME=value` shape — the value after the first `=` replaced too. Lines
+ * shorter than 4 characters are ignored: replacing a stray "ok" would shred the log for
+ * nothing, and a secret that short is refused by acceptToken anyway.
+ *
+ * The value half matters on its own because a REFUSED multi-value answer never becomes a set
+ * of values (`values` stays null), so nothing else in the run knows the values to hide while
+ * the script's own stdout or stderr may quote one of them.
  *
  * @param {unknown} text
  * @param {unknown} raw
@@ -428,9 +466,17 @@ export function acceptTokenValues(raw, manifest, names, { named = null } = {}) {
  */
 export function scrubAll(text, raw) {
   let out = String(text ?? "");
-  const lines = [...new Set(String(raw ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length >= 4))];
+  const rawText = String(raw ?? "");
+  const lines = [...new Set(rawText.split("\n").map((l) => l.trim()).filter((l) => l.length >= 4))];
   // Longest first: a line that contains another would otherwise leave a fragment behind.
   for (const line of lines.sort((a, b) => b.length - a.length)) out = out.split(line).join("[hidden]");
+  const values = [...new Set(rawText
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.includes("="))
+    .map((l) => l.slice(l.indexOf("=") + 1))
+    .filter((v) => v.length >= 4))];
+  for (const value of values.sort((a, b) => b.length - a.length)) out = out.split(value).join("[hidden]");
   return out;
 }
 
@@ -474,12 +520,67 @@ function resolveReviewedScript(scriptDir, relScript) {
 }
 
 /**
+ * The value this extension's own MCP entry holds for one env key ("" when it holds none).
+ * Read only to answer "does it already have a value"; never logged, returned or compared to
+ * anything but emptiness.
+ *
+ * @param {string} bundleId
+ * @param {string} envKey
+ * @returns {Promise<string>}
+ */
+async function mcpEntryValue(bundleId, envKey) {
+  try {
+    const [{ readFileSync }, config] = await Promise.all([import("node:fs"), import("./bundles-config.js")]);
+    const all = JSON.parse(readFileSync(config.MCP_ADDONS_PATH, "utf8"));
+    const entry = all && typeof all === "object" ? all[bundleId] : null;
+    const env = entry && typeof entry.env === "object" && entry.env ? entry.env : null;
+    const value = env ? env[envKey] : undefined;
+    return typeof value === "string" ? value : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Whether the keychain holds an ACTIVE row for this bundle + env (metadata only: the value is
+ * never opened). A home with no keychain table has no row, which is not a failure.
+ *
+ * @param {string} bundleId
+ * @param {string} envKey
+ * @returns {Promise<boolean>}
+ */
+async function keychainHasRow(bundleId, envKey) {
+  try {
+    const { createDbClient } = await import("../db.js");
+    let db = null;
+    try {
+      db = createDbClient();
+      const { rows } = await db.execute({
+        sql: "SELECT 1 FROM crow_keychain WHERE kind = 'extension' AND status = 'active' AND bundle_id = ? AND env_key = ? LIMIT 1",
+        args: [bundleId, envKey],
+      });
+      return (rows || []).length > 0;
+    } finally {
+      try { db?.close?.(); } catch { /* already closed */ }
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The seams a run uses. Injected wholesale by tests; the defaults are the real ones.
  * `stillInstalled(id, installStamp)` is asked after the script succeeded and before the
  * save: a call that answers false means the extension is gone (or was reinstalled) and
  * nothing may be written for it. The default answers FALSE (fail closed): with no installed
  * list read, nothing has confirmed the extension, and a token is not saved on a guess.
  * Every real caller injects a seam that re-reads installed.json.
+ *
+ * `mcpValue` / `hasKeychainRow` are the two places a value can already be, exactly the pair
+ * the boot catch-up asks (catchUpHasValue). `removeValue` takes one value this run saved back
+ * out again when a two-value save cannot finish: there is no per-value remover in Crow today
+ * (the keychain store deletes by row id, or every row of a bundle), so the default answers
+ * false and the run reports that it could not undo the save instead of pretending it did.
  */
 function defaultDeps() {
   return {
@@ -490,6 +591,9 @@ function defaultDeps() {
     // (`token.stdin: "admin-password"`). Lazily imported for the same reason the catch-up's
     // seams are: the manifest contract imports this module and may not load the database.
     adminPassword: (o) => readAdminPassword(o),
+    mcpValue: (id, envKey) => mcpEntryValue(id, envKey),
+    hasKeychainRow: (id, envKey) => keychainHasRow(id, envKey),
+    removeValue: async () => false,
     warn: (m) => console.warn(m),
   };
 }
@@ -545,8 +649,12 @@ async function readAdminPassword({ bundleId, envKey, crowHome = null } = {}) {
  *
  * An ARRAY `token.env` answers one `NAME=value` line per declared name; every value is
  * accepted before ANY is saved, so a save can never mix a fresh value with a half-read one.
- * A refusal on a later save is the run's answer — the values saved before it stay, because
- * they are this install's own and the answer (and the bell) says the job did not finish.
+ * A two-value save is all or nothing at the other end too: an extension whose settings are
+ * already half-filled is left alone before the script runs (PREFILLED_PARTIAL_REASON), and a
+ * run whose saves disagree (one refused because the extension already has a value, or one
+ * failing) takes back the values it wrote and answers "failed" — never "ok" over a set that
+ * is half new and half old. When a value cannot be taken back, the reason is
+ * NO_TAKEBACK_REASON, so the operator knows to look at Configure.
  *
  * The caller owns the concurrency lock (tryBeginFirstAdminSetup): this function takes none.
  *
@@ -559,7 +667,8 @@ async function readAdminPassword({ bundleId, envKey, crowHome = null } = {}) {
  * @param {string|null} [o.installStamp]  the installed.json stamp the caller gated on. A run
  *                            without one refuses to save: there would be nothing to compare
  *                            installed.json against after the script ran
- * @param {object} [o.deps]      seams: runner, save, stillInstalled, adminPassword, warn
+ * @param {object} [o.deps]      seams: runner, save, stillInstalled, adminPassword, warn,
+ *                            mcpValue, hasKeychainRow, removeValue
  */
 export async function runApiToken({ bundleId, manifest, scriptDir = null, destDir = null, crowHome = process.env.CROW_HOME || null, installStamp = null, deps = {} } = {}) {
   const d = { ...defaultDeps(), ...(deps || {}) };
@@ -579,6 +688,22 @@ export async function runApiToken({ bundleId, manifest, scriptDir = null, destDi
   // never be confirmed once the script is done, so there is no point running it at all.
   if (typeof installStamp !== "string" || installStamp.trim() === "") {
     return { result: "failed", reason: NOT_CONFIRMED_REASON, log: [] };
+  }
+
+  // A two-value declaration is all or nothing, and that starts before the script runs: an
+  // extension whose settings are half-filled already is left exactly as it is rather than
+  // mixed with fresh values. The same check the boot catch-up makes, seam for seam.
+  if (Array.isArray(plan.env)) {
+    const filled = [];
+    for (const envKey of envs) {
+      if (await catchUpHasValue(bundleId, envKey, (name) => {
+        const seam = d[name];
+        if (typeof seam !== "function") throw new Error(`no ${name} seam`);
+        return seam;
+      })) filled.push(envKey);
+    }
+    if (filled.length === envs.length) return { result: "skipped-has-value", log: [] };
+    if (filled.length > 0) return { result: "failed", reason: PREFILLED_PARTIAL_REASON, log: [] };
   }
 
   // The admin password, when the manifest asks Crow to hand it in. Its absence is answered
@@ -663,13 +788,29 @@ export async function runApiToken({ bundleId, manifest, scriptDir = null, destDi
     // The token goes where a typed key would, with the policy a value Crow minted needs:
     // recorded as generated, never propagated into the gateway's own env, and never
     // replacing a value this extension already holds. Every value was accepted above, so a
-    // save can never mix a fresh value with a half-read one.
-    let saves = 0;
+    // save can never mix a fresh value with a half-read one — and this loop keeps the other
+    // half of that promise: whatever it writes, it takes back again when a later save does
+    // not land, so the run never answers "ok" over a half-saved set.
+    const saved = [];
     let mcpEnvUpdated = false;
+    let sawHasValue = false;
+    // Take back the values THIS run saved, in the order it saved them. A value that cannot be
+    // removed (or whose removal throws) means the extension may now hold some but not others:
+    // the run says exactly that instead of the reason that started it.
+    const takeBack = async (reason) => {
+      if (saved.length === 0) return answer("failed", reason);
+      let removed = true;
+      for (const envKey of saved) {
+        let gone = false;
+        try { gone = !!(await d.removeValue({ bundleId, envKey, crowHome })); } catch { gone = false; }
+        if (!gone) removed = false;
+      }
+      return answer("failed", removed ? reason : NO_TAKEBACK_REASON);
+    };
     for (const env of envs) {
-      let saved;
+      let savedResult;
       try {
-        saved = await d.save({
+        savedResult = await d.save({
           bundleId,
           manifest,
           envKey: env,
@@ -680,17 +821,26 @@ export async function runApiToken({ bundleId, manifest, scriptDir = null, destDi
           firstWriterWins: true,
         });
       } catch {
-        return answer("failed", SAVE_FAILED_REASON);
+        return await takeBack(SAVE_FAILED_REASON);
       }
-      if (saved && saved.ok) {
-        saves += 1;
-        if (saved.needs_restart) mcpEnvUpdated = true;
+      if (savedResult && savedResult.ok) {
+        saved.push(env);
+        if (savedResult.needs_restart) mcpEnvUpdated = true;
         continue;
       }
-      const refusedWith = saved && typeof saved.error === "string" ? saved.error : null;
-      if (refusedWith !== API_KEY_SAVE_REFUSALS.has_value) return answer("failed", refusedWith || SAVE_FAILED_REASON);
+      const refusedWith = savedResult && typeof savedResult.error === "string" ? savedResult.error : null;
+      if (refusedWith === API_KEY_SAVE_REFUSALS.has_value) {
+        // The extension already had THIS one. With one name that is the whole answer (nothing
+        // of ours to take back); with several it is a mixed set, settled below.
+        sawHasValue = true;
+        continue;
+      }
+      return await takeBack(refusedWith || SAVE_FAILED_REASON);
     }
-    if (saves === 0) return answer("skipped-has-value");
+    if (saved.length === 0) return answer("skipped-has-value");
+    // Some names already had a value and some were saved by this run: a half-new set is a
+    // failure, and the values this run wrote come back out.
+    if (sawHasValue) return await takeBack(MIXED_SAVE_REASON);
     return answer("ok", null, { mcpEnvUpdated });
   } catch (err) {
     // Never throws into the caller, and never echoes anything secret — the code or name only.
@@ -835,10 +985,13 @@ export function installStampOf(entry) {
  * Whether this extension already HOLDS a value for `env`: a real (non-placeholder) value in
  * its own mcp-addons.json entry, or an active keychain row for the same bundle + env. An
  * operator's pasted token is never overwritten (review round 1, C1).
+ *
+ * Used by the boot catch-up AND by runApiToken's own all-or-nothing check before a two-value
+ * script runs; a seam may answer synchronously (the catch-up's) or with a promise.
  */
 async function catchUpHasValue(id, env, seam) {
   let fromMcp = "";
-  try { fromMcp = String((await seam("mcpValue"))(id, env) ?? ""); } catch { fromMcp = ""; }
+  try { fromMcp = String((await (await seam("mcpValue"))(id, env)) ?? ""); } catch { fromMcp = ""; }
   if (fromMcp.trim() !== "" && !isPlaceholderValue(fromMcp)) return true;
   try { return !!(await (await seam("hasKeychainRow"))(id, env)); } catch { return false; }
 }
@@ -853,7 +1006,8 @@ async function catchUpHasValue(id, env, seam) {
  * Gates, all of them skips rather than failures (review round 1, C6):
  *   - the reviewed manifest declares a token block Crow may run (apiTokenPlan, not refused),
  *   - the add-on is not satellite-hosted (its tools run on another computer),
- *   - the app's admin exists for THIS install, which depends on how Crow made it:
+ *   - the app's admin exists for THIS install, which depends on how Crow made it (and
+ *     `firstAdmin.mode` has to be "crow" at all: another mode's admin is not Crow's):
  *       * `via: "setup"` — `first_admin_auto:<id>` says Crow's own admin setup returned "ok"
  *         for THIS install (`install` equals the installed entry's stamp: an install whose
  *         admin was saved without a marker is out of scope),
@@ -930,6 +1084,9 @@ async function catchUpOne(id, entry, seam) {
   const installAt = installStampOf(entry);
   if (!installAt) return null;
   const fa = manifest && manifest.firstAdmin && typeof manifest.firstAdmin === "object" ? manifest.firstAdmin : {};
+  // Only a `mode: "crow"` admin is one Crow made (firstAdminVia's rule): another mode's admin
+  // is the operator's own, so no token script of Crow's may sign in as it.
+  if (fa.mode !== "crow") return null;
   if (fa.via === "env") {
     const secretEnv = typeof fa.secretEnv === "string" ? fa.secretEnv.trim() : "";
     if (!secretEnv) return null;

@@ -27,7 +27,10 @@
  *   8. the static rules: bash, fail-fast, executable, fd 3 written exactly once and only after
  *      the proof, every external command with fd 3 closed, never `docker compose`,
  *   9. the manifest: the version bump, the token block with BOTH env names and the stdin
- *      password, both entries declared secret, and a clean contract check.
+ *      password, both entries declared secret, and a clean contract check,
+ *  10. the form body: every value is percent-encoded with bash builtins before it is piped,
+ *      so a password carrying `&`, `+`, `%`, `=` and a space reaches the app intact and is
+ *      never in an argv.
  *
  * No docker and no network here: a `docker` executable written into a temp dir sits first on
  * PATH, records every argv and the stdin it received, and replays canned answers.
@@ -56,7 +59,7 @@ const CLIENT_ID = "1_dgqk33xxf1koo4oo4cwk4s08o8gg8o4kgoo8oocwg8kogog4c";
 const CLIENT_SECRET = "1m2n3o4p5q6r7s8t9u0v1w2x3y4z5a6";
 /** An older row can carry an id with no underscore at all; that must parse too. */
 const CLIENT_ID_NO_UNDERSCORE = "3pbcwp0qzw0ss8c4k0kskw0ws0w0sw0";
-/** Crow's generated admin password is base64url; the script may rely on that in a form body. */
+/** Crow's generated admin password is base64url. The form body is percent-encoded anyway. */
 const PASSWORD = "gen-Secret_ABC123xy-z45";
 
 const TMP = mkdtempSync(join(tmpdir(), "crow-wallabag-token-"));
@@ -207,6 +210,27 @@ test("wallabag: the client id and secret come back on fd 3, one line each and no
     proof.stdin,
     new RegExp(`grant_type=password&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&username=wallabag&password=${PASSWORD}`),
   );
+});
+
+test("wallabag: every form value is percent-encoded, so & + % = and a space survive", () => {
+  // A password the OPERATOR set is not base64url: it may carry the characters a form body
+  // treats as syntax. Each value is encoded with bash builtins before it is piped, so the body
+  // reaches curl on stdin unchanged in meaning, and no value ever appears in an argv.
+  const password = "p&w+d%e=f g'q";
+  const r = run({ password: `${password}\n` });
+  assert.equal(r.status, 0, r.stderr);
+  const proof = r.calls.find((c) => c.argv.includes("/oauth/v2/token"));
+  assert.ok(proof, "the client is still proved against the token endpoint");
+  assert.equal(proof.argv.includes("--data @-"), true, "curl still reads the body from stdin");
+  assert.equal(
+    proof.stdin,
+    `grant_type=password&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&username=wallabag&password=p%26w%2Bd%25e%3Df%20g%27q`,
+    "each value is encoded, and only the script's own `&`s separate the fields",
+  );
+  assert.equal(argvText(r).includes(password), false, "the raw password is never an argument");
+  assert.equal(argvText(r).includes("p%26w%2Bd%25e%3Df%20g%27q"), false, "nor the encoded one");
+  assert.equal(String(r.stdout).includes(password), false, "and the script prints no value");
+  assert.equal(String(r.stderr).includes(password), false);
 });
 
 test("wallabag: the id's underscore is part of the id, and one without it still parses", () => {

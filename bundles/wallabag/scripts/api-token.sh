@@ -32,8 +32,8 @@
 #
 # Wallabag's public client id is `<numeric id>_<random>` (the underscore is part of it, and the
 # numeric part can be missing on older rows) and its secret is a lowercase base36 string; the
-# admin password Crow generates is base64url, so all three are safe inside a form body without
-# escaping.
+# admin password Crow generates is base64url. None of that is a guarantee about the FORM BODY
+# below (an operator can set their own password), so every value is percent-encoded first.
 # The values never reach a host argument or an environment variable: they travel in the
 # script's own variables and on pipes. Each docker call runs with fd 3 closed (`3>&-`), and
 # the single write at the end is the only thing fd 3 ever gets.
@@ -50,6 +50,29 @@ ADMIN_USER="${CROW_FIRST_ADMIN_USER-wallabag}"
 
 say() { printf '%s\n' "$1"; }
 die() { printf '%s\n' "$1" >&2; exit "${2:-1}"; }
+
+# ── form-body encoding, with bash builtins only ────────────────────────────────────
+# `urlencode VALUE` leaves the percent-encoded value in URLENC. Nothing is spawned: `printf`
+# is a builtin, no command substitution runs, and no external program ever receives the value
+# (not as an argument, not in an environment variable). Every byte outside RFC 3986's
+# unreserved set becomes %XX, so `&`, `+`, `%`, `=` and a space cannot change the form body.
+URLENC=""
+urlencode() {
+  local LC_ALL=C s="$1" out="" c hex i
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      [A-Za-z0-9.~_-]) out+="$c" ;;
+      # A lone quote reads as an empty character constant to printf's `'c` form.
+      "'") out+="%27" ;;
+      *)
+        printf -v hex '%%%02X' "'$c"
+        out+="$hex"
+        ;;
+    esac
+  done
+  URLENC="$out"
+}
 
 # The PHP program Crow runs inside the container. It is a sibling of this script, in Crow's
 # own copy of the bundle (the cwd is the INSTALLED bundle dir, so $0 — not `.` — locates it).
@@ -113,9 +136,14 @@ SECRET="$(printf '%s\n' "$client_out" 3>&- | sed -n 's/^CLIENT=[A-Za-z0-9_]\{1,\
 
 # ── prove it against the app's own token endpoint ──────────────────────────────────
 # The form body (client id, secret, account, password) goes in on stdin (`--data @-`), never
-# in an argument. A 200 with an access token is Wallabag saying the client works; a wrong
-# secret answers 400, which curl reports as a failure.
-if ! printf 'grant_type=password&client_id=%s&client_secret=%s&username=%s&password=%s' "$ID" "$SECRET" "$ADMIN_USER" "$PW" 3>&- |
+# in an argument, and every value is percent-encoded first (see urlencode). A 200 with an
+# access token is Wallabag saying the client works; a wrong secret answers 400, which curl
+# reports as a failure.
+urlencode "$ID"; FORM_ID="$URLENC"
+urlencode "$SECRET"; FORM_SECRET="$URLENC"
+urlencode "$ADMIN_USER"; FORM_USER="$URLENC"
+urlencode "$PW"; FORM_PW="$URLENC"
+if ! printf 'grant_type=password&client_id=%s&client_secret=%s&username=%s&password=%s' "$FORM_ID" "$FORM_SECRET" "$FORM_USER" "$FORM_PW" 3>&- |
   docker exec -i "$CONTAINER" curl -fsS -o /dev/null --data @- http://127.0.0.1:80/oauth/v2/token >/dev/null 2>&1 3>&-; then
   die "Wallabag did not accept the OAuth client Crow created; nothing was saved." 5
 fi
