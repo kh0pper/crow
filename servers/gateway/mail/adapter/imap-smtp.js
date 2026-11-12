@@ -39,8 +39,22 @@
  * from the SELECT, then from `STATUS (UIDNEXT)`, and only then from the highest UID seen, because the
  * sync engine advances `highest_uid` to `uidNext - 1`.
  *
- * `saveDraft` and `send` are declared and refuse until the SMTP task fills them in, so `assertAdapter`
- * accepts this implementation and the contract can run with those two steps skipped.
+ * `send` is the one path by which a message leaves Crow, and it is the strictest one. `validateOutgoing`
+ * runs before a transport exists — a refused message therefore opens no socket — and the nodemailer
+ * message is built from its returned fields and from nothing else: no caller-supplied header map, no
+ * file or URL source, no attachment key beyond a filename, a media type and the bytes, one transport
+ * kind (never a pooled one), `disableFileAccess` and `disableUrlAccess` both closed, `logger` and
+ * `debug` both off. nodemailer derives the SMTP recipient list from the To/Cc/Bcc headers it is handed
+ * and leaves Bcc out of the bytes it transmits, so a blind recipient is delivered without being
+ * published. The Message-ID is generated here as `<random@sender-domain>`, with the domain taken from
+ * the From address, and handed to nodemailer as the message's id, so the copy Crow stores and the copy
+ * the server relays carry the same one. TLS follows the account's SMTP security exactly as the IMAP
+ * side follows its own, a recipient the server refuses comes back in `rejected` instead of as an
+ * error, and every failure is a fixed sentence through the same classifier.
+ *
+ * `saveDraft` appends the caller's bytes to the `\Drafts` folder over the read connection, inside the
+ * command deadline and its error wrapping, with `\Draft` and `\Seen` set; a mailbox without a
+ * `\Drafts` folder is NOT_FOUND rather than a note filed in some folder Crow chose by name.
  *
  * @typedef {import("./interface.js").AdapterFolder} AdapterFolder
  * @typedef {import("./interface.js").AdapterItem} AdapterItem
@@ -50,10 +64,12 @@
  * @typedef {import("./interface.js").AdapterSendResult} AdapterSendResult
  * @typedef {import("./interface.js").OutgoingMessage} OutgoingMessage
  */
+import { randomBytes } from "node:crypto";
 import { ImapFlow } from "imapflow";
+import nodemailer from "nodemailer";
 import { MailError, toMailError } from "../errors.js";
 import { authFor } from "../credentials.js";
-import { assertAdapter } from "./interface.js";
+import { assertAdapter, validateOutgoing } from "./interface.js";
 import { MAX_RAW_BYTES } from "../parse.js";
 
 /** The wall-clock budget per phase, in milliseconds. */
@@ -81,6 +97,18 @@ const SECURITIES = new Set(["ssl", "starttls", "none"]);
 
 /** The only hosts a cleartext (`security: "none"`) sign-in may reach: this machine, and only it. */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "[::1]", "localhost"]);
+
+/**
+ * The special-use flag that names the drafts mailbox, lower-cased because RFC 6154 flags are
+ * case-insensitive, and the flags a saved draft carries.
+ */
+const DRAFTS_SPECIAL_USE = "\\drafts";
+const DRAFT_FLAGS = Object.freeze(["\\Draft", "\\Seen"]);
+
+/** A domain a Message-ID can carry: what is left of the From domain once nothing else survives. */
+const MESSAGE_ID_DOMAIN_STRIP = /[^A-Za-z0-9.-]/g;
+const MESSAGE_ID_FALLBACK_DOMAIN = "localhost";
+const MESSAGE_ID_MAX_DOMAIN = 253;
 
 /** Headroom above `maxRawBytes` for one IMAP literal, so a message at the cap still fits its framing. */
 const LITERAL_HEADROOM = 1024 * 1024;
@@ -255,6 +283,125 @@ function toItem(message) {
   };
 }
 
+/**
+ * One endpoint of the account row (`imap` or `smtp`), checked here rather than trusted. The account
+ * store refuses a malformed host, port or security value on the way in, and this checks again because
+ * the same object can arrive from anywhere. A cleartext connection is loopback-only for the same reason
+ * on both: there is no wire to listen on when both ends are this machine.
+ *
+ * @param {object} account a mail_accounts row
+ * @param {"imap"|"smtp"} kind
+ * @returns {{host: string, port: number, security: string}}
+ */
+function endpointFor(account, kind) {
+  const endpoint = account == null ? null : account[kind];
+  if (endpoint == null || typeof endpoint !== "object") throw new MailError("BAD_INPUT", kind);
+  const { host, port, security } = endpoint;
+  if (typeof host !== "string" || !host) throw new MailError("BAD_INPUT", `${kind}_host`);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new MailError("BAD_INPUT", `${kind}_port`);
+  if (!SECURITIES.has(security)) throw new MailError("BAD_INPUT", `${kind}_security`);
+  if (security === "none" && !LOOPBACK_HOSTS.has(host.trim().toLowerCase())) {
+    // No TLS here, so the password would travel in the clear: only a loopback address, where there is
+    // no wire to listen on, may be reached this way.
+    throw new MailError("BAD_INPUT", `${kind}_security`);
+  }
+  return { host, port, security };
+}
+
+/**
+ * A Message-ID this adapter owns: random local part, domain from the From address, both reduced to what
+ * an id may carry. It is fixed here and handed to nodemailer as the message's id so the stored copy and
+ * the transmitted copy agree; nothing the caller sends can set it.
+ */
+function messageIdFor(fromAddress) {
+  const at = String(fromAddress).lastIndexOf("@");
+  const domain = at < 0 ? "" : String(fromAddress).slice(at + 1).toLowerCase()
+    .replace(MESSAGE_ID_DOMAIN_STRIP, "");
+  const host = domain && domain.length <= MESSAGE_ID_MAX_DOMAIN ? domain : MESSAGE_ID_FALLBACK_DOMAIN;
+  return `<${randomBytes(16).toString("hex")}@${host}>`;
+}
+
+/** The addresses nodemailer reports back, as a list of clean strings and nothing else. */
+function addressListOf(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry) => typeof entry === "string" && entry !== "");
+}
+
+/** One validated address as nodemailer wants it: a display name when there is one, else the address. */
+function smtpAddress(entry) {
+  return entry.name ? { name: entry.name, address: entry.address } : { address: entry.address };
+}
+
+/**
+ * An attachment's bytes as nodemailer takes them: the string as it is, or a Buffer over the same memory.
+ * Nothing else of the caller's attachment object travels — no path, no URL, no header map — which is
+ * also why the two access flags on the transport are closed rather than merely unused.
+ */
+function contentBytes(content) {
+  if (typeof content === "string") return content;
+  if (content instanceof ArrayBuffer) return Buffer.from(content);
+  return Buffer.from(content.buffer, content.byteOffset, content.byteLength);
+}
+
+/**
+ * The message handed to nodemailer, built from `validateOutgoing`'s output field by field. Every key
+ * below is one of those fields, plus the adapter's own `messageId`; there is no way for a header map, a
+ * recipient list off the headers, or any other transport option to arrive from the caller.
+ */
+function smtpMessage(outgoing, messageId) {
+  const message = {
+    messageId,
+    from: smtpAddress(outgoing.from),
+    to: outgoing.to.map(smtpAddress),
+    subject: outgoing.subject,
+    text: outgoing.text,
+  };
+  // A Bcc recipient is delivered and never written into the headers nodemailer emits.
+  if (outgoing.cc.length) message.cc = outgoing.cc.map(smtpAddress);
+  if (outgoing.bcc.length) message.bcc = outgoing.bcc.map(smtpAddress);
+  if (outgoing.html != null) message.html = outgoing.html;
+  if (outgoing.inReplyTo) message.inReplyTo = outgoing.inReplyTo;
+  if (outgoing.references.length) message.references = [...outgoing.references];
+  if (outgoing.attachments.length) {
+    message.attachments = outgoing.attachments.map((attachment) => ({
+      filename: attachment.filename,
+      contentType: attachment.contentType,
+      content: contentBytes(attachment.content),
+    }));
+  }
+  return message;
+}
+
+/**
+ * The nodemailer transport for one account. TLS is fixed here exactly as it is on the IMAP side: `ssl`
+ * is TLS from the first byte, `starttls` must upgrade or the send fails, `none` is loopback-only
+ * cleartext, and `tls.rejectUnauthorized` is `true` — no account field can turn it off. Nothing is
+ * logged (`logger` and `debug` both off), the transport is never pooled, file and URL sources are
+ * closed, and every phase is bounded by the adapter's own timeouts.
+ */
+function smtpTransportOptions(endpoint, auth, timeouts) {
+  const options = {
+    host: endpoint.host,
+    port: endpoint.port,
+    secure: endpoint.security === "ssl",
+    auth: auth.accessToken
+      ? { type: "OAuth2", user: auth.user, accessToken: auth.accessToken }
+      : { user: auth.user, pass: auth.pass },
+    logger: false,
+    debug: false,
+    disableFileAccess: true,
+    disableUrlAccess: true,
+    pool: false,
+    connectionTimeout: timeouts.connectMs,
+    greetingTimeout: timeouts.greetingMs,
+    socketTimeout: timeouts.socketMs,
+    tls: { rejectUnauthorized: true },
+  };
+  if (endpoint.security === "starttls") options.requireTLS = true;
+  if (endpoint.security === "none") options.ignoreTLS = true;
+  return options;
+}
+
 function normalizeListOptions(options) {
   if (options == null) return normalizeListOptions({});
   if (typeof options !== "object") throw new MailError("BAD_INPUT", "options");
@@ -380,17 +527,7 @@ export function createImapSmtpAdapter(options = {}) {
    * loopback, before a socket is opened.
    */
   function clientOptions(auth) {
-    const endpoint = account.imap;
-    if (endpoint == null || typeof endpoint !== "object") throw new MailError("BAD_INPUT", "imap");
-    const { host, port, security } = endpoint;
-    if (typeof host !== "string" || !host) throw new MailError("BAD_INPUT", "imap_host");
-    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new MailError("BAD_INPUT", "imap_port");
-    if (!SECURITIES.has(security)) throw new MailError("BAD_INPUT", "imap_security");
-    if (security === "none" && !LOOPBACK_HOSTS.has(host.trim().toLowerCase())) {
-      // No TLS here, so the password would travel in the clear: only a loopback address, where there
-      // is no wire to listen on, may be reached this way.
-      throw new MailError("BAD_INPUT", "imap_security");
-    }
+    const { host, port, security } = endpointFor(account, "imap");
 
     // The parser's own bounds, so a server cannot make Crow buffer what Crow would never keep: one
     // literal sits at the raw cap plus the framing headroom, one response total sits above the
@@ -855,14 +992,99 @@ export function createImapSmtpAdapter(options = {}) {
     });
   }
 
-  /** Task 13 fills this in: the SMTP task appends the draft to the \Drafts folder. */
-  async function saveDraft() {
-    throw new MailError("PROTOCOL", "not_implemented");
+  /**
+   * Append a draft to the mailbox the server marks `\Drafts`, with `\Draft` and `\Seen` set. The
+   * folder is found by its special-use flag and never by its name, so a server that calls it
+   * "Entwürfe" still works, and a server with no such folder is NOT_FOUND rather than a note filed
+   * somewhere Crow picked. The bytes travel over the read connection inside `runCommand`, so the
+   * append carries the command deadline and the same error wrapping as every other command.
+   *
+   * `uid` is the UID the server reported for the appended message, or `null` when it reported none
+   * (a server without UIDPLUS); the draft is stored either way.
+   *
+   * @param {Buffer|string} raw the RFC 822 message
+   * @returns {Promise<AdapterDraftRef>}
+   */
+  async function saveDraft(raw) {
+    let bytes;
+    if (Buffer.isBuffer(raw)) bytes = raw;
+    else if (typeof raw === "string") bytes = Buffer.from(raw, "utf8");
+    else throw new MailError("BAD_INPUT", "draft");
+    if (bytes.length === 0) throw new MailError("BAD_INPUT", "draft");
+    if (bytes.length > rawLimit) throw new MailError("TOO_LARGE", "draft");
+
+    return runCommand(async (client) => {
+      const folders = await listFolders();
+      const drafts = folders.find((folder) => typeof folder.specialUse === "string"
+        && folder.specialUse.trim().toLowerCase() === DRAFTS_SPECIAL_USE);
+      if (!drafts) throw new MailError("NOT_FOUND", "drafts");
+      const response = await client.append(drafts.path, bytes, [...DRAFT_FLAGS]);
+      const uid = Number(response && response.uid);
+      return {
+        folderPath: drafts.path,
+        uid: Number.isSafeInteger(uid) && uid > 0 ? uid : null,
+      };
+    });
   }
 
-  /** Task 13 fills this in: the SMTP task builds and sends the message. */
-  async function send() {
-    throw new MailError("PROTOCOL", "not_implemented");
+  /**
+   * Send one message.
+   *
+   * `validateOutgoing` runs first and runs whole: a message with a key Crow does not send, an address
+   * that is not one clean addr-spec, a message id or media type carrying a control character, or a
+   * header value that could add a line is refused before a transport exists, so nothing is opened for
+   * it. Everything after that is built from the validated fields (see `smtpMessage`).
+   *
+   * The recipient list nodemailer reports comes back in two lists, so a server that refuses one
+   * recipient of several is reported to the caller rather than thrown; a send whose every recipient is
+   * refused is a failure with a fixed sentence, because nothing was transmitted for the lists to
+   * describe. A failure of any other kind is a fixed sentence through the shared classifier too: no
+   * server text, no command line, no credential and no address travels with it. Each phase of the
+   * exchange is bounded by the adapter's own timeouts (connect, greeting and socket; `commandMs`
+   * budgets one IMAP command and has no SMTP counterpart here). The transport is closed in `finally` —
+   * it is one connection for one message, never a pool.
+   *
+   * @param {OutgoingMessage} message
+   * @returns {Promise<AdapterSendResult>}
+   */
+  async function send(message) {
+    const outgoing = validateOutgoing(message);
+    const endpoint = endpointFor(account, "smtp");
+    const messageId = messageIdFor(outgoing.from.address);
+    const payload = smtpMessage(outgoing, messageId);
+
+    let transporter = null;
+    try {
+      const auth = await authFor(account, {
+        credentials,
+        tokenProvider,
+        rotation: typeof onTokenRotated === "function"
+          ? async (accountId, { refreshToken } = {}) => { await onTokenRotated(refreshToken); }
+          : undefined,
+      });
+      transporter = nodemailer.createTransport(smtpTransportOptions(endpoint, auth, timeouts));
+      if (transporter == null || typeof transporter.sendMail !== "function") {
+        throw new MailError("PROTOCOL", "transport");
+      }
+      const info = await transporter.sendMail(payload);
+      return {
+        // The id handed to nodemailer as the Message-ID header, so the stored copy and the sent copy
+        // carry the same one.
+        messageId,
+        accepted: addressListOf(info && info.accepted),
+        rejected: addressListOf(info && info.rejected),
+      };
+    } catch (err) {
+      throw asMailError(err);
+    } finally {
+      if (transporter) {
+        try {
+          transporter.close();
+        } catch {
+          // the connection is already gone; there is nothing left to close
+        }
+      }
+    }
   }
 
   /**

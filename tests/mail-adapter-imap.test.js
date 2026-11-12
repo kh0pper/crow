@@ -9,7 +9,7 @@ import net from "node:net";
 import { readFileSync } from "node:fs";
 import { ImapFlow } from "imapflow";
 import {
-  createFakeImapServer, makeRaw, FAKE_USER, FAKE_PASSWORD,
+  createFakeImapServer, createFakeSmtpServer, makeRaw, FAKE_USER, FAKE_PASSWORD,
 } from "./fixtures/fake-mail-server.mjs";
 import { runAdapterContract } from "./fixtures/mail-adapter-contract.mjs";
 import { createImapSmtpAdapter } from "../servers/gateway/mail/adapter/imap-smtp.js";
@@ -26,6 +26,12 @@ after(async () => {
 
 async function startFake(options) {
   const fake = await createFakeImapServer(options);
+  fakes.add(fake);
+  return fake;
+}
+
+async function startSmtpFake(options) {
+  const fake = await createFakeSmtpServer(options);
   fakes.add(fake);
   return fake;
 }
@@ -234,22 +240,24 @@ function captureConsole() {
 const FIXTURE_SOURCE = readFileSync(new URL("./fixtures/fake-mail-server.mjs", import.meta.url), "utf8");
 const HAS_OMIT_UIDNEXT = FIXTURE_SOURCE.includes("omitUidNext");
 
-const CONTRACT_SKIP = ["saveDraft", "send"];
+const CONTRACT_SKIP = [];
 if (!HAS_OMIT_UIDNEXT) CONTRACT_SKIP.push("a listing that omits UIDNEXT still yields a uidNext");
-// RFC 3501's INTERNALDATE is `DD-Mon-YYYY HH:MM:SS +0000` and carries no fractional seconds, so two
-// messages whose internal dates are one millisecond apart come back from the server identical. The
-// contract step that separates exactly that pair cannot hold for any IMAP implementation, so it is
-// skipped here; the same rule has a one-second-resolution case in "list bounds the window with
-// sinceDate ..." below, which is the finest bound a real server can carry.
-CONTRACT_SKIP.push("sinceDate is an exact millisecond bound");
 
 runAdapterContract(async (opts = {}) => {
   const fake = await startFake(opts.omitUidNext ? { omitUidNext: true } : {});
-  const adapter = adapterFor(fake);
+  // `send` needs a server that speaks SMTP, so one fake SMTP server stands behind the account's smtp
+  // endpoint for the two contract steps that send a message.
+  const smtp = await startSmtpFake();
+  const adapter = createImapSmtpAdapter({
+    account: accountFor(fake, { smtp: { host: smtp.host, port: smtp.port, security: "none" } }),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts: FAST,
+  });
   const close = adapter.close.bind(adapter);
   adapter.close = async () => {
     await close();
     await stopFake(fake);
+    await stopFake(smtp);
   };
   await adapter.connect();
   return {
@@ -547,27 +555,7 @@ test("get reports an oversized message with its metadata and issues no body fetc
   }
 });
 
-/* ------------------------------------------------------------------- the shims for Task 13 */
-
-test("saveDraft and send exist as methods and refuse until Task 13 fills them in", async () => {
-  const fake = await startFake();
-  const adapter = adapterFor(fake);
-  try {
-    for (const method of ["saveDraft", "send"]) {
-      const err = await rejectionOf(adapter[method]({}));
-      assert.ok(err instanceof MailError, `${method} throws a MailError`);
-      assert.equal(err.code, "PROTOCOL");
-      assert.equal(err.detail, "not_implemented");
-      assert.equal(err.message, MAIL_ERROR_TEXT.PROTOCOL);
-    }
-    assert.equal(fake.connectionCount(), 0, "neither method opens a connection");
-  } finally {
-    await adapter.close();
-    await stopFake(fake);
-  }
-});
-
-/* ------------------------------------------------------------------------- list/get/search */
+/* ------------------------------------------------- the contract now covers send and saveDraft */
 
 test("list bounds the window with sinceDate, afterUid, fromUid and beforeUid", async () => {
   const fake = await startFake();
