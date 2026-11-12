@@ -149,6 +149,43 @@ Every agent carries a permission policy that governs what it may do without aski
 
 These rules are enforced on the underlying action, not just the surface tool name. If an agent tries to reach a protected action through a general-purpose tool wrapper, the policy still applies. On the voice path, the same gate runs before any tool executes, and a blocked action is spoken back to you.
 
+## Git access
+
+An agent can work on git repositories with its own SSH key. The key belongs to that one agent: you add it as a deploy key on the repos you choose, and the agent can do nothing on the forge beyond those repos. It is off by default and you turn it on per agent, on the Safety tab.
+
+**Read this first.** All agents on one Crow run as the same account. In the default sandbox each can read and change the whole filesystem and Crow's database, so one agent can plant a git hook or a repo setting in another agent's workspace, or change its instructions, and get that agent to use its key. Treat a git-enabled agent's key as reachable by every agent on the Crow. The key only works on the repos you add it to, so the blast radius is those repos and nothing else. This is a known limitation of this version.
+
+What turning it on gives the agent:
+
+- Commits made as `<agent name> (Crow bot)`, with the address `noreply+<agent id>@crow-bot.invalid`. That domain can never receive mail, and it never names your machine, your Crow or your network.
+- A plain `git` on the command line, working against `github.com` out of the box and against any other git host you confirm.
+- Its own key files in Crow's secrets folder, which the agent's sandbox can read but not change, and which no other part of Crow hands out.
+
+What it does not give the agent: any access to your own SSH keys, your `~/.ssh` config, an ssh-agent, or a git host you have not trusted. The agent's git runs with an empty ssh config, no agent and its own known-hosts file.
+
+### Add the key to a repo
+
+1. Turn on **Git access** on the agent's **Safety** tab. The card shows the agent's public key and its fingerprint.
+2. Copy the public key.
+3. On the forge, open the repo's settings and add it as a **deploy key** (GitHub: repo → **Settings** → **Deploy keys** → **Add deploy key**; Gitea: repo → **Settings** → **Deploy Keys** → **Add key**).
+4. Tick **Allow write access** only if the agent should push. Leave it unticked for a read-only clone.
+5. Repeat for each repo the agent may use. The same key works on any number of them; each repo is a separate decision.
+6. Press **Test connection** on the card to check that the forge accepts the key.
+
+### Hosts
+
+`github.com` works out of the box: Crow carries GitHub's published host keys, pinned, and refuses any other key for that host. Your own git server (a Gitea or Forgejo instance, a company GitLab, a machine on your network) needs one confirmation first. Type the host name, or the name and port, into **Add a host**, then check the fingerprint Crow shows against the server's own host key (`ssh-keygen -lf` on the server's host key file) and press **Confirm this key**. Crow then refuses any other key for that host. Removing a host forgets it, so the next connection is refused until you confirm again.
+
+### What it cannot do
+
+- **Contain tier: none.** An agent that runs in the contain tier gets no git access in this version; the card says so instead of offering the switch.
+- **Not every host can.** Git access needs the full bubblewrap sandbox with its own process space, a bubblewrap new enough to bind the key folder read-only, and `openssh-client` installed. If any of that is missing the card names what is missing and stays off.
+- **The agent can read its own key.** That is what using it means: a prompt injection that reaches a git-enabled agent can use the key for as long as it is on. Turn it off when you do not need it.
+
+### Turning it off, deleting the agent
+
+**Turn off git access** deletes the key from this Crow and shows you its fingerprint. The deploy key stays on the forge until you remove it there: open each repo's deploy keys and delete the entry with that fingerprint. Deleting the agent does the same thing and tells you the fingerprint on the page you land on, so remove the deploy key then as well. If Crow could not remove the key folder, the page names the folder and Crow tries again at the next restart; delete it by hand if you want it gone sooner.
+
 ## Opt-in self-authoring
 
 An agent can help write its own skills, but only if you turn it on under **Advanced → Learning new skills**. It is **off by default**; you can let it suggest skills for your approval, or learn on its own with guardrails (an agent that can send email or run commands only ever suggests).

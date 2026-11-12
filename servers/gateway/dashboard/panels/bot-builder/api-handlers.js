@@ -13,6 +13,7 @@ import {
 import { normalizeGatewayFields, missingGatewayFields } from "./gateway-fields.js";
 import { handleWizardCreate } from "./wizard.js";
 import { handleDeleteConfirm } from "./delete-bot.js";
+import { handleGitAction } from "./git-access.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
 import { regenerateBotMcp } from "../bot-mcp-regen.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
@@ -252,7 +253,15 @@ export async function handleBotBuilderPost(req, res, { db }) {
 
   // ---- delete a bot (Item 5 PR2, spec §D5) — PRG; confirm page is a GET ----
   if (action === "delete_confirm") {
-    return handleDeleteConfirm(req, res, { db });
+    return handleDeleteConfirm(req, res, { db, lang: reqLang(req) });
+  }
+
+  // ---- per-bot git access (Safety tab): its own owner-only POSTs ----
+  // Every git_* action is ONE action here; git-access.js reads the bot row, the
+  // key dir on disk and this process's facts itself, and never writes the
+  // definition. Dispatched before the tab saves so "git_" never collides.
+  if (typeof action === "string" && action.startsWith("git_")) {
+    return handleGitAction(req, res, { db });
   }
 
   // Legacy "sandbox" (never implemented; reads as deny): the owner's one-click

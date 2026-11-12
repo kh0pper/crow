@@ -83,6 +83,20 @@ export function fingerprintOf(keyB64) {
   return "SHA256:" + createHash("sha256").update(blob).digest("base64").replace(/=+$/, "");
 }
 
+/**
+ * The exact shape fingerprintOf() produces: `SHA256:` + 43 base64 characters
+ * (sha256 is 32 bytes, which is 43 unpadded base64 characters). Shared by
+ * every place a fingerprint arrives from OUTSIDE and is about to be rendered or
+ * put into a redirect — a scan result, a form field, a query string — so one
+ * rule decides what a fingerprint may look like.
+ */
+export const FINGERPRINT_RE = /^SHA256:[A-Za-z0-9+/]{43}$/;
+
+/** True when `value` is a fingerprint of exactly that shape. */
+export function isFingerprint(value) {
+  return typeof value === "string" && FINGERPRINT_RE.test(value);
+}
+
 /** A 4-octet dotted quad, each octet 0-255, no leading zeros; else null. */
 function ipv4(s) {
   const parts = s.split(".");

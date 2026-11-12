@@ -15,6 +15,7 @@ import {
   instanceContainment, LEVEL_CONTAINED, LEVEL_PARTLY, LEVEL_NOT, OPEN_DATA_DBS,
 } from "../../../../../scripts/pi-bots/containment-status.mjs";
 import { containmentBots, currentProbe, LEVEL_KEY } from "../../settings/sections/bot-runtime.js";
+import { renderGitAccessCard } from "./git-access.js";
 
 export async function renderSafety(ctx) {
   const { db, def, lang, hidden } = ctx;
@@ -102,10 +103,14 @@ export async function renderSafety(ctx) {
     `<input type="hidden" name="confirm_offered" value="${escapeHtml(JSON.stringify(tools.map((x) => x.key)))}">`,
     t("botbuilder.sfConfirmLead", lang));
 
+  // The Git access card is its OWN section with its OWN forms: nested forms are
+  // invalid, so it is appended AFTER this form's closing tag (git-access.js).
+  const gitCard = await renderGitAccessCard(ctx);
+
   return `<form method="POST" class="btb-form" id="btb-safety-form">${hidden("safety")}` +
     email + folders + satCard + ask +
     `<p class="btb-hint" data-testid="safety-summary">${escapeHtml(t(level.enforced ? "botbuilder.sfSummaryContained" : "botbuilder.sfSummaryNotContained", lang))}</p>` +
-    actionBar(`<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.sfSave", lang))}</button>`) + `</form>`;
+    actionBar(`<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.sfSave", lang))}</button>`) + `</form>` + gitCard;
 }
 
 /**
