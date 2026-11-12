@@ -4,10 +4,22 @@
  * a time as the player goes, and its ledger row only ever grows.
  *
  * WHAT A CARD IS. `cardKey` is the FULL wallet key of one card: `<day>:<slot>`
- * for one of the day's own cards, later `<day>:x:<entryId>:<startedAtSeconds>`
- * for an extra beyond them. This module treats it as an opaque string and keys
- * the `ramble_wallet` rows by exactly it, so two cards of one day never share a
- * row. Building the extra shape and rewriting a stale day belong to the caller.
+ * for one of the day's own cards, `<day>:x:<entryId>:<startedAtSeconds>` for an
+ * extra beyond them (`extraCardKey`). This module treats it as an opaque string,
+ * so two cards of one day never share a row. Because an extra is stamped with
+ * the second it started, two instances that each run one build different keys
+ * and a MAX merge can never hide one; `extrasCount` counts a day's extras
+ * without any stored counter.
+ *
+ * ⚠ THE DAY RULE. A post's `day` is not trusted: it goes through `capDayKey`
+ * (indoor-cap.js), which keeps only today or yesterday and credits anything
+ * else to today — otherwise every past date would open a fresh daily budget.
+ * When that rewritten day differs from the card key's own first ten
+ * characters, the WALLET keys (the `movecard` row and the `movemin` day) use
+ * the rewritten day and keep the rest of the key (`d + cardKey.slice(10)`); the
+ * start record, the best record and the in-process queue keep the key as it
+ * was given, so the session a start opened is still found and a retry still
+ * serializes behind it. Every budget claim uses the rewritten day.
  *
  * THREE WRITES, THREE PURPOSES.
  *   local.moves.started.<cardKey>   JSON { startedAt, plannedSeconds } — written
@@ -23,11 +35,12 @@
  *
  * ⚠ EVERY ramble_wallet ROW WRITTEN HERE IS A CONSTANT OR GROWS, because
  * applyRambleWallet merges a key conflict with MAX(delta) (instance-sync.js).
- *   movecard  key = the card key, delta = the Health this card has paid in all.
- *             Grown by compare-and-swap only, by the increase over what it
- *             already holds.
- *   movemin   key = the card key's day (its first ten characters), delta = the
- *             whole minutes accepted that day across its cards. Grown by the
+ *   movecard  key = the card key (with the day rule's rewrite), delta = the
+ *             Health this card has paid in all. Grown by compare-and-swap only,
+ *             by the increase over what it already holds.
+ *   movemin   key = the day the pay landed on (the card key's first ten
+ *             characters, after the day rule), delta = the whole minutes
+ *             accepted that day across its cards. Grown by the
  *             increase in `floor(accepted / 60)` when a card's high-water
  *             minute rises. A lost compare-and-swap there is IGNORED: it counts
  *             minutes, it does not pay, so it must never hold a pay back.
@@ -47,7 +60,7 @@
 import { createRequire } from "node:module";
 import { casDelta, rowDelta } from "../steps.js";
 import { feed as petFeed, petState } from "../pet.js";
-import { claimCapped, claimIndoor } from "./indoor-cap.js";
+import { capDayKey, claimCapped, claimIndoor } from "./indoor-cap.js";
 import {
   chunkPoints, entryIsOutdoor, MovesInputError, MOVE_OUTDOOR_KIND, OUTDOOR_DAILY_CAP,
 } from "./ledger.js";
@@ -64,7 +77,7 @@ function sessionApi() {
 
 /** Wallet kind: key = the card key, delta = the Health this card has paid. Grows. */
 export const MOVE_CARD_KIND = "movecard";
-/** Wallet kind: key = the card key's day, delta = whole minutes accepted that day. Grows. */
+/** Wallet kind: key = the day the pay landed on, delta = whole minutes accepted that day. Grows. */
 export const MOVE_MIN_KIND = "movemin";
 
 /** `local.` prefixes: this instance's own session bookkeeping, never replicated. */
@@ -74,8 +87,11 @@ const BEST_PREFIX = "local.moves.best.";
 /** A card's accepted seconds may run this far ahead of the wall clock. */
 const WALL_SLACK = 1.1;
 
-/** The longest card key the ledger accepts. */
-const CARD_KEY_MAX = 80;
+/** The longest card key the ledger accepts (an extra's shape fits with room). */
+const CARD_KEY_MAX = 96;
+
+/** A well-formed day, the only thing `extrasCount` will put in a LIKE. */
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function asAt(now) {
   return Number.isFinite(Number(now)) ? Number(now) : Date.now();
@@ -87,6 +103,35 @@ function requireCardKey(cardKey) {
     throw new MovesInputError(`cardKey must be a non-empty string of at most ${CARD_KEY_MAX} characters`);
   }
   return cardKey;
+}
+
+/* --------------------------------------------------------------- card keys */
+
+/**
+ * The wallet key of an extra card beyond the day's own: `entryId` and the
+ * second the session started. The start second is what makes the key unique —
+ * there is no counter to read, so two boxes never mint the same one.
+ * `startedAt` is in ms, as every `now` in this bundle is.
+ */
+export function extraCardKey(day, entryId, startedAt) {
+  return `${day}:x:${entryId}:${Math.floor(startedAt / 1000)}`;
+}
+
+/**
+ * How many extra cards the day has paid: the count of `movecard` rows whose key
+ * carries the day's extra prefix. Nothing stores that number. A day that is not
+ * `YYYY-MM-DD` counts 0 rather than reaching SQL with it — the day is the only
+ * part of the LIKE pattern that comes from a caller.
+ */
+export async function extrasCount(db, day) {
+  if (typeof day !== "string" || !DAY_RE.test(day)) return 0;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT count(*) AS n FROM ramble_wallet WHERE kind = ? AND key LIKE ?",
+      args: [MOVE_CARD_KIND, `${day}:x:%`],
+    });
+    return Math.max(0, Number(rows[0]?.n) || 0);
+  } catch { return 0; }
 }
 
 /** A JSON setting, or null when absent/unreadable/junk. */
@@ -122,10 +167,10 @@ async function raiseSetting(db, key, value, current) {
  * or another process) leaves the count short, which under-counts and never
  * blocks a pay. Nothing here pays anything.
  */
-async function growMinutes(db, cardKey, fromSeconds, toSeconds, { now, emit }) {
+async function growMinutes(db, walletKey, fromSeconds, toSeconds, { now, emit }) {
   const increase = Math.floor(toSeconds / 60) - Math.floor(fromSeconds / 60);
   if (!(increase > 0)) return;
-  const day = cardKey.slice(0, 10);
+  const day = walletKey.slice(0, 10);
   try {
     const held = await rowDelta(db, MOVE_MIN_KIND, day);
     const from = held === null ? null : Math.max(0, Number(held) || 0);
@@ -144,8 +189,9 @@ async function growMinutes(db, cardKey, fromSeconds, toSeconds, { now, emit }) {
  *
  * `plannedSeconds` is the length the compiled session gives this chunk, or null
  * when the caller has none (then `isChunkDone` can never be true for the card).
- * `day` is the card's day, kept in the signature for the day rule the caller
- * owns; the record itself is keyed by the card key alone.
+ * `day` is the card's day, unused here: the record is keyed by the card key
+ * alone, and the day rule lives in `recordProgress`, so a retried start of a
+ * stale-day card still lands under the key the client will post with.
  */
 export async function startChunk(db, { cardKey, plannedSeconds = null, now = Date.now() } = {}) {
   const key = requireCardKey(cardKey);
@@ -178,6 +224,11 @@ export async function startChunk(db, { cardKey, plannedSeconds = null, now = Dat
  * added to the bird, `total` what the card's row now holds, `done` whether the
  * card has passed its half-way mark, `capped` whether a daily budget cut the
  * claim short.
+ *
+ * `day` is the day the caller read off the card key; `capDayKey` decides which
+ * day actually gets paid (see the header). Both ids — the one the session is
+ * keyed by and the one the wallet is keyed by — are settled here, before the
+ * queue, so every write inside it agrees.
  */
 export async function recordProgress(db, {
   day, cardKey, entry, plannedSeconds, activeSeconds, now = Date.now(), emit,
@@ -188,14 +239,19 @@ export async function recordProgress(db, {
   if (typeof activeSeconds !== "number" || !Number.isFinite(active) || active < 0) {
     throw new MovesInputError("activeSeconds must be a number of seconds, zero or more");
   }
+  const due = capDayKey(day, at);
+  const walletKey = key.slice(0, 10) === due ? key : due + key.slice(10);
   // The start record is read inside the queue, so a post that arrives while the
-  // start is still being written waits for it instead of failing.
+  // start is still being written waits for it instead of failing. The queue is
+  // the card's, so it is keyed by the card key as given.
   return serialize(key, () => payCard(db, {
-    day, cardKey: key, entry, plannedSeconds, activeSeconds: active, now: at, emit,
+    day: due, cardKey: key, walletKey, entry, plannedSeconds, activeSeconds: active, now: at, emit,
   }));
 }
 
-async function payCard(db, { day, cardKey, entry, plannedSeconds, activeSeconds, now, emit }) {
+async function payCard(db, {
+  day, cardKey, walletKey, entry, plannedSeconds, activeSeconds, now, emit,
+}) {
   const started = await readJson(db, STARTED_PREFIX + cardKey);
   const startedAt = Number(started?.startedAt);
   if (!Number.isFinite(startedAt)) throw new MovesInputError("start the chunk first");
@@ -215,7 +271,7 @@ async function payCard(db, { day, cardKey, entry, plannedSeconds, activeSeconds,
   const done = sessionApi().isChunkDone(planned, accepted);
 
   const target = chunkPoints(Math.floor(accepted / 60));
-  const existing = await rowDelta(db, MOVE_CARD_KIND, cardKey);
+  const existing = await rowDelta(db, MOVE_CARD_KIND, walletKey);
   const alreadyPaid = Math.max(0, Number(existing) || 0);
   const want = Math.max(0, target - alreadyPaid);
 
@@ -230,7 +286,7 @@ async function payCard(db, { day, cardKey, entry, plannedSeconds, activeSeconds,
     capped = !!claim.capped;
     if (claim.paid > 0) {
       const grew = await casDelta(
-        db, MOVE_CARD_KIND, cardKey, existing === null ? null : alreadyPaid, alreadyPaid + claim.paid, now, emit,
+        db, MOVE_CARD_KIND, walletKey, existing === null ? null : alreadyPaid, alreadyPaid + claim.paid, now, emit,
       );
       if (grew) {
         // Apply the pet's owed lazy decay first: decay landing afterwards would
@@ -242,11 +298,11 @@ async function payCard(db, { day, cardKey, entry, plannedSeconds, activeSeconds,
     }
   }
 
-  const held = Number(await rowDelta(db, MOVE_CARD_KIND, cardKey));
+  const held = Number(await rowDelta(db, MOVE_CARD_KIND, walletKey));
   const total = Number.isFinite(held) ? Math.max(0, held) : 0;
 
   await raiseSetting(db, bestKey, accepted, bestSeconds);
-  await growMinutes(db, cardKey, bestSeconds, accepted, { now, emit });
+  await growMinutes(db, walletKey, bestSeconds, accepted, { now, emit });
 
   return { paid, total, done, capped, accepted };
 }

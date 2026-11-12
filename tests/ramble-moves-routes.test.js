@@ -316,14 +316,14 @@ test("POST /moves/start and /moves/progress refuse junk: slots, key shape, and a
   const db = await scratchDb();
   const card = (await (await get("/api/ramble/moves/today")).json()).challenge;
 
-  assert.equal((await send("POST", "/api/ramble/moves/start", { cardKey: "extra", entryId: card.entry.id })).status, 400,
-    "a slot other than early/day/evening is refused for now");
+  assert.equal((await send("POST", "/api/ramble/moves/start", { cardKey: "bonus", entryId: card.entry.id })).status, 400,
+    "a slot other than early/day/evening/extra is refused for now");
   assert.equal((await send("POST", "/api/ramble/moves/start", { cardKey: "day" })).status, 400,
     "entryId is required");
   assert.equal((await send("POST", "/api/ramble/moves/start", { cardKey: "day", entryId: "no-such-entry" })).status, 404,
     "an entry the served library does not have is a 404, like the detail route");
 
-  for (const cardKey of ["day", card.day, card.day + ":bonus", card.day + ":x:walk-10:1"]) {
+  for (const cardKey of ["day", card.day, card.day + ":bonus", card.day + ":x1"]) {
     const r = await send("POST", "/api/ramble/moves/progress", {
       cardKey, chunkIndex: 0, entryId: card.entry.id, activeSeconds: 60,
     });
@@ -344,6 +344,99 @@ test("POST /moves/start and /moves/progress refuse junk: slots, key shape, and a
     cardKey: card.day + ":early", chunkIndex: 0, entryId: card.entry.id, activeSeconds: 600,
   })).status, 400, "a card that was never started cannot be paid");
   assert.equal(await walletTotal(db, card.day), before, "and the refused post wrote nothing");
+  db.close?.();
+});
+
+/* ------------------------------------- retries, order, cheating (4.2) */
+
+/** The day's whole budget in both kinds: a chunk that must pay in full gets room. */
+async function clearBudgets(db, day) {
+  await db.execute({
+    sql: "DELETE FROM ramble_wallet WHERE kind IN ('moveindoor', 'moveoutdoor') AND key = ?",
+    args: [day],
+  });
+}
+
+test("POST /moves/start cardKey extra: any served entry, and its key pays through once", async () => {
+  const db = await scratchDb();
+  const card = (await (await get("/api/ramble/moves/today")).json()).challenge;
+  const other = MOVES_LIBRARY.find((e) => e.id !== card.entry.id);
+  assert.ok(other, "the fixture library has an entry that is not today's card");
+
+  const started = await send("POST", "/api/ramble/moves/start", { cardKey: "extra", entryId: other.id });
+  assert.equal(started.status, 200, "an extra may be started from any served entry");
+  const start = await started.json();
+  assert.match(start.cardKey, /^\d{4}-\d{2}-\d{2}:x:[A-Za-z0-9_.-]{1,64}:\d{1,12}$/);
+  assert.equal(start.cardKey.slice(0, 10), localDay(Date.now()), "the server stamps its own day");
+  assert.ok(start.cardKey.startsWith(start.cardKey.slice(0, 10) + ":x:" + other.id + ":"));
+  assert.ok(Number.isFinite(start.startedAt));
+
+  await ageStartRecord(db, start.cardKey, 11 * 60000);
+  const before = await walletTotal(db, card.day);
+  const posted = await send("POST", "/api/ramble/moves/progress", {
+    cardKey: start.cardKey, chunkIndex: 0, entryId: other.id, activeSeconds: 600,
+  });
+  assert.equal(posted.status, 200);
+  const body = await posted.json();
+  assert.ok(body.progress.paid > 0, "the extra's key is the one its start answered with");
+  assert.equal(body.progress.accepted, 600);
+  const gain = (await walletTotal(db, card.day)) - before;
+  assert.equal(gain, body.progress.paid);
+
+  const again = await send("POST", "/api/ramble/moves/progress", {
+    cardKey: start.cardKey, chunkIndex: 0, entryId: other.id, activeSeconds: 600,
+  });
+  assert.equal(again.status, 200);
+  assert.equal((await again.json()).progress.paid, 0, "the retry pays nothing");
+  assert.equal(await walletTotal(db, card.day), before + gain, "and moves no row");
+  db.close?.();
+});
+
+test("two concurrent identical progress posts pay once in total", async () => {
+  const db = await scratchDb();
+  const card = (await (await get("/api/ramble/moves/today")).json()).challenge;
+  await clearBudgets(db, card.day);
+
+  const start = await (await send("POST", "/api/ramble/moves/start", {
+    cardKey: "evening", entryId: card.entry.id,
+  })).json();
+  await ageStartRecord(db, start.cardKey, 11 * 60000);
+  const before = await walletTotal(db, card.day);
+
+  const post = () => send("POST", "/api/ramble/moves/progress", {
+    cardKey: start.cardKey, chunkIndex: 0, entryId: card.entry.id, activeSeconds: 600,
+  });
+  const [a, b] = await Promise.all([post(), post()]);
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  const [pa, pb] = [(await a.json()).progress, (await b.json()).progress];
+
+  const gain = (await walletTotal(db, card.day)) - before;
+  assert.equal(gain, chunkPoints(10), "the day is exactly one chunk's points better off");
+  assert.equal(pa.paid + pb.paid, gain, "and that is all the two of them paid together");
+  assert.equal([pa, pb].filter((p) => p.paid > 0).length, 1, "one of the two paid, the other found it done");
+  db.close?.();
+});
+
+test("progress refuses the old x1 shape, a mismatched entry and a malformed extra key", async () => {
+  const db = await scratchDb();
+  const card = (await (await get("/api/ramble/moves/today")).json()).challenge;
+  const other = MOVES_LIBRARY.find((e) => e.id !== card.entry.id);
+  const before = await walletTotal(db, card.day);
+  const post = (cardKey, entryId) => send("POST", "/api/ramble/moves/progress", {
+    cardKey, chunkIndex: 0, entryId, activeSeconds: 600,
+  });
+
+  assert.equal((await post(card.day + ":x1", card.entry.id)).status, 400, "the retired numbering");
+
+  const start = await (await send("POST", "/api/ramble/moves/start", {
+    cardKey: "extra", entryId: card.entry.id,
+  })).json();
+  assert.equal((await post(start.cardKey, other.id)).status, 400,
+    "an extra's key names its own entry");
+  assert.equal((await post(card.day + ":x:" + card.entry.id, card.entry.id)).status, 400,
+    "an extra key without its start second");
+  assert.equal(await walletTotal(db, card.day), before, "none of the refused posts wrote anything");
   db.close?.();
 });
 

@@ -25,7 +25,8 @@ import {
   chunkPoints, MovesInputError, MOVE_INDOOR_KIND, MOVE_OUTDOOR_KIND, INDOOR_DAILY_CAP,
 } from "../bundles/ramble/server/moves/ledger.js";
 import {
-  startChunk, recordProgress, plannedSecondsFor, MOVE_CARD_KIND, MOVE_MIN_KIND,
+  startChunk, recordProgress, plannedSecondsFor, extraCardKey, extrasCount,
+  MOVE_CARD_KIND, MOVE_MIN_KIND,
 } from "../bundles/ramble/server/moves/progress.js";
 
 /** Local noon on a fixed local day, so the whole file is timezone-independent. */
@@ -314,4 +315,175 @@ test("the accepted seconds are clamped to the wall clock, whatever the client cl
   assert.ok(out.accepted < 600, "four minutes of wall clock cannot credit ten");
   assert.equal(out.accepted, Math.floor(240 * 1.1));
   assert.equal(out.done, false);
+});
+
+/* ------------------------------------------------- retries, order, cheating */
+
+test("the same post twice pays once and moves no row the second time", async () => {
+  const db = await freshDb();
+  const cardKey = DAY0 + ":day";
+  await startChunk(db, { day: DAY0, cardKey, plannedSeconds: 600, now: T0 });
+  const post = () => recordProgress(db, {
+    day: DAY0, cardKey, entry: entry(), activeSeconds: 600, now: T0 + 11 * MIN,
+  });
+
+  const first = await post();
+  assert.deepEqual(first, { paid: 12, total: 12, done: true, capped: false, accepted: 600 });
+  const before = {
+    card: await walletRowsOf(db, MOVE_CARD_KIND, cardKey),
+    indoor: await walletRowsOf(db, MOVE_INDOOR_KIND, DAY0),
+    minutes: await walletRowsOf(db, MOVE_MIN_KIND, DAY0),
+  };
+
+  const second = await post();
+  assert.deepEqual(
+    { paid: second.paid, total: second.total, accepted: second.accepted, done: second.done },
+    { paid: 0, total: 12, accepted: 600, done: true },
+    "a retried post is already paid for",
+  );
+  assert.deepEqual(await walletRowsOf(db, MOVE_CARD_KIND, cardKey), before.card);
+  assert.deepEqual(await walletRowsOf(db, MOVE_INDOOR_KIND, DAY0), before.indoor);
+  assert.deepEqual(await walletRowsOf(db, MOVE_MIN_KIND, DAY0), before.minutes);
+});
+
+test("a 200-second post arriving after a 500-second one changes nothing and still reports done", async () => {
+  const db = await freshDb();
+  const cardKey = DAY0 + ":day";
+  await startChunk(db, { day: DAY0, cardKey, plannedSeconds: 600, now: T0 });
+
+  const longer = await recordProgress(db, {
+    day: DAY0, cardKey, entry: entry(), activeSeconds: 500, now: T0 + 11 * MIN,
+  });
+  assert.equal(longer.accepted, 500);
+  assert.equal(longer.paid, chunkPoints(8), "eight whole minutes");
+  assert.equal(longer.done, true);
+  const before = {
+    card: await walletRowsOf(db, MOVE_CARD_KIND, cardKey),
+    indoor: await walletRowsOf(db, MOVE_INDOOR_KIND, DAY0),
+    minutes: await walletRowsOf(db, MOVE_MIN_KIND, DAY0),
+  };
+
+  const later = await recordProgress(db, {
+    day: DAY0, cardKey, entry: entry(), activeSeconds: 200, now: T0 + 12 * MIN,
+  });
+  assert.deepEqual(
+    { paid: later.paid, accepted: later.accepted, total: later.total, done: later.done },
+    { paid: 0, accepted: longer.accepted, total: longer.total, done: true },
+    "a later, lower post neither pays nor takes the half-way mark back",
+  );
+  assert.deepEqual(await walletRowsOf(db, MOVE_CARD_KIND, cardKey), before.card);
+  assert.deepEqual(await walletRowsOf(db, MOVE_INDOOR_KIND, DAY0), before.indoor);
+  assert.deepEqual(await walletRowsOf(db, MOVE_MIN_KIND, DAY0), before.minutes);
+});
+
+test("active seconds far beyond the wall clock are cut to the clock plus 10%", async () => {
+  const db = await freshDb();
+  const cardKey = DAY0 + ":day";
+  await startChunk(db, { day: DAY0, cardKey, plannedSeconds: 600, now: T0 });
+  const out = await recordProgress(db, {
+    day: DAY0, cardKey, entry: entry(), activeSeconds: 6000, now: T0 + 100 * 1000,
+  });
+  assert.equal(out.accepted, 110, "100 seconds of wall clock is 110 accepted at most");
+  assert.equal(out.paid, chunkPoints(1));
+  assert.equal(await rowDelta(db, MOVE_MIN_KIND, DAY0), 1);
+});
+
+/* ---------------------------------------------------------------- day rule */
+
+test("a card key from an older day is credited to today; yesterday keeps yesterday", async () => {
+  const db = await freshDb();
+  const stale = localDay(T0 - 2 * 86400000);
+  const yesterday = localDay(T0 - 86400000);
+  const staleKey = stale + ":day";
+  const yesterdayKey = yesterday + ":evening";
+  assert.notEqual(stale, DAY0);
+  assert.notEqual(yesterday, DAY0);
+
+  await startChunk(db, { day: stale, cardKey: staleKey, plannedSeconds: 600, now: T0 });
+  const moved = await recordProgress(db, {
+    day: stale, cardKey: staleKey, entry: entry(), activeSeconds: 600, now: T0 + 11 * MIN,
+  });
+  assert.equal(moved.paid, 12);
+
+  // The wallet carries the day the pay landed on, and the rest of the key. The
+  // start record keeps the key the start was given, so the post still found it.
+  assert.deepEqual(await walletRowsOf(db, MOVE_CARD_KIND, DAY0 + ":day"), [{ key: DAY0 + ":day", delta: 12 }]);
+  assert.equal(await rowDelta(db, MOVE_INDOOR_KIND, DAY0), 12, "today's budget paid it");
+  assert.equal(await rowDelta(db, MOVE_MIN_KIND, DAY0), 10, "and today's minutes count it");
+  for (const [kind, key] of [
+    [MOVE_CARD_KIND, staleKey], [MOVE_INDOOR_KIND, stale], [MOVE_MIN_KIND, stale],
+  ]) {
+    assert.equal(await rowDelta(db, kind, key), null, `nothing is filed under the stale day: ${kind} ${key}`);
+  }
+
+  await startChunk(db, { day: yesterday, cardKey: yesterdayKey, plannedSeconds: 600, now: T0 });
+  const kept = await recordProgress(db, {
+    day: yesterday, cardKey: yesterdayKey, entry: entry(), activeSeconds: 600, now: T0 + 12 * MIN,
+  });
+  assert.equal(kept.paid, 12);
+  assert.deepEqual(await walletRowsOf(db, MOVE_CARD_KIND, yesterdayKey), [{ key: yesterdayKey, delta: 12 }]);
+  assert.equal(await rowDelta(db, MOVE_INDOOR_KIND, yesterday), 12, "yesterday's own budget paid it");
+  assert.equal(await rowDelta(db, MOVE_MIN_KIND, yesterday), 10);
+  assert.equal(await rowDelta(db, MOVE_INDOOR_KIND, DAY0), 12, "and today's is untouched by it");
+});
+
+/* ------------------------------------------------------------- extra cards */
+
+test("extraCardKey is deterministic and stamped with the start second", () => {
+  const at = T0 + 1000;
+  const key = extraCardKey(DAY0, "test-entry", at);
+  assert.equal(key, DAY0 + ":x:test-entry:" + Math.floor(at / 1000));
+  assert.equal(extraCardKey(DAY0, "test-entry", at), key, "same inputs, same key");
+  assert.match(key, /^\d{4}-\d{2}-\d{2}:x:[A-Za-z0-9_.-]{1,64}:\d{1,12}$/);
+  assert.notEqual(extraCardKey(DAY0, "test-entry", at + 1000), key,
+    "a second extra of the same entry started at another second is another card");
+});
+
+test("two extras of one entry are two cards, and extrasCount counts them", async () => {
+  const db = await freshDb();
+  assert.equal(await extrasCount(db, DAY0), 0, "a day with no extras counts none");
+  assert.equal(await extrasCount(db, "junk"), 0);
+  assert.equal(await extrasCount(db, DAY0 + ":x:%"), 0, "the day must be a day");
+
+  const firstAt = T0 + 1000;
+  const secondAt = T0 + 2 * MIN;
+  const keys = [extraCardKey(DAY0, "test-entry", firstAt), extraCardKey(DAY0, "test-entry", secondAt)];
+  const posts = [[keys[0], firstAt, 600], [keys[1], secondAt, 300]];
+  const paid = [];
+  for (const [key, startedAt, activeSeconds] of posts) {
+    await startChunk(db, { day: DAY0, cardKey: key, plannedSeconds: 600, now: startedAt });
+    const out = await recordProgress(db, {
+      day: DAY0, cardKey: key, entry: entry(), activeSeconds, now: startedAt + 11 * MIN,
+    });
+    paid.push(out.paid);
+  }
+  assert.deepEqual(paid, [12, 6], "each extra pays its own minutes");
+
+  // Two distinct keys, so a MAX merge of one can never hide the other.
+  assert.deepEqual(await walletRowsOf(db, MOVE_CARD_KIND, keys[0]), [{ key: keys[0], delta: 12 }]);
+  assert.deepEqual(await walletRowsOf(db, MOVE_CARD_KIND, keys[1]), [{ key: keys[1], delta: 6 }]);
+  assert.equal(await extrasCount(db, DAY0), 2);
+  assert.equal(await extrasCount(db, localDay(T0 - 86400000)), 0, "another day has none");
+  assert.equal(await rowDelta(db, MOVE_MIN_KIND, DAY0), 15, "ten minutes then five, for the one day");
+});
+
+test("startChunk records an extra under its own key, and a retried start keeps its anchor", async () => {
+  const db = await freshDb();
+  const cardKey = extraCardKey(DAY0, "test-entry", T0);
+  const first = await startChunk(db, { day: DAY0, cardKey, plannedSeconds: 600, now: T0 });
+  assert.equal(first.startedAt, T0);
+  const retried = await startChunk(db, { day: DAY0, cardKey, plannedSeconds: 900, now: T0 + 5 * MIN });
+  assert.equal(retried.startedAt, T0, "the retry keeps the session's anchor");
+
+  const { rows } = await db.execute({
+    sql: "SELECT key FROM ramble_settings WHERE key = ?",
+    args: ["local.moves.started." + cardKey],
+  });
+  assert.equal(rows.length, 1, "one start record, under the extra's own key");
+
+  const out = await recordProgress(db, {
+    day: DAY0, cardKey, entry: entry(), activeSeconds: 600, now: T0 + 11 * MIN,
+  });
+  assert.equal(out.paid, 12, "and the extra pays through on the key it started with");
+  assert.equal(await extrasCount(db, DAY0), 1);
 });

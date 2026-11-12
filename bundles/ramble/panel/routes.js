@@ -1378,42 +1378,58 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   }));
 
   /**
-   * The day's own card slots. Until a card can be played beyond today's cards, a
-   * start names one of these and the SERVER builds the full wallet key from
-   * today's day (`todayCard`), never from the client's clock.
+   * The day's own card slots. A start naming one of these opens TODAY's card,
+   * and the SERVER builds the full wallet key from today's day (`todayCard`),
+   * never from the client's clock.
    */
   const MOVE_CARD_SLOTS = ["early", "day", "evening"];
   /**
-   * A progress post carries the FULL key a start answered with:
-   * `<day>:<slot>`. An extra's key (and a day other than the card's) is the
-   * caller's rule to add, not this one's.
+   * A start may also ask for an EXTRA: `cardKey: "extra"` with any served entry.
+   * The server stamps the key with its own day and second (`extraCardKey`), so a
+   * retried extra keeps the key the client was first given.
+   */
+  const MOVE_EXTRA_SLOT = "extra";
+  /**
+   * A progress post carries the FULL key a start answered with: `<day>:<slot>`
+   * for the day's own card, `<day>:x:<entryId>:<startedAtSeconds>` for an extra.
+   * Anything else — the retired `<day>:x1` numbering among it — is refused.
    */
   const MOVE_CARD_KEY_RE = /^\d{4}-\d{2}-\d{2}:(early|day|evening)$/;
+  const MOVE_EXTRA_KEY_RE = /^\d{4}-\d{2}-\d{2}:x:([A-Za-z0-9_.-]{1,64}):\d{1,12}$/;
   /** The most active seconds one post may claim (six hours). */
   const MOVE_ACTIVE_MAX = 21600;
+  /** The most characters a card key may carry (an extra's shape must fit). */
+  const MOVE_CARD_KEY_MAX = 96;
 
   router.post("/api/ramble/moves/start", handle(async (req, res) => {
     if (!(await ensureMovesMods(res))) return;
     const now = Date.now();
     const b = req.body || {};
-    const slot = requireText(b.cardKey, 80, "cardKey");
-    if (!MOVE_CARD_SLOTS.includes(slot)) bad("cardKey must be one of " + MOVE_CARD_SLOTS.join(", "));
+    const slot = requireText(b.cardKey, MOVE_CARD_KEY_MAX, "cardKey");
+    const extra = slot === MOVE_EXTRA_SLOT;
+    if (!extra && !MOVE_CARD_SLOTS.includes(slot)) {
+      bad("cardKey must be one of " + [...MOVE_CARD_SLOTS, MOVE_EXTRA_SLOT].join(", "));
+    }
     const entryId = requireText(b.entryId, 80, "entryId");
     const library = servedMoves();
     const entry = movesMods.libraryMod.entryById(library, entryId);
     if (!entry) return res.status(404).json({ error: "not found" });
-    // Only the card actually on screen can be played: the client names it, and a
-    // start for any other entry would open a session nothing can mark Done.
+    // An own-card slot is only the card actually on screen: the client names it,
+    // and a start for any other entry would open a session nothing can mark
+    // Done. An extra is any served entry, so it skips that gate.
     const today = await todayCard(now);
-    if (!today || today.off || !today.entry || today.entry.id !== entry.id) {
+    if (!extra && (!today || today.off || !today.entry || today.entry.id !== entry.id)) {
       bad("entryId must be today's card");
     }
     const plannedSeconds = movesMods.progressMod.plannedSecondsFor({
       chain: b.chain, entryId, library, entry,
     });
-    const cardKey = today.day + ":" + slot;
+    const day = extra ? mods.eggsMod.localDay(now) : today.day;
+    const cardKey = extra
+      ? movesMods.progressMod.extraCardKey(day, entryId, now)
+      : today.day + ":" + slot;
     const started = await movesMods.progressMod.startChunk(db, {
-      day: today.day, cardKey, plannedSeconds, now,
+      day, cardKey, plannedSeconds, now,
     });
     res.json({ cardKey, startedAt: started.startedAt });
   }));
@@ -1422,8 +1438,10 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (!(await ensureMovesMods(res))) return;
     const now = Date.now();
     const b = req.body || {};
-    const cardKey = requireText(b.cardKey, 80, "cardKey");
-    if (!MOVE_CARD_KEY_RE.test(cardKey)) bad("cardKey must be the key a start answered with");
+    const cardKey = requireText(b.cardKey, MOVE_CARD_KEY_MAX, "cardKey");
+    const ownCard = MOVE_CARD_KEY_RE.test(cardKey);
+    const extraKey = ownCard ? null : MOVE_EXTRA_KEY_RE.exec(cardKey);
+    if (!ownCard && !extraKey) bad("cardKey must be the key a start answered with");
     if (!Number.isInteger(b.chunkIndex) || b.chunkIndex < 0) {
       bad("chunkIndex must be a non-negative whole number");
     }
@@ -1433,11 +1451,15 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       bad(`activeSeconds must be a number from 0 to ${MOVE_ACTIVE_MAX}`);
     }
     const entryId = requireText(b.entryId, 80, "entryId");
+    // An extra's key names its own entry, so a post can never pay one extra's
+    // minutes into another card.
+    if (extraKey && extraKey[1] !== entryId) bad("cardKey names a different entry");
     const entry = movesMods.libraryMod.entryById(servedMoves(), entryId);
     if (!entry) return res.status(404).json({ error: "not found" });
 
     // The card key carries its day, and that is the day the minutes, the pay and
-    // the Done are filed under.
+    // the Done are filed under. `recordProgress` then applies the day rule: a
+    // key from any day but today or yesterday is credited to today.
     const day = cardKey.slice(0, 10);
     let progress;
     try {
