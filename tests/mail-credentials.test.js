@@ -8,10 +8,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { MAIL_DDL } from "../servers/shared/mail-schema.js";
-import { MailError } from "../servers/gateway/mail/errors.js";
+import { MAIL_ERROR_TEXT, MailError } from "../servers/gateway/mail/errors.js";
 import { createAccount } from "../servers/gateway/mail/store/accounts.js";
 import {
-  ensureKeychainTable, ensureWriteKey, listEntries, KeychainKeyMissingError,
+  ensureKeychainTable, ensureWriteKey, listEntries, saveServiceSecret, serviceSecretsFor,
+  KeychainKeyMissingError,
 } from "../servers/gateway/keychain/store.js";
 import { loadKeychainKey } from "../servers/gateway/keychain/key.js";
 import {
@@ -152,13 +153,27 @@ test("the row falls back to the account id when the mail_accounts row is gone", 
   assert.deepEqual(await credentials.getSecrets(orphanId), { MAIL_PASSWORD: PASSWORD });
 });
 
-test("nothing saved is an empty object, not an error", async () => {
+test("nothing saved is an empty object, not an error — including from a home with no key file", async () => {
   const db = await freshDb();
-  const credentials = createMailCredentials({ db, crowHome: freshHome() });
-  assert.deepEqual(await credentials.getSecrets("ma-0123456789abcdef"), {});
-  // A home with no key file yet, and a table that was never created, answer the same way.
-  assert.equal(loadKeychainKey({ crowHome: freshHome() }), null);
-  assert.deepEqual(await credentials.getSecrets("ma-0123456789abcdef"), {});
+  const id = "ma-0123456789abcdef";
+
+  // A credentials object whose crowHome holds no keychain.key at all, on a table that was never created.
+  const keylessHome = freshHome();
+  assert.equal(loadKeychainKey({ crowHome: keylessHome }), null);
+  const keyless = createMailCredentials({ db, crowHome: keylessHome });
+  assert.deepEqual(await keyless.getSecrets(id), {}, "no rows and no key file: nothing saved");
+
+  // The same home once rows exist under another machine's key: the fault is the key, never {}.  A row
+  // that is there and cannot be opened is not "nothing saved".
+  const account = await createAccount(db, accountInput(ALEX));
+  const sealedElsewhere = createMailCredentials({ db, crowHome: freshHome() });
+  await sealedElsewhere.saveSecret(account.id, "MAIL_PASSWORD", PASSWORD);
+  assert.deepEqual(await keyless.getSecrets(id), {}, "another account's rows are not this account's");
+  await assert.rejects(keyless.getSecrets(account.id), (err) => {
+    assert.ok(err instanceof KeychainKeyMissingError, `expected the key-missing fault, got ${err && err.name}`);
+    assert.equal(err.code, "KEYCHAIN_KEY_MISSING");
+    return true;
+  });
 });
 
 test("rows sealed under another machine's key raise the key-missing fault unchanged", async () => {
@@ -348,14 +363,29 @@ test("authFor hands a rotated refresh token to the writer only when one is suppl
   assert.ok(!JSON.stringify(writes).includes("access-token-3"), "an access token never reaches the writer");
 });
 
-test("a working sign-in survives a rotation writer that fails", async () => {
+test("a failing rotation writer is reported without failing the sign-in and without its text", async () => {
   const tokenProvider = async () => ({ accessToken: "access-token-4", refreshToken: "refresh-4" });
   const auth = await authFor(XOAUTH2_ACCOUNT, {
     credentials: {},
     tokenProvider,
-    rotation: async () => { throw new MailError("BAD_INPUT", "env_key"); },
+    rotation: async () => { throw new Error(`keychain write failed for ${HUNTER}`); },
   });
-  assert.deepEqual(auth, { user: ALEX, accessToken: "access-token-4" });
+  assert.deepEqual(auth, { user: ALEX, accessToken: "access-token-4", rotationFailed: true });
+  assert.equal(auth.rotationFailed, true, "a fixed boolean, never the writer's error");
+  assert.deepEqual(Object.keys(auth).sort(), ["accessToken", "rotationFailed", "user"]);
+  assert.ok(!JSON.stringify(auth).includes(HUNTER), "no error text rides along with the flag");
+});
+
+test("a key-missing fault from the rotation writer is rethrown unchanged", async () => {
+  const tokenProvider = async () => ({ accessToken: "access-token-5", refreshToken: "refresh-5" });
+  await assert.rejects(
+    authFor(XOAUTH2_ACCOUNT, {
+      credentials: {},
+      tokenProvider,
+      rotation: async () => { throw new KeychainKeyMissingError(); },
+    }),
+    keyMissingFault,
+  );
 });
 
 /* ------------------------------------------------------------ keychain panel */
@@ -376,17 +406,176 @@ test("a mail row lists in the keychain panel without its secret", async () => {
   assert.equal(row.label, `Mail: ${ALEX}`);
   assert.equal(row.readable, true);
   assert.equal(row.status, "active");
-  assert.ok(!JSON.stringify(entrySafe(row)).includes(PASSWORD));
+
+  // The whole listed result, not a chosen subset of fields: neither the secret nor its sealed text is
+  // anywhere in what the panel is handed, whatever column a future reader adds.
+  const sealed = (await db.execute({
+    sql: "SELECT secret_sealed FROM crow_keychain WHERE connection_uuid = ?", args: [account.id],
+  })).rows[0].secret_sealed;
+  assert.ok(typeof sealed === "string" && sealed.length > 0, "the row itself is sealed, not empty");
+  const listed = JSON.stringify(entries);
+  assert.ok(!listed.includes(PASSWORD), "no field of any listed entry carries the secret");
+  assert.ok(!listed.includes(sealed), "no field of any listed entry carries the sealed text either");
 
   const { renderPasswordsPage } = await import("../servers/gateway/dashboard/settings/sections/passwords.js");
   const html = renderPasswordsPage({ entries, method: "none", lang: "en" });
   assert.match(html, /Mail: alex@example\.com/);
   assert.match(html, new RegExp(MAIL_BUNDLE_ID));
   assert.ok(!html.includes(PASSWORD), "the rendered page never carries the secret");
+  assert.ok(!html.includes(sealed), "the rendered page never carries the sealed text");
 });
 
-/** The entry as the page consumes it (id, kind, label, bundle_id, env_key, username, url, status). */
-function entrySafe(entry) {
-  const { id, kind, label, bundle_id, env_key, username, url, status, readable } = entry;
-  return { id, kind, label, bundle_id, env_key, username, url, status, readable };
+/* ------------------------------------------------------------------ mail scope */
+
+/** A call that must fail with MailError BAD_INPUT and leave the keychain table byte-identical. */
+async function refusesAndChangesNothing(db, call) {
+  const before = await keychainRows(db);
+  await assert.rejects(call(), mailCode("BAD_INPUT"));
+  assert.deepEqual(await keychainRows(db), before, "the refused call touched no row");
 }
+
+const MALFORMED_IDS = Object.freeze([
+  "", " ", "ma-", "ma-0123", "ma-0123456789abcde", "ma-0123456789abcdef0",
+  "ma-0123456789ABCDEF", "MA-0123456789abcdef", "ma-0123456789abcdeZ",
+  "ma_0123456789abcdef", " ma-0123456789abcdef", "ma-0123456789abcdef ",
+  "acct-0123456789abcdef", null, 42,
+]);
+
+test("every call needs an account id in the store's ma-<16 hex> form", async () => {
+  const db = await freshDb();
+  const credentials = createMailCredentials({ db, crowHome: freshHome() });
+  for (const bad of MALFORMED_IDS) {
+    const shown = JSON.stringify(bad);
+    await assert.rejects(credentials.saveSecret(bad, "MAIL_PASSWORD", PASSWORD), mailCode("BAD_INPUT"), `saveSecret ${shown}`);
+    await assert.rejects(credentials.getSecrets(bad), mailCode("BAD_INPUT"), `getSecrets ${shown}`);
+    await assert.rejects(credentials.deleteSecrets(bad), mailCode("BAD_INPUT"), `deleteSecrets ${shown}`);
+  }
+  await ensureKeychainTable(db);
+  assert.equal((await keychainRows(db)).length, 0, "a refused call writes no row");
+});
+
+test("a row of another bundle under the same uuid is never read, overwritten or deleted", async () => {
+  const db = await freshDb();
+  const home = freshHome();
+  const account = await createAccount(db, accountInput(ALEX));
+  const credentials = createMailCredentials({ db, crowHome: home });
+  const key = await ensureWriteKey(db, { crowHome: home });
+  // A project connection's secret that shares the uuid and the env key mail would read.
+  await saveServiceSecret(db, key, {
+    connectionUuid: account.id,
+    bundleId: "some-addon",
+    envKey: "MAIL_PASSWORD",
+    label: "Another bundle's connection",
+    secret: OTHER_PASSWORD,
+  });
+  assert.equal((await keychainRows(db)).length, 1);
+
+  await refusesAndChangesNothing(db, () => credentials.getSecrets(account.id));
+  await refusesAndChangesNothing(db, () => credentials.saveSecret(account.id, "MAIL_PASSWORD", PASSWORD));
+  await refusesAndChangesNothing(db, () => credentials.saveSecret(account.id, "MAIL_REFRESH_TOKEN", "refresh-token-9"));
+  await refusesAndChangesNothing(db, () => credentials.deleteSecrets(account.id));
+
+  // Its own bundle still reads exactly what it saved: nothing was read, overwritten or removed.
+  assert.deepEqual(
+    await serviceSecretsFor(db, key, account.id, { allowedKeys: MAIL_SECRET_KEYS }),
+    { MAIL_PASSWORD: OTHER_PASSWORD },
+  );
+  const rows = await keychainRows(db);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].bundle_id, "some-addon");
+});
+
+test("a keychain row with no bundle under the same uuid is refused too", async () => {
+  const db = await freshDb();
+  const account = await createAccount(db, accountInput(ALEX));
+  const credentials = createMailCredentials({ db, crowHome: freshHome() });
+  await ensureKeychainTable(db);
+  await db.execute({
+    sql: `INSERT INTO crow_keychain (kind, label, bundle_id, env_key, secret_sealed, key_id, origin, status, connection_uuid)
+          VALUES ('service', 'No bundle', NULL, 'MAIL_PASSWORD', 'sealed-placeholder', 'k1', 'typed', 'active', ?)`,
+    args: [account.id],
+  });
+  assert.equal((await keychainRows(db)).length, 1);
+
+  await refusesAndChangesNothing(db, () => credentials.getSecrets(account.id));
+  await refusesAndChangesNothing(db, () => credentials.saveSecret(account.id, "MAIL_PASSWORD", PASSWORD));
+  await refusesAndChangesNothing(db, () => credentials.deleteSecrets(account.id));
+});
+
+/* ------------------------------------------------- key-missing faults travel as they are */
+
+function keyMissingFault(err) {
+  assert.ok(err instanceof KeychainKeyMissingError, `expected the key-missing fault, got ${err && err.name}`);
+  assert.ok(!(err instanceof MailError), "a missing key is not a mail error");
+  assert.equal(err.code, "KEYCHAIN_KEY_MISSING");
+  return true;
+}
+
+test("a key-missing fault on the password path is not reported as a bad password", async () => {
+  const account = { id: "ma-0123456789abcdef", address: ALEX, username: ALEX, authKind: "password" };
+  const credentials = { getSecrets: async () => { throw new KeychainKeyMissingError(); } };
+  await assert.rejects(authFor(account, { credentials }), keyMissingFault);
+
+  // And through the real keychain: a crow.db whose key file is not on this machine.
+  const db = await freshDb();
+  const stored = await createAccount(db, accountInput(ALEX));
+  await createMailCredentials({ db, crowHome: freshHome() }).saveSecret(stored.id, "MAIL_PASSWORD", PASSWORD);
+  const restored = createMailCredentials({ db, crowHome: freshHome() });
+  await assert.rejects(authFor(stored, { credentials: restored }), keyMissingFault);
+});
+
+test("a key-missing fault from the token provider is rethrown unchanged", async () => {
+  const tokenProvider = async () => { throw new KeychainKeyMissingError(); };
+  await assert.rejects(authFor(XOAUTH2_ACCOUNT, { credentials: {}, tokenProvider }), keyMissingFault);
+  // Including on the retry the adapter runs after AUTH_FAILED.
+  await assert.rejects(
+    authFor(XOAUTH2_ACCOUNT, { credentials: {}, tokenProvider, forceRefresh: true }),
+    keyMissingFault,
+  );
+});
+
+/* --------------------------------------- raw database text never leaves the module */
+
+function explodingDb() {
+  const boom = async () => { throw new Error(`SQLITE_ERROR: ${HUNTER} no such value`); };
+  return { execute: boom, executeMultiple: boom, batch: boom };
+}
+
+/** A wrapped failure: a MailError with its fixed sentence and no database text anywhere on it. */
+function assertWrappedNoLeak(thrown) {
+  assert.ok(thrown instanceof MailError, `expected a MailError, got ${thrown && thrown.name}`);
+  assert.equal(thrown.message, MAIL_ERROR_TEXT[thrown.code], "the fixed sentence for its code");
+  const surface = [thrown.message, String(thrown.detail), thrown.code, String(thrown),
+    JSON.stringify(thrown), thrown.stack].join("\n");
+  assert.ok(!surface.includes(HUNTER), "no field quotes the database's text");
+  assert.ok(!surface.includes(PASSWORD), "no field quotes a saved secret");
+  return true;
+}
+
+async function rejection(call) {
+  try {
+    await call();
+  } catch (err) {
+    return err;
+  }
+  assert.fail("expected the call to fail");
+}
+
+test("a failing database leaves saveSecret, getSecrets and deleteSecrets as fixed mail errors", async () => {
+  const credentials = createMailCredentials({ db: explodingDb(), crowHome: freshHome() });
+  const id = "ma-0123456789abcdef";
+  // saveSecret fails in its label lookup first, before any key or row is written.
+  assertWrappedNoLeak(await rejection(() => credentials.saveSecret(id, "MAIL_PASSWORD", PASSWORD)));
+  assertWrappedNoLeak(await rejection(() => credentials.getSecrets(id)));
+  assertWrappedNoLeak(await rejection(() => credentials.deleteSecrets(id)));
+});
+
+test("a failing database on the password path of authFor leaves a fixed mail error", async () => {
+  const account = { id: "ma-0123456789abcdef", address: ALEX, username: ALEX, authKind: "password" };
+  assertWrappedNoLeak(await rejection(() => authFor(account, {
+    credentials: { getSecrets: async () => { throw new Error(`keychain read failed for ${HUNTER}`); } },
+  })));
+  assertWrappedNoLeak(await rejection(() => authFor(account, {
+    credentials: createMailCredentials({ db: explodingDb(), crowHome: freshHome() }),
+  })));
+});

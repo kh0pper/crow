@@ -5,6 +5,13 @@
  * getSecrets and deleteSecrets — and getSecrets is the only plaintext path: the adapter factory calls
  * it to build a login, and nothing else does.
  *
+ * Every entry point is scoped to mail. The account id must be the store's `ma-<16 hex>` form, and a
+ * keychain row under that connection uuid that belongs to another bundle (or to none) makes all three
+ * refuse with BAD_INPUT: the keychain's read, upsert and delete are by (kind, uuid, env_key), so a
+ * project connection whose uuid happened to equal an account id would otherwise be read as that
+ * account's password, overwritten by its save and removed by its delete. The check runs before any of
+ * them reads, writes or deletes, so such a row is never touched.
+ *
  * Two different keys are involved and they are resolved the way the keychain's own callers resolve
  * them. Saving needs the WRITE key (ensureWriteKey creates the key file on first use and refuses to
  * re-key a table that still has rows); reading needs the key that is on disk now (loadKeychainKey,
@@ -39,11 +46,11 @@ export const MAIL_BUNDLE_ID = "crow-mail";
 export const MAIL_SECRET_KEYS = Object.freeze(["MAIL_PASSWORD", "MAIL_REFRESH_TOKEN"]);
 
 const SECRET_KEYS = new Set(MAIL_SECRET_KEYS);
-const ACCOUNT_ID_RE = /^\S{1,80}$/;
+// Exactly what the account store creates (`"ma-" + randomBytes(8).toString("hex")`). Anything else is
+// not a mail account id, and the keychain is keyed by that id alone.
+const ACCOUNT_ID_RE = /^ma-[0-9a-f]{16}$/;
 
 function requireAccountId(value) {
-  // Account ids are the store's `ma-<hex>`: no whitespace, bounded. A blank id would otherwise name a
-  // keychain row no account owns.
   if (typeof value !== "string" || !ACCOUNT_ID_RE.test(value)) throw new MailError("BAD_INPUT", "account_id");
   return value;
 }
@@ -62,6 +69,22 @@ function requireSecret(value) {
 function asMailError(err) {
   if (err instanceof MailError || err instanceof KeychainKeyMissingError) return err;
   return toMailError(err);
+}
+
+/**
+ * Refuse a connection uuid the keychain also holds rows for under another bundle, or under none.
+ * Mail owns the uuids it writes and nothing else on this machine may share one: a foreign row with a
+ * mail env key would be served as this account's secret, replaced by a save and removed by a delete.
+ * Runs before the caller reads, writes or deletes anything.
+ */
+async function assertMailOwned(db, accountId) {
+  await ensureKeychainTable(db);
+  const { rows } = await db.execute({
+    sql: `SELECT 1 AS not_mail FROM crow_keychain
+           WHERE connection_uuid = ? AND (bundle_id IS NULL OR bundle_id <> ?) LIMIT 1`,
+    args: [accountId, MAIL_BUNDLE_ID],
+  });
+  if (rows.length > 0) throw new MailError("BAD_INPUT", "account_id");
 }
 
 /**
@@ -105,8 +128,9 @@ export function createMailCredentials({ db, crowHome } = {}) {
       const id = requireAccountId(accountId);
       const key = requireSecretKey(envKey);
       const value = requireSecret(secret);
-      const label = await labelFor(db, id);
       try {
+        await assertMailOwned(db, id);
+        const label = await labelFor(db, id);
         const writeKey = await ensureWriteKey(db, { crowHome });
         return await saveServiceSecret(db, writeKey, {
           connectionUuid: id,
@@ -130,21 +154,25 @@ export function createMailCredentials({ db, crowHome } = {}) {
      */
     async getSecrets(accountId) {
       const id = requireAccountId(accountId);
-      // The keychain table is created lazily by its own store; a mail account saved on this machine
-      // always has it, and "nothing saved" must answer {} even before the first save.
-      await ensureKeychainTable(db);
-      const key = loadKeychainKey({ crowHome });
-      if (!key) {
-        // No key file here. Nothing saved is an empty answer; rows under this uuid were sealed
-        // elsewhere, so serviceSecretsFor raises the key-missing fault rather than reporting {}.
-        const { rows } = await db.execute({
-          sql: `SELECT 1 AS present FROM crow_keychain
-                 WHERE kind = 'service' AND connection_uuid = ? AND status = 'active' LIMIT 1`,
-          args: [id],
-        });
-        if (rows.length === 0) return {};
+      try {
+        // assertMailOwned creates the keychain table (its own store creates it lazily); a mail account
+        // saved on this machine always has it, and "nothing saved" must answer {} before the first save.
+        await assertMailOwned(db, id);
+        const key = loadKeychainKey({ crowHome });
+        if (!key) {
+          // No key file here. Nothing saved is an empty answer; rows under this uuid were sealed
+          // elsewhere, so serviceSecretsFor raises the key-missing fault rather than reporting {}.
+          const { rows } = await db.execute({
+            sql: `SELECT 1 AS present FROM crow_keychain
+                   WHERE kind = 'service' AND connection_uuid = ? AND status = 'active' LIMIT 1`,
+            args: [id],
+          });
+          if (rows.length === 0) return {};
+        }
+        return await serviceSecretsFor(db, key, id, { allowedKeys: MAIL_SECRET_KEYS });
+      } catch (err) {
+        throw asMailError(err);
       }
-      return serviceSecretsFor(db, key, id, { allowedKeys: MAIL_SECRET_KEYS });
     },
 
     /**
@@ -157,6 +185,7 @@ export function createMailCredentials({ db, crowHome } = {}) {
     async deleteSecrets(accountId) {
       const id = requireAccountId(accountId);
       try {
+        await assertMailOwned(db, id);
         return await deleteServiceSecrets(db, id);
       } catch (err) {
         throw asMailError(err);
@@ -192,16 +221,21 @@ export function createRotationWriter(credentials) {
  * - `authKind: "xoauth2"` → `{user, accessToken}` from `tokenProvider({accountId, forceRefresh})`; no
  *   provider, or a reply without an access token, is AUTH_FAILED. A reply's `refreshToken` goes to
  *   `rotation(accountId, {refreshToken})` when the caller supplied one; a rotation write that fails
- *   does not fail the sign-in, because the token just issued is the one the connection uses now.
+ *   does not fail the sign-in, because the token just issued is the one the connection uses now — the
+ *   result then carries `rotationFailed: true`, a fixed boolean with no error text, so the caller can
+ *   say so without ever seeing what the writer said.
  *
  * A provider error is a library error and may quote the token it was given, so only a MailError's own
- * allow-listed `detail` survives; the code is always AUTH_FAILED. KeychainKeyMissingError from the
- * password path passes through unchanged.
+ * allow-listed `detail` survives; the code is always AUTH_FAILED. Two faults are not the provider's
+ * and travel unchanged instead: KeychainKeyMissingError (the key file is not on this machine — the
+ * key's fault, not a bad password, so it must not be reported as AUTH_FAILED) and, on the password
+ * path, any MailError. Any other failure on the password path is classified, so a keychain or driver
+ * message never leaves as the error's text.
  *
  * @param {object} account a mail_accounts row as the account store returns it
  * @param {{credentials?: object, tokenProvider?: Function, forceRefresh?: boolean,
  *   rotation?: Function}} [options]
- * @returns {Promise<{user: string, pass?: string, accessToken?: string}>}
+ * @returns {Promise<{user: string, pass?: string, accessToken?: string, rotationFailed?: true}>}
  */
 export async function authFor(account, { credentials, tokenProvider, forceRefresh = false, rotation } = {}) {
   if (!account || typeof account !== "object" || typeof account.id !== "string" || account.id === "") {
@@ -214,7 +248,12 @@ export async function authFor(account, { credentials, tokenProvider, forceRefres
 
   if (account.authKind === "password") {
     if (!credentials || typeof credentials.getSecrets !== "function") throw new MailError("AUTH_FAILED");
-    const secrets = await credentials.getSecrets(account.id);
+    let secrets;
+    try {
+      secrets = await credentials.getSecrets(account.id);
+    } catch (err) {
+      throw asMailError(err);
+    }
     const pass = secrets && typeof secrets.MAIL_PASSWORD === "string" ? secrets.MAIL_PASSWORD : "";
     if (!pass) throw new MailError("AUTH_FAILED");
     return { user, pass };
@@ -226,19 +265,28 @@ export async function authFor(account, { credentials, tokenProvider, forceRefres
     try {
       result = await tokenProvider({ accountId: account.id, forceRefresh: Boolean(forceRefresh) });
     } catch (err) {
+      // A provider that reads its own client secret from the keychain can fail on the key rather than
+      // the token; that fault is the caller's to report and travels unchanged.
+      if (err instanceof KeychainKeyMissingError) throw err;
       // Never the library's text: it can quote the refresh token or the server's reply.
       throw new MailError("AUTH_FAILED", err instanceof MailError ? err.detail : null);
     }
     const accessToken = result && typeof result.accessToken === "string" ? result.accessToken : "";
     if (!accessToken) throw new MailError("AUTH_FAILED");
+    let rotationFailed = false;
     if (result.refreshToken && typeof rotation === "function") {
       try {
         await rotation(account.id, { refreshToken: result.refreshToken });
-      } catch {
+      } catch (err) {
         // The access token in hand is valid; a failed rotation write is retried on the next refresh.
+        // It must not pass unseen either, and a missing key is still the key's fault, not the token's.
+        if (err instanceof KeychainKeyMissingError) throw err;
+        rotationFailed = true;
       }
     }
-    return { user, accessToken };
+    const auth = { user, accessToken };
+    if (rotationFailed) auth.rotationFailed = true;
+    return auth;
   }
 
   throw new MailError("BAD_INPUT", "auth_kind");
