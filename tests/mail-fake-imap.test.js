@@ -274,6 +274,51 @@ test("setFlags, addMailbox and removeMailbox move the mailbox state", async () =
   await client.logout();
 });
 
+test("APPEND stores the message in the named mailbox with its flags", async () => {
+  const fake = await startFake();
+  const client = await connectFake(fake);
+
+  const raw = makeRaw({ subject: "Draft from the fake", body: "Not sent yet." });
+  const result = await client.append("Drafts", raw, ["\\Draft"]);
+  assert.equal(result.destination, "Drafts");
+
+  assert.equal(fake.appended.length, 1);
+  assert.equal(fake.appended[0].mailbox, "Drafts");
+  assert.deepEqual(fake.appended[0].flags, ["\\Draft"]);
+  assert.equal(fake.appended[0].raw.length, Buffer.byteLength(raw));
+  assert.match(fake.appended[0].raw.toString(), /Subject: Draft from the fake/);
+  assert.ok(fake.commands.includes("APPEND"));
+
+  // It lands in the mailbox itself, readable like any other message there.
+  const box = await client.mailboxOpen("Drafts");
+  assert.equal(box.exists, 1);
+  const stored = await client.fetchOne("1", { uid: true, flags: true, source: true }, { uid: true });
+  assert.equal(stored.uid, 1);
+  assert.ok(stored.flags.has("\\Draft"));
+  assert.equal(stored.flags.has("\\Seen"), false);
+  assert.match(stored.source.toString(), /Not sent yet\./);
+
+  // Nothing was appended to the mailbox the client had not named.
+  const inbox = await client.status("INBOX", { messages: true });
+  assert.equal(inbox.messages, 0);
+  await client.logout();
+});
+
+test("omitUidNext leaves UIDNEXT out of SELECT while STATUS still answers it", async () => {
+  const fake = await startFake({ omitUidNext: true });
+  const uid = fake.deliver("INBOX", makeRaw({ subject: "No UIDNEXT in SELECT" }));
+  const client = await connectFake(fake);
+
+  const box = await client.mailboxOpen("INBOX");
+  assert.equal(box.exists, 1);
+  assert.equal(box.uidNext, undefined);
+
+  const status = await client.status("INBOX", { messages: true, uidNext: true });
+  assert.equal(status.messages, 1);
+  assert.equal(status.uidNext, uid + 1);
+  await client.logout();
+});
+
 test("a dropped connection with no error listener reaches uncaughtException", async () => {
   const fake = await startFake();
   const client = makeClient(fake);

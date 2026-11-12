@@ -1,16 +1,22 @@
 /**
- * In-process mail servers for the Crow Mail tests, one exported factory per protocol. This file
- * holds the IMAP fake; the SMTP fake is a separate factory so neither protocol's state machine
- * has to know about the other.
+ * In-process mail servers for the Crow Mail tests, one exported factory per protocol. The IMAP
+ * state machine and the SMTP state machine are separate factories so neither has to know about the
+ * other.
  *
  * The IMAP server speaks plain TCP on 127.0.0.1 and is told to bind port 0, so a test never picks
  * a fixed port. It answers what imapflow 2.11 asks for on the read side: greeting capabilities,
  * CAPABILITY/ID/ENABLE/NAMESPACE, LOGIN and AUTHENTICATE PLAIN|XOAUTH2, LIST/LSUB/STATUS,
  * SELECT/EXAMINE, SEARCH/UID SEARCH, FETCH/UID FETCH, STORE/UID STORE, IDLE with DONE, CLOSE and
- * LOGOUT. The advertised capability list is IMAP4rev1 only - no IMAP4rev2, LIST-EXTENDED,
- * LIST-STATUS, CONDSTORE, BINARY or COMPRESS - so imapflow takes its plainest paths: no RETURN
- * options on LIST, no ENABLE, no MODSEQ fetch items, a `* SEARCH 1 2 3` answer and an LSUB for the
- * subscription state that rev1 does not carry inline.
+ * LOGOUT, plus APPEND for the draft-save path. The advertised capability list is IMAP4rev1 only - no
+ * IMAP4rev2, LIST-EXTENDED, LIST-STATUS, CONDSTORE, BINARY or COMPRESS - so imapflow takes its
+ * plainest paths: no RETURN options on LIST, no ENABLE, no MODSEQ fetch items, a `* SEARCH 1 2 3`
+ * answer and an LSUB for the subscription state that rev1 does not carry inline. `omitUidNext`
+ * models the servers that leave UIDNEXT out of a SELECT and answer it only in a STATUS.
+ *
+ * The SMTP server speaks plain TCP on 127.0.0.1 port 0 as well, with no STARTTLS and no AUTH
+ * required: greeting, EHLO with the AUTH mechanism list, AUTH PLAIN/LOGIN/XOAUTH2, MAIL FROM,
+ * RCPT TO, DATA with dot-unstuffing, RSET and QUIT. nodemailer talks to it the way it talks to a
+ * real relay.
  *
  * One deliberate quirk of real servers is reproduced: `UID SEARCH UID n:*` with `n` above the
  * highest UID still matches the highest UID, because `*` means "the largest number in use" and the
@@ -18,8 +24,11 @@
  */
 
 import net from "node:net";
+import { StringDecoder } from "node:string_decoder";
 
 const CRLF = "\r\n";
+/** The one address every fake binds: a test never reaches the network. */
+const FAKE_HOST = "127.0.0.1";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -251,9 +260,11 @@ function flagList(flags) {
  * @param {Record<string, string>} [options.users] user -> password
  * @param {string[]} [options.mailboxes] mailbox paths, INBOX included
  * @param {Record<string, string>} [options.specialUse] path -> special-use flag
+ * @param {boolean} [options.omitUidNext] leave UIDNEXT out of SELECT/EXAMINE, answering it in STATUS only
  */
 export async function createFakeImapServer(options = {}) {
   const users = new Map(Object.entries(options.users ?? { [FAKE_USER]: FAKE_PASSWORD }));
+  const omitUidNext = options.omitUidNext === true;
   const mailboxes = new Map();
   const specialUseFlags = { ...DEFAULT_SPECIAL_USE, ...(options.specialUse ?? {}) };
   for (const path of options.mailboxes ?? DEFAULT_MAILBOXES) {
@@ -266,6 +277,7 @@ export async function createFakeImapServer(options = {}) {
     connections: new Set(),
     commands: [],
     logins: [],
+    appended: [],
     accepted: 0,
     silenceRemaining: 0,
     failLoginRemaining: 0,
@@ -321,6 +333,7 @@ export async function createFakeImapServer(options = {}) {
     port: address.port,
     commands: state.commands,
     logins: state.logins,
+    appended: state.appended,
 
     /** Adds a message to a mailbox, as an arrival does. Returns its UID. */
     deliver(mailbox, raw, { flags = [], internalDate = new Date() } = {}) {
@@ -619,10 +632,39 @@ export async function createFakeImapServer(options = {}) {
         write(conn, `* ${box.messages.length} EXISTS`);
         write(conn, "* 0 RECENT");
         write(conn, `* OK [UIDVALIDITY ${box.uidValidity}] UIDs valid`);
-        write(conn, `* OK [UIDNEXT ${box.uidNext}] Predicted next UID`);
+        // A server may leave UIDNEXT out of the SELECT answer; STATUS still carries it.
+        if (!omitUidNext) write(conn, `* OK [UIDNEXT ${box.uidNext}] Predicted next UID`);
         write(conn, "* OK [PERMANENTFLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft \\*)] Limited");
         const mode = name === "EXAMINE" ? "READ-ONLY" : "READ-WRITE";
         write(conn, `${tag} OK [${mode}] ${name} completed`);
+        return;
+      }
+
+      case "APPEND": {
+        if (!requireAuth(conn, tag)) return;
+        const box = mailboxes.get(tokenText(tokens[2]));
+        if (!box) {
+          write(conn, `${tag} NO [TRYCREATE] no such mailbox`);
+          return;
+        }
+        const literal = tokens.find((token) => token.type === "literal");
+        if (!literal) {
+          write(conn, `${tag} BAD a literal message is required`);
+          return;
+        }
+        // Flags arrive as backslash atoms ahead of the literal; the optional date-time is a
+        // quoted string, so it is not mistaken for one.
+        const flags = tokens
+          .slice(3)
+          .filter((token) => token.type === "atom" && tokenText(token).startsWith("\\"))
+          .map(tokenText);
+        const raw = Buffer.from(literal.value ?? Buffer.alloc(0));
+        const uid = box.uidNext;
+        box.uidNext += 1;
+        box.messages.push({ uid, raw, flags: new Set(flags), internalDate: new Date() });
+        state.appended.push({ mailbox: box.path, flags: [...flags], raw: Buffer.from(raw) });
+        notify(box, `* ${box.messages.length} EXISTS`);
+        write(conn, `${tag} OK APPEND completed`);
         return;
       }
 
@@ -922,5 +964,330 @@ export async function createFakeImapServer(options = {}) {
     const tests = [];
     while (index < tokens.length) tests.push(parseOne());
     return (message) => tests.every((test) => test(message));
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+// SMTP
+// -----------------------------------------------------------------------------------------------
+
+/** The EHLO extension lines after the greeting line. */
+const SMTP_EXTENSIONS = [
+  "PIPELINING",
+  "SIZE 35882577",
+  "8BITMIME",
+  "AUTH PLAIN LOGIN XOAUTH2",
+];
+
+/** `MAIL FROM:<address>` / `RCPT TO:<address>`, with an optional trailing parameter list. */
+const SMTP_PATH_RE = /^(?:FROM|TO):\s*<([^>]*)>/i;
+
+/**
+ * Starts the fake SMTP server. Resolves once it is listening, with the bound port.
+ *
+ * `raw` on each recorded message is the unframed DATA content, dot-unstuffing already undone.
+ *
+ * @param {object} [options]
+ * @param {Record<string, string>} [options.users] user -> password; when omitted any non-empty credentials are accepted
+ * @param {(address: string) => boolean} [options.rejectRcpt] refuse this recipient with a 550
+ */
+export async function createFakeSmtpServer(options = {}) {
+  const users = options.users ? new Map(Object.entries(options.users)) : null;
+  const rejectRcpt = typeof options.rejectRcpt === "function" ? options.rejectRcpt : null;
+
+  const state = {
+    messages: [],
+    connections: new Set(),
+    accepted: 0,
+    failDataRemaining: 0,
+    queued: 0,
+    closed: false,
+  };
+
+  const server = net.createServer((socket) => {
+    state.accepted += 1;
+    const conn = {
+      socket,
+      decoder: new StringDecoder("utf8"),
+      buffer: "",
+      // null while a command is expected; otherwise the continuation being collected.
+      expect: null,
+      auth: null,
+      from: null,
+      rcpt: [],
+      data: [],
+      pendingUser: null,
+    };
+    state.connections.add(conn);
+    socket.setNoDelay(true);
+    socket.on("data", (chunk) => smtpFeed(conn, chunk));
+    socket.on("error", () => {});
+    socket.on("close", () => state.connections.delete(conn));
+    smtpWrite(conn, `220 ${FAKE_HOST} fake SMTP ready`);
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+
+  const fake = {
+    host: FAKE_HOST,
+    port: address.port,
+    messages: state.messages,
+
+    /** The next DATA command is refused with a transient failure. */
+    failNextData() {
+      state.failDataRemaining += 1;
+    },
+
+    connectionCount() {
+      return state.accepted;
+    },
+
+    openConnections() {
+      return state.connections.size;
+    },
+
+    async close() {
+      if (state.closed) return;
+      state.closed = true;
+      for (const conn of state.connections) conn.socket.destroy();
+      state.connections.clear();
+      await new Promise((resolve) => {
+        server.close(() => resolve());
+        // A socket the OS has not torn down yet must not keep the test run alive.
+        setTimeout(resolve, 1000).unref();
+      });
+    },
+  };
+
+  return fake;
+
+  // ---------------------------------------------------------------------------------------------
+
+  function smtpWrite(conn, line) {
+    if (conn.socket.destroyed) return;
+    conn.socket.write(`${line}${CRLF}`);
+  }
+
+  function smtpFeed(conn, chunk) {
+    conn.buffer += conn.decoder.write(chunk);
+    for (;;) {
+      const end = conn.buffer.indexOf(CRLF);
+      if (end < 0) return;
+      const line = conn.buffer.slice(0, end);
+      conn.buffer = conn.buffer.slice(end + 2);
+      smtpLine(conn, line);
+      if (conn.socket.destroyed) return;
+    }
+  }
+
+  function smtpLine(conn, line) {
+    if (conn.expect === "data") {
+      // RFC 5321 4.5.2: a leading dot is the transparency escape, and a lone dot ends the data.
+      if (line === ".") {
+        smtpFinishData(conn);
+        return;
+      }
+      conn.data.push(line.startsWith(".") ? line.slice(1) : line);
+      return;
+    }
+
+    if (conn.expect === "plain" || conn.expect === "xoauth2") {
+      const mechanism = conn.expect;
+      conn.expect = null;
+      if (line === "*") {
+        smtpWrite(conn, "501 5.7.0 Authentication cancelled");
+        return;
+      }
+      if (mechanism === "plain") smtpAuthenticatePlain(conn, line);
+      else smtpAuthenticateXoauth2(conn, line);
+      return;
+    }
+
+    if (conn.expect === "username") {
+      conn.pendingUser = Buffer.from(line, "base64").toString("utf8");
+      conn.expect = "password";
+      smtpWrite(conn, `334 ${Buffer.from("Password:").toString("base64")}`);
+      return;
+    }
+
+    if (conn.expect === "password") {
+      conn.expect = null;
+      const password = Buffer.from(line, "base64").toString("utf8");
+      const user = conn.pendingUser;
+      conn.pendingUser = null;
+      smtpAcceptPassword(conn, user, password, "LOGIN");
+      return;
+    }
+
+    const space = line.indexOf(" ");
+    const verb = (space < 0 ? line : line.slice(0, space)).toUpperCase();
+    const rest = space < 0 ? "" : line.slice(space + 1);
+
+    switch (verb) {
+      case "EHLO": {
+        const lines = [`${FAKE_HOST} fake SMTP`, ...SMTP_EXTENSIONS];
+        lines.forEach((text, index) => {
+          smtpWrite(conn, `${index === lines.length - 1 ? "250 " : "250-"}${text}`);
+        });
+        return;
+      }
+
+      case "HELO":
+        smtpWrite(conn, `250 ${FAKE_HOST}`);
+        return;
+
+      case "AUTH": {
+        const split = rest.indexOf(" ");
+        const mechanism = (split < 0 ? rest : rest.slice(0, split)).toUpperCase();
+        const inline = split < 0 ? "" : rest.slice(split + 1).trim();
+        if (mechanism === "PLAIN") {
+          if (inline) smtpAuthenticatePlain(conn, inline);
+          else {
+            conn.expect = "plain";
+            smtpWrite(conn, "334 ");
+          }
+          return;
+        }
+        if (mechanism === "LOGIN") {
+          conn.expect = "username";
+          smtpWrite(conn, `334 ${Buffer.from("Username:").toString("base64")}`);
+          return;
+        }
+        if (mechanism === "XOAUTH2") {
+          if (inline) smtpAuthenticateXoauth2(conn, inline);
+          else {
+            conn.expect = "xoauth2";
+            smtpWrite(conn, "334 ");
+          }
+          return;
+        }
+        smtpWrite(conn, "504 5.5.4 Unrecognised authentication mechanism");
+        return;
+      }
+
+      case "MAIL": {
+        const match = SMTP_PATH_RE.exec(rest);
+        if (!match) {
+          smtpWrite(conn, "501 5.5.4 Syntax: MAIL FROM:<address>");
+          return;
+        }
+        conn.from = match[1].trim();
+        conn.rcpt = [];
+        smtpWrite(conn, "250 2.1.0 Ok");
+        return;
+      }
+
+      case "RCPT": {
+        if (conn.from === null) {
+          smtpWrite(conn, "503 5.5.1 Need MAIL before RCPT");
+          return;
+        }
+        const match = SMTP_PATH_RE.exec(rest);
+        if (!match) {
+          smtpWrite(conn, "501 5.5.4 Syntax: RCPT TO:<address>");
+          return;
+        }
+        const address = match[1].trim();
+        if (rejectRcpt && rejectRcpt(address)) {
+          smtpWrite(conn, `550 5.1.1 <${address}>: no such recipient here`);
+          return;
+        }
+        conn.rcpt.push(address);
+        smtpWrite(conn, "250 2.1.5 Ok");
+        return;
+      }
+
+      case "DATA": {
+        if (conn.from === null || !conn.rcpt.length) {
+          smtpWrite(conn, "503 5.5.1 Need MAIL and RCPT before DATA");
+          return;
+        }
+        if (state.failDataRemaining > 0) {
+          state.failDataRemaining -= 1;
+          conn.from = null;
+          conn.rcpt = [];
+          smtpWrite(conn, "451 4.3.0 temporary failure, try again later");
+          return;
+        }
+        conn.data = [];
+        conn.expect = "data";
+        smtpWrite(conn, "354 End data with <CR><LF>.<CR><LF>");
+        return;
+      }
+
+      case "RSET":
+        conn.from = null;
+        conn.rcpt = [];
+        smtpWrite(conn, "250 2.0.0 Ok");
+        return;
+
+      case "NOOP":
+        smtpWrite(conn, "250 2.0.0 Ok");
+        return;
+
+      case "QUIT":
+        smtpWrite(conn, "221 2.0.0 Bye");
+        conn.socket.end();
+        return;
+
+      default:
+        smtpWrite(conn, "502 5.5.2 Command not recognised");
+    }
+  }
+
+  function smtpFinishData(conn) {
+    const raw = conn.data.join(CRLF);
+    state.messages.push({
+      from: conn.from,
+      rcpt: [...conn.rcpt],
+      raw,
+      auth: conn.auth ? { ...conn.auth } : null,
+    });
+    state.queued += 1;
+    conn.data = [];
+    conn.from = null;
+    conn.rcpt = [];
+    conn.expect = null;
+    smtpWrite(conn, `250 2.0.0 Ok: queued as fake-${state.queued}`);
+  }
+
+  function smtpAcceptPassword(conn, user, password, method) {
+    if (!user || (users && users.get(user) !== password)) {
+      smtpWrite(conn, "535 5.7.8 Authentication credentials invalid");
+      return;
+    }
+    conn.auth = { user, method };
+    smtpWrite(conn, "235 2.7.0 Authentication successful");
+  }
+
+  function smtpAuthenticatePlain(conn, payload) {
+    // PLAIN carries [authorization identity] NUL user NUL password; nodemailer sends no authzid.
+    const parts = Buffer.from(String(payload).trim(), "base64").toString("utf8").split("\u0000");
+    const user = parts.length >= 3 ? parts[1] : "";
+    const password = parts.length >= 3 ? parts[2] : "";
+    smtpAcceptPassword(conn, user, password, "PLAIN");
+  }
+
+  function smtpAuthenticateXoauth2(conn, payload) {
+    // `user=<address>\x01auth=Bearer <token>\x01\x01`, all base64-encoded as one blob.
+    const decoded = Buffer.from(String(payload).trim(), "base64").toString("utf8");
+    const fields = decoded.split("\u0001");
+    const userField = fields.find((field) => field.startsWith("user=")) ?? "";
+    const authField = fields.find((field) => field.startsWith("auth=")) ?? "";
+    const user = userField.slice("user=".length);
+    const token = authField.replace(/^auth=Bearer\s*/i, "").trim();
+    if (!user || !token || (users && !users.has(user))) {
+      smtpWrite(conn, "535 5.7.8 Authentication credentials invalid");
+      return;
+    }
+    conn.auth = { user, method: "XOAUTH2" };
+    smtpWrite(conn, "235 2.7.0 Authentication successful");
   }
 }
