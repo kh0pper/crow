@@ -44,6 +44,7 @@
  */
 import { localDay } from "../eggs.js";
 import { rowDelta, insertOnce } from "../steps.js";
+import { MOVE_NEED_KIND, MOVE_SLOT_KIND, MOVE_STAND_KIND } from "./day-complete.js";
 import { servedLibrary, entryById, AREAS } from "./library.js";
 import { pickChunk, slotFor } from "./picker.js";
 import {
@@ -60,16 +61,11 @@ import {
 export { SLOTS };
 
 /** Wallet kind: key `<day>`, delta 1-3 — how many cards the day asks for. Grows, MAX. */
-export const MOVE_NEED_KIND = "moveneed";
+export { MOVE_NEED_KIND };
 /** Synced setting prefix: `moves.slot.<slot>` holds that slot's pick. */
 export const SLOT_KEY_PREFIX = "moves.slot.";
 /** Synced setting: JSON { weekId, cards, days } — the week this day belongs to. */
 export const WEEK_KEY = "moves.week";
-
-/** Wallet kind: key `<day>:<slot>`, delta 1 — that slot's card was finished. */
-const MOVE_SLOT_KIND = "moveslot";
-/** Wallet kind: key `<day>:<slot>`, delta 1 — a stand-in was done for that slot. */
-const MOVE_STAND_IN_KIND = "movestand";
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** The most cards a day can ask for, and the clamp of a stored `moveneed` row. */
@@ -338,7 +334,7 @@ export async function dayCards(db, {
   for (const item of slots) {
     const key = `${day}:${item.slot}`;
     item.done = (await rowDelta(db, MOVE_SLOT_KIND, key)) !== null;
-    item.standIn = (await rowDelta(db, MOVE_STAND_IN_KIND, key)) !== null;
+    item.standIn = (await rowDelta(db, MOVE_STAND_KIND, key)) !== null;
   }
 
   // The card count is a FACT of the day, written once and merged by MAX, and

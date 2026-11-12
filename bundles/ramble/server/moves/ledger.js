@@ -37,7 +37,7 @@
 import { localDay, startOfLocalDay } from "../eggs.js";
 import { insertOnce, casDelta } from "../steps.js";
 import { feed as petFeed, petState } from "../pet.js";
-import { ACTIVITY_KINDS } from "./library.js";
+import { ACTIVITY_KINDS, AREAS } from "./library.js";
 import { claimCapped, claimIndoor, capDayKey, dayKey, INDOOR_DAILY_CAP, MOVE_INDOOR_KIND } from "./indoor-cap.js";
 
 // ledger.js is the moves surface the routes and the panel import; the indoor
@@ -83,6 +83,33 @@ export const SINGLE_ENTRY_MAX = CHUNK_MAX;
 export const LOG_MINUTES_MAX = 600;
 /** The fixed effort vocabulary. No free text reaches the ledger. */
 export const EFFORTS = Object.freeze(["easy", "moderate", "hard"]);
+
+/**
+ * The area each activity leans on when a log names none: the fixed vocabulary of
+ * `ACTIVITY_KINDS` mapped onto `AREAS`, with `other` naming no area at all
+ * (`null`). Read only through `areaFor`, which ignores anything outside AREAS.
+ */
+export const ACTIVITY_AREA = Object.freeze({
+  walk: "heart",
+  jog: "heart",
+  run: "heart",
+  cycle: "heart",
+  swim: "heart",
+  sport: "heart",
+  yoga: "mobility",
+  band: "upper",
+  bodyweight: "core",
+  other: null,
+});
+
+/**
+ * The area a log's activity leans on: the caller's own area when it is one of
+ * AREAS, else the activity's default, else null. Junk is ignored, never stored.
+ */
+export function areaFor(activity, area) {
+  if (AREAS.includes(area)) return area;
+  return Object.hasOwn(ACTIVITY_AREA, activity) ? ACTIVITY_AREA[activity] : null;
+}
 /** A challenge Done is always counted as moderate: the picker chose its size. */
 export const CHALLENGE_EFFORT = "moderate";
 
@@ -226,11 +253,14 @@ export async function recordChallengeDone(db, { day, entry, now = Date.now(), em
  * what `movesDay` reports per log, and why the day's logs always sum to no more
  * than the budget row says was paid.
  *
- * Returns `{ paid, key, already, day, points }`: `points` is what the activity
- * is worth, `paid` what the day's budget allowed (they differ at the cap, and
- * `paid` is 0 for a repeat).
+ * Returns `{ paid, key, already, day, points, capped, area }`: `points` is what
+ * the activity is worth, `paid` what the day's budget allowed (they differ at
+ * the cap, and `paid` is 0 for a repeat), and `area` the area the log trains —
+ * the caller's own when it is one of AREAS, else the activity's default
+ * (ACTIVITY_AREA), else null. The area is an answer only: it never changes the
+ * key, the pay or the dedup.
  */
-export async function recordLog(db, { activity, minutes, effort, now = Date.now(), emit } = {}) {
+export async function recordLog(db, { activity, minutes, effort, area, now = Date.now(), emit } = {}) {
   const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
   if (!ACTIVITY_KINDS.includes(activity)) {
     throw new MovesInputError("activity must be one of " + ACTIVITY_KINDS.join(", "));
@@ -245,9 +275,10 @@ export async function recordLog(db, { activity, minutes, effort, now = Date.now(
   const day = localDay(at);
   const key = day + ":" + minuteOfDay(at) + ":" + activity + ":" + minutes + ":" + effort;
   const points = pointsFor({ activity, minutes, effort });
+  const logArea = areaFor(activity, area);
 
   const fresh = await insertOnce(db, MOVE_LOG_KIND, key, 0, at, emit);
-  if (!fresh) return { paid: 0, key, already: true, day, points: 0 };
+  if (!fresh) return { paid: 0, key, already: true, day, points: 0, area: logArea };
 
   const claim = isOutdoorActivity(activity)
     ? await claimCapped(db, { kind: MOVE_OUTDOOR_KIND, cap: OUTDOOR_DAILY_CAP, day, points, now: at, emit })
@@ -259,7 +290,7 @@ export async function recordLog(db, { activity, minutes, effort, now = Date.now(
     if (await casDelta(db, MOVE_LOG_KIND, key, 0, claim.paid, at, emit)) paid = claim.paid;
   }
   await pay(db, { paid }, { now: at, emit });
-  return { paid, key, already: false, day, points, capped: claim.capped };
+  return { paid, key, already: false, day, points, capped: claim.capped, area: logArea };
 }
 
 /**

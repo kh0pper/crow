@@ -32,6 +32,7 @@ import {
   pointsFor, chunkPoints, isOutdoorActivity, markChallengeDone, recordChallengeDone, recordLog,
   movesDay, movesRoom, MovesInputError, MOVE_DONE_KIND, MOVE_INDOOR_KIND, MOVE_OUTDOOR_KIND,
   MOVE_LOG_KIND, INDOOR_DAILY_CAP, OUTDOOR_DAILY_CAP, SINGLE_ENTRY_MAX, CHUNK_RATE, CHUNK_MAX,
+  ACTIVITY_AREA,
 } from "../bundles/ramble/server/moves/ledger.js";
 import { applyRambleWallet } from "../servers/sharing/instance-sync.js";
 
@@ -408,6 +409,40 @@ test("a log pays the chunk rate: 10 minutes 12, 30 minutes 20, 60 minutes 20", a
   assert.deepEqual([b.points, b.paid], [20, 20]);
   const c = await recordLog(db, { activity: "yoga", minutes: 60, effort: "hard", now: T0 + 48 * HOUR });
   assert.deepEqual([c.points, c.paid], [20, 20]);
+});
+
+test("a log answers the area it trains: the caller's, the activity's default, or none", async () => {
+  assert.equal(Object.isFrozen(ACTIVITY_AREA), true);
+  assert.deepEqual({ ...ACTIVITY_AREA }, {
+    walk: "heart", jog: "heart", run: "heart", cycle: "heart", swim: "heart", sport: "heart",
+    yoga: "mobility", band: "upper", bodyweight: "core", other: null,
+  });
+
+  const db = await freshDb();
+  const yoga = await recordLog(db, { activity: "yoga", minutes: 10, effort: "easy", now: T0 });
+  assert.equal(yoga.area, "mobility", "the activity's own area");
+
+  const walk = await recordLog(db, { activity: "walk", minutes: 10, effort: "easy", now: T0 + 60000 });
+  assert.equal(walk.area, "heart");
+
+  const other = await recordLog(db, { activity: "other", minutes: 10, effort: "easy", now: T0 + 120000 });
+  assert.equal(other.area, null, "the something-else bucket leans on no area");
+
+  const given = await recordLog(db, {
+    activity: "yoga", minutes: 10, effort: "easy", area: "core", now: T0 + 180000,
+  });
+  assert.equal(given.area, "core", "the caller's own area wins over the activity's");
+
+  const junk = await recordLog(db, {
+    activity: "band", minutes: 10, effort: "easy", area: "knees", now: T0 + 240000,
+  });
+  assert.equal(junk.area, "upper", "an area outside AREAS is ignored");
+  assert.match(junk.key, new RegExp(`^${DAY0}:\\d+:band:10:easy$`), "the area never reaches the key");
+
+  const repeat = await recordLog(db, { activity: "yoga", minutes: 10, effort: "easy", now: T0 });
+  assert.equal(repeat.already, true);
+  assert.equal(repeat.key, yoga.key);
+  assert.equal(repeat.area, "mobility", "a repeat answers its area too");
 });
 
 test("logs and a Done share one budget of 40 a day, indoor and outdoor separately", async () => {

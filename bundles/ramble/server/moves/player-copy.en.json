@@ -33,5 +33,12 @@
   "settings.slot.evening": "Evening",
   "player.voice": "Voice",
   "player.sound": "Sounds",
-  "player.voiceUnavailable": "Voice isn't available on this device"
+  "player.voiceUnavailable": "Voice isn't available on this device",
+  "today.balancing": "A walk covers part of today. One card is for stretching or strength.",
+  "outdoor.start": "Start",
+  "outdoor.done": "Done",
+  "outdoor.running": "{minutes} min so far",
+  "outdoor.counts": "Each full 10 minutes counts toward a card.",
+  "outdoor.result": "{minutes} minutes. That covers {done} of today's cards.",
+  "outdoor.cap": "Up to 60 minutes count in a day."
 }

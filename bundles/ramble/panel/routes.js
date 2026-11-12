@@ -311,7 +311,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   async function ensureMovesMods(res) {
     if (movesMods) return true;
     try {
-      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod, slotsMod] = await Promise.all([
+      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod, slotsMod, dayMod, dayCompleteMod] = await Promise.all([
         bundleImport("server/moves/library.js"),
         bundleImport("server/moves/picker.js"),
         bundleImport("server/moves/ledger.js"),
@@ -321,9 +321,12 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/moves/parse.js"),
         bundleImport("server/moves/progress.js"),
         bundleImport("server/moves/slots.js"),
+        bundleImport("server/moves/day.js"),
+        bundleImport("server/moves/day-complete.js"),
       ]);
       movesMods = {
         libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod, slotsMod,
+        dayMod, dayCompleteMod,
       };
       return true;
     } catch (err) {
@@ -463,10 +466,49 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       };
     });
     const payload = {
-      day: out.day, need: out.need, nowSlot: out.nowSlot, off: !!out.off, slots,
+      day: out.day,
+      need: out.need,
+      nowSlot: out.nowSlot,
+      off: !!out.off,
+      slots,
+      // A paused day has no cards to finish, so there is nothing to judge.
+      complete: out.off
+        ? false
+        : await movesMods.dayCompleteMod.isDayComplete(db, out.day, { need: out.need }),
     };
     if (refused !== undefined) payload.refused = !!refused;
+    // The open (or last finished) outdoor session, so a reload resumes a walk's
+    // timer from the SERVER's start rather than a client clock.
+    payload.outdoor = await movesMods.dayMod.outdoorState(db);
     return payload;
+  }
+
+  /**
+   * The day's slots as moves/slots.js draws them (entryId per slot), with the
+   * weather the user still wants weighed.
+   */
+  async function daySlots(now) {
+    const prefs = await movesMods.todayMod.readPrefs(db);
+    return movesMods.slotsMod.dayCards(db, {
+      now, weather: await movesWeather(prefs), emit, library: servedMoves(),
+    });
+  }
+
+  /**
+   * Offer the day's completion for today and yesterday. Completion is never
+   * stored: `settleDay` derives it from the rows and, when it holds, writes the
+   * day's cache row and offers the streak heart — both keyed by the day, so a
+   * second settle writes nothing new. Today is judged against the day's own
+   * picks-capped card count; yesterday is long settled and is offered no count.
+   * A paused day has no cards, so nothing is settled.
+   *
+   * `dayOut` is read for `day`, `need` and `off` only.
+   */
+  async function settleRecent(now, dayOut) {
+    if (!dayOut || dayOut.off) return;
+    await movesMods.dayMod.settleDay(db, { day: dayOut.day, now, emit, need: dayOut.need });
+    const yesterday = mods.eggsMod.localDay(mods.eggsMod.startOfLocalDay(now) - 1);
+    await movesMods.dayMod.settleDay(db, { day: yesterday, now, emit });
   }
 
   /** The whole moves strip: today's card, the bird's Health, steps and the streak. */
@@ -1445,7 +1487,18 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   router.get("/api/ramble/moves/day", handle(async (req, res) => {
     if (!(await ensureMovesMods(res))) return;
-    res.json(await dayPayload(Date.now()));
+    const now = Date.now();
+    const payload = await dayPayload(now);
+    // This route may write, so it marks the day the streak's all-cards rule
+    // starts on this instance (once; a second read writes nothing), then settles
+    // the day before the answer: a day already finished by rows that arrived
+    // from another instance gets its cache row and its heart offered here, and a
+    // second read of it writes nothing new.
+    await movesMods.streakMod.ensureStreakV2(db, {
+      day: mods.eggsMod.localDay(now), now, emit,
+    });
+    await settleRecent(now, payload);
+    res.json(payload);
   }));
 
   router.post("/api/ramble/moves/slot/swap", handle(async (req, res) => {
@@ -1490,7 +1543,9 @@ export default function rambleRouter(dashboardAuth, options = {}) {
    * and the SERVER builds the full wallet key from today's day (`todayCard`),
    * never from the client's clock.
    */
-  const MOVE_CARD_SLOTS = ["early", "day", "evening"];
+  const MOVE_CARD_SLOTS = ["early", "day", "evening", "morning", "midday"];
+  /** The slot names the day itself uses (moves/week.js SLOTS). */
+  const MOVE_SLOT_NAMES = ["morning", "midday", "evening"];
   /**
    * A start may also ask for an EXTRA: `cardKey: "extra"` with any served entry.
    * The server stamps the key with its own day and second (`extraCardKey`), so a
@@ -1502,12 +1557,40 @@ export default function rambleRouter(dashboardAuth, options = {}) {
    * for the day's own card, `<day>:x:<entryId>:<startedAtSeconds>` for an extra.
    * Anything else — the retired `<day>:x1` numbering among it — is refused.
    */
-  const MOVE_CARD_KEY_RE = /^\d{4}-\d{2}-\d{2}:(early|day|evening)$/;
+  const MOVE_CARD_KEY_RE = /^\d{4}-\d{2}-\d{2}:(early|day|evening|morning|midday)$/;
   const MOVE_EXTRA_KEY_RE = /^\d{4}-\d{2}-\d{2}:x:([A-Za-z0-9_.-]{1,64}):\d{1,12}$/;
   /** The most active seconds one post may claim (six hours). */
   const MOVE_ACTIVE_MAX = 21600;
   /** The most characters a card key may carry (an extra's shape must fit). */
   const MOVE_CARD_KEY_MAX = 96;
+
+  /**
+   * The slot a finished card closes, or null for a chunk beyond the day's cards.
+   *
+   * A card of today is matched against the day's own slots: named by the day's
+   * slot names, the slot must still hold the entry that was played (a slot the
+   * user swapped away from closes nothing); named by the earlier ones, the entry
+   * names the slot it sits in, the Now slot first when two of them hold it. A
+   * card carried over from yesterday has no slots of today to read, so a day
+   * slot name is trusted as given and an earlier one closes nothing.
+   */
+  function resolveSlot(cardKey, entryId, dayOut) {
+    if (MOVE_EXTRA_KEY_RE.test(cardKey)) return null;
+    const day = cardKey.slice(0, 10);
+    const slot = cardKey.slice(11);
+    const slots = Array.isArray(dayOut?.slots) ? dayOut.slots : [];
+    if (dayOut && day === dayOut.day) {
+      if (MOVE_SLOT_NAMES.includes(slot)) {
+        const item = slots.find((s) => s && s.slot === slot);
+        return item && !item.empty && item.entryId === entryId ? slot : null;
+      }
+      const matches = slots.filter((s) => s && !s.empty && s.entryId === entryId);
+      if (matches.length === 0) return null;
+      const nowItem = matches.find((s) => s.slot === dayOut.nowSlot);
+      return (nowItem ?? matches[0]).slot;
+    }
+    return MOVE_SLOT_NAMES.includes(slot) ? slot : null;
+  }
 
   router.post("/api/ramble/moves/start", handle(async (req, res) => {
     if (!(await ensureMovesMods(res))) return;
@@ -1524,18 +1607,39 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (!entry) return res.status(404).json({ error: "not found" });
     // An own-card slot is only the card actually on screen: the client names it,
     // and a start for any other entry would open a session nothing can mark
-    // Done. An extra is any served entry, so it skips that gate.
-    const today = await todayCard(now);
-    if (!extra && (!today || today.off || !today.entry || today.entry.id !== entry.id)) {
-      bad("entryId must be today's card");
+    // Done. An extra is any served entry, so it skips that gate. A slot named by
+    // the day's own slot names is checked against that slot's card, so the
+    // morning card is the morning chunk and never another slot's. `evening` is
+    // both one of those names AND one of the strip's older ones: the day's own
+    // slot wins when it holds the posted card, and the older gate answers
+    // otherwise. `early` and `day` are the older names only.
+    let day = null;
+    if (extra) {
+      day = mods.eggsMod.localDay(now);
+    } else if (MOVE_SLOT_NAMES.includes(slot)) {
+      const dayOut = await daySlots(now);
+      const item = (Array.isArray(dayOut.slots) ? dayOut.slots : []).find((s) => s.slot === slot);
+      if (item && !item.empty && item.entryId === entry.id) {
+        day = dayOut.day;
+      } else if (slot !== "evening") {
+        bad("entryId must be today's card");
+      }
+    }
+    if (day === null) {
+      // The card on screen: the older gate, for `early`, `day` and an
+      // `evening` the day's own slot does not hold.
+      const today = await todayCard(now);
+      if (!today || today.off || !today.entry || today.entry.id !== entry.id) {
+        bad("entryId must be today's card");
+      }
+      day = today.day;
     }
     const plannedSeconds = movesMods.progressMod.plannedSecondsFor({
       chain: b.chain, entryId, library, entry,
     });
-    const day = extra ? mods.eggsMod.localDay(now) : today.day;
     const cardKey = extra
       ? movesMods.progressMod.extraCardKey(day, entryId, now)
-      : today.day + ":" + slot;
+      : day + ":" + slot;
     const started = await movesMods.progressMod.startChunk(db, {
       day, cardKey, entryId, plannedSeconds, now,
     });
@@ -1586,15 +1690,121 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     // An entry the ledger cannot mark (outside its vocabulary) leaves the pay
     // standing: the mark and the streak heart are skipped for this post, and no
     // paid post turns into a 500.
+    const dayOut = await daySlots(now);
+    let dayDone = null;
     if (progress.done) {
       try {
         await movesMods.ledgerMod.markChallengeDone(db, { day, entry, now, emit });
         await movesMods.streakMod.awardStreakHeart(db, { now, emit });
+        // The finished chunk closes the slot it was the card of (null for an
+        // extra, which still marks the area and may balance the day). Only a
+        // card of today is judged against today's picks-capped card count, and
+        // an entry the recorder cannot take leaves this post's pay and marks
+        // standing — a paid post never turns into a 500.
+        dayDone = await movesMods.dayMod.recordSlotDone(db, {
+          day,
+          slot: resolveSlot(cardKey, entryId, dayOut),
+          entry,
+          via: "player",
+          now,
+          emit,
+          ...(day === dayOut.day ? { need: dayOut.need } : {}),
+        });
       } catch (err) {
         if (err?.name !== "MovesInputError") throw err;
       }
     }
-    res.json({ ...(await movesSnapshot(now)), progress });
+    await settleRecent(now, dayOut);
+    res.json({ ...(await movesSnapshot(now)), progress, dayDone });
+  }));
+
+  /*
+   * An outdoor session: a walk measured by its own Start/Done rather than a
+   * chunk. The client names only the entry; the day and the session key are the
+   * SERVER's (moves/day.js startOutdoor), so a retried or reloaded start keeps
+   * its original anchor and a walk cannot be restarted to shorten itself.
+   */
+  router.post("/api/ramble/moves/outdoor/start", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const entryId = requireText((req.body || {}).entryId, 80, "entryId");
+    const entry = movesMods.libraryMod.entryById(servedMoves(), entryId);
+    if (!entry) return res.status(404).json({ error: "not found" });
+    if (entry.kind !== "walk") bad("entryId must be a walk");
+    let started;
+    try {
+      started = await movesMods.dayMod.startOutdoor(db, {
+        day: mods.eggsMod.localDay(now), entryId, now,
+      });
+    } catch (err) { movesInput(err); }
+    res.json({ startedAt: started.startedAt, sessionKey: started.sessionKey, entryId });
+  }));
+
+  /**
+   * Finish the open outdoor session. The day's cards are handed in as the
+   * caller's own read (moves/day.js never imports slots.js), so a session of ten
+   * minutes or more stands in for the cards still open — never for the one a
+   * balancing chunk is kept for — and a paused day has none to fill.
+   */
+  router.post("/api/ramble/moves/outdoor/done", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    // The day's own cards, read once before the finish: a session of ten
+    // minutes or more stands in for the cards still open, and a paused day has
+    // none to fill. `day` travels with them because moves/day.js refuses a set
+    // drawn for another day.
+    const dayOut = await daySlots(now);
+    let finished;
+    try {
+      finished = await movesMods.dayMod.finishOutdoor(db, {
+        day: dayOut.day,
+        now,
+        emit,
+        cards: dayOut.off ? undefined : { day: dayOut.day, need: dayOut.need, slots: dayOut.slots },
+      });
+    } catch (err) { movesInput(err); }
+    // Core repaints the profile picture, coalesced (profile-avatar.js).
+    if (finished.walkedNew) poke("ramble:walked-changed", { day: dayOut.day });
+    await settleRecent(now, await daySlots(now));
+    await movesMods.streakMod.awardStreakHeart(db, { now, emit });
+    res.json({ ...finished, day: await dayPayload(now) });
+  }));
+
+  /**
+   * A stand-in for one of the day's open cards: a log the player already
+   * recorded, or a step count that reached the goal. The day's cards are handed
+   * in as the caller's own read (moves/day.js never imports slots.js), so a
+   * stand-in can only ever fill a card the day really holds, and a paused day
+   * has none to fill. A refusal is the day's answer, not a bad request: it comes
+   * back as 409 with the reason the day gave.
+   */
+  router.post("/api/ramble/moves/standin", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const b = req.body || {};
+    const source = requireText(b.source, 16, "source");
+    const slot = b.slot == null ? undefined : requireText(b.slot, 16, "slot");
+    const logKey = b.logKey == null ? undefined : requireText(b.logKey, 96, "logKey");
+    const area = b.area == null ? undefined : requireText(b.area, 16, "area");
+    const dayOut = await daySlots(now);
+    if (dayOut.off) bad("challenges are paused");
+    const standIn = await movesMods.dayMod.assignStandIn(db, {
+      day: dayOut.day,
+      slot,
+      source,
+      logKey,
+      area,
+      now,
+      emit,
+      cards: { day: dayOut.day, need: dayOut.need, slots: dayOut.slots },
+    });
+    // Everything the answer carries is read BEFORE it is sent: today is already
+    // settled by the stand-in's own settleDay, and this offers yesterday. A
+    // failure here still has a response to become, never a sent one to follow.
+    const day = standIn.ok ? await dayPayload(now) : null;
+    await settleRecent(now, dayOut);
+    if (standIn.ok) res.json({ standIn, day });
+    else res.status(409).json({ error: standIn.reason, standIn });
   }));
 
   // The one-card Swap the old strip and the MCP tool still call: it re-rolls the
@@ -1661,7 +1871,8 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     await movesMods.streakMod.awardStreakHeart(db, { now, emit });
     res.json({
       log: {
-        paid: logged.paid, points: logged.points, already: logged.already, day: logged.day, capped: !!logged.capped,
+        paid: logged.paid, points: logged.points, already: logged.already, day: logged.day,
+        capped: !!logged.capped, key: logged.key, area: logged.area,
       },
       ...(await movesSnapshot(now)),
       moves: await movesMods.ledgerMod.movesDay(db, { day: logged.day, now }),
