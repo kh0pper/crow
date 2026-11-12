@@ -1727,3 +1727,462 @@ test("start() starts every account at once: a hung server does not delay the oth
   }
   starting.catch(() => {});
 });
+
+/* --------------------------- the epoch belongs to the run, not to the handler (B1, B2) */
+
+/**
+ * One supervisor whose SECOND adapter — the borrowed action adapter — parks its `close()` on a
+ * promise the test releases. `restartAccount` closes that adapter before anything else, so this is
+ * how a test suspends a restart at its first await while a run is still in flight.
+ */
+async function setupHeldActionClose(options = {}) {
+  let inner = null;
+  let holdNext = false;
+  let release = null;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const h = await setup({
+    ...options,
+    start: false,
+    adapterFactory: async (args) => {
+      const view = await inner(args);
+      if (!holdNext) return view;
+      holdNext = false;
+      const realClose = view.close.bind(view);
+      let parked = true;
+      view.close = async () => {
+        if (parked) {
+          parked = false;
+          await gate;
+        }
+        return realClose();
+      };
+      return view;
+    },
+  });
+  inner = h.factory;
+  await h.supervisor.start();
+  return {
+    ...h,
+    holdNextClose: () => { holdNext = true; },
+    releaseClose: () => release(),
+  };
+}
+
+/**
+ * Park the next db call the test names until `release()`: a read or a write a handler waits on, so a
+ * test can suspend that handler there and poke at the supervisor from inside the gap. `after` skips
+ * the calls a run makes before it reaches the handler (the account row `prepare` reads, mostly).
+ */
+function holdDbCall(db, { method = "execute", match = null, after = 0 } = {}) {
+  const original = db[method].bind(db);
+  let release = null;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let parkResolve = null;
+  const parked = new Promise((resolve) => {
+    parkResolve = resolve;
+  });
+  let calls = 0;
+  let done = false;
+  db[method] = async (...args) => {
+    const text = typeof args[0] === "string" ? args[0] : args[0]?.sql ?? "";
+    if (match == null || match.test(text)) {
+      calls += 1;
+      if (!done && calls > after) {
+        done = true;
+        parkResolve();
+        await gate;
+      }
+    }
+    return original(...args);
+  };
+  return { parked, release: () => release() };
+}
+
+test("a failure that lands while restartAccount awaits the action close counts nothing", async () => {
+  const h = await setupHeldActionClose();
+  // A borrowed adapter is kept after one call, so the restart's first await is its close.
+  h.holdNextClose();
+  await h.supervisor.withAdapter(h.accountId, (adapter) => adapter.listFolders());
+  const actionView = h.views.at(-1);
+  assert.equal(actionView.state.closed, false);
+
+  // A pass parked inside an adapter call: it is still the worker's run when the restart lands.
+  const releaseCalls = holdCalls(h.gate);
+  const failing = h.supervisor.syncNow(h.accountId);
+  await flush(20);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+
+  const restarting = h.supervisor.restartAccount(h.accountId);
+  await flush(40);
+  // The restart is suspended on the borrowed adapter's close, with the run already closed out.
+  assert.equal(actionView.state.closed, false);
+
+  // The run in flight now fails. It belongs to the worker that was replaced, so no failure may be
+  // counted against the worker the restart is about to build.
+  h.fake.failNext("listFolders", netError());
+  releaseCalls();
+  await flush(80);
+  const held = await getSyncState(h.db, h.accountId);
+  assert.equal(held.state, "idle");
+  assert.equal(held.failures, 0);
+  assert.equal(held.backoffUntil, null);
+  await failing;
+
+  h.releaseClose();
+  await restarting;
+  await flush(150);
+  const current = await getSyncState(h.db, h.accountId);
+  assert.equal(current.state, "idle");
+  assert.equal(current.failures, 0);
+  const freshView = h.views.at(-1);
+  assert.equal(freshView.state.closed, false);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  await h.supervisor.stop();
+});
+
+test("a deadline that fires while restartAccount awaits the action close records no TIMEOUT", async () => {
+  const h = await setupHeldActionClose();
+  h.holdNextClose();
+  await h.supervisor.withAdapter(h.accountId, (adapter) => adapter.listFolders());
+
+  const releaseCalls = holdCalls(h.gate);
+  const hung = h.supervisor.syncNow(h.accountId);
+  await flush(20);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+
+  const restarting = h.supervisor.restartAccount(h.accountId);
+  await flush(40);
+  // The run's own deadline passes while the restart is still suspended on the close: the run was
+  // closed out and its timer disarmed before that await, so nothing fires and nothing is recorded.
+  await h.clock.advance(SYNC_DEADLINE_MS);
+  await flush(60);
+  const held = await getSyncState(h.db, h.accountId);
+  assert.equal(held.errorCode, null);
+  assert.equal(held.failures, 0);
+
+  releaseCalls();
+  h.releaseClose();
+  await hung;
+  await restarting;
+  await flush(150);
+  const current = await getSyncState(h.db, h.accountId);
+  assert.equal(current.state, "idle");
+  assert.equal(current.failures, 0);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  await h.supervisor.stop();
+});
+
+/**
+ * A factory that records the handlers each watch is armed with, so a test can report as an old watch
+ * after a restart replaced it.
+ */
+function captureWatchHandlers(arms) {
+  let inner = null;
+  return {
+    factory: async (args) => {
+      const view = await inner(args);
+      const realWatch = view.watch.bind(view);
+      view.watch = async (paths, handlers) => {
+        arms.push({ view, handlers });
+        return realWatch(paths, handlers);
+      };
+      return view;
+    },
+    setInner: (fn) => { inner = fn; },
+  };
+}
+
+test("an old watcher's error after a restart leaves the fresh watch armed and records nothing", async () => {
+  const armed = [];
+  const capture = captureWatchHandlers(armed);
+  const h = await setup({ start: false, adapterFactory: capture.factory });
+  capture.setInner(h.factory);
+  await h.supervisor.start();
+  assert.equal(armed.length, 1);
+  const old = armed[0];
+
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(120);
+  assert.equal(armed.length, 2);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  const listsBefore = listCount(h.fake, "INBOX");
+
+  // The connection the old watch lived on reports a change and then its own death, both after the
+  // restart replaced it: neither may reach the worker that now owns a watch of its own.
+  old.handlers.onError(new MailError("NETWORK", "ECONNRESET"));
+  old.handlers.onChange({ folderPath: "INBOX", reason: "exists" });
+  await flush(120);
+
+  const current = await getSyncState(h.db, h.accountId);
+  assert.equal(current.state, "idle");
+  assert.equal(current.failures, 0);
+  assert.equal(current.backoffUntil, null);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  assert.equal(listCount(h.fake, "INBOX"), listsBefore);
+  assert.equal(h.views.at(-1).state.closed, false);
+  assert.equal(h.notices.length, 0);
+  await h.supervisor.stop();
+});
+
+test("a change whose folder read spans a restart starts no run", async () => {
+  const armed = [];
+  const capture = captureWatchHandlers(armed);
+  const h = await setup({ start: false, adapterFactory: capture.factory });
+  capture.setInner(h.factory);
+  await h.supervisor.start();
+  const old = armed[0];
+
+  // The change handler's own folder read is parked, and the restart lands while it is in flight.
+  const held = holdDbCall(h.db, { match: /FROM mail_folders/ });
+  old.handlers.onChange({ folderPath: "INBOX", reason: "exists" });
+  await held.parked;
+  await flush(20);
+
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(150);
+  const listsBefore = listCount(h.fake, "INBOX");
+  const timers = h.clock.pending();
+
+  held.release();
+  await flush(200);
+
+  // The stale change returned on its way out of the read: no run, no timer, nothing recorded.
+  assert.equal(listCount(h.fake, "INBOX"), listsBefore);
+  assert.equal(h.clock.pending(), timers);
+  const current = await getSyncState(h.db, h.accountId);
+  assert.equal(current.state, "idle");
+  assert.equal(current.failures, 0);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  await h.supervisor.stop();
+});
+
+/* ------------------------- a superseded handler stops on its own state (M3, M4, M5, M6) */
+
+test("a failure handler suspended across a claim taken in prepare acts no further", async () => {
+  let claimedElsewhere = false;
+  const h = await setupHeldClose({ isClaimedElsewhere: async () => claimedElsewhere });
+
+  h.fake.failNext("listFolders", netError());
+  const failing = h.supervisor.syncNow(h.accountId);
+  await flush(40);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+
+  // A peer wrote the claim while the handler was parked. prepare() takes it without a supersede, so
+  // only the claim itself can tell this handler that its run is over.
+  await updateAccount(h.db, h.accountId, { status: "claimed_elsewhere", statusDetail: null });
+  claimedElsewhere = true;
+  await assert.rejects(
+    h.supervisor.syncNow(h.accountId),
+    (err) => err.code === "CLAIMED_ELSEWHERE",
+  );
+
+  h.releaseClose();
+  await failing;
+  await flush(200);
+
+  const current = await getSyncState(h.db, h.accountId);
+  assert.equal(current.state, "idle");
+  assert.equal(current.failures, 0);
+  assert.equal(current.backoffUntil, null);
+  assert.equal((await getAccount(h.db, h.accountId)).status, "claimed_elsewhere");
+  await h.supervisor.stop();
+});
+
+test("an old run that succeeds across a restart keeps its hands off the fresh worker", async () => {
+  const h = await setup();
+  // A pass stamps the account at the end of `syncAccount`; the run's own success stamps it again.
+  // Parked on the second write, the run is suspended inside `onRunSuccess` itself.
+  const held = holdDbCall(h.db, { match: /UPDATE mail_accounts/, after: 1 });
+  const slow = h.supervisor.syncNow(h.accountId);
+  await held.parked;
+  await flush(20);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+
+  // The worker the restart builds fails at once, so it holds a back-off timer of its own.
+  h.fake.failNext("listFolders", netError());
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(150);
+  const restartState = await getSyncState(h.db, h.accountId);
+  assert.equal(restartState.state, "backoff");
+  assert.equal(restartState.failures, 1);
+  const timers = h.clock.pending();
+  const watches = callsOf(h.fake, "watch").length;
+  assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+
+  held.release();
+  await slow;
+  await flush(200);
+
+  // The old run cleared no timer and armed no second watch on the worker that replaced it.
+  assert.equal(h.clock.pending(), timers);
+  assert.equal(callsOf(h.fake, "watch").length, watches);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+  const current = await getSyncState(h.db, h.accountId);
+  assert.equal(current.state, "backoff");
+  assert.equal(current.failures, 1);
+  await h.supervisor.stop();
+});
+
+test("a stale recordFailure suspended on its state read writes no back-off", async () => {
+  const h = await setup();
+  const held = holdDbCall(h.db, { match: /FROM mail_sync_state/ });
+  h.fake.failNext("listFolders", netError());
+  const failing = h.supervisor.syncNow(h.accountId);
+  await held.parked;
+  await flush(20);
+
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(150);
+  const timers = h.clock.pending();
+  const watches = callsOf(h.fake, "watch").length;
+  const fresh = h.views.at(-1);
+  assert.equal(fresh.state.closed, false);
+
+  held.release();
+  await failing;
+  await flush(200);
+
+  const current = await getSyncState(h.db, h.accountId);
+  assert.equal(current.state, "idle");
+  assert.equal(current.failures, 0);
+  assert.equal(current.backoffUntil, null);
+  assert.equal(h.clock.pending(), timers);
+  assert.equal(callsOf(h.fake, "watch").length, watches);
+  assert.equal(fresh.state.closed, false);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  await h.supervisor.stop();
+});
+
+test("a stale recordFailure suspended on its state write arms no timer", async () => {
+  const h = await setup();
+  // The run fails at the folder listing, so the failure's own state write is the first one armed.
+  const held = holdDbCall(h.db, { method: "runTransaction" });
+  h.fake.failNext("listFolders", netError());
+  const failing = h.supervisor.syncNow(h.accountId);
+  await held.parked;
+  await flush(20);
+
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(150);
+  const timers = h.clock.pending();
+  const notices = h.notices.length;
+  assert.equal((await getSyncState(h.db, h.accountId)).state, "idle");
+
+  held.release();
+  await failing;
+  await flush(200);
+
+  assert.equal(h.clock.pending(), timers);
+  assert.equal(h.notices.length, notices);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  await h.supervisor.stop();
+});
+
+test("a stale recordAuthFailure suspended on its account read marks nothing", async () => {
+  const h = await setup();
+  // prepare() reads the account first; the handler's own read is the one parked here.
+  const held = holdDbCall(h.db, { match: /FROM mail_accounts/, after: 1 });
+  h.fake.failNext("listFolders", new MailError("AUTH_FAILED"));
+  const failing = h.supervisor.syncNow(h.accountId);
+  await held.parked;
+  await flush(20);
+
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(150);
+  const timers = h.clock.pending();
+
+  held.release();
+  await failing;
+  await flush(200);
+
+  const account = await getAccount(h.db, h.accountId);
+  assert.equal(account.status, "active");
+  assert.equal(account.statusDetail, null);
+  const current = await getSyncState(h.db, h.accountId);
+  assert.equal(current.state, "idle");
+  assert.equal(current.errorCode, null);
+  assert.equal(h.notices.length, 0);
+  assert.equal(h.clock.pending(), timers);
+  await h.supervisor.stop();
+});
+
+test("a stale recordAuthFailure suspended on its account write writes no state and no notice", async () => {
+  const h = await setup();
+  const held = holdDbCall(h.db, { match: /UPDATE mail_accounts/ });
+  h.fake.failNext("listFolders", new MailError("AUTH_FAILED"));
+  const failing = h.supervisor.syncNow(h.accountId);
+  await held.parked;
+  await flush(20);
+
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(150);
+  const timers = h.clock.pending();
+
+  held.release();
+  await failing;
+  await flush(200);
+
+  const current = await getSyncState(h.db, h.accountId);
+  assert.equal(current.state, "idle");
+  assert.equal(current.errorCode, null);
+  assert.equal(h.notices.length, 0);
+  assert.equal(h.clock.pending(), timers);
+  await h.supervisor.stop();
+});
+
+test("a notice swallowed by a restart is not repeated for a day", async () => {
+  const h = await setup();
+  await setSyncState(h.db, h.accountId, {
+    state: "backoff",
+    errorCode: "NETWORK",
+    failures: FAILURES_BEFORE_NOTICE - 1,
+  });
+  // The failing-sync notice reads the account label before it writes its stamp: that read is parked.
+  const held = holdDbCall(h.db, { match: /FROM mail_accounts/, after: 1 });
+  h.fake.failNext("listFolders", netError());
+  const failing = h.supervisor.syncNow(h.accountId);
+  await held.parked;
+  await flush(20);
+
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(150);
+  const timers = h.clock.pending();
+
+  held.release();
+  await failing;
+  await flush(200);
+
+  // The notice was never sent and left no stamp behind — neither persisted nor in memory.
+  assert.equal(h.notices.length, 0);
+  assert.equal(h.clock.pending(), timers);
+  const swallowed = await getSyncState(h.db, h.accountId);
+  assert.equal(swallowed.state, "idle");
+  assert.equal(swallowed.lastNoticeAt, null);
+
+  // The ladder reaches the threshold again on the fresh worker: the notice that was swallowed must
+  // go out now, not be blocked for a day by the stamp of the attempt that was cut off.
+  await setSyncState(h.db, h.accountId, {
+    state: "backoff",
+    errorCode: "NETWORK",
+    failures: FAILURES_BEFORE_NOTICE - 1,
+  });
+  h.fake.failNext("listFolders", netError());
+  await h.supervisor.syncNow(h.accountId);
+
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.notices[0].title, "Mail sync is failing");
+  assert.equal(h.notices[0].body, 'Crow cannot sync "Alex" right now. It will keep trying.');
+  await h.supervisor.stop();
+});

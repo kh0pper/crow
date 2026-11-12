@@ -54,10 +54,16 @@
  * **A handler that was overtaken does nothing.** Every failure path awaits — a close, a state read, a
  * write, a notice — and any of those may span a `restartAccount`, a `stop()` or a lost claim. A
  * worker therefore carries an `epoch`: `restartAccount`, `stop()` and `becomeClaimed` bump it, and a
- * handler that captured it at entry returns without further effect the moment it no longer matches
- * (or the supervisor is no longer live). A stale handler never counts a failure on top of the fresh
- * worker's state, never arms a back-off, never writes a status and never notifies; it never closes
- * the connection either, because `worker.adapter` is the fresh run's by then.
+ * handler that compares against an older value returns without further effect the moment it no
+ * longer matches (or the supervisor is no longer live, or the worker has lost its claim). The epoch
+ * a handler compares is the one its run or its watch was built with — stamped into the run when it
+ * is created, captured when the watch is armed — never the worker's value read when the handler
+ * starts: `restartAccount` bumps the epoch and closes the run out in one synchronous step, and a
+ * failure that surfaces inside that step belongs to the run that was ended, not to the one that
+ * follows. A stale handler never counts a failure on top of the fresh worker's state, never arms a
+ * back-off, never writes a status and never notifies; it never closes the connection, clears a
+ * back-off timer or arms a watch either, because `worker.adapter` and the timers are the fresh run's
+ * by then.
  *
  * **A stopped supervisor opens nothing.** After `stop()` the adapters, watchers and timers are gone
  * for good: `syncNow`, `requestSync` and `restartAccount` resolve without touching an account,
@@ -224,9 +230,13 @@ export function createMailSupervisor(options = {}) {
     worker.epoch += 1;
   }
 
-  /** Whether a failure handler that captured `epoch` may still act on this worker. */
+  /**
+   * Whether a handler that was built with `epoch` may still act on this worker: the supervisor is
+   * live, the worker has not been torn down or replaced since, and it has not lost its claim. A
+   * claim taken without a supersede (the re-check in `prepare`) is enough to end a suspended handler.
+   */
   function current(worker, epoch) {
-    return live() && worker.epoch === epoch;
+    return live() && worker.claimed !== true && worker.epoch === epoch;
   }
 
   function logEvent(event, extra = {}) {
@@ -464,19 +474,23 @@ export function createMailSupervisor(options = {}) {
     // never watched.
     if (!live() || worker.claimed || worker.adapter !== adapter) return;
 
+    // Captured when the watch is armed, not when the adapter reports: a watch on a connection a
+    // restart has since replaced may still report a change, or its own death, and that report belongs
+    // to the worker that armed it, never to the one that now holds a watch of its own.
+    const epoch = worker.epoch;
     let watcher;
     try {
       watcher = await adapter.watch(paths, {
         onChange: (event) => {
-          void onIdleChange(worker, event);
+          void onIdleChange(worker, event, epoch);
         },
         onError: (err) => {
-          void onWatchError(worker, err);
+          void onWatchError(worker, err, epoch);
         },
       });
     } catch (err) {
       logError("watch_failed", err, { accountId: worker.accountId });
-      await onWatchError(worker, err);
+      await onWatchError(worker, err, epoch);
       return;
     }
     // The watch may have outlived the supervisor, the connection it was made on, or the arm that came
@@ -492,14 +506,16 @@ export function createMailSupervisor(options = {}) {
   }
 
   /** A change the server reported: sync that one folder, coalesced with a run already going. */
-  async function onIdleChange(worker, event) {
+  async function onIdleChange(worker, event, epoch = worker.epoch) {
     try {
-      if (!live() || worker.claimed || worker.authFailed || !worker.syncable) return;
+      if (!current(worker, epoch)) return;
+      if (worker.claimed || worker.authFailed || !worker.syncable) return;
       const folderPath = event != null && typeof event.folderPath === "string" ? event.folderPath : null;
       if (folderPath == null || folderPath === "") return;
       if (worker.backoffTimer != null) return;
 
       const folders = await listFolders(db, worker.accountId);
+      if (!current(worker, epoch)) return;
       const folder = folders.find((candidate) => candidate.path === folderPath);
       if (!folder) return;
       if (!IDLE_ROLES.includes(folderRole(folder))) return;
@@ -513,11 +529,13 @@ export function createMailSupervisor(options = {}) {
    * The watch connection died. Nothing stored is touched: the watcher is dropped, the connection is
    * closed, and the back-off decides when it is reconnected. A run already in flight reports its own
    * outcome (and a success re-arms the watch), so it is left alone here.
+   * `epoch` is the value the watch was armed with. A report that arrives after a restart comes from a
+   * connection this worker no longer owns: it is dropped here, before it can stop the fresh watch.
    */
-  async function onWatchError(worker, err) {
-    const epoch = worker.epoch;
+  async function onWatchError(worker, err, epoch = worker.epoch) {
+    if (!current(worker, epoch)) return;
     stopWatcher(worker);
-    if (!live() || worker.claimed || worker.authFailed || !worker.syncable) return;
+    if (worker.claimed || worker.authFailed || !worker.syncable) return;
     if (worker.inflight != null) return;
     await recordFailure(worker, toMailError(err), epoch);
   }
@@ -558,7 +576,7 @@ export function createMailSupervisor(options = {}) {
       noteRequest(worker, plan);
       return worker.inflight.settled;
     }
-    const run = { plan, closedOut: false, timer: null, settled: null, resolve: null };
+    const run = { plan, epoch: worker.epoch, closedOut: false, timer: null, settled: null, resolve: null };
     run.settled = new Promise((resolve) => {
       run.resolve = resolve;
     });
@@ -597,11 +615,13 @@ export function createMailSupervisor(options = {}) {
       const adapter = await workerAdapter(worker, run);
       await runPlan(worker, adapter, run.plan, deadlineAt);
       if (run.closedOut || worker.inflight !== run) return;
-      await onRunSuccess(worker);
+      await onRunSuccess(worker, run);
     } catch (err) {
       if (run.closedOut || worker.inflight !== run) return;
       failed = true;
-      await onRunFailure(worker, toMailError(err));
+      // The epoch this run was created with, not the worker's as the failure surfaces: a restart may
+      // already have bumped it while the failing call was still in the adapter.
+      await onRunFailure(worker, toMailError(err), run.epoch);
     } finally {
       if (!run.closedOut) {
         run.closedOut = true;
@@ -657,8 +677,9 @@ export function createMailSupervisor(options = {}) {
   }
 
   /** A run finished its pass: the ladder resets, the stamp is written, the watch and the poll return. */
-  async function onRunSuccess(worker) {
-    if (worker.claimed) return;
+  async function onRunSuccess(worker, run) {
+    const epoch = run.epoch;
+    if (!current(worker, epoch) || worker.claimed) return;
     worker.authFailed = false;
     worker.syncable = true;
     await writeState(worker.accountId, {
@@ -668,16 +689,20 @@ export function createMailSupervisor(options = {}) {
       backoffUntil: null,
       lastSuccessAt: now(),
     });
+    // Every await above and below may span a restart: the fresh worker has its own timers, its own
+    // watch and its own state, and this run may not clear or arm any of them.
+    if (!current(worker, epoch)) return;
     await writeAccount(worker.accountId, { lastSyncAt: now() });
+    if (!current(worker, epoch)) return;
     worker.backoffTimer = disarm(worker.backoffTimer);
     await ensureWatch(worker);
+    if (!current(worker, epoch)) return;
     armPoll(worker);
     logEvent("sync_ok", { accountId: worker.accountId });
   }
 
   /** A run failed: the connection is dropped and the code decides between AUTH_FAILED and the ladder. */
-  async function onRunFailure(worker, mailErr) {
-    const epoch = worker.epoch;
+  async function onRunFailure(worker, mailErr, epoch = worker.epoch) {
     if (!current(worker, epoch) || worker.claimed) return;
     await closeWorkerAdapter(worker);
     // The close may have spanned a restart or a stop: the connection it dropped was the old run's,
@@ -701,7 +726,7 @@ export function createMailSupervisor(options = {}) {
     if (worker.inflight === run) worker.inflight = null;
     // The pending flag is kept, exactly as for a run that threw: the retry after the back-off is a
     // full sync, so a request that arrived during the hung run is covered by it.
-    const epoch = worker.epoch;
+    const epoch = run.epoch;
     void (async () => {
       try {
         if (worker.claimed) return;
@@ -740,9 +765,10 @@ export function createMailSupervisor(options = {}) {
    * Count one consecutive failure, persist the ladder, write the one notice that is due, and arm the
    * retry. Nothing here deletes, resets or re-reads stored mail.
    *
-   * `epoch` is the worker's at the moment the failing run was reported; every await below can span a
-   * restart, a stop or a lost claim, and each one is followed by the same guard. A superseded handler
-   * stops there: the fresh worker's state, timers and connection are not its to touch.
+   * `epoch` is the one the failing run was created with (never this worker's value read here); every
+   * await below can span a restart, a stop or a lost claim, and each one is followed by the same
+   * guard. A superseded handler stops there: the fresh worker's state, timers and connection are not
+   * its to touch.
    */
   async function recordFailure(worker, mailErr, epoch = worker.epoch) {
     if (!current(worker, epoch)) return;
@@ -811,20 +837,26 @@ export function createMailSupervisor(options = {}) {
     if (!current(worker, epoch)) return;
     // The in-memory stamp goes down BEFORE the first await. Two failures recorded at the same moment
     // both reach the gate before either has written the persisted stamp, and this is what makes the
-    // second one see that the notice is already going out and stay quiet.
+    // second one see that the notice is already going out and stay quiet. A handler that turns out to
+    // be superseded puts it back: a swallowed notice must not silence the fresh worker for a day.
+    const previousStamp = worker.noticeAt[kind] ?? null;
     const stampAt = now();
     worker.noticeAt[kind] = stampAt;
     const account = await accountOrNull(worker.accountId);
-    // A restart or a stop while the label was read: a notice about a run that is over is not sent.
-    if (!current(worker, epoch)) return;
     const label = typeof account?.label === "string" && account.label !== "" ? account.label : "this account";
     const title = kind === "auth" ? "Crow Mail cannot sign in" : "Mail sync is failing";
     const body = kind === "auth"
       ? `Crow could not sign in to "${label}". Check the app password.`
       : `Crow cannot sync "${label}" right now. It will keep trying.`;
 
-    // The stamps are written before the notice: a notice that cannot be delivered must not be repeated
-    // on every failure for the next twenty-four hours.
+    // The stamp is written before the notice: a notice that cannot be delivered must not be repeated
+    // on every failure for the next twenty-four hours. The stale check sits BEFORE that write, and a
+    // handler that fails it puts the in-memory stamp back: a swallowed notice must not persist a
+    // stamp, nor keep one in memory, that would silence the fresh worker's own notice for a day.
+    if (!current(worker, epoch)) {
+      worker.noticeAt[kind] = previousStamp;
+      return;
+    }
     await writeState(worker.accountId, { lastNoticeAt: stampAt });
     if (!current(worker, epoch)) return;
     try {
@@ -1231,18 +1263,19 @@ export function createMailSupervisor(options = {}) {
     const account = await getAccount(db, accountId);
     if (!account) throw new MailError("NOT_FOUND", "account");
     const worker = workerFor(account);
-    // Everything the old worker had in flight is stale from here: a failure handler suspended in it
-    // must not count its failure, arm its back-off or write its status over the run below.
+    // One synchronous step, before anything below awaits: the run in flight belongs to the OLD
+    // password, so it is ended here, before its connection is closed, exactly as `stop()` ends one.
+    // Its rejection — the close that follows is what causes it — is then ignored by executeRun: no
+    // failure count, no back-off and no notice, so nothing is armed that could delay the fresh sync
+    // this restart is about to start (which would keep using the old secret). Bumping the epoch on its
+    // own would leave that run in flight and still open for as long as the borrowed adapter's close
+    // takes, and a failure surfacing in that window would look current to its own handler.
     supersede(worker);
+    closeOutRun(worker);
     await closeActionAdapter(accountId);
     worker.backoffTimer = disarm(worker.backoffTimer);
-    // The run in flight belongs to the OLD password, so it is ended here, before its connection is
-    // closed, exactly as `stop()` ends one. Its rejection — the close that follows is what causes it —
-    // is then ignored by executeRun: no failure count, no back-off and no notice, so nothing is armed
-    // that could delay the fresh sync this restart is about to start (which would keep using the old
-    // secret). The request that run was still carrying is dropped rather than drained: the fresh run
-    // below is a full sync and covers it.
-    closeOutRun(worker);
+    // The request that run was still carrying is dropped rather than drained: the fresh run below is
+    // a full sync and covers it.
     clearPending(worker);
     await closeWorkerAdapter(worker);
     worker.tick = 0;
