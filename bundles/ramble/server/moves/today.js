@@ -70,7 +70,7 @@ export const MAX_SWAPS = 3;
 export const DEFAULT_PREFS = Object.freeze({
   on: true,
   kinds: Object.freeze([]),
-  equipment: Object.freeze(["none"]),
+  equipment: Object.freeze(["none", "wall"]),
   limits: Object.freeze([]),
   level: 2,
   weather: true,

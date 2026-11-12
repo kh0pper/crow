@@ -123,7 +123,7 @@ test("loader: the page's weather reaches Ramble as { rain, temp, code }, and not
 function entry(over = {}) {
   return {
     id: "ex-1",
-    kind: "exercise",
+    kind: "routine",
     title: "A short bodyweight flow",
     minutes: 10,
     level: 2,

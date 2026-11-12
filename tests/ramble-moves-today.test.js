@@ -50,7 +50,7 @@ async function freshDb() {
 function entry(over = {}) {
   return {
     id: "ex-1",
-    kind: "exercise",
+    kind: "routine",
     title: "Test entry",
     minutes: 10,
     level: 1,
@@ -142,10 +142,10 @@ test("readPrefs: defaults on a fresh db, and one junk field never blanks the res
   await writeSetting(db, PREFS_KEY, JSON.stringify({
     ...DEFAULT_PREFS, equipment: ["jetpack", "trampoline"],
   }));
-  assert.deepEqual((await readPrefs(db)).equipment, ["none"]);
+  assert.deepEqual((await readPrefs(db)).equipment, ["none", "wall"]);
 
   await writeSetting(db, PREFS_KEY, JSON.stringify({ ...DEFAULT_PREFS, equipment: [] }));
-  assert.deepEqual((await readPrefs(db)).equipment, ["none"], "an empty list reads as no equipment");
+  assert.deepEqual((await readPrefs(db)).equipment, ["none", "wall"], "an empty list reads as no equipment");
 });
 
 test("writePrefs: merges, validates, and an unknown limit tag is refused with nothing written", async () => {
@@ -437,7 +437,7 @@ test("TWO DEVICES: picks converge under the settings LWW, and Done pays once acr
   const b = await freshDb();
   await writePrefs(a, PREFS);
   await writePrefs(b, PREFS);
-  const lib = [entry({ id: "dev-1" }), entry({ id: "dev-2", kind: "pose", activity: "yoga" })];
+  const lib = [entry({ id: "dev-1" }), entry({ id: "dev-2", kind: "flow", activity: "yoga" })];
   const ca = collector();
   const cb = collector();
 
@@ -538,7 +538,7 @@ test("ONE ASSEMBLY: the panel's helper and For You's module pick the same entry 
   const forYouDb = await freshDb();
   await writePrefs(panelDb, PREFS);
   await writePrefs(forYouDb, PREFS);
-  const lib = [entry({ id: "a-1" }), entry({ id: "b-2", kind: "pose", activity: "yoga" })];
+  const lib = [entry({ id: "a-1" }), entry({ id: "b-2", kind: "flow", activity: "yoga" })];
 
   const panel = await todayForSurface(panelDb, { now: T0, weather: { rain: 80 }, library: lib });
   const forYou = await forYouMoves(forYouDb, { now: T0, weather: { rain: 80 }, library: lib });

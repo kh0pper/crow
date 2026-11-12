@@ -23,7 +23,7 @@
  *   "learning_flow"                             the pick is a flow the user is learning
  *   "easy_day"                                  the picked entry is level 1
  */
-import { LIMIT_TAGS, ACTIVITY_KINDS } from "./library.js";
+import { LIMIT_TAGS, ACTIVITY_KINDS, isChunk } from "./library.js";
 
 /** early is before 9, evening is from 17, day otherwise. */
 export function slotFor(hourLocal) {
@@ -115,6 +115,7 @@ export function pickChallenge({
   const candidates = [];
   for (const e of Array.isArray(library) ? library : []) {
     if (!e || typeof e !== "object" || e.reviewed !== true) continue;
+    if (!isChunk(e)) continue; // a card is a chunk; poses and short exercises stay for Learn
     if (excluded.has(e.id)) continue; // a swap must not re-land on a shown entry
     if ((Array.isArray(e.skipIf) ? e.skipIf : []).some((t) => limits.includes(t))) continue;
     if (kinds.length > 0 && !kinds.includes(e.activity)) continue;
