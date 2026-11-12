@@ -12,7 +12,7 @@ import {
   createFakeImapServer, createFakeSmtpServer, makeRaw, FAKE_USER, FAKE_PASSWORD,
 } from "./fixtures/fake-mail-server.mjs";
 import { runAdapterContract } from "./fixtures/mail-adapter-contract.mjs";
-import { createImapSmtpAdapter } from "../servers/gateway/mail/adapter/imap-smtp.js";
+import { createImapSmtpAdapter, messageIdFor } from "../servers/gateway/mail/adapter/imap-smtp.js";
 import { MAIL_ERROR_TEXT, MailError } from "../servers/gateway/mail/errors.js";
 
 const ACCOUNT_ID = "ma-0123456789abcdef";
@@ -119,7 +119,11 @@ function recordingClientFactory(fetches) {
     const client = new ImapFlow(options);
     const fetch = client.fetch.bind(client);
     client.fetch = (range, query, opts) => {
-      fetches.push({ range: String(range), body: Boolean(query && query.source === true) });
+      fetches.push({
+        range: String(range),
+        body: Boolean(query && query.source),
+        source: query ? query.source : null,
+      });
       return fetch(range, query, opts);
     };
     return client;
@@ -739,7 +743,8 @@ test("the client is built with parser bounds above the raw cap, and cleartext on
   assert.ok(options.maxLiteralSize > 4096, "a literal may exceed the raw cap only by the framing");
   assert.ok(options.maxLiteralSize <= 4096 + 2 * 1024 * 1024);
   assert.ok(options.maxResponseSize > options.maxLiteralSize, "above the literal cap, as the parser asks");
-  assert.ok(options.maxLineLength >= 1024 * 1024 && options.maxLineLength <= 8 * 1024 * 1024);
+  assert.ok(options.maxLineLength >= 1024 * 1024, "a line cap is set at all");
+  assert.equal(options.maxLineLength, 16 * 1024 * 1024, "a SEARCH over a large mailbox answers on one line");
   assert.equal(options.logger, false);
   assert.equal(options.tls.rejectUnauthorized, true);
 
@@ -842,7 +847,7 @@ test("get drops the bytes of a message the server under-reported and reports it 
       const client = new ImapFlow(options);
       const fetch = client.fetch.bind(client);
       client.fetch = async function* (range, query, opts) {
-        const body = Boolean(query && query.source === true);
+        const body = Boolean(query && query.source);
         fetches.push({ range: String(range), body });
         for await (const message of fetch(range, query, opts)) {
           // The metadata answer names a size far below the message the server then sends.
@@ -971,7 +976,7 @@ test("a very large listing still yields a uidNext instead of exhausting the argu
 
 /* ------------------------------------------------------------- names Crow will not command */
 
-test("listFolders and a cross-folder search skip a name carrying a control character", async () => {
+test("listFolders keeps a hostile name listed but out of every command, and drops a hostile flag", async () => {
   const fake = await startFake({ mailboxes: ["INBOX", "Odd"] });
   fake.deliver("INBOX", makeRaw({ subject: "findme", body: "wombat" }));
   const locks = [];
@@ -1001,7 +1006,17 @@ test("listFolders and a cross-folder search skip a name carrying a control chara
   try {
     await adapter.connect();
     const folders = await adapter.listFolders();
-    assert.deepEqual(folders.map((folder) => folder.path), ["INBOX"], "only selectable names are reported");
+    assert.deepEqual(
+      folders.map((folder) => folder.path),
+      ["INBOX", "Evil\r\nA9 LOGOUT", "Odd"],
+      "the folder store still sees every folder the server listed, so it deletes no rows",
+    );
+    const evil = folders.find((folder) => folder.name === "Evil");
+    assert.equal(evil.selectable, false, "a name with a control character is never selected or synced");
+    assert.equal(folders.find((folder) => folder.path === "INBOX").selectable, true);
+    const odd = folders.find((folder) => folder.path === "Odd");
+    assert.equal(odd.selectable, true, "the flag is what was hostile, not the folder");
+    assert.equal(odd.specialUse, null, "a control character in specialUse reports no flag at all");
     assert.deepEqual(
       await adapter.search("wombat"),
       [{ folderPath: "INBOX", uid: 1 }],
@@ -1102,4 +1117,117 @@ test("close() during a watch's in-flight connect closes that client as soon as i
   } finally {
     await adapter.close();
   }
+});
+
+/* ------------------------------------------------- a uid get() did not reach is never an empty body */
+
+test("the body fetch asks the server to stop one byte past the raw cap", async () => {
+  const fake = await startFake();
+  const uid = fake.deliver("INBOX", makeRaw({ subject: "capped", body: "hello" }));
+  const fetches = [];
+  const adapter = adapterFor(fake, { maxRawBytes: 500, clientFactory: recordingClientFactory(fetches) });
+  try {
+    await adapter.connect();
+    const [message] = await adapter.get("INBOX", [uid]);
+    assert.ok(message.raw.length > 0, "the message came back with its bytes");
+    const bodyFetches = fetches.filter((call) => call.body);
+    assert.ok(bodyFetches.length > 0, "a body fetch was issued");
+    for (const call of bodyFetches) {
+      assert.deepEqual(call.source, { maxLength: 501 }, "the range is the cap plus one byte, never unbounded");
+    }
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("get leaves out a message expunged between the metadata and the body fetch", async () => {
+  const fake = await startFake();
+  const gone = fake.deliver("INBOX", makeRaw({ subject: "vanishes", body: "poof" }));
+  const stays = fake.deliver("INBOX", makeRaw({ subject: "stays", body: "still here" }));
+  let expunged = false;
+  const adapter = adapterFor(fake, {
+    clientFactory: (options) => {
+      const client = new ImapFlow(options);
+      const fetch = client.fetch.bind(client);
+      client.fetch = async function* (range, query, opts) {
+        for await (const message of fetch(range, query, opts)) yield message;
+        // The metadata answer named this uid and the mailbox no longer holds it by the time the body is
+        // asked for, which is what an expunge in between looks like from here.
+        if (!(query && query.source) && !expunged) {
+          expunged = true;
+          fake.expunge("INBOX", gone);
+        }
+      };
+      return client;
+    },
+  });
+  try {
+    await adapter.connect();
+    const messages = await adapter.get("INBOX", [gone, stays]);
+    assert.deepEqual(
+      messages.map((message) => message.uid),
+      [stays],
+      "a uid with no body is absent from the answer, not reported with an empty Buffer",
+    );
+    assert.match(messages[0].raw.toString("utf8"), /still here/);
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("a budget stop leaves the rest absent even when the bodies arrive out of order", async () => {
+  const fake = await startFake();
+  const raw = makeRaw({ subject: "budgeted", body: "y".repeat(300) });
+  const rawSize = Buffer.byteLength(raw);
+  const uids = [];
+  for (let index = 0; index < 6; index += 1) uids.push(fake.deliver("INBOX", raw));
+  // Every message claims ten bytes, so all six fit the planned budget and all six are asked for; the
+  // real bodies are what overrun it, and they come back newest first.
+  const adapter = adapterFor(fake, {
+    maxRawBytes: rawSize + 10,
+    clientFactory: (options) => {
+      const client = new ImapFlow(options);
+      const fetch = client.fetch.bind(client);
+      client.fetch = async function* (range, query, opts) {
+        const rows = [];
+        for await (const message of fetch(range, query, opts)) rows.push(message);
+        if (query && query.size) {
+          for (const message of rows) yield { ...message, size: 10 };
+          return;
+        }
+        for (const message of query && query.source ? rows.reverse() : rows) yield message;
+      };
+      return client;
+    },
+  });
+  try {
+    await adapter.connect();
+    const first = await adapter.get("INBOX", uids);
+    assert.ok(first.length > 0 && first.length < uids.length, `the call stops part way (${first.length})`);
+    assert.ok(
+      first.every((message) => message.raw.length > 0),
+      "no uid the call did not finish is reported with an empty Buffer",
+    );
+    const reported = new Set(first.map((message) => message.uid));
+    const rest = uids.filter((uid) => !reported.has(uid));
+    assert.ok(rest.length > 0, "the uids the call did not reach are absent from the answer");
+
+    const second = await adapter.get("INBOX", rest);
+    assert.deepEqual(second.map((message) => message.uid), rest, "the next call fetches what was left");
+    assert.ok(second.every((message) => message.raw.length > 0));
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+/* ------------------------------------------------------------------ the generated Message-ID */
+
+test("a Message-ID takes its domain from the From address, an internationalised one as punycode", () => {
+  assert.match(messageIdFor("alex@example.com"), /^<[0-9a-f]{32}@example\.com>$/);
+  assert.match(messageIdFor("alex@Bücher.Example"), /^<[0-9a-f]{32}@xn--bcher-kva\.example>$/);
+  assert.match(messageIdFor("alex@"), /^<[0-9a-f]{32}@localhost>$/, "an address with no domain falls back");
+  assert.notEqual(messageIdFor("alex@example.com"), messageIdFor("alex@example.com"));
 });

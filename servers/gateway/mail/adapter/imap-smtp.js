@@ -21,6 +21,10 @@
  *   supervisor's decision, not the adapter's).
  * - **Every command is raced against `commandMs`.** The expiry closes the socket, which is the only
  *   reliable way to unblock a server that answered nothing, and the call rejects TIMEOUT.
+ * - **A send has one deadline for the whole exchange.** `sendMs` covers the sign-in, the connect, the
+ *   greeting and the transmission, and the same deadline travels in the nodemailer message as its
+ *   `signal`. nodemailer's `socketTimeout` measures silence, so a server that dribbles one response
+ *   line per second never trips it; the deadline is what ends such a send.
  * - **At most three connections.** One read connection, plus one IDLE connection per watched folder,
  *   and `watch` takes at most two folders (Inbox and Sent); a third folder, or a second watcher, is
  *   BAD_INPUT rather than a silent extra TLS session.
@@ -30,7 +34,7 @@
  *   mailbox the server says does not exist is NOT_FOUND, and every command path runs its rejection
  *   through the same wrapper so no raw library error can escape from a listing, a fetch or a search.
  *   One fault is deliberately not a MailError: a keychain key that is not on this machine
- *   (`KEYCHAIN_KEY_MISSING`) travels unchanged, because it is the key's fault rather than a bad
+ *   (`KeychainKeyMissingError`) travels unchanged, because it is the key's fault rather than a bad
  *   password, and reporting it as AUTH_FAILED would send the owner to reset a working password.
  *
  * `list` filters `afterUid`, `beforeUid` and `fromUid` itself instead of trusting the server: a UID
@@ -65,19 +69,25 @@
  * @typedef {import("./interface.js").OutgoingMessage} OutgoingMessage
  */
 import { randomBytes } from "node:crypto";
+import { domainToASCII } from "node:url";
 import { ImapFlow } from "imapflow";
 import nodemailer from "nodemailer";
 import { MailError, toMailError } from "../errors.js";
 import { authFor } from "../credentials.js";
+import { KeychainKeyMissingError } from "../../keychain/store.js";
 import { assertAdapter, validateOutgoing } from "./interface.js";
 import { MAX_RAW_BYTES } from "../parse.js";
 
-/** The wall-clock budget per phase, in milliseconds. */
+/**
+ * The wall-clock budget per phase, in milliseconds. `sendMs` is not a phase but a send's whole
+ * exchange — sign-in included — because nothing shorter bounds a server that keeps talking.
+ */
 const DEFAULT_TIMEOUTS = Object.freeze({
   connectMs: 15_000,
   greetingMs: 15_000,
   socketMs: 60_000,
   commandMs: 120_000,
+  sendMs: 300_000,
 });
 
 /** Inbox and Sent are the two folders the supervisor idles on, so a watch never exceeds that. */
@@ -113,8 +123,11 @@ const MESSAGE_ID_MAX_DOMAIN = 253;
 /** Headroom above `maxRawBytes` for one IMAP literal, so a message at the cap still fits its framing. */
 const LITERAL_HEADROOM = 1024 * 1024;
 
-/** A response line longer than this is a server that never sent a line terminator. */
-const MAX_LINE_BYTES = 4 * 1024 * 1024;
+/**
+ * A response line longer than this is a server that never sent a line terminator. It is generous
+ * because a SEARCH over a large mailbox answers with every matching UID on one line.
+ */
+const MAX_LINE_BYTES = 16 * 1024 * 1024;
 
 /**
  * One `get()` call downloads at most this many times `maxRawBytes` of raw data. The engine batches,
@@ -125,23 +138,25 @@ const GET_BUDGET_FACTOR = 4;
 /** imapflow's own timeout codes, which the shared classifier does not know by name. */
 const IMAP_TIMEOUT_CODES = new Set(["CONNECT_TIMEOUT", "GREETING_TIMEOUT", "UPGRADE_TIMEOUT"]);
 
-/** A keychain key fault is not a mail failure: it travels unchanged so the caller can say so. */
-const KEYCHAIN_KEY_MISSING = "KEYCHAIN_KEY_MISSING";
+/** TLS failures arrive as socket codes with these prefixes, the same list the shared classifier uses. */
+const TLS_CODE_RE = /^(?:ERR_TLS_|ERR_SSL_|CERT_|DEPTH_ZERO|UNABLE_TO_VERIFY|SELF_SIGNED)/;
+
+/** The response codes a server refuses a message by for its size: RFC 7889 and RFC 4469. */
+const TOO_LARGE_CODES = new Set(["APPENDLIMIT", "TOOBIG"]);
 
 const META_QUERY = Object.freeze({ uid: true, flags: true, internalDate: true, size: true });
-const SOURCE_QUERY = Object.freeze({ uid: true, source: true });
 
 /* ------------------------------------------------------------------------------ helpers */
 
 /**
- * The bracketed response code (RFC 3501 `[NONEXISTENT]`) a refusal carries. It is read as one fixed
- * token out of the parsed reply — the reply's free text is never touched — so nothing of the server's
- * sentence can ride along with it.
+ * The response code (RFC 3501 `[NONEXISTENT]`, RFC 7889 `[APPENDLIMIT]`) a refusal carries. It is read
+ * as one fixed token — imapflow's own `serverResponseCode`, a plain `responseCode`, or the parsed reply
+ * section — and never from the reply's free text, so nothing of the server's sentence rides along.
  */
 function responseCodeOf(err) {
   if (err == null || typeof err !== "object") return "";
-  if (typeof err.responseCode === "string" && err.responseCode.trim()) {
-    return err.responseCode.trim().toUpperCase();
+  for (const value of [err.serverResponseCode, err.responseCode]) {
+    if (typeof value === "string" && value.trim()) return value.trim().toUpperCase();
   }
   const response = err.response;
   const section = response != null && typeof response === "object" && response.attributes &&
@@ -158,17 +173,29 @@ function isMissingMailbox(err) {
 
 /**
  * A library error as a MailError, except two cases that must keep their meaning: a MailError passes
- * through, and a missing keychain key is the key's fault rather than the server's. imapflow's
- * `*_TIMEOUT` codes are the socket and greeting deadlines, so they are TIMEOUT and not PROTOCOL; a
- * refused mailbox is NOT_FOUND rather than PROTOCOL, so the caller can say the folder is gone; a
- * STARTTLS upgrade that could not happen is TLS, because that is the protection it lost.
+ * through, and a missing keychain key (a `KeychainKeyMissingError`) is the key's fault rather than the
+ * server's. imapflow's `*_TIMEOUT` codes are the socket and greeting deadlines, so they are TIMEOUT
+ * and not PROTOCOL; a refused mailbox is NOT_FOUND rather than PROTOCOL, so the caller can say the
+ * folder is gone; a message the server refused for its size is TOO_LARGE; a STARTTLS upgrade that
+ * could not happen is TLS, because that is the protection it lost, and so is a certificate OpenSSL
+ * refused (nodemailer keeps that code in `originalCode` after overwriting `code` with `ESOCKET`). A
+ * send the deadline cancelled is TIMEOUT rather than a protocol fault.
  */
 function asMailError(err) {
   if (err instanceof MailError) return err;
-  if (err != null && typeof err === "object" && err.code === KEYCHAIN_KEY_MISSING) return err;
+  if (err instanceof KeychainKeyMissingError) return err;
   if (isMissingMailbox(err)) return new MailError("NOT_FOUND");
+  const responseCode = responseCodeOf(err);
+  if (TOO_LARGE_CODES.has(responseCode)) return new MailError("TOO_LARGE", responseCode);
   if (err != null && typeof err === "object" && err.tlsFailed === true) {
     return new MailError("TLS", err.code);
+  }
+  const originalCode = err != null && typeof err === "object" ? err.originalCode : null;
+  if (typeof originalCode === "string" && TLS_CODE_RE.test(originalCode)) {
+    return new MailError("TLS", originalCode);
+  }
+  if (err != null && typeof err === "object" && (err.code === "EABORT" || err.name === "AbortError")) {
+    return new MailError("TIMEOUT", err.code === "EABORT" ? "EABORT" : "send_deadline");
   }
   if (err != null && typeof err === "object" && IMAP_TIMEOUT_CODES.has(err.code)) {
     return new MailError("TIMEOUT", err.code);
@@ -206,6 +233,32 @@ function withDeadline(run, ms, onExpire, detail) {
   });
   return Promise.race([Promise.resolve().then(run), expiry]).finally(() => {
     if (timer !== null) clearTimeout(timer);
+  });
+}
+
+/**
+ * Await one step of a send under the send's one deadline. nodemailer honours the same signal by closing
+ * its connection, and racing it here also bounds the sign-in, which nodemailer never sees. The losing
+ * promise keeps a rejection handler, so a failure that arrives after the deadline cannot escape.
+ */
+function withSendDeadline(signal, run) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (finish, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      finish(value);
+    };
+    function onAbort() {
+      settle(reject, new MailError("TIMEOUT", "send_deadline"));
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    Promise.resolve().then(run).then(
+      (value) => settle(resolve, value),
+      (err) => settle(reject, err),
+    );
   });
 }
 
@@ -310,13 +363,19 @@ function endpointFor(account, kind) {
 
 /**
  * A Message-ID this adapter owns: random local part, domain from the From address, both reduced to what
- * an id may carry. It is fixed here and handed to nodemailer as the message's id so the stored copy and
- * the transmitted copy agree; nothing the caller sends can set it.
+ * an id may carry. An internationalised domain is converted to its ASCII (punycode) form first, which
+ * is the form other mail software compares; the strip then only removes what an id may not carry at
+ * all. It is fixed here and handed to nodemailer as the message's id so the stored copy and the
+ * transmitted copy agree, and nothing the caller sends can set it.
+ *
+ * @param {string} fromAddress the validated From addr-spec
+ * @returns {string}
  */
-function messageIdFor(fromAddress) {
+export function messageIdFor(fromAddress) {
   const at = String(fromAddress).lastIndexOf("@");
-  const domain = at < 0 ? "" : String(fromAddress).slice(at + 1).toLowerCase()
-    .replace(MESSAGE_ID_DOMAIN_STRIP, "");
+  const rawDomain = at < 0 ? "" : String(fromAddress).slice(at + 1).toLowerCase();
+  const asciiDomain = rawDomain ? domainToASCII(rawDomain) || "" : "";
+  const domain = asciiDomain.replace(MESSAGE_ID_DOMAIN_STRIP, "");
   const host = domain && domain.length <= MESSAGE_ID_MAX_DOMAIN ? domain : MESSAGE_ID_FALLBACK_DOMAIN;
   return `<${randomBytes(16).toString("hex")}@${host}>`;
 }
@@ -345,16 +404,19 @@ function contentBytes(content) {
 
 /**
  * The message handed to nodemailer, built from `validateOutgoing`'s output field by field. Every key
- * below is one of those fields, plus the adapter's own `messageId`; there is no way for a header map, a
- * recipient list off the headers, or any other transport option to arrive from the caller.
+ * below is one of those fields, plus the adapter's own `messageId` and the send's deadline `signal`;
+ * there is no way for a header map, a recipient list off the headers, or any other transport option to
+ * arrive from the caller.
  */
-function smtpMessage(outgoing, messageId) {
+function smtpMessage(outgoing, messageId, signal) {
   const message = {
     messageId,
     from: smtpAddress(outgoing.from),
     to: outgoing.to.map(smtpAddress),
     subject: outgoing.subject,
     text: outgoing.text,
+    // The transport's own cancel route: an abort closes the connection and fails the send with EABORT.
+    signal,
   };
   // A Bcc recipient is delivered and never written into the headers nodemailer emits.
   if (outgoing.cc.length) message.cc = outgoing.cc.map(smtpAddress);
@@ -512,6 +574,13 @@ export function createImapSmtpAdapter(options = {}) {
   const rawLimit = Math.floor(maxRawBytes);
   const makeClient = typeof clientFactory === "function" ? clientFactory : (clientOptions) => new ImapFlow(clientOptions);
 
+  /**
+   * The body fetch of one UID: the server is asked to stop one byte past the cap, so a message whose
+   * reported size was short cannot send more than that many bytes through this connection. A source
+   * longer than the cap is an oversized message, not a message to keep.
+   */
+  const sourceQuery = () => ({ uid: true, source: { maxLength: rawLimit + 1 } });
+
   /** The read connection: `{client, dead}` once open, plus its in-flight connect promise. */
   let readState = null;
   let readConnecting = null;
@@ -531,7 +600,8 @@ export function createImapSmtpAdapter(options = {}) {
 
     // The parser's own bounds, so a server cannot make Crow buffer what Crow would never keep: one
     // literal sits at the raw cap plus the framing headroom, one response total sits above the
-    // literal cap (as the parser documents), and a line without a terminator is stopped a few MiB in.
+    // literal cap (as the parser documents), and a line without a terminator is stopped at the line
+    // cap rather than buffered forever.
     const maxLiteralSize = rawLimit + LITERAL_HEADROOM;
 
     const options_ = {
@@ -751,8 +821,12 @@ export function createImapSmtpAdapter(options = {}) {
   }
 
   /**
-   * Every folder the server lists, minus the names Crow will not run a command for: a path carrying a
-   * control character is skipped rather than reported and later quoted into a SELECT.
+   * Every folder the server lists. A name Crow cannot safely quote into a command — a path carrying a
+   * control character — is still listed, with `selectable: false`, rather than dropped: the folder
+   * store treats an unlisted folder as removed from the server and would delete the messages it holds.
+   * `selectable` is the field that keeps such a name out of a sync and out of every command. A
+   * special-use flag carrying a control character is reported as no flag at all, because the flag is a
+   * label rather than the folder: the folder itself is still usable.
    *
    * @returns {Promise<AdapterFolder[]>}
    */
@@ -762,16 +836,18 @@ export function createImapSmtpAdapter(options = {}) {
       if (!Array.isArray(entries)) throw new MailError("PROTOCOL", "list");
       const folders = [];
       for (const entry of entries) {
-        const path = listedFolderPath(entry.path);
-        if (path == null) continue;
-        const specialUse = entry.specialUse ?? null;
-        if (specialUse != null && (typeof specialUse !== "string" || CONTROL_CHARS.test(specialUse))) continue;
+        // A folder with no name at all names nothing a store row could hold, so there is nothing to keep.
+        if (typeof entry.path !== "string" || entry.path === "") continue;
+        const path = entry.path;
+        const specialUse = typeof entry.specialUse === "string" && !CONTROL_CHARS.test(entry.specialUse)
+          ? entry.specialUse
+          : null;
         folders.push({
           path,
           name: typeof entry.name === "string" ? entry.name : path,
           specialUse,
           delimiter: typeof entry.delimiter === "string" ? entry.delimiter : "/",
-          selectable: isSelectable(entry),
+          selectable: listedFolderPath(path) != null && isSelectable(entry),
         });
       }
       return folders;
@@ -850,12 +926,14 @@ export function createImapSmtpAdapter(options = {}) {
    * The raw bytes of the UIDs the caller asked for. A UID the mailbox does not have is absent; a
    * message above `maxRawBytes` is reported with its metadata and an empty Buffer, so the engine can
    * store a `too_large` row without Crow ever holding the bytes. That covers both a message the server
-   * *reported* above the limit (its body is never asked for) and one that arrives larger than the size
-   * the server gave (the bytes are dropped as they arrive).
+   * *reported* above the limit (its body is never asked for) and one whose bytes arrive larger than the
+   * size the server gave (the body fetch stops one byte past the cap, and bytes past it are dropped).
    *
-   * One call downloads at most `GET_BUDGET_FACTOR × maxRawBytes` of raw data. A UID that does not fit
-   * that budget is **absent from the result** — not reported with an empty Buffer, so it cannot be
-   * mistaken for an oversized message — and the caller asks for it again in a later call.
+   * One call downloads at most `GET_BUDGET_FACTOR × maxRawBytes` of raw data. A UID this call does not
+   * reach — one left outside the budget, one whose body arrived after the budget was spent, or one
+   * expunged between the metadata and the body fetch — is **absent from the result**, never reported
+   * with an empty Buffer, so it cannot be mistaken for an oversized message: a uid omitted by get() may
+   * be retried; the sync engine must not advance highest_uid past an omitted uid.
    *
    * @param {string} folderPath
    * @param {number[]} uids
@@ -878,6 +956,11 @@ export function createImapSmtpAdapter(options = {}) {
           }
         }
 
+        // Two kinds of "no bytes", kept apart: `oversized` means the message itself is over the cap and
+        // is reported with an empty Buffer, `absent` means this call did not deliver it and says nothing.
+        const oversized = new Set(
+          [...meta.values()].filter((item) => item.size > rawLimit).map((item) => item.uid),
+        );
         // Ask only for the bodies the reported sizes say fit this call's budget, in UID order; a
         // server that under-reports is caught below, on the bytes that actually arrived.
         const candidates = [...meta.values()]
@@ -893,44 +976,44 @@ export function createImapSmtpAdapter(options = {}) {
         const attempted = new Set(attempts);
         const absent = new Set(candidates.filter((item) => !attempted.has(item.uid)).map((item) => item.uid));
 
-        const raws = new Map();
+        const bodies = new Map();
         let used = 0;
-        let stoppedAt = null;
         download: for (const chunk of chunks(attempts, FETCH_CHUNK)) {
-          for await (const message of client.fetch(chunk.join(","), SOURCE_QUERY, { uid: true })) {
+          for await (const message of client.fetch(chunk.join(","), sourceQuery(), { uid: true })) {
             const uid = Number(message.uid);
-            if (!meta.has(uid)) continue;
-            const source = Buffer.isBuffer(message.source) ? message.source : Buffer.alloc(0);
+            if (!attempted.has(uid)) continue;
+            if (!Buffer.isBuffer(message.source)) continue;
+            const source = message.source;
             if (source.length > rawLimit) {
               // The server's reported size was below the real one: the bytes are dropped here and the
               // message is reported as oversized, exactly like one the server admitted to.
-              raws.set(uid, Buffer.alloc(0));
+              oversized.add(uid);
               continue;
             }
             if (used + source.length > budget) {
-              // This body would take the call past its budget: it and every larger UID are left out,
-              // so the caller asks for them again rather than Crow holding them in this call.
-              stoppedAt = uid;
+              // This body would take the call past its budget, so the call stops here. Whatever else was
+              // asked for is left out below, in whatever order the server delivers it: an empty Buffer
+              // would read as an empty message rather than as one to fetch again.
               break download;
             }
             used += source.length;
-            raws.set(uid, source);
+            bodies.set(uid, source);
           }
         }
-        if (stoppedAt != null) {
-          for (const uid of attempts) {
-            if (uid >= stoppedAt && !raws.has(uid)) absent.add(uid);
-          }
+        for (const uid of attempts) {
+          if (!bodies.has(uid) && !oversized.has(uid)) absent.add(uid);
         }
 
         const messages = [];
         for (const item of [...meta.values()].sort((left, right) => left.uid - right.uid)) {
           if (absent.has(item.uid)) continue;
+          const raw = bodies.get(item.uid) ?? (oversized.has(item.uid) ? Buffer.alloc(0) : null);
+          if (raw == null) continue;
           messages.push({
             uid: item.uid,
             flags: item.flags,
             internalDate: item.internalDate,
-            raw: raws.get(item.uid) ?? Buffer.alloc(0),
+            raw,
           });
         }
         return messages;
@@ -1000,7 +1083,10 @@ export function createImapSmtpAdapter(options = {}) {
    * append carries the command deadline and the same error wrapping as every other command.
    *
    * `uid` is the UID the server reported for the appended message, or `null` when it reported none
-   * (a server without UIDPLUS); the draft is stored either way.
+   * (a server without UIDPLUS); the draft is stored either way. A drafts folder whose own path carries
+   * a control character is listed by `listFolders` but not one Crow commands, so it is not picked — a
+   * server refusal for size (APPENDLIMIT or TOOBIG) comes back as TOO_LARGE rather than as a protocol
+   * fault.
    *
    * @param {Buffer|string} raw the RFC 822 message
    * @returns {Promise<AdapterDraftRef>}
@@ -1016,7 +1102,8 @@ export function createImapSmtpAdapter(options = {}) {
     return runCommand(async (client) => {
       const folders = await listFolders();
       const drafts = folders.find((folder) => typeof folder.specialUse === "string"
-        && folder.specialUse.trim().toLowerCase() === DRAFTS_SPECIAL_USE);
+        && folder.specialUse.trim().toLowerCase() === DRAFTS_SPECIAL_USE
+        && listedFolderPath(folder.path) != null);
       if (!drafts) throw new MailError("NOT_FOUND", "drafts");
       const response = await client.append(drafts.path, bytes, [...DRAFT_FLAGS]);
       const uid = Number(response && response.uid);
@@ -1035,14 +1122,23 @@ export function createImapSmtpAdapter(options = {}) {
    * header value that could add a line is refused before a transport exists, so nothing is opened for
    * it. Everything after that is built from the validated fields (see `smtpMessage`).
    *
+   * One deadline covers the whole exchange — the sign-in, the connect, the greeting and the
+   * transmission. nodemailer's `socketTimeout` only measures silence, so it is not a bound on a server
+   * that answers slowly but never stops answering; `sendMs` is. The deadline travels to nodemailer as
+   * the message's `signal`, which closes the connection and fails the send with `EABORT`, and the
+   * `authFor` step — which runs before any transport exists — is raced against the same signal.
+   *
+   * A refused OAuth sign-in is retried once with a forced token refresh, exactly as `openClient` does:
+   * AUTH is the first exchange of a send, so nothing has been transmitted and the retry cannot deliver
+   * the message twice. Nothing else is retried, because a bad password must not be hammered at a server.
+   *
    * The recipient list nodemailer reports comes back in two lists, so a server that refuses one
    * recipient of several is reported to the caller rather than thrown; a send whose every recipient is
    * refused is a failure with a fixed sentence, because nothing was transmitted for the lists to
    * describe. A failure of any other kind is a fixed sentence through the shared classifier too: no
-   * server text, no command line, no credential and no address travels with it. Each phase of the
-   * exchange is bounded by the adapter's own timeouts (connect, greeting and socket; `commandMs`
-   * budgets one IMAP command and has no SMTP counterpart here). The transport is closed in `finally` —
-   * it is one connection for one message, never a pool.
+   * server text, no command line, no credential and no address travels with it. nodemailer opens one
+   * connection for one message — never a pool — and closes it itself before the send settles;
+   * `transporter.close()` below only releases the transport's own listeners.
    *
    * @param {OutgoingMessage} message
    * @returns {Promise<AdapterSendResult>}
@@ -1051,37 +1147,56 @@ export function createImapSmtpAdapter(options = {}) {
     const outgoing = validateOutgoing(message);
     const endpoint = endpointFor(account, "smtp");
     const messageId = messageIdFor(outgoing.from.address);
-    const payload = smtpMessage(outgoing, messageId);
+    const deadline = AbortSignal.timeout(timeouts.sendMs);
+    const payload = smtpMessage(outgoing, messageId, deadline);
 
     let transporter = null;
+    let retried = false;
     try {
-      const auth = await authFor(account, {
-        credentials,
-        tokenProvider,
-        rotation: typeof onTokenRotated === "function"
-          ? async (accountId, { refreshToken } = {}) => { await onTokenRotated(refreshToken); }
-          : undefined,
-      });
-      transporter = nodemailer.createTransport(smtpTransportOptions(endpoint, auth, timeouts));
-      if (transporter == null || typeof transporter.sendMail !== "function") {
-        throw new MailError("PROTOCOL", "transport");
+      for (;;) {
+        try {
+          const auth = await withSendDeadline(deadline, () => authFor(account, {
+            credentials,
+            tokenProvider,
+            forceRefresh: retried,
+            rotation: typeof onTokenRotated === "function"
+              ? async (accountId, { refreshToken } = {}) => { await onTokenRotated(refreshToken); }
+              : undefined,
+          }));
+          transporter = nodemailer.createTransport(smtpTransportOptions(endpoint, auth, timeouts));
+          if (transporter == null || typeof transporter.sendMail !== "function") {
+            throw new MailError("PROTOCOL", "transport");
+          }
+          const info = await withSendDeadline(deadline, () => transporter.sendMail(payload));
+          return {
+            // The id handed to nodemailer as the Message-ID header, so the stored copy and the sent copy
+            // carry the same one.
+            messageId,
+            accepted: addressListOf(info && info.accepted),
+            rejected: addressListOf(info && info.rejected),
+          };
+        } catch (err) {
+          const mail = asMailError(err);
+          const canRefresh = !retried && mail.code === "AUTH_FAILED" &&
+            account.authKind === "xoauth2" && typeof tokenProvider === "function";
+          if (!canRefresh) throw mail;
+          retried = true;
+          if (transporter) {
+            try {
+              transporter.close();
+            } catch {
+              // a transport whose connection is already gone has nothing to release
+            }
+            transporter = null;
+          }
+        }
       }
-      const info = await transporter.sendMail(payload);
-      return {
-        // The id handed to nodemailer as the Message-ID header, so the stored copy and the sent copy
-        // carry the same one.
-        messageId,
-        accepted: addressListOf(info && info.accepted),
-        rejected: addressListOf(info && info.rejected),
-      };
-    } catch (err) {
-      throw asMailError(err);
     } finally {
       if (transporter) {
         try {
           transporter.close();
         } catch {
-          // the connection is already gone; there is nothing left to close
+          // as above: the send's own connection was already closed by nodemailer
         }
       }
     }

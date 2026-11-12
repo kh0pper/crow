@@ -8,8 +8,11 @@
 // and no address. A draft is stored by special-use flag, never by folder name.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import net from "node:net";
+import tls from "node:tls";
 import { readFileSync } from "node:fs";
+import { ImapFlow } from "imapflow";
 import {
   createFakeImapServer, createFakeSmtpServer, makeRaw, FAKE_PASSWORD,
 } from "./fixtures/fake-mail-server.mjs";
@@ -133,6 +136,262 @@ function captureConsole() {
   return {
     text: () => lines.join("\n"),
     restore: () => { for (const [method, original] of originals) console[method] = original; },
+  };
+}
+
+const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Polls a predicate, so a pushed answer never depends on a fixed delay. */
+async function waitFor(predicate, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (predicate()) return;
+    if (Date.now() > deadline) throw new Error("timed out waiting for a condition");
+    await tick(5);
+  }
+}
+
+/* --------------------------------------------------------------- a throwaway TLS certificate */
+
+function derLength(size) {
+  if (size < 0x80) return Buffer.from([size]);
+  const bytes = [];
+  let value = size;
+  while (value > 0) {
+    bytes.unshift(value & 0xff);
+    value = Math.floor(value / 256);
+  }
+  return Buffer.from([0x80 | bytes.length, ...bytes]);
+}
+
+function der(tag, ...chunks) {
+  const content = Buffer.concat(chunks.map((chunk) => (Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))));
+  return Buffer.concat([Buffer.from([tag]), derLength(content.length), content]);
+}
+
+const derSequence = (...chunks) => der(0x30, ...chunks);
+const derSet = (...chunks) => der(0x31, ...chunks);
+const derOid = (...bytes) => der(0x06, Buffer.from(bytes));
+const derName = (value) => derSequence(derSet(derSequence(derOid(0x55, 0x04, 0x03), der(0x0c, Buffer.from(value, "utf8")))));
+/** A PEM block: base64 in 64-character lines, with no blank line before the tail. */
+function derPem(label, bytes) {
+  const lines = bytes.toString("base64").match(/.{1,64}/g) ?? [];
+  return `-----BEGIN ${label}-----\n${lines.join("\n")}\n-----END ${label}-----\n`;
+}
+
+/**
+ * A self-signed certificate for `127.0.0.1`/`localhost`, built from `node:crypto` alone: an EC key, the
+ * X.509 fields a server certificate needs, and an ECDSA signature over them. It is a throwaway that
+ * exists for one test run and is trusted by nothing.
+ */
+function selfSignedCertificate() {
+  const { privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const subjectPublicKey = crypto.createPublicKey(privateKey).export({ type: "spki", format: "der" });
+  const signatureAlgorithm = derSequence(derOid(0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02));
+  const extensions = der(0xa3, derSequence(
+    derSequence(derOid(0x55, 0x1d, 0x11), der(0x04, derSequence(
+      der(0x82, Buffer.from("localhost", "ascii")),
+      der(0x87, Buffer.from([127, 0, 0, 1])),
+    ))),
+    derSequence(derOid(0x55, 0x1d, 0x25), der(0x04, derSequence(derOid(0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01)))),
+  ));
+  const toBeSigned = derSequence(
+    der(0xa0, der(0x02, Buffer.from([2]))),
+    der(0x02, Buffer.from([1])),
+    signatureAlgorithm,
+    derName("localhost"),
+    derSequence(
+      der(0x17, Buffer.from("240101000000Z", "ascii")),
+      der(0x17, Buffer.from("491231235959Z", "ascii")),
+    ),
+    derName("localhost"),
+    subjectPublicKey,
+    extensions,
+  );
+  const signature = crypto.sign("sha256", toBeSigned, privateKey);
+  const certificate = derSequence(toBeSigned, signatureAlgorithm, der(0x03, Buffer.from([0]), signature));
+  return {
+    cert: derPem("CERTIFICATE", certificate),
+    key: privateKey.export({ type: "pkcs8", format: "pem" }),
+  };
+}
+
+/** An SMTP server behind implicit TLS, with the throwaway certificate. */
+async function startTlsSmtp(pair) {
+  const sockets = new Set();
+  const server = tls.createServer({ key: pair.key, cert: pair.cert }, (socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+    socket.on("close", () => sockets.delete(socket));
+    socket.write(`220 fake SMTP ready${CRLF}`);
+    socket.on("data", () => {});
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  return {
+    host: "127.0.0.1",
+    port: server.address().port,
+    async close() {
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+/** Whether a TLS client with verification turned off reaches this server, and with it on refuses it. */
+async function tlsVerdict(port) {
+  const verdict = {};
+  const attempt = (rejectUnauthorized) => new Promise((resolve) => {
+    const socket = tls.connect({ port, host: "127.0.0.1", rejectUnauthorized }, () => {
+      socket.end();
+      resolve("connected");
+    });
+    socket.on("error", (err) => resolve(String(err.code)));
+  });
+  verdict.withoutVerification = await attempt(false);
+  verdict.withVerification = await attempt(true);
+  return verdict;
+}
+
+/* --------------------------------------------------------------- a server that never stops talking */
+
+/**
+ * An SMTP server that greets and then answers EHLO with one `250-` continuation line every 100 ms, for
+ * as long as the client stays. Nothing is ever silent, so an inactivity timer measures nothing.
+ */
+async function startDribblingSmtp() {
+  const sockets = new Set();
+  const timers = new Set();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+    socket.on("close", () => sockets.delete(socket));
+    socket.setNoDelay(true);
+    socket.write(`220 fake SMTP ready${CRLF}`);
+    let buffer = "";
+    let dribbling = null;
+    socket.on("close", () => {
+      if (dribbling) clearInterval(dribbling);
+      timers.delete(dribbling);
+    });
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      if (!buffer.includes(CRLF) || dribbling) return;
+      buffer = "";
+      dribbling = setInterval(() => {
+        if (socket.destroyed) return;
+        socket.write(`250-still-working${CRLF}`);
+      }, 100);
+      timers.add(dribbling);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  return {
+    host: "127.0.0.1",
+    port: server.address().port,
+    openConnections: () => sockets.size,
+    async close() {
+      for (const timer of timers) clearInterval(timer);
+      timers.clear();
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+/* --------------------------------------------- an SMTP server whose AUTH answer this test decides */
+
+/**
+ * A minimal SMTP server that refuses the first `failAuthTimes` sign-ins and accepts the next one, so a
+ * test can see the retry on the wire. Everything after a successful sign-in is answered as accepted.
+ */
+async function startScriptedSmtp({ failAuthTimes }) {
+  const state = { messages: [], authCommands: [], connections: 0, authFailures: 0 };
+  const sockets = new Set();
+  const server = net.createServer((socket) => {
+    state.connections += 1;
+    sockets.add(socket);
+    socket.on("error", () => {});
+    socket.on("close", () => sockets.delete(socket));
+    socket.setNoDelay(true);
+    socket.write(`220 fake SMTP ready${CRLF}`);
+    let buffer = "";
+    let data = null;
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      for (;;) {
+        const end = buffer.indexOf(CRLF);
+        if (end < 0) return;
+        const line = buffer.slice(0, end);
+        buffer = buffer.slice(end + 2);
+        if (data) {
+          if (line === ".") {
+            state.messages.push(data.join(CRLF));
+            data = null;
+            socket.write(`250 2.0.0 Ok: queued${CRLF}`);
+          } else {
+            data.push(line.startsWith(".") ? line.slice(1) : line);
+          }
+          continue;
+        }
+        const verb = (line.split(" ")[0] || "").toUpperCase();
+        if (verb === "EHLO") {
+          socket.write(`250-fake${CRLF}250-AUTH PLAIN LOGIN XOAUTH2${CRLF}250 8BITMIME${CRLF}`);
+        } else if (verb === "AUTH") {
+          state.authCommands.push(line);
+          if (state.authFailures < failAuthTimes) {
+            state.authFailures += 1;
+            socket.write(`535 5.7.8 Authentication credentials invalid${CRLF}`);
+          } else {
+            socket.write(`235 2.7.0 Authentication successful${CRLF}`);
+          }
+        } else if (verb === "MAIL") {
+          socket.write(`250 2.1.0 Ok${CRLF}`);
+        } else if (verb === "RCPT") {
+          socket.write(`250 2.1.5 Ok${CRLF}`);
+        } else if (verb === "DATA") {
+          data = [];
+          socket.write(`354 End data with <CR><LF>.<CR><LF>${CRLF}`);
+        } else if (verb === "QUIT") {
+          socket.write(`221 2.0.0 Bye${CRLF}`);
+          socket.end();
+        } else {
+          socket.write(`250 2.0.0 Ok${CRLF}`);
+        }
+      }
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  return {
+    host: "127.0.0.1",
+    port: server.address().port,
+    get authCommands() { return state.authCommands; },
+    get messages() { return state.messages; },
+    get connections() { return state.connections; },
+    async close() {
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+      await new Promise((resolve) => server.close(resolve));
+    },
   };
 }
 
@@ -433,7 +692,7 @@ test("sending writes nothing to the console, and never the password", async () =
 
 /* ----------------------------------------------------------------------------------- saveDraft */
 
-function imapAdapterFor(imap, overrides = {}) {
+function imapAdapterFor(imap, overrides = {}, adapterOptions = {}) {
   return createImapSmtpAdapter({
     account: accountFor(
       { host: "127.0.0.1", port: 1, security: "none" },
@@ -441,6 +700,7 @@ function imapAdapterFor(imap, overrides = {}) {
     ),
     credentials: passwordCredentials(FAKE_PASSWORD),
     timeouts: FAST,
+    ...adapterOptions,
   });
 }
 
@@ -508,6 +768,200 @@ test("saveDraft refuses input that is not a message before opening a connection"
       assert.equal(err.code, "BAD_INPUT");
     }
     assert.equal(imap.connectionCount(), 0, "a refused draft opens no socket");
+  } finally {
+    await adapter.close();
+    await stopFake(imap);
+  }
+});
+
+test("an attachment naming a local file, a URL, raw bytes or a transfer encoding is refused before any connection", async () => {
+  const fake = await startSmtp();
+  const adapter = adapterFor(fake);
+  const content = Buffer.from("bytes", "utf8");
+  const refused = [
+    { path: "/etc/passwd" },
+    { href: "https://example.test/report.bin" },
+    { raw: "Content-Type: text/plain" },
+    { encoding: "base64" },
+  ];
+  try {
+    for (const extra of refused) {
+      const err = await rejectionOf(adapter.send(outgoing({
+        attachments: [{ filename: "report.bin", contentType: "application/octet-stream", content, ...extra }],
+      })));
+      assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+      assert.equal(err.code, "BAD_INPUT");
+      assert.equal(err.detail, "attachments", "the detail names the field, never the value");
+      assert.equal(err.message, MAIL_ERROR_TEXT.BAD_INPUT);
+    }
+    assert.equal(fake.connectionCount(), 0, "no refused message opened a socket");
+    assert.equal(fake.messages.length, 0);
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+/* ------------------------------------------------------------------------- the send deadline */
+
+test("a server that dribbles one line at a time fails the send at the send deadline", async () => {
+  const dribbler = await startDribblingSmtp();
+  const adapter = createImapSmtpAdapter({
+    account: accountFor({ host: dribbler.host, port: dribbler.port, security: "none" }),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts: { connectMs: 4000, greetingMs: 4000, socketMs: 4000, commandMs: 4000, sendMs: 600 },
+  });
+  try {
+    const started = Date.now();
+    const err = await rejectionOf(adapter.send(outgoing()));
+    const elapsed = Date.now() - started;
+    assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+    assert.equal(err.code, "TIMEOUT", "a send that never goes silent is still bounded");
+    assert.equal(err.message, MAIL_ERROR_TEXT.TIMEOUT);
+    assert.ok(elapsed < 1500, `the send deadline ended it (${elapsed} ms)`);
+    const shown = shownError(err);
+    assert.ok(!shown.includes(FAKE_PASSWORD), "no credential in the sentence");
+    assert.ok(!shown.includes("still-working"), "no server line in the sentence");
+    await waitFor(() => dribbler.openConnections() === 0);
+    assert.equal(dribbler.openConnections(), 0, "the connection was closed, not left holding the send");
+  } finally {
+    await adapter.close();
+    await dribbler.close();
+  }
+});
+
+test("a hung token provider rejects TIMEOUT within the send budget", async () => {
+  const adapter = createImapSmtpAdapter({
+    account: accountFor({ host: "127.0.0.1", port: 1, security: "none" }, { authKind: "xoauth2" }),
+    tokenProvider: () => new Promise(() => {}),
+    timeouts: { connectMs: 4000, greetingMs: 4000, socketMs: 4000, commandMs: 4000, sendMs: 250 },
+  });
+  try {
+    const started = Date.now();
+    const err = await rejectionOf(adapter.send(outgoing()));
+    const elapsed = Date.now() - started;
+    assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+    assert.equal(err.code, "TIMEOUT", "the sign-in is under the same deadline as the send");
+    assert.equal(err.detail, "send_deadline");
+    assert.ok(elapsed < 1500, `the send deadline ended it (${elapsed} ms)`);
+  } finally {
+    await adapter.close();
+  }
+});
+
+/* --------------------------------------------------------------- XOAUTH2 refusal and retry */
+
+test("a refused XOAUTH2 send-signin retries once with a forced refresh", async () => {
+  const server = await startScriptedSmtp({ failAuthTimes: 1 });
+  const calls = [];
+  const adapter = createImapSmtpAdapter({
+    account: accountFor({ host: server.host, port: server.port, security: "none" }, { authKind: "xoauth2" }),
+    tokenProvider: async ({ forceRefresh }) => {
+      calls.push(forceRefresh);
+      return { accessToken: `access-token-${calls.length}` };
+    },
+    timeouts: FAST,
+  });
+  try {
+    const result = await adapter.send(outgoing());
+    assert.deepEqual(calls, [false, true], "the second sign-in asks for a forced refresh");
+    assert.equal(server.authCommands.length, 2, "two sign-ins were attempted");
+    assert.equal(server.connections, 2, "the retry is its own connection");
+    assert.equal(server.messages.length, 1, "the message was transmitted once");
+    assert.ok(server.messages[0].includes("Hello from Crow"), "and it is the message that was asked for");
+    assert.match(result.messageId, /^<[0-9a-f]{32}@example\.com>$/);
+  } finally {
+    await adapter.close();
+    await server.close();
+  }
+});
+
+test("a second refused XOAUTH2 sign-in is AUTH_FAILED and transmits nothing", async () => {
+  const server = await startScriptedSmtp({ failAuthTimes: Number.POSITIVE_INFINITY });
+  const calls = [];
+  const adapter = createImapSmtpAdapter({
+    account: accountFor({ host: server.host, port: server.port, security: "none" }, { authKind: "xoauth2" }),
+    tokenProvider: async ({ forceRefresh }) => {
+      calls.push(forceRefresh);
+      return { accessToken: `access-token-${calls.length}` };
+    },
+    timeouts: FAST,
+  });
+  try {
+    const err = await rejectionOf(adapter.send(outgoing()));
+    assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+    assert.equal(err.code, "AUTH_FAILED");
+    assert.equal(err.message, MAIL_ERROR_TEXT.AUTH_FAILED);
+    assert.deepEqual(calls, [false, true], "the forced refresh is asked for exactly once");
+    assert.equal(server.authCommands.length, 2, "two sign-ins, not a third");
+    assert.equal(server.messages.length, 0, "nothing was transmitted");
+    const shown = shownError(err);
+    assert.ok(!shown.includes("access-token-1"), "no token in the sentence");
+  } finally {
+    await adapter.close();
+    await server.close();
+  }
+});
+
+/* ------------------------------------------------------------------ implicit TLS and a bad cert */
+
+test("implicit TLS against a self-signed certificate is TLS and transmits nothing", async () => {
+  const pair = selfSignedCertificate();
+  const server = await startTlsSmtp(pair);
+  try {
+    const verdict = await tlsVerdict(server.port);
+    assert.equal(verdict.withoutVerification, "connected", "the server is a real TLS endpoint");
+    assert.match(
+      String(verdict.withVerification),
+      /CERT/,
+      "and a client that verifies refuses its certificate",
+    );
+
+    const adapter = createImapSmtpAdapter({
+      account: accountFor({ host: server.host, port: server.port, security: "ssl" }),
+      credentials: passwordCredentials(FAKE_PASSWORD),
+      timeouts: FAST,
+    });
+    try {
+      const err = await rejectionOf(adapter.send(outgoing()));
+      assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+      assert.equal(err.code, "TLS", "an untrusted certificate is a TLS fault, not a network one");
+      assert.equal(err.message, MAIL_ERROR_TEXT.TLS);
+      const shown = shownError(err);
+      assert.ok(!shown.includes(FAKE_PASSWORD), "the sign-in never happened");
+      assert.ok(!shown.includes(SAM), "no recipient address in the sentence");
+    } finally {
+      await adapter.close();
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("saveDraft reports an APPENDLIMIT or TOOBIG refusal as TOO_LARGE", async () => {
+  const imap = await startImap();
+  let refusal = "APPENDLIMIT";
+  const adapter = imapAdapterFor(imap, {}, {
+    clientFactory: (options) => {
+      const client = new ImapFlow(options);
+      client.append = async () => {
+        const err = new Error("the server refused the append");
+        err.serverResponseCode = refusal;
+        throw err;
+      };
+      return client;
+    },
+  });
+  try {
+    for (const code of ["APPENDLIMIT", "TOOBIG"]) {
+      refusal = code;
+      const err = await rejectionOf(adapter.saveDraft(makeRaw({ subject: "Draft", body: "Not sent yet." })));
+      assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+      assert.equal(err.code, "TOO_LARGE", `${code} is the message being too large`);
+      assert.equal(err.message, MAIL_ERROR_TEXT.TOO_LARGE);
+      assert.equal(err.detail, code);
+    }
+    assert.equal(imap.appended.length, 0, "no refusal was filed as a draft");
   } finally {
     await adapter.close();
     await stopFake(imap);
