@@ -274,8 +274,8 @@ test("MCP: ramble_moves_today reads, ramble_moves_log refuses an unknown activit
   const logged = await handlers.ramble_moves_log({ activity: "walk", minutes: 10, effort: "easy" });
   assert.ok(!logged.isError, logged.content?.[0]?.text);
   const log = JSON.parse(logged.content[0].text);
-  assert.equal(log.points, 5);
-  assert.equal(log.paid, 5);
+  assert.equal(log.points, 12);
+  assert.equal(log.paid, 12);
   assert.equal(log.already, false);
   assert.ok(log.logs.some((l) => l.activity === "walk" && l.minutes === 10 && l.effort === "easy"));
 

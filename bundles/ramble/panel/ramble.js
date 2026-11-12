@@ -542,8 +542,8 @@ export default {
                 <div class="rb-step-txt"><strong>Unlock a mark</strong><span class="rb-muted rb-fine">open something someone left behind</span></div>
               </div>
               <div class="rb-step">
-                <span class="rb-step-n">+24</span>
-                <div class="rb-step-txt"><strong>Today's challenge</strong><span class="rb-muted rb-fine">up to +24 a day indoors</span></div>
+                <span class="rb-step-n">+40</span>
+                <div class="rb-step-txt"><strong>Today's challenge</strong><span class="rb-muted rb-fine">up to +40 a day indoors</span></div>
               </div>
               <div class="rb-step">
                 <span class="rb-step-n">+5</span>

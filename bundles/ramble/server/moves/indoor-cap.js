@@ -3,15 +3,18 @@
  *
  * ONE combined cap per local day, shared by every indoor earner: an indoor
  * challenge Done and an indoor "something else" log (moves/ledger.js). It is
- * the old 3 x 8 daily-tap purse (24), kept as the ceiling on indoor Health so
- * the number did not move when moves arrived.
+ * 40, the same size as the outdoor budget (ledger.js OUTDOOR_DAILY_CAP),
+ * because both pay the same chunk rate.
  *
- * ⚠ WHY 24 IS LOAD-BEARING. With the 5-point daily check-in that is 29/day
- * against 40/day of decay (10 per 6 h), so indoor-only activity can never
- * sustain lay days — see the long comment on eggs.js `recordHappyDay`. Raise
- * this number and that invariant breaks; if it ever has to move, move
- * `lay.days` or the decay with it and re-run the simulation in
- * tests/ramble-moves-ledger.test.js.
+ * ⚠ THE BUDGETS NO LONGER GUARD EGGS, AND A CAP CANNOT. They used to: an
+ * indoor-only day was meant to sit under the day's decay. No cap size can do
+ * that, because the daily check-in and the step floor pay on days this file
+ * never sees, so a purse big enough to be worth playing is big enough to keep
+ * a bird happy. The egg rule therefore stopped reading these numbers: a lay
+ * day requires a REAL-MOVEMENT fact for that local day, and `recordHappyDay`
+ * refuses without one (`hasRealMovement` in eggs.js). Indoor-only play can
+ * bank happy days forever and never lay a day, whatever this cap or the chunk
+ * rate is retuned to. Do not reintroduce a rule that reads this number.
  *
  * ⚠ SYNC SAFETY. The cap row GROWS and is moved ONLY by compare-and-swap
  * (`casDelta`, steps.js), because instance-sync merges a wallet conflict with
@@ -30,8 +33,8 @@
 import { localDay, startOfLocalDay } from "../eggs.js";
 import { casDelta, rowDelta } from "../steps.js";
 
-/** Indoor Health from moves, per local day (the old 3 x 8 purse). */
-export const INDOOR_DAILY_CAP = 24;
+/** Indoor Health from moves, per local day. */
+export const INDOOR_DAILY_CAP = 40;
 /** Wallet kind: key `<day>`, delta = indoor Health paid that day. Grows, <= cap. */
 export const MOVE_INDOOR_KIND = "moveindoor";
 

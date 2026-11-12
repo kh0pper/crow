@@ -516,6 +516,120 @@ export async function layProgress(db) {
 }
 
 /**
+ * The wallet/credit kinds that count as a REAL-MOVEMENT fact (P3, spec §4.3).
+ *
+ * ⚠ THE STRINGS ARE LITERALS ON PURPOSE. `steps.js` (WALKED_KIND) and
+ * `moves/ledger.js` (MOVE_OUTDOOR_KIND) both reach this file through the pet
+ * module, so importing either one back from here would close a module cycle.
+ * `settleHappyDay` is called BY them, never the other way round. The tests pin
+ * each literal against the constant its owning module exports, so the three
+ * cannot drift apart silently.
+ *
+ *   walked     steps.js `WALKED_KIND` — key `<day>`, delta 1. Written by
+ *              `settleDay` alone, for both the step-badge threshold and the
+ *              "I walked today" tap (which is a `walkcheck` row that settleDay
+ *              turns into a `walked` one).
+ *   outdoor    moves/ledger.js `MOVE_OUTDOOR_KIND` — key `<day>`, delta = the
+ *              outdoor Health paid that day (grows, <= OUTDOOR_DAILY_CAP).
+ *   visitPlace the kind `creditKey` in this file writes for a `visit_place`
+ *              event (`ramble_credits`, key `<cell>:<ISO week>`).
+ */
+export const MOVEMENT_KINDS = Object.freeze({
+  walked: "walked",
+  outdoor: "moveoutdoor",
+  visitPlace: "visit_place",
+});
+
+const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The [start, start of the next local day) window that the `YYYY-MM-DD` day
+ * string names, or null when the string is not a real local date. Built from
+ * the local-time Date constructor, not from UTC arithmetic, so a day that
+ * gains or loses an hour at a DST change still runs exactly one local day.
+ */
+function localDayBounds(day) {
+  if (typeof day !== "string" || !DAY_KEY_RE.test(day)) return null;
+  const [y, m, d] = day.split("-").map(Number);
+  const start = new Date(y, m - 1, d);
+  // Round-trip check: Date rolls 2026-02-30 and 2026-13-01 over silently, and
+  // those are junk keys, not days.
+  if (start.getFullYear() !== y || start.getMonth() !== m - 1 || start.getDate() !== d) return null;
+  return [start.getTime(), new Date(y, m - 1, d + 1).getTime()];
+}
+
+/**
+ * Is there a REAL-MOVEMENT fact for the local day `day` ("YYYY-MM-DD")? A pure
+ * read: it writes no row, mints nothing and emits nothing.
+ *
+ * Three facts qualify, and the list is exhaustive by design — anything not on
+ * it is not movement:
+ *
+ *   1. a `walked` row for the day (a step-badge day, or the "I walked today"
+ *      tap; see MOVEMENT_KINDS),
+ *   2. an outdoor `moveoutdoor` row for the day above 0 (the outdoor budget is
+ *      only ever filled by an activity the fixed vocabulary calls outdoor, so
+ *      it is the corroborated claim, not the indoor one),
+ *   3. a `visit_place` credit whose `credited_at` falls inside the local day.
+ *
+ * ⚠ Indoor budget rows (`moveindoor`, `movelog`, `movedone`) and `checkin`
+ * credits are deliberately NOT facts: they are self-reported or indoor, and
+ * indoor-only play must never lay (indoor-only play never lays, because no
+ * movement fact exists — see recordHappyDay).
+ *
+ * ⚠ WHY THE THIRD SOURCE IS THE `visit_place` CREDIT AND NOT A CELL. The plan
+ * wanted "a cell first unlocked that day" from `ramble_cells.first_unlocked_at`,
+ * and that column is not reliable: init-tables.js runs a one-time backfill that
+ * stamps every pre-existing cell with the install-time clock, and instance sync
+ * keeps MIN(first_unlocked_at) across devices so it can move. The day's
+ * `visit_place` credit is local-only and is written by `creditWarmth` in this
+ * file at the moment the place really was visited.
+ */
+export async function hasRealMovement(db, day) {
+  const bounds = localDayBounds(day);
+  if (!bounds) return false;
+
+  const { rows: walkedRows } = await db.execute({
+    sql: "SELECT 1 FROM ramble_wallet WHERE kind = ? AND key = ? LIMIT 1",
+    args: [MOVEMENT_KINDS.walked, day],
+  });
+  if (walkedRows.length > 0) return true;
+
+  const { rows: outdoorRows } = await db.execute({
+    sql: "SELECT 1 FROM ramble_wallet WHERE kind = ? AND key = ? AND delta > 0 LIMIT 1",
+    args: [MOVEMENT_KINDS.outdoor, day],
+  });
+  if (outdoorRows.length > 0) return true;
+
+  const { rows: placeRows } = await db.execute({
+    sql: `SELECT 1 FROM ramble_credits
+           WHERE kind = ? AND credited_at >= ? AND credited_at < ? LIMIT 1`,
+    args: [MOVEMENT_KINDS.visitPlace, bounds[0], bounds[1]],
+  });
+  return placeRows.length > 0;
+}
+
+/**
+ * Re-run the happy-day rule for the pet as it stands NOW — the pet's stored
+ * mood, read straight from `ramble_pet` (no pet.js import; this file must stay
+ * on the bottom of that dependency chain). Writes nothing itself: everything it
+ * can change, `recordHappyDay` writes.
+ *
+ * It exists so the ORDER of "fed" and "moved" within a day does not matter. A
+ * movement fact usually lands AFTER the feed that made the bird happy (a walk
+ * is logged, then the budget pays the pet), so the feed's own happy-day check
+ * sees a day with no movement yet. steps.js calls this once the `walked` row is
+ * written, and the moves ledger's outdoor claim is the same shape.
+ *
+ * A missing pet row is nothing to judge: do nothing and report nothing.
+ */
+export async function settleHappyDay(db, { now = Date.now(), emit } = {}) {
+  const { rows } = await db.execute({ sql: "SELECT mood FROM ramble_pet WHERE owner = 'self'", args: [] });
+  if (!rows.length) return { recorded: false, laid: false };
+  return recordHappyDay(db, { now, mood: rows[0].mood, emit });
+}
+
+/**
  * Count today toward laying, and lay if the threshold is reached (spec §4.3).
  *
  * Called from the pet's read and feed paths, so "ends the day happy" is really
@@ -536,20 +650,23 @@ export async function layProgress(db) {
  * DOING something — a walk, a challenge, a check-in — not by opening the app,
  * which is also the truer reading of §4.3's "sustained care".
  *
- * ⚠ Laying REQUIRES real movement, and that is a design consequence, not an
- * oversight. Decay is 10 per 6 h (-40/day); the most a player who never posts
- * a location fix can earn is check-in 5 + indoor moves 24 = 29/day — ONE
- * combined indoor budget (moves/indoor-cap.js INDOOR_DAILY_CAP, the old
- * 3 x 8 purse, now shared by an indoor challenge Done and an indoor
- * "something else" log), plus the check-in, which is the only indoor earner
- * outside it. From the default 60 they bank three happy days and then
- * fall below the 60 threshold for good. Do NOT write, in a comment or a doc,
- * that indoor moves and the check-in alone can reach `lay.days`. They
- * cannot. tests/ramble-moves-ledger.test.js simulates the fortnight.
+ * ⚠ LAY DAYS REQUIRE REAL MOVEMENT, and the check lives here (`hasRealMovement`)
+ * rather than in the size of any budget. Being happy is not enough: the day
+ * must also carry a movement fact — a `walked` row (step badge or the "I walked
+ * today" tap), a positive outdoor `moveoutdoor` row, or a `visit_place` credit
+ * for that local day. So indoor-only play never lays: no movement fact exists,
+ * whatever the indoor budget pays, and the answer does not change when a cap or
+ * a rate is retuned.
+ *
+ * ⚠ "Observed happy" alone would also have let the budget size decide the
+ * rule, which is the coupling this check removes: the indoor purse and the
+ * daily check-in feed the bird, and the bird's mood is judged as before, but
+ * the day only counts once something was actually walked or visited.
  */
 export async function recordHappyDay(db, { now = Date.now(), mood, emit } = {}) {
   if (mood !== "happy") return { recorded: false, laid: false };
   if (await hasAnyEggAnywhere(db)) return { recorded: false, laid: false };
+  if (!(await hasRealMovement(db, localDay(now)))) return { recorded: false, laid: false, reason: "no_movement" };
 
   const key = localDay(now);
   const { rowsAffected } = await db.execute({

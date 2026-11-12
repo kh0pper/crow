@@ -9,9 +9,9 @@
  *
  * Health from movement (moves/ledger.js) arrives through `feed()`'s `move`
  * event, out of a daily budget claimed by the caller. The old daily chores are
- * gone (their 3 x 8 = 24 purse survives as moves/indoor-cap.js's indoor
- * budget); `chores_json` stays in the table because the column replicates, but
- * nothing reads it any more.
+ * gone; moves/indoor-cap.js now holds the indoor budget of 40 a day, the same
+ * size as the outdoor one. `chores_json` stays in the table because the column
+ * replicates, but nothing reads it any more.
  *
  * `ramble_pet` IS in instance-sync's SYNCED_TABLES (servers/sharing/
  * instance-sync.js), keyed on its natural key `owner` (always 'self'), with
@@ -61,7 +61,7 @@ function stepsAmount(a) {
 /**
  * Task 4 (moves): a self-reported move pays Health in a variable amount, so
  * like steps its size is bounded here rather than living in FEED_DELTAS. The
- * real ceiling is a day's budget — 24 indoor, 20 outdoor, claimed in
+ * real ceiling is a day's budget — 40 indoor, 40 outdoor, claimed in
  * moves/ledger.js BEFORE this is ever called — so the bound is the base energy
  * bar: generous enough that retuning a cap can never silently truncate a pay.
  *
