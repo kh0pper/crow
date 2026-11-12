@@ -164,6 +164,12 @@ State folders are not part of this block. A few add-ons keep state directly in t
 
 Finally, a first-party bundle's policy is read from Crow's own copy of the manifest, not from the installed one. An installed `sandbox` block that differs from it keeps the add-on off with the card "its installed files changed; reinstall it to wall it" — so do not edit the installed copy, and bump `version` when you change the block.
 
+### Secret env vars
+
+Crow keeps a value in the keychain instead of `mcp-addons.json` only when the manifest says the field is a secret: `"secret": true` on its `env_vars` entry, or a credential-shaped name (`*_TOKEN`, `*_KEY`, `*_PASSWORD`, …). A name ending in `_URL`, `_BASE_URL`, `_HOST`, `_PORT`, `_PATH`, `_FILE` or `_DIR` reads as a location, so it stays PLAIN even when the value looks like a credential — the wall and the child read it as a location.
+
+So declare `secret: true` for any such field whose value carries a credential: a webhook URL with its token in the path (`https://hooks.example.com/T00/B00/xxxx`), a `DATABASE_URL` with a password (`postgres://user:pass@host/db`), or an access key in a host name. Left undeclared, the value is written to `mcp-addons.json` and the bundle's `.env` in the clear.
+
 ### `webUI` Field
 
 Add-ons that provide a browser-accessible interface should declare a `webUI` object:

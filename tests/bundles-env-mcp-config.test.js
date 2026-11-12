@@ -18,15 +18,19 @@ process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-test-home-"));
 process.env.CROW_DATA_DIR = join(process.env.CROW_HOME, "data");
 mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 const { applyEnvToMcpAddons, findInvalidEnv } = await import("../servers/gateway/routes/bundles.js");
+// applyEnvToMcpAddons seals (async) and refuses to run un-locked (0.6.1), so every call
+// below goes through the add-on's lock.
+const { withAddonLock } = await import("../servers/gateway/addon-secrets-seal.js");
+const applyEnv = (id, ...args) => withAddonLock(id, () => applyEnvToMcpAddons(id, ...args));
 
-test("configuring an mcp-server add-on's env updates mcp-addons.json (the file the MCP child actually reads)", () => {
+test("configuring an mcp-server add-on's env updates mcp-addons.json (the file the MCP child actually reads)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "crowmcp-"));
   const path = join(dir, "mcp-addons.json");
   writeFileSync(path, JSON.stringify({
     "home-assistant": { command: "node", args: ["server/index.js"], env: { HA_URL: "" } },
   }));
 
-  const wrote = applyEnvToMcpAddons("home-assistant", { HA_URL: "http://homeassistant.local:8123", HA_TOKEN: "tok" }, path);
+  const wrote = await applyEnv("home-assistant", { HA_URL: "http://homeassistant.local:8123", HA_TOKEN: "tok" }, path);
   assert.equal(wrote, true);
 
   const after = JSON.parse(readFileSync(path, "utf8"));
@@ -35,27 +39,27 @@ test("configuring an mcp-server add-on's env updates mcp-addons.json (the file t
   assert.equal(after["home-assistant"].command, "node", "existing config fields survive");
 });
 
-test("an empty-string value is skipped — a blank must never land in the MCP env block (it would SHADOW an inherited process.env value at spawn, not clear it)", () => {
+test("an empty-string value is skipped — a blank must never land in the MCP env block (it would SHADOW an inherited process.env value at spawn, not clear it)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "crowmcp-"));
   const path = join(dir, "mcp-addons.json");
   writeFileSync(path, JSON.stringify({
     "home-assistant": { command: "node", env: { HA_TOKEN: "existing" } },
   }));
 
-  applyEnvToMcpAddons("home-assistant", { HA_TOKEN: "" }, path);
+  await applyEnv("home-assistant", { HA_TOKEN: "" }, path);
 
   const after = JSON.parse(readFileSync(path, "utf8"));
   assert.equal(after["home-assistant"].env.HA_TOKEN, "existing", "blank must not overwrite — proxy.js spawns with { ...process.env, ...config.env }, so \"\" would shadow a working ambient value");
 });
 
-test("an existing env key not mentioned in the update survives the merge", () => {
+test("an existing env key not mentioned in the update survives the merge", async () => {
   const dir = mkdtempSync(join(tmpdir(), "crowmcp-"));
   const path = join(dir, "mcp-addons.json");
   writeFileSync(path, JSON.stringify({
     "home-assistant": { command: "node", env: { HA_URL: "http://ha.local:8123", HA_VERIFY_SSL: "false" } },
   }));
 
-  const wrote = applyEnvToMcpAddons("home-assistant", { HA_TOKEN: "tok" }, path);
+  const wrote = await applyEnv("home-assistant", { HA_TOKEN: "tok" }, path);
   assert.equal(wrote, true);
 
   const after = JSON.parse(readFileSync(path, "utf8"));
@@ -64,15 +68,15 @@ test("an existing env key not mentioned in the update survives the merge", () =>
   assert.equal(after["home-assistant"].env.HA_TOKEN, "tok");
 });
 
-test("an add-on with no MCP server registration is a no-op (returns false)", () => {
+test("an add-on with no MCP server registration is a no-op (returns false)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "crowmcp-"));
   const path = join(dir, "mcp-addons.json");
   writeFileSync(path, JSON.stringify({}));
-  assert.equal(applyEnvToMcpAddons("jellyfin", { JELLYFIN_API_KEY: "x" }, path), false);
+  assert.equal(await applyEnv("jellyfin", { JELLYFIN_API_KEY: "x" }, path), false);
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {});
 });
 
-test("a save scrubs loader names already sitting in an entry's env, keeping every other key", () => {
+test("a save scrubs loader names already sitting in an entry's env, keeping every other key", async () => {
   const dir = mkdtempSync(join(tmpdir(), "crowmcp-"));
   const path = join(dir, "mcp-addons.json");
   // An entry written before the loader rule (or hand-edited): it already carries both names.
@@ -84,7 +88,7 @@ test("a save scrubs loader names already sitting in an entry's env, keeping ever
     },
   }));
 
-  const wrote = applyEnvToMcpAddons("home-assistant", { HA_TOKEN: "tok" }, path);
+  const wrote = await applyEnv("home-assistant", { HA_TOKEN: "tok" }, path);
   assert.equal(wrote, true);
 
   const after = JSON.parse(readFileSync(path, "utf8"));
@@ -108,14 +112,14 @@ test("findInvalidEnv refuses a loader/injection name and leaves ordinary names a
   assert.equal(findInvalidEnv({ HA_URL: "http://h", MY_PATH: "/data" }), null);
 });
 
-test("applyEnvToMcpAddons never copies a loader name into an entry (defence in depth, no gate upstream)", () => {
+test("applyEnvToMcpAddons never copies a loader name into an entry (defence in depth, no gate upstream)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "crowmcp-"));
   const path = join(dir, "mcp-addons.json");
   writeFileSync(path, JSON.stringify({
     "home-assistant": { command: "node", args: ["server/index.js"], env: { HA_URL: "http://ha.local:8123" } },
   }));
 
-  const wrote = applyEnvToMcpAddons("home-assistant", {
+  const wrote = await applyEnv("home-assistant", {
     NODE_OPTIONS: "--require /x.js",
     LD_PRELOAD: "/x.so",
     FOO: "bar",

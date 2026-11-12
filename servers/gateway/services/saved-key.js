@@ -24,6 +24,13 @@
  *    and connecting it again (or by typing the new key in that project's sheet).
  *  - A deleted row (or one an uninstall marked extension_removed) hides the one-click button and
  *    answers no_saved_key; the connection that was made from it keeps working.
+ *
+ * One shared row per (bundle id, env key) (R4, decided 2026-11-12): the row this module writes is
+ * the SAME `kind='extension'` row an add-on entry lists in `keychainEnv`, so a key typed in a
+ * project's connect sheet and one sealed from Configure are one owner key, not two. When an add-on
+ * entry lists a name, that list is authoritative at spawn (servers/shared/addon-secrets.js); the
+ * boot migration's file/wins switch (MIGRATION_ROW_CONFLICT) governs only which COPY a migrated
+ * value keeps, never a second row.
  */
 
 import { auditLog } from "../../db.js";

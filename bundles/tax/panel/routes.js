@@ -23,10 +23,20 @@ const LEGACY_TAX_DOCS_DIR = join(homedir(), ".crow", "tax-documents");
 
 /** The tax key, read when needed, in the SAME order the tax MCP server gets it (its env is
  * the gateway env overlaid by this instance's tax entry in mcp-addons.json, proxy.js): the
- * entry first, then the gateway env. A generated key reaches only that entry. Never logged. */
+ * entry first (its `keychainEnv` names unsealed by this gateway process), then the gateway
+ * env. A generated key reaches only that entry. Never logged. */
 const ADDONS_FILE = join(process.env.CROW_HOME || join(homedir(), ".crow"), "mcp-addons.json");
 function addonEnv() {
-  try { const env = JSON.parse(readFileSync(ADDONS_FILE, "utf8"))?.tax?.env; return env && typeof env === "object" ? env : {}; } catch { return {}; }
+  let entry;
+  try { entry = JSON.parse(readFileSync(ADDONS_FILE, "utf8"))?.tax; } catch { return {}; }
+  if (!entry || typeof entry !== "object") return {};
+  try {
+    return hydrateAddonEntry("tax", entry, { unsealer: processUnsealer(), ...gatewayKeychainPaths() })?.env || {};
+  } catch (err) {
+    if (!(err instanceof AddonKeysUnavailableError)) throw err;
+    // A listed name has no plain value to fall back to; the env override below still applies.
+    return entry.env && typeof entry.env === "object" ? entry.env : {};
+  }
 }
 export function taxKeys() {
   const a = addonEnv();
@@ -43,6 +53,12 @@ function resolveBundleDir() {
   if (existsSync(installed)) return installed;
   return join(import.meta.dirname, "..");
 }
+
+// The add-on secrets reader, through the bundle's existing app root (never a direct import of a
+// gateway module — an installed copy must resolve the running checkout's core).
+const { appImport } = await import(pathToFileURL(join(resolveBundleDir(), "server", "app-root.js")).href);
+const { AddonKeysUnavailableError, hydrateAddonEntry, processUnsealer } = await appImport("servers/shared/addon-secrets.js");
+const { gatewayKeychainPaths } = await appImport("servers/gateway/addon-keys-paths.js");
 
 // Resolve the crow db module
 function resolveDbModule() {

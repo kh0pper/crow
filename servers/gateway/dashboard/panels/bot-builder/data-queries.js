@@ -42,6 +42,9 @@ import { getPeerCapabilities } from "../../capabilities-cache.js";
 import { getTrustedInstances } from "../nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
 import { readSetting } from "../../settings/registry.js";
+// The live add-on connections, so a sealed add-on's tools are read from the copy already
+// running instead of spawning a second one from its stored entry (task 1.9).
+import { getAddonLiveTools } from "../../../proxy.js";
 
 export const TASKS_DB = tasksDbPath();
 
@@ -101,15 +104,26 @@ export async function probeAll(crowHome = resolveCrowHome()) {
 let _extCache = null;
 let _extAt = 0;
 let _extHome = null;
-export async function probeExtensions(crowHome) {
+/**
+ * The Tools tab's add-on surface. `opts.probe`/`opts.liveTools` are test seams; production uses
+ * mcp_writer's probe and the gateway's live connection getter. The cached value holds the
+ * installed entries (whose `block` is the STORED entry) and tool names only: a hydrated block
+ * (which carries a secret in `env`) is never cached.
+ */
+export async function probeExtensions(crowHome, opts = {}) {
   if (_extCache && _extHome === crowHome && Date.now() - _extAt < 300000) return _extCache;
   // A connection-based service's add-on entry carries no credentials (they live per connection),
   // so a probe would spawn it blind. Its tools come from serviceToolsForBuilder instead. A
   // Crow-wide toggle service or a legacy-configured service add-on is an ordinary extension.
   const exts = listInstalledExtensions(crowHome).filter((e) => e.needsMint && !isConnectionService(e.id, e));
+  const tools = {
+    crowHome,
+    liveTools: opts.liveTools || getAddonLiveTools,
+    ...(typeof opts.probe === "function" ? { probe: opts.probe } : {}),
+  };
   const out = [];
   for (const ext of exts) {
-    out.push({ ext, probe: await extensionTools(ext, { crowHome }) });
+    out.push({ ext, probe: await extensionTools(ext, tools) });
   }
   _extCache = out;
   _extAt = Date.now();

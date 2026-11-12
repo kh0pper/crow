@@ -27,10 +27,13 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { probeServerTools, readCanonicalMcp, CANONICAL_MCP_PATH } from "./mcp_writer.mjs";
+import { deepHasPattern, probeServerTools, readCanonicalMcp, CANONICAL_MCP_PATH } from "./mcp_writer.mjs";
 import { crowServerCatalog, instanceBinding, rebindBlock } from "./crow-server-catalog.mjs";
 import { serviceById } from "../../servers/shared/service-catalog.js";
 import { isLegacyConfiguredAddon } from "../../servers/gateway/services/legacy-sources.js";
+import {
+  ADDON_KEYS_UNREADABLE, AddonKeysUnavailableError, hydrateAddonEntry, keychainEnvNames, processUnsealer,
+} from "../../servers/shared/addon-secrets.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // scripts/pi-bots -> repo root (~/crow) -> bundles
@@ -248,11 +251,35 @@ export function isConnectionService(id, entry, env = process.env) {
 }
 
 /**
+ * The `{ name, description, hasPattern }` shape probeServerTools returns, from a list of
+ * RAW MCP tool objects. The gateway's live connection (getAddonLiveTools) hands out the
+ * client's own tool objects, so a sealed add-on's list is mapped here instead of passed
+ * through: same shape as the probed ones (and no `inputSchema` riding into the palette).
+ */
+function liveToolShape(tools) {
+  return (Array.isArray(tools) ? tools : [])
+    .filter((t) => t && typeof t.name === "string")
+    .map((t) => ({
+      name: t.name,
+      description: (typeof t.description === "string" ? t.description : "").slice(0, 240),
+      hasPattern: deepHasPattern(t.inputSchema),
+    }));
+}
+
+/**
  * LIVE tools for an extension on this instance. `ext` may be an entry from
  * listInstalledExtensions() (has .id/.block/.capabilities) or a bare server-id
  * string. Spawns the MCP server, runs tools/list (mcp_writer.probeServerTools),
  * then overlays curated capabilities metadata (label/subgroup) where declared.
  * Mirrors the canonical-server probe shape so A6 can fold it into probeAll.
+ *
+ * A SEALED add-on (an entry whose `keychainEnv` lists names) is handled without a
+ * blind spawn: when the caller passes `opts.liveTools` (the gateway's
+ * getAddonLiveTools) and the add-on is connected, its live tool list is reused (mapped to the
+ * same { name, description, hasPattern } shape as a probe);
+ * otherwise the entry is hydrated with THIS process's unsealer role and probed.
+ * A process that registered none (the ext_registry CLI, a child) answers
+ * ok:false instead of spawning key-less. `opts.probe` is the test seam.
  *
  * @returns {Promise<{ok:boolean, serverId, group, inCanonical?, tools?, error?}>}
  *   tools[] = { name, description, hasPattern, label, subgroup }.
@@ -269,18 +296,45 @@ export async function extensionTools(ext, opts = {}) {
   if (isConnectionService(sid, entry)) {
     return { ok: false, serverId: sid, group, error: "service bundle: tools come from its connections" };
   }
-  const block = entry.block || serverBlockFor(sid, crowHome);
+  let block = entry.block || serverBlockFor(sid, crowHome);
   if (!block) {
     return { ok: false, serverId: sid, group, error: "not installed on this instance" };
   }
   const meta = new Map(((cap && cap.tools) || []).map((t) => [t.name, t]));
-  const res = await probeServerTools(block, { timeoutMs: opts.timeoutMs || 12000 });
-  if (!res.ok) return { ok: false, serverId: sid, group, error: res.error };
-  const tools = (res.tools || []).map((t) => {
+  const enrich = (tools) => (Array.isArray(tools) ? tools : []).map((t) => {
     const m = meta.get(t.name);
     return { ...t, label: (m && m.label) || t.name, subgroup: (m && m.subgroup) || null };
   });
-  return { ok: true, serverId: sid, group, inCanonical: !!entry.inCanonical, tools };
+
+  // A sealed entry: never spawn it from the stored block (its listed names have no plain value).
+  const addonEntry = entry.block || mcpAddonBlockFor(sid, crowHome);
+  const listed = keychainEnvNames(addonEntry);
+  if (listed.length > 0) {
+    const live = typeof opts.liveTools === "function" ? opts.liveTools(sid) : null;
+    if (live && live.status === "connected" && Array.isArray(live.tools)) {
+      return { ok: true, serverId: sid, group, inCanonical: !!entry.inCanonical, tools: enrich(liveToolShape(live.tools)) };
+    }
+    const unsealer = processUnsealer();
+    if (!unsealer) {
+      // Never a key-less spawn: this process is not the gateway (0.5).
+      return { ok: false, serverId: sid, group, error: ADDON_KEYS_UNREADABLE };
+    }
+    try {
+      const { gatewayKeychainPaths } = await import("../../servers/gateway/addon-keys-paths.js");
+      const hydrated = hydrateAddonEntry(sid, addonEntry, { unsealer, ...gatewayKeychainPaths() });
+      // addonBlockWithCwd fills the cwd the gateway spawn would use; the hydrated block is used
+      // here and NEVER cached (it carries the secret in `env`).
+      block = addonBlockWithCwd(sid, hydrated, crowHome);
+    } catch (err) {
+      if (!(err instanceof AddonKeysUnavailableError)) throw err;
+      return { ok: false, serverId: sid, group, error: ADDON_KEYS_UNREADABLE };
+    }
+  }
+
+  const probe = typeof opts.probe === "function" ? opts.probe : probeServerTools;
+  const res = await probe(block, { timeoutMs: opts.timeoutMs || 12000 });
+  if (!res.ok) return { ok: false, serverId: sid, group, error: res.error };
+  return { ok: true, serverId: sid, group, inCanonical: !!entry.inCanonical, tools: enrich(res.tools) };
 }
 
 /**

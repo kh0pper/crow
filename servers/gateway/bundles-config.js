@@ -9,11 +9,14 @@
  * from `routes/bundles.js`, which would drag express, db.js, peer-forward,
  * cross-host-auth and the settings registry into the panel render path.
  *
- * Imports node builtins ONLY — no circular-import risk with routes/bundles.js.
+ * Imports node builtins plus modules that never reach routes/bundles.js: the add-on secrets
+ * NAMES reader only. This module never unseals a value, because it runs on every Extensions
+ * render.
  */
 
 import { isPlaceholderValue } from "./bundle-env-placeholders.js";
 import { parseEnvText } from "./bundle-env-codec.js";
+import { keychainEnvNames } from "../shared/addon-secrets.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, dirname, relative as relativePath, isAbsolute } from "node:path";
 import { resolveCrowHome } from "../shared/crow-home.js";
@@ -146,18 +149,20 @@ const isSet = (v) => typeof v === "string" && v.trim() !== "";
  * @param {string} bundleId
  * @param {object|null} manifest         installed-first manifest (for env_vars names)
  * @param {{envOverride?: object|null}} [opts]  envOverride = the whole truth (test seam)
- * @returns {{managed: boolean, env: Record<string,string>}}
+ * @returns {{managed: boolean, env: Record<string,string>, keychainSet: Set<string>}}
+ *   `keychainSet` holds the NAMES the add-on entry lists for the keychain. Their values are
+ *   never read here.
  */
 export function resolveEffectiveEnv(bundleId, manifest, { envOverride = null } = {}) {
   // An injected env is the WHOLE truth: it must not be topped up from mcp-addons or
   // process.env, or a unit test's result would depend on what the host happens to have
   // installed (tests/bundles-install-set.test.js:40,45).
-  if (envOverride) return { managed: true, env: { ...envOverride } };
+  if (envOverride) return { managed: true, env: { ...envOverride }, keychainSet: new Set() };
 
   const dotEnvPath = join(BUNDLES_DIR, bundleId, ".env");
   const hasDotEnv = existsSync(dotEnvPath);
   const mcpEntry = readMcpAddonEntry(bundleId);
-  if (!hasDotEnv && !mcpEntry) return { managed: false, env: {} };
+  if (!hasDotEnv && !mcpEntry) return { managed: false, env: {}, keychainSet: new Set() };
 
   const env = {};
   if (mcpEntry) {
@@ -174,7 +179,7 @@ export function resolveEffectiveEnv(bundleId, manifest, { envOverride = null } =
       if (isSet(v)) env[k] = v;
     }
   }
-  return { managed: true, env };
+  return { managed: true, env, keychainSet: new Set(keychainEnvNames(mcpEntry)) };
 }
 
 /** A service's account field names (manifest `connect.fields`), [] for any other add-on. */
@@ -191,9 +196,10 @@ export function accountFieldNames(manifest) {
 export function configuredAccountFields(bundleId, manifest = getInstalledFirstManifest(bundleId)) {
   const names = accountFieldNames(manifest);
   if (names.length === 0) return [];
-  const { managed, env } = resolveEffectiveEnv(bundleId, manifest);
+  const { managed, env, keychainSet } = resolveEffectiveEnv(bundleId, manifest);
   if (!managed) return [];
-  return names.filter((k) => isSet(env[k]) && !isPlaceholderValue(env[k]));
+  // A listed keychain name is configured: its value lives in the keychain, not in `env`.
+  return names.filter((k) => keychainSet.has(k) || (isSet(env[k]) && !isPlaceholderValue(env[k])));
 }
 
 /**
@@ -225,17 +231,18 @@ export function needsConfigKeys(bundleId, envOverride = null) {
   const man = getInstalledFirstManifest(bundleId);
   const required = (man?.env_vars || []).filter((v) => v.required && !v.generate).map((v) => v.name);
   if (required.length === 0) return folders;
-  const { managed, env } = resolveEffectiveEnv(bundleId, man, { envOverride });
+  const { managed, env, keychainSet } = resolveEffectiveEnv(bundleId, man, { envOverride });
   if (!managed) return folders;
   // An example value copied from .env.example ("/path/to/media", "x.example.com", a key
   // once published in the repo) is not configuration: list it, never rewrite the .env.
-  let missing = required.filter((k) => !isSet(env[k]) || isPlaceholderValue(env[k]));
+  // A name the entry lists for the keychain IS configured (its value lives there).
+  let missing = required.filter((k) => !keychainSet.has(k) && (!isSet(env[k]) || isPlaceholderValue(env[k])));
   // Services UI on (Task 12): a service's account fields belong to project connections, so an
   // add-on with none of them set Crow-wide (installed from the Install sheet) is not "missing"
   // them. One with a legacy Crow-wide configuration keeps the nag for the rest of its fields.
   if (!envOverride && servicesUiEnabled()) {
     const account = accountFieldNames(man);
-    if (account.length && !account.some((k) => isSet(env[k]) && !isPlaceholderValue(env[k]))) {
+    if (account.length && !account.some((k) => keychainSet.has(k) || (isSet(env[k]) && !isPlaceholderValue(env[k])))) {
       missing = missing.filter((k) => !account.includes(k));
     }
   }

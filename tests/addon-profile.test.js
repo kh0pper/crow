@@ -26,11 +26,14 @@ import {
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const NO_INSTALLED = join(REPO, "no-such-installed-bundles");
 
-let B, scratch;
+let B, applyEnv, scratch;
 before(async () => {
   scratch = mkdtempSync(join(tmpdir(), "addon-profile-"));
   process.env.CROW_HOME = scratch;
   B = await import("../servers/gateway/routes/bundles.js");
+  // applyEnvToMcpAddons is async and refuses to run outside the add-on's lock (0.6.1).
+  const { withAddonLock } = await import("../servers/gateway/addon-secrets-seal.js");
+  applyEnv = (id, ...args) => withAddonLock(id, () => B.applyEnvToMcpAddons(id, ...args));
 });
 
 // --- fixtures --------------------------------------------------------------
@@ -409,25 +412,25 @@ test("mcpAddonEntryFor records the owner-entered keys only", () => {
   assert.deepEqual(B.mcpAddonEntryFor(OWNER_MANIFEST).ownerSet, []);
 });
 
-test("applyEnvToMcpAddons records the owner-typed keys it writes", () => {
+test("applyEnvToMcpAddons records the owner-typed keys it writes", async () => {
   const path = join(scratch, "mcp-addons-configure.json");
   writeFileSync(path, JSON.stringify({ acme: { command: "node", args: [], env: { D: "the-default" } } }));
-  assert.equal(B.applyEnvToMcpAddons("acme", { X: "typed", D: "the-default" }, path, OWNER_MANIFEST, { edited: ["X"], owner: true }), true);
+  assert.equal(await applyEnv("acme", { X: "typed", D: "the-default" }, path, OWNER_MANIFEST, { edited: ["X"], owner: true }), true);
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).acme.ownerSet, ["X"]);
 });
 
-test("applyEnvToMcpAddons seeds a legacy entry from the past-defaults rule", () => {
+test("applyEnvToMcpAddons seeds a legacy entry from the past-defaults rule", async () => {
   // A legacy value that equals the current manifest default is not the owner's.
   const equalsDefault = join(scratch, "mcp-addons-legacy-1.json");
   writeFileSync(equalsDefault, JSON.stringify({ acme: { command: "node", args: [], env: { D: "the-default" } } }));
-  B.applyEnvToMcpAddons("acme", { D: "typed-instead" }, equalsDefault, OWNER_MANIFEST, { owner: true });
+  await applyEnv("acme", { D: "typed-instead" }, equalsDefault, OWNER_MANIFEST, { owner: true });
   assert.deepEqual(JSON.parse(readFileSync(equalsDefault, "utf8")).acme.ownerSet, ["D"]);
 
   // A legacy value matching no default at all was owner-entered, and survives a save that
   // writes the current default over it.
   const otherValue = join(scratch, "mcp-addons-legacy-2.json");
   writeFileSync(otherValue, JSON.stringify({ acme: { command: "node", args: [], env: { D: "typed-before-this-change" } } }));
-  B.applyEnvToMcpAddons("acme", { D: "the-default" }, otherValue, OWNER_MANIFEST, { owner: true });
+  await applyEnv("acme", { D: "the-default" }, otherValue, OWNER_MANIFEST, { owner: true });
   assert.deepEqual(JSON.parse(readFileSync(otherValue, "utf8")).acme.ownerSet, ["D"]);
 });
 

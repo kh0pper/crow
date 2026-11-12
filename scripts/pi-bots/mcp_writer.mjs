@@ -483,7 +483,13 @@ export function writeBotMcp(def, opts = {}) {
 
 // ---- dependency-free MCP stdio tools/list (GUI picker source) -------------
 
-function deepHasPattern(schema, depth = 0) {
+/**
+ * True if a tool's `inputSchema` contains a `pattern`/regex ANYWHERE (nested included).
+ * Exported because every source of Bot Builder tools must answer `hasPattern` the same
+ * way: a sealed add-on's tools come from the gateway's LIVE connection (raw MCP tool
+ * objects) instead of this probe, and ext_registry maps them with this.
+ */
+export function deepHasPattern(schema, depth = 0) {
   if (!schema || typeof schema !== "object" || depth > 12) return false;
   if (Object.prototype.hasOwnProperty.call(schema, "pattern")) return true;
   for (const k of Object.keys(schema)) {
@@ -692,6 +698,10 @@ if (import.meta.url === "file://" + process.argv[1]) {
     process.exit(0);
   }
   if (cmd === "probe" && arg) {
+    // This CLI reads the canonical ~/.pi/agent/mcp.json only, never this instance's
+    // mcp-addons.json: an add-on entry that lists `keychainEnv` names is never seen here, so
+    // this path can neither spawn it key-less nor unseal it (the Bot Builder probe handles
+    // that — scripts/pi-bots/ext_registry.mjs extensionTools).
     const c = readCanonicalMcp();
     const block = c.mcpServers[arg];
     if (!block) {

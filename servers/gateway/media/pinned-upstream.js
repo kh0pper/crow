@@ -17,6 +17,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { resolveCrowHome } from "../../shared/crow-home.js";
+import { AddonKeysUnavailableError, hydrateAddonEntry, processUnsealer } from "../../shared/addon-secrets.js";
+import { gatewayKeychainPaths } from "../addon-keys-paths.js";
 
 export const LISTEN_PATH = /^\/api\/v1\/listen\/[0-9a-fA-F-]{8,64}\/$/;
 export const STREAM_CODECS = Object.freeze(["mp3", "ogg", "opus", "aac", "flac"]);
@@ -36,13 +38,25 @@ export function originOf(u) {
 
 /**
  * The music server's address and credential: the Funkwhale add-on's own entry in
- * <crow-home>/mcp-addons.json, else the gateway's environment. → { origin, token, storageOrigin } | null
+ * <crow-home>/mcp-addons.json (its listed keychain names unsealed when THIS process registered
+ * a role — the gateway does; a child gets null and falls back to its own env), else the
+ * gateway's environment. → { origin, token, storageOrigin } | null
  */
 export function musicUpstreamConfig({ crowHome = resolveCrowHome(), env = process.env } = {}) {
   let e = {};
   try {
     const cfg = JSON.parse(readFileSync(join(crowHome, "mcp-addons.json"), "utf8"));
-    e = cfg?.funkwhale?.env || {};
+    const entry = cfg?.funkwhale;
+    if (entry && typeof entry === "object") {
+      try {
+        e = hydrateAddonEntry("funkwhale", entry, { unsealer: processUnsealer(), ...gatewayKeychainPaths() })?.env || {};
+      } catch (err) {
+        if (!(err instanceof AddonKeysUnavailableError)) throw err;
+        // A child process (or a read whose keys are gone): today's answer, the plain entry
+        // env plus this process's own FUNKWHALE_* (which is what a child is spawned with).
+        e = entry.env && typeof entry.env === "object" ? entry.env : {};
+      }
+    }
   } catch { /* not installed or unreadable */ }
   const url = e.FUNKWHALE_URL || env.FUNKWHALE_URL;
   const token = e.FUNKWHALE_ACCESS_TOKEN || env.FUNKWHALE_ACCESS_TOKEN;

@@ -9,6 +9,16 @@ import { bootGuardMessage, GUARD_EXIT_CODE } from "./guards.js";
 import { resolveSatHome, resolveBind, startAgent } from "./agent.js";
 import { pairCodeLines } from "./pairing.js";
 
+import { registerAddonUnsealer } from "../shared/addon-secrets.js";
+
+/**
+ * This process may unseal an add-on's listed keys when it starts one (0.5): the role is
+ * registered ONCE here, so a module shared with an add-on child (which never registers, and
+ * whose env carries CROW_ADDON_HOST) gets `null` from processUnsealer() and falls back to its
+ * own env. Registering before anything can spawn is the point of doing it at module load.
+ */
+registerAddonUnsealer("satellite");
+
 process.umask(0o077);
 
 let bind;

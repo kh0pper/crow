@@ -39,6 +39,8 @@ import { CallToolRequestSchema, CallToolResultSchema, ErrorCode, ListToolsReques
 import { canonicalJson, RESULT_CAP_BYTES, sha256Hex } from "../shared/satellite-protocol.js";
 import { checkLauncherArgs, resolveAddonCommand } from "../shared/resolve-command.js";
 import { installedPath, readInstalled } from "../gateway/bundle-core.js";
+import { loadKeychainKey } from "../gateway/keychain/key.js";
+import { ADDON_KEYS_UNREADABLE, AddonKeysUnavailableError, hydrateAddonEntry } from "../shared/addon-secrets.js";
 import { memAvailableMb } from "./gate.js";
 import { readTextOrNull } from "./status.js";
 import { withoutLoaderEnv } from "../shared/loader-env.js";
@@ -228,7 +230,20 @@ export function createMcpHost({
     const rc = resolveAddonCommand(config.command, { sha256: config.command_sha256, cwd });
     const argProblem = rc.missing ? null : checkLauncherArgs(rc.command, config.args);
     if (rc.missing || argProblem) throw new Error(`command '${config.command}' not usable: ${argProblem || rc.reason || "not found"}`);
-    const env = satelliteChildEnv(baseEnv, config.env);
+    // The child's env: its entry's env, with every name the entry lists in `keychainEnv` unsealed
+    // from THIS server's keychain (task 1.10). All or nothing (0.4): a listed key that cannot be
+    // produced — no row, a row under another key, a missing key file — stops the child instead of
+    // starting it with a partial env, and never falls back to a plain value or process.env. The
+    // caller logs it and answers START_FAILED_TEXT.
+    let run;
+    try {
+      run = hydrateAddonEntry(id, config, { unsealer: "satellite", rawDb: db, key: loadKeychainKey({ crowHome: satHome }) });
+    } catch (err) {
+      if (!(err instanceof AddonKeysUnavailableError)) throw err;
+      const names = err.names.length ? `: ${err.names.join(", ")}` : "";
+      throw Object.assign(new Error(`${ADDON_KEYS_UNREADABLE} (${err.code}${names})`), { code: ADDON_KEYS_UNREADABLE });
+    }
+    const env = satelliteChildEnv(baseEnv, run.env);
     const transport = new BoundedStdioTransport({ command: rc.command, args: Array.isArray(config.args) ? config.args : [], env, cwd });
     const entry = { id, transport, client: null, pid: null, inflight: 0, lastUsed: ++clock, idleTimer: null, stopping: null };
     entry.exited = new Promise((resolve) => { entry.markExited = resolve; });

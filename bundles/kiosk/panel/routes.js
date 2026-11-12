@@ -6,7 +6,7 @@
  */
 import express, { Router } from "express";
 import { WebSocketServer } from "ws";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -42,6 +42,8 @@ const { validateAddonDoorToken } = await appImport("servers/shared/addon-doors.j
 const { PERCH_TOKENS } = await appImport("servers/gateway/dashboard/shared/design-tokens.js");
 const { readPortrait } = await appImport("servers/sharing/profile-avatar.js");
 const { createKioskRuntime, createSttWarmup, kioskThemeCss } = await bImport("server/runtime.js");
+// The music source's add-on env reader (a keychain-aware reader; see server/addon-env.js).
+const { addonEnvFromFile } = await bImport("server/addon-env.js");
 // Live voice surfaces (presence.js, voice hand-off PR 5): guarded, so an older core without it (or one that fails to
 // load) still loads this panel, and the displays are simply never registered (P29).
 const presence = await appImport("servers/gateway/voice/presence.js").catch((err) => {
@@ -54,7 +56,9 @@ const { resolveDisplayBird } = await bImport("server/bird.js");
 /** An installed add-on's environment, read at the moment it is needed (a token change applies without a restart). Never logged. */
 const ADDONS_FILE = join(process.env.CROW_HOME || join(homedir(), ".crow"), "mcp-addons.json");
 function addonEnv(id) {
-  try { const env = JSON.parse(readFileSync(ADDONS_FILE, "utf8"))?.[id]?.env; return env && typeof env === "object" ? env : null; } catch { return null; }
+  // A listed keychain name comes from the keychain (this panel runs in the gateway); a read that
+  // cannot produce it falls back to the entry's plain settings, which carry no secret.
+  return addonEnvFromFile(ADDONS_FILE, id);
 }
 
 const vdeps = await defaultVoiceDeps();

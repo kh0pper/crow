@@ -18,23 +18,38 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createDbClient } from "../server/db.js";
 import { encryptStoredDocuments, decryptStoredDocuments } from "../server/documents-crypto.js";
+import { appImport } from "../server/app-root.js";
+
+const { AddonKeysUnavailableError, hydrateAddonEntry, keychainEnvNames } = await appImport("servers/shared/addon-secrets.js");
+const { gatewayKeychainPaths } = await appImport("servers/gateway/addon-keys-paths.js");
 
 function keys() {
   let entry = {};
-  try { entry = JSON.parse(readFileSync(join(process.env.CROW_HOME || join(homedir(), ".crow"), "mcp-addons.json"), "utf8"))?.tax?.env || {}; } catch { /* none */ }
+  try { entry = JSON.parse(readFileSync(join(process.env.CROW_HOME || join(homedir(), ".crow"), "mcp-addons.json"), "utf8"))?.tax || {}; } catch { /* none */ }
+  let env = entry && typeof entry === "object" ? entry.env || {} : {};
+  // An entry may keep its generated key in the keychain (`keychainEnv`). This CLI is run by the
+  // operator, so it is allowed to unseal; the env overrides below still apply when it cannot.
+  if (entry && typeof entry === "object" && keychainEnvNames(entry).length > 0) {
+    try {
+      env = hydrateAddonEntry("tax", entry, { unsealer: "operator-cli", ...gatewayKeychainPaths() })?.env || {};
+    } catch (err) {
+      if (!(err instanceof AddonKeysUnavailableError)) throw err;
+    }
+  }
   return {
-    key: entry.CROW_TAX_ENCRYPTION_KEY || process.env.CROW_TAX_ENCRYPTION_KEY || "",
-    previous: entry.CROW_TAX_ENCRYPTION_KEY_PREVIOUS || process.env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS || "",
+    key: env.CROW_TAX_ENCRYPTION_KEY || process.env.CROW_TAX_ENCRYPTION_KEY || "",
+    previous: env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS || process.env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS || "",
   };
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
-const { key, previous } = keys();
-if (!key) { console.error("No tax key: install the tax extension, or set CROW_TAX_ENCRYPTION_KEY."); process.exit(2); }
 // The database of the SAME instance as the key and the folders (CROW_HOME), never another one's.
+// Set before `keys()` so the keychain read resolves the same DB file.
 if (process.env.CROW_HOME && !process.env.CROW_DB_PATH && !process.env.CROW_DATA_DIR && !process.env.CROW_TAX_DB_PATH) {
   process.env.CROW_DB_PATH = join(process.env.CROW_HOME, "data", "crow.db");
 }
+const { key, previous } = keys();
+if (!key) { console.error("No tax key: install the tax extension, or set CROW_TAX_ENCRYPTION_KEY."); process.exit(2); }
 const db = createDbClient();
 let out;
 if (cmd === "encrypt") {

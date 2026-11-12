@@ -493,6 +493,7 @@ async function migrateOne({ id, source, how, entry, ctx }) {
 /** Steps 2-8 for one id: copy, check, prepare, copy the data out, switch in, rewrite the entry. */
 async function copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, stub, ctx, state }) {
   const { dataRoot, homeDir, run, log, verify, afterCopy, afterSwitchStep, copyData } = ctx;
+  // A deep copy of the WHOLE entry: `keychainEnv` must survive; this CLI races the gateway's writers (plan 0.6.4).
   const next = deepCopy(entry);
   const envPaths = stub ? [] : envPathsInside(entry, source, homeDir);
   const copyInto = typeof copyData === "function" ? copyData : cpSync;
@@ -757,6 +758,7 @@ export async function undoMigration({ crowHome, ids = null, mcpAddonsPath, now =
       }
       const oldest = backups[backups.length - 1].data;
       if (addons && oldest.entry) {
+        // The backup holds the entry from before any change, `keychainEnv` included; this CLI races the gateway's writers (plan 0.6.4).
         addons[id] = deepCopy(oldest.entry);
         writeAtomicPrivate(addonsPath, JSON.stringify(addons, null, 2));
       }

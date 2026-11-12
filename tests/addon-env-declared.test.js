@@ -154,6 +154,11 @@ const APP_MODULES = {
     keys: ["CROW_SERVE_PEER_UIDS"],
     exempt: { CROW_SERVE_PEER_UIDS: "the gateway's Tailscale Serve identity policy; a child that does not see it trusts no Serve headers, the conservative direction" },
   },
+  "servers/shared/addon-secrets.js": {
+    keys: ["CROW_ADDON_HOST"],
+    exempt: {},
+  },
+  "servers/gateway/addon-keys-paths.js": { keys: [], exempt: {} },
   "servers/shared/design-kit.js": { keys: [], exempt: {} },
   "servers/shared/relative-dates.js": { keys: [], exempt: {} },
   "servers/shared/browser-lease.js": { keys: [], exempt: {} },

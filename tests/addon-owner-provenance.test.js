@@ -16,13 +16,16 @@ import { join } from "node:path";
 
 import { ownerSetKeys } from "../scripts/addon-sandbox/profile.mjs";
 
-let B, scratch, seq = 0;
+let B, applyEnv, scratch, seq = 0;
 before(async () => {
   scratch = mkdtempSync(join(tmpdir(), "addon-owner-provenance-"));
   process.env.CROW_HOME = scratch;
   process.env.CROW_DATA_DIR = join(scratch, "data");
   mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
   B = await import("../servers/gateway/routes/bundles.js");
+  // applyEnvToMcpAddons is async and refuses to run outside the add-on's lock (0.6.1).
+  const { withAddonLock } = await import("../servers/gateway/addon-secrets-seal.js");
+  applyEnv = (id, ...args) => withAddonLock(id, () => B.applyEnvToMcpAddons(id, ...args));
 });
 
 /** An mcp-addons.json holding `entries`, in a fresh file. */
@@ -57,18 +60,18 @@ const KOLIBRI = {
 
 // --- values that are not the owner's, even on the owner's own save -------------
 
-test("a written value equal to an OLDER shipped default is not owner-set", () => {
+test("a written value equal to an OLDER shipped default is not owner-set", async () => {
   const path = addonsFile({ kolibri: { command: "node", args: [] } });
-  B.applyEnvToMcpAddons("kolibri", { KOLIBRI_URL: "http://localhost:8085" }, path, KOLIBRI, { edited: [], owner: true });
+  await applyEnv("kolibri", { KOLIBRI_URL: "http://localhost:8085" }, path, KOLIBRI, { edited: [], owner: true });
   assertNoOwnerKeys(entryOf(path, "kolibri"), KOLIBRI, "kolibri");
 
   // The contrast: a value that differs from every default this manifest ever shipped is.
   const other = addonsFile({ kolibri: { command: "node", args: [] } });
-  B.applyEnvToMcpAddons("kolibri", { KOLIBRI_URL: "http://localhost:9999" }, other, KOLIBRI, { edited: [], owner: true });
+  await applyEnv("kolibri", { KOLIBRI_URL: "http://localhost:9999" }, other, KOLIBRI, { edited: [], owner: true });
   assert.deepEqual(entryOf(other, "kolibri").ownerSet, ["KOLIBRI_URL"]);
 });
 
-test("a written key with no default at all is not owner-set when it was not edited", () => {
+test("a written key with no default at all is not owner-set when it was not edited", async () => {
   const manifest = {
     id: "acme",
     type: "mcp-server",
@@ -78,17 +81,17 @@ test("a written key with no default at all is not owner-set when it was not edit
   };
   const path = addonsFile({ acme: { command: "node", args: [] } });
   // The form sends every filled field, so "it arrived in env_vars" proves nothing.
-  B.applyEnvToMcpAddons("acme", { FREE_TEXT: "typed" }, path, manifest, { edited: [], owner: true });
+  await applyEnv("acme", { FREE_TEXT: "typed" }, path, manifest, { edited: [], owner: true });
   assertNoOwnerKeys(entryOf(path, "acme"), manifest, "acme");
 });
 
-test("with no manifest nothing is owner-set — not even a value that differs from the old entry's", () => {
+test("with no manifest nothing is owner-set — not even a value that differs from the old entry's", async () => {
   const path = addonsFile({ acme: { command: "node", args: [], env: { X: "old" } } });
-  B.applyEnvToMcpAddons("acme", { X: "new" }, path, null, { edited: [], owner: true });
+  await applyEnv("acme", { X: "new" }, path, null, { edited: [], owner: true });
   assertNoOwnerKeys(entryOf(path, "acme"), null, "acme");
 });
 
-test("an injected previous_key slot is not owner-set, whatever its value", () => {
+test("an injected previous_key slot is not owner-set, whatever its value", async () => {
   const manifest = {
     id: "acme",
     type: "mcp-server",
@@ -98,7 +101,7 @@ test("an injected previous_key slot is not owner-set, whatever its value", () =>
   };
   // The Configure route carries the outgoing key into the previous-key slot itself.
   const path = addonsFile({ acme: { command: "node", args: [] } });
-  B.applyEnvToMcpAddons("acme", { TAX_KEY: "key-two", TAX_KEY_OLD: "key-one" }, path, manifest, {
+  await applyEnv("acme", { TAX_KEY: "key-two", TAX_KEY_OLD: "key-one" }, path, manifest, {
     edited: ["TAX_KEY"],
     injected: ["TAX_KEY_OLD"],
     owner: true,
@@ -107,7 +110,7 @@ test("an injected previous_key slot is not owner-set, whatever its value", () =>
 
   // Without the injection the same slot value would look typed (it differs from its default).
   const unsaid = addonsFile({ acme: { command: "node", args: [] } });
-  B.applyEnvToMcpAddons("acme", { TAX_KEY: "key-two", TAX_KEY_OLD: "key-one" }, unsaid, manifest, {
+  await applyEnv("acme", { TAX_KEY: "key-two", TAX_KEY_OLD: "key-one" }, unsaid, manifest, {
     edited: ["TAX_KEY"],
     owner: true,
   });
@@ -116,7 +119,7 @@ test("an injected previous_key slot is not owner-set, whatever its value", () =>
 
 // --- the owner's own save ------------------------------------------------------
 
-test("an edited key is owner-set only when the save is the local owner's", () => {
+test("an edited key is owner-set only when the save is the local owner's", async () => {
   const manifest = {
     id: "acme",
     type: "mcp-server",
@@ -125,20 +128,20 @@ test("an edited key is owner-set only when the save is the local owner's", () =>
     env_vars: [{ name: "X" }],
   };
   const owned = addonsFile({ acme: { command: "node", args: [] } });
-  B.applyEnvToMcpAddons("acme", { X: "typed" }, owned, manifest, { edited: ["X"], owner: true });
+  await applyEnv("acme", { X: "typed" }, owned, manifest, { edited: ["X"], owner: true });
   assert.deepEqual(entryOf(owned, "acme").ownerSet, ["X"]);
 
   const peer = addonsFile({ acme: { command: "node", args: [] } });
-  B.applyEnvToMcpAddons("acme", { X: "typed" }, peer, manifest, { edited: ["X"], owner: false });
+  await applyEnv("acme", { X: "typed" }, peer, manifest, { edited: ["X"], owner: false });
   assertNoOwnerKeys(entryOf(peer, "acme"), manifest, "acme");
 
   // No `owner` at all is the same as false: fail closed.
   const unstated = addonsFile({ acme: { command: "node", args: [] } });
-  B.applyEnvToMcpAddons("acme", { X: "typed" }, unstated, manifest, { edited: ["X"] });
+  await applyEnv("acme", { X: "typed" }, unstated, manifest, { edited: ["X"] });
   assertNoOwnerKeys(entryOf(unstated, "acme"), manifest, "acme");
 });
 
-test("a save that is not the owner's removes the keys it rewrote from an existing ownerSet", () => {
+test("a save that is not the owner's removes the keys it rewrote from an existing ownerSet", async () => {
   const manifest = {
     id: "acme",
     type: "mcp-server",
@@ -147,7 +150,7 @@ test("a save that is not the owner's removes the keys it rewrote from an existin
     env_vars: [{ name: "X" }, { name: "Y" }],
   };
   const path = addonsFile({ acme: { command: "node", args: [], env: { X: "typed", Y: "typed" }, ownerSet: ["X", "Y"] } });
-  B.applyEnvToMcpAddons("acme", { X: "rewritten" }, path, manifest, { edited: ["X"], owner: false });
+  await applyEnv("acme", { X: "rewritten" }, path, manifest, { edited: ["X"], owner: false });
   // Y's value was not written by this save, so it keeps its claim; X's new value was not
   // typed by the owner, so its claim goes.
   assert.deepEqual(entryOf(path, "acme").ownerSet, ["Y"]);
@@ -167,11 +170,11 @@ test("mcpAddonEntryFor writes an ownerSet only for the local owner's own install
   assertNoOwnerKeys(B.mcpAddonEntryFor(manifest, { X: "typed" }, { edited: ["X"] }), manifest, "acme");
   assert.deepEqual(B.mcpAddonEntryFor(manifest, { X: "typed" }, { edited: ["X"], owner: true }).ownerSet, ["X"]);
 });
-test("a non-owner save keeps the owner's claim on a value it did not change", () => {
+test("a non-owner save keeps the owner's claim on a value it did not change", async () => {
   const dir = mkdtempSync(join(tmpdir(), "crow-owner-prov-keep-"));
   const path = join(dir, "mcp-addons.json");
   writeFileSync(path, JSON.stringify({ acme: { command: "node", args: [], env: { X: "typed", Y: "old" }, ownerSet: ["X", "Y"] } }));
-  B.applyEnvToMcpAddons("acme", { X: "typed", Y: "new" }, path, { id: "acme", env_vars: [{ name: "X" }, { name: "Y" }] }, { owner: false });
+  await applyEnv("acme", { X: "typed", Y: "new" }, path, { id: "acme", env_vars: [{ name: "X" }, { name: "Y" }] }, { owner: false });
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).acme.ownerSet, ["X"]);
   rmSync(dir, { recursive: true, force: true });
 });
@@ -191,16 +194,16 @@ test("a non-owner install leaves an empty list, so the wall counts none of its v
   assertNoOwnerKeys(entry, ACME_URL_MANIFEST, "acme");
 });
 
-test("a non-owner save that empties the list keeps it, so the new value is not laundered as legacy", () => {
+test("a non-owner save that empties the list keeps it, so the new value is not laundered as legacy", async () => {
   const path = addonsFile({ acme: { command: "node", args: [], env: { ACME_URL: "http://100.64.20.5:80" }, ownerSet: ["ACME_URL"] } });
-  B.applyEnvToMcpAddons("acme", { ACME_URL: "http://100.64.20.9:22" }, path, ACME_URL_MANIFEST, { owner: false });
+  await applyEnv("acme", { ACME_URL: "http://100.64.20.9:22" }, path, ACME_URL_MANIFEST, { owner: false });
   assertNoOwnerKeys(entryOf(path, "acme"), ACME_URL_MANIFEST, "acme");
 });
 
-test("a non-owner save on a legacy entry materialises the legacy claims and drops the ones it changed", () => {
+test("a non-owner save on a legacy entry materialises the legacy claims and drops the ones it changed", async () => {
   const manifest = { ...ACME_URL_MANIFEST, server: { command: "node", args: [], envKeys: ["ACME_URL", "KEEP_URL"] }, env_vars: [{ name: "ACME_URL" }, { name: "KEEP_URL" }] };
   const path = addonsFile({ acme: { command: "node", args: [], env: { ACME_URL: "http://100.64.20.5:80", KEEP_URL: "http://100.64.20.6:80" } } });
-  B.applyEnvToMcpAddons("acme", { ACME_URL: "http://100.64.20.9:22" }, path, manifest, { owner: false });
+  await applyEnv("acme", { ACME_URL: "http://100.64.20.9:22" }, path, manifest, { owner: false });
   const e = entryOf(path, "acme");
   assert.deepEqual(e.ownerSet, ["KEEP_URL"]);
   assert.deepEqual([...ownerSetKeys(e, manifest, {})], ["KEEP_URL"]);
