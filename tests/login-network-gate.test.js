@@ -1,10 +1,12 @@
-// The login and password-reset pages are network-gated.
+// The login and password-reset pages are network-gated — and so are the 2FA
+// steps that finish a login (POST /dashboard/login/2fa and the recovery routes).
 //
 // dashboardAuth (servers/gateway/dashboard/auth.js) already refuses a source that
 // isAllowedNetwork() rejects, but the PUBLIC routes — GET/POST /dashboard/login,
-// GET/POST /dashboard/reset and POST /dashboard/reset/complete — are mounted
-// before it, so without their own gate a source the rest of the dashboard refuses
-// still got a password form to guess into (and, on a fresh install, a setup page).
+// GET/POST /dashboard/reset, POST /dashboard/reset/complete and the 2FA login
+// steps — are mounted before it, so without their own gate a source the rest of
+// the dashboard refuses still got a password form to guess into (and, on a fresh
+// install, a setup page), or a TOTP code to guess into.
 //
 // The gate is isAllowedNetwork() plus ONE exemption: a request straight off this
 // machine's loopback socket (loginNetworkAllowed), because that is the first-run
@@ -24,6 +26,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
+import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,6 +38,7 @@ import {
   loginNetworkAllowed,
   sendNetworkRefusal,
 } from "../servers/gateway/dashboard/auth.js";
+import { listenProxySocketForTests, closeProxySocket } from "../servers/gateway/proxy-socket.js";
 
 // --- request / env helpers --------------------------------------------------
 
@@ -139,16 +143,26 @@ function peerShim(req, res, next) {
   next();
 }
 
-async function startDashboard() {
+async function startDashboard({ socketPath } = {}) {
   const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
   const app = express();
   app.use(peerShim);
   app.use((req, res, next) => { res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
   // A stub for the panels' mcp auth: these tests never reach a panel.
   app.use(dashboardRouter((req, res, next) => res.status(401).end()));
-  return new Promise((resolve) => {
-    const server = app.listen(0, "127.0.0.1", () => resolve(server));
+  const server = await new Promise((resolve) => {
+    const s = app.listen(0, "127.0.0.1", () => resolve(s));
   });
+  if (socketPath) {
+    // The dedicated proxy socket Caddy dials (proxy-socket.js marks every
+    // connection accepted there), which is how a Caddy peer is modelled: a
+    // unix socket has no peer address, so only the marker can vouch for it.
+    const proxy = listenProxySocketForTests(app, server, socketPath, { log: () => {} });
+    assert.ok(proxy, "the test-only proxy listener starts");
+    await once(proxy, "listening");
+    server.proxySocket = proxy;
+  }
+  return server;
 }
 
 function request(port, path, { method = "GET", headers = {}, body = null, peer = null } = {}) {
@@ -176,13 +190,17 @@ function request(port, path, { method = "GET", headers = {}, body = null, peer =
   });
 }
 
-/** The five public auth routes, in the shape a password guesser would use. */
+/** The public auth routes, in the shape a password (or code) guesser would use. */
 const PUBLIC_AUTH_ROUTES = [
   { path: "/dashboard/login" },
   { path: "/dashboard/login", method: "POST", body: { password: "guess-guess-guess" } },
   { path: "/dashboard/reset" },
   { path: "/dashboard/reset", method: "POST", body: {} },
   { path: "/dashboard/reset/complete", method: "POST", body: { token: "tok", password: "guess-guess-guess", confirm: "guess-guess-guess" } },
+  // The 2FA steps that finish a login carry their own gate.
+  { path: "/dashboard/login/2fa", method: "POST", body: { totp_code: "000000" } },
+  { path: "/dashboard/login/2fa/recovery" },
+  { path: "/dashboard/login/2fa/recovery", method: "POST", body: { recovery_code: "aaaa-bbbb" } },
 ];
 
 function label(route) {
@@ -403,6 +421,51 @@ test("positive control: an allowed source's POST does reach the password check a
     assert.ok(JSON.parse(counters[0].value).count >= 1);
     assert.ok(auditRows(path).some((row) => row.event_type === "auth_login_failure"));
   } finally {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- the real router: a Caddy proxy peer ------------------------------------
+//
+// The installer's Caddy dials the gateway's dedicated unix socket
+// (proxy-socket.js), so its visitors arrive with no peer address at all and a
+// PROXY_SOCKET mark on the connection. The harness can model that peer exactly:
+// listenProxySocketForTests serves the same app on a unix socket and marks every
+// accepted connection the way production does, so nothing is planted on a
+// request.
+
+/** One request over the proxy unix socket, as Caddy's dial makes it. */
+function proxyRequest(socketPath, path, { headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ socketPath, path, method: "GET", headers }, (res) => {
+      let text = "";
+      res.on("data", (c) => (text += c));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: text }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+test("a Caddy proxy peer gets the login page for a private client, and is refused for a public one", async () => {
+  const { dir, path } = freshDb();
+  const socketPath = join(dir, "gateway.sock");
+  const server = await startDashboard({ socketPath });
+  try {
+    const r = await withEnv({ ...GATE_OFF, CROW_DB_PATH: path }, () =>
+      proxyRequest(socketPath, "/dashboard/login", { headers: { "x-forwarded-for": "10.0.0.5" } }));
+    assert.equal(r.status, 200, `the LAN visitor Caddy named is an allowed source (got ${r.status})`);
+    assert.match(r.body, /name="password"/, "the login page is served");
+    assert.doesNotMatch(r.body, /Access Denied/);
+
+    // The header can only take trust away: the hop Caddy names is what decides.
+    const pub = await withEnv({ ...GATE_OFF, CROW_DB_PATH: path }, () =>
+      proxyRequest(socketPath, "/dashboard/login", { headers: { "x-forwarded-for": "203.0.113.7" } }));
+    assert.equal(pub.status, 403, "a public client through the same proxy is refused");
+    assert.match(pub.body, /Access Denied/);
+  } finally {
+    await closeProxySocket(server.proxySocket);
     server.close();
     rmSync(dir, { recursive: true, force: true });
   }

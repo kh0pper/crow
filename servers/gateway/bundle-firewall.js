@@ -9,8 +9,9 @@
  * sudo or ufw.
  *
  * Rules are scoped to the tailnet interface (`in on tailscale0`) so the same port is not
- * opened on a LAN interface too. Uninstall also removes the older, unscoped rule an
- * install from before this change may have written.
+ * opened on a LAN interface too. The unscoped rule an install from before this change may
+ * have left behind is removed best-effort on open (before adding, and before skipping a
+ * loopback-only port) and again on uninstall.
  */
 
 import os from "node:os";
@@ -97,7 +98,9 @@ export function deleteRuleArgs(port) {
 
 /**
  * Open each port to the tailnet, skipping the ones that cannot need a rule: Tailscale is
- * not running here, or the port is published on loopback only. `run(command, argv, opts)`
+ * not running here, or the port is published on loopback only. Where the tailnet is up,
+ * the legacy unscoped rule is deleted first (best-effort, its outcome is ignored).
+ * `run(command, argv, opts)`
  * is injected (install passes execFileSync) and may throw; a failed add is logged, not
  * propagated — a missing ufw must never fail an install.
  * @returns {Promise<Array<{port: any, action: "added"|"skipped-no-tailscale"|"skipped-loopback"|"failed"}>>}
@@ -105,17 +108,26 @@ export function deleteRuleArgs(port) {
 export async function openTailnetPorts({ ports = [], name = "", model = null, interfaces, run, log = () => {} } = {}) {
   const results = [];
   const up = tailscaleUp(interfaces);
+  // Best-effort removal of the unscoped rule an earlier install may have written. It is
+  // never allowed to change a port's result: a failure here is just a leftover rule.
+  const removeLegacyRule = async (port) => {
+    try {
+      await run("sudo", deleteRuleArgs(port)[1], { timeout: 10000 });
+    } catch { /* no such rule, or sudo/ufw unavailable — the add/skip below still stands */ }
+  };
   for (const port of ports) {
     if (!up) {
-      log(`Tailscale is not running here, so no tailnet firewall rule was added for port ${port}`);
+      log(`Tailscale is not running here, so no tailnet firewall rule was added for port ${port} — reinstall the app once Tailscale is up`);
       results.push({ port, action: "skipped-no-tailscale" });
       continue;
     }
     if (portLoopbackOnly(model, port)) {
+      await removeLegacyRule(port);
       log(`Port ${port} listens only on this machine, so no firewall rule is needed`);
       results.push({ port, action: "skipped-loopback" });
       continue;
     }
+    await removeLegacyRule(port);
     try {
       await run("sudo", tailnetRuleArgs(port, name), { timeout: 10000 });
       log(`Opened firewall port ${port}/tcp for Tailscale`);

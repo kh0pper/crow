@@ -271,7 +271,7 @@ export function announceSetupToken({ crowHome = resolveCrowHome(), passwordSet =
   if (!path) return null;
   const line = token
     ? `[setup] No dashboard password yet. Open the setup link from ${path} (only this machine's user can read it).`
-    : `[setup] No dashboard password yet, and the setup token could not be written to ${path}. First-run setup works only from this machine (http://localhost:3001/setup) until the file can be created.`;
+    : `[setup] No dashboard password yet, and the setup token could not be written to ${path}: set CROW_SETUP_TOKEN or make that path writable to run first-run setup.`;
   log(line);
   return line;
 }

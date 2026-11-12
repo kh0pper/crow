@@ -149,7 +149,8 @@ export async function saveExtensionSecret(db, key, opts = {}) {
  * SAME key id untouched; a missing row is inserted; a row that is not active (extension_removed)
  * or sealed under a different key id is overwritten and becomes active. Validation and sealing
  * are saveExtensionSecret's own (reserved id, key required, origin, seal).
- * @returns {Promise<boolean>} whether a row was written — never the value
+ * @returns {Promise<number|null>} the id of the row written, or null when nothing was written —
+ *   never the value
  */
 export async function rememberExtensionSecret(db, key, opts = {}) {
   const { bundleId, envKey } = opts;
@@ -167,7 +168,7 @@ export async function rememberExtensionSecret(db, key, opts = {}) {
           RETURNING id`,
     args: [v.label, bundleId, envKey, v.username, v.url, v.sealed, key.id, opts.origin, v.fvu, v.ts, v.ts],
   });
-  return r.rows.length > 0;
+  return r.rows.length > 0 ? Number(r.rows[0].id) : null;
 }
 
 /**

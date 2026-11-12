@@ -3466,7 +3466,7 @@ export const translations = {
   "passwords.event.keychain_copy": { en: "Copied", es: "Copiada al portapapeles" },
   "passwords.event.keychain_delete": { en: "Deleted", es: "Eliminada" },
   "passwords.event.keychain_add": { en: "Added", es: "Añadida" },
-  "passwords.event.keychain_save": { en: "Saved by an extension install", es: "Guardada al instalar una extensión" },
+  "passwords.event.keychain_save": { en: "Saved in the keychain", es: "Guardada en el llavero" },
   "passwords.event.keychain_first_view": { en: "Shown once after install", es: "Mostrada una vez tras la instalación" },
   "passwords.event.keychain_vault_save": { en: "Sent to Vaultwarden", es: "Enviada a Vaultwarden" },
   "passwords.event.keychain_reauth_ok": { en: "Identity confirmed", es: "Identidad confirmada" },
