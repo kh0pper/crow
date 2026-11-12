@@ -1609,16 +1609,25 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     // and a start for any other entry would open a session nothing can mark
     // Done. An extra is any served entry, so it skips that gate. A slot named by
     // the day's own slot names is checked against that slot's card, so the
-    // morning card is the morning chunk and never another slot's.
-    let day;
+    // morning card is the morning chunk and never another slot's. `evening` is
+    // both one of those names AND one of the strip's older ones: the day's own
+    // slot wins when it holds the posted card, and the older gate answers
+    // otherwise. `early` and `day` are the older names only.
+    let day = null;
     if (extra) {
       day = mods.eggsMod.localDay(now);
-    } else if (slot === "morning" || slot === "midday") {
+    } else if (MOVE_SLOT_NAMES.includes(slot)) {
       const dayOut = await daySlots(now);
       const item = (Array.isArray(dayOut.slots) ? dayOut.slots : []).find((s) => s.slot === slot);
-      if (!item || item.empty || item.entryId !== entry.id) bad("entryId must be today's card");
-      day = dayOut.day;
-    } else {
+      if (item && !item.empty && item.entryId === entry.id) {
+        day = dayOut.day;
+      } else if (slot !== "evening") {
+        bad("entryId must be today's card");
+      }
+    }
+    if (day === null) {
+      // The card on screen: the older gate, for `early`, `day` and an
+      // `evening` the day's own slot does not hold.
       const today = await todayCard(now);
       if (!today || today.off || !today.entry || today.entry.id !== entry.id) {
         bad("entryId must be today's card");
@@ -1787,11 +1796,15 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       area,
       now,
       emit,
-      cards: { need: dayOut.need, slots: dayOut.slots },
+      cards: { day: dayOut.day, need: dayOut.need, slots: dayOut.slots },
     });
-    if (standIn.ok) res.json({ standIn, day: await dayPayload(now) });
-    else res.status(409).json({ error: standIn.reason, standIn });
+    // Everything the answer carries is read BEFORE it is sent: today is already
+    // settled by the stand-in's own settleDay, and this offers yesterday. A
+    // failure here still has a response to become, never a sent one to follow.
+    const day = standIn.ok ? await dayPayload(now) : null;
     await settleRecent(now, dayOut);
+    if (standIn.ok) res.json({ standIn, day });
+    else res.status(409).json({ error: standIn.reason, standIn });
   }));
 
   // The one-card Swap the old strip and the MCP tool still call: it re-rolls the

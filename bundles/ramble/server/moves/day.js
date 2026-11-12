@@ -276,10 +276,12 @@ export async function outdoorState(db) {
 /**
  * Open an outdoor session: when it started, and the key that names it.
  *
- * IDEMPOTENT while a session is open: an unfinished row is answered exactly as
- * it was written, so a retried or reloaded start keeps its original anchor (and
- * a walk cannot be restarted to shorten itself). A finished row is replaced —
- * the next session of the day is a new session.
+ * IDEMPOTENT while a session of THIS day is open: an unfinished row of the
+ * day the start credits is answered exactly as it was written, so a retried or
+ * reloaded start keeps its original anchor (and a walk cannot be restarted to
+ * shorten itself). A finished row is replaced — the next session of the day is
+ * a new session — and so is an unfinished row of any other day, because a Done
+ * nobody pressed must not turn the next day's start into one long session.
  *
  * `day` goes through `capDayKey`, so the day a session credits is the one it
  * started on, and an entryId is required: a session with no entry has nothing
@@ -293,7 +295,7 @@ export async function startOutdoor(db, { day, entryId, now = Date.now() } = {}) 
   }
 
   const stored = await readSession(db);
-  if (stored && stored.finished !== true) {
+  if (stored && stored.finished !== true && stored.day === d) {
     return { startedAt: stored.startedAt, sessionKey: stored.sessionKey };
   }
 
@@ -337,10 +339,10 @@ async function growMinutes(db, day, minutes, { now, emit }) {
   }
 }
 
-/** The day's cards as this call may use them: only today's, and only if they are a list. */
-function usableCards(cards, at) {
+/** The day's cards as this call may use them: only the pay day's, and only if they are a list. */
+function usableCards(cards, day) {
   if (!cards || typeof cards !== "object" || Array.isArray(cards)) return null;
-  if (cards.day !== localDay(at)) return null;
+  if (cards.day !== day) return null;
   if (!Array.isArray(cards.slots)) return null;
   const need = Number.isInteger(cards.need) && cards.need >= 1 ? cards.need : 0;
   return { need, slots: cards.slots };
@@ -425,8 +427,10 @@ async function fillCards(db, { day, cards, minutes, stands, now, emit }) {
  * At CARD_MIN_MINUTES and over it also marks the day's heart area and writes
  * the `walked` badge fact, settling the happy day when that fact is new, and it
  * fills cards (`fillCards`). The day's cards are PASSED IN as the caller's own
- * `dayCards` result — this module never imports slots.js — and a missing (or
- * not-today) `cards` fills none of them while the pay, the minutes, the heart
+ * `dayCards` result — this module never imports slots.js — and they are used
+ * only when they are the PAY day's own draw: a missing set, or one drawn for
+ * any other day (the new day's cards handed in by a session finished just
+ * after midnight), fills none of them while the pay, the minutes, the heart
  * area and the walked fact still happen.
  *
  * `needsBalance` says the day still wants a balancing chunk: no `movebal` row
@@ -487,7 +491,7 @@ export async function finishOutdoor(db, { day, now = Date.now(), emit, cards } =
   }
 
   const stands = await standInCount(db, d);
-  const dayCardsIn = usableCards(cards, at);
+  const dayCardsIn = usableCards(cards, d);
   const filled = dayCardsIn && minutes >= CARD_MIN_MINUTES
     ? await fillCards(db, { day: d, cards: dayCardsIn, minutes, stands, now: at, emit })
     : [];
@@ -633,7 +637,10 @@ function stepsSlot(slots, open) {
  *
  * WHICH SLOT. A log fills the caller's named slot when one is given, else the
  * open card of its own area (the caller's `area` when it is one of AREAS, else
- * the activity's default from ACTIVITY_AREA), else the first open card. A log of
+ * the activity's default from ACTIVITY_AREA), else the first open card. When
+ * the card that falls out is the last open one a balancing chunk fits, another
+ * open card is taken instead before the day is refused — a named slot is never
+ * moved. A log of
  * `yoga`, `band` or `bodyweight` whose area is a balancing one is the balancing
  * chunk itself: it is exempt from the counting rule and writes the `movebal` row.
  * A reached step goal fills the midday card, or the first open heart card and
@@ -698,7 +705,15 @@ export async function assignStandIn(db, {
     if ((await rowDelta(db, MOVE_BAL_KIND, today)) === null) {
       const balanceCards = open.filter((item) => BALANCE_AREAS.includes(item.area));
       const last = balanceCards.length > 0 ? balanceCards[balanceCards.length - 1] : null;
-      if (last && last.slot === chosen.slot) return { ok: false, reason: "last_balance" };
+      if (last && last.slot === chosen.slot) {
+        // The card a balancing chunk is kept for stays open. A stand-in that
+        // does not balance may still take another open card, so the day is
+        // only refused when there is none left; a slot the caller named is
+        // answered as asked and never quietly moved.
+        const other = named === null ? open.find((item) => item.slot !== last.slot) ?? null : null;
+        if (!other) return { ok: false, reason: "last_balance" };
+        chosen = other;
+      }
     }
   }
 

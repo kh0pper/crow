@@ -687,8 +687,11 @@
   if (startBtn) startBtn.addEventListener("click", startChallenge);
   var doneBtn = $("rb-challenge-done");
   if (doneBtn) doneBtn.addEventListener("click", function () {
-    /* A walk with a clock running finishes through its own route. */
-    if (outdoor) { postOutdoorDone(); return; }
+    /* A running session finishes through its own route only while the card on
+     * screen is the walk it was opened for: on any other card Done keeps the
+     * Done it always had. */
+    var c = today && today.challenge;
+    if (outdoor && c && c.entry && c.entry.kind === "walk") { postOutdoorDone(); return; }
     postDone();
   });
   var swapBtn = $("rb-challenge-swap");

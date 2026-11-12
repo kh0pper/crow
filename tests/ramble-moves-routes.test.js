@@ -941,23 +941,60 @@ test("POST /moves/start by slot name: a finished card closes its own slot", asyn
           "one moveslot row for " + slot);
       }
 
-      // `evening` is also one of the strip's old names, and it keeps the strip's
-      // gate: it opens the card on screen, which is the evening card when the
-      // hour names it and a refused start otherwise.
+      // `evening` is both one of the day's own slot names and one of the
+      // strip's older ones. The day's slot decides first, so the evening card
+      // starts under its own name whichever slot the clock calls "now".
       const evening = day.slots.find((item) => item.slot === "evening");
       assert.ok(evening?.entry, "the day holds an evening card");
-      if (day.nowSlot === "evening") {
-        const body = await playSlotCard(mount, db, day, "evening");
-        assert.equal(body.dayDone.fresh, true);
-        assert.equal((await walletKeys(db, "moveslot", day.day + ":evening")).length, 1);
-      } else {
-        const refused = await dayPost(mount.url, "/api/ramble/moves/start", {
-          cardKey: "evening", entryId: evening.entry.id,
-        });
-        assert.equal(refused.status, 400, "the evening name opens the card on screen only");
-      }
+      const body = await playSlotCard(mount, db, day, "evening");
+      assert.equal(body.dayDone.fresh, true, "the evening slot row is new");
+      assert.equal((await walletKeys(db, "moveslot", day.day + ":evening")).length, 1,
+        "one moveslot row for evening");
     } finally { db.close?.(); }
   } finally { await mount.close(); }
+});
+
+test("POST /moves/start evening: the day's evening card starts by its own name", async () => {
+  const mount = await freshMount();
+  const realNow = Date.now;
+  // The clock is pinned to 09:30 local, where the day's Now slot is the midday
+  // one, so the evening card is NOT the card on screen.
+  const morning = new Date(new Date(realNow()).setHours(9, 30, 0, 0)).getTime();
+  Date.now = () => morning;
+  try {
+    const day = await (await dayGet(mount.url)).json();
+    assert.equal(day.nowSlot, "midday", "the clock names the midday slot");
+    assert.equal(day.need, 3);
+    const evening = day.slots.find((item) => item.slot === "evening");
+    const nowSlot = day.slots.find((item) => item.slot === day.nowSlot);
+    assert.ok(evening?.entry, "the day holds an evening card");
+    assert.ok(nowSlot?.entry, "and a Now card");
+    assert.notEqual(evening.entry.id, nowSlot.entry.id, "the evening card is not the Now card");
+
+    const started = await dayPost(mount.url, "/api/ramble/moves/start", {
+      cardKey: "evening", entryId: evening.entry.id,
+    });
+    assert.equal(started.status, 200, "the day's own evening slot answers its own name");
+    const start = await started.json();
+    assert.equal(start.cardKey, day.day + ":evening");
+
+    const db = await mountDb(mount.dir);
+    try {
+      await ageStartRecord(db, start.cardKey, 11 * 60000);
+      const posted = await dayPost(mount.url, "/api/ramble/moves/progress", {
+        cardKey: start.cardKey, chunkIndex: 0, entryId: evening.entry.id, activeSeconds: 600,
+      });
+      assert.equal(posted.status, 200);
+      const body = await posted.json();
+      assert.equal(body.progress.done, true);
+      assert.equal(body.dayDone.fresh, true, "the done post closed the evening slot");
+      assert.deepEqual(await walletKeys(db, "moveslot", day.day + ":evening"),
+        [day.day + ":evening"]);
+    } finally { db.close?.(); }
+  } finally {
+    Date.now = realNow;
+    await mount.close();
+  }
 });
 
 test("POST /moves/start cardKey day: the old name closes the slot the entry sits in", async () => {

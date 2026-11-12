@@ -461,6 +461,45 @@ test("without the day's cards the session still pays, counts, marks and badges",
   assert.equal(await rowDelta(other, MOVE_OUTDOOR_KIND, DAY), 36);
 });
 
+/** A local clock time on the day after DAY0, built from local fields so DST cannot shift it. */
+const NEXT_AT = (h, m = 0) => new Date(2026, 9, 6, h, m, 0, 0).getTime();
+
+test("a session finished after midnight pays its own day and fills none of the new day's cards", async () => {
+  const db = await freshDb();
+  const start = new Date(2026, 9, 5, 23, 50, 0, 0).getTime();
+  const finish = NEXT_AT(0, 10);
+  const nextDay = localDay(finish);
+  assert.equal(localDay(start), DAY, "the session started on the fixed day");
+  assert.notEqual(nextDay, DAY);
+
+  // What the route reads at 00:10 and hands in: the NEW day's cards.
+  const tomorrows = await cardsFor(db, finish);
+  assert.equal(tomorrows.day, nextDay);
+  assert.equal(tomorrows.need, 3);
+
+  await startOutdoor(db, { day: DAY, entryId: "walk-1", now: start });
+  const out = await finishOutdoor(db, { day: nextDay, now: finish, cards: tomorrows });
+
+  assert.deepEqual(out.filled, [], "another day's cards are never written under this one");
+  assert.equal(out.paid, outdoorPoints(20), "the session still pays");
+  assert.equal(await rowDelta(db, MOVE_OUTDOOR_KIND, DAY), outdoorPoints(20), "on the day it started");
+  assert.equal(await rowDelta(db, MOVE_OUTDOOR_KIND, nextDay), null);
+  assert.equal(await rowDelta(db, MOVE_MIN_KIND, DAY), 20);
+  assert.equal(await rowDelta(db, MOVE_AREA_KIND, `${DAY}:heart`), 1, "the heart area is the session's day");
+  assert.equal(await rowDelta(db, MOVE_AREA_KIND, `${nextDay}:heart`), null);
+  assert.equal(await rowDelta(db, WALKED_KIND, DAY), 1);
+  assert.deepEqual(await keysOf(db, MOVE_SLOT_KIND), [], "no slot row on either day");
+  assert.deepEqual(await keysOf(db, MOVE_STAND_KIND), [], "no stand-in row on either day");
+
+  // A same-day finish still fills the pay day's own cards.
+  const daysOwn = await cardsFor(db, AT(9));
+  assert.equal(daysOwn.day, DAY);
+  await startOutdoor(db, { day: DAY, entryId: "walk-2", now: AT(9) });
+  const sameDay = await finishOutdoor(db, { day: DAY, now: AT(9) + 20 * M, cards: daysOwn });
+  assert.deepEqual(sameDay.filled, ["midday", "morning"], "the pay day's own cards are still filled");
+  assert.deepEqual(await keysOf(db, MOVE_SLOT_KIND), [`${DAY}:midday`, `${DAY}:morning`]);
+});
+
 /* --------------------------------------------------- movement fact and badge */
 
 test("a ten-minute walk is a movement fact and badges the profile picture", async () => {
@@ -518,6 +557,33 @@ test("startOutdoor keeps an open session's anchor, and outdoorState reads it bac
   assert.equal(replaced.finished, false);
   assert.equal(replaced.entryId, "walk-2");
   assert.equal(replaced.startedAt, AT(9, 20));
+});
+
+test("an unfinished session of another day is replaced, not resumed", async () => {
+  const db = await freshDb();
+  const first = await startOutdoor(db, { day: DAY, entryId: "walk-1", now: AT(9) });
+  const retried = await startOutdoor(db, { day: DAY, entryId: "walk-1", now: AT(9, 20) });
+  assert.deepEqual(retried, first, "a retried start the same day keeps the original anchor");
+
+  // The next day's start: the forgotten Done must not make this one long.
+  const tomorrow = NEXT_AT(9);
+  const tomorrowDay = localDay(tomorrow);
+  const next = await startOutdoor(db, { day: tomorrowDay, entryId: "walk-2", now: tomorrow });
+  assert.equal(next.startedAt, tomorrow, "the new day's start is anchored at its own clock");
+  assert.notEqual(next.sessionKey, first.sessionKey, "and it is a new session");
+
+  const state = await outdoorState(db);
+  assert.deepEqual(state, {
+    day: tomorrowDay,
+    startedAt: tomorrow,
+    entryId: "walk-2",
+    sessionKey: next.sessionKey,
+    finished: false,
+  });
+
+  const out = await finishOutdoor(db, { day: tomorrowDay, now: tomorrow + 11 * M });
+  assert.equal(out.minutes, 11, "the walk is measured from the new start, not from yesterday's");
+  assert.equal(out.paid, outdoorPoints(11));
 });
 
 test("nothing about the session row is ever emitted", async () => {

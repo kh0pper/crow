@@ -971,3 +971,26 @@ test("a walk card's Done with no session running is the plain Done", async () =>
     "with no clock running the card keeps the Done it always had");
   assert.equal(booted.calls.some((c) => c.url === "/api/ramble/moves/outdoor/done"), false);
 });
+
+test("a running session leaves Done its own route only while the card on screen is a walk", async () => {
+  const now = Date.parse("2026-10-30T10:00:00");
+  const booted = bootMoves((sb) => { sb.localStorage.setItem("ramble.moves.safetySeen", "1"); },
+    "", undefined, {
+      now,
+      today: CHUNK_TODAY,
+      routes: outdoorRoutes(now, 0, {
+        outdoor: { day: "2026-10-30", startedAt: now - 9 * 60000, entryId: "walk-10", sessionKey: "k", finished: false },
+      }),
+    });
+  await flush();
+
+  booted.el("rb-challenge-done").click();
+  await flush();
+
+  const done = booted.calls.find((c) => c.url === "/api/ramble/moves/done");
+  assert.ok(done, "a card that is not a walk keeps the Done it always had");
+  assert.equal(done.method, "POST");
+  assert.deepEqual(done.body, { day: "2026-10-30" });
+  assert.equal(booted.calls.some((c) => c.url === "/api/ramble/moves/outdoor/done"), false,
+    "the clock running behind another card is not finished by this Done");
+});

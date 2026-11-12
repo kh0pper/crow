@@ -247,7 +247,39 @@ test("a bodyweight log with a heart area does not balance the day", async () => 
     "the log's own area, not its activity, is what decides the balance");
 });
 
-/* ----------------------------------------------------------------- refusals */
+/* ------------------------------------------------- refusals */
+
+test("a log whose area is the last balancing card takes another open card instead", async () => {
+  const db = await freshDb();
+  const cards = await cardsFor(db);
+  assert.deepEqual(cards.slots.map((item) => [item.slot, item.area]), [
+    ["morning", "mobility"], ["midday", "heart"], ["evening", "lower"],
+  ]);
+  // A lower-area log leans on the evening card, which is the last open card a
+  // balancing chunk fits: the stand-in goes to another open card instead.
+  const logged = await log(db, { activity: "walk", minutes: 10, area: "lower", at: AT(10) });
+
+  const out = await assignStandIn(db, {
+    day: DAY, source: "log", logKey: logged.key, area: "lower", now: AT(10), cards,
+  });
+  assert.equal(out.ok, true, "another open card is a card this stand-in may take");
+  assert.equal(out.slot, "morning", "the first open card that is not the one kept open");
+  assert.deepEqual(await keysOf(db, MOVE_SLOT_KIND), [`${DAY}:morning`]);
+  assert.equal(await rowDelta(db, MOVE_BAL_KIND, DAY), null, "a walk log never balances the day");
+});
+
+test("a named slot that is the last balancing card is still refused", async () => {
+  const db = await freshDb();
+  const cards = await cardsFor(db);
+  const logged = await log(db, { activity: "walk", minutes: 10, area: "lower", at: AT(10) });
+
+  const out = await assignStandIn(db, {
+    day: DAY, slot: "evening", source: "log", logKey: logged.key, area: "lower", now: AT(10), cards,
+  });
+  assert.deepEqual(out, { ok: false, reason: "last_balance" }, "a named slot is answered as asked");
+  assert.deepEqual(await keysOf(db, MOVE_SLOT_KIND), []);
+  assert.deepEqual(await keysOf(db, MOVE_STAND_KIND), []);
+});
 
 test("a nine-minute log is too short to stand in for a card", async () => {
   const db = await freshDb();
