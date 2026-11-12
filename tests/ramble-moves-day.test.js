@@ -17,11 +17,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
-import { rowDelta } from "../bundles/ramble/server/steps.js";
+import { localDay } from "../bundles/ramble/server/eggs.js";
+import { insertOnce, rowDelta } from "../bundles/ramble/server/steps.js";
 import {
   MOVE_ALL_KIND, MOVE_BAL_KIND, MOVE_NEED_KIND, MOVE_SLOT_KIND, MOVE_STAND_KIND,
   completeDays, isDayComplete,
 } from "../bundles/ramble/server/moves/day-complete.js";
+import { MOVE_AREA_KIND } from "../bundles/ramble/server/moves/week.js";
+import { HEART_KIND } from "../bundles/ramble/server/hearts.js";
+import { MOVE_DONE_KIND } from "../bundles/ramble/server/moves/ledger.js";
+import { VIA, recordSlotDone, settleDay } from "../bundles/ramble/server/moves/day.js";
 
 const DAY = "2026-11-12";
 const YESTERDAY = "2026-11-11";
@@ -176,3 +181,261 @@ test("completeDays answers exactly the complete days of a range, in three querie
   assert.deepEqual([...(await completeDays(db, {}))], []);
 });
 
+// --- Writing a day: recordSlotDone and settleDay ---------------------------
+
+/** Local noon, so day arithmetic is timezone-independent. */
+function base(offset) {
+  return new Date(2026, 9, 20 + offset, 12, 0, 0).getTime();
+}
+
+/** Just after local midnight of that day. */
+function midnight(offset) {
+  return new Date(2026, 9, 20 + offset, 0, 5, 0).getTime();
+}
+
+const dayOf = (offset) => localDay(base(offset));
+
+/** A player-run chunk: `kind` (a routine by default) training `areas`. */
+function chunk(areas, kind = "routine") {
+  return { id: `chunk-${kind}-${areas.join("-")}`, kind, areas, activity: "bodyweight", minutes: 10 };
+}
+
+/** A walk, which never balances a day whatever it works. */
+function walk(id, areas) {
+  return { id, kind: "walk", areas, activity: "walk", minutes: 10 };
+}
+
+/** Rows of one kind, so an assertion says how many were written. */
+async function rowsOfKind(db, kind) {
+  const { rows } = await db.execute({
+    sql: "SELECT key FROM ramble_wallet WHERE kind = ? ORDER BY key",
+    args: [kind],
+  });
+  return rows.map((row) => String(row.key));
+}
+
+test("three finished slots complete the day; two of three do not", async () => {
+  const db = await freshDb();
+  const day = dayOf(0);
+  await insertOnce(db, MOVE_NEED_KIND, day, 3, base(0));
+
+  const morning = await recordSlotDone(db, {
+    day, slot: "morning", entry: chunk(["heart"]), via: "player", now: base(0),
+  });
+  assert.deepEqual(morning, { fresh: true, all: false });
+
+  const midday = await recordSlotDone(db, {
+    day, slot: "midday", entry: chunk(["mobility"]), via: "player", now: base(0),
+  });
+  assert.equal(midday.all, false, "two of three is not the day");
+  assert.equal(await rowDelta(db, MOVE_ALL_KIND, day), null, "no cache row before the last card");
+
+  const evening = await recordSlotDone(db, {
+    day, slot: "evening", entry: chunk(["core"]), via: "player", now: base(0),
+  });
+  assert.equal(evening.fresh, true);
+  assert.equal(evening.all, true);
+  assert.equal(await rowDelta(db, MOVE_ALL_KIND, day), 1);
+});
+
+test("settleDay is the only writer of the cache and the heart, once each", async () => {
+  const db = await freshDb();
+  const day = dayOf(0);
+  // A seven-day run ending today, so the settlement has a heart to award.
+  for (let i = -6; i <= 0; i += 1) await fact(db, MOVE_DONE_KIND, dayOf(i), 1);
+  await fact(db, MOVE_NEED_KIND, day, 3);
+  await slotRows(db, day);
+  await fact(db, MOVE_BAL_KIND, day);
+
+  const before = await walletCounts(db);
+  assert.equal(await isDayComplete(db, day), true);
+  assert.deepEqual(await walletCounts(db), before, "a read is a read");
+  assert.equal(await rowDelta(db, MOVE_ALL_KIND, day), null, "completion writes nothing on its own");
+
+  const first = await settleDay(db, { day, now: base(0) });
+  assert.deepEqual(first, { complete: true, fresh: true });
+  const settled = await walletCounts(db);
+  assert.equal(settled[MOVE_ALL_KIND], 1, "one cache row");
+  assert.equal(settled[HEART_KIND], 1, "one heart");
+  assert.equal(await rowDelta(db, MOVE_ALL_KIND, day), 1);
+  assert.equal(await rowDelta(db, HEART_KIND, "streak:" + day), 1);
+
+  const second = await settleDay(db, { day, now: base(0) });
+  assert.deepEqual(second, { complete: true, fresh: false });
+  assert.deepEqual(await walletCounts(db), settled, "a second settle writes nothing");
+  assert.deepEqual(await rowsOfKind(db, HEART_KIND), ["streak:" + day]);
+});
+
+test("a day at its slot count without a balance is not complete", async () => {
+  const day = dayOf(0);
+
+  const walks = await freshDb();
+  await insertOnce(walks, MOVE_NEED_KIND, day, 3, base(0));
+  for (const slot of SLOTS) {
+    const got = await recordSlotDone(walks, {
+      day, slot, entry: walk("walk-" + slot, ["heart"]), via: "player", now: base(0),
+    });
+    // eslint-disable-next-line no-await-in-loop
+    assert.equal(got.all, false);
+  }
+  assert.equal(await rowDelta(walks, MOVE_BAL_KIND, day), null, "a walk is not a balance");
+  assert.equal(await isDayComplete(walks, day), false);
+
+  const outdoor = await freshDb();
+  await insertOnce(outdoor, MOVE_NEED_KIND, day, 3, base(0));
+  for (const slot of SLOTS) {
+    await recordSlotDone(outdoor, {
+      day, slot, entry: chunk(["core"]), via: "outdoor", now: base(0),
+    });
+  }
+  assert.equal(await rowDelta(outdoor, MOVE_BAL_KIND, day), null, "an outdoor chunk is no balance");
+  assert.equal(await isDayComplete(outdoor, day), false, "three of three, still no balance");
+});
+
+test("recording the same slot twice writes its row once", async () => {
+  const db = await freshDb();
+  const day = dayOf(0);
+
+  const first = await recordSlotDone(db, {
+    day, slot: "morning", entry: chunk(["core"]), via: "player", now: base(0),
+  });
+  assert.equal(first.fresh, true);
+  assert.deepEqual(await rowsOfKind(db, MOVE_SLOT_KIND), [`${day}:morning`]);
+  const before = await walletCounts(db);
+
+  const second = await recordSlotDone(db, {
+    day, slot: "morning", entry: chunk(["core"]), via: "player", now: base(0),
+  });
+  assert.equal(second.fresh, false, "the row was already there");
+  assert.deepEqual(await walletCounts(db), before, "a repeat writes nothing new");
+  assert.deepEqual(await rowsOfKind(db, MOVE_SLOT_KIND), [`${day}:morning`]);
+});
+
+test("a chunk beyond the day's cards closes no slot, and can finish the day", async () => {
+  const db = await freshDb();
+  const day = dayOf(0);
+  const emitted = [];
+  const emit = async (table, op, row) => {
+    if (table === "ramble_wallet") emitted.push(`${row.kind} ${row.key}`);
+  };
+
+  const extra = await recordSlotDone(db, {
+    day, entry: chunk(["core"]), via: "player", now: base(0), emit,
+  });
+  assert.equal(extra.fresh, true, "its area and balance rows were new");
+  assert.deepEqual(await rowsOfKind(db, MOVE_SLOT_KIND), [], "an extra closes no slot");
+  assert.equal(await rowDelta(db, MOVE_AREA_KIND, `${day}:core`), 1);
+  assert.equal(await rowDelta(db, MOVE_BAL_KIND, day), 1);
+  assert.deepEqual(emitted, [`${MOVE_AREA_KIND} ${day}:core`, `${MOVE_BAL_KIND} ${day}`]);
+
+  const again = await recordSlotDone(db, {
+    day, entry: chunk(["core"]), via: "player", now: base(0),
+  });
+  assert.equal(again.fresh, false, "nothing was new the second time");
+
+  // Every card already done and no balance: the extra is what finishes the day.
+  const late = await freshDb();
+  await fact(late, MOVE_NEED_KIND, day, 3);
+  await slotRows(late, day);
+  assert.equal(await isDayComplete(late, day), false, "the day still lacks its balance");
+
+  const finishing = await recordSlotDone(late, {
+    day, entry: chunk(["core"]), via: "player", now: base(0),
+  });
+  assert.equal(finishing.all, true);
+  assert.equal(await rowDelta(late, MOVE_SLOT_KIND, `${day}:morning`), 1, "the day's card rows stay");
+});
+
+test("a balance is the player's own chunk or a class, never a walk and never a stand-in", async () => {
+  const day = dayOf(0);
+  const balanceAfter = async (entry, via) => {
+    const db = await freshDb();
+    await recordSlotDone(db, { day, slot: "morning", entry, via, now: base(0) });
+    return rowDelta(db, MOVE_BAL_KIND, day);
+  };
+
+  assert.equal(await balanceAfter(chunk(["heart"]), "player"), null,
+    "a heart routine leaves the balance alone");
+  assert.equal(await balanceAfter(chunk(["lower", "heart"]), "player"), 1,
+    "a routine that works the legs balances the day");
+  assert.equal(await balanceAfter(chunk(["lower", "heart"], "landmark"), "player"), 1,
+    "a landmark routine counts: it is the player's own and it works the legs");
+  assert.equal(await balanceAfter(walk("walk-heart", ["heart"]), "player"), null);
+  assert.equal(await balanceAfter(walk("walk-lower", ["lower"]), "player"), null,
+    "a walk is no balance, even working the legs");
+  assert.equal(await balanceAfter(chunk(["core"]), "class"), 1, "a class balances like the player");
+  for (const via of ["outdoor", "standin-log", "standin-steps"]) {
+    // eslint-disable-next-line no-await-in-loop
+    assert.equal(await balanceAfter(chunk(["lower"]), via), null, `via ${via} writes no balance`);
+  }
+});
+
+test("a chunk done just after midnight is filed under the day it was picked for", async () => {
+  const db = await freshDb();
+  const today = dayOf(0);
+  const yesterday = dayOf(-1);
+  const now = midnight(0);
+
+  const got = await recordSlotDone(db, {
+    day: yesterday, slot: "evening", entry: chunk(["core"]), via: "player", now,
+  });
+  assert.equal(got.fresh, true);
+  assert.deepEqual(await rowsOfKind(db, MOVE_SLOT_KIND), [`${yesterday}:evening`]);
+  assert.equal(await rowDelta(db, MOVE_SLOT_KIND, `${today}:evening`), null, "today's cards stay open");
+  assert.equal(await rowDelta(db, MOVE_AREA_KIND, `${yesterday}:core`), 1);
+  assert.equal(await rowDelta(db, MOVE_BAL_KIND, yesterday), 1);
+  assert.equal(await rowDelta(db, MOVE_BAL_KIND, today), null);
+
+  // A day older than yesterday is too old to write to: today's date is used.
+  const old = await freshDb();
+  await recordSlotDone(old, {
+    day: dayOf(-2), slot: "evening", entry: chunk(["core"]), via: "player", now: base(0),
+  });
+  assert.deepEqual(await rowsOfKind(old, MOVE_SLOT_KIND), [`${today}:evening`]);
+});
+
+test("the picks-capped need finishes a day its slot count alone would not", async () => {
+  const db = await freshDb();
+  const day = dayOf(0);
+  await insertOnce(db, MOVE_NEED_KIND, day, 3, base(0));
+  await recordSlotDone(db, {
+    day, slot: "morning", entry: chunk(["core"]), via: "player", now: base(0),
+  });
+  await recordSlotDone(db, {
+    day, slot: "midday", entry: chunk(["mobility"]), via: "player", now: base(0),
+  });
+
+  assert.equal((await settleDay(db, { day, now: base(0) })).complete, false, "two of three is not the day");
+  assert.equal(await rowDelta(db, MOVE_ALL_KIND, day), null, "an incomplete settle writes nothing");
+  assert.equal((await settleDay(db, { day, now: base(0), need: 2 })).complete, true,
+    "the day could only fill two cards");
+
+  const capped = await recordSlotDone(db, {
+    day, slot: "midday", entry: chunk(["mobility"]), via: "player", now: base(0), need: 2,
+  });
+  assert.equal(capped.all, true);
+});
+
+test("a chunk naming an unknown via, slot or entry is refused before anything is written", async () => {
+  const db = await freshDb();
+  const day = dayOf(0);
+  const entry = chunk(["core"]);
+  const refused = { name: "MovesInputError" };
+
+  await assert.rejects(recordSlotDone(db, { day, slot: "morning", entry, via: "buddy", now: base(0) }), refused);
+  await assert.rejects(recordSlotDone(db, { day, slot: "morning", entry, via: undefined, now: base(0) }), refused);
+  await assert.rejects(recordSlotDone(db, { day, slot: "noon", entry, via: "player", now: base(0) }), refused);
+  await assert.rejects(recordSlotDone(db, { day, slot: "", entry, via: "player", now: base(0) }), refused);
+  await assert.rejects(recordSlotDone(db, { day, slot: "morning", via: "player", now: base(0) }), refused);
+  await assert.rejects(recordSlotDone(db, {
+    day, slot: "morning", entry: { areas: ["core"] }, via: "player", now: base(0),
+  }), refused);
+  await assert.rejects(recordSlotDone(db, {
+    day, slot: "morning", entry: { kind: "routine", areas: [1] }, via: "player", now: base(0),
+  }), refused);
+  assert.deepEqual(VIA, ["player", "class", "outdoor", "standin-log", "standin-steps"]);
+  assert.equal(Object.isFrozen(VIA), true);
+
+  const ok = await recordSlotDone(db, { day, entry, via: "player", now: base(0) });
+  assert.equal(ok.fresh, true, "a chunk with no slot is an extra, not junk");
+});
