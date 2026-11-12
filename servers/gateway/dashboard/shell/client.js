@@ -247,23 +247,34 @@ export function shellClientJs() {
       }
     })();
 
-    // ─── For You: the drag reveal (For You v1; drag reveal 2026-10-30; the chain, widgets phase 2) ───
-    // A left-to-right drag pulls the page to the LEFT in from the left, like the Pixel's Discover
-    // feed: the page and the panel beside it follow the finger 1:1. The chain is
-    // [Widgets, For You, Chat or a project home], so the same drag that brings For You in over the
-    // Chat list brings Widgets in over For You, and the reverse drag (right to left) walks back one
-    // step. On release it lands on the next page in (past COMMIT of the width, or a flick) or springs
-    // back. On For You the mirror drag pushes it back out: Back after a forward drag landed here (a
-    // one-time sessionStorage marker) or when the page before was a Crow page and the document came
-    // from this origin, else the Chat list. On Widgets the mirror drag goes back one step, to For You.
+    // ─── For You: the drag reveal (For You v1; drag reveal 2026-10-30; the chain, widgets phase 2;
+    // the tab strip) ───
+    // One continuous strip on phones: Widgets <- For You <- Chat -> Board -> Make, where Chat is the
+    // Chat list or a project's home. The page and the panel beside it follow the finger 1:1, like the
+    // Pixel's Discover feed, so the same drag that brings For You in over the Chat list brings Widgets
+    // in over For You, Board in over the Chat list and Board in over Make, and the reverse drag (right
+    // to left) walks one step the other way: Make over Board, Board over the Chat list. A finger moving
+    // right pulls the page on the left in (dir 1); a finger moving left pushes this page out to the
+    // left (dir -1). At the ends of the strip there is no gesture at all: nothing right of Widgets,
+    // nothing left of Make, nothing right of an open chat. On release it lands on the next page in
+    // (past COMMIT of the width, or a flick) or springs back.
+    // A step onto a tab is a plain Turbo visit to that tab's own href, read from the real tab bar
+    // (a.shell-tab[data-shell-tab="chat|board|make"] inside .shell-tabs): no sessionStorage marker,
+    // no history.back(). A page is Board or Make only when its pathname is that tab's own, so a
+    // sub-page that merely lights the tab does not swipe.
+    // For You keeps its own way back. On For You the mirror drag pushes it back out: Back after a
+    // forward drag landed here (a one-time sessionStorage marker) or when the page before was a Crow
+    // page and the document came from this origin, else the Chat list. On Widgets the mirror drag goes
+    // back one step, to For You.
     //
-    // Where: the Chat list (/dashboard/perch with no chat open), a project's home (For You itself for
-    // the way back) and For You (Widgets, reached through the page's own data-widgets-entry link), at
+    // Where: the Chat list (/dashboard/perch with no chat open), a project's home, For You (Widgets,
+    // reached through the page's own data-widgets-entry link), Widgets, and the Board and Make tabs, at
     // phone width (the bottom-bar layout), never on a chat or a canvas. It must not feel like the
     // system Back gesture (a swipe in from either edge with a small chevron): it starts at least EDGE
     // px in from the edge it moves away from, only after a deliberate sideways move (the axis lock:
-    // past SLOP px and AXIS times more sideways than up or down), the whole page moves, and the
-    // forward drag never calls history.back(). Never from a field, a box that scrolls sideways or a
+    // past SLOP px and AXIS times more sideways than up or down), the whole page moves, and no step of
+    // the strip calls history.back() except the reverse drag out of For You and Widgets, which
+    // restores the page it came from. Never from a field, a box that scrolls sideways or a
     // canvas/video/[data-no-swipe], or while a drawer, sheet or dialog is open; dropped when text is
     // selected, when a text field on the page holds a draft (leaving would lose it), and on a paired
     // kiosk display (its browser holds the kiosk's pairing token). A gesture that starts inside a
@@ -272,14 +283,13 @@ export function shellClientJs() {
     // Vertical scrolling is untouched: .content-body is touch-action pan-y,
     // touchstart/end are passive, and the one non-passive touchmove listener
     // sits on an eligible page's .main-content and cancels moves only once a
-    // drag has locked. On the Chat list and a project home it exists only while
-    // the flag is on, because the For You link (data-for-you-entry, rendered
-    // only then) is its forward target; on For You that target is the page's own
-    // widgets link (data-widgets-entry), and on Widgets the reverse drag needs
-    // no link at all.
+    // drag has locked. It is registered wherever the strip has a step out of
+    // this page (swipePage()). The flag-off chrome drops the For You link on the
+    // Chat list, which takes that step away there and leaves the tab steps; on
+    // For You the way in is the page's own widgets link (data-widgets-entry).
     //
-    // The panel: the page being pulled in is fetched once per page view on the first
-    // eligible touch (once, success or not; a new render aborts it) and
+    // The panel: the page being pulled in is fetched once per page view and target on the first
+    // eligible touch (once, success or not; a new render aborts them) and
     // parsed with DOMParser (nothing in it runs); scripts, frames, media,
     // dialogs and SVG animation are dropped, then ids, names, event
     // attributes, off-site URLs and any CSS that could load something
@@ -298,7 +308,7 @@ export function shellClientJs() {
       var PROJECT = /^\\/dashboard\\/project\\/[^\\/]+$/;
       var DROP = 'script,iframe,frame,frameset,object,embed,link,meta,base,template,noscript,audio,video,source,track,dialog,animate,set,animatemotion,animatetransform';
       var start = null, drag = null, busy = null, raf = 0;
-      var gen = 0, preview = null, tried = false, ctl = null, here = null, prev = null;
+      var gen = 0, previews = {}, tried = {}, ctls = {}, here = null, prev = null;
 
       function kiosk() {
         try { return !!window.localStorage.getItem('crow.kiosk.token'); } catch (e) { return false; }
@@ -320,12 +330,44 @@ export function shellClientJs() {
       // (an icon button in its header, rendered on the page itself).
       function entry() { return document.querySelector('a[data-for-you-entry]'); }
       function widgetsEntry() { return document.querySelector('a[data-widgets-entry]'); }
-      // The page a forward drag would bring in, and the link that names it: For You from the Chat list
-      // or a project home, Widgets from For You. null where there is nowhere further in (and whenever
-      // the link is absent, which is how the flag-off chrome tells the reveal to stay put).
-      function forwardLink() {
-        if (surface()) return entry();
-        if (onForYou()) return widgetsEntry();
+      // The real tab bar's links (chrome.js: a.shell-tab[data-shell-tab=...] inside .shell-tabs). A tab
+      // step is offered only where its link is and its href is a same-origin /dashboard/ path.
+      function tabLink(id) { return document.querySelector('.shell-tabs a[data-shell-tab="' + id + '"]'); }
+      function tabHref(id) { return hrefOf(tabLink(id)); }
+      function pathOf(href) { return String(href || '').split('?')[0].split('#')[0]; }
+      // Board or Make only when this page IS that tab's page: a sub-page that merely lights the tab
+      // does not swipe, and the tab link's scope query is not part of the pathname.
+      function tabPage() {
+        var p = location.pathname;
+        if (p === pathOf(tabHref('board'))) return 'board';
+        if (p === pathOf(tabHref('make'))) return 'make';
+        return '';
+      }
+      function tabStep(id) {
+        var link = tabLink(id), href = hrefOf(link);
+        return href ? { href: href, tab: true, link: link } : null;
+      }
+      // A page that names its own way in through a link on itself (entry(), widgetsEntry()).
+      function linkStep(link) {
+        var href = hrefOf(link);
+        return href ? { href: href, tab: false, link: link } : null;
+      }
+      // One step of the strip in one direction: null where the strip ends here, { back: true } for the
+      // reverse drag out of For You or Widgets (that page comes back from Turbo's cache, so it carries
+      // no href), else the href to bring in and whether it is a tab step.
+      function step(dir) {
+        var t = tabPage();
+        if (dir > 0) {
+          if (onWidgets()) return null;
+          if (onForYou()) return linkStep(widgetsEntry());
+          if (surface()) return linkStep(entry());
+          if (t === 'board') return tabStep('chat');
+          if (t === 'make') return tabStep('board');
+          return null;
+        }
+        if (onForYou() || onWidgets()) return { back: true };
+        if (surface()) return tabStep('board');
+        if (t === 'board') return tabStep('make');
         return null;
       }
       // The link's href, only as a same-origin /dashboard/ path (else null).
@@ -340,9 +382,8 @@ export function shellClientJs() {
         if (text) return text;
         return link ? String(link.getAttribute('aria-label') || '').trim() : '';
       }
-      // Whether this page is on the chain at all. The reverse drag needs no link (Widgets is always
-      // one step out from For You); the forward one is only offered where its link is.
-      function swipePage() { return !!(forwardLink() || onForYou() || onWidgets()); }
+      // Whether this page is anywhere on the strip: a step either way is what it takes.
+      function swipePage() { return !!(step(1) || step(-1)); }
       // An open dialog, or a modal layer that is actually on screen. Some modal
       // layers live in every page, hidden by CSS until opened (Crow Talk's
       // overlay is display:none until .active): those must not count, or the
@@ -412,11 +453,16 @@ export function shellClientJs() {
           }
         }
       }
-      function copyOf(doc) {
+      function copyOf(doc, tab) {
         var main = doc.querySelector('.main-content');
-        // Not the page being pulled in (a sign-in page, an error): the caller keeps the skeleton.
-        if (!main || !main.querySelector('[data-fy], [data-wg-page="widgets"]')) return null;
-        var parts = [main, doc.querySelector('.shell-tabs')];
+        var tabs = doc.querySelector('.shell-tabs');
+        // Not the page being pulled in (a sign-in page, an error): the caller keeps the skeleton. A tab
+        // step brings in any real page of the shell, so there the whole frame — a .main-content inside
+        // the shell's own tab bar — is what tells that page from a sign-in screen or an error page.
+        if (!main) return null;
+        if (tab && !tabs) return null;
+        if (!tab && !main.querySelector('[data-fy], [data-wg-page="widgets"]')) return null;
+        var parts = [main, tabs];
         var box = document.createElement('div');
         for (var i = 0; i < parts.length; i++) {
           if (!parts[i]) continue;
@@ -425,25 +471,26 @@ export function shellClientJs() {
         }
         return box;
       }
-      // At most one fetch per page view, success or not (a failure keeps the
-      // skeleton); a new render aborts it.
-      function prefetch() {
-        var href = hrefOf(forwardLink());
-        if (tried || !href || typeof fetch !== 'function' || typeof DOMParser !== 'function') return;
-        tried = true;
+      // At most one fetch per target per page view, success or not (a failure keeps the
+      // skeleton); a new render aborts them.
+      function prefetch(href, tab) {
+        if (!href || tried[href] || typeof fetch !== 'function' || typeof DOMParser !== 'function') return;
+        tried[href] = true;
         var g = gen;
-        ctl = typeof AbortController === 'function' ? new AbortController() : null;
+        var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+        ctls[href] = ctl;
         fetch(href, { credentials: 'same-origin', headers: { accept: 'text/html' }, signal: ctl ? ctl.signal : undefined })
           .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
-          .then(function (html) { if (g === gen) preview = copyOf(new DOMParser().parseFromString(html, 'text/html')); })
+          .then(function (html) { if (g === gen) previews[href] = copyOf(new DOMParser().parseFromString(html, 'text/html'), tab); })
           .catch(function () {});
       }
       function abortFetch() {
-        if (ctl) { try { ctl.abort(); } catch (e) {} }
-        ctl = null;
+        var hrefs = Object.keys(ctls);
+        for (var i = 0; i < hrefs.length; i++) { try { ctls[hrefs[i]].abort(); } catch (e) {} }
+        ctls = {};
       }
       // Until the copy arrives: this page's own header and tab bar (no tab
-      // lit), the For You title and three grey cards.
+      // lit), the target's title and three grey cards.
       function chrome(sel) {
         var el = document.querySelector(sel);
         if (!el) return null;
@@ -453,13 +500,12 @@ export function shellClientJs() {
         for (var i = 0; i < lit.length; i++) lit[i].removeAttribute('aria-current');
         return c;
       }
-      function skeleton() {
+      function skeleton(link) {
         var box = document.createElement('div');
         var main = document.createElement('main');
         main.className = 'main-content';
-        var link = forwardLink();
         var name = nameOf(link) || 'For You';
-        // For You has no tab, so its title shows on a line of its own.
+        // The skeleton's own title line carries the name, so the header is not laid out as a tab's.
         var head = chrome('.main-content > .content-header');
         if (head) {
           if (head.classList) head.classList.remove('shell-header--tab');
@@ -484,16 +530,20 @@ export function shellClientJs() {
         if (tabs) box.appendChild(tabs);
         return box;
       }
-      // dir 1: For You comes in from the left; -1: a plain panel from the right
-      // (history.back() restores the page itself from Turbo's cache).
-      function makePanel(dir, w, fade) {
+      // dir 1: the page on the left comes in over this one; -1: this page leaves to the left. A step
+      // onto a tab brings a real page in either way, so it carries a copy too; the reverse drag out of
+      // For You or Widgets gets a plain, empty panel (history.back() restores the page itself from
+      // Turbo's cache).
+      function makePanel(dir, w, fade, s) {
         var p = document.createElement('div');
-        p.className = dir > 0 ? 'fy-reveal dashboard' : 'fy-reveal';
+        var carries = dir > 0 || !!(s && s.tab);
+        p.className = carries ? 'fy-reveal dashboard' : 'fy-reveal';
         p.setAttribute('data-fy-reveal', '');
         p.setAttribute('aria-hidden', 'true');
         p.setAttribute('inert', '');
-        if (dir > 0) {
-          var src = preview ? preview.cloneNode(true) : skeleton();
+        if (carries) {
+          var copy = s && s.href ? previews[s.href] : null;
+          var src = copy ? copy.cloneNode(true) : skeleton(s ? s.link : null);
           while (src.firstChild) p.appendChild(src.firstChild);
         }
         if (fade) p.style.opacity = '0'; else p.style.transform = shift(-dir * w);
@@ -521,8 +571,13 @@ export function shellClientJs() {
         if (overlayOpen() || selecting() || hasDraft()) return false;
         // While a widget grid is being edited the page never swipes, wherever the gesture started.
         if (document.querySelector('.wg-grid[data-editing]')) return false;
-        if (start.dir < 0) return onForYou() || onWidgets();
-        start.href = hrefOf(forwardLink());
+        var s = start.dir > 0 ? start.right : start.left;
+        if (!s) return false;
+        // The reverse drag out of For You and Widgets is still only offered there.
+        if (s.back) return onForYou() || onWidgets();
+        start.href = s.href;
+        start.tab = !!s.tab;
+        start.link = s.link || null;
         return !!start.href;
       }
       function lock(t) {
@@ -543,7 +598,7 @@ export function shellClientJs() {
           }
           document.documentElement.style.overflowX = 'clip';
         }
-        drag = { dir: start.dir, href: start.href, w: w, x: 0, x0: t.clientX, fade: fade, movers: movers, panel: makePanel(start.dir, w, fade), samples: [] };
+        drag = { dir: start.dir, href: start.href, tab: start.tab, w: w, x: 0, x0: t.clientX, fade: fade, movers: movers, panel: makePanel(start.dir, w, fade, start), samples: [] };
         return true;
       }
       function place(d, x) {
@@ -600,6 +655,13 @@ export function shellClientJs() {
       // Arrived: navigate, and keep the page where it is until the new one
       // renders. If it never does, put the page back.
       function land(d) {
+        // A step onto a tab is a plain visit: no marker, no Back. The page then stays where the
+        // animation left it until Turbo renders it (the usual give-up timer).
+        if (d.tab) {
+          go(d.href);
+          d.timer = setTimeout(function () { if (document.body.contains(d.panel)) undo(d); }, GIVE_UP_MS);
+          return;
+        }
         var m = d.dir < 0 ? readMark() : null;
         if (d.dir > 0) {
           if (markable(here)) writeMark({ from: here, to: d.href, at: Date.now(), landed: false });
@@ -647,24 +709,24 @@ export function shellClientJs() {
         if (drag) { cancel(); return; } // a second finger mid-drag: spring back
         start = null;
         if (busy || !e.touches || e.touches.length !== 1 || kiosk() || !media('(max-width: 1023px)') || overlayOpen()) return;
-        // Which ways this page may go: in from the left where there is a page to pull in (For You from
-        // the Chat list or a project home, Widgets from For You), out to the left where there is one to
-        // go back to (For You, Widgets). For You has both. Which one a gesture is, is decided by the
-        // way the finger moves (move()), not here.
-        var canFwd = !!forwardLink(), canBack = onForYou() || onWidgets();
-        if (!canFwd && !canBack) return;
+        // The two directions of the strip from this page (step()): right pulls the page on the left
+        // in, left pushes this page out to the left. A page with neither is not on the strip at all.
+        // Which one a gesture is, is decided by the way the finger moves (move()), not here.
+        var right = step(1), left = step(-1);
+        if (!right && !left) return;
         var tgt = e.target;
         if (!tgt || !tgt.closest || !tgt.closest('.main-content') || blocked(tgt)) return;
         // Edit mode (widgets phase 2, Task 4): a gesture that starts inside the grid being edited is
         // a widget drag or a handle press, never a page swipe. The grid itself also stops its own
         // touchstart from bubbling; this is the belt to that braces.
         if (tgt.closest('.wg-grid[data-editing]')) return;
-        start = { x: e.touches[0].clientX, y: e.touches[0].clientY, dir: 0, canFwd: canFwd, canBack: canBack };
-        // The forward panel is fetched on the first eligible touch, so it is there (or on its way)
-        // by the time the axis lock decides: once per page view, whatever the gesture turns out to be.
-        // On For You that is one bounded render of Widgets per visit (each widget has its own
-        // timeout); fetching only at the forward lock would show the skeleton on every first swipe.
-        if (canFwd) prefetch();
+        start = { x: e.touches[0].clientX, y: e.touches[0].clientY, dir: 0, right: right, left: left };
+        // Both panels are fetched on the first eligible touch, so they are there (or on their way)
+        // by the time the axis lock decides: once per target per page view, whatever the gesture turns
+        // out to be. On For You that is one bounded render of Widgets per visit (each widget has its
+        // own timeout); fetching only at the lock would show the skeleton on every first swipe.
+        if (right && right.href) prefetch(right.href, right.tab);
+        if (left && left.href) prefetch(left.href, left.tab);
       }
       function move(e) {
         if (!start) return;
@@ -678,7 +740,7 @@ export function shellClientJs() {
             // left (only where there is one), to the left pushes this page out (likewise). A step
             // this page does not have is not a swipe at all, and neither is one that starts within
             // EDGE px of the edge it moves away from (that is the system Back gesture's).
-            var dir = dx > 0 ? (start.canFwd ? 1 : 0) : (start.canBack ? -1 : 0);
+            var dir = dx > 0 ? (start.right ? 1 : 0) : (start.left ? -1 : 0);
             if (!dir) { start = null; return; }
             var w = window.innerWidth || 0;
             if (dir > 0 ? start.x < EDGE : start.x > w - EDGE) { start = null; return; }
@@ -709,8 +771,8 @@ export function shellClientJs() {
         start = null;
         if (d) settle(d, false);
       }
-      // Per page view (this script re-runs on every Turbo render): a fresh
-      // preview, the page we came from, and the touch wiring for this body.
+      // Per page view (this script re-runs on every Turbo render): fresh previews, the page we came
+      // from, and the touch wiring for this body.
       function setTouch() {
         var cb = document.querySelector('.content-body');
         if (cb) cb.style.touchAction = swipePage() ? 'pan-y pinch-zoom' : '';
@@ -718,13 +780,13 @@ export function shellClientJs() {
       function visit() {
         gen++;
         abortFetch();
-        preview = null; tried = false; start = null;
+        previews = {}; tried = {}; start = null;
         tidy(document.body);
         var at = location.pathname + (location.search || '');
         if (at !== here) { prev = here; here = at; }
         noteLanding(at);
-        var p = location.pathname, main = document.querySelector('.main-content');
-        if (main && !main.__crowFyMove && swipePage() && (p === CHAT || p === FY || p === WIDGETS || PROJECT.test(p))) {
+        var main = document.querySelector('.main-content');
+        if (main && !main.__crowFyMove && swipePage()) {
           main.__crowFyMove = true;
           main.addEventListener('touchmove', move, { passive: false });
         }
