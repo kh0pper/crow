@@ -32,6 +32,13 @@ export const SYNC_ALLOWLIST = {
   profile_avatar_url:        "Own profile — picture (an inline data: image since 2026-09-08)",
   profile_bio:               "Own profile — bio",
   profile_avatar_source:     "Own profile — picture source (picture, or the Ramble bird)",
+  // Crow Mail's one-account-one-instance claim (servers/gateway/mail/claims.js).
+  // Each instance writes only its OWN key, `mail_claim_<address hash>_<instance id>`;
+  // a single shared key per address cannot work, because settings rows replicate
+  // last-writer-wins per key. The holder is computed from the whole set of claim rows.
+  // The key carries a hash, never the address: the value is an instance id, its
+  // display name and a time.
+  "mail_claim_*":            "Which instance holds a mail address (a hash, never the address)",
   // companion_wm_federation removed — the kiosk button's federation is
   // driven by real-time overview availability now, not a separate opt-in
   // flag. Rollback to local-only kiosk is CROW_UNIFIED_DASHBOARD=0.
