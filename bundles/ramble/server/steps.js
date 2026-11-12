@@ -15,7 +15,7 @@
  * Nothing here may feed a contact-facing payload except the boolean `walked`
  * fact, which core turns into artwork.
  */
-import { localDay, startOfLocalDay } from "./eggs.js";
+import { localDay, startOfLocalDay, settleHappyDay } from "./eggs.js";
 import { feed as petFeed, petState } from "./pet.js";
 import { SEED_KIND } from "./wallet.js";
 
@@ -445,6 +445,16 @@ export async function settleDay(db, { now = Date.now(), emit } = {}) {
 
   const walked = checkedIn || steps >= Math.min(s.goal, s.badgeMin);
   const walkedNew = walked ? await insertOnce(db, WALKED_KIND, day, 1, now, emit) : false;
+  // The `walked` row is one of the egg rule's movement facts, so the day is
+  // judged again the moment that fact is NEW — it may have been fed (and
+  // happy) hours before the walk. The pet's owed decay is applied first, so
+  // the mood settleHappyDay reads is the current one; it writes nothing
+  // itself. Only on `walkedNew`: after that, every later judge of the day (a
+  // feed) already sees the fact, and this path would only re-read the day.
+  if (walkedNew) {
+    await petState(db, { now });
+    await settleHappyDay(db, { now, emit });
+  }
   return { day, steps, energyPaid, seedBonus, walked: walked || (await rowDelta(db, WALKED_KIND, day)) !== null, walkedNew };
 }
 

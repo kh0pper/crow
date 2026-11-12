@@ -34,6 +34,18 @@ async function eggCount(db) {
 async function setLayDays(db, n) {
   await db.execute({ sql: "INSERT INTO ramble_settings (key, value) VALUES ('lay.days', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: [String(n)] });
 }
+/**
+ * A `walked` wallet row for `now`'s local day — one of the egg rule's
+ * real-movement facts (steps.js `settleDay` writes the same row, for the step
+ * badge and for the "I walked today" tap). Written straight to the table with
+ * no emit: these tests are about laying, not about the badge.
+ */
+async function plantWalked(db, now) {
+  await db.execute({
+    sql: "INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES ('walked', ?, 1, ?) ON CONFLICT(kind, key) DO NOTHING",
+    args: [localDay(now), now],
+  });
+}
 
 test("the default is the spec's 14", async () => {
   const db = await freshDb();
@@ -61,6 +73,9 @@ test("hasAnyEggAnywhere counts eggs, not birds", async () => {
 
 test("a happy day accrues ONLY while eggless, and only once per local day", async () => {
   const db = await freshDb();
+  await plantWalked(db, T0);
+  await plantWalked(db, T0 + DAY);
+  await plantWalked(db, T0 + 2 * DAY);
   const first = await recordHappyDay(db, { now: T0, mood: "happy" });
   assert.equal(first.recorded, true);
   assert.equal((await layProgress(db)).days, 1);
@@ -80,6 +95,8 @@ test("a happy day accrues ONLY while eggless, and only once per local day", asyn
 test("days need NOT be consecutive", async () => {
   const db = await freshDb();
   await setLayDays(db, 3);
+  await plantWalked(db, T0);
+  await plantWalked(db, T0 + 5 * DAY);
   await recordHappyDay(db, { now: T0, mood: "happy" });
   await recordHappyDay(db, { now: T0 + DAY, mood: "alarmed" });
   await recordHappyDay(db, { now: T0 + 5 * DAY, mood: "happy" });
@@ -90,6 +107,9 @@ test("days need NOT be consecutive", async () => {
 test("at the threshold the bird lays, and the count resets", async () => {
   const db = await freshDb();
   await setLayDays(db, 3);
+  await plantWalked(db, T0);
+  await plantWalked(db, T0 + DAY);
+  await plantWalked(db, T0 + 2 * DAY);
   await recordHappyDay(db, { now: T0, mood: "happy" });
   await recordHappyDay(db, { now: T0 + DAY, mood: "happy" });
   assert.equal(await eggCount(db), 0, "not yet");
@@ -109,6 +129,9 @@ test("at the threshold the bird lays, and the count resets", async () => {
 test("after laying, the count starts again only once the player is eggless again", async () => {
   const db = await freshDb();
   await setLayDays(db, 2);
+  await plantWalked(db, T0);
+  await plantWalked(db, T0 + DAY);
+  await plantWalked(db, T0 + 3 * DAY);
   await recordHappyDay(db, { now: T0, mood: "happy" });
   await recordHappyDay(db, { now: T0 + DAY, mood: "happy" });
   assert.equal(await eggCount(db), 1);
@@ -124,14 +147,28 @@ test("after laying, the count starts again only once the player is eggless again
 test("every layday row carries delta exactly 1, whatever lay.days is set to", async () => {
   const db = await freshDb();
   await setLayDays(db, 25);
+  await plantWalked(db, T0);
   await recordHappyDay(db, { now: T0, mood: "happy" });
   const { rows } = await db.execute({ sql: "SELECT delta FROM ramble_wallet WHERE kind = 'layday'", args: [] });
   assert.equal(Number(rows[0].delta), 1, "MAX(delta) is only convergent on a constant");
 });
 
+test("a happy day with NO movement row does not count toward layProgress", async () => {
+  const db = await freshDb();
+  const out = await recordHappyDay(db, { now: T0, mood: "happy" });
+  assert.deepEqual(out, { recorded: false, laid: false, reason: "no_movement" });
+  assert.deepEqual(await layProgress(db), { days: 0, needed: 14 });
+
+  await plantWalked(db, T0);
+  assert.equal((await recordHappyDay(db, { now: T0, mood: "happy" })).recorded, true,
+    "the same day counts once the walk is a fact");
+  assert.deepEqual(await layProgress(db), { days: 1, needed: 14 });
+});
+
 test("layProgress reports what the panel needs", async () => {
   const db = await freshDb();
   assert.deepEqual(await layProgress(db), { days: 0, needed: 14 });
+  await plantWalked(db, T0);
   await recordHappyDay(db, { now: T0, mood: "happy" });
   assert.deepEqual(await layProgress(db), { days: 1, needed: 14 });
 });
@@ -150,6 +187,8 @@ test("MULTI-INSTANCE: a peer's layday rows converge to the same count", async ()
 
   const rows = [];
   const emit = (table, op, row) => { if (table === "ramble_wallet") rows.push(row); };
+  await plantWalked(a, T0);
+  await plantWalked(a, T0 + DAY);
   await recordHappyDay(a, { now: T0, mood: "happy", emit });
   await recordHappyDay(a, { now: T0 + DAY, mood: "happy", emit });
 
@@ -165,6 +204,8 @@ test("MULTI-INSTANCE: created_at going BACKWARDS on apply must not change the co
   // user's own machines is enough to do it.
   const db = await freshDb();
   await setLayDays(db, 99);
+  await plantWalked(db, T0);
+  await plantWalked(db, T0 + DAY);
   await recordHappyDay(db, { now: T0, mood: "happy" });
   await recordHappyDay(db, { now: T0 + DAY, mood: "happy" });
   const before = (await layProgress(db)).days;
@@ -179,6 +220,8 @@ test("MULTI-INSTANCE: created_at going BACKWARDS on apply must not change the co
 test("MULTI-INSTANCE: a peer's lay row resets this instance's count too", async () => {
   const db = await freshDb();
   await setLayDays(db, 99);
+  await plantWalked(db, T0);
+  await plantWalked(db, T0 + DAY);
   await recordHappyDay(db, { now: T0, mood: "happy" });
   await recordHappyDay(db, { now: T0 + DAY, mood: "happy" });
   assert.equal((await layProgress(db)).days, 2);
