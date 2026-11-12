@@ -17,11 +17,17 @@
  * `validateOutgoing` lives here rather than in an implementation because every implementation has to
  * refuse the same things: a caller-controlled `envelope` (nodemailer would use it instead of the
  * header addresses, which is a header-injection route), an unknown key, an address that is not
- * exactly one clean addr-spec, and a CR/LF anywhere a header is built from it. Address parsing is
+ * exactly one clean addr-spec, an attachment whose media type is not a `type/subtype` token, and a
+ * control character anywhere a header is built from it. Address parsing is
  * `parseAddressListDetailed` — the same RFC 5322 reader the staged-draft hashing uses — so a display
  * name or a group in one field is refused, never re-read at send time. The returned value is the
  * message with nothing but the allowed fields, so an implementation builds its headers from that and
  * from nothing else.
+ *
+ * Control characters are treated by field, never by accident: an address, a message id and a subject
+ * are refused (an address or id with a trailing CR/LF is an injection attempt, not padding, and it is
+ * refused before any trimming hides it), while a display name and a filename are stripped, because
+ * there the text is the caller's to keep and only the control character has to go.
  *
  * @typedef {{name: string|null, address: string}} AdapterAddress
  * @typedef {{path: string, name: string, specialUse: string|null, delimiter: string,
@@ -63,11 +69,20 @@ const RECIPIENT_KEYS = new Set(["name", "address"]);
 /** A message id header entry: one angle-bracketed token, no whitespace and no second bracket. */
 const MESSAGE_ID_RE = /^<[^<>\s]{1,250}>$/;
 
+/** RFC 6838 restricted-name: one letter or digit, then up to 126 more name characters. */
+const RESTRICTED_NAME = "[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}";
+/** A media type: `type/subtype`, plus optional `;` parameters holding no control character. */
+const CONTENT_TYPE_RE = new RegExp(
+  `^${RESTRICTED_NAME}/${RESTRICTED_NAME}(?:;[^\\u0000-\\u001f\\u007f]*)?$`,
+);
+
 /** References past this many are dropped from the front: the tail is the part a sender controls. */
 const MAX_REFERENCES = 50;
 
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const CONTROL_CHARS_ALL = /[\u0000-\u001f\u007f]/g;
+/** A subject may carry CR and LF (they become one space); every other C0 control and DEL is refused. */
+const SUBJECT_CONTROL_CHARS = /[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/;
 const CRLF_RUN = /[\r\n]+/g;
 const DEFAULT_ATTACHMENT_TYPE = "application/octet-stream";
 
@@ -98,15 +113,16 @@ export function assertAdapter(obj) {
 /* ------------------------------------------------------------ outgoing validation */
 
 /**
- * One address field: exactly one clean addr-spec. Trimmed (a trailing newline is not part of an
- * address), but CR/LF or any other control character inside it is refused rather than repaired, and
- * so is anything the strict parser reads back differently — a display name (`Sam <sam@x>`), a group,
- * a second address, or a bare `>`.
+ * One address field: exactly one clean addr-spec. Surrounding spaces go, but the control-character
+ * test runs before that trim, so a trailing `\n` or a leading `\r` is refused instead of being
+ * trimmed away and forgotten; anything the strict parser reads back differently — a display name
+ * (`Sam <sam@x>`), a group, a second address, or a bare `>` — is refused too.
  */
 function oneAddress(value, detail) {
   if (typeof value !== "string") fail(detail);
+  if (CONTROL_CHARS.test(value)) fail(detail);
   const trimmed = value.trim();
-  if (!trimmed || CONTROL_CHARS.test(trimmed)) fail(detail);
+  if (!trimmed) fail(detail);
   const { addresses, invalid } = parseAddressListDetailed(trimmed);
   if (invalid.length || addresses.length !== 1) fail(detail);
   if (addresses[0] !== trimmed.toLowerCase()) fail(detail);
@@ -141,9 +157,9 @@ function addressList(value, detail, { required = false } = {}) {
   return value.map((entry) => oneRecipient(entry, detail));
 }
 
-/** One message id header value: `<...>`, nothing else. */
+/** One message id header value: `<...>`, nothing else, and no control character inside it. */
 function oneMessageId(value, detail) {
-  if (typeof value !== "string" || !MESSAGE_ID_RE.test(value)) fail(detail);
+  if (typeof value !== "string" || CONTROL_CHARS.test(value) || !MESSAGE_ID_RE.test(value)) fail(detail);
   return value;
 }
 
@@ -154,10 +170,13 @@ function idList(value, detail, keep) {
   return ids.length > keep ? ids.slice(-keep) : ids;
 }
 
-/** A subject's CR/LF runs become one space, exactly as `canonicalSnapshot` writes it. */
+/**
+ * A subject's CR/LF runs become one space, exactly as `canonicalSnapshot` writes it. A subject is not
+ * a place to repair either: any other control character (NUL first among them) refuses the message.
+ */
 function normaliseSubject(value) {
   if (value == null) return "";
-  if (typeof value !== "string") fail("subject");
+  if (typeof value !== "string" || SUBJECT_CONTROL_CHARS.test(value)) fail("subject");
   return value.replace(CRLF_RUN, " ").trim();
 }
 
@@ -177,8 +196,10 @@ function attachmentList(value) {
     if (typeof entry.filename !== "string") fail("attachments");
     const filename = entry.filename.replace(CONTROL_CHARS_ALL, "");
     if (!filename) fail("attachments");
-    const contentType = entry.contentType == null ? DEFAULT_ATTACHMENT_TYPE : entry.contentType;
-    if (typeof contentType !== "string") fail("attachments");
+    const declared = entry.contentType == null ? DEFAULT_ATTACHMENT_TYPE : entry.contentType;
+    if (typeof declared !== "string" || CONTROL_CHARS.test(declared)) fail("attachments");
+    const contentType = declared.trim();
+    if (!CONTENT_TYPE_RE.test(contentType)) fail("attachments");
     const content = entry.content;
     if (!(typeof content === "string" || content instanceof Uint8Array || content instanceof ArrayBuffer)) {
       fail("attachments");

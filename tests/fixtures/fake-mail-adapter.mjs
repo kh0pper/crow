@@ -17,10 +17,13 @@
  *   dropWatch(err?)                                        the watch connection is lost
  *
  * `sent`, `drafts` and `calls` record what an implementation would have done on the wire. Two real
- * server quirks are modelled on purpose, because the adapter contract exists to hide them: a UID
- * search from above the mailbox's range still answers with the last message (so `afterUid` must be
- * filtered here, not by the server), and `opts.omitUidNext` drops `uidNext` from a listing, so the
- * adapter answers with the highest listed UID + 1 — the contract's last-resort rule.
+ * server behaviours are modelled on purpose, because the adapter contract exists to hide them. A UID
+ * search from above the mailbox's range still answers with the last message (`n:*` matches even when
+ * `n` is past the end), so `list` first lets the mailbox answer that way and then applies the
+ * adapter's own `uid > afterUid` filter: drop the filter and the quirk shows through. And
+ * `opts.omitUidNext` drops `uidNext` from a listing, so the adapter answers with the highest UID in
+ * the folder + 1 (1 for an empty folder) — the contract's last-resort rule, counted over the whole
+ * folder rather than over the page the caller asked for.
  *
  * `send` validates its message with the same `validateOutgoing` a real adapter uses, so a caller that
  * skipped validation fails here too, and the fake never records a message a real implementation would
@@ -99,7 +102,12 @@ export function createFakeMailAdapter(opts = {}) {
   function emit(folderPath, reason = "change") {
     for (const watcher of [...watchers]) {
       if (watcher.stopped || !watcher.folderPaths.has(folderPath)) continue;
-      watcher.onChange({ folderPath, reason });
+      try {
+        watcher.onChange({ folderPath, reason });
+      } catch {
+        // A handler that throws is the caller's bug, not the mailbox's: it must not turn a delivery,
+        // or a later watcher's report, into a failure of the delivery itself.
+      }
     }
   }
 
@@ -202,19 +210,28 @@ export function createFakeMailAdapter(opts = {}) {
       const folder = folderFor(folderPath);
       const { sinceDate, afterUid, beforeUid, fromUid, limit, newestFirst } = options ?? {};
 
+      // The folder's own highest UID, counted over the whole folder and never over the page: it is the
+      // message the mailbox answers a search past its range with, and the fallback a listing without
+      // UIDNEXT reports.
+      const highestUid = folder.messages.reduce((top, message) => Math.max(top, message.uid), 0);
+
       let items = folder.messages;
       if (sinceDate != null) items = items.filter((message) => message.internalDate >= sinceDate);
-      // The server-side `n:*` search would answer with the last message for any n past the end, so
-      // the adapter filters `afterUid` itself.  Here it filters here for the same reason.
-      if (afterUid != null) items = items.filter((message) => message.uid > afterUid);
+      if (afterUid != null) {
+        // Two layers, both of them real. The mailbox answers `UID SEARCH UID n:*` with the last message
+        // even when `n` is past its own range, and the adapter then keeps only `uid > afterUid`, which
+        // is what takes that message back out. The server half is reproduced here so the contract's
+        // filter assertions exercise the adapter half.
+        items = items.filter((message) => message.uid >= afterUid
+          || (highestUid > 0 && afterUid > highestUid && message.uid === highestUid));
+        items = items.filter((message) => message.uid > afterUid);
+      }
       if (fromUid != null) items = items.filter((message) => message.uid >= fromUid);
       if (beforeUid != null) items = items.filter((message) => message.uid < beforeUid);
 
       const ordered = [...items].sort((a, b) => (newestFirst ? b.uid - a.uid : a.uid - b.uid));
       const page = limit == null ? ordered : ordered.slice(0, limit);
-      const uidNext = omitUidNext
-        ? (page.length ? Math.max(...page.map((message) => message.uid)) + 1 : 1)
-        : folder.uidNext;
+      const uidNext = omitUidNext ? highestUid + 1 : folder.uidNext;
 
       return {
         uidValidity: folder.uidValidity,

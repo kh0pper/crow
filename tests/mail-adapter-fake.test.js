@@ -27,10 +27,60 @@ function makeAdapter(opts = {}) {
 
 runAdapterContract(async (opts = {}) => makeAdapter(opts));
 
-// The seam Task 12 uses while the IMAP adapter has no send/saveDraft yet: the same contract, with the
-// steps that need those two methods skipped and every other step still running.
-test("the contract runs with saveDraft and send skipped", async () => {
-  runAdapterContract(async (opts = {}) => makeAdapter(opts), { skip: ["saveDraft", "send"] });
+/* --------------------------------------------------------------- the contract's skip rule */
+
+/** Collect the steps the contract would register instead of running them. */
+function collect(factory, options = {}) {
+  const steps = [];
+  runAdapterContract(factory, {
+    ...options,
+    register: (name, testOptions, fn) => steps.push({ name, options: testOptions, fn }),
+  });
+  return steps;
+}
+
+const LOST_WATCH = "adapter contract: a lost watch reports one error and ends";
+
+test("the contract skips exactly the steps whose names are in skip", () => {
+  // The seam Task 12 uses while the IMAP adapter has no send/saveDraft yet.
+  const steps = collect(async (opts = {}) => makeAdapter(opts), { skip: ["saveDraft", "send"] });
+  const skipped = steps.filter((step) => step.options.skip !== false).map((step) => step.name);
+  assert.deepEqual(skipped, [
+    "adapter contract: saveDraft stores the raw text in a drafts folder",
+    "adapter contract: send returns a messageId and the addresses it accepted",
+  ]);
+  const ran = steps.filter((step) => step.options.skip === false).map((step) => step.name);
+  assert.equal(ran.length, steps.length - 2, "every step outside the two named ones still runs");
+  assert.ok(ran.includes("adapter contract: watch reports a change in a watched folder and stop() ends it"),
+    "a step that uses neither method is unaffected");
+  assert.equal(steps.find((step) => step.name === LOST_WATCH).options.skip, false);
+});
+
+test("a missing seeding hook fails its step unless skip names it", async () => {
+  const withoutDropWatch = async (opts = {}) => {
+    const made = makeAdapter(opts);
+    delete made.dropWatch;
+    return made;
+  };
+
+  const steps = collect(withoutDropWatch);
+  const lost = steps.find((step) => step.name === LOST_WATCH);
+  assert.ok(lost, "the step is registered");
+  assert.equal(lost.options.skip, false, "an unlisted missing hook is not quietly a skip");
+  await assert.rejects(lost.fn(), /dropWatch/, "the step fails and says which hook it needs");
+  assert.equal(steps.filter((step) => step.options.skip !== false).length, 0,
+    "no other step is skipped either");
+
+  const byHook = collect(withoutDropWatch, { skip: ["dropWatch"] });
+  assert.equal(byHook.find((step) => step.name === LOST_WATCH).options.skip, "skipped dropWatch");
+
+  const byName = collect(withoutDropWatch, { skip: ["a lost watch reports one error and ends"] });
+  assert.equal(byName.find((step) => step.name === LOST_WATCH).options.skip,
+    "skipped a lost watch reports one error and ends");
+
+  const nearMiss = collect(withoutDropWatch, { skip: ["drop", "watches"] });
+  assert.equal(nearMiss.find((step) => step.name === LOST_WATCH).options.skip, false,
+    "only an exact name in skip matches");
 });
 
 /* ---------------------------------------------------------------- the method list */
@@ -109,6 +159,76 @@ test("validateOutgoing refuses a recipient that is not exactly one clean address
   // A recipient entry may carry only a name and an address.
   assert.throws(() => validateOutgoing(outgoing({ to: [{ name: "Sam", address: "sam@example.com", smtp: "x" }] })),
     badInput("to"));
+});
+
+test("validateOutgoing refuses an edge newline on every address field", () => {
+  // The control-character test comes before the trim, so an edge newline is refused on all four
+  // fields instead of being trimmed away and the address accepted.
+  const edges = ["sam@example.com\n", "sam@example.com\r", "\rsam@example.com", "\nsam@example.com"];
+  for (const address of edges) {
+    const shown = JSON.stringify(address);
+    assert.throws(() => validateOutgoing(outgoing({ from: { address } })), badInput("from"), shown);
+    assert.throws(() => validateOutgoing(outgoing({ to: [{ address }] })), badInput("to"), shown);
+    assert.throws(() => validateOutgoing(outgoing({ cc: [{ address }] })), badInput("cc"), shown);
+    assert.throws(() => validateOutgoing(outgoing({ bcc: [{ address }] })), badInput("bcc"), shown);
+    assert.throws(() => validateOutgoing(outgoing({ to: [address] })), badInput("to"), `bare ${shown}`);
+    assert.throws(() => validateOutgoing(outgoing({ to: [{ name: "Sam", address }] })), badInput("to"), shown);
+  }
+  // Surrounding spaces are still padding, not an injection attempt.
+  const padded = validateOutgoing(outgoing({ to: [{ address: "  sam@example.com  " }] }));
+  assert.equal(padded.to[0].address, "sam@example.com");
+});
+
+test("validateOutgoing refuses a control character in a subject or a message id and strips one from display text", () => {
+  // A subject keeps its CR/LF rule (one space) but nothing else: any other control is refused.
+  for (const subject of ["Hi\u0000there", "Hi\u0007", "Hi\u001b", "Hi\u007f"]) {
+    assert.throws(() => validateOutgoing(outgoing({ subject })), badInput("subject"), JSON.stringify(subject));
+  }
+  // Display text is the caller's, so the control character goes and the words stay.
+  const out = validateOutgoing(outgoing({
+    from: { name: "Al\u0000ex\u0007", address: "alex@example.com" },
+    to: [{ name: "Sa\u0000m", address: "sam@example.com" }],
+    subject: "Hello\r\nWorld",
+  }));
+  assert.equal(out.from.name, "Alex");
+  assert.equal(out.to[0].name, "Sam");
+  assert.equal(out.subject, "Hello World", "a CR/LF run is still one space");
+  // Ids are refused, and a bracketed id is no exception.
+  for (const id of ["<a\u0000b@example.com>", "<a\u0007b@example.com>", "<a\u007fb@example.com>"]) {
+    const shown = JSON.stringify(id);
+    assert.throws(() => validateOutgoing(outgoing({ inReplyTo: id })), badInput("inReplyTo"), shown);
+    assert.throws(() => validateOutgoing(outgoing({ references: [id] })), badInput("references"), shown);
+  }
+});
+
+test("validateOutgoing refuses an attachment media type that is not a type/subtype token", () => {
+  const hostile = [
+    "text/plain\r\nBcc: x@example.com",
+    "text/plain\nBcc: x@example.com",
+    "text/plain\r\n",
+    "text/plain; charset=utf-8\r\nBcc: x@example.com",
+    "text/plain\u0000",
+    "text",
+    "text/",
+    "/plain",
+    "text/pl ain",
+    "te xt/plain",
+    "-text/plain",
+    "text/plain/extra",
+  ];
+  for (const contentType of hostile) {
+    const shown = JSON.stringify(contentType);
+    assert.throws(() => validateOutgoing(outgoing({
+      attachments: [{ filename: "note.txt", contentType, content: Buffer.from("x") }],
+    })), badInput("attachments"), shown);
+  }
+  // A real media type passes, with and without parameters.
+  for (const contentType of ["text/plain", "application/octet-stream", "image/svg+xml", "text/plain; charset=utf-8"]) {
+    const out = validateOutgoing(outgoing({
+      attachments: [{ filename: "note.txt", contentType, content: Buffer.from("x") }],
+    }));
+    assert.equal(out.attachments[0].contentType, contentType);
+  }
 });
 
 test("validateOutgoing refuses a message id with CR/LF or without brackets", () => {
@@ -261,6 +381,44 @@ test("moveIn keeps an old date at a new uid, and expunge takes a uid out", async
   fake.deliver("INBOX", rawMessage({ subject: "deleted" }), { flags: ["\\Deleted"] });
   assert.equal(fake.expunge("INBOX"), 1, "no uid means every \\Deleted message");
   assert.equal((await fake.list("INBOX")).items.length, 1);
+});
+
+test("a throwing onChange handler does not fail the delivery or the other watchers", async () => {
+  const fake = createFakeMailAdapter();
+  const seen = [];
+  await fake.watch(["INBOX"], { onChange: () => { throw new Error("a handler bug"); } });
+  await fake.watch(["INBOX"], { onChange: (event) => seen.push(event) });
+  let uid;
+  assert.doesNotThrow(() => { uid = fake.deliver("INBOX", rawMessage({ subject: "arrived" })); });
+  assert.equal(uid, 1, "the delivery still returns the uid it was given");
+  assert.deepEqual(seen, [{ folderPath: "INBOX", reason: "exists" }],
+    "the watcher after the throwing one still hears the change");
+});
+
+test("omitUidNext answers the folder's next uid, not the page's", async () => {
+  const fake = createFakeMailAdapter({ omitUidNext: true });
+  for (const subject of ["one", "two", "three"]) fake.deliver("INBOX", rawMessage({ subject }));
+
+  const page = await fake.list("INBOX", { limit: 1, newestFirst: true });
+  assert.deepEqual(page.items.map((item) => item.uid), [3]);
+  assert.equal(page.uidNext, 4, "the highest uid in the folder plus one");
+
+  const past = await fake.list("INBOX", { afterUid: 3 });
+  assert.deepEqual(past.items, [], "the last message the mailbox answers with is filtered back out");
+  assert.equal(past.uidNext, 4, "an emptied page still reports the folder's uidNext");
+
+  const empty = createFakeMailAdapter({ omitUidNext: true });
+  assert.equal((await empty.list("INBOX")).uidNext, 1, "an empty folder answers 1");
+});
+
+test("list bounds the window at whole seconds, which is what a server's INTERNALDATE carries", async () => {
+  const fake = createFakeMailAdapter();
+  const t = Date.UTC(2026, 1, 2, 3, 4, 5);
+  fake.deliver("INBOX", rawMessage({ subject: "old" }), { internalDate: t });
+  fake.deliver("INBOX", rawMessage({ subject: "new" }), { internalDate: t + 1000 });
+  assert.deepEqual((await fake.list("INBOX", { sinceDate: t + 1000 })).items.map((item) => item.uid), [2]);
+  assert.deepEqual((await fake.list("INBOX", { sinceDate: t })).items.map((item) => item.uid), [1, 2],
+    "the bound itself is in");
 });
 
 test("bumpUidValidity changes the value the next listing reports, and emit wakes watchers", async () => {
