@@ -89,24 +89,27 @@ const send = (method, p, body) => fetch(base + p, { method, headers: H, body: JS
 const authStub = (req, res, next) => (req.headers["x-test-auth"] ? next() : res.status(401).end());
 
 /**
- * A second mount with its own scratch data dir. A day's card count, its slots and
- * a slot's swap count are facts of ONE database, so a test about them opens its
- * own instead of inheriting the day this file already drew.
+ * A second mount with its own scratch data dir, and optionally its own moves
+ * library. A day's card count, its slots and a slot's swap count are facts of
+ * ONE database, so a test about them opens its own instead of inheriting the
+ * day this file already drew. `dir` is that scratch dir, for a test that reads
+ * the rows the routes wrote.
  */
-async function freshMount() {
+async function freshMount(library = MOVES_LIBRARY) {
   const scratch = mkdtempSync(join(tmpdir(), "ramble-moves-day-"));
   const previous = process.env.CROW_DATA_DIR;
   process.env.CROW_DATA_DIR = scratch;
   const app = express();
   app.use(rambleRouter(authStub, {
     emit: async (table, op, row) => emitted.push({ table, op, row }),
-    movesLibrary: MOVES_LIBRARY,
+    movesLibrary: library,
   }));
   const srv = app.listen(0);
   await once(srv, "listening");
   const url = `http://127.0.0.1:${srv.address().port}`;
   return {
     url,
+    dir: scratch,
     async close() {
       srv.close();
       if (previous === undefined) delete process.env.CROW_DATA_DIR;
@@ -852,4 +855,206 @@ test("MCP: ramble_moves_today reads, ramble_moves_log refuses an unknown activit
   assert.ok(junk.isError);
 
   db.close();
+});
+
+/* ---------------------------------- a finished chunk marks its slot (4.3) */
+
+/** The scratch db the mount at `dir` opened, so these tests read the rows it wrote. */
+async function mountDb(dir) {
+  const { createDbClient } = await import("../bundles/ramble/server/db.js");
+  return createDbClient(join(dir, "crow.db"));
+}
+
+/** The keys of one wallet kind: all of them, or just the one asked for. */
+async function walletKeys(db, kind, key) {
+  const { rows } = await db.execute({
+    sql: "SELECT key FROM ramble_wallet WHERE kind = ?"
+      + (key === undefined ? "" : " AND key = ?") + " ORDER BY key",
+    args: key === undefined ? [kind] : [kind, key],
+  });
+  return rows.map((row) => String(row.key));
+}
+
+/** Start one of the day's own slot cards by its slot name, and finish it. */
+async function playSlotCard(mount, db, day, slot) {
+  const card = day.slots.find((item) => item.slot === slot);
+  assert.ok(card?.entry, "the day holds a card for " + slot);
+  const started = await dayPost(mount.url, "/api/ramble/moves/start", {
+    cardKey: slot, entryId: card.entry.id,
+  });
+  assert.equal(started.status, 200, "a start names the day's " + slot + " card");
+  const start = await started.json();
+  assert.equal(start.cardKey, day.day + ":" + slot, "the key names the slot it closes");
+  await ageStartRecord(db, start.cardKey, 11 * 60000);
+  const posted = await dayPost(mount.url, "/api/ramble/moves/progress", {
+    cardKey: start.cardKey, chunkIndex: 0, entryId: card.entry.id, activeSeconds: 600,
+  });
+  assert.equal(posted.status, 200, "the finished " + slot + " chunk posts");
+  const body = await posted.json();
+  assert.equal(body.progress.done, true, "ten minutes of a ten-minute card is done");
+  return body;
+}
+
+/**
+ * A chunk per area that can balance a day. A landmark is a card (chunk-shaped,
+ * never a walk), so a finished one is the day's balance as well as its slot.
+ */
+function balanceChunk(area, n) {
+  return entry({
+    id: `mark-${area}-${n}`,
+    kind: "landmark",
+    title: `A ${area} landmark, number ${n}`,
+    minutes: 10,
+    areas: area === "mobility" ? ["mobility"] : [area, "mobility"],
+  });
+}
+const BALANCE_LIBRARY = CHUNK_AREAS.flatMap((area) => [1, 2, 3, 4, 5].map((n) => balanceChunk(area, n)));
+
+test("GET /moves/day: a fresh day is not complete and writes no moveall row", async () => {
+  const mount = await freshMount();
+  try {
+    const body = await (await dayGet(mount.url)).json();
+    assert.equal(body.complete, false, "nothing has been finished yet");
+    const db = await mountDb(mount.dir);
+    try {
+      assert.deepEqual(await walletKeys(db, "moveall"), [], "an unfinished day settles nothing");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("POST /moves/start by slot name: a finished card closes its own slot", async () => {
+  const mount = await freshMount();
+  try {
+    const day = await (await dayGet(mount.url)).json();
+    const db = await mountDb(mount.dir);
+    try {
+      for (const slot of ["morning", "midday"]) {
+        // eslint-disable-next-line no-await-in-loop
+        const body = await playSlotCard(mount, db, day, slot);
+        assert.equal(body.dayDone.fresh, true, "the " + slot + " slot row is new");
+        // eslint-disable-next-line no-await-in-loop
+        assert.equal((await walletKeys(db, "moveslot", day.day + ":" + slot)).length, 1,
+          "one moveslot row for " + slot);
+      }
+
+      // `evening` is also one of the strip's old names, and it keeps the strip's
+      // gate: it opens the card on screen, which is the evening card when the
+      // hour names it and a refused start otherwise.
+      const evening = day.slots.find((item) => item.slot === "evening");
+      assert.ok(evening?.entry, "the day holds an evening card");
+      if (day.nowSlot === "evening") {
+        const body = await playSlotCard(mount, db, day, "evening");
+        assert.equal(body.dayDone.fresh, true);
+        assert.equal((await walletKeys(db, "moveslot", day.day + ":evening")).length, 1);
+      } else {
+        const refused = await dayPost(mount.url, "/api/ramble/moves/start", {
+          cardKey: "evening", entryId: evening.entry.id,
+        });
+        assert.equal(refused.status, 400, "the evening name opens the card on screen only");
+      }
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("POST /moves/start cardKey day: the old name closes the slot the entry sits in", async () => {
+  const mount = await freshMount();
+  try {
+    const day = await (await dayGet(mount.url)).json();
+    const nowSlot = day.slots.find((item) => item.slot === day.nowSlot);
+    assert.ok(nowSlot?.entry, "the Now slot holds a card");
+    const db = await mountDb(mount.dir);
+    try {
+      const started = await dayPost(mount.url, "/api/ramble/moves/start", {
+        cardKey: "day", entryId: nowSlot.entry.id,
+      });
+      assert.equal(started.status, 200);
+      const start = await started.json();
+      assert.equal(start.cardKey, day.day + ":day", "the old key names no slot of the day");
+      await ageStartRecord(db, start.cardKey, 11 * 60000);
+      const posted = await dayPost(mount.url, "/api/ramble/moves/progress", {
+        cardKey: start.cardKey, chunkIndex: 0, entryId: nowSlot.entry.id, activeSeconds: 600,
+      });
+      assert.equal(posted.status, 200);
+      const body = await posted.json();
+      assert.equal(body.progress.done, true);
+      assert.equal(body.dayDone.fresh, true);
+      assert.deepEqual(await walletKeys(db, "moveslot"), [day.day + ":" + day.nowSlot],
+        "the entry names the slot it sits in");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("a finished extra closes no slot but marks the areas it trains", async () => {
+  const mount = await freshMount();
+  try {
+    const day = await (await dayGet(mount.url)).json();
+    const chunk = MOVES_LIBRARY.find((e) => e.id === "mobility-1");
+    assert.ok(chunk, "the fixture library serves a single-area chunk");
+    const db = await mountDb(mount.dir);
+    try {
+      const started = await dayPost(mount.url, "/api/ramble/moves/start", {
+        cardKey: "extra", entryId: chunk.id,
+      });
+      assert.equal(started.status, 200);
+      const start = await started.json();
+      await ageStartRecord(db, start.cardKey, 11 * 60000);
+      const posted = await dayPost(mount.url, "/api/ramble/moves/progress", {
+        cardKey: start.cardKey, chunkIndex: 0, entryId: chunk.id, activeSeconds: 600,
+      });
+      assert.equal(posted.status, 200);
+      const body = await posted.json();
+      assert.equal(body.progress.done, true);
+      assert.equal(body.dayDone.fresh, true, "the area row is new");
+      assert.deepEqual(await walletKeys(db, "moveslot"), [], "an extra closes no slot");
+      assert.deepEqual(await walletKeys(db, "movearea", day.day + ":mobility"),
+        [day.day + ":mobility"], "the area it trains is marked");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("POST /moves/start morning: another slot's card is refused", async () => {
+  const mount = await freshMount();
+  try {
+    const day = await (await dayGet(mount.url)).json();
+    const other = day.slots.find((item) => item.slot !== "morning");
+    assert.ok(other?.entry, "the day holds a card that is not the morning one");
+    const refused = await dayPost(mount.url, "/api/ramble/moves/start", {
+      cardKey: "morning", entryId: other.entry.id,
+    });
+    assert.equal(refused.status, 400);
+    assert.match((await refused.json()).error, /today's card/);
+  } finally { await mount.close(); }
+});
+
+test("GET /moves/day: every slot finished by the player completes the day, once", async () => {
+  const mount = await freshMount(BALANCE_LIBRARY);
+  try {
+    // Two cards, both named by the day's own slots, so both are started by name.
+    const set = await dayPost(mount.url, "/api/ramble/moves/prefs", {
+      cards: 2, windows: ["morning", "midday"],
+    });
+    assert.equal(set.status, 200);
+    const day = await (await dayGet(mount.url)).json();
+    assert.deepEqual(day.slots.map((item) => item.slot), ["morning", "midday"]);
+    assert.equal(day.need, 2);
+    assert.equal(day.complete, false);
+
+    const db = await mountDb(mount.dir);
+    try {
+      for (const item of day.slots) {
+        // eslint-disable-next-line no-await-in-loop
+        const body = await playSlotCard(mount, db, day, item.slot);
+        assert.equal(body.dayDone.fresh, true, item.slot + " closed its slot");
+      }
+
+      const settled = await (await dayGet(mount.url)).json();
+      assert.equal(settled.complete, true, "every slot finished and the day balanced");
+      assert.equal((await walletKeys(db, "moveall", day.day)).length, 1, "the cache row landed once");
+
+      const again = await (await dayGet(mount.url)).json();
+      assert.equal(again.complete, true);
+      assert.equal((await walletKeys(db, "moveall", day.day)).length, 1,
+        "a second read settles nothing new");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
 });
