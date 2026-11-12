@@ -1,0 +1,153 @@
+{
+  "id": "routine-heart-indoor-1",
+  "kind": "routine",
+  "title": "Indoor heart mix",
+  "minutes": 15,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "wall"
+  ],
+  "tags": [
+    "heart",
+    "routine"
+  ],
+  "areas": [
+    "heart"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
+  "steps": [
+    "Warm up for two minutes.",
+    "Do each exercise for the time shown, resting between them, then go through them a second time.",
+    "Cool down for two minutes.",
+    "Stop any exercise that hurts and use its easier version."
+  ],
+  "works": [
+    "Arms",
+    "Front of the hips",
+    "Heart and lungs",
+    "Legs",
+    "Shoulders",
+    "Side of the hips"
+  ],
+  "stretches": [
+    "Back of the thigh",
+    "Calves",
+    "Chest",
+    "Neck",
+    "Side of the back",
+    "Side of the waist"
+  ],
+  "mistakes": [
+    "Skipping the warm-up or the cool-down.",
+    "Rushing the reps to beat the clock."
+  ],
+  "skipIf": [
+    "shoulder",
+    "hip",
+    "balance"
+  ],
+  "easier": null,
+  "harder": null,
+  "blocks": {
+    "warmup": [
+      {
+        "id": "heart-march",
+        "seconds": 45
+      },
+      {
+        "id": "warm-shoulder-rolls",
+        "seconds": 35
+      },
+      {
+        "id": "warm-heel-digs",
+        "seconds": 40
+      }
+    ],
+    "main": [
+      {
+        "id": "heart-march",
+        "seconds": 60,
+        "restSeconds": 20
+      },
+      {
+        "id": "heart-step-touch",
+        "seconds": 60,
+        "restSeconds": 20
+      },
+      {
+        "id": "heart-knee-lifts",
+        "seconds": 60,
+        "restSeconds": 20
+      },
+      {
+        "id": "heart-shadow-box",
+        "seconds": 60,
+        "restSeconds": 20
+      }
+    ],
+    "cooldown": [
+      {
+        "id": "cool-calf-stretch",
+        "seconds": 40
+      },
+      {
+        "id": "cool-side-bend",
+        "seconds": 30
+      },
+      {
+        "id": "yoga-mountain",
+        "seconds": 50
+      }
+    ]
+  },
+  "usesBlocks": {
+    "warmup": "warmup-1",
+    "cooldown": "cooldown-1"
+  },
+  "sources": [
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    },
+    {
+      "title": "University of British Columbia, School of Kinesiology, GOAL trial exercise glossary: Cardio pyramid (step touch)",
+      "url": "https://goal.kin.educ.ubc.ca/glossary/cardio-pyramid",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "Cara (Sport Inclusion Ireland), supported by Sport Ireland: 10 minute Home Exercise Circuit, Boxercise Circuit 1",
+      "url": "https://www.smh.ie/assets/files/pdf/cara_boxercise_circuit_1.pdf",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "Harvard Health Publishing: Punch up your exercise routine with fitness boxing",
+      "url": "https://www.harvardhealth.org/exercise-and-fitness/punch-up-your-exercise-routine-with-fitness-boxing",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: How to stretch after exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-stretch-after-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: Flexibility exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/flexibility-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
+}

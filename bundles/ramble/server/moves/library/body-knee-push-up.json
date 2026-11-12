@@ -1,0 +1,150 @@
+{
+  "id": "body-knee-push-up",
+  "kind": "exercise",
+  "title": "Knee push-up",
+  "minutes": 3,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "bodyweight",
+    "upper-body",
+    "arms",
+    "chest",
+    "push",
+    "floor",
+    "strength"
+  ],
+  "areas": [
+    "upper"
+  ],
+  "sets": 2,
+  "reps": 8,
+  "tempoSeconds": 6,
+  "perSide": false,
+  "steps": [
+    {
+      "text": "Kneel on a mat or soft floor. Put your palms flat on the floor, shoulder-width apart, fingers pointing forward.",
+      "cue": "Kneel. Palms flat, shoulder-width apart.",
+      "at": 0
+    },
+    {
+      "text": "Move your weight forward until your shoulders are over your hands and your body is one line from knees to head.",
+      "cue": "Shoulders over hands. One line from the knees.",
+      "at": 0
+    },
+    {
+      "text": "Firm your belly and bend your elbows to lower your chest slowly toward the floor. Go only as far as you can control.",
+      "cue": "Belly firm. Lower your chest slowly.",
+      "at": 1
+    },
+    {
+      "text": "Press through your hands until your arms are straight. Keep your head in line with your back.",
+      "cue": "Press up until your arms are straight.",
+      "at": 0
+    }
+  ],
+  "works": [
+    "Back of the arms",
+    "Chest",
+    "Shoulders"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Letting the lower back sag or the hips lift.",
+    "Dropping the head toward the floor."
+  ],
+  "regression": "Lower only part of the way, or go back to wall push-ups.",
+  "stopIf": "Stop if you feel pain in your wrists, elbows, shoulders or lower back.",
+  "skipIf": [
+    "wrist",
+    "shoulder",
+    "knee",
+    "lower_back"
+  ],
+  "easier": "body-wall-push-up",
+  "harder": null,
+  "poses": [
+    {
+      "neck": -5,
+      "spine": 0,
+      "shoulderL": 28,
+      "elbowL": 0,
+      "wristL": 60,
+      "shoulderR": 28,
+      "elbowR": 0,
+      "wristR": 60,
+      "hipL": 0,
+      "kneeL": 57,
+      "ankleL": -40,
+      "hipR": 0,
+      "kneeR": 57,
+      "ankleR": -40,
+      "rootAngle": 42,
+      "support": "knees"
+    },
+    {
+      "neck": -5,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 90,
+      "wristL": 60,
+      "shoulderR": 0,
+      "elbowR": 90,
+      "wristR": 60,
+      "hipL": 0,
+      "kneeL": 35,
+      "ankleL": -40,
+      "hipR": 0,
+      "kneeR": 35,
+      "ankleR": -40,
+      "rootAngle": 66,
+      "support": "knees"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "chest",
+        "triceps",
+        "shoulders",
+        "serratus"
+      ],
+      "lengthening": [],
+      "main": "triceps",
+      "bones": [
+        "humerus",
+        "scapula",
+        "clavicle",
+        "radius",
+        "ulna"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "down",
+          "label": "Press"
+        }
+      ],
+      "why": "The chest and the back of the arms push the floor away, while the belly keeps the body in one line."
+    }
+  ],
+  "sources": [
+    {
+      "title": "American Council on Exercise, exercise library: Bent-knee push-up",
+      "url": "https://www.acefitness.org/resources/everyone/exercise-library/13/bent-knee-push-up/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

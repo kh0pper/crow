@@ -1,0 +1,158 @@
+{
+  "id": "heart-step-forward-back",
+  "kind": "pose",
+  "title": "Forward and back steps",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "indoor-heart",
+    "low-impact",
+    "standing",
+    "step-pattern"
+  ],
+  "areas": [
+    "heart"
+  ],
+  "steps": [
+    {
+      "text": "Stand tall with your feet hip-width apart and clear floor in front of you.",
+      "cue": "Stand tall. Clear floor ahead.",
+      "at": 0
+    },
+    {
+      "text": "Step forward with one foot, then bring the other foot up beside it.",
+      "cue": "Step forward. Other foot joins.",
+      "at": 1
+    },
+    {
+      "text": "Step back with the first foot, then bring the other foot back beside it.",
+      "cue": "Step back. Other foot joins.",
+      "at": 0
+    },
+    {
+      "text": "Keep going at a steady pace. Halfway through, lead with the other foot.",
+      "cue": "Steady pace. Change the leading foot halfway.",
+      "at": 1
+    }
+  ],
+  "works": [
+    "Legs",
+    "Heart and lungs"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Taking steps so long that you lunge.",
+    "Stepping back without clear floor behind you."
+  ],
+  "regression": "Take short steps, and stay close to a wall you can touch.",
+  "stopIf": "Stop if you feel dizzy, sick, very short of breath, or any pain in your chest.",
+  "skipIf": [],
+  "easier": "heart-step-touch",
+  "harder": null,
+  "pose": {
+    "neck": 0,
+    "spine": 0,
+    "shoulderL": -20,
+    "elbowL": 60,
+    "wristL": 0,
+    "shoulderR": 25,
+    "elbowR": 60,
+    "wristR": 0,
+    "hipL": 25,
+    "kneeL": 10,
+    "ankleL": -15,
+    "hipR": -15,
+    "kneeR": 5,
+    "ankleR": 20,
+    "rootAngle": 0,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 60,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 60,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": -20,
+      "elbowL": 60,
+      "wristL": 0,
+      "shoulderR": 25,
+      "elbowR": 60,
+      "wristR": 0,
+      "hipL": 25,
+      "kneeL": 10,
+      "ankleL": -15,
+      "hipR": -15,
+      "kneeR": 5,
+      "ankleR": 20,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "quadriceps",
+        "glutes",
+        "calf"
+      ],
+      "lengthening": [],
+      "main": "quadriceps",
+      "bones": [
+        "femur",
+        "tibia",
+        "hip-bone",
+        "calcaneus"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "feet",
+          "direction": "forward",
+          "label": "Step"
+        }
+      ],
+      "why": "Stepping forward and back keeps the thighs and calves working in a steady rhythm."
+    }
+  ],
+  "sources": [
+    {
+      "title": "University of Maine Cooperative Extension: 5-Minute Aerobic Activity Workout (step aerobics)",
+      "url": "https://extension.umaine.edu/food-health/wp-content/uploads/sites/9/2024/09/5-Minute-Aerobic-Activity-Workout.pdf",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

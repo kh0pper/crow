@@ -1,0 +1,144 @@
+{
+  "id": "routine-lower-none-2",
+  "kind": "routine",
+  "title": "Legs and hips",
+  "minutes": 12,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "wall"
+  ],
+  "tags": [
+    "lower",
+    "routine"
+  ],
+  "areas": [
+    "lower"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
+  "steps": [
+    "Warm up for two minutes.",
+    "Do each exercise for the time shown, resting between them, then go through them a second time.",
+    "Cool down for two minutes.",
+    "Stop any exercise that hurts and use its easier version."
+  ],
+  "works": [
+    "Ankles",
+    "Calves",
+    "Core",
+    "Glutes",
+    "Hips",
+    "Legs"
+  ],
+  "stretches": [
+    "Back of the thigh",
+    "Calves",
+    "Front of the hip",
+    "Hips",
+    "Side of the back",
+    "Side of the waist"
+  ],
+  "mistakes": [
+    "Skipping the warm-up or the cool-down.",
+    "Rushing the reps to beat the clock."
+  ],
+  "skipIf": [
+    "knee",
+    "lower_back",
+    "hip",
+    "ankle",
+    "balance"
+  ],
+  "easier": null,
+  "harder": null,
+  "blocks": {
+    "warmup": [
+      {
+        "id": "heart-march",
+        "seconds": 30
+      },
+      {
+        "id": "warm-heel-digs",
+        "seconds": 30
+      },
+      {
+        "id": "heart-knee-lifts",
+        "seconds": 30
+      },
+      {
+        "id": "warm-knee-bends",
+        "seconds": 30
+      }
+    ],
+    "main": [
+      {
+        "id": "body-split-squat",
+        "seconds": 60,
+        "restSeconds": 20
+      },
+      {
+        "id": "body-calf-raise",
+        "seconds": 60,
+        "restSeconds": 20
+      },
+      {
+        "id": "body-glute-bridge",
+        "seconds": 60,
+        "restSeconds": 20
+      }
+    ],
+    "cooldown": [
+      {
+        "id": "cool-calf-stretch",
+        "seconds": 40
+      },
+      {
+        "id": "cool-side-bend",
+        "seconds": 30
+      },
+      {
+        "id": "yoga-mountain",
+        "seconds": 50
+      }
+    ]
+  },
+  "usesBlocks": {
+    "warmup": "warmup-2",
+    "cooldown": "cooldown-1"
+  },
+  "sources": [
+    {
+      "title": "Wikipedia: Lunge (exercise)",
+      "url": "https://en.wikipedia.org/wiki/Lunge_(exercise)",
+      "license": "CC BY-SA (Wikipedia). Facts only; the wording is ours."
+    },
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    },
+    {
+      "title": "NHS: How to stretch after exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-stretch-after-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: Flexibility exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/flexibility-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

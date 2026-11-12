@@ -1,0 +1,160 @@
+{
+  "id": "body-split-squat",
+  "kind": "exercise",
+  "title": "Split squat with wall support",
+  "minutes": 3,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "wall"
+  ],
+  "tags": [
+    "bodyweight",
+    "lower-body",
+    "legs",
+    "strength",
+    "balance"
+  ],
+  "areas": [
+    "lower"
+  ],
+  "sets": 2,
+  "reps": 5,
+  "tempoSeconds": 6,
+  "perSide": true,
+  "steps": [
+    {
+      "text": "Stand side-on to a wall with one hand on it. Take a long step forward with the leg nearest the wall.",
+      "cue": "Side-on to the wall. One long step forward.",
+      "at": 0
+    },
+    {
+      "text": "Lift your back heel. Bend both knees and lower your body straight down.",
+      "cue": "Back heel up. Lower straight down.",
+      "at": 1
+    },
+    {
+      "text": "Stop when your front thigh is partway to level. Keep the front knee over the ankle and your body upright.",
+      "cue": "Front knee over the ankle. Body upright.",
+      "at": 1
+    },
+    {
+      "text": "Press through the front foot and come back up.",
+      "cue": "Press through the front foot. Come up.",
+      "at": 0
+    },
+    {
+      "text": "Finish your reps, then turn round and change legs.",
+      "cue": "Finish, then change legs.",
+      "say": "Finish your reps on this side.",
+      "at": 0
+    }
+  ],
+  "works": [
+    "Legs",
+    "Glutes"
+  ],
+  "stretches": [
+    "Front of the hip"
+  ],
+  "mistakes": [
+    "Letting the front knee fall inward.",
+    "Leaning the body forward over the front leg."
+  ],
+  "regression": "Take a shorter step and lower only a little way.",
+  "stopIf": "Stop if you feel pain in either knee, or feel unsteady.",
+  "skipIf": [
+    "knee",
+    "hip",
+    "balance",
+    "ankle"
+  ],
+  "easier": "body-squat",
+  "harder": null,
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 20,
+      "elbowL": 20,
+      "wristL": 0,
+      "shoulderR": 20,
+      "elbowR": 20,
+      "wristR": 0,
+      "hipL": 28,
+      "kneeL": 12,
+      "ankleL": -16,
+      "hipR": -18,
+      "kneeR": 20,
+      "ankleR": -12,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 20,
+      "elbowL": 20,
+      "wristL": 0,
+      "shoulderR": 20,
+      "elbowR": 20,
+      "wristR": 0,
+      "hipL": 75,
+      "kneeL": 85,
+      "ankleL": 10,
+      "hipR": -12,
+      "kneeR": 85,
+      "ankleR": -50,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "quadriceps",
+        "glutes",
+        "side-hip"
+      ],
+      "lengthening": [
+        "hip-flexors"
+      ],
+      "main": "quadriceps",
+      "bones": [
+        "femur",
+        "tibia",
+        "patella",
+        "hip-bone"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hips",
+          "direction": "down",
+          "label": "Lower"
+        }
+      ],
+      "why": "The front thigh and buttock lift you, while the side of the hip keeps you steady over a narrow base."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Wikipedia: Lunge (exercise)",
+      "url": "https://en.wikipedia.org/wiki/Lunge_(exercise)",
+      "license": "CC BY-SA (Wikipedia). Facts only; the wording is ours."
+    },
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

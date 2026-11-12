@@ -1,0 +1,160 @@
+{
+  "id": "heart-step-touch",
+  "kind": "pose",
+  "title": "Step-touch",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "indoor-heart",
+    "low-impact",
+    "standing",
+    "side-step"
+  ],
+  "areas": [
+    "heart"
+  ],
+  "steps": [
+    {
+      "text": "Stand tall with your feet together and your knees soft.",
+      "cue": "Feet together, knees soft.",
+      "at": 0
+    },
+    {
+      "text": "Step one foot out to the side.",
+      "cue": "Step out to the side.",
+      "at": 0
+    },
+    {
+      "text": "Bring the other foot in and tap it beside the first.",
+      "cue": "Bring the other foot in and tap.",
+      "at": 0
+    },
+    {
+      "text": "Go back the other way. Let your arms swing gently in time.",
+      "cue": "Now the other way. Arms swing gently.",
+      "at": 0
+    }
+  ],
+  "works": [
+    "Legs",
+    "Side of the hips",
+    "Heart and lungs"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Stepping so wide that you lose your balance.",
+    "Looking down at your feet the whole time."
+  ],
+  "regression": "Take smaller steps, and leave your hands on your hips.",
+  "stopIf": "Stop if you feel dizzy, sick, very short of breath, or any pain in your chest.",
+  "skipIf": [],
+  "easier": null,
+  "harder": "heart-step-forward-back",
+  "pose": {
+    "neck": 0,
+    "spine": 0,
+    "shoulderL": 10,
+    "elbowL": 60,
+    "wristL": 0,
+    "shoulderR": 10,
+    "elbowR": 60,
+    "wristR": 0,
+    "hipL": 6,
+    "kneeL": 12,
+    "ankleL": 6,
+    "hipR": 6,
+    "kneeR": 12,
+    "ankleR": 6,
+    "rootAngle": 0,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 10,
+      "elbowL": 60,
+      "wristL": 0,
+      "shoulderR": 10,
+      "elbowR": 60,
+      "wristR": 0,
+      "hipL": 6,
+      "kneeL": 12,
+      "ankleL": 6,
+      "hipR": 6,
+      "kneeR": 12,
+      "ankleR": 6,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 10,
+      "elbowL": 60,
+      "wristL": 0,
+      "shoulderR": 10,
+      "elbowR": 60,
+      "wristR": 0,
+      "hipL": 6,
+      "kneeL": 12,
+      "ankleL": 6,
+      "hipR": 6,
+      "kneeR": 12,
+      "ankleR": 6,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "still": true,
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "side-hip",
+        "inner-thigh",
+        "quadriceps",
+        "calf"
+      ],
+      "lengthening": [],
+      "main": "side-hip",
+      "bones": [
+        "hip-bone",
+        "femur",
+        "tibia"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "feet",
+          "direction": "out",
+          "label": "Step"
+        }
+      ],
+      "why": "Stepping sideways uses the outside and inside of the hips, which walking forward hardly touches."
+    }
+  ],
+  "sources": [
+    {
+      "title": "University of British Columbia, School of Kinesiology, GOAL trial exercise glossary: Cardio pyramid (step touch)",
+      "url": "https://goal.kin.educ.ubc.ca/glossary/cardio-pyramid",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

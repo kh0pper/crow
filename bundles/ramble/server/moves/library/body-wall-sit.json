@@ -1,0 +1,148 @@
+{
+  "id": "body-wall-sit",
+  "kind": "exercise",
+  "title": "Wall sit",
+  "minutes": 3,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "wall"
+  ],
+  "tags": [
+    "bodyweight",
+    "lower-body",
+    "legs",
+    "strength",
+    "hold"
+  ],
+  "areas": [
+    "lower"
+  ],
+  "sets": 2,
+  "reps": 2,
+  "tempoSeconds": 25,
+  "perSide": false,
+  "steps": [
+    {
+      "text": "Stand with your back against a wall and your feet about two foot-lengths away from it, shoulder-width apart.",
+      "cue": "Back on the wall, feet out in front.",
+      "at": 0
+    },
+    {
+      "text": "Slide your back down the wall until your knees are bent. Stop higher than a seated position if that is enough.",
+      "cue": "Slide down until your knees are bent.",
+      "at": 1
+    },
+    {
+      "text": "Keep your knees over your ankles and your back flat against the wall. Breathe steadily.",
+      "cue": "Knees over ankles. Keep breathing.",
+      "at": 1
+    },
+    {
+      "text": "Hold for up to 25 seconds, then press through your feet and slide back up.",
+      "cue": "Hold, then slide back up.",
+      "say": "Hold, and keep breathing.",
+      "at": 1
+    },
+    {
+      "text": "Shake out your legs and do one more hold.",
+      "cue": "Shake out your legs. One more hold.",
+      "at": 0
+    }
+  ],
+  "works": [
+    "Legs",
+    "Glutes"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Holding your breath.",
+    "Letting the knees move forward past the toes."
+  ],
+  "regression": "Slide down only a little way, and hold for 10 seconds.",
+  "stopIf": "Stop if you feel pain in your knees, or feel dizzy or light-headed.",
+  "skipIf": [
+    "knee",
+    "high_blood_pressure"
+  ],
+  "easier": "body-chair-squat",
+  "harder": null,
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 90,
+      "kneeL": 90,
+      "ankleL": 0,
+      "hipR": 90,
+      "kneeR": 90,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "quadriceps",
+        "glutes"
+      ],
+      "lengthening": [],
+      "main": "quadriceps",
+      "bones": [
+        "femur",
+        "tibia",
+        "patella",
+        "hip-bone"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "back",
+          "direction": "back",
+          "label": "Press"
+        }
+      ],
+      "why": "The front of the thigh holds the knees bent without moving."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Wikipedia: Wall sit",
+      "url": "https://en.wikipedia.org/wiki/Wall_sit",
+      "license": "CC BY-SA (Wikipedia). Facts only; the wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}
