@@ -16,8 +16,14 @@ const SUDO = /\b[\w$.]+\(\s*["'`]sudo["'`\s]|["'`]sudo\s+-[A-Za-z]/;
 // NoNewPrivileges=yes they fail into the logged "open manually" note on the
 // install job. A new site is a real finding: do not add it here without a reason.
 const KNOWN = [
-  // direct-mode bundle install/uninstall: ufw rule for the tailnet range, Tailscale Serve
-  { file: "servers/gateway/routes/bundles.js", re: /efs\("sudo", \["-n", "(ufw|tailscale)"/, count: 4 },
+  // direct-mode bundle install/uninstall: Tailscale Serve only — the tailnet ufw rules now go
+  // through servers/gateway/bundle-firewall.js (which takes an injected runner, so it spawns
+  // nothing itself).
+  { file: "servers/gateway/routes/bundles.js", re: /efs\("sudo", \["-n", "(ufw|tailscale)"/, count: 2 },
+  // The tailnet ufw rules themselves (servers/gateway/bundle-firewall.js): it spawns nothing
+  // — the command goes to an injected `run` (install/uninstall pass execFileSync), so under
+  // NoNewPrivileges=yes the add/delete simply fails into the logged "open manually" note.
+  { file: "servers/gateway/bundle-firewall.js", re: /run\("sudo"/, count: 2 },
 ];
 const COMMENT = /^\s*(\*|\/\/|\/\*)/;
 const SKIP = /(^|\/)(node_modules|install[^/]*\.(sh|mjs|js))$/;
