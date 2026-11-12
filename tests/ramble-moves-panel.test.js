@@ -1,18 +1,21 @@
 /**
  * Moves design Task 8 — the Ramble screens (Today, "something else",
- * Customize, Learn, the flow player and the safety note).
+ * Customize, Learn, the safety note, and the hand-off to the player).
  *
- * Three layers, like the rest of the Ramble tests:
+ * Four layers, like the rest of the Ramble tests:
  *   1. the server-rendered panel (panel/ramble.js) — copy, ids, vocabularies,
- *      the figure/moves scripts and the en/es safety note;
+ *      the figure/session/player scripts, the player's copy table and the en/es
+ *      safety note;
  *   2. the client (panel/static/moves.js) run in a vm against a tiny DOM, so
- *      a real click posts the real route with the day the card carries;
+ *      a real click posts the real route with the day the card carries, and a
+ *      chunk opened from Today mounts the player on the day's card;
  *   3. the player's guidance rules as pure functions (the one-pose "first"
- *      level and its memory prompt).
+ *      level and its memory prompt);
+ *   4. the house rules both scripts keep: classic scripts, no backtick.
  *
- * The routes themselves are covered by tests/ramble-moves-routes.test.js; this
- * file pins the wiring those routes depend on, plus the house rule that a
- * panel client script carries no backtick.
+ * The routes themselves are covered by tests/ramble-moves-routes.test.js and
+ * the player itself by tests/ramble-moves-player.test.js; this file pins the
+ * wiring those depend on.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -25,6 +28,7 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dir, "..");
 const PANEL_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/ramble.js"), "utf8");
 const CLIENT_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/moves.js"), "utf8");
+const PLAYER_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/player.js"), "utf8");
 const CSS_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/ramble.css"), "utf8");
 
 const { default: panel } = await import("../bundles/ramble/panel/ramble.js");
@@ -98,10 +102,11 @@ test("the panel renders the moves screens, not the old chores", async () => {
   // Learn: the list, the friendly empty state, an entry page and the player.
   assert.ok(html.includes('data-for="learn"'), "learn is a fifth view");
   for (const id of ["rb-learn-btn", "rb-learn-list", "rb-learn-empty", "rb-learn-entry-card", "rb-entry-title",
-    "rb-entry-figure", "rb-entry-body", "rb-flow", "rb-flow-figure", "rb-flow-name", "rb-flow-cues",
-    "rb-flow-pause", "rb-flow-half", "rb-flow-step", "rb-flow-ask", "rb-flow-smooth", "rb-flow-help"]) {
+    "rb-entry-figure", "rb-entry-body", "rb-player"]) {
     assert.ok(html.includes('id="' + id + '"'), id);
   }
+  // The old flow player's boxes are gone: the player draws its own screen.
+  assert.equal(html.includes("rb-flow"), false, "no rb-flow ids survive");
   assert.ok(html.includes("The exercise library is being written. Check back soon."),
     "an empty library says so, in words");
 
@@ -131,11 +136,75 @@ test("the panel is bilingual: Spanish copy for the new screens, including the sa
   assert.ok(html.includes("Entendido"));
 });
 
-test("the client script has zero backticks", () => {
+test("the client and the player have zero backticks", () => {
+  for (const [label, src] of [["moves.js", CLIENT_SRC()], ["player.js", PLAYER_SRC()]]) {
+    assert.equal((src.match(/`/g) || []).length, 0,
+      label + " must contain no backtick: panel client scripts must not carry one, the tooling treats it as its own delimiter");
+    assert.ok(src.length > 1000, label + " looks empty");
+  }
+});
+
+test("the panel loads the figure, the session and the player engines before the client", async () => {
+  const html = await render("en");
+  const at = (needle) => {
+    const index = html.indexOf(needle);
+    assert.ok(index > 0, needle + " is in the panel");
+    return index;
+  };
+  assert.ok(at("/ramble/static/figure.js") < at("/ramble/static/session.js"),
+    "the figure engine loads before the session it draws for");
+  assert.ok(at("/ramble/static/session.js") < at("/ramble/static/player.js"),
+    "the session engine loads before the player that compiles with it");
+  assert.ok(at("/ramble/static/player.js") < at("/ramble/static/moves.js"),
+    "the player is defined before the client mounts it");
+  assert.ok(at("/ramble/static/ramble.css") < at("/ramble/static/player.css"),
+    "the player's stylesheet follows the panel's own");
+  assert.ok(html.includes('<link rel="stylesheet" href="/ramble/static/player.css">'),
+    "the player stylesheet is linked");
+});
+
+/** The panel escapes the copy table for a double-quoted attribute; this is the
+ * browser's half of that round trip. */
+function attrText(value) {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+test("the player host carries the approved copy table as data-copy", async () => {
+  const html = await render("en");
+  const tag = /<div id="rb-player"[^>]*>/.exec(html);
+  assert.ok(tag, "the player host is a div with an id");
+  const attr = /data-copy="([^"]*)"/.exec(tag[0]);
+  assert.ok(attr, "the host carries a data-copy attribute");
+  const copy = JSON.parse(attrText(attr[1]));
+  assert.equal(typeof copy, "object");
+  for (const key of ["player.pause", "player.back", "player.more", "player.end.title"]) {
+    assert.equal(typeof copy[key], "string", key + " is in the table");
+    assert.ok(copy[key].length > 0, key + " is not empty");
+  }
+  assert.equal(copy.start, "Start", "the page's own Start label is part of the copy");
+  assert.equal(copy.safety, undefined, "the panel's safety sheet is shown before the player, so it carries no safety note");
+
+  // Spanish is served the same approved English player copy for now.
+  const es = await render("es");
+  const esTag = /<div id="rb-player"[^>]*>/.exec(es);
+  assert.ok(esTag, "the Spanish panel has the player host too");
+  const esCopy = JSON.parse(attrText(/data-copy="([^"]*)"/.exec(esTag[0])[1]));
+  assert.equal(esCopy["player.pause"], copy["player.pause"], "the player copy is the same in both languages");
+  assert.equal(esCopy.start, "Empezar", "but Start is the page's own word");
+});
+
+test("the old flow player is gone from the client", () => {
   const src = CLIENT_SRC();
-  assert.equal((src.match(/`/g) || []).length, 0,
-    "panel client scripts must contain no backtick: the tooling treats one as its own delimiter");
-  assert.ok(src.length > 1000, "the client looks empty");
+  for (const name of ["createPlayer", "startFlow", "loadFlowPoses", "reportFlow"]) {
+    assert.equal(src.includes(name), false, name + " must not survive in moves.js");
+  }
+  assert.ok(src.includes("RamblePlayer.mount"), "the client mounts the shared player");
+  assert.ok(src.includes("flowFrames") && src.includes("parseFallback"), "the pure helpers stay exported");
 });
 
 test("the learn view has a CSS rule, or showView('learn') paints nothing", () => {
@@ -200,6 +269,16 @@ const TODAY = {
 
 const PREFS = { prefs: { on: true, kinds: [], equipment: ["none"], limits: [], level: 2, weather: true } };
 
+/* The one entry the detail route answers with: today's challenge, a walk of ten
+ * minutes, so it is a chunk the player can take. */
+const WALK_ENTRY = {
+  id: "walk-10",
+  kind: "walk",
+  title: "A ten minute walk",
+  minutes: 10,
+  steps: ["Walk at a pace you can talk at."],
+};
+
 function bootMoves(beforeRun, search) {
   const els = new Map();
   const el = (id) => {
@@ -225,7 +304,10 @@ function bootMoves(beforeRun, search) {
     if (u === "/api/ramble/moves/parse") return json({ ok: false, reason: "no_model" });
     if (u === "/api/ramble/moves/log") return json({ ...TODAY, log: { paid: 5, points: 5, already: false } });
     if (u === "/api/ramble/moves/prefs") return json(PREFS);
-    if (u === "/api/ramble/moves/library") return json({ entries: [] });
+    if (u === "/api/ramble/moves/library") return json({ entries: [WALK_ENTRY] });
+    if (u === "/api/ramble/moves/library/walk-10") return json({ entry: WALK_ENTRY });
+    if (u === "/api/ramble/moves/start") return json({ cardKey: "2026-10-30:day", startedAt: 1 });
+    if (u === "/api/ramble/moves/progress") return json({ progress: { accepted: 60, done: false, paid: 0 } });
     return json({ entry: null }, 404);
   };
 
@@ -393,4 +475,73 @@ test("no or unknown moves parameter changes nothing", async () => {
   await flush();
   assert.equal(odd.root.getAttribute("data-view"), null);
   assert.equal(odd.calls.some((c) => c.url.startsWith("/api/ramble/moves/library/")), false, "nothing was opened");
+});
+
+/* --------------------------------------- the hand-off to the player (7.5) */
+
+test("a chunk opened from Today mounts the player on the day's card", async () => {
+  const mounted = { count: 0 };
+  const booted = bootMoves((sb) => {
+    sb.localStorage.setItem("ramble.moves.safetySeen", "1");
+    sb.RamblePlayer = {
+      mount(host, opts) {
+        mounted.count += 1;
+        mounted.host = host;
+        mounted.opts = opts;
+        return { destroy() { mounted.destroyed = true; }, state() { return {}; } };
+      },
+    };
+  }, "?moves=start");
+  booted.el("rb-player").setAttribute("data-copy", JSON.stringify({ "player.pause": "Pause", start: "Start" }));
+  await flush();
+
+  assert.equal(mounted.count, 1, "the player was mounted once");
+  assert.equal(mounted.host, booted.el("rb-player"), "it is mounted on #rb-player");
+  assert.deepEqual(JSON.parse(JSON.stringify(mounted.opts.chain)), [{ chunkId: "walk-10" }],
+    "the whole session is the chunk that was opened");
+  assert.equal(mounted.opts.cardSlot, "day", "Today's Start names the day's card");
+  assert.ok(mounted.opts.library.some((entry) => entry && entry.id === "walk-10"),
+    "the library carries the chunk itself, so its poses can be drawn");
+  assert.equal(mounted.opts.copy["player.pause"], "Pause", "the copy is read off the host's data-copy attribute");
+  assert.equal(mounted.opts.guidance, "full", "the level the detail route answered with is the one played");
+  assert.equal(typeof mounted.opts.post, "function");
+  assert.equal(typeof mounted.opts.start, "function");
+  assert.equal(typeof mounted.opts.onEvent, "function");
+  assert.equal(booted.el("rb-player").hasAttribute("hidden"), false, "the player's screen is shown");
+  assert.equal(booted.el("rb-entry-body").hasAttribute("hidden"), true, "the entry's static steps step aside");
+
+  await mounted.opts.start({ cardKey: "day", entryId: "walk-10", chain: [{ chunkId: "walk-10" }] });
+  assert.ok(booted.calls.some((c) => c.method === "POST" && c.url === "/api/ramble/moves/start"),
+    "the player's start posts /api/ramble/moves/start");
+
+  const answer = await mounted.opts.post({ cardKey: "2026-10-30:day", chunkIndex: 0, entryId: "walk-10", activeSeconds: 60 });
+  assert.ok(booted.calls.some((c) => c.method === "POST" && c.url === "/api/ramble/moves/progress"),
+    "the player's report posts /api/ramble/moves/progress");
+  assert.equal(answer.progress.accepted, 60, "jsonFetch's answer reaches the player as it came");
+});
+
+test("a Learn-page open passes no card slot", async () => {
+  const mounted = { count: 0 };
+  const booted = bootMoves((sb) => {
+    sb.RamblePlayer = {
+      mount(host, opts) {
+        mounted.count += 1;
+        mounted.opts = opts;
+        return { destroy() {}, state() { return {}; } };
+      },
+    };
+  });
+  await flush();
+
+  assert.equal(mounted.count, 0, "nothing opens by itself");
+  const list = booted.el("rb-learn-list");
+  const row = list.children.find((child) => child.listeners && child.listeners.click);
+  assert.ok(row, "the Learn list has a row for the one entry");
+  row.click();
+  await flush();
+
+  assert.equal(mounted.count, 1, "the row opened the entry in the player");
+  assert.equal(mounted.opts.cardSlot, undefined, "a Learn-page open names no card slot");
+  assert.deepEqual(JSON.parse(JSON.stringify(mounted.opts.chain)), [{ chunkId: "walk-10" }]);
+  assert.equal(booted.sandbox.window.RambleMoves.transitionMs, 1200, "the pure helpers are still exported");
 });
