@@ -127,7 +127,7 @@ export function pointsFor({ activity, minutes, effort } = {}) {
  * every entry (library.js); `activity` is the fallback for a hand-built entry
  * (a test fixture, or an entry that predates the field).
  */
-function entryIsOutdoor(entry) {
+export function entryIsOutdoor(entry) {
   if (typeof entry?.indoor === "boolean") return !entry.indoor;
   return isOutdoorActivity(entry?.activity);
 }

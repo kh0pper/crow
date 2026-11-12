@@ -270,7 +270,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   async function ensureMovesMods(res) {
     if (movesMods) return true;
     try {
-      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod] = await Promise.all([
+      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod] = await Promise.all([
         bundleImport("server/moves/library.js"),
         bundleImport("server/moves/picker.js"),
         bundleImport("server/moves/ledger.js"),
@@ -278,8 +278,11 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/moves/streak.js"),
         bundleImport("server/moves/learning.js"),
         bundleImport("server/moves/parse.js"),
+        bundleImport("server/moves/progress.js"),
       ]);
-      movesMods = { libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod };
+      movesMods = {
+        libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod,
+      };
       return true;
     } catch (err) {
       console.warn(`[ramble routes] moves modules unavailable: ${err.message}`);
@@ -1372,6 +1375,118 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     } catch (err) { movesInput(err); }
     await movesMods.streakMod.awardStreakHeart(db, { now, emit });
     res.json({ ...(await movesSnapshot(now)), done });
+  }));
+
+  /**
+   * The day's own card slots. A start naming one of these opens TODAY's card,
+   * and the SERVER builds the full wallet key from today's day (`todayCard`),
+   * never from the client's clock.
+   */
+  const MOVE_CARD_SLOTS = ["early", "day", "evening"];
+  /**
+   * A start may also ask for an EXTRA: `cardKey: "extra"` with any served entry.
+   * The server stamps the key with its own day and second (`extraCardKey`), so a
+   * retried extra keeps the key the client was first given.
+   */
+  const MOVE_EXTRA_SLOT = "extra";
+  /**
+   * A progress post carries the FULL key a start answered with: `<day>:<slot>`
+   * for the day's own card, `<day>:x:<entryId>:<startedAtSeconds>` for an extra.
+   * Anything else — the retired `<day>:x1` numbering among it — is refused.
+   */
+  const MOVE_CARD_KEY_RE = /^\d{4}-\d{2}-\d{2}:(early|day|evening)$/;
+  const MOVE_EXTRA_KEY_RE = /^\d{4}-\d{2}-\d{2}:x:([A-Za-z0-9_.-]{1,64}):\d{1,12}$/;
+  /** The most active seconds one post may claim (six hours). */
+  const MOVE_ACTIVE_MAX = 21600;
+  /** The most characters a card key may carry (an extra's shape must fit). */
+  const MOVE_CARD_KEY_MAX = 96;
+
+  router.post("/api/ramble/moves/start", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const b = req.body || {};
+    const slot = requireText(b.cardKey, MOVE_CARD_KEY_MAX, "cardKey");
+    const extra = slot === MOVE_EXTRA_SLOT;
+    if (!extra && !MOVE_CARD_SLOTS.includes(slot)) {
+      bad("cardKey must be one of " + [...MOVE_CARD_SLOTS, MOVE_EXTRA_SLOT].join(", "));
+    }
+    const entryId = requireText(b.entryId, 80, "entryId");
+    const library = servedMoves();
+    const entry = movesMods.libraryMod.entryById(library, entryId);
+    if (!entry) return res.status(404).json({ error: "not found" });
+    // An own-card slot is only the card actually on screen: the client names it,
+    // and a start for any other entry would open a session nothing can mark
+    // Done. An extra is any served entry, so it skips that gate.
+    const today = await todayCard(now);
+    if (!extra && (!today || today.off || !today.entry || today.entry.id !== entry.id)) {
+      bad("entryId must be today's card");
+    }
+    const plannedSeconds = movesMods.progressMod.plannedSecondsFor({
+      chain: b.chain, entryId, library, entry,
+    });
+    const day = extra ? mods.eggsMod.localDay(now) : today.day;
+    const cardKey = extra
+      ? movesMods.progressMod.extraCardKey(day, entryId, now)
+      : today.day + ":" + slot;
+    const started = await movesMods.progressMod.startChunk(db, {
+      day, cardKey, entryId, plannedSeconds, now,
+    });
+    res.json({ cardKey, startedAt: started.startedAt });
+  }));
+
+  router.post("/api/ramble/moves/progress", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const b = req.body || {};
+    const cardKey = requireText(b.cardKey, MOVE_CARD_KEY_MAX, "cardKey");
+    const ownCard = MOVE_CARD_KEY_RE.test(cardKey);
+    const extraKey = ownCard ? null : MOVE_EXTRA_KEY_RE.exec(cardKey);
+    if (!ownCard && !extraKey) bad("cardKey must be the key a start answered with");
+    if (!Number.isInteger(b.chunkIndex) || b.chunkIndex < 0) {
+      bad("chunkIndex must be a non-negative whole number");
+    }
+    const activeSeconds = b.activeSeconds;
+    if (typeof activeSeconds !== "number" || !Number.isFinite(activeSeconds)
+        || activeSeconds < 0 || activeSeconds > MOVE_ACTIVE_MAX) {
+      bad(`activeSeconds must be a number from 0 to ${MOVE_ACTIVE_MAX}`);
+    }
+    const entryId = requireText(b.entryId, 80, "entryId");
+    // An extra's key names its own entry, so a post can never pay one extra's
+    // minutes into another card.
+    if (extraKey && extraKey[1] !== entryId) bad("cardKey names a different entry");
+    const entry = movesMods.libraryMod.entryById(servedMoves(), entryId);
+    if (!entry) return res.status(404).json({ error: "not found" });
+    // A start binds its card to the entry it was opened for, so the same card
+    // key cannot be paid twice over against two different entries' text. A
+    // record with no binding — or no record at all — falls through; a post for
+    // a card that was never started is refused by `recordProgress`.
+    const bound = await movesMods.progressMod.startedEntryId(db, cardKey);
+    if (bound && bound !== entryId) bad("cardKey was started for a different entry");
+
+    // The card key carries its day, and that is the day the minutes, the pay and
+    // the Done are filed under. `recordProgress` then applies the day rule: a
+    // key from any day but today or yesterday is credited to today.
+    const day = cardKey.slice(0, 10);
+    let progress;
+    try {
+      progress = await movesMods.progressMod.recordProgress(db, {
+        day, cardKey, entry, activeSeconds, now, emit,
+      });
+    } catch (err) { movesInput(err); }
+    // The chunk pay has already happened, so a passed half-way mark is marked —
+    // `markChallengeDone`, never `recordChallengeDone`, which would pay again.
+    // An entry the ledger cannot mark (outside its vocabulary) leaves the pay
+    // standing: the mark and the streak heart are skipped for this post, and no
+    // paid post turns into a 500.
+    if (progress.done) {
+      try {
+        await movesMods.ledgerMod.markChallengeDone(db, { day, entry, now, emit });
+        await movesMods.streakMod.awardStreakHeart(db, { now, emit });
+      } catch (err) {
+        if (err?.name !== "MovesInputError") throw err;
+      }
+    }
+    res.json({ ...(await movesSnapshot(now)), progress });
   }));
 
   router.post("/api/ramble/moves/swap", handle(async (req, res) => {
