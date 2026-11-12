@@ -569,7 +569,8 @@ export function getOrCreateLocalInstanceId() {
     throw instanceError(
       "INSTANCE_ID_UNREADABLE",
       `${idPath} exists but its instance id cannot be read (empty or unreadable), and ` +
-      `CROW_LOCAL_INSTANCE_ID is not a 32-character hex instance id; refusing to invent one`,
+      `CROW_LOCAL_INSTANCE_ID is not a 32-character hex instance id; refusing to invent one. ` +
+      `On the gateway itself an EMPTY instance-id file is safe to delete: a missing file is minted again on the next start`,
     );
   }
 
