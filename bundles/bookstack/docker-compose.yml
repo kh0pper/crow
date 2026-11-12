@@ -21,7 +21,7 @@ services:
     depends_on:
       bookstack-db:
         condition: service_healthy
-    init: true
+    # NOTE: init: true breaks BookStack — its s6-overlay supervisor must run as PID 1, and it reaps zombies itself.
     mem_limit: 512m
     restart: unless-stopped
     healthcheck:

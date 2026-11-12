@@ -23,7 +23,7 @@ services:
         condition: service_healthy
       paperless-redis:
         condition: service_healthy
-    init: true
+    # NOTE: init: true breaks Paperless-ngx — its s6-overlay supervisor must run as PID 1, and it reaps zombies itself.
     mem_limit: 1g
     restart: unless-stopped
     healthcheck:
