@@ -2145,3 +2145,42 @@ test("fix: a wake lock that lands while another is held hands the older one back
   assert.deepEqual(released, ["older", "newer"], "and the newer one goes back with the visit");
 });
 
+test("fix: Finish here tells the page it paused before the post comes back", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "routine-10" }];
+  const timeline = booted.sandbox.RambleSession.compileSession(chain, FINISH_LIB, { guidance: "full" });
+  const heard = [];
+  const posted = [];
+  let answer = null;
+  const { player } = mountOn(booted, chain, {
+    post: (payload) => {
+      posted.push(payload);
+      return new Promise((resolve) => { answer = resolve; });
+    },
+    onEvent: (event) => { heard.push(event); },
+  });
+
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 300);
+  byRole(booted.host, "finish").click();
+
+  assert.equal(posted.length, 1, "the post is on its way");
+  assert.notEqual(answer, null);
+  assert.equal(heard.some((event) => event.type === "left"), false,
+    "nothing is posted back yet, so nothing has left yet");
+
+  const pauses = heard.filter((event) => event.type === "pause");
+  assert.equal(pauses.length, 1, "the page hears the pause at once");
+  assert.deepEqual(plain(pauses[0].segment), plain(timeline.segments[player.state().segmentIndex]),
+    "it names the segment the clock stopped in");
+  assert.equal(pauses[0].elapsed > 0, true, "and how far into it the clock stood");
+  assert.equal(player.state().paused, true, "the clock stopped where it stood");
+
+  answer({ paid: true, total: 1, done: true, capped: false, accepted: true });
+  await settle();
+
+  assert.equal(heard.some((event) => event.type === "left"), true,
+    "the leaving report follows the page's answer");
+  assert.equal(player.state().finished, true);
+});
+

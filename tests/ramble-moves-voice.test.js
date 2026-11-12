@@ -711,6 +711,25 @@ function spokenTexts(played) {
   return played.state.spoken.map((utterance) => utterance.text);
 }
 
+/* The tick tones heard so far: a tick sounds when its own timer fires, so this
+ * counts what was really heard rather than what was once scheduled. */
+function tickCount(played) {
+  return played.audio.tones.filter((tone) => tone.freq === TICK_FREQ).length;
+}
+
+/* Walk the timers a second at a time and name the second of the segment each
+ * new tick fell on. */
+function tickSeconds(played, seconds) {
+  const seen = [];
+  for (let step = 1; step <= seconds; step += 1) {
+    const before = tickCount(played);
+    played.timers.advance(1000);
+    const after = tickCount(played);
+    for (let i = before; i < after; i += 1) seen.push(step);
+  }
+  return seen;
+}
+
 /* A routine long enough to cross every segment type the player reports. */
 function routine(played) {
   const events = [
@@ -941,27 +960,26 @@ test("attach: the chime is scheduled before the first spoken line", () => {
 test("attach: a 20 second hold ticks on its last three seconds", () => {
   const played = harness();
   played.control.onEvent(event({ segment: segment({ type: "hold", seconds: 20 }) }));
-  const ticks = played.audio.tones
-    .filter((tone) => tone.freq === TICK_FREQ)
-    .map((tone) => tone.when)
-    .sort((a, b) => a - b);
-  assert.deepEqual(ticks, [17, 18, 19]);
+  assert.equal(tickCount(played), 0, "nothing sounds before its second comes");
+  assert.deepEqual(tickSeconds(played, 25), [17, 18, 19]);
 
   const timed = harness();
   timed.control.onEvent(event({ segment: segment({ type: "timed", seconds: 20 }) }));
-  assert.deepEqual(timed.audio.tones.filter((tone) => tone.freq === TICK_FREQ), []);
+  assert.deepEqual(tickSeconds(timed, 25), []);
 });
 
 test("attach: tones only sound while the sound choice is on", () => {
   const played = harness();
   played.control.setSound(false);
   played.control.onEvent(event({ segment: segment({ type: "hold", seconds: 20 }) }));
+  played.timers.advance(25000);
   assert.deepEqual(played.audio.tones, []);
   assert.equal(played.audio.created(), 0);
 
   played.control.setSound(true);
   played.control.onEvent(event({ segment: segment({ type: "hold", seconds: 20 }) }));
-  assert.equal(played.audio.tones.length, 4);
+  played.timers.advance(25000);
+  assert.equal(played.audio.tones.length, 4, "the chime and the three ticks");
 });
 
 test("attach: voice off schedules nothing spoken", () => {
@@ -998,6 +1016,191 @@ test("attach: resume says its line and picks the cues up from where they were", 
   played.timers.advance(20000);
   const finished = spokenTexts(played.voice);
   assert.equal(finished[finished.length - 1], LINES.close.hold);
+});
+
+/* ---------- the fixes the review asked for ---------- */
+
+test("fix: a skip drops the ticks of the segment left behind", () => {
+  const played = harness();
+  played.control.onEvent(event({ segment: segment({ type: "hold", seconds: 20 }) }));
+  played.timers.advance(5000);
+  assert.equal(tickCount(played), 0);
+
+  played.control.onEvent(event({
+    segment: segment({ type: "timed", seconds: 20, entryId: "pose-fold" }),
+  }));
+  assert.deepEqual(tickSeconds(played, 20), [], "the hold's ticks went with it");
+});
+
+test("fix: a pause takes the ticks still to come with it", () => {
+  const played = harness();
+  played.control.onEvent(event({ segment: segment({ type: "hold", seconds: 20 }) }));
+  played.timers.advance(10000);
+  played.control.onEvent({ type: "pause" });
+  assert.deepEqual(tickSeconds(played, 20), []);
+});
+
+test("fix: a resume plays each remaining tick once, on its own second", () => {
+  const hold = segment({ type: "hold", seconds: 20 });
+  const played = harness();
+  played.control.onEvent(event({ segment: hold }));
+  played.timers.advance(10000);
+  played.control.onEvent({ type: "pause" });
+  played.control.onEvent({
+    type: "resume",
+    segment: hold,
+    next: null,
+    ctx: ctx(),
+    elapsed: 12,
+  });
+
+  /* Twelve seconds in, 17, 18 and 19 are still to come: five, six and seven
+   * seconds after the clock starts again, each one once. */
+  assert.equal(tickCount(played), 0, "a resume schedules no tick of its own on the spot");
+  played.timers.advance(5000);
+  assert.equal(tickCount(played), 1);
+  played.timers.advance(1000);
+  assert.equal(tickCount(played), 2);
+  played.timers.advance(1000);
+  assert.equal(tickCount(played), 3);
+  played.timers.advance(10000);
+  assert.equal(tickCount(played), 3, "nothing sounds twice");
+});
+
+test("fix: destroy takes the ticks still to come with it", () => {
+  const played = harness();
+  played.control.onEvent(event({ segment: segment({ type: "hold", seconds: 20 }) }));
+  played.timers.advance(5000);
+  played.control.destroy();
+  assert.deepEqual(tickSeconds(played, 20), []);
+});
+
+test("fix: a sound choice turned off silences the ticks already due", () => {
+  const played = harness();
+  played.control.onEvent(event({ segment: segment({ type: "hold", seconds: 20 }) }));
+  played.timers.advance(5000);
+  played.control.setSound(false);
+  assert.deepEqual(tickSeconds(played, 20), []);
+});
+
+test("fix: a later line replaces the one still being said, the ones at the start do not", () => {
+  const played = harness();
+  /* Three reps in nine seconds: the counts fall at 1.5, 4.5 and 7.5, and the
+   * close at 9. */
+  const reps = segment({ type: "reps", seconds: 9, reps: 3, say: "Small circles" });
+  played.control.onEvent(event({ segment: reps }));
+  assert.equal(played.voice.state.cancels, 1, "the new segment cancels what ran before it");
+
+  /* The lead-in and the segment's own line both fall at 0: the second one does
+   * not cut the first off. */
+  played.timers.advance(1400);
+  assert.equal(played.voice.state.cancels, 1);
+  assert.deepEqual(spokenTexts(played.voice), [
+    fill(LINES.leadIn.next, { name: NAME }),
+    reps.say,
+  ]);
+
+  played.timers.advance(100);
+  assert.equal(played.voice.state.cancels, 2, "the first count replaces the line at the start");
+  played.timers.advance(3000);
+  assert.equal(played.voice.state.cancels, 3, "the second count replaces the first");
+  played.timers.advance(3000);
+  assert.equal(played.voice.state.cancels, 4, "the third count replaces the second");
+  played.timers.advance(1500);
+  assert.equal(played.voice.state.cancels, 5, "the close replaces the third count");
+});
+
+test("fix: a cue that was already spoken is not spoken again on a resume", () => {
+  const reps = segment({ type: "reps", seconds: 40, reps: 4, say: "" });
+  const played = harness();
+  played.control.onEvent(event({ segment: reps, ctx: ctx({ entryStart: false }) }));
+  played.timers.advance(20000);
+  assert.deepEqual(spokenTexts(played.voice), [LINES.reps.numbers[0], LINES.reps.numbers[1]]);
+
+  played.control.onEvent({ type: "pause" });
+  played.control.onEvent({
+    type: "resume",
+    segment: reps,
+    next: null,
+    ctx: ctx({ entryStart: false }),
+    elapsed: 20,
+  });
+  played.timers.advance(30000);
+
+  const said = spokenTexts(played.voice);
+  assert.equal(said.filter((line) => line === LINES.reps.numbers[0]).length, 1, "the first count is not said twice");
+  assert.equal(said.filter((line) => line === LINES.reps.numbers[1]).length, 1, "nor the second");
+  assert.equal(said.filter((line) => line === LINES.reps.numbers[2]).length, 1, "the counts still to come are said once");
+  assert.equal(said.filter((line) => line === LINES.reps.lastRep).length, 1);
+  assert.equal(said[said.length - 1], LINES.close.reps);
+});
+
+test("fix: a line due at the start that the pause came before is spoken on the resume", () => {
+  const hold = segment({ seconds: 20 });
+  const played = harness();
+  played.control.onEvent(event({ segment: hold }));
+  /* The line at the start waits out the chime's lead, so a pause inside that
+   * first moment comes before it. */
+  played.timers.advance(200);
+  assert.deepEqual(spokenTexts(played.voice), []);
+
+  played.control.onEvent({ type: "pause" });
+  played.control.onEvent({
+    type: "resume",
+    segment: hold,
+    next: null,
+    ctx: ctx(),
+    elapsed: 0.2,
+  });
+  played.timers.advance(1000);
+  assert.deepEqual(spokenTexts(played.voice), [
+    LINES.paused,
+    LINES.resume,
+    fill(LINES.leadIn.next, { name: NAME }),
+    hold.say,
+  ]);
+});
+
+test("fix: turning the voice off and on again keeps the segment's later lines", () => {
+  const played = harness();
+  played.control.onEvent(event({
+    segment: segment({ type: "reps", seconds: 40, reps: 4, say: "" }),
+    ctx: ctx({ entryStart: false }),
+  }));
+  played.timers.advance(5000);
+  assert.deepEqual(spokenTexts(played.voice), [LINES.reps.numbers[0]]);
+
+  played.control.setVoice(false);
+  played.timers.advance(10000);
+  assert.deepEqual(spokenTexts(played.voice), [LINES.reps.numbers[0]],
+    "the count that came due while the voice was off is not heard");
+
+  played.control.setVoice(true);
+  played.timers.advance(30000);
+  const said = spokenTexts(played.voice);
+  assert.equal(said.indexOf(LINES.reps.numbers[1]), -1, "the count that went by stays unsaid");
+  assert.equal(said.indexOf(LINES.reps.numbers[2]) >= 0, true, "the rest of the segment speaks");
+  assert.equal(said[said.length - 1], LINES.close.reps);
+});
+
+test("fix: the voices property goes back to the handler that was there, and only ours", () => {
+  const previous = function () {};
+  const property = makeSpeech({ onVoicesProperty: true });
+  property.synth.onvoiceschanged = previous;
+  const played = harness({ speech: property.speech });
+  assert.notEqual(property.synth.onvoiceschanged, previous,
+    "the voice watches the property while it runs");
+
+  played.control.destroy();
+  assert.equal(property.synth.onvoiceschanged, previous, "the handler that was there comes back");
+
+  /* A handler someone else puts in its place is theirs to keep. */
+  const taken = makeSpeech({ onVoicesProperty: true });
+  const other = function () {};
+  const second = harness({ speech: taken.speech });
+  taken.synth.onvoiceschanged = other;
+  second.control.destroy();
+  assert.equal(taken.synth.onvoiceschanged, other);
 });
 
 /* ---------- the toggles ---------- */

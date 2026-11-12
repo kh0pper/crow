@@ -1341,14 +1341,19 @@
     }
 
     /* The clock stops where it is and the wake lock goes back the way a pause
-     * hands it back. */
+     * hands it back. A clock that was running here is reported as a pause, so
+     * the page stops talking with the clock instead of waiting for whatever the
+     * leaving posts answer. */
     function leaveRunning() {
+      var wasRunning = false;
       try {
-        if (!clock.state().paused) clock.pause();
+        wasRunning = clock.state().paused !== true;
+        if (wasRunning) clock.pause();
       } catch (err) {
         return;
       }
       dropWakeLock();
+      if (wasRunning) report(segmentEvent("pause", clock.state().segmentIndex));
     }
 
     function onFinishClick() {

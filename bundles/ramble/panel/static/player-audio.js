@@ -383,8 +383,11 @@
     var clicks = [];
     var voiceListener = null;
     var voiceProperty = false;
+    var voiceHandler = null;
     var previousOnVoices = null;
     var lastAvailable = null;
+    var cueFired = [];
+    var cueKey = null;
 
     /* ---------- the platform wrappers ---------- */
 
@@ -722,7 +725,7 @@
       }
       try {
         previousOnVoices = synth.onvoiceschanged;
-        synth.onvoiceschanged = function () {
+        voiceHandler = function () {
           try {
             if (typeof previousOnVoices === "function") previousOnVoices.apply(null, arguments);
           } catch (err) {
@@ -730,6 +733,7 @@
           }
           onVoicesChanged();
         };
+        synth.onvoiceschanged = voiceHandler;
         voiceProperty = true;
       } catch (err) {
         /* a synthesiser with neither route never reports its voices */
@@ -749,20 +753,43 @@
       }
       if (voiceProperty) {
         try {
-          if (speech && isObject(speech.synth)) speech.synth.onvoiceschanged = previousOnVoices;
+          /* Only our own handler goes back: one someone else has put in its
+           * place since is theirs to keep. */
+          var synth = speech && isObject(speech.synth) ? speech.synth : null;
+          if (synth && synth.onvoiceschanged === voiceHandler) {
+            synth.onvoiceschanged = previousOnVoices;
+          }
         } catch (err) {
           /* leave it as it is */
         }
         voiceProperty = false;
+        voiceHandler = null;
       }
     }
 
     /* ---------- one segment's cues, its chime and its ticks ---------- */
 
-    function speakAt(delaySeconds, text) {
+    /* One cue, spoken when its own timer fires. Its place in the segment's
+     * record is marked as spoken the moment the timer runs, so a resume never
+     * says it twice. A cue that falls after the segment's start replaces
+     * whatever is still being said; the lines that arrive together at the start
+     * are spoken in order and never cut each other off. */
+    function speakCue(index, delaySeconds, replaces, text) {
       if (tidy(textOf(text)) === "") return;
       later(delaySeconds, function () {
+        cueFired[index] = true;
+        if (replaces) cancelSpeech();
         speakText(text);
+      });
+    }
+
+    /* A tick waits in the same queue as a cue, so a skip, a pause, a destroy or
+     * a sound choice that goes off takes it with them. The tone is played when
+     * its timer fires rather than on the audio clock, which cannot be taken
+     * back. */
+    function playTick(delaySeconds) {
+      later(delaySeconds, function () {
+        tone(TICK_TONE, 0);
       });
     }
 
@@ -773,8 +800,37 @@
         var at = seconds - back;
         if (at < 0) continue;
         if (!(at > from)) continue;
-        tone(TICK_TONE, resuming ? at - from : at);
+        playTick(resuming ? at - from : at);
       }
+    }
+
+    /* What tells one segment from the next for the spoken-cue record: the same
+     * segment handed back for a resume keeps its own record. */
+    function segmentKey(segment) {
+      if (!isObject(segment)) return "";
+      var parts = [
+        segment.chunkIndex, segment.block, segment.entryId, segment.stepIndex,
+        segment.type, segment.side, segment.seconds, segment.reps
+      ];
+      var out = [];
+      for (var i = 0; i < parts.length; i += 1) {
+        var value = parts[i];
+        if (typeof value === "number" && isFinite(value)) out.push(String(value));
+        else if (typeof value === "string") out.push(value);
+        else out.push("");
+      }
+      return out.join("|");
+    }
+
+    function freshCues(segment) {
+      cueKey = segmentKey(segment);
+      cueFired = [];
+      return cueFired;
+    }
+
+    function firedCuesFor(segment) {
+      if (cueKey !== segmentKey(segment)) return freshCues(segment);
+      return cueFired;
     }
 
     function playSegment(segment, from, resuming) {
@@ -787,6 +843,7 @@
       } catch (err) {
         cues = [];
       }
+      var fired = resuming ? firedCuesFor(segment) : freshCues(segment);
       var chimed = false;
       if (!resuming && isWork(segment)) chimed = tone(CHIME_TONE, 0);
       var lead = chimed ? CHIME_LEAD_SECONDS : 0;
@@ -794,15 +851,19 @@
         var cue = cues[i];
         var at = numberOr(cue && cue.at, null);
         if (at === null) continue;
+        if (fired[i] === true) continue;
         var delay = 0;
         if (resuming) {
-          if (!(at > elapsed)) continue;
+          /* A line the pause came before is still owed on the way back; one
+           * already spoken is not said again. The chime's lead belongs to a
+           * fresh segment only. */
           delay = at - elapsed;
+          if (!(delay > 0)) delay = 0;
         } else {
           if (at < 0) continue;
           delay = at === 0 ? lead : at;
         }
-        speakAt(delay, cue.text);
+        speakCue(i, delay, at > 0, cue.text);
       }
       if (segment.type === "hold") playTicks(segment, elapsed, resuming);
     }
@@ -849,10 +910,10 @@
       if (destroyed) return;
       voiceChoice = Boolean(on);
       writeChoice(storage, VOICE_KEY, voiceChoice);
-      if (!voiceChoice) {
-        cancelSpeech();
-        clearScheduled();
-      }
+      /* The segment's cues stay queued: each one asks the choice when its own
+       * timer runs, so turning the voice back on lets the rest of the segment
+       * speak. */
+      if (!voiceChoice) cancelSpeech();
       repaint();
     }
 
