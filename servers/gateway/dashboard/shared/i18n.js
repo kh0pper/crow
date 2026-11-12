@@ -202,6 +202,10 @@ export const translations = {
   // A `crow` / `via: "setup"` app: Crow can create the admin itself and keep it.
   "bundles.firstAdmin.setupBody": { en: "Crow can create {name}'s admin login for you and save it in Settings → Passwords.", es: "Crow puede crear el inicio de sesión de administrador de {name} y guardarlo en Ajustes → Contraseñas." },
   "bundles.firstAdmin.keptBody": { en: "{name} already has an admin. Save the login you use so Crow can keep it for you.", es: "{name} ya tiene un administrador. Guarda el inicio de sesión que usas para que Crow lo conserve por ti." },
+  // A run Crow made itself CHANGED the app's password (the boot catch-up caught up an install
+  // that predates the automatic setup): the old password stops working, so the owner is told.
+  "bundles.firstAdmin.changedTitle": { en: "{name}: Crow set the admin password", es: "{name}: Crow cambió la contraseña de administrador" },
+  "bundles.firstAdmin.changedBody": { en: "The new login is in Settings → Passwords. Apps or devices still using the old password need the new one.", es: "El nuevo inicio de sesión está en Ajustes → Contraseñas. Las aplicaciones o dispositivos que todavía usan la contraseña anterior necesitan la nueva." },
   "bundles.firstAdmin.setItUp": { en: "Set it up for me", es: "Configúralo por mí" },
   "bundles.firstAdmin.settingUp": { en: "Setting up…", es: "Configurando…" },
   "bundles.firstAdmin.savedInPasswords": { en: "Saved in Settings → Passwords.", es: "Guardado en Ajustes → Contraseñas." },

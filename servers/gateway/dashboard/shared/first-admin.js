@@ -68,6 +68,13 @@ export const FIRST_ADMIN_DEFAULT_LOGIN_BODY_KEY = "bundles.firstAdmin.defaultLog
 export const FIRST_ADMIN_SETUP_BODY_KEY = "bundles.firstAdmin.setupBody";
 export const FIRST_ADMIN_KEPT_BODY_KEY = "bundles.firstAdmin.keptBody";
 
+/**
+ * The bell for a login Crow CHANGED under the operator (the boot catch-up): the password
+ * an app or a device was using no longer works, so the owner has to hear about it.
+ */
+export const FIRST_ADMIN_CHANGED_TITLE_KEY = "bundles.firstAdmin.changedTitle";
+export const FIRST_ADMIN_CHANGED_BODY_KEY = "bundles.firstAdmin.changedBody";
+
 /** The card's sentences for an invite-only app (N3-4 phase 2e). */
 export const FIRST_ADMIN_INVITE_CLOSE_BODY_KEY = "bundles.firstAdmin.invite.closeBody";
 export const FIRST_ADMIN_INVITE_CREATE_BODY_KEY = "bundles.firstAdmin.invite.createBody";
@@ -222,6 +229,16 @@ export function firstAdminLink(bundleId, manifest) {
 /** The card's title — the same words the bell uses. */
 export function firstAdminTitle(name, lang = "en") {
   return fill(t(FIRST_ADMIN_TITLE_KEY, lang), { name });
+}
+
+/** The title of the "Crow set this app's admin password" bell — never a secret. */
+export function firstAdminChangedTitle(name, lang = "en") {
+  return fill(t(FIRST_ADMIN_CHANGED_TITLE_KEY, lang), { name });
+}
+
+/** Its body: where the new login is kept, and what still needs it. Never a secret. */
+export function firstAdminChangedBody(lang = "en") {
+  return t(FIRST_ADMIN_CHANGED_BODY_KEY, lang);
 }
 
 /**

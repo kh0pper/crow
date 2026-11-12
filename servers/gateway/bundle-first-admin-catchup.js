@@ -17,8 +17,10 @@
  *   - the REVIEWED manifest (getManifest, never the installed copy) declares a setup script
  *     Crow may run (firstAdminSetupPlan, not refused), and is not an invite-only app (whose
  *     card is decided by its own admin API, never by a script);
- *   - the keychain does NOT already hold this bundle's admin login (firstAdminSavedKey, the
- *     same check the card uses to decide there is nothing left to ask);
+ *   - the keychain does NOT already hold this bundle's admin login — neither under the
+ *     manifest's admin key (firstAdminSavedKey, the same check the card uses to decide there
+ *     is nothing left to ask) nor under the setup plan's own `secretEnv`, which can be a
+ *     different entry name (the two stay in step with the run's own "already saved" answer);
  *   - `first_admin_auto:<id>` has no result for THIS install (installedAt), except
  *     "not-running" (exit 4: the app was not up), which is retried on the next boot only.
  *     "ok", "kept" and "failed" are never re-run automatically: a failed run stays on the
@@ -42,13 +44,18 @@
  * login up WITHOUT a gateway restart. Nothing here ever restarts the gateway: a restart at
  * boot would kill whatever install job is running.
  *
+ * A run that really CREATED the login ("ok", and not the run's own `alreadySaved` answer, which
+ * changed nothing) also tells the owner, once per install (reportChanged → the "Crow set the
+ * admin password" bell): a catch-up can replace a password an app or a device has used for
+ * months, and nothing else would say so. That bell carries no password and no log line.
+ *
  * NEVER throws, and never logs or returns a password: the only values that leave are bundle
  * ids and the run's own result word.
  */
 import { join } from "node:path";
 import { installStampOf } from "./bundle-api-token.js";
 import { applyFirstAdminAfter, firstAdminAfterPlan } from "./bundle-first-admin-after.js";
-import { firstAdminAutoKey, reportFirstAdminNotice } from "./bundle-first-admin.js";
+import { firstAdminAutoKey, reportFirstAdminNotice, reportFirstAdminPasswordChanged } from "./bundle-first-admin.js";
 import {
   endFirstAdminSetup,
   firstAdminSetupPlan,
@@ -157,6 +164,7 @@ export async function firstAdminCatchUpDeps() {
       return proxy.reconnectAddonServer(id);
     },
     reportAfterFailure: (o) => reportFirstAdminNotice(o),
+    reportChanged: (o) => reportFirstAdminPasswordChanged(o),
     warn: (m) => console.warn(m),
     close: async () => {
       try { handle?.close?.(); } catch { /* already closed */ }
@@ -190,6 +198,10 @@ async function catchUpOne(id, entry, seam) {
   // operator may have saved a working one by hand, or an earlier run already made it.
   const savedKey = firstAdminSavedKey(manifest);
   if (savedKey && (await (await seam("hasAdminSaved"))(id, savedKey))) return null;
+  // The run itself skips when the keychain holds the plan's `secretEnv`, which can differ
+  // from the manifest's admin key: checking it here too (rather than only trusting the run's
+  // answer) keeps the pass from taking the lock and recreating a container every boot.
+  if (plan.secretEnv && plan.secretEnv !== savedKey && (await (await seam("hasAdminSaved"))(id, plan.secretEnv))) return null;
 
   const installAt = installStampOf(entry);
   const prior = parseMarker(await (await seam("readSetting"))(firstAdminAutoKey(id)));
@@ -237,6 +249,11 @@ async function catchUpOne(id, entry, seam) {
   // nothing was recorded by either of us.
   if (result === "busy") return null;
 
+  // The login was already in the keychain: the run changed NOTHING (no script, no marker), so
+  // there is nothing to reconnect, no follow-up step to apply — a container recreate on every
+  // boot is exactly what this answer exists to prevent — and no password change to announce.
+  if (run && run.alreadySaved) return "ok";
+
   // The login also went into the bundle's mcp-addons.json entry, which an MCP child reads
   // only when it is spawned: reconnect that add-on ONCE here (what the API-token catch-up
   // does after saving a token) instead of asking for a gateway restart.
@@ -274,6 +291,21 @@ async function catchUpOne(id, entry, seam) {
       }
     }
   }
+
+  // A run that really created the login replaces whatever the operator (or an app, or a phone
+  // still pointed at this app) has been using: say so once for this install. The bell is the
+  // last thing this pass does, it carries no password and no log, and its own failure is
+  // swallowed like every other reporting seam here.
+  if (result === "ok") {
+    try {
+      await (await seam("reportChanged"))({
+        bundleId: id,
+        manifest,
+        bundleName: (typeof manifest.name === "string" && manifest.name) || id,
+        installId: installAt,
+      });
+    } catch { /* a bell that cannot be written never undoes anything */ }
+  }
   return result;
 }
 
@@ -288,8 +320,8 @@ async function catchUpOne(id, entry, seam) {
  * @param {object} [o]
  * @param {object} [o.deps] seams: listInstalled, getManifest, readSetting, mcpTransport,
  *                          hasAdminSaved, appRunning, tryBegin, end, runSetup, applyAfter,
- *                          recreate, reconnect, reportAfterFailure, warn, appBundles,
- *                          bundlesDir, crowHome, setupDeps, close
+ *                          recreate, reconnect, reportAfterFailure, reportChanged, warn,
+ *                          appBundles, bundlesDir, crowHome, setupDeps, close
  * @returns {Promise<{checked: number, ran: Array<{id: string, result: string}>}>}
  */
 export async function runFirstAdminCatchUp({ deps = {} } = {}) {

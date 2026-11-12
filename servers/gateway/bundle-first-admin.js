@@ -51,6 +51,10 @@ import { bundlePageUrl } from "./bundle-pull-alert.js";
 import { firstAdminAfterFailureSentence } from "./bundle-first-admin-after.js";
 import {
   FIRST_ADMIN_SAVED_KEY,
+  FIRST_ADMIN_CHANGED_BODY_KEY,
+  FIRST_ADMIN_CHANGED_TITLE_KEY,
+  firstAdminChangedBody,
+  firstAdminChangedTitle,
   firstAdminOf,
   firstAdminNeedsNotice,
   firstAdminSavedKey,
@@ -78,6 +82,8 @@ export {
   FIRST_ADMIN_INVITE_BODY_KEY,
   FIRST_ADMIN_INVITE_SIGNUPS_OPEN_KEY,
   FIRST_ADMIN_SAVED_KEY,
+  FIRST_ADMIN_CHANGED_TITLE_KEY,
+  FIRST_ADMIN_CHANGED_BODY_KEY,
   firstAdminOf,
   firstAdminNeedsOperator,
   firstAdminNeedsNotice,
@@ -86,6 +92,8 @@ export {
   firstAdminVia,
   firstAdminLink,
   firstAdminTitle,
+  firstAdminChangedTitle,
+  firstAdminChangedBody,
   firstAdminBody,
   firstAdminInviteBody,
   firstAdminInviteReason,
@@ -100,6 +108,12 @@ export const FIRST_ADMIN_NOTIFICATION_SOURCE = "bundle-installer";
 /** What Crow's own setup run did for this bundle, at this install (`firstAdmin.via: "setup"`). */
 export const FIRST_ADMIN_AUTO_PREFIX = "first_admin_auto:";
 /**
+ * The install (`<installedAt>`) an automatic run already told the owner about a login it
+ * CHANGED. A succeeded run used to be silent (nothing was claimable), but a catch-up run
+ * can replace a password an app or a device has been using for months: that one rings.
+ */
+export const FIRST_ADMIN_CHANGED_PREFIX = "first_admin_changed:";
+/**
  * The address Crow actually invited into this bundle's own admin panel. An
  * invite-only app's installed `.env` carries an owner email too, but that file is
  * editable through `POST /bundles/api/env`: only this marker (written here, by
@@ -113,6 +127,8 @@ export const firstAdminDoneKey = (bundleId) => `${FIRST_ADMIN_DONE_PREFIX}${bund
 export const firstAdminNoticeKey = (bundleId) => `${FIRST_ADMIN_NOTICE_PREFIX}${bundleId}`;
 /** This bundle's most recent automatic setup outcome (`{install, result}`). */
 export const firstAdminAutoKey = (bundleId) => `${FIRST_ADMIN_AUTO_PREFIX}${bundleId}`;
+/** The install (`<installedAt>`) the "Crow changed the password" bell already rang for. */
+export const firstAdminChangedKey = (bundleId) => `${FIRST_ADMIN_CHANGED_PREFIX}${bundleId}`;
 /** The address Crow invited into this bundle's admin panel, last time it invited one. */
 export const firstAdminInvitedKey = (bundleId) => `${FIRST_ADMIN_INVITED_PREFIX}${bundleId}`;
 
@@ -448,6 +464,106 @@ export async function reportFirstAdminNotice({
     return await notifyFirstAdmin({ db, bundleId, manifest, bundleName, installId, autoResult, afterResult, inviteResult, log, ...rest });
   } catch (err) {
     try { log.warn(`[bundles] first-admin notification skipped: ${err?.message ?? err}`); } catch { /* console gone */ }
+    return null;
+  } finally {
+    try { db?.close?.(); } catch { /* already closed */ }
+  }
+}
+
+/**
+ * Ring the "Crow set your admin password" bell ONCE per bundle install.
+ *
+ * This is the OTHER half of the `crow`/`via: "setup"` story: a run that returns "ok" used
+ * to be entirely silent (there was nothing left for the operator to claim), yet the boot
+ * catch-up can replace a login a long-running app — or the phone/desktop client pointed at
+ * it — has been using for months. The owner therefore hears about it, once per install, with
+ * where the new login lives and what still needs it.
+ *
+ * Deduped exactly like notifyFirstAdmin: the `first_admin_changed:<id>` marker holds the
+ * install stamp whose bell already rang, so a second run at the same install stays silent
+ * and a reinstall may ring again. NEVER carries the password or the run's log: the bell has
+ * a title, one plain body, the app's page, and the bundle id.
+ *
+ * @param {object} o
+ * @param {object} o.db                   libsql-shaped client
+ * @param {string} o.bundleId
+ * @param {object} o.manifest             the REVIEWED manifest
+ * @param {string} [o.bundleName]         display name (else the manifest's, else the id)
+ * @param {string} [o.installId]          installed.json's installedAt for this install
+ * @param {number} [o.nowMs]              clock seam
+ * @param {Function} [o.notify]           createNotification-shaped seam (tests)
+ * @param {string} [o.lang]               force a language (else the dashboard setting)
+ * @param {object} [o.log]                console-shaped logger
+ * @returns {Promise<object|null>} the notification row, or null when silent
+ */
+export async function notifyFirstAdminPasswordChanged({
+  db,
+  bundleId,
+  manifest = null,
+  bundleName = null,
+  installId = null,
+  nowMs = Date.now(),
+  notify = createNotification,
+  lang = null,
+  log = console,
+}) {
+  if (!db || typeof bundleId !== "string" || !bundleId) return null;
+  const key = firstAdminChangedKey(bundleId);
+  const stamp = typeof installId === "string" && installId ? installId : new Date(nowMs).toISOString();
+  try {
+    let lastAt = null;
+    try {
+      const { rows } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [key] });
+      lastAt = rows?.[0]?.value ?? null;
+    } catch {
+      /* unreadable marker: ring rather than stay silent (a missing bell is the worse error) */
+    }
+    if (lastAt === stamp) return null; // this install already rang
+
+    const name = bundleName || (manifest && manifest.name) || bundleId;
+    const language = lang || await readLanguage(db);
+    const fa = firstAdminOf(manifest);
+    const row = await notify(db, {
+      title: firstAdminChangedTitle(name, language),
+      body: firstAdminChangedBody(language),
+      type: "system",
+      source: FIRST_ADMIN_NOTIFICATION_SOURCE,
+      priority: "normal",
+      action_url: bundlePageUrl(bundleId),
+      // A bell of its own (not the "finish setup" one): uninstalling the bundle dismisses
+      // that notice, this one is history about a password change that already happened.
+      metadata: { kind: "bundle-first-admin-changed", bundle: bundleId, mode: fa ? fa.mode : null },
+    });
+    // Stamped even when the type is switched off (createNotification returns null): the
+    // owner's preference is a choice, and a reinstall is a new notice.
+    await writeMarker(db, key, stamp);
+    return row;
+  } catch (err) {
+    try { log.warn(`[bundles] first-admin change notification skipped: ${err?.message ?? err}`); } catch { /* console gone */ }
+    return null;
+  }
+}
+
+/**
+ * The boot catch-up's entry point for the bell above: owns its database client (the pass
+ * owns none) and never throws into the caller — a bell that cannot be written must never
+ * undo a login that is already saved.
+ */
+export async function reportFirstAdminPasswordChanged({
+  bundleId,
+  manifest = null,
+  bundleName = null,
+  installId = null,
+  dbFactory = createDbClient,
+  log = console,
+  ...rest
+} = {}) {
+  let db = null;
+  try {
+    db = dbFactory();
+    return await notifyFirstAdminPasswordChanged({ db, bundleId, manifest, bundleName, installId, log, ...rest });
+  } catch (err) {
+    try { log.warn(`[bundles] first-admin change notification skipped: ${err?.message ?? err}`); } catch { /* console gone */ }
     return null;
   } finally {
     try { db?.close?.(); } catch { /* already closed */ }

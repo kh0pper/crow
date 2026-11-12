@@ -33,7 +33,7 @@ import { captureOutput } from "./helpers/sentinel-scan.mjs";
 
 const { runFirstAdminCatchUp } = await import("../servers/gateway/bundle-first-admin-catchup.js");
 const { runFirstAdminSetup } = await import("../servers/gateway/bundle-first-admin-setup.js");
-const { FIRST_ADMIN_AUTO_PREFIX } = await import("../servers/gateway/bundle-first-admin.js");
+const { FIRST_ADMIN_AUTO_PREFIX, firstAdminSavedKey } = await import("../servers/gateway/bundle-first-admin.js");
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TMP = mkdtempSync(join(tmpdir(), "crow-first-admin-catchup-"));
@@ -74,9 +74,10 @@ function harness({ overrides = {}, deps: extra = {} } = {}) {
     savedKey: null,
     running: true,
     result: "ok",
+    alreadySaved: false,
     mcpEnvUpdated: false,
     afterAnswer: { ok: true, applied: true, outcome: "applied", line: 'after: "applied"', reason: null },
-    calls: { run: [], reconnect: [], after: [], notify: [], begun: [], ended: [], warned: [] },
+    calls: { run: [], reconnect: [], after: [], notify: [], changed: [], begun: [], ended: [], warned: [] },
   };
   const deps = {
     appBundles: () => "/reviewed",
@@ -93,12 +94,13 @@ function harness({ overrides = {}, deps: extra = {} } = {}) {
     end: (id) => { state.calls.ended.push(id); },
     runSetup: async (o) => {
       state.calls.run.push(o);
-      return { result: state.result, log: [], ...(state.mcpEnvUpdated ? { mcpEnvUpdated: true } : {}) };
+      return { result: state.result, log: [], ...(state.alreadySaved ? { alreadySaved: true } : {}), ...(state.mcpEnvUpdated ? { mcpEnvUpdated: true } : {}) };
     },
     applyAfter: async (o) => { state.calls.after.push(o); return state.afterAnswer; },
     recreate: async () => ({ ok: true, recreated: true }),
     reconnect: async (id) => { state.calls.reconnect.push(id); return { ok: true }; },
     reportAfterFailure: async (o) => { state.calls.notify.push(o); return null; },
+    reportChanged: async (o) => { state.calls.changed.push(o); return null; },
     warn: (m) => { state.calls.warned.push(String(m)); },
     ...extra,
   };
@@ -109,6 +111,7 @@ function harness({ overrides = {}, deps: extra = {} } = {}) {
   if (overrides.transport) state.transport = overrides.transport;
   if (overrides.savedKey !== undefined) state.savedKey = overrides.savedKey;
   if (overrides.running !== undefined) state.running = overrides.running;
+  if (overrides.alreadySaved) state.alreadySaved = true;
   if (overrides.mcpEnvUpdated) state.mcpEnvUpdated = true;
   if (overrides.afterAnswer) state.afterAnswer = overrides.afterAnswer;
   return { deps, state };
@@ -312,6 +315,75 @@ test("an after-step that cannot be performed here is left to the card, with one 
   assert.match(state.calls.warned[0], /Extensions card can/);
 });
 
+// ── a changed login tells the owner, once ──────────────────────────────────────
+
+test("an ok run tells the owner once that Crow set the password, and carries no secret", async () => {
+  const { deps, state } = harness();
+  const summary = await runFirstAdminCatchUp({ deps });
+
+  assert.deepEqual(summary.ran, [{ id: ID, result: "ok" }]);
+  assert.equal(state.calls.changed.length, 1, "a login that really changed is announced");
+  const changed = state.calls.changed[0];
+  assert.equal(changed.bundleId, ID);
+  assert.equal(changed.installId, INSTALL, "deduped per install, like the other first-admin bells");
+  assert.equal(changed.bundleName, "Frigate", "the app's name, so the title can say it");
+  // The bell is a title and one plain sentence: never the password, and never a log.
+  for (const key of Object.keys(changed)) {
+    assert.equal(/pass|secret|^log$/i.test(key), false, `${key} must not be handed to a notification`);
+  }
+  assert.equal(state.calls.run.length, 1, "one run, one bell");
+});
+
+test("a result that is not ok is not a password change: no bell", async () => {
+  for (const result of ["kept", "not-running", "failed"]) {
+    const { deps, state } = harness({ overrides: { result } });
+    await runFirstAdminCatchUp({ deps });
+    assert.deepEqual(state.calls.changed, [], result);
+  }
+});
+
+test("a run that found the login already saved reports ok and does nothing else", async () => {
+  const manifest = {
+    ...MANIFEST,
+    env_vars: [...MANIFEST.env_vars, { name: "FRIGATE_SIGNUPS", default: "true" }],
+    firstAdmin: {
+      ...MANIFEST.firstAdmin,
+      setup: { ...MANIFEST.firstAdmin.setup, after: { env: { FRIGATE_SIGNUPS: "false" }, recreate: true } },
+    },
+  };
+  const { deps, state } = harness({ overrides: { manifest, alreadySaved: true, mcpEnvUpdated: true } });
+  const summary = await runFirstAdminCatchUp({ deps });
+
+  assert.deepEqual(summary.ran, [{ id: ID, result: "ok" }], "the run's own word is kept");
+  assert.deepEqual(state.calls.reconnect, [], "nothing was written, so nothing reconnects");
+  assert.equal(state.calls.after.length, 0, "no container recreate on a boot that changed nothing");
+  assert.deepEqual(state.calls.changed, [], "nothing changed, so there is nothing to announce");
+});
+
+test("a login saved under the plan's own secretEnv is skipped before the run, even when the admin key differs", async () => {
+  // An admin-PANEL token is never the operator's login, so firstAdminSavedKey answers null for
+  // it while the setup plan still names it as its secretEnv: the gate has to ask about both.
+  const manifest = {
+    ...MANIFEST,
+    env_vars: [...MANIFEST.env_vars, { name: "VAULTWARDEN_ADMIN_TOKEN", secret: true }],
+    firstAdmin: { ...MANIFEST.firstAdmin, secretEnv: "VAULTWARDEN_ADMIN_TOKEN" },
+  };
+  assert.equal(firstAdminSavedKey(manifest), null, "the premise: the admin key says nothing");
+  const { deps, state } = harness({ overrides: { manifest, savedKey: "VAULTWARDEN_ADMIN_TOKEN" } });
+  const summary = await runFirstAdminCatchUp({ deps });
+
+  assert.deepEqual(summary.ran, []);
+  assert.equal(state.calls.run.length, 0, "the run would only answer 'already saved'");
+  assert.equal(state.calls.begun.length, 0, "not even the lock is taken");
+  assert.deepEqual(state.calls.changed, []);
+});
+
+test("a bell that cannot be written leaves the run's own answer alone", async () => {
+  const { deps } = harness({ deps: { reportChanged: async () => { throw new Error("bell is broken"); } } });
+  const summary = await runFirstAdminCatchUp({ deps });
+  assert.deepEqual(summary.ran, [{ id: ID, result: "ok" }], "a notification failure never undoes anything");
+});
+
 // ── it never throws, and never leaks ────────────────────────────────────────────
 
 test("one bundle's broken seam does not stop the next bundle", async () => {
@@ -338,6 +410,7 @@ test("one bundle's broken seam does not stop the next bundle", async () => {
     recreate: async () => ({ ok: true }),
     reconnect: async () => {},
     reportAfterFailure: async () => null,
+    reportChanged: async () => null,
     warn: () => {},
   };
   const summary = await runFirstAdminCatchUp({ deps });
@@ -362,6 +435,7 @@ test("no seam can make the catch-up throw", async () => {
     applyAfter: asyncBoom,
     reconnect: asyncBoom,
     reportAfterFailure: asyncBoom,
+    reportChanged: asyncBoom,
   };
   for (const [name, fn] of Object.entries(cases)) {
     const { deps } = harness({ deps: { [name]: fn } });
@@ -425,6 +499,7 @@ test("no password reaches a log line: the REAL run, with a sentinel", async (t) 
     recreate: async () => ({ ok: true }),
     reconnect: async () => {},
     reportAfterFailure: async () => null,
+    reportChanged: async () => null,
     warn: (m) => console.warn(m),
   };
   const summary = await runFirstAdminCatchUp({ deps });
