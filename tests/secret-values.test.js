@@ -506,6 +506,32 @@ test("every Crow home on the host is found by the shape of its secrets dir, what
   rmSync(root, { recursive: true, force: true });
 });
 
+test("_setSystemScanDirsForTest: the /etc half of the co-host scan is a scratch dir in a test, and the real defaults are back on reset", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-scan-seam-"));
+  const home = join(root, "user");
+  const self = join(home, ".crow");
+  mkdirSync(join(self, "secrets"), { recursive: true, mode: 0o700 });
+  const units = join(root, "units");
+  mkdirSync(units);
+  const declared = join(root, "srv", "other-home");
+  mkdirSync(join(declared, "secrets"), { recursive: true });
+  writeFileSync(join(units, "crow-other.service"), "[Service]\nEnvironment=CROW_HOME=" + declared + "\n");
+  const env = { CROW_HOME: self, HOME: home };
+  try {
+    SV._setSystemScanDirsForTest({ unitDirs: [units], envFileDirs: [] });
+    assert.ok(SV.instanceSecretsDirs(env).includes(join(declared, "secrets")),
+      "with no opts, a home declared under the overridden unit dir is found");
+    SV._setSystemScanDirsForTest({ unitDirs: [], envFileDirs: [] });
+    assert.equal(SV.instanceSecretsDirs(env).includes(join(declared, "secrets")), false,
+      "an empty override finds no declared home: the host's /etc is not read");
+  } finally {
+    SV._setSystemScanDirsForTest();                                    // reset: the real defaults
+    rmSync(root, { recursive: true, force: true });
+  }
+  assert.equal(SV.instanceSecretsDirs(env).includes(join(declared, "secrets")), false,
+    "after reset the override is gone (the real /etc dirs are back)");
+});
+
 test("discovery also merges the sibling-prefix scan, hides a secrets dir without keychain.key, and follows a symlinked $HOME child", () => {
   const root = mkdtempSync(join(tmpdir(), "crow-homes2-"));
   const home = join(root, "user");

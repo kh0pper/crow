@@ -170,6 +170,15 @@ process.env.CROW_DATA_DIR = join(CROW, "data");
 delete process.env.CROW_DB_PATH;
 mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 const REAL_CROW = realpathSync(CROW);
+// The co-host scan must not read the HOST's /etc (a dev box with a declared
+// extra Crow home would change these spawns): point its /etc half at scratch,
+// empty dirs. $HOME is the scratch home above, so the per-user unit dir stays.
+const SCAN_UNITS = join(USER_HOME, "scan-units");
+const SCAN_ENV = join(USER_HOME, "scan-etc-crow");
+mkdirSync(SCAN_UNITS, { recursive: true });
+mkdirSync(SCAN_ENV, { recursive: true });
+const { _setSystemScanDirsForTest } = await import("../servers/shared/secret-values.js");
+_setSystemScanDirsForTest({ unitDirs: [SCAN_UNITS], envFileDirs: [SCAN_ENV] });
 
 const { PiRpc, homeMatchesResolved, logUnhideableOnce, _resetUnhideableLogForTest } = await import("../scripts/pi-bots/bridge.mjs");
 const { probePiSandbox, _resetPiSandboxForTest } = await import("../scripts/pi-bots/pi_sandbox.mjs");
@@ -285,9 +294,10 @@ async function spawnOutcome() {
   }
 }
 
-test("a bundle link into a hidden folder (env/, secrets/) refuses with the plain sentence about the hidden folder", { skip: noSandbox }, async () => {
-  // The target is a dir under env/, which is hidden WHOLE: the .env behind the
-  // link is never maskable there, so the link itself is the refusal.
+test("a .env listed inside a hidden folder (env/) refuses with the hidden-folder sentence, naming the file's own path", { skip: noSandbox }, async () => {
+  // The bundle link is resolved by the listing, so the candidate IS the file at
+  // its real path (env/sub/.env): the file itself sits in a folder hidden WHOLE,
+  // not behind a link, so the sentence names the file's own relative path.
   const target = join(CROW, "env", "sub");
   mkdirSync(target, { recursive: true });
   mkdirSync(join(CROW, "bundles"), { recursive: true });
@@ -299,6 +309,25 @@ test("a bundle link into a hidden folder (env/, secrets/) refuses with the plain
     assert.ok(e, "the spawn is refused");
     assert.equal(e.message, "A bot could not start: env/sub/.env is a link into a hidden folder, so Crow can't hide it. Remove the link.");
     assert.ok(!e.message.includes("fake-hidden-folder-env"), "no content in the message");
+  } finally { rmSync(link, { force: true }); rmSync(join(CROW, "env"), { recursive: true, force: true }); }
+});
+
+test("a root .env that is a link into a hidden folder refuses, naming the LINK (.env), not the file it points at", { skip: noSandbox }, async () => {
+  // env/ is hidden WHOLE, so a link leading into it is the refusal. The link is
+  // on the candidate's own path, so the sentence names the LINK below its root
+  // (the way a link-out names its link), never the target behind it.
+  const target = join(CROW, "env", "sub");
+  mkdirSync(target, { recursive: true });
+  writeFileSync(join(target, "real.env"), "fake-linked-hidden-env\n", { mode: 0o600 });
+  const link = join(CROW, ".env");
+  rmSync(link, { force: true });
+  symlinkSync(join(target, "real.env"), link);
+  try {
+    const e = await spawnOutcome();
+    assert.ok(e, "the spawn is refused");
+    assert.equal(e.message, "A bot could not start: .env is a link into a hidden folder, so Crow can't hide it. Remove the link.");
+    assert.ok(!e.message.includes("fake-linked-hidden-env"), "no content in the message");
+    assert.ok(!e.message.includes("real.env"), "and not the file the link leads to");
   } finally { rmSync(link, { force: true }); rmSync(join(CROW, "env"), { recursive: true, force: true }); }
 });
 
@@ -580,6 +609,20 @@ test("the instance env/ and android-keystore/ folders list empty inside", { skip
   } finally { rmSync(envDir, { recursive: true, force: true }); rmSync(keyDir, { recursive: true, force: true }); }
 });
 
+test("a root .env.bak-<date> copy reads empty inside a sandboxed spawn and keeps its content on disk", { skip: noSandbox }, async () => {
+  // The .env* name rule covers a backup copy beside the real file: it is a
+  // secret of its own, masked at its own name like the plain .env.
+  const backup = join(CROW, ".env.bak-20261101");
+  const value = "fake-env-backup-value\n";
+  writeFileSync(backup, value, { mode: 0o600 });
+  try {
+    const { report, masked } = await spawnReport({ files: { backup } });
+    assert.equal(report.len.backup, 0, "the backup copy reads empty inside");
+    assert.ok(masked.includes(join(REAL_CROW, ".env.bak-20261101")), "masked at its own name");
+    assert.equal(readFileSync(backup, "utf8"), value, "the file on disk keeps its content");
+  } finally { rmSync(backup, { force: true }); }
+});
+
 test("the add-on registry and its backups read empty inside a sandboxed spawn; mcp-addons.example.json stays readable", { skip: noSandbox }, async () => {
   const addons = join(CROW, "mcp-addons.json");
   const addonsBackup = join(CROW, "mcp-addons.json.bak-20261111");
@@ -609,10 +652,12 @@ test("the add-on registry and its backups read empty inside a sandboxed spawn; m
 
 test("mcp-addons.json with another hard link refuses the spawn, naming it and no content", { skip: noSandbox }, async () => {
   const addons = join(CROW, "mcp-addons.json");
-  const extra = join(CROW, "mcp-addons-extra-name");
+  const extra = join(CROW, "addons-copy");
   const fake = '{"fake-addon":{"env":{"FAKE_KEY":"fake-hardlinked-value"}}}\n';
   writeFileSync(addons, fake, { mode: 0o600 });
-  // A second name on disk (masking one leaves the other readable).
+  // A second name on disk (masking one leaves the other readable). The extra
+  // name does NOT match the add-on rule, so only the hard link on the registry
+  // itself can be the reason for the refusal.
   linkSync(addons, extra);
   try {
     const e = await spawnOutcome();

@@ -21,6 +21,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
+// The co-host scan must not read the HOST's /etc (a dev box with a declared
+// extra Crow home would change these spawns): point its /etc half at scratch,
+// empty dirs.
+const SCAN_ROOT = mkdtempSync(join(tmpdir(), "crow-pirpc-exit-scan-"));
+const SCAN_UNITS = join(SCAN_ROOT, "units");
+const SCAN_ENV = join(SCAN_ROOT, "etc-crow");
+mkdirSync(SCAN_UNITS, { recursive: true });
+mkdirSync(SCAN_ENV, { recursive: true });
+const { _setSystemScanDirsForTest } = await import("../servers/shared/secret-values.js");
+_setSystemScanDirsForTest({ unitDirs: [SCAN_UNITS], envFileDirs: [SCAN_ENV] });
 
 function makeStub(dir, body) {
   const p = join(dir, "stub-pi.mjs");
