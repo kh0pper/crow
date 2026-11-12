@@ -554,3 +554,25 @@ test("a Learn-page open passes no card slot", async () => {
   assert.deepEqual(JSON.parse(JSON.stringify(mounted.opts.chain)), [{ chunkId: "walk-10" }]);
   assert.equal(booted.sandbox.window.RambleMoves.transitionMs, 1200, "the pure helpers are still exported");
 });
+
+/* ---------------------------------------------- the fixes from the review */
+
+test("fix: the client puts the player host on screen before it mounts, and names a narrow layout", () => {
+  const src = CLIENT_SRC();
+  const from = src.indexOf("function mountPlayer(");
+  const to = src.indexOf("function openPlayer(");
+  assert.ok(from > 0 && to > from, "mountPlayer sits where the client keeps it");
+  const body = src.slice(from, to);
+
+  const shownAt = body.indexOf("setHidden(host, false)");
+  const mountAt = body.indexOf("Player.mount(host");
+  assert.ok(shownAt > 0, "the mount unhides the host");
+  assert.ok(mountAt > 0, "and mounts the player on it");
+  assert.ok(shownAt < mountAt, "the host is on screen before its width is read and the player mounted");
+  assert.ok(body.indexOf("clientWidth") > shownAt, "the width is read once the host is on screen");
+  assert.ok(body.includes('options.layout = "phone"'), "a narrow or unmeasured host is played as a phone");
+  assert.equal(/options\.layout = "(kiosk|class)"/.test(body), false,
+    "a wide host is left to the player to decide");
+
+  assert.ok(src.includes("err.status = res.status"), "a failed route answer carries its status to the caller");
+});

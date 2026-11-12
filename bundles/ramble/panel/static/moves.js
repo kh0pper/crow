@@ -277,7 +277,11 @@
     return fetch(url, opts).then(function (res) {
       if (res.status === 204) return null;
       return res.json().catch(function () { return null; }).then(function (body) {
-        if (!res.ok) throw new Error((body && body.error) || ("request failed: " + res.status));
+        if (!res.ok) {
+          var err = new Error((body && body.error) || ("request failed: " + res.status));
+          err.status = res.status;
+          throw err;
+        }
         return body;
       });
     });
@@ -1034,6 +1038,12 @@
       onEvent: function () {}
     };
     if (ctx && typeof ctx.cardSlot === "string" && ctx.cardSlot !== "") options.cardSlot = ctx.cardSlot;
+    /* The host has to be on screen before its width is worth reading, and the
+     * width decides the layout: a narrow screen plays the phone one, a measured
+     * wide one is left to the player. */
+    setHidden(host, false);
+    var width = typeof host.clientWidth === "number" ? host.clientWidth : 0;
+    if (!(width >= 700)) options.layout = "phone";
     var handle = null;
     try {
       handle = Player.mount(host, options);
@@ -1047,7 +1057,6 @@
     }
     playerHandle = handle;
     setStaticEntry(false);
-    setHidden(host, false);
   }
 
   /* Play one chunk: the entry, everything its steps reach, and the player over

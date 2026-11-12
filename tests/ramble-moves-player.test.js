@@ -513,7 +513,8 @@ test("controls: Back, Pause, Keep going and Skip work", () => {
   assert.equal(pause.tagName, "BUTTON");
   assert.equal(pause.getAttribute("type"), "button");
   assert.equal(pause.textContent, COPY["player.pause"]);
-  assert.equal(pause.getAttribute("aria-pressed"), "false");
+  assert.equal(pause.hasAttribute("aria-pressed"), false,
+    "a button whose label changes carries no pressed state");
   assert.equal(byRole(booted.host, "status"), null, "nothing is paused yet");
 
   advance(booted.clock, 63);
@@ -528,7 +529,7 @@ test("controls: Back, Pause, Keep going and Skip work", () => {
   byRole(booted.host, "pause").click();
   assert.equal(player.state().paused, true);
   assert.equal(byRole(booted.host, "pause").textContent, COPY["player.keepGoing"]);
-  assert.equal(byRole(booted.host, "pause").getAttribute("aria-pressed"), "true");
+  assert.equal(byRole(booted.host, "pause").hasAttribute("aria-pressed"), false);
   assert.equal(byRole(booted.host, "status").textContent, COPY["player.paused"]);
 
   byRole(booted.host, "pause").click();
@@ -704,7 +705,7 @@ test("controls: destroy takes the visibilitychange listener off", () => {
 
   assert.equal((booted.docListeners.visibilitychange || []).length, 0);
   fireVisibility(booted, true);
-  assert.equal(player.state().paused, false, "nothing hears the hidden tab any more");
+  assert.equal(player.state().paused, true, "nothing left hears the hidden tab");
   assert.equal(booted.host.children.length, 0);
 });
 
@@ -800,6 +801,20 @@ function fakeStorage(seed) {
   };
 }
 
+/* The local day a moment falls on, named the way the player names it. */
+function dayOf(ms) {
+  const when = new Date(ms);
+  const pad = (value) => (value < 10 ? "0" + value : String(value));
+  return when.getFullYear() + "-" + pad(when.getMonth() + 1) + "-" + pad(when.getDate());
+}
+
+/* The error a page answers a refused report with: a word and a status. */
+function statusError(status) {
+  const err = new Error("refused: " + status);
+  err.status = status;
+  return err;
+}
+
 /* The planned seconds of each chunk, straight off the compiled timeline. */
 function plannedOfChunks(booted, chain) {
   const timeline = booted.sandbox.RambleSession.compileSession(chain, FINISH_LIB, { guidance: "full" });
@@ -888,7 +903,12 @@ test("finish: 4:59 leaves the chunk undone, saves a resume record and a remount 
   assert.equal(note.textContent, COPY["player.end.notYet"]);
 
   const saved = JSON.parse(storage.getItem("ramble.player.resume.routine-10"));
-  assert.deepEqual(saved, { segmentIndex: 2, activeSeconds: [299] });
+  assert.deepEqual(saved, {
+    day: dayOf(301000),
+    segmentIndex: 2,
+    activeSeconds: [299],
+    cardKeys: [null],
+  });
 
   /* The same storage, a fresh player: the line before Start, and the first
    * Start back at the stored segment. */
@@ -1144,7 +1164,9 @@ test("finish: That's it hides the choices, keeps the result lines and drops the 
   const booted = boot();
   const chain = [{ chunkId: "routine-10" }];
   const storage = fakeStorage({
-    "ramble.player.resume.routine-10": JSON.stringify({ segmentIndex: 0, activeSeconds: [0] }),
+    "ramble.player.resume.routine-10": JSON.stringify({
+      day: dayOf(0), segmentIndex: 0, activeSeconds: [0], cardKeys: [null]
+    }),
   });
   const recorder = postRecorder(booted, chain);
   const heard = [];
@@ -1399,6 +1421,7 @@ test("posting: a rejected post waits in storage and is retried on a later tick",
     chunkIndex: 0,
     entryId: "walk-10",
     activeSeconds: 120,
+    visit: "0",
   }], "the report that could not be made waits in storage");
 
   advance(booted.clock, 12);
@@ -1436,6 +1459,7 @@ test("posting: a queued post survives a remount and is retried by the next visit
     chunkIndex: 0,
     entryId: "walk-10",
     activeSeconds: 90,
+    visit: "0",
   }]);
 
   const second = boot();
@@ -1566,5 +1590,304 @@ test("posting: destroy reports the time the beat counted and no post carried", a
     entryId: "walk-10",
     activeSeconds: 100,
   });
+});
+
+/* ---------- the fixes the review asked for ---------- */
+
+test("fix: a queued item with no card asks for a start and posts with the key it answers", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }];
+  const storage = fakeStorage();
+  const starts = [];
+  const posted = [];
+  let aCardIsOffered = false;
+  mountOn(booted, chain, {
+    storage,
+    cardSlot: "day",
+    start: (body) => {
+      starts.push(plain(body));
+      if (!aCardIsOffered) return Promise.resolve({});
+      return Promise.resolve({ cardKey: "card-after-retry" });
+    },
+    post: (payload) => { posted.push(plain(payload)); return Promise.resolve({ done: false }); },
+  });
+
+  byRole(booted.host, "start").click();
+  await settle();
+  advance(booted.clock, 100);
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  assert.equal(posted.length, 0, "a chunk with no card of its own is not reported");
+  const waiting = queueOf(storage);
+  assert.equal(waiting.length, 1, "the report waits in storage");
+  assert.equal(waiting[0].cardKey, undefined, "it has no card to be sent against yet");
+  assert.equal(waiting[0].activeSeconds, 100);
+
+  /* The start still answers no card: the item stays where it was. */
+  const startsBefore = starts.length;
+  advance(booted.clock, 12);
+  await settle();
+  assert.equal(starts.length > startsBefore, true, "the retry asks the page for a card again");
+  assert.equal(queueOf(storage).length, 1, "a start that still answers nothing leaves the item queued");
+  assert.equal(posted.length, 0);
+
+  aCardIsOffered = true;
+  advance(booted.clock, 12);
+  await settle();
+
+  assert.equal(posted.length, 1, "the item goes out once a card answers");
+  assert.equal(posted[0].cardKey, "card-after-retry", "it is sent against the card the start answered");
+  assert.equal(posted[0].activeSeconds, 100);
+  assert.deepEqual(queueOf(storage), [], "and it leaves the queue");
+});
+
+test("fix: a stored item is sent only with its own card key and leaves once the page has it", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }];
+  const storage = fakeStorage({
+    [QUEUE_KEY]: JSON.stringify([
+      { cardKey: "card-from-another-visit", chunkIndex: 0, entryId: "walk-10", activeSeconds: 120, visit: "other" },
+    ]),
+  });
+  const posted = [];
+  mountOn(booted, chain, {
+    storage,
+    cardSlot: "day",
+    start: () => Promise.resolve({ cardKey: "2026-01-01:day" }),
+    post: (payload) => { posted.push(plain(payload)); return Promise.resolve({ done: false }); },
+  });
+
+  await settle();
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].cardKey, "card-from-another-visit", "the item keeps the card it was stored for");
+  assert.equal(posted[0].activeSeconds, 120);
+  assert.deepEqual(queueOf(storage), [], "an acknowledged item leaves the queue");
+
+  byRole(booted.host, "start").click();
+  await settle();
+  advance(booted.clock, 130);
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  const own = posted.filter((one) => one.cardKey === "2026-01-01:day");
+  assert.equal(own.length, 1, "this visit reports against its own card");
+  assert.equal(own[0].activeSeconds, 130, "the other visit's count is no floor for this card");
+  assert.equal(posted.some((one) => one.activeSeconds === 120 && one.cardKey === "2026-01-01:day"), false,
+    "the other visit's card is never this chunk's card");
+});
+
+test("fix: a resumed visit reuses the record's card keys and posts the total under them", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }];
+  const storage = fakeStorage({
+    "ramble.player.resume.walk-10": JSON.stringify({
+      day: dayOf(0),
+      segmentIndex: 0,
+      activeSeconds: [240],
+      cardKeys: ["card-from-earlier-today"],
+    }),
+  });
+  const starts = [];
+  const posted = [];
+  const { player } = mountOn(booted, chain, {
+    storage,
+    cardSlot: "day",
+    start: (body) => { starts.push(plain(body)); return Promise.resolve({ cardKey: "a-fresh-card" }); },
+    post: (payload) => { posted.push(plain(payload)); return Promise.resolve({ done: false }); },
+  });
+
+  assert.ok(byRole(booted.host, "resume-line"), "today's record is offered before Start");
+  byRole(booted.host, "start").click();
+  await settle();
+  assert.deepEqual(starts, [], "the stored card is used, never asked for again");
+
+  advance(booted.clock, 60);
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].cardKey, "card-from-earlier-today", "the report goes against the stored card");
+  assert.equal(posted[0].activeSeconds, 300, "the stored seconds and this visit's own, counted once");
+  assert.equal(player.state().finished, true);
+});
+
+test("fix: a resume record from another day is ignored and taken out of storage", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }];
+  const key = "ramble.player.resume.walk-10";
+  const storage = fakeStorage({
+    [key]: JSON.stringify({
+      day: "1999-01-01",
+      segmentIndex: 0,
+      activeSeconds: [240],
+      cardKeys: ["stale-card"],
+    }),
+  });
+  const posted = [];
+  const { player } = mountOn(booted, chain, {
+    storage,
+    post: (payload) => { posted.push(plain(payload)); return Promise.resolve({ done: false }); },
+  });
+
+  assert.equal(byRole(booted.host, "resume-line"), null, "no line for a record of another day");
+  assert.equal(storage.getItem(key), null, "the stale record is taken out of storage");
+
+  byRole(booted.host, "start").click();
+  assert.equal(player.state().segmentIndex, 0, "the visit starts at the top");
+  advance(booted.clock, 60);
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].activeSeconds, 60, "yesterday's seconds are not counted again");
+});
+
+test("fix: the wake lock goes back when the clock ends", async () => {
+  const booted = boot();
+  const events = [];
+  let asked = 0;
+  const { player } = mountOn(booted, [{ chunkId: "walk-10" }], {
+    wakeLock: {
+      request() {
+        asked += 1;
+        return { release() { events.push("released-" + asked); } };
+      },
+    },
+  });
+
+  byRole(booted.host, "start").click();
+  assert.equal(asked, 1);
+  assert.deepEqual(events, [], "a running session holds the lock");
+
+  advance(booted.clock, 605);
+  await settle();
+
+  assert.equal(player.state().ended, true);
+  assert.deepEqual(events, ["released-1"], "the end of the clock hands the lock back");
+  assert.equal(byRole(booted.host, "pause"), null, "and the transport with it");
+});
+
+test("fix: destroy stops the clock before it reports what the beat counted", async () => {
+  const booted = boot();
+  const posted = [];
+  const { player } = mountOn(booted, [{ chunkId: "walk-10" }], {
+    start: () => Promise.resolve({ cardKey: "2026-01-01:day" }),
+    post: (payload) => { posted.push(plain(payload)); return Promise.resolve({ done: false }); },
+  });
+
+  byRole(booted.host, "start").click();
+  await settle();
+  advance(booted.clock, 100);
+  assert.equal(player.state().paused, false, "the session is running");
+
+  player.destroy();
+  await settle();
+
+  assert.equal(player.state().paused, true, "the clock is stopped where it stood");
+  assert.equal(posted.length, 1);
+  assert.deepEqual(posted[0], {
+    cardKey: "2026-01-01:day",
+    chunkIndex: 0,
+    entryId: "walk-10",
+    activeSeconds: 100,
+  });
+});
+
+test("fix: the pause button carries the page's word and no pressed state", () => {
+  const booted = boot();
+  mountOn(booted, [{ chunkId: "walk-10" }]);
+
+  byRole(booted.host, "start").click();
+  const running = byRole(booted.host, "pause");
+  assert.equal(running.textContent, COPY["player.pause"]);
+  assert.equal(running.hasAttribute("aria-pressed"), false, "the label says what the button does");
+
+  running.click();
+  const paused = byRole(booted.host, "pause");
+  assert.equal(paused.textContent, COPY["player.keepGoing"], "a paused session offers Keep going");
+  assert.equal(paused.hasAttribute("aria-pressed"), false, "and carries no pressed state");
+
+  paused.click();
+  const going = byRole(booted.host, "pause");
+  assert.equal(going.textContent, COPY["player.pause"]);
+  assert.equal(going.hasAttribute("aria-pressed"), false);
+});
+
+test("fix: stored seconds are clamped to a chunk's worth and a non-number is dropped", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }, { chunkId: "walk-10" }];
+  const storage = fakeStorage({
+    "ramble.player.resume.walk-10|walk-10": JSON.stringify({
+      day: dayOf(0),
+      segmentIndex: 0,
+      activeSeconds: [-30, 999999],
+      cardKeys: [null, null],
+    }),
+    [QUEUE_KEY]: JSON.stringify([
+      { cardKey: "card-below-zero", chunkIndex: 0, entryId: "walk-10", activeSeconds: -5, visit: "old" },
+      { cardKey: "card-far-too-long", chunkIndex: 0, entryId: "walk-10", activeSeconds: 999999, visit: "old" },
+      { cardKey: "card-not-a-number", chunkIndex: 0, entryId: "walk-10", activeSeconds: "plenty", visit: "old" },
+    ]),
+  });
+  const posted = [];
+  mountOn(booted, chain, {
+    storage,
+    post: (payload) => { posted.push(plain(payload)); return Promise.resolve({ done: false }); },
+  });
+
+  await settle();
+  const sent = posted.map((one) => [one.cardKey, one.activeSeconds]);
+  assert.deepEqual(sent, [["card-below-zero", 0], ["card-far-too-long", 21600]],
+    "a stored count is brought inside 0..21600, and one that is no number is dropped");
+  assert.deepEqual(queueOf(storage), [], "what was sent leaves the queue");
+
+  posted.length = 0;
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 60);
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  const byChunk = posted.map((one) => [one.chunkIndex, one.activeSeconds]);
+  assert.deepEqual(byChunk, [[0, 60], [1, 21600]],
+    "the record's own counts are clamped the same way");
+
+  /* A record holding something that is no number at all is no record. */
+  const odd = boot();
+  const oddStorage = fakeStorage({
+    "ramble.player.resume.walk-10": JSON.stringify({
+      day: dayOf(0), segmentIndex: 0, activeSeconds: ["plenty"], cardKeys: [null]
+    }),
+  });
+  mountOn(odd, [{ chunkId: "walk-10" }], { storage: oddStorage });
+  assert.equal(byRole(odd.host, "resume-line"), null);
+});
+
+test("fix: a queue item the page refuses outright stops waiting, a timeout and a throttle do not", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }];
+  const storage = fakeStorage({
+    [QUEUE_KEY]: JSON.stringify([
+      { cardKey: "card-refused", chunkIndex: 0, entryId: "walk-10", activeSeconds: 60, visit: "old" },
+      { cardKey: "card-timed-out", chunkIndex: 0, entryId: "walk-10", activeSeconds: 60, visit: "old" },
+      { cardKey: "card-throttled", chunkIndex: 0, entryId: "walk-10", activeSeconds: 60, visit: "old" },
+    ]),
+  });
+  const posted = [];
+  const status = { "card-refused": 422, "card-timed-out": 408, "card-throttled": 429 };
+  mountOn(booted, chain, {
+    storage,
+    post: (payload) => {
+      posted.push(payload.cardKey);
+      return Promise.reject(statusError(status[payload.cardKey]));
+    },
+  });
+
+  await settle();
+
+  assert.deepEqual(posted.slice().sort(), ["card-refused", "card-throttled", "card-timed-out"],
+    "every waiting item was tried once");
+  assert.deepEqual(queueOf(storage).map((one) => one.cardKey), ["card-timed-out", "card-throttled"],
+    "a refused report is dropped, a timeout and a throttle are kept");
 });
 

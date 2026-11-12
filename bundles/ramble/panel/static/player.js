@@ -24,6 +24,9 @@
   var QUEUE_KEY = "ramble.player.queue";
   var RETRY_TICKS = 10;
   var RETRY_MS = 10000;
+  /* The most counted time a stored report is trusted for in one chunk: six
+   * hours, more than any session the player can hold. */
+  var MAX_STORED_SECONDS = 21600;
 
   /* ---------- the page around us ---------- */
 
@@ -114,6 +117,15 @@
     if (wanted === "phone" || wanted === "kiosk" || wanted === "class") return wanted;
     var width = host && typeof host.clientWidth === "number" ? host.clientWidth : 700;
     return width < 700 ? "phone" : "kiosk";
+  }
+
+  /* The local day a moment falls on, as YYYY-MM-DD. */
+  function localDay(ms) {
+    var when = new Date(typeof ms === "number" && isFinite(ms) ? ms : Date.now());
+    function pad(value) {
+      return value < 10 ? "0" + value : String(value);
+    }
+    return when.getFullYear() + "-" + pad(when.getMonth() + 1) + "-" + pad(when.getDate());
   }
 
   function prefersReducedMotion() {
@@ -586,16 +598,18 @@
     /* One card per chunk of the chain, as the page's start answered it. */
     var cardKeys = [];
     var startWaiting = [];
-    /* The highest count each card has had acknowledged, so a report never says
-     * less than one before it. */
-    var lastAck = Object.create(null);
-    /* The highest count already on its way to the page for a card, so the same
-     * report is never sent twice while the first one is still out. */
-    var lastSent = Object.create(null);
-    var inFlight = Object.create(null);
-    var lastDoneAck = Object.create(null);
-    /* Reports that could not be made, keyed by card: storage when the page has
-     * any, this visit's memory when it has none. */
+    /* What each card has been told, by card key: the highest count
+     * acknowledged, the highest already on its way, and the Done the page
+     * answered. A visit starts with none of it, so no card of an earlier visit
+     * speaks for one of this visit's. */
+    var floors = new Map();
+    /* The report a card of this visit is still waiting on, by card key. */
+    var inFlight = new Map();
+    /* This visit's own name in the queue, so two visits' keyless items are
+     * never the same item. */
+    var visitId = String(nowFn());
+    /* Reports that could not be made: storage when the page has any, this
+     * visit's memory when it has none. */
     var queue = readQueue();
     var ticks = 0;
     var lastRetryTick = 0;
@@ -606,17 +620,31 @@
      * time from the session that chunk belongs to. */
     var currentChain = Array.isArray(options.chain) ? options.chain : [];
 
-    /* A chunk's place in the queue and in the ack list: the card the page's
-     * start answered with, or a chunk of this visit that has no card yet. */
+    /* An item's place in the queue: the card it was stored for, or the chunk
+     * it belongs to together with the visit that saw it, so two visits'
+     * keyless items are never one item. */
     function queueIdOf(item) {
-      if (item && typeof item.cardKey === "string" && item.cardKey !== "") return item.cardKey;
+      var cardKey = item && typeof item.cardKey === "string" ? item.cardKey : "";
+      if (cardKey !== "") return cardKey;
       var index = item && Number.isInteger(item.chunkIndex) ? item.chunkIndex : -1;
-      return "#" + index;
+      var visit = item && typeof item.visit === "string" ? item.visit : "";
+      return "#" + index + "@" + visit;
     }
 
-    function ackKeyOf(index) {
+    /* The key a chunk's report and its floor live under: the card the page's
+     * start answered with, or the chunk's own name while it has none. */
+    function floorKeyOf(index) {
       var key = cardKeys[index];
       return typeof key === "string" && key !== "" ? key : "#" + index;
+    }
+
+    /* The item a chunk of this visit stands for in the queue. */
+    function queueRef(index, key) {
+      return {
+        cardKey: typeof key === "string" && key !== "" ? key : undefined,
+        chunkIndex: index,
+        visit: visitId
+      };
     }
 
     /* The slot a chunk's start names: the page's own slot for the first chunk,
@@ -628,12 +656,18 @@
       return "extra";
     }
 
-    function secondsOrNull(value) {
-      return typeof value === "number" && isFinite(value) ? value : null;
+    /* A stored count outside what a chunk can hold is brought back inside it;
+     * one that is no number at all is no count to send. */
+    function clampSeconds(value) {
+      if (typeof value !== "number" || !isFinite(value)) return null;
+      if (value < 0) return 0;
+      if (value > MAX_STORED_SECONDS) return MAX_STORED_SECONDS;
+      return value;
     }
 
     /* The queue as storage kept it. Anything whose shape is not one this player
-     * wrote is dropped. */
+     * wrote is dropped, and a count outside what a chunk can hold is brought
+     * back inside it. */
     function readQueue() {
       var raw = storageGet(QUEUE_KEY);
       if (raw === null || raw === "") return [];
@@ -649,14 +683,16 @@
         var item = data[i];
         if (!item || typeof item !== "object") continue;
         if (!Number.isInteger(item.chunkIndex) || item.chunkIndex < 0) continue;
-        var seconds = secondsOrNull(item.activeSeconds);
-        if (seconds === null || seconds <= 0) continue;
-        out.push({
-          cardKey: typeof item.cardKey === "string" && item.cardKey !== "" ? item.cardKey : undefined,
+        var seconds = clampSeconds(item.activeSeconds);
+        if (seconds === null) continue;
+        var one = {
           chunkIndex: item.chunkIndex,
           entryId: typeof item.entryId === "string" ? item.entryId : "",
-          activeSeconds: seconds
-        });
+          activeSeconds: seconds,
+          visit: typeof item.visit === "string" ? item.visit : ""
+        };
+        if (typeof item.cardKey === "string" && item.cardKey !== "") one.cardKey = item.cardKey;
+        out.push(one);
       }
       return out;
     }
@@ -672,7 +708,8 @@
         var one = {
           chunkIndex: item.chunkIndex,
           entryId: item.entryId,
-          activeSeconds: item.activeSeconds
+          activeSeconds: item.activeSeconds,
+          visit: typeof item.visit === "string" ? item.visit : ""
         };
         if (typeof item.cardKey === "string" && item.cardKey !== "") one.cardKey = item.cardKey;
         plain.push(one);
@@ -680,12 +717,19 @@
       storageSet(QUEUE_KEY, JSON.stringify(plain));
     }
 
-    /* One item per card: the larger count wins, because a report never goes
-     * backwards. */
+    /* One item per card, and one per keyless chunk of a visit: the larger count
+     * wins, because a report never goes backwards. */
     function enqueue(item) {
-      var id = queueIdOf(item);
+      var fresh = {
+        cardKey: typeof item.cardKey === "string" && item.cardKey !== "" ? item.cardKey : undefined,
+        chunkIndex: item.chunkIndex,
+        entryId: item.entryId,
+        activeSeconds: item.activeSeconds,
+        visit: typeof item.visit === "string" && item.visit !== "" ? item.visit : visitId
+      };
+      var id = queueIdOf(fresh);
       var kept = [];
-      var merged = item;
+      var merged = fresh;
       for (var i = 0; i < queue.length; i += 1) {
         var one = queue[i];
         if (!one) continue;
@@ -695,30 +739,19 @@
         }
         kept.push(one);
       }
-      var key = typeof merged.cardKey === "string" && merged.cardKey !== "" ? merged.cardKey : undefined;
-      if (key === undefined && typeof item.cardKey === "string" && item.cardKey !== "") {
-        key = item.cardKey;
-      }
-      kept.push({
-        cardKey: key,
-        chunkIndex: merged.chunkIndex,
-        entryId: merged.entryId,
-        activeSeconds: merged.activeSeconds
-      });
+      kept.push(merged);
       queue = kept;
       saveQueue();
     }
 
-    /* The item has been carried: it leaves the queue. */
-    function dropQueued(index, key) {
+    /* The item has been carried, or refused for good: it leaves the queue. */
+    function dropQueued(item) {
+      var id = queueIdOf(item);
       var kept = [];
       for (var i = 0; i < queue.length; i += 1) {
         var one = queue[i];
         if (!one) continue;
-        var sameKey = typeof key === "string" && key !== ""
-          ? one.cardKey === key
-          : (one.cardKey === undefined || one.cardKey === "");
-        if (sameKey && one.chunkIndex === index) continue;
+        if (queueIdOf(one) === id) continue;
         kept.push(one);
       }
       if (kept.length === queue.length) return;
@@ -726,11 +759,23 @@
       saveQueue();
     }
 
+    /* A card's record for this visit, made when it is first read. */
+    function floorOf(key) {
+      var one = floors.get(key);
+      if (!one) {
+        one = { ack: null, sent: null, done: null };
+        floors.set(key, one);
+      }
+      return one;
+    }
+
     /* A count never goes backwards: what an earlier report said about a card,
      * or is saying now, is the floor for every later one. */
     function lastTold(key) {
-      var sent = lastSent[key];
-      var ack = lastAck[key];
+      var one = floors.get(key);
+      if (!one) return null;
+      var sent = one.sent;
+      var ack = one.ack;
       if (typeof sent === "number" && typeof ack === "number") return sent > ack ? sent : ack;
       if (typeof sent === "number") return sent;
       return typeof ack === "number" ? ack : null;
@@ -748,14 +793,26 @@
     }
 
     function acknowledge(key, seconds) {
-      if (typeof lastAck[key] !== "number" || seconds > lastAck[key]) lastAck[key] = seconds;
-      delete lastSent[key];
+      var one = floorOf(key);
+      if (typeof one.ack !== "number" || seconds > one.ack) one.ack = seconds;
+      one.sent = null;
+    }
+
+    /* A count on its way to the page, so the same report is never sent twice
+     * while the first one is still out. */
+    function toldSent(key, seconds) {
+      floorOf(key).sent = seconds;
     }
 
     /* A report that never landed says nothing about the card, so the count it
      * carried is not treated as told. */
     function forgetSent(key) {
-      delete lastSent[key];
+      var one = floors.get(key);
+      if (one) one.sent = null;
+    }
+
+    function rememberDone(key, done) {
+      floorOf(key).done = done;
     }
 
     /* The card a chunk reports against. The page's start answers it once per
@@ -809,49 +866,91 @@
       return answer;
     }
 
-    function acceptQueued(item, carried, answer) {
-      acknowledge(item.cardKey, carried);
-      var progress = progressOf(answer);
-      if (progress && typeof progress === "object" && typeof progress.done === "boolean") {
-        lastDoneAck[item.cardKey] = progress.done;
+    /* One queued item is on its way at a time: the post decides what happens
+     * to it, so a retry never talks over one already sent. */
+    function sendQueued(item) {
+      if (destroyed || !item || !hooks.post) return;
+      var key = typeof item.cardKey === "string" && item.cardKey !== "" ? item.cardKey : "";
+      if (key === "") {
+        sendKeylessQueued(item);
+        return;
       }
-      dropQueued(item.chunkIndex, item.cardKey);
+      sendQueuedAgainst(item, key);
     }
 
-    /* One queued item, sent against the card it was first refused for. An item
-     * with no card yet waits for its chunk's own report, which asks the page
-     * for a card first. */
-    function sendQueued(item) {
-      if (!item || typeof item.cardKey !== "string" || item.cardKey === "") return;
-      if (chunkIdOf(item.chunkIndex) === item.entryId) {
-        var known = cardKeys[item.chunkIndex];
-        if (typeof known !== "string" || known === "") cardKeys[item.chunkIndex] = item.cardKey;
+    /* An item stored with no card belongs to a chunk of the chain being run:
+     * the start that failed for it is asked once more, and the report waits for
+     * the card it answers. A start that still answers nothing leaves the item
+     * where it was. */
+    function sendKeylessQueued(item) {
+      if (!hooks.start) return;
+      var index = item.chunkIndex;
+      if (chunkIdOf(index) !== item.entryId) return;
+      var known = cardKeys[index];
+      if (typeof known === "string" && known !== "") {
+        sendQueuedAgainst(item, known);
+        return;
       }
-      var carried = raiseTo(item.cardKey, item.activeSeconds);
-      if (acked(item.cardKey, carried)) {
-        dropQueued(item.chunkIndex, item.cardKey);
+      var waiting = startFor(index);
+      if (!waiting) return;
+      Promise.resolve(waiting).then(function () {
+        if (destroyed) return;
+        var answered = cardKeys[index];
+        if (typeof answered !== "string" || answered === "") return;
+        sendQueuedAgainst(item, answered);
+      }, function () {
+        return undefined;
+      });
+    }
+
+    /* The post itself, against the card the item was stored with and no other:
+     * its own count, raised to what that card already knows, and the item gone
+     * once the page has it. A 400-499 answer that is neither a timeout nor a
+     * throttle is the report being refused, so the item goes rather than wait
+     * for ever. */
+    function sendQueuedAgainst(item, key) {
+      var id = queueIdOf(item);
+      if (inFlight.get(id)) return;
+      var carried = raiseTo(key, item.activeSeconds);
+      if (acked(key, carried)) {
+        dropQueued(item);
         return;
       }
       var answer;
       try {
+        inFlight.set(id, true);
         answer = hooks.post({
-          cardKey: item.cardKey,
+          cardKey: key,
           chunkIndex: item.chunkIndex,
           entryId: item.entryId,
           activeSeconds: carried
         });
       } catch (err) {
+        inFlight.delete(id);
         return;
       }
       if (!answer || typeof answer.then !== "function") {
-        acceptQueued(item, carried, answer);
+        inFlight.delete(id);
+        dropQueued(item);
         return;
       }
-      Promise.resolve(answer).then(function (value) {
-        acceptQueued(item, carried, value);
-      }, function () {
-        return undefined;
+      Promise.resolve(answer).then(function () {
+        inFlight.delete(id);
+        dropQueued(item);
+      }, function (err) {
+        inFlight.delete(id);
+        if (refusedReport(err)) dropQueued(item);
       });
+    }
+
+    /* A page that answers 400-499 itself has refused the report: a timeout and
+     * a throttle are worth another try, nothing else in that range is. */
+    function refusedReport(err) {
+      if (!err || typeof err !== "object") return false;
+      var status = err.status;
+      if (typeof status !== "number" || !isFinite(status)) return false;
+      if (status < 400 || status > 499) return false;
+      return status !== 408 && status !== 429;
     }
 
     /* The queue is retried whole: at mount, on the beat, and before every fresh
@@ -889,8 +988,9 @@
       postOne(index, active);
     }
 
-    /* The resume record, when its shape is one this player wrote. Anything else
-     * is no record at all and is ignored. */
+    /* The resume record, when it is one this player wrote today. Anything else
+     * is no record at all: a record from another day is taken out of storage,
+     * because picking up yesterday's visit would count its time twice. */
     function readResumeRecord() {
       var raw = storageGet(resumeKey());
       if (raw === null || raw === "") return null;
@@ -901,24 +1001,44 @@
         return null;
       }
       if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+      if (data.day !== localDay(nowFn())) {
+        storageDrop(resumeKey());
+        return null;
+      }
       if (!Number.isInteger(data.segmentIndex) || data.segmentIndex < 0) return null;
       if (!Array.isArray(data.activeSeconds)) return null;
       var counts = [];
       for (var i = 0; i < data.activeSeconds.length; i += 1) {
-        var value = data.activeSeconds[i];
-        if (typeof value !== "number" || !isFinite(value) || value < 0) return null;
+        var value = clampSeconds(data.activeSeconds[i]);
+        if (value === null) return null;
         counts.push(value);
+      }
+      var keys = [];
+      var rawKeys = Array.isArray(data.cardKeys) ? data.cardKeys : [];
+      for (var k = 0; k < rawKeys.length; k += 1) {
+        var one = rawKeys[k];
+        keys.push(typeof one === "string" && one !== "" ? one : null);
       }
       var at = data.segmentIndex;
       if (at > segments.length - 1) at = segments.length - 1;
-      return { segmentIndex: at, activeSeconds: counts };
+      return { segmentIndex: at, activeSeconds: counts, cardKeys: keys };
     }
 
+    /* A record says which local day it belongs to and which card each chunk was
+     * reported against, so a visit picking it up neither pays twice nor starts
+     * the same chunk again. */
     function saveResume() {
       var snap = clock.state();
+      var keys = [];
+      for (var i = 0; i < chunkCount(); i += 1) {
+        var key = cardKeys[i];
+        keys.push(typeof key === "string" && key !== "" ? key : null);
+      }
       storageSet(resumeKey(), JSON.stringify({
+        day: localDay(nowFn()),
         segmentIndex: snap.segmentIndex,
-        activeSeconds: activeList(snap)
+        activeSeconds: activeList(snap),
+        cardKeys: keys
       }));
     }
 
@@ -979,23 +1099,24 @@
         });
         return settled(fallback);
       }
-      var ackKey = ackKeyOf(index);
+      var ackKey = floorKeyOf(index);
       var carried = raiseTo(ackKey, active);
       if (acked(ackKey, carried)) {
         /* Nothing new to say about this card. A report already out is waited
          * for, so the page's own answer still decides Done. */
-        var flying = inFlight[ackKey];
+        var flying = inFlight.get(ackKey);
         if (flying) {
           return flying.then(function (value) {
             return settled(doneFrom(progressOf(value), fallback));
           });
         }
-        var known = lastDoneAck[ackKey];
+        var held = floors.get(ackKey);
+        var known = held ? held.done : null;
         return settled(typeof known === "boolean" ? known : fallback);
       }
       var answer;
       try {
-        lastSent[ackKey] = carried;
+        toldSent(ackKey, carried);
         answer = hooks.post({
           cardKey: key,
           chunkIndex: index,
@@ -1011,27 +1132,27 @@
         return acceptOne(index, key, carried, answer, fallback, settled);
       }
       var pending = Promise.resolve(answer).then(function (value) {
-        if (inFlight[ackKey] === pending) delete inFlight[ackKey];
+        if (inFlight.get(ackKey) === pending) inFlight.delete(ackKey);
         acceptOne(index, key, carried, value, fallback, settled);
         return value;
       }, function () {
-        if (inFlight[ackKey] === pending) delete inFlight[ackKey];
+        if (inFlight.get(ackKey) === pending) inFlight.delete(ackKey);
         forgetSent(ackKey);
         enqueue({ cardKey: key, chunkIndex: index, entryId: entryId, activeSeconds: carried });
         return null;
       });
-      inFlight[ackKey] = pending;
+      inFlight.set(ackKey, pending);
       return pending.then(function (value) {
         return settled(doneFrom(progressOf(value), fallback));
       });
     }
 
     function acceptOne(index, key, carried, answer, fallback, settled) {
-      var ackKey = ackKeyOf(index);
+      var ackKey = floorKeyOf(index);
       acknowledge(ackKey, carried);
       var done = doneFrom(progressOf(answer), fallback);
-      lastDoneAck[ackKey] = done;
-      dropQueued(index, key);
+      rememberDone(ackKey, done);
+      dropQueued(queueRef(index, key));
       return settled(done);
     }
 
@@ -1349,6 +1470,7 @@
       if (finished || endShown) return;
       endShown = true;
       terminal = true;
+      dropWakeLock();
       hideTransport();
       postCounted(function (list) {
         if (destroyed) return;
@@ -1372,9 +1494,14 @@
       }
     }
 
-    /* A page that offers no wake lock, or refuses one, never hears about it. */
+    /* A page that offers no wake lock, or refuses one, never hears about it. A
+     * lock already held goes back before another is asked for, so a second play
+     * never leaves one behind. */
     function takeWakeLock() {
       wakeWanted = true;
+      var held = wakeHandle;
+      wakeHandle = null;
+      releaseWakeHandle(held);
       var lock = hooks.wakeLock;
       if (!lock || typeof lock.request !== "function") return;
       var result;
@@ -1521,7 +1648,6 @@
       if (els.pause) {
         var label = snap.paused && keepGoingText !== "" ? keepGoingText : pauseText;
         if (els.pause.textContent !== label) els.pause.textContent = label;
-        els.pause.setAttribute("aria-pressed", snap.paused ? "true" : "false");
       }
       var current = [];
       for (var c = 0; c < els.transport.children.length; c += 1) {
@@ -1614,9 +1740,24 @@
       intervalId = setIntervalFn(onTick, TICK_MS);
     }
 
+    /* The cards a record from earlier today was reported against are its own:
+     * the visit picks them up instead of asking the page for them again, which
+     * would pay for the same chunk twice. */
+    function adoptResumeKeys() {
+      if (!resumeRecord || !Array.isArray(resumeRecord.cardKeys)) return;
+      for (var i = 0; i < chunkCount(); i += 1) {
+        var key = resumeRecord.cardKeys[i];
+        if (typeof key !== "string" || key === "") continue;
+        var known = cardKeys[i];
+        if (typeof known === "string" && known !== "") continue;
+        cardKeys[i] = key;
+      }
+    }
+
     function onStart() {
       if (started) return;
       started = true;
+      adoptResumeKeys();
       removeNode(els.safety, host);
       removeNode(els.start, host);
       els.safety = null;
@@ -1719,6 +1860,15 @@
       if (typeof unsubscribe === "function") {
         unsubscribe();
         unsubscribe = null;
+      }
+      /* The clock stops where it is first, so the stretch since the last tick
+       * is counted before it is reported. */
+      if (started && !clock.state().paused) {
+        try {
+          clock.pause();
+        } catch (err) {
+          /* nothing left to stop */
+        }
       }
       /* Whatever the clock counted and no report has carried yet goes now,
        * before the page takes the player away. */
