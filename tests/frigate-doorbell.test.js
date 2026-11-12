@@ -15,6 +15,7 @@ import { join } from "node:path";
 import {
   SNAPSHOT_MAX_BYTES,
   SNAPSHOT_NAME_RE,
+  _setOpenForTest,
   isSnapshotName,
   listSnapshotCameras,
   readSnapshot,
@@ -39,6 +40,26 @@ function freshDir() {
 const jpg = (dir, name, body = "jpeg-bytes") => writeFileSync(join(dir, `${name}.jpg`), body);
 const sidecar = (dir, name, value) =>
   writeFileSync(join(dir, `${name}.json`), typeof value === "string" ? value : JSON.stringify(value));
+
+/**
+ * A handle whose stat() reports a small regular file while read() hands out `content` — the file
+ * growing between the check and the read, as seen from the reader's side.
+ */
+function growingHandle(content) {
+  const closed = { count: 0 };
+  const handle = {
+    stat: async () => ({ isFile: () => true, size: 4 }),
+    read: async (buffer, offset, length, position) => {
+      const slice = content.subarray(position, Math.min(position + length, content.length));
+      slice.copy(buffer, offset);
+      return { bytesRead: slice.length };
+    },
+    close: async () => {
+      closed.count += 1;
+    },
+  };
+  return { handle, closed };
+}
 
 // ─── names ────────────────────────────────────────────────────────────────
 
@@ -159,6 +180,83 @@ test("a still's bytes are returned, and every unsafe name or file shape is refus
   }
   assert.equal(await readSnapshot(null, "front_door"), null, "no folder, no read");
   assert.equal(await readSnapshot("", "front_door"), null);
+});
+
+test("a symlink in the folder is refused, for a still and for its sidecar", async () => {
+  const dir = freshDir();
+  const elsewhereJpg = join(outside, "hidden.jpg");
+  writeFileSync(elsewhereJpg, "bytes-from-outside-the-folder");
+  symlinkSync(elsewhereJpg, join(dir, "borrowed.jpg"));
+  assert.equal(await readSnapshot(dir, "borrowed"), null, "a symlinked still is not read");
+
+  const elsewhereJson = join(outside, "hidden.json");
+  writeFileSync(elsewhereJson, JSON.stringify({ timestamp: 1_600_000_500, type: "ding" }));
+  jpg(dir, "linked_side", "a-real-still");
+  utimesSync(join(dir, "linked_side.jpg"), 1_600_000_000, 1_600_000_000);
+  symlinkSync(elsewhereJson, join(dir, "linked_side.json"));
+
+  const listed = await listSnapshotCameras(dir);
+  assert.deepEqual(listed.map((entry) => entry.name), ["linked_side"], "the still itself is listed");
+  assert.equal(listed[0].type, null, "a symlinked sidecar contributes no reason");
+  assert.equal(listed[0].timestamp, 1_600_000_000, "a symlinked sidecar contributes no time");
+  const read = await readSnapshot(dir, "linked_side");
+  assert.ok(read && read.bytes.toString() === "a-real-still", "the plain still still reads");
+});
+
+test("a still that grows past the cap between the stat and the read is refused", async () => {
+  const dir = freshDir();
+  jpg(dir, "growing");
+  const { handle, closed } = growingHandle(Buffer.alloc(SNAPSHOT_MAX_BYTES + 10, 0x41));
+  _setOpenForTest(async () => handle);
+  try {
+    assert.equal(await readSnapshot(dir, "growing"), null);
+  } finally {
+    _setOpenForTest(null);
+  }
+  assert.equal(closed.count, 1, "the handle is closed on the refusing path");
+  const after = await readSnapshot(dir, "growing");
+  assert.ok(after && after.bytes.toString() === "jpeg-bytes", "the real reader is back");
+});
+
+test("a sidecar that grows past its cap between the stat and the read is ignored", async () => {
+  const dir = freshDir();
+  jpg(dir, "growing_side");
+  utimesSync(join(dir, "growing_side.jpg"), 1_600_000_000, 1_600_000_000);
+  const { handle, closed } = growingHandle(Buffer.alloc(4096 + 10, 0x20));
+  _setOpenForTest(async () => handle);
+  let listed;
+  try {
+    listed = await listSnapshotCameras(dir);
+  } finally {
+    _setOpenForTest(null);
+  }
+  assert.deepEqual(listed.map((entry) => entry.name), ["growing_side"]);
+  assert.equal(listed[0].type, null, "the over-long sidecar is not parsed");
+  assert.equal(listed[0].timestamp, 1_600_000_000, "and the still keeps its mtime");
+  assert.equal(closed.count, 1, "the handle is closed on the refusing path");
+});
+
+test("the happy path is unchanged: the bytes come back and the sidecar is read", async () => {
+  const dir = freshDir();
+  jpg(dir, "porch", "porch-picture");
+  sidecar(dir, "porch", { timestamp: 1_700_000_400, type: "ding" });
+  const read = await readSnapshot(dir, "porch");
+  assert.ok(read && Buffer.isBuffer(read.bytes));
+  assert.equal(read.bytes.toString(), "porch-picture");
+  const listed = await listSnapshotCameras(dir);
+  assert.deepEqual(listed.map((entry) => entry.name), ["porch"]);
+  assert.deepEqual({ timestamp: listed[0].timestamp, type: listed[0].type }, { timestamp: 1_700_000_400, type: "ding" });
+  assert.equal(snapshotLabel(listed[0], 1_700_000_400_000, "en"), "doorbell - just now");
+
+  // Exactly at the cap is still a still; one byte over is not.
+  const atCap = freshDir();
+  writeFileSync(join(atCap, "at_cap.jpg"), "");
+  truncateSync(join(atCap, "at_cap.jpg"), SNAPSHOT_MAX_BYTES);
+  const capped = await readSnapshot(atCap, "at_cap");
+  assert.ok(capped && capped.bytes.length === SNAPSHOT_MAX_BYTES, "a still at the cap is read whole");
+  writeFileSync(join(atCap, "over_cap.jpg"), "");
+  truncateSync(join(atCap, "over_cap.jpg"), SNAPSHOT_MAX_BYTES + 1);
+  assert.equal(await readSnapshot(atCap, "over_cap"), null);
 });
 
 // ─── the label ────────────────────────────────────────────────────────────

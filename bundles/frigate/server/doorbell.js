@@ -14,7 +14,8 @@
  * name from a request can only ever reach a plain `.jpg` sitting in that folder.
  */
 
-import { lstat, readFile, readdir } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 /** The only shape a snapshot name may have: lowercase, no dots, no slashes, 64 chars at most. */
@@ -26,6 +27,56 @@ const SIDECAR_MAX_BYTES = 4 * 1024;
 const SNAPSHOT_SUFFIX = ".jpg";
 const SIDECAR_SUFFIX = ".json";
 const KNOWN_TYPES = new Set(["motion", "ding", "interval", "on-demand"]);
+/** A read never follows a symlink and never opens a file for anything but reading. */
+const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
+
+let openFile = (file, flags) => open(file, flags);
+
+/**
+ * Replaces the file-opening call used by both readers; `null` (or anything not a function)
+ * restores the real one. Test seam only.
+ */
+export function _setOpenForTest(fn) {
+  openFile = typeof fn === "function" ? fn : (file, flags) => open(file, flags);
+}
+
+/**
+ * The contents of `file`, read from one handle opened without following a symlink, or null.
+ *
+ * The path is opened once and both the shape/size check and the read come from that same
+ * handle, so nothing can be swapped in between: a symlink, a missing file, a non-regular file,
+ * an empty file and one that turns out to be longer than `limit` all answer null. At most
+ * `limit` + 1 bytes are ever read, which is enough to notice a file that grew past the cap.
+ */
+async function readCappedFile(file, limit) {
+  let handle;
+  try {
+    handle = await openFile(file, READ_FLAGS);
+  } catch {
+    return null;
+  }
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size <= 0 || info.size > limit) return null;
+    const buffer = Buffer.allocUnsafe(limit + 1);
+    let filled = 0;
+    while (filled < limit + 1) {
+      const read = await handle.read(buffer, filled, limit + 1 - filled, filled);
+      if (!read || !read.bytesRead) break;
+      filled += read.bytesRead;
+    }
+    if (filled === 0 || filled > limit) return null;
+    return buffer.subarray(0, filled);
+  } catch {
+    return null;
+  } finally {
+    try {
+      await handle.close();
+    } catch {
+      // Closing failing leaves nothing to report: the caller already has its answer.
+    }
+  }
+}
 
 const REASONS = {
   en: { motion: "motion", ding: "doorbell", interval: "scheduled", "on-demand": "on request" },
@@ -48,17 +99,11 @@ function reasonWord(type, lang) {
 
 /** The parsed sidecar for one still, or null. A corrupt, empty or oversized file is ignored. */
 async function readSidecar(dir, name) {
-  const file = join(dir, name + SIDECAR_SUFFIX);
-  let info;
-  try {
-    info = await lstat(file);
-  } catch {
-    return null;
-  }
-  if (!info.isFile() || info.size <= 0 || info.size > SIDECAR_MAX_BYTES) return null;
+  const bytes = await readCappedFile(join(dir, name + SIDECAR_SUFFIX), SIDECAR_MAX_BYTES);
+  if (!bytes) return null;
   let data;
   try {
-    data = JSON.parse(await readFile(file, "utf8"));
+    data = JSON.parse(bytes.toString("utf8"));
   } catch {
     return null;
   }
@@ -118,28 +163,16 @@ export async function listSnapshotCameras(dir) {
 }
 
 /**
- * One still's bytes, or null. The name is matched before a path is built, and the file is
- * lstat'ed — a symlink, a missing file, an empty one and an oversized one all answer null, so a
- * name arriving from a request can never be pointed at something else on the disk.
+ * One still's bytes, or null. The name is matched before a path is built, and the file is opened
+ * once without following a symlink — a symlink, a missing file, an empty one and an oversized one
+ * all answer null, so a name arriving from a request can only ever reach a plain `.jpg` in that
+ * folder.
  */
 export async function readSnapshot(dir, name) {
   if (typeof dir !== "string" || !dir) return null;
   if (!isSnapshotName(name)) return null;
-  const file = join(dir, name + SNAPSHOT_SUFFIX);
-  let info;
-  try {
-    info = await lstat(file);
-  } catch {
-    return null;
-  }
-  if (!info.isFile() || info.size <= 0 || info.size > SNAPSHOT_MAX_BYTES) return null;
-  try {
-    const bytes = await readFile(file);
-    if (bytes.length === 0 || bytes.length > SNAPSHOT_MAX_BYTES) return null;
-    return { bytes };
-  } catch {
-    return null;
-  }
+  const bytes = await readCappedFile(join(dir, name + SNAPSHOT_SUFFIX), SNAPSHOT_MAX_BYTES);
+  return bytes ? { bytes } : null;
 }
 
 /** Seconds between a still's timestamp and now, never negative (a future time reads as now). */
