@@ -168,6 +168,13 @@ export function rowSecretEquals(row, key, plaintext) {
 export async function saveExtensionSecret(db, key, opts = {}) {
   const { bundleId, envKey } = opts;
   assertExtensionOwner(bundleId, opts.systemOwner);
+  // A keep must NAME the row it was judged on, before anything is written: the caller compared
+  // the value it writes against a blob it read earlier, and only that blob can say whether the
+  // row still holds that value. Pinning on this call's own read would be a pin on a fresh
+  // observation — it would always match, and the race the pin exists for would go unnoticed.
+  if (opts.keepFirstView === true && (typeof opts.keepFirstViewPinnedTo !== "string" || opts.keepFirstViewPinnedTo === "")) {
+    throw new Error("keepFirstView needs keepFirstViewPinnedTo");
+  }
   await ensureKeychainTable(db);
   const v = extensionValues(key, opts);
   const { label, username, url, sealed, ts, fvu } = v;
@@ -185,20 +192,18 @@ export async function saveExtensionSecret(db, key, opts = {}) {
   // compared the value it writes against a blob it read earlier, and another writer can
   // replace that value in between. Sealed blobs carry a random nonce, so an equality match
   // names exactly the row that was read; a replaced blob turns the keep off and the window
-  // becomes `fvu`, which is what a value the keeper never looked at must get. The pin is the
-  // caller's own blob when it names one (`keepFirstViewPinnedTo`, the seal's read), else the
-  // blob this read returned. NOT pinned: label/username/url/origin — a stale label is
-  // harmless, and this call's metadata is the only one it has to write.
+  // becomes `fvu`, which is what a value the keeper never looked at must get. The pin is
+  // ALWAYS the caller's own blob (`keepFirstViewPinnedTo`, the seal's read) — never the blob
+  // this function reads, which would match by construction and defeat the pin — so a keep
+  // without one is refused above, before any write. NOT pinned: label/username/url/origin — a
+  // stale label is harmless, and this call's metadata is the only one it has to write.
   const keepFirstView = opts.keepFirstView === true;
   const existing = (await db.execute({ sql: "SELECT id, secret_sealed FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ?", args: [bundleId, envKey] })).rows[0];
   if (existing) {
-    const pinned = typeof opts.keepFirstViewPinnedTo === "string" && opts.keepFirstViewPinnedTo !== ""
-      ? opts.keepFirstViewPinnedTo
-      : existing.secret_sealed;
     await db.execute({
       sql: `UPDATE crow_keychain SET label = ?, username = ?, url = ?, secret_sealed = ?, key_id = ?, origin = ?, status = 'active',
               first_view_until = CASE WHEN ? AND secret_sealed = ? THEN first_view_until ELSE ? END, updated_at = ? WHERE id = ?`,
-      args: [label, username, url, sealed, key.id, opts.origin, keepFirstView ? 1 : 0, pinned ?? null, fvu, ts, existing.id],
+      args: [label, username, url, sealed, key.id, opts.origin, keepFirstView ? 1 : 0, keepFirstView ? opts.keepFirstViewPinnedTo : null, fvu, ts, existing.id],
     });
     return { id: Number(existing.id), created: false };
   }
