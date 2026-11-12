@@ -20,9 +20,146 @@
  * A failed login is remembered for five seconds: with wrong credentials every card,
  * event and still on the page would otherwise start its own login and hammer Frigate's
  * login endpoint. Inside that window the same error is reported without a request.
+ *
+ * Doorbell stills and the live view are served from here too, and neither of them asks Frigate
+ * anything: the stills are files a sidecar writes (server/doorbell.js) and the live view is one
+ * ffmpeg per camera fed by a stream address this process holds (server/live-session.js). The
+ * folder and the addresses arrive from the gateway's environment and never appear in a response.
+ *
+ * Both of those modules live beside the bundle and this file is installed to
+ * <CROW_HOME>/panels/frigate-routes.js, where a relative import out of the bundle does not
+ * resolve, so they are loaded by path: this instance's installed copy first, the app's own
+ * bundle after it.
  */
 
 import { Router } from "express";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+/** The snapshot name rule, kept here as well so a bad name is refused before a module loads. */
+const SNAPSHOT_NAME_RE = /^[a-z0-9_-]{1,64}$/;
+const SNAPSHOT_SUFFIX = ".jpg";
+const RTSP_RE = /^rtsps?:\/\//i;
+
+/** The folder a snapshot bridge writes `<name>.jpg` into; blank means no snapshot cameras. */
+function snapshotDir() {
+  const value = process.env.FRIGATE_SNAPSHOT_DIR;
+  return typeof value === "string" ? value : "";
+}
+
+/** True for a string that is a usable snapshot name. */
+function isSnapshotName(name) {
+  return typeof name === "string" && SNAPSHOT_NAME_RE.test(name);
+}
+
+/**
+ * `FRIGATE_LIVE_SOURCES` as `{ name: url }`: a JSON object whose keys are camera names and whose
+ * values are the addresses ffmpeg pulls. Bad JSON, a non-object, a name that could never be a
+ * snapshot camera and a value that is not an rtsp(s) address are all dropped. Never throws, and
+ * never leaves this file.
+ */
+function liveSources() {
+  const raw = process.env.FRIGATE_LIVE_SOURCES;
+  if (typeof raw !== "string" || !raw.trim()) return {};
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+  const out = {};
+  for (const [name, url] of Object.entries(data)) {
+    if (!isSnapshotName(name)) continue;
+    if (typeof url !== "string" || !RTSP_RE.test(url)) continue;
+    out[name] = url;
+  }
+  return out;
+}
+
+/** Loaded server modules, per file name: a module is imported once per process. */
+const serverModules = new Map();
+
+/** One of this bundle's server modules, or null. Never throws. */
+function serverModule(fileName) {
+  if (!serverModules.has(fileName)) {
+    serverModules.set(fileName, importServerModule(fileName).catch(() => null));
+  }
+  return serverModules.get(fileName);
+}
+
+async function importServerModule(fileName) {
+  const home = process.env.CROW_HOME || join(homedir(), ".crow");
+  const candidates = [join(home, "bundles", "frigate", "server", fileName)];
+  const appRoot = process.env.CROW_APP_ROOT;
+  if (typeof appRoot === "string" && appRoot) {
+    candidates.push(join(appRoot, "bundles", "frigate", "server", fileName));
+  }
+  try {
+    candidates.push(fileURLToPath(new URL(`../server/${fileName}`, import.meta.url)));
+  } catch {
+    // A module URL that cannot be read as a path: the two candidates above still stand.
+  }
+  for (const path of candidates) {
+    try {
+      return await import(pathToFileURL(path).href);
+    } catch {
+      // try the next copy
+    }
+  }
+  return null;
+}
+
+/** The live-view cooldown file: one per instance, beside the rest of its state. */
+function cooldownFilePath() {
+  const home = process.env.CROW_HOME || join(homedir(), ".crow");
+  return join(home, "frigate-live-cooldown.json");
+}
+
+/** Set by a test to stand in for the real live manager; null restores it. */
+let liveManagerOverride = null;
+/**
+ * The manager built for one reading of the environment, rebuilt when that reading changes:
+ * `{ key, manager, pending }`. The key is the raw sources value, so an edited address
+ * produces a fresh manager with a fresh view of its own sessions.
+ */
+let liveManagerState = { key: null, manager: null, pending: null };
+
+/** Test seam: a stand-in live manager (or null to go back to the real one). */
+export function _setLiveManagerForTest(manager) {
+  liveManagerOverride = manager && typeof manager === "object" ? manager : null;
+  liveManagerState = { key: null, manager: null, pending: null };
+}
+
+/** The process-wide live-view manager, built lazily from this instance's own modules. */
+async function liveManager() {
+  if (liveManagerOverride) return liveManagerOverride;
+  const key = typeof process.env.FRIGATE_LIVE_SOURCES === "string" ? process.env.FRIGATE_LIVE_SOURCES : "";
+  if (liveManagerState.key === key) {
+    if (liveManagerState.manager) return liveManagerState.manager;
+    if (liveManagerState.pending) return liveManagerState.pending;
+  }
+  const pending = (async () => {
+    const live = await serverModule("live-session.js");
+    if (!live || typeof live.createLiveManager !== "function") return null;
+    const options = { sources: liveSources() };
+    if (typeof live.createFileCooldownStore === "function") {
+      options.cooldownStore = live.createFileCooldownStore(cooldownFilePath());
+    }
+    return live.createLiveManager(options);
+  })().catch(() => null);
+  liveManagerState = { key, manager: null, pending };
+  const manager = await pending;
+  if (liveManagerState.pending === pending) liveManagerState = { key, manager, pending: null };
+  return manager;
+}
+
+/** True when this instance can show `name` live (it is a key of FRIGATE_LIVE_SOURCES). */
+async function isLiveSource(name) {
+  const manager = await liveManager();
+  return !!(manager && typeof manager.has === "function" && manager.has(name) === true);
+}
 
 const FRIGATE_URL = () => (process.env.FRIGATE_URL || "http://localhost:8971").replace(/\/+$/, "");
 const FRIGATE_USER = () => process.env.FRIGATE_USER || "";
@@ -160,21 +297,53 @@ export default function frigateRouter(authMiddleware) {
   const router = Router();
 
   router.get("/api/frigate/cameras", authMiddleware, async (req, res) => {
+    const doorbell = await serverModule("doorbell.js");
+    const snapshots = doorbell && typeof doorbell.listSnapshotCameras === "function"
+      ? await doorbell.listSnapshotCameras(snapshotDir()).catch(() => [])
+      : [];
+    const snapshotNames = new Set(snapshots.map((entry) => entry.name));
+    const liveFlags = new Map();
+    for (const name of snapshotNames) liveFlags.set(name, await isLiveSource(name));
+
+    let cameras = [];
+    let frigateError = null;
     try {
       const upstream = await frFetch("/api/config");
       const config = await upstream.json();
-      const cameras = Object.entries(config.cameras || {}).map(([name, cam]) => ({
+      cameras = Object.entries(config.cameras || {}).map(([name, cam]) => ({
         name,
         enabled: cam.enabled !== false,
         detect_enabled: cam.detect?.enabled !== false,
         width: cam.detect?.width || null,
         height: cam.detect?.height || null,
         tracked_objects: cam.objects?.track || [],
+        snapshot: snapshotNames.has(name),
+        live: liveFlags.get(name) === true,
       }));
-      res.json({ cameras });
     } catch (err) {
-      res.json({ error: err.message });
+      frigateError = err.message;
     }
+
+    // A camera that only exists as a still in the snapshot folder is still a camera to the page.
+    const known = new Set(cameras.map((camera) => camera.name));
+    for (const entry of snapshots) {
+      if (known.has(entry.name)) continue;
+      known.add(entry.name);
+      cameras.push({
+        name: entry.name,
+        enabled: true,
+        detect_enabled: false,
+        width: null,
+        height: null,
+        tracked_objects: [],
+        snapshot: true,
+        live: liveFlags.get(entry.name) === true,
+      });
+    }
+
+    // Frigate being down costs its own cameras only: the stills in the folder still list.
+    if (frigateError !== null && snapshots.length === 0) res.json({ cameras, error: frigateError });
+    else res.json({ cameras });
   });
 
   router.get("/api/frigate/stats", authMiddleware, async (req, res) => {
@@ -211,6 +380,63 @@ export default function frigateRouter(authMiddleware) {
     } catch (err) {
       res.json({ error: err.message });
     }
+  });
+
+  // One still from the snapshot folder (server/doorbell.js). The name is checked before any path
+  // is built, so a request can only ever read a plain `.jpg` sitting in that folder.
+  router.get("/api/frigate/snap/:file", authMiddleware, async (req, res) => {
+    const file = typeof req.params.file === "string" ? req.params.file : "";
+    const name = file.endsWith(SNAPSHOT_SUFFIX) ? file.slice(0, -SNAPSHOT_SUFFIX.length) : "";
+    if (!isSnapshotName(name)) return res.status(404).json({ error: "Unknown snapshot" });
+    const doorbell = await serverModule("doorbell.js");
+    if (!doorbell || typeof doorbell.readSnapshot !== "function") {
+      return res.status(404).json({ error: "Unknown snapshot" });
+    }
+    const still = await doorbell.readSnapshot(snapshotDir(), name);
+    if (!still) return res.status(404).json({ error: "Unknown snapshot" });
+    res.set("content-type", "image/jpeg");
+    res.set("cache-control", "no-store");
+    res.status(200).end(still.bytes);
+  });
+
+  // The live view: the manager takes the response over and streams into it, and owns its close
+  // handling. A refusal is answered here, before anything has been written.
+  router.get("/api/frigate/live/:name/stream.mjpg", authMiddleware, async (req, res) => {
+    const name = req.params.name;
+    if (!isSnapshotName(name)) return res.status(404).json({ error: "Unknown camera" });
+    const manager = await liveManager();
+    if (!manager || typeof manager.attach !== "function") {
+      return res.status(404).json({ error: "Unknown camera" });
+    }
+    const answer = await manager.attach(name, res);
+    if (answer && answer.ok === true) return; // the manager owns res from here
+    const status = answer && Number.isInteger(answer.status) ? answer.status : 404;
+    const retryAfter = answer ? Number(answer.retryAfterSec) : NaN;
+    if (Number.isFinite(retryAfter) && retryAfter > 0) res.set("retry-after", String(Math.ceil(retryAfter)));
+    const message = answer && typeof answer.message === "string" && answer.message
+      ? answer.message
+      : "Unknown camera";
+    res.status(status).json({ error: message });
+  });
+
+  router.get("/api/frigate/live/:name/status", authMiddleware, async (req, res) => {
+    const name = req.params.name;
+    if (!isSnapshotName(name)) return res.status(404).json({ error: "Unknown camera" });
+    const manager = await liveManager();
+    if (!manager || typeof manager.has !== "function" || manager.has(name) !== true) {
+      return res.status(404).json({ error: "Unknown camera" });
+    }
+    let available = false;
+    try {
+      available = typeof manager.available === "function" ? (await manager.available()) === true : false;
+    } catch {
+      available = false;
+    }
+    // A manager that can say how much cooldown is left is the only one that reports it.
+    const cooldown = typeof manager.cooldownLeftMs === "function" ? Number(manager.cooldownLeftMs(name)) : NaN;
+    const body = { available };
+    if (Number.isFinite(cooldown)) body.cooldown_seconds = cooldown > 0 ? Math.ceil(cooldown / 1000) : 0;
+    res.json(body);
   });
 
   // Thumbnail + clip bytes proxied through the gateway so Frigate's JWT stays server-side.

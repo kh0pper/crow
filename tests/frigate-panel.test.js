@@ -13,7 +13,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,7 +25,15 @@ const MANIFEST = JSON.parse(readFileSync(join(BUNDLE, "manifest.json"), "utf8"))
 const panel = (await import("../bundles/frigate/panel/frigate.js")).default;
 
 const SCRATCH_HOME = mkdtempSync(join(tmpdir(), "crow-frigate-panel-"));
-const ENV_KEYS = ["CROW_HOME", "FRIGATE_URL", "FRIGATE_UI_URL", "FRIGATE_USER", "FRIGATE_PASSWORD"];
+const ENV_KEYS = [
+  "CROW_HOME",
+  "FRIGATE_URL",
+  "FRIGATE_UI_URL",
+  "FRIGATE_USER",
+  "FRIGATE_PASSWORD",
+  "FRIGATE_SNAPSHOT_DIR",
+  "FRIGATE_LIVE_SOURCES",
+];
 const SAVED_ENV = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 // A CROW_HOME with no installed bundle: the panel then reads its own client from appRoot,
@@ -693,6 +701,108 @@ test("a failed login is replayed for five seconds, then tried again", { timeout:
   }
 });
 
+// ─── the doorbell stills and the Watch live button ───────────────────────
+
+/**
+ * A snapshot folder with the given stills, and the widget's live sources for the given names.
+ * The address carries a credential, so a page that ever printed it would be caught below.
+ */
+function withSnapshots(names, liveNames) {
+  const dir = mkdtempSync(join(SCRATCH_HOME, "snap-"));
+  for (const name of names) writeFileSync(join(dir, `${name}.jpg`), "jpeg-bytes");
+  writeFileSync(join(dir, "front_door.json"), JSON.stringify({
+    timestamp: Math.floor(Date.now() / 1000) - 180,
+    type: "motion",
+  }));
+  const sources = {};
+  for (const name of liveNames) sources[name] = `rtsp://someone:hunter2@100.64.20.7:8554/${name}_live`;
+  process.env.FRIGATE_SNAPSHOT_DIR = dir;
+  process.env.FRIGATE_LIVE_SOURCES = JSON.stringify(sources);
+  return () => {
+    delete process.env.FRIGATE_SNAPSHOT_DIR;
+    delete process.env.FRIGATE_LIVE_SOURCES;
+  };
+}
+
+test("a snapshot camera is drawn from its own file, with its label and its live button", async () => {
+  const restore = withSnapshots(["front_door", "side_gate"], ["front_door"]);
+  const stub = stubFetch((url) => {
+    if (url.endsWith("/api/config")) return jsonResponse({ cameras: { driveway: { detect: { width: 640, height: 360 } } } });
+    throw new Error(`unexpected read: ${url}`);
+  });
+  let html;
+  try {
+    html = await renderPanel();
+  } finally {
+    stub.restore();
+    restore();
+  }
+
+  const document = page(html);
+  const snapshotCards = [...document.querySelectorAll("#fg-cameras .fg-camera")]
+    .filter((card) => card.querySelector("[data-snapshot]"));
+  const byName = new Map(snapshotCards.map((card) => [card.querySelector(".fg-camera-name").textContent, card]));
+
+  const front = byName.get("front_door");
+  assert.ok(front, "the all-lowercase still in the folder is a camera on the page");
+  const still = front.querySelector("img");
+  assert.equal(still.getAttribute("src"), "/api/frigate/snap/front_door.jpg",
+    "a snapshot camera is drawn from its file, not from Frigate's latest.jpg");
+  assert.equal(still.getAttribute("data-snapshot"), "1", "the refresh loop can tell the two apart");
+  assert.match(front.textContent, /motion - /, "the reason and the time are printed under the name");
+  assert.equal(front.querySelectorAll("[data-live]").length, 1, "a camera with a live source offers the button");
+  assert.equal(front.querySelector("[data-live]").getAttribute("data-live"), "front_door");
+
+  const gate = byName.get("side_gate");
+  assert.ok(gate, "a camera that exists only as a still is listed too");
+  assert.equal(gate.querySelectorAll("[data-live]").length, 0, "no live source, no button");
+
+  assert.equal(snapshotCards.length, 2, "only the two stills in the folder are snapshot cameras");
+  assert.ok(!html.includes("hunter2"), "the stream address, credentials and all, never reaches the page");
+  assert.ok(!html.includes("100.64.20.7"), "nor its host");
+  assert.ok(!html.includes("rtsp"), "nor any part of it");
+});
+
+test("a link that only preselects a camera starts nothing", async () => {
+  const restore = withSnapshots(["front_door"], ["front_door"]);
+  const stub = stubFetch((url) => {
+    if (url.endsWith("/api/config")) return jsonResponse({ cameras: {} });
+    throw new Error(`unexpected read: ${url}`);
+  });
+  let html;
+  try {
+    html = await renderPanel({ live: "front_door" });
+  } finally {
+    stub.restore();
+    restore();
+  }
+
+  const document = page(html);
+  const player = document.getElementById("fg-live");
+  assert.ok(player, "the panel carries one player");
+  assert.equal(player.getAttribute("data-preselect"), "front_door", "the link preselects the camera");
+  const img = document.getElementById("fg-live-img");
+  assert.ok(img, "the player has its one image");
+  assert.equal(img.getAttribute("src"), null, "and no src until a click");
+  assert.ok(!/<img[^>]+stream\.mjpg/i.test(html), "no still or player image points at the stream route");
+
+  const script = /<script>([\s\S]*?)<\/script>/.exec(html);
+  assert.ok(script, "the page carries its client script");
+  assert.doesNotThrow(() => new Function(script[1]), "it parses: nothing in it tore the template literal");
+  assert.doesNotMatch(script[1], /`/, "no backtick inside the template literal");
+  assert.doesNotMatch(script[1], /\$\{/, "and no template substitution");
+  assert.match(script[1], /LIVE_MAX_SECONDS = 120/, "the countdown is the server's two minutes");
+  assert.match(script[1], /removeAttribute\("src"\)/, "ending the view drops the stream");
+  assert.match(script[1], /fg-live-again/, "and offers Watch again, which is another click");
+});
+
+test("a bad ?live= value is not printed on the page", async () => {
+  const html = await renderPanel({ live: "../etc/passwd" });
+  assert.ok(!html.includes("passwd"), "a name that is not a camera name is dropped, not echoed");
+  const player = page(html).getElementById("fg-live");
+  assert.equal(player.getAttribute("data-preselect"), null);
+});
+
 // ─── manifest and example config ──────────────────────────────────────────
 
 test("the panel file ends with exactly one newline", () => {
@@ -701,13 +811,35 @@ test("the panel file ends with exactly one newline", () => {
   assert.ok(!text.endsWith("\n\n"), "and only one");
 });
 
-test("the manifest is 1.2.4 and declares FRIGATE_UI_URL", () => {
-  assert.equal(MANIFEST.version, "1.2.4");
+test("the manifest is 1.3.0 and declares FRIGATE_UI_URL", () => {
+  assert.equal(MANIFEST.version, "1.3.0");
   const ui = (MANIFEST.env_vars || []).find((v) => v && v.name === "FRIGATE_UI_URL");
   assert.ok(ui, "the browser-facing address is a declared env var, or the panel never sees it");
   assert.equal(ui.required, false, "blank means the Web UI link is hidden");
   assert.match(ui.description, /Address your browser uses to open Frigate's own web UI/);
   assert.match(ui.description, /Leave blank to hide the Web UI link/);
+});
+
+test("the manifest declares the snapshot folder and the live sources", () => {
+  const vars = new Map((MANIFEST.env_vars || []).map((v) => [v.name, v]));
+
+  const snapshots = vars.get("FRIGATE_SNAPSHOT_DIR");
+  assert.ok(snapshots, "the widget reads FRIGATE_SNAPSHOT_DIR, so the manifest must declare it");
+  assert.equal(snapshots.required, false, "blank means no snapshot cameras");
+  assert.match(snapshots.description, /<camera>\.jpg/);
+  assert.match(snapshots.description, /timestamp, type/);
+  assert.match(snapshots.description, /Blank = no snapshot cameras/);
+
+  const live = vars.get("FRIGATE_LIVE_SOURCES");
+  assert.ok(live, "the panel and the routes read FRIGATE_LIVE_SOURCES");
+  assert.equal(live.required, false, "blank means no live view");
+  assert.equal(live.secret, true, "the value carries the cameras' RTSP credentials");
+  assert.match(live.description, /JSON object mapping a camera name to its RTSP URL/);
+  assert.match(live.description, /ffmpeg/);
+  assert.match(live.description, /Blank = no live view/);
+
+  assert.match(MANIFEST.notes, /optional ffmpeg/);
+  assert.match(MANIFEST.notes, /at most 120 s per session/);
 });
 
 test("the example camera has detection switched on (Frigate 0.18 needs it)", () => {
