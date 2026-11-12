@@ -42,7 +42,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { botsDbPath } from "./instance-paths.mjs";
 import { mintRemoteBlocks } from "./remote-blocks.mjs";
-import { crowServerCatalog, instanceBinding, rebindBlock, SECRETS_SERVER } from "./crow-server-catalog.mjs";
+import { crowServerCatalog, instanceBinding, rebindBlock, SECRETS_SERVER, addonKeychainNeeds, withoutKeychainValues } from "./crow-server-catalog.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { applyActorEnv, actorEnvFor } from "./actor-env.mjs";
 
@@ -185,11 +185,20 @@ function addonSpawnBlock(serverId, block, crowHome) {
     console.warn(`[pi-bots] add-on '${serverId}' omitted: ${rc.reason || argProblem}`);
     return null;
   }
-  const { command_sha256: _pin, ...rest } = block;
+  // `keychainEnv` lists NAMES whose values live in the keychain, and is not part of a spawn
+  // block: no bot's .mcp.json may carry it (and this writer never unseals — the value is
+  // produced by the spawning process, if it is produced at all).
+  const { command_sha256: _pin, keychainEnv: _keychainEnv, env: entryEnv, ...rest } = block;
   // The entry's env is handed to the child as-is EXCEPT loader/injection names
-  // (NODE_OPTIONS, LD_PRELOAD, …): those run code before the server itself does.
-  // A block with no env stays without one.
-  const env = rest.env && typeof rest.env === "object" ? { env: withoutLoaderEnv(rest.env) } : {};
+  // (NODE_OPTIONS, LD_PRELOAD, …): those run code before the server itself does — and except
+  // a sealed name's plain value, which is stale by definition (the keychain value wins).
+  // A block with no env stays without one. `env` is taken OUT of `rest` above, so an emptied
+  // env cannot survive by not being overridden.
+  const kept = withoutKeychainValues(block, entryEnv);
+  // A block whose env held ONLY sealed names has nothing left to pass: it must not gain an
+  // empty `env` object the entry never had.
+  const emptied = kept && typeof kept === "object" && kept !== entryEnv && Object.keys(kept).length === 0;
+  const env = kept && typeof kept === "object" && !emptied ? { env: withoutLoaderEnv(kept) } : {};
   // The pin rides along so pi-lab re-verifies it at spawn time.
   return { ...rest, ...env, ...(rc.resolved ? { command: rc.command } : {}), ...(rc.sha256 ? { command_sha256: rc.sha256 } : {}),
     cwd };
@@ -197,10 +206,12 @@ function addonSpawnBlock(serverId, block, crowHome) {
 
 /**
  * Mint pi-compatible blocks for the bot's selected servers that are ABSENT from
- * canonical but present in <crowHome>/mcp-addons.json. Returns a
- * {name: block} map (cwd defaulted; the journal guard is applied later by
- * buildBotMcp on the clone). Servers absent from BOTH canonical and addons are
- * left out here so buildBotMcp surfaces them as a warning.
+ * canonical but present in <crowHome>/mcp-addons.json. Returns
+ * `{ servers, needsKeys }`: a `{name: block}` map (cwd defaulted; the journal
+ * guard is applied later by buildBotMcp on the clone) plus, per sealed add-on,
+ * the env NAMES it owes the keychain (values are never read here). Servers absent
+ * from BOTH canonical and addons are left out so buildBotMcp surfaces them as a
+ * warning.
  *
  * @param {object} opts.canonical  pre-read canonical (avoids a second read)
  */
@@ -209,6 +220,7 @@ export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), op
   const canonical = opts.canonical || readCanonicalMcp(opts.canonicalPath);
   const addons = readAddons(crowHome);
   const servers = {};
+  const needsKeys = {};
   for (const name of want) {
     // The catalog (crow-server-catalog.mjs) already covers every Crow server on
     // this instance and is consulted first by buildBotMcp, so this path only
@@ -221,9 +233,12 @@ export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), op
     // MCP block on this host (spec §9.1). Part 2 of SAT-7 adds the bot mount.
     if (addon.transport === "satellite") continue;
     const blk = addonSpawnBlock(name, addon, crowHome);
-    if (blk) servers[name] = blk;
+    if (!blk) continue;
+    servers[name] = blk;
+    const needs = addonKeychainNeeds(name, addon);
+    if (needs.length > 0) needsKeys[name] = needs;
   }
-  return servers;
+  return { servers, needsKeys };
 }
 
 /**
@@ -405,7 +420,12 @@ export function writeBotMcp(def, opts = {}) {
   // absent from canonical. opts.crowHome lets the bridge/GUI/CLI pin the
   // instance explicitly; otherwise CROW_HOME env (MPA service) or ~/.crow.
   const crowHome = opts.crowHome || resolveCrowHome();
-  const extraServers = opts.extraServers || extraServersFromExtensions(def, crowHome, { canonical });
+  // Both sources report the env names a sealed add-on owes the keychain (`needsKeys`); this
+  // writer never produces the values — it only keeps them out of the block (see
+  // addonSpawnBlock) so a caller that CAN unseal knows which blocks still need it.
+  const extra = opts.extraServers
+    ? { servers: opts.extraServers, needsKeys: {} }
+    : extraServersFromExtensions(def, crowHome, { canonical });
   // The instance catalog is the FIRST source for any Crow server. opts.binding
   // lets tests and the panel pin an instance without mutating process.env.
   const binding = opts.binding || instanceBinding(crowHome, opts);
@@ -417,11 +437,11 @@ export function writeBotMcp(def, opts = {}) {
   // the headers only with the X-Crow-Actor-Sig the catalog adds when this
   // process holds the actor key; anything else on the board token resolves
   // to an unattributed bot (never 'session').
-  const { servers: catalog, unconfigured } = crowServerCatalog(crowHome, {
+  const { servers: catalog, unconfigured, needsKeys: catalogNeedsKeys } = crowServerCatalog(crowHome, {
     binding, botId: opts.botId, jobId: opts.jobId, threadId: opts.threadId, gatewayType: opts.gatewayType,
   });
   const built = buildBotMcp(def, canonical, {
-    extraServers, catalog, unconfigured, binding, crowHome,
+    extraServers: extra.servers, catalog, unconfigured, binding, crowHome,
     ensureServers: opts.ensureServers,
     interactive: opts.interactive === true,
     actor: opts.botId ? { botId: opts.botId, displayName: opts.displayName, threadId: opts.threadId } : undefined,
@@ -467,10 +487,18 @@ export function writeBotMcp(def, opts = {}) {
     mkdirSync(sessionDir, { recursive: true });
     writeFileSync(path, JSON.stringify(built.json, null, 2) + "\n", { mode: 0o600 });
   }
+  // Only an ACTIVE block owes keys: a name the build disabled (unconfigured, owner-authority,
+  // forgotten with the closed world) is not in the config, so nothing is left to hydrate.
+  const needsKeys = {};
+  for (const [name, names] of Object.entries({ ...catalogNeedsKeys, ...extra.needsKeys })) {
+    const block = built.json.mcpServers[name];
+    if (block && block.disabled !== true && Array.isArray(names) && names.length > 0) needsKeys[name] = names;
+  }
   return {
     path: opts.write === false ? null : path,
     json: built.json,
     removedStale,
+    needsKeys,
     servers: built.servers,
     warnings: built.warnings,
     journalGuarded: built.journalGuarded,
