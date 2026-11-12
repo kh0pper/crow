@@ -40,6 +40,7 @@ export function compareHealth(before, after) {
 import { readFileSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { checkTreeImport } from "./boot/import-check.js";
+import { runMigrationsInChild } from "./migration-child.js";
 import { updateQuarantineHeldAtHead } from "../shared/update-quarantine.js";
 
 /** How long a convergence has to boot and verify before we call it failed.
@@ -386,9 +387,13 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
       return { pulled, converged: false, skipped: "import-check-failed", sha: headNow, applied: [] };
     }
 
-    const { runMigrations } = await import("../../scripts/migrations/runner.mjs");
+    // A FRESH child process, never this one: ESM caches by URL, so a migration
+    // pulled in this same update that imports a shared module the gateway
+    // loaded in its OLD version would link against the stale namespace and fail
+    // on every tick (the process never restarts). Boot paths already run in a
+    // fresh process and keep calling the runner directly.
     const { join: joinPath } = await import("node:path");
-    var res = await runMigrations({
+    var res = await runMigrationsInChild({
       migrationsDir: joinPath(root, "scripts", "migrations"),
       dbPath: inst.dbPath,
       tasksDbPath: inst.tasksDbPath,
