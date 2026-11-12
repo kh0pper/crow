@@ -25,7 +25,7 @@ import {
   chunkPoints, MovesInputError, MOVE_INDOOR_KIND, MOVE_OUTDOOR_KIND, INDOOR_DAILY_CAP,
 } from "../bundles/ramble/server/moves/ledger.js";
 import {
-  startChunk, recordProgress, plannedSecondsFor, extraCardKey, extrasCount,
+  startChunk, startedEntryId, recordProgress, plannedSecondsFor, extraCardKey, extrasCount,
   MOVE_CARD_KIND, MOVE_MIN_KIND,
 } from "../bundles/ramble/server/moves/progress.js";
 
@@ -196,6 +196,31 @@ test("movemin for the day grows by the whole minutes accepted, and never shrinks
 
 /* ------------------------------------------------------------- start records */
 
+test("a start binds the card to its entry, and the first binding holds", async () => {
+  const db = await freshDb();
+  const cardKey = DAY0 + ":day";
+  assert.equal(await startedEntryId(db, cardKey), null, "a card with no start record binds nothing");
+
+  await startChunk(db, { day: DAY0, cardKey, entryId: "test-entry", plannedSeconds: 600, now: T0 });
+  assert.equal(await startedEntryId(db, cardKey), "test-entry");
+
+  await startChunk(db, {
+    day: DAY0, cardKey, entryId: "other-entry", plannedSeconds: 900, now: T0 + 5 * MIN,
+  });
+  assert.equal(await startedEntryId(db, cardKey), "test-entry",
+    "a retried start keeps the entry the card was opened for");
+
+  assert.equal(await startedEntryId(db, "no-such-card"), null, "an unknown card binds nothing");
+
+  const bare = DAY0 + ":early";
+  await startChunk(db, { day: DAY0, cardKey: bare, plannedSeconds: 600, now: T0 });
+  assert.equal(await startedEntryId(db, bare), null, "a start that names no entry binds nothing");
+
+  const blank = DAY0 + ":evening";
+  await startChunk(db, { day: DAY0, cardKey: blank, entryId: "", plannedSeconds: 600, now: T0 });
+  assert.equal(await startedEntryId(db, blank), null, "an empty entry id is no entry id");
+});
+
 test("a second start keeps the first record, and the settings rows stay local and unemitted", async () => {
   const db = await freshDb();
   const cardKey = DAY0 + ":day";
@@ -209,7 +234,7 @@ test("a second start keeps the first record, and the settings rows stay local an
     "every row written for this card is a `local.` key: " + keys.join(", "));
   const startedRow = rows.find((r) => String(r.key) === "local.moves.started." + cardKey);
   assert.ok(startedRow, "the start record exists");
-  assert.deepEqual(JSON.parse(String(startedRow.value)), { startedAt: T0, plannedSeconds: 600 },
+  assert.deepEqual(JSON.parse(String(startedRow.value)), { startedAt: T0, plannedSeconds: 600, entryId: null },
     "and it still carries the first plan");
 
   const emitted = [];

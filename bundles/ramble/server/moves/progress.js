@@ -22,9 +22,12 @@
  * serializes behind it. Every budget claim uses the rewritten day.
  *
  * THREE WRITES, THREE PURPOSES.
- *   local.moves.started.<cardKey>   JSON { startedAt, plannedSeconds } — written
- *       ONCE, and the wall-clock anchor the accepted seconds are clamped
- *       against. A second start for the same key keeps the first record.
+ *   local.moves.started.<cardKey>   JSON { startedAt, plannedSeconds, entryId }
+ *       — written ONCE, and the wall-clock anchor the accepted seconds are
+ *       clamped against. A second start for the same key keeps the first
+ *       record. `entryId` is the entry the session was opened for (null when
+ *       the caller named none), so a post can be checked against the entry the
+ *       card was started with (`startedEntryId`).
  *   local.moves.best.<cardKey>      a JSON number — the high-water of accepted
  *       seconds, only ever raised, so a late lower post still reports the same
  *       `done` and never re-pays.
@@ -189,25 +192,40 @@ async function growMinutes(db, walletKey, fromSeconds, toSeconds, { now, emit })
  *
  * `plannedSeconds` is the length the compiled session gives this chunk, or null
  * when the caller has none (then `isChunkDone` can never be true for the card).
- * `day` is the card's day, unused here: the record is keyed by the card key
- * alone, and the day rule lives in `recordProgress`, so a retried start of a
- * stale-day card still lands under the key the client will post with.
+ * `entryId` is the entry the card was opened for; a non-empty string is stored
+ * as given, anything else as null. `day` is the card's day, unused here: the
+ * record is keyed by the card key alone, and the day rule lives in
+ * `recordProgress`, so a retried start of a stale-day card still lands under the
+ * key the client will post with.
  */
-export async function startChunk(db, { cardKey, plannedSeconds = null, now = Date.now() } = {}) {
+export async function startChunk(db, {
+  cardKey, entryId = null, plannedSeconds = null, now = Date.now(),
+} = {}) {
   const key = requireCardKey(cardKey);
   const at = asAt(now);
   const planned = Number.isFinite(Number(plannedSeconds)) && plannedSeconds !== null
     ? Math.max(0, Math.round(Number(plannedSeconds)))
     : null;
+  const bound = typeof entryId === "string" && entryId !== "" ? entryId : null;
   const settingKey = STARTED_PREFIX + key;
   await db.execute({
     sql: `INSERT INTO ramble_settings (key, value) VALUES (?, ?)
           ON CONFLICT(key) DO NOTHING`,
-    args: [settingKey, JSON.stringify({ startedAt: at, plannedSeconds: planned })],
+    args: [settingKey, JSON.stringify({ startedAt: at, plannedSeconds: planned, entryId: bound })],
   });
   const stored = await readJson(db, settingKey);
   const startedAt = Number(stored?.startedAt);
   return { startedAt: Number.isFinite(startedAt) ? startedAt : at };
+}
+
+/**
+ * The entry the card was started for, or null when the card has no start record
+ * or the record carries no entry. A card that names no entry binds nothing.
+ */
+export async function startedEntryId(db, cardKey) {
+  if (typeof cardKey !== "string" || cardKey === "" || cardKey.length > CARD_KEY_MAX) return null;
+  const stored = await readJson(db, STARTED_PREFIX + cardKey);
+  return typeof stored?.entryId === "string" && stored.entryId !== "" ? stored.entryId : null;
 }
 
 /* --------------------------------------------------------------- progress */

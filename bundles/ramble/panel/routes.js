@@ -1429,7 +1429,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       ? movesMods.progressMod.extraCardKey(day, entryId, now)
       : today.day + ":" + slot;
     const started = await movesMods.progressMod.startChunk(db, {
-      day, cardKey, plannedSeconds, now,
+      day, cardKey, entryId, plannedSeconds, now,
     });
     res.json({ cardKey, startedAt: started.startedAt });
   }));
@@ -1456,6 +1456,12 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (extraKey && extraKey[1] !== entryId) bad("cardKey names a different entry");
     const entry = movesMods.libraryMod.entryById(servedMoves(), entryId);
     if (!entry) return res.status(404).json({ error: "not found" });
+    // A start binds its card to the entry it was opened for, so the same card
+    // key cannot be paid twice over against two different entries' text. A
+    // record with no binding — or no record at all — falls through; a post for
+    // a card that was never started is refused by `recordProgress`.
+    const bound = await movesMods.progressMod.startedEntryId(db, cardKey);
+    if (bound && bound !== entryId) bad("cardKey was started for a different entry");
 
     // The card key carries its day, and that is the day the minutes, the pay and
     // the Done are filed under. `recordProgress` then applies the day rule: a
@@ -1469,9 +1475,16 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     } catch (err) { movesInput(err); }
     // The chunk pay has already happened, so a passed half-way mark is marked —
     // `markChallengeDone`, never `recordChallengeDone`, which would pay again.
+    // An entry the ledger cannot mark (outside its vocabulary) leaves the pay
+    // standing: the mark and the streak heart are skipped for this post, and no
+    // paid post turns into a 500.
     if (progress.done) {
-      await movesMods.ledgerMod.markChallengeDone(db, { day, entry, now, emit });
-      await movesMods.streakMod.awardStreakHeart(db, { now, emit });
+      try {
+        await movesMods.ledgerMod.markChallengeDone(db, { day, entry, now, emit });
+        await movesMods.streakMod.awardStreakHeart(db, { now, emit });
+      } catch (err) {
+        if (err?.name !== "MovesInputError") throw err;
+      }
     }
     res.json({ ...(await movesSnapshot(now)), progress });
   }));

@@ -12,6 +12,8 @@
  *   - today / done / swap / log / prefs / library / flow-run round-trip,
  *   - a parse with no local model answers `no_model` and the request's words
  *     appear in no log line and in no emitted row,
+ *   - a card is paid against the entry it was started for, never another one,
+ *   - a Done mark the ledger cannot file leaves the chunk pay standing,
  *   - the MCP tool refuses an activity outside the fixed vocabulary.
  */
 import { test, before, after } from "node:test";
@@ -52,6 +54,13 @@ const MOVES_LIBRARY = [
     id: "flow-test", kind: "flow", title: "A test flow", minutes: 8, indoor: true,
     activity: "yoga", equipment: ["none"], flow: ["pose-test", "pose-test", "pose-test", "pose-test", "pose-test"]
       .map((id) => ({ id, holdSeconds: 30 })),
+  }),
+  // An activity outside the ledger's vocabulary: a chunk of it can be started and
+  // paid, but the Done mark cannot file it. Level 9 keeps it out of the picker, so
+  // today's card is never this one.
+  entry({
+    id: "pose-unmarkable", kind: "pose", title: "A fixture the ledger cannot mark", minutes: 10,
+    indoor: true, activity: "stretching", level: 9, pose: { joints: { knee: 45 } },
   }),
 ];
 
@@ -113,7 +122,7 @@ test("GET /moves/today: a challenge from the served library, with Health, steps 
 
 test("GET /moves/library: reviewed entries only, no pose data; the detail route carries it", async () => {
   const list = await (await get("/api/ramble/moves/library")).json();
-  assert.deepEqual(list.entries.map((e) => e.id).sort(), ["flow-test", "pose-test", "walk-10"]);
+  assert.deepEqual(list.entries.map((e) => e.id).sort(), ["flow-test", "pose-test", "pose-unmarkable", "walk-10"]);
   assert.equal(list.entries.some((e) => "pose" in e), false);
 
   const detail = await (await get("/api/ramble/moves/library/pose-test")).json();
@@ -437,6 +446,57 @@ test("progress refuses the old x1 shape, a mismatched entry and a malformed extr
   assert.equal((await post(card.day + ":x:" + card.entry.id, card.entry.id)).status, 400,
     "an extra key without its start second");
   assert.equal(await walletTotal(db, card.day), before, "none of the refused posts wrote anything");
+  db.close?.();
+});
+
+/* ------------------------------------------- the entry a card was started for */
+
+test("a start binds its card to one entry: a post naming a different entry is refused", async () => {
+  const db = await scratchDb();
+  const card = (await (await get("/api/ramble/moves/today")).json()).challenge;
+  const other = MOVES_LIBRARY.find((e) => e.id !== card.entry.id);
+
+  const started = await send("POST", "/api/ramble/moves/start", { cardKey: "early", entryId: card.entry.id });
+  assert.equal(started.status, 200);
+  const start = await started.json();
+  await ageStartRecord(db, start.cardKey, 11 * 60000);
+
+  const before = await walletTotal(db, card.day);
+  const posted = await send("POST", "/api/ramble/moves/progress", {
+    cardKey: start.cardKey, chunkIndex: 0, entryId: other.id, activeSeconds: 600,
+  });
+  assert.equal(posted.status, 400, "the card was started for today's entry, not this one");
+  assert.match((await posted.json()).error, /different entry/);
+  assert.equal(await walletTotal(db, card.day), before, "and the refused post wrote nothing");
+  db.close?.();
+});
+
+test("a Done mark that cannot be filed leaves the pay standing and answers 200", async () => {
+  const db = await scratchDb();
+  const card = (await (await get("/api/ramble/moves/today")).json()).challenge;
+  await clearBudgets(db, card.day);
+  const unmarkable = MOVES_LIBRARY.find((e) => e.id === "pose-unmarkable");
+  assert.ok(unmarkable, "the fixture library serves an entry the ledger cannot mark");
+
+  const started = await send("POST", "/api/ramble/moves/start", {
+    cardKey: "extra", entryId: unmarkable.id,
+  });
+  assert.equal(started.status, 200);
+  const start = await started.json();
+  assert.ok(start.cardKey.startsWith(card.day + ":x:" + unmarkable.id + ":"));
+  await ageStartRecord(db, start.cardKey, 11 * 60000);
+
+  const doneBefore = await doneCount(db, card.day);
+  const before = await walletTotal(db, card.day);
+  const posted = await send("POST", "/api/ramble/moves/progress", {
+    cardKey: start.cardKey, chunkIndex: 0, entryId: unmarkable.id, activeSeconds: 600,
+  });
+  assert.equal(posted.status, 200, "a paid post is never a 500 over its Done mark");
+  const body = await posted.json();
+  assert.equal(body.progress.done, true, "the chunk passed its half-way mark");
+  assert.ok(body.progress.paid > 0, "and the pay made stands");
+  assert.equal((await walletTotal(db, card.day)) - before, body.progress.paid);
+  assert.equal(await doneCount(db, card.day), doneBefore, "the post filed no movedone row");
   db.close?.();
 });
 
