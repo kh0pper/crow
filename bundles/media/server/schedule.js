@@ -53,15 +53,29 @@ export function normalizeConfig(raw) {
   };
 }
 
-/** → { row (the schedules row, or null), cfg } */
-export async function readSchedule(db) {
+/**
+ * → { row (the schedules row, or null), cfg }
+ *
+ * `strict: true` is for the minute tick, which is about to CLAIM an occurrence and build a briefing
+ * from `cfg`: a config it cannot read must abort the tick, not quietly become an empty schedule
+ * (that is how a briefing was made with every show dropped). A failed read throws. A schedule row
+ * means saveSchedule wrote the settings with it, so a row with no stored config, or one that does
+ * not parse, is a broken store too: `{ code: "config_unreadable" }`. Non-strict (the tabs and the
+ * tools) keeps rendering whatever it can.
+ */
+export async function readSchedule(db, { strict = false } = {}) {
   let rows = [];
   try {
     ({ rows } = await db.execute({ sql: "SELECT id, cron_expression, enabled, next_run FROM schedules WHERE task = ? ORDER BY id LIMIT 1", args: [SCHEDULE_TASK] }));
   } catch (err) {
     if (!/no such table: schedules/.test(String(err?.message))) throw err;   // a database without the core schema: no schedule
   }
-  return { row: rows[0] || null, cfg: normalizeConfig(await readJsonSetting(db, CONFIG_KEY)) };
+  const row = rows[0] || null;
+  const stored = await readJsonSetting(db, CONFIG_KEY, { strict });
+  if (strict && row && !stored) {
+    throw Object.assign(new Error("schedule row exists but its config could not be read"), { code: "config_unreadable" });
+  }
+  return { row, cfg: normalizeConfig(stored) };
 }
 
 /** What the tab and the tool show: { state: "unset" | "off" | "on" | "bad_cron", cron, tz, time, next } */
@@ -205,7 +219,10 @@ export async function runScheduleTick(db, deps = {}) {
   const out = { state: "unset", claimed: null, retried: null, failed: null, announced: [], watched: null, error: null };
   let cfg = normalizeConfig(null);
   try {
-    const s = await readSchedule(db);
+    // Strict: a tick that cannot read the schedule or its settings claims nothing and reports the
+    // failure (out.error, and the job state), so the next minute retries with the real config. A
+    // briefing is therefore never generated, and never claimed, on an unreadable read.
+    const s = await readSchedule(db, { strict: true });
     cfg = s.cfg;
     out.state = !s.row ? "unset" : Number(s.row.enabled) === 1 ? "on" : "off";
     if (out.state === "on") {

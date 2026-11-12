@@ -538,20 +538,40 @@ export async function discoverLocalInstances(db) {
   return discovered;
 }
 
+/** An instance id: 16 random bytes as hex (generateInstanceId above). */
+export const LOCAL_INSTANCE_ID_RE = /^[0-9a-f]{32}$/;
+
 let _unpinnedId = null;
 
 /**
  * Get the current instance's ID. Reads from <data dir>/instance-id or generates one.
+ *
+ * The file can EXIST and still not be readable: inside an add-on wall,
+ * `<data dir>/instance-id` is a masked /dev/null char device, so existsSync() is true and
+ * readFileSync() throws EACCES (an empty file counts as unreadable too). That case must
+ * never mint an id: dashboard_settings_overrides rows are keyed by (key, instance_id), so
+ * a fresh random id per call matches no row — every per-instance setting silently reads as
+ * unset (the daily briefing lost its shows this way) and every write adds a junk override
+ * row. An unreadable file therefore resolves to the id the gateway handed this process in
+ * CROW_LOCAL_INSTANCE_ID (never written anywhere), or throws INSTANCE_ID_UNREADABLE so the
+ * caller reports a failure instead of inventing an identity. Only a MISSING file is minted.
  */
 export function getOrCreateLocalInstanceId() {
   const dataDir = resolveInstanceDataDir();
   const idPath = resolve(dataDir, "instance-id");
 
-  try {
-    if (existsSync(idPath)) {
-      return readFileSync(idPath, "utf-8").trim();
-    }
-  } catch {}
+  if (existsSync(idPath)) {
+    let fileId = "";
+    try { fileId = readFileSync(idPath, "utf-8").trim(); } catch { /* unreadable: handled below */ }
+    if (fileId) return fileId;
+    const envId = String(process.env.CROW_LOCAL_INSTANCE_ID || "").trim();
+    if (LOCAL_INSTANCE_ID_RE.test(envId)) return envId;
+    throw instanceError(
+      "INSTANCE_ID_UNREADABLE",
+      `${idPath} exists but its instance id cannot be read (empty or unreadable), and ` +
+      `CROW_LOCAL_INSTANCE_ID is not a 32-character hex instance id; refusing to invent one`,
+    );
+  }
 
   // An instance-id is the boot gate's evidence that <CROW_HOME>/data is an
   // instance (crow-home.js instancePathsVerdict rule 3). Only a gateway that

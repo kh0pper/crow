@@ -108,11 +108,18 @@ test("the bot env module's full-environment mode cannot leak into the base", () 
   assert.equal(base.PATH, full.PATH);
 });
 
-test("an add-on with no registry entry gets the base, its config env and the host marker — nothing else", () => {
+test("an add-on with no registry entry gets the base, its config env, the host marker and the instance id — nothing else", () => {
   const env = addonStdioEnv({ env: { OWN_SETTING: "1" } }, GATEWAY_ENV, "not-a-bundle-in-the-repo");
   const expected = Object.keys(addonBaseEnv(GATEWAY_ENV)).sort();
+  const extras = ["OWN_SETTING", "CROW_ADDON_HOST"];
+  // The gateway's own id rides along (last, from the gateway): a walled child cannot read
+  // <data dir>/instance-id itself, and its per-instance settings rows are keyed by this id.
+  if (env.CROW_LOCAL_INSTANCE_ID !== undefined) {
+    assert.match(env.CROW_LOCAL_INSTANCE_ID, /^[0-9a-f]{32}$/);
+    extras.push("CROW_LOCAL_INSTANCE_ID");
+  }
   const got = Object.keys(env).sort();
-  assert.deepEqual(got, [...expected, "OWN_SETTING", "CROW_ADDON_HOST"].sort());
+  assert.deepEqual(got, [...expected, ...extras].sort());
   assert.equal(env.CROW_ADDON_HOST, "gateway");
   for (const key of Object.keys(GATEWAY_ENV)) {
     if (expected.includes(key)) continue;

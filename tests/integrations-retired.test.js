@@ -195,8 +195,10 @@ test("a service add-on's child gets its derived env; a non-service add-on is unc
   assert.equal(addonStdioEnv({ ...render, env: { RENDER_API_KEY: "entry" } }, { RENDER_API_KEY: "base" }, "render").AUTH_HEADER, "Bearer entry");
   const fw = { command: "node", args: ["server/index.js"], env: { FUNKWHALE_URL: "http://fw.example" } };
   assert.deepEqual(addonStdioEnv(fw, { PATH: "/bin" }, "funkwhale"), addonStdioEnv(fw, { PATH: "/bin" }));
-  assert.deepEqual(addonStdioEnv(fw, { PATH: "/bin" }, "funkwhale"),
-    { PATH: "/bin", FUNKWHALE_URL: "http://fw.example", CROW_ADDON_HOST: "gateway" });
+  // The gateway's own instance id rides along, last, so a walled child can resolve its settings.
+  const { CROW_LOCAL_INSTANCE_ID: instanceId, ...rest } = addonStdioEnv(fw, { PATH: "/bin" }, "funkwhale");
+  assert.match(String(instanceId), /^[0-9a-f]{32}$/, "the gateway's instance id");
+  assert.deepEqual(rest, { PATH: "/bin", FUNKWHALE_URL: "http://fw.example", CROW_ADDON_HOST: "gateway" });
 });
 
 test("the bot catalog gives a Render add-on its AUTH_HEADER (I1)", () => {
