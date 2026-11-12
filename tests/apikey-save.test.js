@@ -576,6 +576,77 @@ test("a seal failure on the MCP entry answers the fixed keychain sentence and do
   assert.equal(JSON.stringify(readMcpEntry("apikey-sealfail")), entryBefore, "the entry was not touched");
 });
 
+test("first-writer-wins: an entry that only LISTS the key is answered from its ACTIVE keychain row", async () => {
+  // With add-on sealing ON the entry keeps no plain value for a declared key — only its NAME in
+  // `keychainEnv`. `hasValue` (the first-writer-wins check) must therefore answer from the active
+  // crow_keychain row: otherwise a generated-value save would happily overwrite the operator's
+  // key that the keychain already holds.
+  const dir = seed("apikey-fw-sealed", { ...DEMO, id: "apikey-fw-sealed", name: "First Writer" }, { dotEnv: "DEMO_API_KEY=\n" });
+  await withSealing(true, () => withServer({ owner: true }, async (post) => {
+    const first = await save(post, { bundle_id: "apikey-fw-sealed", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+  }));
+
+  const entry = readMcpEntry("apikey-fw-sealed");
+  assert.deepEqual(entry.keychainEnv, ["DEMO_API_KEY"], "the entry lists the name");
+  assert.equal(readMcp("apikey-fw-sealed").DEMO_API_KEY, undefined, "and holds no plain value to compare");
+  assert.equal(JSON.stringify(entry).includes(VALUE), false);
+
+  const second = await saveApiKey({
+    bundleId: "apikey-fw-sealed",
+    manifest: { ...DEMO, id: "apikey-fw-sealed" },
+    envKey: "DEMO_API_KEY",
+    value: VALUE2,
+    firstWriterWins: true,
+    crowHome: TMP_HOME,
+  });
+  assert.deepEqual(second, { ok: false, status: 409, error: API_KEY_SAVE_REFUSALS.has_value });
+  assert.equal(second.error, "This extension already has a value for that key; Crow left it alone.");
+  assert.equal(JSON.stringify(second).includes(VALUE2), false, "the refusal never echoes the value");
+
+  const rows = await keychainRows("apikey-fw-sealed");
+  assert.equal(rows.length, 1, "no second row");
+  assert.equal(rows[0].secret, VALUE, "the first writer's value is still the one saved");
+  assert.equal(rows[0].status, "active");
+  assert.equal(readMcp("apikey-fw-sealed").DEMO_API_KEY, undefined, "nothing was written into the entry");
+  assert.equal(readDotEnv(dir).DEMO_API_KEY, VALUE, "nor into the bundle's .env");
+
+  // Control: the LISTING alone is not a value. A fresh add-on whose entry lists the name with no
+  // row behind it is saved normally — the 409 above came from the row, not from `keychainEnv`.
+  seed("apikey-fw-fresh", { ...DEMO, id: "apikey-fw-fresh", name: "Fresh" });
+  const listingOnly = JSON.parse(readFileSync(MCP_ADDONS, "utf8"));
+  listingOnly["apikey-fw-fresh"].keychainEnv = ["DEMO_API_KEY"];
+  writeFileSync(MCP_ADDONS, JSON.stringify(listingOnly, null, 2), { mode: 0o600 });
+  assert.deepEqual(await keychainRows("apikey-fw-fresh"), [], "no row yet");
+  const remembered = [];
+  const fresh = await saveApiKey({
+    bundleId: "apikey-fw-fresh",
+    manifest: { ...DEMO, id: "apikey-fw-fresh" },
+    envKey: "DEMO_API_KEY",
+    value: VALUE2,
+    firstWriterWins: true,
+    crowHome: TMP_HOME,
+    deps: {
+      withLock: (id, fn) => fn(),
+      findInvalidEnv: () => null,
+      envPatternViolation: () => null,
+      openDb: () => ({ close() {} }),
+      ensureWriteKey: async () => ({ id: "key-1", seed: Buffer.alloc(32) }),
+      save: async () => { throw new Error("a first-writer-wins save never takes the overwriting path"); },
+      remember: async (_db, _key, entry) => { remembered.push(entry); return 11; },
+      applyEnv: async () => true,
+      propagate: () => false,
+      needsConfig: () => [],
+      mcpValue: () => "",
+      now: () => Date.parse("2026-11-12T09:30:00Z"),
+      warn: () => {},
+    },
+  });
+  assert.equal(fresh.ok, true, JSON.stringify(fresh));
+  assert.equal(remembered.length, 1, "the atomic write claimed the key");
+  assert.equal(remembered[0].secret, VALUE2);
+});
+
 test("no API-key save leaks the sentinel: console, audit rows, notifications, the entry", async (t) => {
   const out = captureOutput(t);
   const SENTINEL = "sentinel-" + randomUUID();
