@@ -1891,3 +1891,145 @@ test("fix: a queue item the page refuses outright stops waiting, a timeout and a
     "a refused report is dropped, a timeout and a throttle are kept");
 });
 
+test("fix: a queue item with no card left by an earlier visit is dropped, and mount asks for no card", async () => {
+  const booted = boot();
+  /* A later moment than the visit that stored the item, so the two visits are
+   * named differently. */
+  booted.clock.time = 5000;
+  const chain = [{ chunkId: "walk-10" }];
+  const storage = fakeStorage({
+    [QUEUE_KEY]: JSON.stringify([
+      { chunkIndex: 0, entryId: "walk-10", activeSeconds: 120, visit: "0" },
+    ]),
+  });
+  const starts = [];
+  const posted = [];
+  mountOn(booted, chain, {
+    storage,
+    cardSlot: "day",
+    start: (body) => {
+      starts.push(plain(body));
+      return Promise.resolve({ cardKey: "card-of-this-visit" });
+    },
+    post: (payload) => { posted.push(plain(payload)); return Promise.resolve({ done: false }); },
+  });
+
+  await settle();
+
+  assert.deepEqual(starts, [], "the mount-time retry asks for no card at all");
+  assert.deepEqual(posted, [], "the other visit's item is not posted");
+  assert.deepEqual(queueOf(storage), [], "its card was never opened, so it leaves the queue");
+
+  byRole(booted.host, "start").click();
+  await settle();
+  advance(booted.clock, 5);
+  await settle();
+
+  assert.equal(starts.length, 1, "this visit's own Start is the first thing that asks for a card");
+  assert.deepEqual(posted, [], "a dropped item is never posted later either");
+  assert.deepEqual(queueOf(storage), [], "and it stays out of the queue");
+});
+
+test("fix: a queued post on its way for a card is no promise for a fresh report about it", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }];
+  const storage = fakeStorage({
+    [QUEUE_KEY]: JSON.stringify([
+      { cardKey: "card-shared", chunkIndex: 0, entryId: "walk-10", activeSeconds: 700, visit: "older" },
+    ]),
+  });
+  const posted = [];
+  const starts = [];
+  let queuedTries = 0;
+  let releaseQueued = null;
+  let releaseOwed = null;
+  const { player } = mountOn(booted, chain, {
+    storage,
+    start: (body) => {
+      starts.push(plain(body));
+      return Promise.resolve({ cardKey: "card-shared" });
+    },
+    post: (payload) => {
+      posted.push(plain(payload));
+      if (payload.activeSeconds === 700) {
+        queuedTries += 1;
+        if (queuedTries <= 2) return Promise.reject(new Error("offline"));
+        return new Promise((resolve) => { releaseQueued = () => resolve({ done: false }); });
+      }
+      return new Promise((resolve) => { releaseOwed = () => resolve({ done: true }); });
+    },
+  });
+
+  await settle();
+  assert.equal(posted.length, 1, "the stored item is tried and cannot be made yet");
+  assert.deepEqual(posted[0], {
+    cardKey: "card-shared", chunkIndex: 0, entryId: "walk-10", activeSeconds: 700,
+  });
+
+  byRole(booted.host, "start").click();
+  await settle();
+  assert.equal(starts.length, 1, "this visit's Start asks its chunk for a card once");
+
+  /* The walk ends at ten minutes: the chunk's own count for its card is on its
+   * way and still unanswered. */
+  advance(booted.clock, 600);
+  await settle();
+  assert.equal(posted.filter((one) => one.activeSeconds === 600).length, 1,
+    "the chunk's own ten minutes are on their way");
+  assert.equal(typeof releaseOwed, "function");
+
+  /* Ten seconds on, the beat tries the waiting item again, so it goes out while
+   * the ten minute report is still unanswered. */
+  advance(booted.clock, 15);
+  await settle();
+  assert.equal(queuedTries, 3, "the waiting item was tried once more");
+  assert.equal(typeof releaseQueued, "function", "and it is on its way again");
+
+  /* A fresh report about the same card now: the item on its way is no promise
+   * for the player to wait on, and the visit ends without an error. */
+  assert.doesNotThrow(() => player.destroy());
+  await settle();
+
+  assert.equal(posted.filter((one) => one.activeSeconds === 600).length, 1,
+    "the card carries one ten minute count, said once");
+  assert.equal(posted.filter((one) => one.activeSeconds === 700).length, 3,
+    "an item already on its way is not sent again while it is out");
+  assert.equal(queueOf(storage).length, 1, "the item waits while its post is out");
+
+  releaseOwed();
+  await settle();
+  releaseQueued();
+  await settle();
+  assert.deepEqual(queueOf(storage), [], "and it leaves the queue once the page has it");
+});
+
+test("fix: a wake lock that lands while another is held hands the older one back", async () => {
+  const booted = boot();
+  const pending = [];
+  const released = [];
+  const { player } = mountOn(booted, [{ chunkId: "walk-10" }], {
+    wakeLock: {
+      request() {
+        return new Promise((resolve) => { pending.push(resolve); });
+      },
+    },
+  });
+
+  byRole(booted.host, "start").click();
+  assert.equal(pending.length, 1, "the Start asks for a lock");
+  byRole(booted.host, "pause").click();
+  byRole(booted.host, "pause").click();
+  assert.equal(pending.length, 2, "Keep going asks for one again");
+
+  pending[0]({ release() { released.push("older"); } });
+  await settle();
+  assert.deepEqual(released, [], "the first handle is kept while the session runs");
+
+  pending[1]({ release() { released.push("newer"); } });
+  await settle();
+  assert.deepEqual(released, ["older"], "the older handle goes back when the newer one lands");
+
+  player.destroy();
+  assert.deepEqual(released, ["older", "newer"], "and the newer one goes back with the visit");
+});
+

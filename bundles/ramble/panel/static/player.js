@@ -603,8 +603,12 @@
      * answered. A visit starts with none of it, so no card of an earlier visit
      * speaks for one of this visit's. */
     var floors = new Map();
-    /* The report a card of this visit is still waiting on, by card key. */
+    /* The report a card of this visit is still waiting on, by card key. Only a
+     * promise ever goes in here: sendOne reads it with .then. */
     var inFlight = new Map();
+    /* The queued items on their way, by card key, so a queued send never stands
+     * in for a promise and a card already being carried is not carried twice. */
+    var queuedInFlight = new Map();
     /* This visit's own name in the queue, so two visits' keyless items are
      * never the same item. */
     var visitId = String(nowFn());
@@ -878,12 +882,20 @@
       sendQueuedAgainst(item, key);
     }
 
-    /* An item stored with no card belongs to a chunk of the chain being run:
+    /* An item stored with no card belongs to a chunk of the visit being run:
      * the start that failed for it is asked once more, and the report waits for
      * the card it answers. A start that still answers nothing leaves the item
-     * where it was. */
+     * where it was. An item of another visit had no card opened for it and
+     * nothing can be posted for it, so it leaves the queue; one of this visit
+     * waits until this visit's own Start, because a keyless item of a visit
+     * only exists once that visit has started. */
     function sendKeylessQueued(item) {
-      if (!hooks.start) return;
+      var itemVisit = typeof item.visit === "string" ? item.visit : "";
+      if (itemVisit !== visitId) {
+        dropQueued(item);
+        return;
+      }
+      if (!hooks.start || !started) return;
       var index = item.chunkIndex;
       if (chunkIdOf(index) !== item.entryId) return;
       var known = cardKeys[index];
@@ -909,8 +921,7 @@
      * throttle is the report being refused, so the item goes rather than wait
      * for ever. */
     function sendQueuedAgainst(item, key) {
-      var id = queueIdOf(item);
-      if (inFlight.get(id)) return;
+      if (queuedInFlight.get(key)) return;
       var carried = raiseTo(key, item.activeSeconds);
       if (acked(key, carried)) {
         dropQueued(item);
@@ -918,7 +929,7 @@
       }
       var answer;
       try {
-        inFlight.set(id, true);
+        queuedInFlight.set(key, true);
         answer = hooks.post({
           cardKey: key,
           chunkIndex: item.chunkIndex,
@@ -926,19 +937,19 @@
           activeSeconds: carried
         });
       } catch (err) {
-        inFlight.delete(id);
+        queuedInFlight.delete(key);
         return;
       }
       if (!answer || typeof answer.then !== "function") {
-        inFlight.delete(id);
+        queuedInFlight.delete(key);
         dropQueued(item);
         return;
       }
       Promise.resolve(answer).then(function () {
-        inFlight.delete(id);
+        queuedInFlight.delete(key);
         dropQueued(item);
       }, function (err) {
-        inFlight.delete(id);
+        queuedInFlight.delete(key);
         if (refusedReport(err)) dropQueued(item);
       });
     }
@@ -1498,6 +1509,8 @@
      * lock already held goes back before another is asked for, so a second play
      * never leaves one behind. */
     function takeWakeLock() {
+      /* A session that has ended owns no lock: nothing is asked for after it. */
+      if (terminal) return;
       wakeWanted = true;
       var held = wakeHandle;
       wakeHandle = null;
@@ -1521,6 +1534,11 @@
             releaseWakeHandle(handle);
             return;
           }
+          /* A lock that landed while another is held: the older one goes back
+           * before the new one is kept, so no handle is left behind. */
+          var older = wakeHandle;
+          wakeHandle = null;
+          releaseWakeHandle(older);
           wakeHandle = handle;
         }, function () {
           return undefined;
