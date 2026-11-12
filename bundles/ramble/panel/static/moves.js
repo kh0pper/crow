@@ -8,7 +8,8 @@
  * What lives here (moves design, spec 2026-10-30 §6): the Today card's
  * challenge (Start / Done / Swap), the step goal and streak lines, the
  * "I did something else" sheet (parse, then manual pickers when there is no
- * model), Customize, the Learn list and its entry pages, and the flow player.
+ * model), Customize, the Learn list and its entry pages, and the hand-off to
+ * static/player.js for a chunk that plays as a session.
  * The server-rendered strings come from panel/ramble.js via lang; this
  * file's RUNTIME strings live in STR below, keyed off the data-lang attribute.
  *
@@ -276,7 +277,11 @@
     return fetch(url, opts).then(function (res) {
       if (res.status === 204) return null;
       return res.json().catch(function () { return null; }).then(function (body) {
-        if (!res.ok) throw new Error((body && body.error) || ("request failed: " + res.status));
+        if (!res.ok) {
+          var err = new Error((body && body.error) || ("request failed: " + res.status));
+          err.status = res.status;
+          throw err;
+        }
         return body;
       });
     });
@@ -482,9 +487,12 @@
     var c = today && today.challenge;
     if (!c || c.off || !c.entry) return;
     var id = c.entry.id;
+    /* The card the session starts under: the challenge's own slot when it
+     * carries one, Today's otherwise. */
+    var slot = typeof c.slot === "string" && c.slot !== "" ? c.slot : "day";
     aroundSafety(function () {
       showLearnView();
-      openLearnEntry(id, true);
+      openLearnEntry(id, true, { cardSlot: slot });
     });
   }
 
@@ -801,7 +809,18 @@
     catch (e) { el.textContent = ""; }
   }
 
-  function paintEntry(entry, level, autoplay) {
+  /* The entry's static page: the figure, the lists and the easier/harder
+   * links. It comes back whenever an entry is painted, and steps aside while
+   * the player has the screen. */
+  function setStaticEntry(on) {
+    setHidden($("rb-entry-figure"), !on);
+    setHidden($("rb-entry-body"), !on);
+    setHidden($("rb-entry-links"), !on);
+  }
+
+  /* autoplay is the Learn screen's own flag (a challenge opened from Today
+   * asks for it); the player it hands a chunk to waits for its own Start. */
+  function paintEntry(entry, level, autoplay, ctx) {
     setText($("rb-entry-title"), entry.title || entry.id);
     var levelKey = { full: "levelFull", names: "levelNames", first: "levelFirst", memory: "levelMemory" }[level];
     setText($("rb-entry-meta"), challengeMeta(entry) + (entry.kind === "flow" && levelKey ? " \u00b7 " + t(levelKey) : ""));
@@ -831,14 +850,11 @@
     addLink(links, entry.easier, t("easier"));
     addLink(links, entry.harder, t("harder"));
 
-    var flowBox = $("rb-flow");
-    if (isFlow) {
-      setHidden(flowBox, false);
-      loadFlowPoses(entry, level, autoplay);
-    } else {
-      stopPlayer();
-      setHidden(flowBox, true);
-    }
+    /* A chunk plays in the player; every other kind keeps this page. */
+    setStaticEntry(true);
+    if (fig) setHidden(fig, !hasFigure);
+    stopPlayer();
+    if (CHUNK_STYLE[entry.kind] === true) openPlayer(entry, level, ctx);
   }
 
   function entryById(id) {
@@ -852,7 +868,9 @@
       .catch(function () { return null; });
   }
 
-  function openLearnEntry(id, autoplay) {
+  /* ctx carries the card slot a session's first chunk starts under: Today's
+   * Start names one, a Learn-page open names none. */
+  function openLearnEntry(id, autoplay, ctx) {
     stopPlayer();
     showLearnView();
     setHidden($("rb-learn-list-card"), true);
@@ -861,7 +879,7 @@
     return jsonFetch("/api/ramble/moves/library/" + encodeURIComponent(id))
       .then(function (out) {
         if (!out || !out.entry) return;
-        paintEntry(out.entry, out.level || "full", autoplay === true);
+        paintEntry(out.entry, out.level || "full", autoplay === true, ctx);
       })
       .catch(function (err) { setText($("rb-learn-status"), err.message); });
   }
@@ -885,195 +903,191 @@
   var learnBackPet = $("rb-learn-back-pet");
   if (learnBackPet) learnBackPet.addEventListener("click", function () { stopPlayer(); root.setAttribute("data-view", "pet"); refreshToday(); });
 
-  /* ----------------------------------------------------------- flow player */
+  /* --------------------------------------------------------------- player */
 
-  var player = null;
-  var currentFlow = null;
+  /* The kinds that play as a session. An entry of one of these hands the
+   * screen to static/player.js; a pose or an exercise is a page of its own.
+   * Same list the session compiler accepts as a chunk. */
+  var CHUNK_STYLE = { flow: true, routine: true, landmark: true, walk: true };
 
-  function flowPose(pose, frame, index, total, flags) {
-    figureInto($("rb-flow-figure"), pose);
-    setText($("rb-flow-name"), flags.name ? (frame.name || "") : "");
-    setText($("rb-flow-cues"), flags.cues && Array.isArray(frame.cues) ? frame.cues.join(" ") : "");
-    setText($("rb-flow-progress"), (index + 1) + t("poseOf") + total + (frame.holdSeconds ? " \u00b7 " + frame.holdSeconds + t("seconds") : ""));
-  }
+  /* How many entries one player's library may hold: the chunk, the entries its
+   * steps name, and theirs. The cap is what stops a reference loop. */
+  var LIBRARY_LIMIT = 40;
 
-  function shownAsk(flags) {
-    setHidden($("rb-flow-ask"), false);
-    setText($("rb-flow-ask-title"), flags.memoryPrompt ? t("doneFromMemory") : t("howWasIt"));
-    // At the first-pose level the question is yes/no, not smooth/needed help.
-    setText($("rb-flow-smooth"), t(flags.memoryPrompt ? "yes" : "smooth"));
-    setText($("rb-flow-help"), t(flags.memoryPrompt ? "notYet" : "neededHelp"));
-  }
+  var playerHandle = null;
+  /* Bumped by every stopPlayer, so a library that arrives after the screen has
+   * moved on cannot mount a player behind it. */
+  var playerToken = 0;
 
-  /**
-   * The player: holds each pose for its holdSeconds and tweens between
-   * consecutive poses over TRANSITION_MS (x2 at half speed). Reduced motion
-   * skips the tween and swaps poses. All timing goes through injected
-   * raf/now so the pure behaviour is testable; in the page they are
-   * requestAnimationFrame and Date.now.
-   */
-  function createPlayer(opts) {
-    var steps = Array.isArray(opts.steps) ? opts.steps : [];
-    var frames = flowFrames(opts.level, steps);
-    var flags = guidance(opts.level);
-    var reduced = opts.reduced === true;
-    var speed = 1;
-    var index = 0;
-    var phase = "hold";
-    var elapsed = 0;
-    var paused = false;
-    var stopped = false;
-    var last = 0;
-    var raf = opts.raf;
-
-    function inMs() { return reduced ? 0 : TRANSITION_MS / speed; }
-    function holdMs() { return Math.max(0, Number(frames[index] && frames[index].holdSeconds) || 0) * 1000 / speed; }
-
-    function draw(t) {
-      var frame = frames[index];
-      if (!frame) return;
-      var pose = frame.pose;
-      if (phase === "in" && index > 0 && !reduced) {
-        var Fig = window.RambleFigure;
-        var prev = frames[index - 1];
-        if (Fig && typeof Fig.interpolate === "function" && prev && prev.pose) {
-          try { pose = Fig.interpolate(prev.pose, frame.pose, t); } catch (e) { pose = frame.pose; }
-        }
-      }
-      if (typeof opts.onPose === "function") opts.onPose(pose, frame, index, frames.length, flags);
+  /* The ids one entry's own steps name: a flow's poses, a routine's blocks,
+   * the easier and harder versions. */
+  function referencedIds(entry) {
+    var ids = [];
+    function add(id) {
+      if (typeof id === "string" && id !== "" && ids.indexOf(id) === -1) ids.push(id);
     }
-
-    function finish() {
-      stopped = true;
-      if (typeof opts.onDone === "function") opts.onDone(flags);
+    if (!entry || typeof entry !== "object") return ids;
+    if (Array.isArray(entry.flow)) {
+      entry.flow.forEach(function (step) { if (step) add(step.id); });
     }
-
-    function tick(ts) {
-      if (stopped) return;
-      if (paused) { last = ts; raf(tick); return; }
-      var dt = last === 0 ? 0 : Math.max(0, ts - last);
-      last = ts;
-      elapsed += dt;
-      var limit = phase === "in" ? inMs() : holdMs();
-      while (!stopped && elapsed >= limit && limit >= 0) {
-        elapsed -= limit;
-        if (phase === "in") { phase = "hold"; limit = holdMs(); continue; }
-        if (index >= frames.length - 1) { finish(); return; }
-        index += 1;
-        phase = inMs() > 0 ? "in" : "hold";
-        limit = phase === "in" ? inMs() : holdMs();
-      }
-      draw(phase === "in" && limit > 0 ? elapsed / limit : 1);
-      raf(tick);
-    }
-
-    function start() {
-      if (frames.length === 0) return;
-      stopped = false;
-      last = 0;
-      phase = "hold";
-      elapsed = 0;
-      draw(1);
-      raf(tick);
-    }
-
-    return {
-      start: start,
-      frames: frames,
-      flags: flags,
-      pause: function () { paused = !paused; return paused; },
-      half: function () { speed = speed === 1 ? 0.5 : 1; return speed; },
-      step: function () {
-        if (index >= frames.length - 1) { finish(); return; }
-        index += 1;
-        phase = "hold";
-        elapsed = 0;
-        draw(1);
-      },
-      stop: function () { stopped = true; },
-      isPaused: function () { return paused; },
-      speed: function () { return speed; }
-    };
-  }
-
-  function stopPlayer() {
-    if (player) { try { player.stop(); } catch (e) { /* gone */ } player = null; }
-    setHidden($("rb-flow-ask"), true);
-  }
-
-  function startFlow(entry, level, steps, autoplay) {
-    stopPlayer();
-    currentFlow = { id: entry.id, level: level };
-    setText($("rb-flow-status"), "");
-    setHidden($("rb-flow-ask"), true);
-    var raf = window.requestAnimationFrame || function (fn) { return setTimeout(function () { fn(Date.now()); }, 16); };
-    player = createPlayer({
-      level: level,
-      steps: steps,
-      reduced: !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches),
-      raf: raf,
-      onPose: flowPose,
-      onDone: shownAsk
-    });
-    player.start();
-  }
-
-  function loadFlowPoses(entry, level, autoplay) {
-    var steps = Array.isArray(entry.flow) ? entry.flow : [];
-    if (steps.length === 0) { setText($("rb-flow-status"), t("offline")); return; }
-    Promise.all(steps.map(function (step) {
-      return entryById(step.id).then(function (poseEntry) {
-        return {
-          id: step.id,
-          holdSeconds: step.holdSeconds,
-          name: poseEntry ? poseEntry.title : step.id,
-          pose: poseEntry ? poseEntry.pose : null,
-          cues: poseEntry && Array.isArray(poseEntry.steps) ? poseEntry.steps : []
-        };
+    if (entry.blocks && typeof entry.blocks === "object") {
+      Object.keys(entry.blocks).forEach(function (name) {
+        var items = Array.isArray(entry.blocks[name]) ? entry.blocks[name] : [];
+        items.forEach(function (item) { if (item) add(item.id); });
       });
-    })).then(function (poses) {
-      startFlow(entry, level, poses, true);
-    }).catch(function (err) { setText($("rb-flow-status"), err.message); });
+    }
+    if (Array.isArray(entry.steps)) {
+      entry.steps.forEach(function (step) { if (step && typeof step === "object") add(step.id); });
+    }
+    add(entry.easier);
+    add(entry.harder);
+    return ids;
   }
 
-  var flowPause = $("rb-flow-pause");
-  if (flowPause) flowPause.addEventListener("click", function () {
-    if (!player) return;
-    var paused = player.pause();
-    flowPause.textContent = paused ? t("keepGoing") : t("pauseLabel");
-  });
-  var flowHalf = $("rb-flow-half");
-  if (flowHalf) flowHalf.addEventListener("click", function () {
-    if (!player) return;
-    var speed = player.half();
-    flowHalf.textContent = speed === 0.5 ? t("normalSpeed") : t("halfSpeed");
-  });
-  var flowStep = $("rb-flow-step");
-  if (flowStep) flowStep.addEventListener("click", function () {
-    if (!player) return;
-    setHidden($("rb-flow-ask"), true);
-    player.step();
-  });
-
-  function reportFlow(outcome) {
-    if (!currentFlow) return;
-    var body = { flowId: currentFlow.id, outcome: outcome };
-    if (currentFlow.level === "first") body.fromMemory = true;
-    setText($("rb-flow-status"), t("saving"));
-    jsonFetch("/api/ramble/moves/flow-run", { method: "POST", body: body })
-      .then(function (out) {
-        setHidden($("rb-flow-ask"), true);
-        if (out && out.memory) setText($("rb-flow-status"), t("flowMemory"));
-        else if (out && out.counted) setText($("rb-flow-status"), t("flowCounted"));
-        else setText($("rb-flow-status"), t("flowNoted"));
-      })
-      .catch(function (err) { setText($("rb-flow-status"), err.message); });
+  /* Every entry the given ids reach, in the order they were asked for. An id
+   * that does not load is left out, and an id already walked over is never
+   * asked for twice. */
+  function loadLibraryFor(ids) {
+    var entries = [];
+    var seen = {};
+    var queue = Array.isArray(ids) ? ids.slice() : [];
+    function take() {
+      if (queue.length === 0 || entries.length >= LIBRARY_LIMIT) return Promise.resolve(entries);
+      var id = queue.shift();
+      if (typeof id !== "string" || id === "" || seen[id]) return take();
+      seen[id] = true;
+      return entryById(id).then(function (entry) {
+        if (entry) {
+          entries.push(entry);
+          referencedIds(entry).forEach(function (ref) {
+            if (!seen[ref]) queue.push(ref);
+          });
+        }
+        return take();
+      });
+    }
+    return take();
   }
 
-  var flowSmooth = $("rb-flow-smooth");
-  if (flowSmooth) flowSmooth.addEventListener("click", function () { reportFlow("smooth"); });
-  var flowHelp = $("rb-flow-help");
-  if (flowHelp) flowHelp.addEventListener("click", function () { reportFlow("needed_help"); });
+  /* The player's own words. The panel is copied alone into an install, so the
+   * approved table is fetched from the routes, once per page, and the page's
+   * own Start label from #rb-player rides along. No table (or a broken one) is
+   * no copy at all: the player then draws the figure and the library's own
+   * text, and says nothing of its own. */
+  var copyPromise = null;
+  function playerCopyTable() {
+    if (copyPromise) return copyPromise;
+    copyPromise = jsonFetch("/api/ramble/moves/copy").then(function (out) {
+      var table = out && out.copy ? out.copy : {};
+      return table && typeof table === "object" && !Array.isArray(table) ? table : {};
+    }).catch(function () {
+      return {};
+    });
+    return copyPromise;
+  }
+
+  function playerStartLabel() {
+    var host = $("rb-player");
+    var raw = host && typeof host.getAttribute === "function" ? host.getAttribute("data-start") : null;
+    return typeof raw === "string" ? raw : "";
+  }
+
+  function loadPlayerCopy() {
+    return playerCopyTable().then(function (table) {
+      return Object.assign({}, table, { start: playerStartLabel() });
+    });
+  }
+
+  /* The guidance a chunk is mounted with. The server's level is used as it
+   * came; a routine is not on the flow ladder, so the two levels that hide the
+   * names play it with names instead. */
+  function guidanceFor(kind, level) {
+    if (typeof level !== "string" || level === "") return undefined;
+    if (kind === "routine" && (level === "first" || level === "memory")) return "names";
+    return level;
+  }
+
+  function playerStorage() {
+    try { return window.localStorage || null; } catch (e) { return null; }
+  }
+
+  function playerWakeLock() {
+    if (typeof navigator === "undefined" || !navigator) return null;
+    return navigator.wakeLock || null;
+  }
+
+  /* Mount over the static page. Anything the player refuses (a chain the
+   * compiler will not take, a host that cannot hold it) leaves the page the
+   * reader already has exactly as it was. */
+  function mountPlayer(host, entries, chain, entry, level, ctx, copy) {
+    var Player = window.RamblePlayer;
+    if (!Player || typeof Player.mount !== "function") return;
+    var options = {
+      chain: chain,
+      library: entries,
+      copy: copy || {},
+      guidance: guidanceFor(entry.kind, level),
+      post: function (payload) {
+        return jsonFetch("/api/ramble/moves/progress", { method: "POST", body: payload });
+      },
+      start: function (body) {
+        return jsonFetch("/api/ramble/moves/start", { method: "POST", body: body });
+      },
+      storage: playerStorage(),
+      wakeLock: playerWakeLock(),
+      onEvent: function () {}
+    };
+    if (ctx && typeof ctx.cardSlot === "string" && ctx.cardSlot !== "") options.cardSlot = ctx.cardSlot;
+    /* The host has to be on screen before its width is worth reading, and the
+     * width decides the layout: a narrow screen plays the phone one, a measured
+     * wide one is left to the player. */
+    setHidden(host, false);
+    var width = typeof host.clientWidth === "number" ? host.clientWidth : 0;
+    if (!(width >= 700)) options.layout = "phone";
+    var handle = null;
+    try {
+      handle = Player.mount(host, options);
+    } catch (e) {
+      handle = null;
+    }
+    if (!handle || typeof handle.destroy !== "function") {
+      host.textContent = "";
+      setHidden(host, true);
+      return;
+    }
+    playerHandle = handle;
+    setStaticEntry(false);
+  }
+
+  /* Play one chunk: the entry, everything its steps reach, and the player over
+   * them. A load that fails, or a mount that throws, leaves the entry's own
+   * page in place. */
+  function openPlayer(entry, level, ctx) {
+    stopPlayer();
+    var host = $("rb-player");
+    if (!host || !entry || typeof entry.id !== "string" || entry.id === "") return;
+    if (!window.RamblePlayer || typeof window.RamblePlayer.mount !== "function") return;
+    var token = playerToken;
+    var chain = [{ chunkId: entry.id }];
+    loadLibraryFor([entry.id].concat(referencedIds(entry))).then(function (entries) {
+      if (token !== playerToken) return;
+      if (!Array.isArray(entries) || entries.length === 0) return;
+      return loadPlayerCopy().then(function (copy) {
+        if (token !== playerToken) return;
+        mountPlayer(host, entries, chain, entry, level, ctx, copy);
+      });
+    }).catch(function () { /* the static page stays */ });
+  }
+
+  /* Take the player down and its screen with it. */
+  function stopPlayer() {
+    playerToken += 1;
+    if (playerHandle) {
+      try { playerHandle.destroy(); } catch (e) { /* already gone */ }
+      playerHandle = null;
+    }
+    setHidden($("rb-player"), true);
+  }
 
   /* ------------------------------------------------------- sheets and keys */
 

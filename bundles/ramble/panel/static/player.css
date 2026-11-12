@@ -1,0 +1,271 @@
+/* Ramble player — one step at a time, phone first.
+ *
+ * Served from /ramble/static/player.css behind dashboardAuth. The player names
+ * nothing with a class: every node it draws carries a data-role, so every rule
+ * here is an attribute selector under #rb-player. Every colour, radius and
+ * font comes from the --rb-* tokens ramble.css already defines on #ramble; no
+ * colour is authored here. The host's own data-layout attribute (phone, kiosk,
+ * class) picks the size of the type.
+ */
+
+#rb-player {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px 18px;
+  color: var(--rb-text);
+  font-family: var(--rb-font-body);
+}
+
+#rb-player[hidden] { display: none; }
+
+/* ------------------------------------------------------------------ a step */
+
+#rb-player [data-role="figure"] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 150px;
+  max-height: 40vh;
+  overflow: hidden;
+}
+
+#rb-player [data-role="figure"] > svg {
+  width: 100%;
+  height: auto;
+  max-height: 40vh;
+}
+
+#rb-player [data-role="name"] {
+  margin: 0;
+  font: 800 28px/1.15 var(--rb-font-display);
+  text-align: center;
+}
+
+#rb-player [data-role="cue"] {
+  margin: 0;
+  font: 600 16px/1.4 var(--rb-font-body);
+  text-align: center;
+}
+
+#rb-player [data-role="next"] {
+  margin: 0;
+  color: var(--rb-muted);
+  font: 700 14px/1.35 var(--rb-font-body);
+  text-align: center;
+}
+
+#rb-player [data-role="clock"] {
+  font: 800 58px/1 var(--rb-font-display);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  letter-spacing: 0.01em;
+  text-align: center;
+}
+
+#rb-player [data-role="safety"],
+#rb-player [data-role="resume-line"],
+#rb-player [data-role="status"] {
+  color: var(--rb-muted);
+  font: 600 14px/1.4 var(--rb-font-body);
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- controls */
+
+#rb-player button {
+  min-height: 48px;
+  min-width: 48px;
+  padding: 0 14px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius-sm);
+  background: var(--rb-surface-2);
+  color: var(--rb-text);
+  font: 800 16px var(--rb-font-display);
+  box-shadow: var(--rb-pop-sm);
+  cursor: pointer;
+}
+
+#rb-player button:active {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--rb-shadow-col);
+}
+
+#rb-player button:focus-visible {
+  outline: 3px solid var(--rb-accent-2);
+  outline-offset: 3px;
+}
+
+#rb-player button[data-role="start"],
+#rb-player button[data-role="pause"],
+#rb-player button[data-role="thats-it"] {
+  background: var(--rb-accent);
+  color: var(--rb-accent-ink);
+}
+
+#rb-player button[data-role="start"] {
+  width: 100%;
+  font-size: 19px;
+}
+
+/* The transport stacks the width of a phone, one thumb-sized button a row. */
+#rb-player [data-role="transport"] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#rb-player [data-role="transport"] button { width: 100%; }
+
+/* ------------------------------------------------------------------- strip */
+
+#rb-player [data-role="strip"] {
+  display: flex;
+  gap: 8px;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  padding-bottom: 4px;
+}
+
+#rb-player [data-role="strip"] button {
+  flex: 0 0 auto;
+  min-height: 48px;
+  white-space: nowrap;
+  font: 700 13px var(--rb-font-body);
+}
+
+#rb-player [data-role="strip"] button[data-current="1"] {
+  background: var(--rb-accent-2);
+  color: var(--rb-accent-2-ink);
+}
+
+/* ------------------------------------------------------------------ sheets */
+
+#rb-player [data-role="sheet"] {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  border: var(--rb-line-w) solid var(--rb-line);
+}
+
+#rb-player [data-role="sheet-title"] {
+  font: 800 22px/1.2 var(--rb-font-display);
+}
+
+#rb-player [data-role="sheet-steps"] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#rb-player [data-role="sheet-step"] {
+  font: 600 16px/1.4 var(--rb-font-body);
+}
+
+#rb-player [data-role="sheet-close"] { width: 100%; }
+
+/* --------------------------------------------------------- the end screen */
+
+#rb-player [data-role="end"],
+#rb-player [data-role="add-options"] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#rb-player [data-role="result"] {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#rb-player [data-role="end-title"] {
+  font: 800 24px/1.2 var(--rb-font-display);
+}
+
+#rb-player [data-role="summary"],
+#rb-player [data-role="chunk-result"],
+#rb-player [data-role="note"],
+#rb-player [data-role="cap-note"],
+#rb-player [data-role="water-note"] {
+  font: 600 14px/1.4 var(--rb-font-body);
+  color: var(--rb-muted);
+}
+
+#rb-player [data-role="progress"]:empty { display: none; }
+
+/* ------------------------------------------------------------------- kiosk */
+
+@media (min-width: 700px) {
+  #rb-player {
+    max-width: 640px;
+    margin: 0 auto;
+    gap: 12px;
+  }
+
+  #rb-player [data-role="figure"] { max-height: 46vh; }
+
+  #rb-player [data-role="figure"] > svg {
+    width: min(420px, 60vh);
+    max-height: 46vh;
+  }
+
+  #rb-player [data-role="name"] { font-size: 34px; }
+  #rb-player [data-role="cue"] { font-size: 18px; }
+  #rb-player [data-role="next"] { font-size: 16px; }
+  #rb-player [data-role="clock"] { font-size: 76px; }
+
+  #rb-player [data-role="transport"] {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  #rb-player [data-role="transport"] button {
+    width: auto;
+    min-width: 132px;
+  }
+}
+
+/* ------------------------------------------------------- a room of people */
+
+#rb-player[data-layout="class"] [data-role="figure"] { max-height: 50vh; }
+
+#rb-player[data-layout="class"] [data-role="figure"] > svg {
+  width: min(56vh, 620px);
+  max-height: 50vh;
+}
+
+#rb-player[data-layout="class"] [data-role="name"] { font-size: 44px; }
+#rb-player[data-layout="class"] [data-role="cue"] { font-size: 26px; }
+#rb-player[data-layout="class"] [data-role="next"] { font-size: 22px; }
+#rb-player[data-layout="class"] [data-role="clock"] { font-size: 120px; }
+
+#rb-player[data-layout="class"] button {
+  min-height: 64px;
+  font-size: 22px;
+}
+
+#rb-player[data-layout="class"] [data-role="sheet-title"] { font-size: 32px; }
+#rb-player[data-layout="class"] [data-role="sheet-step"] { font-size: 24px; }
+
+/* --------------------------------------------------------- reduced motion */
+
+/* Nothing here animates, and a visitor who asked for less motion gets no
+ * transition from a rule added later either. */
+@media (prefers-reduced-motion: reduce) {
+  #rb-player,
+  #rb-player * {
+    transition: none;
+    animation: none;
+  }
+}

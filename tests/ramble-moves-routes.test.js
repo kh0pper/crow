@@ -9,7 +9,8 @@
  *
  * What is pinned here:
  *   - every moves route is behind the session auth, like the rest of /api/ramble,
- *   - today / done / swap / log / prefs / library / flow-run round-trip,
+ *   - today / done / swap / log / prefs / library / copy / flow-run round-trip,
+ *   - the copy route serves the approved player table, word for word as pinned,
  *   - a parse with no local model answers `no_model` and the request's words
  *     appear in no log line and in no emitted row,
  *   - a card is paid against the entry it was started for, never another one,
@@ -20,7 +21,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,7 +95,7 @@ after(async () => {
 });
 
 test("auth: the moves API sits behind dashboardAuth", async () => {
-  for (const p of ["/api/ramble/moves/today", "/api/ramble/moves/prefs", "/api/ramble/moves/library"]) {
+  for (const p of ["/api/ramble/moves/today", "/api/ramble/moves/prefs", "/api/ramble/moves/library", "/api/ramble/moves/copy"]) {
     assert.equal((await fetch(base + p)).status, 401, p);
   }
 });
@@ -131,6 +132,34 @@ test("GET /moves/library: reviewed entries only, no pose data; the detail route 
 
   assert.equal((await get("/api/ramble/moves/library/no-such-entry")).status, 404);
   assert.equal((await get("/api/ramble/moves/library/Bad%20Id")).status, 400);
+});
+
+/* ---------------------------------------- the player's words (7.6) */
+
+const COPY_PINS = JSON.parse(readFileSync(join(__dir, "ramble-moves-player-copy.pins.json"), "utf8"));
+const SHIPPED_COPY = JSON.parse(readFileSync(
+  join(REPO_ROOT, "bundles", "ramble", "server", "moves", "player-copy.en.json"), "utf8",
+));
+
+test("GET /moves/copy: the approved player table, and nothing but it", async () => {
+  const r = await get("/api/ramble/moves/copy");
+  assert.equal(r.status, 200);
+  const body = await r.json();
+  assert.equal(body.copy["player.pause"], "Pause");
+  assert.deepEqual(Object.keys(body.copy).sort(), Object.keys(SHIPPED_COPY).sort(),
+    "the route serves the shipped table key for key");
+  assert.equal("start" in body.copy, false, "the page's Start label is the page's, not the table's");
+});
+
+test("every word the copy route serves hashes to its pin", async () => {
+  const body = await (await get("/api/ramble/moves/copy")).json();
+  const keys = Object.keys(body.copy);
+  assert.ok(keys.length > 0, "the route answers a table");
+  assert.deepEqual(keys.sort(), Object.keys(COPY_PINS).sort(), "the served keys are the pinned ones");
+  for (const [key, value] of Object.entries(body.copy)) {
+    assert.equal(typeof value, "string", key + " is a string");
+    assert.equal(createHash("sha256").update(value).digest("hex"), COPY_PINS[key], key + " matches its pin");
+  }
 });
 
 test("POST /moves/done: pays once, shows done on the card, and replays as already", async () => {

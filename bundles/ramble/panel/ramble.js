@@ -16,10 +16,11 @@
  * camera view painted by static/ramble-ar.js (labels by bearing and distance,
  * a radar strip when the camera or compass is missing).
  *
- * COPIED ALONE to `$CROW_HOME/panels/ramble.js` at install, so it carries no
- * relative `../server/*` import; anything it needs from the bundle is resolved
- * through BUNDLE_DIR at request time. Every HTTP surface it talks to lives in
- * the companion `panel/routes.js` (STRICT_PANEL_MOUNT contract).
+ * COPIED ALONE to `$CROW_HOME/panels/ramble.js` at install, so it imports no
+ * relative `../server/*` module and reads no bundle file at all; anything it
+ * needs from the bundle is resolved through BUNDLE_DIR at request time. Every
+ * HTTP surface it talks to lives in the companion `panel/routes.js`
+ * (STRICT_PANEL_MOUNT contract).
  *
  * The page is rendered static: grid state, marks, the egg and the pet are all
  * fetched by `static/ramble.js` from `/api/ramble/*`, and every bird and egg
@@ -29,12 +30,16 @@
  *
  * The moves screens (spec 2026-10-30 §6) live in the pet view's Today card and
  * in a fifth view, `learn`: the challenge and its Done, the step goal and the
- * streak, "I did something else", Customize, the library and its entry pages,
- * and the flow player. They are wired by `static/moves.js`; the poses are
- * drawn by `static/figure.js`, which serves the SAME `server/moves/figure.cjs`
- * the figure builder tests against. Every new string is rendered here from
- * STRINGS via the dashboard's `lang` (en/es); the client's runtime strings are
- * its own small table, keyed off `data-lang`.
+ * streak, "I did something else", Customize, the library and its entry pages.
+ * They are wired by `static/moves.js`; a chunk that plays as a session is drawn
+ * by `static/player.js`, which takes its figures from `static/figure.js` and
+ * its timeline from `static/session.js` — the SAME `server/moves/figure.cjs`
+ * and `server/moves/session.cjs` the server builds and tests against. Every new
+ * string is rendered here from STRINGS via the dashboard's `lang` (en/es); the
+ * client's runtime strings are its own small table, keyed off `data-lang`, and
+ * the player's are the approved table the routes serve at
+ * /api/ramble/moves/copy. This file reads no bundle file at all: a panel is
+ * installed as a single file, so the table is fetched by the client.
  */
 
 const OSM_ATTRIBUTION = "&copy; OpenStreetMap contributors";
@@ -276,6 +281,9 @@ export default {
   async handler(req, res, { db, layout, lang }) {
     const S = textFor(lang);
     const L = lang === "es" ? "es" : "en";
+    // The player's words are the approved English table (Spanish has none of
+    // its own yet), served by the routes; Today's Start label is the one word
+    // that comes from this page, so the host carries just that one.
     // Spec §11: OpenStreetMap public tiles are the phase-1 default, with the
     // tile URL configurable in settings. The URL itself is NOT rendered here:
     // the dashboard CSP is img-src 'self', so the client always draws from the
@@ -318,6 +326,7 @@ export default {
     const content = `
       <link rel="stylesheet" href="/ramble/static/leaflet/leaflet.css">
       <link rel="stylesheet" href="/ramble/static/ramble.css">
+      <link rel="stylesheet" href="/ramble/static/player.css">
       <link rel="preconnect" href="https://fonts.googleapis.com">
       <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
       <link rel="stylesheet" href="${esc(FONTS_HREF)}">
@@ -613,27 +622,11 @@ export default {
             <div class="rb-steps" id="rb-entry-body"></div>
             <div class="rb-row rb-actions" id="rb-entry-links"></div>
 
-            <!-- The flow player. Poses are drawn by static/figure.js; the
-                 player itself is static/moves.js. -->
-            <div id="rb-flow" hidden>
-              <div class="rb-entry-figure rb-crossfade" id="rb-flow-figure"></div>
-              <p class="rb-h" id="rb-flow-name"></p>
-              <p class="rb-muted rb-fine" id="rb-flow-cues"></p>
-              <p class="rb-muted rb-fine" id="rb-flow-progress"></p>
-              <div class="rb-row rb-actions">
-                <button class="rb-btn rb-btn-ghost" id="rb-flow-pause" type="button">${esc(S.pause)}</button>
-                <button class="rb-btn rb-btn-ghost" id="rb-flow-half" type="button">${esc(S.half)}</button>
-                <button class="rb-btn rb-btn-ghost" id="rb-flow-step" type="button">${esc(S.step)}</button>
-              </div>
-              <div id="rb-flow-ask" hidden>
-                <p class="rb-h" id="rb-flow-ask-title">${esc(S.howWasIt)}</p>
-                <div class="rb-row rb-actions">
-                  <button class="rb-btn" id="rb-flow-smooth" type="button">${esc(S.smooth)}</button>
-                  <button class="rb-btn rb-btn-ghost" id="rb-flow-help" type="button">${esc(S.neededHelp)}</button>
-                </div>
-              </div>
-              <p class="rb-muted rb-fine" id="rb-flow-status"></p>
-            </div>
+            <!-- The player. static/player.js draws one step at a time from the
+                 timeline static/session.js compiles, and the figure engine
+                 draws the poses. Its words are the approved table the routes
+                 serve; only the page's own Start label rides along here. -->
+            <div id="rb-player" class="rb-player" data-start="${esc(S.start)}" hidden></div>
           </section>
 
           <div class="rb-row rb-actions">
@@ -891,6 +884,8 @@ export default {
       <script src="/ramble/static/leaflet/leaflet.js"></script>
       <script src="/ramble/static/bird-svg.js"></script>
       <script src="/ramble/static/figure.js"></script>
+      <script src="/ramble/static/session.js"></script>
+      <script src="/ramble/static/player.js"></script>
       <script src="/ramble/static/ramble-ar.js"></script>
       <script src="/ramble/static/ramble.js"></script>
       <script src="/ramble/static/moves.js"></script>
