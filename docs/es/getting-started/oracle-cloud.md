@@ -65,7 +65,7 @@ Puedes usar el instalador de un comando o instalar manualmente.
 **Opción A: Instalador de un comando (Recomendado)**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash
 ```
 
 **Opción B: Instalación manual**

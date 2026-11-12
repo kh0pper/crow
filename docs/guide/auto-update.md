@@ -504,8 +504,8 @@ and whether it also covers the repositories Crow added.
   itself:
 
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash -s -- --no-auto-updates
-  curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | CROW_NO_AUTO_UPDATES=1 bash
+  curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash -s -- --no-auto-updates
+  curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | CROW_NO_AUTO_UPDATES=1 bash
   ```
 
   Nothing under `/etc/apt/apt.conf.d` is changed: neither

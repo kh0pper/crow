@@ -64,7 +64,7 @@ Once systemd is confirmed active, proceed to install Crow.
 Open the **Ubuntu** app from the Start menu (this drops you into a real Linux shell) and run the same one-liner used for [Home Server](./home-server) installs:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash
 ```
 
 The installer detects Debian/Ubuntu and runs normally — Node.js, the Crow platform, a systemd service, and a self-signed HTTPS certificate all get set up inside the WSL2 Ubuntu environment. It takes 5-10 minutes, same as a native Linux install.

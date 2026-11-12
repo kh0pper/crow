@@ -139,11 +139,11 @@ claude  # Loads .mcp.json + CLAUDE.md automatically
 ### Raspberry Pi / Self-Hosted (Crow OS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash
 crow status
 ```
 
-Installs Crow as a persistent service with the `crow` CLI for managing bundles and updates. Supports Raspberry Pi, Debian, and Ubuntu.
+Installs Crow v1.1.0 as a persistent service with the `crow` CLI for managing bundles and updates. Supports Raspberry Pi, Debian, and Ubuntu. To read the script before running it, download it first: `curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh -o crow-install.sh`, then `less crow-install.sh`, then `bash crow-install.sh`. After install, Crow keeps itself up to date from the main branch. To stay on v1.1.0, turn off Crow's automatic code updates: in the Crow's Nest dashboard under Settings, Updates, or by setting `CROW_AUTO_UPDATE=0` in your `.env` file. (`--no-auto-updates` is a different option: it only skips the operating system's automatic security updates.)
 
 → **[Full setup guide](https://maestro.press/software/crow/getting-started/full-setup)**
 

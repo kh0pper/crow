@@ -9,10 +9,10 @@
 # follow the manual path in docs/getting-started/ instead.
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash
 #
 # Or download and inspect first:
-#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh -o crow-install.sh
+#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh -o crow-install.sh
 #   less crow-install.sh
 #   bash crow-install.sh
 #
@@ -20,12 +20,20 @@
 #   -y, --yes          assume the default answer to every prompt (also CROW_INSTALL_YES=1)
 #   --no-auto-updates  do not turn on automatic security updates (also CROW_NO_AUTO_UPDATES=1)
 #
+# Environment:
+#   CROW_INSTALL_REF   release tag, branch, or commit to install (default v1.1.0;
+#                      CROW_INSTALL_REF=main installs the tip of main)
+#
 # The one-liner above feeds the script to bash on stdin, so an option has to go
 # to bash itself and not after the URL:
-#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash -s -- --no-auto-updates
-#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | CROW_NO_AUTO_UPDATES=1 bash
+#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash -s -- --no-auto-updates
+#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | CROW_NO_AUTO_UPDATES=1 bash
 
 set -euo pipefail
+
+# The release this script installs. The release checklist bumps it together with the README and the guide pages.
+CROW_INSTALL_REF="${CROW_INSTALL_REF:-v1.1.0}"
+CROW_REPO_URL="${CROW_REPO_URL:-https://github.com/kh0pper/crow.git}"
 
 CROW_HOME="$HOME/.crow"
 CROW_APP="$CROW_HOME/app"
@@ -52,6 +60,21 @@ header() {
   echo "  $1"
   echo "═══════════════════════════════════════════════"
 }
+
+# ─── The release to install (validated) ──────────────────
+# CROW_INSTALL_REF reaches `git checkout` as an argument, so it is validated
+# before anything else happens: a value starting with `-` would be read as an
+# option (`--upload-pack=…` → arbitrary command), and `..` / whitespace are
+# never part of a ref we publish. Run here (helpers above, prompts below) so a
+# sourced copy fails the same way an executed one does.
+case "$CROW_INSTALL_REF" in
+  ''|[-/]*|*..*|*[!A-Za-z0-9._/-]*)
+    error "Invalid CROW_INSTALL_REF: $CROW_INSTALL_REF"
+    error "Use a release tag (v1.1.0), a branch (main), or a commit sha — [A-Za-z0-9._/-] only,"
+    error "not starting with '-' or '/', and without '..'."
+    exit 1
+    ;;
+esac
 
 # ─── Prompt helpers (F-INSTALL-5/-7) ──────────────────────
 # The documented `curl … | bash` one-liner has no usable stdin (the script
@@ -1390,6 +1413,37 @@ add_crow_to_path() {
   log "Added 'crow' command to PATH (restart shell or run: source ~/.bashrc)"
 }
 
+# clone_crow_release <dest> — clone Crow and leave the checkout on a LOCAL
+# branch named main, at the release this script pins (CROW_INSTALL_REF).
+# The gateway's auto-updater only pulls when HEAD is the branch `main`
+# (servers/gateway/auto-update.js), so a detached checkout at a tag would never
+# update again. `-B main <ref>` puts the working tree at the pinned commit while
+# keeping a real main branch, and the upstream is origin/main, so the updater's
+# `git pull --ff-only` fast-forwards onto main (only while the pinned commit is
+# an ancestor of main). CROW_INSTALL_REF=main keeps the plain clone.
+clone_crow_release() {
+  local dest="$1"
+  git clone "$CROW_REPO_URL" "$dest"
+  if [ "$CROW_INSTALL_REF" = "main" ]; then
+    return 0
+  fi
+  # A plain clone already has origin/main (the remote's default branch); fetch
+  # it only when the remote's default branch is something else.
+  if ! git -C "$dest" rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+    git -C "$dest" fetch origin main
+  fi
+  # Prefer the tag object: a name like v1.1.0 could also be a branch on the
+  # remote, and the tag is what the release checklist pins.
+  if git -C "$dest" rev-parse --verify --quiet "refs/tags/$CROW_INSTALL_REF^{commit}" >/dev/null; then
+    git -C "$dest" checkout -q -B main "refs/tags/$CROW_INSTALL_REF"
+  elif git -C "$dest" rev-parse --verify --quiet "origin/$CROW_INSTALL_REF^{commit}" >/dev/null; then
+    git -C "$dest" checkout -q -B main "origin/$CROW_INSTALL_REF"
+  else
+    git -C "$dest" checkout -q -B main "$CROW_INSTALL_REF"
+  fi
+  git -C "$dest" branch --set-upstream-to=origin/main main
+}
+
 # Test seam: tests source the helpers without executing the install.
 if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then
   # shellcheck disable=SC2317  # exit IS reachable: `return` fails when the
@@ -1593,7 +1647,7 @@ if [ -d "$CROW_APP" ]; then
   cd "$CROW_APP"
   git pull --ff-only 2>/dev/null || warn "Could not pull latest — continuing with existing version"
 else
-  git clone https://github.com/kh0pper/crow.git "$CROW_APP"
+  clone_crow_release "$CROW_APP"
   log "Cloned Crow to $CROW_APP"
   cd "$CROW_APP"
 fi

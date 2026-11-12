@@ -24,12 +24,12 @@ Opciones comunes:
 Un solo comando instala Crow y todas las dependencias:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash
 ```
 
 ::: tip ¿Prefieres inspeccionar el script primero?
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh -o crow-install.sh
+curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh -o crow-install.sh
 less crow-install.sh   # Revisar el script
 bash crow-install.sh   # Ejecutarlo
 ```
