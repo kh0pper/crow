@@ -47,6 +47,21 @@ test("a user-owned absolute launcher without a pin is omitted; with a matching p
   } finally { console.warn = orig; }
 });
 
+test("a spawn block drops loader names from the entry env, keeping its other vars and adding no env when it has none", () => {
+  const orig = console.warn; console.warn = () => {};
+  try {
+    const h = home({
+      ldr: { command: "node", args: ["x.js"], env: { FOO: "bar", NODE_OPTIONS: "--require /tmp/evil.js", LD_PRELOAD: "/tmp/evil.so" } },
+      bare: { command: "node", args: ["x.js"] },
+    });
+    const s = extraServersFromExtensions(def(["ldr", "bare"]), h, { canonical });
+    assert.equal(s.ldr.env.FOO, "bar", "an ordinary env var survives");
+    assert.equal(s.ldr.env.NODE_OPTIONS, undefined, "NODE_OPTIONS would --require code before the server runs");
+    assert.equal(s.ldr.env.LD_PRELOAD, undefined, "LD_PRELOAD would load a library before the server runs");
+    assert.equal("env" in s.bare, false, "a block with no env must not gain one");
+  } finally { console.warn = orig; }
+});
+
 test("pin-addon-command writes the launcher's SHA-256 (and an absolute command) into mcp-addons.json", async () => {
   const { pinAddonCommand } = await import("../scripts/ops/pin-addon-command.mjs");
   const { readFileSync } = await import("node:fs");

@@ -87,6 +87,7 @@ import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
 import { recordKeptData, clearKeptData, keptDataMatches, recordKeptDataOnUninstall, setWallMode, ADDON_WALL_SWITCH_KEYS } from "../../shared/addon-walls-file.js";
 import { legacyOwnerKeys, profileFor, pendingHostFields } from "../../../scripts/addon-sandbox/profile.mjs";
+import { isLoaderEnvName, withoutLoaderEnv } from "../../shared/loader-env.js";
 import { wallsOnForHost } from "../../../scripts/addon-sandbox/host-switch.mjs";
 import { pinEntryIfWalled, PinRefused } from "../../../scripts/addon-sandbox/pin.mjs";
 import { sandboxLine } from "../../../scripts/addon-sandbox/words.mjs";
@@ -1673,6 +1674,7 @@ export function removePanelEnabled(panelId, path = PANELS_CONFIG_PATH) {
  * The mcp-addons.json entry for a manifest that declares `server` — the single shape both
  * install (either branch) and the version refresh write. envKeys values come only from an
  * install request; every truthy env_vars default rides along (unchanged install behaviour).
+ * A loader name (see servers/shared/loader-env.js) never rides along, whatever the manifest asks for.
  */
 // `reqEnv` may carry generated values (runInstallJob passes them): only keys the manifest
 // lists in server.envKeys reach the entry, so a generated secret reaches its own MCP child
@@ -1687,10 +1689,17 @@ function generatedPlainForMcp(manifest, generated) {
 export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null, edited = null, generatedKeys = [], owner = false, priorEntry = null, bundleId = null } = {}) {
   const env = {};
   const fromRequest = new Set();
+  // A loader name (NODE_OPTIONS, LD_PRELOAD, ...) never enters the entry: the child would
+  // run whatever the value points at before its own code. Same rule the manifest contract
+  // refuses (servers/shared/loader-env.js), compared case-insensitively.
   for (const key of manifest?.server?.envKeys || []) {
+    if (isLoaderEnvName(key)) continue;
     if (reqEnv && reqEnv[key]) { env[key] = reqEnv[key]; fromRequest.add(key); }
   }
-  for (const v of manifest?.env_vars || []) if (v.default && !env[v.name]) env[v.name] = v.default;
+  for (const v of manifest?.env_vars || []) {
+    if (!v || isLoaderEnvName(v.name)) continue;
+    if (v.default && !env[v.name]) env[v.name] = v.default;
+  }
   // Which values the OWNER entered (never a manifest default): the form's edited list,
   // plus a requested value that differs from its manifest default and from every default a
   // version of the manifest has shipped (a generated key is minted by Crow, not typed).
@@ -1866,7 +1875,11 @@ export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, m
   if (!entry) return false; // not an MCP add-on — nothing to configure
   const allowed = mcpForwardableKeys(manifest);
   const priorEnv = { ...(entry.env || {}) };
-  const merged = { ...(entry.env || {}) };
+  // Start from the entry's env with every loader name scrubbed: an entry written before this
+  // rule (or hand-edited) must not keep NODE_OPTIONS/LD_PRELOAD, and the child would run what
+  // they point at before its own code. `priorEnv` above stays the unscrubbed pre-change
+  // snapshot — it is what provenance is judged against.
+  const merged = withoutLoaderEnv(entry.env);
   // Skip falsy values: proxy.js merges the child's entry env last (over the base allowlist
   // and the declared passthrough), so a blank here would SHADOW a working ambient value that
   // the bundle's registry entry declares rather than clear it. The two
@@ -1874,9 +1887,17 @@ export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, m
   // same way. Clearing a value stays the .env file's job.
   const written = [];
   for (const [k, v] of Object.entries(envVars || {})) {
+    // Defence in depth: a loader name (NODE_OPTIONS, LD_PRELOAD, ...) must never reach an
+    // entry's env — the child would run whatever the value points at before its own code.
+    // Configure already refuses such a key (findInvalidEnv); this keeps the writer honest
+    // for any caller that skipped that gate.
+    if (isLoaderEnvName(k)) continue;
     if (v && (!allowed || allowed(k))) { merged[k] = v; written.push(k); }
   }
   entry.env = merged;
+  // The file is written unconditionally below, so a save whose only effect is dropping a
+  // loader name still persists the scrub (there is no "nothing changed, skip the write" gate
+  // here, and the provenance loop iterates `written`, which never contains a loader name).
   // Provenance for the wall's host/bind rules: only a value the OWNER typed counts, and only
   // when this save is the local owner's own request (`owner`) — anyone else's write proves
   // nothing, so it neither adds a key nor leaves a stale claim on one it rewrote. A legacy
@@ -2852,6 +2873,9 @@ export function findInvalidEnv(envVars) {
     // A bundle .env is also Docker Compose's own settings file: COMPOSE_FILE would swap the
     // file the install security check read, and Start never re-checks it.
     if (/^(?:COMPOSE|DOCKER)_/.test(k) && k !== "COMPOSE_PROJECT_NAME") return { key: k, why: "controls Docker itself, so an extension can't set it" };
+    // A loader/interpreter variable makes the child run other code (or load other libraries)
+    // before its own: NODE_OPTIONS' --require, PYTHONSTARTUP's file, LD_PRELOAD's library.
+    if (isLoaderEnvName(k)) return { key: k, why: "is a loader/injection variable (it would run other code inside the extension), so an extension can't set it" };
     if (v !== undefined && v !== null) {
       const problem = envValueProblem(v);
       if (problem) return { key: k, why: problem };

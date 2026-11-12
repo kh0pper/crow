@@ -32,6 +32,9 @@ import { botsDbPath, resolveSqlitePath } from "./instance-paths.mjs";
 import { signActor, signBoardActor, signArtifactsActor, signBoardThreadActor, signSecretsActor } from "./actor-sig.mjs";
 // Leaf module (registry read only): no path back to ext_registry.mjs or mcp_writer.mjs.
 import { isLegacyConfiguredAddon, addonDerivedEnv } from "../../servers/gateway/services/legacy-sources.js";
+// Leaf module (no imports): loader/injection names a child must never inherit from the
+// addon entry — NODE_OPTIONS --require and LD_PRELOAD run code before the server does.
+import { withoutLoaderEnv } from "../../servers/shared/loader-env.js";
 
 /**
  * The env vars that name an instance. r4-deploy.sh warns that a child missing
@@ -382,7 +385,11 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
       // is written. A field the child would inherit from the environment is never rendered into
       // the block (that would copy a gateway .env secret into the bot's MCP config).
       const derived = addonDerivedEnv(id, addon.env, undefined, {});
-      r.block.env = { ...(r.block.env || {}), ...derived, CROW_HOME: crowHome };
+      // Loader names (NODE_OPTIONS, LD_PRELOAD, …) are stripped from BOTH sides: the block's
+      // env is cloned from the addon entry, and `derived` is rendered from that same entry's
+      // env, so a loader name can reach the child through either. CROW_HOME is added here by
+      // the catalog itself and is never stripped.
+      r.block.env = { ...withoutLoaderEnv(r.block.env), ...withoutLoaderEnv(derived), CROW_HOME: crowHome };
       // A bare command (uvx, uv, npx) is resolved to an absolute path here:
       // the gateway's systemd PATH usually lacks ~/.local/bin, so the bot's
       // pi child failed with ENOENT and the server silently dropped.

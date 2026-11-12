@@ -178,6 +178,39 @@ test("env_vars items must have a name", () => {
   assert.equal(validateManifest({ ...VALID, env_vars: [{ description: "no name" }] }, dir).ok, false);
 });
 
+// The names that make a loader or interpreter run other code before the program starts.
+// Written out here rather than imported, so dropping one from the contract fails this test.
+const LOADER_NAMES = [
+  "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+  "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "PERL5OPT", "RUBYOPT",
+];
+
+test("env_vars: a loader/injection name is refused, case-insensitively", () => {
+  const { dir } = tmpBundle("demo");
+  assert.equal(LOADER_NAMES.length, 10);
+  for (const name of LOADER_NAMES) {
+    for (const written of [name, name.toLowerCase()]) {
+      const r = validateManifest({ ...VALID, env_vars: [{ name: written }] }, dir);
+      assert.equal(r.ok, false, `env_vars ${written} must fail`);
+      assert.ok(r.errors.some((e) => e.startsWith(`env_vars ${written}:`) && e.includes("loader/injection")),
+        `env_vars ${written}: ${r.errors.join("; ")}`);
+    }
+  }
+  // An ordinary name beside them is still fine — the rule is the name, not env_vars itself.
+  assert.equal(validateManifest({ ...VALID, env_vars: [{ name: "DEMO_API_KEY" }, { name: "DEMO_PLAIN", default: "x" }] }, dir).ok, true);
+});
+
+test("server.envKeys: a loader/injection name is refused", () => {
+  const { dir } = tmpBundle("demo");
+  const r = validateManifest({ ...VALID, server: { command: "npx", args: ["-y", "x"], envKeys: ["DEMO_KEY", "NODE_OPTIONS"] } }, dir);
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.startsWith("server.envKeys NODE_OPTIONS:") && e.includes("loader/injection")), r.errors.join("; "));
+  const lower = validateManifest({ ...VALID, server: { command: "npx", args: ["-y", "x"], envKeys: ["ld_preload"] } }, dir);
+  assert.equal(lower.ok, false, "case must not matter");
+  assert.ok(lower.errors.some((e) => e.includes("ld_preload")), lower.errors.join("; "));
+  assert.equal(validateManifest({ ...VALID, server: { command: "npx", args: ["-y", "x"], envKeys: ["DEMO_KEY"] } }, dir).ok, true);
+});
+
 test("detectSurfaces reports declared surfaces", () => {
   const s = detectSurfaces({ ...VALID, server: { command: "node", args: ["x"] }, skills: ["a.md"] });
   assert.deepEqual(s.sort(), ["server", "skills"]);

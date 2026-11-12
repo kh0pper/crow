@@ -797,8 +797,10 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     // A bundle labels its volumes with its own id (crow.bundle) and may not wear another's.
     const declared = vol.labels && typeof vol.labels === "object" && !Array.isArray(vol.labels) ? vol.labels["crow.bundle"] : undefined;
     if (declared !== undefined && ownId && String(declared) !== ownId) return refuse(`volume '${name}' carries the label crow.bundle=${String(declared).slice(0, 60)}: another bundle's identity`);
-    if (!vol.external && ownId && typeof ctx?.volumeInfo === "function") {
-      const real = String(vol.name || `${project}_${name}`);
+    // This owner check also covers external volumes: an external volume is another
+    // project's data too, and consent alone does not tell whose.
+    if (ownId && typeof ctx?.volumeInfo === "function") {
+      const real = vol.external ? String(vol.name || name) : String(vol.name || `${project}_${name}`);
       let info;
       try { info = ctx.volumeInfo(real); } catch (err) { return refuse(`could not check who owns volume '${real.slice(0, 60)}' (${String(err?.message || err).slice(0, 120)}): refusing`); }
       if (info && info.bundle && info.bundle !== ownId) {
@@ -808,7 +810,8 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
         return refuse(`volume '${real.slice(0, 60)}' already exists and belongs to compose project '${String(info.project).slice(0, 60)}': another bundle's data`);
       }
     }
-    // An external volume is another project's data (another extension's database…).
+    // An external volume is another project's data (another extension's database…). A
+    // volume with no owner label (or not created yet) is still only consent-gated.
     if (vol.external && (r = needPriv(`the external volume '${vol.name || name}'`))) return r;
     if (vol.driver !== undefined && vol.driver !== "local" && (r = needPriv(`volume driver ${vol.driver}`))) return r;
     // driver_opts (type, device, o) are read above, before any service's mounts and

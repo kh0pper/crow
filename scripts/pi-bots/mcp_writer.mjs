@@ -35,6 +35,7 @@
  */
 import { resolveAddonCommand, checkLauncherArgs } from "../../servers/shared/resolve-command.js";
 import { buildBotBaseEnv } from "../../servers/shared/bot-env.js";
+import { withoutLoaderEnv } from "../../servers/shared/loader-env.js";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -185,8 +186,12 @@ function addonSpawnBlock(serverId, block, crowHome) {
     return null;
   }
   const { command_sha256: _pin, ...rest } = block;
+  // The entry's env is handed to the child as-is EXCEPT loader/injection names
+  // (NODE_OPTIONS, LD_PRELOAD, …): those run code before the server itself does.
+  // A block with no env stays without one.
+  const env = rest.env && typeof rest.env === "object" ? { env: withoutLoaderEnv(rest.env) } : {};
   // The pin rides along so pi-lab re-verifies it at spawn time.
-  return { ...rest, ...(rc.resolved ? { command: rc.command } : {}), ...(rc.sha256 ? { command_sha256: rc.sha256 } : {}),
+  return { ...rest, ...env, ...(rc.resolved ? { command: rc.command } : {}), ...(rc.sha256 ? { command_sha256: rc.sha256 } : {}),
     cwd };
 }
 
@@ -543,13 +548,18 @@ async function probeHttpServerTools(block, timeoutMs) {
 /**
  * The environment a probe spawns a server block with: what a bot's pi child would
  * really give it — the bot env allowlist (servers/shared/bot-env.js) plus the
- * block's own env — never the gateway's environment this prober runs inside. Under
- * CROW_BOT_ENV_PASSTHROUGH=1 that allowlist is the whole environment minus credential
- * keys, which is exactly what bots get under that switch.
+ * block's own env, minus loader/injection names — never the gateway's environment
+ * this prober runs inside. Under CROW_BOT_ENV_PASSTHROUGH=1 that allowlist is the
+ * whole environment minus credential keys, which is exactly what bots get under
+ * that switch.
+ * The block here may be a raw mcp-addons entry from the Tools tab, not a block
+ * run through rebindBlock, so it is stripped here: NODE_OPTIONS --require and
+ * LD_PRELOAD would run code before the server itself. withoutLoaderEnv returns a
+ * new object and maps a missing env to {}, so an env-less block gains nothing.
  * Exported so a test can judge the env without spawning.
  */
 export function probeSpawnEnv(block, source = process.env) {
-  return Object.assign({}, buildBotBaseEnv(source), block?.env || {});
+  return Object.assign({}, buildBotBaseEnv(source), withoutLoaderEnv(block?.env));
 }
 
 /**

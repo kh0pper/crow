@@ -358,6 +358,24 @@ test("the probe spawns a server with a bot's env, never the gateway's", async ()
   assert.deepEqual(env, { ...buildBotBaseEnv(gatewayEnv), OWN_SETTING: "1" });
 });
 
+test("the probe strips loader names from a raw addon entry's env", async () => {
+  const { probeSpawnEnv } = await import("../scripts/pi-bots/mcp_writer.mjs");
+  // The Tools tab probes the raw mcp-addons entry, not a rebindBlock result, so this
+  // env arrives unstripped: a loader name here runs code before the server itself.
+  const source = { PATH: "/usr/bin:/bin", HOME: "/home/someone", LANG: "en_US.UTF-8" };
+  const env = probeSpawnEnv(
+    {
+      command: process.execPath,
+      args: ["x.mjs"],
+      env: { OWN_SETTING: "1", NODE_OPTIONS: "--require /tmp/x.js", LD_PRELOAD: "/tmp/x.so" },
+    },
+    source
+  );
+  assert.equal(env.OWN_SETTING, "1", "the block's own env still reaches the server");
+  assert.equal(env.NODE_OPTIONS, undefined, "NODE_OPTIONS reached the probe's spawn");
+  assert.equal(env.LD_PRELOAD, undefined, "LD_PRELOAD reached the probe's spawn");
+});
+
 test("bash adapter writes only the shared stored vocabulary (parity with servers/shared/bot-bash-policy.js when present)", async () => {
   const { BASH_STORED_VALUES } = await import("../servers/gateway/dashboard/panels/bot-builder/bash-mode.js");
   for (const v of Object.values(BASH_UI_TO_STORED)) assert.ok(BASH_STORED_VALUES.includes(v), v);

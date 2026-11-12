@@ -94,6 +94,33 @@ test("pin-addon-command --check: read-only, one line per add-on, honours CROW_HO
 // may be skipped for that reason; anything else must resolve.
 const BINS_GATE_ALLOWED = new Set(["arxiv", "zotero"]);
 
+// The names that make a loader or interpreter run other code before the program starts.
+// Written out here rather than imported, so dropping one from the contract fails this test.
+const LOADER_NAMES = [
+  "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+  "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "PERL5OPT", "RUBYOPT",
+];
+
+test("mcpAddonEntryFor: a loader/injection env name never reaches the entry", () => {
+  assert.equal(LOADER_NAMES.length, 10);
+  // Both ways a value can arrive: an installed key from the request, and a manifest default —
+  // each written once upper-case and once lower-case.
+  const envKeys = [...LOADER_NAMES, ...LOADER_NAMES.map((n) => n.toLowerCase()), "DEMO_KEY"];
+  const reqEnv = Object.fromEntries([...envKeys.map((k) => [k, "injected"]), ["DEMO_KEY", "k"]]);
+  const env_vars = [
+    ...LOADER_NAMES.map((name) => ({ name, default: "injected" })),
+    ...LOADER_NAMES.map((name) => ({ name: name.toLowerCase(), default: "injected" })),
+    { name: "DEMO_PLAIN", default: "p" },
+  ];
+  const entry = mcpAddonEntryFor({ server: { command: "node", args: ["server/index.js"], envKeys }, env_vars }, reqEnv);
+  assert.deepEqual(entry.env, { DEMO_KEY: "k", DEMO_PLAIN: "p" });
+  for (const k of Object.keys(entry.env)) assert.ok(!LOADER_NAMES.includes(k.toUpperCase()), `${k} must not be carried`);
+
+  // A manifest that only declares defaults (no request) is skipped the same way.
+  const onlyDefaults = mcpAddonEntryFor({ server: { command: "npx", args: ["-y", "x"] }, env_vars }, null);
+  assert.deepEqual(onlyDefaults.env, { DEMO_PLAIN: "p" });
+});
+
 test("every bundle manifest in this repo resolves on a fresh-install layout", () => {
   const checked = [];
   const gated = [];

@@ -8,6 +8,7 @@
 
 import { resolveAddonCommand, checkLauncherArgs } from "../shared/resolve-command.js";
 import { withoutCredentialKeys } from "../shared/credentials-env.js";
+import { withoutLoaderEnv } from "../shared/loader-env.js";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { resolveCrowHome as resolveSharedCrowHome, isWithin } from "../shared/crow-home.js";
@@ -489,7 +490,7 @@ async function connectToServer(integration) {
 /** A walled add-on's own env: its entry env, its derived keys, and the gateway host mark. */
 export function addonOwnEnv(config = {}, base = process.env, id = null) {
   const derived = id ? addonDerivedEnv(id, config.env, undefined, withoutCredentialKeys(base)) : {};
-  return { ...(config.env || {}), ...derived, CROW_ADDON_HOST: "gateway" };
+  return { ...withoutLoaderEnv(config.env), ...withoutLoaderEnv(derived), CROW_ADDON_HOST: "gateway" };
 }
 
 /**
@@ -512,8 +513,8 @@ export function addonStdioEnv(config = {}, base = process.env, id = null, opts =
     ...addonBaseEnv(base),
     ...declaredPassthrough(id, gate, opts),
     ...storagePassthrough(id, gate),
-    ...(config.env || {}),
-    ...derived,
+    ...withoutLoaderEnv(config.env),
+    ...withoutLoaderEnv(derived),
     CROW_ADDON_HOST: "gateway",
   };
 }

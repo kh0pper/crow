@@ -21,6 +21,9 @@ import { badBundlePath, badPanelId } from "../../servers/shared/bundle-declared-
 // exactly what the card's own save route would refuse.
 import { isDeniedApiKeyEnvName } from "../../servers/gateway/bundle-apikey-save.js";
 import { safeSignupUrl } from "../../servers/gateway/dashboard/shared/api-key-card.js";
+// The loader/injection env names live in one import-free leaf module, shared with
+// routes/bundles.js (which never copies one into an mcp-addons entry).
+import { isLoaderEnvName } from "../../servers/shared/loader-env.js";
 
 const schema = JSON.parse(
   readFileSync(new URL("../../registry/manifest.schema.json", import.meta.url), "utf8"),
@@ -80,6 +83,13 @@ const TS_NET_RE = /\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.ts\.net\b/i;
 /** 32-hex-char instance-id shape (as minted by servers/shared instance-identity code). */
 const INSTANCE_ID_HEX32_RE = /^[0-9a-f]{32}$/i;
 const ALLOWED_HOST_VALUES = new Set(["local", "cloud"]);
+
+// The loader/injection env name list itself lives in servers/shared/loader-env.js:
+// validateManifest refuses a manifest declaring one (env_vars and server.envKeys), and
+// routes/bundles.js (mcpAddonEntryFor) never copies one into an mcp-addons entry.
+
+/** The sentence both loader-name refusals use, so the reason reads the same everywhere. */
+const LOADER_ENV_REASON = "loader/injection variable names (NODE_OPTIONS, LD_PRELOAD, ...) are not allowed";
 
 /**
  * Recursively scan every string value in a manifest for a leaked Tailscale
@@ -476,7 +486,12 @@ function validateConnect(manifest) {
     }
   };
   for (const [key, url] of Object.entries(c.step_links || {})) checkTemplate(`step_links ${key}`, url);
-  for (const [env, d] of Object.entries(c.derived_env || {})) checkTemplate(`derived_env ${env}`, d.template);
+  for (const [env, d] of Object.entries(c.derived_env || {})) {
+    checkTemplate(`derived_env ${env}`, d.template);
+    // A derived key is handed to the child as env like any other: a loader name here would
+    // run code before the server itself, so the manifest declaration is refused outright.
+    if (isLoaderEnvName(env)) errors.push(`connect.derived_env ${env}: ${LOADER_ENV_REASON}`);
+  }
   const t = c.test;
   if (t && t.kind === "http") {
     checkTemplate("test.url", t.url);
@@ -576,6 +591,7 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
 
   for (const v of (manifest && Array.isArray(manifest.env_vars)) ? manifest.env_vars : []) {
     if (!v || typeof v !== "object") continue;
+    if (isLoaderEnvName(v.name)) errors.push(`env_vars ${v.name}: ${LOADER_ENV_REASON}`);
     if (v.store_as !== undefined) {
       if (v.store_as !== "argon2id") errors.push(`env_vars ${v.name}: store_as must be "argon2id"`);
       if (v.generate !== "secret") errors.push(`env_vars ${v.name}: store_as needs generate: "secret"`);
@@ -627,6 +643,13 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
       if (v.generate !== undefined) errors.push(`env_vars ${v.name}: generatable is for typed fields; it cannot be combined with generate`);
       if (v.propagate !== false) errors.push(`env_vars ${v.name}: generatable needs propagate: false (a human password must not be copied into the gateway .env)`);
     }
+  }
+
+  // A loader name the server would hand its own MCP child is refused at the manifest too,
+  // not only skipped at entry-build time: the manifest is the declaration, and a bundle
+  // asking for NODE_OPTIONS is asking for code injection.
+  for (const key of (manifest && manifest.server && Array.isArray(manifest.server.envKeys)) ? manifest.server.envKeys : []) {
+    if (isLoaderEnvName(key)) errors.push(`server.envKeys ${key}: ${LOADER_ENV_REASON}`);
   }
 
   // 3b. firstAdmin (security audit N3-4): how the bundle's own first admin is created.

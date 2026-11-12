@@ -241,6 +241,26 @@ test("a derived browser block names its own instance and never the primary", () 
   assert.ok(!block.cwd.startsWith(primary + "/"), `browser block cwd points at the primary: ${block.cwd}`);
 });
 
+test("catalog strips loader names cloned from the addon entry, keeping the addon's own env and CROW_HOME", () => {
+  const dir = mkdtempSync(join(tmpdir(), "instLoader-"));
+  const home = join(dir, ".crow-loader");
+  mkdirSync(join(home, "bundles", "tasks"), { recursive: true });
+  mkdirSync(join(home, "data"), { recursive: true });
+  writeFileSync(join(home, "mcp-addons.json"), JSON.stringify({
+    tasks: {
+      command: "node",
+      args: ["server/index.js"],
+      env: { FOO: "bar", NODE_OPTIONS: "--require /tmp/evil.js", LD_PRELOAD: "/tmp/evil.so" },
+    },
+  }));
+  const { servers } = crowServerCatalog(home, { binding: BINDING_B(home) });
+  const env = servers.tasks.env;
+  assert.equal(env.FOO, "bar", "an ordinary addon env var survives");
+  assert.equal(env.NODE_OPTIONS, undefined, "NODE_OPTIONS would --require code before the server runs");
+  assert.equal(env.LD_PRELOAD, undefined, "LD_PRELOAD would load a library before the server runs");
+  assert.equal(env.CROW_HOME, home, "the catalog still stamps CROW_HOME");
+});
+
 test("probe surface offers the phone http server when the phone token exists (Bot Builder Tools tab)", () => {
   const { home } = instanceB();
   const canonical = { mcpServers: {} };

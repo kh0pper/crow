@@ -110,6 +110,21 @@ test("step_links values use field names only", () => {
   has(v(mk({ step_links: { "s.one": "https://example.com/${NOPE}" } })), "NOPE");
 });
 
+test("a derived_env key that is a loader/injection name is refused", () => {
+  const withKey = (key) => v(mk({
+    derived_env: { [key]: { template: "Bearer ${HA_TOKEN}", encoding: "raw" } },
+  }));
+  for (const key of ["NODE_OPTIONS", "LD_PRELOAD", "node_path", "DYLD_INSERT_LIBRARIES"]) {
+    const r = withKey(key);
+    assert.equal(r.ok, false, `${key}: a loader name in connect.derived_env passed`);
+    has(r, `connect.derived_env ${key}`);
+    has(r, "loader/injection variable names");
+  }
+  // The same block with an ordinary key still passes, so the refusal is about the name only.
+  const ok = withKey("AUTH_HEADER");
+  assert.equal(ok.ok, true, ok.errors.join("; "));
+});
+
 test("duplicate field names are refused", () => {
   const f = { name: "HA_URL", kind: "address", label_key: "k" };
   has(v(mk({ fields: [f, f] })), "duplicate");

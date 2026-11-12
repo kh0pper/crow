@@ -157,6 +157,25 @@ test("shapeResult: text kept, others dropped with one note; oversize → isError
   assert.equal(ok.isError, undefined);
 });
 
+test("satelliteChildEnv: the base is inherited, the entry's loader names are dropped, this host's own values are set last", () => {
+  const base = { PATH: "/usr/bin", HOME: "/home/someone", NODE_OPTIONS: "--max-old-space-size=512" };
+  const env = H.satelliteChildEnv(base, {
+    LD_PRELOAD: "/x.so", DYLD_INSERT_LIBRARIES: "/x.dylib", NODE_OPTIONS: "--require /x.js",
+    PYTHONSTARTUP: "/x.py", FOO: "bar",
+  });
+  assert.equal(env.FOO, "bar", "an ordinary entry key is kept");
+  assert.equal(env.LD_PRELOAD, undefined);
+  assert.equal(env.DYLD_INSERT_LIBRARIES, undefined);
+  assert.equal(env.PYTHONSTARTUP, undefined);
+  assert.equal(env.NODE_OPTIONS, H.CHILD_NODE_OPTIONS, "never the entry's, and never the base's either");
+  assert.equal(env.CROW_ADDON_HOST, "satellite");
+  assert.equal(env.PATH, "/usr/bin", "the base is inherited unfiltered");
+  assert.equal(env.HOME, "/home/someone");
+  // No entry env at all (or a non-object one) is the plain base plus the host's own two values.
+  assert.deepEqual(H.satelliteChildEnv({ PATH: "/bin" }, null), { PATH: "/bin", NODE_OPTIONS: H.CHILD_NODE_OPTIONS, CROW_ADDON_HOST: "satellite" });
+  assert.deepEqual(H.satelliteChildEnv({ PATH: "/bin" }, ["LD_PRELOAD=/x.so"]), { PATH: "/bin", NODE_OPTIONS: H.CHILD_NODE_OPTIONS, CROW_ADDON_HOST: "satellite" });
+});
+
 test("admission constants are the spec's", () => {
   assert.equal(H.IDLE_STOP_MS, 600000);
   assert.equal(H.KILL_GRACE_MS, 5000);
