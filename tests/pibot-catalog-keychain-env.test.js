@@ -167,7 +167,7 @@ test("extraServersFromExtensions: a sealed entry with no other env gains no env 
 
 // ─── writeBotMcp end to end ────────────────────────────────────────────────
 
-test("writeBotMcp: a sealed add-on reaches neither the file nor the result with a value, and is reported in needsKeys", () => {
+test("writeBotMcp (file mode): a sealed add-on is left out entirely — its keys cannot ride a file", () => {
   const { dir, home, binding } = instance({ sealed: sealedEntry() });
   const sessionDir = join(dir, "session");
   mkdirSync(sessionDir, { recursive: true });
@@ -177,14 +177,20 @@ test("writeBotMcp: a sealed add-on reaches neither the file nor the result with 
   const res = writeBotMcp({ tools: { crow_mcp: ["sealed/t"] } }, {
     sessionDir, canonicalPath, crowHome: home, binding,
   });
-  assert.deepEqual(res.needsKeys, { sealed: ["HA_TOKEN"] });
-  assert.equal(res.json.mcpServers.sealed.env.HA_TOKEN, undefined);
-  assert.equal("keychainEnv" in res.json.mcpServers.sealed, false);
+  // PR2 Task 2.2: file-mode delivery cannot carry a keychain value, so the block is disabled
+  // with one warning instead of reaching the file key-less (a spawn that would only fail
+  // later). Nothing is left for a caller to hydrate.
+  assert.deepEqual(res.json.mcpServers.sealed, { disabled: true });
+  assert.deepEqual(res.needsKeys, {});
+  assert.equal(res.servers.includes("sealed"), false, "a disabled block is not active");
+  assert.ok(res.disabled.includes("sealed"));
+  assert.ok(res.warnings.some((w) => w.startsWith("add-on sealed: ") && /file-mode MCP delivery cannot carry them/.test(w)),
+    "the warning names the add-on and the reason");
+  assert.equal(JSON.stringify(res).includes(SENTINEL), false, "no secret value anywhere in the result");
 
   const written = readFileSync(join(sessionDir, ".mcp.json"), "utf8");
   assert.equal(written.includes(SENTINEL), false, "the written .mcp.json carries no secret value");
   assert.equal(written.includes("keychainEnv"), false, "and no keychainEnv field");
-  assert.equal(JSON.stringify(res).includes(SENTINEL), false, "nor does anything else the caller gets back");
 });
 
 test("writeBotMcp: an unsealed bot config reports no needsKeys at all", () => {
