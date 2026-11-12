@@ -27,6 +27,8 @@ process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
 const REPO = join(import.meta.dirname, "..");
 const STORE_URL = pathToFileURL(join(REPO, "servers/shared/project-bot-shares.js")).href;
 const REMOTE_BLOCKS_URL = pathToFileURL(join(REPO, "scripts/pi-bots/remote-blocks.mjs")).href;
+const DB_URL = pathToFileURL(join(REPO, "servers/db.js")).href;
+const PROJECT_SPACES_URL = pathToFileURL(join(REPO, "servers/shared/project-spaces.js")).href;
 
 let db = null;
 let createProjectSpace = null;
@@ -241,6 +243,40 @@ test("remoteInvocationOn reports a bot that is both flagged and wired for remote
   } finally {
     await db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = 'feature_flags'", args: [] });
   }
+});
+
+test("a remote-block helper that cannot be loaded reports remoteInvocationOn false instead of failing the grant", () => {
+  // A grant must never fail because the lazily loaded remote-invocation helpers are unavailable.
+  // The helpers are imported inside remoteInvocationOn, so a resolve hook that refuses one of them
+  // is the only way to reach that path: a child process fails the helper's resolution, then grants
+  // a share to a bot that is both flagged and wired, which would otherwise report `true`.
+  const lines = [
+    'import { registerHooks } from "node:module";',
+    "registerHooks({",
+    "  resolve(spec, context, next) {",
+    "    if (/remote-blocks\\.mjs$/.test(spec)) throw new Error('remote-block helper unavailable');",
+    "    return next(spec, context);",
+    "  },",
+    "});",
+    `const { createDbClient } = await import(${JSON.stringify(DB_URL)});`,
+    "const db = createDbClient();",
+    `const { createProjectSpace } = await import(${JSON.stringify(PROJECT_SPACES_URL)});`,
+    `const S = await import(${JSON.stringify(STORE_URL)});`,
+    "const project = await createProjectSpace(db, { name: 'Failing helper target' });",
+    "await db.execute({ sql: \"INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled) VALUES ('probe-wired-bot', 'Probe Bot', ?, NULL, 1)\", args: [JSON.stringify({ tools: { remote_mcp: ['abcdef1234567890::crow-memory'] } })] });",
+    "await db.execute({ sql: \"INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('feature_flags', ?)\", args: [JSON.stringify({ remote_invocation: true })] });",
+    "const res = await S.grantShare(db, { projectId: Number(project.id), botId: 'probe-wired-bot', level: 'read' });",
+    "await db.execute({ sql: \"DELETE FROM dashboard_settings WHERE key = 'feature_flags'\", args: [] });",
+    "await db.execute({ sql: \"DELETE FROM pi_bot_defs WHERE bot_id = 'probe-wired-bot'\", args: [] });",
+    "db.close();",
+    "console.log(JSON.stringify({ changed: res.changed, remoteInvocationOn: res.remoteInvocationOn }));",
+  ];
+  const out = spawnSync(process.execPath, ["--input-type=module", "-e", lines.join("\n")],
+    { cwd: REPO, env: { ...process.env }, encoding: "utf8" });
+  assert.equal(out.status, 0, out.stderr || out.stdout);
+  const res = JSON.parse(out.stdout.trim());
+  assert.equal(res.changed, "created", "the grant itself still goes through");
+  assert.equal(res.remoteInvocationOn, false, "a helper that cannot load reads as off, not as an error");
 });
 
 // ---- resolve (use time) ----

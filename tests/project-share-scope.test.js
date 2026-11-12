@@ -123,12 +123,14 @@ test("the five collections are frozen and shaped as the plan says", () => {
   assert.deepEqual(S.TOOL_CLASS.crow_fetch_source, { family: "source", class: "write" });
   assert.deepEqual(S.TOOL_CLASS.crow_upload_file, { family: "file", class: "write" });
   assert.deepEqual(S.TOOL_CLASS.crow_search_notes, { family: "note", class: "read" });
-  assert.equal(S.PROJECT_NEUTRAL_TOOLS.length, 6);
-  // A bot may SEND the operator a notification; reading or dismissing one is owner-only, because
-  // the text carries other projects' names and card titles and a dismiss clears the owner's alerts.
+  assert.equal(S.PROJECT_NEUTRAL_TOOLS.length, 5);
+  // A bot may SEND the operator a notification; reading, dismissing or re-configuring one is
+  // owner-only, because the text carries other projects' names and card titles, a dismiss clears
+  // the owner's alerts, and the settings tool's `set` action rewrites instance-wide preferences
+  // (a bot could silence the operator's own alerts with it).
   assert.ok(S.PROJECT_NEUTRAL_TOOLS.includes("crow_create_notification"));
-  assert.ok(S.PROJECT_NEUTRAL_TOOLS.includes("crow_notification_settings"));
-  for (const tool of ["crow_check_notifications", "crow_dismiss_notification", "crow_dismiss_all_notifications"]) {
+  for (const tool of ["crow_check_notifications", "crow_dismiss_notification", "crow_dismiss_all_notifications",
+    "crow_notification_settings"]) {
     assert.ok(S.OWNER_ONLY_TOOLS.includes(tool), tool);
     assert.ok(!S.PROJECT_NEUTRAL_TOOLS.includes(tool), tool);
   }
@@ -161,6 +163,7 @@ test("toolPolicyFor resolves crow_dream's two entries by dry_run and classifies 
   assert.equal(S.toolPolicyFor("crow_create_project").kind, "owner_only");
   assert.equal(S.toolPolicyFor("crow_create_schedule").kind, "owner_only");
   assert.equal(S.toolPolicyFor("crow_check_notifications").kind, "owner_only");
+  assert.equal(S.toolPolicyFor("crow_notification_settings").kind, "owner_only");
   assert.equal(S.toolPolicyFor("crow_create_notification").kind, "neutral");
   assert.equal(S.toolPolicyFor("crow_web_search").kind, "neutral");
   assert.equal(S.toolPolicyFor("crow_not_a_tool"), null, "unlisted: no policy, so denied at runtime");
@@ -339,7 +342,10 @@ test("notification reading and dismissing are owner-only; sending one stays neut
   await grant(X, bot, "read_write");
   const actor = { kind: "bot", id: bot };
 
-  for (const tool of ["crow_check_notifications", "crow_dismiss_notification", "crow_dismiss_all_notifications"]) {
+  // The settings tool joins them: its `set` action writes instance-wide notification preferences,
+  // so a bot holding any share could otherwise silence the operator's own alerts.
+  for (const tool of ["crow_check_notifications", "crow_dismiss_notification", "crow_dismiss_all_notifications",
+    "crow_notification_settings"]) {
     for (const projectId of [home, X, null]) {
       const d = await S.decideProjectAccess(db, actor, { tool, projectId });
       assert.equal(d.allowed, false, `${tool} with project ${projectId}`);
@@ -349,8 +355,6 @@ test("notification reading and dismissing are owner-only; sending one stays neut
 
   assert.equal((await S.decideProjectAccess(db, actor,
     { tool: "crow_create_notification", projectId: home })).allowed, true);
-  assert.equal((await S.decideProjectAccess(db, actor,
-    { tool: "crow_notification_settings", projectId: null })).allowed, true);
 
   // The operator's voice bot is exempt from the bot rules, notifications included.
   const voice = { kind: "bot", id: CROW_VOICE_BOT_ID };
@@ -430,6 +434,34 @@ test("botWriteProject defaults to the home project and refuses when the bot has 
 
   assert.deepEqual(await S.botWriteProject(db, OWNER, null), { projectId: null }, "the owner keeps today's behavior");
   assert.deepEqual(await S.botWriteProject(db, OWNER, X), { projectId: X });
+});
+
+test("a covered write with no project_id is refused for a bot with no home project, never passed null", async () => {
+  const homeless = { kind: "bot", id: await mkBot({}) };
+  const anyProject = await mkProject("Write refusal witness");
+  await db.execute({ sql: "INSERT INTO memories (content, category, project_id) VALUES ('homeless read row', 'general', ?)", args: [anyProject] });
+
+  for (const [tool, cls] of Object.entries(S.TOOL_CLASS)) {
+    if (cls.class !== "write") continue;
+    const d = await S.decideProjectAccess(db, homeless, { tool, projectId: null });
+    assert.equal(d.allowed, false, tool);
+    assert.equal(d.code, "home_only", tool);
+    assert.equal(d.message, S.NAME_A_PROJECT_MESSAGE, `${tool} tells the caller to name a project`);
+
+    const gate = S.makeShareGate(db, tool, { baseActor: homeless });
+    const pass = await gate.check(undefined);
+    assert.equal(pass.isError, true, `${tool} is refused, not passed {projectId: null}`);
+    assert.equal(pass.projectId, undefined, tool);
+  }
+
+  // A READ differs: the gate passes `{projectId: null}` because the handler scopes itself with
+  // readScope(). A null projectId there is not "unrestricted" — a bot with no home matches no rows.
+  const gate = S.makeShareGate(db, "crow_search_memories", { baseActor: homeless });
+  assert.deepEqual(await gate.check(undefined), { projectId: null });
+  assert.deepEqual(await gate.readScope(), { homeProjectId: null });
+  const p = S.scopePredicate(await gate.readScope());
+  const seen = (await db.execute({ sql: `SELECT content FROM memories WHERE 1=1${p.sql}`, args: p.args })).rows;
+  assert.deepEqual(seen.map((r) => r.content), [], "the null pass is scoped to nothing, not to everything");
 });
 
 // --- by-id rows -----------------------------------------------------------------------------

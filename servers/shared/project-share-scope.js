@@ -31,7 +31,8 @@
 //     device scope. A bot naming `device_id` is refused `owner_only`.
 //   - A covered read with no `project_id` is scoped to the home project and nothing else
 //     (`botReadScope`): project-less rows are never included. A covered write with no `project_id`
-//     lands in the home project (`botWriteProject`).
+//     lands in the home project (`botWriteProject`); a bot with NO home project is refused
+//     `home_only` with NAME_A_PROJECT_MESSAGE, so a write is never allowed with no project.
 //   - By-id tools resolve the row's own `project_id` first (`decideRowAccess`); every refusal
 //     there is reported as the message a missing id gets, so a hidden row and a missing row read
 //     the same. `auditRefusal` records the true code.
@@ -164,8 +165,10 @@ export const SCOPED_LISTING_PROJECT_TOOLS = Object.freeze([
  * belongs to this instance, not to a project, so there is nothing to scope it to — home-only would
  * have let a bot manage the operator's whole schedule list.
  *
- * The three notification read/dismiss tools are here because notification text carries other
- * projects' names and card titles, and dismissing one clears the operator's own alerts.
+ * The notification tools are here because notification text carries other projects' names and card
+ * titles, and dismissing one clears the operator's own alerts. `crow_notification_settings` belongs
+ * here too: its `set` action rewrites instance-wide notification preferences, so a bot could
+ * silence the operator's alerts.
  */
 export const OWNER_ONLY_TOOLS = Object.freeze([
   "crow_create_project",
@@ -177,18 +180,18 @@ export const OWNER_ONLY_TOOLS = Object.freeze([
   "crow_check_notifications",
   "crow_dismiss_notification",
   "crow_dismiss_all_notifications",
+  "crow_notification_settings",
 ]);
 
 /**
- * Six project-neutral tools, listed so that no existing bot silently loses them: they touch no
- * project-scoped row (backgrounds are instance-wide, web search writes nothing). Reading or
- * dismissing a notification is NOT neutral — see OWNER_ONLY_TOOLS.
+ * Five project-neutral tools, listed so that no existing bot silently loses them: they touch no
+ * project-scoped row (backgrounds are instance-wide, web search writes nothing). Reading,
+ * dismissing or re-configuring a notification is NOT neutral — see OWNER_ONLY_TOOLS.
  */
 export const PROJECT_NEUTRAL_TOOLS = Object.freeze([
   "crow_web_search",
   // Sending a notification is a message to the operator, never a read of another project's rows.
   "crow_create_notification",
-  "crow_notification_settings",
   "crow_generate_background",
   "crow_list_backgrounds",
   "crow_set_background",
@@ -266,9 +269,11 @@ async function homeProjectId(db, botId) {
  * For a bot: an unverified bot is refused `owner_only`, as is a call naming `device_id`;
  * `OWNER_ONLY_TOOLS` (and any unlisted name) are refused `owner_only`; no project is allowed for a
  * covered tool, a `PROJECT_NEUTRAL_TOOLS` or a `SCOPED_LISTING_TOOLS` entry, and for a HOME_ONLY
- * tool only when the bot has a home project; a named project is allowed when it is the home
- * project, refused `home_only` for a HOME_ONLY tool and for a `SCOPED_LISTING_PROJECT_TOOLS` entry,
- * and otherwise decided by `resolveBotAccess`.
+ * tool only when the bot has a home project. A covered WRITE with no project needs a project to
+ * land in, so a bot with no home project is refused `home_only` with NAME_A_PROJECT_MESSAGE (a
+ * read with no project still passes, and scopes itself through `botReadScope`); a named project is
+ * allowed when it is the home project, refused `home_only` for a HOME_ONLY tool and for a
+ * `SCOPED_LISTING_PROJECT_TOOLS` entry, and otherwise decided by `resolveBotAccess`.
  *
  * `args` is the call's own arguments (only `dry_run` is read: it picks which of `crow_dream`'s two
  * entries applies); `deviceId` is the call's `device_id`.
@@ -288,7 +293,13 @@ export async function decideProjectAccess(db, actor, { tool, projectId, args = {
   const home = await homeProjectId(db, actor.id);
 
   if (requested == null) {
-    if (policy.kind === "home_only" && home == null) return deny("home_only");
+    if (home == null && policy.kind === "home_only") return deny("home_only");
+    // A write must land in a real project: the home project, or a refusal. Passing
+    // `{projectId: null}` would hand a handler a write it cannot scope (`botWriteProject` refuses
+    // the same call), so the gate refuses here with the code the audit log knows.
+    if (home == null && policy.kind === "write") {
+      return { allowed: false, code: "home_only", message: NAME_A_PROJECT_MESSAGE };
+    }
     return { allowed: true, projectId: home };
   }
 
@@ -432,6 +443,11 @@ export async function auditRefusal(db, actor, { tool, projectId, code, now = Dat
  * The handler passes the call's own arguments as the second parameter: only `device_id` and
  * `dry_run` are read (a bot naming a device is refused, and `dry_run` picks which of `crow_dream`'s
  * two entries applies).
+ *
+ * A pass can carry `projectId: null`, and for a bot READ that does NOT mean unrestricted: it means
+ * the call named no project and the bot has no home project. The handler must then apply
+ * `readScope()` (with `scopePredicate`) so the read matches nothing. A covered WRITE never passes
+ * `projectId: null`: a bot with no home project is refused instead.
  *
  * Every refusal from `checkRow` is the not-found result; the true code goes to the audit log only.
  */
