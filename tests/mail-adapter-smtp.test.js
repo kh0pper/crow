@@ -18,6 +18,7 @@ import {
 } from "./fixtures/fake-mail-server.mjs";
 import { createImapSmtpAdapter } from "../servers/gateway/mail/adapter/imap-smtp.js";
 import { MAIL_ERROR_TEXT, MailError } from "../servers/gateway/mail/errors.js";
+import { KeychainKeyMissingError } from "../servers/gateway/keychain/store.js";
 import { parseRawMessage } from "../servers/gateway/mail/parse.js";
 
 const ACCOUNT_ID = "ma-0123456789abcdef";
@@ -690,6 +691,27 @@ test("sending writes nothing to the console, and never the password", async () =
   await stopFake(fake);
 });
 
+test("a keychain key that is missing on this machine reaches send unchanged", async () => {
+  const fake = await startSmtp();
+  const missing = new KeychainKeyMissingError();
+  const adapter = createImapSmtpAdapter({
+    account: accountFor(smtpEndpoint(fake)),
+    credentials: { getSecrets: async () => { throw missing; } },
+    timeouts: FAST,
+  });
+  try {
+    const err = await rejectionOf(adapter.send(outgoing()));
+    assert.equal(err, missing, "the key's fault travels as the same error, not as a mail one");
+    assert.equal(err.code, "KEYCHAIN_KEY_MISSING");
+    assert.equal(err instanceof MailError, false, "a key that is not here is not a bad password");
+    assert.equal(fake.connectionCount(), 0, "a send with no credential opens no socket");
+    assert.equal(fake.messages.length, 0, "nothing was transmitted");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
 /* ----------------------------------------------------------------------------------- saveDraft */
 
 function imapAdapterFor(imap, overrides = {}, adapterOptions = {}) {
@@ -737,6 +759,57 @@ test("saveDraft finds the drafts folder by its special-use flag, not by its name
     const saved = await adapter.saveDraft(makeRaw({ subject: "Draft" }));
     assert.equal(saved.folderPath, "Postponed");
     assert.equal(imap.appended[0].mailbox, "Postponed");
+  } finally {
+    await adapter.close();
+    await stopFake(imap);
+  }
+});
+
+test("saveDraft skips a drafts folder whose path carries a control character", async () => {
+  const imap = await startImap();
+  const entry = (path) => ({
+    path, name: "Drafts", specialUse: "\\Drafts", delimiter: "/", flags: new Set(["\\HasNoChildren"]),
+  });
+  const adapter = imapAdapterFor(imap, {}, {
+    clientFactory: (options) => {
+      const client = new ImapFlow(options);
+      // The folder Crow cannot name comes first, so picking it would be the easy mistake.
+      client.list = async () => [entry("Dra\u0001fts"), entry("Drafts")];
+      return client;
+    },
+  });
+  try {
+    const saved = await adapter.saveDraft(makeRaw({ subject: "Draft" }));
+    assert.equal(saved.folderPath, "Drafts", "the drafts folder Crow can name is the one used");
+    assert.equal(imap.appended.length, 1);
+    assert.equal(imap.appended[0].mailbox, "Drafts");
+  } finally {
+    await adapter.close();
+    await stopFake(imap);
+  }
+});
+
+test("saveDraft is NOT_FOUND when the only drafts folder cannot be named", async () => {
+  const imap = await startImap();
+  const adapter = imapAdapterFor(imap, {}, {
+    clientFactory: (options) => {
+      const client = new ImapFlow(options);
+      client.list = async () => [{
+        path: "Dra\u0001fts",
+        name: "Drafts",
+        specialUse: "\\Drafts",
+        delimiter: "/",
+        flags: new Set(["\\HasNoChildren"]),
+      }];
+      return client;
+    },
+  });
+  try {
+    const err = await rejectionOf(adapter.saveDraft(makeRaw({ subject: "Draft" })));
+    assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+    assert.equal(err.code, "NOT_FOUND");
+    assert.equal(err.message, MAIL_ERROR_TEXT.NOT_FOUND);
+    assert.equal(imap.appended.length, 0, "nothing was filed in a folder Crow cannot name");
   } finally {
     await adapter.close();
     await stopFake(imap);
@@ -830,6 +903,24 @@ test("a server that dribbles one line at a time fails the send at the send deadl
   }
 });
 
+test("a send budget above the 32-bit ceiling still lets the send happen", async () => {
+  const fake = await startSmtp();
+  const adapter = createImapSmtpAdapter({
+    account: accountFor(smtpEndpoint(fake)),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts: { ...FAST, sendMs: 2 ** 31 },
+  });
+  try {
+    const result = await adapter.send(outgoing());
+    assert.match(result.messageId, /^<[0-9a-f]{32}@example\.com>$/);
+    assert.equal(fake.messages.length, 1, "a capped send budget does not abort the send at once");
+    assert.ok(fake.messages[0].raw.includes("Hello from Crow"), "the message itself went out");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
 test("a hung token provider rejects TIMEOUT within the send budget", async () => {
   const adapter = createImapSmtpAdapter({
     account: accountFor({ host: "127.0.0.1", port: 1, security: "none" }, { authKind: "xoauth2" }),
@@ -905,7 +996,7 @@ test("a second refused XOAUTH2 sign-in is AUTH_FAILED and transmits nothing", as
 
 /* ------------------------------------------------------------------ implicit TLS and a bad cert */
 
-test("implicit TLS against a self-signed certificate is TLS and transmits nothing", async () => {
+test("implicit TLS against a self-signed certificate is TLS, and neither a credential nor an address reaches the sentence", async () => {
   const pair = selfSignedCertificate();
   const server = await startTlsSmtp(pair);
   try {

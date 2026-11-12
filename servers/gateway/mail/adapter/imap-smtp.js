@@ -90,6 +90,13 @@ const DEFAULT_TIMEOUTS = Object.freeze({
   sendMs: 300_000,
 });
 
+/**
+ * The largest delay `setTimeout` (and so `AbortSignal.timeout`) accepts. A longer one overflows the
+ * 32-bit signed field and fires after about a millisecond, which would turn a generous budget into an
+ * instant deadline, so every timeout is clamped to this.
+ */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /** Inbox and Sent are the two folders the supervisor idles on, so a watch never exceeds that. */
 const MAX_WATCH_FOLDERS = 2;
 
@@ -240,8 +247,12 @@ function withDeadline(run, ms, onExpire, detail) {
  * Await one step of a send under the send's one deadline. nodemailer honours the same signal by closing
  * its connection, and racing it here also bounds the sign-in, which nodemailer never sees. The losing
  * promise keeps a rejection handler, so a failure that arrives after the deadline cannot escape.
+ *
+ * A signal that is already aborted means the deadline has passed before this step began: `run` is not
+ * started at all, so nothing the step would do (a token provider call, a transport) begins without a
+ * deadline left to end it. Exported because the rule belongs to `send` rather than to its plumbing.
  */
-function withSendDeadline(signal, run) {
+export function withSendDeadline(signal, run) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const settle = (finish, value) => {
@@ -254,7 +265,10 @@ function withSendDeadline(signal, run) {
       settle(reject, new MailError("TIMEOUT", "send_deadline"));
     }
     signal.addEventListener("abort", onAbort, { once: true });
-    if (signal.aborted) onAbort();
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
     Promise.resolve().then(run).then(
       (value) => settle(resolve, value),
       (err) => settle(reject, err),
@@ -270,7 +284,8 @@ function normalizeTimeouts(overrides) {
     const value = overrides[key];
     if (value == null) continue;
     if (!Number.isInteger(value) || value < 1) throw new TypeError(`timeouts.${key} must be a positive integer`);
-    timeouts[key] = value;
+    // A budget above MAX_TIMEOUT_MS would fire at once rather than later, so it is capped instead.
+    timeouts[key] = Math.min(value, MAX_TIMEOUT_MS);
   }
   return timeouts;
 }

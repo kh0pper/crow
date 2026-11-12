@@ -174,7 +174,12 @@ export function createFakeMailAdapter(opts = {}) {
       watcher.stopped = true;
       watchers.delete(watcher);
       dropped += 1;
-      watcher.onError(err);
+      try {
+        watcher.onError(err);
+      } catch {
+        // As in emit(): a handler that throws is the caller's bug, and it must not turn the loss of
+        // the connection, or a later watcher's report of it, into a failure here.
+      }
     }
     return dropped;
   }

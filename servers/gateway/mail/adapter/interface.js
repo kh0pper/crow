@@ -24,10 +24,15 @@
  * message with nothing but the allowed fields, so an implementation builds its headers from that and
  * from nothing else.
  *
- * Control characters are treated by field, never by accident: an address, a message id and a subject
- * are refused (an address or id with a trailing CR/LF is an injection attempt, not padding, and it is
- * refused before any trimming hides it), while a display name and a filename are stripped, because
- * there the text is the caller's to keep and only the control character has to go.
+ * Control characters are treated by field, never by accident. An address and a message id are refused
+ * (one with a trailing CR/LF is an injection attempt, not padding, and it is refused before any
+ * trimming hides it), and so is a subject carrying a C0 control other than the three a header can hold.
+ * A display name and a filename are stripped instead, because there the text is the caller's to keep
+ * and only the control character has to go. A subject's CR, LF and TAB become one space, and C1
+ * controls (U+0080-U+009F) and the Unicode line and paragraph separators (U+2028, U+2029) are stripped
+ * from a subject, a display name and a filename — they are not header delimiters, only text no header
+ * should carry — while an address or a message id carrying one is refused like any other control
+ * character.
  *
  * @typedef {{name: string|null, address: string}} AdapterAddress
  * @typedef {{path: string, name: string, specialUse: string|null, delimiter: string,
@@ -71,19 +76,29 @@ const MESSAGE_ID_RE = /^<[^<>\s]{1,250}>$/;
 
 /** RFC 6838 restricted-name: one letter or digit, then up to 126 more name characters. */
 const RESTRICTED_NAME = "[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}";
-/** A media type: `type/subtype`, plus optional `;` parameters holding no control character. */
+/**
+ * A media type: `type/subtype`, plus optional `;` parameters holding no control character. The whole
+ * value is handed to nodemailer, which re-encodes the parameters for the part header; nothing here is
+ * written to a header as it stands.
+ */
 const CONTENT_TYPE_RE = new RegExp(
-  `^${RESTRICTED_NAME}/${RESTRICTED_NAME}(?:;[^\\u0000-\\u001f\\u007f]*)?$`,
+  `^${RESTRICTED_NAME}/${RESTRICTED_NAME}(?:;[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]*)?$`,
 );
 
 /** References past this many are dropped from the front: the tail is the part a sender controls. */
 const MAX_REFERENCES = 50;
 
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
-const CONTROL_CHARS_ALL = /[\u0000-\u001f\u007f]/g;
-/** A subject may carry CR and LF (they become one space); every other C0 control and DEL is refused. */
-const SUBJECT_CONTROL_CHARS = /[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/;
-const CRLF_RUN = /[\r\n]+/g;
+/** C0 controls, DEL, C1 controls and the Unicode line and paragraph separators. */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f\u0080-\u009f\u2028\u2029]/;
+const CONTROL_CHARS_ALL = /[\u0000-\u001f\u007f\u0080-\u009f\u2028\u2029]/g;
+/**
+ * A subject may carry CR, LF and TAB (they become one space); every other C0 control and DEL is
+ * refused. C1 controls and U+2028/U+2029 are stripped instead — see SUBJECT_STRIPPED_CHARS.
+ */
+const SUBJECT_CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const SUBJECT_STRIPPED_CHARS = /[\u0080-\u009f\u2028\u2029]/g;
+/** A run of the whitespace a header line cannot hold: it becomes one space. */
+const SUBJECT_WHITESPACE_RUN = /[\r\n\t]+/g;
 const DEFAULT_ATTACHMENT_TYPE = "application/octet-stream";
 
 function fail(detail) {
@@ -171,13 +186,15 @@ function idList(value, detail, keep) {
 }
 
 /**
- * A subject's CR/LF runs become one space, exactly as `canonicalSnapshot` writes it. A subject is not
- * a place to repair either: any other control character (NUL first among them) refuses the message.
+ * A subject's CR/LF runs become one space, exactly as `canonicalSnapshot` writes it, and a TAB becomes
+ * one too rather than reaching the header as it stands. A C1 control or a Unicode line separator is
+ * dropped instead. A subject is not a place to repair beyond that: any C0 control left (NUL first
+ * among them) refuses the message.
  */
 function normaliseSubject(value) {
   if (value == null) return "";
   if (typeof value !== "string" || SUBJECT_CONTROL_CHARS.test(value)) fail("subject");
-  return value.replace(CRLF_RUN, " ").trim();
+  return value.replace(SUBJECT_STRIPPED_CHARS, "").replace(SUBJECT_WHITESPACE_RUN, " ").trim();
 }
 
 function bodyPart(value, detail) {

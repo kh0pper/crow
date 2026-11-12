@@ -14,8 +14,10 @@
  * models the servers that leave UIDNEXT out of a SELECT and answer it only in a STATUS. EXAMINE
  * opens a mailbox read-only, so a flag change inside it is refused; mailbox names go out as
  * escaped IMAP quoted strings; a BODY fetch item that is not a section fetch (BODYSTRUCTURE and
- * friends) is left out of the answer; and IDLE ends only on DONE, any other line while idling
- * failing the IDLE tag instead of being run as a command.
+ * friends) is left out of the answer; a section fetch with a partial specifier (`BODY[]<0.N>`, the
+ * form imapflow sends when a caller caps the bytes it wants) answers with at most the requested N
+ * bytes under the `<0>` origin the client places them by; and IDLE ends only on DONE, any other line
+ * while idling failing the IDLE tag instead of being run as a command.
  *
  * The SMTP server speaks plain TCP on 127.0.0.1 port 0 as well, with no STARTTLS and no AUTH
  * required: greeting, EHLO with the AUTH mechanism list, AUTH PLAIN/LOGIN/XOAUTH2, MAIL FROM,
@@ -302,8 +304,11 @@ function headerContains(fields, name, needle) {
  */
 const HEADER_SEARCH_FIELD = { FROM: "from", TO: "to", CC: "cc", SUBJECT: "subject" };
 
-/** `BODY[]`, `BODY.PEEK[]`, `BODY[HEADER]`, with an optional partial range after the brackets. */
-const BODY_SECTION_RE = /^BODY(?:\.PEEK)?\[([^\]]*)\](?:<\d+(?:\.\d+)?>)?$/;
+/**
+ * `BODY[]`, `BODY.PEEK[]`, `BODY[HEADER]`, with an optional `<origin.length>` partial range after the
+ * brackets: the origin is the first byte the client wants, the length how many bytes it will take.
+ */
+const BODY_SECTION_RE = /^BODY(?:\.PEEK)?\[([^\]]*)\](?:<(\d+)(?:\.(\d+))?>)?$/;
 
 /**
  * Starts the fake IMAP server. Resolves once it is listening, with the bound port.
@@ -908,7 +913,16 @@ export async function createFakeImapServer(options = {}) {
         if (section === "") content = message.raw;
         else if (section === "HEADER") content = headerBlock(message.raw);
         else content = Buffer.alloc(0);
-        parts.push({ header: `BODY[${section}] {${content.length}}${CRLF}`, data: content });
+        // A partial specifier caps the answer, and the answer says where it starts: the client reads
+        // the origin out of `<0>` to place the bytes, so echoing it is what makes the range real.
+        const start = match[2] === undefined ? 0 : Number(match[2]);
+        const length = match[3] === undefined ? null : Number(match[3]);
+        let origin = "";
+        if (match[2] !== undefined) {
+          origin = `<${start}>`;
+          content = content.subarray(start, length === null ? undefined : start + length);
+        }
+        parts.push({ header: `BODY[${section}]${origin} {${content.length}}${CRLF}`, data: content });
       }
     }
     // imapflow keys a fetch row on the UID, so every answer carries one.

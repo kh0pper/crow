@@ -12,8 +12,11 @@ import {
   createFakeImapServer, createFakeSmtpServer, makeRaw, FAKE_USER, FAKE_PASSWORD,
 } from "./fixtures/fake-mail-server.mjs";
 import { runAdapterContract } from "./fixtures/mail-adapter-contract.mjs";
-import { createImapSmtpAdapter, messageIdFor } from "../servers/gateway/mail/adapter/imap-smtp.js";
+import {
+  createImapSmtpAdapter, messageIdFor, withSendDeadline,
+} from "../servers/gateway/mail/adapter/imap-smtp.js";
 import { MAIL_ERROR_TEXT, MailError } from "../servers/gateway/mail/errors.js";
+import { KeychainKeyMissingError } from "../servers/gateway/keychain/store.js";
 
 const ACCOUNT_ID = "ma-0123456789abcdef";
 const WRONG_PASSWORD = "not-the-app-password";
@@ -61,6 +64,10 @@ function accountFor(endpoint, overrides = {}) {
 const passwordCredentials = (password) => ({ getSecrets: async () => ({ MAIL_PASSWORD: password }) });
 
 const FAST = { connectMs: 4000, greetingMs: 4000, socketMs: 4000, commandMs: 4001 };
+
+/** The largest delay `setTimeout` takes before it overflows and fires at once, and one past it. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const OVER_CEILING_MS = MAX_TIMEOUT_MS + 1;
 
 function adapterFor(endpoint, overrides = {}) {
   return createImapSmtpAdapter({
@@ -223,6 +230,14 @@ async function startLiteralServer(declaredBytes) {
   };
 }
 
+/** A raw message padded with body bytes to exactly `size` octets, so a byte cap is a byte boundary. */
+function rawOfSize(size, subject) {
+  const base = makeRaw({ subject, body: "" });
+  const raw = `${base}${"x".repeat(size - Buffer.byteLength(base))}`;
+  assert.equal(Buffer.byteLength(raw), size);
+  return raw;
+}
+
 function captureConsole() {
   const lines = [];
   const methods = ["log", "info", "warn", "error", "debug", "trace"];
@@ -346,6 +361,26 @@ test("a refused connection is NETWORK, with the fixed sentence", async () => {
     assert.equal(err.message, MAIL_ERROR_TEXT.NETWORK);
   } finally {
     await adapter.close();
+  }
+});
+
+test("a keychain key that is missing on this machine reaches connect unchanged", async () => {
+  const fake = await startFake();
+  const missing = new KeychainKeyMissingError();
+  const adapter = createImapSmtpAdapter({
+    account: accountFor(fake),
+    credentials: { getSecrets: async () => { throw missing; } },
+    timeouts: FAST,
+  });
+  try {
+    const err = await rejectionOf(adapter.connect());
+    assert.equal(err, missing, "the key's fault travels as the same error, not as a mail one");
+    assert.equal(err.code, "KEYCHAIN_KEY_MISSING");
+    assert.equal(err instanceof MailError, false, "a key that is not here is not a bad password");
+    assert.equal(fake.connectionCount(), 0, "no socket is opened for a sign-in that cannot happen");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
   }
 });
 
@@ -483,6 +518,65 @@ test("a silent greeting rejects TIMEOUT within greetingMs", async () => {
   }
 });
 
+/* ----------------------------------------------------------------- the timeout ceiling */
+
+test("a timeout above the 32-bit ceiling is clamped instead of firing at once", async () => {
+  const fake = await startFake();
+  fake.deliver("INBOX", makeRaw({ subject: "one" }));
+  const built = [];
+  const adapter = createImapSmtpAdapter({
+    account: accountFor(fake),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts: {
+      connectMs: OVER_CEILING_MS,
+      greetingMs: OVER_CEILING_MS * 500,
+      socketMs: OVER_CEILING_MS,
+      commandMs: OVER_CEILING_MS,
+    },
+    clientFactory: (options) => {
+      built.push(options);
+      return new ImapFlow(options);
+    },
+  });
+  try {
+    await adapter.connect();
+    assert.equal(built.length, 1);
+    assert.equal(built[0].connectionTimeout, MAX_TIMEOUT_MS, "a connect budget is capped");
+    assert.equal(built[0].greetingTimeout, MAX_TIMEOUT_MS, "a greeting budget is capped");
+    assert.equal(built[0].socketTimeout, MAX_TIMEOUT_MS, "a socket budget is capped");
+    const listing = await adapter.list("INBOX");
+    assert.equal(listing.items.length, 1, "a capped command deadline still leaves the command its time");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+/* --------------------------------------------------------- the send deadline's own rule */
+
+test("a step whose deadline has already passed is never begun", async () => {
+  let started = 0;
+  const already = await rejectionOf(withSendDeadline(AbortSignal.abort(), () => {
+    started += 1;
+    return "ran";
+  }));
+  assert.ok(already instanceof MailError, `expected a MailError, got ${already && already.name}`);
+  assert.equal(already.code, "TIMEOUT");
+  assert.equal(already.detail, "send_deadline");
+  assert.equal(started, 0, "the work the deadline covers is not started without a deadline left");
+
+  const controller = new AbortController();
+  const running = withSendDeadline(controller.signal, () => new Promise((resolve) => {
+    setTimeout(() => resolve("ran"), 30);
+  }));
+  controller.abort();
+  const aborted = await rejectionOf(running);
+  assert.ok(aborted instanceof MailError, `expected a MailError, got ${aborted && aborted.name}`);
+  assert.equal(aborted.code, "TIMEOUT", "a deadline that passes mid-step still ends it");
+
+  assert.equal(await withSendDeadline(new AbortController().signal, () => "ran"), "ran");
+});
+
 /* ----------------------------------------------------------------- the connection budget */
 
 test("one read connection plus one per watched folder, and a third folder is refused", async () => {
@@ -527,6 +621,72 @@ test("one read connection plus one per watched folder, and a third folder is ref
 });
 
 /* --------------------------------------------------------------------- oversized messages */
+
+test("get keeps a message at the raw cap and reports one byte past it as oversized", async () => {
+  const CAP = 500;
+  const fake = await startFake();
+  const atCapRaw = rawOfSize(CAP, "exactly at the cap");
+  const atCap = fake.deliver("INBOX", atCapRaw);
+  const pastCap = fake.deliver("INBOX", rawOfSize(CAP + 1, "one byte past the cap"));
+  const underReported = fake.deliver("INBOX", rawOfSize(CAP * 4, "under-reported size"));
+  const bodyFetches = [];
+  const bodySizes = new Map();
+  const adapter = adapterFor(fake, {
+    maxRawBytes: CAP,
+    clientFactory: (options) => {
+      const client = new ImapFlow(options);
+      const fetch = client.fetch.bind(client);
+      client.fetch = async function* (range, query, opts) {
+        if (query && query.source) bodyFetches.push(String(range));
+        for await (const message of fetch(range, query, opts)) {
+          if (query && query.source && Buffer.isBuffer(message.source)) {
+            bodySizes.set(message.uid, message.source.length);
+          }
+          // The metadata answer names a size below the real one for one message only.
+          if (query && query.size === true && !query.source && message.uid === underReported) {
+            yield { ...message, size: 12 };
+          } else {
+            yield message;
+          }
+        }
+      };
+      return client;
+    },
+  });
+  try {
+    await adapter.connect();
+    const messages = await adapter.get("INBOX", [atCap, pastCap, underReported]);
+    assert.deepEqual(
+      messages.map((message) => message.uid),
+      [atCap, pastCap, underReported],
+      "every uid is reported",
+    );
+
+    const kept = messages.find((message) => message.uid === atCap);
+    assert.equal(kept.raw.length, CAP, "a message exactly at the cap keeps every byte");
+    assert.equal(kept.raw.toString("utf8"), atCapRaw, "and the bytes are the message");
+    assert.equal(bodySizes.get(atCap), CAP, "the body fetch asked for a byte past the cap and got the whole message");
+
+    const admitted = messages.find((message) => message.uid === pastCap);
+    assert.equal(admitted.raw.length, 0, "one byte past the cap is oversized, with no bytes kept");
+    assert.equal(typeof admitted.internalDate, "number", "its metadata still comes through");
+    assert.ok(
+      bodyFetches.every((range) => !rangeHas(range, pastCap)),
+      "no body was asked for a message the server reported above the cap",
+    );
+
+    const under = messages.find((message) => message.uid === underReported);
+    assert.equal(under.raw.length, 0, "a body that arrives past the cap is dropped, not kept");
+    assert.equal(bodySizes.get(underReported), CAP + 1, "the server stopped at the byte past the cap");
+    assert.ok(
+      bodyFetches.some((range) => rangeHas(range, underReported)),
+      "the under-reported body was asked for, so the drop happened on the bytes that arrived",
+    );
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
 
 test("get reports an oversized message with its metadata and issues no body fetch for it", async () => {
   const fake = await startFake();

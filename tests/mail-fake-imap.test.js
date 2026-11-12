@@ -691,6 +691,24 @@ test("HEADER matches the named header and its value", async () => {
 
 /* ----------------------------------------------------------------------------- FETCH */
 
+test("a partial section fetch answers with the requested bytes under the <0> origin", async () => {
+  const fake = await startFake();
+  const raw = makeRaw({ subject: "Partial me", body: "0123456789" });
+  const bytes = Buffer.from(raw, "utf8");
+  fake.deliver("INBOX", raw);
+  const client = await connectFake(fake);
+  await client.mailboxOpen("INBOX");
+
+  const capped = await client.fetchOne("1", { source: { maxLength: 40 } }, { uid: true });
+  assert.equal(capped.source.length, 40, "the answer stops at the requested length");
+  assert.deepEqual(capped.source, bytes.subarray(0, 40), "and it is the first bytes of the message");
+
+  const whole = await client.fetchOne("1", { source: true }, { uid: true });
+  assert.equal(whole.source.length, bytes.length, "a fetch with no range is still the whole message");
+  assert.deepEqual(whole.source, bytes);
+  await client.logout();
+});
+
 test("a BODYSTRUCTURE fetch is not answered as BODY[]", async () => {
   const fake = await startFake();
   fake.deliver("INBOX", makeRaw({ subject: "Structure me", body: "Body text." }));

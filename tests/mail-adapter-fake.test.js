@@ -179,6 +179,43 @@ test("validateOutgoing refuses an edge newline on every address field", () => {
   assert.equal(padded.to[0].address, "sam@example.com");
 });
 
+test("validateOutgoing turns a subject's TAB into a space and strips C1 controls and line separators", () => {
+  const spaced = validateOutgoing(outgoing({ subject: "Hi\tthere" }));
+  assert.equal(spaced.subject, "Hi there", "a TAB is whitespace a header can carry, not a fault");
+  assert.equal(validateOutgoing(outgoing({ subject: "a\tb\r\nc" })).subject, "a b c",
+    "a run of CR, LF and TAB is one space");
+
+  // C1 controls and the Unicode line and paragraph separators are text, not delimiters: they go.
+  assert.equal(validateOutgoing(outgoing({ subject: "Hi\u0085there\u2028now" })).subject, "Hitherenow");
+  assert.equal(validateOutgoing(outgoing({ subject: "Hi\u009fthere" })).subject, "Hithere");
+  const out = validateOutgoing(outgoing({
+    from: { name: "Al\u0085ex\u2029", address: "alex@example.com" },
+    to: [{ name: "Sa\u009fm", address: "sam@example.com" }],
+    attachments: [{ filename: "no\u2028tes.txt", content: Buffer.from("x") }],
+  }));
+  assert.equal(out.from.name, "Alex");
+  assert.equal(out.to[0].name, "Sam");
+  assert.equal(out.attachments[0].filename, "notes.txt");
+
+  // An address or a message id carrying one is refused instead, like any other control character.
+  for (const address of ["sam@exa\u0085mple.com", "sam@example.com\u2028", "\u2029sam@example.com"]) {
+    const shown = JSON.stringify(address);
+    assert.throws(() => validateOutgoing(outgoing({ to: [{ address }] })), badInput("to"), shown);
+    assert.throws(() => validateOutgoing(outgoing({ from: { address } })), badInput("from"), shown);
+  }
+  for (const id of ["<a\u0085b@example.com>", "<a\u2028b@example.com>"]) {
+    const shown = JSON.stringify(id);
+    assert.throws(() => validateOutgoing(outgoing({ inReplyTo: id })), badInput("inReplyTo"), shown);
+    assert.throws(() => validateOutgoing(outgoing({ references: [id] })), badInput("references"), shown);
+  }
+  // A media type's parameters are refused a control character too, the same as its tokens.
+  for (const contentType of ["text/plain; charset=utf-8\u0085", "text/plain\u2028"]) {
+    assert.throws(() => validateOutgoing(outgoing({
+      attachments: [{ filename: "note.txt", contentType, content: Buffer.from("x") }],
+    })), badInput("attachments"), JSON.stringify(contentType));
+  }
+});
+
 test("validateOutgoing refuses a control character in a subject or a message id and strips one from display text", () => {
   // A subject keeps its CR/LF rule (one space) but nothing else: any other control is refused.
   for (const subject of ["Hi\u0000there", "Hi\u0007", "Hi\u001b", "Hi\u007f"]) {
@@ -381,6 +418,20 @@ test("moveIn keeps an old date at a new uid, and expunge takes a uid out", async
   fake.deliver("INBOX", rawMessage({ subject: "deleted" }), { flags: ["\\Deleted"] });
   assert.equal(fake.expunge("INBOX"), 1, "no uid means every \\Deleted message");
   assert.equal((await fake.list("INBOX")).items.length, 1);
+});
+
+test("a throwing onError handler does not stop the drop or the other watchers", async () => {
+  const fake = createFakeMailAdapter();
+  const seen = [];
+  await fake.watch(["INBOX"], { onError: () => { throw new Error("a handler bug"); } });
+  await fake.watch(["INBOX", "Sent"], { onError: (err) => seen.push(err) });
+  let dropped;
+  assert.doesNotThrow(() => { dropped = fake.dropWatch(); });
+  assert.equal(dropped, 2, "every live watcher is ended, including the one whose handler threw");
+  assert.equal(seen.length, 1, "the watcher after the throwing one still hears the lost connection");
+  assert.ok(seen[0] instanceof MailError);
+  assert.equal(seen[0].code, "NETWORK");
+  assert.equal(fake.dropWatch(), 0, "a drop after every watcher has ended reports nothing");
 });
 
 test("a throwing onChange handler does not fail the delivery or the other watchers", async () => {
