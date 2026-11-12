@@ -350,6 +350,11 @@ function resolveReviewedScript(scriptDir, relScript) {
  * @param {string} o.destDir              the installed bundle dir (cwd, CROW_BUNDLE_DIR, .env)
  * @param {string|null} [o.installId]     installed.json's installedAt for this install
  * @param {string|null} [o.crowHome]
+ * @param {boolean} [o.holdsLock]         the CALLER already holds this bundle's first-admin
+ *                                        lock (the boot catch-up does, so it can skip a
+ *                                        bundle whose run is already in flight): the run then
+ *                                        neither takes nor releases it. Never set this from
+ *                                        the install path or the card's route.
  * @param {object} [o.deps]               seams: runScript, openDb, hasSaved, ensureWriteKey,
  *                                        newSecret, save, writeEnv, writeMarker, now, warn,
  *                                        applyMcpEnv, requestReload
@@ -361,6 +366,7 @@ export async function runFirstAdminSetup({
   destDir = null,
   installId = null,
   crowHome = process.env.CROW_HOME || null,
+  holdsLock = false,
   deps = {},
 } = {}) {
   const d = { ...defaultDeps(), ...(deps || {}) };
@@ -375,7 +381,7 @@ export async function runFirstAdminSetup({
   }
   const abs = script.path;
 
-  if (!tryBeginFirstAdminSetup(bundleId)) return { result: "busy", log: [] };
+  if (!holdsLock && !tryBeginFirstAdminSetup(bundleId)) return { result: "busy", log: [] };
   try {
     const name = (manifest && typeof manifest.name === "string" && manifest.name) || bundleId || "the app";
     const declaredEnv = new Set(
@@ -534,7 +540,7 @@ export async function runFirstAdminSetup({
       try { db?.close?.(); } catch { /* already closed */ }
     }
   } finally {
-    endFirstAdminSetup(bundleId);
+    if (!holdsLock) endFirstAdminSetup(bundleId);
   }
 }
 

@@ -802,23 +802,42 @@ export async function runPostListenSetup(server, app, deps) {
     })();
   }
 
-  // Existing installs get the API token their app mints for Crow (`firstAdmin.setup.token`,
-  // bundle-api-token.js): once per boot, after the add-ons have settled, for every bundle
-  // whose own admin setup succeeded for THIS install and whose token env is still empty.
-  // It runs behind the same settle gate as the walls above, takes the per-bundle
-  // first-admin lock, and reconnects the add-on itself when it succeeds. Fire-and-forget:
-  // it never delays listen and never throws. Skipped on a --no-auth gateway, which is
-  // nobody's dashboard.
+  // Existing installs get their app's own admin login created by Crow, and then the API
+  // token that app mints for Crow. Once per boot, after the add-ons have settled, in ONE
+  // chain and in this order (a token needs the admin to exist first):
+  //   1. bundle-first-admin-catchup.js: every installed bundle whose app can be given its
+  //      admin by a setup script Crow may run, and that has no login/keychain entry yet —
+  //      the install path ran the step only from the version that shipped it, so an install
+  //      made before it (or one whose app was not up yet) never got one.
+  //   2. bundle-api-token.js: every bundle whose own admin setup succeeded for THIS install
+  //      and whose token env is still empty.
+  // Both run behind the same settle gate as the walls above, take the per-bundle first-admin
+  // lock, and reconnect the add-on themselves when they write its MCP entry. Fire-and-forget:
+  // neither delays listen nor throws, and each is caught on its own so a failure in the first
+  // never costs the second. Skipped on a --no-auth gateway, which is nobody's dashboard.
   if (!noAuth) {
     (async () => {
-      try {
+      const settled = async () => {
         const proxy = await import("../proxy.js");
         await Promise.race([
           proxy.addonsSettled(),
           new Promise((r) => setTimeout(r, 10 * 60 * 1000).unref()),
         ]);
-        // The catch-up's own real seams (bundle-api-token.js): one copy of the wiring, so
-        // boot and the module cannot drift apart.
+      };
+      try {
+        await settled();
+        // The catch-up's own real seams: one copy of the wiring, so boot and the module
+        // cannot drift apart.
+        const { runFirstAdminCatchUp, firstAdminCatchUpDeps } = await import("../bundle-first-admin-catchup.js");
+        const admin = await runFirstAdminCatchUp({ deps: await firstAdminCatchUpDeps() });
+        // Ids and result words only — never anything the run handled.
+        if (admin.ran.length) {
+          console.log(`[first-admin] catch-up: ${admin.ran.map((r) => `${r.id} ${r.result}`).join(", ")}`);
+        }
+      } catch (err) {
+        console.warn("[first-admin] catch-up skipped:", err?.message || err);
+      }
+      try {
         const { runApiTokenCatchUp, apiTokenCatchUpDeps } = await import("../bundle-api-token.js");
         const summary = await runApiTokenCatchUp({ deps: await apiTokenCatchUpDeps() });
         if (summary.ran.length) {

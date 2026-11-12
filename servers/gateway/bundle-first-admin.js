@@ -21,7 +21,9 @@
  *   none           no login of its own. No notice.
  *
  * A web UI bundle that says nothing (a community-store manifest written before
- * the field existed) falls back to `finish-setup` — see firstAdminOf.
+ * the field existed) falls back to `undeclared` — see firstAdminOf. It gets a
+ * card asking the operator to check whether the app wants an account, and NO
+ * bell: Crow has no evidence that anything is claimable.
  *
  * This module owns the operator-facing pieces of that:
  *   - the card on Extensions (pendingFirstAdminNotices(). `done` is the
@@ -62,9 +64,11 @@ import {
 // shared with the Extensions renderer: dashboard/shared/first-admin.js.
 export {
   FIRST_ADMIN_MODES,
+  FIRST_ADMIN_INTERNAL_MODES,
   OPERATOR_FIRST_ADMIN_MODES,
   FIRST_ADMIN_TITLE_KEY,
   FIRST_ADMIN_FINISH_BODY_KEY,
+  FIRST_ADMIN_UNDECLARED_BODY_KEY,
   FIRST_ADMIN_DEFAULT_LOGIN_BODY_KEY,
   FIRST_ADMIN_SETUP_BODY_KEY,
   FIRST_ADMIN_KEPT_BODY_KEY,
@@ -343,8 +347,9 @@ export async function clearFirstAdminNotice(db, bundleId, { nowMs = Date.now(), 
  * step did not fail (afterResult): a script that failed, found the app not answering,
  * or found an admin already in place is exactly what the operator must hear about, and
  * so is an app whose registration Crow could not close afterwards — otherwise the door
- * stays open unnoticed. A web UI bundle that declares nothing falls back to
- * `finish-setup` (firstAdminOf), so an undeclared third-party install still rings.
+ * stays open unnoticed. An `undeclared` web UI (firstAdminOf's fallback) gets a card but
+ * NO bell: Crow cannot tell whether that app has a login to claim, and a false alarm is
+ * exactly what the softer card exists to avoid.
  *
  * @param {object} o
  * @param {object} o.db                   libsql-shaped client

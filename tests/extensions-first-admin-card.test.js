@@ -160,14 +160,32 @@ test("the boot code records a proxy mount failure, and the Extensions page reads
   assert.equal(proxy.getProxyMountFailure(), null);
 });
 
-test("a third-party bundle that declares nothing still gets the card", () => {
+test("a third-party bundle that declares nothing gets the softer 'undeclared' card", () => {
   // S4: a community-store manifest written before `firstAdmin` existed cannot
-  // silence the warning by saying nothing.
+  // silence the card by saying nothing — but Crow does not claim there is an account to
+  // steal either, because it cannot tell whether the app has a login of its own.
   const shop = { id: "shop", name: "Shop App", webUI: { port: 9000, path: "/", label: "Shop App" } };
   const { document } = boot(render({ ids: ["shop"], live: ["shop"], manifests: { shop } }));
   const card = document.querySelector('.ext-firstadmin[data-addon-id="shop"]');
   assert.ok(card, "the card is rendered for an undeclared web UI");
   assert.match(card.textContent, /Finish Shop App's setup now/);
+  assert.match(
+    card.textContent,
+    /Crow can't tell whether Shop App has its own login\. If it asks you to create an account when you open it, create it now and save it here\./,
+  );
+  assert.doesNotMatch(card.textContent, /can claim Shop App's admin account/, "no false alarm");
+  // Everything a finish-setup card offers, minus the automatic run: open, save, Done.
+  assert.ok(card.querySelector(".ext-firstadmin-open"), "the Open link stays");
+  assert.ok(card.querySelector(".ext-firstadmin-save"), "'Save the login you made' stays");
+  assert.ok(card.querySelector(".ext-firstadmin-done"), "Done stays");
+  assert.equal(card.querySelector(".ext-firstadmin-auto"), null, "Crow has no script to run for it");
+});
+
+test("the undeclared card is translated (es) as well", () => {
+  const shop = { id: "shop", name: "Shop App", webUI: { port: 9000, path: "/", label: "Shop App" } };
+  const html = render({ ids: ["shop"], live: ["shop"], manifests: { shop }, lang: "es" });
+  assert.ok(html.includes("Crow no puede saber si Shop App tiene su propio inicio de sesión."));
+  assert.ok(!html.includes("puede reclamar la cuenta de administrador"), "no false alarm in Spanish either");
 });
 
 test("Done clears the card and records it for this bundle", async () => {

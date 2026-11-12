@@ -196,6 +196,9 @@ export const translations = {
   "bundles.firstAdmin.title": { en: "Finish {name}'s setup now", es: "Termina de configurar {name} ahora" },
   "bundles.firstAdmin.finishSetupBody": { en: "Until you do, anyone or anything on this machine can claim {name}'s admin account.", es: "Hasta que lo hagas, cualquier persona o cosa en esta máquina puede reclamar la cuenta de administrador de {name}." },
   "bundles.firstAdmin.defaultLoginBody": { en: "{name} starts with a known login (user {user}). Change the password now.", es: "{name} empieza con un inicio de sesión conocido (usuario {user}). Cambia la contraseña ahora." },
+  // A web UI whose manifest does not say how its admin comes to exist: Crow cannot tell
+  // whether the app has its own login, so the card asks instead of warning.
+  "bundles.firstAdmin.undeclaredBody": { en: "Crow can't tell whether {name} has its own login. If it asks you to create an account when you open it, create it now and save it here.", es: "Crow no puede saber si {name} tiene su propio inicio de sesión. Si te pide crear una cuenta al abrirlo, créala ahora y guárdala aquí." },
   // A `crow` / `via: "setup"` app: Crow can create the admin itself and keep it.
   "bundles.firstAdmin.setupBody": { en: "Crow can create {name}'s admin login for you and save it in Settings → Passwords.", es: "Crow puede crear el inicio de sesión de administrador de {name} y guardarlo en Ajustes → Contraseñas." },
   "bundles.firstAdmin.keptBody": { en: "{name} already has an admin. Save the login you use so Crow can keep it for you.", es: "{name} ya tiene un administrador. Guarda el inicio de sesión que usas para que Crow lo conserve por ti." },
