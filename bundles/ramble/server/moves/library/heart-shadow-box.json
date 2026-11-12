@@ -1,0 +1,168 @@
+{
+  "id": "heart-shadow-box",
+  "kind": "pose",
+  "title": "Shadow-boxing arms",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "indoor-heart",
+    "low-impact",
+    "standing",
+    "arms"
+  ],
+  "areas": [
+    "heart"
+  ],
+  "steps": [
+    {
+      "text": "Stand with your feet shoulder-width apart, one foot a little ahead, and your knees soft.",
+      "cue": "Feet apart, one a little ahead. Knees soft.",
+      "at": 0
+    },
+    {
+      "text": "Make loose fists and hold them in front of your chin with your elbows down.",
+      "cue": "Loose fists by your chin, elbows down.",
+      "at": 0
+    },
+    {
+      "text": "Reach one fist forward at shoulder height, then bring it back. Do not snap the elbow straight.",
+      "cue": "Reach one fist forward. Elbow stays soft.",
+      "at": 1
+    },
+    {
+      "text": "Change arms each time, at a steady pace.",
+      "cue": "Change arms each time. Steady pace.",
+      "at": 1
+    }
+  ],
+  "works": [
+    "Shoulders",
+    "Arms",
+    "Heart and lungs"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Snapping the elbows straight.",
+    "Lifting the shoulders up toward the ears."
+  ],
+  "regression": "Reach more slowly and not as far, or do it sitting on a sturdy chair.",
+  "stopIf": "Stop if you feel dizzy, sick, very short of breath, or any pain in your chest.",
+  "skipIf": [
+    "shoulder"
+  ],
+  "easier": null,
+  "harder": null,
+  "pose": {
+    "neck": 0,
+    "spine": 0,
+    "shoulderL": 85,
+    "elbowL": 10,
+    "wristL": 0,
+    "shoulderR": 35,
+    "elbowR": 135,
+    "wristR": 0,
+    "hipL": 5,
+    "kneeL": 10,
+    "ankleL": 5,
+    "hipR": 5,
+    "kneeR": 10,
+    "ankleR": 5,
+    "rootAngle": 0,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 35,
+      "elbowL": 135,
+      "wristL": 0,
+      "shoulderR": 35,
+      "elbowR": 135,
+      "wristR": 0,
+      "hipL": 5,
+      "kneeL": 10,
+      "ankleL": 5,
+      "hipR": 5,
+      "kneeR": 10,
+      "ankleR": 5,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 85,
+      "elbowL": 10,
+      "wristL": 0,
+      "shoulderR": 35,
+      "elbowR": 135,
+      "wristR": 0,
+      "hipL": 5,
+      "kneeL": 10,
+      "ankleL": 5,
+      "hipR": 5,
+      "kneeR": 10,
+      "ankleR": 5,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "shoulders",
+        "triceps",
+        "chest",
+        "serratus"
+      ],
+      "lengthening": [],
+      "main": "shoulders",
+      "bones": [
+        "humerus",
+        "scapula",
+        "clavicle",
+        "radius",
+        "ulna"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "forward",
+          "label": "Reach"
+        }
+      ],
+      "why": "Reaching the arms forward in turn keeps the shoulders and arms moving, which raises your breathing."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Cara (Sport Inclusion Ireland), supported by Sport Ireland: 10 minute Home Exercise Circuit, Boxercise Circuit 1",
+      "url": "https://www.smh.ie/assets/files/pdf/cara_boxercise_circuit_1.pdf",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "Harvard Health Publishing: Punch up your exercise routine with fitness boxing",
+      "url": "https://www.harvardhealth.org/exercise-and-fitness/punch-up-your-exercise-routine-with-fitness-boxing",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

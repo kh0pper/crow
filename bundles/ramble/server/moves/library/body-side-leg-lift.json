@@ -1,0 +1,144 @@
+{
+  "id": "body-side-leg-lift",
+  "kind": "exercise",
+  "title": "Side leg lift at the wall",
+  "minutes": 3,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "wall"
+  ],
+  "tags": [
+    "bodyweight",
+    "lower-body",
+    "hips",
+    "strength"
+  ],
+  "areas": [
+    "lower"
+  ],
+  "sets": 2,
+  "reps": 6,
+  "tempoSeconds": 5,
+  "perSide": true,
+  "steps": [
+    {
+      "text": "Stand side-on to a wall with one hand resting on it.",
+      "cue": "Side-on to the wall, one hand on it.",
+      "at": 0
+    },
+    {
+      "text": "Keep your toes facing forward and lift your outside leg out to the side.",
+      "cue": "Toes forward. Lift the leg to the side.",
+      "at": 0
+    },
+    {
+      "text": "Stay upright. Lift only as far as you can without leaning.",
+      "cue": "Stay upright. No leaning.",
+      "at": 0
+    },
+    {
+      "text": "Lower slowly. Finish your reps, then turn round and change legs.",
+      "cue": "Lower slowly.",
+      "say": "Lower slowly.",
+      "at": 0
+    }
+  ],
+  "works": [
+    "Side of the hips",
+    "Glutes"
+  ],
+  "stretches": [
+    "Inner thigh"
+  ],
+  "mistakes": [
+    "Tipping the body toward the wall.",
+    "Turning the toes out to lift higher."
+  ],
+  "regression": "Slide your foot out along the floor instead of lifting it.",
+  "stopIf": "Stop if you feel pain in your hip or lower back.",
+  "skipIf": [
+    "hip",
+    "balance"
+  ],
+  "easier": null,
+  "harder": null,
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 60,
+      "elbowL": 30,
+      "wristL": 0,
+      "shoulderR": 60,
+      "elbowR": 30,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 60,
+      "elbowL": 30,
+      "wristL": 0,
+      "shoulderR": 60,
+      "elbowR": 30,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "still": true,
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "side-hip"
+      ],
+      "lengthening": [
+        "inner-thigh"
+      ],
+      "main": "side-hip",
+      "bones": [
+        "hip-bone",
+        "femur"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "feet",
+          "direction": "out",
+          "label": "Lift"
+        }
+      ],
+      "why": "The side of the hip lifts the leg out, and on the standing side it keeps the pelvis level."
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: Strength exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}
