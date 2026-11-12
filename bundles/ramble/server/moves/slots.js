@@ -170,12 +170,31 @@ export async function dayCards(db, {
   if (prefs.on === false) return { day, need: 0, nowSlot: null, slots: [], off: true };
 
   // The day's card count. A stored row WINS over the prefs (a peer that asked
-  // for more cards widens this day too, and the two instances agree), and the
-  // slots beyond the user's own choice come from the rest of SLOTS in order.
+  // for more cards widens this day too, and the two instances agree).
   const existing = needOf(await rowDelta(db, MOVE_NEED_KIND, day));
   const base = enabledSlots(prefs);
   const order = [...base, ...SLOTS.filter((slot) => !base.includes(slot))];
-  const slotNames = existing === null ? base : order.slice(0, existing);
+
+  // The day's slots. Before the day has a card count they are the user's own
+  // choice, empty ones included. Once it has one, they are the slots that
+  // already hold a stored pick for TODAY — a slot that was empty when the day
+  // was first drawn is simply not part of it — read in SLOTS order, and widened
+  // up to that count by the next slots of `order`, so a peer that asked for more
+  // cards still gets a full day. A slot row for another day says nothing about
+  // this one.
+  let slotNames = base;
+  if (existing !== null) {
+    slotNames = [];
+    for (const slot of SLOTS) {
+      const row = normalizeSlotRow(await readJson(db, SLOT_KEY_PREFIX + slot));
+      if (row && row.day === day) slotNames.push(slot);
+    }
+    for (const slot of order) {
+      if (slotNames.length >= existing) break;
+      if (!slotNames.includes(slot)) slotNames.push(slot);
+    }
+    slotNames.sort((a, b) => SLOTS.indexOf(a) - SLOTS.indexOf(b));
+  }
 
   const weekId = weekIdOf(at);
   const plan = weekPlan(weekId, slotNames.length, slotNames);

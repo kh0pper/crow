@@ -11,6 +11,9 @@
  *     second open of the same day writes nothing at all,
  *   - a `moveneed` row a peer wrote wider than the day's own choice widens the
  *     day (the extra slots are real cards), and a narrower one narrows it,
+ *   - once the day has a card count its slots are the ones holding a stored
+ *     pick for that day, so a slot left empty at first open cannot swallow a
+ *     slot that found a card,
  *   - a stored slot row that no longer holds a usable pick (an entry gone from
  *     the library, or one a stated limit now rules out) is re-picked rather
  *     than shown, and a slot with nothing eligible stays empty,
@@ -278,6 +281,37 @@ test("a wider moveneed from a peer draws the extra slots; a narrower one draws f
   assert.equal(narrowed.need, 2);
 });
 
+test("a moveneed a peer wrote before the first open gives the day three cards", async () => {
+  const db = await freshDb();
+  await writePrefs(db, { cards: 1 });
+  await insertOnce(db, MOVE_NEED_KIND, DAY, 3, THURSDAY);
+
+  const result = await dayCards(db, { now: THURSDAY, library: library() });
+  assert.equal(result.need, 3);
+  assert.deepEqual(result.slots.map((item) => item.slot), [...SLOTS]);
+  for (const item of result.slots) {
+    assert.ok(item.entryId, "a card was drawn: " + item.slot);
+    assert.equal(item.empty, false);
+  }
+});
+
+test("a later card-count raise leaves today's slots alone", async () => {
+  const db = await freshDb();
+  const lib = library();
+  await writePrefs(db, { cards: 1 });
+  const first = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.deepEqual(first.slots.map((item) => item.slot), ["midday"]);
+  assert.ok(slotNamed(first, "midday").entryId);
+  assert.equal(first.need, 1);
+
+  await writePrefs(db, { cards: 3 });
+  const raised = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.deepEqual(raised.slots.map((item) => item.slot), ["midday"],
+    "the day keeps the slots it was drawn with");
+  assert.equal(raised.need, 1, "and the count it was drawn with");
+  assert.equal(slotNamed(raised, "midday").entryId, slotNamed(first, "midday").entryId);
+});
+
 /* -------------------------------------------------------------- empty slots */
 
 test("a slot with nothing eligible is empty, and the need counts the picks", async () => {
@@ -309,6 +343,49 @@ test("a slot with nothing eligible is empty, and the need counts the picks", asy
   }
   assert.equal(await rowDelta(nothing, MOVE_NEED_KIND, DAY), null, "nothing to ask for");
   assert.equal(await readSetting(nothing, "moves.today"), null, "and no card to mirror");
+});
+
+test("a day whose slot was empty keeps the slots that hold a pick", async () => {
+  const db = await freshDb();
+  // No heart chunk, so the midday slot of the three-card day has nothing to
+  // offer; the other two fill.
+  const lib = [
+    chunk({ id: "mob-1", areas: ["mobility"] }),
+    chunk({ id: "low-1", areas: ["lower"] }),
+    chunk({ id: "up-1", areas: ["upper"] }),
+  ];
+
+  const first = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.equal(first.slots.length, 3, "the day opens with its three slots");
+  const midday = slotNamed(first, "midday");
+  assert.equal(midday.entryId, null);
+  assert.equal(midday.empty, true);
+  assert.ok(slotNamed(first, "morning").entryId);
+  assert.ok(slotNamed(first, "evening").entryId);
+  assert.equal(first.slots.filter((item) => item.entryId !== null).length, 2);
+  assert.equal(first.need, 2, "the need counts the slots that found a card");
+  assert.equal(await rowDelta(db, MOVE_NEED_KIND, DAY), 2);
+
+  const second = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.equal(second.need, 2);
+  assert.deepEqual(second.slots.map((item) => item.slot), ["morning", "evening"],
+    "the day's slots are the ones holding a pick");
+  for (const item of second.slots) {
+    assert.ok(item.entryId, "the slot keeps a card: " + item.slot);
+    assert.equal(item.empty, false);
+  }
+  assert.equal(slotNamed(second, "morning").entryId, slotNamed(first, "morning").entryId);
+  assert.equal(slotNamed(second, "evening").entryId, slotNamed(first, "evening").entryId);
+
+  // Finishing both cards of the day reaches the need the day asked for.
+  await insertRow(db, "moveslot", `${DAY}:morning`);
+  await insertRow(db, "moveslot", `${DAY}:evening`);
+  const finished = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.equal(finished.need, 2);
+  assert.equal(finished.slots.length, 2);
+  for (const item of finished.slots) {
+    assert.equal(item.done, true, "finished: " + item.slot);
+  }
 });
 
 /* --------------------------------------------------------------- stale rows */
