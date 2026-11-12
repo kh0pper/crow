@@ -11,7 +11,11 @@
  * IMAP4rev2, LIST-EXTENDED, LIST-STATUS, CONDSTORE, BINARY or COMPRESS - so imapflow takes its
  * plainest paths: no RETURN options on LIST, no ENABLE, no MODSEQ fetch items, a `* SEARCH 1 2 3`
  * answer and an LSUB for the subscription state that rev1 does not carry inline. `omitUidNext`
- * models the servers that leave UIDNEXT out of a SELECT and answer it only in a STATUS.
+ * models the servers that leave UIDNEXT out of a SELECT and answer it only in a STATUS. EXAMINE
+ * opens a mailbox read-only, so a flag change inside it is refused; mailbox names go out as
+ * escaped IMAP quoted strings; a BODY fetch item that is not a section fetch (BODYSTRUCTURE and
+ * friends) is left out of the answer; and IDLE ends only on DONE, any other line while idling
+ * failing the IDLE tag instead of being run as a command.
  *
  * The SMTP server speaks plain TCP on 127.0.0.1 port 0 as well, with no STARTTLS and no AUTH
  * required: greeting, EHLO with the AUTH mechanism list, AUTH PLAIN/LOGIN/XOAUTH2, MAIL FROM,
@@ -253,6 +257,54 @@ function flagList(flags) {
   return `(${[...flags].join(" ")})`;
 }
 
+/** An IMAP quoted string: backslash and double quote are the only two characters it escapes. */
+function quoteString(value) {
+  return `"${String(value).replace(/[\\"]/g, (char) => `\\${char}`)}"`;
+}
+
+/**
+ * The header block of a raw message, folded and keyed by lower-cased field name, so a search can
+ * look at one header instead of at the whole message. A repeated field keeps one entry per
+ * occurrence, in order.
+ */
+function headerFields(raw) {
+  const end = raw.indexOf("\r\n\r\n");
+  const block = end < 0 ? raw : raw.subarray(0, end);
+  const fields = new Map();
+  let current = null;
+  for (const line of block.toString("utf8").split("\r\n")) {
+    if (current && (line.startsWith(" ") || line.startsWith("\t"))) {
+      const values = fields.get(current);
+      values[values.length - 1] += ` ${line.trim()}`;
+      continue;
+    }
+    const colon = line.indexOf(":");
+    if (colon <= 0) {
+      current = null;
+      continue;
+    }
+    current = line.slice(0, colon).trim().toLowerCase();
+    if (!fields.has(current)) fields.set(current, []);
+    fields.get(current).push(line.slice(colon + 1).trim());
+  }
+  return fields;
+}
+
+/** True when one of the message's values for `name` contains `needle`, both lower-cased. */
+function headerContains(fields, name, needle) {
+  const values = fields.get(name) || [];
+  return values.some((value) => value.toLowerCase().includes(needle));
+}
+
+/**
+ * The search keys that look at one header: the field name to read for each. FROM/TO/CC/SUBJECT
+ * must not match text that only appears elsewhere in the message.
+ */
+const HEADER_SEARCH_FIELD = { FROM: "from", TO: "to", CC: "cc", SUBJECT: "subject" };
+
+/** `BODY[]`, `BODY.PEEK[]`, `BODY[HEADER]`, with an optional partial range after the brackets. */
+const BODY_SECTION_RE = /^BODY(?:\.PEEK)?\[([^\]]*)\](?:<\d+(?:\.\d+)?>)?$/;
+
 /**
  * Starts the fake IMAP server. Resolves once it is listening, with the bound port.
  *
@@ -295,6 +347,7 @@ export async function createFakeImapServer(options = {}) {
       authed: false,
       user: null,
       selected: null,
+      readOnly: false,
       idleTag: null,
       authTag: null,
       authMechanism: null,
@@ -428,9 +481,14 @@ export async function createFakeImapServer(options = {}) {
       for (const conn of state.connections) conn.socket.destroy();
       state.connections.clear();
       await new Promise((resolve) => {
-        server.close(() => resolve());
-        // A socket the OS has not torn down yet must not keep the test run alive.
-        setTimeout(resolve, 1000).unref();
+        // A socket the OS has not torn down yet must not keep the test run alive: the fallback
+        // timer is unref-ed, and cleared as soon as the server reports itself closed.
+        const timer = setTimeout(resolve, 1000);
+        timer.unref();
+        server.close(() => {
+          clearTimeout(timer);
+          resolve();
+        });
       });
     },
   };
@@ -515,15 +573,14 @@ export async function createFakeImapServer(options = {}) {
       return;
     }
 
-    // DONE ends IDLE; it carries no tag.
+    // DONE ends IDLE and carries no tag (RFC 3501 6.4.2). Any other line while idling is a client
+    // error: the IDLE ends with a tagged BAD for the IDLE tag, and the line is not run as a command.
     if (conn.idleTag) {
-      if (first === "DONE") {
-        const idleTag = conn.idleTag;
-        conn.idleTag = null;
-        write(conn, `${idleTag} OK IDLE terminated`);
-        return;
-      }
+      const idleTag = conn.idleTag;
       conn.idleTag = null;
+      if (first === "DONE") write(conn, `${idleTag} OK IDLE terminated`);
+      else write(conn, `${idleTag} BAD only DONE can end an IDLE`);
+      return;
     }
 
     const tag = firstToken;
@@ -590,7 +647,7 @@ export async function createFakeImapServer(options = {}) {
         for (const box of mailboxes.values()) {
           if (!matchesListPattern(box.path, reference, pattern)) continue;
           const flags = box.specialUse ? `(\\HasNoChildren ${box.specialUse})` : "(\\HasNoChildren)";
-          write(conn, `* ${name} ${flags} "/" "${box.path}"`);
+          write(conn, `* ${name} ${flags} "/" ${quoteString(box.path)}`);
         }
         write(conn, `${tag} OK ${name} completed`);
         return;
@@ -614,7 +671,7 @@ export async function createFakeImapServer(options = {}) {
             items.push(`UNSEEN ${box.messages.filter((message) => !hasFlag(message, "\\Seen")).length}`);
           } else if (item === "RECENT") items.push("RECENT 0");
         }
-        write(conn, `* STATUS "${box.path}" (${items.join(" ")})`);
+        write(conn, `* STATUS ${quoteString(box.path)} (${items.join(" ")})`);
         write(conn, `${tag} OK STATUS completed`);
         return;
       }
@@ -628,6 +685,7 @@ export async function createFakeImapServer(options = {}) {
           return;
         }
         conn.selected = box;
+        conn.readOnly = name === "EXAMINE";
         write(conn, "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)");
         write(conn, `* ${box.messages.length} EXISTS`);
         write(conn, "* 0 RECENT");
@@ -671,6 +729,7 @@ export async function createFakeImapServer(options = {}) {
       case "CLOSE": {
         if (!requireAuth(conn, tag)) return;
         conn.selected = null;
+        conn.readOnly = false;
         write(conn, `${tag} OK CLOSE completed`);
         return;
       }
@@ -678,6 +737,10 @@ export async function createFakeImapServer(options = {}) {
       case "EXPUNGE": {
         if (!conn.selected) {
           write(conn, `${tag} BAD no mailbox selected`);
+          return;
+        }
+        if (conn.readOnly) {
+          write(conn, `${tag} NO [READ-ONLY] mailbox is open read-only`);
           return;
         }
         const box = conn.selected;
@@ -747,6 +810,10 @@ export async function createFakeImapServer(options = {}) {
         const box = conn.selected;
         if (!box) {
           write(conn, `${tag} BAD no mailbox selected`);
+          return;
+        }
+        if (conn.readOnly) {
+          write(conn, `${tag} NO [READ-ONLY] mailbox is open read-only`);
           return;
         }
         const start = isUid ? 3 : 2;
@@ -831,11 +898,15 @@ export async function createFakeImapServer(options = {}) {
       } else if (item === "RFC822.SIZE" || item === "RFC822SIZE") {
         parts.push(`RFC822.SIZE ${message.raw.length}`);
       } else if (item.startsWith("BODY")) {
-        const open = item.indexOf("[");
-        const section = open < 0 ? "" : item.slice(open + 1, item.lastIndexOf("]"));
+        // Only a section fetch (BODY[], BODY.PEEK[], BODY[HEADER]) can be answered from the raw
+        // message. BODYSTRUCTURE and the other BODY items describe the message rather than being
+        // the message, so they are left out of the answer instead of being reported as BODY[].
+        const match = BODY_SECTION_RE.exec(item);
+        if (!match) continue;
+        const section = match[1].toUpperCase();
         let content;
         if (section === "") content = message.raw;
-        else if (section.toUpperCase() === "HEADER") content = headerBlock(message.raw);
+        else if (section === "HEADER") content = headerBlock(message.raw);
         else content = Buffer.alloc(0);
         parts.push({ header: `BODY[${section}] {${content.length}}${CRLF}`, data: content });
       }
@@ -902,6 +973,17 @@ export async function createFakeImapServer(options = {}) {
   function buildSearchTest(tokens, box) {
     let index = 0;
     const uidMaximum = highestUid(box);
+    // Parsed per message on first use, so one search parses each header block once.
+    const headerCache = new Map();
+
+    function fieldsFor(message) {
+      let fields = headerCache.get(message);
+      if (!fields) {
+        fields = headerFields(message.raw);
+        headerCache.set(message, fields);
+      }
+      return fields;
+    }
 
     function parseOne() {
       const token = tokens[index];
@@ -948,7 +1030,21 @@ export async function createFakeImapServer(options = {}) {
           return value === day;
         };
       }
-      if (["TEXT", "BODY", "SUBJECT", "FROM", "TO", "CC", "HEADER"].includes(key)) {
+      const headerField = HEADER_SEARCH_FIELD[key];
+      if (headerField) {
+        const needle = tokenText(tokens[index]).toLowerCase();
+        index += 1;
+        return (message) => headerContains(fieldsFor(message), headerField, needle);
+      }
+      if (key === "HEADER") {
+        // HEADER <field name> <value>: the field name is the first token, the value the second.
+        const field = tokenText(tokens[index]).toLowerCase();
+        const needle = tokenText(tokens[index + 1]).toLowerCase();
+        index += 2;
+        return (message) => headerContains(fieldsFor(message), field, needle);
+      }
+      if (["TEXT", "BODY"].includes(key)) {
+        // The whole raw message, headers included. Neither key is header-specific.
         const needle = tokenText(tokens[index]).toLowerCase();
         index += 1;
         return (message) => message.raw.toString("utf8").toLowerCase().includes(needle);
@@ -1059,9 +1155,14 @@ export async function createFakeSmtpServer(options = {}) {
       for (const conn of state.connections) conn.socket.destroy();
       state.connections.clear();
       await new Promise((resolve) => {
-        server.close(() => resolve());
-        // A socket the OS has not torn down yet must not keep the test run alive.
-        setTimeout(resolve, 1000).unref();
+        // A socket the OS has not torn down yet must not keep the test run alive: the fallback
+        // timer is unref-ed, and cleared as soon as the server reports itself closed.
+        const timer = setTimeout(resolve, 1000);
+        timer.unref();
+        server.close(() => {
+          clearTimeout(timer);
+          resolve();
+        });
       });
     },
   };
