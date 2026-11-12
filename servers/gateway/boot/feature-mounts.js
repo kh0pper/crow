@@ -333,6 +333,17 @@ export async function mountFeatureRoutes(app, deps) {
     console.warn("[notifications] Failed to mount:", err.message);
   }
 
+  // --- Mount Music status API ---
+  // Lives in the gateway, not in the Funkwhale bundle: the Music panel asks it whether a
+  // library is configured, so it must answer even when that bundle's panel is not mounted.
+  try {
+    const { default: musicStatusRouter } = await import("../routes/music-status.js");
+    app.use(musicStatusRouter(dashboardAuth));
+    console.log("Music status API mounted at /api/music/status");
+  } catch (err) {
+    console.warn("[music-status] Failed to mount:", err.message);
+  }
+
   // --- Mount Model Catalog Panel API (Item G, Task 12) ---
   // Own JSON-answering session gate (routes/models.js's
   // requireDashboardSessionJson) rather than the redirect-based
