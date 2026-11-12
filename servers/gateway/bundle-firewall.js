@@ -117,7 +117,7 @@ export async function openTailnetPorts({ ports = [], name = "", model = null, in
   };
   for (const port of ports) {
     if (!up) {
-      log(`Tailscale is not running here, so no tailnet firewall rule was added for port ${port} — reinstall the app once Tailscale is up`);
+      log(`Tailscale is not running here, so no tailnet firewall rule was added for port ${port} — connect Tailscale and reinstall this add-on to add the rule later`);
       results.push({ port, action: "skipped-no-tailscale" });
       continue;
     }

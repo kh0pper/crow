@@ -1,10 +1,12 @@
 // The login and password-reset pages are network-gated — and so are the 2FA
-// steps that finish a login (POST /dashboard/login/2fa and the recovery routes).
+// steps that finish a login (POST /dashboard/login/2fa and the recovery routes)
+// and the 2FA setup steps (GET/POST /dashboard/login/2fa/setup).
 //
 // dashboardAuth (servers/gateway/dashboard/auth.js) already refuses a source that
 // isAllowedNetwork() rejects, but the PUBLIC routes — GET/POST /dashboard/login,
-// GET/POST /dashboard/reset, POST /dashboard/reset/complete and the 2FA login
-// steps — are mounted before it, so without their own gate a source the rest of
+// GET/POST /dashboard/reset, POST /dashboard/reset/complete, the 2FA login steps
+// and the 2FA setup steps — are mounted before it, so without their own gate a
+// source the rest of
 // the dashboard refuses still got a password form to guess into (and, on a fresh
 // install, a setup page), or a TOTP code to guess into.
 //
@@ -37,6 +39,8 @@ import {
   isAllowedNetwork,
   loginNetworkAllowed,
   sendNetworkRefusal,
+  attemptLogin,
+  sessionAuth,
 } from "../servers/gateway/dashboard/auth.js";
 import { listenProxySocketForTests, closeProxySocket } from "../servers/gateway/proxy-socket.js";
 
@@ -95,6 +99,15 @@ const DDL = `
     actor TEXT,
     ip_address TEXT,
     details TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE oauth_tokens (
+    token TEXT PRIMARY KEY,
+    token_type TEXT NOT NULL CHECK(token_type IN ('access', 'refresh')),
+    client_id TEXT NOT NULL,
+    scopes TEXT DEFAULT '',
+    resource TEXT,
+    expires_at TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
   );
 `;
@@ -201,6 +214,10 @@ const PUBLIC_AUTH_ROUTES = [
   { path: "/dashboard/login/2fa", method: "POST", body: { totp_code: "000000" } },
   { path: "/dashboard/login/2fa/recovery" },
   { path: "/dashboard/login/2fa/recovery", method: "POST", body: { recovery_code: "aaaa-bbbb" } },
+  // So do the 2FA setup steps: a refused source must not be handed a fresh
+  // secret (which would replace the live one) nor get to verify a code.
+  { path: "/dashboard/login/2fa/setup" },
+  { path: "/dashboard/login/2fa/setup", method: "POST", body: { totp_code: "000000", secret: "JBSWY3DPEHPK3PXP" } },
 ];
 
 function label(route) {
@@ -319,6 +336,113 @@ test("a refused source gets 403 on every login/reset route and never reaches the
     assert.deepEqual(authState(path), before, "no auth state was touched");
     assert.deepEqual(lockoutRows(path), [], "the lockout counter was never bumped");
     assert.deepEqual(auditRows(path), [], "no login attempt was recorded");
+  } finally {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a refused source never reaches the 2FA setup gate: no setup page, no secret saved, no code verified", async () => {
+  // The gate under test is the network one. Both loops below send the same two
+  // requests — once with no cookie, once carrying a REAL session — from the
+  // refused peer. The session is minted by the gateway's own login path
+  // (attemptLogin against a real password hash) and 2FA is NOT enabled on this
+  // DB, so nothing but its source stops a signed-in caller here: twoFactorSetupGate
+  // passes a live session through, and the GET then writes the TOTP secret
+  // (the positive control below does exactly that on an allowed peer). Without
+  // this route's gate the refused request would fall through to that same
+  // session check, which shares the network rule and answers 302 — hence the
+  // status and `location` assertions below, plus the row check.
+  const { dir, path } = freshDb();
+  const server = await startDashboard();
+  try {
+    const port = server.address().port;
+    const { token, error } = await withEnv({ ...GATE_OFF, CROW_DB_PATH: path }, () =>
+      attemptLogin("correct horse battery staple", "10.0.0.5", null, null, { onHost: false }));
+    assert.equal(error, undefined, `the real login minted a session (${error})`);
+    assert.ok(token, "a real dashboard session was minted");
+    const session = await withEnv({ ...GATE_OFF, CROW_DB_PATH: path }, () => sessionAuth(token));
+    assert.equal(session.valid, true, "the session is live in the session store");
+    assert.deepEqual(
+      dbRows(path, "SELECT key FROM dashboard_settings WHERE key = 'totp_enabled'"),
+      [],
+      "2FA starts off, so the gate would hand a signed-in caller the setup page",
+    );
+    // Snapshot AFTER the mint: the login itself writes audit rows and the session
+    // row, and neither may move from here on.
+    const before = authState(path);
+    const routes = [
+      { path: "/dashboard/login/2fa/setup" },
+      { path: "/dashboard/login/2fa/setup", method: "POST", body: { totp_code: "000000", secret: "JBSWY3DPEHPK3PXP" } },
+    ];
+    for (const route of routes) {
+      // No cookie: nothing to reach the gate with, exactly as before.
+      const anon = await withEnv({ ...GATE_OFF, CROW_DB_PATH: path }, () =>
+        request(port, route.path, { method: route.method, body: route.body, peer: "203.0.113.7" }));
+      assert.equal(anon.status, 403, `${label(route)} must be refused, got ${anon.status}`);
+      assert.match(anon.body, /Access Denied/, label(route));
+      assert.equal(anon.headers.location, undefined, `${label(route)} never reached twoFactorSetupGate's redirect`);
+      assert.equal(anon.headers["set-cookie"], undefined, `${label(route)} must not mint a cookie`);
+      assert.doesNotMatch(anon.body, /name="totp_code"/, `${label(route)} must not serve the setup form`);
+      assert.doesNotMatch(anon.body, /data:image/, `${label(route)} must not serve a QR code`);
+
+      // With the live session: the network gate is the ONLY thing refusing this.
+      // Had it passed, the GET would have written totp_secret + totp_recovery_codes
+      // and the POST would have verified the code against it.
+      const signed = await withEnv({ ...GATE_OFF, CROW_DB_PATH: path }, () =>
+        request(port, route.path, {
+          method: route.method,
+          body: route.body,
+          peer: "203.0.113.7",
+          headers: { cookie: `crow_session=${token}` },
+        }));
+      assert.equal(signed.status, 403, `${label(route)} with a live session must still be refused, got ${signed.status}`);
+      assert.match(signed.body, /Access Denied/, label(route));
+      assert.equal(signed.headers.location, undefined, `${label(route)} never reached twoFactorSetupGate's redirect`);
+      assert.equal(signed.headers["set-cookie"], undefined, `${label(route)} must not mint a cookie`);
+      assert.doesNotMatch(signed.body, /name="totp_code"/, `${label(route)} must not serve the setup form`);
+      assert.doesNotMatch(signed.body, /data:image/, `${label(route)} must not serve a QR code`);
+    }
+    assert.deepEqual(authState(path), before, "no auth state was touched");
+    assert.deepEqual(
+      dbRows(path, "SELECT key FROM dashboard_settings WHERE key LIKE 'totp%'"),
+      [],
+      "no TOTP secret or recovery codes were saved",
+    );
+  } finally {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("positive control: the same session on an allowed source does reach saveTotpSetup and writes the TOTP secret", async () => {
+  // This is what the refused case above must NOT do, and it is what makes its
+  // "no totp row" assertion falsifiable: same DB, same session cookie, same
+  // request — only the peer address is one the gate allows. If the network gate
+  // on /dashboard/login/2fa/setup were dropped, the refused GET would land here
+  // and leave totp_secret + totp_recovery_codes behind.
+  const { dir, path } = freshDb();
+  const server = await startDashboard();
+  try {
+    const port = server.address().port;
+    const { token } = await withEnv({ ...GATE_OFF, CROW_DB_PATH: path }, () =>
+      attemptLogin("correct horse battery staple", "10.0.0.5", null, null, { onHost: false }));
+    assert.ok(token, "a real dashboard session was minted");
+    assert.deepEqual(
+      dbRows(path, "SELECT key FROM dashboard_settings WHERE key LIKE 'totp%'"),
+      [],
+      "2FA starts off",
+    );
+    const r = await withEnv({ ...GATE_OFF, CROW_DB_PATH: path }, () =>
+      request(port, "/dashboard/login/2fa/setup", { peer: "10.0.0.5", headers: { cookie: `crow_session=${token}` } }));
+    assert.equal(r.status, 200, `an allowed source with a live session gets the setup page (got ${r.status})`);
+    assert.match(r.body, /name="totp_code"/, "the setup form is served");
+    const written = dbRows(path, "SELECT key FROM dashboard_settings WHERE key LIKE 'totp%' ORDER BY key");
+    assert.deepEqual(
+      written.map((row) => row.key),
+      ["totp_recovery_codes", "totp_secret"],
+      "saveTotpSetup wrote the secret and the recovery codes",
+    );
   } finally {
     server.close();
     rmSync(dir, { recursive: true, force: true });
