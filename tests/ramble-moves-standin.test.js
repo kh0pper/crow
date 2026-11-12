@@ -13,7 +13,9 @@
  *     balancing chunk: it writes the day's `movebal` row. A walk log never does,
  *     and the log's own area is what decides it;
  *   - the step goal fills the midday card, or — on a day without one — the first
- *     open heart card and then the first open free one, and never balances;
+ *     open heart card and then the first open free one, and never balances; the
+ *     card it lands on is the only one it may take, so a goal that falls on the
+ *     last open balancing card is refused rather than moved to another slot;
  *   - the stand-ins a day already carries count against `need - 1`, so steps, a
  *     walk and a walk log together leave the day unfinished;
  *   - a stand-in writes one `movestand` row and never pays: no budget row, no
@@ -22,8 +24,8 @@
  *     of the days older than yesterday.
  *
  * The shipped library is filled elsewhere, so every test injects its own
- * chunks. The clocks are fixed local days (a Monday, a Tuesday, a Saturday), so
- * the plan each one carries is the same on every machine.
+ * chunks. The clocks are fixed local days (a Monday, a Tuesday, a Saturday and
+ * a Sunday), so the plan each one carries is the same on every machine.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -52,12 +54,15 @@ const M = 60_000;
 const MON0 = startOfLocalDay(new Date(2026, 9, 5, 12, 0, 0, 0).getTime());
 const TUE0 = startOfLocalDay(new Date(2026, 9, 6, 12, 0, 0, 0).getTime());
 const SAT0 = startOfLocalDay(new Date(2026, 9, 10, 12, 0, 0, 0).getTime());
+const SUN0 = startOfLocalDay(new Date(2026, 9, 11, 12, 0, 0, 0).getTime());
 const AT = (h, m = 0) => MON0 + h * H + m * M;
 const AT_TUE = (h, m = 0) => TUE0 + h * H + m * M;
 const AT_SAT = (h, m = 0) => SAT0 + h * H + m * M;
+const AT_SUN = (h, m = 0) => SUN0 + h * H + m * M;
 const DAY = localDay(AT(12));
 const DAY_TUE = localDay(AT_TUE(12));
 const DAY_SAT = localDay(AT_SAT(12));
+const DAY_SUN = localDay(AT_SUN(12));
 
 async function freshDb() {
   const db = createClient({ url: "file::memory:" });
@@ -158,6 +163,7 @@ test("the fixed days carry the plans these tests lean on", async () => {
   assert.equal(DAY, "2026-10-05");
   assert.equal(DAY_TUE, "2026-10-06");
   assert.equal(DAY_SAT, "2026-10-10");
+  assert.equal(DAY_SUN, "2026-10-11");
 
   const db = await freshDb();
   const cards = await cardsFor(db);
@@ -406,6 +412,37 @@ test("the step goal fills the midday card and no other slot", async () => {
   assert.deepEqual(await keysOf(db, MOVE_SLOT_KIND), [`${DAY}:midday`]);
   assert.equal(await rowDelta(db, MOVE_AREA_KIND, `${DAY}:heart`), 1);
   assert.equal(await rowDelta(db, MOVE_BAL_KIND, DAY), null, "steps never balance a day");
+});
+
+test("a step goal on the last open balancing card is refused, never moved", async () => {
+  const db = await freshDb();
+  // A day whose midday card trains a balancing area: its planned heart card
+  // falls back to mobility because the library holds no heart chunk, so the
+  // midday card is the last open card a balancing chunk fits.
+  const lib = [
+    chunk({ id: "mob-1", areas: ["mobility"] }),
+    chunk({ id: "mob-2", areas: ["mobility"] }),
+    chunk({ id: "low-1", areas: ["lower"] }),
+    chunk({ id: "core-1", areas: ["core"] }),
+    chunk({ id: "up-1", areas: ["upper"] }),
+  ];
+  const cards = await cardsFor(db, AT_SUN(9), lib);
+  assert.equal(cards.need, 3);
+  assert.deepEqual(cards.slots.map((item) => [item.slot, item.area]), [
+    ["morning", "mobility"], ["midday", "mobility"], ["evening", "free"],
+  ]);
+  const balancing = cards.slots
+    .filter((item) => BALANCE_AREAS.includes(item.area))
+    .map((item) => item.slot);
+  assert.deepEqual(balancing, ["morning", "midday"], "midday is the last of them");
+  await stepsReading(db, AT_SUN(9));
+
+  const out = await assignStandIn(db, { day: DAY_SUN, source: "steps", now: AT_SUN(10), cards });
+  assert.deepEqual(out, { ok: false, reason: "last_balance" },
+    "a step-goal stand-in fills midday and no other slot");
+  assert.deepEqual(await keysOf(db, MOVE_SLOT_KIND), []);
+  assert.deepEqual(await keysOf(db, MOVE_STAND_KIND), []);
+  assert.equal(await rowDelta(db, MOVE_BAL_KIND, DAY_SUN), null);
 });
 
 test("a step count under the goal does not stand in for a card", async () => {

@@ -682,14 +682,17 @@ function stepsSlot(slots, open) {
  * WHICH SLOT. A log fills the caller's named slot when one is given, else the
  * open card of its own area (the caller's `area` when it is one of AREAS, else
  * the activity's default from ACTIVITY_AREA), else the first open card. When
- * the card that falls out is the last open one a balancing chunk fits, another
- * open card is taken instead before the day is refused — a named slot is never
- * moved. A log of
- * `yoga`, `band` or `bodyweight` whose area is a balancing one is the balancing
- * chunk itself: it is exempt from the counting rule and writes the `movebal` row.
- * A reached step goal fills the midday card, or the first open heart card and
- * then the first open free one; it never balances. Each source is good for one
- * card a day, kept in the local setting STANDIN_DAY_KEY.
+ * that card is the last open one a balancing chunk fits, a log with no named
+ * slot takes another open card instead before the day is refused: the card a
+ * balancing chunk is kept for stays open, and a slot the caller named is
+ * answered as asked. A log of `yoga`, `band` or `bodyweight` whose area is a
+ * balancing one is the balancing chunk itself: it is exempt from the counting
+ * rule and writes the `movebal` row. A reached step goal fills the midday card,
+ * or the first open heart card and then the first open free one; it never
+ * balances, and the card it lands on is the only one it may take — a goal that
+ * falls on the last open balancing card is refused rather than moved to another
+ * slot. Each source is good for one card a day, kept in the local setting
+ * STANDIN_DAY_KEY.
  *
  * Writes, in order: the balance row (balancing logs only), the `movestand` row
  * (once — a second assign for a slot writes nothing), the slot row and the areas
@@ -751,11 +754,14 @@ export async function assignStandIn(db, {
       const balanceCards = open.filter((item) => BALANCE_AREAS.includes(item.area));
       const last = balanceCards.length > 0 ? balanceCards[balanceCards.length - 1] : null;
       if (last && last.slot === chosen.slot) {
-        // The card a balancing chunk is kept for stays open. A stand-in that
-        // does not balance may still take another open card, so the day is
-        // only refused when there is none left; a slot the caller named is
-        // answered as asked and never quietly moved.
-        const other = named === null ? open.find((item) => item.slot !== last.slot) ?? null : null;
+        // The card a balancing chunk is kept for stays open. A log that does
+        // not balance may still take another open card, so the day is only
+        // refused when there is none left; a slot the caller named is answered
+        // as asked, and the card the step goal fills is the only one it may
+        // take, never quietly moved to another slot.
+        const other = source === "log" && named === null
+          ? open.find((item) => item.slot !== last.slot) ?? null
+          : null;
         if (!other) return { ok: false, reason: "last_balance" };
         chosen = other;
       }
