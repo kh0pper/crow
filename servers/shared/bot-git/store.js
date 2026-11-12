@@ -231,6 +231,17 @@ function readMeta(botId) {
   }
 }
 
+/**
+ * A bot's key-dir metadata (`{ bot_id, created_at, fingerprint, generated_at }`),
+ * or null when there is no usable key dir. Read-only, through the anchored
+ * secrets dir and under the same mode/shape rules as every other read; the
+ * bridge uses `created_at` only as housekeeping (does this key dir belong to
+ * the row that is about to spawn). Never returns key material.
+ */
+export function botGitMeta(botId) {
+  return isValidGitBotId(botId) ? readMeta(botId) : null;
+}
+
 /** The confirmed host lines of a bot, re-serialised from parsed parts. */
 function readConfirmedLines(botId) {
   const p = botGitAnchored(botId, CONFIRMED);

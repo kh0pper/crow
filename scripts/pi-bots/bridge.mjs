@@ -38,7 +38,7 @@ import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { chmodSync, closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, constants as fsConstants, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
@@ -48,7 +48,10 @@ import { resolveModel, escalateRequested, stripEscalateToken } from "./model_res
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab, cardText } from "./tracker.mjs";
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
-import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
+import { wrapPiSpawn, piSandboxMode, probePiSandbox } from "./pi_sandbox.mjs";
+import { gitPreSpawn, gitPostLaunch, countEnabledPiBots } from "./bot_git_spawn.mjs";
+import { BOT_GIT_DIRNAME, checkKeyDir, gitAllowedForInstance, isSafeKeyPath, isValidGitBotId } from "../../servers/shared/bot-git/paths.js";
+import { botGitMeta, writeSpawnFiles } from "../../servers/shared/bot-git/store.js";
 import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REFUSAL } from "./hidden_files.mjs";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
@@ -118,6 +121,9 @@ const HOME = process.env.HOME || homedir();
  *  their "-hostnet" forms (CROW_PI_CONTAIN_NET=off keeps the host network, containment does not change). */
 const isContainTier = (tier) => typeof tier === "string" && tier.startsWith("contain");
 const SECCOMP_FD = 6; // 5 is SECRET_VALUES_FD: the two must never share a number
+/** The fd a git-enabled spawn's own key dir reaches bwrap on (3 = --info-fd, 4 = MCP config,
+ *  5 = secret values, 6 = seccomp). bwrap consumes it (--ro-bind-fd) and does not pass it on. */
+const GIT_KEYDIR_FD = 7;
 function seccompFileFd(buf) {
   const dir = mkdtempSync(join(tmpdir(), "crow-seccomp-"));
   const f = join(dir, "filter.bpf");
@@ -808,10 +814,98 @@ export class PiRpc {
     // The gateway's delivered-files staging root lives inside it.
     try { mkdirSync(secretsDir(), { recursive: true, mode: 0o700 }); } catch { /* anchoring creates it */ }
     const secretsHere = secretsDirCurrentPath() || secretsDir();
+    // ---- Per-bot git access (PR B; still dark: no UI creates a key dir yet) ----
+    // A bot is git-enabled when a key dir exists for it under the anchored
+    // secrets dir. The id comes from opts.botId ONLY, never the def fallback
+    // sandboxBotId uses above: a definition is bot-writable, so a def naming
+    // another bot must never select that bot's key (review item 3). The whole
+    // block is fail-closed and never throws into the spawn: no key dir, or any
+    // failed check, leaves `gitDir` null and the spawn byte-identical.
+    //
+    // The fd's closer is registered HERE, before the fd exists (a no-op until
+    // it does) and before anything below can throw — checkedInstanceSecretsDirs
+    // a few lines down included — so no failure path can leave the key dir
+    // descriptor open in this process.
+    let gitDir = null;      // the key dir this spawn really binds read-only inside its own sandbox
+    let gitKeyDir = null;   // the key dir this bot owns, even when the sandbox cannot bind it
+    let gitFd = null;
+    let gitFdLive = false;
+    const closeGitFd = () => { if (!gitFdLive) return; gitFdLive = false; try { closeSync(gitFd); } catch { /* closed */ } };
+    this._containCleanups = [];
+    this._containCleanups.push(closeGitFd);
+    try {
+      const candidate = isValidGitBotId(opts.botId) ? join(secretsHere, BOT_GIT_DIRNAME, opts.botId) : null;
+      if (candidate && existsSync(candidate)) {
+        let row = null;
+        let enabledPiBotCount = 0;
+        // A spawn must never CREATE crow.db: read it only when it is there, and
+        // open it read-only with fileMustExist, so even a race that removes the
+        // file between the two calls cannot make this read create one.
+        if (existsSync(CROW_DB)) {
+          let conn = null;
+          try {
+            conn = new Database(resolveSqlitePath(CROW_DB), { fileMustExist: true, readonly: true });
+            conn.pragma("busy_timeout = 10000");
+            row = conn.prepare("SELECT display_name, created_at FROM pi_bot_defs WHERE bot_id = ?").get(opts.botId) || null;
+            enabledPiBotCount = countEnabledPiBots(conn.prepare("SELECT enabled, definition FROM pi_bot_defs").all());
+          } catch { row = null; } finally { try { if (conn) conn.close(); } catch { /* closed */ } }
+        }
+        const meta = botGitMeta(opts.botId);
+        const pre = gitPreSpawn({
+          candidate,
+          containedSpawn,
+          optsBotId: opts.botId,
+          noGit: opts.noGit === true,
+          gitDirExists: true,
+          metaCreatedAt: meta && typeof meta.created_at === "string" ? meta.created_at : null,
+          rowCreatedAt: row && typeof row.created_at === "string" ? row.created_at : null,
+          keyDirCheck: checkKeyDir(candidate),
+          safePath: ["id_ed25519", "known_hosts", "gitconfig"].every((n) => isSafeKeyPath(join(candidate, n))),
+          instanceAllowed: gitAllowedForInstance({ enabledPiBotCount }),
+          // Defence in depth: the fd is never even OPENED on a host whose
+          // bubblewrap cannot bind it back (no PID-namespace tier, or a bwrap
+          // without --ro-bind-fd). CROW_PI_SANDBOX=off passes no probe at all.
+          // gitPreSpawn still reports keyDir, so the GIT_* strip below applies
+          // to a bot that owns a key even when the sandbox cannot expose it.
+          probe: piSandboxMode(process.env) === "off" ? null : probePiSandbox(),
+        });
+        let reason = pre.reason;
+        gitKeyDir = pre.keyDir;
+        if (pre.gitDir) {
+          // The two GENERATED files are refreshed at every spawn (the identity
+          // and the host list are engine-owned, the key is not).
+          const written = writeSpawnFiles({ botId: opts.botId, displayName: row ? row.display_name : null });
+          if (!written.ok) reason = written.reason || "the spawn files could not be written";
+          else {
+            try {
+              gitFd = openSync(pre.gitDir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+              gitFdLive = true;
+              gitDir = pre.gitDir;
+            } catch { gitFd = null; reason = "the key dir cannot be opened"; }
+          }
+        }
+        if (!gitDir && reason) console.error("[pi-bots] git access off for " + opts.botId + ": " + reason);
+      }
+    } catch {
+      closeGitFd();
+      gitDir = null;
+      gitKeyDir = null;
+      gitFd = null;
+      console.error("[pi-bots] git access off for " + String(opts.botId) + ": the key dir could not be read");
+    }
     // Every OTHER Crow home on this host (found by the shape of its secrets
     // dir, whatever it is called) is a co-hosted instance under the same uid:
     // its secrets dir is hidden too.
-    const others = checkedInstanceSecretsDirs();      // throws (refusing the spawn) when a home cannot be checked or a remembered one is gone
+    let others;
+    try {
+      others = checkedInstanceSecretsDirs();   // throws (refusing the spawn) when a home cannot be checked or a remembered one is gone
+    } catch (e) {
+      // This throw lands BETWEEN the key dir open and the launch, where no
+      // other cleanup path runs: close the fd here or the gateway keeps it for
+      // the life of the process.
+      closeGitFd();
+      throw e;
+    }
     // The co-hosts' HOMES (the scan returns their secrets dirs, real paths):
     // the contain plan refuses a bind by resolved home path, not by name.
     const otherHomes = others.map((d) => (basename(d) === "secrets" ? dirname(d) : d));
@@ -845,10 +939,6 @@ export class PiRpc {
       try { recordContainment(sandboxBotId, { ...status, tier }); } catch { /* status only */ }
       console.error(formatContainmentLine(sandboxBotId, status));
     };
-    // Per-spawn contain resources (agent shadow, ...), removed exactly once:
-    // on any failure before pi runs, or once pi's whole process group is gone
-    // (the outer bwrap can exit while pi still drains inside its namespace).
-    this._containCleanups = [];
     let launch;
     let hiddenCandidates = null;
     // Folders this spawn hides WHOLE (a tmpfs): every secrets dir, plus env/ and
@@ -926,7 +1016,10 @@ export class PiRpc {
         hiddenCandidates.sshDir = sshDir;
       }
       launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain,
-        hideDirs: [secretsHere, ...others, ...(contain ? [] : [sshDir, ...instanceSecretDirs])], hideFiles, hideFileRoots, hidePinDirs, seccompFd: contain ? SECCOMP_FD : null, passFds });
+        hideDirs: [secretsHere, ...others, ...(contain ? [] : [sshDir, ...instanceSecretDirs])], hideFiles, hideFileRoots, hidePinDirs, seccompFd: contain ? SECCOMP_FD : null, passFds,
+        // The bot's OWN key dir, bound back inside the secrets tmpfs from the
+        // already-open fd (null unless every check in gitPreSpawn passed).
+        exposeInHidden: gitDir && gitFd != null ? [{ dir: gitDir, fd: gitFd, childFd: GIT_KEYDIR_FD }] : [] });
     } catch (e) {
       // A contain spawn that was REFUSED still gets its one line, naming the
       // provider with no door (or the refusal the caller sees). When the
@@ -1023,6 +1116,15 @@ export class PiRpc {
     }
     // Only now, with every one hidden, are they remembered (a refused spawn records nothing).
     if (launch.wrapper === "bwrap") { try { rememberInstanceSecretsDirs(others); } catch { /* next spawn */ } }
+    // Per-bot git access, part 2: the env. With no key dir the launch env is
+    // untouched. With one, the four GIT_* keys are always removed (a def's
+    // spawn_env value never survives), and the pinned GIT_SSH_COMMAND /
+    // GIT_CONFIG_GLOBAL are set only when this launch REALLY bound the dir
+    // read-only inside its own PID namespace (launch.exposed is the report).
+    const gitPost = gitPostLaunch({ gitDir: gitKeyDir, launch });
+    for (const k of gitPost.remove) delete launch.env[k];
+    if (gitPost.set) Object.assign(launch.env, gitPost.set);
+    if (gitPost.reason) console.error("[pi-bots] git access off for " + String(opts.botId) + ": " + gitPost.reason);
     delete launch.env.PI_BOT_SECRET_VALUES_FILE;
     // Fail closed: the values file is written and card values trusted only
     // when this instance's AND every other instance's secrets dir is out of
@@ -1085,7 +1187,26 @@ export class PiRpc {
     this.mcpDelivery = fdMode ? "fd" : "file";
     // Contain tier: the seccomp program on fd SECCOMP_FD, from an already
     // unlinked file (nothing to clean up, nothing a bot could find on disk).
+    // A git-enabled spawn's key dir fd goes on GIT_KEYDIR_FD, the same way,
+    // but ONLY when bubblewrap will really consume it: the entry survived
+    // validExposed (launch.exposed reports the dirs that did) and this is the
+    // pidns tier, whose --ro-bind-fd is in the argv. In any other launch
+    // (userns, setpriv, plain, or an entry validExposed dropped) fd 7 would be
+    // handed STRAIGHT to the child, which could then walk
+    // /proc/self/fd/7/../<other-bot>/id_ed25519 and the rest of the secrets
+    // dir. So the fd is closed HERE, before the spawn, and stdio[7] is never
+    // set. In every case the fd is closed in the parent once bwrap has it (and
+    // on every failure path, through _runContainCleanup).
     let seccompFdHost = null;
+    const gitFdBound = gitFd != null && launch.wrapper === "bwrap" && launch.pidNamespace === true
+      && Array.isArray(launch.exposed) && launch.exposed.includes(gitDir);
+    if (gitFdBound) {
+      while (stdio.length < GIT_KEYDIR_FD) stdio.push("ignore");
+      stdio[GIT_KEYDIR_FD] = gitFd;
+    } else {
+      closeGitFd();
+      gitFd = null;   // a number nothing may be tempted to hand on again
+    }
     try {
       if (launch.seccomp) {
         seccompFdHost = seccompFileFd(launch.seccomp);
@@ -1098,6 +1219,7 @@ export class PiRpc {
       throw e;
     } finally {
       if (seccompFdHost != null) { try { closeSync(seccompFdHost); } catch {} }
+      closeGitFd();
     }
     // A spawn that fails asynchronously (ENOENT) emits 'error' and no 'exit'.
     this.proc.on("error", () => this._runContainCleanup());

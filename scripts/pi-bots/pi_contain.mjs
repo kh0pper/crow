@@ -39,7 +39,8 @@
  *
  * Never bound, whatever a policy says: ~/.ssh, ~/.gnupg, ~/.claude, ~/.config
  * /systemd, the whole $HOME, other /home users, other Crow instance homes,
- * /etc/crow, /run/credentials, /run/user, docker sockets; nor is the checkout
+ * a bot's git key dir (the contain tier has no git in v1), /etc/crow,
+ * /run/credentials, /run/user, docker sockets; nor is the checkout
  * or engine ever writable. "/" in write_paths/read_paths (permissionMode
  * bypass) cannot be contained: ContainRefused.
  *
