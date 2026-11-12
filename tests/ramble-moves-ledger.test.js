@@ -794,7 +794,7 @@ test("EGG SIMULATION C, one chunk a day: the bird slides below happy", async () 
   assert.equal(await eggCount(db), 0, "and it never laid");
 });
 
-test("EGG SIMULATION C with a log, one chunk a day: the extra log changes where the bird ends the month", async () => {
+test("EGG SIMULATION C with a log (two chunks a day in all): the bird ends the month happy", async () => {
   const db = await freshDb();
   const last = await tapMonth(db, { chunks: 2, emit: collector([]) });
   assert.equal(last.mood, "happy", `energy ${last.energy} at the end of the last day`);

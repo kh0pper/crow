@@ -66,7 +66,9 @@ test("the movement kinds eggs.js uses are the constants their owners export", as
     MOVEMENT_KINDS.visitPlace);
 
   const src = readFileSync(resolve(HERE, "../bundles/ramble/server/eggs.js"), "utf8");
-  const specifiers = [...src.matchAll(/^\s*import\s[^;\n]*?from\s+["']([^"']+)["']/gm)].map((m) => m[1]);
+  // The lazy [\s\S]*? lets an import list span lines without running past its
+  // own `from` into the next import's specifier.
+  const specifiers = [...src.matchAll(/^\s*import\s[\s\S]*?\sfrom\s+["']([^"']+)["']/gm)].map((m) => m[1]);
   assert.ok(specifiers.length > 0, "the import scan found eggs.js's imports");
   for (const bad of ["steps.js", "indoor-cap", "ledger", "pet.js"]) {
     assert.ok(!specifiers.some((s) => s.includes(bad)),
