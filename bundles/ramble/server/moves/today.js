@@ -44,7 +44,7 @@ import { localDay } from "../eggs.js";
 import { rowDelta, insertOnce } from "../steps.js";
 import { MOVE_DONE_KIND } from "./ledger.js";
 import {
-  servedLibrary, entryById, ACTIVITY_KINDS, EQUIPMENT, LIMIT_TAGS,
+  servedLibrary, entryById, isChunk, ACTIVITY_KINDS, EQUIPMENT, LIMIT_TAGS,
 } from "./library.js";
 import { pickChallenge } from "./picker.js";
 import { learningFlows } from "./learning.js";
@@ -363,12 +363,14 @@ export async function todayForSurface(db, {
  * filters leave nothing to pick (an empty/unreviewed library, or a limit set
  * that excludes every entry — the panel then offers the manual pickers).
  *
- * REUSE: a stored `moves.today` for the same local day is returned as-is
- * (barring a limit that has since ruled it out). Anything else is a new day
- * (or a first run): the previous pick is folded into history and a fresh pick
- * is stored. A same-day card the live limits rule out is re-picked carrying
- * the day's stored swap count, so a replacement never reopens the cap, and the
- * day's `seen` list, so a replacement never forgets a card the user saw.
+ * REUSE: a stored `moves.today` for the same local day is returned as-is when
+ * it is still a card — a chunk the library holds and no limit rules out.
+ * Anything else is a new day (or a first run): the previous pick is folded into
+ * history and a fresh pick is stored. A same-day card the live limits rule out,
+ * or one the picker would no longer offer (a pose, a short exercise, a card the
+ * library has since dropped), is re-picked carrying the day's stored swap
+ * count, so a replacement never reopens the cap, and the day's `seen` list, so
+ * a replacement never forgets a card the user saw.
  *
  * When prefs.on is false it writes the day's `moveoff` fact and returns
  * `{ off: true }` — the pause neither counts nor breaks the streak.
@@ -390,7 +392,7 @@ export async function todayChallenge(db, {
 
   if (stored && stored.day === day) {
     const entry = entryById(lib, stored.entryId);
-    if (entry && !blockedByLimits(entry, prefs)) {
+    if (entry && isChunk(entry) && !blockedByLimits(entry, prefs)) {
       return {
         day,
         entry,

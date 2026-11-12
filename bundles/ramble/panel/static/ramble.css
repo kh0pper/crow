@@ -441,6 +441,7 @@
 #ramble .rb-step.is-done .rb-step-n { background: var(--rb-accent); color: var(--rb-accent-ink); }
 #ramble .rb-step-txt { min-width: 0; }
 #ramble .rb-step-txt strong { display: block; }
+#ramble .rb-step-txt > .rb-fine { display: block; }
 
 /* Audience tag — only ever drawn for a non-public mark, so "no tag" reads as
    "everyone" without a label competing with the mark's own text. */

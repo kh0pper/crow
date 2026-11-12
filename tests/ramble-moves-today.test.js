@@ -4,6 +4,9 @@
  * What is pinned here:
  *   - the pick is stable all day and re-picked on a new local day,
  *   - the stored card is reused (and swapped in place) rather than re-rolled,
+ *   - a stored card that is no longer a chunk, or whose entry the library no
+ *     longer holds, is re-picked with today's swap count and seen list kept,
+ *     and a Done day stays Done through that replacement,
  *   - a stated limit beats even a card stored before the limit was set,
  *   - two devices that each pick converge on one card under the settings LWW,
  *     and a Done on each still credits the day once after the wallet merges,
@@ -264,6 +267,105 @@ test("a stated limit always wins — even over a card stored before the limit wa
   assert.equal(refused.refused, true);
   assert.notEqual(refused.entry.id, "knee-1");
   assert.equal(refused.entry.id, "safe-1", "one eligible entry: the card on screen stays");
+});
+
+/* ------------------------------------------------- picks that are not chunks */
+
+test("a stored pick that is not a chunk is replaced by one, keeping the swap count and the seen list", async () => {
+  const db = await freshDb();
+  await writePrefs(db, PREFS);
+  const SHORT = entry({ id: "short-1", kind: "exercise", minutes: 3 });
+  const CHUNK = entry({ id: "chunk-1" });
+  await writeSetting(db, TODAY_KEY, JSON.stringify({
+    day: DAY0, entryId: "short-1", swap: 1, seen: ["short-1"], reasons: [], why: "",
+  }));
+
+  const shown = await todayChallenge(db, { now: T0, library: [SHORT, CHUNK] });
+  assert.equal(shown.entry.id, "chunk-1", "a card shorter than a chunk is not left on screen");
+  assert.equal(shown.swap, 1, "a re-pick keeps the day's swap count");
+  assert.ok(shown.seen.includes("short-1"), "the replaced card stays in the day's seen list");
+  assert.ok(shown.seen.includes("chunk-1"));
+
+  const stored = JSON.parse(await readSetting(db, TODAY_KEY));
+  assert.equal(stored.day, DAY0);
+  assert.equal(stored.entryId, "chunk-1", "the stored row names the chunk now");
+  assert.equal(stored.swap, 1);
+  assert.deepEqual(stored.seen, shown.seen);
+});
+
+test("a stored routine under ten minutes, and a stored id the library no longer holds, are both re-picked", async () => {
+  const SHORT_ROUTINE = entry({ id: "r-5", minutes: 5 });
+  const CHUNK = entry({ id: "chunk-1" });
+  for (const entryId of ["r-5", "gone-9"]) {
+    const db = await freshDb();
+    // eslint-disable-next-line no-await-in-loop
+    await writePrefs(db, PREFS);
+    // eslint-disable-next-line no-await-in-loop
+    await writeSetting(db, TODAY_KEY, JSON.stringify({
+      day: DAY0, entryId, swap: 2, seen: [entryId], reasons: [], why: "",
+    }));
+
+    // eslint-disable-next-line no-await-in-loop
+    const shown = await todayChallenge(db, { now: T0, library: [SHORT_ROUTINE, CHUNK] });
+    assert.equal(shown.entry.id, "chunk-1", "a stored " + entryId + " is not reused");
+    assert.equal(shown.swap, 2);
+    assert.ok(shown.seen.includes(entryId));
+    // eslint-disable-next-line no-await-in-loop
+    const stored = JSON.parse(await readSetting(db, TODAY_KEY));
+    assert.equal(stored.entryId, "chunk-1");
+    assert.equal(stored.swap, 2);
+  }
+});
+
+test("a stored chunk is kept exactly, and reusing it writes nothing", async () => {
+  const db = await freshDb();
+  await writePrefs(db, PREFS);
+  const CHUNK = entry({ id: "chunk-1" });
+  await writeSetting(db, TODAY_KEY, JSON.stringify({
+    day: DAY0, entryId: "chunk-1", swap: 1, seen: ["chunk-1"], reasons: [], why: "kept",
+  }));
+  const c = collector();
+
+  const shown = await todayChallenge(db, { now: T0, library: [CHUNK], emit: c.emit });
+  assert.equal(shown.entry, CHUNK, "the same live entry object comes back");
+  assert.equal(shown.swap, 1);
+  assert.deepEqual(shown.seen, ["chunk-1"]);
+  assert.equal(shown.why, "kept");
+  assert.deepEqual(rowsOf(c, "ramble_settings", TODAY_KEY), [], "a reuse writes no card row");
+});
+
+test("a Done day stays Done when its stored card is replaced", async () => {
+  const db = await freshDb();
+  await writePrefs(db, PREFS);
+  const CHUNK = entry({ id: "chunk-1" });
+  const SHORT = entry({ id: "short-1", kind: "exercise", minutes: 3 });
+  await recordChallengeDone(db, { day: DAY0, entry: CHUNK, now: T0 });
+  await writeSetting(db, TODAY_KEY, JSON.stringify({
+    day: DAY0, entryId: "short-1", swap: 0, seen: ["short-1"], reasons: [], why: "",
+  }));
+
+  const shown = await todayChallenge(db, { now: T0 + 1000, library: [SHORT, CHUNK] });
+  assert.equal(shown.entry.id, "chunk-1");
+  assert.equal(shown.done, true, "Done is read from the day's movedone row, not from the card");
+  assert.equal(await rowDelta(db, MOVE_DONE_KIND, DAY0), 1, "the day keeps its one Done row");
+  assert.equal((await movesDay(db, { day: DAY0 })).done, true);
+});
+
+test("todayForSurface replaces a stored card that is not a chunk too", async () => {
+  const db = await freshDb();
+  await writePrefs(db, PREFS);
+  const SHORT = entry({ id: "short-1", kind: "exercise", minutes: 3 });
+  const CHUNK = entry({ id: "chunk-1" });
+  await writeSetting(db, TODAY_KEY, JSON.stringify({
+    day: DAY0, entryId: "short-1", swap: 3, seen: ["short-1"], reasons: [], why: "",
+  }));
+
+  const shown = await todayForSurface(db, { now: T0, library: [SHORT, CHUNK] });
+  assert.equal(shown.entry.id, "chunk-1");
+  assert.equal(shown.swap, 3);
+  const stored = JSON.parse(await readSetting(db, TODAY_KEY));
+  assert.equal(stored.entryId, "chunk-1");
+  assert.equal(stored.swap, 3);
 });
 
 /* ----------------------------------------------------------------- swap */
