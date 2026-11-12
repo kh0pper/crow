@@ -261,6 +261,7 @@ test("render: after Start the figure, name, cue and next show segment 0, and a b
   const plainState = JSON.parse(JSON.stringify(player.state()));
   assert.deepEqual(plainState, {
     layout: "kiosk", started: true, segmentIndex: 0, paused: false, ended: false, sheetOpen: false,
+    finished: false,
   });
   assert.equal(segments[0].type, "hold", "the fixture opens on a hold");
   assert.equal(figure.innerHTML, booted.sandbox.RambleFigure.poseSvg(segments[0].toPose));
@@ -706,3 +707,545 @@ test("controls: destroy takes the visibilitychange listener off", () => {
   assert.equal(player.state().paused, false, "nothing hears the hidden tab any more");
   assert.equal(booted.host.children.length, 0);
 });
+
+/* ---------- finish here, the resume record and the end screen ---------- */
+
+/* Fixtures with an exact planned time: a ten minute walk is one stretch of
+ * moving time, a ten minute routine is its warm-up, main block and cool-down,
+ * and "routine-rounds" carries no cool-down so an added round is main time
+ * alone. */
+const FINISH_LIB = [
+  ...LIB,
+  {
+    id: "walk-10",
+    kind: "walk",
+    title: "Loop walk",
+    minutes: 10,
+    steps: [{ text: "Walk the loop", cue: "Walk the loop", say: "Walk the loop" }],
+  },
+  {
+    id: "walk-14",
+    kind: "walk",
+    title: "Longer loop",
+    minutes: 14,
+    steps: [{ text: "Walk the longer loop", cue: "Longer loop", say: "Longer loop" }],
+  },
+  {
+    id: "routine-10",
+    kind: "routine",
+    title: "Ten minute routine",
+    minutes: 10,
+    rounds: 1,
+    steps: [{ text: "warm-up, main, cool-down", cue: "warm-up", say: "warm-up" }],
+    blocks: {
+      warmup: [{ id: "pose-fold", seconds: 120 }],
+      main: [{ id: "pose-reach", seconds: 450 }],
+      cooldown: [{ id: "pose-fold", seconds: 30 }],
+    },
+  },
+  {
+    id: "routine-rounds",
+    kind: "routine",
+    title: "Rounds routine",
+    minutes: 10,
+    rounds: 1,
+    steps: [{ text: "warm-up, main", cue: "warm-up", say: "warm-up" }],
+    blocks: {
+      warmup: [{ id: "pose-fold", seconds: 120 }],
+      main: [{ id: "pose-reach", seconds: 450 }],
+    },
+  },
+  {
+    id: "routine-rest",
+    kind: "routine",
+    title: "Restful routine",
+    minutes: 10,
+    rounds: 1,
+    steps: [{ text: "warm-up, main, cool-down", cue: "warm-up", say: "warm-up" }],
+    blocks: {
+      warmup: [{ id: "pose-fold", seconds: 120 }],
+      main: [{ id: "ex-arms", seconds: 200, restSeconds: 60 }],
+      cooldown: [{ id: "pose-reach", seconds: 30 }],
+    },
+  },
+];
+
+function finishTitleOf(id) {
+  const entry = FINISH_LIB.find((one) => one.id === id);
+  return entry ? entry.title : "";
+}
+
+function mountOn(booted, chain, over) {
+  const options = {
+    chain,
+    library: FINISH_LIB,
+    copy: PAGE_COPY,
+    guidance: "full",
+    clock: booted.clock,
+    reducedMotion: true,
+    ...(over || {}),
+  };
+  const player = booted.sandbox.RamblePlayer.mount(booted.host, options);
+  return { player, options };
+}
+
+/* localStorage, as the page would hand it in. */
+function fakeStorage(seed) {
+  const map = new Map(Object.entries(seed || {}));
+  return {
+    map,
+    getItem(key) { return map.has(key) ? map.get(key) : null; },
+    setItem(key, value) { map.set(key, String(value)); },
+    removeItem(key) { map.delete(key); },
+  };
+}
+
+/* The planned seconds of each chunk, straight off the compiled timeline. */
+function plannedOfChunks(booted, chain) {
+  const timeline = booted.sandbox.RambleSession.compileSession(chain, FINISH_LIB, { guidance: "full" });
+  return timeline.chunks.map((chunk) => chunk.plannedSeconds);
+}
+
+/* A recording stand-in for the page's posting: the session module's own
+ * half-time rule answers Done. */
+function postRecorder(booted, chain) {
+  const planned = plannedOfChunks(booted, chain);
+  const posted = [];
+  return {
+    posted,
+    post(payload) {
+      posted.push(payload);
+      const done = booted.sandbox.RambleSession.isChunkDone(planned[payload.chunkIndex], payload.activeSeconds);
+      return Promise.resolve({ paid: true, total: 1, done, capped: false, accepted: true });
+    },
+  };
+}
+
+/* The player answers a post on its own promises: one macrotask turn is enough
+ * for the whole chain to run. */
+function settle() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+test("finish: five active minutes of a ten minute chunk, then Finish here, shows the card done", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "routine-10" }];
+  const recorder = postRecorder(booted, chain);
+  const { player } = mountOn(booted, chain, { post: recorder.post });
+
+  assert.equal(plannedOfChunks(booted, chain)[0], 600, "the fixture chunk plans ten minutes");
+  assert.equal(byRole(booted.host, "finish"), null, "no Finish here before Start");
+
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 302);
+
+  const finish = byRole(booted.host, "finish");
+  assert.ok(finish, "a running session offers Finish here");
+  assert.equal(finish.tagName, "BUTTON");
+  assert.equal(finish.getAttribute("type"), "button");
+  assert.equal(finish.textContent, COPY["player.finishHere"]);
+  assert.equal(player.state().finished, false);
+
+  finish.click();
+  assert.equal(player.state().finished, true, "Finish here is the end of the visit");
+  await settle();
+
+  assert.equal(recorder.posted.length, 1, "a chunk with active time is posted once");
+  assert.deepEqual(JSON.parse(JSON.stringify(recorder.posted[0])),
+    { chunkIndex: 0, entryId: "routine-10", activeSeconds: 300 });
+
+  const lines = allByRole(booted.host, "chunk-result");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].getAttribute("data-chunk"), "0");
+  assert.equal(lines[0].textContent, COPY["today.card.isDone"]);
+
+  assert.equal(byRole(booted.host, "note"), null, "a done chunk needs no note");
+  assert.equal(byRole(booted.host, "transport"), null, "the transport goes with the finish");
+  assert.equal(byRole(booted.host, "pause"), null);
+  assert.equal(byRole(booted.host, "finish"), null);
+});
+
+test("finish: 4:59 leaves the chunk undone, saves a resume record and a remount picks up there", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "routine-10" }];
+  const storage = fakeStorage();
+  const recorder = postRecorder(booted, chain);
+  mountOn(booted, chain, { post: recorder.post, storage });
+
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 301);
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  assert.equal(recorder.posted.length, 1);
+  assert.equal(recorder.posted[0].activeSeconds, 299, "one second short of half the chunk");
+
+  const lines = allByRole(booted.host, "chunk-result");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].textContent, COPY["today.card.resume"], "the chunk is not done yet");
+  const note = byRole(booted.host, "note");
+  assert.ok(note, "nothing is done, so the note is on screen");
+  assert.equal(note.textContent, COPY["player.end.notYet"]);
+
+  const saved = JSON.parse(storage.getItem("ramble.player.resume.routine-10"));
+  assert.deepEqual(saved, { segmentIndex: 2, activeSeconds: [299] });
+
+  /* The same storage, a fresh player: the line before Start, and the first
+   * Start back at the stored segment. */
+  const again = boot();
+  const againRecorder = postRecorder(again, chain);
+  const remount = mountOn(again, chain, { post: againRecorder.post, storage });
+  const line = byRole(again.host, "resume-line");
+  assert.ok(line, "the resume line is offered before Start");
+  assert.equal(line.textContent, COPY["today.card.resume"]);
+
+  byRole(again.host, "start").click();
+  assert.equal(byRole(again.host, "resume-line"), null, "the line goes with Start");
+  assert.equal(remount.player.state().segmentIndex, 2, "the first Start seeks to the stored segment");
+  assert.equal(byRole(again.host, "name").textContent, finishTitleOf("pose-reach"),
+    "the main hold the record was saved in");
+
+  advance(again.clock, 5);
+  byRole(again.host, "finish").click();
+  await settle();
+  assert.equal(againRecorder.posted[0].activeSeconds, 304, "the restored seconds count too");
+  assert.equal(allByRole(again.host, "chunk-result")[0].textContent, COPY["today.card.isDone"]);
+});
+
+test("finish: rests, pauses and skipped steps add no active time", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "routine-rest" }];
+  const recorder = postRecorder(booted, chain);
+  mountOn(booted, chain, { post: recorder.post });
+
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 122);
+  byRole(booted.host, "pause").click();
+  advance(booted.clock, 90);
+  byRole(booted.host, "pause").click();
+  advance(booted.clock, 20);
+  byRole(booted.host, "skip").click();
+  advance(booted.clock, 59);
+  byRole(booted.host, "skip-rest").click();
+  advance(booted.clock, 2);
+  advance(booted.clock, 10);
+
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  assert.equal(recorder.posted.length, 1);
+  assert.equal(recorder.posted[0].activeSeconds, 150,
+    "120 of the warm-up, 20 of the reps step and 10 of the close: nothing else");
+});
+
+test("finish: the end screen shows three choices, none chosen and nothing ticking", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "routine-10" }];
+  const recorder = postRecorder(booted, chain);
+  const heard = [];
+  const { player } = mountOn(booted, chain, {
+    post: recorder.post,
+    offers: { nextCard: { slot: "morning", chunkId: "walk-10" }, areaChunk: { chunkId: "walk-14" } },
+    onEvent: (event) => {
+      if (event.type === "ended" || event.type === "left") heard.push(event.type);
+    },
+  });
+
+  const realFocus = FakeEl.prototype.focus;
+  let focused = 0;
+  FakeEl.prototype.focus = function () { focused += 1; };
+  try {
+    byRole(booted.host, "start").click();
+    advance(booted.clock, 604);
+    await settle();
+
+    const end = byRole(booted.host, "end");
+    assert.ok(end, "the session ends on an end screen");
+    assert.equal(byRole(booted.host, "end-title").textContent, COPY["player.end.title"]);
+
+    const summaries = allByRole(booted.host, "summary");
+    assert.equal(summaries.length, 1, "one line per chunk with active time");
+    assert.equal(summaries[0].textContent,
+      fillCopy(COPY["player.end.summary"], { minutes: 10, name: finishTitleOf("routine-10") }));
+
+    const choices = end.children
+      .map((child) => child.getAttribute("data-role"))
+      .filter((role) => role === "one-more-round" || role === "add-ten" || role === "thats-it");
+    assert.deepEqual(choices, ["one-more-round", "add-ten", "thats-it"]);
+
+    assert.equal(byRole(booted.host, "one-more-round").textContent, COPY["player.end.oneMoreRound"]);
+    assert.equal(byRole(booted.host, "add-ten").textContent, COPY["player.end.addTen"]);
+    assert.equal(byRole(booted.host, "thats-it").textContent, COPY["player.end.thatsIt"]);
+
+    for (const role of ["one-more-round", "add-ten", "thats-it"]) {
+      const button = byRole(booted.host, role);
+      assert.equal(button.getAttribute("aria-pressed"), null, "no choice is pressed");
+      assert.equal(button.hasAttribute("data-selected"), false, "no choice is selected");
+    }
+    assert.equal(focused, 0, "no choice takes the focus");
+    assert.equal(booted.clock.intervals.length, 1, "only the session's own beat: no countdown");
+
+    assert.equal(allByRole(booted.host, "chunk-result")[0].textContent, COPY["today.card.isDone"]);
+    assert.equal(player.state().ended, true);
+    assert.equal(player.state().finished, false, "the end screen waits for the person");
+    assert.deepEqual(heard, ["ended"]);
+  } finally {
+    FakeEl.prototype.focus = realFocus;
+  }
+});
+
+test("finish: One more round adds main-block time only", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "routine-rounds" }];
+  const recorder = postRecorder(booted, chain);
+  const { player } = mountOn(booted, chain, { post: recorder.post });
+
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 572);
+  await settle();
+
+  const before = booted.sandbox.RambleSession.compileSession(chain, FINISH_LIB, { guidance: "full" });
+  const stripBefore = byRole(booted.host, "strip").children.length;
+
+  const oneMore = byRole(booted.host, "one-more-round");
+  assert.ok(oneMore, "a routine with rounds left offers one more");
+  assert.equal(oneMore.textContent, COPY["player.end.oneMoreRound"]);
+  oneMore.click();
+
+  assert.equal(byRole(booted.host, "end"), null, "the end screen goes when the session goes on");
+  assert.equal(player.state().segmentIndex, before.segments.length, "the clock picks up after what was played");
+  assert.equal(byRole(booted.host, "name").textContent, finishTitleOf("pose-reach"),
+    "the main hold is what comes next");
+
+  const strip = byRole(booted.host, "strip");
+  assert.equal(strip.children.length, stripBefore + 1, "one more work step, and no more than that");
+  assert.equal(strip.children[strip.children.length - 1].textContent, finishTitleOf("pose-reach"));
+
+  /* The addition itself: main-block time, and never another warm-up. */
+  const extended = booted.sandbox.RambleSession.extend(
+    before,
+    { segmentIndex: before.segments.length - 1 },
+    FINISH_LIB,
+    { addRound: true },
+  );
+  const added = extended.segments.slice(before.segments.length);
+  assert.ok(added.length > 0, "the round really does add segments");
+  assert.equal(added.some((one) => one.block === "warmup"), false, "no warm-up is added");
+  assert.equal(added.every((one) => one.block === "main"), true, "the new segments are main-block ones");
+  const addedWork = added.filter((one) => one.type === "hold" || one.type === "reps" || one.type === "timed");
+  assert.equal(addedWork.length, 1);
+  assert.equal(addedWork[0].seconds, 450, "the new round is the main block's own time");
+});
+
+test("finish: Add another 10 offers the next card, the area chunk and the chunk again, in that order", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "routine-10" }];
+  const recorder = postRecorder(booted, chain);
+  const offers = { nextCard: { slot: "morning", chunkId: "walk-10" }, areaChunk: { chunkId: "walk-14" } };
+  mountOn(booted, chain, { post: recorder.post, offers });
+
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 604);
+  await settle();
+
+  assert.equal(byRole(booted.host, "add-options"), null, "the options wait for the click");
+  byRole(booted.host, "add-ten").click();
+
+  const panel = byRole(booted.host, "add-options");
+  assert.ok(panel);
+  const options = panel.children;
+  assert.deepEqual(options.map((one) => one.getAttribute("data-role")),
+    ["add-option", "add-option", "add-option"]);
+  assert.deepEqual(options.map((one) => one.textContent), [
+    fillCopy(COPY["player.end.addTen.nextCard"], { slot: COPY["settings.slot.morning"] }),
+    finishTitleOf("walk-14"),
+    finishTitleOf("routine-10"),
+  ]);
+
+  byRole(booted.host, "add-ten").click();
+  assert.equal(allByRole(booted.host, "add-options").length, 1, "a second click adds no second panel");
+
+  const stripBefore = byRole(booted.host, "strip").children.length;
+  options[0].click();
+  assert.equal(byRole(booted.host, "end"), null, "the chosen addition sends the session on");
+  const strip = byRole(booted.host, "strip");
+  assert.equal(strip.children.length, stripBefore + 1, "the next card's own step joins the strip");
+  assert.equal(strip.children[strip.children.length - 1].textContent, finishTitleOf("walk-10"));
+});
+
+test("finish: a chain stopped at 12 of 20 minutes counts the first chunk done and the second not", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }, { chunkId: "walk-10" }];
+  const recorder = postRecorder(booted, chain);
+  const { player } = mountOn(booted, chain, { post: recorder.post });
+
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 720);
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  assert.equal(recorder.posted.length, 2, "both chunks have active time");
+  assert.equal(recorder.posted[0].activeSeconds, 600);
+  assert.ok(recorder.posted[1].activeSeconds > 0);
+  assert.ok(recorder.posted[1].activeSeconds < 300, "the second chunk is not half done");
+
+  const lines = allByRole(booted.host, "chunk-result");
+  assert.deepEqual(lines.map((one) => one.getAttribute("data-chunk")), ["0", "1"]);
+  assert.equal(lines[0].textContent, COPY["today.card.isDone"]);
+  assert.equal(lines[1].textContent, COPY["today.card.resume"]);
+  assert.equal(player.state().finished, true);
+});
+
+test("finish: an hour in, nothing more is offered and the cap note shows", async () => {
+  const booted = boot();
+  const chain = [0, 1, 2, 3, 4, 5].map(() => ({ chunkId: "walk-10" }));
+  const recorder = postRecorder(booted, chain);
+  const offers = { nextCard: { slot: "evening", chunkId: "walk-10" }, areaChunk: { chunkId: "walk-14" } };
+  mountOn(booted, chain, { post: recorder.post, offers });
+
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 3625);
+  await settle();
+
+  assert.ok(byRole(booted.host, "end"), "the session reached its end");
+  assert.equal(byRole(booted.host, "one-more-round"), null, "no round to add");
+  assert.equal(byRole(booted.host, "add-ten"), null, "no chunk to add");
+  const capNote = byRole(booted.host, "cap-note");
+  assert.ok(capNote, "the cap has its own word");
+  assert.equal(capNote.textContent, COPY["player.sessionCap"]);
+  assert.ok(byRole(booted.host, "thats-it"), "the way out is still there");
+  assert.equal(recorder.posted.length, 6);
+});
+
+test("finish: the water and rest note shows after thirty active minutes, and not before", async () => {
+  const short = boot();
+  const shortChain = [{ chunkId: "walk-10" }, { chunkId: "walk-10" }];
+  const shortRecorder = postRecorder(short, shortChain);
+  mountOn(short, shortChain, { post: shortRecorder.post });
+  byRole(short.host, "start").click();
+  advance(short.clock, 1205);
+  await settle();
+  assert.ok(byRole(short.host, "end"));
+  assert.equal(byRole(short.host, "water-note"), null, "twenty active minutes is not thirty");
+
+  const long = boot();
+  const longChain = [{ chunkId: "walk-10" }, { chunkId: "walk-10" }, { chunkId: "walk-10" }];
+  const longRecorder = postRecorder(long, longChain);
+  mountOn(long, longChain, { post: longRecorder.post });
+  byRole(long.host, "start").click();
+  advance(long.clock, 1810);
+  await settle();
+  const water = byRole(long.host, "water-note");
+  assert.ok(water, "thirty active minutes brings the note");
+  assert.equal(water.textContent, COPY["player.waterAndRest"]);
+});
+
+test("finish: That's it hides the choices, keeps the result lines and drops the resume record", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "routine-10" }];
+  const storage = fakeStorage({
+    "ramble.player.resume.routine-10": JSON.stringify({ segmentIndex: 0, activeSeconds: [0] }),
+  });
+  const recorder = postRecorder(booted, chain);
+  const heard = [];
+  const { player } = mountOn(booted, chain, {
+    post: recorder.post,
+    storage,
+    onEvent: (event) => { if (event.type === "left") heard.push(event.type); },
+  });
+
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 604);
+  await settle();
+  assert.notEqual(storage.getItem("ramble.player.resume.routine-10"), null,
+    "the record is still in storage at the end screen");
+
+  byRole(booted.host, "thats-it").click();
+
+  assert.equal(byRole(booted.host, "end"), null, "the end screen and its choices go");
+  assert.equal(byRole(booted.host, "one-more-round"), null);
+  assert.equal(allByRole(booted.host, "chunk-result").length, 1, "the result lines stay");
+  assert.equal(storage.getItem("ramble.player.resume.routine-10"), null, "nothing is left to pick up");
+  assert.deepEqual(heard, ["left"]);
+  assert.equal(player.state().finished, true);
+});
+
+test("finish: a chunk the clock never reached is not posted", async () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }, { chunkId: "walk-10" }];
+  const recorder = postRecorder(booted, chain);
+  mountOn(booted, chain, { post: recorder.post });
+
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 100);
+  byRole(booted.host, "finish").click();
+  await settle();
+
+  assert.equal(recorder.posted.length, 1, "a chunk with no active time is never posted");
+  assert.deepEqual(JSON.parse(JSON.stringify(recorder.posted[0])),
+    { chunkIndex: 0, entryId: "walk-10", activeSeconds: 100 });
+  assert.equal(allByRole(booted.host, "chunk-result").length, 1);
+});
+
+test("finish: a page with no posting, or a post that rejects, decides Done locally", async () => {
+  const chain = [{ chunkId: "routine-10" }];
+
+  const bare = boot();
+  mountOn(bare, chain);
+  byRole(bare.host, "start").click();
+  advance(bare.clock, 302);
+  byRole(bare.host, "finish").click();
+  await settle();
+  assert.equal(allByRole(bare.host, "chunk-result")[0].textContent, COPY["today.card.isDone"],
+    "half the chunk is done even with nobody to ask");
+
+  const angry = boot();
+  mountOn(angry, chain, { post: () => Promise.reject(new Error("no posting today")) });
+  byRole(angry.host, "start").click();
+  advance(angry.clock, 301);
+  byRole(angry.host, "finish").click();
+  await settle();
+  assert.equal(allByRole(angry.host, "chunk-result")[0].textContent, COPY["today.card.resume"]);
+  assert.ok(byRole(angry.host, "note"));
+
+  /* A storage that throws is a page with none. */
+  const stuck = {
+    getItem() { throw new Error("no storage here"); },
+    setItem() { throw new Error("no storage here"); },
+    removeItem() { throw new Error("no storage here"); },
+  };
+  const throwing = boot();
+  assert.doesNotThrow(() => mountOn(throwing, chain, { storage: stuck }));
+  assert.equal(byRole(throwing.host, "resume-line"), null);
+  byRole(throwing.host, "start").click();
+  advance(throwing.clock, 302);
+  assert.doesNotThrow(() => byRole(throwing.host, "finish").click());
+  await settle();
+  assert.equal(allByRole(throwing.host, "chunk-result").length, 1);
+});
+
+test("finish: a page whose post answers at once is answered at once", () => {
+  const booted = boot();
+  const chain = [{ chunkId: "walk-10" }];
+  const posted = [];
+  const heard = [];
+  mountOn(booted, chain, {
+    post: (payload) => {
+      posted.push(payload);
+      return { paid: true, total: 1, done: true, capped: false, accepted: true };
+    },
+    onEvent: (event) => { if (event.type === "left") heard.push(event.type); },
+  });
+
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 100);
+  byRole(booted.host, "finish").click();
+
+  assert.equal(posted.length, 1);
+  const lines = allByRole(booted.host, "chunk-result");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].textContent, COPY["today.card.isDone"],
+    "the page's own answer decides Done, not the half-time rule");
+  assert.deepEqual(heard, ["left"]);
+});
+

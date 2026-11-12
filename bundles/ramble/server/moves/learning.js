@@ -102,6 +102,18 @@ export async function flowLevel(db, flowId) {
 }
 
 /**
+ * The guidance an entry is actually run at. A strength routine is a list of
+ * names, not a script that fades: at "first" and "memory" it still shows its
+ * names, so a routine never runs with less guidance than that. Every other
+ * kind keeps the level it was given.
+ */
+export function guidanceFor(level, entry) {
+  const kind = entry && typeof entry === "object" ? entry.kind : null;
+  if (kind === "routine" && (level === "first" || level === "memory")) return "names";
+  return level;
+}
+
+/**
  * Record the outcome of one flow run at the guidance level it was done with.
  *
  * `outcome: "smooth"` counts (one `flowrun` increment at that level, by

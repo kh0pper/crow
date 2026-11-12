@@ -153,22 +153,24 @@
         state: function () {
           return {
             layout: null, started: false, segmentIndex: 0, paused: true,
-            ended: false, sheetOpen: false
+            ended: false, sheetOpen: false, finished: false
           };
         }
       };
     }
 
     var copy = (options.copy && typeof options.copy === "object") ? options.copy : {};
-    /* The controls ask the page for a wake lock while the session runs and
-     * report each move to a page-supplied listener; posting and storing come
-     * later. */
+    /* The page supplies the wake lock, the listener that hears each move, the
+     * posting that decides Done and the storage a resume record lives in. */
     var hooks = {
       post: typeof options.post === "function" ? options.post : null,
       storage: options.storage === undefined ? null : options.storage,
       wakeLock: options.wakeLock === undefined ? null : options.wakeLock,
       onEvent: typeof options.onEvent === "function" ? options.onEvent : null
     };
+    /* What the page's day offers beyond this session: its next card and the
+     * chunk that matches the area just worked. Either may be absent. */
+    var offers = (options.offers && typeof options.offers === "object") ? options.offers : {};
     var Figure = figureApi();
     var reduced = typeof options.reducedMotion === "boolean"
       ? options.reducedMotion
@@ -196,6 +198,13 @@
       : defaultClearInterval;
 
     var clock = Session.createClock({ timeline: timeline, now: nowFn });
+
+    /* A record an earlier visit left behind, read before anything is built so
+     * its line can sit with the page's own: the counts it holds are added to
+     * what this visit earns, and the first Start picks up at its segment. */
+    var resumeRecord = readResumeRecord();
+    var base = resumeRecord ? resumeRecord.activeSeconds : [];
+    var pendingSeek = resumeRecord ? resumeRecord.segmentIndex : null;
 
     /* ---------- the elements ---------- */
 
@@ -246,6 +255,19 @@
     var setDoneText = copyString("player.setDone");
     var skipRestText = copyString("player.rest.skip");
     var moreText = copyString("player.more");
+    var finishText = copyString("player.finishHere");
+    var resumeLineText = copyString("today.card.resume");
+    var doneCardText = copyString("today.card.isDone");
+    var resumeCardText = copyString("today.card.resume");
+    var notYetText = copyString("player.end.notYet");
+    var endTitleText = copyString("player.end.title");
+    var summaryText = copyString("player.end.summary");
+    var oneMoreRoundText = copyString("player.end.oneMoreRound");
+    var addTenText = copyString("player.end.addTen");
+    var addTenNextText = copyString("player.end.addTen.nextCard");
+    var thatsItText = copyString("player.end.thatsIt");
+    var waterText = copyString("player.waterAndRest");
+    var capText = copyString("player.sessionCap");
 
     /* A control exists only when the page's copy carries its word. */
     function makeButton(role, label) {
@@ -261,6 +283,8 @@
     els.start = build("button", "start");
     els.start.setAttribute("type", "button");
     if (startText !== "") els.start.textContent = startText;
+    els.resumeLine = resumeRecord && resumeLineText !== "" ? build("div", "resume-line") : null;
+    if (els.resumeLine) els.resumeLine.textContent = resumeLineText;
     els.figure = build("div", "figure");
     els.name = build("div", "name");
     els.cue = build("div", "cue");
@@ -273,6 +297,7 @@
     els.setDone = makeButton("set-done", setDoneText);
     els.skipRest = makeButton("skip-rest", skipRestText);
     els.more = makeButton("more", moreText);
+    els.finish = makeButton("finish", finishText);
     els.pause = makeButton("pause", pauseText);
     els.status = pausedText === "" ? null : build("div", "status");
     if (els.status) els.status.textContent = pausedText;
@@ -288,9 +313,14 @@
     els.sheet.appendChild(els.sheetTitle);
     els.sheet.appendChild(els.sheetSteps);
     if (els.sheetClose) els.sheet.appendChild(els.sheetClose);
+    /* The lines a visit leaves behind, and the end screen itself. Both are put
+     * on the host only when there is something to show. */
+    els.result = build("div", "result");
+    els.end = build("div", "end");
 
     append(els.safety);
     if (startText !== "") append(els.start);
+    if (els.resumeLine) append(els.resumeLine);
     append(els.figure);
     append(els.name);
     append(els.cue);
@@ -306,6 +336,12 @@
     var intervalId = null;
     var intervalLive = false;
     var unsubscribe = null;
+    /* Once a visit is over the transport stays away: the terminal flag says
+     * the controls belong to no running session any more. */
+    var finished = false;
+    var endShown = false;
+    var terminal = false;
+    var addOptionsShown = false;
 
     function segmentAt(index) {
       return segments[index] ? segments[index] : null;
@@ -452,6 +488,482 @@
       return segment ? segment.type : null;
     }
 
+    /* ---------- chunk counts, posting and the resume record ---------- */
+
+    function chunkCount() {
+      return Array.isArray(timeline.chunks) ? timeline.chunks.length : 0;
+    }
+
+    function chunkIdOf(index) {
+      var chunk = Array.isArray(timeline.chunks) ? timeline.chunks[index] : null;
+      return chunk && typeof chunk.chunkId === "string" ? chunk.chunkId : "";
+    }
+
+    function plannedOf(index) {
+      var chunk = Array.isArray(timeline.chunks) ? timeline.chunks[index] : null;
+      return chunk && typeof chunk.plannedSeconds === "number" ? chunk.plannedSeconds : 0;
+    }
+
+    /* What an earlier visit already earned for one chunk. */
+    function baseAt(index) {
+      var value = base[index];
+      return typeof value === "number" && isFinite(value) && value > 0 ? value : 0;
+    }
+
+    /* One chunk's active seconds now: whatever was restored plus what the clock
+     * has counted since the mount. The clock counts a step's own time only, so
+     * a rest, a pause and a skipped step add nothing here. */
+    function activeAt(index, snap) {
+      var counted = snap && Array.isArray(snap.activeSeconds) ? snap.activeSeconds[index] : 0;
+      var seen = typeof counted === "number" && isFinite(counted) && counted > 0 ? counted : 0;
+      return baseAt(index) + seen;
+    }
+
+    function activeList(snap) {
+      var list = [];
+      for (var i = 0; i < chunkCount(); i += 1) list.push(activeAt(i, snap));
+      return list;
+    }
+
+    function totalActive(snap) {
+      var list = activeList(snap);
+      var total = 0;
+      for (var i = 0; i < list.length; i += 1) total += list[i];
+      return total;
+    }
+
+    function resumeKey() {
+      var ids = [];
+      for (var i = 0; i < chunkCount(); i += 1) ids.push(chunkIdOf(i));
+      return "ramble.player.resume." + ids.join("|");
+    }
+
+    /* A page that offers no storage, or a storage that throws, is a page with
+     * none: the session runs and nothing is remembered. */
+    function storageGet(key) {
+      var store = hooks.storage;
+      if (!store || typeof store.getItem !== "function") return null;
+      try {
+        var value = store.getItem(key);
+        return typeof value === "string" ? value : null;
+      } catch (err) {
+        return null;
+      }
+    }
+
+    function storageSet(key, value) {
+      var store = hooks.storage;
+      if (!store || typeof store.setItem !== "function") return;
+      try {
+        store.setItem(key, value);
+      } catch (err) {
+        return;
+      }
+    }
+
+    function storageDrop(key) {
+      var store = hooks.storage;
+      if (!store || typeof store.removeItem !== "function") return;
+      try {
+        store.removeItem(key);
+      } catch (err) {
+        return;
+      }
+    }
+
+    /* The resume record, when its shape is one this player wrote. Anything else
+     * is no record at all and is ignored. */
+    function readResumeRecord() {
+      var raw = storageGet(resumeKey());
+      if (raw === null || raw === "") return null;
+      var data;
+      try {
+        data = JSON.parse(raw);
+      } catch (err) {
+        return null;
+      }
+      if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+      if (!Number.isInteger(data.segmentIndex) || data.segmentIndex < 0) return null;
+      if (!Array.isArray(data.activeSeconds)) return null;
+      var counts = [];
+      for (var i = 0; i < data.activeSeconds.length; i += 1) {
+        var value = data.activeSeconds[i];
+        if (typeof value !== "number" || !isFinite(value) || value < 0) return null;
+        counts.push(value);
+      }
+      var at = data.segmentIndex;
+      if (at > segments.length - 1) at = segments.length - 1;
+      return { segmentIndex: at, activeSeconds: counts };
+    }
+
+    function saveResume() {
+      var snap = clock.state();
+      storageSet(resumeKey(), JSON.stringify({
+        segmentIndex: snap.segmentIndex,
+        activeSeconds: activeList(snap)
+      }));
+    }
+
+    function dropResume() {
+      storageDrop(resumeKey());
+    }
+
+    /* Half a chunk's planned time is the done line, the rule the rest of Ramble
+     * reads; a page with no posting to ask leaves it deciding. */
+    function locallyDone(index, active) {
+      try {
+        return Session.isChunkDone(plannedOf(index), active) === true;
+      } catch (err) {
+        return false;
+      }
+    }
+
+    function doneFrom(answer, fallback) {
+      if (!answer || typeof answer !== "object") return fallback;
+      if (typeof answer.done === "boolean") return answer.done;
+      return fallback;
+    }
+
+    /* One chunk's report to the page. A page with no posting, a post that
+     * throws and a post that rejects all leave the local rule deciding, and a
+     * page whose post answers at once is answered at once. */
+    function postOne(index, active) {
+      var payload = { chunkIndex: index, entryId: chunkIdOf(index), activeSeconds: active };
+      var fallback = locallyDone(index, active);
+      var answer = null;
+      if (hooks.post) {
+        try {
+          answer = hooks.post(payload);
+        } catch (err) {
+          answer = null;
+        }
+      }
+      if (!answer || typeof answer.then !== "function") {
+        return { index: index, activeSeconds: active, done: doneFrom(answer, fallback) };
+      }
+      return Promise.resolve(answer).then(function (value) {
+        return { index: index, activeSeconds: active, done: doneFrom(value, fallback) };
+      }, function () {
+        return { index: index, activeSeconds: active, done: fallback };
+      });
+    }
+
+    /* Hand the finished reports to the caller: at once when every page answer
+     * was already in hand, otherwise once the last one lands. */
+    function settleJobs(jobs, onDone) {
+      var waiting = false;
+      var all = [];
+      for (var i = 0; i < jobs.length; i += 1) {
+        var job = jobs[i];
+        var pending = Boolean(job) && typeof job.then === "function";
+        if (pending) waiting = true;
+        all.push(pending ? job : Promise.resolve(job));
+      }
+      if (!waiting) {
+        onDone(jobs);
+        return;
+      }
+      Promise.all(all).then(function (values) { onDone(values); }, function () {
+        onDone(jobs);
+      });
+    }
+
+    /* Every chunk the clock counted time for, in chain order. A chunk with no
+     * active time is never posted. */
+    function postCounted(onDone) {
+      var snap = clock.state();
+      var jobs = [];
+      for (var i = 0; i < chunkCount(); i += 1) {
+        var active = activeAt(i, snap);
+        if (!(active > 0)) continue;
+        jobs.push(postOne(i, active));
+      }
+      settleJobs(jobs, onDone);
+    }
+
+    function anyDone(list) {
+      for (var i = 0; i < list.length; i += 1) {
+        if (list[i] && list[i].done === true) return true;
+      }
+      return false;
+    }
+
+    /* Every chunk of the chain counted as done, so there is nothing left to
+     * pick up. */
+    function everyChunkDone(list) {
+      if (chunkCount() === 0) return false;
+      for (var index = 0; index < chunkCount(); index += 1) {
+        var found = false;
+        for (var i = 0; i < list.length; i += 1) {
+          if (list[i] && list[i].index === index && list[i].done === true) found = true;
+        }
+        if (!found) return false;
+      }
+      return true;
+    }
+
+    function showResults(list) {
+      clearChildren(els.result);
+      for (var i = 0; i < list.length; i += 1) {
+        var line = build("div", "chunk-result");
+        line.setAttribute("data-chunk", String(list[i].index));
+        line.textContent = list[i].done === true ? doneCardText : resumeCardText;
+        els.result.appendChild(line);
+      }
+      if (!anyDone(list) && notYetText !== "") {
+        var note = build("div", "note");
+        note.textContent = notYetText;
+        els.result.appendChild(note);
+      }
+      attach(els.result);
+    }
+
+    /* ---------- leaving, and the end screen ---------- */
+
+    function restHintSeconds() {
+      var hint = Session ? Session.REST_HINT_SECONDS : null;
+      return typeof hint === "number" && isFinite(hint) ? hint : 1800;
+    }
+
+    function hideTransport() {
+      clearChildren(els.transport);
+      removeNode(els.transport, host);
+    }
+
+    /* The clock stops where it is and the wake lock goes back the way a pause
+     * hands it back. */
+    function leaveRunning() {
+      try {
+        if (!clock.state().paused) clock.pause();
+      } catch (err) {
+        return;
+      }
+      dropWakeLock();
+    }
+
+    function onFinishClick() {
+      if (!started || finished || endShown) return;
+      finished = true;
+      terminal = true;
+      leaveRunning();
+      hideTransport();
+      postCounted(function (list) {
+        showResults(list);
+        if (everyChunkDone(list)) dropResume();
+        else saveResume();
+        report({ type: "left" });
+      });
+    }
+
+    function canAdd(addition) {
+      try {
+        var answer = Session.canExtend(timeline, clock.state(), options.library, addition);
+        return Boolean(answer && answer.ok === true);
+      } catch (err) {
+        return false;
+      }
+    }
+
+    /* Today's card label: the slot's own word from the page's copy, inside the
+     * copy's own sentence. No word, no label. */
+    function cardLabel(slot) {
+      if (typeof slot !== "string" || slot === "") return "";
+      var word = copy["settings.slot." + slot];
+      if (typeof word !== "string" || word === "") return "";
+      return fill(addTenNextText, { slot: word });
+    }
+
+    function lastChunkId() {
+      var count = chunkCount();
+      return count > 0 ? chunkIdOf(count - 1) : "";
+    }
+
+    /* The additions the end screen offers, in the order it shows them: today's
+     * next card, the chunk that shares the area just worked, and the chunk
+     * again. An addition the session will not take is left out, and so is one
+     * whose library title is missing. */
+    function chunkAdditions() {
+      var list = [];
+      var card = offers.nextCard && typeof offers.nextCard === "object" ? offers.nextCard : null;
+      if (card && typeof card.chunkId === "string" && card.chunkId !== "") {
+        var cardText = cardLabel(card.slot);
+        if (cardText !== "" && canAdd({ addChunk: card.chunkId })) {
+          list.push({ chunkId: card.chunkId, label: cardText });
+        }
+      }
+      var area = offers.areaChunk && typeof offers.areaChunk === "object" ? offers.areaChunk : null;
+      if (area && typeof area.chunkId === "string" && area.chunkId !== "") {
+        var areaTitle = titleOf(area.chunkId);
+        if (areaTitle !== "" && canAdd({ addChunk: area.chunkId })) {
+          list.push({ chunkId: area.chunkId, label: areaTitle });
+        }
+      }
+      var again = lastChunkId();
+      if (again !== "") {
+        var againTitle = titleOf(again);
+        if (againTitle !== "" && canAdd({ addChunk: again })) {
+          list.push({ chunkId: again, label: againTitle });
+        }
+      }
+      return list;
+    }
+
+    /* One summary line per chunk the visit spent active time on, with that
+     * chunk's own library title. */
+    function summaryRows(snap) {
+      var rows = [];
+      if (summaryText === "") return rows;
+      for (var i = 0; i < chunkCount(); i += 1) {
+        var active = activeAt(i, snap);
+        if (!(active > 0)) continue;
+        var name = titleOf(chunkIdOf(i));
+        if (name === "") continue;
+        var row = build("div", "summary");
+        row.textContent = fill(summaryText, { minutes: Math.round(active / 60), name: name });
+        rows.push(row);
+      }
+      return rows;
+    }
+
+    /* The session goes on from an addition: the new timeline under the same
+     * clock, the end screen away, the clock playing again. */
+    function onAddition(next) {
+      if (!next || !Array.isArray(next.segments) || next.segments.length === 0) return;
+      timeline = next;
+      segments = next.segments;
+      try {
+        clock.setTimeline(timeline);
+      } catch (err) {
+        return;
+      }
+      hideEnd();
+      rebuildStrip();
+      paint();
+      playNow(false);
+    }
+
+    function onOneMoreRoundClick() {
+      var next;
+      try {
+        next = Session.extend(timeline, clock.state(), options.library, { addRound: true });
+      } catch (err) {
+        return;
+      }
+      onAddition(next);
+    }
+
+    function onAddOptionClick(chunkId) {
+      return function () {
+        var next;
+        try {
+          next = Session.extend(timeline, clock.state(), options.library, { addChunk: chunkId });
+        } catch (err) {
+          return;
+        }
+        onAddition(next);
+      };
+    }
+
+    function onAddTenClick() {
+      if (addOptionsShown) return;
+      var additions = chunkAdditions();
+      if (additions.length === 0) return;
+      addOptionsShown = true;
+      var panel = build("div", "add-options");
+      for (var i = 0; i < additions.length; i += 1) {
+        var button = makeButton("add-option", additions[i].label);
+        if (!button) continue;
+        button.addEventListener("click", onAddOptionClick(additions[i].chunkId));
+        panel.appendChild(button);
+      }
+      els.addOptions = panel;
+      els.end.appendChild(panel);
+      attach(els.end);
+    }
+
+    function hideEnd() {
+      endShown = false;
+      terminal = false;
+      addOptionsShown = false;
+      clearChildren(els.end);
+      clearChildren(els.result);
+      removeNode(els.end, host);
+      removeNode(els.result, host);
+    }
+
+    function onThatsItClick() {
+      if (finished) return;
+      finished = true;
+      endShown = false;
+      addOptionsShown = false;
+      terminal = true;
+      hideTransport();
+      clearChildren(els.end);
+      removeNode(els.end, host);
+      dropResume();
+      report({ type: "left" });
+    }
+
+    /* None of the end screen's choices is picked for the person: no button is
+     * pressed, nothing takes the focus, nothing counts down and nothing
+     * happens by itself. */
+    function showEnd(snap) {
+      clearChildren(els.end);
+      var title = build("div", "end-title");
+      title.textContent = endTitleText;
+      els.end.appendChild(title);
+
+      var rows = summaryRows(snap);
+      for (var i = 0; i < rows.length; i += 1) els.end.appendChild(rows[i]);
+
+      var rounds = canAdd({ addRound: true });
+      var additions = chunkAdditions();
+      var atCap = !rounds && additions.length === 0;
+
+      if (rounds && !atCap) {
+        var oneMore = makeButton("one-more-round", oneMoreRoundText);
+        if (oneMore) {
+          oneMore.addEventListener("click", onOneMoreRoundClick);
+          els.end.appendChild(oneMore);
+        }
+      }
+      if (additions.length > 0 && !atCap) {
+        var addTen = makeButton("add-ten", addTenText);
+        if (addTen) {
+          addTen.addEventListener("click", onAddTenClick);
+          els.end.appendChild(addTen);
+        }
+      }
+      var thatsIt = makeButton("thats-it", thatsItText);
+      if (thatsIt) {
+        thatsIt.addEventListener("click", onThatsItClick);
+        els.end.appendChild(thatsIt);
+      }
+      if (atCap && capText !== "") {
+        var capNote = build("div", "cap-note");
+        capNote.textContent = capText;
+        els.end.appendChild(capNote);
+      }
+      if (waterText !== "" && totalActive(snap) >= restHintSeconds()) {
+        var waterNote = build("div", "water-note");
+        waterNote.textContent = waterText;
+        els.end.appendChild(waterNote);
+      }
+      attach(els.end);
+    }
+
+    function onClockEnd() {
+      if (finished || endShown) return;
+      endShown = true;
+      terminal = true;
+      hideTransport();
+      postCounted(function (list) {
+        showEnd(clock.state());
+        showResults(list);
+        report({ type: "ended" });
+      });
+    }
+
     /* ---------- the wake lock ---------- */
 
     var wakeWanted = false;
@@ -595,6 +1107,12 @@
     /* The row of controls holds exactly the buttons this segment offers, in
      * one order, so a repaint never reshuffles them. */
     function paintTransport() {
+      if (terminal) {
+        clearChildren(els.transport);
+        removeNode(els.transport, host);
+        return;
+      }
+      if (els.transport.parentNode !== host) attach(els.transport);
       var snap = clock.state();
       var type = segmentTypeNow();
       var wanted = [];
@@ -605,6 +1123,7 @@
       if (els.more) wanted.push(els.more);
       if (els.pause && started) wanted.push(els.pause);
       if (els.status && started && snap.paused) wanted.push(els.status);
+      if (els.finish && started) wanted.push(els.finish);
       if (els.pause) {
         var label = snap.paused && keepGoingText !== "" ? keepGoingText : pauseText;
         if (els.pause.textContent !== label) els.pause.textContent = label;
@@ -645,6 +1164,19 @@
         stripNodes.push(node);
         stripIndexes.push(i);
       }
+    }
+
+    /* The strip is built from the timeline in hand, so an addition that adds
+     * steps to the session rebuilds it. */
+    function rebuildStrip() {
+      for (var s = 0; s < stripHandlers.length; s += 1) {
+        stripHandlers[s].node.removeEventListener("click", stripHandlers[s].handler);
+      }
+      stripHandlers.length = 0;
+      stripNodes.length = 0;
+      stripIndexes.length = 0;
+      clearChildren(els.strip);
+      buildStrip();
     }
 
     function paintStrip(index) {
@@ -692,6 +1224,20 @@
       removeNode(els.safety, host);
       removeNode(els.start, host);
       els.safety = null;
+      if (els.resumeLine) {
+        removeNode(els.resumeLine, host);
+        els.resumeLine = null;
+      }
+      /* A visit picking up a record starts at the segment it left off on; the
+       * seek comes before the play, so no time is counted on the way there. */
+      if (pendingSeek !== null) {
+        try {
+          clock.seek(pendingSeek);
+        } catch (err) {
+          /* a bad index is no reason to stay stopped */
+        }
+        pendingSeek = null;
+      }
       playNow(false);
       startInterval();
       paint();
@@ -706,6 +1252,7 @@
     }
 
     els.start.addEventListener("click", onStart);
+    if (els.finish) els.finish.addEventListener("click", onFinishClick);
     if (els.pause) els.pause.addEventListener("click", onPauseClick);
     if (els.back) els.back.addEventListener("click", onBackClick);
     if (els.skip) els.skip.addEventListener("click", onSkipClick);
@@ -722,7 +1269,12 @@
      * stretch. */
     unsubscribe = clock.on(function (event) {
       paint();
-      if (!event || event.type !== "segment") return;
+      if (!event) return;
+      if (event.type === "end") {
+        onClockEnd();
+        return;
+      }
+      if (event.type !== "segment") return;
       var at = event.state && Number.isInteger(event.state.segmentIndex)
         ? event.state.segmentIndex
         : clock.state().segmentIndex;
@@ -731,7 +1283,7 @@
       report({ type: "segment", index: at });
     });
 
-    buildStrip();
+    rebuildStrip();
     paintTransport();
 
     function state() {
@@ -742,7 +1294,8 @@
         segmentIndex: snap.segmentIndex,
         paused: snap.paused,
         ended: snap.ended,
-        sheetOpen: sheetOpen
+        sheetOpen: sheetOpen,
+        finished: finished
       };
     }
 
@@ -758,6 +1311,7 @@
       }
       dropWakeLock();
       els.start.removeEventListener("click", onStart);
+      if (els.finish) els.finish.removeEventListener("click", onFinishClick);
       if (els.pause) els.pause.removeEventListener("click", onPauseClick);
       if (els.back) els.back.removeEventListener("click", onBackClick);
       if (els.skip) els.skip.removeEventListener("click", onSkipClick);

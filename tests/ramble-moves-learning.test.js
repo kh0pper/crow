@@ -19,7 +19,7 @@ import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { rowDelta } from "../bundles/ramble/server/steps.js";
 import {
   FLOW_RUN_KIND, FLOW_MEMORY_KIND, GUIDANCE, FLOW_RUNS_TO_ADVANCE,
-  LearningInputError, recordFlowRun, flowLevel, learningFlows,
+  LearningInputError, recordFlowRun, flowLevel, guidanceFor, learningFlows,
 } from "../bundles/ramble/server/moves/learning.js";
 import { applyRambleWallet } from "../servers/sharing/instance-sync.js";
 
@@ -269,7 +269,6 @@ test("MULTI-INSTANCE: synced flow rows converge, and re-applying them changes no
 });
 
 /* ------------------------------------------------------------ learningFlows */
-
 test("learningFlows lists flows with a counted run and no memory fact, in library order", async () => {
   const library = [
     { id: "flow-a", kind: "flow" },
@@ -341,4 +340,29 @@ test("learningFlows accepts a Map library and tolerates a missing one", async ()
   assert.deepEqual(await learningFlows(db, null), []);
   assert.deepEqual(await learningFlows(db, undefined), []);
   assert.deepEqual(await learningFlows(db, []), []);
+});
+
+/* ------------------------------------------------------------ routine guidance */
+
+test("guidanceFor never takes a strength routine past names", () => {
+  const routine = { id: "strength-routine", kind: "routine" };
+  assert.equal(guidanceFor("full", routine), "full");
+  assert.equal(guidanceFor("names", routine), "names");
+  assert.equal(guidanceFor("first", routine), "names", "first becomes names for a routine");
+  assert.equal(guidanceFor("memory", routine), "names", "memory becomes names for a routine");
+
+  const flow = { id: "morning-flow", kind: "flow" };
+  for (const level of GUIDANCE) {
+    assert.equal(guidanceFor(level, flow), level, "a flow keeps every level it is given");
+  }
+
+  /* The other kinds follow the flow rule: nothing of theirs is faded out. */
+  for (const kind of ["pose", "exercise", "walk", "landmark"]) {
+    assert.equal(guidanceFor("memory", { id: "one-entry", kind }), "memory");
+  }
+
+  /* A missing entry or level passes straight through. */
+  assert.equal(guidanceFor("first", null), "first");
+  assert.equal(guidanceFor("first", {}), "first");
+  assert.equal(guidanceFor(undefined, routine), undefined);
 });
