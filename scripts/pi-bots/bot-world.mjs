@@ -254,6 +254,10 @@ async function writeWorldMcp(a, sessionId) {
       // never a channel or job turn (mcp_writer.mjs buildBotMcp).
       interactive: a.gatewayType === "perch" && !a.jobId,
       write: a.mcpDelivery === "file",
+      // Task 2.3: a sealed add-on's keychain values may only travel on the fd a `write: false`
+      // turn pipes to pi (mcp-delivery.mjs). A file-mode turn must never ask for them — the
+      // writer would refuse the combination anyway, so the two switches are the same switch.
+      addonKeys: a.mcpDelivery === "fd" ? "hydrate" : "omit",
     });
     mcpConfig = w.json || null;
     // Project services (Task 18, R6 vs PR-B): withServiceBlocks stored this turn's blocks here

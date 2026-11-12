@@ -396,7 +396,10 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     }
     try {
       const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {}, ...jobActor(job), displayName: bot.display_name,
-        write: mcpDelivery === "file" });
+        write: mcpDelivery === "file",
+        // Task 2.3: a sealed add-on's values may only reach a child on the config fd
+        // (mcp-delivery.mjs) — hydrate there, never for a file.
+        addonKeys: mcpDelivery === "fd" ? "hydrate" : "omit" });
       mcpConfig = (w && w.json) || null;
     } catch (e) { log("job mcp.json write skipped (non-fatal): " + ((e && e.message) || e)); }
     // Project services (Task 18): the owner's connected accounts as labelled blocks, only for a
