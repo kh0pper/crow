@@ -15,6 +15,10 @@
  *                                                be opened
  *   <CROW_HOME>/secrets/bundle-env/*.env        no: hidden dir       yes
  *     (retained generated bundle secrets)        (tmpfs, read-only)
+ *   <CROW_HOME>/secrets/bot-git/<id>/...        no: hidden dir       yes (display
+ *     (per-bot git keys, bot-git/store.js)       (tmpfs, read-only)   only: never
+ *                                                                     a card, which
+ *                                                                     pi receives)
  *   <CROW_HOME>/.env, checkout .env, env/*.env  yes                  no
  *   <CROW_HOME>/bundles/<id>/.env, manifests    yes                  no
  *   <CROW_HOME>/*-token                         yes                  no
@@ -45,6 +49,7 @@ import {
 } from "./secret-values.js";
 import { loadKeychainKey } from "../gateway/keychain/key.js";
 import { readableSecretsSync } from "../gateway/keychain/store.js";
+import { botGitSecretValues } from "./bot-git/store.js";
 
 const MAX_SOURCE_BYTES = 256 * 1024;
 
@@ -117,9 +122,9 @@ function keychainEntries({ dbPath, env, transaction = false }) {
 /**
  * The sets from the trusted sources above (the one place they are built).
  *   display: every trusted value (manual keychain entries, generated-shaped
- *            extension entries, generated-shaped retained bundle secrets, and
- *            the service values below), for logs, notifications and
- *            transcripts, where nothing is approved.
+ *            extension entries, generated-shaped retained bundle secrets, the
+ *            service values below, and every per-bot git key body), for logs,
+ *            notifications and transcripts, where nothing is approved.
  *   card:    manual keychain entries only, and only shell-safe ones
  *            (safeShape). Extension and retained values can be steered by a
  *            bot through a bundle .env at the next reinstall or boot backfill,
@@ -172,8 +177,14 @@ export function collectSecretValueSets({ env = process.env, dbPath } = {}) {
   const service = entries
     .filter((e) => e.kind === "service" && serviceHashes.has(cardHashOf(e.secret)) && cardStrong(e.secret))
     .map((e) => e.secret);
+  // Per-bot git keys (bot-git/store.js): a bot's ssh key body may turn up in
+  // ssh's own output, in a transcript or in a notification, so it joins the
+  // display set. Never the card set: that set is the payload every bot's pi
+  // receives, and putting a key there would hand every bot every key. The key
+  // store is read for the SAME env this collection was asked about, never for
+  // this process's.
   return {
-    display: normalizeValues([...manual, ...minted, ...retained, ...service]),
+    display: normalizeValues([...manual, ...minted, ...retained, ...service, ...botGitSecretValues(env)]),
     card: normalizeValues(operator).filter(safeShape),
     service: normalizeValues(service),
   };
