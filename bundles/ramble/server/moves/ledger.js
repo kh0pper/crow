@@ -5,10 +5,11 @@
  *
  * TWO EARNERS, TWO BUDGETS. An indoor challenge Done and an indoor
  * "something else" log draw from ONE indoor budget (INDOOR_DAILY_CAP,
- * moves/indoor-cap.js — 24/day, the old 3 x 8 purse); outdoor logs draw from
- * their own (OUTDOOR_DAILY_CAP, 20/day). Which
- * budget an activity belongs to is the fixed-vocabulary question
- * `isOutdoorActivity` answers, so no model is ever in the loop.
+ * moves/indoor-cap.js — 40/day); outdoor logs draw from their own
+ * (OUTDOOR_DAILY_CAP — 40/day). Both budgets pay the same rate: a chunk of
+ * activity is 1.2 Health a minute, at most 20 for one entry, so a 10-minute
+ * chunk pays 12. Which budget an activity belongs to is the fixed-vocabulary
+ * question `isOutdoorActivity` answers, so no model is ever in the loop.
  *
  * HEALTH ONLY, NEVER SEED. Moves pay the pet's energy. The step goal keeps its
  * own seed bonus (steps.js `settleDay`) and nothing here writes a `seed` row.
@@ -28,7 +29,7 @@
  *
  * THE PAY RULE, same shape as steps.js `settleDay`: the cap row moves FIRST, by
  * compare-and-swap; then `petState` applies the decay the bird is already owed
- * (a `move` feed resets the decay clock, so decay applied afterwards would
+ * (a feed applies the owed decay first, so decay landing afterwards would
  * clamp the Health just paid away); then the pet is fed the increment. A lost
  * compare-and-swap, an exhausted budget or a crash between the two writes pays
  * 0 — every failure mode under-pays, never over-pays.
@@ -49,7 +50,7 @@ export const MOVE_DONE_KIND = "movedone";
 /** Wallet kind: key `<day>`, delta = outdoor Health paid that day. Grows, <= cap. */
 export const MOVE_OUTDOOR_KIND = "moveoutdoor";
 /** Outdoor self-reported activity, per local day. */
-export const OUTDOOR_DAILY_CAP = 20;
+export const OUTDOOR_DAILY_CAP = 40;
 /**
  * Wallet kind: key `<day>:<minuteOfDay>:<activity>:<minutes>:<effort>`, delta =
  * the Health this log paid. The key IS the dedup: the same parsed activity in
@@ -58,8 +59,26 @@ export const OUTDOOR_DAILY_CAP = 20;
  */
 export const MOVE_LOG_KIND = "movelog";
 
+/** Health per active minute: the chunk rate both earners pay by. */
+export const CHUNK_RATE = 1.2;
+/** The most one chunk (one card, one log) is worth, whatever its length. */
+export const CHUNK_MAX = 20;
+
+/**
+ * Health a chunk of activity pays: `round(1.2 x minutes)`, never more than
+ * CHUNK_MAX, and 0 for junk (not a number, not finite, or <= 0). Pure and
+ * integral, so every device reaches the same number from the same entry —
+ * which is what makes a `movelog` delta converge under MAX.
+ *
+ *   5 min -> 6      10 min -> 12      15 min -> 18      30 min -> 20
+ */
+export function chunkPoints(activeMinutes) {
+  if (typeof activeMinutes !== "number" || !Number.isFinite(activeMinutes) || activeMinutes <= 0) return 0;
+  return Math.min(CHUNK_MAX, Math.round(CHUNK_RATE * activeMinutes));
+}
+
 /** The most Health one logged activity is worth before the daily budget bites. */
-export const SINGLE_ENTRY_MAX = 20;
+export const SINGLE_ENTRY_MAX = CHUNK_MAX;
 /** Same ceiling the library puts on an entry's `minutes` (library.js). */
 export const LOG_MINUTES_MAX = 600;
 /** The fixed effort vocabulary. No free text reaches the ledger. */
@@ -67,14 +86,12 @@ export const EFFORTS = Object.freeze(["easy", "moderate", "hard"]);
 /** A challenge Done is always counted as moderate: the picker chose its size. */
 export const CHALLENGE_EFFORT = "moderate";
 
-const EFFORT_MULT = Object.freeze({ easy: 1, moderate: 1.5, hard: 2 });
-
 /**
  * Outdoor by ACTIVITY, from library.js's fixed vocabulary. `other` counts as
  * outdoor: it is the "something else" bucket a walk or a swim is most often
- * parsed into, and the outdoor budget is the tighter of the two only because
- * it is the one a step counter can corroborate — an uncorroborated claim
- * belongs in the smaller purse, not the larger.
+ * parsed into. Both budgets are 40 a day, so size is not what separates them —
+ * a step counter can corroborate an outdoor claim, and a corroborated claim is
+ * the one that counts as a real-movement fact (eggs.js `hasRealMovement`).
  */
 const OUTDOOR_ACTIVITIES = Object.freeze(["walk", "jog", "run", "cycle", "sport", "swim", "other"]);
 
@@ -87,22 +104,22 @@ export function isOutdoorActivity(activity) {
 }
 
 /**
- * Health one activity is worth: minutes/2, x1 easy / x1.5 moderate / x2 hard,
- * rounded, and never more than SINGLE_ENTRY_MAX for a single entry. Pure — the
- * same three fields give the same integer on every device, which is what makes
- * a `movelog` delta converge under MAX. Anything outside the fixed vocabularies
- * is worth 0 (a caller must not silently pay for junk; `recordLog` throws).
+ * Health one activity is worth: the chunk rate, 1.2 a minute, rounded, and
+ * never more than CHUNK_MAX for a single entry. The effort no longer changes
+ * the pay — a bigger card or a longer log is the only way to earn more — but
+ * it is still VALIDATED: it is one of the three fields a `movelog` key is
+ * built from, so junk in it would poison the ledger. Pure: the same fields
+ * give the same integer on every device, which is what makes a `movelog`
+ * delta converge under MAX. Anything outside the fixed vocabularies is worth
+ * 0 (a caller must not silently pay for junk; `recordLog` throws).
  *
- *   10 min easy      -> 5      10 min moderate  -> 8      10 min hard -> 10
- *   30 min moderate  -> 20 (22.5 rounds to 23, then the single-entry max bites)
- *   60 min hard      -> 20
+ *   10 min -> 12      30 min -> 20 (36, then the chunk max bites)      60 min -> 20
  */
 export function pointsFor({ activity, minutes, effort } = {}) {
   if (!ACTIVITY_KINDS.includes(activity)) return 0;
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > LOG_MINUTES_MAX) return 0;
-  const mult = Object.hasOwn(EFFORT_MULT, effort) ? EFFORT_MULT[effort] : null;
-  if (mult === null) return 0;
-  return Math.max(0, Math.min(SINGLE_ENTRY_MAX, Math.round((minutes / 2) * mult)));
+  if (!EFFORTS.includes(effort)) return 0;
+  return chunkPoints(minutes);
 }
 
 /**
@@ -133,22 +150,28 @@ async function pay(db, claim, { now, emit }) {
 }
 
 /**
- * Mark today's challenge Done and pay it. IDEMPOTENT PER DAY: the `movedone`
- * row is claimed first, so a double tap — or the same day's Done arriving from
- * two devices — pays once and every later call reports `already`.
+ * Mark today's challenge Done, and nothing else. IDEMPOTENT PER DAY: the
+ * `movedone` row is claimed with `insertOnce`, so a double tap — or the same
+ * day's Done arriving from two devices — marks once and every later call
+ * reports `fresh: false`.
+ *
+ * NO PAY. Not one Health, not one wallet budget row, no pet feed: the pay half
+ * is `recordChallengeDone` below, which is this call plus one claim. The card
+ * player marks each chunk as it goes, paying that chunk on the spot, and then
+ * marks the card at the end — two different facts, so two different writes.
  *
  * `day` is the day the challenge was PICKED for, and it is the caller's job to
  * pass it (Task 5 reads it off `moves.today`). That is the whole midnight rule:
- * picked at 23:58, Done at 00:02, the Health and the `movedone` fact are filed
- * under the day it was picked for, never under both days. A missing or junk
- * `day` falls back to the local day of `now`.
+ * picked at 23:58, Done at 00:02, the `movedone` fact is filed under the day it
+ * was picked for, never under both days. A missing or junk `day` falls back to
+ * the local day of `now`.
  *
  * Content gating is NOT this function's job: the server only ever hands out
  * entries from `servedLibrary` (reviewed, licensed). What is checked here is
- * that the entry can be paid at all, and that check runs BEFORE the day's Done
- * row is burned — a junk entry must not spend the player's one Done.
+ * that the entry COULD be paid, and that check runs BEFORE the day's Done row
+ * is burned — a junk entry must not spend the player's one Done.
  */
-export async function recordChallengeDone(db, { day, entry, now = Date.now(), emit } = {}) {
+export async function markChallengeDone(db, { day, entry, now = Date.now(), emit } = {}) {
   const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
   const d = capDayKey(day, at);
   if (!entry || typeof entry !== "object" || typeof entry.id !== "string" || entry.id === "") {
@@ -161,14 +184,32 @@ export async function recordChallengeDone(db, { day, entry, now = Date.now(), em
   }
 
   const fresh = await insertOnce(db, MOVE_DONE_KIND, d, 1, at, emit);
-  if (!fresh) return { paid: 0, already: true, day: d, points, capped: false };
+  return { fresh, day: d };
+}
+
+/**
+ * Mark today's challenge Done AND pay it: `markChallengeDone` plus one claim
+ * against the indoor or outdoor budget for `chunkPoints(entry.minutes)`. Kept
+ * for the old tap-Done client.
+ *
+ * A day that is already marked — by this call or by `markChallengeDone` — pays
+ * 0 (`already: true`): the mark was the player's one Done, and that card's
+ * Health is paid as its chunks, not on the tap.
+ *
+ * Returns `{ paid, already, day, points, capped, outdoor }`.
+ */
+export async function recordChallengeDone(db, { day, entry, now = Date.now(), emit } = {}) {
+  const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const mark = await markChallengeDone(db, { day, entry, now: at, emit });
+  const points = pointsFor({ activity: entry.activity, minutes: entry.minutes, effort: CHALLENGE_EFFORT });
+  if (!mark.fresh) return { paid: 0, already: true, day: mark.day, points, capped: false };
 
   const outdoor = entryIsOutdoor(entry);
   const claim = outdoor
-    ? await claimCapped(db, { kind: MOVE_OUTDOOR_KIND, cap: OUTDOOR_DAILY_CAP, day: d, points, now: at, emit })
-    : await claimIndoor(db, { day: d, points, now: at, emit });
+    ? await claimCapped(db, { kind: MOVE_OUTDOOR_KIND, cap: OUTDOOR_DAILY_CAP, day: mark.day, points, now: at, emit })
+    : await claimIndoor(db, { day: mark.day, points, now: at, emit });
   const paid = await pay(db, claim, { now: at, emit });
-  return { paid, already: false, day: d, points, capped: claim.capped, outdoor };
+  return { paid, already: false, day: mark.day, points, capped: claim.capped, outdoor };
 }
 
 /**

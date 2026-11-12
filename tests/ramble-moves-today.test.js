@@ -413,7 +413,7 @@ test("MIDNIGHT: a card picked at 23:58 and Done at 00:02 credits the picked day,
   assert.notEqual(localDay(doneAt), picked.day, "the fixture really does cross local midnight");
   const done = await recordChallengeDone(db, { day: picked.day, entry: picked.entry, now: doneAt });
   assert.equal(done.day, picked.day);
-  assert.equal(done.paid, 8);
+  assert.equal(done.paid, 12);
   assert.equal((await movesDay(db, { day: picked.day })).done, true);
 
   // The same card's second tap pays nothing.
@@ -489,8 +489,8 @@ test("TWO DEVICES: picks converge under the settings LWW, and Done pays once acr
   const doneB = await recordChallengeDone(b, {
     day: settledB.day, entry: settledB.entry, now: at + 120_000, emit: cb.emit,
   });
-  assert.equal(doneA.paid, 8);
-  assert.equal(doneB.paid, 8);
+  assert.equal(doneA.paid, 12);
+  assert.equal(doneB.paid, 12);
 
   for (const { op, row } of rowsOf(ca, "ramble_wallet")) await applyRambleWallet(b, op, row, 1);
   for (const { op, row } of rowsOf(cb, "ramble_wallet")) await applyRambleWallet(a, op, row, 1);
@@ -499,11 +499,11 @@ test("TWO DEVICES: picks converge under the settings LWW, and Done pays once acr
     // eslint-disable-next-line no-await-in-loop
     const day = await movesDay(db, { day: settledA.day });
     assert.equal(day.done, true, "the day is marked done on both");
-    assert.equal(day.indoorPaid, 8, "and paid once: MAX(delta) converges, it does not sum");
+    assert.equal(day.indoorPaid, 12, "and paid once: MAX(delta) converges, it does not sum");
     // eslint-disable-next-line no-await-in-loop
     assert.equal(await rowDelta(db, MOVE_DONE_KIND, settledA.day), 1);
     // eslint-disable-next-line no-await-in-loop
-    assert.equal(await rowDelta(db, MOVE_INDOOR_KIND, settledA.day), 8);
+    assert.equal(await rowDelta(db, MOVE_INDOOR_KIND, settledA.day), 12);
     // eslint-disable-next-line no-await-in-loop
     assert.equal((await todayChallenge(db, { now: at + 180_000, library: lib })).done, true);
   }
