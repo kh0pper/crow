@@ -30,6 +30,10 @@ export const BUNDLE_ENV_READABLE = ["browser", "workspace"];
  *
  * `.env` and its copies at a root are not named here: they are picked up by
  * the `.env*` name rule (isSecretEnvName), which masks every one of them.
+ * Neither is `mcp-addons.json` and its copies: they are picked up by the
+ * add-on name rule (isAddonsFileName) at the Crow home root only. The add-on
+ * env values carry keys, and the gateway side reads the file and hands those
+ * values to the bot in its `.mcp.json` blocks, so a bot never needs it.
  */
 export const ROOT_SECRET_FILES = [".keystore-env", "board-token", "phone-token", "artifacts-token"];
 
@@ -43,6 +47,23 @@ export const BUNDLE_ENV_NAME_RE = /^\.env(\..*)?$/;
  */
 export function isSecretEnvName(n) {
   return BUNDLE_ENV_NAME_RE.test(n) && !n.endsWith(".example");
+}
+
+/**
+ * A `mcp-addons.json` name at the Crow home root: the file itself, or any copy
+ * `mcp-addons.json.<anything>` (`.bak`, `.bak-<date>`, `.bak.<epoch>`,
+ * `.pre-<tag>-<date>`) — every suffix counts, not only `.bak`.
+ * `mcp-addons.example.json` is documentation, not a secret.
+ */
+export const ADDONS_FILE_NAME_RE = /^mcp-addons\.json(\..*)?$/;
+
+/**
+ * True for a name whose CONTENT is the add-on registry with its env values.
+ * `mcp-addons.example.json` is documentation and does not match the pattern,
+ * so it needs no exemption and stays readable.
+ */
+export function isAddonsFileName(n) {
+  return ADDONS_FILE_NAME_RE.test(n);
 }
 
 /**
@@ -73,6 +94,15 @@ export function isSecretEnvName(n) {
  * too); one whose target sits under a dir in `hiddenDirs` (hidden whole, like
  * env/) is already hidden and is not listed; a dangling one is ignored; any
  * other is listed under its own name so the caller refuses.
+ *
+ * The CROW HOME ONLY (never appRoot, a repo checkout that holds no add-on
+ * registry) also contributes `<crowHome>/mcp-addons.json` whether it exists or
+ * not, plus every regular file or symlink directly in the home root matching
+ * isAddonsFileName (`mcp-addons.json.<anything>`: the `.bak`, `.bak-<date>`,
+ * `.pre-<tag>-<date>` backups), through the same symlink handling as the
+ * `.env*` names. The add-on env values carry keys and the gateway side reads
+ * the file and hands the bot the env in its `.mcp.json` blocks, so the file
+ * itself is never needed inside the sandbox.
  * @param {{crowHome:string, appRoot?:string, hiddenDirs?:string[], readdir?:Function}} opts
  * @returns {string[]}
  */
@@ -81,6 +111,7 @@ export function secretFilesFor({ crowHome, appRoot, hiddenDirs = [], readdir = r
   const add = (p) => { if (!out.includes(p)) out.push(p); };
   for (const n of ROOT_SECRET_FILES) add(join(crowHome, n));
   add(join(crowHome, ".env"));
+  add(join(crowHome, "mcp-addons.json"));
   if (appRoot) add(join(appRoot, ".env"));
   const roots = [crowHome, appRoot].filter(Boolean);
   const underRoot = (p) => roots.some((r) => p === r || p.startsWith(r + "/"));
@@ -98,7 +129,10 @@ export function secretFilesFor({ crowHome, appRoot, hiddenDirs = [], readdir = r
   // real path, behind a hidden dir it is already hidden, dangling it is
   // ignored, and one leaving the roots is listed under its own name so the
   // caller refuses the spawn.
-  for (const root of roots) for (const n of envNamesIn(root, readdir)) addEnv(root, n);
+  for (const root of roots) for (const n of maskedNamesIn(root, readdir, isSecretEnvName)) addEnv(root, n);
+  // The add-on registry and its backup copies, at the Crow home root only:
+  // the repo checkout never holds one, and its env values carry keys.
+  for (const n of maskedNamesIn(crowHome, readdir, isAddonsFileName)) addEnv(crowHome, n);
   // Every bundle dir, including a stale copy (x.migrated-...): its .env files
   // are secrets too. A missing bundles dir means none.
   for (const root of roots) {
@@ -106,13 +140,13 @@ export function secretFilesFor({ crowHome, appRoot, hiddenDirs = [], readdir = r
       if (BUNDLE_ENV_READABLE.includes(id)) continue;
       const dir = join(root, "bundles", id);
       const kind = entryKind(dir);
-      if (kind === "dir") { for (const n of envNamesIn(dir, readdir)) addEnv(dir, n); continue; }
+      if (kind === "dir") { for (const n of maskedNamesIn(dir, readdir, isSecretEnvName)) addEnv(dir, n); continue; }
       if (kind !== "link") continue;
       let real;
       try { real = realpathSync(dir); } catch { continue; }
       if (entryKind(real) !== "dir") continue;
-      if (underRoot(real)) { for (const n of envNamesIn(real, readdir)) addEnv(real, n); }
-      else { for (const n of envNamesIn(real, readdir)) add(join(dir, n)); }
+      if (underRoot(real)) { for (const n of maskedNamesIn(real, readdir, isSecretEnvName)) addEnv(real, n); }
+      else { for (const n of maskedNamesIn(real, readdir, isSecretEnvName)) add(join(dir, n)); }
     }
   }
   return out;
@@ -175,11 +209,11 @@ export const SSH_NOT_HIDDEN_REFUSAL = "A bot could not start: Crow could not hid
 function bundleIds(root, readdir) {
   try { return readdir(join(root, "bundles")); } catch { return []; }
 }
-/** Names of the secret `.env*` files directly in dir: regular files, and symlinks too (never masked, so the caller refuses the spawn). `.example` templates are not secrets. */
-function envNamesIn(dir, readdir) {
+/** Names of the secret files directly in dir that `match` accepts: regular files, and symlinks too (never masked, so the caller refuses the spawn). */
+function maskedNamesIn(dir, readdir, match) {
   let names;
   try { names = readdir(dir); } catch { return []; }
-  return names.filter((n) => isSecretEnvName(n) && (() => { try { const st = lstatSync(join(dir, n)); return st.isFile() || st.isSymbolicLink(); } catch { return false; } })());
+  return names.filter((n) => match(n) && (() => { try { const st = lstatSync(join(dir, n)); return st.isFile() || st.isSymbolicLink(); } catch { return false; } })());
 }
 function entryKind(p) {
   try { const st = lstatSync(p); return st.isSymbolicLink() ? "link" : st.isDirectory() ? "dir" : "other"; } catch { return "none"; }
