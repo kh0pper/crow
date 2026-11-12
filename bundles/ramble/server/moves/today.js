@@ -329,7 +329,7 @@ export async function readHistory(db) {
  * stores a new card: a day whose library yields nothing must not bank the same
  * rollover again on the next attempt.
  */
-async function historyWithRollover(db, stored) {
+export async function historyWithRollover(db, stored) {
   const history = await readHistory(db);
   if (!stored || !stored.entryId) return { history, changed: false };
   const done = (await rowDelta(db, MOVE_DONE_KIND, stored.day)) !== null;
