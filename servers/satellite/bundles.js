@@ -42,6 +42,9 @@ import { loadKeychainKey } from "../gateway/keychain/key.js";
 import { ensureWriteKey, markBundleRemoved, readableSecretsSync, saveExtensionSecret } from "../gateway/keychain/store.js";
 import { launcherPin } from "../shared/resolve-command.js";
 import { redactSecrets } from "../shared/redact-secrets.js";
+import {
+  ADDON_KEYCHAIN_FIELD, addonSecretsSealingOn, keychainEnvNames, readAddonSecretsSync, sealableEnv,
+} from "../shared/addon-secrets.js";
 import { repinAddon } from "../../scripts/ops/pin-addon-command.mjs";
 import { bundleCurrentUseMb, runGate } from "./gate.js";
 import { checkSatelliteCompose } from "./compose-rules.js";
@@ -55,6 +58,8 @@ const BUNDLE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BACKUP_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
 const SINCE = /^[0-9A-Za-z][0-9A-Za-z:.+-]{0,39}$/; // never a leading "-" (it would read as a flag)
+/** The fixed sentence a keychain failure answers with — never a value, never a driver message. */
+export const KEYS_SAVE_FAILED = "Crow could not save this extension's keys to this server's keychain";
 
 class Refusal extends Error {
   constructor(status, code, extra = {}) { super(code); Object.assign(this, { status, code, extra }); }
@@ -141,6 +146,30 @@ export function createBundleManager({
   // gate against the same MemAvailable before either reservation is recorded.
   const activeInstall = () => [...jobs.values()].find((j) => j.action === "install" && j.status === "running" && j.satHome === satHome) || null;
 
+  /**
+   * One write section per add-on id at a time (0.6.3). putEnv awaits keychain calls, so two PUTs
+   * of one bundle could otherwise interleave between the `.env` write and the entry write and
+   * leave the file, the `.env` and the keychain row disagreeing. The same keyed promise-chain
+   * shape as the gateway's withAddonLock, kept here so the agent never imports a gateway route
+   * module; a PUT never re-enters itself, so this needs no re-entrancy.
+   */
+  const writeQueues = new Map();
+  function withAddonWriteLock(id, fn) {
+    const prev = writeQueues.get(id) || Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const tail = prev.then(() => gate);
+    writeQueues.set(id, tail);
+    return prev.then(async () => {
+      try {
+        return await fn();
+      } finally {
+        release();
+        if (writeQueues.get(id) === tail) writeQueues.delete(id);
+      }
+    });
+  }
+
   const installed = () => readInstalled(instPath);
   const record = (id) => installed().find((b) => b.id === id) || null;
   const destOf = (id) => join(bundlesDir, id);
@@ -190,14 +219,74 @@ export function createBundleManager({
   })();
   const currentUseMb = (rec) => bundleCurrentUseMb({ project: projectOf(rec), dockerRunner, readText, mcpPids: () => mcpPids(rec.id) });
 
-  function writeAddonEntry(id, manifest, values) {
-    const addons = readJson(addonsPath, {});
+  /**
+   * Write one add-on's mcp-addons.json entry (task 1.10).
+   *
+   * `env` is built exactly as before. Sealing OFF (PR1's default, 0.3 row 4): a name the entry
+   * already listed in `keychainEnv` that this install wrote a PLAIN value for is un-listed, so
+   * the value just written is the one the child uses — its keychain row is kept (the owner's key,
+   * in Settings).
+   *
+   * Sealing ON: every value sealableEnv() picks (a manifest secret/generate, or a name the entry
+   * already listed — the list is authoritative) becomes a keychain row with its origin, is read
+   * BACK through the spawn's own reader, and is dropped from `env`; the entry keeps the NAMES in
+   * `keychainEnv`. A value that cannot be proved stops the install rather than registering an
+   * add-on whose keys would not come back (0.4).
+   *
+   * The seal awaits, so the document is re-read afterwards and only this entry is replaced: a
+   * concurrent writer's entry survives.
+   */
+  async function writeAddonEntry(id, manifest, values, { generatedKeys = [], log: logLine = () => {} } = {}) {
     const env = {};
     for (const k of manifest.server.envKeys || []) if (nonBlank(values[k])) env[k] = String(values[k]);
     for (const v of manifest.env_vars || []) if (v.default && !env[v.name]) env[v.name] = v.default;
     const pin = launcherPin(manifest.server.command, destOf(id));
-    addons[id] = { command: manifest.server.command, args: manifest.server.args || [], ...(Object.keys(env).length ? { env } : {}), ...(pin ? { command_sha256: pin } : {}) };
-    writePrivateFile(addonsPath, JSON.stringify(addons, null, 2));
+    const before = readJson(addonsPath, {});
+    const listed = keychainEnvNames(before && typeof before === "object" && !Array.isArray(before) ? before[id] : null);
+
+    let entryEnv = env;
+    let names = listed;
+    let reRead = false;
+    if (addonSecretsSealingOn(process.env)) {
+      const { seal } = sealableEnv(env, manifest, { listed });
+      const keys = Object.keys(seal).sort();
+      if (keys.length) {
+        const key = await ensureWriteKey(kdb, { crowHome: satHome });
+        const generated = new Set(generatedKeys);
+        for (const name of keys) {
+          await saveExtensionSecret(kdb, key, {
+            bundleId: id, envKey: name, label: `${manifest.name || id} ${name}`,
+            secret: seal[name], origin: generated.has(name) ? "generated" : "typed", now: new Date(now()),
+          });
+        }
+        let readBack = null;
+        try {
+          readBack = readAddonSecretsSync(id, keys, { unsealer: "satellite", rawDb: db, key });
+        } catch { /* proved below: no read-back is the same failure as a wrong one */ }
+        for (const name of keys) if (!readBack || readBack[name] !== seal[name]) throw new Error(KEYS_SAVE_FAILED);
+        const rest = { ...env };
+        for (const name of keys) delete rest[name];
+        entryEnv = rest;
+        names = [...new Set([...listed, ...keys])].sort();
+        logLine(`Saved ${keys.length} generated or typed secret(s) in this server's keychain`);
+        reRead = true;
+      }
+    } else {
+      // 0.3 row 4: the opt-out. A plain value written now wins over a listed name.
+      names = listed.filter((name) => typeof env[name] !== "string" || env[name] === "");
+    }
+
+    const addons = reRead ? readJson(addonsPath, null) : before;
+    if (addons === null || typeof addons !== "object" || Array.isArray(addons)) {
+      // A document that cannot be read (or is not an object) is never rewritten from {}: that
+      // would drop every other add-on. The install fails instead.
+      if (existsSync(addonsPath)) throw new Error("mcp-addons.json exists but could not be read, so nothing was written");
+    }
+    const doc = addons && typeof addons === "object" && !Array.isArray(addons) ? addons : {};
+    const entry = { command: manifest.server.command, args: manifest.server.args || [], ...(Object.keys(entryEnv).length ? { env: entryEnv } : {}), ...(pin ? { command_sha256: pin } : {}) };
+    if (names.length) entry[ADDON_KEYCHAIN_FIELD] = [...names].sort();
+    doc[id] = entry;
+    writePrivateFile(addonsPath, JSON.stringify(doc, null, 2));
   }
 
   // ── consent ────────────────────────────────────────────────────────────────
@@ -346,7 +435,7 @@ export function createBundleManager({
       if (manifest.server) {
         const hashed = new Set((manifest.env_vars || []).filter((v) => v?.store_as).map((v) => v.name));
         const gen = Object.fromEntries(Object.entries(plan.env).filter(([k]) => !hashed.has(k)));
-        writeAddonEntry(id, manifest, { ...typed, ...gen });
+        await writeAddonEntry(id, manifest, { ...typed, ...gen }, { generatedKeys: Object.keys(gen), log: (m) => log(job, m) });
         log(job, `Registered MCP server '${id}'`);
         // tool_cache (§7.3): start the child once, cache its tools/list, stop it.
         if (toolCache) {
@@ -436,30 +525,93 @@ export function createBundleManager({
       return { name, set: nonBlank(env[name]), secret: s.secret === true, generated: !!s.generate };
     });
   }
-  function putEnv(id, body = {}) {
+  /**
+   * PUT env: the `.env` and the MCP entry's env (never a value out).
+   *
+   * Async, and the whole read-modify-write runs under the add-on's write lock (0.6.3): the seal
+   * awaits keychain calls, so an unlocked save could interleave with another one and leave the
+   * `.env`, the entry and the keychain row disagreeing.
+   *
+   * Sealing ON (task 1.10): a value this save writes for a name the MCP entry carries is sealed
+   * (when sealableEnv() says so — or always, for a name the entry already lists), proved by a
+   * read through the spawn's own reader, dropped from the entry's env and added to `keychainEnv`.
+   * The `.env` still gets the plain value (the container reads that file; only mcp-addons.json is
+   * sealed). `null` clears the value: a listed name stops being listed and its keychain row is
+   * KEPT (the owner's key, in Settings; a re-typed value reactivates it).
+   *
+   * Sealing OFF: a listed name written plain is un-listed (0.3 row 4) so the value just typed is
+   * the one the child uses, and the row is kept.
+   */
+  async function putEnv(id, body = {}) {
     installedId(id);
     const manifest = manifestOf(id);
     const updates = validateEnv(manifest, body.env);
-    const path = join(destOf(id), ".env");
-    let text = "";
-    try { text = readFileSync(path, "utf8"); } catch { /* none yet */ }
-    const set = Object.fromEntries(Object.entries(updates).filter(([, v]) => v !== null));
-    const remove = Object.keys(updates).filter((k) => updates[k] === null);
-    writePrivateFile(path, updateEnvText(text, set, { pathKeys: pathEnvKeys(manifest), remove }));
-    // The MCP child reads its env from mcp-addons.json, never the .env: keep its keys in step.
-    const addons = readJson(addonsPath, null);
-    if (addons?.[id] && manifest?.server) {
-      const listed = new Set(manifest.server.envKeys || []);
-      const e = { ...(addons[id].env || {}) };
+    return withAddonWriteLock(id, async () => {
+      const path = join(destOf(id), ".env");
+      let text = "";
+      try { text = readFileSync(path, "utf8"); } catch { /* none yet */ }
+      const set = Object.fromEntries(Object.entries(updates).filter(([, v]) => v !== null));
+      const remove = Object.keys(updates).filter((k) => updates[k] === null);
+      // The MCP child reads its env from mcp-addons.json, never the .env: keep its keys in step.
+      const before = readJson(addonsPath, null);
+      const prior = before && typeof before === "object" && !Array.isArray(before) ? before[id] || null : null;
+      const entryKeys = new Set(manifest?.server?.envKeys || []);
+      // The plain values this save puts in the entry (only keys the entry carries), and the entry
+      // env it produces — the seal classifies this save's values, so a leftover plain value the
+      // entry already had for a listed name is never re-sealed over its keychain row.
+      const writes = Object.fromEntries(Object.entries(set).filter(([k]) => entryKeys.has(k)));
+      const effective = { ...(prior && prior.env && typeof prior.env === "object" ? prior.env : {}) };
       for (const [k, v] of Object.entries(updates)) {
-        if (!listed.has(k)) continue;
-        if (v === null) delete e[k]; else e[k] = v;
+        if (!entryKeys.has(k)) continue;
+        if (v === null) delete effective[k]; else effective[k] = v;
       }
-      addons[id] = { ...addons[id], env: e };
-      if (!Object.keys(e).length) delete addons[id].env;
-      writePrivateFile(addonsPath, JSON.stringify(addons, null, 2));
-    }
-    return { ok: true, restart_needed: true, keys: envKeys(id) };
+      const listed = keychainEnvNames(prior);
+      let names = listed.filter((name) => !remove.includes(name)); // a cleared field stops being listed
+      const sealed = [];
+      if (prior && manifest?.server) {
+        if (addonSecretsSealingOn(process.env)) {
+          const split = sealableEnv(writes, manifest, { listed });
+          const keys = Object.keys(split.seal).sort();
+          if (keys.length) {
+            try {
+              const key = await ensureWriteKey(kdb, { crowHome: satHome });
+              for (const name of keys) {
+                await saveExtensionSecret(kdb, key, {
+                  bundleId: id, envKey: name, label: `${manifest.name || id} ${name}`,
+                  secret: split.seal[name], origin: "typed", now: new Date(now()),
+                });
+              }
+              const readBack = readAddonSecretsSync(id, keys, { unsealer: "satellite", rawDb: db, key });
+              for (const name of keys) if (readBack[name] !== split.seal[name]) throw new Error(KEYS_SAVE_FAILED);
+            } catch (err) {
+              // Fixed sentence, no value: nothing was written to the .env or the entry.
+              throw err instanceof Refusal ? err : new Refusal(500, "keychain", { reason: KEYS_SAVE_FAILED });
+            }
+            sealed.push(...keys);
+            names = [...new Set([...listed, ...keys])].sort();
+          }
+        } else {
+          names = names.filter((name) => !(typeof effective[name] === "string" && effective[name] !== ""));
+        }
+      }
+      writePrivateFile(path, updateEnvText(text, set, { pathKeys: pathEnvKeys(manifest), remove }));
+      // Re-read after the keychain awaits: replace only this entry, and leave the document alone
+      // when the add-on's entry was removed meanwhile (an uninstall is not resurrected).
+      const addons = readJson(addonsPath, null);
+      if (addons && typeof addons === "object" && !Array.isArray(addons) && addons[id] && manifest?.server) {
+        const e = { ...(addons[id].env && typeof addons[id].env === "object" ? addons[id].env : {}) };
+        for (const [k, v] of Object.entries(updates)) {
+          if (!entryKeys.has(k)) continue;
+          if (v === null || sealed.includes(k)) delete e[k]; else e[k] = v;
+        }
+        const next = { ...addons[id] };
+        if (Object.keys(e).length) next.env = e; else delete next.env;
+        if (names.length) next[ADDON_KEYCHAIN_FIELD] = [...names].sort(); else delete next[ADDON_KEYCHAIN_FIELD];
+        addons[id] = next;
+        writePrivateFile(addonsPath, JSON.stringify(addons, null, 2));
+      }
+      return { ok: true, restart_needed: true, keys: envKeys(id) };
+    });
   }
 
   // ── logs ───────────────────────────────────────────────────────────────────

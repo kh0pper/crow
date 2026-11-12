@@ -95,6 +95,8 @@ export function recordSatelliteInstall({ id, satelliteId, version = null, appBun
   writeInstalled(paths.installed, list);
 
   const addons = readAddons(paths.addons);
+  // A satellite entry names no keys, so it never carries `keychainEnv`; every other entry in the
+  // document is written back as read, another add-on's `keychainEnv` included.
   addons[id] = { transport: SATELLITE_MODE, satellite_id: satelliteId, bundle: id };
   writePrivateFile(paths.addons, JSON.stringify(addons, null, 2));
 

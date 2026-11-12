@@ -964,7 +964,7 @@
     {
       "id": "campaigns",
       "name": "Campaigns",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "Social media campaign manager — draft, schedule, and publish posts across platforms (starting with Reddit)",
       "type": "mcp-server",
       "author": "Crow",
@@ -2855,7 +2855,7 @@
     {
       "id": "kiosk",
       "name": "Kiosk display",
-      "version": "0.5.2",
+      "version": "0.5.3",
       "type": "mcp-server",
       "author": "Crow",
       "category": "hardware",
@@ -6949,7 +6949,7 @@
     {
       "id": "tax",
       "name": "Tax Filing Assistant",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "description": "Prepare federal income taxes — PDF document ingestion, calculation, form generation, and guided filing. Federal returns only (no state). Supports 1040, Schedules 1/C/D/SE, Form 8889, Form 8863, and common credits. 2024 + 2025 tax years.",
       "type": "mcp-server",
       "author": "Crow",

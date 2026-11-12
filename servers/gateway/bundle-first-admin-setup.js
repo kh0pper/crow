@@ -281,11 +281,15 @@ function defaultDeps() {
     // The bundle's MCP entry (mcp-addons.json) is the routes module's. Imported lazily: that
     // module imports THIS one, and it resolves its paths from CROW_HOME when it is first loaded.
     applyMcpEnv: async (id, values, reviewed) => {
-      const [{ applyEnvToMcpAddons }, { MCP_ADDONS_PATH }] = await Promise.all([
+      const [{ applyEnvToMcpAddons }, { MCP_ADDONS_PATH }, { withAddonLock }] = await Promise.all([
         import("./routes/bundles.js"),
         import("./bundles-config.js"),
+        import("./addon-secrets-seal.js"),
       ]);
-      return applyEnvToMcpAddons(id, values, MCP_ADDONS_PATH, reviewed);
+      // The per-add-on lock (0.6.1 / 1.5b): a sealing writer never runs un-locked. It is
+      // re-entrant per id, so the install path — which holds it while it registers the
+      // entry — can call this seam for the same add-on without deadlocking.
+      return withAddonLock(id, () => applyEnvToMcpAddons(id, values, MCP_ADDONS_PATH, reviewed));
     },
     // mcp-addons.json is read when an MCP child is spawned, so the entry a run just wrote is
     // only loaded by a restart. This run never starts one — a restart mid-install kills the job

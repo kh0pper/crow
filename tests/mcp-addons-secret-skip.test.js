@@ -4,11 +4,14 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-let B, dir;
+let B, dir, applyEnv;
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), "mcpaddons-"));
   process.env.CROW_HOME = dir;
   B = await import("../servers/gateway/routes/bundles.js");
+  // applyEnvToMcpAddons is async and refuses to run outside the add-on's lock (0.6.1).
+  const { withAddonLock } = await import("../servers/gateway/addon-secrets-seal.js");
+  applyEnv = (id, ...args) => withAddonLock(id, () => B.applyEnvToMcpAddons(id, ...args));
 });
 
 const manifest = {
@@ -22,10 +25,10 @@ const manifest = {
   ],
 };
 
-test("Configure never copies secret or generated keys into mcp-addons.json", () => {
+test("Configure never copies secret or generated keys into mcp-addons.json", async () => {
   const p = join(dir, "mcp-addons.json");
   writeFileSync(p, JSON.stringify({ workspace: { command: "node", args: ["server/index.js"] } }));
-  const wrote = B.applyEnvToMcpAddons("workspace", {
+  const wrote = await applyEnv("workspace", {
     WORKSPACE_ADMIN_PASSWORD: "hunter2-hunter2", WORKSPACE_DB_PASSWORD: "dbpw", PUBLIC_KEY_LISTED: "ok-listed", WORKSPACE_PUBLIC_HOST: "crow.example.ts.net",
   }, p, manifest);
   assert.equal(wrote, true);
@@ -40,14 +43,14 @@ test("bundles that did not opt in (kodi) still receive their secrets on Configur
   const kodi = JSON.parse(rf(join(import.meta.dirname, "..", "bundles", "kodi", "manifest.json"), "utf8"));
   const p = join(dir, "mcp-addons-kodi.json");
   writeFileSync(p, JSON.stringify({ kodi: { command: "node", args: ["server/index.js"] } }));
-  B.applyEnvToMcpAddons("kodi", { KODI_PASSWORD: "k-secret" }, p, kodi);
+  await applyEnv("kodi", { KODI_PASSWORD: "k-secret" }, p, kodi);
   assert.equal(JSON.parse(readFileSync(p, "utf8")).kodi.env.KODI_PASSWORD, "k-secret");
 });
 
-test("without a manifest the old behaviour is unchanged (back-compat)", () => {
+test("without a manifest the old behaviour is unchanged (back-compat)", async () => {
   const p = join(dir, "mcp-addons-2.json");
   writeFileSync(p, JSON.stringify({ x: { command: "node" } }));
-  B.applyEnvToMcpAddons("x", { A: "1" }, p);
+  await applyEnv("x", { A: "1" }, p);
   assert.deepEqual(JSON.parse(readFileSync(p, "utf8")).x.env, { A: "1" });
 });
 

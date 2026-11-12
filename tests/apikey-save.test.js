@@ -53,6 +53,10 @@ const { parseEnvText } = await import("../servers/gateway/bundle-env-codec.js");
 const { createDbClient } = await import("../servers/db.js");
 const { listEntries, openEntrySecret } = await import("../servers/gateway/keychain/store.js");
 const { loadKeychainKey } = await import("../servers/gateway/keychain/key.js");
+const { AddonKeysUnavailableError, hydrateAddonEntry } = await import("../servers/shared/addon-secrets.js");
+const { gatewayKeychainPaths } = await import("../servers/gateway/addon-keys-paths.js");
+const { captureOutput, scanDb } = await import("./helpers/sentinel-scan.mjs");
+const { randomUUID } = await import("node:crypto");
 
 B._setAppBundlesForTest(TMP_BUNDLES);
 B._setAppEnvPathForTest(GATEWAY_ENV);
@@ -404,6 +408,34 @@ test("a keychain that will not open answers 500 and writes nothing else", async 
   assert.match(captured.lines.join("\n"), /apikey-kcfail: DEMO_API_KEY/);
 });
 
+test("the key file is gone while rows exist: the card's save refuses with the keychain sentence and mints NO new key", async () => {
+  // Earlier saves in this file wrote keychain rows under the scratch home's key.
+  const keyFile = join(TMP_HOME, "secrets", "keychain.key");
+  assert.equal(existsSync(keyFile), true, "the key this test removes was minted by an earlier save");
+  const dir = seed("apikey-nokey", { ...DEMO, id: "apikey-nokey", name: "No Key" }, { dotEnv: "OTHER=1\nDEMO_API_KEY=\n" });
+  const mcpBefore = readFileSync(MCP_ADDONS, "utf8");
+  const envBefore = readFileSync(join(dir, ".env"), "utf8");
+  const keyBefore = readFileSync(keyFile);
+  rmSync(keyFile);
+  let minted = null;
+  try {
+    await withServer({ owner: true }, async (post) => {
+      const r = await save(post, { bundle_id: "apikey-nokey", env_key: "DEMO_API_KEY", value: VALUE });
+      assert.equal(r.status, 500);
+      assert.equal(r.body.error, API_KEY_SAVE_REFUSALS.keychain, "the fixed keychain sentence, never a driver message");
+      assert.equal(JSON.stringify(r.body).includes(VALUE), false);
+      minted = existsSync(keyFile); // judged INSIDE, before the restore below
+    });
+    assert.equal(minted, false, "a new keychain key was not minted over the rows it would orphan");
+  } finally {
+    // Put the key back so the tests after this one still read their rows.
+    if (!existsSync(keyFile)) writeFileSync(keyFile, keyBefore, { mode: 0o600 });
+  }
+  assert.equal(readFileSync(MCP_ADDONS, "utf8"), mcpBefore, "the MCP entry was not touched");
+  assert.equal(readFileSync(join(dir, ".env"), "utf8"), envBefore, "the .env was not touched");
+  assert.deepEqual(await keychainRows("apikey-nokey"), [], "and no row was written");
+});
+
 test("no response, error sentence or log line from any refusal carries the value", async () => {
   seed("apikey-quiet", { ...DEMO, id: "apikey-quiet", name: "Quiet" }, { dotEnv: "DEMO_API_KEY=\n" });
   const captured = captureConsole();
@@ -484,8 +516,87 @@ test("the module's seams see the exact keychain entry, MCP write and restart ans
   assert.equal(calls.propagated.length, 0, "no .env in that dir, so the gateway env is not touched");
 });
 
-// ── 5. nothing is synced ────────────────────────────────────────────────────────────
+// ── 6. sealing ON (task 1.5b: the card's key goes to the keychain, not the file) ─────
 
+/** Run `fn` with the add-on-secrets sealing switch at `on`; restores it afterwards. */
+async function withSealing(on, fn) {
+  const before = process.env.CROW_ADDON_SECRETS_KEYCHAIN;
+  if (on) process.env.CROW_ADDON_SECRETS_KEYCHAIN = "1";
+  else delete process.env.CROW_ADDON_SECRETS_KEYCHAIN;
+  try {
+    return await fn();
+  } finally {
+    if (before === undefined) delete process.env.CROW_ADDON_SECRETS_KEYCHAIN;
+    else process.env.CROW_ADDON_SECRETS_KEYCHAIN = before;
+  }
+}
+
+test("sealing on: the card's key is sealed (keychainEnv + a row), not left plain in the entry", async () => {
+  const dir = seed("apikey-sealed", { ...DEMO, id: "apikey-sealed", name: "Sealed App" }, { dotEnv: "DEMO_API_KEY=\n" });
+  await withSealing(true, () => withServer({ owner: true }, async (post) => {
+    const r = await save(post, { bundle_id: "apikey-sealed", env_key: "DEMO_API_KEY", value: VALUE });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.needs_restart, true);
+    assert.equal(JSON.stringify(r.body).includes(VALUE), false);
+  }));
+
+  const entry = readMcpEntry("apikey-sealed");
+  assert.deepEqual(entry.keychainEnv, ["DEMO_API_KEY"], "the entry keeps the NAME of the key");
+  assert.equal(JSON.stringify(entry).includes(VALUE), false, "and never the value");
+  assert.deepEqual(entry.ownerSet, ["DEMO_API_KEY"], "the owner provenance survives the seal");
+  const rows = await keychainRows("apikey-sealed");
+  assert.equal(rows.length, 1, "one row (step 1 and the seal write the same one)");
+  assert.equal(rows[0].secret, VALUE);
+  assert.equal(readDotEnv(dir).DEMO_API_KEY, VALUE, "the bundle's own .env still gets the key");
+  assert.deepEqual(
+    hydrateAddonEntry("apikey-sealed", entry, { unsealer: "gateway", ...gatewayKeychainPaths() }).env,
+    { DEMO_API_KEY: VALUE },
+    "the spawn env gets the key back from the keychain",
+  );
+});
+
+test("a seal failure on the MCP entry answers the fixed keychain sentence and does not write the .env", async () => {
+  const dir = seed("apikey-sealfail", { ...DEMO, id: "apikey-sealfail", name: "Seal Fail" }, { dotEnv: "OTHER=1\nDEMO_API_KEY=\n" });
+  const envBefore = readFileSync(join(dir, ".env"), "utf8");
+  const entryBefore = JSON.stringify(readMcpEntry("apikey-sealfail"));
+  B._setApiKeySaveDepsForTest({
+    applyEnv: async () => { throw new AddonKeysUnavailableError("ROWS_MISSING", "apikey-sealfail", ["DEMO_API_KEY"]); },
+  });
+  try {
+    await withServer({ owner: true }, async (post) => {
+      const r = await save(post, { bundle_id: "apikey-sealfail", env_key: "DEMO_API_KEY", value: VALUE });
+      assert.equal(r.status, 500);
+      assert.equal(r.body.error, API_KEY_SAVE_REFUSALS.keychain);
+      assert.equal(JSON.stringify(r.body).includes(VALUE), false);
+    });
+  } finally {
+    B._setApiKeySaveDepsForTest(null);
+  }
+  assert.equal(readFileSync(join(dir, ".env"), "utf8"), envBefore, "the .env was not written");
+  assert.equal(JSON.stringify(readMcpEntry("apikey-sealfail")), entryBefore, "the entry was not touched");
+});
+
+test("no API-key save leaks the sentinel: console, audit rows, notifications, the entry", async (t) => {
+  const out = captureOutput(t);
+  const SENTINEL = "sentinel-" + randomUUID();
+  seed("apikey-scan", { ...DEMO, id: "apikey-scan", name: "Scan App" }, { dotEnv: "DEMO_API_KEY=\n" });
+  await withSealing(true, () => withServer({ owner: true }, async (post) => {
+    const ok = await save(post, { bundle_id: "apikey-scan", env_key: "DEMO_API_KEY", value: SENTINEL });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    B._setApiKeySaveDepsForTest({ applyEnv: async () => { throw new AddonKeysUnavailableError("ROWS_MISSING", "apikey-scan", ["DEMO_API_KEY"]); } });
+    try {
+      const bad = await save(post, { bundle_id: "apikey-scan", env_key: "DEMO_API_KEY", value: SENTINEL });
+      assert.equal(bad.status, 500);
+    } finally {
+      B._setApiKeySaveDepsForTest(null);
+    }
+  }));
+  assert.equal(out.text().includes(SENTINEL), false, "no console line carries a value");
+  assert.deepEqual(scanDb(gatewayKeychainPaths().dbPath, SENTINEL), [], "no audit row or bell carries a value");
+  assert.equal(JSON.stringify(readMcpEntry("apikey-scan")).includes(SENTINEL), false);
+});
+
+// ── 7. nothing is synced ────────────────────────────────────────────────────────────
 test("the keychain table is on the never-sync list, so a saved key reaches no peer", () => {
   const src = readFileSync(join(REPO, "servers/sharing/instance-sync.js"), "utf8");
   const start = src.indexOf("export const LOCAL_ONLY_TABLES");

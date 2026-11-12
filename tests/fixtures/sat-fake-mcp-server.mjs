@@ -3,7 +3,8 @@
 //   FAKE_MCP_VARIANT        "v1" (default) | "v2" | "huge" (one tool, a 300 KB description)
 //   FAKE_MCP_IGNORE_TERM=1  ignore SIGTERM (the host must SIGKILL after the grace)
 // Tools (prefixed demo_ like a satellite bundle's):
-//   demo_echo {x}           text: JSON {meta, args, node_options, pid}
+//   demo_echo {x, env?}     text: JSON {meta, args, node_options, pid, env} (env: the named
+//                           env vars this child was spawned with)
 //   demo_big {bytes}        one text item of `bytes` "x" characters
 //   demo_mixed              text + image + resource items (the host keeps text only)
 //   demo_slow {ms}          waits, then text "slow done"
@@ -43,8 +44,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
   const { name, arguments: args = {}, _meta: meta = {} } = req.params;
   const text = (t) => ({ content: [{ type: "text", text: t }] });
   switch (name) {
-    case "demo_echo":
-      return text(JSON.stringify({ meta, args, node_options: process.env.NODE_OPTIONS || null, pid: process.pid }));
+    case "demo_echo": {
+      // `env` (an array of names) echoes the child's own env for those names: a test can see the
+      // env the host spawned it with, without this fixture knowing any bundle's settings.
+      const wanted = Array.isArray(args.env) ? args.env.filter((n) => typeof n === "string") : [];
+      const env = {};
+      for (const name of wanted) env[name] = process.env[name] ?? null;
+      return text(JSON.stringify({ meta, args, node_options: process.env.NODE_OPTIONS || null, pid: process.pid, env }));
+    }
     case "demo_big":
       return text("x".repeat(Number(args.bytes) || 0));
     case "demo_mixed":

@@ -58,6 +58,7 @@ export function repinAddon({ crowHome, id, command }) {
     if (!isAbsolute(cmd) && !cmd.includes("/")) throw new Error(`'${id}' uses the bare command '${cmd}'; give it an absolute path (--command /abs/path)`);
     throw new Error(`'${id}': ${cmd} needs no pin or cannot be pinned (root-owned, or not found)`);
   }
+  // The entry is spread: `keychainEnv` must survive; this CLI races the gateway's writers (plan 0.6.4).
   addons[id] = { ...entry, command: cmd, command_sha256: sha };
   writeAddons(file, addons);
   return { file, command: cmd, sha256: sha };

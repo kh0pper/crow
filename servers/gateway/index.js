@@ -63,6 +63,8 @@ const GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"
 process.env.CROW_APP_ROOT ||= __appRoot;
 // The checkout .env is applied by ./boot/run-instance-paths-gate.js (the first
 // import above), so import-time constants already see its values.
+// The gateway is the registered add-on unsealer for this process (PR1, 0.5).
+registerAddonUnsealer("gateway");
 
 import { mcpAuthRouter, createOAuthMetadata } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { mcpAuthMetadataRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
@@ -94,6 +96,10 @@ import { startParentWatch } from "./parent-watch.js";
 // never has to await a dynamic one mid-exit.
 import { markPlanned } from "./boot-guard-state.js";
 import { generateInstructions } from "../shared/instructions.js";
+// Add-on secrets (PR1): this process is the one allowed to unseal a listed add-on secret into
+// a child's env. A module shared with an add-on child calls processUnsealer() and gets null
+// there, so a child can never unseal its siblings' keys (0.5).
+import { registerAddonUnsealer } from "../shared/addon-secrets.js";
 // startAutoUpdate/startScheduler/connectedServers/initProxyServers/loadRemoteInstances
 // are imported directly by boot/post-listen.js (not needed here).
 import { initWebPush } from "./push/web-push.js";

@@ -27,7 +27,7 @@ import { markFirstAdminDone, reportFirstAdminNotice, firstAdminVia, clearFirstAd
 import { runFirstAdminSetup, saveFirstAdminLogin, firstAdminSetupPlan, firstAdminResultMessage, SETUP_UNAVAILABLE, tryBeginFirstAdminSetup, endFirstAdminSetup } from "../bundle-first-admin-setup.js";
 import { applyFirstAdminAfter, firstAdminAfterPlan, firstAdminAfterFailureSentence } from "../bundle-first-admin-after.js";
 import { runApiToken, apiTokenPlan, apiTokenResultMessage, installStampOf } from "../bundle-api-token.js";
-import { saveApiKey } from "../bundle-apikey-save.js";
+import { saveApiKey, API_KEY_SAVE_REFUSALS } from "../bundle-apikey-save.js";
 import {
   inviteHandlerFor,
   inviteFirstAdminOnInstall,
@@ -97,6 +97,9 @@ import { addonWallStatus } from "../dashboard/shared/addon-wall-status.js";
 import { inspectKept, describeKept } from "../uninstall-kept.js";
 import { t as i18nT } from "../dashboard/shared/i18n.js";
 import { isStorageEnvConsumer } from "../addon-env.js";
+import { AddonKeysUnavailableError, hydrateAddonEntry, isAddonKeychainSaveFailure } from "../../shared/addon-secrets.js";
+import { gatewayKeychainPaths } from "../addon-keys-paths.js";
+import { isAddonLockHeld, sealEntrySecrets, withAddonLock } from "../addon-secrets-seal.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
 import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, legacyFallbackKeys, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedEnv, gatewayEnvNames, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation, mintMissingFlaggedKeys } from "../bundle-env-secrets.js";
@@ -1171,7 +1174,9 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner, log = (m) =
     }
     if (!addons[id]) {
       // No provenance: this boot/update path registers defaults on behalf of no request
-      // (`owner` stays false), so the entry gets an empty `ownerSet`.
+      // (`owner` stays false), so the entry gets an empty `ownerSet`. Defaults are never
+      // sealed (a value equal to the manifest's default stays plain, 0.2), so this path
+      // needs neither the keychain nor the add-on lock (task 1.6, refresh: comment only).
       addons[id] = mcpAddonEntryFor(repoManifest, null, { bundleDir: destDir });
       writeJsonSafe(MCP_ADDONS_PATH, addons);
       touched.push("mcp-addons entry (restart to load)");
@@ -1283,6 +1288,9 @@ export async function backfillBundleKeychain({ log = (m) => console.log(`[keycha
     let installed = {}, retained = {};
     try { installed = parseEnvText(readFileSync(join(BUNDLES_DIR, id, ".env"), "utf8")); } catch { /* none */ }
     try { retained = parseEnvText(readFileSync(retainedEnvPath(CROW_HOME, id), "utf8")); } catch { /* none */ }
+    // A name the entry lists in `keychainEnv` already has its row: sealing it again is a no-op
+    // (saveExtensionSecret updates the same bundle+env row), and the entry's `env` no longer
+    // holds a plain value for it, so the loop below simply finds nothing to backfill.
     const entryEnv = addons?.[id]?.env || {};
     const values = {};
     const legacyKeys = legacyFallbackKeys(retained);
@@ -1698,6 +1706,9 @@ function writeJsonSafe(path, data) {
   mkdirSync(dirname(path), { recursive: true });
   // mcp-addons.json carries MCP children's secrets (generated keys reach their MCP entry
   // here): always written atomically at mode 600, whatever the umask or the old file's mode.
+  // Secrets reach the entry only while keychain sealing is OFF (addonSecretsSealingOn):
+  // with it on, a secret is sealed into the keychain and the entry keeps its NAME in
+  // `keychainEnv` instead (servers/gateway/addon-secrets-seal.js).
   if (path === MCP_ADDONS_PATH) { writePrivateFile(path, JSON.stringify(data, null, 2)); return; }
   writeFileSync(path, JSON.stringify(data, null, 2));
 }
@@ -1797,13 +1808,31 @@ export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null, ed
 }
 
 /**
+ * The mcp-addons document an install writes its entry into, re-read AFTER the seal (1.6).
+ * The seal awaits, so the document read before it can be stale; re-reading keeps another
+ * writer's entry. A file that exists but cannot be read is NEVER overwritten (that would
+ * wipe every other add-on): the install fails instead, as the refresh path does.
+ */
+function rereadMcpAddons() {
+  const doc = readJsonSafe(MCP_ADDONS_PATH, null);
+  if (doc === null) {
+    if (!existsSync(MCP_ADDONS_PATH)) return {};
+    throw new Error("mcp-addons.json exists but could not be read, so nothing was written");
+  }
+  if (typeof doc !== "object" || Array.isArray(doc)) throw new Error("mcp-addons.json is not an object, so nothing was written");
+  return doc;
+}
+
+/**
  * The entry an install writes: `mcpAddonEntryFor`'s, pinned to one exact version
- * when this host's walls are on (scripts/addon-sandbox/pin.mjs).
+ * when this host's walls are on (scripts/addon-sandbox/pin.mjs), then SEALED into the
+ * keychain (task 1.6): a secret the request typed or the manifest generated becomes a
+ * keychain row and the entry keeps its NAME in `keychainEnv` instead of the value.
  *
- * With the walls off nothing is resolved and the entry is written unchanged.
- * A launcher that cannot be pinned to one version fails the install, and no
- * entry is written: a walled add-on must not run tomorrow whatever the registry
- * serves then.
+ * With the walls off nothing is resolved and the entry is written unchanged. A launcher
+ * that cannot be pinned to one version fails the install, and no entry is written: a
+ * walled add-on must not run tomorrow whatever the registry serves then. The same holds
+ * for the seal: if the keychain will not take the keys, nothing is registered.
  */
 async function pinnedMcpEntry({ manifest, reqEnv, generated, ownerEnv, editedEnv, destDir, bundleId, priorEntry, job }) {
   const built = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, {
@@ -1823,7 +1852,17 @@ async function pinnedMcpEntry({ manifest, reqEnv, generated, ownerEnv, editedEnv
     throw new Error(`could not pin ${bundleId} to one version: ${err.message}`);
   }
   if (JSON.stringify(entry) !== JSON.stringify(built)) appendLog(job, `Pinned ${bundleId} to one exact version`);
-  return entry;
+  // The origin of each value: one Crow minted is "generated", one the request typed is
+  // "typed" (the seal's default). Sealing OFF (PR1) keeps every value plain, as today.
+  const origins = {};
+  for (const name of Object.keys(generated || {})) origins[name] = "generated";
+  try {
+    return await sealEntrySecrets({ bundleId, entry, manifest, origins });
+  } catch (err) {
+    // The message names no value: it is the seal's fixed sentence (or a key-file path).
+    appendLog(job, "Could not save this extension's keys to the keychain; it was not registered");
+    throw err;
+  }
 }
 
 /**
@@ -1928,6 +1967,17 @@ function mcpForwardableKeys(manifest) {
 }
 
 /**
+ * The fixed sentence Configure's save answers (500) when the keychain would not take or could
+ * not prove this add-on's keys. It carries no value and no driver message.
+ *
+ * It does NOT say "nothing was saved": the keychain rows of a save are committed BEFORE the
+ * read-back proof runs (addon-secrets-seal.js step 6, then step 7), so a proof failure leaves
+ * this save's rows written and the names of the keys already listed still saved. The sentence
+ * says what the operator can rely on — the new key is unconfirmed — and what to do about it.
+ */
+export const ADDON_KEYS_SAVE_FAILED = "Crow could not confirm the new key was saved correctly. Open Configure and save it again.";
+
+/**
  * Push env values into the add-on's mcp-addons.json entry.
  *
  * MCP children are spawned with the add-on base allowlist, the keys the bundle's registry
@@ -1938,9 +1988,17 @@ function mcpForwardableKeys(manifest) {
  * configuration silently did nothing (home-assistant would stay dead no matter
  * how carefully you filled in HA_URL/HA_TOKEN).
  *
- * @returns {boolean} true if the add-on registers an MCP server and the file was written
+ * The save is SEALED (async): values that must not stay plain move into the keychain and the
+ * entry keeps their NAMES in `keychainEnv`. Because that awaits, the caller MUST hold the
+ * add-on's lock — otherwise two saves of one add-on can interleave between the read below
+ * and the write at the end (0.6.1).
+ *
+ * @returns {Promise<boolean>} true if the add-on registers an MCP server and the file was written
  */
-export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null, { edited = null, injected = [], owner = false } = {}) {
+export async function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null, { edited = null, injected = [], owner = false, deps = {} } = {}) {
+  // A sealing writer always runs inside withAddonLock (0.6.1): a forgotten caller fails
+  // here, in tests, instead of quietly opening a lost-update window.
+  if (!isAddonLockHeld(bundleId)) throw new Error("applyEnvToMcpAddons needs withAddonLock");
   const mcpAddons = readJsonSafe(path, {});
   const entry = mcpAddons[bundleId];
   if (!entry) return false; // not an MCP add-on — nothing to configure
@@ -1983,7 +2041,12 @@ export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, m
     const next = new Set(Array.isArray(entry.ownerSet) ? entry.ownerSet : legacyOwnerSet(priorEnv, manifest, pastDefaults));
     for (const k of written) {
       // A non-owner save drops the claim only on a value it CHANGED: the form re-sends every
-      // filled field, and an unchanged value is still the one the owner typed.
+      // filled field, and an unchanged value is still the one the owner typed. A name the
+      // entry lists in `keychainEnv` has no plain value in `priorEnv` to compare with, so a
+      // non-owner save of it reads as "changed" and drops the claim — the fail-closed
+      // direction. `ownerSet` drives only the wall's host/bind rules (scripts/addon-sandbox/
+      // profile.mjs), which never read a secret name, so losing a claim on one grants nothing
+      // and keeps nothing.
       if (!isOwner) { if (String(priorEnv[k] ?? "") !== String(merged[k])) next.delete(k); continue; }
       if (isOwnerTyped(k, merged[k], { editedSet, manifest, pastDefaults, injected: injectedSet })) next.add(k);
     }
@@ -1991,8 +2054,18 @@ export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, m
     // Always written, empty included (an absent list reads as a legacy entry).
     entry.ownerSet = sorted;
   }
-  mcpAddons[bundleId] = entry;
-  writeJsonSafe(path, mcpAddons);
+  // The seal: every value this save may not keep plain moves into the keychain, and the
+  // entry comes back with `keychainEnv` naming it. With sealing OFF (PR1) it still runs —
+  // that is the 0.3 row-4 opt-out, where a listed name written plain is un-listed so the
+  // value the owner just typed is the one used.
+  const sealed = await sealEntrySecrets({ bundleId, entry, manifest, deps });
+  // The seal awaited (keychain rows, read-back proof), so this document may be stale by now.
+  // Re-read the file and replace ONLY this entry: a lost update here would drop another
+  // writer's entry, and an entry removed meanwhile (an uninstall) is not resurrected.
+  const fresh = readJsonSafe(path, {});
+  if (!fresh || typeof fresh !== "object" || !fresh[bundleId]) return false;
+  fresh[bundleId] = sealed;
+  writeJsonSafe(path, fresh);
   return true;
 }
 
@@ -3737,7 +3810,6 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // The data folder first: a folder this add-on cannot get fails the install with
         // no half-registered MCP server left in mcp-addons.json.
         ensureAddonDataDir(bundleId, manifest);
-        const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
         // Do NOT bake an absolute CROW_DB_PATH here. mcp-addons.json can be
         // shared by more than one gateway on a host (e.g. the home server runs a
         // main gateway + a separate-DB instance off the same ~/.crow), so a
@@ -3746,18 +3818,27 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // locked". The MCP child instead inherits the SPAWNING gateway's
         // CROW_DB_PATH via process.env at launch (its own default otherwise),
         // so each gateway's children always use that gateway's DB.
-        mcpAddons[bundleId] = await pinnedMcpEntry({
-          manifest,
-          reqEnv,
-          generated,
-          ownerEnv,
-          editedEnv,
-          destDir,
-          bundleId,
-          priorEntry: mcpAddons[bundleId] || null,
-          job,
+        //
+        // Under the add-on's lock (0.6.1/1.6): build → seal (an await) → RE-READ the file
+        // → replace only this entry. Writing back the document read before the seal would
+        // drop whatever another writer added meanwhile.
+        await withAddonLock(bundleId, async () => {
+          const priorEntry = readJsonSafe(MCP_ADDONS_PATH, {})[bundleId] || null;
+          const entry = await pinnedMcpEntry({
+            manifest,
+            reqEnv,
+            generated,
+            ownerEnv,
+            editedEnv,
+            destDir,
+            bundleId,
+            priorEntry,
+            job,
+          });
+          const fresh = rereadMcpAddons();
+          fresh[bundleId] = entry;
+          writeJsonSafe(MCP_ADDONS_PATH, fresh);
         });
-        writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
         needsRestart = true;
       }
@@ -3793,21 +3874,26 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     } else if (addonType === "mcp-server") {
       // MCP server — register in mcp-addons.json
       if (manifest?.server) {
-        // Before the entry is written (see the bundle branch above).
+        // Before the entry is written (see the bundle branch above), and under the same
+        // lock: build → seal → RE-READ → replace only this entry (1.6).
         ensureAddonDataDir(bundleId, manifest);
-        const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        mcpAddons[bundleId] = await pinnedMcpEntry({
-          manifest,
-          reqEnv,
-          generated,
-          ownerEnv,
-          editedEnv,
-          destDir,
-          bundleId,
-          priorEntry: mcpAddons[bundleId] || null,
-          job,
+        await withAddonLock(bundleId, async () => {
+          const priorEntry = readJsonSafe(MCP_ADDONS_PATH, {})[bundleId] || null;
+          const entry = await pinnedMcpEntry({
+            manifest,
+            reqEnv,
+            generated,
+            ownerEnv,
+            editedEnv,
+            destDir,
+            bundleId,
+            priorEntry,
+            job,
+          });
+          const fresh = rereadMcpAddons();
+          fresh[bundleId] = entry;
+          writeJsonSafe(MCP_ADDONS_PATH, fresh);
         });
-        writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
       }
 
@@ -5491,108 +5577,155 @@ export default function bundlesRouter() {
         return res.status(403).json({ code: "folder_needs_owner", key: pathishKeys[0], error: `Folder settings (${pathishKeys.join(", ")}) are set from this machine's own dashboard, signed in with its password.` });
       }
 
-      // Read the existing .env. The save is LINE-PRESERVING (C4): only the submitted
-      // keys change; every other line (legacy values, comments) stays byte-for-byte.
-      const envPath = join(bundleDir, ".env");
-      const oldEnvText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
-      const existing = parseEnvText(oldEnvText);
+      // One write section under the add-on's own lock (0.6.1): the previous_key read, the MCP
+      // entry, the .env, the folder grants and the keychain save must never interleave with
+      // another save of this add-on (a second Configure, an API-key card, an install).
+      const saved = await withAddonLock(bundle_id, async () => {
+        // Read the existing .env. The save is LINE-PRESERVING (C4): only the submitted
+        // keys change; every other line (legacy values, comments) stays byte-for-byte.
+        const envPath = join(bundleDir, ".env");
+        const oldEnvText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+        const existing = parseEnvText(oldEnvText);
 
-      // env_vars[].previous_key (tax's encryption key): a key change that does not fill the
-      // previous-key slot itself keeps the outgoing key there, so returns saved with it stay
-      // readable. The outgoing key is the one the MCP child will start with (its entry, the
-      // gateway env, this .env). The slot always takes the key just replaced: the tax
-      // server moves every return to the current key when it starts, so an older key in
-      // the slot only still matters if it did not start since the last change — the
-      // warning (key names only) says so.
-      const keyWarnings = [];
-      // The `previous_key` slots THIS request made the server fill: those values are the
-      // server's, not the owner's, so they are never recorded as owner-entered.
-      const injectedSlots = [];
-      {
-        const entryEnv = readJsonSafe(MCP_ADDONS_PATH, {})?.[bundle_id]?.env || {};
-        for (const v of getInstalledFirstManifest(bundle_id)?.env_vars || []) {
-          const prev = v && typeof v.previous_key === "string" ? v.previous_key : null;
-          if (!prev || env_vars[v.name] === undefined || env_vars[v.name] === "" || env_vars[prev] !== undefined) continue;
-          const next = String(env_vars[v.name]);
-          const old = entryEnv[v.name] || process.env[v.name] || existing[v.name] || "";
-          if (!old || old === next) continue;
-          const kept = entryEnv[prev] || process.env[prev] || existing[prev] || "";
-          env_vars[prev] = old;
-          injectedSlots.push(prev);
-          if (kept && kept !== old && kept !== next) {
-            keyWarnings.push(`${prev} now holds the key you just replaced (it held an older one). Data still on that older key, only if the extension did not restart since the last change, opens only if you enter it in ${prev}.`);
+        // env_vars[].previous_key (tax's encryption key): a key change that does not fill the
+        // previous-key slot itself keeps the outgoing key there, so returns saved with it stay
+        // readable. The outgoing key is the one the MCP child will start with (its entry, the
+        // gateway env, this .env). The slot always takes the key just replaced: the tax
+        // server moves every return to the current key when it starts, so an older key in
+        // the slot only still matters if it did not start since the last change — the
+        // warning (key names only) says so.
+        const keyWarnings = [];
+        // The `previous_key` slots THIS request made the server fill: those values are the
+        // server's, not the owner's, so they are never recorded as owner-entered.
+        const injectedSlots = [];
+        {
+          // The entry's own copy of the outgoing key may be SEALED (keychainEnv), and the .env
+          // alone is not authoritative: unseal it through the spawn's own paths — the same
+          // paths the child takes. A key that cannot be read contributes nothing here (the
+          // .env and the gateway env are still tried), and a slot that then cannot be filled
+          // is reported by NAME only.
+          const rawEntry = readJsonSafe(MCP_ADDONS_PATH, {})?.[bundle_id] || null;
+          let entryEnv = {};
+          let entryUnreadable = false;
+          try {
+            entryEnv = (rawEntry ? hydrateAddonEntry(bundle_id, rawEntry, { unsealer: "gateway", ...gatewayKeychainPaths() }) : null)?.env || {};
+          } catch (err) {
+            if (!(err instanceof AddonKeysUnavailableError)) throw err;
+            entryUnreadable = true;
+            console.warn(`[bundles] ${bundle_id}: the saved keys could not be read from the keychain (${err.code}); previous-key slots are filled from the .env and the gateway env only`);
+          }
+          for (const v of getInstalledFirstManifest(bundle_id)?.env_vars || []) {
+            const prev = v && typeof v.previous_key === "string" ? v.previous_key : null;
+            if (!prev || env_vars[v.name] === undefined || env_vars[v.name] === "" || env_vars[prev] !== undefined) continue;
+            const next = String(env_vars[v.name]);
+            const old = entryEnv[v.name] || process.env[v.name] || existing[v.name] || "";
+            if (!old || old === next) {
+              if (!old && entryUnreadable) keyWarnings.push(`${v.name}'s current key could not be read, so it was not kept in ${prev}.`);
+              continue;
+            }
+            const kept = entryEnv[prev] || process.env[prev] || existing[prev] || "";
+            env_vars[prev] = old;
+            injectedSlots.push(prev);
+            if (kept && kept !== old && kept !== next) {
+              keyWarnings.push(`${prev} now holds the key you just replaced (it held an older one). Data still on that older key, only if the extension did not restart since the last change, opens only if you enter it in ${prev}.`);
+            }
           }
         }
-      }
 
-      // Keys whose value this save actually changes (names only, never values).
-      const changedKeys = Object.keys(env_vars).filter((k) => {
-        const next = env_vars[k];
-        if (next === undefined) return false;
-        return existing[k] === undefined ? String(next) !== "" : String(existing[k]) !== String(next);
-      });
+        // Keys whose value this save actually changes (names only, never values).
+        const changedKeys = Object.keys(env_vars).filter((k) => {
+          const next = env_vars[k];
+          if (next === undefined) return false;
+          return existing[k] === undefined ? String(next) !== "" : String(existing[k]) !== String(next);
+        });
 
-      Object.assign(existing, env_vars); // the effective env after this save
-      writePrivateFile(envPath, updateEnvText(oldEnvText, env_vars, { pathKeys: pathEnvKeys(getInstalledFirstManifest(bundle_id)) }));
-      const folderWarnings = [];
-      if (owner && folderKeys.size) {
-        // The owner typed these folders here: allow them (a default is not a choice). Only
-        // keys this save CHANGES: an unchanged value may have been written by something else
-        // (a hand edit, a CLI install, a container that can write the .env), and the form
-        // sends every filled field. A changed key the owner set to anything else loses its
-        // grant; an unchanged one keeps whatever it had.
-        const changed = new Set(changedKeys);
-        const man = getInstalledFirstManifest(bundle_id);
-        let composeTextG = "";
-        try { composeTextG = readFileSync(join(bundleDir, "docker-compose.yml"), "utf8"); } catch { /* none */ }
-        let exampleEnv = {};
-        try { exampleEnv = parseEnvText(readFileSync(join(bundleDir, ".env.example"), "utf8")); } catch { /* none */ }
-        // The form prefills (and sends) the manifest default: a default or an example is never
-        // taken as the owner's choice, here as at install.
-        try { migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants }); } catch { /* best-effort */ }
-        const refused = {};
-        const submittedChanged = Object.fromEntries(Object.entries(env_vars).filter(([k]) => changed.has(k)));
-        const g = grantCandidates({ manifest: man, submitted: submittedChanged, composeText: composeTextG, exampleEnv, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants, appRoot: APP_ROOT, otherRoots: otherBundlesRoots(bundle_id, { crowHome: CROW_HOME, home: homeForGrants }), refused });
-        await dropSharedFolderConflicts(bundle_id, g, refused);
-        recordGrants(CROW_HOME, bundle_id, g);
-        dropGrants(CROW_HOME, bundle_id, [...changed].filter((k) => folderKeys.has(k) && !g[k]));
-        // Say why a folder this save names is still not allowed (Start would refuse it).
-        let ungranted = [];
-        try { ungranted = ungrantedFolderKeys(bundle_id, { crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants, bundleDir, appRoot: APP_ROOT }); } catch { /* none */ }
-        for (const k of ungranted) {
-          if (env_vars[k] === undefined) continue;
-          const why = refused[k] || (changed.has(k)
-            ? "it can't be allowed"
-            : "it did not change in this save, and a folder is allowed only when you type it here (retype it, for example with a trailing /)");
-          folderWarnings.push(`${k} was saved, but its folder is not allowed, so the extension will not start with it: ${why}.`);
+        // The MCP entry FIRST (1.5a). Its write is the one that can refuse on the keychain,
+        // and such a refusal must leave the .env byte-identical. It also means an unwritable
+        // mcp-addons.json now fails the whole save instead of leaving a stale entry beside a
+        // fresh .env: the two are one piece of state.
+        let mcpUpdated = false;
+        try {
+          mcpUpdated = await applyEnvToMcpAddons(bundle_id, env_vars, MCP_ADDONS_PATH, getInstalledFirstManifest(bundle_id), {
+            edited: owner ? changedKeys : [],
+            injected: injectedSlots,
+            owner,
+          });
+        } catch (err) {
+          if (!isAddonKeychainSaveFailure(err)) throw err;
+          console.warn(`[bundles] ${bundle_id}: the keychain would not take this save (${err?.code || err?.name || "error"}); nothing was written`);
+          return { keychainFailed: true };
         }
-      }
-      keyWarnings.push(...folderWarnings);
-      // The owner check made at the top of this route (local password session, off-box).
-      const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: owner });
-      // keychain_configure:false fields (Workspace admin password): setup applied the stored value
-      // once and Configure cannot re-apply a new one, so never overwrite the stored copy here.
-      const noConfigureKc = new Set((getInstalledFirstManifest(bundle_id)?.env_vars || []).filter((v) => v && v.keychain_configure === false).map((v) => v.name));
-      keychainReq.save = keychainReq.save.filter((k) => !noConfigureKc.has(k));
-      const kcLog = [];
-      const kc = keychainReq.save.length
-        ? await recordKeychainForInstall({ bundleId: bundle_id, manifest: getInstalledFirstManifest(bundle_id), env: existing, minted: {}, keychainReq, log: (m) => kcLog.push(m) })
-        : null;
 
-      // Also configure the MCP child, which reads mcp-addons.json — not this .env. `owner` is
-      // the check made at the top of this route: only the local owner's own request leaves
-      // provenance behind (a peer's or a token's save proves nothing about who typed what).
-      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars, MCP_ADDONS_PATH, getInstalledFirstManifest(bundle_id), {
-        edited: owner ? changedKeys : [],
-        injected: injectedSlots,
-        owner,
+        // Then the .env. A failed write after a successful seal is NOT rolled back (review
+        // round 2, item 2 — accepted): the keychain and the entry hold the new value, the
+        // .env still holds the old one, and the answer is the existing env_write sentence.
+        // The operator's next save (or Restart's catch-up) rewrites the .env.
+        try {
+          Object.assign(existing, env_vars); // the effective env after this save
+          writePrivateFile(envPath, updateEnvText(oldEnvText, env_vars, { pathKeys: pathEnvKeys(getInstalledFirstManifest(bundle_id)) }));
+        } catch (err) {
+          console.warn(`[bundles] ${bundle_id}: the .env could not be written (${err?.code || "write"})`);
+          return { envWriteFailed: true };
+        }
+        const folderWarnings = [];
+        if (owner && folderKeys.size) {
+          // The owner typed these folders here: allow them (a default is not a choice). Only
+          // keys this save CHANGES: an unchanged value may have been written by something else
+          // (a hand edit, a CLI install, a container that can write the .env), and the form
+          // sends every filled field. A changed key the owner set to anything else loses its
+          // grant; an unchanged one keeps whatever it had.
+          const changed = new Set(changedKeys);
+          const man = getInstalledFirstManifest(bundle_id);
+          let composeTextG = "";
+          try { composeTextG = readFileSync(join(bundleDir, "docker-compose.yml"), "utf8"); } catch { /* none */ }
+          let exampleEnv = {};
+          try { exampleEnv = parseEnvText(readFileSync(join(bundleDir, ".env.example"), "utf8")); } catch { /* none */ }
+          // The form prefills (and sends) the manifest default: a default or an example is never
+          // taken as the owner's choice, here as at install.
+          try { migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants }); } catch { /* best-effort */ }
+          const refused = {};
+          const submittedChanged = Object.fromEntries(Object.entries(env_vars).filter(([k]) => changed.has(k)));
+          const g = grantCandidates({ manifest: man, submitted: submittedChanged, composeText: composeTextG, exampleEnv, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants, appRoot: APP_ROOT, otherRoots: otherBundlesRoots(bundle_id, { crowHome: CROW_HOME, home: homeForGrants }), refused });
+          await dropSharedFolderConflicts(bundle_id, g, refused);
+          recordGrants(CROW_HOME, bundle_id, g);
+          dropGrants(CROW_HOME, bundle_id, [...changed].filter((k) => folderKeys.has(k) && !g[k]));
+          // Say why a folder this save names is still not allowed (Start would refuse it).
+          let ungranted = [];
+          try { ungranted = ungrantedFolderKeys(bundle_id, { crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants, bundleDir, appRoot: APP_ROOT }); } catch { /* none */ }
+          for (const k of ungranted) {
+            if (env_vars[k] === undefined) continue;
+            const why = refused[k] || (changed.has(k)
+              ? "it can't be allowed"
+              : "it did not change in this save, and a folder is allowed only when you type it here (retype it, for example with a trailing /)");
+            folderWarnings.push(`${k} was saved, but its folder is not allowed, so the extension will not start with it: ${why}.`);
+          }
+        }
+        keyWarnings.push(...folderWarnings);
+        // The owner check made at the top of this route (local password session, off-box).
+        const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: owner });
+        // keychain_configure:false fields (Workspace admin password): setup applied the stored value
+        // once and Configure cannot re-apply a new one, so never overwrite the stored copy here.
+        const noConfigureKc = new Set((getInstalledFirstManifest(bundle_id)?.env_vars || []).filter((v) => v && v.keychain_configure === false).map((v) => v.name));
+        keychainReq.save = keychainReq.save.filter((k) => !noConfigureKc.has(k));
+        const kcLog = [];
+        const kc = keychainReq.save.length
+          ? await recordKeychainForInstall({ bundleId: bundle_id, manifest: getInstalledFirstManifest(bundle_id), env: existing, minted: {}, keychainReq, log: (m) => kcLog.push(m) })
+          : null;
+
+        // And the gateway's own env, exactly as install does for docker bundles:
+        // gateway-side panel routes read their config from process.env (the phone
+        // bundle's PHONE_RUNNER_SECRET), so a value entered here never reached them.
+        // Only keys the manifest declares — never arbitrary request keys.
+        const gatewayUpdated = propagateBundleEnvToGateway(bundle_id, env_vars);
+        return { mcpUpdated, gatewayUpdated, kc, kcLog, keyWarnings, changedKeys };
       });
-
-      // And the gateway's own env, exactly as install does for docker bundles:
-      // gateway-side panel routes read their config from process.env (the phone
-      // bundle's PHONE_RUNNER_SECRET), so a value entered here never reached them.
-      // Only keys the manifest declares — never arbitrary request keys.
-      const gatewayUpdated = propagateBundleEnvToGateway(bundle_id, env_vars);
+      if (saved.keychainFailed) {
+        return res.status(500).json({ code: "keychain", error: ADDON_KEYS_SAVE_FAILED });
+      }
+      if (saved.envWriteFailed) {
+        return res.status(500).json({ code: "env_write", error: API_KEY_SAVE_REFUSALS.env_write });
+      }
+      const { mcpUpdated, gatewayUpdated, kc, kcLog, keyWarnings, changedKeys } = saved;
       const needsRestart = mcpUpdated || gatewayUpdated;
 
       // B4: a running container keeps the env it was created with. When the

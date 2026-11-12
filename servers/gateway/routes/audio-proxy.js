@@ -17,6 +17,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getExposedCapabilities, isCapabilityExposedToPeer } from "../peer-exposure.js";
 import { resolveCrowHome } from "../proxy.js";
+import { AddonKeysUnavailableError, hydrateAddonEntry, processUnsealer } from "../../shared/addon-secrets.js";
+import { gatewayKeychainPaths } from "../addon-keys-paths.js";
 
 const ID_RE = /^[0-9a-fA-F-]{8,64}$/;
 const CODECS = new Set(["mp3", "ogg", "opus"]);
@@ -29,15 +31,33 @@ export function validateAudioParams({ cap, id, codec } = {}) {
   return { ok: true, id, codec };
 }
 
-/** Read the local Funkwhale addon env from ~/.crow/mcp-addons.json. */
+/**
+ * Read the local Funkwhale addon env from <crowHome>/mcp-addons.json, unsealing the entry's
+ * listed keychain names with THIS process's role (the gateway registers one; a child gets null
+ * and falls back to the plain values + its own env). A key that cannot be produced keeps
+ * today's answer: the plain entry env only — never half a secret.
+ */
 export function readFunkwhaleEnv(crowHome = resolveCrowHome()) {
+  let entry = null;
   try {
     const cfg = JSON.parse(readFileSync(join(crowHome, "mcp-addons.json"), "utf8"));
-    const fw = cfg?.funkwhale?.env || cfg?.funkwhale || {};
-    const url = fw.FUNKWHALE_URL;
-    const token = fw.FUNKWHALE_ACCESS_TOKEN;
-    if (url && token) return { url: String(url).replace(/\/+$/, ""), token: String(token) };
-  } catch { /* not installed / unreadable */ }
+    entry = cfg?.funkwhale ?? null;
+  } catch {
+    return null; // not installed / unreadable
+  }
+  let hydrated = entry;
+  if (entry && typeof entry === "object") {
+    try {
+      hydrated = hydrateAddonEntry("funkwhale", entry, { unsealer: processUnsealer(), ...gatewayKeychainPaths() });
+    } catch (err) {
+      if (!(err instanceof AddonKeysUnavailableError)) throw err;
+      hydrated = entry; // a child's own env is all it gets (0.5); a listed name has no plain value
+    }
+  }
+  const fw = hydrated?.env || hydrated || {};
+  const url = fw.FUNKWHALE_URL;
+  const token = fw.FUNKWHALE_ACCESS_TOKEN;
+  if (url && token) return { url: String(url).replace(/\/+$/, ""), token: String(token) };
   return null;
 }
 

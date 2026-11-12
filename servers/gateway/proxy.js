@@ -24,6 +24,10 @@ import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-z
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
 import { legacyEnvSources, isLegacyConfiguredAddon, legacyIntegrationsView, addonDerivedEnv } from "./services/legacy-sources.js";
 import { addonBaseEnv, declaredPassthrough, storagePassthrough } from "./addon-env.js";
+// Spawn-time unseal (add-on secrets, PR1 task 1.7): a listed secret comes from THIS process's
+// keychain, all or nothing, and is passed straight into the child's env — never to a file.
+import { ADDON_KEYS_UNREADABLE, AddonKeysUnavailableError, hydrateAddonEntry, sharedAddonEnv } from "../shared/addon-secrets.js";
+import { gatewayKeychainPaths } from "./addon-keys-paths.js";
 import { createDbClient, resolveDataDir } from "../db.js";
 import { gatewayListenPort } from "./listen-port.js";
 import { addonWallMode } from "../../scripts/addon-sandbox/spawn.mjs";
@@ -487,6 +491,41 @@ async function connectToServer(integration) {
   }
 }
 
+/**
+ * The mcp-addons.json entry for `id`, read at CALL time — the source of another add-on's shared
+ * secrets (R6, ADDON_SECRET_SHARES) is read live, so a key rotated since boot is the one shared.
+ * Never throws: an unreadable file is "not installed".
+ */
+function readAddonEntryForShares(id) {
+  try {
+    const all = JSON.parse(readFileSync(join(resolveCrowHome(), "mcp-addons.json"), "utf8"));
+    return all && typeof all === "object" && Object.hasOwn(all, id) ? all[id] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The env an add-on's child is spawned with (task 1.7): `config` hydrated from the keychain plus
+ * another add-on's shared settings (R6). Throws AddonKeysUnavailableError when a listed secret
+ * cannot be produced — the caller then starts nothing (0.4: never a partial or plain env). The
+ * result is for the spawning process only: never written back to mcp-addons.json and never handed
+ * to the wall as its `entry` (a secret must not travel where the entry travels).
+ */
+function addonRunConfig(id, config) {
+  const runConfig = hydrateAddonEntry(id, config, { unsealer: "gateway", ...gatewayKeychainPaths() });
+  const shares = dep("addonSecretShares", null); // test seam for the frozen R6 table
+  const shared = sharedAddonEnv(id, readAddonEntryForShares, {
+    unsealer: "gateway",
+    ...gatewayKeychainPaths(),
+    ...(shares ? { shares } : {}),
+  });
+  // A share is merged into a NEW object: the stored entry (`config`) is also the wall's `entry`
+  // and must never be mutated.
+  if (Object.keys(shared).length === 0) return runConfig;
+  return { ...runConfig, env: { ...(runConfig.env || {}), ...shared } };
+}
+
 /** A walled add-on's own env: its entry env, its derived keys, and the gateway host mark. */
 export function addonOwnEnv(config = {}, base = process.env, id = null) {
   const derived = id ? addonDerivedEnv(id, config.env, undefined, withoutCredentialKeys(base)) : {};
@@ -578,7 +617,27 @@ export async function connectAddonServer(id, config) {
     } else {
       // stdio (default, backward-compatible)
       const cwd = installDir;
-      const env = addonStdioEnv(config, process.env, id);
+      // 0.4/0.5: the listed secrets are unsealed HERE, before anything is built or spawned.
+      let runConfig;
+      try {
+        runConfig = addonRunConfig(id, config);
+      } catch (err) {
+        if (!(err instanceof AddonKeysUnavailableError)) throw err;
+        // Fixed sentence, add-on id, error code and key NAMES only — never a value.
+        console.error(`  [proxy] addon ${id}: not started, its saved keys could not be read from the keychain (${err.code}: ${err.names.join(", ")})`);
+        connectedServers.set(id, {
+          client: null,
+          tools: [],
+          status: "error",
+          error: ADDON_KEYS_UNREADABLE,
+          isAddon: true,
+          keysUnreadable: err.names,
+        });
+        // The Fix-it card is wired in PR3; a reporter failure must not change this outcome.
+        try { await dep("reportAddonKeysUnreadable", () => {})(id, err); } catch { /* PR3 wires it */ }
+        return null;
+      }
+      const env = addonStdioEnv(runConfig, process.env, id);
       remoteBotActor = remoteBotActorForCwd(cwd);
       // Bare command names (uvx, uv, npx) resolve against the gateway PATH,
       // then the per-user install dirs systemd's PATH lacks.
@@ -600,6 +659,8 @@ export async function connectAddonServer(id, config) {
         const warm = await dep("warmAddon", warmAddon)({
           id,
           kind: "addon",
+          // The STORED entry, never the hydrated one: the wall's plan/profile is built from it and
+          // must not see a secret value (review item 8). Only the child env below carries them.
           entry: config,
           command: rc.command,
           args: config.args || [],
@@ -633,13 +694,17 @@ export async function connectAddonServer(id, config) {
         try {
           wall = await dep("startAddonWall", (o) => getWallContext().startAddonWall(o))({
             id,
+            // The STORED entry: the profile is built from it, so it never sees a secret value
+            // (review item 8). The hydrated env reaches the child only through `ownEnv`.
             entry: config,
             command: rc.command,
             args: config.args || [],
             // The wall builds the child env itself: the gateway env is read only
             // through its allowlist, never spread (defence in depth over Phase 0).
             baseEnv: process.env,
-            ownEnv: addonOwnEnv(config, process.env, id),
+            // The keychain values (and R6 shares), derived keys included: this is the one place
+            // a secret reaches a walled child.
+            ownEnv: addonOwnEnv(runConfig, process.env, id),
             kind: "addon",
           });
         } catch (err) {
@@ -674,7 +739,10 @@ export async function connectAddonServer(id, config) {
         transport = new StdioClientTransport({ command: wall.cmd, args: wall.args, env: wall.env, cwd, stderr: "pipe" });
         attachStderrPrefixer(transport, id);
       } else {
-        transport = new StdioClientTransport({ command: rc.command, args: config.args || [], env, cwd, stderr: "pipe" });
+        // Seam only (a test proves an unreadable key list creates no transport at all).
+        transport = dep("createStdioTransport", (o) => new StdioClientTransport(o))({
+          command: rc.command, args: config.args || [], env, cwd, stderr: "pipe",
+        });
         attachStderrPrefixer(transport, id);
       }
       wallInfo = wallInfoFor(wall, wm);
@@ -1541,6 +1609,17 @@ export function addonsSettled() { return _settled; }
 /** Marked from initProxyServers' `finally`. Idempotent. */
 export function _markAddonsSettled() {
   if (_settledResolve) { _settledResolve(); _settledResolve = null; }
+}
+
+/**
+ * The LIVE connection of one add-on: `{ status, tools }`, or null when it has none (never
+ * loaded, errored, or hosted elsewhere). The Bot Builder probe (task 1.9) reuses a connected
+ * add-on's tool list instead of spawning a second copy from its stored entry.
+ */
+export function getAddonLiveTools(id) {
+  const entry = connectedServers.get(id);
+  if (!entry) return null;
+  return { status: entry.status, tools: Array.isArray(entry.tools) ? entry.tools : [] };
 }
 
 /**

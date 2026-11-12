@@ -10,7 +10,9 @@
  *   CROW_MUSIC_ADDONS_FILE=<an mcp-addons.json holding the funkwhale entry> node scripts/kiosk-eval/music-match-report.mjs
  *
  * The token is read from that file inside this process: it is never on a command line or in a
- * shell variable. (CROW_MUSIC_TOKEN still works for tests; do not use it by hand.)
+ * shell variable. When the entry keeps the token in the keychain (`keychainEnv`), this operator
+ * script hydrates it as `"operator-cli"`. The FILE's token wins over CROW_MUSIC_TOKEN (the file
+ * is the add-on the display itself reads), so do not set that by hand.
  *
  * Reading the result: albums.unique_resolved should equal albums.unique_total less
  * unique_to_artist (an album titled like its artist plays the artist, which includes it);
@@ -22,12 +24,28 @@
  */
 import { readFileSync } from "node:fs";
 import { createMusicSource } from "../../bundles/kiosk/server/sources/funkwhale.js";
+import { AddonKeysUnavailableError, hydrateAddonEntry, keychainEnvNames } from "../../servers/shared/addon-secrets.js";
+import { gatewayKeychainPaths } from "../../servers/gateway/addon-keys-paths.js";
 
 const NAMES = { base: "CROW_MUSIC_BASE", token: "CROW_MUSIC_TOKEN", storageOrigin: "CROW_MUSIC_STORAGE_ORIGIN" };
 const settings = Object.fromEntries(Object.entries(NAMES).map(([k, name]) => [k, process.env[name] || ""]));
 if (process.env.CROW_MUSIC_ADDONS_FILE) {
-  try { settings.token = String(JSON.parse(readFileSync(process.env.CROW_MUSIC_ADDONS_FILE, "utf8"))?.funkwhale?.env?.FUNKWHALE_ACCESS_TOKEN || ""); }
+  let entry;
+  try { entry = JSON.parse(readFileSync(process.env.CROW_MUSIC_ADDONS_FILE, "utf8"))?.funkwhale || {}; }
   catch { console.error("CROW_MUSIC_ADDONS_FILE could not be read as an add-on file"); process.exit(2); }
+  let env = entry && typeof entry === "object" ? entry.env || entry : {};
+  // The entry may keep its token in the keychain: this script runs as the operator, so it is
+  // allowed to unseal (the child processes never are). A failure names no value.
+  if (entry && typeof entry === "object" && keychainEnvNames(entry).length > 0) {
+    try {
+      env = hydrateAddonEntry("funkwhale", entry, { unsealer: "operator-cli", ...gatewayKeychainPaths() })?.env || {};
+    } catch (err) {
+      if (!(err instanceof AddonKeysUnavailableError)) throw err;
+      console.error(`The add-on's saved keys could not be read from the keychain (${err.code}); set CROW_MUSIC_TOKEN to supply the token by hand.`);
+      process.exit(2);
+    }
+  }
+  settings.token = String(env?.FUNKWHALE_ACCESS_TOKEN || "") || settings.token;
 }
 const source = createMusicSource({ config: () => settings, autoStart: false, timeoutMs: 30_000 });
 if (!source.available()) {

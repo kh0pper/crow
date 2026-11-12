@@ -4,11 +4,14 @@
  * module only through openEntrySecret / consumeFirstView / exportableEntries, whose callers
  * gate and audit them; through serviceSecretsFor, which only the gateway's own connection test
  * and child spawn read (a project connection's secrets, kind 'service', keyed by connection
- * uuid); and through extensionSecretsFor, which only the gateway's own project connect route
+ * uuid); through extensionSecretsFor, which only the gateway's own project connect route
  * reads when the owner picks a key they already saved for that service (kind 'extension',
- * bundle id + env key). Rows sealed under another key (a crow.db restored onto a machine
- * without the key file) are listed as readable:false and throw KeychainKeyMissingError on
- * open — never a crash, never a wrong plaintext.
+ * bundle id + env key); and through extensionSecretsSync, the SYNCHRONOUS all-or-nothing
+ * reader of one add-on's listed env keys whose only callers are spawn hydration
+ * (servers/shared/addon-secrets.js readAddonSecretsSync), the Bot Builder's add-on probe,
+ * and the seal and migration read-back proofs. Rows sealed under another key (a crow.db
+ * restored onto a machine without the key file) are listed as readable:false and throw
+ * KeychainKeyMissingError on open — never a crash, never a wrong plaintext.
  */
 import { sealSecret, openSecret } from "../../sharing/secret-box.js";
 import { KEYCHAIN_DDL, KEYCHAIN_CONNECTION_COLUMN, KEYCHAIN_SERVICE_INDEX_DDL } from "./schema.js";
@@ -31,6 +34,20 @@ export class KeychainServiceRowError extends Error {
   constructor() {
     super("This key belongs to a project connection. Disconnect it on the project's Services page instead.");
     this.code = "KEYCHAIN_SERVICE_ROW";
+  }
+}
+
+/**
+ * One or more of an add-on's listed env keys has no usable row: missing, not 'active' (an
+ * uninstall's extension_removed), sealed under another key id (a crow.db restored without
+ * its key file), or unreadable/empty. All or nothing — callers never start an add-on with a
+ * partial env. `names` are env NAMES; the message carries no value and no driver error.
+ */
+export class KeychainRowsMissingError extends Error {
+  constructor(names) {
+    super("The keychain has no readable secret for every saved key of this extension.");
+    this.code = "KEYCHAIN_ROWS_MISSING";
+    this.names = (Array.isArray(names) ? names : []).filter((n) => typeof n === "string");
   }
 }
 
@@ -266,6 +283,49 @@ export async function extensionSecretsFor(db, key, bundleId, allowedKeys) {
       const v = openSecret(r.secret_sealed, box(key));
       if (typeof v === "string" && v) out[r.env_key] = v;
     } catch { /* damaged row: skip, never log */ }
+  }
+  return out;
+}
+
+/**
+ * An add-on's listed env keys, SYNCHRONOUSLY, from a better-sqlite3 handle: `{envKey: plaintext}`
+ * for every requested name, or a throw (0.4 — never a partial env, never a fallback).
+ *
+ * Only active rows of this kind and bundle id are candidates; `key` must be the keychain key
+ * (a missing/invalid one is KeychainKeyMissingError). A requested name that has no row, a row
+ * under a DIFFERENT key id, a row that fails openSecret, or one that opens to "" fails the
+ * whole read with KeychainRowsMissingError(names) — every requested name, so a caller can list
+ * them. A missing table or an unreadable DB is the same error (nothing to prove). A system
+ * bundle id (offsite-backup) and an empty name list yield {} before the key is even looked at.
+ *
+ * Callers: servers/shared/addon-secrets.js readAddonSecretsSync (spawn hydration, the Bot
+ * Builder probe, the seal's and the migration's read-back proofs); the satellite agent's
+ * reader. There is no async equivalent for a plaintext add-on secret.
+ */
+export function extensionSecretsSync(rawDb, key, bundleId, names, { kind = "extension" } = {}) {
+  const wanted = [...new Set((Array.isArray(names) ? names : []).filter((n) => typeof n === "string" && n !== ""))];
+  if (typeof bundleId !== "string" || bundleId === "" || isSystemBundleId(bundleId) || wanted.length === 0) return {};
+  requireKey(key);
+  let rows;
+  try {
+    rows = rawDb.prepare("SELECT env_key, key_id, secret_sealed FROM crow_keychain WHERE kind = ? AND bundle_id = ? AND status = 'active'").all(kind, bundleId);
+  } catch {
+    throw new KeychainRowsMissingError(wanted);
+  }
+  const byName = new Map();
+  for (const r of rows) if (r && typeof r.env_key === "string") byName.set(r.env_key, r);
+  const out = {};
+  for (const name of wanted) {
+    const r = byName.get(name);
+    if (!r || r.key_id !== key.id) throw new KeychainRowsMissingError(wanted);
+    let v;
+    try {
+      v = openSecret(r.secret_sealed, box(key));
+    } catch {
+      throw new KeychainRowsMissingError(wanted);
+    }
+    if (typeof v !== "string" || v === "") throw new KeychainRowsMissingError(wanted);
+    out[name] = v;
   }
   return out;
 }

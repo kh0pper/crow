@@ -20,13 +20,20 @@
  * The value never leaves this module except into the keychain, the add-on's
  * mcp-addons.json entry and the bundle's .env. No return value, error sentence, log
  * line or bell carries it: the refusals below are fixed sentences, and the one log line
- * names the bundle id and the env var.
+ * names the bundle id and the env var. With add-on secret sealing ON the entry does not
+ * keep the value at all: the seal writes it to the keychain and lists its NAME in
+ * `keychainEnv` (servers/gateway/addon-secrets-seal.js).
  *
  * Write order, and why:
+ *   0. the whole save runs under the add-on's per-add-on lock (withAddonLock, 0.6.1/1.5b):
+ *      the row, the entry (whose seal reads and rewrites the same keychain rows) and the
+ *      .env must not interleave with a Configure save or a second card for this add-on.
  *   1. the keychain, ALWAYS (no checkbox — the operator typed a key, so Crow keeps it;
  *      an existing entry for the same bundle+env key is updated, so re-entering a
- *      rotated key works). A keychain that will not open stops the save there: nothing
- *      else is written.
+ *      rotated key works). The key comes from the SEAL's own rule (keyForSave, via
+ *      addon-secrets-seal.js), never from a bare ensureWriteKey: a key file that is gone
+ *      while rows exist REFUSES instead of minting a new key over them. A keychain that
+ *      will not open (or will not mint) stops the save there: nothing else is written.
  *   2. the add-on's mcp-addons.json entry (applyEnvToMcpAddons with the reviewed
  *      manifest, `edited` = this key, `owner: true` — the local owner's own request is
  *      what the wall's host/bind rules read as provenance). An MCP child is spawned
@@ -60,6 +67,7 @@ import { join } from "node:path";
 import { updateEnvText, parseEnvText } from "./bundle-env-codec.js";
 import { writePrivateFile, envPatternViolation } from "./bundle-env-secrets.js";
 import { isPlaceholderValue } from "./bundle-env-placeholders.js";
+import { isAddonKeychainSaveFailure } from "../shared/addon-secrets.js";
 
 /** The longest key this route accepts (a typed secret is a token, not a document). */
 export const API_KEY_MAX_LENGTH = 1024;
@@ -149,13 +157,17 @@ function readMcpEntryValue(path, bundleId, envKey) {
  * and by the Extensions renderer (shared/api-key-card.js), neither of which may load the
  * routes module or the database.
  */
-async function defaultDeps(bundleId, crowHome) {
+async function defaultDeps(bundleId, crowHome, names = []) {
   const [routes, config, keychain, db] = await Promise.all([
     import("./routes/bundles.js"),
     import("./bundles-config.js"),
     import("./keychain/store.js"),
     import("../db.js"),
   ]);
+  // One lazy import for what this module needs from the seal (the key rule): it lives in a
+  // module the manifest contract and the Extensions renderer must not load. The per-add-on
+  // lock has its own loader (defaultWithLock) for the same reason.
+  const seal = () => import("./addon-secrets-seal.js");
   return {
     bundleDir: join(config.BUNDLES_DIR, bundleId),
     findInvalidEnv: routes.findInvalidEnv,
@@ -168,7 +180,10 @@ async function defaultDeps(bundleId, crowHome) {
     propagate: routes.propagateBundleEnvToGateway,
     needsConfig: (id) => config.needsConfigKeys(id),
     openDb: () => db.createDbClient(),
-    ensureWriteKey: (handle) => keychain.ensureWriteKey(handle, { crowHome: crowHome || undefined }),
+    // The SEAL's rule, never ensureWriteKey bare: the latter would mint a new keychain key
+    // while rows exist, orphaning every sealed row (0.4). Missing key file + rows → the
+    // AddonKeysSaveRefusedError this save answers with the fixed keychain sentence.
+    ensureWriteKey: async (handle) => (await seal()).keyForSave(handle, { bundleId, names, crowHome }),
     save: keychain.saveExtensionSecret,
     // The atomic first-writer-wins write: null means an active row under this key already
     // existed, so nothing was written.
@@ -177,7 +192,8 @@ async function defaultDeps(bundleId, crowHome) {
     mcpValue: (id, envKey) => readMcpEntryValue(config.MCP_ADDONS_PATH, id, envKey),
     // "Does this extension already hold a value for that key?" — the entry its own MCP child
     // runs with, or an active keychain row (metadata only: the value is never opened). A
-    // home with no keychain table yet has no rows.
+    // home with no keychain table yet has no rows. With sealing ON the entry holds no plain
+    // value, but it LISTS the name in `keychainEnv`: the active row is what answers for it.
     hasValue: async (id, envKey) => {
       const fromMcp = readMcpEntryValue(config.MCP_ADDONS_PATH, id, envKey);
       if (fromMcp.trim() !== "" && !isPlaceholderValue(fromMcp)) return true;
@@ -196,10 +212,29 @@ async function defaultDeps(bundleId, crowHome) {
         try { handle?.close?.(); } catch { /* already closed */ }
       }
     },
+    // The per-add-on lock (0.6.1): the seal's own mutex, imported lazily for the same reason
+    // as the routes module above (the manifest contract and the Extensions renderer import
+    // this module and may not load the database).
+    withLock: (id, fn) => defaultWithLock(id, fn),
     envPatternViolation,
     now: () => Date.now(),
     warn: (m) => console.warn(m),
   };
+}
+
+/**
+ * The per-add-on lock every sealing writer holds for its whole write section (0.6.1).
+ *
+ * Its own lazy import, outside `defaultDeps`: a caller that injects every other seam (a
+ * test, the manifest contract) must not resolve the routes module or open a database just
+ * to serialize itself, and the module stays free of the seal at import time.
+ *
+ * @param {string} bundleId
+ * @param {() => Promise<any>} fn  must await every write it starts (see addon-secrets-seal.js)
+ */
+async function defaultWithLock(bundleId, fn) {
+  const { withAddonLock } = await import("./addon-secrets-seal.js");
+  return withAddonLock(bundleId, fn);
 }
 
 /**
@@ -216,7 +251,8 @@ async function defaultDeps(bundleId, crowHome) {
  * @param {boolean} [o.firstWriterWins]  never replace a value this extension already holds (default false)
  * @param {object} [o.deps]          seams: bundleDir, findInvalidEnv, applyEnv, propagate,
  *                                   needsConfig, openDb, ensureWriteKey, save, remember,
- *                                   hasValue, mcpValue, envPatternViolation, now, warn
+ *                                   hasValue, mcpValue, withLock,
+ *                                   envPatternViolation, now, warn
  * @returns {Promise<{ok: true, needs_restart: boolean, needs_config: string[]}|{ok: false, status: number, error: string}>}
  *          An ok carries the two facts the card needs and nothing else. Never the value.
  */
@@ -252,6 +288,10 @@ export async function saveApiKey({
     if (!defaults) defaults = await defaultDeps(bundleId, crowHome);
     return defaults[name];
   };
+  // The lock resolves through its OWN lazy import (never through defaultDeps): a caller that
+  // injects every other seam — a test, the manifest contract — must not load the routes
+  // module or open a database just to serialize itself.
+  const withLock = injected.withLock !== undefined ? injected.withLock : defaultWithLock;
   const warn = async (message) => { try { (await seam("warn"))(message); } catch { /* console gone */ } };
 
   // First-writer-wins answers before anything is written (and before the value is even
@@ -278,109 +318,132 @@ export async function saveApiKey({
 
   const name = typeof manifest.name === "string" && manifest.name ? manifest.name : bundleId;
 
-  // 1. The keychain, before anything else: no keychain, no write.
-  let db = null;
-  try {
-    db = await (await seam("openDb"))();
-    const writeKey = await (await seam("ensureWriteKey"))(db);
-    const entry = {
-      bundleId,
-      envKey: key,
-      label: `${name} - ${key}`,
-      secret: value,
-      origin,
-      now: new Date((await seam("now"))()),
-    };
-    if (firstWriterWins) {
-      // ONE atomic INSERT … ON CONFLICT: a row another save inserted first wins, and this
-      // call wrote nothing at all — so nothing else is written either.
-      //
-      // NOTE: `remember` is only first-writer-wins for a row that does not exist yet.
-      // rememberExtensionSecret OVERWRITES an active row sealed under a DIFFERENT key_id
-      // (the same extension key re-sealed with this box's key), so first-writer-wins here
-      // rests on the `hasValue` check above — an extension that already holds a value
-      // never reaches this write at all.
-      const id = await (await seam("remember"))(db, writeKey, entry);
-      if (id === null || id === undefined) return refuse("has_value", 409);
-    } else {
-      await (await seam("save"))(db, writeKey, entry);
-    }
-  } catch (err) {
-    // The cause's own code/name only: never the value, never the message (a driver's
-    // message can quote the row it failed on).
-    await warn(`[bundles] ${bundleId}: ${key} was not saved to the keychain (${err && err.code ? err.code : "keychain"})`);
-    return refuse("keychain", 500);
-  } finally {
-    try { db?.close?.(); } catch { /* already closed */ }
-  }
-
-  // First-writer-wins has already claimed its keychain row, so asking `hasValue` again would
-  // always answer yes. What CAN still have changed is the bundle's own MCP entry (a Configure
-  // save in a parallel request): re-read just that one value and leave it alone if it exists.
-  if (firstWriterWins) {
-    let existing = "";
-    try { existing = (await seam("mcpValue"))(bundleId, key); } catch { existing = ""; }
-    if (typeof existing === "string" && existing.trim() !== "" && !isPlaceholderValue(existing)) {
-      return refuse("has_value", 409);
-    }
-  }
-
-  // 2. The add-on's MCP entry. Not an MCP add-on is no error: the keychain holds the key
-  // and a later Configure save writes whatever else this bundle reads.
-  let mcpUpdated = false;
-  try { mcpUpdated = !!(await (await seam("applyEnv"))(bundleId, values, manifest)); } catch { mcpUpdated = false; }
-
-  // 3. An existing bundle .env, then the gateway's own env for a docker bundle.
-  // First-writer-wins re-checks HERE too: the keychain row and the MCP entry are already
-  // written by now, so a value the operator put in the .env meanwhile is left alone rather
-  // than refused — the save finishes (known, harmless: the keychain row this call wrote
-  // stays, and the add-on keeps the operator's value).
-  let gatewayUpdated = false;
-  let envWritten = false;
-  try {
-    const envPath = join(await seam("bundleDir"), ".env");
-    if (existsSync(envPath)) {
-      // Only a regular file: a symlink planted from inside the container must not make this
-      // write copy (or overwrite) a file elsewhere.
-      if (!lstatSync(envPath).isFile()) throw Object.assign(new Error("not a regular file"), { code: "ENOTREG" });
-      let text = "";
-      let keepExisting = false;
+  // Steps 1-3 are ONE write section under the add-on's per-add-on lock (0.6.1 / 1.5b): the
+  // keychain row, the MCP entry (whose seal reads and rewrites the same keychain rows, then
+  // re-reads the file) and the .env must never interleave with a Configure save or a second
+  // card for this add-on.
+  return withLock(bundleId, async () => {
+    // 1. The keychain, before anything else: no keychain, no write.
+    //
+    // R4 crash window (documented, not closed): this row commits first, and a crash before
+    // step 2 leaves the OLD plain value in mcp-addons.json. The boot migration's
+    // MIGRATION_ROW_CONFLICT = "file" then re-seals that FILE value, reverting the key the
+    // owner just typed here. Accepted: the next successful save re-seals the new one.
+    let db = null;
+    try {
+      db = await (await seam("openDb"))();
+      const writeKey = await (await seam("ensureWriteKey"))(db);
+      const entry = {
+        bundleId,
+        envKey: key,
+        label: `${name} - ${key}`,
+        secret: value,
+        origin,
+        now: new Date((await seam("now"))()),
+      };
       if (firstWriterWins) {
-        // A .env this call cannot READ or PARSE is treated as one that already holds the
-        // operator's own value: the write is skipped and the save still answers ok, so a file
-        // Crow cannot inspect is never replaced on a guess. Keeping the operator's value is
-        // allowed because the app's own container never reads THIS token out of .env (it is
-        // Crow's credential for talking to the app, and the copy that matters is the MCP entry
-        // written above); likewise the `has_value` stop on that entry leaves the generated
-        // keychain row this call already wrote behind — unreferenced, and harmless.
-        try {
-          text = readFileSync(envPath, "utf8");
-          const existing = parseEnvText(text)[key];
-          keepExisting = typeof existing === "string" && existing.trim() !== "" && !isPlaceholderValue(existing);
-        } catch {
-          keepExisting = true;
-        }
+        // ONE atomic INSERT … ON CONFLICT: a row another save inserted first wins, and this
+        // call wrote nothing at all — so nothing else is written either.
+        //
+        // NOTE: `remember` is only first-writer-wins for a row that does not exist yet.
+        // rememberExtensionSecret OVERWRITES an active row sealed under a DIFFERENT key_id
+        // (the same extension key re-sealed with this box's key), so first-writer-wins here
+        // rests on the `hasValue` check above — an extension that already holds a value
+        // never reaches this write at all.
+        const id = await (await seam("remember"))(db, writeKey, entry);
+        if (id === null || id === undefined) return refuse("has_value", 409);
       } else {
-        text = readFileSync(envPath, "utf8");
+        await (await seam("save"))(db, writeKey, entry);
       }
-      if (!keepExisting) {
-        writePrivateFile(envPath, updateEnvText(text, values));
-        envWritten = true;
+    } catch (err) {
+      // The cause's own code/name only: never the value, never the message (a driver's
+      // message can quote the row it failed on).
+      await warn(`[bundles] ${bundleId}: ${key} was not saved to the keychain (${err && err.code ? err.code : "keychain"})`);
+      return refuse("keychain", 500);
+    } finally {
+      try { db?.close?.(); } catch { /* already closed */ }
+    }
+
+    // First-writer-wins has already claimed its keychain row, so asking `hasValue` again would
+    // always answer yes. What CAN still have changed is the bundle's own MCP entry (a Configure
+    // save in a parallel request): re-read just that one value and leave it alone if it exists.
+    // With sealing ON the entry keeps no plain value but LISTS the name in `keychainEnv` — the
+    // `hasValue` check above is what answers for that case, through the active keychain row.
+    if (firstWriterWins) {
+      let existing = "";
+      try { existing = (await seam("mcpValue"))(bundleId, key); } catch { existing = ""; }
+      if (typeof existing === "string" && existing.trim() !== "" && !isPlaceholderValue(existing)) {
+        return refuse("has_value", 409);
       }
     }
-  } catch (err) {
-    await warn(`[bundles] ${bundleId}: ${key} was saved but the bundle's .env could not be written (${err && err.code ? err.code : "write"})`);
-    return refuse("env_write", 500);
-  }
-  if (envWritten && propagate) {
-    try { gatewayUpdated = !!(await (await seam("propagate"))(bundleId, values)); } catch { gatewayUpdated = false; }
-  }
 
-  let needsConfig = [];
-  try {
-    const missing = (await seam("needsConfig"))(bundleId);
-    needsConfig = Array.isArray(missing) ? missing : [];
-  } catch { needsConfig = []; }
+    // 2. The add-on's MCP entry. Not an MCP add-on is no error: the keychain holds the key
+    // and a later Configure save writes whatever else this bundle reads. A SEAL failure is a
+    // keychain failure (the entry was not written, so nothing points at the new key): answer
+    // it like step 1 instead of claiming the save half-worked.
+    let mcpUpdated = false;
+    try {
+      mcpUpdated = !!(await (await seam("applyEnv"))(bundleId, values, manifest));
+    } catch (err) {
+      if (isAddonKeychainSaveFailure(err)) {
+        await warn(`[bundles] ${bundleId}: ${key} was not saved to the keychain (${err && err.code ? err.code : "keychain"})`);
+        return refuse("keychain", 500);
+      }
+      mcpUpdated = false;
+    }
 
-  return { ok: true, needs_restart: mcpUpdated || gatewayUpdated, needs_config: needsConfig };
+    // 3. An existing bundle .env, then the gateway's own env for a docker bundle.
+    // First-writer-wins re-checks HERE too: the keychain row and the MCP entry are already
+    // written by now, so a value the operator put in the .env meanwhile is left alone rather
+    // than refused — the save finishes (known, harmless: the keychain row this call wrote
+    // stays, and the add-on keeps the operator's value).
+    let gatewayUpdated = false;
+    let envWritten = false;
+    try {
+      const envPath = join(await seam("bundleDir"), ".env");
+      if (existsSync(envPath)) {
+        // Only a regular file: a symlink planted from inside the container must not make this
+        // write copy (or overwrite) a file elsewhere.
+        if (!lstatSync(envPath).isFile()) throw Object.assign(new Error("not a regular file"), { code: "ENOTREG" });
+        let text = "";
+        let keepExisting = false;
+        if (firstWriterWins) {
+          // A .env this call cannot READ or PARSE is treated as one that already holds the
+          // operator's own value: the write is skipped and the save still answers ok, so a file
+          // Crow cannot inspect is never replaced on a guess. Keeping the operator's value is
+          // allowed because the app's own container never reads THIS token out of .env (it is
+          // Crow's credential for talking to the app, and the copy that matters is the MCP entry
+          // written above); likewise the `has_value` stop on that entry leaves the generated
+          // keychain row this call already wrote behind — unreferenced, and harmless.
+          try {
+            text = readFileSync(envPath, "utf8");
+            const existing = parseEnvText(text)[key];
+            keepExisting = typeof existing === "string" && existing.trim() !== "" && !isPlaceholderValue(existing);
+          } catch {
+            keepExisting = true;
+          }
+        } else {
+          text = readFileSync(envPath, "utf8");
+        }
+        if (!keepExisting) {
+          writePrivateFile(envPath, updateEnvText(text, values));
+          envWritten = true;
+        }
+      }
+    } catch (err) {
+      await warn(`[bundles] ${bundleId}: ${key} was saved but the bundle's .env could not be written (${err && err.code ? err.code : "write"})`);
+      return refuse("env_write", 500);
+    }
+    if (envWritten && propagate) {
+      try { gatewayUpdated = !!(await (await seam("propagate"))(bundleId, values)); } catch { gatewayUpdated = false; }
+    }
+
+    let needsConfig = [];
+    try {
+      const missing = (await seam("needsConfig"))(bundleId);
+      needsConfig = Array.isArray(missing) ? missing : [];
+    } catch { needsConfig = []; }
+
+    return { ok: true, needs_restart: mcpUpdated || gatewayUpdated, needs_config: needsConfig };
+  });
 }

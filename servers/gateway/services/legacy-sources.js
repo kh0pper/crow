@@ -9,6 +9,7 @@
  * Pure: never spawns a child and never writes a file.
  */
 import { serviceCatalog, renderDerivedEnv } from "../../shared/service-catalog.js";
+import { entryConfiguredNames } from "../../shared/addon-secrets.js";
 import { docsUrl } from "../dashboard/shared/components.js";
 
 // Env-configured Google: not a service bundle yet, so it stays a literal here.
@@ -104,15 +105,17 @@ export function legacyEnvSources(env = process.env, catalog = serviceCatalog()) 
 /**
  * Whether an mcp-addons.json entry still starts Crow-wide. A non-service add-on
  * always does. A service add-on does when every field is set, in its own
- * `entry.env` or in `env` (the add-on child inherits process.env).
+ * `entry.env`, in the entry's `keychainEnv` list (the value lives in the keychain —
+ * this predicate never unseals, it only needs the NAMES), or in `env` (the add-on
+ * child inherits process.env).
  *
  * Deleted by PR 4 (Home migration); the google-workspace entry by PR 6.
  */
 export function isLegacyConfiguredAddon(id, entry, catalog = serviceCatalog(), env = process.env) {
   const service = catalog.find((s) => s.id === id);
   if (!service) return true;
-  const own = (entry && entry.env) || {};
-  return fieldNames(service).every((f) => own[f] || env[f]);
+  const configured = new Set(entryConfiguredNames(entry));
+  return fieldNames(service).every((f) => configured.has(f) || env[f]);
 }
 
 /**
