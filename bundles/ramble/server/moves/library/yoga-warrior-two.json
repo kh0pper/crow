@@ -14,12 +14,38 @@
     "strength",
     "hips"
   ],
+  "areas": [
+    "lower",
+    "mobility"
+  ],
+  "perSide": true,
   "steps": [
-    "Stand with your feet wide apart.",
-    "Turn the front foot out and bend that knee over the ankle.",
-    "Stretch your arms out at shoulder height.",
-    "Keep your torso upright and look over the front hand.",
-    "Hold for a few breaths, then straighten the leg and change sides."
+    {
+      "text": "Stand with your feet wide apart.",
+      "cue": "Stand with your feet wide apart.",
+      "at": 0
+    },
+    {
+      "text": "Turn the front foot out and bend that knee over the ankle.",
+      "cue": "Front foot out. Bend that knee over the ankle.",
+      "at": 0
+    },
+    {
+      "text": "Stretch your arms out at shoulder height.",
+      "cue": "Arms out at shoulder height.",
+      "at": 0
+    },
+    {
+      "text": "Keep your torso upright and look over the front hand.",
+      "cue": "Torso upright. Look over the front hand.",
+      "at": 0
+    },
+    {
+      "text": "Hold for a few breaths, then straighten the leg and change sides.",
+      "cue": "Hold and breathe, then straighten the leg.",
+      "say": "Hold for a few breaths, then straighten the leg.",
+      "at": 0
+    }
   ],
   "works": [
     "Legs",
@@ -34,20 +60,14 @@
     "Letting the front knee cave inward.",
     "Leaning the torso over the front leg."
   ],
+  "regression": "Bend the front knee less.",
+  "stopIf": "Come out if your front knee hurts.",
   "skipIf": [
     "knee",
     "hip"
   ],
   "easier": "yoga-mountain",
   "harder": "yoga-triangle",
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": 0,
     "spine": 0,
@@ -65,5 +85,54 @@
     "ankleR": 20,
     "rootAngle": 0,
     "support": "feet"
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "quadriceps",
+        "glutes",
+        "side-hip",
+        "shoulders"
+      ],
+      "lengthening": [
+        "inner-thigh"
+      ],
+      "main": "quadriceps",
+      "bones": [
+        "femur",
+        "tibia",
+        "patella",
+        "hip-bone",
+        "humerus"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "knees",
+          "direction": "forward",
+          "label": "Bend"
+        }
+      ],
+      "why": "The front thigh holds the bent knee steady while the inner thighs lengthen."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

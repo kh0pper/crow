@@ -1,0 +1,148 @@
+{
+  "id": "body-wall-angel",
+  "kind": "exercise",
+  "title": "Wall angels",
+  "minutes": 3,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "wall"
+  ],
+  "tags": [
+    "bodyweight",
+    "upper-body",
+    "shoulders",
+    "posture"
+  ],
+  "areas": [
+    "upper",
+    "mobility"
+  ],
+  "sets": 2,
+  "reps": 10,
+  "tempoSeconds": 6,
+  "perSide": false,
+  "steps": [
+    {
+      "text": "Stand with your back to a wall, with your head, shoulder blades and hips touching it.",
+      "cue": "Head, shoulder blades and hips on the wall.",
+      "at": 0
+    },
+    {
+      "text": "Hold your arms down by your sides with your palms facing out and the backs of your hands on the wall.",
+      "cue": "Arms down, palms out, hands on the wall.",
+      "at": 0
+    },
+    {
+      "text": "Slide your arms slowly out and up the wall as far as is comfortable. Keep the backs of your hands on it.",
+      "cue": "Slide your arms out and up slowly.",
+      "at": 0
+    },
+    {
+      "text": "Pause, then slide them slowly back down. Keep your lower back relaxed.",
+      "cue": "Pause. Slide slowly back down.",
+      "at": 0
+    }
+  ],
+  "works": [
+    "Upper back",
+    "Shoulders"
+  ],
+  "stretches": [
+    "Chest"
+  ],
+  "mistakes": [
+    "Arching the lower back away from the wall.",
+    "Forcing the arms flat when the shoulders are not ready."
+  ],
+  "regression": "Let your arms come a little away from the wall, and slide only a short way.",
+  "stopIf": "Stop if you feel pinching or pain in your shoulders, or tingling in your arms.",
+  "skipIf": [
+    "shoulder"
+  ],
+  "easier": null,
+  "harder": "body-prone-y-raise",
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "still": true,
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "trapezius",
+        "rhomboids",
+        "rotator-cuff",
+        "shoulders"
+      ],
+      "lengthening": [
+        "chest"
+      ],
+      "main": "trapezius",
+      "bones": [
+        "scapula",
+        "humerus",
+        "clavicle",
+        "thoracic-spine"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "up",
+          "label": "Slide"
+        }
+      ],
+      "why": "The upper back turns the shoulder blades as the arms slide, while the chest lengthens."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Cleveland Clinic: posture exercises (wall angels)",
+      "url": "https://health.clevelandclinic.org/posture-exercises",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

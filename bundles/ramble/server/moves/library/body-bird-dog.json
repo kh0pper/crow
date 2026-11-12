@@ -15,12 +15,34 @@
     "back",
     "balance"
   ],
+  "areas": [
+    "core"
+  ],
+  "sets": 2,
+  "reps": 6,
+  "tempoSeconds": 5,
+  "perSide": true,
   "steps": [
-    "Start on your hands and knees with your wrists under your shoulders.",
-    "Reach one arm forward and the opposite leg back until both are level with your back.",
-    "Keep your hips level and your belly firm for one breath.",
-    "Return to the start and switch sides.",
-    "Do 2 sets of 6 reaches per side."
+    {
+      "text": "Start on your hands and knees with your wrists under your shoulders.",
+      "cue": "Hands and knees, wrists under shoulders.",
+      "at": 0
+    },
+    {
+      "text": "Reach one arm forward and the opposite leg back until both are level with your back.",
+      "cue": "Reach one arm forward, the opposite leg back.",
+      "at": 1
+    },
+    {
+      "text": "Keep your hips level and your belly firm for one breath.",
+      "cue": "Hips level, belly firm, one breath.",
+      "at": 1
+    },
+    {
+      "text": "Return to the start and switch sides.",
+      "cue": "Return and switch sides.",
+      "at": 0
+    }
   ],
   "works": [
     "Core",
@@ -32,17 +54,105 @@
     "Letting your hips tip to one side.",
     "Lifting your head to look forward instead of down."
   ],
+  "regression": "Move only the arm, or only the leg, and keep the toes on the floor.",
+  "stopIf": "Stop if you feel pain in your lower back or wrists.",
   "skipIf": [
     "wrist",
     "lower_back"
   ],
   "easier": "body-dead-bug",
   "harder": null,
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 98,
+      "elbowL": 0,
+      "wristL": 60,
+      "shoulderR": 98,
+      "elbowR": 0,
+      "wristR": 60,
+      "hipL": 60,
+      "kneeL": 90,
+      "ankleL": -50,
+      "hipR": 60,
+      "kneeR": 90,
+      "ankleR": -50,
+      "rootAngle": 65,
+      "support": "knees"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 155,
+      "elbowL": 0,
+      "wristL": 0,
+      "shoulderR": 98,
+      "elbowR": 0,
+      "wristR": 60,
+      "hipL": 60,
+      "kneeL": 90,
+      "ankleL": -50,
+      "hipR": -20,
+      "kneeR": 0,
+      "ankleR": -30,
+      "rootAngle": 65,
+      "support": "knees"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "back-extensors",
+        "abdominals",
+        "glutes",
+        "shoulders"
+      ],
+      "lengthening": [],
+      "main": "back-extensors",
+      "bones": [
+        "lumbar-spine",
+        "hip-bone",
+        "femur",
+        "humerus"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "forward",
+          "label": "Reach"
+        },
+        {
+          "from": "feet",
+          "direction": "back",
+          "label": "Reach"
+        }
+      ],
+      "why": "The muscles around the trunk hold the spine still while one arm and one leg reach away."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.3 Axial muscles of the head, neck and back",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-3-axial-muscles-of-the-head-neck-and-back",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.4 Axial muscles of the abdominal wall and thorax",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-4-axial-muscles-of-the-abdominal-wall-and-thorax",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

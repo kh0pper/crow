@@ -1,0 +1,158 @@
+{
+  "id": "balance-one-leg-stand",
+  "kind": "pose",
+  "title": "One-leg stand at the wall",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "wall"
+  ],
+  "tags": [
+    "balance",
+    "standing"
+  ],
+  "areas": [
+    "mobility"
+  ],
+  "perSide": true,
+  "steps": [
+    {
+      "text": "Stand facing a wall with your fingertips resting on it.",
+      "cue": "Face the wall, fingertips on it.",
+      "at": 0
+    },
+    {
+      "text": "Lift one foot a little off the floor. Keep your hips level.",
+      "cue": "Lift one foot. Hips level.",
+      "at": 1
+    },
+    {
+      "text": "Stand tall on the other leg with that knee soft.",
+      "cue": "Stand tall. Standing knee soft.",
+      "at": 1
+    },
+    {
+      "text": "Hold and breathe, then lower the foot and change legs.",
+      "cue": "Hold and breathe.",
+      "say": "Hold and breathe.",
+      "at": 1
+    }
+  ],
+  "works": [
+    "Legs",
+    "Hips"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Leaning on the wall instead of only touching it.",
+    "Locking the standing knee."
+  ],
+  "regression": "Keep the toes of the lifted foot resting on the floor.",
+  "stopIf": "Stop if you feel unsteady, or feel pain in your standing knee or ankle.",
+  "skipIf": [
+    "balance",
+    "ankle"
+  ],
+  "easier": null,
+  "harder": "yoga-tree",
+  "pose": {
+    "neck": 0,
+    "spine": 0,
+    "shoulderL": 75,
+    "elbowL": 15,
+    "wristL": 0,
+    "shoulderR": 75,
+    "elbowR": 15,
+    "wristR": 0,
+    "hipL": 3,
+    "kneeL": 6,
+    "ankleL": 3,
+    "hipR": 30,
+    "kneeR": 60,
+    "ankleR": -10,
+    "rootAngle": 0,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 75,
+      "elbowL": 15,
+      "wristL": 0,
+      "shoulderR": 75,
+      "elbowR": 15,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 75,
+      "elbowL": 15,
+      "wristL": 0,
+      "shoulderR": 75,
+      "elbowR": 15,
+      "wristR": 0,
+      "hipL": 3,
+      "kneeL": 6,
+      "ankleL": 3,
+      "hipR": 30,
+      "kneeR": 60,
+      "ankleR": -10,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "side-hip",
+        "calf",
+        "outer-shin",
+        "shin"
+      ],
+      "lengthening": [],
+      "main": "side-hip",
+      "bones": [
+        "hip-bone",
+        "femur",
+        "tibia",
+        "talus",
+        "foot-bones"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "feet",
+          "direction": "down",
+          "label": "Root"
+        }
+      ],
+      "why": "The side of the standing hip and the lower-leg muscles make small corrections to keep you upright."
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: Balance exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/balance-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

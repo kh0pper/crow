@@ -14,12 +14,34 @@
     "arms",
     "strength"
   ],
+  "areas": [
+    "upper"
+  ],
+  "sets": 2,
+  "reps": 12,
+  "tempoSeconds": 5,
+  "perSide": false,
   "steps": [
-    "Stand on the middle of the band with your feet hip-width apart.",
-    "Hold one end in each hand with your arms long and your palms facing forward.",
-    "Bend your elbows and bring your hands toward your shoulders.",
-    "Lower slowly until your arms are long again.",
-    "Do 2 sets of 12."
+    {
+      "text": "Stand on the middle of the band with your feet hip-width apart.",
+      "cue": "Stand on the middle of the band.",
+      "at": 0
+    },
+    {
+      "text": "Hold one end in each hand with your arms long and your palms facing forward.",
+      "cue": "Arms long, palms facing forward.",
+      "at": 0
+    },
+    {
+      "text": "Bend your elbows and bring your hands toward your shoulders.",
+      "cue": "Bend your elbows. Hands toward your shoulders.",
+      "at": 1
+    },
+    {
+      "text": "Lower slowly until your arms are long again.",
+      "cue": "Lower slowly.",
+      "at": 0
+    }
   ],
   "works": [
     "Arms"
@@ -29,14 +51,86 @@
     "Swinging your elbows forward to lift the band.",
     "Leaning back to help the curl."
   ],
+  "regression": "Stand on the band with one foot only, so it pulls less.",
+  "stopIf": "Stop if you feel pain in your elbows or wrists.",
   "skipIf": [],
   "easier": "band-row",
   "harder": null,
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 5,
+      "elbowL": 140,
+      "wristL": 0,
+      "shoulderR": 5,
+      "elbowR": 140,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "biceps",
+        "forearm-flexors"
+      ],
+      "lengthening": [
+        "triceps"
+      ],
+      "main": "biceps",
+      "bones": [
+        "humerus",
+        "radius",
+        "ulna"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "up",
+          "label": "Curl"
+        }
+      ],
+      "why": "The front of the upper arm bends the elbow against the pull of the band."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

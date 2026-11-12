@@ -14,11 +14,30 @@
     "beginner",
     "breath"
   ],
+  "areas": [
+    "mobility"
+  ],
   "steps": [
-    "Stand with your feet hip-width apart and your weight even on both feet.",
-    "Let your arms hang by your sides with your palms facing in.",
-    "Lift your chest a little and let your shoulders soften down.",
-    "Look straight ahead and take slow, steady breaths."
+    {
+      "text": "Stand with your feet hip-width apart and your weight even on both feet.",
+      "cue": "Feet hip-width, weight even.",
+      "at": 0
+    },
+    {
+      "text": "Let your arms hang by your sides with your palms facing in.",
+      "cue": "Arms by your sides, palms in.",
+      "at": 0
+    },
+    {
+      "text": "Lift your chest a little and let your shoulders soften down.",
+      "cue": "Lift your chest a little. Soften your shoulders.",
+      "at": 0
+    },
+    {
+      "text": "Look straight ahead and take slow, steady breaths.",
+      "cue": "Look ahead. Slow, steady breaths.",
+      "at": 0
+    }
   ],
   "works": [
     "Legs",
@@ -29,17 +48,11 @@
     "Locking the knees.",
     "Lifting the shoulders up toward the ears."
   ],
+  "regression": "Stand with your back near a wall.",
+  "stopIf": "Sit down if you feel dizzy.",
   "skipIf": [],
   "easier": null,
   "harder": "yoga-tree",
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": 0,
     "spine": 0,
@@ -57,5 +70,50 @@
     "ankleR": 0,
     "rootAngle": 0,
     "support": "feet"
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "back-extensors",
+        "abdominals"
+      ],
+      "lengthening": [],
+      "main": "back-extensors",
+      "bones": [
+        "cervical-spine",
+        "thoracic-spine",
+        "lumbar-spine",
+        "hip-bone",
+        "femur"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "head",
+          "direction": "up",
+          "label": "Grow tall"
+        }
+      ],
+      "why": "The muscles along the spine and around the trunk hold you upright with very little effort."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.3 Axial muscles of the head, neck and back",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-3-axial-muscles-of-the-head-neck-and-back",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.4 Axial muscles of the abdominal wall and thorax",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-4-axial-muscles-of-the-abdominal-wall-and-thorax",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

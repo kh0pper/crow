@@ -1,0 +1,146 @@
+{
+  "id": "body-squat",
+  "kind": "exercise",
+  "title": "Bodyweight squat",
+  "minutes": 3,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "bodyweight",
+    "lower-body",
+    "legs",
+    "strength"
+  ],
+  "areas": [
+    "lower"
+  ],
+  "sets": 2,
+  "reps": 10,
+  "tempoSeconds": 6,
+  "perSide": false,
+  "steps": [
+    {
+      "text": "Stand with your feet a little wider than your hips and your toes turned slightly out.",
+      "cue": "Feet a little wider than hips.",
+      "at": 0
+    },
+    {
+      "text": "Reach your arms forward. Bend your knees and sit your hips back, as if toward a chair.",
+      "cue": "Arms forward. Sit your hips back.",
+      "at": 1
+    },
+    {
+      "text": "Go only as low as is comfortable. Keep your heels down and your chest lifted.",
+      "cue": "As low as is comfortable. Heels down.",
+      "at": 1
+    },
+    {
+      "text": "Press through your feet and stand up tall.",
+      "cue": "Press through your feet and stand.",
+      "at": 0
+    }
+  ],
+  "works": [
+    "Legs",
+    "Glutes"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Letting the knees fall inward.",
+    "Lifting the heels off the floor."
+  ],
+  "regression": "Bend your knees only a little, with one hand on a wall.",
+  "stopIf": "Stop if you feel pain in your knees, hips or lower back.",
+  "skipIf": [
+    "knee",
+    "hip"
+  ],
+  "easier": "body-chair-squat",
+  "harder": "band-squat",
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 125,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 125,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 110,
+      "kneeL": 95,
+      "ankleL": 20,
+      "hipR": 110,
+      "kneeR": 95,
+      "ankleR": 20,
+      "rootAngle": 35,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "quadriceps",
+        "glutes"
+      ],
+      "lengthening": [],
+      "main": "quadriceps",
+      "bones": [
+        "femur",
+        "tibia",
+        "patella",
+        "hip-bone"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "feet",
+          "direction": "down",
+          "label": "Press"
+        }
+      ],
+      "why": "The front of the thigh and the buttocks straighten the knees and hips to stand you up."
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: Strength exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

@@ -15,12 +15,34 @@
     "side-body",
     "floor"
   ],
+  "areas": [
+    "core"
+  ],
+  "sets": 2,
+  "reps": 2,
+  "tempoSeconds": 15,
+  "perSide": true,
   "steps": [
-    "Lie on one side with your forearm on the floor under your shoulder and your knees bent.",
-    "Stack your hips and shoulders and press your forearm down.",
-    "Lift your hips until your body makes a straight line from head to knees.",
-    "Hold for 3 slow breaths, then lower.",
-    "Do 2 holds on each side."
+    {
+      "text": "Lie on one side with your forearm on the floor under your shoulder and your knees bent.",
+      "cue": "On your side, forearm under your shoulder, knees bent.",
+      "at": 0
+    },
+    {
+      "text": "Stack your hips and shoulders and press your forearm down.",
+      "cue": "Stack hips and shoulders. Press the forearm down.",
+      "at": 0
+    },
+    {
+      "text": "Lift your hips until your body makes a straight line from head to knees.",
+      "cue": "Lift your hips into one straight line.",
+      "at": 1
+    },
+    {
+      "text": "Hold for 3 slow breaths, then lower.",
+      "cue": "Hold for three slow breaths, then lower.",
+      "at": 1
+    }
   ],
   "works": [
     "Core",
@@ -32,6 +54,8 @@
     "Letting your hips sink toward the floor.",
     "Rolling your top shoulder forward."
   ],
+  "regression": "Hold for one breath, or stay on your side and only press the forearm down.",
+  "stopIf": "Stop if you feel pain in your shoulder, wrist or hip.",
   "skipIf": [
     "shoulder",
     "wrist",
@@ -39,11 +63,90 @@
   ],
   "easier": null,
   "harder": null,
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 66,
+      "elbowL": 90,
+      "wristL": 0,
+      "shoulderR": 66,
+      "elbowR": 90,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 80,
+      "ankleL": -30,
+      "hipR": 0,
+      "kneeR": 80,
+      "ankleR": -30,
+      "rootAngle": 66,
+      "support": "knees"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 66,
+      "elbowL": 90,
+      "wristL": 0,
+      "shoulderR": 66,
+      "elbowR": 90,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 80,
+      "ankleL": -30,
+      "hipR": 0,
+      "kneeR": 80,
+      "ankleR": -30,
+      "rootAngle": 66,
+      "support": "knees"
+    }
+  ],
+  "still": true,
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "side-waist",
+        "internal-oblique",
+        "quadratus-lumborum",
+        "abdominals",
+        "side-hip",
+        "shoulders"
+      ],
+      "lengthening": [],
+      "main": "side-waist",
+      "bones": [
+        "lumbar-spine",
+        "hip-bone",
+        "humerus",
+        "scapula"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hips",
+          "direction": "up",
+          "label": "Lift"
+        }
+      ],
+      "why": "The side of the waist holds the hips up so the body stays in one line."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.4 Axial muscles of the abdominal wall and thorax",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-4-axial-muscles-of-the-abdominal-wall-and-thorax",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

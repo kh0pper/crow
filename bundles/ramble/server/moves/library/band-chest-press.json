@@ -15,12 +15,34 @@
     "push",
     "strength"
   ],
+  "areas": [
+    "upper"
+  ],
+  "sets": 2,
+  "reps": 10,
+  "tempoSeconds": 5,
+  "perSide": false,
   "steps": [
-    "Loop the band behind your back and hold one end in each hand at chest height.",
-    "Stand tall with your elbows bent and tucked near your sides.",
-    "Press both hands forward until your arms are long.",
-    "Return slowly to the start.",
-    "Do 2 sets of 10."
+    {
+      "text": "Loop the band behind your back and hold one end in each hand at chest height.",
+      "cue": "Band behind your back, hands at chest height.",
+      "at": 0
+    },
+    {
+      "text": "Stand tall with your elbows bent and tucked near your sides.",
+      "cue": "Stand tall, elbows tucked.",
+      "at": 0
+    },
+    {
+      "text": "Press both hands forward until your arms are long.",
+      "cue": "Press both hands forward.",
+      "at": 1
+    },
+    {
+      "text": "Return slowly to the start.",
+      "cue": "Return slowly.",
+      "at": 0
+    }
   ],
   "works": [
     "Chest",
@@ -34,16 +56,90 @@
     "Arching your lower back as you press.",
     "Letting your elbows flare out wide."
   ],
+  "regression": "Use a lighter band, or press one arm at a time.",
+  "stopIf": "Stop if you feel pinching or pain in your shoulders.",
   "skipIf": [
     "shoulder"
   ],
   "easier": "band-pull-apart",
   "harder": "body-wall-push-up",
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": -20,
+      "elbowL": 125,
+      "wristL": 0,
+      "shoulderR": -20,
+      "elbowR": 125,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 85,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 85,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "chest",
+        "shoulders",
+        "triceps"
+      ],
+      "lengthening": [
+        "rhomboids"
+      ],
+      "main": "chest",
+      "bones": [
+        "humerus",
+        "scapula",
+        "clavicle",
+        "sternum"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "forward",
+          "label": "Press"
+        }
+      ],
+      "why": "The chest muscles push the arms forward and the back of the arm straightens the elbows."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

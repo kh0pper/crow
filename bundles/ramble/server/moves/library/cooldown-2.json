@@ -1,0 +1,63 @@
+{
+  "id": "cooldown-2",
+  "kind": "flow",
+  "title": "Floor cool-down",
+  "minutes": 2,
+  "level": 1,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "cool-down"
+  ],
+  "areas": [
+    "mobility"
+  ],
+  "block": "cooldown",
+  "steps": [
+    "Ease into each stretch and hold it still. Do not bounce.",
+    "Breathe slowly, and stop short of any pain.",
+    "Take your time before you carry on with your day."
+  ],
+  "works": [],
+  "stretches": [],
+  "mistakes": [
+    "Rushing through it.",
+    "Holding your breath."
+  ],
+  "skipIf": [
+    "knee",
+    "wrist"
+  ],
+  "easier": null,
+  "harder": null,
+  "flow": [
+    {
+      "id": "yoga-cat",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-cow",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-child",
+      "holdSeconds": 60
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "NHS: How to stretch after exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-stretch-after-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

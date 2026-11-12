@@ -51,9 +51,9 @@ const MOVES_LIBRARY = [
     activity: "yoga", pose: { joints: { hip: 90 } },
   }),
   entry({
-    id: "flow-test", kind: "flow", title: "A test flow", minutes: 8, indoor: true,
+    id: "flow-test", kind: "flow", title: "A test flow", minutes: 10, indoor: true,
     activity: "yoga", equipment: ["none"], flow: ["pose-test", "pose-test", "pose-test", "pose-test", "pose-test"]
-      .map((id) => ({ id, holdSeconds: 30 })),
+      .map((id) => ({ id, holdSeconds: 120 })),
   }),
   // An activity outside the ledger's vocabulary: a chunk of it can be started and
   // paid, but the Done mark cannot file it. Level 9 keeps it out of the picker, so

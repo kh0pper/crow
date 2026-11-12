@@ -15,12 +15,34 @@
     "pull",
     "posture"
   ],
+  "areas": [
+    "upper"
+  ],
+  "sets": 2,
+  "reps": 12,
+  "tempoSeconds": 5,
+  "perSide": false,
   "steps": [
-    "Hold the band in front of you with both hands and your arms straight at chest height.",
-    "Set your hands about shoulder-width apart so the band is slightly tight.",
-    "Pull the band apart until your arms open wide, keeping your shoulders down.",
-    "Return slowly to the start.",
-    "Do 2 sets of 12."
+    {
+      "text": "Hold the band in front of you with both hands and your arms straight at chest height.",
+      "cue": "Band in front, arms straight at chest height.",
+      "at": 0
+    },
+    {
+      "text": "Set your hands about shoulder-width apart so the band is slightly tight.",
+      "cue": "Hands shoulder-width, band slightly tight.",
+      "at": 0
+    },
+    {
+      "text": "Pull the band apart until your arms open wide, keeping your shoulders down.",
+      "cue": "Pull the band apart. Shoulders down.",
+      "at": 1
+    },
+    {
+      "text": "Return slowly to the start.",
+      "cue": "Return slowly.",
+      "at": 0
+    }
   ],
   "works": [
     "Upper back",
@@ -33,16 +55,90 @@
     "Bending your elbows to get more range.",
     "Leaning back as you pull."
   ],
+  "regression": "Hold the band with your hands wider apart so it pulls less.",
+  "stopIf": "Stop if you feel pinching or pain in your shoulders.",
   "skipIf": [
     "shoulder"
   ],
   "easier": null,
   "harder": "band-row",
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 88,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 88,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 85,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 85,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "still": true,
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "rhomboids",
+        "trapezius",
+        "shoulders"
+      ],
+      "lengthening": [
+        "chest"
+      ],
+      "main": "rhomboids",
+      "bones": [
+        "scapula",
+        "humerus",
+        "thoracic-spine"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "out",
+          "label": "Pull apart"
+        }
+      ],
+      "why": "The muscles between the shoulder blades draw them together, which opens the chest."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

@@ -8,6 +8,8 @@
  *   - Every entry cites at least one source {title, url, license}. The source
  *     register is moves/SOURCES.md; a source still marked UNVERIFIED there
  *     may not be cited by any shipped entry (review is what flips the flag).
+ *   - Every entry names the areas it trains in `areas`: a non-empty subset of
+ *     AREAS, so the picker can balance a week without reading the prose.
  *   - `skipIf` is the fixed LIMIT_TAGS vocabulary — the safety question the
  *     picker can ask with no model in the loop.
  *
@@ -331,12 +333,10 @@ export function validateEntry(obj, lib = null, opts = {}) {
   for (const field of ["works", "stretches", "mistakes"]) {
     if (!isStrArray(obj[field])) errors.push(`${field} must be an array of non-empty strings`);
   }
-  // The trained areas, when an entry names them at all.
-  if (obj.areas !== undefined) {
-    if (!Array.isArray(obj.areas) || obj.areas.length === 0
-      || !obj.areas.every((a) => AREAS.includes(a))) {
-      errors.push(`areas must be a non-empty array drawn from ${AREAS.join(", ")}`);
-    }
+  // The trained areas: every entry names at least one.
+  if (!Array.isArray(obj.areas) || obj.areas.length === 0
+    || !obj.areas.every((a) => AREAS.includes(a))) {
+    errors.push(`areas is required: a non-empty array drawn from ${AREAS.join(", ")}`);
   }
   // Per-step anatomy. Its ids are only checked when the caller hands a vocabulary.
   if (obj.anatomy !== undefined) errors.push(...anatomyProblems(obj.anatomy, vocab));

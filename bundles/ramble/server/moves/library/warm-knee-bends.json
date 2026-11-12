@@ -1,0 +1,153 @@
+{
+  "id": "warm-knee-bends",
+  "kind": "pose",
+  "title": "Knee bends",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "warm-up",
+    "standing",
+    "legs"
+  ],
+  "areas": [
+    "lower"
+  ],
+  "steps": [
+    {
+      "text": "Stand with your feet shoulder-width apart and your arms reaching forward.",
+      "cue": "Feet shoulder-width, arms forward.",
+      "at": 0
+    },
+    {
+      "text": "Bend your knees and lower yourself a little, about a hand's width.",
+      "cue": "Bend your knees a little.",
+      "at": 1
+    },
+    {
+      "text": "Stand back up. Keep your heels down and your knees pointing the same way as your toes.",
+      "cue": "Stand up. Heels down, knees over toes.",
+      "at": 0
+    },
+    {
+      "text": "Repeat slowly and smoothly.",
+      "cue": "Slow and smooth.",
+      "at": 1
+    }
+  ],
+  "works": [
+    "Legs",
+    "Glutes"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Dropping too low for a warm-up.",
+    "Letting the knees fall inward."
+  ],
+  "regression": "Bend less, and rest a hand on a wall or a sturdy chair.",
+  "stopIf": "Stop if you feel pain in your knees.",
+  "skipIf": [
+    "knee"
+  ],
+  "easier": null,
+  "harder": "body-squat",
+  "pose": {
+    "neck": 0,
+    "spine": 0,
+    "shoulderL": 100,
+    "elbowL": 5,
+    "wristL": 0,
+    "shoulderR": 100,
+    "elbowR": 5,
+    "wristR": 0,
+    "hipL": 35,
+    "kneeL": 40,
+    "ankleL": 15,
+    "hipR": 35,
+    "kneeR": 40,
+    "ankleR": 15,
+    "rootAngle": 10,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 90,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 90,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 100,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 100,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 35,
+      "kneeL": 40,
+      "ankleL": 15,
+      "hipR": 35,
+      "kneeR": 40,
+      "ankleR": 15,
+      "rootAngle": 10,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "quadriceps",
+        "glutes"
+      ],
+      "lengthening": [],
+      "main": "quadriceps",
+      "bones": [
+        "femur",
+        "tibia",
+        "patella",
+        "hip-bone"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "feet",
+          "direction": "down",
+          "label": "Press"
+        }
+      ],
+      "why": "A small bend warms up the front of the thighs and the buttocks before harder leg work."
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

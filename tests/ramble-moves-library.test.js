@@ -9,7 +9,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,7 +20,7 @@ import {
   stepOf, validateEntry, loadLibrary, servedLibrary, entryById,
 } from "../bundles/ramble/server/moves/library.js";
 
-const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "ramble-moves-library");
+const FIXTURE_SOURCE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "ramble-moves-library");
 
 const POSE_IDS = ["pose-a", "pose-b", "pose-c", "pose-d", "pose-e"];
 
@@ -36,6 +36,7 @@ function base(over = {}) {
     activity: "yoga",
     equipment: ["none"],
     tags: [],
+    areas: ["mobility"],
     steps: ["Stand tall."],
     works: [],
     stretches: [],
@@ -82,6 +83,21 @@ function tempDir() {
   return d;
 }
 after(() => { for (const d of TEMP_DIRS) rmSync(d, { recursive: true, force: true }); });
+
+/**
+ * A loadable copy of the fixture directory. The files in
+ * tests/fixtures/ramble-moves-library/ carry no `areas`, so each entry is
+ * written out again with one; the files themselves stay as they are.
+ */
+function fixtureDir() {
+  const dir = tempDir();
+  for (const name of readdirSync(FIXTURE_SOURCE).filter((n) => n.endsWith(".json"))) {
+    const entry = JSON.parse(readFileSync(join(FIXTURE_SOURCE, name), "utf8"));
+    writeFileSync(join(dir, name), JSON.stringify({ areas: ["mobility"], ...entry }));
+  }
+  return dir;
+}
+const FIXTURES = fixtureDir();
 
 test("the vocabularies are the fixed lists", () => {
   assert.deepEqual([...ENTRY_KINDS], ["pose", "exercise", "flow", "walk", "routine", "landmark"]);
@@ -236,7 +252,7 @@ test("a missing directory loads as an empty library rather than throwing", () =>
   assert.deepEqual(lib, []);
 });
 
-test("areas: a non-empty subset of AREAS, and optional", () => {
+test("areas: required, a non-empty subset of AREAS", () => {
   assert.equal(validateEntry(base({ areas: ["lower", "mobility"] })).ok, true);
   assert.equal(validateEntry(base({ areas: ["heart"] })).ok, true);
 
@@ -250,7 +266,10 @@ test("areas: a non-empty subset of AREAS, and optional", () => {
 
   const absent = base();
   delete absent.areas;
-  assert.equal(validateEntry(absent).ok, true, "an entry without areas still validates");
+  assert.equal(absent.areas, undefined);
+  const missing = validateEntry(absent);
+  assert.equal(missing.ok, false, "every entry names the areas it trains");
+  assert.ok(missing.errors.some((e) => e.includes("areas")), missing.errors.join("; "));
 });
 
 test("sets, reps and tempoSeconds are positive whole numbers; perSide is a boolean", () => {

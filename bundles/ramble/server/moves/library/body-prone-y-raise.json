@@ -1,0 +1,148 @@
+{
+  "id": "body-prone-y-raise",
+  "kind": "exercise",
+  "title": "Lying Y raise",
+  "minutes": 3,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "bodyweight",
+    "upper-body",
+    "upper-back",
+    "floor",
+    "strength"
+  ],
+  "areas": [
+    "upper"
+  ],
+  "sets": 2,
+  "reps": 10,
+  "tempoSeconds": 6,
+  "perSide": false,
+  "steps": [
+    {
+      "text": "Lie face down with your forehead on the floor or on a folded towel.",
+      "cue": "Lie face down, forehead resting.",
+      "at": 0
+    },
+    {
+      "text": "Reach your arms forward and a little out, like the letter Y, with your thumbs up.",
+      "cue": "Arms in a Y, thumbs up.",
+      "at": 0
+    },
+    {
+      "text": "Draw your shoulder blades down and lift both arms a little off the floor.",
+      "cue": "Shoulder blades down. Lift your arms a little.",
+      "at": 1
+    },
+    {
+      "text": "Hold for a breath, then lower slowly. Keep your neck long and your feet on the floor.",
+      "cue": "Hold a breath. Lower slowly.",
+      "at": 0
+    }
+  ],
+  "works": [
+    "Upper back",
+    "Shoulders"
+  ],
+  "stretches": [
+    "Chest"
+  ],
+  "mistakes": [
+    "Lifting the head and straining the neck.",
+    "Swinging the arms up instead of lifting slowly."
+  ],
+  "regression": "Lift one arm at a time, or bend your elbows.",
+  "stopIf": "Stop if you feel pain in your shoulders, neck or lower back.",
+  "skipIf": [
+    "shoulder",
+    "neck",
+    "lower_back",
+    "pregnancy"
+  ],
+  "easier": "body-wall-angel",
+  "harder": null,
+  "poses": [
+    {
+      "neck": -5,
+      "spine": 0,
+      "shoulderL": 174,
+      "elbowL": 0,
+      "wristL": 0,
+      "shoulderR": 174,
+      "elbowR": 0,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 5,
+      "ankleL": -50,
+      "hipR": 0,
+      "kneeR": 5,
+      "ankleR": -50,
+      "rootAngle": 90,
+      "support": "seat"
+    },
+    {
+      "neck": -5,
+      "spine": -10,
+      "shoulderL": 180,
+      "elbowL": 0,
+      "wristL": 0,
+      "shoulderR": 180,
+      "elbowR": 0,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 5,
+      "ankleL": -50,
+      "hipR": 0,
+      "kneeR": 5,
+      "ankleR": -50,
+      "rootAngle": 90,
+      "support": "seat"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "trapezius",
+        "rhomboids",
+        "shoulders"
+      ],
+      "lengthening": [
+        "chest"
+      ],
+      "main": "trapezius",
+      "bones": [
+        "scapula",
+        "humerus",
+        "thoracic-spine"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "up",
+          "label": "Lift"
+        }
+      ],
+      "why": "The upper back lifts the arms by drawing the shoulder blades back and down."
+    }
+  ],
+  "sources": [
+    {
+      "title": "American Council on Exercise, exercise library: Prone scapular (shoulder) stabilization series, I, Y, T, W, O formation",
+      "url": "https://www.acefitness.org/resources/everyone/exercise-library/249/prone-scapular-shoulder-stabilization-series-i-y-t-w-o-formation/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

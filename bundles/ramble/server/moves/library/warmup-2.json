@@ -1,0 +1,69 @@
+{
+  "id": "warmup-2",
+  "kind": "flow",
+  "title": "Legs warm-up",
+  "minutes": 2,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "warm-up"
+  ],
+  "areas": [
+    "heart",
+    "mobility"
+  ],
+  "block": "warmup",
+  "steps": [
+    "Move gently through each part for the time shown.",
+    "Start small and let the movements grow as you warm up.",
+    "You should feel warmer, not tired."
+  ],
+  "works": [],
+  "stretches": [],
+  "mistakes": [
+    "Rushing through it.",
+    "Holding your breath."
+  ],
+  "skipIf": [
+    "knee",
+    "hip",
+    "balance"
+  ],
+  "easier": null,
+  "harder": null,
+  "flow": [
+    {
+      "id": "heart-march",
+      "holdSeconds": 30
+    },
+    {
+      "id": "warm-heel-digs",
+      "holdSeconds": 30
+    },
+    {
+      "id": "heart-knee-lifts",
+      "holdSeconds": 30
+    },
+    {
+      "id": "warm-knee-bends",
+      "holdSeconds": 30
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    }
+  ],
+  "reviewed": true
+}

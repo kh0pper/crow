@@ -2,7 +2,7 @@
   "id": "yoga-flow-desk-break",
   "kind": "flow",
   "title": "Desk break flow",
-  "minutes": 5,
+  "minutes": 10,
   "level": 1,
   "indoor": true,
   "activity": "yoga",
@@ -14,6 +14,11 @@
     "short",
     "standing"
   ],
+  "areas": [
+    "mobility"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
   "steps": [
     "Move through the poses in the order listed, keeping each one small and easy.",
     "Hold each pose for the time given and breathe slowly.",
@@ -40,14 +45,6 @@
   ],
   "easier": null,
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "flow": [
     {
       "id": "yoga-mountain",
@@ -59,7 +56,7 @@
     },
     {
       "id": "yoga-forward-fold",
-      "holdSeconds": 40
+      "holdSeconds": 45
     },
     {
       "id": "yoga-low-lunge",
@@ -75,7 +72,15 @@
     },
     {
       "id": "yoga-mountain",
-      "holdSeconds": 30
+      "holdSeconds": 45
     }
-  ]
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
 }

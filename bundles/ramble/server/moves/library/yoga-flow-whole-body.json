@@ -1,0 +1,97 @@
+{
+  "id": "yoga-flow-whole-body",
+  "kind": "flow",
+  "title": "Whole-body flow",
+  "minutes": 10,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "whole-body",
+    "standing",
+    "floor"
+  ],
+  "areas": [
+    "mobility",
+    "core",
+    "upper",
+    "lower"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
+  "steps": [
+    "Move through the poses in the order listed, one side at a time where the pose is one-sided.",
+    "Hold each pose for the time given and keep your breathing even.",
+    "Go through the whole flow twice. The first time is your warm-up, so keep it easy.",
+    "Finish in the last pose for a few slow breaths."
+  ],
+  "works": [
+    "Legs",
+    "Core",
+    "Shoulders",
+    "Arms"
+  ],
+  "stretches": [
+    "Hamstrings",
+    "Hips",
+    "Calves",
+    "Back"
+  ],
+  "mistakes": [
+    "Pushing into a pose further than is comfortable.",
+    "Holding your breath in the harder poses."
+  ],
+  "skipIf": [
+    "knee",
+    "lower_back",
+    "shoulder",
+    "wrist",
+    "hip",
+    "ankle",
+    "balance",
+    "high_blood_pressure"
+  ],
+  "easier": null,
+  "harder": null,
+  "flow": [
+    {
+      "id": "yoga-mountain",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-halfway-lift",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-plank",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-downward-dog",
+      "holdSeconds": 40
+    },
+    {
+      "id": "yoga-high-lunge",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-warrior-two",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-child",
+      "holdSeconds": 50
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
+}

@@ -1,0 +1,164 @@
+{
+  "id": "cool-neck-turn",
+  "kind": "pose",
+  "title": "Neck turn",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "cool-down",
+    "standing",
+    "stretch",
+    "neck"
+  ],
+  "areas": [
+    "mobility"
+  ],
+  "perSide": true,
+  "steps": [
+    {
+      "text": "Stand or sit tall and look straight ahead.",
+      "cue": "Tall, eyes ahead.",
+      "at": 0
+    },
+    {
+      "text": "Slowly turn your head toward one shoulder as far as is comfortable.",
+      "cue": "Turn your head slowly to one side.",
+      "at": 0
+    },
+    {
+      "text": "Hold for a few seconds. Keep your shoulders down and still.",
+      "cue": "Hold. Shoulders down.",
+      "at": 0
+    },
+    {
+      "text": "Come back to the middle, then turn the other way.",
+      "cue": "Back to the middle.",
+      "say": "Come back to the middle.",
+      "at": 0
+    }
+  ],
+  "works": [
+    "Neck"
+  ],
+  "stretches": [
+    "Neck"
+  ],
+  "mistakes": [
+    "Turning quickly.",
+    "Lifting a shoulder toward the ear."
+  ],
+  "regression": "Turn only a little way, and do it sitting down.",
+  "stopIf": "Stop if you feel pain, dizziness or tingling.",
+  "skipIf": [
+    "neck"
+  ],
+  "easier": null,
+  "harder": null,
+  "pose": {
+    "neck": 0,
+    "spine": 0,
+    "shoulderL": 0,
+    "elbowL": 0,
+    "wristL": 0,
+    "shoulderR": 0,
+    "elbowR": 0,
+    "wristR": 0,
+    "hipL": 0,
+    "kneeL": 0,
+    "ankleL": 0,
+    "hipR": 0,
+    "kneeR": 0,
+    "ankleR": 0,
+    "rootAngle": 0,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 0,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 0,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 0,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 0,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "still": true,
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "neck-front"
+      ],
+      "lengthening": [
+        "neck-back",
+        "trapezius"
+      ],
+      "main": "neck-front",
+      "bones": [
+        "cervical-spine",
+        "skull",
+        "clavicle"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "head",
+          "direction": "out",
+          "label": "Turn"
+        }
+      ],
+      "why": "The muscle at the side of the neck turns the head, and the far side lengthens."
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: Flexibility exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/flexibility-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: Sitting exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/sitting-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.3 Axial muscles of the head, neck and back",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-3-axial-muscles-of-the-head-neck-and-back",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

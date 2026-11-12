@@ -15,12 +15,34 @@
     "back",
     "floor"
   ],
+  "areas": [
+    "core"
+  ],
+  "sets": 2,
+  "reps": 6,
+  "tempoSeconds": 5,
+  "perSide": true,
   "steps": [
-    "Lie on your back with your knees bent over your hips and your arms pointing at the ceiling.",
-    "Press your lower back gently toward the floor.",
-    "Lower one arm and the opposite leg toward the floor without letting your back arch.",
-    "Return to the start and switch sides.",
-    "Do 2 sets of 6 per side."
+    {
+      "text": "Lie on your back with your knees bent over your hips and your arms pointing at the ceiling.",
+      "cue": "On your back, knees over hips, arms up.",
+      "at": 0
+    },
+    {
+      "text": "Press your lower back gently toward the floor.",
+      "cue": "Press your lower back gently down.",
+      "at": 0
+    },
+    {
+      "text": "Lower one arm and the opposite leg toward the floor without letting your back arch.",
+      "cue": "Lower one arm and the opposite leg.",
+      "at": 1
+    },
+    {
+      "text": "Return to the start and switch sides.",
+      "cue": "Return and switch sides.",
+      "at": 0
+    }
   ],
   "works": [
     "Core",
@@ -31,16 +53,92 @@
     "Letting your lower back lift off the floor.",
     "Holding your breath as you move."
   ],
+  "regression": "Keep your arms still and lower one foot at a time with the knee bent.",
+  "stopIf": "Stop if your lower back arches off the floor and you cannot keep it down, or it hurts.",
   "skipIf": [
     "lower_back"
   ],
   "easier": null,
   "harder": "body-bird-dog",
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 90,
+      "elbowL": 0,
+      "wristL": 0,
+      "shoulderR": 90,
+      "elbowR": 0,
+      "wristR": 0,
+      "hipL": 90,
+      "kneeL": 90,
+      "ankleL": 0,
+      "hipR": 90,
+      "kneeR": 90,
+      "ankleR": 0,
+      "rootAngle": -90,
+      "support": "back"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 170,
+      "elbowL": 0,
+      "wristL": 0,
+      "shoulderR": 90,
+      "elbowR": 0,
+      "wristR": 0,
+      "hipL": 90,
+      "kneeL": 90,
+      "ankleL": 0,
+      "hipR": 12,
+      "kneeR": 5,
+      "ankleR": 0,
+      "rootAngle": -90,
+      "support": "back"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "abdominals",
+        "hip-flexors"
+      ],
+      "lengthening": [],
+      "main": "abdominals",
+      "bones": [
+        "lumbar-spine",
+        "hip-bone",
+        "femur",
+        "rib-cage"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "feet",
+          "direction": "forward",
+          "label": "Reach"
+        }
+      ],
+      "why": "The belly muscles keep the lower back still while an arm and a leg lower away."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.4 Axial muscles of the abdominal wall and thorax",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-4-axial-muscles-of-the-abdominal-wall-and-thorax",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

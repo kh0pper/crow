@@ -15,12 +15,34 @@
     "push",
     "strength"
   ],
+  "areas": [
+    "upper"
+  ],
+  "sets": 2,
+  "reps": 8,
+  "tempoSeconds": 6,
+  "perSide": false,
   "steps": [
-    "Stand on the middle of the band and hold one end in each hand at shoulder height.",
-    "Keep your ribs down and your belly gently firm.",
-    "Press both hands overhead until your arms are long.",
-    "Lower slowly back to shoulder height.",
-    "Do 2 sets of 8."
+    {
+      "text": "Stand on the middle of the band and hold one end in each hand at shoulder height.",
+      "cue": "Stand on the band, hands at shoulder height.",
+      "at": 0
+    },
+    {
+      "text": "Keep your ribs down and your belly gently firm.",
+      "cue": "Ribs down, belly gently firm.",
+      "at": 0
+    },
+    {
+      "text": "Press both hands overhead until your arms are long.",
+      "cue": "Press both hands overhead.",
+      "at": 1
+    },
+    {
+      "text": "Lower slowly back to shoulder height.",
+      "cue": "Lower slowly to shoulder height.",
+      "at": 0
+    }
   ],
   "works": [
     "Shoulders",
@@ -34,6 +56,8 @@
     "Arching your lower back as you press up.",
     "Shrugging your shoulders into your ears."
   ],
+  "regression": "Press one arm at a time, or press only to forehead height.",
+  "stopIf": "Stop if you feel pain in your shoulders or neck, or you feel light-headed.",
   "skipIf": [
     "shoulder",
     "neck",
@@ -41,11 +65,82 @@
   ],
   "easier": "band-pull-apart",
   "harder": null,
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 15,
+      "elbowL": 150,
+      "wristL": 0,
+      "shoulderR": 15,
+      "elbowR": 150,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 175,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 175,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "shoulders",
+        "triceps",
+        "trapezius"
+      ],
+      "lengthening": [
+        "lats"
+      ],
+      "main": "shoulders",
+      "bones": [
+        "humerus",
+        "scapula",
+        "clavicle"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "up",
+          "label": "Press"
+        }
+      ],
+      "why": "The shoulder muscle lifts the arm and the back of the arm straightens the elbow."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

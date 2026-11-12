@@ -14,12 +14,36 @@
     "back",
     "chest"
   ],
+  "areas": [
+    "mobility",
+    "core"
+  ],
   "steps": [
-    "Lie face down with your legs long behind you.",
-    "Place your hands beside your chest with your elbows close to your body.",
-    "Press lightly into your hands and lift your chest a small amount.",
-    "Keep your shoulders down and hold for a couple of breaths.",
-    "Lower slowly and rest your cheek on the mat."
+    {
+      "text": "Lie face down with your legs long behind you.",
+      "cue": "Lie face down, legs long.",
+      "at": 0
+    },
+    {
+      "text": "Place your hands beside your chest with your elbows close to your body.",
+      "cue": "Hands beside your chest, elbows close.",
+      "at": 0
+    },
+    {
+      "text": "Press lightly into your hands and lift your chest a small amount.",
+      "cue": "Press lightly. Lift your chest a little.",
+      "at": 0
+    },
+    {
+      "text": "Keep your shoulders down and hold for a couple of breaths.",
+      "cue": "Shoulders down. Hold and breathe.",
+      "at": 0
+    },
+    {
+      "text": "Lower slowly and rest your cheek on the mat.",
+      "cue": "Lower slowly. Rest your cheek on the mat.",
+      "at": 0
+    }
   ],
   "works": [
     "Back",
@@ -33,6 +57,8 @@
     "Pressing up so far that the lower back feels pinched.",
     "Shrugging the shoulders toward the ears."
   ],
+  "regression": "Keep your forearms on the mat and lift only your head and chest.",
+  "stopIf": "Come down if you feel pinching in your lower back.",
   "skipIf": [
     "lower_back",
     "wrist",
@@ -40,14 +66,6 @@
   ],
   "easier": "yoga-cat",
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": -15,
     "spine": -10,
@@ -65,5 +83,55 @@
     "ankleR": -50,
     "rootAngle": 70,
     "support": "seat"
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "back-extensors",
+        "multifidus",
+        "glutes",
+        "triceps"
+      ],
+      "lengthening": [
+        "rectus-abdominis",
+        "hip-flexors",
+        "chest"
+      ],
+      "main": "back-extensors",
+      "bones": [
+        "lumbar-spine",
+        "thoracic-spine",
+        "hip-bone",
+        "humerus"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "chest",
+          "direction": "up",
+          "label": "Lift"
+        }
+      ],
+      "why": "The muscles along the spine lift the chest; the hands only steady you."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.3 Axial muscles of the head, neck and back",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-3-axial-muscles-of-the-head-neck-and-back",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.4 Axial muscles of the abdominal wall and thorax",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-4-axial-muscles-of-the-abdominal-wall-and-thorax",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

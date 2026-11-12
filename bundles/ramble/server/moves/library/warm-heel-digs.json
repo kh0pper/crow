@@ -1,0 +1,156 @@
+{
+  "id": "warm-heel-digs",
+  "kind": "pose",
+  "title": "Heel digs",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "warm-up",
+    "standing"
+  ],
+  "areas": [
+    "heart"
+  ],
+  "steps": [
+    {
+      "text": "Stand tall with your feet hip-width apart and your knees soft.",
+      "cue": "Stand tall, knees soft.",
+      "at": 0
+    },
+    {
+      "text": "Reach one heel forward and tap it on the floor with your toes pointing up.",
+      "cue": "Tap one heel forward, toes up.",
+      "at": 1
+    },
+    {
+      "text": "Bring it back and tap the other heel forward. Keep the standing knee a little bent.",
+      "cue": "Change legs. Standing knee soft.",
+      "at": 1
+    },
+    {
+      "text": "Keep a steady rhythm. Bend and straighten your arms in time if you like.",
+      "cue": "Steady rhythm. Arms join in if you like.",
+      "at": 1
+    }
+  ],
+  "works": [
+    "Legs",
+    "Heart and lungs"
+  ],
+  "stretches": [
+    "Back of the thigh"
+  ],
+  "mistakes": [
+    "Locking the standing knee.",
+    "Leaning back as the heel reaches forward."
+  ],
+  "regression": "Take smaller taps and rest one hand on a wall.",
+  "stopIf": "Stop if you feel pain in your knees or ankles, or feel dizzy.",
+  "skipIf": [],
+  "easier": null,
+  "harder": "heart-knee-lifts",
+  "pose": {
+    "neck": 0,
+    "spine": 0,
+    "shoulderL": 0,
+    "elbowL": 20,
+    "wristL": 0,
+    "shoulderR": 0,
+    "elbowR": 20,
+    "wristR": 0,
+    "hipL": 4,
+    "kneeL": 8,
+    "ankleL": 4,
+    "hipR": 28,
+    "kneeR": 0,
+    "ankleR": 20,
+    "rootAngle": 0,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 20,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 20,
+      "wristR": 0,
+      "hipL": 4,
+      "kneeL": 8,
+      "ankleL": 4,
+      "hipR": 4,
+      "kneeR": 8,
+      "ankleR": 4,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 20,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 20,
+      "wristR": 0,
+      "hipL": 4,
+      "kneeL": 8,
+      "ankleL": 4,
+      "hipR": 28,
+      "kneeR": 0,
+      "ankleR": 20,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "hip-flexors",
+        "shin",
+        "quadriceps"
+      ],
+      "lengthening": [
+        "hamstrings",
+        "calf"
+      ],
+      "main": "hip-flexors",
+      "bones": [
+        "hip-bone",
+        "femur",
+        "tibia",
+        "calcaneus"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "heels",
+          "direction": "forward",
+          "label": "Tap"
+        }
+      ],
+      "why": "Reaching the heel forward with the toes up gently lengthens the back of that leg."
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

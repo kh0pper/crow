@@ -14,11 +14,31 @@
     "fold",
     "beginner"
   ],
+  "areas": [
+    "mobility",
+    "core"
+  ],
   "steps": [
-    "Fold forward from your hips with a soft bend in your knees.",
-    "Rest your hands on your shins and lengthen your back.",
-    "Draw your shoulders away from your ears and look slightly ahead.",
-    "Hold for a couple of breaths, then fold down or stand up slowly."
+    {
+      "text": "Fold forward from your hips with a soft bend in your knees.",
+      "cue": "Fold forward with soft knees.",
+      "at": 0
+    },
+    {
+      "text": "Rest your hands on your shins and lengthen your back.",
+      "cue": "Hands on your shins. Lengthen your back.",
+      "at": 0
+    },
+    {
+      "text": "Draw your shoulders away from your ears and look slightly ahead.",
+      "cue": "Shoulders away from your ears. Look a little ahead.",
+      "at": 0
+    },
+    {
+      "text": "Hold for a couple of breaths, then fold down or stand up slowly.",
+      "cue": "Hold, then fold down or stand up slowly.",
+      "at": 0
+    }
   ],
   "works": [
     "Back"
@@ -31,19 +51,13 @@
     "Rounding the back instead of lengthening it.",
     "Pulling hard on the shins."
   ],
+  "regression": "Rest your hands on your thighs instead of your shins.",
+  "stopIf": "Stand up slowly if your lower back hurts.",
   "skipIf": [
     "lower_back"
   ],
   "easier": "yoga-mountain",
   "harder": "yoga-forward-fold",
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": -15,
     "spine": 5,
@@ -61,5 +75,51 @@
     "ankleR": 10,
     "rootAngle": 85,
     "support": "feet"
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "back-extensors",
+        "abdominals"
+      ],
+      "lengthening": [
+        "hamstrings"
+      ],
+      "main": "back-extensors",
+      "bones": [
+        "thoracic-spine",
+        "lumbar-spine",
+        "hip-bone",
+        "femur"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "chest",
+          "direction": "forward",
+          "label": "Lengthen"
+        }
+      ],
+      "why": "The muscles along the spine hold the back long and flat while the back of the legs lengthens."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.3 Axial muscles of the head, neck and back",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-3-axial-muscles-of-the-head-neck-and-back",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

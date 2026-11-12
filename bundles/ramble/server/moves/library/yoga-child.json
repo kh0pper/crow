@@ -14,11 +14,30 @@
     "kneeling",
     "floor"
   ],
+  "areas": [
+    "mobility"
+  ],
   "steps": [
-    "Kneel on the mat with your knees a little apart and your big toes together.",
-    "Sit your hips back toward your heels.",
-    "Walk your hands forward and rest your forehead on the mat.",
-    "Breathe slowly and let your shoulders relax."
+    {
+      "text": "Kneel on the mat with your knees a little apart and your big toes together.",
+      "cue": "Kneel, knees a little apart, big toes together.",
+      "at": 0
+    },
+    {
+      "text": "Sit your hips back toward your heels.",
+      "cue": "Sit your hips back toward your heels.",
+      "at": 0
+    },
+    {
+      "text": "Walk your hands forward and rest your forehead on the mat.",
+      "cue": "Walk your hands forward. Forehead down.",
+      "at": 0
+    },
+    {
+      "text": "Breathe slowly and let your shoulders relax.",
+      "cue": "Breathe slowly. Let your shoulders relax.",
+      "at": 0
+    }
   ],
   "works": [],
   "stretches": [
@@ -30,19 +49,13 @@
     "Lifting the hips off the heels to reach further.",
     "Pressing the forehead into the mat hard."
   ],
+  "regression": "Put a cushion between your hips and heels.",
+  "stopIf": "Come out if your knees hurt.",
   "skipIf": [
     "knee"
   ],
   "easier": "yoga-mountain",
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": 30,
     "spine": 10,
@@ -60,5 +73,50 @@
     "ankleR": -50,
     "hipR": 120,
     "shoulderR": 168
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [],
+      "lengthening": [
+        "back-extensors",
+        "glutes",
+        "shin"
+      ],
+      "main": "back-extensors",
+      "bones": [
+        "lumbar-spine",
+        "hip-bone",
+        "femur",
+        "tibia"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hips",
+          "direction": "back",
+          "label": "Sink"
+        }
+      ],
+      "why": "Folding forward with the hips back lets the muscles along the spine lengthen and rest."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.3 Axial muscles of the head, neck and back",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-3-axial-muscles-of-the-head-neck-and-back",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

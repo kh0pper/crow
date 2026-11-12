@@ -14,11 +14,30 @@
     "fold",
     "calves"
   ],
+  "areas": [
+    "mobility"
+  ],
   "steps": [
-    "Stand with your feet hip-width apart.",
-    "Bend your knees a little and fold forward from your hips.",
-    "Let your head and arms hang heavy toward the floor.",
-    "Stay for a few slow breaths, then roll up slowly one bit at a time."
+    {
+      "text": "Stand with your feet hip-width apart.",
+      "cue": "Stand with your feet hip-width apart.",
+      "at": 0
+    },
+    {
+      "text": "Bend your knees a little and fold forward from your hips.",
+      "cue": "Soft knees. Fold forward from your hips.",
+      "at": 0
+    },
+    {
+      "text": "Let your head and arms hang heavy toward the floor.",
+      "cue": "Let your head and arms hang heavy.",
+      "at": 0
+    },
+    {
+      "text": "Stay for a few slow breaths, then roll up slowly one bit at a time.",
+      "cue": "Breathe slowly, then roll up a bit at a time.",
+      "at": 0
+    }
   ],
   "works": [
     "Legs"
@@ -32,20 +51,14 @@
     "Locking the knees.",
     "Standing up fast and getting light-headed."
   ],
+  "regression": "Bend your knees more and rest your hands on your thighs.",
+  "stopIf": "Come up slowly if you feel dizzy or your lower back hurts.",
   "skipIf": [
     "lower_back",
     "high_blood_pressure"
   ],
   "easier": "yoga-halfway-lift",
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": 25,
     "spine": 20,
@@ -63,5 +76,51 @@
     "ankleR": 5,
     "rootAngle": 100,
     "support": "feet"
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [],
+      "lengthening": [
+        "hamstrings",
+        "calf",
+        "back-extensors",
+        "glutes"
+      ],
+      "main": "hamstrings",
+      "bones": [
+        "femur",
+        "tibia",
+        "hip-bone",
+        "lumbar-spine"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "head",
+          "direction": "down",
+          "label": "Hang"
+        }
+      ],
+      "why": "Hanging forward from the hips lengthens the whole back of the legs."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.3 Axial muscles of the head, neck and back",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-3-axial-muscles-of-the-head-neck-and-back",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

@@ -55,7 +55,7 @@ async function freshDb() {
 function entry(over = {}) {
   return {
     id: "ex-1",
-    kind: "exercise",
+    kind: "routine",
     title: "Test entry",
     minutes: 10,
     level: 1,

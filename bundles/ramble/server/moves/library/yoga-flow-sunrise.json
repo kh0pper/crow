@@ -14,6 +14,11 @@
     "gentle",
     "full-body"
   ],
+  "areas": [
+    "mobility"
+  ],
+  "rounds": 1,
+  "maxRounds": 2,
   "steps": [
     "Move through the poses in the order listed, taking one slow breath per step.",
     "Hold each pose for the time given, then move on gently.",
@@ -41,14 +46,6 @@
   ],
   "easier": null,
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "flow": [
     {
       "id": "yoga-mountain",
@@ -56,27 +53,35 @@
     },
     {
       "id": "yoga-cat",
-      "holdSeconds": 60
-    },
-    {
-      "id": "yoga-cow",
-      "holdSeconds": 60
-    },
-    {
-      "id": "yoga-downward-dog",
-      "holdSeconds": 60
-    },
-    {
-      "id": "yoga-low-lunge",
       "holdSeconds": 75
     },
     {
+      "id": "yoga-cow",
+      "holdSeconds": 75
+    },
+    {
+      "id": "yoga-downward-dog",
+      "holdSeconds": 75
+    },
+    {
+      "id": "yoga-low-lunge",
+      "holdSeconds": 90
+    },
+    {
       "id": "yoga-halfway-lift",
-      "holdSeconds": 45
+      "holdSeconds": 60
     },
     {
       "id": "yoga-forward-fold",
       "holdSeconds": 75
     }
-  ]
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
 }

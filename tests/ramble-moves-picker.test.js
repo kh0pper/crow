@@ -13,9 +13,10 @@ import { slotFor, pickChallenge } from "../bundles/ramble/server/moves/picker.js
 function entry(over = {}) {
   return {
     id: "ex-1",
-    kind: "exercise",
+    kind: "routine",
     activity: "bodyweight",
     level: 2,
+    minutes: 10,
     indoor: true,
     equipment: ["none"],
     skipIf: [],
@@ -33,7 +34,6 @@ const BASE_PREFS = {
   weather: true,
 };
 
-const YOGA_POSE = entry({ id: "yoga-pose", kind: "pose", activity: "yoga", level: 1 });
 const YOGA_FLOW = entry({ id: "yoga-flow", kind: "flow", activity: "yoga", level: 1 });
 const WALK = entry({ id: "walk-1", kind: "walk", activity: "walk", level: 1, indoor: false });
 const JOG = entry({ id: "jog-1", activity: "jog", level: 2, indoor: false });
@@ -50,7 +50,7 @@ function pick(over = {}) {
     weather: null,
     prefs: BASE_PREFS,
     history: {},
-    library: [YOGA_POSE, WALK, BAND, SQUAT, PUSHUP],
+    library: [YOGA_FLOW, WALK, BAND, SQUAT, PUSHUP],
     swap: 0,
     ...over,
   });
@@ -93,7 +93,7 @@ test("swap re-rolls the day when more than one candidate exists", () => {
 });
 
 test("a stated limit always wins: knee never returns a skipIf:knee entry", () => {
-  const lib = [SQUAT, WRISTY, PUSHUP, BAND, YOGA_POSE];
+  const lib = [SQUAT, WRISTY, PUSHUP, BAND, YOGA_FLOW];
   const prefs = { ...BASE_PREFS, limits: ["knee"] };
   for (const day of days(500)) {
     for (const swap of [0, 1, 2]) {
@@ -146,7 +146,7 @@ test("weather is ignored when prefs.weather is false", () => {
 });
 
 test("early slot with yoga liked picks yoga; reasons carry slot:early, liked:yoga, easy_day", () => {
-  const lib = [YOGA_POSE, PUSHUP, BAND];
+  const lib = [YOGA_FLOW, PUSHUP, BAND];
   const prefs = { ...BASE_PREFS, kinds: ["yoga", "bodyweight", "band"] }; // all three stay candidates
   let yogaPick = null;
   const counts = {};
@@ -154,10 +154,10 @@ test("early slot with yoga liked picks yoga; reasons carry slot:early, liked:yog
     const r = pick({ day, hourLocal: 6, library: lib, prefs });
     assert.ok(r.reasons.includes("slot:early"), r.reasons.join(","));
     counts[r.entryId] = (counts[r.entryId] ?? 0) + 1;
-    if (r.entryId === "yoga-pose" && !yogaPick) yogaPick = r;
+    if (r.entryId === "yoga-flow" && !yogaPick) yogaPick = r;
   }
   assert.ok(yogaPick, "yoga (slot-preferred, weight x3) should win at least once in 60 days");
-  assert.ok(counts["yoga-pose"] > (counts["pushup-1"] ?? 0), "the slot-preferred entry should win most days");
+  assert.ok(counts["yoga-flow"] > (counts["pushup-1"] ?? 0), "the slot-preferred entry should win most days");
   assert.ok(yogaPick.reasons.includes("liked:yoga"), yogaPick.reasons.join(","));
   assert.ok(yogaPick.reasons.includes("easy_day"), "a level-1 pick is an easy day");
 });
@@ -172,9 +172,9 @@ test("slot preference is a weight, not a filter: a day with nothing preferred st
 });
 
 test("day slot prefers walk/jog; evening prefers band/bodyweight or a gentle flow", () => {
-  const lib = [WALK, YOGA_POSE, BAND];
+  const lib = [WALK, YOGA_FLOW, BAND];
   const dayCounts = countsOf(days(60).map((d) => pick({ day: d, hourLocal: 12, library: lib }).entryId));
-  assert.ok(dayCounts["walk-1"] > (dayCounts["yoga-pose"] ?? 0), "noon should prefer the walk");
+  assert.ok(dayCounts["walk-1"] > (dayCounts["yoga-flow"] ?? 0), "noon should prefer the walk");
 
   const evCounts = countsOf(days(60).map((d) => pick({ day: d, hourLocal: 18, library: lib }).entryId));
   assert.ok(evCounts["band-1"] > (evCounts["walk-1"] ?? 0), "evening should prefer the band entry");
@@ -254,7 +254,7 @@ test("filters: unreviewed, equipment, kinds, level — and null when nothing sur
 });
 
 test("reasons are fact codes, never prose", () => {
-  const lib = [YOGA_POSE, YOGA_FLOW, WALK, JOG, BAND, SQUAT, PUSHUP];
+  const lib = [YOGA_FLOW, WALK, JOG, BAND, SQUAT, PUSHUP];
   const shape = /^(slot:early|slot:day|slot:evening|rain_later|cold|hot|liked:[a-z_]+|learning_flow|easy_day)$/;
   for (const day of days(100)) {
     const hourLocal = Number(day.slice(4)) % 24;
@@ -273,7 +273,7 @@ test("reasons are fact codes, never prose", () => {
 });
 
 test("no weather reason without the weather rule applying", () => {
-  const lib = [YOGA_POSE, PUSHUP, BAND];
+  const lib = [YOGA_FLOW, PUSHUP, BAND];
   for (const weather of [null, { rain: 10, temp: 20, code: 1 }, { rain: 59, temp: 2, code: 1 }, { rain: 0, temp: 34, code: 0 }]) {
     for (const day of days(30)) {
       const r = pick({ day, library: lib, weather });

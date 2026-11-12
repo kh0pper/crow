@@ -14,11 +14,31 @@
     "back",
     "warm-up"
   ],
+  "areas": [
+    "mobility"
+  ],
   "steps": [
-    "Start on your hands and knees with your wrists under your shoulders.",
-    "Let your belly drop gently toward the mat.",
-    "Lift your chest and tailbone and slide your shoulder blades down your back.",
-    "Look slightly up and hold for one slow breath, then return to a flat back."
+    {
+      "text": "Start on your hands and knees with your wrists under your shoulders.",
+      "cue": "Hands and knees, wrists under shoulders.",
+      "at": 0
+    },
+    {
+      "text": "Let your belly drop gently toward the mat.",
+      "cue": "Let your belly drop gently.",
+      "at": 0
+    },
+    {
+      "text": "Lift your chest and tailbone and slide your shoulder blades down your back.",
+      "cue": "Lift your chest and tailbone.",
+      "at": 0
+    },
+    {
+      "text": "Look slightly up and hold for one slow breath, then return to a flat back.",
+      "cue": "Look slightly up. One slow breath.",
+      "say": "Look slightly up and hold for one slow breath.",
+      "at": 0
+    }
   ],
   "works": [
     "Back",
@@ -32,20 +52,14 @@
     "Cranking the neck too far back.",
     "Collapsing the chest between the shoulders."
   ],
+  "regression": "Make the movement smaller.",
+  "stopIf": "Come out if your knees, wrists or lower back hurt.",
   "skipIf": [
     "knee",
     "wrist"
   ],
   "easier": null,
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": -25,
     "spine": -15,
@@ -63,5 +77,52 @@
     "wristR": 60,
     "hipR": 62,
     "hipL": 62
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "back-extensors",
+        "multifidus"
+      ],
+      "lengthening": [
+        "rectus-abdominis",
+        "chest"
+      ],
+      "main": "rectus-abdominis",
+      "bones": [
+        "lumbar-spine",
+        "thoracic-spine",
+        "hip-bone",
+        "sternum"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "chest",
+          "direction": "forward",
+          "label": "Open"
+        }
+      ],
+      "why": "Letting the belly drop lengthens the front of the trunk while the back muscles gently arch the spine."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.3 Axial muscles of the head, neck and back",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-3-axial-muscles-of-the-head-neck-and-back",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.4 Axial muscles of the abdominal wall and thorax",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-4-axial-muscles-of-the-abdominal-wall-and-thorax",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

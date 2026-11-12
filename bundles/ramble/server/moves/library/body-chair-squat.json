@@ -15,12 +15,34 @@
     "squat",
     "starter"
   ],
+  "areas": [
+    "lower"
+  ],
+  "sets": 2,
+  "reps": 8,
+  "tempoSeconds": 6,
+  "perSide": false,
   "steps": [
-    "Stand in front of a chair with your feet hip-width apart.",
-    "Reach your hips back and lower down until you lightly touch the seat.",
-    "Keep your chest up and your knees over your feet.",
-    "Stand back up and squeeze your glutes.",
-    "Do 2 sets of 8."
+    {
+      "text": "Stand in front of a chair with your feet hip-width apart.",
+      "cue": "Stand in front of the chair, feet hip-width.",
+      "at": 0
+    },
+    {
+      "text": "Reach your hips back and lower down until you lightly touch the seat.",
+      "cue": "Hips back. Lower until you touch the seat.",
+      "at": 1
+    },
+    {
+      "text": "Keep your chest up and your knees over your feet.",
+      "cue": "Chest up, knees over your feet.",
+      "at": 1
+    },
+    {
+      "text": "Stand back up and squeeze your glutes.",
+      "cue": "Stand up and squeeze your glutes.",
+      "at": 0
+    }
   ],
   "works": [
     "Legs",
@@ -34,17 +56,88 @@
     "Dropping onto the chair instead of lowering under control.",
     "Letting your knees roll inward."
   ],
+  "regression": "Use a higher seat, or put a firm cushion on the chair.",
+  "stopIf": "Stop if you feel pain in your knees, hips or back.",
   "skipIf": [
     "knee",
     "hip"
   ],
   "easier": null,
   "harder": "band-squat",
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 80,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 80,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 100,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 100,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 100,
+      "kneeL": 90,
+      "ankleL": 10,
+      "hipR": 100,
+      "kneeR": 90,
+      "ankleR": 10,
+      "rootAngle": 20,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "quadriceps",
+        "glutes"
+      ],
+      "lengthening": [],
+      "main": "quadriceps",
+      "bones": [
+        "femur",
+        "tibia",
+        "patella",
+        "hip-bone"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "feet",
+          "direction": "down",
+          "label": "Press"
+        }
+      ],
+      "why": "The front of the thigh and the buttocks straighten the knees and hips to lift you off the chair."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true
