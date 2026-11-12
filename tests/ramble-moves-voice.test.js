@@ -1161,3 +1161,304 @@ test("attach: a synth whose speak and cancel throw never throws out of onEvent",
   });
 });
 
+/* ============ the player and the voice, in one page ============ */
+/*
+ * player.js reports every move, player-audio.js speaks to it, and the two
+ * scripts are loaded here exactly as the panel loads them: plain script tags
+ * into one context, over a fake DOM and an injected clock. The routine is the
+ * panel's own chain shape, compiled by the session engine on the way in.
+ */
+
+const SESSION_SRC = readFileSync(join(MOVES, "session.cjs"), "utf8");
+const FIGURE_SRC = readFileSync(join(MOVES, "figure.cjs"), "utf8");
+const PLAYER_SRC = readFileSync(join(ROOT, "bundles", "ramble", "panel", "static", "player.js"), "utf8");
+
+/* The routine the page plays: a warm-up hold, a counted set with a rest, and a
+ * closing hold. */
+const PAGE_LIB = [
+  {
+    id: "pose-reach",
+    kind: "pose",
+    title: "Reach up",
+    minutes: 1,
+    pose: { rootAngle: 4, shoulderL: 150, shoulderR: 150 },
+    steps: [{ text: "Reach up tall", cue: "Reach up tall", say: "Reach up tall" }],
+  },
+  {
+    id: "pose-fold",
+    kind: "pose",
+    title: "Fold forward",
+    minutes: 1,
+    pose: { rootAngle: 80, shoulderL: 40, shoulderR: 40 },
+    steps: [{ text: "Fold forward", cue: "Fold forward", say: "Fold forward" }],
+  },
+  {
+    id: "ex-arms",
+    kind: "exercise",
+    title: "Arm circles",
+    minutes: 1,
+    reps: 4,
+    poses: [{ shoulderL: 20, shoulderR: 20 }, { shoulderL: 120, shoulderR: 120 }],
+    steps: [{ text: "Small circles", cue: "Small circles", say: "Small circles" }],
+  },
+  {
+    id: "chunk-page",
+    kind: "routine",
+    title: "Page routine",
+    minutes: 10,
+    rounds: 1,
+    steps: [{ text: "warm-up, main, cool-down", cue: "warm-up", say: "warm-up" }],
+    blocks: {
+      warmup: [{ id: "pose-reach", seconds: 20 }],
+      main: [{ id: "ex-arms", seconds: 30, restSeconds: 5 }, { id: "pose-reach", seconds: 20 }],
+      cooldown: [{ id: "pose-fold", seconds: 20 }],
+    },
+  },
+];
+const PAGE_CHAIN = [{ chunkId: "chunk-page" }];
+const PAGE_COPY = { ...COPY, start: "Start", safety: "" };
+
+/* The smallest DOM the player and the voice's controls need between them. */
+class PageNode {
+  constructor(tag) {
+    this.tagName = String(tag || "div").toUpperCase();
+    this.attrs = Object.create(null);
+    this.listeners = Object.create(null);
+    this.children = [];
+    this.parentNode = null;
+    this.style = {};
+    this.textContent = "";
+    this.innerHTML = "";
+    this.clientWidth = 0;
+  }
+  get firstChild() {
+    return this.children.length > 0 ? this.children[0] : null;
+  }
+  addEventListener(type, fn) {
+    const list = this.listeners[type] || (this.listeners[type] = []);
+    list.push(fn);
+  }
+  removeEventListener(type, fn) {
+    const list = this.listeners[type] || [];
+    this.listeners[type] = list.filter((one) => one !== fn);
+  }
+  setAttribute(name, value) {
+    this.attrs[String(name)] = String(value);
+  }
+  getAttribute(name) {
+    return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null;
+  }
+  removeAttribute(name) {
+    delete this.attrs[name];
+  }
+  hasAttribute(name) {
+    return Object.prototype.hasOwnProperty.call(this.attrs, name);
+  }
+  appendChild(child) {
+    if (child.parentNode && typeof child.parentNode.removeChild === "function") {
+      child.parentNode.removeChild(child);
+    }
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+  removeChild(child) {
+    this.children = this.children.filter((one) => one !== child);
+    if (child && child.parentNode === this) child.parentNode = null;
+    return child;
+  }
+  remove() {
+    if (this.parentNode) this.parentNode.removeChild(this);
+  }
+  querySelectorAll() {
+    return [];
+  }
+  querySelector() {
+    return null;
+  }
+  focus() {}
+  blur() {}
+  closest() {
+    return null;
+  }
+  click() {
+    (this.listeners.click || []).slice().forEach((fn) => fn({ target: this }));
+  }
+}
+
+function pageRole(host, role) {
+  const queue = host.children.slice();
+  while (queue.length > 0) {
+    const node = queue.shift();
+    if (node.getAttribute("data-role") === role) return node;
+    if (node.children.length > 0) queue.push(...node.children);
+  }
+  return null;
+}
+
+/* session.cjs, figure.cjs, player.js and player-audio.js, in the order the
+ * panel sends them, over one fake page. */
+function pageBoot() {
+  const host = new PageNode("div");
+  const clock = {
+    time: 0,
+    intervals: [],
+    now() {
+      return this.time;
+    },
+    setInterval(fn) {
+      this.intervals.push(fn);
+      return this.intervals.length;
+    },
+    clearInterval() {},
+  };
+  const doc = {
+    hidden: false,
+    createElement: (tag) => new PageNode(tag),
+    querySelectorAll: () => [],
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const sandbox = { console, document: doc, matchMedia: () => ({ matches: true }) };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(SESSION_SRC, { filename: "session.cjs" }).runInContext(sandbox);
+  new vm.Script(FIGURE_SRC, { filename: "figure.cjs" }).runInContext(sandbox);
+  new vm.Script(PLAYER_SRC, { filename: "player.js" }).runInContext(sandbox);
+  new vm.Script(SOURCE, { filename: "player-audio.js" }).runInContext(sandbox);
+  return { sandbox, host, clock, doc };
+}
+
+/* One page with the voice attached the way the panel attaches it: into a slot
+ * of its own, which goes on the player's host once the player has built its
+ * screen. */
+function pageMount(config) {
+  const cfg = config || {};
+  const page = pageBoot();
+  const timers = fakeTimers();
+  const audio = makeAudio();
+  const slot = page.doc.createElement("div");
+  const voice = page.sandbox.window.RamblePlayerAudio.attach(null, {
+    lines: cfg.lines === undefined ? LINES : cfg.lines,
+    copy: COPY,
+    guidance: "full",
+    host: slot,
+    doc: page.doc,
+    storage: fakeStorage(),
+    timers: { setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout },
+    speech: cfg.speech === undefined ? null : cfg.speech,
+    audio: audio.factory,
+  });
+  const player = page.sandbox.RamblePlayer.mount(page.host, {
+    chain: PAGE_CHAIN,
+    library: PAGE_LIB,
+    copy: PAGE_COPY,
+    guidance: "full",
+    clock: page.clock,
+    reducedMotion: true,
+    onEvent: (ev) => voice.onEvent(ev),
+  });
+  page.host.appendChild(slot);
+  return { page, timers, audio, voice, player, slot };
+}
+
+/* One second of the session: the injected clock moves and the player's own
+ * beat reads it, with the voice's timers running alongside. */
+function pageSecond(played) {
+  played.page.clock.time += 1000;
+  const beat = played.page.clock.intervals[0];
+  if (typeof beat === "function") beat();
+  played.timers.advance(1000);
+}
+
+function pageRun(played) {
+  const start = pageRole(played.page.host, "start");
+  if (!start) return 0;
+  start.click();
+  let seconds = 0;
+  while (!played.player.state().ended && seconds < 600) {
+    pageSecond(played);
+    seconds += 1;
+  }
+  return seconds;
+}
+
+/* Every string the shipped lines file carries, as a pattern that accepts a
+ * filled placeholder. */
+function linePatterns() {
+  const strings = [];
+  (function walk(value) {
+    if (typeof value === "string") strings.push(value);
+    else if (Array.isArray(value)) value.forEach(walk);
+    else if (value && typeof value === "object") Object.values(value).forEach(walk);
+  })(LINES);
+  return strings.map((template) => {
+    const parts = template.split(/\{[a-z]+\}/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    return new RegExp("^" + parts.join(".+") + "$");
+  });
+}
+
+/* The words the library itself carries: a step's own text, cue and say are
+ * spoken as they are. */
+function libraryWords() {
+  const out = new Set();
+  (function walk(value) {
+    if (typeof value === "string") out.add(value);
+    else if (Array.isArray(value)) value.forEach(walk);
+    else if (value && typeof value === "object") Object.values(value).forEach(walk);
+  })(PAGE_LIB);
+  return out;
+}
+
+test("integration: a page with no voice at all plays the whole routine without a throw", () => {
+  const played = pageMount({ speech: null });
+  assert.equal(played.voice.available(), false, "this page has no voice to speak with");
+
+  /* The two labels the controls carry are the copy's own words. */
+  const sound = pageRole(played.page.host, "sound-toggle");
+  assert.notEqual(sound, null);
+  assert.equal(sound.textContent, COPY["player.sound"]);
+  const note = pageRole(played.page.host, "voice-unavailable");
+  assert.notEqual(note, null, "the note stands where the voice toggle would be");
+  assert.equal(note.textContent, COPY["player.voiceUnavailable"]);
+  assert.equal(pageRole(played.page.host, "voice-toggle"), null);
+
+  let seconds = 0;
+  assert.doesNotThrow(() => {
+    seconds = pageRun(played);
+  });
+  assert.equal(played.player.state().ended, true, "the routine reached its end");
+  assert.ok(seconds > 90 && seconds < 600, "it ran the timeline it was given");
+
+  /* The tones are the voice's, and they were scheduled from the player's own
+   * moves rather than by a timer of its own. */
+  assert.equal(played.audio.created() > 0, true, "the tone context was made when the session started");
+  assert.equal(played.audio.tones.some((tone) => tone.freq === CHIME_FREQ), true, "a chime marks the work segments");
+
+  /* Nothing is left speaking once the player is taken down. */
+  assert.doesNotThrow(() => {
+    played.player.destroy();
+    played.voice.destroy();
+  });
+  assert.equal(pageRole(played.page.host, "audio-controls"), null);
+});
+
+test("integration: with a voice present every spoken line is a shipped line or the library's own text", () => {
+  const spoken = makeSpeech();
+  const played = pageMount({ speech: spoken.speech });
+  assert.equal(played.voice.available(), true);
+  assert.notEqual(pageRole(played.page.host, "voice-toggle"), null);
+
+  assert.doesNotThrow(() => pageRun(played));
+  assert.equal(played.player.state().ended, true);
+
+  const said = spokenTexts(spoken);
+  assert.ok(said.length > 0, "the page's voice spoke during the routine");
+  const patterns = linePatterns();
+  const words = libraryWords();
+  for (const line of said) {
+    const shipped = patterns.some((pattern) => pattern.test(line));
+    assert.ok(shipped || words.has(line), "neither a shipped line nor the library's own text: " + line);
+  }
+});
+

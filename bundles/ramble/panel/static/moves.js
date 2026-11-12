@@ -915,6 +915,10 @@
   var LIBRARY_LIMIT = 40;
 
   var playerHandle = null;
+  /* The voice that speaks for the player now, and the slot its controls live
+   * in: both go with the player they belong to. */
+  var voiceHandle = null;
+  var voiceSlot = null;
   /* Bumped by every stopPlayer, so a library that arrives after the screen has
    * moved on cannot mount a player behind it. */
   var playerToken = 0;
@@ -998,6 +1002,20 @@
     });
   }
 
+  /* The spoken lines, fetched once per page the same way as the copy table. A
+   * load that fails is an empty table: the player then says nothing at all. */
+  var voicePromise = null;
+  function loadVoiceLines() {
+    if (voicePromise) return voicePromise;
+    voicePromise = jsonFetch("/api/ramble/moves/voice").then(function (out) {
+      var lines = out && out.lines ? out.lines : {};
+      return lines && typeof lines === "object" && !Array.isArray(lines) ? lines : {};
+    }).catch(function () {
+      return {};
+    });
+    return voicePromise;
+  }
+
   /* The guidance a chunk is mounted with. The server's level is used as it
    * came; a routine is not on the flow ladder, so the two levels that hide the
    * names play it with names instead. */
@@ -1019,14 +1037,15 @@
   /* Mount over the static page. Anything the player refuses (a chain the
    * compiler will not take, a host that cannot hold it) leaves the page the
    * reader already has exactly as it was. */
-  function mountPlayer(host, entries, chain, entry, level, ctx, copy) {
+  function mountPlayer(host, entries, chain, entry, level, ctx, copy, lines) {
     var Player = window.RamblePlayer;
     if (!Player || typeof Player.mount !== "function") return;
+    var guidance = guidanceFor(entry.kind, level);
     var options = {
       chain: chain,
       library: entries,
       copy: copy || {},
-      guidance: guidanceFor(entry.kind, level),
+      guidance: guidance,
       post: function (payload) {
         return jsonFetch("/api/ramble/moves/progress", { method: "POST", body: payload });
       },
@@ -1038,6 +1057,33 @@
       onEvent: function () {}
     };
     if (ctx && typeof ctx.cardSlot === "string" && ctx.cardSlot !== "") options.cardSlot = ctx.cardSlot;
+    /* The voice comes first, so the player's very first step has somewhere to
+     * go. It draws into a slot of its own: the player clears the host as it
+     * builds its screen, so the slot goes on the host once the player is there.
+     * No voice script, or one that refuses to start, is a silent session. */
+    var Audio = window.RamblePlayerAudio;
+    if (Audio && typeof Audio.attach === "function") {
+      try {
+        var slot = document.createElement("div");
+        voiceHandle = Audio.attach(null, {
+          lines: lines && typeof lines === "object" ? lines : {},
+          copy: copy || {},
+          guidance: guidance,
+          host: slot,
+          doc: document,
+          storage: playerStorage(),
+          speech: typeof Audio.defaultSpeech === "function" ? Audio.defaultSpeech(window) : null,
+          audio: typeof Audio.defaultAudio === "function" ? Audio.defaultAudio(window) : null
+        });
+        voiceSlot = slot;
+      } catch (e) {
+        voiceHandle = null;
+        voiceSlot = null;
+      }
+    }
+    options.onEvent = function (ev) {
+      try { voiceHandle && voiceHandle.onEvent(ev); } catch (e) { /* the session goes on */ }
+    };
     /* The host has to be on screen before its width is worth reading, and the
      * width decides the layout: a narrow screen plays the phone one, a measured
      * wide one is left to the player. */
@@ -1051,11 +1097,15 @@
       handle = null;
     }
     if (!handle || typeof handle.destroy !== "function") {
+      stopVoice();
       host.textContent = "";
       setHidden(host, true);
       return;
     }
     playerHandle = handle;
+    if (voiceSlot) {
+      try { host.appendChild(voiceSlot); } catch (e) { stopVoice(); }
+    }
     setStaticEntry(false);
   }
 
@@ -1072,11 +1122,28 @@
     loadLibraryFor([entry.id].concat(referencedIds(entry))).then(function (entries) {
       if (token !== playerToken) return;
       if (!Array.isArray(entries) || entries.length === 0) return;
-      return loadPlayerCopy().then(function (copy) {
+      /* The words and the lines together: a load that fails is an empty table
+       * either way, and the player still mounts. */
+      return Promise.all([loadPlayerCopy(), loadVoiceLines()]).then(function (loaded) {
         if (token !== playerToken) return;
-        mountPlayer(host, entries, chain, entry, level, ctx, copy);
+        mountPlayer(host, entries, chain, entry, level, ctx, loaded[0], loaded[1]);
       });
     }).catch(function () { /* the static page stays */ });
+  }
+
+  /* The voice goes with the player it spoke for. */
+  function stopVoice() {
+    if (voiceHandle) {
+      try { voiceHandle.destroy(); } catch (e) { /* already gone */ }
+      voiceHandle = null;
+    }
+    if (voiceSlot) {
+      var slot = voiceSlot;
+      voiceSlot = null;
+      try {
+        if (slot.parentNode && typeof slot.parentNode.removeChild === "function") slot.parentNode.removeChild(slot);
+      } catch (e) { /* already out of the page */ }
+    }
   }
 
   /* Take the player down and its screen with it. */
@@ -1086,6 +1153,7 @@
       try { playerHandle.destroy(); } catch (e) { /* already gone */ }
       playerHandle = null;
     }
+    stopVoice();
     setHidden($("rb-player"), true);
   }
 

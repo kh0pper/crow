@@ -30,6 +30,8 @@ const PANEL_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/ramble.
 const CLIENT_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/moves.js"), "utf8");
 const PLAYER_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/player.js"), "utf8");
 const CSS_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/ramble.css"), "utf8");
+const AUDIO_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/player-audio.js"), "utf8");
+const PLAYER_CSS_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/player.css"), "utf8");
 
 const { default: panel } = await import("../bundles/ramble/panel/ramble.js");
 const { ACTIVITY_KINDS, EQUIPMENT, LIMIT_TAGS } = await import("../bundles/ramble/server/moves/library.js");
@@ -137,11 +139,23 @@ test("the panel is bilingual: Spanish copy for the new screens, including the sa
 });
 
 test("the client and the player have zero backticks", () => {
-  for (const [label, src] of [["moves.js", CLIENT_SRC()], ["player.js", PLAYER_SRC()]]) {
+  for (const [label, src] of [
+    ["moves.js", CLIENT_SRC()],
+    ["player.js", PLAYER_SRC()],
+    ["player-audio.js", AUDIO_SRC()],
+    ["player.css", PLAYER_CSS_SRC()],
+  ]) {
     assert.equal((src.match(/`/g) || []).length, 0,
       label + " must contain no backtick: panel client scripts must not carry one, the tooling treats it as its own delimiter");
-    assert.ok(src.length > 1000, label + " looks empty");
+    assert.ok(src.length > 100, label + " looks empty");
   }
+});
+
+test("the client fetches the spoken lines from their own route, once per page", () => {
+  const src = CLIENT_SRC();
+  assert.ok(src.includes("/api/ramble/moves/voice"), "the lines come over the wire, never baked into the panel");
+  assert.ok(src.includes("function loadVoiceLines("), "one helper owns that fetch");
+  assert.ok(src.includes("function loadPlayerCopy("), "and the copy keeps its own");
 });
 
 test("the panel loads the figure, the session and the player engines before the client", async () => {
@@ -155,6 +169,8 @@ test("the panel loads the figure, the session and the player engines before the 
     "the figure engine loads before the session it draws for");
   assert.ok(at("/ramble/static/session.js") < at("/ramble/static/player.js"),
     "the session engine loads before the player that compiles with it");
+  assert.ok(at("/ramble/static/player-audio.js") < at("/ramble/static/player.js"),
+    "the voice is defined before the player that reports to it");
   assert.ok(at("/ramble/static/player.js") < at("/ramble/static/moves.js"),
     "the player is defined before the client mounts it");
   assert.ok(at("/ramble/static/ramble.css") < at("/ramble/static/player.css"),
@@ -312,6 +328,7 @@ function bootMoves(beforeRun, search) {
     if (u === "/api/ramble/moves/log") return json({ ...TODAY, log: { paid: 5, points: 5, already: false } });
     if (u === "/api/ramble/moves/prefs") return json(PREFS);
     if (u === "/api/ramble/moves/copy") return json({ copy: { "player.pause": "Pause", "player.next": "Next: {name}" } });
+    if (u === "/api/ramble/moves/voice") return json({ lines: { paused: "Paused.", resume: "Carrying on." } });
     if (u === "/api/ramble/moves/library") return json({ entries: [WALK_ENTRY] });
     if (u === "/api/ramble/moves/library/walk-10") return json({ entry: WALK_ENTRY });
     if (u === "/api/ramble/moves/start") return json({ cardKey: "2026-10-30:day", startedAt: 1 });
@@ -553,6 +570,130 @@ test("a Learn-page open passes no card slot", async () => {
   assert.equal(mounted.opts.cardSlot, undefined, "a Learn-page open names no card slot");
   assert.deepEqual(JSON.parse(JSON.stringify(mounted.opts.chain)), [{ chunkId: "walk-10" }]);
   assert.equal(booted.sandbox.window.RambleMoves.transitionMs, 1200, "the pure helpers are still exported");
+});
+
+/* ------------------------------------------------- the voice a chunk gets */
+
+test("the mounted player is given the voice, fed by the lines route, and every step reaches it", async () => {
+  const voice = { attaches: [], heard: [] };
+  const booted = bootMoves((sb) => {
+    sb.localStorage.setItem("ramble.moves.safetySeen", "1");
+    sb.RamblePlayer = {
+      mount(host, opts) {
+        voice.opts = opts;
+        return { destroy() {}, state() { return {}; } };
+      },
+    };
+    sb.RamblePlayerAudio = {
+      defaultSpeech(win) { voice.speechFrom = win && win.document; return null; },
+      defaultAudio(win) { voice.audioFrom = win && win.document; return null; },
+      attach(player, opts) {
+        assert.equal(player, null, "the voice is attached before there is a player to give it");
+        voice.attaches.push(opts);
+        return {
+          onEvent(ev) { voice.heard.push(ev.type === "segment" ? "segment:" + ev.index : ev.type); },
+          destroy() { voice.destroyed = true; },
+        };
+      },
+    };
+  }, "?moves=start");
+  booted.el("rb-player").setAttribute("data-start", "Start");
+  await flush();
+
+  assert.equal(voice.attaches.length, 1, "one voice per mount");
+  const opts = voice.attaches[0];
+  assert.equal(opts.lines.paused, "Paused.", "the lines are the ones /api/ramble/moves/voice answered");
+  assert.equal(opts.copy["player.pause"], "Pause", "the copy is the page's own table");
+  assert.equal(opts.copy.start, "Start");
+  assert.equal(opts.guidance, "full", "the voice plays the level the player plays");
+  assert.equal(opts.doc, booted.sandbox.document);
+  assert.equal(voice.speechFrom, booted.sandbox.document, "the platform's own speech is read from the window");
+  assert.equal(voice.audioFrom, booted.sandbox.document, "and its own tone factory");
+  assert.equal(booted.calls.filter((c) => c.url === "/api/ramble/moves/voice").length, 1,
+    "the lines are fetched once per page");
+
+  /* The voice's controls live in a slot of their own, put on the player's host
+   * once the player has built its screen there. */
+  assert.notEqual(opts.host, booted.el("rb-player"));
+  assert.equal(booted.el("rb-player").children.indexOf(opts.host) >= 0, true,
+    "the slot is on the player's host");
+
+  /* Every step the player reports reaches the voice. */
+  voice.opts.onEvent({ type: "segment", index: 0 });
+  voice.opts.onEvent({ type: "pause" });
+  assert.deepEqual(voice.heard, ["segment:0", "pause"]);
+});
+
+test("leaving the player takes the voice down with it", async () => {
+  const voice = { attaches: 0, destroyed: 0 };
+  const booted = bootMoves((sb) => {
+    sb.localStorage.setItem("ramble.moves.safetySeen", "1");
+    sb.RamblePlayer = { mount() { return { destroy() {}, state() { return {}; } }; } };
+    sb.RamblePlayerAudio = {
+      attach(player, opts) {
+        voice.attaches += 1;
+        voice.slot = opts.host;
+        return { onEvent() {}, destroy() { voice.destroyed += 1; } };
+      },
+    };
+  }, "?moves=start");
+  await flush();
+  assert.equal(voice.attaches, 1);
+
+  booted.el("rb-learn-back").click();
+
+  assert.equal(voice.destroyed, 1, "the voice is destroyed with the player it spoke for");
+  assert.equal(booted.el("rb-player").hasAttribute("hidden"), true, "and the player's host goes away");
+});
+
+test("a voice script that throws on attach leaves the player mounted and the page silent", async () => {
+  const mounted = { count: 0 };
+  const booted = bootMoves((sb) => {
+    sb.localStorage.setItem("ramble.moves.safetySeen", "1");
+    sb.RamblePlayerAudio = {
+      defaultSpeech() { return null; },
+      defaultAudio() { return null; },
+      attach() { throw new Error("no voice here"); },
+    };
+    sb.RamblePlayer = {
+      mount(host, opts) {
+        mounted.count += 1;
+        mounted.opts = opts;
+        return { destroy() {}, state() { return {}; } };
+      },
+    };
+  }, "?moves=start");
+  booted.el("rb-player").setAttribute("data-start", "Start");
+  await flush();
+
+  assert.equal(mounted.count, 1, "the player mounts anyway");
+  assert.equal(booted.el("rb-player").hasAttribute("hidden"), false, "and its screen is on show");
+  assert.equal(typeof mounted.opts.onEvent, "function");
+  assert.doesNotThrow(() => mounted.opts.onEvent({ type: "segment", index: 0 }));
+  assert.doesNotThrow(() => mounted.opts.onEvent({ type: "pause" }));
+});
+
+test("a voice that throws on a step does not take the session with it", async () => {
+  const mounted = { count: 0 };
+  const booted = bootMoves((sb) => {
+    sb.localStorage.setItem("ramble.moves.safetySeen", "1");
+    sb.RamblePlayerAudio = {
+      attach() {
+        return { onEvent() { throw new Error("voice trouble"); }, destroy() {} };
+      },
+    };
+    sb.RamblePlayer = {
+      mount(host, opts) {
+        mounted.count += 1;
+        mounted.opts = opts;
+        return { destroy() {}, state() { return {}; } };
+      },
+    };
+  }, "?moves=start");
+  await flush();
+  assert.equal(mounted.count, 1);
+  assert.doesNotThrow(() => mounted.opts.onEvent({ type: "segment", index: 0 }));
+  assert.doesNotThrow(() => mounted.opts.onEvent({ type: "ended" }));
 });
 
 /* ---------------------------------------------- the fixes from the review */

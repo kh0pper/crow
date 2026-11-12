@@ -141,6 +141,23 @@
   color: var(--rb-accent-2-ink);
 }
 
+/* ------------------------------------------------------------------- voice */
+
+/* The two toggles the voice adds sit under the strip, side by side and never
+ * wider than the screen; they wrap onto a second row when the words are long. */
+#rb-player [data-role="audio-controls"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+#rb-player [data-role="voice-unavailable"] {
+  color: var(--rb-muted);
+  font: 600 13px/1.4 var(--rb-font-body);
+  text-align: center;
+}
+
 /* ------------------------------------------------------------------ sheets */
 
 #rb-player [data-role="sheet"] {

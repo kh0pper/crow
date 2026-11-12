@@ -675,7 +675,7 @@ test("controls: onEvent hears segment, pause and resume in the order they happen
     onEvent: (event) => { heard.push(event.type === "segment" ? "segment:" + event.index : event.type); },
   });
   byRole(booted.host, "start").click();
-  assert.deepEqual(heard, [], "the first Start is not a resume");
+  assert.deepEqual(heard, ["segment:0"], "the first Start is a segment of its own, and no resume");
 
   const strip = byRole(booted.host, "strip");
   strip.children[1].click();
@@ -684,7 +684,9 @@ test("controls: onEvent hears segment, pause and resume in the order they happen
   byRole(booted.host, "skip").click();
   byRole(booted.host, "back").click();
 
-  assert.deepEqual(heard, ["segment:2", "pause", "resume", "segment:3", "segment:2"]);
+  assert.deepEqual(heard, [
+    "segment:0", "segment:2", "pause", "resume", "segment:3", "segment:2",
+  ]);
 
   /* A listener that throws is its own problem. */
   const angry = boot();
@@ -692,6 +694,116 @@ test("controls: onEvent hears segment, pause and resume in the order they happen
   byRole(angry.host, "start").click();
   assert.doesNotThrow(() => byRole(angry.host, "strip").children[2].click());
   assert.doesNotThrow(() => byRole(angry.host, "pause").click());
+});
+
+/* ---------- what a page hears about a move ---------- */
+
+test("events: a segment event carries the segment, its neighbour, its elapsed time and its place", () => {
+  const booted = boot();
+  const segments = segmentsOf(booted.sandbox);
+  const heard = [];
+  mountPlayer(booted, {
+    onEvent: (event) => { if (event.type === "segment") heard.push(event); },
+  });
+
+  assert.deepEqual(heard, [], "nothing is heard before Start");
+  byRole(booted.host, "start").click();
+
+  assert.equal(heard.length, 1, "the first Start reports the segment it starts on");
+  const first = heard[0];
+  assert.equal(first.index, 0);
+  assert.deepEqual(plain(first.segment), plain(segments[0]), "the segment at that index");
+  assert.deepEqual(plain(first.next), plain(segments[1]), "the segment that follows it");
+  assert.equal(first.elapsed, 0, "a segment that has just begun is at zero");
+  assert.deepEqual(plain(first.ctx), {
+    name: entryTitle("pose-reach"),
+    nextName: entryTitle("ex-arms"),
+    isFirstWork: true,
+    isLastWork: false,
+    entryStart: true,
+    seed: 0,
+  });
+
+  /* A quiet segment in the middle: it names no entry of its own, carries the
+   * next one along, and starts nothing. */
+  byRole(booted.host, "skip").click();
+  const quiet = heard[heard.length - 1];
+  assert.equal(quiet.index, 1);
+  assert.deepEqual(plain(quiet.ctx), {
+    name: "",
+    nextName: entryTitle("ex-arms"),
+    isFirstWork: false,
+    isLastWork: false,
+    entryStart: false,
+    seed: 1,
+  });
+  assert.deepEqual(plain(quiet.segment), plain(segments[1]));
+
+  /* The middle work step: its entry starts here, and another one follows. */
+  const strip = byRole(booted.host, "strip");
+  strip.children[1].click();
+  const middle = heard[heard.length - 1];
+  assert.equal(middle.index, 2);
+  assert.equal(middle.elapsed, 0);
+  assert.deepEqual(plain(middle.next), plain(segments[3]));
+  assert.deepEqual(plain(middle.ctx), {
+    name: entryTitle("ex-arms"),
+    nextName: entryTitle("pose-fold"),
+    isFirstWork: false,
+    isLastWork: false,
+    entryStart: true,
+    seed: 2,
+  });
+
+  /* The last work step of the whole timeline: nothing follows it. */
+  strip.children[2].click();
+  const last = heard[heard.length - 1];
+  assert.equal(last.index, 5);
+  assert.equal(last.next, null);
+  assert.deepEqual(plain(last.ctx), {
+    name: entryTitle("pose-fold"),
+    nextName: "",
+    isFirstWork: false,
+    isLastWork: true,
+    entryStart: true,
+    seed: 5,
+  });
+});
+
+test("events: pause and resume carry the segment and how far into it the clock is", () => {
+  const booted = boot();
+  const segments = segmentsOf(booted.sandbox);
+  const heard = [];
+  mountPlayer(booted, {
+    onEvent: (event) => {
+      if (event.type === "pause" || event.type === "resume") heard.push(event);
+    },
+  });
+  byRole(booted.host, "start").click();
+  advance(booted.clock, 10);
+
+  byRole(booted.host, "pause").click();
+  assert.equal(heard.length, 1);
+  assert.equal(heard[0].type, "pause");
+  assert.deepEqual(plain(heard[0].segment), plain(segments[0]));
+  assert.deepEqual(plain(heard[0].next), plain(segments[1]));
+  assert.equal(heard[0].elapsed, 10, "ten seconds into the hold");
+  assert.equal(heard[0].ctx.name, entryTitle("pose-reach"));
+  assert.equal(heard[0].ctx.seed, 0);
+  assert.equal(heard[0].index, undefined, "a pause names no index of its own");
+
+  /* A paused stretch adds nothing to the segment's elapsed time. */
+  advance(booted.clock, 5);
+  byRole(booted.host, "pause").click();
+  assert.equal(heard.length, 2);
+  assert.equal(heard[1].type, "resume");
+  assert.equal(heard[1].elapsed, 10);
+  assert.deepEqual(plain(heard[1].segment), plain(segments[0]));
+  assert.equal(heard[1].ctx.name, entryTitle("pose-reach"));
+
+  advance(booted.clock, 3);
+  byRole(booted.host, "pause").click();
+  assert.equal(heard[2].elapsed, 13, "the clock keeps its own time after a resume");
 });
 
 test("controls: destroy takes the visibilitychange listener off", () => {

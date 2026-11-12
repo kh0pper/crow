@@ -885,6 +885,7 @@ export default {
       <script src="/ramble/static/bird-svg.js"></script>
       <script src="/ramble/static/figure.js"></script>
       <script src="/ramble/static/session.js"></script>
+      <script src="/ramble/static/player-audio.js"></script>
       <script src="/ramble/static/player.js"></script>
       <script src="/ramble/static/ramble-ar.js"></script>
       <script src="/ramble/static/ramble.js"></script>

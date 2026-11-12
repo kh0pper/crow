@@ -489,7 +489,7 @@
 
     /* ---------- the controls ---------- */
 
-    var lastReportedIndex = 0;
+    var lastReportedIndex = -1;
     /* The chunk the clock is in now; a move out of it is a report. */
     var chunkSeen = 0;
     var sheetOpen = false;
@@ -503,6 +503,96 @@
       } catch (err) {
         /* swallowed on purpose */
       }
+    }
+
+    /* ---------- what a page hears with a move ---------- */
+
+    /* The work segment before one index, or -1 when there is none. */
+    function workIndexBefore(index) {
+      for (var i = index - 1; i >= 0; i -= 1) {
+        if (isWork(segments[i])) return i;
+      }
+      return -1;
+    }
+
+    /* The work segment after one index: what a rest is resting before. */
+    function workIndexAfter(index) {
+      for (var i = index + 1; i < segments.length; i += 1) {
+        if (isWork(segments[i])) return i;
+      }
+      return -1;
+    }
+
+    function firstWorkIndex() {
+      for (var i = 0; i < segments.length; i += 1) {
+        if (isWork(segments[i])) return i;
+      }
+      return -1;
+    }
+
+    function lastWorkIndex() {
+      for (var i = segments.length - 1; i >= 0; i -= 1) {
+        if (isWork(segments[i])) return i;
+      }
+      return -1;
+    }
+
+    /* The entry's own title, from the library the player was handed; an entry
+     * it does not carry is an empty string, never an invented name. */
+    function nameOf(segment) {
+      return segment ? titleOf(segment.entryId) : "";
+    }
+
+    /* One segment as a page hears it: the segment itself, the one after it, how
+     * far into it the clock is, and the few facts the voice needs about where
+     * it sits in the whole timeline. */
+    function payloadOf(index, elapsed) {
+      var segment = segmentAt(index);
+      var before = workIndexBefore(index);
+      var after = workIndexAfter(index);
+      var into = typeof elapsed === "number" && isFinite(elapsed) && elapsed > 0 ? elapsed : 0;
+      return {
+        segment: segment,
+        next: segmentAt(index + 1),
+        elapsed: into,
+        ctx: {
+          name: nameOf(segment),
+          nextName: after < 0 ? "" : titleOf(segments[after].entryId),
+          isFirstWork: isWork(segment) && index === firstWorkIndex(),
+          isLastWork: isWork(segment) && index === lastWorkIndex(),
+          entryStart: isWork(segment)
+            && (before < 0 || segments[before].entryId !== segment.entryId),
+          seed: index
+        }
+      };
+    }
+
+    /* A pause, a resume or a new segment, all carrying where the clock is. */
+    function segmentEvent(type, index) {
+      var payload = payloadOf(index, clock.state().segmentElapsed);
+      return {
+        type: type,
+        segment: payload.segment,
+        next: payload.next,
+        elapsed: payload.elapsed,
+        ctx: payload.ctx
+      };
+    }
+
+    /* A move to another segment is the page's to hear: the chunk left behind is
+     * reported first, then the move itself, once per index. */
+    function reportSegment(at) {
+      var chunkAt = chunkOfSegment(at);
+      if (chunkAt !== chunkSeen) {
+        var left = chunkSeen;
+        chunkSeen = chunkAt;
+        leaveChunk(left);
+      }
+      if (at === lastReportedIndex) return;
+      lastReportedIndex = at;
+      var event = segmentEvent("segment", at);
+      event.index = at;
+      report(event);
     }
 
     function segmentTypeNow() {
@@ -1562,13 +1652,13 @@
       if (clock.state().paused) return;
       clock.pause();
       dropWakeLock();
-      report({ type: "pause" });
+      report(segmentEvent("pause", clock.state().segmentIndex));
     }
 
     function playNow(asking) {
       clock.play();
       takeWakeLock();
-      if (asking) report({ type: "resume" });
+      if (asking) report(segmentEvent("resume", clock.state().segmentIndex));
     }
 
     function onPauseClick() {
@@ -1794,6 +1884,10 @@
         pendingSeek = null;
       }
       playNow(false);
+      /* No clock event announces the Start itself, so the first step the page
+       * hears is reported here. A resume record's own seek has already been
+       * reported, and the same index is not reported twice. */
+      reportSegment(clock.state().segmentIndex);
       startInterval();
       paint();
       /* The first chunk's card is asked for now; every later chunk asks when
@@ -1837,18 +1931,7 @@
       var at = event.state && Number.isInteger(event.state.segmentIndex)
         ? event.state.segmentIndex
         : clock.state().segmentIndex;
-      /* A step in another chunk means the clock has left one behind, whether it
-       * walked there, skipped, went back or was tapped there: that chunk's own
-       * count is reported now. */
-      var chunkAt = chunkOfSegment(at);
-      if (chunkAt !== chunkSeen) {
-        var left = chunkSeen;
-        chunkSeen = chunkAt;
-        leaveChunk(left);
-      }
-      if (at === lastReportedIndex) return;
-      lastReportedIndex = at;
-      report({ type: "segment", index: at });
+      reportSegment(at);
     });
 
     rebuildStrip();
