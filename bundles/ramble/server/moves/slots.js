@@ -35,6 +35,12 @@
  * completion and no streak: a card is finished somewhere else, and the rows
  * this module reads for the day's flags (`moveslot`, `movestand`) are written
  * there too.
+ *
+ * SWAP IS PER SLOT (swapSlot). One card is re-rolled by bumping its own `swap`
+ * and growing its own `seen` list, so the other cards of the day stay put and
+ * a slot never shows an entry it already showed. The cap, the refusal shape
+ * and the refusal-without-writing rule are today.js's: a swap that cannot
+ * produce a new card answers the card on screen with `refused: true`.
  */
 import { localDay } from "../eggs.js";
 import { rowDelta, insertOnce } from "../steps.js";
@@ -42,8 +48,8 @@ import { servedLibrary, entryById, AREAS } from "./library.js";
 import { pickChunk, slotFor } from "./picker.js";
 import {
   DEFAULT_PREFS, HISTORY_KEY, MAX_SWAPS, TODAY_KEY,
-  blockedByLimits, historyWithRollover, normalizeToday, readJson, readPrefs, seenOf,
-  whyLine, writeJson,
+  blockedByLimits, historyWithRollover, normalizeToday, readHistory, readJson, readPrefs,
+  seenOf, whyLine, writeJson,
 } from "./today.js";
 import { learningFlows } from "./learning.js";
 import {
@@ -141,6 +147,31 @@ function nowSlotOf(slotNames, at) {
   return after.length > 0 ? after[0] : slotNames[slotNames.length - 1];
 }
 
+/** The area weights for the day's week, read from the marks it holds so far. */
+async function dayWeights(db, at) {
+  return areaWeights(await weekState(db, { now: at }));
+}
+
+/** Whether the stored `moves.today` row already carries `item` for `day`. */
+function nowStoredAs(stored, day, item) {
+  return stored !== null && stored.day === day && stored.entryId === item.entryId;
+}
+
+/**
+ * The Now mirror: store `item` as the one card `moves.today` carries, so the
+ * rest of moves (Done, Swap, the streak) keeps reading one card a day.
+ */
+async function writeToday(db, { day, item, emit, lang }) {
+  await writeJson(db, TODAY_KEY, {
+    day,
+    entryId: item.entryId,
+    swap: item.swap,
+    seen: item.seen,
+    reasons: item.reasons,
+    why: whyLine(item.reasons, lang),
+  }, emit);
+}
+
 /**
  * The day's cards, and the writes that keep them.
  *
@@ -210,7 +241,7 @@ export async function dayCards(db, {
       days: weekPlan(weekId, prefs.cards, enabledSlots(prefs)),
     }, emit);
   }
-  const weights = areaWeights(await weekState(db, { now: at }));
+  const weights = await dayWeights(db, at);
 
   // An earlier day's card is folded into history IN MEMORY here; it is written
   // only alongside a new card, so a day that yields nothing banks nothing.
@@ -318,20 +349,115 @@ export async function dayCards(db, {
   // Swap, the streak) keeps reading one card a day the way it always has.
   const nowSlot = nowSlotOf(slotNames, at);
   const nowItem = nowSlot === null ? null : slots.find((item) => item.slot === nowSlot) ?? null;
-  if (nowItem && nowItem.entryId !== null) {
-    const same = stored !== null && stored.day === day && stored.entryId === nowItem.entryId;
-    if (!same) {
-      if (changed) await writeJson(db, HISTORY_KEY, history, emit);
-      await writeJson(db, TODAY_KEY, {
-        day,
-        entryId: nowItem.entryId,
-        swap: nowItem.swap,
-        seen: nowItem.seen,
-        reasons: nowItem.reasons,
-        why: whyLine(nowItem.reasons, lang),
-      }, emit);
-    }
+  if (nowItem && nowItem.entryId !== null && !nowStoredAs(stored, day, nowItem)) {
+    if (changed) await writeJson(db, HISTORY_KEY, history, emit);
+    await writeToday(db, { day, item: nowItem, emit, lang });
   }
 
   return { day, need, nowSlot, slots };
+}
+
+/** The entry ids the day's other slots hold, as the swap's extra exclude list. */
+function otherSlotIds(slots, slot) {
+  const ids = [];
+  for (const item of slots) {
+    if (item.slot === slot) continue;
+    if (typeof item.entryId === "string" && item.entryId !== "") ids.push(item.entryId);
+  }
+  return ids;
+}
+
+/**
+ * Swap one of the day's cards.
+ *
+ * The day is established first, exactly as a read of it would be (`dayCards`),
+ * so a swap is a re-roll of what is already on screen and never a way to draw a
+ * card the day would not have drawn. The slot then gets one new chunk:
+ *
+ *   swap       item.swap + 1, so the picker's seed moves
+ *   exclude    the slot's own `seen` list plus every other slot's entryId, so
+ *              a swap neither repeats a card the slot showed nor hands out a
+ *              chunk another card of the day already holds
+ *   area       the slot's PLANNED area, so a swap keeps the week's balance
+ *
+ * A card that is Done is not swapped, and the day's cap is today.js's
+ * MAX_SWAPS: the last allowed swap is swap MAX_SWAPS, and the next call answers
+ * the card on screen with `refused: true`. Nothing outside the exclude list
+ * being eligible refuses the same way. Every refusal, and every request for a
+ * slot that is not one of the day's cards (an off day, a name that is not a
+ * slot, a slot of another card count, a slot left empty), writes nothing at
+ * all.
+ *
+ * A successful swap writes the slot row, and mirrors it into `moves.today` when
+ * the slot is the day's Now card — the same mirror `dayCards` writes. The day's
+ * `moveneed` row, its other slot rows, its `moveslot`/`movestand` flags and
+ * `moves.history` are all left alone: a swap is one card, not a new day.
+ */
+export async function swapSlot(db, {
+  slot, now = Date.now(), weather = null, library, emit, lang = "en",
+} = {}) {
+  const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const out = await dayCards(db, { now: at, weather, library, emit, lang });
+  const slots = Array.isArray(out.slots) ? out.slots : [];
+  const item = slots.find((s) => s.slot === slot) ?? null;
+
+  // Not a card of this day: a paused day, a name that is not a slot, a slot the
+  // day's card count left out, or a slot nothing could be picked for.
+  if (out.off || !item || item.empty || !item.entryId) {
+    return { day: out.day, slot, refused: true, empty: true };
+  }
+  if (item.done === true || item.swap >= MAX_SWAPS) {
+    return { ...item, day: out.day, refused: true };
+  }
+
+  const swap = item.swap + 1;
+  const prefs = await readPrefs(db);
+  const lib = Array.isArray(library) ? library : servedLibrary();
+  // The history a swap picks with is the stored one: the day already holds its
+  // cards, so nothing rolls over here and nothing is folded.
+  const history = await readHistory(db);
+  const learning = await learningFlows(db, lib);
+  const weights = await dayWeights(db, at);
+  const exclude = [...item.seen, ...otherSlotIds(slots, slot)];
+
+  const picked = pickChunk({
+    day: out.day,
+    slot,
+    area: item.plannedArea,
+    weights,
+    weather,
+    prefs,
+    history: { done: history.done, skipped: history.skipped, learning },
+    library: lib,
+    swap,
+    exclude,
+  });
+  // Nothing outside the exclude list is eligible: a one-chunk library, or
+  // limits that leave a single card. The card on screen stays, nothing written.
+  if (!picked) return { ...item, day: out.day, refused: true };
+
+  const seen = seenOf(picked.entryId, item.seen);
+  await writeJson(db, SLOT_KEY_PREFIX + slot, {
+    day: out.day,
+    entryId: picked.entryId,
+    area: picked.area,
+    reasons: picked.reasons,
+    swap,
+    seen,
+  }, emit);
+
+  const next = {
+    slot,
+    entryId: picked.entryId,
+    area: picked.area,
+    plannedArea: item.plannedArea,
+    reasons: picked.reasons,
+    swap,
+    seen,
+    done: false,
+    standIn: item.standIn,
+    empty: false,
+  };
+  if (slot === out.nowSlot) await writeToday(db, { day: out.day, item: next, emit, lang });
+  return { ...next, day: out.day, refused: false };
 }

@@ -22,7 +22,14 @@
  *   - the Now card is mirrored into `moves.today` so the rest of moves keeps
  *     reading one card a day, and an earlier day's card folds into history,
  *   - the week's row is written once per week,
- *   - challenges off draws nothing and writes nothing.
+ *   - challenges off draws nothing and writes nothing,
+ *   - a swap re-rolls ONE slot: a different card, its own swap count, and the
+ *     cards it already showed on its `seen` list, so no id repeats,
+ *   - a swap stays off the day's other cards, leaves `moveneed` and the other
+ *     slot rows alone, and mirrors into `moves.today` only for the Now card,
+ *   - a Done card, a card at the day's swap cap, a card with nothing else
+ *     eligible, a slot left empty and a slot the day does not have all refuse
+ *     without writing.
  *
  * The shipped library is filled elsewhere, so every test injects its own
  * chunks. The clock is a fixed local Thursday, so nothing here depends on the
@@ -37,9 +44,11 @@ import { entryById } from "../bundles/ramble/server/moves/library.js";
 import {
   SLOTS, areaWeights, weekDays, weekIdOf, weekPlan, weekState,
 } from "../bundles/ramble/server/moves/week.js";
-import { todayChallenge, whyLine, writePrefs } from "../bundles/ramble/server/moves/today.js";
 import {
-  MOVE_NEED_KIND, SLOT_KEY_PREFIX, WEEK_KEY, dayCards, enabledSlots,
+  MAX_SWAPS, todayChallenge, whyLine, writePrefs,
+} from "../bundles/ramble/server/moves/today.js";
+import {
+  MOVE_NEED_KIND, SLOT_KEY_PREFIX, WEEK_KEY, dayCards, enabledSlots, swapSlot,
 } from "../bundles/ramble/server/moves/slots.js";
 
 /** A fixed local Thursday: 2026-11-12, in ISO week 2026-W46. */
@@ -90,6 +99,21 @@ function library() {
     chunk({ id: "low-1", areas: ["lower"] }),
     chunk({ id: "up-1", areas: ["upper"] }),
   ];
+}
+
+/**
+ * A library with several chunks per area, so a slot has cards to swap between.
+ * Every chunk trains exactly one area, so the picker's balance rule filters
+ * nothing and a slot's swaps stay inside its planned area.
+ */
+function swapLibrary() {
+  const out = [];
+  for (const [area, prefix] of [
+    ["mobility", "mob"], ["heart", "heart"], ["lower", "low"], ["upper", "up"],
+  ]) {
+    for (let i = 1; i <= 6; i += 1) out.push(chunk({ id: `${prefix}-${i}`, areas: [area] }));
+  }
+  return out;
 }
 
 async function readSetting(db, key) {
@@ -560,6 +584,249 @@ test("prefs.on false answers off and writes nothing", async () => {
   assert.deepEqual(result.slots, []);
   assert.equal(result.day, DAY);
   assert.deepEqual(await snapshot(db), before, "a paused day draws and stores nothing");
+});
+
+/* ------------------------------------------------------------------- swap */
+
+test("a swap re-rolls one slot: a different card, swap 1, the old one on its seen list", async () => {
+  const db = await freshDb();
+  const lib = swapLibrary();
+  const first = await dayCards(db, { now: THURSDAY, library: lib });
+  const before = slotNamed(first, "midday");
+  assert.ok(before.entryId, "the slot has a card to swap");
+
+  const out = await swapSlot(db, { slot: "midday", now: THURSDAY, library: lib });
+  assert.equal(out.day, DAY);
+  assert.equal(out.slot, "midday");
+  assert.equal(out.refused, false);
+  assert.equal(out.empty, false);
+  assert.equal(out.swap, 1, "the swap count was bumped");
+  assert.notEqual(out.entryId, before.entryId, "the card changed");
+  assert.ok(!before.seen.includes(out.entryId), "the new card was not on the slot's seen list");
+  assert.deepEqual(out.seen, [before.entryId, out.entryId], "the old card stays on the seen list");
+  assert.equal(out.plannedArea, before.plannedArea);
+  assert.equal(out.area, before.plannedArea, "the swap keeps the week plan's area");
+  assert.equal(out.standIn, before.standIn);
+  assert.equal(out.done, false);
+
+  const row = JSON.parse(await readSetting(db, SLOT_KEY_PREFIX + "midday"));
+  assert.equal(row.day, DAY);
+  assert.equal(row.entryId, out.entryId);
+  assert.equal(row.area, out.area);
+  assert.equal(row.swap, 1);
+  assert.deepEqual(row.seen, out.seen);
+
+  // The day reads the swapped card back, and its other cards are untouched.
+  const again = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.equal(slotNamed(again, "midday").entryId, out.entryId);
+  assert.equal(slotNamed(again, "midday").swap, 1);
+  for (const slot of ["morning", "evening"]) {
+    assert.equal(slotNamed(again, slot).entryId, slotNamed(first, slot).entryId,
+      "another slot's card is untouched: " + slot);
+    assert.equal(slotNamed(again, slot).swap, 0);
+  }
+});
+
+test("three swaps of a slot work, and the fourth refuses and writes nothing", async () => {
+  const db = await freshDb();
+  const lib = swapLibrary();
+  const first = await dayCards(db, { now: THURSDAY, library: lib });
+  const others = first.slots.filter((item) => item.slot !== "morning").map((item) => item.entryId);
+
+  // Every card the morning slot has shown, the first one included.
+  const shown = [slotNamed(first, "morning").entryId];
+  let current = slotNamed(first, "morning");
+
+  for (let n = 1; n <= MAX_SWAPS; n += 1) {
+    const out = await swapSlot(db, { slot: "morning", now: THURSDAY, library: lib });
+    assert.equal(out.refused, false, `swap ${n} is allowed`);
+    assert.equal(out.swap, n, `swap ${n} bumps the count`);
+    assert.notEqual(out.entryId, current.entryId, `swap ${n} changes the card`);
+    assert.ok(out.seen.includes(out.entryId), "the new card is on the seen list");
+    assert.ok(!shown.includes(out.entryId), `swap ${n} never repeats a card the slot showed`);
+    assert.ok(!others.includes(out.entryId), `swap ${n} never takes another slot's card`);
+    shown.push(out.entryId);
+    current = out;
+  }
+  assert.equal(new Set(shown).size, MAX_SWAPS + 1, "no card repeated across the swaps");
+  assert.deepEqual(current.seen, shown, "the seen list holds every card the slot showed");
+
+  const before = await snapshot(db);
+  const fourth = await swapSlot(db, { slot: "morning", now: THURSDAY, library: lib });
+  assert.equal(fourth.refused, true, "the cap refuses the fourth swap");
+  assert.equal(fourth.entryId, current.entryId, "the card on screen stays");
+  assert.equal(fourth.swap, MAX_SWAPS);
+  assert.deepEqual(await snapshot(db), before, "a refused swap writes nothing");
+});
+
+test("a swap never lands on another slot's card of the same day", async () => {
+  const db = await freshDb();
+  // "multi-1" trains all three planned areas and is the better pick for the
+  // morning, so without the day's other cards as an exclude it is exactly what
+  // a midday swap would land on.
+  const lib = [
+    chunk({ id: "multi-1", areas: ["mobility", "heart", "lower"] }),
+    chunk({ id: "mob-2", areas: ["mobility"] }),
+    chunk({ id: "heart-2", areas: ["heart"] }),
+    chunk({ id: "low-2", areas: ["lower"] }),
+  ];
+  const first = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.equal(slotNamed(first, "morning").entryId, "multi-1", "the shared chunk opens the day");
+
+  const dayIds = first.slots.map((item) => item.entryId);
+  const out = await swapSlot(db, { slot: "midday", now: THURSDAY, library: lib });
+  assert.equal(out.refused, false);
+  assert.equal(out.entryId, "mob-2");
+  assert.ok(!dayIds.includes(out.entryId), "the swap stays off every card of the day");
+  const after = await dayCards(db, { now: THURSDAY, library: lib });
+  const ids = after.slots.map((item) => item.entryId);
+  assert.equal(new Set(ids).size, ids.length, "no card of the day repeats");
+});
+
+test("swapping the Now slot updates moves.today; swapping another slot does not", async () => {
+  const db = await freshDb();
+  const lib = swapLibrary();
+  const first = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.equal(first.nowSlot, "evening");
+  const beforeMirror = await readSetting(db, "moves.today");
+  assert.equal(JSON.parse(beforeMirror).entryId, slotNamed(first, "evening").entryId);
+
+  const out = await swapSlot(db, { slot: "evening", now: THURSDAY, library: lib });
+  assert.equal(out.refused, false);
+  const mirror = JSON.parse(await readSetting(db, "moves.today"));
+  assert.equal(mirror.day, DAY);
+  assert.equal(mirror.entryId, out.entryId, "the Now card is the swapped one");
+  assert.equal(mirror.swap, out.swap);
+  assert.deepEqual(mirror.seen, out.seen);
+  assert.deepEqual(mirror.reasons, out.reasons);
+  assert.equal(mirror.why, whyLine(out.reasons));
+
+  const challenge = await todayChallenge(db, { now: THURSDAY, library: lib });
+  assert.equal(challenge.entry.id, out.entryId, "the rest of moves reads the swapped card");
+  assert.equal(challenge.swap, out.swap);
+
+  // A slot that is not the Now card leaves moves.today exactly as it was.
+  const held = await readSetting(db, "moves.today");
+  const morning = await swapSlot(db, { slot: "morning", now: THURSDAY, library: lib });
+  assert.equal(morning.refused, false);
+  assert.equal(await readSetting(db, "moves.today"), held, "another slot's swap leaves the mirror alone");
+});
+
+test("a Done slot is not swapped", async () => {
+  const db = await freshDb();
+  const lib = swapLibrary();
+  await insertRow(db, "moveslot", `${DAY}:morning`);
+  const first = await dayCards(db, { now: THURSDAY, library: lib });
+  const item = slotNamed(first, "morning");
+  assert.equal(item.done, true);
+
+  const before = await snapshot(db);
+  const out = await swapSlot(db, { slot: "morning", now: THURSDAY, library: lib });
+  assert.equal(out.refused, true);
+  assert.equal(out.entryId, item.entryId, "a finished card stays");
+  assert.equal(out.done, true);
+  assert.deepEqual(await snapshot(db), before, "a refused swap writes nothing");
+
+  // A slot that is not done still swaps.
+  const open = await swapSlot(db, { slot: "midday", now: THURSDAY, library: lib });
+  assert.equal(open.refused, false);
+  assert.notEqual(open.entryId, slotNamed(first, "midday").entryId);
+});
+
+test("a swap with nothing else eligible refuses and writes nothing", async () => {
+  const db = await freshDb();
+  // One card a day, and the only chunk there is: the slot has nothing else to
+  // hand out.
+  await writePrefs(db, { cards: 1 });
+  const lib = [chunk({ id: "core-1", areas: ["core"] })];
+  const first = await dayCards(db, { now: THURSDAY, library: lib });
+  const item = slotNamed(first, "midday");
+  assert.equal(item.entryId, "core-1", "the day's one card is the only chunk");
+
+  const before = await snapshot(db);
+  const out = await swapSlot(db, { slot: "midday", now: THURSDAY, library: lib });
+  assert.equal(out.refused, true);
+  assert.equal(out.entryId, "core-1", "the card on screen stays");
+  assert.equal(out.empty, false, "the slot still holds a card");
+  assert.deepEqual(await snapshot(db), before, "nothing was written");
+});
+
+test("a junk slot name, or a slot the day's card count left out, refuses", async () => {
+  const db = await freshDb();
+  const lib = swapLibrary();
+  await dayCards(db, { now: THURSDAY, library: lib });
+
+  const before = await snapshot(db);
+  for (const slot of ["nope", "", null, undefined, "Morning"]) {
+    const out = await swapSlot(db, { slot, now: THURSDAY, library: lib });
+    assert.equal(out.refused, true, "refused: " + String(slot));
+    assert.equal(out.empty, true);
+    assert.equal(out.day, DAY);
+    assert.equal(out.slot, slot);
+  }
+  assert.deepEqual(await snapshot(db), before, "a refused slot writes nothing");
+
+  // One card a day is the midday; the morning is not part of the day at all.
+  const one = await freshDb();
+  await writePrefs(one, { cards: 1 });
+  const drawn = await dayCards(one, { now: THURSDAY, library: lib });
+  assert.deepEqual(drawn.slots.map((item) => item.slot), ["midday"]);
+  const oneBefore = await snapshot(one);
+  const out = await swapSlot(one, { slot: "morning", now: THURSDAY, library: lib });
+  assert.equal(out.refused, true);
+  assert.equal(out.empty, true);
+  assert.deepEqual(await snapshot(one), oneBefore, "a slot outside the day writes nothing");
+
+  // The day's own slot still swaps.
+  const midday = await swapSlot(one, { slot: "midday", now: THURSDAY, library: lib });
+  assert.equal(midday.refused, false);
+  assert.equal(midday.swap, 1);
+});
+
+test("a swap leaves the day's card count and its other cards alone", async () => {
+  const db = await freshDb();
+  const lib = swapLibrary();
+  const first = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.equal(await rowDelta(db, MOVE_NEED_KIND, DAY), 3);
+
+  await swapSlot(db, { slot: "midday", now: THURSDAY, library: lib });
+  assert.equal(await rowDelta(db, MOVE_NEED_KIND, DAY), 3, "moveneed is untouched");
+
+  const after = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.equal(after.need, first.need);
+  assert.deepEqual(after.slots.map((item) => item.slot), first.slots.map((item) => item.slot));
+  for (const item of after.slots) {
+    if (item.slot === "midday") continue;
+    assert.equal(item.entryId, slotNamed(first, item.slot).entryId, "untouched: " + item.slot);
+  }
+});
+
+test("a limit set after the pick is re-picked first, and the slot still swaps", async () => {
+  const db = await freshDb();
+  const lib = [
+    chunk({ id: "knee-1", areas: ["mobility"], skipIf: ["knee"] }),
+    chunk({ id: "mob-2", areas: ["mobility"] }),
+    chunk({ id: "mob-3", areas: ["mobility"] }),
+    chunk({ id: "mob-4", areas: ["mobility"] }),
+    chunk({ id: "heart-2", areas: ["heart"] }),
+    chunk({ id: "low-2", areas: ["lower"] }),
+  ];
+  await writeSetting(db, SLOT_KEY_PREFIX + "morning", JSON.stringify({
+    day: DAY, entryId: "knee-1", area: "mobility", reasons: ["slot:early"], swap: 0, seen: ["knee-1"],
+  }));
+
+  // No limit yet: the stored card is kept.
+  const kept = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.equal(slotNamed(kept, "morning").entryId, "knee-1");
+
+  await writePrefs(db, { limits: ["knee"] });
+  const out = await swapSlot(db, { slot: "morning", now: THURSDAY, library: lib });
+  assert.equal(out.refused, false, "the slot still swaps");
+  assert.equal(out.swap, 1, "the re-pick kept the day's swap count");
+  assert.notEqual(out.entryId, "knee-1", "the limited card is never offered");
+  assert.ok(entryById(lib, out.entryId), "the swapped card is a real chunk");
+  assert.ok(!entryById(lib, out.entryId).skipIf.includes("knee"));
+  assert.ok(out.seen.includes("knee-1"), "the replaced card stays on the seen list");
 });
 
 /* --------------------------------------------------------------- the week */
