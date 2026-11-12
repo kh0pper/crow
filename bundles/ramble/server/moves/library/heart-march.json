@@ -1,0 +1,157 @@
+{
+  "id": "heart-march",
+  "kind": "pose",
+  "title": "March on the spot",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "indoor-heart",
+    "low-impact",
+    "standing",
+    "marching"
+  ],
+  "areas": [
+    "heart"
+  ],
+  "steps": [
+    {
+      "text": "Stand tall and start marching on the spot.",
+      "cue": "March on the spot.",
+      "at": 0
+    },
+    {
+      "text": "Lift your knees to a comfortable height and put each foot down softly.",
+      "cue": "Knees to a comfortable height. Soft feet.",
+      "at": 1
+    },
+    {
+      "text": "Bend your elbows and swing your arms in time with your legs.",
+      "cue": "Elbows bent. Arms swing in time.",
+      "at": 1
+    },
+    {
+      "text": "You should be able to talk, but feel warmer and breathe a little faster.",
+      "cue": "You can still talk, and you feel warmer.",
+      "at": 1
+    }
+  ],
+  "works": [
+    "Legs",
+    "Heart and lungs"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Stamping the feet down.",
+    "Leaning back as the knees come up."
+  ],
+  "regression": "Take smaller steps, or sit on a sturdy chair and march your feet.",
+  "stopIf": "Stop if you feel dizzy, sick, very short of breath, or any pain in your chest.",
+  "skipIf": [],
+  "easier": null,
+  "harder": "heart-knee-lifts",
+  "pose": {
+    "neck": 0,
+    "spine": 0,
+    "shoulderL": 30,
+    "elbowL": 70,
+    "wristL": 0,
+    "shoulderR": -20,
+    "elbowR": 70,
+    "wristR": 0,
+    "hipL": 0,
+    "kneeL": 0,
+    "ankleL": 0,
+    "hipR": 70,
+    "kneeR": 80,
+    "ankleR": -10,
+    "rootAngle": 0,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": -20,
+      "elbowL": 70,
+      "wristL": 0,
+      "shoulderR": 25,
+      "elbowR": 70,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 30,
+      "elbowL": 70,
+      "wristL": 0,
+      "shoulderR": -20,
+      "elbowR": 70,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 70,
+      "kneeR": 80,
+      "ankleR": -10,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "hip-flexors",
+        "quadriceps",
+        "calf"
+      ],
+      "lengthening": [],
+      "main": "hip-flexors",
+      "bones": [
+        "hip-bone",
+        "femur",
+        "tibia"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "knees",
+          "direction": "up",
+          "label": "Lift"
+        }
+      ],
+      "why": "Lifting the knees in turn keeps the big leg muscles busy, which gently raises your breathing."
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

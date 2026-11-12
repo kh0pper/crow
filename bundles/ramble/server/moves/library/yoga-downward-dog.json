@@ -14,12 +14,36 @@
     "shoulders",
     "hamstrings"
   ],
+  "areas": [
+    "mobility",
+    "upper"
+  ],
   "steps": [
-    "Start on your hands and knees with your hands slightly ahead of your shoulders.",
-    "Lift your hips up and back and straighten your arms.",
-    "Bend your knees as much as you need and let your heels lift.",
-    "Press the mat away and keep your neck long.",
-    "Hold for a few breaths, then lower your knees down."
+    {
+      "text": "Start on your hands and knees with your hands slightly ahead of your shoulders.",
+      "cue": "Hands and knees, hands a little ahead.",
+      "at": 0
+    },
+    {
+      "text": "Lift your hips up and back and straighten your arms.",
+      "cue": "Lift your hips up and back.",
+      "at": 0
+    },
+    {
+      "text": "Bend your knees as much as you need and let your heels lift.",
+      "cue": "Bend your knees as much as you need.",
+      "at": 0
+    },
+    {
+      "text": "Press the mat away and keep your neck long.",
+      "cue": "Press the mat away. Neck long.",
+      "at": 0
+    },
+    {
+      "text": "Hold for a few breaths, then lower your knees down.",
+      "cue": "Hold and breathe, then lower your knees.",
+      "at": 0
+    }
   ],
   "works": [
     "Shoulders",
@@ -35,6 +59,8 @@
     "Letting the shoulders creep up toward the ears.",
     "Locking the knees to force the heels down."
   ],
+  "regression": "Keep your knees deeply bent, or do the halfway lift instead.",
+  "stopIf": "Come down if you feel dizzy or your wrists or shoulders hurt.",
   "skipIf": [
     "wrist",
     "shoulder",
@@ -42,14 +68,6 @@
   ],
   "easier": "yoga-halfway-lift",
   "harder": "yoga-plank",
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": 20,
     "spine": 5,
@@ -67,5 +85,61 @@
     "ankleR": 15,
     "rootAngle": 140,
     "support": "hands_feet"
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "shoulders",
+        "triceps",
+        "serratus",
+        "quadriceps"
+      ],
+      "lengthening": [
+        "hamstrings",
+        "calf",
+        "lats"
+      ],
+      "main": "hamstrings",
+      "bones": [
+        "humerus",
+        "scapula",
+        "femur",
+        "tibia",
+        "calcaneus"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "down",
+          "label": "Press"
+        },
+        {
+          "from": "hips",
+          "direction": "up",
+          "label": "Lift"
+        }
+      ],
+      "why": "The arms and shoulders push the floor away, which sends the hips up and lengthens the back of the legs."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

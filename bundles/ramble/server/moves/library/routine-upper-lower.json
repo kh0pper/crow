@@ -1,0 +1,150 @@
+{
+  "id": "routine-upper-lower",
+  "kind": "routine",
+  "title": "Arms and legs",
+  "minutes": 12,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "wall"
+  ],
+  "tags": [
+    "upper",
+    "lower",
+    "routine"
+  ],
+  "areas": [
+    "upper",
+    "lower"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
+  "steps": [
+    "Warm up for two minutes.",
+    "Do each exercise for the time shown, resting between them, then go through them a second time.",
+    "Cool down for two minutes.",
+    "Stop any exercise that hurts and use its easier version."
+  ],
+  "works": [
+    "Arms",
+    "Chest",
+    "Glutes",
+    "Legs",
+    "Shoulders",
+    "Upper back"
+  ],
+  "stretches": [
+    "Back of the thigh",
+    "Calves",
+    "Chest",
+    "Side of the back",
+    "Side of the waist"
+  ],
+  "mistakes": [
+    "Skipping the warm-up or the cool-down.",
+    "Rushing the reps to beat the clock."
+  ],
+  "skipIf": [
+    "knee",
+    "shoulder",
+    "wrist",
+    "hip",
+    "balance"
+  ],
+  "easier": null,
+  "harder": null,
+  "blocks": {
+    "warmup": [
+      {
+        "id": "heart-march",
+        "seconds": 30
+      },
+      {
+        "id": "warm-heel-digs",
+        "seconds": 30
+      },
+      {
+        "id": "heart-knee-lifts",
+        "seconds": 30
+      },
+      {
+        "id": "warm-knee-bends",
+        "seconds": 30
+      }
+    ],
+    "main": [
+      {
+        "id": "body-wall-push-up",
+        "seconds": 60,
+        "restSeconds": 20
+      },
+      {
+        "id": "body-squat",
+        "seconds": 60,
+        "restSeconds": 20
+      },
+      {
+        "id": "body-wall-angel",
+        "seconds": 60,
+        "restSeconds": 20
+      }
+    ],
+    "cooldown": [
+      {
+        "id": "cool-calf-stretch",
+        "seconds": 40
+      },
+      {
+        "id": "cool-side-bend",
+        "seconds": 30
+      },
+      {
+        "id": "yoga-mountain",
+        "seconds": 50
+      }
+    ]
+  },
+  "usesBlocks": {
+    "warmup": "warmup-2",
+    "cooldown": "cooldown-1"
+  },
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "NHS: Strength exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "Cleveland Clinic: posture exercises (wall angels)",
+      "url": "https://health.clevelandclinic.org/posture-exercises",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    },
+    {
+      "title": "NHS: How to stretch after exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-stretch-after-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: Flexibility exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/flexibility-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

@@ -1,0 +1,96 @@
+{
+  "id": "yoga-flow-shoulders",
+  "kind": "flow",
+  "title": "Shoulders flow",
+  "minutes": 10,
+  "level": 1,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "shoulders",
+    "standing",
+    "desk"
+  ],
+  "areas": [
+    "mobility"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
+  "steps": [
+    "Move through the poses in the order listed, one side at a time where the pose is one-sided.",
+    "Hold each pose for the time given and keep your breathing even.",
+    "Go through the whole flow twice. The first time is your warm-up, so keep it easy.",
+    "Finish in the last pose for a few slow breaths."
+  ],
+  "works": [
+    "Upper back",
+    "Shoulders"
+  ],
+  "stretches": [
+    "Chest",
+    "Neck",
+    "Side of the waist"
+  ],
+  "mistakes": [
+    "Pushing into a pose further than is comfortable.",
+    "Holding your breath in the harder poses."
+  ],
+  "skipIf": [
+    "neck",
+    "shoulder"
+  ],
+  "easier": null,
+  "harder": null,
+  "flow": [
+    {
+      "id": "yoga-mountain",
+      "holdSeconds": 30
+    },
+    {
+      "id": "warm-shoulder-rolls",
+      "holdSeconds": 60
+    },
+    {
+      "id": "cool-chest-stretch",
+      "holdSeconds": 50
+    },
+    {
+      "id": "cool-neck-turn",
+      "holdSeconds": 25
+    },
+    {
+      "id": "cool-side-bend",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-mountain",
+      "holdSeconds": 50
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: Sitting exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/sitting-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: Flexibility exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/flexibility-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

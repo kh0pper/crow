@@ -15,12 +15,34 @@
     "push",
     "starter"
   ],
+  "areas": [
+    "upper"
+  ],
+  "sets": 2,
+  "reps": 10,
+  "tempoSeconds": 5,
+  "perSide": false,
   "steps": [
-    "Stand an arm's length from a wall and place both palms on it at shoulder height.",
-    "Walk your feet back a little so your body is in one straight line.",
-    "Bend your elbows to bring your chest toward the wall.",
-    "Push back out to straight arms.",
-    "Do 2 sets of 10."
+    {
+      "text": "Stand an arm's length from a wall and place both palms on it at shoulder height.",
+      "cue": "Palms on the wall at shoulder height.",
+      "at": 0
+    },
+    {
+      "text": "Walk your feet back a little so your body is in one straight line.",
+      "cue": "Feet back a little, body in one line.",
+      "at": 0
+    },
+    {
+      "text": "Bend your elbows to bring your chest toward the wall.",
+      "cue": "Bend your elbows. Chest toward the wall.",
+      "at": 1
+    },
+    {
+      "text": "Push back out to straight arms.",
+      "cue": "Push back to straight arms.",
+      "at": 0
+    }
   ],
   "works": [
     "Chest",
@@ -34,17 +56,91 @@
     "Letting your hips sag toward the wall.",
     "Shrugging your shoulders up as you bend your elbows."
   ],
+  "regression": "Stand closer to the wall.",
+  "stopIf": "Stop if you feel pain in your wrists or shoulders.",
   "skipIf": [
     "wrist",
     "shoulder"
   ],
   "easier": null,
   "harder": "band-chest-press",
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 102,
+      "elbowL": 5,
+      "wristL": -60,
+      "shoulderR": 102,
+      "elbowR": 5,
+      "wristR": -60,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 12,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 12,
+      "rootAngle": 12,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 62,
+      "elbowL": 100,
+      "wristL": -60,
+      "shoulderR": 62,
+      "elbowR": 100,
+      "wristR": -60,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 20,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 20,
+      "rootAngle": 22,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "chest",
+        "triceps",
+        "shoulders",
+        "serratus"
+      ],
+      "lengthening": [],
+      "main": "chest",
+      "bones": [
+        "humerus",
+        "scapula",
+        "clavicle",
+        "radius",
+        "ulna"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "forward",
+          "label": "Press"
+        }
+      ],
+      "why": "The chest and the back of the arms push the wall away; the side of the ribs keeps the shoulder blades flat."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

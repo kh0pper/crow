@@ -15,12 +15,34 @@
     "pull",
     "strength"
   ],
+  "areas": [
+    "upper"
+  ],
+  "sets": 2,
+  "reps": 10,
+  "tempoSeconds": 6,
+  "perSide": false,
   "steps": [
-    "Loop the band around a sturdy anchor at waist height, or around both feet while seated.",
-    "Hold one end in each hand and sit or stand tall with your arms long.",
-    "Pull both hands toward your ribs and squeeze your shoulder blades together.",
-    "Pause for a breath, then return slowly.",
-    "Do 2 sets of 10."
+    {
+      "text": "Loop the band around a sturdy anchor at waist height, or around both feet while seated.",
+      "cue": "Anchor the band at waist height, or round your feet.",
+      "at": 0
+    },
+    {
+      "text": "Hold one end in each hand and sit or stand tall with your arms long.",
+      "cue": "Sit or stand tall, arms long.",
+      "at": 0
+    },
+    {
+      "text": "Pull both hands toward your ribs and squeeze your shoulder blades together.",
+      "cue": "Pull to your ribs. Squeeze your shoulder blades.",
+      "at": 1
+    },
+    {
+      "text": "Pause for a breath, then return slowly.",
+      "cue": "Pause, then return slowly.",
+      "at": 0
+    }
   ],
   "works": [
     "Upper back",
@@ -33,16 +55,91 @@
     "Shrugging your shoulders up toward your ears.",
     "Letting the band snap back instead of returning slowly."
   ],
+  "regression": "Use a lighter band, or sit closer to the anchor.",
+  "stopIf": "Stop if you feel pain in your shoulders or lower back.",
   "skipIf": [
     "shoulder"
   ],
   "easier": "band-pull-apart",
   "harder": null,
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 70,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 70,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 4,
+      "kneeL": 8,
+      "ankleL": 4,
+      "hipR": 4,
+      "kneeR": 8,
+      "ankleR": 4,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": -30,
+      "elbowL": 110,
+      "wristL": 0,
+      "shoulderR": -30,
+      "elbowR": 110,
+      "wristR": 0,
+      "hipL": 4,
+      "kneeL": 8,
+      "ankleL": 4,
+      "hipR": 4,
+      "kneeR": 8,
+      "ankleR": 4,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "rhomboids",
+        "trapezius",
+        "lats",
+        "teres-major",
+        "biceps"
+      ],
+      "lengthening": [
+        "chest"
+      ],
+      "main": "rhomboids",
+      "bones": [
+        "scapula",
+        "humerus",
+        "thoracic-spine"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "elbows",
+          "direction": "back",
+          "label": "Pull"
+        }
+      ],
+      "why": "The upper back draws the shoulder blades together while the arms bend to pull."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

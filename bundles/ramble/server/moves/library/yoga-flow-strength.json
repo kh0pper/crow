@@ -14,8 +14,15 @@
     "full-body",
     "standing"
   ],
+  "areas": [
+    "lower",
+    "mobility"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
   "steps": [
     "Move through the poses in the order listed and hold each for the time given.",
+    "Go through the whole flow twice.",
     "Keep your breathing steady and rest in child's pose whenever you need to.",
     "Finish lying still for a few breaths before you get up."
   ],
@@ -43,6 +50,36 @@
   ],
   "easier": null,
   "harder": null,
+  "flow": [
+    {
+      "id": "yoga-plank",
+      "holdSeconds": 40
+    },
+    {
+      "id": "yoga-cobra",
+      "holdSeconds": 40
+    },
+    {
+      "id": "yoga-downward-dog",
+      "holdSeconds": 50
+    },
+    {
+      "id": "yoga-high-lunge",
+      "holdSeconds": 50
+    },
+    {
+      "id": "yoga-warrior-two",
+      "holdSeconds": 60
+    },
+    {
+      "id": "yoga-bridge",
+      "holdSeconds": 50
+    },
+    {
+      "id": "yoga-child",
+      "holdSeconds": 50
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
@@ -50,35 +87,5 @@
       "license": "MIT (this repository)"
     }
   ],
-  "reviewed": true,
-  "flow": [
-    {
-      "id": "yoga-plank",
-      "holdSeconds": 60
-    },
-    {
-      "id": "yoga-cobra",
-      "holdSeconds": 60
-    },
-    {
-      "id": "yoga-downward-dog",
-      "holdSeconds": 75
-    },
-    {
-      "id": "yoga-high-lunge",
-      "holdSeconds": 75
-    },
-    {
-      "id": "yoga-warrior-two",
-      "holdSeconds": 90
-    },
-    {
-      "id": "yoga-bridge",
-      "holdSeconds": 75
-    },
-    {
-      "id": "yoga-child",
-      "holdSeconds": 60
-    }
-  ]
+  "reviewed": true
 }

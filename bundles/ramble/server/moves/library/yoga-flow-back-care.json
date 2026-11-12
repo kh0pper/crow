@@ -1,0 +1,95 @@
+{
+  "id": "yoga-flow-back-care",
+  "kind": "flow",
+  "title": "Back care flow",
+  "minutes": 10,
+  "level": 1,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "back",
+    "gentle"
+  ],
+  "areas": [
+    "mobility"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
+  "steps": [
+    "Move through the poses in the order listed, one side at a time where the pose is one-sided.",
+    "Hold each pose for the time given and keep your breathing even.",
+    "Go through the whole flow twice. The first time is your warm-up, so keep it easy.",
+    "Finish in the last pose for a few slow breaths."
+  ],
+  "works": [
+    "Back",
+    "Core"
+  ],
+  "stretches": [
+    "Back",
+    "Chest",
+    "Side of the waist"
+  ],
+  "mistakes": [
+    "Pushing into a pose further than is comfortable.",
+    "Holding your breath in the harder poses."
+  ],
+  "skipIf": [
+    "knee",
+    "shoulder",
+    "wrist"
+  ],
+  "easier": null,
+  "harder": null,
+  "flow": [
+    {
+      "id": "yoga-mountain",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-cat",
+      "holdSeconds": 45
+    },
+    {
+      "id": "yoga-cow",
+      "holdSeconds": 45
+    },
+    {
+      "id": "yoga-child",
+      "holdSeconds": 60
+    },
+    {
+      "id": "cool-side-bend",
+      "holdSeconds": 30
+    },
+    {
+      "id": "cool-chest-stretch",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-mountain",
+      "holdSeconds": 30
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "NHS: Flexibility exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/flexibility-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: Sitting exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/sitting-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

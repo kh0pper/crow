@@ -15,12 +15,34 @@
     "hips",
     "core"
   ],
+  "areas": [
+    "lower"
+  ],
+  "sets": 2,
+  "reps": 10,
+  "tempoSeconds": 6,
+  "perSide": false,
   "steps": [
-    "Lie on your back with your knees bent and your feet flat, hip-width apart.",
-    "Rest your arms along your sides.",
-    "Push through your feet and lift your hips until your body makes a straight line.",
-    "Hold for one breath, then lower slowly.",
-    "Do 2 sets of 10."
+    {
+      "text": "Lie on your back with your knees bent and your feet flat, hip-width apart.",
+      "cue": "Lie on your back, knees bent, feet flat.",
+      "at": 0
+    },
+    {
+      "text": "Rest your arms along your sides.",
+      "cue": "Arms along your sides.",
+      "at": 0
+    },
+    {
+      "text": "Push through your feet and lift your hips until your body makes a straight line.",
+      "cue": "Push through your feet. Lift your hips.",
+      "at": 1
+    },
+    {
+      "text": "Hold for one breath, then lower slowly.",
+      "cue": "Hold one breath, then lower slowly.",
+      "at": 1
+    }
   ],
   "works": [
     "Glutes",
@@ -34,17 +56,89 @@
     "Arching your lower back at the top.",
     "Pushing through your toes instead of your heels."
   ],
+  "regression": "Lift your hips only a little way.",
+  "stopIf": "Stop if you feel pain in your lower back or a cramp in the back of your thigh.",
   "skipIf": [
     "lower_back",
     "hip"
   ],
   "easier": null,
   "harder": "band-glute-bridge",
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 45,
+      "kneeL": 100,
+      "ankleL": -35,
+      "hipR": 45,
+      "kneeR": 100,
+      "ankleR": -35,
+      "rootAngle": -90,
+      "support": "feet"
+    },
+    {
+      "neck": 15,
+      "spine": 0,
+      "shoulderL": -33,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": -33,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": -17,
+      "kneeL": 101,
+      "ankleL": 0,
+      "hipR": -17,
+      "kneeR": 101,
+      "ankleR": 0,
+      "rootAngle": -118,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "glutes",
+        "hamstrings"
+      ],
+      "lengthening": [
+        "hip-flexors"
+      ],
+      "main": "glutes",
+      "bones": [
+        "hip-bone",
+        "femur",
+        "lumbar-spine"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hips",
+          "direction": "up",
+          "label": "Lift"
+        }
+      ],
+      "why": "The buttock muscles straighten the hips, helped by the back of the thigh."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

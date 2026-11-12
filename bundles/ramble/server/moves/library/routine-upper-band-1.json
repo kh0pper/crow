@@ -1,0 +1,134 @@
+{
+  "id": "routine-upper-band-1",
+  "kind": "routine",
+  "title": "Band arms and chest",
+  "minutes": 12,
+  "level": 1,
+  "indoor": true,
+  "activity": "band",
+  "equipment": [
+    "band"
+  ],
+  "tags": [
+    "upper",
+    "routine"
+  ],
+  "areas": [
+    "upper"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
+  "steps": [
+    "Warm up for two minutes.",
+    "Do each exercise for the time shown, resting between them, then go through them a second time.",
+    "Cool down for two minutes.",
+    "Stop any exercise that hurts and use its easier version."
+  ],
+  "works": [
+    "Arms",
+    "Chest",
+    "Shoulders",
+    "Upper back"
+  ],
+  "stretches": [
+    "Back of the thigh",
+    "Chest",
+    "Front of the shoulders",
+    "Neck",
+    "Side of the back",
+    "Side of the waist"
+  ],
+  "mistakes": [
+    "Skipping the warm-up or the cool-down.",
+    "Rushing the reps to beat the clock."
+  ],
+  "skipIf": [
+    "neck",
+    "shoulder"
+  ],
+  "easier": null,
+  "harder": null,
+  "blocks": {
+    "warmup": [
+      {
+        "id": "heart-march",
+        "seconds": 45
+      },
+      {
+        "id": "warm-shoulder-rolls",
+        "seconds": 35
+      },
+      {
+        "id": "warm-heel-digs",
+        "seconds": 40
+      }
+    ],
+    "main": [
+      {
+        "id": "band-pull-apart",
+        "seconds": 60,
+        "restSeconds": 20
+      },
+      {
+        "id": "band-chest-press",
+        "seconds": 60,
+        "restSeconds": 20
+      },
+      {
+        "id": "band-bicep-curl",
+        "seconds": 60,
+        "restSeconds": 20
+      }
+    ],
+    "cooldown": [
+      {
+        "id": "yoga-mountain",
+        "seconds": 30
+      },
+      {
+        "id": "cool-chest-stretch",
+        "seconds": 30
+      },
+      {
+        "id": "cool-neck-turn",
+        "seconds": 30
+      },
+      {
+        "id": "cool-side-bend",
+        "seconds": 30
+      }
+    ]
+  },
+  "usesBlocks": {
+    "warmup": "warmup-1",
+    "cooldown": "cooldown-3"
+  },
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    },
+    {
+      "title": "NHS: Sitting exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/sitting-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: Flexibility exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/flexibility-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

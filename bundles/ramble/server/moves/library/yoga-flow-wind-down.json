@@ -1,0 +1,94 @@
+{
+  "id": "yoga-flow-wind-down",
+  "kind": "flow",
+  "title": "Wind-down flow",
+  "minutes": 10,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "evening",
+    "floor",
+    "gentle"
+  ],
+  "areas": [
+    "mobility"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
+  "steps": [
+    "Move through the poses in the order listed, one side at a time where the pose is one-sided.",
+    "Hold each pose for the time given and keep your breathing even.",
+    "Go through the whole flow twice. The first time is your warm-up, so keep it easy.",
+    "Finish in the last pose for a few slow breaths."
+  ],
+  "works": [
+    "Back"
+  ],
+  "stretches": [
+    "Back",
+    "Hips",
+    "Hamstrings",
+    "Neck"
+  ],
+  "mistakes": [
+    "Pushing into a pose further than is comfortable.",
+    "Holding your breath in the harder poses."
+  ],
+  "skipIf": [
+    "knee",
+    "lower_back",
+    "neck",
+    "wrist",
+    "hip"
+  ],
+  "easier": null,
+  "harder": null,
+  "flow": [
+    {
+      "id": "yoga-cat",
+      "holdSeconds": 40
+    },
+    {
+      "id": "yoga-cow",
+      "holdSeconds": 40
+    },
+    {
+      "id": "yoga-child",
+      "holdSeconds": 60
+    },
+    {
+      "id": "yoga-seated-forward-fold",
+      "holdSeconds": 60
+    },
+    {
+      "id": "cool-neck-turn",
+      "holdSeconds": 20
+    },
+    {
+      "id": "yoga-child",
+      "holdSeconds": 60
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "NHS: Flexibility exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/flexibility-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: Sitting exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/sitting-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

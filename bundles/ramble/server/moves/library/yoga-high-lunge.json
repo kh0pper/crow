@@ -14,11 +14,33 @@
     "standing",
     "balance"
   ],
+  "areas": [
+    "lower",
+    "mobility"
+  ],
+  "perSide": true,
   "steps": [
-    "From a low lunge, tuck your back toes and lift the back knee off the mat.",
-    "Keep the front knee above the ankle and press through the back foot.",
-    "Reach both arms up and lengthen through the whole body.",
-    "Hold for a few breaths, then lower the back knee and change sides."
+    {
+      "text": "From a low lunge, tuck your back toes and lift the back knee off the mat.",
+      "cue": "From a low lunge, tuck your toes and lift the back knee.",
+      "at": 0
+    },
+    {
+      "text": "Keep the front knee above the ankle and press through the back foot.",
+      "cue": "Front knee over the ankle. Press the back foot.",
+      "at": 0
+    },
+    {
+      "text": "Reach both arms up and lengthen through the whole body.",
+      "cue": "Reach both arms up. Grow long.",
+      "at": 0
+    },
+    {
+      "text": "Hold for a few breaths, then lower the back knee and change sides.",
+      "cue": "Hold and breathe, then lower the back knee.",
+      "say": "Hold for a few breaths, then lower the back knee.",
+      "at": 0
+    }
   ],
   "works": [
     "Legs",
@@ -33,6 +55,8 @@
     "Letting the front knee drift past the toes.",
     "Arching the lower back to reach higher."
   ],
+  "regression": "Lower the back knee to the mat.",
+  "stopIf": "Come out if your front knee hurts or you feel unsteady.",
   "skipIf": [
     "knee",
     "balance",
@@ -40,14 +64,6 @@
   ],
   "easier": "yoga-low-lunge",
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": 0,
     "spine": 5,
@@ -65,5 +81,47 @@
     "ankleR": 20,
     "rootAngle": 10,
     "support": "feet"
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "quadriceps",
+        "glutes",
+        "calf"
+      ],
+      "lengthening": [
+        "hip-flexors"
+      ],
+      "main": "quadriceps",
+      "bones": [
+        "femur",
+        "tibia",
+        "patella",
+        "hip-bone"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hips",
+          "direction": "down",
+          "label": "Sink"
+        }
+      ],
+      "why": "The front thigh holds your weight while the front of the back hip opens."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

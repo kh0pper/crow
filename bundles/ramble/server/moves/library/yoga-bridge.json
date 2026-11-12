@@ -14,11 +14,30 @@
     "back",
     "strength"
   ],
+  "areas": [
+    "lower"
+  ],
   "steps": [
-    "Lie on your back with your knees bent and your feet flat on the mat.",
-    "Keep your feet hip-width apart and your arms beside you.",
-    "Press through your feet and lift your hips a small amount.",
-    "Hold for a couple of breaths, then lower your hips slowly."
+    {
+      "text": "Lie on your back with your knees bent and your feet flat on the mat.",
+      "cue": "Lie on your back, knees bent, feet flat.",
+      "at": 0
+    },
+    {
+      "text": "Keep your feet hip-width apart and your arms beside you.",
+      "cue": "Feet hip-width, arms beside you.",
+      "at": 0
+    },
+    {
+      "text": "Press through your feet and lift your hips a small amount.",
+      "cue": "Press through your feet. Lift your hips a little.",
+      "at": 0
+    },
+    {
+      "text": "Hold for a couple of breaths, then lower your hips slowly.",
+      "cue": "Hold, then lower your hips slowly.",
+      "at": 0
+    }
   ],
   "works": [
     "Glutes",
@@ -32,20 +51,14 @@
     "Pushing the hips higher than feels comfortable for the lower back.",
     "Letting the knees splay outward."
   ],
+  "regression": "Lift your hips only a few centimetres.",
+  "stopIf": "Come down if you feel pain in your lower back or neck.",
   "skipIf": [
     "lower_back",
     "neck"
   ],
   "easier": null,
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": 15,
     "spine": 0,
@@ -63,5 +76,54 @@
     "ankleR": 0,
     "rootAngle": -118,
     "support": "feet"
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "glutes",
+        "hamstrings",
+        "back-extensors"
+      ],
+      "lengthening": [
+        "hip-flexors",
+        "abdominals",
+        "chest"
+      ],
+      "main": "glutes",
+      "bones": [
+        "hip-bone",
+        "femur",
+        "lumbar-spine",
+        "thoracic-spine"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hips",
+          "direction": "up",
+          "label": "Lift"
+        }
+      ],
+      "why": "The buttocks and the back of the thighs lift the hips, which opens the front of the body."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.3 Axial muscles of the head, neck and back",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-3-axial-muscles-of-the-head-neck-and-back",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

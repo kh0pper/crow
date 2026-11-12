@@ -1,0 +1,158 @@
+{
+  "id": "cool-chest-stretch",
+  "kind": "pose",
+  "title": "Standing chest stretch",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "cool-down",
+    "standing",
+    "stretch",
+    "shoulders"
+  ],
+  "areas": [
+    "mobility"
+  ],
+  "steps": [
+    {
+      "text": "Stand tall with your shoulders relaxed.",
+      "cue": "Stand tall, shoulders relaxed.",
+      "at": 0
+    },
+    {
+      "text": "Reach your arms back and out to the sides, a little away from your body, with your thumbs turned out.",
+      "cue": "Arms back and out, thumbs turned out.",
+      "at": 1
+    },
+    {
+      "text": "Gently lift your chest forward and up until you feel a stretch across it.",
+      "cue": "Lift your chest. Feel it open.",
+      "at": 1
+    },
+    {
+      "text": "Hold and breathe slowly. Keep your chin level.",
+      "cue": "Hold and breathe. Chin level.",
+      "at": 1
+    }
+  ],
+  "works": [
+    "Upper back"
+  ],
+  "stretches": [
+    "Chest",
+    "Front of the shoulders"
+  ],
+  "mistakes": [
+    "Arching the lower back to get further.",
+    "Pushing the chin forward."
+  ],
+  "regression": "Keep your hands on your hips and just draw your elbows back a little.",
+  "stopIf": "Stop if you feel pinching in your shoulders, or tingling in your arms.",
+  "skipIf": [
+    "shoulder"
+  ],
+  "easier": null,
+  "harder": null,
+  "pose": {
+    "neck": 0,
+    "spine": -6,
+    "shoulderL": -35,
+    "elbowL": 10,
+    "wristL": 0,
+    "shoulderR": -35,
+    "elbowR": 10,
+    "wristR": 0,
+    "hipL": 0,
+    "kneeL": 0,
+    "ankleL": 0,
+    "hipR": 0,
+    "kneeR": 0,
+    "ankleR": 0,
+    "rootAngle": 0,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": -6,
+      "shoulderL": -35,
+      "elbowL": 10,
+      "wristL": 0,
+      "shoulderR": -35,
+      "elbowR": 10,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "rhomboids"
+      ],
+      "lengthening": [
+        "chest",
+        "shoulders"
+      ],
+      "main": "chest",
+      "bones": [
+        "scapula",
+        "humerus",
+        "clavicle",
+        "sternum"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "elbows",
+          "direction": "back",
+          "label": "Open"
+        }
+      ],
+      "why": "Drawing the shoulder blades together lengthens the chest muscles across the front."
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: Sitting exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/sitting-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

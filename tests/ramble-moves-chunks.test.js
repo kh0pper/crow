@@ -31,6 +31,7 @@ function base(over = {}) {
     activity: "yoga",
     equipment: ["none"],
     tags: [],
+    areas: ["mobility"],
     steps: ["Stand tall."],
     works: [],
     stretches: [],

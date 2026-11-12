@@ -14,12 +14,35 @@
     "seated",
     "fold"
   ],
+  "areas": [
+    "mobility"
+  ],
   "steps": [
-    "Sit on the mat with your legs straight in front of you.",
-    "Bend your knees a little and sit up tall on your sitting bones.",
-    "Fold forward from your hips and rest your hands wherever they reach.",
-    "Keep your neck long and breathe slowly.",
-    "Come up slowly, one bit at a time."
+    {
+      "text": "Sit on the mat with your legs straight in front of you.",
+      "cue": "Sit with your legs straight in front of you.",
+      "at": 0
+    },
+    {
+      "text": "Bend your knees a little and sit up tall on your sitting bones.",
+      "cue": "Soft knees. Sit up tall.",
+      "at": 0
+    },
+    {
+      "text": "Fold forward from your hips and rest your hands wherever they reach.",
+      "cue": "Fold from your hips. Hands wherever they reach.",
+      "at": 0
+    },
+    {
+      "text": "Keep your neck long and breathe slowly.",
+      "cue": "Neck long. Breathe slowly.",
+      "at": 0
+    },
+    {
+      "text": "Come up slowly, one bit at a time.",
+      "cue": "Come up slowly, a bit at a time.",
+      "at": 0
+    }
   ],
   "works": [
     "Back"
@@ -33,20 +56,14 @@
     "Rounding the back to reach the feet.",
     "Bouncing to get deeper."
   ],
+  "regression": "Sit on a folded blanket and bend your knees more.",
+  "stopIf": "Come up if you feel pain in your lower back or behind your knees.",
   "skipIf": [
     "lower_back",
     "hip"
   ],
   "easier": "yoga-forward-fold",
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": 15,
     "elbowL": 0,
@@ -64,5 +81,52 @@
     "ankleR": 20,
     "hipR": 120,
     "shoulderR": 124
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "hip-flexors"
+      ],
+      "lengthening": [
+        "hamstrings",
+        "back-extensors",
+        "calf"
+      ],
+      "main": "hamstrings",
+      "bones": [
+        "femur",
+        "tibia",
+        "hip-bone",
+        "lumbar-spine"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "chest",
+          "direction": "forward",
+          "label": "Fold"
+        }
+      ],
+      "why": "Tipping forward from the hips lengthens the back of the thighs."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.3 Axial muscles of the head, neck and back",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-3-axial-muscles-of-the-head-neck-and-back",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

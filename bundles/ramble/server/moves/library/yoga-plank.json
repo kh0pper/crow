@@ -14,11 +14,31 @@
     "core",
     "weight-on-hands"
   ],
+  "areas": [
+    "core",
+    "upper"
+  ],
   "steps": [
-    "Start on your hands and knees, then step your feet back one at a time.",
-    "Line your shoulders up over your hands and stretch your legs out behind you.",
-    "Draw your belly in and keep one long line from your head to your heels.",
-    "Hold while breathing steadily, then lower your knees to the mat."
+    {
+      "text": "Start on your hands and knees, then step your feet back one at a time.",
+      "cue": "From hands and knees, step your feet back.",
+      "at": 0
+    },
+    {
+      "text": "Line your shoulders up over your hands and stretch your legs out behind you.",
+      "cue": "Shoulders over hands, legs long.",
+      "at": 0
+    },
+    {
+      "text": "Draw your belly in and keep one long line from your head to your heels.",
+      "cue": "Belly in. One long line, head to heels.",
+      "at": 0
+    },
+    {
+      "text": "Hold while breathing steadily, then lower your knees to the mat.",
+      "cue": "Hold and breathe, then lower your knees.",
+      "at": 0
+    }
   ],
   "works": [
     "Core",
@@ -30,6 +50,8 @@
     "Letting the hips sag toward the floor.",
     "Holding your breath."
   ],
+  "regression": "Keep your knees on the mat.",
+  "stopIf": "Lower your knees if your lower back sags or hurts, or your wrists hurt.",
   "skipIf": [
     "wrist",
     "shoulder",
@@ -37,14 +59,6 @@
   ],
   "easier": "yoga-cat",
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": -10,
     "spine": 0,
@@ -62,5 +76,52 @@
     "kneeR": 0,
     "shoulderR": 58,
     "ankleR": -20
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "abdominals",
+        "shoulders",
+        "serratus",
+        "triceps",
+        "quadriceps"
+      ],
+      "lengthening": [],
+      "main": "abdominals",
+      "bones": [
+        "lumbar-spine",
+        "scapula",
+        "humerus",
+        "hip-bone"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hands",
+          "direction": "down",
+          "label": "Press"
+        }
+      ],
+      "why": "The belly muscles stop the hips from sagging while the arms and shoulders hold you up."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.4 Axial muscles of the abdominal wall and thorax",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-4-axial-muscles-of-the-abdominal-wall-and-thorax",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

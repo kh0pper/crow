@@ -14,6 +14,12 @@
     "standing",
     "floor"
   ],
+  "areas": [
+    "mobility",
+    "lower"
+  ],
+  "rounds": 1,
+  "maxRounds": 2,
   "steps": [
     "Move through the poses in the order listed, one side at a time where the pose is one-sided.",
     "Hold each pose for the time given and keep your breathing even.",
@@ -39,14 +45,6 @@
   ],
   "easier": null,
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "flow": [
     {
       "id": "yoga-low-lunge",
@@ -72,5 +70,13 @@
       "id": "yoga-child",
       "holdSeconds": 60
     }
-  ]
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    }
+  ],
+  "reviewed": true
 }

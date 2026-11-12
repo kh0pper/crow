@@ -1,0 +1,156 @@
+{
+  "id": "cool-calf-stretch",
+  "kind": "pose",
+  "title": "Calf stretch at the wall",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "wall"
+  ],
+  "tags": [
+    "cool-down",
+    "standing",
+    "stretch"
+  ],
+  "areas": [
+    "mobility"
+  ],
+  "perSide": true,
+  "steps": [
+    {
+      "text": "Stand facing a wall with both hands on it at chest height.",
+      "cue": "Face the wall, hands at chest height.",
+      "at": 0
+    },
+    {
+      "text": "Step one foot back and press that heel toward the floor. Keep the back leg straight.",
+      "cue": "One foot back. Heel down, leg straight.",
+      "at": 1
+    },
+    {
+      "text": "Bend the front knee until you feel a gentle stretch in the back calf.",
+      "cue": "Bend the front knee. Gentle stretch.",
+      "at": 1
+    },
+    {
+      "text": "Hold still and breathe slowly, then change legs.",
+      "cue": "Hold and breathe.",
+      "say": "Hold still and breathe slowly.",
+      "at": 1
+    }
+  ],
+  "works": [],
+  "stretches": [
+    "Calves"
+  ],
+  "mistakes": [
+    "Bouncing in the stretch.",
+    "Letting the back heel lift or the back foot turn out."
+  ],
+  "regression": "Take a shorter step back so the stretch is lighter.",
+  "stopIf": "Stop if you feel sharp pain in your calf, heel or ankle.",
+  "skipIf": [],
+  "easier": null,
+  "harder": null,
+  "pose": {
+    "neck": 0,
+    "spine": 0,
+    "shoulderL": 95,
+    "elbowL": 20,
+    "wristL": -60,
+    "shoulderR": 95,
+    "elbowR": 20,
+    "wristR": -60,
+    "hipL": 45,
+    "kneeL": 40,
+    "ankleL": 10,
+    "hipR": 0,
+    "kneeR": 0,
+    "ankleR": 15,
+    "rootAngle": 15,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 85,
+      "elbowL": 10,
+      "wristL": -60,
+      "shoulderR": 85,
+      "elbowR": 10,
+      "wristR": -60,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 95,
+      "elbowL": 20,
+      "wristL": -60,
+      "shoulderR": 95,
+      "elbowR": 20,
+      "wristR": -60,
+      "hipL": 45,
+      "kneeL": 40,
+      "ankleL": 10,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 15,
+      "rootAngle": 15,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [],
+      "lengthening": [
+        "calf"
+      ],
+      "main": "calf",
+      "bones": [
+        "tibia",
+        "fibula",
+        "calcaneus",
+        "talus"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "heels",
+          "direction": "down",
+          "label": "Press"
+        }
+      ],
+      "why": "Keeping the back heel down with a straight knee lengthens the calf."
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: How to stretch after exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-stretch-after-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "NHS: Flexibility exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/flexibility-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

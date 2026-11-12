@@ -1,0 +1,166 @@
+{
+  "id": "heart-knee-lifts",
+  "kind": "pose",
+  "title": "Knee lifts",
+  "minutes": 1,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "indoor-heart",
+    "low-impact",
+    "standing",
+    "marching"
+  ],
+  "areas": [
+    "heart"
+  ],
+  "steps": [
+    {
+      "text": "Stand tall with your feet hip-width apart and your belly gently firm.",
+      "cue": "Stand tall, belly gently firm.",
+      "at": 0
+    },
+    {
+      "text": "Lift one knee toward hip height and touch it with the opposite hand.",
+      "cue": "Knee up. Touch it with the opposite hand.",
+      "at": 1
+    },
+    {
+      "text": "Lower it and lift the other knee. Keep the standing knee a little bent.",
+      "cue": "Change legs. Standing knee soft.",
+      "at": 1
+    },
+    {
+      "text": "Keep your back straight and your rhythm steady.",
+      "cue": "Back straight. Steady rhythm.",
+      "at": 1
+    }
+  ],
+  "works": [
+    "Legs",
+    "Front of the hips",
+    "Heart and lungs"
+  ],
+  "stretches": [],
+  "mistakes": [
+    "Curling the back down to meet the knee.",
+    "Locking the standing knee."
+  ],
+  "regression": "Lift your knees lower, and keep one hand on a wall.",
+  "stopIf": "Stop if you feel dizzy, sick, very short of breath, or any pain in your chest.",
+  "skipIf": [
+    "balance",
+    "hip"
+  ],
+  "easier": "heart-march",
+  "harder": null,
+  "pose": {
+    "neck": 0,
+    "spine": 0,
+    "shoulderL": 55,
+    "elbowL": 40,
+    "wristL": 0,
+    "shoulderR": -10,
+    "elbowR": 20,
+    "wristR": 0,
+    "hipL": 3,
+    "kneeL": 6,
+    "ankleL": 3,
+    "hipR": 90,
+    "kneeR": 90,
+    "ankleR": -10,
+    "rootAngle": 0,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 0,
+      "elbowL": 20,
+      "wristL": 0,
+      "shoulderR": 0,
+      "elbowR": 20,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 55,
+      "elbowL": 40,
+      "wristL": 0,
+      "shoulderR": -10,
+      "elbowR": 20,
+      "wristR": 0,
+      "hipL": 3,
+      "kneeL": 6,
+      "ankleL": 3,
+      "hipR": 90,
+      "kneeR": 90,
+      "ankleR": -10,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "hip-flexors",
+        "abdominals",
+        "side-hip"
+      ],
+      "lengthening": [],
+      "main": "hip-flexors",
+      "bones": [
+        "hip-bone",
+        "femur",
+        "lumbar-spine"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "knees",
+          "direction": "up",
+          "label": "Lift"
+        }
+      ],
+      "why": "The front of the hip lifts the knee while the standing hip keeps you level."
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.4 Axial muscles of the abdominal wall and thorax",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-4-axial-muscles-of-the-abdominal-wall-and-thorax",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

@@ -15,13 +15,39 @@
     "strength",
     "squat"
   ],
+  "areas": [
+    "lower"
+  ],
+  "sets": 2,
+  "reps": 10,
+  "tempoSeconds": 5,
+  "perSide": false,
   "steps": [
-    "Stand on the middle of the band with your feet hip-width apart.",
-    "Hold one end in each hand at your shoulders.",
-    "Bend your knees and sit your hips back, keeping your chest up.",
-    "Stand back up and squeeze your glutes.",
-    "Do 2 sets of 10, resting between sets.",
-    "Keep a chair behind you if you want something to aim for."
+    {
+      "text": "Stand on the middle of the band with your feet hip-width apart.",
+      "cue": "Stand on the middle of the band.",
+      "at": 0
+    },
+    {
+      "text": "Hold one end in each hand at your shoulders.",
+      "cue": "Hold the ends at your shoulders.",
+      "at": 0
+    },
+    {
+      "text": "Bend your knees and sit your hips back, keeping your chest up.",
+      "cue": "Bend your knees. Sit your hips back, chest up.",
+      "at": 1
+    },
+    {
+      "text": "Stand back up and squeeze your glutes.",
+      "cue": "Stand up and squeeze your glutes.",
+      "at": 0
+    },
+    {
+      "text": "Keep a chair behind you if you want something to aim for.",
+      "cue": "A chair behind you gives you something to aim for.",
+      "at": 0
+    }
   ],
   "works": [
     "Legs",
@@ -36,17 +62,88 @@
     "Letting your knees roll inward.",
     "Lifting your heels off the floor."
   ],
+  "regression": "Do it without the band, down to a chair.",
+  "stopIf": "Stop if you feel pain in your knees, hips or back.",
   "skipIf": [
     "knee",
     "hip"
   ],
   "easier": "body-chair-squat",
   "harder": null,
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 15,
+      "elbowL": 150,
+      "wristL": 0,
+      "shoulderR": 15,
+      "elbowR": 150,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 50,
+      "elbowL": 150,
+      "wristL": 0,
+      "shoulderR": 50,
+      "elbowR": 150,
+      "wristR": 0,
+      "hipL": 110,
+      "kneeL": 95,
+      "ankleL": 20,
+      "hipR": 110,
+      "kneeR": 95,
+      "ankleR": 20,
+      "rootAngle": 35,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "quadriceps",
+        "glutes"
+      ],
+      "lengthening": [],
+      "main": "quadriceps",
+      "bones": [
+        "femur",
+        "tibia",
+        "patella",
+        "hip-bone"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "feet",
+          "direction": "down",
+          "label": "Press"
+        }
+      ],
+      "why": "The front of the thigh and the buttocks straighten the knees and hips to stand you up against the band."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

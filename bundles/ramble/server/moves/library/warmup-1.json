@@ -1,0 +1,61 @@
+{
+  "id": "warmup-1",
+  "kind": "flow",
+  "title": "Standing warm-up",
+  "minutes": 2,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "warm-up"
+  ],
+  "areas": [
+    "heart",
+    "mobility"
+  ],
+  "block": "warmup",
+  "steps": [
+    "Move gently through each part for the time shown.",
+    "Start small and let the movements grow as you warm up.",
+    "You should feel warmer, not tired."
+  ],
+  "works": [],
+  "stretches": [],
+  "mistakes": [
+    "Rushing through it.",
+    "Holding your breath."
+  ],
+  "skipIf": [],
+  "easier": null,
+  "harder": null,
+  "flow": [
+    {
+      "id": "heart-march",
+      "holdSeconds": 45
+    },
+    {
+      "id": "warm-shoulder-rolls",
+      "holdSeconds": 35
+    },
+    {
+      "id": "warm-heel-digs",
+      "holdSeconds": 40
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    }
+  ],
+  "reviewed": true
+}

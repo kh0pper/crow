@@ -13,12 +13,38 @@
     "standing",
     "balance"
   ],
+  "areas": [
+    "mobility",
+    "lower"
+  ],
+  "perSide": true,
   "steps": [
-    "Stand tall with your feet together.",
-    "Rest one foot against your other calf or inner thigh, not on the knee.",
-    "Bring your hands together at your chest, or reach them overhead.",
-    "Find a steady point to look at and take a few slow breaths.",
-    "Lower the foot and change sides."
+    {
+      "text": "Stand tall with your feet together.",
+      "cue": "Stand tall, feet together.",
+      "at": 0
+    },
+    {
+      "text": "Rest one foot against your other calf or inner thigh, not on the knee.",
+      "cue": "One foot on your calf or inner thigh, not the knee.",
+      "at": 0
+    },
+    {
+      "text": "Bring your hands together at your chest, or reach them overhead.",
+      "cue": "Hands at your chest, or reach up.",
+      "at": 0
+    },
+    {
+      "text": "Find a steady point to look at and take a few slow breaths.",
+      "cue": "Find a steady point to look at. Breathe.",
+      "at": 0
+    },
+    {
+      "text": "Lower the foot and change sides.",
+      "cue": "Lower the foot.",
+      "say": "Lower the foot.",
+      "at": 0
+    }
   ],
   "works": [
     "Legs",
@@ -31,6 +57,8 @@
     "Pressing the raised foot into the side of the knee.",
     "Letting the standing knee lock."
   ],
+  "regression": "Keep your toes on the floor with the heel resting on your ankle, near a wall.",
+  "stopIf": "Put the foot down if you start to wobble.",
   "skipIf": [
     "balance",
     "knee",
@@ -38,14 +66,6 @@
   ],
   "easier": "yoga-mountain",
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": 0,
     "spine": 2,
@@ -63,5 +83,49 @@
     "ankleR": -25,
     "rootAngle": -3,
     "support": "feet"
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "side-hip",
+        "calf",
+        "outer-shin",
+        "quadriceps"
+      ],
+      "lengthening": [
+        "inner-thigh"
+      ],
+      "main": "side-hip",
+      "bones": [
+        "hip-bone",
+        "femur",
+        "tibia",
+        "talus",
+        "foot-bones"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "feet",
+          "direction": "down",
+          "label": "Root"
+        }
+      ],
+      "why": "The side of the standing hip keeps the pelvis level while you balance on one leg."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

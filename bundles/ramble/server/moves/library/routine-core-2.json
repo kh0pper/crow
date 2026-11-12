@@ -1,0 +1,133 @@
+{
+  "id": "routine-core-2",
+  "kind": "routine",
+  "title": "Core with plank",
+  "minutes": 12,
+  "level": 2,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "mat"
+  ],
+  "tags": [
+    "core",
+    "routine"
+  ],
+  "areas": [
+    "core"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
+  "steps": [
+    "Warm up for two minutes.",
+    "Do each exercise for the time shown, resting between them, then go through them a second time.",
+    "Cool down for two minutes.",
+    "Stop any exercise that hurts and use its easier version."
+  ],
+  "works": [
+    "Arms",
+    "Core",
+    "Hips",
+    "Shoulders"
+  ],
+  "stretches": [
+    "Back",
+    "Chest",
+    "Front of the body",
+    "Hips",
+    "Lower back",
+    "Neck",
+    "Shoulders"
+  ],
+  "mistakes": [
+    "Skipping the warm-up or the cool-down.",
+    "Rushing the reps to beat the clock."
+  ],
+  "skipIf": [
+    "knee",
+    "lower_back",
+    "shoulder",
+    "wrist",
+    "hip"
+  ],
+  "easier": null,
+  "harder": null,
+  "blocks": {
+    "warmup": [
+      {
+        "id": "heart-march",
+        "seconds": 30
+      },
+      {
+        "id": "yoga-cat",
+        "seconds": 30
+      },
+      {
+        "id": "yoga-cow",
+        "seconds": 30
+      },
+      {
+        "id": "yoga-child",
+        "seconds": 30
+      }
+    ],
+    "main": [
+      {
+        "id": "yoga-plank",
+        "seconds": 30,
+        "restSeconds": 15
+      },
+      {
+        "id": "yoga-plank",
+        "seconds": 30,
+        "restSeconds": 15
+      },
+      {
+        "id": "body-dead-bug",
+        "seconds": 60,
+        "restSeconds": 20
+      },
+      {
+        "id": "body-side-plank-from-knees",
+        "seconds": 60,
+        "restSeconds": 20
+      }
+    ],
+    "cooldown": [
+      {
+        "id": "yoga-cat",
+        "seconds": 30
+      },
+      {
+        "id": "yoga-cow",
+        "seconds": 30
+      },
+      {
+        "id": "yoga-child",
+        "seconds": 60
+      }
+    ]
+  },
+  "usesBlocks": {
+    "warmup": "warmup-3",
+    "cooldown": "cooldown-2"
+  },
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "CDC: Measuring physical activity intensity (the talk test)",
+      "url": "https://www.cdc.gov/physical-activity-basics/measuring/index.html",
+      "license": "US government work (public domain). Facts only; the wording is ours."
+    }
+  ],
+  "reviewed": true
+}

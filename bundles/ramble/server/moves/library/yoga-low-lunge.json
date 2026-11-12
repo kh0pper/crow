@@ -14,12 +14,37 @@
     "hips",
     "kneeling"
   ],
+  "areas": [
+    "mobility"
+  ],
+  "perSide": true,
   "steps": [
-    "Start on your hands and knees on the mat.",
-    "Step one foot forward and place it flat, with the knee above the ankle.",
-    "Slide the other knee back until you feel a gentle stretch at the front of that hip.",
-    "Rest your hands on your front thigh or on the mat and breathe slowly.",
-    "Step back to hands and knees, then change sides."
+    {
+      "text": "Start on your hands and knees on the mat.",
+      "cue": "Start on your hands and knees.",
+      "at": 0
+    },
+    {
+      "text": "Step one foot forward and place it flat, with the knee above the ankle.",
+      "cue": "Step one foot forward, knee over the ankle.",
+      "at": 0
+    },
+    {
+      "text": "Slide the other knee back until you feel a gentle stretch at the front of that hip.",
+      "cue": "Slide the other knee back. Gentle stretch.",
+      "at": 0
+    },
+    {
+      "text": "Rest your hands on your front thigh or on the mat and breathe slowly.",
+      "cue": "Hands on your thigh or the mat. Breathe slowly.",
+      "at": 0
+    },
+    {
+      "text": "Step back to hands and knees, then change sides.",
+      "cue": "Step back to hands and knees.",
+      "say": "Step back to hands and knees.",
+      "at": 0
+    }
   ],
   "works": [
     "Legs",
@@ -33,20 +58,14 @@
     "Letting the front knee fall inward.",
     "Sinking the hips further than feels comfortable."
   ],
+  "regression": "Take a shorter step and keep your hips higher.",
+  "stopIf": "Come out if either knee hurts.",
   "skipIf": [
     "knee",
     "hip"
   ],
   "easier": "yoga-child",
   "harder": "yoga-high-lunge",
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": 0,
     "spine": 5,
@@ -64,5 +83,44 @@
     "ankleR": 4,
     "rootAngle": 0,
     "support": "knees"
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [],
+      "lengthening": [
+        "hip-flexors",
+        "quadriceps"
+      ],
+      "main": "hip-flexors",
+      "bones": [
+        "hip-bone",
+        "femur",
+        "lumbar-spine",
+        "patella"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hips",
+          "direction": "forward",
+          "label": "Sink"
+        }
+      ],
+      "why": "Letting the hips sink forward lengthens the front of the back hip and thigh."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

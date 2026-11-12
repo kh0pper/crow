@@ -1,0 +1,156 @@
+{
+  "id": "warm-shoulder-rolls",
+  "kind": "pose",
+  "title": "Shoulder rolls",
+  "minutes": 1,
+  "level": 1,
+  "indoor": true,
+  "activity": "bodyweight",
+  "equipment": [
+    "none"
+  ],
+  "tags": [
+    "warm-up",
+    "standing",
+    "shoulders"
+  ],
+  "areas": [
+    "mobility"
+  ],
+  "steps": [
+    {
+      "text": "Stand tall with your arms relaxed by your sides.",
+      "cue": "Stand tall, arms relaxed.",
+      "at": 0
+    },
+    {
+      "text": "Lift both shoulders toward your ears, roll them back, and let them drop.",
+      "cue": "Shoulders up, back, and down.",
+      "at": 0
+    },
+    {
+      "text": "Do five slow rolls backward, then five forward.",
+      "cue": "Five slow rolls back, then five forward.",
+      "at": 0
+    },
+    {
+      "text": "Keep your neck long and your breathing easy.",
+      "cue": "Neck long. Easy breathing.",
+      "at": 0
+    }
+  ],
+  "works": [
+    "Shoulders",
+    "Upper back"
+  ],
+  "stretches": [
+    "Neck",
+    "Chest"
+  ],
+  "mistakes": [
+    "Rolling fast and jerking the neck.",
+    "Holding your breath."
+  ],
+  "regression": "Make the circles smaller, or roll one shoulder at a time.",
+  "stopIf": "Stop if you feel pinching or pain in your shoulders or neck.",
+  "skipIf": [],
+  "easier": null,
+  "harder": null,
+  "pose": {
+    "neck": 0,
+    "spine": 0,
+    "shoulderL": 8,
+    "elbowL": 5,
+    "wristL": 0,
+    "shoulderR": 8,
+    "elbowR": 5,
+    "wristR": 0,
+    "hipL": 0,
+    "kneeL": 0,
+    "ankleL": 0,
+    "hipR": 0,
+    "kneeR": 0,
+    "ankleR": 0,
+    "rootAngle": 0,
+    "support": "feet"
+  },
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": -8,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": -8,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 8,
+      "elbowL": 5,
+      "wristL": 0,
+      "shoulderR": 8,
+      "elbowR": 5,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "still": true,
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "trapezius",
+        "rhomboids"
+      ],
+      "lengthening": [
+        "chest"
+      ],
+      "main": "trapezius",
+      "bones": [
+        "scapula",
+        "clavicle",
+        "humerus"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "shoulders",
+          "direction": "back",
+          "label": "Roll"
+        }
+      ],
+      "why": "Rolling the shoulders moves the shoulder blades through their range before they take load."
+    }
+  ],
+  "sources": [
+    {
+      "title": "NHS: How to warm up before exercising",
+      "url": "https://www.nhs.uk/live-well/exercise/how-to-warm-up-before-exercising/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

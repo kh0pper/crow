@@ -7,7 +7,7 @@
   "indoor": true,
   "activity": "bodyweight",
   "equipment": [
-    "chair"
+    "wall"
   ],
   "tags": [
     "bodyweight",
@@ -15,12 +15,34 @@
     "calves",
     "balance"
   ],
+  "areas": [
+    "lower"
+  ],
+  "sets": 2,
+  "reps": 12,
+  "tempoSeconds": 5,
+  "perSide": false,
   "steps": [
-    "Stand behind a chair and rest your fingertips on the back for balance.",
-    "Press through the balls of your feet and lift your heels as high as feels steady.",
-    "Pause for one breath at the top.",
-    "Lower slowly until your heels touch the floor.",
-    "Do 2 sets of 12."
+    {
+      "text": "Stand facing a wall, or behind a chair, and rest your fingertips on it for balance.",
+      "cue": "Fingertips on a wall or a chair back.",
+      "at": 0
+    },
+    {
+      "text": "Press through the balls of your feet and lift your heels as high as feels steady.",
+      "cue": "Lift your heels as high as feels steady.",
+      "at": 1
+    },
+    {
+      "text": "Pause for one breath at the top.",
+      "cue": "Pause for one breath.",
+      "at": 1
+    },
+    {
+      "text": "Lower slowly until your heels touch the floor.",
+      "cue": "Lower slowly until your heels touch.",
+      "at": 0
+    }
   ],
   "works": [
     "Calves",
@@ -33,17 +55,90 @@
     "Rolling onto the outside edge of your feet.",
     "Bouncing at the bottom of the movement."
   ],
+  "regression": "Lift your heels only a little, with both hands on the wall.",
+  "stopIf": "Stop if you feel pain in your ankles or calves, or you feel unsteady.",
   "skipIf": [
     "ankle",
     "balance"
   ],
   "easier": null,
   "harder": null,
+  "poses": [
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 60,
+      "elbowL": 30,
+      "wristL": 0,
+      "shoulderR": 60,
+      "elbowR": 30,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": 0,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": 0,
+      "rootAngle": 0,
+      "support": "feet"
+    },
+    {
+      "neck": 0,
+      "spine": 0,
+      "shoulderL": 60,
+      "elbowL": 30,
+      "wristL": 0,
+      "shoulderR": 60,
+      "elbowR": 30,
+      "wristR": 0,
+      "hipL": 0,
+      "kneeL": 0,
+      "ankleL": -30,
+      "hipR": 0,
+      "kneeR": 0,
+      "ankleR": -30,
+      "rootAngle": 0,
+      "support": "feet"
+    }
+  ],
+  "anatomy": [
+    {
+      "at": 1,
+      "working": [
+        "calf"
+      ],
+      "lengthening": [
+        "shin"
+      ],
+      "main": "calf",
+      "bones": [
+        "tibia",
+        "fibula",
+        "calcaneus",
+        "talus",
+        "foot-bones"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "heels",
+          "direction": "up",
+          "label": "Rise"
+        }
+      ],
+      "why": "The calf muscles pull on the heel bone to lift you onto the balls of your feet."
+    }
+  ],
   "sources": [
     {
       "title": "Written for Crow Ramble Moves",
       "url": "",
       "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
     }
   ],
   "reviewed": true

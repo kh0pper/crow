@@ -1,0 +1,87 @@
+{
+  "id": "yoga-flow-balance",
+  "kind": "flow",
+  "title": "Balance flow",
+  "minutes": 10,
+  "level": 2,
+  "indoor": true,
+  "activity": "yoga",
+  "equipment": [
+    "wall"
+  ],
+  "tags": [
+    "balance",
+    "standing"
+  ],
+  "areas": [
+    "mobility",
+    "lower"
+  ],
+  "rounds": 2,
+  "maxRounds": 2,
+  "steps": [
+    "Move through the poses in the order listed, one side at a time where the pose is one-sided.",
+    "Hold each pose for the time given and keep your breathing even.",
+    "Go through the whole flow twice. The first time is your warm-up, so keep it easy.",
+    "Finish in the last pose for a few slow breaths."
+  ],
+  "works": [
+    "Legs",
+    "Hips",
+    "Core"
+  ],
+  "stretches": [
+    "Hips"
+  ],
+  "mistakes": [
+    "Pushing into a pose further than is comfortable.",
+    "Holding your breath in the harder poses."
+  ],
+  "skipIf": [
+    "knee",
+    "hip",
+    "ankle",
+    "balance"
+  ],
+  "easier": null,
+  "harder": null,
+  "flow": [
+    {
+      "id": "yoga-mountain",
+      "holdSeconds": 30
+    },
+    {
+      "id": "balance-one-leg-stand",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-tree",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-warrior-two",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-high-lunge",
+      "holdSeconds": 30
+    },
+    {
+      "id": "yoga-mountain",
+      "holdSeconds": 30
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "NHS: Balance exercises",
+      "url": "https://www.nhs.uk/live-well/exercise/strength-and-flexibility-exercises/balance-exercises/",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
+}

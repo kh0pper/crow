@@ -14,12 +14,37 @@
     "hips",
     "side-body"
   ],
+  "areas": [
+    "mobility"
+  ],
+  "perSide": true,
   "steps": [
-    "Stand with your feet wide apart and turn the front foot out.",
-    "Reach both arms out at shoulder height.",
-    "Tip your torso over the front leg and rest your lower hand on your shin.",
-    "Reach the top arm up and keep both legs straight.",
-    "Hold for a few breaths, then come up slowly and change sides."
+    {
+      "text": "Stand with your feet wide apart and turn the front foot out.",
+      "cue": "Feet wide apart, front foot turned out.",
+      "at": 0
+    },
+    {
+      "text": "Reach both arms out at shoulder height.",
+      "cue": "Arms out at shoulder height.",
+      "at": 0
+    },
+    {
+      "text": "Tip your torso over the front leg and rest your lower hand on your shin.",
+      "cue": "Tip over the front leg. Lower hand on your shin.",
+      "at": 0
+    },
+    {
+      "text": "Reach the top arm up and keep both legs straight.",
+      "cue": "Reach the top arm up. Legs straight.",
+      "at": 0
+    },
+    {
+      "text": "Hold for a few breaths, then come up slowly and change sides.",
+      "cue": "Hold and breathe, then come up slowly.",
+      "say": "Hold for a few breaths, then come up slowly.",
+      "at": 0
+    }
   ],
   "works": [
     "Legs",
@@ -34,20 +59,14 @@
     "Locking the front knee.",
     "Collapsing the chest toward the floor."
   ],
+  "regression": "Take a narrower stance and rest your hand higher on your leg.",
+  "stopIf": "Come up slowly if your lower back or hips hurt.",
   "skipIf": [
     "hip",
     "lower_back"
   ],
   "easier": "yoga-warrior-two",
   "harder": null,
-  "sources": [
-    {
-      "title": "Written for Crow Ramble Moves",
-      "url": "",
-      "license": "MIT (this repository)"
-    }
-  ],
-  "reviewed": true,
   "pose": {
     "neck": -10,
     "spine": 10,
@@ -65,5 +84,52 @@
     "ankleR": 20,
     "rootAngle": 65,
     "support": "feet"
-  }
+  },
+  "anatomy": [
+    {
+      "at": 0,
+      "working": [
+        "quadriceps",
+        "side-waist"
+      ],
+      "lengthening": [
+        "hamstrings",
+        "inner-thigh"
+      ],
+      "main": "hamstrings",
+      "bones": [
+        "femur",
+        "hip-bone",
+        "lumbar-spine",
+        "rib-cage"
+      ],
+      "nerves": [],
+      "arrows": [
+        {
+          "from": "hips",
+          "direction": "back",
+          "label": "Shift"
+        }
+      ],
+      "why": "Tipping sideways over a straight front leg lengthens the back and the inside of that thigh."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Written for Crow Ramble Moves",
+      "url": "",
+      "license": "MIT (this repository)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.4 Axial muscles of the abdominal wall and thorax",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-4-axial-muscles-of-the-abdominal-wall-and-thorax",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "reviewed": true
 }

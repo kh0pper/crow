@@ -15,6 +15,10 @@
     "stairs",
     "outdoors"
   ],
+  "areas": [
+    "heart",
+    "lower"
+  ],
   "steps": [
     "Warm up on flat ground for 5 minutes.",
     "Walk up a gentle slope or one flight of stairs at a steady pace.",

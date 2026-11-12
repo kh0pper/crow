@@ -15,6 +15,9 @@
     "brisk",
     "steady"
   ],
+  "areas": [
+    "heart"
+  ],
   "steps": [
     "Warm up with 5 minutes of easy walking.",
     "Pick up the pace until your breathing is deeper but you can still speak a short sentence.",
