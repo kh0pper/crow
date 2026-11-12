@@ -4,7 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, statSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -183,7 +183,19 @@ test("getProxyStatus keeps the card shape", async () => {
   assert.ok(!cards.some((c) => c.id === "slack" || c.id === "microsoft-teams"));
 });
 
-test("a service add-on's child gets its derived env; a non-service add-on is unchanged (I1)", async () => {
+test("a service add-on's child gets its derived env; a non-service add-on is unchanged (I1)", async (t) => {
+  // A scratch data dir holding a readable 32-hex instance-id for this test: the id the gateway
+  // hands a child is then deterministic, and the real ~/.crow identity is never read or minted.
+  const INSTANCE_ID = "0123456789abcdef0123456789abcdef";
+  const dataDir = mkdtempSync(join(tmpdir(), "integrations-retired-instance-id-"));
+  const prevDataDir = process.env.CROW_DATA_DIR;
+  writeFileSync(join(dataDir, "instance-id"), INSTANCE_ID);
+  process.env.CROW_DATA_DIR = dataDir;
+  t.after(() => {
+    if (prevDataDir === undefined) delete process.env.CROW_DATA_DIR;
+    else process.env.CROW_DATA_DIR = prevDataDir;
+    rmSync(dataDir, { recursive: true, force: true });
+  });
   const { addonStdioEnv } = await import("../servers/gateway/proxy.js");
   const render = { command: "npx", args: ["-y", "mcp-remote", "https://mcp.render.com/mcp", "--header", "Authorization:${AUTH_HEADER}"] };
   const fromEntry = addonStdioEnv({ ...render, env: { RENDER_API_KEY: "test-token-7" } }, {}, "render");
@@ -195,8 +207,11 @@ test("a service add-on's child gets its derived env; a non-service add-on is unc
   assert.equal(addonStdioEnv({ ...render, env: { RENDER_API_KEY: "entry" } }, { RENDER_API_KEY: "base" }, "render").AUTH_HEADER, "Bearer entry");
   const fw = { command: "node", args: ["server/index.js"], env: { FUNKWHALE_URL: "http://fw.example" } };
   assert.deepEqual(addonStdioEnv(fw, { PATH: "/bin" }, "funkwhale"), addonStdioEnv(fw, { PATH: "/bin" }));
-  assert.deepEqual(addonStdioEnv(fw, { PATH: "/bin" }, "funkwhale"),
-    { PATH: "/bin", FUNKWHALE_URL: "http://fw.example", CROW_ADDON_HOST: "gateway" });
+  // The gateway's own instance id rides along, last, so a walled child can resolve its settings.
+  const { CROW_LOCAL_INSTANCE_ID: instanceId, ...rest } = addonStdioEnv(fw, { PATH: "/bin" }, "funkwhale");
+  assert.match(String(instanceId), /^[0-9a-f]{32}$/, "the gateway's instance id");
+  assert.equal(instanceId, INSTANCE_ID, "the gateway's instance id comes from its own <data dir>/instance-id");
+  assert.deepEqual(rest, { PATH: "/bin", FUNKWHALE_URL: "http://fw.example", CROW_ADDON_HOST: "gateway" });
 });
 
 test("the bot catalog gives a Render add-on its AUTH_HEADER (I1)", () => {

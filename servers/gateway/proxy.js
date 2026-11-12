@@ -30,6 +30,9 @@ import { ADDON_KEYS_UNREADABLE, AddonKeysUnavailableError, hydrateAddonEntry, sh
 import { gatewayKeychainPaths } from "./addon-keys-paths.js";
 import { createDbClient, resolveDataDir } from "../db.js";
 import { gatewayListenPort } from "./listen-port.js";
+// The gateway's own instance id, read through the same registry the settings store uses. A static
+// import is safe here (no cycle): instance-registry.js imports nothing from proxy.js.
+import { getOrCreateLocalInstanceId, LOCAL_INSTANCE_ID_RE } from "./instance-registry.js";
 import { addonWallMode } from "../../scripts/addon-sandbox/spawn.mjs";
 import { AddonStdioTransport, createStderrPrefixer } from "../../scripts/addon-sandbox/transport.mjs";
 import { clearWallFailures, recordWallFailure, wallFailureByRef, wallFailureReason, WARMUP_REASON } from "../../scripts/addon-sandbox/failures.mjs";
@@ -529,7 +532,31 @@ function addonRunConfig(id, config) {
 /** A walled add-on's own env: its entry env, its derived keys, and the gateway host mark. */
 export function addonOwnEnv(config = {}, base = process.env, id = null) {
   const derived = id ? addonDerivedEnv(id, config.env, undefined, withoutCredentialKeys(base)) : {};
-  return { ...withoutLoaderEnv(config.env), ...withoutLoaderEnv(derived), CROW_ADDON_HOST: "gateway" };
+  return withLocalInstanceId({ ...withoutLoaderEnv(config.env), ...withoutLoaderEnv(derived), CROW_ADDON_HOST: "gateway" });
+}
+
+/**
+ * The gateway's own instance id as an env entry, or `{}` when it cannot be read. An add-on child
+ * inside its wall sees `<data dir>/instance-id` as a masked char device (existsSync is true,
+ * readFileSync throws), so it cannot read the id its per-instance settings rows are keyed by —
+ * without this it either minted a random id per call (settings read as unset) or now refuses.
+ * The id is not a secret: it names this instance in dashboard_settings_overrides.
+ */
+function localInstanceIdEnv() {
+  try {
+    const id = getOrCreateLocalInstanceId();
+    if (LOCAL_INSTANCE_ID_RE.test(String(id))) return { CROW_LOCAL_INSTANCE_ID: id };
+  } catch { /* unreadable here too: the child gets no id rather than a wrong one */ }
+  return {};
+}
+
+/**
+ * The gateway's id, applied LAST (so no add-on env decides it) and only from the gateway: a value
+ * an add-on's own entry carries is dropped, never trusted as the instance's identity.
+ */
+function withLocalInstanceId(env) {
+  delete env.CROW_LOCAL_INSTANCE_ID;
+  return Object.assign(env, localInstanceIdEnv());
 }
 
 /**
@@ -542,20 +569,24 @@ export function addonOwnEnv(config = {}, base = process.env, id = null) {
  * cannot claim or drop it.
  * With an `id`, a service add-on also gets its manifest's derived env (e.g. Render's AUTH_HEADER),
  * rendered from `config.env` over `base`.
+ * `CROW_LOCAL_INSTANCE_ID` (the gateway's own id) is set last of all: a child that cannot read
+ * `<data dir>/instance-id` itself needs it to resolve its per-instance settings rows. A
+ * project-service child (services/children.js connectionChildEnv) reads no dashboard settings,
+ * so it is deliberately not given one.
  * The passthrough reads from a base without the names this process applied from systemd
  * credentials: those values are the gateway's own, not part of the environment it was given.
  */
 export function addonStdioEnv(config = {}, base = process.env, id = null, opts = {}) {
   const gate = withoutCredentialKeys(base);
   const derived = id ? addonDerivedEnv(id, config.env, undefined, gate) : {};
-  return {
+  return withLocalInstanceId({
     ...addonBaseEnv(base),
     ...declaredPassthrough(id, gate, opts),
     ...storagePassthrough(id, gate),
     ...withoutLoaderEnv(config.env),
     ...withoutLoaderEnv(derived),
     CROW_ADDON_HOST: "gateway",
-  };
+  });
 }
 
 /**

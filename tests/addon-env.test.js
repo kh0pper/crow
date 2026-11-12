@@ -83,6 +83,23 @@ function scratchDir(t, prefix = "crow-addon-env-") {
   return dir;
 }
 
+/**
+ * Point CROW_DATA_DIR at a scratch data dir holding a readable 32-hex instance-id for the rest of
+ * the test, then restore it — so the id the gateway hands a child is deterministic, and the real
+ * ~/.crow identity is neither read nor minted here.
+ */
+function withInstanceId(t, id = "0123456789abcdef0123456789abcdef") {
+  const dir = scratchDir(t, "crow-addon-env-instance-id-");
+  writeFileSync(join(dir, "instance-id"), id);
+  const prev = process.env.CROW_DATA_DIR;
+  process.env.CROW_DATA_DIR = dir;
+  t.after(() => {
+    if (prev === undefined) delete process.env.CROW_DATA_DIR;
+    else process.env.CROW_DATA_DIR = prev;
+  });
+  return id;
+}
+
 test("the base is the allowlist: system basics, Crow instance keys, and nothing else", () => {
   const base = addonBaseEnv(GATEWAY_ENV);
   for (const key of ADDON_BASE_KEYS) assert.equal(base[key], GATEWAY_ENV[key], key);
@@ -108,11 +125,19 @@ test("the bot env module's full-environment mode cannot leak into the base", () 
   assert.equal(base.PATH, full.PATH);
 });
 
-test("an add-on with no registry entry gets the base, its config env and the host marker — nothing else", () => {
+test("an add-on with no registry entry gets the base, its config env, the host marker and the instance id — nothing else", (t) => {
+  // Deterministic: a scratch <data dir>/instance-id supplies the id unconditionally (never an
+  // ambient ~/.crow one, never a minted one), so the assertion below cannot pass vacuously.
+  const instanceId = withInstanceId(t);
   const env = addonStdioEnv({ env: { OWN_SETTING: "1" } }, GATEWAY_ENV, "not-a-bundle-in-the-repo");
   const expected = Object.keys(addonBaseEnv(GATEWAY_ENV)).sort();
+  // The gateway's own id rides along (last, from the gateway): a walled child cannot read
+  // <data dir>/instance-id itself, and its per-instance settings rows are keyed by this id.
+  const extras = ["OWN_SETTING", "CROW_ADDON_HOST", "CROW_LOCAL_INSTANCE_ID"];
+  assert.match(env.CROW_LOCAL_INSTANCE_ID, /^[0-9a-f]{32}$/);
+  assert.equal(env.CROW_LOCAL_INSTANCE_ID, instanceId, "the id in the scratch <data dir>/instance-id");
   const got = Object.keys(env).sort();
-  assert.deepEqual(got, [...expected, "OWN_SETTING", "CROW_ADDON_HOST"].sort());
+  assert.deepEqual(got, [...expected, ...extras].sort());
   assert.equal(env.CROW_ADDON_HOST, "gateway");
   for (const key of Object.keys(GATEWAY_ENV)) {
     if (expected.includes(key)) continue;
