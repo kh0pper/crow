@@ -302,7 +302,20 @@ const WALK_ENTRY = {
   steps: ["Walk at a pace you can talk at."],
 };
 
-function bootMoves(beforeRun, search) {
+/* An entry that keeps the page instead of the player: an exercise, with the
+ * step objects and the shorthand tags the detail route sends. */
+const CORE_ENTRY = {
+  id: "hip-lift",
+  kind: "exercise",
+  title: "Hip lift",
+  steps: ["Lie on your back.", { text: "Lift your hips.", cue: "Up", say: "Lift", at: 0 }],
+  works: ["Glutes", "Hips", "Core"],
+  mistakes: ["Arching the back.", "Holding your breath."],
+  skipIf: ["lowerback", "hip"],
+};
+
+function bootMoves(beforeRun, search, detail) {
+  const answered = detail || WALK_ENTRY;
   const els = new Map();
   const el = (id) => {
     if (!els.has(id)) els.set(id, new FakeEl(id));
@@ -329,8 +342,8 @@ function bootMoves(beforeRun, search) {
     if (u === "/api/ramble/moves/prefs") return json(PREFS);
     if (u === "/api/ramble/moves/copy") return json({ copy: { "player.pause": "Pause", "player.next": "Next: {name}" } });
     if (u === "/api/ramble/moves/voice") return json({ lines: { paused: "Paused.", resume: "Carrying on." } });
-    if (u === "/api/ramble/moves/library") return json({ entries: [WALK_ENTRY] });
-    if (u === "/api/ramble/moves/library/walk-10") return json({ entry: WALK_ENTRY });
+    if (u === "/api/ramble/moves/library") return json({ entries: [answered] });
+    if (u === "/api/ramble/moves/library/" + answered.id) return json({ entry: answered });
     if (u === "/api/ramble/moves/start") return json({ cardKey: "2026-10-30:day", startedAt: 1 });
     if (u === "/api/ramble/moves/progress") return json({ progress: { accepted: 60, done: false, paid: 0 } });
     return json({ entry: null }, 404);
@@ -716,4 +729,65 @@ test("fix: the client puts the player host on screen before it mounts, and names
     "a wide host is left to the player to decide");
 
   assert.ok(src.includes("err.status = res.status"), "a failed route answer carries its status to the caller");
+});
+
+/* ---------------------------------------- the entry page's lists (detail) */
+
+/** Every string a FakeEl tree holds, its own and its children's. */
+function textsIn(node, out = []) {
+  if (!node || typeof node !== "object") return out;
+  if (typeof node.textContent === "string" && node.textContent !== "") out.push(node.textContent);
+  const kids = Array.isArray(node.children) ? node.children : [];
+  kids.forEach((kid) => textsIn(kid, out));
+  return out;
+}
+
+/** The titled blocks of an entry body: the title and the item elements after it. */
+function entryBlocks(host) {
+  return host.children.map((row) => {
+    const txt = row && row.children ? row.children[0] : null;
+    if (!txt || !Array.isArray(txt.children) || txt.children.length === 0) return null;
+    return { title: txt.children[0].textContent, items: txt.children.slice(1) };
+  }).filter(Boolean);
+}
+
+function blockNamed(blocks, title) {
+  const block = blocks.find((b) => b.title === title);
+  assert.ok(block, "the entry body has a " + title + " block");
+  return block;
+}
+
+test("a step object and every list item read as their own line on the entry page", async () => {
+  const booted = bootMoves(null, "", CORE_ENTRY);
+  await flush();
+
+  booted.el("rb-learn-btn").click();
+  await flush();
+  const row = booted.el("rb-learn-list").children.find((child) => child.listeners && child.listeners.click);
+  assert.ok(row, "the Learn list has a row for the entry");
+  row.click();
+  await flush();
+
+  const body = booted.el("rb-entry-body");
+  const texts = textsIn(body);
+  assert.ok(texts.length > 0, "the entry page drew its lists");
+  assert.equal(texts.some((txt) => txt.includes("[object Object]")), false,
+    "no list item prints an object as its own string");
+
+  const blocks = entryBlocks(body);
+  assert.deepEqual(blockNamed(blocks, "Steps").items.map((i) => i.textContent),
+    ["Lie on your back.", "Lift your hips."], "a step object contributes its text, one item each");
+  assert.deepEqual(blockNamed(blocks, "Works").items.map((i) => i.textContent),
+    ["Glutes", "Hips", "Core"], "one item per work, never run together");
+  assert.equal(blockNamed(blocks, "Common mistakes").items.length, 2, "one item per mistake");
+
+  const skip = blockNamed(blocks, "Skip if").items;
+  assert.equal(skip.length, 2, "one element per skip-if tag");
+  assert.equal(skip.some((i) => i.textContent.includes("[object Object]")), false,
+    "the skip-if tags read as their own words");
+});
+
+test("each entry-page list item is styled onto a line of its own", () => {
+  assert.match(CSS_SRC(), /#ramble \.rb-step-txt > \.rb-fine\s*\{[^}]*display:\s*block/,
+    "the list items are block elements, so they never run together");
 });

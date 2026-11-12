@@ -751,6 +751,14 @@
       .catch(function () { /* the list can be empty for now */ });
   }
 
+  /* A step may be a plain string or an object carrying its own text, so a list
+   * line reads the string it holds instead of the object around it. */
+  function itemText(item) {
+    if (typeof item === "string") return item;
+    if (item && typeof item === "object") return typeof item.text === "string" ? item.text : "";
+    return item === null || item === undefined ? "" : String(item);
+  }
+
   function addList(host, title, items) {
     if (!host || !Array.isArray(items) || items.length === 0) return;
     var row = document.createElement("div");
@@ -761,9 +769,11 @@
     strong.textContent = title;
     txt.appendChild(strong);
     items.forEach(function (item) {
+      var text = itemText(item);
+      if (text === "") return;
       var line = document.createElement("span");
       line.className = "rb-muted rb-fine";
-      line.textContent = String(item);
+      line.textContent = text;
       txt.appendChild(line);
     });
     row.appendChild(txt);
