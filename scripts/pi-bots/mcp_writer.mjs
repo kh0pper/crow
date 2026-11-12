@@ -38,7 +38,7 @@ import { buildBotBaseEnv } from "../../servers/shared/bot-env.js";
 import { withoutLoaderEnv } from "../../servers/shared/loader-env.js";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { botsDbPath } from "./instance-paths.mjs";
 import { mintRemoteBlocks } from "./remote-blocks.mjs";
@@ -48,7 +48,7 @@ import { applyActorEnv, actorEnvFor } from "./actor-env.mjs";
 // Task 2.2: the ONLY place on the bot-config path that unseals — and only for an fd turn.
 // readAddonSecretsSync is all-or-throw (a name with no active row is ROWS_MISSING), so it is
 // never handed another add-on's shared names: those are read through their OWN entry.
-import { AddonKeysUnavailableError, keychainEnvNames, readAddonSecretsSync, sharedAddonEnv } from "../../servers/shared/addon-secrets.js";
+import { AddonKeysUnavailableError, ADDON_SECRET_SHARES, keychainEnvNames, readAddonSecretsSync, sharedAddonEnv } from "../../servers/shared/addon-secrets.js";
 // The anchored secrets dir (700, fd-anchored): the keychain key is read through it, exactly as
 // the bot engine's values collector does, so a plantable path is never followed.
 import { anchoredPath } from "../../servers/shared/secret-values.js";
@@ -246,7 +246,7 @@ export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), op
     const blk = addonSpawnBlock(name, addon, crowHome);
     if (!blk) continue;
     servers[name] = blk;
-    const needs = addonKeychainNeeds(name, addon);
+    const needs = addonKeychainNeeds(name, addon, { addons });
     if (needs.length > 0) needsKeys[name] = needs;
   }
   return { servers, needsKeys };
@@ -421,6 +421,61 @@ export const WARN_ADDON_KEYS_FILE_MODE = (id) =>
 export const WARN_ADDON_KEYS_UNREADABLE = (id) =>
   `add-on ${id}: its saved keys could not be read; left out of this turn`;
 
+// ---- the shared-settings table: one frozen table, no production override -----
+/**
+ * The table add-on shares are hydrated from (ADDON_SECRET_SHARES). It is NOT a writeBotMcp
+ * option: the share switch is a code change in servers/shared/addon-secrets.js, so a caller
+ * (a bridge, a panel, a CLI) must not be able to point a bot at a different add-on's keys.
+ * Tests that need a different table set it here and set it back.
+ */
+let addonSecretSharesTable = ADDON_SECRET_SHARES;
+
+/** TEST ONLY: replace the share table for the rest of this process; returns the previous one. */
+export function _setAddonSecretSharesForTest(table) {
+  const prev = addonSecretSharesTable;
+  addonSecretSharesTable = table && typeof table === "object" ? table : ADDON_SECRET_SHARES;
+  return prev;
+}
+
+/**
+ * Is `crowHome` the instance THIS process resolves its DB and keychain key from?
+ *
+ * writeBotMcp reads the add-on entries from `crowHome` (opts.crowHome, or CROW_HOME, or
+ * ~/.crow), but botsDbPath() and anchoredPath() resolve from the process env. When the two
+ * name different instances, hydrating would read THIS process's keychain rows for ANOTHER
+ * instance's entries — and anchoring would create a secrets dir under the wrong home. The
+ * hydrate step therefore refuses in that case (WARN_ADDON_KEYS_UNREADABLE, add-on dropped);
+ * compare the resolved paths, since `~/.crow` and a trailing slash name the same home.
+ */
+export function addonUnsealInstanceMatches(crowHome, env = process.env) {
+  if (typeof crowHome !== "string" || crowHome === "") return false;
+  const envHome = (env && env.CROW_HOME) || _HOME_FOR_CROW + "/.crow";
+  return resolve(crowHome) === resolve(envHome);
+}
+
+/**
+ * The boot line the bot engine logs ONCE when the secrets dir cannot be anchored (unsafe
+ * ancestors while CROW_BOT_UID is set): every unseal then fails closed, so a sealed add-on is
+ * left out of every bot turn. Fixed sentence, no path, no value.
+ */
+export const ADDON_KEYS_BOT_UNAVAILABLE =
+  "[addon-secrets] bots cannot read add-on keys: the secrets folder is not safe for the bot user; sealed add-ons are left out of bot turns";
+
+/**
+ * Bot-engine startup check: log ADDON_KEYS_BOT_UNAVAILABLE when the keychain key cannot be
+ * reached through the anchored secrets dir (anchoredPath returns null: the ancestors are not
+ * safe for the bot uid, so every read fails closed). Returns true when it logged. `anchor` is
+ * the seam (the real anchoredPath by default); it is the same call the hydrate step makes, so
+ * a null here means the hydrate step will drop sealed add-ons too.
+ */
+export function warnIfAddonKeysUnanchorable(log = (m) => console.warn(m), { env = process.env, anchor = anchoredPath } = {}) {
+  let path = null;
+  try { path = anchor(env, "keychain.key"); } catch { path = null; }
+  if (path) return false;
+  log(ADDON_KEYS_BOT_UNAVAILABLE);
+  return true;
+}
+
 /**
  * Write `<session_dir>/.mcp.json` for a bot. Idempotent (full rewrite each
  * call). Throws only on a missing session_dir in the def or an unreadable
@@ -436,7 +491,9 @@ export const WARN_ADDON_KEYS_UNREADABLE = (id) =>
  * "hydrate" (unseal its keychain values into the returned config; FD DELIVERY ONLY, so it
  * throws when combined with a file write). A file-mode turn leaves a sealed add-on out of the
  * config entirely, with one warning: a file cannot carry its keys, and a key-less spawn would
- * fail later instead.
+ * fail later instead. Hydration reads the same instance the entries came from or nothing: a
+ * `crowHome` that is not this process's CROW_HOME drops the add-on (WARN_ADDON_KEYS_UNREADABLE).
+ * The ADDON_SECRET_SHARES table is NOT an option (see _setAddonSecretSharesForTest).
  */
 export function writeBotMcp(def, opts = {}) {
   const sessionDir = opts.sessionDir || (def && def.session_dir);
@@ -533,8 +590,17 @@ export function writeBotMcp(def, opts = {}) {
     // The unseal paths: the DB this process's bridge/panel resolves, and the keychain key read
     // through the anchored secrets dir (never through a path another principal could plant).
     // botsDbPath() is resolveDbPath()'s file for every layout (pinned by the test) — the SAME
-    // rows the gateway sealed, never a second instance's.
-    const unseal = { unsealer: "bot-engine", dbPath: botsDbPath(), keyPath: anchoredPath(process.env, "keychain.key") };
+    // rows the gateway sealed, never a second instance's. So they are used ONLY when the
+    // entries came from this same instance: `crowHome` is what the blocks were read from, and
+    // when it names another home the two disagree — a mismatch fails closed below.
+    const sameInstance = addonUnsealInstanceMatches(crowHome);
+    let unseal = null;
+    const unsealPaths = () => {
+      if (!unseal) {
+        unseal = { unsealer: "bot-engine", dbPath: botsDbPath(), keyPath: anchoredPath(process.env, "keychain.key") };
+      }
+      return unseal;
+    };
     const addonEntries = readAddons(crowHome);
     // A name this turn drops moves the block into `disabled` and takes its bookkeeping with
     // it: it is not active, so it journals nothing and mints nothing.
@@ -552,15 +618,17 @@ export function writeBotMcp(def, opts = {}) {
     for (const [id, names] of owedKeys) {
       if (fileMode) { drop(id, WARN_ADDON_KEYS_FILE_MODE(id)); continue; }
       if (addonKeys === "omit") continue; // key-less block: the caller only validates it
+      if (!sameInstance) { drop(id, WARN_ADDON_KEYS_UNREADABLE(id)); continue; } // never another instance's rows
       try {
         const entry = addonEntries[id];
         const own = keychainEnvNames(entry);
-        const secrets = own.length > 0 ? readAddonSecretsSync(id, own, unseal) : {};
+        const secrets = own.length > 0 ? readAddonSecretsSync(id, own, unsealPaths()) : {};
         // Another add-on's settings this one reads (ADDON_SECRET_SHARES, R6): hydrated through
-        // the SOURCE's own entry, so its rows are read under its own id, never this one's.
+        // the SOURCE's own entry, so its rows are read under its own id, never this one's. The
+        // table is the frozen module constant (or a test's replacement) — never a caller option.
         const shared = sharedAddonEnv(id, (sourceId) => addonEntries[sourceId] ?? null, {
-          ...unseal,
-          ...(opts.addonSecretShares ? { shares: opts.addonSecretShares } : {}),
+          ...unsealPaths(),
+          shares: addonSecretSharesTable,
         });
         const block = built.json.mcpServers[id];
         // The derived env is rendered from `{ ...block.env, ...secrets }` — the values the child

@@ -36,20 +36,18 @@ import { isLegacyConfiguredAddon, addonDerivedEnv } from "../../servers/gateway/
 // addon entry — NODE_OPTIONS --require and LD_PRELOAD run code before the server does.
 import { withoutLoaderEnv } from "../../servers/shared/loader-env.js";
 // Names only, never a value: this module resolves no keychain handle and unseals nothing
-// (the spawning process hydrates; see addonKeychainNeeds below).
-import { ADDON_KEYCHAIN_FIELD, ADDON_SECRET_SHARES, keychainEnvNames } from "../../servers/shared/addon-secrets.js";
+// (the spawning process hydrates; see addonKeychainNeeds below). INSTANCE_ENV_KEYS comes from
+// there too: the shared module needs the same list to drop a listed instance key, and this
+// module may not be imported BY it (that would be a cycle).
+import { ADDON_KEYCHAIN_FIELD, ADDON_SECRET_SHARES, INSTANCE_ENV_KEYS, keychainEnvNames } from "../../servers/shared/addon-secrets.js";
 
 /**
  * The env vars that name an instance. r4-deploy.sh warns that a child missing
  * any of these silently resolves to the PRIMARY instance, which is exactly the
- * failure this list exists to prevent.
+ * failure this list exists to prevent. Defined in servers/shared/addon-secrets.js
+ * (keychainEnvNames drops a listed instance key) and re-exported here.
  */
-export const INSTANCE_ENV_KEYS = [
-  "CROW_HOME",
-  "CROW_DATA_DIR",
-  "CROW_DB_PATH",
-  "CROW_TASKS_DB_PATH",
-];
+export { INSTANCE_ENV_KEYS };
 
 /** The default primary-instance home — the one botsDbPath()/tasksDbPath() fall back to. */
 const DEFAULT_CROW_HOME = join(homedir(), ".crow");
@@ -227,24 +225,36 @@ function applyJournalGuard(env) {
 }
 
 /**
- * The env NAMES an add-on cannot start without, read from the entry alone — never a value.
+ * The env NAMES an add-on cannot start without, read from the entries alone — never a value.
  *
  * Two sources: the entry's own `keychainEnv` (its sealed settings) and ADDON_SECRET_SHARES
  * (another add-on's settings this one reads, R6 — e.g. sunvox-studio reading Funkwhale's
  * URL and access token). Producing the values is the CALLER's business (the gateway hydrates
  * from its own keychain); a bot config only learns which names are owed.
  *
+ * A SHARE name is owed only when the SOURCE add-on's own entry lists it in `keychainEnv`:
+ * sunvox-studio never seals Funkwhale's settings itself, so with Funkwhale not installed (no
+ * entry) or unsealed (nothing listed) it owes no keychain name at all — and a file-mode bot
+ * keeps it instead of dropping it with a warning about keys that do not exist. `opts.addons`
+ * is the whole mcp-addons.json map (the source entries live there, not in this entry).
+ *
  * Empty for an add-on with neither, which is what keeps today's entries byte-identical.
  */
-export function addonKeychainNeeds(id, entry) {
+export function addonKeychainNeeds(id, entry, opts = {}) {
   const names = [...keychainEnvNames(entry)];
   const shares = typeof id === "string" && Object.prototype.hasOwnProperty.call(ADDON_SECRET_SHARES, id)
     ? ADDON_SECRET_SHARES[id]
     : null;
   if (shares && typeof shares === "object") {
-    for (const wanted of Object.values(shares)) {
+    const addons = opts.addons && typeof opts.addons === "object" ? opts.addons : {};
+    for (const [sourceId, wanted] of Object.entries(shares)) {
+      // The source must be installed (it has an entry) and must itself seal the name.
+      const source = Object.prototype.hasOwnProperty.call(addons, sourceId) ? addons[sourceId] : null;
+      if (!source || typeof source !== "object") continue;
+      const listed = keychainEnvNames(source);
       for (const name of Array.isArray(wanted) ? wanted : []) {
-        if (typeof name === "string" && name !== "" && !names.includes(name)) names.push(name);
+        if (typeof name !== "string" || name === "" || !listed.includes(name)) continue;
+        if (!names.includes(name)) names.push(name);
       }
     }
   }
@@ -408,7 +418,10 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   // A service add-on's fields count as set in its entry, the repo .env, or the
   // caller's environment (the child inherits it), as in the gateway's proxy.
   const addonEnv = { ...repoEnv, ...process.env };
-  for (const [id, addon] of Object.entries(readAddons(crowHome))) {
+  // Read once: a SHARE name is owed only when the SOURCE add-on's own entry lists it
+  // (addonKeychainNeeds), which needs the whole map, not this entry.
+  const addons = readAddons(crowHome);
+  for (const [id, addon] of Object.entries(addons)) {
     // Satellite-hosted bundles have no local MCP server to spawn: crow reaches them through its
     // own satellite tool entry (spec §8, §9.1), so they are never catalog blocks here.
     if (addon?.transport === "satellite") {
@@ -477,7 +490,7 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
       servers[id] = r.block;
       // Only an EMITTED block owes keys: an unconfigured or unusable add-on is not in the
       // config at all, so there is nothing for the caller to hydrate.
-      const needs = addonKeychainNeeds(id, addon);
+      const needs = addonKeychainNeeds(id, addon, { addons });
       if (needs.length > 0) needsKeys[id] = needs;
     }
   }

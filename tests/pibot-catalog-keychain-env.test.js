@@ -16,7 +16,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crowServerCatalog } from "../scripts/pi-bots/crow-server-catalog.mjs";
-import { extraServersFromExtensions, writeBotMcp } from "../scripts/pi-bots/mcp_writer.mjs";
+import { extraServersFromExtensions, writeBotMcp, WARN_ADDON_KEYS_FILE_MODE } from "../scripts/pi-bots/mcp_writer.mjs";
 
 /** A value no block may ever carry. */
 const SENTINEL = "SENTINEL-value-8c1f-never-in-a-block";
@@ -106,7 +106,9 @@ test("catalog: a sealed service add-on gets no derived env, so the plaintext can
   assert.equal(plain.servers.render.env.AUTH_HEADER, "Bearer plain-value");
 });
 
-test("catalog: an add-on that READS another add-on (ADDON_SECRET_SHARES) owes those names too", () => {
+test("catalog: an add-on that READS another add-on (ADDON_SECRET_SHARES) owes only the names the SOURCE seals", () => {
+  // sunvox-studio seals nothing of Funkwhale's itself: a share name counts only when Funkwhale's
+  // own entry lists it. With Funkwhale absent there is no entry to read and nothing is owed.
   const { home, binding } = instance({
     "sunvox-studio": {
       command: "node",
@@ -115,11 +117,84 @@ test("catalog: an add-on that READS another add-on (ADDON_SECRET_SHARES) owes th
       keychainEnv: ["SUNVOX_TOKEN"],
     },
   });
-  const result = crowServerCatalog(home, { binding });
-  assert.deepEqual(result.needsKeys["sunvox-studio"],
-    ["SUNVOX_TOKEN", "FUNKWHALE_URL", "FUNKWHALE_ACCESS_TOKEN"],
-    "its own listed names, then the names it shares from funkwhale — deduped, never a value");
-  assert.equal(JSON.stringify(result).includes(SENTINEL), false);
+  const absent = crowServerCatalog(home, { binding });
+  assert.deepEqual(absent.needsKeys["sunvox-studio"], ["SUNVOX_TOKEN"],
+    "Funkwhale is not installed, so it owes no Funkwhale name");
+  assert.equal(JSON.stringify(absent).includes(SENTINEL), false);
+
+  // Installed but UNSEALED (no keychainEnv of its own): still nothing owed — its plain values
+  // are its own business, not a keychain name this add-on cannot start without.
+  const unsealedHome = instance({
+    "sunvox-studio": { command: "node", args: ["server/index.js"], keychainEnv: ["SUNVOX_TOKEN"] },
+    funkwhale: {
+      command: "node",
+      args: ["server/index.js"],
+      env: { FUNKWHALE_URL: "http://funk.example:5000", FUNKWHALE_ACCESS_TOKEN: "plain-token" },
+    },
+  });
+  const unsealed = crowServerCatalog(unsealedHome.home, { binding: unsealedHome.binding });
+  assert.deepEqual(unsealed.needsKeys["sunvox-studio"], ["SUNVOX_TOKEN"]);
+
+  // Sealed with the token listed: now the token really is a keychain name it cannot start without.
+  const sealedHome = instance({
+    "sunvox-studio": { command: "node", args: ["server/index.js"], keychainEnv: ["SUNVOX_TOKEN"] },
+    funkwhale: {
+      command: "node",
+      args: ["server/index.js"],
+      env: { FUNKWHALE_URL: "http://funk.example:5000" },
+      keychainEnv: ["FUNKWHALE_ACCESS_TOKEN"],
+    },
+  });
+  const sealed = crowServerCatalog(sealedHome.home, { binding: sealedHome.binding });
+  assert.deepEqual(sealed.needsKeys["sunvox-studio"], ["SUNVOX_TOKEN", "FUNKWHALE_ACCESS_TOKEN"],
+    "only the name Funkwhale's entry actually seals (not FUNKWHALE_URL, which is plain there)");
+});
+
+test("writeBotMcp (file mode): an add-on that only READS another add-on's settings is kept when nothing is sealed", () => {
+  // File mode used to drop sunvox-studio ALWAYS, with a warning about keys it does not have,
+  // because it "owed" Funkwhale's two shared names whether or not Funkwhale existed.
+  for (const addons of [
+    { "sunvox-studio": { command: "node", args: ["server/index.js"] } },
+    {
+      "sunvox-studio": { command: "node", args: ["server/index.js"] },
+      funkwhale: { command: "node", args: ["server/index.js"], env: { FUNKWHALE_URL: "http://funk.example:5000", FUNKWHALE_ACCESS_TOKEN: "plain-token" } },
+    },
+  ]) {
+    const { dir, home, binding } = instance(addons);
+    const sessionDir = join(dir, "session");
+    mkdirSync(sessionDir, { recursive: true });
+    const canonicalPath = join(dir, "canonical.json");
+    writeFileSync(canonicalPath, JSON.stringify(NO_CANONICAL));
+    const res = writeBotMcp({ tools: { crow_mcp: ["sunvox-studio/t"] } }, { sessionDir, canonicalPath, crowHome: home, binding });
+    assert.ok(res.servers.includes("sunvox-studio"), "the block is emitted");
+    assert.equal(res.json.mcpServers["sunvox-studio"].disabled, undefined);
+    assert.equal(res.warnings.some((w) => w.includes("sunvox-studio")), false, "and no warning about keys it does not owe");
+    assert.deepEqual(res.needsKeys, {}, "nothing for a later caller to hydrate either");
+    const written = JSON.parse(readFileSync(join(sessionDir, ".mcp.json"), "utf8"));
+    assert.equal(written.mcpServers["sunvox-studio"].disabled, undefined, "nor is it in the file as disabled");
+    assert.equal("FUNKWHALE_ACCESS_TOKEN" in (written.mcpServers["sunvox-studio"].env || {}), false,
+      "an unsealed share is not invented for it — the block carries only its own settings");
+  }
+});
+
+test("writeBotMcp (file mode): a shared name the SOURCE seals still drops the add-on, with the warning", () => {
+  const { dir, home, binding } = instance({
+    "sunvox-studio": { command: "node", args: ["server/index.js"] },
+    funkwhale: {
+      command: "node",
+      args: ["server/index.js"],
+      env: { FUNKWHALE_URL: "http://funk.example:5000" },
+      keychainEnv: ["FUNKWHALE_ACCESS_TOKEN"],
+    },
+  });
+  const sessionDir = join(dir, "session");
+  mkdirSync(sessionDir, { recursive: true });
+  const canonicalPath = join(dir, "canonical.json");
+  writeFileSync(canonicalPath, JSON.stringify(NO_CANONICAL));
+  const res = writeBotMcp({ tools: { crow_mcp: ["sunvox-studio/t"] } }, { sessionDir, canonicalPath, crowHome: home, binding });
+  assert.deepEqual(res.json.mcpServers["sunvox-studio"], { disabled: true }, "file mode cannot carry the source's sealed token");
+  assert.ok(res.warnings.includes(WARN_ADDON_KEYS_FILE_MODE("sunvox-studio")));
+  assert.equal(res.servers.includes("sunvox-studio"), false);
 });
 
 test("catalog: an add-on that never got a block owes no keys (nothing to hydrate)", () => {

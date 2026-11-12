@@ -208,7 +208,7 @@ test("sealing on: an existing row is overwritten — the value typed now wins", 
   assert.equal(n, 1, "one row per add-on + name, never a second one");
 });
 
-test("sealing on: a row another writer recorded keeps its identity — the seal owns the VALUE, not the label, username, address or first-view window", async (t) => {
+test("sealing on: re-saving the SAME value keeps the row's identity — label, username, address, origin and the one-time first-view window", async (t) => {
   sealSwitch(t, true);
   const ctx = scratch();
   const key = createKeychainKey({ crowHome: ctx.home });
@@ -232,8 +232,73 @@ test("sealing on: a row another writer recorded keeps its identity — the seal 
   assert.deepEqual({ label: row.label, username: row.username, url: row.url }, {
     label: "Frigate - admin login", username: "admin", url: "http://127.0.0.1:8971",
   });
-  assert.equal(row.first_view_until, fvu, "the one-time first-view window survives the re-seal");
-  assert.equal(row.origin, "typed", "the seal's own origin wins: it describes THIS write's provenance, not the credential");
+  assert.equal(row.first_view_until, fvu, "the one-time first-view window survives a re-seal of the same value");
+  assert.equal(row.origin, "generated", "the row keeps its own provenance while the value is unchanged (not 'typed')");
+});
+
+test("sealing on: a DIFFERENT value clears the window and takes the caller's metadata and origin", async (t) => {
+  sealSwitch(t, true);
+  const ctx = scratch();
+  const key = createKeychainKey({ crowHome: ctx.home });
+  await saveExtensionSecret(ctx.wrapper, key, {
+    bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "Frigate - admin login",
+    username: "admin", url: "http://127.0.0.1:8971", secret: SENTINEL2, origin: "generated", firstView: true,
+  });
+  assert.ok(ctx.raw.prepare("SELECT first_view_until FROM crow_keychain").get().first_view_until);
+
+  await sealEntrySecrets({
+    bundleId: "frigate",
+    entry: { env: { FRIGATE_PASSWORD: SENTINEL } }, // a new password
+    manifest: { name: "Frigate", env_vars: [{ name: "FRIGATE_PASSWORD", secret: true }] },
+    deps: depsFor(ctx),
+  });
+
+  const row = ctx.raw.prepare("SELECT label, username, url, first_view_until, origin FROM crow_keychain").get();
+  assert.equal(row.first_view_until, null, "a NEW value must not become viewable inside the OLD value's window");
+  assert.equal(row.label, "Frigate - FRIGATE_PASSWORD", "the seal's own label for a value it wrote itself");
+  assert.equal(row.username, null);
+  assert.equal(row.url, null);
+  assert.equal(row.origin, "typed", "the origin describes THIS write when the value changed");
+  assert.deepEqual(
+    readAddonSecretsSync("frigate", ["FRIGATE_PASSWORD"], { unsealer: "gateway", dbPath: ctx.dbPath, keyPath: ctx.keyPath }),
+    { FRIGATE_PASSWORD: SENTINEL },
+  );
+});
+
+test("sealing on: a consumeFirstView racing the re-seal leaves the window spent (never a timestamp read earlier)", async (t) => {
+  sealSwitch(t, true);
+  const ctx = scratch();
+  const key = createKeychainKey({ crowHome: ctx.home });
+  await saveExtensionSecret(ctx.wrapper, key, {
+    bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "Frigate - admin login",
+    username: "admin", secret: SENTINEL, origin: "generated", firstView: true,
+  });
+
+  // The race: the seal reads the prior row, and the window is spent before it writes. The
+  // interceptor runs the spend right after the prior-row SELECT (its `LIMIT 1`) returns.
+  let spent = 0;
+  const racing = {
+    async execute(q) {
+      const out = await ctx.wrapper.execute(q);
+      const sql = typeof q === "string" ? q : q.sql;
+      if (/FROM crow_keychain WHERE kind = 'extension'/.test(sql) && /LIMIT 1$/.test(sql.trim())) {
+        spent += ctx.raw.prepare("UPDATE crow_keychain SET first_view_until = NULL WHERE first_view_until IS NOT NULL").run().changes;
+      }
+      return out;
+    },
+    async executeMultiple(sql) { return ctx.wrapper.executeMultiple(sql); },
+  };
+
+  await sealEntrySecrets({
+    bundleId: "frigate",
+    entry: { env: { FRIGATE_PASSWORD: SENTINEL } }, // the SAME value: the window would be kept
+    manifest: { name: "Frigate", env_vars: [{ name: "FRIGATE_PASSWORD", secret: true }] },
+    deps: { ...depsFor(ctx), db: racing },
+  });
+
+  assert.equal(spent, 1, "positive control: the window was live and spent between the read and the write");
+  const row = ctx.raw.prepare("SELECT first_view_until FROM crow_keychain").get();
+  assert.equal(row.first_view_until, null, "the seal writes no earlier timestamp back: the value stays shown once");
 });
 
 test("sealing on: origin is the caller's, else the manifest's generate kind, else typed", async (t) => {

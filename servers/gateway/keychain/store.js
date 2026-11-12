@@ -13,6 +13,7 @@
  * restored onto a machine without the key file) are listed as readable:false and throw
  * KeychainKeyMissingError on open — never a crash, never a wrong plaintext.
  */
+import { timingSafeEqual } from "node:crypto";
 import { sealSecret, openSecret } from "../../sharing/secret-box.js";
 import { KEYCHAIN_DDL, KEYCHAIN_CONNECTION_COLUMN, KEYCHAIN_SERVICE_INDEX_DDL } from "./schema.js";
 import { keychainKeyState, createKeychainKey, KeychainKeyInvalidError } from "./key.js";
@@ -124,11 +125,11 @@ function assertExtensionOwner(bundleId, systemOwner) {
 
 /**
  * The validation + sealing both extension writers do, so neither can drift from the other.
- * `firstViewUntil` is an ISO timestamp a caller passes to KEEP an existing row's one-time
- * window (the seal re-saving a value another writer recorded with `firstView`); undefined
- * means "derive it from `firstView`".
+ * A caller that must KEEP an existing row's one-time window does it with `keepFirstView` on
+ * the write (saveExtensionSecret), never by passing a timestamp back: an earlier read can be
+ * stale by the time the row is written.
  */
-function extensionValues(key, { bundleId, envKey, label, username = null, url = null, secret, origin, firstView = false, firstViewUntil = undefined, now }) {
+function extensionValues(key, { bundleId, envKey, label, username = null, url = null, secret, origin, firstView = false, now }) {
   requireKey(key);
   if (!bundleId || !envKey || typeof secret !== "string" || secret === "") throw new Error("keychain: bundleId, envKey and a secret are required");
   if (!ORIGINS.has(origin) || origin === "manual") throw new Error("keychain: origin must be typed or generated");
@@ -138,10 +139,30 @@ function extensionValues(key, { bundleId, envKey, label, username = null, url = 
     url: cleanText(url, 2048),
     sealed: sealSecret(secret, box(key)),
     ts: iso(now),
-    fvu: firstViewUntil !== undefined
-      ? firstViewUntil
-      : (firstView ? new Date((now || new Date()).getTime() + FIRST_VIEW_MS).toISOString() : null),
+    fvu: firstView ? new Date((now || new Date()).getTime() + FIRST_VIEW_MS).toISOString() : null,
   };
+}
+
+/**
+ * Does this row hold exactly `plaintext` under `key`? The seal asks it before it decides
+ * whether a re-save may carry a row's identity forward. False for another key id, a damaged
+ * row, a non-string plaintext, and — deliberately — a value of a different LENGTH
+ * (timingSafeEqual needs equal-length buffers): a different length is a different value.
+ * Never returns, logs or throws the value itself.
+ */
+export function rowSecretEquals(row, key, plaintext) {
+  if (!row || !key || row.key_id !== key.id || typeof plaintext !== "string") return false;
+  let current;
+  try {
+    current = openSecret(row.secret_sealed, box(key));
+  } catch {
+    return false;
+  }
+  if (typeof current !== "string") return false;
+  const a = Buffer.from(current, "utf8");
+  const b = Buffer.from(plaintext, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 export async function saveExtensionSecret(db, key, opts = {}) {
@@ -150,11 +171,20 @@ export async function saveExtensionSecret(db, key, opts = {}) {
   await ensureKeychainTable(db);
   const v = extensionValues(key, opts);
   const { label, username, url, sealed, ts, fvu } = v;
+  // `keepFirstView` KEEPS an existing row's one-time window, and it is decided INSIDE the
+  // UPDATE — never by writing back a timestamp a caller read earlier. A window that a
+  // concurrent consumeFirstView NULLs between the caller's read and this write therefore
+  // stays spent (`first_view_until = first_view_until` copies the CURRENT value: NULL), and
+  // a caller may pass it only when the value it writes equals the row's current value (a
+  // NEW value must not become viewable inside an OLD window). Without it the window is
+  // cleared: a fresh save proves nothing about a view grant an earlier value earned.
+  const keepFirstView = opts.keepFirstView === true;
   const existing = (await db.execute({ sql: "SELECT id FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ?", args: [bundleId, envKey] })).rows[0];
   if (existing) {
     await db.execute({
-      sql: "UPDATE crow_keychain SET label = ?, username = ?, url = ?, secret_sealed = ?, key_id = ?, origin = ?, status = 'active', first_view_until = ?, updated_at = ? WHERE id = ?",
-      args: [label, username, url, sealed, key.id, opts.origin, fvu, ts, existing.id],
+      sql: `UPDATE crow_keychain SET label = ?, username = ?, url = ?, secret_sealed = ?, key_id = ?, origin = ?, status = 'active',
+              first_view_until = CASE WHEN ? THEN first_view_until ELSE NULL END, updated_at = ? WHERE id = ?`,
+      args: [label, username, url, sealed, key.id, opts.origin, keepFirstView ? 1 : 0, ts, existing.id],
     });
     return { id: Number(existing.id), created: false };
   }
