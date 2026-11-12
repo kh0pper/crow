@@ -399,30 +399,46 @@ test("a failed setup leaves the bundle's MCP entry alone", async () => {
 });
 
 test("the real seam writes the bundle's own mcp-addons entry, and a bundle without one is no error", async () => {
+  // Its OWN id: sealing is ON, so this run writes keychain rows, and a row under the id the
+  // route tests below use would make their "nothing saved yet" runs answer "already".
+  const SEAM_ID = "frigate-realseam";
+  const SEAM_MANIFEST = { ...SETUP_MANIFEST, id: SEAM_ID, name: "Frigate Real Seam" };
   const addonsPath = join(TMP_HOME, "mcp-addons.json");
   rmSync(addonsPath, { force: true });
   // No entry: this app has no MCP server. Nothing is written, no restart is reported, and the
   // run is still an ok — the login is in the keychain either way.
   const none = seams();
   delete none.deps.applyMcpEnv;
-  const without = await runSetup(none.deps);
+  const without = await runSetup(none.deps, { bundleId: SEAM_ID, manifest: SEAM_MANIFEST });
   assert.equal(without.out.result, "ok");
   assert.equal(without.out.mcpEnvUpdated, undefined);
   assert.equal(existsSync(addonsPath), false, "an entry-less bundle is not given a file");
   assert.equal(none.calls.reload.length, 0);
 
   // The entry the install registered: both login values land in it, the other values stay.
-  writeFileSync(addonsPath, JSON.stringify({ frigate: { command: "node", args: ["server/index.js"], env: { FRIGATE_URL: "http://127.0.0.1:8971" } } }), { mode: 0o600 });
+  writeFileSync(addonsPath, JSON.stringify({ [SEAM_ID]: { command: "node", args: ["server/index.js"], env: { FRIGATE_URL: "http://127.0.0.1:8971" } } }), { mode: 0o600 });
   const withEntry = seams();
   delete withEntry.deps.applyMcpEnv;
-  const second = await runSetup(withEntry.deps);
+  const second = await runSetup(withEntry.deps, { bundleId: SEAM_ID, manifest: SEAM_MANIFEST });
   assert.equal(second.out.result, "ok");
   assert.equal(second.out.mcpEnvUpdated, true);
   assert.equal(withEntry.calls.reload.length, 1);
   const doc = JSON.parse(readFileSync(addonsPath, "utf8"));
-  assert.equal(doc.frigate.env.FRIGATE_PASSWORD, PASSPHRASE, "the MCP child gets the password it needs");
-  assert.equal(doc.frigate.env.FRIGATE_USER, "admin");
-  assert.equal(doc.frigate.env.FRIGATE_URL, "http://127.0.0.1:8971", "every other value is kept");
+  const entry = doc[SEAM_ID];
+  // Sealing is ON, so the password is in the keychain and the entry only names it — the MCP
+  // child gets it at spawn from there.
+  assert.equal("FRIGATE_PASSWORD" in entry.env, false, "the password is not written plain");
+  assert.deepEqual(entry.keychainEnv, ["FRIGATE_PASSWORD"], "the entry names the key instead");
+  assert.equal(readFileSync(addonsPath, "utf8").includes(PASSPHRASE), false, "no value in the file");
+  const { readAddonSecretsSync } = await import("../servers/shared/addon-secrets.js");
+  const { gatewayKeychainPaths } = await import("../servers/gateway/addon-keys-paths.js");
+  assert.equal(
+    readAddonSecretsSync(SEAM_ID, ["FRIGATE_PASSWORD"], { unsealer: "gateway", ...gatewayKeychainPaths() }).FRIGATE_PASSWORD,
+    PASSPHRASE,
+    "the MCP child gets the password it needs",
+  );
+  assert.equal(entry.env.FRIGATE_USER, "admin");
+  assert.equal(entry.env.FRIGATE_URL, "http://127.0.0.1:8971", "every other value is kept");
   assert.equal(statSync(addonsPath).mode & 0o777, 0o600, "the file that now holds a secret stays private");
   assert.equal(JSON.stringify(second.out).includes(PASSPHRASE), false);
   // Nothing of this file may leak into the route tests below (they use the real seams).

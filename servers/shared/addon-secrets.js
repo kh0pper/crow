@@ -195,12 +195,12 @@ export function sealableEnv(env, manifest = null, { listed = [] } = {}) {
 /**
  * May this process seal add-on secrets into the keychain at all?
  *
+ * Sealing is ON by default; this only answers the two exceptions:
  *   - `CROW_ADDON_SECRETS_KEYCHAIN=0` turns it off (the operator opt-out);
  *   - a split-DB host (the host-default CROW_HOME shared by two gateways with different
  *     CROW_DB_PATH) is OFF: the two gateways would keep keychain rows in different DBs
- *     while both spawn from the same entry, so neither could prove the other's rows;
- *   - PR1 ships the machinery with sealing OFF: nothing turns it on until
- *     `CROW_ADDON_SECRETS_KEYCHAIN=1`. (PR2 deletes this line and turns it on by default.)
+ *     while both spawn from the same entry, so neither could prove the other's rows.
+ * Any other value (unset, "1", a typo) seals.
  *
  * Readers never consult this: an entry that already lists names is hydrated either way.
  */
@@ -208,7 +208,6 @@ export function addonSecretsSealingOn(env = process.env) {
   const e = env || {};
   if (e.CROW_ADDON_SECRETS_KEYCHAIN === "0") return false;
   if (isDefaultCrowHome(e) && e.CROW_DB_PATH && !sameDbLocation(resolve(e.CROW_DB_PATH), resolveInstanceDataDir(e))) return false;
-  if (e.CROW_ADDON_SECRETS_KEYCHAIN !== "1") return false; // PR1 only (Task 2.4 removes this line)
   return true;
 }
 

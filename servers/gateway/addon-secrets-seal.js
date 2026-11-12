@@ -9,10 +9,10 @@
  * with the fresh read-only handle readAddonSecretsSync opens, and checks the key file's id
  * is the key the seal wrote with, so a save can never claim a key a child could not get.
  *
- * PR1 ships this with sealing OFF (addonSecretsSealingOn is false unless the operator sets
- * CROW_ADDON_SECRETS_KEYCHAIN=1), so today the only thing a writer does is the opt-out of
- * 0.3 row 4: a listed name whose value was just written plain is un-listed, and the keychain
- * row is kept for the owner to see in Settings.
+ * Sealing is ON by default. The operator's opt-out (`CROW_ADDON_SECRETS_KEYCHAIN=0`, or a
+ * split-DB host — see addonSecretsSealingOn) leaves only 0.3 row 4: a listed name whose
+ * value was just written plain is un-listed, and the keychain row is kept for the owner to
+ * see in Settings.
  *
  * Nothing here logs, returns, audits or throws a secret VALUE. Messages name the add-on id
  * and the env NAMES; errors carry a fixed sentence and a `code`.
@@ -159,13 +159,32 @@ function resolveDeps(deps = {}) {
   };
 }
 
-/** The manifest's `env_vars` by name, for the label, the origin and the store_as skip. */
+/** A manifest's `env_vars` by name, for the label, the origin and the store_as skip. */
 function specMap(manifest) {
   const specs = new Map();
   for (const v of (manifest && Array.isArray(manifest.env_vars) ? manifest.env_vars : [])) {
     if (v && typeof v.name === "string" && !specs.has(v.name)) specs.set(v.name, v);
   }
   return specs;
+}
+
+/**
+ * The ACTIVE extension row this add-on + env name already has, if any — metadata only, the
+ * value is never read here. A writer that saved the same secret with more to say about it
+ * (first-admin setup: username, address, a one-time first-view window) must not lose that
+ * when its value is sealed again through the MCP entry. A home without the table yet is no
+ * row: the save below creates it.
+ */
+async function priorExtensionRow(db, bundleId, name) {
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT label, username, url, first_view_until FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ? AND status = 'active' LIMIT 1",
+      args: [bundleId, name],
+    });
+    return (rows && rows[0]) || null;
+  } catch {
+    return null;
+  }
 }
 
 /** "generated" for a value the manifest produces, else what the caller said (default typed). */
@@ -230,16 +249,16 @@ export async function keyForSave(db, { bundleId, names = [], crowHome = null, de
 /**
  * Seal one save's secrets and return the entry to write.
  *
- * Sealing OFF (0.3 row 4, PR1's only behaviour): a listed name that was just written a
- * plain value is REMOVED from `keychainEnv` so the new plain value is the one used; the
- * keychain row is kept (the owner's key, in Settings). Nothing is opened.
- *
- * Sealing ON: every sealable value of this save becomes a keychain row (overwriting the
+ * Sealing is ON: every sealable value of this save becomes a keychain row (overwriting the
  * previous one — the new typed value wins), the entry loses those plain values, and
  * `keychainEnv` becomes the sorted union of the names it listed and the names just sealed.
  * The read-back proof runs through the spawn's own paths; any mismatch throws and the
  * INPUT ENTRY is left untouched (the caller decides what to do with the rows already
  * written — 1.5a's accepted `.env`-write outcome).
+ *
+ * With `CROW_ADDON_SECRETS_KEYCHAIN=0` (or on a split-DB host) the operator opt-out of
+ * 0.3 row 4 is all a writer does: a listed name whose value was just written plain is
+ * un-listed, and the keychain row is kept for the owner to see in Settings.
  *
  * @param {object} args
  * @param {string} args.bundleId - the mcp-addons entry id
@@ -288,16 +307,23 @@ export async function sealEntrySecrets({ bundleId, entry, manifest = null, origi
     // 5. The key (refuses rather than mints when rows already depend on a missing key).
     const key = await writeKeyFor(db, d, { bundleId, names });
 
-    // 6. One row per name, then audit (names and ids only).
+    // 6. One row per name, then audit (names and ids only). A row this add-on already had
+    // keeps the identity another writer recorded on it (a first-admin login's username, its
+    // address, the one-time first-view window): the same value is pushed into the entry
+    // after that save, so the seal here owns the VALUE and must not erase the rest.
     for (const name of names) {
       const origin = originFor(name, origins, specs);
+      const prior = await priorExtensionRow(db, bundleId, name);
       const row = await saveExtensionSecret(db, key, {
         bundleId,
         envKey: name,
-        label: `${label} - ${name}`,
+        label: (prior && prior.label) || `${label} - ${name}`,
+        username: prior ? prior.username : null,
+        url: prior ? prior.url : null,
         secret: seal[name],
         origin,
         firstView: false,
+        firstViewUntil: prior ? (prior.first_view_until ?? null) : undefined,
       });
       await d.audit(db, "keychain_save", {
         details: { entry_id: row.id, bundle_id: bundleId, env_key: name, origin, sealed_from: "mcp-addons" },

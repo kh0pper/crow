@@ -24,6 +24,7 @@ const { fakeIdentity } = await import("./helpers/fake-satellite.js");
 const { startAgent } = await import("../servers/satellite/agent.js");
 const { ensureSatelliteKey, writeCert, writePinned } = await import("../servers/satellite/keys.js");
 const { LOG_CAP_BYTES } = await import("../servers/satellite/bundles.js");
+const { readAddonSecretsSync } = await import("../servers/shared/addon-secrets.js");
 
 const dirs = [CROW_HOME, process.env.CROW_DATA_DIR];
 const agents = [];
@@ -133,6 +134,16 @@ async function waitJob(t, id) {
 const readJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 const mode = (p) => statSync(p).mode & 0o777;
 
+/** Run `fn` with the sealing switch at `on` (off is the operator's explicit "0"). */
+async function withSealing(on, fn) {
+  const before = process.env.CROW_ADDON_SECRETS_KEYCHAIN;
+  process.env.CROW_ADDON_SECRETS_KEYCHAIN = on ? "1" : "0";
+  try { return await fn(); } finally {
+    if (before === undefined) delete process.env.CROW_ADDON_SECRETS_KEYCHAIN;
+    else process.env.CROW_ADDON_SECRETS_KEYCHAIN = before;
+  }
+}
+
 async function installDemo(t, body = {}) {
   const r = await call(t, "POST", "bundles/install", { id: "demo", env: { DEMO_TOKEN: SECRET_TOKEN }, ...body });
   assert.equal(r.status, 202, JSON.stringify(r.json));
@@ -141,6 +152,20 @@ async function installDemo(t, body = {}) {
 }
 
 // ── install ──────────────────────────────────────────────────────────────────
+
+test("install (sealing off, CROW_ADDON_SECRETS_KEYCHAIN=0): today's plain entry — the typed key stays plain and nothing is listed", async () => {
+  const world = fakeDocker();
+  const t = await boot({ world, setup: (h) => appBundle(h, "demo") });
+  const job = await withSealing(false, () => installDemo(t));
+  assert.equal(job.status, "complete", job.log.join("\n"));
+  const env = readFileSync(join(t.home, "bundles", "demo", ".env"), "utf8");
+  const generated = env.match(/DEMO_KEY=(\S+)/)[1];
+  const entry = readJson(join(t.home, "mcp-addons.json")).demo;
+  assert.equal(entry.env.DEMO_TOKEN, SECRET_TOKEN, "the opt-out keeps today's plain shape");
+  assert.equal(entry.env.DEMO_KEY, generated);
+  assert.equal("keychainEnv" in entry, false, "nothing is listed when sealing is off");
+  assert.deepEqual(t.a.db.prepare("SELECT env_key, origin FROM crow_keychain").all(), [{ env_key: "DEMO_KEY", origin: "generated" }], "the generated key is still kept in the keychain");
+});
 
 test("install: job copies from the agent's checkout, checks, writes .env/installed.json/mcp-addons.json, compose up", async () => {
   const t = await boot({ setup: (h) => appBundle(h, "demo") });
@@ -169,14 +194,27 @@ test("install: job copies from the agent's checkout, checks, writes .env/install
   assert.equal(mode(join(t.home, "mcp-addons.json")), 0o600);
   assert.equal(addons.demo.command, "node");
   assert.deepEqual(addons.demo.args, ["server/index.js"]);
-  assert.equal(addons.demo.env.DEMO_TOKEN, SECRET_TOKEN);
-  assert.equal(addons.demo.env.DEMO_URL, "http://localhost:3999");
   const generated = env.match(/DEMO_KEY=(\S+)/)[1];
-  assert.equal(addons.demo.env.DEMO_KEY, generated);
-  // The generated secret is in the satellite keychain, sealed (never plaintext).
-  const rows = t.a.db.prepare("SELECT bundle_id, env_key, origin, secret_sealed, status FROM crow_keychain").all();
-  assert.deepEqual(rows.map((r) => [r.bundle_id, r.env_key, r.origin, r.status]), [["demo", "DEMO_KEY", "generated", "active"]]);
-  assert.ok(!rows[0].secret_sealed.includes(generated));
+  // Sealing is ON: both secrets are in the satellite keychain, the entry only NAMES them.
+  assert.equal(addons.demo.env.DEMO_TOKEN, undefined, "the typed key is not in mcp-addons.json");
+  assert.equal(addons.demo.env.DEMO_KEY, undefined, "neither is the generated one");
+  assert.equal(addons.demo.env.DEMO_URL, "http://localhost:3999");
+  assert.deepEqual(addons.demo.keychainEnv, ["DEMO_KEY", "DEMO_TOKEN"], "both are listed by NAME");
+  const addonsText = readFileSync(join(t.home, "mcp-addons.json"), "utf8");
+  assert.equal(addonsText.includes(SECRET_TOKEN) || addonsText.includes(generated), false, "no secret value is in the entry file");
+  const unsealed = readAddonSecretsSync("demo", ["DEMO_KEY", "DEMO_TOKEN"], {
+    unsealer: "satellite",
+    dbPath: join(t.home, "satellite.db"),
+    keyPath: join(t.home, "secrets", "keychain.key"),
+  });
+  assert.deepEqual(unsealed, { DEMO_KEY: generated, DEMO_TOKEN: SECRET_TOKEN }, "the keychain holds both values");
+  // Both secrets are in the satellite keychain, sealed (never plaintext).
+  const rows = t.a.db.prepare("SELECT bundle_id, env_key, origin, secret_sealed, status FROM crow_keychain ORDER BY env_key").all();
+  assert.deepEqual(rows.map((r) => [r.bundle_id, r.env_key, r.origin, r.status]), [
+    ["demo", "DEMO_KEY", "generated", "active"],
+    ["demo", "DEMO_TOKEN", "typed", "active"],
+  ]);
+  for (const [i, plain] of [[0, generated], [1, SECRET_TOKEN]]) assert.equal(rows[i].secret_sealed.includes(plain), false);
   assert.equal(mode(join(t.home, "secrets", "keychain.key")), 0o600);
   // No secret in the job log.
   assert.ok(!job.log.join("\n").includes(SECRET_TOKEN) && !job.log.join("\n").includes(generated));
@@ -544,7 +582,10 @@ test("uninstall marks the bundle's keychain rows removed (kept for a reinstall),
   await installDemo(t);
   const u = await call(t, "POST", "bundles/uninstall", { id: "demo" });
   await waitJob(t, u.json.job_id);
-  assert.deepEqual(t.a.db.prepare("SELECT env_key, status FROM crow_keychain").all(), [{ env_key: "DEMO_KEY", status: "extension_removed" }]);
+  assert.deepEqual(t.a.db.prepare("SELECT env_key, status FROM crow_keychain ORDER BY env_key").all(), [
+    { env_key: "DEMO_KEY", status: "extension_removed" },
+    { env_key: "DEMO_TOKEN", status: "extension_removed" },
+  ]);
   const j = await call(t, "GET", "jobs/ffffffffffffffff");
   assert.equal(j.status, 404);
   assert.equal(j.json.error, "unknown_job");

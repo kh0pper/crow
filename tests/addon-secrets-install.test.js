@@ -70,8 +70,7 @@ after(() => {
 
 async function withSealing(on, fn) {
   const before = process.env.CROW_ADDON_SECRETS_KEYCHAIN;
-  if (on) process.env.CROW_ADDON_SECRETS_KEYCHAIN = "1";
-  else delete process.env.CROW_ADDON_SECRETS_KEYCHAIN;
+  process.env.CROW_ADDON_SECRETS_KEYCHAIN = on ? "1" : "0";
   try {
     return await fn();
   } finally {

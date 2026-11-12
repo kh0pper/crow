@@ -2,7 +2,8 @@
  * Task 1.10 — the satellite as an add-on-secrets WRITER and as the spawn-time READER.
  *
  * The satellite owns its own `mcp-addons.json` and its own keychain (`crow_keychain` in
- * satellite.db, key $SAT_HOME/secrets/keychain.key). With `CROW_ADDON_SECRETS_KEYCHAIN=1`:
+ * satellite.db, key $SAT_HOME/secrets/keychain.key). Sealing is ON by default (the tests below
+ * also pin the operator opt-out, `CROW_ADDON_SECRETS_KEYCHAIN=0`):
  *
  *   1. install seals the typed and the generated secret: both names are listed in the entry's
  *      `keychainEnv`, neither value is in the file, both rows are active, and the spawn reader
@@ -158,11 +159,10 @@ async function installDemand(t, env = { DEMO_TOKEN: SENTINEL }) {
   return waitJob(t, r.json.job_id);
 }
 
-/** Run `fn` with the sealing switch explicitly ON (PR1 ships it OFF). */
+/** Run `fn` with the sealing switch at `on` (off is the operator's explicit "0"). */
 async function withSealing(on, fn) {
   const before = process.env.CROW_ADDON_SECRETS_KEYCHAIN;
-  if (on) process.env.CROW_ADDON_SECRETS_KEYCHAIN = "1";
-  else delete process.env.CROW_ADDON_SECRETS_KEYCHAIN;
+  process.env.CROW_ADDON_SECRETS_KEYCHAIN = on ? "1" : "0";
   try { return await fn(); } finally {
     if (before === undefined) delete process.env.CROW_ADDON_SECRETS_KEYCHAIN;
     else process.env.CROW_ADDON_SECRETS_KEYCHAIN = before;

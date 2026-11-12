@@ -208,6 +208,34 @@ test("sealing on: an existing row is overwritten — the value typed now wins", 
   assert.equal(n, 1, "one row per add-on + name, never a second one");
 });
 
+test("sealing on: a row another writer recorded keeps its identity — the seal owns the VALUE, not the label, username, address or first-view window", async (t) => {
+  sealSwitch(t, true);
+  const ctx = scratch();
+  const key = createKeychainKey({ crowHome: ctx.home });
+  // The first-admin setup's shape: the login, its account and a one-time view. The same
+  // value is then pushed into the MCP entry, which seals it again.
+  await saveExtensionSecret(ctx.wrapper, key, {
+    bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "Frigate - admin login",
+    username: "admin", url: "http://127.0.0.1:8971", secret: SENTINEL, origin: "generated", firstView: true,
+  });
+  const fvu = ctx.raw.prepare("SELECT first_view_until FROM crow_keychain").get().first_view_until;
+  assert.ok(fvu, "the first view was granted");
+
+  await sealEntrySecrets({
+    bundleId: "frigate",
+    entry: { env: { FRIGATE_PASSWORD: SENTINEL } },
+    manifest: { name: "Frigate", env_vars: [{ name: "FRIGATE_PASSWORD", secret: true }] },
+    deps: depsFor(ctx),
+  });
+
+  const row = ctx.raw.prepare("SELECT label, username, url, first_view_until, origin FROM crow_keychain").get();
+  assert.deepEqual({ label: row.label, username: row.username, url: row.url }, {
+    label: "Frigate - admin login", username: "admin", url: "http://127.0.0.1:8971",
+  });
+  assert.equal(row.first_view_until, fvu, "the one-time first-view window survives the re-seal");
+  assert.equal(row.origin, "typed", "the seal's own origin wins: it describes THIS write's provenance, not the credential");
+});
+
 test("sealing on: origin is the caller's, else the manifest's generate kind, else typed", async (t) => {
   sealSwitch(t, true);
   const ctx = scratch();

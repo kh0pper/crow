@@ -122,8 +122,13 @@ function assertExtensionOwner(bundleId, systemOwner) {
   if (isSystemBundleId(bundleId) && systemOwner !== true) throw new Error("keychain: that id is reserved for Crow itself");
 }
 
-/** The validation + sealing both extension writers do, so neither can drift from the other. */
-function extensionValues(key, { bundleId, envKey, label, username = null, url = null, secret, origin, firstView = false, now }) {
+/**
+ * The validation + sealing both extension writers do, so neither can drift from the other.
+ * `firstViewUntil` is an ISO timestamp a caller passes to KEEP an existing row's one-time
+ * window (the seal re-saving a value another writer recorded with `firstView`); undefined
+ * means "derive it from `firstView`".
+ */
+function extensionValues(key, { bundleId, envKey, label, username = null, url = null, secret, origin, firstView = false, firstViewUntil = undefined, now }) {
   requireKey(key);
   if (!bundleId || !envKey || typeof secret !== "string" || secret === "") throw new Error("keychain: bundleId, envKey and a secret are required");
   if (!ORIGINS.has(origin) || origin === "manual") throw new Error("keychain: origin must be typed or generated");
@@ -133,7 +138,9 @@ function extensionValues(key, { bundleId, envKey, label, username = null, url = 
     url: cleanText(url, 2048),
     sealed: sealSecret(secret, box(key)),
     ts: iso(now),
-    fvu: firstView ? new Date((now || new Date()).getTime() + FIRST_VIEW_MS).toISOString() : null,
+    fvu: firstViewUntil !== undefined
+      ? firstViewUntil
+      : (firstView ? new Date((now || new Date()).getTime() + FIRST_VIEW_MS).toISOString() : null),
   };
 }
 
