@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -102,6 +102,37 @@ test("CROW_INSTALL_REF=main keeps today's plain clone (tip of main)", () => {
   assert.equal(r.status, 0, `clone_crow_release failed:\n${r.stdout}\n${r.stderr}`);
 
   assert.equal(git(dest, "rev-parse", "HEAD").trim(), b);
+  assert.equal(git(dest, "symbolic-ref", "--short", "HEAD").trim(), "main");
+});
+
+test("a CROW_INSTALL_REF that does not exist fails instead of silently installing main", () => {
+  const { root, bare } = makeReleaseFixture();
+  const dest = join(root, "app");
+
+  const r = runWithHelpers(`clone_crow_release "${dest}"`, {
+    CROW_REPO_URL: bare,
+    CROW_INSTALL_REF: "v0.0.0-missing",
+    HOME: root,
+  });
+  assert.notEqual(r.status, 0, `a missing ref must fail:\n${r.stdout}\n${r.stderr}`);
+  assert.match(r.stdout + r.stderr, /was not found/, "the error must name the missing ref");
+  // No half-made clone left behind: a rerun must not take the "already cloned"
+  // path and install main under a ref that does not exist.
+  assert.equal(existsSync(dest), false, "the half-made clone must be removed");
+});
+
+test("a commit sha is accepted as CROW_INSTALL_REF (still on a local main)", () => {
+  const { root, bare, a } = makeReleaseFixture();
+  const dest = join(root, "app");
+
+  const r = runWithHelpers(`clone_crow_release "${dest}"`, {
+    CROW_REPO_URL: bare,
+    CROW_INSTALL_REF: a,
+    HOME: root,
+  });
+  assert.equal(r.status, 0, `clone_crow_release failed for sha ${a}:\n${r.stdout}\n${r.stderr}`);
+
+  assert.equal(git(dest, "rev-parse", "HEAD").trim(), a, "HEAD must be the pinned commit");
   assert.equal(git(dest, "symbolic-ref", "--short", "HEAD").trim(), "main");
 });
 

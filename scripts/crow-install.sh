@@ -1421,6 +1421,10 @@ add_crow_to_path() {
 # keeping a real main branch, and the upstream is origin/main, so the updater's
 # `git pull --ff-only` fast-forwards onto main (only while the pinned commit is
 # an ancestor of main). CROW_INSTALL_REF=main keeps the plain clone.
+# A ref that resolves to neither a tag nor a remote branch is accepted only when
+# it names a commit (a sha); otherwise it is a hard error, never a blind
+# `checkout -B main` — that would silently install main under a ref that does
+# not exist.
 clone_crow_release() {
   local dest="$1"
   git clone "$CROW_REPO_URL" "$dest"
@@ -1438,8 +1442,16 @@ clone_crow_release() {
     git -C "$dest" checkout -q -B main "refs/tags/$CROW_INSTALL_REF"
   elif git -C "$dest" rev-parse --verify --quiet "origin/$CROW_INSTALL_REF^{commit}" >/dev/null; then
     git -C "$dest" checkout -q -B main "origin/$CROW_INSTALL_REF"
-  else
+  elif git -C "$dest" rev-parse --verify --quiet "$CROW_INSTALL_REF^{commit}" >/dev/null; then
+    # Not a tag or a remote branch, but it does name a commit (a sha): use it.
     git -C "$dest" checkout -q -B main "$CROW_INSTALL_REF"
+  else
+    # Nothing resolves. exit (not return) after removing the half-made clone so
+    # a rerun cannot find a leftover checkout, take the "already cloned" path
+    # and silently install main.
+    error "CROW_INSTALL_REF '$CROW_INSTALL_REF' was not found in $CROW_REPO_URL"
+    rm -rf "$dest"
+    exit 1
   fi
   git -C "$dest" branch --set-upstream-to=origin/main main
 }
