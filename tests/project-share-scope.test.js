@@ -114,7 +114,8 @@ const allNames = () => [...new Set([
 // --- the inventory --------------------------------------------------------------------------
 
 test("the five collections are frozen and shaped as the plan says", () => {
-  for (const c of [S.TOOL_CLASS, S.HOME_ONLY_TOOLS, S.SCOPED_LISTING_TOOLS, S.OWNER_ONLY_TOOLS, S.PROJECT_NEUTRAL_TOOLS]) {
+  for (const c of [S.TOOL_CLASS, S.HOME_ONLY_TOOLS, S.SCOPED_LISTING_TOOLS, S.SCOPED_LISTING_PROJECT_TOOLS,
+    S.OWNER_ONLY_TOOLS, S.PROJECT_NEUTRAL_TOOLS]) {
     assert.ok(Object.isFrozen(c));
   }
   assert.ok(Object.isFrozen(S.TOOL_CLASS.crow_get_memory));
@@ -122,7 +123,25 @@ test("the five collections are frozen and shaped as the plan says", () => {
   assert.deepEqual(S.TOOL_CLASS.crow_fetch_source, { family: "source", class: "write" });
   assert.deepEqual(S.TOOL_CLASS.crow_upload_file, { family: "file", class: "write" });
   assert.deepEqual(S.TOOL_CLASS.crow_search_notes, { family: "note", class: "read" });
-  assert.equal(S.PROJECT_NEUTRAL_TOOLS.length, 9);
+  assert.equal(S.PROJECT_NEUTRAL_TOOLS.length, 6);
+  // A bot may SEND the operator a notification; reading or dismissing one is owner-only, because
+  // the text carries other projects' names and card titles and a dismiss clears the owner's alerts.
+  assert.ok(S.PROJECT_NEUTRAL_TOOLS.includes("crow_create_notification"));
+  assert.ok(S.PROJECT_NEUTRAL_TOOLS.includes("crow_notification_settings"));
+  for (const tool of ["crow_check_notifications", "crow_dismiss_notification", "crow_dismiss_all_notifications"]) {
+    assert.ok(S.OWNER_ONLY_TOOLS.includes(tool), tool);
+    assert.ok(!S.PROJECT_NEUTRAL_TOOLS.includes(tool), tool);
+  }
+  // The schedules table has no project column: the three schedule tools cannot be scoped at all.
+  for (const tool of ["crow_create_schedule", "crow_list_schedules", "crow_update_schedule"]) {
+    assert.ok(S.OWNER_ONLY_TOOLS.includes(tool), tool);
+    assert.ok(!S.HOME_ONLY_TOOLS.includes(tool), tool);
+  }
+  // One listing takes a project_id filter, so it is a narrower list of its own.
+  assert.deepEqual(S.SCOPED_LISTING_PROJECT_TOOLS, ["crow_list_context_sections"]);
+  for (const tool of S.SCOPED_LISTING_PROJECT_TOOLS) {
+    assert.ok(S.SCOPED_LISTING_TOOLS.includes(tool), `${tool} is a scoped listing too`);
+  }
   // Only crow_dream is listed twice (in SCOPED_LISTING_TOOLS and OWNER_ONLY_TOOLS).
   const occurrences = [S.TOOL_CLASS, S.HOME_ONLY_TOOLS, S.SCOPED_LISTING_TOOLS, S.OWNER_ONLY_TOOLS, S.PROJECT_NEUTRAL_TOOLS]
     .map((c) => (Array.isArray(c) ? c.length : Object.keys(c).length))
@@ -138,7 +157,11 @@ test("toolPolicyFor resolves crow_dream's two entries by dry_run and classifies 
   assert.equal(S.toolPolicyFor("crow_delete_memory").kind, "write");
   assert.equal(S.toolPolicyFor("crow_update_project").kind, "home_only");
   assert.equal(S.toolPolicyFor("crow_list_projects").kind, "scoped_listing");
+  assert.equal(S.toolPolicyFor("crow_list_context_sections").kind, "scoped_listing");
   assert.equal(S.toolPolicyFor("crow_create_project").kind, "owner_only");
+  assert.equal(S.toolPolicyFor("crow_create_schedule").kind, "owner_only");
+  assert.equal(S.toolPolicyFor("crow_check_notifications").kind, "owner_only");
+  assert.equal(S.toolPolicyFor("crow_create_notification").kind, "neutral");
   assert.equal(S.toolPolicyFor("crow_web_search").kind, "neutral");
   assert.equal(S.toolPolicyFor("crow_not_a_tool"), null, "unlisted: no policy, so denied at runtime");
 });
@@ -278,6 +301,61 @@ test("every HOME_ONLY tool is refused on X even with a read_write share", async 
     assert.equal(d.allowed, false, tool);
     assert.equal(d.code, "home_only", tool);
     assert.ok(!d.message.includes("Home only target"), "the refusal never carries the project name");
+  }
+});
+
+test("a scoped listing that names another project is home_only, even with a read_write share", async () => {
+  const X = await mkProject("Listing target");
+  const home = await mkProject("Listing home");
+  const bot = await mkBot({ home });
+  await grant(X, bot, "read_write");
+  const actor = { kind: "bot", id: bot };
+
+  const onX = await S.decideProjectAccess(db, actor, { tool: "crow_list_context_sections", projectId: X });
+  assert.equal(onX.allowed, false, "a share of X does not buy X's section names");
+  assert.equal(onX.code, "home_only");
+  assert.ok(!onX.message.includes("Listing target"), "the refusal never carries the project name");
+
+  const onHome = await S.decideProjectAccess(db, actor, { tool: "crow_list_context_sections", projectId: home });
+  assert.equal(onHome.allowed, true, "the home project behaves as before");
+  assert.equal(onHome.projectId, home);
+  const noProject = await S.decideProjectAccess(db, actor, { tool: "crow_list_context_sections", projectId: null });
+  assert.equal(noProject.allowed, true, "omitting the filter behaves as before");
+  assert.equal(noProject.projectId, home);
+
+  const gate = S.makeShareGate(db, "crow_list_context_sections", { baseActor: actor });
+  assert.equal((await gate.check(X)).isError, true);
+  assert.deepEqual(await gate.check(home), { projectId: home });
+
+  const homeless = { kind: "bot", id: await mkBot({}) };
+  assert.equal((await S.decideProjectAccess(db, homeless, { tool: "crow_list_context_sections", projectId: X })).code,
+    "home_only");
+});
+
+test("notification reading and dismissing are owner-only; sending one stays neutral", async () => {
+  const home = await mkProject("Notification home");
+  const X = await mkProject("Notification target");
+  const bot = await mkBot({ home });
+  await grant(X, bot, "read_write");
+  const actor = { kind: "bot", id: bot };
+
+  for (const tool of ["crow_check_notifications", "crow_dismiss_notification", "crow_dismiss_all_notifications"]) {
+    for (const projectId of [home, X, null]) {
+      const d = await S.decideProjectAccess(db, actor, { tool, projectId });
+      assert.equal(d.allowed, false, `${tool} with project ${projectId}`);
+      assert.equal(d.code, "owner_only", tool);
+    }
+  }
+
+  assert.equal((await S.decideProjectAccess(db, actor,
+    { tool: "crow_create_notification", projectId: home })).allowed, true);
+  assert.equal((await S.decideProjectAccess(db, actor,
+    { tool: "crow_notification_settings", projectId: null })).allowed, true);
+
+  // The operator's voice bot is exempt from the bot rules, notifications included.
+  const voice = { kind: "bot", id: CROW_VOICE_BOT_ID };
+  for (const tool of ["crow_check_notifications", "crow_dismiss_all_notifications"]) {
+    assert.equal((await S.decideProjectAccess(db, voice, { tool, projectId: null })).allowed, true, tool);
   }
 });
 
@@ -463,19 +541,19 @@ test("an unverified bot is refused every registered tool with owner_only", async
 
 // --- HOME_ONLY with no project_id -----------------------------------------------------------
 
-test("a HOME_ONLY call with no project_id becomes the home project, and is refused without one", async () => {
+test("I3: a HOME_ONLY call with no project_id becomes the home project, and is refused without one", async () => {
   const home = await mkProject("Context home");
   const bot = await mkBot({ home });
   const actor = { kind: "bot", id: bot };
   const homeless = { kind: "bot", id: await mkBot({}) };
 
-  for (const tool of ["crow_get_context", "crow_update_context_section", "crow_create_schedule"]) {
+  for (const tool of ["crow_get_context", "crow_update_context_section"]) {
     const d = await S.decideProjectAccess(db, actor, { tool, projectId: null });
     assert.equal(d.allowed, true, tool);
     assert.equal(d.projectId, home, `${tool} is resolved to the home project`);
 
     const gate = S.makeShareGate(db, tool, { baseActor: actor });
-    assert.equal(await gate.check(undefined), null, tool);
+    assert.deepEqual(await gate.check(undefined), { projectId: home }, tool);
     assert.deepEqual(await gate.writeProject(undefined), { projectId: home }, tool);
 
     const noHome = await S.decideProjectAccess(db, homeless, { tool, projectId: null });
@@ -489,6 +567,56 @@ test("a HOME_ONLY call with no project_id becomes the home project, and is refus
     const viaGate = await S.makeShareGate(db, tool, { baseActor: actor }).check(home, { device_id: "device-1" });
     assert.equal(viaGate.isError, true, tool);
   }
+});
+
+test("I3: the schedule tools are owner_only for a bot, home project or not", async () => {
+  const home = await mkProject("Schedule home");
+  const X = await mkProject("Schedule target");
+  const bot = await mkBot({ home });
+  await grant(X, bot, "read_write");
+  const actor = { kind: "bot", id: bot };
+
+  // The schedules table has no project column, so nothing can be scoped to a project: a bot gets
+  // no schedule tool at all, on its own project or on a shared one.
+  for (const tool of ["crow_create_schedule", "crow_list_schedules", "crow_update_schedule"]) {
+    for (const projectId of [home, X, null]) {
+      const d = await S.decideProjectAccess(db, actor, { tool, projectId });
+      assert.equal(d.allowed, false, `${tool} with project ${projectId}`);
+      assert.equal(d.code, "owner_only", tool);
+    }
+  }
+
+  const voice = { kind: "bot", id: CROW_VOICE_BOT_ID };
+  assert.equal((await S.decideProjectAccess(db, voice, { tool: "crow_create_schedule", projectId: X })).allowed, true,
+    "the operator's voice bot stays exempt");
+});
+
+// --- the gate's pass shape ------------------------------------------------------------------
+
+test("the gate answers the resolved project on a pass and the tool-result shape on a refusal", async () => {
+  const home = await mkProject("Gate home");
+  const X = await mkProject("Gate target");
+  const bot = await mkBot({ home });
+  await grant(X, bot, "read");
+  const actor = { kind: "bot", id: bot };
+
+  const readGate = S.makeShareGate(db, "crow_search_sources", { baseActor: actor });
+  assert.deepEqual(await readGate.check(X), { projectId: X }, "a named project resolves to itself");
+  assert.deepEqual(await readGate.check(undefined), { projectId: home }, "an omitted project resolves to home");
+
+  const writeGate = S.makeShareGate(db, "crow_store_memory", { baseActor: actor });
+  const refusal = await writeGate.check(X);
+  assert.equal(refusal.isError, true);
+  assert.equal(refusal.projectId, undefined, "a refusal carries no project for a handler to write against");
+  assert.equal(refusal.content[0].text, `Error: This bot's share of that project is read-only.`);
+
+  const rowGate = S.makeShareGate(db, "crow_get_memory", { baseActor: actor });
+  assert.equal(await rowGate.checkRow(home), null, "checkRow passes null: the row already names its project");
+  const unshared = await mkProject("Gate unshared target");
+  assert.deepEqual(await rowGate.checkRow(unshared), S.notFoundResult(), "and refuses with the not-found result");
+
+  assert.deepEqual(await S.makeShareGate(db, "crow_web_search", { baseActor: OWNER }).check(X), { projectId: X });
+  assert.deepEqual(await S.makeShareGate(db, "crow_web_search", { baseActor: OWNER }).check(null), { projectId: null });
 });
 
 // --- refusal repeat suppression -------------------------------------------------------------
@@ -523,6 +651,44 @@ test("repeats of one refusal inside 60 s collapse, and the log takes the next on
   await S.auditRefusal(db, actor, { tool: "crow_get_source", projectId: 987654, code: "no_share", now: () => t });
   const ghost = await db.execute({ sql: "SELECT COUNT(*) AS n FROM project_audit_log WHERE project_id = 987654", args: [] });
   assert.equal(Number(ghost.rows[0].n), 0, "a project that does not exist takes no row");
+});
+
+test("a refusal that names no project is logged on the bot's home project, and dropped when it has none", async () => {
+  const home = await mkProject("Refusal home");
+  const bot = await mkBot({ home });
+  const actor = { kind: "bot", id: bot };
+
+  // Through the gate: a device-named call is owner_only and names no project at all.
+  const gate = S.makeShareGate(db, "crow_get_context", { baseActor: actor });
+  const refusal = await gate.check(undefined, { device_id: "device-1" });
+  assert.equal(refusal.isError, true);
+
+  const rows = await audits(home);
+  assert.equal(rows.length, 1, "the bot's own project log records the refusal");
+  assert.equal(rows[0].actor_type, "bot");
+  assert.equal(rows[0].actor_id, bot);
+  assert.equal(rows[0].target, "tool:crow_get_context");
+  assert.deepEqual(JSON.parse(rows[0].payload), { code: "owner_only" });
+  assert.ok(!rows[0].payload.includes("Refusal home"));
+
+  // The 60 s suppression still covers the home-project fallback.
+  await gate.check(undefined, { device_id: "device-1" });
+  assert.equal((await audits(home)).length, 1, "a repeat inside 60 s collapses");
+
+  // A bot with no home project, and an unverified bot, are skipped silently.
+  const t = 9_000_000;
+  const homeless = await mkBot({});
+  await S.auditRefusal(db, { kind: "bot", id: homeless },
+    { tool: "crow_get_memory", projectId: null, code: "owner_only", now: () => t });
+  await S.auditRefusal(db, { kind: "bot", id: null, unverified: true },
+    { tool: "crow_get_memory", projectId: null, code: "owner_only", now: () => t });
+  const stray = await db.execute({
+    sql: `SELECT COUNT(*) AS n FROM project_audit_log
+           WHERE action = 'share.refused' AND target = 'tool:crow_get_memory'
+             AND (actor_id = ? OR actor_id = 'unknown')`,
+    args: [homeless],
+  });
+  assert.equal(Number(stray.rows[0].n), 0, "there is nothing to log a homeless or unverified bot against");
 });
 
 // --- coverage: the three factories ------------------------------------------------------------

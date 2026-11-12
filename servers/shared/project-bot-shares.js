@@ -25,8 +25,6 @@
 // See the private engineering notes for the Phase 1 share design.
 
 import { AclError, appendAudit, assertProjectExists } from "./project-acl.js";
-import { readSetting } from "../gateway/dashboard/settings/registry.js";
-import { parseRemoteInvocationFlag, remoteServersForBot } from "../../scripts/pi-bots/remote-blocks.mjs";
 
 export const SHARE_LEVELS = Object.freeze(["read", "read_write"]);
 
@@ -99,8 +97,16 @@ async function auditBoth(db, { action, project, home, botId, payload }) {
  * Whether the bot can invoke a peer's tools at all: this instance's `remote_invocation` flag is on
  * AND the bot selects at least one remote capability. A live share blocks that proxy, so the caller
  * uses this to warn that the warning toggle is about to be inert for this bot.
+ *
+ * Both halves are resolved LAZILY, here and nowhere else: the settings registry and the pi-bots
+ * remote-block helper are dashboard/bridge code, and a server that only imports this store (to
+ * resolve a bot's access) must not pull them in.
  */
 async function remoteInvocationOn(db, bot) {
+  const [{ readSetting }, { parseRemoteInvocationFlag, remoteServersForBot }] = await Promise.all([
+    import("../gateway/dashboard/settings/registry.js"),
+    import("../../scripts/pi-bots/remote-blocks.mjs"),
+  ]);
   let raw = null;
   try { raw = await readSetting(db, "feature_flags"); } catch { return false; }
   if (!parseRemoteInvocationFlag(raw)) return false;

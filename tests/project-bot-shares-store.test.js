@@ -7,10 +7,11 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const dir = mkdtempSync(join(tmpdir(), "crow-shares-"));
 const DATA = join(dir, "data");
@@ -24,6 +25,8 @@ process.env.CROW_TASKS_DB_PATH = join(DATA, "tasks.db");
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
 
 const REPO = join(import.meta.dirname, "..");
+const STORE_URL = pathToFileURL(join(REPO, "servers/shared/project-bot-shares.js")).href;
+const REMOTE_BLOCKS_URL = pathToFileURL(join(REPO, "scripts/pi-bots/remote-blocks.mjs")).href;
 
 let db = null;
 let createProjectSpace = null;
@@ -394,6 +397,41 @@ test("a bot with no live share is a no-op for revokeAllSharesForBot", async () =
   assert.equal(await S.botHoldsLiveShare(db, "never-shared-bot"), false);
 });
 
+// ---- importing the store stays light ----
+
+// A child process records which modules the loader actually resolves, so the store's own import
+// graph can be inspected without this file's earlier imports having loaded anything.
+const PROBE_PRELUDE = [
+  'import { registerHooks } from "node:module";',
+  "const loaded = [];",
+  "registerHooks({",
+  "  resolve(spec, context, next) {",
+  "    const r = next(spec, context);",
+  '    if (/settings\\/registry\\.js$|remote-blocks\\.mjs$/.test(r.url)) loaded.push(r.url);',
+  "    return r;",
+  "  },",
+  "});",
+];
+
+function moduleLoadProbe(extraImports = []) {
+  const lines = [
+    ...PROBE_PRELUDE,
+    ...extraImports.map((u) => `await import(${JSON.stringify(u)});`),
+    `await import(${JSON.stringify(STORE_URL)});`,
+    'console.log(loaded.length ? loaded.join(",") : "-");',
+  ];
+  const out = spawnSync(process.execPath, ["--input-type=module", "-e", lines.join("\n")],
+    { cwd: REPO, env: { ...process.env }, encoding: "utf8" });
+  assert.equal(out.status, 0, out.stderr || out.stdout);
+  return out.stdout.trim();
+}
+
+test("importing the store alone loads neither the settings registry nor the remote-block helper", () => {
+  assert.equal(moduleLoadProbe(), "-", "the store's own import graph stays light");
+  assert.match(moduleLoadProbe([REMOTE_BLOCKS_URL]), /remote-blocks\.mjs$/,
+    "the probe does report an eager import");
+});
+
 // ---- the two lifecycle endings ----
 
 test("purging a project revokes the shares pointing at it and audits each bot's home log", async () => {
@@ -460,4 +498,42 @@ test("deleting a bot through the Bot Builder revokes its shares; a new bot with 
   });
   assert.deepEqual(await S.resolveBotAccess(db, botId, x), NO_ACCESS);
   assert.equal(await S.botHoldsLiveShare(db, botId), false);
+});
+
+test("a revoke that throws stops the delete before the def row goes", async () => {
+  const home = await mkProject("Share home X");
+  const x = await mkProject("Share target X");
+  const botId = "share-break-bot";
+  await db.execute({
+    sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled) VALUES (?,?,?,?,1)",
+    args: [botId, "Break Bot", "{}", home],
+  });
+  const granted = await S.grantShare(db, { projectId: x, botId, level: "read" });
+
+  // Everything else answers; only the share store is down.
+  const sharesDown = {
+    execute(arg, ...rest) {
+      const sql = typeof arg === "string" ? arg : (arg && arg.sql);
+      if (String(sql || "").includes("project_bot_shares")) throw new Error("shares store unavailable");
+      return db.execute(arg, ...rest);
+    },
+    close() { return db.close(); },
+  };
+
+  const res = { redirected: null, redirectAfterPost(u) { this.redirected = u; } };
+  await handleDeleteConfirm({ body: { action: "delete_confirm", bot_id: botId } }, res, { db: sharesDown });
+
+  const url = String(res.redirected);
+  assert.match(url, /error=/, "the failure is reported back to the operator");
+  assert.ok(!url.includes("deleted="), "nothing claims the bot was deleted");
+  assert.equal(await n("SELECT COUNT(*) AS n FROM pi_bot_defs WHERE bot_id = ?", [botId]), 1,
+    "a bot that still reaches its shared projects keeps its def");
+  const row = await one("SELECT revoked_at FROM project_bot_shares WHERE id = ?", [granted.id]);
+  assert.equal(row.revoked_at, null, "and the share was not left half-revoked");
+
+  // Once the store answers again the delete goes through.
+  const retry = { redirected: null, redirectAfterPost(u) { this.redirected = u; } };
+  await handleDeleteConfirm({ body: { action: "delete_confirm", bot_id: botId } }, retry, { db });
+  assert.match(String(retry.redirected), new RegExp(`deleted=${botId}`));
+  assert.equal(await n("SELECT COUNT(*) AS n FROM pi_bot_defs WHERE bot_id = ?", [botId]), 0);
 });
