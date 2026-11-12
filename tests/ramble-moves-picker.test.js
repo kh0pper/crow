@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { slotFor, pickChallenge } from "../bundles/ramble/server/moves/picker.js";
+import { slotFor, pickChallenge, pickChunk } from "../bundles/ramble/server/moves/picker.js";
 
 /** A minimal picker-shaped entry; each test overrides exactly what it is about. */
 function entry(over = {}) {
@@ -19,6 +19,7 @@ function entry(over = {}) {
     minutes: 10,
     indoor: true,
     equipment: ["none"],
+    areas: ["core"],
     skipIf: [],
     reviewed: true,
     ...over,
@@ -286,4 +287,194 @@ test("an entry with no level is never picked; junk kinds are ignored, not a filt
   const { level, ...noLevel } = PUSHUP;
   assert.equal(pick({ day: "2026-11-02", library: [noLevel] }), null);
   assert.ok(pick({ day: "2026-11-02", library: [PUSHUP], prefs: { ...BASE_PREFS, kinds: ["not-a-kind"] } }));
+});
+
+/* ------------------------------------------------------------------ *
+ * pickChunk: the slot-and-area pick behind a day's chunk (moves Task 4).
+ * ------------------------------------------------------------------ */
+
+/** A chunk that tags the given areas; kind flow so the learning rule can bite. */
+function chunk(id, areas, over = {}) {
+  return entry({ id, kind: "flow", activity: "yoga", areas, ...over });
+}
+
+/** pickChunk with test defaults; every test overrides only what it is about. */
+function pickC(over = {}) {
+  return pickChunk({
+    day: "2026-09-14",
+    slot: "midday",
+    area: "free",
+    weights: {},
+    weather: null,
+    prefs: BASE_PREFS,
+    history: {},
+    library: [chunk("core-1", ["core"])],
+    swap: 0,
+    ...over,
+  });
+}
+
+test("pickChunk: pure and deterministic, and different seeds vary the pick", () => {
+  const library = [chunk("c-a", ["core"]), chunk("c-b", ["core"]), chunk("c-c", ["core"])];
+  for (const day of days(40)) {
+    for (const swap of [0, 1, 2]) {
+      for (const slot of ["morning", "midday", "evening"]) {
+        assert.deepEqual(
+          pickC({ day, swap, slot, area: "core", library }),
+          pickC({ day, swap, slot, area: "core", library }),
+        );
+      }
+    }
+  }
+  const seen = new Set(days(40).map((day) => pickC({ day, area: "core", library }).entryId));
+  assert.equal(seen.size, 3, "over 40 seeds every candidate gets its turn: " + [...seen].join(","));
+});
+
+test("pickChunk: the library's order never matters", () => {
+  const library = [
+    chunk("o-1", ["core"]),
+    chunk("o-2", ["core", "upper"]),
+    chunk("o-3", ["mobility"]),
+    chunk("o-4", ["upper"]),
+  ];
+  const backwards = [...library].reverse();
+  for (const day of days(50)) {
+    for (const area of ["core", "upper", "heart", "free"]) {
+      const opts = { day, area, weights: { upper: 3 }, swap: day.length % 3 };
+      assert.deepEqual(pickC({ ...opts, library }), pickC({ ...opts, library: backwards }), day + " " + area);
+    }
+  }
+});
+
+test("pickChunk: poses and short exercises are never picked", () => {
+  const pose = entry({ id: "pose-1", kind: "pose", minutes: 1, areas: ["mobility"] });
+  const short = entry({ id: "short-1", kind: "exercise", minutes: 5, areas: ["upper"] });
+  const flow = chunk("flow-1", ["mobility"]);
+  for (const day of days(30)) {
+    for (const area of ["mobility", "upper", "free"]) {
+      assert.equal(pickC({ day, area, library: [pose, short] }), null, "nothing short of a chunk is a chunk");
+      assert.equal(pickC({ day, area, library: [pose, short, flow] }).entryId, "flow-1");
+    }
+  }
+});
+
+test("pickChunk: area lower only ever returns a chunk that tags lower", () => {
+  const library = [chunk("lower-1", ["lower"]), chunk("core-1", ["core"]), chunk("mixed-1", ["core", "lower"])];
+  const tagsLower = new Set(["lower-1", "mixed-1"]);
+  for (const day of days(60)) {
+    for (const swap of [0, 1]) {
+      const r = pickC({ day, swap, area: "lower", library });
+      assert.ok(tagsLower.has(r.entryId), "picked " + r.entryId + " for lower");
+      assert.equal(r.area, "lower");
+    }
+  }
+});
+
+test("pickChunk: an area with no chunk falls back to mobility, then core, then null", () => {
+  const mobility = chunk("mob-1", ["mobility"]);
+  const core = chunk("core-1", ["core"]);
+  const upper = chunk("upper-1", ["upper"]);
+  const lower = chunk("lower-1", ["lower"]);
+  for (const day of days(20)) {
+    const viaMobility = pickC({ day, area: "upper", library: [mobility, core] });
+    assert.equal(viaMobility.entryId, "mob-1");
+    assert.equal(viaMobility.area, "mobility", "the area says which one was used");
+
+    const viaCore = pickC({ day, area: "upper", library: [core] });
+    assert.equal(viaCore.entryId, "core-1");
+    assert.equal(viaCore.area, "core");
+
+    // A real upper chunk is preferred over any fallback.
+    assert.equal(pickC({ day, area: "upper", library: [mobility, core, upper] }).area, "upper");
+
+    // Nothing in the area, mobility or core: nothing at all.
+    assert.equal(pickC({ day, area: "heart", library: [upper, lower] }), null);
+  }
+});
+
+test("pickChunk: a chunk that also trains a x3 area wins over area-only chunks", () => {
+  const library = [chunk("core-a", ["core"]), chunk("core-b", ["core"]), chunk("core-upper", ["core", "upper"])];
+  for (const day of days(120)) {
+    for (const swap of [0, 1, 2]) {
+      const r = pickC({ day, swap, area: "core", weights: { upper: 3 }, library });
+      assert.equal(r.entryId, "core-upper", day + " swap " + swap);
+      assert.equal(r.area, "core");
+    }
+  }
+});
+
+test("pickChunk: the free area follows the weights", () => {
+  const upper = chunk("upper-1", ["upper"]);
+  const core = chunk("core-1", ["core"]);
+  const weights = { upper: 3, core: 0.5 };
+  const picks = days(60).map((day) => pickC({ day, area: "free", weights, library: [upper, core] }));
+  for (const r of picks) assert.equal(r.area, "free");
+  const counts = countsOf(picks.map((r) => r.entryId));
+  assert.equal((counts["upper-1"] ?? 0) + (counts["core-1"] ?? 0), 60);
+  assert.ok((counts["core-1"] ?? 0) > 0, "a lighter weight still gets picked: " + JSON.stringify(counts));
+  assert.ok(
+    (counts["upper-1"] ?? 0) >= 4 * (counts["core-1"] ?? 0),
+    "weight 3 vs 0.5 should show over 60 days: " + JSON.stringify(counts),
+  );
+});
+
+test("pickChunk: exclude removes ids", () => {
+  const library = [chunk("x-1", ["core"]), chunk("x-2", ["core"])];
+  for (const day of days(40)) {
+    assert.equal(pickC({ day, area: "core", library, exclude: ["x-1"] }).entryId, "x-2");
+    assert.equal(pickC({ day, area: "free", library, exclude: ["x-2"] }).entryId, "x-1");
+  }
+  assert.equal(pickC({ area: "core", library, exclude: ["x-1", "x-2"] }), null);
+  assert.equal(pickC({ area: "core", library, exclude: ["x-1", "x-2", "junk", 7, ""] }), null);
+});
+
+test("pickChunk: a stated limit removes entries whose skipIf carries that tag", () => {
+  const knee = chunk("knee-1", ["core"], { skipIf: ["knee"] });
+  const clear = chunk("clear-1", ["core"]);
+  const prefs = { ...BASE_PREFS, limits: ["knee"] };
+  for (const day of days(40)) {
+    assert.equal(pickC({ day, area: "core", prefs, library: [knee, clear] }).entryId, "clear-1");
+    assert.equal(pickC({ day, area: "free", prefs, library: [knee, clear] }).entryId, "clear-1");
+  }
+  assert.equal(pickC({ area: "core", prefs, library: [knee] }), null);
+});
+
+test("pickChunk: rain keeps only indoor chunks", () => {
+  const outdoor = chunk("out-1", ["heart"], { indoor: false });
+  const indoor = chunk("in-1", ["heart"], { indoor: true });
+  const weather = { rain: 80, temp: 18, code: "rain" };
+  for (const day of days(40)) {
+    const r = pickC({ day, area: "heart", weather, library: [outdoor, indoor] });
+    assert.equal(r.entryId, "in-1");
+    assert.ok(r.reasons.includes("rain_later"), r.reasons.join(","));
+    assert.equal(pickC({ day, area: "free", weather, library: [outdoor, indoor] }).entryId, "in-1");
+  }
+  assert.equal(pickC({ area: "heart", weather, library: [outdoor] }), null);
+});
+
+test("pickChunk: reasons carry the slot code and the same fact codes as pickChallenge", () => {
+  const library = [chunk("core-1", ["core"])];
+  const codes = { morning: "slot:early", midday: "slot:day", evening: "slot:evening" };
+  for (const [slot, code] of Object.entries(codes)) {
+    assert.equal(pickC({ slot, area: "core", library }).reasons[0], code);
+  }
+  const learned = chunk("learn-flow", ["core"], { level: 1 });
+  const r = pickC({
+    area: "core",
+    library: [learned],
+    prefs: { ...BASE_PREFS, kinds: ["yoga"] },
+    history: { done: {}, skipped: {}, learning: ["learn-flow"] },
+  });
+  assert.deepEqual(r.reasons, ["slot:day", "liked:yoga", "learning_flow", "easy_day"]);
+});
+
+test("pickChunk: an unknown slot or area is null, not a throw", () => {
+  const library = [chunk("core-1", ["core"])];
+  for (const slot of ["", "noon", "MORNING", null, undefined, 7]) {
+    assert.equal(pickC({ slot, area: "core", library }), null, "slot " + String(slot));
+  }
+  for (const area of ["", "legs", "Free", null, undefined]) {
+    assert.equal(pickC({ area, library }), null, "area " + String(area));
+  }
+  assert.deepEqual(pickC(), { entryId: "core-1", area: "free", reasons: ["slot:day"] });
 });

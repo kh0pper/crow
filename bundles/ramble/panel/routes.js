@@ -311,7 +311,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   async function ensureMovesMods(res) {
     if (movesMods) return true;
     try {
-      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod] = await Promise.all([
+      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod, slotsMod] = await Promise.all([
         bundleImport("server/moves/library.js"),
         bundleImport("server/moves/picker.js"),
         bundleImport("server/moves/ledger.js"),
@@ -320,9 +320,10 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/moves/learning.js"),
         bundleImport("server/moves/parse.js"),
         bundleImport("server/moves/progress.js"),
+        bundleImport("server/moves/slots.js"),
       ]);
       movesMods = {
-        libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod,
+        libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod, slotsMod,
       };
       return true;
     } catch (err) {
@@ -409,12 +410,63 @@ export default function rambleRouter(dashboardAuth, options = {}) {
    * Today's pick, assembled by the ONE shared function both surfaces call
    * (moves/today.js todayForSurface): prefs, the weather the user still wants
    * weighed, the served library and the learned flows.
+   *
+   * The day's cards are drawn first (moves/slots.js dayCards), because that draw
+   * is what mirrors the Now card into the one card `moves.today` carries — the
+   * row todayForSurface reuses. A failure drawing them is logged and the old
+   * strip still answers from the stored card, so this surface never depends on
+   * the day's slots being drawable.
    */
   async function todayCard(now, lang) {
+    const prefs = await movesMods.todayMod.readPrefs(db);
+    const weather = await movesWeather(prefs);
+    try {
+      await movesMods.slotsMod.dayCards(db, { now, weather, emit, library: servedMoves() });
+    } catch (err) {
+      console.warn(`[ramble routes] moves day cards unavailable: ${err?.message ?? err}`);
+    }
     return movesMods.todayMod.todayForSurface(db, {
-      now, weather: await movesWeather(await movesMods.todayMod.readPrefs(db)), emit,
-      library: servedMoves(), lang,
+      now, weather, library: servedMoves(), lang, emit,
     });
+  }
+
+  /**
+   * The day's cards as the panel reads them: one item per slot, the card without
+   * the joint-angle data, the reason line for the slot, and the flag pair the
+   * wallet holds. The day's `seen` lists stay in the database — a card that was
+   * shown is bookkeeping, not something a surface renders. `refused` is only
+   * carried when the caller states it, so a swap's answer has it and a plain
+   * read of the day does not.
+   */
+  async function dayPayload(now, { refused } = {}) {
+    const prefs = await movesMods.todayMod.readPrefs(db);
+    const library = servedMoves();
+    const out = await movesMods.slotsMod.dayCards(db, {
+      now, weather: await movesWeather(prefs), emit, library,
+    });
+    const slots = (Array.isArray(out.slots) ? out.slots : []).map((item) => {
+      const reasons = Array.isArray(item.reasons) ? item.reasons : [];
+      const entry = item.empty || !item.entryId
+        ? null
+        : withoutPose(movesMods.libraryMod.entryById(library, item.entryId));
+      return {
+        slot: item.slot,
+        entry,
+        area: item.area,
+        plannedArea: item.plannedArea,
+        reasons,
+        why: movesMods.todayMod.whyLine(reasons),
+        swap: Number.isInteger(item.swap) ? item.swap : 0,
+        done: !!item.done,
+        standIn: !!item.standIn,
+        empty: !!item.empty,
+      };
+    });
+    const payload = {
+      day: out.day, need: out.need, nowSlot: out.nowSlot, off: !!out.off, slots,
+    };
+    if (refused !== undefined) payload.refused = !!refused;
+    return payload;
   }
 
   /** The whole moves strip: today's card, the bird's Health, steps and the streak. */
@@ -1391,6 +1443,21 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     res.json(await movesSnapshot(Date.now()));
   }));
 
+  router.get("/api/ramble/moves/day", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    res.json(await dayPayload(Date.now()));
+  }));
+
+  router.post("/api/ramble/moves/slot/swap", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const slot = requireText((req.body || {}).slot, 16, "slot");
+    const library = servedMoves();
+    const weather = await movesWeather(await movesMods.todayMod.readPrefs(db));
+    const out = await movesMods.slotsMod.swapSlot(db, { slot, now, weather, emit, library });
+    res.json({ ...(await dayPayload(now)), refused: !!out?.refused });
+  }));
+
   router.post("/api/ramble/moves/done", handle(async (req, res) => {
     if (!(await ensureMovesMods(res))) return;
     const now = Date.now();
@@ -1530,14 +1597,27 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     res.json({ ...(await movesSnapshot(now)), progress });
   }));
 
+  // The one-card Swap the old strip and the MCP tool still call: it re-rolls the
+  // day's Now card through the day's own slots (moves/slots.js swapSlot), so the
+  // card on screen, the slot behind it and the day's swap cap are one fact. A
+  // day the user paused keeps the old challenge-level path, which is the one
+  // that answers the paused shape.
   router.post("/api/ramble/moves/swap", handle(async (req, res) => {
     if (!(await ensureMovesMods(res))) return;
     const now = Date.now();
     const library = servedMoves();
     const prefs = await movesMods.todayMod.readPrefs(db);
     const weather = await movesWeather(prefs);
-    const learning = await movesMods.learningMod.learningFlows(db, library);
-    const out = await movesMods.todayMod.swapChallenge(db, { now, weather, emit, library, learning });
+    let out;
+    if (prefs.on === false) {
+      const learning = await movesMods.learningMod.learningFlows(db, library);
+      out = await movesMods.todayMod.swapChallenge(db, { now, weather, emit, library, learning });
+    } else {
+      const day = await movesMods.slotsMod.dayCards(db, { now, weather, emit, library });
+      out = day.nowSlot
+        ? await movesMods.slotsMod.swapSlot(db, { slot: day.nowSlot, now, weather, emit, library })
+        : { refused: true };
+    }
     res.json({ ...(await movesSnapshot(now)), refused: !!out?.refused });
   }));
 

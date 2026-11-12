@@ -4,7 +4,12 @@
  *
  * TWO SYNCED SETTINGS ROWS, plus the small history row that feeds the next
  * pick:
- *   moves.prefs   JSON { on, kinds, equipment, limits, level, weather }
+ *   moves.prefs   JSON { on, kinds, equipment, limits, level, weather, cards,
+ *                       windows, contactsSeeMoved }
+ *         cards = how many cards a day the week plan asks for (1, 2 or 3),
+ *         windows = the slot names the user picked, in SLOTS order (empty means
+ *         the default slots for that number of cards), contactsSeeMoved =
+ *         whether the contacts feed may show that a card was done.
  *   moves.today   JSON { day, entryId, swap, seen, reasons, why }
  *         seen = the entry ids already shown today (the first pick and each
  *         swap), so a swap never re-lands on one; absent on rows written
@@ -48,6 +53,7 @@ import {
 } from "./library.js";
 import { pickChallenge } from "./picker.js";
 import { learningFlows } from "./learning.js";
+import { SLOTS } from "./week.js";
 
 /** Synced setting: JSON prefs. */
 export const PREFS_KEY = "moves.prefs";
@@ -69,6 +75,10 @@ export const MAX_SWAPS = 3;
  * until the user says they have one. A stored prefs row is never rewritten, so
  * this list only applies where nothing is saved yet. Limits come from
  * library.js's LIMIT_TAGS only.
+ *
+ * `cards` is three (the full day), and `windows` is empty, which means the
+ * default slots for that number of cards. `contactsSeeMoved` starts true, so a
+ * finished card is shareable until the user says otherwise.
  */
 export const DEFAULT_PREFS = Object.freeze({
   on: true,
@@ -77,6 +87,9 @@ export const DEFAULT_PREFS = Object.freeze({
   limits: Object.freeze([]),
   level: 2,
   weather: true,
+  cards: 3,
+  windows: Object.freeze([]),
+  contactsSeeMoved: true,
 });
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -97,7 +110,7 @@ async function safeEmit(emit, table, op, row) {
 }
 
 /** A JSON setting, or null when absent/unreadable/junk. */
-async function readJson(db, key) {
+export async function readJson(db, key) {
   try {
     const { rows } = await db.execute({
       sql: "SELECT value FROM ramble_settings WHERE key = ?",
@@ -114,7 +127,7 @@ async function readJson(db, key) {
  * the emit. `ramble_settings` is a last-writer-wins table, so the copied row
  * carrying the full value is all a peer needs.
  */
-async function writeJson(db, key, obj, emit) {
+export async function writeJson(db, key, obj, emit) {
   const value = JSON.stringify(obj);
   await db.execute({
     sql: `INSERT INTO ramble_settings (key, value) VALUES (?, ?)
@@ -127,16 +140,36 @@ async function writeJson(db, key, obj, emit) {
 const isVocab = (v, vocab) => typeof v === "string" && vocab.includes(v);
 
 /**
+ * The slot names a stored `windows` names, in SLOTS order. Anything that is not
+ * a list of slot names reads as no choice at all (the default slots), and a
+ * repeat counts once: the list is a set of windows, not a schedule.
+ */
+function normalizeWindows(raw) {
+  if (!Array.isArray(raw)) return [];
+  const named = new Set(raw.filter((w) => isVocab(w, SLOTS)));
+  return SLOTS.filter((s) => named.has(s));
+}
+
+/**
  * Coerce anything that came off disk or the wire into a complete prefs object.
  * Junk in ONE field falls back for that field alone: a peer on a newer version
  * writing a kind this build does not know must not blank the whole set.
  */
 function normalizePrefs(raw) {
-  const out = { ...DEFAULT_PREFS, kinds: [], equipment: [...DEFAULT_PREFS.equipment], limits: [] };
+  const out = {
+    ...DEFAULT_PREFS,
+    kinds: [],
+    equipment: [...DEFAULT_PREFS.equipment],
+    limits: [],
+    windows: [],
+  };
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
   if (typeof raw.on === "boolean") out.on = raw.on;
   if (typeof raw.weather === "boolean") out.weather = raw.weather;
+  if (typeof raw.contactsSeeMoved === "boolean") out.contactsSeeMoved = raw.contactsSeeMoved;
   if ([1, 2, 3].includes(raw.level)) out.level = raw.level;
+  if ([1, 2, 3].includes(raw.cards)) out.cards = raw.cards;
+  out.windows = normalizeWindows(raw.windows);
   if (Array.isArray(raw.kinds)) {
     out.kinds = raw.kinds.filter((k) => isVocab(k, ACTIVITY_KINDS));
   }
@@ -189,7 +222,7 @@ function validatePrefsPatch(patch) {
     }
   }
   const out = {};
-  for (const field of ["on", "weather"]) {
+  for (const field of ["on", "weather", "contactsSeeMoved"]) {
     if (patch[field] === undefined) continue;
     if (typeof patch[field] !== "boolean") throw new MovesPrefsError(`${field} must be true or false`);
     out[field] = patch[field];
@@ -197,6 +230,19 @@ function validatePrefsPatch(patch) {
   if (patch.level !== undefined) {
     if (![1, 2, 3].includes(patch.level)) throw new MovesPrefsError("level must be 1, 2 or 3");
     out.level = patch.level;
+  }
+  if (patch.cards !== undefined) {
+    if (![1, 2, 3].includes(patch.cards)) throw new MovesPrefsError("cards must be 1, 2 or 3");
+    out.cards = patch.cards;
+  }
+  if (patch.windows !== undefined) {
+    // A window the plan cannot use is a statement the week cannot honour, so it
+    // is refused rather than dropped, and a repeat is folded into one entry.
+    if (!Array.isArray(patch.windows)) throw new MovesPrefsError(`windows must be drawn from ${SLOTS.join(", ")}`);
+    for (const slot of patch.windows) {
+      if (!isVocab(slot, SLOTS)) throw new MovesPrefsError(`windows must be drawn from ${SLOTS.join(", ")}`);
+    }
+    out.windows = normalizeWindows(patch.windows);
   }
   if (patch.kinds !== undefined) out.kinds = checkList("kinds", patch.kinds, ACTIVITY_KINDS);
   if (patch.equipment !== undefined) out.equipment = checkList("equipment", patch.equipment, EQUIPMENT);
@@ -227,7 +273,7 @@ export async function writePrefs(db, patch, { emit } = {}) {
  * MAX_SWAPS swaps). A longer list can only be junk or a newer build, so the
  * NEWEST ids are kept: they are the ones a swap is most likely to re-land on.
  */
-function seenOf(entryId, rawSeen) {
+export function seenOf(entryId, rawSeen) {
   const out = [];
   for (const id of [...(Array.isArray(rawSeen) ? rawSeen : []), entryId]) {
     if (typeof id !== "string" || id === "" || out.includes(id)) continue;
@@ -237,7 +283,7 @@ function seenOf(entryId, rawSeen) {
 }
 
 /** The stored pick for today, or null when absent/junk. */
-function normalizeToday(raw) {
+export function normalizeToday(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   if (typeof raw.day !== "string" || !DAY_RE.test(raw.day)) return null;
   if (typeof raw.entryId !== "string" || raw.entryId === "") return null;
@@ -267,7 +313,7 @@ function countsOf(raw) {
   return out;
 }
 
-async function readHistory(db) {
+export async function readHistory(db) {
   const raw = await readJson(db, HISTORY_KEY);
   return { done: countsOf(raw?.done), skipped: countsOf(raw?.skipped) };
 }
@@ -283,7 +329,7 @@ async function readHistory(db) {
  * stores a new card: a day whose library yields nothing must not bank the same
  * rollover again on the next attempt.
  */
-async function historyWithRollover(db, stored) {
+export async function historyWithRollover(db, stored) {
   const history = await readHistory(db);
   if (!stored || !stored.entryId) return { history, changed: false };
   const done = (await rowDelta(db, MOVE_DONE_KIND, stored.day)) !== null;
@@ -293,7 +339,7 @@ async function historyWithRollover(db, stored) {
 }
 
 /** A stored card the live limits have since ruled out must not be shown. */
-function blockedByLimits(entry, prefs) {
+export function blockedByLimits(entry, prefs) {
   if (!entry) return true;
   const tags = Array.isArray(entry.skipIf) ? entry.skipIf : [];
   return tags.some((t) => prefs.limits.includes(t));

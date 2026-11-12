@@ -45,6 +45,21 @@ function entry(over = {}) {
     easier: null, harder: null, sources: source("Fixture"), reviewed: true, ...over,
   };
 }
+/**
+ * A chunk that trains exactly ONE area, five to an area. The day's slots ask the
+ * week plan for mobility, heart and the day's third area, and the Now slot (and
+ * any slot a swap re-rolls) needs four distinct cards of its own area: the first
+ * pick plus the three swaps the day allows. One area per chunk keeps the picker's
+ * balance weighting from narrowing a slot's pool to the multi-area chunks alone.
+ */
+function areaChunks(area) {
+  return [1, 2, 3, 4, 5].map((n) => entry({
+    id: `${area}-${n}`, title: `A ${area} chunk, number ${n}`, areas: [area],
+  }));
+}
+const CHUNK_AREAS = ["mobility", "heart", "lower", "upper", "core"];
+const AREA_CHUNKS = CHUNK_AREAS.flatMap(areaChunks);
+
 const MOVES_LIBRARY = [
   entry(),
   entry({
@@ -63,13 +78,43 @@ const MOVES_LIBRARY = [
     id: "pose-unmarkable", kind: "pose", title: "A fixture the ledger cannot mark", minutes: 10,
     indoor: true, activity: "stretching", level: 9, pose: { joints: { knee: 45 } },
   }),
+  ...AREA_CHUNKS,
 ];
 
-let SCRATCH, server, base, saved;
+let SCRATCH, server, base, saved, rambleRouter;
 const emitted = [];
 const H = { "x-test-auth": "1", "content-type": "application/json" };
 const get = (p) => fetch(base + p, { headers: H });
 const send = (method, p, body) => fetch(base + p, { method, headers: H, body: JSON.stringify(body ?? {}) });
+const authStub = (req, res, next) => (req.headers["x-test-auth"] ? next() : res.status(401).end());
+
+/**
+ * A second mount with its own scratch data dir. A day's card count, its slots and
+ * a slot's swap count are facts of ONE database, so a test about them opens its
+ * own instead of inheriting the day this file already drew.
+ */
+async function freshMount() {
+  const scratch = mkdtempSync(join(tmpdir(), "ramble-moves-day-"));
+  const previous = process.env.CROW_DATA_DIR;
+  process.env.CROW_DATA_DIR = scratch;
+  const app = express();
+  app.use(rambleRouter(authStub, {
+    emit: async (table, op, row) => emitted.push({ table, op, row }),
+    movesLibrary: MOVES_LIBRARY,
+  }));
+  const srv = app.listen(0);
+  await once(srv, "listening");
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  return {
+    url,
+    async close() {
+      srv.close();
+      if (previous === undefined) delete process.env.CROW_DATA_DIR;
+      else process.env.CROW_DATA_DIR = previous;
+      rmSync(scratch, { recursive: true, force: true });
+    },
+  };
+}
 
 before(async () => {
   SCRATCH = mkdtempSync(join(tmpdir(), "ramble-moves-routes-"));
@@ -77,9 +122,9 @@ before(async () => {
   process.env.CROW_APP_ROOT = REPO_ROOT;
   process.env.CROW_DATA_DIR = SCRATCH;
   delete process.env.CROW_DB_PATH;
-  const { default: rambleRouter } = await import(`../bundles/ramble/panel/routes.js?t=${Date.now()}`);
+  ({ default: rambleRouter } = await import(`../bundles/ramble/panel/routes.js?t=${Date.now()}`));
   const app = express();
-  app.use(rambleRouter((req, res, next) => (req.headers["x-test-auth"] ? next() : res.status(401).end()), {
+  app.use(rambleRouter(authStub, {
     emit: async (table, op, row) => emitted.push({ table, op, row }),
     movesLibrary: MOVES_LIBRARY,
   }));
@@ -126,7 +171,8 @@ test("GET /moves/today: a challenge from the served library, with Health, steps 
 
 test("GET /moves/library: reviewed entries only, no pose data; the detail route carries it", async () => {
   const list = await (await get("/api/ramble/moves/library")).json();
-  assert.deepEqual(list.entries.map((e) => e.id).sort(), ["flow-test", "pose-test", "pose-unmarkable", "walk-10"]);
+  const served = ["flow-test", "pose-test", "pose-unmarkable", "walk-10", ...AREA_CHUNKS.map((e) => e.id)];
+  assert.deepEqual(list.entries.map((e) => e.id).sort(), served.sort());
   assert.equal(list.entries.some((e) => "pose" in e), false);
 
   const detail = await (await get("/api/ramble/moves/library/pose-test")).json();
@@ -234,6 +280,184 @@ test("POST /moves/swap: re-rolls the day, keeps Done, and stops after the cap", 
   assert.equal(body.challenge.swap, 1);
   assert.equal(body.challenge.done, true, "a swap never takes a Done back");
   assert.ok(MOVES_LIBRARY.some((e) => e.id === body.challenge.entry.id));
+});
+
+/* ------------------------------------------------ the day's own cards (7.x) */
+
+const dayGet = (url) => fetch(url + "/api/ramble/moves/day", { headers: H });
+const dayPost = (url, path, body) => fetch(url + path, {
+  method: "POST", headers: H, body: JSON.stringify(body ?? {}),
+});
+
+test("GET /moves/day: the day's card count, its Now slot and one card per slot", async () => {
+  const mount = await freshMount();
+  try {
+    const r = await dayGet(mount.url);
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.day, localDay(Date.now()));
+    assert.equal(body.need, 3);
+    assert.equal(body.off, false);
+    assert.deepEqual(body.slots.map((s) => s.slot), ["morning", "midday", "evening"]);
+    assert.ok(["morning", "midday", "evening"].includes(body.nowSlot), "the Now slot is one of the day's");
+    for (const slot of body.slots) {
+      assert.ok(slot.entry, "every slot has a card: " + slot.slot);
+      assert.ok(MOVES_LIBRARY.some((e) => e.id === slot.entry.id), "the card is from the served library");
+      assert.equal("pose" in slot.entry, false, "a card carries no joint-angle data");
+      assert.equal(slot.empty, false);
+      assert.equal(slot.done, false);
+      assert.equal(slot.standIn, false);
+      assert.equal(slot.swap, 0);
+      assert.ok(Array.isArray(slot.reasons));
+      assert.equal(typeof slot.why, "string");
+      assert.equal(typeof slot.area, "string");
+      assert.equal(typeof slot.plannedArea, "string");
+      assert.equal("seen" in slot, false, "the day's seen lists stay in the database");
+    }
+
+    const again = await (await dayGet(mount.url)).json();
+    assert.deepEqual(again.slots, body.slots, "a second read of the day answers the same cards");
+  } finally { await mount.close(); }
+});
+
+test("GET /moves/day: a two-card day asked for on a fresh db needs two", async () => {
+  const mount = await freshMount();
+  try {
+    const set = await dayPost(mount.url, "/api/ramble/moves/prefs", { cards: 2 });
+    assert.equal(set.status, 200);
+    assert.equal((await set.json()).prefs.cards, 2);
+
+    const body = await (await dayGet(mount.url)).json();
+    assert.equal(body.need, 2);
+    assert.deepEqual(body.slots.map((s) => s.slot), ["morning", "evening"]);
+    for (const slot of body.slots) assert.ok(slot.entry, "both cards were drawn: " + slot.slot);
+  } finally { await mount.close(); }
+});
+
+test("POST /moves/slot/swap: re-rolls one slot, bumps its own swap, and stops at the cap", async () => {
+  const mount = await freshMount();
+  try {
+    const day = await (await dayGet(mount.url)).json();
+    const start = day.slots.find((s) => s.slot === "morning");
+    assert.ok(start?.entry);
+    const otherIds = day.slots.filter((s) => s.slot !== "morning").map((s) => s.entry.id);
+    let current = start;
+    const shown = [start.entry.id];
+
+    for (let i = 1; i <= 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await dayPost(mount.url, "/api/ramble/moves/slot/swap", { slot: "morning" });
+      assert.equal(r.status, 200);
+      // eslint-disable-next-line no-await-in-loop
+      const body = await r.json();
+      assert.equal(body.refused, false, "swap " + i + " had a card to re-roll to");
+      const slot = body.slots.find((s) => s.slot === "morning");
+      assert.notEqual(slot.entry.id, current.entry.id, "swap " + i + " changed the slot's card");
+      assert.equal(shown.includes(slot.entry.id), false, "swap " + i + " never repeats a card the slot showed");
+      assert.equal(otherIds.includes(slot.entry.id), false, "swap " + i + " never takes another slot's card");
+      assert.equal(slot.swap, i, "the slot's own swap count moved");
+      shown.push(slot.entry.id);
+      current = slot;
+
+      for (const item of body.slots) {
+        if (item.slot === "morning") continue;
+        assert.equal(item.entry.id, day.slots.find((s) => s.slot === item.slot).entry.id,
+          "a swap is one card: " + item.slot + " stayed put");
+      }
+    }
+
+    const refused = await dayPost(mount.url, "/api/ramble/moves/slot/swap", { slot: "morning" });
+    assert.equal(refused.status, 200);
+    const cap = await refused.json();
+    assert.equal(cap.refused, true, "the fourth swap of the slot refuses");
+    const slot = cap.slots.find((s) => s.slot === "morning");
+    assert.equal(slot.entry.id, current.entry.id, "the card on screen stays");
+    assert.equal(slot.swap, 3, "a refused swap costs no swap");
+  } finally { await mount.close(); }
+});
+
+test("POST /moves/slot/swap: a junk slot name is refused, a missing one is a 400", async () => {
+  const mount = await freshMount();
+  try {
+    const day = await (await dayGet(mount.url)).json();
+    const junk = await dayPost(mount.url, "/api/ramble/moves/slot/swap", { slot: "nope" });
+    assert.equal(junk.status, 200);
+    const body = await junk.json();
+    assert.equal(body.refused, true, "a slot the day does not have refuses");
+    assert.deepEqual(body.slots, day.slots, "and nothing was re-rolled");
+
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/slot/swap", {})).status, 400,
+      "a missing slot is a bad request");
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/slot/swap", { slot: 7 })).status, 400,
+      "a slot that is not a string is a bad request");
+  } finally { await mount.close(); }
+});
+
+test("GET /moves/today: the legacy card is the day's Now slot", async () => {
+  const mount = await freshMount();
+  try {
+    const today = await (await fetch(mount.url + "/api/ramble/moves/today", { headers: H })).json();
+    const day = await (await dayGet(mount.url)).json();
+    const now = day.slots.find((s) => s.slot === day.nowSlot);
+    assert.ok(now?.entry, "the Now slot holds a card");
+    assert.equal(today.challenge.day, day.day);
+    assert.equal(today.challenge.entry.id, now.entry.id, "one card a day, and it is the Now slot's");
+    assert.deepEqual(today.challenge.reasons, now.reasons);
+    assert.equal(today.challenge.why, now.why);
+    assert.equal("pose" in today.challenge.entry, false);
+  } finally { await mount.close(); }
+});
+
+test("GET /moves/today: a paused day emits its moveoff wallet row", async () => {
+  const mount = await freshMount();
+  try {
+    const paused = await dayPost(mount.url, "/api/ramble/moves/prefs", { on: false });
+    assert.equal(paused.status, 200);
+    assert.equal((await paused.json()).prefs.on, false);
+
+    const before = emitted.length;
+    const today = await (await fetch(mount.url + "/api/ramble/moves/today", { headers: H })).json();
+    assert.equal(today.challenge.off, true, "the day is paused");
+    assert.equal(today.challenge.entry, null, "a paused day has no card");
+
+    const day = localDay(Date.now());
+    const rows = emitted.slice(before);
+    assert.ok(rows.some((e) => e.table === "ramble_wallet" && e.op === "update"
+      && e.row.kind === "moveoff" && e.row.key === day),
+    "the paused day's fact reaches the sync hook");
+  } finally { await mount.close(); }
+});
+
+test("POST /moves/swap: re-rolls the Now card and stops at the cap", async () => {
+  const mount = await freshMount();
+  try {
+    const day = await (await dayGet(mount.url)).json();
+    const nowSlot = day.slots.find((s) => s.slot === day.nowSlot);
+    assert.ok(nowSlot?.entry, "the day's Now slot holds a card");
+    let current = nowSlot.entry.id;
+
+    for (let i = 1; i <= 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await dayPost(mount.url, "/api/ramble/moves/swap", {});
+      assert.equal(r.status, 200);
+      // eslint-disable-next-line no-await-in-loop
+      const body = await r.json();
+      assert.equal(body.refused, false, "swap " + i + " had a card to re-roll to");
+      assert.notEqual(body.challenge.entry.id, current, "swap " + i + " changed the Now card");
+      assert.equal(body.challenge.swap, i, "the day's swap count moved");
+      current = body.challenge.entry.id;
+    }
+
+    const cap = await (await dayPost(mount.url, "/api/ramble/moves/swap", {})).json();
+    assert.equal(cap.refused, true, "the fourth swap of the day refuses");
+    assert.equal(cap.challenge.entry.id, current, "and the card on screen stays");
+    assert.equal(cap.challenge.swap, 3, "a refused swap costs no swap");
+
+    const after = await (await dayGet(mount.url)).json();
+    const slot = after.slots.find((s) => s.slot === after.nowSlot);
+    assert.equal(slot.entry.id, current, "the slot behind the Now card holds the same card");
+    assert.equal(slot.swap, 3);
+  } finally { await mount.close(); }
 });
 
 test("POST /moves/log: the fixed vocabulary pays Health and lands in the day's ledger", async () => {
@@ -367,6 +591,9 @@ test("POST /moves/start then /moves/progress: a ten-minute chunk leaves the day 
   const db = await scratchDb();
   const card = (await (await get("/api/ramble/moves/today")).json()).challenge;
   assert.ok(card, "there is a card to play");
+  // The day's budgets are not what this test is about; the earlier tests in this
+  // file have already spent part of them, so give the chunk room to pay in full.
+  await clearBudgets(db, card.day);
 
   const started = await send("POST", "/api/ramble/moves/start", { cardKey: "day", entryId: card.entry.id });
   assert.equal(started.status, 200);
@@ -445,6 +672,8 @@ test("POST /moves/start cardKey extra: any served entry, and its key pays throug
   const card = (await (await get("/api/ramble/moves/today")).json()).challenge;
   const other = MOVES_LIBRARY.find((e) => e.id !== card.entry.id);
   assert.ok(other, "the fixture library has an entry that is not today's card");
+  // Same as above: the day's budgets, not the key's pay-through, are under test.
+  await clearBudgets(db, card.day);
 
   const started = await send("POST", "/api/ramble/moves/start", { cardKey: "extra", entryId: other.id });
   assert.equal(started.status, 200, "an extra may be started from any served entry");

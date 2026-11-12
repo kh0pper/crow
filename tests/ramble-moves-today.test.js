@@ -138,6 +138,9 @@ test("readPrefs: defaults on a fresh db, and one junk field never blanks the res
     limits: ["knee"],
     level: 2,
     weather: true,
+    cards: 3,
+    windows: [],
+    contactsSeeMoved: true,
   }, "each field falls back alone; unknown vocabulary members are dropped");
 
   // Every equipment value unknown is the same statement as none at all: the
@@ -175,6 +178,123 @@ test("writePrefs: merges, validates, and an unknown limit tag is refused with no
   // LIMIT_TAGS is the vocabulary, not an arbitrary string.
   const withKnee = await writePrefs(db, { limits: ["knee"] });
   assert.deepEqual(withKnee.limits, ["knee"]);
+});
+
+test("prefs defaults: three cards, no windows named, contacts see a moved card", async () => {
+  assert.equal(DEFAULT_PREFS.cards, 3);
+  assert.deepEqual(DEFAULT_PREFS.windows, []);
+  assert.equal(DEFAULT_PREFS.contactsSeeMoved, true);
+
+  const db = await freshDb();
+  const prefs = await readPrefs(db);
+  assert.equal(prefs.cards, 3);
+  assert.deepEqual(prefs.windows, []);
+  assert.equal(prefs.contactsSeeMoved, true);
+  assert.notEqual(prefs.windows, DEFAULT_PREFS.windows, "the read carries its own array");
+  prefs.windows.push("midday");
+  assert.deepEqual(await readPrefs(db), DEFAULT_PREFS, "a local edit does not reach the defaults");
+});
+
+test("writePrefs: cards round-trips and leaves the other fields alone", async () => {
+  const db = await freshDb();
+  await writePrefs(db, { level: 1, limits: ["knee"] });
+
+  const prefs = await writePrefs(db, { cards: 2 });
+  assert.equal(prefs.cards, 2);
+  assert.equal(prefs.level, 1);
+  assert.deepEqual(prefs.limits, ["knee"]);
+  assert.equal(prefs.on, true);
+  assert.deepEqual(prefs.windows, []);
+  assert.equal(prefs.contactsSeeMoved, true);
+
+  const read = await readPrefs(db);
+  assert.equal(read.cards, 2);
+  assert.equal(read.level, 1);
+
+  assert.equal((await writePrefs(db, { cards: 1 })).cards, 1);
+  assert.equal((await writePrefs(db, { cards: 3 })).cards, 3);
+});
+
+test("writePrefs: a cards value outside 1, 2 and 3 is refused", async () => {
+  const db = await freshDb();
+  const before = await readSetting(db, PREFS_KEY);
+  for (const cards of [0, 4, "2", 2.5, -1, null, [2]]) {
+    // eslint-disable-next-line no-await-in-loop
+    await assert.rejects(() => writePrefs(db, { cards }), (err) => {
+      assert.ok(err instanceof MovesPrefsError);
+      assert.equal(err.message, "cards must be 1, 2 or 3");
+      return true;
+    }, `cards ${JSON.stringify(cards)} is not a card count`);
+  }
+  assert.equal(await readSetting(db, PREFS_KEY), before, "a refused patch writes nothing");
+  assert.equal((await readPrefs(db)).cards, 3);
+});
+
+test("readPrefs: a stored cards value outside 1, 2 and 3 reads as three", async () => {
+  const db = await freshDb();
+  for (const cards of [9, "x", 0, null, 1.5]) {
+    await writeSetting(db, PREFS_KEY, JSON.stringify({
+      cards, level: 1, limits: ["knee"], contactsSeeMoved: false, windows: ["evening"],
+    }));
+    const prefs = await readPrefs(db);
+    assert.equal(prefs.cards, 3, `stored cards ${JSON.stringify(cards)} falls back alone`);
+    assert.equal(prefs.level, 1);
+    assert.deepEqual(prefs.limits, ["knee"]);
+    assert.equal(prefs.contactsSeeMoved, false);
+    assert.deepEqual(prefs.windows, ["evening"]);
+  }
+});
+
+test("writePrefs: windows are stored in slot order, without repeats", async () => {
+  const db = await freshDb();
+  const prefs = await writePrefs(db, { windows: ["evening", "morning", "morning"] });
+  assert.deepEqual(prefs.windows, ["morning", "evening"]);
+  assert.deepEqual((await readPrefs(db)).windows, ["morning", "evening"]);
+
+  await writePrefs(db, { windows: [] });
+  assert.deepEqual((await readPrefs(db)).windows, [], "no windows named is back to the defaults");
+
+  await writePrefs(db, { windows: ["midday", "morning", "evening"] });
+  assert.deepEqual((await readPrefs(db)).windows, ["morning", "midday", "evening"]);
+});
+
+test("writePrefs: a window name outside the slots is refused", async () => {
+  const db = await freshDb();
+  const before = await readSetting(db, PREFS_KEY);
+  for (const windows of [["noon"], ["morning", "noon"], "morning", 3, null]) {
+    // eslint-disable-next-line no-await-in-loop
+    await assert.rejects(() => writePrefs(db, { windows }), (err) => {
+      assert.ok(err instanceof MovesPrefsError);
+      assert.equal(err.message, "windows must be drawn from morning, midday, evening");
+      return true;
+    }, `windows ${JSON.stringify(windows)} is not a slot list`);
+  }
+  assert.equal(await readSetting(db, PREFS_KEY), before, "a refused patch writes nothing");
+});
+
+test("writePrefs: contactsSeeMoved is a boolean and round-trips", async () => {
+  const db = await freshDb();
+  const prefs = await writePrefs(db, { contactsSeeMoved: false });
+  assert.equal(prefs.contactsSeeMoved, false);
+  assert.equal(prefs.cards, 3, "the other fields stay put");
+  assert.equal((await readPrefs(db)).contactsSeeMoved, false);
+
+  for (const value of ["no", 0, 1, null]) {
+    // eslint-disable-next-line no-await-in-loop
+    await assert.rejects(() => writePrefs(db, { contactsSeeMoved: value }), MovesPrefsError);
+  }
+  assert.equal((await readPrefs(db)).contactsSeeMoved, false, "a refused patch changes nothing");
+
+  assert.equal((await writePrefs(db, { contactsSeeMoved: true })).contactsSeeMoved, true);
+});
+
+test("writePrefs: a field this build does not know is still refused", async () => {
+  const db = await freshDb();
+  await assert.rejects(() => writePrefs(db, { lvl: 1 }), MovesPrefsError);
+  await assert.rejects(() => writePrefs(db, { card: 2 }), MovesPrefsError);
+  await assert.rejects(() => writePrefs(db, { window: ["midday"] }), MovesPrefsError);
+  await assert.rejects(() => writePrefs(db, { cards: 2, extra: true }), MovesPrefsError);
+  assert.equal(await readSetting(db, PREFS_KEY), null, "a refused patch writes nothing");
 });
 
 /* ------------------------------------------------------------ the pick */
