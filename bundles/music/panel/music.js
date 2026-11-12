@@ -49,19 +49,24 @@ const CLIENT_SCRIPT = `
 
   // ---------- Setup check ----------
 
+  // One of 'ready' | 'not_configured' | 'unreachable'. The gateway answers this
+  // from the addon env it already holds, so the check does not depend on the
+  // Funkwhale panel being registered.
   async function checkFunkwhale() {
     try {
-      var res = await fetch('/api/funkwhale/status', { credentials: 'same-origin' });
-      if (!res.ok) return false;
+      var res = await fetch('/api/music/status', { credentials: 'same-origin' });
+      if (!res.ok) return 'unreachable';
       var data = await res.json();
-      return !data.error;
-    } catch (_) { return false; }
+      if (data && data.state === 'ready') return 'ready';
+      if (data && data.state === 'not_configured') return 'not_configured';
+      return 'unreachable';
+    } catch (_) { return 'unreachable'; }
   }
 
-  function renderSetupCTA(reason) {
+  function renderSetupCTA(reason, heading) {
     var r = root(); clear(r);
     var wrap = el('div', { className: 'music-empty' });
-    wrap.appendChild(el('h2', null, 'Music needs a library'));
+    wrap.appendChild(el('h2', null, heading || 'Music needs a library'));
     wrap.appendChild(el('p', null, reason || 'Install and configure the Funkwhale bundle to browse your music library.'));
     var link = el('a', { href: '/dashboard/extensions', className: 'btn btn-primary' }, 'Open Extensions');
     wrap.appendChild(link);
@@ -607,8 +612,15 @@ const CLIENT_SCRIPT = `
   // ---------- Init ----------
 
   (async function init() {
-    var ok = await checkFunkwhale();
-    if (!ok) { renderSetupCTA(); return; }
+    var status = await checkFunkwhale();
+    if (status === 'not_configured') { renderSetupCTA(); return; }
+    if (status !== 'ready') {
+      renderSetupCTA(
+        'Funkwhale is set up but did not answer. Try again in a moment.',
+        'Music library not reachable'
+      );
+      return;
+    }
 
     // Wire tab buttons
     document.querySelectorAll('.music-tab').forEach(function(tab) {

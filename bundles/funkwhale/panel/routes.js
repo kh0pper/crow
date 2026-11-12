@@ -13,20 +13,55 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-// Address classification, resolved from the app root so it also works from an installed copy
-// (the gateway sets CROW_APP_ROOT; the repo-relative fallback covers running from the checkout).
+// Address classification and the add-on's settings reader, both resolved from the app root so
+// they also work from an installed copy (the gateway sets CROW_APP_ROOT; the repo-relative
+// fallback covers running from the checkout).
 const appRoot = process.env.CROW_APP_ROOT || join(import.meta.dirname, "..", "..", "..");
 const { isPublicEgressIp } = await import(pathToFileURL(join(appRoot, "servers", "shared", "ip-classify.js")).href);
+const { readFunkwhaleEnv } = await import(pathToFileURL(join(appRoot, "servers", "gateway", "routes", "audio-proxy.js")).href);
 
-const URL_BASE = () => (process.env.FUNKWHALE_URL || "http://funkwhale-api:5000").replace(/\/+$/, "");
-const TOKEN = () => process.env.FUNKWHALE_ACCESS_TOKEN || "";
-const HOSTNAME = () => process.env.FUNKWHALE_HOSTNAME || "";
+const DEFAULT_URL = "http://funkwhale-api:5000";
+
+/**
+ * One request's Funkwhale settings. The add-on's own saved settings win (they are what Configure
+ * writes and what the audio proxy already reads); with none, this process's env and the compose
+ * default keep a standalone run working exactly as before. Called per request, never cached: the
+ * entry is a small file and a running gateway sees a Configure change on the next request.
+ */
+function resolveFunkwhaleSettings(fwEnv = readFunkwhaleEnv) {
+  let entry = null;
+  try { entry = typeof fwEnv === "function" ? fwEnv() : null; } catch { entry = null; }
+  return {
+    url: String(entry?.url || process.env.FUNKWHALE_URL || DEFAULT_URL).replace(/\/+$/, ""),
+    token: String(entry?.token || process.env.FUNKWHALE_ACCESS_TOKEN || ""),
+    hostname: String(entry?.hostname || process.env.FUNKWHALE_HOSTNAME || ""),
+  };
+}
+
+// The reader the module-level helpers below (fetchArtwork, allowedPrivateHosts) resolve through;
+// the router factory points it at its own injected reader, so both halves of a request agree.
+let fwEnvForRequests = readFunkwhaleEnv;
+const settings = () => resolveFunkwhaleSettings(fwEnvForRequests);
+
+const URL_BASE = () => settings().url;
+const TOKEN = () => settings().token;
+const HOSTNAME = () => settings().hostname;
 const TIMEOUT = 15_000;
+
+/**
+ * An error's text as it may leave in a response body: the token and any bearer value are
+ * removed, so an upstream or driver message that echoes a request header cannot carry them out.
+ */
+function errorText(err, token = "") {
+  let text = String(err?.message ?? err ?? "");
+  if (token) text = text.split(token).join("[redacted]");
+  return text.replace(/bearer\s+[^\s"',;)]*/gi, "Bearer [redacted]");
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STREAM_FORMATS = new Set(["mp3", "ogg", "opus"]);
 
-async function fw(path, { noAuth, query } = {}) {
+async function fw(cfg, path, { noAuth, query } = {}) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), TIMEOUT);
   try {
@@ -38,8 +73,8 @@ async function fw(path, { noAuth, query } = {}) {
           .join("&")
       : "";
     const headers = {};
-    if (!noAuth && TOKEN()) headers.Authorization = `Bearer ${TOKEN()}`;
-    const r = await fetch(`${URL_BASE()}${path}${qs}`, { signal: ctl.signal, headers });
+    if (!noAuth && cfg.token) headers.Authorization = `Bearer ${cfg.token}`;
+    const r = await fetch(`${cfg.url}${path}${qs}`, { signal: ctl.signal, headers });
     if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
     const text = await r.text();
     return text ? JSON.parse(text) : {};
@@ -49,13 +84,13 @@ async function fw(path, { noAuth, query } = {}) {
 }
 
 /** Resolve artwork URL, always returning an absolute URL or null. */
-function resolveArtworkUrl(cover) {
+function resolveArtworkUrl(cover, base = URL_BASE()) {
   if (!cover) return null;
   const url = cover.urls?.medium_square_crop || cover.urls?.original || null;
   if (!url) return null;
   // Funkwhale sometimes returns relative paths; prefix with base.
   if (/^https?:\/\//i.test(url)) return url;
-  return `${URL_BASE()}${url.startsWith("/") ? url : "/" + url}`;
+  return `${base}${url.startsWith("/") ? url : "/" + url}`;
 }
 
 /** Clamp page_size into [1, max] and page into [1, ∞). */
@@ -180,15 +215,20 @@ export async function fetchArtwork(src, { lookup = dnsLookup, maxBytes = ARTWORK
   }
 }
 
-export default function funkwhaleRouter(authMiddleware) {
+export default function funkwhaleRouter(authMiddleware, { fwEnv = readFunkwhaleEnv } = {}) {
   const router = Router();
+  // Each handler resolves the settings for its own request (resolveFunkwhaleSettings); the
+  // module-level helpers (fetchArtwork, allowedPrivateHosts) read through the same reader.
+  fwEnvForRequests = typeof fwEnv === "function" ? fwEnv : readFunkwhaleEnv;
+  const cfgFor = () => resolveFunkwhaleSettings(fwEnvForRequests);
 
   router.get("/api/funkwhale/status", authMiddleware, async (_req, res) => {
+    const cfg = cfgFor();
     try {
-      const nodeinfo = await fw("/api/v1/instance/nodeinfo/2.0/", { noAuth: true }).catch(() => null);
-      const whoami = TOKEN() ? await fw("/api/v1/users/me/").catch(() => null) : null;
+      const nodeinfo = await fw(cfg, "/api/v1/instance/nodeinfo/2.0/", { noAuth: true }).catch(() => null);
+      const whoami = cfg.token ? await fw(cfg, "/api/v1/users/me/").catch(() => null) : null;
       res.json({
-        hostname: HOSTNAME(),
+        hostname: cfg.hostname,
         software: nodeinfo?.software?.name || null,
         version: nodeinfo?.software?.version || null,
         federation_enabled: nodeinfo?.metadata?.federation?.enabled ?? null,
@@ -196,14 +236,15 @@ export default function funkwhaleRouter(authMiddleware) {
         whoami: whoami ? { username: whoami.username, is_superuser: whoami.is_superuser } : null,
       });
     } catch (err) {
-      res.json({ error: `Cannot reach Funkwhale: ${err.message}` });
+      res.json({ error: `Cannot reach Funkwhale: ${errorText(err, cfg.token)}` });
     }
   });
 
   router.get("/api/funkwhale/libraries", authMiddleware, async (_req, res) => {
+    const cfg = cfgFor();
     try {
-      if (!TOKEN()) return res.json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
-      const out = await fw("/api/v1/libraries/", { query: { scope: "me", page_size: 20 } });
+      if (!cfg.token) return res.json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
+      const out = await fw(cfg, "/api/v1/libraries/", { query: { scope: "me", page_size: 20 } });
       res.json({
         count: out.count,
         libraries: (out.results || []).map((l) => ({
@@ -214,15 +255,16 @@ export default function funkwhaleRouter(authMiddleware) {
         })),
       });
     } catch (err) {
-      res.json({ error: err.message });
+      res.json({ error: errorText(err, cfg.token) });
     }
   });
 
   router.get("/api/funkwhale/listens", authMiddleware, async (_req, res) => {
+    const cfg = cfgFor();
     try {
-      if (!TOKEN()) return res.json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
+      if (!cfg.token) return res.json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
       const pageSize = Math.max(1, Math.min(parseInt(_req.query.page_size, 10) || 10, 100));
-      const out = await fw("/api/v1/history/listenings/", { query: { page_size: pageSize, ordering: "-creation_date" } });
+      const out = await fw(cfg, "/api/v1/history/listenings/", { query: { page_size: pageSize, ordering: "-creation_date" } });
       res.json({
         listens: (out.results || []).map((l) => ({
           ts: l.creation_date,
@@ -230,22 +272,23 @@ export default function funkwhaleRouter(authMiddleware) {
           track_title: l.track?.title,
           artist: l.track?.artist?.name,
           album: l.track?.album?.title,
-          artwork_url: resolveArtworkUrl(l.track?.album?.cover || l.track?.cover),
+          artwork_url: resolveArtworkUrl(l.track?.album?.cover || l.track?.cover, cfg.url),
         })),
       });
     } catch (err) {
-      res.json({ error: err.message });
+      res.json({ error: errorText(err, cfg.token) });
     }
   });
 
   // ---------- Browse endpoints ----------
 
   router.get("/api/funkwhale/browse/artists", authMiddleware, async (req, res) => {
+    const cfg = cfgFor();
     try {
-      if (!TOKEN()) return res.status(503).json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
+      if (!cfg.token) return res.status(503).json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
       const { page, page_size } = clampPage(req, 50, 100);
       const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
-      const out = await fw("/api/v1/artists/", {
+      const out = await fw(cfg, "/api/v1/artists/", {
         query: { page, page_size, q, ordering: "name" },
       });
       res.json({
@@ -257,17 +300,18 @@ export default function funkwhaleRouter(authMiddleware) {
         })),
       });
     } catch (err) {
-      res.status(502).json({ error: err.message });
+      res.status(502).json({ error: errorText(err, cfg.token) });
     }
   });
 
   router.get("/api/funkwhale/browse/albums", authMiddleware, async (req, res) => {
+    const cfg = cfgFor();
     try {
-      if (!TOKEN()) return res.status(503).json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
+      if (!cfg.token) return res.status(503).json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
       const { page, page_size } = clampPage(req, 50, 100);
       const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
       const artist = req.query.artist;
-      const out = await fw("/api/v1/albums/", {
+      const out = await fw(cfg, "/api/v1/albums/", {
         query: { page, page_size, q, artist, ordering: "title" },
       });
       res.json({
@@ -277,23 +321,24 @@ export default function funkwhaleRouter(authMiddleware) {
           title: a.title,
           artist: a.artist?.name || null,
           artist_id: a.artist?.id || null,
-          artwork_url: resolveArtworkUrl(a.cover),
+          artwork_url: resolveArtworkUrl(a.cover, cfg.url),
           tracks_count: a.tracks_count,
           year: a.release_date ? String(a.release_date).slice(0, 4) : null,
         })),
       });
     } catch (err) {
-      res.status(502).json({ error: err.message });
+      res.status(502).json({ error: errorText(err, cfg.token) });
     }
   });
 
   router.get("/api/funkwhale/browse/tracks", authMiddleware, async (req, res) => {
+    const cfg = cfgFor();
     try {
-      if (!TOKEN()) return res.status(503).json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
+      if (!cfg.token) return res.status(503).json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
       const { page, page_size } = clampPage(req, 100, 100);
       const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
       const album = req.query.album;
-      const out = await fw("/api/v1/tracks/", {
+      const out = await fw(cfg, "/api/v1/tracks/", {
         query: { page, page_size, q, album, ordering: "position" },
       });
       res.json({
@@ -308,20 +353,21 @@ export default function funkwhaleRouter(authMiddleware) {
             album_id: t.album?.id || null,
             position: t.position,
             duration: t.duration,
-            artwork_url: resolveArtworkUrl(t.album?.cover || t.cover),
+            artwork_url: resolveArtworkUrl(t.album?.cover || t.cover, cfg.url),
           };
         }),
       });
     } catch (err) {
-      res.status(502).json({ error: err.message });
+      res.status(502).json({ error: errorText(err, cfg.token) });
     }
   });
 
   // ---------- Search ----------
 
   router.get("/api/funkwhale/search", authMiddleware, async (req, res) => {
+    const cfg = cfgFor();
     try {
-      if (!TOKEN()) return res.status(503).json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
+      if (!cfg.token) return res.status(503).json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
       const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
       if (q.length < 2) {
         return res.json({ artists: [], albums: [], tracks: [] });
@@ -329,7 +375,7 @@ export default function funkwhaleRouter(authMiddleware) {
       const pageSize = Math.max(1, Math.min(parseInt(req.query.page_size, 10) || 20, 50));
       // Funkwhale's search endpoint is `/api/v1/search` (no trailing slash);
       // the trailing-slash variant 404s. Accepts either `q=` or `query=`.
-      const out = await fw("/api/v1/search", { query: { query: q, page_size: pageSize } });
+      const out = await fw(cfg, "/api/v1/search", { query: { query: q, page_size: pageSize } });
       res.json({
         artists: (out.artists || []).map((a) => ({
           id: a.id,
@@ -340,7 +386,7 @@ export default function funkwhaleRouter(authMiddleware) {
           id: a.id,
           title: a.title,
           artist: a.artist?.name || null,
-          artwork_url: resolveArtworkUrl(a.cover),
+          artwork_url: resolveArtworkUrl(a.cover, cfg.url),
         })),
         tracks: (out.tracks || []).map((t) => {
           const m = (t.listen_url || "").match(/\/listen\/([0-9a-f-]+)\//);
@@ -349,12 +395,12 @@ export default function funkwhaleRouter(authMiddleware) {
             title: t.title,
             artist: t.artist?.name || null,
             album: t.album?.title || null,
-            artwork_url: resolveArtworkUrl(t.album?.cover || t.cover),
+            artwork_url: resolveArtworkUrl(t.album?.cover || t.cover, cfg.url),
           };
         }),
       });
     } catch (err) {
-      res.status(502).json({ error: err.message });
+      res.status(502).json({ error: errorText(err, cfg.token) });
     }
   });
 
@@ -369,14 +415,15 @@ export default function funkwhaleRouter(authMiddleware) {
     if (!STREAM_FORMATS.has(to)) {
       return res.status(400).json({ error: "unsupported format" });
     }
-    if (!TOKEN()) return res.status(503).json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
+    const cfg = cfgFor();
+    if (!cfg.token) return res.status(503).json({ error: "FUNKWHALE_ACCESS_TOKEN not set" });
 
-    const upstreamUrl = `${URL_BASE()}/api/v1/listen/${encodeURIComponent(trackUuid)}/?to=${to}`;
+    const upstreamUrl = `${cfg.url}/api/v1/listen/${encodeURIComponent(trackUuid)}/?to=${to}`;
     const controller = new AbortController();
     req.on("close", () => { try { controller.abort(); } catch {} });
 
     try {
-      const headers = { Authorization: `Bearer ${TOKEN()}` };
+      const headers = { Authorization: `Bearer ${cfg.token}` };
       if (req.headers.range) headers.Range = req.headers.range;
       if (req.headers["if-range"]) headers["If-Range"] = req.headers["if-range"];
       if (req.headers["if-none-match"]) headers["If-None-Match"] = req.headers["if-none-match"];
@@ -394,14 +441,14 @@ export default function funkwhaleRouter(authMiddleware) {
       // resolve via GET /api/v1/tracks/{uuid}/ first (cheap, cacheable).
       const isFreshPlay = upstream.ok && (!req.headers.range || /^bytes=0-/.test(req.headers.range));
       if (isFreshPlay) {
-        fw(`/api/v1/tracks/${encodeURIComponent(trackUuid)}/`)
+        fw(cfg, `/api/v1/tracks/${encodeURIComponent(trackUuid)}/`)
           .then((meta) => {
             if (!meta?.id) return;
-            return fetch(`${URL_BASE()}/api/v1/history/listenings/`, {
+            return fetch(`${cfg.url}/api/v1/history/listenings/`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
-                "Authorization": `Bearer ${TOKEN()}`,
+                "Authorization": `Bearer ${cfg.token}`,
               },
               body: JSON.stringify({ track: meta.id }),
             });
@@ -424,7 +471,7 @@ export default function funkwhaleRouter(authMiddleware) {
       await pipeline(nodeStream, res, { signal: controller.signal });
     } catch (err) {
       if (err?.name === "AbortError") return; // client disconnected — expected
-      if (!res.headersSent) res.status(502).json({ error: err.message });
+      if (!res.headersSent) res.status(502).json({ error: errorText(err, cfg.token) });
     }
   });
 
@@ -447,7 +494,7 @@ export default function funkwhaleRouter(authMiddleware) {
       res.end(art.body);
     } catch (err) {
       if (err?.code === "aborted") return; // client disconnected
-      if (!res.headersSent) res.status(err?.status || 502).json({ error: err?.code || "upstream_error" });
+      if (!res.headersSent) res.status(err?.status || 502).json({ error: errorText(err?.code || "upstream_error") });
     }
   });
 

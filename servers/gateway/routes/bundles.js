@@ -1306,6 +1306,147 @@ export async function backfillBundleKeychain({ log = (m) => console.log(`[keycha
   return n;
 }
 
+/**
+ * The ids that count as installed when a `requires.bundles` entry is judged: installed.json's
+ * own entries plus the keys of mcp-addons.json. An add-on can be registered there (with its
+ * bundle dir on disk) without ever being recorded in installed.json, and it is installed all
+ * the same — so a dependent bundle must be allowed to install, and the consented prereq list
+ * must not call it missing. A missing or unreadable file contributes nothing; only object keys
+ * count, so an array-shaped file adds none.
+ */
+export function dependencyInstalledIds(installed, path = MCP_ADDONS_PATH) {
+  const ids = new Set();
+  for (const entry of Array.isArray(installed) ? installed : []) {
+    const id = typeof entry === "string" ? entry : entry?.id;
+    if (typeof id === "string") ids.add(id);
+  }
+  const addons = readJsonSafe(path, null);
+  if (addons && typeof addons === "object" && !Array.isArray(addons)) {
+    for (const key of Object.keys(addons)) ids.add(key);
+  }
+  return ids;
+}
+
+/**
+ * Boot repair for DEPENDENCY panels: a panel that another INSTALLED bundle needs must exist and
+ * be enabled even when nobody registered it by hand.
+ *
+ * Uninstalling a bundle removes its dir, its mcp-addons entry, its panel files and its
+ * panels.json id together, so an uninstalled bundle never reads as installed here. An owner who
+ * removes ONLY a panel (hand-editing panels.json) leaves no marker at all — so nothing is
+ * restored on its own account: a panel comes back only when an INSTALLED bundle's manifest lists
+ * it in `requires.bundles`. A panel nothing depends on stays removed.
+ *
+ * The files served come from the repo's copy of the dependency when its manifest version differs
+ * from the installed one, else from the installed copy, which is the one the running add-on
+ * matches: an add-on recorded only in mcp-addons.json is never reached by the version refresh
+ * that walks installed.json, so its installed copy can be an older version than the repo's. An
+ * installed manifest carrying `"refresh": false` keeps the installed copy whatever the repo
+ * says. The chosen source's own manifest resolves the panel and routes paths, and a file that is
+ * absent there is not copied. The bundle dir is never written: only panelsDir and panels.json
+ * are. Idempotent — a served file already holding its source's bytes is left alone, and
+ * panels.json is never rewritten for an id it already lists. Never throws.
+ *
+ * @param {{installedIds?: Array<string|{id?: string}>, appBundles?: string, bundlesDir?: string,
+ *   panelsDir?: string, panelsConfigPath?: string, mcpAddonsPath?: string, appRoot?: string,
+ *   log?: Function}} [opts]
+ *   installedIds: what the caller's own installed.json read returned (a bare id or a record).
+ * @returns {{repaired: string[], errors: Array<{id, error}>}}
+ */
+export function repairDependencyPanels({ installedIds = [], appBundles = APP_BUNDLES, bundlesDir = BUNDLES_DIR, panelsDir = PANELS_DIR, panelsConfigPath = PANELS_CONFIG_PATH, mcpAddonsPath = MCP_ADDONS_PATH, appRoot = APP_ROOT, log = (m) => console.log(m) } = {}) {
+  const repaired = [];
+  const errors = [];
+  try {
+    const ids = [];
+    for (const entry of Array.isArray(installedIds) ? installedIds : []) {
+      const id = typeof entry === "string" ? entry : entry?.id;
+      if (typeof id === "string" && isValidBundleId(id) && !ids.includes(id)) ids.push(id);
+    }
+    // dependency id -> the installed ids whose manifest requires it
+    const dependents = new Map();
+    for (const id of ids) {
+      const manifestPath = join(appBundles, id, "manifest.json");
+      if (!existsSync(manifestPath)) continue;
+      let manifest;
+      try {
+        manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      } catch (err) {
+        errors.push({ id, error: `read manifest: ${err?.message || err}` });
+        continue;
+      }
+      const requires = manifest?.requires?.bundles;
+      if (!Array.isArray(requires)) continue;
+      const seen = new Set();
+      for (const dep of requires) {
+        if (typeof dep !== "string" || !isValidBundleId(dep) || seen.has(dep)) continue;
+        seen.add(dep);
+        if (!dependents.has(dep)) dependents.set(dep, []);
+        dependents.get(dep).push(id);
+      }
+    }
+    if (dependents.size === 0) return { repaired, errors };
+
+    const depInstalled = dependencyInstalledIds(ids, mcpAddonsPath);
+
+    for (const [dep, dependentsOf] of dependents) {
+      try {
+        // Installed either way: a recorded install, or an add-on registered only in mcp-addons.json.
+        if (!depInstalled.has(dep)) continue;
+        const installedManifest = readJsonSafe(join(bundlesDir, dep, "manifest.json"), null);
+        if (!resolvePanelPath(installedManifest, dep)) continue; // the installed copy declares no panel: nothing to serve
+        // Source of the served files: the repo's copy when it is a different version than the
+        // installed one, else the installed copy. An installed manifest with `refresh: false`
+        // marks a copy the operator maintains by hand: the repo never overrides it.
+        const repoManifest = readJsonSafe(join(appBundles, dep, "manifest.json"), null);
+        const fromRepo = !!repoManifest
+          && installedManifest.refresh !== false
+          && repoManifest.version !== installedManifest.version;
+        const srcDir = fromRepo ? join(appBundles, dep) : join(bundlesDir, dep);
+        const srcManifest = fromRepo ? repoManifest : installedManifest;
+        const panelRel = resolvePanelPath(srcManifest, dep);
+        if (!panelRel) continue; // the chosen source declares no panel: nothing to serve
+        const panelSrc = join(srcDir, panelRel);
+        if (!existsSync(panelSrc)) continue; // declared, not on disk: nothing to copy
+        const routesRel = resolvePanelRoutesPath(srcManifest);
+        const routesSrc = routesRel && existsSync(join(srcDir, routesRel)) ? join(srcDir, routesRel) : null;
+        const panelDst = join(panelsDir, `${dep}.js`);
+        const routesDst = join(panelsDir, `${dep}-routes.js`);
+        const enabled = readPanelsConfig(panelsConfigPath).list.includes(dep);
+        // A served file that is missing or holds different bytes than its source is stale, and
+        // is refreshed even though the panel is enabled; matching bytes are left untouched.
+        const stale = !sameBytes(panelSrc, panelDst) || (routesSrc ? !sameBytes(routesSrc, routesDst) : false);
+        if (enabled && !stale) continue; // already served, enabled and current
+
+        mkdirSync(panelsDir, { recursive: true });
+        rmSync(panelDst, { force: true });
+        cpSync(panelSrc, panelDst);
+        if (routesSrc) {
+          rmSync(routesDst, { force: true });
+          cpSync(routesSrc, routesDst);
+        }
+        // Install-parity: the panels dir's node_modules symlink (see refreshVersionedBundle).
+        const nmLink = join(panelsDir, "node_modules");
+        if (!existsSync(nmLink)) {
+          const gatewayNm = join(appRoot, "node_modules");
+          if (existsSync(gatewayNm)) { try { symlinkSync(gatewayNm, nmLink); } catch {} }
+        }
+        // An id panels.json already lists is left alone (no rewrite of the file).
+        if (!enabled) addPanelEnabled(dep, panelsConfigPath);
+        const line = enabled
+          ? `${dep}: panel refreshed for ${dependentsOf.join(", ")}`
+          : `${dep}: panel registered for ${dependentsOf.join(", ")}`;
+        repaired.push(line);
+        log(`[bundles] ${line}`);
+      } catch (err) {
+        errors.push({ id: dep, error: err?.message || String(err) });
+      }
+    }
+  } catch (err) {
+    errors.push({ id: "*", error: err?.message || String(err) });
+  }
+  return { repaired, errors };
+}
+
 export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, run: runner = run, skillMode = skillSyncMode(), skillLedger = null, log = (m) => console.log(m), env = process.env, migrateLinked = null } = {}) {
   // This is one boot pass for the compose history lookups: a git that hangs or
   // cannot answer costs ONE timeout per pass, not one per installed bundle.
@@ -1521,6 +1662,21 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
     errors.push({ id: "*", error: `installed.json version sync: ${err.message}` });
   }
 
+  // Dependency panels: a panel another INSTALLED bundle requires must be present even when no
+  // one registered it (see repairDependencyPanels for why this is limited to dependencies).
+  // Its own catch: a panel problem never blocks the rest of the boot repair.
+  try {
+    const depOut = repairDependencyPanels({
+      installedIds: installed.map((e) => (typeof e === "string" ? e : e?.id)).filter((id) => typeof id === "string"),
+      appBundles, bundlesDir: BUNDLES_DIR, panelsDir: PANELS_DIR, panelsConfigPath: PANELS_CONFIG_PATH,
+      mcpAddonsPath: MCP_ADDONS_PATH, appRoot: APP_ROOT, log,
+    });
+    repaired.push(...depOut.repaired);
+    errors.push(...depOut.errors);
+  } catch (err) {
+    errors.push({ id: "*", error: `dependency panels: ${err?.message || err}` });
+  }
+
   return { repaired, errors, skillLines, skillsKept };
 }
 
@@ -1692,6 +1848,15 @@ const runCompose = (composeArgs, opts = {}) => coreRunCompose(composeArgs, { ...
 const runComposeTeardown = (args, opts) => coreRunComposeTeardown(args, { ...opts, crowHome: CROW_HOME });
 const blankHardFailKeys = (cwd, composeRel) => coreBlankHardFailKeys(cwd, composeRel, CROW_HOME);
 const composeServiceRunning = (bundleDir) => coreComposeServiceRunning(bundleDir, { crowHome: CROW_HOME });
+
+/** True when both files exist and hold the same bytes (missing or unreadable counts as different). */
+function sameBytes(a, b) {
+  try {
+    return readFileSync(a).equals(readFileSync(b));
+  } catch {
+    return false;
+  }
+}
 
 /** Read JSON file with fallback */
 function readJsonSafe(path, fallback) {
@@ -3295,7 +3460,7 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
   }
   const requiredBundles = manifest?.requires?.bundles || [];
   if (requiredBundles.length > 0) {
-    const installedIds = new Set(installed.map((i) => i.id));
+    const installedIds = dependencyInstalledIds(installed);
     const missing = requiredBundles.filter((id) => !installedIds.has(id));
     if (missing.length > 0) {
       return {
@@ -4330,6 +4495,7 @@ export function validateCollectionServerSide(collection, { manifestFor = getMani
     return { ok: false, error: "Collection has no members" };
   }
   const seen = new Set();
+  const depInstalled = dependencyInstalledIds(getInstalled());
   for (const m of collection.members) {
     if (!m?.id || !isValidBundleId(m.id)) return { ok: false, error: `Invalid member id '${m?.id}'` };
     if (!existsSync(join(APP_BUNDLES, m.id))) return { ok: false, error: `Member '${m.id}' is not a known bundle` };
@@ -4347,7 +4513,7 @@ export function validateCollectionServerSide(collection, { manifestFor = getMani
       return { ok: false, error: `Member '${m.id}' is GPU-gated — install it individually` };
     }
     for (const dep of man?.requires?.bundles || []) {
-      if (!seen.has(dep) && !getInstalled().some((i) => i.id === dep)) {
+      if (!seen.has(dep) && !depInstalled.has(dep)) {
         return { ok: false, error: `Member '${m.id}' requires '${dep}', which is neither installed nor earlier in the collection` };
       }
     }
@@ -4862,7 +5028,7 @@ export default function bundlesRouter() {
       const { token, expires_in_seconds } = await mintConsentToken(db, bundleId);
       // Compute prereq install state for UI to show prereq checklist
       const reqBundles = manifest.requires?.bundles || [];
-      const installedIds = new Set(getInstalled().map((i) => i.id));
+      const installedIds = dependencyInstalledIds(getInstalled());
       const prereqs = reqBundles.map((id) => ({ id, installed: installedIds.has(id) }));
       res.json({
         required: true,
