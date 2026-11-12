@@ -337,6 +337,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
   // 2FA verification (TOTP code entry after password)
   router.post("/dashboard/login/2fa", async (req, res) => {
+    // Same network gate as the login page and its POST: a source the rest of the
+    // dashboard refuses never gets to guess a code.
+    if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const pendingToken = cookies.crow_pending_2fa;
@@ -407,6 +410,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
   // 2FA recovery code entry page
   router.get("/dashboard/login/2fa/recovery", async (req, res) => {
+    if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     res.type("html").send(render2faRecovery({ lang }));
@@ -414,6 +418,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
   // 2FA recovery code verification
   router.post("/dashboard/login/2fa/recovery", async (req, res) => {
+    if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const pendingToken = cookies.crow_pending_2fa;

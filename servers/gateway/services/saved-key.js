@@ -32,13 +32,13 @@ import { ensureKeychainTable, isSystemBundleId, rememberExtensionSecret } from "
 /** The label shape of a remembered key: the service, then the field it fills. */
 const labelFor = (service, envKey) => `${service.name} - ${envKey}`;
 
-/** The id of the row just written for this pair: an audit detail only, never the value. */
-async function entryIdFor(db, bundleId, envKey) {
-  const { rows } = await db.execute({
-    sql: "SELECT id FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ?",
-    args: [bundleId, envKey],
-  });
-  return rows[0] ? Number(rows[0].id) : null;
+/** The id a save seam answered with: a number, an object's .id, or null (e.g. `true`: written,
+ *  id unknown). An audit detail only, never the value. */
+function entryIdOf(wrote) {
+  const id = typeof wrote === "object" && wrote !== null ? wrote.id : wrote;
+  if (typeof id === "number" && Number.isFinite(id)) return id;
+  if (typeof id === "string" && id !== "" && Number.isFinite(Number(id))) return Number(id);
+  return null;
 }
 
 /**
@@ -98,9 +98,10 @@ export async function savedKeyServiceIds(db, catalog, installedIds) {
  * one sealed under another key id (a crow.db restored without its key file), which is replaced the
  * same way.
  *
- * Every row a call actually writes is audited as `keychain_save` (entry id, bundle id, env key,
- * origin 'typed'), the same event the keychain install path writes; a row the atomic write skipped
- * (an active row already holds that key) is not audited. The details never carry a value.
+ * Every row a call actually writes is audited as `keychain_save` (the id it was written under,
+ * bundle id, env key, origin 'typed'), the same event the keychain install path writes; a row the
+ * atomic write skipped (an active row already holds that key) is not audited. The details never
+ * carry a value.
  *
  * Never fatal: a keychain fault here must not fail a connect that already succeeded, so failures
  * are swallowed after one fixed log line (never a value, never an error message). An audit fault
@@ -130,11 +131,11 @@ export async function rememberTypedKeys(db, key, service, secrets, { now, save =
         origin: "typed",
         ...(now ? { now } : {}),
       });
-      // `false` from the atomic write: an active row already holds this key, nothing was written.
-      if (wrote === false) continue;
+      // Falsy from the atomic write: an active row already holds this key, nothing was written.
+      if (!wrote) continue;
       try {
         await audit(db, "keychain_save", {
-          details: { entry_id: await entryIdFor(db, service.bundleId, f.name), bundle_id: service.bundleId, env_key: f.name, origin: "typed" },
+          details: { entry_id: entryIdOf(wrote), bundle_id: service.bundleId, env_key: f.name, origin: "typed" },
         });
       } catch { /* the key is saved: an audit fault must not undo or hide it */ }
     }

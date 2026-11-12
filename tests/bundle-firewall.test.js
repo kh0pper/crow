@@ -9,7 +9,7 @@ import {
   openTailnetPorts, closeTailnetPorts,
 } from "../servers/gateway/bundle-firewall.js";
 
-const LOG_LINE_NO_TAILSCALE = (p) => `Tailscale is not running here, so no tailnet firewall rule was added for port ${p}`;
+const LOG_LINE_NO_TAILSCALE = (p) => `Tailscale is not running here, so no tailnet firewall rule was added for port ${p} — reinstall the app once Tailscale is up`;
 const LOG_LINE_LOOPBACK = (p) => `Port ${p} listens only on this machine, so no firewall rule is needed`;
 const LOG_LINE_OPENED = (p) => `Opened firewall port ${p}/tcp for Tailscale`;
 const LOG_LINE_OPEN_FAILED = (p) => `Note: Could not open port ${p} (sudo/ufw not available — open manually if needed)`;
@@ -145,6 +145,26 @@ function recorder(behaviour = () => {}) {
   return { calls, run };
 }
 
+/** The legacy unscoped delete openTailnetPorts runs before adding or skipping a port. */
+function legacyDeleteCall(port) {
+  return { cmd: "sudo", argv: deleteRuleArgs(port)[1], opts: { timeout: 10000 } };
+}
+
+function addCall(port, name) {
+  return { cmd: "sudo", argv: tailnetRuleArgs(port, name), opts: { timeout: 10000 } };
+}
+
+const TAILNET_UP = { tailscale0: iface("100.64.0.7") };
+const TAILNET_DOWN = { eth0: iface("192.168.1.20") };
+
+// --- the log line tells the operator what to do ----------------------------
+
+test("the no-Tailscale line says to reinstall the app once Tailscale is up, and prints no sudo command", () => {
+  const line = LOG_LINE_NO_TAILSCALE(8080);
+  assert.match(line, /reinstall the app once Tailscale is up/);
+  assert.doesNotMatch(line, /sudo/);
+});
+
 test("openTailnetPorts: Tailscale down calls no runner and says so per port", async () => {
   const logs = [];
   const { calls, run } = recorder();
@@ -160,7 +180,7 @@ test("openTailnetPorts: Tailscale down calls no runner and says so per port", as
   assert.deepEqual(logs, [LOG_LINE_NO_TAILSCALE(8080), LOG_LINE_NO_TAILSCALE(9090)]);
 });
 
-test("openTailnetPorts: a loopback-only port is skipped with its own line", async () => {
+test("openTailnetPorts: a loopback-only port is skipped with its own line, after the legacy delete", async () => {
   const logs = [];
   const { calls, run } = recorder();
   const results = await openTailnetPorts({
@@ -168,12 +188,12 @@ test("openTailnetPorts: a loopback-only port is skipped with its own line", asyn
     model: modelWithPorts([{ target: 8080, published: "8080", host_ip: "127.0.0.1", protocol: "tcp" }]),
     interfaces: { tailscale0: iface("100.64.0.7") }, run, log: (m) => logs.push(m),
   });
-  assert.deepEqual(calls, []);
+  assert.deepEqual(calls, [legacyDeleteCall(8080)]);
   assert.deepEqual(results, [{ port: 8080, action: "skipped-loopback" }]);
   assert.deepEqual(logs, [LOG_LINE_LOOPBACK(8080)]);
 });
 
-test("openTailnetPorts: a wide port gets the exact add call", async () => {
+test("openTailnetPorts: a wide port gets the exact add call, after the legacy delete", async () => {
   const logs = [];
   const { calls, run } = recorder();
   const results = await openTailnetPorts({
@@ -181,7 +201,7 @@ test("openTailnetPorts: a wide port gets the exact add call", async () => {
     model: modelWithPorts([{ target: 8080, published: "8080", host_ip: "0.0.0.0", protocol: "tcp" }]),
     interfaces: { tailscale0: iface("100.64.0.7") }, run, log: (m) => logs.push(m),
   });
-  assert.deepEqual(calls, [{ cmd: "sudo", argv: tailnetRuleArgs(8080, "Ramble"), opts: { timeout: 10000 } }]);
+  assert.deepEqual(calls, [legacyDeleteCall(8080), addCall(8080, "Ramble")]);
   assert.deepEqual(results, [{ port: 8080, action: "added" }]);
   assert.deepEqual(logs, [LOG_LINE_OPENED(8080)]);
 });
@@ -192,7 +212,7 @@ test("openTailnetPorts: an unknown model still gets the rule (unknown is not loo
     ports: [8080], name: "Ramble", model: null,
     interfaces: { tailscale0: iface("100.64.0.7") }, run,
   });
-  assert.equal(calls.length, 1);
+  assert.deepEqual(calls, [legacyDeleteCall(8080), addCall(8080, "Ramble")]);
   assert.deepEqual(results, [{ port: 8080, action: "added" }]);
 });
 
@@ -205,12 +225,60 @@ test("openTailnetPorts: a throwing runner is logged, not propagated, and the nex
     ports: [8080, 9090], name: "Ramble", model: null,
     interfaces: { tailscale0: iface("100.64.0.7") }, run, log: (m) => logs.push(m),
   });
-  assert.equal(calls.length, 2);
+  assert.deepEqual(calls, [
+    legacyDeleteCall(8080), addCall(8080, "Ramble"),
+    legacyDeleteCall(9090), addCall(9090, "Ramble"),
+  ]);
   assert.deepEqual(results, [
     { port: 8080, action: "failed" },
     { port: 9090, action: "added" },
   ]);
   assert.deepEqual(logs, [LOG_LINE_OPEN_FAILED(8080), LOG_LINE_OPENED(9090)]);
+});
+
+// --- the legacy unscoped rule is cleaned up on open ------------------------
+
+test("openTailnetPorts: the legacy delete comes first, then the scoped add", async () => {
+  const { calls, run } = recorder();
+  const results = await openTailnetPorts({
+    ports: [8080], name: "Ramble", model: null,
+    interfaces: TAILNET_UP, run,
+  });
+  assert.deepEqual(calls, [legacyDeleteCall(8080), addCall(8080, "Ramble")]);
+  assert.ok(!calls[0].argv.includes("tailscale0"), "the first call is the unscoped delete");
+  assert.deepEqual(results, [{ port: 8080, action: "added" }]);
+});
+
+test("openTailnetPorts: a loopback-only port gets the legacy delete and no add", async () => {
+  const { calls, run } = recorder();
+  const results = await openTailnetPorts({
+    ports: [8080], name: "Ramble",
+    model: modelWithPorts([{ target: 8080, published: "8080", host_ip: "127.0.0.1", protocol: "tcp" }]),
+    interfaces: TAILNET_UP, run,
+  });
+  assert.deepEqual(calls, [legacyDeleteCall(8080)]);
+  assert.deepEqual(results, [{ port: 8080, action: "skipped-loopback" }]);
+});
+
+test("openTailnetPorts: a throwing legacy delete does not stop the add", async () => {
+  const { calls, run } = recorder((_cmd, argv) => {
+    if (!argv.includes("tailscale0")) throw new Error("ufw: rule not found");
+  });
+  const results = await openTailnetPorts({
+    ports: [8080], name: "Ramble", model: null,
+    interfaces: TAILNET_UP, run,
+  });
+  assert.deepEqual(calls, [legacyDeleteCall(8080), addCall(8080, "Ramble")]);
+  assert.deepEqual(results, [{ port: 8080, action: "added" }]);
+});
+
+test("openTailnetPorts: no legacy delete when Tailscale is down", async () => {
+  const { calls, run } = recorder();
+  await openTailnetPorts({
+    ports: [8080], name: "Ramble", model: null,
+    interfaces: TAILNET_DOWN, run,
+  });
+  assert.deepEqual(calls, []);
 });
 
 // --- closeTailnetPorts -----------------------------------------------------

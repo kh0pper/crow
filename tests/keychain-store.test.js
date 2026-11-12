@@ -182,6 +182,43 @@ test("Export → Import round-trips through a passphrase file; wrong passphrase 
   assert.deepEqual(await K.importEntries(db2, key2, await X.openExport(file, "correct horse battery")), { imported: 0, skipped: 2, ids: [] }, "re-import overwrites nothing");
 });
 
+test("rememberExtensionSecret: an insert returns the numeric row id and the row is active", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  const id = await K.rememberExtensionSecret(db, key, { bundleId: "remember", envKey: "REMEMBER_A", label: "L", secret: "first", origin: "typed" });
+  assert.equal(typeof id, "number");
+  const e = await K.getEntry(db, id);
+  assert.equal(e.bundle_id, "remember");
+  assert.equal(e.env_key, "REMEMBER_A");
+  assert.equal(e.status, "active");
+  assert.equal(await K.openEntrySecret(db, key, id), "first");
+});
+
+test("rememberExtensionSecret: a second call on an active row returns null and keeps the first secret", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  const id = await K.rememberExtensionSecret(db, key, { bundleId: "remember", envKey: "REMEMBER_B", label: "L", secret: "first", origin: "typed" });
+  const again = await K.rememberExtensionSecret(db, key, { bundleId: "remember", envKey: "REMEMBER_B", label: "L2", secret: "second", origin: "typed" });
+  assert.equal(again, null, "nothing was written");
+  assert.equal((await K.listEntries(db)).length, 1);
+  assert.equal(await K.openEntrySecret(db, key, id), "first", "first typed key wins");
+  assert.equal((await K.getEntry(db, id)).label, "L");
+});
+
+test("rememberExtensionSecret: a row an uninstall marked removed is reactivated and its id returned", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  const id = await K.rememberExtensionSecret(db, key, { bundleId: "remember", envKey: "REMEMBER_C", label: "L", secret: "first", origin: "typed" });
+  assert.equal(await K.markBundleRemoved(db, "remember"), 1);
+  assert.equal((await K.getEntry(db, id)).status, "extension_removed");
+  const back = await K.rememberExtensionSecret(db, key, { bundleId: "remember", envKey: "REMEMBER_C", label: "L", secret: "second", origin: "typed" });
+  assert.equal(typeof back, "number");
+  const e = await K.getEntry(db, back);
+  assert.equal(e.status, "active");
+  assert.equal((await K.listEntries(db)).length, 1, "updated in place, not a second row");
+  assert.equal(await K.openEntrySecret(db, key, back), "second");
+});
+
 test("init-db creates crow_keychain with the same columns as the store's lazy ensure (no CHECK constraints)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "crow-kc-initdb-"));
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe" });

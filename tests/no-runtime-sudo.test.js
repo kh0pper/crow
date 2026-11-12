@@ -23,7 +23,9 @@ const KNOWN = [
   // The tailnet ufw rules themselves (servers/gateway/bundle-firewall.js): it spawns nothing
   // — the command goes to an injected `run` (install/uninstall pass execFileSync), so under
   // NoNewPrivileges=yes the add/delete simply fails into the logged "open manually" note.
-  { file: "servers/gateway/bundle-firewall.js", re: /run\("sudo"/, count: 2 },
+  // Three sites: the best-effort legacy deletes on open, the scoped add on open, and the
+  // two deletes on close.
+  { file: "servers/gateway/bundle-firewall.js", re: /run\("sudo"/, count: 3 },
 ];
 const COMMENT = /^\s*(\*|\/\/|\/\*)/;
 const SKIP = /(^|\/)(node_modules|install[^/]*\.(sh|mjs|js))$/;
