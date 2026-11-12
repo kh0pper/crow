@@ -148,6 +148,29 @@ test("normalizeHost: a confirmable host and port, or null", () => {
     ["127.0.0.1", null],
     ["127.9.9.9:2222", null],
     ["0.0.0.0", null],
+    // Numeric spellings the resolver reads as an address (inet_aton accepts
+    // hex, octal and short forms): each must be a strict dotted quad, never a
+    // host name that happens to reach 127.0.0.1.
+    ["0x7f.0.0.1", null],
+    ["0X7F.0.0.1", null],
+    ["0177.0.0.1", null],
+    ["0x7f000001", null],
+    ["2130706433", null],
+    ["127.1", null],
+    ["127.0.1", null],
+    // Deliberate and fail closed (see NUMERIC_LABEL_RE): a REAL host name whose
+    // labels are all hex is read as an address, is not a dotted quad, and is
+    // refused. `cafe.de` and `abc` are the plain cases; nothing may lift this
+    // without re-opening the `0x7f.0.0.1` route above.
+    ["cafe.de", null],
+    ["abc", null],
+    ["0.0.0.0:2222", null],
+    ["10.0.0.5", { host: "10.0.0.5", port: 22 }],
+    // One non-hex label and the name is a name again.
+    ["abc.example", { host: "abc.example", port: 22 }],
+    ["git.cafe.de", { host: "git.cafe.de", port: 22 }],
+    ["10.0.0.5:2222", { host: "10.0.0.5", port: 2222 }],
+    ["git.example.org", { host: "git.example.org", port: 22 }],
     ["::1", null],
     ["[::1]:22", null],
     ["github.com", null],
@@ -216,6 +239,18 @@ test("buildKnownHosts drops comments, extra fields and unconfirmable hosts", () 
   assert.ok(!built.includes("my laptop"));
   assert.ok(!built.includes("#comment"));
   assert.ok(!built.includes("cert-authority"));
+});
+
+test("parseKeyLine and buildKnownHosts refuse hex/octal/short-form loopback spellings", () => {
+  const ed = syntheticKey("ssh-ed25519");
+  for (const host of ["0x7f.0.0.1", "0177.0.0.1", "2130706433", "127.1"]) {
+    assert.equal(H.parseKeyLine(host + " ssh-ed25519 " + ed), null, host + " is not a confirmable host");
+    assert.equal(H.normalizeHost(host), null, host + " is not a confirmable host");
+  }
+  const built = H.buildKnownHosts(["0x7f.0.0.1 ssh-ed25519 " + ed, "127.1 ssh-ed25519 " + ed]);
+  assert.equal(built.trimEnd().split("\n").length, 3, "only the pinned lines survive");
+  assert.equal(H.parseKeyLine("10.0.0.5 ssh-ed25519 " + ed).host, "10.0.0.5");
+  assert.equal(H.parseKeyLine("git.example.org ssh-ed25519 " + ed).host, "git.example.org");
 });
 
 test("buildKnownHosts never lets a confirmed line stand in for a pinned host", () => {

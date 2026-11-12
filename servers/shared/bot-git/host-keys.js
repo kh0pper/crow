@@ -62,6 +62,20 @@ const KEY_TYPES = new Set(ALLOWED_KEY_TYPES);
 const HOSTNAME_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 /** Base64, optionally padded (ssh writes it padded). */
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+/**
+ * A label that is a NUMBER in some base the C library's resolver accepts
+ * (decimal, octal with a leading 0, or 0x-prefixed hex), or — the wider net —
+ * any label made only of hex digits. `inet_aton` reads `0x7f.0.0.1`,
+ * `0177.0.0.1` and `127.1` as 127.0.0.1, so a host made only of such labels is
+ * treated as an ADDRESS below, never as a host name.
+ *
+ * FAIR WARNING: that rule also refuses a real host name whose labels happen to
+ * be all hex — `cafe.de`, `abc`, `beef.example`. It is deliberate and it fails
+ * closed: the resolver could read those labels as an address, so a host that
+ * ambiguous is never confirmed (and never reaches a known_hosts line). A name
+ * with one non-hex label (`abc.example`, `git.cafe.de`) is unaffected.
+ */
+const NUMERIC_LABEL_RE = /^(?:0x[0-9a-f]+|[0-9a-f]+)$/;
 
 /** `SHA256:…` of a public key's base64 blob (OpenSSH's own spelling). */
 export function fingerprintOf(keyB64) {
@@ -80,12 +94,27 @@ function ipv4(s) {
   return s;
 }
 
-/** Syntax only: a dotted quad or dot-separated host name labels; lower-case. */
+/**
+ * Syntax only: a dotted quad or dot-separated host name labels; lower-case.
+ *
+ * A label starting with `0x`/`0X`, and any host whose labels are ALL
+ * numeric-or-hex, is an address as far as the resolver is concerned (glibc's
+ * `inet_aton` accepts hex/octal/short forms), so it must be a strict dotted
+ * quad — each octet 0-255, no leading zeros — before hostRefused() ever looks
+ * at 127/0.0.0.0. Without this, `0x7f.0.0.1` passed as a host-name label and
+ * resolved to 127.0.0.1, bypassing the loopback refusal. The cost is the
+ * all-hex real host name (`cafe.de`, `abc`): read as an address, not a dotted
+ * quad, and so refused — deliberately, and fail closed.
+ * (Resolve-then-pin was considered and not taken: a confirmed host is
+ * owner-only input and the LAN is allowed by design.)
+ */
 function parseHostSyntax(raw) {
   if (typeof raw !== "string" || !raw || raw.length > 253) return null;
   const host = raw.toLowerCase();
-  if (/^[0-9.]+$/.test(host)) return ipv4(host);
   const labels = host.split(".");
+  const hexPrefixed = labels.some((label) => label.startsWith("0x"));
+  const allNumeric = labels.every((label) => NUMERIC_LABEL_RE.test(label));
+  if (hexPrefixed || allNumeric) return ipv4(host);
   for (const label of labels) if (!HOSTNAME_LABEL_RE.test(label)) return null;
   return host;
 }

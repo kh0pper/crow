@@ -80,6 +80,8 @@
  *    and of the app root, except the browser and workspace bundles'. They read
  *    empty inside. ~/.ssh is hidden as a dir always (created 0700 when it is
  *    missing), and so are the instance's env/ and android-keystore/ folders.
+ *    A git-enabled bot's own key dir under the secrets dir is bound back
+ *    read-only inside the tmpfs (--ro-bind-fd; see servers/shared/bot-git).
  *    Still readable, because something inside the sandbox reads each one:
  *    the cloud model key (llm-cloud-token), the local models token
  *    (models-token), the kiosk and studio tokens (kiosk-announce-token,
@@ -101,9 +103,9 @@
  * to spawn pi without bwrap), "off" (never wrap).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, fstatSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { containSelected, buildContainPlan, ContainRefused } from "./pi_contain.mjs";
 import { buildSeccompProgram, seccompSupported } from "./pi_seccomp.mjs";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
@@ -223,6 +225,20 @@ function runProbe(bin, args) {
 }
 
 /**
+ * One `bwrap --help` run: does this bubblewrap know `--ro-bind-fd`? That flag
+ * is how a git-enabled bot's own key dir is bound back inside the secrets
+ * tmpfs from an already-open fd (no path resolved at mount time, so nothing
+ * can be swapped between Crow's check and bwrap's mount). An older bubblewrap
+ * leaves git off with a plain "bubblewrap too old" reason. Never throws.
+ */
+function runBwrapHelp(bin) {
+  try {
+    const r = spawnSync(bin, ["--help"], { timeout: 5000, stdio: ["ignore", "pipe", "ignore"] });
+    return String((r.stdout && r.stdout.toString()) || "");
+  } catch { return ""; }
+}
+
+/**
  * Can this process start a bubblewrap sandbox, and which tier? Tier 1 (user
  * + PID namespace, fresh /proc) first, then tier 2 (user namespace only).
  * Only a FULL-tier success is cached for the life of the process. A failure
@@ -250,7 +266,12 @@ export function probePiSandbox(opts = {}) {
   }
   let setprivOk = false;
   if (!ok && setpriv) setprivOk = run(setpriv, ["--no-new-privs", "/bin/true"]) == null;
-  probeCache = { ok, pidns, bwrap: ok ? bwrap : null, setpriv: setprivOk ? setpriv : null, reason: ok ? null : reason,
+  // `bindFd` is a property of the BINARY, not of the tier: it is what lets a
+  // pidns spawn bind a git key dir back (--ro-bind-fd), and it is re-read
+  // whenever the probe is (cached for a full tier, re-probed for a weaker one).
+  const help = typeof opts.bwrapHelp === "string" ? opts.bwrapHelp : (bwrap ? runBwrapHelp(bwrap) : "");
+  const bindFd = ok && help.includes("--ro-bind-fd");
+  probeCache = { ok, pidns, bindFd, bwrap: ok ? bwrap : null, setpriv: setprivOk ? setpriv : null, reason: ok ? null : reason,
     pidnsReason: pidns ? null : pidnsReason, at: now };
   return probeCache;
 }
@@ -292,13 +313,71 @@ export function piSandboxStatus() {
 }
 
 /**
+ * The `exposeInHidden` entries this spawn may really bind back: a dir INSIDE a
+ * dir it hides, handed over as an already-open fd (`O_DIRECTORY|O_NOFOLLOW`) so
+ * bwrap pins the exact inode Crow checked instead of resolving a path again at
+ * mount time (a TOCTOU a gateway or a future bot uid could win).
+ *
+ * Anything that does not qualify is dropped silently (fail closed): git is an
+ * extra capability, and a spawn must run exactly as before without it. The
+ * entry is valid only when
+ *  - the probe found `--ro-bind-fd` in this bwrap (bindFd) and this spawn is
+ *    the pidns tier (in the userns tier host /proc is visible, so a same-uid
+ *    bot could read another key dir through /proc/<pid>/root anyway);
+ *  - `dir` is an absolute, normalised path with no `..`, strictly inside
+ *    exactly ONE hide dir, and that hide dir is not itself under a runtime
+ *    tmpfs (whose contents the caller does not own);
+ *  - `fd` is an open directory descriptor of this user's, mode 0700 or tighter,
+ *    whose dev+ino are the dir's own (lstat), and no component from the hide
+ *    dir down to `dir` is a symlink;
+ *  - `childFd` is the fd number bwrap will see (>= 3: stdio is not ours).
+ * @returns {{dir: string, childFd: number}[]}
+ */
+function validExposed(list, { hideDirs, tmpfs, pidns, bindFd, uid = process.getuid() }) {
+  if (bindFd !== true || pidns !== true || !Array.isArray(list)) return [];
+  const out = [];
+  for (const entry of list) {
+    if (!entry || typeof entry !== "object") continue;
+    const { dir, fd, childFd } = entry;
+    if (typeof dir !== "string" || !isAbsolute(dir) || dir.split("/").includes("..") || resolve(dir) !== dir) continue;
+    if (!Number.isInteger(fd) || fd < 3 || !Number.isInteger(childFd) || childFd < 3) continue;
+    const parents = hideDirs.filter((d) => dir.startsWith(d + "/"));
+    if (parents.length !== 1) continue;
+    // A dir that is ITSELF hidden whole is never re-exposed.
+    if (hideDirs.includes(dir)) continue;
+    const parent = parents[0];
+    if (tmpfs.some((t) => parent === t || parent.startsWith(t + "/"))) continue;
+    // No symlink anywhere below the hide dir, and every component a real dir.
+    let p = parent;
+    let ok = true;
+    for (const part of dir.slice(parent.length + 1).split("/")) {
+      p = p + "/" + part;
+      let st;
+      try { st = lstatSync(p); } catch { ok = false; break; }
+      if (st.isSymbolicLink() || !st.isDirectory()) { ok = false; break; }
+    }
+    if (!ok) continue;
+    let lst, fst;
+    try { lst = lstatSync(dir); fst = fstatSync(fd); } catch { continue; }
+    if (!fst.isDirectory() || fst.uid !== uid || (fst.mode & 0o077) !== 0) continue;
+    if (fst.dev !== lst.dev || fst.ino !== lst.ino) continue;
+    out.push({ dir, childFd });
+  }
+  return out;
+}
+
+/**
  * The command line (and env) to spawn pi with. `tier` names what the child
  * really gets: "pidns" (bwrap, user + PID namespace, fresh /proc), "userns"
  * (bwrap, user namespace only), "nnp" (setpriv --no-new-privs only) or
  * "none" (plain spawn). `pidNamespace` is true exactly for "pidns".
  * opts.passFds names the EXTRA fds the caller really wires for the child
  * (beyond stdio): the network tier's entry process hands pi only those.
- * @returns {{cmd, args, env, tier:"pidns"|"userns"|"nnp"|"none", sandboxed:boolean, wrapper:"bwrap"|"setpriv"|null, pidNamespace:boolean, reason, masked:string[]}}
+ * opts.exposeInHidden names dirs INSIDE hideDirs to bind back read-only from
+ * an already-open fd (`--ro-bind-fd`; a git-enabled bot's own key dir). Only
+ * entries that pass validExposed() reach the argv, and `exposed` reports the
+ * dirs that really did.
+ * @returns {{cmd, args, env, tier:"pidns"|"userns"|"nnp"|"none", sandboxed:boolean, wrapper:"bwrap"|"setpriv"|null, pidNamespace:boolean, reason, masked:string[], exposed:string[]}}
  * @throws when mode is "required" and bwrap is unavailable.
  */
 export function wrapPiSpawn(cmd, args, opts = {}) {
@@ -306,7 +385,7 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   // the child env (which carries the bot def's spawn_env).
   const mode = opts.mode || piSandboxMode(process.env);
   const env = opts.env || process.env;
-  const plain = (reason) => ({ cmd, args, env, tier: "none", sandboxed: false, wrapper: null, pidNamespace: false, reason, masked: [] });
+  const plain = (reason) => ({ cmd, args, env, tier: "none", sandboxed: false, wrapper: null, pidNamespace: false, reason, masked: [], exposed: [] });
   if (mode === "off") return plain("CROW_PI_SANDBOX=off");
   const probe = opts.probe || probePiSandbox();
   // Contain tier (pi_contain.mjs): selected for this bot by the spawner's env
@@ -383,7 +462,7 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
     const tier = (seccomp ? "contain" : "contain-noseccomp") + (plan.net ? "" : "-hostnet");
     return { cmd: probe.bwrap, args: [...pre, "--", ...inner], env: { ...scrubSandboxEnv(env), ...plan.env },
       sandboxed: true, wrapper: "bwrap", tier, pidNamespace: true, reason: null,
-      masked, unreachable, refused: plan.refused, seccomp, net: plan.net };
+      masked, exposed: [], unreachable, refused: plan.refused, seccomp, net: plan.net };
   }
   if (!probe.ok) {
     if (mode === "required" || mode === "contain") {
@@ -398,7 +477,7 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
     }
     if (probe.setpriv) {
       return { cmd: probe.setpriv, args: ["--no-new-privs", cmd, ...args], env: scrubSandboxEnv(env),
-        tier: "nnp", sandboxed: false, wrapper: "setpriv", pidNamespace: false, reason: probe.reason, masked: [] };
+        tier: "nnp", sandboxed: false, wrapper: "setpriv", pidNamespace: false, reason: probe.reason, masked: [], exposed: [] };
     }
     return plain(probe.reason);
   }
@@ -485,11 +564,24 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
       (probe.pidnsReason || "unavailable") + "). Bots can see host processes and their /proc entries.");
   }
   const pre = [...(pidNamespace ? BWRAP_BASE : BWRAP_BASE_NO_PIDNS)];
+  // A bot's OWN git key dir, bound back read-only from an already-open fd; see
+  // validExposed for why an fd (--ro-bind-fd) and not a path. `pidNamespace`
+  // guards the userns tier; a runtime tmpfs is not ours to expose from.
+  const exposed = validExposed(opts.exposeInHidden, { hideDirs, tmpfs, pidns: pidNamespace, bindFd: probe.bindFd });
   for (const a of pins.sort((x, y) => x.length - y.length)) pre.push("--bind", a, a);
   for (const d of tmpfs) pre.push("--tmpfs", d);
   // Read-only too: no decoy can be planted there for a host-side reader
-  // (send_user_file) to resolve to the real file behind the mask.
-  for (const d of hideDirs) if (!tmpfs.some((t) => d === t || d.startsWith(t + "/"))) pre.push("--tmpfs", d, "--remount-ro", d);
+  // (send_user_file) to resolve to the real file behind the mask. An exposed
+  // dir is bound back INSIDE its tmpfs, between the tmpfs and the remount-ro:
+  // every other bot's key dir stays behind the empty tmpfs and does not exist
+  // inside. The exposed dir itself is read-only; it is NOT added to `masked`
+  // (it is reachable, and the caller checks `exposed` to hand git its env).
+  for (const d of hideDirs) {
+    if (tmpfs.some((t) => d === t || d.startsWith(t + "/"))) continue;
+    pre.push("--tmpfs", d);
+    for (const e of exposed) if (e.dir.startsWith(d + "/")) pre.push("--ro-bind-fd", String(e.childFd), e.dir);
+    pre.push("--remount-ro", d);
+  }
   for (const s of sockets) if (!tmpfs.some((d) => s === d || s.startsWith(d + "/"))) pre.push("--ro-bind", "/dev/null", s);
   for (const d of roDirs) pre.push("--ro-bind", d, d);
   // After the roDirs binds, so no earlier bind can cover a masked file.
@@ -497,7 +589,8 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
   return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: scrubSandboxEnv(env),
     tier: pidNamespace ? "pidns" : "userns", sandboxed: true, wrapper: "bwrap", pidNamespace, reason: null,
-    masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs, ...maskedFiles], maskedFiles, pinned: pins };
+    masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs, ...maskedFiles], maskedFiles, pinned: pins,
+    exposed: exposed.map((e) => e.dir) };
 }
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */

@@ -210,7 +210,7 @@ export async function runSkillReview(opts) {
 
     const { PiRpc } = await import("./bridge.mjs"); // lazy — avoids static import cycle
     const pi = new PiRpc({ def: reviewDef, sessionDir: reviewDir, resolved, selfAuthoringDir: null,
-      piSessionId: null, appendSystemPromptFile: sysFile });
+      piSessionId: null, appendSystemPromptFile: sysFile, noGit: true });
     try {
       await pi.getState().catch(() => null);
       await pi.prompt(buildPrompt(transcript), REVIEW_TIMEOUT_MS);

@@ -9,7 +9,7 @@
 // holds in the PARENT, so each assertion proves the sandbox took it away.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, statSync, symlinkSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, statSync, symlinkSync, realpathSync, openSync, closeSync, constants as fsConstants } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { connect, createServer } from "node:net";
@@ -818,4 +818,246 @@ test("a tier-2 (user-namespace-only) success is re-probed after PROBE_RETRY_MS a
     if (prevMode === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prevMode;
     _resetPiSandboxForTest();
   }
+});
+
+// ---- exposeInHidden: a git-enabled bot's own key dir (PR B) ----
+//
+// A bot's key dir lives INSIDE the secrets dir, which every spawn hides behind
+// a read-only tmpfs. A git-enabled spawn binds its own key dir back inside that
+// tmpfs, from an already-open O_DIRECTORY|O_NOFOLLOW fd (--ro-bind-fd): bwrap
+// pins the inode Crow checked instead of resolving a path again at mount time.
+// These tests prove both halves: the validation (nothing questionable ever
+// reaches the argv) and the real mount (own key readable, every other key and
+// the rest of the secrets dir gone, and nothing inside is writable).
+
+const EXPOSE_PROBE = Object.freeze({ ok: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null, pidns: true, bindFd: true });
+
+/** root/home/.crow/secrets/bot-git/{a,b}, modes as they ship. */
+function exposeFixture() {
+  const root = mkdtempSync(join(tmpdir(), "crow-expose-"));
+  const secrets = join(root, "home", ".crow", "secrets");
+  mkdirSync(join(secrets, "bot-git", "a"), { recursive: true, mode: 0o700 });
+  mkdirSync(join(secrets, "bot-git", "b"), { recursive: true, mode: 0o700 });
+  for (const d of [secrets, join(secrets, "bot-git"), join(secrets, "bot-git", "a"), join(secrets, "bot-git", "b")]) chmodSync(d, 0o700);
+  return { root, secrets };
+}
+
+function openDir(p) {
+  return openSync(p, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+}
+
+function wrapExposing(f, extra = {}, cmd = "node", args = ["cli.js"]) {
+  return wrapPiSpawn(cmd, args, { mode: "auto", probe: EXPOSE_PROBE, sockets: [], runtimeDirs: [], roDirs: [],
+    hideDirs: [f.secrets], pinStop: f.root, ...extra });
+}
+
+test("wrapPiSpawn: an exposed key dir is bound between --tmpfs and --remount-ro, from its fd", () => {
+  const f = exposeFixture();
+  const a = join(f.secrets, "bot-git", "a");
+  const fd = openDir(a);
+  try {
+    const l = wrapExposing(f, { exposeInHidden: [{ dir: a, fd, childFd: 7 }] });
+    const at = l.args.findIndex((x, i) => x === "--tmpfs" && l.args[i + 1] === f.secrets);
+    assert.ok(at > 0, "the secrets dir is still tmpfs'd");
+    assert.deepEqual(l.args.slice(at, at + 8),
+      ["--tmpfs", f.secrets, "--ro-bind-fd", "7", a, "--remount-ro", f.secrets, "--"],
+      "exactly: tmpfs, ro-bind-fd, remount-ro");
+    assert.deepEqual(l.exposed, [a]);
+    assert.ok(l.masked.includes(f.secrets), "the secrets dir still counts as masked");
+    assert.ok(!l.masked.includes(a), "the exposed dir itself is reachable, never reported as masked");
+    assert.equal(l.pidNamespace, true);
+  } finally { closeSync(fd); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("wrapPiSpawn: no exposeInHidden (or []) leaves the argv byte-identical", () => {
+  const f = exposeFixture();
+  try {
+    const base = wrapExposing(f);
+    const empty = wrapExposing(f, { exposeInHidden: [] });
+    assert.deepEqual(empty.args, base.args);
+    assert.deepEqual(empty.env, base.env);
+    assert.deepEqual(empty.exposed, []);
+    assert.ok(!base.args.includes("--ro-bind-fd"));
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("wrapPiSpawn: drops an expose entry that does not qualify (and the argv never sees it)", () => {
+  const f = exposeFixture();
+  const a = join(f.secrets, "bot-git", "a");
+  const b = join(f.secrets, "bot-git", "b");
+  const other = join(f.root, "elsewhere");
+  mkdirSync(other, { mode: 0o700 });
+  chmodSync(other, 0o700);
+  const cohost = join(f.root, "second-home", ".crow-2", "secrets", "bot-git", "c");
+  mkdirSync(cohost, { recursive: true, mode: 0o700 });
+  chmodSync(cohost, 0o700);
+  symlinkSync(a, join(f.secrets, "bot-git", "linked"));
+  const fds = [];
+  const open = (p) => { const fd = openDir(p); fds.push(fd); return fd; };
+  try {
+    const fa = open(a), fb = open(b), fo = open(other), fc = open(cohost);
+    const cases = [
+      ["outside every hide dir", { dir: other, fd: fo, childFd: 7 }],
+      ["under a co-host secrets dir that is not hidden here", { dir: cohost, fd: fc, childFd: 7 }],
+      ["a symlinked component", { dir: join(f.secrets, "bot-git", "linked"), fd: fa, childFd: 7 }],
+      ["missing", { dir: join(f.secrets, "bot-git", "missing"), fd: fa, childFd: 7 }],
+      ["a path with ..", { dir: f.secrets + "/bot-git/../bot-git/a", fd: fa, childFd: 7 }],
+      ["an fd whose inode is another dir", { dir: a, fd: fb, childFd: 7 }],
+      ["a non-integer fd", { dir: a, fd: "7", childFd: 7 }],
+      ["a child fd in stdio range", { dir: a, fd: fa, childFd: 2 }],
+    ];
+    for (const [what, entry] of cases) {
+      const l = wrapExposing(f, { exposeInHidden: [entry] });
+      assert.deepEqual(l.exposed, [], what);
+      assert.ok(!l.args.includes("--ro-bind-fd"), "no --ro-bind-fd for " + what);
+    }
+    // the probe: an old bwrap (no --ro-bind-fd) and the userns tier both refuse it
+    const oldBwrap = wrapExposing(f, { probe: { ...EXPOSE_PROBE, bindFd: false }, exposeInHidden: [{ dir: a, fd: fa, childFd: 7 }] });
+    assert.deepEqual(oldBwrap.exposed, []);
+    const userns = wrapExposing(f, { probe: { ...EXPOSE_PROBE, pidns: false }, exposeInHidden: [{ dir: a, fd: fa, childFd: 7 }] });
+    assert.deepEqual(userns.exposed, []);
+    assert.equal(userns.tier, "userns");
+    assert.ok(!userns.args.includes("--ro-bind-fd"), "never in the userns tier");
+  } finally {
+    for (const fd of fds) { try { closeSync(fd); } catch { /* closed */ } }
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("wrapPiSpawn: the contain tier never binds an exposed dir (no git there in v1)", () => {
+  const f = exposeFixture();
+  const a = join(f.secrets, "bot-git", "a");
+  // The contain plan WALKS every bound dir for .env files and fails closed on a
+  // dir too large to scan, so it gets a host layout of its own under the
+  // fixture root (the tests/pi-contain-plan.test.js shape) rather than the real
+  // checkout, node install and home. Nothing here is read for its contents.
+  const host = join(f.root, "host");
+  const home = join(host, "home");
+  const appRoot = join(home, "crow");
+  const nodeRoot = join(home, ".nvm", "versions", "node", "v24.0.0");
+  const crowHome = join(home, ".crow");
+  const dataDir = join(crowHome, "data");
+  const dir = join(home, "session");
+  const nodeBin = join(nodeRoot, "bin", "node");
+  for (const d of [appRoot, join(nodeRoot, "bin"), dataDir, dir]) mkdirSync(d, { recursive: true });
+  writeFileSync(nodeBin, "");
+  const fd = openDir(a);
+  const prev = process.env.CROW_PI_CONTAIN_BOTS;
+  process.env.CROW_PI_CONTAIN_BOTS = "expose-contain-bot";
+  try {
+    const l = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe: EXPOSE_PROBE, botId: "expose-contain-bot",
+      sockets: [], runtimeDirs: [], roDirs: [], hideDirs: [f.secrets], exposeInHidden: [{ dir: a, fd, childFd: 7 }],
+      contain: { home, crowHome, dataDir, appRoot, nodeBin,
+        sessionDir: dir, cwd: dir, writePaths: [], readPaths: [], mcpServers: [], otherHomes: [] } });
+    assert.match(l.tier, /^contain/);
+    assert.deepEqual(l.exposed, []);
+    assert.ok(!l.args.includes("--ro-bind-fd"));
+    assert.ok(l.args.includes("--tmpfs") && l.args.includes(home), "the fixture home is the sandbox's empty home");
+  } finally {
+    closeSync(fd);
+    if (prev === undefined) delete process.env.CROW_PI_CONTAIN_BOTS; else process.env.CROW_PI_CONTAIN_BOTS = prev;
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+// Real bubblewrap only: SKIP when no bwrap binary exists at the installer's
+// path. Every other failure is a failure (a host WITH bwrap that cannot make
+// the namespace is a broken sandbox, not a reason to skip).
+const noBwrapBinary = existsSync("/usr/bin/bwrap") ? false : "no bwrap binary at /usr/bin/bwrap";
+
+test("integration: an exposed key dir is readable inside; every other key, the secrets dir and every write are not", { skip: noBwrapBinary }, async () => {
+  const f = exposeFixture();
+  const a = join(f.secrets, "bot-git", "a");
+  const b = join(f.secrets, "bot-git", "b");
+  writeFileSync(join(a, "id_ed25519"), "A-KEY", { mode: 0o600 });
+  writeFileSync(join(a, "meta.json"), '{"bot_id":"a"}\n', { mode: 0o600 });
+  writeFileSync(join(a, "known_hosts"), "github.com ssh-ed25519 AAAA\n", { mode: 0o600 });
+  writeFileSync(join(a, "gitconfig"), "[user]\n", { mode: 0o600 });
+  writeFileSync(join(b, "id_ed25519"), "B-KEY", { mode: 0o600 });
+  writeFileSync(join(f.secrets, "secret-file"), "SECRET\n", { mode: 0o600 });
+  const fd = openDir(a);
+  const generation = 7;
+  try {
+    // The host paths that must not be reachable through ANY inherited fd: the
+    // bot's own key dir, another bot's key dir, and the secrets dir itself.
+    const forbiddenFds = JSON.stringify([a, b, f.secrets]);
+    const script = [
+      'const fs = require("fs");',
+      'const [a, b, secrets, fdNo, forbiddenJson] = process.argv.slice(1);',
+      'const rd = (p) => { try { return fs.readFileSync(p, "utf8"); } catch (e) { return "ERR:" + e.code; } };',
+      'const wr = (p) => { try { fs.writeFileSync(p, "x"); return "ok"; } catch (e) { return e.code || "refused"; } };',
+      'const ren = (p, q) => { try { fs.renameSync(p, q); return "ok"; } catch (e) { return e.code || "refused"; } };',
+      'const rm = (p) => { try { fs.unlinkSync(p); return "ok"; } catch (e) { return e.code || "refused"; } };',
+      'const ls = (p) => { try { return fs.readdirSync(p); } catch (e) { return "ERR:" + e.code; } };',
+      // Every open fd in the child, resolved. The generation fd number is not
+      // enough on its own: node opens internal descriptors of its own and one of
+      // them can land on that number, so an "is fd N open?" probe is a false
+      // positive. What matters is that no fd resolves INTO a key dir or the
+      // secrets dir. (bwrap is expected to have closed the --ro-bind-fd fd when
+      // it handed over to the child — the plain-`sh` check the orchestrator ran
+      // shows only 0-3 there — but the assertion is about the paths, not a
+      // number bwrap and node can disagree about.)
+      'const under = (p, root) => p === root || p.startsWith(root + "/");',
+      'const forbidden = JSON.parse(forbiddenJson);',
+      'const fdLinks = [];',
+      'for (const n of fs.readdirSync("/proc/self/fd")) {',
+      '  let target = "";',
+      '  try { target = fs.readlinkSync("/proc/self/fd/" + n); } catch (e) { target = ""; }',
+      '  fdLinks.push({ fd: n, target });',
+      '}',
+      'const leakedFds = fdLinks.filter((x) => forbidden.some((root) => under(x.target, root)));',
+      'const out = {',
+      '  ownKey: rd(a + "/id_ed25519"), otherKey: rd(b + "/id_ed25519"),',
+      '  secrets: ls(secrets), botGit: ls(secrets + "/bot-git"), secretFile: rd(secrets + "/secret-file"),',
+      '  keyWrite: wr(a + "/x"), dirRename: ren(a, a + ".x"), mkdir: wr(secrets + "/bot-git/c"),',
+      '  metaWrite: wr(a + "/meta.json"), metaRename: ren(a + "/meta.json", a + "/meta.json.x"), metaUnlink: rm(a + "/meta.json"),',
+      '  knownWrite: wr(a + "/known_hosts"), knownRename: ren(a + "/known_hosts", a + "/k.x"), knownUnlink: rm(a + "/known_hosts"),',
+      '  cfgWrite: wr(a + "/gitconfig"), cfgRename: ren(a + "/gitconfig", a + "/g.x"), cfgUnlink: rm(a + "/gitconfig"),',
+      '  fdCount: fdLinks.length, leakedFds, generationFd: fdLinks.filter((x) => x.fd === fdNo),',
+      '};',
+      'console.log(JSON.stringify(out));',
+    ].join("\n");
+    // The child runs the same way every real-bwrap test in this file does: an
+    // inline script under `node -e`, so nothing is resolved from a cwd (a bare
+    // `node cli.js` would only look for a file the sandbox does not have).
+    const launch = wrapExposing(f, { exposeInHidden: [{ dir: a, fd, childFd: generation }] },
+      process.execPath, ["-e", script, a, b, f.secrets, String(generation), forbiddenFds]);
+    assert.equal(launch.wrapper, "bwrap");
+    assert.deepEqual(launch.exposed, [a]);
+    const stdio = ["pipe", "pipe", "pipe"];
+    while (stdio.length < generation) stdio.push("ignore");
+    stdio[generation] = fd;
+    const res = await new Promise((resolve) => {
+      const c = spawn(launch.cmd, launch.args, { env: launch.env, stdio });
+      let o = "", e = "";
+      c.stdout.on("data", (d) => (o += d)); c.stderr.on("data", (d) => (e += d));
+      c.on("exit", (code) => resolve({ code, o: o.trim(), e }));
+    });
+    assert.equal(res.code, 0, "the sandboxed child exits 0: " + res.e.slice(0, 400));
+    const r = JSON.parse(res.o.split("\n").pop());
+    assert.equal(r.ownKey, "A-KEY", "the bot's own key is readable");
+    assert.equal(r.otherKey, "ERR:ENOENT", "another bot's key does not exist inside");
+    assert.deepEqual(r.secrets, ["bot-git"], "the secrets dir holds only bot-git inside");
+    assert.deepEqual(r.botGit, ["a"], "only this bot's key dir is visible");
+    assert.equal(r.secretFile, "ERR:ENOENT", "the secrets dir's files do not exist inside");
+    assert.equal(r.keyWrite, "EROFS", "the key dir is read-only");
+    assert.notEqual(r.dirRename, "ok", "the key dir cannot be renamed over");
+    assert.notEqual(r.mkdir, "ok", "no dir can be created under the tmpfs'd bot-git");
+    for (const k of ["metaWrite", "knownWrite", "cfgWrite"]) assert.equal(r[k], "EROFS", k + " is read-only");
+    for (const k of ["metaRename", "knownRename", "cfgRename", "metaUnlink", "knownUnlink", "cfgUnlink"]) {
+      assert.notEqual(r[k], "ok", k + " must fail inside");
+    }
+    assert.ok(r.fdCount > 0, "the child could enumerate /proc/self/fd: " + JSON.stringify(r));
+    assert.deepEqual(r.leakedFds, [],
+      "no fd in the child resolves to (or under) this bot's key dir, another bot's key dir, or the secrets dir " +
+      "(generation fd " + generation + " resolves to " + JSON.stringify(r.generationFd) + ")");
+    // Outside: nothing changed, nothing appeared.
+    assert.equal(readFileSync(join(b, "id_ed25519"), "utf8"), "B-KEY");
+    assert.equal(readFileSync(join(a, "id_ed25519"), "utf8"), "A-KEY");
+    assert.equal(readFileSync(join(a, "meta.json"), "utf8"), '{"bot_id":"a"}\n');
+    assert.equal(readFileSync(join(a, "known_hosts"), "utf8"), "github.com ssh-ed25519 AAAA\n");
+    assert.equal(readFileSync(join(a, "gitconfig"), "utf8"), "[user]\n");
+    assert.equal(existsSync(join(f.secrets, "bot-git", "c")), false, "no c dir outside");
+    assert.equal(existsSync(join(f.secrets, "bot-git", "a.x")), false, "no rename outside");
+  } finally { closeSync(fd); rmSync(f.root, { recursive: true, force: true }); }
 });
