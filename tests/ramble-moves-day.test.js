@@ -11,7 +11,10 @@
  *   - `opts.need` caps the requirement at the day's picks-capped need, and any
  *     value that is not a whole number from 1 up is no cap,
  *   - `completeDays` answers exactly the complete days of a range in three
- *     queries, and a bad range answers nothing.
+ *     queries, and a bad range answers nothing,
+ *   - `settleDay` writes the streak's upgrade row (`movestreakv2`, once per
+ *     instance, keyed by the day it settled) on a complete day, and nothing on
+ *     a day that is not complete.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -26,6 +29,7 @@ import {
 import { MOVE_AREA_KIND } from "../bundles/ramble/server/moves/week.js";
 import { HEART_KIND } from "../bundles/ramble/server/hearts.js";
 import { MOVE_DONE_KIND } from "../bundles/ramble/server/moves/ledger.js";
+import { STREAK_V2_KIND } from "../bundles/ramble/server/moves/streak.js";
 import { VIA, recordSlotDone, settleDay } from "../bundles/ramble/server/moves/day.js";
 
 const DAY = "2026-11-12";
@@ -438,4 +442,37 @@ test("a chunk naming an unknown via, slot or entry is refused before anything is
 
   const ok = await recordSlotDone(db, { day, entry, via: "player", now: base(0) });
   assert.equal(ok.fresh, true, "a chunk with no slot is an extra, not junk");
+});
+
+test("settling a complete day writes the streak's upgrade row once, and never again", async () => {
+  const db = await freshDb();
+  const day = dayOf(0);
+  await finishedDay(db, day);
+
+  const first = await settleDay(db, { day, now: base(0) });
+  assert.deepEqual(first, { complete: true, fresh: true });
+  assert.deepEqual(await rowsOfKind(db, STREAK_V2_KIND), [day]);
+  assert.equal(await rowDelta(db, STREAK_V2_KIND, day), 1);
+
+  const second = await settleDay(db, { day, now: base(0) });
+  assert.deepEqual(second, { complete: true, fresh: false });
+  assert.deepEqual(await rowsOfKind(db, STREAK_V2_KIND), [day], "one row, however often the day settles");
+
+  // The next day settles under the same row: the upgrade day is the first one.
+  await finishedDay(db, dayOf(1));
+  await settleDay(db, { day: dayOf(1), now: base(1) });
+  assert.deepEqual(await rowsOfKind(db, STREAK_V2_KIND), [day]);
+});
+
+test("settling a day that is not complete writes no upgrade row", async () => {
+  const db = await freshDb();
+  const day = dayOf(0);
+  await fact(db, MOVE_NEED_KIND, day, 3);
+  await slotRows(db, day, ["morning", "midday"]);
+  await fact(db, MOVE_BAL_KIND, day);
+
+  assert.deepEqual(await settleDay(db, { day, now: base(0) }), { complete: false, fresh: false });
+  assert.deepEqual(await rowsOfKind(db, STREAK_V2_KIND), []);
+  assert.deepEqual(await rowsOfKind(db, MOVE_ALL_KIND), []);
+  assert.deepEqual(await rowsOfKind(db, HEART_KIND), []);
 });

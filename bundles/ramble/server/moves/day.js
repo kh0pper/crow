@@ -5,8 +5,9 @@
  * TWO CALLS, ONE OF WHICH NEVER WRITES BY ITSELF:
  *   recordSlotDone  the player finished a card (or a chunk beyond the day's
  *                   cards), by their own session, a class, or a stand-in.
- *   settleDay       the day is judged finished: the `moveall` cache row and the
- *                   streak heart. Nothing else in moves writes either.
+ *   settleDay       the day is judged finished: the streak's upgrade row (once
+ *                   per instance), the `moveall` cache row and the streak
+ *                   heart. Nothing else in moves writes either.
  *
  * OUTDOOR SESSIONS (startOutdoor / finishOutdoor) are the third writer. A walk
  * or jog is a Start/Done session rather than a chunk: its elapsed minutes,
@@ -58,7 +59,7 @@ import {
 } from "./day-complete.js";
 import { MOVE_AREA_KIND, SLOTS } from "./week.js";
 import { AREAS, ACTIVITY_KINDS, BALANCE_AREAS } from "./library.js";
-import { awardStreakHeart } from "./streak.js";
+import { awardStreakHeart, ensureStreakV2 } from "./streak.js";
 import { capDayKey, claimCapped } from "./indoor-cap.js";
 import { MOVE_MIN_KIND } from "./progress.js";
 import {
@@ -158,18 +159,20 @@ export async function recordSlotDone(db, { day, slot, entry, via, now = Date.now
  * Settle `day`: the ONLY place completion causes a write.
  *
  * `complete = isDayComplete(db, day, { need })` — derived, never stored — and
- * when it holds, the day's `moveall` cache row is inserted once and the streak
- * heart for that day is offered. The heart is awarded at the day's own local
- * noon when the day is not today, so a day finished just after midnight pays
- * `streak:<yesterday>` rather than opening a new day's run. When the day is not
- * complete nothing is written at all, and a second settle on a complete day
- * writes nothing new: both rows are keyed by the day.
+ * when it holds, the streak's upgrade row is written the first time this
+ * instance sees a complete day, the day's `moveall` cache row is inserted once
+ * and the streak heart for that day is offered. The heart is awarded at the
+ * day's own local noon when the day is not today, so a day finished just after
+ * midnight pays `streak:<yesterday>` rather than opening a new day's run. When
+ * the day is not complete nothing is written at all, and a second settle on a
+ * complete day writes nothing new: all three rows are keyed by the day.
  */
 export async function settleDay(db, { day, now = Date.now(), emit, need } = {}) {
   const at = asAt(now);
   const complete = await isDayComplete(db, day, { need });
   if (!complete) return { complete: false, fresh: false };
 
+  await ensureStreakV2(db, { day: localDay(at), emit, now: at });
   const fresh = await insertOnce(db, MOVE_ALL_KIND, day, 1, at, emit);
   const heartAt = day === localDay(at) ? at : noonOf(day);
   await awardStreakHeart(db, { now: heartAt, emit });

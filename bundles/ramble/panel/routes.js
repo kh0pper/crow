@@ -1489,9 +1489,14 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (!(await ensureMovesMods(res))) return;
     const now = Date.now();
     const payload = await dayPayload(now);
-    // Settled on the read, before the answer: a day already finished by rows
-    // that arrived from another instance gets its cache row and its heart
-    // offered here, and a second read of it writes nothing new.
+    // This route may write, so it marks the day the streak's all-cards rule
+    // starts on this instance (once; a second read writes nothing), then settles
+    // the day before the answer: a day already finished by rows that arrived
+    // from another instance gets its cache row and its heart offered here, and a
+    // second read of it writes nothing new.
+    await movesMods.streakMod.ensureStreakV2(db, {
+      day: mods.eggsMod.localDay(now), now, emit,
+    });
     await settleRecent(now, payload);
     res.json(payload);
   }));
