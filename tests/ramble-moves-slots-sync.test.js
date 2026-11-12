@@ -24,7 +24,20 @@
  *   - a slot row for a day that has passed is replaced by today's pick,
  *   - moves.week converges to one row with one weekId,
  *   - a Done flag crosses as a wallet row and the receiving instance reads the
- *     slot as done without writing anything.
+ *     slot as done without writing anything,
+ *   - a merged day is a read: a further open on either instance emits no row at
+ *     all, settings or wallet, so nothing can ping-pong,
+ *   - two instances' lamports interleaved across one day (a slot row older than
+ *     one instance's `moves.today` row, newer than the other's) still leave one
+ *     midday row and one `moves.today` on both sides, and one read reconciles the
+ *     Now slot with `moves.today`,
+ *   - a day wider than an instance's library can fill keeps the wider moveneed
+ *     while that instance's day asks only for the picks it holds,
+ *   - a paused instance receives a day another instance drew and stays off.
+ *
+ * The interleaving scenario pins three rows to exact lamports (pinRow), because
+ * the per-instance counter alone always puts one instance's writes above the
+ * other's.
  *
  * The shipped library is filled elsewhere, so every test injects its own
  * chunks. The clock is a fixed local Thursday, so nothing here depends on the
@@ -37,7 +50,7 @@ import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { rowDelta, insertOnce } from "../bundles/ramble/server/steps.js";
 import { applyRambleSetting, applyRambleWallet } from "../servers/sharing/instance-sync.js";
 import { SLOTS, weekPlan } from "../bundles/ramble/server/moves/week.js";
-import { writePrefs } from "../bundles/ramble/server/moves/today.js";
+import { TODAY_KEY, writePrefs } from "../bundles/ramble/server/moves/today.js";
 import {
   MOVE_NEED_KIND, SLOT_KEY_PREFIX, WEEK_KEY, dayCards, enabledSlots,
 } from "../bundles/ramble/server/moves/slots.js";
@@ -112,6 +125,19 @@ function weatherLibrary() {
     chunk({ id: "mob-2", areas: ["mobility"] }),
     chunk({ id: "heart-out-1", areas: ["heart"], indoor: false }),
     chunk({ id: "low-1", areas: ["lower"] }),
+  ];
+}
+
+/**
+ * A second library, so two instances picking the same day land on different
+ * entries for every slot.
+ */
+function otherLibrary() {
+  return [
+    chunk({ id: "mob-9", areas: ["mobility", "core"] }),
+    chunk({ id: "heart-9", areas: ["heart"] }),
+    chunk({ id: "low-9", areas: ["lower"] }),
+    chunk({ id: "up-9", areas: ["upper"] }),
   ];
 }
 
@@ -200,6 +226,41 @@ async function settingRowCount(db, key) {
     sql: "SELECT key FROM ramble_settings WHERE key = ?", args: [key],
   });
   return rows.length;
+}
+
+/** The lamport a settings row carries, so a scenario can name the winner. */
+async function readStamp(db, key) {
+  const { rows } = await db.execute({
+    sql: "SELECT lamport_ts FROM ramble_settings WHERE key = ?", args: [key],
+  });
+  return rows[0] ? Number(rows[0].lamport_ts) : null;
+}
+
+/**
+ * Pin one settings row to an exact lamport (and value, when given), both in the
+ * db the writing instance keeps and in the row it will emit. The per-instance
+ * counter always numbers one instance's writes above the other's, so only a pin
+ * can put one instance's slot row BETWEEN two of the other's rows.
+ */
+async function pinRow(inst, key, { lamport, value }) {
+  const kept = inst.ops.filter((op) => !(op.table === "ramble_settings" && op.row?.key === key));
+  inst.ops.splice(0, inst.ops.length, ...kept);
+  const pinned = value ?? await readRaw(inst.db, key);
+  await inst.db.execute({
+    sql: "UPDATE ramble_settings SET value = ?, lamport_ts = ?, lamport_origin = ? WHERE key = ?",
+    args: [pinned, lamport, ORIGIN[inst.name], key],
+  });
+  inst.ops.push({
+    table: "ramble_settings", op: "update", row: { key, value: pinned },
+    lamport, origin: ORIGIN[inst.name],
+  });
+}
+
+/** A capture emit that only records what a read wrote. */
+function capture() {
+  const writes = [];
+  const emit = async (table, op, row) => { writes.push({ table, op, row: { ...row } }); };
+  return { writes, emit };
 }
 
 /** The wallet's `moveneed` deltas for a day, as numbers. */
@@ -447,6 +508,187 @@ describe("a Done flag by sync", () => {
       assert.equal(slotNamed(day, "evening").done, false);
       assert.deepEqual(writes, [], "B writes nothing for it");
       assert.deepEqual(await walletSnapshot(B.db), before, "and no wallet row");
+    });
+  }
+});
+
+describe("a merged day is a read", () => {
+  for (const [order, label] of ORDERS) {
+    test(`a further open on either instance emits nothing (${label})`, async () => {
+      const lib = library();
+      const { A, B } = await converge(() => sameDayFixture(lib), order);
+
+      for (const inst of [A, B]) {
+        const before = await walletSnapshot(inst.db);
+        for (let round = 0; round < 2; round += 1) {
+          const { writes, emit } = capture();
+          const day = await dayCards(inst.db, { now: THURSDAY, library: lib, emit });
+          assert.deepEqual(writes, [],
+            "no settings row of any key and no wallet row: " + inst.name);
+          assert.deepEqual(day.slots.map((item) => item.slot), [...SLOTS],
+            "the day still holds every slot: " + inst.name);
+          assert.equal(day.need, 3);
+        }
+        assert.deepEqual(await walletSnapshot(inst.db), before,
+          "the wallet is untouched too: " + inst.name);
+        assert.deepEqual(await needDeltas(inst.db), [3], "still one row: " + inst.name);
+      }
+    });
+  }
+});
+
+describe("interleaved lamports", () => {
+  for (const [order, label] of ORDERS) {
+    test(`one midday row and one moves.today, then one read reconciles the Now slot (${label})`, async () => {
+      const libA = library();
+      const libB = otherLibrary();
+      const build = async () => {
+        const A = await instance("A");
+        const B = await instance("B");
+        await writePrefs(A.db, { cards: 3 });
+        await writePrefs(B.db, { cards: 3 });
+        const dayA = await dayCards(A.db, { now: THURSDAY, library: libA, emit: A.emit });
+        const dayB = await dayCards(B.db, { now: THURSDAY, library: libB, emit: B.emit });
+        const middayA = slotNamed(dayA, "midday").entryId;
+        const middayB = slotNamed(dayB, "midday").entryId;
+        assert.notEqual(middayA, middayB, "the two instances drew different midday cards");
+
+        // B's midday row at 10, A's at 15, B's moves.today at 20: A's slot row
+        // sits between B's two rows, and B's moves.today is the newest of all.
+        await pinRow(A, SLOT_KEY_PREFIX + "midday", { lamport: 15 });
+        await pinRow(A, TODAY_KEY, { lamport: 12 });
+        await pinRow(B, SLOT_KEY_PREFIX + "midday", { lamport: 10 });
+        await pinRow(B, TODAY_KEY, {
+          lamport: 20,
+          value: JSON.stringify({
+            day: DAY, entryId: middayA, swap: 0, seen: [middayA], reasons: [],
+          }),
+        });
+        return { A, B, middayA };
+      };
+      const { A, B, middayA } = await converge(build, order);
+      const lib = [...libA, ...libB];
+
+      const middayRows = [];
+      const todayRows = [];
+      for (const inst of [A, B]) {
+        assert.equal(await readStamp(inst.db, SLOT_KEY_PREFIX + "midday"), 15,
+          "A's older midday row outlives B's: " + inst.name);
+        assert.equal(await readStamp(inst.db, TODAY_KEY), 20,
+          "B's newer moves.today outlives A's: " + inst.name);
+        assert.equal((await readJson(inst.db, SLOT_KEY_PREFIX + "midday")).entryId, middayA,
+          "the midday row is one value: " + inst.name);
+        assert.equal((await readJson(inst.db, TODAY_KEY)).entryId, middayA,
+          "and moves.today is the row B wrote: " + inst.name);
+        middayRows.push(await readRaw(inst.db, SLOT_KEY_PREFIX + "midday"));
+        todayRows.push(await readRaw(inst.db, TODAY_KEY));
+      }
+      assert.equal(middayRows[1], middayRows[0], "both instances hold the same midday row");
+      assert.equal(todayRows[1], todayRows[0], "both instances hold the same moves.today");
+
+      const nowCards = [];
+      for (const inst of [A, B]) {
+        const { writes, emit } = capture();
+        const day = await dayCards(inst.db, { now: THURSDAY, library: lib, emit });
+        assert.equal(writes.length, 1, "one row, the Now mirror: " + inst.name);
+        assert.equal(writes[0].row.key, TODAY_KEY, "and it is moves.today: " + inst.name);
+        const nowEntry = slotNamed(day, day.nowSlot).entryId;
+        assert.equal(nowEntry, slotNamed(day, "evening").entryId, "the Now slot is the evening one");
+        assert.equal((await readJson(inst.db, TODAY_KEY)).entryId, nowEntry,
+          "moves.today holds the Now slot's card: " + inst.name);
+        nowCards.push(nowEntry);
+      }
+      assert.equal(nowCards[1], nowCards[0], "both instances name the same Now card");
+
+      for (const inst of [A, B]) {
+        const { writes, emit } = capture();
+        await dayCards(inst.db, { now: THURSDAY, library: lib, emit });
+        assert.deepEqual(writes, [], "the reconciled day writes nothing: " + inst.name);
+      }
+    });
+  }
+});
+
+describe("a day wider than one instance can fill", () => {
+  for (const [order, label] of ORDERS) {
+    test(`moveneed keeps the MAX and each day asks only for its picks (${label})`, async () => {
+      const build = async () => {
+        const A = await instance("A");
+        const B = await instance("B");
+        const libA = library();
+        // No heart, mobility or core chunk: B's midday slot asks for heart and
+        // falls back to mobility then core, so that slot comes back empty.
+        const libB = [
+          chunk({ id: "low-9", areas: ["lower"] }),
+          chunk({ id: "up-9", areas: ["upper"] }),
+        ];
+        await writePrefs(A.db, { cards: 3 });
+        await writePrefs(B.db, { cards: 3 });
+        const full = await dayCards(A.db, { now: THURSDAY, library: libA, emit: A.emit });
+        const thin = await dayCards(B.db, { now: THURSDAY, library: libB, emit: B.emit });
+        assert.deepEqual([full.need, thin.need], [3, 1], "one day fills, the other cannot");
+        assert.equal(slotNamed(thin, "midday").empty, true, "B's midday slot is empty");
+        return { A, B, libA, libB };
+      };
+      const { A, B, libA, libB } = await converge(build, order);
+
+      for (const inst of [A, B]) {
+        assert.deepEqual(await needDeltas(inst.db), [3],
+          "the wider count is the one that survives: " + inst.name);
+      }
+
+      const needs = [];
+      for (const [inst, lib] of [[A, libA], [B, libB]]) {
+        const day = await dayCards(inst.db, { now: THURSDAY, library: lib });
+        const picks = day.slots.filter((item) => item.entryId !== null).length;
+        assert.equal(day.need, picks,
+          "the day asks for the cards it holds, never more: " + inst.name);
+        assert.ok(day.need <= day.slots.length, "and never past its slots: " + inst.name);
+        needs.push(day.need);
+      }
+      assert.deepEqual(needs, [3, 1], "the full day keeps three, the thin one asks for one");
+    });
+  }
+});
+
+describe("a paused day", () => {
+  for (const [order, label] of ORDERS) {
+    test(`a drawn day lands on the paused instance and its day stays off (${label})`, async () => {
+      const lib = library();
+      const build = async () => {
+        const A = await instance("A");
+        const B = await instance("B");
+        await writePrefs(A.db, { on: false });
+        await writePrefs(B.db, { on: true, cards: 3 });
+        const day = await dayCards(B.db, { now: THURSDAY, library: lib, emit: B.emit });
+        assert.deepEqual(day.slots.map((item) => item.slot), [...SLOTS]);
+        return { A, B, day };
+      };
+      const { A, B, day } = await converge(build, order);
+
+      for (const inst of [A, B]) {
+        for (const slot of SLOTS) {
+          const row = await readJson(inst.db, SLOT_KEY_PREFIX + slot);
+          assert.ok(row, "the drawn slot reached both instances: " + slot + " on " + inst.name);
+          assert.equal(row.day, DAY);
+          assert.equal(row.entryId, slotNamed(day, slot).entryId,
+            "B's pick is intact on " + inst.name + " for " + slot);
+        }
+      }
+
+      const before = [];
+      for (const slot of SLOTS) before.push(await readRaw(A.db, SLOT_KEY_PREFIX + slot));
+
+      const { writes, emit } = capture();
+      const paused = await dayCards(A.db, { now: THURSDAY, library: lib, emit });
+      assert.equal(paused.off, true, "A is still paused");
+      assert.deepEqual(paused.slots, [], "a paused day has no cards");
+      assert.equal(paused.need, 0);
+      assert.deepEqual(writes, [], "a paused day writes nothing");
+
+      const after = [];
+      for (const slot of SLOTS) after.push(await readRaw(A.db, SLOT_KEY_PREFIX + slot));
+      assert.deepEqual(after, before, "the pause did not touch the drawn slots");
     });
   }
 });
