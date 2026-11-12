@@ -70,6 +70,7 @@ test("volumes, images and settings: inspect finds them, describe logs the names 
   assert.deepEqual(kept.volumes, ["kept-full_cache", "kept-full_data"]); // sorted
   assert.deepEqual(kept.images, [{ name: "nginx:1.25", present: true }, { name: "postgres:16", present: true }]);
   assert.equal(kept.settings, true);
+  assert.equal(kept.unresolvedImages, 0);
 
   const volCall = inOrder(runner.calls, "docker", "volume")[0];
   assert.deepEqual(volCall.args, ["volume", "ls", "--filter", "label=com.docker.compose.project=kept-full", "--format", "{{.Name}}"]);
@@ -85,7 +86,7 @@ test("volumes, images and settings: inspect finds them, describe logs the names 
     "Kept image: postgres:16",
     "Kept its saved settings (secrets file exists; contents not shown)",
   ]);
-  assert.equal(body, "Its data was kept: 2 storage volumes, 2 images, and its saved settings. Reinstalling picks them up again.");
+  assert.equal(body, "Kept on this computer: 2 storage volumes, 2 images, and its saved settings. Reinstalling uses them again.");
   for (const name of ["kept-full_data", "kept-full_cache", "nginx:1.25", "postgres:16"]) {
     assert.ok(!body.includes(name), `the body lists counts only, not ${name}`);
   }
@@ -94,7 +95,7 @@ test("volumes, images and settings: inspect finds them, describe logs the names 
 test("nothing kept: one nothing line, in both the log and the body", async () => {
   const runner = fakeRunner({ volumes: [] });
   const kept = await inspectKept({ bundleId: "kept-none", project: "kept-none", composeText: "", env: {}, crowHome: HOME, runner });
-  assert.deepEqual(kept, { volumes: [], images: [], settings: false, error: null });
+  assert.deepEqual(kept, { volumes: [], images: [], settings: false, unresolvedImages: 0, error: null });
 
   const { logLines, body } = describeKept(kept, (k) => tr(k, "en"));
   assert.deepEqual(logLines, ["Nothing was left behind."]);
@@ -144,6 +145,56 @@ test("compose image names honour env interpolation and drop build-only services"
   const runner = fakeRunner({ volumes: [] });
   const kept = await inspectKept({ bundleId: "kept-env", project: null, composeText: compose, env: { TAG: "nginx:1.27" }, crowHome: HOME, runner });
   assert.deepEqual(kept.images, [{ name: "nginx:1.27", present: true }]);
+  assert.equal(kept.unresolvedImages, 0);
+});
+
+test("an image ref is named from the bundle's env (app:${TAG} → app:1.0)", async () => {
+  const compose = `services:
+  web:
+    image: app:\${TAG}
+`;
+  const runner = fakeRunner({ volumes: [] });
+  const kept = await inspectKept({ bundleId: "kept-ref", project: null, composeText: compose, env: { TAG: "1.0" }, crowHome: HOME, runner });
+
+  assert.equal(kept.error, null);
+  assert.deepEqual(kept.images, [{ name: "app:1.0", present: true }]);
+  assert.equal(kept.unresolvedImages, 0);
+  assert.deepEqual(inOrder(runner.calls, "docker", "image").map((c) => c.args.at(-1)), ["app:1.0"]);
+});
+
+test("an image ref that cannot be named is counted, and never reads as 'nothing was left behind'", async () => {
+  const compose = `services:
+  web:
+    image: app:\${TAG}
+`;
+  const runner = fakeRunner({ volumes: [] });
+  const kept = await inspectKept({ bundleId: "kept-unresolved", project: null, composeText: compose, env: {}, crowHome: HOME, runner });
+
+  assert.equal(kept.error, null);
+  assert.deepEqual(kept.images, []);
+  assert.equal(kept.unresolvedImages, 1);
+  assert.deepEqual(inOrder(runner.calls, "docker", "image"), [], "an unnameable ref is never handed to docker");
+
+  const couldNotName = tr("extensions.kept.couldNotNameImage", "en");
+  const { logLines, body } = describeKept(kept, (k) => tr(k, "en"));
+  assert.deepEqual(logLines, [couldNotName]);
+  assert.equal(body, couldNotName);
+  assert.notEqual(body, tr("extensions.kept.nothing", "en"));
+});
+
+test("a build-only service is not an unresolved image: nothing kept still says nothing", async () => {
+  const compose = `services:
+  builder:
+    build: .
+`;
+  const runner = fakeRunner({ volumes: [] });
+  const kept = await inspectKept({ bundleId: "kept-buildonly", project: null, composeText: compose, env: {}, crowHome: HOME, runner });
+
+  assert.equal(kept.unresolvedImages, 0);
+  assert.deepEqual(kept.images, []);
+  const { logLines, body } = describeKept(kept, (k) => tr(k, "en"));
+  assert.deepEqual(logLines, ["Nothing was left behind."]);
+  assert.equal(body, "Nothing was left behind.");
 });
 
 test("Spanish: the description is translated, never empty", async () => {

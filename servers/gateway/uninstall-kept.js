@@ -43,7 +43,7 @@ function shortError(err) {
  * @param {object} [opts.env]          the values compose interpolates into those image names
  * @param {string} [opts.crowHome]     the instance home (holds secrets/bundle-env)
  * @param {Function} [opts.runner]     `run(cmd, args, opts)` → Promise<{stdout, stderr}>
- * @returns {Promise<{volumes: string[], images: {name: string, present: boolean}[], settings: boolean, error: string|null}>}
+ * @returns {Promise<{volumes: string[], images: {name: string, present: boolean}[], settings: boolean, unresolvedImages: number, error: string|null}>}
  */
 export async function inspectKept({ bundleId, project, composeText, env = {}, crowHome, runner } = {}) {
   // The kept settings file is a plain path check: it is never opened here (it holds secrets).
@@ -51,7 +51,7 @@ export async function inspectKept({ bundleId, project, composeText, env = {}, cr
   if (typeof bundleId === "string" && bundleId !== "" && typeof crowHome === "string" && crowHome !== "") {
     try { settings = existsSync(retainedEnvPath(crowHome, bundleId)); } catch { settings = false; }
   }
-  const out = { volumes: [], images: [], settings, error: null };
+  const out = { volumes: [], images: [], settings, unresolvedImages: 0, error: null };
   const call = typeof runner === "function" ? runner : run;
 
   if (typeof project === "string" && project.trim() !== "") {
@@ -64,8 +64,16 @@ export async function inspectKept({ bundleId, project, composeText, env = {}, cr
     }
   }
 
-  const names = [...new Set(Object.values(composeServiceImages(composeText, env) || {})
-    .filter((name) => typeof name === "string" && name.trim() !== "")
+  // A service whose `image:` line resolves to nothing usable (an unset ${VAR}, a bare
+  // "app:" tail, a leftover "${") cannot be looked up at all: count it instead of
+  // dropping it, so the description never claims nothing was left behind when the
+  // check was incomplete. A build-only service has no `image:` key and is NOT counted.
+  const declared = composeServiceImages(composeText, env) || {};
+  const unresolved = Object.values(declared)
+    .filter((image) => !isNameableImage(image)).length;
+  out.unresolvedImages = unresolved;
+  const names = [...new Set(Object.values(declared)
+    .filter(isNameableImage)
     .map((name) => name.trim()))].sort();
   for (const name of names) {
     try {
@@ -79,6 +87,13 @@ export async function inspectKept({ bundleId, project, composeText, env = {}, cr
     }
   }
   return out;
+}
+
+/** Can this resolved `image:` value be handed to docker as an image name? */
+function isNameableImage(image) {
+  if (typeof image !== "string") return false;
+  const name = image.trim();
+  return name !== "" && !name.includes("${") && !name.endsWith(":");
 }
 
 /** "a and b" / "a, b, and c" — the joining words are translated too. */
@@ -113,9 +128,14 @@ export function describeKept(kept, t = defaultT) {
     .filter((i) => i && i.present !== false && typeof i.name === "string" && i.name !== "")
     .map((i) => i.name);
   const settings = kept?.settings === true;
+  // An image name that could not be worked out means the look was incomplete: the
+  // "nothing was left behind" line would be a lie, so it is never used then.
+  const unresolved = Number.isFinite(kept?.unresolvedImages) && kept.unresolvedImages > 0
+    ? Math.floor(kept.unresolvedImages) : 0;
+  const couldNotName = () => tt("extensions.kept.couldNotNameImage");
 
   if (volumes.length === 0 && images.length === 0 && !settings) {
-    const line = tt("extensions.kept.nothing");
+    const line = unresolved > 0 ? couldNotName() : tt("extensions.kept.nothing");
     return { logLines: [line], body: line };
   }
 
@@ -130,5 +150,11 @@ export function describeKept(kept, t = defaultT) {
   if (images.length === 1) parts.push(tt("extensions.kept.imageOne"));
   else if (images.length > 1) parts.push(fill(tt("extensions.kept.imageMany"), { n: images.length }));
   if (settings) parts.push(tt("extensions.kept.settingsPart"));
-  return { logLines, body: fill(tt("extensions.kept.body"), { list: joinParts(parts, tt) }) };
+  const body = fill(tt("extensions.kept.body"), { list: joinParts(parts, tt) });
+  if (unresolved > 0) {
+    const extra = couldNotName();
+    logLines.push(extra);
+    return { logLines, body: `${body} ${extra}` };
+  }
+  return { logLines, body };
 }

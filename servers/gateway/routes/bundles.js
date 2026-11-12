@@ -5102,6 +5102,10 @@ export default function bundlesRouter() {
         // (incl. one an older install typed, or ran on as a compose fallback) for a reinstall.
         let composeTextForRetain = null;
         try { const cp = join(bundleDir, "docker-compose.yml"); if (existsSync(cp)) composeTextForRetain = readFileSync(cp, "utf8"); } catch {}
+        // The values compose interpolates into those image names live in the bundle's own
+        // .env (an `image: app:${TAG}` is unnameable without them). Best effort, read-only.
+        let bundleEnvForKept = {};
+        try { bundleEnvForKept = parseEnvText(readFileSync(join(bundleDir, ".env"), "utf8")); } catch {}
         const keptSecrets = retainGeneratedForReinstall(bundle_id, manifest, { destDir: bundleDir, crowHome: CROW_HOME, composeText: composeTextForRetain, includeFallbacks: !volumesRemoved });
         if (keptSecrets) appendLog(job, `Kept ${keptSecrets} generated secret(s) / library path(s) for a later reinstall (mode 600)`);
         // Tell, do not delete: an uninstall removes the bundle's folder but the owner's data
@@ -5111,7 +5115,7 @@ export default function bundlesRouter() {
         try {
           const kept = await inspectKept({
             bundleId: bundle_id, project: keptProject, composeText: composeTextForRetain,
-            crowHome: CROW_HOME, runner: dockerRunner(),
+            env: bundleEnvForKept, crowHome: CROW_HOME, runner: dockerRunner(),
           });
           const described = describeKept(kept, (key) => i18nT(key, "en"));
           for (const line of described.logLines) appendLog(job, line);

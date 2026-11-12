@@ -932,11 +932,12 @@ export const translations = {
   "extensions.dataDeleteHint": { en: "Optionally delete all files stored by this service. Leave unchecked to keep data for a future reinstall.", es: "Opcionalmente elimina todos los archivos almacenados por este servicio. Deja sin marcar para conservar los datos para una futura reinstalación." },
   // After an uninstall: what was KEPT on purpose (nothing here deletes anything).
   "extensions.kept.couldNotCheck": { en: "Could not check what was left behind: Docker did not answer.", es: "No se pudo comprobar qué quedó: Docker no respondió." },
+  "extensions.kept.couldNotNameImage": { en: "Could not fully check what was left behind: an image's name could not be worked out.", es: "No se pudo comprobar del todo qué quedó: no se pudo determinar el nombre de una imagen." },
   "extensions.kept.nothing": { en: "Nothing was left behind.", es: "No quedó nada." },
   "extensions.kept.logVolume": { en: "Kept storage volume: {name}", es: "Se conservó el volumen de almacenamiento: {name}" },
   "extensions.kept.logImage": { en: "Kept image: {name}", es: "Se conservó la imagen: {name}" },
   "extensions.kept.logSettings": { en: "Kept its saved settings (secrets file exists; contents not shown)", es: "Se conservaron sus ajustes guardados (el archivo de secretos existe; no se muestran sus contenidos)" },
-  "extensions.kept.body": { en: "Its data was kept: {list}. Reinstalling picks them up again.", es: "Sus datos se conservaron: {list}. Al volver a instalarlo se recuperan." },
+  "extensions.kept.body": { en: "Kept on this computer: {list}. Reinstalling uses them again.", es: "Se conservó en este equipo: {list}. Al volver a instalarlo se usan de nuevo." },
   "extensions.kept.volumeOne": { en: "1 storage volume", es: "1 volumen de almacenamiento" },
   "extensions.kept.volumeMany": { en: "{n} storage volumes", es: "{n} volúmenes de almacenamiento" },
   "extensions.kept.imageOne": { en: "1 image", es: "1 imagen" },

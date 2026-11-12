@@ -49,15 +49,17 @@ const IMAGE = "example/demo:1.0";
 const COMPOSE = `name: kept-demo-project\nservices:\n  app:\n    image: ${IMAGE}\n    volumes:\n      - data:/data\nvolumes:\n  data:\n`;
 
 /** A bundle installed the plain way: folder under CROW_HOME/bundles + an installed.json entry. */
-function seedInstalled(id) {
+function seedInstalled(id, { compose = COMPOSE, envText = null } = {}) {
   const manifest = { id, name: id, description: "d", type: "bundle", category: "productivity", version: "0.1.0" };
   mkdirSync(join(FIXTURES, id), { recursive: true });
   writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify(manifest));
-  writeFileSync(join(FIXTURES, id, "docker-compose.yml"), COMPOSE);
+  writeFileSync(join(FIXTURES, id, "docker-compose.yml"), compose);
   const dir = join(HOME, "bundles", id);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
-  writeFileSync(join(dir, "docker-compose.yml"), COMPOSE);
+  writeFileSync(join(dir, "docker-compose.yml"), compose);
+  // The values compose interpolates into the bundle's image refs sit in its own .env.
+  if (envText !== null) writeFileSync(join(dir, ".env"), envText, { mode: 0o600 });
   const installedPath = join(HOME, "installed.json");
   const list = existsSync(installedPath) ? JSON.parse(readFileSync(installedPath, "utf8")) : [];
   writeFileSync(installedPath, JSON.stringify([...list.filter((i) => i.id !== id), { id, type: "bundle", version: "0.1.0" }]));
@@ -178,4 +180,23 @@ test("uninstall with docker refusing the volume lookup still completes, noting i
   const notice = await removedNotice(id);
   assert.ok(notice, "the bell row was written");
   assert.equal(notice.body, "Could not check what was left behind: Docker did not answer.");
+});
+
+test("the image ref is named from the bundle's own .env (image: example/demo:${TAG})", async () => {
+  const id = "kept-envtag";
+  const compose = "name: kept-envtag-project\nservices:\n  app:\n    image: example/demo:${TAG}\n";
+  const dir = seedInstalled(id, { compose, envText: "TAG=1.2\n" });
+  B._setDockerRunnerForTest(dockerStub({ volumes: [] }));
+
+  const job = await uninstall(id);
+  const log = job.log.join("\n");
+  assert.ok(["complete", "complete_restart"].includes(job.status), log);
+  assert.equal(existsSync(dir), false, "the bundle folder is still removed");
+  assert.ok(job.log.includes("Kept image: example/demo:1.2"), log);
+  assert.ok(!log.includes("Nothing was left behind."), log);
+
+  const notice = await removedNotice(id);
+  assert.ok(notice, "the bell row was written");
+  assert.match(notice.body, /Kept on this computer: 1 image\./);
+  assert.match(notice.body, /Reinstalling uses them again\.$/);
 });
