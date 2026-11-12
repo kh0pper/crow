@@ -95,7 +95,10 @@ after(async () => {
 });
 
 test("auth: the moves API sits behind dashboardAuth", async () => {
-  for (const p of ["/api/ramble/moves/today", "/api/ramble/moves/prefs", "/api/ramble/moves/library", "/api/ramble/moves/copy"]) {
+  for (const p of [
+    "/api/ramble/moves/today", "/api/ramble/moves/prefs", "/api/ramble/moves/library",
+    "/api/ramble/moves/copy", "/api/ramble/moves/voice",
+  ]) {
     assert.equal((await fetch(base + p)).status, 401, p);
   }
 });
@@ -159,6 +162,48 @@ test("every word the copy route serves hashes to its pin", async () => {
   for (const [key, value] of Object.entries(body.copy)) {
     assert.equal(typeof value, "string", key + " is a string");
     assert.equal(createHash("sha256").update(value).digest("hex"), COPY_PINS[key], key + " matches its pin");
+  }
+});
+
+/* ----------------------------------------- the spoken lines (8.1) */
+
+const VOICE_PINS = JSON.parse(readFileSync(join(__dir, "ramble-moves-voice.pins.json"), "utf8"));
+const SHIPPED_VOICE = JSON.parse(readFileSync(
+  join(REPO_ROOT, "bundles", "ramble", "server", "moves", "voice.en.json"), "utf8",
+));
+
+/**
+ * Flatten the lines the way the pins name them: arrays as "path[index]",
+ * objects as "path.key". The top-level `reviewed` flag is not a spoken line,
+ * so it carries no pin.
+ */
+function flattenLines(value, prefix, out) {
+  const flat = out || {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!prefix && key === "reviewed") continue;
+    const path = prefix ? prefix + "." + key : key;
+    if (Array.isArray(item)) item.forEach((v, i) => { flat[path + "[" + i + "]"] = v; });
+    else if (item && typeof item === "object") flattenLines(item, path, flat);
+    else flat[path] = item;
+  }
+  return flat;
+}
+
+test("GET /moves/voice: the shipped spoken lines, line for line", async () => {
+  const r = await get("/api/ramble/moves/voice");
+  assert.equal(r.status, 200);
+  const body = await r.json();
+  assert.deepEqual(body.lines, SHIPPED_VOICE, "the route serves the shipped lines unchanged");
+});
+
+test("every spoken line the voice route serves hashes to its pin", async () => {
+  const body = await (await get("/api/ramble/moves/voice")).json();
+  const flat = flattenLines(body.lines, "", null);
+  const keys = Object.keys(flat);
+  assert.ok(keys.length > 0, "the route answers lines");
+  assert.deepEqual(keys.sort(), Object.keys(VOICE_PINS).sort(), "the served lines are the pinned ones");
+  for (const [path, value] of Object.entries(flat)) {
+    assert.equal(createHash("sha256").update(String(value)).digest("hex"), VOICE_PINS[path], path + " matches its pin");
   }
 });
 

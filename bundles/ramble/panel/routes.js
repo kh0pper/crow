@@ -83,6 +83,27 @@ function loadPlayerCopy() {
   return playerCopy;
 }
 
+/**
+ * The spoken lines, read once from the bundle and cached — the same shape and
+ * the same reason as the copy table above: the panel is installed as a single
+ * file and cannot see `server/moves/*`, so the player fetches the lines from
+ * /api/ramble/moves/voice instead of the page carrying them. A missing or
+ * unreadable table is an empty object: the player then says nothing rather
+ * than inventing a line.
+ */
+let voiceLines = null;
+function loadVoiceLines() {
+  if (voiceLines) return voiceLines;
+  try {
+    const table = JSON.parse(readFileSync(join(SERVER_DIR, "moves", "voice.en.json"), "utf8"));
+    voiceLines = table && typeof table === "object" && !Array.isArray(table) ? table : {};
+  } catch (err) {
+    console.warn(`[ramble routes] voice lines unavailable: ${err?.message ?? err}`);
+    voiceLines = {};
+  }
+  return voiceLines;
+}
+
 /* ------------------------------------------------------------- validation */
 
 const CELL_RE = /^[0-9b-hjkmnp-z]{1,12}$/;
@@ -1597,6 +1618,13 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   // modules.
   router.get("/api/ramble/moves/copy", handle(async (req, res) => {
     res.json({ copy: loadPlayerCopy() });
+  }));
+
+  // The spoken lines. Same constraint as the copy table: the panel file is
+  // copied alone into an install, so the lines reach the player over the wire
+  // or not at all. One file, no db, no moves modules.
+  router.get("/api/ramble/moves/voice", handle(async (req, res) => {
+    res.json({ lines: loadVoiceLines() });
   }));
 
   // Only reviewed, licensed entries are served, and the joint-angle data is a
