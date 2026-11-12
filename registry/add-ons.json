@@ -5206,7 +5206,7 @@
     {
       "id": "paperless",
       "name": "Paperless-ngx",
-      "version": "1.0.4",
+      "version": "1.1.0",
       "refreshFiles": [
         "docker-compose.yml"
       ],
@@ -5259,7 +5259,8 @@
           "name": "PAPERLESS_API_TOKEN",
           "description": "Paperless-ngx API token (Settings > API Tokens)",
           "required": true,
-          "secret": true
+          "secret": true,
+          "pattern": "^[0-9a-f]{40}$"
         },
         {
           "name": "PAPERLESS_DATA_PATH",
@@ -5300,7 +5301,12 @@
         "via": "setup",
         "setup": {
           "script": "scripts/first-admin.sh",
-          "timeout_s": 240
+          "timeout_s": 240,
+          "token": {
+            "script": "scripts/api-token.sh",
+            "env": "PAPERLESS_API_TOKEN",
+            "timeout_s": 120
+          }
         },
         "user": "admin",
         "secretEnv": "PAPERLESS_ADMIN_PASSWORD"

@@ -171,6 +171,12 @@ export const INSTANCE_SCOPE_KEYS = {
   // Done press and the per-install bell marker for each bundle. Both describe
   // THIS box's installs (a paired instance has its own), so they never sync.
   "first_admin_*":            "Per-install 'finish this app's setup' acknowledgements and bell markers (per install)",
+  // What the boot catch-up did about the API token an app mints for Crow
+  // (bundle-api-token.js): `api_token_auto:<id>` = {install, at, result}. It
+  // describes THIS box's install and its own app, so it never syncs. The pattern
+  // includes the colon so it matches exactly the `api_token_auto:<id>` keys and
+  // nothing that merely starts with the word.
+  "api_token_auto:*":        "Per-install API-token catch-up results (per install)",
   // Version history (the version history design §4/§8): `history.erase_sync` is
   // read DIRECTLY from the global dashboard_settings row (history/erase.js
   // eraseSyncEnabled), so it has to be routed here rather than downgraded to an

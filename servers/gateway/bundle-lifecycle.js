@@ -68,6 +68,9 @@ export function hookEnv(destDir, crowHome, base = process.env) {
   return env;
 }
 
+/** The most a child may hand back on fd 3 before its answer is refused outright. */
+export const SECRET_FD_MAX_BYTES = 4096;
+
 /**
  * execFile-like, but in its own process group: a timeout kills the whole group.
  *
@@ -76,34 +79,71 @@ export function hookEnv(destDir, crowHome, base = process.env) {
  * open pipe; without `input` stdin is /dev/null, exactly as before. A non-zero exit
  * rejects with the exit code in `exitCode` and `timedOut` set on a timeout, so a caller
  * can map a script's own exit codes (the first-admin setup protocol).
+ *
+ * `secretFd` (default false) gives the child a FOURTH stdio entry — fd 3, a pipe — and
+ * collects what it writes there apart from stdout/stderr. That is how a script hands back
+ * a value (an app's API token) that must never be mistaken for logging: the run resolves
+ * with `{ stdout, stderr, secret, secretOverflow }` and a rejection carries the same two
+ * fields NON-ENUMERABLY (Object.defineProperty), so nothing serialises a secret by
+ * accident. fd 3 is capped at SECRET_FD_MAX_BYTES: one byte more sets `secretOverflow`
+ * and the collected value is dropped rather than truncated-and-accepted (the rest of the
+ * stream is drained so the child cannot block on a full pipe).
  */
-export function spawnGroup(cmd, args, { cwd, env, timeout, input, maxBuffer = 4 * 1024 * 1024 } = {}) {
+export function spawnGroup(cmd, args, { cwd, env, timeout, input, maxBuffer = 4 * 1024 * 1024, secretFd = false } = {}) {
   return new Promise((resolve, reject) => {
     const wantsInput = typeof input === "string";
-    const child = spawn(cmd, args, { cwd, env, detached: true, stdio: [wantsInput ? "pipe" : "ignore", "pipe", "pipe"] });
+    const stdio = [wantsInput ? "pipe" : "ignore", "pipe", "pipe"];
+    if (secretFd) stdio.push("pipe");
+    const child = spawn(cmd, args, { cwd, env, detached: true, stdio });
     if (wantsInput) {
       // EPIPE if the script exits without reading: that is the child's business, not a crash here.
       child.stdin.on("error", () => {});
       child.stdin.end(input);
     }
     let stdout = ""; let stderr = ""; let timedOut = false; let killTimer = null;
+    // fd 3: never mixed into stdout/stderr, never grown past the cap.
+    let secret = ""; let secretBytes = 0; let secretOverflow = false;
     const cap = (s, d) => (s.length > maxBuffer ? s : s + d);
     child.stdout.on("data", (d) => { stdout = cap(stdout, d); });
     child.stderr.on("data", (d) => { stderr = cap(stderr, d); });
+    const secretStream = secretFd ? child.stdio && child.stdio[3] : null;
+    if (secretStream) {
+      secretStream.on("error", () => {});
+      secretStream.on("data", (d) => {
+        // An overflowed run keeps draining (a full pipe would block the child) but keeps nothing:
+        // a truncated token must never look like an answer.
+        if (secretOverflow) return;
+        secretBytes += d.length;
+        if (secretBytes > SECRET_FD_MAX_BYTES) { secretOverflow = true; secret = ""; return; }
+        secret += d.toString("utf8");
+      });
+    }
+    // Hidden, not enumerable: an Error that carries a token must not leak it into a
+    // log line, JSON.stringify or a spread of its own keys.
+    const withSecret = (err) => {
+      Object.defineProperty(err, "secret", { value: secret, enumerable: false, configurable: true, writable: true });
+      Object.defineProperty(err, "secretOverflow", { value: secretOverflow, enumerable: false, configurable: true, writable: true });
+      return err;
+    };
     const killGroup = (sig) => { try { process.kill(-child.pid, sig); } catch { /* already gone */ } };
     const timer = timeout ? setTimeout(() => {
       timedOut = true;
       killGroup("SIGTERM");
       killTimer = setTimeout(() => killGroup("SIGKILL"), 10_000);
     }, timeout) : null;
-    child.on("error", (err) => { clearTimeout(timer); clearTimeout(killTimer); reject(Object.assign(err, { stdout, stderr })); });
+    child.on("error", (err) => {
+      clearTimeout(timer); clearTimeout(killTimer);
+      const failure = Object.assign(err, { stdout, stderr });
+      reject(secretFd ? withSecret(failure) : failure);
+    });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
       // Leader exited: SIGKILL any stray group members now so none outlive the resolved hook.
       if (killTimer) { clearTimeout(killTimer); killGroup("SIGKILL"); }
-      if (code === 0 && !timedOut) return resolve({ stdout, stderr });
+      if (code === 0 && !timedOut) return resolve(secretFd ? { stdout, stderr, secret, secretOverflow } : { stdout, stderr });
       const why = timedOut ? `timed out after ${Math.round(timeout / 1000)}s` : `exit ${code ?? signal}`;
-      reject(Object.assign(new Error(why), { stdout, stderr: `${stderr}\n${why}`, exitCode: code, signal: signal ?? null, timedOut }));
+      const failure = Object.assign(new Error(why), { stdout, stderr: `${stderr}\n${why}`, exitCode: code, signal: signal ?? null, timedOut });
+      reject(secretFd ? withSecret(failure) : failure);
     });
   });
 }

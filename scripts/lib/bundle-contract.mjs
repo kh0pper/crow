@@ -11,6 +11,10 @@ import { join, isAbsolute, basename } from "node:path";
 import Ajv from "ajv";
 import { INVITE_HANDLER_NAMES, isInviteHandlerName } from "../../servers/gateway/first-admin/registry.js";
 import { firstAdminAfterProblems } from "../../servers/gateway/bundle-first-admin-after.js";
+// `firstAdmin.setup.token` — the script that mints the app's own API token. Its rules live
+// beside the runtime that runs it (servers/gateway/bundle-api-token.js), so a manifest cannot
+// declare a token step Crow would refuse to run.
+import { apiTokenProblems } from "../../servers/gateway/bundle-api-token.js";
 // The "is this a plain path inside the bundle" rule and the panel-id rule live in one leaf
 // module, shared with routes/bundles.js (which skips such a value at install) and
 // compose-guard.js: a manifest the contract refuses is the same value the runtime refuses.
@@ -382,6 +386,14 @@ function validateSetupFirstAdmin(manifest, bundleDir, fa) {
     // (servers/gateway/bundle-first-admin-after.js), so a manifest cannot declare a step
     // Crow would not run.
     errors.push(...firstAdminAfterProblems(manifest));
+    // `setup.token` (the app's own API token): the declaration's rules, and the script it
+    // names has to ship in the bundle like every other declared script.
+    errors.push(...apiTokenProblems(manifest));
+    const tokenSetup = setup.token && typeof setup.token === "object" && !Array.isArray(setup.token) ? setup.token : null;
+    const tokenScript = tokenSetup ? tokenSetup.script : undefined;
+    if (typeof tokenScript === "string" && !isAbsolute(tokenScript) && !tokenScript.split(/[\\/]/).includes("..") && tokenScript.endsWith(".sh") && !fileExists(bundleDir, tokenScript)) {
+      errors.push(`firstAdmin: setup.token.script "${tokenScript}" not found`);
+    }
   }
   if (fa.userEnv !== undefined) {
     const declared = typeof fa.userEnv === "string" && envVars.some((v) => v && v.name === fa.userEnv);

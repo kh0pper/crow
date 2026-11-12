@@ -720,6 +720,34 @@ export async function runPostListenSetup(server, app, deps) {
     })();
   }
 
+  // Existing installs get the API token their app mints for Crow (`firstAdmin.setup.token`,
+  // bundle-api-token.js): once per boot, after the add-ons have settled, for every bundle
+  // whose own admin setup succeeded for THIS install and whose token env is still empty.
+  // It runs behind the same settle gate as the walls above, takes the per-bundle
+  // first-admin lock, and reconnects the add-on itself when it succeeds. Fire-and-forget:
+  // it never delays listen and never throws. Skipped on a --no-auth gateway, which is
+  // nobody's dashboard.
+  if (!noAuth) {
+    (async () => {
+      try {
+        const proxy = await import("../proxy.js");
+        await Promise.race([
+          proxy.addonsSettled(),
+          new Promise((r) => setTimeout(r, 10 * 60 * 1000).unref()),
+        ]);
+        // The catch-up's own real seams (bundle-api-token.js): one copy of the wiring, so
+        // boot and the module cannot drift apart.
+        const { runApiTokenCatchUp, apiTokenCatchUpDeps } = await import("../bundle-api-token.js");
+        const summary = await runApiTokenCatchUp({ deps: await apiTokenCatchUpDeps() });
+        if (summary.ran.length) {
+          console.log(`[api-token] catch-up: ${summary.ran.map((r) => `${r.id} ${r.result}`).join(", ")}`);
+        }
+      } catch (err) {
+        console.warn("[api-token] catch-up skipped:", err?.message || err);
+      }
+    })();
+  }
+
   // Bring up alwaysResident vLLM bundles (embed, etc.) via gpu-orchestrator.
   // Non-fatal — if docker isn't available the gateway still runs; bundles
   // just have to be started manually.
