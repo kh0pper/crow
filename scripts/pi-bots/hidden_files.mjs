@@ -61,16 +61,18 @@ export function isSecretEnvName(n) {
  * writePrivateFile) and `.mcp-addons.json.tmp-<pid>-<base36>`
  * (scripts/addon-sandbox/migrate-linked.mjs writeAtomicPrivate), and the no-dot
  * `mcp-addons.json.tmp-<pid>` (scripts/ops/pin-addon-command.mjs). All of them
- * hold the full add-on env. The exemption is the `.example.json` suffix, not the
- * name: `mcp-addons.example.json` is documentation, not a secret, and so is a
- * dotted `.mcp-addons.example.json`, which the lookahead exempts the same way.
+ * hold the full add-on env. The exemption is a file NAME ENDING IN
+ * `.example.json`, not the name itself: `mcp-addons.example.json` is
+ * documentation, not a secret, and so is a dotted `.mcp-addons.example.json`,
+ * which the lookahead exempts the same way.
  */
 export const ADDONS_FILE_NAME_RE = /^\.?mcp-addons(?!\.example\.json$)[^/]*$/;
 
 /**
  * True for a name whose CONTENT is the add-on registry with its env values:
  * any name at the home root starting with `mcp-addons` or `.mcp-addons`,
- * except a `.example.json` name (the templates, which stay readable).
+ * except a file name ending in `.example.json` (the templates, which stay
+ * readable).
  * Over-masking is the safe direction, so every other suffix — `.bak`, a date,
  * another `.json` segment, a `~`, and the writers' temp names — matches.
  */
@@ -111,8 +113,8 @@ export function isAddonsFileName(n) {
  * registry) also contributes `<crowHome>/mcp-addons.json` whether it exists or
  * not, plus every regular file or symlink directly in the home root whose name
  * isAddonsFileName accepts: any name starting with `mcp-addons` or
- * `.mcp-addons`, except one whose suffix is exactly `.example.json` (the
- * shipped `mcp-addons.example.json`, and the dotted one). ADDONS_FILE_NAME_RE
+ * `.mcp-addons`, except a file name ending in `.example.json` (the shipped
+ * `mcp-addons.example.json`, and the dotted one). ADDONS_FILE_NAME_RE
  * spells out the covered copies — the `.bak`, `.bak-<date>`, `.bak.<epoch>`,
  * `.pre-<tag>-<date>` and other backup shapes, an editor's `~`, and the
  * `.mcp-addons.json.tmp-*` file a writer holds while it renames one into place
@@ -150,7 +152,7 @@ export function secretFilesFor({ crowHome, appRoot, hiddenDirs = [], readdir = r
   for (const root of roots) for (const n of maskedNamesIn(root, readdir, isSecretEnvName)) addEnv(root, n);
   // The add-on registry at the Crow home root only: every name isAddonsFileName
   // accepts (any name starting with `mcp-addons` or `.mcp-addons`, except one
-  // whose suffix is exactly `.example.json`) — the file itself, every backup
+  // whose name ends in `.example.json`) — the file itself, every backup
   // copy shape and a writer's temp file. The repo checkout never holds one, and
   // the env values the file carries are keys.
   for (const n of maskedNamesIn(crowHome, readdir, isAddonsFileName)) addEnv(crowHome, n);

@@ -22,7 +22,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -31,6 +31,7 @@ const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
 // extra Crow home would change these spawns): point its /etc half at scratch,
 // empty dirs.
 const SCAN_ROOT = mkdtempSync(join(tmpdir(), "crow-pirpc-cmds-scan-"));
+process.on("exit", () => { try { rmSync(SCAN_ROOT, { recursive: true, force: true }); } catch { /* gone */ } });
 const SCAN_UNITS = join(SCAN_ROOT, "units");
 const SCAN_ENV = join(SCAN_ROOT, "etc-crow");
 mkdirSync(SCAN_UNITS, { recursive: true });

@@ -474,6 +474,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // 2FA setup page (mandatory for managed hosting, optional access for self-hosted via settings)
   router.get("/dashboard/login/2fa/setup", async (req, res) => {
     res.set({ "Cache-Control": "no-store", Pragma: "no-cache" });
+    // Same network gate as the login page: a refused source must not reach
+    // twoFactorSetupGate, nor be handed a fresh secret and recovery codes.
+    if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     // Signed in, and 2FA not already on: otherwise this GET would replace the
     // live secret and recovery codes for anyone who can reach it.
     const gate = await twoFactorSetupGate(req);
@@ -494,6 +497,8 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // 2FA setup verification (verify first code to enable)
   router.post("/dashboard/login/2fa/setup", async (req, res) => {
     res.set({ "Cache-Control": "no-store", Pragma: "no-cache" });
+    // Same network gate: a refused source never gets to verify a code here.
+    if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     const gate = await twoFactorSetupGate(req);
     if (gate) return res.redirectAfterPost(gate);
     const cookies = parseCookies(req);

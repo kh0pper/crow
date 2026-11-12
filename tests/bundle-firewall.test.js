@@ -9,7 +9,7 @@ import {
   openTailnetPorts, closeTailnetPorts,
 } from "../servers/gateway/bundle-firewall.js";
 
-const LOG_LINE_NO_TAILSCALE = (p) => `Tailscale is not running here, so no tailnet firewall rule was added for port ${p} — reinstall the app once Tailscale is up`;
+const LOG_LINE_NO_TAILSCALE = (p) => `Tailscale is not running here, so no tailnet firewall rule was added for port ${p} — connect Tailscale and reinstall this add-on to add the rule later`;
 const LOG_LINE_LOOPBACK = (p) => `Port ${p} listens only on this machine, so no firewall rule is needed`;
 const LOG_LINE_OPENED = (p) => `Opened firewall port ${p}/tcp for Tailscale`;
 const LOG_LINE_OPEN_FAILED = (p) => `Note: Could not open port ${p} (sudo/ufw not available — open manually if needed)`;
@@ -159,9 +159,10 @@ const TAILNET_DOWN = { eth0: iface("192.168.1.20") };
 
 // --- the log line tells the operator what to do ----------------------------
 
-test("the no-Tailscale line says to reinstall the app once Tailscale is up, and prints no sudo command", () => {
+test("the no-Tailscale line says to reinstall the add-on once Tailscale is connected, and prints no sudo command", () => {
   const line = LOG_LINE_NO_TAILSCALE(8080);
-  assert.match(line, /reinstall the app once Tailscale is up/);
+  assert.match(line, /connect Tailscale and reinstall this add-on/);
+  assert.match(line, /add the rule later/);
   assert.doesNotMatch(line, /sudo/);
 });
 
