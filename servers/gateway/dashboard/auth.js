@@ -16,6 +16,11 @@ import { peerTrust } from "../../shared/peer-trust.js";
 import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
 import { escapeHtml } from "./shared/components.js";
 import { withWriteContext, ownerWriteContext, peerWriteContext } from "../../shared/history/write-context.js";
+// The same "this is a bare same-box caller" rule the first-run gate uses
+// (peer-class.js's isLocalPeer: a loopback socket carrying no forwarding header
+// and no tailscale-* header). setup-token.js imports auth.js only lazily, so
+// this is not an import cycle.
+import { isDirectLoopback } from "./setup-token.js";
 
 export function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
@@ -661,6 +666,42 @@ export async function sessionAuth(token) {
 }
 
 /**
+ * The 403 page a request gets when the network gate is closed: the same
+ * response dashboardAuth sends, and the same one the login and password-reset
+ * pages send (they are the pages a stranger would otherwise type a password
+ * into).
+ *
+ * No env-var escape hatch here: the security audit's finding was that this
+ * page sent the owner to CROW_DASHBOARD_PUBLIC=true, which turns the whole
+ * network gate off. Say how to reach Crow instead.
+ */
+export function sendNetworkRefusal(req, res) {
+  const cookies = parseCookies(req);
+  const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
+  res.status(403).type("html").send(`<!DOCTYPE html><html><head><title>${escapeHtml(t("login.accessDeniedTitle", lang))}</title></head><body style="font-family:sans-serif;padding:3rem;text-align:center">
+      <h1>${escapeHtml(t("login.accessDeniedTitle", lang))}</h1>
+      <p>${escapeHtml(t("login.accessDeniedBody", lang))}</p>
+    </body></html>`);
+}
+
+/**
+ * Whether the login and password-reset pages may be served to (and accept a
+ * password from) this request.
+ *
+ * The same network rule as every private route, plus one exemption: a request
+ * straight off this machine's loopback socket. That is the first-run setup path
+ * (the setup page is http://localhost:3001/setup while no password is set) and
+ * the owner at this machine's console — reusing exactly the "bare same-box
+ * caller" test the first-run gate uses, so a proxied visitor (a forwarding or
+ * tailscale-* header) and a Serve/Funnel request are still classified as what
+ * they are and refused. CROW_DASHBOARD_PUBLIC=true is handled inside
+ * isAllowedNetwork.
+ */
+export function loginNetworkAllowed(req) {
+  return isAllowedNetwork(req) || isDirectLoopback(req);
+}
+
+/**
  * Dashboard auth middleware.
  * Checks session cookie or redirects to login.
  *
@@ -681,15 +722,7 @@ export async function sessionAuth(token) {
 export function dashboardAuth(req, res, next) {
   // Network check
   if (!isAllowedNetwork(req)) {
-    // No env-var escape hatch here: the security audit's finding was that this
-    // page sent the owner to CROW_DASHBOARD_PUBLIC=true, which turns the whole
-    // network gate off. Say how to reach Crow instead.
-    const cookies = parseCookies(req);
-    const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
-    res.status(403).type("html").send(`<!DOCTYPE html><html><head><title>${escapeHtml(t("login.accessDeniedTitle", lang))}</title></head><body style="font-family:sans-serif;padding:3rem;text-align:center">
-      <h1>${escapeHtml(t("login.accessDeniedTitle", lang))}</h1>
-      <p>${escapeHtml(t("login.accessDeniedBody", lang))}</p>
-    </body></html>`);
+    sendNetworkRefusal(req, res);
     return;
   }
 

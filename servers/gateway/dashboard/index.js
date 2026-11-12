@@ -19,6 +19,8 @@ import {
   parseCookies,
   validatePasswordStrength,
   isAllowedNetwork,
+  loginNetworkAllowed,
+  sendNetworkRefusal,
   mintSsoSession,
   SSO_SESSION_MAX_AGE,
 } from "./auth.js";
@@ -189,6 +191,10 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // page whose loopback socket carries its own domain as the Host
   // (isLoopbackHost, same-origin.js).
   router.get("/dashboard/login", async (req, res) => {
+    // The network gate comes first: a source every private route refuses must
+    // not be handed a page that takes a password (nor a setup link). Direct
+    // loopback stays allowed — that is the first-run setup path.
+    if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     // An app's consent hand-off survives the login round trip only in the exact
@@ -208,6 +214,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
   // Login handler
   router.post("/dashboard/login", async (req, res) => {
+    // Before the password check, the lockout counter, isPasswordSet() and any
+    // read of the body: a refused source never gets to guess.
+    if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const { password, confirm } = req.body;
@@ -512,6 +521,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
   // Password reset request page
   router.get("/dashboard/reset", async (req, res) => {
+    if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const isHosted = !!process.env.CROW_HOSTED;
@@ -542,6 +552,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
   // Password reset request handler (managed hosting — triggers email via hosting API)
   router.post("/dashboard/reset", async (req, res) => {
+    if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const isHosted = !!process.env.CROW_HOSTED;
@@ -570,6 +581,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
   // Password reset completion (new password form submission)
   router.post("/dashboard/reset/complete", async (req, res) => {
+    if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const isHosted = !!process.env.CROW_HOSTED;

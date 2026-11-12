@@ -2096,8 +2096,7 @@ else
     echo "    ${SETUP_TOKEN_FILE}"
     echo "  Read it on this machine and add it to the URL as ?token=<that value>."
   fi
-  echo "  Opening the setup page on this machine itself (http://localhost:3001/setup)"
-  echo "  needs no token."
+  echo "  On a machine with only one login account, http://localhost:3001/setup opens here without a token; with more than one, use the token above."
 fi
 echo ""
 echo "  Everything else happens there — the setup wizard walks you through"

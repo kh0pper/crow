@@ -14,7 +14,9 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, statSync, existsSync, readFileSync } from "node:fs";
+import fs from "node:fs";
+import { mkdtempSync, statSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,12 +27,82 @@ const execFileP = promisify(execFile);
 
 const REPO = join(import.meta.dirname, "..");
 const dir = mkdtempSync(join(tmpdir(), "first-run-setup-token-"));
+
+// Passwd fixtures for the shared-machine rule (hasOtherHumanAccounts).
+const GATEWAY_UID = process.getuid?.();
+/** The second login account's uid: 1001 unless this process already is 1001. */
+const OTHER_UID = GATEWAY_UID === 1001 ? 1002 : 1001;
+const passwdLine = (name, uid, shell) => `${name}:x:${uid}:${uid}:${name}:/home/${name}:${shell}`;
+
+// The accounts every Linux box has, plus the shapes that must NOT count as a
+// person: nobody, uid 65534, uid >= 60000, a nologin/false/sync shell, and
+// malformed or commented lines.
+const SERVICE_ACCOUNTS = [
+  "root:x:0:0:root:/root:/bin/bash",
+  "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin",
+  "bin:x:2:2:bin:/bin:/usr/sbin/nologin",
+  "sync:x:4:65534:sync:/bin:/bin/sync",
+  "www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin",
+  "dhcpcd:x:100:65534:DHCP Client Daemon,,,:/usr/lib/dhcpcd:/bin/false",
+  "systemd-network:x:998:998:systemd Network Management:/:/usr/sbin/nologin",
+  "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin",
+];
+const NON_HUMAN_SHAPES = [
+  "nobody:x:1999:1999:nobody:/nonexistent:/bin/bash", // in range, real shell: the NAME is excluded
+  "service:x:65534:65534:not-a-person:/nonexistent:/bin/bash", // uid 65534 is out of range
+  "container:x:60001:60001:not-a-person:/nonexistent:/bin/bash", // >= 60000 is out of range
+  "# a comment line with colons:x:1005:1005::/:/bin/bash",
+  "garbage",
+  "short:x:1001",
+  "baduid:x:notanumber:0:x:/:/bin/bash",
+];
+
+/** A passwd file: the services, the owner (this process's uid), the non-human
+ *  shapes, and whatever else the caller adds. */
+function writePasswdFixture(file, extra = []) {
+  const path = join(dir, file);
+  writeFileSync(path, [...SERVICE_ACCOUNTS, passwdLine("owner", GATEWAY_UID, "/bin/bash"), ...NON_HUMAN_SHAPES, ...extra].join("\n") + "\n");
+  return path;
+}
+
+/** One login account: this process's own. */
+const SINGLE_ACCOUNT_PASSWD = writePasswdFixture("passwd-single-account", [
+  passwdLine("service-second", OTHER_UID, "/usr/sbin/nologin"),
+]);
+/** A shared box: a SECOND human account with a real login shell. */
+const SHARED_PASSWD = writePasswdFixture("passwd-shared", [passwdLine("second", OTHER_UID, "/bin/bash")]);
+
+/** A request straight off this machine's loopback socket, addressed to a
+ *  loopback Host — the shape the exemption is about. */
+const loopbackReq = ({ host = "localhost:3001", headers = {}, query = {}, body = {} } = {}) => ({
+  socket: { remoteAddress: "127.0.0.1" },
+  headers: { host, ...headers },
+  query,
+  body,
+});
+
 const HOME = join(dir, "home");
 process.env.CROW_HOME = HOME;
 process.env.CROW_DATA_DIR = join(dir, "data");
 delete process.env.CROW_DB_PATH;
 delete process.env.CROW_SETUP_TOKEN;
 execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env }, stdio: "pipe", cwd: REPO });
+
+// The HTTP tests below drive the REAL dashboard router, and dashboard/index.js
+// and setup-page.js call allowFirstRun(req, { from }) with no opts — a request
+// cannot carry a passwd path. The host running this suite may well have a
+// second login account (the one it does run on does), which would refuse every
+// loopback exemption below for a reason the test is not about. So redirect just
+// the /etc/passwd read to the single-account fixture for this whole file:
+// syncBuiltinESMExports() is what makes setup-token.js's `import { readFileSync
+// } from "node:fs"` binding see the wrapper. Tests that need a different passwd
+// pass `passwdPath` explicitly, and one end-to-end test below uses the shared
+// fixture's shape through those opts.
+const realReadFileSync = fs.readFileSync;
+fs.readFileSync = function readFileSyncWithPasswdFixture(path, ...rest) {
+  return realReadFileSync.call(fs, path === "/etc/passwd" ? SINGLE_ACCOUNT_PASSWD : path, ...rest);
+};
+syncBuiltinESMExports();
 
 const express = (await import("express")).default;
 const { createDbClient } = await import("../servers/db.js");
@@ -42,6 +114,7 @@ const {
   tokenMatches,
   clearSetupToken,
   isDirectLoopback,
+  hasOtherHumanAccounts,
   allowFirstRun,
   announceSetupToken,
   bootSetupToken,
@@ -49,9 +122,16 @@ const {
 } = await import("../servers/gateway/dashboard/setup-token.js");
 const { isSameOriginRequest, configuredOwnOrigins, isLoopbackHost, FIRST_RUN_CROSS_ORIGIN_MESSAGE } =
   await import("../servers/gateway/dashboard/same-origin.js");
+// Serve, as the gateway sees it: the network gate allows a verified Serve client
+// (an overlay address behind a tailscaled-owned loopback socket).
+const { actAsServe, serveHeaders } = await import("./fixtures/serve-peer.mjs");
 
 const db = createDbClient();
-const LAN = "192.0.2.7";
+// A genuine LAN peer: the login/reset pages are network-gated (loginNetworkAllowed
+// in dashboard/auth.js), so a TEST-NET address like 192.0.2.7 — public, and
+// therefore refused outright — would never reach the first-run gate these tests
+// are about. 10.0.0.5 is RFC1918, as a neighbour on the home network really is.
+const LAN = "10.0.0.5";
 const PW = "correct horse battery staple";
 const TOKEN_FILE = setupTokenPath({ crowHome: HOME });
 
@@ -243,16 +323,26 @@ test("POST /dashboard/login from the LAN with the right token: password set, tok
 test("POST /dashboard/login: a Serve-shaped loopback request needs the token, a bare loopback one does not", async () => {
   await resetFirstRun();
 
-  // The Serve shape: loopback socket WITH forwarding headers (what tailscaled
-  // writes), so it is not the machine's own user.
-  const serve = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { "x-forwarded-for": "100.64.20.5", "x-forwarded-host": "crow.example.ts.net" } });
-  assert.equal(serve.status, 200);
-  assert.ok(isGated(await serve.text()), "refused without a token");
-  assert.equal(await isPasswordSet(), false);
+  // The Serve shape: a loopback socket opened by tailscaled, carrying the
+  // headers Serve writes. Verified Serve traffic is an allowed network, so what
+  // refuses it below is the first-run token gate (no token, and Serve is not
+  // the machine's own user, so no loopback exemption).
+  actAsServe();
+  try {
+    const serve = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: serveHeaders("owner@example.invalid") });
+    assert.equal(serve.status, 200);
+    assert.ok(isGated(await serve.text()), "refused without a token");
+    assert.equal(await isPasswordSet(), false);
+  } finally {
+    delete process.env.CROW_SERVE_PEER_UIDS;
+  }
 
+  // A loopback socket carrying only a Forwarded header: no Serve shape and no
+  // uid anyone can vouch for, so it is not an allowed source at all. The
+  // NETWORK gate refuses it outright — it never even gets the gated setup page.
   const forwarded = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { forwarded: "for=100.64.20.5" } });
-  assert.equal(forwarded.status, 200);
-  assert.ok(isGated(await forwarded.text()), "refused without a token");
+  assert.equal(forwarded.status, 403, "an unvouched loopback proxy shape is refused by the network gate");
+  assert.match(await forwarded.text(), /Access Denied/);
   assert.equal(await isPasswordSet(), false);
 
   // The owner on the machine itself (or through an SSH tunnel): no token needed.
@@ -364,6 +454,83 @@ test("MINOR 5b: a loopback socket listed in CROW_TRUSTED_PROXIES is NOT exempt, 
     if (previous === undefined) delete process.env.CROW_TRUSTED_PROXIES;
     else process.env.CROW_TRUSTED_PROXIES = previous;
   }
+});
+
+// --- shared-machine rule: a second login account needs the token ------------
+//
+// The loopback exemption says "the owner on the machine itself". On a box with
+// another login account that is not the owner at all: any other local user
+// could open http://localhost:3001/setup and claim the Crow. So the exemption
+// additionally requires that /etc/passwd names no other human login account
+// (hasOtherHumanAccounts), and on a shared box the token below it decides — the
+// token path itself is unchanged.
+
+test("hasOtherHumanAccounts: one login account plus services, nobody, out-of-range uids and malformed lines is not shared", () => {
+  assert.equal(hasOtherHumanAccounts({ passwdPath: SINGLE_ACCOUNT_PASSWD, uid: GATEWAY_UID }), false);
+  // The gateway's own account is only "another" from somebody else's point of view.
+  assert.equal(hasOtherHumanAccounts({ passwdPath: SINGLE_ACCOUNT_PASSWD, uid: OTHER_UID }), true,
+    "the owner account IS another human account for a different uid");
+});
+
+test("hasOtherHumanAccounts: a second account with a real login shell makes it a shared machine", () => {
+  assert.equal(hasOtherHumanAccounts({ passwdPath: SHARED_PASSWD, uid: GATEWAY_UID }), true);
+});
+
+test("hasOtherHumanAccounts: a second account whose shell is not a login shell does not", () => {
+  for (const shell of ["/usr/sbin/nologin", "/bin/false", "/bin/sync", "/sbin/halt", "/sbin/shutdown", ""]) {
+    const path = writePasswdFixture(`passwd-second-${shell.replace(/\W/g, "") || "emptyshell"}`, [
+      `second:x:${OTHER_UID}:${OTHER_UID}:second:/home/second:${shell}`,
+    ]);
+    assert.equal(hasOtherHumanAccounts({ passwdPath: path, uid: GATEWAY_UID }), false, shell || "empty shell");
+  }
+});
+
+test("hasOtherHumanAccounts fails CLOSED: an unreadable passwd file or a non-numeric uid counts as shared", () => {
+  assert.equal(hasOtherHumanAccounts({ passwdPath: join(dir, "no-such-passwd"), uid: GATEWAY_UID }), true, "missing file");
+  assert.equal(hasOtherHumanAccounts({ passwdPath: dir, uid: GATEWAY_UID }), true, "a directory is not readable as a file");
+  assert.equal(hasOtherHumanAccounts({ passwdPath: SINGLE_ACCOUNT_PASSWD, uid: "1000" }), true, "a string uid");
+  assert.equal(hasOtherHumanAccounts({ passwdPath: SINGLE_ACCOUNT_PASSWD, uid: null }), true, "a null uid");
+});
+
+test("allowFirstRun: the loopback exemption is kept on a machine with one login account", async () => {
+  await resetFirstRun();
+  const gate = allowFirstRun(loopbackReq(), { crowHome: HOME, from: "query", passwdPath: SINGLE_ACCOUNT_PASSWD, uid: GATEWAY_UID });
+  assert.deepEqual(gate, { allowed: true, token: null }, "no token needed, and none handed back");
+});
+
+test("allowFirstRun: on a shared machine loopback needs the token — and the token still works", async () => {
+  const token = await resetFirstRun();
+  const shared = { crowHome: HOME, from: "query", passwdPath: SHARED_PASSWD, uid: GATEWAY_UID };
+  assert.deepEqual(allowFirstRun(loopbackReq(), shared), { allowed: false, token: null }, "no token, no exemption");
+  assert.equal(allowFirstRun(loopbackReq({ query: { token: "not-the-token" } }), shared).allowed, false, "a wrong token is refused");
+  assert.deepEqual(allowFirstRun(loopbackReq({ query: { token } }), shared), { allowed: true, token }, "the token path below is unchanged");
+  // The POST shape reads req.body.setup_token, and behaves the same way.
+  const fromBody = { ...shared, from: "body" };
+  assert.equal(allowFirstRun(loopbackReq({ body: { setup_token: token } }), fromBody).allowed, true);
+  assert.equal(allowFirstRun(loopbackReq(), fromBody).allowed, false);
+});
+
+test("allowFirstRun: a second account with a nologin shell leaves the exemption in place", async () => {
+  const path = writePasswdFixture("passwd-second-nologin-gate", [passwdLine("second", OTHER_UID, "/usr/sbin/nologin")]);
+  await resetFirstRun();
+  const gate = allowFirstRun(loopbackReq(), { crowHome: HOME, from: "query", passwdPath: path, uid: GATEWAY_UID });
+  assert.deepEqual(gate, { allowed: true, token: null });
+});
+
+test("allowFirstRun: uid 65534 and uid >= 60000 are not login accounts, so the exemption stays", async () => {
+  await resetFirstRun();
+  // NON_HUMAN_SHAPES carries both (with /bin/bash, so only the uid range can
+  // exclude them) plus a `nobody` account in range.
+  assert.equal(hasOtherHumanAccounts({ passwdPath: SINGLE_ACCOUNT_PASSWD, uid: GATEWAY_UID }), false);
+  const gate = allowFirstRun(loopbackReq(), { crowHome: HOME, from: "query", passwdPath: SINGLE_ACCOUNT_PASSWD, uid: GATEWAY_UID });
+  assert.equal(gate.allowed, true);
+});
+
+test("allowFirstRun: an unreadable passwd path means the token is required (fail closed)", async () => {
+  const token = await resetFirstRun();
+  const opts = { crowHome: HOME, from: "query", passwdPath: join(dir, "passwd-that-is-not-there"), uid: GATEWAY_UID };
+  assert.deepEqual(allowFirstRun(loopbackReq(), opts), { allowed: false, token: null });
+  assert.deepEqual(allowFirstRun(loopbackReq({ query: { token } }), opts), { allowed: true, token }, "the token still opens it");
 });
 
 // --- MINOR 3: two processes racing to mint the token agree --------------------
@@ -702,4 +869,33 @@ test("Fix round 1: isLoopbackHost — loopback names, loopback literals, a confi
   assert.equal(isLoopbackHost(req("crow.example.ts.net"), { env }), true);
   assert.equal(isLoopbackHost(req("crow.example.ts.net:3001"), none), false, "unconfigured: just a stranger's name");
   assert.equal(isLoopbackHost(req("evil.example:3001"), { env }), false);
+});
+
+// ---------------------------------------------------------------------------
+// Shared-machine fix: the exemption's two guards are independent. A machine
+// with ONE login account still refuses a DNS-rebinding page (its Host names the
+// attacker's domain, not this box) — the passwd rule must not be the thing that
+// stops rebinding, nor may it open it on a single-account machine.
+// ---------------------------------------------------------------------------
+
+test("shared-machine fix: a single-account box still refuses a rebinding Host, and a loopback Host still works", { timeout: 20_000 }, async () => {
+  await resetFirstRun();
+
+  const rebound = await rawRequest("/dashboard/login", {
+    method: "POST",
+    host: REBIND_HOST,
+    headers: { origin: `http://${REBIND_HOST}`, "sec-fetch-site": "same-origin" },
+    body: new URLSearchParams({ password: PW, confirm: PW }).toString(),
+  });
+  assert.ok(isRefusal(rebound, await rebound.text()), `expected the plain 403, got ${rebound.status}`);
+  assert.equal(await isPasswordSet(), false, "no password was stored");
+  assert.ok(existsSync(TOKEN_FILE), "and the one-time token was not spent");
+
+  const gated = await rawRequest("/dashboard/login", { host: REBIND_HOST });
+  assert.ok(isGated(await gated.text()), "its page stays gated even with one login account");
+
+  // Control: the same single-account box, a loopback Host — the exemption applies.
+  const local = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null });
+  assert.equal(local.status, 303, (await local.text()).slice(0, 200));
+  assert.equal(await isPasswordSet(), true);
 });

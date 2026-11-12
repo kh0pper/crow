@@ -8,7 +8,9 @@
  * box first on the same Wi-Fi owns it. The token closes that window: while no
  * password is set, every first-run path (GET /dashboard/login, POST
  * /dashboard/login, GET /setup) demands the token unless the request is direct
- * loopback BY A LOOPBACK NAME (isDirectLoopback and isLoopbackHost, beside).
+ * loopback BY A LOOPBACK NAME (isDirectLoopback and isLoopbackHost, beside),
+ * and only on a machine with a single login account (hasOtherHumanAccounts
+ * below): on a shared box another local user could claim the instance too.
  *
  * Where the token comes from:
  *   - CROW_SETUP_TOKEN, when set: today's hosted behaviour, unchanged. No file
@@ -28,7 +30,7 @@
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { resolveCrowHome } from "../../shared/crow-home.js";
 import { isLocalPeer } from "../../shared/peer-class.js";
 import { isLoopbackHost } from "./same-origin.js";
@@ -160,6 +162,52 @@ export function isDirectLoopback(req) {
   return isLocalPeer(req?.socket?.remoteAddress, req?.headers || {});
 }
 
+/** Login shells that are not a person's: an account with one is a service account. */
+const NON_HUMAN_SHELLS = new Set(["nologin", "false", "sync", "halt", "shutdown"]);
+
+/**
+ * True when this machine has another human login account besides `uid` — a
+ * shared box, where "the local user" is not necessarily the owner.
+ *
+ * Reads /etc/passwd (field layout: name, x, uid, gid, gecos, home, shell). An
+ * account counts when its numeric uid is 1000 <= uid < 60000, it is not `uid`
+ * itself, its name is not `nobody`, and its shell is non-empty and not one of
+ * nologin / false / sync / halt / shutdown. Malformed lines and comment lines
+ * are ignored.
+ *
+ * Fail CLOSED: a file that cannot be read, or a uid that is not a number,
+ * answers true, so an unreadable passwd file can never open the exemption.
+ *
+ * @param {{ passwdPath?: string, uid?: number }} [opts]
+ * @returns {boolean}
+ */
+export function hasOtherHumanAccounts({ passwdPath = "/etc/passwd", uid = process.getuid?.() } = {}) {
+  if (!Number.isInteger(uid)) return true;
+  let passwd;
+  try {
+    passwd = readFileSync(passwdPath, "utf8");
+  } catch {
+    return true;
+  }
+  for (const line of passwd.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const fields = trimmed.split(":");
+    if (fields.length < 7) continue;
+    const [name, , uidField, , , , shell] = fields;
+    if (!name) continue;
+    const accountUid = Number(uidField);
+    if (!Number.isInteger(accountUid)) continue;
+    if (accountUid < 1000 || accountUid >= 60000) continue;
+    if (accountUid === uid) continue;
+    if (name === "nobody") continue;
+    if (!shell) continue;
+    if (NON_HUMAN_SHELLS.has(basename(shell).toLowerCase())) continue;
+    return true;
+  }
+  return false;
+}
+
 /**
  * The first-run gate for one request. Only ever consulted while no password is
  * set — it guards the FIRST password, never a login or a reset.
@@ -175,15 +223,27 @@ export function isDirectLoopback(req) {
  * 127.0.0.1, so it falls through to the token below — and, with no token, is
  * refused exactly as a LAN peer is.
  *
+ * The exemption is also only for a machine with ONE login account: on a shared
+ * box another local user could claim the Crow just as a LAN neighbour could, so
+ * there every first-run request needs the token (hasOtherHumanAccounts above).
+ *
  * @param {object} req Express request (`req.query` for a GET, `req.body` for a POST)
- * @param {{ crowHome?: string, from?: "body"|"query", hasPassword?: boolean, env?: object }} [opts]
- *   `env` is the environment the configured own origin is read from (tests)
+ * @param {{ crowHome?: string, from?: "body"|"query", hasPassword?: boolean, env?: object, passwdPath?: string, uid?: number }} [opts]
+ *   `env` is the environment the configured own origin is read from (tests);
+ *   `passwdPath` and `uid` are handed to hasOtherHumanAccounts (tests)
  * @returns {{ allowed: boolean, token: string|null }}
  *   `token` is the matched token when the request carried one (so the page can
  *   pass it on in the form), null on the direct-loopback exemption.
  */
-export function allowFirstRun(req, { crowHome = resolveCrowHome(), from = "body", hasPassword = false, env = process.env } = {}) {
-  if (!process.env.CROW_SETUP_TOKEN && isDirectLoopback(req) && isLoopbackHost(req, { env })) return { allowed: true, token: null };
+export function allowFirstRun(req, { crowHome = resolveCrowHome(), from = "body", hasPassword = false, env = process.env, passwdPath, uid } = {}) {
+  if (
+    !process.env.CROW_SETUP_TOKEN &&
+    isDirectLoopback(req) &&
+    isLoopbackHost(req, { env }) &&
+    !hasOtherHumanAccounts({ passwdPath, uid })
+  ) {
+    return { allowed: true, token: null };
+  }
   const { token } = getSetupToken({ crowHome, hasPassword });
   const candidate = from === "query" ? req?.query?.token : req?.body?.setup_token;
   return tokenMatches(candidate, token) ? { allowed: true, token } : { allowed: false, token: null };
