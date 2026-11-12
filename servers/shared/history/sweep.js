@@ -16,13 +16,20 @@
  *       "[redacted]" in place of each match and the row is marked redacted = 1 —
  *       which api.js then refuses to restore, because the row no longer holds the
  *       item's value.
- *       ONE SHAPE IS HISTORY-ONLY: a credential in a URL query string
- *       (`?api_key=…`, `&token=…`, `&access_token=…`) — URL_CREDENTIAL_QUERY in
- *       this file. A documentation URL with a placeholder `?token=…` is ordinary
- *       in a tracked file, while a source's stored `url` is exactly how a pasted
- *       key reaches history, and no SECRET_PATTERN recognizes a short value there.
- *       LIVE DATA IS NOT HISTORY'S BUSINESS: the memory, post or section itself
- *       keeps its text. Only the stored versions are rewritten.
+ *       ONE SHAPE IS HISTORY-ONLY, AND ONLY IN A URL-NAMED FIELD: a credential
+ *       in a URL query string or fragment (`?api_key=…`, `&token=…`,
+ *       `#access_token=…`) — URL_CREDENTIAL_QUERY in this file, applied by
+ *       redactValue to a snapshot value whose KEY is `url` or ends in `_url`.
+ *       It is deliberately NOT applied to plain text: `?token=…` is ordinary in a
+ *       how-to, a note or a post (a placeholder, a pagination cursor named
+ *       token), and every redacted version is refused by a restore — for a
+ *       deleted item, also by the Trash — so a false positive costs the operator
+ *       the ability to restore their own prose. The field it does cover is a
+ *       source's stored `url`: exactly how a pasted key reaches history, and a
+ *       value no SECRET_PATTERN recognizes. SECRET_PATTERNS and the PEM/PGP
+ *       blocks stay GLOBAL — a real key shape is redacted in every type and
+ *       every field. LIVE DATA IS NOT HISTORY'S BUSINESS: the memory, post or
+ *       section itself keeps its text. Only the stored versions are rewritten.
  *       Rewriting a version is a history edit, so it goes through the armed
  *       switch (covered.js), one transaction per batch: arm → update → disarm.
  *
@@ -183,27 +190,45 @@ const PEM_PRIVATE_KEY_HEADER = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
 const PGP_PRIVATE_KEY_HEADER = /-{5}BEGIN PGP PRIVATE KEY BLOCK-{5}/;
 
 /**
- * A credential carried in a URL QUERY STRING (`?api_key=…`, `&token=…`,
- * `&access_token=…`): the whole parameter, name and value, becomes the
- * placeholder.
+ * A credential carried in a URL QUERY STRING or FRAGMENT (`?api_key=…`,
+ * `&token=…`, `#access_token=…`): the whole parameter, name and value, becomes
+ * the placeholder.
  *
  * HISTORY-ONLY, deliberately not in SECRET_PATTERNS (the list CI's hygiene check
- * shares): a documentation URL carrying `?token=…` is normal in a tracked file,
- * while a STORED VERSION with one holds a second copy of a real key forever —
- * which is exactly what this sweep exists to prevent. A source's `url` is the
- * column a pasted credential reaches history through, and the value in it looks
- * like no known token shape (`SECRET_PATTERNS` never sees it).
+ * shares), and — see redactValue — applied ONLY to a snapshot value whose key
+ * names a URL. Plain text is left alone: `?token=…` is ordinary in prose and in
+ * documentation, and a redacted version cannot be restored (and a redacted delete
+ * cannot be un-deleted), so the pattern is kept to the one field where a pasted
+ * credential actually lands. A source's stored `url` is that field, and the value
+ * in it looks like no known token shape (`SECRET_PATTERNS` never sees it).
  *
- * The `[?&;]` (or start-of-fragment) prefix is what keeps this off SQL text and
- * prose: a bare `token=` is a column name in a statement or a sentence, not a URL
- * parameter. A value of `${…}`/`<…>` (a template or a placeholder) is left alone,
- * and so is an already-redacted one.
+ * The `[?&;#]` prefix is what keeps this off SQL text and prose: a bare
+ * `token=` is a column name in a statement or a sentence, not a URL parameter.
+ * `#` covers the fragment an OAuth implicit-flow callback carries its token in
+ * (`https://site/callback#access_token=…&expires_in=3600`).
+ *
+ * A value of `${…}`/`<…>` (a template or a placeholder) is left alone, and so is
+ * an already-redacted one. Percent-encoding is NOT excluded: a base64 token whose
+ * first character is `/` or `+` arrives as `%2F…` or `%2B…`, which is a
+ * credential like any other.
  */
 const URL_CREDENTIAL_QUERY = new RegExp(
-  String.raw`[?&;](?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|client[_-]?secret|password|passwd)=` +
-    String.raw`(?![\[$<{]|%)[^&#\s"'<>]{3,}`,
+  String.raw`[?&;#](?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|client[_-]?secret|password|passwd)=` +
+    String.raw`(?![\[$<{])[^&#\s"'<>]{3,}`,
   "gi",
 );
+
+/**
+ * A snapshot KEY that names a URL: `url` itself, or a snake_case field ending in
+ * `_url` (a source's `final_url`, a hypothetical `source_url`). Only a value
+ * under such a key gets the URL-credential scrub — see redactValue.
+ */
+const URL_FIELD_KEY = /(^|_)url$/i;
+
+/** Does this snapshot key name a URL field? */
+function isUrlFieldKey(key) {
+  return typeof key === "string" && URL_FIELD_KEY.test(key);
+}
 
 /**
  * Replace every secret-shaped match in one DECODED string with the placeholder.
@@ -217,9 +242,9 @@ const URL_CREDENTIAL_QUERY = new RegExp(
  * are redacted from BEGIN through the matching END; an unmatched header (no END)
  * redacts the WHOLE value, because the field cannot be trusted to end anywhere.
  *
- * A credential in a URL query string is redacted as its whole parameter
- * (URL_CREDENTIAL_QUERY): no secret pattern recognizes a short `?api_key=…`
- * value on its own, and a URL is a place a person pastes one by accident.
+ * A credential in a URL query string or fragment is NOT handled here: that shape
+ * is ordinary in prose and documentation, so it is applied per FIELD — see
+ * redactUrlCredentials, which redactValue calls only for a url-named key.
  *
  * @returns {string|null} the rewritten text, or null when nothing matched
  */
@@ -238,11 +263,6 @@ export function redactText(text) {
     out = REDACTION_PLACEHOLDER;
     hit = true;
   }
-  const withoutUrlCredentials = out.replace(URL_CREDENTIAL_QUERY, REDACTION_PLACEHOLDER);
-  if (withoutUrlCredentials !== out) {
-    out = withoutUrlCredentials;
-    hit = true;
-  }
   for (const [, pattern] of SECRET_PATTERNS) {
     // String#replace resets a global regex's lastIndex itself, so the shared
     // pattern objects are safe to reuse across rows and runs.
@@ -256,25 +276,59 @@ export function redactText(text) {
 }
 
 /**
+ * Redact the credential-bearing parameters of ONE url field's value
+ * (URL_CREDENTIAL_QUERY).
+ *
+ * URL-SCOPED on purpose (see the pattern and redactValue): the shape is ordinary
+ * in prose, and a redacted version is one nobody can restore, so it is applied
+ * only where a pasted link with a live key actually lands.
+ *
+ * @returns {string|null} the rewritten url, or null when nothing matched
+ */
+export function redactUrlCredentials(url) {
+  if (typeof url !== "string" || url === "") return null;
+  const rewritten = url.replace(URL_CREDENTIAL_QUERY, REDACTION_PLACEHOLDER);
+  return rewritten === url ? null : rewritten;
+}
+
+/**
  * Walk every string VALUE of a decoded snapshot, redacting as it goes.
+ *
+ * The KEY rides along because the URL-credential scrub is field-scoped: it fires
+ * for a value under a url-named key only (isUrlFieldKey), while PEM/PGP and
+ * SECRET_PATTERNS fire for every string of every type. An array hands its own key
+ * down to its elements, so a list of links under a url-named key is still covered.
+ *
  * @returns {*} the rewritten value, or null when nothing matched
  */
-function redactValue(value) {
-  if (typeof value === "string") return redactText(value);
+function redactValue(value, key = null) {
+  if (typeof value === "string") {
+    const rewrittenText = redactText(value);
+    let out = rewrittenText === null ? value : rewrittenText;
+    let hit = rewrittenText !== null;
+    if (isUrlFieldKey(key)) {
+      const withoutCredentials = redactUrlCredentials(out);
+      if (withoutCredentials !== null) {
+        out = withoutCredentials;
+        hit = true;
+      }
+    }
+    return hit ? out : null;
+  }
   let hit = false;
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
-      const next = redactValue(value[i]);
+      const next = redactValue(value[i], key);
       if (next !== null) {
         value[i] = next;
         hit = true;
       }
     }
   } else if (value && typeof value === "object") {
-    for (const key of Object.keys(value)) {
-      const next = redactValue(value[key]);
+    for (const childKey of Object.keys(value)) {
+      const next = redactValue(value[childKey], childKey);
       if (next !== null) {
-        value[key] = next;
+        value[childKey] = next;
         hit = true;
       }
     }

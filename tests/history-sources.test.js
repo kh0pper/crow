@@ -676,6 +676,19 @@ test("backend_id is kept current on an edit restore, and a removed backend leave
     row = await sourceRowOf(db, binned);
     assert.equal(row.title, "Binned with a backend");
     assert.equal(row.backend_id, null, "a backend that no longer exists is not written back");
+
+    // 3. THE OTHER HALF OF THAT BRANCH: the backend is still there, so the Trash
+    //    restore writes the pointer back and the source stays where it was placed.
+    const liveBackend = await newBackend("trash-arm-live");
+    const binnedWithLive = await insertSource(db, OWNER, {
+      title: "Binned, backend still here",
+      backend_id: liveBackend,
+    });
+    await deleteSource(db, OWNER, binnedWithLive);
+    await restoreFromTrash(db, { itemType: "research_source", itemId: binnedWithLive }, OWNER);
+    row = await sourceRowOf(db, binnedWithLive);
+    assert.equal(row.title, "Binned, backend still here");
+    assert.equal(row.backend_id, liveBackend, "a backend that still exists IS written back, so the source stays placed");
   } finally {
     db.close();
     fx.dispose();
@@ -849,6 +862,58 @@ test("a credential in a source's URL query string is scrubbed from snapshot_json
       () => restoreVersion(db, { versionId: Number(listed[1].id) }, OWNER),
       (err) => err.code === "redacted",
     );
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a credential in a URL fragment or behind percent-encoding is scrubbed from a source's url", async () => {
+  const fx = await fixture();
+  const db = fx.open();
+  try {
+    // Two shapes a query-string scrub also has to see. An OAuth implicit-flow
+    // callback carries its token in the FRAGMENT (`#access_token=…`), and a base64
+    // token whose first character is `/` or `+` arrives percent-encoded, so its
+    // first character in the URL is `%`.
+    const cases = [
+      {
+        secret: "fragFakeValue000000004",
+        kept: "expires_in=3600",
+        url: "https://example.com/callback#access_token=fragFakeValue000000004&expires_in=3600",
+      },
+      {
+        secret: "%2FFakeValueForAnEncodedToken5",
+        kept: "page=2",
+        url: "https://example.com/private/report?token=%2FFakeValueForAnEncodedToken5&page=2",
+      },
+    ];
+    const ids = [];
+    for (const [i, shape] of cases.entries()) {
+      ids.push(await insertSource(db, OWNER, { title: `An encoded link ${i}`, url: shape.url }));
+    }
+
+    // 1. The trigger stores the URL as the row held it (the sweep, not the
+    //    trigger, is what scrubs it).
+    for (const [i, id] of ids.entries()) {
+      const stored = (await versionsOf(db, "research_source", id)).at(-1);
+      assert.ok(stored.snapshot_json.includes(cases[i].secret), "the version captured the URL as written");
+    }
+
+    // 2. The sweep's scrub catches both.
+    await withWriteContext(SYSTEM, () => sweep(db, { batchSize: 500 }));
+    const stored = (
+      await db.execute({
+        sql: "SELECT item_id, snapshot_json, redacted FROM item_versions WHERE item_type = 'research_source' ORDER BY id",
+        args: [],
+      })
+    ).rows;
+    assert.equal(stored.length, ids.length);
+    for (const [i, row] of stored.entries()) {
+      assert.ok(!row.snapshot_json.includes(cases[i].secret), "the token is gone from the stored snapshot");
+      assert.equal(Number(row.redacted), 1, "the version is marked redacted");
+      assert.ok(row.snapshot_json.includes(cases[i].kept), "the harmless part of the URL is kept");
+    }
   } finally {
     db.close();
     fx.dispose();
