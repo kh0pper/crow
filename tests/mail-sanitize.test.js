@@ -73,6 +73,43 @@ test("a tag split by another tag cannot assemble a script", () => {
   assert.match(nested, /<p>after<\/p>/);
 });
 
+test("a space inside a URL is refused, so a spaced scheme cannot pass as a relative link", () => {
+  const samples = [
+    '<a href="h ttps://x/../../dashboard/settings">x</a>',
+    '<a href="https:// x">x</a>',
+    '<a href="mail to:alex@example.com">x</a>',
+    '<a href="h ttps://example.test/">x</a>',
+  ];
+  for (const sample of samples) {
+    const out = clean(sample);
+    assert.doesNotMatch(out, /href=/, sample);
+    assert.doesNotMatch(out, /dashboard\/settings/, sample);
+    assert.match(out, /target="_blank"/, sample);
+    assert.match(out, /rel="noopener noreferrer nofollow"/, sample);
+  }
+
+  // An encoded space is part of the URL, not a spacing trick, and a trailing space is trimmed.
+  assert.match(clean('<a href="https://example.test/a%20b">x</a>'), /href="https:\/\/example\.test\/a%20b"/);
+  assert.match(clean('<a href="https://example.test/ok ">x</a>'), /href="https:\/\/example\.test\/ok"/);
+  assert.doesNotMatch(clean('<a href="https://example.test/ok ">x</a>'), /href="[^"]* "$/);
+});
+
+test("an image URL with a space inside it is dropped, never shown as a remote image", () => {
+  const { html, remoteImageCount, blockedRemoteImageCount } = sanitizeMessageHtml(
+    '<img src="ht tps://x/a.png">',
+    { allowRemoteImages: true },
+  );
+  assert.doesNotMatch(html, /src=/);
+  assert.doesNotMatch(html, /data-crow-blocked/);
+  assert.equal(remoteImageCount, 0, "a spaced scheme is not shown as a remote image");
+  assert.equal(blockedRemoteImageCount, 0);
+
+  const trailing = sanitizeMessageHtml('<img src="https://cdn.example.test/a.png ">', { allowRemoteImages: true });
+  assert.match(trailing.html, /src="https:\/\/cdn\.example\.test\/a\.png"/);
+  assert.equal(trailing.remoteImageCount, 1);
+  assert.equal(trailing.blockedRemoteImageCount, 0);
+});
+
 test("style and class attributes, a style block and its @import vanish", () => {
   const out = clean(
     '<style>@import url("https://evil.example.test/x.css"); body { background: red }</style>' +
@@ -247,6 +284,27 @@ test("bodyForDisplay passes the remote-image choice through to the sanitiser", (
   const hidden = bodyForDisplay({ bodyHtml: `<img src="${REMOTE}">`, bodyText: "" });
   assert.doesNotMatch(hidden.html, /src=/);
   assert.equal(hidden.blockedRemoteImageCount, 1);
+});
+
+test("a script after the 2 MB cut never reaches the output, and the output stays bounded", () => {
+  const html = "a".repeat(MAX_SANITIZE_HTML_CHARS) + '<script>alert(1)</script><p onclick="alert(1)">tail</p>';
+  assert.ok(html.length > MAX_SANITIZE_HTML_CHARS);
+
+  const out = sanitizeMessageHtml(html);
+  assert.doesNotMatch(out.html, /<script/i);
+  assert.doesNotMatch(out.html, /alert/);
+  assert.doesNotMatch(out.html, /onclick/i);
+  assert.ok(out.html.length <= MAX_SANITIZE_HTML_CHARS, `output length ${out.html.length}`);
+});
+
+test("a non-string body is an empty safe result, never a throw", () => {
+  const nothing = { html: "", remoteImageCount: 0, blockedRemoteImageCount: 0 };
+  for (const input of [null, undefined, 42, true, {}, [], { html: "<script>alert(1)</script>" }]) {
+    assert.deepEqual(sanitizeMessageHtml(input), nothing, String(input));
+    assert.deepEqual(sanitizeMessageHtml(input, { allowRemoteImages: true }), nothing, String(input));
+  }
+  assert.deepEqual(bodyForDisplay(42), { ...nothing, source: "none" });
+  assert.deepEqual(bodyForDisplay({ bodyHtml: 42, bodyText: 7 }), { ...nothing, source: "none" });
 });
 
 test("a 5 MB html body is sanitised in well under two seconds", () => {

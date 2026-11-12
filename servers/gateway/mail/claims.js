@@ -23,6 +23,10 @@
  * `offline` (or is this instance), so a wiped or revoked instance that never got to write a tombstone
  * cannot hold an address forever.
  *
+ * Convergence assumes every instance has the same view of live/revoked instances (a full mesh); with
+ * different views two instances can both connect an address, and the clock-skew advantage of an
+ * earlier `claimedAt` is accepted by design.
+ *
  * This module writes through `writeSetting(..., {allowLocalFallback: false})`, so a key that is not
  * in `SYNC_ALLOWLIST` throws `NotSyncable` instead of silently staying local — a claim that does not
  * replicate is worse than a loud failure.
@@ -80,21 +84,38 @@ export function claimKey(address, instanceId) {
   return `${CLAIM_PREFIX}${addressHash(address)}_${normalizeInstanceId(instanceId)}`;
 }
 
-/** The address hash a key carries, or null when the key is not exactly one of ours. */
-function hashOfKey(key) {
+/**
+ * The hash and instance id a claim key carries, or null when the key is not exactly one of ours.
+ * The key's suffix IS the instance id: a value naming another instance is not a claim at all, so a
+ * mislabelled row can never lock an address to an instance that cannot write that key.
+ */
+function keyParts(key) {
   if (typeof key !== "string" || !key.startsWith(CLAIM_PREFIX)) return null;
   const rest = key.slice(CLAIM_PREFIX.length);
   const at = rest.indexOf("_");
   if (at !== HASH_LEN) return null;
   const hash = rest.slice(0, at);
   if (!HASH_RE.test(hash)) return null;
-  if (!rest.slice(at + 1)) return null;
-  return hash;
+  const instanceId = rest.slice(at + 1);
+  if (!INSTANCE_ID_RE.test(instanceId)) return null;
+  return { hash, instanceId };
+}
+
+/** The address hash a key carries, or null when the key is not exactly one of ours. */
+function hashOfKey(key) {
+  return keyParts(key)?.hash ?? null;
 }
 
 /* ------------------------------------------------------------------ rows */
 
+/** A claim time is a positive safe integer; anything else is no time at all (and sorts last). */
+function claimTimeOrNull(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
 function parseClaim(key, value) {
+  const parts = keyParts(key);
+  if (!parts) return null;
   let raw;
   try {
     raw = JSON.parse(String(value ?? ""));
@@ -102,13 +123,13 @@ function parseClaim(key, value) {
     return null;
   }
   if (!raw || typeof raw !== "object") return null;
-  const instanceId = typeof raw.instanceId === "string" ? raw.instanceId.trim() : "";
-  if (!instanceId || instanceId.length > 64) return null;
+  // Exact, no trim: `" instP "` in the value is not the `instP` the key names.
+  if (typeof raw.instanceId !== "string" || raw.instanceId !== parts.instanceId) return null;
   return {
     key,
-    instanceId,
+    instanceId: parts.instanceId,
     instanceName: cleanName(raw.instanceName),
-    claimedAt: Number.isFinite(raw.claimedAt) ? Number(raw.claimedAt) : null,
+    claimedAt: claimTimeOrNull(raw.claimedAt),
     released: raw.released === true,
     releasedAt: Number.isFinite(raw.releasedAt) ? Number(raw.releasedAt) : null,
   };
@@ -203,7 +224,7 @@ export async function writeClaim(db, address, { localInstanceId, instanceName, n
   const existing = (await listClaims(db, address)).find((c) => c.key === key) ?? null;
   const inherited = existing && !existing.released && existing.instanceId === instanceId ? existing : null;
 
-  const claimedAt = Number.isFinite(now) ? Number(now) : (inherited?.claimedAt ?? Date.now());
+  const claimedAt = claimTimeOrNull(now) ?? claimTimeOrNull(inherited?.claimedAt) ?? Date.now();
   const name = typeof instanceName === "string" && instanceName.trim()
     ? cleanName(instanceName)
     : (inherited?.instanceName || await registryName(db, instanceId));

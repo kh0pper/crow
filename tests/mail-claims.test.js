@@ -270,6 +270,78 @@ test("listClaims does not return a key whose hash only matched the LIKE wildcard
   assert.deepEqual(await checkClaim(db, ADDRESS, { localInstanceId: LOCAL }), { ok: true });
 });
 
+/** Write a claim row straight into dashboard_settings, bypassing writeClaim's own key shape. */
+async function insertClaim(db, key, value) {
+  await db.execute({
+    sql: "INSERT INTO dashboard_settings (key, value) VALUES (?, ?)",
+    args: [key, typeof value === "string" ? value : JSON.stringify(value)],
+  });
+}
+
+test("a claim whose key suffix and value name different instances is ignored everywhere", async () => {
+  const db = await freshDb();
+  await addInstance(db, PEER, { name: "Studio" });
+  await addInstance(db, "instP", { name: "P" });
+  const hash = addressHash(ADDRESS);
+  // The key names instP, the value claims to be PEER: the key is the instance id, so the row is not
+  // a claim at all and must not lock the address to the name in the value.
+  await insertClaim(db, `mail_claim_${hash}_instP`, { instanceId: PEER, instanceName: "Studio", claimedAt: 1_000 });
+
+  assert.deepEqual(await listClaims(db, ADDRESS), []);
+  assert.equal(
+    pickClaimWinner(await listClaims(db, ADDRESS), { liveInstanceIds: new Set([LOCAL, PEER, "instP"]) }),
+    null,
+  );
+  assert.deepEqual(await checkClaim(db, ADDRESS, { localInstanceId: LOCAL }), { ok: true });
+  assert.deepEqual(await listForeignClaims(db, { localInstanceId: LOCAL }), []);
+
+  // The next real claim wins, and the mismatched row is still not one of them.
+  await writeClaim(db, ADDRESS, { localInstanceId: PEER, instanceName: "Studio", now: 2_000 });
+  assert.deepEqual(await checkClaim(db, ADDRESS, { localInstanceId: LOCAL }), { ok: false, instanceName: "Studio" });
+  assert.deepEqual((await listClaims(db, ADDRESS)).map((c) => c.instanceId), [PEER]);
+  assert.deepEqual(await listForeignClaims(db, { localInstanceId: LOCAL }), [{ instanceName: "Studio", claimedAt: 2_000 }]);
+});
+
+test("the key suffix is matched exactly: whitespace around the value's instanceId is a disagreement", async () => {
+  const db = await freshDb();
+  await addInstance(db, "instP", { name: "P" });
+  const hash = addressHash(ADDRESS);
+  await insertClaim(db, `mail_claim_${hash}_instP`, { instanceId: " instP ", instanceName: "P", claimedAt: 1_000 });
+
+  assert.deepEqual(await listClaims(db, ADDRESS), []);
+  assert.deepEqual(await checkClaim(db, ADDRESS, { localInstanceId: LOCAL }), { ok: true });
+  assert.deepEqual(await listForeignClaims(db, { localInstanceId: LOCAL }), []);
+
+  await writeClaim(db, ADDRESS, { localInstanceId: "instP", instanceName: "P", now: 2_000 });
+  assert.deepEqual(await checkClaim(db, ADDRESS, { localInstanceId: LOCAL }), { ok: false, instanceName: "P" });
+});
+
+test("claimedAt is a positive safe integer or null, and a null sorts last", async () => {
+  const hash = addressHash(ADDRESS);
+  const invalid = [0, -5, 1.5, "7", "NaN", NaN, Number.MAX_SAFE_INTEGER + 1];
+  for (const raw of invalid) {
+    const db = await freshDb();
+    await addInstance(db, PEER, { name: "Studio" });
+    await addInstance(db, LOCAL, { name: "Home" });
+    await insertClaim(db, `mail_claim_${hash}_${LOCAL}`, { instanceId: LOCAL, instanceName: "Home", claimedAt: raw });
+    await insertClaim(db, `mail_claim_${hash}_${PEER}`, { instanceId: PEER, instanceName: "Studio", claimedAt: 2_000 });
+
+    const claims = await listClaims(db, ADDRESS);
+    const home = claims.find((c) => c.instanceId === LOCAL);
+    assert.equal(home.claimedAt, null, `${String(raw)} is not a claimedAt`);
+    assert.equal(claims[claims.length - 1].instanceId, LOCAL, `a null claimedAt from ${String(raw)} sorts last`);
+    assert.equal(
+      pickClaimWinner(claims, { liveInstanceIds: new Set([LOCAL, PEER]) }).instanceId,
+      PEER,
+      `${String(raw)} never beats a real time`,
+    );
+  }
+
+  const db = await freshDb();
+  await insertClaim(db, `mail_claim_${hash}_${LOCAL}`, { instanceId: LOCAL, instanceName: "Home", claimedAt: 1_700_000_000_000 });
+  assert.equal((await listClaims(db, ADDRESS))[0].claimedAt, 1_700_000_000_000);
+});
+
 test("a claim from a revoked or absent instance is ignored and the next claim wins", async () => {
   const db = await freshDb();
   await addInstance(db, PEER, { name: "Studio", status: "revoked" });

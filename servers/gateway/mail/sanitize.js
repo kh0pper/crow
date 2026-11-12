@@ -78,8 +78,12 @@ const NON_TEXT_TAGS = [
 /** Control characters in a URL value: strippable, never part of a scheme. */
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
 
-/** Everything a browser ignores before reading a URL scheme (char codes 32 and below). */
-const URL_BLANKS = /[\x00-\x20]+/g;
+/**
+ * Any byte a browser stops at when it reads a URL scheme, space included. A browser strips tab, CR
+ * and LF inside a URL but keeps a space, so `h ttps://x/...` is a relative path with a space in it,
+ * not the remote URL it looks like: no kept URL may carry one.
+ */
+const INNER_BLANK = /[\x00-\x20]/;
 
 /** An absolute http(s) URL: a scheme, then `//`, then at least one more character. */
 const ABSOLUTE_HTTP = /^https?:\/\/./i;
@@ -104,28 +108,29 @@ function cleanUrl(value) {
 }
 
 /**
- * The lower-cased scheme of `url`, or null when it has none — matching what a browser reads, so
- * `java\tscript:` names `javascript` and `//host/path` names nothing at all.
+ * The lower-cased scheme of `url`, or null when it has none. Control characters were already removed
+ * by `cleanUrl`, so `java\tscript:` names `javascript` and `//host/path` names nothing at all.
  */
 function schemeOf(url) {
-  const match = /^([a-z][a-z0-9+.-]*):/i.exec(url.replace(URL_BLANKS, ""));
+  const match = /^([a-z][a-z0-9+.-]*):/i.exec(url);
   return match ? match[1].toLowerCase() : null;
 }
 
 /**
  * The href a kept link gets: an absolute http(s) URL or a `mailto:`/`tel:` with something after the
  * colon. Everything else — `javascript:`, `data:`, an unknown scheme, a relative path and a
- * protocol-relative `//host` — answers null and the href is dropped, leaving the link's text.
+ * protocol-relative `//host` — answers null and the href is dropped, leaving the link's text. A URL
+ * with any blank byte left inside its trimmed value answers null too, so `h ttps://x/...` and
+ * `mail to:x` reach neither a browser's scheme reader nor a same-origin relative fetch.
  */
 function safeHref(value) {
   if (typeof value !== "string") return null;
   const url = cleanUrl(value);
-  if (url === "") return null;
+  if (url === "" || INNER_BLANK.test(url)) return null;
   const scheme = schemeOf(url);
   if (scheme === null || !ALLOWED_SCHEMES.includes(scheme)) return null;
-  const compact = url.replace(URL_BLANKS, "");
-  if (scheme === "http" || scheme === "https") return ABSOLUTE_HTTP.test(compact) ? url : null;
-  return compact.length > scheme.length + 1 ? url : null;
+  if (scheme === "http" || scheme === "https") return ABSOLUTE_HTTP.test(url) ? url : null;
+  return url.length > scheme.length + 1 ? url : null;
 }
 
 /**
@@ -137,14 +142,16 @@ function imageSrcPolicy(value, allowRemoteImages) {
   if (typeof value !== "string") return "drop";
   const url = cleanUrl(value);
   if (url === "") return "drop";
-  const compact = url.replace(URL_BLANKS, "");
+  // A blank byte inside the URL makes it a relative path to a browser (`ht tps://x/a.png`), so it is
+  // not the remote image this policy could show: dropped, and not counted as one.
+  if (INNER_BLANK.test(url)) return "drop";
   // A protocol-relative reference is remote: it fetches from a host, over http or https, and it is
   // never the https URL this policy would show.
-  if (/^[/\\]{2}/.test(compact)) return "block";
+  if (/^[/\\]{2}/.test(url)) return "block";
   const scheme = schemeOf(url);
   if (scheme === "cid" || scheme === "data") return "drop";
   if (scheme === "http") return "block";
-  if (scheme === "https") return allowRemoteImages && ABSOLUTE_HTTP.test(compact) ? "show" : "block";
+  if (scheme === "https") return allowRemoteImages && ABSOLUTE_HTTP.test(url) ? "show" : "block";
   return "drop";
 }
 
@@ -179,6 +186,8 @@ function optionsFor(counts, allowRemoteImages) {
       img: (tagName, attribs) => {
         // Built from scratch, so every attribute the sender wrote — including a `data-crow-blocked`
         // it planted to look like a blocked image — is forgotten. Only this function marks images.
+        // An image whose src is dropped comes out as an empty `<img />` (no marker, not counted):
+        // that is intended, and plan 2 counts blocked images via the marker.
         const policy = imageSrcPolicy(attribs.src, allowRemoteImages);
         const out = {};
         if (policy === "show") out.src = cleanUrl(attribs.src);
