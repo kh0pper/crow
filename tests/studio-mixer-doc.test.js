@@ -885,8 +885,14 @@ test("an amp insert needs a capture of kind nam", (t) => {
   assert.deepEqual(snapshot(s.doc).inserts, {}, "a refused amp wrote nothing");
 
   // The amp itself: the capture it was given, no cabinet yet, and the three
-  // numbers at the table's defaults.
-  const added = addInsert(s.doc, trackOwner(track), "amp", { id: "amp-1", params: { model_id: "cap-a" } });
+  // numbers at the table's defaults. The operator adds it, so it is live and
+  // theirs rather than an agent's.
+  const added = runCommand(
+    s.doc,
+    "insert.add",
+    { id: "amp-1", owner: trackOwner(track), kind: "amp", params: { model_id: "cap-a" } },
+    { author: HUMAN },
+  );
   assert.equal(added.summary, "Added an amp to Guitar");
   const insert = snapshot(s.doc).inserts["amp-1"];
   assert.deepEqual(insert, {
@@ -1039,11 +1045,14 @@ test("a proposed amp counts against the song's amp cap", (t) => {
   const s = studio(t);
   const first = addTrack(s.doc, "Guitar 1");
   const second = addTrack(s.doc, "Guitar 2");
+  const third = addTrack(s.doc, "Guitar 3");
   addLibraryFile(s.doc, "cap-a", "nam");
 
   // Fifteen amps: seven on one chain and eight on the other, which is the chain
   // cap exactly. The sixteenth is an agent's second amp on the first chain, so
   // it is a proposal — and a proposal holds a library reference, so it counts.
+  // The seventeenth goes on an empty third chain, so it is the song's cap that
+  // refuses it and not a chain's.
   const addAmp = (owner, id) =>
     runCommand(s.doc, "insert.add", { id, owner, kind: "amp", params: { model_id: "cap-a" } }, { author: HUMAN });
   let made = 0;
@@ -1067,7 +1076,7 @@ test("a proposed amp counts against the song's amp cap", (t) => {
   assert.equal(snapshot(s.doc).inserts["amp-proposed"].proposed, true);
 
   const over = refuses(
-    () => addAmp(trackOwner(second), "amp-16"),
+    () => addAmp(trackOwner(third), "amp-16"),
     "limit",
   );
   assert.equal(over.message, "A song holds at most 16 amp inserts.");

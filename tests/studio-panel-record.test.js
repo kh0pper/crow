@@ -1378,6 +1378,10 @@ test("a take this device already holds keeps the offset it was recorded with", a
   const recorder = await startFakeRecording(ui, 48000);
   recorder.chunk(new Uint8Array(64).buffer, 0, 0);
   await ui.settle();
+  // The take reaches this device (and is begun) only once the recorder reports
+  // its end, the way `recordedOffset` does it.
+  recorder.done({ segments: [{ segment: 0, start_frame: 48000, frames: 48000 }], frames: 48000, start_frame: 48000 });
+  await ui.settle(24);
   const armed = begins(ui).find((body) => body.clip_id !== "c-earlier");
   assert.ok(armed, "the new take was begun");
   assert.equal(armed.offset_frames, 3408 + framesOf(1.5), "and carries the round trip and the engine's delay");
