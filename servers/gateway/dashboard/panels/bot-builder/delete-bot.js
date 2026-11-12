@@ -28,6 +28,14 @@
  *     (via device-store helpers — devices are a JSON blob in
  *     dashboard_settings, never raw SQL)
  * The workspace directory on disk is deliberately KEPT (user data).
+ *
+ * The bot's git key (per-bot git access, C5) is the one on-disk thing that is
+ * removed: a key dir under the instance's 0700 secrets dir belongs to a bot id
+ * that is about to stop existing, so leaving it would be a live credential for
+ * nothing. Its fingerprint goes back on the redirect, so the owner is told
+ * which deploy key to take off the forge. A failed removal never fails the
+ * delete (the bot is gone either way): the redirect names the leftover folder
+ * instead, and the next boot sweep (post-listen.js) tries again.
  */
 
 import { escapeHtml, section, callout } from "../../shared/components.js";
@@ -36,6 +44,18 @@ import { t, fill } from "../../shared/i18n.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
 import { isVoiceBotId } from "../../../../shared/voice-bot.js";
+import { isFingerprint } from "../../../../shared/bot-git/host-keys.js";
+import { botGitDirReal } from "../../../../shared/bot-git/paths.js";
+import { botKeyStatus, removeBotKey } from "../../../../shared/bot-git/store.js";
+
+// One seam, for the two key-store calls the delete path makes: a test needs to
+// prove the handler survives a removal that throws, without planting a real
+// failure under the secrets dir.
+let keyStore = { botKeyStatus, removeBotKey };
+/** TEST ONLY: replace the key-store calls. null restores the real store. */
+export function _setBotGitStoreForTest(store) {
+  keyStore = store && typeof store === "object" ? store : { botKeyStatus, removeBotKey };
+}
 
 async function count(db, sql, args) {
   try {
@@ -79,7 +99,9 @@ export async function deleteBlastRadius(db, botId) {
     messages = await count(db, "SELECT COUNT(*) AS n FROM messages WHERE contact_id=?", [contactId]);
     groupMemberships = await count(db, "SELECT COUNT(*) AS n FROM contact_group_members WHERE contact_id=?", [contactId]);
   }
-  return { sessions, liveSessions, acl, invites, seen, boundDevices, messages, groupMemberships };
+  let gitKey = false;
+  try { gitKey = keyStore.botKeyStatus(botId).on === true; } catch { gitKey = false; }
+  return { sessions, liveSessions, acl, invites, seen, boundDevices, messages, groupMemberships, gitKey };
 }
 
 /** GET ?bot=<id>&confirm_delete=1 — the confirmation page. */
@@ -103,6 +125,7 @@ export async function renderDeleteConfirm(req, res, { db, layout, lang, PAGE_CSS
     (br.messages || br.groupMemberships)
       ? li(fill(t("botbuilder.delRadiusConversation", lang), { n: br.messages, g: br.groupMemberships }))
       : "",
+    br.gitKey ? li(t("botbuilder.delRadiusGitKey", lang)) : "",
     li(t("botbuilder.delRadiusWorkspaceKept", lang)),
   ].filter(Boolean).join("");
 
@@ -131,8 +154,19 @@ export async function renderDeleteConfirm(req, res, { db, layout, lang, PAGE_CSS
   }));
 }
 
+/**
+ * The warning for a key folder that outlived its bot: the real path when it can
+ * be named, and the plain folder name otherwise. Never a filesystem error — the
+ * owner needs the folder, not the errno.
+ */
+function keyLeftoverText(lang, botId) {
+  let path = "";
+  try { path = botGitDirReal(botId) || ""; } catch { path = ""; }
+  return fill(t("botbuilder.delGitKeyWarn", lang), { path: path || "bot-git/" + botId });
+}
+
 /** POST action="delete_confirm" — PRG. Returns the redirect via res. */
-export async function handleDeleteConfirm(req, res, { db }) {
+export async function handleDeleteConfirm(req, res, { db, lang = "en" } = {}) {
   const b = req.body || {};
   const botId = (b.bot_id || "").trim();
   if (!botId) return res.redirectAfterPost("/dashboard/bot-builder");
@@ -193,6 +227,29 @@ export async function handleDeleteConfirm(req, res, { db }) {
     return res.redirectAfterPost(
       `/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=review&error=` + encodeURIComponent(String(e.message || e)));
   }
+
+  // The bot's git key (C5). The def row is gone, so no spawn can use the key
+  // any more; removing it here lets the owner take the deploy key off the forge
+  // in the same breath. A removal that fails (or throws) must not fail the
+  // delete: the bot is deleted either way, the redirect names the leftover
+  // folder, and the next boot sweep retries.
+  let gitFp = null;
+  let gitWarn = null;
+  let gitKeyOn = false;
+  try { gitKeyOn = keyStore.botKeyStatus(botId).on === true; } catch { gitKeyOn = false; }
+  try {
+    const g = keyStore.removeBotKey(botId);
+    if (g && g.removed === true) {
+      if (isFingerprint(g.fingerprint)) gitFp = g.fingerprint;
+    } else if (gitKeyOn) {
+      gitWarn = keyLeftoverText(lang, botId);
+    }
+  } catch {
+    gitWarn = keyLeftoverText(lang, botId);
+  }
+
   emitBotDefsChanged(botId);
-  return res.redirectAfterPost(`/dashboard/bot-builder?deleted=${encodeURIComponent(botId)}`);
+  return res.redirectAfterPost(`/dashboard/bot-builder?deleted=${encodeURIComponent(botId)}` +
+    (gitFp ? `&git_fp=${encodeURIComponent(gitFp)}` : "") +
+    (gitWarn ? `&warn=${encodeURIComponent(gitWarn)}` : ""));
 }

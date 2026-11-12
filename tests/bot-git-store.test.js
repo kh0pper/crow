@@ -22,8 +22,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync,
-  utimesSync, writeFileSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync,
+  symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -401,6 +401,39 @@ test("generateBotKey refuses a second key, and removeBotKey returns the fingerpr
   assert.deepEqual(S.removeBotKey(".."), { removed: false, fingerprint: null });
 });
 
+test("generateBotKey replaces a key dir made for ANOTHER bot row, and only that one (C5 create guard)", () => {
+  const id = "stale-guard";
+  const rowAt = "2026-01-01 00:00:00";
+  const recreatedAt = "2026-02-02 00:00:00";
+  generate(id, rowAt);
+
+  // Same row timestamp: this IS the bot's key — never replaced, the owner's
+  // deploy key on the forge is the old public half.
+  assert.throws(() => generate(id, rowAt), /already exists/);
+  assert.equal(S.botKeyStatus(id).on, true);
+  assert.equal(JSON.parse(readFileSync(join(keyDir(id), "meta.json"), "utf8")).created_at, rowAt);
+
+  // A recreated bot with the same recycled id: the leftover dir carries another
+  // row's created_at, so no spawn would use it (the spawn side refuses the
+  // mismatch on its own) — it is housekeeping, and it is replaced.
+  generate(id, recreatedAt);
+  const meta = JSON.parse(readFileSync(join(keyDir(id), "meta.json"), "utf8"));
+  assert.equal(meta.created_at, recreatedAt, "the stale dir was replaced with one for THIS row");
+  assert.equal(meta.bot_id, id);
+  assert.equal(S.botKeyStatus(id).on, true);
+
+  // A caller with no row timestamp has nothing to compare, so freshness cannot
+  // be established and the plain refusal stays (fail closed).
+  assert.throws(() => generate(id, null), /already exists/);
+  assert.throws(() => generate(id, ""), /already exists/);
+
+  // A key dir with no usable meta.json belongs to no row at all, so it is stale
+  // for a caller that does know its row.
+  rmSync(join(keyDir(id), "meta.json"));
+  generate(id, "2026-03-03 00:00:00");
+  assert.equal(JSON.parse(readFileSync(join(keyDir(id), "meta.json"), "utf8")).created_at, "2026-03-03 00:00:00");
+});
+
 test("a failing keygen leaves no key dir and no temp dir, and echoes no stderr", () => {
   const id = "failbot1";
   const root = botGitRoot();
@@ -450,6 +483,53 @@ test("sweepOrphanKeys: removes unowned key dirs and stale temps only", () => {
   assert.deepEqual(S.sweepOrphanKeys(null), [], "not an array: nothing is removed");
   assert.deepEqual(S.sweepOrphanKeys(undefined), []);
   assert.equal(existsSync(join(root, "sweep-a")), true);
+});
+
+test("runBotGitOrphanSweep (boot): a DB error or a bad row shape removes nothing; a real list sweeps", async () => {
+  const { runBotGitOrphanSweep } = await import("../servers/gateway/boot/post-listen.js");
+  generate("boot-kept");
+  const keptDir = keyDir("boot-kept");
+  assert.equal(existsSync(keptDir), true);
+
+  // The bot list could not be read: an empty read must never mean "no bots
+  // exist", which would delete every key dir on the box.
+  const boom = () => ({ execute: () => { throw new Error("db is down"); } });
+  assert.equal(await runBotGitOrphanSweep(boom), 0);
+  assert.equal(existsSync(keptDir), true, "a failed read removes nothing");
+  assert.equal(await runBotGitOrphanSweep(() => { throw new Error("no db handle"); }), 0);
+  assert.equal(existsSync(keptDir), true, "a factory that throws removes nothing");
+  assert.equal(await runBotGitOrphanSweep(() => ({ execute: async () => ({ rows: "nope" }), close() {} })), 0);
+  assert.equal(existsSync(keptDir), true, "a shape we do not understand removes nothing");
+
+  // A successful read sweeps: everything this scratch home lists as live stays,
+  // and the one id the DB does not know is removed.
+  const root = botGitRoot();
+  const live = readdirSync(root, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !e.name.startsWith(".tmp-") && e.name !== "boot-kept" && P.isValidGitBotId(e.name))
+    .map((e) => e.name);
+  const removed = await runBotGitOrphanSweep(() => ({
+    execute: async () => ({ rows: live.map((bot_id) => ({ bot_id })) }),
+    close() {},
+  }));
+  assert.equal(removed, 1);
+  assert.equal(existsSync(keptDir), false, "an orphan key dir is removed once the bot list is known");
+  const otherDirs = readdirSync(root, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !e.name.startsWith(".tmp-") && P.isValidGitBotId(e.name))
+    .map((e) => e.name);
+  assert.deepEqual(otherDirs.sort(), [...live].sort(), "a live bot's key dir is never touched");
+
+  // An instance that never turned git on has no key store: nothing is swept,
+  // and the sweep does not create the secrets dir (or its anchor) just to look.
+  const emptyHome = mkdtempSync(join(tmpdir(), "bot-git-empty-"));
+  dirs.push(emptyHome);
+  const prevHome = process.env.CROW_HOME;
+  process.env.CROW_HOME = emptyHome;
+  try {
+    assert.equal(await runBotGitOrphanSweep(() => ({ execute: async () => ({ rows: [] }), close() {} })), 0);
+    assert.equal(existsSync(join(emptyHome, "secrets")), false, "no secrets dir is created by the sweep");
+  } finally {
+    process.env.CROW_HOME = prevHome;
+  }
 });
 
 test("a symlink at bot-git/<id> is refused by every function and nothing outside is touched", () => {

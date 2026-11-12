@@ -20,6 +20,7 @@ import { startScheduler } from "../scheduler.js";
 import { createDbClient } from "../../db.js";
 import { tasksDbPath as instanceTasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { upgradeLocalMarksAtBoot } from "./admin-api.js";
 
 // QW1 (Crow Messages usability arc, Phase 0): a gateway started with
@@ -58,6 +59,58 @@ export async function runCrossHostAuditPrune(dbFactory = createDbClient) {
   } catch (err) {
     console.warn("[xhost-audit-retention] cycle error:", err?.message || err);
     return { deleted: 0, checkpointed: false };
+  }
+}
+
+/**
+ * One bot-git key orphan sweep (per-bot git access, C5): a key dir under
+ * `<secrets>/bot-git/` whose bot id no longer exists in pi_bot_defs is removed,
+ * together with `.tmp-*` dirs a crashed generator left behind (store.js
+ * sweepOrphanKeys). This is how a delete whose key removal failed gets retried:
+ * the owner is told the next restart tries again.
+ *
+ * The DB read comes FIRST and the sweep runs only when it SUCCEEDED: an empty or
+ * failed read must never be read as "no bots exist", which would delete every
+ * key dir on the box. Opens a fresh db client via the injected factory
+ * (defaults to createDbClient) and always closes it. NEVER throws — this runs
+ * fire-and-forget from the boot path.
+ *
+ * @param {() => {execute: Function, close?: Function}} [dbFactory]
+ * @returns {Promise<number>} key dirs removed
+ */
+export async function runBotGitOrphanSweep(dbFactory = createDbClient) {
+  let ids;
+  try {
+    const db = dbFactory();
+    try {
+      const r = await db.execute({ sql: "SELECT bot_id FROM pi_bot_defs", args: [] });
+      if (!r || !Array.isArray(r.rows)) {
+        console.warn("[bot-git] orphan sweep skipped: the bot list came back in an unexpected shape");
+        return 0;
+      }
+      ids = r.rows.map((row) => (row ? row.bot_id : null)).filter((id) => typeof id === "string" && id);
+    } finally {
+      try { db.close?.(); } catch {}
+    }
+  } catch (err) {
+    console.warn("[bot-git] orphan sweep skipped: the bot list could not be read:", err?.message || err);
+    return 0;
+  }
+  try {
+    const { BOT_GIT_DIRNAME } = await import("../../shared/bot-git/paths.js");
+    const { secretsDir } = await import("../../shared/secret-values.js");
+    // Look BEFORE anchoring: anchoring creates the secrets dir, keeps an fd open
+    // and runs the ancestors judgement, and an instance that never turned git
+    // on has no key store to sweep (and should not get that side effect from a
+    // sweep). The check is only about whether there is work to do.
+    if (!existsSync(join(secretsDir(), BOT_GIT_DIRNAME))) return 0;
+    const { sweepOrphanKeys } = await import("../../shared/bot-git/store.js");
+    const removed = sweepOrphanKeys(ids);
+    if (removed.length > 0) console.log(`[bot-git] removed ${removed.length} orphan key dir(s)`);
+    return removed.length;
+  } catch (err) {
+    console.warn("[bot-git] orphan sweep failed:", err?.message || err);
+    return 0;
   }
 }
 
@@ -914,6 +967,16 @@ export async function runPostListenSetup(server, app, deps) {
     }, XHOST_AUDIT_PRUNE_BOOT_DELAY_MS).unref();
 
     console.log("[xhost-audit-retention] armed (24h interval, first run in 5 min)");
+  }
+
+  // Bot git key orphan sweep (per-bot git access, C5): remove key dirs for bots
+  // that no longer exist, so a delete whose key removal failed is retried on the
+  // next boot (the owner's warning says so) and a recreated id never inherits a
+  // dead key dir's fingerprint. Once per boot, a minute in, unref'd; the sweep
+  // never throws and only runs after a successful bot-list read.
+  {
+    const BOT_GIT_SWEEP_DELAY_MS = 60 * 1000;   // 1 min
+    setTimeout(() => { runBotGitOrphanSweep(createDbClient); }, BOT_GIT_SWEEP_DELAY_MS).unref();
   }
 
   // Version history sweep (the version history design, Task 4): redact

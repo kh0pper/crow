@@ -15,6 +15,7 @@ import { renderBotEditor } from "./bot-builder/editor.js";
 import { renderBotList } from "./bot-builder/html.js";
 import { renderWizard } from "./bot-builder/wizard.js";
 import { renderDeleteConfirm } from "./bot-builder/delete-bot.js";
+import { isFingerprint } from "../../../shared/bot-git/host-keys.js";
 import { renderVoiceBotEditor, VOICE_ERROR_KEYS } from "./bot-builder/voice-bot-editor.js";
 import { isVoiceBotId } from "../../../shared/voice-bot.js";
 
@@ -26,6 +27,30 @@ const ERROR_KEYS = {
   voice_bot_readonly: "botbuilder.voiceBotReadonly",
   voice_bot_permanent: "botbuilder.voiceBotPermanent",
   ...VOICE_ERROR_KEYS,
+  // Per-bot git access (Safety tab): git-access.js redirects the refusal as a
+  // fixed code (never a filesystem message), and each code is the SAME sentence
+  // the Git access card shows for that state — one wording, two places.
+  git_owner_only: "botbuilder.gitOwnerOnly",
+  git_no_bwrap: "botbuilder.gitNoBwrap",
+  git_no_pidns: "botbuilder.gitNoPidns",
+  git_old_bwrap: "botbuilder.gitOldBwrap",
+  git_policy: "botbuilder.gitPolicy",
+  git_no_tools: "botbuilder.gitNoTools",
+  git_bad_path: "botbuilder.gitBadPath",
+  git_contained: "botbuilder.gitContained",
+  git_already_on: "botbuilder.gitAlreadyOn",
+  git_key_failed: "botbuilder.gitKeyFailed",
+  git_off_failed: "botbuilder.gitOffFailed",
+  git_unsupported: "botbuilder.gitUnsupported",
+  // The host-confirm and connection-test refusals (C3, C4). Same rule: a fixed
+  // code, never a filesystem or ssh message.
+  git_host_invalid: "botbuilder.gitHostInvalid",
+  git_host_pinned: "botbuilder.gitHostPinnedErr",
+  git_scan_empty: "botbuilder.gitScanEmpty",
+  git_scan_stale: "botbuilder.gitScanStale",
+  git_host_failed: "botbuilder.gitHostFailed",
+  git_not_on: "botbuilder.gitNotOn",
+  git_test_invalid: "botbuilder.gitTestInvalid",
 };
 
 // C4 Task 8: q.error="engine_required" / q.warn="bot_runtime_off" are the
@@ -58,6 +83,19 @@ function botRuntimeOffBanner(lang) {
 function warnValues(raw) {
   if (raw == null) return [];
   return (Array.isArray(raw) ? raw : [raw]).map(String).filter(Boolean);
+}
+
+/**
+ * The deleted notice's git half (per-bot git access, C5): the delete handler
+ * passes the removed key's fingerprint, so the owner is told on the same page
+ * which deploy key to take off the forge. Only the exact `SHA256:` fingerprint
+ * shape is rendered — anything else in the query string is dropped instead of
+ * printed.
+ */
+function deletedGitNote(q, lang) {
+  const fp = isFingerprint(q && q.git_fp) ? q.git_fp : null;
+  if (!fp) return "";
+  return " " + escapeHtml(fill(t("botbuilder.delGitKeyNotice", lang), { fp }));
 }
 
 export default {
@@ -98,7 +136,7 @@ export default {
     // ?created= renders as the review tab's callout (editor.js), not here —
     // both messages stacked read as a double banner (PR #191 review m2).
     const baseNotice = q.saved ? `<p class="btb-notice-ok" role="status">${escapeHtml(t("botbuilder.noticeSaved", lang))}</p>`
-      : q.deleted ? `<p class="btb-notice-ok" role="status">${escapeHtml(fill(t("botbuilder.noticeDeleted", lang), { id: String(q.deleted) }))}</p>`
+      : q.deleted ? `<p class="btb-notice-ok" role="status">${escapeHtml(fill(t("botbuilder.noticeDeleted", lang), { id: String(q.deleted) }))}${deletedGitNote(q, lang)}</p>`
       : q.error === "engine_required" ? engineRequiredBanner(lang)
       : typeof q.error === "string" && Object.hasOwn(ERROR_KEYS, q.error) ? `<p class="btb-notice-err">${escapeHtml(t(ERROR_KEYS[q.error], lang))}</p>`
       : q.error ? `<p class="btb-notice-err">${escapeHtml(String(q.error))}</p>` : "";

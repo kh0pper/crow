@@ -9,15 +9,20 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const dir = mkdtempSync(join(tmpdir(), "btb-checklist-del-"));
 process.env.CROW_DATA_DIR = dir;
+// The git key store lives under <CROW_HOME>/secrets (never the data dir), so
+// the delete-with-a-key cases below need a scratch home of their own — the real
+// one is off limits.
+process.env.CROW_HOME = dir;
 
 let db = null;
-let renderReadiness, deleteBlastRadius, handleDeleteConfirm, renderDeleteConfirm;
+let renderReadiness, deleteBlastRadius, handleDeleteConfirm, renderDeleteConfirm, _setBotGitStoreForTest;
+let S = null;
 let translations = null;
 let _setEngineStatusForTest, _setBotRuntimeStatusForTest, writeSetting;
 
@@ -36,8 +41,9 @@ before(async () => {
   const { loadOrCreateIdentity } = await import("../servers/sharing/identity.js");
   loadOrCreateIdentity("");
   ({ renderReadiness } = await import("../servers/gateway/dashboard/panels/bot-builder/checklist.js"));
-  ({ deleteBlastRadius, handleDeleteConfirm, renderDeleteConfirm } =
+  ({ deleteBlastRadius, handleDeleteConfirm, renderDeleteConfirm, _setBotGitStoreForTest } =
     await import("../servers/gateway/dashboard/panels/bot-builder/delete-bot.js"));
+  S = await import("../servers/shared/bot-git/store.js");
   ({ translations } = await import("../servers/gateway/dashboard/shared/i18n.js"));
   ({ _setEngineStatusForTest, _setBotRuntimeStatusForTest } =
     await import("../servers/gateway/dashboard/panels/bot-builder/engine-gate.js"));
@@ -389,6 +395,100 @@ test("delete_confirm on an unknown bot: error redirect, nothing thrown", async (
   const res = mkRes();
   await handleDeleteConfirm({ body: { action: "delete_confirm", bot_id: "never-was" } }, res, { db });
   assert.match(res.redirected, /error=unknown_bot/);
+});
+
+// ---- git key removal on delete (per-bot git access, C5) ----
+
+/** A public-key blob shaped the way ssh writes one: <len><type><len><bytes>. */
+function syntheticKey(type, fillByte = 0x5a) {
+  const label = Buffer.from(type, "latin1");
+  const body = Buffer.alloc(32, fillByte);
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(label.length);
+  const blen = Buffer.alloc(4);
+  blen.writeUInt32BE(body.length);
+  return Buffer.concat([len, label, blen, body]).toString("base64");
+}
+
+// Built at runtime: a tracked file must never spell a private-key header.
+const PEM_BEGIN = "-----BEGIN " + "OPENSSH " + "PRIVATE" + " KEY-----";
+const PEM_END = "-----END " + "OPENSSH " + "PRIVATE" + " KEY-----";
+const KEY_BODY = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB";
+
+/** A stand-in with ssh-keygen's contract: writes `<f>` and `<f>.pub`. */
+function stubKeygen(_cmd, args) {
+  const f = args[args.indexOf("-f") + 1];
+  writeFileSync(f, `${PEM_BEGIN}\n${KEY_BODY}\n${KEY_BODY}\n${PEM_END}\n`, { mode: 0o600 });
+  writeFileSync(f + ".pub", "ssh-ed25519 " + syntheticKey("ssh-ed25519") + " crow-bot:test\n", { mode: 0o600 });
+}
+
+const gitKeyDir = (botId) => join(dir, "secrets", "bot-git", botId);
+/** A key dir of the real shape, without needing ssh-keygen on this host. */
+function fabricateKey(botId) {
+  return S.generateBotKey({ botId, createdAt: "2026-11-12 00:00:00", execFileImpl: stubKeygen });
+}
+
+test("blast radius and the confirm page name the git key when the bot has one", async () => {
+  await seedBot("git-radius-bot");
+  fabricateKey("git-radius-bot");
+  const br = await deleteBlastRadius(db, "git-radius-bot");
+  assert.equal(br.gitKey, true, "the radius says a key is about to go");
+
+  const bot = (await db.execute({ sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE bot_id='git-radius-bot'", args: [] })).rows[0];
+  const res = mkRes();
+  await renderDeleteConfirm({ headers: {}, query: {} }, res, { db, layout: ({ content }) => content, lang: "en", PAGE_CSS: "", bot });
+  assert.ok(res.html.includes(translations["botbuilder.delRadiusGitKey"].en), "the confirm page says the key goes too");
+
+  // A bot without a key never claims one.
+  const plain = await deleteBlastRadius(db, "plain-bot");
+  assert.equal(plain.gitKey, false);
+});
+
+test("delete_confirm removes the bot's git key dir and reports its fingerprint", async () => {
+  await seedBot("git-doomed");
+  const made = fabricateKey("git-doomed");
+  assert.equal(S.botKeyStatus("git-doomed").on, true, "the fixture key is usable");
+
+  const res = mkRes();
+  await handleDeleteConfirm({ body: { action: "delete_confirm", bot_id: "git-doomed" } }, res, { db });
+  assert.match(res.redirected, /deleted=git-doomed/);
+  assert.ok(res.redirected.includes("git_fp=" + encodeURIComponent(made.fingerprint)),
+    "the owner is told which deploy key to take off the forge: " + res.redirected);
+  assert.ok(!res.redirected.includes("warn="), "no warning when the removal worked");
+  assert.equal(existsSync(gitKeyDir("git-doomed")), false, "the key dir is gone");
+});
+
+test("delete_confirm without a git key adds neither git_fp nor a warning", async () => {
+  await seedBot("git-nokey");
+  const res = mkRes();
+  await handleDeleteConfirm({ body: { action: "delete_confirm", bot_id: "git-nokey" } }, res, { db });
+  assert.match(res.redirected, /deleted=git-nokey/);
+  assert.ok(!res.redirected.includes("git_fp="), res.redirected);
+  assert.ok(!res.redirected.includes("warn="), res.redirected);
+});
+
+test("delete_confirm survives a key-removal failure: the bot is gone, the folder is named, no git_fp", async () => {
+  await seedBot("git-stuck");
+  fabricateKey("git-stuck");
+  _setBotGitStoreForTest({
+    botKeyStatus: S.botKeyStatus,
+    removeBotKey: () => { throw new Error("EACCES: permission denied"); },
+  });
+  try {
+    const res = mkRes();
+    await handleDeleteConfirm({ body: { action: "delete_confirm", bot_id: "git-stuck" } }, res, { db });
+    assert.match(res.redirected, /deleted=git-stuck/);
+    assert.equal(await countIn("pi_bot_defs", "git-stuck"), 0, "the bot is still deleted");
+    const readable = decodeURIComponent(res.redirected);
+    assert.ok(readable.includes("warn="), readable);
+    assert.ok(readable.includes("bot-git/git-stuck"), "the warning names the folder to delete by hand: " + readable);
+    assert.ok(!readable.includes("EACCES"), "never the filesystem error");
+    assert.ok(!res.redirected.includes("git_fp="), "no fingerprint for a key that was not removed");
+  } finally {
+    _setBotGitStoreForTest(null);
+  }
+  assert.equal(existsSync(gitKeyDir("git-stuck")), true, "the leftover folder is left for the owner / the boot sweep");
+  rmSync(gitKeyDir("git-stuck"), { recursive: true, force: true });
 });
 
 // ---- i18n parity for the PR2 keys ----

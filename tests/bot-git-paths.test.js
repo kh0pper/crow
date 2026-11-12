@@ -42,7 +42,7 @@ function fixture({ botGitMode = 0o700, dirMode = 0o700, keyMode = 0o600, key = t
   return { root, secrets, botGit, dir, keyPath };
 }
 
-test("gitAllowedForInstance: the R13 policy switch, fail-closed as shipped", () => {
+test("gitAllowedForInstance: the R13 policy switch, shipped as the operator's ruling", () => {
   const table = { accepted: [true, true, true], "single-bot": [false, true, false] };
   try {
     for (const [policy, want] of Object.entries(table)) {
@@ -53,15 +53,23 @@ test("gitAllowedForInstance: the R13 policy switch, fail-closed as shipped", () 
   } finally {
     P._setGitSharedUidPolicyForTest(null);
   }
-  // The shipped value is the fail-closed one: the operator ACCEPTED R13 for v1
-  // (2026-11-12), and PR C flips this constant to "accepted".
-  assert.equal(P.GIT_SHARED_UID_POLICY, "single-bot");
+  // PR C ships the ACCEPTED value: the operator ruled that the shared uid risk
+  // is acceptable for v1, and the Bot Builder card states it plainly. Under
+  // that policy the enabled-bot count is not consulted at all.
+  assert.equal(P.GIT_SHARED_UID_POLICY, "accepted");
   assert.deepEqual(P.GIT_UID_POLICIES, ["accepted", "single-bot"]);
   assert.equal(P.gitAllowedForInstance({ enabledPiBotCount: 1 }), true);
-  assert.equal(P.gitAllowedForInstance({ enabledPiBotCount: 0 }), false);
-  assert.equal(P.gitAllowedForInstance({ enabledPiBotCount: 2 }), false);
-  assert.equal(P.gitAllowedForInstance({ enabledPiBotCount: "1" }), false, "a string count is not a count");
-  assert.equal(P.gitAllowedForInstance(), false, "no count at all fails closed");
+  assert.equal(P.gitAllowedForInstance({ enabledPiBotCount: 0 }), true, "accepted: the count does not gate it");
+  assert.equal(P.gitAllowedForInstance({ enabledPiBotCount: 2 }), true, "accepted: two bots are allowed");
+  assert.equal(P.gitAllowedForInstance(), true, "accepted: no count at all is still allowed");
+  // The fail-closed value stays reachable (and stays fail-closed) for the switch.
+  try {
+    P._setGitSharedUidPolicyForTest("single-bot");
+    assert.equal(P.gitAllowedForInstance({ enabledPiBotCount: "1" }), false, "a string count is not a count");
+    assert.equal(P.gitAllowedForInstance(), false, "no count at all fails closed");
+  } finally {
+    P._setGitSharedUidPolicyForTest(null);
+  }
 });
 
 test("isValidGitBotId: the engine's charset, no dot names, no separators", () => {

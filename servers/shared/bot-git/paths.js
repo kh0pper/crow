@@ -201,13 +201,14 @@ export function checkKeyDir(dirReal, { uid = process.getuid() } = {}) {
  * Operator ruling on R13 (2026-11-12): two bots run as the same uid, so a bot
  * with a shell can read another bot's key dir through /proc while both are
  * spawned. The operator ACCEPTED that risk for v1: the sandbox's read-only
- * tmpfs is the boundary, not per-bot secrecy. The other value, "single-bot",
- * offers git access only while exactly one pi bot is enabled on this instance.
+ * tmpfs is the boundary, not per-bot secrecy. The Bot Builder's Git access card
+ * states it plainly, and the other value, "single-bot", offers git access only
+ * while exactly one pi bot is enabled on this instance.
  *
- * The shipped constant is still the fail-closed one; the flip to the accepted
- * value ships in PR C, not here.
+ * PR C ships the ACCEPTED value (the ruling). Separate per-bot Linux users are
+ * the queued follow-up; flipping back is this one line.
  */
-export const GIT_SHARED_UID_POLICY = "single-bot";
+export const GIT_SHARED_UID_POLICY = "accepted";
 
 /** The values GIT_SHARED_UID_POLICY may take. */
 export const GIT_UID_POLICIES = Object.freeze(["accepted", "single-bot"]);
