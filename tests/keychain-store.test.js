@@ -144,7 +144,7 @@ test("manual entries; delete; uninstall marks extension entries and a later save
   assert.equal(await K.getEntry(db, m.id), null);
 });
 
-test("REVIEW FOCUS 2 — first view is single-use and expires", async () => {
+test("REVIEW 2 — first view is single-use and expires", async () => {
   const db = freshDb();
   const key = KEY.createKeychainKey({ crowHome: home() });
   const t0 = new Date("2026-10-03T12:00:00Z");
@@ -154,6 +154,94 @@ test("REVIEW FOCUS 2 — first view is single-use and expires", async () => {
   assert.equal(await K.consumeFirstView(db, key, id, { now: new Date(t0.getTime() + 61_000) }), null, "second look refused");
   const late = await K.saveExtensionSecret(db, key, { bundleId: "x", envKey: "Y", label: "L", secret: "tok2", origin: "generated", firstView: true, now: t0 });
   assert.equal(await K.consumeFirstView(db, key, late.id, { now: new Date(t0.getTime() + K.FIRST_VIEW_MS + 1) }), null, "expired after 30 min");
+});
+
+const fvuOf = async (db, id) => (await db.execute({ sql: "SELECT first_view_until FROM crow_keychain WHERE id = ?", args: [id] })).rows[0].first_view_until;
+const fvuAt = (t) => new Date(t.getTime() + K.FIRST_VIEW_MS).toISOString();
+const T0 = new Date("2026-10-03T12:00:00Z");
+const T1 = new Date(T0.getTime() + 10 * 60_000);
+
+test("REVIEW 2 — firstView:true over an EXISTING active row grants a FRESH window (reinstall, re-run first-admin setup)", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  const first = await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: true, now: T0 });
+  assert.equal(await K.consumeFirstView(db, key, first.id, { now: T0 }), "one", "positive control: the first window was live and is now spent");
+  assert.equal(await fvuOf(db, first.id), null);
+
+  const again = await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: true, now: T1 });
+  assert.equal(again.id, first.id);
+  assert.equal(again.created, false, "the row was UPDATEd, never a second row");
+  assert.equal(await fvuOf(db, first.id), fvuAt(T1), "the UPDATE grants its own window, not the column's old (spent) one");
+  assert.deepEqual((await K.pendingFirstViews(db, { now: T1, keyId: key.id })).map((e) => e.id), [first.id], "the fresh window is pending again");
+  assert.equal(await K.consumeFirstView(db, key, first.id, { now: T1 }), "one");
+});
+
+test("REVIEW 2 — firstView:true over an extension_removed row grants a FRESH window too", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  const saved = await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", now: T0 });
+  assert.equal(await K.markBundleRemoved(db, "frigate"), 1);
+  assert.equal((await K.getEntry(db, saved.id)).status, "extension_removed");
+
+  const back = await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: true, now: T1 });
+  assert.equal(back.id, saved.id, "a reinstall reuses the row");
+  assert.equal((await K.getEntry(db, saved.id)).status, "active");
+  assert.equal(await fvuOf(db, saved.id), fvuAt(T1));
+  assert.equal(await K.consumeFirstView(db, key, saved.id, { now: T1 }), "one");
+});
+
+test("REVIEW 2 — firstView:false over an existing row with a live window and a CHANGED value clears it", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  const { id } = await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: true, now: T0 });
+  assert.equal(await fvuOf(db, id), fvuAt(T0));
+
+  await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "two", origin: "generated", firstView: false, now: T1 });
+  assert.equal(await fvuOf(db, id), null, "a new value must not become viewable inside the old value's window");
+  assert.deepEqual(await K.pendingFirstViews(db, { now: T1, keyId: key.id }), []);
+  assert.equal(await K.openEntrySecret(db, key, id), "two");
+});
+
+test("REVIEW 2 — keepFirstView still keeps a LIVE window, and a spent one stays spent", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  const { id } = await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: true, now: T0 });
+  const fvu = await fvuOf(db, id);
+
+  await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: false, keepFirstView: true, now: T1 });
+  assert.equal(await fvuOf(db, id), fvu, "the live window survives a re-save of the same value");
+
+  assert.equal(await K.consumeFirstView(db, key, id, { now: T1 }), "one");
+  await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: false, keepFirstView: true, now: T1 });
+  assert.equal(await fvuOf(db, id), null, "the keep copies the CURRENT value: a spent window is not re-granted");
+});
+
+test("REVIEW 2 — the keep is PINNED to the row it was decided on: a value replaced between the read and the UPDATE is not kept", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  const SB = await import("../servers/sharing/secret-box.js");
+  const { id } = await K.saveExtensionSecret(db, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: true, now: T0 });
+  assert.equal(await fvuOf(db, id), fvuAt(T0));
+
+  // The race: this save judged "same value" against the row it read, and another writer
+  // replaces the value before the UPDATE. The interceptor runs right after the keep's SELECT.
+  let replaced = 0;
+  const racing = {
+    async execute(q) {
+      const out = await db.execute(q);
+      const sql = typeof q === "string" ? q : q.sql;
+      if (/^SELECT id, secret_sealed FROM crow_keychain WHERE kind = 'extension'/.test(sql)) {
+        await db.execute({ sql: "UPDATE crow_keychain SET secret_sealed = ? WHERE id = ?", args: [SB.sealSecret("another writer's value", { seed: key.seed }), id] });
+        replaced++;
+      }
+      return out;
+    },
+    async executeMultiple(sql) { return db.executeMultiple(sql); },
+  };
+
+  await K.saveExtensionSecret(racing, key, { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "L", secret: "one", origin: "generated", firstView: false, keepFirstView: true });
+  assert.equal(replaced, 1, "positive control: the value was replaced between the read and the UPDATE");
+  assert.equal(await fvuOf(db, id), null, "the blob changed, so the window is fvu (null), never a window for a value the keeper never looked at");
 });
 
 test("Export → Import round-trips through a passphrase file; wrong passphrase opens nothing; readable entries are never overwritten", async () => {

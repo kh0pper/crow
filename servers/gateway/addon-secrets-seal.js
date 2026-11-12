@@ -334,8 +334,11 @@ export async function sealEntrySecrets({ bundleId, entry, manifest = null, origi
         firstView: false,
         // KEEP the window only for the same value, and let the UPDATE copy the column's
         // CURRENT value (never a timestamp read above): a consumeFirstView landing between
-        // this read and this write leaves the window spent.
+        // this read and this write leaves the window spent. The keep is PINNED to the row this
+        // read returned (`prior.secret_sealed`): if another writer replaced the value between
+        // that read and the UPDATE, the pin misses and the window is not kept.
         keepFirstView: unchanged,
+        keepFirstViewPinnedTo: unchanged ? prior.secret_sealed : null,
       });
       await d.audit(db, "keychain_save", {
         details: { entry_id: row.id, bundle_id: bundleId, env_key: name, origin, sealed_from: "mcp-addons" },

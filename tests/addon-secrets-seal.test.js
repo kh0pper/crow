@@ -15,6 +15,7 @@ import Database from "better-sqlite3";
 import { KEYCHAIN_DDL } from "../servers/gateway/keychain/schema.js";
 import { createKeychainKey, keychainKeyPath } from "../servers/gateway/keychain/key.js";
 import { saveExtensionSecret } from "../servers/gateway/keychain/store.js";
+import { sealSecret } from "../servers/sharing/secret-box.js";
 import {
   ADDON_KEYS_UNREADABLE, AddonKeysUnavailableError, readAddonSecretsSync,
 } from "../servers/shared/addon-secrets.js";
@@ -299,6 +300,44 @@ test("sealing on: a consumeFirstView racing the re-seal leaves the window spent 
   assert.equal(spent, 1, "positive control: the window was live and spent between the read and the write");
   const row = ctx.raw.prepare("SELECT first_view_until FROM crow_keychain").get();
   assert.equal(row.first_view_until, null, "the seal writes no earlier timestamp back: the value stays shown once");
+});
+
+test("sealing on: a value another writer replaced between the prior-row read and the UPDATE is not kept as unchanged (the keep is pinned)", async (t) => {
+  sealSwitch(t, true);
+  const ctx = scratch();
+  const key = createKeychainKey({ crowHome: ctx.home });
+  await saveExtensionSecret(ctx.wrapper, key, {
+    bundleId: "frigate", envKey: "FRIGATE_PASSWORD", label: "Frigate - admin login",
+    username: "admin", secret: SENTINEL, origin: "generated", firstView: true,
+  });
+  assert.ok(ctx.raw.prepare("SELECT first_view_until FROM crow_keychain").get().first_view_until);
+  const otherWritersBlob = sealSecret(SENTINEL3, { seed: key.seed });
+
+  // The race: the seal reads the prior row and decides "same value" from it; another writer
+  // replaces the value before the UPDATE. The interceptor runs right after the prior-row SELECT.
+  let replaced = 0;
+  const racing = {
+    async execute(q) {
+      const out = await ctx.wrapper.execute(q);
+      const sql = typeof q === "string" ? q : q.sql;
+      if (/FROM crow_keychain WHERE kind = 'extension'/.test(sql) && /LIMIT 1$/.test(sql.trim())) {
+        replaced += ctx.raw.prepare("UPDATE crow_keychain SET secret_sealed = ? WHERE first_view_until IS NOT NULL").run(otherWritersBlob).changes;
+      }
+      return out;
+    },
+    async executeMultiple(sql) { return ctx.wrapper.executeMultiple(sql); },
+  };
+
+  await sealEntrySecrets({
+    bundleId: "frigate",
+    entry: { env: { FRIGATE_PASSWORD: SENTINEL } }, // the SAME value the seal's own read saw
+    manifest: { name: "Frigate", env_vars: [{ name: "FRIGATE_PASSWORD", secret: true }] },
+    deps: { ...depsFor(ctx), db: racing },
+  });
+
+  assert.equal(replaced, 1, "positive control: the value was replaced after the prior-row read");
+  const row = ctx.raw.prepare("SELECT first_view_until FROM crow_keychain").get();
+  assert.equal(row.first_view_until, null, "the pin names the row the seal read: a replaced value is not 'unchanged' and earns no window");
 });
 
 test("sealing on: origin is the caller's, else the manifest's generate kind, else typed", async (t) => {

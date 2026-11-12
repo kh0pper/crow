@@ -176,15 +176,29 @@ export async function saveExtensionSecret(db, key, opts = {}) {
   // concurrent consumeFirstView NULLs between the caller's read and this write therefore
   // stays spent (`first_view_until = first_view_until` copies the CURRENT value: NULL), and
   // a caller may pass it only when the value it writes equals the row's current value (a
-  // NEW value must not become viewable inside an OLD window). Without it the window is
-  // cleared: a fresh save proves nothing about a view grant an earlier value earned.
+  // NEW value must not become viewable inside an OLD window). Without it the window becomes
+  // this write's own: `fvu` is the window a `firstView: true` save just computed (a fresh
+  // save — a reinstall reusing an extension_removed row, a re-run first-admin setup — grants
+  // its own), NULL otherwise.
+  //
+  // The keep is also PINNED to the row it was decided on (`secret_sealed = ?`): the keeper
+  // compared the value it writes against a blob it read earlier, and another writer can
+  // replace that value in between. Sealed blobs carry a random nonce, so an equality match
+  // names exactly the row that was read; a replaced blob turns the keep off and the window
+  // becomes `fvu`, which is what a value the keeper never looked at must get. The pin is the
+  // caller's own blob when it names one (`keepFirstViewPinnedTo`, the seal's read), else the
+  // blob this read returned. NOT pinned: label/username/url/origin — a stale label is
+  // harmless, and this call's metadata is the only one it has to write.
   const keepFirstView = opts.keepFirstView === true;
-  const existing = (await db.execute({ sql: "SELECT id FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ?", args: [bundleId, envKey] })).rows[0];
+  const existing = (await db.execute({ sql: "SELECT id, secret_sealed FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ?", args: [bundleId, envKey] })).rows[0];
   if (existing) {
+    const pinned = typeof opts.keepFirstViewPinnedTo === "string" && opts.keepFirstViewPinnedTo !== ""
+      ? opts.keepFirstViewPinnedTo
+      : existing.secret_sealed;
     await db.execute({
       sql: `UPDATE crow_keychain SET label = ?, username = ?, url = ?, secret_sealed = ?, key_id = ?, origin = ?, status = 'active',
-              first_view_until = CASE WHEN ? THEN first_view_until ELSE NULL END, updated_at = ? WHERE id = ?`,
-      args: [label, username, url, sealed, key.id, opts.origin, keepFirstView ? 1 : 0, ts, existing.id],
+              first_view_until = CASE WHEN ? AND secret_sealed = ? THEN first_view_until ELSE ? END, updated_at = ? WHERE id = ?`,
+      args: [label, username, url, sealed, key.id, opts.origin, keepFirstView ? 1 : 0, pinned ?? null, fvu, ts, existing.id],
     });
     return { id: Number(existing.id), created: false };
   }
