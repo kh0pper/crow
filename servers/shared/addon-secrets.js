@@ -34,6 +34,19 @@ import { KeychainKeyInvalidError, loadKeychainKey } from "../gateway/keychain/ke
 export const ADDON_KEYCHAIN_FIELD = "keychainEnv";
 /** The crow_keychain `kind` an add-on's secret row has (one row per bundle id + env name). */
 export const ADDON_KEY_KIND = "extension";
+/**
+ * The env vars that name an INSTANCE rather than a secret. A `keychainEnv` that lists one is
+ * ignored (keychainEnvNames drops it): the instance value is the one the caller bound the
+ * child to, so a stale keychain copy must never be hydrated over it, and no add-on can point
+ * a bot at another instance by sealing CROW_HOME / CROW_DB_PATH. crow-server-catalog.mjs
+ * re-exports this list as INSTANCE_ENV_KEYS (one list, one meaning).
+ */
+export const INSTANCE_ENV_KEYS = Object.freeze([
+  "CROW_HOME",
+  "CROW_DATA_DIR",
+  "CROW_DB_PATH",
+  "CROW_TASKS_DB_PATH",
+]);
 /** Which copy wins when the boot migration finds both a keychain row and a plain value. */
 export const MIGRATION_ROW_CONFLICT = "file";
 
@@ -196,17 +209,19 @@ export function sealableEnv(env, manifest = null, { listed = [] } = {}) {
  * May this process seal add-on secrets into the keychain at all?
  *
  * Sealing is ON by default; this only answers the two exceptions:
- *   - `CROW_ADDON_SECRETS_KEYCHAIN=0` turns it off (the operator opt-out);
+ *   - `CROW_ADDON_SECRETS_KEYCHAIN` = 0 / false / off / no (trimmed, case-insensitive) turns it
+ *     off (the operator opt-out);
  *   - a split-DB host (the host-default CROW_HOME shared by two gateways with different
  *     CROW_DB_PATH) is OFF: the two gateways would keep keychain rows in different DBs
  *     while both spawn from the same entry, so neither could prove the other's rows.
- * Any other value (unset, "1", a typo) seals.
+ * Any other value (unset, "1", "yes", a typo) seals.
  *
  * Readers never consult this: an entry that already lists names is hydrated either way.
  */
 export function addonSecretsSealingOn(env = process.env) {
   const e = env || {};
-  if (e.CROW_ADDON_SECRETS_KEYCHAIN === "0") return false;
+  const flag = typeof e.CROW_ADDON_SECRETS_KEYCHAIN === "string" ? e.CROW_ADDON_SECRETS_KEYCHAIN.trim().toLowerCase() : e.CROW_ADDON_SECRETS_KEYCHAIN;
+  if (flag === "0" || flag === "false" || flag === "off" || flag === "no") return false;
   if (isDefaultCrowHome(e) && e.CROW_DB_PATH && !sameDbLocation(resolve(e.CROW_DB_PATH), resolveInstanceDataDir(e))) return false;
   return true;
 }
@@ -218,9 +233,10 @@ const MAX_KEYCHAIN_ENV_NAMES = 64;
 
 /**
  * The usable names in an entry's `keychainEnv`: strings shaped like env names, never a
- * loader name, deduped, at most 64. Anything else is dropped with one log line that
- * carries only names (a malformed entry could hold a value in that array, so a string
- * that is not name-shaped is reported as a count, never printed).
+ * loader name, never an INSTANCE key (CROW_HOME & co: the instance value always wins, so a
+ * listed instance name is ignored rather than hydrated), deduped, at most 64. Anything else
+ * is dropped with one log line that carries only names (a malformed entry could hold a value
+ * in that array, so a string that is not name-shaped is reported as a count, never printed).
  */
 export function keychainEnvNames(entry) {
   const raw = entry && Array.isArray(entry[ADDON_KEYCHAIN_FIELD]) ? entry[ADDON_KEYCHAIN_FIELD] : [];
@@ -232,6 +248,7 @@ export function keychainEnvNames(entry) {
     if (typeof name !== "string" || !ENV_NAME_RE.test(name)) { droppedOther++; continue; }
     if (seen.has(name)) continue;
     if (isLoaderEnvName(name)) { seen.add(name); dropped.push(name); continue; }
+    if (INSTANCE_ENV_KEYS.includes(name)) { seen.add(name); dropped.push(name); continue; }
     if (out.length >= MAX_KEYCHAIN_ENV_NAMES) { seen.add(name); dropped.push(name); continue; }
     seen.add(name);
     out.push(name);

@@ -33,7 +33,7 @@ import {
 } from "../shared/addon-secrets.js";
 import { gatewayKeychainPaths } from "./addon-keys-paths.js";
 import { keychainKeyState, loadKeychainKey } from "./keychain/key.js";
-import { countEntries, ensureWriteKey, saveExtensionSecret } from "./keychain/store.js";
+import { countEntries, ensureWriteKey, rowSecretEquals, saveExtensionSecret } from "./keychain/store.js";
 
 // ─── the refusal when the key file is gone but rows depend on it (round 2, item 3) ──
 
@@ -169,16 +169,18 @@ function specMap(manifest) {
 }
 
 /**
- * The ACTIVE extension row this add-on + env name already has, if any — metadata only, the
- * value is never read here. A writer that saved the same secret with more to say about it
- * (first-admin setup: username, address, a one-time first-view window) must not lose that
- * when its value is sealed again through the MCP entry. A home without the table yet is no
- * row: the save below creates it.
+ * The ACTIVE extension row this add-on + env name already has, if any: its metadata (label,
+ * username, address, a first-view window another writer granted) plus the sealed value, which
+ * is used for ONE thing — deciding whether this save writes the SAME value again (rowSecretEquals).
+ * Nothing here returns, logs or audits that value. A writer that saved the same secret with
+ * more to say about it (first-admin setup: username, address, a one-time first-view window)
+ * must not lose the rest when its value is sealed again through the MCP entry. A home without
+ * the table yet is no row: the save below creates it.
  */
 async function priorExtensionRow(db, bundleId, name) {
   try {
     const { rows } = await db.execute({
-      sql: "SELECT label, username, url, first_view_until FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ? AND status = 'active' LIMIT 1",
+      sql: "SELECT label, username, url, origin, key_id, secret_sealed FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ? AND status = 'active' LIMIT 1",
       args: [bundleId, name],
     });
     return (rows && rows[0]) || null;
@@ -309,21 +311,31 @@ export async function sealEntrySecrets({ bundleId, entry, manifest = null, origi
 
     // 6. One row per name, then audit (names and ids only). A row this add-on already had
     // keeps the identity another writer recorded on it (a first-admin login's username, its
-    // address, the one-time first-view window): the same value is pushed into the entry
-    // after that save, so the seal here owns the VALUE and must not erase the rest.
+    // address, its origin, the one-time first-view window) ONLY when this save writes the SAME
+    // value: the same value is pushed into the entry after that save, so the seal here owns the
+    // VALUE and must not erase the rest. For a DIFFERENT (or unreadable) value the row gets
+    // this save's metadata and origin, and its first-view window is cleared — a new value must
+    // not become viewable inside a window an older value earned.
     for (const name of names) {
-      const origin = originFor(name, origins, specs);
       const prior = await priorExtensionRow(db, bundleId, name);
+      const unchanged = rowSecretEquals(prior, key, seal[name]);
+      // The prior row's own provenance survives when the value did not change; a row written
+      // by a first-admin setup is still `generated` after the MCP entry re-seals it.
+      const keptOrigin = unchanged && (prior.origin === "generated" || prior.origin === "typed") ? prior.origin : null;
+      const origin = keptOrigin || originFor(name, origins, specs);
       const row = await saveExtensionSecret(db, key, {
         bundleId,
         envKey: name,
-        label: (prior && prior.label) || `${label} - ${name}`,
-        username: prior ? prior.username : null,
-        url: prior ? prior.url : null,
+        label: (unchanged ? prior.label : null) || `${label} - ${name}`,
+        username: unchanged ? prior.username : null,
+        url: unchanged ? prior.url : null,
         secret: seal[name],
         origin,
         firstView: false,
-        firstViewUntil: prior ? (prior.first_view_until ?? null) : undefined,
+        // KEEP the window only for the same value, and let the UPDATE copy the column's
+        // CURRENT value (never a timestamp read above): a consumeFirstView landing between
+        // this read and this write leaves the window spent.
+        keepFirstView: unchanged,
       });
       await d.audit(db, "keychain_save", {
         details: { entry_id: row.id, bundle_id: bundleId, env_key: name, origin, sealed_from: "mcp-addons" },

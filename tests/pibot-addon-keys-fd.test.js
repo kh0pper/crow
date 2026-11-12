@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { KEYCHAIN_DDL } from "../servers/gateway/keychain/schema.js";
@@ -52,7 +52,8 @@ mkdirSync(join(USER_HOME, ".pi", "agent"), { recursive: true });
 writeFileSync(join(USER_HOME, ".pi", "agent", "mcp.json"), JSON.stringify({ mcpServers: {} }));
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
-const { writeBotMcp, WARN_ADDON_KEYS_FILE_MODE, WARN_ADDON_KEYS_UNREADABLE } =
+const { writeBotMcp, WARN_ADDON_KEYS_FILE_MODE, WARN_ADDON_KEYS_UNREADABLE, ADDON_KEYS_BOT_UNAVAILABLE,
+  _setAddonSecretSharesForTest, warnIfAddonKeysUnanchorable } =
   await import("../scripts/pi-bots/mcp_writer.mjs");
 const { botsDbPath } = await import("../scripts/pi-bots/instance-paths.mjs");
 const { resolveDbPath } = await import("../servers/db.js");
@@ -238,11 +239,58 @@ test("fd + hydrate: an add-on that READS another one gets the SOURCE add-on's ke
   assert.equal(env.FUNKWHALE_ACCESS_TOKEN, SHARED, "the shared token came from the source add-on's rows");
   assert.equal(env.FUNKWHALE_URL, "http://funk.example:5000");
 
-  // The switch at its other setting: no share table, so no shared value is produced.
-  const noShares = run(ctx, ["sunvox-studio"], { write: false, addonKeys: "hydrate", addonSecretShares: {} });
+  // The share table is NOT a writeBotMcp option (a production caller must not be able to
+  // change which add-on's keys another one reads), so the seam below is the only way.
+  const before = _setAddonSecretSharesForTest(
+    // A table with no entry for sunvox-studio: no share, so no shared value is produced.
+    {});
+  let noShares;
+  try {
+    noShares = run(ctx, ["sunvox-studio"], { write: false, addonKeys: "hydrate" });
+  } finally { _setAddonSecretSharesForTest(before); }
   const env2 = noShares.json.mcpServers["sunvox-studio"].env;
   assert.equal(env2.SUNVOX_TOKEN, SENTINEL, "its own value is still its own");
   assert.equal(env2.FUNKWHALE_ACCESS_TOKEN, undefined, "and no other add-on's value is invented");
+
+  // An option named addonSecretShares is IGNORED: the production table cannot be changed by a caller.
+  const ignored = run(ctx, ["sunvox-studio"], { write: false, addonKeys: "hydrate", addonSecretShares: {} });
+  assert.equal(ignored.json.mcpServers["sunvox-studio"].env.FUNKWHALE_ACCESS_TOKEN, SHARED,
+    "the frozen share table still applies");
+});
+
+test("fd + hydrate vs file mode: a shared name counts only when the SOURCE add-on's entry seals it", async () => {
+  // sunvox-studio seals nothing of Funkwhale's itself. Funkwhale sealed (its entry lists the
+  // token) → the name is really owed: file mode drops sunvox-studio, fd mode hydrates it.
+  // Funkwhale unsealed/absent → nothing is owed and file mode keeps the add-on, no warning.
+  const SHARED = "sentinel-" + randomUUID();
+  const sunvox = { command: "node", args: ["server/index.js"] };
+  const funkwhaleSealed = {
+    command: "node", args: ["server/index.js"],
+    env: { FUNKWHALE_URL: "http://funk.example:5000" }, keychainEnv: ["FUNKWHALE_ACCESS_TOKEN"],
+  };
+  const ctx = instance({ "sunvox-studio": sunvox, funkwhale: funkwhaleSealed });
+  await seed(ctx, [["funkwhale", "FUNKWHALE_ACCESS_TOKEN", SHARED]]);
+
+  const file = run(ctx, ["sunvox-studio"]);
+  assert.deepEqual(file.json.mcpServers["sunvox-studio"], { disabled: true });
+  assert.ok(file.warnings.includes(WARN_ADDON_KEYS_FILE_MODE("sunvox-studio")));
+  assert.equal(JSON.stringify(file).includes(SHARED), false);
+
+  const fd = run(ctx, ["sunvox-studio"], { write: false, addonKeys: "hydrate" });
+  const env = fd.json.mcpServers["sunvox-studio"].env;
+  assert.equal(env.FUNKWHALE_ACCESS_TOKEN, SHARED, "hydrated through Funkwhale's own rows");
+  assert.equal(env.FUNKWHALE_URL, "http://funk.example:5000");
+  assert.deepEqual(fd.needsKeys, {}, "a hydrated block owes nothing");
+
+  // Now Funkwhale is installed but not sealed: sunvox-studio must survive the file turn.
+  writeFileSync(join(ctx.home, "mcp-addons.json"), JSON.stringify({
+    "sunvox-studio": sunvox,
+    funkwhale: { command: "node", args: ["server/index.js"], env: { FUNKWHALE_URL: "http://funk.example:5000", FUNKWHALE_ACCESS_TOKEN: "plain-token" } },
+  }));
+  const kept = run(ctx, ["sunvox-studio"]);
+  assert.ok(kept.servers.includes("sunvox-studio"), "emitted: it owes no keychain name");
+  assert.equal(kept.warnings.some((w) => w.includes("sunvox-studio")), false, "and no key warning");
+  assert.deepEqual(kept.needsKeys, {});
 });
 
 test("fd + hydrate: a name with no active row leaves that add-on out, and every other server intact", async () => {
@@ -387,7 +435,69 @@ test("botsDbPath() is resolveDbPath() under every layout, so the writer reads th
   });
 });
 
-// ─── the sentinel scan ──────────────────────────────────────────────────────
+// ─── one instance for the entries AND the rows (review item 4) ─────────────
+
+test("fd + hydrate: a crowHome that is not this process's instance fails closed, and creates no secrets dir there", async () => {
+  // The entries come from opts.crowHome; the DB and the keychain key come from the process env.
+  // When the two name different instances, hydrating would read ANOTHER instance's rows (and
+  // anchoring would create a secrets dir under the wrong home), so the add-on is dropped.
+  const env = instance({ sealed: sealedEntry() });
+  await seed(env, [["sealed", "HA_TOKEN", SENTINEL]]);
+
+  const otherHome = join(mkdtempSync(join(tmpdir(), "pibot-addon-fd-other-")), ".crow-other");
+  TMP_ROOTS.push(dirname(otherHome));
+  mkdirSync(join(otherHome, "bundles", "sealed"), { recursive: true });
+  writeFileSync(join(otherHome, "mcp-addons.json"), JSON.stringify({ sealed: sealedEntry() }));
+  const otherBinding = {
+    CROW_HOME: otherHome,
+    CROW_DATA_DIR: join(otherHome, "data"),
+    CROW_DB_PATH: join(otherHome, "data", "crow.db"),
+    CROW_TASKS_DB_PATH: join(otherHome, "data", "tasks.db"),
+  };
+  writeFileSync(env.canonicalPath, JSON.stringify(CANONICAL));
+
+  const mismatched = writeBotMcp(def(["sealed"]), {
+    sessionDir: env.sessionDir, canonicalPath: env.canonicalPath, crowHome: otherHome,
+    binding: otherBinding, write: false, addonKeys: "hydrate",
+  });
+  assert.deepEqual(mismatched.json.mcpServers.sealed, { disabled: true }, "never another instance's value");
+  assert.ok(mismatched.warnings.includes(WARN_ADDON_KEYS_UNREADABLE("sealed")), "the existing fixed sentence");
+  assert.equal(existsSync(join(otherHome, "secrets")), false, "no secrets dir is created under the other home");
+  assert.equal(JSON.stringify(mismatched).includes(SENTINEL), false);
+
+  // Positive control: the SAME call for this process's own home hydrates normally.
+  const own = writeBotMcp(def(["sealed"]), {
+    sessionDir: env.sessionDir, canonicalPath: env.canonicalPath, crowHome: env.home,
+    binding: env.binding, write: false, addonKeys: "hydrate",
+  });
+  assert.equal(own.json.mcpServers.sealed.env.HA_TOKEN, SENTINEL);
+});
+
+test("bot-engine boot: the add-on-keys line is logged once, fixed, when the secrets dir cannot be anchored", () => {
+  // CROW_BOT_UID set and an ancestor the bot uid can write → anchorSecretsDir refuses, so
+  // every unseal fails closed. The helper is the decision the boot line makes.
+  const lines = [];
+  const logged = warnIfAddonKeysUnanchorable((m) => lines.push(m), { anchor: () => null });
+  assert.equal(logged, true);
+  assert.deepEqual(lines, [ADDON_KEYS_BOT_UNAVAILABLE], "ONE fixed line, no path, no value");
+  assert.equal(ADDON_KEYS_BOT_UNAVAILABLE,
+    "[addon-secrets] bots cannot read add-on keys: the secrets folder is not safe for the bot user; sealed add-ons are left out of bot turns");
+
+  // An anchor is the silent case.
+  const quiet = [];
+  assert.equal(warnIfAddonKeysUnanchorable((m) => quiet.push(m), { anchor: () => "/proc/self/fd/9/keychain.key" }), false);
+  assert.deepEqual(quiet, []);
+
+  // The real anchoredPath: a bot uid that owns the ancestors is a finding, so it refuses.
+  const home = mkdtempSync(join(tmpdir(), "pibot-addon-fd-uid-"));
+  TMP_ROOTS.push(home);
+  const real = [];
+  const env = { CROW_HOME: join(home, ".crow"), CROW_BOT_UID: String(process.getuid()) };
+  assert.equal(warnIfAddonKeysUnanchorable((m) => real.push(m), { env }), true);
+  assert.deepEqual(real, [ADDON_KEYS_BOT_UNAVAILABLE], "the real refusal produces the same one line");
+});
+
+// ─── the sentinel scan ─────────────────────────────────────────────────
 
 test("unsealing for an fd turn leaves the value on no console line, in no audit row and in no file", async (t) => {
   const out = captureOutput(t);
