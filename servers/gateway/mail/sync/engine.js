@@ -39,10 +39,10 @@
  *
  * Two on-demand reads reach outside the window without moving it. `fetchOlder` pages a folder's
  * history backwards from `floor_uid` by UID (never by date, which would skip a run of messages sharing
- * one INTERNALDATE) and lowers the floor to what it actually handled. `searchRemote` stores a
- * server-side search's hits, skips the ones already local, and leaves both watermarks alone. A hit a
- * search stored far below the window does not make the range between contiguous, which is why the
- * floor only ever follows the lowest UID a backfill handled — and never passes a UID it did not store.
+ * one INTERNALDATE) and lowers the floor only over a page that went through whole. `searchRemote`
+ * stores a server-side search's hits, skips the ones already local, and leaves both watermarks alone.
+ * A hit a search stored far below the window does not make the range between contiguous, which is why
+ * the floor only ever follows a page a backfill handled — and never passes a UID it did not store.
  */
 import { MailError, toMailError } from "../errors.js";
 import { MAX_RAW_BYTES, parseRawMessage, placeholderMessage } from "../parse.js";
@@ -62,6 +62,12 @@ import {
 
 /** UIDs per get() call, however small the messages are. */
 export const SYNC_BATCH_MAX = 25;
+
+/**
+ * UIDs per get() call for a search hit set, which carries no sizes at all: only a count bounds it, so
+ * a batch of 25 could ask for 625 MB of bodies in one call. Four is the count a sizeless listing gets.
+ */
+export const SEARCH_BATCH_MAX = 4;
 
 /** Raw bytes per get() call, counted from the sizes the listing reported. */
 export const SYNC_BATCH_BYTES = 16 * 1024 * 1024;
@@ -187,15 +193,16 @@ function ascending(items) {
  * own, so the budget can never starve it and it is never fetched beside anything else.
  *
  * @param {object[]} items listing items, already ascending
+ * @param {number} [maxCount] UIDs per batch (SEARCH_BATCH_MAX for a sizeless search answer)
  * @returns {object[][]} batches
  */
-function batchItems(items) {
+function batchItems(items, maxCount = SYNC_BATCH_MAX) {
   const batches = [];
   let current = [];
   let bytes = 0;
   for (const item of items) {
     const size = sizeOf(item);
-    if (current.length > 0 && (current.length >= SYNC_BATCH_MAX || bytes + size > SYNC_BATCH_BYTES)) {
+    if (current.length > 0 && (current.length >= maxCount || bytes + size > SYNC_BATCH_BYTES)) {
       batches.push(current);
       current = [];
       bytes = 0;
@@ -330,14 +337,19 @@ export function resetSyncLivenessForTests() {
  * passes is logged as uid_skipped and passed over instead of stopping the pass. Nothing is stored for
  * it either way.
  *
+ * With `skipOmissions` set (a search answer), a UID still missing after its one retry is passed over
+ * and reported in `omitted` instead of stopping the batch: a search hit is not a watermark, so one it
+ * can never deliver must not cost the folder every hit beside it.
+ *
  * @param {object} c the resolved context
  * @param {object} folder the stored folder row
  * @param {object[]} batch ascending items (`{uid, size}` from a listing, or `{uid}` from a search)
- * @param {{liveness?: boolean}} [options]
- * @returns {Promise<{delivered: Map<number, object>, stopAtUid: number|null}>}
+ * @param {{liveness?: boolean, skipOmissions?: boolean}} [options]
+ * @returns {Promise<{delivered: Map<number, object>, stopAtUid: number|null, omitted: number[]}>}
  */
-async function fetchBatch(c, folder, batch, { liveness = false } = {}) {
+async function fetchBatch(c, folder, batch, { liveness = false, skipOmissions = false } = {}) {
   const delivered = new Map();
+  const omitted = [];
   const wanted = [];
   for (const item of batch) {
     if (sizeOf(item) > MAX_RAW_BYTES) delivered.set(item.uid, { item, tooLarge: true });
@@ -378,11 +390,16 @@ async function fetchBatch(c, folder, batch, { liveness = false } = {}) {
         c.log({ event: "uid_skipped", folderId, uid: item.uid, code: "omitted" });
         continue;
       }
+      // A search hit is nobody's watermark: pass over it and let the caller count it.
+      if (skipOmissions) {
+        omitted.push(item.uid);
+        continue;
+      }
       if (stopAtUid == null || item.uid < stopAtUid) stopAtUid = item.uid;
     }
   }
 
-  return { delivered, stopAtUid };
+  return { delivered, stopAtUid, omitted };
 }
 
 /**
@@ -455,25 +472,28 @@ async function storeBatch(c, folder, batch, delivered, stopAtUid) {
  * persist its progress there: an interruption then leaves progress rather than work to redo. A pass
  * that stopped writes nothing for the batches after it, and nothing at or above its stop UID.
  * `liveness` is the sync pass's own rule (see fetchBatch): for the on-demand reads it stays off, so
- * they keep stopping on the first UID they cannot get.
+ * they keep stopping on the first UID they cannot get — except a search answer, whose `skipOmissions`
+ * passes the missing hits over and reports them in `omittedUids`.
  *
  * @param {object} c the resolved context
  * @param {object} folder the stored folder row
  * @param {object[][]} batches ascending items, grouped as batchItems returned them
- * @param {{afterBatch?: Function|null, liveness?: boolean}} [options]
+ * @param {{afterBatch?: Function|null, liveness?: boolean, skipOmissions?: boolean}} [options]
  * @returns {Promise<{added: number, stopAtUid: number|null, stopReason: string|null,
- *                    lowestStoredUid: number|null, highestUid: number}>}
+ *                    lowestStoredUid: number|null, highestUid: number, omittedUids: number[]}>}
  */
-async function storeBatches(c, folder, batches, { afterBatch = null, liveness = false } = {}) {
+async function storeBatches(c, folder, batches, { afterBatch = null, liveness = false, skipOmissions = false } = {}) {
   let added = 0;
   let lowestStoredUid = null;
   let stopAtUid = null;
   let stopReason = null;
   let highestUid = 0;
+  let omittedUids = [];
 
   for (const batch of batches) {
     checkDeadline(c);
-    const fetched = await fetchBatch(c, folder, batch, { liveness });
+    const fetched = await fetchBatch(c, folder, batch, { liveness, skipOmissions });
+    if (fetched.omitted.length > 0) omittedUids = omittedUids.concat(fetched.omitted);
     const stored = await storeBatch(c, folder, batch, fetched.delivered, fetched.stopAtUid);
     added += stored.added;
     if (stored.lowestStoredUid != null
@@ -491,7 +511,7 @@ async function storeBatches(c, folder, batches, { afterBatch = null, liveness = 
     if (afterBatch) await afterBatch(batchTop);
   }
 
-  return { added, stopAtUid, stopReason, lowestStoredUid, highestUid };
+  return { added, stopAtUid, stopReason, lowestStoredUid, highestUid, omittedUids };
 }
 
 /**
@@ -674,13 +694,20 @@ export async function syncFolder(ctx, accountId, folder) {
  * the only bound that walks a mailbox exactly once. The listing is asked for newest-first because that
  * is the shape the adapter offers for a bounded page, and the batches are built ascending from it.
  *
- * The floor is the lower bound of what Crow holds and what the expunge scan starts from, so it never
- * passes a UID this call did not store. A UID `get()` left out (still missing after its one retry)
- * puts the floor at that UID + 1: the hole itself is the next page's business, and everything above it
- * is contiguous. Otherwise the floor follows the lowest UID stored in this page — either fetched and
- * stored, or deliberately stored as a `too_large` placeholder — and it never rises. A UID a search
- * stored far below the window lowers nothing, because the range between it and the window is still a
- * hole. Nothing here touches `highest_uid`, `uid_validity`, an existing row or anything else.
+ * The floor is the lower bound of what Crow holds and what the expunge scan starts from, so it only
+ * ever moves over a page that was handled whole. A batch stores ascending and STOPS at the first hole
+ * — an omitted UID still missing after its one retry, or a message that could not be written — so the
+ * UIDs ABOVE that hole in the same page are not stored: a floor of `hole + 1` would claim them, and
+ * the expunge scan would then treat "below the floor" as a range it may delete from. Any stop
+ * therefore leaves the floor exactly where it was, and the next page re-reads the same range below it
+ * (the rows already stored are idempotent upserts, so re-reading costs nothing but bandwidth).
+ * Otherwise the floor follows the lowest UID of the page, which with no stop is a UID this call either
+ * stored — fetched and stored, or deliberately stored as a `too_large` placeholder — or skipped by the
+ * liveness escape below; and it never rises. That escape is the only way past a permanent hole: a UID
+ * still missing on the third consecutive pass is skipped, and the page below it then completes.
+ * A UID a search stored far below the window lowers nothing, because the range between it and the
+ * window is still a hole. Nothing here touches `highest_uid`, `uid_validity`, an existing row or
+ * anything else.
  *
  * A listing whose UIDVALIDITY no longer matches the stored one is refused before a single body is
  * fetched: the UIDs mean something else now, and the next regular sync is what resets the folder.
@@ -714,15 +741,25 @@ export async function fetchOlder(ctx, accountId, folderId, { limit = DEFAULT_OLD
     throw new MailError("PROTOCOL", "uidvalidity_changed");
   }
 
-  const outcome = await storeBatches(c, folder, batchItems(ascending(listing.items)));
+  checkDeadline(c);
+
+  // A backfill goes through the same liveness counter a sync pass does: one UID nothing ever delivers
+  // must not hold the floor for ever.
+  const outcome = await storeBatches(c, folder, batchItems(ascending(listing.items)), { liveness: true });
+
+  // A pass that stopped for ANY reason leaves the floor untouched: the UIDs above the hole in this
+  // page were never stored, so a floor there would claim rows nothing wrote.
+  const stopped = outcome.stopAtUid != null;
   let floorUid = lo;
-  if (outcome.stopAtUid != null) floorUid = Math.min(lo, outcome.stopAtUid + 1);
-  else if (outcome.lowestStoredUid != null) floorUid = Math.min(lo, outcome.lowestStoredUid);
+  if (!stopped) {
+    const pageLow = listing.items.reduce((low, item) => (low == null || item.uid < low ? item.uid : low), null);
+    if (pageLow != null) floorUid = Math.min(lo, pageLow);
+  }
   if (floorUid !== lo) await setFolderSyncState(c.db, folder.id, { floorUid });
 
   return {
     added: outcome.added,
-    reachedStart: listing.items.length < wanted || lo <= 1 || floorUid <= 1,
+    reachedStart: !stopped && (listing.items.length < wanted || lo <= 1 || floorUid <= 1),
   };
 }
 
@@ -732,11 +769,16 @@ export async function fetchOlder(ctx, accountId, folderId, { limit = DEFAULT_OLD
  * Store what a server-side search found but the window never reached.
  *
  * The adapter answers with `{folderPath, uid}` pairs and no metadata at all, so each hit's body is
- * fetched (batched by count, under the same byte cap, omitted-UID rule and per-message try/catch as a
- * sync) and the row takes its flags, internal date and raw length from what came back; a body that is
- * empty or over MAX_RAW_BYTES is stored as `too_large`. Hits are matched to stored folders by exact
- * path: one this account has not stored is skipped, as is one of the three virtual views, and a UID
- * already local is never fetched again.
+ * fetched (batched by count only — SEARCH_BATCH_MAX per get(), because no size is known to bound it by
+ * bytes — under the same byte cap, omitted-UID rule and per-message try/catch as a sync) and the row
+ * takes its flags, internal date and raw length from what came back; a body that is empty or over
+ * MAX_RAW_BYTES is stored as `too_large`. Hits are matched to stored folders by exact path: one this
+ * account has not stored is skipped, as is one of the three virtual views, and a UID already local is
+ * never fetched again.
+ *
+ * A hit the adapter never delivers is retried once on its own and then skipped, and the rest of the
+ * answer is still stored: a search hit is not a watermark, so one missing body is one missing row,
+ * never the folder's reason to stop. The give-up is a log line carrying ids and a count only.
  *
  * A search that throws is classified and rethrown before anything is written, so the store is exactly
  * as it was. Nothing here changes `floor_uid` or `highest_uid`: a hit far below the window is one row,
@@ -791,8 +833,16 @@ export async function searchRemote(ctx, accountId, query, { limit } = {}) {
   let added = 0;
   for (const { folder, uids } of pending.values()) {
     checkDeadline(c);
-    const outcome = await storeBatches(c, folder, batchItems(ascending(uids.map((uid) => ({ uid })))));
+    // No sizes are known here, so the count is the only bound on a batch.
+    const items = ascending(uids.map((uid) => ({ uid })));
+    const outcome = await storeBatches(c, folder, batchItems(items, SEARCH_BATCH_MAX), {
+      skipOmissions: true,
+    });
     added += outcome.added;
+    if (outcome.omittedUids.length > 0) {
+      // Ids and a count, never a subject or an address: the hit that never arrived was never seen.
+      c.log({ event: "search_hit_omitted", folderId: folder.id, count: outcome.omittedUids.length });
+    }
   }
   return { added };
 }

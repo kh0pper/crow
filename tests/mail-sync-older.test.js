@@ -3,10 +3,13 @@
 // built from MAIL_DDL and the in-memory fake adapter, with a first `syncFolder` setting up the window.
 //
 // The rules under test are the ones a date-based pager gets wrong: INTERNALDATE has one-second
-// resolution, so paging is by UID and a run of messages sharing one date is walked exactly once; the
-// floor never passes a UID the page did not store (an omitted UID, after its one retry, leaves the
-// floor just above it); a hit a search stored far below the window does not make the range between
-// contiguous; and neither read moves `highest_uid`, `uid_validity` or anything already stored.
+// resolution, so paging is by UID and a run of messages sharing one date is walked exactly once; a
+// page that stops — an omitted UID after its one retry, or a message that cannot be written — leaves
+// the floor exactly where it was, because batches store ascending and stop at the hole, so the UIDs
+// above it were never stored and a higher floor would claim them; only three consecutive stuck passes
+// on one UID (the liveness escape) let a page finish and move the floor. A hit a search stored far
+// below the window does not make the range between contiguous; and neither read moves `highest_uid`,
+// `uid_validity` or anything already stored.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -22,7 +25,13 @@ import {
   storedUids,
   upsertFolders,
 } from "../servers/gateway/mail/store/messages.js";
-import { fetchOlder, searchRemote, syncFolder } from "../servers/gateway/mail/sync/engine.js";
+import {
+  SEARCH_BATCH_MAX,
+  fetchOlder,
+  resetSyncLivenessForTests,
+  searchRemote,
+  syncFolder,
+} from "../servers/gateway/mail/sync/engine.js";
 import { MailError } from "../servers/gateway/mail/errors.js";
 import { createFakeMailAdapter } from "./fixtures/fake-mail-adapter.mjs";
 import { makeRaw } from "./fixtures/fake-mail-server.mjs";
@@ -47,6 +56,9 @@ async function freshDb() {
 
 /** A scratch DB with one account and one fake adapter whose clock is the test's. */
 async function setup() {
+  // The omitted-UID liveness count is module state keyed by folder id, and every scratch DB numbers
+  // its folders from 1: one test's stuck count must never reach the next test's folder.
+  resetSyncLivenessForTests();
   const db = await freshDb();
   const account = await createAccount(db, {
     address: ALEX,
@@ -88,6 +100,21 @@ async function firstSync(db, adapter, accountId, path = "INBOX") {
   const folder = await prepareFolder(db, adapter, accountId, path);
   await syncFolder(ctxFor(db, adapter), accountId, folder);
   return getFolder(db, folder.id);
+}
+
+/**
+ * The invariant a backfill must never break: every UID between the folder's floor and the lowest UID
+ * the regular sync put in its window is on disk, or was given up on by the liveness escape.
+ */
+async function assertNoHole(db, folderId, windowLowUid, given = []) {
+  const folder = await getFolder(db, folderId);
+  const stored = new Set(await storedUids(db, folderId));
+  for (let uid = folder.floorUid; uid <= windowLowUid; uid += 1) {
+    assert.ok(
+      stored.has(uid) || given.includes(uid),
+      `uid ${uid} sits between the floor ${folder.floorUid} and the window ${windowLowUid}`,
+    );
+  }
 }
 
 /* ------------------------------------------------------- going further back */
@@ -193,7 +220,52 @@ test("fetchOlder on a folder with no local range returns at once and calls no ad
   assert.deepEqual(await storedUids(db, folder.id), []);
 });
 
-test("a UID get() omits holds the floor just above the hole and stores nothing for it", async () => {
+test("a stopped page leaves the floor exactly where it was, and the next call re-reads it whole", async () => {
+  const { db, accountId, adapter } = await setup();
+  seed(adapter, "INBOX", 100, { internalDate: OLD });
+  seed(adapter, "INBOX", 50, { internalDate: T0 }); // uids 101..150: the window
+  const folder = await firstSync(db, adapter, accountId);
+  assert.equal(folder.floorUid, 101);
+
+  const realGet = adapter.get;
+  const omit = 95;
+  const asked = [];
+  const omitting = new Set([omit]);
+  adapter.get = async (path, uids) => {
+    asked.push([...uids]);
+    const messages = await realGet(path, uids);
+    return messages.filter((message) => !omitting.has(message.uid));
+  };
+
+  // The page is 51..100, batched [51..75] and [76..100]. The second batch stores ascending and stops
+  // at 95, so 96..100 are NOT stored — a floor of 96 would claim four rows nothing ever wrote.
+  const stopped = await fetchOlder(ctxFor(db, adapter), accountId, folder.id);
+  assert.equal(stopped.added, 44, "uids 51..94: the page stops at the hole");
+  assert.equal(stopped.reachedStart, false, "a stopped pass is never the start of the folder");
+  assert.deepEqual(asked.at(-1), [omit], "the hole was retried once on its own, never in a loop");
+
+  let after = await getFolder(db, folder.id);
+  assert.equal(after.floorUid, 101, "the floor does not move over a page that stopped");
+  assert.equal(after.highestUid, 150);
+  assert.deepEqual(await storedUids(db, folder.id), [...range(51, 94), ...range(101, 150)]);
+  await assertNoHole(db, folder.id, 101);
+
+  // The hole closes: the next call re-reads the same page below the untouched floor, stores it whole,
+  // and only then lowers the floor to its lowest UID.
+  omitting.clear();
+  const next = await fetchOlder(ctxFor(db, adapter), accountId, folder.id);
+  assert.equal(next.added, 6, "only 95..100 were new; the rows below the hole were already stored");
+  assert.equal(next.reachedStart, false);
+  assert.equal(listCalls(adapter).at(-1).args[1].beforeUid, 101, "the page still starts under the floor");
+
+  after = await getFolder(db, folder.id);
+  assert.equal(after.floorUid, 51, "the whole page is stored now, so the floor follows it");
+  assert.equal(after.highestUid, 150, "a backfill never moves the watermark");
+  assert.deepEqual(await storedUids(db, folder.id), range(51, 150));
+  await assertNoHole(db, folder.id, 101);
+});
+
+test("three stuck passes on one UID skip it, and only then does the floor move below it", async () => {
   const { db, accountId, adapter } = await setup();
   seed(adapter, "INBOX", 100, { internalDate: OLD });
   seed(adapter, "INBOX", 50, { internalDate: T0 });
@@ -201,36 +273,36 @@ test("a UID get() omits holds the floor just above the hole and stores nothing f
 
   const realGet = adapter.get;
   const omit = 95;
-  const asked = [];
-  let omitting = true;
-  adapter.get = async (path, uids) => {
-    const messages = await realGet(path, uids);
-    asked.push([...uids]);
-    return omitting ? messages.filter((message) => message.uid !== omit) : messages;
-  };
+  adapter.get = async (path, uids) => (await realGet(path, uids))
+    .filter((message) => message.uid !== omit);
 
-  const result = await fetchOlder(ctxFor(db, adapter), accountId, folder.id);
+  const logs = [];
+  const log = (entry) => logs.push(entry);
 
-  assert.equal(result.added, 44, "uids 51..94: the page stops at the hole");
-  assert.equal(result.reachedStart, false);
-  assert.equal(asked.length, 3, "two batch calls and the one retry, never a loop");
-  assert.deepEqual(asked.at(-1), [omit]);
+  const first = await fetchOlder(ctxFor(db, adapter, { log }), accountId, folder.id);
+  assert.equal(first.added, 44);
+  assert.equal(first.reachedStart, false);
+  assert.equal((await getFolder(db, folder.id)).floorUid, 101, "pass 1 stops below the hole");
+
+  const second = await fetchOlder(ctxFor(db, adapter, { log }), accountId, folder.id);
+  assert.equal(second.added, 0, "nothing below the hole was new");
+  assert.equal(second.reachedStart, false);
+  assert.equal((await getFolder(db, folder.id)).floorUid, 101, "pass 2 is stuck at the same UID");
+  assert.equal(logs.filter((entry) => entry.event === "uid_skipped").length, 0);
+
+  const third = await fetchOlder(ctxFor(db, adapter, { log }), accountId, folder.id);
+  assert.equal(third.added, 5, "96..100: the page finishes past the UID nobody ever delivers");
+  assert.equal(third.reachedStart, false);
+
   const after = await getFolder(db, folder.id);
-  assert.equal(after.floorUid, omit + 1, "the floor never passes a UID nothing was stored for");
+  assert.equal(after.floorUid, 51, "the skipped page is the one the floor follows");
   assert.equal(after.highestUid, 150);
-  const stored = await storedUids(db, folder.id);
-  assert.ok(!stored.includes(omit), "nothing was stored for the omitted UID");
-  assert.deepEqual(stored, [...range(51, 94), ...range(101, 150)]);
+  assert.deepEqual(await storedUids(db, folder.id),
+    [...range(51, 94), ...range(96, 150)], "nothing is stored for the skipped UID");
+  await assertNoHole(db, folder.id, 101, [omit]);
 
-  omitting = false;
-  // The next page starts just under the floor, so it is the hole and nothing below it.
-  const next = await fetchOlder(ctxFor(db, adapter), accountId, folder.id, { limit: 45 });
-  assert.equal(next.added, 1, "the hole itself is what the next page finds");
-  assert.equal(next.reachedStart, false);
-  assert.equal((await getFolder(db, folder.id)).floorUid, 51);
-  // Nothing at or above the hole was stored on the first page, and the second page stops at the
-  // hole's own UID, so the rows above it wait for a later page or a regular sync.
-  assert.deepEqual(await storedUids(db, folder.id), [...range(51, 95), ...range(101, 150)]);
+  const skipped = logs.filter((entry) => entry.event === "uid_skipped");
+  assert.deepEqual(skipped, [{ event: "uid_skipped", folderId: folder.id, uid: omit, code: "omitted" }]);
 });
 
 test("a folder path with spaces and unicode reaches the adapter byte for byte", async () => {
@@ -331,13 +403,48 @@ test("searchRemote stores only the hits the store does not hold yet", async () =
 
   assert.equal(result.added, 100, "the fifty local hits were not created again");
   assert.deepEqual(await storedUids(db, folder.id), range(1, 150));
-  const asked = getCalls(adapter).slice(getsBefore).flatMap((call) => call.args[1]);
+  const batches = getCalls(adapter).slice(getsBefore).map((call) => call.args[1]);
+  const asked = batches.flat();
   assert.equal(asked.length, 100);
+  assert.ok(batches.every((uids) => uids.length <= SEARCH_BATCH_MAX),
+    `a sizeless hit set is batched by SEARCH_BATCH_MAX (${SEARCH_BATCH_MAX}) UIDs, never 25`);
   for (const uid of asked) assert.ok(uid < 101, `uid ${uid} was already local and must not be fetched`);
 
   const after = await getFolder(db, folder.id);
   assert.equal(after.floorUid, 101, "a search never moves the floor");
   assert.equal(after.highestUid, 150, "a search never moves the watermark");
+});
+
+test("a search hit the adapter never delivers is skipped, and the other hits are still stored", async () => {
+  const { db, accountId, adapter } = await setup();
+  seed(adapter, "INBOX", 10, { internalDate: OLD, subject: "heron log" });
+  seed(adapter, "INBOX", 1, { internalDate: T0, subject: "in the window" }); // uid 11
+  const folder = await firstSync(db, adapter, accountId);
+  assert.equal(folder.floorUid, 11);
+  assert.deepEqual(await storedUids(db, folder.id), [11]);
+
+  const realGet = adapter.get;
+  const omit = 5;
+  adapter.get = async (path, uids) => (await realGet(path, uids))
+    .filter((message) => message.uid !== omit);
+
+  const logs = [];
+  const result = await searchRemote(
+    ctxFor(db, adapter, { log: (entry) => logs.push(entry) }),
+    accountId,
+    "heron",
+  );
+
+  // A hit is not a watermark: one the adapter never delivers costs one row, not the other nine.
+  assert.equal(result.added, 9);
+  assert.deepEqual(await storedUids(db, folder.id), [1, 2, 3, 4, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(logs.filter((entry) => entry.event === "search_hit_omitted"),
+    [{ event: "search_hit_omitted", folderId: folder.id, count: 1 }],
+    "the give-up is a count and an id, nothing a message or a path could ride on");
+
+  const after = await getFolder(db, folder.id);
+  assert.equal(after.floorUid, 11, "a skipped hit moves neither watermark");
+  assert.equal(after.highestUid, 11);
 });
 
 test("a search hit far below the window does not move the floor, and fetchOlder pages from it", async () => {
