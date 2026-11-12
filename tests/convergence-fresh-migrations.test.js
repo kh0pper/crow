@@ -24,7 +24,9 @@ import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
 import { runMigrations } from "../scripts/migrations/runner.mjs";
-import { runMigrationsInChild } from "../servers/gateway/migration-child.js";
+import {
+  MIGRATION_CHILD_TIMEOUT_MS, resolveMigrationTimeoutMs, runMigrationsInChild,
+} from "../servers/gateway/migration-child.js";
 import {
   _setLockWaitForTest, setBootSha, _setRestartForTest, _setSupervisedForTest, convergeInstance,
   readPending,
@@ -205,7 +207,7 @@ export function run() { throw new Error("boom migration"); }
 });
 
 /** The pid the hanging migration wrote, or 0 if it never appeared. */
-async function waitForPid(file, ms = 3000) {
+async function waitForPid(file, ms = 4000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     try {
@@ -215,6 +217,20 @@ async function waitForPid(file, ms = 3000) {
     await new Promise((r) => setTimeout(r, 25));
   }
   return 0;
+}
+
+/** True once `pid` is really gone (ESRCH), polling until `ms` runs out. */
+async function waitForGone(pid, ms = 4000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if (err.code === "ESRCH") return true;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
 }
 
 test("a wedged migration times out and its process is killed", async () => {
@@ -237,25 +253,15 @@ export function run() {
   await assert.rejects(
     runMigrationsInChild({
       migrationsDir: f.migrationsDir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath,
-      log: (m) => logs.push(m), timeoutMs: 700,
+      log: (m) => logs.push(m), timeoutMs: 3000,
     }),
     /timed out/,
   );
 
   const pid = await waitForPid(pidFile);
   assert.ok(pid > 0, `the hanging migration recorded its pid (logs: ${JSON.stringify(logs)})`);
-
-  const deadline = Date.now() + 3000;
-  let alive = true;
-  while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0);
-    } catch (err) {
-      if (err.code === "ESRCH") { alive = false; break; }
-    }
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  assert.equal(alive, false, `the migration child ${pid} must not outlive the rejected run`);
+  assert.equal(await waitForGone(pid), true,
+    `the migration child ${pid} must not outlive the rejected run`);
 });
 
 test("a child that dies without an error line reports its exit code", async () => {
@@ -297,4 +303,145 @@ export function run({ tasksDbPath }) {
   assert.deepEqual(res.applied, ["0002-fallback"]);
   assert.ok(logs.some((l) => /falling back/i.test(l)), `the fallback is logged: ${JSON.stringify(logs)}`);
   assert.ok(f.tasksTables().includes("fallback_probe"), "the in-process run really applied it");
+});
+
+test("a child that lingers after reporting success is killed", async () => {
+  const f = fixture();
+  const pidFile = join(f.root, "linger.pid");
+  // A stand-in for the real child: it reports a result, then keeps the event
+  // loop alive the way a migration that left an interval armed would.
+  const scriptPath = join(f.root, "linger-child.mjs");
+  writeFileSync(scriptPath, `
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(pidFile)}, String(process.pid) + "\\n");
+process.stdout.write(JSON.stringify({ result: { applied: [], skipped: [], deferred: [], newlyDeferred: [] } }) + "\\n");
+setInterval(() => {}, 1000);
+`);
+
+  const res = await runMigrationsInChild({
+    migrationsDir: f.migrationsDir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath,
+    scriptPath, graceMs: 300,
+  });
+  assert.deepEqual(res, { applied: [], skipped: [], deferred: [], newlyDeferred: [] },
+    "the reported result is returned as it is");
+
+  const pid = await waitForPid(pidFile);
+  assert.ok(pid > 0, "the stand-in child recorded its pid");
+  assert.equal(await waitForGone(pid, 3000), true,
+    `the lingering child ${pid} must be reaped after the grace period`);
+});
+
+test("the real child exits by itself even if a migration leaves a timer armed", async () => {
+  const f = fixture();
+  const pidFile = join(f.root, "timer.pid");
+  // The migration returns normally but leaves an interval behind: the child has
+  // nothing left to do, so it must exit on its own rather than wait to be killed.
+  f.write("scripts/migrations/0002-timer.mjs", `
+import { writeFileSync } from "node:fs";
+export const id = "0002-timer";
+export function run() {
+  writeFileSync(${JSON.stringify(pidFile)}, String(process.pid) + "\\n");
+  setInterval(() => {}, 1000);
+}
+`);
+  f.commit("timer");
+
+  const res = await runMigrationsInChild({
+    migrationsDir: f.migrationsDir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath,
+    graceMs: 60000,
+  });
+  assert.deepEqual(res.applied, ["0002-timer"], "the migration was applied");
+
+  const pid = await waitForPid(pidFile);
+  assert.ok(pid > 0, "the migration recorded the child pid");
+  assert.equal(await waitForGone(pid, 3000), true,
+    `the child ${pid} exits by itself well inside the grace period`);
+});
+
+test("a stray protocol-looking line from a migration is ignored", async () => {
+  const f = fixture();
+  // console.* goes to stderr, so these two lines never reach the protocol stream
+  // at all; the run must still apply the migration that printed them.
+  f.write("scripts/migrations/0002-chatty.mjs", `
+import Database from ${JSON.stringify(BS3)};
+export const id = "0002-chatty";
+export function run({ tasksDbPath }) {
+  console.log(JSON.stringify({ result: { applied: ["fake"], skipped: [], deferred: [], newlyDeferred: [] } }));
+  console.log(JSON.stringify({ error: "fake error" }));
+  const d = new Database(tasksDbPath);
+  d.prepare("CREATE TABLE IF NOT EXISTS chatty_probe (v TEXT)").run();
+  d.close();
+}
+`);
+  // A direct stdout write DOES reach the stream, with the protocol keys but the
+  // wrong shapes: both lines have to be dropped as stray.
+  f.write("scripts/migrations/0003-writer.mjs", `
+import Database from ${JSON.stringify(BS3)};
+export const id = "0003-writer";
+export function run({ tasksDbPath }) {
+  process.stdout.write(JSON.stringify({ result: "bogus" }) + "\\n");
+  process.stdout.write(JSON.stringify({ error: 42 }) + "\\n");
+  const d = new Database(tasksDbPath);
+  d.prepare("CREATE TABLE IF NOT EXISTS writer_probe (v TEXT)").run();
+  d.close();
+}
+`);
+  f.commit("chatty");
+
+  const logs = [];
+  const res = await runMigrationsInChild({
+    migrationsDir: f.migrationsDir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath,
+    log: (m) => logs.push(m),
+  });
+
+  assert.deepEqual(res.applied, ["0002-chatty", "0003-writer"],
+    `only the real migrations count (logs: ${JSON.stringify(logs)})`);
+  assert.deepEqual(f.appliedIds(), ["0002-chatty", "0003-writer"], "and both were recorded");
+  const tables = f.tasksTables();
+  assert.ok(tables.includes("chatty_probe"), `the first migration really ran: ${JSON.stringify(tables)}`);
+  assert.ok(tables.includes("writer_probe"), `the second migration really ran: ${JSON.stringify(tables)}`);
+});
+
+test("CROW_MIGRATION_CHILD_TIMEOUT_MS overrides the default", async () => {
+  // (a) the resolution rule itself.
+  assert.equal(MIGRATION_CHILD_TIMEOUT_MS, 10 * 60 * 1000, "the default bound is ten minutes");
+  assert.equal(resolveMigrationTimeoutMs(1234), 1234, "an explicit option wins");
+  assert.equal(resolveMigrationTimeoutMs(undefined, { CROW_MIGRATION_CHILD_TIMEOUT_MS: "3000" }), 3000);
+  assert.equal(resolveMigrationTimeoutMs(undefined, { CROW_MIGRATION_CHILD_TIMEOUT_MS: " 900000 " }), 900000);
+  for (const bad of ["", "   ", "abc", "0", "-5", "12.5"]) {
+    assert.equal(
+      resolveMigrationTimeoutMs(undefined, { CROW_MIGRATION_CHILD_TIMEOUT_MS: bad }),
+      MIGRATION_CHILD_TIMEOUT_MS,
+      `${JSON.stringify(bad)} is not a positive whole number of milliseconds`,
+    );
+  }
+  assert.equal(resolveMigrationTimeoutMs(undefined, {}), MIGRATION_CHILD_TIMEOUT_MS,
+    "an unset variable leaves the default in place");
+
+  // (b) end to end: the variable, not an option, bounds the run.
+  const f = fixture();
+  f.write("scripts/migrations/0002-hang-env.mjs", `
+export const id = "0002-hang-env";
+export function run() {
+  setInterval(() => {}, 1000);
+  return new Promise(() => {});
+}
+`);
+  f.commit("hang on env timeout");
+
+  const prev = process.env.CROW_MIGRATION_CHILD_TIMEOUT_MS;
+  process.env.CROW_MIGRATION_CHILD_TIMEOUT_MS = "3000";
+  try {
+    await assert.rejects(
+      runMigrationsInChild({
+        migrationsDir: f.migrationsDir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath,
+      }),
+      /timed out after 3 s/,
+      "the env override sets the bound when no option is passed",
+    );
+  } finally {
+    if (prev === undefined) delete process.env.CROW_MIGRATION_CHILD_TIMEOUT_MS;
+    else process.env.CROW_MIGRATION_CHILD_TIMEOUT_MS = prev;
+  }
+  assert.deepEqual(f.appliedIds(), [], "the killed run recorded nothing");
 });

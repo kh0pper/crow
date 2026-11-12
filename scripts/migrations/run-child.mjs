@@ -15,35 +15,62 @@
 //   node scripts/migrations/run-child.mjs '<json>'
 //   json = { migrationsDir, dbPath, tasksDbPath, sha }
 //
-// stdout is NDJSON and nothing else — one JSON object per line:
+// stdout is NDJSON — one JSON object per line:
 //   {"log": "<message>"}   progress, forwarded to the parent's log
 //   {"result": {...}}      the runMigrations return value, last line on success
 //   {"error": "<message>"} the thrown message, last line on failure
 //
-// Exit codes: 0 success, 1 failure. Nothing in this file writes to stdout in
-// any other shape, and nothing calls process.exit: exitCode lets the event loop
-// drain so the final write reaches the pipe.
-import { runMigrations } from "./runner.mjs";
+// The protocol owns stdout: console.log, console.info and console.debug are
+// pointed at stderr before the runner is imported, so a migration — or anything
+// it imports — that logs with console.* can never land on the protocol stream.
+// The runner is imported from inside main() for exactly that reason: a static
+// import would evaluate it first, import-time logs included. A migration that
+// writes to process.stdout directly is not blocked; the parent shape-checks
+// every line for that reason.
+//
+// Exit codes: 0 success, 1 failure. The final line is written with a write
+// callback that then calls process.exit(code), so the child leaves as soon as
+// that line is flushed — even when a migration left a timer or a socket open.
 
-function emit(obj) {
-  process.stdout.write(`${JSON.stringify(obj)}\n`);
+// The protocol's own write, captured before anything else can redirect stdout.
+const out = process.stdout.write.bind(process.stdout);
+
+// console.* belongs to the human reading the journal, not to the protocol.
+const toStderr = console.error.bind(console);
+console.log = toStderr;
+console.info = toStderr;
+console.debug = toStderr;
+
+function writeLine(obj) {
+  out(`${JSON.stringify(obj)}\n`);
+}
+
+/** Write the final line, then exit once it is flushed. */
+function finish(obj, code) {
+  out(`${JSON.stringify(obj)}\n`, () => process.exit(code));
 }
 
 async function main() {
   const raw = process.argv[2];
   if (!raw) throw new Error("run-child: missing JSON argument");
   const { migrationsDir, dbPath, tasksDbPath, sha = null } = JSON.parse(raw);
-  const result = await runMigrations({
+  const { runMigrations } = await import("./runner.mjs");
+  return runMigrations({
     migrationsDir,
     dbPath,
     tasksDbPath,
     sha,
-    log: (m) => emit({ log: String(m) }),
+    log: (m) => writeLine({ log: String(m) }),
   });
-  emit({ result });
 }
 
-main().catch((err) => {
-  emit({ error: String(err?.message ?? err) });
-  process.exitCode = 1;
-});
+main().then(
+  (result) => finish({ result }, 0),
+  (err) => {
+    // The trace goes to stderr, out of the protocol stream; the parent keeps a
+    // tail of stderr for a child that dies without an error line.
+    process.stderr.write(`${err?.stack || err?.message || String(err)}\n`, () => {
+      finish({ error: String(err?.message ?? err) }, 1);
+    });
+  },
+);

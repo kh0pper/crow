@@ -15,14 +15,23 @@
 // run in a fresh process and must keep calling runMigrations directly.
 //
 // The child's stdout is NDJSON: {"log"}, then exactly one of {"result"} or
-// {"error"}. Only that is parsed; anything else on stdout is ignored.
+// {"error"}. The child points console.log/info/debug at stderr before it starts
+// the runner, so a migration that logs with console.* never reaches this
+// stream; a migration that writes to process.stdout directly is not blocked, so
+// every line's shape is checked here as well — a result needs all four arrays, an
+// error needs a string. A line that looks like protocol but does not have the
+// shape is a stray line and is ignored, like anything else on stdout.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** A migration run is bounded: a wedged child must never hold the update tick
- *  forever (a guarded SCHEMA_GENERATION pass on a large store is the slow end). */
+/** A migration run is bounded so a wedged child can never hold the update tick
+ *  for ever; the child applies the registry only (init-db runs in the parent's
+ *  schema pre-flight). Ten minutes is ample for the per-item INSERT … SELECT
+ *  migrations this registry carries, and an operator can raise the bound on a
+ *  host that needs longer with CROW_MIGRATION_CHILD_TIMEOUT_MS (milliseconds),
+ *  without a code change. */
 export const MIGRATION_CHILD_TIMEOUT_MS = 10 * 60 * 1000;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -33,12 +42,35 @@ export function defaultMigrationChildScript() {
   return join(HERE, "..", "..", "scripts", "migrations", "run-child.mjs");
 }
 
-const emptyResult = () => ({ applied: [], skipped: [], deferred: [], newlyDeferred: [] });
+/** The bound for one run: an explicit option wins, then the operator's env
+ *  override when it is a positive whole number of milliseconds, then the
+ *  built-in default. Read per call, so a host can be unstuck without a restart. */
+export function resolveMigrationTimeoutMs(explicit, env = process.env) {
+  if (explicit !== undefined && explicit !== null) return explicit;
+  const raw = String(env?.CROW_MIGRATION_CHILD_TIMEOUT_MS ?? "").trim();
+  const n = Number(raw);
+  if (raw !== "" && Number.isInteger(n) && n > 0) return n;
+  return MIGRATION_CHILD_TIMEOUT_MS;
+}
 
 /** "<N> s" for an error message, without turning 700 ms into "1". */
 function seconds(ms) {
   const s = ms / 1000;
   return Number.isInteger(s) ? String(s) : String(Number(s.toFixed(1)));
+}
+
+const RESULT_ARRAYS = ["applied", "skipped", "deferred", "newlyDeferred"];
+
+function isPlainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/** A result line only counts with all four arrays: anything else on stdout is a
+ *  stray line, not this protocol. */
+function isResult(value) {
+  return isPlainObject(value) && RESULT_ARRAYS.every((k) => Array.isArray(value[k]));
 }
 
 /**
@@ -51,7 +83,9 @@ function seconds(ms) {
  * says so in the log.
  *
  * The child is killed on every rejection: a timed-out or failed run must never
- * leave a process behind holding the store.
+ * leave a process behind holding the store. A child that reports success but
+ * does not exit (a migration left a timer or a socket open) gets `graceMs` to go
+ * on its own and is then SIGKILLed, so ticks cannot accumulate live children.
  *
  * @returns {Promise<{applied: string[], skipped: string[], deferred: string[], newlyDeferred: string[]}>}
  */
@@ -61,7 +95,8 @@ export async function runMigrationsInChild({
   tasksDbPath,
   sha = null,
   log = () => {},
-  timeoutMs = MIGRATION_CHILD_TIMEOUT_MS,
+  timeoutMs = undefined,
+  graceMs = 5000,
   scriptPath = defaultMigrationChildScript(),
 } = {}) {
   const script = scriptPath || defaultMigrationChildScript();
@@ -71,6 +106,7 @@ export async function runMigrationsInChild({
     return runMigrations({ migrationsDir, dbPath, tasksDbPath, sha, log });
   }
 
+  const limitMs = resolveMigrationTimeoutMs(timeoutMs);
   const payload = JSON.stringify({ migrationsDir, dbPath, tasksDbPath, sha });
 
   return new Promise((resolve, reject) => {
@@ -86,24 +122,39 @@ export async function runMigrationsInChild({
 
     const MAX_STDERR = 4 * 1024 * 1024;
     let settled = false;
-    let result = null;
     let stdoutBuf = "";
     let stderrTail = "";
     let timer = null;
+    let graceTimer = null;
+    let closed = false;
 
     const killChild = () => {
       try { child.kill("SIGKILL"); } catch { /* already gone */ }
+    };
+    const clearGrace = () => {
+      if (graceTimer) clearTimeout(graceTimer);
+      graceTimer = null;
     };
     const done = (err, val) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (err) {
+        clearGrace();
         killChild();
         reject(err);
         return;
       }
       resolve(val);
+    };
+
+    /** After the result line: the child should exit by itself; if it does not,
+     *  SIGKILL it. The timer is unref'd — it must never keep the gateway awake. */
+    const reapAfterResult = () => {
+      clearGrace();
+      if (closed) return; // it is gone: nothing to reap
+      graceTimer = setTimeout(killChild, graceMs);
+      if (typeof graceTimer.unref === "function") graceTimer.unref();
     };
 
     /** One NDJSON object. Returns true when it settled the promise. */
@@ -115,21 +166,23 @@ export async function runMigrationsInChild({
       if (!obj || typeof obj !== "object") return false;
       if (typeof obj.log === "string") { log(obj.log); return false; }
       if ("error" in obj) {
+        if (typeof obj.error !== "string") return false; // not this protocol
         // The migration's own message, unchanged — the caller wraps it textually.
-        done(new Error(String(obj.error)));
+        done(new Error(obj.error));
         return true;
       }
       if ("result" in obj) {
-        result = obj.result;
-        done(null, result ?? emptyResult());
+        if (!isResult(obj.result)) return false; // a stray line that merely looks like one
+        done(null, obj.result);
+        reapAfterResult();
         return true;
       }
       return false;
     };
 
     timer = setTimeout(() => {
-      done(new Error(`migration process timed out after ${seconds(timeoutMs)} s`));
-    }, timeoutMs);
+      done(new Error(`migration process timed out after ${seconds(limitMs)} s`));
+    }, limitMs);
 
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
@@ -150,6 +203,8 @@ export async function runMigrationsInChild({
       done(new Error(`migration process failed to start: ${err?.message || err}`));
     });
     child.on("close", (code, signal) => {
+      closed = true;
+      clearGrace();
       if (settled) return;
       // A last line the child wrote without a trailing newline still counts.
       if (consume(stdoutBuf) || settled) return;
