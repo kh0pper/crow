@@ -100,10 +100,19 @@ function makeClock(start = T0) {
  *
  * `gate.delay` makes every call yield, and `gate.hold` parks every call on a promise the test
  * releases: that is how a test keeps a run observably in flight while it pokes at the supervisor.
+ * A close ends every call that is still in flight or parked, the way a dropped connection does, so a
+ * run held open across a close fails instead of hanging forever.
  */
 function adapterView(fake, gate) {
   const state = { calls: [], closed: false };
   const watchers = new Set();
+  // The close signal every call races: rejected once, when the connection goes.
+  let dropCalls = null;
+  const closedSignal = new Promise((resolve, reject) => {
+    dropCalls = reject;
+  });
+  closedSignal.catch(() => {});
+  const whileOpen = (work) => Promise.race([Promise.resolve().then(work), closedSignal]);
   const pause = async () => {
     const hold = gate.hold;
     if (hold) await hold;
@@ -115,58 +124,77 @@ function adapterView(fake, gate) {
   };
   return {
     state,
-    async connect() {
-      open("connect");
-      await pause();
-      await fake.connect();
+    connect() {
+      return whileOpen(async () => {
+        open("connect");
+        await pause();
+        await fake.connect();
+      });
     },
     async close() {
       if (state.closed) return;
       state.closed = true;
       state.calls.push("close");
+      // A real connection drops whatever it has in flight: a call parked here (the gate's hold, or a
+      // `hangNext` inside the fake) rejects now rather than waiting for a socket that is gone.
+      dropCalls(new MailError("NETWORK", "closed"));
       for (const watcher of [...watchers]) watcher.stop();
       watchers.clear();
     },
-    async listFolders() {
-      open("listFolders");
-      await pause();
-      return fake.listFolders();
+    listFolders() {
+      return whileOpen(async () => {
+        open("listFolders");
+        await pause();
+        return fake.listFolders();
+      });
     },
-    async list(folderPath, options) {
-      open("list");
-      await pause();
-      return fake.list(folderPath, options);
+    list(folderPath, options) {
+      return whileOpen(async () => {
+        open("list");
+        await pause();
+        return fake.list(folderPath, options);
+      });
     },
-    async get(folderPath, uids) {
-      open("get");
-      await pause();
-      return fake.get(folderPath, uids);
+    get(folderPath, uids) {
+      return whileOpen(async () => {
+        open("get");
+        await pause();
+        return fake.get(folderPath, uids);
+      });
     },
-    async search(query, options) {
-      open("search");
-      await pause();
-      return fake.search(query, options);
+    search(query, options) {
+      return whileOpen(async () => {
+        open("search");
+        await pause();
+        return fake.search(query, options);
+      });
     },
-    async saveDraft(raw) {
-      open("saveDraft");
-      return fake.saveDraft(raw);
+    saveDraft(raw) {
+      return whileOpen(async () => {
+        open("saveDraft");
+        return fake.saveDraft(raw);
+      });
     },
-    async send(message) {
-      open("send");
-      return fake.send(message);
+    send(message) {
+      return whileOpen(async () => {
+        open("send");
+        return fake.send(message);
+      });
     },
-    async watch(folderPaths, handlers) {
-      open("watch");
-      await pause();
-      const watcher = await fake.watch(folderPaths, handlers);
-      const handle = {
-        stop() {
-          watchers.delete(handle);
-          watcher.stop();
-        },
-      };
-      watchers.add(handle);
-      return handle;
+    watch(folderPaths, handlers) {
+      return whileOpen(async () => {
+        open("watch");
+        await pause();
+        const watcher = await fake.watch(folderPaths, handlers);
+        const handle = {
+          stop() {
+            watchers.delete(handle);
+            watcher.stop();
+          },
+        };
+        watchers.add(handle);
+        return handle;
+      });
     },
     // The seeding hooks, so a test can talk to the mailbox through the adapter it was handed.
     deliver: (...args) => fake.deliver(...args),
@@ -631,6 +659,43 @@ test("noteChange nudges only a running sync, and exactly once", async () => {
   assert.equal(callsOf(h.fake, "listFolders").length - listsBefore, 2);
 });
 
+test("a request that arrives during a run that then fails is not drained on top of the failure", async () => {
+  const h = await setup();
+  const folders = await folderRows(h.db, h.accountId);
+  const drafts = folders.find((folder) => folder.path === "Drafts");
+  const listsBefore = callsOf(h.fake, "listFolders").length;
+  const draftsBefore = listCount(h.fake, "Drafts");
+
+  h.fake.failNext("list", netError());
+  const release = holdCalls(h.gate);
+  const first = h.supervisor.requestSync(h.accountId, { folderIds: [drafts.id] });
+  await flush(20);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+  // A request during the run: it must survive the run's failure, not be run right after it.
+  const second = h.supervisor.requestSync(h.accountId, { folderIds: [drafts.id] });
+  await flush(20);
+  release();
+  await Promise.all([first, second]);
+  await flush(200);
+
+  // The run failed. Its pending request was NOT taken: nothing runs on top of a failure, so the
+  // back-off is the only thing between this failure and the next attempt (a drained request would
+  // have started a full pass at once).
+  let state = await getSyncState(h.db, h.accountId);
+  assert.equal(state.state, "backoff");
+  assert.equal(state.failures, 1);
+  assert.equal(callsOf(h.fake, "listFolders").length, listsBefore);
+  assert.equal((await h.supervisor.status(h.accountId)).running, false);
+
+  // After the back-off the retry is a FULL sync, so the folder the request named is covered by it.
+  await h.clock.advance(BACKOFF_BASE_MS);
+  state = await getSyncState(h.db, h.accountId);
+  assert.equal(state.state, "idle");
+  assert.equal(state.failures, 0);
+  assert.equal(callsOf(h.fake, "listFolders").length, listsBefore + 1);
+  assert.equal(listCount(h.fake, "Drafts"), draftsBefore + 2);
+});
+
 test("requestSync with folder ids syncs only those folders", async () => {
   const h = await setup();
   const folders = await folderRows(h.db, h.accountId);
@@ -874,6 +939,80 @@ test("restartAccount drops both adapters and the next factory call sees the new 
   assert.equal((await h.supervisor.status(h.accountId)).watching, true);
 });
 
+test("restartAccount ends the run in flight itself: no false failure, and the new secret is used", async () => {
+  const h = await setup();
+  const state = () => getSyncState(h.db, h.accountId);
+  const listsBefore = callsOf(h.fake, "listFolders").length;
+
+  // A pass parked on a listing that a real connection drops when it closes: exactly the run a
+  // restart must not turn into a failure.
+  h.fake.hangNext("list");
+  const hung = h.supervisor.syncNow(h.accountId);
+  await flush(8);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+  const hungView = h.views.at(-1);
+
+  // The owner re-entered the app password while that pass was still running.
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  // The run the restart ended settles on its own: nothing is left waiting for it.
+  await hung;
+  await flush(200);
+
+  assert.equal(hungView.state.closed, true);
+  const current = await state();
+  assert.equal(current.failures, 0);
+  // Not "backoff": the ended run left no failure behind, so no back-off delays the fresh sync.
+  assert.equal(current.state, "idle");
+  assert.equal(current.errorCode, null);
+  // The fresh full sync went out through the normal path (a new factory call) and used the new
+  // secret, so the password change took effect at once.
+  assert.equal(h.views.length, 2);
+  assert.equal(h.secrets.at(-1), "second-secret");
+  assert.ok(callsOf(h.fake, "listFolders").length > listsBefore);
+  assert.equal(current.lastSuccessAt, h.clock.now());
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+});
+
+test("closeWorkerAdapter drops the watch with the connection, so a restart re-arms a fresh one", async () => {
+  let inner = null;
+  let supervisorRef = null;
+  const watchingAtFactory = [];
+  const h = await setup({
+    start: false,
+    adapterFactory: async (args) => {
+      // Snapshot what the worker still believes it is watching when the next connection is built.
+      if (supervisorRef != null) {
+        watchingAtFactory.push((await supervisorRef.status(args.account.id)).watching);
+      }
+      return inner(args);
+    },
+  });
+  inner = h.factory;
+  supervisorRef = h.supervisor;
+
+  await h.supervisor.start();
+  assert.deepEqual(watchingAtFactory, [false]);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  const watchCallsBefore = callsOf(h.fake, "watch").length;
+
+  // A restart is the one path where closeWorkerAdapter alone can drop the watch: recordFailure and
+  // becomeClaimed stop it themselves, this one does not.
+  h.box.password = "second-secret";
+  await h.supervisor.restartAccount(h.accountId);
+  await flush(120);
+
+  // The connection the old watch was made on is gone, so the worker must not still claim to watch
+  // (a stale entry would also make ensureWatch trust a watch on a closed adapter).
+  assert.equal(watchingAtFactory.length, 2);
+  assert.equal(watchingAtFactory[1], false);
+
+  // And the successful run put a new watch on the new connection.
+  assert.equal(callsOf(h.fake, "watch").length, watchCallsBefore + 1);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  await h.supervisor.stop();
+});
+
 /* ------------------------------------------------------------------ no leakage */
 
 test("start never throws: a factory that cannot connect is a code in the log and a back-off", async () => {
@@ -1028,6 +1167,47 @@ test("stop() during ensureWatch stops the watcher it was arming and keeps no con
   assert.equal(lateWatcherStopped, true);
   assert.equal(h.views[0].state.closed, true);
   assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+  assert.equal(h.clock.pending(), 0);
+});
+
+/* --------------------------------------- the stopped guard in startRun itself (M) */
+
+test("a start that reaches startRun after stop() opens nothing and records nothing", async () => {
+  const h = await setup({ start: false });
+  // Park the one read startWorker makes between its live() check and startRun, so stop() lands in
+  // that window. This is the only way into startRun that does not go through prepare(), whose own
+  // guard would answer first.
+  const realExecute = h.db.execute.bind(h.db);
+  let releaseState = null;
+  const stateGate = new Promise((resolve) => {
+    releaseState = resolve;
+  });
+  let parked = false;
+  h.db.execute = async (query, ...rest) => {
+    const sql = typeof query === "string" ? query : query?.sql ?? "";
+    if (!parked && /FROM mail_sync_state/.test(sql)) {
+      parked = true;
+      await stateGate;
+    }
+    return realExecute(query, ...rest);
+  };
+
+  const starting = h.supervisor.start();
+  await flush(60);
+  assert.equal(parked, true);
+  assert.equal(h.views.length, 0);
+
+  await h.supervisor.stop();
+  releaseState();
+  await starting;
+  await flush(120);
+
+  // startRun was reached with the supervisor stopped: no connection is built, no run is recorded and
+  // the sync state is never touched (a run that started would have failed and backed off).
+  assert.equal(h.views.length, 0);
+  assert.equal(callsOf(h.fake, "listFolders").length, 0);
+  assert.equal(await getSyncState(h.db, h.accountId), null);
+  assert.equal((await h.supervisor.status(h.accountId)).running, false);
   assert.equal(h.clock.pending(), 0);
 });
 

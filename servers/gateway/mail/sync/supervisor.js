@@ -19,6 +19,13 @@
  * `syncNow` is not stuck behind a promise that will never settle. A fresh adapter is built after any
  * close, by the pinned `adapterFactory({account, credentials})`, which reads the keychain again.
  *
+ * **A run ended on purpose is never a failure.** `stop()`, the deadline timer and `restartAccount`
+ * all end a run the same way: it is closed out first (its timer disarmed, its in-flight entry
+ * cleared, its promise resolved) and the connection goes afterwards, so the rejection the close
+ * causes is ignored — no failure count, no back-off and no notice. `restartAccount` closes the old
+ * password's run out BEFORE closing the adapter and then starts one fresh full sync through the same
+ * path a manual sync takes, so the run that follows is always built with the secret just stored.
+ *
  * **Failures back off, and a lost watch never touches stored mail.** Every failure but AUTH_FAILED
  * counts up the same ladder (`backoffDelay` doubles from five seconds to fifteen minutes with
  * jitter) — a connection fault and a code the engine raised for a bad setting, a missing item or a
@@ -529,6 +536,24 @@ export function createMailSupervisor(options = {}) {
     return run.settled;
   }
 
+  /**
+   * End the worker's in-flight run from the outside, without reporting anything about it: the run is
+   * marked closed out, its deadline timer disarmed, the in-flight entry cleared and its promise
+   * resolved, so whoever joined it is not left waiting for a run that is over. The run's own later
+   * rejection — the adapter it was using is about to close under it — is ignored by `executeRun`,
+   * which is the point: a run this module ended on purpose is never a failure (no count, no back-off,
+   * no notice). `stop()` and `restartAccount` both end a run this way.
+   */
+  function closeOutRun(worker) {
+    const run = worker.inflight;
+    if (run == null) return null;
+    run.closedOut = true;
+    run.timer = disarm(run.timer);
+    worker.inflight = null;
+    run.resolve();
+    return run;
+  }
+
   async function executeRun(worker, run) {
     const deadlineAt = now() + SYNC_DEADLINE_MS;
     let failed = false;
@@ -692,6 +717,8 @@ export function createMailSupervisor(options = {}) {
       failures,
       backoffUntil: now() + delay,
     });
+    // At the threshold and on every failure after it: from here on the gap is what decides whether a
+    // notice goes out (see maybeFailingNotice), so a long outage is mentioned about once a day.
     if (failures >= FAILURES_BEFORE_NOTICE) await maybeFailingNotice(worker, previous);
     armBackoff(worker, delay);
     logEvent("sync_backoff", { accountId: worker.accountId, code: mailErr.code, failures });
@@ -724,9 +751,15 @@ export function createMailSupervisor(options = {}) {
    * One fixed sentence per kind. There are two kinds and one persisted stamp: `mail_sync_state` has
    * no per-kind column and the schema does not change, so the failing-sync notice is gated by
    * `last_notice_at` (plus its own in-memory stamp) while the AUTH_FAILED notice is sent on the
-   * transition into `auth_failed` only and never consults the gap.
+   * transition into `auth_failed` only and never consults the gap. Both kinds write that one shared
+   * `last_notice_at` column.
    */
   async function sendNotice(worker, kind) {
+    // The in-memory stamp goes down BEFORE the first await. Two failures recorded at the same moment
+    // both reach the gate before either has written the persisted stamp, and this is what makes the
+    // second one see that the notice is already going out and stay quiet.
+    const stampAt = now();
+    worker.noticeAt[kind] = stampAt;
     const account = await accountOrNull(worker.accountId);
     const label = typeof account?.label === "string" && account.label !== "" ? account.label : "this account";
     const title = kind === "auth" ? "Crow Mail cannot sign in" : "Mail sync is failing";
@@ -736,8 +769,7 @@ export function createMailSupervisor(options = {}) {
 
     // The stamps are written before the notice: a notice that cannot be delivered must not be repeated
     // on every failure for the next twenty-four hours.
-    worker.noticeAt[kind] = now();
-    await writeState(worker.accountId, { lastNoticeAt: now() });
+    await writeState(worker.accountId, { lastNoticeAt: stampAt });
     try {
       await notifyOwner(title, body);
       logEvent("notice_sent", { accountId: worker.accountId, kind });
@@ -747,9 +779,17 @@ export function createMailSupervisor(options = {}) {
   }
 
   /**
-   * The failing-sync notice: at most once per NOTICE_GAP_MS. It may repeat every 24 h while failures
-   * stay at or above the threshold — the retry is still failing, and the owner should hear it again a
-   * day later — but never sooner.
+   * The failing-sync notice gate: at most once per NOTICE_GAP_MS.
+   *
+   * It INTENTIONALLY REPEATS, which is a deviation from "one notice at the fifth consecutive failure":
+   * once failures are at or above FAILURES_BEFORE_NOTICE every later failure reaches this gate, and
+   * only the gap decides whether a notice goes out, so an account that keeps failing is mentioned
+   * roughly once a day rather than once and never again. That is deliberate — the retry is still
+   * failing and the owner should hear it again — and it is why the gap, not the count, is the gate.
+   *
+   * `mail_sync_state.last_notice_at` is ONE stamp SHARED BY BOTH KINDS (the schema has no per-kind
+   * column and does not change): this gate compares it (and its own in-memory stamp) against the gap;
+   * the AUTH_FAILED notice never consults them, so a "sync is failing" notice cannot silence it.
    */
   async function maybeFailingNotice(worker, previous) {
     const stored = Number(previous?.lastNoticeAt);
@@ -1120,10 +1160,11 @@ export function createMailSupervisor(options = {}) {
   }
 
   /**
-   * The keychain may have changed under us (a new app password): drop both connections so the next
-   * factory call reads the secret again, and start the worker over through the same preparation a
-   * manual sync does — so a claim is re-checked and a signed-out account is retried and marked active
-   * again. A resolved promise means "nothing to do here" (stopped, or the claim still stands).
+   * The keychain may have changed under us (a new app password): end the run in flight, drop both
+   * connections so the next factory call reads the secret again, and start the worker over through
+   * the same preparation a manual sync does — so a claim is re-checked and a signed-out account is
+   * retried and marked active again. A resolved promise means "nothing to do here" (stopped, or the
+   * claim still stands).
    */
   async function restartAccount(accountId) {
     if (!live()) return undefined;
@@ -1132,6 +1173,14 @@ export function createMailSupervisor(options = {}) {
     const worker = workerFor(account);
     await closeActionAdapter(accountId);
     worker.backoffTimer = disarm(worker.backoffTimer);
+    // The run in flight belongs to the OLD password, so it is ended here, before its connection is
+    // closed, exactly as `stop()` ends one. Its rejection — the close that follows is what causes it —
+    // is then ignored by executeRun: no failure count, no back-off and no notice, so nothing is armed
+    // that could delay the fresh sync this restart is about to start (which would keep using the old
+    // secret). The request that run was still carrying is dropped rather than drained: the fresh run
+    // below is a full sync and covers it.
+    closeOutRun(worker);
+    clearPending(worker);
     await closeWorkerAdapter(worker);
     worker.tick = 0;
 
@@ -1252,13 +1301,7 @@ export function createMailSupervisor(options = {}) {
       worker.backoffTimer = disarm(worker.backoffTimer);
       stopWatcher(worker);
       clearPending(worker);
-      const run = worker.inflight;
-      if (run != null) {
-        run.closedOut = true;
-        run.timer = disarm(run.timer);
-        worker.inflight = null;
-        run.resolve();
-      }
+      closeOutRun(worker);
       const adapter = worker.adapter;
       worker.adapter = null;
       if (adapter != null && typeof adapter.close === "function") {
