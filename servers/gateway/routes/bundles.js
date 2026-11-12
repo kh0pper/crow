@@ -4314,6 +4314,24 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           if (token?.needsRestart) needsRestart = true;
         }
       }
+    } else if (!composeFailure && firstAdminVia(manifest) === "env") {
+      // `via: "env"`: the app made its own admin from the password Crow generated at install
+      // (saved in the keychain BEFORE compose up — an install whose save failed aborts before
+      // this point), so the admin exists as soon as the app answers. An app that mints an API
+      // token for Crow (`firstAdmin.token`, the sibling of `secretEnv`) gets it here, exactly
+      // once, the way a setup bundle's does: same guarded run, same per-install record, same
+      // "a written MCP entry asks for the restart below".
+      const reviewed = getManifest(bundleId);
+      const tokenPlan = apiTokenPlan(reviewed);
+      if (tokenPlan && !tokenPlan.refused) {
+        const token = await runApiTokenStep({
+          bundleId,
+          manifest: reviewed,
+          installStamp: recordedInstallAt,
+          log: (m) => appendLog(job, m),
+        });
+        if (token?.needsRestart) needsRestart = true;
+      }
     }
 
     // Security audit N3-4 phase 2e: an INVITE-ONLY app (manifest

@@ -300,7 +300,14 @@ test("the real manifests use the modes the audit mapped (no silent downgrade to 
     },
     {
       "actual-budget": { mode: "crow", via: "postInstall" },
-      miniflux: { mode: "crow", via: "env", secretEnv: "MINIFLUX_ADMIN_PASSWORD", userEnv: "MINIFLUX_ADMIN_USER" },
+      miniflux: {
+        mode: "crow",
+        via: "env",
+        secretEnv: "MINIFLUX_ADMIN_PASSWORD",
+        userEnv: "MINIFLUX_ADMIN_USER",
+        // The app's own API key, minted from the admin login Crow generated at install.
+        token: { script: "scripts/api-token.sh", env: "MINIFLUX_API_KEY", stdin: "admin-password", timeout_s: 120 },
+      },
       minio: { mode: "crow", via: "env", secretEnv: "MINIO_ROOT_PASSWORD", userEnv: "MINIO_ROOT_USER" },
       unsloth: { mode: "crow", via: "env", secretEnv: "UNSLOTH_STUDIO_PASSWORD" },
       "maker-lab-advanced": { mode: "crow", via: "env", secretEnv: "MLA_ADMIN_PASSWORD", userEnv: "MLA_ADMIN_USER" },

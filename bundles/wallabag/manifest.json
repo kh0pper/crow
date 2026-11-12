@@ -1,7 +1,7 @@
 {
   "id": "wallabag",
   "name": "Wallabag",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Self-hosted read-it-later — save articles, read offline, and organize with tags",
   "type": "bundle",
   "author": "Crow",
@@ -16,7 +16,7 @@
   "requires": { "env": ["WALLABAG_CLIENT_ID", "WALLABAG_CLIENT_SECRET", "WALLABAG_USERNAME", "WALLABAG_PASSWORD"], "min_ram_mb": 512, "min_disk_mb": 500 },
   "env_vars": [
     { "name": "WALLABAG_URL", "description": "Wallabag server URL", "default": "http://localhost:8084", "required": true },
-    { "name": "WALLABAG_CLIENT_ID", "description": "Wallabag OAuth2 client ID (API clients management)", "required": true },
+    { "name": "WALLABAG_CLIENT_ID", "description": "Wallabag OAuth2 client ID (created by Crow at install)", "required": true, "secret": true },
     { "name": "WALLABAG_CLIENT_SECRET", "description": "Wallabag OAuth2 client secret", "required": true, "secret": true },
     { "name": "WALLABAG_USERNAME", "description": "Wallabag username", "required": true },
     { "name": "WALLABAG_PASSWORD", "description": "Wallabag password", "required": true, "secret": true },
@@ -27,9 +27,18 @@
   "firstAdmin": {
     "mode": "crow",
     "via": "setup",
-    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 240 },
+    "setup": {
+      "script": "scripts/first-admin.sh",
+      "timeout_s": 240,
+      "token": {
+        "script": "scripts/api-token.sh",
+        "env": ["WALLABAG_CLIENT_ID", "WALLABAG_CLIENT_SECRET"],
+        "stdin": "admin-password",
+        "timeout_s": 180
+      }
+    },
     "user": "wallabag",
     "secretEnv": "WALLABAG_PASSWORD", "userEnv": "WALLABAG_USERNAME"
   },
-  "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Crow replaces the shipped wallabag/wallabag admin login at install and writes WALLABAG_USERNAME/WALLABAG_PASSWORD into this bundle's settings itself, so the MCP server logs in with no extra step; the password is in Settings → Passwords. Create an API client in Wallabag under Developer > Create a new client, then put its id and secret into WALLABAG_CLIENT_ID/WALLABAG_CLIENT_SECRET. To keep an account of your own, set WALLABAG_USERNAME to it before installing: Crow then leaves that login alone."
+  "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Crow replaces the shipped wallabag/wallabag admin login at install and writes WALLABAG_USERNAME/WALLABAG_PASSWORD into this bundle's settings itself, so the MCP server logs in with no extra step; the password is in Settings → Passwords. Crow also creates the OAuth2 client at install and keeps its id and secret in this extension's settings, so there is nothing to paste. To keep an account of your own, set WALLABAG_USERNAME to it before installing: Crow then leaves that login (and its own OAuth client) alone."
 }

@@ -3273,7 +3273,7 @@
     {
       "id": "linkding",
       "name": "Linkding",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Lightweight bookmark manager — save, tag, search, and organize web links",
       "type": "bundle",
       "author": "Crow",
@@ -3321,7 +3321,8 @@
           "name": "LINKDING_API_TOKEN",
           "description": "API token from Linkding Settings > Integrations",
           "required": true,
-          "secret": true
+          "secret": true,
+          "pattern": "^[0-9a-f]{40}$"
         }
       ],
       "ports": [
@@ -3337,12 +3338,17 @@
         "via": "setup",
         "setup": {
           "script": "scripts/first-admin.sh",
-          "timeout_s": 180
+          "timeout_s": 180,
+          "token": {
+            "script": "scripts/api-token.sh",
+            "env": "LINKDING_API_TOKEN",
+            "timeout_s": 120
+          }
         },
         "user": "admin",
         "secretEnv": "LINKDING_ADMIN_PASSWORD"
       },
-      "notes": "Self-host via Docker or connect to an existing Linkding instance. Generate an API token in Linkding Settings > Integrations.",
+      "notes": "Self-host via Docker or connect to an existing Linkding instance. Crow creates the admin account and an API token at install, so there is nothing to paste.",
       "official": true
     },
     {
@@ -4410,7 +4416,7 @@
     {
       "id": "miniflux",
       "name": "Miniflux",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "refreshFiles": [
         "docker-compose.yml"
       ],
@@ -4460,7 +4466,7 @@
         },
         {
           "name": "MINIFLUX_API_KEY",
-          "description": "Miniflux API key (Settings > API Keys)",
+          "description": "API key Crow creates in Miniflux at install (Settings > API Keys)",
           "required": true,
           "secret": true
         },
@@ -4501,9 +4507,15 @@
         "mode": "crow",
         "via": "env",
         "secretEnv": "MINIFLUX_ADMIN_PASSWORD",
-        "userEnv": "MINIFLUX_ADMIN_USER"
+        "userEnv": "MINIFLUX_ADMIN_USER",
+        "token": {
+          "script": "scripts/api-token.sh",
+          "env": "MINIFLUX_API_KEY",
+          "stdin": "admin-password",
+          "timeout_s": 120
+        }
       },
-      "notes": "Self-host via Docker (Crow generates the admin password and saves it in Settings → Passwords) or connect to an existing server (set MINIFLUX_URL + MINIFLUX_API_KEY). Either way, create an API key in Miniflux (Settings → API Keys) and paste it into MINIFLUX_API_KEY.",
+      "notes": "Self-host via Docker (Crow generates the admin password, saves it in Settings → Passwords, and creates an API key for this extension at install) or connect to an existing server (set MINIFLUX_URL + MINIFLUX_API_KEY).",
       "official": true
     },
     {
@@ -7868,7 +7880,7 @@
     {
       "id": "wallabag",
       "name": "Wallabag",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "description": "Self-hosted read-it-later — save articles, read offline, and organize with tags",
       "type": "bundle",
       "author": "Crow",
@@ -7921,8 +7933,9 @@
         },
         {
           "name": "WALLABAG_CLIENT_ID",
-          "description": "Wallabag OAuth2 client ID (API clients management)",
-          "required": true
+          "description": "Wallabag OAuth2 client ID (created by Crow at install)",
+          "required": true,
+          "secret": true
         },
         {
           "name": "WALLABAG_CLIENT_SECRET",
@@ -7962,13 +7975,22 @@
         "via": "setup",
         "setup": {
           "script": "scripts/first-admin.sh",
-          "timeout_s": 240
+          "timeout_s": 240,
+          "token": {
+            "script": "scripts/api-token.sh",
+            "env": [
+              "WALLABAG_CLIENT_ID",
+              "WALLABAG_CLIENT_SECRET"
+            ],
+            "stdin": "admin-password",
+            "timeout_s": 180
+          }
         },
         "user": "wallabag",
         "secretEnv": "WALLABAG_PASSWORD",
         "userEnv": "WALLABAG_USERNAME"
       },
-      "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Crow replaces the shipped wallabag/wallabag admin login at install and writes WALLABAG_USERNAME/WALLABAG_PASSWORD into this bundle's settings itself, so the MCP server logs in with no extra step; the password is in Settings → Passwords. Create an API client in Wallabag under Developer > Create a new client, then put its id and secret into WALLABAG_CLIENT_ID/WALLABAG_CLIENT_SECRET. To keep an account of your own, set WALLABAG_USERNAME to it before installing: Crow then leaves that login alone.",
+      "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Crow replaces the shipped wallabag/wallabag admin login at install and writes WALLABAG_USERNAME/WALLABAG_PASSWORD into this bundle's settings itself, so the MCP server logs in with no extra step; the password is in Settings → Passwords. Crow also creates the OAuth2 client at install and keeps its id and secret in this extension's settings, so there is nothing to paste. To keep an account of your own, set WALLABAG_USERNAME to it before installing: Crow then leaves that login (and its own OAuth client) alone.",
       "official": true
     },
     {

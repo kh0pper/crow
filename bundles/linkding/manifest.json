@@ -1,7 +1,7 @@
 {
   "id": "linkding",
   "name": "Linkding",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Lightweight bookmark manager — save, tag, search, and organize web links",
   "type": "bundle",
   "author": "Crow",
@@ -16,16 +16,20 @@
   "requires": { "env": ["LINKDING_API_TOKEN"], "min_ram_mb": 128, "min_disk_mb": 100 },
   "env_vars": [
     { "name": "LINKDING_URL", "description": "Linkding server URL", "default": "http://localhost:9090", "required": true },
-    { "name": "LINKDING_API_TOKEN", "description": "API token from Linkding Settings > Integrations", "required": true, "secret": true }
+    { "name": "LINKDING_API_TOKEN", "description": "API token from Linkding Settings > Integrations", "required": true, "secret": true, "pattern": "^[0-9a-f]{40}$" }
   ],
   "ports": [9090],
   "webUI": { "port": 9090, "path": "/", "label": "Linkding" },
   "firstAdmin": {
     "mode": "crow",
     "via": "setup",
-    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+    "setup": {
+      "script": "scripts/first-admin.sh",
+      "timeout_s": 180,
+      "token": { "script": "scripts/api-token.sh", "env": "LINKDING_API_TOKEN", "timeout_s": 120 }
+    },
     "user": "admin",
     "secretEnv": "LINKDING_ADMIN_PASSWORD"
   },
-  "notes": "Self-host via Docker or connect to an existing Linkding instance. Generate an API token in Linkding Settings > Integrations."
+  "notes": "Self-host via Docker or connect to an existing Linkding instance. Crow creates the admin account and an API token at install, so there is nothing to paste."
 }
