@@ -8,5 +8,6 @@
   "category": "media",
   "tags": ["music", "funkwhale", "player", "subsonic"],
   "icon": "music",
-  "panel": "panel/music.js"
+  "panel": "panel/music.js",
+  "requires": { "bundles": ["funkwhale"] }
 }
