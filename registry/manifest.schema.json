@@ -135,6 +135,16 @@
           "properties": {
             "script": { "type": "string", "minLength": 1, "maxLength": 300 },
             "timeout_s": { "type": "integer", "minimum": 1, "maximum": 600 },
+            "token": {
+              "type": "object",
+              "required": ["script", "env"],
+              "additionalProperties": false,
+              "properties": {
+                "script": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\.sh$" },
+                "env": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z_][A-Z0-9_]*$" },
+                "timeout_s": { "type": "integer", "minimum": 1, "maximum": 600 }
+              }
+            },
             "after": {
               "type": "object",
               "additionalProperties": false,

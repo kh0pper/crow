@@ -24,8 +24,9 @@ import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
 import { reportImagePullFailure } from "../bundle-pull-alert.js";
 import { markFirstAdminDone, reportFirstAdminNotice, firstAdminVia, clearFirstAdminNotice } from "../bundle-first-admin.js";
-import { runFirstAdminSetup, saveFirstAdminLogin, firstAdminSetupPlan, firstAdminResultMessage, SETUP_UNAVAILABLE } from "../bundle-first-admin-setup.js";
+import { runFirstAdminSetup, saveFirstAdminLogin, firstAdminSetupPlan, firstAdminResultMessage, SETUP_UNAVAILABLE, tryBeginFirstAdminSetup, endFirstAdminSetup } from "../bundle-first-admin-setup.js";
 import { applyFirstAdminAfter, firstAdminAfterPlan, firstAdminAfterFailureSentence } from "../bundle-first-admin-after.js";
+import { runApiToken, apiTokenPlan, apiTokenResultMessage, installStampOf } from "../bundle-api-token.js";
 import { saveApiKey } from "../bundle-apikey-save.js";
 import {
   inviteHandlerFor,
@@ -1567,6 +1568,73 @@ export function _setHookRunnerForTest(fn) { _hookRunnerForTest = fn || null; }
 // Test-only: seams for the first-admin setup run (script runner, keychain, .env writer).
 let _firstAdminSetupDepsForTest = null;
 export function _setFirstAdminSetupDepsForTest(d) { _firstAdminSetupDepsForTest = d || null; }
+
+// Test-only: seams for the API-token step the first-admin setup hands over to (the script
+// runner, the save, the warn sink) — the shape runApiToken takes as `deps`.
+let _apiTokenDepsForTest = null;
+export function _setApiTokenDepsForTest(d) { _apiTokenDepsForTest = d || null; }
+
+/** The install stamp THIS install of the bundle carries right now (null when it is gone). */
+function currentInstallStamp(bundleId) {
+  try {
+    return installStampOf(getInstalled().find((e) => e && e.id === bundleId));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The API-token step both first-admin paths run — the install job and the Extensions card's
+ * "Set it up for me" — once the app's admin exists (`firstAdmin.setup.token`). One guarded
+ * run under the same per-bundle lock (a run already in flight is not raced), the script's own
+ * lines indented like the setup's, then one plain sentence. Nothing here reconnects: the
+ * written MCP entry asks for a restart, which the two callers report in their own way
+ * (review round 1, C7). Never throws, and never a token in a line.
+ *
+ * @param {object} o
+ * @param {string} o.bundleId
+ * @param {object} o.manifest   the REVIEWED manifest
+ * @param {(line: string) => void} o.log  where the lines go (job log, card answer)
+ * @param {string|null} [o.installStamp]  the install stamp the caller gated on (default: read now)
+ * @returns {Promise<{result: string, needsRestart: boolean}|null>} null when it was not run
+ */
+async function runApiTokenStep({ bundleId, manifest, log = () => {}, installStamp = null }) {
+  const plan = apiTokenPlan(manifest);
+  if (!plan || plan.refused) return null;
+  const name = (manifest && typeof manifest.name === "string" && manifest.name) || bundleId;
+  if (!tryBeginFirstAdminSetup(bundleId)) {
+    log(`Crow will connect ${name}'s API token later.`);
+    return { result: "busy", needsRestart: false };
+  }
+  // The stamp this run is tied to: a bundle uninstalled (or reinstalled — a NEW stamp)
+  // while the script runs must get no token.
+  const stamp = installStamp || currentInstallStamp(bundleId);
+  try {
+    const out = await runApiToken({
+      bundleId,
+      manifest,
+      scriptDir: join(APP_BUNDLES, bundleId),
+      destDir: join(BUNDLES_DIR, bundleId),
+      crowHome: CROW_HOME,
+      installStamp: stamp,
+      deps: {
+        ...(_apiTokenDepsForTest || {}),
+        // Re-read installed.json AFTER the script, exactly like the boot catch-up. This
+        // guard is authoritative, so a test seam cannot accidentally disable it.
+        stillInstalled: (id, at) => !!at && currentInstallStamp(id) === at,
+      },
+    });
+    for (const line of out.log || []) log(`  ${line}`);
+    log(apiTokenResultMessage({ result: out.result, name, reason: out.reason || null }));
+    return { result: out.result, needsRestart: !!out.mcpEnvUpdated };
+  } catch (err) {
+    // runApiToken never throws; this is belt and braces so the step can never fail an install.
+    log(apiTokenResultMessage({ result: "failed", name, reason: null }));
+    return { result: "failed", needsRestart: false };
+  } finally {
+    endFirstAdminSetup(bundleId);
+  }
+}
 
 // Test-only: seams for the first-admin INVITE step (fetch, keychain reader, clock).
 let _firstAdminInviteDepsForTest = null;
@@ -3982,6 +4050,18 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           firstAdminAfter = { ok: after.ok, outcome: after.outcome };
           if (!after.ok) appendLog(job, firstAdminAfterFailureSentence(reviewed?.name || bundleId));
         }
+        // The token the app mints for Crow (`firstAdmin.setup.token`): only once the app's
+        // admin really exists. Same lock as the card's run; it never reconnects here — a
+        // written MCP entry asks for the restart below (`needsRestart`).
+        if (auto.result === "ok") {
+          const token = await runApiTokenStep({
+            bundleId,
+            manifest: reviewed,
+            installStamp: recordedInstallAt,
+            log: (m) => appendLog(job, m),
+          });
+          if (token?.needsRestart) needsRestart = true;
+        }
       }
     }
 
@@ -4425,6 +4505,13 @@ export default function bundlesRouter() {
       after = step.outcome;
       afterResult = { ok: step.ok, outcome: step.outcome };
     }
+    // The token the app mints for Crow (`firstAdmin.setup.token`), once its admin exists.
+    // Same guarded run as the install path's; a written MCP entry is what the answer's
+    // `needs_restart` below reports (this route never starts a restart itself).
+    let apiToken = null;
+    if (out.result === "ok") {
+      apiToken = await runApiTokenStep({ bundleId, manifest, installStamp: installId, log: (m) => log.push(m) });
+    }
     // A follow-up step that failed leaves the app's door open while the card now reads as
     // finished, so it rings the same one bell the install path rings for this install. It is
     // stamped per install (an install that already rang stays silent — the card sentence is
@@ -4461,7 +4548,7 @@ export default function bundlesRouter() {
       // reads only when it is spawned. NOTHING restarts the gateway from here: a restart while
       // another bundle's install job runs kills that job (review round 3, finding 1). The card
       // shows the same "restart to apply" sentence Configure's save answers with.
-      needs_restart: !!out.mcpEnvUpdated,
+      needs_restart: !!out.mcpEnvUpdated || !!apiToken?.needsRestart,
       log,
     });
   });

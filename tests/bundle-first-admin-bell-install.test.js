@@ -46,6 +46,7 @@ const {
   _setDockerRunnerForTest,
   _setHookRunnerForTest,
   _setFirstAdminSetupDepsForTest,
+  _setApiTokenDepsForTest,
 } = await import("../servers/gateway/routes/bundles.js");
 const { tryBeginFirstAdminSetup, endFirstAdminSetup } = await import("../servers/gateway/bundle-first-admin-setup.js");
 
@@ -58,6 +59,7 @@ after(() => {
   _setDockerRunnerForTest(null);
   _setHookRunnerForTest(null);
   _setFirstAdminSetupDepsForTest(null);
+  _setApiTokenDepsForTest(null);
   for (const d of [TMP_HOME, TMP_BUNDLES]) { try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
 });
 
@@ -333,4 +335,99 @@ test("an install never starts a setup script while the card's run is in flight",
     unstubDocker();
   }
   assert.equal(ran, 0, "the second script never started");
+});
+
+// ── the API token the app mints for Crow (`firstAdmin.setup.token`) ──
+// The install path runs the token script only after `firstAdmin.setup` reported ok, under the
+// same per-bundle lock, and never reconnects: a token written into the bundle's MCP entry is
+// what `needsRestart` (the caller's one restart) is for.
+
+/** A 40-hex token, the shape the fixture manifest's own `pattern` describes. */
+const TOKEN = "0123456789abcdef0123456789abcdef01234567";
+
+/** The same crow/setup bundle, declaring that its app mints an API token for Crow. */
+function tokenSetupManifest(id) {
+  const manifest = setupManifest(id);
+  manifest.firstAdmin.setup.token = { script: "scripts/api-token.sh", env: "FX_API_TOKEN", timeout_s: 30 };
+  manifest.env_vars.push({ name: "FX_API_TOKEN", description: "API token", secret: true, pattern: "^[0-9a-f]{40}$" });
+  writeFileSync(join(TMP_BUNDLES, id, "manifest.json"), JSON.stringify(manifest, null, 2));
+  mkdirSync(join(TMP_BUNDLES, id, "scripts"), { recursive: true });
+  writeFileSync(join(TMP_BUNDLES, id, "scripts", "api-token.sh"), "#!/bin/sh\nexit 0\n");
+  return manifest;
+}
+
+/** The setup half of a successful install: the admin script really reports ok. */
+const SETUP_OK = {
+  runScript: async () => ({ stdout: "created the admin\n", stderr: "" }),
+  save: async () => ({ id: 1 }),
+  writeEnv: () => {},
+};
+
+test("the install runs the API-token step after the admin succeeded, and asks for the restart", async () => {
+  const id = "fx-token-ok";
+  const manifest = tokenSetupManifest(id);
+  stubDocker({});
+  const saved = [];
+  _setFirstAdminSetupDepsForTest(SETUP_OK);
+  _setApiTokenDepsForTest({
+    runner: async () => ({ stdout: "minted\n", stderr: "", secret: `${TOKEN}\n` }),
+    save: async (o) => { saved.push(o); return { ok: true, needs_restart: true, needs_config: [] }; },
+    warn: () => {},
+  });
+  try {
+    const job = _createJobForTest(id, "install");
+    const out = await runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+    _finishJobForTest(job, "complete");
+    assert.equal(out.ok, true, out.reason);
+    assert.equal(out.needsRestart, true, "the token went into the MCP entry: the caller's restart loads it");
+    const log = job.log.join("\n");
+    assert.match(log, /Connected Crow to fx-token-ok app with an API token it created/);
+    assert.match(log, /minted/, "the script's own output is in the log, indented like the setup's");
+    assert.equal(log.includes(TOKEN), false, "the token never reaches the install log");
+    assert.equal(saved.length, 1, "one save");
+    assert.deepEqual(
+      { ...saved[0], manifest: "manifest" },
+      {
+        bundleId: id,
+        manifest: "manifest",
+        envKey: "FX_API_TOKEN",
+        value: TOKEN,
+        crowHome: TMP_HOME,
+        origin: "generated",
+        propagate: false,
+        firstWriterWins: true,
+      },
+    );
+  } finally {
+    _setFirstAdminSetupDepsForTest(null);
+    _setApiTokenDepsForTest(null);
+    unstubDocker();
+  }
+});
+
+test("a failed admin setup never runs the API-token step", async () => {
+  const id = "fx-token-skip";
+  const manifest = tokenSetupManifest(id);
+  stubDocker({});
+  let tokenRan = 0;
+  _setFirstAdminSetupDepsForTest({
+    runScript: async () => { throw Object.assign(new Error("exit 4"), { exitCode: 4, stdout: "", stderr: "nothing is listening\nexit 4" }); },
+  });
+  _setApiTokenDepsForTest({
+    runner: async () => { tokenRan++; return { stdout: "", stderr: "", secret: `${TOKEN}\n` }; },
+    warn: () => {},
+  });
+  try {
+    const job = _createJobForTest(id, "install");
+    const out = await runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+    _finishJobForTest(job, "complete");
+    assert.equal(out.ok, true, "the install itself is fine; the app's admin is what is missing");
+    assert.match(job.log.join("\n"), /could not set up fx-token-skip app's admin login/);
+    assert.equal(job.log.join("\n").includes("API token"), false, "nothing about a token either");
+  } finally {
+    _setFirstAdminSetupDepsForTest(null);
+    _setApiTokenDepsForTest(null);
+    unstubDocker();
+  }
+  assert.equal(tokenRan, 0, "no admin, no token: the token script needs one to sign in with");
 });
