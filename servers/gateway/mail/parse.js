@@ -91,6 +91,19 @@ function placeholder(parseError) {
   };
 }
 
+/**
+ * The placeholder ParsedMessage for one failure code, without its attachment bytes: what the sync engine
+ * stores for a message it never parsed at all (one the server reported as larger than MAX_RAW_BYTES,
+ * or one whose bytes the adapter reported as empty). A fresh object each call, so a caller can never
+ * mutate a shared placeholder.
+ *
+ * @param {"too_large"|"unparseable"} parseError
+ * @returns {object} a ParsedMessage with parseError set
+ */
+export function placeholderMessage(parseError) {
+  return placeholder(parseError).parsed;
+}
+
 function bodyLimit(opts) {
   const wanted = opts && typeof opts === "object" ? opts.maxBodyChars : undefined;
   if (typeof wanted === "number" && Number.isFinite(wanted) && wanted >= 0) return Math.floor(wanted);
