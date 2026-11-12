@@ -93,6 +93,8 @@ import { wallsOnForHost } from "../../../scripts/addon-sandbox/host-switch.mjs";
 import { pinEntryIfWalled, PinRefused } from "../../../scripts/addon-sandbox/pin.mjs";
 import { sandboxLine } from "../../../scripts/addon-sandbox/words.mjs";
 import { addonWallStatus } from "../dashboard/shared/addon-wall-status.js";
+import { inspectKept, describeKept } from "../uninstall-kept.js";
+import { t as i18nT } from "../dashboard/shared/i18n.js";
 import { isStorageEnvConsumer } from "../addon-env.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
@@ -4949,12 +4951,17 @@ export default function bundlesRouter() {
       try {
         const manifest = getManifest(bundle_id);
         const addonType = manifest?.type || "bundle";
+        // The compose project this uninstall tore down, for the "what was kept" lookups below
+        // (named volumes are looked up by that project label). Null when there was nothing to
+        // tear down or the compose file was never read.
+        let keptProject = null;
 
         // 1. Type-specific cleanup
         if (addonType === "bundle") {
           const composePath = join(bundleDir, "docker-compose.yml");
           if (existsSync(composePath)) {
             const own = await composeOwnership(bundle_id, bundleDir, getInstalledFirstManifest(bundle_id));
+            keptProject = own.project || null;
             if (own.warning) appendLog(job, `Note: ${own.warning}`);
             if (own.refusal) {
               appendLog(job, `Containers left running: ${own.refusal}`);
@@ -5101,8 +5108,28 @@ export default function bundlesRouter() {
         // (incl. one an older install typed, or ran on as a compose fallback) for a reinstall.
         let composeTextForRetain = null;
         try { const cp = join(bundleDir, "docker-compose.yml"); if (existsSync(cp)) composeTextForRetain = readFileSync(cp, "utf8"); } catch {}
+        // The values compose interpolates into those image names live in the bundle's own
+        // .env (an `image: app:${TAG}` is unnameable without them). Best effort, read-only.
+        let bundleEnvForKept = {};
+        try { bundleEnvForKept = parseEnvText(readFileSync(join(bundleDir, ".env"), "utf8")); } catch {}
         const keptSecrets = retainGeneratedForReinstall(bundle_id, manifest, { destDir: bundleDir, crowHome: CROW_HOME, composeText: composeTextForRetain, includeFallbacks: !volumesRemoved });
         if (keptSecrets) appendLog(job, `Kept ${keptSecrets} generated secret(s) / library path(s) for a later reinstall (mode 600)`);
+        // Tell, do not delete: an uninstall removes the bundle's folder but the owner's data
+        // (named volumes, pulled images, the kept secrets file) stays. Read-only lookups, and
+        // nothing here may fail the uninstall — a docker that will not answer is just noted.
+        let keptBody;
+        try {
+          const kept = await inspectKept({
+            bundleId: bundle_id, project: keptProject, composeText: composeTextForRetain,
+            env: bundleEnvForKept, crowHome: CROW_HOME, runner: dockerRunner(),
+          });
+          const described = describeKept(kept, (key) => i18nT(key, "en"));
+          for (const line of described.logLines) appendLog(job, line);
+          keptBody = described.body;
+        } catch {
+          keptBody = i18nT("extensions.kept.couldNotCheck", "en");
+          appendLog(job, keptBody);
+        }
         rmSync(bundleDir, { recursive: true, force: true });
         appendLog(job, "Bundle files removed");
 
@@ -5155,6 +5182,7 @@ export default function bundlesRouter() {
           notifDb = createDbClient();
           await createNotification(notifDb, {
             title: `Removed: ${manifest?.name || bundle_id}`,
+            body: keptBody,
             type: "system",
             source: "bundle-installer",
             action_url: "/dashboard/extensions",
