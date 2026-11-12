@@ -1307,6 +1307,27 @@ export async function backfillBundleKeychain({ log = (m) => console.log(`[keycha
 }
 
 /**
+ * The ids that count as installed when a `requires.bundles` entry is judged: installed.json's
+ * own entries plus the keys of mcp-addons.json. An add-on can be registered there (with its
+ * bundle dir on disk) without ever being recorded in installed.json, and it is installed all
+ * the same — so a dependent bundle must be allowed to install, and the consented prereq list
+ * must not call it missing. A missing or unreadable file contributes nothing; only object keys
+ * count, so an array-shaped file adds none.
+ */
+export function dependencyInstalledIds(installed, path = MCP_ADDONS_PATH) {
+  const ids = new Set();
+  for (const entry of Array.isArray(installed) ? installed : []) {
+    const id = typeof entry === "string" ? entry : entry?.id;
+    if (typeof id === "string") ids.add(id);
+  }
+  const addons = readJsonSafe(path, null);
+  if (addons && typeof addons === "object" && !Array.isArray(addons)) {
+    for (const key of Object.keys(addons)) ids.add(key);
+  }
+  return ids;
+}
+
+/**
  * Boot repair for DEPENDENCY panels: a panel that another INSTALLED bundle needs must exist and
  * be enabled even when nobody registered it by hand.
  *
@@ -1365,13 +1386,12 @@ export function repairDependencyPanels({ installedIds = [], appBundles = APP_BUN
     }
     if (dependents.size === 0) return { repaired, errors };
 
-    const addons = readJsonSafe(mcpAddonsPath, {}) || {};
-    const addonIds = new Set(addons && typeof addons === "object" && !Array.isArray(addons) ? Object.keys(addons) : []);
+    const depInstalled = dependencyInstalledIds(ids, mcpAddonsPath);
 
     for (const [dep, dependentsOf] of dependents) {
       try {
         // Installed either way: a recorded install, or an add-on registered only in mcp-addons.json.
-        if (!ids.includes(dep) && !addonIds.has(dep)) continue;
+        if (!depInstalled.has(dep)) continue;
         const installedManifest = readJsonSafe(join(bundlesDir, dep, "manifest.json"), null);
         if (!resolvePanelPath(installedManifest, dep)) continue; // the installed copy declares no panel: nothing to serve
         // Source of the served files: the repo's copy when it is a different version than the
@@ -3440,7 +3460,7 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
   }
   const requiredBundles = manifest?.requires?.bundles || [];
   if (requiredBundles.length > 0) {
-    const installedIds = new Set(installed.map((i) => i.id));
+    const installedIds = dependencyInstalledIds(installed);
     const missing = requiredBundles.filter((id) => !installedIds.has(id));
     if (missing.length > 0) {
       return {
@@ -4475,6 +4495,7 @@ export function validateCollectionServerSide(collection, { manifestFor = getMani
     return { ok: false, error: "Collection has no members" };
   }
   const seen = new Set();
+  const depInstalled = dependencyInstalledIds(getInstalled());
   for (const m of collection.members) {
     if (!m?.id || !isValidBundleId(m.id)) return { ok: false, error: `Invalid member id '${m?.id}'` };
     if (!existsSync(join(APP_BUNDLES, m.id))) return { ok: false, error: `Member '${m.id}' is not a known bundle` };
@@ -4492,7 +4513,7 @@ export function validateCollectionServerSide(collection, { manifestFor = getMani
       return { ok: false, error: `Member '${m.id}' is GPU-gated — install it individually` };
     }
     for (const dep of man?.requires?.bundles || []) {
-      if (!seen.has(dep) && !getInstalled().some((i) => i.id === dep)) {
+      if (!seen.has(dep) && !depInstalled.has(dep)) {
         return { ok: false, error: `Member '${m.id}' requires '${dep}', which is neither installed nor earlier in the collection` };
       }
     }
@@ -5007,7 +5028,7 @@ export default function bundlesRouter() {
       const { token, expires_in_seconds } = await mintConsentToken(db, bundleId);
       // Compute prereq install state for UI to show prereq checklist
       const reqBundles = manifest.requires?.bundles || [];
-      const installedIds = new Set(getInstalled().map((i) => i.id));
+      const installedIds = dependencyInstalledIds(getInstalled());
       const prereqs = reqBundles.map((id) => ({ id, installed: installedIds.has(id) }));
       res.json({
         required: true,
