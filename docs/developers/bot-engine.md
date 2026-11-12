@@ -245,6 +245,22 @@ The two systemd dirs are created empty when missing.
 
   The child env also loses `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`, `TMUX`, `TMUX_PANE`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY` and every `*_SOCK`, `*_SOCKET` and `*_SOCKET_PATH`.
 - **User unit dirs are not directly writable.** This is not a guarantee: a bot can rename an ancestor directory (see the remaining routes below).
+- **Most key files are hidden.** A bot's shell and tool servers read these as empty files; a bot cannot rename over them or move their folders away:
+  - `<CROW_HOME>/.env` and the app root's `.env`;
+  - `.keystore-env`, `board-token`, `phone-token` and `artifacts-token` in `<CROW_HOME>` (the gateway hands the bot these values in the MCP block headers, so the bot never needs the files);
+  - `~/.ssh`, hidden as a whole folder on every spawn. It is created empty (mode 0700) when it does not exist, so the mask always applies and a bot can never plant `authorized_keys` under it. A bot cannot read the operator's ssh keys from there. Git over ssh for a bot is a later opt-in;
+  - `<CROW_HOME>/env/` and `<CROW_HOME>/android-keystore/`, hidden as whole folders when they exist (compose env files and the release keys);
+  - every `.env` and `.env.<tag>` file (a `.env.bak-2026…` copy counts) directly in a bundle folder, in `<CROW_HOME>/bundles/<id>/` and in the app root's `bundles/<id>/` alike, listed at spawn time. The bundles in `BUNDLE_ENV_READABLE` (`scripts/pi-bots/hidden_files.mjs`: `browser` and `workspace`) are the exception: their tool servers read their own `.env` inside the sandbox. The Phase 2 browser door is the fix.
+
+  The same is done for every other Crow home on the host. Left readable on purpose, because something inside the sandbox reads each one: the cloud model key (`llm-cloud-token`, pi runs `cat` on it as a provider key), the local models token (`models-token`, pi-lab's local-models extension), the kiosk and studio tokens (`kiosk-announce-token`, `studio-agent-token`, read by those add-on tool servers), the browser and workspace add-on settings, the sharing identity (`data/identity.json`) and the database (`crow.db`).
+
+  Masks are applied at spawn time, and only under the Crow homes and the app root (each resolved first). A symlink is never followed. A bundle entry that is a symlink is resolved: one that lands under a Crow home or under the app root is covered by that root's listing and does not refuse the spawn; one that lands outside every root and has an `.env` file behind it is refused. A bundle symlink with no `.env` behind it is ignored. A `.env` that is itself a symlink to a file under a Crow home or the app root is masked at the file's real path; one that points into a hidden folder such as `env/` is already hidden; a dangling one is ignored. If a secret file exists but cannot be masked, the spawn is refused with a plain sentence that names the path below its root (never any content) and shows on the failed turn. There are four causes, each with its own sentence:
+  - a symlink, or a path through one, that stays inside the Crow folders: `<path> is a link or sits behind one, so Crow can't hide it. Remove the link.`
+  - a symlink that leads outside the Crow folders: `<path> is a link that leads outside the Crow folders, so Crow can't hide it. Remove the link.`
+  - a link into a folder that is already hidden whole (a `secrets` folder, `env/`, `android-keystore/`): `<path> is a link into a hidden folder, so Crow can't hide it. Remove the link.`
+  - a file with another name on disk (a hard link, which masking one name leaves readable): `<path> has another name on disk, so Crow can't hide it. Remove the extra link.`
+
+  A home that disagrees with the one the gateway itself resolves refuses the spawn too, because the masks could land on the wrong tree. The journal line is logged once per path per hour. On the default tier a bot that can write the Crow folder can stop other bots from starting by planting a link or a hard link; the contain tier prevents it. It can also point a link at any file under the Crow folders and make that file read empty for every bot, the same class as the planted-link refusal; the contain tier prevents it. The bundle folders are writable inside the default sandbox, so a bot can rename a `.env` away before a later spawn; that spawn then masks the new file at the old name, not the moved one. The bundles folder and each real bundle folder are pinned, in the Crow home and in the app root alike, so a bot cannot swap one for a symlink after the listing. If the gateway rewrites a hidden file by rename while a bot is running, that bot sees the new file until its next spawn. The gateway writes its token files in place on the same file (a file with another name, or a link, is replaced instead), so a rotation does not unmask them for a running bot. A token file that does not exist when a bot starts cannot be hidden for that turn: if the gateway creates it during the turn, that bot can read it until its next start. The contain tier does not use this list: it starts from an empty root.
 - **No privilege raises:** `no_new_privs` is set, so sudo and setuid/setgid binaries (crontab, at, pkexec) cannot raise privilege.
 - **No other processes at all (`pidns` tier):** pi runs in its own PID namespace, so the gateway and other bots are not even visible inside. In the `userns` tier their `/proc/<pid>/{root,environ,mem}` are still refused by user-namespace rules.
 - **The masks are locked mounts.** The child cannot unmount them, even from a nested user namespace.
@@ -256,13 +272,12 @@ The two systemd dirs are created empty when missing.
   - `~/.bashrc` and other rc files;
   - `~/crow`, the gateway's own source, which runs on the next restart or auto-update;
   - desktop autostart entries;
-  - `~/.ssh/authorized_keys`;
   - any script a privileged process executes.
-- **`ssh localhost`** (or another lab host) using a readable private key in `~/.ssh`. That gives an unsandboxed shell.
+- **`ssh localhost`** (or another lab host) using a private key. `~/.ssh` is hidden on every spawn and created empty when missing, so a key there is out of reach and a bot can no longer plant `authorized_keys` under it; a key kept anywhere else the uid can read still works.
 - **Renaming an ancestor of the user unit dirs.** `mv ~/.config ~/.config.x && mkdir -p ~/.config/systemd/user` moves the read-only mount away. A unit written to the fresh dir (or to `~/.config/environment.d`) is loaded at the next reload or boot. This is the same persistence class as rc files.
 - **The system D-Bus** (`/run/dbus/system_bus_socket`). Privileged methods are polkit-gated, and the setuid polkit helper cannot run under `no_new_privs`, so no escalation is known. It is still open.
 - **Abstract unix sockets**, because there is no network namespace (for example `@/tmp/.X11-unix/X*`).
-- **Reading anything the uid can read:** crow.db, tokens, `~/.claude`. That is S6, which is pi-lab read confinement.
+- **Reading what is not on the hidden list above:** `crow.db`, `data/identity.json` (the sharing identity), `~/.claude`, the `browser` and `workspace` add-on `.env` files and the token files named above (the cloud model key, the local models token, the kiosk and studio tokens). That is S6, which is pi-lab read confinement. The contain tier starts from an empty root instead; its section says what it still binds (the database is one).
 
 Groups cannot be dropped without privilege (`setpriv --clear-groups` needs CAP_SETGID). `id -G` inside shows the docker gid as 65534, but the group is still in the credential; only the objects it opens are masked.
 

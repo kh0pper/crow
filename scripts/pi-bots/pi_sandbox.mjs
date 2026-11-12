@@ -58,9 +58,11 @@
  * What it does not stop (known escape routes, all need a dedicated user):
  *  - the writable filesystem: ~/.bashrc and other rc files, ~/crow (the
  *    gateway's own source, run on the next restart/auto-update), autostart
- *    entries, ~/.ssh/authorized_keys, any script a privileged process runs;
- *  - `ssh localhost` (or another lab host) with a readable private key in
- *    ~/.ssh, which gives an unsandboxed shell;
+ *    entries, any script a privileged process runs;
+ *  - `ssh localhost` (or another lab host) with a private key kept outside
+ *    ~/.ssh (that dir is hidden on every spawn, and created empty when it is
+ *    missing, so a key inside it or a planted authorized_keys is out of
+ *    reach), which gives an unsandboxed shell;
  *  - abstract unix sockets (no network namespace), e.g. @/tmp/.X11-unix/X*;
  *  - the user-unit dirs are only not DIRECTLY writable: renaming an ancestor
  *    (mv ~/.config ~/.config.x; mkdir -p ~/.config/systemd/user) moves the
@@ -69,7 +71,19 @@
  *  - the system D-Bus (/run/dbus/system_bus_socket): reachable; privileged
  *    methods are polkit-gated and the setuid polkit helper cannot run under
  *    no_new_privs, so no escalation was found, but it stays open;
- *  - reading anything the uid can read (crow.db, tokens, ~/.claude) - S6.
+ *  - reading most of what the uid can read - S6. Most key files are hidden
+ *    (hideFiles, see hidden_files.mjs): each Crow home's .env, .keystore-env,
+ *    board-token, phone-token and artifacts-token, the app root's .env, and
+ *    every .env / .env.* file in a bundle folder of each Crow home and of the
+ *    app root, except the browser and workspace bundles'. They read empty
+ *    inside. ~/.ssh is hidden as a dir always (created 0700 when it is
+ *    missing), and so are the instance's env/ and android-keystore/ folders.
+ *    Still readable, because something inside the sandbox reads each one:
+ *    the cloud model key (llm-cloud-token), the local models token
+ *    (models-token), the kiosk and studio tokens (kiosk-announce-token,
+ *    studio-agent-token), the browser and workspace add-on settings, the
+ *    sharing identity (data/identity.json), the database (crow.db) and
+ *    ~/.claude.
  *
  * Without bubblewrap (e.g. the cloud VM), the fallback is
  * `setpriv --no-new-privs`: no masks, but sudo/setuid are still blocked.
@@ -85,7 +99,7 @@
  * to spawn pi without bwrap), "off" (never wrap).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { containSelected, buildContainPlan, ContainRefused } from "./pi_contain.mjs";
@@ -394,6 +408,44 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   // a file: a file bind would come off the moment the file is replaced by
   // rename, while the tmpfs over its dir stays.
   const hideDirs = (opts.hideDirs || []).filter((d) => typeof d === "string" && d.startsWith("/") && isDir(d));
+  // Secret FILES (hideFiles) are single files masked with --dev-bind /dev/null
+  // (a --ro-bind would be nodev, and reading it would fail with EACCES instead
+  // of reading empty, which tools that load a missing .env handle better).
+  // The paths come from the gateway, never from a bot, but the tree under
+  // them is bot-writable, so nothing is followed: a symlink is skipped, and so
+  // is any file with a symlink between it and its root (a bot could plant one
+  // to steer a bind at /proc, /dev or a tmpfs mask). A file must sit under one
+  // of opts.hideFileRoots (each Crow home and the app root; no roots, no
+  // masks), and its ancestors are pinned only from its dir up to and
+  // including that root, so a bot cannot rename a folder away and plant a
+  // decoy. Masks are applied at spawn time: a bot that renames a .env away
+  // before a later spawn makes that spawn mask the new file at the old name,
+  // not the moved one. A host-side rewrite by rename un-masks the path for the
+  // rest of that spawn. A bot inside cannot rename over a mask: EBUSY.
+  const noPinRoots = new Set(["/", "/proc", "/dev", "/sys", "/run", "/tmp", "/var", "/home", "/usr", "/etc", "/bin", "/lib", "/sbin", "/root"]);
+  const forbidden = (d) => noPinRoots.has(d) || ["/proc/", "/dev/", "/sys/", "/run/"].some((x) => d.startsWith(x)) ||
+    tmpfs.some((t) => d === t || d.startsWith(t + "/")) || hideDirs.some((t) => d === t || d.startsWith(t + "/"));
+  const realDir = (d) => { try { return lstatSync(d).isDirectory(); } catch { return false; } };
+  const fileRoots = (opts.hideFileRoots || []).filter((r) => typeof r === "string" && r.startsWith("/") && !forbidden(r) && realDir(r));
+  const maskedFiles = [];
+  const filePins = [];
+  for (const f of opts.hideFiles || []) {
+    if (typeof f !== "string" || !f.startsWith("/") || maskedFiles.includes(f)) continue;
+    if (f.split("/").includes("..")) continue;
+    const root = fileRoots.filter((r) => f.startsWith(r + "/")).sort((x, y) => y.length - x.length)[0];
+    if (!root || forbidden(f)) continue;
+    try { if (!lstatSync(f).isFile()) continue; } catch { continue; }   // lstat: a symlink is not a file
+    const chain = [];
+    let ok = true;
+    for (let a = dirname(f); ; a = dirname(a)) {
+      if (!realDir(a) || forbidden(a)) { ok = false; break; }
+      chain.push(a);
+      if (a === root) break;
+    }
+    if (!ok) continue;
+    maskedFiles.push(f);
+    for (const a of chain) if (!filePins.includes(a)) filePins.push(a);
+  }
   // Pin EVERY ancestor of a hidden dir below / (bound onto itself it is a
   // mountpoint, and renaming a mountpoint fails, EBUSY). Not only those whose
   // parent is writable now: the bot owns ~ and can chmod it unwritable for
@@ -406,6 +458,22 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
     for (let a = dirname(d); a && a !== "/" && a !== opts.pinStop; a = dirname(a)) {
       if (!pins.includes(a)) pins.push(a);
     }
+  }
+  for (const a of filePins) if (!pins.includes(a)) pins.push(a);
+  // opts.hidePinDirs: real dirs under a root pinned for their own sake (the
+  // bundles dir and each bundle dir, with or without a .env), by the same rules.
+  for (const d of opts.hidePinDirs || []) {
+    if (typeof d !== "string" || !d.startsWith("/") || d.split("/").includes("..")) continue;
+    const root = fileRoots.filter((r) => d === r || d.startsWith(r + "/")).sort((x, y) => y.length - x.length)[0];
+    if (!root) continue;
+    const chain = [];
+    let ok = true;
+    for (let a = d; ; a = dirname(a)) {
+      if (!realDir(a) || forbidden(a)) { ok = false; break; }
+      chain.push(a);
+      if (a === root) break;
+    }
+    if (ok) for (const a of chain) if (!pins.includes(a)) pins.push(a);
   }
   // A probe without a pidns field (older callers, test stubs) means the full tier.
   const pidNamespace = probe.pidns !== false;
@@ -422,9 +490,12 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   for (const d of hideDirs) if (!tmpfs.some((t) => d === t || d.startsWith(t + "/"))) pre.push("--tmpfs", d, "--remount-ro", d);
   for (const s of sockets) if (!tmpfs.some((d) => s === d || s.startsWith(d + "/"))) pre.push("--ro-bind", "/dev/null", s);
   for (const d of roDirs) pre.push("--ro-bind", d, d);
+  // After the roDirs binds, so no earlier bind can cover a masked file.
+  for (const f of maskedFiles) pre.push("--dev-bind", "/dev/null", f);
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
   return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: scrubSandboxEnv(env),
-    tier: pidNamespace ? "pidns" : "userns", sandboxed: true, wrapper: "bwrap", pidNamespace, reason: null, masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs], pinned: pins };
+    tier: pidNamespace ? "pidns" : "userns", sandboxed: true, wrapper: "bwrap", pidNamespace, reason: null,
+    masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs, ...maskedFiles], maskedFiles, pinned: pins };
 }
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */

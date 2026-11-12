@@ -319,7 +319,7 @@ export const translations = {
   "signals.peers.noDialAddress": { en: "Instance sync can't reach peer {name}: it has no usable dial address ({missing}). Changes for it are queuing. Add its tailscale_ip or a tailnet gateway URL on the Paired instances page.", es: "La sincronización de instancias no puede llegar al par {name}: no tiene una dirección utilizable ({missing}). Los cambios para él se están acumulando. Añade su tailscale_ip o una URL de gateway del tailnet en la página de instancias emparejadas." },
   // Bot sandbox (audit N1b-2): the same sentence the Bot Runtime settings show.
   "signals.botSandbox.label": { en: "Bot sandbox", es: "Entorno aislado de los bots" },
-  "signals.botSandbox.ok": { en: "bots run inside bubblewrap", es: "los bots se ejecutan dentro de bubblewrap" },
+  "signals.botSandbox.ok": { en: "bots run inside bubblewrap (some files stay readable)", es: "los bots se ejecutan dentro de bubblewrap (algunos archivos siguen siendo legibles)" },
   "signals.botSandbox.notSandboxed": { en: "bots run without bubblewrap", es: "los bots se ejecutan sin bubblewrap" },
   "signals.botSandbox.unobserved": {
     en: "started by an external supervisor — not observed here",
@@ -3161,8 +3161,8 @@ export const translations = {
   // not; without it the bot keeps the operator's groups and sudo works (mode
   // off is always the plain case — pi spawns unwrapped then).
   "settings.sandboxStatus.sandboxed": {
-    en: "Bots run inside the bubblewrap sandbox.",
-    es: "Los bots se ejecutan dentro del entorno aislado bubblewrap.",
+    en: "Bots run inside the bubblewrap sandbox. It hides most key files, most add-on settings, the instance's env/ and android-keystore/ folders, and the ~/.ssh folder (created empty if it was missing). The cloud model key (llm-cloud-token), the local models token, the kiosk and studio tokens, the browser and workspace add-on settings, the sharing identity and the database stay readable unless the contain tier is on.",
+    es: "Los bots se ejecutan dentro del entorno aislado bubblewrap. Oculta la mayoría de los archivos de claves, la mayoría de los ajustes de los complementos, las carpetas env/ y android-keystore/ de la instancia y la carpeta ~/.ssh (se crea vacía si faltaba). La clave del modelo en la nube (llm-cloud-token), el token de los modelos locales, los tokens de kiosco y estudio, los ajustes de los complementos de navegador y espacio de trabajo, la identidad para compartir y la base de datos siguen siendo legibles a menos que el nivel de contención esté activado.",
   },
   "settings.sandboxStatus.unsandboxed": {
     en: "Bots run WITHOUT the bubblewrap sandbox: {reason}. {exposure}",

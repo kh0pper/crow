@@ -38,7 +38,7 @@ import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
@@ -49,6 +49,8 @@ import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVoc
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
+import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REFUSAL } from "./hidden_files.mjs";
+import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
 import { containSelected, prepareAgentShadow, sweepStaleContainDirs, ContainRefused } from "./pi_contain.mjs";
 import { containedClassifierBlock, containedCloudTokenPath } from "./pi_contain_agent.mjs";
@@ -480,6 +482,34 @@ const SECRET_VALUES_FD = 5;
 /** Most other-instance secrets dirs a spawn will hide; past it, it refuses. */
 const MAX_HIDDEN_INSTANCE_DIRS = 512;
 
+/** absolute path -> last time its "could not hide" line was logged. */
+const unhideableLogged = new Map();
+/** realpath, or null when the path is gone. */
+const realRoot = (d) => { try { return realpathSync(d); } catch { return null; } };
+const UNHIDEABLE_LOG_MS = 3600_000;
+/** Log a refusal line once per absolute path per hour; entries older than an hour are dropped.
+ *  Exported for its own test (item: the pruned entry logs again). */
+export function logUnhideableOnce(absPath, msg, now = Date.now()) {
+  for (const [k, t] of unhideableLogged) if (now - t >= UNHIDEABLE_LOG_MS) unhideableLogged.delete(k);
+  if (unhideableLogged.has(absPath)) return;
+  unhideableLogged.set(absPath, now);
+  console.error("[pi-bots] " + msg);
+}
+/** Test-only: forget which paths were logged, so one test cannot see another's entries. */
+export function _resetUnhideableLogForTest() {
+  unhideableLogged.clear();
+}
+
+/**
+ * Whether the home the masks are built from is the one this gateway resolves.
+ * A null on EITHER side (a home that is gone, or nothing resolved) is a
+ * refusal: two nulls are not agreement, they are two unknowns, and masks built
+ * from an unknown home could land on the wrong tree. Exported for its own test.
+ */
+export function homeMatchesResolved(homeReal, resolvedReal) {
+  return Boolean(homeReal) && Boolean(resolvedReal) && homeReal === resolvedReal;
+}
+
 export class PiRpc {
   constructor(opts) {
     const def = opts.def, sessionDir = opts.sessionDir;
@@ -820,6 +850,11 @@ export class PiRpc {
     // (the outer bwrap can exit while pi still drains inside its namespace).
     this._containCleanups = [];
     let launch;
+    let hiddenCandidates = null;
+    // Folders this spawn hides WHOLE (a tmpfs): every secrets dir, plus env/ and
+    // android-keystore/. Filled below with the launch's own plan; read by the
+    // refusal check so a link into one gets its own plain sentence.
+    let hiddenWholeDirs = [];
     try {
       if (containedSpawn) {
         contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, modelInputs: containModels, otherHomes });
@@ -842,8 +877,56 @@ export class PiRpc {
         if (fdMode) passFds.push(MCP_CONFIG_FD);
         if (piLabSupportsSecretValuesFd()) { passFds.push(SECRET_VALUES_FD); this._passedSecretFd = true; }
       }
+      // Secret files the default tier masks by file (hideFiles). The roots are
+      // this instance's Crow home, the repo checkout and every co-host's home,
+      // resolved first (a Crow home linked onto another disk is still masked,
+      // at its real path); wrapPiSpawn masks only under them and never follows
+      // a symlink. A candidate that exists but was not masked refuses the spawn
+      // (below).
+      const homeReal = realRoot(dirname(secretsHere));
+      // The home the candidate list is built from is the one this gateway
+      // resolves (resolveCrowHome), not merely where the anchored secrets dir
+      // is now; if the two disagree (a swapped ancestor, a moved home) the
+      // masks could land on the wrong tree, so the spawn is refused.
+      if (!contain && !homeMatchesResolved(homeReal, realRoot(resolveCrowHome()))) {
+        throw new Error("A bot could not start: Crow's home folder is not where this gateway expects it, so Crow can't hide its secret files.");
+      }
+      const appReal = realRoot(BRIDGE_APP_ROOT);
+      const otherHomesReal = otherHomes.map(realRoot).filter(Boolean);
+      const hideFileRoots = [homeReal, appReal, ...otherHomesReal].filter(Boolean);
+      // Instance secret dirs no code inside the sandbox reads (env/ holds
+      // compose env files the gateway reads; android-keystore/ the release
+      // keys): hidden as dirs, tmpfs, when they exist.
+      const instanceSecretDirs = [homeReal, ...otherHomesReal].filter(Boolean).flatMap((h) => [join(h, "env"), join(h, "android-keystore")]);
+      // Folders hidden WHOLE (a tmpfs), so a candidate inside one is already
+      // unreachable and a link into one is refused with a plain "links into a
+      // hidden folder" sentence instead of "sits behind a link".
+      hiddenWholeDirs = [...new Set([secretsHere, ...others, ...instanceSecretDirs,
+        ...(homeReal ? [join(homeReal, "secrets")] : []), ...otherHomesReal.map((h) => join(h, "secrets"))])].filter(Boolean);
+      // Every home's list is built with the SAME trusted roots (this home, the
+      // repo checkout, the co-hosts' homes): a co-hosted home with a bundle link
+      // into appRoot/bundles is listed at its resolved path (and masked) rather
+      // than refused as "outside the Crow folders".
+      const hideFiles = [
+        ...(homeReal ? secretFilesFor({ crowHome: homeReal, appRoot: appReal || undefined, hiddenDirs: instanceSecretDirs }) : []),
+        ...otherHomesReal.flatMap((h) => secretFilesFor({ crowHome: h, appRoot: appReal || undefined, hiddenDirs: instanceSecretDirs })),
+      ];
+      // Deduped: the app root's bundles dir and each of its real bundle dirs are
+      // pinned for every home, and each root's listing adds the same paths twice.
+      const hidePinDirs = [...new Set([homeReal, ...otherHomesReal].filter(Boolean)
+        .flatMap((h) => secretPinDirsFor({ crowHome: h, appRoot: appReal || undefined })))];
+      hiddenCandidates = { hideFiles, hideFileRoots, homes: [homeReal, ...otherHomesReal].filter(Boolean) };
+      // The operator's ssh keys: no Crow code reads ~/.ssh. Always hidden (a dir,
+      // tmpfs), so a bot cannot use the keys, or `ssh localhost`, to leave the
+      // sandbox, nor plant authorized_keys under it. Created empty when absent,
+      // so the mask always applies.
+      const sshDir = join(HOME, ".ssh");
+      if (!contain) {
+        try { mkdirSync(sshDir, { mode: 0o700 }); } catch (e) { if (e && e.code !== "EEXIST") throw new Error("A bot could not start: Crow could not create " + sshDir + " to keep it hidden."); }
+        hiddenCandidates.sshDir = sshDir;
+      }
       launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain,
-        hideDirs: [secretsHere, ...others], seccompFd: contain ? SECCOMP_FD : null, passFds });
+        hideDirs: [secretsHere, ...others, ...(contain ? [] : [sshDir, ...instanceSecretDirs])], hideFiles, hideFileRoots, hidePinDirs, seccompFd: contain ? SECCOMP_FD : null, passFds });
     } catch (e) {
       // A contain spawn that was REFUSED still gets its one line, naming the
       // provider with no door (or the refusal the caller sees). When the
@@ -867,6 +950,62 @@ export class PiRpc {
     // does. Both are reported by wrapPiSpawn, and a dir that a bound path
     // contains and cannot be masked refuses the spawn there. Nothing is
     // assumed hidden: a contain spawn with no report for a dir is not trusted.
+    // Fail closed on a secret FILE too. A candidate with another hard link
+    // refuses the spawn (masking one name leaves the other readable); one that
+    // exists but was not masked (a symlink, a path through one, or outside the
+    // roots) refuses it too. The message names the path below its root and the
+    // actual cause, never any content.
+    if (!isContainTier(launch.tier) && launch.wrapper === "bwrap" && hiddenCandidates) {
+      const maskedSet = new Set(launch.maskedFiles || []);
+      const relOf = (f) => {
+        const root = hiddenCandidates.hideFileRoots.filter((r) => f.startsWith(r + "/")).sort((x, y) => y.length - x.length)[0];
+        return root ? f.slice(root.length + 1) : null;
+      };
+      const refuse = (f, msg) => {
+        logUnhideableOnce(f, msg);
+        this._runContainCleanup();
+        throw new Error(msg);
+      };
+      // Already behind a folder hidden whole (secrets/, env/, android-keystore/).
+      const hiddenWhole = (p) => hiddenWholeDirs.some((d) => p === d || p.startsWith(d + "/"));
+      // Why a candidate could not be masked: the plain sentence for it, never
+      // its content. The FIRST link on the way up decides link-out vs
+      // link-inside; a path in (or a link into) a folder hidden whole says so.
+      // The link path itself comes back too: the sentence must name the link
+      // (a bundle FOLDER, say), not the file it leads to, and say which Crow
+      // home that link sits in (the repo checkout is a root, but no home).
+      const causeOf = (f, rel) => {
+        if (!rel) return { cause: "outside" };
+        if (hiddenWhole(f)) return { cause: "hidden-dir" };
+        for (let a = f; a && hiddenCandidates.hideFileRoots.every((r) => a !== r); a = dirname(a)) {
+          let lst; try { lst = lstatSync(a); } catch { break; }
+          if (!lst.isSymbolicLink()) continue;
+          const t = realRoot(a);
+          const home = hiddenCandidates.hideFileRoots.filter((r) => a.startsWith(r + "/")).sort((x, y) => y.length - x.length)[0];
+          const link = { linkPath: a, home: hiddenCandidates.homes.includes(home) ? home : null };
+          if (t && hiddenWhole(t)) return { cause: "hidden-dir", ...link };
+          return { cause: t && hiddenCandidates.hideFileRoots.some((r) => t === r || t.startsWith(r + "/")) ? "link-inside" : "link-out", ...link };
+        }
+        return { cause: "link-inside" };
+      };
+      for (const f of hiddenCandidates.hideFiles) {
+        let st;
+        try { st = lstatSync(f); } catch { continue; }
+        const rel = relOf(f);
+        if (st.isFile() && st.nlink > 1) refuse(f, unmaskableRefusal(rel || f, "hardlink"));
+        if (maskedSet.has(f) || !(st.isFile() || st.isSymbolicLink())) continue;
+        const why = causeOf(f, rel);
+        // A link on the way up is the name to show; the file itself is the
+        // link when it IS the link. No trusted root: the absolute path is the
+        // only name it has.
+        const linkRel = why.linkPath && why.linkPath !== f ? relOf(why.linkPath) : null;
+        refuse(f, unmaskableRefusal(linkRel || rel || f, why.cause, { home: why.home }));
+      }
+      if (hiddenCandidates.sshDir && !launch.masked.includes(hiddenCandidates.sshDir)) {
+        this._runContainCleanup();
+        throw new Error(SSH_NOT_HIDDEN_REFUSAL);
+      }
+    }
     if (!isContainTier(launch.tier) && launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
       this._runContainCleanup();
       throw new Error("pi sandbox: a Crow instance secrets dir could not be hidden; refusing to start pi");
@@ -921,6 +1060,7 @@ export class PiRpc {
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
     this.sandboxTier = launch.tier;
+    this.sandboxMaskedFiles = launch.maskedFiles || [];
     this.piPid = null;
     this.sandboxInitPid = null;
     // S6-CROW: in fd mode the child gets one more pipe at MCP_CONFIG_FD (4;
