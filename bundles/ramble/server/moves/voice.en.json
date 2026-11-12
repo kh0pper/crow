@@ -1,0 +1,83 @@
+{
+  "reviewed": true,
+  "leadIn": {
+    "first": "First, {name}.",
+    "next": "Next, {name}.",
+    "nextSide": "Next, {name}, {side} side.",
+    "last": "Last one, {name}.",
+    "round": "Round {n}. Same again."
+  },
+  "sides": {
+    "left": "left",
+    "right": "right"
+  },
+  "switchSides": "And switch sides.",
+  "midHold": [
+    "Breathe out slowly.",
+    "Soften your shoulders.",
+    "Stay easy in your jaw.",
+    "Keep your breath moving.",
+    "Let your neck be long.",
+    "Ease off a little if it feels sharp.",
+    "Steady and unhurried.",
+    "Feel your feet on the floor.",
+    "Relax your hands.",
+    "Half way. Keep breathing."
+  ],
+  "close": {
+    "hold": "And release.",
+    "timed": "And ease off.",
+    "reps": "Set done.",
+    "side": "And release that side."
+  },
+  "rest": {
+    "withNext": "Rest. Next is {next}.",
+    "plain": "Rest. Shake it out.",
+    "last": "Rest. One more to go."
+  },
+  "reps": {
+    "everyRepUpTo": 10,
+    "thenEvery": 2,
+    "numbers": [
+      "one",
+      "two",
+      "three",
+      "four",
+      "five",
+      "six",
+      "seven",
+      "eight",
+      "nine",
+      "ten",
+      "eleven",
+      "twelve",
+      "thirteen",
+      "fourteen",
+      "fifteen",
+      "sixteen",
+      "seventeen",
+      "eighteen",
+      "nineteen",
+      "twenty"
+    ],
+    "lastRep": "Last one.",
+    "perSideStart": "{n} on each side. Start with your {side}.",
+    "holdRep": "Hold. And rest.",
+    "rule": "Speak every number for sets of 10 or fewer. Above 10, speak every second number and always the last. The last rep is spoken as lastRep in place of its number."
+  },
+  "welcome": {
+    "flow": "Welcome. This is {name}, about {minutes} minutes. Move gently and stop anything that hurts.",
+    "routine": "Welcome. This is {name}, about {minutes} minutes. We warm up first. Stop anything that hurts.",
+    "walk": "Off we go. Start easy for the first two minutes.",
+    "landmark": "Here we are. This one takes about {minutes} minutes. Start easy."
+  },
+  "closing": {
+    "flow": "That's the flow. Take one more slow breath. Nicely done.",
+    "routine": "That's the routine. Nicely done. Have some water.",
+    "walk": "That's your walk. Ease down for the last two minutes.",
+    "landmark": "That's the challenge. Nicely done. Walk home easy."
+  },
+  "waterAndRest": "That's thirty minutes. Have some water and a rest before any more.",
+  "paused": "Paused.",
+  "resume": "Carrying on."
+}
