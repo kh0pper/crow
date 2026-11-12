@@ -149,6 +149,7 @@ test("auth: the moves API sits behind dashboardAuth", async () => {
     "/api/ramble/moves/today", "/api/ramble/moves/prefs", "/api/ramble/moves/library",
     "/api/ramble/moves/copy", "/api/ramble/moves/voice",
     "/api/ramble/moves/day", "/api/ramble/moves/outdoor/start", "/api/ramble/moves/outdoor/done",
+    "/api/ramble/moves/standin",
   ]) {
     assert.equal((await fetch(base + p)).status, 401, p);
   }
@@ -1151,5 +1152,66 @@ test("POST /moves/outdoor/done: pays by the minutes, fills cards, and answers th
       assert.equal(again.filled.length, body.filled.length, "and fills nothing more");
       assert.equal(await rowDelta(db, MOVE_OUTDOOR_KIND, body.day.day), paid, "and moves no row");
     } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+/* ---------------------------------------------------------- stand-ins (6.x) */
+
+test("POST /moves/log carries key and area, and that log stands in for a card", async () => {
+  const mount = await freshMount();
+  try {
+    const day = localDay(Date.now());
+    const logged = await dayPost(mount.url, "/api/ramble/moves/log", {
+      activity: "yoga", minutes: 12, effort: "easy",
+    });
+    assert.equal(logged.status, 200);
+    const body = await logged.json();
+    assert.match(body.log.key, new RegExp(`^${day}:\\d+:yoga:12:easy$`));
+    assert.equal(body.log.area, "mobility", "the activity's own area when none is named");
+
+    const r = await dayPost(mount.url, "/api/ramble/moves/standin", {
+      source: "log", logKey: body.log.key,
+    });
+    assert.equal(r.status, 200);
+    const answer = await r.json();
+    assert.equal(answer.standIn.ok, true);
+    assert.ok(["morning", "midday", "evening"].includes(answer.standIn.slot));
+    assert.equal(answer.day.day, day);
+    const filled = answer.day.slots.find((item) => item.slot === answer.standIn.slot);
+    assert.ok(filled, "the slot the stand-in took is one of the day's");
+    assert.equal(filled.done, true, "the stand-in closed it");
+    assert.equal(filled.standIn, true, "and marked it as a stand-in");
+
+    // A yoga log with a mobility area is the balancing chunk the day kept open.
+    const db = await mountDb(mount.dir);
+    try {
+      assert.deepEqual(await walletKeys(db, "movebal", day), [day]);
+      assert.deepEqual(await walletKeys(db, "moveslot"), [day + ":" + answer.standIn.slot],
+        "one card, and only the one the stand-in named");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("POST /moves/standin: a refusal is a 409 with the day's reason", async () => {
+  const mount = await freshMount();
+  try {
+    const steps = await dayPost(mount.url, "/api/ramble/moves/standin", { source: "steps" });
+    assert.equal(steps.status, 409);
+    const body = await steps.json();
+    assert.equal(body.error, "goal_not_reached");
+    assert.equal(body.standIn.ok, false);
+    assert.equal(body.standIn.reason, "goal_not_reached");
+
+    const noLog = await dayPost(mount.url, "/api/ramble/moves/standin", { source: "log" });
+    assert.equal(noLog.status, 409, "a log stand-in with no log key is the day's refusal");
+    assert.equal((await noLog.json()).error, "no_log");
+
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/standin", {})).status, 400,
+      "source is required");
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/standin", { source: 7 })).status, 400,
+      "a source that is not a string is a bad request");
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/standin", {
+      source: "log", logKey: "x".repeat(97),
+    })).status, 400, "a log key is bounded");
   } finally { await mount.close(); }
 });

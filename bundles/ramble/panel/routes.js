@@ -1756,6 +1756,39 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     res.json({ ...finished, day: await dayPayload(now) });
   }));
 
+  /**
+   * A stand-in for one of the day's open cards: a log the player already
+   * recorded, or a step count that reached the goal. The day's cards are handed
+   * in as the caller's own read (moves/day.js never imports slots.js), so a
+   * stand-in can only ever fill a card the day really holds, and a paused day
+   * has none to fill. A refusal is the day's answer, not a bad request: it comes
+   * back as 409 with the reason the day gave.
+   */
+  router.post("/api/ramble/moves/standin", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const b = req.body || {};
+    const source = requireText(b.source, 16, "source");
+    const slot = b.slot == null ? undefined : requireText(b.slot, 16, "slot");
+    const logKey = b.logKey == null ? undefined : requireText(b.logKey, 96, "logKey");
+    const area = b.area == null ? undefined : requireText(b.area, 16, "area");
+    const dayOut = await daySlots(now);
+    if (dayOut.off) bad("challenges are paused");
+    const standIn = await movesMods.dayMod.assignStandIn(db, {
+      day: dayOut.day,
+      slot,
+      source,
+      logKey,
+      area,
+      now,
+      emit,
+      cards: { need: dayOut.need, slots: dayOut.slots },
+    });
+    if (standIn.ok) res.json({ standIn, day: await dayPayload(now) });
+    else res.status(409).json({ error: standIn.reason, standIn });
+    await settleRecent(now, dayOut);
+  }));
+
   // The one-card Swap the old strip and the MCP tool still call: it re-rolls the
   // day's Now card through the day's own slots (moves/slots.js swapSlot), so the
   // card on screen, the slot behind it and the day's swap cap are one fact. A
@@ -1820,7 +1853,8 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     await movesMods.streakMod.awardStreakHeart(db, { now, emit });
     res.json({
       log: {
-        paid: logged.paid, points: logged.points, already: logged.already, day: logged.day, capped: !!logged.capped,
+        paid: logged.paid, points: logged.points, already: logged.already, day: logged.day,
+        capped: !!logged.capped, key: logged.key, area: logged.area,
       },
       ...(await movesSnapshot(now)),
       moves: await movesMods.ledgerMod.movesDay(db, { day: logged.day, now }),

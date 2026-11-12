@@ -8,11 +8,15 @@
  *   settleDay       the day is judged finished: the `moveall` cache row and the
  *                   streak heart. Nothing else in moves writes either.
  *
- * OUTDOOR SESSIONS (startOutdoor / finishOutdoor, at the end of this file) are
- * the third writer. A walk or jog is a Start/Done session rather than a chunk:
- * its elapsed minutes, capped at an hour, are what pays — through the outdoor
- * day budget only, never CHUNK_MAX — and at ten minutes or more it also stands
- * in for the day's cards, never for the one card a balancing chunk is kept for.
+ * OUTDOOR SESSIONS (startOutdoor / finishOutdoor) are the third writer. A walk
+ * or jog is a Start/Done session rather than a chunk: its elapsed minutes,
+ * capped at an hour, are what pays — through the outdoor day budget only, never
+ * CHUNK_MAX — and at ten minutes or more it also stands in for the day's cards,
+ * never for the one card a balancing chunk is kept for.
+ *
+ * STAND-INS (assignStandIn) are the fourth writer. A log or the step goal fills
+ * exactly one of the day's open cards; a stand-in never pays (no budget claim,
+ * no pet feed).
  *
  * WHY COMPLETION IS NEVER STORED BY THE PICKER. The wallet sync applies a row
  * from another instance by plain MIN/MAX with no callback, so nothing runs when
@@ -27,10 +31,14 @@
  * date would let a chunk fill a day that is already in the past.
  *
  * VIA is the fixed vocabulary of who ran the chunk. Only the player's own
- * session and a class count a balance (`movebal`): a walk is not a balance, and
- * a stand-in is somebody else's movement reported on the player's behalf, so it
- * never balances a day. The `movebal` row is the day's second half of the
- * completion rule, which is exactly why it may not be earned by proxy.
+ * session and a class count a balance (`movebal`) here: a walk is not a
+ * balance, and a stand-in is somebody else's movement reported on the player's
+ * behalf, so `recordSlotDone` never balances a day from a stand-in via. The one
+ * exception is `assignStandIn`'s log stand-in: a `yoga`, `band` or `bodyweight`
+ * log whose area is a balancing one is the chunk the day was kept open for, and
+ * that call writes the `movebal` row itself. The `movebal` row is the day's
+ * second half of the completion rule, which is exactly why it may not be earned
+ * by proxy.
  *
  * ⚠ EVERY ROW WRITTEN HERE IS THE CONSTANT 1, keyed by day (or day and slot /
  * area), because applyRambleWallet merges a key conflict with MAX(delta). Every
@@ -41,18 +49,21 @@
  * `dayCards` must never call `settleDay`: a read of a day is always a read.
  */
 import { localDay, settleHappyDay } from "../eggs.js";
-import { casDelta, insertOnce, rowDelta, WALKED_KIND } from "../steps.js";
+import {
+  casDelta, insertOnce, readStepSettings, rowDelta, stepsToday, WALKED_KIND,
+} from "../steps.js";
 import { feed as petFeed, petState } from "../pet.js";
 import {
   MOVE_ALL_KIND, MOVE_BAL_KIND, MOVE_SLOT_KIND, MOVE_STAND_KIND, isDayComplete,
 } from "./day-complete.js";
 import { MOVE_AREA_KIND, SLOTS } from "./week.js";
-import { AREAS, BALANCE_AREAS } from "./library.js";
+import { AREAS, ACTIVITY_KINDS, BALANCE_AREAS } from "./library.js";
 import { awardStreakHeart } from "./streak.js";
 import { capDayKey, claimCapped } from "./indoor-cap.js";
 import { MOVE_MIN_KIND } from "./progress.js";
 import {
-  CHUNK_RATE, MOVE_OUTDOOR_KIND, MovesInputError, OUTDOOR_DAILY_CAP,
+  areaFor, CHUNK_RATE, EFFORTS, MOVE_LOG_KIND, MOVE_OUTDOOR_KIND,
+  MovesInputError, OUTDOOR_DAILY_CAP,
 } from "./ledger.js";
 
 /** Who ran the chunk. `standin-*` is somebody else's movement, reported for the player. */
@@ -496,4 +507,210 @@ export async function finishOutdoor(db, { day, now = Date.now(), emit, cards } =
   });
 
   return { minutes, filled, paid, needsBalance, walkedNew };
+}
+
+/* --------------------------------------------------------------- stand-ins */
+
+/**
+ * Ramble setting holding which stand-ins a day already used, as
+ * `{ log: true, steps: true }`.
+ *
+ * A `local.` key, so it never replicates and is never emitted: it is this
+ * instance's own bookkeeping about a day (the same rule as the outdoor session
+ * row above), not a fact about the player.
+ */
+export const STANDIN_DAY_KEY = "local.moves.standin.";
+
+/** The activities whose log can balance a day, when its area is a balancing one. */
+const BALANCE_ACTIVITIES = Object.freeze(["yoga", "band", "bodyweight"]);
+
+/** The stand-in flags the day already carries, as `{ log, steps }`. */
+async function readStandInFlags(db, day) {
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT value FROM ramble_settings WHERE key = ?",
+      args: [STANDIN_DAY_KEY + day],
+    });
+    const value = rows[0]?.value;
+    if (typeof value !== "string") return { log: false, steps: false };
+    const parsed = JSON.parse(value);
+    return { log: parsed?.log === true, steps: parsed?.steps === true };
+  } catch { return { log: false, steps: false }; }
+}
+
+/** Mark one stand-in as used. Plain setting SQL, and NO emit: a local key. */
+async function writeStandInFlag(db, day, field) {
+  const flags = await readStandInFlags(db, day);
+  flags[field] = true;
+  await db.execute({
+    sql: `INSERT INTO ramble_settings (key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    args: [STANDIN_DAY_KEY + day, JSON.stringify(flags)],
+  });
+}
+
+/** The day's cards as a stand-in may use them, or null when they state no card count. */
+function standInCards(cards) {
+  if (!cards || typeof cards !== "object" || Array.isArray(cards)) return null;
+  if (!Array.isArray(cards.slots)) return null;
+  const need = Number.isInteger(cards.need) && cards.need >= 1 ? cards.need : 0;
+  if (need < 1) return null;
+  return { need, slots: cards.slots };
+}
+
+/**
+ * The cards a stand-in could still fill: a real pick with no `moveslot` row, in
+ * slot order. Read from the wallet, never from the card's own `done` flag.
+ */
+async function openCards(db, day, slots) {
+  const open = [];
+  for (const item of slots) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    if (!SLOTS.includes(item.slot)) continue;
+    if (item.empty === true) continue;
+    if (typeof item.entryId !== "string" || item.entryId === "") continue;
+    // eslint-disable-next-line no-await-in-loop
+    if ((await rowDelta(db, MOVE_SLOT_KIND, `${day}:${item.slot}`)) !== null) continue;
+    open.push(item);
+  }
+  return open.sort(bySlotOrder);
+}
+
+/** The five parts of a `movelog` key of `day`, or null when it is not one. */
+function parseLogKey(logKey, day) {
+  if (typeof logKey !== "string" || logKey === "") return null;
+  if (!logKey.startsWith(`${day}:`)) return null;
+  const parts = logKey.split(":");
+  if (parts.length !== 5) return null;
+  const [keyDay, minute, activity, mins, effort] = parts;
+  if (keyDay !== day) return null;
+  if (!/^\d+$/.test(minute)) return null;
+  const minutes = Number(mins);
+  if (!Number.isInteger(minutes) || minutes < 1) return null;
+  if (!ACTIVITY_KINDS.includes(activity)) return null;
+  if (!EFFORTS.includes(effort)) return null;
+  return { day: keyDay, activity, minutes, effort };
+}
+
+/**
+ * The card a reached step goal fills: the day's midday card, or — on a day
+ * without one — the first open heart card, then the first open free one. A
+ * midday card that is already Done answers null: the goal never takes a second
+ * card of the day.
+ */
+function stepsSlot(slots, open) {
+  const midday = slots.find((item) => item && typeof item === "object" && !Array.isArray(item)
+    && item.slot === "midday"
+    && item.empty !== true
+    && typeof item.entryId === "string" && item.entryId !== "");
+  if (midday) return open.find((item) => item.slot === "midday") ?? null;
+  return open.find((item) => item.area === "heart")
+    ?? open.find((item) => item.area === "free")
+    ?? null;
+}
+
+/**
+ * A log or the step goal stands in for ONE of the day's open cards.
+ *
+ * The day's cards come from the caller (`{ need, slots }`, moves/slots.js
+ * `dayCards`): this module never imports slots.js. Every refusal writes nothing
+ * and names itself in `reason`: a day that is not today (`not_today`), a source
+ * that is not `log` or `steps` (`bad_source`), a log key that is not one of the
+ * day's `movelog` rows (`no_log`) or is under ten minutes (`too_short`), a second
+ * stand-in of the same source that day (`already_used`), a step count under the
+ * goal (`goal_not_reached`), a named slot that is not an open card (`bad_slot`),
+ * no open card at all (`no_card`), and the stand-ins a balancing chunk is kept
+ * for (`last_balance`).
+ *
+ * COUNTING. `movestand` rows are the stand-ins the day has used. A stand-in that
+ * is not balancing is allowed only while it leaves one card of `need` open, and
+ * never on the last open card a balancing chunk fits (BALANCE_AREAS) while the
+ * day has no `movebal` row — so walks, steps and other movement can never fill a
+ * day by themselves.
+ *
+ * WHICH SLOT. A log fills the caller's named slot when one is given, else the
+ * open card of its own area (the caller's `area` when it is one of AREAS, else
+ * the activity's default from ACTIVITY_AREA), else the first open card. A log of
+ * `yoga`, `band` or `bodyweight` whose area is a balancing one is the balancing
+ * chunk itself: it is exempt from the counting rule and writes the `movebal` row.
+ * A reached step goal fills the midday card, or the first open heart card and
+ * then the first open free one; it never balances. Each source is good for one
+ * card a day, kept in the local setting STANDIN_DAY_KEY.
+ *
+ * Writes, in order: the balance row (balancing logs only), the `movestand` row
+ * (once — a second assign for a slot writes nothing), the slot row and the areas
+ * through `recordSlotDone`, and the local flag. A stand-in never pays: no budget
+ * claim is made and the pet is never fed.
+ */
+export async function assignStandIn(db, {
+  day, slot, source, logKey, area, now = Date.now(), emit, cards,
+} = {}) {
+  const at = asAt(now);
+  const today = localDay(at);
+  if (day !== today) return { ok: false, reason: "not_today" };
+  if (source !== "log" && source !== "steps") return { ok: false, reason: "bad_source" };
+
+  const plan = standInCards(cards);
+  if (!plan) return { ok: false, reason: "no_card" };
+  const open = await openCards(db, today, plan.slots);
+  if (open.length === 0) return { ok: false, reason: "no_card" };
+
+  const named = typeof slot === "string" && slot !== "" ? slot : null;
+  if (named !== null && !open.some((item) => item.slot === named)) {
+    return { ok: false, reason: "bad_slot" };
+  }
+
+  const flags = await readStandInFlags(db, today);
+  let chosen = null;
+  let logArea = null;
+  let balancing = false;
+
+  if (source === "log") {
+    const info = parseLogKey(logKey, today);
+    if (!info || (await rowDelta(db, MOVE_LOG_KIND, logKey)) === null) {
+      return { ok: false, reason: "no_log" };
+    }
+    if (info.minutes < CARD_MIN_MINUTES) return { ok: false, reason: "too_short" };
+    if (flags.log) return { ok: false, reason: "already_used" };
+    logArea = areaFor(info.activity, area);
+    balancing = BALANCE_ACTIVITIES.includes(info.activity)
+      && logArea !== null
+      && BALANCE_AREAS.includes(logArea);
+    chosen = named === null ? null : open.find((item) => item.slot === named) ?? null;
+    if (!chosen && logArea !== null) chosen = open.find((item) => item.area === logArea) ?? null;
+    if (!chosen) chosen = open[0];
+  } else {
+    if (flags.steps) return { ok: false, reason: "already_used" };
+    const settings = await readStepSettings(db);
+    if ((await stepsToday(db, at, settings)) < settings.goal) {
+      return { ok: false, reason: "goal_not_reached" };
+    }
+    chosen = stepsSlot(plan.slots, open);
+    if (!chosen) return { ok: false, reason: "no_card" };
+  }
+
+  if (!balancing) {
+    const stands = await standInCount(db, today);
+    if (stands + 1 > plan.need - 1) return { ok: false, reason: "last_balance" };
+    if ((await rowDelta(db, MOVE_BAL_KIND, today)) === null) {
+      const balanceCards = open.filter((item) => BALANCE_AREAS.includes(item.area));
+      const last = balanceCards.length > 0 ? balanceCards[balanceCards.length - 1] : null;
+      if (last && last.slot === chosen.slot) return { ok: false, reason: "last_balance" };
+    }
+  }
+
+  if (balancing) await insertOnce(db, MOVE_BAL_KIND, today, 1, at, emit);
+  await insertOnce(db, MOVE_STAND_KIND, `${today}:${chosen.slot}`, 1, at, emit);
+  const areas = source === "steps" ? ["heart"] : (logArea === null ? [] : [logArea]);
+  const done = await recordSlotDone(db, {
+    day: today,
+    slot: chosen.slot,
+    entry: { kind: "stand-in", areas },
+    via: source === "log" ? "standin-log" : "standin-steps",
+    now: at,
+    emit,
+    need: plan.need,
+  });
+  await writeStandInFlag(db, today, source);
+  return { ok: true, slot: chosen.slot, all: done.all };
 }
