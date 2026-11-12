@@ -12,7 +12,9 @@ services:
     #   (verified §1.A gate). MTP requires the vulkan-radv-mtp toolbox and -np 1
     #   (no --parallel) — so this is single-stream (no 4-way concurrency), chosen
     #   for interactive use. Backend split is model-specific: 35B→Vulkan, 122B→ROCm.
-    image: kyuz0/amd-strix-halo-toolboxes:vulkan-radv-mtp
+    # The upstream tag is rolling (it moves to a new build); the digest is the
+    # build crow runs. Bump both toolboxes together — they must stay on one image.
+    image: kyuz0/amd-strix-halo-toolboxes:vulkan-radv-mtp@sha256:7537b55fa3e1120a09522aa581bb94b6db311ef7fcec1f68b76b71ad4652cc9e
     container_name: llamacpp-vulkan-qwen36-35b-a3b
     devices:
       - /dev/kfd

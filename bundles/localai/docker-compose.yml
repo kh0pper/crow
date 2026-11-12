@@ -10,7 +10,10 @@
 
 services:
   localai:
-    image: localai/localai:latest-cpu
+    # `latest-cpu` was frozen upstream (nothing newer was published to it), and
+    # newer releases ship no plain `-cpu` tag: the unsuffixed release tag IS the
+    # CPU image (`-aio-cpu` is the all-in-one variant, a different image).
+    image: localai/localai:v3.12.1@sha256:558efc7610e2ce43e702eaed4fcf456102a416471929d99819ef251fdbbf8b51
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
@@ -19,8 +22,8 @@ services:
       - THREADS=4
       - CONTEXT_SIZE=2048
     restart: unless-stopped
-    # For NVIDIA GPU support, change image to localai/localai:latest-gpu-nvidia-cuda-12
-    # and uncomment:
+    # For NVIDIA GPU support, swap the image for the same release's CUDA variant
+    # (a versioned, digest-pinned tag — never a rolling `latest-*` one) and uncomment:
     # deploy:
     #   resources:
     #     reservations:
