@@ -335,13 +335,15 @@ function resolveReviewedScript(scriptDir, relScript) {
  *
  * NEVER throws and NEVER returns or logs the password (every occurrence of it in the
  * log lines and the reason is replaced with `[hidden]`). Returns
- * `{ result: "ok"|"kept"|"not-running"|"failed"|"busy"|"skipped", reason?, log, mcpEnvUpdated? }`
+ * `{ result: "ok"|"kept"|"not-running"|"failed"|"busy"|"skipped", reason?, log, mcpEnvUpdated?, alreadySaved? }`
  * where `log` is the last 20 non-empty lines of the script's stdout (the installer appends
  * them to its job log; the route hands them to the card) and `mcpEnvUpdated` says the
  * bundle's mcp-addons.json entry was written with the new login, so a gateway restart is needed
  * before its MCP child uses it (the card route answers `needs_restart`; nothing restarts here).
  * `"busy"` means another run for this bundle — the install path's or the card's — is
- * already in flight.
+ * already in flight. `alreadySaved` marks the path where the keychain already held this
+ * login: NOTHING changed (no script, no marker, no followed-up step), so a caller that acts
+ * on a change — the boot catch-up's after-step and its bell — must not act on this answer.
  *
  * @param {object} o
  * @param {string} o.bundleId
@@ -350,6 +352,11 @@ function resolveReviewedScript(scriptDir, relScript) {
  * @param {string} o.destDir              the installed bundle dir (cwd, CROW_BUNDLE_DIR, .env)
  * @param {string|null} [o.installId]     installed.json's installedAt for this install
  * @param {string|null} [o.crowHome]
+ * @param {boolean} [o.holdsLock]         the CALLER already holds this bundle's first-admin
+ *                                        lock (the boot catch-up does, so it can skip a
+ *                                        bundle whose run is already in flight): the run then
+ *                                        neither takes nor releases it. Never set this from
+ *                                        the install path or the card's route.
  * @param {object} [o.deps]               seams: runScript, openDb, hasSaved, ensureWriteKey,
  *                                        newSecret, save, writeEnv, writeMarker, now, warn,
  *                                        applyMcpEnv, requestReload
@@ -361,6 +368,7 @@ export async function runFirstAdminSetup({
   destDir = null,
   installId = null,
   crowHome = process.env.CROW_HOME || null,
+  holdsLock = false,
   deps = {},
 } = {}) {
   const d = { ...defaultDeps(), ...(deps || {}) };
@@ -375,7 +383,7 @@ export async function runFirstAdminSetup({
   }
   const abs = script.path;
 
-  if (!tryBeginFirstAdminSetup(bundleId)) return { result: "busy", log: [] };
+  if (!holdsLock && !tryBeginFirstAdminSetup(bundleId)) return { result: "busy", log: [] };
   try {
     const name = (manifest && typeof manifest.name === "string" && manifest.name) || bundleId || "the app";
     const declaredEnv = new Set(
@@ -442,7 +450,7 @@ export async function runFirstAdminSetup({
       } catch {
         return await record("failed", KEYCHAIN_UNOPENABLE);
       }
-      if (already) return { result: "ok", log };
+      if (already) return { result: "ok", alreadySaved: true, log };
 
       // The keychain has to be writable BEFORE the app's login changes: a password the app
       // holds and nothing here does would lock the app.
@@ -534,7 +542,7 @@ export async function runFirstAdminSetup({
       try { db?.close?.(); } catch { /* already closed */ }
     }
   } finally {
-    endFirstAdminSetup(bundleId);
+    if (!holdsLock) endFirstAdminSetup(bundleId);
   }
 }
 

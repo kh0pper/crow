@@ -31,8 +31,10 @@
  *
  * FAIL-SAFE default: a web UI bundle with NO usable declaration (a third-party
  * or community-store manifest written before this field existed, or a typo'd
- * mode) is treated as `finish-setup`, so the operator still gets the card and
- * the bell. Silence is only ever an explicit `crow`/`external`/`none`.
+ * mode) is `undeclared`, so the operator still gets a card — but a softer one:
+ * Crow cannot tell whether the app has a login of its own, so it never claims
+ * that anyone on the machine can hijack it, and it rings no bell. Silence is
+ * only ever an explicit `crow`/`external`/`none`.
  *
  * The bell and the "Done" marker (db-backed, per install) live in
  * servers/gateway/bundle-first-admin.js, which re-exports everything here.
@@ -41,17 +43,37 @@ import { t, fill } from "./i18n.js";
 import { appTileLink } from "./app-link.js";
 import { isAdminPanelTokenEnvKey, isInviteHandlerName, inviteHandlerBundleId } from "../../first-admin/registry.js";
 
-/** The modes a manifest may declare (same list as the contract). */
-export const FIRST_ADMIN_MODES = Object.freeze(["crow", "finish-setup", "default-login", "external", "none"]);
+/**
+ * Every mode the runtime knows. The last one is INTERNAL: `undeclared` is what
+ * a web UI without a usable declaration becomes (see firstAdminOf). No manifest
+ * may declare it — the contract's own list does not contain it, and a manifest
+ * that says `"mode": "undeclared"` is treated as having declared nothing.
+ */
+export const FIRST_ADMIN_MODES = Object.freeze(["crow", "finish-setup", "default-login", "external", "none", "undeclared"]);
 
-/** The two modes that put a card in front of the operator and ring the bell. */
-export const OPERATOR_FIRST_ADMIN_MODES = Object.freeze(["finish-setup", "default-login"]);
+/** The modes that exist only inside Crow: never a manifest's to declare. */
+export const FIRST_ADMIN_INTERNAL_MODES = Object.freeze(["undeclared"]);
+
+/**
+ * The modes that put a card in front of the operator. `finish-setup` and
+ * `default-login` also ring the bell; `undeclared` does not — Crow has no proof
+ * that there is an account to claim, so it asks quietly instead of alarming.
+ */
+export const OPERATOR_FIRST_ADMIN_MODES = Object.freeze(["finish-setup", "default-login", "undeclared"]);
 
 export const FIRST_ADMIN_TITLE_KEY = "bundles.firstAdmin.title";
 export const FIRST_ADMIN_FINISH_BODY_KEY = "bundles.firstAdmin.finishSetupBody";
+export const FIRST_ADMIN_UNDECLARED_BODY_KEY = "bundles.firstAdmin.undeclaredBody";
 export const FIRST_ADMIN_DEFAULT_LOGIN_BODY_KEY = "bundles.firstAdmin.defaultLoginBody";
 export const FIRST_ADMIN_SETUP_BODY_KEY = "bundles.firstAdmin.setupBody";
 export const FIRST_ADMIN_KEPT_BODY_KEY = "bundles.firstAdmin.keptBody";
+
+/**
+ * The bell for a login Crow CHANGED under the operator (the boot catch-up): the password
+ * an app or a device was using no longer works, so the owner has to hear about it.
+ */
+export const FIRST_ADMIN_CHANGED_TITLE_KEY = "bundles.firstAdmin.changedTitle";
+export const FIRST_ADMIN_CHANGED_BODY_KEY = "bundles.firstAdmin.changedBody";
 
 /** The card's sentences for an invite-only app (N3-4 phase 2e). */
 export const FIRST_ADMIN_INVITE_CLOSE_BODY_KEY = "bundles.firstAdmin.invite.closeBody";
@@ -70,9 +92,11 @@ export const FIRST_ADMIN_SAVED_KEY = "APP_ADMIN_PASSWORD";
 
 /**
  * The manifest's firstAdmin block, normalized. A web UI with no usable
- * declaration (missing, or a mode the schema does not know) is `finish-setup`:
- * a third-party manifest cannot silence the warning by saying nothing. A
- * manifest with no web UI declares nothing at all → null.
+ * declaration (missing, a mode the schema does not know, or the internal name
+ * `undeclared` itself) is `undeclared`: a third-party manifest cannot silence
+ * the card by saying nothing, and Crow does not pretend to know whether the app
+ * has a login of its own. A manifest with no web UI declares nothing at all →
+ * null.
  *
  * `invite` is kept only when the mode is `finish-setup` AND the name is one of
  * Crow's code-held handlers: anything else is as good as absent (the contract
@@ -89,9 +113,11 @@ export function firstAdminOf(manifest) {
   if (!m) return null;
   const hasWebUI = !!(m.webUI && typeof m.webUI === "object");
   const fa = m.firstAdmin && typeof m.firstAdmin === "object" ? m.firstAdmin : null;
-  const declared = fa && FIRST_ADMIN_MODES.includes(fa.mode) ? fa : null;
+  // `undeclared` is Crow's own name for "no declaration": a manifest that spells it out
+  // declared nothing, exactly like one that left the block out or typo'd the mode.
+  const declared = fa && !FIRST_ADMIN_INTERNAL_MODES.includes(fa.mode) && FIRST_ADMIN_MODES.includes(fa.mode) ? fa : null;
   if (!declared) {
-    return hasWebUI ? { mode: "finish-setup", path: null, user: null, note: null } : null;
+    return hasWebUI ? { mode: "undeclared", path: null, user: null, note: null } : null;
   }
   return {
     mode: declared.mode,
@@ -133,7 +159,12 @@ export function firstAdminSavedKey(manifest) {
   return isAdminPanelTokenEnvKey(key) ? null : key;
 }
 
-/** Does this bundle's install leave an admin account someone else could claim? */
+/**
+ * Does this bundle's install leave an admin account someone else could claim?
+ * `finish-setup` and `default-login` say so outright; `undeclared` means Crow
+ * cannot tell, and the operator is asked (quietly) to check — so it counts here
+ * too, while never ringing the bell.
+ */
 export function firstAdminNeedsOperator(manifest) {
   const fa = firstAdminOf(manifest);
   return !!fa && OPERATOR_FIRST_ADMIN_MODES.includes(fa.mode);
@@ -159,6 +190,9 @@ export function firstAdminNeedsOperator(manifest) {
 export function firstAdminNeedsNotice(manifest, { autoResult = null, inviteResult = null, afterResult = null } = {}) {
   const fa = firstAdminOf(manifest);
   if (!fa) return false;
+  // `undeclared` gets a card, never a bell: Crow cannot tell whether the app has a login of
+  // its own, so it must not ring an alarm that may be about nothing.
+  if (fa.mode === "undeclared") return false;
   if (fa.invite) {
     const r = inviteResult && typeof inviteResult === "object" ? inviteResult : null;
     const invited = !!r && (r.result === "invited" || r.result === "already");
@@ -197,6 +231,16 @@ export function firstAdminTitle(name, lang = "en") {
   return fill(t(FIRST_ADMIN_TITLE_KEY, lang), { name });
 }
 
+/** The title of the "Crow set this app's admin password" bell — never a secret. */
+export function firstAdminChangedTitle(name, lang = "en") {
+  return fill(t(FIRST_ADMIN_CHANGED_TITLE_KEY, lang), { name });
+}
+
+/** Its body: where the new login is kept, and what still needs it. Never a secret. */
+export function firstAdminChangedBody(lang = "en") {
+  return t(FIRST_ADMIN_CHANGED_BODY_KEY, lang);
+}
+
 /**
  * The card's (and the bell's) sentence for a normalized firstAdmin record, in
  * `lang` — the app's note appended when it has one. Null when it needs no
@@ -214,9 +258,12 @@ export function firstAdminBody(fa, name, lang = "en") {
     return fa.note ? `${body} ${fa.note}` : body;
   }
   if (!OPERATOR_FIRST_ADMIN_MODES.includes(fa.mode)) return null;
+  // `undeclared`: the app may have no login at all, so the card asks rather than warns.
   const body = fa.mode === "default-login"
     ? fill(t(FIRST_ADMIN_DEFAULT_LOGIN_BODY_KEY, lang), { name, user: fa.user || "" })
-    : fill(t(FIRST_ADMIN_FINISH_BODY_KEY, lang), { name });
+    : fa.mode === "undeclared"
+      ? fill(t(FIRST_ADMIN_UNDECLARED_BODY_KEY, lang), { name })
+      : fill(t(FIRST_ADMIN_FINISH_BODY_KEY, lang), { name });
   return fa.note ? `${body} ${fa.note}` : body;
 }
 

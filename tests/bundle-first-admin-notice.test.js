@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   firstAdminOf,
   firstAdminNeedsOperator,
+  firstAdminNeedsNotice,
   firstAdminTitle,
   firstAdminBody,
   firstAdminLink,
@@ -58,7 +59,7 @@ test("firstAdminOf normalizes, and refuses a mode the schema does not know", () 
   assert.equal(firstAdminOf({ firstAdmin: { mode: "none", path: "admin" } }).path, null, "a path that is not one is dropped");
 });
 
-test("only finish-setup and default-login need the operator", () => {
+test("only finish-setup, default-login and the undeclared fallback need the operator", () => {
   assert.equal(firstAdminNeedsOperator(FINISH), true);
   assert.equal(firstAdminNeedsOperator(DEFAULT_LOGIN), true);
   assert.equal(firstAdminNeedsOperator(CROW), false, "Crow already made the admin");
@@ -67,21 +68,40 @@ test("only finish-setup and default-login need the operator", () => {
   assert.equal(firstAdminNeedsOperator({}), false);
 });
 
-test("a web UI manifest that declares nothing is treated as finish-setup, so it still warns", () => {
-  // A community-store manifest written before the field existed (or a typo'd
-  // mode) cannot silence the warning by saying nothing (review round 1, S4).
+test("a web UI that declares nothing becomes 'undeclared': a card, no claim warning, no bell", () => {
+  // A community-store manifest written before the field existed (or a typo'd mode)
+  // cannot silence the card by saying nothing — but Crow also will not claim there is an
+  // admin account to steal when it has no idea whether the app has a login at all.
   const undeclared = { id: "shop", name: "Shop App", webUI: { port: 9000, path: "/", label: "Shop App" } };
-  assert.deepEqual(firstAdminOf(undeclared), { mode: "finish-setup", path: null, user: null, note: null });
+  assert.deepEqual(firstAdminOf(undeclared), { mode: "undeclared", path: null, user: null, note: null });
   assert.equal(firstAdminNeedsOperator(undeclared), true);
-  assert.deepEqual(firstAdminOf({ ...undeclared, firstAdmin: { mode: "nope" } }), { mode: "finish-setup", path: null, user: null, note: null });
+  assert.deepEqual(firstAdminOf({ ...undeclared, firstAdmin: { mode: "nope" } }), { mode: "undeclared", path: null, user: null, note: null });
+  // `undeclared` is Crow's own internal name: a manifest that declares it declared nothing.
+  assert.deepEqual(firstAdminOf({ ...undeclared, firstAdmin: { mode: "undeclared" } }), { mode: "undeclared", path: null, user: null, note: null });
+  assert.equal(firstAdminNeedsNotice(undeclared), false, "no bell for a card that may be about nothing");
   const cards = pendingFirstAdminNotices({
     installed: { shop: { installedAt: INSTALL_A } },
     manifests: { shop: undeclared },
     liveProxyIds: ["shop"],
   });
-  assert.deepEqual(cards.map((c) => `${c.id}:${c.mode}`), ["shop:finish-setup"]);
+  assert.deepEqual(cards.map((c) => `${c.id}:${c.mode}`), ["shop:undeclared"]);
+  // The softer card keeps the whole action set: open the app, save the login you made, Done.
+  assert.equal(cards[0].canAuto, false, "Crow has no script to run for an app it does not know");
+  assert.equal(cards[0].canSave, true);
+  assert.equal(cards[0].canDone, true);
   // No manifest at all is still no card: there is nothing to link or name.
   assert.equal(firstAdminOf(null), null);
+});
+
+test("the undeclared card asks instead of warning, and says what to do", () => {
+  const shop = { id: "shop", name: "Shop App", webUI: { port: 9000, path: "/", label: "Shop App" } };
+  assert.equal(firstAdminTitle("Shop App", "en"), "Finish Shop App's setup now", "the title is unchanged");
+  assert.equal(
+    firstAdminBody(firstAdminOf(shop), "Shop App", "en"),
+    "Crow can't tell whether Shop App has its own login. If it asks you to create an account when you open it, create it now and save it here.",
+  );
+  assert.notEqual(firstAdminBody(firstAdminOf(shop), "Shop App", "es"), firstAdminBody(firstAdminOf(shop), "Shop App", "en"));
+  assert.equal(t("bundles.firstAdmin.undeclaredBody", "en").includes("can claim"), false, "never the claim warning");
 });
 
 test("the link is the Nest tile's: /proxy/<id><path>, or the app's own https origin when direct", () => {
@@ -238,14 +258,12 @@ test("the bell is silent for crow, external and none", async () => {
   assert.equal(calls.length, 0);
 });
 
-test("an undeclared web UI install rings once (the third-party fallback)", async () => {
+test("an undeclared web UI install gets its card but rings NO bell", async () => {
   const { db } = makeDb();
   const { calls, notify } = makeNotify();
   const undeclared = { id: "shop", name: "Shop App", webUI: { port: 9000, path: "/", label: "Shop App" } };
-  await notifyFirstAdmin({ db, bundleId: "shop", manifest: undeclared, installId: INSTALL_A, notify });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].title, "Finish Shop App's setup now");
-  assert.deepEqual(calls[0].metadata, { kind: "bundle-first-admin", bundle: "shop", mode: "finish-setup" });
+  assert.equal(await notifyFirstAdmin({ db, bundleId: "shop", manifest: undeclared, installId: INSTALL_A, notify }), null);
+  assert.equal(calls.length, 0, "Crow cannot prove there is an account to claim, so it does not alarm");
 });
 
 test("a second install of the same bundle rings again; the same install never rings twice", async () => {

@@ -235,9 +235,11 @@ machine can answer that page on `127.0.0.1` before you do. So a manifest with a
 - `via`, `secretEnv`, `userEnv` and `urlEnv` are only allowed with `crow`.
 - Prefer `crow`: it is the only mode where nothing can claim the account between the install and the operator's first visit.
 
-A web UI bundle that declares nothing is not silently ignored: at runtime it is
-treated as `finish-setup`, so the operator still sees the card and gets the
-bell. Only an explicit `crow`, `external` or `none` is silent.
+A web UI bundle that declares nothing is not silently ignored: at runtime it
+becomes `undeclared`, so the operator still sees the card (a softer one, asking
+them to check whether the app has a login of its own) — but no bell, because Crow
+cannot tell whether there is an account to claim. Only an explicit `crow`,
+`external` or `none` is silent.
 
 `docs/developers/bundles.md` has the same rules in more detail.
 

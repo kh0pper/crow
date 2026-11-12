@@ -2416,6 +2416,10 @@ async function recreateBundleGuarded(bundleId) {
   }
 }
 export { recreateBundleGuarded as _recreateBundleGuardedForTest };
+// The real name, for the ONE caller outside this module that must reuse the same guards: the
+// boot first-admin catch-up's `firstAdmin.setup.after` step (bundle-first-admin-catchup.js).
+// It needs no request, so the boot pass may run it exactly as the card's route does.
+export { recreateBundleGuarded };
 
 // Follow-up B: who may allow a folder outside Crow's home (the owner at this machine's own
 // dashboard), and the folders each check may admit.

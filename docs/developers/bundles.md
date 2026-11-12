@@ -259,8 +259,10 @@ Contract rules (`scripts/lib/bundle-contract.mjs`, enforced by `build-registry`)
 
 At runtime the declaration is **fail-safe the other way**: a web UI bundle with
 no usable declaration (a community-store manifest written before this field, or
-a typo'd mode) is treated as `finish-setup`, so the card and the bell still
-appear. Silence has to be an explicit `crow`, `external` or `none`.
+a typo'd mode) becomes `undeclared` — an internal mode no manifest may declare.
+The operator still gets a card asking them to check whether the app wants an
+account, and to save the login if it does, but no bell: Crow has no evidence that
+anything is claimable. Silence has to be an explicit `crow`, `external` or `none`.
 
 ### `via: "setup"`: the script that gives the app its admin
 
@@ -320,9 +322,19 @@ The script reports what happened through its exit code:
 |---|---|---|
 | `0` | the app's admin `<user>` now has exactly that password | saves it in the keychain (Settings → Passwords), into the bundle `.env` under `secretEnv`/`userEnv` when those are declared `env_vars`, and into the bundle's `mcp-addons.json` entry when it has one |
 | `3` | the app already has its own admin (set up earlier by the operator); nothing changed | leaves everything alone, and asks the operator to save the login they use |
-| `4` | the app is not running / not answering; nothing changed | tells the operator to use "Set it up for me" on the Extensions card later |
+| `4` | the app is not running / not answering; nothing changed | records that, and runs the script again on the next gateway boot (the card's "Set it up for me" runs it now) |
 | `5` | the app itself confirmed the new password, but logging in with it did not succeed | keeps it exactly like `0` (the app holds that password now), and adds "Crow saved the new login, but could not log in with it to confirm" to the card and the install log |
 | anything else, or a timeout | failed | says so on the card and in the install log |
+
+**When the first run never happened**, Crow catches up on its own: once per gateway boot,
+after the extension's containers start, every installed bundle whose reviewed manifest
+declares `via: "setup"` and whose keychain holds no admin login for it gets the same run —
+under the same per-bundle lock the card's button takes, with the same `after` step. The
+outcome is remembered per install (`first_admin_auto:<id>`), so `ok`, `kept` and `failed`
+are never repeated automatically: a failed run stays on the card's "Set it up for me"
+button, where the reason is shown. Only "the app was not up" (`4`) is retried, on the next
+boot. This is what makes an app installed before this feature existed, or one whose
+containers were not up yet, finish its setup without the operator pressing anything.
 
 ### `setup.after`: what Crow does once the admin exists
 

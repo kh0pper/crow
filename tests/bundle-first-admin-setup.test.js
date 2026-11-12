@@ -566,11 +566,19 @@ test("an existing ACTIVE keychain entry wins: nothing runs, nothing is overwritt
   const { calls, deps } = seams({ hasSaved: async (_db, id, key) => id === "frigate" && key === "FRIGATE_PASSWORD" });
   const { out } = await runSetup(deps);
   assert.equal(out.result, "ok");
+  assert.equal(out.alreadySaved, true, "the caller is told this was NOT a change");
   assert.equal(calls.runScript.length, 0, "the script must never run over a login Crow already has");
   assert.equal(calls.save.length, 0);
   // The keychain entry alone hides the card: a marker would keep it hidden after the
   // operator deletes the entry, so nothing is written here.
   assert.deepEqual(calls.marker, []);
+});
+
+test("only the already-saved path answers alreadySaved; a run that created the login does not", async () => {
+  const fresh = seams();
+  const ran = await runSetup(fresh.deps);
+  assert.equal(ran.out.result, "ok", "result stays 'ok': the install path and the card route read it");
+  assert.equal("alreadySaved" in ran.out, false, "this run really changed the app's login");
 });
 
 test("a keychain that cannot be opened or written stops everything BEFORE the app is touched", async () => {
