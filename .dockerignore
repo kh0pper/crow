@@ -1,0 +1,78 @@
+# Build context for the root image (`docker build .`).
+#
+# This is an ALLOWLIST, not a denylist. A developer's checkout carries untracked
+# material that must never reach an image layer: a filled-in .mcp.json,
+# config/models.json with API keys, bots/, nested bundle .git directories, Python
+# .venv trees, SQLite databases and *.bak copies. A denylist has to name every one
+# of those (and misses the next one added); an allowlist ships only what is named.
+#
+# ORDER MATTERS: the LAST matching line wins, so the four blocks below must stay
+# in this order.
+
+# ─── 1. Everything is out unless a later line says otherwise ────────────────
+*
+
+# ─── 2. …re-included: exactly what the image runs on ────────────────────────
+# `scripts/init-db.js` walks scripts/ (migrations included) and the gateway
+# imports bundles/ and registry/ at runtime, so the source tree beyond servers/
+# has to be here. The env and model templates are read by scripts/setup.js and
+# by bundle installs to seed a real, untracked .env.
+!servers
+!scripts
+!bundles
+!registry
+!skills
+!templates
+!vendor
+!package.json
+!package-lock.json
+# The MIT notice has to ship with the image, and LICENSE is a plain file the
+# blanket `*` above would otherwise keep out.
+!LICENSE
+!.env.example
+!.env.garage.example
+!models.example.json
+!.mcp.json.example
+!docker-compose.yml
+
+# ─── 3. …but never these, at any depth ──────────────────────────────────────
+# VCS data (a nested bundle .git carries a whole history), dependencies, Python
+# caches and venvs, secrets and keys, runtime databases and logs, and the
+# per-machine files that hold tokens. Note that `servers/gateway/secrets/` is
+# TRACKED CODE and is deliberately absent from this list — there is no `secrets`
+# pattern here.
+**/.git
+**/node_modules
+**/.venv
+**/venv
+**/__pycache__
+**/.ruff_cache
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.gpg
+**/id_rsa*
+**/id_ed25519*
+**/.npmrc
+**/.netrc
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite-*
+**/*.bak
+**/*.bak-*
+**/*.log
+**/.crow
+**/.mcp.json
+**/models.json
+
+# ─── 4. …with the shipped env TEMPLATES still re-included ───────────────────
+# Block 3's `**/.env.*` swallows `.env.example`, so every template is re-included
+# again HERE, below every exclusion (the last matching line wins).
+!.env.example
+!**/.env.example
+!.env.garage.example

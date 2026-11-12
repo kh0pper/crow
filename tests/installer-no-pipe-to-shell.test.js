@@ -29,6 +29,12 @@ const SETUP = join(ROOT, "scripts", "setup.js");
 const DOCKERFILE = join(ROOT, "Dockerfile");
 const src = () => readFileSync(INSTALLER, "utf-8");
 
+/** Index of the installer's source-only seam — the line that ends the helper
+ *  layer and starts the install body. A bare indexOf("CROW_INSTALL_SOURCE_ONLY")
+ *  no longer finds it: the test-only fingerprint overrides above the seam
+ *  reference the same variable in their own guard. */
+const SEAM = 'if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then';
+
 /** A pipeline into a shell: `… | sh`, `… | bash`, `… | sudo sh`,
  *  `… | sudo -E bash -`. Comment lines are handled by the caller. */
 const PIPE_TO_SHELL = /\|\s*(?:sudo\s+(?:-E\s+)?)?(?:ba)?sh\b|<\(\s*(?:curl|wget)\b|\b(?:ba)?sh\s+-c\s+"?\$\(\s*(?:curl|wget)\b/;
@@ -90,7 +96,8 @@ test("K7/N4-2: the vendor install scripts are gone from the installer", () => {
   assert.doesNotMatch(s, /tailscale\.com\/install\.sh/, "Tailscale's install script is gone");
   // …and the three repository steps take their place, above the source-only
   // seam so the suite can drive them.
-  const seam = s.indexOf("CROW_INSTALL_SOURCE_ONLY");
+  const seam = s.indexOf(SEAM);
+  assert.ok(seam > -1, "the source-only seam must exist");
   for (const fn of ["fetch_verified_key() {", "install_docker_repo() {", "install_nodesource_repo() {", "install_tailscale_repo() {"]) {
     const at = s.indexOf(fn);
     assert.ok(at > -1 && at < seam, `${fn} must be defined above the seam`);
@@ -224,8 +231,11 @@ const RASPBIAN_BOOKWORM = [
 /** A scratch root: os-release fixture, keyring/sources dirs, a private TMPDIR, a
  *  curl shim that serves `served` to its -o target, a sudo shim that runs its
  *  argument, and an apt shim that only logs. `fpr` is the fingerprint this run
- *  treats as expected (the throwaway key's, unless a test overrides one). */
-function vendorScratch({ osRelease = UBUNTU_NOBLE, served = "", fpr, downloadOk = true, arch = "amd64" } = {}) {
+ *  treats as expected (the throwaway key's, unless a test overrides one).
+ *  `sudoCatFixture` makes the sudo shim's `cat` serve that file instead of
+ *  exec'ing cat — it stands in for root reading a file the invoking user may not
+ *  read (chmod 000), which no unprivileged shim can do for real. */
+function vendorScratch({ osRelease = UBUNTU_NOBLE, served = "", fpr, downloadOk = true, arch = "amd64", sudoCatFixture = "" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "crow-vendors-"));
   const bin = join(dir, "bin");
   mkdirSync(bin);
@@ -260,6 +270,10 @@ function vendorScratch({ osRelease = UBUNTU_NOBLE, served = "", fpr, downloadOk 
   const sudoLog = join(dir, "sudo.log");
   const sudo = shim(bin, "sudo", [
     `printf '%s\\n' "$*" >> ${JSON.stringify(sudoLog)}`,
+    // Test-only, and only when the caller asks for it: the sudo shim runs its
+    // argument as the invoking user, so it cannot read a chmod 000 file the way
+    // real sudo (root) would. Serving a fixture is the smallest stand-in.
+    ...(sudoCatFixture === "" ? [] : [`[ "$1" = cat ] && { cat ${JSON.stringify(sudoCatFixture)}; exit 0; }`]),
     'exec "$@"',
   ].join("\n"));
 
@@ -529,6 +543,196 @@ test("K7/N4-2: an unsupported distribution refuses both steps and names them", (
   assert.match(r.stdout, /https:\/\/tailscale\.com\/download/);
   assert.deepEqual(readdirSync(s.sourcesDir), [], "no apt source is written");
   assert.deepEqual(logLines(s.curlLog), [], "and nothing is downloaded");
+});
+
+// ─── static: the fingerprint test seams cannot leak into a real install ──────
+
+test("K7/N4-2: the CROW_TEST_*_KEY_FPR overrides only apply when the suite sources the installer", () => {
+  const lines = src().split("\n");
+  // `bash crow-install.sh` and the documented `curl … | bash` must keep the
+  // pinned fingerprints even when these variables are exported, so the three
+  // override assignments sit in ONE block guarded by BOTH conditions: the
+  // source-only flag AND the script having been sourced (BASH_SOURCE[0] != $0).
+  const guardIdx = lines.findIndex((line) => !/^\s*#/.test(line)
+    && line.includes("CROW_INSTALL_SOURCE_ONLY") && line.includes("BASH_SOURCE[0]") && line.includes('"$0"'));
+  assert.ok(guardIdx > -1, "the overrides must be guarded by CROW_INSTALL_SOURCE_ONLY AND the BASH_SOURCE test");
+  assert.match(lines[guardIdx], /^if .*; then$/, "the guard is a single if block");
+  const endIdx = lines.findIndex((line, i) => i > guardIdx && line === "fi");
+  assert.ok(endIdx > guardIdx, "the guarded block is closed");
+  const block = lines.slice(guardIdx, endIdx + 1);
+
+  for (const name of ["DOCKER", "NODESOURCE", "TAILSCALE"]) {
+    const varName = `CROW_TEST_${name}_KEY_FPR`;
+    const assignments = block.filter((line) => !/^\s*#/.test(line) && line.includes("${" + varName + ":-"));
+    assert.equal(assignments.length, 1,
+      `${varName} must be read exactly once, inside the guard: ${JSON.stringify(assignments)}`);
+    assert.match(assignments[0], new RegExp(`^\\s+${name}_KEY_FPR="\\$\\{${varName}:-\\$${name}_KEY_FPR\\}"$`),
+      "the override assigns the plain constant, nothing else");
+  }
+
+  // …and no read of any of them outside the block: there is no second,
+  // unguarded seam anywhere in the executed code.
+  const outside = lines
+    .map((line, i) => ({ line, i }))
+    .filter(({ line }) => !/^\s*#/.test(line) && /CROW_TEST_[A-Z]+_KEY_FPR/.test(line))
+    .filter(({ i }) => i < guardIdx || i > endIdx)
+    .map(({ line }) => line);
+  assert.deepEqual(outside, [], "no CROW_TEST_*_KEY_FPR read lives outside the guard");
+});
+
+// ─── behaviour: Docker's legacy one-line source is cleaned up ────────────────
+
+const DOCKER_LEGACY_LIST = "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable\n";
+
+test("K7/N4-2: a legacy docker.list mentioning download.docker.com is removed only AFTER the new source is written", (t) => {
+  if (!hasGpg()) return t.skip("gpg is not installed");
+  const keys = throwawayKeys();
+  const s = vendorScratch({ served: keys.armor, fpr: keys.fpr });
+  const legacy = join(s.sourcesDir, "docker.list");
+  writeFileSync(legacy, DOCKER_LEGACY_LIST);
+
+  const r = runVendor(s, outcome("install_docker_repo"));
+  assert.match(r.stdout, /STEP_OK/, r.stdout + r.stderr);
+
+  assert.equal(existsSync(legacy), false, "the legacy docker.list must be removed");
+  assert.equal(existsSync(join(s.sourcesDir, "docker.sources")), true, "and the deb822 source is written");
+  assert.match(read(join(s.sourcesDir, "docker.sources")),
+    /^URIs: https:\/\/download\.docker\.com\/linux\/ubuntu$/m);
+
+  // Removed through the sudo seam, and only AFTER the new source file is
+  // installed: a failed write must never leave the host with no Docker repo.
+  const calls = logLines(s.sudoLog);
+  const rmIdx = calls.findIndex((line) => line === `rm -f ${legacy}`);
+  const writeIdx = calls.findIndex((line) => line.includes("docker.sources"));
+  assert.ok(rmIdx > -1, `the legacy file is removed through the sudo seam: ${JSON.stringify(calls)}`);
+  assert.ok(writeIdx > -1, `the new source file is installed through the sudo seam: ${JSON.stringify(calls)}`);
+  assert.ok(rmIdx > writeIdx, "the legacy file goes only after docker.sources was written");
+  assert.deepEqual(readdirSync(s.tmpDir), []);
+});
+
+test("K7/N4-2: a docker.list whose only download.docker.com line is commented out is kept", (t) => {
+  if (!hasGpg()) return t.skip("gpg is not installed");
+  const keys = throwawayKeys();
+  const s = vendorScratch({ served: keys.armor, fpr: keys.fpr });
+  const commented = join(s.sourcesDir, "docker.list");
+  // A commented-out line is not an active Docker source, so apt never conflicts
+  // with docker.sources over it — the file is somebody's note, not a repo.
+  const body = `# ${DOCKER_LEGACY_LIST.replace(/\n$/, "")}\n`;
+  writeFileSync(commented, body);
+
+  const r = runVendor(s, outcome("install_docker_repo"));
+  assert.match(r.stdout, /STEP_OK/, r.stdout + r.stderr);
+
+  assert.equal(existsSync(commented), true, "a commented-out mention is not Docker's active source");
+  assert.equal(read(commented), body, "…so the file is left byte for byte");
+  assert.match(r.stdout, /Kept the legacy file .*docker\.list/, "and the operator is told why");
+  assert.deepEqual(logLines(s.sudoLog).filter((line) => line.includes(`rm -f ${commented}`)), [],
+    "nothing removed it");
+  // The new source is written regardless.
+  assert.equal(existsSync(join(s.sourcesDir, "docker.sources")), true);
+  assert.deepEqual(readdirSync(s.tmpDir), []);
+});
+
+test("K7/N4-2: a docker.list that is not Docker's is kept", (t) => {
+  if (!hasGpg()) return t.skip("gpg is not installed");
+  const keys = throwawayKeys();
+  const s = vendorScratch({ served: keys.armor, fpr: keys.fpr });
+  const unrelated = join(s.sourcesDir, "docker.list");
+  const body = "deb https://apt.example.invalid/docker stable main\n";
+  writeFileSync(unrelated, body);
+
+  const r = runVendor(s, outcome("install_docker_repo"));
+  assert.match(r.stdout, /STEP_OK/, r.stdout + r.stderr);
+
+  assert.equal(existsSync(unrelated), true, "an unrelated file named docker.list must be left alone");
+  assert.equal(read(unrelated), body, "…byte for byte");
+  assert.match(r.stdout, /Kept the legacy file .*docker\.list/, "and the operator is told why");
+  assert.deepEqual(logLines(s.sudoLog).filter((line) => line.includes("docker.list")), [],
+    "nothing removed it");
+});
+
+// A docker.list the invoking user cannot read (mode 000). The installer must not
+// call it "not Docker's" on the strength of a failed read: it reads it through
+// the sudo seam instead, and only an unreadable-in-both-ways file is kept.
+
+/** A chmod 000 docker.list in `s`'s sources dir. Root ignores the mode, so these
+ *  two tests skip there; the file's mode is restored in a finally. */
+const unreadableLegacyList = (s) => {
+  const legacy = join(s.sourcesDir, "docker.list");
+  writeFileSync(legacy, DOCKER_LEGACY_LIST);
+  chmodSync(legacy, 0o000);
+  return legacy;
+};
+
+test("K7/N4-2: an unreadable docker.list that sudo CAN read is still removed when it is Docker's", (t) => {
+  if (!hasGpg()) return t.skip("gpg is not installed");
+  if (process.getuid() === 0) return t.skip("root ignores mode 000, so the unreadable path cannot be exercised");
+  const keys = throwawayKeys();
+  // The fixture stands in for root's read of the 000 file: the sudo shim runs its
+  // argument as the invoking user, so it cannot read the file the way real sudo can.
+  const dir = mkdtempSync(join(tmpdir(), "crow-sudocat-"));
+  const asRoot = join(dir, "docker.list.as-root");
+  writeFileSync(asRoot, DOCKER_LEGACY_LIST);
+  const s = vendorScratch({ served: keys.armor, fpr: keys.fpr, sudoCatFixture: asRoot });
+  const legacy = unreadableLegacyList(s);
+
+  const r = runVendor(s, outcome("install_docker_repo"));
+  assert.match(r.stdout, /STEP_OK/, r.stdout + r.stderr);
+
+  assert.equal(existsSync(legacy), false,
+    "the sudo read showed download.docker.com, so the legacy file is Docker's and is removed");
+  assert.doesNotMatch(r.stdout, /could not be read/, "the read through sudo succeeded, so there is no warning");
+  assert.match(r.stdout, /Removed the legacy Docker file .*docker\.list/, "and the operator is told");
+  const calls = logLines(s.sudoLog);
+  assert.ok(calls.includes(`cat ${legacy}`), `the file was read through the sudo seam: ${JSON.stringify(calls)}`);
+  assert.ok(calls.includes(`rm -f ${legacy}`), `and removed through it too: ${JSON.stringify(calls)}`);
+  assert.equal(existsSync(join(s.sourcesDir, "docker.sources")), true);
+  assert.deepEqual(readdirSync(s.tmpDir), []);
+});
+
+test("K7/N4-2: an unreadable docker.list is kept, with a warning, when sudo cannot read it either", (t) => {
+  if (!hasGpg()) return t.skip("gpg is not installed");
+  if (process.getuid() === 0) return t.skip("root ignores mode 000, so the unreadable path cannot be exercised");
+  const keys = throwawayKeys();
+  // No sudoCatFixture: the sudo shim's `cat` fails as well, which is the case
+  // where the file is owned by somebody else and cannot be identified at all.
+  const s = vendorScratch({ served: keys.armor, fpr: keys.fpr });
+  const legacy = unreadableLegacyList(s);
+
+  try {
+    const r = runVendor(s, outcome("install_docker_repo"));
+    assert.match(r.stdout, /STEP_OK/, r.stdout + r.stderr);
+
+    assert.equal(existsSync(legacy), true, "a file nobody could read is not taken for Docker's and deleted");
+    assert.equal(statSync(legacy).size, Buffer.byteLength(DOCKER_LEGACY_LIST), "…and is left as it was");
+    assert.equal(statSync(legacy).mode & 0o777, 0, "…mode included");
+    assert.match(r.stdout, /Kept the legacy file .*docker\.list: it could not be read/,
+      "the operator is told why it was kept");
+    const calls = logLines(s.sudoLog);
+    assert.ok(calls.includes(`cat ${legacy}`), `a second read was attempted through sudo: ${JSON.stringify(calls)}`);
+    assert.deepEqual(calls.filter((line) => line.includes(`rm -f ${legacy}`)), [], "nothing removed it");
+    // The new source is written regardless of the legacy file's fate.
+    assert.equal(existsSync(join(s.sourcesDir, "docker.sources")), true);
+    assert.deepEqual(readdirSync(s.tmpDir), []);
+  } finally {
+    chmodSync(legacy, 0o644);
+  }
+});
+
+test("K7/N4-2: a refused Docker key leaves a legacy docker.list untouched", (t) => {
+  if (!hasGpg()) return t.skip("gpg is not installed");
+  const keys = throwawayKeys();
+  const s = vendorScratch({ served: keys.armor, fpr: keys.fpr });
+  const legacy = join(s.sourcesDir, "docker.list");
+  writeFileSync(legacy, DOCKER_LEGACY_LIST);
+
+  const r = runVendor(s, outcome("install_docker_repo"), { CROW_TEST_DOCKER_KEY_FPR: keys.otherFpr });
+  assert.match(r.stdout, /STEP_FAIL/, r.stdout + r.stderr);
+
+  assert.equal(existsSync(legacy), true, "the key was never verified, so nothing of the old setup is taken away");
+  assert.equal(read(legacy), DOCKER_LEGACY_LIST);
+  assert.equal(existsSync(join(s.sourcesDir, "docker.sources")), false);
+  assert.deepEqual(logLines(s.sudoLog).filter((line) => line.includes("docker.list")), []);
 });
 
 // ─── behaviour: the old NodeSource setup files are cleaned up ────────────────
