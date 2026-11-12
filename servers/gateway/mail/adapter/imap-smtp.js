@@ -109,7 +109,12 @@ const MAX_QUERY_CHARS = 1000;
 /** How long `close()` waits for a graceful LOGOUT before it drops the socket. */
 const CLOSE_TIMEOUT_MS = 2000;
 
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+/**
+ * The characters no folder name, search term or special-use flag may carry: C0 controls and DEL, the
+ * C1 controls, and U+2028/U+2029 — the same class the shared contract validator in `interface.js` uses,
+ * so a value it refuses never reaches a command here by a second door.
+ */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f\u0080-\u009f\u2028\u2029]/;
 const SECURITIES = new Set(["ssl", "starttls", "none"]);
 
 /** The only hosts a cleartext (`security: "none"`) sign-in may reach: this machine, and only it. */

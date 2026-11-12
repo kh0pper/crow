@@ -552,6 +552,40 @@ test("a timeout above the 32-bit ceiling is clamped instead of firing at once", 
   }
 });
 
+test("a timeout that is not a positive integer is refused when the adapter is built", () => {
+  const endpoint = { host: "127.0.0.1", port: 143 };
+  const build = (timeouts) => createImapSmtpAdapter({
+    account: accountFor(endpoint),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts,
+  });
+  for (const value of [Number.NaN, -1, 0, "5000", Number.POSITIVE_INFINITY, 1.5]) {
+    assert.throws(
+      () => build({ ...FAST, connectMs: value }),
+      (err) => {
+        assert.ok(err instanceof TypeError, `connectMs: ${String(value)} throws a TypeError, got ${err && err.name}`);
+        assert.match(err.message, /timeouts\.connectMs/);
+        return true;
+      },
+      `connectMs: ${String(value)} is refused rather than read as a deadline`,
+    );
+  }
+  for (const value of ["x", 5, true]) {
+    assert.throws(
+      () => build(value),
+      (err) => {
+        assert.ok(err instanceof TypeError, `timeouts: ${String(value)} throws a TypeError, got ${err && err.name}`);
+        assert.match(err.message, /timeouts must be an object/);
+        return true;
+      },
+      `a non-object timeouts (${String(value)}) is refused`,
+    );
+  }
+  // The seam the valid values take: the defaults stand in for a key that is absent or null.
+  assert.ok(build({ connectMs: 1 }) != null, "one is a deadline");
+  assert.ok(build({ connectMs: null }) != null, "null leaves the default in place");
+});
+
 /* --------------------------------------------------------- the send deadline's own rule */
 
 test("a step whose deadline has already passed is never begun", async () => {
@@ -1135,6 +1169,78 @@ test("a very large listing still yields a uidNext instead of exhausting the argu
 });
 
 /* ------------------------------------------------------------- names Crow will not command */
+
+test("a C1 control or a line separator is refused like a C0 one, in a folder name and in a query", async () => {
+  const fake = await startFake({ mailboxes: ["INBOX"] });
+  fake.deliver("INBOX", makeRaw({ subject: "findme", body: "wombat" }));
+  const locks = [];
+  const hostile = ["C0\u0007", "C1\u0085", "Sep\u2028", "Para\u2029"];
+  const listed = [
+    { path: "INBOX", name: "INBOX", specialUse: null, delimiter: "/", flags: new Set(["\\HasNoChildren"]) },
+    ...hostile.map((path) => ({
+      path,
+      name: path,
+      specialUse: null,
+      delimiter: "/",
+      flags: new Set(["\\HasNoChildren"]),
+    })),
+  ];
+  const adapter = adapterFor(fake, {
+    clientFactory: (options) => {
+      const client = new ImapFlow(options);
+      client.list = async () => listed;
+      const openLock = client.getMailboxLock.bind(client);
+      client.getMailboxLock = async (path, lockOptions) => {
+        locks.push(path);
+        return openLock(path, lockOptions);
+      };
+      return client;
+    },
+  });
+  try {
+    await adapter.connect();
+    const folders = await adapter.listFolders();
+    assert.deepEqual(
+      folders.map((folder) => folder.path),
+      ["INBOX", ...hostile],
+      "every folder the server listed stays listed, as for a C0 name",
+    );
+    assert.equal(folders.find((folder) => folder.path === "INBOX").selectable, true);
+    for (const path of hostile) {
+      assert.equal(
+        folders.find((folder) => folder.path === path).selectable,
+        false,
+        `${JSON.stringify(path)} is never selected or synced, exactly like a C0 name`,
+      );
+    }
+    assert.deepEqual(
+      await adapter.search("wombat"),
+      [{ folderPath: "INBOX", uid: 1 }],
+      "the search looks at the folders it can name",
+    );
+    assert.deepEqual(locks, ["INBOX"], "no command ran for any name carrying a control character");
+
+    // A caller's own argument is refused the same way, whichever of the four characters it carries.
+    // The character is embedded rather than trailing: a leading or trailing one is trimmed off a
+    // caller's argument first, and what is left is a clean name, exactly as a trailing CR is.
+    for (const bad of ["\u0000", "\u0085", "\u2028", "\u2029"]) {
+      const shown = `U+${bad.charCodeAt(0).toString(16).padStart(4, "0")}`;
+      const dirtyPath = `Odd${bad}Odd`;
+      await assert.rejects(adapter.list(dirtyPath), mailCode("BAD_INPUT"), `list refuses a folder carrying ${shown}`);
+      await assert.rejects(adapter.get(dirtyPath, [1]), mailCode("BAD_INPUT"), `get refuses a folder carrying ${shown}`);
+      await assert.rejects(adapter.search(`wombat${bad}wombat`), mailCode("BAD_INPUT"), `search refuses a query carrying ${shown}`);
+      await assert.rejects(
+        adapter.search("wombat", { folderPath: dirtyPath }),
+        mailCode("BAD_INPUT"),
+        `search refuses a folder carrying ${shown}`,
+      );
+    }
+    assert.deepEqual(locks, ["INBOX"], "a refused argument reached no command either");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
 
 test("listFolders keeps a hostile name listed but out of every command, and drops a hostile flag", async () => {
   const fake = await startFake({ mailboxes: ["INBOX", "Odd"] });
