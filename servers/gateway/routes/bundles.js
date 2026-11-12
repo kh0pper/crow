@@ -73,6 +73,7 @@ import {
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { syncBundleSkills, removeBundleSkills, readSkillLedger, skillSyncMode } from "../bundle-skill-sync.js";
 import { isSatelliteEntry } from "../satellites/installs.js";
+import { openTailnetPorts, closeTailnetPorts } from "../bundle-firewall.js";
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries, restoreServicesAfterInstall } from "../keychain/install-hooks.js";
 import { projectsUsingBundle } from "../../shared/service-connections.js";
@@ -4015,15 +4016,21 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // Open firewall ports and set up Tailscale HTTPS for direct-mode web UIs
     if (manifest?.ports && Array.isArray(manifest.ports)) {
       const { execFileSync: efs } = await import("node:child_process");
-      for (const port of manifest.ports) {
-        // Open firewall for Tailscale
-        try {
-          efs("sudo", ["-n", "ufw", "allow", "from", "100.64.0.0/10", "to", "any", "port", String(port), "proto", "tcp", "comment", `Crow: ${manifest.name || bundleId}`], { timeout: 10000 });
-          appendLog(job, `Opened firewall port ${port}/tcp for Tailscale`);
-        } catch {
-          appendLog(job, `Note: Could not open port ${port} (sudo/ufw not available — open manually if needed)`);
-        }
-      }
+      // Only ports a tailnet peer could actually reach get a rule: no Tailscale here, or a
+      // port published on loopback only, needs none (bundle-firewall.js decides, and says so
+      // in the job log). A model we cannot read counts as "not provably loopback".
+      let firewallModel = null;
+      try {
+        const loaded = await loadComposeModel(join(BUNDLES_DIR, bundleId), { env: composeEnv(), runConfig: runComposeConfig });
+        firewallModel = loaded?.error ? null : loaded?.model || null;
+      } catch { firewallModel = null; }
+      await openTailnetPorts({
+        ports: manifest.ports,
+        name: manifest.name || bundleId,
+        model: firewallModel,
+        run: (cmd, args, opts) => efs(cmd, args, opts),
+        log: (m) => appendLog(job, m),
+      });
       // Set up Tailscale HTTPS proxy for direct-mode webUI ports (SPA apps need TLS due to HSTS)
       if (manifest?.webUI?.proxyMode === "direct" && manifest.webUI.port) {
         try {
@@ -5067,14 +5074,13 @@ export default function bundlesRouter() {
         // 4. Close firewall ports (if manifest has ports and ufw is available)
         if (manifest?.ports && Array.isArray(manifest.ports)) {
           const { execFileSync: efs } = await import("node:child_process");
-          for (const port of manifest.ports) {
-            try {
-              efs("sudo", ["-n", "ufw", "delete", "allow", "from", "100.64.0.0/10", "to", "any", "port", String(port), "proto", "tcp"], { timeout: 10000 });
-              appendLog(job, `Closed firewall port ${port}/tcp`);
-            } catch {
-              appendLog(job, `Note: Could not close port ${port} (sudo/ufw not available)`);
-            }
-          }
+          // Both the scoped rule this version writes and the unscoped one an older install
+          // may have left behind (bundle-firewall.js); each is allowed to be absent.
+          await closeTailnetPorts({
+            ports: manifest.ports,
+            run: (cmd, args, opts) => efs(cmd, args, opts),
+            log: (m) => appendLog(job, m),
+          });
           // Remove Tailscale HTTPS proxy for direct-mode webUI
           if (manifest?.webUI?.proxyMode === "direct" && manifest.webUI.port) {
             try {
