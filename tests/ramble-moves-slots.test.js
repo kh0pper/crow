@@ -319,6 +319,26 @@ test("a moveneed a peer wrote before the first open gives the day three cards", 
   }
 });
 
+test("a moveneed wider than the picks is capped, and the row keeps its count", async () => {
+  const db = await freshDb();
+  // A peer asked for three cards before the day was drawn.
+  await insertOnce(db, MOVE_NEED_KIND, DAY, 3, THURSDAY);
+  // Thursday asks for mobility, heart and lower, and only two of those have a
+  // chunk: the heart slot's mobility fallback is already the morning's card.
+  const lib = [
+    chunk({ id: "mob-1", areas: ["mobility"] }),
+    chunk({ id: "low-1", areas: ["lower"] }),
+  ];
+
+  const result = await dayCards(db, { now: THURSDAY, library: lib });
+  assert.equal(result.slots.length, 3, "the day still has its three slots");
+  const picks = result.slots.filter((item) => item.entryId !== null);
+  assert.equal(picks.length, 2, "only two slots could be filled");
+  assert.equal(result.slots.filter((item) => item.empty).length, 1);
+  assert.equal(result.need, 2, "the need never exceeds the slots that hold a pick");
+  assert.equal(await rowDelta(db, MOVE_NEED_KIND, DAY), 3, "the moveneed row still reads three");
+});
+
 test("a later card-count raise leaves today's slots alone", async () => {
   const db = await freshDb();
   const lib = library();

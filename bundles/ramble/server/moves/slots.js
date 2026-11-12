@@ -176,11 +176,17 @@ async function writeToday(db, { day, item, emit, lang }) {
  * The day's cards, and the writes that keep them.
  *
  * Returns `{ day, need, nowSlot, slots }`, where `need` is the day's card count
- * (0 when nothing could be picked) and each `slots[]` item is
- * `{ slot, entryId, area, plannedArea, reasons, swap, seen, done, standIn, empty }`
+ * and each `slots[]` item is `{ slot, entryId, area, plannedArea, reasons,
+ * swap, seen, done, standIn, empty }`
  * — `plannedArea` is what the week plan asked the slot for, `area` the area the
  * card actually trains (the picker falls back when an area has no eligible
  * chunk), and `entryId` is null for a slot left empty.
+ *
+ * `need` is capped by the slots that actually hold a pick: it is the smaller of
+ * the day's `moveneed` row and the number of slots with an `entryId`, so a day
+ * that could only fill two of its three slots asks for two (0 when nothing
+ * could be picked). The `moveneed` row itself is never rewritten by this cap —
+ * it stays the count the day asked for.
  *
  * Writes, in order: the week's row when the week turns, one slot row per
  * re-picked slot, the day's `moveneed` row once, the folded history when an
@@ -336,14 +342,18 @@ export async function dayCards(db, {
   }
 
   // The card count is a FACT of the day, written once and merged by MAX, and
-  // never written for a day that could not be given a single card.
+  // never written for a day that could not be given a single card. The answer
+  // is capped by the picks the day actually holds: a day that could fill two of
+  // its three slots asks for two, while the row keeps the count it was written
+  // with.
   const picks = slots.filter((item) => item.entryId !== null).length;
-  let need = existing ?? 0;
+  let asked = existing;
   if (picks > 0 && existing === null) {
     await insertOnce(db, MOVE_NEED_KIND, day, picks, at, emit);
     // A concurrent writer or a sync merge may hold a larger value by now.
-    need = needOf(await rowDelta(db, MOVE_NEED_KIND, day)) ?? picks;
+    asked = needOf(await rowDelta(db, MOVE_NEED_KIND, day)) ?? picks;
   }
+  const need = Math.min(asked ?? 0, picks);
 
   // The Now card is the one `moves.today` carries, so the rest of moves (Done,
   // Swap, the streak) keeps reading one card a day the way it always has.

@@ -39,6 +39,7 @@ import { labelFor } from "./labels.js";
 import { giftEgg, proposeSwap } from "./trades.js";
 import { servedLibrary, ACTIVITY_KINDS } from "./moves/library.js";
 import { readPrefs, writePrefs, todayChallenge } from "./moves/today.js";
+import { dayCards } from "./moves/slots.js";
 import {
   recordLog, movesDay, pointsFor, EFFORTS, LOG_MINUTES_MAX,
 } from "./moves/ledger.js";
@@ -527,6 +528,16 @@ export function createRambleServer(db, options = {}) {
     const weather = await movesWeather(prefs);
     const learning = await learningFlows(db, library);
     const emit = await getEmit();
+    // The day's cards are drawn first, exactly as the panel draws them: that
+    // draw mirrors the day's Now card into `moves.today`, the row
+    // todayChallenge reads back, so chat and the panel never show two cards for
+    // one day. A failure drawing them is logged and the card still answers
+    // from the stored one.
+    try {
+      await dayCards(db, { now, weather, emit, library });
+    } catch (err) {
+      try { console.warn(`[ramble server] moves day cards unavailable: ${err?.message ?? err}`); } catch {}
+    }
     const today = await todayChallenge(db, { now, weather, emit, library, learning });
     const pet = await petState(db, { now });
     const steps = await stepsState(db, { now });

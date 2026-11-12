@@ -17,13 +17,16 @@
  * The challenge is today's pick, the same one Ramble's own panel shows: both surfaces call the
  * SAME assembly (moves/today.js todayForSurface), so prefs, the weather switch, the library and
  * the learned flows cannot drift apart, and they read one `moves.today` row, so they can never
- * disagree. `weather` is the weather the For You page already loaded ({ rain, temp, code }),
- * passed in by the gateway — this module fetches nothing, and todayForSurface drops it when the
- * user turned weather off. `library` is a seam for tests; production passes none and the picker
- * reads the served (reviewed, licensed) library. `lang` picks the language of the why line.
+ * disagree. The day's cards are drawn first (moves/slots.js dayCards) for the same reason the
+ * panel draws them: that draw mirrors the day's Now card into `moves.today`, so the legacy single
+ * card here IS the Now card of the day's slots. `weather` is the weather the For You page already
+ * loaded ({ rain, temp, code }), passed in by the gateway — this module fetches nothing, and
+ * todayForSurface drops it when the user turned weather off. `library` is a seam for tests;
+ * production passes none and the picker reads the served (reviewed, licensed) library. `lang`
+ * picks the language of the why line.
  *
- * The GET STORES today's card (and, with challenges off, the day's pause fact), exactly as
- * Ramble's own panel read does — idempotent, but a write: it does not only read.
+ * The GET STORES today's card and the day's slot rows (and, with challenges off, the day's pause
+ * fact), exactly as Ramble's own panel read does — idempotent, but a write: it does not only read.
  *
  * NO FREE TEXT REACHES HERE OR LEAVES HERE: `why` is built from the picker's fixed reason codes
  * (today.js whyLine), and nothing is written except today's card and the day's pause fact — the
@@ -32,6 +35,7 @@
  * model.
  */
 import { todayForSurface } from "./moves/today.js";
+import { dayCards } from "./moves/slots.js";
 import { streakState } from "./moves/streak.js";
 import { petState } from "./pet.js";
 import { stepsState } from "./steps.js";
@@ -39,6 +43,16 @@ import { stepsState } from "./steps.js";
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 export async function forYouMoves(db, { now = Date.now(), weather = null, library, lang = "en", emit } = {}) {
+  // The day's cards are drawn first (moves/slots.js dayCards), because that
+  // draw is what mirrors the Now card into the one card `moves.today` carries —
+  // the row todayForSurface reads back. A failure drawing them is logged and
+  // the card below is still assembled from the stored one.
+  try {
+    await dayCards(db, { now, weather, emit, library });
+  } catch (err) {
+    try { console.warn(`[ramble for-you] moves day cards unavailable: ${err?.message ?? err}`); } catch {}
+  }
+
   const [today, pet, steps, streak] = await Promise.all([
     todayForSurface(db, { now, weather, emit, library, lang }),
     petState(db, { now }),

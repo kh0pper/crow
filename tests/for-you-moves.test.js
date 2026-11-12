@@ -208,6 +208,47 @@ test("Ramble's module: no entry the picker can serve is a null challenge; challe
   } finally { db.close(); }
 });
 
+/** One chunk per area, three of each, so every slot of a three-card day fills. */
+function areaChunks() {
+  const out = [];
+  for (const area of ["mobility", "heart", "lower", "upper", "core"]) {
+    for (const n of [1, 2, 3]) {
+      out.push(entry({ id: `${area}-${n}`, title: `A ${area} chunk, number ${n}`, areas: [area] }));
+    }
+  }
+  return out;
+}
+
+async function readMovesSetting(db, key) {
+  const { rows } = await db.execute({
+    sql: "SELECT value FROM ramble_settings WHERE key = ?", args: [key],
+  });
+  return rows[0]?.value ?? null;
+}
+
+test("Ramble's module: read first, the card is the day's Now slot; the day after that is a read", async () => {
+  const db = await rambleDb();
+  try {
+    const now = new Date(2026, 9, 30, 12, 0, 0).getTime(); // local noon: the picker's midday
+    const lib = areaChunks();
+    const card = await B.forYouMoves(db, { now, weather: null, library: lib });
+    assert.ok(card.challenge, "the day has a card");
+
+    const { dayCards } = await import("../bundles/ramble/server/moves/slots.js");
+    const day = await dayCards(db, { now, weather: null, library: lib });
+    const nowSlot = day.slots.find((item) => item.slot === day.nowSlot);
+    assert.ok(nowSlot?.entryId, "the Now slot holds a card");
+    assert.equal(card.challenge.entryId, nowSlot.entryId,
+      "the single card is the Now slot of the day's cards");
+
+    const mirror = await readMovesSetting(db, "moves.today");
+    assert.equal(JSON.parse(mirror).entryId, nowSlot.entryId);
+    await dayCards(db, { now, weather: null, library: lib });
+    assert.equal(await readMovesSetting(db, "moves.today"), mirror,
+      "a second read of the day writes no moves.today change");
+  } finally { db.close(); }
+});
+
 // ---- the card's markup -------------------------------------------------------
 
 const movesOk = () => ({

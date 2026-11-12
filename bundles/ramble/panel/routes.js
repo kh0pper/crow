@@ -426,7 +426,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       console.warn(`[ramble routes] moves day cards unavailable: ${err?.message ?? err}`);
     }
     return movesMods.todayMod.todayForSurface(db, {
-      now, weather, library: servedMoves(), lang,
+      now, weather, library: servedMoves(), lang, emit,
     });
   }
 

@@ -408,6 +408,26 @@ test("GET /moves/today: the legacy card is the day's Now slot", async () => {
   } finally { await mount.close(); }
 });
 
+test("GET /moves/today: a paused day emits its moveoff wallet row", async () => {
+  const mount = await freshMount();
+  try {
+    const paused = await dayPost(mount.url, "/api/ramble/moves/prefs", { on: false });
+    assert.equal(paused.status, 200);
+    assert.equal((await paused.json()).prefs.on, false);
+
+    const before = emitted.length;
+    const today = await (await fetch(mount.url + "/api/ramble/moves/today", { headers: H })).json();
+    assert.equal(today.challenge.off, true, "the day is paused");
+    assert.equal(today.challenge.entry, null, "a paused day has no card");
+
+    const day = localDay(Date.now());
+    const rows = emitted.slice(before);
+    assert.ok(rows.some((e) => e.table === "ramble_wallet" && e.op === "update"
+      && e.row.kind === "moveoff" && e.row.key === day),
+    "the paused day's fact reaches the sync hook");
+  } finally { await mount.close(); }
+});
+
 test("POST /moves/swap: re-rolls the Now card and stops at the cap", async () => {
   const mount = await freshMount();
   try {
