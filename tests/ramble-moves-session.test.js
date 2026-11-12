@@ -23,7 +23,13 @@ const {
   SessionError, SESSION_MAX_SECONDS, REST_HINT_SECONDS, TRANSITION_SECONDS,
   SWITCH_SECONDS, CHUNK_BREAK_SECONDS, DEFAULT_FLOW_ROUNDS, MIN_STAGE_SECONDS,
   compileSession, compileTimeline, chunksOf,
+  createClock, extend, isChunkDone, canExtend,
 } = Session;
+
+const ROUTES_PATH = join(
+  dirname(fileURLToPath(import.meta.url)), "..",
+  "bundles", "ramble", "panel", "routes.js",
+);
 
 /* ---------- fixture library ---------- */
 
@@ -102,6 +108,10 @@ const LIB = [
   routineEntry("routine-c"),
   routineEntry("routine-side", { blocks: SIDE_BLOCKS }),
   routineEntry("routine-stage", { stages: [{ rounds: 1 }, { reps: 4 }] }),
+  routineEntry("routine-hard-a", { level: 3, areas: ["knees", "ankles"] }),
+  routineEntry("routine-hard-b", { level: 3, areas: ["knees"] }),
+  routineEntry("routine-hard-c", { level: 3, areas: ["shoulders"] }),
+  routineEntry("routine-easy", { level: 2, areas: ["knees"] }),
   routineEntry("routine-missing-step", {
     blocks: routineBlocks({ main: [{ id: "pose-nope", seconds: 60 }] }),
   }),
@@ -477,4 +487,434 @@ test("every segment has the whole shape and the counts agree with the segments",
   assert.deepEqual(timedSegment.fromPose, { rootAngle: 3 });
   assert.deepEqual(timedSegment.toPose, { rootAngle: 4 });
   assert.equal(timedSegment.seconds, 60);
+});
+
+/* ---------------------------------------------------- the clock (Task 2.2) */
+
+/** A clock on an injected millisecond reading the test advances by hand. */
+function makeClock(timeline) {
+  let nowMs = 0;
+  const clock = createClock({ timeline, now: () => nowMs });
+  return {
+    clock,
+    advance(seconds) { nowMs += seconds * 1000; },
+  };
+}
+
+const sumSeconds = (segments) => segments.reduce((total, s) => total + s.seconds, 0);
+const activeTotalOf = (segments) =>
+  segments.filter((s) => s.active).reduce((total, s) => total + s.seconds, 0);
+
+/** Active seconds a span of running time adds from a position in the timeline. */
+function activeGain(segments, index, segmentElapsed, span) {
+  let left = span;
+  let active = 0;
+  let i = index;
+  let at = segmentElapsed;
+  while (left > 0 && i < segments.length) {
+    const full = segments[i].seconds;
+    const step = Math.min(full - at, left);
+    if (segments[i].active) active += step;
+    at += step;
+    left -= step;
+    if (at >= full) {
+      i += 1;
+      at = 0;
+    }
+  }
+  return active;
+}
+
+test("tick walks through segment boundaries, one segment event per boundary", () => {
+  const timeline = compileTimeline("routine-a", LIB);
+  const { clock, advance } = makeClock(timeline);
+  const events = [];
+  clock.on((event) => { if (event.type === "segment") events.push(event); });
+
+  const start = clock.state();
+  assert.equal(start.segmentIndex, 0);
+  assert.equal(start.segmentElapsed, 0);
+  assert.equal(start.elapsed, 0);
+  assert.equal(start.paused, true, "a fresh clock is paused");
+  assert.equal(start.ended, false);
+
+  clock.play();
+  advance(timeline.segments[0].seconds);
+  const afterFirst = clock.tick();
+  assert.equal(afterFirst.segmentIndex, 1, "the clock really moved on");
+  assert.ok(events.length > 0, "the clock really announced the move");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].segmentIndex, 1);
+  assert.equal(events[0].cause, "tick");
+  assert.equal(events[0].state.segmentIndex, 1);
+  assert.equal(afterFirst.segmentElapsed, 0);
+
+  // One span covering three boundaries: three events with consecutive indexes.
+  const span = sumSeconds(timeline.segments.slice(1, 4));
+  advance(span);
+  const afterSpan = clock.tick();
+  assert.deepEqual(events.map((e) => e.segmentIndex), [1, 2, 3, 4]);
+  assert.equal(afterSpan.segmentIndex, 4);
+  assert.equal(afterSpan.segmentElapsed, 0);
+  assert.equal(afterSpan.elapsed, timeline.segments[0].seconds + span);
+});
+
+test("active seconds grow only inside active segments", () => {
+  const timeline = compileTimeline("routine-a", LIB);
+  const { clock, advance } = makeClock(timeline);
+  clock.play();
+
+  const covered = timeline.segments.slice(0, 12);
+  const span = sumSeconds(covered);
+  const expected = activeTotalOf(covered);
+  assert.ok(covered.some((s) => s.type === "transition"), "a transition is crossed");
+  assert.ok(covered.some((s) => s.type === "rest"), "a rest is crossed");
+
+  advance(span);
+  const state = clock.tick();
+  assert.equal(state.segmentIndex, 12);
+  assert.equal(state.segmentElapsed, 0);
+  assert.equal(state.elapsed, span);
+  assert.deepEqual(state.activeSeconds, [expected], "one number per chunk");
+  assert.equal(expected, 5 * 60, "the five holds in there, and nothing for moves or rests");
+  assert.ok(expected < span, "the quiet segments added nothing to the count");
+});
+
+test("pause freezes every count", () => {
+  const timeline = compileTimeline("routine-a", LIB);
+  const { clock, advance } = makeClock(timeline);
+  clock.play();
+
+  advance(30);
+  clock.tick();
+  const paused = clock.pause();
+  assert.equal(paused.paused, true);
+  assert.equal(paused.segmentIndex, 0);
+  assert.equal(paused.segmentElapsed, 30);
+  assert.equal(paused.elapsed, 30);
+  assert.deepEqual(paused.activeSeconds, [30]);
+
+  advance(100);
+  const after = clock.tick();
+  assert.deepEqual(after, paused, "100 s of wall time moved nothing");
+});
+
+test("skip moves on and never counts the remainder of the skipped segment", () => {
+  const timeline = compileTimeline("routine-a", LIB);
+  const { clock, advance } = makeClock(timeline);
+  const events = [];
+  clock.on((event) => { if (event.type === "segment") events.push(event); });
+
+  clock.play();
+  advance(20);
+  const running = clock.tick();
+  assert.equal(running.activeSeconds[0], 20);
+
+  const skipped = clock.skip();
+  assert.equal(skipped.segmentIndex, 1);
+  assert.equal(skipped.segmentElapsed, 0);
+  assert.equal(skipped.activeSeconds[0], 20, "the 40 s left in the hold never counts");
+  assert.equal(skipped.elapsed, 20, "skipping is not running time");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].cause, "skip");
+  assert.equal(events[0].segmentIndex, 1);
+
+  // Skipping the last segment ends the session.
+  const last = timeline.segments.length - 1;
+  clock.seek(last);
+  const endings = [];
+  clock.on((event) => { if (event.type === "end") endings.push(event); });
+  const atEnd = clock.skip();
+  assert.equal(atEnd.ended, true);
+  assert.equal(atEnd.paused, true);
+  assert.equal(atEnd.segmentIndex, last);
+  assert.equal(atEnd.segmentElapsed, timeline.segments[last].seconds);
+  assert.equal(endings.length, 1);
+});
+
+test("back returns to the previous non-transition segment without lowering the counts", () => {
+  const timeline = compileTimeline("routine-a", LIB);
+  const { clock, advance } = makeClock(timeline);
+  clock.play();
+
+  advance(timeline.segments[0].seconds + timeline.segments[1].seconds);
+  const atTwo = clock.tick();
+  assert.equal(atTwo.segmentIndex, 2);
+  assert.equal(atTwo.activeSeconds[0], timeline.segments[0].seconds);
+
+  const back = clock.back();
+  assert.equal(timeline.segments[1].type, "transition");
+  assert.equal(back.segmentIndex, 0, "index 1 is a move, so back steps past it");
+  assert.equal(back.segmentElapsed, 0);
+  assert.equal(back.elapsed, atTwo.elapsed);
+  assert.equal(back.activeSeconds[0], atTwo.activeSeconds[0], "active time never shrinks");
+
+  const again = clock.back();
+  assert.equal(again.segmentIndex, 0, "at the head of the session, back restarts segment 0");
+  assert.equal(again.segmentElapsed, 0);
+  assert.equal(again.activeSeconds[0], atTwo.activeSeconds[0]);
+});
+
+test("seek sets the position and every listener sees the same index", () => {
+  const timeline = compileTimeline("routine-a", LIB);
+  const { clock } = makeClock(timeline);
+  const one = [];
+  const two = [];
+  clock.on((event) => { if (event.type === "segment") one.push({ index: event.segmentIndex, cause: event.cause }); });
+  clock.on((event) => { if (event.type === "segment") two.push({ index: event.segmentIndex, cause: event.cause }); });
+
+  const target = 4;
+  const state = clock.seek(target);
+  assert.equal(state.segmentIndex, target);
+  assert.equal(state.segmentElapsed, 0);
+  assert.deepEqual(one, [{ index: target, cause: "seek" }]);
+  assert.deepEqual(two, one, "both listeners were told the same segment");
+  assert.equal(clock.state().segmentIndex, target);
+
+  assert.equal(clock.seek(9999).segmentIndex, timeline.segments.length - 1, "clamped at the end");
+  assert.equal(clock.seek(-5).segmentIndex, 0, "clamped at the start");
+
+  const fails = (fn) => assert.throws(fn, (err) => {
+    assert.ok(err instanceof SessionError);
+    assert.equal(err.code, "bad_index");
+    return true;
+  });
+  fails(() => clock.seek("x"));
+  fails(() => clock.seek(1.5));
+  fails(() => clock.seek());
+});
+
+test("running through everything ends the clock, once", () => {
+  const timeline = compileTimeline("routine-a", LIB);
+  assert.ok(timeline.totalSeconds >= 600, "a routine worth a session");
+  const { clock, advance } = makeClock(timeline);
+  const types = [];
+  clock.on((event) => types.push(event.type));
+  clock.play();
+
+  advance(timeline.totalSeconds);
+  const state = clock.tick();
+  const last = timeline.segments.length - 1;
+  const activeTotal = activeTotalOf(timeline.segments);
+
+  assert.equal(state.ended, true);
+  assert.equal(state.paused, true);
+  assert.equal(state.segmentIndex, last);
+  assert.equal(state.segmentElapsed, timeline.segments[last].seconds);
+  assert.equal(state.elapsed, timeline.totalSeconds);
+  assert.equal(state.activeSeconds[0], activeTotal, "every active second, and no other");
+  assert.equal(types.filter((t) => t === "end").length, 1);
+  assert.equal(
+    types.filter((t) => t === "segment").length,
+    timeline.segments.length - 1,
+    "one segment event per boundary crossed",
+  );
+
+  advance(10);
+  const later = clock.tick();
+  assert.deepEqual(later, state, "an ended clock does not move");
+  assert.equal(types.filter((t) => t === "end").length, 1, "the end is announced once");
+});
+
+test("extend with a round mid-session keeps elapsed and activeSeconds", () => {
+  const base = compileSession([{ chunkId: "routine-a" }], LIB);
+  const { clock, advance } = makeClock(base);
+  clock.play();
+
+  clock.seek(4);
+  advance(30);
+  const running = clock.tick();
+  assert.equal(running.segmentIndex, 4);
+  assert.equal(running.segmentElapsed, 30);
+  assert.deepEqual(running.activeSeconds, [30]);
+
+  const extended = extend(base, running, LIB, { addRound: true });
+  const fresh = compileSession([{ chunkId: "routine-a", extraRounds: 1 }], LIB);
+  assert.deepEqual(extended.chain, [{ chunkId: "routine-a", extraRounds: 1 }]);
+  assert.equal(
+    extended.chunks[0].plannedSeconds,
+    base.chunks[0].plannedSeconds + 210,
+    "one main round of three steps with their rests",
+  );
+  assert.equal(extended.totalSeconds, fresh.totalSeconds);
+  assert.equal(extended.totalSeconds - base.totalSeconds, 210 + 3 * TRANSITION_SECONDS);
+  assert.equal(
+    extended.segments.filter((s) => s.active && s.block === "main").length,
+    base.segments.filter((s) => s.active && s.block === "main").length + 3,
+  );
+
+  const after = clock.setTimeline(extended);
+  assert.equal(after.elapsed, running.elapsed);
+  assert.deepEqual(after.activeSeconds, running.activeSeconds);
+  assert.equal(after.segmentIndex, running.segmentIndex);
+  assert.equal(after.segmentElapsed, running.segmentElapsed);
+  assert.equal(after.ended, false);
+  assert.equal(after.paused, false, "the swap does not pause the player");
+
+  // The clock keeps counting on the longer timeline.
+  const gained = activeGain(extended.segments, 4, 30, 60);
+  advance(60);
+  const later = clock.tick();
+  assert.equal(later.elapsed, running.elapsed + 60);
+  assert.equal(later.activeSeconds[0], running.activeSeconds[0] + gained);
+});
+
+test("extend at the end appends a chunk and setTimeline un-ends at the first new segment", () => {
+  const base = compileTimeline("walk-a", LIB);
+  assert.equal(base.segments.length, 1);
+  const { clock, advance } = makeClock(base);
+  clock.play();
+  advance(base.totalSeconds);
+  const ended = clock.tick();
+  assert.equal(ended.ended, true);
+
+  const extended = extend(base, ended, LIB, { addChunk: "walk-a" });
+  assert.equal(extended.chain.length, 2);
+  assert.equal(extended.chunks.length, 2, "a second chunk to count for");
+  assert.deepEqual(extended.chunks.map((c) => c.chunkId), ["walk-a", "walk-a"]);
+  assert.equal(extended.chunks[0].plannedSeconds, base.chunks[0].plannedSeconds);
+  assert.equal(extended.chunks[1].plannedSeconds, base.chunks[0].plannedSeconds);
+  assert.deepEqual(
+    extended.segments.slice(0, base.segments.length),
+    base.segments,
+    "what was already played is untouched",
+  );
+  assert.ok(extended.totalSeconds > base.totalSeconds);
+
+  const resumed = clock.setTimeline(extended);
+  assert.equal(resumed.ended, false);
+  assert.equal(resumed.paused, true, "it waits to be played again");
+  assert.equal(resumed.segmentIndex, base.segments.length, "the first new segment");
+  assert.equal(resumed.segmentElapsed, 0);
+  assert.equal(resumed.elapsed, ended.elapsed);
+  assert.equal(resumed.activeSeconds.length, 2);
+  assert.equal(resumed.activeSeconds[0], ended.activeSeconds[0]);
+  assert.equal(resumed.activeSeconds[1], 0);
+});
+
+test("extend never mutates the timeline it is given", () => {
+  const base = compileSession([{ chunkId: "routine-a" }, { chunkId: "walk-a" }], LIB);
+  const before = deep(base);
+
+  const byRound = extend(base, { segmentIndex: 2 }, LIB, { addRound: true });
+  const byChunk = extend(base, { segmentIndex: 2 }, LIB, { addChunk: "routine-b" });
+
+  assert.deepEqual(deep(base), before, "the input timeline is read, never written");
+  assert.equal(byRound.chain.length, base.chain.length);
+  assert.equal(byRound.chain[base.chain.length - 1].extraRounds, 1);
+  assert.equal(byChunk.chain.length, base.chain.length + 1);
+  assert.equal(byChunk.chain[byChunk.chain.length - 1].chunkId, "routine-b");
+  assert.notEqual(byRound.chain, base.chain);
+  assert.notEqual(byRound.segments, base.segments);
+  assert.deepEqual(byChunk.opts, base.opts, "the timeline's own opts carry over");
+  assert.notEqual(byChunk.chain[0], base.chain[0], "the chain items are copies too");
+});
+
+test("canExtend refuses at the cap, past maxRounds and for hard back-to-back areas", () => {
+  // max_session: three 20-minute walks are the cap, a fourth passes it.
+  const walks = compileSession(
+    [{ chunkId: "walk-a" }, { chunkId: "walk-a" }, { chunkId: "walk-a" }],
+    LIB,
+  );
+  assert.equal(
+    walks.chunks.reduce((total, c) => total + c.plannedSeconds, 0),
+    SESSION_MAX_SECONDS,
+  );
+  assert.deepEqual(
+    canExtend(walks, { segmentIndex: 0 }, LIB, { addChunk: "walk-a" }),
+    { ok: false, reason: "max_session" },
+  );
+  assert.deepEqual(
+    canExtend(walks, { segmentIndex: 0 }, LIB, { addChunk: "landmark-a" }),
+    { ok: false, reason: "max_session" },
+    "a session already at the cap refuses everything",
+  );
+
+  // max_rounds: routine-a runs two rounds and may take one more, no more.
+  const plain = compileTimeline("routine-a", LIB);
+  assert.deepEqual(canExtend(plain, { segmentIndex: 2 }, LIB, { addRound: true }), { ok: true, reason: null });
+  const oneExtra = compileSession([{ chunkId: "routine-a", extraRounds: 1 }], LIB);
+  assert.deepEqual(
+    canExtend(oneExtra, { segmentIndex: 2 }, LIB, { addRound: true }),
+    { ok: false, reason: "max_rounds" },
+  );
+  const walk = compileTimeline("walk-a", LIB);
+  assert.deepEqual(
+    canExtend(walk, { segmentIndex: 0 }, LIB, { addRound: true }),
+    { ok: false, reason: "max_rounds" },
+    "a walk has no rounds",
+  );
+
+  // hard_same_area: two level-3 chunks that share an area never sit together.
+  const hard = compileTimeline("routine-hard-a", LIB);
+  assert.deepEqual(
+    canExtend(hard, { segmentIndex: 0 }, LIB, { addChunk: "routine-hard-b" }),
+    { ok: false, reason: "hard_same_area" },
+  );
+  assert.deepEqual(
+    canExtend(hard, { segmentIndex: 0 }, LIB, { addChunk: "routine-hard-c" }),
+    { ok: true, reason: null },
+    "different areas are fine",
+  );
+  assert.deepEqual(
+    canExtend(hard, { segmentIndex: 0 }, LIB, { addChunk: "routine-easy" }),
+    { ok: true, reason: null },
+    "a level-2 chunk is never refused",
+  );
+
+  // Everything else is allowed.
+  assert.deepEqual(
+    canExtend(plain, { segmentIndex: 0 }, LIB, { addChunk: "flow-a" }),
+    { ok: true, reason: null },
+  );
+
+  assert.throws(
+    () => extend(plain, { segmentIndex: 0 }, LIB, { addChunk: "walk-nope" }),
+    (err) => err instanceof SessionError && err.code === "unknown_chunk",
+  );
+  assert.throws(
+    () => canExtend(plain, { segmentIndex: 0 }, LIB, { addChunk: "walk-nope" }),
+    (err) => err instanceof SessionError && err.code === "unknown_chunk",
+  );
+});
+
+test("half of a chunk's planned time is done", () => {
+  assert.equal(isChunkDone(600, 299), false);
+  assert.equal(isChunkDone(600, 300), true);
+  assert.equal(isChunkDone(900, 450), true);
+  assert.equal(isChunkDone(0, 100), false, "no planned time is never done");
+  assert.equal(isChunkDone(-10, 100), false);
+  assert.equal(isChunkDone(NaN, 100), false);
+  assert.equal(isChunkDone(Infinity, 100), false);
+});
+
+test("a listener that throws does not stop the others or the clock", () => {
+  const timeline = compileTimeline("routine-a", LIB);
+  const { clock, advance } = makeClock(timeline);
+  const heard = [];
+  clock.on(() => { throw new Error("boom"); });
+  clock.on((event) => heard.push(event.type));
+
+  clock.play();
+  assert.ok(heard.includes("play"));
+
+  advance(timeline.segments[0].seconds);
+  const state = clock.tick();
+  assert.ok(heard.includes("segment"));
+  assert.equal(state.segmentIndex, 1, "the clock kept its own time");
+  assert.equal(state.activeSeconds[0], timeline.segments[0].seconds);
+});
+
+test("the session route sits above the static catch-all and serves server/moves/session.cjs", () => {
+  const routes = readFileSync(ROUTES_PATH, "utf8");
+  const figureAt = routes.indexOf('"/ramble/static/figure.js"');
+  const sessionAt = routes.indexOf('"/ramble/static/session.js"');
+  const catchAllAt = routes.indexOf('"/ramble/static/:file"');
+  assert.ok(sessionAt > 0, "the session route exists");
+  assert.ok(sessionAt > figureAt, "it sits right after the figure route");
+  assert.ok(catchAllAt > sessionAt, "it must be registered before the :file catch-all");
+  assert.ok(
+    routes.includes('join(SERVER_DIR, "moves", "session.cjs")'),
+    "it serves the shared engine, not a copy",
+  );
 });

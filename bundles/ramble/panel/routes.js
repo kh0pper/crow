@@ -667,6 +667,19 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     return res.sendFile(target);
   });
 
+  /**
+   * The moves session engine, on the same terms as figure.js: one file, so a
+   * timeline the browser plays is the same shape the server builds.
+   */
+  router.get("/ramble/static/session.js", (req, res) => {
+    const target = resolve(normalize(join(SERVER_DIR, "moves", "session.cjs")));
+    if (!target.startsWith(SERVER_DIR + sep)) return res.status(400).type("text/plain").send("Bad path");
+    if (!existsSync(target)) return res.status(404).type("text/plain").send("Not found");
+    res.setHeader("Content-Type", "text/javascript; charset=utf-8");
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    return res.sendFile(target);
+  });
+
   router.get("/ramble/static/:file", (req, res) => sendStatic(res, [req.params.file]));
 
   // --- marks ----------------------------------------------------------------

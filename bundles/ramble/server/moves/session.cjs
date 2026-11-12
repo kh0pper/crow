@@ -558,6 +558,362 @@
     return compileSession([{ chunkId: chunk, extraRounds: 0 }], library, opts);
   }
 
+  /* ---------- the clock ---------- */
+
+  /* A float boundary is reached when this close to it: 0.1 + 0.2 seconds of
+   * elapsed time must not leave a 0.0000001 s segment behind. */
+  var CLOCK_EPSILON = 1e-9;
+  /* Stops a timeline of zero-second segments from spinning forever. */
+  var CLOCK_GUARD = 100000;
+
+  function chunksLengthOf(timeline) {
+    return isObject(timeline) && Array.isArray(timeline.chunks) ? timeline.chunks.length : 0;
+  }
+
+  function requireTimeline(timeline, what) {
+    if (!isObject(timeline) || !Array.isArray(timeline.segments) || timeline.segments.length === 0) {
+      throw new SessionError("bad_timeline", what + " needs a timeline with at least one segment");
+    }
+    return timeline;
+  }
+
+  function totalOfSegments(segments) {
+    var total = 0;
+    for (var i = 0; i < segments.length; i += 1) {
+      total += isSeconds(segments[i].seconds) ? segments[i].seconds : 0;
+    }
+    return total;
+  }
+
+  /* One clock for the whole session: the figure, the step text, the voice, the
+   * sounds and the counts all read this. Time is injected, so the module never
+   * reads a real clock and a caller decides what a second is. */
+  function createClock(spec) {
+    var settings = isObject(spec) ? spec : {};
+    var timeline = requireTimeline(settings.timeline, "createClock");
+    var now = typeof settings.now === "function" ? settings.now : function () { return 0; };
+
+    var segmentIndex = 0;
+    var segmentElapsed = 0;
+    var elapsed = 0;
+    var paused = true;
+    var ended = false;
+    var activeSeconds = [];
+    var listeners = [];
+    var lastRead = now();
+
+    for (var c = 0; c < chunksLengthOf(timeline); c += 1) activeSeconds.push(0);
+
+    function state() {
+      return {
+        segmentIndex: segmentIndex,
+        segmentElapsed: segmentElapsed,
+        elapsed: elapsed,
+        paused: paused,
+        ended: ended,
+        activeSeconds: activeSeconds.slice()
+      };
+    }
+
+    /* A listener that throws is its own problem: the others still hear the
+     * event and the clock keeps its own time. */
+    function emit(type, cause) {
+      var snapshot = listeners.slice();
+      for (var i = 0; i < snapshot.length; i += 1) {
+        try {
+          snapshot[i]({
+            type: type,
+            segmentIndex: segmentIndex,
+            cause: cause === undefined ? null : cause,
+            state: state()
+          });
+        } catch (err) {
+          continue;
+        }
+      }
+    }
+
+    function addActive(chunkIndex, seconds) {
+      if (!(seconds > 0)) return;
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= activeSeconds.length) return;
+      activeSeconds[chunkIndex] += seconds;
+    }
+
+    /* Spend a stretch of running time: every boundary it covers becomes a
+     * "segment" event, and the last segment's end is the session's end. */
+    function advance(seconds) {
+      var remaining = seconds;
+      var guard = 0;
+      while (!ended && guard < CLOCK_GUARD) {
+        guard += 1;
+        var segment = timeline.segments[segmentIndex];
+        var left = segment.seconds - segmentElapsed;
+        if (!(left > 0)) left = 0;
+        var step = remaining < left ? remaining : left;
+        addActive(segment.chunkIndex, segment.active ? step : 0);
+        segmentElapsed += step;
+        remaining -= step;
+        if (segmentElapsed + CLOCK_EPSILON >= segment.seconds) {
+          if (segmentIndex >= timeline.segments.length - 1) {
+            segmentIndex = timeline.segments.length - 1;
+            segmentElapsed = segment.seconds;
+            ended = true;
+            paused = true;
+            emit("end", null);
+            return;
+          }
+          segmentIndex += 1;
+          segmentElapsed = 0;
+          emit("segment", "tick");
+          if (!(remaining > 0)) return;
+          continue;
+        }
+        return;
+      }
+    }
+
+    /* Read the injected clock. Time only moves the session while it is both
+     * playing and unfinished; the read itself always happens, so a paused
+     * stretch never lands in `elapsed` later. */
+    function tick() {
+      var read = now();
+      var deltaMs = read - lastRead;
+      lastRead = read;
+      if (!paused && !ended && deltaMs > 0) {
+        var seconds = deltaMs / 1000;
+        elapsed += seconds;
+        advance(seconds);
+      }
+      return state();
+    }
+
+    function play() {
+      lastRead = now();
+      if (ended) return state();
+      if (paused) {
+        paused = false;
+        emit("play", null);
+      }
+      return state();
+    }
+
+    function pause() {
+      tick();
+      if (!paused && !ended) {
+        paused = true;
+        emit("pause", null);
+      }
+      return state();
+    }
+
+    function seek(index) {
+      if (!Number.isInteger(index)) {
+        throw new SessionError("bad_index", "seek needs a whole segment index");
+      }
+      tick();
+      var clamped = index < 0 ? 0 : index;
+      if (clamped > timeline.segments.length - 1) clamped = timeline.segments.length - 1;
+      segmentIndex = clamped;
+      segmentElapsed = 0;
+      ended = false;
+      emit("segment", "seek");
+      return state();
+    }
+
+    function skip() {
+      tick();
+      if (ended) return state();
+      if (segmentIndex >= timeline.segments.length - 1) {
+        segmentIndex = timeline.segments.length - 1;
+        segmentElapsed = timeline.segments[segmentIndex].seconds;
+        ended = true;
+        paused = true;
+        emit("end", null);
+        return state();
+      }
+      /* The rest of the skipped segment is never added to `activeSeconds`. */
+      segmentIndex += 1;
+      segmentElapsed = 0;
+      emit("segment", "skip");
+      return state();
+    }
+
+    function back() {
+      tick();
+      var target = segmentIndex > 0 ? -1 : 0;
+      for (var i = segmentIndex - 1; i >= 0; i -= 1) {
+        if (timeline.segments[i].type !== "transition") {
+          target = i;
+          break;
+        }
+      }
+      if (target < 0) target = 0;
+      if (target !== segmentIndex) {
+        ended = false;
+        segmentIndex = target;
+        segmentElapsed = 0;
+        emit("segment", "back");
+        return state();
+      }
+      /* Already at the head of the session: start it over, never moving
+       * `elapsed` or `activeSeconds` backwards. */
+      ended = false;
+      segmentElapsed = 0;
+      return state();
+    }
+
+    /* A recompiled timeline swapped in under a running session: the position
+     * and the counts are the player's, the segments are the new ones. */
+    function setTimeline(next) {
+      requireTimeline(next, "setTimeline");
+      var wasEnded = ended;
+      var oldLength = timeline.segments.length;
+      timeline = next;
+      lastRead = now();
+      var wanted = chunksLengthOf(next);
+      while (activeSeconds.length < wanted) activeSeconds.push(0);
+      if (activeSeconds.length > wanted) activeSeconds = activeSeconds.slice(0, wanted);
+      if (segmentIndex > next.segments.length - 1) {
+        segmentIndex = next.segments.length - 1;
+        segmentElapsed = 0;
+      }
+      if (wasEnded && next.segments.length > oldLength) {
+        segmentIndex = oldLength;
+        segmentElapsed = 0;
+        ended = false;
+      }
+      return state();
+    }
+
+    function on(listener) {
+      if (typeof listener !== "function") return function () {};
+      listeners.push(listener);
+      var live = true;
+      return function () {
+        if (!live) return;
+        live = false;
+        var at = listeners.indexOf(listener);
+        if (at >= 0) listeners.splice(at, 1);
+      };
+    }
+
+    return {
+      play: play,
+      pause: pause,
+      tick: tick,
+      seek: seek,
+      back: back,
+      skip: skip,
+      setTimeline: setTimeline,
+      state: state,
+      on: on
+    };
+  }
+
+  /* ---------- adding to a running session ---------- */
+
+  /* The first index where the recompiled segments part company with the ones
+   * already played, or the old length when the old ones are a prefix. */
+  function firstChangedIndex(freshSegments, oldSegments) {
+    var common = Math.min(freshSegments.length, oldSegments.length);
+    for (var i = 0; i < common; i += 1) {
+      if (JSON.stringify(freshSegments[i]) !== JSON.stringify(oldSegments[i])) return i;
+    }
+    return oldSegments.length;
+  }
+
+  /* Append a chunk or one round of the last chunk. What was already played is
+   * kept as it was played; only the part ahead of the player is recompiled, so
+   * setTimeline on the result moves no count. */
+  function extend(timeline, state, library, addition, opts) {
+    var base = requireTimeline(timeline, "extend");
+    var add = isObject(addition) ? addition : {};
+    var chain = normalizeChain(base.chain).map(function (item) {
+      return { chunkId: item.chunkId, extraRounds: item.extraRounds };
+    });
+    if (isStr(add.addChunk)) {
+      chain.push({ chunkId: add.addChunk, extraRounds: 0 });
+    } else if (add.addRound === true) {
+      chain[chain.length - 1].extraRounds += 1;
+    }
+
+    var fresh = compileSession(chain, library, opts === undefined || opts === null ? base.opts : opts);
+    var oldSegments = base.segments;
+    var changedAt = firstChangedIndex(fresh.segments, oldSegments);
+    var at = isObject(state) && Number.isInteger(state.segmentIndex) ? state.segmentIndex : 0;
+    var segments;
+    if (at < changedAt) {
+      segments = fresh.segments;
+    } else {
+      segments = oldSegments.slice(0, at + 1).concat(fresh.segments.slice(changedAt));
+    }
+
+    return {
+      segments: segments,
+      chunks: chunksOf(chain, segments),
+      totalSeconds: totalOfSegments(segments),
+      chain: fresh.chain,
+      opts: fresh.opts
+    };
+  }
+
+  /* Half of a chunk's planned time is enough for it to count as done. */
+  function isChunkDone(plannedSeconds, activeSeconds) {
+    if (!isSeconds(plannedSeconds)) return false;
+    var active = typeof activeSeconds === "number" && isFinite(activeSeconds) ? activeSeconds : 0;
+    return active >= plannedSeconds / 2;
+  }
+
+  function roundsBaseOf(entry) {
+    if (isPositiveInt(entry.rounds)) return entry.rounds;
+    return entry.kind === "flow" ? DEFAULT_FLOW_ROUNDS : 1;
+  }
+
+  function sharesArea(one, two) {
+    var a = Array.isArray(one.areas) ? one.areas : [];
+    var b = Array.isArray(two.areas) ? two.areas : [];
+    for (var i = 0; i < a.length; i += 1) {
+      if (b.indexOf(a[i]) >= 0) return true;
+    }
+    return false;
+  }
+
+  /* May this addition be offered at all? The reasons are the picker's own
+   * words, never a sentence. */
+  function canExtend(timeline, state, library, addition, opts) {
+    var base = requireTimeline(timeline, "canExtend");
+    var add = isObject(addition) ? addition : {};
+    var byId = toLibrary(library);
+    var chain = normalizeChain(base.chain);
+    var lastItem = chain[chain.length - 1];
+
+    /* A walk and a landmark are one stretch of moving time: no rounds to add. */
+    if (!isStr(add.addChunk) && add.addRound === true) {
+      var lastEntry = resolveChunk(lastItem, byId);
+      if (lastEntry.kind === "walk" || lastEntry.kind === "landmark") {
+        return { ok: false, reason: "max_rounds" };
+      }
+      var rounds = roundsBaseOf(lastEntry);
+      var limit = isPositiveInt(lastEntry.maxRounds) ? lastEntry.maxRounds : Math.max(2, rounds + 1);
+      if (rounds + lastItem.extraRounds + 1 > limit) return { ok: false, reason: "max_rounds" };
+    }
+
+    if (isStr(add.addChunk)) {
+      var newEntry = resolveChunk({ chunkId: add.addChunk, extraRounds: 0 }, byId);
+      var tailEntry = resolveChunk(lastItem, byId);
+      if (newEntry.level === 3 && tailEntry.level === 3 && sharesArea(newEntry, tailEntry)) {
+        return { ok: false, reason: "hard_same_area" };
+      }
+    }
+
+    var extended = extend(base, state, library, add, opts);
+    var planned = 0;
+    for (var i = 0; i < extended.chunks.length; i += 1) planned += extended.chunks[i].plannedSeconds;
+    if (planned > SESSION_MAX_SECONDS) return { ok: false, reason: "max_session" };
+
+    return { ok: true, reason: null };
+  }
+
   return {
     SessionError: SessionError,
     SESSION_MAX_SECONDS: SESSION_MAX_SECONDS,
@@ -569,6 +925,10 @@
     MIN_STAGE_SECONDS: MIN_STAGE_SECONDS,
     compileSession: compileSession,
     compileTimeline: compileTimeline,
-    chunksOf: chunksOf
+    chunksOf: chunksOf,
+    createClock: createClock,
+    extend: extend,
+    isChunkDone: isChunkDone,
+    canExtend: canExtend
   };
 });
