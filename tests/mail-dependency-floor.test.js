@@ -3,8 +3,8 @@
  *
  * WHY THIS TEST EXISTS: the mail channel is built on three libraries whose
  * behaviour the rest of the plan assumes — `nodemailer` must be at least
- * 10.0.2 (the first release with the ESM entry + transport API the sender
- * relies on), and `imapflow` / `postal-mime` must actually load under the
+ * 10.0.2, the floor that fixes the TLS servername and stack-exhaustion
+ * advisories; and `imapflow` / `postal-mime` must actually load under the
  * repo's declared Node major (see tests/node-standard.test.js) rather than
  * only being listed in package.json. A dependency that is declared but
  * uninstallable, or installed below the floor while the manifest claims

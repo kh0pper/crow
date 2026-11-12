@@ -1,8 +1,10 @@
 // Crow Mail thread assignment (servers/gateway/mail/thread-key.js) against a scratch DB built from
 // MAIL_DDL. The rules, in the order assignThread applies them: the same message already stored, a
 // known parent, a known child, ids with no known relative, and (finally) subject plus time plus a
-// shared participant. Merges are one transaction: messages move to the lowest thread id, emptied
-// mail_threads rows go, counts are recomputed.
+// shared participant. Rule 4 never joins on a subject alone: a same-day key collision between
+// people with nothing in common, or an empty subject, starts a new thread. Merges are one
+// transaction: messages move to the lowest thread id, emptied mail_threads rows go, counts are
+// recomputed.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -385,23 +387,58 @@ test("the same subject with no shared participant is two threads", async () => {
   assert.equal(await threadCount(db), 2);
 });
 
-test("two id-less messages whose subject key collides join the one row without a UNIQUE error", async () => {
+test("a same-day subject key collision with no shared participant starts a second thread, no UNIQUE error", async () => {
   const db = await freshDb();
-  // Same normalized subject, same UTC day, no shared participant: rule 4 refuses the join, and the
-  // new key is the one already there, so the thread is joined rather than inserted twice.
+  // Same normalized subject and same UTC day, no shared participant: rule 4 refuses the join, so
+  // the day's key already taken gets a participant suffix rather than being joined or duplicated.
+  const day = new Date(T0).toISOString().slice(0, 10);
   const first = await assign(db, { subject: "Hello", date: T0, participants: [ALEX, SAM] });
   await store(db, { threadId: first, subject: "Hello", date: T0, from: ALEX, to: [SAM] });
 
   const second = await assign(db, { subject: "Re: Hello", date: T0 + MINUTE, participants: [KIM, LEE] });
-  assert.equal(second, first);
-  assert.equal(await threadCount(db), 1);
+  assert.notEqual(second, first);
+  assert.equal(await threadCount(db), 2);
+  assert.equal((await thread(db, second)).thread_key, `subj:hello:${day}:${KIM}`);
+  await store(db, { threadId: second, subject: "Re: Hello", date: T0 + MINUTE, from: KIM, to: [LEE] });
+
+  const third = await assign(db, { subject: "Hello", date: T0 + 2 * MINUTE, participants: [LEE, KIM] });
+  assert.equal(third, second, "the same pair lands on the suffixed key it already owns");
+  assert.equal(await threadCount(db), 2);
 });
 
-test("an id-less message with no subject still gets a thread", async () => {
+test("a thread keyed on 'Meeting: agenda' is never reused for 'Meeting'", async () => {
   const db = await freshDb();
-  const id = await assign(db, { subject: "", date: T0, participants: [] });
-  const row = await thread(db, id);
-  assert.equal(row.thread_key, `subj::${new Date(T0).toISOString().slice(0, 10)}`);
+  // Both keys share the prefix `subj:meeting:`; only a whole normalized subject matches, so the
+  // shorter subject starts its own thread even on the same day with the same people.
+  const agenda = await assign(db, { subject: "Meeting: agenda", date: T0 });
+  await store(db, { threadId: agenda, subject: "Meeting: agenda", date: T0, from: ALEX, to: [SAM] });
+
+  const plain = await assign(db, { subject: "Meeting", date: T0 + MINUTE, participants: [ALEX, SAM] });
+  assert.notEqual(plain, agenda);
+  assert.equal(await threadCount(db), 2);
+});
+
+test("an id-less message with no subject always starts a new anon thread", async () => {
+  const db = await freshDb();
+  const first = await assign(db, { subject: "", date: T0, participants: [] });
+  await store(db, { threadId: first, subject: "", date: T0 });
+  const firstKey = (await thread(db, first)).thread_key;
+  assert.match(firstKey, /^anon:[0-9a-f]+$/);
+
+  // Even the same people on the same day: an empty subject is never a join key.
+  const second = await assign(db, { subject: "Re:", date: T0 + MINUTE, participants: [ALEX, SAM] });
+  assert.notEqual(second, first);
+  assert.match((await thread(db, second)).thread_key, /^anon:[0-9a-f]+$/);
+  assert.equal(await threadCount(db), 2);
+});
+
+test("a finite out-of-range date cannot throw: the day falls back to the epoch", async () => {
+  const db = await freshDb();
+  let id;
+  await assert.doesNotReject(async () => {
+    id = await assign(db, { subject: "Hello", date: 8.7e15, participants: [ALEX] });
+  });
+  assert.equal((await thread(db, id)).thread_key, "subj:hello:1970-01-01");
 });
 
 /* ------------------------------------------------------- refreshThreadCounts */

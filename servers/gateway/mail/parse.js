@@ -12,12 +12,17 @@
  * `text` is the plain part. An HTML-only message has no plain part at all — postal-mime renders
  * textTypes it saw, so only html comes back — and then text is derived from the html: script and
  * style content and comments dropped, tags stripped, entities decoded, whitespace collapsed. The
- * html itself is kept as parsed; sanitising it is a separate step, and this module does not treat
- * it as safe.
+ * html is cut to the body limit before that derivation, so the work done on a message is bounded
+ * by the cap and never by what the sender wrote. The html itself is kept as parsed (cut to the
+ * same cap); sanitising it is a separate step, and this module does not treat it as safe.
  *
  * `parseRawMessageFull` also returns the attachment bytes, in the same order as
  * `ParsedMessage.attachments`: one pass over postal-mime's attachment list builds both, so index i
  * of each list is the same part by construction. That is what plan 2's attachment download reads.
+ *
+ * The id fields are narrowed here too: an id header names its first `<...>` token only (a trailing
+ * comment or a second id on In-Reply-To is not part of it), and References keeps its LAST 50 ids,
+ * because the tail is the part a sender can grow without bound.
  */
 import PostalMime from "postal-mime";
 
@@ -136,16 +141,121 @@ function decodeEntities(value) {
 
 const collapse = (value) => value.replace(/\s+/g, " ").trim();
 
+/** ASCII lower case of one char code. Html tag names are ASCII, and String.prototype.toLowerCase
+ *  is not used here because it can change a string's length (a dotted capital I becomes two
+ *  characters), which would move every index the scan below relies on. */
+function lowerCode(code) {
+  return code >= 0x41 && code <= 0x5a ? code + 0x20 : code;
+}
+
+/** Characters that continue a tag name, so `<script-x>` and `<script>` are different names and
+ *  `<scriptx` is not a script tag. Anything else (whitespace, `/`, `>`, `<`) ends the name. */
+function isTagNameCode(code) {
+  return (code >= 0x61 && code <= 0x7a) || (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x30 && code <= 0x39) || code === 0x2d || code === 0x5f || code === 0x3a;
+}
+
+/** The lower-cased tag name starting at `lt` (the position of "<"), or "" when the character
+ *  after the "<" is not a name character (`<!doctype`, `</p`, `< a`). */
+function tagNameAt(html, lt) {
+  let i = lt + 1;
+  const start = i;
+  while (i < html.length && isTagNameCode(html.charCodeAt(i))) i++;
+  if (i === start) return "";
+  let name = "";
+  for (let k = start; k < i; k++) name += String.fromCharCode(lowerCode(html.charCodeAt(k)));
+  return name;
+}
+
+/** What may follow a closing tag name: the end of the tag or whitespace before the `>`. */
+function endsTagName(code) {
+  return code === 0x3e || code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d || code === 0x0c;
+}
+
+/** The position of "</name" at or after `from`, matched case-insensitively and only when the name
+ *  ends there, or -1. The caller consumes everything up to what this found, so no stretch of the
+ *  html is ever scanned twice. */
+function closingTagAt(html, name, from) {
+  const length = html.length;
+  let i = from;
+  for (let lt = html.indexOf("</", i); lt !== -1; lt = html.indexOf("</", i)) {
+    const after = lt + 2 + name.length;
+    if (after <= length) {
+      let matches = true;
+      for (let k = 0; k < name.length; k++) {
+        if (lowerCode(html.charCodeAt(lt + 2 + k)) !== name.charCodeAt(k)) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches && (after === length || endsTagName(html.charCodeAt(after)))) return lt;
+    }
+    i = lt + 2;
+  }
+  return -1;
+}
+
+/** Everything htmlToText drops, in one forward pass with no regular expression over the input:
+ *  comments and script/style blocks (with their content), then any other tag. A block or comment
+ *  that never closes takes the rest of the body with it, so a sender cannot smuggle markup or
+ *  script text into the derived body by leaving an end marker off.
+ *
+ * Each removal becomes a space, which is what the whitespace collapse downstream expects between
+ * what used to be two adjacent pieces of text (`a<br>b` is "a b", not "ab"). Every search starts
+ * where the previous one ended and only ever moves forward, so the pass is linear in the length
+ * of `html` — including on nothing but `<`, on a megabyte of unclosed comments, and on a script
+ * block whose end tag is missing. */
+function stripMarkup(html) {
+  const length = html.length;
+  const parts = [];
+  let pos = 0;
+
+  while (pos < length) {
+    const lt = html.indexOf("<", pos);
+    if (lt === -1) break;
+
+    if (html.startsWith("<!--", lt)) {
+      if (lt > pos) parts.push(html.slice(pos, lt));
+      parts.push(" ");
+      const close = html.indexOf("-->", lt + 4);
+      if (close === -1) return parts.join("");
+      pos = close + 3;
+      continue;
+    }
+
+    const gt = html.indexOf(">", lt + 1);
+    if (gt === -1) {
+      // A "<" with no ">" after it ends the body's text: the remainder is not text.
+      if (lt > pos) parts.push(html.slice(pos, lt));
+      parts.push(" ");
+      return parts.join("");
+    }
+
+    const name = tagNameAt(html, lt);
+    if (name === "script" || name === "style") {
+      if (lt > pos) parts.push(html.slice(pos, lt));
+      parts.push(" ");
+      const closeLt = closingTagAt(html, name, gt + 1);
+      if (closeLt === -1) return parts.join("");
+      const closeGt = html.indexOf(">", closeLt + 1);
+      if (closeGt === -1) return parts.join("");
+      pos = closeGt + 1;
+      continue;
+    }
+
+    if (lt > pos) parts.push(html.slice(pos, lt));
+    parts.push(" ");
+    pos = gt + 1;
+  }
+
+  if (pos < length) parts.push(html.slice(pos, length));
+  return parts.join("");
+}
+
 /** The text of an html body: script and style content and comments gone, then the tags, then the
  *  entities decoded. Browser-grade conversion is not the goal — a readable body and a snippet are. */
 function htmlToText(html) {
-  const stripped = String(html)
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
-    // An unclosed <script or <style would otherwise keep its content as body text.
-    .replace(/<(script|style)\b[\s\S]*$/i, " ")
-    .replace(/<[^>]*>/g, " ");
-  return collapse(decodeEntities(stripped));
+  return collapse(decodeEntities(stripMarkup(String(html))));
 }
 
 /** postal-mime's address entries as `{name, address}`: groups flattened to their members, entries
@@ -183,20 +293,34 @@ function singleAddress(entry) {
   return { name, address };
 }
 
-/** `<...>` msg-ids in the order sent; a sender that left the brackets off gets its bare tokens. */
+/** `<...>` msg-ids in the order sent; a sender that left the brackets off gets its bare tokens.
+ *  Only the LAST MAX_REFERENCES of them are kept: a thread's nearest ancestors are the ones that
+ *  matter, and the tail is the part a sender can grow without bound. */
+const REFERENCE_TOKEN_RE = /<[^<>\s]{1,998}>/g;
+
+/** How many references header ids are kept. */
+const MAX_REFERENCES = 50;
+
 function messageIds(value) {
   if (typeof value !== "string") return [];
   const out = [];
-  const re = /<[^<>\s]{1,998}>/g;
-  for (let m = re.exec(value); m !== null; m = re.exec(value)) out.push(m[0]);
-  if (out.length > 0) return out;
-  return value.split(/[\s,]+/).filter((token) => token !== "");
+  REFERENCE_TOKEN_RE.lastIndex = 0;
+  for (let m = REFERENCE_TOKEN_RE.exec(value); m !== null; m = REFERENCE_TOKEN_RE.exec(value)) out.push(m[0]);
+  const ids = out.length > 0 ? out : value.split(/[\s,]+/).filter((token) => token !== "");
+  return ids.length > MAX_REFERENCES ? ids.slice(-MAX_REFERENCES) : ids;
 }
+
+/** The id a Message-ID or In-Reply-To header names: its first `<...>` token with the brackets kept,
+ *  so a trailing comment (`<m@x> (c)`) or a second id on an In-Reply-To is not part of it. A header
+ *  with no brackets at all names its first whitespace-separated token; an empty one names nothing. */
+const FIRST_ID_RE = /<[^<>\s]{1,998}>/;
 
 function singleMessageId(value) {
   if (typeof value !== "string") return null;
+  const bracketed = FIRST_ID_RE.exec(value);
+  if (bracketed) return bracketed[0];
   const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
+  return trimmed === "" ? null : trimmed.split(/\s+/)[0];
 }
 
 function dateMs(value) {
@@ -250,14 +374,18 @@ function attachmentsOf(list) {
 
 function normalise(email, opts) {
   const limit = bodyLimit(opts);
-  const html0 = typeof email.html === "string" ? email.html : null;
+  const htmlSource = typeof email.html === "string" ? email.html : null;
+  // The html is cut before anything walks it, so the derivation below reads at most `limit`
+  // characters however large the part postal-mime decoded was.
+  const html = htmlSource === null ? null : cut(htmlSource, limit);
+  const htmlCut = html !== null && html.length < htmlSource.length;
+
   const text0 = typeof email.text === "string" && email.text !== ""
     ? email.text
-    : html0 === null ? "" : htmlToText(html0);
+    : html === null ? "" : htmlToText(html);
 
   const text = cut(text0, limit);
-  const html = html0 === null ? null : cut(html0, limit);
-  const truncated = text.length < text0.length || (html !== null && html.length < html0.length);
+  const truncated = text.length < text0.length || htmlCut;
 
   const { attachments, attachmentContents } = attachmentsOf(email.attachments);
 

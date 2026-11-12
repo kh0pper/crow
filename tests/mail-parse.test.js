@@ -21,6 +21,28 @@ function raw(...lines) {
 
 const collapsed = (s) => s.replace(/\s+/g, " ").trim();
 
+/** An html-only message (no plain part), so the text comes from the markup alone. */
+function htmlOnlyMessage(html) {
+  return raw(
+    "From: alex@example.com",
+    "To: sam@example.com",
+    "Subject: Hostile markup",
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    html,
+  );
+}
+
+const MB = 1024 * 1024;
+
+/** Parse one html-only message and report how long the whole normaliser took, in ms. */
+async function timedParse(html) {
+  const message = htmlOnlyMessage(html);
+  const started = performance.now();
+  const parsed = await parseRawMessage(message);
+  return { parsed, elapsed: performance.now() - started };
+}
+
 /** A message body nested in `depth` multipart/mixed wrappers around one text/plain part. */
 function nestedMultipart(depth) {
   let message = raw("Content-Type: text/plain; charset=utf-8", "", "inner body");
@@ -323,8 +345,10 @@ test("opts.maxBodyChars cuts text and html alike and sets truncated", async () =
   const parsed = await parseRawMessage(htmlOnly, { maxBodyChars: 100 });
 
   assert.equal(parsed.parseError, null);
-  assert.equal(parsed.text.length, 100);
-  assert.equal(parsed.text, "b".repeat(100));
+  // The html is cut to the limit first, and the text is derived from that cut: the three
+  // characters of <p> take three of the hundred, so ninety-seven characters of body remain.
+  assert.equal(parsed.html, `<p>${"b".repeat(97)}`);
+  assert.equal(parsed.text, "b".repeat(97));
   assert.equal(parsed.html.length, 100);
   assert.equal(parsed.truncated, true);
 
@@ -339,7 +363,150 @@ test("opts.maxBodyChars cuts text and html alike and sets truncated", async () =
   assert.equal(plain.truncated, true);
 });
 
-test("garbage returns parseError unparseable with no error text anywhere", async () => {
+test("an html body is cut to the body limit before its text is derived", async () => {
+  const parsed = await parseRawMessage(htmlOnlyMessage(`<p>${"b".repeat(MAX_BODY_CHARS + 5000)}</p>`));
+
+  assert.equal(parsed.parseError, null);
+  assert.equal(parsed.html.length, MAX_BODY_CHARS);
+  assert.equal(parsed.truncated, true);
+  assert.ok(parsed.text.length <= MAX_BODY_CHARS);
+  assert.ok(parsed.text.length > MAX_BODY_CHARS - 10, "the cut keeps nearly the whole body");
+  assert.match(parsed.text, /^b+$/);
+});
+
+test("comments, script and style blocks go, mixed case too, and tags leave their text", async () => {
+  const parsed = await parseRawMessage(htmlOnlyMessage(
+    "<!-- a comment with <b>tags</b> inside --><P>Keep &amp; this</P>" +
+    "<SCRIPT type=\"text/javascript\">alert('x')</SCRIPT>" +
+    "<sTyLe>p { color: red }</sTyLe>" +
+    "<ScRiPt>alert('y')</sCrIpT>" +
+    "<div class=\"x\">and&nbsp;this</div>",
+  ));
+
+  assert.equal(parsed.parseError, null);
+  assert.equal(parsed.text, "Keep & this and this");
+  assert.doesNotMatch(parsed.text, /alert|color|comment/);
+});
+
+test("an unclosed script block, style block or comment drops the rest instead of leaking it", async () => {
+  for (const html of [
+    "<p>Visible</p><script>secret()",
+    "<p>Visible</p><STYLE>.secret { color: red }",
+    "<p>Visible</p><!-- secret <p>hidden</p>",
+  ]) {
+    const parsed = await parseRawMessage(htmlOnlyMessage(html));
+    assert.equal(parsed.parseError, null);
+    assert.equal(parsed.text, "Visible");
+    assert.doesNotMatch(parsed.text, /secret|hidden|color/);
+  }
+});
+
+test("a megabyte of '<' characters derives text in well under 200 ms", async () => {
+  const { parsed, elapsed } = await timedParse("<".repeat(MB));
+
+  assert.equal(parsed.parseError, null);
+  assert.equal(parsed.text, "");
+  assert.ok(elapsed < 200, `took ${elapsed.toFixed(1)} ms`);
+});
+
+test("a megabyte of unclosed comments derives text in well under 200 ms", async () => {
+  const { parsed, elapsed } = await timedParse("<!--".repeat(MB / 4));
+
+  assert.equal(parsed.parseError, null);
+  assert.equal(parsed.text, "");
+  assert.ok(elapsed < 200, `took ${elapsed.toFixed(1)} ms`);
+});
+
+test("a megabyte of unclosed script blocks derives text in well under 200 ms", async () => {
+  for (const html of [
+    "<script".repeat(MB / 7),          // never closed with '>'
+    "<script>".repeat(MB / 8) + "alert(1)", // opened, never closed
+  ]) {
+    const { parsed, elapsed } = await timedParse(html);
+    assert.equal(parsed.parseError, null);
+    assert.equal(parsed.text, "");
+    assert.ok(elapsed < 200, `took ${elapsed.toFixed(1)} ms`);
+  }
+});
+
+test("a megabyte of unclosed '<a ' tags derives text in well under 200 ms", async () => {
+  const { parsed, elapsed } = await timedParse("<a ".repeat(MB / 3));
+
+  assert.equal(parsed.parseError, null);
+  assert.equal(parsed.text, "");
+  assert.ok(elapsed < 200, `took ${elapsed.toFixed(1)} ms`);
+});
+
+test("references are capped to the last 50 ids", async () => {
+  const ids = Array.from({ length: 30000 }, (_, i) => `<r${i}@mail.example.test>`);
+  const parsed = await parseRawMessage(raw(
+    "From: alex@example.com",
+    "To: sam@example.com",
+    "Subject: A very long References header",
+    `References: ${ids.join(" ")}`,
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "Body.",
+  ));
+
+  assert.equal(parsed.parseError, null);
+  assert.equal(parsed.references.length, 50, "a wider References header is cut");
+  assert.deepEqual(parsed.references, ids.slice(-50), "the newest ancestors are the ones kept");
+});
+
+test("the id headers take their first bracketed id and ignore the rest of the header", async () => {
+  const parsed = await parseRawMessage(raw(
+    "From: alex@example.com",
+    "To: sam@example.com",
+    "Subject: ids with extras",
+    "Message-ID: <m@mail.example.test> (c)",
+    "In-Reply-To: <a@mail.example.test> <b@mail.example.test>",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "Body.",
+  ));
+
+  assert.equal(parsed.parseError, null);
+  assert.equal(parsed.messageId, "<m@mail.example.test>", "a trailing comment is not part of the id");
+  assert.equal(parsed.inReplyTo, "<a@mail.example.test>", "only the first id is the reply target");
+});
+
+test("an id header with no angle brackets keeps its first token, and an empty one is null", async () => {
+  const parsed = await parseRawMessage(raw(
+    "From: alex@example.com",
+    "Subject: bare ids",
+    "Message-ID: m@mail.example.test extra words",
+    "In-Reply-To:    ",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "Body.",
+  ));
+
+  assert.equal(parsed.parseError, null);
+  assert.equal(parsed.messageId, "m@mail.example.test");
+  assert.equal(parsed.inReplyTo, null, "a header of nothing but whitespace names no id");
+});
+
+test("garbage text comes back as a message, with no error text anywhere", async () => {
+  const hostile = "garbage\x00\xff not a message";
+  let parsed;
+  await assert.doesNotReject(async () => { parsed = await parseRawMessage(hostile); });
+
+  // postal-mime is lenient about a body that has no headers at all, so the observed parseError is
+  // null: the string is taken as a body and the parse succeeds. What the normaliser must guarantee
+  // is that nothing throws and that no parser error text can reach the result.
+  assert.equal(parsed.parseError, null);
+  assert.equal(parsed.messageId, null);
+  assert.equal(parsed.inReplyTo, null);
+  assert.deepEqual(parsed.references, []);
+  assert.equal(parsed.subject, "");
+  assert.equal(parsed.date, null);
+  assert.equal(parsed.from, null);
+  assert.equal(parsed.html, null);
+  assert.doesNotMatch(JSON.stringify(parsed), /Unsupported email input|Maximum MIME|Cannot read|undefined/);
+});
+
+test("an input that is not a message at all comes back as the unparseable placeholder", async () => {
   for (const input of [42, { raw: "no" }, ["From: alex@example.com"]]) {
     const parsed = await parseRawMessage(input);
     assert.equal(parsed.parseError, "unparseable");

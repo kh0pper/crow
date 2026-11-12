@@ -12,14 +12,20 @@
  *   2. a stored in_reply_to or references_json names this messageId (the parent arrived late);
  *   3. ids but no known relative -> a thread keyed by the first reference, else inReplyTo, else
  *      messageId;
- *   4. no ids at all -> join a same-subject thread whose last message is within 14 days and which
- *      shares a participant, else a thread keyed by subject and UTC day. Never subject alone.
+ *   4. no ids at all -> join the nearest same-subject thread that shares a participant and whose
+ *      last message is within 14 days; otherwise a new thread. With a subject the key is
+ *      subj:<normalized>:<UTC day>, and when that day's key is already taken by people this message
+ *      shares nothing with, the new key gains a participant (or random) suffix. No normalized
+ *      subject at all -> a fresh thread keyed anon:<random hex>. A subject alone never joins.
  *
- * Rules 3 and 4 are insert-or-join on (account_id, thread_key): an existing row with that key is
- * joined, never duplicated. Rules 1, 2 and every merge run in ONE transaction (db.runTransaction,
- * servers/db.js: read, compare and write with no await in between), so a merge can never be seen
- * half-done — messages moved but the emptied thread row still there, or counts stale.
+ * Rules 3 and 4 insert-or-join on (account_id, thread_key) and a collision never raises a UNIQUE
+ * error. Rule 3 joins the existing row with that key; rule 4 joins it only when a participant is
+ * shared, and otherwise adds a suffix so the row is new. Rules 1, 2 and every merge run in ONE
+ * transaction (db.runTransaction, servers/db.js: read, compare and write with no await in between),
+ * so a merge can never be seen half-done — messages moved but the emptied thread row still there,
+ * or counts stale.
  */
+import { randomBytes } from "node:crypto";
 
 /** 14 days: how far apart two id-less messages with the same subject may be and still be one thread. */
 const SUBJECT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
@@ -138,6 +144,12 @@ const SUBJECT_THREADS_SQL = `SELECT id, thread_key FROM mail_threads
      AND last_date >= ? AND last_date <= ?
    ORDER BY id`;
 
+/** The day a subject key carries on its face, and the normalized subject in front of it. */
+const SUBJECT_KEY_RE = /^(.*):(\d{4}-\d{2}-\d{2})(?::(.*))?$/;
+
+/** The longest instant a Date can hold; beyond it toISOString throws. */
+const MAX_TIME_MS = 8.64e15;
+
 const THREAD_PARTICIPANTS_SQL = "SELECT from_addr, to_json, cc_json FROM mail_messages WHERE thread_id = ?";
 
 const INSERT_THREAD_SQL = `INSERT INTO mail_threads
@@ -215,9 +227,61 @@ function joinOrCreate(run, accountId, threadKey, subject, at) {
   return Number(rows(run, THREAD_BY_KEY_SQL, [accountId, threadKey])[0].id);
 }
 
-/** The UTC day a message belongs to, for rule 4's key. */
+/** The thread already holding `threadKey`, as an id, or null. */
+function findByKey(run, accountId, threadKey) {
+  const row = rows(run, THREAD_BY_KEY_SQL, [accountId, threadKey])[0];
+  return row ? Number(row.id) : null;
+}
+
+/**
+ * A `subj:` key split into its normalized subject and its day, or null when it is not one.
+ *
+ * The subject is matched from the left, greedily, so a subject that itself contains a date-shaped
+ * run keeps it (`subj:meeting 2026-01-05:2026-01-06` is the subject "meeting 2026-01-05" on the
+ * 6th), and a participant-suffixed key still parses. Comparing this subject with === is what keeps
+ * a thread for "Meeting: agenda" from answering for "Meeting".
+ */
+function parseSubjectKey(threadKey) {
+  if (typeof threadKey !== "string" || !threadKey.startsWith("subj:")) return null;
+  const match = SUBJECT_KEY_RE.exec(threadKey.slice("subj:".length));
+  if (!match) return null;
+  return { subject: match[1], day: match[2] };
+}
+
+/** A short random key suffix, for an id-less thread with no participant to name it after. */
+function randomSuffix() {
+  return randomBytes(8).toString("hex");
+}
+
+/**
+ * Rule 4's new thread for a non-empty subject on a given day.
+ *
+ * The plain `subj:<normalized>:<day>` key belongs to the first pair who wrote that subject that day.
+ * A second, unrelated pair writing it must not be folded into their conversation, so the key gains
+ * `:<first participant>` (or a random suffix when the message names nobody), which the same pair
+ * then reuses. A key that is somehow already there is joined only when a participant is shared.
+ */
+function subjectThread(run, accountId, normalized, subject, at, people) {
+  const base = `subj:${normalized}:${utcDay(at)}`;
+  const existing = findByKey(run, accountId, base);
+  if (existing === null) return joinOrCreate(run, accountId, base, subject, at);
+  if (sharesParticipant(run, existing, people)) return existing;
+
+  const preferred = people.values().next().value;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const key = attempt === 0 && preferred ? `${base}:${preferred}` : `${base}:${randomSuffix()}`;
+    const found = findByKey(run, accountId, key);
+    if (found === null) return joinOrCreate(run, accountId, key, subject, at);
+    if (sharesParticipant(run, found, people)) return found;
+  }
+  return joinOrCreate(run, accountId, `${base}:${randomSuffix()}`, subject, at);
+}
+
+/** The UTC day a message belongs to, for rule 4's key. A finite date outside what a Date can hold
+ *  falls back to the epoch day: a sender's malformed Date header must not throw out of a sync. */
 function utcDay(at) {
-  return new Date(at).toISOString().slice(0, 10);
+  const ms = Number.isFinite(at) && Math.abs(at) <= MAX_TIME_MS ? at : 0;
+  return new Date(ms).toISOString().slice(0, 10);
 }
 
 /**
@@ -275,6 +339,8 @@ export async function assignThread(db, accountId, message) {
     }
 
     // Rule 1 — the parent is known: a stored message_id equals inReplyTo or is in references.
+    // First match wins: a message whose parent and child sit in different threads joins the
+    // parent's thread here and does not merge the child's.
     if (inReplyTo || references.length) {
       const parents = threadIds(run, THREADS_WITH_PARENT_SQL,
         [accountId, inReplyTo || null, JSON.stringify(references)]);
@@ -298,16 +364,19 @@ export async function assignThread(db, accountId, message) {
     }
 
     // Rule 4 — no ids at all. Subject, time and a shared participant together, never subject alone.
-    if (normalized) {
-      const prefix = `subj:${normalized}:`;
-      const candidates = rows(run, SUBJECT_THREADS_SQL,
-        [accountId, at - SUBJECT_WINDOW_MS, at + SUBJECT_WINDOW_MS]);
-      for (const candidate of candidates) {
-        if (!String(candidate.thread_key).startsWith(prefix)) continue;
-        if (!sharesParticipant(run, Number(candidate.id), people)) continue;
-        return touch(run, Number(candidate.id));
-      }
+    if (!normalized) {
+      // An empty normalized subject is no join key at all: every such message is its own thread.
+      return touch(run, joinOrCreate(run, accountId, `anon:${randomSuffix()}`, subject, at));
     }
-    return touch(run, joinOrCreate(run, accountId, `subj:${normalized}:${utcDay(at)}`, subject, at));
+    const candidates = rows(run, SUBJECT_THREADS_SQL,
+      [accountId, at - SUBJECT_WINDOW_MS, at + SUBJECT_WINDOW_MS]);
+    for (const candidate of candidates) {
+      const parsed = parseSubjectKey(candidate.thread_key);
+      if (!parsed || parsed.subject !== normalized) continue;
+      const id = Number(candidate.id);
+      if (!sharesParticipant(run, id, people)) continue;
+      return touch(run, id);
+    }
+    return touch(run, subjectThread(run, accountId, normalized, subject, at, people));
   });
 }

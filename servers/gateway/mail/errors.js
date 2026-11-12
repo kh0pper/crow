@@ -84,7 +84,6 @@ export function toMailError(err) {
   const detail = detailFrom(err);
   const field = (name) => (err != null && typeof err === "object" && typeof err[name] === "string" ? err[name] : "");
   const code = field("code");
-  const status = field("responseStatus");
   const name = field("name");
 
   if (err != null && typeof err === "object" && err.authenticationFailed === true) {
@@ -94,7 +93,5 @@ export function toMailError(err) {
   if (TLS_CODE_RE.test(code) || code === "ETLS") return new MailError("TLS", detail);
   if (TIMEOUT_CODES.has(code) || TIMEOUT_NAMES.has(name)) return new MailError("TIMEOUT", detail);
   if (NETWORK_CODES.has(code)) return new MailError("NETWORK", detail);
-  // A bare IMAP NO/BAD is the server refusing a command: nothing to quote, no detail beyond the status.
-  if (status === "NO" || status === "BAD") return new MailError("PROTOCOL", detail);
   return new MailError("PROTOCOL", detail);
 }
