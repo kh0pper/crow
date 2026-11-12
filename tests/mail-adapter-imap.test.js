@@ -103,6 +103,116 @@ async function unusedPort() {
   return port;
 }
 
+/**
+ * A client wrapper that records every FETCH the adapter issues: the range it names, and whether the
+ * fetch asked for the message body or only its metadata. The fake server records command names
+ * without their arguments, so this is where a test sees which UIDs a body fetch was issued for.
+ */
+function recordingClientFactory(fetches) {
+  return (options) => {
+    const client = new ImapFlow(options);
+    const fetch = client.fetch.bind(client);
+    client.fetch = (range, query, opts) => {
+      fetches.push({ range: String(range), body: Boolean(query && query.source === true) });
+      return fetch(range, query, opts);
+    };
+    return client;
+  };
+}
+
+/** A UID list as the adapter sends it (a comma-joined set of concrete UIDs, never a range). */
+const rangeHas = (range, uid) => range.split(",").some((part) => Number(part) === uid);
+
+/** An ImapFlow-shaped client for the clientFactory seam, with no socket behind it. */
+function stubClient(overrides = {}) {
+  return {
+    on() {},
+    close() {},
+    usable: true,
+    mailbox: { uidValidity: 1, uidNext: undefined },
+    async connect() {},
+    async logout() {},
+    async getMailboxLock() { return { release() {} }; },
+    async status() { return {}; },
+    async list() { return []; },
+    async search() { return []; },
+    async idle() {},
+    async mailboxOpen() {},
+    async *fetch() {},
+    ...overrides,
+  };
+}
+
+/**
+ * A one-response IMAP server: it greets, accepts a LOGIN, selects INBOX, answers a metadata FETCH with
+ * a size, and answers a body FETCH by declaring a literal larger than the client's parser cap and then
+ * going silent. The declaration alone is what the client has to refuse.
+ */
+async function startLiteralServer(declaredBytes) {
+  const sockets = new Set();
+  let declared = 0;
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+    socket.on("close", () => sockets.delete(socket));
+    socket.setNoDelay(true);
+    socket.write("* OK [CAPABILITY IMAP4rev1] fake IMAP ready\r\n");
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      for (;;) {
+        const end = buffer.indexOf("\r\n");
+        if (end < 0) return;
+        const line = buffer.slice(0, end);
+        buffer = buffer.slice(end + 2);
+        const tokens = line.split(" ");
+        const tag = tokens[0];
+        const first = (tokens[1] || "").toUpperCase();
+        const name = first === "UID" ? (tokens[2] || "").toUpperCase() : first;
+        if (name === "CAPABILITY") {
+          socket.write("* CAPABILITY IMAP4rev1\r\n");
+          socket.write(`${tag} OK CAPABILITY completed\r\n`);
+        } else if (name === "LOGIN") {
+          socket.write(`${tag} OK LOGIN completed\r\n`);
+        } else if (name === "SELECT" || name === "EXAMINE") {
+          socket.write("* FLAGS (\\Seen)\r\n* 1 EXISTS\r\n");
+          socket.write("* OK [UIDVALIDITY 1] UIDs valid\r\n* OK [UIDNEXT 2] next\r\n");
+          socket.write(`${tag} OK [READ-WRITE] ${name} completed\r\n`);
+        } else if (name === "FETCH") {
+          if (/BODY/i.test(line)) {
+            // The body is never sent: the declared size is the whole attack, and it is over the cap.
+            declared += 1;
+            socket.write(`* 1 FETCH (UID 1 BODY[] {${declaredBytes}}\r\n`);
+          } else {
+            socket.write('* 1 FETCH (UID 1 FLAGS () INTERNALDATE "01-Jan-2024 00:00:00 +0000" ');
+            socket.write("RFC822.SIZE 32)\r\n");
+            socket.write(`${tag} OK FETCH completed\r\n`);
+          }
+        } else {
+          socket.write(`${tag} OK ${name} completed\r\n`);
+        }
+      }
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  return {
+    host: "127.0.0.1",
+    port: server.address().port,
+    literalsDeclared: () => declared,
+    async close() {
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
 function captureConsole() {
   const lines = [];
   const methods = ["log", "info", "warn", "error", "debug", "trace"];
@@ -406,22 +516,29 @@ test("one read connection plus one per watched folder, and a third folder is ref
 
 /* --------------------------------------------------------------------- oversized messages */
 
-test("get skips the bytes of a message above maxRawBytes and keeps its metadata", async () => {
+test("get reports an oversized message with its metadata and issues no body fetch for it", async () => {
   const fake = await startFake();
   const big = fake.deliver("INBOX", makeRaw({ subject: "too big", body: "x".repeat(2000) }), {
     flags: ["\\Seen"],
   });
   const small = fake.deliver("INBOX", makeRaw({ subject: "small enough", body: "hello" }));
-  const adapter = adapterFor(fake, { maxRawBytes: 500 });
+  const fetches = [];
+  const adapter = adapterFor(fake, { maxRawBytes: 500, clientFactory: recordingClientFactory(fetches) });
   try {
     await adapter.connect();
     const messages = await adapter.get("INBOX", [big, small]);
     assert.equal(messages.length, 2, "both uids are reported");
     const oversized = messages.find((message) => message.uid === big);
     assert.ok(Buffer.isBuffer(oversized.raw));
-    assert.equal(oversized.raw.length, 0, "no bytes are fetched for a message above the limit");
+    assert.equal(oversized.raw.length, 0, "the oversized message comes back without its bytes");
     assert.deepEqual(oversized.flags, ["\\Seen"], "its flags still come through");
     assert.equal(typeof oversized.internalDate, "number");
+    const bodyFetches = fetches.filter((call) => call.body);
+    assert.ok(bodyFetches.length > 0, "the small message's body was fetched");
+    assert.ok(
+      bodyFetches.every((call) => !rangeHas(call.range, big)),
+      "no fetch asked for the oversized message's body",
+    );
     const kept = messages.find((message) => message.uid === small);
     assert.match(kept.raw.toString("utf8"), /small enough/);
   } finally {
@@ -494,5 +611,507 @@ test("search refuses an empty query and a control character", async () => {
   } finally {
     await adapter.close();
     await stopFake(fake);
+  }
+});
+
+/* --------------------------------------------------------------- a library error never travels */
+
+test("a missing folder is NOT_FOUND on list, get and search, with nothing of the answer kept", async () => {
+  const fake = await startFake();
+  fake.deliver("INBOX", makeRaw({ subject: "one" }));
+  const adapter = adapterFor(fake);
+  // No fake answer ever mentions this name, so a match in the error would have come from the request.
+  const missing = "Gone2024";
+  const calls = [
+    ["list", () => adapter.list(missing)],
+    ["get", () => adapter.get(missing, [1])],
+    ["search", () => adapter.search("hello", { folderPath: missing })],
+  ];
+  try {
+    await adapter.connect();
+    for (const [name, call] of calls) {
+      const err = await rejectionOf(call());
+      assert.ok(err instanceof MailError, `${name} rejects a MailError, got ${err && err.name}`);
+      assert.equal(err.code, "NOT_FOUND", `${name} on a missing folder`);
+      assert.equal(err.message, MAIL_ERROR_TEXT.NOT_FOUND);
+      for (const field of ["response", "responseText", "executedCommand", "command"]) {
+        assert.ok(!Object.hasOwn(err, field), `${name} carries no ${field} from the library`);
+      }
+      const shown = `${JSON.stringify(err)} ${String(err)} ${String(err.stack)}`;
+      assert.ok(!shown.includes(missing), `${name} names no folder`);
+      assert.ok(!shown.includes("no such mailbox"), `${name} carries no server sentence`);
+    }
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("a NONEXISTENT response code is NOT_FOUND and a plain library error leaves as a MailError", async () => {
+  const fake = await startFake();
+  const serverText = "Mailbox Gone2024 does not exist";
+  const rawMissing = Object.assign(new Error(`A7 NO [NONEXISTENT] ${serverText}`), {
+    responseStatus: "NO",
+    response: { tag: "A7", command: "NO", attributes: [{ section: [{ value: "NONEXISTENT" }] }] },
+    responseText: serverText,
+    executedCommand: "A7 SELECT Gone2024",
+  });
+  const throwingFactory = (thrown) => (options) => {
+    const client = new ImapFlow(options);
+    client.getMailboxLock = async () => { throw thrown; };
+    return client;
+  };
+
+  const missingAdapter = adapterFor(fake, { clientFactory: throwingFactory(rawMissing) });
+  const rangeAdapter = adapterFor(fake, {
+    clientFactory: throwingFactory(new RangeError(`invalid input for Gone2024: ${serverText}`)),
+  });
+  try {
+    await missingAdapter.connect();
+    const missingErr = await rejectionOf(missingAdapter.list("Gone2024"));
+    assert.ok(missingErr instanceof MailError, `expected a MailError, got ${missingErr && missingErr.name}`);
+    assert.equal(missingErr.code, "NOT_FOUND", "the NONEXISTENT code means the mailbox is gone");
+    for (const field of ["response", "responseText", "executedCommand", "command"]) {
+      assert.ok(!Object.hasOwn(missingErr, field), `the library field ${field} does not travel`);
+    }
+    const shownMissing = `${JSON.stringify(missingErr)} ${String(missingErr)}`;
+    assert.ok(!shownMissing.includes(serverText), "no server sentence");
+    assert.ok(!shownMissing.includes("NONEXISTENT"), "not even the response code's raw form");
+
+    await rangeAdapter.connect();
+    const rangeErr = await rejectionOf(rangeAdapter.list("Gone2024"));
+    assert.ok(rangeErr instanceof MailError, "a RangeError is classified like any other library fault");
+    assert.equal(rangeErr.code, "PROTOCOL");
+    const shownRange = `${JSON.stringify(rangeErr)} ${String(rangeErr)}`;
+    assert.ok(!shownRange.includes("Gone2024"), "the folder name does not travel");
+    assert.ok(!shownRange.includes("invalid input"), "the library's sentence does not travel");
+  } finally {
+    await missingAdapter.close();
+    await rangeAdapter.close();
+    await stopFake(fake);
+  }
+});
+
+/* ------------------------------------------------------------------- RF2: a rotation write */
+
+test("an async rotation writer that rejects is no unhandled rejection and does not fail the sign-in", async () => {
+  const fake = await startFake();
+  fake.deliver("INBOX", makeRaw({ subject: "still signed in" }));
+  const fakeRefreshToken = "refresh-token-under-test";
+  const unhandled = [];
+  const spy = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", spy);
+  const captured = captureConsole();
+  const adapter = createImapSmtpAdapter({
+    account: accountFor(fake, { authKind: "xoauth2" }),
+    tokenProvider: async () => ({ accessToken: "access-token-1", refreshToken: fakeRefreshToken }),
+    onTokenRotated: async () => {
+      throw new Error(`the keychain refused ${fakeRefreshToken}`);
+    },
+    timeouts: FAST,
+  });
+  try {
+    await adapter.connect();
+    assert.ok((await adapter.listFolders()).length > 0, "the connection is up");
+    assert.equal((await adapter.list("INBOX")).items.length, 1, "a command still works");
+    // A dropped promise settles here, inside the window the spy is listening to.
+    await tick(50);
+  } finally {
+    captured.restore();
+    process.off("unhandledRejection", spy);
+    await adapter.close();
+    await stopFake(fake);
+  }
+  assert.deepEqual(unhandled, [], "the writer's rejection reached authFor instead of the process");
+  assert.ok(!captured.text().includes(fakeRefreshToken), "the writer's sentence is nowhere in the console");
+});
+
+/* ------------------------------------------------------------- RF8: the client-side bounds */
+
+test("the client is built with parser bounds above the raw cap, and cleartext only for loopback", async () => {
+  const built = [];
+  const factory = (options) => {
+    built.push(options);
+    return stubClient();
+  };
+  const local = createImapSmtpAdapter({
+    account: accountFor({ host: "127.0.0.1", port: 143 }),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts: FAST,
+    maxRawBytes: 4096,
+    clientFactory: factory,
+  });
+  try {
+    await local.connect();
+  } finally {
+    await local.close();
+  }
+  assert.equal(built.length, 1);
+  const [options] = built;
+  assert.ok(options.maxLiteralSize > 4096, "a literal may exceed the raw cap only by the framing");
+  assert.ok(options.maxLiteralSize <= 4096 + 2 * 1024 * 1024);
+  assert.ok(options.maxResponseSize > options.maxLiteralSize, "above the literal cap, as the parser asks");
+  assert.ok(options.maxLineLength >= 1024 * 1024 && options.maxLineLength <= 8 * 1024 * 1024);
+  assert.equal(options.logger, false);
+  assert.equal(options.tls.rejectUnauthorized, true);
+
+  const refusedBuilt = [];
+  const remote = createImapSmtpAdapter({
+    account: accountFor({ host: "mail.example.test", port: 143 }),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts: FAST,
+    clientFactory: (opts) => {
+      refusedBuilt.push(opts);
+      return stubClient();
+    },
+  });
+  try {
+    const err = await rejectionOf(remote.connect());
+    assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+    assert.equal(err.code, "BAD_INPUT");
+    assert.deepEqual(refusedBuilt, [], "a cleartext host that is not loopback builds no client");
+  } finally {
+    await remote.close();
+  }
+
+  for (const host of ["127.0.0.1", "::1", "localhost"]) {
+    const allowedBuilt = [];
+    const adapter = createImapSmtpAdapter({
+      account: accountFor({ host, port: 143 }),
+      credentials: passwordCredentials(FAKE_PASSWORD),
+      timeouts: FAST,
+      clientFactory: (opts) => {
+        allowedBuilt.push(opts);
+        return stubClient();
+      },
+    });
+    try {
+      await adapter.connect();
+    } finally {
+      await adapter.close();
+    }
+    assert.equal(allowedBuilt.length, 1, `${host} is loopback, so cleartext is allowed`);
+  }
+});
+
+test("a server that does not offer STARTTLS fails closed instead of signing in in the clear", async () => {
+  const fake = await startFake();
+  const adapter = createImapSmtpAdapter({
+    account: accountFor(fake, { imap: { host: fake.host, port: fake.port, security: "starttls" } }),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts: FAST,
+  });
+  try {
+    const err = await rejectionOf(adapter.connect());
+    assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+    assert.equal(err.code, "TLS");
+    assert.equal(err.message, MAIL_ERROR_TEXT.TLS);
+    assert.ok(!String(err.message).includes(FAKE_PASSWORD), "no credential in the sentence");
+    assert.deepEqual(fake.logins, [], "nothing was offered to a server that could not upgrade");
+    await waitFor(() => fake.openConnections() === 0);
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("a server literal above the parser cap rejects with a MailError and its bytes are never sent", async () => {
+  const literalServer = await startLiteralServer(4 * 1024 * 1024);
+  const adapter = createImapSmtpAdapter({
+    account: accountFor(literalServer),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts: FAST,
+    maxRawBytes: 1024,
+  });
+  try {
+    await adapter.connect();
+    const started = Date.now();
+    const err = await rejectionOf(adapter.get("INBOX", [1]));
+    const elapsed = Date.now() - started;
+    assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+    assert.equal(err.code, "PROTOCOL");
+    assert.equal(literalServer.literalsDeclared(), 1, "the oversized declaration was what arrived");
+    assert.notEqual(err.detail, "command_deadline", "it was refused, not left waiting for the body");
+    for (const field of ["response", "responseText", "executedCommand"]) {
+      assert.ok(!Object.hasOwn(err, field), `the library field ${field} does not travel`);
+    }
+    assert.ok(!String(err.message).includes("Literal size"), "no parser sentence travels");
+    assert.ok(elapsed < 3000, `the declaration was refused without waiting for the body (${elapsed} ms)`);
+  } finally {
+    await adapter.close();
+    await literalServer.close();
+  }
+});
+
+test("get drops the bytes of a message the server under-reported and reports it as oversized", async () => {
+  const fake = await startFake();
+  const big = fake.deliver("INBOX", makeRaw({ subject: "under-reported", body: "x".repeat(3000) }));
+  const small = fake.deliver("INBOX", makeRaw({ subject: "small enough", body: "hello" }));
+  const fetches = [];
+  const adapter = adapterFor(fake, {
+    maxRawBytes: 500,
+    clientFactory: (options) => {
+      const client = new ImapFlow(options);
+      const fetch = client.fetch.bind(client);
+      client.fetch = async function* (range, query, opts) {
+        const body = Boolean(query && query.source === true);
+        fetches.push({ range: String(range), body });
+        for await (const message of fetch(range, query, opts)) {
+          // The metadata answer names a size far below the message the server then sends.
+          if (query && query.size === true && message.uid === big) yield { ...message, size: 12 };
+          else yield message;
+        }
+      };
+      return client;
+    },
+  });
+  try {
+    await adapter.connect();
+    const messages = await adapter.get("INBOX", [big, small]);
+    assert.equal(messages.length, 2, "both uids are still reported");
+    assert.ok(
+      fetches.some((call) => call.body && rangeHas(call.range, big)),
+      "the under-reported body was asked for, so the drop happened after it arrived",
+    );
+    const oversized = messages.find((message) => message.uid === big);
+    assert.equal(oversized.raw.length, 0, "the larger-than-reported body is dropped, not kept");
+    assert.equal(typeof oversized.internalDate, "number", "its metadata still comes through");
+    const kept = messages.find((message) => message.uid === small);
+    assert.match(kept.raw.toString("utf8"), /small enough/);
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("get stops at its byte budget, leaves the rest absent, and returns them in the next call", async () => {
+  const fake = await startFake();
+  const raw = makeRaw({ subject: "budgeted", body: "y".repeat(300) });
+  const rawSize = Buffer.byteLength(raw);
+  const uids = [];
+  for (let index = 0; index < 8; index += 1) uids.push(fake.deliver("INBOX", raw));
+  const adapter = adapterFor(fake, { maxRawBytes: rawSize + 10 });
+  try {
+    await adapter.connect();
+    const first = await adapter.get("INBOX", uids);
+    assert.ok(first.length >= 1 && first.length < uids.length, `one call stops part way (${first.length})`);
+    assert.ok(first.every((message) => message.raw.length > 0), "every reported message carries its bytes");
+    const reported = new Set(first.map((message) => message.uid));
+    const rest = uids.filter((uid) => !reported.has(uid));
+    assert.ok(rest.length > 0, "the rest of the uids is absent from the result");
+    assert.deepEqual(
+      first.map((message) => message.uid),
+      uids.slice(0, first.length),
+      "the budget stops in uid order",
+    );
+
+    const second = await adapter.get("INBOX", rest);
+    assert.deepEqual(second.map((message) => message.uid), rest, "the next call fetches what was left");
+    assert.ok(second.every((message) => message.raw.length > 0));
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+/* --------------------------------------------------------------------- uid bookkeeping */
+
+test("list drops a row whose uid is not a safe integer, and uidNext never becomes NaN", async () => {
+  const fake = await startFake();
+  fake.deliver("INBOX", makeRaw({ subject: "one" }));
+  fake.deliver("INBOX", makeRaw({ subject: "two" }));
+  const adapter = adapterFor(fake, {
+    clientFactory: (options) => {
+      const client = new ImapFlow(options);
+      const openLock = client.getMailboxLock.bind(client);
+      client.getMailboxLock = async (path, lockOptions) => {
+        const lock = await openLock(path, lockOptions);
+        if (client.mailbox) client.mailbox.uidNext = undefined;
+        return lock;
+      };
+      client.status = async (path) => ({ path, messages: 2 });
+      const fetch = client.fetch.bind(client);
+      client.fetch = async function* (range, query, opts) {
+        for await (const message of fetch(range, query, opts)) yield message;
+        if (query && query.uid === true && query.size === true) {
+          // A row that names no message: no usable uid, so nothing may store it or derive uidNext.
+          yield { uid: Number.NaN, flags: [], internalDate: new Date(0), size: 1 };
+        }
+      };
+      return client;
+    },
+  });
+  try {
+    await adapter.connect();
+    const listing = await adapter.list("INBOX");
+    assert.deepEqual(listing.items.map((item) => item.uid), [1, 2], "only rows with a usable uid are listed");
+    assert.ok(listing.items.every((item) => Number.isSafeInteger(item.uid)));
+    assert.equal(listing.uidNext, 3, "the guessed uidNext skips the unusable row");
+    assert.ok(Number.isSafeInteger(listing.uidNext), "uidNext is a safe integer, never NaN");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("a very large listing still yields a uidNext instead of exhausting the argument list", async () => {
+  const MANY = 200_000;
+  const adapter = createImapSmtpAdapter({
+    account: accountFor({ host: "127.0.0.1", port: 143 }),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts: FAST,
+    clientFactory: () => stubClient({
+      search: async () => Array.from({ length: MANY }, (_, index) => index + 1),
+      fetch: async function* (range) {
+        for (const part of String(range).split(",")) {
+          const uid = Number(part);
+          if (!Number.isSafeInteger(uid)) continue;
+          yield { uid, flags: [], internalDate: new Date(0), size: 10 };
+        }
+      },
+    }),
+  });
+  try {
+    await adapter.connect();
+    const listing = await adapter.list("INBOX");
+    assert.equal(listing.items.length, MANY);
+    assert.equal(listing.uidNext, MANY + 1);
+  } finally {
+    await adapter.close();
+  }
+});
+
+/* ------------------------------------------------------------- names Crow will not command */
+
+test("listFolders and a cross-folder search skip a name carrying a control character", async () => {
+  const fake = await startFake({ mailboxes: ["INBOX", "Odd"] });
+  fake.deliver("INBOX", makeRaw({ subject: "findme", body: "wombat" }));
+  const locks = [];
+  const listed = [
+    { path: "INBOX", name: "INBOX", specialUse: null, delimiter: "/", flags: new Set(["\\HasNoChildren"]) },
+    {
+      path: "Evil\r\nA9 LOGOUT",
+      name: "Evil",
+      specialUse: null,
+      delimiter: "/",
+      flags: new Set(["\\HasNoChildren"]),
+    },
+    { path: "Odd", name: "Odd", specialUse: "\u0001\\Sent", delimiter: "/", flags: new Set(["\\HasNoChildren"]) },
+  ];
+  const adapter = adapterFor(fake, {
+    clientFactory: (options) => {
+      const client = new ImapFlow(options);
+      client.list = async () => listed;
+      const openLock = client.getMailboxLock.bind(client);
+      client.getMailboxLock = async (path, lockOptions) => {
+        locks.push(path);
+        return openLock(path, lockOptions);
+      };
+      return client;
+    },
+  });
+  try {
+    await adapter.connect();
+    const folders = await adapter.listFolders();
+    assert.deepEqual(folders.map((folder) => folder.path), ["INBOX"], "only selectable names are reported");
+    assert.deepEqual(
+      await adapter.search("wombat"),
+      [{ folderPath: "INBOX", uid: 1 }],
+      "the search looks at the folders it can name",
+    );
+    assert.deepEqual(locks, ["INBOX", "Odd"], "no command ran for the path with a control character");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("get asks for a uid once even when the caller repeats it", async () => {
+  const fake = await startFake();
+  const one = fake.deliver("INBOX", makeRaw({ subject: "one" }));
+  const fetches = [];
+  const adapter = adapterFor(fake, { clientFactory: recordingClientFactory(fetches) });
+  try {
+    await adapter.connect();
+    const messages = await adapter.get("INBOX", [one, one, one]);
+    assert.equal(messages.length, 1);
+    assert.ok(fetches.length > 0);
+    assert.ok(fetches.every((call) => call.range === String(one)), "the repeated uid is named once");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+/* --------------------------------------------------------- close() during an in-flight call */
+
+function slowStubClient(record) {
+  const stub = {
+    closed: 0,
+    usable: false,
+    on() {},
+    async connect() {
+      await tick(80);
+      stub.usable = true;
+    },
+    close() {
+      stub.closed += 1;
+      stub.usable = false;
+    },
+  };
+  record.push(stub);
+  return stub;
+}
+
+test("close() during a slow connect leaves no unhandled rejection and no open client", async () => {
+  const clients = [];
+  const adapter = createImapSmtpAdapter({
+    account: accountFor({ host: "127.0.0.1", port: 143 }),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts: FAST,
+    clientFactory: () => slowStubClient(clients),
+  });
+  const unhandled = [];
+  const spy = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", spy);
+  let settling;
+  try {
+    settling = rejectionOf(adapter.connect());
+    await tick(15);
+    assert.equal(clients[0].closed, 0, "the connect is still in flight when close() runs");
+    await adapter.close();
+    const err = await settling;
+    assert.ok(err instanceof MailError, `the abandoned connect rejects a MailError, got ${err && err.name}`);
+    assert.equal(err.code, "NETWORK");
+    await tick(30);
+    assert.deepEqual(unhandled, [], "close() left no unhandled rejection behind");
+    assert.ok(clients[0].closed >= 1, "the client that finished connecting was closed");
+    assert.equal(clients[0].usable, false, "no open client is left behind");
+  } finally {
+    process.off("unhandledRejection", spy);
+    await adapter.close();
+  }
+});
+
+test("close() during a watch's in-flight connect closes that client as soon as it connects", async () => {
+  const clients = [];
+  const adapter = createImapSmtpAdapter({
+    account: accountFor({ host: "127.0.0.1", port: 143 }),
+    credentials: passwordCredentials(FAKE_PASSWORD),
+    timeouts: FAST,
+    clientFactory: () => slowStubClient(clients),
+  });
+  try {
+    const watching = adapter.watch(["INBOX"], { onChange() {}, onError() {} });
+    await tick(15);
+    await adapter.close();
+    const handle = await watching;
+    assert.equal(typeof handle.stop, "function");
+    assert.equal(clients.length, 1);
+    assert.ok(clients[0].closed >= 1, "the watch's client did not stay open after close()");
+    assert.equal(clients[0].usable, false);
+    handle.stop();
+  } finally {
+    await adapter.close();
   }
 });

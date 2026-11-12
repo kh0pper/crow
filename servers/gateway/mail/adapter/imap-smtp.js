@@ -9,7 +9,9 @@
  * - **TLS is never negotiable.** `tls.rejectUnauthorized` is `true` on every connection and nothing
  *   in the account row can change it; `ssl` means implicit TLS and `starttls` means `doSTARTTLS: true`,
  *   so a stripped STARTTLS capability aborts the connection instead of sending the password in
- *   cleartext. `none` is only what the account store already allows for a server on this machine.
+ *   cleartext. `none` is only what the account store already allows for a server on this machine, and
+ *   this module checks that itself: a cleartext sign-in to any host that is not loopback is refused
+ *   before a socket exists.
  * - **Nothing is logged.** `logger: false` and `emitLogs: false`, and this module has no console call
  *   of its own, so a credential cannot reach a log even by accident.
  * - **Every connection has an `error` listener before `connect()`.** imapflow emits `error` when a
@@ -24,7 +26,9 @@
  *   BAD_INPUT rather than a silent extra TLS session.
  * - **Every failure is a fixed sentence.** A library or socket error becomes a MailError through the
  *   shared classifier, so imapflow's `response`, `command` and `message` — which quote the server and
- *   the username — never travel. imapflow's own `*_TIMEOUT` codes are TIMEOUT rather than PROTOCOL.
+ *   the username — never travel. imapflow's own `*_TIMEOUT` codes are TIMEOUT rather than PROTOCOL, a
+ *   mailbox the server says does not exist is NOT_FOUND, and every command path runs its rejection
+ *   through the same wrapper so no raw library error can escape from a listing, a fetch or a search.
  *   One fault is deliberately not a MailError: a keychain key that is not on this machine
  *   (`KEYCHAIN_KEY_MISSING`) travels unchanged, because it is the key's fault rather than a bad
  *   password, and reporting it as AUTH_FAILED would send the owner to reset a working password.
@@ -75,6 +79,21 @@ const CLOSE_TIMEOUT_MS = 2000;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const SECURITIES = new Set(["ssl", "starttls", "none"]);
 
+/** The only hosts a cleartext (`security: "none"`) sign-in may reach: this machine, and only it. */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "[::1]", "localhost"]);
+
+/** Headroom above `maxRawBytes` for one IMAP literal, so a message at the cap still fits its framing. */
+const LITERAL_HEADROOM = 1024 * 1024;
+
+/** A response line longer than this is a server that never sent a line terminator. */
+const MAX_LINE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * One `get()` call downloads at most this many times `maxRawBytes` of raw data. The engine batches,
+ * so a call that would exceed it reports the rest in a later call rather than holding them all.
+ */
+const GET_BUDGET_FACTOR = 4;
+
 /** imapflow's own timeout codes, which the shared classifier does not know by name. */
 const IMAP_TIMEOUT_CODES = new Set(["CONNECT_TIMEOUT", "GREETING_TIMEOUT", "UPGRADE_TIMEOUT"]);
 
@@ -87,13 +106,42 @@ const SOURCE_QUERY = Object.freeze({ uid: true, source: true });
 /* ------------------------------------------------------------------------------ helpers */
 
 /**
+ * The bracketed response code (RFC 3501 `[NONEXISTENT]`) a refusal carries. It is read as one fixed
+ * token out of the parsed reply — the reply's free text is never touched — so nothing of the server's
+ * sentence can ride along with it.
+ */
+function responseCodeOf(err) {
+  if (err == null || typeof err !== "object") return "";
+  if (typeof err.responseCode === "string" && err.responseCode.trim()) {
+    return err.responseCode.trim().toUpperCase();
+  }
+  const response = err.response;
+  const section = response != null && typeof response === "object" && response.attributes &&
+    response.attributes[0] && response.attributes[0].section;
+  const value = section && section[0] && typeof section[0].value === "string" ? section[0].value : "";
+  return value.trim().toUpperCase();
+}
+
+/** A mailbox that is not there: imapflow marks it on the SELECT failure, or the server named it. */
+function isMissingMailbox(err) {
+  if (err == null || typeof err !== "object") return false;
+  return err.mailboxMissing === true || responseCodeOf(err) === "NONEXISTENT";
+}
+
+/**
  * A library error as a MailError, except two cases that must keep their meaning: a MailError passes
  * through, and a missing keychain key is the key's fault rather than the server's. imapflow's
- * `*_TIMEOUT` codes are the socket and greeting deadlines, so they are TIMEOUT and not PROTOCOL.
+ * `*_TIMEOUT` codes are the socket and greeting deadlines, so they are TIMEOUT and not PROTOCOL; a
+ * refused mailbox is NOT_FOUND rather than PROTOCOL, so the caller can say the folder is gone; a
+ * STARTTLS upgrade that could not happen is TLS, because that is the protection it lost.
  */
 function asMailError(err) {
   if (err instanceof MailError) return err;
   if (err != null && typeof err === "object" && err.code === KEYCHAIN_KEY_MISSING) return err;
+  if (isMissingMailbox(err)) return new MailError("NOT_FOUND");
+  if (err != null && typeof err === "object" && err.tlsFailed === true) {
+    return new MailError("TLS", err.code);
+  }
   if (err != null && typeof err === "object" && IMAP_TIMEOUT_CODES.has(err.code)) {
     return new MailError("TIMEOUT", err.code);
   }
@@ -146,10 +194,31 @@ function normalizeTimeouts(overrides) {
   return timeouts;
 }
 
-function requireFolderPath(value, detail = "folder") {
-  if (typeof value !== "string") throw new MailError("BAD_INPUT", detail);
+/**
+ * A path Crow will run a command for, or `null` when the value is not one: empty, oversized, or
+ * carrying a control character no folder name has. A server that lists such a name offers nothing
+ * Crow can select, so the caller skips it instead of quoting it into a command.
+ */
+function safeFolderPath(value) {
+  if (typeof value !== "string") return null;
   const path = value.trim();
-  if (!path || path.length > 1024 || CONTROL_CHARS.test(path)) throw new MailError("BAD_INPUT", detail);
+  if (!path || path.length > 1024 || CONTROL_CHARS.test(path)) return null;
+  return path;
+}
+
+/**
+ * The same rule for a name the server itself listed, without the trim a caller's argument gets: the
+ * name has to be used exactly as the server wrote it, or the next command selects another mailbox.
+ */
+function listedFolderPath(value) {
+  if (typeof value !== "string") return null;
+  if (!value || value.length > 1024 || CONTROL_CHARS.test(value)) return null;
+  return value;
+}
+
+function requireFolderPath(value, detail = "folder") {
+  const path = safeFolderPath(value);
+  if (path == null) throw new MailError("BAD_INPUT", detail);
   return path;
 }
 
@@ -232,10 +301,13 @@ function requireSearchQuery(value) {
 
 function requireUidList(value) {
   if (!Array.isArray(value)) throw new MailError("BAD_INPUT", "uids");
+  const seen = new Set();
   const uids = [];
   for (const entry of value) {
     if (!Number.isSafeInteger(entry) || entry < 1) throw new MailError("BAD_INPUT", "uids");
-    if (!uids.includes(entry)) uids.push(entry);
+    if (seen.has(entry)) continue;
+    seen.add(entry);
+    uids.push(entry);
   }
   return uids;
 }
@@ -304,7 +376,8 @@ export function createImapSmtpAdapter(options = {}) {
   /**
    * The imapflow options for one sign-in. TLS validation is fixed here and cannot be influenced by the
    * account row: `ssl` is implicit TLS, `starttls` refuses to continue without the upgrade, and both
-   * carry `rejectUnauthorized: true`.
+   * carry `rejectUnauthorized: true`. A cleartext sign-in is refused for every host but this machine's
+   * loopback, before a socket is opened.
    */
   function clientOptions(auth) {
     const endpoint = account.imap;
@@ -313,6 +386,16 @@ export function createImapSmtpAdapter(options = {}) {
     if (typeof host !== "string" || !host) throw new MailError("BAD_INPUT", "imap_host");
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new MailError("BAD_INPUT", "imap_port");
     if (!SECURITIES.has(security)) throw new MailError("BAD_INPUT", "imap_security");
+    if (security === "none" && !LOOPBACK_HOSTS.has(host.trim().toLowerCase())) {
+      // No TLS here, so the password would travel in the clear: only a loopback address, where there
+      // is no wire to listen on, may be reached this way.
+      throw new MailError("BAD_INPUT", "imap_security");
+    }
+
+    // The parser's own bounds, so a server cannot make Crow buffer what Crow would never keep: one
+    // literal sits at the raw cap plus the framing headroom, one response total sits above the
+    // literal cap (as the parser documents), and a line without a terminator is stopped a few MiB in.
+    const maxLiteralSize = rawLimit + LITERAL_HEADROOM;
 
     const options_ = {
       host,
@@ -328,6 +411,9 @@ export function createImapSmtpAdapter(options = {}) {
       connectionTimeout: timeouts.connectMs,
       greetingTimeout: timeouts.greetingMs,
       socketTimeout: timeouts.socketMs,
+      maxLiteralSize,
+      maxResponseSize: maxLiteralSize + LITERAL_HEADROOM,
+      maxLineLength: MAX_LINE_BYTES,
     };
     if (security === "starttls") options_.doSTARTTLS = true;
     if (security === "none") options_.doSTARTTLS = false;
@@ -352,13 +438,18 @@ export function createImapSmtpAdapter(options = {}) {
           tokenProvider,
           forceRefresh: retried,
           rotation: typeof onTokenRotated === "function"
-            ? async (accountId, { refreshToken } = {}) => { onTokenRotated(refreshToken); }
+            // The writer is awaited: a writer that rejects is caught by authFor (which reports it as
+            // `rotationFailed`) instead of escaping as an unhandled rejection of a dropped promise.
+            ? async (accountId, { refreshToken } = {}) => { await onTokenRotated(refreshToken); }
             : undefined,
         });
       } catch (err) {
         throw asMailError(err);
       }
 
+      // authFor reports a failed rotation write as `rotationFailed` rather than throwing, because the
+      // access token in hand is the one this connection signs in with. The sign-in therefore goes
+      // ahead, and the writer's own failure text is never read, kept or reported here.
       const connectOptions = clientOptions(auth);
       let client;
       try {
@@ -434,19 +525,28 @@ export function createImapSmtpAdapter(options = {}) {
     }
   }
 
-  /** One command group on the read connection, under the command deadline. */
+  /**
+   * One command group on the read connection, under the command deadline. Every rejection leaves as a
+   * MailError: a listing, a fetch or a search that fails reports a fixed sentence and an allow-listed
+   * code, never the library error — whose `response`, `responseText` and `executedCommand` quote the
+   * server and the command line.
+   */
   async function runCommand(work) {
-    const state = await readConnection();
-    if (state.dead) throw state.dead;
-    return withDeadline(
-      () => work(state.client, state),
-      timeouts.commandMs,
-      () => {
-        state.dead = state.dead ?? new MailError("TIMEOUT", "command_deadline");
-        safeClose(state.client);
-      },
-      "command_deadline",
-    );
+    try {
+      const state = await readConnection();
+      if (state.dead) throw state.dead;
+      return await withDeadline(
+        () => work(state.client, state),
+        timeouts.commandMs,
+        () => {
+          state.dead = state.dead ?? new MailError("TIMEOUT", "command_deadline");
+          safeClose(state.client);
+        },
+        "command_deadline",
+      );
+    } catch (err) {
+      throw asMailError(err);
+    }
   }
 
   /** The UIDNEXT of the open mailbox, from the SELECT, then STATUS, then the highest UID seen. */
@@ -463,7 +563,12 @@ export function createImapSmtpAdapter(options = {}) {
     }
     const fromStatus = Number(status && status.uidNext);
     if (Number.isSafeInteger(fromStatus) && fromStatus > 0) return fromStatus;
-    const highest = seenUids.length ? Math.max(...seenUids) : 0;
+    // A loop rather than `Math.max(...seenUids)`: a large mailbox would spread the whole array into
+    // the argument list, and a uid that is not a safe integer must not turn the answer into NaN.
+    let highest = 0;
+    for (const uid of seenUids) {
+      if (Number.isSafeInteger(uid) && uid > highest) highest = uid;
+    }
     return highest + 1;
   }
 
@@ -487,9 +592,14 @@ export function createImapSmtpAdapter(options = {}) {
         // a watcher that is already gone needs no second stop
       }
     }
+    // A connect that is still in flight owns a socket no other path can reach yet. It closes that
+    // socket itself the moment it settles (the `closed` check in readConnection), and its rejection is
+    // handled here so a close() during a connect leaves no unhandled promise behind.
+    const connecting = readConnecting;
+    readConnecting = null;
+    if (connecting) connecting.catch(() => {});
     const state = readState;
     readState = null;
-    readConnecting = null;
     if (!state || !state.client) return;
     try {
       await withDeadline(
@@ -503,18 +613,31 @@ export function createImapSmtpAdapter(options = {}) {
     }
   }
 
-  /** @returns {Promise<AdapterFolder[]>} */
+  /**
+   * Every folder the server lists, minus the names Crow will not run a command for: a path carrying a
+   * control character is skipped rather than reported and later quoted into a SELECT.
+   *
+   * @returns {Promise<AdapterFolder[]>}
+   */
   async function listFolders() {
     return runCommand(async (client) => {
       const entries = await client.list();
       if (!Array.isArray(entries)) throw new MailError("PROTOCOL", "list");
-      return entries.map((entry) => ({
-        path: String(entry.path),
-        name: typeof entry.name === "string" ? entry.name : String(entry.path),
-        specialUse: entry.specialUse ?? null,
-        delimiter: typeof entry.delimiter === "string" ? entry.delimiter : "/",
-        selectable: isSelectable(entry),
-      }));
+      const folders = [];
+      for (const entry of entries) {
+        const path = listedFolderPath(entry.path);
+        if (path == null) continue;
+        const specialUse = entry.specialUse ?? null;
+        if (specialUse != null && (typeof specialUse !== "string" || CONTROL_CHARS.test(specialUse))) continue;
+        folders.push({
+          path,
+          name: typeof entry.name === "string" ? entry.name : path,
+          specialUse,
+          delimiter: typeof entry.delimiter === "string" ? entry.delimiter : "/",
+          selectable: isSelectable(entry),
+        });
+      }
+      return folders;
     });
   }
 
@@ -553,7 +676,11 @@ export function createImapSmtpAdapter(options = {}) {
         const items = [];
         for (const chunk of chunks(uids, FETCH_CHUNK)) {
           for await (const message of client.fetch(chunk.join(","), META_QUERY, { uid: true })) {
-            items.push(toItem(message));
+            const item = toItem(message);
+            // A row whose UID is not a positive safe integer names no message Crow could store or ask
+            // for again, so it is dropped here and never reaches `uidNext` or the caller.
+            if (!Number.isSafeInteger(item.uid) || item.uid < 1) continue;
+            items.push(item);
           }
         }
 
@@ -585,7 +712,13 @@ export function createImapSmtpAdapter(options = {}) {
   /**
    * The raw bytes of the UIDs the caller asked for. A UID the mailbox does not have is absent; a
    * message above `maxRawBytes` is reported with its metadata and an empty Buffer, so the engine can
-   * store a `too_large` row without Crow ever holding the bytes.
+   * store a `too_large` row without Crow ever holding the bytes. That covers both a message the server
+   * *reported* above the limit (its body is never asked for) and one that arrives larger than the size
+   * the server gave (the bytes are dropped as they arrive).
+   *
+   * One call downloads at most `GET_BUDGET_FACTOR × maxRawBytes` of raw data. A UID that does not fit
+   * that budget is **absent from the result** — not reported with an empty Buffer, so it cannot be
+   * mistaken for an oversized message — and the caller asks for it again in a later call.
    *
    * @param {string} folderPath
    * @param {number[]} uids
@@ -595,6 +728,7 @@ export function createImapSmtpAdapter(options = {}) {
     const path = requireFolderPath(folderPath);
     const wanted = requireUidList(uids);
     if (wanted.length === 0) return [];
+    const budget = rawLimit * GET_BUDGET_FACTOR;
     return runCommand(async (client) => {
       const lock = await client.getMailboxLock(path);
       try {
@@ -602,31 +736,67 @@ export function createImapSmtpAdapter(options = {}) {
         for (const chunk of chunks(wanted, FETCH_CHUNK)) {
           for await (const message of client.fetch(chunk.join(","), META_QUERY, { uid: true })) {
             const item = toItem(message);
-            if (Number.isSafeInteger(item.uid)) meta.set(item.uid, item);
+            if (!Number.isSafeInteger(item.uid) || item.uid < 1) continue;
+            meta.set(item.uid, item);
           }
         }
 
-        const wantedSources = [...meta.values()]
+        // Ask only for the bodies the reported sizes say fit this call's budget, in UID order; a
+        // server that under-reports is caught below, on the bytes that actually arrived.
+        const candidates = [...meta.values()]
           .filter((item) => item.size <= rawLimit)
-          .map((item) => item.uid)
-          .sort((left, right) => left - right);
-        const sources = new Map();
-        for (const chunk of chunks(wantedSources, FETCH_CHUNK)) {
+          .sort((left, right) => left.uid - right.uid);
+        const attempts = [];
+        let planned = 0;
+        for (const item of candidates) {
+          if (planned + item.size > budget) break;
+          attempts.push(item.uid);
+          planned += item.size;
+        }
+        const attempted = new Set(attempts);
+        const absent = new Set(candidates.filter((item) => !attempted.has(item.uid)).map((item) => item.uid));
+
+        const raws = new Map();
+        let used = 0;
+        let stoppedAt = null;
+        download: for (const chunk of chunks(attempts, FETCH_CHUNK)) {
           for await (const message of client.fetch(chunk.join(","), SOURCE_QUERY, { uid: true })) {
             const uid = Number(message.uid);
-            if (!Number.isSafeInteger(uid)) continue;
-            sources.set(uid, Buffer.isBuffer(message.source) ? message.source : Buffer.alloc(0));
+            if (!meta.has(uid)) continue;
+            const source = Buffer.isBuffer(message.source) ? message.source : Buffer.alloc(0);
+            if (source.length > rawLimit) {
+              // The server's reported size was below the real one: the bytes are dropped here and the
+              // message is reported as oversized, exactly like one the server admitted to.
+              raws.set(uid, Buffer.alloc(0));
+              continue;
+            }
+            if (used + source.length > budget) {
+              // This body would take the call past its budget: it and every larger UID are left out,
+              // so the caller asks for them again rather than Crow holding them in this call.
+              stoppedAt = uid;
+              break download;
+            }
+            used += source.length;
+            raws.set(uid, source);
+          }
+        }
+        if (stoppedAt != null) {
+          for (const uid of attempts) {
+            if (uid >= stoppedAt && !raws.has(uid)) absent.add(uid);
           }
         }
 
-        return [...meta.values()]
-          .sort((left, right) => left.uid - right.uid)
-          .map((item) => ({
+        const messages = [];
+        for (const item of [...meta.values()].sort((left, right) => left.uid - right.uid)) {
+          if (absent.has(item.uid)) continue;
+          messages.push({
             uid: item.uid,
             flags: item.flags,
             internalDate: item.internalDate,
-            raw: sources.get(item.uid) ?? Buffer.alloc(0),
-          }));
+            raw: raws.get(item.uid) ?? Buffer.alloc(0),
+          });
+        }
+        return messages;
       } finally {
         lock.release();
       }
@@ -654,7 +824,14 @@ export function createImapSmtpAdapter(options = {}) {
       } else {
         const entries = await client.list();
         if (!Array.isArray(entries)) throw new MailError("PROTOCOL", "list");
-        paths = entries.filter(isSelectable).map((entry) => String(entry.path));
+        paths = [];
+        for (const entry of entries) {
+          if (!isSelectable(entry)) continue;
+          // A listed name with a control character is not one Crow selects; it is skipped rather than
+          // quoted into a command, the same rule `listFolders` applies to what it reports.
+          const listed = listedFolderPath(entry.path);
+          if (listed != null) paths.push(listed);
+        }
       }
 
       const hits = [];
