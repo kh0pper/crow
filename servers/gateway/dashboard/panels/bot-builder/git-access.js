@@ -22,8 +22,10 @@
  * fail-closed: no key dir is made, and the page says why.
  *
  * Operator ruling R13 (2026-11-12) is ACCEPTED for v1: every bot on this Crow
- * runs as the same Linux account, so a bot with a shell could, with effort,
- * reach another git-enabled bot's key through /proc. The card says so plainly,
+ * runs as the same Linux account, so one bot could, with effort, reach another
+ * bot's files — its key dir, or git hooks and config it planted for it — even
+ * though the sandbox's own pid namespace keeps it from seeing the other bot's
+ * processes. The card says so plainly,
  * above the key, before the owner adds it to a repo. The separate per-bot
  * users are a queued follow-up, not a promise made here.
  *
@@ -68,7 +70,7 @@ import { gitconfigText, noReplyEmail } from "../../../../shared/bot-git/identity
 import { botGitDirReal, gitAllowedForInstance, isSafeKeyPath, isValidGitBotId } from "../../../../shared/bot-git/paths.js";
 import { keyscan, testConnection } from "../../../../shared/bot-git/ssh.js";
 import {
-  addConfirmedHost, botKeyStatus, generateBotKey, removeBotKey, removeConfirmedHost, sshToolsAvailable,
+  addConfirmedHost, botKeyDirPresent, botKeyStatus, generateBotKey, removeBotKey, removeConfirmedHost, sshToolsAvailable,
 } from "../../../../shared/bot-git/store.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
 import { countEnabledPiBots } from "../../../../../scripts/pi-bots/bot_git_spawn.mjs";
@@ -355,7 +357,14 @@ function noticeHtml(q, lang) {
     return `<p class="btb-notice-ok" role="status" data-testid="git-notice">${escapeHtml(text)}</p>`;
   }
   if (q && q.git === "on") {
-    return `<p class="btb-notice-ok" role="status" data-testid="git-notice">${escapeHtml(t("botbuilder.gitOnNotice", lang))}</p>`;
+    // Turning git on over a stale key dir replaced the old key. The `fp` query
+    // and the FINGERPRINT_RE check are the ones the off action uses; the
+    // sentence is its own, because the off one would claim git is off.
+    const fp = typeof q.fp === "string" && FINGERPRINT_RE.test(q.fp) ? q.fp : null;
+    const text = fp
+      ? t("botbuilder.gitOnNotice", lang) + " " + fill(t("botbuilder.gitReplacedNotice", lang), { fp })
+      : t("botbuilder.gitOnNotice", lang);
+    return `<p class="btb-notice-ok" role="status" data-testid="git-notice">${escapeHtml(text)}</p>`;
   }
   if (q && q.git === "host_added") {
     return `<p class="btb-notice-ok" role="status" data-testid="git-notice">${escapeHtml(t("botbuilder.gitHostAddedNotice", lang))}</p>`;
@@ -535,6 +544,14 @@ export async function renderGitAccessCard(ctx = {}) {
     const state = st.state;
     if (state === "unknown") return "";
     const status = st.status || { on: false };
+    // A key dir that exists but is not usable here — a missing `.pub`, an
+    // unusable `meta.json` — is not "on", but it IS the owner's to clear: the
+    // card offers Turn off for it and says the folder is damaged. The same goes
+    // for a usable dir left by an earlier bot with the same recycled id (state
+    // "off", status on). A symlink or another user's dir is not a key dir this
+    // Crow may remove, so it is not counted (removal keeps refusing those).
+    const keyDirPresent = botKeyDirPresent(id);
+    const damagedKeyDir = !status.on && keyDirPresent;
     const owner = await isOwner(db, req);
     const ownerOnly = owner ? "" : `<p class="btb-hint btb-warn" data-testid="git-owner-only">` +
       `${escapeHtml(t("botbuilder.gitOwnerOnly", lang))}</p>`;
@@ -553,7 +570,7 @@ export async function renderGitAccessCard(ctx = {}) {
         const scan = liveNonce(scanStore, q.git_scan, id, SCAN_TTL_MS);
         if (scan) body.push(scanBlock({ scan, nonce: q.git_scan, req, botId: id, lang }));
       }
-      if (q && typeof q.git_test === "string") {
+      if (q && typeof q.git_test === "string" && owner) {
         const tested = liveNonce(testStore, q.git_test, id, TEST_TTL_MS);
         if (tested) body.push(testBlock({ result: tested.result, excerpt: tested.excerpt, lang }));
       }
@@ -568,15 +585,28 @@ export async function renderGitAccessCard(ctx = {}) {
         `${escapeHtml(t("botbuilder.gitR13Warn", lang))}</p>`);
       body.push(`<p class="btb-hint" data-testid="git-identity">` +
         `${escapeHtml(fill(t("botbuilder.gitIdentity", lang), { name: ident.name + " (Crow bot)", email: ident.email }))}</p>`);
-      body.push(owner ? gitForm(req, id, "git_on", button("botbuilder.gitTurnOn", lang)) : ownerOnly);
+      if (damagedKeyDir) {
+        body.push(`<p class="btb-hint btb-warn" data-testid="git-damaged">` +
+          `${escapeHtml(t("botbuilder.gitKeyDamaged", lang))}</p>`);
+      }
+      if (!owner) body.push(ownerOnly);
+      else {
+        // A damaged folder is offered for removal FIRST: Turn on cannot replace
+        // it (the store refuses a dir that is not provably stale), so the owner
+        // clears it, then turns git on.
+        if (keyDirPresent) body.push(gitForm(req, id, "git_off", button("botbuilder.gitTurnOff", lang, "btb-btn btb-btn-sm btb-btn-danger")));
+        body.push(gitForm(req, id, "git_on", button("botbuilder.gitTurnOn", lang)));
+      }
     } else {
       // A blocked state: the sentence says why, and a key that exists anyway
       // is marked inactive and can still be turned OFF (removal needs none of
       // what is missing here).
       body.push(`<p class="btb-hint" data-testid="git-state-sentence">${escapeHtml(t(STATE_KEY[state] || "botbuilder.gitNoBwrap", lang))}</p>`);
       if (status.on) body.push(`<p class="btb-hint btb-warn" data-testid="git-inactive">${escapeHtml(t("botbuilder.gitInactive", lang))}</p>`);
+      if (damagedKeyDir) body.push(`<p class="btb-hint btb-warn" data-testid="git-damaged">` +
+        `${escapeHtml(t("botbuilder.gitKeyDamaged", lang))}</p>`);
       if (owner) {
-        if (status.on) body.push(gitForm(req, id, "git_off", button("botbuilder.gitTurnOff", lang, "btb-btn btb-btn-sm btb-btn-danger")));
+        if (keyDirPresent) body.push(gitForm(req, id, "git_off", button("botbuilder.gitTurnOff", lang, "btb-btn btb-btn-sm btb-btn-danger")));
       } else {
         body.push(ownerOnly);
       }
@@ -643,19 +673,31 @@ export async function handleGitAction(req, res, { db } = {}) {
     const st = await gitAccessState({ db, botId });
     // Every refusal the card can show is re-checked here, from this process.
     if (st.state !== "off") return back("error=" + (STATE_ERROR[st.state] || "git_unsupported"));
+    let made;
     try {
-      generateBotKey({ botId, createdAt: row.created_at });
+      made = generateBotKey({ botId, createdAt: row.created_at });
     } catch {
       return back("error=git_key_failed");
     }
     emitBotDefsChanged(botId);
-    return back("git=on");
+    // A stale key dir was replaced: its own public fingerprint travels in the
+    // same `fp` query the off action uses, so the page can tell the owner which
+    // deploy key on the forge is now dead.
+    const oldFp = made && typeof made.replacedFingerprint === "string" && FINGERPRINT_RE.test(made.replacedFingerprint)
+      ? made.replacedFingerprint
+      : null;
+    return back("git=on" + (oldFp ? "&fp=" + encodeURIComponent(oldFp) : ""));
   }
 
   if (action === "git_off") {
+    // Whether there was anything to remove is read from the DISK, not from the
+    // card's state: a damaged dir (a missing `.pub`, an unusable `meta.json`)
+    // is status.on === false, so a removal that FAILED there would otherwise
+    // redirect git=off while the folder — and the key in it — is still there.
+    const wasPresent = botKeyDirPresent(botId);
     const was = await gitAccessState({ db, botId });
     const r = removeBotKey(botId);
-    if (!r.removed && was.status && was.status.on) return back("error=git_off_failed");
+    if (!r.removed && (wasPresent || (was.status && was.status.on))) return back("error=git_off_failed");
     emitBotDefsChanged(botId);
     const fp = typeof r.fingerprint === "string" && FINGERPRINT_RE.test(r.fingerprint) ? r.fingerprint : null;
     return back("git=off" + (fp ? "&fp=" + encodeURIComponent(fp) : ""));

@@ -17,7 +17,7 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmScratch } from "./helpers/safe-rm.js";
@@ -434,6 +434,78 @@ test("a leftover key dir from an earlier bot with the same id: the card says off
   const meta = JSON.parse(readFileSync(join(keyDir(BOT), "meta.json"), "utf8"));
   assert.equal(meta.created_at, CREATED_AT, "the stale dir was replaced with one for THIS row");
   assert.equal((await G.gitAccessState({ db, botId: BOT })).state, "on");
+  removeKeyDir(BOT);
+});
+
+test("a DAMAGED key dir (no .pub) is named as damaged and can still be turned off", async () => {
+  fabricateKey();
+  rmSync(join(keyDir(BOT), "id_ed25519.pub"));
+  assert.equal(S.botKeyStatus(BOT).on, false, "a dir without its public half is not a usable key");
+  assert.equal((await G.gitAccessState({ db, botId: BOT })).state, "off", "the card cannot claim git is on");
+
+  const html = await G.renderGitAccessCard(ctxOf());
+  assert.match(html, /data-state="off"/);
+  assert.ok(html.includes(translations["botbuilder.gitKeyDamaged"].en), "the damage is said out loud");
+  assert.ok(html.includes(translations["botbuilder.gitTurnOff"].en), "Turn off is offered for a damaged folder");
+  assert.ok(forms(html).some((f) => f.includes('name="action" value="git_off"')), "and it is a real form");
+
+  const res = mkRes();
+  await G.handleGitAction(ownerReq({ action: "git_off", bot_id: BOT }), res, { db });
+  assert.match(res.redirected, /git=off/);
+  assert.ok(!res.redirected.includes("fp="), "a damaged dir has no readable public key to name");
+  assert.ok(!res.redirected.includes("error="), res.redirected);
+  assert.equal(existsSync(keyDir(BOT)), false, "the damaged folder is gone");
+});
+
+test("git_off on a DAMAGED dir whose removal FAILS is an error, never a plain off", {
+  // Staged by a mode root ignores: as root the removal would succeed and the
+  // failure this case is about could not happen.
+  skip: typeof process.getuid === "function" && process.getuid() === 0
+    ? "root can remove a 0500 dir, so the failure cannot be staged"
+    : false,
+}, async () => {
+  // Byte-for-byte the datastore's own report: a damaged dir is status.on ===
+  // false, so a check that only looked at the state could not tell a FAILED
+  // removal from "there was nothing to remove" and redirected git=off while the
+  // folder — and the private key in it — was still on disk.
+  fabricateKey();
+  rmSync(join(keyDir(BOT), "id_ed25519.pub"));
+  assert.equal(S.botKeyStatus(BOT).on, false, "damaged: not a usable key, so the card says off");
+  assert.equal(S.botKeyDirPresent(BOT), true, "but the folder is still there, so Turn off is offered");
+
+  const keyPath = join(keyDir(BOT), "id_ed25519");
+  const keyBefore = readFileSync(keyPath, "utf8");
+  chmodSync(keyDir(BOT), 0o500);            // the children can no longer be unlinked
+  try {
+    const res = mkRes();
+    await G.handleGitAction(ownerReq({ action: "git_off", bot_id: BOT }), res, { db });
+    assert.match(res.redirected, /error=git_off_failed/, res.redirected);
+    assert.ok(!/[?&]git=off/.test(res.redirected), "a failed removal is never reported as off");
+    assert.equal(existsSync(keyPath), true, "the private key is still on disk");
+    assert.equal(readFileSync(keyPath, "utf8"), keyBefore, "and it is untouched");
+  } finally {
+    chmodSync(keyDir(BOT), 0o700);
+  }
+  removeKeyDir(BOT);
+});
+
+test("git_on over a stale key dir surfaces the OLD fingerprint for the forge", { skip: sshKeygen ? false : "no openssh-client on this host" }, async () => {
+  const stale = fabricateKey(BOT, "2025-01-01 00:00:00");
+  const res = mkRes();
+  await G.handleGitAction(ownerReq({ action: "git_on", bot_id: BOT }), res, { db });
+  assert.match(res.redirected, /git=on/, res.redirected);
+  const m = /[?&]fp=([^&]+)/.exec(res.redirected);
+  assert.ok(m, "the redirect carries the old fingerprint: " + res.redirected);
+  assert.equal(decodeURIComponent(m[1]), stale.fingerprint, "the fingerprint of the key that was replaced");
+
+  const after = S.botKeyStatus(BOT);
+  assert.equal(after.on, true, "a fresh key is in place");
+  assert.notEqual(after.fingerprint, stale.fingerprint, "and it is not the old one");
+
+  const notice = await G.renderGitAccessCard(ctxOf({ q: { git: "on", fp: decodeURIComponent(m[1]) } }));
+  assert.ok(notice.includes(translations["botbuilder.gitOnNotice"].en), "git is on");
+  assert.ok(notice.includes(translations["botbuilder.gitReplacedNotice"].en.replace("{fp}", stale.fingerprint)),
+    "and the dead deploy key is named");
   removeKeyDir(BOT);
 });
 

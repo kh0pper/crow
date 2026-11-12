@@ -415,8 +415,12 @@ test("generateBotKey replaces a key dir made for ANOTHER bot row, and only that 
 
   // A recreated bot with the same recycled id: the leftover dir carries another
   // row's created_at, so no spawn would use it (the spawn side refuses the
-  // mismatch on its own) — it is housekeeping, and it is replaced.
-  generate(id, recreatedAt);
+  // mismatch on its own) — it is housekeeping, and it is replaced. The old
+  // public fingerprint comes back, so the owner can be told which deploy key on
+  // the forge is now dead.
+  const oldFp = S.botKeyStatus(id).fingerprint;
+  const made = generate(id, recreatedAt);
+  assert.equal(made.replacedFingerprint, oldFp, "the replaced dir's own fingerprint is reported");
   const meta = JSON.parse(readFileSync(join(keyDir(id), "meta.json"), "utf8"));
   assert.equal(meta.created_at, recreatedAt, "the stale dir was replaced with one for THIS row");
   assert.equal(meta.bot_id, id);
@@ -426,6 +430,11 @@ test("generateBotKey replaces a key dir made for ANOTHER bot row, and only that 
   // be established and the plain refusal stays (fail closed).
   assert.throws(() => generate(id, null), /already exists/);
   assert.throws(() => generate(id, ""), /already exists/);
+
+  // A fresh key never reports a replaced fingerprint.
+  const plain = generate("fresh-fp");
+  assert.equal(plain.replacedFingerprint, null);
+  S.removeBotKey("fresh-fp");            // leave no extra key dir for the sweep tests
 
   // A key dir with no usable meta.json belongs to no row at all, so it is stale
   // for a caller that does know its row.
@@ -530,6 +539,37 @@ test("runBotGitOrphanSweep (boot): a DB error or a bad row shape removes nothing
   } finally {
     process.env.CROW_HOME = prevHome;
   }
+});
+
+test("runBotGitOrphanSweep (boot): a successful read that lists ZERO bots removes nothing", async () => {
+  const { runBotGitOrphanSweep } = await import("../servers/gateway/boot/post-listen.js");
+  generate("boot-zero");
+  const kept = keyDir("boot-zero");
+  assert.equal(existsSync(kept), true);
+
+  // A fresh or re-initialised crow.db, or a dev gateway pointed at another
+  // CROW_DB_PATH, answers zero rows while the key store on disk belongs to the
+  // real one: an empty list must never be read as "no bots exist".
+  assert.equal(await runBotGitOrphanSweep(() => ({ execute: async () => ({ rows: [] }), close() {} })), 0);
+  assert.equal(existsSync(kept), true, "an empty bot list removes nothing");
+  rmSync(kept, { recursive: true, force: true });
+});
+
+test("runBotGitOrphanSweep (boot): a list whose only row is the voice bot removes nothing", async () => {
+  const { runBotGitOrphanSweep } = await import("../servers/gateway/boot/post-listen.js");
+  const { CROW_VOICE_BOT_ID } = await import("../servers/shared/voice-bot.js");
+  generate("boot-voice-kept");
+  const kept = keyDir("boot-voice-kept");
+  assert.equal(existsSync(kept), true);
+
+  // ensureVoiceBot seeds crow.voice into a fresh DB at boot, BEFORE this sweep
+  // runs, so a DB with nothing else in it answers exactly one row. The voice bot
+  // never holds a key, so that row must not be read as "one live bot exists" with
+  // every real key dir an orphan.
+  const onlyVoice = () => ({ execute: async () => ({ rows: [{ bot_id: CROW_VOICE_BOT_ID }] }), close() {} });
+  assert.equal(await runBotGitOrphanSweep(onlyVoice), 0, "nothing is removed and nothing is reported");
+  assert.equal(existsSync(kept), true, "a real bot's key dir survives the voice bot's row");
+  rmSync(kept, { recursive: true, force: true });
 });
 
 test("a symlink at bot-git/<id> is refused by every function and nothing outside is touched", () => {

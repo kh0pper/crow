@@ -155,14 +155,17 @@ export async function renderDeleteConfirm(req, res, { db, layout, lang, PAGE_CSS
 }
 
 /**
- * The warning for a key folder that outlived its bot: the real path when it can
- * be named, and the plain folder name otherwise. Never a filesystem error — the
- * owner needs the folder, not the errno.
+ * The warning for a key folder that outlived its bot. The redirect text names
+ * only the folder inside the key store (`bot-git/<id>`), never the owner's full
+ * secrets path; the full path goes to this box's log instead. Never a
+ * filesystem error — the owner needs the folder, not the errno.
  */
 function keyLeftoverText(lang, botId) {
-  let path = "";
-  try { path = botGitDirReal(botId) || ""; } catch { path = ""; }
-  return fill(t("botbuilder.delGitKeyWarn", lang), { path: path || "bot-git/" + botId });
+  const name = "bot-git/" + botId;
+  let fullPath = "";
+  try { fullPath = botGitDirReal(botId) || ""; } catch { fullPath = ""; }
+  console.warn("[bot-git] a deleted bot's key folder could not be removed: " + (fullPath || name));
+  return fill(t("botbuilder.delGitKeyWarn", lang), { path: name });
 }
 
 /** POST action="delete_confirm" — PRG. Returns the redirect via res. */

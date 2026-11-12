@@ -475,15 +475,27 @@ test("delete_confirm survives a key-removal failure: the bot is gone, the folder
     removeBotKey: () => { throw new Error("EACCES: permission denied"); },
   });
   try {
-    const res = mkRes();
-    await handleDeleteConfirm({ body: { action: "delete_confirm", bot_id: "git-stuck" } }, res, { db });
+    const warnings = [];
+    const realWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.map(String).join(" ")); };
+    let res;
+    try {
+      res = mkRes();
+      await handleDeleteConfirm({ body: { action: "delete_confirm", bot_id: "git-stuck" } }, res, { db });
+    } finally {
+      console.warn = realWarn;
+    }
     assert.match(res.redirected, /deleted=git-stuck/);
     assert.equal(await countIn("pi_bot_defs", "git-stuck"), 0, "the bot is still deleted");
     const readable = decodeURIComponent(res.redirected);
     assert.ok(readable.includes("warn="), readable);
     assert.ok(readable.includes("bot-git/git-stuck"), "the warning names the folder to delete by hand: " + readable);
+    assert.ok(!readable.includes(join(dir, "secrets")), "the redirect never carries the owner's full secrets path: " + readable);
     assert.ok(!readable.includes("EACCES"), "never the filesystem error");
     assert.ok(!res.redirected.includes("git_fp="), "no fingerprint for a key that was not removed");
+    const fullPath = join(dir, "secrets", "bot-git", "git-stuck");
+    assert.ok(warnings.some((line) => line.includes(fullPath)),
+      "the full path is logged on this box instead: " + JSON.stringify(warnings));
   } finally {
     _setBotGitStoreForTest(null);
   }

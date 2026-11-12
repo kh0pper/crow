@@ -22,6 +22,7 @@ import { tasksDbPath as instanceTasksDbPath } from "../../../scripts/pi-bots/ins
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { upgradeLocalMarksAtBoot } from "./admin-api.js";
+import { isVoiceBotId } from "../../shared/voice-bot.js";
 
 // QW1 (Crow Messages usability arc, Phase 0): a gateway started with
 // --no-auth (e.g. the home server's loopback companion MCP bridge) is never the
@@ -69,16 +70,41 @@ export async function runCrossHostAuditPrune(dbFactory = createDbClient) {
  * sweepOrphanKeys). This is how a delete whose key removal failed gets retried:
  * the owner is told the next restart tries again.
  *
- * The DB read comes FIRST and the sweep runs only when it SUCCEEDED: an empty or
- * failed read must never be read as "no bots exist", which would delete every
- * key dir on the box. Opens a fresh db client via the injected factory
- * (defaults to createDbClient) and always closes it. NEVER throws — this runs
- * fire-and-forget from the boot path.
+ * The DB read comes FIRST, before anything is removed, and the sweep runs only
+ * when it SUCCEEDED: a failed read must never be read as "no bots exist", which
+ * would delete every key dir on the box. A successful read that lists no bots is
+ * treated the same way — a fresh or re-initialised crow.db, or a dev gateway
+ * pointed at another CROW_DB_PATH, answers zero rows while the key store on disk
+ * belongs to the real one — so an empty list skips the sweep and says so in one
+ * line, and the voice bot's row is dropped BEFORE that check: ensureVoiceBot
+ * seeds crow.voice into a fresh DB at boot (before this sweep runs), and the
+ * voice bot never holds a key, so a list whose only row is the voice bot is an
+ * empty list for this purpose. The store module is imported before the read, so
+ * the gap between reading the bot list and sweeping it stays as small as it can
+ * be.
+ *
+ * Opens a fresh db client via the injected factory (defaults to createDbClient)
+ * and always closes it. NEVER throws — this runs fire-and-forget from the boot
+ * path.
  *
  * @param {() => {execute: Function, close?: Function}} [dbFactory]
  * @returns {Promise<number>} key dirs removed
  */
 export async function runBotGitOrphanSweep(dbFactory = createDbClient) {
+  let sweepOrphanKeys;
+  try {
+    const { BOT_GIT_DIRNAME } = await import("../../shared/bot-git/paths.js");
+    const { secretsDir } = await import("../../shared/secret-values.js");
+    // Look BEFORE anchoring: anchoring creates the secrets dir, keeps an fd open
+    // and runs the ancestors judgement, and an instance that never turned git
+    // on has no key store to sweep (and should not get that side effect from a
+    // sweep). The check is only about whether there is work to do.
+    if (!existsSync(join(secretsDir(), BOT_GIT_DIRNAME))) return 0;
+    ({ sweepOrphanKeys } = await import("../../shared/bot-git/store.js"));
+  } catch (err) {
+    console.warn("[bot-git] orphan sweep failed:", err?.message || err);
+    return 0;
+  }
   let ids;
   try {
     const db = dbFactory();
@@ -88,7 +114,12 @@ export async function runBotGitOrphanSweep(dbFactory = createDbClient) {
         console.warn("[bot-git] orphan sweep skipped: the bot list came back in an unexpected shape");
         return 0;
       }
-      ids = r.rows.map((row) => (row ? row.bot_id : null)).filter((id) => typeof id === "string" && id);
+      // Why the voice bot is dropped here: ensureVoiceBot seeds crow.voice into a
+      // fresh DB at boot, before this sweep runs, so the list would be
+      // ["crow.voice"] — non-empty — and every real key dir on the box an
+      // "orphan". The voice bot never holds a key, so its row owns no dir.
+      ids = r.rows.map((row) => (row ? row.bot_id : null))
+        .filter((id) => typeof id === "string" && id && !isVoiceBotId(id));
     } finally {
       try { db.close?.(); } catch {}
     }
@@ -96,15 +127,13 @@ export async function runBotGitOrphanSweep(dbFactory = createDbClient) {
     console.warn("[bot-git] orphan sweep skipped: the bot list could not be read:", err?.message || err);
     return 0;
   }
+  // An empty bot list is not "no bots exist": sweeping with it would delete
+  // every key dir on the box, so it is skipped and said out loud.
+  if (ids.length === 0) {
+    console.log("[bot-git] bot list is empty; orphan sweep skipped");
+    return 0;
+  }
   try {
-    const { BOT_GIT_DIRNAME } = await import("../../shared/bot-git/paths.js");
-    const { secretsDir } = await import("../../shared/secret-values.js");
-    // Look BEFORE anchoring: anchoring creates the secrets dir, keeps an fd open
-    // and runs the ancestors judgement, and an instance that never turned git
-    // on has no key store to sweep (and should not get that side effect from a
-    // sweep). The check is only about whether there is work to do.
-    if (!existsSync(join(secretsDir(), BOT_GIT_DIRNAME))) return 0;
-    const { sweepOrphanKeys } = await import("../../shared/bot-git/store.js");
     const removed = sweepOrphanKeys(ids);
     if (removed.length > 0) console.log(`[bot-git] removed ${removed.length} orphan key dir(s)`);
     return removed.length;

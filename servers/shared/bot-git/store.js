@@ -311,22 +311,52 @@ function staleKeyDir(botId, createdAt) {
 }
 
 /**
+ * Whether a key dir exists at `bot-git/<bot_id>/` that this user could remove: a
+ * real directory of this user's, never a symlink. Says nothing about whether the
+ * dir is USABLE (checkKeyDir does): a damaged dir — a missing `.pub`, an
+ * unusable `meta.json` — answers true, which is how the card knows the owner can
+ * still clear it with Turn off.
+ */
+function keyDirPresent(botId) {
+  const dir = botGitAnchored(botId);
+  if (!dir) return false;
+  let st;
+  try { st = lstatSync(dir); } catch { return false; }
+  return !st.isSymbolicLink() && st.isDirectory() && st.uid === uid();
+}
+
+/**
+ * Whether a key dir exists for this bot even if it is not usable (see
+ * `keyDirPresent`). The card uses it to offer Turn off for a damaged dir, and
+ * for a stale one a recycled id left behind; removal itself applies the same
+ * symlink and foreign-owner refusals as every other write.
+ */
+export function botKeyDirPresent(botId) {
+  return isValidGitBotId(botId) && keyDirPresent(botId);
+}
+
+/**
  * Remove the key dir at `bot-git/<bot_id>/` when it is a real directory of this
  * user's. A symlink, a foreign dir and a missing dir all answer false and leave
  * whatever is there untouched.
  */
 function removeKeyDir(botId) {
+  if (!keyDirPresent(botId)) return false;
   const dir = botGitAnchored(botId);
   if (!dir) return false;
-  let st;
-  try { st = lstatSync(dir); } catch { return false; }
-  if (st.isSymbolicLink() || !st.isDirectory() || st.uid !== uid()) return false;
   try {
     rmSync(dir, { recursive: true, force: true });
   } catch {
     return false;
   }
   return true;
+}
+
+/** The fingerprint of the `.pub` already in a key dir, or null when unreadable. */
+function keyDirFingerprint(botId) {
+  const p = botGitAnchored(botId, PUB);
+  const pub = publicLineOf(p ? readSmallFile(p, { max: 8192, noGroupOther: true }) : null);
+  return pub ? pub.fingerprint : null;
 }
 
 /** A host/port pair normalised for a confirm, or null (also refuses GitHub). */
@@ -351,8 +381,12 @@ function confirmTarget(host, port) {
  * that dir is renamed into place, so a failure at any point leaves no key dir
  * and no temp dir behind.
  *
+ * `replacedFingerprint` is the stale dir's own public fingerprint, read before
+ * the dir goes, so the caller can tell the owner which deploy key on the forge
+ * is now dead; null when no dir was replaced (or its `.pub` was unreadable).
+ *
  * @param {{botId: string, createdAt?: string|null, execFileImpl?: Function}} opts
- * @returns {{publicKey: string, fingerprint: string}}
+ * @returns {{publicKey: string, fingerprint: string, replacedFingerprint: string|null}}
  */
 export function generateBotKey({ botId, createdAt = null, execFileImpl = execFileSync } = {}) {
   if (!isValidGitBotId(botId)) throw new Error("bot git: invalid bot id");
@@ -360,8 +394,15 @@ export function generateBotKey({ botId, createdAt = null, execFileImpl = execFil
   const keyDir = join(root, botId);
   let existing;
   try { existing = lstatSync(keyDir); } catch { existing = null; }
-  if (existing && !(staleKeyDir(botId, createdAt) && removeKeyDir(botId))) {
-    throw new Error("bot git: a key already exists for this bot");
+  let replacedFingerprint = null;
+  if (existing) {
+    const stale = staleKeyDir(botId, createdAt);
+    // Read the old public half BEFORE the removal: afterwards there is nothing
+    // left to name the deploy key the owner must take off the forge.
+    if (stale) replacedFingerprint = keyDirFingerprint(botId);
+    if (!(stale && removeKeyDir(botId))) {
+      throw new Error("bot git: a key already exists for this bot");
+    }
   }
   const tmpDir = join(root, ".tmp-" + botId + "-" + randomHex());
   try { mkdirSync(tmpDir, { mode: 0o700 }); } catch {
@@ -393,7 +434,7 @@ export function generateBotKey({ botId, createdAt = null, execFileImpl = execFil
     writeAtomic(tmpDir, CONFIRMED, "");
     renameSync(tmpDir, keyDir);
     published = true;
-    return { publicKey: pub.line, fingerprint: pub.fingerprint };
+    return { publicKey: pub.line, fingerprint: pub.fingerprint, replacedFingerprint };
   } finally {
     if (!published) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ } }
   }
