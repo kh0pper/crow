@@ -194,14 +194,17 @@ export const SYNCED_TABLES = [
 // recipients and the body; satellites and their revocations, tool pins and bot opt-ins: this
 // instance's own paired boxes; Crow-to-Crow transport state: the outbox, the per-stream
 // send counters, inbound high-water marks and visit records are per-instance; the mail tables:
-// they hold the user's mail and credentials metadata, and stay on the instance that synced it). The
-// keychain has its own key file, but its rows are still never replicated. Checked at load.
+// they hold the user's mail and credentials metadata, and stay on the instance that synced it;
+// project_bot_shares: a bot's grant to reach one project is this instance's own decision, keyed to
+// local ids and to a bot that lives here). The keychain has its own key file, but its rows are
+// still never replicated. Checked at load.
 export const LOCAL_ONLY_TABLES = Object.freeze([
   "crow_keychain", "voice_handoffs", "service_connections", "staged_sends",
   "satellites", "satellite_revocations", "satellite_tool_pins", "satellite_bot_optins",
   "c2c_outbox", "c2c_outbox_seq", "c2c_inbound_seq", "c2c_visits", "c2c_invite_gen",
   "mail_accounts", "mail_folders", "mail_threads", "mail_messages", "mail_messages_fts",
   "mail_sync_state", "mail_image_allow",
+  "project_bot_shares",
 ]);
 export function assertLocalOnlyDisjoint(synced, localOnly) {
   for (const t of localOnly) {
