@@ -133,10 +133,10 @@ const CARD = {
   signup_label: { en: "Get a demo key" },
 };
 
-function render(cards, lang = "en") {
+function render(cards, lang = "en", available = []) {
   return buildExtensionsHTML({
     installed: Object.fromEntries(cards.map((c) => [c.id, {}])),
-    available: [], collections: [], needsConfig: {}, keychainPending: [],
+    available, collections: [], needsConfig: {}, keychainPending: [],
     registrySource: "local", communityStores: [], bundleStatus: {},
     apiKeyCards: cards, lang,
   }).viewsHtml;
@@ -198,6 +198,25 @@ test("a card with no Spanish text shows the English one; one with Spanish shows 
   // The button's default label when the manifest names none.
   const noLabel = render([{ ...CARD, signup_label: null }], "en");
   assert.match(noLabel, new RegExp(`>${t("bundles.apiKey.getKey", "en")}<`));
+});
+
+test("a community add-on's explanation is introduced as its own words; an official one stays unattributed", () => {
+  // The same registry flag the Community badge reads (`official: false` → _community).
+  const community = [{ id: "demo", name: "Demo App", type: "mcp-server", _community: true }];
+  const official = [{ id: "demo", name: "Demo App", type: "mcp-server" }];
+
+  const en = render([CARD], "en", community);
+  assert.match(en, new RegExp(`>${t("bundles.apiKey.fromAddon", "en")} The demo key, used for demo calls\\.<`));
+
+  const es = render([CARD], "es", community);
+  assert.match(es, new RegExp(`>${t("bundles.apiKey.fromAddon", "es")} La clave demo, usada para llamadas demo\\.<`));
+  assert.equal(es.includes(t("bundles.apiKey.fromAddon", "en")), false, "the lead-in is translated too");
+
+  for (const [label, listed] of [["official", official], ["not in the registry", []]]) {
+    const html = render([CARD], "en", listed);
+    assert.equal(html.includes(t("bundles.apiKey.fromAddon", "en")), false, `${label}: Crow-authored text stays unattributed`);
+    assert.match(html, />The demo key, used for demo calls\.</, label);
+  }
 });
 
 // ── the field help (Install + Configure) ────────────────────────────────────────────
@@ -313,4 +332,37 @@ test("a service's own connect fields stay hidden from the install form", () => {
     formEnvVars(addon, { servicesUi: false }).map((v) => v.name),
     ["BRAVE_API_KEY", "SERVICE_ADDRESS", "SERVICE_TOKEN"],
   );
+});
+
+// ── the field help in the Install form: whose words are they? ────────────────────────
+
+const FORM_ADDON = {
+  id: "demo",
+  name: "Demo App",
+  description: "d",
+  type: "mcp-server",
+  category: "misc",
+  env_vars: [{ name: "DEMO_API_KEY", secret: true, required: true, explain: { en: "The demo key." } }],
+};
+
+/** Render the page for one not-installed add-on, open its Install form, return the help text. */
+async function installFormHelp(registryFlags) {
+  const page = buildExtensionsHTML({
+    installed: {}, available: [{ ...FORM_ADDON, ...registryFlags }], collections: [], needsConfig: {},
+    keychainPending: [], registrySource: "local", communityStores: [], bundleStatus: {}, lang: "en",
+  });
+  const { window, document, settle } = await bootCard(page.viewsHtml + page.addonRegistryScript);
+  const install = document.querySelector(".bundle-install");
+  assert.ok(install, "the add-on offers an Install button");
+  install.dispatchEvent(new window.Event("click", { bubbles: true }));
+  await settle();
+  const help = document.querySelector(".ext-env-help p");
+  assert.ok(help, "the field carries the manifest's help");
+  return help.textContent;
+}
+
+test("the install form introduces a community add-on's help as its own words", async () => {
+  assert.equal(await installFormHelp({ _community: true }), `${t("bundles.apiKey.fromAddon", "en")} The demo key.`);
+  // Crow-authored (official) help is unchanged, and so is an add-on the registry does not flag.
+  assert.equal(await installFormHelp({}), "The demo key.");
 });

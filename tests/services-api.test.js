@@ -388,7 +388,8 @@ test("ruling 5b: a key created by the connect route while rows exist is audited 
   await withApp(ctx, async (s) => {
     assert.equal((await connectGh(s, "Main", "test-token-10")).status, 201);
   }, { crowHome: newHome, audit: async (_db, ev, d) => audits.push([ev, d.details]), notify: async (_db, n) => notes.push(n.title), recordSecrets: () => {} });
-  assert.deepEqual(audits, [["keychain_key_created", { orphaned: 1 }]]);
+  // The remembered typed key's keychain_save row now shares this seam; this ruling is about the key.
+  assert.deepEqual(audits.filter(([ev]) => ev === "keychain_key_created"), [["keychain_key_created", { orphaned: 1 }]]);
   assert.deepEqual(notes, ["New Crow keychain key created"]);
 });
 

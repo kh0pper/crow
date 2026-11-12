@@ -88,7 +88,7 @@ const DEMO = {
 };
 
 /** Write a bundle into the repo copy and the installed tree, and record the install. */
-function seed(id, manifest, { installedManifest = null, dotEnv = null, mcp = true } = {}) {
+function seed(id, manifest, { installedManifest = null, dotEnv = null, mcp = true, installMode = null } = {}) {
   const repoDir = join(TMP_BUNDLES, id);
   mkdirSync(repoDir, { recursive: true });
   writeFileSync(join(repoDir, "manifest.json"), JSON.stringify(manifest, null, 2));
@@ -98,7 +98,7 @@ function seed(id, manifest, { installedManifest = null, dotEnv = null, mcp = tru
   if (dotEnv !== null) writeFileSync(join(dir, ".env"), dotEnv, { mode: 0o600 });
   const current = existsSync(INSTALLED) ? JSON.parse(readFileSync(INSTALLED, "utf8")) : [];
   const rest = current.filter((e) => e && e.id !== id);
-  rest.push({ id, type: manifest.type || "bundle", version: manifest.version || "1.0.0", installedAt: INSTALL });
+  rest.push({ id, type: manifest.type || "bundle", version: manifest.version || "1.0.0", installedAt: INSTALL, ...(installMode ? { mode: installMode } : {}) });
   writeFileSync(INSTALLED, JSON.stringify(rest, null, 2));
   if (mcp) {
     const all = existsSync(MCP_ADDONS) ? JSON.parse(readFileSync(MCP_ADDONS, "utf8")) : {};
@@ -500,19 +500,21 @@ test("review fixes: more runtime-control names are denied, a satellite install a
   assert.equal(isDeniedApiKeyEnvName("DEMO_API_KEY"), false);
   const manifest = { ...DEMO, id: "apikey-review", name: "Review App", env_vars: [...DEMO.env_vars, { name: "DEMO_ROTATING", required: false, secret: true, previous_key: "DEMO_ROTATING_PREV" }] };
   const dir = seed("apikey-review", manifest, { dotEnv: "DEMO_API_KEY=\n" });
-  // satellite entry
-  const cur = JSON.parse(readFileSync(INSTALLED, "utf8"));
-  cur.push({ id: "apikey-sat", type: "bundle", version: "1.0.0", installedAt: INSTALL, mode: "satellite" });
-  writeFileSync(INSTALLED, JSON.stringify(cur, null, 2));
-  seed("apikey-sat", { ...DEMO, id: "apikey-sat", name: "Sat" });
-  const cur2 = JSON.parse(readFileSync(INSTALLED, "utf8")).map((e) => (e.id === "apikey-sat" ? { ...e, mode: "satellite" } : e));
-  writeFileSync(INSTALLED, JSON.stringify(cur2, null, 2));
+  // satellite install, seeded once: the entry (mode: "satellite") plus the bundle copy
+  seed("apikey-sat", { ...DEMO, id: "apikey-sat", name: "Sat" }, { installMode: "satellite" });
+  const satEntries = JSON.parse(readFileSync(INSTALLED, "utf8")).filter((e) => e && e.id === "apikey-sat");
+  assert.equal(satEntries.length, 1, "the satellite fixture is one install entry");
+  assert.equal(satEntries[0].mode, "satellite");
   await withServer({ owner: true }, async (post) => {
     const sat = await save(post, { bundle_id: "apikey-sat", env_key: "DEMO_API_KEY", value: VALUE });
     assert.equal(sat.status, 400);
+    assert.match(sat.body.error, /runs on another machine/, "refused because the install is a satellite");
     assert.equal(JSON.stringify(sat.body).includes(VALUE), false);
     const rot = await save(post, { bundle_id: "apikey-review", env_key: "DEMO_ROTATING", value: VALUE });
     assert.equal(rot.status, 400);
+    assert.equal(rot.body.error, API_KEY_SAVE_REFUSALS.rotating, "the refusal says the key is rotated in Configure, not that it is undeclared");
+    assert.notEqual(rot.body.error, API_KEY_SAVE_REFUSALS.undeclared);
+    assert.equal(JSON.stringify(rot.body).includes(VALUE), false);
     // a symlinked .env: refused, and the link target is never written
     const target = join(TMP_HOME, "symlink-target.txt");
     writeFileSync(target, "UNTOUCHED=1\n");
