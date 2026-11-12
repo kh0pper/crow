@@ -5456,9 +5456,11 @@ export const translations = {
   "history.field.section_title": { en: "Section title", es: "Título de la sección" },
   "history.field.enabled": { en: "On", es: "Activada" },
   "history.field.device_id": { en: "Device", es: "Dispositivo" },
-  // The types Task 7 added (notes, KB articles, bot definitions, board cards) and
-  // the two read-through stores (an artifact's own versions, a Studio song).
+  // The types Task 7 added (notes, KB articles, bot definitions, board cards), the
+  // research SOURCE that followed it, and the two read-through stores (an
+  // artifact's own versions, a Studio song).
   "history.type.research_note": { en: "Research note", es: "Nota de investigación" },
+  "history.type.research_source": { en: "Research source", es: "Fuente de investigación" },
   "history.type.kb_article": { en: "Knowledge base article", es: "Artículo de la base de conocimiento" },
   "history.type.bot_def": { en: "Bot", es: "Agente" },
   "history.type.card": { en: "Board card", es: "Tarjeta del tablero" },
@@ -5500,6 +5502,25 @@ export const translations = {
   "history.field.autonomy": { en: "How it runs", es: "Cómo se ejecuta" },
   "history.field.uuid": { en: "Identifier", es: "Identificador" },
   "history.field.origin_instance_id": { en: "Came from", es: "Viene de" },
+  // The research source's own fields (a source's snapshot, history.type.research_source).
+  "history.field.source_type": { en: "Kind of source", es: "Tipo de fuente" },
+  "history.field.url": { en: "Web address", es: "Dirección web" },
+  "history.field.authors": { en: "Authors", es: "Autores" },
+  "history.field.publication_date": { en: "Published", es: "Publicado" },
+  "history.field.publisher": { en: "Publisher", es: "Editorial" },
+  "history.field.doi": { en: "DOI (document identifier)", es: "DOI (identificador del documento)" },
+  "history.field.isbn": { en: "ISBN (book number)", es: "ISBN (número del libro)" },
+  "history.field.abstract": { en: "Abstract", es: "Resumen" },
+  "history.field.content_summary": { en: "Summary", es: "Síntesis" },
+  "history.field.full_text": { en: "Full text", es: "Texto completo" },
+  "history.field.citation_apa": { en: "Citation", es: "Cita" },
+  "history.field.retrieval_date": { en: "Found on", es: "Encontrada el" },
+  "history.field.retrieval_method": { en: "How it was found", es: "Cómo se encontró" },
+  "history.field.verified": { en: "Checked", es: "Revisada" },
+  "history.field.verification_notes": { en: "Checking notes", es: "Notas de revisión" },
+  "history.field.verification_method": { en: "How it was checked", es: "Cómo se revisó" },
+  "history.field.relevance_score": { en: "Relevance", es: "Relevancia" },
+  "history.field.backend_id": { en: "Data backend", es: "Fuente de datos" },
   "history.field.version": { en: "Number", es: "Número" },
   "history.field.state": { en: "State", es: "Estado" },
   "history.field.changed": { en: "Note", es: "Nota" },

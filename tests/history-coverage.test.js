@@ -35,6 +35,11 @@ import {
   id as MIGRATION_0025,
 } from "../scripts/migrations/0025-item-versions-more.mjs";
 import {
+  ITEM_TYPES as SOURCE_ITEM_TYPES,
+  run as runSources,
+  id as MIGRATION_0026,
+} from "../scripts/migrations/0026-item-versions-sources.mjs";
+import {
   BOT_DEFINITION_KEYS,
   COVERED,
   SECRET_COLUMN,
@@ -86,9 +91,10 @@ async function fixture(prefix = "hist-coverage-") {
   await runCardModel({ dbPath, tasksDbPath, log: quiet });
   runItemVersions({ dbPath, log: quiet });
   runMore({ dbPath, tasksDbPath, log: quiet });
+  runSources({ dbPath, log: quiet });
   const book = new Database(dbPath);
   book.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)");
-  for (const id of [MIGRATION_0024, MIGRATION_0025]) {
+  for (const id of [MIGRATION_0024, MIGRATION_0025, MIGRATION_0026]) {
     book.prepare("INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(id, new Date().toISOString());
   }
   book.close();
@@ -357,6 +363,69 @@ test("bot_def canary in every credential column and key never appears in snapsho
     const undone = await undoJob(f.db, { jobId: BOT.jobId }, OWNER);
     assert.ok(!JSON.stringify(undone).includes(CANARY), "an undo result never carries a credential");
     assert.ok(!JSON.stringify(undone).includes(AWS_SHAPED_CANARY));
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("a URL-shaped credential is scrubbed from a source's url only, never from prose", async () => {
+  const f = await fixture();
+  try {
+    // A documented call: `?api_key=` with a placeholder value, and a pagination
+    // cursor that happens to be named `token`. Both are matched by the
+    // URL-credential pattern and both are ordinary sentences in a how-to.
+    const prose =
+      "Call /v1/items?api_key=YOUR_KEY first, then follow the link it returns with &token=CURSOR123abc.";
+    const proseItems = [
+      ["memory", await insert(f.db, OWNER, "memories", { content: prose })],
+      ["research_note", await insert(f.db, OWNER, "research_notes", { title: "A how-to", content: prose })],
+      ["blog_post", await insert(f.db, OWNER, "blog_posts", { slug: "a-how-to", title: "A how-to", content: prose })],
+    ];
+    // The one field the pattern IS for: a source's stored url, carrying the same
+    // placeholder.
+    const sourceId = await insert(f.db, OWNER, "research_sources", {
+      title: "A source behind a documented API",
+      source_type: "web_article",
+      url: "https://example.com/v1/items?api_key=YOUR_KEY&page=2",
+      citation_apa: "Someone (2026). A source. Example Press.",
+    });
+
+    // 1. Capture is real: every version holds its text as written (the sweep, not
+    //    the trigger, is what would scrub it).
+    for (const [itemType, id] of proseItems) {
+      const [version] = await versionsOf(f.db, itemType, id);
+      assert.equal(JSON.parse(version.snapshot_json).content, prose, `${itemType}: the version captured the text`);
+    }
+
+    await sweep(f.db, { batchSize: 500 });
+
+    // 2. THE PROSE IS LEFT ALONE and not marked redacted. A redacted version is
+    //    refused by restoreVersion (and by a Trash restore), so a false positive
+    //    here would cost the operator their own writing.
+    for (const [itemType, id] of proseItems) {
+      const version = (
+        await f.db.execute({
+          sql: "SELECT snapshot_json, redacted FROM item_versions WHERE item_type = ? AND item_id = ?",
+          args: [itemType, String(id)],
+        })
+      ).rows[0];
+      assert.equal(Number(version.redacted), 0, `${itemType}: a URL-shaped string in prose is not a credential`);
+      assert.equal(JSON.parse(version.snapshot_json).content, prose, `${itemType}: the text stays exactly as written`);
+    }
+
+    // 3. THE SOURCE URL IS STILL SCRUBBED: the field-scoped pattern reaches the
+    //    one place a pasted key actually lands.
+    const sourceVersion = (
+      await f.db.execute({
+        sql: "SELECT snapshot_json, redacted FROM item_versions WHERE item_type = 'research_source' AND item_id = ?",
+        args: [String(sourceId)],
+      })
+    ).rows[0];
+    assert.equal(Number(sourceVersion.redacted), 1, "a credential in a url field is still redacted");
+    assert.ok(!sourceVersion.snapshot_json.includes("YOUR_KEY"), "the value is gone from the stored url");
+    assert.ok(sourceVersion.snapshot_json.includes("[redacted]"), "replaced with the placeholder");
+    assert.ok(sourceVersion.snapshot_json.includes("page=2"), "the harmless part of the query is kept");
+    assert.ok(sourceVersion.snapshot_json.includes("https://example.com/v1/items"), "and so is the rest of the url");
   } finally {
     await f.dispose();
   }
@@ -852,11 +921,19 @@ test("restoring an artifact version records where it came from in the new versio
 
 test("the COVERED import rules still hold for the new entries", async () => {
   // Every COVERED type is claimed by exactly one migration, and each migration's
-  // list is its own (0024's never grows).
-  const claimed = [...typesForMigration(MIGRATION_0024), ...typesForMigration(MIGRATION_0025)];
+  // list is its own (0024's never grows, and neither does 0025's now that 0026
+  // owns the research source).
+  const claimed = [
+    ...typesForMigration(MIGRATION_0024),
+    ...typesForMigration(MIGRATION_0025),
+    ...typesForMigration(MIGRATION_0026),
+  ];
   assert.deepEqual(claimed.sort(), Object.keys(COVERED).sort(), "every covered type names its migration");
+  assert.equal(claimed.length, Object.keys(COVERED).length, "and each is claimed by exactly one migration");
   assert.equal(typesForMigration(MIGRATION_0024).length, 3, "0024 keeps its own three types");
-  assert.deepEqual(typesForMigration(MIGRATION_0025), [...ITEM_TYPES], "0025 owns the rest");
+  assert.deepEqual(typesForMigration(MIGRATION_0025), [...ITEM_TYPES], "0025 owns its own list");
+  assert.deepEqual(typesForMigration(MIGRATION_0026), [...SOURCE_ITEM_TYPES], "0026 owns the research source");
+  assert.deepEqual(SOURCE_ITEM_TYPES, ["research_source"], "and nothing else");
   assert.deepEqual(
     typesForStore(STORE_TASKS),
     ["card"],

@@ -39,6 +39,7 @@ import { run as runTrackerConvergence } from "../scripts/migrations/0003-tracker
 import { run as runCardModel } from "../scripts/migrations/0004-track1-card-model.mjs";
 import { run as runItemVersions, id as MIGRATION_0024 } from "../scripts/migrations/0024-item-versions.mjs";
 import { run as runMore, id as MIGRATION_0025 } from "../scripts/migrations/0025-item-versions-more.mjs";
+import { run as runSources, id as MIGRATION_0026 } from "../scripts/migrations/0026-item-versions-sources.mjs";
 import { erasureItemType, isErased } from "../servers/shared/history/erase.js";
 import { ensureHistoryTriggersAtBoot } from "../servers/shared/history/ensure.js";
 import { withWriteContext } from "../servers/shared/history/write-context.js";
@@ -88,12 +89,13 @@ async function fixture(prefix = "hist-tasks-") {
   await runCardModel({ dbPath, tasksDbPath, log: quiet });
   runItemVersions({ dbPath, log: quiet });
   runMore({ dbPath, tasksDbPath, log: quiet });
+  runSources({ dbPath, log: quiet });
   // The registry's bookkeeping lives in crow.db even for the migrations that write
   // tasks.db, so "0025 has applied" is a row HERE — that is what the boot ensure
   // reads for the card store.
   const book = new Database(dbPath);
   book.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)");
-  for (const id of [MIGRATION_0024, MIGRATION_0025]) {
+  for (const id of [MIGRATION_0024, MIGRATION_0025, MIGRATION_0026]) {
     book.prepare("INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(id, new Date().toISOString());
   }
   book.close();

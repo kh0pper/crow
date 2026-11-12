@@ -82,6 +82,7 @@ export function typeWord(itemType, lang = "en") {
     "blog_post",
     "context_section",
     "research_note",
+    "research_source",
     "kb_article",
     "bot_def",
     "card",
@@ -95,10 +96,12 @@ export function typeWord(itemType, lang = "en") {
 /**
  * The one-line label of an item, from its snapshot: a memory's content, a blog
  * post's title, a context section's title (or its key), a note's title or text,
- * a KB article's title, a bot's display name, a card's title, an artifact's
- * title. Untrusted by definition — callers must escape it (this returns the RAW
- * string on purpose, because the Trash and job lists clip it before escaping and
- * the caller may want a full version elsewhere).
+ * a research source's title (else its URL, else its citation — a source a person
+ * added by URL alone still has to be recognisable), a KB article's title, a bot's
+ * display name, a card's title, an artifact's title. Untrusted by definition —
+ * callers must escape it (this returns the RAW string on purpose, because the
+ * Trash and job lists clip it before escaping and the caller may want a full
+ * version elsewhere).
  */
 export function itemLabel(itemType, snapshot) {
   const s = snapshot && typeof snapshot === "object" ? snapshot : {};
@@ -106,6 +109,9 @@ export function itemLabel(itemType, snapshot) {
   if (itemType === "blog_post") return clip(s.title ?? "", MAX_PREVIEW_CHARS) || "—";
   if (itemType === "context_section") return clip(s.section_title || s.section_key || "", MAX_PREVIEW_CHARS) || "—";
   if (itemType === "research_note") return clip(s.title || s.content || "", MAX_PREVIEW_CHARS) || "—";
+  if (itemType === "research_source") {
+    return clip(s.title || s.url || s.citation_apa || "", MAX_PREVIEW_CHARS) || "—";
+  }
   if (itemType === "kb_article") return clip(s.title ?? "", MAX_PREVIEW_CHARS) || "—";
   if (itemType === "bot_def") return clip(s.display_name ?? "", MAX_PREVIEW_CHARS) || "—";
   if (itemType === "card") return clip(s.title ?? "", MAX_PREVIEW_CHARS) || "—";
