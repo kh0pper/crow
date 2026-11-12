@@ -103,10 +103,19 @@ async function auditBoth(db, { action, project, home, botId, payload }) {
  * resolve a bot's access) must not pull them in.
  */
 async function remoteInvocationOn(db, bot) {
-  const [{ readSetting }, { parseRemoteInvocationFlag, remoteServersForBot }] = await Promise.all([
-    import("../gateway/dashboard/settings/registry.js"),
-    import("../../scripts/pi-bots/remote-blocks.mjs"),
-  ]);
+  let mods;
+  try {
+    mods = await Promise.all([
+      import("../gateway/dashboard/settings/registry.js"),
+      import("../../scripts/pi-bots/remote-blocks.mjs"),
+    ]);
+  } catch {
+    // A helper that cannot be loaded only means the warning is unavailable: report it off rather
+    // than fail a grant that has nothing to do with remote invocation.
+    return false;
+  }
+  const { readSetting } = mods[0];
+  const { parseRemoteInvocationFlag, remoteServersForBot } = mods[1];
   let raw = null;
   try { raw = await readSetting(db, "feature_flags"); } catch { return false; }
   if (!parseRemoteInvocationFlag(raw)) return false;
