@@ -2061,6 +2061,11 @@ async function liveSong(title, scenes = FCB_SCENES) {
     assert.equal(result.ok, true, `${command} was refused: ${result.error}`);
     return result;
   };
+  // createSong opens a new song on a "Scene 1" of its own (a fresh id), which
+  // would sit ahead of the fixture's scenes and shift the FCB1010 profile onto
+  // it — the fixture must hold exactly `scenes`, so the default one goes.
+  const opening = (await hub.openSong(id)).snapshot.scenes.map((scene) => scene.id);
+  for (const sceneId of opening) await run("scene.remove", { scene_id: sceneId });
   await run("track.add", { id: TRACK, name: "Beat box", kind: "sampler" });
   for (const [sceneId, name] of scenes) await run("scene.add", { id: sceneId, name });
   await run("clip.add_pattern", { clip_id: CLIP, track_id: TRACK, scene_id: SCENE, name: "Beat", length_steps: 16 });
