@@ -595,7 +595,7 @@ const _jsonParser = express.json({ limit: "1mb" });
 // non-strictly, so `/…/edit/` reaches the same route with its own parser — it must not be handed to
 // the global one first.
 const _hasOwnParser = (p) => p.toLowerCase().startsWith("/llm") || p.toLowerCase().startsWith("/api/workspace/live/v1/") || /^\/s\/[^/]+\/feedback$/.test(p) ||
-  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p) || /^\/dashboard\/perch-api\/staged\/[^/]+\/(send|edit|discard)\/?$/i.test(p);
+  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p) || /^\/dashboard\/perch-api\/staged\/[^/]+\/(send|edit|discard)\/?$/i.test(p) || /^\/dashboard\/mail\/api\//i.test(p);
 app.use((req, res, next) => (_hasOwnParser(req.path) ? next() : _jsonParser(req, res, next)));
 
 // --- Static files (PWA manifest, service worker, icons) ---
@@ -946,6 +946,13 @@ async function gracefulShutdown() {
   try {
     const { stopScheduler } = await import("./scheduler.js");
     stopScheduler();
+  } catch {}
+
+  // Step 1c — stop Crow Mail's sync supervisor too: its timers, watchers and connections must not
+  // outlive the drain window or write to a database being checked in. No-op when mail never started.
+  try {
+    const { stopMailSync } = await import("./boot/mail-boot.js");
+    await stopMailSync();
   } catch {}
 
   // Step 2 — stop accepting new connections on BOTH listeners; release idle

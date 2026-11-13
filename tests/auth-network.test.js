@@ -304,6 +304,29 @@ test("rejectFunneled middleware: the voice hand-off confirm page is never funnel
   for (const path of paths) assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
 });
 
+// Crow Mail (plan 1, Task 19): the private mail API reads mailboxes and holds an account's settings,
+// so not one of its routes may be reachable from Funnel.
+test("rejectFunneled middleware: the mail API is never funnel-exposed", async () => {
+  const server = await startTestApp();
+  const paths = [
+    "/dashboard/mail/api/accounts",
+    "/dashboard/mail/api/accounts/ma-0123456789abcdef/folders",
+    "/dashboard/mail/api/accounts/ma-0123456789abcdef/sync",
+  ];
+  try {
+    const port = server.address().port;
+    for (const path of paths) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const path of paths) assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+  assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => "/dashboard/mail".startsWith(p)), "/dashboard/mail is not public");
+});
+
 // Crow-to-Crow plan 1, task 7B: the sharing API names contacts, projects and visits —
 // who shares what with whom — so not one of its routes may be reachable from Funnel.
 test("rejectFunneled middleware: the Crow-to-Crow sharing API is never funnel-exposed", async () => {

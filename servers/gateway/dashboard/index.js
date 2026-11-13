@@ -113,6 +113,7 @@ import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
 import voiceHandoffsRouter from "../routes/voice-handoffs.js";
 import stagedPageRouter from "../routes/staged-page.js";
+import mailApiRouter from "../routes/mail-api.js";
 import widgetsRouter from "../routes/widgets.js";
 import { shellRouter, resolveRequestMode, resolveShellPage, nestIsExplicit } from "./shell/request.js";
 import { isLocalPasswordSessionOn } from "./local-session.js";
@@ -901,6 +902,10 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // confirm page above (session + CSRF, Funnel refused upstream), and the page
   // is owner-only on its own prefix — see routes/staged-page.js's header.
   router.use(stagedPageRouter(dashboardAuth));
+
+  // Crow Mail's private JSON API (`CROW_MAIL`): the same slot and rails as the staged page above
+  // (session + CSRF, Funnel refused upstream), owner-only on its own prefix — see routes/mail-api.js.
+  router.use(mailApiRouter(dashboardAuth));
 
   // The "What needs me" widget's API (widgets phase 1): the JSON summary both renderers draw and
   // the act endpoint that answers an item in place. Same slot and rails as the phone confirm page

@@ -37,6 +37,13 @@
  * account pass (AUTH_FAILED, NETWORK, TLS and the pass's own deadline TIMEOUT) travel further than
  * their own folder: the folders after it are abandoned and the account is not stamped.
  *
+ * An optional `ctx.cancelled` is the pass's second stop, beside the deadline: the caller's answer to
+ * "has this run been closed out from outside?", asked before every write. A run whose owner closed it
+ * out (a delete, `stop()`) must not land another message, folder or state row on an id whose rows are
+ * going, and a batch already fetched is exactly where that would happen — so `true` ends the pass with
+ * NETWORK/`run_closed` before the next row, batch or state write. No `cancelled` means never cancelled:
+ * every other rule above is unchanged.
+ *
  * Two on-demand reads reach outside the window without moving it. `fetchOlder` pages a folder's
  * history backwards from `floor_uid` by UID (never by date, which would skip a run of messages sharing
  * one INTERNALDATE) and lowers the floor only over a page that went through whole. `searchRemote`
@@ -114,10 +121,10 @@ function noop() {}
 /* --------------------------------------------------------------------- context */
 
 /**
- * The one place ctx is read: defaults for `now`, `log` and `yieldFn`, and a check that the two things
- * a pass cannot run without are there.
+ * The one place ctx is read: defaults for `now`, `cancelled`, `log` and `yieldFn`, and a check that the
+ * two things a pass cannot run without are there.
  *
- * @param {{db: object, adapter: object, now?: Function, deadlineAt?: number|null,
+ * @param {{db: object, adapter: object, now?: Function, deadlineAt?: number|null, cancelled?: Function,
  *          log?: Function, yieldFn?: Function}} ctx
  */
 function contextOf(ctx) {
@@ -135,6 +142,7 @@ function contextOf(ctx) {
     adapter: ctx.adapter,
     now: typeof ctx.now === "function" ? ctx.now : Date.now,
     deadlineAt: Number.isFinite(ctx.deadlineAt) ? Number(ctx.deadlineAt) : null,
+    cancelled: typeof ctx.cancelled === "function" ? ctx.cancelled : null,
     log: typeof ctx.log === "function" ? ctx.log : noop,
     yieldFn: typeof ctx.yieldFn === "function"
       ? ctx.yieldFn
@@ -159,6 +167,23 @@ function onDemandLimit(value) {
 function checkDeadline(c) {
   if (c.deadlineAt == null) return;
   if (c.now() >= c.deadlineAt) throw new MailError("TIMEOUT", "sync_deadline");
+}
+
+/**
+ * The pass's other stop: the owner of this run closed it out (`ctx.cancelled`) while the engine still
+ * holds a batch it already fetched. Asked before every write, so a run that has been closed out — by a
+ * delete, by `stop()` — never lands another message, folder or state row on an id nothing holds any
+ * more. A context with no `cancelled` function never takes this path.
+ */
+function checkCancelled(c) {
+  if (c.cancelled == null) return;
+  if (c.cancelled() === true) throw new MailError("NETWORK", "run_closed");
+}
+
+/** Both of a pass's stops, asked together wherever the engine is about to write something. */
+function checkStop(c) {
+  checkDeadline(c);
+  checkCancelled(c);
 }
 
 /* ------------------------------------------------------------------- the shape */
@@ -389,7 +414,7 @@ async function fetchBatch(c, folder, batch, {
     }
     for (const item of wanted) {
       if (got.has(item.uid)) continue;
-      checkDeadline(c);
+      checkStop(c);
       const again = await getOrThrow(c, folder.path, [item.uid]);
       const found = again.find((message) => Number(message.uid) === item.uid
         && Buffer.isBuffer(message.raw));
@@ -445,22 +470,46 @@ async function storeBatch(c, folder, batch, delivered, stopAtUid) {
   let stop = stopAtUid ?? null;
   let stopReason = stop == null ? null : "omitted";
 
+  /**
+   * One message that cannot be prepared or stored holds the watermark, exactly like one get() left out:
+   * the code is all a log may say about it.
+   */
+  const failed = (err, uid) => {
+    c.log({ event: "message_failed", folderId, uid, code: toMailError(err).code });
+    if (stop == null || uid < stop) {
+      stop = uid;
+      stopReason = "store_failed";
+    }
+  };
+
   for (const item of batch) {
     if (stop != null && item.uid >= stop) break;
-    checkDeadline(c);
+    checkStop(c);
     const entry = delivered.get(item.uid);
     if (!entry) continue;
     // Between messages, so a large arrival can never hold the event loop for the whole folder.
     await c.yieldFn();
 
+    // fetchBatch only delivers bytes, so a null raw here is the listing's own too_large marker. An
+    // empty body is how the adapter reports a message above the raw cap, so it is a too_large row
+    // too — never an empty message that reads as one the sender left blank.
+    let parsed;
     try {
-      // fetchBatch only delivers bytes, so a null raw here is the listing's own too_large marker. An
-      // empty body is how the adapter reports a message above the raw cap, so it is a too_large row
-      // too — never an empty message that reads as one the sender left blank.
       const raw = entry.tooLarge ? null : entry.message.raw;
-      const parsed = raw == null || raw.length === 0
+      parsed = raw == null || raw.length === 0
         ? placeholderMessage("too_large")
         : await parseRawMessage(raw);
+    } catch (err) {
+      failed(err, item.uid);
+      break;
+    }
+
+    // The last look before the row lands: a cancel that arrives while this message was being parsed
+    // (or while the loop yielded) must not be overtaken by the write it was meant to stop. It sits
+    // outside the try below so a run that was closed out is never mistaken for a message that failed.
+    checkStop(c);
+
+    try {
       const written = await upsertMessage(c.db, {
         ...parsed,
         accountId: folder.accountId,
@@ -472,13 +521,7 @@ async function storeBatch(c, folder, batch, delivered, stopAtUid) {
       if (written.created) added += 1;
       if (lowestStoredUid == null || item.uid < lowestStoredUid) lowestStoredUid = item.uid;
     } catch (err) {
-      // A message that cannot be stored holds the watermark, exactly like one get() left out: the
-      // code is all a log may say about it.
-      c.log({ event: "message_failed", folderId, uid: item.uid, code: toMailError(err).code });
-      if (stop == null || item.uid < stop) {
-        stop = item.uid;
-        stopReason = "store_failed";
-      }
+      failed(err, item.uid);
       break;
     }
   }
@@ -516,7 +559,7 @@ async function storeBatches(c, folder, batches, {
   let omittedUids = [];
 
   for (const batch of batches) {
-    checkDeadline(c);
+    checkStop(c);
     const fetched = await fetchBatch(c, folder, batch, { liveness, skipOmissions, livenessGapMs });
     if (fetched.omitted.length > 0) omittedUids = omittedUids.concat(fetched.omitted);
     const stored = await storeBatch(c, folder, batch, fetched.delivered, fetched.stopAtUid);
@@ -598,6 +641,9 @@ async function firstSync(c, folder, { windowDays, nowMs }) {
   };
   const uidValidity = uidValidityOf(listing.uidValidity);
   if (uidValidity != null) patch.uidValidity = uidValidity;
+  // A run closed out while the window was being stored writes no state either: the next pass is a
+  // first sync again, and the upserts make that idempotent.
+  checkStop(c);
   await setFolderSyncState(c.db, folder.id, patch);
   logOmitted(c, folderIdOf(folder), outcome);
 
@@ -629,7 +675,7 @@ async function reconcileFlags(c, folder, uidValidity) {
   if (seen != null && uidValidity != null && seen !== uidValidity) {
     throw new MailError("PROTOCOL", "uidvalidity_changed");
   }
-  checkDeadline(c);
+  checkStop(c);
   await applyFlags(c.db, folderId, listing.items);
   const present = listing.items.map((item) => item.uid);
   return deleteMissing(c.db, folderId, present, { minUid: lo });
@@ -643,7 +689,7 @@ async function reconcileFlags(c, folder, uidValidity) {
  * reconciles flags and expunges: that scan only ever touches rows below the watermark, so it can
  * settle what this pass did store without reaching past the hole.
  *
- * @param {object} ctx `{db, adapter, now?, deadlineAt?, log?, yieldFn?}`
+ * @param {object} ctx `{db, adapter, now?, deadlineAt?, cancelled?, log?, yieldFn?}`
  * @param {string} accountId the account the folder belongs to
  * @param {object} folder a mail_folders row as the store returns it
  * @returns {Promise<{added: number, removed: number, reset: boolean}>}
@@ -651,7 +697,7 @@ async function reconcileFlags(c, folder, uidValidity) {
 export async function syncFolder(ctx, accountId, folder) {
   const c = contextOf(ctx);
   folderIdOf(folder);
-  checkDeadline(c);
+  checkStop(c);
 
   const account = await getAccount(c.db, accountId);
   const windowDays = Number.isInteger(account?.windowDays) && account.windowDays >= 1
@@ -673,6 +719,7 @@ export async function syncFolder(ctx, accountId, folder) {
   const listedValidity = uidValidityOf(listing.uidValidity);
   if (storedValidity != null && listedValidity != null && listedValidity !== storedValidity) {
     // Every UID this folder holds means something else now: empty it and start over as a first sync.
+    checkStop(c);
     await resetFolder(c.db, folderIdOf(folder), listedValidity);
     // The new epoch's UIDs say nothing about the old one's, so a stuck count left behind would skip a
     // UID of the new epoch on that epoch's first pass. The count starts again from nothing.
@@ -699,6 +746,7 @@ export async function syncFolder(ctx, accountId, folder) {
     // An undeliverable UID (or a store that failed) is where the watermark stops. The rows below it
     // are on disk and the next pass re-lists from here; nothing is ever skipped over. Only ids and a
     // code reach the log line: the uid names no content.
+    checkStop(c);
     await setFolderSyncState(c.db, folderId, {
       ...validity,
       highestUid: Math.max(outcome.highestUid, outcome.stopAtUid - 1),
@@ -708,6 +756,7 @@ export async function syncFolder(ctx, accountId, folder) {
     return counts;
   }
 
+  checkStop(c);
   await setFolderSyncState(c.db, folderId, {
     ...validity,
     highestUid: Math.max(outcome.highestUid, uidNext - 1),
@@ -751,7 +800,7 @@ export async function syncFolder(ctx, accountId, folder) {
  * A listing whose UIDVALIDITY no longer matches the stored one is refused before a single body is
  * fetched: the UIDs mean something else now, and the next regular sync is what resets the folder.
  *
- * @param {object} ctx `{db, adapter, now?, deadlineAt?, log?, yieldFn?}`
+ * @param {object} ctx `{db, adapter, now?, deadlineAt?, cancelled?, log?, yieldFn?}`
  * @param {string} accountId the account the folder belongs to
  * @param {number} folderId a folder of that account
  * @param {{limit?: number}} [options] UIDs to ask for (50 by default)
@@ -771,7 +820,7 @@ export async function fetchOlder(ctx, accountId, folderId, { limit = DEFAULT_OLD
   const lo = folder.floorUid;
   // Nothing local means nothing to page below: the folder's first sync sets the window and the floor.
   if (lo == null) return { added: 0, reachedStart: true };
-  checkDeadline(c);
+  checkStop(c);
 
   const listing = await listOrThrow(c, folder.path, { beforeUid: lo, limit: wanted, newestFirst: true });
   const storedValidity = uidValidityOf(folder.uidValidity);
@@ -780,7 +829,7 @@ export async function fetchOlder(ctx, accountId, folderId, { limit = DEFAULT_OLD
     throw new MailError("PROTOCOL", "uidvalidity_changed");
   }
 
-  checkDeadline(c);
+  checkStop(c);
 
   // A backfill goes through the same liveness counter a sync pass does: one UID nothing ever delivers
   // must not hold the floor for ever. It counts on its own slower clock, though — this read is a
@@ -798,7 +847,10 @@ export async function fetchOlder(ctx, accountId, folderId, { limit = DEFAULT_OLD
     const pageLow = listing.items.reduce((low, item) => (low == null || item.uid < low ? item.uid : low), null);
     if (pageLow != null) floorUid = Math.min(lo, pageLow);
   }
-  if (floorUid !== lo) await setFolderSyncState(c.db, folder.id, { floorUid });
+  if (floorUid !== lo) {
+    checkStop(c);
+    await setFolderSyncState(c.db, folder.id, { floorUid });
+  }
 
   return {
     added: outcome.added,
@@ -827,7 +879,7 @@ export async function fetchOlder(ctx, accountId, folderId, { limit = DEFAULT_OLD
  * as it was. Nothing here changes `floor_uid` or `highest_uid`: a hit far below the window is one row,
  * not a contiguous range, and only a backfill (`fetchOlder`) may claim more.
  *
- * @param {object} ctx `{db, adapter, now?, deadlineAt?, log?, yieldFn?}`
+ * @param {object} ctx `{db, adapter, now?, deadlineAt?, cancelled?, log?, yieldFn?}`
  * @param {string} accountId
  * @param {string} query the person's words, passed to the adapter unchanged
  * @param {{limit?: number}} [options] the adapter's own result cap
@@ -838,7 +890,7 @@ export async function searchRemote(ctx, accountId, query, { limit } = {}) {
   const account = accountIdOf(accountId);
   if (typeof query !== "string" || query.trim() === "") throw new MailError("BAD_INPUT", "query");
   const cap = limit == null ? null : onDemandLimit(limit);
-  checkDeadline(c);
+  checkStop(c);
 
   let hits;
   try {
@@ -875,7 +927,7 @@ export async function searchRemote(ctx, accountId, query, { limit } = {}) {
 
   let added = 0;
   for (const { folder, uids } of pending.values()) {
-    checkDeadline(c);
+    checkStop(c);
     // No sizes are known here, so the count is the only bound on a batch.
     const items = ascending(uids.map((uid) => ({ uid })));
     const outcome = await storeBatches(c, folder, batchItems(items, SEARCH_BATCH_MAX), {
@@ -900,14 +952,14 @@ export async function searchRemote(ctx, accountId, query, { limit } = {}) {
  * whole pass instead: the folders after it are abandoned and `last_sync_at` is not stamped, because a
  * pass that stopped early is not a pass that succeeded.
  *
- * @param {object} ctx `{db, adapter, now?, deadlineAt?, log?, yieldFn?}`
+ * @param {object} ctx `{db, adapter, now?, deadlineAt?, cancelled?, log?, yieldFn?}`
  * @param {string} accountId
  * @returns {Promise<{folders: number, added: number}>} folders synced and rows created
  */
 export async function syncAccount(ctx, accountId) {
   const c = contextOf(ctx);
   if (typeof accountId !== "string" || accountId === "") throw new MailError("BAD_INPUT", "account_id");
-  checkDeadline(c);
+  checkStop(c);
 
   let listing;
   try {
@@ -924,7 +976,7 @@ export async function syncAccount(ctx, accountId) {
   }
   c.log({ event: "folders_listed", count: listing.length });
 
-  checkDeadline(c);
+  checkStop(c);
   const upserted = await upsertFolders(c.db, accountId, listing);
   if (upserted.deleted > 0) c.log({ event: "folders_deleted", count: upserted.deleted });
   if (upserted.deletesRefused) c.log({ event: "deletes_refused" });
@@ -945,7 +997,7 @@ export async function syncAccount(ctx, accountId) {
     if (entry.selectable === false) continue;
     if (isSkippedSpecialUse(folder, entry)) continue;
 
-    checkDeadline(c);
+    checkStop(c);
     try {
       const outcome = await syncFolder(c, accountId, folder);
       folders += 1;
@@ -964,7 +1016,9 @@ export async function syncAccount(ctx, accountId) {
     }
   }
 
-  // The stamp is bookkeeping, not a result: an account row that cannot take it changes nothing.
+  // The stamp is bookkeeping, not a result: an account row that cannot take it changes nothing. A run
+  // closed out while the last folder was finishing stamps nothing either.
+  checkStop(c);
   try {
     await updateAccount(c.db, accountId, { lastSyncAt: c.now() });
   } catch {
