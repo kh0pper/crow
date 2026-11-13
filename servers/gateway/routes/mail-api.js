@@ -38,6 +38,7 @@ import { Router, json as jsonParserOf } from "express";
 import { createDbClient } from "../../db.js";
 import { cleanPeerName } from "../../shared/peer-label.js";
 import { recordServiceSecretValues } from "../../shared/secret-values.js";
+import { withoutWriteContext } from "../../shared/history/write-context.js";
 import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 import { getInstance, getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { createImapSmtpAdapter } from "../mail/adapter/imap-smtp.js";
@@ -47,7 +48,7 @@ import { createMailCredentials } from "../mail/credentials.js";
 import { MailError, MAIL_ERROR_TEXT, toMailError } from "../mail/errors.js";
 import { mailEnabled } from "../mail/flag.js";
 import { probeAccount } from "../mail/probe.js";
-import { createAccount, deleteAccount, getAccount, updateAccount } from "../mail/store/accounts.js";
+import { createAccount, deleteAccount, getAccount, listAccounts, updateAccount } from "../mail/store/accounts.js";
 import { listFolders } from "../mail/store/messages.js";
 import { SKIP_SPECIAL_USE } from "../mail/sync/engine.js";
 import { registerMessageRoutes } from "./mail-api-messages.js";
@@ -80,7 +81,7 @@ const FIXED_TEXT = Object.freeze({
   bad_input: "That request is not valid.",
   duplicate_address: "That address is already connected on this Crow.",
   keychain_key_missing: "The keychain key for this password is not on this machine.",
-  internal: "Crow Mail could not do that.",
+  internal: "Something went wrong.",
 });
 
 const SECURITIES = new Set(["ssl", "starttls", "none"]);
@@ -129,8 +130,11 @@ function sendMailError(res, err) {
   // The keychain's key-missing fault is not a mail error and must not be reported as a bad password;
   // its own fixed sentence says which fault it is, and carries no path and no value.
   if (err && err.code === "KEYCHAIN_KEY_MISSING") return sendError(res, 409, "keychain_key_missing");
-  const mailErr = toMailError(err);
-  sendError(res, STATUS_BY_CODE[mailErr.code] ?? 500, mailErr.code);
+  // Anything else that is not a MailError is this Crow's own fault — a database write that failed, say
+  // — and it answers the internal sentence: a mail-server sentence would blame the wrong machine, and
+  // the failure's own text is never repeated to anybody.
+  if (!(err instanceof MailError)) return sendError(res, 500, "internal");
+  sendError(res, STATUS_BY_CODE[err.code] ?? 500, err.code);
 }
 
 /** A route's failure in the log: the code only, so no value can travel with it. */
@@ -235,6 +239,19 @@ function isDuplicateAddress(err) {
   return err instanceof MailError && err.code === "BAD_INPUT" && err.detail === "address";
 }
 
+/**
+ * Is this address already connected here? The same identity the store's UNIQUE COLLATE NOCASE column
+ * enforces, checked before anything is dialled: a second account for one mailbox is the owner's input,
+ * not a server's verdict, so the probe at the far end of the world need not be asked at all.
+ */
+async function addressTaken(db, address) {
+  const wanted = String(address).trim().toLowerCase();
+  for (const account of await listAccounts(db)) {
+    if (String(account.address).trim().toLowerCase() === wanted) return true;
+  }
+  return false;
+}
+
 /** This instance's id and the name its own registry row carries (never an address or a mailbox host). */
 async function defaultLocalInstance(db) {
   const instanceId = getOrCreateLocalInstanceId();
@@ -272,13 +289,20 @@ function supervisorFor(deps) {
   return supervisor ?? null;
 }
 
-/** A connect starts its first sync in the background; its failure is the supervisor's to report. */
+/**
+ * A sync outlives the request that asked for it, so it is opened with no write context: otherwise
+ * every row it wrote later would be attributed to the sign-in that happened to click Connect (see the
+ * `withoutWriteContext` note in servers/gateway/dashboard/auth.js). Its failure is the supervisor's to
+ * report, not this route's.
+ */
 function startBackgroundSync(deps, accountId) {
   const supervisor = supervisorFor(deps);
   if (!supervisor || typeof supervisor.syncNow !== "function") return;
-  Promise.resolve()
-    .then(() => supervisor.syncNow(accountId))
-    .catch((err) => logCode("background_sync", err));
+  withoutWriteContext(() => {
+    Promise.resolve()
+      .then(() => supervisor.syncNow(accountId))
+      .catch((err) => logCode("background_sync", err));
+  });
 }
 
 /** Undo a connect that could not be finished: the secret, then the account. Best effort, code-logged. */
@@ -304,18 +328,22 @@ async function releaseClaimQuietly(db, address, localInstanceId) {
 }
 
 /**
- * Remove the account's worker from the mailbox before the row goes. The supervisor has no
- * stop-one-account call, so `restartAccount` is the closest thing: it closes that account's borrowed
- * adapter, its sync connection and its IDLE watcher. It is not awaited — it would start a full sync —
- * and the row and its secret are gone by the time that run could write anything, so a NOT_FOUND from
- * it is the supervisor's to log, not this route's to report.
+ * Retire the account's sync worker BEFORE its rows go, and wait for it: the worker's run, timers,
+ * watcher and both of its connections are gone by the time this resolves, so nothing of the deleted
+ * account can write an orphan folder, message or sync state afterwards, or send a notice about it.
+ *
+ * The call is opened with no write context — the worker's own writes long outlive this request — and
+ * it never throws: a supervisor without the call, or one whose stop failed, must not hold up a delete
+ * the owner asked for. A supervisor that is not running simply has nothing to stop.
  */
-function stopWorkerForDelete(deps, accountId) {
+async function stopWorkerForDelete(deps, accountId) {
   const supervisor = supervisorFor(deps);
-  if (!supervisor || typeof supervisor.restartAccount !== "function") return;
-  Promise.resolve()
-    .then(() => supervisor.restartAccount(accountId))
-    .catch((err) => logCode("delete_worker", err));
+  if (!supervisor || typeof supervisor.stopAccount !== "function") return;
+  try {
+    await withoutWriteContext(() => supervisor.stopAccount(accountId));
+  } catch (err) {
+    logCode("delete_worker", err);
+  }
 }
 
 /* -------------------------------------------------------------------- router */
@@ -429,11 +457,15 @@ export function mailApiRouter(dashboardAuth, deps = {}) {
 
   /* ------------------------------------------------------------------ writes */
 
-  // POST /accounts — probe first, store after, then one claim; a claim that is lost afterwards is
-  // undone whole, so an address is never half-connected.
+  // POST /accounts — a duplicate is refused before anything dials, the probe comes before anything is
+  // stored, then one claim; a claim that is lost afterwards is undone whole, so an address is never
+  // half-connected.
   router.post(`${MAIL_API_PREFIX}/accounts`, route("POST /accounts", async (db, req, res) => {
     const input = readAccountInput(req.body);
     if (!input) return sendError(res, 400, "bad_input");
+    // Before the probe and before the secret is even masked: one mailbox is one account here, and the
+    // store's own identity rule (lower-cased) is this rule.
+    if (await addressTaken(db, input.address)) return sendError(res, 409, "duplicate_address");
     const local = await localInstanceFor(db, deps);
 
     // The new password joins the masking set before any path can write it to a log. A recorder that
@@ -502,10 +534,11 @@ export function mailApiRouter(dashboardAuth, deps = {}) {
     res.json({ account: accountSummary(account) });
   }));
 
-  // DELETE /accounts/:id — the worker first (its connections and watcher), then the rows, the secret
-  // and the claim. A keychain or claim failure after the row is gone is logged by code: the secret of
-  // a deleted account is never served again, and a claim row that cannot be tombstoned still expires
-  // with this instance's liveness.
+  // DELETE /accounts/:id — the worker FIRST and awaited (its run, timers, watcher and both of its
+  // connections are gone before the rows are touched), then the rows, the secret and the claim. A
+  // keychain or claim failure after the row is gone is logged by code: the secret of a deleted account
+  // is never served again, and a claim row that cannot be tombstoned still expires with this
+  // instance's liveness.
   router.delete(`${MAIL_API_PREFIX}/accounts/:id`, route("DELETE /accounts/:id", async (db, req, res) => {
     const id = String(req.params.id);
     if (!MAIL_ACCOUNT_ID_RE.test(id)) return sendError(res, 404, "not_found");
@@ -514,7 +547,7 @@ export function mailApiRouter(dashboardAuth, deps = {}) {
     const local = await localInstanceFor(db, deps);
     const credentials = credentialsFor(db, deps);
 
-    stopWorkerForDelete(deps, id);
+    await stopWorkerForDelete(deps, id);
     const removed = await deleteAccount(db, id);
     try {
       await credentials.deleteSecrets(id);

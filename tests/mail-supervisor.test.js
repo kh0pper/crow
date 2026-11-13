@@ -15,6 +15,7 @@ import { createDbClient } from "../servers/db.js";
 import { MAIL_DDL } from "../servers/shared/mail-schema.js";
 import {
   createAccount,
+  deleteAccount,
   getAccount,
   getSyncState,
   listAccounts,
@@ -1308,6 +1309,115 @@ test("stop() during ensureWatch stops the watcher it was arming and keeps no con
   assert.equal(h.clock.pending(), 0);
 });
 
+/* ------------------------------------------------ stopAccount, one account (B1) */
+
+test("stopAccount stops one account's worker for good: no row, no connection, no notice", async () => {
+  const armed = [];
+  const capture = captureWatchHandlers(armed);
+  const h = await setup({ start: false, adapterFactory: capture.factory });
+  capture.setInner(h.factory);
+  deliver(h.fake, "INBOX", "before the delete");
+  await h.supervisor.start();
+
+  assert.equal(await messageCount(h.db, h.accountId), 1);
+  assert.equal(armed.length, 1);
+  const workerView = armed[0].view;
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  const connections = h.views.length;
+  const factoryCalls = h.factoryArgs.length;
+  const listsBefore = callsOf(h.fake, "list").length;
+
+  await h.supervisor.stopAccount(h.accountId);
+
+  // The connection is closed and the watch is gone; nothing of the supervisor's is left for the id.
+  assert.equal(workerView.state.closed, true);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+  const timersAfterStop = h.clock.pending();
+
+  // The rows go, exactly as the delete route does right after the stop.
+  await deleteAccount(h.db, h.accountId);
+  assert.equal(await messageCount(h.db, h.accountId), 0);
+  assert.deepEqual(await folderRows(h.db, h.accountId), []);
+
+  // A report the dead watch still makes, and two poll intervals: no row, no connection, no notice.
+  armed[0].handlers.onChange({ folderPath: "INBOX", reason: "exists" });
+  armed[0].handlers.onError(netError());
+  await h.clock.advance(POLL_MS * 2);
+  await flush(120);
+
+  assert.equal(await messageCount(h.db, h.accountId), 0);
+  assert.deepEqual(await folderRows(h.db, h.accountId), []);
+  assert.equal(callsOf(h.fake, "list").length, listsBefore, "no folder was listed for the stopped account");
+  assert.equal(h.views.length, connections, "no connection was opened for the stopped account");
+  assert.equal(h.factoryArgs.length, factoryCalls);
+  assert.equal(h.notices.length, 0, "an account that is gone earns no notice");
+  assert.equal(await getSyncState(h.db, h.accountId), null, "no sync state was written");
+
+  // Status for that id is empty: nothing stored, no run, no watch.
+  const status = await h.supervisor.status(h.accountId);
+  assert.equal(status.state, "idle");
+  assert.equal(status.errorCode, null);
+  assert.equal(status.failures, 0);
+  assert.equal(status.running, false);
+  assert.equal(status.watching, false);
+
+  // A second stop, one for an id this supervisor never saw, and one for a junk id: all no-ops.
+  await h.supervisor.stopAccount(h.accountId);
+  await h.supervisor.stopAccount("ma-0123456789abcdef");
+  await h.supervisor.stopAccount(null);
+  await flush(60);
+  assert.equal(h.views.length, connections);
+  assert.equal(h.clock.pending(), timersAfterStop);
+  await h.supervisor.stop();
+  await h.supervisor.stopAccount(h.accountId);
+});
+
+test("stopAccount disarms a back-off, so nothing retries behind a deleted account", async () => {
+  const h = await setup();
+  h.fake.failNext("listFolders", netError());
+  await h.supervisor.syncNow(h.accountId);
+  assert.equal((await getSyncState(h.db, h.accountId)).state, "backoff");
+  const viewsAfterFailure = h.views.length;
+
+  await h.supervisor.stopAccount(h.accountId);
+  await deleteAccount(h.db, h.accountId);
+  await h.clock.advance(BACKOFF_BASE_MS * 4);
+  await flush(120);
+
+  assert.equal(h.views.length, viewsAfterFailure, "the retry the back-off held never ran");
+  assert.equal(h.notices.length, 0);
+  assert.equal(await getSyncState(h.db, h.accountId), null);
+  await h.supervisor.stop();
+});
+
+test("a run whose account's rows are gone before its connection lands writes nothing at all", async () => {
+  const h = await setup({ start: false });
+  const listsBefore = callsOf(h.fake, "listFolders").length;
+  const release = holdCalls(h.gate);
+  const run = h.supervisor.syncNow(h.accountId);
+  await flush(20);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+  assert.equal(h.views.length, 1, "the connection is still opening");
+
+  // A delete that stopped no worker lands while that handshake is still out.
+  await deleteAccount(h.db, h.accountId);
+  release();
+  await run;
+  await flush(200);
+
+  assert.deepEqual(await folderRows(h.db, h.accountId), []);
+  assert.equal(await messageCount(h.db, h.accountId), 0);
+  assert.equal(await getSyncState(h.db, h.accountId), null, "no sync state for a deleted account");
+  assert.equal(h.notices.length, 0);
+  assert.equal(callsOf(h.fake, "listFolders").length, listsBefore, "no pass was run");
+  assert.equal(h.views[0].state.closed, true, "the late connection is closed, never used");
+  const status = await h.supervisor.status(h.accountId);
+  assert.equal(status.running, false);
+  assert.equal(status.failures, 0);
+  assert.equal(h.clock.pending(), 0, "no back-off was armed behind it");
+  await h.supervisor.stop();
+});
+
 /* --------------------------------------- the stopped guard in startRun itself (M) */
 
 test("a start that reaches startRun after stop() opens nothing and records nothing", async () => {
@@ -2089,8 +2199,9 @@ test("a stale recordFailure suspended on its state write arms no timer", async (
 
 test("a stale recordAuthFailure suspended on its account read marks nothing", async () => {
   const h = await setup();
-  // prepare() reads the account first; the handler's own read is the one parked here.
-  const held = holdDbCall(h.db, { match: /FROM mail_accounts/, after: 1 });
+  // prepare() reads the account, the run re-reads it before its plan; the handler's own read is the
+  // one parked here.
+  const held = holdDbCall(h.db, { match: /FROM mail_accounts/, after: 2 });
   h.fake.failNext("listFolders", new MailError("AUTH_FAILED"));
   const failing = h.supervisor.syncNow(h.accountId);
   await held.parked;
@@ -2148,8 +2259,9 @@ test("a notice swallowed by a restart is not repeated for a day", async () => {
     errorCode: "NETWORK",
     failures: FAILURES_BEFORE_NOTICE - 1,
   });
-  // The failing-sync notice reads the account label before it writes its stamp: that read is parked.
-  const held = holdDbCall(h.db, { match: /FROM mail_accounts/, after: 1 });
+  // The failing-sync notice reads the account label before it writes its stamp: that read is parked
+  // (after prepare's own read and the run's re-read before its plan).
+  const held = holdDbCall(h.db, { match: /FROM mail_accounts/, after: 2 });
   h.fake.failNext("listFolders", netError());
   const failing = h.supervisor.syncNow(h.accountId);
   await held.parked;

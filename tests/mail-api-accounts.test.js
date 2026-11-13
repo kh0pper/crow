@@ -38,7 +38,9 @@ const { accountsOverview } = await import("../servers/gateway/mail/accounts-over
 const { addressHash, checkClaim, claimKey, listClaims, writeClaim } = await import("../servers/gateway/mail/claims.js");
 const { createAccount, getAccount, setSyncState, addImageAllow } = await import("../servers/gateway/mail/store/accounts.js");
 const { upsertFolders, upsertMessage } = await import("../servers/gateway/mail/store/messages.js");
+const { createMailSupervisor } = await import("../servers/gateway/mail/sync/supervisor.js");
 const { createFakeMailAdapter } = await import("./fixtures/fake-mail-adapter.mjs");
+const { currentWriteContext, ownerWriteContext, withWriteContext } = await import("../servers/shared/history/write-context.js");
 
 const OWNER = "owner-local-password-session";
 const SSO = "peer-sso-session";
@@ -150,9 +152,22 @@ let n = 0;
 
 /**
  * One test's world. `adapterFactory` defaults to a working in-memory adapter, `supervisor` to one that
- * records its calls, `recordSecrets` to an in-memory recorder.
+ * records its calls, `recordSecrets` to an in-memory recorder. `supervisorFactory({db, credentials,
+ * adapterFactory})` builds a real supervisor over this test's database instead; `wrapDb` sees each
+ * request's own client before the router does; `writeContext` runs every request inside an owner
+ * write context, exactly as dashboardAuth does; `ownerCheck` replaces the owner rule.
  */
-async function setup({ adapterFactory = null, supervisor = undefined, recordSecrets = null, localInstance = LOCAL, credentials: credentialsOverride = null } = {}) {
+async function setup({
+  adapterFactory = null,
+  supervisor = undefined,
+  supervisorFactory = null,
+  recordSecrets = null,
+  localInstance = LOCAL,
+  credentials: credentialsOverride = null,
+  wrapDb = null,
+  writeContext = false,
+  ownerCheck = undefined,
+} = {}) {
   const dir = join(root, "t" + (++n));
   mkdirSync(dir);
   const crow = join(dir, "crow.db");
@@ -172,13 +187,19 @@ async function setup({ adapterFactory = null, supervisor = undefined, recordSecr
   };
 
   const supervisorCalls = [];
-  const fakeSupervisor = supervisor === undefined
-    ? {
+  let fakeSupervisor;
+  if (supervisorFactory != null) {
+    fakeSupervisor = await supervisorFactory({ db, credentials, adapterFactory: adapter, crow });
+  } else if (supervisor === undefined) {
+    fakeSupervisor = {
       calls: supervisorCalls,
       async syncNow(id) { supervisorCalls.push(["syncNow", id]); },
+      async stopAccount(id) { supervisorCalls.push(["stopAccount", id]); },
       async restartAccount(id) { supervisorCalls.push(["restartAccount", id]); },
-    }
-    : supervisor;
+    };
+  } else {
+    fakeSupervisor = supervisor;
+  }
 
   const recorded = [];
   const record = recordSecrets ?? ((values) => { recorded.push(values); });
@@ -189,7 +210,7 @@ async function setup({ adapterFactory = null, supervisor = undefined, recordSecr
     const c = createDbClient(crow);
     const close = c.close.bind(c);
     c.close = () => { opened.closed++; return close(); };
-    return c;
+    return wrapDb == null ? c : (wrapDb(c) ?? c);
   };
 
   const app = express();
@@ -207,7 +228,9 @@ async function setup({ adapterFactory = null, supervisor = undefined, recordSecr
     if (!token) return res.status(401).json({ error: "unauthorized" });
     req.dashboardSession = token;
     if (req.headers["x-test-from"] === "laptop") markFromLaptop(req);
-    next();
+    // The shape dashboardAuth gives a request: everything downstream runs inside a write context.
+    if (writeContext) withWriteContext(ownerWriteContext(token), () => next());
+    else next();
   };
   const dash = express.Router();
   dash.use("/dashboard", csrfMiddleware);
@@ -218,6 +241,7 @@ async function setup({ adapterFactory = null, supervisor = undefined, recordSecr
     credentials,
     localInstance,
     recordSecrets: record,
+    ...(ownerCheck === undefined ? {} : { ownerCheck }),
   }));
   app.use(dash);
 
@@ -235,7 +259,7 @@ async function setup({ adapterFactory = null, supervisor = undefined, recordSecr
 
   return {
     db, crow, credentials, factoryCalls, supervisorCalls, recorded, opened, count, keychainRows,
-    hasOwnParser,
+    hasOwnParser, supervisor: fakeSupervisor,
   };
 }
 
@@ -409,6 +433,7 @@ test("RF5: an address spelled differently ('Alex@Example.COM') is a 409, and cha
   const s = await setup();
   assert.equal((await post(accountsPath, BODY)).status, 201);
   const before = await s.count("mail_accounts");
+  assert.equal(s.factoryCalls.length, 1, "the first connect probed once");
 
   for (const address of ["Alex@Example.COM", " ALEX@example.com "]) {
     const r = await post(accountsPath, { ...BODY, address });
@@ -420,6 +445,31 @@ test("RF5: an address spelled differently ('Alex@Example.COM') is a 409, and cha
   assert.equal(await s.count("crow_keychain"), 1, "no second secret");
   await flush();
   assert.equal(s.supervisorCalls.filter(([what]) => what === "syncNow").length, 1);
+});
+
+test("M2: a duplicate address is answered before the probe, so the adapter is never built", async () => {
+  const s = await setup();
+  const first = await post(accountsPath, BODY);
+  assert.equal(first.status, 201, first.text);
+  const id = first.json.account.id;
+  assert.equal(s.factoryCalls.length, 1, "the first connect was probed once");
+  const claimsBefore = await listClaims(s.db, ADDRESS);
+  const recordedBefore = s.recorded.length;
+
+  const again = await post(accountsPath, { ...BODY, address: "alex@EXAMPLE.com", label: "Second" });
+  assert.equal(again.status, 409, again.text);
+  assert.deepEqual(again.json, {
+    error: "duplicate_address",
+    message: "That address is already connected on this Crow.",
+  });
+  assert.equal(s.factoryCalls.length, 1, "the duplicate never dialled the server");
+  assert.equal(again.text.includes(ADDRESS), false, "the answer names no address");
+  assert.equal(again.text.includes("mail.example.test"), false, "the answer names no host");
+  assert.equal(await s.count("mail_accounts"), 1, "no second account");
+  assert.equal(await s.count("crow_keychain"), 1, "no second secret");
+  assert.deepEqual(await listClaims(s.db, ADDRESS), claimsBefore, "no second claim");
+  assert.equal(s.recorded.length, recordedBefore, "the duplicate's password was never masked or stored");
+  assert.equal((await getAccount(s.db, id)).label, "Personal", "the first account is untouched");
 });
 
 test("an address another live instance holds is a 409 naming it, and the adapter is never built", async () => {
@@ -494,11 +544,61 @@ test("a keychain whose key is not on this machine is its own answer, never a bad
   assert.equal(await s.count("mail_accounts"), 0, "the half-made account was undone");
 });
 
-test("RF5/M4: DELETE removes the messages, folders, secret, claim and worker", async () => {
-  const s = await setup();
+test("RF5/M4/B1: DELETE stops the account's real worker first, then removes the messages, folders, secret and claim", async () => {
+  const order = [];
+  const views = [];
+  let armed = false;
+  const atDelete = [];
+  const s = await setup({
+    // A real supervisor: its worker owns a connection and an IDLE watch for the account, so the stop
+    // the route performs is observable in what is closed and in what the rows see.
+    supervisorFactory: async ({ db, credentials, adapterFactory }) => {
+      const real = createMailSupervisor({
+        db,
+        credentials,
+        adapterFactory: async (args) => {
+          const view = await adapterFactory(args);
+          views.push(view);
+          return view;
+        },
+        setTimer: (fn) => fn,
+        clearTimer: () => {},
+        notify: async () => { order.push("notice"); },
+        log: () => {},
+      });
+      return {
+        ...real,
+        async syncNow(id) { order.push("syncNow:" + id); return real.syncNow(id); },
+        async stopAccount(id) {
+          order.push("stop:" + id);
+          await real.stopAccount(id);
+          order.push("stopped:" + id);
+        },
+      };
+    },
+    // Every request's own client, seen just before the router: the delete's transaction is the moment
+    // the rows go, so what the worker looks like there is the whole question.
+    wrapDb: (client) => {
+      const realRun = client.runTransaction.bind(client);
+      client.runTransaction = async (work) => {
+        if (armed) {
+          atDelete.push({
+            order: [...order],
+            closed: views.map((view) => view.calls.some((call) => call.method === "close")),
+          });
+        }
+        return realRun(work);
+      };
+      return client;
+    },
+  });
+
   const created = await post(accountsPath, BODY);
   assert.equal(created.status, 201, created.text);
   const id = created.json.account.id;
+  await flush(60);
+  assert.equal(views.length, 1, "the connect opened one connection for its first sync");
+  assert.equal((await s.supervisor.status(id)).watching, true, "the worker holds an IDLE watch");
 
   const { folders } = await upsertFolders(s.db, id, [{ path: "INBOX", name: "INBOX", specialUse: "\\Inbox", delimiter: "/" }]);
   await upsertMessage(s.db, {
@@ -508,11 +608,20 @@ test("RF5/M4: DELETE removes the messages, folders, secret, claim and worker", a
   });
   await setSyncState(s.db, id, { state: "idle" });
   await addImageAllow(s.db, id, "sam@example.com");
-  s.supervisorCalls.length = 0;
 
+  armed = true;
   const r = await del(accountPath(id));
+  armed = false;
   assert.equal(r.status, 200, r.text);
   assert.deepEqual(r.json, { ok: true, messages: 1 });
+
+  // The stop ran to completion BEFORE the delete's own transaction: the worker's connection was
+  // already closed when the rows went, so nothing could write them back.
+  assert.equal(atDelete.length, 1, "the delete ran in one transaction");
+  assert.ok(atDelete[0].order.includes("stopped:" + id), "the stop was awaited before the rows were deleted");
+  assert.ok(atDelete[0].order.indexOf("stop:" + id) < atDelete[0].order.indexOf("stopped:" + id));
+  assert.deepEqual(atDelete[0].closed, [true], "the worker's connection was closed before the rows went");
+  assert.equal(order.includes("notice"), false, "no notice was sent");
 
   for (const table of ["mail_messages", "mail_threads", "mail_folders", "mail_image_allow", "mail_sync_state"]) {
     assert.equal(await s.count(table, "WHERE account_id = ?", [id]), 0, `${table} has no row left`);
@@ -523,12 +632,17 @@ test("RF5/M4: DELETE removes the messages, folders, secret, claim and worker", a
   assert.equal(claims.length, 1);
   assert.equal(claims[0].released, true, "the claim is a tombstone, so the address is free");
   assert.deepEqual(await checkClaim(s.db, ADDRESS, { localInstanceId: "instC" }), { ok: true });
-  await flush();
-  assert.deepEqual(s.supervisorCalls, [["restartAccount", id]], "the account's worker was stopped first");
+
+  // And the worker stays gone: nothing is opened again for the id afterwards.
+  await flush(120);
+  assert.equal(views.length, 1, "no second connection for the deleted account");
+  assert.equal((await s.supervisor.status(id)).watching, false);
+  assert.equal((await s.supervisor.status(id)).running, false);
 
   assert.equal((await del(accountPath(id))).status, 404, "a second delete is a 404");
   assert.equal((await del(`${accountsPath}/ma-0123456789abcdef`)).status, 404);
   assert.equal((await del(`${accountsPath}/not-an-account`)).status, 404);
+  await s.supervisor.stop();
 });
 
 test("probeAccount closes the adapter on success and on failure, and leaks neither secret nor username", async () => {
@@ -786,4 +900,81 @@ test("the runtime set by boot is what a router without deps uses, and clearing i
   assert.deepEqual(calls, [], "the injected supervisor is the one that ran");
   assert.deepEqual(s.supervisorCalls, [["syncNow", row.id]]);
   clearMailApiRuntime();
+});
+
+/* ------------------------------------------------ a fault that is not mail's (M5) */
+
+test("M5: a failure that is not a MailError is 500 internal, never a mail-server sentence", async () => {
+  // A keychain write that fails like a database would: not a MailError, and its text names the store.
+  const s = await setup({
+    credentials: {
+      getSecrets: async () => ({}),
+      saveSecret: async () => { throw new Error("SQLITE_FULL: database or disk is full (crow_keychain)"); },
+      deleteSecrets: async () => ({ deleted: 0 }),
+    },
+  });
+  const { lines, result: stored } = await warnings(() => post(accountsPath, BODY));
+  assert.equal(stored.status, 500, stored.text);
+  assert.deepEqual(stored.json, { error: "internal", message: "Something went wrong." });
+  for (const text of [stored.text, lines.join("\n")]) {
+    assert.equal(text.includes("SQLITE_FULL"), false, "no store text in the answer or a log");
+    assert.equal(text.includes(PASSWORD), false, "no password anywhere");
+    assert.equal(text.includes("crow_keychain"), false, "no table name anywhere");
+  }
+  assert.equal(await s.count("mail_accounts"), 0, "the half-made account was undone");
+
+  // A read that fails the same way, from the request's own database client.
+  const reads = await setup({
+    ownerCheck: async () => true,
+    wrapDb: (client) => {
+      const realExecute = client.execute.bind(client);
+      client.execute = async (query, ...rest) => {
+        const sql = typeof query === "string" ? query : (query?.sql ?? "");
+        if (/FROM mail_accounts/.test(sql)) throw new Error("SQLITE_IOERR: disk I/O error");
+        return realExecute(query, ...rest);
+      };
+      return client;
+    },
+  });
+  const broken = await get(`${accountsPath}/ma-0123456789abcdef/folders`);
+  assert.equal(broken.status, 500, broken.text);
+  assert.deepEqual(broken.json, { error: "internal", message: "Something went wrong." });
+  assert.equal(broken.text.includes("SQLITE_IOERR"), false);
+  assert.equal(reads.opened.n, reads.opened.closed, "one client per request, closed");
+
+  // A MailError keeps its own code and its own fixed sentence.
+  const refused = await setup({
+    adapterFactory: () => {
+      const fake = createFakeMailAdapter();
+      fake.failNext("connect", new MailError("AUTH_FAILED"));
+      return fake;
+    },
+  });
+  const auth = await post(accountsPath, BODY);
+  assert.equal(auth.status, 400, auth.text);
+  assert.deepEqual(auth.json, { error: "AUTH_FAILED", message: MAIL_ERROR_TEXT.AUTH_FAILED });
+  assert.equal(await refused.count("mail_accounts"), 0);
+});
+
+/* --------------------------------- the supervisor's work outlives the request (M1) */
+
+test("M1: the long-lived supervisor work is opened outside the request's write context", async () => {
+  const seen = [];
+  const supervisor = {
+    async syncNow(id) { seen.push(["syncNow", id, currentWriteContext()]); },
+    async stopAccount(id) { seen.push(["stopAccount", id, currentWriteContext()]); },
+  };
+  const s = await setup({ supervisor, writeContext: true });
+
+  const created = await post(accountsPath, BODY);
+  assert.equal(created.status, 201, created.text);
+  const id = created.json.account.id;
+  await flush();
+  assert.equal((await del(accountPath(id))).status, 200, "the delete goes through");
+
+  assert.deepEqual(seen.map(([what]) => what), ["syncNow", "stopAccount"]);
+  for (const [what, , ctx] of seen) {
+    assert.equal(ctx, null, `${what} carries no request author into its writes`);
+  }
+  assert.equal(await s.count("mail_accounts"), 0);
 });
