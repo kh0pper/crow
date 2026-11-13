@@ -83,6 +83,7 @@
  * error unchanged.
  */
 
+import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import * as Y from "yjs";
 import {
@@ -160,6 +161,9 @@ import { initStudioTables } from "./init-tables.js";
 
 /** The error name a project ACL refusal carries; the hub maps it to "acl". */
 const ACL_ERROR_NAME = "AclError";
+
+/** The one scene a newly created song starts with. */
+const NEW_SONG_SCENE_NAME = "Scene 1";
 
 /** Ten minutes of de-duplication, per song, when the caller names no window. */
 const DEFAULT_DEDUPE_MS = 600000;
@@ -2086,9 +2090,10 @@ export function createHub({
    * Create a song in a project.
    *
    * Needs `write_files`; an archived project is refused by the ACL module. The
-   * new song's empty document is stored as its update seq 1 in the same
-   * transaction as the song's own row, so opening it later reproduces exactly
-   * what its author saw and a save that fails leaves no empty song behind.
+   * new song's document — one scene named "Scene 1" and no tracks — is stored
+   * as its update seq 1 in the same transaction as the song's own row, so
+   * opening it later reproduces exactly what its author saw and a save that
+   * fails leaves no empty song behind.
    * @param {{project_id: number, title: string, author: object}} request
    * @returns {Promise<{ok: true, song_id: string, snapshot_version: number}|{ok: false, code: string, error: string}>}
    */
@@ -2113,6 +2118,19 @@ export function createHub({
     }
 
     const doc = newSongDoc({ title: songTitle });
+    // A new song opens on Scene 1, so the operator (or an agent) has a column
+    // to drop a clip into the moment it exists. The scene goes on with the very
+    // command the panel's "+ Scene" runs, BEFORE the document is encoded: the
+    // song's own first stored update then already carries it, so opening the
+    // song later reproduces what its author saw. `newSongDoc` itself still makes
+    // an empty document (a song that never came through here keeps whatever it
+    // was stored with — no migration runs, and no older song is touched).
+    doc.transact(() => {
+      applyCommand(
+        doc,
+        prepareCommand(doc, "scene.add", { id: `s-${randomUUID()}`, name: NEW_SONG_SCENE_NAME }),
+      );
+    }, "studio:new-song");
     const update = Y.encodeStateAsUpdate(doc);
 
     let created;

@@ -350,6 +350,8 @@
    *            nextBarFrame: function(): {bar: number, beat: number, frame: number},
    *            barLines: function(object): {barFrame: number|null,
    *              nextBarFrame: number|null, bar: number|null},
+   *            clickBeats: function(number, number, object): {count: number,
+   *              frames: number[], accents: boolean[]},
    *            position: function(): {bar: number, beat: number, sixteenth: number},
    *            isPlaying: function(): boolean}}
    */
@@ -391,6 +393,25 @@
      * performance bus's bar question every block allocates nothing at all.
      */
     const barScratch = { bar: 0, beat: 0, frame: 0 };
+
+    /**
+     * How many beats one block's `clickBeats()` answer can hold. A block is 128
+     * frames in every host, so even a very fast song puts one beat in it; the
+     * room for more is there so a larger block is still answered whole.
+     */
+    const MAX_CLICK_BEATS = 64;
+
+    /**
+     * The object `clickBeats()` fills when no target is named: frame offsets
+     * inside the block and which of those beats is the bar's first. Allocated
+     * once, so a host reading the metronome's beats every block makes no
+     * garbage on the audio thread.
+     */
+    const clickScratch = {
+      count: 0,
+      frames: new Array(MAX_CLICK_BEATS).fill(0),
+      accents: new Array(MAX_CLICK_BEATS).fill(false),
+    };
 
     /** track id → [{track_id, clipId, startBeat, endBeat}] in beat order. */
     const segments = new Map();
@@ -1788,6 +1809,61 @@
       return out;
     }
 
+    /**
+     * The quarter-note beats whose frame falls inside one block, as offsets
+     * inside it, each with whether it is the first beat of an engine bar (the
+     * metronome's accent).
+     *
+     * The engine's bars are four beats (`BEATS_PER_BAR`), whatever the song's
+     * `meta.meter` says, and this answer deliberately follows what the engine
+     * PLAYS rather than the stored meter: time-signature support in the engine
+     * is a separate gap, so a 3/4 song still accents every fourth beat here, in
+     * step with the grid and the arrangement the engine really renders. Beats
+     * are counted from beat 0 of the transport plus the arrangement's origin
+     * beat (`originBeat()`), so the accents sit on the very bar lines a host
+     * shows, at any tempo and after a seek.
+     *
+     * A stopped transport (or one that has not run yet) has no beat grid at
+     * all, so the answer is empty — the count is 0 and nothing is read.
+     *
+     * The answer is written into a REUSED object (the caller's `target`, or this
+     * sequencer's own), like `barLines()`: `frames` are block-relative and
+     * sorted, and `accents` says which of them is the bar's first beat. Nothing
+     * is allocated, so it is safe on the audio thread.
+     * @param {number} frameStart absolute frame of the block's first frame
+     * @param {number} frames how many frames the block holds
+     * @param {{count: number, frames: number[], accents: boolean[]}} [target]
+     * @returns {{count: number, frames: number[], accents: boolean[]}} the same
+     *   object, filled in
+     */
+    function clickBeats(frameStart, frames, target) {
+      const out = target && typeof target === "object" ? target : clickScratch;
+      out.count = 0;
+      if (!playing || originFrame === null) return out;
+      const start = Math.trunc(Number(frameStart));
+      const count = Math.trunc(Number(frames));
+      if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) return out;
+
+      // The first beat whose ROUNDED frame is at or after the block's first
+      // frame: the same "x >= frame - 0.5" rule `nextBarFrom` uses, so a beat
+      // boundary found here is the boundary the block itself plays.
+      let index = Math.max(0, Math.ceil((start - 0.5 - originFrame) / framesPerBeat - EPSILON_BEATS));
+      const origin = originBeat();
+      const end = start + count;
+      const room = Array.isArray(out.frames) ? out.frames.length : 0;
+      while (out.count < room) {
+        const frame = Math.round(originFrame + index * framesPerBeat);
+        if (frame >= end) break;
+        if (frame >= start) {
+          out.frames[out.count] = frame - start;
+          out.accents[out.count] = (origin + index) % BEATS_PER_BAR === 0;
+          out.count += 1;
+        }
+        index += 1;
+      }
+      return out;
+    }
+
     // --- block -----------------------------------------------------------
 
     /**
@@ -2582,6 +2658,7 @@
       block: block,
       nextBarFrame: nextBarFrame,
       barLines: barLines,
+      clickBeats: clickBeats,
       position: position,
       isPlaying: function isPlaying() {
         return playing;

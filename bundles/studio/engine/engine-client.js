@@ -117,6 +117,17 @@
  *   arrangement, where its placements sound on their bars. Switching mode
  *   closes every sounding note and voice; `seek()` moves the arrangement
  *   playhead, and the next block plays from that bar.
+ * - `setMetronome(on)` turns the engine's metronome click on or off: while the
+ *   transport plays, one short click (~25 ms of a sine with a fast decay) on
+ *   every quarter-note beat, 1500 Hz and louder on the first beat of an engine
+ *   bar and 1000 Hz on the others. The engine's bars are four beats whatever
+ *   the song's `meta.meter` says — time-signature support in the engine is a
+ *   separate gap — so the click follows what the engine really plays, and it
+ *   follows a tempo change with the sequencer's own clock. It is a MONITOR
+ *   signal: the processor adds it to its output after the master tap, so no
+ *   mix, tap, meter reading, mixdown or render ever contains it. Off by
+ *   default; `server/render.js` never sends it, so a render stays click-free.
+ *   It never edits the song and is not a command.
  * - `flush()` resolves once every message posted before it has been applied.
  * - `loadAudio(take_id, channels, rate)` hands the processor one take's PCM,
  *   resampled here to the context's rate when the take was recorded at another
@@ -996,6 +1007,7 @@
    *                    stop: function(): void,
    *                    setMode: function(string): void,
    *                    seek: function(number): void,
+   *                    setMetronome: function(boolean): void,
    *                    flush: function(): Promise<void>,
    *                    onPosition: function(function): function,
    *                    onLaunch: function(function): function,
@@ -2069,6 +2081,26 @@
        */
       seek(bar) {
         post({ type: "seek", bar: Number(bar) });
+      },
+
+      /**
+       * Turn the engine's metronome click on or off.
+       *
+       * While the transport plays it clicks once per quarter-note beat, at
+       * 1500 Hz and louder on the first beat of an engine bar and 1000 Hz on
+       * the rest. It is the engine's own monitor signal: the processor adds it
+       * to its output AFTER the master tap, so a master tap, the meter, a
+       * mixdown or a render never carries it — and `server/render.js` never
+       * sends this message, so renders are click-free. The engine's bars are
+       * four beats whatever the song's `meta.meter` says (time-signature
+       * support in the engine is a separate gap). Off until this says
+       * otherwise; stopping the transport or turning it off starts no new
+       * click, and the one already ringing is left to finish.
+       * @param {boolean} on anything but `true` turns it off
+       * @returns {void}
+       */
+      setMetronome(on) {
+        post({ type: "metronome", on: on === true });
       },
 
       /**
