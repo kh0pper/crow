@@ -263,6 +263,12 @@ async function bootClient(options = {}) {
   const sockets = [];
   /** Timers the page scheduled (a toast's own), so nothing outlives a test. */
   const timers = [];
+  /**
+   * What the page asked of `navigator.mediaDevices`: every listener it put on
+   * the device list and took off again, and how often it listed the outputs.
+   * A torn-down page must leave no listener behind, which is what these count.
+   */
+  const mediaCalls = { added: [], removed: [], enumerated: 0 };
 
   function makeSocket() {
     const socket = { readyState: 1, handlers: {} };
@@ -306,7 +312,14 @@ async function bootClient(options = {}) {
     ? {}
     : {
         mediaDevices: {
+          addEventListener(name) {
+            mediaCalls.added.push(name);
+          },
+          removeEventListener(name) {
+            mediaCalls.removed.push(name);
+          },
           async enumerateDevices() {
+            mediaCalls.enumerated += 1;
             return options.devices || [];
           },
         },
@@ -398,6 +411,7 @@ async function bootClient(options = {}) {
     engine: engineApi,
     Ctx,
     storage,
+    media: mediaCalls,
     current,
     frame,
     click,
@@ -575,6 +589,48 @@ test("an output the browser refuses falls back to the default one and says so", 
     Ctx.sinks,
     ["gone-1", ""],
     "the refused device first, then the default output it fell back to",
+  );
+});
+
+// --- teardown ---------------------------------------------------------------
+
+/** @returns {number} how many times one device-list event name was registered. */
+function countOf(list, name) {
+  return list.filter((entry) => entry === name).length;
+}
+
+test("a torn-down page takes the output picker's listeners off, so a re-boot leaves one", async () => {
+  const ui = await bootClient({
+    devices: [{ kind: "audiooutput", deviceId: "out-1", label: "Studio monitors" }],
+  });
+  const select = ui.document.querySelector("[data-role=output-device]");
+  assert.ok(select, "the output picker is on the page");
+  assert.equal(countOf(ui.media.added, "devicechange"), 1, "one devicechange listener for this page");
+  assert.equal(countOf(ui.media.removed, "devicechange"), 0, "and nothing taken off yet");
+
+  // Turbo snapshots the page for the Back button (a visit away is the same
+  // teardown): the client's own teardown runs, and both of the picker's
+  // listeners come off with the rest of the page's.
+  ui.document.dispatchEvent(new ui.window.Event("turbo:before-cache", { bubbles: true }));
+  await ui.settle();
+  assert.equal(countOf(ui.media.removed, "devicechange"), 1, "the devicechange listener is removed");
+
+  // A focus on the picker after teardown lists nothing: that listener is gone too.
+  const listedAfterTeardown = ui.media.enumerated;
+  select.dispatchEvent(new ui.window.Event("focus", { bubbles: true }));
+  await ui.settle();
+  assert.equal(ui.media.enumerated, listedAfterTeardown, "the focus handler is removed as well");
+
+  // Back to this page: the shell boots again, and exactly one listener is left.
+  const page = ui.document.querySelector(".studio");
+  assert.ok(page && typeof page.__studioBoot === "function", "the shell can be booted again");
+  page.__studioBoot();
+  await ui.settle();
+  assert.equal(countOf(ui.media.added, "devicechange"), 2, "the second boot registers its own");
+  assert.equal(
+    countOf(ui.media.added, "devicechange") - countOf(ui.media.removed, "devicechange"),
+    1,
+    "so one devicechange listener is registered after two boots and one teardown",
   );
 });
 

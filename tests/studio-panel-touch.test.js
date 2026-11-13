@@ -178,6 +178,45 @@ test("no unselectable rule swallows text: not *, not an input, not the ask box",
   }
 });
 
+// --- a field inside a control still selects its text --------------------------
+
+test("a field inside an unselectable control keeps its selection", async () => {
+  const css = String(styleText(await render({ song: "song-1" })));
+  const rules = cssRules(css);
+
+  // The rule that turns selection back on: all three declarations, and it
+  // names a plain input so it is not some other field's own setting.
+  const selectsText = (body) =>
+    /(?:^|;|\s)user-select\s*:\s*text/.test(String(body)) &&
+    /-webkit-user-select\s*:\s*text/.test(String(body)) &&
+    /-webkit-touch-callout\s*:\s*default/.test(String(body));
+  const index = rules.findIndex(
+    (candidate) => selectsText(candidate.body) && candidate.selectors.includes(".studio input"),
+  );
+  assert.notEqual(index, -1, "a rule gives fields their selection back");
+
+  // It has to come AFTER the hold-is-a-press rule: same weight, later wins.
+  const lockingIndex = rules.findIndex(
+    (candidate) => locksSelection(candidate.body) && candidate.selectors.includes(".studio button"),
+  );
+  assert.notEqual(lockingIndex, -1, "the unselectable rule is on the sheet");
+  assert.ok(index > lockingIndex, "the fields' rule comes after the one that turns selection off");
+
+  const rule = rules[index];
+  const fields = ["input", "textarea", "[contenteditable]"];
+  for (const field of fields) {
+    assert.ok(rule.selectors.includes(`.studio ${field}`), `a bare ${field} selects its text`);
+  }
+  // And the same three inside every container the unselectable rule names, so a
+  // velocity, a clip's name or a block's label is still a field.
+  for (const container of [".st-cell", ".st-clip", ".st-tl-block", "[role=button]", "button"]) {
+    for (const field of fields) {
+      const selector = `.studio ${container} ${field}`;
+      assert.ok(rule.selectors.includes(selector), `${selector} selects its text`);
+    }
+  }
+});
+
 // --- item 20: the first context runs, and says how late it is ---------------
 
 /**

@@ -407,6 +407,8 @@ test("an omitted length on a song with no clips still renders one bar", async ()
 
 test("an arrangement render still has to say how long", async () => {
   const { renderer, asked } = lengthRenderer();
+  // An arrangement has no pattern chain to measure, so an omitted length is
+  // refused for what it is missing — not as a number past the limit.
   await assert.rejects(
     renderer.render({
       song_id: "song-1",
@@ -415,7 +417,23 @@ test("an arrangement render still has to say how long", async () => {
       mode: "arrangement",
       from_bar: 0,
     }),
-    /A render can be at most 300 seconds long\./,
+    /An arrangement render needs seconds\./,
   );
   assert.deepEqual(asked, [], "no arrangement render is derived: the caller names its window");
+});
+
+test("an arrangement render that says how long still renders", async () => {
+  const { renderer, asked } = lengthRenderer();
+  const result = await renderer.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: chainSong(),
+    mode: "arrangement",
+    from_bar: 0,
+    seconds: 8,
+  });
+  assert.equal(asked.length, 1, "the arrangement render reached the engine");
+  assert.equal(asked[0].seconds, 8, "the window the caller named is the window rendered");
+  assert.equal(asked[0].mode, "arrangement", "and it rendered the timeline, not the session grid");
+  assert.equal(result.seconds, 0.01, "the stubbed audio's own figure is what comes back");
 });

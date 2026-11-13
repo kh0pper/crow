@@ -327,6 +327,31 @@ const STYLES = `
   .studio rect.st-note {
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   }
+  /* A field inside one of those controls is still a field: the hold above must
+     not reach into it, or text the operator has to edit (a velocity, a clip's
+     name, a block's label) could not be selected or long-pressed at all. This
+     rule comes after the one above and names every such field, both bare and
+     inside the containers that hold them. */
+  .studio input,
+  .studio textarea,
+  .studio [contenteditable],
+  .studio .st-cell input,
+  .studio .st-cell textarea,
+  .studio .st-cell [contenteditable],
+  .studio .st-clip input,
+  .studio .st-clip textarea,
+  .studio .st-clip [contenteditable],
+  .studio .st-tl-block input,
+  .studio .st-tl-block textarea,
+  .studio .st-tl-block [contenteditable],
+  .studio [role=button] input,
+  .studio [role=button] textarea,
+  .studio [role=button] [contenteditable],
+  .studio button input,
+  .studio button textarea,
+  .studio button [contenteditable] {
+    user-select: text; -webkit-user-select: text; -webkit-touch-callout: default;
+  }
   .studio .st-presence { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
   .studio .st-chip { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--st-muted); }
   .studio .st-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--st-human); flex: 0 0 auto; }

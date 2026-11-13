@@ -1376,7 +1376,7 @@ export function createStudioServer({
           .positive()
           .optional()
           .describe(
-            "how many seconds to render; leave out for one full pass of the scene or clip's longest pattern chain",
+            "how many seconds to render; optional for a scene or clip (leave out for one full pass of its longest pattern chain), required for an arrangement render",
           ),
         mode: z.enum(["session", "arrangement"]).optional().describe("session (default: a scene or clip) or arrangement (the timeline)"),
         from_bar: z.number().int().min(0).max(998).optional().describe("arrangement only: the bar to start from (0 = the first bar)"),

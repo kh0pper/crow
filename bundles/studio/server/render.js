@@ -776,11 +776,13 @@ export function createRenderer({
     const fromBar = renderFromBar(request.from_bar);
     // How long, refused or capped here too. A session render that names no
     // seconds is one full pass of the pattern chain it plays (see
-    // `onePassSeconds`); an arrangement render still has to say. Either way the
-    // one cap in `checkSeconds` applies, to a derived span as to an asked one.
-    const asked = seconds === undefined || seconds === null
-      ? (mode === "session" ? onePassSeconds(snapshot, pickLaunch(snapshot, scene_id, clip_id)) : seconds)
-      : seconds;
+    // `onePassSeconds`); an arrangement render has no chain to measure, so it
+    // says its own span — refused for what it is missing, not as a bad number.
+    // Either way the one cap in `checkSeconds` applies, to a derived span as
+    // to an asked one.
+    const omitted = seconds === undefined || seconds === null;
+    if (omitted && mode === "arrangement") throw new Error("An arrangement render needs seconds.");
+    const asked = omitted ? onePassSeconds(snapshot, pickLaunch(snapshot, scene_id, clip_id)) : seconds;
     const span = checkSeconds(asked, longest);
 
     await acl.assertLocalCapability(db, project_id, "write_files");
