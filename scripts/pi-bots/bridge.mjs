@@ -329,9 +329,11 @@ export function toolAllowlist(def, { remoteEnabled = false, serviceBlocks = null
   // satellite, file-mode delivery, an ungranted bundle) the entry keeps today's spelling.
   // A BARE entry naming a server (e.g. "studio") is the same trap: pi-lab registers that
   // server's tools one by one as mcp__studio__<tool>, so `mcp__studio` matches nothing.
-  // bare-server-tools.mjs lists them (the rail primes the cache before the spawn) and the
-  // entry expands to the names pi really offers. No known list — every non-owner turn, and
-  // any server that could not be listed — keeps today's spelling byte for byte. A
+  // bare-server-tools.mjs lists them and the entry expands to the names pi really offers.
+  // The listing is passed in EXPLICITLY (`bareServerTools`, the map primeBareServerTools
+  // returned, carried on piRpcOpts so the budget check and the spawn see one snapshot);
+  // nothing is read from the cache here. No map or no entry for the id — every non-owner
+  // turn, and any server that could not be listed — keeps today's spelling byte for byte. A
   // SATELLITE-hosted bundle is never expanded locally: it has no local server, it is spelled
   // from its block above when granted, and a bare entry for it keeps today's spelling.
   const mcp = ((def.tools && def.tools.crow_mcp) || []).flatMap((s) =>
@@ -2060,8 +2062,8 @@ export async function handleInbound(opts) {
   }
 
   // piRpcOpts carries {def, sessionDir, resolved, selfAuthoringDir,
-  // remoteEnabled, narrowedTools, appendSystemPromptFile}; the resume decision
-  // is channel policy, so the caller adds piSessionId.
+  // remoteEnabled, narrowedTools, appendSystemPromptFile, bareServerTools}; the
+  // resume decision is channel policy, so the caller adds piSessionId.
   const pi = new PiRpc(Object.assign({}, spawnPrep.piRpcOpts, {
     piSessionId: effectiveResume ? session.pi_session_id : null }));
   let result;

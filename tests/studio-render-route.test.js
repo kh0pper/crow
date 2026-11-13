@@ -30,6 +30,7 @@ import { Readable } from "node:stream";
 import { createClient } from "@libsql/client";
 import express, { Router } from "express";
 import { WebSocketServer } from "ws";
+import { AclError } from "../servers/shared/project-acl.js";
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb } from "../bundles/studio/server/web.js";
@@ -116,20 +117,44 @@ function fakeRenderStorage({ objects = new Map(), failGet = null, streamError = 
 }
 
 /**
+ * The project ACL of a caller who may write the project but may not SEE its
+ * songs: `assertCapability` lets the song be created, and the hub's own read
+ * (`openSong`) is refused with the ACL's error, which is what a project a
+ * caller has no access to answers.
+ * @returns {object} the acl module the hub reads
+ */
+function aclHidingTheSongs() {
+  return {
+    async assertProjectExists(_db, projectId) {
+      const id = Number(projectId);
+      throw new AclError(`Project #${id} not found`, "not_found");
+    },
+    async assertCapability(_db, projectId) {
+      const id = Number(projectId);
+      if (id !== PROJECT) throw new AclError(`Project #${id} not found`, "not_found");
+      return { id };
+    },
+    async appendAudit() {},
+  };
+}
+
+/**
  * Boot the Studio router on 127.0.0.1:0 with one song, and the render storage
  * the routes stream through.
  *
  * @param {import("node:test").TestContext} t
  * @param {{session?: boolean, storage?: object|null,
- *          renderInfoOf?: Function|null}} [options]
+ *          renderInfoOf?: Function|null, acl?: object|null}} [options]
  *   `session: false` installs a dashboard gate that refuses every request the
  *   way an ended session answers; `renderInfoOf` is the audit-row lookup the
- *   panel loader injects (absent means this instance cannot describe a render).
+ *   panel loader injects (absent means this instance cannot describe a render);
+ *   `acl` replaces the project ACL the hub reads, so a test can model a caller
+ *   who cannot see the song's project.
  */
-async function boot(t, { session = true, storage = null, renderInfoOf = null } = {}) {
+async function boot(t, { session = true, storage = null, renderInfoOf = null, acl = null } = {}) {
   const db = scratchDb(t);
   await initStudioTables(db);
-  const hub = createHub({ db, acl: fakeAcl(), onBroadcast: () => {} });
+  const hub = createHub({ db, acl: acl ?? fakeAcl(), onBroadcast: () => {} });
 
   const created = await hub.createSong({ project_id: PROJECT, title: "Render song", author: HUMAN });
   assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
@@ -335,6 +360,37 @@ test("a storage failure is the fixed 503 sentence, naming nothing", async (t) =>
   assert.match(cut.headers.get("content-type"), /^application\/json/);
   assert.equal(cut.headers.get("cache-control"), null);
   assert.notEqual(cut.headers.get("content-length"), "4096");
+});
+
+test("a song whose project the caller cannot see is refused, and storage is never asked", async (t) => {
+  const storage = fakeRenderStorage();
+  const { base, songId } = await boot(t, { storage, acl: aclHidingTheSongs() });
+  const key = renderKey(songId, RENDER_NAME);
+  storage.objects.set(key, WAV_BYTES);
+
+  // The row exists (the song list is not itself an ACL read), so the refusal is
+  // the hub's own `openSong` — the same read every other studio route makes.
+  const refused = await fetchRender(base, songId, RENDER_NAME);
+  assert.equal(
+    refused.status === 403 || refused.status === 404,
+    true,
+    `a project the caller cannot see is a 403 or a 404, got ${refused.status}`,
+  );
+  assert.deepEqual(storage.requested, [], "no render bytes are read for a song this caller cannot see");
+  assert.equal(refused.text.includes("RIFF"), false, "and none are handed back");
+
+  // The info route takes the same read gate, so it names no figures either.
+  const asked = [];
+  const infoBoot = await boot(t, {
+    acl: aclHidingTheSongs(),
+    renderInfoOf: async (request) => {
+      asked.push(request);
+      return { seconds: 1 };
+    },
+  });
+  const info = await fetchRenderInfo(infoBoot.base, infoBoot.songId, RENDER_NAME);
+  assert.equal(info.status === 403 || info.status === 404, true, `info answered ${info.status}`);
+  assert.deepEqual(asked, [], "the audit row is not read for a song this caller cannot see");
 });
 
 test("the render route needs a dashboard session", async (t) => {

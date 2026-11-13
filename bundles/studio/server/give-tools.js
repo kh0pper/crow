@@ -21,7 +21,8 @@
  * dashboard session and the CSRF header, refuses an agent caller, and needs
  * write on the song's project. It also never guesses which bot: the caller
  * names the bot and the stored row's `project_id` has to be the project the
- * route asked about.
+ * route asked about. Crow's voice bot is refused by its id before any row is
+ * read (the injected `isVoiceBot`), because its tools are its own.
  *
  * ## A tool budget it cannot read fails open
  *
@@ -37,8 +38,11 @@
 /** What a caller is told when the def is already past saving by hand. */
 const BAD_DEF_TEXT = "That bot's definition could not be read; fix it in Bot Builder first.";
 
-/** What a caller is told when the bot is not this project's, or is gone. */
-const NOT_FOUND_TEXT = "That bot is not this project's bot any more.";
+/**
+ * What a caller is told when the bot is not this project's, or is gone — and
+ * what Crow's voice bot is told, so nothing about it is confirmed.
+ */
+export const NOT_FOUND_TEXT = "That bot is not this project's bot any more.";
 
 /** What a caller is told when the bot changed between the read and the write. */
 const STALE_TEXT = "The bot changed meanwhile; reload and try again.";
@@ -57,19 +61,18 @@ function refuse(code, message) {
 /**
  * Does this bot def already grant the Studio server?
  *
- * Three spellings mean the same thing to the pi rails: the bare server entry
- * (`"studio"`), one of its tools (`"studio/studio_play"`), and an already-spelled
- * pi tool name (`"studio__studio_play"`). Any of them is "already".
+ * Only the BARE server entry (`"studio"`) is the server grant: it is the one
+ * spelling the pi rails expand to every tool Studio offers. A per-tool entry
+ * (`"studio/studio_play"`, `"studio__studio_play"`) grants that one tool and
+ * nothing else, so a bot holding only those is still offered the grant — and
+ * `withStudioTools` appends the bare entry beside them, never in place of them.
  * @param {object|null|undefined} def
  * @returns {boolean}
  */
 export function grantsStudioTools(def) {
   const list = def && def.tools && def.tools.crow_mcp;
   if (!Array.isArray(list)) return false;
-  return list.some(
-    (entry) =>
-      entry === "studio" || (typeof entry === "string" && (entry.startsWith("studio/") || entry.startsWith("studio__"))),
-  );
+  return list.includes("studio");
 }
 
 /**
@@ -104,11 +107,19 @@ export function withStudioTools(def) {
  *   audit append (`project-acl.js` `appendAudit`, already bound to the client)
  * @param {((botId: string) => void)|null} [options.emitDefsChanged] Bot Builder's
  *   defs-changed emit, so a running gateway picks the new def up without a restart
- * @param {((def: object) => Promise<void>)|null} [options.primeTools] the bare-entry
- *   primer (`primeBareServerTools`): it fills the tool-name cache the budget
- *   count reads, and it never throws
- * @param {((def: object) => Promise<{cap?: number|null, countFor: Function}>)|null}
- *   [options.budgetFor] the model's tool budget (`defaultCompanionBudget`)
+ * @param {((def: object) => Promise<Object<string, string[]>|void>)|null}
+ *   [options.primeTools] the bare-entry primer (`primeBareServerTools`): it
+ *   lists each bare server's real tool names and RETURNS the map it built, which
+ *   is handed on to the budget count. A primer that throws or returns nothing
+ *   is an empty map: the count then sees the entry itself, as a spawn with no
+ *   listing does
+ * @param {((def: object, options: {bareServerTools: Object<string, string[]>}) =>
+ *   Promise<{cap?: number|null, countFor: Function}>)|null}
+ *   [options.budgetFor] the model's tool budget (`defaultCompanionBudget`), given
+ *   the primer's map so its count is the one the spawn makes
+ * @param {((botId: string) => boolean)|null} [options.isVoiceBot] whether an id
+ *   is Crow's voice bot, which is refused before any row is read (default:
+ *   never a voice bot)
  * @param {((message: string) => void)|null} [options.log] one line per failed
  *   budget read; defaults to silence
  * @returns {(request: {botId: string, projectId: number}) =>
@@ -120,11 +131,15 @@ export function createGiveBotStudioTools({
   emitDefsChanged = null,
   primeTools = null,
   budgetFor = null,
+  isVoiceBot = null,
   log = () => {},
 } = {}) {
   if (!db || typeof db.execute !== "function") {
     throw new TypeError("Studio give-tools needs a database client");
   }
+
+  /** The voice-bot rule the caller injects; without one, no id is Crow's voice. */
+  const voiceBot = typeof isVoiceBot === "function" ? isVoiceBot : () => false;
 
   /**
    * Append the Studio server entry to one bot's `tools.crow_mcp`.
@@ -139,6 +154,11 @@ export function createGiveBotStudioTools({
     const id = String(botId ?? "");
     const project = Number(projectId);
     if (id === "" || !Number.isInteger(project) || project <= 0) throw refuse("not_found", NOT_FOUND_TEXT);
+    // Crow's voice answers every surface and its tools are its own (the Bot
+    // Builder rule: voice_bot_readonly). It is refused by its id, BEFORE the row
+    // is read, with the same answer a bot that is not this project's gets, so
+    // the route confirms nothing about it.
+    if (voiceBot(id) === true) throw refuse("not_found", NOT_FOUND_TEXT);
 
     const { rows } = await db.execute({
       sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id = ?",
@@ -165,18 +185,21 @@ export function createGiveBotStudioTools({
     const candidate = withStudioTools(def);
 
     // The candidate is primed first (the live tools/list probe the rails run
-    // before a spawn), so the count below sees the names the bare entry really
-    // expands to rather than the entry itself.
+    // before a spawn), and the map the primer returns is handed to the count, so
+    // the budget sees the names the bare entry really expands to rather than the
+    // entry itself. A primer that throws or returns nothing is an empty map.
+    let bareServerTools = {};
     if (typeof primeTools === "function") {
       try {
-        await primeTools(candidate);
+        const primed = await primeTools(candidate);
+        if (primed && typeof primed === "object" && !Array.isArray(primed)) bareServerTools = primed;
       } catch {
         // A listing that fails only warns in the primer; a primer that throws
         // is the same failure and must not block the edit.
       }
     }
     try {
-      const budget = typeof budgetFor === "function" ? await budgetFor(candidate) : null;
+      const budget = typeof budgetFor === "function" ? await budgetFor(candidate, { bareServerTools }) : null;
       if (
         budget &&
         Number.isInteger(budget.cap) &&

@@ -750,6 +750,29 @@ test("a render this Crow cannot describe leaves the card without a table", async
   assert.ok(card.querySelector("audio"), "the player stays");
 });
 
+test("a javascript: link and raw HTML in bot text arrive harmless in the rendered frame", async () => {
+  // The page only ever assigns innerHTML from a frame's `html`, and the gateway
+  // builds that with renderBotMarkdown — so the frame is tested where it is
+  // made, with the real module (never a copy of it).
+  const { renderBotMarkdown } = await import("../servers/blog/renderer.js");
+  const hostile = [
+    "[x](javascript:alert(1))",
+    "<img src=x onerror=alert(1)>",
+    "<script>alert(1)</script>",
+  ].join(" ");
+
+  const html = renderBotMarkdown(hostile);
+  assert.equal(typeof html, "string", "the frame still carries markup to draw");
+  assert.notEqual(html, "", "and it is not silently emptied");
+  assert.equal(/javascript:/i.test(html), false, "no javascript: address survives: " + html);
+  assert.equal(/onerror/i.test(html), false, "the image's error handler is gone: " + html);
+  assert.equal(/<script/i.test(html), false, "no script element survives: " + html);
+  // sanitize-html's allow-list keeps an image as a plain picture (src, alt,
+  // title, width, height, loading) and carries no event attribute at all, so
+  // the hostile img may arrive as an inert <img> — never a runnable one.
+  assert.equal(/<[^>]*\son\w+=/i.test(html), false, "no event handler survives inside any tag: " + html);
+});
+
 // ---- items 11 and 13: no bot, and a bot without Studio tools -----------
 
 test("a project with no bot leaves the box disabled with a note and a setup link", async (t) => {

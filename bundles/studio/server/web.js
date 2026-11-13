@@ -76,6 +76,9 @@ import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { encodeDocState } from "./doc.js";
 import { createLibraryStore } from "./library-store.js";
+// The one sentence a bot that is not this project's gets — the same one the
+// grant's own `not_found` refusal carries (see `server/give-tools.js`).
+import { NOT_FOUND_TEXT as GIVE_TOOLS_NOT_FOUND_TEXT } from "./give-tools.js";
 
 /** File under CROW_HOME holding the per-boot token the MCP process presents. */
 const TOKEN_FILE = "studio-agent-token";
@@ -756,7 +759,9 @@ function refuse(socket, status, text) {
  *   appends the bare `studio` server entry to one bot's `tools.crow_mcp` (the
  *   panel loader wires it over `pi_bot_defs`; see `server/give-tools.js`). Its
  *   refusals carry a `code` (`not_found`, `stale`, `bad_def`, `over_budget`)
- *   and a sentence written for the caller. Absent, the route answers 503.
+ *   and a sentence written for the caller. A voice bot id is refused by the
+ *   route itself, before any row is read, with the `not_found` body. Absent,
+ *   the route answers 503.
  * @param {((options: {projectId: number, storageKey: string}) => Promise<object|null>)|null}
  *   [options.renderInfoOf] one render's measured figures, from the audit row
  *   the renderer wrote (`action: "studio.render"`, its payload's
@@ -1649,11 +1654,19 @@ export function createStudioWeb({
     //
     // The body names the bot the page is looking at, and it has to still be
     // this project's bot: a page left open across a bot change cannot edit the
-    // bot that replaced it. The edit itself (`server/give-tools.js`) answers
-    // `{ok, already}` and throws coded refusals with a sentence for the caller.
+    // bot that replaced it. Crow's voice bot is refused by its id FIRST —
+    // before the song is read — with the same not-found body a bot that is not
+    // this project's gets, because its tools are its own (Bot Builder's
+    // voice_bot_readonly rule and the artifacts house-style route refuse that
+    // id too). The edit itself (`server/give-tools.js`) answers `{ok, already}`
+    // and throws coded refusals with a sentence for the caller.
     r.post("/api/studio/songs/:id/project-bot/studio-tools", dashboardAuth, requireCsrf, handled(async (req, res) => {
       if (agentCaller(req)) return res.status(403).json({ error: AGENT_GIVE_TOOLS_REFUSED_TEXT });
       if (!giveStudioTools) return res.status(503).json({ error: GIVE_TOOLS_UNAVAILABLE_TEXT });
+      const asked = String(req.body?.bot_id ?? "");
+      if (asked !== "" && isVoiceBot(asked) === true) {
+        return res.status(404).json({ error: GIVE_TOOLS_NOT_FOUND_TEXT });
+      }
       const songId = String(req.params.id ?? "");
       const row = await readSongRow(songId);
       if (!row) return res.status(404).json({ error: `There is no song "${songId}".` });
@@ -1664,7 +1677,6 @@ export function createStudioWeb({
       if (!canWrite) return res.status(503).json({ error: GIVE_TOOLS_UNAVAILABLE_TEXT });
       await canWrite(projectId);
 
-      const asked = String(req.body?.bot_id ?? "");
       const bot = Number.isInteger(projectId) ? await projectBot(projectId) : null;
       const botId = bot && bot.bot_id ? String(bot.bot_id) : null;
       if (!botId || asked !== botId) return res.status(409).json({ error: STALE_BOT_TEXT });

@@ -294,12 +294,17 @@ web = createStudioWeb({
     },
     primeTools: async (def) => {
       const { primeBareServerTools } = await appImport("scripts/pi-bots/bare-server-tools.mjs");
+      // The primer RETURNS the `{ [serverId]: string[] }` listing this def's bare
+      // entries expand to; the edit hands it on to the budget count below.
       return primeBareServerTools(def, { crowHome, log: (line) => console.warn("[studio]", line) });
     },
-    budgetFor: async (def) => {
+    budgetFor: async (def, { bareServerTools } = {}) => {
       const { defaultCompanionBudget } = await appImport("scripts/pi-bots/artifacts-companions.mjs");
-      return defaultCompanionBudget(def);
+      return defaultCompanionBudget(def, { bareServerTools });
     },
+    // Crow's voice bot answers every surface and its tools are its own: the
+    // def edit refuses it by id before reading its row.
+    isVoiceBot: (botId) => isVoiceBotId(String(botId)) === true,
     log: (line) => console.warn("[studio]", line),
   }),
 });

@@ -26,15 +26,22 @@ export function grantsArtifactUpdate(list) {
   return Array.isArray(list) && (list.includes("artifacts/artifact_update") || list.includes("artifacts__artifact_update"));
 }
 
-/** {cap, countFor(def)} for this def's resolved default model. Fails open (cap null). */
-export async function defaultCompanionBudget(def) {
+/**
+ * {cap, countFor(def)} for this def's resolved default model. Fails open (cap null).
+ * @param {object} def
+ * @param {{bareServerTools?: Object<string,string[]>}} [opts] the bare-entry listing
+ *   snapshot a caller holds (primeBareServerTools's return). Pass it and countFor counts
+ *   the EXPANDED names a bare crow_mcp entry really spawns with; without it the count is
+ *   today's (a bare entry counts as its one `mcp__<id>` spelling), unchanged.
+ */
+export async function defaultCompanionBudget(def, { bareServerTools } = {}) {
   try {
     const [{ resolveModel }, { capFor, countCsvTools }, { buildToolsCsv }] = await Promise.all([
       import("./model_resolver.mjs"), import("./tool-budget.mjs"), import("./bridge.mjs"),
     ]);
     const resolved = await resolveModel(def);
     const cap = capFor(resolved);
-    return { cap, countFor: (d) => countCsvTools(buildToolsCsv(d, { resolved, interactive: true }).csv) || 0 };
+    return { cap, countFor: (d) => countCsvTools(buildToolsCsv(d, { resolved, interactive: true, bareServerTools }).csv) || 0 };
   } catch {
     return { cap: null, countFor: () => 0 };
   }
