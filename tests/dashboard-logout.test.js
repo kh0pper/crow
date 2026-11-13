@@ -130,16 +130,28 @@ test("the confirm page's Cancel link goes home and does not log out", async () =
 
 // ---- the POST --------------------------------------------------------------
 
-test("POST without a CSRF token is refused, and the session survives", async () => {
+test("POST without a CSRF token is refused with the plain 403, and the session survives", async () => {
+  // No token was echoed at all — not a stale form of ours, so this route's
+  // redirect does not apply and csrfMiddleware answers exactly as everywhere
+  // else (the 303 back to the confirm page is only for a MISMATCHED token).
   const r = await req("POST", "/dashboard/logout", { session: SESS.missing });
   assert.equal(r.status, 403, r.text);
   assert.equal(r.location, null);
   assert.equal(await verifySession(SESS.missing), true, "a refused logout changes nothing");
 });
 
-test("POST with the WRONG CSRF token is refused, and the session survives", async () => {
+test("POST with the WRONG CSRF token goes back to the confirm page, and the session survives", async () => {
+  // A stale token is a stale PAGE, not an attack: the 303 lands on the GET
+  // confirm page, which renders the token the cookie carries now, so the
+  // viewer can finish the logout instead of reading "CSRF token mismatch."
   const r = await req("POST", "/dashboard/logout", { session: SESS.wrong, body: "_csrf=not-the-token" });
-  assert.equal(r.status, 403, r.text);
+  assert.equal(r.status, 303, r.text);
+  assert.equal(r.location, "/dashboard/logout");
+  assert.equal(await verifySession(SESS.wrong), true, "a refused logout still changes nothing");
+  // The page it points at is the confirm page, carrying the current token.
+  const page = await req("GET", "/dashboard/logout", { session: SESS.wrong });
+  assert.equal(page.status, 200, page.text.slice(0, 200));
+  assert.match(page.text, /<input type="hidden" name="_csrf" value="logout-csrf-token">/);
   assert.equal(await verifySession(SESS.wrong), true);
 });
 

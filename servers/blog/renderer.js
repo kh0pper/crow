@@ -291,9 +291,9 @@ const botMarked = new Marked({
   // protocol-relative `//evil.example/x.png` — is a same-origin GET (or a
   // third-party beacon) fired with the viewer's cookies just by reading the
   // reply. A refused image becomes its alt text and nothing else: never a
-  // link, so it cannot become a click target either. `storage:` is let
-  // through to the renderer because sanitizeRendered rewrites it to
-  // `/blog/media/<key>` (and the bot-only sanitize rule below then decides).
+  // link, so it cannot become a click target either. `storage:` is rewritten
+  // to `/blog/media/<key>` here first, and THAT is what gets judged (and
+  // sanitizeRendered's bot-only rule checks the rewritten src again).
   renderer: {
     image(token) {
       if (Array.isArray(token.tokens) && token.tokens.some((t) => t.type === "mathInline")) {
@@ -302,7 +302,15 @@ const botMarked = new Marked({
           : t));
       }
       const href = String(token.href ?? "");
-      if (!isAllowedBotImageSrc(href) && !href.startsWith("storage:")) {
+      // Judge the src the sanitizer will actually emit: a `storage:<key>` src is
+      // rewritten to `/blog/media/<key>` below, so `storage:../../x` must be
+      // refused HERE — it would resolve out of the media route — instead of
+      // passing a `storage:` prefix test and losing its alt text to the
+      // sanitize step.
+      const src = href.startsWith("storage:")
+        ? BOT_IMAGE_PREFIX + href.slice("storage:".length)
+        : href;
+      if (!isAllowedBotImageSrc(src)) {
         // The alt source, escaped by us: this string lands in the HTML as
         // character data (not inside an attribute), so it must never carry
         // markup of its own.
@@ -333,20 +341,29 @@ const botMarked = new Marked({
 
 /** The only image path a bot reply may use — the public blog media route. */
 const BOT_IMAGE_PREFIX = "/blog/media/";
+/** The Turbo opt-outs every bot link carries (see sanitizeRendered). */
+const BOT_LINK_ATTRS = ["data-turbo-prefetch", "data-turbo"];
 /** Every bot image src is resolved against this fixed origin (never the request's). */
 const BOT_IMAGE_ORIGIN = "http://crow.invalid";
 
 /**
  * True when `src` is a same-origin absolute path under `/blog/media/` and
  * nothing else: no backslash (a browser may read it as a slash), no `//` after
- * the leading slash (protocol-relative), no `..` segment and nothing that
- * resolves out of the prefix (`%2e%2e` is decoded by the URL parser, so
- * `/blog/media/%2e%2e/dashboard/logout` resolves to `/dashboard/logout`).
- * Absolute URLs (`http(s)://…`, `//host/…`), `javascript:`, `data:` and bare
- * relative paths all fail the prefix test at once.
+ * the leading slash (protocol-relative), and nothing that resolves out of the
+ * prefix.
+ *
+ * A raw `..` is NOT refused as such. `/blog/media/a/../b` is allowed: the URL
+ * parser's dot-segment walk normalizes it to `/blog/media/b` before `pathname`
+ * is read, and that normalized path is exactly what the browser will request.
+ * What is refused is a `..` that RESOLVES out of the prefix
+ * (`/blog/media/../dashboard/logout` → `/dashboard/logout`) or one that
+ * survives normalization. Absolute URLs (`http(s)://…`, `//host/…`),
+ * `javascript:`, `data:` and bare relative paths all fail the prefix test at
+ * once.
  *
  * Percent-encoded separators/dots are refused outright, case-insensitively:
- * `%2e` (a dot the URL parser decodes before its own dot-segment walk),
+ * `%2e` (a dot the URL parser decodes before its own dot-segment walk —
+ * `/blog/media/%2e%2e/dashboard/logout` resolves to `/dashboard/logout`),
  * `%2f` and `%5c` (slashes a downstream layer may decode after our check).
  * Refusing them by raw source text keeps the verdict independent of the order
  * in which any later parser normalizes or decodes.
@@ -381,15 +398,16 @@ export function renderBotMarkdown(markdown) {
   blockMemo = makeStartMemo();
   blockValid = new Map();
   cutsLeft = MAX_PARAGRAPH_CUTS;
-  return sanitizeRendered(botMarked.parse(src), { botImages: true });
+  return sanitizeRendered(botMarked.parse(src), { bot: true });
 }
 
 /** The shared post-parse half: storage: rewrite, allow-list sanitize, tables. */
-function sanitizeRendered(raw, { botImages = false } = {}) {
-  // Rewrite storage: URLs to public blog media route
+function sanitizeRendered(raw, { bot = false } = {}) {
+  // Rewrite storage: URLs to public blog media route. The same prefix the image
+  // renderer judges at parse time (BOT_IMAGE_PREFIX), so the two cannot drift.
   const processed = raw.replace(
     /(<img\s[^>]*src=")storage:([^"]+)(")/g,
-    '$1/blog/media/$2$3'
+    (_m, before, key, after) => before + BOT_IMAGE_PREFIX + key + after
   );
   const clean = sanitizeHtml(processed, {
     allowedTags: sanitizeHtml.defaults.allowedTags.concat([
@@ -402,7 +420,12 @@ function sanitizeRendered(raw, { botImages = false } = {}) {
     allowedAttributes: {
       ...sanitizeHtml.defaults.allowedAttributes,
       img: ["src", "alt", "title", "width", "height", "loading"],
-      a: ["href", "title", "target", "rel"],
+      // The two Turbo opt-outs below are allow-listed on `a` ONLY on the bot
+      // path (the owner's posts and previews keep exactly the attributes they
+      // always had). sanitize-html runs transformTags BEFORE it filters
+      // attributes, so the values here are the ones the transform writes — a
+      // bot can never supply its own.
+      a: ["href", "title", "target", "rel", ...(bot ? BOT_LINK_ATTRS : [])],
       code: ["class"],
       span: ["class"],
       pre: ["class"],
@@ -426,19 +449,41 @@ function sanitizeRendered(raw, { botImages = false } = {}) {
       article: ["*"],
     },
     selfClosing: ["img", "br", "hr", "input"],
-    // Bot output only (never the owner's blog/memory renderer): an image that
-    // is not from /blog/media/ is dropped after the storage: rewrite, so the
-    // viewer's browser never makes that request. A markdown image's alt text
-    // has already been emitted in its place by the image renderer above; a raw
-    // HTML <img> in the markdown simply disappears. sanitize-html's own filter
-    // (not a regex over the HTML) owns this decision.
+    // Bot output only (never the owner's blog/memory renderer):
+    //
+    // (1) An image that is not from /blog/media/ is dropped after the storage:
+    // rewrite, so the viewer's browser never makes that request. A markdown
+    // image's alt text has already been emitted in its place by the image
+    // renderer above; a raw HTML <img> in the markdown simply disappears.
+    // sanitize-html's own filter (not a regex over the HTML) owns this
+    // decision.
     //
     // `exclusiveFilter` is ONE function, `(frame) => boolean`, called on the
     // CLOSING tag, and a truthy return DROPS the element together with its
     // content (sanitize-html 2.x — it is not a per-tag map). So: drop every
     // <img> whose src is not allowed, let everything else through.
-    ...(botImages
+    //
+    // (2) Every <a> gets data-turbo-prefetch="false" and data-turbo="false".
+    // A bot's markdown is rendered in the OWNER's browser, and Turbo 8 (the
+    // vendored turbo-8.0.5.umd.js) PREFETCHES a same-origin link on hover: a
+    // GET fired with the viewer's cookies just by pointing at the link — the
+    // same trick the <img> rule above exists to stop (it was
+    // `![x](/dashboard/logout)`; a link to a state-changing GET is the same
+    // move). A click would also navigate via Turbo Drive. Both are opted out
+    // here, and the values are written by us, after the bot's own attributes,
+    // so a bot cannot ask for `data-turbo-prefetch="true"` back.
+    ...(bot
       ? {
+        transformTags: {
+          a: (tagName, attribs) => ({
+            tagName,
+            attribs: {
+              ...attribs,
+              "data-turbo-prefetch": "false",
+              "data-turbo": "false",
+            },
+          }),
+        },
         exclusiveFilter: (frame) => frame.tag === "img"
           && !isAllowedBotImageSrc(frame.attribs && frame.attribs.src),
       }

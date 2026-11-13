@@ -8,8 +8,12 @@
  *
  * Fix: the bot path keeps exactly ONE image source — the public blog media
  * route. Everything else loses its <img> and keeps only its alt text (never a
- * link). The owner's renderer (renderMarkdown — blog preview, memory, KB, file
- * view) is unchanged.
+ * link). And every bot LINK carries data-turbo-prefetch="false" /
+ * data-turbo="false": Turbo 8 prefetches a same-origin link on hover with the
+ * viewer's cookies (a GET fired just by pointing at the link) and navigates a
+ * click with Turbo Drive; the sanitizer strips data-* from a bot's markup, so
+ * the renderer puts them back itself. The owner's renderer (renderMarkdown —
+ * blog preview, memory, KB, file view) is unchanged.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -118,6 +122,15 @@ test("a storage: key still becomes /blog/media/<key>", () => {
   assert.match(html, /alt="a"/, html);
 });
 
+test("a storage: key that resolves out of /blog/media/ keeps its alt text", () => {
+  // The image renderer judges the REWRITTEN src (/blog/media/../../x), so this
+  // is refused at parse time like any other out-of-prefix image — it must not
+  // reach the sanitizer and vanish there, losing the alt text.
+  const html = renderBotMarkdown("![a](storage:../../x)");
+  assert.doesNotMatch(html, /<img/i, html);
+  assert.equal(text(html).trim(), "a", html);
+});
+
 test("a refused image inside a link keeps the link, without the image", () => {
   const html = renderBotMarkdown("[![x](/dashboard/logout)](https://example.com/doc)");
   assert.doesNotMatch(html, /<img/i, html);
@@ -125,7 +138,33 @@ test("a refused image inside a link keeps the link, without the image", () => {
   assert.doesNotMatch(html, /dashboard\/logout/, html);
 });
 
+// ---- links: no Turbo prefetch, no Turbo Drive -----------------------------
+
+test("a bot link carries data-turbo-prefetch=\"false\" and data-turbo=\"false\"", () => {
+  // Turbo 8 prefetches a same-origin link on HOVER, as a GET with the viewer's
+  // cookies — the same trick the image rule above stops.
+  const html = renderBotMarkdown("[x](/dashboard/make/open/a/b)");
+  assert.match(html, /<a href="\/dashboard\/make\/open\/a\/b"[^>]*>x<\/a>/, html);
+  assert.match(html, /href="\/dashboard\/make\/open\/a\/b"[^>]*data-turbo-prefetch="false"/, html);
+  assert.match(html, /href="\/dashboard\/make\/open\/a\/b"[^>]*data-turbo="false"/, html);
+});
+
+test("a bot cannot ask for prefetch back, and no other data-* survives on a link", () => {
+  const html = renderBotMarkdown('<a data-turbo-prefetch="true" data-turbo="true" data-evil="1" href="/x">x</a>');
+  assert.match(html, /href="\/x"/, html);
+  assert.match(html, /data-turbo-prefetch="false"/, html, "the renderer's value wins: " + html);
+  assert.match(html, /data-turbo="false"/, html);
+  assert.doesNotMatch(html, /="true"/, html);
+  assert.doesNotMatch(html, /data-evil/, html);
+});
+
 // ---- the owner's renderer is untouched ------------------------------------
+
+test("renderMarkdown's link keeps no Turbo opt-out attributes (unchanged)", () => {
+  const html = renderMarkdown("[x](/dashboard/make/open/a/b)");
+  assert.match(html, /<a href="\/dashboard\/make\/open\/a\/b">x<\/a>/, html);
+  assert.doesNotMatch(html, /data-turbo/, html);
+});
 
 test("renderMarkdown keeps an ordinary external image unchanged", () => {
   const html = renderMarkdown("![a](https://example.com/x.png)");

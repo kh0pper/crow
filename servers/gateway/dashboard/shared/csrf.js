@@ -13,7 +13,9 @@
  *        - via a `_csrf` body field (classic `<form>` POST).
  *   3. The middleware compares `req.cookies.crow_csrf` (which a cross-site
  *      attacker cannot read, even though SameSite=Lax lets it be SENT) against
- *      the echoed value. A mismatch → 403.
+ *      the echoed value. A mismatch → 403 (the verdict itself is exported as
+ *      `csrfRefusal`, so one route — the logout POST — can answer a stale token
+ *      by redirecting to a freshly rendered page instead).
  *
  * Deliberately skipped:
  *   - GET / HEAD / OPTIONS (non-state-changing).
@@ -69,33 +71,60 @@ export function csrfMiddleware(req, res, next) {
     req.csrfToken = cookies[CSRF_COOKIE];
   }
 
+  const refusal = csrfRefusal(req);
+  if (!refusal) return next();
+  return res.status(403).type("text/plain").send(REFUSAL_MESSAGES[refusal]);
+}
+
+const REFUSAL_MESSAGES = {
+  missing: "CSRF token missing.",
+  absent: "CSRF token mismatch.",
+  mismatch: "CSRF token mismatch.",
+};
+
+/**
+ * The double-submit verdict for an Express request. `null` when the request may
+ * proceed — read-only method, HMAC-signed peer call, pre-auth flow (no session
+ * cookie), the `CROW_CSRF_STRICT=0` kill-switch, or a matching token —
+ * otherwise WHY it is refused:
+ *   - `"missing"`  the session carries no `crow_csrf` cookie at all, so no page
+ *                  could have echoed one (reloading would not help);
+ *   - `"absent"`   the cookie is there but the request echoed no token;
+ *   - `"mismatch"` a token WAS echoed and does not match the cookie — the shape
+ *                  of a stale page, and the only case a route can usefully
+ *                  answer by sending the viewer back to a freshly rendered one.
+ * Exported because a route that wants to answer a mismatch its own way must ask
+ * the exact same question rather than re-implement the comparison: POST
+ * /dashboard/logout redirects a stale form to its confirm page instead of the
+ * plain-text 403 (see dashboard/index.js).
+ * @param {object} req
+ * @returns {null|"missing"|"absent"|"mismatch"}
+ */
+export function csrfRefusal(req) {
   // Read-only method → nothing to validate.
-  if (!STATE_CHANGING_METHODS.has(req.method)) return next();
+  if (!STATE_CHANGING_METHODS.has(req.method)) return null;
 
   // HMAC-signed peer request → bundle router / federation router handle auth.
-  if (req.headers["x-crow-signature"]) return next();
+  if (req.headers["x-crow-signature"]) return null;
+
+  const cookies = parseCookies(req);
 
   // Pre-auth flow (no session yet) → login/reset/2fa handlers own their own
   // defenses (rate-limit, lockout).
-  if (!cookies.crow_session) return next();
+  if (!cookies.crow_session) return null;
 
   // Rollback escape hatch: cookie still set, validation bypassed.
-  if (!strictMode()) return next();
+  if (!strictMode()) return null;
 
   const cookieValue = cookies[CSRF_COOKIE];
-  if (!cookieValue) {
-    return res.status(403).type("text/plain").send("CSRF token missing.");
-  }
+  if (!cookieValue) return "missing";
 
   const headerValue = req.headers[HEADER_NAME];
   const bodyValue = req.body && typeof req.body === "object" ? req.body[BODY_FIELD] : null;
   const presented = headerValue || bodyValue;
 
-  if (!presented || !safeEqual(String(presented), cookieValue)) {
-    return res.status(403).type("text/plain").send("CSRF token mismatch.");
-  }
-
-  return next();
+  if (!presented) return "absent";
+  return safeEqual(String(presented), cookieValue) ? null : "mismatch";
 }
 
 /**

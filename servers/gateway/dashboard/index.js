@@ -58,7 +58,7 @@ import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getP
 import { resolveNavGroups } from "./nav-registry.js";
 import { readSetting } from "./settings/registry.js";
 import { healthAttentionRouter } from "./panels/health.js";
-import { csrfMiddleware } from "./shared/csrf.js";
+import { csrfMiddleware, csrfRefusal } from "./shared/csrf.js";
 import { createOAuthConsentRouter, isConsentNext } from "../oauth-consent.js";
 import secretSubmitRouter from "../routes/secret-submit.js";
 import { twoFactorSetupGate } from "./two-factor-setup-gate.js";
@@ -795,13 +795,35 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // Auth middleware for all other dashboard routes
   router.use("/dashboard", dashboardAuth);
 
+  // A CSRF mismatch on the logout POST is a STALE PAGE, not an attack: the form
+  // was rendered with a token that has since been replaced (a second tab logged
+  // in again, say), and answering the plain-text 403 would leave the viewer
+  // stuck on "CSRF token mismatch." So this ONE route sends them back (303) to
+  // the GET confirm page, which renders whatever token the cookie carries now.
+  //
+  // Mounted BEFORE csrfMiddleware and scoped to POST /dashboard/logout; every
+  // other route keeps csrfMiddleware's plain 403. dashboardAuth has already run
+  // (so this only ever sees a live session), and on anything but a mismatch —
+  // no crow_csrf cookie at all, no token echoed, or a matching token — it calls
+  // next(), so the real chain (csrfMiddleware, then the POST handler below)
+  // makes the decision. The comparison is csrf.js's own (csrfRefusal), not a
+  // second implementation of it.
+  router.use("/dashboard", (req, res, next) => {
+    if (req.method !== "POST") return next();
+    if (req.path !== "/logout" && req.path !== "/dashboard/logout") return next();
+    if (csrfRefusal(req) !== "mismatch") return next();
+    res.set("Cache-Control", "no-store");
+    return res.redirect(303, "/dashboard/logout");
+  });
+
   // CSRF double-submit validation for state-changing requests.
   // Skips: GET/HEAD/OPTIONS, HMAC-signed peer calls (handled above),
   // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
   router.use("/dashboard", csrfMiddleware);
 
   // --- Logout: POST only, and CSRF-checked (session-authed by dashboardAuth
-  // and token-checked by csrfMiddleware, both above).
+  // and token-checked by csrfMiddleware, both above; a STALE token is answered
+  // by the 303-to-the-confirm-page handler in front of csrfMiddleware).
   //
   // It used to be a GET in the public section that destroyed the session and
   // redirected. That made /dashboard/logout a state-changing GET on a
