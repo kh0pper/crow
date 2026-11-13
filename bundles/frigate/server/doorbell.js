@@ -27,8 +27,14 @@ const SIDECAR_MAX_BYTES = 4 * 1024;
 const SNAPSHOT_SUFFIX = ".jpg";
 const SIDECAR_SUFFIX = ".json";
 const KNOWN_TYPES = new Set(["motion", "ding", "interval", "on-demand"]);
-/** A read never follows a symlink and never opens a file for anything but reading. */
-const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
+
+/**
+ * A read never follows a symlink and never opens a file for anything but reading. Without
+ * `O_NONBLOCK` an open on a FIFO parks a libuv thread until a writer arrives; a FIFO or other
+ * special file opens without blocking here and is then refused by the regular-file check on the
+ * handle.
+ */
+const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
 
 let openFile = (file, flags) => open(file, flags);
 

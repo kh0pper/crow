@@ -9,7 +9,8 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, truncateSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -40,6 +41,40 @@ function freshDir() {
 const jpg = (dir, name, body = "jpeg-bytes") => writeFileSync(join(dir, `${name}.jpg`), body);
 const sidecar = (dir, name, value) =>
   writeFileSync(join(dir, `${name}.json`), typeof value === "string" ? value : JSON.stringify(value));
+
+/**
+ * A FIFO at `file`, or false when this box has no `mkfifo` to make one with (Windows, a stripped
+ * image), so the caller can skip instead of asserting on something it could not set up.
+ */
+function makeFifo(file) {
+  try {
+    execFileSync("mkfifo", [file], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Removes a FIFO a case planted, whether or not the case got as far as asserting. */
+function dropFifo(file) {
+  try {
+    unlinkSync(file);
+  } catch {
+    // Nothing left to remove.
+  }
+}
+
+/**
+ * `work`, but the test fails if it has not settled in two seconds — an open that blocks on a FIFO
+ * with no writer never settles at all, and the runner would sit there until its own timeout.
+ */
+function boundedBy2s(work) {
+  let timer;
+  const expiry = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("the read did not settle within 2 s")), 2000);
+  });
+  return Promise.race([work, expiry]).finally(() => clearTimeout(timer));
+}
 
 /**
  * A handle whose stat() reports a small regular file while read() hands out `content` — the file
@@ -201,6 +236,33 @@ test("a symlink in the folder is refused, for a still and for its sidecar", asyn
   assert.equal(listed[0].timestamp, 1_600_000_000, "a symlinked sidecar contributes no time");
   const read = await readSnapshot(dir, "linked_side");
   assert.ok(read && read.bytes.toString() === "a-real-still", "the plain still still reads");
+});
+
+test("a FIFO planted at a still or sidecar path does not block the reader", async (t) => {
+  const stillDir = freshDir();
+  const sideDir = freshDir();
+  const stillFifo = join(stillDir, "planted.jpg");
+  const sideFifo = join(sideDir, "planted_side.json");
+  if (!makeFifo(stillFifo) || !makeFifo(sideFifo)) {
+    dropFifo(stillFifo);
+    dropFifo(sideFifo);
+    return t.skip("mkfifo is not available here");
+  }
+  try {
+    assert.equal(await boundedBy2s(readSnapshot(stillDir, "planted")), null, "a FIFO is not a still");
+
+    jpg(sideDir, "planted_side", "a-real-still");
+    utimesSync(join(sideDir, "planted_side.jpg"), 1_600_000_000, 1_600_000_000);
+    const listed = await boundedBy2s(listSnapshotCameras(sideDir));
+    assert.deepEqual(listed.map((entry) => entry.name), ["planted_side"], "the plain still is listed");
+    assert.equal(listed[0].type, null, "a FIFO sidecar contributes no reason");
+    assert.equal(listed[0].timestamp, 1_600_000_000, "a FIFO sidecar contributes no time");
+    const read = await boundedBy2s(readSnapshot(sideDir, "planted_side"));
+    assert.ok(read && read.bytes.toString() === "a-real-still", "the plain still still reads");
+  } finally {
+    dropFifo(stillFifo);
+    dropFifo(sideFifo);
+  }
 });
 
 test("a still that grows past the cap between the stat and the read is refused", async () => {
