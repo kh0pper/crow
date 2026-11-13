@@ -874,6 +874,72 @@ test("a claim check that throws at start starts nothing and is re-read on a shor
   await h.supervisor.stop();
 });
 
+test("a claim re-check whose account read fails arms the retry again and starts on the next one", async () => {
+  let checkThrows = true;
+  const h = await setup({
+    start: false,
+    isClaimedElsewhere: async () => {
+      if (checkThrows) throw new Error("secret-text the claim store said no");
+      return false;
+    },
+    // Only the pending worker's first re-read fails, the way a busy database does: the listing at
+    // start is the read before it.
+    wrapDb: (db) => busyAccountRead(db, { skip: 1, times: 1 }),
+  });
+
+  await h.supervisor.start();
+  await flush();
+  assert.equal(h.views.length, 0, "an unreadable claim starts nothing");
+  checkThrows = false;
+
+  // The re-check cannot read the account row: a read error is not a deleted account, so the retry is
+  // armed once more rather than the account sitting unstarted until the next restart.
+  await h.clock.advance(CLAIM_RETRY_MS);
+  assert.equal(h.views.length, 0);
+  assert.equal(h.factoryArgs.length, 0);
+  assert.ok(
+    h.logs.some((line) => line.event === "account_read_failed" && line.code === "PROTOCOL"),
+    "the read failure is logged by code only",
+  );
+  assert.equal(JSON.stringify(h.logs).includes("secret-text"), false);
+
+  await h.clock.advance(CLAIM_RETRY_MS);
+  assert.equal(h.views.length, 1, "the second re-check started the worker");
+  assert.ok(callsOf(h.fake, "listFolders").length > 0, "the first full sync ran");
+  assert.equal((await getAccount(h.db, h.accountId)).status, "active");
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  await h.supervisor.stop();
+});
+
+test("a claim re-check for an account that was really deleted stops retrying", async () => {
+  let checks = 0;
+  const h = await setup({
+    start: false,
+    isClaimedElsewhere: async () => {
+      checks += 1;
+      if (checks === 1) throw new Error("secret-text the claim store said no");
+      return false;
+    },
+  });
+
+  await h.supervisor.start();
+  await flush();
+  assert.equal(h.views.length, 0);
+  await deleteAccount(h.db, h.accountId);
+
+  // No row: nothing is started, no claim is read again, and no timer survives the re-check.
+  await h.clock.advance(CLAIM_RETRY_MS);
+  assert.equal(checks, 1, "a deleted account's claim is not read again");
+  assert.equal(h.factoryArgs.length, 0, "no connection is built for a deleted account");
+  assert.equal(h.views.length, 0);
+
+  await h.clock.advance(CLAIM_RETRY_MS * 4);
+  assert.equal(checks, 1);
+  assert.equal(h.factoryArgs.length, 0);
+  assert.equal(h.views.length, 0);
+  await h.supervisor.stop();
+});
+
 /* -------------------------------------------------------------------- actions */
 
 test("withAdapter runs calls one at a time and reuses one kept adapter until the keep time", async () => {

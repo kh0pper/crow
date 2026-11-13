@@ -80,8 +80,9 @@
  * `claimed_elsewhere`, and the light global tick re-evaluates it and restarts it once the claim
  * clears. `refreshClaim` rewrites our own claim at start and once a day. A claim that could not be
  * read is not a verdict: the worker starts nothing and claims nothing, stays pending, and a short
- * re-check (`CLAIM_RETRY_MS`, never the next 15-minute tick) reads the claim again — a loser must
- * never sync for a tick because the claim store was briefly unavailable.
+ * re-check (`CLAIM_RETRY_MS`, never the next 15-minute tick) reads the claim again — a re-check whose
+ * account read throws (a busy database, not a deleted account) re-arms that short timer too — a loser
+ * must never sync for a tick because the claim store was briefly unavailable.
  *
  * `withAdapter` is the seam plan 2's actions and attachment fetches use. It never borrows the sync
  * worker's connection: it keeps its own short-lived adapter, one call at a time per account, reusing
@@ -1252,7 +1253,17 @@ export function createMailSupervisor(options = {}) {
       if (worker.pendingStart !== true || worker.claimed) return;
       if (worker.authFailed || worker.inflight != null || worker.backoffTimer != null) return;
       if (worker.pollTimer != null) return;
-      const account = await accountOrNull(worker.accountId);
+      // A THROWING read, as in `accountReallyGone`: `accountOrNull` turns a busy or locked database
+      // into null, and a read error must never be read as a deleted account. A retry that cannot read
+      // the row arms itself again, so a pending account is never left unstarted until a restart.
+      let account;
+      try {
+        account = await getAccount(db, worker.accountId);
+      } catch (err) {
+        logError("account_read_failed", err, { accountId: worker.accountId });
+        armClaimRetry(worker);
+        return;
+      }
       if (!live() || notOurs(worker) || worker.pendingStart !== true) return;
       // A row that is gone, or one the tick path owns now, is not this timer's to start.
       if (!account || account.status !== "active") return;

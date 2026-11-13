@@ -164,6 +164,12 @@ against the new adapter with the provider's own fake, and skip nothing.
   short-lived action connection — an open message, a mark-read, an attachment fetch — which
   `withAdapter` keeps open for up to 30 seconds so a burst costs one login. `watch` refuses a third
   folder rather than opening another long-lived connection.
+- **Deleting an account.** `stopAccount(accountId)` retires the worker, its timers and its connections,
+  but it does not by itself cancel work already running through `withAdapter` (a backfill page, a
+  remote search): that work stops on the `cancelled` flag it is handed, and the flag reads the
+  supervisor's removal set. So the delete path must call `beginRemoval(accountId)` before
+  `stopAccount`, and `endRemoval` once the rows are gone — otherwise a batch already fetched can still
+  be written.
 
 ## One address, one instance: claims
 
