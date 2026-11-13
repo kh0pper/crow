@@ -55,6 +55,7 @@ import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { applyServiceBlocks, withServiceBlocks, offerableConnections } from "./service-blocks.mjs";
 import { applySatelliteBlocks, withSatelliteBlocks } from "./satellite-blocks.mjs";
+import { primeBareServerTools } from "./bare-server-tools.mjs";
 import { worldRootFor, carriedReadRoots, brokenWorldLink } from "./world-root.mjs";
 import { installedKitDir, readKitThemes, readHouseStyleSync, houseStyleLinks } from "../../servers/shared/design-kit.js";
 
@@ -508,11 +509,21 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
  * channel policy, not world state) and any test seams.
  *
  * @param {object} world  the object buildBotWorld() returned
- * @param {{escalate?: boolean, log?: (m: string) => void}} [opts]
+ * @param {{escalate?: boolean, log?: (m: string) => void, probe?: Function}} [opts]
+ *   `probe` is the bare-server listing seam (threaded into primeBareServerTools), for
+ *   a caller that must not spawn a real MCP server.
  * @returns {Promise<{sysFile, selfAuthoringDir, resolved, piRpcOpts}>}
  */
-export async function prepareSpawn(world, { escalate = false, log = () => {} } = {}) {
+export async function prepareSpawn(world, { escalate = false, log = () => {}, probe } = {}) {
   const def = world.def, crowHome = world.crowHome;
+  // A BARE crow_mcp entry (e.g. "studio") only expands to that server's real tool names
+  // (`mcp__studio__<tool>`, the shape pi-lab registers) when its list is known BEFORE the
+  // spawn — toolAllowlist() is synchronous and reads only the snapshot it is handed. So the
+  // listing is taken here and RETURNED as this spawn's map: it goes onto piRpcOpts below,
+  // and the budget check in handleInbound reads the same piRpcOpts.bareServerTools, so the
+  // count and the spawn see one listing. Never throws: a server that cannot be listed keeps
+  // today's spelling and warns once.
+  const bareServerTools = await primeBareServerTools(def, { crowHome, log, probe });
 
   const sysFile = join(mkdtempSync(join(tmpdir(), "pibot-")), "sys.md");
   writeFileSync(sysFile, def.system_prompt || "You are a Crow bot.", { mode: 0o600 });
@@ -602,6 +613,9 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
       remoteEnabled: world.remoteEnabled,
       botClassifier: world.botClassifier || null,
       narrowedTools: world.narrowedTools,
+      // The bare-entry listing snapshot taken above ({} when the def has none): the
+      // spawn's --tools csv and the channel budget check both read exactly this.
+      bareServerTools,
       appendSystemPromptFile: sysFile,
       // S6-CROW: the bot's project workspace joins its read roots (PiRpc,
       // bot-read-paths.mjs); null for a bot without a project.

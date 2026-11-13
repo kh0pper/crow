@@ -45,6 +45,7 @@ import { hasActorKey, presignActors } from "./actor-sig.mjs";
 import { withSkillTools, botGrantsServer, withServiceBlocks, withSatelliteBlocks } from "./bot-world.mjs";
 import { crowDefaultsBlock, readWritingRules } from "./crow-defaults.mjs";
 import { turnScopeFor } from "./service-blocks.mjs";
+import { primeBareServerTools } from "./bare-server-tools.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
@@ -339,7 +340,7 @@ export function jobActor(job) {
   return { botId: job.bot_id, threadId: "job-" + job.job_id, gatewayType: "job", jobId: job.job_id };
 }
 
-export async function runJob(job, { log = () => {}, bridge: injectedBridge = null, repoSkillsDir = undefined } = {}) {
+export async function runJob(job, { log = () => {}, bridge: injectedBridge = null, repoSkillsDir = undefined, probe = undefined } = {}) {
   // loadBot is exported from bridge.mjs (S1). Lazy-import the whole module so we
   // also get PiRpc without a static cycle.
   // The Crow voice bot takes no background jobs, from any producer. Refused
@@ -445,10 +446,19 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     // as the provider's 400.)
     await warmModel(resolved.provider, log);
 
+    // A BARE crow_mcp entry (e.g. "studio") expands to that server's real tool names only
+    // from the listing taken BEFORE PiRpc pins `--tools` (toolAllowlist reads the snapshot it
+    // is handed, synchronously). The returned map is passed to PiRpc below, so this job's
+    // --tools csv is built from exactly the listing taken here. Never throws: an unlistable
+    // server keeps today's spelling. `probe` is the test seam.
+    const bareServerTools = await primeBareServerTools(def, { crowHome, log, probe });
     const pi = new bridge.PiRpc({
       def, sessionDir, resolved, piProvider, selfAuthoringDir: null,
       piSessionId: null, appendSystemPromptFile: sysFile,
       projectWorkspaceDir, mcpDelivery, mcpConfig, botId: job.bot_id,
+      // The listing above is a snapshot of every bare entry's real tool names ({} when the
+      // def has none): PiRpc's --tools assembly reads it, never the module cache.
+      bareServerTools,
       serviceBlocks: svcPrep.piRpcOpts.serviceBlocks || null,
       serviceSkippedTools: svcPrep.piRpcOpts.serviceSkippedTools || [],
       satelliteBlocks: svcPrep.piRpcOpts.satelliteBlocks || null,

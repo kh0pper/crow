@@ -13,7 +13,11 @@
  * The bot scope is wired here too: a Crow bot's linked project comes from
  * `pi_bot_defs` on that same client, and the voice-bot rule from the app's own
  * `servers/gateway/voice/crow-voice.js`. The panel's "Ask the agent" box asks
- * the same table for the song project's bot (`projectBotOf` below).
+ * the same table for the song project's bot (`projectBotOf` below), and offers
+ * to give that bot the Studio tools: the def edit itself lives in
+ * `server/give-tools.js`, wired here with the gateway's own client, the audit
+ * append and Bot Builder's defs-changed emit. A render's measured figures come
+ * from the `studio.render` audit row the renderer wrote (`renderInfoOf`).
  *
  * Request bodies are left to the gateway: its global JSON parser (1 MB cap)
  * runs before the panel router, so nothing here adds one — with one exception.
@@ -69,6 +73,10 @@ const { createTakeUploads } = await bImport("server/takes-upload.js");
 // storage is configured yet, and it asks on every call, so a Shared Storage
 // setting saved after boot works without a restart.
 const { createTakeStorage } = await bImport("server/take-storage.js");
+// The one-click "give this bot the Studio tools" edit: a bare `studio` entry in
+// the bot's `tools.crow_mcp`, compare-and-swap written over `pi_bot_defs` here
+// and audited on the song's project.
+const { createGiveBotStudioTools, grantsStudioTools } = await bImport("server/give-tools.js");
 // The song table: a take's project is its song's project, never a caller's
 // word for it. The studio tables are created by the hub, so this is the same
 // function the hub itself reads a song row with.
@@ -218,14 +226,87 @@ web = createStudioWeb({
     if (!Number.isInteger(id) || id <= 0) return null;
     const { rows } = await db.execute({
       sql:
-        "SELECT bot_id, display_name FROM pi_bot_defs " +
+        "SELECT bot_id, display_name, definition FROM pi_bot_defs " +
         "WHERE project_id = ? AND enabled = 1 ORDER BY display_name LIMIT 1",
       args: [id],
     });
     const row = rows?.[0];
     if (!row) return null;
-    return { bot_id: String(row.bot_id), name: String(row.display_name || row.bot_id) };
+    let def = null;
+    try {
+      def = JSON.parse(row.definition ?? "{}");
+    } catch {
+      def = null;
+    }
+    return {
+      bot_id: String(row.bot_id),
+      name: String(row.display_name || row.bot_id),
+      // The def is read here, not imported from Bot Builder: one boolean is
+      // all the ask box needs, and a def nobody can read claims nothing.
+      has_studio_tools: grantsStudioTools(def && typeof def === "object" ? def : null),
+    };
   },
+
+  // One render's measured figures, for the render info route: the `studio.render`
+  // audit row the renderer wrote (`server/render.js`), whose payload names the
+  // exact storage key the WAV was filed under. Only the six figures leave this
+  // function; the payload also carries the instruments the render missed and
+  // the credits it heard, none of which that route reports.
+  async renderInfoOf({ projectId, storageKey }) {
+    const id = Number(projectId);
+    if (!Number.isInteger(id) || id <= 0 || typeof storageKey !== "string" || storageKey === "") return null;
+    const { rows } = await db.execute({
+      sql:
+        "SELECT payload FROM project_audit_log WHERE project_id = ? AND action = 'studio.render' " +
+        "AND json_extract(payload, '$.storage_key') = ? ORDER BY id DESC LIMIT 1",
+      args: [id, storageKey],
+    });
+    const payload = rows?.[0]?.payload;
+    if (payload == null) return null;
+    let figures = null;
+    try {
+      figures = JSON.parse(payload);
+    } catch {
+      figures = null;
+    }
+    if (!figures || typeof figures !== "object") return null;
+    return {
+      seconds: figures.seconds ?? null,
+      lufs: figures.lufs ?? null,
+      true_peak_db: figures.true_peak_db ?? null,
+      short_term_max_lufs: figures.short_term_max_lufs ?? null,
+      target: figures.target ?? null,
+      meets_target: figures.meets_target ?? null,
+    };
+  },
+
+  // The ask box's one-click "give it the Studio tools": the def edit is
+  // `server/give-tools.js`, over this same client. The bare-entry primer and the
+  // model's tool budget are loaded lazily there (they live in the app root, not
+  // in the bundle), and only on an actual click.
+  giveBotStudioTools: createGiveBotStudioTools({
+    db,
+    appendAudit: (entry) => projectAcl.appendAudit(db, entry),
+    emitDefsChanged: (botId) => {
+      appImport("servers/gateway/dashboard/panels/bot-builder/defs-changed.js")
+        .then((mod) => mod.emitBotDefsChanged(botId))
+        .catch(() => {});
+    },
+    primeTools: async (def) => {
+      const { primeBareServerTools } = await appImport("scripts/pi-bots/bare-server-tools.mjs");
+      // The primer RETURNS the `{ [serverId]: string[] }` listing this def's bare
+      // entries expand to; the edit hands it on to the budget count below.
+      return primeBareServerTools(def, { crowHome, log: (line) => console.warn("[studio]", line) });
+    },
+    budgetFor: async (def, { bareServerTools } = {}) => {
+      const { defaultCompanionBudget } = await appImport("scripts/pi-bots/artifacts-companions.mjs");
+      return defaultCompanionBudget(def, { bareServerTools });
+    },
+    // Crow's voice bot answers every surface and its tools are its own: the
+    // def edit refuses it by id before reading its row.
+    isVoiceBot: (botId) => isVoiceBotId(String(botId)) === true,
+    log: (line) => console.warn("[studio]", line),
+  }),
 });
 
 // Mint the agent token at boot so a Studio MCP process started from the same

@@ -17,6 +17,8 @@
  * names them like any ticked tool.
  */
 import { withArtifactsCompanions } from "./bot-world.mjs";
+import { primeBareServerTools } from "./bare-server-tools.mjs";
+import { resolveCrowHome } from "./ext_registry.mjs";
 import { isVoiceBotId, isVoiceBotDef } from "../../servers/shared/voice-bot.js";
 
 export const MIGRATION_KEY = "artifacts_companions_v1";
@@ -26,15 +28,33 @@ export function grantsArtifactUpdate(list) {
   return Array.isArray(list) && (list.includes("artifacts/artifact_update") || list.includes("artifacts__artifact_update"));
 }
 
-/** {cap, countFor(def)} for this def's resolved default model. Fails open (cap null). */
-export async function defaultCompanionBudget(def) {
+/**
+ * {cap, countFor(def)} for this def's resolved default model. Fails open (cap null).
+ * @param {object} def
+ * @param {{bareServerTools?: Object<string,string[]>, crowHome?: string, probe?: Function}} [opts]
+ *   `bareServerTools` is the bare-entry listing snapshot a caller already holds
+ *   (primeBareServerTools's return): with it, countFor counts the EXPANDED names a bare
+ *   crow_mcp entry really spawns with. WITHOUT it (F1) this function primes the listing
+ *   itself for `def` — before the spawn, a bare entry expands to its server's WHOLE
+ *   listing on every turn, so a count that treated it as one `mcp__<id>` spelling would
+ *   wave a def past the cap that the spawn then refuses (or a provider rejects). A throw
+ *   inside that prime leaves the snapshot absent, i.e. today's count (fail-open).
+ *   `crowHome` defaults to the same per-instance home the rails use (resolveCrowHome),
+ *   and `probe` is passed through as the listing seam (a test must not spawn a server).
+ */
+export async function defaultCompanionBudget(def, { bareServerTools, crowHome, probe } = {}) {
   try {
     const [{ resolveModel }, { capFor, countCsvTools }, { buildToolsCsv }] = await Promise.all([
       import("./model_resolver.mjs"), import("./tool-budget.mjs"), import("./bridge.mjs"),
     ]);
     const resolved = await resolveModel(def);
     const cap = capFor(resolved);
-    return { cap, countFor: (d) => countCsvTools(buildToolsCsv(d, { resolved, interactive: true }).csv) || 0 };
+    // The def passed in carries the same bare entries the candidate does, so its listing is
+    // the candidate's listing.
+    const snapshot = bareServerTools === undefined
+      ? await primeBareServerTools(def, { crowHome: crowHome || resolveCrowHome(), probe })
+      : bareServerTools;
+    return { cap, countFor: (d) => countCsvTools(buildToolsCsv(d, { resolved, interactive: true, bareServerTools: snapshot }).csv) || 0 };
   } catch {
     return { cap: null, countFor: () => 0 };
   }

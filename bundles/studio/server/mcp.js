@@ -1366,7 +1366,7 @@ export function createStudioServer({
     {
       title: "Render the song to audio",
       description:
-        "Render the song — one scene, one clip, or the arrangement (the timeline) from a bar — offline through the same engine the operator hears, master chain and all, store a 24-bit WAV and return its download url with the integrated loudness (LUFS) and the true peak (dB), both measured after the master inserts. short_term_max_lufs is the highest 3 s short-term figure the engine's own master meter took while it played. target is the song's own loudness target and meets_target says whether this render met it: lufs within 1 LU of the target, true_peak at or under its ceiling. The operator's render length limit applies; listen before and after a change and report the numbers against the target. The song's instruments are loaded from this device: an instrument it does not hold plays silence and is named in missing_library, and a credit-bearing bank the render heard is named in credits. An insert the render could not run (a compiled effect this host does not have, or one the engine bypassed) is named in effect_problems; the rest of the chain still played.",
+        "Render the song — one scene, one clip, or the arrangement (the timeline) from a bar — offline through the same engine the operator hears, master chain and all, store a 24-bit WAV and return `download_url` — a link on the operator's own Crow — with the integrated loudness (LUFS) and the true peak (dB), both measured after the master inserts. Present download_url as a markdown link for the operator to open; it is a path on their own Crow, never a storage address, so never quote or invent a bucket URL instead. short_term_max_lufs is the highest 3 s short-term figure the engine's own master meter took while it played. target is the song's own loudness target and meets_target says whether this render met it: lufs within 1 LU of the target, true_peak at or under its ceiling. The operator's render length limit applies; listen before and after a change and report the numbers against the target. The song's instruments are loaded from this device: an instrument it does not hold plays silence and is named in missing_library, and a credit-bearing bank the render heard is named in credits. An insert the render could not run (a compiled effect this host does not have, or one the engine bypassed) is named in effect_problems; the rest of the chain still played.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song to render"),
         scene_id: z.string().min(1).optional().describe("render this scene (every clip it holds)"),
@@ -1397,6 +1397,10 @@ export function createStudioServer({
           from_bar: args.from_bar ?? 0,
           author,
         });
+        // The renderer's own result keeps its presigned url for its other
+        // callers; this tool answers with a path on this Crow instead.
+        const storageKey = typeof out.storage_key === "string" ? out.storage_key : "";
+        const renderFileName = storageKey.split("/").pop() || "";
         // A pad whose sample could not be loaded plays silence; the render
         // still happened, so the agent is told which sound it did not hear.
         const missing = Array.isArray(out.missing_samples) ? out.missing_samples : [];
@@ -1411,7 +1415,13 @@ export function createStudioServer({
         // Task 11), so the agent knows which part of the chain it did not hear.
         const effectProblems = Array.isArray(out.effect_problems) ? out.effect_problems : [];
         return textResult({
-          url: out.url,
+          // A gateway path, never a presigned storage URL: the bytes come from
+          // the dashboard's own render route, behind the operator's session, so
+          // the agent never holds (or reports) a bucket address. The file name
+          // is the last segment of the key the renderer filed the WAV under.
+          download_url: renderFileName
+            ? `/api/studio/songs/${encodeURIComponent(String(args.song_id))}/renders/${renderFileName}`
+            : null,
           lufs: out.lufs,
           true_peak_db: out.true_peak_db,
           short_term_max_lufs: out.short_term_max_lufs ?? null,

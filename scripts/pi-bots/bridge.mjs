@@ -79,6 +79,7 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 import { buildBotWorld, prepareSpawn, bindWorldSession, withServiceBlocks, withSatelliteBlocks } from "./bot-world.mjs";
 import { expandServiceEntry, turnScopeFor } from "./service-blocks.mjs";
 import { expandSatelliteEntry } from "./satellite-blocks.mjs";
+import { expandBareEntry, isSpellableEntry, warnInvalidEntry } from "./bare-server-tools.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath, botsProjectsRoot } from "./instance-paths.mjs";
 import { botWorkspaceEnv, BOT_WORKSPACE_KEYS, BOT_ID_RE } from "./bot-workspace-env.mjs";
@@ -316,7 +317,7 @@ export function filterSpawnEnv(def) { return filterSpawnEnvWithReport(def).spawn
 
 export function db(p) { const d = new Database(resolveSqlitePath(p)); d.pragma("busy_timeout = 10000"); return d; }
 
-export function toolAllowlist(def, { remoteEnabled = false, serviceBlocks = null, serviceSkippedTools = [], satelliteBlocks = null } = {}) {
+export function toolAllowlist(def, { remoteEnabled = false, serviceBlocks = null, serviceSkippedTools = [], satelliteBlocks = null, bareServerTools } = {}) {
   const builtin = (def.tools && def.tools.pi_builtin) || [];
   // Project services (Task 18): an entry naming a connected service that got labelled blocks for
   // this turn (service-blocks.mjs) becomes one name per block (`github/get_me` ->
@@ -326,10 +327,29 @@ export function toolAllowlist(def, { remoteEnabled = false, serviceBlocks = null
   // (satellite-blocks.mjs expandSatelliteEntry): pi-lab registers one `mcp__<block>__<tool>` per
   // tool of a {url} block, and the block is what carries the grant. With no block (a revoked
   // satellite, file-mode delivery, an ungranted bundle) the entry keeps today's spelling.
-  const mcp = ((def.tools && def.tools.crow_mcp) || []).flatMap((s) =>
-    expandServiceEntry(s, { serviceBlocks, skippedTools: serviceSkippedTools })
-    || expandSatelliteEntry(s, { satelliteBlocks })
-    || ["mcp__" + s.replace("/", "__")]);
+  // A BARE entry naming a server (e.g. "studio") is the same trap: pi-lab registers that
+  // server's tools one by one as mcp__studio__<tool>, so `mcp__studio` matches nothing.
+  // bare-server-tools.mjs lists them and the entry expands to the names pi really offers.
+  // The listing is passed in EXPLICITLY (`bareServerTools`, the map primeBareServerTools
+  // returned, carried on piRpcOpts so the budget check and the spawn see one snapshot);
+  // nothing is read from the cache here. prepareSpawn primes on EVERY turn — the owner's
+  // Perch turn, a stranger's Discord or Gmail turn, a job — so a bare entry now expands to
+  // the server's whole listing on every channel turn (a connection service is still
+  // skipped: its tools come from a project's connections). Only a server with no listing, a
+  // failed listing, or a SATELLITE-hosted bundle keeps today's spelling byte for byte. A
+  // satellite-hosted bundle is never expanded locally: it has no local server, it is
+  // spelled from its block above when granted.
+  const mcp = ((def.tools && def.tools.crow_mcp) || []).flatMap((s) => {
+    const spelled = expandServiceEntry(s, { serviceBlocks, skippedTools: serviceSkippedTools })
+      || expandSatelliteEntry(s, { satelliteBlocks })
+      || expandBareEntry(s, { bareServerTools, skippedTools: serviceSkippedTools, satelliteBundles: Object.values(satelliteBlocks || {}) });
+    if (spelled) return spelled;
+    // Nothing claimed it: today's plain spelling — but only for an entry shaped like an
+    // id, an `id/tool` or an `id__tool`. An entry outside that alphabet ("a,read") is
+    // dropped whole, never split into a csv field of its own, and warned about once.
+    if (!isSpellableEntry(s)) { warnInvalidEntry(s); return []; }
+    return ["mcp__" + s.replace("/", "__")];
+  });
   const out = [...builtin, ...mcp];
   if (remoteEnabled) {
     // Server-level allow per remote capability (= all that capability's tools;
@@ -373,7 +393,7 @@ export function canonicalToolOrder(csv) {
  * which feed PI_BOT_PERMISSION_POLICY.
  * @returns {{csv: string, maOptIn: boolean, maCapable: boolean}}
  */
-export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactive = false, narrowedTools = null, serviceBlocks = null, serviceSkippedTools = [], satelliteBlocks = null } = {}) {
+export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactive = false, narrowedTools = null, serviceBlocks = null, serviceSkippedTools = [], satelliteBlocks = null, bareServerTools } = {}) {
   const maOptIn = !!(def.permission_policy && def.permission_policy.multi_agent === true);
   const maCapable = isMultiAgentCapable(resolved.provider, resolved.model);
   // Belt (R7 — pi `--tools` provably filters extension-registered tools
@@ -381,7 +401,7 @@ export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactiv
   // custom tools"). Only expose `subagent` to the model when capable+
   // opted-in; otherwise pi never offers it. The gate is the backstop if a
   // hand DB-edit bypasses this.
-  let tools = canonicalToolOrder(toolAllowlist(def, { remoteEnabled, serviceBlocks, serviceSkippedTools, satelliteBlocks }));
+  let tools = canonicalToolOrder(toolAllowlist(def, { remoteEnabled, serviceBlocks, serviceSkippedTools, satelliteBlocks, bareServerTools }));
   if (maOptIn && maCapable) tools = [tools, "subagent"].filter(Boolean).join(",");
   // PL-3 completion, same belt as subagent above. pi-lab's ask-user
   // extension REGISTERS ask_user only under PI_BOT_INTERACTIVE=1
@@ -581,6 +601,7 @@ export class PiRpc {
       serviceBlocks: opts.serviceBlocks || null,
       serviceSkippedTools: opts.serviceSkippedTools || [],
       satelliteBlocks: opts.satelliteBlocks || null,
+      bareServerTools: opts.bareServerTools || undefined,
     });
     // Wave 2: the FINAL csv, exposed so the interactive engine's Session-tab
     // facts can report the tool count the child was actually pinned with
@@ -1889,6 +1910,7 @@ export async function handleInbound(opts) {
       serviceBlocks: po.serviceBlocks || null,
       serviceSkippedTools: po.serviceSkippedTools || [],
       satelliteBlocks: po.satelliteBlocks || null,
+      bareServerTools: po.bareServerTools || undefined,
     });
     const budget = checkToolBudget(csv, capFor(resolved));
     if (!budget.ok) {
@@ -2049,8 +2071,8 @@ export async function handleInbound(opts) {
   }
 
   // piRpcOpts carries {def, sessionDir, resolved, selfAuthoringDir,
-  // remoteEnabled, narrowedTools, appendSystemPromptFile}; the resume decision
-  // is channel policy, so the caller adds piSessionId.
+  // remoteEnabled, narrowedTools, appendSystemPromptFile, bareServerTools}; the
+  // resume decision is channel policy, so the caller adds piSessionId.
   const pi = new PiRpc(Object.assign({}, spawnPrep.piRpcOpts, {
     piSessionId: effectiveResume ? session.pi_session_id : null }));
   let result;

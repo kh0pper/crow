@@ -49,7 +49,7 @@ You cannot hear. A render returns `lufs` (integrated), `true_peak_db`, `short_te
 | inserts on any track, on any return and on the master: `eq`, `filter`, `delay`, `reverb`, `chorus`, `phaser`, `saturation`, `compressor`, `limiter`, `gate`, `deesser`, and an `amp` that plays the capture and cabinet the operator chose | sidechain from another track (ducking); choosing, swapping or removing an amp's capture or cabinet |
 | sends to up to 8 returns, and 8 returns of their own | recording by the agent, dither, MP3/AAC export, upload |
 | the master's `gain_db`, its target `{lufs, true_peak_db}`, and a master limiter whose look-ahead holds the ceiling | any look-ahead on a track or return insert: those are zero-latency by rule |
-| `studio_render`: WAV url + integrated LUFS + true peak + highest short-term figure, per song, scene or clip | |
+| `studio_render`: a gateway download link + integrated LUFS + true peak + highest short-term figure, per song, scene or clip | |
 | `studio_mix`: every chain, every send, every return, the master target, and the last render's figures | |
 | `studio_history`, `studio_undo`, `studio_redo`; audio tracks play the operator's recorded takes through the same chains | |
 

@@ -576,6 +576,48 @@ const STYLES = `
     background: var(--st-agent); color: #0E1A26; font: inherit; font-weight: 600; font-size: 13px;
   }
   .studio .st-ask input:disabled, .studio .st-ask button:disabled { opacity: 0.55; cursor: default; }
+  /* What the ask box draws under itself: the operator's own line, the bot's
+     server-rendered reply, the working line, and the note that says why the box
+     cannot be used. */
+  .studio .st-ask-line { margin: 6px 0 0; }
+  .studio .st-ask-you {
+    border-left: 3px solid var(--st-human); padding-left: 8px; color: var(--st-text);
+  }
+  .studio .st-ask-reply { overflow-x: auto; }
+  .studio .st-ask-reply p { margin: 6px 0; }
+  .studio .st-ask-reply a { color: var(--st-agent); }
+  .studio .st-ask-reply ul, .studio .st-ask-reply ol { margin: 6px 0; padding-left: 18px; }
+  .studio .st-ask-reply .table-scroll { overflow-x: auto; max-width: 100%; }
+  .studio .st-ask-reply table {
+    border-collapse: collapse; font-size: 11px; margin: 6px 0; max-width: 100%;
+  }
+  .studio .st-ask-reply th, .studio .st-ask-reply td {
+    border: 1px solid var(--st-line); padding: 2px 6px; text-align: left;
+  }
+  .studio .st-ask-error { color: var(--st-danger); }
+  .studio .st-ask-working { margin: 6px 0 0; color: var(--st-muted); font-style: italic; }
+  .studio .st-ask-note { margin: 8px 0 0; font-size: 12px; color: var(--st-muted); }
+  .studio .st-ask-note a { color: var(--st-agent); }
+  .studio .st-ask-note button {
+    margin-left: 6px; min-height: 32px; padding: 0 10px; border-radius: 6px; border: none;
+    background: var(--st-agent); color: #0E1A26; font: inherit; font-weight: 600; font-size: 12px;
+  }
+  .studio .st-ask-note button:disabled { opacity: 0.55; cursor: default; }
+  /* One of this song's renders, offered where the bot linked it: built from the
+     song id and the validated name, never from the address the bot pasted. */
+  .studio .st-ask-render {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    margin: 6px 0; padding: 6px; border: 1px solid var(--st-edge); border-radius: 8px;
+    background: var(--st-panel);
+  }
+  .studio .st-ask-render audio { max-width: 100%; height: 32px; }
+  .studio .st-ask-download { color: var(--st-agent); font-size: 12px; }
+  .studio .st-ask-loudbox { flex: 1 1 100%; }
+  .studio .st-ask-loud { border-collapse: collapse; font-size: 11px; width: 100%; }
+  .studio .st-ask-loud th, .studio .st-ask-loud td {
+    border: 1px solid var(--st-line); padding: 2px 6px; text-align: left;
+  }
+  .studio .st-ask-loud th { color: var(--st-muted); font-weight: 500; }
   .studio .st-songs { display: flex; flex-direction: column; gap: 8px; }
   .studio .st-song {
     display: flex; flex-direction: column; gap: 2px; padding: 10px 12px;

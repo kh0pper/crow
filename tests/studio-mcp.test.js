@@ -43,8 +43,8 @@ import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { actorFromEnv, resolveCallActor } from "../servers/research/actor.js";
 import { tinySf2 } from "./fixtures/tiny-sf2.mjs";
 
-/** The render url the fake renderer answers with (a placeholder host). */
-const RENDER_URL = "https://storage.example/studio/song-1/render.wav";
+/** The file name the fake renderer's storage key ends in (a placeholder host is no longer handed out). */
+const RENDER_FILE = "render.wav";
 
 /** The one project the scratch database's ACL knows about. */
 const PROJECT = 21;
@@ -152,7 +152,12 @@ function makeHub(options = {}) {
   return { hub, calls };
 }
 
-/** A fake renderer: records the request, refuses anything over 300 s. */
+/**
+ * A fake renderer: records the request, refuses anything over 300 s. It still
+ * answers a presigned `url` — the renderer's own result keeps that for its
+ * other callers — while `studio_render` hands the agent a gateway
+ * `download_url` built from the key's file name instead.
+ */
 function makeRenderer() {
   const calls = [];
   return {
@@ -164,8 +169,8 @@ function makeRenderer() {
           throw new Error("A render can be at most 300 seconds long.");
         }
         return {
-          storage_key: "studio/song-1/render.wav",
-          url: RENDER_URL,
+          storage_key: `studio/song-1/${RENDER_FILE}`,
+          url: `https://storage.example/studio/song-1/${RENDER_FILE}`,
           seconds: request.seconds,
           lufs: -14.2,
           true_peak_db: -1.1,
@@ -420,7 +425,8 @@ test("studio_render passes seconds through and surfaces limit errors", async () 
     });
     assert.notEqual(result.isError, true, textOf(result));
     const body = JSON.parse(textOf(result));
-    assert.equal(body.url, RENDER_URL);
+    assert.equal(body.download_url, `/api/studio/songs/song-1/renders/${RENDER_FILE}`);
+    assert.equal("url" in body, false, "the agent is given a gateway link, never a storage URL");
     assert.equal(body.seconds, 4);
     assert.equal(body.lufs, -14.2);
     assert.equal(body.true_peak_db, -1.1);
@@ -825,7 +831,10 @@ test("agent renders the arrangement from bar 9", async (t) => {
       arguments: { song_id: songId, seconds: 8, mode: "arrangement", from_bar: 8 },
     });
     assert.notEqual(result.isError, true, textOf(result));
-    assert.equal(JSON.parse(textOf(result)).url, RENDER_URL);
+    assert.equal(
+      JSON.parse(textOf(result)).download_url,
+      `/api/studio/songs/${encodeURIComponent(songId)}/renders/${RENDER_FILE}`,
+    );
 
     assert.equal(calls.length, 1);
     assert.equal(calls[0].mode, "arrangement", "the renderer is asked for the timeline, not a scene");
@@ -1673,7 +1682,7 @@ test("agent sets a program and hears it in a render", async (t) => {
 
     // Program 0 of the bank is a 340 Hz tone.
     const first = await render();
-    assert.ok(first.url, "the first render is stored");
+    assert.ok(first.download_url, "the first render is stored");
     assert.deepEqual(first.credits, ["Tiny Font by a person"], "the credit line comes back with the render");
     assert.equal(first.missing_library, undefined, "every font was on this device");
     assert.equal(storage.gets.length, 1, "the bank was read once, from the song's own storage key");
@@ -1702,7 +1711,7 @@ test("agent sets a program and hears it in a render", async (t) => {
     const after = decodeWav(storage.uploads[1].data).channels[0];
     assert.ok(toneAmplitude(after, 4800, 24000, TONE_PROGRAM_1) > 0.01, "program 1's 420 Hz tone sounds");
     assert.ok(toneAmplitude(after, 4800, 24000, TONE_PROGRAM_0) < 0.005, "and program 0's is gone");
-    assert.notEqual(second.url, first.url, "two renders, two files");
+    assert.notEqual(second.download_url, first.download_url, "two renders, two files");
 
     // Nothing about the bank itself was the agent's to touch: the font is the
     // operator's, so a set_font step is refused in the hub's own sentence.

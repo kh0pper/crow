@@ -44,8 +44,12 @@ const BOTLESS_PROJECT = 22;
 /** The dashboard's author for a song created through the hub. */
 const HUMAN = { kind: "human", id: "local", label: "You" };
 
-/** The bot this file's fake `projectBotOf` answers for PROJECT. */
-const BOT = Object.freeze({ bot_id: "bassbot", name: "Bass Bot" });
+/**
+ * The bot this file's fake `projectBotOf` answers for PROJECT. Its def grants
+ * the Studio tools, because the ask box only lets a person ask a bot that has
+ * them: a bot without is offered the grant instead and sends nothing.
+ */
+const BOT = Object.freeze({ bot_id: "bassbot", name: "Bass Bot", has_studio_tools: true });
 
 /** The title the song page shows, and therefore what the context names. */
 const SONG_TITLE = "Bass song";
@@ -196,12 +200,22 @@ test("project-bot route returns the song project's bot, and null without one", a
   assert.equal(found.body.bot_id, BOT.bot_id, "the enabled bot of that project is named");
   assert.equal(found.body.name, BOT.name, "with its display name");
   assert.equal(found.body.project_id, PROJECT, "and the project the page files its session under");
+  // Additive fields of the ask box's Studio offer: this bot's def grants the
+  // Studio tools, and a project that has a bot needs no setup link.
+  assert.equal(found.body.has_studio_tools, true, "a bot whose def grants the Studio tools says so");
+  assert.equal(found.body.setup_url, null, "a project that has a bot sets nothing up");
   assert.deepEqual(asked, [PROJECT], "the lookup was asked about the song's own project");
 
   const none = await projectBot(base, otherSong);
   assert.equal(none.status, 200, "a project with no bot is still a valid answer");
   assert.equal(none.body.bot_id, null, "and says so instead of naming a bot");
   assert.equal(none.body.name, null, "there is no name to show either");
+  assert.equal(none.body.has_studio_tools, null, "there is no bot to say anything about");
+  assert.equal(
+    none.body.setup_url,
+    `/dashboard/bot-builder?new=1&project=${BOTLESS_PROJECT}`,
+    "a project with no bot is offered Bot Builder's new-bot page for it",
+  );
 });
 
 test("an unknown song has no project bot", async (t) => {

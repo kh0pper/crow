@@ -1250,7 +1250,8 @@ test("a render reports a missing sample", async () => {
     assert.notEqual(answer.isError, true, answer.content?.[0]?.text);
     const body = JSON.parse(answer.content[0].text);
     assert.deepEqual(body.missing_samples, stored.missing_samples, "the agent is told what it did not hear");
-    assert.ok(body.url, "the render's url still comes back");
+    assert.ok(body.download_url, "the render's gateway link still comes back");
+    assert.equal("url" in body, false, "and never a storage address");
   } finally {
     await client.close();
   }
