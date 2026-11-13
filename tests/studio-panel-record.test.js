@@ -1518,6 +1518,65 @@ test("a stored measurement shows in the header and in the monitor sentence", asy
   );
 });
 
+test("monitor warning waits for the measurement instead of saying unmeasured", async () => {
+  // The switch closes only once its delay is in hand: a monitor drawn while the
+  // read is still on its way would tell the operator the measurement it already
+  // has does not exist.
+  const store = fakeTakeStore({ latency: CALIBRATED, log: [] });
+  const read = store.getLatency.bind(store);
+  let releaseRead = () => {};
+  let holdNextRead = false;
+  const readGate = new Promise((resolve) => {
+    releaseRead = resolve;
+  });
+  store.getLatency = async (key) => {
+    if (holdNextRead) {
+      holdNextRead = false;
+      await readGate;
+    }
+    return read(key);
+  };
+
+  const ui = await bootPanel({ store });
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  assert.equal(
+    ui.document.querySelector('[data-role=latency]').textContent,
+    "71 ms",
+    "the armed track already holds its measurement",
+  );
+
+  // The next read — the monitor's own — is kept open, and the page is drawn
+  // again while it is open (playing draws the panel, and plays nothing here).
+  const chip = ui.document.querySelector('[data-role=latency]');
+  holdNextRead = true;
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=monitor]`);
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle();
+
+  assert.notEqual(
+    ui.document.querySelector('[data-role=latency]'),
+    chip,
+    "the panel was drawn again while the measurement was still on its way",
+  );
+  const early = ui.document.querySelector('[data-role=monitor-warning]');
+  assert.ok(
+    !early || !early.textContent.includes("hasn't measured"),
+    "a monitor whose measurement is still being read never says it has none",
+  );
+
+  releaseRead();
+  await ui.settle(24);
+  const warning = ui.document.querySelector('[data-role=monitor-warning]');
+  assert.ok(warning, "the switch closes once the measurement is in hand");
+  assert.equal(
+    warning.textContent,
+    "You'll hear yourself about 71 ms late. Your interface's direct-monitor knob has no delay.",
+    "and the sentence states the measured delay",
+  );
+});
+
 test("a recorded chunk is kept on this device before it is uploaded", async () => {
   const ui = await bootPanel({ gateFinish: true });
   ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
