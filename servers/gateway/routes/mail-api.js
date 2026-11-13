@@ -346,6 +346,36 @@ async function stopWorkerForDelete(deps, accountId) {
   }
 }
 
+/**
+ * The same, for the other half of the delete: while the id is in the supervisor's removal set no
+ * worker, run or borrowed adapter may be built for it, so a `syncNow`, a `requestSync` or a
+ * `withAdapter` that lands between the stop and the rows' removal cannot write after the delete (no
+ * mail table row carries a foreign key). Both calls are optional and never throw: a supervisor from an
+ * older build, or a fake one, must not hold up a delete.
+ */
+function beginRemovalFor(deps, accountId) {
+  const supervisor = supervisorFor(deps);
+  if (!supervisor || typeof supervisor.beginRemoval !== "function") return false;
+  try {
+    supervisor.beginRemoval(accountId);
+    return true;
+  } catch (err) {
+    logCode("delete_removal_begin", err);
+    return false;
+  }
+}
+
+function endRemovalFor(deps, accountId, started) {
+  if (started !== true) return;
+  const supervisor = supervisorFor(deps);
+  if (!supervisor || typeof supervisor.endRemoval !== "function") return;
+  try {
+    supervisor.endRemoval(accountId);
+  } catch (err) {
+    logCode("delete_removal_end", err);
+  }
+}
+
 /* -------------------------------------------------------------------- router */
 
 /**
@@ -534,8 +564,9 @@ export function mailApiRouter(dashboardAuth, deps = {}) {
     res.json({ account: accountSummary(account) });
   }));
 
-  // DELETE /accounts/:id — the worker FIRST and awaited (its run, timers, watcher and both of its
-  // connections are gone before the rows are touched), then the rows, the secret and the claim. A
+  // DELETE /accounts/:id — the id is marked as being removed, then the worker (awaited: its run,
+  // timers, watcher and both of its connections are gone before the rows are touched), then the rows,
+  // the secret and the claim; the mark goes in a `finally`, so a delete that fails still frees the id. A
   // keychain or claim failure after the row is gone is logged by code: the secret of a deleted account
   // is never served again, and a claim row that cannot be tombstoned still expires with this
   // instance's liveness.
@@ -547,15 +578,20 @@ export function mailApiRouter(dashboardAuth, deps = {}) {
     const local = await localInstanceFor(db, deps);
     const credentials = credentialsFor(db, deps);
 
-    await stopWorkerForDelete(deps, id);
-    const removed = await deleteAccount(db, id);
+    const removalBegan = beginRemovalFor(deps, id);
     try {
-      await credentials.deleteSecrets(id);
-    } catch (err) {
-      logCode("delete_secret", err);
+      await stopWorkerForDelete(deps, id);
+      const removed = await deleteAccount(db, id);
+      try {
+        await credentials.deleteSecrets(id);
+      } catch (err) {
+        logCode("delete_secret", err);
+      }
+      await releaseClaimQuietly(db, account.address, local.instanceId);
+      res.json({ ok: true, messages: removed.messages });
+    } finally {
+      endRemovalFor(deps, id, removalBegan);
     }
-    await releaseClaimQuietly(db, account.address, local.instanceId);
-    res.json({ ok: true, messages: removed.messages });
   }));
 
   // POST /accounts/:id/sync — the owner's nudge. The run is the supervisor's; the answer says whether

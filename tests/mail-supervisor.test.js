@@ -2298,3 +2298,147 @@ test("a notice swallowed by a restart is not repeated for a day", async () => {
   assert.equal(h.notices[0].body, 'Crow cannot sync "Alex" right now. It will keep trying.');
   await h.supervisor.stop();
 });
+
+/* -------------------- a worker retired by a delete is never brought back (hole 1) */
+
+test("an ensureWatch that resumes after stopAccount opens no connection, arms no watch and writes nothing", async () => {
+  let inner = null;
+  let releaseConnect = null;
+  const connectGate = new Promise((resolve) => {
+    releaseConnect = resolve;
+  });
+  let parkConnect = false;
+  const h = await setup({
+    start: false,
+    adapterFactory: async (args) => {
+      const view = await inner(args);
+      if (!parkConnect) return view;
+      parkConnect = false;
+      const realConnect = view.connect.bind(view);
+      view.connect = async () => {
+        await connectGate;
+        return realConnect();
+      };
+      return view;
+    },
+  });
+  inner = h.factory;
+
+  // The run's success handler is parked on its own account write: the gap a delete lands in. The
+  // start's own ensureWatch is still ahead of it, and the connection it would open is the late one.
+  const held = holdDbCall(h.db, { match: /UPDATE mail_accounts/, after: 1 });
+  const starting = h.supervisor.start();
+  await held.parked;
+  await flush(20);
+  const viewsAfterRun = h.views.length;
+  const listsBefore = callsOf(h.fake, "list").length;
+  const factoriesBefore = h.factoryArgs.length;
+  parkConnect = true;
+
+  await h.supervisor.stopAccount(h.accountId);
+  const timersAfterStop = h.clock.pending();
+  held.release();
+  await flush(60);
+  // The rows go, exactly as the delete route does after the stop, while the connect is still out.
+  await deleteAccount(h.db, h.accountId);
+  releaseConnect();
+  await starting;
+  await flush(200);
+
+  assert.equal(h.views.length, viewsAfterRun, "no connection was opened for the retired worker");
+  assert.equal(h.factoryArgs.length, factoriesBefore, "no adapter was built for the retired worker");
+  for (const view of h.views) assert.equal(view.state.closed, true, "no connection is left open");
+  assert.equal(callsOf(h.fake, "list").length, listsBefore, "no pass ran for the retired worker");
+  assert.equal(await getSyncState(h.db, h.accountId), null, "no sync state was written");
+  assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+  assert.equal((await h.supervisor.status(h.accountId)).running, false);
+  assert.equal(h.clock.pending(), timersAfterStop, "nothing was armed behind it");
+  assert.equal(h.notices.length, 0);
+  await h.supervisor.stop();
+});
+
+/* --------------------- a deleted account without a cached connection (hole 2) */
+
+test("a deleted account whose worker holds no connection ends quietly: no state row, no retry, no notice", async () => {
+  const h = await setup();
+  // A failure closes the cached connection and arms the ladder, so the retry has none to reuse.
+  h.fake.failNext("listFolders", netError());
+  await h.supervisor.syncNow(h.accountId);
+  assert.equal((await getSyncState(h.db, h.accountId)).failures, 1);
+  const viewsAfterFailure = h.views.length;
+  const timersAfterFailure = h.clock.pending();
+
+  // The rows go while the retry is still pending: nothing of the worker's may be written again.
+  await deleteAccount(h.db, h.accountId);
+
+  await h.clock.advance(BACKOFF_BASE_MS);
+  await flush(120);
+
+  assert.equal(await getSyncState(h.db, h.accountId), null, "no sync state row for a deleted account");
+  assert.equal(h.views.length, viewsAfterFailure, "the retry opened no connection");
+  assert.equal((await h.supervisor.status(h.accountId)).running, false);
+  // The retry's own poll and back-off timers are gone: only the supervisor's two global ticks remain.
+  assert.equal(h.clock.pending(), timersAfterFailure - 2, "no retry and no poll were left armed");
+
+  // The ladder's later attempts, and the poll: still nothing, and never a notice about a gone account.
+  await h.clock.advance(BACKOFF_BASE_MS * 2 + 1000);
+  await h.clock.advance(POLL_MS * 2);
+  await flush(120);
+
+  assert.equal(await getSyncState(h.db, h.accountId), null);
+  assert.equal(h.views.length, viewsAfterFailure);
+  assert.equal(h.notices.length, 0);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+  await h.supervisor.stop();
+});
+
+/* ------------------------- an id being removed refuses new work (hole 3) */
+
+test("beginRemoval refuses syncNow, requestSync and withAdapter, and endRemoval puts the account back", async () => {
+  const h = await setup();
+  const viewsBefore = h.views.length;
+  const listsBefore = callsOf(h.fake, "listFolders").length;
+  const stateBefore = await getSyncState(h.db, h.accountId);
+
+  h.supervisor.beginRemoval(h.accountId);
+  await h.supervisor.syncNow(h.accountId);
+  await h.supervisor.requestSync(h.accountId);
+  await assert.rejects(
+    h.supervisor.withAdapter(h.accountId, () => {
+      throw new Error("must not run");
+    }),
+    (err) => {
+      assert.ok(err instanceof MailError);
+      assert.equal(err.code, "NOT_FOUND");
+      assert.equal(err.detail, "account");
+      return true;
+    },
+  );
+  await flush(60);
+
+  assert.equal(h.views.length, viewsBefore, "no connection was opened during the removal");
+  assert.equal(callsOf(h.fake, "listFolders").length, listsBefore, "nothing was listed");
+  assert.deepEqual(await getSyncState(h.db, h.accountId), stateBefore, "nothing was written");
+  assert.equal((await h.supervisor.status(h.accountId)).running, false);
+
+  // Out of the set again: the same calls work.
+  h.supervisor.endRemoval(h.accountId);
+  await h.supervisor.syncNow(h.accountId);
+  assert.ok(callsOf(h.fake, "listFolders").length > listsBefore);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  await h.supervisor.stop();
+});
+
+test("a removal in progress keeps a fresh start from building a worker for that account", async () => {
+  const h = await setup({ start: false });
+  h.supervisor.beginRemoval(h.accountId);
+  await h.supervisor.start();
+  await flush(60);
+
+  assert.equal(h.views.length, 0);
+  assert.equal(callsOf(h.fake, "listFolders").length, 0);
+  assert.equal(await getSyncState(h.db, h.accountId), null);
+
+  h.supervisor.endRemoval(h.accountId);
+  await h.supervisor.stop();
+});

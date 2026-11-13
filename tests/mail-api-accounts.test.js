@@ -645,6 +645,77 @@ test("RF5/M4/B1: DELETE stops the account's real worker first, then removes the 
   await s.supervisor.stop();
 });
 
+test("DELETE brackets the removal: beginRemoval before stopAccount, endRemoval after the rows", async () => {
+  const order = [];
+  const supervisor = {
+    async syncNow() {},
+    async stopAccount(id) { order.push("stopAccount:" + id); },
+    beginRemoval(id) { order.push("beginRemoval:" + id); },
+    endRemoval(id) { order.push("endRemoval:" + id); },
+  };
+  const s = await setup({
+    supervisor,
+    wrapDb: (client) => {
+      const realRun = client.runTransaction.bind(client);
+      client.runTransaction = async (work) => {
+        order.push("delete");
+        return realRun(work);
+      };
+      return client;
+    },
+  });
+
+  const created = await post(accountsPath, BODY);
+  assert.equal(created.status, 201, created.text);
+  const id = created.json.account.id;
+  order.length = 0;
+
+  const r = await del(accountPath(id));
+  assert.equal(r.status, 200, r.text);
+
+  // The id is marked as being removed before the worker is told to stop, so a sync or an action that
+  // lands in between is refused; the mark goes only after the rows are gone.
+  assert.deepEqual(order.slice(0, 3), [
+    "beginRemoval:" + id,
+    "stopAccount:" + id,
+    "delete",
+  ]);
+  assert.equal(order.at(-1), "endRemoval:" + id, "the mark is dropped after the rows went");
+  assert.equal(order.filter((entry) => entry.startsWith("endRemoval")).length, 1);
+  assert.equal(await s.count("mail_accounts"), 0);
+});
+
+test("DELETE drops the removal mark even when the rows cannot be removed", async () => {
+  const order = [];
+  const supervisor = {
+    async syncNow() {},
+    async stopAccount() { order.push("stopAccount"); },
+    beginRemoval() { order.push("beginRemoval"); },
+    endRemoval() { order.push("endRemoval"); },
+  };
+  const s = await setup({
+    supervisor,
+    wrapDb: (client) => {
+      client.runTransaction = async () => {
+        order.push("delete");
+        throw new Error("database is locked");
+      };
+      return client;
+    },
+  });
+
+  const created = await post(accountsPath, BODY);
+  assert.equal(created.status, 201, created.text);
+  const id = created.json.account.id;
+  order.length = 0;
+
+  const r = await del(accountPath(id));
+  assert.equal(r.status, 500, r.text);
+  assert.deepEqual(r.json, { error: "internal", message: "Something went wrong." });
+  assert.deepEqual(order, ["beginRemoval", "stopAccount", "delete", "endRemoval"]);
+  assert.equal(await s.count("mail_accounts", "WHERE id = ?", [id]), 1, "the account is still there");
+});
+
 test("probeAccount closes the adapter on success and on failure, and leaks neither secret nor username", async () => {
   // Success: connect and list, then close.
   const good = createFakeMailAdapter();

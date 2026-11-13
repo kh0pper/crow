@@ -31,9 +31,23 @@
  *
  * **A run for an account that is gone writes nothing.** Every run re-reads its own account row before
  * it runs its plan, whether it reused a cached connection or opened a fresh one: a run that finds the
- * row gone ends quietly — no folder, no message, no sync state, no notice — and closes the connection
- * it was holding. That close, with `stopAccount`, is what keeps a delete from leaving orphan mail
- * behind when a handshake lands after the rows went.
+ * row gone ends quietly — no folder, no message, no sync state, no notice, no back-off timer — and
+ * closes the connection it was holding. A run that cannot even build a connection because the row is
+ * gone takes the same path (the factory's NOT_FOUND/`account` is the quiet one): the worker is retired
+ * along with the rows instead of counting a failure against an id that has none. That close, with
+ * `stopAccount`, is what keeps a delete from leaving orphan mail behind when a handshake lands after
+ * the rows went.
+ *
+ * **A retired worker is never brought back.** `stopAccount` takes its worker out of the map and marks
+ * it `retired`; the id may also be in the supervisor's removal set (`beginRemoval`/`endRemoval`, the
+ * delete route's bracket around the stop and the rows). Every place that could adopt a connection
+ * (`workerAdapter`), arm a watch, start a run or handle a watch report bails on a worker that is
+ * retired or no longer the map's, closing the connection it just got instead of keeping it — so an
+ * `ensureWatch` or a handshake suspended across a delete leaves no watcher, no connection and no
+ * state row behind. While an id is in the removal set, `syncNow` and `requestSync` resolve without
+ * effect, `withAdapter` refuses with NOT_FOUND/`account`, and no worker is built for it at all: a
+ * request that lands between the stop and the rows' removal cannot start a pass that would write
+ * after the delete (no mail table row carries a foreign key).
  *
  * **Failures back off, and a lost watch never touches stored mail.** Every failure but AUTH_FAILED
  * counts up the same ladder (`backoffDelay` doubles from five seconds to fifteen minutes with
@@ -224,6 +238,9 @@ export function createMailSupervisor(options = {}) {
   /** accountId -> promise: the tail of that account's `withAdapter` queue. */
   const actionQueues = new Map();
 
+  /** accountIds whose delete has begun: no worker is built and no new work is started for them. */
+  const deleting = new Set();
+
   let started = false;
   let stopped = false;
   let claimTickTimer = null;
@@ -240,12 +257,27 @@ export function createMailSupervisor(options = {}) {
   }
 
   /**
+   * This worker is no longer the supervisor's: a delete retired it (`retired`), or it is not the one
+   * the map holds for its id any more. Nothing suspended in it may adopt a connection, arm a watch,
+   * start a run or write: the id it served is being removed, or another worker serves it now.
+   */
+  function notOurs(worker) {
+    return worker.retired === true || workers.get(worker.accountId) !== worker;
+  }
+
+  /** Whether this account id is in the middle of a delete (see `beginRemoval`). */
+  function removing(accountId) {
+    return deleting.has(accountId);
+  }
+
+  /**
    * Whether a handler that was built with `epoch` may still act on this worker: the supervisor is
-   * live, the worker has not been torn down or replaced since, and it has not lost its claim. A
-   * claim taken without a supersede (the re-check in `prepare`) is enough to end a suspended handler.
+   * live, the worker has not been torn down, retired or replaced since, and it has not lost its claim.
+   * A claim taken without a supersede (the re-check in `prepare`) is enough to end a suspended
+   * handler, and so is a delete that retired the worker behind it.
    */
   function current(worker, epoch) {
-    return live() && worker.claimed !== true && worker.epoch === epoch;
+    return live() && worker.claimed !== true && worker.epoch === epoch && !notOurs(worker);
   }
 
   function logEvent(event, extra = {}) {
@@ -277,10 +309,15 @@ export function createMailSupervisor(options = {}) {
   }
 
   function workerFor(account) {
+    // A worker built for an id whose delete has begun would be a worker whose first pass could write
+    // rows for an account that is about to have none.
+    if (removing(account.id)) throw new MailError("NOT_FOUND", "account");
     let worker = workers.get(account.id);
     if (!worker) {
       worker = {
         accountId: account.id,
+        // Set by `retireWorker`: a retired worker is never handed a connection or a run again.
+        retired: false,
         adapter: null,
         watcher: null,
         watchPaths: [],
@@ -399,6 +436,13 @@ export function createMailSupervisor(options = {}) {
       await closeAdapterValue(adapter, worker.accountId);
       throw new MailError("NETWORK", "run_closed");
     }
+    // A worker a delete retired (or one the map no longer holds) never adopts a connection, whether
+    // its caller is a run or a run-less `ensureWatch`: the connection that just landed is closed here.
+    // The caller hears NOT_FOUND/`account`, which `executeRun` treats as the quiet gone path.
+    if (notOurs(worker)) {
+      await closeAdapterValue(adapter, worker.accountId);
+      throw new MailError("NOT_FOUND", "account");
+    }
     if (!live() || worker.adapter != null) {
       await closeAdapterValue(adapter, worker.accountId);
       // A run-less caller (ensureWatch) or a live run that lost a benign race takes the connection
@@ -454,7 +498,7 @@ export function createMailSupervisor(options = {}) {
 
   /** (Re)arm the IDLE watch on INBOX and Sent, and only those two. Never throws. */
   async function ensureWatch(worker) {
-    if (!live() || worker.claimed || worker.authFailed) return;
+    if (!live() || worker.claimed || worker.authFailed || notOurs(worker)) return;
     // A watch is only reconnected after the back-off: the retry's own success lands here again.
     if (worker.backoffTimer != null) return;
     let paths;
@@ -478,10 +522,10 @@ export function createMailSupervisor(options = {}) {
       logError("watch_connect_failed", err, { accountId: worker.accountId });
       return;
     }
-    // The connect may have outlived the supervisor or the worker's own connection: `stop()` and a
-    // failure both close the adapter and null it, so a connection that is no longer the worker's is
-    // never watched.
-    if (!live() || worker.claimed || worker.adapter !== adapter) return;
+    // The connect may have outlived the supervisor, the worker's own connection or a delete: `stop()`
+    // and a failure both close the adapter and null it, and a delete retires the worker outright, so a
+    // connection that is no longer the worker's is never watched.
+    if (!live() || worker.claimed || notOurs(worker) || worker.adapter !== adapter) return;
 
     // Captured when the watch is armed, not when the adapter reports: a watch on a connection a
     // restart has since replaced may still report a change, or its own death, and that report belongs
@@ -502,10 +546,10 @@ export function createMailSupervisor(options = {}) {
       await onWatchError(worker, err, epoch);
       return;
     }
-    // The watch may have outlived the supervisor, the connection it was made on, or the arm that came
-    // before it: a watcher created after `stop()` or after a failure closed the adapter is stopped
-    // here and never stored.
-    if (!live() || worker.claimed || worker.adapter !== adapter || worker.watcher != null) {
+    // The watch may have outlived the supervisor, the connection it was made on, the arm that came
+    // before it or the worker itself: a watcher created after `stop()`, after a failure closed the
+    // adapter or after a delete retired the worker is stopped here and never stored.
+    if (!live() || worker.claimed || notOurs(worker) || worker.adapter !== adapter || worker.watcher != null) {
       stopWatcherValue(watcher, worker.accountId);
       return;
     }
@@ -517,7 +561,7 @@ export function createMailSupervisor(options = {}) {
   /** A change the server reported: sync that one folder, coalesced with a run already going. */
   async function onIdleChange(worker, event, epoch = worker.epoch) {
     try {
-      if (!current(worker, epoch)) return;
+      if (!current(worker, epoch) || notOurs(worker)) return;
       if (worker.claimed || worker.authFailed || !worker.syncable) return;
       const folderPath = event != null && typeof event.folderPath === "string" ? event.folderPath : null;
       if (folderPath == null || folderPath === "") return;
@@ -542,7 +586,7 @@ export function createMailSupervisor(options = {}) {
    * connection this worker no longer owns: it is dropped here, before it can stop the fresh watch.
    */
   async function onWatchError(worker, err, epoch = worker.epoch) {
-    if (!current(worker, epoch)) return;
+    if (!current(worker, epoch) || notOurs(worker)) return;
     stopWatcher(worker);
     if (worker.claimed || worker.authFailed || !worker.syncable) return;
     if (worker.inflight != null) return;
@@ -579,8 +623,10 @@ export function createMailSupervisor(options = {}) {
    * `status()` and `mail_sync_state`, not thrown at the caller who asked for it.
    */
   function startRun(worker, plan) {
-    // A stopped supervisor has no timers and no connections: nothing may start behind it.
-    if (!live()) return Promise.resolve();
+    // A stopped supervisor has no timers and no connections, and a worker a delete retired — or one
+    // whose id is in the removal set — has nothing left to sync: nothing may start behind either.
+    if (!live() || notOurs(worker) || removing(worker.accountId)) return Promise.resolve();
+
     if (worker.inflight != null) {
       noteRequest(worker, plan);
       return worker.inflight.settled;
@@ -631,10 +677,21 @@ export function createMailSupervisor(options = {}) {
       await onRunSuccess(worker, run);
     } catch (err) {
       if (run.closedOut || worker.inflight !== run) return;
+      const mailErr = toMailError(err);
+      // The account's row is gone. A run that cannot even build a connection lands here too: the
+      // factory's NOT_FOUND/`account` means the same thing as a missing row, and it must not become a
+      // failure count, a back-off loop on a worker no id holds, an orphan `mail_sync_state` row or a
+      // "sync is failing" notice. The worker is retired with it: no timers, no watch, no connection.
+      if (mailErr.code === "NOT_FOUND" && mailErr.detail === "account") {
+        run.gone = true;
+        await retireWorker(worker, { keepRun: true });
+        logEvent("sync_account_gone", { accountId: worker.accountId });
+        return;
+      }
       failed = true;
       // The epoch this run was created with, not the worker's as the failure surfaces: a restart may
       // already have bumped it while the failing call was still in the adapter.
-      await onRunFailure(worker, toMailError(err), run.epoch);
+      await onRunFailure(worker, mailErr, run.epoch);
     } finally {
       if (!run.closedOut) {
         run.closedOut = true;
@@ -710,7 +767,7 @@ export function createMailSupervisor(options = {}) {
   }
 
   async function drainPending(worker, pending) {
-    if (worker.claimed || !live()) return;
+    if (worker.claimed || !live() || notOurs(worker)) return;
     if (pending.full) {
       await startRun(worker, { kind: "account" });
       return;
@@ -787,7 +844,7 @@ export function createMailSupervisor(options = {}) {
 
   function armBackoff(worker, delay) {
     worker.backoffTimer = disarm(worker.backoffTimer);
-    if (!live() || worker.claimed || worker.authFailed) return;
+    if (!live() || worker.claimed || worker.authFailed || notOurs(worker)) return;
     worker.backoffTimer = arm(() => {
       worker.backoffTimer = null;
       void retryRun(worker);
@@ -795,7 +852,7 @@ export function createMailSupervisor(options = {}) {
   }
 
   async function retryRun(worker) {
-    if (!live() || worker.claimed || worker.authFailed) return;
+    if (!live() || worker.claimed || worker.authFailed || notOurs(worker)) return;
     if (worker.inflight != null) {
       noteRequest(worker, { kind: "account" });
       return;
@@ -978,7 +1035,7 @@ export function createMailSupervisor(options = {}) {
 
   function armPoll(worker) {
     if (!running() || worker.pollTimer != null) return;
-    if (worker.claimed || worker.authFailed || !worker.syncable) return;
+    if (worker.claimed || worker.authFailed || !worker.syncable || notOurs(worker)) return;
     worker.pollTimer = arm(() => {
       worker.pollTimer = null;
       void pollTick(worker);
@@ -992,7 +1049,7 @@ export function createMailSupervisor(options = {}) {
    */
   async function pollTick(worker) {
     try {
-      if (!live() || worker.claimed) return;
+      if (!live() || worker.claimed || notOurs(worker) || removing(worker.accountId)) return;
       if (await claimCheck(worker)) return;
       if (!live() || worker.claimed || worker.authFailed || !worker.syncable) return;
       if (worker.backoffTimer != null || worker.inflight != null) return;
@@ -1220,6 +1277,11 @@ export function createMailSupervisor(options = {}) {
     if (typeof fn !== "function") return Promise.reject(new MailError("BAD_INPUT", "fn"));
     // Refused before the queue and before any connection: a stopped supervisor has neither.
     if (!live()) return Promise.reject(new MailError("NETWORK", "stopped"));
+    // Refused during a delete for the same reason: whatever the call would read or write belongs to
+    // an account whose rows are going.
+    if (typeof accountId === "string" && removing(accountId)) {
+      return Promise.reject(new MailError("NOT_FOUND", "account"));
+    }
     const previous = actionQueues.get(accountId) ?? Promise.resolve();
     const next = previous.catch(() => {}).then(() => runAction(accountId, fn));
     const tail = next.catch(() => {});
@@ -1240,6 +1302,8 @@ export function createMailSupervisor(options = {}) {
    */
   async function runAction(accountId, fn) {
     if (!live()) throw new MailError("NETWORK", "stopped");
+    // A delete may have begun while this call waited in the queue.
+    if (removing(accountId)) throw new MailError("NOT_FOUND", "account");
     const account = await getAccount(db, accountId).catch((err) => {
       logError("account_read_failed", err, { accountId });
       return null;
@@ -1346,6 +1410,9 @@ export function createMailSupervisor(options = {}) {
   async function prepare(accountId, { resume }) {
     // A stopped supervisor opens nothing and writes nothing: callers read null as "nothing to do".
     if (!live()) return null;
+    // An id whose delete has begun is not prepared either: a caller that slipped in between the stop
+    // and the rows' removal must not rebuild a worker whose pass would write after the delete.
+    if (typeof accountId === "string" && removing(accountId)) return null;
     const account = await getAccount(db, accountId);
     if (!account) throw new MailError("NOT_FOUND", "account");
     const worker = workerFor(account);
@@ -1380,7 +1447,8 @@ export function createMailSupervisor(options = {}) {
    * Sync one account now. A run already going is joined (and will be followed by one more). Resolves
    * when the run settles and never rejects because the sync failed: a failure is reported in
    * `status()` and `mail_sync_state`, not thrown at the caller who asked for it (plan 2's callers
-   * read `status()`). After `stop()` it is a no-op.
+   * read `status()`). After `stop()` it is a no-op, and so it is while the account's delete is under
+   * way (`beginRemoval`).
    *
    * A caller joined to a run that `restartAccount` ends resolves at the restart, not when the fresh
    * full sync that follows settles: the fresh run covers the joined caller's request.
@@ -1394,7 +1462,7 @@ export function createMailSupervisor(options = {}) {
   /**
    * Sync the given folders now, or the whole account when none were named. Like `syncNow` it
    * resolves when the run settles and never rejects because the sync failed (read `status()`), and
-   * after `stop()` it is a no-op.
+   * after `stop()` or during the account's own delete it is a no-op.
    */
   async function requestSync(accountId, { folderIds } = {}) {
     const worker = await prepare(accountId, { resume: false });
@@ -1431,14 +1499,49 @@ export function createMailSupervisor(options = {}) {
   }
 
   /**
+   * Mark an account id as being deleted until `endRemoval`. While the mark stands, `syncNow` and
+   * `requestSync` resolve without effect, `withAdapter` refuses with NOT_FOUND/`account`, no run is
+   * started and no worker is built — so a request that lands between the worker's stop and the rows'
+   * removal cannot start a pass that would write rows for an account that is gone (no mail table row
+   * carries a foreign key, so nothing but this would stop it). Idempotent, and safe on a junk id.
+   */
+  function beginRemoval(accountId) {
+    if (typeof accountId === "string" && accountId !== "") deleting.add(accountId);
+  }
+
+  /** The account's rows are gone, or the delete failed: drop the mark and serve the id again. */
+  function endRemoval(accountId) {
+    deleting.delete(accountId);
+  }
+
+  /**
+   * Retire one worker for good: out of the map first (nothing may find it and start something on it
+   * again), marked `retired` so every handler suspended in it bails on its own state, its run closed
+   * out unless the caller IS that run, its timers disarmed and its watch, borrowed adapter and
+   * connection closed. Nothing is written: a retiring worker's account may already have no row.
+   */
+  async function retireWorker(worker, { keepRun = false } = {}) {
+    worker.retired = true;
+    if (workers.get(worker.accountId) === worker) workers.delete(worker.accountId);
+    supersede(worker);
+    if (!keepRun) closeOutRun(worker);
+    worker.pollTimer = disarm(worker.pollTimer);
+    worker.backoffTimer = disarm(worker.backoffTimer);
+    stopWatcher(worker);
+    clearPending(worker);
+    await closeActionAdapter(worker.accountId);
+    await closeWorkerAdapter(worker);
+  }
+
+  /**
    * Stop one account's worker for good: its run, its timers, its watch and both of its connections.
    *
    * This is the delete route's call, which is why it never reads the account row: the row is being
    * removed, and a worker that read it first would be a worker that could still start a pass. It ends
    * the run in flight the way `stop()` does (closed out first, so the rejection its own connection's
-   * close causes is never counted as a failure), disarms the poll and the back-off, stops the watch,
-   * closes the kept action adapter and the worker's connection, and forgets the worker — all without
-   * writing a sync state row, which would be a row for an id that is about to have none.
+   * close causes is never counted as a failure), retires the worker (see `retireWorker`), and forgets
+   * it — all without writing a sync state row, which would be a row for an id that is about to have
+   * none. A connection that lands after this is closed by `workerAdapter`, never adopted.
    *
    * Idempotent, a no-op for an id this supervisor never saw and for a stopped supervisor, and it never
    * throws: a delete must not be held up by the worker it is retiring.
@@ -1448,18 +1551,8 @@ export function createMailSupervisor(options = {}) {
     if (typeof accountId !== "string" || accountId === "") return;
     try {
       const worker = workers.get(accountId) ?? null;
-      if (worker != null) {
-        // Out of the map first: nothing may find this worker and start something on it again.
-        workers.delete(accountId);
-        supersede(worker);
-        closeOutRun(worker);
-        worker.pollTimer = disarm(worker.pollTimer);
-        worker.backoffTimer = disarm(worker.backoffTimer);
-        stopWatcher(worker);
-        clearPending(worker);
-      }
-      await closeActionAdapter(accountId);
-      if (worker != null) await closeWorkerAdapter(worker);
+      if (worker != null) await retireWorker(worker);
+      else await closeActionAdapter(accountId);
       logEvent("account_stopped", { accountId });
     } catch (err) {
       logError("account_stop_failed", err, { accountId });
@@ -1504,6 +1597,8 @@ export function createMailSupervisor(options = {}) {
     withAdapter,
     restartAccount,
     stopAccount,
+    beginRemoval,
+    endRemoval,
     noteChange,
   };
 }
