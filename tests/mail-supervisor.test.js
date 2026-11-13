@@ -31,6 +31,7 @@ import {
   ACTION_IDLE_KEEP_MS,
   BACKOFF_BASE_MS,
   CLAIM_REFRESH_MS,
+  CLAIM_RETRY_MS,
   FAILURES_BEFORE_NOTICE,
   IDLE_ROLES,
   NOTICE_GAP_MS,
@@ -823,6 +824,48 @@ test("a claim lost at start starts nothing, and one lost on a tick stops the wor
   await h.clock.advance(POLL_MS);
   assert.equal((await getAccount(h.db, h.accountId)).status, "active");
   assert.ok(callsOf(h.fake, "listFolders").length > listsBefore);
+});
+
+test("a claim check that throws at start starts nothing and is re-read on a short re-check", async () => {
+  let checkThrows = true;
+  const h = await setup({
+    start: false,
+    isClaimedElsewhere: async () => {
+      if (checkThrows) throw new Error("secret-text the claim store said no");
+      return false;
+    },
+  });
+
+  await h.supervisor.start();
+  await flush();
+
+  // A claim that could not be read is not a verdict: no connection, no claim, no status change.
+  assert.equal(h.factoryArgs.length, 0, "no adapter is built for a claim that was never read");
+  assert.equal(h.views.length, 0);
+  assert.equal(callsOf(h.fake, "listFolders").length, 0, "nothing was synced");
+  const account = await getAccount(h.db, h.accountId);
+  assert.equal(account.status, "active", "the account is left as it was, never marked elsewhere");
+  assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+  assert.equal(JSON.stringify(h.logs).includes("secret-text"), false, "the error text reaches no log");
+  assert.ok(
+    h.logs.some((line) => line.event === "claim_check_failed" && line.code === "PROTOCOL"),
+    "the failure is logged by code only",
+  );
+
+  // Still unreadable: the re-check arms itself again and still starts nothing.
+  await h.clock.advance(CLAIM_RETRY_MS);
+  assert.equal(h.views.length, 0);
+  assert.equal(h.factoryArgs.length, 0);
+  assert.equal(h.logs.filter((line) => line.event === "claim_check_failed").length, 2);
+
+  // A healthy answer starts the worker, long before the next poll tick.
+  checkThrows = false;
+  await h.clock.advance(CLAIM_RETRY_MS);
+  assert.equal(h.views.length, 1, "the re-check started the worker");
+  assert.ok(callsOf(h.fake, "listFolders").length > 0, "the first full sync ran");
+  assert.equal((await getAccount(h.db, h.accountId)).status, "active");
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  await h.supervisor.stop();
 });
 
 /* -------------------------------------------------------------------- actions */

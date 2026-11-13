@@ -25,10 +25,13 @@ import Database from "better-sqlite3";
 import { markFromLaptop } from "./helpers/off-box.js";
 
 const root = mkdtempSync(join(tmpdir(), "mail-e2e-"));
+// What the suite had before this file set its own scratch paths, restored at the end of the file.
+const PRIOR_TASKS_DB_PATH = process.env.CROW_TASKS_DB_PATH;
+const MASTER_TASKS_DB_PATH = join(root, "master", "tasks.db");
 process.env.CROW_DATA_DIR = join(root, "master");
 process.env.CROW_HOME = join(root, "home");
 delete process.env.CROW_DB_PATH;
-process.env.CROW_TASKS_DB_PATH = join(root, "master", "tasks.db");
+process.env.CROW_TASKS_DB_PATH = MASTER_TASKS_DB_PATH;
 mkdirSync(process.env.CROW_HOME, { recursive: true });
 const REPO = new URL("..", import.meta.url).pathname;
 const MASTER = join(root, "master", "crow.db");
@@ -126,6 +129,8 @@ after(() => {
   for (const s of servers) s.close();
   for (const c of clients) { try { c.close(); } catch { /* closed */ } }
   rmSync(root, { recursive: true, force: true });
+  if (PRIOR_TASKS_DB_PATH === undefined) delete process.env.CROW_TASKS_DB_PATH;
+  else process.env.CROW_TASKS_DB_PATH = PRIOR_TASKS_DB_PATH;
 });
 
 before(() => {
@@ -428,6 +433,13 @@ test("a mailbox end to end: connect, IDLE, read, search, older mail, a UIDVALIDI
     for (const subject of [...SUBJECTS, OLD_SUBJECT]) {
       assert.equal(captured.includes(subject), false, `no subject in the output (${subject})`);
     }
+    // The supervisor's own log lines are the other sink: a message subject or the password must not
+    // be in one either.
+    const logged = JSON.stringify(logs);
+    assert.equal(logged.includes(FAKE_PASSWORD), false, "the password never reaches a log line");
+    for (const subject of [...SUBJECTS, OLD_SUBJECT]) {
+      assert.equal(logged.includes(subject), false, `no subject in a log line (${subject})`);
+    }
   } finally {
     if (handle != null) await handle.stop();
     await stopMailSync();
@@ -437,5 +449,6 @@ test("a mailbox end to end: connect, IDLE, read, search, older mail, a UIDVALIDI
     await imap.close();
     await smtp.close();
     delete process.env.CROW_MAIL;
+    process.env.CROW_TASKS_DB_PATH = MASTER_TASKS_DB_PATH;
   }
 });

@@ -18,11 +18,12 @@ import { join } from "node:path";
 import http from "node:http";
 
 const root = mkdtempSync(join(tmpdir(), "mail-boot-"));
-process.env.CROW_DATA_DIR = join(root, "data");
+const DATA_DIR = join(root, "data");
+process.env.CROW_DATA_DIR = DATA_DIR;
 process.env.CROW_HOME = join(root, "home");
 delete process.env.CROW_DB_PATH;
-process.env.CROW_TASKS_DB_PATH = join(root, "data", "tasks.db");
-mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
+process.env.CROW_TASKS_DB_PATH = join(DATA_DIR, "tasks.db");
+mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(process.env.CROW_HOME, { recursive: true });
 const REPO = new URL("..", import.meta.url).pathname;
 
@@ -30,7 +31,8 @@ const { default: express } = await import("express");
 const { createDbClient } = await import("../servers/db.js");
 const { MAIL_DDL } = await import("../servers/shared/mail-schema.js");
 const { startMailSync, stopMailSync } = await import("../servers/gateway/boot/mail-boot.js");
-const { createAccount, getSyncState } = await import("../servers/gateway/mail/store/accounts.js");
+const { createAccount, getAccount, getSyncState } = await import("../servers/gateway/mail/store/accounts.js");
+const { CLAIM_RETRY_MS } = await import("../servers/gateway/mail/sync/supervisor.js");
 const { mailApiRouter, MAIL_API_PREFIX } = await import("../servers/gateway/routes/mail-api.js");
 const { listClaims, releaseClaim, writeClaim } = await import("../servers/gateway/mail/claims.js");
 const { createFakeMailAdapter } = await import("./fixtures/fake-mail-adapter.mjs");
@@ -77,9 +79,11 @@ after(() => {
 });
 
 before(() => {
-  // init-db makes the instance's own data dir a real instance (instance-id) without touching ~/.crow.
+  // init-db makes the instance's own data dir a real instance (instance-id). It is passed explicitly
+  // and checked first: an unset dir would make init-db target the real ~/.crow.
+  if (!DATA_DIR) throw new Error("CROW_DATA_DIR is unset: init-db would target the real ~/.crow");
   execFileSync(process.execPath, ["scripts/init-db.js"], {
-    env: { ...process.env, CROW_DATA_DIR: process.env.CROW_DATA_DIR },
+    env: { ...process.env, CROW_DATA_DIR: DATA_DIR },
     stdio: "pipe",
     cwd: REPO,
   });
@@ -114,7 +118,7 @@ async function addAccount(db, address = ADDRESS, label = "Alex") {
   });
 }
 
-/** A clock whose timers only fire when a test advances it (none here do). */
+/** A clock whose timers only fire when a test advances it. */
 function makeClock(start = T0) {
   const timers = new Map();
   let current = start;
@@ -129,6 +133,26 @@ function makeClock(start = T0) {
     clearTimer(handle) { timers.delete(handle); },
     pending: () => timers.size,
     advance(ms) { current += ms; },
+    /** Fire every timer due within `ms`, earliest first, and settle everything it starts. */
+    async fire(ms) {
+      const target = current + ms;
+      for (;;) {
+        await flush();
+        let due = null;
+        for (const entry of timers) {
+          if (entry[1].at > target) continue;
+          if (due == null || entry[1].at < due[1].at || (entry[1].at === due[1].at && entry[0] < due[0])) {
+            due = entry;
+          }
+        }
+        if (due == null) break;
+        timers.delete(due[0]);
+        if (due[1].at > current) current = due[1].at;
+        due[1].fn();
+      }
+      current = target;
+      await flush();
+    },
   };
 }
 
@@ -305,6 +329,69 @@ test("a start() that rejects is caught and logged by code only", async () => {
   await handle.stop();
 });
 
+/* ---------------------------------------------------- one start, and a shutdown */
+
+test("two concurrent starts build one supervisor and share one handle", async () => {
+  const db = await freshDb();
+  await addAccount(db);
+  let release = null;
+  const held = new Promise((resolve) => { release = resolve; });
+  let builds = 0;
+  const supervisor = { start: async () => {}, stop: async () => {} };
+  const options = {
+    db,
+    env: { CROW_MAIL: "1" },
+    noAuth: false,
+    localInstance: async () => { await held; return LOCAL; },
+    createSupervisor: () => { builds += 1; return supervisor; },
+    log: () => {},
+  };
+
+  const first = startMailSync(options);
+  const second = startMailSync(options);
+  await flush();
+  release();
+  const [a, b] = await Promise.all([first, second]);
+
+  assert.equal(builds, 1, "the second call joined the start already in flight");
+  assert.equal(a, b, "both calls receive the same handle");
+  assert.equal(a.started, true);
+  assert.equal(a.supervisor, supervisor);
+  await a.stop();
+});
+
+test("a shutdown during an in-flight start stops it: nothing is built or published", async () => {
+  const db = await freshDb();
+  await addAccount(db);
+  let release = null;
+  const held = new Promise((resolve) => { release = resolve; });
+  let builds = 0;
+  const logs = [];
+
+  const started = startMailSync({
+    db,
+    env: { CROW_MAIL: "1" },
+    noAuth: false,
+    localInstance: async () => { await held; return LOCAL; },
+    createSupervisor: () => { builds += 1; return { start: async () => {}, stop: async () => {} }; },
+    log: (line) => logs.push(line),
+  });
+  await flush();
+
+  // No handle exists yet, so there is nothing for the shutdown to stop — and the start must not
+  // carry on once it resumes.
+  assert.equal(await stopMailSync(), false, "no handle was there to stop");
+  release();
+  const result = await started;
+
+  assert.equal(result.started, false, "the start reports itself as not started");
+  assert.equal(result.reason, "shutting_down");
+  assert.equal(result.supervisor, undefined, "no supervisor is published after shutdown began");
+  assert.equal(builds, 0, "nothing is built for a process that is going down");
+  assert.ok(logs.some((line) => line.event === "not_started" && line.reason === "shutting_down"));
+  assert.equal(await stopMailSync(), false, "no handle was published afterwards either");
+});
+
 /* -------------------------------------------------------------------- claims */
 
 test("the supervisor is handed claim wrappers bound to this instance: a loser is detected, refresh touches only our own live claim", async () => {
@@ -364,6 +451,63 @@ test("the supervisor is handed claim wrappers bound to this instance: a loser is
   await captured.refreshClaim({ address: "sam@example.com" });
   assert.deepEqual(await listClaims(db, "sam@example.com"), []);
 
+  await handle.stop();
+});
+
+test("a claim check that cannot be read starts nothing through the boot wrapper, and the short re-check starts it", async () => {
+  const db = await freshDb();
+  const account = await addAccount(db);
+  const clock = makeClock();
+  const fake = createFakeMailAdapter({ now: clock.now });
+  fake.deliver("INBOX", makeRaw({ subject: "hello after the claim came back" }));
+  const built = [];
+  const logs = [];
+  let claimStoreFails = true;
+
+  // The claim's liveness read is the one that fails: every other statement, transaction and batch the
+  // supervisor and the stores use passes straight through, so this is the claim check and nothing else.
+  const flaky = new Proxy(db, {
+    get(target, prop) {
+      if (prop === "execute") {
+        return (statement) => {
+          const sql = typeof statement === "string" ? statement : (statement?.sql ?? "");
+          if (claimStoreFails && sql.includes("crow_instances")) {
+            return Promise.reject(new Error("hunter2 claim store"));
+          }
+          return target.execute(statement);
+        };
+      }
+      const value = target[prop];
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+  const handle = await startMailSync({
+    db: flaky,
+    env: { CROW_MAIL: "1" },
+    noAuth: false,
+    localInstance: LOCAL,
+    ...clockOptions(clock),
+    adapterFactory: () => { built.push("adapter"); return fake; },
+    log: (line) => logs.push(line),
+  });
+  assert.equal(handle.started, true);
+  await flush();
+
+  assert.deepEqual(built, [], "no connection is opened for a claim that was never read");
+  assert.equal((await getAccount(db, account.id)).status, "active", "the account is not marked elsewhere");
+  assert.equal(await getSyncState(db, account.id), null, "nothing was started");
+  assert.equal(await messageCount(db, account.id), 0);
+  assert.equal(JSON.stringify(logs).includes("hunter2"), false, "the store's text reaches no log line");
+  assert.ok(logs.some((line) => line.event === "claim_check_failed" && line.code === "PROTOCOL"));
+
+  // The claim readable again: the short re-check starts the worker instead of waiting for a poll tick.
+  claimStoreFails = false;
+  await clock.fire(CLAIM_RETRY_MS);
+  assert.equal(await until(async () => (await messageCount(db, account.id)) === 1), true,
+    "the re-check started the worker and it synced");
+  assert.equal(built.length, 1);
+  assert.equal((await getAccount(db, account.id)).status, "active");
   await handle.stop();
 });
 

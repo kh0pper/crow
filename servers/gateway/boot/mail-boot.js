@@ -29,6 +29,11 @@
  * name and a MailError code, never as an error's text (a library's message can quote a server reply or
  * a username, and a password must never reach a log).
  *
+ * One start at a time: the start in flight is published before its first await, so two concurrent
+ * calls build one supervisor and receive the same handle. `stopMailSync` closes a gate that a start
+ * still awaiting something checks after that await — it stops what it built and reports
+ * `started: false` instead of publishing a supervisor the shutdown drain would not wait for.
+ *
  * The handle it returns carries `stop()`: the supervisor is stopped (its timers, watchers and
  * connections), the API runtime is cleared, and a db client this module opened itself is closed.
  * `stop()` is idempotent, and the shutdown path in servers/gateway/index.js reaches it through
@@ -52,6 +57,18 @@ import { clearMailApiRuntime, setMailApiRuntime } from "../routes/mail-api.js";
 
 /** The current handle, so the shutdown path can reach the supervisor `startMailSync` started. */
 let currentHandle = null;
+
+/**
+ * The start in flight, or null. Published before the first await so two concurrent calls build one
+ * supervisor and hand back one handle instead of one each.
+ */
+let starting = null;
+
+/**
+ * Set by `stopMailSync` and cleared at the top of a start: a start that is still awaiting something
+ * when shutdown begins must not publish a runtime or leave a supervisor running behind the drain.
+ */
+let shuttingDown = false;
 
 /** One log line: an event name and, when there is one, an allow-listed code. Nothing else. */
 function defaultLog(line) {
@@ -148,7 +165,22 @@ function stoppedHandle(reason) {
  *   never rejects
  */
 export async function startMailSync(options = {}) {
-  const env = options.env ?? process.env;
+  // One supervisor per process: a second call adopts the running handle, or joins the start already
+  // in flight, instead of opening a second worker per account (the boot path calls this once, and the
+  // tests must not leak one into the next).
+  if (currentHandle != null && currentHandle.started === true) return currentHandle;
+  if (starting != null) return starting;
+  const attempt = beginStart(options);
+  starting = attempt;
+  try {
+    return await attempt;
+  } finally {
+    if (starting === attempt) starting = null;
+  }
+}
+
+/** The body of one start, after the module-level gate that keeps it to one at a time. */
+async function beginStart(options) {
   const noAuth = options.noAuth === true;
   const log = typeof options.log === "function" ? options.log : defaultLog;
   const openDb = typeof options.openDb === "function" ? options.openDb : createDbClient;
@@ -157,10 +189,9 @@ export async function startMailSync(options = {}) {
     ? options.clearRuntime
     : clearMailApiRuntime;
 
-  // One supervisor per process: a second call adopts the running handle instead of opening a second
-  // worker per account (the boot path calls this once, and the tests must not leak one into the next).
-  if (currentHandle != null && currentHandle.started === true) return currentHandle;
-
+  const env = options.env ?? process.env;
+  // A start re-opens the gate a shutdown closed, whatever the previous start left behind.
+  shuttingDown = false;
   // A log sink that throws is never a reason to fail boot or a shutdown.
   const say = (line) => {
     try {
@@ -180,6 +211,25 @@ export async function startMailSync(options = {}) {
   let ownsDb = false;
   let supervisor = null;
 
+  /** Undo what this start built: stop its supervisor and close a db client it opened itself. */
+  async function unwind() {
+    if (supervisor != null && typeof supervisor.stop === "function") {
+      try {
+        await supervisor.stop();
+      } catch {
+        // The start is being abandoned; a stop that fails too changes nothing.
+      }
+    }
+    if (ownsDb && db != null) {
+      try {
+        db.close();
+      } catch {
+        // As above.
+      }
+    }
+    if (currentHandle != null && currentHandle.supervisor === supervisor) currentHandle = null;
+  }
+
   try {
     if (db == null) {
       db = openDb();
@@ -191,6 +241,12 @@ export async function startMailSync(options = {}) {
       ? options.adapterFactory
       : defaultAdapterFactory(credentials, options.tokenProvider);
     const local = await resolveLocalInstance(db, options.localInstance);
+    // Shutdown may have started while this awaited: nothing is built for a process that is going down.
+    if (shuttingDown) {
+      await unwind();
+      say({ event: "not_started", reason: "shutting_down" });
+      return stoppedHandle("shutting_down");
+    }
 
     // The supervisor's hooks, in its own shapes (see the module comment): a strict boolean for the
     // claim check, and a one-account refresh bound to this instance's id and name.
@@ -221,6 +277,14 @@ export async function startMailSync(options = {}) {
       ? options.createSupervisor
       : createMailSupervisor;
     supervisor = createSupervisor(supervisorOptions);
+
+    // The last check before anything is published: a supervisor built while shutdown began is
+    // stopped here rather than handed a first sync the drain will not wait for.
+    if (shuttingDown) {
+      await unwind();
+      say({ event: "not_started", reason: "shutting_down" });
+      return stoppedHandle("shutting_down");
+    }
 
     const handle = {
       started: true,
@@ -270,21 +334,7 @@ export async function startMailSync(options = {}) {
   } catch (err) {
     const code = toMailError(err).code;
     say({ event: "start_failed", code });
-    if (supervisor != null && typeof supervisor.stop === "function") {
-      try {
-        await supervisor.stop();
-      } catch {
-        // The start already failed; a stop that fails too changes nothing.
-      }
-    }
-    if (ownsDb && db != null) {
-      try {
-        db.close();
-      } catch {
-        // As above.
-      }
-    }
-    if (currentHandle != null && currentHandle.supervisor === supervisor) currentHandle = null;
+    await unwind();
     return stoppedHandle("error");
   }
 }
@@ -293,9 +343,15 @@ export async function startMailSync(options = {}) {
  * Stop the supervisor `startMailSync` started, if there is one. The gateway's shutdown path calls
  * this beside `stopScheduler()`, so no timer, watcher or connection outlives the drain window.
  *
+ * A start still in flight is told to shut down here (it then stops what it built and reports
+ * `started: false`); this returns whether a handle was there to stop, so it is `false` for that case.
+ *
  * @returns {Promise<boolean>} whether a handle was there to stop
  */
 export async function stopMailSync() {
+  // Set before the handle is read: a start cannot slip a handle in after this line, because every
+  // await in it is followed by a `shuttingDown` check.
+  shuttingDown = true;
   const handle = currentHandle;
   currentHandle = null;
   if (handle == null) return false;

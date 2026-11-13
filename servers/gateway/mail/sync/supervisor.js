@@ -76,7 +76,10 @@
  * **The claim comes first.** An account another Crow instance claimed is never synced here: a
  * losing worker stops its watcher and timers, closes its adapters and marks the account
  * `claimed_elsewhere`, and the light global tick re-evaluates it and restarts it once the claim
- * clears. `refreshClaim` rewrites our own claim at start and once a day.
+ * clears. `refreshClaim` rewrites our own claim at start and once a day. A claim that could not be
+ * read is not a verdict: the worker starts nothing and claims nothing, stays pending, and a short
+ * re-check (`CLAIM_RETRY_MS`, never the next 15-minute tick) reads the claim again — a loser must
+ * never sync for a tick because the claim store was briefly unavailable.
  *
  * `withAdapter` is the seam plan 2's actions and attachment fetches use. It never borrows the sync
  * worker's connection: it keeps its own short-lived adapter, one call at a time per account, reusing
@@ -143,6 +146,14 @@ export const NOTICE_GAP_MS = 24 * 3600 * 1000;
 
 /** Our own claim is rewritten this often. */
 export const CLAIM_REFRESH_MS = 24 * 3600 * 1000;
+
+/**
+ * A claim check that could not be read is re-read this soon, never left to the next poll tick.
+ *
+ * Unreadable is not a verdict: the account stays unstarted and unclaimed, and a loser that synced
+ * until the 15-minute tick would be a loser that synced at all.
+ */
+export const CLAIM_RETRY_MS = 60 * 1000;
 
 /** One `withAdapter` call may take this long. */
 export const ACTION_DEADLINE_MS = 60 * 1000;
@@ -349,6 +360,10 @@ export function createMailSupervisor(options = {}) {
         claimed: account.status === "claimed_elsewhere",
         authFailed: account.status === "auth_failed",
         syncable: account.status === "active",
+        // Set when a start left this account pending because its claim could not be read: only a
+        // short re-check may start it, and only this flag says one is due.
+        pendingStart: false,
+        claimRetryTimer: null,
         tick: 0,
         // Bumped whenever this worker is torn down and started over (a restart, `stop()`, a lost
         // claim): a failure handler that captured an older value is stale and must not write again.
@@ -1098,6 +1113,8 @@ export function createMailSupervisor(options = {}) {
     supersede(worker);
     worker.claimed = true;
     worker.syncable = false;
+    worker.pendingStart = false;
+    worker.claimRetryTimer = disarm(worker.claimRetryTimer);
     worker.pollTimer = disarm(worker.pollTimer);
     worker.backoffTimer = disarm(worker.backoffTimer);
     stopWatcher(worker);
@@ -1204,6 +1221,53 @@ export function createMailSupervisor(options = {}) {
     }
   }
 
+  /**
+   * A start whose claim could not be read leaves the account pending: nothing was started and nothing
+   * was claimed, and this short timer reads the claim again. A still-failing store re-arms it, so the
+   * account is never abandoned to the 15-minute tick (nor started without a verdict).
+   */
+  function armClaimRetry(worker) {
+    worker.claimRetryTimer = disarm(worker.claimRetryTimer);
+    if (!live() || notOurs(worker) || worker.claimed) return;
+    worker.claimRetryTimer = arm(() => {
+      worker.claimRetryTimer = null;
+      void retryClaimStart(worker);
+    }, CLAIM_RETRY_MS);
+  }
+
+  /** The short re-check: start the pending worker only on a readable claim that says it is ours. */
+  async function retryClaimStart(worker) {
+    try {
+      if (!live() || notOurs(worker) || removing(worker.accountId)) return;
+      if (worker.pendingStart !== true || worker.claimed) return;
+      if (worker.authFailed || worker.inflight != null || worker.backoffTimer != null) return;
+      if (worker.pollTimer != null) return;
+      const account = await accountOrNull(worker.accountId);
+      if (!live() || notOurs(worker) || worker.pendingStart !== true) return;
+      // A row that is gone, or one the tick path owns now, is not this timer's to start.
+      if (!account || account.status !== "active") return;
+
+      let loser = false;
+      try {
+        loser = (await isClaimedElsewhere(account)) === true;
+      } catch (err) {
+        logError("claim_check_failed", err, { accountId: worker.accountId });
+        armClaimRetry(worker);
+        return;
+      }
+      if (!live() || notOurs(worker) || worker.pendingStart !== true) return;
+      worker.pendingStart = false;
+      if (loser) {
+        await becomeClaimed(worker);
+        return;
+      }
+      await startWorker(worker);
+    } catch (err) {
+      logError("claim_retry_failed", err, { accountId: worker.accountId });
+      armClaimRetry(worker);
+    }
+  }
+
   /** Our own claim, rewritten at start and once a day after it. */
   function armRefreshTimer() {
     if (!running() || refreshTimer != null) return;
@@ -1239,6 +1303,8 @@ export function createMailSupervisor(options = {}) {
     worker.claimed = false;
     worker.authFailed = false;
     worker.syncable = true;
+    worker.pendingStart = false;
+    worker.claimRetryTimer = disarm(worker.claimRetryTimer);
     worker.tick = 0;
     // A restarted supervisor resumes the ladder where it left off: a stored `backoff_until` still in
     // the future delays the first attempt instead of syncing (and maybe failing) at once.
@@ -1284,14 +1350,24 @@ export function createMailSupervisor(options = {}) {
       return;
     }
 
-    let loser = false;
+    // `null` is "the claim could not be read": not a verdict for either side.
+    let loser = null;
     try {
       loser = (await isClaimedElsewhere(account)) === true;
     } catch (err) {
       logError("claim_check_failed", err, { accountId: account.id });
     }
-    if (loser) {
+    if (loser === true) {
       await becomeClaimed(worker);
+      return;
+    }
+    if (loser == null) {
+      // No connection and no claim: a loser must never sync while the claim is unread, and a winner
+      // must not be recorded as the holder before its claim is known. The worker stays pending and
+      // the short re-check reads the claim again.
+      worker.pendingStart = true;
+      armClaimRetry(worker);
+      logEvent("account_pending_claim", { accountId: account.id });
       return;
     }
     await startWorker(worker);
@@ -1468,6 +1544,7 @@ export function createMailSupervisor(options = {}) {
     closeOutRun(worker);
     await closeActionAdapter(accountId);
     worker.backoffTimer = disarm(worker.backoffTimer);
+    worker.claimRetryTimer = disarm(worker.claimRetryTimer);
     // The request that run was still carrying is dropped rather than drained: the fresh run below is
     // a full sync and covers it.
     clearPending(worker);
@@ -1613,6 +1690,7 @@ export function createMailSupervisor(options = {}) {
     if (!keepRun) closeOutRun(worker);
     worker.pollTimer = disarm(worker.pollTimer);
     worker.backoffTimer = disarm(worker.backoffTimer);
+    worker.claimRetryTimer = disarm(worker.claimRetryTimer);
     stopWatcher(worker);
     clearPending(worker);
     await closeActionAdapter(worker.accountId);
@@ -1668,6 +1746,7 @@ export function createMailSupervisor(options = {}) {
       supersede(worker);
       worker.pollTimer = disarm(worker.pollTimer);
       worker.backoffTimer = disarm(worker.backoffTimer);
+      worker.claimRetryTimer = disarm(worker.claimRetryTimer);
       stopWatcher(worker);
       clearPending(worker);
       closeOutRun(worker);

@@ -42,7 +42,9 @@ CROW_MAIL=1                 # the whole feature: boot, routes, later nav entries
 CROW_DISABLE_MAIL_SYNC=1    # keep the routes, run no sync loop (a debugging / load-shedding switch)
 ```
 
-- Read per use through `mailEnabled(env)`, so unsetting it needs no restart of anything that reads it.
+- Read per use through `mailEnabled(env)`, so unsetting it makes the API answer 404 on the next
+  request. A supervisor that is already running keeps syncing until the gateway restarts: the flag is
+  read when the boot hook starts it, not on every pass.
 - The API answers 404 for every route while it is unset, before a database client is opened.
 - `startMailSync` builds no adapter, no credentials reader and no supervisor when the flag is unset, when
   the gateway runs `--no-auth` (a secondary loopback gateway is nobody's dashboard), or when sync is
@@ -157,10 +159,11 @@ against the new adapter with the provider's own fake, and skip nothing.
   connection faults, and a hard ten-minute deadline per run that closes the adapter so a hung socket
   cannot park the account forever. A refused sign-in marks the account `auth_failed`, notifies the owner
   once and stops retrying until the owner asks for a sync.
-- **Three connections per account.** One read connection (the sync worker's), one IDLE connection per
-  watched folder (at most two: Inbox and Sent), and a fourth, short-lived one for actions — an open
-  message, a mark-read, an attachment fetch — which `withAdapter` keeps open for up to 30 seconds so a
-  burst costs one login. `watch` refuses a third folder rather than opening a fourth connection.
+- **Connections per account.** Three long-lived connections (one read connection — the sync
+  worker's — and up to two IDLE connections, one per watched folder: Inbox and Sent) plus a
+  short-lived action connection — an open message, a mark-read, an attachment fetch — which
+  `withAdapter` keeps open for up to 30 seconds so a burst costs one login. `watch` refuses a third
+  folder rather than opening another long-lived connection.
 
 ## One address, one instance: claims
 
@@ -187,6 +190,9 @@ Consequences worth knowing:
 - **Partial-mesh limit.** Convergence assumes every instance sees the same set of claims. There is no
   relay: with A–B and B–C paired but not A–C, A and C never see each other's claim rows and can both
   connect the same address. Clock skew is accepted too: an earlier `claimedAt` wins by design.
+- **Liveness is each instance's own view.** A claim only counts while its instance is in the *local*
+  `crow_instances` as `active` or `offline`. If A has revoked B but B still lists A as active, the two
+  disagree about which claims count, and both (or neither) can win until their views agree.
 
 ## Known gaps
 
@@ -202,6 +208,11 @@ Consequences worth knowing:
   planned for this in the first version — it is a documented consequence of paging by UID.
 - **Proton Bridge** serves a self-signed localhost certificate, which `tls.rejectUnauthorized: true`
   refuses. A per-account pinned-certificate option is a later plan, never a global off switch.
+- **Two gateways on one `crow.db` share one instance id.** Nothing guards it: both read the same
+  `mail_accounts` rows, both compute themselves the winner of the same claim and both sync the same
+  folders into the same tables. The rule that one address is connected on one instance assumes each
+  instance has its own database (the primary and a second instance are separate databases); running a
+  second gateway against the primary's file breaks it.
 - Virtual Gmail views (`\All`, `\Flagged`, `\Important`) are skipped; labels sync as ordinary folders and
   are deduplicated by `(account_id, message_id)` for search and counts.
 
