@@ -274,6 +274,15 @@ const STYLES = `
   .studio .st-title { font-size: 15px; font-weight: 700; }
   .studio .st-logo { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 700; }
   .studio .st-transport { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  /* The click toggle and the output picker are this browser's own settings, so
+     they sit beside the transport rather than in any of the song's own panels. */
+  .studio .st-click-btn[aria-pressed=true] { background: #3A2F1C; border-color: var(--st-human); color: var(--st-human); }
+  .studio .st-out-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .studio .st-out-bar[hidden] { display: none; }
+  .studio .st-out-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--st-muted); }
+  .studio .st-out-bar .st-select { width: auto; min-width: 150px; }
+  .studio .st-output-note { font-size: 12px; line-height: 1.4; color: var(--st-human); }
+  .studio .st-output-note:empty { display: none; }
   .studio .st-bpm { font-size: 12px; color: var(--st-muted); display: flex; align-items: center; gap: 6px; }
   .studio .st-bpm input {
     width: 68px; min-height: 44px; border-radius: 8px; border: 1px solid var(--st-edge);
@@ -1177,11 +1186,19 @@ function studioPage({ songId, render, res }) {
           <button class="st-btn st-transport-btn" type="button" data-act="play" title="Play" aria-label="Play">▶</button>
           <button class="st-btn st-transport-btn" type="button" data-act="stop" title="Stop" aria-label="Stop">■</button>
           <button class="st-btn st-transport-btn st-record-btn" type="button" data-act="record" title="Record into the armed track" aria-label="Record" disabled>●</button>
+          <button class="st-btn st-small st-click-btn" type="button" data-act="metronome" aria-pressed="false"
+            title="Metronome: a click on every beat while it plays">Click</button>
           <span class="st-rec" data-role="rec-status" hidden></span>
           <label class="st-bpm">bpm
             <input data-role="bpm" type="number" min="20" max="300" step="1" value="120" aria-label="Tempo in beats per minute">
           </label>
           <span class="st-pos" data-role="position">001.1.1</span>
+        </div>
+        <div class="st-out-bar" data-role="output-bar" hidden>
+          <label class="st-out-label">Output
+            <select class="st-select st-out-select" data-role="output-device" aria-label="Output device"></select>
+          </label>
+          <span class="st-output-note" data-role="output-note" hidden></span>
         </div>
         <div class="st-midi-bar">
           <button class="st-btn st-small" type="button" data-act="midi-connect" aria-pressed="false"
