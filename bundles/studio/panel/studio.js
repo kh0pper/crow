@@ -302,6 +302,31 @@ const STYLES = `
     background: var(--st-bg); color: var(--st-text); font: inherit; font-size: 13px; padding: 0 8px;
   }
   .studio .st-pos { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; padding: 0 6px; }
+  .studio .st-latency { font-size: 11px; color: var(--st-muted); }
+  .studio .st-latency[hidden] { display: none; }
+  /* A press-and-hold on a control is a press, not a text selection. On Android
+     the hold selected the button's label and opened the Copy/Share menu instead
+     of moving the pad it was held on (the Looper), so every control of the page
+     is listed here once. Nothing that is TEXT is in this list: an input, a
+     textarea, a select's own text, and the ask box with its messages all stay
+     selectable. */
+  .studio button,
+  .studio [role=button],
+  .studio .st-btn,
+  .studio .st-transport-btn,
+  .studio .st-mode,
+  .studio .st-toggle,
+  .studio .st-pad,
+  .studio .st-step,
+  .studio .st-fx-btn,
+  .studio .st-empty,
+  .studio .st-cell,
+  .studio .st-clip,
+  .studio .st-tl-block,
+  .studio .st-roll-svg,
+  .studio rect.st-note {
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
   .studio .st-presence { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
   .studio .st-chip { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--st-muted); }
   .studio .st-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--st-human); flex: 0 0 auto; }
@@ -1214,6 +1239,7 @@ function studioPage({ songId, render, res }) {
             <input data-role="bpm" type="number" min="20" max="300" step="1" value="120" aria-label="Tempo in beats per minute">
           </label>
           <span class="st-pos" data-role="position">001.1.1</span>
+          <span class="st-latency" data-role="latency" hidden></span>
         </div>
         <div class="st-out-bar" data-role="output-bar" hidden>
           <label class="st-out-label">Output

@@ -737,7 +737,10 @@ export function createRenderer({
    * @param {object} request.snapshot the song to render
    * @param {string|null} [request.scene_id] render this scene
    * @param {string|null} [request.clip_id] render this clip
-   * @param {number} request.seconds how much to render
+   * @param {number} [request.seconds] how much to render; left out, a session
+   *   render is one full pass of the longest pattern chain among the clips it
+   *   launches (a clip render: that clip's chain), at least one bar — an
+   *   arrangement render still has to say how much
    * @param {"session"|"arrangement"} [request.mode] render the session grid
    *   (the default) or the song's timeline
    * @param {number} [request.from_bar] the bar an arrangement render starts at
@@ -767,11 +770,18 @@ export function createRenderer({
     // A render is always filed under the song's project: the ACL call and the
     // storage prefix both need it, so a render without one is refused clearly.
     if (project_id == null) throw new Error("A render needs the song's project.");
-    const span = checkSeconds(seconds, longest);
     // Which view, and where in the timeline: refused here, before a slot is
     // taken, so a bad request never holds the render queue.
     const mode = renderMode(request.mode);
     const fromBar = renderFromBar(request.from_bar);
+    // How long, refused or capped here too. A session render that names no
+    // seconds is one full pass of the pattern chain it plays (see
+    // `onePassSeconds`); an arrangement render still has to say. Either way the
+    // one cap in `checkSeconds` applies, to a derived span as to an asked one.
+    const asked = seconds === undefined || seconds === null
+      ? (mode === "session" ? onePassSeconds(snapshot, pickLaunch(snapshot, scene_id, clip_id)) : seconds)
+      : seconds;
+    const span = checkSeconds(asked, longest);
 
     await acl.assertLocalCapability(db, project_id, "write_files");
     await acquire();
@@ -1802,10 +1812,76 @@ function placementsOf(snapshot) {
  * @returns {number}
  */
 function barsOf(seconds, snapshot) {
+  return (Number(seconds) * tempoOf(snapshot)) / (60 * BEATS_PER_BAR);
+}
+
+/**
+ * How many seconds this many bars last, at the song's own tempo and four beats
+ * to the bar: the inverse of `barsOf`, for a render whose length it derives.
+ * @param {number} bars
+ * @param {object} snapshot
+ * @returns {number}
+ */
+function secondsOfBars(bars, snapshot) {
+  return (Number(bars) * 60 * BEATS_PER_BAR) / tempoOf(snapshot);
+}
+
+/**
+ * The song's tempo in bpm, or the default when `meta.bpm` is unusable.
+ * @param {object} snapshot
+ * @returns {number}
+ */
+function tempoOf(snapshot) {
   const meta = snapshot && snapshot.meta && typeof snapshot.meta === "object" ? snapshot.meta : {};
   const bpm = Number(meta.bpm);
-  const tempo = Number.isFinite(bpm) && bpm > 0 ? bpm : DEFAULT_BPM;
-  return (Number(seconds) * tempo) / (60 * BEATS_PER_BAR);
+  return Number.isFinite(bpm) && bpm > 0 ? bpm : DEFAULT_BPM;
+}
+
+/**
+ * How long one clip lasts, in bars, as the sequencer walks it: a pattern clip
+ * plays its chain, one pattern loop per slot (an entry that names no pattern
+ * keeps its slot, and a chain naming none at all plays the clip's first
+ * pattern), so its cycle is its own `length_bars` times the chain's slots. A
+ * clip that is not a pattern clip, or one with no chain, is its own length.
+ * `length_bars` is the snapshot's own figure, already derived from a pattern
+ * clip's loop (`doc.js` `lengthBarsForSteps`), so it is read, never recomputed.
+ * @param {object} clip
+ * @returns {number} at least one bar
+ */
+function clipPassBars(clip) {
+  const bars = Number(clip && clip.length_bars);
+  const own = Number.isFinite(bars) && bars > 0 ? bars : 1;
+  if (!clip || clip.kind !== "pattern") return own;
+  const chain = Array.isArray(clip.chain) ? clip.chain.length : 0;
+  return own * Math.max(1, chain);
+}
+
+/**
+ * The bars one full pass of the longest pattern chain among the clips a launch
+ * plays takes, and never less than one bar. A launch that plays no clip at all
+ * (silence) is one bar.
+ * @param {object} snapshot
+ * @param {{scene?: string, clip?: string}} launch what the render launches
+ * @returns {number}
+ */
+function onePassBars(snapshot, launch) {
+  let bars = 1;
+  for (const clip of playingClips(snapshot, launch)) {
+    bars = Math.max(bars, clipPassBars(clip));
+  }
+  return bars;
+}
+
+/**
+ * How much a session render plays when the caller names no seconds: one full
+ * pass of the longest pattern chain among the clips it launches, at the song's
+ * own tempo, and never less than one bar.
+ * @param {object} snapshot
+ * @param {{scene?: string, clip?: string}} launch what the render launches
+ * @returns {number} seconds
+ */
+function onePassSeconds(snapshot, launch) {
+  return secondsOfBars(onePassBars(snapshot, launch), snapshot);
 }
 
 /**

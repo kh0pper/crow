@@ -1366,12 +1366,18 @@ export function createStudioServer({
     {
       title: "Render the song to audio",
       description:
-        "Render the song — one scene, one clip, or the arrangement (the timeline) from a bar — offline through the same engine the operator hears, master chain and all, store a 24-bit WAV and return `download_url` — a link on the operator's own Crow — with the integrated loudness (LUFS) and the true peak (dB), both measured after the master inserts. Present download_url as a markdown link for the operator to open; it is a path on their own Crow, never a storage address, so never quote or invent a bucket URL instead. short_term_max_lufs is the highest 3 s short-term figure the engine's own master meter took while it played. target is the song's own loudness target and meets_target says whether this render met it: lufs within 1 LU of the target, true_peak at or under its ceiling. The operator's render length limit applies; listen before and after a change and report the numbers against the target. The song's instruments are loaded from this device: an instrument it does not hold plays silence and is named in missing_library, and a credit-bearing bank the render heard is named in credits. An insert the render could not run (a compiled effect this host does not have, or one the engine bypassed) is named in effect_problems; the rest of the chain still played.",
+        "Render the song — one scene, one clip, or the arrangement (the timeline) from a bar — offline through the same engine the operator hears, master chain and all, store a 24-bit WAV and return `download_url` — a link on the operator's own Crow — with the integrated loudness (LUFS) and the true peak (dB), both measured after the master inserts. When seconds is omitted, a scene or clip renders one full pass of its longest pattern chain at the song's tempo, at least one bar. Present download_url as a markdown link for the operator to open; it is a path on their own Crow, never a storage address, so never quote or invent a bucket URL instead. short_term_max_lufs is the highest 3 s short-term figure the engine's own master meter took while it played. target is the song's own loudness target and meets_target says whether this render met it: lufs within 1 LU of the target, true_peak at or under its ceiling. The operator's render length limit applies; listen before and after a change and report the numbers against the target. The song's instruments are loaded from this device: an instrument it does not hold plays silence and is named in missing_library, and a credit-bearing bank the render heard is named in credits. An insert the render could not run (a compiled effect this host does not have, or one the engine bypassed) is named in effect_problems; the rest of the chain still played.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song to render"),
         scene_id: z.string().min(1).optional().describe("render this scene (every clip it holds)"),
         clip_id: z.string().min(1).optional().describe("render just this clip"),
-        seconds: z.number().positive().describe("how many seconds to render"),
+        seconds: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            "how many seconds to render; leave out for one full pass of the scene or clip's longest pattern chain",
+          ),
         mode: z.enum(["session", "arrangement"]).optional().describe("session (default: a scene or clip) or arrangement (the timeline)"),
         from_bar: z.number().int().min(0).max(998).optional().describe("arrangement only: the bar to start from (0 = the first bar)"),
       },
