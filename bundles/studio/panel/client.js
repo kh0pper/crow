@@ -1540,7 +1540,7 @@ export const CLIENT_SCRIPT = [
   "    var titleHost = page.querySelector('[data-role=title]');",
   "    var bpmInput = page.querySelector('[data-role=bpm]');",
   "    var positionHost = page.querySelector('[data-role=position]');",
-  "    var latencyHost = page.querySelector('[data-role=latency]');",
+  "    var latencyHost = page.querySelector('[data-role=output-latency]');",
   "    var hintHost = page.querySelector('[data-role=hint]');",
   "    var outputBar = page.querySelector('[data-role=output-bar]');",
   "    var outputHost = page.querySelector('[data-role=output-device]');",

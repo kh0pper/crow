@@ -459,7 +459,7 @@ test("the readout names the base and output latency the context reports", async 
   ui.click("[data-act=play]");
   await ui.settle();
 
-  const readout = ui.document.querySelector("[data-role=latency]");
+  const readout = ui.document.querySelector("[data-role=output-latency]");
   assert.ok(readout, "the transport carries a latency readout");
   assert.equal(readout.hidden, false, "with figures to show, it is shown");
   assert.equal(
@@ -474,7 +474,7 @@ test("the readout hides when the context reports neither figure", async () => {
   ui.click("[data-act=play]");
   await ui.settle();
 
-  const readout = ui.document.querySelector("[data-role=latency]");
+  const readout = ui.document.querySelector("[data-role=output-latency]");
   assert.equal(readout.hidden, true, "nothing to say, so it says nothing");
   assert.equal(String(readout.textContent), "", "and stays empty");
 });

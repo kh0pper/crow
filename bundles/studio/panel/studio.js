@@ -1239,7 +1239,7 @@ function studioPage({ songId, render, res }) {
             <input data-role="bpm" type="number" min="20" max="300" step="1" value="120" aria-label="Tempo in beats per minute">
           </label>
           <span class="st-pos" data-role="position">001.1.1</span>
-          <span class="st-latency" data-role="latency" hidden></span>
+          <span class="st-latency" data-role="output-latency" hidden></span>
         </div>
         <div class="st-out-bar" data-role="output-bar" hidden>
           <label class="st-out-label">Output
