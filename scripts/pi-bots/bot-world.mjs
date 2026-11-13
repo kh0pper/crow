@@ -55,6 +55,7 @@ import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { applyServiceBlocks, withServiceBlocks, offerableConnections } from "./service-blocks.mjs";
 import { applySatelliteBlocks, withSatelliteBlocks } from "./satellite-blocks.mjs";
+import { primeBareServerTools } from "./bare-server-tools.mjs";
 import { worldRootFor, carriedReadRoots, brokenWorldLink } from "./world-root.mjs";
 import { installedKitDir, readKitThemes, readHouseStyleSync, houseStyleLinks } from "../../servers/shared/design-kit.js";
 
@@ -513,6 +514,11 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
  */
 export async function prepareSpawn(world, { escalate = false, log = () => {} } = {}) {
   const def = world.def, crowHome = world.crowHome;
+  // A BARE crow_mcp entry (e.g. "studio") only expands to that server's real tool names
+  // (`mcp__studio__<tool>`, the shape pi-lab registers) when its list is known BEFORE the
+  // spawn — toolAllowlist() only reads the cache, so it stays synchronous. Never throws:
+  // a server that cannot be listed keeps today's spelling and warns once.
+  await primeBareServerTools(def, { crowHome, log });
 
   const sysFile = join(mkdtempSync(join(tmpdir(), "pibot-")), "sys.md");
   writeFileSync(sysFile, def.system_prompt || "You are a Crow bot.", { mode: 0o600 });

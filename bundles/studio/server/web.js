@@ -59,6 +59,14 @@
  * from object storage (the injected `takeStorage`) and only from the exact key
  * `finish` wrote under the song's own `studio/<song_id>/takes/` or
  * `studio/<song_id>/samples/`.
+ *
+ * A render is streamed the same way, from
+ * `GET /api/studio/songs/:id/renders/:name`: it is the WAV the offline
+ * renderer filed under the song's own `studio/<song_id>/` directory, and it is
+ * what `studio_render`'s `download_url` points at (a path on this Crow, never a
+ * presigned storage address). Its measured figures come from
+ * `GET .../renders/:name/info`, read through the injected `renderInfoOf` — the
+ * audit row the renderer wrote, because this module owns no database.
  */
 
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -148,6 +156,16 @@ const AGENT_DOWNLOAD_REFUSED_TEXT =
 const AGENT_STARTER_REFUSED_TEXT =
   "Adding a starter sound is for the person at the Studio page; an agent cannot add one.";
 
+/** What an agent is told when it asks to give a bot the Studio tools. */
+const AGENT_GIVE_TOOLS_REFUSED_TEXT =
+  "Giving a bot the Studio tools is for the person at the Studio page; an agent cannot do it.";
+
+/** What the give-tools route answers when this instance cannot edit a bot's def. */
+const GIVE_TOOLS_UNAVAILABLE_TEXT = "Studio cannot change a bot's tools on this instance.";
+
+/** What a caller is told when the project's bot is no longer the one it named. */
+const STALE_BOT_TEXT = "That is not this song project's bot any more. Reload the page and try again.";
+
 /** What a caller is told when Studio could not add a starter sound. */
 const STARTER_FAILED_TEXT = "Studio could not add that starter sound.";
 
@@ -167,6 +185,22 @@ const CONTENT_TYPE_BY_KIND = Object.freeze({
  * private caches.
  */
 const AUDIO_CACHE_CONTROL = "private, max-age=31536000, immutable";
+
+/**
+ * A render's own cache rule: its name is chosen once per render and does not
+ * carry a hash, so it is cached for an hour — still only in private caches.
+ */
+const RENDER_CACHE_CONTROL = "private, max-age=3600";
+
+/**
+ * The only render names a route will stream: one safe path segment ending in
+ * `.wav` — no nested directory (so no `..` segment), and only characters a
+ * filename may hold, because the name is also used as the download filename.
+ */
+const RENDER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,100}\.wav$/;
+
+/** What a caller is told for a render this song does not hold. */
+const MISSING_RENDER_TEXT = "There is no such render in this song.";
 
 /**
  * The two kinds of stored audio an audio route streams: the container a song
@@ -202,6 +236,19 @@ const STATUS_BY_CODE = Object.freeze({
   // Studio's own: the caller may not have it, whatever it asks the song.
   studio_only: 403,
   conflict: 409,
+});
+
+/**
+ * HTTP status for each refusal `giveBotStudioTools` throws. It is a separate
+ * map because those codes are the bot-def editing helper's, not the hub's:
+ * two of them are the same 422 (a def that cannot be read, a tool list that
+ * would be over the model's budget), and neither is a validation of a song.
+ */
+const GIVE_TOOLS_STATUS_BY_CODE = Object.freeze({
+  not_found: 404,
+  stale: 409,
+  bad_def: 422,
+  over_budget: 422,
 });
 
 /**
@@ -579,6 +626,79 @@ function handled(fn) {
   };
 }
 
+/**
+ * Stream one stored object's bytes to a response, on the storage-backed
+ * routes' header discipline.
+ *
+ * Storage can fail at any point, and an S3 error's message names the bucket and
+ * the key it was asked for, so it is answered HERE rather than by `errorText`:
+ * the headers go out only with the first byte (a Content-Length the response
+ * will not honour is the one answer that cannot be taken back), a failure
+ * before that first byte is a clean 503 with one fixed sentence and no stored
+ * bytes' headers on it, and a failure after the headers are out cuts the
+ * response instead of ending it as if the WAV were complete.
+ *
+ * @param {object} res - the Express response
+ * @param {{stream?: object, stat?: object}|null} object - what `getObject` answered
+ * @param {{contentType: string, cacheControl: string, disposition?: string|null,
+ *          what: string}} options - the headers to send and the noun for the log
+ * @returns {object|undefined} `stream.pipe(res)`'s own answer
+ */
+function streamStoredObject(res, object, { contentType, cacheControl, disposition = null, what = "stored object" }) {
+  const stream = object?.stream;
+  if (!stream || typeof stream.pipe !== "function" || typeof stream.on !== "function") {
+    console.warn(`[studio] ${what}: storage returned no stream`);
+    res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
+    return undefined;
+  }
+
+  const size = Number(object?.stat?.size ?? object?.stat?.metaData?.["content-length"]);
+  const headerNames = ["Content-Type", "Content-Length", "Cache-Control", "Content-Disposition"];
+
+  let headed = false;
+  /** The stored bytes' headers, set once and only once the file is really coming. */
+  function sendHeaders() {
+    if (headed) return;
+    headed = true;
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", cacheControl);
+    if (disposition) res.setHeader("Content-Disposition", disposition);
+    if (Number.isFinite(size) && size >= 0) res.setHeader("Content-Length", String(size));
+  }
+
+  /** Take back any header that was set before the first byte failed. */
+  function dropHeaders() {
+    if (res.headersSent) return;
+    for (const name of headerNames) res.removeHeader(name);
+  }
+
+  // The first chunk (or an empty object's end) is what makes this a file
+  // response: until one of them arrives, an error is still a clean JSON 503.
+  stream.once("data", sendHeaders);
+  stream.once("end", sendHeaders);
+  stream.on("error", (err) => {
+    if (res.headersSent) {
+      // The headers are out, so the only honest answer is to cut the
+      // response: a half-sent file must not look complete.
+      res.destroy();
+      return;
+    }
+    console.warn(`[studio] ${what} stream:`, err);
+    dropHeaders();
+    res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
+  });
+  // A client that goes away mid-file has nobody left to answer, so the stream
+  // is dropped and the response torn down; neither is an error to report.
+  res.on("error", () => {
+    if (typeof stream.destroy === "function") stream.destroy();
+  });
+  res.on("close", () => {
+    if (typeof stream.unpipe === "function") stream.unpipe(res);
+    if (typeof stream.destroy === "function") stream.destroy();
+  });
+  return stream.pipe(res);
+}
+
 /** Send one JSON text frame, if the socket is still open. */
 function send(ws, message) {
   if (ws.readyState !== 1) return;
@@ -624,11 +744,24 @@ function refuse(socket, status, text) {
  *   (`pi_bot_defs.project_id`) and whether it is Crow's voice bot. The panel
  *   loader injects both; a caller that injects neither gets the strict
  *   default, in which every bot has no project and therefore sees no song.
- * @param {((projectId: number) => Promise<{bot_id: string, name: string}|null>)|null}
+ * @param {((projectId: number) => Promise<{bot_id: string, name: string,
+ *          has_studio_tools?: boolean}|null>)|null}
  *   [options.projectBotOf] the project's bot: the first ENABLED `pi_bot_defs`
- *   row whose `project_id` is that project, by display name. The panel loader
- *   reads it on the gateway's own client; a caller that injects nothing has no
- *   project bot, so the ask box stays disabled.
+ *   row whose `project_id` is that project, by display name, with
+ *   `has_studio_tools` saying whether its def already grants the Studio tools.
+ *   The panel loader reads it on the gateway's own client; a caller that
+ *   injects nothing has no project bot, so the ask box stays disabled.
+ * @param {((options: {botId: string, projectId: number}) => Promise<{ok: boolean,
+ *          already: boolean}>)|null} [options.giveBotStudioTools]
+ *   appends the bare `studio` server entry to one bot's `tools.crow_mcp` (the
+ *   panel loader wires it over `pi_bot_defs`; see `server/give-tools.js`). Its
+ *   refusals carry a `code` (`not_found`, `stale`, `bad_def`, `over_budget`)
+ *   and a sentence written for the caller. Absent, the route answers 503.
+ * @param {((options: {projectId: number, storageKey: string}) => Promise<object|null>)|null}
+ *   [options.renderInfoOf] one render's measured figures, from the audit row
+ *   the renderer wrote (`action: "studio.render"`, its payload's
+ *   `storage_key`). Injected because this module owns no database; absent, the
+ *   render info route answers 404.
  * @param {{begin: Function, putChunk: Function, status: Function,
  *          finish: Function, sweepStale: Function}|null} [options.takeUploads]
  *   the upload service (`createTakeUploads`), which stages takes and samples.
@@ -680,6 +813,8 @@ export function createStudioWeb({
   bundleDir,
   botScope = null,
   projectBotOf = null,
+  giveBotStudioTools = null,
+  renderInfoOf = null,
   takeUploads = null,
   takeStorage = null,
   rawBody = null,
@@ -711,6 +846,12 @@ export function createStudioWeb({
   // The project's bot, for the panel's "Ask the agent" box. Same contract as
   // the bot scope above: injected, and absent means "no bot", never a guess.
   const projectBot = typeof projectBotOf === "function" ? projectBotOf : async () => null;
+
+  // Giving that bot the Studio tools (a person's one click) and one render's
+  // measured figures. Both are injected for the same reason as everything
+  // above: this module owns no database.
+  const giveStudioTools = typeof giveBotStudioTools === "function" ? giveBotStudioTools : null;
+  const renderInfo = typeof renderInfoOf === "function" ? renderInfoOf : null;
 
   // One song's row, for the routes that need one song and not the catalogue.
   const songRowLookup = typeof songRowOf === "function" ? songRowOf : null;
@@ -1329,16 +1470,32 @@ export function createStudioWeb({
   }
 
   /**
-   * The storage key one stored object may be played from, exactly as `finish`
-   * wrote it: `<prefix>studio/<song_id>/<dir>/<id>.wav`, where `dir` is `takes`
-   * for a take and `samples` for a sample.
+   * The storage key of one object under a song's own directory:
+   * `<prefix>studio/<song_id>/<relative>`, where the prefix is the song
+   * project's `project_spaces.storage_prefix`.
    *
-   * The prefix is the song project's `project_spaces.storage_prefix`, which
-   * this module cannot read (it owns no database), so the injected storage
-   * adapter answers it. Without that answer the prefix is empty, and an object
-   * whose key names any prefix at all is then refused rather than fetched —
-   * the route never streams something it cannot place inside the song's own
-   * `takes/` or `samples/` directory.
+   * The prefix is the one thing this module cannot read (it owns no database),
+   * so the injected storage adapter answers it. Without that answer the prefix
+   * is empty, and an object whose key names any prefix at all is then refused
+   * rather than fetched.
+   *
+   * @param {number|null} projectId the project the song lives in
+   * @param {string} songId
+   * @param {string} relative the path under `studio/<song_id>/`
+   * @returns {Promise<string>}
+   */
+  async function studioKeyOf(projectId, songId, relative) {
+    const prefix =
+      typeof takeStorage?.storagePrefixFor === "function"
+        ? String((await takeStorage.storagePrefixFor(projectId)) ?? "")
+        : "";
+    return `${prefix}studio/${songId}/${relative}`;
+  }
+
+  /**
+   * The storage key one stored take or sample may be played from, exactly as
+   * `finish` wrote it: `<prefix>studio/<song_id>/<dir>/<id>.wav`, where `dir` is
+   * `takes` for a take and `samples` for a sample.
    *
    * @param {number|null} projectId the project the song lives in
    * @param {string} songId
@@ -1347,11 +1504,7 @@ export function createStudioWeb({
    * @returns {Promise<string>}
    */
   async function audioKeyOf(projectId, songId, dir, id) {
-    const prefix =
-      typeof takeStorage?.storagePrefixFor === "function"
-        ? String((await takeStorage.storagePrefixFor(projectId)) ?? "")
-        : "";
-    return `${prefix}studio/${songId}/${dir}/${id}.wav`;
+    return studioKeyOf(projectId, songId, `${dir}/${id}.wav`);
   }
 
   /** @returns {{project_ids?: number[]}} the filter a `project_id` query asks for. */
@@ -1464,6 +1617,10 @@ export function createStudioWeb({
     // The song's project comes from the hub's own song list, so the page is
     // told the same project the agent routes scope by, and `project_id` rides
     // back with the bot because the page files its Perch session under it.
+    // `has_studio_tools` says whether that bot's def already grants the Studio
+    // tools (null when there is no bot), and `setup_url` is where a project
+    // with none can make one — Bot Builder's own "new bot in this project"
+    // page, which is a real page and not something invented here.
     r.get("/api/studio/songs/:id/project-bot", dashboardAuth, handled(async (req, res) => {
       const song_id = String(req.params.id ?? "");
       const songs = await hub.listSongs({});
@@ -1476,7 +1633,50 @@ export function createStudioWeb({
         bot_id: botId,
         name: botId ? String(bot.name || botId) : null,
         project_id: Number.isInteger(projectId) ? projectId : null,
+        has_studio_tools: botId ? bot.has_studio_tools === true : null,
+        setup_url:
+          !botId && Number.isInteger(projectId)
+            ? `/dashboard/bot-builder?new=1&project=${projectId}`
+            : null,
       });
+    }));
+
+    // Give the project's bot the Studio tools: the ask box's one-click offer,
+    // never something that happens on its own. It is a PERSON's action like a
+    // library download — the dashboard session, the CSRF header, and no agent
+    // caller — and it needs `write` on the song's project, which is asserted
+    // after the song is known and before the bot is read.
+    //
+    // The body names the bot the page is looking at, and it has to still be
+    // this project's bot: a page left open across a bot change cannot edit the
+    // bot that replaced it. The edit itself (`server/give-tools.js`) answers
+    // `{ok, already}` and throws coded refusals with a sentence for the caller.
+    r.post("/api/studio/songs/:id/project-bot/studio-tools", dashboardAuth, requireCsrf, handled(async (req, res) => {
+      if (agentCaller(req)) return res.status(403).json({ error: AGENT_GIVE_TOOLS_REFUSED_TEXT });
+      if (!giveStudioTools) return res.status(503).json({ error: GIVE_TOOLS_UNAVAILABLE_TEXT });
+      const songId = String(req.params.id ?? "");
+      const row = await readSongRow(songId);
+      if (!row) return res.status(404).json({ error: `There is no song "${songId}".` });
+      const projectId = Number(row.project_id);
+      // The write check is what proves the caller may change this project at
+      // all; without the injected ACL read this Crow cannot prove it, and the
+      // same 503 the library routes answer refuses the edit.
+      if (!canWrite) return res.status(503).json({ error: GIVE_TOOLS_UNAVAILABLE_TEXT });
+      await canWrite(projectId);
+
+      const asked = String(req.body?.bot_id ?? "");
+      const bot = Number.isInteger(projectId) ? await projectBot(projectId) : null;
+      const botId = bot && bot.bot_id ? String(bot.bot_id) : null;
+      if (!botId || asked !== botId) return res.status(409).json({ error: STALE_BOT_TEXT });
+
+      try {
+        const result = await giveStudioTools({ botId, projectId });
+        return res.json({ ok: true, already: result?.already === true });
+      } catch (err) {
+        const status = GIVE_TOOLS_STATUS_BY_CODE[String(err?.code ?? "")];
+        if (!status) throw err;
+        return res.status(status).json({ error: String(err?.message || STALE_BOT_TEXT) });
+      }
     }));
 
     // The engine's worklet module, composed here from the same source files a
@@ -1708,58 +1908,13 @@ export function createStudioWeb({
         return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
       }
 
-      const stream = object?.stream;
-      if (!stream || typeof stream.pipe !== "function" || typeof stream.on !== "function") {
-        console.warn(`[studio] ${spec.noun} audio: storage returned no stream for`, objectId);
-        return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
-      }
-
-      const size = Number(object?.stat?.size ?? object?.stat?.metaData?.["content-length"]);
-
-      let headed = false;
-      /** The audio headers, set once and only once the WAV is really coming. */
-      function sendAudioHeaders() {
-        if (headed) return;
-        headed = true;
-        res.setHeader("Content-Type", "audio/wav");
-        res.setHeader("Cache-Control", AUDIO_CACHE_CONTROL);
-        if (Number.isFinite(size) && size >= 0) res.setHeader("Content-Length", String(size));
-      }
-
-      /** Take back any audio header that was set before the first byte failed. */
-      function dropAudioHeaders() {
-        if (res.headersSent) return;
-        for (const name of ["Content-Type", "Content-Length", "Cache-Control"]) {
-          res.removeHeader(name);
-        }
-      }
-
-      // The first chunk (or an empty object's end) is what makes this a WAV
-      // response: until one of them arrives, an error is still a clean JSON
-      // 503 with no audio headers on it.
-      stream.once("data", sendAudioHeaders);
-      stream.once("end", sendAudioHeaders);
-      stream.on("error", (err) => {
-        if (res.headersSent) {
-          // The headers are out, so the only honest answer is to cut the
-          // response: a half-sent WAV must not look complete.
-          res.destroy();
-          return;
-        }
-        console.warn(`[studio] ${spec.noun} audio stream:`, err);
-        dropAudioHeaders();
-        res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
+      // A stored take never changes under its key, so it is cached forever (see
+      // `streamStoredObject` for the header and failure discipline).
+      return streamStoredObject(res, object, {
+        contentType: "audio/wav",
+        cacheControl: AUDIO_CACHE_CONTROL,
+        what: `${spec.noun} audio`,
       });
-      // A client that goes away mid-WAV has nobody left to answer, so the stream
-      // is dropped and the response torn down; neither is an error to report.
-      res.on("error", () => {
-        if (typeof stream.destroy === "function") stream.destroy();
-      });
-      res.on("close", () => {
-        if (typeof stream.unpipe === "function") stream.unpipe(res);
-        if (typeof stream.destroy === "function") stream.destroy();
-      });
-      return stream.pipe(res);
     }
 
     // One take's recorded audio, and one sample's imported or recorded audio, on
@@ -1770,6 +1925,98 @@ export function createStudioWeb({
 
     r.get("/api/studio/songs/:id/samples/:sample_id/audio", dashboardAuth, handled(async (req, res) => {
       await serveAudio(req, res, "sample");
+    }));
+
+    // ---- renders ---------------------------------------------------------
+    //
+    // A render is the WAV the offline renderer filed under the song's own
+    // `studio/<song_id>/` directory. `studio_render` hands the agent this
+    // route's path (`download_url`) rather than a presigned storage address,
+    // so the bytes come from this gateway behind the dashboard session and no
+    // response names the bucket, the key or the host.
+    //
+    // Only a name of the shape a render is filed under is streamed: one safe
+    // segment ending in `.wav`. Anything else — a nested path, an encoded
+    // slash, a `..` segment, another extension — is the same 404 a missing
+    // render gets, before storage is asked anything.
+    //
+    // The read check is the audio routes' own: `readSongRow` for the song's
+    // project, then the hub's `openSong`, which refuses an unknown song and a
+    // project this caller may not see.
+    async function serveRender(req, res) {
+      const songId = String(req.params.id ?? "");
+      const name = String(req.params.name ?? "");
+      const missing = () => res.status(404).json({ error: MISSING_RENDER_TEXT });
+      if (!RENDER_NAME_PATTERN.test(name)) return missing();
+      if (!takeStorage || typeof takeStorage.getObject !== "function") {
+        return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
+      }
+
+      const row = await readSongRow(songId);
+      if (!row) return missing();
+      await hub.openSong(songId);
+
+      const key = await studioKeyOf(Number(row.project_id), songId, name);
+      const bucket = typeof takeStorage.defaultBucket === "function" ? takeStorage.defaultBucket() : undefined;
+
+      let object = null;
+      try {
+        object = await takeStorage.getObject(key, { bucket });
+      } catch (err) {
+        const code = String(err?.code ?? "");
+        // minio.js spells a missing object NotFound; the S3 API spells it
+        // NoSuchKey. Either is a render this song does not hold.
+        if (code === "NotFound" || code === "NoSuchKey") return missing();
+        console.warn("[studio] render:", err);
+        return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
+      }
+
+      // A render's name carries no hash, so it is cached for an hour rather
+      // than forever; `?download=1` is the panel's download link, and the name
+      // is already limited to characters a filename may hold.
+      const download = String(req.query?.download ?? "") === "1";
+      return streamStoredObject(res, object, {
+        contentType: "audio/wav",
+        cacheControl: RENDER_CACHE_CONTROL,
+        disposition: download ? `attachment; filename="${name}"` : null,
+        what: "render",
+      });
+    }
+
+    r.get("/api/studio/songs/:id/renders/:name", dashboardAuth, handled(async (req, res) => {
+      await serveRender(req, res);
+    }));
+
+    // One render's measured figures — the numbers `studio_render` reported and
+    // the renderer audited — read through the injected `renderInfoOf` from the
+    // `studio.render` audit row that names this exact storage key. The same
+    // auth and name rules as the bytes, and a 404 for anything else: a render
+    // this Crow has no audit row for is one it cannot describe. Without the
+    // option this instance answers 404 rather than guessing.
+    r.get("/api/studio/songs/:id/renders/:name/info", dashboardAuth, handled(async (req, res) => {
+      const songId = String(req.params.id ?? "");
+      const name = String(req.params.name ?? "");
+      const missing = () => res.status(404).json({ error: MISSING_RENDER_TEXT });
+      if (!RENDER_NAME_PATTERN.test(name)) return missing();
+      if (!renderInfo) return missing();
+
+      const row = await readSongRow(songId);
+      if (!row) return missing();
+      await hub.openSong(songId);
+
+      const projectId = Number(row.project_id);
+      const key = await studioKeyOf(projectId, songId, name);
+      const info = await renderInfo({ projectId, storageKey: key });
+      if (!info || typeof info !== "object") return missing();
+
+      return res.json({
+        seconds: info.seconds ?? null,
+        lufs: info.lufs ?? null,
+        true_peak_db: info.true_peak_db ?? null,
+        short_term_max_lufs: info.short_term_max_lufs ?? null,
+        target: info.target ?? null,
+        meets_target: info.meets_target ?? null,
+      });
     }));
 
     // ---- the instrument library -----------------------------------------

@@ -45,6 +45,7 @@ import { hasActorKey, presignActors } from "./actor-sig.mjs";
 import { withSkillTools, botGrantsServer, withServiceBlocks, withSatelliteBlocks } from "./bot-world.mjs";
 import { crowDefaultsBlock, readWritingRules } from "./crow-defaults.mjs";
 import { turnScopeFor } from "./service-blocks.mjs";
+import { primeBareServerTools } from "./bare-server-tools.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
@@ -445,6 +446,10 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     // as the provider's 400.)
     await warmModel(resolved.provider, log);
 
+    // A BARE crow_mcp entry (e.g. "studio") expands to that server's real tool names only
+    // when its list is in the cache before PiRpc pins `--tools` (toolAllowlist reads it
+    // synchronously). Never throws: an unlistable server keeps today's spelling.
+    await primeBareServerTools(def, { crowHome, log });
     const pi = new bridge.PiRpc({
       def, sessionDir, resolved, piProvider, selfAuthoringDir: null,
       piSessionId: null, appendSystemPromptFile: sysFile,
