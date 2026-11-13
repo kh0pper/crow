@@ -28,8 +28,10 @@
  * `stopAccount` is the delete route's call: it retires one worker for good — without reading the
  * account row, because that row is being removed — and so ends a run whose write would land on an id
  * nothing holds any more. Closing a run out only releases whoever joined it, though, so the stop also
- * waits (at most `STOP_RUN_WAIT_MS`) for that run's own pass to finish: the rows go right after the
- * stop, and a batch the engine had already fetched must not still be going into them.
+ * waits (at most `STOP_RUN_WAIT_MS`) for that run's own pass — and for the tail of the account's
+ * `withAdapter` queue, a backfill or a remote search that is holding a page of bodies — to finish:
+ * the rows go right after the stop, and a batch either of them had already fetched must not still be
+ * going into them.
  *
  * **The engine is told to stop, not just closed out.** Every run's context carries `cancelled`, which
  * is true once the run is closed out, the worker is no longer the map's or its id is being removed;
@@ -86,7 +88,10 @@
  * it for `ACTION_IDLE_KEEP_MS` so a burst costs one connection, and closing it at once when a call
  * fails, when the account restarts, when the claim is lost and on `stop()`. Every call has a hard
  * `ACTION_DEADLINE_MS` timer too, armed before the connection is opened — a handshake that never
- * answers is bounded like a call that never does, and the connection it finally gets is closed.
+ * answers is bounded like a call that never does, and the connection it finally gets is closed. A
+ * call also gets `{cancelled}` beside the adapter, true once the account's delete has begun or this
+ * supervisor has stopped, so an engine call it wraps ends its pass instead of storing the batch it
+ * already fetched; a caller that takes only the adapter ignores it.
  *
  * **A handler that was overtaken does nothing.** Every failure path awaits — a close, a state read, a
  * write, a notice — and any of those may span a `restartAccount`, a `stop()` or a lost claim. A
@@ -726,22 +731,27 @@ export function createMailSupervisor(options = {}) {
   }
 
   /**
-   * Wait for a closed-out run's own pass to stop writing, at most `STOP_RUN_WAIT_MS`.
+   * Wait, at most `STOP_RUN_WAIT_MS`, for the writes a stop has closed out to reach their end.
    *
-   * `closeOutRun` releases whoever joined the run; the engine, meanwhile, may still be storing the
-   * batch it fetched before the close. The delete route's next step removes the rows, so the run must
-   * have stopped writing before that: this waits on the run's own promise, and the cap keeps a write
-   * that never finishes from holding a delete open.
+   * `closeOutRun` releases whoever joined a run and a closed action adapter drops its connection, but
+   * neither stops a pass that is already holding fetched bodies: the engine, the backfill or the
+   * remote search may still be storing them. The delete route's next step removes the rows, so the
+   * stop waits on both promises here — one armed timer for the pair, disarmed the moment they settle,
+   * because the cap is what keeps a write that never finishes from holding a delete open for ever.
    */
-  async function waitForRun(run) {
-    if (run == null || run.done == null) return;
+  async function waitForWrites(pending) {
+    const waiting = pending.filter((promise) => promise != null && typeof promise.then === "function");
+    if (waiting.length === 0) return;
     await new Promise((resolve) => {
       const timer = arm(() => resolve(), STOP_RUN_WAIT_MS);
+      let left = waiting.length;
       const settle = () => {
+        left -= 1;
+        if (left > 0) return;
         disarm(timer);
         resolve();
       };
-      run.done.then(settle, settle);
+      for (const promise of waiting) promise.then(settle, settle);
     });
   }
 
@@ -1478,6 +1488,10 @@ export function createMailSupervisor(options = {}) {
     let entry = actionAdapters.get(accountId) ?? null;
     let timer = null;
     let expired = false;
+    // What this call is handed beside the adapter: the account's delete has begun, or this supervisor
+    // has stopped, so the engine a route wraps ends the pass instead of storing the batch it already
+    // fetched. A caller that names only the adapter ignores the second argument.
+    const control = { cancelled: () => removing(accountId) || !live() };
     const deadline = new Promise((resolve, reject) => {
       timer = arm(() => {
         expired = true;
@@ -1508,7 +1522,7 @@ export function createMailSupervisor(options = {}) {
 
     try {
       const adapter = await Promise.race([borrow, deadline]);
-      const work = Promise.resolve().then(() => fn(adapter));
+      const work = Promise.resolve().then(() => fn(adapter, control));
       work.catch(() => {});
       const value = await Promise.race([work, deadline]);
       timer = disarm(timer);
@@ -1708,8 +1722,9 @@ export function createMailSupervisor(options = {}) {
    * none. A connection that lands after this is closed by `workerAdapter`, never adopted.
    *
    * Closing the run out does not stop the pass: the engine's `cancelled` does, on its next write. So
-   * this waits for the run's own promise too, capped at `STOP_RUN_WAIT_MS`, because the caller's very
-   * next step is deleting the rows and nothing of this worker may land in them afterwards.
+   * this waits for the run's own promise, and for the tail of this account's `withAdapter` queue (a
+   * backfill or a remote search the cancel reaches the same way), capped at `STOP_RUN_WAIT_MS`, because
+   * the caller's very next step is deleting the rows and nothing of either may land in them afterwards.
    *
    * Idempotent, a no-op for an id this supervisor never saw and for a stopped supervisor, and it never
    * throws: a delete must not be held up by the worker it is retiring.
@@ -1719,14 +1734,12 @@ export function createMailSupervisor(options = {}) {
     if (typeof accountId !== "string" || accountId === "") return;
     try {
       const worker = workers.get(accountId) ?? null;
-      if (worker != null) {
-        // The run in flight is captured before the retire: the retire is what closes it out.
-        const run = worker.inflight;
-        await retireWorker(worker);
-        await waitForRun(run);
-      } else {
-        await closeActionAdapter(accountId);
-      }
+      // Captured before the retire and the close: both are what settle these promises.
+      const run = worker?.inflight ?? null;
+      const queued = actionQueues.get(accountId) ?? null;
+      if (worker != null) await retireWorker(worker);
+      else await closeActionAdapter(accountId);
+      await waitForWrites([run?.done, queued]);
       logEvent("account_stopped", { accountId });
     } catch (err) {
       logError("account_stop_failed", err, { accountId });

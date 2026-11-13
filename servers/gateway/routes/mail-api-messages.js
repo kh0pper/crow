@@ -358,12 +358,15 @@ export function registerMessageRoutes(router, ctx) {
     try {
       for (const account of targets) {
         try {
-          const result = await withCap(remoteSearchCapMs, () => supervisor.withAdapter(account.id, (adapter) => searchRemote(
+          const result = await withCap(remoteSearchCapMs, () => supervisor.withAdapter(account.id, (adapter, control) => searchRemote(
             {
               db,
               adapter,
               now: Date.now,
               deadlineAt: Date.now() + remoteSearchCapMs,
+              // The supervisor's own stop, so a search it closed out (a delete) ends the pass instead
+              // of storing the batch that is already in its hands.
+              cancelled: control?.cancelled,
               log: logEngineEvent,
             },
             account.id,
@@ -402,8 +405,16 @@ export function registerMessageRoutes(router, ctx) {
     if (inFlightOlder.has(folder.accountId)) return sendBusy(res);
     inFlightOlder.add(folder.accountId);
     try {
-      const outcome = await withCap(olderCapMs, () => supervisor.withAdapter(folder.accountId, (adapter) => fetchOlder(
-        { db, adapter, now: Date.now, deadlineAt: Date.now() + olderCapMs },
+      const outcome = await withCap(olderCapMs, () => supervisor.withAdapter(folder.accountId, (adapter, control) => fetchOlder(
+        {
+          db,
+          adapter,
+          now: Date.now,
+          deadlineAt: Date.now() + olderCapMs,
+          // The supervisor's own stop, so a page it closed out (a delete) ends the pass instead of
+          // storing the batch of bodies it had already fetched.
+          cancelled: control?.cancelled,
+        },
         folder.accountId,
         folder.id,
       )), "older_cap");

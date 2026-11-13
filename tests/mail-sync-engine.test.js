@@ -1003,6 +1003,42 @@ test("a cancelled pass stops with NETWORK/run_closed and stores nothing after th
   assert.equal(after.lastSyncedAt, null);
 });
 
+test("a cancel that lands after the batch's first check stops before the row, so nothing of it is stored", async () => {
+  const { db, accountId, adapter } = await setup();
+  for (let i = 1; i <= 6; i += 1) deliver(adapter, "INBOX", { subject: `arrival ${i}` });
+  const folder = await prepareFolder(db, adapter, accountId, "INBOX");
+
+  // The pass looks at the top of each message's turn (before the yield) and again once the body is
+  // parsed. Here the cancel lands in the yield, between the two: the second look is the one that has
+  // to win, or the row it was meant to stop is written anyway.
+  let cancelled = false;
+  const ctx = {
+    db,
+    adapter,
+    now: () => T0,
+    cancelled: () => cancelled,
+    yieldFn: () => new Promise((resolve) => {
+      setImmediate(() => {
+        cancelled = true;
+        resolve();
+      });
+    }),
+  };
+
+  await assert.rejects(
+    syncFolder(ctx, accountId, folder),
+    (err) => err instanceof MailError && err.code === "NETWORK" && err.detail === "run_closed",
+  );
+
+  assert.deepEqual(await storedUids(db, folder.id), [], "no row of the batch landed after the cancel");
+  assert.deepEqual(await messageRows(db, folder.id), []);
+  assert.deepEqual(await searchLocal(db, { q: "arrival", accountId }), [], "no FTS row either");
+  const after = await getFolder(db, folder.id);
+  assert.equal(after.highestUid, 0);
+  assert.equal(after.floorUid, null);
+  assert.equal(after.lastSyncedAt, null);
+});
+
 test("a first sync that stops on an omitted UID writes the state it reached, below the hole", async () => {
   const { db, accountId, adapter } = await setup();
   deliver(adapter, "INBOX", { subject: "one" });

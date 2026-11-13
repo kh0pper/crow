@@ -729,6 +729,50 @@ test("POST /folders/:id/older pages a folder's history back and reports the star
   }
 });
 
+test("POST /folders/:id/older and POST /search/remote hand the engine the supervisor's own cancel", async () => {
+  let s = null;
+  const controls = [];
+  const supervisor = {
+    calls: [],
+    async syncNow() {},
+    async restartAccount() {},
+    async withAdapter(accountId, fn) {
+      // Task 16's second argument: this call's own stop. A route that drops it lets a call the
+      // supervisor already closed out go on storing the batch it had fetched.
+      const control = { cancelled: () => true };
+      controls.push(control);
+      return fn(s.adapterFor(accountId), control);
+    },
+  };
+  s = await setup({ supervisor });
+  const { account, inbox } = await seedAccount(s);
+  await seedMessage(s, account, inbox, { uid: 5, subject: "Newest local", date: Date.now() });
+  await setFolderSyncState(s.db, inbox.id, { uidValidity: 71, highestUid: 5, floorUid: 5 });
+  const adapter = s.adapterFor(account.id);
+  for (let i = 1; i <= 20; i += 1) {
+    adapter.deliver("INBOX", makeRaw({ subject: `Older ${i}`, body: `old zebra ${i}`, messageId: `<older-${i}@mail.example.test>` }), {
+      internalDate: Date.now() - i * 86400000,
+    });
+  }
+
+  const before = await s.count("mail_messages");
+  const older = await post(olderPath(inbox.id), {});
+  assert.equal(older.status, 502, older.text);
+  assert.equal(older.json.error, "NETWORK");
+  assert.equal(await s.count("mail_messages"), before, "a closed-out backfill stored nothing");
+  assert.deepEqual((await get(`${SEARCH}?q=zebra`)).json.items, [], "and nothing reached the index");
+
+  const remote = await post(REMOTE_SEARCH, { q: "zebra", account: account.id });
+  assert.equal(remote.status, 200, remote.text);
+  assert.deepEqual(remote.json, {
+    added: 0,
+    failures: [{ accountId: account.id, error: MAIL_ERROR_TEXT.NETWORK }],
+  });
+  assert.equal(await s.count("mail_messages"), before, "a closed-out search stored nothing");
+  assert.deepEqual((await get(`${SEARCH}?q=zebra`)).json.items, []);
+  assert.equal(controls.length, 2, "both routes were handed a control");
+});
+
 test("RF2: an adapter failure while paging older mail answers only the code's fixed sentence", async () => {
   const SEEDED = "hunter2-in-the-imap-reply";
   const supervisor = {

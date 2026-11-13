@@ -22,7 +22,13 @@ import {
   setSyncState,
   updateAccount,
 } from "../servers/gateway/mail/store/accounts.js";
-import { listFolders, searchLocal } from "../servers/gateway/mail/store/messages.js";
+import {
+  listFolders,
+  searchLocal,
+  setFolderSyncState,
+  upsertFolders,
+} from "../servers/gateway/mail/store/messages.js";
+import { fetchOlder, searchRemote } from "../servers/gateway/mail/sync/engine.js";
 import { MailError } from "../servers/gateway/mail/errors.js";
 import { createFakeMailAdapter } from "./fixtures/fake-mail-adapter.mjs";
 import { makeRaw } from "./fixtures/fake-mail-server.mjs";
@@ -2583,6 +2589,113 @@ test("stopAccount waits at most STOP_RUN_WAIT_MS for a closed-out run to stop wr
   held.release();
   await slow;
   await flush(60);
+  await h.supervisor.stop();
+});
+
+/* -- an action a delete overtakes stops writing before the rows go, and the stop is bounded -- */
+
+/**
+ * The delete route's order, run from inside the first message write of an action: the removal mark,
+ * the stop (which its caller does not await), and then the rows.
+ */
+async function deleteFromInsideTheFirstWrite(ref, hook) {
+  ref.supervisor.beginRemoval(ref.accountId);
+  hook.stopping = ref.supervisor.stopAccount(ref.accountId);
+  await deleteAccount(ref.db, ref.accountId);
+}
+
+/** One stored folder with a floor, so an on-demand read has a history to page below. */
+async function storeInboxWithFloor(h, { highestUid, floorUid }) {
+  const listed = await upsertFolders(h.db, h.accountId, [
+    { path: "INBOX", name: "INBOX", specialUse: "\\Inbox", delimiter: "/" },
+  ]);
+  const folder = listed.folders[0];
+  await setFolderSyncState(h.db, folder.id, { uidValidity: 71, highestUid, floorUid });
+  return folder;
+}
+
+test("a fetchOlder the delete overtakes stores no message or FTS row", async () => {
+  const hook = { stopping: null };
+  let ref = null;
+  const h = await setup({
+    start: false,
+    wrapDb: (db) => afterFirstMessageInsert(db, () => deleteFromInsideTheFirstWrite(ref, hook)),
+  });
+  ref = h;
+  // Twenty bodies — one whole page already fetched — below a floor of 21.
+  for (let i = 1; i <= 40; i += 1) deliver(h.fake, "INBOX", `older ${i}`);
+  const folder = await storeInboxWithFloor(h, { highestUid: 40, floorUid: 21 });
+
+  // The route's own call, with the supervisor's control beside the adapter.
+  const paging = h.supervisor.withAdapter(h.accountId, (adapter, control) => fetchOlder(
+    { db: h.supervisorDb, adapter, now: () => T0, cancelled: control?.cancelled },
+    h.accountId,
+    folder.id,
+  ));
+  await paging.catch(() => {});
+  assert.ok(hook.stopping != null, "the delete landed inside the page");
+  await hook.stopping;
+  await flush(120);
+
+  assert.equal(await messageCount(h.db, h.accountId), 0, "no message row for the deleted account");
+  assert.deepEqual(await searchLocal(h.db, { q: "older", accountId: h.accountId }), [],
+    "no FTS row for the deleted account");
+  assert.deepEqual(await listFolders(h.db, h.accountId), [], "no folder row either");
+  assert.equal((await h.supervisor.status(h.accountId)).running, false);
+  h.supervisor.endRemoval(h.accountId);
+  await h.supervisor.stop();
+});
+
+test("a searchRemote the delete overtakes stores no message or FTS row", async () => {
+  const hook = { stopping: null };
+  let ref = null;
+  const h = await setup({
+    start: false,
+    wrapDb: (db) => afterFirstMessageInsert(db, () => deleteFromInsideTheFirstWrite(ref, hook)),
+  });
+  ref = h;
+  for (let i = 1; i <= 20; i += 1) {
+    h.fake.deliver("INBOX", makeRaw({ subject: `zebra ${i}` }), { internalDate: T0 });
+  }
+  await storeInboxWithFloor(h, { highestUid: 0, floorUid: null });
+
+  const found = h.supervisor.withAdapter(h.accountId, (adapter, control) => searchRemote(
+    { db: h.supervisorDb, adapter, now: () => T0, cancelled: control?.cancelled },
+    h.accountId,
+    "zebra",
+  ));
+  await found.catch(() => {});
+  assert.ok(hook.stopping != null, "the delete landed inside the search's first batch");
+  await hook.stopping;
+  await flush(120);
+
+  assert.equal(await messageCount(h.db, h.accountId), 0, "no message row for the deleted account");
+  assert.deepEqual(await searchLocal(h.db, { q: "zebra", accountId: h.accountId }), [],
+    "no FTS row for the deleted account");
+  h.supervisor.endRemoval(h.accountId);
+  await h.supervisor.stop();
+});
+
+test("stopAccount waits at most STOP_RUN_WAIT_MS for an action that never settles", async () => {
+  const h = await setup({ start: false });
+  const action = h.supervisor.withAdapter(h.accountId, () => new Promise(() => {}));
+  action.catch(() => {});
+  await flush(20);
+
+  h.supervisor.beginRemoval(h.accountId);
+  let settled = false;
+  const stopping = h.supervisor.stopAccount(h.accountId).then(() => { settled = true; });
+  await flush(20);
+  assert.equal(settled, false, "the stop waits for the action it closed out");
+
+  await h.clock.advance(STOP_RUN_WAIT_MS - 1);
+  await flush(20);
+  assert.equal(settled, false);
+
+  // The cap is what keeps an action that never answers from holding a delete open for ever.
+  await h.clock.advance(1);
+  await stopping;
+  assert.equal(settled, true);
   await h.supervisor.stop();
 });
 

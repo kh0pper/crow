@@ -470,6 +470,18 @@ async function storeBatch(c, folder, batch, delivered, stopAtUid) {
   let stop = stopAtUid ?? null;
   let stopReason = stop == null ? null : "omitted";
 
+  /**
+   * One message that cannot be prepared or stored holds the watermark, exactly like one get() left out:
+   * the code is all a log may say about it.
+   */
+  const failed = (err, uid) => {
+    c.log({ event: "message_failed", folderId, uid, code: toMailError(err).code });
+    if (stop == null || uid < stop) {
+      stop = uid;
+      stopReason = "store_failed";
+    }
+  };
+
   for (const item of batch) {
     if (stop != null && item.uid >= stop) break;
     checkStop(c);
@@ -478,14 +490,26 @@ async function storeBatch(c, folder, batch, delivered, stopAtUid) {
     // Between messages, so a large arrival can never hold the event loop for the whole folder.
     await c.yieldFn();
 
+    // fetchBatch only delivers bytes, so a null raw here is the listing's own too_large marker. An
+    // empty body is how the adapter reports a message above the raw cap, so it is a too_large row
+    // too — never an empty message that reads as one the sender left blank.
+    let parsed;
     try {
-      // fetchBatch only delivers bytes, so a null raw here is the listing's own too_large marker. An
-      // empty body is how the adapter reports a message above the raw cap, so it is a too_large row
-      // too — never an empty message that reads as one the sender left blank.
       const raw = entry.tooLarge ? null : entry.message.raw;
-      const parsed = raw == null || raw.length === 0
+      parsed = raw == null || raw.length === 0
         ? placeholderMessage("too_large")
         : await parseRawMessage(raw);
+    } catch (err) {
+      failed(err, item.uid);
+      break;
+    }
+
+    // The last look before the row lands: a cancel that arrives while this message was being parsed
+    // (or while the loop yielded) must not be overtaken by the write it was meant to stop. It sits
+    // outside the try below so a run that was closed out is never mistaken for a message that failed.
+    checkStop(c);
+
+    try {
       const written = await upsertMessage(c.db, {
         ...parsed,
         accountId: folder.accountId,
@@ -497,13 +521,7 @@ async function storeBatch(c, folder, batch, delivered, stopAtUid) {
       if (written.created) added += 1;
       if (lowestStoredUid == null || item.uid < lowestStoredUid) lowestStoredUid = item.uid;
     } catch (err) {
-      // A message that cannot be stored holds the watermark, exactly like one get() left out: the
-      // code is all a log may say about it.
-      c.log({ event: "message_failed", folderId, uid: item.uid, code: toMailError(err).code });
-      if (stop == null || item.uid < stop) {
-        stop = item.uid;
-        stopReason = "store_failed";
-      }
+      failed(err, item.uid);
       break;
     }
   }
