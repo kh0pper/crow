@@ -1400,6 +1400,8 @@ test("studio_midi lists mappings with who set them", async (t) => {
     const tools = (await client.listTools()).tools;
     const names = tools.map((tool) => tool.name);
     assert.equal(names.includes("studio_midi_accept"), false, "an agent cannot say yes for the operator");
+    // The same for the operator's yes to a second amp on a chain.
+    assert.equal(names.includes("studio_insert_accept"), false, "an agent cannot accept its own amp proposal");
     for (const name of ["studio_midi_map", "studio_midi_remove", "studio_midi_propose_profile"]) {
       const tool = tools.find((item) => item.name === name);
       assert.ok(tool, `${name} exists`);
@@ -1935,8 +1937,21 @@ test("studio_mix lists chains, sends, returns, the master target and the last re
     ]) {
       assert.ok(tool.description.includes(command), `the description points at ${command}`);
     }
+    assert.equal(
+      tool.description.includes("studio_insert_accept"),
+      false,
+      "there is no tool for the operator's yes to a second amp, so none is offered",
+    );
+    // The one tool an agent proposes a second amp with says what a proposal is,
+    // and that the yes is not its own.
+    const addTool = (await client.listTools()).tools.find((entry) => entry.name === "studio_insert_add");
+    assert.ok(addTool, "studio_insert_add is a tool");
+    assert.match(addTool.description, /proposal/i, "it says a second amp is a proposal");
+    assert.match(addTool.description, /no tool for accepting/i, "and that accepting is not its to do");
     assert.match(tool.description, /undo/i, "it says each step is undoable");
     assert.match(tool.description, /A\/B/i, "and that A/B is the person's");
+    assert.match(tool.description, /`proposed`/, "it says an amp entry tells a proposal from a live amp");
+    assert.match(tool.description, /`set_by`/, "and who set it");
 
     const result = await client.callTool({ name: "studio_mix", arguments: { song_id: songId } });
     assert.notEqual(result.isError, true, textOf(result));
@@ -2332,6 +2347,28 @@ test("agent builds a guitar chain but cannot swap or remove the capture you chos
     assert.equal(held.bypass, true);
     assert.equal(held.capture.id, "lib-cap-a", "still the operator's capture");
     assert.equal(held.params.ir_id, "lib-cab", "still the operator's cabinet");
+
+    // A second amp the agent may only propose: the mixer read says which of the
+    // chain's amps is still waiting for the operator and who set each one.
+    assert.match(
+      await run("studio_insert_add", {
+        id: "amp-2",
+        owner: "track:guitar",
+        kind: "amp",
+        params: { model_id: "lib-cap-b" },
+      }),
+      /Proposed a second amp on Guitar/,
+    );
+    const proposed = JSON.parse(textOf(await client.callTool({ name: "studio_mix", arguments: { song_id: songId } })));
+    assert.deepEqual(
+      proposed.tracks[0].inserts
+        .filter((insert) => insert.kind === "amp")
+        .map((insert) => [insert.id, insert.proposed, insert.set_by]),
+      [
+        ["amp", false, "agent"],
+        ["amp-2", true, "agent"],
+      ],
+    );
   } finally {
     await client.close();
   }

@@ -973,6 +973,9 @@ const STYLES = `
   }
   .studio .st-mix-chip-off { border-style: dashed; color: var(--st-muted); }
   .studio .st-mix-chip-fault { border-color: var(--st-danger); color: var(--st-danger); }
+  /* A proposed second amp: it is not in the chain yet, so it is drawn dimmed and
+     dashed, with Accept and Decline in place of a bypass switch and a remove. */
+  .studio .st-mix-chip-proposed { border-style: dashed; color: var(--st-muted); background: #1E2225; opacity: .7; }
   .studio .st-mix-mini {
     flex: 0 0 auto; min-width: 32px; min-height: 44px; padding: 0 4px; border-radius: 6px;
     border: 1px solid var(--st-edge); background: #24282D; color: var(--st-text);

@@ -1360,9 +1360,11 @@ function creditsOf(fonts, loaded) {
  * The field an amp insert names an entry in is its own: `model_id` for a capture
  * (`kind: "nam"`) and `ir_id` for a cabinet (`kind: "ir"`). A bypassed insert
  * counts: a render that left its capture out would not be the song the operator
- * hears the moment they un-bypass it. An id the song's library does not hold is
- * included with `entry: null`, so it is REPORTED as missing rather than passed
- * over (Review Focus 5).
+ * hears the moment they un-bypass it. A PROPOSAL does not: it is waiting for the
+ * operator's yes, the engine skips it, and it loads nothing — so it is not a
+ * missing file either. An id the song's library does not hold is included with
+ * `entry: null`, so it is REPORTED as missing rather than passed over (Review
+ * Focus 5).
  * @param {object} snapshot the song
  * @param {"nam"|"ir"} kind
  * @returns {Array<{id: string, entry: object|null}>}
@@ -1373,7 +1375,13 @@ function libraryFilesOfKind(snapshot, kind) {
   const found = [];
   const seen = new Set();
   const ordered = Object.values(inserts)
-    .filter((insert) => insert && typeof insert === "object" && insert.kind === "amp")
+    .filter(
+      (insert) =>
+        insert &&
+        typeof insert === "object" &&
+        insert.kind === "amp" &&
+        insert.proposed !== true,
+    )
     .sort((left, right) => {
       const orderLeft = Number(left.order);
       const orderRight = Number(right.order);

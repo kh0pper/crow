@@ -93,6 +93,7 @@ const COMMAND_IDS = [
   "clip.set_comp",
   "clip.set_length",
   "clip.write",
+  "insert.accept",
   "insert.add",
   "insert.bypass",
   "insert.move",
@@ -257,6 +258,10 @@ const MINIMAL_ARGS = {
   },
   "library.remove": { library_id: "the-font" },
   "insert.add": { owner: "track:t1", kind: "eq" },
+  "insert.accept": {
+    id: "i1",
+    expect: { owner: "track:t1", model_id: "cap-a", ir_id: null },
+  },
   "insert.bypass": { id: "i1", bypass: true },
   "insert.move": { id: "i1", after: null },
   "insert.remove": { id: "i1" },
@@ -350,6 +355,9 @@ test("the registry lists every command", () => {
   // So is the yes that makes a MIDI mapping live.
   assert.equal(getCommand("midi.accept").humanOnly, true);
   assert.equal(getCommand("midi.map").humanOnly, false);
+  // And the yes that makes a second amp on a chain live.
+  assert.equal(getCommand("insert.accept").humanOnly, true);
+  assert.equal(getCommand("insert.add").humanOnly, false);
   // A take only ever arrives through the gateway's upload finish route.
   assert.equal(getCommand("take.add").internal, true);
   // A sample only ever arrives through the same finish route.
@@ -966,6 +974,48 @@ test("apply returns before/after for every touched field", (t) => {
       args: { id: "return-a" },
       keys: ["return:return-a|*", "insert:insert-verb|*"],
     },
+    // The second amp on a chain: the capture it plays, the operator's first amp
+    // (live, because a chain with no amp is where an agent's own amp goes too),
+    // the agent's second one — stored as a proposal — and the operator's yes.
+    {
+      id: "library.add",
+      args: {
+        entry: {
+          id: "cap-a",
+          kind: "nam",
+          name: "Capture A",
+          source: "upload",
+          upload_id: "upload-cap-a",
+          storage_key: "projects/7/studio/song-1/library/cap-a.nam",
+          sha256: "b".repeat(64),
+          bytes: 2048,
+          licence: "",
+          credit: "",
+          author_label: "the operator",
+        },
+      },
+      keys: ["library:cap-a|*"],
+    },
+    {
+      id: "insert.add",
+      args: { id: "insert-amp", owner: `track:${track}`, kind: "amp", params: { model_id: "cap-a" } },
+      author: HUMAN,
+      keys: ["insert:insert-amp|*"],
+    },
+    {
+      id: "insert.add",
+      args: { id: "insert-amp-2", owner: `track:${track}`, kind: "amp", params: { model_id: "cap-a" } },
+      keys: ["insert:insert-amp-2|*"],
+    },
+    {
+      id: "insert.accept",
+      args: {
+        id: "insert-amp-2",
+        expect: { owner: `track:${track}`, model_id: "cap-a", ir_id: null },
+      },
+      author: HUMAN,
+      keys: ["insert:insert-amp-2|proposed"],
+    },
   ];
 
   // The list covers the whole contract: a new command cannot slip in without
@@ -1260,3 +1310,254 @@ test("tracks accept only the self-contained SunVox instruments", async () => {
     assert.throws(() => run("track.add", { name: "x", device: { engine: "sunvox", type, params: {} } }));
   }
 });
+
+// --- the second amp on a chain -----------------------------------------------
+
+/** An MCP command's author, per the plan's attribution rule. */
+const AGENT = { kind: "agent", id: "mcp", label: "Agent (MCP)" };
+
+/**
+ * One library entry, the way the gateway's library routes build it.
+ * @param {string} id
+ * @param {"nam"|"ir"} kind
+ * @returns {object}
+ */
+function ampLibraryEntry(id, kind) {
+  return {
+    id,
+    kind,
+    name: `${kind === "nam" ? "Capture" : "Cabinet"} ${id}`,
+    source: "upload",
+    upload_id: `upload-${id}`,
+    storage_key: `projects/7/studio/song-1/library/${id}.${kind === "nam" ? "nam" : "wav"}`,
+    sha256: "c".repeat(64),
+    bytes: 1024,
+    licence: "",
+    credit: "",
+    author_label: "the operator",
+  };
+}
+
+/**
+ * A scratch song with one audio track and two captures an amp can play.
+ * @param {import("node:test").TestContext} t
+ * @returns {{doc: object, track: string, owner: string}}
+ */
+function ampSong(t) {
+  const doc = scratchDoc(t);
+  const track = addTrack(doc, "Guitar", { kind: "audio" });
+  for (const id of ["cap-a", "cap-b"]) {
+    runCommand(doc, "library.add", { entry: ampLibraryEntry(id, "nam") });
+  }
+  return { doc, track, owner: `track:${track}` };
+}
+
+/**
+ * Add one amp insert as `author`, and return the command result.
+ * @param {object} doc
+ * @param {string} owner
+ * @param {string} id
+ * @param {string} capture - the library entry the amp plays
+ * @param {object} [author] - the caller; an agent when omitted
+ * @returns {object}
+ */
+function addAmp(doc, owner, id, capture, author = AGENT) {
+  return runCommand(
+    doc,
+    "insert.add",
+    { id, owner, kind: "amp", params: { model_id: capture } },
+    { author },
+  );
+}
+
+test("the first amp on a chain is live, every amp after it is a proposal", (t) => {
+  const { doc, owner } = ampSong(t);
+
+  // An agent's FIRST amp on a chain that has none is an ordinary live edit.
+  const first = addAmp(doc, owner, "amp-1", "cap-a");
+  assert.equal(first.summary, "Added an amp to Guitar");
+  assert.equal(snapshot(doc).inserts["amp-1"].proposed, false);
+  assert.equal(snapshot(doc).inserts["amp-1"].set_by, "agent");
+
+  // The second one is a proposal, whole-object write included: what the history
+  // records is exactly what the song holds.
+  const second = addAmp(doc, owner, "amp-2", "cap-b");
+  assert.equal(second.summary, "Proposed a second amp on Guitar");
+  const proposed = second.after[`insert:amp-2|*`];
+  assert.equal(proposed.proposed, true);
+  assert.equal(proposed.set_by, "agent");
+  assert.equal(proposed.params.model_id, "cap-b");
+  assert.deepEqual(snapshot(doc).inserts["amp-2"], proposed);
+
+  // The operator's own second amp is live: the yes is theirs.
+  const theirs = addAmp(doc, owner, "amp-3", "cap-a", HUMAN);
+  assert.equal(theirs.summary, "Added an amp to Guitar");
+  assert.equal(snapshot(doc).inserts["amp-3"].proposed, false);
+  assert.equal(snapshot(doc).inserts["amp-3"].set_by, "operator");
+});
+
+test("a bypassed amp still counts as an amp on the chain", (t) => {
+  const { doc, owner } = ampSong(t);
+  addAmp(doc, owner, "amp-1", "cap-a");
+  runCommand(doc, "insert.bypass", { id: "amp-1", bypass: true }, { author: AGENT });
+
+  const second = addAmp(doc, owner, "amp-2", "cap-b");
+  assert.equal(second.summary, "Proposed a second amp on Guitar");
+  assert.equal(snapshot(doc).inserts["amp-1"].bypass, true);
+  assert.equal(snapshot(doc).inserts["amp-2"].proposed, true, "a bypassed amp does not unlock a live second one");
+});
+
+test("a proposal counts as an amp, and another chain's amp does not", (t) => {
+  const { doc, owner } = ampSong(t);
+  addAmp(doc, owner, "amp-1", "cap-a");
+  addAmp(doc, owner, "amp-2", "cap-b");
+  // The chain now holds a live amp and a proposal: a third amp is still a
+  // proposal, not a live one beside them.
+  const third = addAmp(doc, owner, "amp-3", "cap-a");
+  assert.equal(third.summary, "Proposed a second amp on Guitar");
+  assert.equal(snapshot(doc).inserts["amp-3"].proposed, true);
+
+  // A second chain with no amp of its own: the first amp there is live, whatever
+  // the first chain holds.
+  const bass = addTrack(doc, "Bass", { kind: "audio" });
+  const other = addAmp(doc, `track:${bass}`, "amp-bass", "cap-a");
+  assert.equal(other.summary, "Added an amp to Bass");
+  assert.equal(snapshot(doc).inserts["amp-bass"].proposed, false);
+});
+
+test("insert.accept is the operator's yes, bound to what was reviewed", (t) => {
+  const { doc, owner } = ampSong(t);
+  addAmp(doc, owner, "amp-1", "cap-a", HUMAN);
+  addAmp(doc, owner, "amp-2", "cap-b");
+  const expect = { owner, model_id: "cap-b", ir_id: null };
+
+  // An agent may propose one and no more: the accept is people-only.
+  const humanOnly = refuses(
+    () => runCommand(doc, "insert.accept", { id: "amp-2", expect }, { author: AGENT }),
+    "human_only",
+  );
+  assert.equal(humanOnly.message, "A second amp on a track is the operator's to accept; an agent can only propose one.");
+  assert.equal(snapshot(doc).inserts["amp-2"].proposed, true);
+
+  // The yes is bound to the chain, capture and cabinet the operator reviewed.
+  const moved = refuses(
+    () =>
+      runCommand(
+        doc,
+        "insert.accept",
+        { id: "amp-2", expect: { owner: "master", model_id: "cap-b", ir_id: null } },
+        { author: HUMAN },
+      ),
+    "conflict",
+  );
+  assert.match(moved.message, /not the proposal you were shown any more/);
+  const recaptured = refuses(
+    () =>
+      runCommand(
+        doc,
+        "insert.accept",
+        { id: "amp-2", expect: { owner, model_id: "cap-a", ir_id: null } },
+        { author: HUMAN },
+      ),
+    "conflict",
+  );
+  assert.match(recaptured.message, /not the proposal you were shown any more/);
+
+  // The operator's yes: one field, and nothing else about the insert moves.
+  const accepted = runCommand(doc, "insert.accept", { id: "amp-2", expect }, { author: HUMAN });
+  assert.equal(accepted.summary, "Accepted the second amp on Guitar");
+  assert.deepEqual(Object.keys(accepted.before), ["insert:amp-2|proposed"]);
+  assert.deepEqual(Object.keys(accepted.after), ["insert:amp-2|proposed"]);
+  assert.equal(accepted.before["insert:amp-2|proposed"], true);
+  assert.equal(accepted.after["insert:amp-2|proposed"], false);
+  assert.equal(snapshot(doc).inserts["amp-2"].proposed, false);
+  assert.equal(snapshot(doc).inserts["amp-2"].set_by, "agent", "accepting does not rewrite who proposed it");
+
+  // A live insert is not a proposal, so there is nothing to accept.
+  const live = refuses(
+    () => runCommand(doc, "insert.accept", { id: "amp-2", expect }, { author: HUMAN }),
+    "conflict",
+  );
+  assert.match(live.message, /live already/);
+});
+
+test("declining a proposal is an ordinary removal for both callers", (t) => {
+  const { doc, owner } = ampSong(t);
+  addAmp(doc, owner, "amp-1", "cap-a", HUMAN);
+  addAmp(doc, owner, "amp-2", "cap-b");
+
+  // The agent takes its own proposal away: a proposal plays nothing, so there is
+  // no sound to lose.
+  const declined = runCommand(doc, "insert.remove", { id: "amp-2" }, { author: AGENT });
+  assert.deepEqual(Object.keys(declined.before), ["insert:amp-2|*"]);
+  assert.equal(snapshot(doc).inserts["amp-2"], undefined);
+
+  // And the operator declines by the same command.
+  addAmp(doc, owner, "amp-3", "cap-b");
+  runCommand(doc, "insert.remove", { id: "amp-3" }, { author: HUMAN });
+  assert.equal(snapshot(doc).inserts["amp-3"], undefined);
+});
+
+test("no command turns a proposal into a live insert or changes its kind", (t) => {
+  const { doc, owner } = ampSong(t);
+  addAmp(doc, owner, "amp-1", "cap-a", HUMAN);
+  addAmp(doc, owner, "amp-2", "cap-b");
+
+  // `insert.set` names parameters and nothing else: a `kind` or a `proposed`
+  // argument is an unknown field, so there is no route to either field.
+  refuses(
+    () => runCommand(doc, "insert.set", { id: "amp-2", params: { input_db: 1 }, proposed: false }),
+    "invalid",
+  );
+  refuses(
+    () => runCommand(doc, "insert.set", { id: "amp-2", params: { input_db: 1 }, kind: "eq" }),
+    "invalid",
+  );
+
+  // Retuning, re-ordering and bypassing a proposal keep it a proposal: each
+  // writes its own field and nothing beside it.
+  runCommand(doc, "insert.set", { id: "amp-2", params: { input_db: 6 } }, { author: AGENT });
+  const moved = runCommand(doc, "insert.move", { id: "amp-2", after: null }, { author: AGENT });
+  assert.deepEqual(Object.keys(moved.after), ["insert:amp-2|order"]);
+  const bypassed = runCommand(doc, "insert.bypass", { id: "amp-2", bypass: true }, { author: AGENT });
+  assert.deepEqual(Object.keys(bypassed.after), ["insert:amp-2|bypass"]);
+  assert.equal(snapshot(doc).inserts["amp-2"].proposed, true);
+  assert.equal(snapshot(doc).inserts["amp-2"].params.input_db, 6);
+});
+
+test("a full song with proposals pending says declining one frees a slot", (t) => {
+  const doc = scratchDoc(t);
+  const first = addTrack(doc, "Guitar 1", { kind: "audio" });
+  const second = addTrack(doc, "Guitar 2", { kind: "audio" });
+  const third = addTrack(doc, "Guitar 3", { kind: "audio" });
+  runCommand(doc, "library.add", { entry: ampLibraryEntry("cap-a", "nam") });
+
+  // Sixteen amps over two chains — the song's cap exactly — of which the last
+  // two on the first chain are an agent's proposals.
+  for (let index = 0; index < 6; index += 1) {
+    addAmp(doc, `track:${first}`, `amp-a-${index}`, "cap-a", HUMAN);
+  }
+  for (let index = 0; index < 2; index += 1) {
+    addAmp(doc, `track:${first}`, `amp-a-pending-${index}`, "cap-a");
+  }
+  for (let index = 0; index < 8; index += 1) {
+    addAmp(doc, `track:${second}`, `amp-b-${index}`, "cap-a", HUMAN);
+  }
+  assert.equal(Object.keys(snapshot(doc).inserts).length, LIMITS.ampInsertsPerSong);
+
+  // A full song names the way out: two of its amps are proposals nobody has
+  // answered, and declining one is what frees the slot the next amp needs.
+  const over = refuses(() => addAmp(doc, `track:${third}`, "amp-16", "cap-a", HUMAN), "limit");
+  assert.equal(
+    over.message,
+    `A song holds at most ${LIMITS.ampInsertsPerSong} amp inserts, and 2 of them are proposals waiting for an answer; declining a proposal frees a slot.`,
+  );
+
+  // Which is exactly what happens: the agent takes one back and the next amp
+  // lands in the freed slot.
+  runCommand(doc, "insert.remove", { id: "amp-a-pending-1" }, { author: AGENT });
+  const added = addAmp(doc, `track:${third}`, "amp-16", "cap-a", HUMAN);
+  assert.equal(added.summary, "Added an amp to Guitar 3");
+  assert.equal(Object.keys(snapshot(doc).inserts).length, LIMITS.ampInsertsPerSong);
+});
+

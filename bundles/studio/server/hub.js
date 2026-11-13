@@ -63,6 +63,14 @@
  * the agent's undo of its own proposal after the operator took it in is refused
  * just as an edit to the accepted mapping would be.
  *
+ * A fifth rule guards a chain's amps (see `ampGateRefusal`): the first amp on a
+ * chain is an ordinary agent edit, and every amp after it is a proposal, because
+ * a second amp changes what the track is heard through. No agent step — a
+ * command, an undo or a redo — may leave a chain holding two amps that are not
+ * proposals, which is what closes the bypass-the-first-then-add-a-second route,
+ * a whole insert written without its proposal fields, and an agent's undo that
+ * would put back an amp beside another live one.
+ *
  * "storage" is the one refusal that has to undo something: the edit was
  * already applied to the live document when the write failed, so the hub drops
  * its cached document for that song and the next operation rebuilds it from the
@@ -78,6 +86,7 @@
 import { isDeepStrictEqual } from "node:util";
 import * as Y from "yjs";
 import {
+  AMP_KIND,
   SAMPLER_DEVICE,
   SOUNDFONT_DEVICE,
   bankKey,
@@ -126,7 +135,9 @@ import "./commands/library.js";
 import "./commands/instruments.js";
 // The 1d mixer commands — effects, sends, returns and the master. Without this
 // import a hub started on its own (the gateway's) refuses every mixer command.
-import "./commands/mixer.js";
+// It also holds the sentence an agent meets when it reaches for a second amp on
+// a chain, and the people-only command that accepts one.
+import { AMP_SECOND_NEEDS_A_YES } from "./commands/mixer.js";
 import {
   REDO_COMMAND,
   UNDO_COMMAND,
@@ -243,6 +254,18 @@ const AMP_CAPTURE_NEEDS_A_YES = "Only the operator changes the capture or cabine
  * agent may still bypass an amp.
  */
 const AMP_REMOVE_NEEDS_A_YES = "Only the operator removes an amp.";
+
+/**
+ * What an agent is told when a step would repoint a proposed amp at another
+ * capture or cabinet.
+ *
+ * A proposal is the choice the operator is being asked about, so the sound it
+ * names is fixed from the moment it is proposed: an agent may retune it or take
+ * it back, and the way to another capture is to take it away and propose
+ * another.
+ */
+const AMP_PROPOSAL_FIXED =
+  "A proposed amp's capture and cabinet are fixed once proposed; remove it and propose another.";
 
 /**
  * What an agent is told when a step would take a file out of the song's library
@@ -745,6 +768,182 @@ function mayTouchMidi(prepared, author) {
   return prepared.touched.some((ref) => MIDI_BEARING_KINDS.includes(parseObjectRef(ref)?.kind));
 }
 
+/** @returns {string[]} the object refs a set of writes names. */
+function changeRefs(changes) {
+  const refs = new Set();
+  for (const [key] of changeEntries(changes)) {
+    const split = splitRefField(key);
+    if (split) refs.add(split.ref);
+  }
+  return [...refs];
+}
+
+/**
+ * The amp inserts a step's writes leave behind, as one small record each: the
+ * chain an insert sits in, its kind, and whether it is still a proposal.
+ *
+ * Projected from the song's own inserts and the writes themselves, so a whole
+ * object put back, a `kind` field and a `proposed` field are all read the same
+ * way — the question is about the chains the step leaves, never about how its
+ * keys are shaped.
+ * @param {object} snap - the song as it stands before those writes
+ * @param {Map<string, any>|Object<string, any>|null|undefined} changes - the
+ *   writes the step makes, keyed `"<ref>|<field>"`; none when omitted
+ * @returns {Map<string, {owner: string, kind: any, proposed: boolean}>}
+ */
+function insertsAfter(snap, changes) {
+  const state = new Map();
+  for (const [id, insert] of Object.entries(snap?.inserts ?? {})) {
+    if (!isPlainObject(insert)) continue;
+    state.set(id, {
+      owner: typeof insert.owner === "string" ? insert.owner : "",
+      kind: insert.kind,
+      proposed: insert.proposed === true,
+    });
+  }
+  for (const [key, value] of changeEntries(changes)) {
+    const split = splitRefField(key);
+    const target = split ? parseObjectRef(split.ref) : null;
+    if (target?.kind !== "insert") continue;
+    if (split.field === "*") {
+      if (value === null) {
+        state.delete(target.id);
+        continue;
+      }
+      if (!isPlainObject(value)) continue;
+      state.set(target.id, {
+        owner: typeof value.owner === "string" ? value.owner : "",
+        kind: value.kind,
+        proposed: value.proposed === true,
+      });
+      continue;
+    }
+    const held = state.get(target.id);
+    if (!held) continue;
+    if (split.field === "kind") held.kind = value;
+    else if (split.field === "proposed") held.proposed = value === true;
+    else if (split.field === "owner") held.owner = typeof value === "string" ? value : "";
+  }
+  return state;
+}
+
+/**
+ * How many amps one chain holds, and how many of them are live.
+ * @param {Map<string, {owner: string, kind: any, proposed: boolean}>} state
+ * @returns {Map<string, {amps: number, live: number}>}
+ */
+function ampCountsByOwner(state) {
+  const counts = new Map();
+  for (const insert of state.values()) {
+    if (insert.kind !== AMP_KIND || insert.owner === "") continue;
+    const held = counts.get(insert.owner) ?? { amps: 0, live: 0 };
+    held.amps += 1;
+    if (insert.proposed !== true) held.live += 1;
+    counts.set(insert.owner, held);
+  }
+  return counts;
+}
+
+/**
+ * Whether a write makes a chain hold a second amp that is not a proposal
+ * without the chain having held one before.
+ *
+ * The two shapes that reach this are the ones a chain count alone cannot see:
+ * a whole insert object arriving as a live amp (an `insert.add` with its
+ * proposal fields stripped, or a chain an undo puts back whole) where the chain
+ * it joins ends up with two, and a raw `proposed: false` write on an insert that
+ * was a proposal (undoing the operator's `insert.accept`, which is people-only
+ * and caught a step earlier — this is the same answer one layer down).
+ * @param {object} snap - the song as it stands before the writes
+ * @param {Map<string, any>|Object<string, any>|null|undefined} changes
+ * @param {Map<string, {owner: string, kind: any, proposed: boolean}>} state - the
+ *   inserts the writes leave behind
+ * @param {Map<string, {amps: number, live: number}>} counts - the same, counted
+ *   per chain
+ * @returns {boolean}
+ */
+function makesSecondAmpLive(snap, changes, state, counts) {
+  for (const [key, value] of changeEntries(changes)) {
+    const split = splitRefField(key);
+    const target = split ? parseObjectRef(split.ref) : null;
+    if (target?.kind !== "insert") continue;
+    const held = Object.hasOwn(snap?.inserts ?? {}, target.id) ? snap.inserts[target.id] : null;
+    if (split.field === "proposed" && value === false && isPlainObject(held) && held.proposed === true) {
+      return true;
+    }
+    if (split.field !== "*" || !isPlainObject(value) || value.proposed === true) continue;
+    // Only an insert the song does not hold yet: one it holds is judged by the
+    // chain counts above (a move, a retune, a removal).
+    if (held !== null) continue;
+    const after = state.get(target.id);
+    if (after?.kind !== AMP_KIND) continue;
+    if ((counts.get(after.owner)?.amps ?? 0) >= 2) return true;
+  }
+  return false;
+}
+
+/**
+ * The agent amp gate: no step may leave a chain holding two amps that are not
+ * proposals.
+ *
+ * The first amp on a chain is an agent's own edit; every amp after it is the
+ * operator's to accept, so an agent may only propose one (see `insert.add` and
+ * `insert.accept`). The rule is about the CHAIN the step leaves, not about which
+ * command ran, so every route to a second live amp meets it: an insert added
+ * with the proposal fields stripped, a chain reached by a move, the first amp
+ * bypassed and a second one added beside it, and a step back along the history
+ * that would put back an amp whose chain has held another one live since.
+ * @param {{changes: Map<string, any>|Object<string, any>, snap: object,
+ *          author: object}} check - the writes the step makes, and the song as it
+ *   stands before them
+ * @returns {object|null} the refusal, or null when the step may run
+ */
+function ampGateRefusal({ changes, snap, author }) {
+  if (author.kind === "human") return null;
+  const before = ampCountsByOwner(insertsAfter(snap, null));
+  const state = insertsAfter(snap, changes);
+  const after = ampCountsByOwner(state);
+  for (const [owner, count] of after) {
+    // Judged live against live: a proposal holds a place in the chain, not the
+    // answer to the second live amp, so a chain that already holds a live amp
+    // and a proposal is still one live amp deep. A chain that held none before
+    // and gains two at once is the same question asked once.
+    const heldLive = before.get(owner)?.live ?? 0;
+    if (count.live >= 2 && count.live > heldLive) return refuse("human_only", AMP_SECOND_NEEDS_A_YES);
+  }
+  if (makesSecondAmpLive(snap, changes, state, after)) {
+    return refuse("human_only", AMP_SECOND_NEEDS_A_YES);
+  }
+  return null;
+}
+
+/**
+ * Whether the amp gate has to look at what a step would write.
+ *
+ * False when a person is calling, and false when the step names no insert and
+ * no chain that already holds an amp: a track's fader, a scene's name or a
+ * sample's key cannot make a chain hold a second amp. When it is true the step
+ * is previewed on a clone and `ampGateRefusal` decides on the writes themselves.
+ * @param {string[]} refs - the object refs the step names or writes
+ * @param {object} snap - the song as it stands before the step
+ * @param {object} author
+ * @returns {boolean}
+ */
+function mayTouchAmpInsert(refs, snap, author) {
+  if (author.kind === "human") return false;
+  const ampOwners = new Set();
+  for (const insert of Object.values(snap?.inserts ?? {})) {
+    if (!isPlainObject(insert) || insert.kind !== AMP_KIND) continue;
+    if (typeof insert.owner === "string" && insert.owner !== "") ampOwners.add(insert.owner);
+  }
+  return refs.some((ref) => {
+    const target = parseObjectRef(ref);
+    if (!target) return false;
+    if (target.kind === "insert") return true;
+    return ampOwners.has(ref);
+  });
+}
+
 /**
  * Whether one write to a pad loses the sound it plays: the pad is deleted while
  * it plays one, or its sample or its slice moves away from the value it held.
@@ -853,32 +1052,52 @@ function ampReferenceMoves(insert, params) {
  * these two answers. ADDING an amp is not a loss: an agent may build a guitar
  * chain with a capture the operator put in the song's library (plan 1d, PR C).
  *
- * KNOWN GAP (review, Task 15 — left in place deliberately, no code for it yet):
- * this rule only asks what a write does to an amp that ALREADY EXISTS. An agent
- * can therefore reach the same sound by another route: bypass the operator's
- * amp and add a SECOND amp that names a capture already in the song's library,
- * so the operator's choice is still theirs and untouched while the track is
- * heard through the agent's. Closing that needs the rule to be about the chain
- * and the song ("which capture does this track hear?"), not about one insert's
- * fields — a design decision for the "who can change a sound" rule, not a
- * guard to bolt on here.
+ * A PROPOSAL loses nothing yet: it plays nothing, so an agent may take its own
+ * proposal away and retune it, and the operator's own inserted amp keeps the
+ * capture they chose. What a proposal POINTS AT is another matter — the capture
+ * and the cabinet it names are the choice the operator is being asked about, so
+ * they are fixed while it stands and moving either is refused (see
+ * `AMP_PROPOSAL_FIXED`). The second-amp case the bypass-then-add route used to
+ * open is closed by the amp gate (`ampGateRefusal`), which judges the chain
+ * rather than one insert's fields.
  * @param {object} snap - the song as it stands before the step
  * @param {string} insertId
- * @param {string} field - `"*"`, `"kind"`, `"params.<name>"`, or another field
+ * @param {string} field - `"*"`, `"kind"`, `"params"`, `"params.<name>"`, or another field
  * @param {any} value - what the step would write
  * @returns {string|null} the sentence, or null when nothing is lost
  */
 function insertWriteLosesSound(snap, insertId, field, value) {
   const insert = Object.hasOwn(snap.inserts ?? {}, insertId) ? snap.inserts[insertId] : null;
-  if (!isPlainObject(insert) || insert.kind !== "amp") return null;
+  if (!isPlainObject(insert) || insert.kind !== AMP_KIND) return null;
+  // A proposal is not a sound yet: only the operator's yes gives it one. Its two
+  // references are still fixed, because they are what the operator is being
+  // asked about — taking it away and proposing another is the way to change one.
+  if (insert.proposed === true) {
+    if (field === "*") {
+      if (!isPlainObject(value)) return null;
+      return ampReferenceMoves(insert, value.params) ? AMP_PROPOSAL_FIXED : null;
+    }
+    if (field === "params") {
+      return ampReferenceMoves(insert, isPlainObject(value) ? value : {}) ? AMP_PROPOSAL_FIXED : null;
+    }
+    if (field.startsWith("params.")) {
+      const name = field.slice("params.".length);
+      if (!AMP_REFERENCES_IN_PARAMS.includes(name)) return null;
+      return ampReferenceMoves(insert, { [name]: value }) ? AMP_PROPOSAL_FIXED : null;
+    }
+    return null;
+  }
   if (field === "*") {
     if (value === null) return AMP_REMOVE_NEEDS_A_YES;
     if (!isPlainObject(value)) return null;
     // A whole insert put back as another kind is the amp taken away.
-    if (typeof value.kind === "string" && value.kind !== "amp") return AMP_REMOVE_NEEDS_A_YES;
+    if (typeof value.kind === "string" && value.kind !== AMP_KIND) return AMP_REMOVE_NEEDS_A_YES;
     return ampReferenceMoves(insert, value.params) ? AMP_CAPTURE_NEEDS_A_YES : null;
   }
-  if (field === "kind") return value === "amp" ? null : AMP_REMOVE_NEEDS_A_YES;
+  if (field === "params") {
+    return ampReferenceMoves(insert, isPlainObject(value) ? value : {}) ? AMP_CAPTURE_NEEDS_A_YES : null;
+  }
+  if (field === "kind") return value === AMP_KIND ? null : AMP_REMOVE_NEEDS_A_YES;
   if (field.startsWith("params.")) {
     const name = field.slice("params.".length);
     if (!AMP_REFERENCES_IN_PARAMS.includes(name)) return null;
@@ -2113,6 +2332,22 @@ export function createHub({
       if (locked) return locked;
     }
 
+    // Nor may it leave a chain holding two amps that are not proposals: the
+    // first amp on a chain is an agent's to add, and every amp after it is the
+    // operator's to accept (see `ampGateRefusal`). Decided on the writes this
+    // step would make, so an agent's own proposal passes and a second live amp
+    // does not, however it was reached.
+    if (mayTouchAmpInsert(prepared.touched, prepared.snap, actor)) {
+      let preview;
+      try {
+        preview = previewChanges(state.doc, prepared);
+      } catch (err) {
+        return toRefusal(err);
+      }
+      const refusedAmp = ampGateRefusal({ changes: preview.after, snap: prepared.snap, author: actor });
+      if (refusedAmp) return refusedAmp;
+    }
+
     // Capture the diff this one transaction produces: it is exactly the update
     // a client replays and the store keeps. A refusal inside applyCommand
     // leaves the document untouched (every command validates first), so the
@@ -2323,6 +2558,20 @@ export function createHub({
       const locked = changesLiveMapping(plan?.apply, snap)
         || changesLiveMapping(target.inverse?.before, snap);
       if (locked) return refuse("human_only", MIDI_NEEDS_A_YES);
+    }
+
+    // The amp gate on a step back along the history, judged the same way: the
+    // writes the plan makes and the values the step would put back. An agent
+    // undoing the operator's removal of an amp into a chain that has held
+    // another one live since, or any step that would turn a proposal live, meets
+    // the sentence a fresh second amp meets.
+    if (actor.kind !== "human") {
+      const ampRefs = [...new Set([...changeRefs(plan?.apply), ...changeRefs(target.inverse?.before)])];
+      if (mayTouchAmpInsert(ampRefs, snap, actor)) {
+        const refusedAmp = ampGateRefusal({ changes: plan?.apply, snap, author: actor })
+          || ampGateRefusal({ changes: target.inverse?.before, snap, author: actor });
+        if (refusedAmp) return refusedAmp;
+      }
     }
 
     // The history declines a plan it could not apply safely and says why: those

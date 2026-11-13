@@ -99,7 +99,9 @@ import "./commands/library.js";
 import "./commands/instruments.js";
 // The 1d mixer commands: the effects of a chain, the sends, the returns and the
 // master. An agent may run every one of them (plan 1d, Global Constraints): a
-// mix step is an undoable step, never a sound leaving the song.
+// mix step is an undoable step, never a sound leaving the song — except
+// `insert.accept`, which is people-only (the yes to a proposed second amp), so
+// mcp.js builds no tool for it.
 import "./commands/mixer.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 import { libraryUsers, libraryInsertUsers, effectLabel } from "./doc.js";
@@ -127,9 +129,16 @@ const UNDO_LINE = "Every change shows up live for the operator, tagged as yours,
  * no tool for `midi.accept` at all, because the loop below skips a people-only
  * command.
  *
+ * The mixer's `insert.add` needs it for the same reason: a SECOND amp on a chain
+ * that already holds one is a proposal, and the operator's yes is the only way it
+ * becomes part of the sound. `insert.accept` is people-only too, so it gets no
+ * tool either.
+ *
  * @type {Readonly<Object<string, string>>}
  */
 const COMMAND_NOTES = Object.freeze({
+  "insert.add":
+    "You propose; the operator accepts. A SECOND amp on a track that already has one is always a proposal; it plays nothing until the operator accepts it in the track's chain, and there is no tool for accepting.",
   "midi.map":
     "You propose; the operator accepts. A mapping you make is always a proposal — it plays nothing until the operator accepts it on the MIDI page — and an accepted mapping is theirs, so your next midi.map makes a new proposal instead of editing one. There is no tool for accepting: that yes is the operator's own click.",
   "midi.remove":
@@ -613,7 +622,9 @@ export function libraryList(snapshot, catalogEntries = [], bundledEntries = []) 
  * an amp does not have, and null for a sound the library no longer holds). Those
  * two are the operator's — the agent may set an amp's input, output and mix, and
  * may bypass it, but not point it at another capture or cabinet — so the read
- * names them and no tool offers to change them.
+ * names them and no tool offers to change them. It says whether the amp is
+ * still a proposal (`proposed`) and who set it (`set_by`) too, so a reader knows
+ * which of a chain's amps are waiting for the operator's yes.
  *
  * A send is `{track_id, return_id, level_db, pre}`, and a return is
  * `{id, name, gain_db, pan, mute}` plus its own chain: returns are not tracks,
@@ -681,10 +692,16 @@ export function mixList(snapshot, lastRender = null) {
         label: effectLabel(insert.kind),
         bypass: insert.bypass === true,
         params: insert.params && typeof insert.params === "object" ? { ...insert.params } : {},
-        // An amp's two sounds, named. An effect has neither key at all, so a
-        // reader can tell an amp from an effect without knowing the kinds.
+        // An amp's two sounds, named, and whether it is still a proposal and
+        // who set it. An effect has none of these keys, so a reader can tell an
+        // amp from an effect without knowing the kinds.
         ...(insert.kind === "amp"
-          ? { capture: soundOf(insert.params?.model_id), cabinet: soundOf(insert.params?.ir_id) }
+          ? {
+              capture: soundOf(insert.params?.model_id),
+              cabinet: soundOf(insert.params?.ir_id),
+              proposed: insert.proposed === true,
+              set_by: typeof insert.set_by === "string" ? insert.set_by : null,
+            }
           : {}),
       }));
 
@@ -1215,7 +1232,7 @@ export function createStudioServer({
     {
       title: "Read the song's mixer",
       description:
-        "Every chain in the song with the settings the engine will use: each track's inserts in the order they run {id, kind, label, bypass, params}, its sends {track_id, return_id, level_db, pre}; each return {id, name, gain_db, pan, mute} with its own inserts; and the master {gain_db, target: {lufs, true_peak_db}} with its chain. An amp insert also reads with capture {id, name, credit} and cabinet {id, name, credit}|null: the sounds it plays, which the operator chose and which you may not swap or remove — you may set its input_db, output_db and ir_mix, and bypass it. last_render is how the last render this process made of the song measured (integrated_lufs, true_peak_db, short_term_max_lufs, target, meets_target) — null until one has run. Read-only. What you may change is the mix, one undoable step at a time: effects (studio_insert_add, studio_insert_set, studio_insert_move, studio_insert_bypass, studio_insert_remove), sends (studio_send_set), returns (studio_return_add, studio_return_set, studio_return_remove) and the master (studio_master_set). A run of those steps is a mix pass, outlined in your colour for the person, who may A/B it and undo it (undo one step, or the whole pass); A/B is theirs, never yours, and it never writes the song.",
+        "Every chain in the song with the settings the engine will use: each track's inserts in the order they run {id, kind, label, bypass, params}, its sends {track_id, return_id, level_db, pre}; each return {id, name, gain_db, pan, mute} with its own inserts; and the master {gain_db, target: {lufs, true_peak_db}} with its chain. An amp insert also reads with capture {id, name, credit} and cabinet {id, name, credit}|null: the sounds it plays, which the operator chose and which you may not swap or remove — you may set its input_db, output_db and ir_mix, and bypass it. An amp entry also says whether it is still a proposal (`proposed`) and who set it (`set_by`): a proposal plays nothing until the operator accepts it, and its capture and cabinet are fixed. last_render is how the last render this process made of the song measured (integrated_lufs, true_peak_db, short_term_max_lufs, target, meets_target) — null until one has run. Read-only. What you may change is the mix, one undoable step at a time: effects (studio_insert_add, studio_insert_set, studio_insert_move, studio_insert_bypass, studio_insert_remove), sends (studio_send_set), returns (studio_return_add, studio_return_set, studio_return_remove) and the master (studio_master_set). A run of those steps is a mix pass, outlined in your colour for the person, who may A/B it and undo it (undo one step, or the whole pass); A/B is theirs, never yours, and it never writes the song.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song whose mixer to read"),
       },

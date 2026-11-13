@@ -2031,6 +2031,95 @@ test("a render plays a starter capture through a starter cabinet", async () => {
   assert.equal(missing.seconds, 1, "the render still happened");
 });
 
+test("a proposed amp is skipped by the render's capture and cabinet list", async () => {
+  const { createLibraryStore, readBundled } = await import("../bundles/studio/server/library-store.js");
+  const { entries } = await readBundled();
+  const starter = entries.find((entry) => entry.id === "starter-a2");
+  const cabinet = entries.find((entry) => entry.id === "cabinet-ampmix");
+  assert.ok(starter, "the bundle ships the starter capture");
+  assert.ok(cabinet, "and the starter cabinets");
+
+  // One guitar take through two amps: the live one plays the starter sounds,
+  // and the second is a proposal the operator has not accepted. It names a
+  // capture and a cabinet the song's library does not hold at all — a render
+  // that counted it would report both as missing, and load nothing anyway.
+  const song = audioSong([{ scene_id: "scene-1", clip_id: "clip-1", take_id: TAKE_ID }]);
+  song.library = { [starter.id]: starterEntry(starter), [cabinet.id]: starterEntry(cabinet) };
+  song.inserts = {
+    "amp-live": {
+      id: "amp-live",
+      owner: "track:audio-1",
+      order: 1,
+      kind: "amp",
+      bypass: false,
+      proposed: false,
+      set_by: "operator",
+      params: { model_id: starter.id, ir_id: cabinet.id, input_db: 0, output_db: 0, ir_mix: 1 },
+    },
+    "amp-proposed": {
+      id: "amp-proposed",
+      owner: "track:audio-1",
+      order: 2,
+      kind: "amp",
+      bypass: false,
+      proposed: true,
+      set_by: "agent",
+      params: { model_id: "ghost-capture", ir_id: "ghost-cabinet", input_db: 0, output_db: 0, ir_mix: 1 },
+    },
+  };
+
+  const crowHome = mkdtempSync(join(tmpdir(), "studio-proposal-"));
+  const storage = fakeStorage();
+  storage.objects.set(takeKey(TAKE_ID), takeWav());
+  const renderer = createRenderer({
+    db: fakeDb(),
+    storage,
+    acl: fakeAcl(),
+    library: createLibraryStore({ crowHome }),
+    maxSeconds: 300,
+    now: () => CLOCK,
+  });
+
+  const result = await renderer.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: song,
+    scene_id: "scene-1",
+    seconds: 1,
+  });
+  assert.deepEqual(result.missing_library, [], "a proposal is not a missing file");
+  const audio = decodeWav(storage.uploads[0].data);
+  const peak = peakOf(audio.channels[0], audio.channels[1] || audio.channels[0]);
+  assert.ok(peak > 0.001, `the live amp still plays, peak ${peak}`);
+
+  // The same song with the proposal accepted into a LIVE amp: the two files it
+  // names are the render's to find, and it says it cannot.
+  const live = structuredClone(song);
+  live.inserts["amp-proposed"].proposed = false;
+  const liveStorage = fakeStorage();
+  liveStorage.objects.set(takeKey(TAKE_ID), takeWav());
+  const liveRenderer = createRenderer({
+    db: fakeDb(),
+    storage: liveStorage,
+    acl: fakeAcl(),
+    library: createLibraryStore({ crowHome }),
+    maxSeconds: 300,
+    now: () => CLOCK,
+  });
+  const missing = await liveRenderer.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: live,
+    scene_id: "scene-1",
+    seconds: 1,
+  });
+  assert.deepEqual(
+    missing.missing_library.map((item) => item.id).sort(),
+    ["ghost-cabinet", "ghost-capture"],
+    `a live amp's files are the render's business, got ${JSON.stringify(missing.missing_library)}`,
+  );
+});
+
 test("a song entry that names an older bundled file is missing, not the new sound", async () => {
   // The song's entry names the file it was added with. A bundle that now ships a
   // DIFFERENT file under that id is not that sound, so the cabinet reads as a file

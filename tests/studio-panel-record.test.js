@@ -993,6 +993,22 @@ function fakeEngine() {
       engine.launches.push(listener);
       return () => {};
     },
+    // The engine reports the whole master path's delay (the limiter's look-ahead
+    // plus the mix delay a converted amp adds) whenever it changes. A test
+    // announces one the way the engine does; a number announced before the page
+    // listens is handed over as soon as it does, which is the order a page that
+    // armed a track first sees it in.
+    latencyListeners: [],
+    latencyPending: null,
+    onMasterLatency(listener) {
+      engine.latencyListeners.push(listener);
+      if (engine.latencyPending !== null) listener(engine.latencyPending);
+      return () => {};
+    },
+    announceLatency(latency) {
+      engine.latencyPending = latency;
+      for (const listener of engine.latencyListeners) listener(latency);
+    },
     async nextBarFrame() {
       return { frame: 48000, bar: 1 };
     },
@@ -1248,21 +1264,157 @@ function chunkPuts(ui) {
  * arms the recorder — everything a take needs before its first chunk.
  * @param {object} ui a booted panel
  * @param {number} [frame] the frame the launch reports
+ * @param {{beforeLaunch?: function(object): void}} [options] `beforeLaunch` runs
+ *   between the recorder being built and the launch that starts the take
  * @returns {Promise<object>} the fake recorder
  */
-async function startFakeRecording(ui, frame = 48000) {
+async function startFakeRecording(ui, frame = 48000, options = {}) {
   ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
   await ui.settle();
   ui.click("[data-act=record]");
   await ui.settle(24);
   const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
   assert.ok(recorder, "the panel built a recorder");
+  if (options.beforeLaunch) await options.beforeLaunch(ui);
   ui.engine.launches.forEach((listener) =>
     listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 0, frame: frame }),
   );
   await ui.settle();
   return recorder;
 }
+
+/**
+ * The take store's latency fixture: an interface that measures a 3,408-frame
+ * (71 ms) round trip at 48 kHz.
+ */
+const CALIBRATED = { latency_frames: 3408, rate: 48000, spread_frames: 0 };
+
+/**
+ * Record one pass and report the offset the take was given, from the row this
+ * device kept for it.
+ * @param {number|null} latencyMs the engine's reported master delay, or null
+ * @returns {Promise<number>} the take's `offset_frames`
+ */
+async function recordedOffset(latencyMs) {
+  const ui = await bootPanel({ latency: CALIBRATED, gateFinish: true });
+  if (latencyMs !== null) ui.engine.announceLatency({ ms: latencyMs });
+  const recorder = await startFakeRecording(ui, 48000);
+  recorder.chunk(new Uint8Array(64).buffer, 0, 0);
+  await ui.settle();
+  recorder.done({ segments: [{ segment: 0, start_frame: 48000, frames: 48000 }], frames: 48000, start_frame: 48000 });
+  await ui.settle(24);
+  const rows = Array.from(ui.store.pendings.values());
+  assert.equal(rows.length, 1, "the take is on this device");
+  ui.releaseFinish();
+  return rows[0].offset_frames;
+}
+
+/** @param {number} ms @returns {number} that delay in frames, at the engine's rate. */
+function framesOf(ms) {
+  return Math.round((ms / 1000) * 48000);
+}
+
+test("a new take's offset also carries the engine's own master delay", async () => {
+  // A take must land where it was played, so it is cut by the interface's round
+  // trip AND by the delay the whole master path has: the limiter's look-ahead,
+  // and the mix delay a rate-converted amp's compensation adds. Only a take
+  // armed now is offset this way.
+  assert.equal(await recordedOffset(null), 3408, "no limiter and no amp: the round trip alone, as before");
+  assert.equal(
+    await recordedOffset(1.5),
+    3408 + framesOf(1.5),
+    "a limiter's look-ahead moves the take by its own frames",
+  );
+  assert.equal(
+    await recordedOffset(0.7),
+    3408 + framesOf(0.7),
+    "a rate-bridged amp alone moves it by the mix delay, and by nothing else",
+  );
+  assert.equal(
+    await recordedOffset(2.2),
+    3408 + framesOf(2.2),
+    "both together are their sum, rounded once",
+  );
+});
+
+test("a mix delay the engine reports while the take is armed is the one it is cut by", async () => {
+  // The recorder is built before the engine has said anything about the master
+  // path, and the report arrives before the launch that starts the take: the
+  // take is cut by what the engine says when it STARTS, not by what it said when
+  // the recorder was built.
+  const ui = await bootPanel({ latency: CALIBRATED, gateFinish: true });
+  const recorder = await startFakeRecording(ui, 48000, {
+    beforeLaunch(panel) {
+      panel.engine.announceLatency({ ms: 1.5 });
+    },
+  });
+  recorder.chunk(new Uint8Array(64).buffer, 0, 0);
+  await ui.settle();
+  recorder.done({ segments: [{ segment: 0, start_frame: 48000, frames: 48000 }], frames: 48000, start_frame: 48000 });
+  await ui.settle(24);
+  const rows = Array.from(ui.store.pendings.values());
+  assert.equal(rows.length, 1, "the take is on this device");
+  assert.equal(
+    rows[0].offset_frames,
+    3408 + framesOf(1.5),
+    "the round trip and the delay the engine reported while the take was armed",
+  );
+  ui.releaseFinish();
+});
+
+test("a take this device already holds keeps the offset it was recorded with", async () => {
+  // A take from an earlier session was cut by the round trip alone. The song has
+  // a limiter now, so a take recorded HERE carries both delays — but the take
+  // already recorded is never re-offset or moved: what it was recorded with is
+  // what it keeps.
+  const takeId = "0a1b2c3d-0000-4000-8000-0000000000ab";
+  const row = {
+    take_id: takeId,
+    song_id: "song-1",
+    clip_id: "c-earlier",
+    rate: 48000,
+    channels: 2,
+    offset_frames: 3408,
+    compensated: true,
+    bpm: 240,
+    chunk_count: 1,
+    begun: false,
+    finished: false,
+    created_at: new Date(0).toISOString(),
+  };
+  /** @returns {object[]} every begin body the page sent, oldest first. */
+  const begins = (ui) => ui.requests
+    .filter((request) => request.method === "PUT" && request.url.includes("/api/studio/takes/") && request.body)
+    .map((request) => JSON.parse(request.body));
+
+  const ui = await bootPanel({
+    latency: CALIBRATED,
+    pending: [row],
+    chunks: [[takeId, 0, new Uint8Array(24).buffer]],
+  });
+  await ui.settle(24);
+
+  // The take this device still owed was begun with the offset it was recorded
+  // with — the engine's delay of the moment does not reach back into it.
+  ui.engine.announceLatency({ ms: 1.5 });
+  await ui.settle();
+  const resumed = begins(ui).find((body) => body.clip_id === "c-earlier");
+  assert.ok(resumed, "the recovered take was begun");
+  assert.equal(resumed.offset_frames, 3408, "with the offset it was recorded with");
+
+  // A take armed now is cut by both delays.
+  const recorder = await startFakeRecording(ui, 48000);
+  recorder.chunk(new Uint8Array(64).buffer, 0, 0);
+  await ui.settle();
+  // The take reaches this device (and is begun) only once the recorder reports
+  // its end, the way `recordedOffset` does it.
+  recorder.done({ segments: [{ segment: 0, start_frame: 48000, frames: 48000 }], frames: 48000, start_frame: 48000 });
+  await ui.settle(24);
+  const armed = begins(ui).find((body) => body.clip_id !== "c-earlier");
+  assert.ok(armed, "the new take was begun");
+  assert.equal(armed.offset_frames, 3408 + framesOf(1.5), "and carries the round trip and the engine's delay");
+  assert.equal(resumed.offset_frames, 3408, "while the one already recorded still carries its own");
+});
 
 test("the take store is a classic script the page inlines before the client", async () => {
   const { TAKE_STORE_SCRIPT } = await import("../bundles/studio/panel/take-store.js");
