@@ -16,6 +16,11 @@ export const translations = {
   "nav.logout": { en: "Logout", es: "Cerrar sesión" },
   "nav.toggleMenu": { en: "Toggle menu", es: "Alternar menú" },
   "nav.collapseSidebar": { en: "Collapse sidebar", es: "Contraer panel lateral" },
+  // Logout confirmation (GET /dashboard/logout — the POST is what logs out)
+  "logout.confirmTitle": { en: "Log out", es: "Cerrar sesión" },
+  "logout.confirmBody": { en: "Log out of the Crow's Nest on this device?", es: "¿Cerrar la sesión del Crow's Nest en este dispositivo?" },
+  "logout.confirmButton": { en: "Log out", es: "Cerrar la sesión" },
+  "logout.cancel": { en: "Cancel", es: "Cancelar" },
   // Panel nav names (keyed by panel id)
   "nav.nest": { en: "Crow's Nest", es: "Nido del Cuervo" },
   "nav.messages": { en: "Messages", es: "Mensajes" },

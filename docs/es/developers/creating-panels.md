@@ -351,10 +351,13 @@ Para rutas `router.get(...)` (redirecciones GET-después-de-GET), un `res.redire
 Para excluir de Turbo por completo un enlace o formulario específico, establece `data-turbo="false"`:
 
 ```html
-<a href="/dashboard/logout" data-turbo="false">Logout</a>
+<form method="post" action="/dashboard/logout" data-turbo="false">
+  <input type="hidden" name="_csrf" value="...">
+  <button type="submit">Logout</button>
+</form>
 ```
 
-Este es el patrón para los enlaces de frontera de autenticación (logout, login). El gateway también intercepta las respuestas `401`, redirige a `/dashboard/login` y fuerza una recarga completa vía `turbo:before-fetch-response`, así que la expiración de sesión siempre se maneja de forma segura.
+Este es el patrón para las acciones de frontera de autenticación. El logout es un **POST** con token CSRF, nunca un enlace: una GET que cambia estado es alcanzable desde cualquier `<a href>` o `<img src>` del mismo origen que se renderice en el navegador del propietario (la respuesta markdown de un bot, una página compartida), así que un GET a `/dashboard/logout` solo muestra una página de confirmación y no cambia nada. Genera el token con `csrfInput(req)` (`dashboard/shared/csrf.js`), o renderiza `req.csrfToken` en un `<input type="hidden" name="_csrf">`. El gateway también intercepta las respuestas `401`, redirige a `/dashboard/login` y fuerza una recarga completa vía `turbo:before-fetch-response`, así que la expiración de sesión siempre se maneja de forma segura.
 
 ### Paneles que embeben iframes
 

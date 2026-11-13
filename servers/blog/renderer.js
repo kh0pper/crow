@@ -46,11 +46,14 @@ export function renderMarkdown(markdown) {
 // "$5-$10" stay text). `\$` stays an escaped dollar.
 // ---------------------------------------------------------------------------
 
-function escapeMathHtml(s) {
+function escapeText(s) {
   return String(s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
+
+/** Math bodies are text too — same escaping, under the name the readers below use. */
+const escapeMathHtml = escapeText;
 
 /** No TeX syntax at all — safe to show as ordinary text. */
 const PLAIN_MATH = /^[A-Za-z0-9 .,:;%+\-=()/]+$/;
@@ -281,6 +284,16 @@ const botMarked = new Marked({
   // Inside alt text, math is just its source. (A renderer override that
   // returns false falls through to marked's own image renderer; walkTokens
   // was measured far too slow on long input.)
+  //
+  // An image also only survives from `/blog/media/` (isAllowedBotImageSrc):
+  // a bot's markdown is untrusted model output rendered in the OWNER's
+  // browser, so any other `<img src>` — `/dashboard/logout`, `/api/…`, a
+  // protocol-relative `//evil.example/x.png` — is a same-origin GET (or a
+  // third-party beacon) fired with the viewer's cookies just by reading the
+  // reply. A refused image becomes its alt text and nothing else: never a
+  // link, so it cannot become a click target either. `storage:` is let
+  // through to the renderer because sanitizeRendered rewrites it to
+  // `/blog/media/<key>` (and the bot-only sanitize rule below then decides).
   renderer: {
     image(token) {
       if (Array.isArray(token.tokens) && token.tokens.some((t) => t.type === "mathInline")) {
@@ -288,10 +301,68 @@ const botMarked = new Marked({
           ? { type: "text", raw: t.raw, text: escapeMathHtml(t.text), escaped: true }
           : t));
       }
+      const href = String(token.href ?? "");
+      if (!isAllowedBotImageSrc(href) && !href.startsWith("storage:")) {
+        // The alt source, escaped by us: this string lands in the HTML as
+        // character data (not inside an attribute), so it must never carry
+        // markup of its own.
+        return escapeText(String(token.text ?? ""));
+      }
       return false;
     },
   },
 });
+
+// ---------------------------------------------------------------------------
+// BOT IMAGES — `/blog/media/` or nothing.
+//
+// A bot reply is rendered as HTML in the owner's browser, so every `<img src>`
+// in it is a request the VIEWER makes, carrying the viewer's cookies. A reply
+// containing `![x](/dashboard/logout)` therefore signed the owner out on read;
+// `/api/…` and `/dashboard/…` were the same trick against other routes, and
+// `//evil.example/x.png` / `https://evil.example/x.png` pinged a third party.
+//
+// So the bot path keeps exactly one image source: our own public media route.
+// The rule is checked twice, deliberately: at parse time (so the alt text can
+// be shown instead — marked's image renderer above) and again in the bot-only
+// sanitize call (which is what actually decides: raw HTML `<img>` in the
+// markdown never goes through marked's renderer at all). The OWNER's renderer
+// (renderMarkdown, the blog and memory panels) is untouched: its authors are
+// the owner and its images are the blog's own.
+// ---------------------------------------------------------------------------
+
+/** The only image path a bot reply may use — the public blog media route. */
+const BOT_IMAGE_PREFIX = "/blog/media/";
+/** Every bot image src is resolved against this fixed origin (never the request's). */
+const BOT_IMAGE_ORIGIN = "http://crow.invalid";
+
+/**
+ * True when `src` is a same-origin absolute path under `/blog/media/` and
+ * nothing else: no backslash (a browser may read it as a slash), no `//` after
+ * the leading slash (protocol-relative), no `..` segment and nothing that
+ * resolves out of the prefix (`%2e%2e` is decoded by the URL parser, so
+ * `/blog/media/%2e%2e/dashboard/logout` resolves to `/dashboard/logout`).
+ * Absolute URLs (`http(s)://…`, `//host/…`), `javascript:`, `data:` and bare
+ * relative paths all fail the prefix test at once.
+ *
+ * Percent-encoded separators/dots are refused outright, case-insensitively:
+ * `%2e` (a dot the URL parser decodes before its own dot-segment walk),
+ * `%2f` and `%5c` (slashes a downstream layer may decode after our check).
+ * Refusing them by raw source text keeps the verdict independent of the order
+ * in which any later parser normalizes or decodes.
+ * @param {string} src
+ * @returns {boolean}
+ */
+export function isAllowedBotImageSrc(src) {
+  if (typeof src !== "string" || !src.startsWith(BOT_IMAGE_PREFIX)) return false;
+  if (src.includes("\\") || src.slice(1).includes("//")) return false;
+  if (/%2e|%2f|%5c/i.test(src)) return false;
+  let url;
+  try { url = new URL(src, BOT_IMAGE_ORIGIN); } catch { return false; }
+  if (url.origin !== BOT_IMAGE_ORIGIN) return false;
+  if (!url.pathname.startsWith(BOT_IMAGE_PREFIX) || url.pathname.includes("..")) return false;
+  return true;
+}
 
 /**
  * Render a bot's markdown (Perch live frames and transcript history — both
@@ -310,11 +381,11 @@ export function renderBotMarkdown(markdown) {
   blockMemo = makeStartMemo();
   blockValid = new Map();
   cutsLeft = MAX_PARAGRAPH_CUTS;
-  return sanitizeRendered(botMarked.parse(src));
+  return sanitizeRendered(botMarked.parse(src), { botImages: true });
 }
 
 /** The shared post-parse half: storage: rewrite, allow-list sanitize, tables. */
-function sanitizeRendered(raw) {
+function sanitizeRendered(raw, { botImages = false } = {}) {
   // Rewrite storage: URLs to public blog media route
   const processed = raw.replace(
     /(<img\s[^>]*src=")storage:([^"]+)(")/g,
@@ -355,6 +426,23 @@ function sanitizeRendered(raw) {
       article: ["*"],
     },
     selfClosing: ["img", "br", "hr", "input"],
+    // Bot output only (never the owner's blog/memory renderer): an image that
+    // is not from /blog/media/ is dropped after the storage: rewrite, so the
+    // viewer's browser never makes that request. A markdown image's alt text
+    // has already been emitted in its place by the image renderer above; a raw
+    // HTML <img> in the markdown simply disappears. sanitize-html's own filter
+    // (not a regex over the HTML) owns this decision.
+    //
+    // `exclusiveFilter` is ONE function, `(frame) => boolean`, called on the
+    // CLOSING tag, and a truthy return DROPS the element together with its
+    // content (sanitize-html 2.x — it is not a per-tag map). So: drop every
+    // <img> whose src is not allowed, let everything else through.
+    ...(botImages
+      ? {
+        exclusiveFilter: (frame) => frame.tag === "img"
+          && !isAllowedBotImageSrc(frame.attribs && frame.attribs.src),
+      }
+      : {}),
   });
   return wrapTables(clean);
 }

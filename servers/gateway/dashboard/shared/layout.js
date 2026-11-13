@@ -133,6 +133,12 @@ function turboDiagScript() {
 </script>`;
 }
 
+/** The sidebar logout form's token: anything that is not a non-empty string
+ *  means "this page has no token" and the plain confirm-page link is rendered. */
+function csrfTokenString(value) {
+  return typeof value === "string" ? value : "";
+}
+
 /**
  * Render the full dashboard HTML page.
  * @param {object} opts
@@ -155,8 +161,15 @@ function turboDiagScript() {
  *   name, tab "chat"|"board"|"make"|null (null on a drawer page). getPanel
  *   defaults to the panel registry's (a test seam).
  * @param {string} [opts.tryNewCard] - Classic-only HTML shown above the content.
+ * @param {string} [opts.csrf] - The viewer's CSRF token (req.csrfToken), used by
+ *   the sidebar's logout form. Logout is a POST: a GET here used to destroy the
+ *   session, which made /dashboard/logout a same-origin image target for
+ *   anything that can render in the owner's browser (a bot reply, a shared
+ *   page). Every page rendered through the panel dispatcher passes its token;
+ *   a page rendered without one keeps a plain link to the GET confirm page
+ *   instead, which changes nothing on its own.
  */
-export function renderLayout({ title, content, activePanel, panels, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs, head, variant = "classic", shell = null, tryNewCard = "" }) {
+export function renderLayout({ title, content, activePanel, panels, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs, head, variant = "classic", shell = null, tryNewCard = "", csrf = "" }) {
   // Unified-off class gates the tabs strip visibility via CSS. The strip
   // is re-rendered on every page (it must NOT be data-turbo-permanent:
   // Turbo would pin the first-rendered — usually empty — strip across
@@ -297,7 +310,9 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
         ${navItems}
       </nav>
       <div class="sidebar-footer">
-        <a href="/dashboard/logout" class="nav-item logout" data-turbo="false">${escapeHtml(t("nav.logout", lang))}</a>
+        ${csrfTokenString(csrf)
+          ? `<form method="post" action="/dashboard/logout" data-turbo="false" style="margin:0"><input type="hidden" name="_csrf" value="${escapeHtml(csrfTokenString(csrf))}"><button type="submit" class="nav-item logout" style="width:100%;background:none;border:0;font-family:inherit;text-align:left;cursor:pointer">${escapeHtml(t("nav.logout", lang))}</button></form>`
+          : `<a href="/dashboard/logout" class="nav-item logout" data-turbo="false">${escapeHtml(t("nav.logout", lang))}</a>`}
       </div>
     </aside>
     <div class="sidebar-overlay" onclick="closeSidebar()"></div>
@@ -955,6 +970,48 @@ export function renderResetForm({ error, token, lang } = {}) {
 function escapeHtml(str) {
   if (!str) return "";
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * Render the logout CONFIRMATION page — what GET /dashboard/logout answers.
+ *
+ * Logout is a POST with a CSRF token. A GET must never destroy the session:
+ * the dashboard renders untrusted HTML in the owner's browser (a bot's markdown
+ * reply, a shared page), so any `<a href>`/`<img src>`/link-preview pointing at
+ * a state-changing GET is a one-read sign-out. This page only confirms; the
+ * form it carries is the one thing that logs out. Same look as the login pages
+ * (dashboardCss + the login card), so no new stylesheet is involved.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.lang]
+ * @param {string} [opts.csrfToken] req.csrfToken — echoed into the form's _csrf field
+ */
+export function renderLogoutConfirm({ lang, csrfToken = "" } = {}) {
+  return `<!DOCTYPE html>
+<html lang="${lang || 'en'}">
+<head>
+  <meta charset="UTF-8">
+  ${textSizeHeadScript()}
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>${escapeHtml(t("logout.confirmTitle", lang))} — Crow's Nest</title>
+  ${FONT_LINKS}
+  ${dashboardCss()}
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-card">
+      <div style="width:120px;height:120px;margin:0 auto 1rem">${CROW_HERO_SVG}</div>
+      <h1 class="login-logo">Crow</h1>
+      <p class="login-subtitle">${escapeHtml(t("logout.confirmBody", lang))}</p>
+      <form method="POST" action="/dashboard/logout">
+        <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}">
+        <button type="submit">${escapeHtml(t("logout.confirmButton", lang))}</button>
+      </form>
+      <p style="margin-top:1rem;font-size:0.8rem;color:var(--crow-text-tertiary)"><a href="/dashboard">${escapeHtml(t("logout.cancel", lang))}</a></p>
+    </div>
+  </div>
+</body>
+</html>`;
 }
 
 const NAV_ICONS = {

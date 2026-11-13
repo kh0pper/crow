@@ -365,10 +365,13 @@ For `router.get(...)` routes (GET-after-GET redirects), plain `res.redirect(url)
 To opt a specific link or form out of Turbo entirely, set `data-turbo="false"`:
 
 ```html
-<a href="/dashboard/logout" data-turbo="false">Logout</a>
+<form method="post" action="/dashboard/logout" data-turbo="false">
+  <input type="hidden" name="_csrf" value="...">
+  <button type="submit">Logout</button>
+</form>
 ```
 
-This is the pattern for auth-boundary links (logout, login). The gateway also intercepts `401` responses and redirects-to-`/dashboard/login` and forces a full reload via `turbo:before-fetch-response`, so session expiry is always handled safely.
+This is the pattern for auth-boundary actions. Logout is a **POST** carrying a CSRF token, never a link: a state-changing GET is reachable from any same-origin `<a href>` or `<img src>` rendered in the owner's browser (a bot's markdown reply, a shared page), so a GET on `/dashboard/logout` only shows a confirmation page and changes nothing. Build the token with `csrfInput(req)` (`dashboard/shared/csrf.js`), or render `req.csrfToken` into an `<input type="hidden" name="_csrf">`. The gateway also intercepts `401` responses and redirects-to-`/dashboard/login` and forces a full reload via `turbo:before-fetch-response`, so session expiry is always handled safely.
 
 ### Iframe-embedding panels
 

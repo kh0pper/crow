@@ -4,7 +4,7 @@
 
 import { Router } from "express";
 import express from "express";
-import { renderLayout, renderLogin, render2faVerify, render2faRecovery, render2faSetup, renderResetRequest, renderResetForm } from "./shared/layout.js";
+import { renderLayout, renderLogin, renderLogoutConfirm, render2faVerify, render2faRecovery, render2faSetup, renderResetRequest, renderResetForm } from "./shared/layout.js";
 import { playerBarHtml, playerBarJs } from "./shared/player.js";
 import { headerIconsHtml, headerIconsJs, headerIconsTrayHtml, tamagotchiHtml, tamagotchiJs, tamagotchiTrayHtml } from "./shared/notifications.js";
 import {
@@ -646,13 +646,8 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     res.type("html").send(renderLogin({ error: t("login.resetSuccess", lang), lang }));
   });
 
-  // Logout
-  router.get("/dashboard/logout", async (req, res) => {
-    const cookies = parseCookies(req);
-    await destroySession(cookies.crow_session);
-    clearSessionCookie(res);
-    res.redirect("/dashboard/login");
-  });
+  // (Logout lives AFTER dashboardAuth + csrfMiddleware, below. It used to be
+  // here, in the public section, as a plain GET — see its comment.)
 
   // SSO accept — PUBLIC route (no password). Authenticated by a single-use,
   // HMAC-signed ticket minted by a paired+trusted source instance. Mounted
@@ -804,6 +799,39 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // Skips: GET/HEAD/OPTIONS, HMAC-signed peer calls (handled above),
   // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
   router.use("/dashboard", csrfMiddleware);
+
+  // --- Logout: POST only, and CSRF-checked (session-authed by dashboardAuth
+  // and token-checked by csrfMiddleware, both above).
+  //
+  // It used to be a GET in the public section that destroyed the session and
+  // redirected. That made /dashboard/logout a state-changing GET on a
+  // same-origin path, and the dashboard renders untrusted HTML in the owner's
+  // browser: a bot's markdown reply containing `![x](/dashboard/logout)` fired
+  // the request as the viewer and signed them out on read. The GET now only
+  // confirms; nothing changes until the form's POST arrives.
+  router.post("/dashboard/logout", async (req, res) => {
+    const cookies = parseCookies(req);
+    await destroySession(cookies.crow_session);
+    clearSessionCookie(res);
+    res.redirect("/dashboard/login");
+  });
+
+  router.get("/dashboard/logout", async (req, res) => {
+    // No session change here — ever. dashboardAuth already answered a request
+    // with no valid session (redirect to /dashboard/login).
+    const db = createDbClient();
+    let lang = "en";
+    try {
+      const stored = await readSetting(db, "language");
+      if (SUPPORTED_LANGS.includes(stored)) lang = stored;
+    } catch (err) {
+      console.warn("[logout] language lookup failed, using en:", err.message);
+    } finally {
+      try { db.close(); } catch {}
+    }
+    res.set("Cache-Control", "no-store");
+    res.type("html").send(renderLogoutConfirm({ lang, csrfToken: req.csrfToken || "" }));
+  });
 
   // There is no /dashboard/models page (it is /dashboard/model-catalog), but
   // older notifications stored that link in their action_url.
@@ -1250,6 +1278,10 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
           panels: visiblePanels,
           navGroups,
           lang,
+          // The sidebar's logout form needs the viewer's CSRF token. It comes
+          // from csrfMiddleware (above), which populates it on every request
+          // that carries the crow_csrf cookie.
+          csrf: req.csrfToken || "",
           headerIcons: activeHeaderHtml,
           afterContent: playerBarHtml(lang),
           scripts: (opts.scripts || "") + playerBarJs(lang) + activeHeaderJs,
