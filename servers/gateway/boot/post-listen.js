@@ -23,6 +23,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { upgradeLocalMarksAtBoot } from "./admin-api.js";
 import { isVoiceBotId } from "../../shared/voice-bot.js";
+import { startMailSync } from "./mail-boot.js";
 
 // QW1 (Crow Messages usability arc, Phase 0): a gateway started with
 // --no-auth (e.g. the home server's loopback companion MCP bridge) is never the
@@ -911,6 +912,14 @@ export async function runPostListenSetup(server, app, deps) {
   // Start schedule executor
   startScheduler(createDbClient()).catch((err) => {
     console.error("[scheduler] Failed to start:", err.message);
+  });
+
+  // Crow Mail's sync supervisor: gated on CROW_MAIL=1, a real (auth) dashboard gateway and
+  // CROW_DISABLE_MAIL_SYNC, all decided inside mail-boot.js, which builds no adapter and no
+  // supervisor behind a closed gate. It never throws and never awaits a first full sync, so it
+  // cannot delay listen. The shutdown path in index.js stops it beside the scheduler.
+  startMailSync({ env: process.env, noAuth }).catch(() => {
+    console.warn("[mail] sync not started");
   });
 
   // W3-3: Health monitor — 15-min interval, first run after 2-min boot delay.

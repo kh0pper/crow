@@ -948,6 +948,13 @@ async function gracefulShutdown() {
     stopScheduler();
   } catch {}
 
+  // Step 1c — stop Crow Mail's sync supervisor too: its timers, watchers and connections must not
+  // outlive the drain window or write to a database being checked in. No-op when mail never started.
+  try {
+    const { stopMailSync } = await import("./boot/mail-boot.js");
+    await stopMailSync();
+  } catch {}
+
   // Step 2 — stop accepting new connections on BOTH listeners; release idle
   // keep-alives. The close promises are collected here so step 3 can wait for
   // both servers to finish, not just the TCP one.
