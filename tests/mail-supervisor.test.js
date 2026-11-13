@@ -22,7 +22,7 @@ import {
   setSyncState,
   updateAccount,
 } from "../servers/gateway/mail/store/accounts.js";
-import { listFolders } from "../servers/gateway/mail/store/messages.js";
+import { listFolders, searchLocal } from "../servers/gateway/mail/store/messages.js";
 import { MailError } from "../servers/gateway/mail/errors.js";
 import { createFakeMailAdapter } from "./fixtures/fake-mail-adapter.mjs";
 import { makeRaw } from "./fixtures/fake-mail-server.mjs";
@@ -35,6 +35,7 @@ import {
   IDLE_ROLES,
   NOTICE_GAP_MS,
   POLL_MS,
+  STOP_RUN_WAIT_MS,
   SYNC_DEADLINE_MS,
   backoffDelay,
   createMailSupervisor,
@@ -245,8 +246,12 @@ async function setup(options = {}) {
   const extras = [];
   for (const extra of options.extraAccounts ?? []) extras.push(await addAccount(db, extra.address, extra.label));
 
+  // A test that needs to see (or interrupt) the supervisor's own writes hands in a wrapper here. The
+  // harness keeps the real client, so the test's own setup and assertions never go through it.
+  const supervisorDb = typeof options.wrapDb === "function" ? options.wrapDb(db) : db;
+
   const supervisor = createMailSupervisor({
-    db,
+    db: supervisorDb,
     credentials,
     adapterFactory: options.adapterFactory ?? factory,
     now: clock.now,
@@ -262,7 +267,7 @@ async function setup(options = {}) {
   if (options.start !== false) await supervisor.start();
 
   return {
-    db, clock, fake, gate, views, secrets, factoryArgs, box, credentials, notices, logs,
+    db, supervisorDb, clock, fake, gate, views, secrets, factoryArgs, box, credentials, notices, logs,
     factory, supervisor, account, accountId: account.id, extras,
   };
 }
@@ -2335,9 +2340,13 @@ test("an ensureWatch that resumes after stopAccount opens no connection, arms no
   const factoriesBefore = h.factoryArgs.length;
   parkConnect = true;
 
-  await h.supervisor.stopAccount(h.accountId);
-  const timersAfterStop = h.clock.pending();
+  // stopAccount waits, at most STOP_RUN_WAIT_MS, for the run it closed out to stop writing, so the
+  // parked write is released first: this test is about the ensureWatch that resumes afterwards.
+  const stopping = h.supervisor.stopAccount(h.accountId);
+  await flush(20);
   held.release();
+  await stopping;
+  const timersAfterStop = h.clock.pending();
   await flush(60);
   // The rows go, exactly as the delete route does after the stop, while the connect is still out.
   await deleteAccount(h.db, h.accountId);
@@ -2440,5 +2449,167 @@ test("a removal in progress keeps a fresh start from building a worker for that 
   assert.equal(await getSyncState(h.db, h.accountId), null);
 
   h.supervisor.endRemoval(h.accountId);
+  await h.supervisor.stop();
+});
+
+/* ------------- a closed-out run stops writing before stopAccount returns (B1) */
+
+/**
+ * A db wrapper that runs `hook` once, right AFTER the first transaction that wrote a message row —
+ * the moment the delete route used to lose: the pass already holds a whole batch of messages and is
+ * between two of them.
+ */
+function afterFirstMessageInsert(db, hook) {
+  let fired = false;
+  return {
+    execute: (statement) => db.execute(statement),
+    batch: (statements) => db.batch(statements),
+    executeMultiple: (sql) => db.executeMultiple(sql),
+    async runTransaction(work) {
+      let inserted = false;
+      const result = await db.runTransaction((run) => work((statement) => {
+        if (/INSERT INTO mail_messages/.test(statement?.sql ?? "")) inserted = true;
+        return run(statement);
+      }));
+      if (inserted && !fired) {
+        fired = true;
+        await hook();
+      }
+      return result;
+    },
+  };
+}
+
+test("a delete that lands mid-batch leaves no message, folder, sync state or FTS row behind", async () => {
+  let ref = null;
+  let stopping = null;
+  const h = await setup({
+    start: false,
+    wrapDb: (db) => afterFirstMessageInsert(db, async () => {
+      // The delete route, exactly: stopAccount is not awaited by its caller, and the rows go while
+      // the pass is still inside the batch it had already fetched.
+      stopping = ref.supervisor.stopAccount(ref.accountId);
+      await deleteAccount(ref.db, ref.accountId);
+    }),
+  });
+  ref = h;
+  // One get() call, one batch: 20 messages fetched, then the first row written is where the delete
+  // lands, with 19 more still to store.
+  for (let i = 1; i <= 20; i += 1) deliver(h.fake, "INBOX", `message ${i}`);
+
+  await h.supervisor.start();
+  await flush(120);
+  assert.ok(stopping != null, "the delete landed mid-batch");
+  await stopping;
+  await flush(120);
+
+  assert.equal(await messageCount(h.db, h.accountId), 0, "no message row for the deleted account");
+  assert.deepEqual(await listFolders(h.db, h.accountId), [], "no folder row for the deleted account");
+  assert.equal(await getSyncState(h.db, h.accountId), null, "no sync state for the deleted account");
+  assert.deepEqual(await searchLocal(h.db, { q: "message", accountId: h.accountId }), [],
+    "no FTS row for the deleted account");
+  assert.equal((await h.supervisor.status(h.accountId)).running, false);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, false);
+  assert.equal(h.notices.length, 0, "an account that is gone earns no notice");
+  await h.supervisor.stop();
+});
+
+test("stopAccount waits at most STOP_RUN_WAIT_MS for a closed-out run to stop writing", async () => {
+  const h = await setup();
+  // The run is parked in its own success write — past its plan, but still the worker's in-flight run.
+  const held = holdDbCall(h.db, { match: /UPDATE mail_accounts/, after: 1 });
+  const slow = h.supervisor.syncNow(h.accountId);
+  await held.parked;
+  await flush(20);
+  assert.equal((await h.supervisor.status(h.accountId)).running, true);
+
+  let settled = false;
+  const stopping = h.supervisor.stopAccount(h.accountId).then(() => { settled = true; });
+  await flush(20);
+  assert.equal(settled, false, "the stop waits for the run it closed out");
+
+  await h.clock.advance(STOP_RUN_WAIT_MS - 1);
+  await flush(20);
+  assert.equal(settled, false);
+
+  // The cap is what keeps a write that never finishes from holding a delete open for ever.
+  await h.clock.advance(1);
+  await stopping;
+  assert.equal(settled, true);
+
+  held.release();
+  await slow;
+  await flush(60);
+  await h.supervisor.stop();
+});
+
+/* ---------------- a transient account read is not a deleted account (B2) */
+
+/** A db wrapper whose account read fails `times` times (a busy database) and then works again. */
+function busyAccountRead(db, { skip = 1, times = 1 } = {}) {
+  let reads = 0;
+  let left = times;
+  return {
+    async execute(statement) {
+      if (/FROM mail_accounts/.test(statement?.sql ?? "")) {
+        reads += 1;
+        if (reads > skip && left > 0) {
+          left -= 1;
+          throw Object.assign(new Error("SQLITE_BUSY: database is locked"), { code: "SQLITE_BUSY" });
+        }
+      }
+      return db.execute(statement);
+    },
+    batch: (statements) => db.batch(statements),
+    executeMultiple: (sql) => db.executeMultiple(sql),
+    runTransaction: (work) => db.runTransaction(work),
+  };
+}
+
+test("a busy account read records a failure instead of retiring the worker, and the retry syncs", async () => {
+  const h = await setup({ start: false, wrapDb: (db) => busyAccountRead(db) });
+  deliver(h.fake, "INBOX", "arrives on the retry");
+
+  // prepare() reads the account row; the run's own read — the one whose failure could be mistaken
+  // for "the row is gone" — is the second one, and it fails on a locked database.
+  await h.supervisor.syncNow(h.accountId);
+
+  const failed = await getSyncState(h.db, h.accountId);
+  assert.equal(failed.state, "backoff");
+  assert.equal(failed.errorCode, "PROTOCOL");
+  assert.equal(failed.failures, 1);
+  assert.equal(failed.backoffUntil, h.clock.now() + BACKOFF_BASE_MS);
+  assert.equal(await messageCount(h.db, h.accountId), 0, "the failed run stored nothing");
+  assert.equal(await getAccount(h.db, h.accountId).then((account) => account.status), "active");
+  assert.equal(h.notices.length, 0);
+
+  // The worker was not retired with the read error: the ladder's retry runs and syncs the account.
+  await h.clock.advance(BACKOFF_BASE_MS);
+  await flush(120);
+
+  const retried = await getSyncState(h.db, h.accountId);
+  assert.equal(retried.state, "idle");
+  assert.equal(retried.failures, 0);
+  assert.equal(await messageCount(h.db, h.accountId), 1);
+  assert.equal((await h.supervisor.status(h.accountId)).watching, true);
+  await h.supervisor.stop();
+});
+
+test("a really-deleted account still ends quietly, whatever its run reads", async () => {
+  const h = await setup();
+  // A failure closes the cached connection, so the retry has to build one — and finds no row.
+  h.fake.failNext("listFolders", netError());
+  await h.supervisor.syncNow(h.accountId);
+  assert.equal((await getSyncState(h.db, h.accountId)).failures, 1);
+  const viewsAfterFailure = h.views.length;
+
+  await deleteAccount(h.db, h.accountId);
+  await h.clock.advance(BACKOFF_BASE_MS);
+  await flush(120);
+
+  assert.equal(await getSyncState(h.db, h.accountId), null, "no sync state for a deleted account");
+  assert.equal(h.views.length, viewsAfterFailure, "the retry opened no connection");
+  assert.equal((await h.supervisor.status(h.accountId)).running, false);
+  assert.equal(h.notices.length, 0, "an account that is gone earns no notice");
   await h.supervisor.stop();
 });

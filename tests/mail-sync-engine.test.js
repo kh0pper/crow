@@ -973,6 +973,36 @@ test("a deadline that passes during a first sync stores rows and writes no state
   assert.equal(after.lastSyncedAt, null);
 });
 
+/* ------------------------------------------------------------- cancellation */
+
+test("a cancelled pass stops with NETWORK/run_closed and stores nothing after the cancel", async () => {
+  const { db, accountId, adapter } = await setup();
+  for (let i = 1; i <= 10; i += 1) deliver(adapter, "INBOX", { subject: `arrival ${i}` });
+  const folder = await prepareFolder(db, adapter, accountId, "INBOX");
+
+  // A run the supervisor closed out (a delete): the third stored row is where the pass is told to
+  // stop, and every message still in the batch after it stays unwritten.
+  let inserted = 0;
+  const watched = watchedDb(db, (statement) => {
+    if (isMessageInsert(statement)) inserted += 1;
+  });
+  const ctx = { db: watched, adapter, now: () => T0, cancelled: () => inserted >= 3 };
+
+  await assert.rejects(
+    syncFolder(ctx, accountId, folder),
+    (err) => err instanceof MailError && err.code === "NETWORK" && err.detail === "run_closed",
+  );
+
+  assert.equal(inserted, 3, "no row was written after the cancel");
+  assert.deepEqual(await storedUids(db, folder.id), [1, 2, 3]);
+  assert.equal((await searchLocal(db, { q: "arrival", accountId })).length, 3,
+    "the FTS index holds exactly the rows that were written");
+  const after = await getFolder(db, folder.id);
+  assert.equal(after.highestUid, 0, "a cancelled first sync writes no state");
+  assert.equal(after.floorUid, null);
+  assert.equal(after.lastSyncedAt, null);
+});
+
 test("a first sync that stops on an omitted UID writes the state it reached, below the hole", async () => {
   const { db, accountId, adapter } = await setup();
   deliver(adapter, "INBOX", { subject: "one" });

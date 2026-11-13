@@ -27,16 +27,27 @@
  * path a manual sync takes, so the run that follows is always built with the secret just stored.
  * `stopAccount` is the delete route's call: it retires one worker for good — without reading the
  * account row, because that row is being removed — and so ends a run whose write would land on an id
- * nothing holds any more.
+ * nothing holds any more. Closing a run out only releases whoever joined it, though, so the stop also
+ * waits (at most `STOP_RUN_WAIT_MS`) for that run's own pass to finish: the rows go right after the
+ * stop, and a batch the engine had already fetched must not still be going into them.
+ *
+ * **The engine is told to stop, not just closed out.** Every run's context carries `cancelled`, which
+ * is true once the run is closed out, the worker is no longer the map's or its id is being removed;
+ * the engine asks it before every write and ends the pass with NETWORK/`run_closed` instead of
+ * storing one more message, folder or state row. A batch already fetched is exactly where a delete
+ * used to lose its rows back.
  *
  * **A run for an account that is gone writes nothing.** Every run re-reads its own account row before
  * it runs its plan, whether it reused a cached connection or opened a fresh one: a run that finds the
  * row gone ends quietly — no folder, no message, no sync state, no notice, no back-off timer — and
  * closes the connection it was holding. A run that cannot even build a connection because the row is
- * gone takes the same path (the factory's NOT_FOUND/`account` is the quiet one): the worker is retired
- * along with the rows instead of counting a failure against an id that has none. That close, with
- * `stopAccount`, is what keeps a delete from leaving orphan mail behind when a handshake lands after
- * the rows went.
+ * gone takes the same path (the factory's NOT_FOUND/`account` is the quiet one), but only after a read
+ * that is allowed to THROW has agreed: the connection path reads the row through `accountOrNull`, which
+ * turns a busy database into null too, and a locked database must never retire a live account's worker.
+ * A read that throws, or that finds the account after all, is an ordinary failure on the back-off
+ * ladder (PROTOCOL/`account_read`). When the row really is gone, the worker is retired along with the
+ * rows instead of counting a failure against an id that has none. That close, with `stopAccount`, is
+ * what keeps a delete from leaving orphan mail behind when a handshake lands after the rows went.
  *
  * **A retired worker is never brought back.** `stopAccount` takes its worker out of the map and marks
  * it `retired`; the id may also be in the supervisor's removal set (`beginRemoval`/`endRemoval`, the
@@ -138,6 +149,16 @@ export const ACTION_DEADLINE_MS = 60 * 1000;
 
 /** A borrowed adapter stays open this long after a successful call, so a burst costs one connection. */
 export const ACTION_IDLE_KEEP_MS = 30 * 1000;
+
+/**
+ * `stopAccount` waits this long for the run it closed out to stop writing, then returns anyway.
+ *
+ * A run closed out is one whose promise its joiners were released from, not one that has stopped: the
+ * engine may still be inside a batch it already fetched. The delete route removes the rows right
+ * after the stop, so the wait is what keeps the two from interleaving — and the cap is what keeps a
+ * write that never finishes from holding a delete open for ever.
+ */
+export const STOP_RUN_WAIT_MS = 5000;
 
 /** A watch this many milliseconds after a failure, jittered: the same ladder as everything else. */
 function jitter(base, random) {
@@ -346,6 +367,22 @@ export function createMailSupervisor(options = {}) {
     } catch (err) {
       logError("account_read_failed", err, { accountId });
       return null;
+    }
+  }
+
+  /**
+   * Whether this worker's account really has no row. A THROWING read, deliberately: `accountOrNull`
+   * turns any failure (a busy database, a locked file) into null, and a read error is not a deleted
+   * account. An id whose delete is under way counts as gone — its row is on its way out and nothing
+   * may be written for it.
+   */
+  async function accountReallyGone(worker) {
+    if (removing(worker.accountId)) return true;
+    try {
+      return (await getAccount(db, worker.accountId)) == null;
+    } catch (err) {
+      logError("account_read_failed", err, { accountId: worker.accountId });
+      return false;
     }
   }
 
@@ -631,12 +668,27 @@ export function createMailSupervisor(options = {}) {
       noteRequest(worker, plan);
       return worker.inflight.settled;
     }
-    const run = { plan, epoch: worker.epoch, closedOut: false, gone: false, timer: null, settled: null, resolve: null };
+    const run = {
+      plan,
+      epoch: worker.epoch,
+      closedOut: false,
+      gone: false,
+      timer: null,
+      settled: null,
+      resolve: null,
+      done: null,
+    };
     run.settled = new Promise((resolve) => {
       run.resolve = resolve;
     });
     worker.inflight = run;
-    void executeRun(worker, run);
+    // The run's own promise, kept on the run: `settled` only says the callers were released, which is
+    // what `closeOutRun` does the moment a delete arrives. `stopAccount` waits on `done`, because that
+    // is what says the engine has stopped writing the batch it already holds.
+    run.done = executeRun(worker, run);
+    // A run this module ended on purpose swallows its own rejection; this only keeps an unexpected
+    // one from becoming an unhandled rejection.
+    run.done.catch(() => {});
     return run.settled;
   }
 
@@ -658,6 +710,26 @@ export function createMailSupervisor(options = {}) {
     return run;
   }
 
+  /**
+   * Wait for a closed-out run's own pass to stop writing, at most `STOP_RUN_WAIT_MS`.
+   *
+   * `closeOutRun` releases whoever joined the run; the engine, meanwhile, may still be storing the
+   * batch it fetched before the close. The delete route's next step removes the rows, so the run must
+   * have stopped writing before that: this waits on the run's own promise, and the cap keeps a write
+   * that never finishes from holding a delete open.
+   */
+  async function waitForRun(run) {
+    if (run == null || run.done == null) return;
+    await new Promise((resolve) => {
+      const timer = arm(() => resolve(), STOP_RUN_WAIT_MS);
+      const settle = () => {
+        disarm(timer);
+        resolve();
+      };
+      run.done.then(settle, settle);
+    });
+  }
+
   async function executeRun(worker, run) {
     const deadlineAt = now() + SYNC_DEADLINE_MS;
     let failed = false;
@@ -672,7 +744,7 @@ export function createMailSupervisor(options = {}) {
       // and a run that was still opening its connection (or that was created for an id a delete is
       // just removing) must not write a folder, a message or a sync state for it.
       if (await accountGone(worker, run)) return;
-      await runPlan(worker, adapter, run.plan, deadlineAt);
+      await runPlan(worker, adapter, run, deadlineAt);
       if (run.closedOut || worker.inflight !== run) return;
       await onRunSuccess(worker, run);
     } catch (err) {
@@ -683,9 +755,18 @@ export function createMailSupervisor(options = {}) {
       // failure count, a back-off loop on a worker no id holds, an orphan `mail_sync_state` row or a
       // "sync is failing" notice. The worker is retired with it: no timers, no watch, no connection.
       if (mailErr.code === "NOT_FOUND" && mailErr.detail === "account") {
-        run.gone = true;
-        await retireWorker(worker, { keepRun: true });
-        logEvent("sync_account_gone", { accountId: worker.accountId });
+        // That code reaches here through `accountOrNull`, which turns ANY failed read into null — a
+        // busy database included. The quiet path is taken only when a read that is ALLOWED to throw
+        // really finds no row (or the id is in the removal set); a read that throws, or that finds the
+        // account, is an ordinary failure, so a locked database never retires a live account's worker.
+        if (await accountReallyGone(worker)) {
+          run.gone = true;
+          await retireWorker(worker, { keepRun: true });
+          logEvent("sync_account_gone", { accountId: worker.accountId });
+          return;
+        }
+        failed = true;
+        await onRunFailure(worker, new MailError("PROTOCOL", "account_read"), run.epoch);
         return;
       }
       failed = true;
@@ -738,12 +819,17 @@ export function createMailSupervisor(options = {}) {
     return true;
   }
 
-  async function runPlan(worker, adapter, plan, deadlineAt) {
+  async function runPlan(worker, adapter, run, deadlineAt) {
+    const { plan } = run;
     const ctx = {
       db,
       adapter,
       now,
       deadlineAt,
+      // The engine's own stop beside the deadline: this run's owner closed it out, this worker is no
+      // longer the map's (a delete retired it) or its id is being removed. Asked before every write,
+      // so a batch already fetched is not stored for an account whose rows are going.
+      cancelled: () => run.closedOut === true || notOurs(worker) || removing(worker.accountId),
       log: (line) => {
         try {
           logSink(line);
@@ -1543,6 +1629,10 @@ export function createMailSupervisor(options = {}) {
    * it — all without writing a sync state row, which would be a row for an id that is about to have
    * none. A connection that lands after this is closed by `workerAdapter`, never adopted.
    *
+   * Closing the run out does not stop the pass: the engine's `cancelled` does, on its next write. So
+   * this waits for the run's own promise too, capped at `STOP_RUN_WAIT_MS`, because the caller's very
+   * next step is deleting the rows and nothing of this worker may land in them afterwards.
+   *
    * Idempotent, a no-op for an id this supervisor never saw and for a stopped supervisor, and it never
    * throws: a delete must not be held up by the worker it is retiring.
    */
@@ -1551,8 +1641,14 @@ export function createMailSupervisor(options = {}) {
     if (typeof accountId !== "string" || accountId === "") return;
     try {
       const worker = workers.get(accountId) ?? null;
-      if (worker != null) await retireWorker(worker);
-      else await closeActionAdapter(accountId);
+      if (worker != null) {
+        // The run in flight is captured before the retire: the retire is what closes it out.
+        const run = worker.inflight;
+        await retireWorker(worker);
+        await waitForRun(run);
+      } else {
+        await closeActionAdapter(accountId);
+      }
       logEvent("account_stopped", { accountId });
     } catch (err) {
       logError("account_stop_failed", err, { accountId });
