@@ -954,11 +954,14 @@ test("17th amp insert refused", (t) => {
   addLibraryFile(s.doc, "cap-a", "nam");
 
   // The cap is the SONG's, not one chain's: two chains of eight are sixteen
-  // amps, and the chain cap (8) is met exactly as the song cap is.
+  // amps, and the chain cap (8) is met exactly as the song cap is. The operator
+  // adds them all, so every one is live and none is a proposal.
+  const addAmp = (owner, id) =>
+    runCommand(s.doc, "insert.add", { id, owner, kind: "amp", params: { model_id: "cap-a" } }, { author: HUMAN });
   let made = 0;
   for (const [at, trackId] of tracks.slice(0, 2).entries()) {
     for (let index = 0; index < 8; index += 1) {
-      addInsert(s.doc, trackOwner(trackId), "amp", { id: `amp-${at}-${index}`, params: { model_id: "cap-a" } });
+      addAmp(trackOwner(trackId), `amp-${at}-${index}`);
       made += 1;
     }
   }
@@ -966,10 +969,7 @@ test("17th amp insert refused", (t) => {
   assert.deepEqual(checkInvariants(s.doc), []);
 
   const before = snapshot(s.doc);
-  const over = refuses(
-    () => addInsert(s.doc, trackOwner(tracks[2]), "amp", { id: "amp-16", params: { model_id: "cap-a" } }),
-    "limit",
-  );
+  const over = refuses(() => addAmp(trackOwner(tracks[2]), "amp-16"), "limit");
   assert.equal(over.message, "A song holds at most 16 amp inserts.");
   assert.deepEqual(snapshot(s.doc), before, "the refused amp wrote nothing");
 
@@ -1079,7 +1079,10 @@ test("a proposed amp counts against the song's amp cap", (t) => {
     () => addAmp(trackOwner(third), "amp-16"),
     "limit",
   );
-  assert.equal(over.message, "A song holds at most 16 amp inserts.");
+  assert.equal(
+    over.message,
+    "A song holds at most 16 amp inserts, and 1 of them are proposals waiting for an answer; declining a proposal frees a slot.",
+  );
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 

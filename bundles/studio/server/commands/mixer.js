@@ -48,7 +48,9 @@
  *     on a chain that already holds one — live or bypassed — is a PROPOSAL:
  *     `insert.add` run by an agent stores it with `proposed: true` and
  *     `set_by: "agent"`, it plays nothing until the operator accepts it with
- *     `insert.accept`, and an agent may take it away again or retune it. The
+ *     `insert.accept`, and an agent may take it away again or retune it — but
+ *     not repoint it, because the capture and cabinet it names are what the
+ *     operator is being asked about (the hub's sound guard says so). The
  *     same rule covers the back doors: no command turns `proposed` off, nothing
  *     changes an insert's `kind`, a move keeps a proposal a proposal, and the
  *     hub refuses any agent step whose effective writes would leave a chain
@@ -56,7 +58,9 @@
  *   - a song holds at most `LIMITS.ampInsertsPerSong` amp inserts, counted over
  *     the whole song rather than over one chain: every amp loads a capture of
  *     its own, so the cap is the song's. A proposal counts against it: it holds
- *     a library reference, and an operator's yes cannot exceed the cap.
+ *     a library reference, and an operator's yes cannot exceed the cap. A
+ *     refusal that finds proposals pending says so, and that declining one
+ *     frees a slot.
  *   - `limiter` may sit on any owner. On the master the engine gives it its
  *     lookahead; on a track or a return it runs at zero latency as a clipper
  *     (plan 1d, DSP rules). Nothing in the document tells the two apart.
@@ -439,6 +443,24 @@ function ampInsertCount(doc) {
   return count;
 }
 
+/**
+ * How many of the song's amp inserts are still PROPOSALS: an amp an agent
+ * suggested and the operator has not answered yet.
+ *
+ * They count against the song's amp cap like any other amp, because each one
+ * holds a library reference of its own; declining one is `insert.remove`, and
+ * that is what frees the slot (see the cap's message in `insert.add`).
+ * @param {Y.Doc} doc
+ * @returns {number}
+ */
+function ampProposalCount(doc) {
+  let count = 0;
+  for (const { insert } of insertEntries(doc)) {
+    if (insert.get("kind") === AMP_KIND && insert.get("proposed") === true) count += 1;
+  }
+  return count;
+}
+
 /** @returns {Y.Map<any>} the live insert, or a "not_found" refusal naming the id. */
 function requireInsert(doc, id) {
   const insert = getInsert(doc, id);
@@ -610,7 +632,14 @@ defineCommand({
         refuseInvalid('An amp insert needs a capture to play: pass the library entry\'s id as "model_id".');
       }
       if (ampInsertCount(doc) >= LIMITS.ampInsertsPerSong) {
-        refuseLimit(`A song holds at most ${LIMITS.ampInsertsPerSong} amp inserts.`);
+        // A full song says which way out there is: a proposal nobody has
+        // answered is a slot the next amp could take once it is declined.
+        const pending = ampProposalCount(doc);
+        refuseLimit(
+          pending === 0
+            ? `A song holds at most ${LIMITS.ampInsertsPerSong} amp inserts.`
+            : `A song holds at most ${LIMITS.ampInsertsPerSong} amp inserts, and ${pending} of them are proposals waiting for an answer; declining a proposal frees a slot.`,
+        );
       }
     }
     const snap = snapshot(doc);

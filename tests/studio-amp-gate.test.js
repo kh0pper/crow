@@ -37,6 +37,10 @@ const AGENT = { kind: "agent", id: "mcp", label: "Agent (MCP)" };
 const AMP_SECOND_NEEDS_A_YES =
   "A second amp on a track is the operator's to accept; an agent can only propose one.";
 
+/** What a proposal whose capture or cabinet an agent moves answers with. */
+const AMP_PROPOSAL_FIXED =
+  "A proposed amp's capture and cabinet are fixed once proposed; remove it and propose another.";
+
 /** A capture's sha256, as the gateway's upload finish measures it. */
 const CAPTURE_HASH = "c0ffee11".repeat(8);
 
@@ -284,6 +288,108 @@ test("bypassing the first amp does not unlock a live second one", async (t) => {
   assert.equal((await snapshotOf(hub, song_id)).inserts["amp-2"], undefined);
 });
 
+test("an agent cannot repoint a proposal at another capture or cabinet", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedAmpSong(hub);
+  await applies(
+    hub,
+    song_id,
+    "operator-amp-1",
+    "insert.add",
+    { id: "amp-1", owner: "track:guitar", kind: "amp", params: { model_id: "cap-a" } },
+    HUMAN,
+  );
+  await applies(
+    hub,
+    song_id,
+    "agent-amp-2",
+    "insert.add",
+    { id: "amp-2", owner: "track:guitar", kind: "amp", params: { model_id: "cap-a" } },
+    AGENT,
+  );
+
+  // A proposal is the choice the operator is being asked about, so another
+  // capture or another cabinet is another question, and not the agent's to put.
+  for (const params of [{ model_id: "cap-b" }, { ir_id: "cab-a" }]) {
+    const repointed = refuses(
+      await hub.runCommand({
+        song_id,
+        cmd_id: `agent-repoint-${Object.keys(params)[0]}`,
+        command: "insert.set",
+        args: { id: "amp-2", params },
+        author: AGENT,
+      }),
+      "human_only",
+    );
+    assert.equal(repointed.error, AMP_PROPOSAL_FIXED);
+  }
+  const held = (await snapshotOf(hub, song_id)).inserts["amp-2"];
+  assert.equal(held.params.model_id, "cap-a", "still the capture it was proposed with");
+  assert.equal(held.params.ir_id, null);
+  assert.equal(held.proposed, true);
+
+  // Its own settings are still its own, and so is taking it back.
+  await applies(hub, song_id, "agent-retune", "insert.set", { id: "amp-2", params: { input_db: 6 } }, AGENT);
+  assert.equal((await snapshotOf(hub, song_id)).inserts["amp-2"].params.input_db, 6);
+  await applies(hub, song_id, "agent-decline", "insert.remove", { id: "amp-2" }, AGENT);
+  assert.equal((await snapshotOf(hub, song_id)).inserts["amp-2"], undefined);
+});
+
+test("the operator's yes is bound to the proposal they were shown", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedAmpSong(hub);
+  await applies(
+    hub,
+    song_id,
+    "operator-amp-1",
+    "insert.add",
+    { id: "amp-1", owner: "track:guitar", kind: "amp", params: { model_id: "cap-a" } },
+    HUMAN,
+  );
+  await applies(
+    hub,
+    song_id,
+    "agent-amp-2",
+    "insert.add",
+    { id: "amp-2", owner: "track:guitar", kind: "amp", params: { model_id: "cap-b" } },
+    AGENT,
+  );
+
+  // A proposal can be taken back and proposed again under the same id, so a yes
+  // that no longer names the chain, capture and cabinet the row showed is a yes
+  // to something the operator never saw.
+  const stale = [
+    { owner: "track:bass", model_id: "cap-b", ir_id: null },
+    { owner: "track:guitar", model_id: "cap-a", ir_id: null },
+    { owner: "track:guitar", model_id: "cap-b", ir_id: "cab-a" },
+  ];
+  for (const [at, expect] of stale.entries()) {
+    const refused = refuses(
+      await hub.runCommand({
+        song_id,
+        cmd_id: `operator-accept-stale-${at}`,
+        command: "insert.accept",
+        args: { id: "amp-2", expect },
+        author: HUMAN,
+      }),
+      "conflict",
+    );
+    assert.match(refused.error, /is not the proposal you were shown any more/);
+    assert.equal((await snapshotOf(hub, song_id)).inserts["amp-2"].proposed, true, "it stays a proposal");
+  }
+
+  // The proposal as it stands is what the operator says yes to.
+  await applies(
+    hub,
+    song_id,
+    "operator-accept",
+    "insert.accept",
+    { id: "amp-2", expect: { owner: "track:guitar", model_id: "cap-b", ir_id: null } },
+    HUMAN,
+  );
+  assert.equal((await snapshotOf(hub, song_id)).inserts["amp-2"].proposed, false);
+});
+
 test("the operator may leave a chain holding two live amps", async (t) => {
   const { hub } = await setup(t);
   const song_id = await seedAmpSong(hub);
@@ -426,6 +532,59 @@ test("an agent cannot move a live amp into a chain that holds one", async (t) =>
   const allowed = await hub.undo({ song_id, cmd_id: "operator-undo-move", entry_id: forged, author: HUMAN });
   assert.equal(allowed.ok, true, `the operator's undo was refused: ${allowed.error}`);
   assert.equal((await snapshotOf(hub, song_id)).inserts["amp-1"].owner, "track:bass");
+});
+
+test("a proposal in a chain does not let a live amp move in beside it", async (t) => {
+  const { db, hub } = await setup(t);
+  const song_id = await seedAmpSong(hub);
+  await applies(
+    hub,
+    song_id,
+    "operator-amp-1",
+    "insert.add",
+    { id: "amp-1", owner: "track:guitar", kind: "amp", params: { model_id: "cap-a" } },
+    HUMAN,
+  );
+  await applies(
+    hub,
+    song_id,
+    "agent-amp-2",
+    "insert.add",
+    { id: "amp-2", owner: "track:guitar", kind: "amp", params: { model_id: "cap-b" } },
+    AGENT,
+  );
+  await applies(
+    hub,
+    song_id,
+    "operator-bass-amp",
+    "insert.add",
+    { id: "amp-3", owner: "track:bass", kind: "amp", params: { model_id: "cap-a" } },
+    HUMAN,
+  );
+
+  // The bass's amp moved into the guitar chain: the proposal waiting there holds
+  // a place in the chain, not the answer to a second LIVE amp, so this would be
+  // the operator's amp plus another one live beside it.
+  const forged = await forgeEntry(db, song_id, {
+    command: "insert.move",
+    args: { id: "amp-3", after: null },
+    before: { "insert:amp-3|owner": "track:guitar" },
+    after: { "insert:amp-3|owner": "track:bass" },
+  });
+  const refused = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-proposed-move", entry_id: forged, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(refused.error, AMP_SECOND_NEEDS_A_YES);
+  const live = Object.values((await snapshotOf(hub, song_id)).inserts).filter(
+    (insert) => insert.owner === "track:guitar" && insert.proposed !== true,
+  );
+  assert.deepEqual(live.map((insert) => insert.id), ["amp-1"], "Guitar still holds one live amp");
+
+  // The operator may take that step: the second live amp is theirs to allow.
+  const allowed = await hub.undo({ song_id, cmd_id: "operator-undo-proposed-move", entry_id: forged, author: HUMAN });
+  assert.equal(allowed.ok, true, `the operator's undo was refused: ${allowed.error}`);
+  assert.equal((await snapshotOf(hub, song_id)).inserts["amp-3"].owner, "track:guitar");
 });
 
 test("an agent cannot undo its way to a second live amp", async (t) => {

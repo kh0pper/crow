@@ -256,6 +256,18 @@ const AMP_CAPTURE_NEEDS_A_YES = "Only the operator changes the capture or cabine
 const AMP_REMOVE_NEEDS_A_YES = "Only the operator removes an amp.";
 
 /**
+ * What an agent is told when a step would repoint a proposed amp at another
+ * capture or cabinet.
+ *
+ * A proposal is the choice the operator is being asked about, so the sound it
+ * names is fixed from the moment it is proposed: an agent may retune it or take
+ * it back, and the way to another capture is to take it away and propose
+ * another.
+ */
+const AMP_PROPOSAL_FIXED =
+  "A proposed amp's capture and cabinet are fixed once proposed; remove it and propose another.";
+
+/**
  * What an agent is told when a step would take a file out of the song's library
  * or put one into it.
  *
@@ -892,11 +904,12 @@ function ampGateRefusal({ changes, snap, author }) {
   const state = insertsAfter(snap, changes);
   const after = ampCountsByOwner(state);
   for (const [owner, count] of after) {
-    const held = before.get(owner);
-    // A chain with no amp yet is where an agent's first amp lands, live: there is
-    // nothing it could add a second one beside.
-    if (!held || held.amps === 0) continue;
-    if (count.live > held.amps) return refuse("human_only", AMP_SECOND_NEEDS_A_YES);
+    // Judged live against live: a proposal holds a place in the chain, not the
+    // answer to the second live amp, so a chain that already holds a live amp
+    // and a proposal is still one live amp deep. A chain that held none before
+    // and gains two at once is the same question asked once.
+    const heldLive = before.get(owner)?.live ?? 0;
+    if (count.live >= 2 && count.live > heldLive) return refuse("human_only", AMP_SECOND_NEEDS_A_YES);
   }
   if (makesSecondAmpLive(snap, changes, state, after)) {
     return refuse("human_only", AMP_SECOND_NEEDS_A_YES);
@@ -1039,11 +1052,14 @@ function ampReferenceMoves(insert, params) {
  * these two answers. ADDING an amp is not a loss: an agent may build a guitar
  * chain with a capture the operator put in the song's library (plan 1d, PR C).
  *
- * A PROPOSAL loses nothing: it plays nothing, so an agent may take its own
- * proposal away, retune it or repoint it, and the operator's own inserted amp
- * keeps the capture they chose. The second-amp case the bypass-then-add route
- * used to open is closed by the amp gate (`ampGateRefusal`), which judges the
- * chain rather than one insert's fields.
+ * A PROPOSAL loses nothing yet: it plays nothing, so an agent may take its own
+ * proposal away and retune it, and the operator's own inserted amp keeps the
+ * capture they chose. What a proposal POINTS AT is another matter — the capture
+ * and the cabinet it names are the choice the operator is being asked about, so
+ * they are fixed while it stands and moving either is refused (see
+ * `AMP_PROPOSAL_FIXED`). The second-amp case the bypass-then-add route used to
+ * open is closed by the amp gate (`ampGateRefusal`), which judges the chain
+ * rather than one insert's fields.
  * @param {object} snap - the song as it stands before the step
  * @param {string} insertId
  * @param {string} field - `"*"`, `"kind"`, `"params.<name>"`, or another field
@@ -1053,8 +1069,21 @@ function ampReferenceMoves(insert, params) {
 function insertWriteLosesSound(snap, insertId, field, value) {
   const insert = Object.hasOwn(snap.inserts ?? {}, insertId) ? snap.inserts[insertId] : null;
   if (!isPlainObject(insert) || insert.kind !== AMP_KIND) return null;
-  // A proposal is not a sound yet: only the operator's yes gives it one.
-  if (insert.proposed === true) return null;
+  // A proposal is not a sound yet: only the operator's yes gives it one. Its two
+  // references are still fixed, because they are what the operator is being
+  // asked about — taking it away and proposing another is the way to change one.
+  if (insert.proposed === true) {
+    if (field === "*") {
+      if (!isPlainObject(value)) return null;
+      return ampReferenceMoves(insert, value.params) ? AMP_PROPOSAL_FIXED : null;
+    }
+    if (field.startsWith("params.")) {
+      const name = field.slice("params.".length);
+      if (!AMP_REFERENCES_IN_PARAMS.includes(name)) return null;
+      return ampReferenceMoves(insert, { [name]: value }) ? AMP_PROPOSAL_FIXED : null;
+    }
+    return null;
+  }
   if (field === "*") {
     if (value === null) return AMP_REMOVE_NEEDS_A_YES;
     if (!isPlainObject(value)) return null;

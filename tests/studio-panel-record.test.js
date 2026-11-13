@@ -1264,15 +1264,18 @@ function chunkPuts(ui) {
  * arms the recorder — everything a take needs before its first chunk.
  * @param {object} ui a booted panel
  * @param {number} [frame] the frame the launch reports
+ * @param {{beforeLaunch?: function(object): void}} [options] `beforeLaunch` runs
+ *   between the recorder being built and the launch that starts the take
  * @returns {Promise<object>} the fake recorder
  */
-async function startFakeRecording(ui, frame = 48000) {
+async function startFakeRecording(ui, frame = 48000, options = {}) {
   ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
   await ui.settle();
   ui.click("[data-act=record]");
   await ui.settle(24);
   const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
   assert.ok(recorder, "the panel built a recorder");
+  if (options.beforeLaunch) await options.beforeLaunch(ui);
   ui.engine.launches.forEach((listener) =>
     listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 0, frame: frame }),
   );
@@ -1332,6 +1335,31 @@ test("a new take's offset also carries the engine's own master delay", async () 
     3408 + framesOf(2.2),
     "both together are their sum, rounded once",
   );
+});
+
+test("a mix delay the engine reports while the take is armed is the one it is cut by", async () => {
+  // The recorder is built before the engine has said anything about the master
+  // path, and the report arrives before the launch that starts the take: the
+  // take is cut by what the engine says when it STARTS, not by what it said when
+  // the recorder was built.
+  const ui = await bootPanel({ latency: CALIBRATED, gateFinish: true });
+  const recorder = await startFakeRecording(ui, 48000, {
+    beforeLaunch(panel) {
+      panel.engine.announceLatency({ ms: 1.5 });
+    },
+  });
+  recorder.chunk(new Uint8Array(64).buffer, 0, 0);
+  await ui.settle();
+  recorder.done({ segments: [{ segment: 0, start_frame: 48000, frames: 48000 }], frames: 48000, start_frame: 48000 });
+  await ui.settle(24);
+  const rows = Array.from(ui.store.pendings.values());
+  assert.equal(rows.length, 1, "the take is on this device");
+  assert.equal(
+    rows[0].offset_frames,
+    3408 + framesOf(1.5),
+    "the round trip and the delay the engine reported while the take was armed",
+  );
+  ui.releaseFinish();
 });
 
 test("a take this device already holds keeps the offset it was recorded with", async () => {

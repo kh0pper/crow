@@ -76,8 +76,11 @@ const BUNDLED_STARTERS = [
  * A song with one audio track playing an amp: the operator's own capture in the
  * library, their own cabinet, and an amp insert that names both. This is what
  * the amp editor edits (plan 1d, Task 15).
- * @param {{proposal?: boolean}} [options] `proposal` adds the agent's SECOND amp
- *   on that same chain, which arrives as a proposal
+ * @param {{proposal?: boolean, secondSounds?: boolean}} [options] `proposal` adds
+ *   the agent's SECOND amp on that same chain, which arrives as a proposal;
+ *   `secondSounds` also puts a second capture and a second cabinet in the
+ *   library and points the proposal at them, so the file only a proposal names
+ *   is one nothing live plays
  * @returns {Promise<{doc: object, history: object[]}>}
  */
 async function ampSong(options = {}) {
@@ -146,6 +149,10 @@ async function ampSong(options = {}) {
   // A library entry is Studio's own step, issued by the gateway's upload finish.
   step("library.add", { entry: capture }, HUMAN, { internal: true });
   step("library.add", { entry: cabinet }, HUMAN, { internal: true });
+  if (options.secondSounds === true) {
+    step("library.add", { entry: { ...capture, id: "lib-cap-2", name: "My second capture" } }, HUMAN, { internal: true });
+    step("library.add", { entry: { ...cabinet, id: "lib-cab-2", name: "My second cabinet" } }, HUMAN, { internal: true });
+  }
   step(
     "insert.add",
     { id: "ins-amp", owner: "track:guitar", kind: "amp", params: { model_id: "lib-cap", ir_id: "lib-cab" } },
@@ -154,9 +161,12 @@ async function ampSong(options = {}) {
   if (options.proposal === true) {
     // The agent's second amp on a chain that already has one: a proposal, which
     // plays nothing until the operator accepts it.
+    const sounds = options.secondSounds === true
+      ? { model_id: "lib-cap-2", ir_id: "lib-cab-2" }
+      : { model_id: "lib-cap", ir_id: null };
     step(
       "insert.add",
-      { id: "ins-amp-2", owner: "track:guitar", kind: "amp", params: { model_id: "lib-cap", ir_id: null } },
+      { id: "ins-amp-2", owner: "track:guitar", kind: "amp", params: sounds },
       AGENT,
     );
   }
@@ -299,6 +309,9 @@ function fakeEngine() {
   const engine = {
     songs: [],
     modes: [],
+    // Every library file the page handed over, in order: what a capture or a
+    // cabinet was read for.
+    libraryLoads: [],
     node: { connect() {} },
     setSong(song) {
       engine.songs.push(song);
@@ -357,7 +370,8 @@ function fakeEngine() {
       return Promise.resolve();
     },
     unloadSample() {},
-    loadLibrary() {
+    loadLibrary(libraryId, kind) {
+      engine.libraryLoads.push({ id: String(libraryId), kind: String(kind) });
       return Promise.resolve({ status: "loaded" });
     },
     unloadLibrary() {},
@@ -393,6 +407,34 @@ function fakeContext() {
     resume: async () => {},
     close() {},
   };
+}
+
+/**
+ * A tiny 16-bit mono WAV, four frames at the context's rate: what a cabinet's
+ * file route answers with, so the page's own WAV reader has a real file to read.
+ * @returns {Uint8Array} the file's bytes
+ */
+function wavBytes() {
+  const dataBytes = 4 * 2;
+  const bytes = new Uint8Array(44 + dataBytes);
+  const view = new DataView(bytes.buffer);
+  const tag = (at, text) => {
+    for (let i = 0; i < 4; i += 1) bytes[at + i] = text.charCodeAt(i);
+  };
+  tag(0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true);
+  tag(8, "WAVE");
+  tag(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, RATE, true);
+  view.setUint32(28, RATE * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  tag(36, "data");
+  view.setUint32(40, dataBytes, true);
+  return bytes;
 }
 
 /** The take store, in memory: nothing is kept, every call answers. */
@@ -455,14 +497,14 @@ async function bootMixer(options = {}) {
   const engine = fakeEngine();
   const sent = [];
   const requests = [];
-  const response = (status, body) => ({
+  const response = (status, body, bytes) => ({
     ok: status >= 200 && status < 300,
     status,
     async json() {
       return body;
     },
     async arrayBuffer() {
-      return new ArrayBuffer(0);
+      return bytes || new ArrayBuffer(0);
     },
   });
 
@@ -507,6 +549,12 @@ async function bootMixer(options = {}) {
         },
         added: true,
       });
+    }
+    if (target.includes("/library/") && target.endsWith("/file")) {
+      // One library file the song's amp inserts name: a capture's own bytes, or a
+      // cabinet's WAV, which the page reads out itself (the engine never decodes).
+      const fileId = decodeURIComponent(target.split("/library/")[1].split("/")[0]);
+      return response(200, {}, fileId.startsWith("lib-cab") ? wavBytes().buffer : new Uint8Array([123, 125]).buffer);
     }
     if (target.includes("/api/studio/songs")) return response(200, [{ id: "song-1", project_id: 71, title: "Mix song" }]);
     return response(200, {});
@@ -1125,9 +1173,9 @@ test("the master meter shows the target", async () => {
     "\u221216.8",
   );
   const latency = ui.mixer().querySelector("[data-role=mix-latency]");
-  assert.ok(latency, "the limiter's delay has its own line");
+  assert.ok(latency, "the master's delay has its own line");
   assert.equal(latency.hidden, false);
-  assert.equal(String(latency.textContent), "Limiter look-ahead: 1.5 ms");
+  assert.equal(String(latency.textContent), "Master delay: 1.5 ms");
 });
 
 // ---- the amp editor (plan 1d, Task 15) -------------------------------------
@@ -1311,7 +1359,7 @@ test("a proposed second amp is drawn as a proposal, with Accept and Decline and 
     .map((node) => node.getAttribute("data-insert-id")), ["ins-amp", "ins-amp-2"]);
 
   const proposed = ui.chip("ins-amp-2");
-  assert.equal(String(proposed.textContent), "Proposed amp", "the chip says what it is");
+  assert.equal(String(proposed.textContent), "Proposed: My capture", "the chip names the capture it would play");
   assert.ok(String(proposed.className).includes("st-mix-chip-proposed"), "and is drawn dimmed as one");
   assert.equal(
     ui.mixer().querySelector('[data-act=insert-bypass][data-insert-id="ins-amp-2"]'),
@@ -1339,9 +1387,29 @@ test("a proposed second amp is drawn as a proposal, with Accept and Decline and 
   assert.equal(String(remove.textContent), "\u00d7", "which is the chain's own remove, not a Decline");
 });
 
-test("Accept sends the proposal the row was drawn with, and Decline removes it", async () => {
+test("a proposed amp's row names the capture and the cabinet it would play", async () => {
+  const ui = await bootMixer({ fixture: await ampSong({ proposal: true, secondSounds: true }) });
+  await ui.openMixer();
+
+  // The proposal names a capture AND a cabinet, and the row says both.
+  assert.equal(String(ui.chip("ins-amp-2").textContent), "Proposed: My second capture - My second cabinet");
+  // The live amp on the same chain is still drawn with its effect's name: the
+  // sounds are what the operator is being asked about, so only a proposal
+  // carries them.
+  assert.equal(String(ui.chip("ins-amp").textContent), "amp");
+});
+
+test("Accept sends the values written on the row that was clicked, and Decline removes it", async () => {
   const ui = await bootMixer({ fixture: await ampSong({ proposal: true }) });
   await ui.openMixer();
+
+  const drawn = ui.mixer().querySelector('[data-act=insert-accept][data-insert-id="ins-amp-2"]');
+  assert.ok(drawn, "the row offers Accept");
+  const drawnRow = drawn.closest("[data-proposed-insert]");
+  assert.ok(drawnRow, "the row carries what it was drawn with");
+  assert.equal(drawnRow.getAttribute("data-expect-owner"), "track:guitar");
+  assert.equal(drawnRow.getAttribute("data-expect-model-id"), "lib-cap", "the capture it was drawn with");
+  assert.equal(drawnRow.getAttribute("data-expect-ir-id"), null, "and no cabinet, which is not the same as an empty id");
 
   // Accept: one insert.accept, carrying the chain, capture and cabinet the row
   // was DRAWN with — never a fresh read of the snapshot.
@@ -1352,6 +1420,11 @@ test("Accept sends the proposal the row was drawn with, and Decline removes it",
     id: "ins-amp-2",
     expect: { owner: "track:guitar", model_id: "lib-cap", ir_id: null },
   });
+  assert.equal(
+    accepts[0].args.expect.model_id,
+    drawnRow.getAttribute("data-expect-model-id"),
+    "what it sends is what the row showed",
+  );
 
   // Decline is the chain's ordinary remove, sent for that insert alone.
   ui.click('[data-act=insert-remove][data-insert-id="ins-amp-2"]');
@@ -1359,6 +1432,86 @@ test("Accept sends the proposal the row was drawn with, and Decline removes it",
   assert.equal(removes.length, 1, "Decline is one insert.remove");
   assert.deepEqual(removes[0].args, { id: "ins-amp-2" });
   assert.equal(ui.commands("insert.accept").length, 1, "and it is not an accept as well");
+});
+
+test("Accept sends the sounds the row was drawn with, not a fresh read of the song", async () => {
+  const ui = await bootMixer({ fixture: await ampSong({ proposal: true, secondSounds: true }) });
+  await ui.openMixer();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+
+  const drawn = ui.mixer().querySelector('[data-act=insert-accept][data-insert-id="ins-amp-2"]');
+  const drawnRow = drawn.closest("[data-proposed-insert]");
+  assert.equal(drawnRow.getAttribute("data-expect-model-id"), "lib-cap-2");
+  assert.equal(drawnRow.getAttribute("data-expect-ir-id"), "lib-cab-2");
+
+  // The proposal moves to another sound while that row is the one on the page
+  // (its capture changed from the editor): the song now names another capture
+  // and no cabinet.
+  runCommand(ui.doc, "insert.set", { id: "ins-amp-2", params: { model_id: "lib-cap", ir_id: null } }, { author: HUMAN });
+  await ui.settle();
+
+  // A press on the row drawn BEFORE sends the values that row shows, not the
+  // ones the song carries now: nobody is asked to answer for a sound they did
+  // not see.
+  ui.click('[data-act=insert-accept][data-insert-id="ins-amp-2"]');
+  const stale = ui.commands("insert.accept");
+  assert.equal(stale.length, 1, "Accept is one insert.accept");
+  assert.deepEqual(stale[0].args, {
+    id: "ins-amp-2",
+    expect: { owner: "track:guitar", model_id: "lib-cap-2", ir_id: "lib-cab-2" },
+  });
+
+  // The song is drawn again with the sounds it carries now, and Accept sends
+  // those — again the ones written on the row that was clicked.
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+  const redrawn = ui.mixer().querySelector('[data-act=insert-accept][data-insert-id="ins-amp-2"]');
+  assert.notEqual(redrawn, drawn, "the row was drawn again");
+  const redrawnRow = redrawn.closest("[data-proposed-insert]");
+  assert.equal(String(ui.chip("ins-amp-2").textContent), "Proposed: My capture");
+  ui.click('[data-act=insert-accept][data-insert-id="ins-amp-2"]');
+  const moved = ui.commands("insert.accept");
+  assert.equal(moved.length, 2);
+  assert.equal(moved[1].args.expect.model_id, redrawnRow.getAttribute("data-expect-model-id"));
+  assert.equal(moved[1].args.expect.ir_id, null);
+  assert.deepEqual(moved[1].args, {
+    id: "ins-amp-2",
+    expect: { owner: "track:guitar", model_id: "lib-cap", ir_id: null },
+  });
+});
+
+test("a proposal's files are neither fetched nor loaded until it is accepted", async () => {
+  const ui = await bootMixer({ fixture: await ampSong({ proposal: true, secondSounds: true }) });
+  await ui.openMixer();
+  await ui.startEngine();
+  await ui.settle();
+
+  // The live amp's capture and cabinet are the song's sound, so the page fetches
+  // both and hands them to the engine (a cabinet as the PCM it reads out itself).
+  const files = () => ui.requests.filter((request) => request.url.endsWith("/file")).map((request) => request.url);
+  assert.ok(files().some((url) => url.includes("/library/lib-cap/")), "the live amp's capture is fetched");
+  assert.ok(files().some((url) => url.includes("/library/lib-cab/")), "and its cabinet");
+  assert.ok(
+    ui.engine.libraryLoads.some((load) => load.id === "lib-cap" && load.kind === "nam"),
+    "the capture reaches the engine",
+  );
+  assert.ok(
+    ui.engine.libraryLoads.some((load) => load.id === "lib-cab" && load.kind === "ir"),
+    "and the cabinet, read out of its WAV",
+  );
+
+  // The proposal plays nothing until the operator accepts it, so nothing of its
+  // own is fetched, read or handed over.
+  assert.deepEqual(
+    files().filter((url) => url.includes("/library/lib-cap-2/") || url.includes("/library/lib-cab-2/")),
+    [],
+    "no file of the proposal's is fetched",
+  );
+  assert.deepEqual(
+    ui.engine.libraryLoads.filter((load) => load.id === "lib-cap-2" || load.id === "lib-cab-2"),
+    [],
+    "and none of it reaches the engine",
+  );
 });
 
 test("the monitor switch hears the chain while recording", async () => {

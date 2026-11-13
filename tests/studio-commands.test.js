@@ -1525,3 +1525,39 @@ test("no command turns a proposal into a live insert or changes its kind", (t) =
   assert.equal(snapshot(doc).inserts["amp-2"].params.input_db, 6);
 });
 
+test("a full song with proposals pending says declining one frees a slot", (t) => {
+  const doc = scratchDoc(t);
+  const first = addTrack(doc, "Guitar 1", { kind: "audio" });
+  const second = addTrack(doc, "Guitar 2", { kind: "audio" });
+  const third = addTrack(doc, "Guitar 3", { kind: "audio" });
+  runCommand(doc, "library.add", { entry: ampLibraryEntry("cap-a", "nam") });
+
+  // Sixteen amps over two chains — the song's cap exactly — of which the last
+  // two on the first chain are an agent's proposals.
+  for (let index = 0; index < 6; index += 1) {
+    addAmp(doc, `track:${first}`, `amp-a-${index}`, "cap-a", HUMAN);
+  }
+  for (let index = 0; index < 2; index += 1) {
+    addAmp(doc, `track:${first}`, `amp-a-pending-${index}`, "cap-a");
+  }
+  for (let index = 0; index < 8; index += 1) {
+    addAmp(doc, `track:${second}`, `amp-b-${index}`, "cap-a", HUMAN);
+  }
+  assert.equal(Object.keys(snapshot(doc).inserts).length, LIMITS.ampInsertsPerSong);
+
+  // A full song names the way out: two of its amps are proposals nobody has
+  // answered, and declining one is what frees the slot the next amp needs.
+  const over = refuses(() => addAmp(doc, `track:${third}`, "amp-16", "cap-a", HUMAN), "limit");
+  assert.equal(
+    over.message,
+    `A song holds at most ${LIMITS.ampInsertsPerSong} amp inserts, and 2 of them are proposals waiting for an answer; declining a proposal frees a slot.`,
+  );
+
+  // Which is exactly what happens: the agent takes one back and the next amp
+  // lands in the freed slot.
+  runCommand(doc, "insert.remove", { id: "amp-a-pending-1" }, { author: AGENT });
+  const added = addAmp(doc, `track:${third}`, "amp-16", "cap-a", HUMAN);
+  assert.equal(added.summary, "Added an amp to Guitar 3");
+  assert.equal(Object.keys(snapshot(doc).inserts).length, LIMITS.ampInsertsPerSong);
+});
+
