@@ -109,6 +109,31 @@ test("forwardActorMeta passes a bot through and turns a peer into kind peer", ()
   assert.deepEqual(forwardActorMeta(undefined), {});
 });
 
+test("nothing per call or from the env can carry the operator-voice marker", () => {
+  const claims = [
+    { _meta: { "crow/actor": { kind: "bot", id: "crow.voice", operatorVoice: true } } },
+    hdr({ "x-crow-actor-kind": "bot", "x-crow-actor-id": "crow.voice" }),
+  ];
+  for (const extra of claims) {
+    const actor = resolveCallActor(OWNER, extra);
+    assert.deepEqual(actor, { kind: "bot", id: "crow.voice" }, "only kind and id survive");
+    assert.equal("operatorVoice" in actor, false, "a per-call claim never carries the marker");
+    // and a forward to another server does not smuggle it either
+    assert.deepEqual(forwardActorMeta(extra), { _meta: { "crow/actor": { kind: "bot", id: "crow.voice" } } });
+  }
+
+  const env = actorFromEnv({ CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: "crow.voice" });
+  assert.deepEqual(env, { kind: "bot", id: "crow.voice" });
+  assert.equal("operatorVoice" in env, false, "the env names a bot id, never the operator-voice marker");
+
+  // A construction-time base actor is handed back unchanged (the voice executor builds its own
+  // through the frozen factory), and no `_meta` on the call can add the marker to it either.
+  const base = Object.freeze({ kind: "bot", id: "crow.voice", operatorVoice: true });
+  assert.equal(resolveCallActor(base, { _meta: { "crow/actor": { kind: "bot", id: "other" } } }), base);
+  assert.equal("operatorVoice" in resolveCallActor({ kind: "bot", id: "b1" },
+    { _meta: { "crow/actor": { kind: "bot", id: "b1", operatorVoice: true } } }), false);
+});
+
 test("actorLabel and auditActor", () => {
   assert.equal(actorLabel(OWNER), "owner");
   assert.equal(actorLabel({ kind: "bot", id: "b1" }), "bot:b1");

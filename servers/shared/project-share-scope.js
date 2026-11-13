@@ -24,8 +24,10 @@
 //
 // The rules the decision functions implement:
 //   - The operator's own voice bot (`crow.voice`) is the operator: every rule here treats it like
-//     a non-bot actor. The same id arriving from a pi bot session (the engine's marker, carried on
-//     the actor as `botSession`) gets no exemption, and neither does any other bot id.
+//     a non-bot actor — but only when the actor is the frozen one `operatorVoiceActor()` builds, the
+//     marker carrying `operatorVoice: true`. An id is a claim, not a credential: the same id arriving
+//     from a pi bot session (the engine's marker, carried on the actor as `botSession`), from a
+//     per-call `_meta`/header, or from a process env gets no exemption and is an ordinary bound bot.
 //   - An unverified bot (marker present, no bot identity) is refused everything, code `owner_only`.
 //   - A HOME_ONLY call with no `project_id` means the bot's HOME project; never the global or the
 //     device scope. A bot naming `device_id` is refused `owner_only`.
@@ -223,12 +225,32 @@ export function toolPolicyFor(tool, args = {}) {
 const isBot = (actor) => !!(actor && actor.kind === "bot");
 
 /**
- * The operator's own voice bot keeps operator scope. The same id from a pi bot session (the
- * engine's marker) does not, and neither does a token that merely mimics the id without the
- * voice-bot definition behind it — only the id plus no pi-session marker is exempt here.
+ * The one actor that keeps operator scope on the operator's voice bot: frozen, and marked. Only the
+ * in-process voice executor may use it as its construction-time base actor; nothing a caller can
+ * send (a `_meta` actor, an `x-crow-actor-*` header, a process env) carries the marker, and
+ * `resolveCallActor` rebuilds a bot actor from kind and id alone. A bot turn on the pi engine gets
+ * the same id without the marker, so it is bound by the bot rules like any other bot.
+ */
+const OPERATOR_VOICE_ACTOR = Object.freeze({ kind: "bot", id: CROW_VOICE_BOT_ID, operatorVoice: true });
+
+/** The operator-voice base actor: frozen, so `Object.isFrozen` gates the marker. */
+export function operatorVoiceActor() {
+  return OPERATOR_VOICE_ACTOR;
+}
+
+/**
+ * Is this the operator's own voice executor? Only the frozen factory actor qualifies: the id alone,
+ * a copy carrying the flag, or the same id from a pi bot session is an ordinary bound bot.
  */
 export function isOperatorVoice(actor) {
-  return !!(actor && actor.kind === "bot" && actor.id === CROW_VOICE_BOT_ID && !actor.botSession);
+  return !!(
+    actor &&
+    actor.kind === "bot" &&
+    actor.id === CROW_VOICE_BOT_ID &&
+    actor.operatorVoice === true &&
+    Object.isFrozen(actor) &&
+    !actor.botSession
+  );
 }
 
 /** Everything below a bot: any bot actor the bot rules bind (the voice bot is not one). */
