@@ -1062,7 +1062,7 @@ function ampReferenceMoves(insert, params) {
  * rather than one insert's fields.
  * @param {object} snap - the song as it stands before the step
  * @param {string} insertId
- * @param {string} field - `"*"`, `"kind"`, `"params.<name>"`, or another field
+ * @param {string} field - `"*"`, `"kind"`, `"params"`, `"params.<name>"`, or another field
  * @param {any} value - what the step would write
  * @returns {string|null} the sentence, or null when nothing is lost
  */
@@ -1077,6 +1077,9 @@ function insertWriteLosesSound(snap, insertId, field, value) {
       if (!isPlainObject(value)) return null;
       return ampReferenceMoves(insert, value.params) ? AMP_PROPOSAL_FIXED : null;
     }
+    if (field === "params") {
+      return ampReferenceMoves(insert, isPlainObject(value) ? value : {}) ? AMP_PROPOSAL_FIXED : null;
+    }
     if (field.startsWith("params.")) {
       const name = field.slice("params.".length);
       if (!AMP_REFERENCES_IN_PARAMS.includes(name)) return null;
@@ -1090,6 +1093,9 @@ function insertWriteLosesSound(snap, insertId, field, value) {
     // A whole insert put back as another kind is the amp taken away.
     if (typeof value.kind === "string" && value.kind !== AMP_KIND) return AMP_REMOVE_NEEDS_A_YES;
     return ampReferenceMoves(insert, value.params) ? AMP_CAPTURE_NEEDS_A_YES : null;
+  }
+  if (field === "params") {
+    return ampReferenceMoves(insert, isPlainObject(value) ? value : {}) ? AMP_CAPTURE_NEEDS_A_YES : null;
   }
   if (field === "kind") return value === AMP_KIND ? null : AMP_REMOVE_NEEDS_A_YES;
   if (field.startsWith("params.")) {

@@ -41,6 +41,9 @@ const AMP_SECOND_NEEDS_A_YES =
 const AMP_PROPOSAL_FIXED =
   "A proposed amp's capture and cabinet are fixed once proposed; remove it and propose another.";
 
+/** What a live amp whose capture or cabinet an agent moves answers with. */
+const AMP_CAPTURE_NEEDS_A_YES = "Only the operator changes the capture or cabinet an amp plays.";
+
 /** A capture's sha256, as the gateway's upload finish measures it. */
 const CAPTURE_HASH = "c0ffee11".repeat(8);
 
@@ -585,6 +588,90 @@ test("a proposal in a chain does not let a live amp move in beside it", async (t
   const allowed = await hub.undo({ song_id, cmd_id: "operator-undo-proposed-move", entry_id: forged, author: HUMAN });
   assert.equal(allowed.ok, true, `the operator's undo was refused: ${allowed.error}`);
   assert.equal((await snapshotOf(hub, song_id)).inserts["amp-3"].owner, "track:guitar");
+});
+
+test("an agent cannot swap a proposal's capture with a whole params write", async (t) => {
+  const { db, hub } = await setup(t);
+  const song_id = await seedAmpSong(hub);
+  await applies(
+    hub,
+    song_id,
+    "operator-amp-1",
+    "insert.add",
+    { id: "amp-1", owner: "track:guitar", kind: "amp", params: { model_id: "cap-a" } },
+    HUMAN,
+  );
+  await applies(
+    hub,
+    song_id,
+    "agent-amp-2",
+    "insert.add",
+    { id: "amp-2", owner: "track:guitar", kind: "amp", params: { model_id: "cap-b" } },
+    AGENT,
+  );
+
+  // The params map written WHOLE, which is the shape a step back along the
+  // history writes: the capture the operator was asked about would move under
+  // their yes, so it is refused like the one-field write it stands for.
+  const held = (await snapshotOf(hub, song_id)).inserts["amp-2"].params;
+  const forged = await forgeEntry(db, song_id, {
+    command: "insert.set",
+    args: { id: "amp-2" },
+    before: { "insert:amp-2|params": { ...held, model_id: "cap-a" } },
+    after: { "insert:amp-2|params": held },
+  });
+  const refused = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-proposal-params", entry_id: forged, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(refused.error, AMP_PROPOSAL_FIXED);
+  const inserts = (await snapshotOf(hub, song_id)).inserts;
+  assert.equal(inserts["amp-2"].params.model_id, "cap-b", "still the capture it was proposed with");
+  assert.equal(inserts["amp-2"].proposed, true);
+
+  // The operator may take that step: the proposal is theirs to repoint.
+  const allowed = await hub.undo({
+    song_id,
+    cmd_id: "operator-undo-proposal-params",
+    entry_id: forged,
+    author: HUMAN,
+  });
+  assert.equal(allowed.ok, true, `the operator's undo was refused: ${allowed.error}`);
+  assert.equal((await snapshotOf(hub, song_id)).inserts["amp-2"].params.model_id, "cap-a");
+});
+
+test("an agent cannot swap a live amp's capture with a whole params write", async (t) => {
+  const { db, hub } = await setup(t);
+  const song_id = await seedAmpSong(hub);
+  await applies(
+    hub,
+    song_id,
+    "operator-amp-1",
+    "insert.add",
+    { id: "amp-1", owner: "track:guitar", kind: "amp", params: { model_id: "cap-a" } },
+    HUMAN,
+  );
+
+  // The same whole-params write on the amp that plays: the capture it names is
+  // the operator's choice, so a history step may not move it either.
+  const held = (await snapshotOf(hub, song_id)).inserts["amp-1"].params;
+  const forged = await forgeEntry(db, song_id, {
+    command: "insert.set",
+    args: { id: "amp-1" },
+    before: { "insert:amp-1|params": { ...held, model_id: "cap-b" } },
+    after: { "insert:amp-1|params": held },
+  });
+  const refused = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-live-params", entry_id: forged, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(refused.error, AMP_CAPTURE_NEEDS_A_YES);
+  assert.equal((await snapshotOf(hub, song_id)).inserts["amp-1"].params.model_id, "cap-a");
+
+  // The operator may take that step: the capture an amp plays is theirs.
+  const allowed = await hub.undo({ song_id, cmd_id: "operator-undo-live-params", entry_id: forged, author: HUMAN });
+  assert.equal(allowed.ok, true, `the operator's undo was refused: ${allowed.error}`);
+  assert.equal((await snapshotOf(hub, song_id)).inserts["amp-1"].params.model_id, "cap-b");
 });
 
 test("an agent cannot undo its way to a second live amp", async (t) => {
