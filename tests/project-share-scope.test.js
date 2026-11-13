@@ -357,10 +357,14 @@ test("notification reading and dismissing are owner-only; sending one stays neut
     { tool: "crow_create_notification", projectId: home })).allowed, true);
 
   // The operator's voice bot is exempt from the bot rules, notifications included.
-  const voice = { kind: "bot", id: CROW_VOICE_BOT_ID };
+  const voice = S.operatorVoiceActor();
   for (const tool of ["crow_check_notifications", "crow_dismiss_all_notifications"]) {
     assert.equal((await S.decideProjectAccess(db, voice, { tool, projectId: null })).allowed, true, tool);
   }
+  // The bare id is not the operator: an ordinary bot that claims it is refused like any other bot.
+  const claimed = { kind: "bot", id: CROW_VOICE_BOT_ID };
+  assert.equal((await S.decideProjectAccess(db, claimed, { tool: "crow_check_notifications", projectId: null })).allowed,
+    false);
 });
 
 test("a suspended share is refused and recovers when the outside member goes, with no regrant", async () => {
@@ -512,14 +516,22 @@ test("a row inside the home project is reachable by id, and a write class follow
 
 // --- the operator's voice bot ---------------------------------------------------------------
 
-test("the voice bot keeps operator scope on every tool and every project", async () => {
+test("the operator-voice factory actor keeps operator scope on every tool and every project", async () => {
   const X = await mkProject("Voice bot target");
-  const voice = { kind: "bot", id: CROW_VOICE_BOT_ID };
+  const voice = S.operatorVoiceActor();
+  assert.ok(Object.isFrozen(voice), "the marker is only trusted on a frozen actor");
+  assert.deepEqual({ ...voice }, { kind: "bot", id: CROW_VOICE_BOT_ID, operatorVoice: true });
   assert.equal(S.isOperatorVoice(voice), true);
+  assert.equal(S.operatorVoiceActor(), voice, "the factory always hands back the same actor");
+  // The id alone is not the operator; neither is an unfrozen copy of the marker.
+  assert.equal(S.isOperatorVoice({ kind: "bot", id: CROW_VOICE_BOT_ID }), false);
+  assert.equal(S.isOperatorVoice({ kind: "bot", id: CROW_VOICE_BOT_ID, operatorVoice: true }), false,
+    "a non-frozen actor carrying the flag is not trusted");
   assert.equal(S.isOperatorVoice({ kind: "bot", id: CROW_VOICE_BOT_ID, botSession: true }), false);
-  assert.equal(S.isOperatorVoice({ kind: "bot", id: `${CROW_VOICE_BOT_ID}.2` }), false);
+  assert.equal(S.isOperatorVoice({ kind: "bot", id: `${CROW_VOICE_BOT_ID}.2`, operatorVoice: true }), false);
   assert.equal(S.isOperatorVoice(OWNER), false);
   assert.equal(S.isOperatorVoice(UNKNOWN), false);
+  assert.equal(S.isOperatorVoice(null), false);
 
   for (const tool of allNames()) {
     const d = await S.decideProjectAccess(db, voice, { tool, projectId: X, args: { dry_run: false } });
@@ -529,13 +541,63 @@ test("the voice bot keeps operator scope on every tool and every project", async
   assert.equal(await S.botReadScope(db, voice), null);
   assert.deepEqual(await S.botWriteProject(db, voice, null), { projectId: null });
   assert.equal((await S.decideRowAccess(db, voice, { tool: "crow_get_memory", rowProjectId: null })).allowed, true);
+  assert.deepEqual(await S.makeShareGate(db, "crow_create_project", { baseActor: voice }).check(X), { projectId: X });
+  assert.deepEqual(await S.makeShareGate(db, "crow_get_memory", { baseActor: voice }).readScope(), null);
   assert.equal((await audits(X)).length, 0);
+});
+
+test("no per-call claim or env actor can stand in for the operator's voice bot", async () => {
+  const X = await mkProject("Claimed voice target");
+  const { resolveCallActor, actorFromEnv } = await import("../servers/research/actor.js");
+
+  const metaExtra = { _meta: { "crow/actor": { kind: "bot", id: CROW_VOICE_BOT_ID, operatorVoice: true } } };
+  const headerExtra = {
+    requestInfo: { headers: { "x-crow-actor-kind": "bot", "x-crow-actor-id": CROW_VOICE_BOT_ID } },
+  };
+  const forged = [
+    ["_meta", metaExtra, resolveCallActor(OWNER, metaExtra)],
+    ["header", headerExtra, resolveCallActor(OWNER, headerExtra)],
+    ["env", null, actorFromEnv({ CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: CROW_VOICE_BOT_ID })],
+  ];
+
+  for (const [label, extra, actor] of forged) {
+    assert.equal(actor.kind, "bot", label);
+    assert.equal(actor.id, CROW_VOICE_BOT_ID, label);
+    assert.equal(actor.operatorVoice, undefined, `${label}: no path outside the factory sets the marker`);
+    assert.equal(S.isOperatorVoice(actor), false, label);
+
+    // Every decision function binds it to the bot rules: no home project, so it sees nothing.
+    assert.equal((await S.decideProjectAccess(db, actor, { tool: "crow_search_sources", projectId: X })).code,
+      "no_share", label);
+    assert.equal((await S.decideProjectAccess(db, actor, { tool: "crow_create_project", projectId: X })).code,
+      "owner_only", label);
+    assert.deepEqual(await S.botReadScope(db, actor), { homeProjectId: null }, label);
+    assert.equal((await S.botWriteProject(db, actor, null)).refused, true, label);
+    assert.equal((await S.decideRowAccess(db, actor, { tool: "crow_get_memory", rowProjectId: null })).code,
+      "no_share", label);
+
+    if (extra) {
+      const gate = S.makeShareGate(db, "crow_get_context", { baseActor: OWNER, extra });
+      assert.equal(S.isOperatorVoice(gate.actor), false, label);
+      assert.equal((await gate.check(undefined)).isError, true, `${label}: a HOME_ONLY call is refused`);
+      assert.equal((await gate.check(X)).isError, true, label);
+      assert.deepEqual(await gate.readScope(), { homeProjectId: null }, label);
+      assert.equal((await gate.writeProject(undefined)).refused, true, label);
+    }
+  }
+
+  // The same claim on a mount whose base is already a bot is ignored, not merged in.
+  const base = resolveCallActor(UNKNOWN, metaExtra);
+  assert.equal(S.isOperatorVoice(base), false);
+  assert.equal(S.isOperatorVoice(resolveCallActor(base, metaExtra)), false);
 });
 
 test("the same id from a pi bot session gets no exemption, and no other bot id ever does", async () => {
   const X = await mkProject("Marked voice target");
   const marked = { kind: "bot", id: CROW_VOICE_BOT_ID, botSession: true };
   const readTool = "crow_search_sources";
+  assert.equal(S.isOperatorVoice(Object.freeze({ ...S.operatorVoiceActor(), botSession: true })), false,
+    "a pi-session marker beats the operator-voice marker");
 
   const d = await S.decideProjectAccess(db, marked, { tool: readTool, projectId: X });
   assert.equal(d.allowed, false);
@@ -618,7 +680,7 @@ test("I3: the schedule tools are owner_only for a bot, home project or not", asy
     }
   }
 
-  const voice = { kind: "bot", id: CROW_VOICE_BOT_ID };
+  const voice = S.operatorVoiceActor();
   assert.equal((await S.decideProjectAccess(db, voice, { tool: "crow_create_schedule", projectId: X })).allowed, true,
     "the operator's voice bot stays exempt");
 });
