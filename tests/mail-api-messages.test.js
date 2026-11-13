@@ -32,8 +32,9 @@ const { default: express, json: expressJson } = await import("express");
 const { createDbClient } = await import("../servers/db.js");
 const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
 const { mailApiRouter, clearMailApiRuntime, MAIL_API_PREFIX } = await import("../servers/gateway/routes/mail-api.js");
+const { setMessageRouteCaps } = await import("../servers/gateway/routes/mail-api-messages.js");
 const { MAIL_ERROR_TEXT } = await import("../servers/gateway/mail/errors.js");
-const { createAccount, isImageAllowed } = await import("../servers/gateway/mail/store/accounts.js");
+const { createAccount, isImageAllowed, updateAccount } = await import("../servers/gateway/mail/store/accounts.js");
 const { setFolderSyncState, upsertFolders, upsertMessage } = await import("../servers/gateway/mail/store/messages.js");
 const { createFakeMailAdapter } = await import("./fixtures/fake-mail-adapter.mjs");
 
@@ -81,6 +82,7 @@ before(() => {
 
 beforeEach(() => {
   clearMailApiRuntime();
+  setMessageRouteCaps({});
   process.env.CROW_MAIL = "1";
 });
 
@@ -126,6 +128,15 @@ const del = (path, { body, ...opts } = {}) => call("DELETE", path, { body, ...op
 
 const page = (params) => `${MESSAGES}?${new URLSearchParams(params).toString()}`;
 
+/** Wait until `predicate()` holds: a route's in-flight window is the point of an assertion. */
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(`timed out waiting for ${label}`);
+}
+
 /** Capture console.warn while `fn` runs: a log line must carry no value. */
 async function warnings(fn) {
   const lines = [];
@@ -156,7 +167,7 @@ function makeSupervisor(adapterFor) {
   };
 }
 
-async function setup({ supervisor = undefined } = {}) {
+async function setup({ supervisor = undefined, caps = {} } = {}) {
   const dir = join(root, "t" + (++n));
   mkdirSync(dir);
   const crow = join(dir, "crow.db");
@@ -165,6 +176,7 @@ async function setup({ supervisor = undefined } = {}) {
 
   const db = createDbClient(crow);
   open.push(db);
+  setMessageRouteCaps(caps);
 
   const adapters = new Map();
   const adapterFor = (accountId) => {
@@ -746,6 +758,154 @@ test("RF2: an adapter failure while paging older mail answers only the code's fi
     assert.equal(text.includes(SEEDED), false, "the seeded secret travels nowhere");
   }
   assert.equal(await s.count("mail_messages"), 1, "nothing was touched");
+});
+
+test("the image allow list is written only with a CSRF token, for POST and DELETE alike", async () => {
+  const s = await setup();
+  const { account } = await seedAccount(s);
+
+  const posted = await post(IMAGE_ALLOW, { accountId: account.id, sender: "sam@example.com" }, { csrf: null });
+  assert.equal(posted.status, 403, posted.text);
+  assert.match(posted.text, /CSRF/i, "the dashboard rail answers, not this router");
+
+  const deleted = await del(IMAGE_ALLOW, { body: { accountId: account.id, sender: "sam@example.com" }, csrf: null });
+  assert.equal(deleted.status, 403, deleted.text);
+  assert.match(deleted.text, /CSRF/i, "the dashboard rail answers, not this router");
+
+  assert.equal(await s.count("mail_image_allow"), 0, "no allowance was written");
+});
+
+test("POST /search/remote with no account named asks only the accounts this instance may talk to", async () => {
+  const s = await setup();
+  const active = await seedAccount(s, { address: "alex@example.com", label: "Personal" });
+  const held = await seedAccount(s, { address: "sam@example.com", label: "Held elsewhere" });
+  const signedOut = await seedAccount(s, { address: "kim@example.com", label: "Signed out" });
+  await updateAccount(s.db, held.account.id, { status: "claimed_elsewhere" });
+  await updateAccount(s.db, signedOut.account.id, { status: "auth_failed" });
+
+  const r = await post(REMOTE_SEARCH, { q: "zebra" });
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(r.json, { added: 0, failures: [] });
+
+  const asked = s.supervisor.calls.filter((call) => call[0] === "withAdapter").map((call) => call[1]);
+  assert.deepEqual(asked, [active.account.id], "only the active account was searched");
+  assert.equal(s.adapters.has(held.account.id), false, "no adapter was built for the account held elsewhere");
+  assert.equal(s.adapters.has(signedOut.account.id), false, "none for the signed-out account either");
+});
+
+test("a display name that spells an allow-listed address does not unlock images", async () => {
+  const s = await setup();
+  const { account, inbox } = await seedAccount(s);
+  assert.equal((await post(IMAGE_ALLOW, { accountId: account.id, sender: "alex@example.com" })).status, 200);
+
+  const raw = [
+    'From: "alex@example.com" <evil@x.test>',
+    'To: alex@example.com',
+    'Subject: Spoofed zebra',
+    'Date: Wed, 01 Oct 2025 10:00:00 +0000',
+    'Message-ID: <spoof-1@mail.example.test>',
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset="utf-8"',
+    '',
+    '<p>spoofed zebra body</p><img src="https://track.example.test/pixel.gif" width="1" height="1">',
+    '',
+  ].join("\r\n");
+  s.adapterFor(account.id).deliver("INBOX", raw, { internalDate: Date.now() });
+
+  const stored = await post(REMOTE_SEARCH, { q: "spoofed zebra", account: account.id });
+  assert.equal(stored.status, 200, stored.text);
+  assert.equal(stored.json.added, 1, "the spoofed message was stored through the search");
+
+  const rows = await s.db.execute({
+    sql: "SELECT id FROM mail_messages WHERE folder_id = ?",
+    args: [inbox.id],
+  });
+  assert.equal(rows.rows.length, 1);
+  const shown = await get(`${MESSAGES}/${rows.rows[0].id}`);
+  assert.equal(shown.status, 200, shown.text);
+  assert.deepEqual(shown.json.from, { name: "alex@example.com", address: "evil@x.test" });
+  assert.equal(shown.json.body.imagesShown, false, "the allow-listed address is the display name, not the sender");
+  assert.equal(shown.json.body.blockedRemoteImageCount, 1);
+  assert.equal(shown.text.includes("pixel.gif"), false, "the tracking pixel stays blocked");
+});
+
+test("a stored attachments_json that is not a list is an empty attachment list", async () => {
+  const s = await setup();
+  const { account, inbox } = await seedAccount(s);
+  const written = await seedMessage(s, account, inbox, { uid: 1, subject: "Odd row" });
+  await s.db.execute({
+    sql: "UPDATE mail_messages SET attachments_json = ? WHERE id = ?",
+    args: ["{}", written.id],
+  });
+
+  const r = await get(`${MESSAGES}/${written.id}`);
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(r.json.attachments, []);
+});
+
+test("POST /search/remote caps one account's search and reports TIMEOUT for it", async () => {
+  const s = await setup({ caps: { remoteSearchCapMs: 20 } });
+  const { account } = await seedAccount(s);
+  s.adapterFor(account.id).hangNext("search");
+
+  const started = Date.now();
+  const r = await post(REMOTE_SEARCH, { q: "zebra", account: account.id });
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(r.json, { added: 0, failures: [{ accountId: account.id, error: MAIL_ERROR_TEXT.TIMEOUT }] });
+  assert.ok(Date.now() - started < 5000, "the cap answered instead of the hung call");
+});
+
+test("POST /folders/:id/older caps one folder's page and answers 504 TIMEOUT", async () => {
+  const s = await setup({ caps: { olderCapMs: 20 } });
+  const { account, inbox } = await seedAccount(s);
+  await seedMessage(s, account, inbox, { uid: 5, subject: "Local" });
+  await setFolderSyncState(s.db, inbox.id, { uidValidity: 71, highestUid: 5, floorUid: 5 });
+  s.adapterFor(account.id).hangNext("list");
+
+  const started = Date.now();
+  const r = await post(olderPath(inbox.id), {});
+  assert.equal(r.status, 504, r.text);
+  assert.deepEqual(r.json, { error: "TIMEOUT", message: MAIL_ERROR_TEXT.TIMEOUT });
+  assert.ok(Date.now() - started < 5000, "the cap answered instead of the hung call");
+});
+
+test("a second in-flight search for one account answers 409 busy", async () => {
+  const s = await setup({ caps: { remoteSearchCapMs: 300 } });
+  const { account } = await seedAccount(s);
+  s.adapterFor(account.id).hangNext("search");
+
+  const first = post(REMOTE_SEARCH, { q: "zebra", account: account.id });
+  await waitFor(() => s.supervisor.calls.some((call) => call[0] === "withAdapter"), "the first search to start");
+
+  const second = await post(REMOTE_SEARCH, { q: "zebra", account: account.id });
+  assert.equal(second.status, 409, second.text);
+  assert.deepEqual(second.json, { error: "busy", message: "That is already running." });
+
+  const firstDone = await first;
+  assert.equal(firstDone.status, 200, firstDone.text);
+  assert.deepEqual(firstDone.json.failures, [{ accountId: account.id, error: MAIL_ERROR_TEXT.TIMEOUT }]);
+
+  const third = await post(REMOTE_SEARCH, { q: "zebra", account: account.id });
+  assert.equal(third.status, 200, "the account is searched again once the first call has ended");
+});
+
+test("a second in-flight older page for one account answers 409 busy", async () => {
+  const s = await setup({ caps: { olderCapMs: 300 } });
+  const { account, inbox } = await seedAccount(s);
+  await seedMessage(s, account, inbox, { uid: 5, subject: "Local" });
+  await setFolderSyncState(s.db, inbox.id, { uidValidity: 71, highestUid: 5, floorUid: 5 });
+  s.adapterFor(account.id).hangNext("list");
+
+  const first = post(olderPath(inbox.id), {});
+  await waitFor(() => s.supervisor.calls.some((call) => call[0] === "withAdapter"), "the first page to start");
+
+  const second = await post(olderPath(inbox.id), {});
+  assert.equal(second.status, 409, second.text);
+  assert.deepEqual(second.json, { error: "busy", message: "That is already running." });
+
+  const firstDone = await first;
+  assert.equal(firstDone.status, 504, firstDone.text);
+  assert.deepEqual(firstDone.json, { error: "TIMEOUT", message: MAIL_ERROR_TEXT.TIMEOUT });
 });
 
 test("a Gmail-style duplicate is one inbox row and one search hit; the store lists its two rows", async () => {

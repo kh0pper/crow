@@ -13,10 +13,12 @@
  * `withAdapter`, which refuses a `claimed_elsewhere` or an `auth_failed` account without connecting
  * and bounds one call with its own hard timer; the route adds the per-call deadline the engine
  * honours between batches (ten seconds to search one account's server, a minute to page one folder's
- * history). A search of the server is a WRITE — its hits are stored — so it is a POST; `GET /search`
+ * history) and its own hard cap around the whole call, so a server that stalls inside a batch still
+ * answers. One account runs one of these at a time: a second call while it is in flight is 409
+ * `busy`. A search of the server is a WRITE — its hits are stored — so it is a POST; `GET /search`
  * is local only and refuses a `remote` parameter instead of writing on a read.
  */
-import { toMailError, MAIL_ERROR_TEXT } from "../mail/errors.js";
+import { MailError, toMailError, MAIL_ERROR_TEXT } from "../mail/errors.js";
 import { bodyForDisplay } from "../mail/sanitize.js";
 import {
   addImageAllow,
@@ -47,6 +49,27 @@ const QUERY_MAX_CHARS = 200;
 /** How long one account's server-side search may take, and one folder's backfill. */
 const REMOTE_SEARCH_DEADLINE_MS = 10 * 1000;
 const OLDER_DEADLINE_MS = 60 * 1000;
+
+/** The answer for a second call of a route already running for one account. */
+const BUSY_TEXT = "That is already running.";
+
+/** The caps in force when `registerMessageRoutes`' own ctx names none (see `setMessageRouteCaps`). */
+let defaultCaps = Object.freeze({
+  remoteSearchCapMs: REMOTE_SEARCH_DEADLINE_MS,
+  olderCapMs: OLDER_DEADLINE_MS,
+});
+
+/**
+ * Replace the default wall-clock caps for the routes registered afterwards. A `registerMessageRoutes`
+ * ctx option of the same name wins over these; boot sets neither, so production runs the constants
+ * above. A test uses a few milliseconds instead of waiting out a real cap.
+ */
+export function setMessageRouteCaps({ remoteSearchCapMs, olderCapMs } = {}) {
+  defaultCaps = Object.freeze({
+    remoteSearchCapMs: capMs(remoteSearchCapMs, REMOTE_SEARCH_DEADLINE_MS),
+    olderCapMs: capMs(olderCapMs, OLDER_DEADLINE_MS),
+  });
+}
 
 /** How many server-side hits one account's search may bring back. */
 const DEFAULT_REMOTE_SEARCH_LIMIT = 50;
@@ -112,6 +135,31 @@ function addressList(list) {
   }));
 }
 
+/** One cap in milliseconds: the configured value when it is a positive number, else the default. */
+function capMs(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * One server round-trip under a hard wall-clock cap, because the per-call deadline the engine honours
+ * is only checked between batches: a server that never answers, or one that stalls inside a batch,
+ * would hold the request for as long as its socket lives. The cap answers TIMEOUT (the supervisor
+ * closes the adapter under the call), and the timer is cleared whether the call or the cap won, so a
+ * finished request leaves nothing armed.
+ */
+async function withCap(ms, run, detail) {
+  let timer = null;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new MailError("TIMEOUT", detail)), ms);
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(run), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * The mail API's mailbox routes, registered on the router `mail-api.js` already guards.
  *
@@ -122,6 +170,16 @@ function addressList(list) {
 export function registerMessageRoutes(router, ctx) {
   const { route, sendError, logCode } = ctx;
   const base = MAIL_API_PREFIX;
+  const remoteSearchCapMs = capMs(ctx.remoteSearchCapMs ?? defaultCaps.remoteSearchCapMs, REMOTE_SEARCH_DEADLINE_MS);
+  const olderCapMs = capMs(ctx.olderCapMs ?? defaultCaps.olderCapMs, OLDER_DEADLINE_MS);
+
+  // One call per account at a time on each server-touching route: a second click while the first
+  // still runs is answered busy instead of opening another connection for the same mailbox.
+  const inFlightRemoteSearch = new Set();
+  const inFlightOlder = new Set();
+
+  /** The 409 for a route already running for that account. */
+  const sendBusy = (res) => sendError(res, 409, "busy", BUSY_TEXT);
 
   /**
    * Which account a list or a search covers: `all` (or nothing) means every account, an id means that
@@ -216,7 +274,7 @@ export function registerMessageRoutes(router, ctx) {
       cc: addressList(message.cc),
       date: message.date,
       isRead: message.isRead,
-      attachments: message.attachments.map(attachmentSummary),
+      attachments: (Array.isArray(message.attachments) ? message.attachments : []).map(attachmentSummary),
       body: {
         html: body.html,
         source: body.source,
@@ -292,30 +350,37 @@ export function registerMessageRoutes(router, ctx) {
       ? [scope.account]
       : (await listAccounts(db)).filter((account) => account.status === "active");
 
+    if (targets.some((account) => inFlightRemoteSearch.has(account.id))) return sendBusy(res);
+    for (const account of targets) inFlightRemoteSearch.add(account.id);
+
     let added = 0;
     const failures = [];
-    for (const account of targets) {
-      try {
-        const result = await supervisor.withAdapter(account.id, (adapter) => searchRemote(
-          {
-            db,
-            adapter,
-            now: Date.now,
-            deadlineAt: Date.now() + REMOTE_SEARCH_DEADLINE_MS,
-            log: logEngineEvent,
-          },
-          account.id,
-          text,
-          { limit },
-        ));
-        added += Number(result?.added) || 0;
-      } catch (err) {
-        // One account's refusal is that account's row in `failures`, in the code's own sentence; the
-        // accounts after it still run, and the answer still reports the rows the others stored.
-        const mailErr = toMailError(err);
-        failures.push({ accountId: account.id, error: MAIL_ERROR_TEXT[mailErr.code] });
-        logCode("POST /search/remote", mailErr);
+    try {
+      for (const account of targets) {
+        try {
+          const result = await withCap(remoteSearchCapMs, () => supervisor.withAdapter(account.id, (adapter) => searchRemote(
+            {
+              db,
+              adapter,
+              now: Date.now,
+              deadlineAt: Date.now() + remoteSearchCapMs,
+              log: logEngineEvent,
+            },
+            account.id,
+            text,
+            { limit },
+          )), "remote_search_cap");
+          added += Number(result?.added) || 0;
+        } catch (err) {
+          // One account's refusal is that account's row in `failures`, in the code's own sentence; the
+          // accounts after it still run, and the answer still reports the rows the others stored.
+          const mailErr = toMailError(err);
+          failures.push({ accountId: account.id, error: MAIL_ERROR_TEXT[mailErr.code] });
+          logCode("POST /search/remote", mailErr);
+        }
       }
+    } finally {
+      for (const account of targets) inFlightRemoteSearch.delete(account.id);
     }
     res.json({ added, failures });
   }));
@@ -334,12 +399,18 @@ export function registerMessageRoutes(router, ctx) {
     const supervisor = supervisorNow();
     if (!supervisor) return sendError(res, 503, "unavailable");
 
-    const outcome = await supervisor.withAdapter(folder.accountId, (adapter) => fetchOlder(
-      { db, adapter, now: Date.now, deadlineAt: Date.now() + OLDER_DEADLINE_MS },
-      folder.accountId,
-      folder.id,
-    ));
-    res.json({ added: Number(outcome?.added) || 0, reachedStart: outcome?.reachedStart === true });
+    if (inFlightOlder.has(folder.accountId)) return sendBusy(res);
+    inFlightOlder.add(folder.accountId);
+    try {
+      const outcome = await withCap(olderCapMs, () => supervisor.withAdapter(folder.accountId, (adapter) => fetchOlder(
+        { db, adapter, now: Date.now, deadlineAt: Date.now() + olderCapMs },
+        folder.accountId,
+        folder.id,
+      )), "older_cap");
+      res.json({ added: Number(outcome?.added) || 0, reachedStart: outcome?.reachedStart === true });
+    } finally {
+      inFlightOlder.delete(folder.accountId);
+    }
   }));
 }
 
