@@ -231,6 +231,19 @@ const MIDI_SCRIPT = await loadPanelScript("midi.js", "MIDI_SCRIPT");
 const MIDI_ROUTE_SCRIPT = await loadPanelScript("midi-route.js", "MIDI_ROUTE_SCRIPT");
 
 /**
+ * The head tag that makes Turbo do a full load of this page.
+ *
+ * The gateway adds `'wasm-unsafe-eval'` to the Content-Security-Policy only for
+ * responses under `/dashboard/studio` (the audio worklet compiles the SunVox
+ * WASM engine). Turbo Drive keeps the FIRST page's policy for the document it
+ * navigates in place, so a Studio reached from another dashboard page would
+ * have no wasm and no audio. A full load is the fix: the response's own CSP is
+ * then the one the page runs under. A panel cannot write the document head, but
+ * the dashboard layout renders an extra-head option, and that is this.
+ */
+const TURBO_RELOAD_HEAD = '<meta name="turbo-visit-control" content="reload">';
+
+/**
  * Escape a value for use in HTML text or a double-quoted attribute.
  * @param {unknown} value
  * @returns {string}
@@ -930,6 +943,12 @@ const STYLES = `
   .studio .st-step-sel { border-color: var(--st-human); }
   .studio .st-step-held { border-color: var(--st-human); background: #2A2418; }
   .studio .st-step-lock { border-color: var(--st-human); background: #2A2418; box-shadow: inset 0 0 0 1px var(--st-human); }
+  /* Where the transport is in the steps: an outline inside the cell, so it reads
+     apart from a selected step (a border) and from a hit (a white border). */
+  .studio .st-step-now {
+    outline: 2px solid var(--st-agent); outline-offset: -2px; background: #1A2730;
+  }
+  .studio .st-step-hint { margin: 0; font-size: 11px; line-height: 1.45; color: var(--st-muted); }
   .studio .st-step-fill { position: absolute; left: 0; right: 0; bottom: 0; background: #B6D98A; }
   .studio .st-step-num {
     position: relative; z-index: 1; font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1111,8 +1130,10 @@ async function listProjects(db) {
 /** The dashboard layout, or a bare page when the panel is rendered on its own. */
 function renderer(layout) {
   if (typeof layout === "function") return layout;
-  return ({ title, content }) =>
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head><body>${content}</body></html>`;
+  return ({ title, content, head }) =>
+    `<!doctype html><html lang="en"><head><meta charset="utf-8">${
+      head || TURBO_RELOAD_HEAD
+    }<title>${escapeHtml(title)}</title></head><body>${content}</body></html>`;
 }
 
 /** The song library page. */
@@ -1165,7 +1186,7 @@ ${MIDI_SCRIPT}
 ${CLIENT_SCRIPT}</script>
     </div>`;
 
-  res.send(render({ title: "Studio", content }));
+  res.send(render({ title: "Studio", content, head: TURBO_RELOAD_HEAD }));
 }
 
 /** One song's studio page. */
@@ -1260,7 +1281,7 @@ ${CLIENT_SCRIPT}</script>
       <script src="/dashboard/studio/assets/resample.js"></script>
     </div>`;
 
-  res.send(render({ title: "Studio", content }));
+  res.send(render({ title: "Studio", content, head: TURBO_RELOAD_HEAD }));
 }
 
 export default {
