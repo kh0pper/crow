@@ -456,7 +456,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
       def, sessionDir, resolved, piProvider, selfAuthoringDir: null,
       piSessionId: null, appendSystemPromptFile: sysFile,
       projectWorkspaceDir, mcpDelivery, mcpConfig, botId: job.bot_id,
-      // The logging above is a snapshot of every bare entry's real tool names ({} when the
+      // The listing above is a snapshot of every bare entry's real tool names ({} when the
       // def has none): PiRpc's --tools assembly reads it, never the module cache.
       bareServerTools,
       serviceBlocks: svcPrep.piRpcOpts.serviceBlocks || null,

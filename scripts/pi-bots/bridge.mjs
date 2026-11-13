@@ -79,7 +79,7 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 import { buildBotWorld, prepareSpawn, bindWorldSession, withServiceBlocks, withSatelliteBlocks } from "./bot-world.mjs";
 import { expandServiceEntry, turnScopeFor } from "./service-blocks.mjs";
 import { expandSatelliteEntry } from "./satellite-blocks.mjs";
-import { expandBareEntry } from "./bare-server-tools.mjs";
+import { expandBareEntry, isSpellableEntry, warnInvalidEntry } from "./bare-server-tools.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath, botsProjectsRoot } from "./instance-paths.mjs";
 import { botWorkspaceEnv, BOT_WORKSPACE_KEYS, BOT_ID_RE } from "./bot-workspace-env.mjs";
@@ -332,15 +332,24 @@ export function toolAllowlist(def, { remoteEnabled = false, serviceBlocks = null
   // bare-server-tools.mjs lists them and the entry expands to the names pi really offers.
   // The listing is passed in EXPLICITLY (`bareServerTools`, the map primeBareServerTools
   // returned, carried on piRpcOpts so the budget check and the spawn see one snapshot);
-  // nothing is read from the cache here. No map or no entry for the id — every non-owner
-  // turn, and any server that could not be listed — keeps today's spelling byte for byte. A
-  // SATELLITE-hosted bundle is never expanded locally: it has no local server, it is spelled
-  // from its block above when granted, and a bare entry for it keeps today's spelling.
-  const mcp = ((def.tools && def.tools.crow_mcp) || []).flatMap((s) =>
-    expandServiceEntry(s, { serviceBlocks, skippedTools: serviceSkippedTools })
-    || expandSatelliteEntry(s, { satelliteBlocks })
-    || expandBareEntry(s, { bareServerTools, skippedTools: serviceSkippedTools, satelliteBundles: Object.values(satelliteBlocks || {}) })
-    || ["mcp__" + s.replace("/", "__")]);
+  // nothing is read from the cache here. prepareSpawn primes on EVERY turn — the owner's
+  // Perch turn, a stranger's Discord or Gmail turn, a job — so a bare entry now expands to
+  // the server's whole listing on every channel turn (a connection service is still
+  // skipped: its tools come from a project's connections). Only a server with no listing, a
+  // failed listing, or a SATELLITE-hosted bundle keeps today's spelling byte for byte. A
+  // satellite-hosted bundle is never expanded locally: it has no local server, it is
+  // spelled from its block above when granted.
+  const mcp = ((def.tools && def.tools.crow_mcp) || []).flatMap((s) => {
+    const spelled = expandServiceEntry(s, { serviceBlocks, skippedTools: serviceSkippedTools })
+      || expandSatelliteEntry(s, { satelliteBlocks })
+      || expandBareEntry(s, { bareServerTools, skippedTools: serviceSkippedTools, satelliteBundles: Object.values(satelliteBlocks || {}) });
+    if (spelled) return spelled;
+    // Nothing claimed it: today's plain spelling — but only for an entry shaped like an
+    // id, an `id/tool` or an `id__tool`. An entry outside that alphabet ("a,read") is
+    // dropped whole, never split into a csv field of its own, and warned about once.
+    if (!isSpellableEntry(s)) { warnInvalidEntry(s); return []; }
+    return ["mcp__" + s.replace("/", "__")];
+  });
   const out = [...builtin, ...mcp];
   if (remoteEnabled) {
     // Server-level allow per remote capability (= all that capability's tools;

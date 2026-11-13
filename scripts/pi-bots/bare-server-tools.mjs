@@ -21,9 +21,11 @@
  *
  * Tool names are provider data (an add-on may list anything at all), so a name is only
  * kept when pi-lab's `mcp__<id>__<name>` spelling it produces is a plausible tool name:
- * `^[A-Za-z0-9_-]+$` and at most PI_TOOL_NAME_MAX characters overall. Without that, a
- * listed name like `ok_tool,read` would be joined into pi's `--tools` csv and hand the
- * model a built-in (`read`) the def never granted.
+ * letters, digits and "-" joined by SINGLE "_" separators (no `__`, no leading or
+ * trailing "_") and at most PI_TOOL_NAME_MAX characters overall. Without that, a listed
+ * name like `ok_tool,read` would be joined into pi's `--tools` csv and hand the model a
+ * built-in (`read`) the def never granted, and a name like `x__y` would move the tool
+ * boundary pi reads in `mcp__<id>__<name>`.
  */
 import { mcpAddonBlockFor, extensionTools } from "./ext_registry.mjs";
 import { crowServerCatalog } from "./crow-server-catalog.mjs";
@@ -52,10 +54,27 @@ const CONNECTION_SERVICE_REASON = "tools come from its connections";
  */
 const SEALED_ADDON_REASON = "sealed add-on: keys are not readable from this process";
 
-/** A listed tool name becomes part of `mcp__<id>__<name>`: only this alphabet is safe. */
-export const TOOL_NAME_RE = /^[A-Za-z0-9_-]+$/;
+/**
+ * One name: letters, digits and "-", with any runs joined by a SINGLE "_". A doubled
+ * "_" would move the server/tool boundary pi reads in `mcp__<id>__<name>`, and a leading
+ * or trailing "_" is a shape pi-lab never registers, so neither is a name we accept.
+ */
+const NAME_SRC = "[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*";
+/** A listed tool name becomes part of `mcp__<id>__<name>`: only this shape is safe. */
+export const TOOL_NAME_RE = new RegExp("^" + NAME_SRC + "$");
 /** A server id is both a block name and half of every tool name it expands to. */
-export const SERVER_ID_RE = /^[A-Za-z0-9_-]+$/;
+export const SERVER_ID_RE = new RegExp("^" + NAME_SRC + "$");
+/**
+ * The loosest shape a crow_mcp entry may still fall back to today's plain spelling in: an
+ * id, an `id/tool` or an `id__tool`, over letters, digits, "_" and "-" (existing defs
+ * spell all three). Anything else is not a name at all and contributes NO tool name.
+ */
+export const FALLBACK_ENTRY_RE = /^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)?$/;
+
+/** May this crow_mcp entry be spelled as one plain `mcp__<...>` name at all? */
+export function isSpellableEntry(entry) {
+  return typeof entry === "string" && FALLBACK_ENTRY_RE.test(entry);
+}
 
 /**
  * One listing per Crow home per server id: two homes on one box (or a scratch home in a
@@ -71,6 +90,22 @@ const warned = new Set();
 const warnedNames = new Set();
 /** home+id -> the ONE listing promise in flight for it (concurrent primes share it). */
 const inflight = new Map();
+/** crow_mcp entries already warned about as junk in THIS process (one line per entry). */
+const warnedEntries = new Set();
+
+/**
+ * One line per distinct crow_mcp entry per process: an entry that is not an id, an
+ * `id/tool` or an `id__tool` is dropped whole, never split into an invented tool name.
+ * Deduped so the same junk entry costs one line however many turns it rides on.
+ */
+export function warnInvalidEntry(entry, log = (m) => console.warn(m)) {
+  const key = String(entry);
+  if (warnedEntries.has(key)) return;
+  warnedEntries.add(key);
+  try {
+    log('crow_mcp entry "' + key + '" is not a valid server or tool name and was dropped');
+  } catch { /* a logger that throws must not break the turn */ }
+}
 
 /**
  * A bare server entry: a non-empty name with no "/" (not a per-tool entry), no "__"
@@ -111,6 +146,7 @@ export function _resetBareServerToolsForTest() {
   cache.clear();
   warned.clear();
   warnedNames.clear();
+  warnedEntries.clear();
   inflight.clear();
 }
 
@@ -219,8 +255,9 @@ function warnDroppedNames(crowHome, serverId, dropped, log) {
   warnedNames.add(key);
   try {
     log('bare server "' + serverId + '" in crow_mcp listed ' + dropped
-      + ' tool name(s) that are not a valid pi tool name (letters, digits, "_" and "-" only, and at most '
-      + PI_TOOL_NAME_MAX + ' characters as mcp__' + serverId + '__<name>); they are not granted');
+      + ' tool name(s) that are not a valid pi tool name (letters, digits, "_" and "-" only, single "_"'
+      + ' separators, and at most ' + PI_TOOL_NAME_MAX
+      + ' characters as mcp__' + serverId + '__<name>); they are not granted');
   } catch { /* a logger that throws must not break the turn */ }
 }
 
@@ -248,8 +285,9 @@ export async function primeBareServerTools(def, { crowHome, log = () => {}, prob
     for (const entry of Array.isArray(list) ? list : []) {
       if (!isBareServerEntry(entry) || want.includes(entry)) continue;
       if (!isValidServerId(entry)) {
-        // Not a server id (a comma, a space, a newline ...): never probed, never expanded.
-        warnUnlisted(crowHome, entry, "not a valid server id (letters, digits, _ and - only)", log);
+        // Not a server id (a comma, a space, a newline ...): never probed, never expanded,
+        // and dropped whole by the csv assembly — so say exactly that, not "it stays".
+        warnInvalidEntry(entry, log);
         continue;
       }
       const fresh = freshEntry(crowHome, entry, now);

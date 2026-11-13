@@ -174,13 +174,13 @@ test("the eval seam's spawn-opts check clones and compares bareServerTools like 
     "an empty snapshot is plain data too");
 });
 
-test("defaultCompanionBudget counts the expanded names when given the snapshot", async () => {
+test("defaultCompanionBudget counts the expanded names, with or without a caller's snapshot", async () => {
   const d = def();
   const perTool = { tools: { pi_builtin: ["read"], crow_mcp: STUDIO_TOOLS.map((t) => "studio/" + t) }, models: { default: "stub/m1" } };
   const expanded = (await defaultCompanionBudget(d, { bareServerTools: { studio: STUDIO_TOOLS } })).countFor(d);
   const writtenOut = (await defaultCompanionBudget(perTool)).countFor(perTool);
-  const withoutMap = (await defaultCompanionBudget(d)).countFor(d);
+  const primed = (await defaultCompanionBudget(d, { crowHome: CROW_HOME, probe: probed().probe })).countFor(d);
   assert.equal(expanded, writtenOut, "the same tool set counts the same, whichever way it is spelled");
-  assert.equal(withoutMap, writtenOut - (STUDIO_TOOLS.length - 1),
-    "no snapshot: unchanged, the bare entry counts as its one mcp__studio spelling");
+  assert.equal(primed, writtenOut,
+    "no snapshot: it primes the listing itself (F1), so the expanded names are counted too");
 });

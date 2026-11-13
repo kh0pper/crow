@@ -124,15 +124,20 @@ test("(g) the tool budget counts the expanded names exactly like the same list w
   assert.equal(checkToolBudget(expanded, STUDIO_TOOLS.length - 1).count, STUDIO_TOOLS.length);
 });
 
-test("(g) defaultCompanionBudget's countFor counts the expanded names when it is given the snapshot", async () => {
+test("(g) defaultCompanionBudget's countFor counts the expanded names, with or without a caller's snapshot", async () => {
   const d = { ...def(["studio"]), models: { default: "stub/m1" } };
   const perTool = { tools: { crow_mcp: STUDIO_TOOLS.map((t) => "studio/" + t) }, models: { default: "stub/m1" } };
   const withMap = await defaultCompanionBudget(d, { bareServerTools: { studio: STUDIO_TOOLS } });
   const perToolBudget = await defaultCompanionBudget(perTool);
   assert.equal(withMap.countFor(d), perToolBudget.countFor(perTool),
     "one name per listed tool, not the single mcp__studio spelling");
-  assert.equal(perToolBudget.countFor(perTool) - (await defaultCompanionBudget(d)).countFor(d), STUDIO_TOOLS.length - 1,
-    "without the snapshot the count is unchanged: the bare entry counts as its one spelling");
+  // F1: a caller that holds no snapshot (withBoardTools, the Bot Builder save, the channel
+  // preflight) gets a primed one, so the bare entry counts as its whole listing too.
+  const primed = await defaultCompanionBudget(d, {
+    crowHome: HOME, probe: async () => ({ ok: true, tools: listing(STUDIO_TOOLS) }),
+  });
+  assert.equal(primed.countFor(d), perToolBudget.countFor(perTool),
+    "without a snapshot the expanded names are counted anyway");
 });
 
 // ── F1: tool names and server ids are data, never grants ────────────────────────
@@ -142,7 +147,10 @@ test("(l) F1: a listed name is kept only as a valid pi tool name of at most 64 c
   const fit = "a".repeat(PI_TOOL_NAME_MAX - prefix.length); // exactly 64 with the prefix
   const tooLong = "b".repeat(PI_TOOL_NAME_MAX - prefix.length + 1); // one over
   const listed = ["ok_tool", "ok_tool,read", "with space", "line\nbreak", "tab\tname", "semi;colon",
-    "quote\"name", fit, tooLong, "x".repeat(80)];
+    "quote\"name", fit, tooLong, "x".repeat(80),
+    // F2: a doubled underscore moves the boundary pi reads in mcp__<id>__<name>, and a
+    // leading/trailing one is a shape pi-lab never registers.
+    "x__y", "_foo", "__", "_", "mcp__other__t"];
   const logs = [];
   const probe = async () => ({ ok: true, tools: listing(listed) });
   const map = await BST.primeBareServerTools(def(["studio"]), { crowHome: HOME, probe, log: (m) => logs.push(m) });
@@ -180,6 +188,39 @@ test("(m) F1: an invalid SERVER id is never expanded and never probed", async ()
   assert.equal(logs.length, badIds.length, "one line per id, and never a probe");
   assert.equal(BST.expandBareEntry("bad,id", { bareServerTools: { "bad,id": ["read"] } }), null,
     "an invalid id is never expanded, even with a hand-made snapshot");
+});
+
+test("(r) F3: a crow_mcp entry that is not a name is dropped whole — never split into a tool", () => {
+  const logs = [];
+  const warn = console.warn;
+  console.warn = (m) => logs.push(m);
+  try {
+    for (const junk of ["a,read", "a read", "a\nread"]) {
+      const csv = buildToolsCsv(def([junk]), { resolved: RESOLVED }).csv;
+      assert.equal(csv, "", JSON.stringify(junk) + " contributes nothing at all");
+      assert.ok(!csv.split(",").includes("read"), "no built-in is handed over");
+      assert.equal(BST.expandBareEntry(junk), null);
+    }
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(logs.length, 3, "one accurate line per distinct entry: " + logs.join(" | "));
+  for (const m of logs) assert.match(m, /is not a valid server or tool name and was dropped/);
+});
+
+test("(s) F3: an entry already spelled as an id, id/tool or id__tool keeps today's spelling", () => {
+  const cases = [
+    ["studio", "mcp__studio"],
+    ["studio/studio_play", "mcp__studio__studio_play"],
+    ["github/get_me", "mcp__github__get_me"],
+    ["studio__x", "mcp__studio__x"],
+    ["mcp__x__y", "mcp__mcp__x__y"],
+    ["crow-memory", "mcp__crow-memory"],
+    ["crow_memory/crow_recall", "mcp__crow_memory__crow_recall"],
+  ];
+  for (const [entry, name] of cases) {
+    assert.equal(buildToolsCsv(def([entry]), { resolved: RESOLVED }).csv, name, JSON.stringify(entry));
+  }
 });
 
 test("(q) F4: an empty or unavailable listing keeps mcp__<id>", async () => {
