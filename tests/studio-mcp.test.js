@@ -450,6 +450,21 @@ test("studio_render passes seconds through and surfaces limit errors", async () 
   }
 });
 
+test("the studio_render schema says an arrangement render must name its seconds", async () => {
+  const { hub } = makeHub();
+  const client = await connect({ hub, renderer: makeRenderer().renderer });
+  try {
+    const tool = (await client.listTools()).tools.find((entry) => entry.name === "studio_render");
+    assert.ok(tool, "studio_render is a tool");
+    const seconds = tool.inputSchema.properties.seconds;
+    assert.ok(seconds, "the schema describes seconds");
+    assert.match(seconds.description, /arrangement/, "it says an arrangement render needs one");
+    assert.match(seconds.description, /scene or clip/, "and that a scene or clip render may leave it out");
+  } finally {
+    await client.close();
+  }
+});
+
 test("render uses the project from the hub, not from the arguments", async () => {
   // The snapshot route names the song's project, so that is what the render is
   // filed under — a project id in the arguments is ignored.

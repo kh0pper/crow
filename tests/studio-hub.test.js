@@ -20,6 +20,7 @@ import { AclError } from "../servers/shared/project-acl.js";
 // The very module instance `server/doc.js` gets from `import * as Y from "yjs"`.
 import * as Y from "../bundles/studio/node_modules/yjs/dist/yjs.mjs";
 import { createHub } from "../bundles/studio/server/hub.js";
+import { newSongDoc } from "../bundles/studio/server/doc.js";
 import { createStudioServer } from "../bundles/studio/server/mcp.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { appendHistory, createSongWithState, getSongRow } from "../bundles/studio/server/store.js";
@@ -763,6 +764,58 @@ test("reopen after restart reproduces the same snapshot", async (t) => {
   assert.equal(next.ok, true);
   assert.equal(next.entry.seq, 7, "the new hub continues the song's sequence");
   assert.equal(next.entry.author.kind, "human");
+});
+
+test("a new song starts with one scene named Scene 1 and no tracks", async (t) => {
+  const { db, acl, hub } = await setup(t);
+  const created = await hub.createSong({ project_id: PROJECT, title: "Fresh", author: HUMAN });
+  assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
+  assert.equal(created.snapshot_version, 1, "the scene is part of the song's first update");
+
+  const opened = await hub.openSong(created.song_id);
+  assert.equal(opened.snapshot.scenes.length, 1, "a new song has exactly one scene");
+  assert.equal(opened.snapshot.scenes[0].name, "Scene 1");
+  assert.match(opened.snapshot.scenes[0].id, /^s-[0-9a-f-]{36}$/, "the scene id is the panel's own shape");
+  assert.equal(opened.snapshot.tracks.length, 0, "a new song still has no tracks");
+  assert.deepEqual(Object.keys(opened.snapshot.clips), [], "and no clips");
+
+  // It is in the stored first update, not something added when the song opens:
+  // a hub with no cached document (a restarted gateway) reads the same song.
+  const restarted = createHub({ db, acl });
+  const reloaded = await restarted.openSong(created.song_id);
+  assert.equal(reloaded.snapshot_version, 1);
+  assert.equal(reloaded.snapshot.scenes.length, 1);
+  assert.equal(reloaded.snapshot.scenes[0].id, opened.snapshot.scenes[0].id);
+  assert.equal(reloaded.snapshot.scenes[0].name, "Scene 1");
+});
+
+test("two new songs get two different scenes", async (t) => {
+  const { hub } = await setup(t);
+  const first = await hub.createSong({ project_id: PROJECT, title: "One", author: HUMAN });
+  const second = await hub.createSong({ project_id: PROJECT, title: "Two", author: HUMAN });
+  assert.equal(first.ok, true, `createSong was refused: ${first.error}`);
+  assert.equal(second.ok, true, `createSong was refused: ${second.error}`);
+
+  const firstScene = (await hub.openSong(first.song_id)).snapshot.scenes[0];
+  const secondScene = (await hub.openSong(second.song_id)).snapshot.scenes[0];
+  assert.equal(firstScene.name, "Scene 1");
+  assert.equal(secondScene.name, "Scene 1");
+  assert.notEqual(firstScene.id, secondScene.id, "every new song's scene is a fresh id");
+});
+
+test("a song created before a new song came with a scene still opens with none", async (t) => {
+  const { db, hub } = await setup(t);
+  // Exactly what `createSong` used to store: an empty document, and nothing
+  // migrated into it since. Existing songs are never touched.
+  const empty = newSongDoc({ title: "Before scenes" });
+  const update = Y.encodeStateAsUpdate(empty);
+  empty.destroy();
+  const { id } = await createSongWithState(db, { project_id: PROJECT, title: "Before scenes", update });
+
+  const opened = await hub.openSong(id);
+  assert.deepEqual(opened.snapshot.scenes, [], "an older song keeps the scenes it was stored with");
+  assert.equal(opened.snapshot.tracks.length, 0);
+  assert.equal(opened.snapshot_version, 1);
 });
 
 test("an old song loaded by the hub gets its mixer containers once", async (t) => {

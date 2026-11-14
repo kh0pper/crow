@@ -231,6 +231,19 @@ const MIDI_SCRIPT = await loadPanelScript("midi.js", "MIDI_SCRIPT");
 const MIDI_ROUTE_SCRIPT = await loadPanelScript("midi-route.js", "MIDI_ROUTE_SCRIPT");
 
 /**
+ * The head tag that makes Turbo do a full load of this page.
+ *
+ * The gateway adds `'wasm-unsafe-eval'` to the Content-Security-Policy only for
+ * responses under `/dashboard/studio` (the audio worklet compiles the SunVox
+ * WASM engine). Turbo Drive keeps the FIRST page's policy for the document it
+ * navigates in place, so a Studio reached from another dashboard page would
+ * have no wasm and no audio. A full load is the fix: the response's own CSP is
+ * then the one the page runs under. A panel cannot write the document head, but
+ * the dashboard layout renders an extra-head option, and that is this.
+ */
+const TURBO_RELOAD_HEAD = '<meta name="turbo-visit-control" content="reload">';
+
+/**
  * Escape a value for use in HTML text or a double-quoted attribute.
  * @param {unknown} value
  * @returns {string}
@@ -274,12 +287,71 @@ const STYLES = `
   .studio .st-title { font-size: 15px; font-weight: 700; }
   .studio .st-logo { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 700; }
   .studio .st-transport { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  /* The click toggle and the output picker are this browser's own settings, so
+     they sit beside the transport rather than in any of the song's own panels. */
+  .studio .st-click-btn[aria-pressed=true] { background: #3A2F1C; border-color: var(--st-human); color: var(--st-human); }
+  .studio .st-out-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .studio .st-out-bar[hidden] { display: none; }
+  .studio .st-out-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--st-muted); }
+  .studio .st-out-bar .st-select { width: auto; min-width: 150px; }
+  .studio .st-output-note { font-size: 12px; line-height: 1.4; color: var(--st-human); }
+  .studio .st-output-note:empty { display: none; }
   .studio .st-bpm { font-size: 12px; color: var(--st-muted); display: flex; align-items: center; gap: 6px; }
   .studio .st-bpm input {
     width: 68px; min-height: 44px; border-radius: 8px; border: 1px solid var(--st-edge);
     background: var(--st-bg); color: var(--st-text); font: inherit; font-size: 13px; padding: 0 8px;
   }
   .studio .st-pos { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; padding: 0 6px; }
+  .studio .st-latency { font-size: 11px; color: var(--st-muted); }
+  .studio .st-latency[hidden] { display: none; }
+  /* A press-and-hold on a control is a press, not a text selection. On Android
+     the hold selected the button's label and opened the Copy/Share menu instead
+     of moving the pad it was held on (the Looper), so every control of the page
+     is listed here once. Nothing that is TEXT is in this list: an input, a
+     textarea, a select's own text, and the ask box with its messages all stay
+     selectable. */
+  .studio button,
+  .studio [role=button],
+  .studio .st-btn,
+  .studio .st-transport-btn,
+  .studio .st-mode,
+  .studio .st-toggle,
+  .studio .st-pad,
+  .studio .st-step,
+  .studio .st-fx-btn,
+  .studio .st-empty,
+  .studio .st-cell,
+  .studio .st-clip,
+  .studio .st-tl-block,
+  .studio .st-roll-svg,
+  .studio rect.st-note {
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  /* A field inside one of those controls is still a field: the hold above must
+     not reach into it, or text the operator has to edit (a velocity, a clip's
+     name, a block's label) could not be selected or long-pressed at all. This
+     rule comes after the one above and names every such field, both bare and
+     inside the containers that hold them. */
+  .studio input,
+  .studio textarea,
+  .studio [contenteditable],
+  .studio .st-cell input,
+  .studio .st-cell textarea,
+  .studio .st-cell [contenteditable],
+  .studio .st-clip input,
+  .studio .st-clip textarea,
+  .studio .st-clip [contenteditable],
+  .studio .st-tl-block input,
+  .studio .st-tl-block textarea,
+  .studio .st-tl-block [contenteditable],
+  .studio [role=button] input,
+  .studio [role=button] textarea,
+  .studio [role=button] [contenteditable],
+  .studio button input,
+  .studio button textarea,
+  .studio button [contenteditable] {
+    user-select: text; -webkit-user-select: text; -webkit-touch-callout: default;
+  }
   .studio .st-presence { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
   .studio .st-chip { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--st-muted); }
   .studio .st-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--st-human); flex: 0 0 auto; }
@@ -921,6 +993,12 @@ const STYLES = `
   .studio .st-step-sel { border-color: var(--st-human); }
   .studio .st-step-held { border-color: var(--st-human); background: #2A2418; }
   .studio .st-step-lock { border-color: var(--st-human); background: #2A2418; box-shadow: inset 0 0 0 1px var(--st-human); }
+  /* Where the transport is in the steps: an outline inside the cell, so it reads
+     apart from a selected step (a border) and from a hit (a white border). */
+  .studio .st-step-now {
+    outline: 2px solid var(--st-agent); outline-offset: -2px; background: #1A2730;
+  }
+  .studio .st-step-hint { margin: 0; font-size: 11px; line-height: 1.45; color: var(--st-muted); }
   .studio .st-step-fill { position: absolute; left: 0; right: 0; bottom: 0; background: #B6D98A; }
   .studio .st-step-num {
     position: relative; z-index: 1; font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1102,8 +1180,10 @@ async function listProjects(db) {
 /** The dashboard layout, or a bare page when the panel is rendered on its own. */
 function renderer(layout) {
   if (typeof layout === "function") return layout;
-  return ({ title, content }) =>
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head><body>${content}</body></html>`;
+  return ({ title, content, head }) =>
+    `<!doctype html><html lang="en"><head><meta charset="utf-8">${
+      head || TURBO_RELOAD_HEAD
+    }<title>${escapeHtml(title)}</title></head><body>${content}</body></html>`;
 }
 
 /** The song library page. */
@@ -1156,7 +1236,7 @@ ${MIDI_SCRIPT}
 ${CLIENT_SCRIPT}</script>
     </div>`;
 
-  res.send(render({ title: "Studio", content }));
+  res.send(render({ title: "Studio", content, head: TURBO_RELOAD_HEAD }));
 }
 
 /** One song's studio page. */
@@ -1177,11 +1257,20 @@ function studioPage({ songId, render, res }) {
           <button class="st-btn st-transport-btn" type="button" data-act="play" title="Play" aria-label="Play">▶</button>
           <button class="st-btn st-transport-btn" type="button" data-act="stop" title="Stop" aria-label="Stop">■</button>
           <button class="st-btn st-transport-btn st-record-btn" type="button" data-act="record" title="Record into the armed track" aria-label="Record" disabled>●</button>
+          <button class="st-btn st-small st-click-btn" type="button" data-act="metronome" aria-pressed="false"
+            title="Metronome: a click on every beat while it plays">Click</button>
           <span class="st-rec" data-role="rec-status" hidden></span>
           <label class="st-bpm">bpm
             <input data-role="bpm" type="number" min="20" max="300" step="1" value="120" aria-label="Tempo in beats per minute">
           </label>
           <span class="st-pos" data-role="position">001.1.1</span>
+          <span class="st-latency" data-role="output-latency" hidden></span>
+        </div>
+        <div class="st-out-bar" data-role="output-bar" hidden>
+          <label class="st-out-label">Output
+            <select class="st-select st-out-select" data-role="output-device" aria-label="Output device"></select>
+          </label>
+          <span class="st-output-note" data-role="output-note" hidden></span>
         </div>
         <div class="st-midi-bar">
           <button class="st-btn st-small" type="button" data-act="midi-connect" aria-pressed="false"
@@ -1243,7 +1332,7 @@ ${CLIENT_SCRIPT}</script>
       <script src="/dashboard/studio/assets/resample.js"></script>
     </div>`;
 
-  res.send(render({ title: "Studio", content }));
+  res.send(render({ title: "Studio", content, head: TURBO_RELOAD_HEAD }));
 }
 
 export default {

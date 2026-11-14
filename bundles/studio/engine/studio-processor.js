@@ -539,7 +539,7 @@
  * client → processor: `{type:"song", snapshot}`, `{type:"launchScene", id}`,
  * `{type:"launchClip", id}`, `{type:"stopTrack", id}`, `{type:"stopAll"}`,
  * `{type:"play"}`, `{type:"stop"}`, `{type:"setMode", mode}`,
- * `{type:"seek", bar}`, `{type:"flush", id}`,
+ * `{type:"seek", bar}`, `{type:"metronome", on}`, `{type:"flush", id}`,
  * `{type:"nextBarFrame", id}`, `{type:"audio", take_id, channels}`,
  * `{type:"audio_unload", take_id}`, `{type:"sample", sample_id, channels}`,
  * `{type:"sample_unload", sample_id}`, `{type:"library", library_id, kind,
@@ -946,6 +946,21 @@
 
   /** How much audio between two `meter` messages, in seconds. */
   const METER_INTERVAL_SECONDS = 0.1;
+
+  /**
+   * The metronome's click: a sine of about 25 ms with a fast exponential decay,
+   * one per quarter-note beat, the first beat of an engine bar higher and
+   * louder than the rest. They are the engine's monitor signal — added to the
+   * OUTPUT after the master tap — so nothing mixed, metered or rendered ever
+   * holds one (see `addMetronome`).
+   */
+  const METRONOME_CLICK_SECONDS = 0.025;
+  const METRONOME_DECAY_SECONDS = 0.008;
+  const METRONOME_HZ = 1000;
+  const METRONOME_ACCENT_HZ = 1500;
+  const METRONOME_LEVEL = 0.35;
+  const METRONOME_ACCENT_LEVEL = 0.5;
+  const METRONOME_TWO_PI = Math.PI * 2;
 
   /** The mixer an engine with no song (or no mixer containers) runs: nothing. */
   const NO_MIXER = Object.freeze({
@@ -2120,6 +2135,27 @@
       /** The track whose own output is tapped, or null. */
       this.tapTrackId = null;
 
+      /**
+       * Whether the metronome's click is heard. Off until the client asks for
+       * it (`{type:"metronome", on}`), so a host that never asks — an offline
+       * render, `server/render.js` — stays click-free.
+       */
+      this.metronomeOn = false;
+
+      /**
+       * The click sounding right now: how many of its samples are left, the
+       * phase and level of the next one, its phase step and the per-sample
+       * decay step. A click that starts in one block rings into the next from
+       * this state, and two clicks never share one entry.
+       */
+      this.metronomeLeft = 0;
+      this.metronomePhase = 0;
+      this.metronomeLevel = 0;
+      this.metronomeStep = 0;
+      /** The click's length in frames and its per-sample decay step. */
+      this.metronomeFrames = Math.max(1, Math.round(sampleRate * METRONOME_CLICK_SECONDS));
+      this.metronomeDecay = Math.exp(-1 / (METRONOME_DECAY_SECONDS * sampleRate));
+
       /** track index → its tap's stereo scratch, allocated only while a track is tapped. */
       this.tapIndex = -1;
       this.tapLeft = null;
@@ -2440,6 +2476,11 @@
           break;
         case "setMode":
           this.sequencer.setMode(message.mode);
+          break;
+        case "metronome":
+          // The metronome is live state, not a command: it is heard from the
+          // next block on (see `addMetronome`), and it never edits the song.
+          this.metronomeOn = message.on === true;
           break;
         case "seek":
           this.sequencer.seek(message.bar);
@@ -6385,12 +6426,71 @@
         this.ensureScratch(count);
         this.block(left, right, count);
         this.postTap(left, right, count, firstFrame);
+        // AFTER the tap: the metronome is a monitor signal on the engine's own
+        // output, never part of the mix a master tap (or anything else) copies.
+        this.addMetronome(left, right, count, firstFrame);
       } catch (error) {
         this.fail(error);
         left.fill(0);
         if (right) right.fill(0);
       }
       return true;
+    }
+
+    /**
+     * Add the metronome's click to the engine's OUTPUT.
+     *
+     * It is added AFTER `postTap()`, and never inside `block()`: the click does
+     * not pass through the mixer, a master insert, the master clip, the master
+     * tap or the meter, so no mix, tap, loudness reading or mixdown contains it.
+     * `server/render.js` and every offline render never send
+     * `{type:"metronome"}`, so a render stays click-free.
+     *
+     * One click is about 25 ms of a sine with a fast exponential decay: 1500 Hz
+     * and 0.5 at the first beat of an engine bar, 1000 Hz and 0.35 at the
+     * others. Its frames come from the sequencer's own beat clock
+     * (`clickBeats()`), so it follows a tempo change and stays on the grid the
+     * sequencer plays, sample-accurate. The engine's bars are four beats
+     * (`BEATS_PER_BAR`) whatever the song's `meta.meter` says — time-signature
+     * support in the engine is a separate gap, so the song's stored meter is
+     * not read here at all.
+     *
+     * A click that starts near the end of a block rings into the next one (the
+     * state carried between blocks is the samples left plus the phase and level
+     * of the next sample). Turning the metronome off, or stopping the
+     * transport, starts no new click and lets the one already ringing finish.
+     * Nothing is allocated per block.
+     * @param {Float32Array} left the master's left channel
+     * @param {Float32Array|null} right the master's right channel
+     * @param {number} count the frames this block holds
+     * @param {number} firstFrame this block's first frame, in the processor's own frames
+     * @returns {void}
+     */
+    addMetronome(left, right, count, firstFrame) {
+      // The beats this block holds, filled into the sequencer's own scratch.
+      const beats = this.metronomeOn ? this.sequencer.clickBeats(firstFrame, count) : null;
+      const clicks = beats !== null && beats.count > 0 ? beats : null;
+      if (clicks === null && this.metronomeLeft <= 0) return;
+      let next = 0;
+      for (let at = 0; at < count; at += 1) {
+        while (clicks !== null && next < clicks.count && clicks.frames[next] <= at) {
+          const accent = clicks.accents[next] === true;
+          this.metronomeLeft = this.metronomeFrames;
+          // Starting at the top of the sine is what makes the click begin on
+          // its own frame instead of a frame or two after the beat.
+          this.metronomePhase = 0;
+          this.metronomeLevel = accent ? METRONOME_ACCENT_LEVEL : METRONOME_LEVEL;
+          this.metronomeStep = (METRONOME_TWO_PI * (accent ? METRONOME_ACCENT_HZ : METRONOME_HZ)) / sampleRate;
+          next += 1;
+        }
+        if (this.metronomeLeft <= 0) continue;
+        const sample = Math.cos(this.metronomePhase) * this.metronomeLevel;
+        left[at] += sample;
+        if (right) right[at] += sample;
+        this.metronomePhase += this.metronomeStep;
+        this.metronomeLevel *= this.metronomeDecay;
+        this.metronomeLeft -= 1;
+      }
     }
 
     /**
