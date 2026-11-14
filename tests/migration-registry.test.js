@@ -49,6 +49,32 @@ const sideEffect = (id, file) =>
    export const id = ${JSON.stringify(id)};
    export function run() { appendFileSync(${JSON.stringify(file)}, ${JSON.stringify(id + "\n")}); }`;
 
+/** Migration files whose leading number is shared, grouped by that number.
+ *  `0001-a.mjs` and `0001-b.mjs` collide; a gap in the sequence (there is no
+ *  0012 today) does not — the rule is uniqueness, not contiguity. */
+function prefixCollisions(files) {
+  const byPrefix = new Map();
+  for (const p of files) {
+    const name = p.split("/").pop();
+    const prefix = name.slice(0, 4);
+    byPrefix.set(prefix, [...(byPrefix.get(prefix) || []), name]);
+  }
+  return [...byPrefix]
+    .filter(([, names]) => names.length > 1)
+    .map(([prefix, names]) => ({ prefix, names }));
+}
+
+function assertUniquePrefixes(files) {
+  const collisions = prefixCollisions(files);
+  if (collisions.length) {
+    throw new Error(
+      `migration numeric prefixes must be unique: ${collisions
+        .map((c) => `${c.prefix} used by ${c.names.join(", ")}`)
+        .join("; ")}`,
+    );
+  }
+}
+
 /** Put 0000-tasks-base on file, so a fixture can model a store whose tasks_items
  *  is absent AFTER 0000 ran (otherwise 0000 creates it in the same pass). */
 function recordBaseApplied(dbPath) {
@@ -139,6 +165,32 @@ test("ignores files that do not match the NNNN-slug.mjs pattern", () => {
 
     const found = discoverMigrations(f.dir).map((p) => p.split("/").pop());
     assert.deepEqual(found, ["0001-real.mjs"]);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("no two migrations share a numeric prefix", () => {
+  // Why it matters: the runner records `id` and orders by FILE NAME, so two
+  // files numbered the same apply in whatever order the names sort in, and a
+  // half-fixed-up store keeps two plausible "latest" migrations.
+  const dir = join(import.meta.dirname, "..", "scripts", "migrations");
+
+  const real = discoverMigrations(dir);
+  assert.ok(real.length > 0, "no migrations discovered — the guard below would pass vacuously");
+  const collisions = prefixCollisions(real);
+  assert.deepEqual(
+    collisions, [],
+    `migration numbers collide: ${collisions.map((c) => `${c.prefix}: ${c.names.join(", ")}`).join("; ")}`,
+  );
+
+  // The real directory has no collision, so the fixture is what proves the guard
+  // can fail at all.
+  const f = fixture();
+  try {
+    wm(f.dir, "0001-a.mjs", `export const id = "0001-a"; export function run() {}`);
+    wm(f.dir, "0001-b.mjs", `export const id = "0001-b"; export function run() {}`);
+    const found = discoverMigrations(f.dir);
+    assert.equal(found.length, 2, "both colliding files must be discovered, or the failure path is untested");
+    assert.throws(() => assertUniquePrefixes(found), /0001 used by 0001-a\.mjs, 0001-b\.mjs/);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
