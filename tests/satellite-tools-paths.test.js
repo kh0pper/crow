@@ -149,7 +149,8 @@ test("every reader of mcp-addons.json skips a satellite record (never a local EX
   const { crowServerCatalog } = await import("../scripts/pi-bots/crow-server-catalog.mjs");
   const { listInstalledExtensions } = await import("../scripts/pi-bots/ext_registry.mjs");
   const def = { tools: { crow_mcp: ["demo/demo_list"] } };
-  assert.deepEqual(extraServersFromExtensions(def, HOME, { canonical: { mcpServers: {} } }), {}, "no pi block is minted");
+  assert.deepEqual(extraServersFromExtensions(def, HOME, { canonical: { mcpServers: {} } }),
+    { servers: {}, needsKeys: {} }, "no pi block is minted");
   assert.ok(!listInstalledExtensions(HOME).some((e) => e.id === "demo"), "not an installed local extension");
   const cat = crowServerCatalog(HOME, { node: process.execPath });
   assert.equal(cat.servers.demo, undefined, "no spawnable catalog block");

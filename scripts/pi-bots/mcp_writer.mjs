@@ -38,13 +38,23 @@ import { buildBotBaseEnv } from "../../servers/shared/bot-env.js";
 import { withoutLoaderEnv } from "../../servers/shared/loader-env.js";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { botsDbPath } from "./instance-paths.mjs";
 import { mintRemoteBlocks } from "./remote-blocks.mjs";
-import { crowServerCatalog, instanceBinding, rebindBlock, SECRETS_SERVER } from "./crow-server-catalog.mjs";
+import { crowServerCatalog, instanceBinding, rebindBlock, SECRETS_SERVER, addonKeychainNeeds, withoutKeychainValues } from "./crow-server-catalog.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { applyActorEnv, actorEnvFor } from "./actor-env.mjs";
+// Task 2.2: the ONLY place on the bot-config path that unseals — and only for an fd turn.
+// readAddonSecretsSync is all-or-throw (a name with no active row is ROWS_MISSING), so it is
+// never handed another add-on's shared names: those are read through their OWN entry.
+import { AddonKeysUnavailableError, ADDON_SECRET_SHARES, keychainEnvNames, readAddonSecretsSync, sharedAddonEnv } from "../../servers/shared/addon-secrets.js";
+// The anchored secrets dir (700, fd-anchored): the keychain key is read through it, exactly as
+// the bot engine's values collector does, so a plantable path is never followed.
+import { anchoredPath } from "../../servers/shared/secret-values.js";
+// A service add-on's derived env (Render's AUTH_HEADER) must be rendered from the values the
+// child will actually get — the unsealed ones — not from the stripped plaintext (Task 2.1).
+import { addonDerivedEnv } from "../../servers/gateway/services/legacy-sources.js";
 
 const HOME = process.env.HOME || homedir();
 export const CANONICAL_MCP_PATH = HOME + "/.pi/agent/mcp.json";
@@ -185,11 +195,21 @@ function addonSpawnBlock(serverId, block, crowHome) {
     console.warn(`[pi-bots] add-on '${serverId}' omitted: ${rc.reason || argProblem}`);
     return null;
   }
-  const { command_sha256: _pin, ...rest } = block;
+  // `keychainEnv` lists NAMES whose values live in the keychain, and is not part of a spawn
+  // block: no bot's .mcp.json may carry it, and no value is produced HERE. The block this
+  // function mints is key-less by construction; the values are owed back as `needsKeys` and
+  // only writeBotMcp's fd-only `addonKeys: "hydrate"` turn unseals them (see below).
+  const { command_sha256: _pin, keychainEnv: _keychainEnv, env: entryEnv, ...rest } = block;
   // The entry's env is handed to the child as-is EXCEPT loader/injection names
-  // (NODE_OPTIONS, LD_PRELOAD, …): those run code before the server itself does.
-  // A block with no env stays without one.
-  const env = rest.env && typeof rest.env === "object" ? { env: withoutLoaderEnv(rest.env) } : {};
+  // (NODE_OPTIONS, LD_PRELOAD, …): those run code before the server itself does — and except
+  // a sealed name's plain value, which is stale by definition (the keychain value wins).
+  // A block with no env stays without one. `env` is taken OUT of `rest` above, so an emptied
+  // env cannot survive by not being overridden.
+  const kept = withoutKeychainValues(block, entryEnv);
+  // A block whose env held ONLY sealed names has nothing left to pass: it must not gain an
+  // empty `env` object the entry never had.
+  const emptied = kept && typeof kept === "object" && kept !== entryEnv && Object.keys(kept).length === 0;
+  const env = kept && typeof kept === "object" && !emptied ? { env: withoutLoaderEnv(kept) } : {};
   // The pin rides along so pi-lab re-verifies it at spawn time.
   return { ...rest, ...env, ...(rc.resolved ? { command: rc.command } : {}), ...(rc.sha256 ? { command_sha256: rc.sha256 } : {}),
     cwd };
@@ -197,10 +217,12 @@ function addonSpawnBlock(serverId, block, crowHome) {
 
 /**
  * Mint pi-compatible blocks for the bot's selected servers that are ABSENT from
- * canonical but present in <crowHome>/mcp-addons.json. Returns a
- * {name: block} map (cwd defaulted; the journal guard is applied later by
- * buildBotMcp on the clone). Servers absent from BOTH canonical and addons are
- * left out here so buildBotMcp surfaces them as a warning.
+ * canonical but present in <crowHome>/mcp-addons.json. Returns
+ * `{ servers, needsKeys }`: a `{name: block}` map (cwd defaulted; the journal
+ * guard is applied later by buildBotMcp on the clone) plus, per sealed add-on,
+ * the env NAMES it owes the keychain (values are never read here). Servers absent
+ * from BOTH canonical and addons are left out so buildBotMcp surfaces them as a
+ * warning.
  *
  * @param {object} opts.canonical  pre-read canonical (avoids a second read)
  */
@@ -209,6 +231,7 @@ export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), op
   const canonical = opts.canonical || readCanonicalMcp(opts.canonicalPath);
   const addons = readAddons(crowHome);
   const servers = {};
+  const needsKeys = {};
   for (const name of want) {
     // The catalog (crow-server-catalog.mjs) already covers every Crow server on
     // this instance and is consulted first by buildBotMcp, so this path only
@@ -221,9 +244,12 @@ export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), op
     // MCP block on this host (spec §9.1). Part 2 of SAT-7 adds the bot mount.
     if (addon.transport === "satellite") continue;
     const blk = addonSpawnBlock(name, addon, crowHome);
-    if (blk) servers[name] = blk;
+    if (!blk) continue;
+    servers[name] = blk;
+    const needs = addonKeychainNeeds(name, addon, { addons });
+    if (needs.length > 0) needsKeys[name] = needs;
   }
-  return servers;
+  return { servers, needsKeys };
 }
 
 /**
@@ -387,6 +413,70 @@ export function removeStaleBotMcp(path, graceMs = STALE_MCP_GRACE_MS) {
 }
 
 /**
+ * The two sentences a sealed add-on's block is reported with when it cannot be hydrated.
+ * Both carry the add-on ID and nothing else — never a value, never a fragment of one.
+ */
+export const WARN_ADDON_KEYS_FILE_MODE = (id) =>
+  `add-on ${id}: its keys are in the keychain and file-mode MCP delivery cannot carry them; the add-on is left out`;
+export const WARN_ADDON_KEYS_UNREADABLE = (id) =>
+  `add-on ${id}: its saved keys could not be read; left out of this turn`;
+
+// ---- the shared-settings table: one frozen table, no production override -----
+/**
+ * The table add-on shares are hydrated from (ADDON_SECRET_SHARES). It is NOT a writeBotMcp
+ * option: the share switch is a code change in servers/shared/addon-secrets.js, so a caller
+ * (a bridge, a panel, a CLI) must not be able to point a bot at a different add-on's keys.
+ * Tests that need a different table set it here and set it back.
+ */
+let addonSecretSharesTable = ADDON_SECRET_SHARES;
+
+/** TEST ONLY: replace the share table for the rest of this process; returns the previous one. */
+export function _setAddonSecretSharesForTest(table) {
+  const prev = addonSecretSharesTable;
+  addonSecretSharesTable = table && typeof table === "object" ? table : ADDON_SECRET_SHARES;
+  return prev;
+}
+
+/**
+ * Is `crowHome` the instance THIS process resolves its DB and keychain key from?
+ *
+ * writeBotMcp reads the add-on entries from `crowHome` (opts.crowHome, or CROW_HOME, or
+ * ~/.crow), but botsDbPath() and anchoredPath() resolve from the process env. When the two
+ * name different instances, hydrating would read THIS process's keychain rows for ANOTHER
+ * instance's entries — and anchoring would create a secrets dir under the wrong home. The
+ * hydrate step therefore refuses in that case (WARN_ADDON_KEYS_UNREADABLE, add-on dropped);
+ * compare the resolved paths, since `~/.crow` and a trailing slash name the same home.
+ */
+export function addonUnsealInstanceMatches(crowHome, env = process.env) {
+  if (typeof crowHome !== "string" || crowHome === "") return false;
+  const envHome = (env && env.CROW_HOME) || _HOME_FOR_CROW + "/.crow";
+  return resolve(crowHome) === resolve(envHome);
+}
+
+/**
+ * The boot line the bot engine logs ONCE when the secrets dir cannot be anchored (unsafe
+ * ancestors while CROW_BOT_UID is set): every unseal then fails closed, so a sealed add-on is
+ * left out of every bot turn. Fixed sentence, no path, no value.
+ */
+export const ADDON_KEYS_BOT_UNAVAILABLE =
+  "[addon-secrets] bots cannot read add-on keys: the secrets folder is not safe for the bot user; sealed add-ons are left out of bot turns";
+
+/**
+ * Bot-engine startup check: log ADDON_KEYS_BOT_UNAVAILABLE when the keychain key cannot be
+ * reached through the anchored secrets dir (anchoredPath returns null: the ancestors are not
+ * safe for the bot uid, so every read fails closed). Returns true when it logged. `anchor` is
+ * the seam (the real anchoredPath by default); it is the same call the hydrate step makes, so
+ * a null here means the hydrate step will drop sealed add-ons too.
+ */
+export function warnIfAddonKeysUnanchorable(log = (m) => console.warn(m), { env = process.env, anchor = anchoredPath } = {}) {
+  let path = null;
+  try { path = anchor(env, "keychain.key"); } catch { path = null; }
+  if (path) return false;
+  log(ADDON_KEYS_BOT_UNAVAILABLE);
+  return true;
+}
+
+/**
  * Write `<session_dir>/.mcp.json` for a bot. Idempotent (full rewrite each
  * call). Throws only on a missing session_dir in the def or an unreadable
  * canonical; a selected-but-absent server is a soft warning (returned).
@@ -396,6 +486,14 @@ export function removeStaleBotMcp(path, graceMs = STALE_MCP_GRACE_MS) {
  * than the legacy def.session_dir. Without the override, mcp.json drifts
  * out of sync with the actual pi cwd and the bot relies solely on the
  * canonical ~/.pi/agent/mcp.json fallback.
+ *
+ * Task 2.2: `opts.addonKeys` is "omit" (default — a sealed add-on's block stays key-less) or
+ * "hydrate" (unseal its keychain values into the returned config; FD DELIVERY ONLY, so it
+ * throws when combined with a file write). A file-mode turn leaves a sealed add-on out of the
+ * config entirely, with one warning: a file cannot carry its keys, and a key-less spawn would
+ * fail later instead. Hydration reads the same instance the entries came from or nothing: a
+ * `crowHome` that is not this process's CROW_HOME drops the add-on (WARN_ADDON_KEYS_UNREADABLE).
+ * The ADDON_SECRET_SHARES table is NOT an option (see _setAddonSecretSharesForTest).
  */
 export function writeBotMcp(def, opts = {}) {
   const sessionDir = opts.sessionDir || (def && def.session_dir);
@@ -405,7 +503,14 @@ export function writeBotMcp(def, opts = {}) {
   // absent from canonical. opts.crowHome lets the bridge/GUI/CLI pin the
   // instance explicitly; otherwise CROW_HOME env (MPA service) or ~/.crow.
   const crowHome = opts.crowHome || resolveCrowHome();
-  const extraServers = opts.extraServers || extraServersFromExtensions(def, crowHome, { canonical });
+  // Both sources report the env names a sealed add-on owes the keychain (`needsKeys`). The
+  // build itself never produces a value — it only keeps stale plaintext out of the block (see
+  // addonSpawnBlock); the fd-only "hydrate" turn below is the ONE place in this file that
+  // unseals them. A caller-supplied opts.extraServers map is trusted verbatim and carries no
+  // needsKeys (the CLI/test seam: nothing is ever unsealed on its behalf).
+  const extra = opts.extraServers
+    ? { servers: opts.extraServers, needsKeys: {} }
+    : extraServersFromExtensions(def, crowHome, { canonical });
   // The instance catalog is the FIRST source for any Crow server. opts.binding
   // lets tests and the panel pin an instance without mutating process.env.
   const binding = opts.binding || instanceBinding(crowHome, opts);
@@ -417,11 +522,11 @@ export function writeBotMcp(def, opts = {}) {
   // the headers only with the X-Crow-Actor-Sig the catalog adds when this
   // process holds the actor key; anything else on the board token resolves
   // to an unattributed bot (never 'session').
-  const { servers: catalog, unconfigured } = crowServerCatalog(crowHome, {
+  const { servers: catalog, unconfigured, needsKeys: catalogNeedsKeys } = crowServerCatalog(crowHome, {
     binding, botId: opts.botId, jobId: opts.jobId, threadId: opts.threadId, gatewayType: opts.gatewayType,
   });
   const built = buildBotMcp(def, canonical, {
-    extraServers, catalog, unconfigured, binding, crowHome,
+    extraServers: extra.servers, catalog, unconfigured, binding, crowHome,
     ensureServers: opts.ensureServers,
     interactive: opts.interactive === true,
     actor: opts.botId ? { botId: opts.botId, displayName: opts.displayName, threadId: opts.threadId } : undefined,
@@ -454,6 +559,96 @@ export function writeBotMcp(def, opts = {}) {
     remoteWarnings = warnings;
     for (const [name, block] of Object.entries(blocks)) built.json.mcpServers[name] = block;
   }
+  // ---- Task 2.2: a sealed add-on is hydrated ONLY for an fd turn -------------
+  // A sealed add-on's values live in the keychain (Task 2.1's merged `needsKeys` names them).
+  // `addonKeys: "hydrate"` unseals them into the IN-MEMORY config the bridge pipes to pi on
+  // its inherited fd (mcp-delivery.mjs); `"omit"` (the default) leaves the block key-less, for
+  // a caller that only validates. The two never mix with a file: `.mcp.json` is readable by
+  // every process that can reach the session dir, so a file-mode turn can never carry a value.
+  // Such an add-on is therefore left OUT of the config with one warning, rather than spawned
+  // with a partial env that would only fail later.
+  const addonKeys = opts.addonKeys === undefined ? "omit" : opts.addonKeys;
+  if (addonKeys !== "omit" && addonKeys !== "hydrate") {
+    throw new Error('writeBotMcp: opts.addonKeys must be "hydrate" or "omit"');
+  }
+  const fileMode = opts.write !== false;
+  // Internal assertion (see above): a hydrated block carries plaintext, so it must never be
+  // written to disk. Stated as a throw rather than a branch so a later refactor cannot make
+  // the two coexist silently.
+  if (addonKeys === "hydrate" && fileMode) {
+    throw new Error('writeBotMcp: addonKeys "hydrate" is fd delivery only (opts.write === false); a hydrated block is never written to .mcp.json');
+  }
+  const hydratedAddons = new Set();
+  // Only an ACTIVE block owes keys: a name the build disabled (unconfigured, owner-authority,
+  // forgotten with the closed world) is not in the config, so nothing is left to hydrate.
+  const owedKeys = [];
+  for (const [name, names] of Object.entries({ ...catalogNeedsKeys, ...extra.needsKeys })) {
+    const block = built.json.mcpServers[name];
+    if (block && block.disabled !== true && Array.isArray(names) && names.length > 0) owedKeys.push([name, names]);
+  }
+  if (owedKeys.length > 0) {
+    // The unseal paths: the DB this process's bridge/panel resolves, and the keychain key read
+    // through the anchored secrets dir (never through a path another principal could plant).
+    // botsDbPath() is resolveDbPath()'s file for every layout (pinned by the test) — the SAME
+    // rows the gateway sealed, never a second instance's. So they are used ONLY when the
+    // entries came from this same instance: `crowHome` is what the blocks were read from, and
+    // when it names another home the two disagree — a mismatch fails closed below.
+    const sameInstance = addonUnsealInstanceMatches(crowHome);
+    let unseal = null;
+    const unsealPaths = () => {
+      if (!unseal) {
+        unseal = { unsealer: "bot-engine", dbPath: botsDbPath(), keyPath: anchoredPath(process.env, "keychain.key") };
+      }
+      return unseal;
+    };
+    const addonEntries = readAddons(crowHome);
+    // A name this turn drops moves the block into `disabled` and takes its bookkeeping with
+    // it: it is not active, so it journals nothing and mints nothing.
+    const drop = (name, warning) => {
+      built.json.mcpServers[name] = { disabled: true };
+      const i = built.servers.indexOf(name);
+      if (i >= 0) built.servers.splice(i, 1);
+      for (const list of [built.journalGuarded, built.minted]) {
+        const j = list.indexOf(name);
+        if (j >= 0) list.splice(j, 1);
+      }
+      if (!built.disabled.includes(name)) built.disabled.push(name);
+      built.warnings.push(warning);
+    };
+    for (const [id, names] of owedKeys) {
+      if (fileMode) { drop(id, WARN_ADDON_KEYS_FILE_MODE(id)); continue; }
+      if (addonKeys === "omit") continue; // key-less block: the caller only validates it
+      if (!sameInstance) { drop(id, WARN_ADDON_KEYS_UNREADABLE(id)); continue; } // never another instance's rows
+      try {
+        const entry = addonEntries[id];
+        const own = keychainEnvNames(entry);
+        const secrets = own.length > 0 ? readAddonSecretsSync(id, own, unsealPaths()) : {};
+        // Another add-on's settings this one reads (ADDON_SECRET_SHARES, R6): hydrated through
+        // the SOURCE's own entry, so its rows are read under its own id, never this one's. The
+        // table is the frozen module constant (or a test's replacement) — never a caller option.
+        const shared = sharedAddonEnv(id, (sourceId) => addonEntries[sourceId] ?? null, {
+          ...unsealPaths(),
+          shares: addonSecretSharesTable,
+        });
+        const block = built.json.mcpServers[id];
+        // The derived env is rendered from `{ ...block.env, ...secrets }` — the values the child
+        // really gets. Rendering it from the entry's own (stripped) env is what would put a
+        // stale plaintext back into the block through Render's `AUTH_HEADER`.
+        block.env = {
+          ...block.env,
+          ...withoutLoaderEnv(secrets),
+          ...withoutLoaderEnv(shared),
+          ...withoutLoaderEnv(addonDerivedEnv(id, { ...block.env, ...secrets }, undefined, {})),
+          CROW_HOME: crowHome,
+        };
+        hydratedAddons.add(id);
+      } catch (err) {
+        // Never a value and never a driver message: the fixed sentence plus the add-on id.
+        if (!(err instanceof AddonKeysUnavailableError)) throw err;
+        drop(id, WARN_ADDON_KEYS_UNREADABLE(id));
+      }
+    }
+  }
   // S6-CROW: opts.write === false is fd delivery (mcp-delivery.mjs) — the
   // config is returned for the bridge to pipe to pi, NOTHING is written, and a
   // stale <sessionDir>/.mcp.json left by an earlier file-mode turn is removed
@@ -467,10 +662,19 @@ export function writeBotMcp(def, opts = {}) {
     mkdirSync(sessionDir, { recursive: true });
     writeFileSync(path, JSON.stringify(built.json, null, 2) + "\n", { mode: 0o600 });
   }
+  // What is still OWED to a caller: a hydrated block already carries its values, and a block
+  // this function disabled is not in the config at all.
+  const needsKeys = {};
+  for (const [name, names] of Object.entries({ ...catalogNeedsKeys, ...extra.needsKeys })) {
+    if (hydratedAddons.has(name)) continue;
+    const block = built.json.mcpServers[name];
+    if (block && block.disabled !== true && Array.isArray(names) && names.length > 0) needsKeys[name] = names;
+  }
   return {
     path: opts.write === false ? null : path,
     json: built.json,
     removedStale,
+    needsKeys,
     servers: built.servers,
     warnings: built.warnings,
     journalGuarded: built.journalGuarded,

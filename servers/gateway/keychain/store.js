@@ -13,6 +13,7 @@
  * restored onto a machine without the key file) are listed as readable:false and throw
  * KeychainKeyMissingError on open — never a crash, never a wrong plaintext.
  */
+import { timingSafeEqual } from "node:crypto";
 import { sealSecret, openSecret } from "../../sharing/secret-box.js";
 import { KEYCHAIN_DDL, KEYCHAIN_CONNECTION_COLUMN, KEYCHAIN_SERVICE_INDEX_DDL } from "./schema.js";
 import { keychainKeyState, createKeychainKey, KeychainKeyInvalidError } from "./key.js";
@@ -122,7 +123,12 @@ function assertExtensionOwner(bundleId, systemOwner) {
   if (isSystemBundleId(bundleId) && systemOwner !== true) throw new Error("keychain: that id is reserved for Crow itself");
 }
 
-/** The validation + sealing both extension writers do, so neither can drift from the other. */
+/**
+ * The validation + sealing both extension writers do, so neither can drift from the other.
+ * A caller that must KEEP an existing row's one-time window does it with `keepFirstView` on
+ * the write (saveExtensionSecret), never by passing a timestamp back: an earlier read can be
+ * stale by the time the row is written.
+ */
 function extensionValues(key, { bundleId, envKey, label, username = null, url = null, secret, origin, firstView = false, now }) {
   requireKey(key);
   if (!bundleId || !envKey || typeof secret !== "string" || secret === "") throw new Error("keychain: bundleId, envKey and a secret are required");
@@ -137,17 +143,67 @@ function extensionValues(key, { bundleId, envKey, label, username = null, url = 
   };
 }
 
+/**
+ * Does this row hold exactly `plaintext` under `key`? The seal asks it before it decides
+ * whether a re-save may carry a row's identity forward. False for another key id, a damaged
+ * row, a non-string plaintext, and — deliberately — a value of a different LENGTH
+ * (timingSafeEqual needs equal-length buffers): a different length is a different value.
+ * Never returns, logs or throws the value itself.
+ */
+export function rowSecretEquals(row, key, plaintext) {
+  if (!row || !key || row.key_id !== key.id || typeof plaintext !== "string") return false;
+  let current;
+  try {
+    current = openSecret(row.secret_sealed, box(key));
+  } catch {
+    return false;
+  }
+  if (typeof current !== "string") return false;
+  const a = Buffer.from(current, "utf8");
+  const b = Buffer.from(plaintext, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
 export async function saveExtensionSecret(db, key, opts = {}) {
   const { bundleId, envKey } = opts;
   assertExtensionOwner(bundleId, opts.systemOwner);
+  // A keep must NAME the row it was judged on, before anything is written: the caller compared
+  // the value it writes against a blob it read earlier, and only that blob can say whether the
+  // row still holds that value. Pinning on this call's own read would be a pin on a fresh
+  // observation — it would always match, and the race the pin exists for would go unnoticed.
+  if (opts.keepFirstView === true && (typeof opts.keepFirstViewPinnedTo !== "string" || opts.keepFirstViewPinnedTo === "")) {
+    throw new Error("keepFirstView needs keepFirstViewPinnedTo");
+  }
   await ensureKeychainTable(db);
   const v = extensionValues(key, opts);
   const { label, username, url, sealed, ts, fvu } = v;
-  const existing = (await db.execute({ sql: "SELECT id FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ?", args: [bundleId, envKey] })).rows[0];
+  // `keepFirstView` KEEPS an existing row's one-time window, and it is decided INSIDE the
+  // UPDATE — never by writing back a timestamp a caller read earlier. A window that a
+  // concurrent consumeFirstView NULLs between the caller's read and this write therefore
+  // stays spent (`first_view_until = first_view_until` copies the CURRENT value: NULL), and
+  // a caller may pass it only when the value it writes equals the row's current value (a
+  // NEW value must not become viewable inside an OLD window). Without it the window becomes
+  // this write's own: `fvu` is the window a `firstView: true` save just computed (a fresh
+  // save — a reinstall reusing an extension_removed row, a re-run first-admin setup — grants
+  // its own), NULL otherwise.
+  //
+  // The keep is also PINNED to the row it was decided on (`secret_sealed = ?`): the keeper
+  // compared the value it writes against a blob it read earlier, and another writer can
+  // replace that value in between. Sealed blobs carry a random nonce, so an equality match
+  // names exactly the row that was read; a replaced blob turns the keep off and the window
+  // becomes `fvu`, which is what a value the keeper never looked at must get. The pin is
+  // ALWAYS the caller's own blob (`keepFirstViewPinnedTo`, the seal's read) — never the blob
+  // this function reads, which would match by construction and defeat the pin — so a keep
+  // without one is refused above, before any write. NOT pinned: label/username/url/origin — a
+  // stale label is harmless, and this call's metadata is the only one it has to write.
+  const keepFirstView = opts.keepFirstView === true;
+  const existing = (await db.execute({ sql: "SELECT id, secret_sealed FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ?", args: [bundleId, envKey] })).rows[0];
   if (existing) {
     await db.execute({
-      sql: "UPDATE crow_keychain SET label = ?, username = ?, url = ?, secret_sealed = ?, key_id = ?, origin = ?, status = 'active', first_view_until = ?, updated_at = ? WHERE id = ?",
-      args: [label, username, url, sealed, key.id, opts.origin, fvu, ts, existing.id],
+      sql: `UPDATE crow_keychain SET label = ?, username = ?, url = ?, secret_sealed = ?, key_id = ?, origin = ?, status = 'active',
+              first_view_until = CASE WHEN ? AND secret_sealed = ? THEN first_view_until ELSE ? END, updated_at = ? WHERE id = ?`,
+      args: [label, username, url, sealed, key.id, opts.origin, keepFirstView ? 1 : 0, keepFirstView ? opts.keepFirstViewPinnedTo : null, fvu, ts, existing.id],
     });
     return { id: Number(existing.id), created: false };
   }

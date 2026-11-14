@@ -127,23 +127,36 @@ test("sealableEnv: nothing to do for an empty or missing env", () => {
 
 // ─── addonSecretsSealingOn ──────────────────────────────────────────────────
 
-test("sealing predicate: PR1 ships OFF, the operator can say 0, and a split-DB host is off even when it says 1", () => {
+test("sealing predicate: ON by default, the operator can say 0, and a split-DB host is off whatever the flag says", () => {
   const dir = tmp();
-  assert.equal(addonSecretsSealingOn({}), false, "PR1: nothing seals until the switch is explicitly 1");
+  assert.equal(addonSecretsSealingOn({}), true, "sealing ships ON: nothing has to be set for a secret to be sealed");
+  assert.equal(addonSecretsSealingOn({ CROW_HOME: join(dir, "home") }), true);
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "0" }), false);
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "0", CROW_HOME: join(dir, "home") }), false, "0 wins everywhere");
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "1" }), true);
-  assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "yes" }), false, "only the exact 1 enables it");
+  assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "yes" }), true, "'yes' is not one of the off words");
+  // The operator's opt-out is forgiving about spelling: the words that mean "no" mean no,
+  // trimmed and in any case, so a systemd drop-in with `=false` or `= off ` cannot look sealed.
+  for (const off of ["false", "FALSE", "False", "off", "OFF", " off ", "no", "No", " 0 "]) {
+    assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: off }), false, `"${off}" is off`);
+    assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: off, CROW_HOME: join(dir, "home") }), false, `"${off}" wins everywhere`);
+  }
+  for (const on of ["1", "true", "on", "never", "", "0x0"]) {
+    assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: on }), true, `"${on}" seals`);
+  }
 });
 
 test("sealing predicate: a DB that is not the data dir's own crow.db on the host-default home is a split-DB host", () => {
   const dir = tmp();
   // Host-default home (no CROW_HOME) with the DB somewhere else: two gateways could share
   // the home while writing different crow.db files, so no seal could be proven.
+  assert.equal(addonSecretsSealingOn({ CROW_DB_PATH: join(dir, "other", "crow.db") }), false, "the split rule needs no flag: it is not an opt-in");
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "1", CROW_DB_PATH: join(dir, "other", "crow.db") }), false);
   // The DB in the instance's own data dir is fine.
+  assert.equal(addonSecretsSealingOn({ CROW_DATA_DIR: dir, CROW_DB_PATH: join(dir, "crow.db") }), true);
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "1", CROW_DATA_DIR: dir, CROW_DB_PATH: join(dir, "crow.db") }), true);
   // A separate CROW_HOME is a separate instance: no split.
+  assert.equal(addonSecretsSealingOn({ CROW_HOME: join(dir, "home"), CROW_DB_PATH: join(dir, "db", "crow.db") }), true);
   assert.equal(addonSecretsSealingOn({ CROW_ADDON_SECRETS_KEYCHAIN: "1", CROW_HOME: join(dir, "home"), CROW_DB_PATH: join(dir, "db", "crow.db") }), true);
 });
 
@@ -160,6 +173,19 @@ test("keychainEnvNames: env-shaped names only, deduped, loader names dropped, ca
   const capped = keychainEnvNames({ keychainEnv: many });
   assert.equal(capped.length, 64, "at most 64 names");
   assert.deepEqual(capped, many.slice(0, 64));
+});
+
+test("keychainEnvNames: an INSTANCE key is never a keychain name — the instance value must win", (t) => {
+  const out = captureOutput(t);
+  // A `keychainEnv` naming an instance var would otherwise be hydrated over the value the
+  // caller bound the child to (and let an add-on point a bot at another instance).
+  assert.deepEqual(keychainEnvNames({ keychainEnv: ["CROW_HOME", "CROW_DB_PATH", "CROW_DATA_DIR", "CROW_TASKS_DB_PATH", "HA_TOKEN"] }), ["HA_TOKEN"]);
+  assert.match(out.text(), /CROW_HOME/, "the drop is named, like a loader name");
+  // End to end: an entry that lists one keeps its plain value and is owed nothing for it.
+  const entry = { env: { CROW_DB_PATH: "/somewhere/else/crow.db", HA_TOKEN: "plain" }, keychainEnv: ["CROW_DB_PATH", "HA_TOKEN"] };
+  assert.deepEqual(keychainEnvNames(entry), ["HA_TOKEN"]);
+  const { seal } = sealableEnv(entry.env, null, { listed: keychainEnvNames(entry) });
+  assert.deepEqual(Object.keys(seal), ["HA_TOKEN"], "the instance key is not sealable through the list");
 });
 
 test("keychainEnvNames: the drop log names names only — never an entry's value", (t) => {

@@ -33,6 +33,7 @@ import { tickBotSchedules } from "../bot_scheduler.mjs";
 import { makeChannelDeliverer } from "./deliver.mjs";
 import { warnIfPiLabIncompatible } from "../pi-lab-compat.mjs";
 import { SKILL_OFF_LIST_SUPPORTED } from "../skill_resolver.mjs";
+import { warnIfAddonKeysUnanchorable } from "../mcp_writer.mjs";
 
 const CROW_DB = botsDbPath();
 const REAP_INTERVAL_MS = Number(process.env.PIBOT_REAP_INTERVAL_MS || 60000);
@@ -170,6 +171,11 @@ process.on("SIGINT", shutdown);
   // S6-CROW: declare the pi-lab minimum (MIN_PI_LAB_REV) at boot — a clear
   // warning when the pi-lab that pi loads predates bot read confinement.
   warnIfPiLabIncompatible((m) => log(m));
+  // Add-on secrets (PR2 of the keychain work): when CROW_BOT_UID is set and the secrets
+  // dir's ancestors are not safe, anchorSecretsDir refuses, every unseal fails closed and a
+  // sealed add-on is left out of every bot turn. One fixed line here, once per boot — no
+  // path, no value — so an operator sees WHY those add-ons never reach a bot.
+  warnIfAddonKeysUnanchorable((m) => log(m));
   // Skills panel on/off: this process loads the resolver once, and the fleet
   // auto-updater restarts gateways only. The line shows in the journal that
   // this process honours the off list (a process without it predates it).
