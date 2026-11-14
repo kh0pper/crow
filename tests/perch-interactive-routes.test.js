@@ -1632,7 +1632,12 @@ test("GET /interactive/:sid/events carries rendered markdown ALONGSIDE the raw t
   assert.match(text.html, /<strong>four<\/strong>/);
 
   const reply = sseDataAt(buf, "reply", 0);
-  assert.match(reply.html, /<a href="https:\/\/example\.com">the docs<\/a>/);
+  // A bot link keeps its href and text, and carries BOTH Turbo opt-outs:
+  // Turbo 8 prefetches a link on HOVER (a GET with the viewer's cookies) and
+  // would navigate on click, so the renderer writes these itself.
+  assert.match(reply.html, /<a href="https:\/\/example\.com"[^>]*>the docs<\/a>/, reply.html);
+  assert.match(reply.html, /<a href="https:\/\/example\.com"[^>]*data-turbo-prefetch="false"[^>]*>the docs<\/a>/, reply.html);
+  assert.match(reply.html, /<a href="https:\/\/example\.com"[^>]*data-turbo="false"[^>]*>the docs<\/a>/, reply.html);
 
   // Gateway chrome is not model prose: a log line saying "warm crow-local ->
   // 200" must not be handed to a markdown parser.

@@ -104,7 +104,9 @@ test("I2: shell variables, tickers and template literals keep their dollar signs
 });
 
 test("M7: math inside image alt text is plain source, not markup", () => {
-  const html = renderBotMarkdown("![a $x$ b](u.png)");
+  // The image is /blog/media/, the only src a bot reply may keep (a refused
+  // image is replaced by its alt TEXT — see bot-markdown-images.test.js).
+  const html = renderBotMarkdown("![a $x$ b](/blog/media/u.png)");
   assert.match(html, /alt="a x b"/, html);
   assert.ok(!/&lt;span|class=&quot;/.test(html), html);
 });
