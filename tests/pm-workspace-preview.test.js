@@ -9,15 +9,23 @@
  *
  * What is pinned here:
  *   - POST /api/pm/notes/preview answers SANITIZED HTML (servers/blog/
- *     renderer.js renderMarkdown) for the classic hostile inputs,
+ *     renderer.js renderBotMarkdown) for the classic hostile inputs,
  *   - ordinary markdown still renders (heading, list, link),
- *   - the body cap matches the MCP tool's content_md cap,
+ *   - note text is BOT text: no image outside /blog/media/ survives (a note's
+ *     `![x](/dashboard/logout)` used to fire a GET with the reader's
+ *     cookies) and every link carries the Turbo prefetch opt-out,
+ *   - the body cap matches the MCP tool's content_md cap, and between the
+ *     bot cap (BOT_MD_MAX_INPUT) and that hard cap the preview answers the
+ *     note as ESCAPED TEXT in a <pre> with truncated:true instead of handing
+ *     it to marked (a 199 KB "_a_" note blocked the event loop ~21 s),
  *   - the route sits behind the same path-scoped auth as POST /api/pm/notes,
  *   - a failed renderer import answers ESCAPED TEXT in a <pre>, never raw
  *     markdown,
  *   - statically: the editor never calls marked and never assigns innerHTML
  *     from anything but the server's `html`; the editor page no longer loads
- *     marked from the CDN (the drawing scripts are untouched).
+ *     marked from the CDN (the drawing scripts are untouched); the planner's
+ *     decide buttons carry their arguments in data-*, never in an onclick
+ *     that interpolates the uid.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -27,11 +35,14 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { BOT_MD_MAX_INPUT } from "../servers/blog/renderer.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dir, "..");
 const EDITOR_JS = join(REPO_ROOT, "bundles", "pm-workspace", "panel", "static", "note-text-editor.js");
 const ROUTES_JS = join(REPO_ROOT, "bundles", "pm-workspace", "panel", "routes.js");
+const PANEL_JS = join(REPO_ROOT, "bundles", "pm-workspace", "panel", "pm-workspace.js");
+const ANCHOR = `<pre style="white-space:pre-wrap">`;
 
 const authStub = (req, res, next) => (req.headers["x-test-auth"] ? next() : res.status(401).end());
 const H = { "x-test-auth": "1", "content-type": "text/plain;charset=UTF-8" };
@@ -81,9 +92,14 @@ test("the route answers the classic hostile inputs with no live markup", async (
     assert.equal(r.status, 200, md);
     const { html } = await r.json();
     assert.equal(typeof html, "string", md);
-    assert.doesNotMatch(html, /onerror/i, `no onerror for ${md}: ${html}`);
-    assert.doesNotMatch(html, /onload/i, `no onload for ${md}: ${html}`);
-    assert.doesNotMatch(html, /javascript:/i, `no javascript: for ${md}: ${html}`);
+    // Asserted on MARKUP, not on substrings: a note that is nothing but a
+    // refused image (raw `<img …>` is dropped by the bot renderer) answers the
+    // escaped-source <pre>, where the words `onerror=…` are inert character
+    // data. A live handler can only sit inside a tag.
+    assert.doesNotMatch(html, /<[^>]*onerror/i, `no onerror attribute for ${md}: ${html}`);
+    assert.doesNotMatch(html, /<[^>]*onload/i, `no onload attribute for ${md}: ${html}`);
+    assert.doesNotMatch(html, /<[^>]*javascript:/i, `no javascript: URL for ${md}: ${html}`);
+    assert.doesNotMatch(html, /<img[^>]*\ssrc="?x"?[^>]*>/i, `no live <img> for ${md}: ${html}`);
   }
 });
 
@@ -112,6 +128,73 @@ test("over-cap content_md is refused, not rendered", async () => {
   assert.equal(typeof body.error, "string");
   assert.match(body.error, /too long/i);
   assert.equal(body.html, undefined, "a refused preview answers no markup");
+});
+
+/* --------------------------------------------------- bot output in the preview */
+
+// A note can be written by a bot (the pm-workspace MCP create-note tool), so the
+// preview is a bot-markdown sink: the same image rule and the same link opt-outs
+// the Perch reply path has.
+test("a note's images are bot images: /dashboard/logout fires nothing", async () => {
+  // A markdown image is dropped to its alt text (the renderer's rule), a raw
+  // HTML <img> disappears entirely — in neither case is there an <img> tag, so
+  // the reader's browser never GETs the src with their cookies.
+  for (const md of ["![x](/dashboard/logout)", '<img src="/dashboard/logout">']) {
+    const r = await preview(md);
+    assert.equal(r.status, 200, md);
+    const { html } = await r.json();
+    assert.doesNotMatch(html, /<img/i, `${md} → ${html}`);
+  }
+  const md = "![x](/dashboard/logout)";
+  const { html } = await (await preview(md)).json();
+  assert.doesNotMatch(html, /dashboard\/logout/, "a markdown image is alt text, not even a link: " + html);
+});
+
+test("bot links in the preview carry data-turbo-prefetch=\"false\"", async () => {
+  const r = await preview("- [x](/dashboard/make/open/a/b)");
+  assert.equal(r.status, 200);
+  const { html } = await r.json();
+  assert.match(html, /<a href="\/dashboard\/make\/open\/a\/b"[^>]*data-turbo-prefetch="false"/, html);
+});
+
+/* -------------------------------------- the bot cap: long notes are TEXT, not a hang */
+
+/** `_a_` repeated to `len` chars — the body that took ~21 s through
+ *  renderMarkdown, and the pattern the bot path's cap exists for. */
+const pathological = (len) => "_a_".repeat(Math.ceil(len / 3)).slice(0, len);
+
+/** Process CPU time, per bot-markdown-render.test.js: the render is synchronous
+ *  and in THIS process, so wall-clock only adds the parallel suite's load. */
+function cpuMs() { const u = process.cpuUsage(); return (u.user + u.system) / 1000; }
+
+test("a 199 KB pathological note answers the escaped <pre> as truncated in under 1 s", async () => {
+  const md = pathological(199_000);
+  const t0 = performance.now();
+  const r = await preview(md);
+  const ms = performance.now() - t0;
+  assert.equal(r.status, 200, "over the BOT cap is not an error: the editor shows the source");
+  const body = await r.json();
+  assert.equal(body.truncated, true);
+  // Exact: the escaped text of the note, in the fallback <pre>, and nothing else
+  // (the note holds no HTML-special characters, so escaping is the identity).
+  assert.equal(body.html, ANCHOR + md + "</pre>");
+  // Measured 36 ms on the review box (was ~21 s through renderMarkdown).
+  assert.ok(ms < 1000, `199 KB pathological note answered in ${ms.toFixed(0)} ms (budget 1000)`);
+});
+
+test("just under the bot cap a pathological note still renders, bounded", async (t) => {
+  const md = pathological(BOT_MD_MAX_INPUT - 1);
+  const t0 = cpuMs();
+  const r = await preview(md);
+  const ms = cpuMs() - t0;
+  assert.equal(r.status, 200);
+  const body = await r.json();
+  assert.notEqual(body.truncated, true, "under the cap the note is rendered, not truncated");
+  assert.match(body.html, /^<p>/, "markdown was rendered: " + body.html.slice(0, 80));
+  assert.ok(!body.html.startsWith(ANCHOR), "not the escaped-text fallback");
+  // Measured ~1.3-1.4 s on the review box — bounded by the cap, not a hang.
+  t.diagnostic(`${BOT_MD_MAX_INPUT - 1} chars of "_a_" rendered in ${ms.toFixed(0)} ms`);
+  assert.ok(ms < 3000, `${BOT_MD_MAX_INPUT - 1} chars of "_a_" took ${ms.toFixed(0)} ms (budget 3000)`);
 });
 
 /* ----------------------------------------------------------------- the auth */
@@ -192,4 +275,19 @@ test("static: the manifest version was bumped so installed copies refresh", () =
   const [major, minor, patch] = manifest.version.split(".").map(Number);
   assert.ok(major === 1 && minor === 0 && patch >= 4,
     "1.0.4 or later so repairInstalledBundleAssets refreshes the installed panel: " + manifest.version);
+});
+
+test("static: planner decide buttons carry data-*, never an onclick with the uid", () => {
+  const src = readFileSync(PANEL_JS, "utf8");
+  // No inline handler on the page interpolates a value any more: a uid inside
+  // an onclick string literal only held because of the uid's shape.
+  assert.doesNotMatch(src, /onclick="[^"]*\$\{/, "no onclick interpolating a value");
+  assert.doesNotMatch(src, /pmPlanDecide\('[^']*\$\{/);
+  assert.match(src, /data-uid="\$\{escapeHtml\(e\.uid\)\}"/, "the uid travels in a data attribute");
+  assert.match(src, /data-pm-decide="approved"/, "the decision travels in a data attribute");
+  assert.match(src, /data-pm-decide="cancelled"/, "all three decisions are covered");
+  // One delegated listener reads them back and calls pmPlanDecide.
+  assert.match(src, /addEventListener\('click'/, "a delegated click listener exists");
+  assert.match(src, /closest\('\[data-pm-decide\]'\)/, "it matches only decide buttons");
+  assert.match(src, /pmPlanDecide\(btn\.dataset\.uid/, "and passes the dataset values to pmPlanDecide");
 });

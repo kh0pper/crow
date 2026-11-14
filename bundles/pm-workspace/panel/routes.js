@@ -282,15 +282,26 @@ ${isDrawing
   // Markdown → sanitized HTML for the editor's Preview tab.
   //
   // The browser never parses markdown itself: the ONLY markup it receives is
-  // renderMarkdown's output (marked + sanitize-html, the same renderer the blog
+  // the renderer's output (marked + sanitize-html, the same pipeline the blog
   // and the knowledge base use), so a note written by a bot through the
   // pm-workspace MCP create-note tool cannot carry a live handler. Same
   // protection as POST /api/pm/notes above: the path-scoped dashboardAuth on
   // /api/pm is the auth rail, and the body is read the same way (text/plain
   // JSON string, or an already-parsed object).
   //
-  // A failed renderer import answers the markdown as ESCAPED TEXT in a <pre> —
-  // an old install reading markdown is a cosmetic loss, never a raw sink.
+  // It is renderBotMarkdown, not renderMarkdown, because note text can be bot
+  // text: that path refuses every image outside /blog/media/ (a same-origin
+  // `<img src="/dashboard/logout">` would fire a GET with the reader's
+  // cookies) and opts every link out of Turbo prefetch, and it caps its input
+  // at BOT_MD_MAX_INPUT — marked's lexer has a cliff on long escape-dense
+  // input (a 199 KB note of `_a_` repeated blocked this event loop ~21 s
+  // through renderMarkdown).
+  //
+  // Over the bot cap is NOT an error: the preview answers the note as ESCAPED
+  // TEXT in a <pre> plus `truncated: true`, and the renderer is never called.
+  // Above the hard PREVIEW_MAX_MD cap the request is still refused. A failed
+  // (or too old) renderer import answers the same escaped text — an old
+  // install reading markdown is a cosmetic loss, never a raw sink.
   const PREVIEW_MAX_MD = 200_000; // the same cap the MCP note tool puts on content_md
   router.post("/api/pm/notes/preview", async (req, res) => {
     const body = parseBody(req);
@@ -300,9 +311,18 @@ ${isDrawing
     }
     const fallback = () => `<pre style="white-space:pre-wrap">${escapeHtml(md)}</pre>`;
     const mod = await loadRenderer();
-    if (!mod || typeof mod.renderMarkdown !== "function") return res.json({ html: fallback() });
+    // Bot renderer first; an install whose renderer predates it keeps the
+    // escaped-text answer rather than falling back to the image-allowing
+    // renderMarkdown.
+    const render = mod && typeof mod.renderBotMarkdown === "function" ? mod.renderBotMarkdown : null;
+    if (!render) return res.json({ html: fallback() });
+    const botCap = typeof mod.BOT_MD_MAX_INPUT === "number" ? mod.BOT_MD_MAX_INPUT : PREVIEW_MAX_MD;
+    if (md.length > botCap) return res.json({ html: fallback(), truncated: true });
     try {
-      return res.json({ html: mod.renderMarkdown(md) });
+      const html = render(md);
+      // renderBotMarkdown answers "" for input it refuses (empty in, empty out).
+      if (!html && md) return res.json({ html: fallback(), truncated: true });
+      return res.json({ html });
     } catch (err) {
       console.warn(`[pm-workspace routes] markdown preview failed: ${err.message}`);
       return res.json({ html: fallback() });
