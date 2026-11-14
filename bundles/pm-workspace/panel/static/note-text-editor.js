@@ -7,6 +7,11 @@
  * PM Workspace changes: whole-note saves POST to PM_BASE + /api/pm/notes
  * as a text/plain JSON string {id, title, kind:'markdown', content_md,
  * tags}; tags are client-side chips submitted with each save.
+ *
+ * The Preview tab is SERVER-rendered: POST PM_BASE + /api/pm/notes/preview
+ * answers sanitized HTML (servers/blog/renderer.js renderMarkdown), because a
+ * note can be written by a bot through the MCP create-note tool and this page
+ * must never parse markdown into live markup itself.
  */
 (function () {
     "use strict";
@@ -42,14 +47,36 @@
         return JSON.stringify([textarea.value, titleInput.value, tags.join(",")]);
     }
 
-    // ── Markdown rendering helper ────────────────────────────────
-    // Uses marked.js when loaded; falls back to escaped text.
-    function renderMarkdown(md) {
-        if (typeof marked !== "undefined" && marked.parse) {
-            return marked.parse(md);
-        }
-        return md.replace(/&/g, "&amp;").replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+    // ── Preview (server-rendered + sanitized) ────────────────────
+    // This page never parses markdown. POST /api/pm/notes/preview answers
+    // renderMarkdown's sanitized HTML (marked + sanitize-html on the server),
+    // and that answer is the only thing ever written as HTML here. While it is
+    // in flight — and if it fails — the textarea's markdown goes in as TEXT.
+    var previewSeq = 0;
+
+    function renderPreview() {
+        var mine = ++previewSeq;
+        var md = textarea.value;
+        preview.textContent = md;
+        fetch(PM_BASE + "/api/pm/notes/preview", {
+            method: "POST",
+            headers: { "Content-Type": "text/plain;charset=UTF-8" },
+            body: JSON.stringify({ content_md: md }),
+        })
+            .then(function (resp) {
+                if (!resp.ok) throw new Error("Preview failed: " + resp.status);
+                return resp.json();
+            })
+            .then(function (data) {
+                if (mine !== previewSeq) return;   // a newer preview won
+                if (!data || typeof data.html !== "string") throw new Error("Preview answered oddly");
+                preview.innerHTML = data.html;
+            })
+            .catch(function (e) {
+                if (mine !== previewSeq) return;
+                console.error("Preview error:", e);
+                preview.textContent = md;
+            });
     }
 
     // ── Save status helper ───────────────────────────────────────
@@ -123,8 +150,7 @@
         } else if (tab === "preview") {
             textarea.style.display = "none";
             preview.style.display = "";
-            // User-authored markdown from their own notes.
-            preview.innerHTML = renderMarkdown(textarea.value);
+            renderPreview();
         }
     }
 

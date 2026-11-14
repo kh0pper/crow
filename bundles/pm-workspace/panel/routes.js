@@ -29,6 +29,35 @@ import { pathToFileURL } from "node:url";
 
 const BUNDLE_DIR = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "pm-workspace");
 
+// Inlined app-root resolver: this file is copied ALONE to
+// <CROW_HOME>/panels/pm-workspace-routes.js, so neither its `../server/*`
+// siblings nor a repo-relative path exist on an installed copy. The gateway
+// sets CROW_APP_ROOT to the checkout at boot (servers/gateway/index.js); the
+// guess is only the run-from-the-repo fallback. Same shape as the maker-lab
+// bundle's inline resolver (that file travels alone too).
+function looksLikeAppRoot(p) {
+  return !!p && existsSync(join(p, "servers", "blog", "renderer.js"));
+}
+const APP_ROOT_GUESS = resolve(import.meta.dirname, "..", "..", "..");
+const APP_ROOT = looksLikeAppRoot(process.env.CROW_APP_ROOT) ? process.env.CROW_APP_ROOT
+  : looksLikeAppRoot(APP_ROOT_GUESS) ? APP_ROOT_GUESS
+  : (process.env.CROW_APP_ROOT || APP_ROOT_GUESS);
+
+// The sanitizing markdown renderer (marked + sanitize-html), loaded lazily the
+// way the knowledge-base panel loads it. `null` = not tried yet, `false` = the
+// import failed (answer escaped text, never raw markdown).
+let rendererMod = null;
+async function loadRenderer() {
+  if (rendererMod !== null) return rendererMod;
+  try {
+    rendererMod = await import(pathToFileURL(join(APP_ROOT, "servers", "blog", "renderer.js")).href);
+  } catch (err) {
+    console.warn(`[pm-workspace routes] failed to load the markdown renderer: ${err.message}`);
+    rendererMod = false;
+  }
+  return rendererMod;
+}
+
 async function importBundleModule(rel) {
   try {
     return await import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
@@ -133,7 +162,7 @@ ${isDrawing ? `<script type="importmap">
   "integrity": { "https://cdn.jsdelivr.net/npm/perfect-freehand@1.2.2/dist/esm/index.mjs": "sha384-5l3A2yfUaPsFT9OELkOpJOX0+bzd81Hi6euWa2tIwITOu+z8k9dMuxvIu78wYkxL" }
 }
 </script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js" integrity="sha384-sLpuECXYCB5TUyTbC06pftm/rgurDambREZmV4eRHwEqJzCQtU6lxI2Ve00z4XW5" crossorigin="anonymous"></script>` : `<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>`}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js" integrity="sha384-sLpuECXYCB5TUyTbC06pftm/rgurDambREZmV4eRHwEqJzCQtU6lxI2Ve00z4XW5" crossorigin="anonymous"></script>` : ""}
 </head>
 <body>
 <div class="editor-page" id="editor-page">
@@ -247,6 +276,36 @@ ${isDrawing
       res.json({ ok: true, note: { ...note, strokes_json: undefined } });
     } catch (err) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Markdown → sanitized HTML for the editor's Preview tab.
+  //
+  // The browser never parses markdown itself: the ONLY markup it receives is
+  // renderMarkdown's output (marked + sanitize-html, the same renderer the blog
+  // and the knowledge base use), so a note written by a bot through the
+  // pm-workspace MCP create-note tool cannot carry a live handler. Same
+  // protection as POST /api/pm/notes above: the path-scoped dashboardAuth on
+  // /api/pm is the auth rail, and the body is read the same way (text/plain
+  // JSON string, or an already-parsed object).
+  //
+  // A failed renderer import answers the markdown as ESCAPED TEXT in a <pre> —
+  // an old install reading markdown is a cosmetic loss, never a raw sink.
+  const PREVIEW_MAX_MD = 200_000; // the same cap the MCP note tool puts on content_md
+  router.post("/api/pm/notes/preview", async (req, res) => {
+    const body = parseBody(req);
+    const md = typeof body.content_md === "string" ? body.content_md : "";
+    if (md.length > PREVIEW_MAX_MD) {
+      return res.status(400).json({ error: `content_md is too long (max ${PREVIEW_MAX_MD} characters)` });
+    }
+    const fallback = () => `<pre style="white-space:pre-wrap">${escapeHtml(md)}</pre>`;
+    const mod = await loadRenderer();
+    if (!mod || typeof mod.renderMarkdown !== "function") return res.json({ html: fallback() });
+    try {
+      return res.json({ html: mod.renderMarkdown(md) });
+    } catch (err) {
+      console.warn(`[pm-workspace routes] markdown preview failed: ${err.message}`);
+      return res.json({ html: fallback() });
     }
   });
 
