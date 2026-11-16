@@ -32,14 +32,19 @@ marked.setOptions({ gfm: true, breaks: true });
  * prefetched: Turbo 8 fires a same-origin GET on hover, with the viewer's
  * cookies.
  *
- * Like the bot path, container nesting is bounded INSIDE marked's block lexer
- * (boundedLexer + MD_MAX_NEST, see "THE BLOCK-NESTING CLIFF" below), the input
- * is capped at OWNER_MD_MAX_INPUT, and a parse that still throws answers its
- * escaped text instead of a RangeError. All three matter to the OWNER path: a
- * bot can write a blog post, a memory, a KB article, a workspace .md or a
- * meta-glasses note, and this function runs synchronously in a route —
- * uncaught, the stack overflow a deeply nested document used to cause was a 500
- * on the page (measured: 1356 ms and a RangeError for 64 KB of `1) `), and an
+ * Like the bot path, this is the SAME guarded pipeline (guardAndParse, driven
+ * with ownerMarked's own defaults, image renderer and link opt-out): container
+ * nesting is bounded INSIDE marked's block lexer (boundedLexer + MD_MAX_NEST,
+ * see "THE BLOCK-NESTING CLIFF" below), and the inline-lexer cliff is guarded
+ * by the same linear pre-pass the bot path uses (see "THE INLINE-LEXER CLIFF").
+ * Both matter to the OWNER path: /blog and /kb are PUBLIC and uncached, so any
+ * reader can hand this function a document — which is exactly how the owner
+ * path's quadratic render went from an operator-only annoyance to an
+ * unauthenticated one (measured before that guard: 1.8 s for 64 KB of `_a`).
+ * And a bot can write a blog post, a memory, a KB article, a workspace .md or a
+ * meta-glasses note, and this function runs synchronously in a route — uncaught,
+ * the stack overflow a deeply nested document used to cause was a 500 on the
+ * page (measured: 1356 ms and a RangeError for 64 KB of `1) `), while an
  * unbounded 4 MB document is an OOM in the gateway process.
  *
  * THE LONG-DOCUMENT SPLIT. marked's block lexer is still quadratic on a few
@@ -53,7 +58,10 @@ marked.setOptions({ gfm: true, breaks: true });
  * is dropped — the head's source plus the tail's text is the entire document.
  * Real content is far below the cap (every stored blog post, KB article and
  * memory is < 60 KB); the file viewer's larger documents are what the tail is
- * for.
+ * for. The head — everything handed to marked — still goes through the same
+ * guarded pipeline, and a guard that refuses it (or a parse that throws) answers
+ * the escaped text of the document — never "": a public page renders what was
+ * written.
  * @param {string} markdown
  * @param {{ storageOrigin?: string|null }} [options] `storageOrigin` overrides
  *   the module-wide storage origin for this call only. The gateway sets that
@@ -92,17 +100,19 @@ export function renderMarkdown(markdown, options) {
  */
 function renderOwnerHead(src) {
   try {
-    // Exactly what ownerMarked.parse(src) does — Lexer#lex (block phase, then
-    // the inline phase) and Parser.parse — with the one difference that the
-    // Lexer is depth-bounded and its re-lex path is byte-budgeted. ownerMarked
-    // carries no hooks, extensions or walkTokens; if one is ever added to it,
-    // it has to be plumbed here too (parse's opt.hooks branch is the code that
-    // would otherwise run it).
-    return ownerMarked.parser(boundedLexer(ownerMarked.defaults, src.length).lex(src));
+    // The same guarded pipeline as the bot path — marked's own two lexing
+    // phases with the inline guard between them, plus the depth-bounded block
+    // lexer — driven with ownerMarked, so the defaults are the owner's (the
+    // image renderer leaves a refused image as its escaped alt text) and there
+    // is no math extension. ownerMarked carries no hooks, extensions or
+    // walkTokens; if one is ever added to it, guardAndParse has to be told
+    // (parse's opt.hooks branch is the code that would otherwise run it).
+    return guardAndParse(src, ownerMarked);
   } catch {
-    // Fail safe, never a 500: the document as escaped text (see
-    // escapedTextHtml — it drops what the author hid, an HTML comment). The
-    // caller's sanitizer still runs, so the fallback cannot carry markup either.
+    // Fail safe, never a 500 and never an empty page: the document as escaped
+    // text (see escapedTextHtml — it drops what the author hid, an HTML
+    // comment). The caller's sanitizer still runs, so the fallback cannot carry
+    // markup either.
     return escapedTextHtml(src);
   }
 }
@@ -1125,7 +1135,8 @@ function boundedLexer(options, inputLength = 0) {
 //   "**_a"                 64     213
 //
 // …while prose, "~a", "[a](", backtick runs, "<a" and fenced code stay linear
-// (5-25 ms at 8 KB).
+// (5-25 ms at 8 KB) — with one exception, a run of `http`-like words, which is
+// the SECOND cliff in this lexer and is covered below.
 //
 // The cost lives in ONE inline block because marked retries its emphasis and
 // link tokenizers at every delimiter position and an attempt can scan the
@@ -1136,15 +1147,28 @@ function boundedLexer(options, inputLength = 0) {
 // COUNT per block is therefore the quantity to bound, and it can be counted
 // in one linear pass.
 //
-// So EVERY bot render runs marked's own two phases (block tokens, then inline
-// tokens — the same split Lexer#lex does) with a linear scan between them: an
-// inline block that is over budget keeps its place and its container (a <p>
-// stays a <p>, a <td> a <td>) but its text is escaped instead of inline-lexed.
-// The pre-pass is linear, so there is no fast path to preserve: the digest
-// tests pin the guarded path byte-identical to plain marked.parse for ordinary
-// content (a normal ~19 KB reply, a delimiter-dense but legitimate document),
-// and routing everything through ONE path is what puts a CRLF reply, a
-// definition flood and a delimiter flood on the same, guarded, code.
+// So EVERY render — the bot path (renderBotMarkdown) and the owner path
+// (renderMarkdown, i.e. every /blog, /kb, memory, file-view and meta-glasses
+// page) — runs marked's own two phases (block tokens, then inline tokens — the
+// same split Lexer#lex does) with a linear scan between them: an inline block
+// that is over budget keeps its place and its container (a <p> stays a <p>, a
+// <td> a <td>) but its text is escaped instead of inline-lexed. The pre-pass is
+// linear, so there is no fast path to preserve: the digest tests pin the
+// guarded path byte-identical to plain marked.parse for ordinary content (a
+// normal ~19 KB reply, a delimiter-dense but legitimate document, a ~24 KB
+// blog post with figures and tables), and routing everything through ONE path
+// is what puts a CRLF reply, a definition flood and a delimiter flood on the
+// same, guarded, code.
+//
+// The guard is shared but the PARSER is not: guardAndParse is handed the Marked
+// instance to drive (botMarked: math extensions + the bot image renderer;
+// ownerMarked: no math, the owner's image rule and link opt-out), so each path
+// keeps its own defaults and its own renderer. The budgets below are per
+// DOCUMENT and shared, because the thing they bound — marked's inline lexer —
+// is the same code in both. That is what lets a 128 KB owner document (the
+// OWNER_MD_MAX_INPUT cap, 2x the bot cap) take the same bound: see "AT THE
+// OWNER CAP" below.
+//
 // Three budgets, so neither one huge block, nor many medium ones, nor a flood
 // of link definitions can add up:
 //   - BOT_MD_BLOCK_DELIMS, one inline block: past it that block is shown as
@@ -1162,6 +1186,10 @@ function boundedLexer(options, inputLength = 0) {
 //     document is orders of magnitude below it — a 200-delimiter paragraph
 //     costs 4e4 of it, and a 19 KB reply with a few dozen emphasis spans costs
 //     1e5 — so only delimiter-dense input, i.e. the attack, ever runs out.
+//     The url email scan (the second cliff, below) is paid from this SAME pool,
+//     so a document cannot spend 4e6 on delimiters and another 4e6 on scans —
+//     and so is the email autolink's run scan (the third, emailRunScan), for
+//     the same reason.
 //   - BOT_MD_MAX_LINK_DEFS, link definitions in one document: marked's
 //     inlineTokens rebuilds `Object.keys(this.tokens.links)` and scans it on
 //     EVERY inline block, so thousands of `[N]:x` definitions make every
@@ -1170,11 +1198,107 @@ function boundedLexer(options, inputLength = 0) {
 //     dropped (insertion order kept; a link to a dropped one renders as its
 //     own text).
 //
-// One cost is bounded but NOT covered by these budgets: marked's email
-// autolink scan is linear yet expensive per character, so a long run of
-// `HTTP` (a plausible word, not just an attack — one 64 KB email local-part
-// candidate) costs ≈0.5 s at the cap, measured 543 ms. It does not compound
-// with the d² term, so it is recorded here and left unguarded.
+// …plus the email autolink's run scan (emailRunScan, below), whose cost is paid
+// from that same pool, and a run-length cap on email-local-part characters that
+// FLATTENS a block outright — it can only flatten, never admit one.
+//
+// AT THE OWNER CAP: 1 MiB THEN, 128 KB NOW. The budgets are per document, so
+// they bound marked's inline lexer at the owner cap exactly as they do at
+// 64 KB — that is the point of the shape, and it is why the same thresholds
+// were kept for the owner path instead of being scaled down for it.
+// OWNER_MD_MAX_INPUT is 128 KB now (the long-document split: the head is
+// parsed, the remainder is plain text), so only that much of any document ever
+// reaches the inline lexer. The numbers below are HISTORICAL — they were
+// measured at the EARLIER 1 MiB cap, on the owner path at 1 MiB - 1 chars,
+// whole renderMarkdown call, sanitizer included, CPU ms (worst single render
+// per shape; the "before" column is the same input through the pre-guard owner
+// path). They are kept because they are the evidence for the thresholds above;
+// the parsed span is 128 KB now and the same shapes cost a fraction of them:
+//
+//   input shape                        before            with the guard
+//   `_a` repeated                      ~460 s†               31
+//   `[a](` repeated                    ~184 s†               18
+//   `*a` repeated                      ~136 s†               25
+//   `*a_` / `**a_` repeated            minutes†            12–15
+//   `HTTP` repeated (url email scan)     330 s               28
+//   `1) ` / `> 1) ` marker run          341 / 368          448 / 464
+//   ref-definition flood, ~800 KB
+//   of definitions + 50k paragraphs    >10 min‡             728
+//   long normal blog post (2k blocks)     341                371
+//   ~500k one-word paragraphs             890               1036§
+//
+//   † extrapolated from the 64 KB measurements at the top of this section (a
+//     quadratic shape at 16x the input is ~256x the time); not run to
+//     completion.
+//   ‡ the 1 MiB flood never finished: marked's inlineTokens scans every link
+//     definition once per inline block, and there was no cap on the owner path.
+//   § NOT a cliff and not something these budgets govern: a document made of
+//     half a million blocks costs marked's per-block overhead plus sanitizing a
+//     3 MB output, linearly. The pre-change renderer measured 890 ms on the
+//     same input, so the guard's linear pre-pass adds ~15%; the bound in the
+//     test for this shape is a regression tripwire, not the 1 s the cliffs are
+//     held to.
+//
+// Worst measured after the guard, across the shapes above plus 30 seeded
+// 256 KB delimiter soups: 123 ms at 64 KB, 728 ms at 1 MiB - 1 (both the
+// definition flood, and 1 MiB was the owner cap then), 114 ms for the soups.
+// tests/owner-markdown-guard.test.js asserts < 1000 ms for every shape at both
+// sizes and records the worst render of each test as its diagnostic.
+//
+// A second quadratic in this lexer, on the SAME input, is marked's GFM url
+// EMAIL alternative — reached once per "protocol word" the text rule stops at,
+// scanning the rest of the word run and failing. It is measured in the same
+// currency, paid from the same document budget and covered by the same
+// pre-pass (see urlScanCost below): 543 ms at the bot cap, 330 s at the owner
+// cap unguarded, ~30 ms guarded at either. The old footnote here called this
+// "bounded but NOT covered by these budgets (0.5 s at the cap), recorded and
+// left unguarded" — 0.5 s was the bot path's cap; the owner path could then
+// parse 1 MiB, which is what made it worth closing.
+//
+// A THIRD quadratic in the same lexer, on the SAME input: marked's text rule
+// also ends a token at EVERY position of a run of
+// `[A-Za-z0-9.!#$%&'*+/=?_`{|}~-]` that `@` follows, and at each of those stops
+// the url tokenizer retries its email alternative — `^[A-Za-z0-9._+-]+@…`,
+// which consumes the rest of the run looking for the `@` and then walks the
+// domain — so the work is Σ(run length) per run, quadratic in it. No protocol
+// word is involved, so urlScanCost (which charges protocol-word stops only)
+// sees NOTHING while marked does all of it: `a…@a…` measured 1.8 s for 64 KB on
+// this tree (and would be minutes at the owner cap), and `a` runs with an `@`
+// every 4,096 characters measured 415 ms at 64 KB.
+//
+// So it is CHARGED, like the other two: emailRunScan (below) returns what it
+// observes — Σ(run²) over EVERY run that precedes an `@`, plus run × domain per
+// `@` (each stop in that run walks the domain), in the same "attempts"
+// currency as d² and urlScanCost — and guardAndParse bills it to the same
+// per-document pool (cost = d² + urlScanCost + emailRunCost). A per-run
+// length cap alone was not enough: a run JUST UNDER the cap is admitted, and
+// its (cap-1)²-ish scan at EVERY `@` is quadratic a whole document long while
+// no single run ever trips the cap — an `@` every 128 or every 256 characters
+// adds up across a large document. With the cost billed, those shapes run the budget out (and flatten
+// like any other dense block) at both caps; one huge run is caught either way,
+// since its own cost alone is far over the budget.
+//
+// The per-run caps stay, as an EXTRA flatten trigger (and as the thing that
+// keeps the cost arithmetic small): a block with an `@` preceded by a run
+// longer than MD_EMAIL_RUN_MAX (256) characters, a domain run longer than the
+// same, or ANY single run of those characters longer than
+// MD_EMAIL_RUN_HARD_MAX (4,096 — the `HTTP` shape, where every fourth character
+// is a protocol-word stop) is flattened exactly like a delimiter-dense block
+// (see emailRunScan). All three numbers sit far above anything prose contains —
+// one address is two runs of a few characters (a few dozen attempts of cost),
+// and the 405-address contacts document below costs ~2e4 of the 4e6 budget, so
+// it keeps its digest and its 405 autolinks — and the scan is one linear pass
+// per block. Guarded, the four shapes above measure 2–21 ms at 64 KB and
+// 28–37 ms at 1 MiB - 1 on the owner path (9 ms worst on the bot path); the
+// under-the-cap run shapes now flatten at both caps instead of adding up —
+// measured 1 ms at the bot cap and 15–17 ms at 1 MiB - 1 on the owner path,
+// against ~790 / ~585 ms with the cost charged nowhere. Every one of them is held
+// to the 500 ms bounds in tests/owner-markdown-guard.test.js and
+// tests/bot-markdown-quadratic.test.js. The hard cap is the one trigger
+// ordinary content can hit: an unbroken token of 4,096+ characters — a base64
+// `data:` payload, a very long hash — is shown as escaped text instead of being
+// parsed. That is the cost of not re-deriving marked's stop positions, and a
+// markdown IMAGE normally names a URL.
 //
 // With the budgets in place, every adversarial unit x container shape at the
 // cap, the medium-block case, the `_`+filler worst shape, the definitions
@@ -1206,11 +1330,241 @@ function countDelims(s) {
   return n;
 }
 
+/**
+ * The SECOND quadratic cost inside marked's inline lexer, and its proxy: the
+ * GFM url tokenizer's EMAIL alternative.
+ *
+ * marked's inline text rule stops at a protocol word — a bug in marked 17.0.4's
+ * `_caseInsensitiveProtocol` (an ungrouped alternation, so the breaks-mode text
+ * rule reads `…|[hH][tT][tT][pP][sS]?|[fF][tT][pP]:\/\/|…` and `http`/`https`
+ * alone ends the text token) — and at `www.`. At EVERY such stop the main
+ * inline loop retries `url()`, whose email alternative
+ * (`^[A-Za-z0-9._+-]+(@)…`) greedily consumes the run of word characters that
+ * follows and then needs an `@`. On a run of letters with no `@` that scan walks
+ * to the end of the block and fails, once per stop: cost ≈ Σ (rest of the run),
+ * i.e. QUADRATIC in the block, while the text an author wrote there is ordinary
+ * prose. A protocol word followed by `://` is a real URL and is consumed (the
+ * scan is then linear in the URL), so only the FAILING stops are counted.
+ *
+ * Measured on the owner path (CPU ms, one paragraph, this tree; the 1 MiB
+ * column predates the 128 KB owner cap):
+ *
+ *   input           8 KB   16 KB   32 KB   64 KB    1 MiB
+ *   `HTTP` repeated   30      66     253     543     330 s
+ *   `http` / `Http`   ~same                          (same shape)
+ *   `AAAA` / `HHHH`     0       1       1       2    24
+ *   `word ` prose       0       1       1       2    27
+ *
+ * …i.e. ~4x per doubling, ~2.4 ns per character scanned, and the gap between
+ * `HTTP` and `AAAA` is exactly "the text rule stops here". This is the cost the
+ * old comment recorded as "bounded but NOT covered by these budgets (0.5 s at
+ * the cap), recorded and left unguarded"; at the owner path's then-1 MiB cap
+ * it was five and a half MINUTES of blocked event loop on a public,
+ * unauthenticated page, so it is covered now: the scan is paid from the SAME
+ * whole-document budget as d² (one pool, so neither cost can hide behind the
+ * other), and a block whose scan alone exceeds the budget is flattened exactly
+ * like a delimiter-dense one — its text stays on screen, escaped.
+ *
+ * The proxy is computed in one linear pass: split the block into maximal runs of
+ * `[A-Za-z0-9._+-]` (the email local-part class, the characters the scan
+ * consumes), and for each stop inside a run add the distance from the stop to
+ * the end of that run. The result is an upper bound on the characters marked
+ * will scan in that block (each stop really scans exactly that far), and it is
+ * cheap to compute because the inner loop walks each run once.
+ * @param {string} s
+ * @returns {number} characters marked's email alternative would scan in `s`
+ */
+function urlScanCost(s) {
+  const n = s.length;
+  let cost = 0;
+  let i = 0;
+  while (i < n) {
+    if (!isUrlRunChar(s.charCodeAt(i))) { i++; continue; }
+    let end = i + 1;
+    while (end < n && isUrlRunChar(s.charCodeAt(end))) end++;
+    for (let j = i; j < end; j++) {
+      if (isUrlScannedStop(s, j)) cost += end - j;
+    }
+    i = end;
+  }
+  return cost;
+}
+
+/** `[A-Za-z0-9._+-]` — the email local-part class marked's url rule scans. */
+function isUrlRunChar(c) {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+    || c === 46 /* . */ || c === 95 /* _ */ || c === 43 /* + */ || c === 45 /* - */;
+}
+
+/**
+ * True when marked's inline text rule ends a text token at `at`, and the url
+ * tokenizer therefore runs there and fails (so its email alternative scans the
+ * rest of the run). Case-insensitive, exactly like the rules: the protocol words
+ * `http`, `https`, `ftp` NOT followed by `://`, and `www.` NOT followed by a
+ * hostname character (`[a-zA-Z0-9-]`, the first thing `url`'s www branch needs).
+ * @param {string} s
+ * @param {number} at index inside a `[A-Za-z0-9._+-]` run
+ * @returns {boolean}
+ */
+function isUrlScannedStop(s, at) {
+  const c = s.charCodeAt(at) | 0x20; // ASCII lowercase
+  if (c === 104 /* h */) {
+    if ((s.charCodeAt(at + 1) | 0x20) !== 116 || (s.charCodeAt(at + 2) | 0x20) !== 116
+      || (s.charCodeAt(at + 3) | 0x20) !== 112) return false;
+    let k = at + 4;
+    if ((s.charCodeAt(k) | 0x20) === 115 /* s */) k++;
+    return !isSchemeSeparator(s, k);
+  }
+  if (c === 102 /* f */) {
+    if ((s.charCodeAt(at + 1) | 0x20) !== 116 || (s.charCodeAt(at + 2) | 0x20) !== 112) return false;
+    return !isSchemeSeparator(s, at + 3);
+  }
+  if (c === 119 /* w */) {
+    if ((s.charCodeAt(at + 1) | 0x20) !== 119 || (s.charCodeAt(at + 2) | 0x20) !== 119
+      || s.charCodeAt(at + 3) !== 46 /* . */) return false;
+    const next = s.charCodeAt(at + 4) | 0x20;
+    // A hostname character means `url()` matches "www.…" and consumes it; any
+    // other character makes the www branch fail and the email scan run instead.
+    return !((next >= 48 && next <= 57) || (next >= 97 && next <= 122) || s.charCodeAt(at + 4) === 45);
+  }
+  return false;
+}
+
+/** `://` at `k` — what makes a protocol word a real URL `url()` consumes. */
+function isSchemeSeparator(s, k) {
+  return s.charCodeAt(k) === 58 /* : */ && s.charCodeAt(k + 1) === 47 /* / */ && s.charCodeAt(k + 2) === 47;
+}
+
+/** The longest run, in characters, of email-local-part characters around an `@`
+ *  that a block may keep before that block is flattened (see emailRunScan).
+ *  One address is two runs of a few characters; the longest real local part or
+ *  domain label is ~64. Exported so the tests can pin the bound they exercise. */
+export const MD_EMAIL_RUN_MAX = 256;
+/** The longest run of those characters a block may contain ANYWHERE (no `@`
+ *  needed). Every fourth character of `HTTP` is a protocol-word stop, so this
+ *  is what keeps a long protocol-word run's email retries — and any other
+ *  long unbroken token — bounded without flattening ordinary prose. */
+export const MD_EMAIL_RUN_HARD_MAX = 4096;
+
+/**
+ * The characters marked's inline TEXT rule stops inside a run of:
+ * `[A-Za-z0-9.!#$%&'*+/=?_`{|}~-]` (v17.0.4's own class, copied exactly). Its
+ * lookahead `(?=[…]+@)` ends a text token at EVERY position of a run that `@`
+ * follows, which is what puts url()'s email alternative — and its scan to the
+ * end of the run — on every one of those positions. Newlines, spaces, commas
+ * and `@` itself are not members, so runs break there.
+ * @param {number} c char code
+ * @returns {boolean}
+ */
+function isEmailRunChar(c) {
+  if ((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)) return true;
+  switch (c) {
+    case 33: /* ! */ case 35: /* # */ case 36: /* $ */ case 37: /* % */
+    case 38: /* & */ case 39: /* ' */ case 42: /* * */ case 43: /* + */
+    case 45: /* - */ case 46: /* . */ case 47: /* / */ case 61: /* = */
+    case 63: /* ? */ case 95: /* _ */ case 96: /* ` */ case 123: /* { */
+    case 124: /* | */ case 125: /* } */ case 126: /* ~ */
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * What marked's email autolink retry will spend on `s` — the cost urlScanCost
+ * CANNOT see, because no protocol word is involved (see "A THIRD quadratic"
+ * above) — and whether a per-run cap makes the block flatten anyway.
+ *
+ * Charging only the caps was the hole: a run JUST UNDER MD_EMAIL_RUN_MAX is
+ * admitted, and marked then pays its (cap-1)²-ish scan at EVERY `@` in the
+ * block, so `@` every 256 — or every 128 — characters is quadratic for a whole
+ * document while no single run ever trips a cap, and none of it reached the
+ * document budget. So this returns the cost it OBSERVES, in the same
+ * "attempts" currency as d² and urlScanCost: Σ(run²) over EVERY run that
+ * precedes an `@`, PLUS run × domain per `@`. run² is the number of characters
+ * the retry walks in the run (Σ over the run's stops — the exact work is
+ * run²/2, rounded up here) plus its own per-stop overhead; the domain run is
+ * walked once per stop, so that `@` pays run × domain for it. The scan resumes
+ * at the character AFTER the `@`, not past the domain: the run it just measured
+ * as a domain can be the NEXT `@`'s local part, and jumping over it would bill
+ * every other run of an `@`-separated chain at `domain` instead of run².
+ * guardAndParse bills the total to the same per-document pool, so the under-cap
+ * shapes add up and run it out exactly like any other dense block.
+ *
+ * `flatten` keeps three run-length triggers as an EXTRA flatten, all far above
+ * ordinary prose:
+ *   - an `@` preceded by a run longer than MD_EMAIL_RUN_MAX (the local part):
+ *     marked stops the text token at every position of that run and each stop
+ *     scans the rest of it;
+ *   - a run longer than MD_EMAIL_RUN_MAX right after an `@` (the domain, whose
+ *     label class `[a-zA-Z0-9-_]` is a subset of this one, so measuring the
+ *     wider run is the conservative choice);
+ *   - ANY run longer than MD_EMAIL_RUN_HARD_MAX, no `@` needed: a long
+ *     protocol-word run (`HTTP` repeated) has a stop every fourth character,
+ *     and urlScanCost already charges those — this is the same family, caught
+ *     by length alone so the check never has to know about stops.
+ *
+ * They also keep the cost arithmetic small: a block that trips one returns
+ * before the rest of its runs are billed, and the verdict would be the same (a
+ * 4,096-character run alone costs ~1.7e7, four times the whole budget).
+ *
+ * One linear pass still: resuming just after the `@` walks each run at most
+ * twice (once as one `@`'s domain, once as the candidate local part that
+ * follows it), so a block costs O(len) here whatever its shape.
+ * @param {string} s
+ * @returns {{ cost: number, flatten: boolean }} `cost` in budget attempts (the
+ *   characters marked's email retry scans there, rounded to run²); `flatten`
+ *   when a per-run cap says this block must be flattened rather than lexed
+ */
+function emailRunScan(s) {
+  const n = s.length;
+  let cost = 0;
+  let i = 0;
+  while (i < n) {
+    if (!isEmailRunChar(s.charCodeAt(i))) { i++; continue; }
+    let end = i + 1;
+    while (end < n && isEmailRunChar(s.charCodeAt(end))) end++;
+    const run = end - i;
+    if (run > MD_EMAIL_RUN_HARD_MAX) return { cost, flatten: true };
+    if (end < n && s.charCodeAt(end) === 64 /* @ */) {
+      if (run > MD_EMAIL_RUN_MAX) return { cost, flatten: true };
+      let d = end + 1;
+      while (d < n && isEmailRunChar(s.charCodeAt(d))) d++;
+      const domain = d - end - 1;
+      if (domain > MD_EMAIL_RUN_MAX) return { cost, flatten: true };
+      // Every stop in the local run walks the domain run, so the domain is paid
+      // per stop (run × domain); and the run after the `@` is NOT skipped — the
+      // next pass scans it again as a candidate local part, so a run that is one
+      // `@`'s domain and the next `@`'s local part is billed run² too.
+      cost += run * run + run * domain;
+      i = end + 1;
+      continue;
+    }
+    i = end;
+  }
+  return { cost, flatten: false };
+}
+
 /** The budgets of the linear pre-pass above, plus the link-definition cap that
- *  removes the inline lexer's other per-block scan. Exported so the tests can
- *  prove they really exercise the guarded path (and that an ordinary story
- *  stays far below every one of them) instead of assuming it. */
+ *  removes the inline lexer's other per-block scan. Shared by BOTH rendered
+ *  paths (bot and owner) because they bound the same inline lexer, and per
+ *  document, so a 128 KB owner document costs no more inside marked than a
+ *  64 KB bot reply does. Exported so the tests can prove they really exercise
+ *  the guarded path (and that an ordinary story stays far below every one of
+ *  them) instead of assuming it. */
 export const BOT_MD_BLOCK_DELIMS = 1024;
+/** The whole-document budget, in "attempts": Σ over the document's inline blocks
+ *  of d² (the emphasis/link retries) PLUS the characters marked's url EMAIL
+ *  alternative would scan there — urlScanCost for the protocol-word stops
+ *  (~2.4 ns each at 1 MiB) and emailRunScan for the `@` runs (Σrun² + run ×
+ *  domain per `@`), the same quadratic reached without a protocol word. All
+ *  three are paid
+ *  from this one pool, so a document cannot spend 4e6 on delimiters and another
+ *  4e6 on scans: the worst case is 4e6 attempts of any kind, ~50 ms of d² or
+ *  ~10 ms of url scan. Real prose stays orders of magnitude below it (a 1 MiB
+ *  post quoting `HTTP` a hundred times costs ~1e3; forty links cost ~1e3; the
+ *  contacts document below costs ~2e4; the 24 KB pinned post in
+ *  tests/owner-markdown-guard.test.js costs under 2e4). */
 export const BOT_MD_SQ_BUDGET = 4_000_000;
 export const BOT_MD_MAX_LINK_DEFS = 256;
 
@@ -1236,16 +1590,26 @@ function plainTextTokens(src) {
  *  keeps the guard per INLINE BLOCK: `lexer.inlineQueue` is exactly the list
  *  of texts marked was about to inline-lex (paragraphs, headings, list item
  *  contents, table cells) — no re-implementation of block splitting, so
- *  rendering stays marked's own. This is the ONLY bot rendering path, so it
- *  also does what Lexer#lex does around the phases (line-ending
- *  normalisation) — before that, a CRLF reply kept its `\r`.
+ *  rendering stays marked's own. This is the ONLY rendering path for EITHER
+ *  renderer (the bot's and the owner's), so it also does what Lexer#lex does
+ *  around the phases (line-ending normalisation) — before that, a CRLF reply
+ *  kept its `\r`.
  *
- *  It leans on that split being stable, and the digest tests in
- *  tests/bot-markdown-quadratic.test.js pin it: ordinary and delimiter-dense
- *  documents are rendered through here and must match the unguarded renderer
- *  byte for byte, so a marked upgrade that moves the phases fails in CI
- *  instead of silently changing bot output. */
-function guardAndParse(src) {
+ *  `instance` is the Marked instance to drive, and it is the ONLY difference
+ *  between the two paths: its defaults are the Lexer's options (so botMarked
+ *  carries the math extensions and ownerMarked carries none — a post about
+ *  prices keeps its dollar signs) and its parser is what renders the tokens
+ *  (so each keeps its own image renderer and link opt-out). Nothing else is
+ *  shared, and nothing about the budgets depends on the instance, because they
+ *  bound marked's inline lexer, which is the same code in both.
+ *
+ *  It leans on that split being stable, and the digest tests pin it: ordinary
+ *  and delimiter-dense documents are rendered through here and must match the
+ *  unguarded renderer byte for byte (tests/bot-markdown-quadratic.test.js for
+ *  the bot path, tests/owner-markdown-guard.test.js for the owner's), so a
+ *  marked upgrade that moves the phases fails in CI instead of silently
+ *  changing published output. */
+function guardAndParse(src, instance) {
   // marked's Lexer#lex normalises line endings before block lexing; calling
   // blockTokens directly skips that, so a CRLF reply (a tool result pasted
   // from Windows) kept a `\r` on every line and flattened into one escaped
@@ -1256,7 +1620,7 @@ function guardAndParse(src) {
   // the stack. The guard is a depth counter (plus, on the tokenizer's re-lex
   // path, a byte budget) inside the lexer, so `src` itself is never rewritten:
   // code, fences, HTML and math keep every character.
-  const lexer = boundedLexer(botMarked.defaults, src.length);
+  const lexer = boundedLexer(instance.defaults, src.length);
   lexer.blockTokens(src, lexer.tokens);
   // Cap the link definitions BEFORE any inline lexing: inlineTokens scans
   // `Object.keys(this.tokens.links)` on every inline block, so a flood of
@@ -1270,8 +1634,24 @@ function guardAndParse(src) {
   let budget = BOT_MD_SQ_BUDGET;
   for (const entry of lexer.inlineQueue) {
     const d = countDelims(entry.src);
-    if (d <= BOT_MD_BLOCK_DELIMS && d * d <= budget) {
-      budget -= d * d;
+    // Three independent costs share the document budget, each measured in the
+    // units it makes marked's inline lexer spend: d² for the emphasis/link
+    // retries (see the table at the top of this section), the url email scan
+    // (urlScanCost, ~2.4 ns per character) and the email autolink's run scan
+    // (emailRunScan: Σrun² + run × domain per `@` — the same quadratic,
+    // reached with no protocol word, that urlScanCost cannot see; see "A THIRD
+    // quadratic"
+    // above). A block is flattened when its delimiter count is over the
+    // per-block cap, or when what is left of the document budget cannot pay for
+    // all three costs — which also covers one block whose url or email-run scan
+    // alone would exceed the whole budget. emailRunScan's per-run caps are an
+    // EXTRA trigger alongside them: they only flatten, never admit, and they
+    // keep the cost arithmetic small.
+    const scan = urlScanCost(entry.src);
+    const email = emailRunScan(entry.src);
+    const cost = d * d + scan + email.cost;
+    if (d <= BOT_MD_BLOCK_DELIMS && cost <= budget && !email.flatten) {
+      budget -= cost;
       continue;
     }
     entry.guarded = true;
@@ -1281,7 +1661,7 @@ function guardAndParse(src) {
     if (!entry.guarded) lexer.inlineTokens(entry.src, entry.tokens);
   }
   lexer.inlineQueue.length = 0;
-  return botMarked.parser(lexer.tokens);
+  return instance.parser(lexer.tokens);
 }
 
 /**
@@ -1356,7 +1736,7 @@ export function renderBotMarkdown(markdown) {
   // are the bot's), and the sanitizer re-checks the same rule after it.
   return withImageContext({ policy: "bot", storageOrigin: null }, () => {
     try {
-      html = guardAndParse(src);
+      html = guardAndParse(src, botMarked);
     } catch {
       return "";
     }
