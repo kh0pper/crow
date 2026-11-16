@@ -51,7 +51,8 @@
  * `debug` both off. nodemailer derives the SMTP recipient list from the To/Cc/Bcc headers it is handed
  * and leaves Bcc out of the bytes it transmits, so a blind recipient is delivered without being
  * published. The Message-ID is generated here as `<random@sender-domain>`, with the domain taken from
- * the From address, and handed to nodemailer as the message's id, so the copy Crow stores and the copy
+ * the From address, unless the validated message carries one of its own, which is then used as given;
+ * either way it is handed to nodemailer as the message's id, so the copy Crow stores and the copy
  * the server relays carry the same one. TLS follows the account's SMTP security exactly as the IMAP
  * side follows its own, a recipient the server refuses comes back in `rejected` instead of as an
  * error, and every failure is a fixed sentence through the same classifier.
@@ -59,6 +60,9 @@
  * `saveDraft` appends the caller's bytes to the `\Drafts` folder over the read connection, inside the
  * command deadline and its error wrapping, with `\Draft` and `\Seen` set; a mailbox without a
  * `\Drafts` folder is NOT_FOUND rather than a note filed in some folder Crow chose by name.
+ * `appendToSent` is the same append one folder over: the bytes of a message that has already gone out,
+ * filed in the folder the server marks `\Sent` with `\Seen` set, or NOT_FOUND when the server lists no
+ * such folder. Both find their folder by its special-use flag and never by its name.
  *
  * `setFlags` and `move` are the two ways a message changes after it is stored, and both refuse to act
  * on a UID whose mailbox is not the one the caller saw: the folder is locked, its UIDVALIDITY is
@@ -144,6 +148,10 @@ const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "[::1]", "localhost"]);
  */
 const DRAFTS_SPECIAL_USE = "\\drafts";
 const DRAFT_FLAGS = Object.freeze(["\\Draft", "\\Seen"]);
+
+/** The special-use flag that names the sent mailbox, and the flag a copy filed there carries. */
+const SENT_SPECIAL_USE = "\\sent";
+const SENT_FLAGS = Object.freeze(["\\Seen"]);
 
 /** A domain a Message-ID can carry: what is left of the From domain once nothing else survives. */
 const MESSAGE_ID_DOMAIN_STRIP = /[^A-Za-z0-9.-]/g;
@@ -403,8 +411,8 @@ function endpointFor(account, kind) {
  * A Message-ID this adapter owns: random local part, domain from the From address, both reduced to what
  * an id may carry. An internationalised domain is converted to its ASCII (punycode) form first, which
  * is the form other mail software compares; the strip then only removes what an id may not carry at
- * all. It is fixed here and handed to nodemailer as the message's id so the stored copy and the
- * transmitted copy agree, and nothing the caller sends can set it.
+ * all. A send hands it to nodemailer as the message's id when the message carries none of its own, so
+ * the stored copy and the transmitted copy agree.
  *
  * @param {string} fromAddress the validated From addr-spec
  * @returns {string}
@@ -1275,42 +1283,64 @@ export function createImapSmtpAdapter(options = {}) {
   }
 
   /**
-   * Append a draft to the mailbox the server marks `\Drafts`, with `\Draft` and `\Seen` set. The
-   * folder is found by its special-use flag and never by its name, so a server that calls it
-   * "Entwürfe" still works, and a server with no such folder is NOT_FOUND rather than a note filed
-   * somewhere Crow picked. The bytes travel over the read connection inside `runCommand`, so the
-   * append carries the command deadline and the same error wrapping as every other command.
+   * The bytes of one append, checked before a connection exists: an opaque Buffer or a string, within
+   * this adapter's raw cap. Anything else names no message, so it is refused with nothing opened.
+   */
+  function appendBytes(raw, detail) {
+    if (!Buffer.isBuffer(raw) && typeof raw !== "string") throw new MailError("BAD_INPUT", detail);
+    const bytes = Buffer.isBuffer(raw) ? raw : Buffer.from(raw, "utf8");
+    if (bytes.length === 0) throw new MailError("BAD_INPUT", detail);
+    if (bytes.length > rawLimit) throw new MailError("TOO_LARGE", detail);
+    return bytes;
+  }
+
+  /**
+   * One append into the folder the server marks with a special-use flag, or NOT_FOUND when it lists
+   * none Crow can name. The folder is found by its flag and never by its name, so a server that calls
+   * it something else still works, and a folder whose own path carries a control character is listed
+   * by `listFolders` but is not one Crow commands, so it is not picked here either. The bytes travel
+   * over the read connection inside `runCommand`, so the append carries the command deadline and the
+   * same error wrapping as every other command; a server refusal for size (APPENDLIMIT or TOOBIG)
+   * comes back as TOO_LARGE rather than as a protocol fault.
    *
-   * `uid` is the UID the server reported for the appended message, or `null` when it reported none
-   * (a server without UIDPLUS); the draft is stored either way. A drafts folder whose own path carries
-   * a control character is listed by `listFolders` but not one Crow commands, so it is not picked — a
-   * server refusal for size (APPENDLIMIT or TOOBIG) comes back as TOO_LARGE rather than as a protocol
-   * fault.
+   * `uid` is the UID the server reported for the appended message, or `null` when it reported none (a
+   * server without UIDPLUS); the copy is stored either way.
+   */
+  async function appendToSpecialUse(raw, { specialUse, flags, detail }) {
+    const bytes = appendBytes(raw, detail);
+    return runCommand(async (client) => {
+      const folders = await listFolders();
+      const folder = folders.find((entry) => typeof entry.specialUse === "string"
+        && entry.specialUse.trim().toLowerCase() === specialUse
+        && listedFolderPath(entry.path) != null);
+      if (!folder) throw new MailError("NOT_FOUND", detail);
+      const response = await client.append(folder.path, bytes, [...flags]);
+      const uid = Number(response && response.uid);
+      return { folderPath: folder.path, uid: Number.isSafeInteger(uid) && uid > 0 ? uid : null };
+    });
+  }
+
+  /**
+   * Append a draft to the mailbox the server marks `\Drafts`, with `\Draft` and `\Seen` set.
    *
    * @param {Buffer|string} raw the RFC 822 message
    * @returns {Promise<AdapterDraftRef>}
    */
   async function saveDraft(raw) {
-    let bytes;
-    if (Buffer.isBuffer(raw)) bytes = raw;
-    else if (typeof raw === "string") bytes = Buffer.from(raw, "utf8");
-    else throw new MailError("BAD_INPUT", "draft");
-    if (bytes.length === 0) throw new MailError("BAD_INPUT", "draft");
-    if (bytes.length > rawLimit) throw new MailError("TOO_LARGE", "draft");
+    return appendToSpecialUse(raw, { specialUse: DRAFTS_SPECIAL_USE, flags: DRAFT_FLAGS, detail: "draft" });
+  }
 
-    return runCommand(async (client) => {
-      const folders = await listFolders();
-      const drafts = folders.find((folder) => typeof folder.specialUse === "string"
-        && folder.specialUse.trim().toLowerCase() === DRAFTS_SPECIAL_USE
-        && listedFolderPath(folder.path) != null);
-      if (!drafts) throw new MailError("NOT_FOUND", "drafts");
-      const response = await client.append(drafts.path, bytes, [...DRAFT_FLAGS]);
-      const uid = Number(response && response.uid);
-      return {
-        folderPath: drafts.path,
-        uid: Number.isSafeInteger(uid) && uid > 0 ? uid : null,
-      };
-    });
+  /**
+   * Append the copy of a message that has already gone out to the mailbox the server marks `\Sent`,
+   * with `\Seen` set and no `\Draft` flag: the recipient's provider files it as a sent message, so
+   * Crow's own copy is filed the same way. No such folder is NOT_FOUND, never a copy left in a folder
+   * Crow picked by name.
+   *
+   * @param {Buffer|string} raw the RFC 822 message
+   * @returns {Promise<AdapterDraftRef>} the folder the copy landed in and its uid, when the server says
+   */
+  async function appendToSent(raw) {
+    return appendToSpecialUse(raw, { specialUse: SENT_SPECIAL_USE, flags: SENT_FLAGS, detail: "sent" });
   }
 
   /**
@@ -1345,7 +1375,7 @@ export function createImapSmtpAdapter(options = {}) {
   async function send(message) {
     const outgoing = validateOutgoing(message);
     const endpoint = endpointFor(account, "smtp");
-    const messageId = messageIdFor(outgoing.from.address);
+    const messageId = outgoing.messageId ?? messageIdFor(outgoing.from.address);
     const deadline = AbortSignal.timeout(timeouts.sendMs);
     const payload = smtpMessage(outgoing, messageId, deadline);
 
@@ -1503,6 +1533,7 @@ export function createImapSmtpAdapter(options = {}) {
     get,
     search,
     saveDraft,
+    appendToSent,
     send,
     setFlags,
     move,

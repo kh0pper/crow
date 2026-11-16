@@ -1,5 +1,5 @@
 /**
- * Crow Mail's provider-neutral adapter: the eleven methods a mailbox implementation offers, the shape
+ * Crow Mail's provider-neutral adapter: the twelve methods a mailbox implementation offers, the shape
  * of each answer, and `validateOutgoing` — the one rule an outgoing message passes before any
  * implementation touches it.
  *
@@ -45,6 +45,18 @@
  * Crow has no other flag of its own — and both calls take at most 100 UIDs, so one action is one
  * command line.
  *
+ * The two appends are the contract's writes that create a message rather than change one. `saveDraft`
+ * files the caller's bytes as a `\Draft` in the folder the server marks `\Drafts`; `appendToSent`
+ * files a copy of a message that has already gone out as `\Seen` in the folder marked `\Sent`. Both
+ * find their folder by its special-use flag and never by its name, and both answer `NOT_FOUND` — with
+ * the copy filed nowhere — when the server lists no such folder, rather than picking one by name.
+ * Neither is a send: nothing in the contract decides whether a message leaves Crow.
+ *
+ * A message id is the one header a caller may set: absent, the implementation makes its own (the
+ * IMAP adapter derives it from the From address); present, it is used as given, so the copy Crow
+ * stores and the copy that is transmitted can carry the same one. It passes the same rule as
+ * `inReplyTo` — one `<token>`, no whitespace, no second bracket, no control character.
+ *
  * @typedef {{name: string|null, address: string}} AdapterAddress
  * @typedef {{path: string, name: string, specialUse: string|null, delimiter: string,
  *            selectable: boolean}} AdapterFolder
@@ -57,7 +69,7 @@
  * @typedef {{moved: number}} AdapterMoveResult
  * @typedef {{from: AdapterAddress, to: AdapterAddress[], cc?: AdapterAddress[],
  *            bcc?: AdapterAddress[], subject: string, text: string, html?: string|null,
- *            inReplyTo?: string|null, references?: string[],
+ *            inReplyTo?: string|null, references?: string[], messageId?: string|null,
  *            attachments?: {filename: string, contentType: string,
  *                           content: Buffer|Uint8Array|string}[]}} OutgoingMessage
  */
@@ -74,6 +86,7 @@ export const ADAPTER_METHODS = Object.freeze([
   "search",
   "saveDraft",
   "send",
+  "appendToSent",
   "setFlags",
   "move",
   "watch",
@@ -81,7 +94,8 @@ export const ADAPTER_METHODS = Object.freeze([
 
 /** A field of an OutgoingMessage; anything else in the object is refused (see validateOutgoing). */
 const OUTGOING_KEYS = new Set([
-  "from", "to", "cc", "bcc", "subject", "text", "html", "inReplyTo", "references", "attachments",
+  "from", "to", "cc", "bcc", "subject", "text", "html", "inReplyTo", "references", "messageId",
+  "attachments",
 ]);
 const ATTACHMENT_KEYS = new Set(["filename", "contentType", "content"]);
 const RECIPIENT_KEYS = new Set(["name", "address"]);
@@ -273,6 +287,8 @@ export function validateOutgoing(message) {
     html: message.html == null ? null : bodyPart(message.html, "html"),
     inReplyTo: message.inReplyTo == null ? null : oneMessageId(message.inReplyTo, "inReplyTo"),
     references: idList(message.references, "references", MAX_REFERENCES),
+    // Absent leaves the implementation's own id in place, which is what a first message wants.
+    messageId: message.messageId == null ? null : oneMessageId(message.messageId, "messageId"),
     attachments: attachmentList(message.attachments),
   };
   if (!validated.text && !validated.html) fail("body");

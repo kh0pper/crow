@@ -18,11 +18,12 @@
  *   emit(folderPath, reason?)                              report a change without a delivery
  *   dropWatch(err?)                                        the watch connection is lost
  *
- * `sent`, `drafts`, `calls` and `wire` record what an implementation would have done on the wire.
- * `calls` is one entry per adapter method (`{method, args}`), so `failNext` and `hangNext` have
- * something to hook. `wire` is the command names a server would have seen — `SELECT`, `UID FETCH`,
- * `UID STORE`, `UID MOVE` — which is what a test reads to show that a refused action reached the
- * mailbox with nothing.
+ * `sent`, `drafts`, `appended`, `calls` and `wire` record what an implementation would have done on
+ * the wire. `calls` is one entry per adapter method (`{method, args}`), so `failNext` and `hangNext`
+ * have something to hook. `wire` is the command names a server would have seen — `SELECT`,
+ * `UID FETCH`, `UID STORE`, `UID MOVE` — which is what a test reads to show that a refused action
+ * reached the mailbox with nothing. `drafts` and `appended` are the two appends the contract offers:
+ * `saveDraft` files a `\Draft`, `appendToSent` files the Sent copy with `\Seen`.
  *
  * The action methods (`setFlags`, `move`) apply the contract's own rules: only `\Seen`, at most 100
  * uids, an `expectedUidValidity` that must be a positive integer, and a `CHANGED` refusal when the
@@ -39,14 +40,19 @@
  *
  * `send` validates its message with the same `validateOutgoing` a real adapter uses, so a caller that
  * skipped validation fails here too, and the fake never records a message a real implementation would
- * have refused. `setFlags` and `move` are recorded in `wire` the way a server would see them, so a
- * test can show that a refused action sent nothing at all.
+ * have refused. A message that names its own Message-ID keeps it, exactly as a transport that is handed
+ * one does. `setFlags` and `move` are recorded in `wire` the way a server would see them, so a test can
+ * show that a refused action sent nothing at all.
+ *
+ * `opts.folders` replaces the four default folders, which is how a test builds a mailbox without a
+ * sent folder (or without a drafts folder) to see the NOT_FOUND each append answers with. The list
+ * `DEFAULT_FOLDERS` is exported for exactly that.
  */
 import { MailError } from "../../servers/gateway/mail/errors.js";
 import { validateOutgoing } from "../../servers/gateway/mail/adapter/interface.js";
 
 /** The folders every fake account has: an inbox, a sent folder, drafts and an archive. */
-const DEFAULT_FOLDERS = Object.freeze([
+export const DEFAULT_FOLDERS = Object.freeze([
   { path: "INBOX", name: "INBOX", specialUse: "\\Inbox", delimiter: "/", selectable: true },
   { path: "Sent", name: "Sent", specialUse: "\\Sent", delimiter: "/", selectable: true },
   { path: "Drafts", name: "Drafts", specialUse: "\\Drafts", delimiter: "/", selectable: true },
@@ -106,7 +112,9 @@ function actionFlags(value, detail) {
 }
 
 /**
- * @param {{omitUidNext?: boolean, uidValidity?: number, now?: () => number}} [opts]
+ * @param {{omitUidNext?: boolean, uidValidity?: number, now?: () => number,
+ *   folders?: {path: string, name: string, specialUse: string|null, delimiter: string,
+ *              selectable: boolean}[]}} [opts]
  * @returns {object} the adapter (all ADAPTER_METHODS) with the seeding hooks attached
  */
 export function createFakeMailAdapter(opts = {}) {
@@ -115,7 +123,8 @@ export function createFakeMailAdapter(opts = {}) {
   const baseUidValidity = Number.isInteger(opts.uidValidity) ? opts.uidValidity : 71;
 
   const folders = new Map();
-  DEFAULT_FOLDERS.forEach((folder, index) => {
+  const folderSpecs = Array.isArray(opts.folders) ? opts.folders : DEFAULT_FOLDERS;
+  folderSpecs.forEach((folder, index) => {
     folders.set(folder.path, {
       ...folder,
       uidValidity: baseUidValidity + index,
@@ -128,6 +137,7 @@ export function createFakeMailAdapter(opts = {}) {
   const wire = [];
   const sent = [];
   const drafts = [];
+  const appended = [];
   const watchers = new Set();
   const failures = new Map();
   const hangs = new Map();
@@ -356,10 +366,21 @@ export function createFakeMailAdapter(opts = {}) {
       return { folderPath: folder.path, uid };
     },
 
+    async appendToSent(raw) {
+      await gate("appendToSent", [raw]);
+      // The bytes are checked first, the way a real implementation refuses one before a connection.
+      const buffer = toBuffer(raw);
+      const folder = [...folders.values()].find((candidate) => candidate.specialUse === "\\Sent");
+      if (!folder) throw new MailError("NOT_FOUND", "sent");
+      const uid = deliver(folder.path, buffer, { flags: ["\\Seen"] });
+      appended.push({ folderPath: folder.path, raw: buffer });
+      return { folderPath: folder.path, uid };
+    },
+
     async send(message) {
       await gate("send", [message]);
       const validated = validateOutgoing(message);
-      const messageId = `<fake-sent-${sent.length + 1}@mail.example.test>`;
+      const messageId = validated.messageId ?? `<fake-sent-${sent.length + 1}@mail.example.test>`;
       sent.push({ ...validated, messageId });
       const accepted = [...validated.to, ...validated.cc, ...validated.bcc]
         .map((recipient) => recipient.address);
@@ -454,6 +475,7 @@ export function createFakeMailAdapter(opts = {}) {
     dropWatch,
     sent,
     drafts,
+    appended,
     calls,
     wire,
   });

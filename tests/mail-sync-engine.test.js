@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
-import { MAIL_DDL } from "../servers/shared/mail-schema.js";
+import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS } from "../servers/shared/mail-schema.js";
 import { createAccount, getAccount, updateAccount } from "../servers/gateway/mail/store/accounts.js";
 import {
   getFolder,
@@ -52,6 +52,10 @@ async function freshDb() {
   dirs.push(dir);
   const db = createDbClient(join(dir, "crow.db"));
   await db.executeMultiple(MAIL_DDL);
+  // The account send columns (plan 3's A3) are ADD COLUMN specs of their own, not part of MAIL_DDL.
+  for (const spec of MAIL_ACCOUNT_SEND_COLUMNS) {
+    await db.execute({ sql: `ALTER TABLE ${spec.table} ADD COLUMN ${spec.column} ${spec.definition}`, args: [] });
+  }
   return db;
 }
 

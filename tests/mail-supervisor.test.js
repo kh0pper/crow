@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
-import { MAIL_DDL } from "../servers/shared/mail-schema.js";
+import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS } from "../servers/shared/mail-schema.js";
 import {
   createAccount,
   deleteAccount,
@@ -221,6 +221,10 @@ async function setup(options = {}) {
   dirs.push(dir);
   const db = createDbClient(join(dir, "crow.db"));
   await db.executeMultiple(MAIL_DDL);
+  // The account send columns (plan 3's A3) are ADD COLUMN specs of their own, not part of MAIL_DDL.
+  for (const spec of MAIL_ACCOUNT_SEND_COLUMNS) {
+    await db.execute({ sql: `ALTER TABLE ${spec.table} ADD COLUMN ${spec.column} ${spec.definition}`, args: [] });
+  }
 
   const clock = makeClock(options.startAt ?? T0);
   const fake = createFakeMailAdapter({ now: clock.now });

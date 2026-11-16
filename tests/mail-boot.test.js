@@ -29,7 +29,7 @@ const REPO = new URL("..", import.meta.url).pathname;
 
 const { default: express } = await import("express");
 const { createDbClient } = await import("../servers/db.js");
-const { MAIL_DDL } = await import("../servers/shared/mail-schema.js");
+const { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS } = await import("../servers/shared/mail-schema.js");
 const { startMailSync, stopMailSync } = await import("../servers/gateway/boot/mail-boot.js");
 const { createAccount, getAccount, getSyncState } = await import("../servers/gateway/mail/store/accounts.js");
 const { CLAIM_RETRY_MS } = await import("../servers/gateway/mail/sync/supervisor.js");
@@ -104,6 +104,10 @@ async function freshDb() {
   mkdirSync(dir, { recursive: true });
   const db = createDbClient(join(dir, "crow.db"));
   await db.executeMultiple(MAIL_DDL + SETTINGS_DDL);
+  // The account send columns (plan 3's A3) are ADD COLUMN specs of their own, not part of MAIL_DDL.
+  for (const spec of MAIL_ACCOUNT_SEND_COLUMNS) {
+    await db.execute({ sql: `ALTER TABLE ${spec.table} ADD COLUMN ${spec.column} ${spec.definition}`, args: [] });
+  }
   dbs.push(db);
   return db;
 }
@@ -519,6 +523,10 @@ test("stop closes the supervisor once, clears the runtime the routes read, and i
   const crowPath = join(dir, "crow.db");
   const db = createDbClient(crowPath);
   await db.executeMultiple(MAIL_DDL + SETTINGS_DDL);
+  // The account send columns (plan 3's A3) are ADD COLUMN specs of their own, not part of MAIL_DDL.
+  for (const spec of MAIL_ACCOUNT_SEND_COLUMNS) {
+    await db.execute({ sql: `ALTER TABLE ${spec.table} ADD COLUMN ${spec.column} ${spec.definition}`, args: [] });
+  }
   dbs.push(db);
   const account = await addAccount(db);
   process.env.CROW_MAIL = "1";
