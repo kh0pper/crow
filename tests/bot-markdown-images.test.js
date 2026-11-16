@@ -12,8 +12,12 @@
  * data-turbo="false": Turbo 8 prefetches a same-origin link on hover with the
  * viewer's cookies (a GET fired just by pointing at the link) and navigates a
  * click with Turbo Drive; the sanitizer strips data-* from a bot's markup, so
- * the renderer puts them back itself. The owner's renderer (renderMarkdown —
- * blog preview, memory, KB, file view) is unchanged.
+ * the renderer puts them back itself. The OWNER's renderer (renderMarkdown —
+ * blog preview, memory, KB, file view) has its own rule, because bots can write
+ * there too: see owner-markdown-images.test.js. It keeps /blog/media/, a
+ * published /blog/figures/ figure (the data-dashboard case-study images), the
+ * storage origin and inline data: images, and its links opt out of the prefetch
+ * only (Turbo Drive is the owner's own navigation).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -138,6 +142,34 @@ test("a refused image inside a link keeps the link, without the image", () => {
   assert.doesNotMatch(html, /dashboard\/logout/, html);
 });
 
+// ---- a published case-study figure is the OWNER's, never a bot's ----------
+// (the rule itself lives in owner-markdown-images.test.js; this is the refusal)
+
+test("a bot reply cannot use /blog/figures/, even in the shape the route serves", () => {
+  for (const src of [
+    "/blog/figures/12-abcdef12.png",
+    "https://host.example/blog/figures/12-abcdef12.png",
+  ]) {
+    const html = renderBotMarkdown(`![a](${src})`);
+    assert.doesNotMatch(html, /<img/i, `${src}: ${html}`);
+    assert.doesNotMatch(html, /\/blog\/figures\//, `${src}: not rendered at all: ${html}`);
+    assert.equal(text(html).trim(), "a", `${src}: alt text only, got ${html}`);
+  }
+  assert.equal(isAllowedBotImageSrc("/blog/figures/12-abcdef12.png"), false);
+  // ...and a raw HTML <img> written by a bot does not slip past the sanitizer.
+  assert.doesNotMatch(renderBotMarkdown('<img src="/blog/figures/12-abcdef12.png" alt="a">'), /<img/i);
+});
+
+// ---- <input>: the shared sanitizer's other rule ---------------------------
+// (the full matrix is in owner-markdown-images.test.js; the bot path shares it)
+
+test("a bot's non-checkbox <input> is dropped; a task-list checkbox is kept", () => {
+  for (const md of ['<input type="submit">', '<input type="text">', '<input type="image" src="/dashboard/x">', "<input>"]) {
+    assert.doesNotMatch(renderBotMarkdown(md), /<input/i, md);
+  }
+  assert.match(renderBotMarkdown("- [x] done"), /<input[^>]*type="checkbox"/);
+});
+
 // ---- links: no Turbo prefetch, no Turbo Drive -----------------------------
 
 test("a bot link carries data-turbo-prefetch=\"false\" and data-turbo=\"false\"", () => {
@@ -158,24 +190,21 @@ test("a bot cannot ask for prefetch back, and no other data-* survives on a link
   assert.doesNotMatch(html, /data-evil/, html);
 });
 
-// ---- the owner's renderer is untouched ------------------------------------
+// ---- the owner's renderer has its own rule -------------------------------
+// (its image matrix lives in owner-markdown-images.test.js)
 
-test("renderMarkdown's link keeps no Turbo opt-out attributes (unchanged)", () => {
+test("renderMarkdown's links opt out of Turbo's prefetch but keep Turbo Drive", () => {
   const html = renderMarkdown("[x](/dashboard/make/open/a/b)");
-  assert.match(html, /<a href="\/dashboard\/make\/open\/a\/b">x<\/a>/, html);
-  assert.doesNotMatch(html, /data-turbo/, html);
+  assert.match(html, /<a href="\/dashboard\/make\/open\/a\/b" data-turbo-prefetch="false">x<\/a>/, html);
+  assert.doesNotMatch(html, /data-turbo="false"/, "the owner's own navigation stays on Turbo Drive: " + html);
 });
 
-test("renderMarkdown keeps an ordinary external image unchanged", () => {
-  const html = renderMarkdown("![a](https://example.com/x.png)");
-  assert.match(html, /<img[^>]*src="https:\/\/example\.com\/x\.png"/, html);
-  assert.match(html, /alt="a"/, html);
-  assert.doesNotMatch(html, /<a[\s>]/i, "no link is invented on the owner's path either");
-});
-
-test("renderMarkdown keeps its own storage: rewrite and its no-rule image behaviour", () => {
+test("renderMarkdown keeps the shared storage: rewrite", () => {
   assert.match(renderMarkdown("![a](storage:p.png)"), /<img[^>]*src="\/blog\/media\/p\.png"/);
-  // The bot-only restriction does not leak into the owner's page: its images
-  // are the owner's own, exactly as before this change.
-  assert.match(renderMarkdown("![x](/dashboard/logout)"), /<img[^>]*src="\/dashboard\/logout"/);
+});
+
+test("renderMarkdown refuses a state-changing same-origin image, like the bot path", () => {
+  const html = renderMarkdown("![x](/dashboard/logout)");
+  assert.doesNotMatch(html, /<img/i, html);
+  assert.equal(text(html).trim(), "x", "the alt text stays, escaped, as plain text");
 });
