@@ -39,41 +39,48 @@ export const BLOCKED_IMAGE_ATTRIBUTE = "data-crow-blocked";
 const LINK_REL = "noopener noreferrer nofollow";
 const LINK_TARGET = "_blank";
 
-const ALLOWED_TAGS = [
-  "a", "b", "blockquote", "br", "code", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr",
-  "i", "img", "li", "ol", "p", "pre", "span", "strong", "sub", "sup", "table", "tbody", "td",
-  "tfoot", "th", "thead", "tr", "u", "ul",
-];
-
 /**
- * Per-tag attribute allow-list. `target` and `rel` are here because the `a` transform adds them;
- * `data-crow-blocked` is here because the `img` transform adds it. An attribute outside this map is
- * deleted by sanitize-html, so `on*`, `style`, `class`, `id`, `srcset` and `background` never reach
- * the output even as a tag-specific accident.
+ * The policy itself: which tags, attributes, URL schemes and non-content tags survive. It is the one
+ * definition, frozen — `optionsFor` below reads it, and plan 2's reader frame mirrors it for its
+ * second pass by importing this object rather than keeping a copy that could drift.
  */
-const ALLOWED_ATTRIBUTES = {
-  a: ["href", "title", "target", "rel"],
-  img: ["src", "alt", "width", "height", BLOCKED_IMAGE_ATTRIBUTE],
-  td: ["colspan", "rowspan"],
-  th: ["colspan", "rowspan"],
-};
+export const SANITIZE_TAG_POLICY = Object.freeze({
+  allowedTags: Object.freeze([
+    "a", "b", "blockquote", "br", "code", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr",
+    "i", "img", "li", "ol", "p", "pre", "span", "strong", "sub", "sup", "table", "tbody", "td",
+    "tfoot", "th", "thead", "tr", "u", "ul",
+  ]),
 
-/** The schemes a link may keep. Images are narrower: absolute https only, see imageSrcPolicy. */
-const ALLOWED_SCHEMES = ["http", "https", "mailto", "tel"];
+  /**
+   * Per-tag attribute allow-list. `target` and `rel` are here because the `a` transform adds them;
+   * `data-crow-blocked` is here because the `img` transform adds it. An attribute outside this map is
+   * deleted by sanitize-html, so `on*`, `style`, `class`, `id`, `srcset` and `background` never reach
+   * the output even as a tag-specific accident.
+   */
+  allowedAttributes: Object.freeze({
+    a: Object.freeze(["href", "title", "target", "rel"]),
+    img: Object.freeze(["src", "alt", "width", "height", BLOCKED_IMAGE_ATTRIBUTE]),
+    td: Object.freeze(["colspan", "rowspan"]),
+    th: Object.freeze(["colspan", "rowspan"]),
+  }),
 
-/**
- * Tags that are not html content: dropped together with everything inside them. sanitize-html's own
- * list is script/style/textarea/option; the rest are active content a reader must never get — an
- * embed, a frame, a form, an SVG or MathML island (both can carry script), a refresher, a base URL,
- * and a noscript block browser parsing rules make easy to abuse. Adding them here is what makes the
- * drop take their content with it, including a nested tag that tries to reopen itself. Leaving
- * `textarea` and `option` out would keep a disallowed tag's raw text; keeping them in is harmless
- * because neither is in the allow-list.
- */
-const NON_TEXT_TAGS = [
-  "script", "style", "textarea", "option",
-  "iframe", "object", "embed", "form", "svg", "math", "link", "meta", "base", "noscript",
-];
+  /** The schemes a link may keep. Images are narrower: absolute https only, see imageSrcPolicy. */
+  allowedSchemes: Object.freeze(["http", "https", "mailto", "tel"]),
+
+  /**
+   * Tags that are not html content: dropped together with everything inside them. sanitize-html's own
+   * list is script/style/textarea/option; the rest are active content a reader must never get — an
+   * embed, a frame, a form, an SVG or MathML island (both can carry script), a refresher, a base URL,
+   * and a noscript block browser parsing rules make easy to abuse. Adding them here is what makes the
+   * drop take their content with it, including a nested tag that tries to reopen itself. Leaving
+   * `textarea` and `option` out would keep a disallowed tag's raw text; keeping them in is harmless
+   * because neither is in the allow-list.
+   */
+  nonTextTags: Object.freeze([
+    "script", "style", "textarea", "option",
+    "iframe", "object", "embed", "form", "svg", "math", "link", "meta", "base", "noscript",
+  ]),
+});
 
 /** Control characters in a URL value: strippable, never part of a scheme. */
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
@@ -128,7 +135,7 @@ function safeHref(value) {
   const url = cleanUrl(value);
   if (url === "" || INNER_BLANK.test(url)) return null;
   const scheme = schemeOf(url);
-  if (scheme === null || !ALLOWED_SCHEMES.includes(scheme)) return null;
+  if (scheme === null || !SANITIZE_TAG_POLICY.allowedSchemes.includes(scheme)) return null;
   if (scheme === "http" || scheme === "https") return ABSOLUTE_HTTP.test(url) ? url : null;
   return url.length > scheme.length + 1 ? url : null;
 }
@@ -158,18 +165,18 @@ function imageSrcPolicy(value, allowRemoteImages) {
 /** The options for one call. The counters live in `counts`, which the transforms below update. */
 function optionsFor(counts, allowRemoteImages) {
   return {
-    allowedTags: [...ALLOWED_TAGS],
+    allowedTags: [...SANITIZE_TAG_POLICY.allowedTags],
     allowedAttributes: {
-      a: [...ALLOWED_ATTRIBUTES.a],
-      img: [...ALLOWED_ATTRIBUTES.img],
-      td: [...ALLOWED_ATTRIBUTES.td],
-      th: [...ALLOWED_ATTRIBUTES.th],
+      a: [...SANITIZE_TAG_POLICY.allowedAttributes.a],
+      img: [...SANITIZE_TAG_POLICY.allowedAttributes.img],
+      td: [...SANITIZE_TAG_POLICY.allowedAttributes.td],
+      th: [...SANITIZE_TAG_POLICY.allowedAttributes.th],
     },
-    allowedSchemes: [...ALLOWED_SCHEMES],
+    allowedSchemes: [...SANITIZE_TAG_POLICY.allowedSchemes],
     allowedSchemesByTag: {},
     allowProtocolRelative: false,
     disallowedTagsMode: "discard",
-    nonTextTags: [...NON_TEXT_TAGS],
+    nonTextTags: [...SANITIZE_TAG_POLICY.nonTextTags],
     // No `style` attribute can survive, so the CSS is never parsed: skipping that keeps a large body
     // cheap to sanitise.
     parseStyleAttributes: false,

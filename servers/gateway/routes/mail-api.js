@@ -52,6 +52,7 @@ import { createAccount, deleteAccount, getAccount, listAccounts, updateAccount }
 import { listFolders } from "../mail/store/messages.js";
 import { SKIP_SPECIAL_USE } from "../mail/sync/engine.js";
 import { registerMessageRoutes } from "./mail-api-messages.js";
+import { registerReaderRoutes } from "./mail-api-reader.js";
 
 /** The mount point. The gateway's global JSON parser skips this prefix (see index.js `_hasOwnParser`). */
 export const MAIL_API_PREFIX = "/dashboard/mail/api";
@@ -607,8 +608,7 @@ export function mailApiRouter(dashboardAuth, deps = {}) {
     res.status(started ? 202 : 200).json({ ok: true, started });
   }));
 
-  // Task 20 fills the mailbox routes on this same router, with these same guards and helpers.
-  registerMessageRoutes(router, {
+  const ctx = {
     guards: { flag: flagGuard, owner: ownerGuard },
     openDb,
     credentials: (db) => credentialsFor(db, deps),
@@ -619,7 +619,12 @@ export function mailApiRouter(dashboardAuth, deps = {}) {
     sendMailError,
     logCode,
     route,
-  });
+  };
+
+  // Task 20 fills the mailbox routes on this same router, with these same guards and helpers.
+  registerMessageRoutes(router, ctx);
+  // Plan 2's reader routes: the message frame and the image allow list, behind the same guards.
+  registerReaderRoutes(router, ctx);
 
   return router;
 }
