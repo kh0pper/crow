@@ -162,11 +162,11 @@ test("the wiring passes the actor at every construction site", () => {
 
   const exec = read("servers/gateway/ai/tool-executor.js");
   assert.match(exec, /kind: "bot", id: boundBotId/);
-  // The three project servers all get the bound bot as their base actor; the operator's voice bot
-  // gets the frozen factory actor instead (it keeps operator scope).
+  // The project servers and the sharing server all get the bound bot as their base actor; the
+  // operator's voice bot gets the frozen factory actor instead (it keeps operator scope there).
   assert.match(exec, /import \{ operatorVoiceActor \} from "\.\.\/\.\.\/shared\/project-share-scope\.js"/);
   assert.match(exec, /const baseActor = boundBotId \? \(boundBotIsVoice \? operatorVoiceActor\(\) : \{ kind: "bot", id: boundBotId \}\) : undefined/);
-  assert.match(exec, /category === "storage" \? \{ baseActor \}/);
+  assert.match(exec, /category === "storage" \|\| category === "sharing" \? \{ baseActor \}/);
   assert.match(exec, /category === "memory" \|\| category === "projects" \? \{ actor: baseActor \}/);
 });
 
