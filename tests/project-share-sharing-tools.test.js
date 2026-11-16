@@ -1,10 +1,13 @@
 /**
- * The sharing server's tools are OWNER-ONLY for bots, on every path.
+ * The sharing server's tools are OWNER-ONLY for bots, on every path — with one exception.
  *
  * The decision: a bot never uses crow_share, or any sharing tool that sends or exports project data
  * to a contact or a peer, changes who can reach this instance, or reveals contacts/peers — including
- * the operator's own voice bot ("any bot actor"). Exactly one tool is harmless: the static
- * crosspost-transform list.
+ * the operator's own voice bot when that bot is anything but the frozen executor actor (a relayed
+ * turn can put words in its mouth). The one exception is the frozen operator-voice actor, which is
+ * the operator's own voice executor: it keeps exactly crow_send_message and crow_voice_memo (a voice
+ * turn says something to a contact) and nothing else (VOICE_ALLOWED). Exactly one tool is harmless
+ * for every bot: the static crosspost-transform list.
  *
  * What this file drives, all against a real `createSharingServer` on a scratch crow.db:
  *
@@ -13,12 +16,16 @@
  *       `shared_items` row, no `crosspost_log` row, no peer/nostr call:
  *         stdio env actor, per-call `_meta` actor, `x-crow-actor-*` header actor, an unverified-bot
  *         env (the engine marker with no bot identity), the frozen operator-voice actor as the
- *         server's base actor, the in-process tool executor bound to a normal bot and to the
- *         voice bot, and a gateway router BUILT for a bot actor (a call carrying no `_meta` at all
- *         is still that bot's call);
+ *         server's base actor (refused everything but its two voice tools — see (b4)), the
+ *         in-process tool executor bound to a normal bot and to the voice bot, and a gateway router
+ *         BUILT for a bot actor (a call carrying no `_meta` at all is still that bot's call);
  *   (b3) a registration the guard cannot see the call's actor through — `server.tool` with no
  *       schema object before its handler, or `server.registerTool` — is refused when it happens,
  *       so no tool can be added to this surface unguarded;
+ *   (b4) the frozen operator-voice actor: exactly crow_send_message and crow_voice_memo reach their
+ *       handlers, every other tool is refused, and the same calls from any other bot (another bot,
+ *       the engine's env actor with the reserved id, a per-call _meta/header claim, an un-frozen
+ *       copy of the actor) are refused;
  *   (c) the one harmless tool still works for a bot;
  *   (d) the owner and an unidentified caller still reach the server (status, contacts);
  *   (e) a bot that holds a live project share is refused exactly the same.
@@ -79,6 +86,7 @@ let createProjectSpace = null;
 let grantShare = null;
 let CROW_VOICE_BOT_ID = null;
 let SHARING_TOOL_CLASS = null;
+let VOICE_ALLOWED = null;
 let MEMORY_ID = null;
 let CONTACT_CROW_ID = null;
 let openShared = []; // every { client, server } this file built, closed in after()
@@ -96,7 +104,7 @@ before(async () => {
   ({ createProjectSpace } = await import("../servers/shared/project-spaces.js"));
   ({ grantShare } = await import("../servers/shared/project-bot-shares.js"));
   ({ CROW_VOICE_BOT_ID } = await import("../servers/shared/voice-bot.js"));
-  ({ SHARING_TOOL_CLASS } = await import("../servers/sharing/bot-owner-only.js"));
+  ({ SHARING_TOOL_CLASS, VOICE_ALLOWED } = await import("../servers/sharing/bot-owner-only.js"));
 
   // The contact and the memory the share tools operate on: with these present, `crow_share` would
   // really send if its handler ran, which is what the bot paths below must not reach.
@@ -328,7 +336,7 @@ test("a bot is refused crow_share, crow_send_message and crow_crosspost on every
     const e = await open({ baseActor: frozen });
     assert.equal(e.server.sharing.actor, frozen, "the frozen operator-voice actor is the base");
     assert.equal(scope.isOperatorVoice(e.server.sharing.actor), true);
-    paths.push({ label: "operator-voice base actor", call: e.call });
+    paths.push({ label: "operator-voice base actor", call: e.call, voice: true });
   }
 
   // 6./7. the in-process tool executor, bound to a normal bot and to the voice bot.
@@ -360,7 +368,7 @@ test("a bot is refused crow_share, crow_send_message and crow_crosspost on every
     assert.ok(voiceServer, "the voice executor built its in-process sharing server");
     assert.equal(voiceServer.sharing.actor, scope.operatorVoiceActor(), "the voice executor's sharing server holds the frozen actor");
     assert.equal(scope.isOperatorVoice(voiceServer.sharing.actor), true);
-    paths.push({ label: "executor voice bot", call: viaCategory(voice) });
+    paths.push({ label: "executor voice bot", call: viaCategory(voice), voice: true });
   }
 
   // 8. the gateway router, which forwards the caller's actor with every call it dispatches.
@@ -376,7 +384,10 @@ test("a bot is refused crow_share, crow_send_message and crow_crosspost on every
   let seq = 0;
   for (const path of paths) {
     await expectOwnerOnly(path.call, path.label, "crow_share", shareArgs(token), "This will share");
-    await expectOwnerOnly(path.call, path.label, "crow_send_message", sendArgs());
+    // The operator's own voice executor keeps crow_send_message (and crow_voice_memo): it is the one
+    // bot actor the sharing guard lets past, and (b4) is where that exception is pinned. Every other
+    // path here is refused it.
+    if (path.voice !== true) await expectOwnerOnly(path.call, path.label, "crow_send_message", sendArgs());
     seq += 1;
     await expectOwnerOnly(path.call, path.label, "crow_crosspost", crosspostArgs(`sharing-bot-path-${seq}-${Date.now()}`));
   }
@@ -470,6 +481,71 @@ test("the sharing guard refuses to register a tool it could not see the call's a
   assert.equal(botRefused.content[0].text, OWNER_ONLY_TEXT);
 });
 
+// --- (b4) the frozen operator-voice actor: exactly two sharing tools -----------------------
+
+test("the frozen operator-voice actor reaches crow_send_message and crow_voice_memo, and nothing else",
+  { timeout: 120_000 }, async () => {
+    const voice = await open({ baseActor: scope.operatorVoiceActor() });
+
+    // Allowed: the guard passes the call to the handler, so the answer is the handler's own (a
+    // missing contact, a kiosk refusal) — never the fixed owner-only refusal.
+    for (const [tool, args] of [
+      ["crow_send_message", sendArgs()],
+      ["crow_voice_memo", { contact: CONTACT_CROW_ID, message: "a memo from the voice turn" }],
+    ]) {
+      const r = await voice.call(tool, args);
+      assert.notEqual(r.text, OWNER_ONLY_TEXT, `${tool} reaches its handler: ${r.text}`);
+    }
+
+    // Refused: every other tool, including the ones a spoken turn has no business with.
+    for (const [tool, args] of [
+      ["crow_share", shareArgs("voice-turn-token")],
+      ["crow_crosspost", crosspostArgs("sharing-voice-" + Date.now())],
+      ["crow_send_group_message", { group: "friends", message: "hello" }],
+      ["crow_room_invite", { contact: CONTACT_CROW_ID }],
+    ]) {
+      const r = await voice.call(tool, args);
+      assert.equal(r.isError, true, `${tool}: ${r.text}`);
+      assert.equal(r.text, OWNER_ONLY_TEXT, `${tool}: the fixed owner-only refusal`);
+    }
+
+    // The allowlist is those two names, exported frozen, and both stay owner_only in the map (the
+    // map's values are unchanged: the exception lives in its own set).
+    assert.deepEqual([...VOICE_ALLOWED].sort(), ["crow_send_message", "crow_voice_memo"]);
+    assert.equal(Object.isFrozen(VOICE_ALLOWED), true, "the allowlist is frozen");
+    for (const name of VOICE_ALLOWED) assert.equal(SHARING_TOOL_CLASS[name], "owner_only", name);
+
+    // Another bot is refused both of them.
+    const other = await openUnderEnv({ CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: ENV_BOT });
+    for (const [tool, args] of [
+      ["crow_send_message", sendArgs()],
+      ["crow_voice_memo", { contact: CONTACT_CROW_ID, message: "m" }],
+    ]) {
+      const r = await other.call(tool, args);
+      assert.equal(r.text, OWNER_ONLY_TEXT, `${tool} for another bot: ${r.text}`);
+    }
+
+    // The reserved id is a claim, not a credential:
+    // - the pi engine's env actor with that id (no marker),
+    const engineVoice = await openUnderEnv({ CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: CROW_VOICE_BOT_ID });
+    assert.deepEqual(engineVoice.server.sharing.actor, { kind: "bot", id: CROW_VOICE_BOT_ID },
+      "the env actor carries no marker");
+    assert.equal((await engineVoice.call("crow_send_message", sendArgs())).text, OWNER_ONLY_TEXT);
+    // - a per-call _meta actor with that id,
+    const asMeta = await open({ baseActor: actor.OWNER });
+    const viaMeta = await asMeta.call("crow_send_message", sendArgs(), { kind: "bot", id: CROW_VOICE_BOT_ID });
+    assert.equal(viaMeta.text, OWNER_ONLY_TEXT, "a per-call crow.voice actor is refused");
+    // - an x-crow-actor header with that id,
+    const asHeader = await open({ baseActor: actor.OWNER });
+    const viaHeader = await handlerCall(asHeader, headerExtra(CROW_VOICE_BOT_ID))("crow_send_message", sendArgs());
+    assert.equal(viaHeader.text, OWNER_ONLY_TEXT, "a crow.voice header actor is refused");
+    // - and a plain COPY of the actor, flag and all, that is not the frozen one.
+    const copy = await open({ baseActor: { kind: "bot", id: CROW_VOICE_BOT_ID, operatorVoice: true } });
+    assert.equal(scope.isOperatorVoice(copy.server.sharing.actor), false, "a copy is not the frozen actor");
+    assert.equal((await copy.call("crow_send_message", sendArgs())).text, OWNER_ONLY_TEXT,
+      "an un-frozen copy carrying the flag is refused");
+  });
+
 // --- (c) the one harmless tool still works for a bot ---------------------------------------
 
 test("crow_list_crosspost_transforms is the one tool a bot still reaches", { timeout: 120_000 }, async () => {
@@ -486,7 +562,8 @@ test("crow_list_crosspost_transforms is the one tool a bot still reaches", { tim
   const viaHeader = await handlerCall(headerBot, headerExtra(HDR_BOT))("crow_list_crosspost_transforms", {});
   assert.equal(viaHeader.isError, false, viaHeader.text);
 
-  // The operator's own voice bot is a bot here too: even the read-only status tool is refused.
+  // The operator's own voice bot is a bot here too: outside its two voice tools (b4), even the
+  // read-only status tool is refused.
   const voiceBot = await open({ baseActor: scope.operatorVoiceActor() });
   const status = await voiceBot.call("crow_sharing_status", {});
   assert.equal(status.isError, true, status.text);

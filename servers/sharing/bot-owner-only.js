@@ -4,13 +4,20 @@
  *
  * Every tool the sharing server registers is placed in exactly one of two classes:
  *
- *   owner_only  refused for ANY bot actor (see below)
+ *   owner_only  refused for any bot actor (see below)
  *   harmless    allowed for a bot: a static list that carries no contact and no project data
  *
  * The rule is the operator's: a bot never reaches the sharing surface. Each tool here either sends
  * or exports project data to a contact or a peer, changes who can reach this instance, or reveals
- * the operator's contacts and peers. `isOperatorVoice` is deliberately NOT consulted — the
- * operator's own voice bot is a bot here, because a relayed turn can put words in its mouth.
+ * the operator's contacts and peers.
+ *
+ * ONE exception, the operator's own spoken turn: the frozen operator-voice actor (isOperatorVoice —
+ * the reserved crow.voice id with the frozen marker, never an id or a def field a caller can send)
+ * keeps exactly VOICE_ALLOWED, `crow_send_message` and `crow_voice_memo`: a voice turn says something
+ * to a contact. Nothing else — not crow_share, not a group send, not a room invite. Every other bot
+ * is refused those two as well, including the voice bot reached any other way (the pi engine's
+ * session with that id, a per-call `_meta`/header claiming it, or a copy of the actor that is not
+ * the frozen one), because a relayed turn can put words in its mouth.
  *
  * The guard wraps `server.tool` BEFORE the register* calls, so it sees every registration whatever
  * its shape (the handler is the LAST function argument) and leaves registration ORDER untouched.
@@ -27,7 +34,7 @@
  * Owner, unknown and peer actors are untouched: this file only ever narrows a bot.
  */
 import { UNKNOWN, resolveCallActor } from "../research/actor.js";
-import { ShareRefusal, refusalResult } from "../shared/project-share-scope.js";
+import { ShareRefusal, refusalResult, isOperatorVoice } from "../shared/project-share-scope.js";
 
 const OWNER_ONLY = "owner_only";
 const HARMLESS = "harmless";
@@ -37,6 +44,11 @@ const HARMLESS = "harmless";
  *
  * `harmless` is exactly one entry: the transform list is a pure static table (source→target pairs),
  * with no contacts, no peers and no project data.
+ *
+ * The classes below are the rule for EVERY bot. The single exception is the frozen operator-voice
+ * actor, and it lives outside this map, in its own exported set (VOICE_ALLOWED) — see the header.
+ * So `crow_send_message` and `crow_voice_memo` stay OWNER_ONLY: they are owner-only for every bot
+ * except the operator's own spoken turn.
  */
 export const SHARING_TOOL_CLASS = Object.freeze({
   // --- contacts (invites, pairing, contact rows) ---
@@ -53,7 +65,7 @@ export const SHARING_TOOL_CLASS = Object.freeze({
   crow_inbox: OWNER_ONLY, // reads incoming shares and the stored text of messages from peers
 
   // --- messaging ---
-  crow_send_message: OWNER_ONLY, // sends a message to a contact as this instance
+  crow_send_message: OWNER_ONLY, // sends a message to a contact as this instance (the operator's voice turn: VOICE_ALLOWED)
   crow_create_message_group: OWNER_ONLY, // builds a group of the operator's contacts to broadcast to
   crow_list_message_groups: OWNER_ONLY, // reveals group membership, which is the contact list
   crow_send_group_message: OWNER_ONLY, // fans a message out to every member of a group of contacts
@@ -76,7 +88,7 @@ export const SHARING_TOOL_CLASS = Object.freeze({
   // --- rooms and social ---
   crow_room_invite: OWNER_ONLY, // invites a contact into a live companion room
   crow_room_close: OWNER_ONLY, // closes the operator's live room out from under them
-  crow_voice_memo: OWNER_ONLY, // sends an audio memo to a contact
+  crow_voice_memo: OWNER_ONLY, // sends an audio memo to a contact (the operator's voice turn: VOICE_ALLOWED)
   crow_react: OWNER_ONLY, // sends a reaction into a shared room, as the operator
 
   // --- identity attestations ---
@@ -95,12 +107,29 @@ export const SHARING_TOOL_CLASS = Object.freeze({
 
 const isBot = (actor) => !!(actor && actor.kind === "bot");
 
+/**
+ * The two sharing tools the operator's own voice executor keeps: it speaks to a contact, so a spoken
+ * turn may send a message or a memo — and nothing else. Separate from SHARING_TOOL_CLASS (whose
+ * values are unchanged) because the exception is about the ACTOR, not about the tool: every other
+ * bot is refused these two like any other owner-only tool.
+ */
+export const VOICE_ALLOWED = Object.freeze(new Set(["crow_send_message", "crow_voice_memo"]));
+
 /** Is this tool name classed harmless? An unknown name is not (fail closed). */
 function isHarmless(name) {
   return (
     Object.prototype.hasOwnProperty.call(SHARING_TOOL_CLASS, name) &&
     SHARING_TOOL_CLASS[name] === HARMLESS
   );
+}
+
+/**
+ * May this actor call this tool? A bot may reach a harmless tool; the frozen operator-voice actor
+ * (and only it) may also reach VOICE_ALLOWED. Everything else is refused.
+ */
+function allowedFor(actor, name) {
+  if (isHarmless(name)) return true;
+  return VOICE_ALLOWED.has(name) && isOperatorVoice(actor);
 }
 
 /**
@@ -114,7 +143,8 @@ function isHarmless(name) {
  * `extra` (a `crow/actor` `_meta`, an `x-crow-actor-*` header, a peer token — `resolveCallActor`
  * owns that logic, so a fixed bot base actor is never narrowed back to the owner). A bot calling a
  * tool that is not `harmless`, or a tool name the map does not class, gets the fixed owner-only
- * refusal and the handler does not run. Owner/unknown/peer actors pass through untouched.
+ * refusal and the handler does not run — unless the actor is the frozen operator-voice actor and the
+ * tool is in VOICE_ALLOWED. Owner/unknown/peer actors pass through untouched.
  *
  * `onCallActor(actor, toolName)` is a test seam that sees every resolution, like the storage
  * server's: the guard's decision is otherwise only visible through the refusal.
@@ -147,7 +177,7 @@ export function guardSharingServer(server, { baseActor, onCallActor } = {}) {
     const guarded = (callArgs, extra) => {
       const actor = resolveCallActor(baseActor || UNKNOWN, extra);
       if (typeof onCallActor === "function") onCallActor(actor, name);
-      if (isBot(actor) && !isHarmless(name)) {
+      if (isBot(actor) && !allowedFor(actor, name)) {
         return refusalResult(new ShareRefusal(OWNER_ONLY).message);
       }
       return handler(callArgs, extra);

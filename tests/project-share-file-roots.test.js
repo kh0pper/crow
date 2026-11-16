@@ -12,16 +12,21 @@
  *     that project keeps its engine state (sessions/, outputs/, .pi/,
  *     .mcp.json with signed actor headers) under <workspace_dir>/bots/<id>, so
  *     a shared root there would expose — and let a read_write bot rewrite —
- *     other bots' sessions. A `bots` directory that is itself a symlink refuses
- *     the whole share's roots with one warning, and so does any other link in
- *     that tree that resolves INSIDE the workspace (the state would then live
- *     at an ordinary top-level entry this share would otherwise grant) or that
- *     cannot be resolved at all (fail closed). A link that resolves OUTSIDE the
- *     workspace is accepted: that is a carried-over bot world
- *     (scripts/pi-bots/world-root.mjs links a bot home, or its
- *     sessions/outputs/.pi/.mcp.json, to the bot's legacy root), and no entry
- *     this share grants can reach it — every granted entry resolves under the
- *     workspace's own realpath.
+ *     other bots' sessions. The `bots` tree is an ALLOWLIST: it may contain no
+ *     link at all except Crow's own moved-bot link, a direct child
+ *     `<workspace>/bots/<id>` -> `<projectsRoot>/<slug>/workspace/bots/<id>`
+ *     whose target name is its own; every other link in that tree — a bot home
+ *     linked to a legacy root, a carried-over `sessions`/`.pi`/`outputs`/`.mcp.json`
+ *     entry, a link deeper inside a bot home, a dangling link — refuses the whole
+ *     share's roots with one warning, and so does an accepted link whose target
+ *     subtree holds a link (or a tree the walk could not finish).
+ *
+ * The workspace's OTHER top-level entries are walked the same way (bounded, never
+ * following a link): a link inside one is harmless — a `.venv`'s system-python
+ * and `lib64 -> lib` links, a dangling link — unless its realpath lands in
+ * another project (or this project's bots tree), inside the Crow home, or inside
+ * the data directory outside this workspace. Such an entry is not granted (one
+ * line names the reason) and its siblings still are.
  *
  * A suspended share (either side has an outside member), a revoked one, one
  * whose project is archived/tombstoned, one with no workspace_dir, one whose
@@ -109,8 +114,10 @@ writeFileSync(STUB_PI, [
 process.env.PIBOT_PI_CLI = STUB_PI;
 
 const { handleInbound, PiRpc, loadBotShares } = await import("../scripts/pi-bots/bridge.mjs");
-const { buildBotWorld, prepareSpawn, shareWorkspaceRoots, BOTS_TREE_MAX_DEPTH, BOTS_TREE_MAX_ENTRIES } =
-  await import("../scripts/pi-bots/bot-world.mjs");
+const {
+  buildBotWorld, prepareSpawn, shareWorkspaceRoots, botsHoldout,
+  BOTS_TREE_MAX_DEPTH, BOTS_TREE_MAX_ENTRIES, SHARE_ENTRY_MAX_DEPTH, SHARE_ENTRY_MAX_ENTRIES,
+} = await import("../scripts/pi-bots/bot-world.mjs");
 const { effectiveReadPaths } = await import("../scripts/pi-bots/bot-read-paths.mjs");
 const { buildContainPlan, ContainRefused } = await import("../scripts/pi-bots/pi_contain.mjs");
 const { createInteractiveEngine, _resetInteractiveEngineForTest } = await import("../servers/gateway/perch-interactive.js");
@@ -544,8 +551,9 @@ test("shareWorkspaceRoots: a file symlink (.mcp.json) inside a bot home refuses 
   assertRefused(d, 31, /symlink/);
 });
 
-test("shareWorkspaceRoots: a carried-over bot world whose entries link OUTSIDE the workspace still grants the other entries", () => {
-  // world-root.mjs "root" mode: the whole bot home is one link to the bot's legacy root.
+test("shareWorkspaceRoots: a carried-over bot home (one link to the bot's legacy root) refuses the whole share", () => {
+  // world-root.mjs "root" mode: the whole bot home is one link to the bot's legacy root. That is not
+  // Crow's moved-bot shape, so the bots tree no longer vouches for it: the share grants nothing.
   const whole = ws("unit-carried-root");
   mkdirSync(join(whole, "docs"), { recursive: true });
   writeFileSync(join(whole, "docs", "a.md"), "a\n");
@@ -556,11 +564,10 @@ test("shareWorkspaceRoots: a carried-over bot world whose entries link OUTSIDE t
   mkdirSync(join(whole, "bots"), { recursive: true });
   symlinkSync(legacyWhole, join(whole, "bots", "carried"));
 
-  const rootShare = shareOf(whole, 36);
-  assert.deepEqual(sortRoots(rootShare.r), { read: sorted(fixtureRoots(whole)), write: sorted(fixtureRoots(whole)) },
-    "a bot home linked to its legacy root grants the workspace's own entries");
-  assert.deepEqual(rootShare.said, [], "and says nothing: the link cannot be reached from any granted root");
+  assertRefused(whole, 36, /moved-bot/);
+});
 
+test("shareWorkspaceRoots: carried-over entries (sessions/outputs/.pi/.mcp.json linked to the legacy root) refuse the share", () => {
   // world-root.mjs "entries" mode: sessions/outputs/.pi/.mcp.json each link to the legacy root.
   const legacy = join(dir, "legacy-worlds", "other");
   mkdirSync(join(legacy, "sessions"), { recursive: true });
@@ -573,13 +580,7 @@ test("shareWorkspaceRoots: a carried-over bot world whose entries link OUTSIDE t
       symlinkSync(join(legacy, name), join(home, name));
     }
   });
-  const entryShare = shareOf(d, 37);
-  assert.deepEqual(sortRoots(entryShare.r), { read: sorted(fixtureRoots(d)), write: sorted(fixtureRoots(d)) },
-    "carried-over entries resolve outside the workspace, so the other entries are still granted");
-  assert.deepEqual(entryShare.said, [], "a carried-over world says nothing");
-  for (const name of ["sessions", "outputs", ".pi", ".mcp.json"]) {
-    assert.equal(coversPath(entryShare.r.read, join(legacy, name)), false, name + ": the link's target is no root");
-  }
+  assertRefused(d, 37, /symlink/);
 });
 
 test("shareWorkspaceRoots: a link inside a bot home that resolves INSIDE the workspace refuses the share", () => {
@@ -599,6 +600,185 @@ test("shareWorkspaceRoots: a link in a bot home with no resolvable target refuse
     symlinkSync(join(dir, "legacy-worlds", "gone"), join(home, "sessions"));
   });
   assertRefused(d, 39, /unresolvable symlink/);
+});
+
+// ---------------------------------------------------------------------------
+// Crow's moved-bot link is the ONE shape accepted under <workspace>/bots
+// ---------------------------------------------------------------------------
+
+/** A project workspace that really homes `id`: the target of a moved-bot link. */
+function movedFrom(name, id) {
+  const d = ws(name);
+  mkdirSync(join(d, "bots", id, "sessions"), { recursive: true });
+  writeFileSync(join(d, "bots", id, "sessions", "s.jsonl"), "{}\n");
+  return d;
+}
+
+test("shareWorkspaceRoots: Crow's moved-bot link (bots/<id> -> <slug>/workspace/bots/<id>) is accepted", () => {
+  const from = movedFrom("unit-moved-from", "moved");
+  const d = botsTreeFixture("moved-bot", () => {});
+  symlinkSync(join(from, "bots", "moved"), join(d, "bots", "moved"));
+
+  const { r, said } = shareOf(d, 40);
+  assert.deepEqual(sortRoots(r), { read: sorted(fixtureRoots(d)), write: sorted(fixtureRoots(d)) },
+    "the workspace's other entries are granted");
+  assert.deepEqual(said, [], "an accepted moved-bot link says nothing");
+  const target = realpathSync(join(from, "bots", "moved"));
+  assert.equal(r.read.includes(target), false, "the bot home's target is never a root");
+
+  const held = botsHoldout(join(d, "bots"), { realDir: realpathSync(d), projectsRoot: realpathSync(PROJECTS_ROOT) });
+  assert.equal(held.ok, true, JSON.stringify(held));
+  assert.equal(held.real, realpathSync(join(d, "bots")), "the bots dir itself is held out");
+  assert.ok(held.homes.includes(target), "the moved bot's home is held out: " + JSON.stringify(held.homes));
+  assert.ok(held.homes.includes(realpathSync(join(d, "bots", "other"))),
+    "and so is the bot homed here: " + JSON.stringify(held.homes));
+});
+
+test("shareWorkspaceRoots: a moved-bot link whose target names a different bot is refused", () => {
+  const from = movedFrom("unit-moved-other-name", "someone-else");
+  const d = botsTreeFixture("moved-other-name", () => {});
+  symlinkSync(join(from, "bots", "someone-else"), join(d, "bots", "moved"));
+  assertRefused(d, 41, /moved-bot/);
+});
+
+test("shareWorkspaceRoots: a bot-home link to a target that is not <slug>/workspace/bots/<id> is refused", () => {
+  // The right project, the wrong place inside it.
+  const elsewhere = ws("unit-moved-elsewhere");
+  mkdirSync(join(elsewhere, "elsewhere", "sessions"), { recursive: true });
+  const wrongPlace = botsTreeFixture("moved-wrong-place", () => {});
+  symlinkSync(join(elsewhere, "elsewhere"), join(wrongPlace, "bots", "moved"));
+  assertRefused(wrongPlace, 42, /moved-bot/);
+
+  // A legacy root outside the projects area: world-root.mjs's carry-over shape.
+  const legacy = join(dir, "legacy-worlds", "moved-legacy");
+  mkdirSync(join(legacy, "sessions"), { recursive: true });
+  const outside = botsTreeFixture("moved-legacy", () => {});
+  symlinkSync(legacy, join(outside, "bots", "moved"));
+  assertRefused(outside, 43, /moved-bot/);
+
+  // Another project's workspace ROOT: one segment short of the shape.
+  const shortShape = botsTreeFixture("moved-short-shape", () => {});
+  symlinkSync(elsewhere, join(shortShape, "bots", "moved"));
+  assertRefused(shortShape, 44, /moved-bot/);
+});
+
+test("shareWorkspaceRoots: an accepted moved-bot home whose subtree holds a link back is refused", () => {
+  // The moved home lives in another project; its `outputs` links back into THIS workspace's docs. The
+  // target subtree is walked exactly like the bots tree (never through a link), so a link anywhere in
+  // it refuses — an outside directory cannot smuggle a way back in.
+  const from = movedFrom("unit-moved-tainted", "moved");
+  const d = botsTreeFixture("moved-tainted-link", () => {});
+  symlinkSync(join(from, "bots", "moved"), join(d, "bots", "moved"));
+  symlinkSync(join(d, "docs"), join(from, "bots", "moved", "outputs"));
+  assertRefused(d, 45, /symlink/);
+});
+
+test("shareWorkspaceRoots: a cross-share link of another shape under bots is refused", () => {
+  // bots/<id> -> another project's docs: neither Crow's moved-bot shape nor a link this share can
+  // vouch for.
+  const other = ws("unit-cross-target");
+  mkdirSync(join(other, "docs"), { recursive: true });
+  const d = botsTreeFixture("cross-share", () => {});
+  symlinkSync(join(other, "docs"), join(d, "bots", "moved"));
+  assertRefused(d, 46, /moved-bot/);
+});
+
+test("shareWorkspaceRoots: a link chain under bots is refused, whatever it finally resolves to", () => {
+  const d = botsTreeFixture("bots-chain", (root, home) => {
+    symlinkSync(join(home, "b"), join(home, "a"));
+    symlinkSync(join(root, "docs"), join(home, "b"));
+  });
+  assertRefused(d, 47, /symlink/);
+});
+
+test("shareWorkspaceRoots: a dangling link directly under bots is refused", () => {
+  const d = botsTreeFixture("bots-dangling", () => {});
+  symlinkSync(join(dir, "legacy-worlds", "not-there"), join(d, "bots", "carried"));
+  assertRefused(d, 48, /unresolvable symlink/);
+});
+
+// ---------------------------------------------------------------------------
+// granted entries: only a DANGEROUS link target refuses the entry
+// ---------------------------------------------------------------------------
+
+/** The first existing system path a .venv would link its interpreter to. */
+const SYSTEM_BIN = ["/usr/bin/python3", "/usr/bin/python3.12", "/usr/bin/env"]
+  .find((p) => existsSync(p)) || process.execPath;
+
+test("shareWorkspaceRoots: a .venv in a granted entry (system python, lib64 -> lib, python3 -> python) is granted", () => {
+  assert.equal(SHARE_ENTRY_MAX_DEPTH, 32, "the granted-entry walk's depth bound");
+  assert.equal(SHARE_ENTRY_MAX_ENTRIES, 200_000, "...and its entry bound across the whole share");
+  const d = shareFixture("venv-entry");
+  const venv = join(d, ".venv");
+  mkdirSync(join(venv, "bin"), { recursive: true });
+  mkdirSync(join(venv, "lib", "python3.12", "site-packages"), { recursive: true });
+  symlinkSync(SYSTEM_BIN, join(venv, "bin", "python"));
+  symlinkSync("python", join(venv, "bin", "python3"));
+  symlinkSync("lib", join(venv, "lib64"));
+  symlinkSync(SYSTEM_BIN, join(venv, "bin", "python3.12"));
+
+  const { r, said } = shareOf(d, 49);
+  assert.deepEqual(sortRoots(r), {
+    read: sorted([...fixtureRoots(d), realpathSync(venv)]),
+    write: sorted([...fixtureRoots(d), realpathSync(venv)]),
+  }, "the venv is a granted entry like any other");
+  assert.deepEqual(said, [], "a link to a system path, and a link inside the workspace, say nothing");
+  assert.ok(coversPath(r.read, join(venv, "bin", "python3")), "the venv's own files are readable through it");
+});
+
+test("shareWorkspaceRoots: a link inside an entry to another project refuses that entry only", () => {
+  const other = ws("unit-entry-other");
+  mkdirSync(join(other, "data"), { recursive: true });
+  const d = shareFixture("entry-other-project");
+  symlinkSync(join(other, "data"), join(d, "docs", "their-data"));
+  // A chain: the first hop is a link in the same entry, the final realpath is the other project's dir.
+  symlinkSync(join(d, "docs", "their-data"), join(d, "docs", "hop"));
+
+  const { r, said } = shareOf(d, 50);
+  assert.equal(r.read.includes(realpathSync(join(d, "docs"))), false, "the entry holding the link is not granted");
+  assert.equal(coversPath(r.read, join(d, "docs", "a.md")), false);
+  assert.ok(coversPath(r.read, join(d, "top.txt")), "the sibling entry is still granted");
+  assert.equal(said.length, 1, "one line names why: " + JSON.stringify(said));
+  assert.match(said[0], /another project/, said[0]);
+});
+
+test("shareWorkspaceRoots: a link inside an entry to the Crow home's secrets or the data directory refuses that entry", () => {
+  const crowHome = join(dir, "crowhome-entry-links");
+  mkdirSync(join(crowHome, "secrets", "keys"), { recursive: true });
+  const secrets = shareFixture("entry-secrets");
+  symlinkSync(join(crowHome, "secrets", "keys"), join(secrets, "docs", "keys"));
+  const s = shareOf(secrets, 51, "read", { crowHome });
+  assert.equal(s.r.read.includes(realpathSync(join(secrets, "docs"))), false,
+    "the entry with the secrets link is not granted");
+  assert.ok(coversPath(s.r.read, join(secrets, "top.txt")), "the sibling entry is granted");
+  assert.match(s.said[0] || "", /Crow home/, JSON.stringify(s.said));
+
+  const dataEntry = shareFixture("entry-datadir");
+  symlinkSync(DB_FILE, join(dataEntry, "docs", "the-db"));
+  const e = shareOf(dataEntry, 52);
+  assert.equal(e.r.read.includes(realpathSync(join(dataEntry, "docs"))), false,
+    "the entry with the data-dir link is not granted");
+  assert.ok(coversPath(e.r.read, join(dataEntry, "top.txt")));
+  assert.match(e.said[0] || "", /data directory/, JSON.stringify(e.said));
+});
+
+test("shareWorkspaceRoots: a link inside an entry to this project's bots tree refuses that entry", () => {
+  const d = shareFixture("entry-bots-link");
+  symlinkSync(join(d, "bots", "other", "sessions"), join(d, "docs", "state"));
+  const { r, said } = shareOf(d, 53);
+  assert.equal(r.read.includes(realpathSync(join(d, "docs"))), false, "the entry with the bots link is not granted");
+  assert.ok(coversPath(r.read, join(d, "top.txt")), "the sibling entry is granted");
+  assert.match(said[0] || "", /bots tree/, JSON.stringify(said));
+});
+
+test("shareWorkspaceRoots: a dangling link inside a granted entry is harmless and the entry is granted", () => {
+  const d = shareFixture("entry-dangling");
+  symlinkSync(join(dir, "no-such-target"), join(d, "docs", "gone"));
+  symlinkSync(join(dir, "no-such-target-2"), join(d, "dangling-top"));
+  const { r, said } = shareOf(d, 54);
+  assert.deepEqual(sortRoots(r), { read: sorted(fixtureRoots(d)), write: sorted(fixtureRoots(d)) },
+    "a dangling link resolves nowhere, so the entry is granted");
+  assert.deepEqual(said, [], "and nothing is said about it");
 });
 
 test("shareWorkspaceRoots: a bots tree over the entry bound refuses the share instead of half-inspecting it", () => {
