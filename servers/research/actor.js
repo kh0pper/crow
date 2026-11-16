@@ -70,6 +70,8 @@ export function resolveCallActor(base, extra) {
   const m = metaActor(extra);
   if (m !== undefined && m !== null) {
     if (m && m.kind === "bot" && m.id !== undefined && m.id !== null && String(m.id) !== "") {
+      // Only kind and id are copied: whatever else a call puts in `_meta` stays behind. In
+      // particular a per-call actor can never carry the operator-voice marker.
       const id = String(m.id);
       return ACTOR_ID_RE.test(id) ? { kind: "bot", id } : UNKNOWN;
     }
@@ -83,7 +85,11 @@ export function forwardActorMeta(extra) {
   // A peer is forwarded in the one shape every gateway forwarder uses ({kind:"peer", instance, from}).
   if (isPeer(extra)) return peerActorMeta(extra);
   const m = metaActor(extra);
-  if (m && typeof m === "object") return { _meta: { "crow/actor": m } };
+  if (m && typeof m === "object") {
+    // A forwarded bot is forwarded as kind and id only, so extra fields (the operator-voice
+    // marker among them) do not travel to the server this router dispatches to.
+    return { _meta: { "crow/actor": m.kind === "bot" ? { kind: "bot", id: m.id } : m } };
+  }
   const h = headerActor(extra);
   if (h) return { _meta: { "crow/actor": h.kind === "bot" ? { kind: "bot", id: h.id } : { kind: "unknown" } } };
   return {};

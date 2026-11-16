@@ -391,6 +391,30 @@ await initTable("project_audit_log table", `
   CREATE INDEX IF NOT EXISTS idx_project_audit_project ON project_audit_log(project_id, created_at DESC);
 `);
 
+// project_bot_shares: one row per bot a project's owner has shared that project with, at level 'read'
+// or 'read_write', plus the revoke (revoked_at, never a delete). The partial unique index keeps at
+// most one LIVE row per (project, bot). LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES): a share is this
+// instance's own grant. No foreign key on bot_id — bot definitions are text keys in pi_bot_defs, so a
+// deleted bot leaves a dead row that resolves to no access; the ON DELETE CASCADE on project_id is a
+// backstop only (foreign keys are not enforced on production connections). Same DDL as
+// PROJECT_BOT_SHARES_DDL in scripts/migrations/0028-project-bot-shares.mjs — one shape, two rails;
+// additive, no SCHEMA_GENERATION bump.
+await initTable("project_bot_shares table", `
+  CREATE TABLE IF NOT EXISTS project_bot_shares (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id    INTEGER NOT NULL REFERENCES project_spaces(id) ON DELETE CASCADE,
+    bot_id        TEXT NOT NULL,
+    level         TEXT NOT NULL CHECK (level IN ('read','read_write')),
+    granted_by    TEXT NOT NULL DEFAULT 'owner',
+    granted_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    revoked_at    TEXT
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_project_bot_shares_live ON project_bot_shares(project_id, bot_id) WHERE revoked_at IS NULL;
+
+  CREATE INDEX IF NOT EXISTS idx_project_bot_shares_bot ON project_bot_shares(bot_id);
+`);
+
 // Project-scoping for storage files: M2 ACL gates uploads on this column,
 // and crow_project_get joins on it for file counts. Added after the
 // project_spaces table exists (FK target). project_id = NULL means the

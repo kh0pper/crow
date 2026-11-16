@@ -442,6 +442,29 @@ async function purgeCrowDb(db, project, { actor, counts, beforeTombstone }) {
     await txWrite(db, "UPDATE card_offers SET status = 'declined', decided_at = datetime('now') WHERE project_id = ? AND status = 'pending'", [id]);
     await txWrite(db, "UPDATE bot_sessions SET project_id = NULL WHERE project_id = ?", [id]);
 
+    // Shares pointing AT this project die with it. The FK on project_id cascades only where foreign
+    // keys are enforced, which production connections do not do, so the rows are marked revoked
+    // here (never deleted) and each affected bot's own home project is told why. A bot whose home
+    // project is this one (or is gone) has nowhere to write: skipped.
+    const shareBots = await tolerant(async () => (await db.execute({
+      sql: "SELECT DISTINCT bot_id FROM project_bot_shares WHERE project_id = ? AND revoked_at IS NULL ORDER BY bot_id",
+      args: [id],
+    })).rows.map((r) => String(r.bot_id)), []);
+    await txWrite(db, "UPDATE project_bot_shares SET revoked_at = datetime('now') WHERE project_id = ? AND revoked_at IS NULL", [id]);
+    for (const botId of shareBots) {
+      const home = await tolerant(async () => (await db.execute({
+        sql: `SELECT d.project_id FROM pi_bot_defs d JOIN project_spaces p ON p.id = d.project_id
+               WHERE d.bot_id = ? AND p.archived_at IS NULL LIMIT 1`,
+        args: [botId],
+      })).rows[0]?.project_id ?? null, null);
+      const homeId = home == null ? null : Number(home);
+      if (homeId == null || homeId === id) continue;
+      await appendAudit(db, {
+        project_id: homeId, actor_type: actor, action: "share.revoke", target: `bot:${botId}`,
+        payload: { reason: "project_deleted", project_id: id },
+      });
+    }
+
     await appendAudit(db, { project_id: id, actor_type: actor, action: "project.delete", payload: counts });
 
     if (beforeTombstone) await beforeTombstone();
