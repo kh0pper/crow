@@ -18,6 +18,12 @@
  * `listMessages` for one page of rows (the `inbox` role across accounts on the All view, one folder
  * when a folder link was followed). The times are drawn in the instance's zone (`instanceZone`).
  *
+ * The `message` view reads the row a link names (`resolveMessageRef`: the row id is only a hint, and
+ * is used only when it belongs to the account and its Message-ID is the link's) and then the whole
+ * conversation (`listThreadMessages`, each entry looked up so its section knows whether it has a
+ * body and which attachments it has). A link that resolves to nothing gets the not-here page.
+ * Neither view writes anything: the body comes from the frame route, never from this page.
+ *
  * Hidden from the classic sidebar; the shell's drawer reveals it (shell/chrome.js) only while the
  * flag is on AND the request is the owner's own local password session (the same check as the gate
  * below, made once per page in dispatchPanel).
@@ -27,7 +33,8 @@ import { isLocalPasswordSessionOn } from "../local-session.js";
 import { mailEnabled } from "../../mail/flag.js";
 import { accountsOverview } from "../../mail/accounts-overview.js";
 import { MailError } from "../../mail/errors.js";
-import { getFolder, listFolders, listMessages } from "../../mail/store/messages.js";
+import { getFolder, getMessage, listFolders, listMessages } from "../../mail/store/messages.js";
+import { listThreadMessages, resolveMessageRef } from "../../mail/store/reader-queries.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
 import { instanceZone } from "../../../shared/schedule-store.js";
 import { renderMailPage } from "./mail/html.js";
@@ -35,6 +42,9 @@ import { mailCss } from "./mail/css.js";
 
 /** Rows per page. The cursor is the only way to the next one. */
 const INBOX_PAGE_SIZE = 30;
+
+/** The list a message view goes back to when its `back` says nothing usable. */
+const INBOX_HREF = "/dashboard/mail";
 
 /**
  * One page of summaries. A cursor is opaque and comes back from a link a person may have edited, so
@@ -51,6 +61,31 @@ async function readPage(db, { accountId = null, folderId = null, cursor } = {}) 
     if (wanted === undefined || !(err instanceof MailError) || err.code !== "BAD_INPUT") throw err;
     return listMessages(db, optionsFor(undefined));
   }
+}
+
+/**
+ * The list a message view's back link may name: a link back into this panel's own list view, or the
+ * inbox. A query value is never followed anywhere else.
+ */
+function readBack(value) {
+  if (typeof value !== "string" || value.length > 512) return INBOX_HREF;
+  return /^\/dashboard\/mail\?/.test(value) ? value : INBOX_HREF;
+}
+
+/**
+ * One conversation as full rows, in Task 1's order: the thread listing answers summaries, and a
+ * section needs its own body state (has it anything to show?) and its own attachment list, so each
+ * summary is looked up. Nothing here writes; the bodies never reach the page.
+ */
+async function readThread(db, message) {
+  if (message.threadId == null) return [message];
+  const entries = await listThreadMessages(db, message.accountId, message.threadId);
+  const rows = [];
+  for (const entry of entries) {
+    const row = await getMessage(db, entry.id);
+    if (row) rows.push(row);
+  }
+  return rows;
 }
 
 export default {
@@ -82,12 +117,17 @@ export default {
     let page = null;
     let acct = "all";
     let folderId = null;
+    let message = null;
+    let thread = [];
+    let account = null;
+    let back = INBOX_HREF;
+    let missing = false;
     let tz;
     try { tz = await instanceZone(db); } catch { tz = undefined; }
 
     if (usable.length && view === "inbox") {
-      const ids = new Set(usable.map((account) => account.id));
-      for (const account of usable) folders.push(...await listFolders(db, account.id));
+      const ids = new Set(usable.map((entry) => entry.id));
+      for (const entry of usable) folders.push(...await listFolders(db, entry.id));
 
       const askedAcct = typeof query.acct === "string" ? query.acct : "";
       const askedFolder = typeof query.folder === "string" && query.folder !== "" ? query.folder : null;
@@ -114,10 +154,32 @@ export default {
       }
     }
 
+    // Opening a message: the link names the account and the Message-ID, with the row id as a hint
+    // resolved against that id (Decision 9). A link that means nothing gets the not-here page.
+    if (usable.length && view === "message") {
+      const ids = new Set(usable.map((entry) => entry.id));
+      const askedAcct = typeof query.a === "string" ? query.a : "";
+      const mid = typeof query.mid === "string" && query.mid !== "" ? query.mid : null;
+      const row = typeof query.row === "string" && query.row !== "" ? query.row : null;
+      back = readBack(query.back);
+      const found = ids.has(askedAcct)
+        ? await resolveMessageRef(db, { accountId: askedAcct, mid, row })
+        : null;
+      if (!found) {
+        missing = true;
+        res.status(404);
+      } else {
+        message = found;
+        account = usable.find((entry) => entry.id === found.accountId) ?? null;
+        thread = await readThread(db, found);
+      }
+    }
+
     return layout({
       title: t("mail.title", lang),
-      content: mailCss({ inbox: page !== null }) + renderMailPage({
+      content: mailCss({ inbox: page !== null, message: message !== null }) + renderMailPage({
         view, accounts, elsewhere, lang, folders, page, acct, folderId, now: Date.now(), tz,
+        message, thread, account, back, missing,
       }),
     });
   },

@@ -5664,6 +5664,14 @@ export const translations = {
   "mail.noSubject": { en: "(no subject)", es: "(sin asunto)" },
   "mail.loadMore": { en: "Load more", es: "Cargar más" },
   "mail.folderGone": { en: "That folder is no longer here.", es: "Esa carpeta ya no está aquí." },
+  // The reader's message view: one message, its conversation and its attachments. A message the store
+  // no longer has, the recipients line, the two image controls, and the sentence a message with no
+  // readable body shows instead of a frame slot.
+  "mail.notHere": { en: "This message is no longer here.", es: "Este mensaje ya no está aquí." },
+  "mail.to": { en: "to", es: "para" },
+  "mail.showImages": { en: "Show images", es: "Mostrar imágenes" },
+  "mail.alwaysShowFrom": { en: "Always show from {sender}", es: "Mostrar siempre los de {sender}" },
+  "mail.noBody": { en: "This message has no text to show.", es: "Este mensaje no tiene texto que mostrar." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

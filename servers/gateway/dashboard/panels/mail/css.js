@@ -4,8 +4,9 @@
  * 44 px; from 1024 px the column is capped so lines stay readable. Colours and radii are the
  * --crow-* tokens, which follow the OS between light and dark.
  *
- * The list rules (chips, the folder drawer and the message rows) come with the inbox view, which is
- * why they are behind `inbox`: a page that draws only an empty state ships only that state's rules.
+ * The list rules (chips, the folder drawer and the message rows) come with the inbox view and the
+ * conversation's rules with the message view, which is why they are behind `inbox` and `message`: a
+ * page that draws only an empty state ships only that state's rules.
  *
  * NOTE: never write a literal closing style tag inside a comment here.
  */
@@ -50,10 +51,54 @@ const INBOX_RULES = `
   }`;
 
 /**
- * @param {{inbox?: boolean}} options `inbox` adds the list rules (chips, folder drawer, message rows)
+ * The message view (Task 5): the header, one conversation section per message, the frame slot the
+ * client fills, the hidden image banner, the attachment rows and the no-body sentence.
+ */
+const MESSAGE_RULES = `
+  .ml-message { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .ml-back {
+    display: inline-flex; align-items: center; align-self: flex-start; min-height: 44px; padding: 0 12px;
+    box-sizing: border-box; border-radius: var(--crow-radius-pill); color: var(--crow-text-primary);
+    font-size: 0.9rem; text-decoration: none; overflow-wrap: anywhere;
+  }
+  .ml-msg-head { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .ml-msg-subject { margin: 0; font-size: 1.2rem; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
+  .ml-msg-from { margin: 0; display: flex; flex-wrap: wrap; gap: 6px; font-size: 0.95rem; min-width: 0; }
+  .ml-msg-name { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+  .ml-msg-addr { color: var(--crow-text-secondary); min-width: 0; overflow-wrap: anywhere; }
+  .ml-msg-recipients { min-width: 0; }
+  .ml-msg-recipients > summary {
+    display: flex; align-items: center; min-height: 44px; cursor: pointer; font-size: 0.9rem;
+    color: var(--crow-text-secondary); overflow-wrap: anywhere;
+  }
+  .ml-recipients { list-style: none; margin: 0; padding: 0 0 4px; display: flex; flex-direction: column; gap: 2px; font-size: 0.9rem; overflow-wrap: anywhere; }
+  .ml-msg-date { margin: 0; font-size: 0.85rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
+  .ml-thread { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .ml-msg-section { border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 16px); background: var(--crow-bg-surface); min-width: 0; }
+  .ml-msg-section[open] > .ml-msg-summary { border-bottom: 1px solid var(--crow-border); }
+  .ml-msg-summary { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; box-sizing: border-box; cursor: pointer; font-size: 0.9rem; min-width: 0; }
+  .ml-msg-who { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+  .ml-msg-when { margin-left: auto; font-size: 0.8rem; color: var(--crow-text-secondary); white-space: nowrap; }
+  .ml-msg-section-subject { margin: 0; padding: 8px 12px 0; font-size: 0.95rem; font-weight: 600; overflow-wrap: anywhere; }
+  .ml-img-banner { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; padding: 8px 12px; }
+  .ml-img-banner[hidden] { display: none; }
+  .ml-frame { min-width: 0; padding: 0 12px 8px; }
+  .ml-frame iframe { display: block; width: 100%; min-height: 120px; border: 0; }
+  .ml-no-body { padding: 8px 12px 12px; }
+  .ml-attachments { list-style: none; margin: 0; padding: 0 12px 8px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .ml-attachment { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .ml-attachment-link {
+    display: inline-flex; align-items: center; min-height: 44px; color: var(--crow-accent);
+    font-size: 0.9rem; text-decoration: none; overflow-wrap: anywhere;
+  }
+  .ml-size { margin-left: auto; font-size: 0.8rem; color: var(--crow-text-secondary); white-space: nowrap; }`;
+
+/**
+ * @param {{inbox?: boolean, message?: boolean}} options `inbox` adds the list rules (chips, folder
+ *   drawer, message rows), `message` the conversation's; a view that draws neither ships neither.
  * @returns {string}
  */
-export function mailCss({ inbox = false } = {}) {
+export function mailCss({ inbox = false, message = false } = {}) {
   return `<style>
   .ml { max-width: 44rem; min-width: 0; display: flex; flex-direction: column; gap: 12px; color: var(--crow-text-primary); }
   .ml-title { margin: 0; font-size: 1.5rem; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
@@ -68,7 +113,7 @@ export function mailCss({ inbox = false } = {}) {
     color: var(--crow-text-primary); font: inherit; font-size: 0.9rem; text-decoration: none; cursor: pointer; text-align: center;
   }
   .ml-btn--primary { background: var(--crow-accent); border-color: var(--crow-accent); color: var(--crow-accent-contrast); font-weight: 600; }
-  .ml a:focus-visible, .ml button:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }${inbox ? INBOX_RULES : ""}
+  .ml a:focus-visible, .ml button:focus-visible, .ml summary:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }${inbox ? INBOX_RULES : ""}${message ? MESSAGE_RULES : ""}
 </style>`;
 }
 

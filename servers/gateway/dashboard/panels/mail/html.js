@@ -17,10 +17,17 @@
  * never used for markup, a URL or an attribute. No secret, host, port or username of an account
  * reaches this module: `accountsOverview` does not read them, and nothing here looks at the
  * connection settings.
+ *
+ * The message view (Task 5) draws one opened message's header, then its whole conversation oldest
+ * first: one `<details>` per message, each carrying the frame slot the client fills with an
+ * opaque-origin iframe (the body itself is served by the frame route and never written into this
+ * page), its attachments, and — after the conversation — the reply slot a later plan fills. A
+ * message with nothing to show says so in one sentence instead of a slot.
  */
 import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { SKIP_SPECIAL_USE } from "../../../mail/sync/engine.js";
+import { FRAME_IFRAME_SANDBOX } from "../../../mail/reader/frame-doc.js";
 
 const e = escapeHtml;
 
@@ -272,15 +279,231 @@ export function inboxViewHtml({
   return `${head}${digest}<div class="ml-list">${rows}</div>${more}`;
 }
 
+/* -------------------------------------------------------------- message view */
+
+/** The frame route's path for one stored row: the body is served there, never drawn here. */
+function frameSrc(id) {
+  return `${MAIL_HREF}/api/messages/${Number(id)}/frame`;
+}
+
+/** The attachment route's path for one attachment of one row (Task 5a serves it). */
+function attachmentHref(id, index) {
+  return `${MAIL_HREF}/api/messages/${Number(id)}/attachments/${Number(index)}`;
+}
+
+/** One addressee as plain text (`Name <address>`): mail text, so the caller escapes it. */
+function personText(person) {
+  const name = typeof person?.name === "string" ? person.name.trim() : "";
+  const address = typeof person?.address === "string" ? person.address.trim() : "";
+  if (name && address) return `${name} <${address}>`;
+  return name || address;
+}
+
+/** A person's words for the header: the name, the address, or the placeholder. */
+function fromHtml(message, lang) {
+  const name = typeof message?.fromName === "string" ? message.fromName.trim() : "";
+  const address = typeof message?.fromAddr === "string" ? message.fromAddr.trim() : "";
+  if (name && address) {
+    return `<span class="ml-msg-name">${e(name)}</span> <span class="ml-msg-addr">&lt;${e(address)}&gt;</span>`;
+  }
+  if (name) return `<span class="ml-msg-name">${e(name)}</span>`;
+  if (address) return `<span class="ml-msg-addr">${e(address)}</span>`;
+  return `<span class="ml-msg-name">${e(t("mail.unknownSender", lang))}</span>`;
+}
+
+/**
+ * The recipients line, collapsed: its summary says who it is to, and opening it lists the To and Cc
+ * addressees. A message with neither shows no line at all.
+ */
+function recipientsHtml(message, lang) {
+  const to = Array.isArray(message?.to) ? message.to : [];
+  const cc = Array.isArray(message?.cc) ? message.cc : [];
+  if (!to.length && !cc.length) return "";
+  const summary = `${t("mail.to", lang)} ${to.map(personText).filter(Boolean).join(", ")}`.trim();
+  const list = (people) => (people.length
+    ? `<ul class="ml-recipients">${people.map((person) => `<li>${e(personText(person))}</li>`).join("")}</ul>`
+    : "");
+  return `<details class="ml-msg-recipients"><summary>${e(summary)}</summary>${list(to)}${list(cc)}</details>`;
+}
+
+/** The full date and time, in the instance's zone. */
+function fullDate(date, { lang, tz }) {
+  const ms = Number(date);
+  if (!Number.isFinite(ms)) return "";
+  const formatter = formatterOf(localeOf(lang), { dateStyle: "full", timeStyle: "short" }, tz);
+  if (!formatter) return "";
+  try {
+    return formatter.format(new Date(ms));
+  } catch {
+    return "";
+  }
+}
+
+/** Whether a stored row has anything to show: neither its text nor its html is empty, no parse error. */
+function hasReadableBody(row) {
+  const parseError = typeof row?.parseError === "string" ? row.parseError.trim() : "";
+  if (parseError !== "") return false;
+  const text = typeof row?.bodyText === "string" ? row.bodyText.trim() : "";
+  const html = typeof row?.bodyHtml === "string" ? row.bodyHtml.trim() : "";
+  return text !== "" || html !== "";
+}
+
+/** A file size in the reader's own units: bytes below 1 KB, then KB, then MB. */
+function formatSize(size) {
+  const n = Number(size);
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1024) return `${Math.trunc(n)} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : String(Math.round(kb))} KB`;
+  const mb = kb / 1024;
+  return `${mb < 10 ? mb.toFixed(1) : String(Math.round(mb))} MB`;
+}
+
+/**
+ * One message's attachments: a name (the download link's own text), its size, and the download link,
+ * which skips Turbo so the file's own response is what the browser gets.
+ */
+function attachmentsHtml(row) {
+  const list = Array.isArray(row?.attachments) ? row.attachments : [];
+  if (!list.length) return "";
+  const items = list.map((entry, index) => {
+    const name = (typeof entry?.filename === "string" ? entry.filename.trim() : "") || "attachment";
+    const size = formatSize(entry?.size);
+    return `<li class="ml-attachment"><a class="ml-attachment-link" href="${e(attachmentHref(row.id, index))}" download data-turbo="false" data-turbo-prefetch="false">${e(name)}</a>`
+      + (size ? `<span class="ml-size">${e(size)}</span>` : "")
+      + "</li>";
+  }).join("");
+  return `<ul class="ml-attachments">${items}</ul>`;
+}
+
+/**
+ * The remote-image controls for one section, hidden until the frame reports blocked images: this load
+ * only ("Show images") and from now on for this sender ("Always show from <sender>").
+ */
+function imageBanner(row, accountId, lang) {
+  const sender = typeof row?.fromAddr === "string" ? row.fromAddr : "";
+  return `<div class="ml-img-banner" data-ml-img-banner hidden data-account="${e(accountId)}" data-sender="${e(sender)}">`
+    + `<button type="button" class="ml-btn" data-ml-show-images>${e(t("mail.showImages", lang))}</button>`
+    + `<button type="button" class="ml-btn" data-ml-always-images>${e(fill(t("mail.alwaysShowFrom", lang), { sender }))}</button>`
+    + "</div>";
+}
+
+/**
+ * One message of the conversation as a `<details>`. The body is never in the markup: the section
+ * carries the frame slot the client fills (Task 8) — unless the message has nothing to show, which
+ * says so in one sentence and still lists its attachments.
+ */
+function messageSection(row, { accountId, lang, tz, open }) {
+  const sender = senderOf(row, lang);
+  const summary = `<summary class="ml-msg-summary"><span class="ml-msg-who">${e(sender)}</span>`
+    + `<span class="ml-msg-when">${e(fullDate(row.date, { lang, tz }))}</span></summary>`;
+  // The section's own subject: a conversation can hold several (a reply that renamed it), and a
+  // collapsed section has to be recognisable without opening it.
+  const subject = `<p class="ml-msg-section-subject">${e(subjectOf(row, lang))}</p>`;
+  const body = hasReadableBody(row)
+    ? imageBanner(row, accountId, lang)
+      + `<div class="ml-frame" data-ml-frame-slot data-src="${e(frameSrc(row.id))}" data-sandbox="${e(FRAME_IFRAME_SANDBOX)}"></div>`
+    : `<p class="ml-note ml-no-body">${e(t("mail.noBody", lang))}</p>`;
+  return `<details class="ml-msg-section" data-ml-msg="${Number(row.id)}"${open ? " open" : ""}>`
+    + summary + subject + body + attachmentsHtml(row) + "</details>";
+}
+
+/** Whether two stored rows are copies of one message (the same id, sender and date, another folder). */
+function isCopyOf(a, b) {
+  const messageId = typeof a?.messageId === "string" && a.messageId !== "" ? a.messageId : null;
+  if (messageId === null || messageId !== b?.messageId) return false;
+  return (a.fromAddr ?? null) === (b.fromAddr ?? null) && Number(a.date) === Number(b.date);
+}
+
+/**
+ * The conversation's sections: Task 1's order, one entry per logical message. The opened row is the
+ * copy the person clicked, so when the thread lists its group's representative instead, the clicked
+ * copy stands for the group (its own body and its own attachment indexes).
+ */
+function threadRows(message, thread) {
+  const list = (Array.isArray(thread) ? thread : [])
+    .filter((row) => row && typeof row === "object" && Number.isInteger(Number(row.id)));
+  if (!list.length) return [message];
+  if (list.some((row) => Number(row.id) === Number(message.id))) return list;
+  const index = list.findIndex((row) => isCopyOf(row, message));
+  if (index < 0) return list;
+  const out = [...list];
+  out[index] = message;
+  return out;
+}
+
+/** The sentence a link that means nothing gets, with the way back to the list. */
+function notHereCard(back, lang) {
+  return `<section class="ml-empty" data-ml-empty="message-gone">
+      <p class="ml-note">${e(t("mail.notHere", lang))}</p>
+      <a class="ml-back" href="${e(back)}">&larr; ${e(t("mail.title", lang))}</a>
+    </section>`;
+}
+
+/**
+ * The message view: the opened message's header, then its whole conversation oldest first, then the
+ * slot a later plan fills with the reply actions. Every section carries a frame slot and no iframe:
+ * the body is served by the frame route and the client builds the frame.
+ *
+ * `thread` holds full rows (the caller looks each summary up, so a section can tell whether it has
+ * a body and list its own attachments); `back` is a validated mail list link, never an outside URL.
+ *
+ * @param {{
+ *   message?: object|null, thread?: object[], account?: object|null, lang?: string,
+ *   back?: string, tz?: string
+ * }} options
+ * @returns {string}
+ */
+export function messageViewHtml({
+  message = null,
+  thread = [],
+  account = null,
+  lang = "en",
+  back = MAIL_HREF,
+  tz = undefined,
+} = {}) {
+  if (!message || typeof message !== "object") return "";
+
+  const accountId = account?.id ?? message.accountId ?? "";
+  const rows = threadRows(message, thread);
+  const openedId = Number(message.id);
+  const newestId = Number(rows[rows.length - 1]?.id);
+  const sections = rows.map((row) => messageSection(row, {
+    accountId,
+    lang,
+    tz,
+    open: Number(row.id) === openedId || Number(row.id) === newestId,
+  })).join("");
+  const mid = typeof message.messageId === "string" ? message.messageId : "";
+  const threadId = message.threadId == null ? "" : String(message.threadId);
+
+  return `<article class="ml-message" data-ml-message>
+      <a class="ml-back" href="${e(back)}">&larr; ${e(t("mail.title", lang))}</a>
+      <header class="ml-msg-head">
+        <h2 class="ml-msg-subject">${e(subjectOf(message, lang))}</h2>
+        <p class="ml-msg-from">${fromHtml(message, lang)}</p>
+        ${recipientsHtml(message, lang)}
+        <p class="ml-msg-date">${e(fullDate(message.date, { lang, tz }))}</p>
+      </header>
+      <div class="ml-thread">${sections}</div>
+      <div data-mail-reply-slot data-account="${e(accountId)}" data-mid="${e(mid)}" data-thread="${e(threadId)}"></div>
+    </article>`;
+}
+
 /**
  * The view dispatcher. `accounts` and `elsewhere` are what `accountsOverview` returns: usable
  * accounts (any status but `claimed_elsewhere`), the held ones with their `heldBy`, and the
  * addresses other live instances hold. The empty states win over the view: a reader with no mail
  * to read gets the same page whichever view it asked for.
  *
+ * `message` is the full row `resolveMessageRef` answered for a link, `thread` the conversation's
+ * rows in Task 1's order (each looked up so a section can tell whether it has a body), and `missing`
+ * a link that resolved to nothing: its page says so and offers the way back, never an error.
+ *
  * @param {{
  *   view?: string, accounts?: object[], elsewhere?: object[], lang?: string, folders?: object[],
- *   page?: object|null, acct?: string, folderId?: number|null, now?: number, tz?: string
+ *   page?: object|null, acct?: string, folderId?: number|null, now?: number, tz?: string,
+ *   message?: object|null, thread?: object[], account?: object|null, back?: string, missing?: boolean
  * }} options
  * @returns {string}
  */
@@ -295,6 +518,11 @@ export function renderMailPage({
   folderId = null,
   now = Date.now(),
   tz = undefined,
+  message = null,
+  thread = [],
+  account = null,
+  back = MAIL_HREF,
+  missing = false,
 } = {}) {
   const usable = accounts.filter((a) => a.status !== "claimed_elsewhere");
 
@@ -304,8 +532,13 @@ export function renderMailPage({
   }
   if (!usable.length) return pageShell(elsewhereCard(accounts.map((a) => a.heldBy), lang), lang);
 
-  // `view` picks the view inside the page; message, search and settings are built in later tasks,
-  // and until then only the inbox has anything to draw.
+  if (view === "message") {
+    if (missing || !message) return pageShell(notHereCard(back, lang), lang);
+    return pageShell(messageViewHtml({ message, thread, account, lang, back, tz }), lang);
+  }
+
+  // `view` picks the view inside the page; search and settings are built in later tasks, and until
+  // then only the inbox has anything to draw.
   if (view === "inbox" && page) {
     return pageShell(inboxViewHtml({ accounts: usable, folders, page, acct, folderId, now, lang, tz }), lang);
   }
