@@ -33,6 +33,7 @@ const { parseEnvText } = await import("../servers/gateway/bundle-env-codec.js");
 const { createDbClient } = await import("../servers/db.js");
 const { loadKeychainKey } = await import("../servers/gateway/keychain/key.js");
 const { validateManifest } = await import("../scripts/lib/bundle-contract.mjs");
+const { addonSecretsSealingOn } = await import("../servers/shared/addon-secrets.js");
 
 const FIXTURES = mkdtempSync(join(tmpdir(), "crow-gensec-app-"));
 const GW_ENV = join(mkdtempSync(join(tmpdir(), "crow-gensec-gw-")), ".env");
@@ -135,8 +136,23 @@ for (const e of EXPECT.filter((x) => ["miniflux", "actual-budget"].includes(x.id
     const gw = parseEnvText(readFileSync(GW_ENV, "utf8"));
     assert.equal(gw[e.key], undefined, `the shared gateway env never gets ${e.key}`);
     const addons = JSON.parse(readFileSync(join(CROW_HOME, "mcp-addons.json"), "utf8"));
+    const entry = addons[e.id] || null;
     const listed = (manifest.server?.envKeys || []).includes(e.key);
-    assert.equal(addons[e.id]?.env?.[e.key] === env[e.key], listed, `${e.key} reaches this instance's MCP entry only when server.envKeys lists it`);
+    const named = (entry?.keychainEnv || []).includes(e.key);
+    if (!listed) {
+      // Not listed in server.envKeys: the key must never reach this instance's MCP entry,
+      // by either route (a plain value or a keychainEnv name).
+      assert.equal(entry?.env?.[e.key], undefined, `${e.key} is not in this instance's MCP entry: server.envKeys does not list it`);
+      assert.equal(named, false, `${e.key} is not listed in keychainEnv either`);
+    } else if (addonSecretsSealingOn(process.env)) {
+      // Sealing is ON by default: the entry keeps the NAME and never the value.
+      assert.equal(named, true, `${e.key} is sealed: the entry lists its name in keychainEnv`);
+      assert.equal(entry.env?.[e.key], undefined, `the sealed ${e.key} is not written into env`);
+    } else {
+      // Sealing off (the operator's CROW_ADDON_SECRETS_KEYCHAIN=0): today's plain entry.
+      assert.equal(entry?.env?.[e.key], env[e.key], `with sealing off, ${e.key} reaches this instance's MCP entry plain`);
+      assert.equal(named, false, `with sealing off nothing is listed in keychainEnv`);
+    }
     if (e.id === "miniflux") assert.equal(rows[0].username, "admin");
     const log = job.log.join("\n");
     assert.ok(!log.includes(env[e.key]), "the value never reaches the job log");
