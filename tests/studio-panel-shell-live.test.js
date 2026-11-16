@@ -14,6 +14,13 @@
  * page through the real dashboard layout
  * (servers/gateway/dashboard/shared/layout.js) and checks the nav sidebar it
  * brings with it.
+ *
+ * Both bars lay out again while the page is still filling in (the song's title
+ * and presence arrive after the first draw), so a control's rectangle read the
+ * moment it appears can be stale by the time a mouse event lands on it. Every
+ * press of a top-bar or transport-bar control therefore goes through
+ * `pressSettled`: it waits for the rectangle to stand still, presses, and
+ * settles and presses again until the page shows the press took.
  */
 
 import { test, before, after } from "node:test";
@@ -302,26 +309,9 @@ async function openPage(url, { width = 1280, height = 900 } = {}) {
    * @returns {Promise<{x: number, y: number, w: number, h: number}>}
    */
   const clickAt = async (selector) => {
-    const box = await evaluate(`(function () {
-      var node = document.querySelector(${JSON.stringify(selector)});
-      if (!node) return null;
-      var rect = node.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return null;
-      return {
-        x: rect.left + rect.width / 2,
-        y: rect.top + rect.height / 2,
-        w: rect.width,
-        h: rect.height
-      };
-    })()`);
+    const box = await evaluate(boxExpression(selector));
     assert.ok(box, `${selector} is on the page and has a rectangle`);
-    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: box.x, y: box.y, button: "none" });
-    await send("Input.dispatchMouseEvent", {
-      type: "mousePressed", x: box.x, y: box.y, button: "left", clickCount: 1,
-    });
-    await send("Input.dispatchMouseEvent", {
-      type: "mouseReleased", x: box.x, y: box.y, button: "left", clickCount: 1,
-    });
+    await clickBox(send, box);
     return box;
   };
 
@@ -393,6 +383,133 @@ const VISIBLE_WIDGETS = `(function () {
   return ids;
 })()`;
 
+/** The expression that is true while the MIDI widget is on the page. */
+const MIDI_SHOWN = `(function () {
+  var ids = ${VISIBLE_WIDGETS};
+  return ids.indexOf('midi') >= 0;
+})()`;
+
+/** The expression that is true while the session grid is what is open. */
+const SESSION_OPEN = `(function () {
+  var area = document.querySelector('[data-role=studio-widgets]');
+  return !!area && !area.hasAttribute('hidden');
+})()`;
+
+/** @returns {Promise<void>} after `ms` milliseconds */
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The expression that reads one element's own rectangle, in page pixels, or
+ * null while it has no rectangle to press (absent, or laid out with no size).
+ * @param {string} selector
+ * @returns {string}
+ */
+function boxExpression(selector) {
+  return `(function () {
+    var node = document.querySelector(${JSON.stringify(selector)});
+    if (!node) return null;
+    var rect = node.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      w: rect.width,
+      h: rect.height
+    };
+  })()`;
+}
+
+/** @returns {boolean} whether two rectangles are the same place and size */
+function sameBox(one, other) {
+  const near = (a, b) => Math.abs(a - b) < 0.5;
+  return near(one.x, other.x) && near(one.y, other.y)
+    && near(one.w, other.w) && near(one.h, other.h);
+}
+
+/**
+ * A real mouse press and release at one rectangle's middle.
+ * @param {(method: string, params?: object) => Promise<any>} send
+ * @param {{x: number, y: number}} box
+ */
+async function clickBox(send, box) {
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: box.x, y: box.y, button: "none" });
+  await send("Input.dispatchMouseEvent", {
+    type: "mousePressed", x: box.x, y: box.y, button: "left", clickCount: 1,
+  });
+  await send("Input.dispatchMouseEvent", {
+    type: "mouseReleased", x: box.x, y: box.y, button: "left", clickCount: 1,
+  });
+}
+
+/**
+ * One control's rectangle once it has stopped moving: the same on two reads
+ * `settleMs` apart. A rectangle that never stands still in time answers with
+ * the last one read (pressing that is what a person's own press would do), and
+ * a control that is not on the page answers null.
+ * @returns {Promise<{x: number, y: number, w: number, h: number}|null>}
+ */
+async function settledBox(page, selector, settleMs, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let previous = null;
+  let latest = null;
+  for (;;) {
+    try {
+      latest = await page.evaluate(boxExpression(selector));
+    } catch {
+      latest = null;
+    }
+    if (latest && previous && sameBox(previous, latest)) return latest;
+    previous = latest;
+    if (Date.now() + settleMs >= deadline) return latest;
+    await pause(settleMs);
+  }
+}
+
+/** @returns {Promise<boolean>} one read of `doneExpression`, false if it throws */
+async function isDone(page, expression) {
+  try {
+    return !!(await page.evaluate(expression));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Press a top-bar or transport-bar control, and only believe the press once
+ * `doneExpression` says it took.
+ *
+ * Both bars lay out again as the song's own title and presence arrive, so the
+ * rectangle a press measured can be stale by the time the mouse event lands on
+ * it — and the event then lands on whatever moved into that place. So the
+ * control's rectangle is read twice, 250 ms apart, and only a rectangle that
+ * did not move is pressed; a press that does not take settles and is pressed
+ * again, up to four times. A control that already does its job is not pressed.
+ * @param {object} page
+ * @param {string} selector
+ * @param {string} doneExpression - what the page shows once the press took
+ * @param {{attempts?: number, settleMs?: number, timeoutMs?: number}} [options]
+ * @returns {Promise<{x: number, y: number, w: number, h: number}|null>} the box
+ *   that was pressed (or that already did the job), null when there was none
+ */
+async function pressSettled(page, selector, doneExpression, options = {}) {
+  const attempts = options.attempts ?? 4;
+  const settleMs = options.settleMs ?? 250;
+  const deadline = Date.now() + (options.timeoutMs ?? 20000);
+  let box = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (Date.now() >= deadline) break;
+    box = await settledBox(page, selector, settleMs, Math.min(8000, Math.max(settleMs * 2, deadline - Date.now())));
+    if (!box) return null;
+    if (await isDone(page, doneExpression)) return box;
+    await clickBox(page.send, box);
+    // Divide what is left of the time between the attempts that remain, so one
+    // slow press cannot spend the whole budget on its own.
+    const share = Math.max(2000, Math.round(Math.max(0, deadline - Date.now()) / (attempts - attempt + 1)));
+    if (await waitFor(page, doneExpression, share)) return box;
+  }
+  return box;
+}
+
 /** Wait until the song page is up: the top bar mounted and the grid drawn. */
 async function waitForStudio(page) {
   assert.ok(
@@ -429,14 +546,12 @@ test("at laptop width the page renders compose, and Perform brings the MIDI widg
     "compose's own widgets are the ones on the page",
   );
 
-  const box = await page.clickAt("[data-mode=perform]");
+  const box = await pressSettled(page, "[data-mode=perform]", MIDI_SHOWN);
+  assert.ok(box, "the Perform button was on the page and was pressed");
   assert.ok(box.w >= 44 && box.h >= 44, `the Perform button is a ${box.w} by ${box.h} target`);
 
   assert.ok(
-    await waitFor(page, `(function () {
-      var ids = ${VISIBLE_WIDGETS};
-      return ids.indexOf('midi') >= 0;
-    })()`, 20000),
+    await waitFor(page, MIDI_SHOWN, 20000),
     "the MIDI widget came in with Perform",
   );
   assert.deepEqual(
@@ -475,11 +590,13 @@ test("Play and Pause work from the transport bar with the page scrolled to the b
   );
 
   const before = await page.evaluate("document.querySelector('[data-role=position]').textContent");
-  const box = await page.clickAt("[data-act=play]");
+  const playing = "document.querySelector('[data-act=play]').getAttribute('aria-pressed') === 'true'";
+  const box = await pressSettled(page, "[data-act=play]", playing);
+  assert.ok(box, "the Play button was on the page and was pressed");
   assert.ok(box.w >= 44 && box.h >= 44, `Play is a ${box.w} by ${box.h} target`);
 
   assert.ok(
-    await waitFor(page, "document.querySelector('[data-act=play]').getAttribute('aria-pressed') === 'true'", 20000),
+    await waitFor(page, playing, 20000),
     "the engine was told to play",
   );
   assert.ok(
@@ -490,9 +607,11 @@ test("Play and Pause work from the transport bar with the page scrolled to the b
     "and the position readout moved",
   );
 
-  await page.clickAt("[data-act=pause]");
+  const pausing = "document.querySelector('[data-act=pause]').getAttribute('aria-pressed') === 'true'";
+  const pauseBox = await pressSettled(page, "[data-act=pause]", pausing);
+  assert.ok(pauseBox, "the Pause button was on the page and was pressed");
   assert.ok(
-    await waitFor(page, "document.querySelector('[data-act=pause]').getAttribute('aria-pressed') === 'true'", 20000),
+    await waitFor(page, pausing, 20000),
     "Pause paused the transport",
   );
   assert.equal(
@@ -523,12 +642,10 @@ test("at 500 px wide the phone tab strip shows and exactly one widget is on the 
 
   // The screen a song was last left in is remembered, so come back to the grid
   // the tabs belong to before reading them.
-  await page.clickAt("[data-act=mode-session]");
+  const sessionBox = await pressSettled(page, "[data-act=mode-session]", SESSION_OPEN);
+  assert.ok(sessionBox, "the Session button was on the page and was pressed");
   assert.ok(
-    await waitFor(page, `(function () {
-      var area = document.querySelector('[data-role=studio-widgets]');
-      return !!area && !area.hasAttribute('hidden');
-    })()`, 20000),
+    await waitFor(page, SESSION_OPEN, 20000),
     "the session grid is what is open",
   );
   assert.ok(
@@ -561,9 +678,11 @@ test("a section chip measures at least 56 px wide at every zoom step", async (t)
   t.after(() => page.close());
   await waitForStudio(page);
 
-  await page.clickAt("[data-act=mode-arrangement]");
+  const chip = "!!document.querySelector('[data-role=section] [data-act=section-rename]')";
+  const arrangementBox = await pressSettled(page, "[data-act=mode-arrangement]", chip);
+  assert.ok(arrangementBox, "the Arrangement button was on the page and was pressed");
   assert.ok(
-    await waitFor(page, "!!document.querySelector('[data-role=section] [data-act=section-rename]')", 20000),
+    await waitFor(page, chip, 20000),
     "the arrangement drew the section's chip",
   );
 
@@ -672,12 +791,10 @@ test("inside the real dashboard layout the nav sidebar either is absent or colla
 
   // The studio page is still whole after both moves of the nav, and the grid
   // the widgets belong to is what is open.
-  await page.clickAt("[data-act=mode-session]");
+  const backBox = await pressSettled(page, "[data-act=mode-session]", SESSION_OPEN);
+  assert.ok(backBox, "the Session button was on the page and was pressed");
   assert.ok(
-    await waitFor(page, `(function () {
-      var area = document.querySelector('[data-role=studio-widgets]');
-      return !!area && !area.hasAttribute('hidden');
-    })()`, 20000),
+    await waitFor(page, SESSION_OPEN, 20000),
     "the session grid is what is open",
   );
   const visible = await page.evaluate(VISIBLE_WIDGETS);
