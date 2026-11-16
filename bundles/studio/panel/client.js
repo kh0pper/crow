@@ -487,6 +487,7 @@ export const COMMANDS = Object.freeze([
   "motion.clear",
   "chain.set",
   "clip.add_pattern",
+  "clip.copy_to_scene",
   "midi.map",
   "midi.accept",
   "midi.remove",

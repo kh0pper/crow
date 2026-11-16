@@ -181,6 +181,7 @@ You may write patterns, steps, locks, chains, slices and pad settings, but only 
 | Tool | What it does |
 |---|---|
 | `studio_clip_add_pattern` | Add a pattern clip to a sampler track in a scene; it arrives with its first pattern, A, and 16 step positions unless you ask for another length. One clip per track per scene. |
+| `studio_clip_copy_to_scene` | Copy a pattern clip into another scene, on the same track: its patterns, steps, locks, motion lanes, chain, swing and loop come with it, and the copy is independent of the original. One clip per track per scene, so the target cell has to be free. |
 | `studio_pattern_add` | Add a pattern to a pattern clip (at most 16); name it for what it does ("Fill", "Chorus"). |
 | `studio_pattern_rename` | Rename a pattern. |
 | `studio_pattern_remove` | Remove a pattern, its steps and its place in the chain in one step; the clip's last pattern stays. |

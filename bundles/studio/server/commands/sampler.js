@@ -14,7 +14,7 @@
  *   pattern.set_steps_beat  pattern.set_swing
  *   step.toggle  step.set  step.clear_locks
  *   motion.write  motion.clear
- *   chain.set  clip.add_pattern
+ *   chain.set  clip.add_pattern  clip.copy_to_scene
  *
  * Every sampler object is its own small object with its own ref (see doc.js),
  * so one pad edit never rewrites the kit's device, and two edits to different
@@ -1835,5 +1835,187 @@ defineCommand({
         [fieldKey(patternRef(clip.id, pattern.id), "*")]: cloneJson(pattern),
       },
     };
+  },
+});
+
+/**
+ * The patterns of one clip as plain objects, in the order they were added, each
+ * with its id and the clip its copy belongs to.
+ *
+ * The whole object is carried — `name` and `order`, and every `motion|<lane>`
+ * key a lane lives under on the pattern itself — so a copy takes a pattern's
+ * curves with it without naming a lane.
+ * @param {import("yjs").Doc} doc
+ * @param {string} clipId
+ * @param {string} copyId - the clip the copies belong to
+ * @returns {Array<{id: string, plain: object}>}
+ */
+function patternsToCopy(doc, clipId, copyId) {
+  const out = [];
+  for (const { id, pattern } of patternsForClip(doc, clipId)) {
+    const plain = toPlain(pattern) ?? {};
+    const patternId = typeof plain.id === "string" && plain.id !== "" ? plain.id : id;
+    out.push({ id: patternId, plain: { ...plain, id: patternId, clip_id: copyId } });
+  }
+  out.sort((left, right) => Number(left.plain.order) - Number(right.plain.order));
+  return out;
+}
+
+/**
+ * Every step of one clip as a plain object, re-keyed under the copy: the same
+ * pad, the same position, the same velocity and the same locks, in the copy's
+ * own patterns.
+ * @param {import("yjs").Doc} doc
+ * @param {string} clipId
+ * @param {string} copyId
+ * @returns {Array<{key: string, plain: object}>}
+ */
+function stepsToCopy(doc, clipId, copyId) {
+  const out = [];
+  for (const { step } of stepEntries(doc)) {
+    const plain = toPlain(step);
+    if (!plain || plain.clip_id !== clipId) continue;
+    out.push({
+      key: stepKey(copyId, plain.pattern_id, plain.at, plain.bank_id, plain.index),
+      plain: { ...plain, clip_id: copyId },
+    });
+  }
+  return out;
+}
+
+defineCommand({
+  id: "clip.copy_to_scene",
+  title: "Copy a pattern clip into another scene",
+  idField: "new_clip_id",
+  // The copy is one object graph — a clip, each of its patterns and each of
+  // their steps — so taking the step back is all-or-nothing (history.js).
+  undoWhole: true,
+  schema: z
+    .object({
+      clip_id: idSchema.describe("the pattern clip to copy"),
+      scene_id: idSchema.describe("the scene the copy sits in"),
+      new_clip_id: idSchema
+        .optional()
+        .describe("your id for the copy; one is generated when omitted"),
+    })
+    .strict(),
+  summary(args, snap) {
+    const scene = (snap.scenes ?? []).find((item) => item.id === args.scene_id);
+    return `Copied clip "${labelOfClip(snap, args.clip_id)}" to scene "${scene?.name ?? args.scene_id}"`;
+  },
+  /**
+   * The new clip, every pattern and every step the copy writes, and — as
+   * `clip.add_pattern` names its track — the track the two clips sit on, so a
+   * locked track refuses the copy the way it refuses a new clip on it.
+   */
+  touches(args, snap) {
+    const source = snap.clips?.[args.clip_id];
+    const refs = [clipRef(args.new_clip_id), clipRef(args.clip_id)];
+    if (typeof source?.track_id === "string" && source.track_id !== "") {
+      refs.push(trackRef(source.track_id));
+    }
+    for (const pattern of Object.values(snap.patterns ?? {})) {
+      if (pattern.clip_id !== args.clip_id) continue;
+      refs.push(patternRef(args.new_clip_id, pattern.id));
+      for (const step of Object.values(snap.steps ?? {})) {
+        if (step.clip_id !== args.clip_id || step.pattern_id !== pattern.id) continue;
+        refs.push(stepRef(args.new_clip_id, pattern.id, step.at, step.bank_id, step.index));
+      }
+    }
+    return refs;
+  },
+  /**
+   * The copy stays on the source's own track, in the target scene's cell, and
+   * brings its patterns, its steps, its locks and its motion lanes with it:
+   * pattern ids are the source's, re-keyed under the new clip (`<clip>/<pattern>`
+   * and `<clip>/<pattern>/<at>/<bank>.<index>`, see doc.js), so nothing in the
+   * copy points back at the original and an edit to one never reaches the
+   * other.
+   *
+   * Everything is validated before the first write, so a refusal leaves the
+   * document exactly as it was.
+   */
+  apply(doc, args) {
+    const source = getClip(doc, args.clip_id);
+    if (!source) refuseMissing(`There is no clip "${args.clip_id}" in this song.`);
+    const name = source.get("name");
+    const kind = source.get("kind");
+    if (kind === "audio") {
+      refuseInvalid(
+        `Clip "${name}" is an audio clip; only a pattern clip can be copied into another scene.`,
+      );
+    }
+    if (kind !== "pattern") {
+      refuseInvalid(
+        `Clip "${name}" is a note clip; only a pattern clip can be copied into another scene.`,
+      );
+    }
+    if (getClip(doc, args.new_clip_id)) {
+      refuseInvalid(`A clip with id "${args.new_clip_id}" already exists in this song.`);
+    }
+    const scene = getScene(doc, args.scene_id);
+    if (!scene) refuseMissing(`There is no scene "${args.scene_id}" in this song.`);
+    const trackId = source.get("track_id");
+    const occupant = clipEntries(doc).find(
+      ({ clip }) => clip.get("track_id") === trackId && clip.get("scene_id") === args.scene_id,
+    );
+    if (occupant) {
+      const trackName = getTrack(doc, trackId)?.get("name") ?? trackId;
+      refuseInvalid(
+        `Track "${trackName}" already plays clip "${occupant.clip.get("name")}" in "${scene.get("name")}"; one track plays one clip per scene.`,
+      );
+    }
+
+    const patterns = patternsToCopy(doc, args.clip_id, args.new_clip_id);
+    if (patterns.length > LIMITS.patternsPerClip) {
+      refuseLimit(`A pattern clip can hold at most ${LIMITS.patternsPerClip} patterns.`);
+    }
+    const steps = stepsToCopy(doc, args.clip_id, args.new_clip_id);
+    const stepsPerPattern = new Map();
+    for (const step of steps) {
+      const id = step.plain.pattern_id;
+      stepsPerPattern.set(id, (stepsPerPattern.get(id) ?? 0) + 1);
+    }
+    for (const count of stepsPerPattern.values()) {
+      if (count <= LIMITS.stepEntriesPerPattern) continue;
+      refuseLimit(
+        `A pattern can hold at most ${LIMITS.stepEntriesPerPattern} steps; this copy would hold ${count}.`,
+      );
+    }
+
+    const clip = {
+      id: args.new_clip_id,
+      track_id: trackId,
+      scene_id: args.scene_id,
+      name,
+      kind: "pattern",
+      notes: [],
+      length_bars: Number(source.get("length_bars")) || 1,
+      length_steps: Number(source.get("length_steps")) || 16,
+      step_beats: Number(source.get("step_beats")) || DEFAULT_STEP_BEATS,
+      swing: Number(source.get("swing")) || 0,
+      chain: cloneJson(toPlain(source.get("chain"))) ?? [],
+    };
+    clipMap(doc).set(clip.id, objectMap(clip));
+
+    const before = { [fieldKey(clipRef(clip.id), "*")]: ABSENT };
+    const after = { [fieldKey(clipRef(clip.id), "*")]: cloneJson(clip) };
+    for (const pattern of patterns) {
+      patternMap(doc).set(patternKey(clip.id, pattern.id), newPatternMap(pattern.plain));
+      const field = fieldKey(patternRef(clip.id, pattern.id), "*");
+      before[field] = ABSENT;
+      after[field] = cloneJson(pattern.plain);
+    }
+    const stepsMap = stepMap(doc);
+    for (const step of steps) {
+      stepsMap.set(step.key, objectMap(step.plain));
+      const field = fieldKey(
+        stepRef(clip.id, step.plain.pattern_id, step.plain.at, step.plain.bank_id, step.plain.index),
+        "*",
+      );
+      before[field] = ABSENT;
+      after[field] = cloneJson(step.plain);
+    }
+    return { before, after };
   },
 });
