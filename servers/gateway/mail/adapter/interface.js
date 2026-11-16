@@ -46,11 +46,13 @@
  * command line.
  *
  * The two appends are the contract's writes that create a message rather than change one. `saveDraft`
- * files the caller's bytes as a `\Draft` in the folder the server marks `\Drafts`; `appendToSent`
- * files a copy of a message that has already gone out as `\Seen` in the folder marked `\Sent`. Both
- * find their folder by its special-use flag and never by its name, and both answer `NOT_FOUND` — with
- * the copy filed nowhere — when the server lists no such folder, rather than picking one by name.
- * Neither is a send: nothing in the contract decides whether a message leaves Crow.
+ * files the caller's bytes as a `\Draft` in the `\Drafts` folder; `appendToSent` files a copy of a
+ * message that has already gone out as `\Seen` in the `\Sent` folder. Both take their folder from the
+ * same resolution: the mailbox the server flags with the special-use attribute or, when the server
+ * flags none, the one imapflow itself identifies by its name (imapflow reports such a flag with
+ * `specialUseSource: "name"`). A server with neither gives `NOT_FOUND` — with the copy filed nowhere —
+ * rather than a folder Crow picked for itself. Neither is a send: nothing in the contract decides
+ * whether a message leaves Crow.
  *
  * A message id is the one header a caller may set: absent, the implementation makes its own (the
  * IMAP adapter derives it from the From address); present, it is used as given, so the copy Crow
@@ -161,8 +163,16 @@ export function assertAdapter(obj) {
  * test runs before that trim, so a trailing `\n` or a leading `\r` is refused instead of being
  * trimmed away and forgotten; anything the strict parser reads back differently — a display name
  * (`Sam <sam@x>`), a group, a second address, or a bare `>` — is refused too.
+ *
+ * Exported because it is the rule for every address the store holds, not only for the ones a message
+ * carries: an account's aliases are compared with an address and shown as one, so they are read back
+ * by the same parser and refused by the same rule.
+ *
+ * @param {unknown} value
+ * @param {string} detail the field a refusal names
+ * @returns {string} the address, lower-cased and trimmed
  */
-function oneAddress(value, detail) {
+export function validateAddress(value, detail) {
   if (typeof value !== "string") fail(detail);
   if (CONTROL_CHARS.test(value)) fail(detail);
   const trimmed = value.trim();
@@ -183,12 +193,12 @@ function cleanName(value, detail) {
 
 /** One recipient: `{name?, address}` (or a bare address string, which is the same thing unnamed). */
 function oneRecipient(entry, detail) {
-  if (typeof entry === "string") return { name: null, address: oneAddress(entry, detail) };
+  if (typeof entry === "string") return { name: null, address: validateAddress(entry, detail) };
   if (entry == null || typeof entry !== "object") fail(detail);
   for (const key of Object.keys(entry)) {
     if (!RECIPIENT_KEYS.has(key)) fail(detail);
   }
-  return { name: cleanName(entry.name, detail), address: oneAddress(entry.address, detail) };
+  return { name: cleanName(entry.name, detail), address: validateAddress(entry.address, detail) };
 }
 
 function addressList(value, detail, { required = false } = {}) {
@@ -278,7 +288,7 @@ export function validateOutgoing(message) {
   }
 
   const validated = {
-    from: { name: cleanName(from.name, "from"), address: oneAddress(from.address, "from") },
+    from: { name: cleanName(from.name, "from"), address: validateAddress(from.address, "from") },
     to: addressList(message.to, "to", { required: true }),
     cc: addressList(message.cc, "cc"),
     bcc: addressList(message.bcc, "bcc"),

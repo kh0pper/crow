@@ -26,12 +26,16 @@
  */
 import { randomBytes } from "node:crypto";
 import { MailError } from "../errors.js";
+import { validateAddress } from "../adapter/interface.js";
 
 export const MAIL_ACCOUNT_STATUSES = Object.freeze(["active", "auth_failed", "claimed_elsewhere"]);
 export const MAIL_AUTH_KINDS = Object.freeze(["password", "xoauth2"]);
 export const MAIL_SECURITIES = Object.freeze(["ssl", "starttls", "none"]);
 /** How an account's Sent copy is kept: the provider files it, or Crow appends one after a send. */
 export const MAIL_SENT_COPY_VALUES = Object.freeze(["provider", "append"]);
+
+/** The most other addresses one account may carry: reply-all reads them, a person types them. */
+const MAX_ALIASES = 50;
 
 /** A plaintext connection is only defensible to a server on this machine. */
 const PLAINTEXT_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -175,16 +179,22 @@ function normalizeDisplayName(value) {
 }
 
 /**
- * The account's other addresses, each one a clean addr-spec by the same rule as an address. They are
- * lower-cased and named once, so a reply-all compares them the way the address column is compared, and
- * they are stored as a JSON array.
+ * The account's other addresses, each one a clean addr-spec by the rule `validateOutgoing` applies to
+ * an address — the same parser, so a display name, a group, a second address or a control character is
+ * refused rather than read back as something else. Angle brackets and quotes are refused on top of
+ * that: an alias is an address the account answers to, never a header form, and no such address is
+ * ever written with a quoted local part. They are lower-cased and named once, so a reply-all compares
+ * them the way the address column is compared, and they are stored as a JSON array. At most
+ * `MAX_ALIASES`; a longer list is refused whole rather than cut short.
  */
 function normalizeAliases(value) {
   if (!Array.isArray(value)) fail("aliases");
+  if (value.length > MAX_ALIASES) fail("aliases");
   const aliases = [];
   for (const entry of value) {
     if (typeof entry !== "string") fail("aliases");
-    const address = normalizeAddress(entry);
+    if (/["<>]/.test(entry)) fail("aliases");
+    const address = validateAddress(entry, "aliases");
     if (!aliases.includes(address)) aliases.push(address);
   }
   return aliases;
@@ -241,7 +251,9 @@ function rowToAccount(row) {
     digestTime: row.digest_time,
     displayName: row.display_name ?? null,
     aliases: parseAliases(row.aliases_json),
-    sentCopy: row.sent_copy ?? "provider",
+    // A stored value that is not one of the two modes (a hand edit, a restored copy) reads as the
+    // default rather than as a third mode the rest of the code would have to know about.
+    sentCopy: MAIL_SENT_COPY_VALUES.includes(row.sent_copy) ? row.sent_copy : "provider",
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
     lastSyncAt: row.last_sync_at == null ? null : Number(row.last_sync_at),
@@ -399,9 +411,10 @@ export async function updateAccount(db, id, patch = {}) {
 /**
  * Every hook registered with `onAccountDeleting`, in the order it was registered. Module state, like
  * the add-on registries elsewhere: a hook is registered once at boot by the code that must speak before
- * an account goes.
+ * an account goes. A `Set`, so registering the same function twice (a module loaded twice, a test that
+ * re-registers) is still one hook that runs once.
  */
-const accountDeletingHooks = [];
+const accountDeletingHooks = new Set();
 
 /**
  * Register `fn(db, accountId)`, which `deleteAccount` awaits before it opens its transaction. A hook
@@ -413,16 +426,15 @@ const accountDeletingHooks = [];
  */
 export function onAccountDeleting(fn) {
   if (typeof fn !== "function") throw new TypeError("onAccountDeleting needs a function");
-  accountDeletingHooks.push(fn);
+  accountDeletingHooks.add(fn);
   return () => {
-    const at = accountDeletingHooks.indexOf(fn);
-    if (at >= 0) accountDeletingHooks.splice(at, 1);
+    accountDeletingHooks.delete(fn);
   };
 }
 
 /** Drop every registered hook. The seam a test uses between cases; nothing in the app calls it. */
-export function clearAccountDeletingHooks() {
-  accountDeletingHooks.length = 0;
+export function _resetAccountDeletingHooksForTests() {
+  accountDeletingHooks.clear();
 }
 
 /**

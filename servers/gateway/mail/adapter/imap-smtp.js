@@ -58,11 +58,13 @@
  * error, and every failure is a fixed sentence through the same classifier.
  *
  * `saveDraft` appends the caller's bytes to the `\Drafts` folder over the read connection, inside the
- * command deadline and its error wrapping, with `\Draft` and `\Seen` set; a mailbox without a
- * `\Drafts` folder is NOT_FOUND rather than a note filed in some folder Crow chose by name.
- * `appendToSent` is the same append one folder over: the bytes of a message that has already gone out,
- * filed in the folder the server marks `\Sent` with `\Seen` set, or NOT_FOUND when the server lists no
- * such folder. Both find their folder by its special-use flag and never by its name.
+ * command deadline and its error wrapping, with `\Draft` and `\Seen` set; a mailbox with no drafts
+ * folder is NOT_FOUND rather than a note filed in some folder Crow chose for itself. `appendToSent` is
+ * the same append one folder over: the bytes of a message that has already gone out, filed in the
+ * `\Sent` folder with `\Seen` set, or NOT_FOUND when the server has no such folder. Both take their
+ * folder from the one resolution imapflow offers: the mailbox the server flags with the special-use
+ * attribute or, when the server flags none, the one imapflow itself identifies by its name (imapflow
+ * marks such a flag `specialUseSource: "name"`).
  *
  * `setFlags` and `move` are the two ways a message changes after it is stored, and both refuse to act
  * on a UID whose mailbox is not the one the caller saw: the folder is locked, its UIDVALIDITY is
@@ -910,6 +912,11 @@ export function createImapSmtpAdapter(options = {}) {
    * special-use flag carrying a control character is reported as no flag at all, because the flag is a
    * label rather than the folder: the folder itself is still usable.
    *
+   * `specialUse` is imapflow's own resolution, passed through unchanged: the flag the server reports
+   * through SPECIAL-USE or XLIST, or, when the server reports none, the flag imapflow assigns from the
+   * folder's name (`specialUseSource: "name"`). The two appends below read the same field, so a folder
+   * is chosen exactly where a listing says it is the sent or drafts mailbox.
+   *
    * @returns {Promise<AdapterFolder[]>}
    */
   async function listFolders() {
@@ -1295,25 +1302,29 @@ export function createImapSmtpAdapter(options = {}) {
   }
 
   /**
-   * One append into the folder the server marks with a special-use flag, or NOT_FOUND when it lists
-   * none Crow can name. The folder is found by its flag and never by its name, so a server that calls
-   * it something else still works, and a folder whose own path carries a control character is listed
-   * by `listFolders` but is not one Crow commands, so it is not picked here either. The bytes travel
-   * over the read connection inside `runCommand`, so the append carries the command deadline and the
-   * same error wrapping as every other command; a server refusal for size (APPENDLIMIT or TOOBIG)
-   * comes back as TOO_LARGE rather than as a protocol fault.
+   * One append into the folder imapflow resolved `specialUse` onto, or NOT_FOUND when the server has
+   * none. The folder is the mailbox the server flags with the special-use attribute or, when the server
+   * flags none, the one imapflow itself identifies by its name (it reports such a flag with
+   * `specialUseSource: "name"`) — never a folder Crow picked for itself. A folder whose own path
+   * carries a control character is listed by `listFolders` but is not one Crow commands, so it is not
+   * picked here either. The bytes travel over the read connection inside `runCommand`, so the append
+   * carries the command deadline and the same error wrapping as every other command; a server refusal
+   * for size (APPENDLIMIT or TOOBIG) comes back as TOO_LARGE rather than as a protocol fault.
+   *
+   * `detail` names the input on a refusal, `notFound` the fixed detail of the NOT_FOUND when no folder
+   * answers — "drafts" for a saved draft, "sent" for a sent copy.
    *
    * `uid` is the UID the server reported for the appended message, or `null` when it reported none (a
    * server without UIDPLUS); the copy is stored either way.
    */
-  async function appendToSpecialUse(raw, { specialUse, flags, detail }) {
+  async function appendToSpecialUse(raw, { specialUse, flags, detail, notFound }) {
     const bytes = appendBytes(raw, detail);
     return runCommand(async (client) => {
       const folders = await listFolders();
       const folder = folders.find((entry) => typeof entry.specialUse === "string"
         && entry.specialUse.trim().toLowerCase() === specialUse
         && listedFolderPath(entry.path) != null);
-      if (!folder) throw new MailError("NOT_FOUND", detail);
+      if (!folder) throw new MailError("NOT_FOUND", notFound);
       const response = await client.append(folder.path, bytes, [...flags]);
       const uid = Number(response && response.uid);
       return { folderPath: folder.path, uid: Number.isSafeInteger(uid) && uid > 0 ? uid : null };
@@ -1321,26 +1332,30 @@ export function createImapSmtpAdapter(options = {}) {
   }
 
   /**
-   * Append a draft to the mailbox the server marks `\Drafts`, with `\Draft` and `\Seen` set.
+   * Append a draft to the mailbox imapflow resolves `\Drafts` onto, with `\Draft` and `\Seen` set.
    *
    * @param {Buffer|string} raw the RFC 822 message
    * @returns {Promise<AdapterDraftRef>}
    */
   async function saveDraft(raw) {
-    return appendToSpecialUse(raw, { specialUse: DRAFTS_SPECIAL_USE, flags: DRAFT_FLAGS, detail: "draft" });
+    return appendToSpecialUse(raw, {
+      specialUse: DRAFTS_SPECIAL_USE, flags: DRAFT_FLAGS, detail: "draft", notFound: "drafts",
+    });
   }
 
   /**
-   * Append the copy of a message that has already gone out to the mailbox the server marks `\Sent`,
-   * with `\Seen` set and no `\Draft` flag: the recipient's provider files it as a sent message, so
-   * Crow's own copy is filed the same way. No such folder is NOT_FOUND, never a copy left in a folder
-   * Crow picked by name.
+   * Append the copy of a message that has already gone out to the mailbox imapflow resolves `\Sent`
+   * onto, with `\Seen` set and no `\Draft` flag: the recipient's provider files it as a sent message,
+   * so Crow's own copy is filed the same way. No such folder is NOT_FOUND, never a copy filed in a
+   * folder Crow picked for itself.
    *
    * @param {Buffer|string} raw the RFC 822 message
    * @returns {Promise<AdapterDraftRef>} the folder the copy landed in and its uid, when the server says
    */
   async function appendToSent(raw) {
-    return appendToSpecialUse(raw, { specialUse: SENT_SPECIAL_USE, flags: SENT_FLAGS, detail: "sent" });
+    return appendToSpecialUse(raw, {
+      specialUse: SENT_SPECIAL_USE, flags: SENT_FLAGS, detail: "sent", notFound: "sent",
+    });
   }
 
   /**

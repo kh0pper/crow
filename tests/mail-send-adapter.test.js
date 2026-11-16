@@ -21,7 +21,7 @@ import { createFakeImapServer, FAKE_PASSWORD, FAKE_USER } from "./fixtures/fake-
 import { rawMessage, runAdapterContract } from "./fixtures/mail-adapter-contract.mjs";
 import {
   createAccount, getAccount, listAccounts, updateAccount, deleteAccount, addImageAllow,
-  isImageAllowed, getSyncState, setSyncState, onAccountDeleting, clearAccountDeletingHooks,
+  isImageAllowed, getSyncState, setSyncState, onAccountDeleting, _resetAccountDeletingHooksForTests,
 } from "../servers/gateway/mail/store/accounts.js";
 
 const ALEX = "alex@example.com";
@@ -30,7 +30,7 @@ const HIDDEN = "hidden@example.com";
 
 const dirs = [];
 after(() => {
-  clearAccountDeletingHooks();
+  _resetAccountDeletingHooksForTests();
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -261,9 +261,13 @@ function imapAdapterFor(imap) {
   });
 }
 
+/** An append as the fake recorded it, with its literal as text so a deep-equal can pin it. */
+function recordedAppend({ mailbox, flags, raw }) {
+  return { mailbox, flags, raw: raw.toString("utf8") };
+}
+
 test("the IMAP adapter's appendToSent is NOT_FOUND on a server with no sent folder", async () => {
-  // A server that has a drafts folder and no \Sent mailbox: the special-use flag is what names the
-  // folder, so there is no fallback to a folder called "Sent".
+  // A server with a drafts folder and no mailbox that answers to \Sent, by flag or by name.
   const imap = await createFakeImapServer({ mailboxes: ["INBOX", "Drafts"] });
   const adapter = imapAdapterFor(imap);
   try {
@@ -273,6 +277,82 @@ test("the IMAP adapter's appendToSent is NOT_FOUND on a server with no sent fold
       () => adapter.appendToSent(rawMessage({ subject: "sent copy" })),
       mailCode("NOT_FOUND"),
     );
+    assert.deepEqual(imap.appended, [], "nothing was filed anywhere");
+  } finally {
+    await adapter.close();
+    await imap.close();
+  }
+});
+
+test("appendToSent files into the folder imapflow names Sent when the server flags none", async () => {
+  // No mailbox here carries a special-use flag: the folder's own name is all that says which one is
+  // which, and imapflow resolves that itself (specialUseSource "name").
+  const imap = await createFakeImapServer({
+    mailboxes: ["INBOX", "Sent", "Drafts"],
+    specialUse: { Sent: null, Drafts: null },
+  });
+  const adapter = imapAdapterFor(imap);
+  const raw = rawMessage({ subject: "sent copy", body: "the sent body" });
+  try {
+    const copy = await adapter.appendToSent(raw);
+    assert.equal(copy.folderPath, "Sent");
+    assert.deepEqual(imap.appended.map(recordedAppend), [{ mailbox: "Sent", flags: ["\\Seen"], raw }]);
+  } finally {
+    await adapter.close();
+    await imap.close();
+  }
+});
+
+test("appendToSent without any sent-like mailbox is NOT_FOUND and files nothing", async () => {
+  const imap = await createFakeImapServer({ mailboxes: ["INBOX", "Drafts", "Notes"] });
+  const adapter = imapAdapterFor(imap);
+  try {
+    await assert.rejects(
+      () => adapter.appendToSent(rawMessage({ subject: "sent copy" })),
+      (err) => {
+        assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+        assert.equal(err.code, "NOT_FOUND");
+        assert.equal(err.detail, "sent");
+        return true;
+      },
+    );
+    assert.deepEqual(imap.appended, [], "no folder was picked for the copy");
+  } finally {
+    await adapter.close();
+    await imap.close();
+  }
+});
+
+test("appendToSent files the copy once and answers the uid a UIDPLUS server reports", async () => {
+  const imap = await createFakeImapServer({ capabilities: ["UIDPLUS"] });
+  const adapter = imapAdapterFor(imap);
+  const raw = rawMessage({ subject: "sent copy", body: "the sent body" });
+  try {
+    const copy = await adapter.appendToSent(raw);
+    assert.equal(copy.folderPath, "Sent");
+    assert.ok(Number.isInteger(copy.uid) && copy.uid > 0, "the server names the message it appended");
+    assert.deepEqual(imap.appended.map(recordedAppend), [{ mailbox: "Sent", flags: ["\\Seen"], raw }],
+      "one append, seen, and never a draft flag");
+    const [stored] = await adapter.get(copy.folderPath, [copy.uid]);
+    assert.ok(stored, "the copy is fetchable at the uid the server reported");
+    assert.deepEqual(stored.flags, ["\\Seen"]);
+    assert.match(stored.raw.toString("utf8"), /the sent body/);
+  } finally {
+    await adapter.close();
+    await imap.close();
+  }
+});
+
+test("saveDraft's NOT_FOUND names drafts, while appendToSent's names sent", async () => {
+  const imap = await createFakeImapServer({ mailboxes: ["INBOX", "Sent"] });
+  const adapter = imapAdapterFor(imap);
+  try {
+    await assert.rejects(() => adapter.saveDraft(rawMessage({ subject: "a draft" })), (err) => {
+      assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+      assert.equal(err.code, "NOT_FOUND");
+      assert.equal(err.detail, "drafts", "the detail the Save-as-draft path reports is the drafts folder");
+      return true;
+    });
     assert.deepEqual(imap.appended, [], "nothing was filed anywhere");
   } finally {
     await adapter.close();
@@ -325,6 +405,8 @@ test("updateAccount accepts displayName, aliases and sentCopy and rejects sentCo
   }, "the aliases are stored as a JSON array");
   assert.deepEqual(await getAccount(db, account.id), updated);
 
+  const fifty = Array.from({ length: 50 }, (_, index) => `alex+${index}@example.com`);
+
   const refusals = [
     { sentCopy: "bogus" },
     { sentCopy: null },
@@ -333,6 +415,9 @@ test("updateAccount accepts displayName, aliases and sentCopy and rejects sentCo
     { aliases: [{ address: ALEX }] },
     { aliases: ["not-an-address"] },
     { aliases: ["a@example.com\r\nBcc: x@example.com"] },
+    { aliases: ["<alex@example.com>"] },
+    { aliases: ['"alex"@example.com'] },
+    { aliases: [...fifty, "alex+50@example.com"] },
     { displayName: 7 },
     { displayName: "A".repeat(121) },
   ];
@@ -345,9 +430,26 @@ test("updateAccount accepts displayName, aliases and sentCopy and rejects sentCo
   }
   assert.deepEqual(await getAccount(db, account.id), updated, "a refused patch changes nothing");
 
+  // Fifty aliases fit; the fifty-first was refused above, so the fifty are still what is stored.
+  assert.deepEqual((await updateAccount(db, account.id, { aliases: fifty })).aliases, fifty);
+  assert.deepEqual((await getAccount(db, account.id)).aliases, fifty);
+
   assert.equal((await updateAccount(db, account.id, { displayName: null })).displayName, null);
   assert.deepEqual((await updateAccount(db, account.id, { aliases: [] })).aliases, []);
   assert.equal((await updateAccount(db, account.id, { sentCopy: "provider" })).sentCopy, "provider");
+});
+
+test("a stored sent_copy outside the two values reads as provider", async () => {
+  const db = await freshDb();
+  const account = await createAccount(db, accountInput());
+  // Written around the store, as a hand edit or a restored copy would: the read still answers a mode
+  // the rest of the code can switch on, never the odd string the column holds.
+  await db.execute({
+    sql: "UPDATE mail_accounts SET sent_copy = ? WHERE id = ?",
+    args: ["bogus", account.id],
+  });
+  assert.equal((await getAccount(db, account.id)).sentCopy, "provider");
+  assert.deepEqual((await listAccounts(db)).map((row) => row.sentCopy), ["provider"]);
 });
 
 /* --------------------------------------------------------- A4: the removal hooks */
@@ -397,6 +499,7 @@ test("onAccountDeleting hooks run before the cascade and a throwing hook aborts 
     assert.deepEqual(await deleteAccount(db, gone.id), { messages: 1 });
   } finally {
     stop();
+    _resetAccountDeletingHooksForTests();
   }
   assert.deepEqual(seen, [{ accountId: gone.id, present: true, messages: 1 }],
     "the hook ran while the account and its rows were still there");
@@ -418,7 +521,7 @@ test("onAccountDeleting hooks run before the cascade and a throwing hook aborts 
       return true;
     });
   } finally {
-    clearAccountDeletingHooks();
+    _resetAccountDeletingHooksForTests();
   }
   assert.deepEqual(ran, ["first", "second"], "every hook runs in the order it was registered");
   assert.ok(await getAccount(db, kept.id), "the account is still there");
@@ -434,8 +537,38 @@ test("onAccountDeleting hooks run before the cascade and a throwing hook aborts 
   try {
     await deleteAccount(db, kept.id);
   } finally {
-    clearAccountDeletingHooks();
+    _resetAccountDeletingHooksForTests();
   }
   assert.deepEqual(again, ["cleared-then-registered"]);
   assert.equal(await getAccount(db, kept.id), null);
+});
+
+test("the same hook registered twice runs once, and its unsubscribe takes it back", async () => {
+  const db = await freshDb();
+  const account = await createAccount(db, accountInput());
+  const calls = [];
+  const hook = async (hookDb, accountId) => {
+    assert.equal(Boolean(await getAccount(hookDb, accountId)), true, "the account is still there");
+    calls.push(accountId);
+  };
+  try {
+    onAccountDeleting(hook);
+    onAccountDeleting(hook);
+    await deleteAccount(db, account.id);
+  } finally {
+    _resetAccountDeletingHooksForTests();
+  }
+  assert.deepEqual(calls, [account.id], "one function is one hook");
+
+  const other = await createAccount(db, accountInput({ address: SAM, label: "Sam" }));
+  const taken = [];
+  const stop = onAccountDeleting(async () => { taken.push("ran"); });
+  assert.equal(typeof stop, "function", "registration answers its unsubscribe");
+  stop();
+  try {
+    await deleteAccount(db, other.id);
+  } finally {
+    _resetAccountDeletingHooksForTests();
+  }
+  assert.deepEqual(taken, [], "an unsubscribed hook does not run");
 });
