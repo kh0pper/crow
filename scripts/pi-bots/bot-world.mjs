@@ -440,8 +440,11 @@ function dangerousShareRoot(dir, crowHome, projectsRoot) {
  * it is harmless unless its realpath lands in another project, in this
  * project's bots tree, in the Crow home, or in the data directory outside this
  * workspace. Such an entry is left out (one line names the reason) and its
- * siblings are still granted; an entry reached through another, refused entry's
- * realpath is left out too.
+ * siblings are still granted. A top-level link is granted on its own realpath
+ * only after the subtree at that realpath has been walked under the same rule.
+ * And a refused entry is refused as a whole: a granted root that is that
+ * realpath, sits under it, or is one of its ancestors is left out too (so an
+ * alias cannot smuggle back what the entry itself was denied).
  *
  * More top-level entries than SHARE_ROOT_ENTRY_CAP grants nothing for the share.
  * @param {string} dir       the workspace_dir as the share row names it
@@ -465,7 +468,7 @@ function shareEntryRoots(dir, {
     log("share workspace not granted (" + entries.length + " top-level entries, cap " + SHARE_ROOT_ENTRY_CAP + "): " + dir);
     return [];
   }
-  const under = (p, root) => p === root || p.startsWith(root + "/");
+  const under = (p, root) => !!root && (p === root || p.startsWith(root + "/"));
   const botsDir = realDir ? join(realDir, "bots") : null;
   let botsReal = null;
   let botHomes = [];
@@ -529,10 +532,16 @@ function shareEntryRoots(dir, {
     }
     granted.push(real);
   }
-  // A refused entry's realpath is never granted — not even through a sibling link that points at it.
+  // A refused entry's realpath is refused as a whole: a granted root that IS that path, sits under it,
+  // or is an ancestor of it is not granted either (the prefix rule keeps /a/bc out of /a/b). Only a
+  // refusal that names a path strictly INSIDE this workspace cascades — a refused link whose realpath
+  // is the workspace itself or lies outside it does not describe a subtree of this share, and letting
+  // it cascade would drop every legitimate root.
+  const refusedInside = realDir ? refused.filter((r) => strictlyUnder(r, realDir)) : [];
   const roots = [];
   for (const root of granted) {
     if (refused.includes(root)) continue;
+    if (refusedInside.some((r) => under(root, r) || under(r, root))) continue;
     if (!roots.includes(root)) roots.push(root);
   }
   return roots;
@@ -554,15 +563,41 @@ function realDirOrNull(p) {
  * FINAL realpath: dangling is harmless (ENOENT — it reaches nothing), any other
  * resolve error refuses the entry, and a realpath that lands somewhere this
  * share must not reach (dangerousLinkTarget) refuses it. Never followed deeper.
+ *
+ * A top-level link that passes that judgement is granted, so the subtree at its
+ * REALPATH is part of what the share hands over: it is walked exactly like a
+ * plain directory entry (same bounds, same dangerous-target rule, still never
+ * following a link), or links inside that subtree would escape the rule through
+ * the link's spelling. A link to a file has no subtree to walk.
  */
 function grantedEntryRefusal(entry, full, real, ctx, budget) {
   if (entry.isSymbolicLink()) {
     const why = dangerousLinkTarget(real, ctx);
-    return why ? { reason: why } : null;
+    if (why) return { reason: why };
+    const target = realTarget(real);
+    if (target.reason) return { reason: target.reason };
+    if (!target.directory) return null;
+    const walked = walkGrantedEntryLinks(real, ctx, budget);
+    return walked.ok ? null : walked;
   }
   if (!entry.isDirectory()) return null;
   const walked = walkGrantedEntryLinks(full, ctx, budget);
   return walked.ok ? null : walked;
+}
+
+/**
+ * What a resolved symlink target is: `{directory}` when it can be looked at,
+ * `{directory: false}` when it is gone (a race with a delete reaches nothing), or
+ * `{reason}` when it cannot be looked at at all (fail closed: an unseen subtree's
+ * links cannot be vouched for).
+ */
+function realTarget(real) {
+  try {
+    return { directory: statSync(real).isDirectory() };
+  } catch (err) {
+    if (isMissing(err)) return { directory: false };
+    return { reason: "unresolvable symlink target in a granted entry (" + errCode(err) + ")" };
+  }
 }
 
 /**

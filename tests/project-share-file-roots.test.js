@@ -781,6 +781,136 @@ test("shareWorkspaceRoots: a dangling link inside a granted entry is harmless an
   assert.deepEqual(said, [], "and nothing is said about it");
 });
 
+// ---------------------------------------------------------------------------
+// a granted top-level LINK hands over the subtree at its REALPATH
+// ---------------------------------------------------------------------------
+
+test("shareWorkspaceRoots: a top-level link to an entry that holds a dangerous link grants neither", () => {
+  // `alias` -> <ws>/data is otherwise granted (the link resolves strictly inside the workspace), but
+  // the subtree at its realpath is what the share actually hands over — so a risky link inside it
+  // has to be judged exactly as `data`'s own entry is.
+  const other = ws("unit-alias-tainted-other");
+  mkdirSync(join(other, "data"), { recursive: true });
+  writeFileSync(join(other, "data", "theirs.md"), "x\n");
+  const d = shareFixture("alias-tainted");
+  mkdirSync(join(d, "data"), { recursive: true });
+  writeFileSync(join(d, "data", "own.md"), "own\n");
+  symlinkSync(join(other, "data"), join(d, "data", "inner"));
+  symlinkSync(join(d, "data"), join(d, "alias"));
+
+  const { r } = shareOf(d, 55);
+  const dataReal = realpathSync(join(d, "data"));
+  assert.equal(r.read.includes(dataReal), false, "neither the entry nor the link to it is a root");
+  assert.equal(r.write.includes(dataReal), false);
+  assert.equal(coversPath(r.read, join(d, "data")), false, "nothing of the refused entry is readable");
+  assert.equal(coversPath(r.read, join(d, "alias")), false, "nor through the link to it");
+  assert.equal(coversPath(r.read, join(d, "data", "own.md")), false);
+  assert.equal(coversPath(r.read, join(other, "data")), false, "and the other project stays out of reach");
+  assert.ok(coversPath(r.read, join(d, "docs")), "the clean siblings are still granted");
+  assert.ok(coversPath(r.read, join(d, "top.txt")));
+});
+
+test("shareWorkspaceRoots: a top-level link to a subdirectory that holds a dangerous link is not granted", () => {
+  const other = ws("unit-alias-subdir-other");
+  mkdirSync(join(other, "data"), { recursive: true });
+  const d = shareFixture("alias-subdir");
+  mkdirSync(join(d, "data", "sub"), { recursive: true });
+  writeFileSync(join(d, "data", "sub", "own.md"), "own\n");
+  symlinkSync(DB_FILE, join(d, "data", "sub", "the-db"));
+  symlinkSync(join(d, "data", "sub"), join(d, "alias"));
+
+  const { r, said } = shareOf(d, 56);
+  const subReal = realpathSync(join(d, "data", "sub"));
+  assert.equal(r.read.includes(subReal), false, "the link's realpath holds the bad link, so the link is not a root");
+  assert.equal(r.write.includes(subReal), false);
+  assert.equal(coversPath(r.read, join(d, "alias")), false);
+  assert.equal(coversPath(r.read, join(d, "data", "sub", "the-db")), false, "the data directory stays out of reach");
+  assert.equal(coversPath(r.read, join(d, "data")), false, "nor is the entry the link's realpath sits in");
+  assert.ok(coversPath(r.read, join(d, "docs")), "the clean siblings are still granted");
+  assert.ok(said.length >= 1, "the refusal is named: " + JSON.stringify(said));
+  assert.ok(said.some((m) => /data directory/.test(m)), JSON.stringify(said));
+});
+
+test("shareWorkspaceRoots: a clean top-level link and its target are both granted, as the realpath", () => {
+  const d = shareFixture("alias-clean");
+  symlinkSync(join(d, "docs"), join(d, "alias"));
+
+  const { r, said } = shareOf(d, 57);
+  const docsReal = realpathSync(join(d, "docs"));
+  assert.deepEqual(sortRoots(r), {
+    read: sorted([docsReal, join(d, "top.txt")]),
+    write: sorted([docsReal, join(d, "top.txt")]),
+  }, "the link's target is the root, once");
+  assert.ok(coversPath(r.read, join(d, "docs", "a.md")), "its files are readable through the link");
+  assert.equal(r.read.includes(join(d, "alias")), false, "the link's own path is never a root");
+  assert.deepEqual(said, [], "a link to a clean subtree of this workspace says nothing");
+});
+
+test("shareWorkspaceRoots: a refused entry's realpath takes a granted alias under it with it", () => {
+  const other = ws("unit-alias-refused-other");
+  mkdirSync(join(other, "data"), { recursive: true });
+  const d = shareFixture("alias-under-refused");
+  mkdirSync(join(d, "data", "sub"), { recursive: true });
+  writeFileSync(join(d, "data", "sub", "own.md"), "own\n");
+  symlinkSync(join(other, "data"), join(d, "data", "inner")); // refuses `data`
+  // A link to a CLEAN subdirectory of the refused entry: its own subtree holds no dangerous link, so
+  // only the refusal of the entry above it keeps it out — the refused realpath covers everything under it.
+  symlinkSync(join(d, "data", "sub"), join(d, "sub-alias"));
+
+  const { r } = shareOf(d, 58);
+  const dataReal = realpathSync(join(d, "data"));
+  assert.equal(r.read.includes(dataReal), false, "the entry holding the bad link is not granted");
+  assert.equal(r.read.includes(realpathSync(join(d, "data", "sub"))), false,
+    "nor is the alias whose realpath sits under the refused realpath");
+  assert.equal(r.write.includes(realpathSync(join(d, "data", "sub"))), false);
+  assert.equal(coversPath(r.read, join(d, "data", "sub", "own.md")), false);
+  assert.ok(coversPath(r.read, join(d, "docs")), "the unrelated sibling stays granted");
+  assert.ok(coversPath(r.read, join(d, "top.txt")));
+});
+
+test("shareWorkspaceRoots: a refused entry's realpath also takes a granted alias above it with it", () => {
+  // `link-deep` is a top-level LINK whose realpath (<ws>/deep/sub) holds the bad link, so it is
+  // refused; `up-alias` points at an ANCESTOR of that realpath, which is the same subtree by another
+  // name. Both the exact path and the ancestor are out.
+  const other = ws("unit-alias-ancestor-other");
+  mkdirSync(join(other, "data"), { recursive: true });
+  const d = shareFixture("alias-above-refused");
+  mkdirSync(join(d, "deep", "sub"), { recursive: true });
+  writeFileSync(join(d, "deep", "sub", "own.md"), "own\n");
+  symlinkSync(join(other, "data"), join(d, "deep", "sub", "bad"));
+  symlinkSync(join(d, "deep", "sub"), join(d, "link-deep"));
+  symlinkSync(join(d, "deep"), join(d, "up-alias"));
+
+  const { r } = shareOf(d, 59);
+  const refusedReal = realpathSync(join(d, "deep", "sub"));
+  const ancestorReal = realpathSync(join(d, "deep"));
+  assert.ok(ancestorReal + "/" === refusedReal.slice(0, ancestorReal.length + 1), "the fixture's pair is ancestor/descendant");
+  assert.equal(r.read.includes(refusedReal), false, "the link whose realpath holds the bad link is not a root");
+  assert.equal(r.read.includes(ancestorReal), false, "nor is the alias above it");
+  assert.equal(r.write.includes(ancestorReal), false);
+  assert.equal(coversPath(r.read, join(d, "deep")), false, "nothing of that subtree is readable");
+  assert.ok(coversPath(r.read, join(d, "docs")), "the unrelated sibling stays granted");
+  assert.ok(coversPath(r.read, join(d, "top.txt")));
+});
+
+test("shareWorkspaceRoots: a refused <ws>/ab does not remove a granted <ws>/abc (prefix, not substring)", () => {
+  const other = ws("unit-prefix-other");
+  mkdirSync(join(other, "data"), { recursive: true });
+  const d = shareFixture("prefix-confusion");
+  mkdirSync(join(d, "ab"), { recursive: true });
+  symlinkSync(join(other, "data"), join(d, "ab", "bad"));
+  mkdirSync(join(d, "abc"), { recursive: true });
+  writeFileSync(join(d, "abc", "ok.md"), "ok\n");
+  symlinkSync(join(d, "abc"), join(d, "abc-alias"));
+
+  const { r } = shareOf(d, 60);
+  const abcReal = realpathSync(join(d, "abc"));
+  assert.equal(coversPath(r.read, join(d, "ab")), false, "the entry holding the bad link is refused");
+  assert.equal(r.read.includes(abcReal), true, "the entry whose name only shares a prefix is granted");
+  assert.ok(coversPath(r.read, join(d, "abc", "ok.md")));
+  assert.ok(coversPath(r.read, join(d, "docs")));
+});
+
 test("shareWorkspaceRoots: a bots tree over the entry bound refuses the share instead of half-inspecting it", () => {
   // Sizing note: the bound is a real constant (pi session transcripts and outputs/ files accumulate
   // in a bot home), so the test passes a SMALL bound down the walk rather than creating 100,000 files.
