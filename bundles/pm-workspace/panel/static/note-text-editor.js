@@ -9,9 +9,12 @@
  * tags}; tags are client-side chips submitted with each save.
  *
  * The Preview tab is SERVER-rendered: POST PM_BASE + /api/pm/notes/preview
- * answers sanitized HTML (servers/blog/renderer.js renderMarkdown), because a
+ * answers sanitized HTML (servers/blog/renderer.js renderBotMarkdown), because a
  * note can be written by a bot through the MCP create-note tool and this page
- * must never parse markdown into live markup itself.
+ * must never parse markdown into live markup itself. The server also refuses to
+ * RENDER a long note (marked is quadratic on some inputs), answering the note
+ * as escaped text with `truncated: true`; a plain-text line above the preview
+ * says so.
  */
 (function () {
     "use strict";
@@ -29,6 +32,17 @@
     var tabs = document.querySelectorAll(".editor-tab");
     var tagChips = document.getElementById("tag-chips");
     var btnAddTag = document.getElementById("btn-add-tag");
+
+    // Plain-text line ABOVE the preview, shown only when the server answers
+    // `truncated: true` (the note was longer than the route's render budget, so
+    // marked was never run on it). It is a SIBLING of #text-editor-preview and
+    // is written with textContent, so the server's `html` stays the only thing
+    // ever assigned to the preview element.
+    var previewNote = document.createElement("p");
+    previewNote.id = "text-editor-preview-note";
+    previewNote.className = "md-preview-note";
+    previewNote.style.display = "none";
+    if (preview.parentNode) preview.parentNode.insertBefore(previewNote, preview);
 
     // ── State ────────────────────────────────────────────────────
     var noteId = noteData.id || null;
@@ -49,15 +63,22 @@
 
     // ── Preview (server-rendered + sanitized) ────────────────────
     // This page never parses markdown. POST /api/pm/notes/preview answers
-    // renderMarkdown's sanitized HTML (marked + sanitize-html on the server),
+    // renderBotMarkdown's sanitized HTML (marked + sanitize-html on the server),
     // and that answer is the only thing ever written as HTML here. While it is
     // in flight — and if it fails — the textarea's markdown goes in as TEXT.
     var previewSeq = 0;
+
+    // Static English text; never markup, never the note's own content.
+    function setPreviewNote(show) {
+        previewNote.textContent = show ? "Long note: showing the text without formatting." : "";
+        previewNote.style.display = show ? "" : "none";
+    }
 
     function renderPreview() {
         var mine = ++previewSeq;
         var md = textarea.value;
         preview.textContent = md;
+        setPreviewNote(false);
         fetch(PM_BASE + "/api/pm/notes/preview", {
             method: "POST",
             headers: { "Content-Type": "text/plain;charset=UTF-8" },
@@ -70,11 +91,13 @@
             .then(function (data) {
                 if (mine !== previewSeq) return;   // a newer preview won
                 if (!data || typeof data.html !== "string") throw new Error("Preview answered oddly");
+                setPreviewNote(data.truncated === true);
                 preview.innerHTML = data.html;
             })
             .catch(function (e) {
                 if (mine !== previewSeq) return;
                 console.error("Preview error:", e);
+                setPreviewNote(false);
                 preview.textContent = md;
             });
     }

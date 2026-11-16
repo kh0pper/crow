@@ -14,15 +14,18 @@
  *   - note text is BOT text: no image outside /blog/media/ survives (a note's
  *     `![x](/dashboard/logout)` used to fire a GET with the reader's
  *     cookies) and every link carries the Turbo prefetch opt-out,
- *   - the body cap matches the MCP tool's content_md cap, and between the
- *     bot cap (BOT_MD_MAX_INPUT) and that hard cap the preview answers the
- *     note as ESCAPED TEXT in a <pre> with truncated:true instead of handing
- *     it to marked (a 199 KB "_a_" note blocked the event loop ~21 s),
+ *   - the body cap matches the MCP tool's content_md cap, and the preview only
+ *     RENDERS a note up to PREVIEW_RENDER_MAX (8_192 chars): marked's lexer is
+ *     quadratic on mixed-delimiter emphasis, so the cap bounds render TIME, not
+ *     just size. Over it the preview answers the note as ESCAPED TEXT in a <pre>
+ *     with truncated:true instead of handing it to marked (65_535 chars of
+ *     `*a_` blocked the event loop ~21.7 s; 8_192 chars cost ~0.4 s),
  *   - the route sits behind the same path-scoped auth as POST /api/pm/notes,
  *   - a failed renderer import answers ESCAPED TEXT in a <pre>, never raw
  *     markdown,
  *   - statically: the editor never calls marked and never assigns innerHTML
- *     from anything but the server's `html`; the editor page no longer loads
+ *     from anything but the server's `html`; its truncated-banner line is
+ *     textContent; the editor page no longer loads
  *     marked from the CDN (the drawing scripts are untouched); the planner's
  *     decide buttons carry their arguments in data-*, never in an onclick
  *     that interpolates the uid.
@@ -35,7 +38,6 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { BOT_MD_MAX_INPUT } from "../servers/blog/renderer.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dir, "..");
@@ -157,11 +159,13 @@ test("bot links in the preview carry data-turbo-prefetch=\"false\"", async () =>
   assert.match(html, /<a href="\/dashboard\/make\/open\/a\/b"[^>]*data-turbo-prefetch="false"/, html);
 });
 
-/* -------------------------------------- the bot cap: long notes are TEXT, not a hang */
+/* ------------------------- the render budget: long notes are TEXT, not a hang */
 
-/** `_a_` repeated to `len` chars — the body that took ~21 s through
- *  renderMarkdown, and the pattern the bot path's cap exists for. */
-const pathological = (len) => "_a_".repeat(Math.ceil(len / 3)).slice(0, len);
+/** `pat` repeated and cut to exactly `len` chars. `*a_`, `_*a` and `**_a` are
+ *  the mixed-delimiter bodies marked's lexer goes quadratic on (65_535 chars of
+ *  `*a_` took ~21.7 s before this cap; `_a_` is the escape-dense control). */
+const repeatPattern = (pat, len) => pat.repeat(Math.ceil(len / pat.length)).slice(0, len);
+const pathological = (len) => repeatPattern("_a_", len);
 
 /** Process CPU time, per bot-markdown-render.test.js: the render is synchronous
  *  and in THIS process, so wall-clock only adds the parallel suite's load. */
@@ -172,7 +176,7 @@ test("a 199 KB pathological note answers the escaped <pre> as truncated in under
   const t0 = performance.now();
   const r = await preview(md);
   const ms = performance.now() - t0;
-  assert.equal(r.status, 200, "over the BOT cap is not an error: the editor shows the source");
+  assert.equal(r.status, 200, "over the render budget is not an error: the editor shows the source");
   const body = await r.json();
   assert.equal(body.truncated, true);
   // Exact: the escaped text of the note, in the fallback <pre>, and nothing else
@@ -182,19 +186,41 @@ test("a 199 KB pathological note answers the escaped <pre> as truncated in under
   assert.ok(ms < 1000, `199 KB pathological note answered in ${ms.toFixed(0)} ms (budget 1000)`);
 });
 
-test("just under the bot cap a pathological note still renders, bounded", async (t) => {
-  const md = pathological(BOT_MD_MAX_INPUT - 1);
-  const t0 = cpuMs();
-  const r = await preview(md);
-  const ms = cpuMs() - t0;
-  assert.equal(r.status, 200);
-  const body = await r.json();
-  assert.notEqual(body.truncated, true, "under the cap the note is rendered, not truncated");
-  assert.match(body.html, /^<p>/, "markdown was rendered: " + body.html.slice(0, 80));
-  assert.ok(!body.html.startsWith(ANCHOR), "not the escaped-text fallback");
-  // Measured ~1.3-1.4 s on the review box — bounded by the cap, not a hang.
-  t.diagnostic(`${BOT_MD_MAX_INPUT - 1} chars of "_a_" rendered in ${ms.toFixed(0)} ms`);
-  assert.ok(ms < 3000, `${BOT_MD_MAX_INPUT - 1} chars of "_a_" took ${ms.toFixed(0)} ms (budget 3000)`);
+// The budget is about TIME. Each of these bodies is quadratic in marked at 64 KB
+// (~5-22 s, measured), yet at the 8_192-char render cap the whole round trip
+// costs a few hundred milliseconds: that is what makes the cap the right rail.
+test("8_192 chars of every mixed-delimiter body renders in under 1.5 s each", async (t) => {
+  for (const pat of ["*a_", "_*a", "**_a", "_a_"]) {
+    const md = repeatPattern(pat, 8_192);
+    assert.equal(md.length, 8_192);
+    const t0 = cpuMs();
+    const r = await preview(md);
+    const ms = cpuMs() - t0;
+    assert.equal(r.status, 200, pat);
+    const body = await r.json();
+    assert.notEqual(body.truncated, true, `${pat}: the cap is INCLUSIVE — 8_192 chars still renders`);
+    assert.match(body.html, /^<p>/, `${pat}: markdown was rendered: ${body.html.slice(0, 80)}`);
+    assert.ok(!body.html.startsWith(ANCHOR), `${pat}: not the escaped-text fallback`);
+    t.diagnostic(`8_192 chars of "${pat}" rendered in ${ms.toFixed(0)} ms`);
+    assert.ok(ms < 1500, `8_192 chars of "${pat}" took ${ms.toFixed(0)} ms (budget 1500)`);
+  }
+});
+
+// One char over the budget: marked is never called, so the answer is immediate
+// even though the same body at 64 KB would block the loop for ~20 s.
+test("8_193 and 65_535 chars of \"*a_\" answer the escaped <pre> as truncated in under 100 ms", async (t) => {
+  for (const len of [8_193, 65_535]) {
+    const md = repeatPattern("*a_", len);
+    const t0 = cpuMs();
+    const r = await preview(md);
+    const ms = cpuMs() - t0;
+    assert.equal(r.status, 200, `${len}: over the render budget is not an error`);
+    const body = await r.json();
+    assert.equal(body.truncated, true, `${len}: answered as text, so the editor shows the note`);
+    assert.equal(body.html, ANCHOR + md + "</pre>", `${len}: the escaped source, nothing else`);
+    t.diagnostic(`${len} chars of "*a_" answered in ${ms.toFixed(0)} ms`);
+    assert.ok(ms < 100, `${len} chars of "*a_" answered in ${ms.toFixed(0)} ms (budget 100)`);
+  }
 });
 
 /* ----------------------------------------------------------------- the auth */
@@ -259,6 +285,18 @@ test("static: the editor posts to the preview route and falls back to textConten
   // While the answer is in flight, and if it fails, the markdown is TEXT.
   assert.match(src, /preview\.textContent = md;/, "the waiting/error path is textContent");
   assert.match(src, /renderPreview\(\);/, "the preview tab asks for a server render");
+});
+
+test("static: truncated:true shows a plain-text line above the preview, never html", () => {
+  const src = readFileSync(EDITOR_JS, "utf8");
+  assert.match(src, /data\.truncated === true/, "the server's truncated flag is what drives the line");
+  // The line's text is a static string written with textContent; it is a
+  // sibling of the preview so the one innerHTML assignment above stays the
+  // only markup ever written.
+  assert.match(src, /previewNote\.textContent = show \? "[^"]+"/, "textContent, with a static English string");
+  assert.match(src, /insertBefore\(previewNote, preview\)/, "it sits above the preview");
+  assert.doesNotMatch(src, /previewNote\.innerHTML/, "no innerHTML for the line");
+  assert.match(src, /Long note: showing the text without formatting\./);
 });
 
 test("static: the editor page no longer loads marked from a CDN, the drawing scripts stay", () => {

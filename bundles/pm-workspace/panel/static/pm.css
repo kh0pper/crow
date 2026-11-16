@@ -264,6 +264,14 @@ html, body {
 }
 .md-textarea:focus { outline: 2px solid var(--pm-accent); }
 
+/* The "shown without formatting" line above the preview (a note longer than the
+   route's render budget). Plain text, set with textContent. */
+.md-preview-note {
+  margin: 0 0 0.5rem;
+  color: var(--pm-text-muted);
+  font-size: 0.85rem;
+}
+
 .md-preview {
   flex: 1;
   overflow-y: auto;

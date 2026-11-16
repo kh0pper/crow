@@ -292,17 +292,27 @@ ${isDrawing
   // It is renderBotMarkdown, not renderMarkdown, because note text can be bot
   // text: that path refuses every image outside /blog/media/ (a same-origin
   // `<img src="/dashboard/logout">` would fire a GET with the reader's
-  // cookies) and opts every link out of Turbo prefetch, and it caps its input
-  // at BOT_MD_MAX_INPUT — marked's lexer has a cliff on long escape-dense
-  // input (a 199 KB note of `_a_` repeated blocked this event loop ~21 s
-  // through renderMarkdown).
+  // cookies) and opts every link out of Turbo prefetch.
   //
-  // Over the bot cap is NOT an error: the preview answers the note as ESCAPED
-  // TEXT in a <pre> plus `truncated: true`, and the renderer is never called.
-  // Above the hard PREVIEW_MAX_MD cap the request is still refused. A failed
-  // (or too old) renderer import answers the same escaped text — an old
-  // install reading markdown is a cosmetic loss, never a raw sink.
+  // PREVIEW_RENDER_MAX bounds render TIME, not just size: marked's lexer is
+  // QUADRATIC on mixed-delimiter emphasis and the render is synchronous on
+  // this server's event loop. Measured through renderBotMarkdown (CPU time,
+  // 2026-09): 8_192 chars of `*a_` 410 ms, `_*a` 376 ms, `**_a` 210 ms; the
+  // same `*a_` run at 32_768 chars 5.4 s, and at 65_535 chars (~64 KB, the
+  // renderer's own BOT_MD_MAX_INPUT) 21.7 s. The renderer's bot cap is
+  // therefore far too late to protect a preview from a single click: 8 KB
+  // renders in well under a second, while the bot cap would still block the
+  // event loop for ~20 s.
+  //
+  // Over PREVIEW_RENDER_MAX (or over the bot cap, which is above it) is NOT an
+  // error: the preview answers the note as ESCAPED TEXT in a <pre> plus
+  // `truncated: true` (the editor puts a "shown without formatting" line above
+  // it) and the renderer is never called. Above the hard PREVIEW_MAX_MD cap
+  // the request is still refused. A failed (or too old) renderer import
+  // answers the same escaped text — an old install reading markdown is a
+  // cosmetic loss, never a raw sink.
   const PREVIEW_MAX_MD = 200_000; // the same cap the MCP note tool puts on content_md
+  const PREVIEW_RENDER_MAX = 8_192; // one preview render may spend this many chars of marked
   router.post("/api/pm/notes/preview", async (req, res) => {
     const body = parseBody(req);
     const md = typeof body.content_md === "string" ? body.content_md : "";
@@ -310,17 +320,20 @@ ${isDrawing
       return res.status(400).json({ error: `content_md is too long (max ${PREVIEW_MAX_MD} characters)` });
     }
     const fallback = () => `<pre style="white-space:pre-wrap">${escapeHtml(md)}</pre>`;
+    // The render budget is checked before the renderer is even imported: a long
+    // note is unformatted text, and marked never sees it.
+    if (md.length > PREVIEW_RENDER_MAX) return res.json({ html: fallback(), truncated: true });
     const mod = await loadRenderer();
     // Bot renderer first; an install whose renderer predates it keeps the
     // escaped-text answer rather than falling back to the image-allowing
     // renderMarkdown.
     const render = mod && typeof mod.renderBotMarkdown === "function" ? mod.renderBotMarkdown : null;
     if (!render) return res.json({ html: fallback() });
-    const botCap = typeof mod.BOT_MD_MAX_INPUT === "number" ? mod.BOT_MD_MAX_INPUT : PREVIEW_MAX_MD;
-    if (md.length > botCap) return res.json({ html: fallback(), truncated: true });
     try {
       const html = render(md);
-      // renderBotMarkdown answers "" for input it refuses (empty in, empty out).
+      // renderBotMarkdown answers "" for input it refuses (empty in, empty out,
+      // and anything over its own BOT_MD_MAX_INPUT — a backstop only, since
+      // PREVIEW_RENDER_MAX is well below it).
       if (!html && md) return res.json({ html: fallback(), truncated: true });
       return res.json({ html });
     } catch (err) {
