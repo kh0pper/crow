@@ -22,6 +22,18 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
 const SRC = readFileSync(resolve(ROOT, "bundles/ramble/panel/static/today.js"), "utf8");
 const COPY = JSON.parse(readFileSync(resolve(ROOT, "bundles/ramble/server/moves/player-copy.en.json"), "utf8"));
+const MOVES_SRC = readFileSync(resolve(ROOT, "bundles/ramble/panel/static/moves.js"), "utf8");
+
+/* The moves client's own runtime strings live in its STR table, not in the copy
+ * JSON (a paused day's two lines are among them), and today.js reads them
+ * through the api.text hook. Taken out of the shipped table so the assertions
+ * below hold the shipped words, not a second copy of them. */
+const MOVES_EN = MOVES_SRC.slice(MOVES_SRC.indexOf("    en: {"), MOVES_SRC.indexOf("    es: {"));
+
+function movesText(key) {
+  const hit = new RegExp("\\b" + key + ":\\s*\"([^\"]*)\"").exec(MOVES_EN);
+  return hit ? JSON.parse("\"" + hit[1] + "\"") : "";
+}
 
 /* ------------------------------------------------------------- the copy table */
 
@@ -36,12 +48,6 @@ function fill(table, key, values) {
 
 function expected(key, values) {
   return fill(COPY, key, values);
-}
-
-function copyFrom(table) {
-  return function copy(key, values) {
-    return fill(table, key, values || {});
-  };
 }
 
 /* --------------------------------------------------------------- the mini DOM */
@@ -218,7 +224,6 @@ async function flush() {
 
 function boot(opts) {
   const options = opts || {};
-  const table = options.table || COPY;
   const byId = new Map();
   const host = options.noHost ? null : new MiniEl("div");
   if (host) host.id = "rb-today-view";
@@ -234,6 +239,10 @@ function boot(opts) {
   const state = { running: options.running === true, day: options.day || DAY };
   const prefsState = { prefs: options.prefs || { cards: 3, windows: [] } };
   const responses = Object.assign({}, options.responses || {});
+  /* The words the page carries; a test may hand over a table without them. */
+  let table = options.table || COPY;
+  /* The day reads a test answers by hand, for the out-of-order case. */
+  const pendingDay = [];
 
   /* The sheet is in the panel markup, hidden, before today.js ever runs. */
   const sheetEl = new MiniEl("div");
@@ -259,7 +268,14 @@ function boot(opts) {
     if (method === "POST" && u === "/api/ramble/moves/slot/swap" && options.swapFails === true) {
       return answer({ error: "no swaps left" }, false);
     }
-    if (u === "/api/ramble/moves/day") return answer(state.day);
+    if (u === "/api/ramble/moves/day") {
+      if (options.deferDay === true) {
+        return new Promise((resolve) => {
+          pendingDay.push((next) => resolve(answer(next === undefined ? state.day : next)));
+        });
+      }
+      return answer(state.day);
+    }
     if (u === "/api/ramble/moves/setup") {
       if (options.setupFails === true) return answer({ error: "refused" }, false);
       return answer({ prefs: prefsState.prefs, day: state.day });
@@ -286,7 +302,8 @@ function boot(opts) {
   sandbox.window = sandbox;
   sandbox.RambleMoves = {
     whenCopy: () => Promise.resolve(table),
-    copy: copyFrom(table),
+    copy: (key, values) => fill(table, key, values || {}),
+    text: (key) => movesText(typeof key === "string" ? key : ""),
     startSlot: (item, day) => {
       spy.started.push({ slot: item && item.slot, item, day });
       return Promise.resolve();
@@ -297,6 +314,8 @@ function boot(opts) {
     },
     outdoorRunning: () => state.running,
   };
+  /* A page whose moves client carries no text hook at all. */
+  if (options.noText === true) delete sandbox.RambleMoves.text;
   vm.createContext(sandbox);
   new vm.Script(SRC, { filename: "today.js" }).runInContext(sandbox);
 
@@ -306,9 +325,11 @@ function boot(opts) {
     calls,
     spy,
     get,
+    pendingDay,
     setRunning(value) { state.running = value === true; },
     setDay(next) { state.day = next; },
     setPrefs(next) { prefsState.prefs = next; },
+    setTable(next) { table = next; },
   };
 }
 
@@ -518,14 +539,110 @@ describe("cards", () => {
     assert.equal(cardFor(booted.host, "midday"), midday, "and the card it belonged to stays put");
   });
 
-  test("a paused day draws no cards", async () => {
+  test("a paused day draws its two lines and no cards", async () => {
     const paused = deep(DAY);
     paused.off = true;
     const booted = boot({ day: paused });
     await flush();
 
     assert.equal(cardsIn(booted.host).length, 0, "a paused day has no cards");
-    assert.equal(booted.host.children.length, 0, "and nothing sits where they would be");
+    assert.notEqual(movesText("paused"), "", "the moves client carries the paused line");
+    assert.notEqual(movesText("pausedLine"), "", "and the line under it");
+
+    const heading = booted.host.findAll((node) => hasClass(node, "rb-slot-title"));
+    assert.equal(heading.length, 1, "one heading-style line");
+    assert.equal(heading[0].textContent, movesText("paused"), "saying the day is paused");
+
+    const fine = booted.host.findAll((node) => hasClass(node, "rb-fine"));
+    assert.equal(fine.length, 1, "and one quiet line");
+    assert.equal(fine[0].textContent, movesText("pausedLine"), "saying how to turn it back on");
+    assert.ok(hasClass(fine[0], "rb-muted"), "the quiet line carries the muted class too");
+
+    assert.equal(booted.get("rb-goal-num").textContent, "2,400", "the steps meter is still painted");
+    assert.equal(booted.get("rb-goal-max").textContent, "6,000");
+  });
+
+  test("a paused day on a page with no text hook draws nothing", async () => {
+    const paused = deep(DAY);
+    paused.off = true;
+    const booted = boot({ day: paused, noText: true });
+    await flush();
+
+    assert.equal(booted.host.children.length, 0, "no hook, no line at all");
+    assert.equal(booted.get("rb-goal-num").textContent, "2,400", "the meter is still painted");
+  });
+
+  test("a card with no swaps left keeps its Swap label and cannot be pressed", async () => {
+    const day = deep(DAY);
+    day.slots[1] = Object.assign({}, day.slots[1], { swap: 3 });
+    const booted = boot({ day });
+    await flush();
+
+    const spent = buttonNamed(cardFor(booted.host, "midday"), expected("today.card.swap"));
+    assert.ok(spent, "the label stays the table's word");
+    assert.equal(spent.textContent, expected("today.card.swap"));
+    assert.equal(spent.disabled, true, "a third swap is all the day gives, so a press would go nowhere");
+
+    const left = buttonNamed(cardFor(booted.host, "morning"), expected("today.card.swap"));
+    assert.equal(left.disabled, false, "a card with swaps left is still pressable");
+  });
+
+  test("the cards the reader opened and shut keep their state across a repaint", async () => {
+    const booted = boot();
+    await flush();
+
+    const midday = cardFor(booted.host, "midday");
+    midday.findAll((node) => node.tagName === "BUTTON")[0].click();
+    assert.equal(bodyOf(midday).hasAttribute("hidden"), false, "the reader opened midday");
+
+    const morning = cardFor(booted.host, "morning");
+    morning.findAll((node) => node.tagName === "BUTTON")[0].click();
+    assert.equal(bodyOf(morning).hasAttribute("hidden"), true, "and shut the Now card");
+
+    await booted.sandbox.RambleToday.refresh();
+    await flush();
+
+    assert.notEqual(cardFor(booted.host, "midday"), midday, "the cards were drawn again");
+    assert.equal(bodyOf(cardFor(booted.host, "midday")).hasAttribute("hidden"), false,
+      "midday is still open");
+    assert.equal(bodyOf(cardFor(booted.host, "morning")).hasAttribute("hidden"), true,
+      "and the morning card is still shut");
+
+    const fresh = deep(DAY);
+    fresh.slots = [Object.assign({}, DAY.slots[0], { slot: "dawn" })];
+    fresh.nowSlot = "dawn";
+    booted.sandbox.RambleToday.paint(fresh);
+    assert.equal(bodyOf(cardFor(booted.host, "dawn")).hasAttribute("hidden"), false,
+      "a slot the reader has never seen opens when the day says it is Now");
+  });
+
+  test("two refreshes answered out of order paint only the newer day", async () => {
+    const booted = boot({ deferDay: true });
+    await flush();
+    assert.equal(booted.pendingDay.length, 1, "the boot's own read is in flight");
+    booted.pendingDay[0](DAY);
+    await flush();
+
+    const older = deep(DAY);
+    older.streak = { days: 1, doneToday: 0, need: 3 };
+    const newer = deep(DAY);
+    newer.streak = { days: 9, doneToday: 2, need: 3 };
+
+    const first = booted.sandbox.RambleToday.refresh();
+    const second = booted.sandbox.RambleToday.refresh();
+    await flush();
+    assert.equal(booted.pendingDay.length, 3, "both reads are in flight");
+
+    booted.pendingDay[2](newer);
+    await flush();
+    booted.pendingDay[1](older);
+    await flush();
+    await Promise.all([first, second]);
+
+    const text = booted.host.textContent;
+    assert.ok(text.includes(expected("today.streak.days", { n: 9 })), "the newer answer is on screen");
+    assert.equal(text.includes(expected("today.streak.days", { n: 1 })), false,
+      "the answer to the earlier request never painted over it");
   });
 
   test("a line the copy table does not carry renders nothing", async () => {
@@ -548,6 +665,7 @@ describe("cards", () => {
     assert.equal(booted.calls.length, 0, "no host, no day to read");
     assert.equal(typeof booted.sandbox.RambleToday.refresh, "function", "the hook is still there to be called");
     assert.equal(typeof booted.sandbox.RambleToday.paint, "function");
+    assert.equal(typeof booted.sandbox.RambleToday.loadSlots, "function", "and so is the one that fills the sheet's block");
   });
 
   test("today.js carries no backtick, and writes no markup", () => {
@@ -733,7 +851,7 @@ describe("first run", () => {
     assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true, "the sheet still closes");
   });
 
-  test("a refused answer still closes the sheet and reads the day again", async () => {
+  test("an answer the server refused leaves the sheet open for the next read", async () => {
     const booted = boot({ day: neededDay(), setupFails: true });
     await flush();
     const before = dayReads(booted);
@@ -744,8 +862,39 @@ describe("first run", () => {
     await flush();
 
     assert.equal(setupPosts(booted).length, 1, "the answer was sent");
-    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true, "and the sheet closed anyway");
-    assert.equal(dayReads(booted), before + 1);
+    assert.equal(dayReads(booted), before + 1, "and the day was read again");
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), false,
+      "a refused answer is no answer, so the sheet is open again");
+    assert.equal(titleOf(firstRunBody(booted)).textContent, expected("firstRun.equipment.title"),
+      "back on the first screen, to be asked again");
+  });
+
+  test("a copy table without the sheet's words leaves the sheet shut", async () => {
+    const booted = boot({ day: neededDay(), table: {} });
+    await flush();
+
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true,
+      "no Next and no Skip is no question to ask");
+    assert.equal(firstRunBody(booted).children.length, 0, "and no screen was drawn");
+    assert.equal(setupPosts(booted).length, 0, "nothing was answered");
+
+    /* The sheet was never marked as shown, so a read that does carry the words
+     * asks it. */
+    booted.setTable(COPY);
+    await booted.sandbox.RambleToday.refresh();
+    await flush();
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), false, "the later read opens it");
+    assert.equal(titleOf(firstRunBody(booted)).textContent, expected("firstRun.equipment.title"));
+  });
+
+  test("one of the sheet's two words missing is still no question to ask", async () => {
+    const half = Object.assign({}, COPY);
+    delete half["firstRun.skip"];
+    const booted = boot({ day: neededDay(), table: half });
+    await flush();
+
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true, "no Skip, no sheet");
+    assert.equal(setupPosts(booted).length, 0);
   });
 
   test("a day that needs nothing never opens the sheet", async () => {
@@ -850,7 +999,7 @@ describe("settings", () => {
     assert.equal(dayReads(booted), before + 1, "the day is read again");
   });
 
-  test("a tick that would not match the count is put back and posts nothing", async () => {
+  test("an untick that leaves fewer windows than cards posts nothing and stays unticked", async () => {
     const booted = boot({ prefs: { cards: 3, windows: [] } });
     await flush();
     await openCustomize(booted);
@@ -861,8 +1010,64 @@ describe("settings", () => {
     midday.change();
     await flush();
 
-    assert.equal(prefsPosts(booted).length, 0, "nothing is sent");
-    assert.equal(midday.checked, true, "and the tick is exactly where it was");
+    assert.equal(prefsPosts(booted).length, 0, "one window short is a change still in progress");
+    assert.equal(midday.checked, false, "so the box stays exactly as the player left it");
+  });
+
+  test("a tick that goes over the count swaps the earliest other window out", async () => {
+    const booted = boot({ prefs: { cards: 2, windows: [] } });
+    await flush();
+    await openCustomize(booted);
+    const boxes = () => blockInputs(booted, "checkbox");
+    const box = (value) => boxes().find((input) => input.value === value);
+    assert.deepEqual(boxes().map((input) => input.checked), [true, false, true],
+      "two cards, the default morning and evening");
+    const before = dayReads(booted);
+
+    const midday = box("midday");
+    midday.checked = true;
+    midday.change();
+    await flush();
+
+    let posts = prefsPosts(booted);
+    assert.equal(posts.length, 1, "the swap is posted");
+    assert.deepEqual(posts[0].body, { windows: ["midday", "evening"] },
+      "midday took the place of the earliest other tick, morning");
+    assert.deepEqual(boxes().map((input) => input.checked), [false, true, true]);
+    assert.equal(dayReads(booted), before + 1, "and the day is read again");
+
+    const evening = box("evening");
+    evening.checked = false;
+    evening.change();
+    await flush();
+    assert.equal(prefsPosts(booted).length, 1, "an untick below the count posts nothing");
+    assert.equal(evening.checked, false, "and the box is left unticked");
+
+    const morning = box("morning");
+    morning.checked = true;
+    morning.change();
+    await flush();
+    posts = prefsPosts(booted);
+    assert.equal(posts.length, 2, "the count is back to the cards value");
+    assert.deepEqual(posts[1].body, { windows: ["morning", "midday"] }, "in slot order");
+  });
+
+  test("with one card a tick swaps the ticked window for the one asked for", async () => {
+    const booted = boot({ prefs: { cards: 1, windows: [] } });
+    await flush();
+    await openCustomize(booted);
+    assert.deepEqual(blockInputs(booted, "checkbox").map((input) => input.checked), [false, true, false],
+      "one card ticks midday by default");
+
+    const morning = blockInputs(booted, "checkbox").find((input) => input.value === "morning");
+    morning.checked = true;
+    morning.change();
+    await flush();
+
+    const posts = prefsPosts(booted);
+    assert.equal(posts.length, 1);
+    assert.deepEqual(posts[0].body, { windows: ["morning"] }, "the one window the day holds is the one asked for");
+    assert.deepEqual(blockInputs(booted, "checkbox").map((input) => input.checked), [true, false, false]);
   });
 
   test("the tick that matches the count posts the windows in slot order", async () => {
@@ -879,21 +1084,6 @@ describe("settings", () => {
     const posts = prefsPosts(booted);
     assert.equal(posts.length, 1);
     assert.deepEqual(posts[0].body, { windows: ["morning", "midday", "evening"] });
-  });
-
-  test("one more tick than the count is put back too", async () => {
-    const booted = boot({ prefs: { cards: 2, windows: [] } });
-    await flush();
-    await openCustomize(booted);
-
-    const midday = blockInputs(booted, "checkbox").find((input) => input.value === "midday");
-    assert.equal(midday.checked, false);
-    midday.checked = true;
-    midday.change();
-    await flush();
-
-    assert.equal(prefsPosts(booted).length, 0, "two cards take two windows");
-    assert.equal(midday.checked, false, "so the third tick is undone");
   });
 
   test("the block is built from the table's lines and nothing else", async () => {

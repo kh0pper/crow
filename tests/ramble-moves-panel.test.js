@@ -156,6 +156,17 @@ test("the client and the player have zero backticks", () => {
   }
 });
 
+test("the Learn page's way back goes to Today, so it says Today", async () => {
+  for (const [lang, word] of [["en", "Today"], ["es", "Hoy"]]) {
+    const html = await render(lang);
+    const button = /<button[^>]*id="rb-learn-back-pet"[^>]*>([\s\S]*?)<\/button>/.exec(html);
+    assert.ok(button, "the back button keeps the id the moves client listens on");
+    assert.ok(button[1].endsWith(word), lang + ": the label is the Today tab's own word");
+    assert.equal(button[1].includes("bird") || button[1].includes("p\u00e1jaro"), false,
+      lang + ": and it no longer promises the bird the button stopped opening");
+  }
+});
+
 test("the panel loads the day's cards script right after the moves client", async () => {
   const html = await render("en");
   const clientAt = html.indexOf("/ramble/static/moves.js");
@@ -547,6 +558,22 @@ test("?moves=log opens the something-else sheet; ?moves=prefs opens Customize", 
   await flush();
   assert.equal(prefs.el("rb-customize-sheet").hasAttribute("hidden"), false);
   assert.ok(prefs.calls.filter((c) => c.url === "/api/ramble/moves/prefs").length >= 1, "the prefs are loaded");
+});
+
+test("?moves=prefs opens Customize and asks today.js to fill its block too", async () => {
+  const loaded = { count: 0 };
+  const prefs = bootMoves((sb) => { sb.RambleToday = { loadSlots: () => { loaded.count += 1; } }; }, "?moves=prefs");
+  await flush();
+
+  assert.equal(prefs.el("rb-customize-sheet").hasAttribute("hidden"), false, "the sheet is open");
+  assert.equal(loaded.count, 1, "the cards-and-windows block is filled as a click on Customize fills it");
+});
+
+test("?moves=prefs without a RambleToday hook still opens the sheet and nothing throws", async () => {
+  const prefs = bootMoves(null, "?moves=prefs");
+  await flush();
+  assert.equal(prefs.el("rb-customize-sheet").hasAttribute("hidden"), false);
+  assert.ok(prefs.calls.some((c) => c.url === "/api/ramble/moves/prefs"), "the prefs are read either way");
 });
 
 test("no or unknown moves parameter changes nothing", async () => {

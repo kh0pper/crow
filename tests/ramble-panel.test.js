@@ -2511,6 +2511,25 @@ test("tabs: the client maps each tab to its view and marks the current one", () 
     "and survives the hook not existing yet");
 });
 
+test("tabs: a data-view set without showView still repaints the bar", () => {
+  /* static/moves.js sets data-view itself: a chunk opens the Learn view and the
+   * Learn page's back button returns to Today. Those go through neither
+   * showView nor its paintTabs call, so the bar follows the attribute. */
+  const src = STATIC_SRC();
+  assert.ok(src.includes('typeof MutationObserver === "function"'),
+    "guarded, so a page without one is not broken by it");
+  const watched = extractFunction(src, "wireTabs");
+  assert.ok(watched, "the observer is set up beside the bar's own wiring");
+  assert.ok(/new MutationObserver\(function \(\) \{\s*paintTabs\(root\.getAttribute\("data-view"\)\);\s*\}\)/.test(watched),
+    "it repaints from the view the root actually carries");
+  assert.ok(watched.includes('{ attributes: true, attributeFilter: ["data-view"] }'),
+    "watching just that one attribute");
+  assert.ok(watched.indexOf('typeof MutationObserver === "function"') < watched.indexOf("new MutationObserver"),
+    "the guard comes before the observer it guards");
+  /* The harness here does not boot static/ramble.js, so this half stays a
+   * source-level assertion; the attribute itself is painted by paintTabs. */
+});
+
 test("tabs: ?view= opens one tab once, then drops only that parameter", () => {
   const src = STATIC_SRC();
   const fnSrc = extractFunction(src, "readViewLink");

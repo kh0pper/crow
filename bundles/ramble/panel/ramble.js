@@ -647,7 +647,7 @@ export default {
           </section>
 
           <div class="rb-row rb-actions">
-            <button class="rb-btn rb-btn-ghost rb-grow" id="rb-learn-back-pet" type="button">${icon("back")}${esc(S.backToBird)}</button>
+            <button class="rb-btn rb-btn-ghost rb-grow" id="rb-learn-back-pet" type="button">${icon("back")}${esc(S.today)}</button>
           </div>
         </section>
 

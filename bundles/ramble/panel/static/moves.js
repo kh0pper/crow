@@ -473,6 +473,17 @@
     try { hook.refresh(); } catch (e) { /* the cards keep their own counsel */ }
   }
 
+  /* The customize sheet holds a block static/today.js fills (the cards a day
+   * and the windows), so a sheet opened without a click on Customize asks it
+   * for that block too. Nothing here is load-bearing: a page without the script
+   * has no hook and no block to fill. */
+  function loadDaySlots() {
+    var hook = null;
+    try { hook = window.RambleToday; } catch (e) { hook = null; }
+    if (!hook || typeof hook.loadSlots !== "function") return;
+    try { hook.loadSlots(); } catch (e) { /* the block keeps its own counsel */ }
+  }
+
   /* ---------------------------------------------------- outdoor sessions */
 
   /* A walk is a Start/Done session of its own, not a chunk. Its minutes are
@@ -1440,6 +1451,7 @@
     } else if (want === "prefs") {
       openSheet("rb-customize-sheet");
       loadPrefs();
+      loadDaySlots();
     } else if (linkedSlot) {
       startLinkedSlot(linkedSlot);
     } else {
@@ -1453,6 +1465,9 @@
   /* static/today.js draws the day's cards and asks for the words and the two
    * actions it needs by name; every member here is one of its hooks. */
   api.copy = function (key, values) { return copyFill(key, values || {}); };
+  /* The page's own runtime strings (a paused day's two lines among them), by
+   * key: a key this file does not carry is "". */
+  api.text = function (key) { return typeof key === "string" ? t(key) : ""; };
   api.whenCopy = function () { return whenCopy(); };
   api.outdoorRunning = function () { return outdoor !== null; };
   api.finishWalk = function () { return postOutdoorDone(); };

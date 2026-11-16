@@ -454,6 +454,17 @@
     for (var i = 0; i < tabs.length; i++) bind(tabs[i]);
     /* Once at start-up, so the bar is right before anything is tapped. */
     paintTabs(root.getAttribute("data-view"));
+    /* The moves client sets data-view itself (opening a chunk, and the Learn
+     * page's way back to Today), so the bar follows the attribute as well as
+     * showView. Without an observer here it is left to the views that paint. */
+    if (typeof MutationObserver === "function") {
+      try {
+        var viewObserver = new MutationObserver(function () {
+          paintTabs(root.getAttribute("data-view"));
+        });
+        viewObserver.observe(root, { attributes: true, attributeFilter: ["data-view"] });
+      } catch (e) { /* no observer here: showView still paints the bar */ }
+    }
   })();
 
   /* ------------------------------------------------------------------ map */

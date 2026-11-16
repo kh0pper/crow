@@ -54,6 +54,15 @@
     return typeof line === "string" ? line : "";
   }
 
+  /** One of the moves client's own lines (its runtime strings), or "". */
+  function textLine(key) {
+    var moves = movesApi();
+    if (!moves || typeof moves.text !== "function") return "";
+    var line = null;
+    try { line = moves.text(key); } catch (e) { return ""; }
+    return typeof line === "string" ? line : "";
+  }
+
   /** The copy table, once per page; a load that fails is no table at all. */
   function whenCopy() {
     var moves = movesApi();
@@ -282,9 +291,13 @@
     }
     var swapLabel = copy("today.card.swap");
     if (swapLabel !== "") {
-      row.appendChild(actionButton("rb-btn rb-btn-ghost", swapLabel, function (btn) {
+      var swapBtn = actionButton("rb-btn rb-btn-ghost", swapLabel, function (btn) {
         swapSlot(typeof item.slot === "string" ? item.slot : "", btn);
-      }));
+      });
+      /* The day allows three; a fourth press would be refused, so the button
+       * says the same word and stops offering it. */
+      swapBtn.disabled = Number(item.swap) >= 3;
+      row.appendChild(swapBtn);
       drew += 1;
     }
     if (drew > 0) body.appendChild(row);
@@ -545,6 +558,8 @@
     else paintEquipmentScreen(body);
   }
 
+  /* A post that did not land answers null: a network error and a status the
+   * server refused are the same thing to the caller, never an answer. */
   function postJson(url, body) {
     if (typeof fetch !== "function") return Promise.resolve(null);
     var out = null;
@@ -556,18 +571,22 @@
         body: JSON.stringify(body)
       });
     } catch (e) { return Promise.resolve(null); }
-    return Promise.resolve(out).catch(function () { return null; });
+    return Promise.resolve(out).then(function (res) {
+      if (!res || res.ok === false) return null;
+      return res;
+    }).catch(function () { return null; });
   }
 
   /* The answer is the whole setup, so one request covers every screen, and the
-   * sheet closes whatever it answered: the server has already made what it can
-   * of it, and the day is worth reading again either way. */
+   * sheet closes either way. An answer the server never took is no answer: the
+   * sheet is worth asking again on the next read of the day. */
   function finishFirstRun() {
     var answer = firstRunAnswers;
     firstRunAnswers = {};
     var sheet = el("rb-first-run");
-    var settle = function () {
+    var settle = function (res) {
       setHidden(sheet, true);
+      if (!res) firstRunShown = false;
       refresh();
     };
     postJson("/api/ramble/moves/setup", answer).then(settle, settle);
@@ -581,6 +600,10 @@
   function maybeFirstRun(payload) {
     if (firstRunShown) return;
     if (!firstRunNeeded(payload)) return;
+    /* Every screen of the sheet is drawn from the table's words, so a table
+     * without them is nothing to ask: the sheet stays shut and stays unasked,
+     * and a later read may try again. */
+    if (copy("firstRun.next") === "" || copy("firstRun.skip") === "") return;
     var sheet = el("rb-first-run");
     var body = el("rb-first-run-body");
     if (!sheet || !body) return;
@@ -645,14 +668,22 @@
     postJson("/api/ramble/moves/prefs", { cards: n, windows: [] }).then(refresh, refresh);
   }
 
-  /* A window the plan cannot use is not a window: a tick that would leave a
-   * different number of them than cards is put back, and nothing is sent. */
+  /* The day holds exactly as many windows as cards, so a tick is a SWAP: when
+   * it makes one too many, the earliest other tick on the page comes off (the
+   * box just ticked is the one the player asked for). An untick that leaves one
+   * too few is a change still in progress -- the box stays unticked and nothing
+   * is sent -- and only a count of exactly cards is posted. */
   function chooseWindow(input) {
     var ticked = tickedWindows();
-    if (ticked.length !== cardsOn) {
-      input.checked = !input.checked;
-      return;
+    if (ticked.length > cardsOn) {
+      for (var i = 0; i < ticked.length; i += 1) {
+        if (ticked[i] === input.value) continue;
+        var other = windowInputs[ticked[i]];
+        if (other) { other.checked = false; break; }
+      }
+      ticked = tickedWindows();
     }
+    if (ticked.length !== cardsOn) return;
     postJson("/api/ramble/moves/prefs", { windows: ticked }).then(refresh, refresh);
   }
 
@@ -750,14 +781,23 @@
     if (!host || !payload || typeof payload !== "object") return;
     day = payload;
     cardBySlot = {};
-    expandedBy = {};
+    /* A repaint keeps what the reader opened and shut: a card still in the day
+     * holds its own state, and a slot not seen before starts open only when it
+     * is the Now card. */
+    var seenBefore = expandedBy;
     clear(host);
 
     paintMeter(payload);
     maybeFirstRun(payload);
-    /* A paused day has no cards and no streak: the status line above says so. */
-    if (payload.off) return;
+    /* A paused day has no cards: the two lines its own table carries say so,
+     * and the steps meter above them still counts. */
+    if (payload.off) {
+      addLine(host, textLine("paused"), "rb-slot-title");
+      addLine(host, textLine("pausedLine"), "rb-muted rb-fine");
+      return;
+    }
 
+    expandedBy = {};
     var streak = streakBlock(payload);
     if (streak) host.appendChild(streak);
 
@@ -765,7 +805,8 @@
     slots.forEach(function (item) {
       if (!item || typeof item !== "object") return;
       var name = typeof item.slot === "string" ? item.slot : "";
-      var open = name !== "" && name === payload.nowSlot;
+      var carried = Object.prototype.hasOwnProperty.call(seenBefore, name);
+      var open = carried ? seenBefore[name] === true : (name !== "" && name === payload.nowSlot);
       expandedBy[name] = open;
       var card = cardNode(item, payload, open);
       cardBySlot[name] = card;
@@ -775,8 +816,15 @@
 
   /* ---------------------------------------------------------------- refresh */
 
+  /* Only the newest read may paint. A refresh() that was answered after a
+   * later one asked is a day the reader has already moved past, so its answer
+   * is dropped rather than drawn over the newer one. */
+  var refreshToken = 0;
+
   function refresh() {
     if (!host || typeof fetch !== "function") return Promise.resolve(null);
+    refreshToken += 1;
+    var token = refreshToken;
     return whenCopy().then(function () {
       paintLabels();
       return fetch("/api/ramble/moves/day", {
@@ -784,9 +832,10 @@
         headers: { Accept: "application/json" }
       });
     }).then(function (res) {
-      if (!res) return null;
+      if (!res || token !== refreshToken) return null;
       return Promise.resolve(res.json ? res.json() : null).catch(function () { return null; })
         .then(function (payload) {
+          if (token !== refreshToken) return null;
           if (!res.ok || !payload || typeof payload !== "object") return null;
           paint(payload);
           return payload;
@@ -797,7 +846,8 @@
     });
   }
 
-  try { window.RambleToday = { refresh: refresh, paint: paint }; } catch (e) { /* no window: nothing to expose */ }
+  try { window.RambleToday = { refresh: refresh, paint: paint, loadSlots: loadSlots }; }
+  catch (e) { /* no window: nothing to expose */ }
 
   if (!host) return;
   refresh();

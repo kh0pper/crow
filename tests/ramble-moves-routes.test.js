@@ -1337,6 +1337,55 @@ test("day payload: streak.doneToday counts the day's own moveslot rows", async (
   } finally { await mount.close(); }
 });
 
+test("day payload: streak.doneToday never exceeds the day's own card count", async () => {
+  const mount = await freshMount(BALANCE_LIBRARY);
+  try {
+    const set = await dayPost(mount.url, "/api/ramble/moves/prefs", {
+      cards: 2, windows: ["morning", "midday"],
+    });
+    assert.equal(set.status, 200);
+    const first = await (await dayGet(mount.url)).json();
+    assert.equal(first.need, 2, "the day holds two cards");
+    assert.deepEqual(first.slots.map((item) => item.slot), ["morning", "midday"]);
+    const day = first.day;
+    const db = await mountDb(mount.dir);
+    try {
+      // Three finished slots, from a day that had more windows than this one.
+      for (const slot of ["morning", "midday", "evening"]) {
+        // eslint-disable-next-line no-await-in-loop
+        await walletFact(db, "moveslot", day + ":" + slot);
+      }
+      const after = await (await dayGet(mount.url)).json();
+      assert.equal(after.streak.need, 2);
+      assert.equal(after.streak.doneToday, 2, "a two-card day can only have two done");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("day payload: the extras ride on a plain read and on a swap answer alike", async () => {
+  const mount = await freshMount();
+  try {
+    const body = await (await dayGet(mount.url)).json();
+    const extras = ["bird", "health", "hearts", "steps", "streak", "week", "setup"];
+    for (const field of extras) {
+      assert.equal(Object.prototype.hasOwnProperty.call(body, field), true,
+        "a read of the day carries " + field);
+    }
+    assert.equal(body.streak.need, body.need, "the streak reads the day's own count");
+
+    const swapped = await (await dayPost(mount.url, "/api/ramble/moves/slot/swap", {
+      slot: body.slots[0].slot,
+    })).json();
+    for (const field of extras) {
+      assert.equal(Object.prototype.hasOwnProperty.call(swapped, field), true,
+        "and so does a swap's answer: " + field);
+    }
+    assert.deepEqual(Object.keys(swapped.steps).sort(), ["day", "goal", "goal_met", "steps", "walked"]);
+    assert.equal(swapped.streak.need, swapped.need);
+    assert.equal(swapped.setup.needed, body.setup.needed);
+  } finally { await mount.close(); }
+});
+
 test("day payload: the setup is needed until a prefs row or an answer exists", async () => {
   const fresh = await freshMount();
   try {
