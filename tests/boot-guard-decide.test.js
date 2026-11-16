@@ -322,6 +322,16 @@ test("missingTopLevelDeps ignores devDependencies and optionalDependencies", () 
   assert.deepEqual(missingTopLevelDeps(root), []);
 });
 
+test("missingTopLevelDeps skips a name optionalDependencies also declares", () => {
+  const root = depTree({
+    pkg: { dependencies: { needed: "1", opt: "1" }, optionalDependencies: { opt: "1" } },
+    installed: ["needed"],
+  });
+  assert.deepEqual(missingTopLevelDeps(root), [], "an optional entry wins over the same name in dependencies");
+  rmSync(join(root, "node_modules", "needed"), { recursive: true, force: true });
+  assert.deepEqual(missingTopLevelDeps(root), ["needed"], "a required dependency is still reported");
+});
+
 test("missingTopLevelDeps is empty without a readable package.json", () => {
   assert.deepEqual(missingTopLevelDeps(depTree()), [], "no package.json");
   assert.deepEqual(missingTopLevelDeps(depTree({ raw: "{not json" })), [], "invalid package.json");

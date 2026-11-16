@@ -956,14 +956,15 @@ test("three failed dependency retries raise ONE blocked alert and stop retrying"
   assert.equal(spoolCodes(f.crowHome).filter((c) => c === "update-rollback-blocked").length, 1);
 });
 
-/** A `npm` on PATH that records every run and "installs" fixture-dep. */
-function npmShim(f, { exit = 0 } = {}) {
+/** A `npm` on PATH that records every run and, unless told otherwise,
+ *  "installs" fixture-dep. */
+function npmShim(f, { exit = 0, creates = exit === 0 } = {}) {
   const shimDir = join(f.root, "shim-missing");
   mkdirSync(shimDir, { recursive: true });
   const npmPath = join(shimDir, "npm");
   const marker = join(f.out, "npm-missing-ran");
   const depDir = join(f.work, "node_modules", "fixture-dep");
-  const install = exit === 0
+  const install = creates
     ? `mkdir -p ${JSON.stringify(depDir)}\necho '{}' > ${JSON.stringify(join(depDir, "package.json"))}\n`
     : "";
   writeFileSync(npmPath, `#!/bin/sh\necho x >> ${JSON.stringify(marker)}\n${install}exit ${exit}\n`);
@@ -1030,6 +1031,85 @@ test("three failed missing-dependency installs raise ONE alert and stop retrying
   assert.equal(spoolCodes(f.crowHome).filter((c) => c === "update-deps-missing-blocked").length, 1);
 });
 
+test("an npm that reports success but installs nothing still counts as a failed attempt", () => {
+  const f = makeFixture({ withDep: true });
+  installAndStabilize(f);
+  const shim = npmShim(f, { creates: false });
+
+  for (let i = 0; i < 3; i += 1) {
+    const run = runLauncher(f, shim.env);
+    assert.equal(run.status, 0, `the launcher must always exit 0 (stderr: ${run.stderr})`);
+  }
+  assert.equal(shim.runs(), 3, "every start before the limit retries");
+  assert.equal(existsSync(shim.depPath), false, "fixture precondition: npm installed nothing");
+  const state = readState(f);
+  assert.equal(state.missing_deps_attempts, 3, "exit 0 without the package is not a success");
+  assert.equal(state.state, "ok", "a failed install never blocks or aborts the start");
+  assert.equal(state.failures, 0);
+  assert.equal(spoolCodes(f.crowHome).filter((c) => c === "update-deps-missing-blocked").length, 1,
+    "the give-up alert is spooled exactly once");
+
+  const after = runLauncher(f, shim.env);
+  assert.equal(after.status, 0, after.stderr);
+  assert.equal(shim.runs(), 3, "the fourth start must not pay for npm again");
+});
+
+test("a new commit gets a fresh missing-dependency budget", () => {
+  const f = makeFixture({ withDep: true });
+  installAndStabilize(f);
+  const failing = npmShim(f, { exit: 1 });
+  for (let i = 0; i < 3; i += 1) {
+    assert.equal(runLauncher(f, failing.env).status, 0);
+  }
+  assert.equal(readState(f).missing_deps_attempts, 3, "fixture precondition: the budget is spent");
+  assert.equal(spoolCodes(f.crowHome).filter((c) => c === "update-deps-missing-blocked").length, 1);
+
+  // B declares the same missing dependency (only other files differ), so the
+  // attempts spent on A must not follow the checkout onto a new commit.
+  fastForwardTo(f, f.b);
+  const working = npmShim(f); // same shim path, now it installs
+  const run = runLauncher(f, working.env);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(working.runs(), 4, "the new commit must be allowed its own install");
+  assert.ok(existsSync(working.depPath), "and the dependency must be there afterwards");
+  const state = readState(f);
+  assert.equal(state.missing_deps_attempts, 0);
+  assert.equal(state.missing_deps_sha, f.b);
+});
+
+test("a start that installs the missing dependency does not count the previous exit", () => {
+  const f = makeFixture({ withDep: true });
+  installAndStabilize(f);
+  const shim = npmShim(f);
+  // The dependency is present for the arm, and only goes missing for the start
+  // whose previous exit is the crash that must not be counted.
+  mkdirSync(join(f.work, "node_modules", "fixture-dep"), { recursive: true });
+  writeFileSync(shim.depPath, "{}\n");
+
+  fastForwardTo(f, f.b);
+  assert.equal(runLauncher(f, shim.env).status, 0);
+  const armed = readState(f);
+  assert.equal(armed.state, "pending");
+  assert.equal(armed.pending_sha, f.b);
+  assert.equal(armed.failures, 0);
+  assert.equal(shim.runs(), 0, "fixture precondition: nothing is missing yet");
+
+  runRecorder(f, { exit: CRASH });
+  assert.equal(readState(f).attempt.exit.exit_status, "1", "fixture precondition: the trial saw a crash");
+  rmSync(join(f.work, "node_modules", "fixture-dep"), { recursive: true, force: true });
+
+  const run = runLauncher(f, shim.env);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(shim.runs(), 1, "the missing dependency must be installed");
+  assert.ok(existsSync(shim.depPath));
+  const state = readState(f);
+  assert.equal(state.failures, 0, "a start that fixed the tree must not count the exit before it as a crash");
+  assert.equal(state.state, "pending", "the trial keeps running on the same commit");
+  assert.equal(state.attempt.exit, null, "and a fresh attempt record is open");
+  assert.ok(state.attempt.id, "with the id of this start");
+  assert.ok(Number.isFinite(Date.parse(state.attempt.started_at)), "and its start stamp");
+});
+
 test("a held checkout lock defers the missing-dependency install", () => {
   const f = makeFixture({ withDep: true });
   installAndStabilize(f);
@@ -1075,6 +1155,35 @@ test("an update whose package files are unchanged still installs a missing depen
   }
   assert.equal(shim.runs(), 1, "the install must run for a missing dependency even when package*.json did not change");
   assert.ok(existsSync(shim.depPath));
+});
+
+test("an update whose package files are unchanged runs no npm when every dependency is present", async () => {
+  const f = makeFixture({ withDep: true });
+  const shim = npmShim(f);
+  mkdirSync(join(f.work, "node_modules", "fixture-dep"), { recursive: true });
+  writeFileSync(shim.depPath, "{}\n");
+  const fix = pushToOrigin(f, "fix.txt", "no package change\n");
+  f.git("fetch", "origin");
+  const changed = f.git("diff", "--name-only", `${f.a}..origin/main`);
+  assert.ok(!changed.includes("package.json") && !changed.includes("package-lock.json"),
+    `fixture precondition, package files unchanged: ${changed}`);
+  assert.notEqual(fix, f.a);
+
+  const savedPath = process.env.PATH;
+  process.env.PATH = shim.env.PATH;
+  _setAppRootForTest(f.work);
+  _setDbForTest({ execute: async () => ({ rows: [] }) });
+  let r;
+  try {
+    r = await checkForUpdates();
+  } finally {
+    process.env.PATH = savedPath;
+    _setDbForTest(null);
+    _setAppRootForTest(REPO);
+  }
+  assert.equal(r.updated, true, JSON.stringify(r));
+  assert.equal(shim.runs(), 0, "nothing is missing and no package file changed, so npm must not run");
+  assert.equal(f.git("rev-parse", "HEAD"), fix, "the update itself must still land");
 });
 
 test("the updater's own missingTopLevelDeps sees what the guard's does", () => {
