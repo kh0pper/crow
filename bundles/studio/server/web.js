@@ -79,6 +79,14 @@ import { createLibraryStore } from "./library-store.js";
 // The one sentence a bot that is not this project's gets — the same one the
 // grant's own `not_found` refusal carries (see `server/give-tools.js`).
 import { NOT_FOUND_TEXT as GIVE_TOOLS_NOT_FOUND_TEXT } from "./give-tools.js";
+// The shell's layout model, which the page runs as an inline script
+// (`panel/shell-layout.js`). Its named exports are evaluated from that very
+// text, so `parseTemplate` here is the page's own rule for what a default
+// layout may be, `WIDGETS` names the ids a template may show and the sizes each
+// one may take, and `MODES`/`SIZE_CLASSES` are the only mode and width pairs a
+// template may be keyed by. Server code importing a panel script this way
+// follows `server/commands/midi.js`.
+import { MODES, SIZE_CLASSES, WIDGETS, parseTemplate } from "../panel/shell-layout.js";
 
 /** File under CROW_HOME holding the per-boot token the MCP process presents. */
 const TOKEN_FILE = "studio-agent-token";
@@ -166,6 +174,45 @@ const AGENT_GIVE_TOOLS_REFUSED_TEXT =
 /** What the give-tools route answers when this instance cannot edit a bot's def. */
 const GIVE_TOOLS_UNAVAILABLE_TEXT = "Studio cannot change a bot's tools on this instance.";
 
+/** What an agent is told when it asks to change the operator's default layout. */
+const AGENT_LAYOUT_TEMPLATE_REFUSED_TEXT =
+  "The default Studio layout is the operator's own; an agent cannot change it.";
+
+/** What the layout-template routes answer when this instance stores no settings. */
+const LAYOUT_TEMPLATE_UNAVAILABLE_TEXT = "Studio cannot keep a default layout on this instance.";
+
+/** What a caller is told when the template it sent is not one. */
+const LAYOUT_TEMPLATE_INVALID_TEXT =
+  "A default layout is this Studio's own widgets, at their sizes, under 8 KB.";
+
+/**
+ * What the template routes answer when the settings store itself fails. One
+ * fixed sentence: the registry's own errors name a path, and SQLite's name a
+ * query, and neither is the caller's to read.
+ */
+const LAYOUT_TEMPLATE_STORE_FAILED_TEXT =
+  "Studio cannot keep its default layout on this instance right now.";
+
+/**
+ * What a write to the default template answers anyone who is not the owner at
+ * this machine's own dashboard.
+ */
+const LAYOUT_TEMPLATE_OWNER_TEXT =
+  "The default Studio layout can only be changed by the owner at this machine's own dashboard.";
+
+/** The only version a layout, and so a template's entries, are written at. */
+const LAYOUT_VERSION = 1;
+
+/**
+ * Every `mode.sizeClass` key a template may name, from the shell's own tables:
+ * a key outside these nine is a layout no mode or width would ever read back.
+ * @type {Set<string>}
+ */
+const TEMPLATE_KEYS = new Set();
+for (const mode of MODES) {
+  for (const sizeClass of SIZE_CLASSES) TEMPLATE_KEYS.add(`${mode}.${sizeClass}`);
+}
+
 /** What a caller is told when the project's bot is no longer the one it named. */
 const STALE_BOT_TEXT = "That is not this song project's bot any more. Reload the page and try again.";
 
@@ -226,7 +273,16 @@ const AGENT_BOT_PREFIX = "agent:bot:";
 /** What Crow's voice is told when it tries to change a song it may read. */
 const READ_ONLY_TEXT = "Crow's voice can read songs but not change them; ask the project's bot.";
 
-/** HTTP status for each hub refusal code. */
+/**
+ * HTTP status for each hub refusal code, and for the instrument library's own
+ * user-facing codes.
+ *
+ * The library's codes are the ones its `LibraryError` can carry that the hub's
+ * table does not name: a network that is down, a redirect the catalog does not
+ * allow, and a transfer that ran out of time. Their sentences come from
+ * `LIBRARY_FAILED_TEXT_BY_CODE`, never from the library's own message (see
+ * `errorText`).
+ */
 const STATUS_BY_CODE = Object.freeze({
   acl: 403,
   not_found: 404,
@@ -239,6 +295,27 @@ const STATUS_BY_CODE = Object.freeze({
   // Studio's own: the caller may not have it, whatever it asks the song.
   studio_only: 403,
   conflict: 409,
+  // A download that met a network which is down, a redirect the catalog does
+  // not allow, or a transfer that ran out of time.
+  network: 502,
+  redirect: 502,
+  timeout: 504,
+});
+
+/**
+ * The one sentence a caller is told for a library failure whose code is its
+ * own.
+ *
+ * The library writes its messages for the log: a network refusal carries the
+ * fetch error's raw text, which names a URL, a host or a path. So the sentence
+ * is fixed here, one per code, and the library's own text is logged instead —
+ * it never reaches a caller.
+ * @type {Readonly<Object<string, string>>}
+ */
+const LIBRARY_FAILED_TEXT_BY_CODE = Object.freeze({
+  network: "The instrument download failed; nothing was kept.",
+  redirect: "The instrument download was refused; nothing was kept.",
+  timeout: "The instrument download took too long; nothing was kept.",
 });
 
 /**
@@ -591,8 +668,21 @@ function sendResult(res, result) {
  * @returns {string}
  */
 function errorText(err) {
+  // A library code has one fixed sentence of its own: its message can carry the
+  // transfer's raw error text (a URL, a host, a path, a query), so it is logged
+  // here and never repeated.
   const code = typeof err?.code === "string" ? err.code : null;
-  if (code || err?.name === "AclError") return String(err?.message || INTERNAL_ERROR_TEXT);
+  if (code && Object.prototype.hasOwnProperty.call(LIBRARY_FAILED_TEXT_BY_CODE, code)) {
+    console.warn("[studio]", err);
+    return LIBRARY_FAILED_TEXT_BY_CODE[code];
+  }
+  // Only a refusal this module answers keeps its own sentence: a code outside
+  // that table is somebody else's vocabulary (the settings registry's, SQLite's)
+  // and its message may name a path or a query, so it is logged and replaced.
+  if (code && Object.prototype.hasOwnProperty.call(STATUS_BY_CODE, code)) {
+    return String(err?.message || INTERNAL_ERROR_TEXT);
+  }
+  if (err?.name === "AclError") return String(err?.message || INTERNAL_ERROR_TEXT);
   console.warn("[studio]", err);
   return INTERNAL_ERROR_TEXT;
 }
@@ -603,21 +693,80 @@ function errorText(err) {
  * The hub's reads throw (there is no half-answer to hand back): a StudioError
  * keeps its code, an ACL refusal becomes 403 with code "acl", and anything
  * unexpected becomes a 500 with code "internal" and a fixed sentence, so a
- * broken query never reaches the caller.
+ * broken query never reaches the caller. A code this module does not answer
+ * (the settings registry's, SQLite's) is somebody else's vocabulary and is
+ * reported as that same internal failure.
  */
 function sendError(res, err) {
   if (res.headersSent) return;
   const code = typeof err?.code === "string" ? err.code : null;
   const isAcl = err?.name === "AclError";
-  if (!code && !isAcl) {
+  const known = isAcl || (code !== null && Object.prototype.hasOwnProperty.call(STATUS_BY_CODE, code));
+  if (!known) {
     res.status(500).json({ ok: false, code: "internal", error: errorText(err) });
     return;
   }
-  res.status(isAcl ? 403 : (STATUS_BY_CODE[code] ?? 500)).json({
+  res.status(isAcl ? 403 : STATUS_BY_CODE[code]).json({
     ok: false,
     code: isAcl ? "acl" : code,
     error: errorText(err),
   });
+}
+
+/**
+ * Whether a handed-in default template is EXACTLY what this Studio saves, and
+ * nothing a caller hoped would be guessed at.
+ *
+ * `parseTemplate` NORMALIZES: it drops an id no widget has, replaces a size the
+ * widget cannot take with one it can, drops a repeated id and turns an empty
+ * entry into the built-in default. That is right for a layout read back out of
+ * storage, where a later panel's smaller table must still land. A template the
+ * operator is SAVING is their intent, and none of those repairs may quietly
+ * become the default for every song on every device, so the route refuses the
+ * value instead. Everything here is read from the shell's own tables: the nine
+ * mode and width keys, each widget and the sizes it allows. Nor may a save lose
+ * a top-level key: an object that is not exactly `v` and `layouts` is not a
+ * template this Studio saves.
+ * @param {string|object|null|undefined} raw
+ * @returns {boolean}
+ */
+function templateIsExact(raw) {
+  let value = raw;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return false;
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const topLevel = Object.keys(value);
+  if (topLevel.length !== 2 || !topLevel.includes("v") || !topLevel.includes("layouts")) return false;
+  if (value.v !== LAYOUT_VERSION) return false;
+  const table = value.layouts;
+  if (!table || typeof table !== "object" || Array.isArray(table)) return false;
+  for (const key of Object.keys(table)) {
+    if (!TEMPLATE_KEYS.has(key)) return false;
+    const entry = table[key];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const entryKeys = Object.keys(entry);
+    if (entryKeys.length !== 2 || !entryKeys.includes("v") || !entryKeys.includes("shown")) return false;
+    if (entry.v !== LAYOUT_VERSION) return false;
+    if (!Array.isArray(entry.shown) || entry.shown.length === 0) return false;
+    const seen = new Set();
+    for (const row of entry.shown) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+      const rowKeys = Object.keys(row);
+      if (rowKeys.length !== 2 || !rowKeys.includes("id") || !rowKeys.includes("size")) return false;
+      if (typeof row.id !== "string") return false;
+      if (!Object.prototype.hasOwnProperty.call(WIDGETS, row.id)) return false;
+      if (seen.has(row.id)) return false;
+      seen.add(row.id);
+      const sizes = Array.isArray(WIDGETS[row.id].sizes) ? WIDGETS[row.id].sizes : [];
+      if (!sizes.includes(row.size)) return false;
+    }
+  }
+  return true;
 }
 
 /** Wrap an async route so a thrown error becomes a response, not a rejection. */
@@ -804,6 +953,23 @@ function refuse(socket, status, text) {
  *   fetches anything, so a read-only member never reaches the network. Injected
  *   because this module owns no database; without it a download is refused,
  *   because this Crow cannot prove the caller may write.
+ * @param {{read: Function, write: Function, clear: Function}|null}
+ *   [options.layoutTemplate] the operator's default layout template: an
+ *   instance-local setting (`read()` answers the stored TEXT or null,
+ *   `write(text)` keeps it in the per-instance store, `clear()` removes it).
+ *   The panel loader builds it over the gateway's settings registry, so it
+ *   never syncs to a peer. Injected for the same reason as everything above —
+ *   this module owns no database — and absent, the template routes answer 503
+ *   and the page keeps the built-in default.
+ * @param {((req: object) => Promise<boolean>)|null} [options.isOwner]
+ *   whether a request is the owner at this machine's own dashboard (a local
+ *   password session: the panel loader wires
+ *   `buildLayoutOwnerCheck(isLocalPasswordSessionOn, db)`). It
+ *   gates the template's WRITE and CLEAR — a default for every song on every
+ *   device is the owner's — while the read stays open to any signed-in caller.
+ *   Injected for the same reason as everything above; absent, no write or
+ *   clear is allowed, so a caller that forgot it locks the routes rather than
+ *   opening them.
  * @returns {{router: Function, attachUpgrade: Function, broadcast: Function}}
  *   `router(dashboardAuth)` builds the Express router, `attachUpgrade(server)`
  *   installs the `/api/studio/ws` handler, and `broadcast(song_id, payload)`
@@ -826,6 +992,8 @@ export function createStudioWeb({
   songRowOf = null,
   libraryStore = null,
   assertCanWrite = null,
+  layoutTemplate = null,
+  isOwner = null,
 } = {}) {
   if (!hub || typeof hub.openSong !== "function" || typeof hub.runCommand !== "function") {
     throw new TypeError("Studio web: the session hub is required");
@@ -871,6 +1039,65 @@ export function createStudioWeb({
   // The project's write capability, checked before a download fetches anything.
   // Absent it, no download runs: this Crow cannot prove the caller may write.
   const canWrite = typeof assertCanWrite === "function" ? assertCanWrite : null;
+
+  // The operator's default layout template. Absent it, nothing in this module
+  // can read or keep one, and the template routes say so rather than guess.
+  const templateStore =
+    layoutTemplate &&
+    typeof layoutTemplate.read === "function" &&
+    typeof layoutTemplate.write === "function" &&
+    typeof layoutTemplate.clear === "function"
+      ? layoutTemplate
+      : null;
+
+  // The owner check the template's writes sit behind. Absent it (or a check
+  // that throws), nobody is the owner: the routes refuse rather than guess.
+  const ownerCheck = typeof isOwner === "function" ? isOwner : null;
+
+  /**
+   * Run one call into the injected template store, answering a failure with one
+   * fixed sentence.
+   *
+   * The store is the dashboard's settings registry, and its errors carry what a
+   * person cannot be shown: `INSTANCE_ID_UNREADABLE` names an absolute path and
+   * the SQLITE_* codes carry the statement that failed. Each is logged here and
+   * the caller gets `LAYOUT_TEMPLATE_STORE_FAILED_TEXT`.
+   * @param {() => Promise<any>} run the store call
+   * @param {object} res the Express response
+   * @returns {Promise<{ok: boolean, value: any}>} `ok:false` once a 500 is sent
+   */
+  async function templateCall(run, res) {
+    try {
+      return { ok: true, value: await run() };
+    } catch (err) {
+      console.warn("[studio] default layout template:", err);
+      res.status(500).json({ error: LAYOUT_TEMPLATE_STORE_FAILED_TEXT });
+      return { ok: false, value: null };
+    }
+  }
+
+  /**
+   * Whether this request may change the default layout, answering 403 when not.
+   * @param {object} req
+   * @param {object} res
+   * @returns {Promise<boolean>} true only when the injected check said so
+   */
+  async function ownerOnly(req, res) {
+    let allowed = false;
+    if (ownerCheck) {
+      try {
+        allowed = (await ownerCheck(req)) === true;
+      } catch (err) {
+        console.warn("[studio] default layout owner check:", err);
+        allowed = false;
+      }
+    }
+    if (!allowed) {
+      res.status(403).json({ error: LAYOUT_TEMPLATE_OWNER_TEXT });
+      return false;
+    }
+    return true;
+  }
 
   /**
    * The row of one song: through the store's single-row lookup when one is
@@ -1689,6 +1916,63 @@ export function createStudioWeb({
         if (!status) throw err;
         return res.status(status).json({ error: String(err?.message || STALE_BOT_TEXT) });
       }
+    }));
+
+    // ---- the operator's default layout template --------------------------
+    //
+    // Where a song's widgets sit is VIEW STATE and lives in the browser, one
+    // key per song, mode and size class (see `panel/shell-layout.js`). What an
+    // operator sets here is their DEFAULT for a song this device has never
+    // opened, kept as an instance-local setting so it is there on the phone as
+    // well as the laptop. It is a person's own preference: an agent never
+    // changes it, and the row lives in the per-instance settings table, which
+    // is never emitted to a peer.
+    //
+    // Reading one is any signed-in caller's, because every device a song opens
+    // on needs it. WRITING or CLEARING the default is the owner's alone: the
+    // same gate the Schedule panel's writes use, a local password session at
+    // this machine's own dashboard (the injected `isOwner`), so a session a peer
+    // sign-in minted and a signed peer call get one fixed refusal.
+
+    r.get("/api/studio/layout-template", dashboardAuth, handled(async (req, res) => {
+      if (!templateStore) return res.status(503).json({ error: LAYOUT_TEMPLATE_UNAVAILABLE_TEXT });
+      const stored = await templateCall(() => templateStore.read(), res);
+      if (!stored.ok) return undefined;
+      // A stored value the layout model refuses reads as "no template", which
+      // is the same answer an operator who never saved one gets.
+      return res.json({ template: parseTemplate(stored.value) });
+    }));
+
+    r.put("/api/studio/layout-template", dashboardAuth, requireCsrf, handled(async (req, res) => {
+      if (agentCaller(req)) return res.status(403).json({ error: AGENT_LAYOUT_TEMPLATE_REFUSED_TEXT });
+      if (!(await ownerOnly(req, res))) return undefined;
+      if (!templateStore) return res.status(503).json({ error: LAYOUT_TEMPLATE_UNAVAILABLE_TEXT });
+      const handed = req.body?.template;
+      // `parseTemplate` is the page's own rule: the wrong version, no layouts
+      // table and anything over the 8 KB cap are already null, and every entry
+      // is narrowed to a layout the page could have saved itself.
+      const template = parseTemplate(handed);
+      // Normalizing is not enough for a value being SAVED: an unknown mode or
+      // size class, an entry that is not exactly `{v:1, shown:[...]}`, a size
+      // the widget cannot take or a repeated id would silently become something
+      // else for every song on every device, so it is refused instead.
+      if (!template || !templateIsExact(handed)) {
+        return res.status(400).json({ error: LAYOUT_TEMPLATE_INVALID_TEXT });
+      }
+      // What is kept is the canonical text the model produces, so the page's
+      // `seedSong` materializes exactly what was validated here.
+      const kept = await templateCall(() => templateStore.write(JSON.stringify(template)), res);
+      if (!kept.ok) return undefined;
+      return res.json({ template });
+    }));
+
+    r.delete("/api/studio/layout-template", dashboardAuth, requireCsrf, handled(async (req, res) => {
+      if (agentCaller(req)) return res.status(403).json({ error: AGENT_LAYOUT_TEMPLATE_REFUSED_TEXT });
+      if (!(await ownerOnly(req, res))) return undefined;
+      if (!templateStore) return res.status(503).json({ error: LAYOUT_TEMPLATE_UNAVAILABLE_TEXT });
+      const cleared = await templateCall(() => templateStore.clear(), res);
+      if (!cleared.ok) return undefined;
+      return res.json({ template: null });
     }));
 
     // The engine's worklet module, composed here from the same source files a

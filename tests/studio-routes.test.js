@@ -11,8 +11,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
@@ -20,9 +21,18 @@ import express, { Router } from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { AclError } from "../servers/shared/project-acl.js";
 import { GENERAL_LIMITER_SKIP_PREFIXES, generalLimiterSkip } from "../servers/gateway/middleware/rate-limit.js";
+import { isLocalPasswordSessionOn } from "../servers/gateway/dashboard/local-session.js";
+import {
+  deleteLocalSetting,
+  readSetting,
+  setSettingsSyncManager,
+  writeSetting,
+} from "../servers/gateway/dashboard/settings/registry.js";
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb, ensureAgentToken } from "../bundles/studio/server/web.js";
+import { buildLayoutOwnerCheck, buildLayoutTemplate } from "../bundles/studio/server/layout-template.js";
+import studioPanel from "../bundles/studio/panel/studio.js";
 
 /** The project every song in these tests belongs to. */
 const PROJECT = 21;
@@ -121,16 +131,213 @@ function classifyPeer(req) {
   return { via: LOOPBACK.has(address) && !forwarded ? "local" : "remote" };
 }
 
+/** The instance-local setting key the operator's default layout template lives under. */
+const LAYOUT_TEMPLATE_KEY = "studio.layout_template";
+
+/** The instance id these tests pin: 32 hex characters, the shape the registry requires. */
+const INSTANCE_ID = "0123456789abcdef0123456789abcdef";
+
+/** The cookie value of the owner's own password session at this dashboard. */
+const OWNER_SESSION = "owner-session";
+
+/** The cookie value of a session a peer sign-in minted (scopes 'dashboard sso'). */
+const SSO_SESSION = "sso-session";
+
+/**
+ * The dashboard's settings tables, created as `scripts/init-db.js` creates them,
+ * for a scratch database that otherwise carries only the studio tables.
+ * @param {object} db
+ * @returns {Promise<void>}
+ */
+async function initSettingsTables(db) {
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS dashboard_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      lamport_ts INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS dashboard_settings_overrides (
+      key TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      lamport_ts INTEGER DEFAULT 0,
+      PRIMARY KEY (key, instance_id)
+    );
+  `);
+}
+
+/**
+ * The dashboard's `oauth_tokens` table, created as `scripts/init-db.js` creates
+ * it, for the owner check's own test: a dashboard session's token is stored as
+ * its sha256 hash, never the value the browser holds.
+ * @param {object} db
+ * @returns {Promise<void>}
+ */
+async function initSessionTable(db) {
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+      token TEXT PRIMARY KEY,
+      token_type TEXT NOT NULL CHECK(token_type IN ('access', 'refresh')),
+      client_id TEXT NOT NULL,
+      scopes TEXT DEFAULT '',
+      resource TEXT,
+      expires_at TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+}
+
+/**
+ * One dashboard session row: the cookie value's sha256 hash under the client id
+ * the dashboard's own logins use, with the scopes that decide what kind of
+ * session it is.
+ * @param {object} db
+ * @param {string} cookieValue the value the browser would hold
+ * @param {string} scopes "dashboard" for a password login here, "dashboard sso"
+ *   for a session a peer sign-in minted
+ * @returns {Promise<void>}
+ */
+async function seedSession(db, cookieValue, scopes) {
+  await db.execute({
+    sql:
+      "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) " +
+      "VALUES (?, 'access', 'dashboard', ?, '2999-01-01 00:00:00')",
+    args: [createHash("sha256").update(cookieValue).digest("hex"), scopes],
+  });
+}
+
+/**
+ * The layout-template store the panel loader injects: the SAME three calls the
+ * panel loader builds (`buildLayoutTemplate`, from `server/layout-template.js`),
+ * over this test's database, so what the routes wire and what a test wires
+ * cannot drift apart. The instance id is pinned to a scratch data dir for the
+ * length of the test, so the read and the write meet on the same rows and never
+ * near a real instance's settings.
+ * @param {import("node:test").TestContext} t
+ * @param {object} db
+ * @returns {{read: Function, write: Function, clear: Function}|null}
+ */
+function settingsTemplate(t, db) {
+  const dataDir = mkdtempSync(join(tmpdir(), "studio-settings-"));
+  writeFileSync(join(dataDir, "instance-id"), INSTANCE_ID);
+  const saved = { CROW_HOME: process.env.CROW_HOME, CROW_DATA_DIR: process.env.CROW_DATA_DIR };
+  process.env.CROW_HOME = join(dataDir, "home");
+  process.env.CROW_DATA_DIR = dataDir;
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  // The registry module as `buildLayoutTemplate` takes it: the three calls the
+  // routes hand it are the registry's own, over this test's client.
+  return buildLayoutTemplate({ readSetting, writeSetting, deleteLocalSetting }, db);
+}
+
+/**
+ * A settings error the way the dashboard's registry raises one: a code of its
+ * own and a message that names an absolute path or the SQL that broke.
+ * @param {string} message
+ * @param {string} code
+ * @returns {Error}
+ */
+function codedError(message, code) {
+  return Object.assign(new Error(message), { code });
+}
+
+/**
+ * The template store of an instance whose settings registry is broken: every
+ * call throws a coded error. What the route answers may contain neither the
+ * path nor the SQL text.
+ * @returns {{read: Function, write: Function, clear: Function}}
+ */
+function failingTemplate() {
+  const fail = (err) => async () => {
+    throw err;
+  };
+  return {
+    read: fail(codedError("/secret/path/data/instance-id", "INSTANCE_ID_UNREADABLE")),
+    write: fail(codedError("SQLITE_ERROR: no such table: dashboard_settings_overrides", "SQLITE_ERROR")),
+    clear: fail(codedError("SQLITE_READONLY: attempt to write a readonly database", "SQLITE_READONLY")),
+  };
+}
+
+/**
+ * The dashboard's session check as the panel receives it: a request without the
+ * session cookie is refused 401 before any route runs. The gateway supplies the
+ * real one; this is its shape, for the one test that needs the check in front of
+ * the router (every other test hands the router a pass-through, because its
+ * callers are the ones a real check has already let through).
+ * @param {object} req
+ * @param {object} res
+ * @param {Function} next
+ */
+function sessionGate(req, res, next) {
+  if (cookieOf(req.headers.cookie, "crow_session") !== "good") {
+    return res.status(401).json({ ok: false, error: "unauthorized" });
+  }
+  return next();
+}
+
+/**
+ * The dashboard's session check as the real owner rule needs it: the cookie IS
+ * the session, and it is handed on as `req.dashboardSession`, which is what
+ * `isLocalPasswordSessionOn` hashes and looks up in `oauth_tokens`.
+ * @param {object} req
+ * @param {object} _res
+ * @param {Function} next
+ */
+function ownerSessionGate(req, _res, next) {
+  req.dashboardSession = cookieOf(req.headers.cookie, "crow_session");
+  return next();
+}
+
 /**
  * Boot a gateway-shaped server for one test.
  * @param {import("node:test").TestContext} t
- * @param {{allowNetwork?: boolean, botScope?: object}} [options]
+ * @param {{allowNetwork?: boolean, botScope?: object, settings?: boolean,
+ *          auth?: Function, owner?: boolean|null, localOwner?: boolean,
+ *          templateStore?: Function}} [options]
+ *   `settings: true` gives the web layer the operator's default layout template,
+ *   wired the way the panel loader wires it, over the dashboard's settings
+ *   tables on this test's own database. `auth` is the dashboard session check the
+ *   router sits behind; without one the router sees a pass-through. `owner` is
+ *   what the injected owner check answers (`true` by default, the owner at this
+ *   machine's dashboard; `false` the peer session the rule refuses; `null` wires
+ *   no check at all, the case a caller that forgot one lands in).
+ *   `localOwner: true` wires the REAL rule instead (`isLocalPasswordSessionOn`,
+ *   through `buildLayoutOwnerCheck`) over this test's own `oauth_tokens` rows,
+ *   and hands the router the session gate that sets `req.dashboardSession`.
+ *   `templateStore(db)` replaces the store, for the cases where it fails.
  */
-async function boot(t, { allowNetwork = true, botScope = null } = {}) {
+async function boot(
+  t,
+  {
+    allowNetwork = true,
+    botScope = null,
+    settings = false,
+    auth = null,
+    owner = true,
+    localOwner = false,
+    templateStore = null,
+  } = {},
+) {
   const db = scratchDb(t);
   await initStudioTables(db);
   const acl = fakeAcl();
   const crowHome = mkdtempSync(join(tmpdir(), "studio-home-"));
+
+  // The owner check the real rule is built over: one password login at this
+  // machine's dashboard, and one session a peer sign-in minted.
+  let realOwnerCheck = null;
+  if (localOwner) {
+    await initSessionTable(db);
+    await seedSession(db, OWNER_SESSION, "dashboard");
+    await seedSession(db, SSO_SESSION, "dashboard sso");
+    realOwnerCheck = buildLayoutOwnerCheck(isLocalPasswordSessionOn, db);
+  }
 
   // The hub is built first and its broadcast reaches the web layer created
   // just after it, exactly as the panel loader wires the two together.
@@ -140,6 +347,19 @@ async function boot(t, { allowNetwork = true, botScope = null } = {}) {
     acl,
     onBroadcast: (song_id, payload) => webRef.web?.broadcast(song_id, payload),
   });
+
+  // The template store, when the test asks for one: the real settings registry
+  // over tables created as the schema creates them, with the instance id
+  // pinned to a scratch data dir so a run reads back exactly what it wrote. A
+  // test that hands its own store gets that one instead.
+  let layoutTemplate = null;
+  if (templateStore) {
+    await initSettingsTables(db);
+    layoutTemplate = templateStore(db);
+  } else if (settings) {
+    await initSettingsTables(db);
+    layoutTemplate = settingsTemplate(t, db);
+  }
 
   const web = createStudioWeb({
     hub,
@@ -155,6 +375,15 @@ async function boot(t, { allowNetwork = true, botScope = null } = {}) {
     crowHome,
     bundleDir: null,
     botScope,
+    layoutTemplate,
+    // The owner check the template's writes sit behind, the way the panel
+    // loader wires `isLocalPasswordSessionOn` (through `buildLayoutOwnerCheck`).
+    // `owner: null` omits it.
+    ...(realOwnerCheck
+      ? { isOwner: realOwnerCheck }
+      : owner === null
+        ? {}
+        : { isOwner: async () => owner === true }),
   });
   webRef.web = web;
 
@@ -170,7 +399,7 @@ async function boot(t, { allowNetwork = true, botScope = null } = {}) {
   // The gateway parses JSON for every route before the panel router (1 MB cap),
   // so the studio routes read `req.body` without a parser of their own.
   app.use(express.json({ limit: "1mb" }));
-  app.use(web.router((_req, _res, next) => next()));
+  app.use(web.router(auth || (localOwner ? ownerSessionGate : (_req, _res, next) => next())));
 
   const server = createServer(app);
   const upgrades = web.attachUpgrade(server);
@@ -654,6 +883,36 @@ test("an internal error does not leak its message", async (t) => {
   assert.ok(logged.some((args) => args[0] === "[studio]"), "the real error is logged");
 });
 
+test("a coded error this module does not answer is not repeated to the caller either", async (t) => {
+  const { base, hub, crowHome } = await boot(t);
+  const token = ensureAgentToken(crowHome);
+  // A code outside STATUS_BY_CODE belongs to somebody else's vocabulary (the
+  // settings registry's, SQLite's) and its message names a path or a query.
+  hub.listSongs = async () => {
+    throw Object.assign(new Error("SQLITE_ERROR: no such table: /secret/path"), { code: "SQLITE_ERROR" });
+  };
+
+  const logged = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => {
+    logged.push(args);
+  };
+  t.after(() => {
+    console.warn = realWarn;
+  });
+
+  const response = await fetch(`${base}/api/studio/agent/songs`, {
+    headers: { "x-studio-token": token },
+  });
+  assert.equal(response.status, 500);
+  const body = await response.json();
+  assert.equal(body.error, INTERNAL_TEXT, "the fixed sentence, not the store's own");
+  const text = JSON.stringify(body);
+  assert.equal(text.includes("SQLITE"), false, "the query text stays in the log");
+  assert.equal(text.includes("/secret/path"), false, "and so does the path");
+  assert.ok(logged.some((args) => args[0] === "[studio]"), "the real error is logged");
+});
+
 test("take.add over the agent HTTP route is refused with 403 and the studio-only message", async (t) => {
   const { base, hub, crowHome } = await boot(t);
   const songId = await seedSong(hub);
@@ -1032,4 +1291,465 @@ test("an agent that is neither the operator's MCP nor a bot sees nothing (fail c
   const operator = await agentGet(base, token, "/api/studio/agent/songs", "mcp");
   assert.equal(operator.status, 200);
   assert.equal(operator.body.length, 1);
+});
+
+// ---- the operator's default layout template ------------------------------
+
+/** The headers the Studio page sends with a read: a dashboard session and the CSRF token. */
+const PAGE_HEADERS = Object.freeze({
+  cookie: "crow_session=good; crow_csrf=csrf-ok",
+  "x-crow-csrf": "csrf-ok",
+});
+
+/** Those same headers, for a call that carries a JSON body. */
+const JSON_HEADERS = Object.freeze({ ...PAGE_HEADERS, "content-type": "application/json" });
+
+/**
+ * The headers a caller off this machine sends with the owner's own session: the
+ * test's stand-in for a peer address the owner rule can tell from this box.
+ */
+const OWNER_HEADERS = Object.freeze({
+  cookie: `crow_session=${OWNER_SESSION}; crow_csrf=csrf-ok`,
+  "x-crow-csrf": "csrf-ok",
+  "x-studio-test-peer": "remote",
+});
+/** One default layout: the editor alone, full width, on a laptop in compose. */
+const TEMPLATE = Object.freeze({
+  v: 1,
+  layouts: { "compose.laptop": { v: 1, shown: [{ id: "editor", size: "l" }] } },
+});
+
+/** GET the operator's default layout template. */
+async function getTemplate(base, headers = PAGE_HEADERS) {
+  const response = await fetch(`${base}/api/studio/layout-template`, { headers });
+  return { status: response.status, body: await response.json() };
+}
+
+/** PUT one default layout template. */
+async function putTemplate(base, template, headers = JSON_HEADERS) {
+  const response = await fetch(`${base}/api/studio/layout-template`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ template }),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+/** DELETE the operator's saved default. */
+async function deleteTemplate(base, headers = PAGE_HEADERS) {
+  const response = await fetch(`${base}/api/studio/layout-template`, { method: "DELETE", headers });
+  return { status: response.status, body: await response.json() };
+}
+
+/** Every row the template key has in the per-instance settings table. */
+async function localRows(db) {
+  const { rows } = await db.execute({
+    sql: "SELECT key, instance_id, value FROM dashboard_settings_overrides WHERE key = ?",
+    args: [LAYOUT_TEMPLATE_KEY],
+  });
+  return rows;
+}
+
+/** Every row the template key has in the settings table peers are emitted from. */
+async function globalRows(db) {
+  const { rows } = await db.execute({
+    sql: "SELECT key, value FROM dashboard_settings WHERE key = ?",
+    args: [LAYOUT_TEMPLATE_KEY],
+  });
+  return rows;
+}
+
+/** A response fake with the two properties the panel handler uses. */
+function fakeRes() {
+  return {
+    headersSent: false,
+    html: "",
+    send(body) {
+      this.html = String(body);
+      this.headersSent = true;
+    },
+    type() {
+      return this;
+    },
+  };
+}
+
+/** The dashboard layout stand-in: the body surrounded by a marker. */
+function layoutFor({ content }) {
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body>MARKER${content}</body></html>`;
+}
+
+/**
+ * One song's Studio page, exactly as the panel route renders it.
+ * @param {string} songId
+ * @returns {Promise<string>} the page HTML
+ */
+async function studioSongPage(songId) {
+  const res = fakeRes();
+  await studioPanel.handler(
+    { method: "GET", query: { song: songId }, headers: {} },
+    res,
+    { db: { async execute() { return { rows: [] }; } }, layout: layoutFor },
+  );
+  assert.equal(res.headersSent, true, "the panel route should have sent a page");
+  return res.html;
+}
+
+test("the default layout template starts empty, round-trips and can be cleared", async (t) => {
+  const { base } = await boot(t, { settings: true });
+
+  const nothing = await getTemplate(base);
+  assert.equal(nothing.status, 200);
+  assert.deepEqual(nothing.body, { template: null }, "an operator who never saved one has no template");
+
+  const saved = await putTemplate(base, TEMPLATE);
+  assert.equal(saved.status, 200);
+  assert.deepEqual(saved.body, { template: TEMPLATE }, "the answer is the canonical template");
+
+  const back = await getTemplate(base);
+  assert.equal(back.status, 200);
+  assert.deepEqual(back.body, saved.body, "what was saved is what comes back");
+
+  const cleared = await deleteTemplate(base);
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(cleared.body, { template: null });
+  assert.deepEqual((await getTemplate(base)).body, { template: null }, "and it is gone");
+});
+
+test("a template over 8 KB, at the wrong version or naming an unknown widget is refused and stores nothing", async (t) => {
+  const { base, db } = await boot(t, { settings: true });
+
+  const refused = [
+    ["over the 8 KB cap", { v: 1, layouts: {}, pad: "x".repeat(8192) }],
+    ["the wrong version", { v: 2, layouts: {} }],
+    ["no layouts table", { v: 1 }],
+    [
+      "a widget this Studio does not have",
+      { v: 1, layouts: { "compose.laptop": { v: 1, shown: [{ id: "not-a-widget", size: "m" }] } } },
+    ],
+    ["nothing at all", null],
+  ];
+  for (const [why, template] of refused) {
+    const answer = await putTemplate(base, template);
+    assert.equal(answer.status, 400, why);
+    assert.equal(typeof answer.body.error, "string", `${why}: the caller is told why`);
+  }
+
+  assert.deepEqual((await getTemplate(base)).body, { template: null }, "nothing was kept");
+  assert.deepEqual(await localRows(db), [], "and no row was written");
+  assert.deepEqual(await globalRows(db), [], "in either settings table");
+});
+
+test("a template that is not exactly what this Studio saves is refused and stores nothing", async (t) => {
+  const { base, db } = await boot(t, { settings: true });
+  const saved = await putTemplate(base, TEMPLATE);
+  assert.equal(saved.status, 200);
+  const rowsBefore = await localRows(db);
+
+  // Every one of these normalizes into something else: an unknown mode or width
+  // key is dropped, an extra key disappears, an illegal size becomes a legal
+  // one, a repeated id keeps only its first row, and an empty entry becomes the
+  // built-in default. A value being SAVED must be refused instead.
+  const refused = [
+    ["a mode and width this Studio does not lay out for", { "compose.huge": { v: 1, shown: [{ id: "editor", size: "m" }] } }],
+    ["an entry with a key that is not the version or the list", { "compose.laptop": { v: 1, shown: [{ id: "editor", size: "m" }], pad: 1 } }],
+    ["an entry the wrong version", { "compose.laptop": { v: 2, shown: [{ id: "editor", size: "m" }] } }],
+    ["an entry with no shown list", { "compose.laptop": { v: 1 } }],
+    ["an entry whose shown is not a list", { "compose.laptop": { v: 1, shown: { id: "editor", size: "m" } } }],
+    ["an entry that shows nothing", { "compose.laptop": { v: 1, shown: [] } }],
+    ["a size this widget may not take", { "compose.laptop": { v: 1, shown: [{ id: "midi", size: "l" }] } }],
+    [
+      "the same widget twice",
+      { "compose.laptop": { v: 1, shown: [{ id: "editor", size: "m" }, { id: "editor", size: "l" }] } },
+    ],
+    ["a row with a key that is not the id or the size", { "compose.laptop": { v: 1, shown: [{ id: "editor", size: "m", x: 0 }] } }],
+    ["a row that is not an object", { "compose.laptop": { v: 1, shown: ["editor"] } }],
+  ];
+  for (const [why, layouts] of refused) {
+    const answer = await putTemplate(base, { v: 1, layouts });
+    assert.equal(answer.status, 400, why);
+    assert.equal(typeof answer.body.error, "string", `${why}: the caller is told why`);
+    assert.deepEqual(await localRows(db), rowsBefore, `${why}: the stored template is unchanged`);
+  }
+
+  // A key BESIDE the version and the layouts table: `parseTemplate` drops it,
+  // so a value being saved may not carry one for the default of every song on
+  // every device.
+  const extra = await putTemplate(base, { v: 1, layouts: TEMPLATE.layouts, extra: "x" });
+  assert.equal(extra.status, 400, "a top-level key besides v and layouts");
+  assert.equal(typeof extra.body.error, "string", "the caller is told why");
+  assert.deepEqual(await localRows(db), rowsBefore, "the extra key stored nothing");
+
+  assert.deepEqual((await getTemplate(base)).body, saved.body, "what was kept is still the saved one");
+});
+
+test("a template write or clear without the CSRF header is refused", async (t) => {
+  const { base, db } = await boot(t, { settings: true });
+  const noCsrf = { cookie: "crow_session=good" };
+
+  const put = await putTemplate(base, TEMPLATE, { ...noCsrf, "content-type": "application/json" });
+  assert.equal(put.status, 403);
+  const clear = await deleteTemplate(base, noCsrf);
+  assert.equal(clear.status, 403);
+
+  assert.deepEqual(await localRows(db), [], "nothing was written");
+});
+
+test("a template write or clear with the wrong CSRF token is refused", async (t) => {
+  const { base, db } = await boot(t, { settings: true });
+
+  // The session is there and the header is there: what is wrong is the token,
+  // which is the double-submit check's whole point.
+  const wrong = { ...JSON_HEADERS, "x-crow-csrf": "wrong" };
+  const put = await putTemplate(base, TEMPLATE, wrong);
+  assert.equal(put.status, 403);
+  const clear = await deleteTemplate(base, { ...PAGE_HEADERS, "x-crow-csrf": "wrong" });
+  assert.equal(clear.status, 403);
+
+  assert.deepEqual(await localRows(db), [], "nothing was written and nothing was cleared");
+});
+
+test("an agent caller cannot change the operator's default template", async (t) => {
+  const { base, db, crowHome } = await boot(t, { settings: true });
+  const token = ensureAgentToken(crowHome);
+
+  const put = await putTemplate(base, TEMPLATE, { ...JSON_HEADERS, "x-studio-token": token });
+  assert.equal(put.status, 403);
+  assert.equal(typeof put.body.error, "string", "the agent is told it is the operator's own");
+
+  const clear = await deleteTemplate(base, { ...PAGE_HEADERS, "x-studio-token": token });
+  assert.equal(clear.status, 403);
+
+  assert.deepEqual(await localRows(db), [], "nothing was written and nothing was cleared");
+});
+
+test("an unauthenticated caller is refused on the template routes as on the other studio routes", async (t) => {
+  const { base } = await boot(t, { settings: true, auth: sessionGate });
+
+  const songs = await fetch(`${base}/api/studio/songs`);
+  assert.equal(songs.status, 401);
+
+  assert.equal((await getTemplate(base, {})).status, songs.status);
+  assert.equal((await putTemplate(base, TEMPLATE, { "content-type": "application/json" })).status, songs.status);
+  assert.equal((await deleteTemplate(base, {})).status, songs.status);
+});
+
+test("the template lands in the per-instance settings table and is never emitted to a peer", async (t) => {
+  const { base, db } = await boot(t, { settings: true });
+  const emitted = [];
+  setSettingsSyncManager({
+    feedsDisabled: false,
+    emitChange: async (table, op, row) => {
+      emitted.push({ table, op, row });
+      return null;
+    },
+  });
+  t.after(() => setSettingsSyncManager(null));
+
+  const saved = await putTemplate(base, TEMPLATE);
+  assert.equal(saved.status, 200);
+
+  const local = await localRows(db);
+  assert.equal(local.length, 1, "one row, in the per-instance table");
+  assert.equal(local[0].key, LAYOUT_TEMPLATE_KEY);
+  assert.equal(local[0].instance_id, INSTANCE_ID, "keyed by this instance");
+  assert.deepEqual(JSON.parse(local[0].value), saved.body.template, "holding the canonical template");
+
+  assert.deepEqual(await globalRows(db), [], "dashboard_settings keeps no row, so nothing can replicate");
+  assert.deepEqual(emitted, [], "and no change was emitted");
+
+  await deleteTemplate(base);
+  assert.deepEqual(await localRows(db), [], "a clear removes the row rather than writing an empty one");
+  assert.deepEqual(emitted, []);
+
+  // The recorder is live, so the empty list above means the template never
+  // emits: a key that IS meant to replicate takes the same path and does.
+  await writeSetting(db, "unified_dashboard_enabled", "true", { scope: "global" });
+  assert.equal(emitted.length, 1, "a syncable key emits");
+  assert.deepEqual(await globalRows(db), [], "and the template still holds no synced row");
+});
+
+test("with no settings registry the template routes answer 503 and the page still renders", async (t) => {
+  const { base } = await boot(t);
+
+  assert.equal((await getTemplate(base)).status, 503);
+  assert.equal((await putTemplate(base, TEMPLATE)).status, 503);
+  assert.equal((await deleteTemplate(base)).status, 503);
+
+  // The page is a shell the client fills in: it asks for the template at boot
+  // and keeps the built-in default when the answer is not a template.
+  const html = await studioSongPage("song-1");
+  assert.ok(html.includes('data-role="grid-wrap"'), "the grid is on the page");
+  assert.ok(html.includes('id="st-ask"'), "so is the ask box");
+});
+
+test("only the owner may change the default template, and the read stays open", async (t) => {
+  const { base, db } = await boot(t, { settings: true, owner: true });
+
+  const saved = await putTemplate(base, TEMPLATE);
+  assert.equal(saved.status, 200, `the owner's own write: ${JSON.stringify(saved.body)}`);
+  assert.equal((await getTemplate(base)).body.template !== null, true, "the owner's template was kept");
+  assert.equal((await deleteTemplate(base)).status, 200, "the owner's own clear");
+  assert.deepEqual(await localRows(db), [], "and it is gone");
+});
+
+test("a session that is not the owner is refused the template's write and clear", async (t) => {
+  // The peer-minted session: `isLocalPasswordSessionOn` answers false for scopes
+  // 'dashboard sso' and for a signed peer call.
+  const { base, db } = await boot(t, { settings: true, owner: false });
+
+  const put = await putTemplate(base, TEMPLATE);
+  assert.equal(put.status, 403);
+  assert.equal(typeof put.body.error, "string", "the caller is told it is the owner's");
+  const clear = await deleteTemplate(base);
+  assert.equal(clear.status, 403);
+
+  assert.deepEqual(await localRows(db), [], "nothing was written and nothing was cleared");
+
+  // The read is any signed-in caller's: every device a song opens on needs it.
+  const read = await getTemplate(base);
+  assert.equal(read.status, 200);
+  assert.deepEqual(read.body, { template: null });
+});
+
+test("with no owner check wired the template's write and clear are refused", async (t) => {
+  const { base, db } = await boot(t, { settings: true, owner: null });
+
+  assert.equal((await putTemplate(base, TEMPLATE)).status, 403);
+  assert.equal((await deleteTemplate(base)).status, 403);
+  assert.deepEqual(await localRows(db), [], "a caller that wired no check gets no write");
+  assert.equal((await getTemplate(base)).status, 200, "the read is unaffected");
+});
+
+test("the owner check built over no rule allows nobody", () => {
+  const db = { execute: async () => ({ rows: [] }) };
+  assert.equal(buildLayoutOwnerCheck(undefined, db)({ headers: {} }), false);
+  assert.equal(buildLayoutOwnerCheck(null, db)({ headers: {} }), false);
+});
+
+test("the owner check built over a rule is that rule, asked over this client", async () => {
+  const db = { marker: "scratch" };
+  const check = buildLayoutOwnerCheck(async (client, req) => client === db && req.owner === true, db);
+  assert.equal(await check({ owner: true }), true);
+  assert.equal(await check({ owner: false }), false);
+});
+
+test("the real owner rule: a local password session writes and clears, a peer-minted session is refused", async (t) => {
+  const { base, db } = await boot(t, { settings: true, localOwner: true });
+  const ssoHeaders = { ...OWNER_HEADERS, cookie: `crow_session=${SSO_SESSION}; crow_csrf=csrf-ok` };
+  const ssoJson = { ...ssoHeaders, "content-type": "application/json" };
+  const ownerJson = { ...OWNER_HEADERS, "content-type": "application/json" };
+
+  // The owner's own session, from this machine itself: the rule takes the
+  // owner's turn away from anything that starts on this box.
+  const loopback = await putTemplate(base, TEMPLATE, {
+    cookie: OWNER_HEADERS.cookie,
+    "x-crow-csrf": OWNER_HEADERS["x-crow-csrf"],
+    "content-type": "application/json",
+  });
+  assert.equal(loopback.status, 403, "a loopback caller is never the owner");
+  assert.equal(typeof loopback.body.error, "string", "and it is told it is the owner's");
+  assert.deepEqual(await localRows(db), [], "and it stored nothing");
+
+  const saved = await putTemplate(base, TEMPLATE, ownerJson);
+  assert.equal(saved.status, 200, `the owner's own write: ${JSON.stringify(saved.body)}`);
+  assert.deepEqual(saved.body, { template: TEMPLATE });
+  const rows = await localRows(db);
+  assert.equal(rows.length, 1, "one row, keyed by this instance");
+  assert.equal(rows[0].key, LAYOUT_TEMPLATE_KEY);
+  assert.deepEqual(JSON.parse(rows[0].value), TEMPLATE);
+
+  // The same requests with the session a peer sign-in minted: refused, and the
+  // owner's own template is untouched.
+  const peerWrite = await putTemplate(base, { v: 1, layouts: {} }, ssoJson);
+  assert.equal(peerWrite.status, 403, "a peer-minted session is not the owner");
+  assert.equal(typeof peerWrite.body.error, "string", "the caller is told it is the owner's");
+  assert.equal(loopback.body.error, peerWrite.body.error, "the same refusal the loopback caller got");
+  const peerClear = await deleteTemplate(base, ssoHeaders);
+  assert.equal(peerClear.status, 403);
+  assert.deepEqual(await localRows(db), rows, "nothing the refused session sent was written");
+
+  // The read is any signed-in caller's, on either session.
+  assert.equal((await getTemplate(base, ssoHeaders)).status, 200);
+
+  const cleared = await deleteTemplate(base, OWNER_HEADERS);
+  assert.equal(cleared.status, 200, `the owner's own clear: ${JSON.stringify(cleared.body)}`);
+  assert.deepEqual(await localRows(db), [], "and it is gone");
+});
+
+test("a settings store that fails is answered with one fixed sentence and never its own text", async (t) => {
+  const { base } = await boot(t, { templateStore: () => failingTemplate() });
+
+  const logged = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => {
+    logged.push(args);
+  };
+  t.after(() => {
+    console.warn = realWarn;
+  });
+
+  const read = await getTemplate(base);
+  const write = await putTemplate(base, TEMPLATE);
+  const clear = await deleteTemplate(base);
+
+  for (const [why, answer] of [["read", read], ["write", write], ["clear", clear]]) {
+    assert.equal(answer.status, 500, `${why}: a store that failed is not the caller's fault`);
+    assert.equal(typeof answer.body.error, "string", `${why}: there is one sentence`);
+    const text = JSON.stringify(answer.body);
+    assert.equal(text.includes("/secret/path"), false, `${why}: the path stays in the log`);
+    assert.equal(text.toLowerCase().includes("sqlite"), false, `${why}: so does the query text`);
+  }
+  assert.equal(read.body.error, write.body.error, "every failure gets the same sentence");
+  assert.equal(write.body.error, clear.body.error, "every failure gets the same sentence");
+  assert.equal(logged.filter((args) => args[0] === "[studio] default layout template:").length, 3, "each failure is logged");
+});
+
+/**
+ * The fixed sentence each of the instrument library's own failure codes is
+ * answered with: the library's messages are written for the log (a network
+ * refusal carries the fetch error's raw text), so none of them is repeated.
+ */
+const LIBRARY_FAILED_TEXT = Object.freeze({
+  network: "The instrument download failed; nothing was kept.",
+  redirect: "The instrument download was refused; nothing was kept.",
+  timeout: "The instrument download took too long; nothing was kept.",
+});
+
+test("a library failure code is answered with its fixed sentence, never the transfer's own text", async (t) => {
+  const { base, hub, crowHome } = await boot(t);
+  const token = ensureAgentToken(crowHome);
+
+  const logged = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => {
+    logged.push(args);
+  };
+  t.after(() => {
+    console.warn = realWarn;
+  });
+
+  // A refusal the library raises: the code is its own, the status the transfer's
+  // (502 for a network that is down or a redirect it refused, 504 for a timeout),
+  // and the message names a path and a query. The read is where a route meets it.
+  for (const [code, status] of [["network", 502], ["redirect", 502], ["timeout", 504]]) {
+    hub.listSongs = async () => {
+      throw Object.assign(new Error(`${code}: /secret/path SQLITE_ERROR: no such table`), { code });
+    };
+
+    const response = await fetch(`${base}/api/studio/agent/songs`, {
+      headers: { "x-studio-token": token },
+    });
+    assert.equal(response.status, status, `${code}: the code's own status`);
+    const body = await response.json();
+    assert.deepEqual(body, { ok: false, code, error: LIBRARY_FAILED_TEXT[code] }, `${code}: one fixed sentence`);
+    const text = JSON.stringify(body);
+    assert.equal(text.includes("/secret/path"), false, `${code}: the path stays in the log`);
+    assert.equal(text.includes("SQLITE"), false, `${code}: so does the query text`);
+  }
+
+  assert.ok(
+    logged.some((args) => args[0] === "[studio]" && String(args[1]?.message).includes("/secret/path")),
+    "the real refusal is logged",
+  );
 });
