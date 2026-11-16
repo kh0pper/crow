@@ -182,11 +182,91 @@ test("Ramble's module: today's challenge, the bird's Health, today's steps and t
     assert.ok(after.health.energy >= first.health.energy, "the move pays Health");
     assert.equal(after.streak.days, 1, "a Done day is a streak day");
 
-    // Nothing free-text can ride out: the challenge is these six fields, health/steps/streak these.
-    assert.deepEqual(Object.keys(after).sort(), ["challenge", "health", "off", "steps", "streak"]);
+    // Nothing free-text can ride out: the challenge is these six fields, health/steps/streak these,
+    // and the day's own fields are the slot name, the lengths, one flag per slot, the minutes and
+    // the week's total.
+    assert.deepEqual(Object.keys(after).sort(), [
+      "challenge", "health", "lengths", "minutesToday", "off", "slot", "slots", "steps", "streak", "week",
+    ]);
     assert.deepEqual(Object.keys(after.health).sort(), ["energy", "max"]);
     assert.deepEqual(Object.keys(after.steps).sort(), ["goal", "today"]);
     assert.deepEqual(Object.keys(after.streak), ["days"]);
+  } finally { db.close(); }
+});
+
+test("Ramble's module: a fresh day carries the Now slot, the three lengths, one entry per non-empty slot and an empty week", async () => {
+  const db = await rambleDb();
+  try {
+    const now = new Date(2026, 9, 30, 12, 0, 0).getTime(); // local noon: the picker's midday
+    const lib = areaChunks();
+    const card = await B.forYouMoves(db, { now, weather: null, library: lib });
+    const { dayCards } = await import("../bundles/ramble/server/moves/slots.js");
+    const day = await dayCards(db, { now, weather: null, library: lib });
+
+    assert.equal(card.slot, day.nowSlot, "the Now slot of the day the card was drawn from");
+    assert.equal(card.slot, "midday");
+    assert.deepEqual(card.lengths, [10, 20, 30]);
+
+    const filled = day.slots.filter((item) => item.empty !== true);
+    assert.ok(filled.length > 0, "the day has cards");
+    assert.deepEqual(card.slots.map((item) => item.slot), filled.map((item) => item.slot),
+      "one entry per non-empty slot, in the day's order");
+    for (const item of card.slots) {
+      assert.deepEqual(Object.keys(item).sort(), ["done", "slot"]);
+      assert.equal(item.done, false, item.slot);
+    }
+
+    assert.equal(card.minutesToday, 0, "no movemin row yet");
+    assert.deepEqual(card.week, { total: 0 });
+  } finally { db.close(); }
+});
+
+test("Ramble's module: a done card reads done in its own slot only, and minutesToday is the day's movemin row", async () => {
+  const db = await rambleDb();
+  try {
+    const now = new Date(2026, 9, 30, 12, 0, 0).getTime();
+    const lib = areaChunks();
+    const fresh = await B.forYouMoves(db, { now, weather: null, library: lib });
+    assert.ok(fresh.slots.length > 1, "a fresh day has more than one card to tell apart");
+    assert.equal(fresh.minutesToday, 0);
+
+    const target = fresh.slots[fresh.slots.length - 1];
+    const { recordSlotDone } = await import("../bundles/ramble/server/moves/day.js");
+    await recordSlotDone(db, {
+      day: fresh.challenge.day, slot: target.slot, entry: { kind: "routine", areas: ["mobility"] }, via: "player", now,
+    });
+    const { insertOnce } = await import("../bundles/ramble/server/steps.js");
+    const { MOVE_MIN_KIND } = await import("../bundles/ramble/server/moves/progress.js");
+    await insertOnce(db, MOVE_MIN_KIND, fresh.challenge.day, 12, now);
+
+    const after = await B.forYouMoves(db, { now, weather: null, library: lib });
+    assert.deepEqual(after.slots.map((item) => item.slot), fresh.slots.map((item) => item.slot),
+      "the day's slots stay the day's slots");
+    assert.equal(after.slots.find((item) => item.slot === target.slot).done, true,
+      "the closed slot reads done");
+    for (const item of after.slots) {
+      if (item.slot === target.slot) continue;
+      assert.equal(item.done, false, item.slot);
+    }
+    assert.equal(after.minutesToday, 12, "the day's whole active minutes");
+  } finally { db.close(); }
+});
+
+test("Ramble's module: challenges off leaves the answer without the day's fields, and off is still the reason", async () => {
+  const db = await rambleDb();
+  try {
+    const now = new Date(2026, 9, 30, 12, 0, 0).getTime();
+    const { writePrefs } = await import("../bundles/ramble/server/moves/today.js");
+    await writePrefs(db, { on: false });
+
+    const off = await B.forYouMoves(db, { now, weather: null, library: areaChunks() });
+    assert.equal(off.off, true);
+    assert.equal(off.challenge, null);
+    for (const key of ["slot", "lengths", "slots", "minutesToday", "week"]) {
+      assert.equal(Object.hasOwn(off, key), false, `${key} is absent on an off day`);
+    }
+    assert.deepEqual(Object.keys(off).sort(), ["challenge", "health", "off", "steps", "streak"],
+      "exactly the shape the card has always been handed");
   } finally { db.close(); }
 });
 
@@ -318,6 +398,20 @@ const movesOk = () => ({
   },
 });
 
+/** The same card with the day's block (P13): the Now slot, the lengths, the dots, today, the week. */
+const movesDay = (over = {}) => ({
+  ramble: "ok",
+  moves: {
+    ...movesOk().moves,
+    slot: "morning",
+    lengths: [10, 20, 30],
+    slots: [{ slot: "morning", done: true }, { slot: "midday", done: false }, { slot: "evening", done: false }],
+    minutesToday: 20,
+    week: { total: 6 },
+    ...over,
+  },
+});
+
 test("the card: the title and the why line are escaped, and Start, Done, Swap and something else are there", () => {
   const out = H.movesHtml({ ramble: "ok", moves: { ...movesOk().moves, challenge: {
     day: DAY, title: 'He said "<b>hi</b>" & left', minutes: 10, why: "A & B <script>", done: false, entryId: "ex-1",
@@ -372,6 +466,77 @@ test("the card: missing, outdated or failing Ramble hides the whole section; es 
   assert.match(H.movesHtml({ ramble: "ok", moves: { ...movesOk().moves, streak: { days: 1 } } }, "es"), /1 día seguido/);
 });
 
+test("the card: the day's block draws the Now slot's Start link, the lengths, the dots, today and the week", () => {
+  const out = H.movesHtml(movesDay(), "en");
+  assert.match(out, /10 min/);
+  assert.match(out, /data-fy-move-lengths/);
+  assert.match(out, /or 20/, "a longer length is a button");
+  assert.match(out, /or 30/);
+  assert.match(out, /<button type="button" class="fy-btn fy-len" data-fy-len="20" aria-pressed="false">or 20<\/button>/);
+  assert.match(out, /<button type="button" class="fy-btn fy-len" data-fy-len="30" aria-pressed="false">or 30<\/button>/);
+  assert.doesNotMatch(out, /data-fy-len="10"/, "the card's own length is not offered again");
+  assert.match(out, /data-fy-move-dots/);
+  assert.match(out, /<span class="fy-move-dot" data-fy-dot="morning" data-done="1" role="img" aria-label="Morning · Done today"/);
+  assert.match(out, /data-fy-dot="midday" data-done="0" role="img" aria-label="Midday"/);
+  assert.match(out, /data-fy-dot="evening" data-done="0" role="img" aria-label="Evening"/);
+  assert.equal((out.match(/fy-move-dot"/g) || []).length, 3, "one dot per slot");
+  assert.match(out, /20 min today/);
+  assert.match(out, /Week: 6 of 10/);
+  assert.match(out, /<a class="fy-btn fy-btn--primary" href="\/dashboard\/ramble\?moves=start&amp;slot=morning" data-fy-move-start data-fy-start-base="\/dashboard\/ramble\?moves=start&amp;slot=morning">Start<\/a>/);
+});
+
+test("the card: the day's block hides the old length line and gives the lengths line its own first span", () => {
+  const out = H.movesHtml(movesDay(), "en");
+  assert.match(out, /<p class="fy-tile-meta" data-fy-move-minutes hidden>10 min<\/p>/,
+    "the length is shown once, by the lengths line");
+  assert.match(out, /<p class="fy-tile-meta" data-fy-move-lengths><span data-fy-move-len-first>10 min<\/span>/);
+  assert.equal(out.includes("data-fy-move-len-first"), true);
+
+  const older = H.movesHtml(movesOk(), "en");
+  assert.match(older, /<p class="fy-tile-meta" data-fy-move-minutes>10 min<\/p>/,
+    "without a day block the old line is not hidden");
+  assert.equal(older.includes("data-fy-move-len-first"), false);
+});
+
+test("the card: a card of 0 minutes offers no other length", () => {
+  const out = H.movesHtml(movesDay({ challenge: {
+    day: DAY, title: "Stand up", minutes: 0, why: "", done: false, entryId: "ex-1",
+  } }), "en");
+  assert.match(out, /data-fy-move-lengths/, "the day block is still drawn");
+  assert.match(out, /data-fy-move-len-first>0 min</);
+  assert.doesNotMatch(out, /data-fy-len/, "nothing to press next to 0 min");
+  assert.doesNotMatch(out, /or 20|or 30/);
+});
+
+test("the card: no minutes today says nothing about them; an unknown slot name keeps the old Start link", () => {
+  const none = H.movesHtml(movesDay({ minutesToday: 0 }), "en");
+  assert.doesNotMatch(none, /min today/);
+  assert.doesNotMatch(none, /data-fy-move-minutes-today/);
+  assert.match(none, /Week: 6 of 10/, "the week still shows");
+
+  const odd = H.movesHtml(movesDay({ slot: "eveningish", week: { total: 40 } }), "en");
+  assert.match(odd, /href="\/dashboard\/ramble\?moves=start" data-fy-move-start/);
+  assert.doesNotMatch(odd, /data-fy-move-slot/, "no Now slot to mark done");
+  assert.match(odd, /Week: 10 of 10/, "the week's total is clamped");
+});
+
+test("the card: without slots (an older Ramble) the markup is the card it has always been", () => {
+  const out = H.movesHtml(movesOk(), "en");
+  assert.match(out, /<a class="fy-btn fy-btn--primary" href="\/dashboard\/ramble\?moves=start">Start<\/a>/);
+  assert.doesNotMatch(out, /data-fy-move-lengths|data-fy-dot|data-fy-len|data-fy-move-start|data-fy-start-base|data-fy-move-slot/);
+  assert.doesNotMatch(out, /min today|Week:/);
+  assert.equal(H.movesHtml({ ramble: "ok", moves: { ...movesOk().moves, slots: [] } }, "en"), out,
+    "an empty slot list is no block at all");
+});
+
+test("the card: a title with markup in it is still escaped on the day's card", () => {
+  const out = H.movesHtml(movesDay({ challenge: {
+    day: DAY, title: 'He said "<b>hi</b>" & left', minutes: 10, why: "A & B <script>", done: false, entryId: "ex-1",
+  } }), "en");
+  assert.match(out, /He said &quot;&lt;b&gt;hi&lt;\/b&gt;&quot; &amp; left/);
+  assert.doesNotMatch(out, /<b>hi<\/b>|<script>/);
+});
+
 test("the page puts Move after Your morning and before Listen; every section off says so", () => {
   const settings = { sections: { morning: true, moves: true, listen: true, news: false, weather: false }, city: "", place: null };
   const morning = { needs: { total: 0, items: [] }, due: { total: 0, items: [] }, finished: { total: 0, items: [] }, leftOff: null };
@@ -398,9 +563,9 @@ test("the client JS has no backtick (it is emitted inside a template literal)", 
   assert.ok(!forYouClientJs().includes("`"));
 });
 
-function movesRig() {
+function movesRig(moves) {
   return import("../servers/gateway/dashboard/panels/for-you/client.js").then(({ forYouClientJs }) => {
-    const card = H.movesHtml(movesOk(), "en");
+    const card = H.movesHtml({ ramble: "ok", moves: moves || movesOk().moves }, "en");
     const { document, window } = parseHTML(`<!doctype html><html><body><main data-fy data-fy-failed="That didn't save">${card}</main></body></html>`);
     Object.defineProperty(document, "cookie", { value: "crow_csrf=t", configurable: true });
     const posts = [];
@@ -414,8 +579,9 @@ function movesRig() {
     const ctx = vm.createContext({ window, document, fetch: fetchStub, JSON, String, Number, Math, encodeURIComponent, decodeURIComponent, Promise });
     vm.runInContext(forYouClientJs().replace(/^<script>|<\/script>\s*$/g, ""), ctx);
     const click = (verb) => document.querySelector('[data-fy-move="' + verb + '"]').dispatchEvent(new window.Event("click", { bubbles: true }));
+    const clickOn = (sel) => document.querySelector(sel).dispatchEvent(new window.Event("click", { bubbles: true }));
     return {
-      document, posts, click,
+      document, posts, click, clickOn,
       reply(next) { reply = next; },
       failOn() { fail = true; },
       async settle() { for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r)); },
@@ -449,6 +615,51 @@ test("the client: the streak line is singular at one day", async () => {
   plural.click("done");
   await plural.settle();
   assert.equal(plural.document.querySelector("[data-fy-move-streak]").textContent, "4-day streak");
+});
+
+test("the client: a Swap repaint writes the new length into the lengths line's first span", async () => {
+  const r = await movesRig(movesDay().moves);
+  const first = () => r.document.querySelector("[data-fy-move-len-first]");
+  assert.equal(first().textContent, "10 min");
+  r.reply(routeSnapshot({ challenge: { entry: { id: "ex-2", title: "Another one", minutes: 25 } } }));
+  r.click("swap");
+  await r.settle();
+  assert.equal(r.document.querySelector("[data-fy-move-minutes]").textContent, "25 min");
+  assert.equal(first().textContent, "25 min", "the line that is shown follows the card too");
+});
+
+test("the client: a length button rewrites the Start link, one at a time, with no call", async () => {
+  const r = await movesRig(movesDay().moves);
+  const start = () => r.document.querySelector("[data-fy-move-start]").getAttribute("href");
+  const pressed = (n) => r.document.querySelector('[data-fy-len="' + n + '"]').getAttribute("aria-pressed");
+  assert.equal(start(), "/dashboard/ramble?moves=start&slot=morning");
+  r.clickOn('[data-fy-len="20"]');
+  assert.equal(start(), "/dashboard/ramble?moves=start&slot=morning&len=20");
+  assert.equal(pressed(20), "true");
+  r.clickOn('[data-fy-len="20"]');
+  assert.equal(start(), "/dashboard/ramble?moves=start&slot=morning", "pressing it again clears it");
+  assert.equal(pressed(20), "false");
+  r.clickOn('[data-fy-len="20"]');
+  r.clickOn('[data-fy-len="30"]');
+  assert.equal(start(), "/dashboard/ramble?moves=start&slot=morning&len=30", "one length at a time");
+  assert.equal(pressed(20), "false");
+  assert.equal(pressed(30), "true");
+  assert.deepEqual(r.posts, [], "no network call");
+  await r.settle();
+});
+
+test("the client: a Done fills the Now slot's dot and says so in its label", async () => {
+  const r = await movesRig({ ...movesDay().moves, slots: [{ slot: "morning", done: false }, { slot: "midday", done: false }] });
+  const dot = (slot) => r.document.querySelector('[data-fy-dot="' + slot + '"]');
+  assert.equal(dot("morning").getAttribute("data-done"), "0");
+  assert.equal(dot("morning").getAttribute("aria-label"), "Morning");
+  r.click("done");
+  await r.settle();
+  assert.equal(dot("morning").getAttribute("data-done"), "1");
+  assert.match(dot("morning").getAttribute("style"), /var\(--crow-accent\)/);
+  assert.equal(dot("morning").getAttribute("aria-label"), "Morning · Done today");
+  assert.equal(dot("midday").getAttribute("data-done"), "0", "only the Now slot closed");
+  assert.equal(dot("midday").getAttribute("aria-label"), "Midday");
 });
 
 test("the client: a repaint that throws never leaves the Done/Swap buttons stuck", async () => {

@@ -5313,6 +5313,13 @@ export const translations = {
   "forYou.movesStreak.one": { en: "{n}-day streak", es: "{n} día seguido" },
   "forYou.movesStreak.other": { en: "{n}-day streak", es: "{n} días seguidos" },
   "forYou.movesSwapRefused": { en: "That's all the swaps for today.", es: "No quedan más cambios hoy." },
+  // For You: Move's day line (the Now slot, the shorter lengths, the dots, today's minutes, the week)
+  "forYou.movesLenOr": { en: "or {n}", es: "or {n}" },
+  "forYou.movesMinutesToday": { en: "{n} min today", es: "{n} min today" },
+  "forYou.movesWeek": { en: "Week: {total} of 10", es: "Week: {total} of 10" },
+  "forYou.slot.morning": { en: "Morning", es: "Morning" },
+  "forYou.slot.midday": { en: "Midday", es: "Midday" },
+  "forYou.slot.evening": { en: "Evening", es: "Evening" },
   // Widgets phase 1: "What needs me" (widgets/needs-me.js)
   "widgets.needsMe.title": { en: "What needs me", es: "Lo que me espera" },
   "widgets.needsMe.allClear": { en: "All clear", es: "Todo en orden" },
@@ -5359,6 +5366,7 @@ export const translations = {
   "widgets.today.nextUp": { en: "Next up", es: "Lo próximo" },
   "widgets.today.allDay": { en: "All day", es: "Todo el día" },
   "widgets.today.move": { en: "Today's move", es: "El movimiento de hoy" },
+  "widgets.today.nowLine": { en: "Now: {title} · {minutes} min · {done} of {total} done", es: "Now: {title} · {minutes} min · {done} of {total} done" },
   "widgets.today.stepsLabel": { en: "Steps today", es: "Pasos de hoy" },
   "widgets.today.steps": { en: "{n} of {goal} steps", es: "{n} de {goal} pasos" },
   "widgets.today.moodLabel": { en: "Mood", es: "Ánimo" },

@@ -128,6 +128,67 @@ export function minutesText(sec, lang = "en") {
   return n > 0 ? fill(t("forYou.minutes", lang), { n: Math.max(1, Math.round(n / 60)) }) : "";
 }
 
+/** Ramble's three day slots (moves/slots.js) and the word each one draws; any other name is skipped. */
+const MOVE_SLOT_KEYS = Object.freeze({
+  morning: "forYou.slot.morning",
+  midday: "forYou.slot.midday",
+  evening: "forYou.slot.evening",
+});
+
+/** One of the three slot names, or "" — never an inherited property name. */
+const moveSlotName = (v) => (typeof v === "string" && Object.hasOwn(MOVE_SLOT_KEYS, v) ? v : "");
+
+/** One dot per slot of Ramble's day: filled (accent) when that slot is done, a ring otherwise. */
+function moveDotsHtml(slots, lang) {
+  const dots = [];
+  for (const item of slots) {
+    const name = item ? moveSlotName(item.slot) : "";
+    if (!name) continue;
+    const done = !!item.done;
+    const word = t(MOVE_SLOT_KEYS[name], lang);
+    const label = done ? `${word} · ${t("forYou.movesDoneToday", lang)}` : word;
+    const paint = done
+      ? "border:1px solid var(--crow-accent);background:var(--crow-accent)"
+      : "border:1px solid var(--crow-border);background:transparent";
+    dots.push(`<span class="fy-move-dot" data-fy-dot="${e(name)}" data-done="${done ? "1" : "0"}" role="img" aria-label="${e(label)}" style="display:inline-block;width:10px;height:10px;border-radius:50%;${paint};vertical-align:middle;margin-right:3px"></span>`);
+  }
+  return dots.length ? `<p class="fy-move-dots" data-fy-move-dots>${dots.join("")}</p>` : "";
+}
+
+/**
+ * The day's line: the card's own length, then one button per shorter-or-longer length the day
+ * offers, the dots, today's minutes and the week's total. An older Ramble sends no `slots` at all,
+ * and this whole block is empty — the card is then exactly the card it has always been.
+ */
+function moveDayHtml(m, minutes, lang) {
+  if (!Array.isArray(m.slots) || !m.slots.length) return { lengths: "", dots: "", meta: "" };
+  // No length to offer when the card has none: a card of 0 minutes offers nothing longer.
+  const offered = minutes > 0
+    ? (Array.isArray(m.lengths) ? m.lengths : [])
+      .map((n) => Number(n))
+      .filter((n) => Number.isFinite(n) && n > minutes)
+    : [];
+  const parts = [`<span data-fy-move-len-first>${e(fill(t("forYou.minutes", lang), { n: minutes }))}</span>`];
+  for (const n of offered) {
+    parts.push(`<span aria-hidden="true"> · </span>`);
+    parts.push(`<button type="button" class="fy-btn fy-len" data-fy-len="${e(n)}" aria-pressed="false">${e(fill(t("forYou.movesLenOr", lang), { n }))}</button>`);
+  }
+  const meta = [];
+  const today = Number(m.minutesToday);
+  if (Number.isFinite(today) && today > 0) {
+    meta.push(`<span data-fy-move-minutes-today>${e(fill(t("forYou.movesMinutesToday", lang), { n: Math.round(today) }))}</span>`);
+  }
+  if (m.week && typeof m.week === "object") {
+    const total = Math.max(0, Math.min(10, Math.round(Number(m.week.total) || 0)));
+    meta.push(`<span data-fy-move-week>${e(fill(t("forYou.movesWeek", lang), { total }))}</span>`);
+  }
+  return {
+    lengths: `<p class="fy-tile-meta" data-fy-move-lengths>${parts.join("")}</p>`,
+    dots: moveDotsHtml(m.slots, lang),
+    meta: meta.length ? `<p class="fy-tile-meta">${meta.join(`<span aria-hidden="true"> · </span>`)}</p>` : "",
+  };
+}
+
 /**
  * Move: Ramble's card (today's challenge, Done and Swap, the bird's Health, today's steps and the
  * streak). A missing, outdated or failing Ramble returns "" — the section is hidden entirely, and
@@ -168,13 +229,22 @@ export function movesHtml(mv, lang = "en") {
     </section>`;
   }
   const done = !!c.done;
+  const minutes = Number(c.minutes) || 0;
+  const slot = moveSlotName(m.slot);
+  const day = moveDayHtml(m, minutes, lang);
+  // The Start link carries the Now slot (Ramble starts that slot) when the bundle names one.
+  const startBase = slot ? `/dashboard/ramble?moves=start&slot=${encodeURIComponent(slot)}` : "/dashboard/ramble?moves=start";
+  const startAttrs = day.lengths ? ` data-fy-move-start data-fy-start-base="${e(startBase)}"` : "";
+  // An older Ramble's day block is nothing at all: not even a line of whitespace, so the card is
+  // byte-for-byte the markup it was before.
+  const dayBlock = day.lengths ? `\n        ${day.lengths}${day.dots}${day.meta}` : "";
   return `<section class="fy-moves" aria-labelledby="fy-moves-h">${head}
-      <div class="fy-card fy-tile fy-move" data-fy-move-card data-fy-minutes-fmt="${e(t("forYou.minutes", lang))}" data-fy-health-fmt="${e(t("forYou.movesHealth", lang))}" data-fy-steps-fmt="${e(t("forYou.movesSteps", lang))}" data-fy-streak-one-fmt="${e(t("forYou.movesStreak.one", lang))}" data-fy-streak-other-fmt="${e(t("forYou.movesStreak.other", lang))}" data-fy-done-label="${e(t("forYou.movesDone", lang))}" data-fy-done-state="${e(t("forYou.movesDoneToday", lang))}" data-fy-refused="${e(t("forYou.movesSwapRefused", lang))}">
+      <div class="fy-card fy-tile fy-move" data-fy-move-card${slot ? ` data-fy-move-slot="${e(slot)}"` : ""} data-fy-minutes-fmt="${e(t("forYou.minutes", lang))}" data-fy-health-fmt="${e(t("forYou.movesHealth", lang))}" data-fy-steps-fmt="${e(t("forYou.movesSteps", lang))}" data-fy-streak-one-fmt="${e(t("forYou.movesStreak.one", lang))}" data-fy-streak-other-fmt="${e(t("forYou.movesStreak.other", lang))}" data-fy-done-label="${e(t("forYou.movesDone", lang))}" data-fy-done-state="${e(t("forYou.movesDoneToday", lang))}" data-fy-refused="${e(t("forYou.movesSwapRefused", lang))}">
         <p class="fy-tile-title" data-fy-move-title>${e(c.title)}</p>
-        <p class="fy-tile-meta" data-fy-move-minutes>${e(fill(t("forYou.minutes", lang), { n: Number(c.minutes) || 0 }))}</p>
-        <p class="fy-tile-meta" data-fy-move-why${c.why ? "" : " hidden"}>${e(c.why || "")}</p>
+        <p class="fy-tile-meta" data-fy-move-minutes${day.lengths ? " hidden" : ""}>${e(fill(t("forYou.minutes", lang), { n: Number(c.minutes) || 0 }))}</p>
+        <p class="fy-tile-meta" data-fy-move-why${c.why ? "" : " hidden"}>${e(c.why || "")}</p>${dayBlock}
         <div class="fy-acts">
-          <a class="fy-btn fy-btn--primary" href="/dashboard/ramble?moves=start">${e(t("forYou.movesStart", lang))}</a>
+          <a class="fy-btn fy-btn--primary" href="${e(startBase)}"${startAttrs}>${e(t("forYou.movesStart", lang))}</a>
           <button type="button" class="fy-btn" data-fy-move="done" data-day="${e(c.day)}"${done ? " disabled" : ""}>${e(t(done ? "forYou.movesDoneToday" : "forYou.movesDone", lang))}</button>
           <button type="button" class="fy-btn" data-fy-move="swap">${e(t("forYou.movesSwap", lang))}</button>
         </div>
@@ -206,9 +276,24 @@ export function todayHtml(data, lang = "en", now = Date.now()) {
     lines.push(line("calendar", t("widgets.today.nextUp", lang), cal.when ? `${cal.summary} · ${cal.when}` : String(cal.summary)));
   }
   const move = data.move;
+  // A bundle new enough to send the day's slots says where the day stands ("Now: <title> · 10 min ·
+  // 1 of 3 done") and the card's tap opens Today; an older one sends none, and the line and the tap
+  // are the ones they have always been.
+  let moveNow = false;
   if (move && move.title) {
-    const minutes = Number(move.minutes) > 0 ? minutesText(move.minutes, lang) : "";
-    lines.push(line("move", t("widgets.today.move", lang), minutes ? `${move.title} · ${minutes}` : String(move.title)));
+    const minutes = Number(move.minutes) || 0;
+    const total = Number(move.slotsTotal) || 0;
+    if (total > 0 && minutes > 0) {
+      moveNow = true;
+      const done = Math.max(0, Math.min(total, Number(move.slotsDone) || 0));
+      lines.push(line("move", t("widgets.today.move", lang), fill(t("widgets.today.nowLine", lang), {
+        title: move.title, minutes, done, total,
+      })));
+    } else {
+      // The move's own minutes (not minutesText's seconds); a card with no length is its title alone.
+      const length = minutes > 0 ? fill(t("forYou.minutes", lang), { n: minutes }) : "";
+      lines.push(line("move", t("widgets.today.move", lang), length ? `${move.title} · ${length}` : String(move.title)));
+    }
   }
   const ramble = data.ramble;
   if (ramble) {
@@ -221,8 +306,11 @@ export function todayHtml(data, lang = "en", now = Date.now()) {
     if (mood) lines.push(line("mood", t("widgets.today.moodLabel", lang), t(mood, lang)));
   }
   if (!lines.length) return "";
-  // With a move on the card, the tap starts it (Ramble reads ?moves=start); otherwise it just opens Ramble.
-  const href = move && move.title ? "/dashboard/ramble?moves=start" : "/dashboard/ramble";
+  // With a move that carries its day's slots, the tap opens Today; with an older move the tap starts
+  // it (Ramble reads ?moves=start); otherwise it just opens Ramble.
+  const href = moveNow
+    ? "/dashboard/ramble?view=today"
+    : move && move.title ? "/dashboard/ramble?moves=start" : "/dashboard/ramble";
   return `<a class="fy-card fy-today" href="${href}" data-fy-today-card>
       <span class="fy-kicker">${e(t("widgets.today.title", lang))}</span>
       ${lines.join("\n      ")}

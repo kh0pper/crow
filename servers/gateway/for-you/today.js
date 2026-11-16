@@ -9,7 +9,10 @@
  *             try/catch: a bundle that is absent, half-installed, out of dependencies or not set up
  *             (getConfig throws not_ready) costs the line and nothing else;
  *   move      today's Ramble challenge, through the SAME loader For You's Move card uses
- *             (for-you/moves.js loadMoves) — no second opinion about what today's move is;
+ *             (for-you/moves.js loadMoves) — no second opinion about what today's move is. The line
+ *             is { title, minutes, done }, plus slotsDone and slotsTotal (the day's done cards out of
+ *             the day's non-empty ones) when the bundle sends `moves.slots`; a bundle older than
+ *             that sends none, and the two keys are then absent altogether;
  *   ramble    the bird's mood and today's steps, read SERVER-SIDE from the state Ramble's own
  *             /api/ramble/pet and /api/ramble/steps routes read (pet.js petState, steps.js
  *             stepsState). No HTTP self-call: the gateway already holds the db those two functions take.
@@ -20,6 +23,7 @@
  * whose every line is optional is never "broken".
  *
  *   loadToday(db, { crowHome, now, tz, lang, weather }) -> { calendar, move, ramble }
+ *       move: { title, minutes, done, slotsDone?, slotsTotal? } | null
  *   rambleState(db, { crowHome, now }) -> { installed, state }   the bird's own state, and whether
  *       Ramble is here at all (routes/widgets.js's bird API needs the difference: no Ramble is
  *       `no_ramble`, an empty read is not)
@@ -167,7 +171,15 @@ async function moveToday(db, { crowHome, now, lang, weather }) {
     if (!loaded || loaded.ramble !== "ok" || !loaded.moves || loaded.moves.off) return null;
     const challenge = loaded.moves.challenge;
     if (!challenge || !challenge.title) return null;
-    return { title: String(challenge.title), minutes: num(challenge.minutes), done: !!challenge.done };
+    const move = { title: String(challenge.title), minutes: num(challenge.minutes), done: !!challenge.done };
+    // The day's slots, when this Ramble sends them: how many of its cards are already done. An older
+    // bundle sends none, and both keys are then absent (the widget line stays the line it always was).
+    const slots = loaded.moves.slots;
+    if (Array.isArray(slots) && slots.length > 0) {
+      move.slotsTotal = slots.length;
+      move.slotsDone = slots.filter((item) => item && item.done === true).length;
+    }
+    return move;
   } catch (err) {
     console.warn(`[today] move line omitted: ${err && err.message}`);
     return null;
