@@ -460,11 +460,16 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       const entry = takeUpload(a.upload_id, actor);
       try {
         const source = sourceFromUpload(entry, a);
+        // C2 scope: the artifact this commit would WRITE must be the round's
+        // own (from the tool argument or the one the upload was begun for).
+        // Checked here, before either write body runs, and for create too (a
+        // scoped session may not create: it has no artifact of its own).
+        const artifactId = a.artifact_id ?? entry.artifactId;
+        if (scope && (artifactId == null || String(artifactId) !== String(scope.artifactId))) throw Object.assign(new Error("this round is limited to its own artifact"), { code: "forbidden" });
         if (a.mode === "create") {
           if (a.type == null) throw Object.assign(new Error("create needs a type: page, document or diagram"), { code: "bad_request" });
           return await doCreate({ title: a.title, type: a.type, source, libs: a.libs, change_note: a.change_note }, actor, scope, { inline: false });
         }
-        const artifactId = a.artifact_id ?? entry.artifactId;
         if (artifactId == null) throw Object.assign(new Error("update needs artifact_id"), { code: "bad_request" });
         if (entry.artifactId != null && String(artifactId) !== entry.artifactId) throw Object.assign(new Error("this upload was started for another artifact"), { code: "forbidden" });
         return await doUpdate({ artifact_id: artifactId, source, libs: a.libs, change_note: a.change_note, round_id: a.round_id, base_version: a.base_version }, actor, scope, { inline: false });

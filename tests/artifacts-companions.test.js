@@ -105,6 +105,28 @@ test("the boot migration writes the companions into stored defs once (marker), s
   } finally { db.close(); }
 });
 
+test("v2 migration: an instance whose v1 marker is already set gains the upload tools; a second run changes nothing", async () => {
+  const db = await defsDb();
+  try {
+    assert.equal(MIGRATION_KEY, "artifacts_companions_v2");
+    // The shape v1 left behind: Update granted, Find and Attach written in, the
+    // two-step upload not (it arrived later), and the v1 marker on the row.
+    await db.execute({ sql: "UPDATE pi_bot_defs SET definition=? WHERE bot_id='bobby'", args: [JSON.stringify({ tools: { crow_mcp: ["memory/crow_search_memories", U, F, A] } })] });
+    await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('artifacts_companions_v1', ?)", args: [new Date().toISOString()] });
+    const out = await migrateArtifactsCompanions(db, { log: () => {}, budgetFor: async () => budget(50) });
+    assert.equal(out.skipped, false, "the v1 marker does not satisfy v2");
+    assert.ok(out.updated.includes("bobby"));
+    assert.deepEqual((await defOf(db, "bobby")).tools.crow_mcp, ["memory/crow_search_memories", U, F, A, B, C], "only the missing pair is added");
+    assert.ok((await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key=?", args: [MIGRATION_KEY] })).rows[0]);
+    // Running again: nothing moves, not even a def that grants Update alone.
+    await db.execute({ sql: "UPDATE pi_bot_defs SET definition=? WHERE bot_id='none'", args: [JSON.stringify({ tools: { crow_mcp: [U] } })] });
+    const again = await migrateArtifactsCompanions(db, { log: () => {}, budgetFor: async () => budget(50) });
+    assert.equal(again.skipped, true);
+    assert.deepEqual(again.updated, []);
+    assert.deepEqual((await defOf(db, "none")).tools.crow_mcp, [U]);
+  } finally { db.close(); }
+});
+
 const catalog = JSON.stringify({ artifacts: [["artifact_update", "write"], ["artifact_find", "read"], ["artifact_attach", "write"], ["artifact_get", "read"]] });
 const ctx = (cap) => ({ lang: "en", changed: () => true, companionBudget: async () => budget(cap) });
 

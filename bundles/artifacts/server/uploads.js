@@ -23,6 +23,8 @@ export const MAX_PENDING_TOTAL = 32;
  *  text (engine comes from the commit); every one of them is UTF-8 text. */
 export const UPLOAD_FIELDS = Object.freeze(["html", "markdown", "svg", "source"]);
 export const UPLOAD_PATH_PREFIX = "/artifacts/upload";
+/** How often the one background sweep runs (armed by the first begin). */
+export const SWEEP_INTERVAL_MS = 60 * 1000;
 
 const err = (code, message) => Object.assign(new Error(message || code), { code });
 const digestOf = (token) => createHash("sha256").update(String(token == null ? "" : token), "utf8").digest();
@@ -45,6 +47,9 @@ export function capForField(field) {
   // The document renderer (marked) has a cliff on long escape-dense input, and
   // renders in the gateway process: markdown keeps its own, smaller cap.
   if (field === "markdown") max = Math.min(max, LIMITS.documentMarkdownBytes);
+  // A Design-kit diagram's `source` is a mermaid/D2/Vega-Lite spec: short by
+  // nature, and rendered in the kit. It never needs the 4 MiB a page may.
+  if (field === "source") max = Math.min(max, LIMITS.diagramSourceBytes);
   return max;
 }
 
@@ -61,8 +66,18 @@ const sameActor = (e, actor) =>
   e.actorKind === (actor?.kind ?? null) && e.actorId === (actor?.id ?? null) && e.thread === (actor?.thread ?? null);
 
 /** Drop finished/expired staging: an entry is never needed after its TTL. */
-function sweep(now) {
+function sweep(now = Date.now()) {
   for (const [k, e] of pending) if (e.expiresAt <= now) pending.delete(k);
+}
+
+let sweepTimer = null;
+/** Arm the one background sweep lazily, on the first begin. `unref()`: it must
+ *  never hold the process (or a test run) open. */
+function armSweep() {
+  if (sweepTimer) return sweepTimer;
+  sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
+  sweepTimer.unref();
+  return sweepTimer;
 }
 
 /**
@@ -71,6 +86,7 @@ function sweep(now) {
  * @returns {{token: string, path: string, expiresAt: number, maxBytes: number}}
  */
 export function beginUpload({ actor, field, artifactId = null, declaredBytes = null, sha256 = null, now = Date.now() } = {}) {
+  armSweep();
   sweep(now);
   if (!UPLOAD_FIELDS.includes(field)) throw err("bad_request", "field must be html, markdown, svg or source");
   const ceiling = capForField(field);
@@ -88,7 +104,7 @@ export function beginUpload({ actor, field, artifactId = null, declaredBytes = n
     key, actorKind: actor?.kind ?? null, actorId: actor?.id ?? null, thread: actor?.thread ?? null,
     field, artifactId: artifactId == null ? null : String(artifactId),
     declaredBytes, sha256: sha256 == null ? null : String(sha256).toLowerCase(),
-    expiresAt: now + UPLOAD_TTL_MS, bytes: null,
+    expiresAt: now + UPLOAD_TTL_MS, bytes: null, writing: false,
   });
   return { token, path: uploadPathFor(token), expiresAt: now + UPLOAD_TTL_MS, maxBytes: maxBytesFor(pending.get(key)) };
 }
@@ -112,6 +128,7 @@ export function findUpload(token) {
  * @returns {object} the live entry, already marked used
  */
 export function takeUpload(token, actor, now = Date.now()) {
+  sweep(now);   // cheap: a commit is the other moment staging is known to be done
   const e = findUpload(token);
   if (!e || e.used || e.expiresAt <= now || !sameActor(e, actor)) throw err("not_found", NO_SUCH);
   if (e.bytes == null) throw err("bad_request", "this upload has no file yet: PUT it to its put_url first");
@@ -127,33 +144,52 @@ export function dropUpload(entry) { if (entry && entry.key) pending.delete(entry
  * application/octet-stream), stop the moment it passes the cap, and keep the
  * bytes as a UTF-8 string on the entry.
  *
- * Refusals: unknown/expired/used token 404; a file already stored 409; a body
- * over the cap 413; bytes that are not UTF-8 400; a declared sha256 that does
- * not match 400.
+ * Refusals: unknown/expired/used token 404; a file already stored, or another
+ * PUT still in flight 409; a body over the cap 413; bytes that are not UTF-8
+ * 400; a declared sha256 that does not match 400.
+ *
+ * ONE PUT per token: the entry is claimed (`writing`) synchronously before the
+ * first await, so N concurrent PUTs cannot all buffer a file (or race to
+ * overwrite the winner's bytes). The claim is released on every refusal and
+ * error path, so a retry after an aborted PUT still works.
  */
 export async function handleUploadPut(req, res) {
+  sweep();   // cheap: a PUT is where staging is looked at
   const token = req?.params?.upload_id ?? pathToken(req?.url);
   const entry = token ? findUpload(token) : null;
   const now = Date.now();
   if (!entry || entry.used || entry.expiresAt <= now) { if (entry) pending.delete(entry.key); return refuse(req, res, 404, NO_SUCH); }
   if (entry.bytes != null) return refuse(req, res, 409, HAS_FILE);
+  if (entry.writing) return refuse(req, res, 409, HAS_FILE);
   if (req.readableEnded) return refuse(req, res, 400, ALREADY_READ);
 
-  const cap = maxBytesFor(entry);
-  const read = await readCapped(req, cap);
-  if (read.over) return refuse(req, res, 413, OVER_CAP);
-  if (read.error) return refuse(req, res, 400, CUT_SHORT);
-  let text;
-  try { text = new TextDecoder("utf-8", { fatal: true }).decode(read.body); }
-  catch { return refuse(req, res, 400, NOT_UTF8); }
-  if (entry.sha256) {
-    const got = createHash("sha256").update(read.body).digest();
-    if (!timingSafeEqual(got, Buffer.from(entry.sha256, "hex"))) return refuse(req, res, 400, SHA_MISMATCH);
+  entry.writing = true;
+  try {
+    const cap = maxBytesFor(entry);
+    const read = await readCapped(req, cap);
+    if (read.over) return refuse(req, res, 413, OVER_CAP);
+    if (read.error) return refuse(req, res, 400, CUT_SHORT);
+    let text;
+    try { text = new TextDecoder("utf-8", { fatal: true }).decode(read.body); }
+    catch { return refuse(req, res, 400, NOT_UTF8); }
+    if (entry.sha256) {
+      const got = createHash("sha256").update(read.body).digest();
+      if (!timingSafeEqual(got, Buffer.from(entry.sha256, "hex"))) return refuse(req, res, 400, SHA_MISMATCH);
+    }
+    // Re-check after the await: a commit may have taken (and dropped) the
+    // entry, the TTL may have run out, or the sweep may have dropped it while
+    // the body was still arriving. A late PUT never lands on a spent token and
+    // never swaps the bytes a commit already took.
+    if (pending.get(entry.key) !== entry || entry.used || entry.expiresAt <= Date.now()) return refuse(req, res, 404, NO_SUCH);
+    entry.bytes = text;
+    entry.size = read.body.length;
+    send(res, 200, "application/json", JSON.stringify({ ok: true, bytes: read.body.length, field: entry.field, max_bytes: cap }));
+    return undefined;
+  } finally {
+    // Released on success too: the file is on the entry now, which is the
+    // durable half of the claim.
+    entry.writing = false;
   }
-  entry.bytes = text;
-  entry.size = read.body.length;
-  send(res, 200, "application/json", JSON.stringify({ ok: true, bytes: read.body.length, field: entry.field, max_bytes: cap }));
-  return undefined;
 }
 
 /** The token out of a raw request URL (when no route param is available). */
@@ -193,12 +229,15 @@ function readCapped(req, cap) {
     };
     const onEnd = () => settle({ body: Buffer.concat(chunks, total) });
     const onError = () => settle({ error: true });
+    // A peer that hangs up mid-body never emits "end": the stream closes short.
+    const onClose = () => settle({ error: true });
     function settle(v) {
       if (settled) return;
       settled = true;
       req.removeListener("data", onData);
       req.removeListener("end", onEnd);
       req.removeListener("error", onError);
+      req.removeListener("close", onClose);
       // Stop the socket feeding us: no more bytes are read (or kept).
       try { req.pause(); } catch { /* already closed */ }
       resolve(v);
@@ -206,6 +245,7 @@ function readCapped(req, cap) {
     req.on("data", onData);
     req.on("end", onEnd);
     req.on("error", onError);
+    req.on("close", onClose);
   });
 }
 

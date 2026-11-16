@@ -5,7 +5,7 @@
  * artifact_upload_commit), which is the way out of the inline size cap. Two
  * writers only:
  *   1. a one-time boot migration over the local pi_bot_defs (marker
- *      `artifacts_companions_v1` in dashboard_settings), and
+ *      `artifacts_companions_v2` in dashboard_settings), and
  *   2. the Bot Builder Abilities save.
  * Peer (federation) patches are NEVER augmented: a peer granting Update
  * grants exactly that, and the migration runs once, so later patches stay as
@@ -23,7 +23,11 @@ import { primeBareServerTools } from "./bare-server-tools.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { isVoiceBotId, isVoiceBotDef } from "../../servers/shared/voice-bot.js";
 
-export const MIGRATION_KEY = "artifacts_companions_v1";
+// v2 (2026-10): v1 shipped before the upload pair existed, so an instance
+// that already carries the v1 marker has defs with Find and Attach but no
+// artifact_upload_begin/commit. The bump makes the migration run once more;
+// a def already fully augmented is a no-op (added = []).
+export const MIGRATION_KEY = "artifacts_companions_v2";
 
 /** Does this crow_mcp list grant artifact_update per tool (either spelling)? */
 export function grantsArtifactUpdate(list) {

@@ -23,6 +23,10 @@ export const LIMITS = Object.seal({
   // Not a D17 number: marked has a cliff on long escape-dense input and the
   // document type renders in the gateway process (renderer.js BOT_MD_MAX_INPUT).
   documentMarkdownBytes: 256 * 1024,
+  // A Design-kit diagram's spec text (the upload field `source`): a mermaid /
+  // D2 / Vega-Lite spec is short by nature (the kit refuses one over 64 KB),
+  // so an upload of one never needs the room a page does.
+  diagramSourceBytes: 256 * 1024,
   // A source that came inline (one tool argument) is bounded by the model's
   // OUTPUT-token limit, not by storage: a 31 KB page lost characters twice at
   // the hand of the model. Over this, the inline tools point at the two-step

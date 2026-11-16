@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { connect } from "node:net";
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -27,7 +28,7 @@ import * as comments from "../bundles/artifacts/server/comments.js";
 import * as rounds from "../bundles/artifacts/server/rounds.js";
 import * as store from "../bundles/artifacts/server/store.js";
 import { LIMITS } from "../bundles/artifacts/server/limits.js";
-import { handleUploadPut, readMeter, _resetReadMeter, _resetUploadsForTest, _expireForTest, UPLOAD_PATH_PREFIX, MAX_PENDING_PER_ACTOR } from "../bundles/artifacts/server/uploads.js";
+import { handleUploadPut, readMeter, _resetReadMeter, _resetUploadsForTest, _expireForTest, UPLOAD_PATH_PREFIX, MAX_PENDING_PER_ACTOR, SWEEP_INTERVAL_MS, capForField, findUpload, takeUpload } from "../bundles/artifacts/server/uploads.js";
 import { initGatewayActorKey, signArtifactsActor, verifyArtifactsActorSig } from "../scripts/pi-bots/actor-sig.mjs";
 import { isFunnelPublicPath, rejectFunneledMiddleware } from "../servers/gateway/funnel.js";
 
@@ -95,6 +96,52 @@ async function stage(c, text, args = {}) {
   const p = await put(b.data.put_url, text);
   assert.equal(p.status, 200, JSON.stringify(p));
   return b.data;
+}
+
+/** Poll a cheap predicate (server-side state a test changed under us). */
+async function until(fn, ms = 3000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) { if (fn()) return true; await new Promise((r) => setTimeout(r, 10)); }
+  return false;
+}
+
+/** A PUT written over a raw socket in STAGES, so a test can act while the body
+ *  is still arriving. `between(i)` runs after part i was written. */
+function stagedPut(token, parts, between = async () => {}) {
+  const total = parts.reduce((n, p) => n + Buffer.byteLength(p), 0);
+  return new Promise((resolve) => {
+    const sock = connect(s.port, "127.0.0.1");
+    let response = "";
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve({ status: Number(/^HTTP\/1\.1 (\d{3})/.exec(response)?.[1] ?? 0), response });
+    };
+    sock.on("data", (d) => { response += d.toString(); });
+    sock.on("error", () => {});
+    sock.on("close", finish);
+    sock.setTimeout(10000, () => { sock.destroy(); finish(); });
+    sock.on("connect", async () => {
+      sock.write(`PUT ${UPLOAD_PATH_PREFIX}/${token} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: ${total}\r\nConnection: close\r\n\r\n`);
+      for (let i = 0; i < parts.length; i++) { sock.write(parts[i]); await between(i); }
+      sock.end();
+    });
+  });
+}
+
+/** A PUT that sends part of its declared body and then hangs up mid-transfer. */
+function abortPut(putUrl) {
+  const token = putUrl.split("/").pop();
+  return new Promise((resolve) => {
+    const sock = connect(s.port, "127.0.0.1");
+    sock.on("error", () => {});
+    sock.on("close", () => resolve());
+    sock.on("connect", () => {
+      sock.write(`PUT ${UPLOAD_PATH_PREFIX}/${token} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: 4000\r\n\r\n<p>half`);
+      setTimeout(() => sock.destroy(), 30);
+    });
+  });
 }
 
 const clean = (botId, thread) => s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind, status) VALUES (?, 'perch', ?, 'perch-live', 'active')", args: [botId, thread] });
@@ -379,6 +426,36 @@ test("commit refuses an artifact other than the one begun, and a scoped session 
   } finally { await c.close(); }
 });
 
+test("a scoped session cannot commit an upload aimed at another artifact: the id actually used must be its round's", async () => {
+  await clean("bobby", "perchlive-up16");
+  const c = await client(s.artToken, bot("bobby", "perchlive-up16"));
+  try {
+    const x = (await call(c, "artifact_create", { title: "In scope", type: "page", source: { html: "<p>x</p>" } })).data.id;
+    const y = (await call(c, "artifact_create", { title: "Out of scope", type: "page", source: { html: "<p>y</p>" } })).data.id;
+    // Begun while the chat is still unscoped, and aimed at Y: both the one that
+    // passes artifact_id and the one that relies on the entry's own claim.
+    const staged = await stage(c, "<p>sneaky</p>", { field: "html", artifact_id: y });
+    const staged2 = await stage(c, "<p>sneaky again</p>", { field: "html", artifact_id: y });
+    // The chat is now a LOCKED round session bound to X: its scope is X.
+    await s.db.execute({ sql: "UPDATE bot_sessions SET narrowed_tools=? WHERE bot_id='bobby' AND gateway_thread_id='perchlive-up16'", args: [JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__"])] });
+    await s.db.execute({ sql: "INSERT INTO artifact_rounds (artifact_id,kind,base_version,thread_ids_json,untrusted_input,bot_id,session_id,status) VALUES (?,'round',1,'[]',1,'bobby','perchlive-up16','working')", args: [x] });
+    const roundId = Number((await s.db.execute({ sql: "SELECT id FROM artifact_rounds WHERE session_id='perchlive-up16' ORDER BY id DESC LIMIT 1", args: [] })).rows[0].id);
+
+    const before = await versions(y);
+    assert.match((await call(c, "artifact_upload_commit", { upload_id: staged.upload_id, mode: "update", artifact_id: y })).err, /^\[forbidden\] this round is limited to its own artifact$/);
+    assert.equal(await versions(y), before, "nothing was written to the out-of-scope artifact");
+    // The entry's own claim counts as "the id used": begun for Y, it is refused
+    // even with no artifact_id argument at commit.
+    assert.match((await call(c, "artifact_upload_commit", { upload_id: staged2.upload_id, mode: "update" })).err, /^\[forbidden\] this round is limited to its own artifact$/);
+    assert.equal(await versions(y), before, "still nothing");
+    // The scope's OWN artifact commits unchanged.
+    const okStage = await stage(c, "<p>x v2</p>", { field: "html", artifact_id: x });
+    const ok = await call(c, "artifact_upload_commit", { upload_id: okStage.upload_id, mode: "update", artifact_id: x, round_id: roundId });
+    assert.equal(ok.err, null, ok.err);
+    assert.equal(JSON.parse((await store.getVersion(s.db, x, ok.data.version)).source_json).html, "<p>x v2</p>");
+  } finally { await c.close(); }
+});
+
 // ─── staging bounds ────────────────────────────────────────────────────────
 
 test("pending uploads are capped per actor", async () => {
@@ -395,6 +472,112 @@ test("pending uploads are capped per actor", async () => {
     const m = await client(s.artToken, bot("mallory", "perchlive-up15m"));
     try { assert.equal((await call(m, "artifact_upload_begin", { field: "html", bytes: 10 })).err, null); } finally { await m.close(); }
   } finally { await c.close(); _resetUploadsForTest(); }
+});
+
+// ─── one PUT per token, the sweep, and the diagram-source cap ─────────────
+
+test("concurrent PUTs to one token: exactly one is stored, the rest are refused, and the file is the winner's", async () => {
+  _resetUploadsForTest();
+  await clean("bobby", "perchlive-up17");
+  const c = await client(s.artToken, bot("bobby", "perchlive-up17"));
+  try {
+    const size = 256 * 1024;
+    const bodies = Array.from({ length: 10 }, (_, i) => `<p>writer ${i}</p>`.padEnd(size, "x"));
+    const beg = await call(c, "artifact_upload_begin", { field: "html", bytes: size });
+    assert.equal(beg.err, null, beg.err);
+    _resetReadMeter();
+    const results = await Promise.all(bodies.map((b) => put(beg.data.put_url, b)));
+    const won = results.map((r, i) => ({ r, i })).filter(({ r }) => r.status === 200);
+    assert.equal(won.length, 1, `exactly one PUT stored a file (statuses: ${results.map((r) => r.status).join(",")})`);
+    assert.equal(results.filter((r) => r.status === 409).length, 9, "the others are refused 409, not buffered");
+    assert.ok(readMeter.bytes <= size + 1024, `only one body was read (${readMeter.bytes} bytes for ten of ${size})`);
+
+    const winner = bodies[won[0].i];
+    const done = await call(c, "artifact_upload_commit", { upload_id: beg.data.upload_id, mode: "create", title: "Raced", type: "page" });
+    assert.equal(done.err, null, done.err);
+    assert.equal(JSON.parse((await store.getVersion(s.db, done.data.id, 1)).source_json).html, winner, "the stored bytes are the 200's body");
+  } finally { await c.close(); _resetUploadsForTest(); }
+});
+
+test("an aborted PUT releases its claim: a retry stores the file and the commit takes it", async () => {
+  _resetUploadsForTest();
+  await clean("bobby", "perchlive-up18");
+  const c = await client(s.artToken, bot("bobby", "perchlive-up18"));
+  try {
+    const beg = await call(c, "artifact_upload_begin", { field: "html", bytes: 4096 });
+    const tok = beg.data.upload_id;
+    await abortPut(beg.data.put_url);
+    assert.ok(await until(() => { const e = findUpload(tok); return !!e && !e.writing; }), "the in-flight claim is released when the PUT dies");
+    const retry = await put(beg.data.put_url, "<p>second try</p>");
+    assert.equal(retry.status, 200, JSON.stringify(retry));
+    const done = await call(c, "artifact_upload_commit", { upload_id: tok, mode: "create", title: "Retried", type: "page" });
+    assert.equal(done.err, null, done.err);
+    assert.deepEqual(JSON.parse((await store.getVersion(s.db, done.data.id, 1)).source_json), { html: "<p>second try</p>" });
+  } finally { await c.close(); _resetUploadsForTest(); }
+});
+
+test("a commit never takes a half-sent file, and a PUT arriving after the commit cannot swap the content", async () => {
+  _resetUploadsForTest();
+  await clean("bobby", "perchlive-up19");
+  const c = await client(s.artToken, bot("bobby", "perchlive-up19"));
+  try {
+    const beg = await call(c, "artifact_upload_begin", { field: "html", bytes: 4096 });
+    const tok = beg.data.upload_id;
+    let release;
+    const held = new Promise((r) => { release = r; });
+    const slow = stagedPut(tok, ["<p>first half", " and second half</p>"], async (i) => { if (i === 0) await held; });
+    assert.ok(await until(() => { const e = findUpload(tok); return !!e && e.writing; }), "the PUT is in flight");
+    const early = await call(c, "artifact_upload_commit", { upload_id: tok, mode: "create", title: "Too soon", type: "page" });
+    assert.match(early.err, /^\[bad_request\] this upload has no file yet/, "a commit never takes a half-sent file");
+    release();
+    assert.equal((await slow).status, 200, "the PUT that was already in flight still lands");
+    const done = await call(c, "artifact_upload_commit", { upload_id: tok, mode: "create", title: "Raced", type: "page" });
+    assert.equal(done.err, null, done.err);
+    const body = { html: "<p>first half and second half</p>" };
+    assert.deepEqual(JSON.parse((await store.getVersion(s.db, done.data.id, 1)).source_json), body);
+    // The token is spent: a late PUT changes nothing about what was committed.
+    assert.equal((await put(beg.data.put_url, "<p>swapped</p>")).status, 404);
+    assert.deepEqual(JSON.parse((await store.getVersion(s.db, done.data.id, 1)).source_json), body, "the committed content is untouched");
+  } finally { await c.close(); _resetUploadsForTest(); }
+});
+
+test("the expiry sweep runs from takeUpload and from the PUT leg (and the interval is a minute, unref'd)", async () => {
+  _resetUploadsForTest();
+  assert.equal(SWEEP_INTERVAL_MS, 60 * 1000);
+  await clean("bobby", "perchlive-up20");
+  const c = await client(s.artToken, bot("bobby", "perchlive-up20"));
+  try {
+    const dead = await call(c, "artifact_upload_begin", { field: "html", bytes: 10 });
+    const live = await call(c, "artifact_upload_begin", { field: "html", bytes: 10 });
+    assert.equal(_expireForTest(dead.data.upload_id), true);
+    assert.ok(findUpload(dead.data.upload_id), "expired, but nothing has looked since");
+    assert.throws(() => takeUpload(live.data.upload_id, { kind: "bot", id: "bobby", thread: "perchlive-up20" }), /no file yet/);
+    assert.equal(findUpload(dead.data.upload_id), null, "a commit sweeps the expired entries");
+
+    const dead2 = await call(c, "artifact_upload_begin", { field: "html", bytes: 100 });
+    const live2 = await call(c, "artifact_upload_begin", { field: "html", bytes: 100 });
+    assert.equal(_expireForTest(dead2.data.upload_id), true);
+    assert.equal((await put(live2.data.put_url, "<p>live</p>")).status, 200);
+    assert.equal(findUpload(dead2.data.upload_id), null, "a PUT sweeps them too");
+  } finally { await c.close(); _resetUploadsForTest(); }
+});
+
+test("capForField: a Design-kit diagram's source is capped at 256 KiB, the other fields keep theirs", async () => {
+  assert.equal(capForField("source"), 256 * 1024);
+  assert.equal(capForField("source"), LIMITS.diagramSourceBytes);
+  assert.equal(capForField("html"), LIMITS.uploadBytes);
+  assert.equal(capForField("svg"), LIMITS.uploadBytes);
+  assert.equal(capForField("markdown"), Math.min(LIMITS.uploadBytes, LIMITS.documentMarkdownBytes));
+
+  await clean("bobby", "perchlive-up21");
+  const c = await client(s.artToken, bot("bobby", "perchlive-up21"));
+  try {
+    const spec = "flowchart LR\n" + "  a-->b\n".repeat(100);
+    const staged = await stage(c, spec, { field: "source" });
+    assert.equal(staged.max_bytes, Buffer.byteLength(spec), "a spec well inside the cap uploads at its own size");
+    const over = await call(c, "artifact_upload_begin", { field: "source", bytes: 256 * 1024 + 1 });
+    assert.match(over.err, /^\[too_big\] the declared size is over what one upload may carry/);
+  } finally { await c.close(); }
 });
 
 // ─── parity: the tool surface, the taint list, the bot defs ────────────────
