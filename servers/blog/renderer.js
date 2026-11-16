@@ -47,21 +47,47 @@ marked.setOptions({ gfm: true, breaks: true });
  * page (measured: 1356 ms and a RangeError for 64 KB of `1) `), while an
  * unbounded 4 MB document is an OOM in the gateway process.
  *
- * THE LONG-DOCUMENT SPLIT. marked's block lexer is still quadratic on a few
- * shapes the depth and byte guard below do not cover (`"    x\n>     y\n"`
- * repeated cost 11 s at 256 KB and ~200 s at 1 MiB), and the owner path is
- * reachable from public /blog, the file viewer and federated memories. So the
- * cap is 128 KB, and a document over it is NOT refused: a head of at most
- * OWNER_MD_MAX_INPUT characters is rendered as markdown exactly as before and
- * the WHOLE remainder follows as escaped plain text under a short notice (see
- * ownerMarkdownCut for where the cut lands, and tailHtml for the tail). Nothing
- * is dropped — the head's source plus the tail's text is the entire document.
- * Real content is far below the cap (every stored blog post, KB article and
- * memory is < 60 KB); the file viewer's larger documents are what the tail is
- * for. The head — everything handed to marked — still goes through the same
- * guarded pipeline, and a guard that refuses it (or a parse that throws) answers
- * the escaped text of the document — never "": a public page renders what was
- * written.
+ * THE LONG DOCUMENT: CHUNKED, NOT CUT. marked's block lexer is still quadratic
+ * on a few shapes the depth and byte guard below do not cover (`"    x\n>     y\n"`
+ * repeated cost 11 s at 256 KB and ~200 s at 1 MiB), and the owner path
+ * is reachable from public /blog, the file viewer and federated memories. So a
+ * document is never handed to marked in one piece: it is split into CONSECUTIVE
+ * chunks of at most OWNER_MD_MAX_INPUT characters (128 KB), each cut at a safe
+ * block boundary by ownerMarkdownCut (see ownerMarkdownChunks), and every chunk
+ * is rendered through the SAME guarded pipeline and sanitizer as before. A
+ * document of 500 KB-1 MB — the owner's lab notes, opened in the file viewer —
+ * is therefore FULLY formatted, not a formatted head followed by plain text.
+ * A document of at most 128 KB is one chunk and takes exactly the path it always
+ * did (pinned byte-for-byte by the digest tests).
+ *
+ * Three things make the split safe:
+ *   - the CUT is a block boundary: the end of a blank line outside a fence, else
+ *     the last line break, else the cap on a character boundary (ownerMarkdownCut).
+ *     A chunk almost never ends mid-block; where it does — a list, quote or table
+ *     that spans the cut — the block closes at the end of one chunk and reopens
+ *     in the next. The text is never altered, only its wrappers are split, and
+ *     `\n\n` (the preferred cut) is a block boundary to marked, which is what
+ *     makes it rare.
+ *   - CROSS-CHUNK REFERENCES: marked resolves `[label]` against ONE lexer's
+ *     `tokens.links`, so a definition written at the top of the document would
+ *     be invisible to the chunk that uses it. collectLinkDefinitions scans the
+ *     whole document linearly first (same fence rules, at most three spaces of
+ *     indent, marked's own def tokenizer for label/href/title, the first 256
+ *     labels — marked's first-wins) and every chunk is handed that map.
+ *   - the TOTAL-TIME BUDGET: a document whose chunks are EACH pathological is
+ *     still bounded, because the render stops once it has spent
+ *     OWNER_MD_RENDER_BUDGET_MS (1500 ms) of CPU and every remaining chunk
+ *     becomes the old plain-text tail — the notice, then the WHOLE remainder as
+ *     escaped text in one <pre> (tailHtml). Nothing is ever dropped. Under that
+ *     sits a hard ceiling too: nothing past OWNER_MD_MAX_TOTAL_INPUT (8 MiB, the
+ *     file viewer's own read cap) is parsed at all — it is the plain-text tail —
+ *     so this function is safe on its own even if a caller forgets that cap.
+ *
+ * Real content is far below all of it (every stored blog post, KB article and
+ * memory is < 60 KB); the file viewer's lab documents are what the chunks are
+ * for. Everything handed to marked still goes through the same guarded pipeline,
+ * and a chunk whose parse throws answers its own escaped text — never "": a
+ * public page renders what was written.
  * @param {string} markdown
  * @param {{ storageOrigin?: string|null }} [options] `storageOrigin` overrides
  *   the module-wide storage origin for this call only. The gateway sets that
@@ -83,22 +109,69 @@ export function renderMarkdown(markdown, options) {
     if (src.length <= OWNER_MD_MAX_INPUT) {
       return sanitizeRendered(renderOwnerHead(src), { imagePolicy: "owner", storageOrigin });
     }
-    // Over the cap: the head is the same guarded render, the tail is the plain
-    // text this page cannot afford to lex. Both halves meet exactly at `cut`.
-    const cut = ownerMarkdownCut(src);
-    return sanitizeRendered(renderOwnerHead(src.slice(0, cut)), { imagePolicy: "owner", storageOrigin })
-      + tailHtml(src.slice(cut));
+    // Longer than one chunk: render every chunk that fits the budget, then the
+    // WHOLE remainder as plain text (see renderOwnerLongDocument).
+    return renderOwnerLongDocument(src, storageOrigin);
   });
+}
+
+/**
+ * A document longer than one chunk (see "THE LONG DOCUMENT: CHUNKED, NOT CUT"
+ * above), rendered chunk by chunk: every chunk through the guarded pipeline and
+ * the sanitizer, the concatenation returned as one HTML string, and the part the
+ * budget (or the hard input ceiling) does not reach rendered as the plain-text
+ * tail. Nothing is dropped.
+ * @param {string} src line-ending-normalised document, longer than
+ *   OWNER_MD_MAX_INPUT
+ * @param {string|null} storageOrigin
+ * @returns {string} Safe HTML
+ */
+function renderOwnerLongDocument(src, storageOrigin) {
+  // The budget is measured from HERE, in process CPU time: rendering is
+  // synchronous and single-threaded, so this is the render's own cost whatever
+  // load the box carries elsewhere.
+  const started = process.cpuUsage();
+  // The whole document's link definitions, first: marked resolves `[x][y]`
+  // against the ONE lexer's `tokens.links`, so without this map a link in chunk
+  // 3 whose `[y]: …` line sits in chunk 1 renders as its literal text.
+  const seedLinks = collectLinkDefinitions(src, ownerMarked);
+  const context = { imagePolicy: "owner", storageOrigin };
+  let html = "";
+  /** Where the markdown-rendered part ends — where a tail would begin. */
+  let rendered = 0;
+  for (const [start, end] of ownerMarkdownChunks(src)) {
+    // Over the budget: this chunk and every one after it become the plain-text
+    // tail below. Checked BEFORE the chunk starts (so a pathological chunk
+    // cannot commit another 128 KB of work) and only after the first chunk (so a
+    // long document always shows at least one formatted chunk).
+    if (rendered > 0 && elapsedCpuMs(started) > OWNER_MD_RENDER_BUDGET_MS) break;
+    html += sanitizeRendered(renderOwnerHead(src.slice(start, end), seedLinks), context);
+    rendered = end;
+  }
+  // The remainder: the chunks the budget stopped before, and anything past
+  // OWNER_MD_MAX_TOTAL_INPUT (which ownerMarkdownChunks never covers). All of it,
+  // escaped, under the notice.
+  if (rendered < src.length) html += tailHtml(src.slice(rendered));
+  return html;
+}
+
+/** CPU milliseconds spent since `start` (a `process.cpuUsage()` reading). */
+function elapsedCpuMs(start) {
+  const spent = process.cpuUsage(start);
+  return (spent.user + spent.system) / 1000;
 }
 
 /**
  * The owner path's markdown half: one guarded parse, or — if the parse still
  * throws — the document as escaped text (see escapedTextHtml). Never more than
- * OWNER_MD_MAX_INPUT characters is handed to it.
+ * OWNER_MD_MAX_INPUT characters is handed to it (that is one chunk).
  * @param {string} src
+ * @param {object|null} [seedLinks] the whole document's link definitions, for a
+ *   chunk of a longer document (see collectLinkDefinitions); omitted for the
+ *   single-chunk path, which must stay byte-identical to what it always rendered
  * @returns {string} unsanitized HTML
  */
-function renderOwnerHead(src) {
+function renderOwnerHead(src, seedLinks = null) {
   try {
     // The same guarded pipeline as the bot path — marked's own two lexing
     // phases with the inline guard between them, plus the depth-bounded block
@@ -107,7 +180,7 @@ function renderOwnerHead(src) {
     // is no math extension. ownerMarked carries no hooks, extensions or
     // walkTokens; if one is ever added to it, guardAndParse has to be told
     // (parse's opt.hooks branch is the code that would otherwise run it).
-    return guardAndParse(src, ownerMarked);
+    return guardAndParse(src, ownerMarked, seedLinks);
   } catch {
     // Fail safe, never a 500 and never an empty page: the document as escaped
     // text (see escapedTextHtml — it drops what the author hid, an HTML
@@ -118,18 +191,40 @@ function renderOwnerHead(src) {
 }
 
 /**
- * The owner path's largest markdown-parsed span, in characters (128 KB).
+ * The owner path's largest markdown-parsed span — ONE CHUNK, in characters
+ * (128 KB).
  *
- * It used to be 1 MiB, which was safe only against memory: marked's block lexer
- * is QUADRATIC on some cheap-looking shapes (`"    x\n>     y\n"` repeated:
- * 11 s at 256 KB, ~200 s at 1 MiB) and this function runs synchronously in a
- * route reachable from public /blog, the file viewer and federated memories.
- * 128 KB bounds that to ~2.8 s on that worst measured shape, and every stored blog
- * post, KB article and memory is under 60 KB, so nothing real is cut. A document
- * over it is not refused — see renderMarkdown: the head is rendered, the rest
- * follows as plain text. Exported so the tests share the number.
+ * It used to be the whole document's markdown cap (and 1 MiB before that, which
+ * was safe only against memory: marked's block lexer is QUADRATIC on some
+ * cheap-looking shapes — `"    x\n>     y\n"` repeated cost 11 s at 256 KB and
+ * ~200 s at 1 MiB — and this function runs synchronously in a route reachable
+ * from public /blog, the file viewer and federated memories). A document longer
+ * than this is no longer cut: it is rendered in consecutive chunks of at most
+ * this many characters (ownerMarkdownChunks), so every span marked sees stays
+ * bounded exactly as before while the reader gets the WHOLE document formatted.
+ * Exported so the tests share the number.
  */
 export const OWNER_MD_MAX_INPUT = 128 * 1024;
+
+/**
+ * The furthest index into a document renderMarkdown will ever hand to marked, in
+ * characters (8 MiB) — the file viewer's own read cap (FILEVIEW_MAX_BYTES).
+ * Nothing past it is parsed: that remainder is the plain-text tail, so the
+ * renderer is safe on its own whatever its caller allows. Exported so the tests
+ * share the number.
+ */
+export const OWNER_MD_MAX_TOTAL_INPUT = 8 * 1024 * 1024;
+
+/**
+ * How much CPU one renderMarkdown call may spend rendering chunks before it
+ * stops and shows the rest of the document as plain text (see
+ * renderOwnerLongDocument). Every chunk is bounded on its own, so this only ever
+ * bites a document whose chunks are EACH pathological — a 1 MiB document of
+ * table-shaped lines spends it after a few chunks and shows the remainder as
+ * text instead of making a public page wait. Exported so the tests share the
+ * number.
+ */
+export const OWNER_MD_RENDER_BUDGET_MS = 1500;
 
 /** The notice that introduces the plain-text tail of a long document. */
 const TAIL_NOTICE = '<p class="md-tail-notice">Long document: the rest is shown as plain text.</p>';
@@ -152,13 +247,16 @@ function tailHtml(tail) {
 }
 
 /**
- * Where renderMarkdown splits a document longer than OWNER_MD_MAX_INPUT: the end
- * of the last blank line at or before the cap that is NOT inside a fenced code
- * block, else the last newline before the cap, else the cap itself.
+ * Where renderMarkdown splits a document: the end of the last blank line at or
+ * before the cap that is NOT inside a fenced code block, else the last newline
+ * before the cap, else the cap itself. Called once per chunk, with `from` at the
+ * previous cut (see ownerMarkdownChunks), so a long document is split into
+ * consecutive chunks by the SAME rule — and with `from` at 0 for a document that
+ * fits in one chunk, which is the path that has to stay byte-identical.
  *
- * "\n\n" is a block boundary to marked, so the head usually parses cleanly
+ * "\n\n" is a block boundary to marked, so a chunk usually parses cleanly
  * instead of starting (or ending) mid-paragraph, and a fence is skipped as a cut
- * point so a code block is never split in half by the notice. One linear pass
+ * point so a code block is rarely split in half by the seam. One linear pass
  * (`indexOf` per line, a fence state machine over 4 characters of each line's
  * start), which is what keeps the split cheap on a 1 MB document.
  *
@@ -172,7 +270,7 @@ function tailHtml(tail) {
  * document became 7).
  *
  * That state machine is an approximation of marked, so a cut is never allowed to
- * cost the head more than half the cap: when the last usable blank line sits
+ * cost a chunk more than half the cap: when the last usable blank line sits
  * below that (the signature of a misjudged fence) the cut falls on the last
  * LINE BREAK before the cap instead.
  *
@@ -184,15 +282,18 @@ function tailHtml(tail) {
  * not a character).
  * @param {string} src line-ending-normalised document
  * @param {number} [cap]
- * @returns {number} the cut index: head is `src.slice(0, cut)`, tail `src.slice(cut)`
+ * @param {number} [from] the index this chunk starts at (0 for the first)
+ * @returns {number} the cut index: this chunk is `src.slice(from, cut)`, the
+ *   next one starts at `cut`
  */
-export function ownerMarkdownCut(src, cap = OWNER_MD_MAX_INPUT) {
+export function ownerMarkdownCut(src, cap = OWNER_MD_MAX_INPUT, from = 0) {
   const length = String(src).length;
-  const limit = Math.min(cap, length);
+  const base = from > 0 ? Math.min(from, length) : 0;
+  const limit = Math.min(base + cap, length);
   let lastBlank = -1;
   /** The open fence: its character and its run length, or null. */
   let fence = null;
-  for (let start = 0; start < limit;) {
+  for (let start = base; start < limit;) {
     const nl = src.indexOf("\n", start);
     const end = nl === -1 ? length : nl;
     const line = src.slice(start, end);
@@ -221,29 +322,143 @@ export function ownerMarkdownCut(src, cap = OWNER_MD_MAX_INPUT) {
   // one at lastBlank - 1, so this is never before the blank line's newline.
   const lineBreak = src.lastIndexOf("\n", limit - 1);
   let cut;
-  if (lastBlank > 0 && (lastBlank * 2 >= limit || lineBreak + 1 <= lastBlank)) {
+  if (lastBlank > base && ((lastBlank - base) * 2 >= limit - base || lineBreak + 1 <= lastBlank)) {
     cut = lastBlank;
-  } else if (lineBreak >= 0) {
-    // No blank line before the cap at all, or only one in the first half of it
-    // (a fence that was not a fence): cut on a plain line break, so the head is
+  } else if (lineBreak >= base) {
+    // No blank line in this window at all, or only one in its first half (a
+    // fence that was not a fence): cut on a plain line break, so the chunk is
     // never collapsed to a few characters.
     cut = lineBreak + 1;
   } else {
-    cut = lastBlank > 0 ? lastBlank : limit;
+    cut = lastBlank > base ? lastBlank : limit;
   }
   // The cap is a hard bound (renderOwnerHead hands marked nothing longer), and a
-  // cut inside a UTF-16 surrogate pair would cut one character in half: the head
-  // would end with a lone high surrogate and the tail begin with its low half
-  // (each renders as U+FFFD, and the split is no longer the characters the
+  // cut inside a UTF-16 surrogate pair would cut one character in half: the
+  // chunk would end with a lone high surrogate and the next begin with its low
+  // half (each renders as U+FFFD, and the split is no longer the characters the
   // author wrote). Step back one unit instead, so the halves stay at most one
   // character shorter and still meet on a character boundary.
   const safe = Math.min(cut, limit);
-  return safe > 0 && isHighSurrogate(src.charCodeAt(safe - 1)) ? safe - 1 : safe;
+  return safe > base && isHighSurrogate(src.charCodeAt(safe - 1)) ? safe - 1 : safe;
 }
 
 /** True for the first half of a UTF-16 surrogate pair (U+D800–U+DBFF). */
 function isHighSurrogate(code) {
   return code >= 0xd800 && code <= 0xdbff;
+}
+
+/**
+ * The chunks renderMarkdown hands to marked, in order, as `[start, end)` pairs
+ * into `src`: consecutive, non-overlapping, each at most `cap` characters, and
+ * together exactly `[0, min(src.length, limit))`.
+ *
+ * Every boundary comes from ownerMarkdownCut (the end of a blank line outside a
+ * fence, else the last line break, else the cap on a character boundary), so a
+ * chunk almost always ends where marked sees a block boundary. Slicing at those
+ * ends and rendering each slice on its own is what makes a 500 KB-1 MB document
+ * fully formatted while every span marked parses stays bounded: nothing is
+ * dropped, nothing is rewritten, and joining the chunks reproduces the input
+ * character for character (pinned by tests/md-chunked-render.test.js).
+ *
+ * Where a cut does land inside a block — a list, quote or table that spans it —
+ * the block is closed by the sanitizer at the end of one chunk and reopened by
+ * the next: the text is unchanged, only its wrappers are split in two. The cut
+ * rule makes that rare.
+ * @param {string} src line-ending-normalised document
+ * @param {number} [cap] the largest chunk, in characters
+ * @param {number} [limit] the furthest index any chunk may reach
+ * @returns {[number, number][]}
+ */
+export function ownerMarkdownChunks(src, cap = OWNER_MD_MAX_INPUT, limit = OWNER_MD_MAX_TOTAL_INPUT) {
+  const text = String(src);
+  const total = Math.min(text.length, limit);
+  const chunks = [];
+  let start = 0;
+  while (start < total) {
+    const window = Math.min(cap, total - start);
+    let end = ownerMarkdownCut(text, window, start);
+    if (end <= start) {
+      // ownerMarkdownCut steps back over a surrogate pair; on a one-unit window
+      // that would answer the chunk's own start. Take the window instead, on a
+      // character boundary, so the loop always advances.
+      end = Math.min(start + window, total);
+      if (end > start + 1 && isHighSurrogate(text.charCodeAt(end - 1))) end -= 1;
+    }
+    chunks.push([start, end]);
+    start = end;
+  }
+  return chunks;
+}
+
+/** A line that could be a link reference definition (`[label]: …` at ≤3 spaces). */
+const LINK_DEF_CANDIDATE = /^ {0,3}\[/;
+
+/**
+ * Every link reference definition in `src`, collected in ONE linear pass — the
+ * map marked itself would have built had the whole document been lexed at once.
+ *
+ * This is what makes a chunked render correct for references: marked resolves a
+ * `[x][y]` link against the inline lexer's `tokens.links`, and that map only
+ * ever holds the definitions of the ONE lexer that parsed the block. Without
+ * this, a document whose definitions sit at the top (the normal way to write
+ * one) would lose every reference link from the second chunk on.
+ *
+ * The scan applies the same fence rules as ownerMarkdownCut (a definition inside
+ * a fenced code block is code, not a definition), takes only lines with at most
+ * three spaces of indent (four is indented code), and lets marked's OWN def
+ * tokenizer decide the rest — the tag marked will look the link up by (lowercased,
+ * escapes removed), the href and the title — so the two can never disagree about
+ * syntax. Duplicate labels keep the FIRST occurrence (marked's rule, and the map
+ * assignment marked makes in its own block lexer), and the scan stops after
+ * BOT_MD_MAX_LINK_DEFS labels, which is the same cap guardAndParse applies: a
+ * definition past it is dropped there too, and not scanning further keeps a
+ * definition flood linear. It also stops at OWNER_MD_MAX_TOTAL_INPUT: the part
+ * of a document past the hard ceiling is never parsed, so it cannot contribute
+ * a definition either.
+ *
+ * The scan is line-shaped, like marked's own def rule, so a def-LOOKING line
+ * that marked would have folded into a paragraph (one written directly under a
+ * paragraph line, no blank line between) is collected too. That is the one place
+ * a chunked render can resolve a reference a single whole-document parse would
+ * not; it can never do the reverse (a real definition is always collected), and
+ * it is what appending the definition block to each chunk would do as well.
+ * @param {string} src line-ending-normalised document
+ * @param {object} instance the Marked instance whose syntax is in force
+ * @returns {Record<string, {href: string, title: string|undefined}>}
+ */
+function collectLinkDefinitions(src, instance) {
+  const links = {};
+  let found = 0;
+  // A Lexer of its own, on a COPY of the options: marked's Lexer caches a
+  // Tokenizer on the options object it is given, and it must never be the shared
+  // defaults (see boundedLexer). Only `tokenizer.def` is used — no lexing.
+  const lexer = new Lexer({ ...instance.defaults });
+  const tokenizer = lexer.tokenizer;
+  tokenizer.lexer = lexer;
+  const length = Math.min(src.length, OWNER_MD_MAX_TOTAL_INPUT);
+  /** The open fence: its character and its run length, or null. */
+  let fence = null;
+  for (let start = 0; start < length;) {
+    const nl = src.indexOf("\n", start);
+    const end = nl === -1 || nl > length ? length : nl;
+    const line = src.slice(start, end);
+    if (fence) {
+      const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+      if (close && close[1][0] === fence.char && close[1].length >= fence.length) fence = null;
+    } else if (LINK_DEF_CANDIDATE.test(line)) {
+      const def = tokenizer.def(line);
+      if (def && !links[def.tag]) {
+        links[def.tag] = { href: def.href, title: def.title };
+        if (++found >= BOT_MD_MAX_LINK_DEFS) break;
+      }
+    } else {
+      const open = /^ {0,3}(`{3,}(?=[^`\n]*$)|~{3,})/.exec(line);
+      if (open) fence = { char: open[1][0], length: open[1].length };
+    }
+    if (nl === -1) break;
+    start = end + 1;
+  }
+  return links;
 }
 
 /**
@@ -1925,9 +2140,12 @@ function boundedLexer(options, inputLength = 0) {
 // they bound marked's inline lexer at the owner cap exactly as they do at
 // 64 KB — that is the point of the shape, and it is why the same thresholds
 // were kept for the owner path instead of being scaled down for it.
-// OWNER_MD_MAX_INPUT is 128 KB now (the long-document split: the head is
-// parsed, the remainder is plain text), so only that much of any document ever
-// reaches the inline lexer. The numbers below are HISTORICAL — they were
+// OWNER_MD_MAX_INPUT is 128 KB now — the size of ONE CHUNK of a long document
+// (see "THE LONG DOCUMENT: CHUNKED, NOT CUT" at the top of this file), and the
+// escape of a remainder the render budget did not reach — so only that much of
+// any document reaches the inline lexer at a time: a 1 MB document is eight of
+// these, each with its own document budget, and the total render stops at
+// OWNER_MD_RENDER_BUDGET_MS. The numbers below are HISTORICAL — they were
 // measured at the EARLIER 1 MiB cap, on the owner path at 1 MiB - 1 chars,
 // whole renderMarkdown call, sanitizer included, CPU ms (worst single render
 // per shape; the "before" column is the same input through the pre-guard owner
@@ -2337,8 +2555,15 @@ function plainTextTokens(src) {
  *  unguarded renderer byte for byte (tests/bot-markdown-quadratic.test.js for
  *  the bot path, tests/owner-markdown-guard.test.js for the owner's), so a
  *  marked upgrade that moves the phases fails in CI instead of silently
- *  changing published output. */
-function guardAndParse(src, instance) {
+ *  changing published output.
+ *
+ *  `seedLinks` is the ONE optional input: a chunk of a longer document is handed
+ *  the whole document's link definitions (collectLinkDefinitions), because
+ *  marked resolves references against the lexer's own map and a definition in
+ *  another chunk would otherwise be invisible. Omitted on every single-document
+ *  path, where it would change nothing.
+ */
+function guardAndParse(src, instance, seedLinks = null) {
   // marked's Lexer#lex normalises line endings before block lexing; calling
   // blockTokens directly skips that, so a CRLF reply (a tool result pasted
   // from Windows) kept a `\r` on every line and flattened into one escaped
@@ -2357,6 +2582,14 @@ function guardAndParse(src, instance) {
   // labels sort first, as they do in marked's own map).
   const links = lexer.tokens.links;
   if (links) {
+    // A chunk of a longer document: its own definitions are a subset of the
+    // whole document's, and the seed holds the document's FIRST occurrence of
+    // every label (marked's first-wins), so the seed replaces a chunk-local
+    // duplicate and adds the definitions that live in other chunks. The cap
+    // below still bounds the total, which is what marked's per-block scan costs.
+    if (seedLinks) {
+      for (const label of Object.keys(seedLinks)) links[label] = seedLinks[label];
+    }
     const labels = Object.keys(links);
     for (const label of labels.slice(BOT_MD_MAX_LINK_DEFS)) delete links[label];
   }

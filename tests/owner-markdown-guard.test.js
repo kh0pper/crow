@@ -3,9 +3,10 @@
 // `renderMarkdown` draws the public blog (servers/gateway/routes/blog-public.js)
 // and the public knowledge base (bundles/knowledge-base/routes/kb-public.js).
 // Both are PUBLIC and UNCACHED, so an anonymous reader can hand this function
-// any document up to OWNER_MD_MAX_INPUT (128 KB — the parsed head, since the
-// long-document split; it was 1 MiB when the measurements below were taken) —
-// and until this guard the owner path had ONLY the block-nesting guard:
+// any document up to OWNER_MD_MAX_INPUT (128 KB — the size of ONE CHUNK since
+// the long-document split; it was 1 MiB when the measurements below were taken)
+// per chunk, and every chunk is parsed through this path — and until this guard
+// the owner path had ONLY the block-nesting guard:
 // marked's own inline-lexer cliffs were one `curl` away. Measured on the owner
 // path before this change: 64 KB of `_a` = 1.8 s, `[a](` = 718 ms, `*a` =
 // 530 ms, a ~39 KB reference-definition flood = 1.7-2.3 s — and at the then
@@ -40,8 +41,10 @@
 //   - the owner path is still the OWNER's parser (no math), with the owner's
 //     image rule and its link opt-out (tests/owner-markdown-images.test.js owns
 //     the full matrix and must pass unchanged);
-//   - a document that is over budget, or over the cap, comes back as its
-//     escaped TEXT — never as "" — and nothing is dropped.
+//   - a document that is over budget, or a chunk whose parse fails, comes back
+//     as its escaped TEXT — never as "" — and nothing is dropped; a document
+//     over the chunk size is rendered in full, chunk by chunk (see
+//     tests/md-chunked-render.test.js).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -799,29 +802,27 @@ test("the owner image rule and link opt-out survive the guarded path", () => {
 });
 
 // --- over budget / over cap: escaped text, never "" ----------------------
-test("an over-budget document comes back as its text (never \"\"), and the cap still holds", (t) => {
+test("an over-budget document comes back as its text (never \"\"), and a long one is rendered in full", (t) => {
   // Over budget: the block is flattened but shown — a public page always
   // renders what was written.
   const flattened = renderMarkdown(rep("*a_", CAP64));
   assert.ok(flattened.length > 0, "never an empty page");
   assert.ok(flattened.includes("*a_*a_"), "the source is on screen as text: " + flattened.slice(0, 120));
 
-  // Over the cap: the head is rendered and the WHOLE remainder follows as plain
-  // text under a notice (renderMarkdown's long-document split) — nothing is
-  // dropped and nothing is refused, and the author's HTML comment is not shown
-  // (the head goes through the same guarded pipeline plus the sanitizer).
+  // Over the chunk size: the document is rendered in CONSECUTIVE CHUNKS now, so
+  // the whole text is on the page as formatted markdown — no notice, no
+  // plain-text tail — and the author's HTML comment is still dropped by the
+  // sanitizer. (The plain-text tail is what the total-time budget and the 8 MiB
+  // ceiling produce; tests/md-chunked-render.test.js owns those.)
   const over = "x ".repeat(Math.ceil((OWNER_MD_MAX_INPUT + 1) / 2));
   const { html, ms } = timed("<!-- hidden -->\n" + over);
   t.diagnostic(`over-cap owner input: ${ms.toFixed(0)} ms`);
-  // (The head here is only an HTML comment, so the sanitizer leaves a bare
-  // newline where it was — hence the leading whitespace.)
-  assert.match(html, /^\s*<p class="md-tail-notice">/, html.slice(0, 80));
-  assert.ok(html.includes('<pre class="md-tail">'), "the tail is plain text");
+  assert.ok(!html.includes("md-tail"), "the whole document is formatted: " + html.slice(0, 120));
   assert.ok(html.includes("x x x"), "the text is still shown");
   assert.ok(html.replace(/<[^>]+>/g, "").length >= over.length,
-    "the whole remainder is on the page, not a truncated part of it");
+    "every character of the document is on the page");
   assert.ok(!html.includes("hidden"), "the hidden comment is not shown");
-  assert.ok(ms < 200, `over-cap input took ${ms.toFixed(0)} ms (bound 200 ms)`);
+  assert.ok(ms < 500, `over-cap input took ${ms.toFixed(0)} ms (bound 500 ms)`);
 });
 
 test("a flattened block's neighbours keep their formatting (owner path)", () => {
