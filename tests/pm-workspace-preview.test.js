@@ -26,9 +26,10 @@
  *   - statically: the editor never calls marked and never assigns innerHTML
  *     from anything but the server's `html`; its truncated-banner line is
  *     textContent; the editor page no longer loads
- *     marked from the CDN (the drawing scripts are untouched); the planner's
- *     decide buttons carry their arguments in data-*, never in an onclick
- *     that interpolates the uid.
+ *     marked from the CDN (the drawing scripts are unchanged in behaviour and
+ *     are now served from the bundle — see the statics test below); the
+ *     planner's decide buttons carry their arguments in data-*, never in an
+ *     onclick that interpolates the uid.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -320,9 +321,12 @@ test("static: the editor page no longer loads marked from a CDN, the drawing scr
   const src = readFileSync(ROUTES_JS, "utf8");
   assert.doesNotMatch(src, /cdn\.jsdelivr\.net\/npm\/marked/, "no marked script tag");
   assert.doesNotMatch(src, /marked\.min\.js/, "no marked bundle reference");
-  // The drawing editor's scripts are out of scope and must survive.
-  assert.match(src, /cdnjs\.cloudflare\.com\/ajax\/libs\/fabric\.js/, "fabric.js untouched");
-  assert.match(src, /cdn\.jsdelivr\.net\/npm\/perfect-freehand@/, "perfect-freehand untouched");
+  // The drawing editor's scripts are out of scope for this test and must
+  // survive; they are now served from the bundle (/pm/static/, see
+  // tests/pm-workspace-drawing-assets.test.js) instead of a CDN the gateway CSP
+  // blocks.
+  assert.match(src, /src="\/pm\/static\/fabric-5\.3\.1\.min\.js"/, "fabric.js still loaded");
+  assert.match(src, /"perfect-freehand": "\/pm\/static\/perfect-freehand-1\.2\.2\.js"/, "perfect-freehand still loaded");
 });
 
 test("static: the manifest version was bumped so installed copies refresh", () => {
