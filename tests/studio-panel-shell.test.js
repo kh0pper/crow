@@ -20,6 +20,7 @@ import studioPanel from "../bundles/studio/panel/studio.js";
 import {
   SHELL_CSS,
   SHELL_SCRIPT,
+  dropIndex,
   emptyNote,
   widgetName,
 } from "../bundles/studio/panel/shell.js";
@@ -205,6 +206,8 @@ async function bootShell(options = {}) {
     hosts: options.hosts === undefined ? standardHosts(document) : options.hosts,
     songId: SONG,
     storage,
+    fetch: options.fetch,
+    csrf: options.csrf,
     screen: () => view.screen,
     render: () => {
       renders += 1;
@@ -312,6 +315,61 @@ function mountTransport(domWindow, document) {
     transportHooks(),
     { sizeClass: "laptop" },
   );
+}
+
+/** The Layout entry with one data-act. */
+function layoutEntry(page, act) {
+  return page.querySelector(`[data-role=layout-entries] [data-act=${act}]`);
+}
+
+/** Turn edit mode on. */
+function startEditing(b) {
+  const toggle = layoutEntry(b.page, "layout-edit");
+  assert.ok(toggle, "the Edit layout entry exists");
+  click(b.domWindow, toggle);
+  assert.equal(toggle.textContent, "Done", "the entry becomes Done while editing");
+  return toggle;
+}
+
+/** One of a frame's own edit controls. */
+function frameAct(b, id, act) {
+  return frame(b.page, id).querySelector(`[data-act=${act}]`);
+}
+
+/** A pointer event carrying the fields the shell reads. */
+function pointer(domWindow, type, fields) {
+  const event = new domWindow.Event(type, { bubbles: true });
+  for (const [name, value] of Object.entries(fields)) event[name] = value;
+  return event;
+}
+
+/** One song's stored layout key. */
+function layoutKey(songId, mode, sizeClass) {
+  return `crow.studio.layout.v2.${songId}.${mode}.${sizeClass}`;
+}
+
+/** The widget ids a song's stored layout shows, in order, or null. */
+function storedIds(storage, songId, mode, sizeClass) {
+  const raw = storage.getItem(layoutKey(songId, mode, sizeClass));
+  if (raw === null) return null;
+  return JSON.parse(raw).shown.map((row) => row.id);
+}
+
+/** Give a frame a rectangle, since linkedom lays nothing out. */
+function stubRect(node, rect) {
+  node.getBoundingClientRect = () => ({ top: 0, left: 0, height: 0, width: 0, ...rect });
+}
+
+/** The three frames of the compose layout, stacked, for a drop position. */
+function stubComposeRects(b) {
+  stubRect(frame(b.page, "scene-grid"), { top: 0, left: 0, width: 600, height: 100 });
+  stubRect(frame(b.page, "editor"), { top: 110, left: 0, width: 300, height: 100 });
+  stubRect(frame(b.page, "history"), { top: 220, left: 0, width: 300, height: 100 });
+}
+
+/** Let a stubbed fetch's promise settle. */
+function flush() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 test("the emitted shell script follows the panel's inline rules and names the widgets", () => {
@@ -682,4 +740,270 @@ test("a throwing storage still renders the default layout", async () => {
     b.page.querySelector("[data-role=mode-switch] [data-mode=record]").getAttribute("aria-pressed"),
     "true",
   );
+});
+
+test("Edit layout gives every frame Remove, Size and a drag handle and the tray Add", async () => {
+  const b = await bootShell();
+  assert.equal(layoutEntry(b.page, "layout-edit").textContent, "Edit layout");
+  assert.equal(
+    b.page.querySelector("[data-role=studio-widgets] [data-act=widget-remove]"),
+    null,
+    "nothing to remove before the layout is being edited",
+  );
+  assert.equal(b.page.querySelector("[data-role=widget-tray]").hasAttribute("hidden"), true);
+
+  startEditing(b);
+  assert.equal(b.page.querySelector("[data-role=widget-tray]").hasAttribute("hidden"), false, "the tray is shown");
+
+  for (const id of ["scene-grid", "editor", "history"]) {
+    assert.ok(frameAct(b, id, "widget-remove"), `${id} can leave the page`);
+    assert.ok(frameAct(b, id, "widget-size"), `${id} can change size`);
+    assert.ok(frame(b.page, id).querySelector("[data-role=widget-drag]"), `${id} can be moved`);
+  }
+  for (const id of ["takes", "midi", "agent"]) {
+    assert.ok(frameAct(b, id, "widget-add"), `${id} can come back from the tray`);
+  }
+
+  click(b.domWindow, layoutEntry(b.page, "layout-edit"));
+  assert.equal(layoutEntry(b.page, "layout-edit").textContent, "Edit layout", "Done leaves edit mode");
+  assert.equal(
+    frame(b.page, "scene-grid").querySelector(".st-widget-edit").hasAttribute("hidden"),
+    true,
+    "the controls leave with edit mode",
+  );
+  assert.equal(b.page.querySelector("[data-role=widget-tray]").hasAttribute("hidden"), true);
+});
+
+test("Remove moves a widget to the tray and writes only this song, mode and class key", async () => {
+  const b = await bootShell();
+  const otherSongKey = layoutKey("another-song", "compose", "laptop");
+  const otherSongValue = JSON.stringify({ v: 1, shown: [{ id: "takes", size: "m" }] });
+  b.storage.setItem(otherSongKey, otherSongValue);
+
+  startEditing(b);
+  click(b.domWindow, frameAct(b, "history", "widget-remove"));
+
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor"]);
+  assert.deepEqual(trayWidgets(b.page), ["takes", "midi", "history", "agent"]);
+  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["scene-grid", "editor"]);
+  assert.equal(b.storage.getItem(otherSongKey), otherSongValue, "another song is untouched");
+  assert.equal(b.storage.getItem(layoutKey(SONG, "perform", "laptop")), null, "another mode is untouched");
+  assert.equal(b.storage.getItem(layoutKey(SONG, "compose", "phone")), null, "another size class is untouched");
+  assert.equal(b.storage.getItem(layoutKey(SONG, "compose", "tablet")), null);
+  assert.ok(frameAct(b, "history", "widget-add"), "the tray frame offers Add");
+
+  click(b.domWindow, frameAct(b, "history", "widget-add"));
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"], "Add puts it back at the end");
+  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["scene-grid", "editor", "history"]);
+
+  click(b.domWindow, frameAct(b, "editor", "widget-size"));
+  assert.equal(sizeOf(b.page, "editor"), "l", "Size steps from m to l");
+  assert.deepEqual(
+    JSON.parse(b.storage.getItem(layoutKey(SONG, "compose", "laptop"))).shown,
+    [
+      { id: "scene-grid", size: "l" },
+      { id: "editor", size: "l" },
+      { id: "history", size: "s" },
+    ],
+  );
+});
+
+test("another song's layout is unaffected", async () => {
+  const b = await bootShell();
+  const otherKey = layoutKey("another-song", "compose", "laptop");
+  const otherValue = JSON.stringify({ v: 1, shown: [{ id: "takes", size: "m" }] });
+  b.storage.setItem(otherKey, otherValue);
+
+  startEditing(b);
+  click(b.domWindow, frameAct(b, "scene-grid", "widget-remove"));
+  click(b.domWindow, frameAct(b, "takes", "widget-add"));
+  click(b.domWindow, frameAct(b, "takes", "widget-size"));
+
+  assert.equal(b.storage.getItem(otherKey), otherValue);
+  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["editor", "history", "takes"]);
+});
+
+test("Reset restores the built-in default and deletes the song key", async () => {
+  const b = await bootShell();
+  startEditing(b);
+  click(b.domWindow, frameAct(b, "history", "widget-remove"));
+  click(b.domWindow, frameAct(b, "takes", "widget-add"));
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "takes"]);
+  assert.ok(b.storage.getItem(layoutKey(SONG, "compose", "laptop")), "the edit was stored");
+
+  click(b.domWindow, layoutEntry(b.page, "layout-reset"));
+
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"], "the built-in default");
+  assert.equal(sizeOf(b.page, "scene-grid"), "l");
+  assert.equal(sizeOf(b.page, "editor"), "m");
+  assert.equal(sizeOf(b.page, "history"), "s");
+  assert.equal(b.storage.getItem(layoutKey(SONG, "compose", "laptop")), null, "the song key is gone");
+});
+
+test("Save as my default sends the PUT with every stored slot of this song; Clear sends the DELETE", async () => {
+  const calls = [];
+  const b = await bootShell({
+    fetch: (url, init) => {
+      calls.push({ url, init });
+      return Promise.resolve({ ok: true });
+    },
+    csrf: () => "token-1",
+  });
+  const compose = b.layout.defaultLayout("compose", "laptop");
+  const record = b.layout.defaultLayout("record", "phone");
+  b.layout.saveLayout(b.storage, SONG, "compose", "laptop", compose);
+  b.layout.saveLayout(b.storage, SONG, "record", "phone", record);
+  b.storage.setItem(
+    layoutKey("another-song", "compose", "laptop"),
+    JSON.stringify({ v: 1, shown: [{ id: "takes", size: "l" }] }),
+  );
+
+  click(b.domWindow, layoutEntry(b.page, "layout-save-default"));
+  await flush();
+
+  assert.equal(calls.length, 1, "one request");
+  assert.equal(calls[0].url, "/api/studio/layout-template");
+  assert.equal(calls[0].init.method, "PUT");
+  assert.equal(calls[0].init.credentials, "same-origin");
+  assert.equal(calls[0].init.headers["x-crow-csrf"], "token-1", "the panel's CSRF header");
+  assert.equal(calls[0].init.headers["content-type"], "application/json");
+  const body = JSON.parse(calls[0].init.body);
+  assert.equal(body.template.v, 1);
+  assert.deepEqual(Object.keys(body.template.layouts).sort(), ["compose.laptop", "record.phone"]);
+  assert.deepEqual(body.template.layouts["compose.laptop"].shown, compose.shown);
+  assert.deepEqual(body.template.layouts["record.phone"].shown, record.shown);
+  assert.equal(
+    b.page.querySelector("[data-role=layout-note]").textContent,
+    "Saved as your default.",
+  );
+
+  click(b.domWindow, layoutEntry(b.page, "layout-clear-default"));
+  await flush();
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].url, "/api/studio/layout-template");
+  assert.equal(calls[1].init.method, "DELETE");
+  assert.equal(calls[1].init.headers["x-crow-csrf"], "token-1");
+  assert.equal(calls[1].init.body, undefined);
+  assert.equal(b.page.querySelector("[data-role=layout-note]").textContent, "Your default is cleared.");
+});
+
+test("a failed PUT shows a note and keeps the layout", async () => {
+  const b = await bootShell({
+    fetch: () => Promise.resolve({ ok: false, status: 503 }),
+    csrf: () => "token-2",
+  });
+  startEditing(b);
+  click(b.domWindow, frameAct(b, "history", "widget-remove"));
+  const before = shownWidgets(b.page);
+  const note = b.page.querySelector("[data-role=layout-note]");
+  assert.equal(note.hasAttribute("hidden"), true, "nothing to say yet");
+
+  click(b.domWindow, layoutEntry(b.page, "layout-save-default"));
+  await flush();
+
+  assert.equal(note.hasAttribute("hidden"), false, "the refusal is shown");
+  assert.match(note.textContent, /not saved/);
+  assert.deepEqual(shownWidgets(b.page), before, "the song's layout is unchanged");
+  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), before);
+});
+
+test("the drop index comes from the frames' rectangles", () => {
+  const rects = [
+    { top: 0, left: 0, height: 100, width: 600 },
+    { top: 110, left: 0, height: 100, width: 300 },
+    { top: 220, left: 0, height: 100, width: 300 },
+  ];
+  assert.equal(dropIndex(rects, { x: 10, y: 10 }), 0, "the near half of the first frame");
+  assert.equal(dropIndex(rects, { x: 590, y: 90 }), 1, "the far half of the first frame");
+  assert.equal(dropIndex(rects, { x: 10, y: 120 }), 1, "the near half of the middle frame");
+  assert.equal(dropIndex(rects, { x: 290, y: 300 }), 3, "the far end of the last frame");
+  assert.equal(dropIndex(rects, { x: 10, y: -80 }), 0, "above the first is before the first");
+  assert.equal(dropIndex(rects, { left: 290, top: 300 }), 3, "a left/top point works too");
+  assert.equal(dropIndex([], { x: 0, y: 0 }), -1, "nothing to drop on");
+});
+
+test("reorder by drag changes the saved order", async () => {
+  const b = await bootShell();
+  startEditing(b);
+  stubComposeRects(b);
+
+  const handle = frame(b.page, "editor").querySelector("[data-role=widget-drag]");
+  assert.ok(handle, "the frame carries a drag handle");
+  handle.dispatchEvent(pointer(b.domWindow, "pointerdown", {
+    pointerType: "mouse", button: 0, pointerId: 1, clientX: 10, clientY: 120,
+  }));
+  handle.dispatchEvent(pointer(b.domWindow, "pointermove", { clientX: 10, clientY: 20 }));
+  handle.dispatchEvent(pointer(b.domWindow, "pointerup", { clientX: 10, clientY: 20 }));
+
+  assert.deepEqual(shownWidgets(b.page), ["editor", "scene-grid", "history"]);
+  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["editor", "scene-grid", "history"]);
+  assert.deepEqual(storedIds(b.storage, "another-song", "compose", "laptop"), null);
+});
+
+test("a touch under 400 ms does not start a drag", async (t) => {
+  const b = await bootShell();
+  startEditing(b);
+  stubComposeRects(b);
+
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const handle = frame(b.page, "editor").querySelector("[data-role=widget-drag]");
+    handle.dispatchEvent(pointer(b.domWindow, "pointerdown", {
+      pointerType: "touch", button: 0, pointerId: 2, clientX: 10, clientY: 120,
+    }));
+    t.mock.timers.tick(399);
+    handle.dispatchEvent(pointer(b.domWindow, "pointermove", { clientX: 10, clientY: 20 }));
+    handle.dispatchEvent(pointer(b.domWindow, "pointerup", { clientX: 10, clientY: 20 }));
+    t.mock.timers.tick(1000);
+  } finally {
+    t.mock.timers.reset();
+  }
+
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"]);
+  assert.equal(
+    b.storage.getItem(layoutKey(SONG, "compose", "laptop")),
+    null,
+    "a press that ends before the long press writes nothing",
+  );
+});
+
+test("no layout change adds an undo step (the history list is unchanged)", async () => {
+  const b = await bootShell();
+  const history = b.page.querySelector("[data-role=history]");
+  const step = b.document.createElement("div");
+  step.className = "st-entry";
+  step.textContent = "One step";
+  history.appendChild(step);
+  const before = history.innerHTML;
+
+  startEditing(b);
+  click(b.domWindow, frameAct(b, "history", "widget-remove"));
+  click(b.domWindow, frameAct(b, "takes", "widget-add"));
+  click(b.domWindow, frameAct(b, "scene-grid", "widget-size"));
+  click(b.domWindow, layoutEntry(b.page, "layout-reset"));
+  click(b.domWindow, layoutEntry(b.page, "layout-edit"));
+
+  assert.equal(history.innerHTML, before, "layout is view state, never a history entry");
+  assert.equal(history.textContent, "One step");
+});
+
+test("a throwing storage lets Edit layout work in memory", async () => {
+  const b = await bootShell({ storage: throwingStorage() });
+  startEditing(b);
+
+  click(b.domWindow, frameAct(b, "history", "widget-remove"));
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor"]);
+
+  click(b.domWindow, frameAct(b, "editor", "widget-size"));
+  assert.equal(sizeOf(b.page, "editor"), "l", "the size steps in memory");
+
+  click(b.domWindow, frameAct(b, "takes", "widget-add"));
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "takes"]);
+
+  click(b.domWindow, layoutEntry(b.page, "layout-reset"));
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"], "reset returns the default");
+
+  assert.doesNotThrow(() => b.shell.setMode("record"));
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "takes", "midi", "history"]);
 });
