@@ -13,6 +13,9 @@
  *     must land UNDER the allowlist root (default: the user's home dir) and end in .md
  *     and be a regular file — otherwise 404. This defeats path traversal and
  *     symlink-escape.
+ *   - A file over 1 MiB (renderer.js OWNER_MD_MAX_INPUT) is never read: stat
+ *     first, then a short notice — renderMarkdown would refuse it anyway, and a
+ *     whole book is not something this page can show.
  *   - renderMarkdown() (servers/blog/renderer.js) sanitizes the HTML.
  *
  * Override the allowlist root with CROW_FILEVIEW_ROOT (used by tests).
@@ -21,7 +24,7 @@ import { Router } from "express";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { relative, isAbsolute, basename } from "node:path";
 import { homedir } from "node:os";
-import { renderMarkdown } from "../../blog/renderer.js";
+import { renderMarkdown, OWNER_MD_MAX_INPUT } from "../../blog/renderer.js";
 import { escapeHtml } from "../dashboard/shared/components.js";
 import { playerShellHtml } from "../dashboard/shared/player-shell.js";
 
@@ -110,6 +113,18 @@ export default function fileviewRouter(dashboardAuth) {
     }
     let md;
     try {
+      // Size FIRST (stat, no read): renderMarkdown refuses anything over
+      // OWNER_MD_MAX_INPUT without parsing it, and a page that showed a
+      // 4 MB file's escaped text would be as useless as it is expensive to
+      // build. Bytes are compared, and bytes >= characters for UTF-8, so a file
+      // that passes here can never hit that cap.
+      if (statSync(safe).size > OWNER_MD_MAX_INPUT) {
+        const mib = (OWNER_MD_MAX_INPUT / (1024 * 1024)).toFixed(0);
+        return res.status(200).type("html").send(page(basename(safe),
+          `<p class="crumb">${escapeHtml(safe)}</p>` +
+          `<p lang="en">This file is too large to view here (over ${mib} MiB). Open it in an editor instead.</p>`,
+          lang));
+      }
       md = readFileSync(safe, "utf8");
     } catch {
       return res.status(404).type("html").send(page("Not found", `<p lang="en">File could not be read.</p>`, lang));
