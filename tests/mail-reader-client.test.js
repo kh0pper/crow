@@ -945,6 +945,30 @@ test("a click while the automatic mark-read is in flight posts nothing more", as
   }
 });
 
+test("the automatic mark-read stands aside while another action is in flight", async () => {
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const r = boot(messagePage(), { fetchImpl: () => pending });
+  r.click(r.$('button[data-ml-action="archive"]'));
+  assert.equal(r.calls.length, 1, "the archive post is out");
+  assert.deepEqual(r.calls[0].body, { action: "archive" });
+
+  assert.equal(r.fire(1500), true, "the automatic mark-read fires while the archive is in flight");
+  await r.settle();
+  assert.equal(r.calls.length, 1, "it posts nothing over the action that is already out");
+  assert.deepEqual(r.calls.map((call) => call.body), [{ action: "archive" }], "no read went out");
+  for (const control of r.$$("[data-ml-actions] [data-ml-action]")) {
+    assert.equal(control.hasAttribute("disabled"), true, "the bar still waits for the archive's own answer");
+  }
+
+  release(jsonResponse(200, { ok: true, movedTo: 5 }));
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.deepEqual(r.visits, ["/dashboard/mail?acct=all&flash=archived"], "the archive's answer still carries the page away");
+  assert.equal(r.$('button[data-ml-action="read"]').hasAttribute("hidden"), false,
+    "no read answer arrived, so the read controls were never swapped");
+});
+
 /* ------------------------------------------------------------------- the settings */
 
 test("Always show posts the account and sender with the CSRF header, then rebuilds the frame with images", async () => {

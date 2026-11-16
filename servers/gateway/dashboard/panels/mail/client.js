@@ -392,7 +392,9 @@ export function mailClientJs(lang = "en") {
   // in window.__mlTimer, which this run already cleared and every departure clears again; a click on
   // either read control clears it too, so it can never override the person's own choice. While the post
   // is in flight the bar is busy exactly as it is for a click (actionBusy and every control disabled),
-  // so a click that lands in that moment is ignored rather than sent as a second request.
+  // so a click that lands in that moment is ignored rather than sent as a second request. When another
+  // action is already in flight (an Archive that is taking the page away, say) it stands aside
+  // entirely: it posts nothing and leaves that action's busy state to be released by its own answer.
   function bindMarkRead() {
     var bar = root.querySelector('[data-ml-actions][data-ml-unread-row]');
     if (!bar) { return; }
@@ -401,6 +403,7 @@ export function mailClientJs(lang = "en") {
     window.__mlTimer = setTimeout(function () {
       window.__mlTimer = null;
       if (String(document.visibilityState || '') !== 'visible') { return; }
+      if (actionBusy) { return; }
       actionBusy = true;
       setActionsWaiting(true);
       post(actionUrl(row), { action: 'read' }).then(function (result) {
