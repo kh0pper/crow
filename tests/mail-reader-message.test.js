@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+import { mailCss } from "../servers/gateway/dashboard/panels/mail/css.js";
 actAsServe();
 
 const dir = mkdtempSync(join(tmpdir(), "mail-reader-message-"));
@@ -196,6 +197,34 @@ function backHref(html) {
 function backText(html) {
   const m = /<a class="ml-back" href="[^"]*">([^<]*)<\/a>/.exec(html);
   return m ? m[1] : null;
+}
+
+/* The action bar: one `data-row` per control, the folders the move select offers, and the mark-read
+   marker the client reads for the opened unread message. */
+const actionRows = (html, action) => [...html.matchAll(new RegExp(`data-ml-action="${action}" data-row="(\\d+)"`, "g"))]
+  .map((m) => Number(m[1]));
+const moveFolderIds = (html) => [...html.matchAll(/<option value="(\d+)"/g)].map((m) => Number(m[1]));
+const unreadMarkerRow = (html) => {
+  const m = /data-ml-unread-row="(\d+)"/.exec(html);
+  return m ? Number(m[1]) : null;
+};
+
+/** The folders an action can need: an inbox, a label, an archive and a trash row. */
+const ACTION_FOLDERS = [
+  { path: "INBOX", name: "Inbox" },
+  { path: "Label", name: "Label" },
+  { path: "Archive", name: "Archive", specialUse: "\\Archive" },
+  { path: "Trash", name: "Trash", specialUse: "\\Trash" },
+];
+
+/** One account with exactly the folders given, plus a `folderId(path)` lookup. */
+async function seedWith(db, listing, {
+  label = "Personal", address = "alex@example.com", username = "alexuser",
+} = {}) {
+  const account = await stores.accounts.createAccount(db, accountInput(label, address, username));
+  const folders = (await stores.messages.upsertFolders(db, account.id, listing)).folders;
+  const folderId = (path) => folders.find((folder) => folder.path === path)?.id ?? null;
+  return { account, folders, folderId };
 }
 
 /* ------------------------------------------------------------ the opened message */
@@ -658,6 +687,8 @@ test("the back link rejects a value that is not a mail list link", async () => {
 });
 
 test("the GET writes nothing: is_read stays as it was", async () => {
+  // The action bar draws controls only; the GET itself writes nothing (the mark-read POST is the
+  // client's, after the page is shown).
   const mid = "<unread@mail.example.test>";
   let accountId, rowId;
   await withDb(async (db) => {
@@ -676,19 +707,173 @@ test("the GET writes nothing: is_read stays as it was", async () => {
   });
 });
 
-test("the page marks nothing read yet: no action bar in this part", async () => {
-  const mid = "<no-actions@mail.example.test>";
-  let accountId;
+/* -------------------------------------------------------------- the action bar */
+
+test("the action bar shows Archive only when an archive target exists and Delete only with Trash", async () => {
+  const plainMid = "<plain-actions@mail.example.test>";
+  const unreadMid = "<unread-actions@mail.example.test>";
+  const richMid = "<rich-actions@mail.example.test>";
+  let plainAccount, plainRow, unreadRow, richAccount, richRow;
   await withDb(async (db) => {
-    const { a, aInbox } = await seed(db);
-    accountId = a.id;
-    await deliver(db, { accountId: a.id, folderId: aInbox, subject: "No actions", messageId: mid });
+    const plain = await seedWith(db, [{ path: "INBOX", name: "Inbox" }]);
+    plainAccount = plain.account.id;
+    plainRow = (await deliver(db, {
+      accountId: plain.account.id,
+      folderId: plain.folderId("INBOX"),
+      subject: "Nothing to act on",
+      messageId: plainMid,
+      isRead: true,
+    })).id;
+    unreadRow = (await deliver(db, {
+      accountId: plain.account.id,
+      folderId: plain.folderId("INBOX"),
+      subject: "Still unread",
+      messageId: unreadMid,
+    })).id;
+
+    const rich = await seedWith(db, ACTION_FOLDERS, { label: "Work", address: "sam@example.com", username: "samuser" });
+    richAccount = rich.account.id;
+    richRow = (await deliver(db, {
+      accountId: rich.account.id,
+      folderId: rich.folderId("INBOX"),
+      subject: "Both targets",
+      messageId: richMid,
+      isRead: true,
+    })).id;
+  });
+  await withFlag(async () => {
+    const plain = await get(messageHref(plainAccount, plainMid));
+    assert.equal(plain.status, 200);
+    assert.deepEqual(actionRows(plain.body, "archive"), [], "no archive target");
+    assert.deepEqual(actionRows(plain.body, "delete"), [], "no Trash folder");
+    assert.deepEqual(actionRows(plain.body, "unread"), [plainRow], "a read message offers Mark unread");
+    assert.match(plain.body, /data-ml-action="unread" data-row="\d+">Mark unread<\/button>/);
+    assert.equal(unreadMarkerRow(plain.body), null, "a read message arms no mark-read");
+
+    const unread = await get(messageHref(plainAccount, unreadMid));
+    assert.equal(unread.status, 200);
+    assert.deepEqual(actionRows(unread.body, "unread"), [], "an unread message does not offer Mark unread");
+    assert.equal(unreadMarkerRow(unread.body), unreadRow, "and the reader marks it read once it is shown");
+
+    const rich = await get(messageHref(richAccount, richMid));
+    assert.equal(rich.status, 200);
+    assert.deepEqual(actionRows(rich.body, "archive"), [richRow]);
+    assert.deepEqual(actionRows(rich.body, "delete"), [richRow]);
+    assert.match(rich.body, /data-ml-action="archive" data-row="\d+">Archive<\/button>/);
+    assert.match(rich.body, /data-ml-action="delete" data-row="\d+">Delete<\/button>/);
+  });
+});
+
+test("the move select lists the account's other folders, never the current one nor the \\All view", async () => {
+  const mid = "<move-select@mail.example.test>";
+  let accountId, rowId, inboxId, ids;
+  await withDb(async (db) => {
+    const seeded = await seedWith(db, [...ACTION_FOLDERS, { path: "All Mail", name: "All Mail", specialUse: "\\All" }]);
+    accountId = seeded.account.id;
+    inboxId = seeded.folderId("INBOX");
+    ids = {
+      label: seeded.folderId("Label"),
+      archive: seeded.folderId("Archive"),
+      trash: seeded.folderId("Trash"),
+      all: seeded.folderId("All Mail"),
+    };
+    rowId = (await deliver(db, {
+      accountId, folderId: inboxId, subject: "Move me", messageId: mid, isRead: true,
+    })).id;
   });
   await withFlag(async () => {
     const r = await get(messageHref(accountId, mid));
     assert.equal(r.status, 200);
-    assert.doesNotMatch(r.body, /data-ml-action/);
+    const offered = moveFolderIds(r.body);
+    assert.deepEqual(offered.slice().sort((x, y) => x - y), [ids.label, ids.archive, ids.trash].sort((x, y) => x - y));
+    assert.equal(offered.includes(inboxId), false, "the folder the message is in is not a destination");
+    assert.equal(offered.includes(ids.all), false, "\\All is a virtual view, not a folder to move to");
+    assert.match(r.body, /<option value="" disabled selected>Move…<\/option>/);
+    assert.match(r.body, /data-ml-action="move" data-row="\d+">Move<\/button>/);
+    assert.deepEqual([...new Set(actionRows(r.body, "move"))], [rowId], "the select and the button name the opened row");
   });
+});
+
+test("Delete is absent in Trash, and Archive is absent in the archive folder and in the \\All view", async () => {
+  const trashMid = "<in-trash@mail.example.test>";
+  const archiveMid = "<in-archive@mail.example.test>";
+  const allMid = "<in-all@mail.example.test>";
+  const allInboxMid = "<all-is-the-archive@mail.example.test>";
+  let accountId, allAccountId, trashRow, archiveRow, allRow, allAccountInboxRow;
+  await withDb(async (db) => {
+    const seeded = await seedWith(db, [...ACTION_FOLDERS, { path: "All Mail", name: "All Mail", specialUse: "\\All" }]);
+    accountId = seeded.account.id;
+    const store = async (path, messageId) => deliver(db, {
+      accountId,
+      folderId: seeded.folderId(path),
+      subject: path,
+      messageId,
+      isRead: true,
+    });
+    trashRow = (await store("Trash", trashMid)).id;
+    archiveRow = (await store("Archive", archiveMid)).id;
+    allRow = (await store("All Mail", allMid)).id;
+
+    const other = await seedWith(db, [
+      { path: "INBOX", name: "Inbox" },
+      { path: "All Mail", name: "All Mail", specialUse: "\\All" },
+    ], { label: "Work", address: "sam@example.com", username: "samuser" });
+    allAccountId = other.account.id;
+    allAccountInboxRow = (await deliver(db, {
+      accountId: allAccountId,
+      folderId: other.folderId("INBOX"),
+      subject: "Archived through \\All only",
+      messageId: allInboxMid,
+      isRead: true,
+    })).id;
+    assert.ok(allRow);
+  });
+  await withFlag(async () => {
+    const trash = await get(messageHref(accountId, trashMid));
+    assert.deepEqual(actionRows(trash.body, "delete"), [], "already in Trash");
+    assert.deepEqual(actionRows(trash.body, "archive"), [trashRow]);
+
+    const archive = await get(messageHref(accountId, archiveMid));
+    assert.deepEqual(actionRows(archive.body, "archive"), [], "already archived");
+    assert.deepEqual(actionRows(archive.body, "delete"), [archiveRow]);
+
+    const all = await get(messageHref(accountId, allMid));
+    assert.deepEqual(actionRows(all.body, "archive"), [], "already in an \\All folder");
+
+    const byAll = await get(messageHref(allAccountId, allInboxMid));
+    assert.deepEqual(actionRows(byAll.body, "archive"), [allAccountInboxRow], "\\All is the archive target");
+    assert.deepEqual(actionRows(byAll.body, "delete"), [], "and there is still no Trash folder");
+  });
+});
+
+test("opening from a label folder acts on that folder's row, not the inbox copy", async () => {
+  const mid = "<label-actions@mail.example.test>";
+  let accountId, inboxRow, labelRow;
+  await withDb(async (db) => {
+    const seeded = await seedWith(db, ACTION_FOLDERS);
+    accountId = seeded.account.id;
+    inboxRow = (await deliver(db, {
+      accountId, folderId: seeded.folderId("INBOX"), subject: "Copied", date: T0, messageId: mid, isRead: true,
+    })).id;
+    labelRow = (await deliver(db, {
+      accountId, folderId: seeded.folderId("Label"), subject: "Copied", date: T0, messageId: mid, isRead: true,
+    })).id;
+  });
+  await withFlag(async () => {
+    const inbox = await get(messageHref(accountId, mid));
+    const label = await get(messageHref(accountId, mid, { row: labelRow }));
+    assert.equal(label.status, 200);
+    assert.deepEqual(actionRows(label.body, "archive"), [labelRow]);
+    assert.deepEqual(actionRows(inbox.body, "archive"), [inboxRow]);
+    assert.notEqual(labelRow, inboxRow, "the two copies are different rows");
+  });
+});
+
+test("every action control is a 44 px target in the stylesheet", () => {
+  const css = mailCss({ message: true });
+  assert.match(css, /\.ml-msg-actions \.ml-btn, \.ml-move-select \{ min-height: 44px; \}/);
+  assert.match(css, /\.ml-move-select \{[^}]*min-height: 44px/);
+  assert.match(css, /\.ml-btn\[hidden\] \{ display: none; \}/);
 });
 
 /* ------------------------------------------------------------- no readable body */

@@ -297,6 +297,9 @@ export default {
       } else {
         message = found;
         account = usable.find((entry) => entry.id === found.accountId) ?? null;
+        // The action bar decides from the account's own folders: which one Archive and Delete would
+        // move the message to, and which folders the move select may offer.
+        folders = await listFolders(db, found.accountId);
         thread = await readThread(db, found);
       }
     }

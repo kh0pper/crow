@@ -85,6 +85,14 @@ const MESSAGE_RULES = `
   }
   .ml-recipients { list-style: none; margin: 0; padding: 0 0 4px; display: flex; flex-direction: column; gap: 2px; font-size: 0.9rem; overflow-wrap: anywhere; }
   .ml-msg-date { margin: 0; font-size: 0.85rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
+  .ml-msg-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+  .ml-msg-actions .ml-btn, .ml-move-select { min-height: 44px; }
+  .ml-msg-actions .ml-status-line { flex-basis: 100%; }
+  .ml-move-select {
+    display: block; min-width: 0; max-width: 100%; min-height: 44px; padding: 0 12px; box-sizing: border-box;
+    border: 1px solid var(--crow-border-strong, var(--crow-border)); border-radius: var(--crow-radius-pill);
+    background: var(--crow-bg-surface); color: var(--crow-text-primary); font: inherit; font-size: 0.9rem;
+  }
   .ml-thread { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
   .ml-msg-section { border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 16px); background: var(--crow-bg-surface); min-width: 0; }
   .ml-msg-section[open] > .ml-msg-summary { border-bottom: 1px solid var(--crow-border); }
@@ -162,6 +170,7 @@ export function mailCss({ inbox = false, message = false, settings = false } = {
     color: var(--crow-text-primary); font: inherit; font-size: 0.9rem; text-decoration: none; cursor: pointer; text-align: center;
   }
   .ml-btn--primary { background: var(--crow-accent); border-color: var(--crow-accent); color: var(--crow-accent-contrast); font-weight: 600; }
+  .ml-btn[hidden] { display: none; }
   .ml-page-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .ml-page-head .ml-title { flex: 1 1 auto; min-width: 0; }
   .ml-gear {

@@ -6,11 +6,15 @@
  * The IMAP server speaks plain TCP on 127.0.0.1 and is told to bind port 0, so a test never picks
  * a fixed port. It answers what imapflow 2.11 asks for on the read side: greeting capabilities,
  * CAPABILITY/ID/ENABLE/NAMESPACE, LOGIN and AUTHENTICATE PLAIN|XOAUTH2, LIST/LSUB/STATUS,
- * SELECT/EXAMINE, SEARCH/UID SEARCH, FETCH/UID FETCH, STORE/UID STORE, IDLE with DONE, CLOSE and
- * LOGOUT, plus APPEND for the draft-save path. The advertised capability list is IMAP4rev1 only - no
- * IMAP4rev2, LIST-EXTENDED, LIST-STATUS, CONDSTORE, BINARY or COMPRESS - so imapflow takes its
- * plainest paths: no RETURN options on LIST, no ENABLE, no MODSEQ fetch items, a `* SEARCH 1 2 3`
- * answer and an LSUB for the subscription state that rev1 does not carry inline. `omitUidNext`
+ * SELECT/EXAMINE, SEARCH/UID SEARCH, FETCH/UID FETCH, STORE/UID STORE, UID COPY, UID MOVE, UID
+ * EXPUNGE, IDLE with DONE, CLOSE and LOGOUT, plus APPEND for the draft-save path. The advertised
+ * capability list is IMAP4rev1 only - no IMAP4rev2, LIST-EXTENDED, LIST-STATUS, CONDSTORE, BINARY,
+ * COMPRESS, MOVE or UIDPLUS - so imapflow takes its plainest paths: no RETURN options on LIST, no
+ * ENABLE, no MODSEQ fetch items, a `* SEARCH 1 2 3` answer and an LSUB for the subscription state
+ * that rev1 does not carry inline, and a move is its COPY + `\Deleted` + EXPUNGE fallback rather
+ * than MOVE. UID MOVE and UID EXPUNGE are answered anyway, for a client that asks for them, and
+ * `options.capabilities` advertises more (`MOVE` names the server's own MOVE command) so a test can
+ * take that path too. `omitUidNext`
  * models the servers that leave UIDNEXT out of a SELECT and answer it only in a STATUS. EXAMINE
  * opens a mailbox read-only, so a flag change inside it is refused; mailbox names go out as
  * escaped IMAP quoted strings; a BODY fetch item that is not a section fetch (BODYSTRUCTURE and
@@ -318,10 +322,14 @@ const BODY_SECTION_RE = /^BODY(?:\.PEEK)?\[([^\]]*)\](?:<(\d+)(?:\.(\d+))?>)?$/;
  * @param {string[]} [options.mailboxes] mailbox paths, INBOX included
  * @param {Record<string, string>} [options.specialUse] path -> special-use flag
  * @param {boolean} [options.omitUidNext] leave UIDNEXT out of SELECT/EXAMINE, answering it in STATUS only
+ * @param {string[]} [options.capabilities] capabilities to advertise in addition to the defaults, e.g. `MOVE`
  */
 export async function createFakeImapServer(options = {}) {
   const users = new Map(Object.entries(options.users ?? { [FAKE_USER]: FAKE_PASSWORD }));
   const omitUidNext = options.omitUidNext === true;
+  const advertised = Array.isArray(options.capabilities)
+    ? [...CAPABILITIES, ...options.capabilities.map(String)]
+    : CAPABILITIES;
   const mailboxes = new Map();
   const specialUseFlags = { ...DEFAULT_SPECIAL_USE, ...(options.specialUse ?? {}) };
   for (const path of options.mailboxes ?? DEFAULT_MAILBOXES) {
@@ -362,7 +370,7 @@ export async function createFakeImapServer(options = {}) {
     socket.on("data", (chunk) => feed(state, conn, chunk));
     socket.on("error", () => {});
     socket.on("close", () => state.connections.delete(conn));
-    write(conn, `* OK [CAPABILITY ${CAPABILITIES.join(" ")}] fake IMAP ready`);
+    write(conn, `* OK [CAPABILITY ${advertised.join(" ")}] fake IMAP ready`);
   });
 
   await new Promise((resolve, reject) => {
@@ -435,6 +443,15 @@ export async function createFakeImapServer(options = {}) {
     bumpUidValidity(mailbox) {
       const box = requireMailbox(mailbox);
       box.uidValidity += 1;
+      return box.uidValidity;
+    },
+
+    /** A UIDVALIDITY reset: the mailbox is emptied and its uid space starts again at 1. */
+    resetUidValidity(mailbox) {
+      const box = requireMailbox(mailbox);
+      box.uidValidity += 1;
+      box.messages = [];
+      box.uidNext = 1;
       return box.uidValidity;
     },
 
@@ -601,7 +618,7 @@ export async function createFakeImapServer(options = {}) {
 
     switch (name) {
       case "CAPABILITY":
-        write(conn, `* CAPABILITY ${CAPABILITIES.join(" ")}`);
+        write(conn, `* CAPABILITY ${advertised.join(" ")}`);
         write(conn, `${tag} OK CAPABILITY completed`);
         return;
 
@@ -841,6 +858,69 @@ export async function createFakeImapServer(options = {}) {
           }
         });
         write(conn, `${tag} OK STORE completed`);
+        return;
+      }
+
+      case "UID COPY":
+      case "UID MOVE": {
+        if (!requireAuth(conn, tag)) return;
+        const box = conn.selected;
+        if (!box) {
+          write(conn, `${tag} BAD no mailbox selected`);
+          return;
+        }
+        if (name === "UID MOVE" && conn.readOnly) {
+          write(conn, `${tag} NO [READ-ONLY] mailbox is open read-only`);
+          return;
+        }
+        const destination = mailboxes.get(tokenText(tokens[4]));
+        if (!destination) {
+          write(conn, `${tag} NO [TRYCREATE] no such mailbox`);
+          return;
+        }
+        const ranges = parseSet(tokenText(tokens[3]), highestUid(box));
+        const moving = box.messages.filter((message) => inRanges(message.uid, ranges));
+        for (const message of moving) {
+          destination.messages.push({
+            uid: destination.uidNext,
+            raw: Buffer.from(message.raw),
+            flags: new Set(message.flags),
+            internalDate: new Date(message.internalDate),
+          });
+          destination.uidNext += 1;
+          notify(destination, `* ${destination.messages.length} EXISTS`);
+        }
+        if (name === "UID MOVE") {
+          for (let index = box.messages.length - 1; index >= 0; index -= 1) {
+            if (!inRanges(box.messages[index].uid, ranges)) continue;
+            box.messages.splice(index, 1);
+            notify(box, `* ${index + 1} EXPUNGE`);
+          }
+        }
+        write(conn, `${tag} OK ${name} completed`);
+        return;
+      }
+
+      case "UID EXPUNGE": {
+        if (!requireAuth(conn, tag)) return;
+        const box = conn.selected;
+        if (!box) {
+          write(conn, `${tag} BAD no mailbox selected`);
+          return;
+        }
+        if (conn.readOnly) {
+          write(conn, `${tag} NO [READ-ONLY] mailbox is open read-only`);
+          return;
+        }
+        // RFC 4315: only a message the set names and `\Deleted` marks is removed.
+        const ranges = parseSet(tokenText(tokens[3]), highestUid(box));
+        for (let index = box.messages.length - 1; index >= 0; index -= 1) {
+          const message = box.messages[index];
+          if (!inRanges(message.uid, ranges) || !hasFlag(message, "\\Deleted")) continue;
+          box.messages.splice(index, 1);
+          notify(box, `* ${index + 1} EXPUNGE`);
+        }
+        write(conn, `${tag} OK UID EXPUNGE completed`);
         return;
       }
 

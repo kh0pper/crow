@@ -22,7 +22,10 @@
  * first: one `<details>` per message, each carrying the frame slot the client fills with an
  * opaque-origin iframe (the body itself is served by the frame route and never written into this
  * page), its attachments, and — after the conversation — the reply slot a later plan fills. A
- * message with nothing to show says so in one sentence instead of a slot.
+ * message with nothing to show says so in one sentence instead of a slot. The header carries the
+ * action bar for the opened row (Part C): Mark unread, Archive and Delete when this account has
+ * somewhere to send the message, and the move select — each control naming that row, so an action
+ * taken from a label folder acts on that folder's copy.
  *
  * The list's own controls (Task 6) live above it: the search box, which is a plain GET form so it
  * works with no client script, the control that refreshes the accounts (also the pull-to-refresh
@@ -502,6 +505,79 @@ function attachmentHref(id, index) {
   return `${MAIL_HREF}/api/messages/${Number(id)}/attachments/${Number(index)}`;
 }
 
+/* ------------------------------------------------------- the message's actions */
+
+/** Whether a folder is the `\All` view (Gmail's All Mail, and its lookalikes). */
+function isAllMailFolder(folder) {
+  const special = typeof folder?.specialUse === "string" ? folder.specialUse : "";
+  return special.split(/\s+/).some((token) => token.trim().toLowerCase() === "\\all");
+}
+
+/** Where Archive sends a message: the archive-role folder, else the account's `\All` folder. */
+function archiveFolder(folders) {
+  return folders.find((folder) => folderRole(folder) === "archive")
+    ?? folders.find(isAllMailFolder)
+    ?? null;
+}
+
+/** Where Delete sends a message: the trash-role folder, and nothing else (a move, never an expunge). */
+function trashFolder(folders) {
+  return folders.find((folder) => folderRole(folder) === "trash") ?? null;
+}
+
+/** Every folder an opened message counts as already archived in: the archive folder and any `\All`. */
+function archivedFolderIds(folders) {
+  const ids = new Set();
+  for (const folder of folders) {
+    if (folderRole(folder) === "archive" || isAllMailFolder(folder)) ids.add(Number(folder.id));
+  }
+  return ids;
+}
+
+/** One action control: its verb, the row it acts on, and the one word it shows. */
+function actionButton(action, label, rowId) {
+  return `<button class="ml-btn" type="button" data-ml-action="${e(action)}" data-row="${Number(rowId)}">${e(label)}</button>`;
+}
+
+/**
+ * The action bar the message header carries: Mark unread for a message already read, Archive and
+ * Delete only when this account has a folder to send the message to and the message is not there
+ * already, and Move — a select of the account's other folders and the button that sends it.
+ *
+ * Every control names the opened row (`data-row`), the row the link's hint selected, so an action
+ * taken from a label folder acts on that folder's copy. The virtual views plan 1 never syncs are not
+ * move destinations (`\All` is not a folder to move to), and a message sitting in an `\All` folder is
+ * archived already.
+ */
+function actionBar({ message, folders, lang }) {
+  const rowId = Number(message?.id);
+  if (!Number.isInteger(rowId) || rowId <= 0) return "";
+  const list = (Array.isArray(folders) ? folders : [])
+    .filter((folder) => folder && Number.isInteger(Number(folder.id)));
+  const current = Number(message.folderId);
+  const trash = trashFolder(list);
+  const controls = [];
+  if (message.isRead) controls.push(actionButton("unread", t("mail.markUnread", lang), rowId));
+  if (archiveFolder(list) && !archivedFolderIds(list).has(current)) {
+    controls.push(actionButton("archive", t("mail.archive", lang), rowId));
+  }
+  if (trash && Number(trash.id) !== current) {
+    controls.push(actionButton("delete", t("mail.delete", lang), rowId));
+  }
+  const options = list
+    .filter((folder) => Number(folder.id) !== current && !isSkippedFolder(folder))
+    .map((folder) => `<option value="${Number(folder.id)}">${e(folderLabel(folder))}</option>`)
+    .join("");
+  const move = `<select class="ml-move-select" data-ml-action="move" data-row="${rowId}" data-ml-move-select>`
+    + `<option value="" disabled selected>${e(t("mail.moveTo", lang))}</option>${options}</select>`
+    + actionButton("move", t("mail.move", lang), rowId);
+  // An unread message carries the row the client posts `read` for once the page is shown; a read one
+  // carries nothing, so the timer is never armed.
+  const unreadMarker = message.isRead ? "" : ` data-ml-unread-row="${rowId}"`;
+  return `<div class="ml-actions ml-msg-actions" data-ml-actions data-row="${rowId}"${unreadMarker}>`
+    + controls.join("") + move + "</div>";
+}
+
 /** One addressee as plain text (`Name <address>`): mail text, so the caller escapes it. */
 function personText(person) {
   const name = typeof person?.name === "string" ? person.name.trim() : "";
@@ -662,16 +738,18 @@ function notHereCard(back, lang) {
 }
 
 /**
- * The message view: the opened message's header, then its whole conversation oldest first, then the
- * slot a later plan fills with the reply actions. Every section carries a frame slot and no iframe:
- * the body is served by the frame route and the client builds the frame.
+ * The message view: the opened message's header (with the action bar for that row), then its whole
+ * conversation oldest first, then the slot a later plan fills with the reply actions. Every section
+ * carries a frame slot and no iframe: the body is served by the frame route and the client builds the
+ * frame.
  *
  * `thread` holds full rows (the caller looks each summary up, so a section can tell whether it has
- * a body and list its own attachments); `back` is a validated mail list link, never an outside URL.
+ * a body and list its own attachments); `folders` is the account's own folder list, which is what the
+ * action bar decides its controls from; `back` is a validated mail list link, never an outside URL.
  *
  * @param {{
- *   message?: object|null, thread?: object[], account?: object|null, lang?: string,
- *   back?: string, tz?: string
+ *   message?: object|null, thread?: object[], account?: object|null, folders?: object[],
+ *   lang?: string, back?: string, tz?: string
  * }} options
  * @returns {string}
  */
@@ -679,6 +757,7 @@ export function messageViewHtml({
   message = null,
   thread = [],
   account = null,
+  folders = [],
   lang = "en",
   back = MAIL_HREF,
   tz = undefined,
@@ -705,6 +784,7 @@ export function messageViewHtml({
         <p class="ml-msg-from">${fromHtml(message, lang)}</p>
         ${recipientsHtml(message, lang)}
         <p class="ml-msg-date">${e(fullDate(message.date, { lang, tz }))}</p>
+        ${actionBar({ message, folders, lang })}
       </header>
       <div class="ml-thread">${sections}</div>
       <div data-mail-reply-slot data-account="${e(accountId)}" data-mid="${e(mid)}" data-thread="${e(threadId)}"></div>
@@ -718,8 +798,9 @@ export function messageViewHtml({
  * to read gets the same page whichever view it asked for.
  *
  * `message` is the full row `resolveMessageRef` answered for a link, `thread` the conversation's
- * rows in Task 1's order (each looked up so a section can tell whether it has a body), and `missing`
- * a link that resolved to nothing: its page says so and offers the way back, never an error.
+ * rows in Task 1's order (each looked up so a section can tell whether it has a body), `folders` the
+ * opened message's account's folders (what its action bar decides from), and `missing` a link that
+ * resolved to nothing: its page says so and offers the way back, never an error.
  *
  * @param {{
  *   view?: string, accounts?: object[], elsewhere?: object[], lang?: string, folders?: object[],
@@ -759,7 +840,7 @@ export function renderMailPage({
 
   if (view === "message") {
     if (missing || !message) return pageShell(notHereCard(back, lang), lang);
-    return pageShell(messageViewHtml({ message, thread, account, lang, back, tz }), lang);
+    return pageShell(messageViewHtml({ message, thread, account, folders, lang, back, tz }), lang);
   }
 
   if (view === "search") {

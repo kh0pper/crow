@@ -18,6 +18,17 @@
  *   Show images rebuilds this one frame with `images=1` (this view only, nothing stored); Always show
  *   posts the sender to the allow list first, then rebuilds it the same way.
  *
+ *   Actions. The opened message's bar posts read/unread, archive, delete and move to the mail API for
+ *   the row the bar names, one action at a time (every control waits for the answer, so a double tap
+ *   is one intention). Mark unread takes its own control away once the server agrees; archive, delete
+ *   and move send the reader back to the list the page's own back link names, and from the moment the
+ *   server agrees the bar stays disabled, because the page is on its way out and a control that came
+ *   back to life could send a second action for a message that has already moved. Only a failure
+ *   frees the bar again. An unread message is
+ *   marked read once, 1.5 s after the page is shown, and only while the page is visible: the page's GET
+ *   writes nothing, so a prefetch marks nothing read. A failure shows the fixed sentence for its code
+ *   and stays; the plan approved no success line, so none is shown.
+ *
  *   Refresh. The refresh control and a pull down of 80 px or more at the top of the list (the pull is
  *   bound on the list element alone) post one sync per account, then reload through Turbo. One round
  *   runs at a time: the control is disabled while it does, and a second trigger — another pull, or a
@@ -45,8 +56,9 @@
  * Lifecycle: Turbo re-runs this script on every visit. Listeners on an element inside the panel are
  * bound behind a marker on that element (the element is replaced with the page, so a fresh one binds
  * again); the window's message listener and the document's turbo:before-visit hook are bound once
- * per window. The mark-read timer a later part of the plan arms lives in window.__mlTimer, which
- * every run and every departure clears, so a timer armed on one page can never fire on the next.
+ * per window, and so is the window's pagehide hook. The mark-read timer a later part of the plan arms
+ * lives in window.__mlTimer, which every run, every departure and every pagehide clears, so a timer
+ * armed on one page can never fire on the next.
  *
  * Emitted inside a template literal: no backticks, no dollar-brace, no markup sink, and a backslash
  * in the emitted script is written doubled here. The stylesheet is scoped under .ml, so the one rule
@@ -244,6 +256,100 @@ export function mailClientJs(lang = "en") {
     });
   }
 
+  /* ---- message actions: read, unread, archive, delete and move ----------------------------- */
+
+  var ACTION_PATH = '/dashboard/mail/api/messages/';
+  var MARK_READ_DELAY_MS = 1500;
+  var actionBusy = false;
+
+  function actionUrl(row) {
+    return ACTION_PATH + encodeURIComponent(String(row)) + '/actions';
+  }
+  function actionControls() {
+    var out = [];
+    var bars = root.querySelectorAll('[data-ml-actions]');
+    for (var i = 0; i < bars.length; i++) {
+      var found = bars[i].querySelectorAll('[data-ml-action]');
+      for (var j = 0; j < found.length; j++) { out.push(found[j]); }
+    }
+    return out;
+  }
+  // One action at a time: every control in the bar waits for the answer, so a double tap is one
+  // intention and never two POSTs.
+  function setActionsWaiting(waiting) {
+    var controls = actionControls();
+    for (var i = 0; i < controls.length; i++) {
+      if (waiting) { controls[i].setAttribute('disabled', ''); }
+      else { controls[i].removeAttribute('disabled'); }
+    }
+  }
+  // The list the person came from: the page's own back link, never a URL built here.
+  function backHref() {
+    var back = root.querySelector('a.ml-back');
+    var href = back ? String(back.getAttribute('href') || '') : '';
+    return href === '' ? String(location.href || '') : href;
+  }
+  function runAction(control, action, folderId) {
+    if (actionBusy) { return; }
+    var row = String(control.getAttribute('data-row') || '');
+    if (row === '') { return; }
+    var bar = closestOf(control, '[data-ml-actions]') || root;
+    var body = { action: action };
+    if (folderId) { body.folderId = folderId; }
+    actionBusy = true;
+    setActionsWaiting(true);
+    post(actionUrl(row), body).then(function (result) {
+      if (!result.ok) {
+        // Only a failure frees the bar: the action changed nothing, so another try is allowed.
+        actionBusy = false;
+        setActionsWaiting(false);
+        sayError(bar, result);
+        return;
+      }
+      // Mark unread has done its job when the server agrees, so its own control goes away and the
+      // rest of the bar is usable again.
+      if (action === 'unread') {
+        actionBusy = false;
+        setActionsWaiting(false);
+        control.setAttribute('hidden', '');
+        return;
+      }
+      // Archive, delete and move change which list the person was looking at, so the reader goes back
+      // to that list. It is already on its way out: the bar stays disabled, and a click that lands
+      // while the next page loads sends nothing.
+      navigate(backHref());
+    });
+  }
+  function clickAction(control) {
+    if (String(control.tagName || '').toLowerCase() !== 'button') { return; }
+    var action = String(control.getAttribute('data-ml-action') || '');
+    if (action === 'move') {
+      var bar = closestOf(control, '[data-ml-actions]');
+      var select = bar && typeof bar.querySelector === 'function' ? bar.querySelector('[data-ml-move-select]') : null;
+      var chosen = select ? Number(select.value) : 0;
+      if (!(chosen > 0)) { return; }
+      runAction(control, 'move', chosen);
+      return;
+    }
+    if (action === 'archive' || action === 'delete' || action === 'unread') { runAction(control, action); }
+  }
+  // Opening an unread message marks it read once, 1.5 s after the page is shown, and only while the
+  // page is visible: the GET itself writes nothing, so a prefetch marks nothing read. The timer lives
+  // in window.__mlTimer, which this run already cleared and every departure clears again.
+  function bindMarkRead() {
+    var bar = root.querySelector('[data-ml-actions][data-ml-unread-row]');
+    if (!bar) { return; }
+    var row = String(bar.getAttribute('data-ml-unread-row') || '');
+    if (row === '') { return; }
+    window.__mlTimer = setTimeout(function () {
+      window.__mlTimer = null;
+      if (String(document.visibilityState || '') !== 'visible') { return; }
+      post(actionUrl(row), { action: 'read' }).then(function (result) {
+        if (!result.ok) { sayError(bar, result); }
+      });
+    }, MARK_READ_DELAY_MS);
+  }
+
   var SLOT_SELECTOR = '[data-ml-frame' + '-slot]';
   // The one sandbox value a slot may carry: the server's own, substituted into this template.
   var SLOT_SANDBOX = __ML_SLOT_SANDBOX__;
@@ -415,6 +521,9 @@ export function mailClientJs(lang = "en") {
   function clickHandler(event) {
     var target = event.target && event.target.closest ? event.target : null;
     if (!target) { return; }
+
+    var actionControl = target.closest('[data-ml-action]');
+    if (actionControl) { clickAction(actionControl); return; }
 
     var show = target.closest('[data-ml-show-images]');
     if (show) { paintFrame(slotIn(show), '?images=1'); return; }
@@ -602,11 +711,13 @@ export function mailClientJs(lang = "en") {
   for (var j = 0; j < lists.length; j++) { bindPull(lists[j]); }
   var addForms = root.querySelectorAll('[data-ml-add-account]');
   for (var k = 0; k < addForms.length; k++) { bindAddForm(addForms[k]); }
+  bindMarkRead();
 
   if (!window.__mlBound) {
     window.__mlBound = true;
     window.addEventListener('message', onFrameReport);
     document.addEventListener('turbo:before-visit', clearMarkTimer);
+    window.addEventListener('pagehide', clearMarkTimer);
   }
 })();
 </script>`.split("__ML_SLOT_SANDBOX__").join(JSON.stringify(FRAME_IFRAME_SANDBOX));

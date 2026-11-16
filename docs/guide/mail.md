@@ -6,9 +6,9 @@ title: Mail
 
 Crow can hold your IMAP mailboxes in its own database and give you one reader for all of them in
 Crow's Nest: one inbox across accounts, folders and labels, an open message with its whole
-conversation, search, older mail fetched on demand, attachments, and remote images on your terms. It
-is built for a phone first — one column, every tap target big enough for a thumb — and it works the
-same on a desktop.
+conversation, search, older mail fetched on demand, attachments, remote images on your terms, and the
+usual actions on a message — read, unread, archive, delete and move. It is built for a phone first —
+one column, every tap target big enough for a thumb — and it works the same on a desktop.
 
 Your mail stays on your instance. The mail tables are local-only: they are never replicated to a
 paired Crow, never put in a peer's outbox and never shared with a project. Each address is connected
@@ -119,8 +119,28 @@ attachment is over about 18 MB, too large to download here."
 
 ## Acting on a message
 
-This release has no message actions yet. **Mark unread**, **Archive**, **Delete**, **Move…** and
-marking an unread message read when you open it arrive with the next release (message actions).
+An open message carries its own controls in the header, and each one acts on the copy you opened: a
+message opened from a label is archived or moved from that label, not from the inbox.
+
+- **Mark unread** puts the message back to unread. It appears on a message you have already read.
+- **Archive** moves the message to the account's Archive folder or, on a mailbox that keeps an "All
+  Mail" folder in its place, to that folder. It is not offered when the account has neither, or when
+  the message is already there.
+- **Delete** moves the message to Trash. Crow never erases mail from the server, and the control is
+  not offered on a message that is already in Trash or on an account with no Trash folder.
+- **Move…** opens a list of the account's other folders; choose one and press **Move**.
+
+After Archive, Delete or Move the reader goes back to the list you came from, where the message has
+left the folder you were reading. One action runs at a time, so a double tap cannot send the same
+change twice.
+
+Opening an unread message marks it read 1.5 seconds after the page is shown, and only while the page
+is visible at that moment — leaving the page before then marks nothing read. The page itself only
+reads; the mark-read is the reader's own separate request.
+
+If the mailbox changed on the server while the page was open, Crow says so and refreshes instead of
+acting on the wrong message. A mail server that cannot move messages at all refuses Archive, Delete
+and Move; Mark unread still works there.
 
 ## Settings
 
