@@ -1384,7 +1384,11 @@ test("U-H15 (regression, expected-green on main) a raw-byte relay that flips one
 
   {
     const { a, b, A, B, sa, sb, st } = await run(t, true);
-    const before = A.spies.keyReceived.length;
+    // Mutual admission returns while the feed-key exchange is still in flight, and
+    // the key B sends A travels the UNTAMPERED direction — so baseline only once
+    // both sides hold their feed key. Only keys arriving AFTER the flip count.
+    assert.ok(await until(() => A.spies.keyReceived.length === 1 && B.spies.keyReceived.length === 1, W(10_000)), pmLogs());
+    const beforeA = A.spies.keyReceived.length, beforeB = B.spies.keyReceived.length;
     st.flipNext = true;
     // Traffic in the flipped direction: a plaintext write makes protomux emit a
     // Noise frame, which the relay corrupts.
@@ -1394,7 +1398,8 @@ test("U-H15 (regression, expected-green on main) a raw-byte relay that flips one
     await writeAndEmit(a, m, "u-h15 after flip");
     await sleep(1000);
     assert.equal(await hasMemory(b.db, m), false, "no entry is applied after the flip");
-    assert.equal(A.spies.keyReceived.length, before, "no feed key arrives from the tampered stream");
+    assert.equal(A.spies.keyReceived.length, beforeA, "no feed key arrives from the tampered stream (A)");
+    assert.equal(B.spies.keyReceived.length, beforeB, "no feed key arrives from the tampered stream (B)");
   }
 });
 
