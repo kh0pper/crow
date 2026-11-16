@@ -76,7 +76,9 @@ const UNVERIFIED_BOT = Object.freeze({ kind: "bot", id: null, unverified: true }
  * What the marker does NOT close: a bot with a shell that spawns one of these servers itself, with a
  * clean env (no marker), is indistinguishable from the operator's own client. That is the existing
  * containment caveat, not something this function can fix; every path the bot engine itself
- * controls (pi's spawn env, the per-bot MCP config) yields a bot actor or the unverified bot.
+ * controls (pi's spawn env, the per-bot MCP config) yields a bot actor or the unverified bot. Nor is
+ * the operator-owned global pi config stripped of actor env, so a server it starts resolves from
+ * whatever actor env that config's blocks carry.
  */
 export function actorFromEnv(env) {
   const e = env || {};

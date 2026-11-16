@@ -232,7 +232,7 @@ test("botSessionEnv is the identity env the engine puts on pi's own process", ()
 });
 
 /** A stub pi that captures its own environment and stays alive long enough to be read. */
-async function spawnStubPi(mode) {
+async function spawnStubPi(mode, overrides = {}) {
   const d = join(dir, "pirpc-" + mode);
   mkdirSync(join(d, "sessions"), { recursive: true });
   const capture = join(d, "env.json");
@@ -265,6 +265,7 @@ async function spawnStubPi(mode) {
       displayName: "Glasses",
       mcpDelivery: mode,
       mcpConfig: { mcpServers: {} },
+      ...overrides,
     });
   } finally {
     if (saved === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = saved;
@@ -294,6 +295,31 @@ for (const mode of ["file", "fd"]) {
     assert.equal(env.CROW_BOT_SESSION, BOT);
     assert.equal(env.KEEP, "1", "an ordinary spawn_env key still passes through");
     assert.ok(!JSON.stringify(env).includes("someone-else"), "the def's actor values are gone");
+    if (mode === "fd") assert.equal(env.PI_BOT_MCP_CONFIG_FD, "4", "fd delivery");
+    else assert.ok(!("PI_BOT_MCP_CONFIG_FD" in env), "file delivery");
+  });
+
+  // A spawn with no bot id (the skill review is one) must not fall back to "nobody said", which
+  // reads as unknown = the operator's own client. No actor, and the marker says unbound, so every
+  // MCP child pi spawns is the unverified bot and is refused everywhere.
+  test(`a spawn with no bot id leaves no actor and marks the session unbound in ${mode} mode`, { timeout: 30_000 }, async () => {
+    const env = await spawnStubPi(mode, {
+      botId: undefined,
+      displayName: undefined,
+      // Whatever merged before the identity (opts.extraEnv is not stripped) does not survive it.
+      extraEnv: {
+        CROW_ACTOR_KIND: "owner", CROW_ACTOR_BOT_ID: "someone-else", CROW_ACTOR_BOT_NAME: "Someone",
+        CROW_BOT_SESSION: "someone-else",
+      },
+    });
+    assert.ok(env.PI_BOT_PERMISSION_POLICY, "the stub really is pi as the bridge spawns it");
+    assert.equal(env.CROW_BOT_SESSION, "unbound");
+    assert.ok(!("CROW_ACTOR_KIND" in env), "no inherited actor kind");
+    assert.ok(!("CROW_ACTOR_BOT_ID" in env), "no inherited bot id");
+    assert.ok(!("CROW_ACTOR_BOT_NAME" in env), "no inherited bot name");
+    assert.ok(!JSON.stringify(env).includes("someone-else"), "the stale identity is gone");
+    assert.deepEqual(actorMod.actorFromEnv(env), { kind: "bot", id: null, unverified: true },
+      "the unverified bot, which every share rule refuses — never the unknown that is the operator");
     if (mode === "fd") assert.equal(env.PI_BOT_MCP_CONFIG_FD, "4", "fd delivery");
     else assert.ok(!("PI_BOT_MCP_CONFIG_FD" in env), "file delivery");
   });
@@ -419,6 +445,21 @@ test("an executor bound to the voice bot gives projects, memory and storage oper
   }
 });
 
+test("a def that merely says kind:'voice' on another bot's id is still a plain bot actor", async () => {
+  const { createToolExecutor } = await import("../servers/gateway/ai/tool-executor.js");
+  // A bot writes its own def, so `kind` is the bot's own word and never a credential.
+  const ex = createToolExecutor({ botDef: { bot_id: "other.bot", kind: "voice", display_name: "Not Crow" } });
+  try {
+    for (const category of ["projects", "memory", "storage"]) {
+      const actor = ex.baseActorFor(category);
+      assert.deepEqual(actor, { kind: "bot", id: "other.bot" }, category);
+      assert.equal(share.isOperatorVoice(actor), false, category);
+    }
+  } finally {
+    await ex.close();
+  }
+});
+
 test("an executor bound to another bot gives projects, memory and storage a plain bot actor", async () => {
   const { createToolExecutor } = await import("../servers/gateway/ai/tool-executor.js");
   const ex = createToolExecutor({ botDef: { bot_id: BOT, display_name: "Glasses" } });
@@ -439,5 +480,98 @@ test("an executor bound to another bot gives projects, memory and storage a plai
     }
   } finally {
     await unbound.close();
+  }
+});
+
+/** Build one category's in-process server through the real getClient path (discovery builds it and
+ *  runs no handler), so the actor read back is the one the server was CONSTRUCTED with. */
+async function buildCategory(ex, category) {
+  await ex.executeTool("crow_discover", { category, action: "crow_no_such_action" });
+  const server = ex._inProcessServers.get(category);
+  assert.ok(server, `${category}: the executor built its in-process server`);
+  return server;
+}
+
+test("the servers the executor actually builds hold the base actor, voice bot and plain bot alike", async () => {
+  const { createToolExecutor } = await import("../servers/gateway/ai/tool-executor.js");
+  const op = share.operatorVoiceActor();
+  // A project-less memory is what a bot's read scope never includes, so the count tells
+  // which base actor the memory server holds (it reports no actor of its own).
+  await db.execute({
+    sql: "INSERT INTO memories (content, category, importance) VALUES (?, 'general', 5)",
+    args: ["The heron lands at the xylophone bridge"],
+  });
+  const voice = createToolExecutor({ botDef: { bot_id: CROW_VOICE_BOT_ID, display_name: "Crow" } });
+  const other = createToolExecutor({ botDef: { bot_id: BOT, display_name: "Glasses" } });
+  try {
+    assert.equal((await buildCategory(voice, "projects")).research.actor, op, "projects");
+    assert.deepEqual((await buildCategory(other, "projects")).research.actor, { kind: "bot", id: BOT }, "projects");
+    assert.equal((await buildCategory(voice, "storage")).storage.actor, op, "storage");
+    assert.deepEqual((await buildCategory(other, "storage")).storage.actor, { kind: "bot", id: BOT }, "storage");
+
+    const stats = async (ex) => (await ex.executeTool("crow_memory", { action: "memory_stats", params: {} })).result;
+    assert.match(await stats(voice), /Total memories: 1/, "the operator-voice base actor reads the project-less memory");
+    assert.match(await stats(other), /Total memories: 0/, "a plain bot's read scope excludes it");
+  } finally {
+    await voice.close();
+    await other.close();
+  }
+});
+
+// The actor is written down in ONE place: getClient builds a server's options from baseActorFor
+// through factoryOptionsFor, never from a second copy of the actor.
+test("the executor's factory options come from its one base-actor helper", () => {
+  const src = readFileSync(join(REPO, "servers/gateway/ai/tool-executor.js"), "utf8");
+  assert.match(src, /createInProcessClient\(category, factory, factoryOptionsFor\(category\)\)/);
+  assert.equal(src.match(/\{ baseActor \}/g).length, 1, "one storage option shape");
+  assert.ok(src.indexOf('category === "storage" ? { baseActor }') > src.indexOf("const factoryOptionsFor"),
+    "the actor→option mapping lives inside factoryOptionsFor");
+});
+
+// --- the router's base actor ----------------------------------------------
+
+async function connect(server) {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const client = new Client({ name: "share-identity-router", version: "0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  return client;
+}
+
+const text = (r) => (r.content || []).map((b) => b.text || "").join("");
+
+test("a router gives the memory and storage servers the same base actor it gives projects", async () => {
+  const { createRouterServer } = await import("../servers/gateway/router.js");
+  const { OWNER } = actorMod;
+  const ownerRouter = createRouterServer({ actor: OWNER });
+  const botRouter = createRouterServer({ actor: { kind: "bot", id: BOT } });
+  const owner = await connect(ownerRouter);
+  const bot = await connect(botRouter);
+  const built = async (routerServer, client, category) => {
+    await client.callTool({ name: "crow_discover", arguments: { category, action: "crow_no_such_action" } });
+    const server = routerServer._inProcessServers.get(category);
+    assert.ok(server, `${category}: the router built its in-process server`);
+    return server;
+  };
+  try {
+    // The mount's own actor object, not a copy of it.
+    assert.equal((await built(ownerRouter, owner, "projects")).research.actor, OWNER, "projects");
+    assert.equal((await built(ownerRouter, owner, "storage")).storage.actor, OWNER, "storage");
+    assert.equal((await built(botRouter, bot, "projects")).research.actor.kind, "bot", "projects");
+    assert.equal((await built(botRouter, bot, "storage")).storage.actor.id, BOT, "storage");
+
+    // Memory reports no actor of its own: the writing rules refuse a bot base and only a bot base,
+    // so the refusal is what shows which base actor the memory server holds.
+    const updateWritingStyle = (client) => client.callTool({
+      name: "crow_memory",
+      arguments: { action: "update_context_section", params: { section_key: "writing_style", content: "# Rules" } },
+    });
+    assert.match(text(await updateWritingStyle(bot)), /can only be changed by the operator/, "a bot base actor is refused");
+    assert.doesNotMatch(text(await updateWritingStyle(owner)), /can only be changed by the operator/, "the mount's actor is not a bot");
+  } finally {
+    try { await owner.close(); } catch {}
+    try { await bot.close(); } catch {}
   }
 });

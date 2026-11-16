@@ -82,6 +82,10 @@ export function createRouterServer(options = {}) {
 
   // Lazy-initialized in-process clients (per-session)
   const clients = new Map(); // category → Client
+  // The in-process server paired with each client (built lazily, one per category). Read by
+  // tests: the actor a server was actually constructed with is on the server itself
+  // (server.research.actor, server.storage.actor), not on the options this router passed.
+  const inProcessServers = new Map(); // category → McpServer
 
   /**
    * Get or create an in-process client for a category.
@@ -125,11 +129,15 @@ export function createRouterServer(options = {}) {
       throw new Error(`Unknown server category: ${category}. Available: ${Object.keys(TOOL_MANIFESTS).join(", ")}`);
     }
 
-    // The project server learns who is calling from the mount (owner or unknown); each call's
-    // forwarded _meta (below) can only narrow it.
-    const factoryOptions = category === "projects" ? { actor: options.actor || UNKNOWN } : undefined;
-    const { client } = await createInProcessClient(category, factory, factoryOptions);
+    // The project servers learn who is calling from the mount (owner or unknown); each call's
+    // forwarded _meta (below) can only narrow it. Projects, memory and storage all take it —
+    // projects and memory as `actor`, storage as `baseActor` (the same actor, not a second one).
+    const factoryOptions = category === "storage" ? { baseActor: options.actor || UNKNOWN }
+      : category === "memory" || category === "projects" ? { actor: options.actor || UNKNOWN }
+        : undefined;
+    const { client, server } = await createInProcessClient(category, factory, factoryOptions);
     clients.set(category, client);
+    inProcessServers.set(category, server);
     return client;
   }
 
@@ -580,6 +588,9 @@ Session End Protocol:
       }],
     })
   );
+
+  // The in-process servers this router built, by category (the seam a test reads an actor from).
+  routerServer._inProcessServers = inProcessServers;
 
   return routerServer;
 }

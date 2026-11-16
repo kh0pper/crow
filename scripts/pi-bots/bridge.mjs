@@ -320,6 +320,28 @@ export function filterSpawnEnv(def) { return filterSpawnEnvWithReport(def).spawn
  *  later task should call, never a copy). */
 export { botSessionEnv };
 
+/**
+ * Applies this spawn's identity to the FINAL pi env (`env` is mutated and returned).
+ *
+ * With a bot id: the bot's identity plus the engine marker (botSessionEnv).
+ *
+ * With NO bot id: every inherited `CROW_ACTOR_*` and the marker are deleted and the marker is set
+ * to the literal "unbound". `actorFromEnv` (servers/research/actor.js) then resolves the unverified
+ * bot, which every share rule refuses — without it an actor-less env reads as unknown, which is the
+ * operator's own client, so a bot-less spawn would fail OPEN. Applied last, so nothing merged
+ * before it (a def's spawn_env is already stripped by filterSpawnEnvWithReport; `opts.extraEnv` is
+ * not) can leave a caller identity behind.
+ */
+export function piIdentityEnv(env, { botId, displayName } = {}) {
+  const out = env && typeof env === "object" ? env : {};
+  if (typeof botId === "string" && botId) return Object.assign(out, botSessionEnv(botId, displayName));
+  for (const key of Object.keys(out)) {
+    if (/^CROW_ACTOR_/.test(key) || key === "CROW_BOT_SESSION") delete out[key];
+  }
+  out.CROW_BOT_SESSION = "unbound";
+  return out;
+}
+
 export function db(p) { const d = new Database(resolveSqlitePath(p)); d.pragma("busy_timeout = 10000"); return d; }
 
 export function toolAllowlist(def, { remoteEnabled = false, serviceBlocks = null, serviceSkippedTools = [], satelliteBlocks = null, bareServerTools } = {}) {
@@ -809,8 +831,10 @@ export class PiRpc {
     // `servers/research/actor.js` turns it into a bot actor — or, when the marker and the bot id
     // disagree (or no bot id is set), into the unverified bot that is refused everywhere. Applied
     // after the def's spawn_env, whose CROW_ACTOR_*/CROW_BOT_SESSION keys were stripped above, so a
-    // bot definition can never choose its own identity. The id is the engine's opts.botId only.
-    if (typeof opts.botId === "string" && opts.botId) Object.assign(env, botSessionEnv(opts.botId, opts.displayName));
+    // bot definition can never choose its own identity. The id is the engine's opts.botId only; a
+    // spawn with NO bot id (skill review) leaves no inherited actor and marks the session "unbound",
+    // so its children resolve the unverified bot instead of falling back to unknown = the operator.
+    piIdentityEnv(env, { botId: opts.botId, displayName: opts.displayName });
     // detached:true puts pi in its own process group so close() can SIGTERM
     // the whole tree (pi + its MCP children). Without this, killing pi leaves
     // its MCP server children (brave-search, google-workspace, github, etc.)
