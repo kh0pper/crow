@@ -15,6 +15,8 @@
  *     appear in no log line and in no emitted row,
  *   - a card is paid against the entry it was started for, never another one,
  *   - a Done mark the ledger cannot file leaves the chunk pay standing,
+ *   - a repeated log still leaves the area it trains marked, and a week made
+ *     whole three weeks back earns its row on a plain read, once,
  *   - the MCP tool refuses an activity outside the fixed vocabulary.
  */
 import { test, before, after } from "node:test";
@@ -29,7 +31,7 @@ import { createHash } from "node:crypto";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createRambleServer } from "../bundles/ramble/server/server.js";
-import { localDay } from "../bundles/ramble/server/eggs.js";
+import { localDay, startOfLocalDay } from "../bundles/ramble/server/eggs.js";
 import { chunkPoints, MOVE_OUTDOOR_KIND } from "../bundles/ramble/server/moves/ledger.js";
 import { rowDelta } from "../bundles/ramble/server/steps.js";
 import { OUTDOOR_SESSION_KEY, outdoorPoints } from "../bundles/ramble/server/moves/day.js";
@@ -1635,6 +1637,68 @@ test("week: a log marks the area it trains, and a short or repeated one marks no
       });
       assert.equal(repeat.status, 200, "a repeated log is not an error");
       assert.deepEqual(await walletKeys(db, "movearea"), before, "and marks nothing new");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("week: a repeated log still leaves the area it trains marked", async () => {
+  const mount = await freshMount();
+  try {
+    const today = localDay(Date.now());
+    const log = { activity: "walk", minutes: 20, effort: "moderate" };
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/log", log)).status, 200);
+
+    const db = await mountDb(mount.dir);
+    try {
+      const mark = today + ":heart";
+      assert.deepEqual(await walletKeys(db, "movearea", mark), [mark], "the first log marked the heart");
+      await db.execute({
+        sql: "DELETE FROM ramble_wallet WHERE kind = ? AND key = ?",
+        args: ["movearea", mark],
+      });
+      assert.deepEqual(await walletKeys(db, "movearea"), [], "the mark is gone before the repeat");
+
+      const repeat = await dayPost(mount.url, "/api/ramble/moves/log", log);
+      assert.equal(repeat.status, 200);
+      assert.equal((await repeat.json()).log.already, true, "the same minute's log is a repeat");
+      assert.deepEqual(await walletKeys(db, "movearea", mark), [mark],
+        "and the repeat puts the mark back");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("week: a week made whole three weeks back earns its row on a plain read, once", async () => {
+  const mount = await freshMount();
+  try {
+    // The first read is what creates and sets up the scratch db this test writes
+    // into; on a fresh week it settles nothing.
+    assert.equal((await (await weekGet(mount.url)).json()).weekId, weekIdOf(Date.now()));
+    const db = await mountDb(mount.dir);
+    try {
+      // The local day three weeks back, at its noon, named the way the router
+      // names it: a day of that week rather than an instant inside it.
+      const pastDay = localDay(startOfLocalDay(Date.now()) - 21 * 86400000 + 43200000);
+      const pastWeek = weekIdOf(new Date(pastDay + "T12:00:00").getTime());
+      const days = weekDays(pastWeek);
+      assert.equal(days.length, 7, "the day names a real week");
+      assert.notEqual(pastWeek, weekIdOf(Date.now()), "and it is not the week of now");
+
+      for (const day of [days[0], days[1]]) {
+        for (const area of AREAS) {
+          // eslint-disable-next-line no-await-in-loop
+          await walletFact(db, "movearea", day + ":" + area);
+        }
+      }
+      assert.deepEqual(await walletKeys(db, "weekfull"), [], "nothing is settled before the rows are whole");
+
+      const week = await (await weekGet(mount.url)).json();
+      assert.equal(week.weekId, weekIdOf(Date.now()), "the answer is still this week");
+      assert.deepEqual(await walletKeys(db, "weekfull"), [pastWeek],
+        "the whole week three weeks back earned its own row");
+
+      await (await weekGet(mount.url)).json();
+      assert.deepEqual(await walletKeys(db, "weekfull"), [pastWeek],
+        "and a second read of it settles nothing new");
     } finally { db.close?.(); }
   } finally { await mount.close(); }
 });

@@ -5,18 +5,24 @@
  * What is pinned here:
  *   - the stage a routine is at: 1 with no row, the row's delta afterwards, and
  *     junk clamped into 1..STAGES_MAX,
- *   - a finished staged routine is recorded once per week, an entry with no id
- *     or no stages records nothing, and older weeks' staged lists are dropped,
+ *   - a finished staged routine is recorded once per week, filed by the week of
+ *     the day it was played and pruned by the week of `now`, so a card filed on
+ *     a Monday for the Sunday before keeps BOTH weeks' lists; an entry with no
+ *     id or no stages, and a day outside those two weeks, record nothing,
  *   - an offer needs a WHOLE-BODY week (a `weekfull` wallet row). The week of
  *     `now` is asked first and the week before it second, and a whole-body week
  *     with nothing to offer falls through to the one before it; a routine with
  *     no stages, a routine already at its last stage and a routine done in a
  *     week that was not whole-body are never offered,
+ *   - an answer covers every week up to the one it names, so a routine staged in
+ *     both whole-body weeks is asked about once: a no sticks and a yes takes one
+ *     stage, never two,
  *   - nothing raises a stage but accepting one: offering many times, days
  *     apart, writes no wallet row and no setting at all,
  *   - accepting raises the stage by exactly one, by compare-and-swap: a second
  *     answer in the same week is refused, two calls started together take one
- *     stage between them, and a stale read loses the swap and writes nothing,
+ *     stage between them, a stale read loses the swap and writes nothing, and a
+ *     row another instance pushed to its last stage gains nothing,
  *   - declining records the answer and no stage row, so the same week is not
  *     asked again while a later whole-body week is,
  *   - a staged routine still plans at least 600 seconds at every stage it
@@ -34,12 +40,12 @@ import { fileURLToPath } from "node:url";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { STAGES_MAX } from "../bundles/ramble/server/moves/library.js";
-import { weekIdOf } from "../bundles/ramble/server/moves/week.js";
+import { weekDays, weekIdOf } from "../bundles/ramble/server/moves/week.js";
 import { readJson } from "../bundles/ramble/server/moves/today.js";
 import { WEEKFULL_KIND } from "../bundles/ramble/server/wardrobe.js";
 import {
   ANSWERED_KEY, STAGED_PREFIX, STAGE_KIND,
-  acceptStage, declineStage, noteRoutineDone, offerStage, stageOf,
+  acceptStage, declineStage, noteRoutineDone as noteRoutineDoneAt, offerStage, stageOf,
 } from "../bundles/ramble/server/moves/stages.js";
 
 const require = createRequire(import.meta.url);
@@ -61,10 +67,27 @@ const DAY_W45 = "2026-11-05";
 const DAY_W46 = "2026-11-12";
 const DAY_W47 = "2026-11-17";
 
+const W42 = "2026-W42";
 const W44 = "2026-W44";
 const W45 = "2026-W45";
 const W46 = "2026-W46";
 const W47 = "2026-W47";
+const NOW_W45 = noon(2026, 11, 5);
+
+/** Local noon of a "YYYY-MM-DD" day. */
+function noonOfDay(day) {
+  const [year, month, date] = String(day ?? "").split("-").map(Number);
+  return new Date(year, month - 1, date, 12, 0, 0, 0).getTime();
+}
+
+/**
+ * noteRoutineDone as the routes call it. A test that does not care which week a
+ * card is filed in files it in the week it was played, so `now` defaults to
+ * that day's own local noon; a test about the week `now` names passes `now`.
+ */
+const noteRoutineDone = (db, { day, entry, now } = {}) => noteRoutineDoneAt(db, {
+  day, entry, now: now === undefined ? noonOfDay(day) : now,
+});
 
 /* ---------- fixture library ---------- */
 
@@ -114,12 +137,15 @@ function routineEntry(id, over = {}) {
   };
 }
 
-/** A routine with three stages, one with four, and one with none. */
+/** A routine with three stages, one with four, one with two, and one with none. */
 const GROW_THREE = routineEntry("grow-three", {
   stages: [{ rounds: 1 }, { reps: 4 }, { rounds: 3 }],
 });
 const GROW_FOUR = routineEntry("grow-four", {
   stages: [{ rounds: 1 }, { rounds: 2 }, { reps: 4 }, { rounds: 3 }],
+});
+const GROW_TWO = routineEntry("grow-two", {
+  stages: [{ rounds: 1 }, { reps: 4 }],
 });
 const PLAIN = routineEntry("plain-one");
 
@@ -128,6 +154,7 @@ const LIB = [
   exerciseEntry("ex-reps"),
   GROW_THREE,
   GROW_FOUR,
+  GROW_TWO,
   PLAIN,
 ];
 
@@ -194,6 +221,34 @@ function staleStageDb(db) {
       if (kind === STAGE_KIND && sql.trim().startsWith("SELECT delta FROM ramble_wallet")) {
         stageReads += 1;
         if (stageReads === 2) {
+          await real({
+            sql: "UPDATE ramble_wallet SET delta = 2 WHERE kind = ? AND key = ?",
+            args: [STAGE_KIND, String(statement.args[1])],
+          });
+        }
+      }
+      return result;
+    },
+  };
+}
+
+/**
+ * A db whose stage row is moved on by another instance right after the FIRST
+ * read of it: the offer is read while the row still says stage 1, and the row
+ * the accept then reads says stage 2. For a routine that carries two stages
+ * that is its last one.
+ */
+function lastStageRaceDb(db) {
+  const real = db.execute.bind(db);
+  let stageReads = 0;
+  return {
+    execute: async (statement) => {
+      const result = await real(statement);
+      const sql = String(statement?.sql ?? "");
+      const kind = Array.isArray(statement?.args) ? statement.args[0] : null;
+      if (kind === STAGE_KIND && sql.trim().startsWith("SELECT delta FROM ramble_wallet")) {
+        stageReads += 1;
+        if (stageReads === 1) {
           await real({
             sql: "UPDATE ramble_wallet SET delta = 2 WHERE kind = ? AND key = ?",
             args: [STAGE_KIND, String(statement.args[1])],
@@ -276,6 +331,47 @@ test("noteRoutineDone keeps only the current and the previous week's staged rows
     "the week before the previous one is dropped");
   assert.deepEqual(await readJson(db, STAGED_PREFIX + W45), ["grow-four"], "and the kept list is unchanged");
   assert.deepEqual(await readJson(db, STAGED_PREFIX + W46), ["grow-four"]);
+});
+
+test("noteRoutineDone files a card by its own week and prunes by the week of now", async () => {
+  const db = await freshDb();
+  const monday = "2026-11-10";
+  const sunday = "2026-11-08";
+  assert.equal(weekIdOf(noonOfDay(monday)), W46);
+  assert.equal(weekIdOf(noonOfDay(sunday)), W45);
+  const now = noonOfDay(monday);
+
+  assert.equal(await noteRoutineDoneAt(db, { day: monday, entry: entryOf("grow-four"), now }), true);
+  assert.deepEqual(await readJson(db, STAGED_PREFIX + W46), ["grow-four"]);
+
+  // A card played on the Sunday before, filed on the Monday: it belongs to last
+  // week, and recording it must not drop the week being played.
+  assert.equal(await noteRoutineDoneAt(db, { day: sunday, entry: entryOf("grow-three"), now }), true);
+  assert.deepEqual(await readJson(db, STAGED_PREFIX + W45), ["grow-three"]);
+  assert.deepEqual(await readJson(db, STAGED_PREFIX + W46), ["grow-four"],
+    "this week's list survives a card filed for last week");
+  assert.deepEqual(await stagedKeys(db), [STAGED_PREFIX + W45, STAGED_PREFIX + W46]);
+
+  // Four weeks before now is neither of the two weeks a record may land in.
+  const far = "2026-10-15";
+  assert.equal(weekIdOf(noonOfDay(far)), W42);
+  const keys = await stagedKeys(db);
+  const rows = await settingsRows(db);
+  assert.equal(await noteRoutineDoneAt(db, { day: far, entry: entryOf("grow-four"), now }), false,
+    "a day outside the two weeks records nothing");
+  assert.deepEqual(await stagedKeys(db), keys, "and drops no week's list");
+  assert.equal(await settingsRows(db), rows, "and writes no setting");
+
+  // A missing or junk `now` is the wall clock: this week is the one recorded.
+  const thisWeek = weekIdOf(Date.now());
+  const today = weekDays(thisWeek)[0];
+  for (const junk of [undefined, null, "junk", Number.NaN]) {
+    // eslint-disable-next-line no-await-in-loop
+    assert.equal(await noteRoutineDoneAt(db, { day: today, entry: entryOf("grow-two"), now: junk }), true,
+      "the wall clock names this week: " + String(junk));
+  }
+  assert.ok((await readJson(db, STAGED_PREFIX + thisWeek)).includes("grow-two"),
+    "this week's list holds the routine the wall clock names");
 });
 
 /* ---------- offerStage ---------- */
@@ -385,6 +481,63 @@ test("offerStage: when both weeks offer, this week's routine wins", async () => 
     "and the week after still asks the newer of the two remaining weeks");
 });
 
+test("offerStage: a routine staged in both whole-body weeks is asked about once, and a no sticks", async () => {
+  const db = await freshDb();
+  await noteRoutineDone(db, { day: DAY_W45, entry: entryOf("grow-four") });
+  await noteRoutineDone(db, { day: DAY_W46, entry: entryOf("grow-four") });
+  await weekfull(db, W45);
+  await weekfull(db, W46);
+  assert.equal(await offerStage(db, { now: NOW_W46, library: LIB }), "grow-four");
+
+  assert.deepEqual(
+    await declineStage(db, { routineId: "grow-four", now: NOW_W46, library: LIB }),
+    { ok: true },
+  );
+  assert.deepEqual(await readJson(db, ANSWERED_KEY), { "grow-four": W46 },
+    "the answer names the week whose offer it answered");
+
+  for (let ask = 0; ask < 4; ask += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    assert.equal(await offerStage(db, { now: NOW_W46, library: LIB }), null,
+      "no later offer asks again: " + ask);
+    // eslint-disable-next-line no-await-in-loop
+    assert.deepEqual(
+      await declineStage(db, { routineId: "grow-four", now: NOW_W46, library: LIB }),
+      { ok: false, reason: "not-offered" },
+      "and a further no is refused: " + ask,
+    );
+  }
+  // The week before still lists the same routine, so the same no covers it.
+  assert.equal(await offerStage(db, { now: NOW_W45, library: LIB }), null,
+    "the week before is answered by the same no");
+  assert.equal(await stageOf(db, "grow-four"), 1, "a no moves no stage");
+  assert.equal(await walletRows(db), 2, "and writes no stage row");
+});
+
+test("offerStage: a routine staged in both whole-body weeks takes one stage from one yes", async () => {
+  const db = await freshDb();
+  await noteRoutineDone(db, { day: DAY_W45, entry: entryOf("grow-four") });
+  await noteRoutineDone(db, { day: DAY_W46, entry: entryOf("grow-four") });
+  await weekfull(db, W45);
+  await weekfull(db, W46);
+  const wallet = await walletRows(db);
+
+  assert.equal(await offerStage(db, { now: NOW_W46, library: LIB }), "grow-four");
+  assert.deepEqual(
+    await acceptStage(db, { routineId: "grow-four", now: NOW_W46, library: LIB }),
+    { ok: true, stage: 2 },
+  );
+  assert.equal(await offerStage(db, { now: NOW_W46, library: LIB }), null,
+    "the answer covers both weeks that list it");
+  assert.deepEqual(
+    await acceptStage(db, { routineId: "grow-four", now: NOW_W46, library: LIB }),
+    { ok: false, reason: "not-offered" },
+    "a second yes is refused",
+  );
+  assert.equal(await stageOf(db, "grow-four"), 2, "the stage rose by exactly one");
+  assert.equal(await walletRows(db), wallet + 1, "and only one stage row was written");
+});
+
 test("a stage never rises by itself: offering many times, days apart, writes nothing", async () => {
   const db = await freshDb();
   await weekfull(db, W46);
@@ -477,6 +630,32 @@ test("two instances racing from one offer take one stage between them", async ()
   }
   assert.equal(await stageOf(db, "grow-four"), 2, "the stage rose by one in total");
   assert.equal(await walletRows(db), wallet + 1, "and only one stage row was written");
+});
+
+test("acceptStage: a row that reached its last stage after the offer gains nothing", async () => {
+  const db = await freshDb();
+  await weekfull(db, W46);
+  await noteRoutineDone(db, { day: DAY_W46, entry: entryOf("grow-two") });
+  await setStage(db, "grow-two", 1);
+  assert.equal(entryOf("grow-two").stages.length, 2, "the fixture routine carries two stages");
+  assert.equal(await offerStage(db, { now: NOW_W46, library: LIB }), "grow-two",
+    "one stage short of its last, it is offered");
+
+  const wallet = await walletRows(db);
+  const settings = await settingsRows(db);
+  const emitted = [];
+  const out = await acceptStage(lastStageRaceDb(db), {
+    routineId: "grow-two", now: NOW_W46, library: LIB,
+    emit: async (...args) => { emitted.push(args); },
+  });
+
+  assert.deepEqual(out, { ok: false, reason: "not-offered" },
+    "the row is at its last stage by the time the accept reads it");
+  assert.equal(await stageOf(db, "grow-two"), 2, "so it never passes the last stage");
+  assert.equal(await readJson(db, ANSWERED_KEY), null, "and no answer is recorded");
+  assert.equal(await walletRows(db), wallet, "no wallet row was written");
+  assert.equal(await settingsRows(db), settings, "and no setting");
+  assert.deepEqual(emitted, [], "and nothing was emitted");
 });
 
 test("a stale instance loses the compare-and-swap and writes nothing more", async () => {

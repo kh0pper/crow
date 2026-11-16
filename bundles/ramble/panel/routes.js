@@ -588,18 +588,27 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   }
 
   /**
-   * Settle this week and the week before it. The stage offer may come from
-   * either of those two weeks, and each one only writes its earned item once
-   * its balance is full; a week that is not whole-body writes nothing at all.
+   * Settle this week and the three weeks before it. The stage offer may come
+   * from the two most recent of them, and any of the four can be made whole by
+   * rows that arrived from another instance, so each one is asked in turn.
+   *
+   * THIS RUNS ON A PLAIN READ, AND IT CAN THEREFORE WRITE ON A READ: settling a
+   * full week claims that week's `weekfull` row through `insertOnce`, once per
+   * week (the constant 1, keyed by the week id), so a second read of the same
+   * week writes nothing new. A week that is not whole-body writes nothing at
+   * all.
    */
   async function settleWeeks(now) {
     await movesMods.weekMod.settleWeek(db, { now, emit });
-    // The local day seven days back, at its noon, so the week before is named by
-    // a day of its own and a DST change inside the week cannot shift it.
-    const day = mods.eggsMod.localDay(
-      mods.eggsMod.startOfLocalDay(now) - 7 * 86400000 + 43200000,
-    );
-    await movesMods.weekMod.settleWeek(db, { now, day, emit });
+    for (const daysBack of [7, 14, 21]) {
+      // The local day that many days back, at its noon, so each week is named by
+      // a day of its own and a DST change inside the week cannot shift it.
+      const day = mods.eggsMod.localDay(
+        mods.eggsMod.startOfLocalDay(now) - daysBack * 86400000 + 43200000,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      await movesMods.weekMod.settleWeek(db, { now, day, emit });
+    }
   }
 
   /**
@@ -616,7 +625,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       routineId,
       title: entry.title,
       stage: await movesMods.stagesMod.stageOf(db, routineId),
-      total: Math.min(4, entry.stages.length),
+      total: Math.min(movesMods.libraryMod.STAGES_MAX, entry.stages.length),
     };
   }
 
@@ -1874,8 +1883,9 @@ export default function rambleRouter(dashboardAuth, options = {}) {
           ...(day === dayOut.day ? { need: dayOut.need } : {}),
         });
         // A played routine is recorded for the week it was done in, so a later
-        // whole-body week can offer its next stage.
-        await movesMods.stagesMod.noteRoutineDone(db, { day, entry });
+        // whole-body week can offer its next stage. `now` names the weeks that
+        // record is filed in and kept for, never the card's own day alone.
+        await movesMods.stagesMod.noteRoutineDone(db, { day, entry, now });
       } catch (err) {
         if (err?.name !== "MovesInputError") throw err;
       }
@@ -2035,13 +2045,13 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         activity: b.activity, minutes: b.minutes, effort: b.effort, area: b.area, now, emit,
       });
     } catch (err) { movesInput(err); }
-    // A new log marks the area it trains on its day, which is what lets a walk
-    // or a band session count toward the week's balance. A repeat already did.
-    if (!logged.already) {
-      await movesMods.dayMod.markLogArea(db, {
-        day: logged.day, activity: b.activity, minutes: b.minutes, area: b.area, now, emit,
-      });
-    }
+    // A log marks the area it trains on its day, which is what lets a walk or a
+    // band session count toward the week's balance. The mark is one constant row
+    // through `insertOnce`, so it runs on EVERY log: a repeat is a no-op that
+    // puts the day's mark back if it is missing.
+    await movesMods.dayMod.markLogArea(db, {
+      day: logged.day, activity: b.activity, minutes: b.minutes, area: logged.area, now, emit,
+    });
     await movesMods.streakMod.awardStreakHeart(db, { now, emit });
     res.json({
       log: {

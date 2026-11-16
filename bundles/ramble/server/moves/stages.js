@@ -14,16 +14,18 @@
  *        ids. A `local.` key: this instance's own record, so it is written
  *        without an emit and never replicates.
  *   local.moves.stage.answered
- *        routine id -> the week id whose offer was answered, yes or no, so one
- *        week asks about a routine once.
+ *        routine id -> the LATEST week id whose offer was answered, yes or no,
+ *        so one week asks about a routine once and an older week's offer can
+ *        never take that answer back.
  *
  * WHAT A STAGE MEANS TO A SESSION. The row holds how many stages have been
  * reached, so stageOf answers 1 for a routine the player has never taken
  * further. A session compiles the stage AT that number (`opts.stage`, a 0-based
  * index into the entry's `stages`, session.cjs): the program the player is
  * working on now, never the one they have just agreed to. Nothing here reads
- * the calendar except to name the two weeks an offer may come from — the week
- * of `now` and the week before it — and nothing but acceptStage raises a stage.
+ * the calendar except to name the two weeks a record or an offer may come from
+ * — the week of `now` and the week before it — and nothing but acceptStage
+ * raises a stage.
  *
  * An offer needs a WHOLE-BODY week: a `weekfull` wallet row for the week id
  * (wardrobe.js). A week that was not whole-body never asks for more, and a
@@ -47,6 +49,17 @@ const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function asAt(now) {
   return Number.isFinite(Number(now)) ? Number(now) : Date.now();
+}
+
+/**
+ * The clock value a record's `now` names: a real instant, or the wall clock when
+ * the caller gave none or gave junk (an absent, null, unreadable or non-positive
+ * value names no day at all).
+ */
+function clockOf(now) {
+  const value = Number(now);
+  if (now == null || !Number.isFinite(value) || value <= 0) return Date.now();
+  return value;
 }
 
 /** A stage number read as 1..STAGES_MAX: junk under it is the first stage, over it is the last. */
@@ -95,12 +108,16 @@ async function answeredOf(db) {
 }
 
 /**
- * Record that a week's offer about a routine was answered. A `local.` key, so
- * it is written with no emit: nothing about it leaves this instance.
+ * Record that a week's offer about a routine was answered. The LATEST week an
+ * answer names is the one kept: ISO week ids compare as strings, so an older
+ * week's answer can never overwrite a newer one still inside the same two-week
+ * window. A `local.` key, so it is written with no emit: nothing about it
+ * leaves this instance.
  */
 async function noteAnswered(db, routineId, weekId) {
   const answered = await answeredOf(db);
-  answered[routineId] = weekId;
+  const recorded = answered[routineId];
+  answered[routineId] = typeof recorded === "string" && recorded > weekId ? recorded : weekId;
   await writeJson(db, ANSWERED_KEY, answered);
 }
 
@@ -141,29 +158,38 @@ async function pruneStaged(db, weekId, previousId) {
 
 /**
  * A staged routine was finished on `day` ("YYYY-MM-DD"): remember its id in
- * that week's staged list. A repeat adds nothing, and recording it also drops
- * the staged lists of weeks older than the one before this one.
+ * that week's staged list. A repeat adds nothing.
+ *
+ * ONLY THE TWO WEEKS A STAGE OFFER CAN STILL COME FROM are recorded into or
+ * kept: the week of `now` and the week before it. A `day` whose week is
+ * neither is not recorded, and pruning is relative to `now`, NEVER to `day`:
+ * filing yesterday's card on a Monday still lands in the week it was played and
+ * cannot drop the list of the week being played. A `now` that is missing or
+ * junk is the wall clock.
  *
  * Returns true when the id is recorded, false when there is nothing to record:
- * an entry with no string id, an entry with no stages, or a day that is not a
- * real day string writes nothing at all.
+ * an entry with no string id, an entry with no stages, a day that is not a real
+ * day string, or a day whose week is outside those two writes nothing at all.
  */
-export async function noteRoutineDone(db, { day, entry } = {}) {
+export async function noteRoutineDone(db, { day, entry, now } = {}) {
   const noon = noonOf(day);
   if (noon === null) return false;
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
   if (typeof entry.id !== "string" || entry.id === "") return false;
   if (!Array.isArray(entry.stages) || entry.stages.length === 0) return false;
 
+  const thisWeek = weekIdOf(clockOf(now));
+  const previousWeek = weekBefore(noonOfAt(clockOf(now)));
   const weekId = weekIdOf(noon);
-  if (weekId === "") return false;
+  if (weekId === "" || thisWeek === "") return false;
+  if (weekId !== thisWeek && weekId !== previousWeek) return false;
 
   const key = STAGED_PREFIX + weekId;
   const ids = await stagedOf(db, weekId);
   if (!ids.includes(entry.id)) ids.push(entry.id);
   // No emit: a `local.` key is this instance's own bookkeeping.
   await writeJson(db, key, ids);
-  await pruneStaged(db, weekId, weekBefore(noon));
+  await pruneStaged(db, thisWeek, previousWeek);
   return true;
 }
 
@@ -174,9 +200,11 @@ export async function noteRoutineDone(db, { day, entry } = {}) {
  * a week counts only when a `weekfull` wallet row carries its id — a whole-body
  * week. Each counting week is asked in turn, and within it the staged ids in
  * order: a routine is offered when the library has it with a `stages` array,
- * its stage is below min(STAGES_MAX, stages.length), and this week's offer about
- * it has not been answered yet. A counting week that holds no such routine falls
- * through to the one before it, so the first week with an unanswered offer wins.
+ * its stage is below min(STAGES_MAX, stages.length), and no answer at or after
+ * this week is recorded for it — an answer names ONE week and covers every week
+ * up to it, so a no given this week sticks even when the week before lists the
+ * same routine. A counting week that holds no such routine falls through to the
+ * one before it, so the first week with an unanswered offer wins.
  * A read: nothing is written.
  */
 async function findOffer(db, { at, library } = {}) {
@@ -193,7 +221,9 @@ async function findOffer(db, { at, library } = {}) {
       if (!entry || !Array.isArray(entry.stages)) continue;
       // eslint-disable-next-line no-await-in-loop
       if ((await stageOf(db, routineId)) >= Math.min(STAGES_MAX, entry.stages.length)) continue;
-      if (answered[routineId] === weekId) continue;
+      // ISO week ids compare as strings, so "at or after this week" is one test.
+      const answer = answered[routineId];
+      if (typeof answer === "string" && answer >= weekId) continue;
       return { routineId, weekId };
     }
     // This week is whole-body but holds nothing to offer, so the week before it
@@ -218,11 +248,15 @@ export async function offerStage(db, { now, library } = {}) {
  * only for a routine offerStage would name right now (`findOffer` above is that
  * same computation, and its routine id is what offerStage answers).
  *
- * `from` is the row as it stands (null when absent), `to` is one stage further,
- * so a routine at stage 1 reaches stage 2 and an absent row is inserted as 2.
- * A swap that loses — a second instance got there first — writes nothing and
- * answers `{ ok: false, reason: "lost" }`. The answered week is recorded only
- * after the stage row landed.
+ * `from` is the row as it stands (null when absent) and `to` is one stage
+ * further, computed from that ONE read, so a routine at stage 1 reaches stage 2
+ * and an absent row is inserted as 2. A row that is already at the last stage
+ * the offered entry carries — including one another instance moved there
+ * between the offer and this read — is refused as `not-offered` BEFORE the
+ * swap, so no row ever passes the last stage. A swap that loses — a second
+ * instance got there first — writes nothing and answers
+ * `{ ok: false, reason: "lost" }`. The answered week is recorded only after the
+ * stage row landed.
  */
 export async function acceptStage(db, { routineId, now, library, emit } = {}) {
   const at = asAt(now);
@@ -230,7 +264,10 @@ export async function acceptStage(db, { routineId, now, library, emit } = {}) {
   if (!offer || offer.routineId !== routineId) return { ok: false, reason: "not-offered" };
 
   const from = await rowDelta(db, STAGE_KIND, routineId);
-  const to = (await stageOf(db, routineId)) + 1;
+  const to = clampStage(from === null ? 1 : from) + 1;
+  const entry = entryOf(library, routineId);
+  const last = entry && Array.isArray(entry.stages) ? Math.min(STAGES_MAX, entry.stages.length) : 0;
+  if (to > last) return { ok: false, reason: "not-offered" };
   if (!(await casDelta(db, STAGE_KIND, routineId, from, to, at, emit))) {
     return { ok: false, reason: "lost" };
   }
