@@ -560,20 +560,20 @@ test("?moves=log opens the something-else sheet; ?moves=prefs opens Customize", 
   assert.ok(prefs.calls.filter((c) => c.url === "/api/ramble/moves/prefs").length >= 1, "the prefs are loaded");
 });
 
-test("?moves=prefs opens Customize and asks today.js to fill its block too", async () => {
-  const loaded = { count: 0 };
-  const prefs = bootMoves((sb) => { sb.RambleToday = { loadSlots: () => { loaded.count += 1; } }; }, "?moves=prefs");
+/* The real page loads moves.js BEFORE today.js, so a ?moves=prefs deep link
+ * always runs with no window.RambleToday yet: its own hook call finds nothing to
+ * call, and today.js fills the sheet's block itself once it has run (those boots
+ * are in tests/ramble-today-view.test.js). All the deep link owes here is the
+ * open sheet and the prefs, and no throw along the way. */
+test("?moves=prefs with no RambleToday hook yet still opens Customize and reads the prefs", async () => {
+  let prefs = null;
+  assert.doesNotThrow(() => { prefs = bootMoves(null, "?moves=prefs"); },
+    "the deep link runs before today.js has defined its hook");
   await flush();
 
+  assert.equal(prefs.sandbox.window.RambleToday, undefined, "the page carries no hook at this point");
   assert.equal(prefs.el("rb-customize-sheet").hasAttribute("hidden"), false, "the sheet is open");
-  assert.equal(loaded.count, 1, "the cards-and-windows block is filled as a click on Customize fills it");
-});
-
-test("?moves=prefs without a RambleToday hook still opens the sheet and nothing throws", async () => {
-  const prefs = bootMoves(null, "?moves=prefs");
-  await flush();
-  assert.equal(prefs.el("rb-customize-sheet").hasAttribute("hidden"), false);
-  assert.ok(prefs.calls.some((c) => c.url === "/api/ramble/moves/prefs"), "the prefs are read either way");
+  assert.ok(prefs.calls.some((c) => c.url === "/api/ramble/moves/prefs"), "the prefs are read");
 });
 
 test("no or unknown moves parameter changes nothing", async () => {

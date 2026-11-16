@@ -386,9 +386,14 @@
   var FIRST_RUN_FIELD = { 1: "equipment", 2: "limits", 3: "level" };
 
   /* Asked once per page: a payload that still says needed (a second device, a
-   * refresh before the answer replicated) never reopens it. */
+   * refresh before the answer replicated) never reopens it. A refused answer is
+   * asked again once, since it may have been the connection; a second refusal
+   * leaves the sheet shut for the rest of the page load -- the server still says
+   * needed, so the next page load asks again rather than every refresh here. */
   var firstRunShown = false;
   var firstRunAnswers = {};
+  var firstRunFailures = 0;
+  var FIRST_RUN_FAILURES_ALLOWED = 2;
 
   /** One labelled checkbox; a value the table has no line for is left out. */
   function checkLine(value, labelText, ticked) {
@@ -579,14 +584,18 @@
 
   /* The answer is the whole setup, so one request covers every screen, and the
    * sheet closes either way. An answer the server never took is no answer: the
-   * sheet is worth asking again on the next read of the day. */
+   * sheet is asked again after the first failure, and left shut after the
+   * second, so a server that keeps refusing does not hold the screen. */
   function finishFirstRun() {
     var answer = firstRunAnswers;
     firstRunAnswers = {};
     var sheet = el("rb-first-run");
     var settle = function (res) {
       setHidden(sheet, true);
-      if (!res) firstRunShown = false;
+      if (!res) {
+        firstRunFailures += 1;
+        firstRunShown = firstRunFailures >= FIRST_RUN_FAILURES_ALLOWED;
+      }
       refresh();
     };
     postJson("/api/ramble/moves/setup", answer).then(settle, settle);
@@ -668,12 +677,17 @@
     postJson("/api/ramble/moves/prefs", { cards: n, windows: [] }).then(refresh, refresh);
   }
 
-  /* The day holds exactly as many windows as cards, so a tick is a SWAP: when
-   * it makes one too many, the earliest other tick on the page comes off (the
-   * box just ticked is the one the player asked for). An untick that leaves one
-   * too few is a change still in progress -- the box stays unticked and nothing
-   * is sent -- and only a count of exactly cards is posted. */
+  /* The day holds exactly as many windows as cards, so the windows change by a
+   * TICK only: when it makes one too many, the earliest other tick on the page
+   * comes off (the box just ticked is the one the player asked for). An untick
+   * would leave the day a window short, so the box is put straight back and
+   * nothing is sent: the screen keeps saying what the server says. Only a count
+   * of exactly cards is posted. */
   function chooseWindow(input) {
+    if (!input || input.checked !== true) {
+      if (input) input.checked = true;
+      return;
+    }
     var ticked = tickedWindows();
     if (ticked.length > cardsOn) {
       for (var i = 0; i < ticked.length; i += 1) {
@@ -761,11 +775,24 @@
     }).catch(function () { return null; });
   }
 
+  /* The block is drawn from the table's words and skips a window it has no line
+   * for, so it is built only once the table is here -- on a deep link into the
+   * customize sheet that may be later than the click that opened it. */
   function loadSlots() {
-    return readPrefs().then(function (prefs) {
+    return whenCopy().then(readPrefs).then(function (prefs) {
       buildSlots(prefs || {});
       return prefs;
     });
+  }
+
+  /** Whether the customize sheet is on screen, with no hidden attribute on it. */
+  function customizeSheetOpen() {
+    var sheet = el("rb-customize-sheet");
+    if (!sheet) return false;
+    try {
+      if (typeof sheet.hasAttribute === "function") return sheet.hasAttribute("hidden") !== true;
+      return sheet.getAttribute("hidden") === null;
+    } catch (e) { return false; }
   }
 
   /* moves.js opens the customize sheet and fills the rest of it; this block is
@@ -850,5 +877,10 @@
   catch (e) { /* no window: nothing to expose */ }
 
   if (!host) return;
+  /* moves.js handles ?moves=prefs at the end of its own script, and it is loaded
+   * BEFORE this one, so its call to loadSlots() finds no api here yet. The sheet
+   * it opened is on the page by the time this runs, so the sheet's own block is
+   * filled from here instead. */
+  if (customizeSheetOpen()) loadSlots();
   refresh();
 })();

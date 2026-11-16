@@ -250,6 +250,13 @@ function boot(opts) {
   sheetEl.setAttribute("hidden", "");
   byId.set("rb-first-run", sheetEl);
 
+  /* The customize sheet is in the panel markup too, shut; a ?moves=prefs deep
+   * link is the one boot that arrives with it already open. */
+  const customizeEl = new MiniEl("div");
+  customizeEl.id = "rb-customize-sheet";
+  if (options.customizeOpen !== true) customizeEl.setAttribute("hidden", "");
+  byId.set("rb-customize-sheet", customizeEl);
+
   function answer(body, statusOk) {
     const ok = statusOk !== false;
     return Promise.resolve({
@@ -869,6 +876,33 @@ describe("first run", () => {
       "back on the first screen, to be asked again");
   });
 
+  test("a run of refused answers closes the sheet for the rest of the page load", async () => {
+    const booted = boot({ day: neededDay(), setupFails: true });
+    await flush();
+    const answerAllThree = () => {
+      buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+      buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+      buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+    };
+
+    answerAllThree();
+    await flush();
+    assert.equal(setupPosts(booted).length, 1, "the answer was sent");
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), false, "the first refusal asks again");
+
+    answerAllThree();
+    await flush();
+    assert.equal(setupPosts(booted).length, 2, "a second answer was sent too");
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true,
+      "a second refusal shuts the sheet for this page load");
+
+    await booted.sandbox.RambleToday.refresh();
+    await flush();
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true,
+      "a day that still says needed does not reopen it here");
+    assert.equal(setupPosts(booted).length, 2, "and nothing more was answered");
+  });
+
   test("a copy table without the sheet's words leaves the sheet shut", async () => {
     const booted = boot({ day: neededDay(), table: {} });
     await flush();
@@ -950,6 +984,37 @@ async function openCustomize(booted) {
 }
 
 describe("settings", () => {
+  test("a page that arrives with the customize sheet open fills its block", async () => {
+    const booted = boot({ customizeOpen: true, prefs: { cards: 2, windows: [] } });
+    await flush();
+
+    const block = slotsBlock(booted);
+    assert.ok(block.children.length > 0, "the block was drawn with no click on Customize");
+
+    assert.deepEqual(blockInputs(booted, "radio").map((input) => input.value), ["1", "2", "3"]);
+    assert.deepEqual(blockInputs(booted, "radio").map((input) => input.checked), [false, true, false],
+      "the stored count is the one selected");
+    assert.deepEqual(blockInputs(booted, "checkbox").map((input) => input.value),
+      ["morning", "midday", "evening"], "one box per window");
+    assert.deepEqual(blockInputs(booted, "checkbox").map((input) => input.checked), [true, false, true],
+      "ticked the way the prefs say");
+    assert.ok(block.textContent.includes(expected("settings.cardsPerDay")), "and the block's own words are there");
+  });
+
+  test("a shut customize sheet is left alone until Customize is clicked", async () => {
+    const booted = boot({ prefs: { cards: 2, windows: [] } });
+    await flush();
+
+    assert.equal(slotsBlock(booted).children.length, 0, "no block before the sheet is opened");
+    assert.equal(booted.calls.filter((call) => call.url === "/api/ramble/moves/prefs").length, 0,
+      "and nothing read the prefs for it");
+
+    await openCustomize(booted);
+    assert.equal(booted.calls.filter((call) => call.method === "GET" && call.url === "/api/ramble/moves/prefs").length, 1,
+      "the click reads the prefs");
+    assert.ok(slotsBlock(booted).children.length > 0, "and the click draws the block");
+  });
+
   test("clicking the customize button loads the prefs into the block", async () => {
     const booted = boot({ prefs: { cards: 2, windows: [] } });
     await flush();
@@ -999,7 +1064,7 @@ describe("settings", () => {
     assert.equal(dayReads(booted), before + 1, "the day is read again");
   });
 
-  test("an untick that leaves fewer windows than cards posts nothing and stays unticked", async () => {
+  test("an untick that leaves fewer windows than cards is put back", async () => {
     const booted = boot({ prefs: { cards: 3, windows: [] } });
     await flush();
     await openCustomize(booted);
@@ -1010,11 +1075,12 @@ describe("settings", () => {
     midday.change();
     await flush();
 
-    assert.equal(prefsPosts(booted).length, 0, "one window short is a change still in progress");
-    assert.equal(midday.checked, false, "so the box stays exactly as the player left it");
+    assert.equal(prefsPosts(booted).length, 0, "a window short is no change to send");
+    assert.equal(midday.checked, true, "so the box is ticked again, as the server has it");
+    assert.deepEqual(blockInputs(booted, "checkbox").map((input) => input.checked), [true, true, true]);
   });
 
-  test("a tick that goes over the count swaps the earliest other window out", async () => {
+  test("with two cards an untick is put back and a tick still swaps the earliest other window out", async () => {
     const booted = boot({ prefs: { cards: 2, windows: [] } });
     await flush();
     await openCustomize(booted);
@@ -1024,32 +1090,25 @@ describe("settings", () => {
       "two cards, the default morning and evening");
     const before = dayReads(booted);
 
+    const evening = box("evening");
+    evening.checked = false;
+    evening.change();
+    await flush();
+    assert.equal(prefsPosts(booted).length, 0, "an untick below the count posts nothing");
+    assert.equal(evening.checked, true, "and the box is ticked again");
+    assert.deepEqual(boxes().map((input) => input.checked), [true, false, true], "the screen still matches the server");
+
     const midday = box("midday");
     midday.checked = true;
     midday.change();
     await flush();
 
-    let posts = prefsPosts(booted);
+    const posts = prefsPosts(booted);
     assert.equal(posts.length, 1, "the swap is posted");
     assert.deepEqual(posts[0].body, { windows: ["midday", "evening"] },
       "midday took the place of the earliest other tick, morning");
     assert.deepEqual(boxes().map((input) => input.checked), [false, true, true]);
     assert.equal(dayReads(booted), before + 1, "and the day is read again");
-
-    const evening = box("evening");
-    evening.checked = false;
-    evening.change();
-    await flush();
-    assert.equal(prefsPosts(booted).length, 1, "an untick below the count posts nothing");
-    assert.equal(evening.checked, false, "and the box is left unticked");
-
-    const morning = box("morning");
-    morning.checked = true;
-    morning.change();
-    await flush();
-    posts = prefsPosts(booted);
-    assert.equal(posts.length, 2, "the count is back to the cards value");
-    assert.deepEqual(posts[1].body, { windows: ["morning", "midday"] }, "in slot order");
   });
 
   test("with one card a tick swaps the ticked window for the one asked for", async () => {
