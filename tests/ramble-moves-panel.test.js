@@ -933,6 +933,39 @@ test("a reload resumes the walk timer from the server's startedAt", async () => 
   assert.match(booted.el("rb-today-status").textContent, /^9 min so far/);
 });
 
+/* static/today.js enables a walk card's Done from RambleMoves.outdoorRunning()
+ * AT PAINT TIME, and its own first refresh() can paint before loadOutdoor() has
+ * resolved — a resumed walk would then show Done disabled until the next paint.
+ * The resume asks for one more paint, so the first Done the reader sees is live. */
+test("a resumed walk asks the day's cards to paint again once the session is in hand", async () => {
+  const now = Date.parse("2026-10-30T10:00:00");
+  const painted = [];
+  const booted = bootMoves((sb) => { sb.RambleToday = { refresh: () => { painted.push(1); } }; },
+    "", undefined, {
+      now,
+      routes: outdoorRoutes(now, 0, {
+        outdoor: { day: "2026-10-30", startedAt: now - 8 * 60000, entryId: "walk-10", sessionKey: "k", finished: false },
+      }),
+    });
+  await flush();
+  await flush();
+
+  assert.equal(booted.sandbox.window.RambleMoves.outdoorRunning(), true, "the session is the running one");
+  assert.equal(painted.length, 1, "and the cards are asked to draw themselves once more");
+});
+
+test("a day with no walk running leaves the cards' own paint alone at start-up", async () => {
+  const now = Date.parse("2026-10-30T10:00:00");
+  const painted = [];
+  const booted = bootMoves((sb) => { sb.RambleToday = { refresh: () => { painted.push(1); } }; },
+    "", undefined, { now, routes: outdoorRoutes(now, 0) });
+  await flush();
+  await flush();
+
+  assert.equal(booted.sandbox.window.RambleMoves.outdoorRunning(), false, "no session, no clock");
+  assert.equal(painted.length, 0, "and nothing asks the cards to paint again");
+});
+
 test("a finished session leaves no timer behind", async () => {
   const now = Date.parse("2026-10-30T10:00:00");
   const booted = bootMoves(null, "", undefined, {

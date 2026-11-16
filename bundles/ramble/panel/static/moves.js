@@ -605,7 +605,11 @@
     return jsonFetch("/api/ramble/moves/day").then(function (dayOut) {
       var state = dayOut && dayOut.outdoor ? dayOut.outdoor : null;
       if (!state || state.finished === true) { clearOutdoor(); return null; }
-      return whenCopy().then(function () { beginOutdoor(state); });
+      /* The cards are painted by static/today.js, and a walk card's Done is
+       * enabled from outdoorRunning() AT PAINT TIME: a first paint that beat
+       * this read would leave Done disabled until the next one. So ask for
+       * the cards again once the session is actually in hand. */
+      return whenCopy().then(function () { beginOutdoor(state); refreshDay(); });
     }).catch(function () { /* no day read: no timer to resume */ });
   }
 
