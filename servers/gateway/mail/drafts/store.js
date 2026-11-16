@@ -9,8 +9,9 @@
  *    (`tap_seal`, `tap_id`, `tap_action`, `attach_digest`) in the SAME UPDATE for every move that
  *    does not end in `holding` or `scheduled`. A seal is bound to one tap (its `tap_id`) over one
  *    head hash, so a row that has left the state a tap put it in keeps nothing a later send could
- *    use. Entering those two states is the only way to set the four columns, and only the send and
- *    schedule services do that.
+ *    use. A move INTO those two states must carry a full seal in the same UPDATE — all four
+ *    columns as non-empty strings, `tap_action` matching the target — so a move between them can
+ *    never ride on the seal an earlier tap wrote. Only the send and schedule services enter them.
  *  - `hashOf()` gives a revision exactly one hash: the canonical snapshot's content hash extended
  *    with what the snapshot does not keep (display names, `inReplyTo`, `references`, mode, From and
  *    the attachment references). It is a pure function of a revision's fields, so a caller that
@@ -27,7 +28,7 @@
  * outside its list is a MailError BAD_INPUT whose detail names the field, never the value.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { canonicalSnapshot, contentHash } from "../../staged/canonical.js";
+import { canonicalSnapshot, contentHash, parseSingleAddressList } from "../../staged/canonical.js";
 import { MailError } from "../errors.js";
 import { getAccount } from "../store/accounts.js";
 
@@ -55,8 +56,11 @@ export const ATTACHMENT_SOURCES = Object.freeze(["thread", "storage"]);
 const EDITABLE_STATES = Object.freeze(["draft", "failed", "missed"]);
 /** The states a draft may be thrown away from. `holding`/`sending`/`scheduled`/`sent` are not. */
 const DISCARDABLE_STATES = Object.freeze(["draft", "failed", "missed", "unknown"]);
-/** The two states that carry a tap seal. */
+/** The two states that carry a tap seal, and the tap word each one is entered under. */
 const TAP_STATES = Object.freeze(["holding", "scheduled"]);
+const TAP_ACTION_FOR_STATE = Object.freeze({ holding: "send", scheduled: "schedule" });
+/** The states a person may still comment on: a comment asks for an edit that is still possible. */
+const COMMENTABLE_STATES = Object.freeze(["draft", "failed", "missed", "scheduled"]);
 /** The four columns a tap writes and every other transition nulls. */
 const SEAL_COLUMNS = Object.freeze(["tap_seal", "tap_id", "tap_action", "attach_digest"]);
 
@@ -73,6 +77,9 @@ const TEXT_FIELDS = new Set(["message_id", "claim_token", "tap_seal", "tap_id", 
 
 const FAIL_REASON_MAX = 200;
 const ID_MAX = 120;
+/** A Message-ID as plan 1's header rules spell it; every reply field must be one of these. */
+const REPLY_ID = /^<[^<>\s]{1,250}>$/;
+const REFERENCES_MAX = 50;
 
 const DRAFT_COLUMNS = `id, account_id, mode, reply_to_mid, thread_key, project_id, bot_id,
   chat_thread_id, audience, state, head_rev, head_hash, due_at, hold_until, message_id,
@@ -157,19 +164,22 @@ function nameOrNull(value) {
 }
 
 /**
- * One recipient, exactly one addr-spec per entry: an entry that carries a whole header, angle
- * brackets, a display name inside the address string or whitespace is refused rather than parsed,
- * so what the hash covers is what the card showed.
+ * One recipient, exactly one clean addr-spec per entry: the address string is put through the same
+ * strict single-address parse the edit routes use (`parseSingleAddressList`), so a comma-joined pair,
+ * a malformed addr-spec, angle brackets, a group prefix or internal whitespace is refused rather
+ * than parsed, and what the hash covers is what the card showed. The display name stays text and is
+ * never read as an address.
  */
 function normalizeAddr(entry) {
   if (entry == null) return null;
   const raw = typeof entry === "string" ? { address: entry } : entry;
   if (typeof raw !== "object" || Array.isArray(raw)) throw bad("address");
   if (typeof raw.address !== "string") throw bad("address");
-  const address = raw.address.trim().toLowerCase();
+  const address = raw.address.trim();
   if (!address) return null;
-  if (/[\s<>]/.test(address)) throw bad("address");
-  return { name: nameOrNull(raw.name), address };
+  const parsed = parseSingleAddressList([address]);
+  if (!parsed) throw bad("address");
+  return { name: nameOrNull(raw.name), address: parsed[0] };
 }
 
 function addrList(value, detail = "address") {
@@ -194,6 +204,13 @@ function textList(value, detail) {
     if (text) out.push(text);
   }
   return out;
+}
+
+/** The reply ids a revision carries: each one a Message-ID, the last 50 kept. */
+function replyIdList(value) {
+  const ids = textList(value, "references");
+  for (const id of ids) if (!REPLY_ID.test(id)) throw bad("references");
+  return ids.slice(-REFERENCES_MAX);
 }
 
 function attachmentRef(entry) {
@@ -236,6 +253,7 @@ function compareAttachments(a, b) {
 function normalizeInput(input) {
   if (input == null || typeof input !== "object" || Array.isArray(input)) throw bad("input");
   const inReplyTo = input.inReplyTo == null ? "" : String(input.inReplyTo).trim();
+  if (inReplyTo && !REPLY_ID.test(inReplyTo)) throw bad("in_reply_to");
   return {
     to: addrList(input.to),
     cc: addrList(input.cc),
@@ -243,7 +261,7 @@ function normalizeInput(input) {
     subject: input.subject == null ? "" : String(input.subject),
     body: input.body == null ? "" : String(input.body),
     inReplyTo: inReplyTo || null,
-    references: textList(input.references, "references"),
+    references: replyIdList(input.references),
     from: normalizeAddr(input.from),
     attachments: attachmentList(input.attachments),
     note: optionalId(input.note, "note"),
@@ -259,7 +277,8 @@ function canonicalAddressList(list) {
   const addresses = canonicalSnapshot({ to: list.map((entry) => entry.address) }).to;
   const names = new Map();
   for (const entry of list) {
-    if (entry.name && !names.has(entry.address)) names.set(entry.address, entry.name);
+    const key = String(entry.address).trim().toLowerCase();
+    if (entry.name && !names.has(key)) names.set(key, entry.name);
   }
   return addresses.map((address) => ({ name: names.get(address) ?? null, address }));
 }
@@ -270,7 +289,11 @@ function canonicalAddressList(list) {
  * whitespace gone), and `from` supplied by this module from the account — never by the caller.
  */
 function canonicalRevisionInput(input, from) {
-  const normalised = normalizeInput(input);
+  if (input == null || typeof input !== "object" || Array.isArray(input)) throw bad("input");
+  // The caller's `from` is dropped before anything reads it: this module supplies the From, so a
+  // malformed one is not the caller's to have refused.
+  const { from: _callerFrom, ...rest } = input;
+  const normalised = normalizeInput(rest);
   const snapshot = canonicalSnapshot({
     to: normalised.to.map((entry) => entry.address),
     cc: normalised.cc.map((entry) => entry.address),
@@ -301,11 +324,11 @@ function fromOfAccount(account) {
 
 /**
  * The hash of one revision: `contentHash` of the canonical snapshot (recipients, subject, body),
- * extended with a SHA-256 over the fields the snapshot does not keep — display names,
- * `inReplyTo`, `references`, mode, From and the attachment references (sorted by source, id and
- * index). The extension is one JSON object with a fixed key order, so the result depends on the
- * revision's values only: not on the order the caller wrote the keys, and not on the order the
- * recipients or the attachments arrived in.
+ * extended with a SHA-256 over the fields the snapshot does not keep — display names (one per
+ * canonical address, so a duplicate entry names nothing extra), `inReplyTo`, `references`, mode,
+ * From and the attachment references (sorted by source, id and index). The extension is one JSON
+ * object with a fixed key order, so the result depends on the revision's values only: not on the
+ * order the caller wrote the keys, and not on the order the recipients or the attachments arrived in.
  *
  * Pure: no database, no clock, no stored column. A caller holding a revision row recomputes the
  * hash with `hashOf(revisionToInput(row), { mode: row.mode })`.
@@ -314,16 +337,24 @@ export function hashOf(input = {}, options = {}) {
   const normalised = normalizeInput(input);
   const mode = options?.mode ?? input?.mode ?? null;
   requireMember(mode, DRAFT_MODES, "mode");
+  // The lists are canonicalised (lower-cased, de-duplicated, sorted) BEFORE the display names are
+  // collected, so a duplicated or differently-cased entry names nothing extra and hashes exactly
+  // like the one-entry list the row stores.
+  const lists = {
+    to: canonicalAddressList(normalised.to),
+    cc: canonicalAddressList(normalised.cc),
+    bcc: canonicalAddressList(normalised.bcc),
+  };
   const base = contentHash({
-    to: normalised.to.map((entry) => entry.address),
-    cc: normalised.cc.map((entry) => entry.address),
-    bcc: normalised.bcc.map((entry) => entry.address),
+    to: lists.to.map((entry) => entry.address),
+    cc: lists.cc.map((entry) => entry.address),
+    bcc: lists.bcc.map((entry) => entry.address),
     subject: normalised.subject,
     body: normalised.body,
   });
   const names = [];
   for (const list of ["to", "cc", "bcc"]) {
-    for (const entry of normalised[list]) {
+    for (const entry of lists[list]) {
       if (entry.name) names.push([list, entry.address, entry.name]);
     }
   }
@@ -528,6 +559,11 @@ function fieldValue(key, value) {
  * `state IN (…)`, plus `head_hash = ?` when the caller passes `expectHash`), `fields` may set only
  * the whitelisted columns, and a move that does not END in `holding`/`scheduled` nulls the four
  * seal columns in the same statement — so no caller can forget to clear a tap.
+ *
+ * A move INTO `holding` or `scheduled` must carry a full seal in that same statement: all four
+ * columns present in `fields` as non-empty strings, with `tap_action` the word that state is entered
+ * under. Otherwise the move is BAD_INPUT and nothing is written, which is what stops a move between
+ * the two tap states from keeping (or reviving) the seal an earlier tap wrote.
  */
 function transitionPlan(id, from, to, fields, options) {
   const clock = clockOf(options);
@@ -541,6 +577,13 @@ function transitionPlan(id, from, to, fields, options) {
   for (const key of Object.keys(fields ?? {})) {
     if (!TRANSITION_FIELDS.includes(key)) throw bad("field");
     if (SEAL_COLUMNS.includes(key) && !carriesTap) throw bad("field");
+  }
+  if (carriesTap) {
+    for (const column of SEAL_COLUMNS) {
+      if (typeof fields?.[column] !== "string" || !fields[column]) throw bad(column);
+    }
+    const action = requireMember(fields.tap_action, TAP_ACTIONS, "tap_action");
+    if (action !== TAP_ACTION_FOR_STATE[to]) throw bad("tap_action");
   }
   const sets = ["state = ?"];
   const args = [to];
@@ -564,14 +607,15 @@ function transitionPlan(id, from, to, fields, options) {
  * Move one draft from any of `from` to `to`, returning whether this call changed the row
  * (`rowsAffected === 1`). The single guarded UPDATE every later task uses; a state outside
  * `DRAFT_STATES`, a field outside the whitelist or a seal column on a move that is not into
- * `holding`/`scheduled` is BAD_INPUT and writes nothing. `expectHash` narrows the guard to the head
- * the caller read.
+ * `holding`/`scheduled` is BAD_INPUT and writes nothing, and so is a move into those two states
+ * that does not bring all four seal columns with a `tap_action` matching the target. `expectHash`
+ * narrows the guard to the head the caller read.
  *
  * @param {object} db
  * @param {string} id
  * @param {string[]} from the states the row may be in
  * @param {string} to the state to write
- * @param {object} [fields] whitelisted columns to set (seal columns only into holding/scheduled)
+ * @param {object} [fields] whitelisted columns to set (seal columns required into holding/scheduled)
  * @param {{now?: (() => number)|number, expectHash?: string|null}} [options]
  * @returns {Promise<boolean>}
  */
@@ -696,11 +740,13 @@ async function notifyRevisionAdded(payload) {
  *
  * The head move is the compare-and-set — `state IN ('draft','failed','missed') AND head_hash =
  * expectHash` — and it runs first; the revision is inserted only if it won, inside the same
- * transaction. A user edit of a `scheduled` draft with `cancelSchedule: true` first returns it to
- * `draft` through `transition()`, seal cleared, under the same hash guard, in the same transaction.
- * A bot on a `scheduled`, `holding` or `sending` draft (or any writer on a `sent`, `discarded` or
- * `unknown` one) is refused `{refused:'frozen'}`; a stale `expectHash` is refused
- * `{refused:'changed'}` and nothing is written.
+ * transaction. The input is canonicalised and hashed BEFORE that transaction opens, so an input
+ * this store refuses (a malformed address, reply id or attachment) leaves the row exactly as it was,
+ * with no schedule cancelled and no transaction even started. A user edit of a `scheduled` draft with
+ * `cancelSchedule: true` first returns it to `draft` through `transition()`, seal cleared, under the
+ * same hash guard, in the same transaction. A bot on a `scheduled`, `holding` or `sending` draft (or
+ * any writer on a `sent`, `discarded` or `unknown` one) is refused `{refused:'frozen'}`; a stale
+ * `expectHash` is refused `{refused:'changed'}` and nothing is written.
  *
  * @param {object} db
  * @param {string} draftId
@@ -721,7 +767,9 @@ export async function addRevision(db, draftId, input, options = {}) {
   if (!head) throw missing("draft");
   const account = await getAccount(db, head.accountId);
   if (!account) throw missing("account");
-  const from = fromOfAccount(account);
+  const mode = head.mode;
+  const revision = canonicalRevisionInput(input, fromOfAccount(account));
+  const hash = hashOf(revision, { mode });
 
   let outcome;
   try {
@@ -737,9 +785,6 @@ export async function addRevision(db, draftId, input, options = {}) {
         const moved = run(transitionPlan(id, ["scheduled"], "draft", {}, { now: () => t, expectHash }));
         if (moved.rowsAffected !== 1) throw new Rollback({ refused: "changed" });
       }
-      const mode = String(row.mode);
-      const revision = canonicalRevisionInput(input, from);
-      const hash = hashOf(revision, { mode });
       const rev = Number(row.head_rev) + 1;
       const bumped = run({
         sql: `UPDATE mail_drafts SET head_rev = ?, head_hash = ?, updated_at = ?
@@ -785,6 +830,10 @@ export async function discardDraft(db, id, options = {}) {
 /**
  * Queue one comment on a revision (the line it quotes, and what the person said about it).
  *
+ * A comment asks for an edit, so it may only name a revision that exists (`rev` at or below the
+ * draft's head) and only on a draft a person can still change: `draft`, `failed`, `missed` or
+ * `scheduled`. Anything else — sent, discarded, unknown, holding, sending — is BAD_INPUT.
+ *
  * @returns {Promise<object>} the stored comment
  */
 export async function addComment(db, draftId, fields = {}, options = {}) {
@@ -798,6 +847,8 @@ export async function addComment(db, draftId, fields = {}, options = {}) {
   const quote = fields.quote == null ? null : String(fields.quote);
   const draft = await getDraft(db, id);
   if (!draft) throw missing("draft");
+  requireMember(draft.state, COMMENTABLE_STATES, "state");
+  if (fields.rev > draft.headRev) throw bad("rev");
   const comment = {
     id: "mdc-" + randomBytes(8).toString("hex"),
     draftId: id,
@@ -838,22 +889,28 @@ export async function listComments(db, draftId, options = {}) {
 }
 
 /**
- * Mark comments `applied` once a revision has folded them in. Only `queued` comments change, so a
- * replay of the same turn changes nothing. `newRev` is the revision they were applied to; the
- * comments table has no column for it, so it is validated here and not stored.
+ * Mark comments `applied` once a revision has folded them in. Only this draft's `queued` comments
+ * change, so another draft's comment named in the same list is untouched and a replay of the same
+ * turn changes nothing. `newRev` is the revision they were applied to: an integer at or below the
+ * draft's head, since a revision that does not exist folded nothing in. The comments table has no
+ * column for it, so it is validated here and not stored.
  *
  * @returns {Promise<number>} how many comments this call moved
  */
-export async function markCommentsApplied(db, ids, newRev) {
+export async function markCommentsApplied(db, draftId, ids, newRev) {
+  const id = requireId(draftId, "draft_id");
   if (!Array.isArray(ids)) throw bad("ids");
   if (!Number.isInteger(newRev) || newRev < 1) throw bad("rev");
+  const draft = await getDraft(db, id);
+  if (!draft) throw missing("draft");
+  if (newRev > draft.headRev) throw bad("rev");
   const commentIds = [];
-  for (const id of ids) if (typeof id === "string" && id) commentIds.push(id);
+  for (const commentId of ids) if (typeof commentId === "string" && commentId) commentIds.push(commentId);
   if (!commentIds.length) return 0;
   const result = await db.execute({
     sql: `UPDATE mail_draft_comments SET state = 'applied'
-           WHERE state = 'queued' AND id IN (${commentIds.map(() => "?").join(", ")})`,
-    args: commentIds,
+           WHERE state = 'queued' AND id IN (${commentIds.map(() => "?").join(", ")}) AND draft_id = ?`,
+    args: [...commentIds, id],
   });
   return result.rowsAffected;
 }
@@ -875,7 +932,8 @@ export async function getVoice(db, draftId, rev) {
 
 /**
  * Store the voice note for one revision. A revision's note is written once: a second call for the
- * same revision keeps the first and answers false.
+ * same revision keeps the first and answers false. The revision named must exist — an integer at or
+ * below the draft's head — or the note would belong to no revision the person can read.
  *
  * @returns {Promise<boolean>} whether a row was written
  */
@@ -893,6 +951,7 @@ export async function setVoice(db, draftId, rev, voice, options = {}) {
   if (typeof json !== "string") throw bad("voice");
   const draft = await getDraft(db, id);
   if (!draft) throw missing("draft");
+  if (rev > draft.headRev) throw bad("rev");
   const result = await db.execute({
     sql: `INSERT INTO mail_draft_voice (draft_id, rev, voice_json, created_at) VALUES (?, ?, ?, ?)
           ON CONFLICT(draft_id, rev) DO NOTHING`,

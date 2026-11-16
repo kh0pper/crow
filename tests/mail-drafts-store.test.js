@@ -102,17 +102,37 @@ function badInput() {
   };
 }
 
-/** A draft resting in `holding` or `scheduled` with a full seal written. */
-async function sealedDraft(db, state) {
-  const { draft } = await makeDraft(db);
-  const ok = await transition(db, draft.id, ["draft"], state, {
+/** The fields a move into `holding` or `scheduled` must carry: a full seal bound to that tap. */
+function seal(state, overrides = {}) {
+  return {
     ...(state === "holding" ? { hold_until: T0 + 10_000 } : { due_at: T0 + 60_000 }),
     tap_seal: "seal-1",
     tap_id: "tap-1",
     tap_action: state === "holding" ? "send" : "schedule",
     attach_digest: "digest-1",
-  }, { now: () => T0 });
+    ...overrides,
+  };
+}
+
+/** A draft resting in `holding` or `scheduled` with a full seal written. */
+async function sealedDraft(db, state) {
+  const { draft } = await makeDraft(db);
+  const ok = await transition(db, draft.id, ["draft"], state, seal(state), { now: () => T0 });
   assert.equal(ok, true, `the draft entered ${state}`);
+  return draft;
+}
+
+/** A draft moved into any state the send, schedule and settle code can leave it in. */
+async function draftInState(db, state) {
+  if (state === "holding" || state === "scheduled") return sealedDraft(db, state);
+  const { draft } = await makeDraft(db);
+  if (state === "draft") return draft;
+  if (state === "sending" || state === "sent") {
+    await transition(db, draft.id, ["draft"], "sending", { claim_token: "claim-1" }, { now: () => T0 });
+    if (state === "sent") await transition(db, draft.id, ["sending"], "sent", { sent_at: T0 }, { now: () => T0 });
+    return draft;
+  }
+  await transition(db, draft.id, ["draft"], state, {}, { now: () => T0 });
   return draft;
 }
 
@@ -495,8 +515,8 @@ test("transition() refuses an unknown state and a field outside its whitelist", 
   await assert.rejects(() => transition(db, draft.id, ["draft"], "holding", { tap_action: "post" }, { now: () => T0 }), badInput());
   assert.equal((await draftRow(db, draft.id)).state, "draft", "a refused transition changes nothing");
 
-  assert.equal(await transition(db, draft.id, ["draft"], "holding", {}, { now: () => T0 + 1 }), true);
-  assert.equal(await transition(db, draft.id, ["draft"], "holding", {}, { now: () => T0 + 2 }), false,
+  assert.equal(await transition(db, draft.id, ["draft"], "holding", seal("holding"), { now: () => T0 + 1 }), true);
+  assert.equal(await transition(db, draft.id, ["draft"], "holding", seal("holding"), { now: () => T0 + 2 }), false,
     "a row in another state is not moved");
   assert.equal((await draftRow(db, draft.id)).updated_at, T0 + 1);
   assert.deepEqual([...TAP_ACTIONS], ["send", "schedule"]);
@@ -505,11 +525,11 @@ test("transition() refuses an unknown state and a field outside its whitelist", 
 test("transition() refuses a move whose expectHash is not the head", async () => {
   const db = await freshDb();
   const { draft } = await makeDraft(db);
-  assert.equal(await transition(db, draft.id, ["draft"], "scheduled", { due_at: T0 + 60_000 }, {
+  assert.equal(await transition(db, draft.id, ["draft"], "scheduled", seal("scheduled"), {
     now: () => T0, expectHash: "1".repeat(64),
   }), false);
   assert.equal((await draftRow(db, draft.id)).state, "draft");
-  assert.equal(await transition(db, draft.id, ["draft"], "scheduled", { due_at: T0 + 60_000 }, {
+  assert.equal(await transition(db, draft.id, ["draft"], "scheduled", seal("scheduled"), {
     now: () => T0, expectHash: draft.headHash,
   }), true);
 });
@@ -627,12 +647,23 @@ test("comments queue, list by state and are marked applied once", async () => {
   assert.deepEqual([...COMMENT_STATES], ["queued", "applied", "dropped"]);
   await assert.rejects(() => listComments(db, draft.id, { state: "pending" }), badInput());
 
-  assert.equal(await markCommentsApplied(db, [first.id], 2), 1);
+  // A revision is what folds a comment in, so the head moves to 2 before any is marked applied.
+  const foldIn = await addRevision(db, draft.id, revInput({ body: "Thursday it is." }), {
+    author: "bot", expectHash: draft.headHash, now: () => T0 + 3,
+  });
+  assert.ok(!foldIn.refused);
+  assert.equal(foldIn.rev, 2);
+
+  assert.equal(await markCommentsApplied(db, draft.id, [first.id], 2), 1);
   assert.deepEqual((await listComments(db, draft.id, { state: "applied" })).map((c) => c.id), [first.id]);
   assert.deepEqual((await listComments(db, draft.id, { state: "queued" })).map((c) => c.id), [second.id]);
-  assert.equal(await markCommentsApplied(db, [first.id], 2), 0, "a replay changes nothing");
-  assert.equal(await markCommentsApplied(db, [], 2), 0);
-  await assert.rejects(() => markCommentsApplied(db, [first.id], 0), badInput());
+  assert.equal(await markCommentsApplied(db, draft.id, [first.id], 2), 0, "a replay changes nothing");
+  assert.equal(await markCommentsApplied(db, draft.id, [], 2), 0);
+  await assert.rejects(() => markCommentsApplied(db, draft.id, [first.id], 0), badInput());
+  await assert.rejects(() => markCommentsApplied(db, draft.id, [first.id], 3), badInput(),
+    "a revision past the head folded nothing in");
+  await assert.rejects(() => markCommentsApplied(db, "md-0000000000000000", [first.id], 1),
+    (err) => err.code === "NOT_FOUND");
 
   await assert.rejects(() => addComment(db, draft.id, { rev: 1, text: "   " }), badInput());
   await assert.rejects(() => addComment(db, draft.id, { rev: 0, text: "x" }), badInput());
@@ -648,8 +679,299 @@ test("a voice note is written once per revision and reads back", async () => {
   assert.deepEqual(await getVoice(db, draft.id, 1), {
     draftId: draft.id, rev: 1, voice: { transcript: "Make it warmer", seconds: 4 }, createdAt: T0 + 1,
   });
-  assert.equal(await setVoice(db, draft.id, 2, { transcript: "On the next one" }, { now: () => T0 + 3 }), true);
+
+  // A note may only name a revision the draft has: rev 2 exists once the head moved there.
+  await assert.rejects(() => setVoice(db, draft.id, 2, { transcript: "Too soon" }), badInput());
+  const second = await addRevision(db, draft.id, revInput({ body: "A second take." }), {
+    author: "user", expectHash: draft.headHash, now: () => T0 + 3,
+  });
+  assert.ok(!second.refused);
+  assert.equal(await setVoice(db, draft.id, 2, { transcript: "On the next one" }, { now: () => T0 + 4 }), true);
   assert.equal((await getVoice(db, draft.id, 2)).voice.transcript, "On the next one");
+  await assert.rejects(() => setVoice(db, draft.id, 3, { transcript: "Past the head" }), badInput());
   await assert.rejects(() => setVoice(db, draft.id, 1, null), badInput());
   await assert.rejects(() => setVoice(db, "md-0000000000000000", 1, { a: 1 }), (err) => err.code === "NOT_FOUND");
+});
+
+/* ------------------------------------------------- review findings: seal, addresses, ids */
+
+test("a move between holding and scheduled needs a fresh seal, and a full one replaces the old", async () => {
+  const db = await freshDb();
+  const draft = await sealedDraft(db, "holding");
+  const original = await draftRow(db, draft.id);
+  assert.equal(original.tap_seal, "seal-1");
+
+  // holding -> scheduled carrying no seal fields at all is refused and writes nothing.
+  await assert.rejects(
+    () => transition(db, draft.id, ["holding"], "scheduled", { due_at: T0 + 90_000 }, { now: () => T0 + 100 }),
+    badInput(),
+  );
+  let row = await draftRow(db, draft.id);
+  assert.equal(row.state, "holding", "the refused move left the state alone");
+  assert.equal(row.tap_seal, "seal-1");
+  assert.equal(row.tap_id, "tap-1");
+  assert.equal(row.tap_action, "send");
+  assert.equal(row.attach_digest, "digest-1");
+  assert.equal(row.due_at, null);
+  assert.equal(row.updated_at, T0);
+
+  // A partial seal (one column missing) and a seal word for the other target are refused too.
+  await assert.rejects(() => transition(db, draft.id, ["holding"], "scheduled", {
+    due_at: T0 + 90_000, tap_seal: "seal-2", tap_id: "tap-2", tap_action: "schedule",
+  }, { now: () => T0 + 100 }), badInput());
+  await assert.rejects(() => transition(db, draft.id, ["holding"], "scheduled", seal("scheduled", {
+    tap_action: "send",
+  }), { now: () => T0 + 100 }), badInput());
+  row = await draftRow(db, draft.id);
+  assert.equal(row.state, "holding");
+  assert.equal(row.tap_seal, "seal-1");
+  assert.equal(row.updated_at, T0);
+
+  // A full new seal replaces every old value in the same UPDATE.
+  assert.equal(await transition(db, draft.id, ["holding"], "scheduled", seal("scheduled", {
+    due_at: T0 + 90_000, tap_seal: "seal-2", tap_id: "tap-2", attach_digest: "digest-2",
+  }), { now: () => T0 + 200 }), true);
+  row = await draftRow(db, draft.id);
+  assert.equal(row.state, "scheduled");
+  assert.equal(row.tap_seal, "seal-2");
+  assert.equal(row.tap_id, "tap-2");
+  assert.equal(row.tap_action, "schedule");
+  assert.equal(row.attach_digest, "digest-2");
+  assert.equal(row.updated_at, T0 + 200);
+
+  // And back to holding with a seal of its own, never the one the schedule carried.
+  await assert.rejects(
+    () => transition(db, draft.id, ["scheduled"], "holding", { hold_until: T0 + 20_000 }, { now: () => T0 + 300 }),
+    badInput(),
+  );
+  assert.equal(await transition(db, draft.id, ["scheduled"], "holding", seal("holding", {
+    hold_until: T0 + 20_000, tap_seal: "seal-3", tap_id: "tap-3", attach_digest: "digest-3",
+  }), { now: () => T0 + 400 }), true);
+  row = await draftRow(db, draft.id);
+  assert.equal(row.state, "holding");
+  assert.equal(row.tap_seal, "seal-3");
+  assert.equal(row.tap_id, "tap-3");
+  assert.equal(row.tap_action, "send");
+  assert.equal(row.attach_digest, "digest-3");
+});
+
+test("markCommentsApplied never touches a comment of another draft", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const one = await createDraft(db, {
+    accountId: account.id, mode: "new", chatThreadId: "chat-1", first: revInput(), author: "bot",
+  }, { now: () => T0 });
+  const other = await createDraft(db, {
+    accountId: account.id, mode: "new", chatThreadId: "chat-1", first: revInput({ body: "Other." }), author: "bot",
+  }, { now: () => T0 + 1 });
+  const mine = await addComment(db, one.id, { rev: 1, text: "Mine" }, { now: () => T0 + 2 });
+  const theirs = await addComment(db, other.id, { rev: 1, text: "Theirs" }, { now: () => T0 + 3 });
+
+  assert.equal(await markCommentsApplied(db, one.id, [theirs.id], 1), 0,
+    "another draft's comment is not moved");
+  assert.equal((await listComments(db, other.id))[0].state, "queued");
+
+  assert.equal(await markCommentsApplied(db, one.id, [mine.id, theirs.id], 1), 1,
+    "only this draft's comment changed");
+  assert.equal((await listComments(db, one.id))[0].state, "applied");
+  assert.equal((await listComments(db, other.id))[0].state, "queued");
+});
+
+test("an address entry is exactly one clean addr-spec", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fields = { accountId: account.id, mode: "new", author: "bot" };
+  const create = (first) => createDraft(db, { ...fields, first }, { now: () => T0 });
+
+  await assert.rejects(() => create(revInput({ to: [{ address: "sam@example.com, jo@example.com" }] })), badInput(),
+    "a comma-joined pair is refused, never split");
+  await assert.rejects(() => create(revInput({ to: [{ address: "typo@@example.com" }] })), badInput());
+  await assert.rejects(() => create(revInput({ cc: [{ address: "sam @example.com" }] })), badInput(),
+    "whitespace inside an address is refused");
+  await assert.rejects(() => create(revInput({ to: [{ address: "Sam <sam@example.com>" }] })), badInput(),
+    "angle brackets are refused");
+  await assert.rejects(() => create(revInput({ bcc: [{ address: "sam@example.com; jo@example.com" }] })), badInput());
+  assert.equal(await count(db, "SELECT COUNT(*) AS n FROM mail_drafts"), 0, "a refused address wrote no draft");
+
+  const good = await create(revInput({ to: [{ name: "Sam", address: "sam@example.com" }] }));
+  assert.deepEqual((await listRevisions(db, good.id))[0].to, [{ name: "Sam", address: "sam@example.com" }]);
+
+  await assert.rejects(() => addRevision(db, good.id, revInput({ to: [{ address: "a@example.com b@example.com" }] }), {
+    author: "user", expectHash: good.headHash,
+  }), badInput());
+  assert.equal((await getDraft(db, good.id)).headRev, 1);
+});
+
+test("hashOf canonicalises an address list before it collects display names", async () => {
+  const db = await freshDb();
+  const duplicated = revInput({
+    to: [
+      { name: "Sam", address: "sam@example.com" },
+      { name: "Sam again", address: "SAM@example.com" },
+      { address: "sam@example.com" },
+    ],
+  });
+  const { draft } = await makeDraft(db, { draft: { first: duplicated } });
+  const stored = (await listRevisions(db, draft.id))[0];
+  assert.deepEqual(stored.to, [{ name: "Sam", address: "sam@example.com" }], "one entry, one name");
+
+  const from = { name: "Alex", address: "alex@example.com" };
+  const single = revInput({ to: [{ name: "Sam", address: "sam@example.com" }], from });
+  assert.equal(hashOf({ ...duplicated, from }, { mode: "reply" }), draft.headHash,
+    "the raw input hashes like the head the store wrote");
+  assert.equal(hashOf({ ...duplicated, from }, { mode: "reply" }), hashOf(single, { mode: "reply" }),
+    "a duplicate entry and its case cannot move the hash");
+  assert.equal(hashOf(revisionToInput(stored), { mode: "reply" }), draft.headHash);
+});
+
+test("a caller's from is stripped before validation, so a malformed one cannot refuse a revision", async () => {
+  const db = await freshDb();
+  const { account, draft } = await makeDraft(db);
+  const result = await addRevision(db, draft.id, revInput({
+    from: { name: "Not an address", address: "typo@@example.com" },
+  }), { author: "user", expectHash: draft.headHash, now: () => T0 + 1 });
+  assert.ok(!result.refused);
+  assert.deepEqual((await listRevisions(db, draft.id))[1].from, { name: "Alex", address: "alex@example.com" });
+
+  // Not an object, not even a string: still ignored.
+  const again = await addRevision(db, draft.id, revInput({ from: ["sam@example.com"] }), {
+    author: "bot", expectHash: result.hash, now: () => T0 + 2,
+  });
+  assert.ok(!again.refused);
+
+  const made = await createDraft(db, {
+    accountId: account.id,
+    mode: "new",
+    first: revInput({ from: { address: "a,b@example.com" } }),
+    author: "user",
+  }, { now: () => T0 + 3 });
+  assert.deepEqual((await listRevisions(db, made.id))[0].from, { name: "Alex", address: "alex@example.com" });
+});
+
+test("a comment names a revision the draft has, on a draft a person can still change", async () => {
+  const db = await freshDb();
+  const { draft } = await makeDraft(db);
+  await assert.rejects(() => addComment(db, draft.id, { rev: 2, text: "Ahead of the head" }), badInput());
+  assert.equal((await addComment(db, draft.id, { rev: 1, text: "Here" }, { now: () => T0 + 1 })).rev, 1);
+
+  const rev2 = await addRevision(db, draft.id, revInput({ body: "Two." }), {
+    author: "user", expectHash: draft.headHash, now: () => T0 + 2,
+  });
+  assert.ok(!rev2.refused);
+  assert.equal((await addComment(db, draft.id, { rev: 2, text: "On the new one" }, { now: () => T0 + 3 })).rev, 2);
+
+  for (const state of ["sent", "discarded", "unknown", "holding", "sending"]) {
+    const closed = await freshDb();
+    const made = await draftInState(closed, state);
+    await assert.rejects(() => addComment(closed, made.id, { rev: 1, text: "Too late" }, { now: () => T0 + 4 }),
+      badInput(), `${state} refuses a comment`);
+    assert.equal(await count(closed, "SELECT COUNT(*) AS n FROM mail_draft_comments"), 0);
+  }
+
+  for (const state of ["draft", "failed", "missed", "scheduled"]) {
+    const open = await freshDb();
+    const made = await draftInState(open, state);
+    assert.equal((await addComment(open, made.id, { rev: 1, text: "Still open" }, { now: () => T0 + 5 })).rev, 1,
+      `${state} takes a comment`);
+  }
+});
+
+test("a revision's inReplyTo and references are Message-IDs, and references keep the last 50", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fields = { accountId: account.id, mode: "reply", author: "bot" };
+  await assert.rejects(() => createDraft(db, { ...fields, first: revInput({ inReplyTo: "m1@mail.example.test" }) }),
+    badInput(), "an inReplyTo without angle brackets is refused");
+  await assert.rejects(() => createDraft(db, { ...fields, first: revInput({ inReplyTo: "<a b@mail.example.test>" }) }),
+    badInput());
+  await assert.rejects(() => createDraft(db, {
+    ...fields, first: revInput({ references: ["<m0@mail.example.test>", "nope"] }),
+  }), badInput());
+  await assert.rejects(() => createDraft(db, { ...fields, first: revInput({ references: "<m0@mail.example.test>" }) }),
+    badInput(), "references must be an array");
+  assert.equal(await count(db, "SELECT COUNT(*) AS n FROM mail_drafts"), 0, "a bad id wrote no draft");
+
+  const created = await createDraft(db, {
+    accountId: account.id, mode: "reply", first: revInput(), author: "bot",
+  }, { now: () => T0 });
+  await assert.rejects(() => addRevision(db, created.id, revInput({
+    references: ["<ok@mail.example.test>", "not-an-id"],
+  }), { author: "user", expectHash: created.headHash, now: () => T0 + 1 }), badInput());
+  assert.equal((await getDraft(db, created.id)).headRev, 1, "the refused input moved nothing");
+
+  const many = Array.from({ length: 55 }, (_, i) => `<r${i}@mail.example.test>`);
+  const result = await addRevision(db, created.id, revInput({ references: many }), {
+    author: "user", expectHash: created.headHash, now: () => T0 + 2,
+  });
+  assert.ok(!result.refused);
+  const stored = (await listRevisions(db, created.id))[1];
+  assert.equal(stored.references.length, 50);
+  assert.deepEqual(stored.references, many.slice(-50), "the last 50 are kept");
+});
+
+test("the head-move compare-and-set is the guard, not the pre-read", async () => {
+  const db = await freshDb();
+  const { draft } = await makeDraft(db);
+  const tampered = "f".repeat(64);
+
+  // A direct UPDATE lands between addRevision's pre-read of the row and its guarded UPDATE.
+  let fired = false;
+  const racing = {
+    async execute(arg) {
+      const result = await db.execute(arg);
+      const sql = typeof arg === "string" ? arg : arg.sql;
+      if (!fired && /FROM mail_drafts WHERE id = \?/.test(sql)) {
+        fired = true;
+        await db.execute({ sql: "UPDATE mail_drafts SET head_hash = ? WHERE id = ?", args: [tampered, draft.id] });
+      }
+      return result;
+    },
+    batch: (statements) => db.batch(statements),
+    executeMultiple: (sql) => db.executeMultiple(sql),
+    runTransaction: (work) => db.runTransaction(work),
+    close: () => db.close(),
+  };
+
+  const result = await addRevision(racing, draft.id, revInput({ body: "Racing." }), {
+    author: "user", expectHash: draft.headHash, now: () => T0 + 1,
+  });
+  assert.equal(fired, true, "the tamper ran after the pre-read");
+  assert.deepEqual(result, { refused: "changed" });
+
+  const row = await draftRow(db, draft.id);
+  assert.equal(row.head_hash, tampered, "only the tamper changed the hash");
+  assert.equal(row.head_rev, 1, "the head did not move");
+  assert.equal(await count(db, "SELECT COUNT(*) AS n FROM mail_draft_revisions WHERE draft_id = ?", [draft.id]), 1,
+    "no revision row was inserted");
+});
+
+test("addRevision refuses a bad input before it opens a transaction, leaving a scheduled draft whole", async () => {
+  const db = await freshDb();
+  const draft = await sealedDraft(db, "scheduled");
+  const before = await draftRow(db, draft.id);
+  let opened = 0;
+  const watched = {
+    ...db,
+    runTransaction: (work) => {
+      opened += 1;
+      return db.runTransaction(work);
+    },
+  };
+
+  await assert.rejects(() => addRevision(watched, draft.id, revInput({ references: ["not-an-id"] }), {
+    author: "user", expectHash: draft.headHash, cancelSchedule: true, now: () => T0 + 1_000,
+  }), badInput());
+  assert.equal(opened, 0, "the transaction was never opened");
+
+  const after = await draftRow(db, draft.id);
+  assert.equal(after.state, "scheduled");
+  assert.equal(after.tap_seal, before.tap_seal);
+  assert.equal(after.tap_id, before.tap_id);
+  assert.equal(after.tap_action, before.tap_action);
+  assert.equal(after.attach_digest, before.attach_digest);
+  assert.equal(after.due_at, before.due_at);
+  assert.equal(after.head_rev, before.head_rev);
+  assert.equal(after.head_hash, before.head_hash);
+  assert.equal(after.updated_at, before.updated_at);
+  assert.equal(await count(db, "SELECT COUNT(*) AS n FROM mail_draft_revisions WHERE draft_id = ?", [draft.id]), 1);
 });
