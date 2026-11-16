@@ -4,14 +4,15 @@
  * `engine-client.js` concatenates these files into ONE module and loads it with
  * `audioWorklet.addModule()`:
  *
- *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
- *       + spessasynth.js + font-voice.js + dynamics.js + faust-host.js
- *       + meter.js + studio-processor.js
+ *     sequencer.js + resample.js + sampler-voice.js + pad-events.js + perf-fx.js
+ *       + sunvox.js + spessasynth.js + font-voice.js + dynamics.js
+ *       + faust-host.js + meter.js + studio-processor.js
  *
  * so this file shares a module scope with the vendored SunVox glue (which
  * declares the `SunVoxLib` factory), with the pure sequencer
  * (`StudioSequencer` on `globalThis`), with the sampler's voice DSP
- * (`StudioSamplerVoice`), with the performance-effects bus (`StudioPerfFx`) and
+ * (`StudioSamplerVoice`), with the pad-event ring (`StudioPadEvents`), with the
+ * performance-effects bus (`StudioPerfFx`) and
  * with the SoundFont hosts (`StudioFontVoice`, which drives the vendored
  * synth's `SpessaSynthProcessor`), with Crow's own dynamics (`StudioDynamics`),
  * with the compiled Faust effects' host (`StudioFaustHost`) and with the master
@@ -176,6 +177,29 @@
  *   `attack_ms`, `decay_ms`, `sustain`, `release_ms`, `pitch`, `gain_db`,
  *   `pan`, `reverse`, `cutoff_hz`, `resonance` and the filter's kind under
  *   `filter_type` — and all of them go through the same `field()` lookup.
+ *
+ * ## Pad events: the lights follow the hits, not the clock
+ *
+ * The panel never polls for a hit. Every pad trigger this file accepts ends in
+ * `startPad` — a pattern step, a live press, a controller press — and there, the
+ * frame the voice starts on is pushed into the pad-event ring
+ * (`pad-events.js`, `StudioPadEvents`) with the voice's EFFECTIVE velocity:
+ *
+ *     {frame, track_id, bank_id, index, kind: "hit", v}
+ *
+ * `frame` is the CONTEXT frame (the clock `launched`, `nextBarFrame` and the
+ * `position` report use), so a light lands on the frame the operator hears —
+ * the one the block's samples reach the output on — instead of on the block the
+ * message happened to be posted from. The ring is preallocated and a push
+ * overwrites a record in place, so a hit costs no allocation on the audio
+ * thread; the one array a post needs is built by `drain()` after the block
+ * rendered.
+ *
+ * The block's whole ring is posted once, at the end of the block, as
+ * `{type:"pad_events", events:[…]}` — and only while a page is listening
+ * (`{type:"pad_events_on", on:true}`, sent on the page's first subscription):
+ * with nobody listening nothing is recorded and nothing is posted. A block with
+ * no trigger posts nothing.
  *
  * ## Motion
  *
@@ -550,10 +574,12 @@
  * `{type:"monitor", track_id, on}`, `{type:"live", track_id,
  * bank_id, index, v, on}`, `{type:"tap", target, on}`, `{type:"fx", name,
  * amount, on}`, `{type:"looper", action}`, `{type:"looper_buffers", left,
- * right}`, `{type:"looper_take", id}`, `{type:"faust-modules", modules}`
+ * right}`, `{type:"looper_take", id}`, `{type:"faust-modules", modules}`,
+ * `{type:"pad_events_on", on}` (a page subscribed to the pad lights)
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
- * error}`, `{type:"position", bar, beat, sixteenth, patterns}` (at most every
- * 50 ms of audio; `patterns` maps each sampler track that was playing a pattern
+ * error}`, `{type:"position", bar, beat, sixteenth, patterns, frame}` (at most
+ * every 50 ms of audio, `frame` being the context frame of the block the report
+ * is for; `patterns` maps each sampler track that was playing a pattern
  * clip in that block to `{pattern_id, slot_start_beat, slot_beats, chain_index}`
  * — the chain slot it played, which is where the motion recorder puts a lane —
  * see `reportPosition`), `{type:"launched",
@@ -586,7 +612,10 @@
  * non-finite sample: it is bypassed in the engine and this is said once — see
  * "The mixer"), `{type:"insert_loading", insert_id, message}` (a Faust insert
  * whose compiled module the page has not posted yet: it passes audio through
- * until then, and this is said once per insert — not an error)
+ * until then, and this is said once per insert — not an error),
+ * `{type:"pad_events", events}` (one message per block that started a voice
+ * while a page is listening; each event is `{frame, track_id, bank_id, index,
+ * kind: "hit", v}` — see "Pad events")
  *
  * ## Frames the client can count on
  *
@@ -799,6 +828,15 @@
    * chain, and past them a stolen voice is simply cut.
    */
   const STOLEN_TAILS_PER_TRACK = 2;
+
+  /**
+   * `pad-events.js`'s two kind codes, duplicated here: a worklet scope composed
+   * without that file (some engine tests build their own file list) has no
+   * `StudioPadEvents` to read them from, and the codes are part of the message
+   * the page reads either way. `pad-events.js` owns the values.
+   */
+  const PAD_EVENT_HIT = 0;
+  const PAD_EVENT_STATE = 1;
 
   /**
    * How many bytes of decoded samples may be loaded at once when the client
@@ -2103,6 +2141,23 @@
       this.tapMaster = false;
 
       /**
+       * The pad-event ring (`pad-events.js`): what `startPad` records for the
+       * page's lights, posted one block's worth at a time (see "Pad events" in
+       * the file header). `null` in a module composed without `pad-events.js`
+       * (some engine tests build their own file list), and then nothing is ever
+       * recorded or posted.
+       */
+      this.padEvents =
+        typeof StudioPadEvents === "object" && StudioPadEvents !== null ? StudioPadEvents.create() : null;
+
+      /**
+       * Whether a page is subscribed to those lights
+       * (`{type:"pad_events_on", on:true}`). Nothing is recorded until one is, so
+       * a page that listens to nothing pays nothing.
+       */
+      this.padEventsOn = false;
+
+      /**
        * The performance-effects bus and the looper (`perf-fx.js`): live state
        * that never reaches the song, applied after the mix and before the clip.
        */
@@ -2550,6 +2605,12 @@
           break;
         case "tap":
           this.setTap(message.target, message.on === true);
+          break;
+        case "pad_events_on":
+          // A page subscribed to the pad lights: from the next block on, every hit
+          // is recorded and the block's ring posted once. Off drops what was
+          // waiting, so a page that comes back is not drawn hits it never heard.
+          this.setPadEventsOn(message.on === true);
           break;
         case "fx":
           // A performance effect is live state: the change takes effect at the
@@ -3655,6 +3716,50 @@
       this.fontFailed.add(fontId);
       this.fontNeeded.delete(fontId);
       this.port.postMessage({ type: "library_failed", library_id: fontId, reason: String(reason) });
+    }
+
+    /**
+     * Turn the pad-event ring on or off. A page turns it on with its first
+     * subscription (`{type:"pad_events_on", on:true}`), and nothing is recorded
+     * until then: a host that never listens — an offline render, `server/render.js`
+     * — records and posts nothing at all.
+     * @param {boolean} on
+     * @returns {void}
+     */
+    setPadEventsOn(on) {
+      this.padEventsOn = on === true;
+      if (!this.padEventsOn && this.padEvents !== null) this.padEvents.clear();
+    }
+
+    /**
+     * Record one pad event for the page, in the context's own frames: the frame
+     * the voice starts on, the pad it came from, the kind and its value (a hit's
+     * effective velocity, or a pad's state code). Nothing is recorded while no
+     * page listens: the ring only fills while somebody is listening.
+     * @param {number} frame the context frame the voice starts on
+     * @param {string} trackId
+     * @param {string} bankId
+     * @param {number} index the voice's light index
+     * @param {number} kind `StudioPadEvents.KIND_HIT` or `KIND_STATE`
+     * @param {number} v the effective velocity, 1..127 (0 for a state)
+     * @param {number} state the pad's state code (0 for a hit)
+     * @returns {void}
+     */
+    pushPadEvent(frame, trackId, bankId, index, kind, v, state) {
+      if (!this.padEventsOn || this.padEvents === null) return;
+      this.padEvents.push(frame, trackId, bankId, index, kind, v, state);
+    }
+
+    /**
+     * Post the block's pad events: ONE message, and only when a page is listening
+     * and something was recorded. The event array is the one allocation, and it
+     * is made here, after the block rendered.
+     * @returns {void}
+     */
+    reportPadEvents() {
+      if (!this.padEventsOn || this.padEvents === null) return;
+      if (this.padEvents.size() === 0) return;
+      this.port.postMessage({ type: "pad_events", events: this.padEvents.drain() });
     }
 
     /**
@@ -6638,6 +6743,7 @@
       // A font that failed while rendering was dropped by its host mid-run; it is
       // reported once here, after the block, and its tracks stay silent.
       this.reportFontFailures();
+      this.reportPadEvents();
       this.reportPosition(count, events.patterns);
       // One meter reading every 100 ms of audio while the playhead runs, and one
       // more when it stops.
@@ -7730,6 +7836,9 @@
       const cutoff = Number(field("cutoff_hz", filter.cutoff_hz));
       const resonance = Number(field("resonance", filter.resonance));
       voice.pad_key = bankId + "." + index;
+      // The pad the panel lights for this voice. C1c (chromatic pads) moves this
+      // off the pad's own index; every pad event and every light reads it here.
+      voice.light_index = index;
       voice.locked = locks ? Object.keys(locks) : null;
       voice.velocity_gain = (velocityHeld / 127) * (velocityHeld / 127);
       voice.reverse_sign = field("reverse", pad.reverse === true) === true ? -1 : 1;
@@ -7767,6 +7876,22 @@
       }
 
       this.stealSongWide(voice);
+
+      // One hit for the page's lights, from the one place every pad trigger passes
+      // through (a step, a live press, a controller press): the frame the voice
+      // starts on, in the context's clock, and the velocity it really plays at.
+      // A live press has no offset of its own, so it lands on this block's first
+      // frame — the frame its voice sounds on.
+      const offset = Number(event.frame);
+      this.pushPadEvent(
+        this.contextOffset() + this.frame + (Number.isFinite(offset) && offset > 0 ? Math.trunc(offset) : 0),
+        asId(event.track_id),
+        bankId,
+        voice.light_index,
+        PAD_EVENT_HIT,
+        velocityHeld,
+        0,
+      );
     }
 
     /**
@@ -8120,7 +8245,9 @@
      * without waiting for the next report.
      *
      * The sequencer's entries are reused across blocks, so the report object is
-     * built HERE, once per post, and never per block.
+     * built HERE, once per post, and never per block. The report also carries the
+     * context frame of the block it is for, which is what the page times the
+     * playing step's light with (a `pad_events` hit carries its own).
      * @param {number} frames the frames the block held
      * @param {Map<string, {pattern_id: string, slot_start_beat: number,
      *   slot_beats: number, chain_index: number}>|undefined} patterns track id →
@@ -8149,6 +8276,11 @@
         beat: position.beat,
         sixteenth: position.sixteenth,
         patterns: played,
+        // The context frame of the BLOCK this report is for (`this.frame` has
+        // already moved to the end of it), so a page can time the playing step's
+        // light against the position it belongs to instead of against the moment
+        // the message arrived.
+        frame: this.contextOffset() + this.frame - frames,
       });
     }
 

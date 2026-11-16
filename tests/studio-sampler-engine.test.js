@@ -45,6 +45,7 @@ const ASSETS = {
   "sequencer.js": readFileSync(join(ENGINE_DIR, "sequencer.js"), "utf8"),
   "resample.js": readFileSync(join(ENGINE_DIR, "resample.js"), "utf8"),
   "sampler-voice.js": readFileSync(join(ENGINE_DIR, "sampler-voice.js"), "utf8"),
+  "pad-events.js": readFileSync(join(ENGINE_DIR, "pad-events.js"), "utf8"),
   "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
   "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
   "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
@@ -349,6 +350,20 @@ function assertLevel(actual, expected, what, tolerance = 1e-6) {
 }
 
 /**
+ * The `pad_events` posts a processor made, each one's own event list: the engine
+ * posts ONE message per block that started a voice, never one per hit.
+ * @param {object[]} messages
+ * @returns {object[][]}
+ */
+function padEventPosts(messages) {
+  const posts = [];
+  for (const message of messages) {
+    if (message && message.type === "pad_events") posts.push(message.events);
+  }
+  return posts;
+}
+
+/**
  * Press and release one pad through the engine's live messages, before the
  * render starts: a live note goes straight to a voice and is never quantized.
  * @param {object} song
@@ -404,6 +419,7 @@ const PROCESSOR_MODULE = studioEngine.composeEngineModule([
   ASSETS["sequencer.js"],
   ASSETS["resample.js"],
   ASSETS["sampler-voice.js"],
+  ASSETS["pad-events.js"],
   readFileSync(join(ENGINE_DIR, "perf-fx.js"), "utf8"),
   ASSETS["sunvox.js"],
   ASSETS["studio-processor.js"],
@@ -478,6 +494,8 @@ async function createProcessor(song, samples) {
 
   return {
     errors: messages.filter((message) => message && message.type === "error").map((message) => message.error),
+    /** Every message the processor posted, in order (a `pad_events` post included). */
+    messages: messages,
     /** Post one protocol message, the way the worklet's port does. */
     post,
     /** @returns {Promise<{left: Float32Array, right: Float32Array}>} the mix, in `blockSize` blocks */
@@ -1764,5 +1782,148 @@ test("releasing a live oneshot pad lets it finish", async () => {
   const gate = await renderLivePad(songFor("gate"), { seconds: 0.35, samples });
   for (const at of [0, 1, 100, 1000]) {
     assert.equal(gate.left[at], 0, `frame ${at}: a live gate pad is released by liveRelease`);
+  }
+});
+
+// --- pad events: the engine tells the page about every hit -------------------
+
+/** One sampler song with `count` pads (0..count-1) on one track and no steps. */
+function padSong(count, { pads = [], steps = [], clips = [] } = {}) {
+  const all = [];
+  for (let index = 0; index < count; index += 1) all.push(pad("track-1", index));
+  return samplerSong({
+    tracks: [track("track-1")],
+    clips,
+    pads: all.concat(pads),
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 48000) },
+    steps,
+  });
+}
+
+/** @returns {object[]} the events of every `pad_events` post, flattened. */
+function allPadEvents(messages) {
+  const events = [];
+  for (const post of padEventPosts(messages)) for (const event of post) events.push(event);
+  return events;
+}
+
+test("a step on pad 3 produces one hit at the step's frame with the step velocity", async () => {
+  const samples = [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }];
+  const song = padSong(0, {
+    pads: [pad("track-1", 3)],
+    clips: [patternClip("clip-1", "track-1")],
+    // One step, a 16th into the bar: 24000 frames at 120 bpm.
+    steps: [step("clip-1", 4, 3, { v: 90 })],
+  });
+  const stepFrame = 4 * FRAMES_PER_SIXTEENTH;
+
+  // The frame is the frame, not a block: it has to be the same whatever size of
+  // block the host asks the processor for (24000 is not a multiple of 128).
+  for (const blockSize of [128, 100]) {
+    const engine = await createProcessor(song, samples);
+    engine.post({ type: "pad_events_on", on: true });
+    const { left } = await engine.process(blockSize, 30000);
+    assert.deepEqual(engine.errors, [], `the processor must render block ${blockSize} without a fault`);
+
+    const posts = padEventPosts(engine.messages);
+    assert.equal(posts.length, 1, `one block started a voice, so one post, got ${posts.length}`);
+    assert.equal(posts[0].length, 1, `one step is one hit, got ${posts[0].length}`);
+    const hit = posts[0][0];
+    assert.equal(hit.frame, stepFrame, `the hit has to stand on the step's own frame (block ${blockSize})`);
+    assert.equal(hit.track_id, "track-1");
+    assert.equal(hit.bank_id, BANK);
+    assert.equal(hit.index, 3, "the event names the pad, not the voice's slot");
+    assert.equal(hit.kind, "hit");
+    assert.equal(hit.v, 90, "the effective velocity is the step's own");
+
+    // The frame the report names is the frame the hit is HEARD on: silence right
+    // before it, and the voice's first sample on it.
+    assert.equal(left[stepFrame - 1], 0, `frame ${stepFrame - 1} is still silence`);
+    const expected = 0.5 * Math.pow(90 / 127, 2) * CENTRE;
+    assertLevel(left[stepFrame], expected, `frame ${stepFrame} is the hit's own first frame`);
+  }
+});
+
+test("a live press and a controller press produce the same event shape", async () => {
+  const samples = [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }];
+  const song = padSong(2);
+  const engine = await createProcessor(song, samples);
+  engine.post({ type: "pad_events_on", on: true });
+  // A press on the panel's pads and a press from a controller are the very same
+  // live message, and both go through the one `startPad` a step does.
+  engine.post({ type: "live", track_id: "track-1", bank_id: BANK, index: 0, v: 127, on: true });
+  engine.post({ type: "live", track_id: "track-1", bank_id: BANK, index: 1, v: 64, on: true });
+  await engine.process(128, 128);
+
+  const posts = padEventPosts(engine.messages);
+  assert.equal(posts.length, 1, `both presses start in one block, so one post, got ${posts.length}`);
+  const events = posts[0];
+  assert.equal(events.length, 2);
+  assert.deepEqual(
+    Object.keys(events[1]).sort(),
+    Object.keys(events[0]).sort(),
+    "a panel press and a controller press have to say the same thing",
+  );
+  assert.deepEqual(Object.keys(events[0]).sort(), ["bank_id", "frame", "index", "kind", "track_id", "v"]);
+  // Read field by field: the processor runs in another realm here, so its
+  // objects' prototypes are not this realm's and a deep-equal of the objects
+  // themselves would compare the wrong thing.
+  assert.deepEqual(
+    Array.from(events, (event) => [event.frame, event.track_id, event.bank_id, event.index, event.kind, event.v]),
+    [
+      [0, "track-1", BANK, 0, "hit", 127],
+      [0, "track-1", BANK, 1, "hit", 64],
+    ],
+    "a live press lands on the next block's first frame, the frame it sounds on",
+  );
+});
+
+test("sixteen hits in one block make one post", async () => {
+  const indices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+  const samples = [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }];
+  const engine = await createProcessor(padSong(16), samples);
+  engine.post({ type: "pad_events_on", on: true });
+  for (const index of indices) {
+    engine.post({ type: "live", track_id: "track-1", bank_id: BANK, index, v: 100, on: true });
+  }
+  await engine.process(128, 128);
+
+  const posts = padEventPosts(engine.messages);
+  assert.equal(posts.length, 1, `a block's hits are ONE post, not one each, got ${posts.length}`);
+  assert.equal(posts[0].length, 16, `all sixteen hits are in it, got ${posts[0].length}`);
+  assert.deepEqual(
+    Array.from(posts[0], (event) => event.index),
+    indices,
+    "the events keep the order the voices started in",
+  );
+});
+
+test("no listener: nothing is posted", async () => {
+  const samples = [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }];
+  const engine = await createProcessor(padSong(16), samples);
+  // No `pad_events_on`: this page never subscribed to the lights.
+  for (let index = 0; index < 16; index += 1) {
+    engine.post({ type: "live", track_id: "track-1", bank_id: BANK, index, v: 100, on: true });
+  }
+  const { left } = await engine.process(128, 128);
+
+  assert.deepEqual(padEventPosts(engine.messages), [], "a page that never subscribed gets no pad events");
+  assert.ok(peakOf(left) > 0.01, "and the pads still sound: only the reporting is off");
+});
+
+test("the position post carries a frame", async () => {
+  const engine = await createProcessor(padSong(1), []);
+  // A `position` report lands at most every 50 ms of audio: 2400 frames here.
+  await engine.process(128, 3000);
+  const positions = engine.messages.filter((message) => message && message.type === "position");
+  assert.ok(positions.length >= 1, "a running transport has to report its position");
+  const first = positions[0];
+  assert.equal(typeof first.frame, "number", "the report has to say which frame it is for");
+  // 2400 frames of audio: the 19th 128-frame block is the first one to reach it,
+  // so the report is for the block that starts at frame 18 × 128.
+  assert.equal(first.frame, 18 * 128);
+  for (const position of positions) {
+    assert.equal(position.frame % 128, 0, `frame ${position.frame} is a block start`);
+    assert.equal(typeof position.sixteenth, "number", "the report still carries the position it used to");
   }
 });
