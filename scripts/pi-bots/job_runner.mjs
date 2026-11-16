@@ -373,15 +373,23 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
   // MCP config and tool csv use it.
   const def = await withSkillTools(bot.def, { crowHome, log, repoSkillsDir });
   // Phase 1 bot↔project shares. A job builds its OWN MCP config and its OWN PiRpc below, so it is
-  // the same read a channel turn does (bot-world.mjs): the live shares are read once here, the file
-  // roots join the spawn, and a live share keeps the remote-proxy blocks out of the job's config.
-  // A suspension contributes no root and keeps the blocks out all the same. Never throws: no
-  // shares (or an older DB) is an empty list.
+  // the same read a channel turn does (bot-world.mjs): the live shares are read once here for the
+  // file roots, and holdsShare (below) keeps the remote-proxy blocks out of the job's config.
+  // Never throws: no shares (or an older DB) is an empty list.
   let jobShares = [];
   try {
     if (typeof bridge.loadBotShares === "function") jobShares = bridge.loadBotShares(job.bot_id) || [];
   } catch { jobShares = []; }
   const jobShareRoots = shareWorkspaceRoots(jobShares, { crowHome, log });
+  // holdsShare is NOT jobShares.length > 0: that list drives the file roots and leaves out
+  // archived/tombstoned projects, while the remote-proxy rule is "does the bot hold any live
+  // project_bot_shares row" — the same rule the channel world, the regen panel and the server-side
+  // share checks apply (bridge.mjs botHoldsLiveShareSync, fail closed on a read error). A bridge
+  // injected by a test without the mirror keeps the list's answer.
+  let holdsShare = jobShares.length > 0;
+  try {
+    if (typeof bridge.botHoldsLiveShareSync === "function") holdsShare = bridge.botHoldsLiveShareSync(job.bot_id) === true;
+  } catch { holdsShare = true; }
   const sessionDir = mkdtempSync(join(tmpdir(), "pibot-job-"));
   mkdirSync(join(sessionDir, "sessions"), { recursive: true });
   try {
@@ -407,7 +415,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     }
     try {
       const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {}, ...jobActor(job), displayName: bot.display_name,
-        holdsShare: jobShares.length > 0,
+        holdsShare,
         write: mcpDelivery === "file" });
       mcpConfig = (w && w.json) || null;
     } catch (e) { log("job mcp.json write skipped (non-fatal): " + ((e && e.message) || e)); }

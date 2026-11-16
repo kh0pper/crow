@@ -51,9 +51,11 @@ export async function regenerateBotMcp(db, botId, opts = {}) {
   const sessionDir = await resolveBotSessionDir(db, botId, def, row.project_id, crowHome);
   // Phase 1 shares: a bot holding a live share gets no remote-proxy blocks (mcp_writer.mjs). The
   // panel has the DB, so it asks the store's own rule — a re-granted or revoked share is reflected
-  // at the next regeneration.
-  let holdsShare = false;
-  try { holdsShare = await botHoldsLiveShare(db, botId); } catch { holdsShare = false; }
+  // at the next regeneration. FAIL CLOSED: a read error counts as a share, so a broken read can
+  // never hand the proxy blocks back; only a DB that predates the table (`no such table`) is "no
+  // share".
+  let holdsShare = true;
+  try { holdsShare = await botHoldsLiveShare(db, botId); } catch (err) { holdsShare = !/no such table/i.test(String((err && err.message) || "")); }
   // The bot's identity rides along: every stdio block the regenerated file carries gets the
   // actor env, exactly as a bridge-written config does (a file with no actor would let its
   // servers resolve the caller from whatever env they happen to inherit).

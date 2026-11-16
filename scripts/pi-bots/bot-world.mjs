@@ -501,6 +501,12 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
   // root only; a `read_write` share adds its workspace to the write roots too.
   const projectShares = B.loadBotShares(botId);
   const shareRoots = shareWorkspaceRoots(projectShares, { crowHome, log });
+  // The remote-proxy rule is a different question with a different answer: NOT "does this list have
+  // an entry" (it leaves out archived/tombstoned projects and dead bot defs) but "does the bot hold
+  // any live project_bot_shares row" — the one rule mcp_writer's CLI, the regen panel and
+  // server-side share checks apply. A suspension still counts, so it can never be used to regain
+  // the proxy, and a failed read fails closed.
+  const holdsShare = B.botHoldsLiveShareSync(botId);
 
   // session_dir resolution: prefer the project workspace when available
   // (new project-native bots). Legacy bots without a project_space row, or
@@ -606,8 +612,9 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
   const mcpArgs = { def, sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId, threadId, gatewayType,
     displayName: bot.display_name, cardBound, projectBoard, mcpDelivery, log,
     // A live share (suspended ones included: a suspension must not be usable to regain the proxy
-    // blocks) keeps every remote-proxy block out of this turn's config.
-    holdsShare: projectShares.length > 0 };
+    // blocks) keeps every remote-proxy block out of this turn's config. projectShares above stays
+    // the file-roots/reporting read; it is not what decides this.
+    holdsShare };
   const { mcpConfig, signedSessionId } = await writeWorldMcp(mcpArgs, session ? session.id : null);
 
   // Install-approval gate (Phase 2.4): refuse non-allowlisted pi_extensions

@@ -1679,6 +1679,31 @@ export function loadBotShares(botId) {
     try { if (c) c.close(); } catch { /* already closed */ }
   }
 }
+// Phase 1 bot↔project shares, the OTHER read: does the bot hold ANY live share? That is the rule
+// mcp_writer.mjs's CLI, the regen panel and servers/shared/project-bot-shares.js
+// (botHoldsLiveShare) all apply — one row of project_bot_shares with `revoked_at IS NULL`, whatever
+// the project's lifecycle state and whatever the bot def says. It is deliberately NOT
+// loadBotShares().length > 0: that list serves the file roots and the reachable-projects line, so
+// it leaves out archived/tombstoned projects and dead bot defs, while the remote-proxy rule is
+// about the share the bot holds. A first version derived holdsShare from it, so a share of an
+// archived project still minted remote-proxy blocks while the MCP side already refused it.
+// FAIL CLOSED: only a DB that predates the table (`no such table`) is "no share"; any other read
+// error reports a share, because a broken read must never hand the proxy blocks back.
+// Never throws: this runs inside a spawn.
+export function botHoldsLiveShareSync(botId) {
+  if (botId == null || String(botId) === "") return false;
+  let c = null;
+  try {
+    c = db(CROW_DB);
+    const row = c.prepare("SELECT 1 AS x FROM project_bot_shares WHERE bot_id=? AND revoked_at IS NULL LIMIT 1").get(String(botId));
+    return !!row;
+  } catch (err) {
+    const msg = err && err.message ? String(err.message) : "";
+    return !/no such table/i.test(msg);
+  } finally {
+    try { if (c) c.close(); } catch { /* already closed */ }
+  }
+}
 // M3b: appendAudit (mirror of the libsql helper in servers/shared/project-acl.js,
 // but using the better-sqlite3 client the bridge already opens). Best-effort —
 // failures must never break the primary action (the bot turn).

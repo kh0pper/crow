@@ -26,6 +26,7 @@
  *   4. feature_flags.remote_invocation                               else 403
  *   5. <mount> is a remote capability                                else 404
  *      the bot is enabled                                            else 403
+ *      and the bot holds no live project share (botHoldsLiveShare)   else 403
  *      and the bot's row selected (instanceId, capability)          else 403
  *   6. a trusted peer row with a gateway_url                         else 404
  *      and a peer bearer                                             else 502
@@ -51,6 +52,7 @@ import { resolveSignedSession, sessionMatchesTuple } from "../../shared/signed-s
 import { REMOTE_CANON_MOUNT, remoteServersForBot, parseRemoteInvocationFlag } from "../../../scripts/pi-bots/remote-blocks.mjs";
 import { sanitizeActorName } from "../../../scripts/pi-bots/actor-env.mjs";
 import { BOT_ID_RE } from "../../../scripts/pi-bots/bot-workspace-env.mjs";
+import { botHoldsLiveShare } from "../../shared/project-bot-shares.js";
 
 const CANON_BY_SEGMENT = new Map(Object.entries(REMOTE_CANON_MOUNT).map(([canon, mount]) => [mount.slice(1), canon]));
 const REQUEST_HEADERS = ["content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"];
@@ -159,6 +161,21 @@ export function peerRelayRouter({ createDbClient, deps = {} } = {}) {
       }
       // A disabled bot relays nothing, whatever sessions it still has.
       if (row && Number(row.enabled) !== 1) return refuse(res, 403, "the bot is not enabled", { id });
+      // Phase 1 project shares: a bot holding a live share gets no remote tools — its relayed
+      // calls arrive at a peer as a relayed actor, not as this bot, so the gate there is not the
+      // bot's. The config builder already withholds the proxy blocks (mcp_writer.mjs holdsShare),
+      // but a share granted while a session is live must not keep relaying until the next respawn,
+      // so the same rule is enforced here on EVERY request. Suspended shares count too (they grant
+      // no access, and a suspension must not be usable to regain the proxy). A failed read is
+      // fail-closed: it is the relay's fault, not the bot's.
+      let holdsShare = false;
+      try {
+        holdsShare = await botHoldsLiveShare(db, bot);
+      } catch (err) {
+        console.error(`[peer-relay] share lookup failed: ${err && err.message}`);
+        return refuse(res, 503, "the peer relay could not read the bot's settings", { id });
+      }
+      if (holdsShare) return refuse(res, 403, "remote tools are off while this bot holds a project share", { id });
       let def = null;
       try { def = row && row.definition ? JSON.parse(row.definition) : null; } catch { def = null; }
       const selected = !!row && remoteServersForBot(def).some((s) => s.instanceId === instanceId && s.canonicalId === canonicalId);

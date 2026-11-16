@@ -782,12 +782,13 @@ if (import.meta.url === "file://" + process.argv[1]) {
         .get(arg);
       // Phase 1 shares: this CLI has the DB open, so it can tell whether the bot holds a live share
       // (the better-sqlite3 mirror of botHoldsLiveShare, servers/shared/project-bot-shares.js) and
-      // keep the remote-proxy blocks out of the config it writes. An older DB without the table is
-      // "no share".
-      let holdsShare = false;
+      // keep the remote-proxy blocks out of the config it writes. FAIL CLOSED: a read error counts
+      // as a share, so a broken read can never hand the proxy blocks back; only a DB that predates
+      // the table (`no such table`) is "no share".
+      let holdsShare = true;
       try {
         holdsShare = !!d.prepare("SELECT 1 AS x FROM project_bot_shares WHERE bot_id=? AND revoked_at IS NULL LIMIT 1").get(arg);
-      } catch { holdsShare = false; }
+      } catch (err) { holdsShare = !/no such table/i.test(String((err && err.message) || "")); }
       d.close();
       if (!row) {
         console.error("no such bot: " + arg);
