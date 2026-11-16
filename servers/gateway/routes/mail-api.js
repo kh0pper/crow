@@ -51,6 +51,7 @@ import { probeAccount } from "../mail/probe.js";
 import { createAccount, deleteAccount, getAccount, listAccounts, updateAccount } from "../mail/store/accounts.js";
 import { listFolders } from "../mail/store/messages.js";
 import { SKIP_SPECIAL_USE } from "../mail/sync/engine.js";
+import { registerActionRoutes } from "./mail-api-actions.js";
 import { registerMessageRoutes } from "./mail-api-messages.js";
 import { registerReaderRoutes } from "./mail-api-reader.js";
 
@@ -628,6 +629,8 @@ export function mailApiRouter(dashboardAuth, deps = {}) {
   registerMessageRoutes(router, ctx);
   // Plan 2's reader routes: the message frame and the image allow list, behind the same guards.
   registerReaderRoutes(router, ctx);
+  // Plan 2's message actions: read/unread, archive, delete and move, behind the same guards.
+  registerActionRoutes(router, ctx);
 
   return router;
 }
