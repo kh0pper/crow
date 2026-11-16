@@ -161,10 +161,10 @@ against the new adapter with the provider's own fake, and skip nothing.
   once and stops retrying until the owner asks for a sync.
 - **Connections per account.** Three long-lived connections (one read connection — the sync
   worker's — and up to two IDLE connections, one per watched folder: Inbox and Sent) plus a
-  short-lived action connection — an attachment fetch today — which `withAdapter` keeps open for up
-  to 30 seconds so a burst costs one login; the message actions of the next part (mark read/unread,
-  archive, delete, move) will use that same connection. `watch` refuses a third folder rather than
-  opening another long-lived connection.
+  short-lived action connection — a remote search, a load-older fetch or an attachment fetch
+  today — which `withAdapter` keeps open for up to 30 seconds so a burst costs one login; the
+  message actions of the next part (mark read/unread, archive, delete, move) will use that same
+  connection. `watch` refuses a third folder rather than opening another long-lived connection.
 - **Deleting an account.** `stopAccount(accountId)` retires the worker, its timers and its connections,
   but it does not by itself cancel work already running through `withAdapter` (a backfill page, a
   remote search): that work stops on the `cancelled` flag it is handed, and the flag reads the
@@ -351,12 +351,13 @@ stored per view.
 
 ### Connections the reader borrows
 
-The reader's attachment path never opens an adapter of its own and never reuses the sync worker's. A
-download goes through `supervisor.withAdapter(accountId, fn)` for the one call at a time that account
-allows, refused outright for a `claimed_elsewhere` or `auth_failed` account. On a success the adapter
-stays open for up to 30 seconds; the message actions of the next part (open a message, mark it read,
-archive it) will go through the same call, so a burst of them costs one login rather than three, and a
-failure closes it at once. That is a fourth connection on top of this module's budget of three (the
+The reader's remote-search, load-older and attachment paths never open an adapter of their own and
+never reuse the sync worker's. A search, a load-older fetch or a download goes through
+`supervisor.withAdapter(accountId, fn)` for the one call at a time that account allows, refused
+outright for a `claimed_elsewhere` or `auth_failed` account. On a success the adapter stays open
+for up to 30 seconds; the message actions of the next part (open a message, mark it read, archive it)
+will go through the same call, so a burst of them costs one login rather than three, and a failure
+closes it at once. That is a fourth connection on top of this module's budget of three (the
 sync worker's read connection and up to two IDLE connections, for Inbox and Sent), and every imapflow
 call inside it takes the mailbox lock. The download route re-fetches the message from the server by UID
 under that account's folder and compares its Message-ID, lower-cased From and Date with the stored row

@@ -396,6 +396,7 @@ test("the account label fallback is translated, not the fixed English name", asy
     assert.match(r.body, /<h2 class="ml-card-title">another Crow<\/h2>/);
   });
 });
+
 test("an account with a blank label heads with its address and leaves the rename field empty", async () => {
   const account = await withDb((db) => stores.accounts.createAccount(db, ACCOUNT("Personal", "alex@example.com", "alexuser")));
   await withDb((db) => db.execute({ sql: "UPDATE mail_accounts SET label = '' WHERE id = ?", args: [account.id] }));
