@@ -11,6 +11,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,6 +21,7 @@ import express, { Router } from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { AclError } from "../servers/shared/project-acl.js";
 import { GENERAL_LIMITER_SKIP_PREFIXES, generalLimiterSkip } from "../servers/gateway/middleware/rate-limit.js";
+import { isLocalPasswordSessionOn } from "../servers/gateway/dashboard/local-session.js";
 import {
   deleteLocalSetting,
   readSetting,
@@ -29,7 +31,7 @@ import {
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb, ensureAgentToken } from "../bundles/studio/server/web.js";
-import { buildLayoutTemplate } from "../bundles/studio/panel/routes.js";
+import { buildLayoutOwnerCheck, buildLayoutTemplate } from "../bundles/studio/server/layout-template.js";
 import studioPanel from "../bundles/studio/panel/studio.js";
 
 /** The project every song in these tests belongs to. */
@@ -135,6 +137,12 @@ const LAYOUT_TEMPLATE_KEY = "studio.layout_template";
 /** The instance id these tests pin: 32 hex characters, the shape the registry requires. */
 const INSTANCE_ID = "0123456789abcdef0123456789abcdef";
 
+/** The cookie value of the owner's own password session at this dashboard. */
+const OWNER_SESSION = "owner-session";
+
+/** The cookie value of a session a peer sign-in minted (scopes 'dashboard sso'). */
+const SSO_SESSION = "sso-session";
+
 /**
  * The dashboard's settings tables, created as `scripts/init-db.js` creates them,
  * for a scratch database that otherwise carries only the studio tables.
@@ -161,8 +169,48 @@ async function initSettingsTables(db) {
 }
 
 /**
+ * The dashboard's `oauth_tokens` table, created as `scripts/init-db.js` creates
+ * it, for the owner check's own test: a dashboard session's token is stored as
+ * its sha256 hash, never the value the browser holds.
+ * @param {object} db
+ * @returns {Promise<void>}
+ */
+async function initSessionTable(db) {
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+      token TEXT PRIMARY KEY,
+      token_type TEXT NOT NULL CHECK(token_type IN ('access', 'refresh')),
+      client_id TEXT NOT NULL,
+      scopes TEXT DEFAULT '',
+      resource TEXT,
+      expires_at TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+}
+
+/**
+ * One dashboard session row: the cookie value's sha256 hash under the client id
+ * the dashboard's own logins use, with the scopes that decide what kind of
+ * session it is.
+ * @param {object} db
+ * @param {string} cookieValue the value the browser would hold
+ * @param {string} scopes "dashboard" for a password login here, "dashboard sso"
+ *   for a session a peer sign-in minted
+ * @returns {Promise<void>}
+ */
+async function seedSession(db, cookieValue, scopes) {
+  await db.execute({
+    sql:
+      "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) " +
+      "VALUES (?, 'access', 'dashboard', ?, '2999-01-01 00:00:00')",
+    args: [createHash("sha256").update(cookieValue).digest("hex"), scopes],
+  });
+}
+
+/**
  * The layout-template store the panel loader injects: the SAME three calls the
- * panel loader builds (`buildLayoutTemplate`, exported by `panel/routes.js`),
+ * panel loader builds (`buildLayoutTemplate`, from `server/layout-template.js`),
  * over this test's database, so what the routes wire and what a test wires
  * cannot drift apart. The instance id is pinned to a scratch data dir for the
  * length of the test, so the read and the write meet on the same rows and never
@@ -234,10 +282,24 @@ function sessionGate(req, res, next) {
 }
 
 /**
+ * The dashboard's session check as the real owner rule needs it: the cookie IS
+ * the session, and it is handed on as `req.dashboardSession`, which is what
+ * `isLocalPasswordSessionOn` hashes and looks up in `oauth_tokens`.
+ * @param {object} req
+ * @param {object} _res
+ * @param {Function} next
+ */
+function ownerSessionGate(req, _res, next) {
+  req.dashboardSession = cookieOf(req.headers.cookie, "crow_session");
+  return next();
+}
+
+/**
  * Boot a gateway-shaped server for one test.
  * @param {import("node:test").TestContext} t
  * @param {{allowNetwork?: boolean, botScope?: object, settings?: boolean,
- *          auth?: Function, owner?: boolean|null, templateStore?: Function}} [options]
+ *          auth?: Function, owner?: boolean|null, localOwner?: boolean,
+ *          templateStore?: Function}} [options]
  *   `settings: true` gives the web layer the operator's default layout template,
  *   wired the way the panel loader wires it, over the dashboard's settings
  *   tables on this test's own database. `auth` is the dashboard session check the
@@ -245,16 +307,37 @@ function sessionGate(req, res, next) {
  *   what the injected owner check answers (`true` by default, the owner at this
  *   machine's dashboard; `false` the peer session the rule refuses; `null` wires
  *   no check at all, the case a caller that forgot one lands in).
+ *   `localOwner: true` wires the REAL rule instead (`isLocalPasswordSessionOn`,
+ *   through `buildLayoutOwnerCheck`) over this test's own `oauth_tokens` rows,
+ *   and hands the router the session gate that sets `req.dashboardSession`.
  *   `templateStore(db)` replaces the store, for the cases where it fails.
  */
 async function boot(
   t,
-  { allowNetwork = true, botScope = null, settings = false, auth = null, owner = true, templateStore = null } = {},
+  {
+    allowNetwork = true,
+    botScope = null,
+    settings = false,
+    auth = null,
+    owner = true,
+    localOwner = false,
+    templateStore = null,
+  } = {},
 ) {
   const db = scratchDb(t);
   await initStudioTables(db);
   const acl = fakeAcl();
   const crowHome = mkdtempSync(join(tmpdir(), "studio-home-"));
+
+  // The owner check the real rule is built over: one password login at this
+  // machine's dashboard, and one session a peer sign-in minted.
+  let realOwnerCheck = null;
+  if (localOwner) {
+    await initSessionTable(db);
+    await seedSession(db, OWNER_SESSION, "dashboard");
+    await seedSession(db, SSO_SESSION, "dashboard sso");
+    realOwnerCheck = buildLayoutOwnerCheck(isLocalPasswordSessionOn, db);
+  }
 
   // The hub is built first and its broadcast reaches the web layer created
   // just after it, exactly as the panel loader wires the two together.
@@ -294,8 +377,13 @@ async function boot(
     botScope,
     layoutTemplate,
     // The owner check the template's writes sit behind, the way the panel
-    // loader wires `isLocalPasswordSessionOn`. `owner: null` omits it.
-    ...(owner === null ? {} : { isOwner: async () => owner === true }),
+    // loader wires `isLocalPasswordSessionOn` (through `buildLayoutOwnerCheck`).
+    // `owner: null` omits it.
+    ...(realOwnerCheck
+      ? { isOwner: realOwnerCheck }
+      : owner === null
+        ? {}
+        : { isOwner: async () => owner === true }),
   });
   webRef.web = web;
 
@@ -311,7 +399,7 @@ async function boot(
   // The gateway parses JSON for every route before the panel router (1 MB cap),
   // so the studio routes read `req.body` without a parser of their own.
   app.use(express.json({ limit: "1mb" }));
-  app.use(web.router(auth || ((_req, _res, next) => next())));
+  app.use(web.router(auth || (localOwner ? ownerSessionGate : (_req, _res, next) => next())));
 
   const server = createServer(app);
   const upgrades = web.attachUpgrade(server);
@@ -1216,6 +1304,15 @@ const PAGE_HEADERS = Object.freeze({
 /** Those same headers, for a call that carries a JSON body. */
 const JSON_HEADERS = Object.freeze({ ...PAGE_HEADERS, "content-type": "application/json" });
 
+/**
+ * The headers a caller off this machine sends with the owner's own session: the
+ * test's stand-in for a peer address the owner rule can tell from this box.
+ */
+const OWNER_HEADERS = Object.freeze({
+  cookie: `crow_session=${OWNER_SESSION}; crow_csrf=csrf-ok`,
+  "x-crow-csrf": "csrf-ok",
+  "x-studio-test-peer": "remote",
+});
 /** One default layout: the editor alone, full width, on a laptop in compose. */
 const TEMPLATE = Object.freeze({
   v: 1,
@@ -1375,6 +1472,14 @@ test("a template that is not exactly what this Studio saves is refused and store
     assert.deepEqual(await localRows(db), rowsBefore, `${why}: the stored template is unchanged`);
   }
 
+  // A key BESIDE the version and the layouts table: `parseTemplate` drops it,
+  // so a value being saved may not carry one for the default of every song on
+  // every device.
+  const extra = await putTemplate(base, { v: 1, layouts: TEMPLATE.layouts, extra: "x" });
+  assert.equal(extra.status, 400, "a top-level key besides v and layouts");
+  assert.equal(typeof extra.body.error, "string", "the caller is told why");
+  assert.deepEqual(await localRows(db), rowsBefore, "the extra key stored nothing");
+
   assert.deepEqual((await getTemplate(base)).body, saved.body, "what was kept is still the saved one");
 });
 
@@ -1516,6 +1621,62 @@ test("with no owner check wired the template's write and clear are refused", asy
   assert.equal((await getTemplate(base)).status, 200, "the read is unaffected");
 });
 
+test("the owner check built over no rule allows nobody", () => {
+  const db = { execute: async () => ({ rows: [] }) };
+  assert.equal(buildLayoutOwnerCheck(undefined, db)({ headers: {} }), false);
+  assert.equal(buildLayoutOwnerCheck(null, db)({ headers: {} }), false);
+});
+
+test("the owner check built over a rule is that rule, asked over this client", async () => {
+  const db = { marker: "scratch" };
+  const check = buildLayoutOwnerCheck(async (client, req) => client === db && req.owner === true, db);
+  assert.equal(await check({ owner: true }), true);
+  assert.equal(await check({ owner: false }), false);
+});
+
+test("the real owner rule: a local password session writes and clears, a peer-minted session is refused", async (t) => {
+  const { base, db } = await boot(t, { settings: true, localOwner: true });
+  const ssoHeaders = { ...OWNER_HEADERS, cookie: `crow_session=${SSO_SESSION}; crow_csrf=csrf-ok` };
+  const ssoJson = { ...ssoHeaders, "content-type": "application/json" };
+  const ownerJson = { ...OWNER_HEADERS, "content-type": "application/json" };
+
+  // The owner's own session, from this machine itself: the rule takes the
+  // owner's turn away from anything that starts on this box.
+  const loopback = await putTemplate(base, TEMPLATE, {
+    cookie: OWNER_HEADERS.cookie,
+    "x-crow-csrf": OWNER_HEADERS["x-crow-csrf"],
+    "content-type": "application/json",
+  });
+  assert.equal(loopback.status, 403, "a loopback caller is never the owner");
+  assert.equal(typeof loopback.body.error, "string", "and it is told it is the owner's");
+  assert.deepEqual(await localRows(db), [], "and it stored nothing");
+
+  const saved = await putTemplate(base, TEMPLATE, ownerJson);
+  assert.equal(saved.status, 200, `the owner's own write: ${JSON.stringify(saved.body)}`);
+  assert.deepEqual(saved.body, { template: TEMPLATE });
+  const rows = await localRows(db);
+  assert.equal(rows.length, 1, "one row, keyed by this instance");
+  assert.equal(rows[0].key, LAYOUT_TEMPLATE_KEY);
+  assert.deepEqual(JSON.parse(rows[0].value), TEMPLATE);
+
+  // The same requests with the session a peer sign-in minted: refused, and the
+  // owner's own template is untouched.
+  const peerWrite = await putTemplate(base, { v: 1, layouts: {} }, ssoJson);
+  assert.equal(peerWrite.status, 403, "a peer-minted session is not the owner");
+  assert.equal(typeof peerWrite.body.error, "string", "the caller is told it is the owner's");
+  assert.equal(loopback.body.error, peerWrite.body.error, "the same refusal the loopback caller got");
+  const peerClear = await deleteTemplate(base, ssoHeaders);
+  assert.equal(peerClear.status, 403);
+  assert.deepEqual(await localRows(db), rows, "nothing the refused session sent was written");
+
+  // The read is any signed-in caller's, on either session.
+  assert.equal((await getTemplate(base, ssoHeaders)).status, 200);
+
+  const cleared = await deleteTemplate(base, OWNER_HEADERS);
+  assert.equal(cleared.status, 200, `the owner's own clear: ${JSON.stringify(cleared.body)}`);
+  assert.deepEqual(await localRows(db), [], "and it is gone");
+});
+
 test("a settings store that fails is answered with one fixed sentence and never its own text", async (t) => {
   const { base } = await boot(t, { templateStore: () => failingTemplate() });
 
@@ -1542,4 +1703,53 @@ test("a settings store that fails is answered with one fixed sentence and never 
   assert.equal(read.body.error, write.body.error, "every failure gets the same sentence");
   assert.equal(write.body.error, clear.body.error, "every failure gets the same sentence");
   assert.equal(logged.filter((args) => args[0] === "[studio] default layout template:").length, 3, "each failure is logged");
+});
+
+/**
+ * The fixed sentence each of the instrument library's own failure codes is
+ * answered with: the library's messages are written for the log (a network
+ * refusal carries the fetch error's raw text), so none of them is repeated.
+ */
+const LIBRARY_FAILED_TEXT = Object.freeze({
+  network: "The instrument download failed; nothing was kept.",
+  redirect: "The instrument download was refused; nothing was kept.",
+  timeout: "The instrument download took too long; nothing was kept.",
+});
+
+test("a library failure code is answered with its fixed sentence, never the transfer's own text", async (t) => {
+  const { base, hub, crowHome } = await boot(t);
+  const token = ensureAgentToken(crowHome);
+
+  const logged = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => {
+    logged.push(args);
+  };
+  t.after(() => {
+    console.warn = realWarn;
+  });
+
+  // A refusal the library raises: the code is its own, the status the transfer's
+  // (502 for a network that is down or a redirect it refused, 504 for a timeout),
+  // and the message names a path and a query. The read is where a route meets it.
+  for (const [code, status] of [["network", 502], ["redirect", 502], ["timeout", 504]]) {
+    hub.listSongs = async () => {
+      throw Object.assign(new Error(`${code}: /secret/path SQLITE_ERROR: no such table`), { code });
+    };
+
+    const response = await fetch(`${base}/api/studio/agent/songs`, {
+      headers: { "x-studio-token": token },
+    });
+    assert.equal(response.status, status, `${code}: the code's own status`);
+    const body = await response.json();
+    assert.deepEqual(body, { ok: false, code, error: LIBRARY_FAILED_TEXT[code] }, `${code}: one fixed sentence`);
+    const text = JSON.stringify(body);
+    assert.equal(text.includes("/secret/path"), false, `${code}: the path stays in the log`);
+    assert.equal(text.includes("SQLITE"), false, `${code}: so does the query text`);
+  }
+
+  assert.ok(
+    logged.some((args) => args[0] === "[studio]" && String(args[1]?.message).includes("/secret/path")),
+    "the real refusal is logged",
+  );
 });

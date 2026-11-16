@@ -273,7 +273,16 @@ const AGENT_BOT_PREFIX = "agent:bot:";
 /** What Crow's voice is told when it tries to change a song it may read. */
 const READ_ONLY_TEXT = "Crow's voice can read songs but not change them; ask the project's bot.";
 
-/** HTTP status for each hub refusal code. */
+/**
+ * HTTP status for each hub refusal code, and for the instrument library's own
+ * user-facing codes.
+ *
+ * The library's codes are the ones its `LibraryError` can carry that the hub's
+ * table does not name: a network that is down, a redirect the catalog does not
+ * allow, and a transfer that ran out of time. Their sentences come from
+ * `LIBRARY_FAILED_TEXT_BY_CODE`, never from the library's own message (see
+ * `errorText`).
+ */
 const STATUS_BY_CODE = Object.freeze({
   acl: 403,
   not_found: 404,
@@ -286,6 +295,27 @@ const STATUS_BY_CODE = Object.freeze({
   // Studio's own: the caller may not have it, whatever it asks the song.
   studio_only: 403,
   conflict: 409,
+  // A download that met a network which is down, a redirect the catalog does
+  // not allow, or a transfer that ran out of time.
+  network: 502,
+  redirect: 502,
+  timeout: 504,
+});
+
+/**
+ * The one sentence a caller is told for a library failure whose code is its
+ * own.
+ *
+ * The library writes its messages for the log: a network refusal carries the
+ * fetch error's raw text, which names a URL, a host or a path. So the sentence
+ * is fixed here, one per code, and the library's own text is logged instead —
+ * it never reaches a caller.
+ * @type {Readonly<Object<string, string>>}
+ */
+const LIBRARY_FAILED_TEXT_BY_CODE = Object.freeze({
+  network: "The instrument download failed; nothing was kept.",
+  redirect: "The instrument download was refused; nothing was kept.",
+  timeout: "The instrument download took too long; nothing was kept.",
 });
 
 /**
@@ -638,10 +668,17 @@ function sendResult(res, result) {
  * @returns {string}
  */
 function errorText(err) {
+  // A library code has one fixed sentence of its own: its message can carry the
+  // transfer's raw error text (a URL, a host, a path, a query), so it is logged
+  // here and never repeated.
+  const code = typeof err?.code === "string" ? err.code : null;
+  if (code && Object.prototype.hasOwnProperty.call(LIBRARY_FAILED_TEXT_BY_CODE, code)) {
+    console.warn("[studio]", err);
+    return LIBRARY_FAILED_TEXT_BY_CODE[code];
+  }
   // Only a refusal this module answers keeps its own sentence: a code outside
   // that table is somebody else's vocabulary (the settings registry's, SQLite's)
   // and its message may name a path or a query, so it is logged and replaced.
-  const code = typeof err?.code === "string" ? err.code : null;
   if (code && Object.prototype.hasOwnProperty.call(STATUS_BY_CODE, code)) {
     return String(err?.message || INTERNAL_ERROR_TEXT);
   }
@@ -687,7 +724,9 @@ function sendError(res, err) {
  * operator is SAVING is their intent, and none of those repairs may quietly
  * become the default for every song on every device, so the route refuses the
  * value instead. Everything here is read from the shell's own tables: the nine
- * mode and width keys, each widget and the sizes it allows.
+ * mode and width keys, each widget and the sizes it allows. Nor may a save lose
+ * a top-level key: an object that is not exactly `v` and `layouts` is not a
+ * template this Studio saves.
  * @param {string|object|null|undefined} raw
  * @returns {boolean}
  */
@@ -701,6 +740,8 @@ function templateIsExact(raw) {
     }
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const topLevel = Object.keys(value);
+  if (topLevel.length !== 2 || !topLevel.includes("v") || !topLevel.includes("layouts")) return false;
   if (value.v !== LAYOUT_VERSION) return false;
   const table = value.layouts;
   if (!table || typeof table !== "object" || Array.isArray(table)) return false;
@@ -922,7 +963,8 @@ function refuse(socket, status, text) {
  *   and the page keeps the built-in default.
  * @param {((req: object) => Promise<boolean>)|null} [options.isOwner]
  *   whether a request is the owner at this machine's own dashboard (a local
- *   password session: the panel loader wires `isLocalPasswordSessionOn`). It
+ *   password session: the panel loader wires
+ *   `buildLayoutOwnerCheck(isLocalPasswordSessionOn, db)`). It
  *   gates the template's WRITE and CLEAR — a default for every song on every
  *   device is the owner's — while the read stays open to any signed-in caller.
  *   Injected for the same reason as everything above; absent, no write or

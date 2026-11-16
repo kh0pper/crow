@@ -9,11 +9,11 @@
  * the fixture throw instead.
  *
  * What is driven is what a person drives: the mode buttons in the top bar, the
- * transport bar at the bottom of a scrolled page, the phone tab strip, and the
- * timeline's zoom buttons over a section chip. The last case renders the same
- * page through the real dashboard layout
- * (servers/gateway/dashboard/shared/layout.js) and checks the nav sidebar it
- * brings with it.
+ * top bar itself with the page scrolled under it, the transport bar at the
+ * bottom of a scrolled page, the phone tab strip, and the timeline's zoom
+ * buttons over a section chip. The last case renders the same page through the
+ * real dashboard layout (servers/gateway/dashboard/shared/layout.js) and checks
+ * the nav sidebar it brings with it.
  *
  * Both bars lay out again while the page is still filling in (the song's title
  * and presence arrive after the first draw), so a control's rectangle read the
@@ -685,6 +685,80 @@ test("Play and Pause work from the transport bar with the page scrolled to the b
     paused,
     "the readout stays where Pause left it",
   );
+});
+
+// ---- the top bar on a page that scrolls under it -------------------------
+
+/** The top bar's own rectangle, and where the page is scrolled to. */
+const TOP_BAR = `(function () {
+  var bar = document.querySelector('.studio .st-top');
+  if (!bar) return null;
+  var rect = bar.getBoundingClientRect();
+  return {
+    top: rect.top,
+    bottom: rect.bottom,
+    height: rect.height,
+    scrollY: window.scrollY,
+    innerHeight: window.innerHeight
+  };
+})()`;
+
+test("the top bar is still at the top of the viewport with the page scrolled under it", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+
+  const page = await openPage(songUrl(), { width: 1280, height: 900 });
+  t.after(() => page.close());
+  await waitForStudio(page);
+
+  // The song's own widgets do not have to add up to more than a screen, so the
+  // page is given something to scroll: the widget area and the screens below
+  // the top bar run on for three viewports.
+  assert.ok(
+    await page.evaluate(`(function () {
+      var studio = document.querySelector('.studio');
+      if (!studio) return false;
+      var want = window.innerHeight * 3;
+      if (studio.getBoundingClientRect().height < want) studio.style.minHeight = want + 'px';
+      return true;
+    })()`),
+    "the page was given something to scroll",
+  );
+  await settledScrollHeight(page);
+
+  const before = await page.evaluate(TOP_BAR);
+  assert.ok(before, "the top bar is on the page");
+  assert.ok(before.height > 0, `the top bar has a height (${before.height})`);
+
+  const target = Math.round(before.innerHeight * 0.75);
+  await page.evaluate(`window.scrollTo(0, ${target}), true`);
+  assert.ok(
+    await waitFor(page, `window.scrollY >= ${target - 4}`, 10000),
+    `the page scrolled down to ${target}`,
+  );
+
+  const after = await page.evaluate(TOP_BAR);
+  assert.ok(
+    after.scrollY > before.scrollY + 100,
+    `the page moved (from ${before.scrollY} to ${after.scrollY})`,
+  );
+  assert.ok(
+    after.top >= 0 && after.top <= Math.max(before.top, 0) + 0.5,
+    `the top bar is still at the top of the viewport (was ${before.top}, is ${after.top} at scrollY ${after.scrollY})`,
+  );
+  assert.ok(
+    after.top >= 0 && after.bottom <= after.innerHeight + 0.5,
+    `and still inside it (from ${after.top} to ${after.bottom} of ${after.innerHeight})`,
+  );
+
+  // What the bar is for: a press still lands on it, not on whatever scrolled
+  // into that place.
+  const box = await settledBox(page, "[data-act=layout-menu]", 250, 10000);
+  assert.ok(box, "the Layout button is still on the page after the scroll");
+  assert.ok(
+    box.y > 0 && box.y < after.innerHeight,
+    `and a press on it lands on the bar (${box.y} of ${after.innerHeight})`,
+  );
+  assert.ok(box.w >= 44 && box.h >= 44, `Layout is a ${box.w} by ${box.h} target`);
 });
 
 // ---- phone: one widget under the tab strip -------------------------------

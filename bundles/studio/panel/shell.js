@@ -60,11 +60,12 @@
  *
  * The agent is in the tray in every default layout, so its unread mark is
  * carried by whichever control is on the screen: the frame's own header while
- * the frame is on the page, and otherwise the Layout menu's Agent row (the
- * agent's own entry, which brings it onto the page) and the agent's own phone
- * tab. A reply is unread whenever the agent is not on the screen — in the tray,
- * behind the side panels toggle, behind another phone tab or with another
- * screen open — and opening the agent clears the mark.
+ * the frame is on the page, and otherwise the Layout button and the Layout
+ * menu's Agent row it opens (the agent's own entry, which brings it onto the
+ * page) and the agent's own phone tab. A reply is unread whenever the agent is
+ * not on the screen — in the tray, behind the side panels toggle, behind
+ * another phone tab or with another screen open — and opening the agent clears
+ * the mark.
  *
  * The page's own header is empty once the four controls the shell moved out of
  * it have left, so it is taken out of the page until destroy puts the row back.
@@ -433,6 +434,19 @@ export const SHELL_SCRIPT = [
   "      menu.insertBefore(menuButton, menu.firstChild);",
   "      created.push(menuButton);",
   "    }",
+  "    // The Layout button carries a copy of the agent's unread mark: while the",
+  "    // agent is in the tray the menu is shut most of the time, and a mark the",
+  "    // operator has to open the menu to see is no mark at all. The dot is a",
+  "    // child of the button, so it is not a second control and the button's own",
+  "    // 44 px target is unchanged.",
+  "    var layoutDot = menuButton.querySelector('[data-role=unread-layout]');",
+  "    if (!layoutDot) {",
+  "      layoutDot = el('span', 'st-widget-dot st-layout-btn-dot');",
+  "      layoutDot.setAttribute('data-role', 'unread-layout');",
+  "      setHidden(layoutDot, true);",
+  "      menuButton.appendChild(layoutDot);",
+  "      created.push(layoutDot);",
+  "    }",
   "    popover = menu.querySelector('[data-role=layout-popover]');",
   "    if (!popover) {",
   "      popover = el('div', 'st-layout-pop');",
@@ -784,15 +798,20 @@ export const SHELL_SCRIPT = [
   "      syncUnread();",
   "    }",
   "",
-  "    // Where the unread mark goes: the agent's frame header, and the two",
-  "    // controls that are on the page while that frame is not — the Layout menu's",
-  "    // Agent row (the agent's only home while it is in the tray, behind the side",
-  "    // panels toggle, behind another phone tab or on another screen) and the",
-  "    // agent's own tab. A mark nobody can see is no mark at all.",
+  "    // Where the unread mark goes: the agent's frame header, and the controls",
+  "    // that are on the page while that frame is not — the Layout menu's Agent",
+  "    // row (the agent's only home while it is in the tray, behind the side",
+  "    // panels toggle, behind another phone tab or on another screen), the",
+  "    // Layout button that menu opens from (shut, it is the one of the two the",
+  "    // operator can see) and the agent's own tab. All of them follow the one",
+  "    // rule: the mark is up while the agent is not on the page. A mark nobody",
+  "    // can see is no mark at all.",
   "    function syncUnread() {",
   "      var unread = state.unread === true;",
+  "      var away = unread && !isShown('agent');",
   "      if (frames.agent && frames.agent.dot) setHidden(frames.agent.dot, !unread);",
-  "      setHidden(agentDot, !(unread && !isShown('agent')));",
+  "      setHidden(agentDot, !away);",
+  "      setHidden(layoutDot, !away);",
   "      var tabDot = null;",
   "      for (var i = 0; i < tabButtons.length; i += 1) {",
   "        if (tabButtons[i].id === 'agent') tabDot = tabButtons[i].dot;",
@@ -1750,11 +1769,15 @@ export const SHELL_CSS = [
   '  background: var(--st-accent, #E8A33D); border-color: var(--st-accent, #E8A33D);',
   '  color: #1B1E22;',
   '}',
-  '/* The unread dot on a tab and on the Layout menu row for the agent. The row',
-  '   and the tab are the two controls a phone or a hidden panel leaves on the',
-  '   page. */',
+  '/* The unread dot on a tab, on the Layout menu row for the agent, and on the',
+  '   Layout button itself. Those are the controls a phone or a hidden panel',
+  '   leaves on the page. */',
   '.studio .st-layout-dot,',
+  '.studio .st-layout-btn-dot,',
   '.studio .st-tab-dot { display: inline-block; margin-left: 6px; vertical-align: middle; }',
+  '/* The button dot keeps its own room while it is hidden, so a reply never',
+  '   changes the button width or moves a control beside it. */',
+  '.studio .st-top .st-layout-btn-dot[hidden] { display: inline-block; visibility: hidden; }',
   '.studio .st-widget {',
   '  display: flex; flex-direction: column; min-width: 0;',
   '  grid-column: span var(--st-span, 12);',

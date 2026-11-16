@@ -1392,6 +1392,38 @@ test("the agent's Layout row brings it onto the page, and carries the unread dot
   b.shell.destroy();
 });
 
+test("the Layout button wears the agent's unread mark while the agent is in the tray", async () => {
+  const b = await bootShell();
+  const button = b.page.querySelector("[data-act=layout-menu]");
+  const layoutButtonDot = () => button.querySelector("[data-role=unread-layout]");
+
+  assert.ok(layoutButtonDot(), "the Layout button carries a mark of its own");
+  assert.equal(layoutButtonDot().tagName.toLowerCase(), "span", "a dot, not a control");
+  assert.equal(button.children.length, 1, "it is the button's only child, so no control was added beside it");
+  assert.equal(layoutButtonDot().hasAttribute("hidden"), true, "nothing unread yet");
+
+  writeReply(b, "A two-track sketch at 120.");
+  await tick();
+
+  assert.equal(layoutButtonDot().hasAttribute("hidden"), false, "the agent is in the tray, so the button says a reply is waiting");
+  assert.equal(button.getAttribute("aria-expanded"), "false", "and the mark is on the menu's shut button");
+  assert.equal(agentRowDot(b.page).hasAttribute("hidden"), false, "beside the mark on the menu's own row");
+
+  // Bringing the agent onto the page, through the row that owns it, leaves the
+  // button without a mark: the frame says it in its own header now.
+  click(b.domWindow, button);
+  click(b.domWindow, agentRow(b.page));
+  assert.equal(
+    frame(b.page, "agent").hasAttribute("hidden"),
+    false,
+    "the agent is on the page",
+  );
+  assert.equal(layoutButtonDot().hasAttribute("hidden"), true, "so the Layout button carries no mark");
+  assert.equal(agentRowDot(b.page).hasAttribute("hidden"), true, "and neither does the row");
+
+  b.shell.destroy();
+});
+
 test("a reply behind another phone tab marks the agent's own tab", async () => {
   const b = await bootShell({ width: 500 });
   b.layout.saveLayout(b.storage, SONG, "compose", "phone", {

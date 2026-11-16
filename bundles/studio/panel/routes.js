@@ -93,6 +93,10 @@ const { isLocalPasswordSessionOn } = await appImport("servers/gateway/dashboard/
 const projectAcl = await appImport("servers/shared/project-acl.js");
 const { createHub } = await bImport("server/hub.js");
 const { createStudioWeb, ensureAgentToken, startLibraryGc } = await bImport("server/web.js");
+// The operator's default layout template and the owner check its writes sit
+// behind: pure wiring over an injected client, in its own module so it can be
+// built without booting a panel (`server/layout-template.js`).
+const { buildLayoutOwnerCheck, buildLayoutTemplate } = await bImport("server/layout-template.js");
 const { createLibraryStore } = await bImport("server/library-store.js");
 const { createTakeUploads } = await bImport("server/takes-upload.js");
 // The take storage adapter: the instance's object storage, narrowed to the
@@ -116,34 +120,11 @@ const s3 = await appImport("servers/storage/s3-client.js").catch(() => null);
 const db = createDbClient();
 const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
 
-/** The instance-local setting key the operator's default layout template lives under. */
-const LAYOUT_TEMPLATE_KEY = "studio.layout_template";
-
-/**
- * The operator's default layout template, as the web layer's three calls: the
- * stored TEXT (null when unset), a write of it, and a clear. A "local" write
- * lands in `dashboard_settings_overrides`, keyed by this instance, and is never
- * emitted to a peer — a song's layout is view state, and the default for it is
- * this instance's own preference. Null when the settings registry could not be
- * loaded at all, which is the 503 the template routes answer.
- *
- * Built from the registry as a value so the wiring is ONE function a test can
- * call with its own database (`buildLayoutTemplate`), rather than a test copy of
- * these three closures that could drift from the routes'.
- * @param {object|null} registry the dashboard's settings registry module
- * @param {object} db a crow.db client (the gateway's own, or a scratch one)
- * @returns {{read: Function, write: Function, clear: Function}|null}
- */
-export function buildLayoutTemplate(registry, db) {
-  if (!registry || typeof registry.readSetting !== "function") return null;
-  return {
-    read: () => registry.readSetting(db, LAYOUT_TEMPLATE_KEY),
-    write: (template) =>
-      registry.writeSetting(db, LAYOUT_TEMPLATE_KEY, String(template), { scope: "local" }),
-    clear: () => registry.deleteLocalSetting(db, LAYOUT_TEMPLATE_KEY),
-  };
-}
-
+// The operator's default layout template: one instance-local row
+// (`studio.layout_template`, written at scope "local", so it is never emitted
+// to a peer and never reaches another machine's default). Null when the
+// settings registry could not be loaded at all, which is the 503 the template
+// routes answer.
 const layoutTemplate = buildLayoutTemplate(settingsRegistry, db);
 
 // One hub per gateway process. The hub's broadcasts reach the web layer that
@@ -249,8 +230,7 @@ web = createStudioWeb({
   layoutTemplate,
   // ...and who may change it: the owner at this machine's own dashboard, the
   // same gate the Schedule panel's owner-only writes use, on this same client.
-  isOwner: (req) =>
-    typeof isLocalPasswordSessionOn === "function" ? isLocalPasswordSessionOn(db, req) : false,
+  isOwner: buildLayoutOwnerCheck(isLocalPasswordSessionOn, db),
   // The instrument catalog and the one stored copy of each file, shared with
   // the housekeeping pass below.
   libraryStore,
