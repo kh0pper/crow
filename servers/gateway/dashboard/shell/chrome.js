@@ -19,6 +19,7 @@ import { crowMarkSvg } from "../shared/crow-mark.js";
 import { getPanel as registryGetPanel } from "../panel-registry.js";
 import { needsYouLabel } from "../panels/board/needs-you-label.js";
 import { forYouEnabled } from "../../for-you/flag.js";
+import { mailEnabled } from "../../mail/flag.js";
 
 /**
  * For You's entry points are the OWNER's alone: the page 404s for every other session (an SSO
@@ -63,6 +64,9 @@ const MORE_ENTRIES = [
   // For You v1: only while CROW_FOR_YOU=1 AND this is the owner's own local password session
   // (the page 404s for every other session). `when` gets this render's { forYouOwner }.
   { id: "for-you", fallback: "For You", when: (opts = {}) => forYouEnabled() && ownerFor(opts.forYouOwner) },
+  // Crow Mail's reader: the same two gates (CROW_MAIL=1 and the owner's own local password
+  // session), because /dashboard/mail 404s for every other session.
+  { id: "mail", key: "nav.mail", fallback: "Mail", when: (opts = {}) => mailEnabled() && ownerFor(opts.forYouOwner) },
   { id: "messages", fallback: "Messages" },
   { id: "bot-builder", fallback: "Bots" },
   { id: "schedule", fallback: "Schedules" },

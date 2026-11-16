@@ -5649,6 +5649,99 @@ export const translations = {
   "settings.historySaved": { en: "Saved.", es: "Guardado." },
   "settings.historyNotOwner": { en: "Only the owner can change these settings.", es: "Solo el propietario puede cambiar estos ajustes." },
   "settings.historyBadDays": { en: "Nothing was saved: the Trash period must be a whole number of days from 1 to 365.", es: "No se guardó nada: el período de la papelera debe ser un número entero de días entre 1 y 365." },
+  // Crow Mail's reader (panels/mail.js, shell/chrome.js): the panel name, the page title and the
+  // empty states — an address held by another instance, and the way to a different account.
+  "nav.mail": { en: "Mail", es: "Correo" },
+  "mail.title": { en: "Mail", es: "Correo" },
+  "mail.emptyConnect": { en: "Connect your mail", es: "Conecta tu correo" },
+  "mail.elsewhereOn": { en: "Mail is set up on {instance}", es: "El correo está configurado en {instance}" },
+  "mail.elsewhereConnect": { en: "Connect a different account here", es: "Conecta otra cuenta aquí" },
+  // The reader's inbox: the account chips, the folder drawer, the row placeholders and the two
+  // navigation lines (one more page of rows, and a folder the server deleted).
+  "mail.chipAll": { en: "All", es: "Todos" },
+  "mail.folders": { en: "Folders", es: "Carpetas" },
+  "mail.unknownSender": { en: "Unknown sender", es: "Remitente desconocido" },
+  "mail.noSubject": { en: "(no subject)", es: "(sin asunto)" },
+  "mail.loadMore": { en: "Load more", es: "Cargar más" },
+  "mail.folderGone": { en: "That folder is no longer here.", es: "Esa carpeta ya no está aquí." },
+  // The reader's message view: one message, its conversation and its attachments. A message the store
+  // no longer has, the recipients line, the two image controls, and the sentence a message with no
+  // readable body shows instead of a frame slot.
+  "mail.notHere": { en: "This message is no longer here.", es: "Este mensaje ya no está aquí." },
+  "mail.to": { en: "to", es: "para" },
+  "mail.showImages": { en: "Show images", es: "Mostrar imágenes" },
+  "mail.alwaysShowFrom": { en: "Always show from {sender}", es: "Mostrar siempre los de {sender}" },
+  "mail.noBody": { en: "This message has no text to show.", es: "Este mensaje no tiene texto que mostrar." },
+  // The reader's state sentences and labels (operator-approved copy): an empty list, the way back
+  // from a folder the server deleted, the message view's own way back, the attachment heading and
+  // its download link, the Cc list's label, and the name a nameless attachment is shown under.
+  "mail.emptyFolder": { en: "No messages here.", es: "No hay mensajes aquí." },
+  "mail.backToInbox": { en: "Back to the inbox", es: "Volver a la bandeja de entrada" },
+  "mail.inbox": { en: "← Inbox", es: "← Recibidos" },
+  "mail.attachments": { en: "Attachments", es: "Archivos adjuntos" },
+  "mail.download": { en: "Download", es: "Descargar" },
+  "mail.cc": { en: "Cc", es: "Con copia" },
+  "mail.untitledAttachment": { en: "Untitled attachment", es: "Archivo adjunto sin nombre" },
+  // The reader's two server-side controls (Task 6): searching the accounts' servers for mail the local
+  // index does not hold, and continuing a folder's history below the lowest mail stored here. The
+  // search box's own label keeps the shipped "Search" (common.search) word for its submit button; its
+  // placeholder and the refresh control's word are the reader's own keys (mail.searchPlaceholder,
+  // mail.refresh).
+  "mail.searchOlderRemote": { en: "Search older mail on the server", es: "Buscar correo más antiguo en el servidor" },
+  "mail.lookFurtherBack": { en: "Look further back", es: "Buscar más atrás" },
+  // Crow Mail's account settings (Task 7): each account's status word, its own controls, the sentence
+  // the remove block sits behind, and the add-account form's heading and field labels. The helper
+  // line under "Local models only" is the plan's own sentence.
+  "mail.statusWorking": { en: "Working", es: "Funcionando" },
+  "mail.statusAuthFailed": { en: "Sign-in failed. Update the password.", es: "No se pudo iniciar sesión. Actualiza la contraseña." },
+  "mail.statusHeld": { en: "Connected on {instance}", es: "Conectado en {instance}" },
+  "mail.syncNow": { en: "Sync now", es: "Sincronizar ahora" },
+  "mail.localModelsOnly": { en: "Local models only", es: "Solo modelos locales" },
+  "mail.localModelsOnlyHelp": { en: "Applies when Crow drafts or summarises with a model.", es: "Se aplica cuando Crow redacta o resume con un modelo." },
+  "mail.updatePassword": { en: "Update password", es: "Actualizar la contraseña" },
+  "mail.removeAccount": { en: "Remove this account", es: "Eliminar esta cuenta" },
+  "mail.removeAccountConfirm": { en: "This deletes the mail Crow stored for it. Mail on the server is not touched.", es: "Esto borra el correo que Crow guardó para ella. El correo en el servidor no se toca." },
+  "mail.addAccount": { en: "Add an account", es: "Añadir una cuenta" },
+  "mail.fieldLabel": { en: "Label", es: "Etiqueta" },
+  "mail.fieldAddress": { en: "Address", es: "Dirección" },
+  "mail.fieldPassword": { en: "Password", es: "Contraseña" },
+  "mail.fieldImapHost": { en: "IMAP host", es: "Servidor IMAP" },
+  "mail.fieldImapPort": { en: "IMAP port", es: "Puerto IMAP" },
+  "mail.fieldSmtpHost": { en: "SMTP host", es: "Servidor SMTP" },
+  "mail.fieldSmtpPort": { en: "SMTP port", es: "Puerto SMTP" },
+  "mail.fieldSecurity": { en: "Security", es: "Seguridad" },
+  "mail.remove": { en: "Remove", es: "Quitar" },
+  // The reader's client script (Task 8): the one word its refresh status line shows, and the fixed
+  // sentence it shows for each API failure code. The English sentences are plan 1's mail error text
+  // verbatim (`servers/gateway/mail/errors.js`), with `changed_on_server` carrying the sentence its
+  // own route answers with.
+  "mail.refreshing": { en: "Refreshing", es: "Actualizando" },
+  "mail.error.auth_failed": { en: "Crow could not sign in to the mail server.", es: "Crow no pudo iniciar sesión en el servidor de correo." },
+  "mail.error.network": { en: "Crow could not reach the mail server.", es: "Crow no pudo conectar con el servidor de correo." },
+  "mail.error.tls": { en: "The mail server's certificate could not be trusted.", es: "No se pudo confiar en el certificado del servidor de correo." },
+  "mail.error.protocol": { en: "The mail server answered with something Crow could not use.", es: "El servidor de correo respondió algo que Crow no pudo usar." },
+  "mail.error.not_found": { en: "That item is not in this mailbox any more.", es: "Ese elemento ya no está en este buzón." },
+  "mail.error.bad_input": { en: "That mail setting is not valid.", es: "Ese ajuste de correo no es válido." },
+  "mail.error.claimed_elsewhere": { en: "This account is connected on another Crow instance.", es: "Esta cuenta está conectada en otra instancia de Crow." },
+  "mail.error.too_large": { en: "That message is too large for Crow to keep.", es: "Ese mensaje es demasiado grande para que Crow lo guarde." },
+  "mail.error.timeout": { en: "The mail server took too long to answer.", es: "El servidor de correo tardó demasiado en responder." },
+  "mail.error.changed": { en: "This message changed on the mail server. Crow is refreshing; try again.", es: "Este mensaje cambió en el servidor de correo. Crow está actualizando; inténtalo de nuevo." },
+  "mail.error.changed_on_server": { en: "This message changed on the mail server. Crow is refreshing; try again.", es: "Este mensaje cambió en el servidor de correo. Crow está actualizando; inténtalo de nuevo." },
+  // The Passwords page and Crow Mail (plan 2, Task 9): a mailbox password is listed under Crow's
+  // name, and deleting it from here is refused in favour of removing the account in Mail settings.
+  "passwords.mailRow": { en: "Crow Mail", es: "Correo de Crow" },
+  "passwords.deleteMailRow": { en: "This password belongs to a Mail account. Remove the account in Mail settings.", es: "Esta contraseña pertenece a una cuenta de Correo. Elimina la cuenta en los ajustes de Correo." },
+  // The reader's operator-approved copy (card 2026-11-16): the sentences a reloading older-mail or
+  // server-search action leaves behind, the count sentence for mail the server found (with its own
+  // singular), the refresh control's own word, the search box's placeholder, and the line a search
+  // with no hits shows in place of the empty-list sentence.
+  "mail.flashOlder": { en: "Loaded older mail.", es: "Se cargó correo más antiguo." },
+  "mail.flashStart": { en: "That's the oldest mail on the server.", es: "Ese es el correo más antiguo del servidor." },
+  "mail.flashRemote": { en: "Found {n} more on the server.", es: "Se encontraron {n} más en el servidor." },
+  "mail.flashRemoteOne": { en: "Found 1 more on the server.", es: "Se encontró 1 más en el servidor." },
+  "mail.refresh": { en: "Refresh", es: "Actualizar" },
+  "mail.searchPlaceholder": { en: "Search mail", es: "Buscar correo" },
+  "mail.noMatch": { en: "No messages match.", es: "Ningún mensaje coincide." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
