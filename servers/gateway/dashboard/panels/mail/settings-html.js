@@ -5,16 +5,18 @@
  * `/dashboard/mail/api`, never to this page.
  *
  * A card shows the owner's own label (editable) and the mailbox address, a status in words — working,
- * a sign-in that needs the password again, or an account another instance holds — the last sync time,
- * the sync control, the local-models switch with its helper line, the update-password control (only
- * for an account the server refused), the senders whose images show unasked, and remove behind its
- * own sentence. Nothing drawn here is a connection setting: `accountsOverview` carries no host, port
- * or username, and this module never asks the account store for one. The senders arrive from the
- * caller as `allow[accountId] = [sender, …]`, already lower-cased and sorted.
+ * a sign-in that needs the password again, or an account another instance holds — the last sync time
+ * under its own "Last checked" label, the sync control, the local-models switch with its helper line,
+ * the update-password control (only for an account the server refused), the senders whose images show
+ * unasked (under their own heading), and remove behind its own sentence. Nothing drawn here is a
+ * connection setting: `accountsOverview` carries no host, port or username, and this module never asks
+ * the account store for one. The senders arrive from the caller as `allow[accountId] = [sender, …]`,
+ * already lower-cased and sorted.
  *
  * Every value that came from the owner or from the wire (a label, an address, a sender) is escaped:
  * a label is text in the heading and an attribute in the rename field, and no value is ever used for
- * markup or an event handler. The page makes no request of its own and holds no script.
+ * markup or an event handler. The page makes no request of its own and holds no script; its header row
+ * carries the same settings gear every other view has.
  *
  * The add-account form's body is its own exported function so plan 5 replaces it whole (provider
  * presets, Gmail's app-password steps, the OAuth wizards) without touching the cards. Its fields are
@@ -24,11 +26,9 @@
  */
 import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
+import { anotherCrow, mailGearLink } from "./html.js";
 
 const e = escapeHtml;
-
-/** Plan 1's own fallback for a claim row that left its instance name blank. */
-const UNNAMED_INSTANCE = "another Crow";
 
 const LOCALES = { en: "en-US", es: "es-ES" };
 
@@ -42,15 +42,15 @@ function typedLabelOf(account) {
 }
 
 /** The account's heading: the owner's words, else the mailbox address (never the blank label itself). */
-function labelOf(account) {
+function labelOf(account, lang) {
   const address = typeof account?.address === "string" ? account.address.trim() : "";
-  return typedLabelOf(account) || address || UNNAMED_INSTANCE;
+  return typedLabelOf(account) || address || anotherCrow(lang);
 }
 
 /** The name of the instance an account is connected on, or the fallback when none is stored. */
-function heldNameOf(account) {
+function heldNameOf(account, lang) {
   const name = typeof account?.heldBy === "string" ? account.heldBy.trim() : "";
-  return name || UNNAMED_INSTANCE;
+  return name || anotherCrow(lang);
 }
 
 /** The status in words: working, a sign-in that needs the password, or held by another instance. */
@@ -58,7 +58,7 @@ function statusWord(account, lang) {
   const status = typeof account?.status === "string" ? account.status : "active";
   if (status === "auth_failed") return t("mail.statusAuthFailed", lang);
   if (status === "claimed_elsewhere") {
-    return fill(t("mail.statusHeld", lang), { instance: heldNameOf(account) });
+    return fill(t("mail.statusHeld", lang), { instance: heldNameOf(account, lang) });
   }
   return t("mail.statusWorking", lang);
 }
@@ -69,7 +69,10 @@ function statusHtml(account, lang) {
   return `<p class="ml-note ml-status" data-ml-status="${e(status)}">${e(statusWord(account, lang))}</p>`;
 }
 
-/** The last sync as a whole date and time in the instance's zone; nothing at all when there is none. */
+/**
+ * The last check as its own visible label and then a whole date and time in the instance's zone;
+ * nothing at all when there is none.
+ */
 function lastSyncHtml(value, { lang, tz }) {
   const ms = Number(value);
   if (value == null || !Number.isFinite(ms)) return "";
@@ -87,13 +90,13 @@ function lastSyncHtml(value, { lang, tz }) {
   } catch {
     return "";
   }
-  return `<p class="ml-note ml-synced"><time datetime="${e(new Date(ms).toISOString())}">${e(text)}</time></p>`;
+  return `<p class="ml-note ml-synced">${e(t("mail.lastChecked", lang))} <time datetime="${e(new Date(ms).toISOString())}">${e(text)}</time></p>`;
 }
 
 /**
- * The senders whose remote images show unasked on this account, each with its own remove control.
- * The list is context-free by design: no approved sentence introduces it, so it is only drawn when
- * there is something to remove.
+ * The senders whose remote images show unasked on this account, under their own heading, each with its
+ * own remove control. The list is context-free without that heading, so the whole block — heading and
+ * list — is drawn only when there is something to remove.
  */
 function allowListHtml(accountId, senders, lang) {
   const list = (Array.isArray(senders) ? senders : [])
@@ -103,7 +106,8 @@ function allowListHtml(accountId, senders, lang) {
     + `<span class="ml-allow-sender">${e(sender)}</span>`
     + `<button class="ml-btn" type="button" data-ml-remove-sender data-account="${e(accountId)}" data-sender="${e(sender)}">${e(t("mail.remove", lang))}</button>`
     + "</li>").join("");
-  return `<ul class="ml-allow" data-ml-allow-list>${items}</ul>`;
+  return `<h3 class="ml-allow-title">${e(t("mail.allowedSendersHeading", lang))}</h3>`
+    + `<ul class="ml-allow" data-ml-allow-list>${items}</ul>`;
 }
 
 /**
@@ -133,7 +137,7 @@ function removeAccountHtml(accountId, lang) {
 /** One account's card: its label, address, status and every control the owner may use on it. */
 function accountCard(account, { senders = [], lang, tz }) {
   const id = String(account?.id ?? "");
-  const label = labelOf(account);
+  const label = labelOf(account, lang);
   const typedLabel = typedLabelOf(account);
   const address = typeof account?.address === "string" ? account.address : "";
   const checked = account?.localModelsOnly ? " checked" : "";
@@ -213,14 +217,17 @@ export function settingsHtml({
   const held = (Array.isArray(elsewhere) ? elsewhere : []).map((entry) => {
     const name = typeof entry?.instanceName === "string" && entry.instanceName.trim() !== ""
       ? entry.instanceName.trim()
-      : UNNAMED_INSTANCE;
+      : anotherCrow(lang);
     return `<p class="ml-note">${e(fill(t("mail.elsewhereOn", lang), { instance: name }))}</p>`;
   }).join("");
   const cards = (Array.isArray(accounts) ? accounts : [])
     .map((account) => accountCard(account, { senders: allow?.[account?.id] ?? [], lang, tz }))
     .join("");
   return `<div class="ml" data-ml>
-    <h1 class="ml-title">${e(t("mail.title", lang))}</h1>
+    <div class="ml-page-head">
+      <h1 class="ml-title">${e(t("mail.title", lang))}</h1>
+      ${mailGearLink(lang)}
+    </div>
     <div class="ml-settings" data-ml-settings>${held}${cards}${addAccountForm(lang)}</div>
   </div>`;
 }

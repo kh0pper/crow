@@ -36,11 +36,13 @@ import {
   serviceSecretsFor,
   deleteServiceSecrets,
   KeychainKeyMissingError,
+  MAIL_BUNDLE,
 } from "../keychain/store.js";
 import { loadKeychainKey } from "../keychain/key.js";
 
-/** The keychain bundle id the mail rows carry (there is no installed bundle behind it). */
-export const MAIL_BUNDLE_ID = "crow-mail";
+/** The keychain bundle id the mail rows carry (there is no installed bundle behind it): the keychain
+ *  store's own MAIL_BUNDLE, a reserved id no add-on path may write, revive or remove. */
+export const MAIL_BUNDLE_ID = MAIL_BUNDLE;
 
 /** The only env keys a mail account row may hold. Nothing else is ever written or served. */
 export const MAIL_SECRET_KEYS = Object.freeze(["MAIL_PASSWORD", "MAIL_REFRESH_TOKEN"]);

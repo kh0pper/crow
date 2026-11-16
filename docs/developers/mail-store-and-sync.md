@@ -161,9 +161,10 @@ against the new adapter with the provider's own fake, and skip nothing.
   once and stops retrying until the owner asks for a sync.
 - **Connections per account.** Three long-lived connections (one read connection — the sync
   worker's — and up to two IDLE connections, one per watched folder: Inbox and Sent) plus a
-  short-lived action connection — an open message, a mark-read, an attachment fetch — which
-  `withAdapter` keeps open for up to 30 seconds so a burst costs one login. `watch` refuses a third
-  folder rather than opening another long-lived connection.
+  short-lived action connection — a remote search, a load-older fetch or an attachment fetch
+  today — which `withAdapter` keeps open for up to 30 seconds so a burst costs one login; the
+  message actions of the next part (mark read/unread, archive, delete, move) will use that same
+  connection. `watch` refuses a third folder rather than opening another long-lived connection.
 - **Deleting an account.** `stopAccount(accountId)` retires the worker, its timers and its connections,
   but it does not by itself cancel work already running through `withAdapter` (a backfill page, a
   remote search): that work stops on the `cancelled` flag it is handed, and the flag reads the
@@ -350,17 +351,19 @@ stored per view.
 
 ### Connections the reader borrows
 
-The reader's attachment and action paths never open an adapter of their own and never reuse the sync
-worker's. A download and any action go through `supervisor.withAdapter(accountId, fn)` for the one call
-at a time that account allows, refused outright for a `claimed_elsewhere` or `auth_failed` account. On
-a success the adapter stays open for up to 30 seconds, so a burst — open a message, mark it read,
-archive it — costs one login rather than three; a failure closes it at once. That is a fourth
-connection on top of this module's budget of three (the sync worker's read connection and up to two
-IDLE connections, for Inbox and Sent), and every imapflow call inside it takes the mailbox lock. The
-download route re-fetches the message from the server by UID under that account's folder and compares
-its Message-ID, lower-cased From and Date with the stored row before serving a byte; a mismatch is 409
-`changed_on_server` and a requested full sync. An empty Buffer is the adapter's way of saying the
-message is over `MAX_RAW_BYTES`, and it answers 413 with the "about 18 MB" sentence.
+The reader's remote-search, load-older and attachment paths never open an adapter of their own and
+never reuse the sync worker's. A search, a load-older fetch or a download goes through
+`supervisor.withAdapter(accountId, fn)` for the one call at a time that account allows, refused
+outright for a `claimed_elsewhere` or `auth_failed` account. On a success the adapter stays open
+for up to 30 seconds; the message actions of the next part (open a message, mark it read, archive it)
+will go through the same call, so a burst of them costs one login rather than three, and a failure
+closes it at once. That is a fourth connection on top of this module's budget of three (the
+sync worker's read connection and up to two IDLE connections, for Inbox and Sent), and every imapflow
+call inside it takes the mailbox lock. The download route re-fetches the message from the server by UID
+under that account's folder and compares its Message-ID, lower-cased From and Date with the stored row
+before serving a byte; a mismatch is 409 `changed_on_server` and a requested full sync. An empty Buffer
+is the adapter's way of saying the message is over `MAX_RAW_BYTES`, and it answers 413 with the "about
+18 MB" sentence.
 
 The account page's password update is the one path that dials on its own: `probeAccount` signs in with
 the password just typed (through the injected adapter factory, holding no stored secret) before

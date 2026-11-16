@@ -15,7 +15,12 @@
  *     error code, never the response's own message;
  *   - the settings page's rename, local-models switch, password, add-account and remove-sender
  *     controls send their own verbs; removing an account keeps its sentence hidden until the first
- *     click, and sends only on a later click at least 500 ms after that.
+ *     click, and sends only on a later click at least 500 ms after that;
+ *   - the image banner shows the sentence the server drew for the count of hidden images (the
+ *     singular for exactly one), and a failure whose code has no sentence of its own shows the
+ *     generic one, while the add-account form shows the duplicate-address sentence for a 409;
+ *   - every view carries exactly one settings gear, in the refresh row where there is one and in
+ *     the page header row otherwise.
  * Static pins: no backtick, no dollar-brace, no markup sink, every request URL under the mail API,
  * the doubled-backslash cookie regex, and the two overscroll rules that stop Chrome's own refresh.
  */
@@ -914,7 +919,8 @@ test("every sentence the client can show is translated, and the error codes have
   const strings = errorStrings("en");
   const spanish = errorStrings("es");
   for (const code of ["auth_failed", "network", "tls", "protocol", "not_found", "bad_input",
-    "claimed_elsewhere", "too_large", "timeout", "changed", "changed_on_server"]) {
+    "claimed_elsewhere", "too_large", "timeout", "changed", "changed_on_server",
+    "no_archive_folder", "no_trash_folder", "duplicate_address", "generic"]) {
     assert.ok(strings[code], `en has a sentence for ${code}`);
     assert.ok(spanish[code], `es has a sentence for ${code}`);
     assert.notEqual(strings[code], spanish[code], `${code} is translated`);
@@ -923,4 +929,232 @@ test("every sentence the client can show is translated, and the error codes have
   assert.notEqual(translations["mail.refreshing"].es, translations["mail.refreshing"].en);
   const refresh = boot(inboxPage()).$("[data-ml-refresh]");
   assert.equal(refresh.getAttribute("data-ml-refreshing"), "Refreshing");
+});
+
+/* --------------------------------------------------------- the approved copy */
+
+test("the approved sentences read exactly as given, and each has its own Spanish", () => {
+  const COPY = {
+    "mail.unread": "Unread",
+    "mail.allowedSendersHeading": "Senders whose images load",
+    "mail.lastChecked": "Last checked",
+    "mail.imagesHidden": "{n} images hidden.",
+    "mail.imageHiddenOne": "1 image hidden.",
+    "mail.settings": "Settings",
+    "mail.anotherCrow": "another Crow",
+    "mail.error.no_archive_folder": "Crow couldn't find this account's Archive folder.",
+    "mail.error.no_trash_folder": "Crow couldn't find this account's Trash folder.",
+    "mail.error.duplicate_address": "That address is already set up in Crow.",
+    "mail.error.generic": "Something went wrong. Try again.",
+  };
+  for (const [key, en] of Object.entries(COPY)) {
+    assert.equal(translations[key]?.en, en, key);
+    assert.ok(translations[key]?.es, `${key} has a Spanish sentence`);
+    assert.notEqual(translations[key].es, en, `${key} is translated`);
+  }
+});
+
+test("a nameless instance is called another Crow, in the page's language", () => {
+  const listing = (lang) => renderMailPage({ view: "inbox", accounts: [], elsewhere: [{ instanceName: "  " }], lang });
+  assert.match(listing("en"), /<p class="ml-note">Mail is set up on another Crow<\/p>/);
+  assert.match(listing("es"), /<p class="ml-note">El correo está configurado en otro Crow<\/p>/);
+  assert.match(settingsHtml({ accounts: [], elsewhere: [{ instanceName: "" }], lang: "es" }), /otro Crow/);
+  // The account-label fallback keeps its behaviour: the label, then the fallback name, translated.
+  const chips = (lang) => renderMailPage({
+    view: "inbox",
+    accounts: [{ ...ACC, label: "" }],
+    folders: [],
+    page: { items: [], nextCursor: null },
+    lang,
+  });
+  assert.match(chips("en"), /class="ml-chip" href="[^"]*"[^>]*>another Crow<\/a>/);
+  assert.match(chips("es"), /class="ml-chip" href="[^"]*"[^>]*>otro Crow<\/a>/);
+  // And the status word of a held account with no instance name stored.
+  const held = settingsHtml({ accounts: [{ ...ACC, status: "claimed_elsewhere" }], lang: "es" });
+  assert.match(held, /Conectado en otro Crow/);
+});
+
+/* ------------------------------------------------------------------- the gear */
+
+const GEAR = '<a class="ml-btn ml-gear" href="/dashboard/mail?view=settings" aria-label="Settings">';
+
+/** Every view the reader can draw, each with the markup the panel serves for it. */
+function everyView() {
+  return {
+    "the connect card": renderMailPage({ view: "inbox", accounts: [], elsewhere: [], lang: "en" }),
+    "the elsewhere card": renderMailPage({ view: "inbox", accounts: [], elsewhere: [{ instanceName: "Studio" }], lang: "en" }),
+    "the held-only card": renderMailPage({
+      view: "inbox", accounts: [{ ...ACC, status: "claimed_elsewhere", heldBy: "Studio" }], lang: "en",
+    }),
+    "the inbox": inboxPage(),
+    "the search view": renderMailPage({
+      view: "search", accounts: [ACC], lang: "en", q: "garden", acct: "all", hits: [summaryRow()], now: T0, tz: "UTC",
+    }),
+    "the message view": messagePage(),
+    "the not-here page": renderMailPage({ view: "message", accounts: [ACC], lang: "en", missing: true }),
+    "the settings view": settingsHtml({ accounts: [ACC], lang: "en", tz: "UTC" }),
+  };
+}
+
+test("every view carries exactly one settings gear, named Settings and pointing at the account page", () => {
+  for (const [name, markup] of Object.entries(everyView())) {
+    const gears = markup.match(/class="ml-btn ml-gear"/g) || [];
+    assert.equal(gears.length, 1, `${name}: one gear`);
+    assert.ok(markup.includes(GEAR), `${name}: the gear carries its own name and target`);
+    const tag = /<a class="ml-btn ml-gear"[\s\S]*?<\/a>/.exec(markup)[0];
+    assert.match(tag, /aria-hidden="true"/, `${name}: the glyph is hidden from assistive technology`);
+    assert.match(tag, /<svg class="ml-gear-icon"/, `${name}: an inline glyph, no icon font`);
+    assert.equal((tag.match(/<svg/g) || []).length, 1, name);
+  }
+});
+
+test("the gear sits after Refresh on the inbox and in the page header row on every other view", () => {
+  const inbox = inboxPage();
+  assert.match(
+    inbox,
+    /data-ml-refresh[^>]*>Refresh<\/button><a class="ml-btn ml-gear" href="\/dashboard\/mail\?view=settings" aria-label="Settings">/,
+    "the inbox puts it right after the refresh control",
+  );
+  for (const name of ["the search view", "the message view", "the not-here page", "the connect card", "the elsewhere card", "the held-only card"]) {
+    const markup = everyView()[name];
+    assert.doesNotMatch(markup, /data-ml-refresh/, `${name}: no refresh row here`);
+    assert.match(
+      markup,
+      /<div class="ml-page-head">\s*<h1 class="ml-title">[^<]*<\/h1>\s*<a class="ml-btn ml-gear"/,
+      `${name}: the gear rides the page header row`,
+    );
+  }
+  assert.match(
+    everyView()["the settings view"],
+    /<div class="ml-page-head">\s*<h1 class="ml-title">[^<]*<\/h1>\s*<a class="ml-btn ml-gear"/,
+  );
+});
+
+test("the gear is a 44px square target in the stylesheet", () => {
+  const css = mailCss({ inbox: true, message: true, settings: true });
+  const rule = /\.ml-gear \{([^}]*)\}/.exec(css);
+  assert.ok(rule, "the gear has its own rule");
+  assert.match(rule[1], /min-width: 44px/);
+  assert.match(rule[1], /min-height: 44px/);
+  assert.match(rule[1], /align-items: center/);
+  assert.match(rule[1], /justify-content: center/);
+});
+
+/* ------------------------------------------------------- the hidden-image count */
+
+test("the image banner shows N images hidden. and 1 image hidden. from the sentence the server drew", () => {
+  const r = boot(messagePage());
+  const record = r.frames[0];
+  const section = r.$("[data-ml-msg][open]");
+  const banner = section.querySelector("[data-ml-img-banner]");
+  const nonce = record.node.getAttribute("data-ml-nonce");
+  assert.equal(banner.getAttribute("data-ml-blocked-many"), "{n} images hidden.");
+  assert.equal(banner.getAttribute("data-ml-blocked-one"), "1 image hidden.");
+
+  r.send(record, { t: "crow-mail-frame", nonce, height: 500, blocked: 3 });
+  let note = banner.querySelector("[data-ml-blocked-note]");
+  assert.ok(note, "the sentence is in the banner");
+  assert.equal(String(note.tagName).toLowerCase(), "p");
+  assert.equal(note.getAttribute("role"), "status");
+  assert.match(note.getAttribute("class"), /ml-note/);
+  assert.equal(note.textContent, "3 images hidden.");
+
+  r.send(record, { t: "crow-mail-frame", nonce, height: 500, blocked: 1 });
+  note = banner.querySelector("[data-ml-blocked-note]");
+  assert.equal(note.textContent, "1 image hidden.", "the singular for exactly one");
+
+  r.send(record, { t: "crow-mail-frame", nonce, height: 500, blocked: 0 });
+  assert.equal(banner.querySelector("[data-ml-blocked-note]"), null, "cleared with the count");
+  assert.ok(banner.hasAttribute("hidden"));
+});
+
+test("a report the listener refuses never reaches the sentence", () => {
+  const r = boot(messagePage());
+  const record = r.frames[0];
+  const section = r.$("[data-ml-msg][open]");
+  const banner = section.querySelector("[data-ml-img-banner]");
+  const nonce = record.node.getAttribute("data-ml-nonce");
+  const refused = [
+    { blocked: "3 images hidden." },
+    { blocked: "<b>x</b>" },
+    { blocked: -2 },
+    { blocked: 2.5 },
+    { blocked: Number.NaN },
+    { blocked: null },
+    { nonce: "wrongnonce000000", blocked: 3 },
+  ];
+  for (const extra of refused) {
+    r.send(record, { t: "crow-mail-frame", nonce, height: 500, blocked: 2, ...extra });
+    assert.equal(banner.querySelector("[data-ml-blocked-note]"), null, JSON.stringify(extra));
+    assert.ok(banner.hasAttribute("hidden"), JSON.stringify(extra));
+  }
+  // The count is the integer alone: no text from anywhere rides into the sentence.
+  r.send(record, { t: "crow-mail-frame", nonce, height: 500, blocked: 4 });
+  assert.equal(banner.querySelector("[data-ml-blocked-note]").textContent, "4 images hidden.");
+});
+
+/* ------------------------------------------------------------ the generic fallback */
+
+test("a code with no sentence of its own shows the generic one, and a code with one keeps it", async () => {
+  const strings = errorStrings();
+  assert.equal(strings.generic, "Something went wrong. Try again.");
+
+  const say = async (error) => {
+    const r = boot(settingsPage(), { fetchImpl: () => jsonResponse(400, { error, message: "RAW SERVER TEXT" }) });
+    const field = r.$("[data-ml-rename]");
+    field.value = "Home";
+    r.change(field);
+    await r.settle();
+    const line = r.$("[data-ml-account] [data-ml-status-line]");
+    assert.ok(line, error);
+    assert.equal(line.textContent.includes("RAW"), false, `${error} never shows the response's message`);
+    return line.textContent;
+  };
+
+  for (const code of ["owner_only", "busy", "unavailable", "keychain_key_missing", "internal", "unknown"]) {
+    assert.equal(await say(code), strings.generic, code);
+  }
+  assert.equal(await say("no_archive_folder"), strings.no_archive_folder, "its own sentence wins");
+  assert.equal(await say("no_trash_folder"), strings.no_trash_folder);
+  assert.equal(await say("AUTH_FAILED"), strings.auth_failed);
+
+  // A failure with no answer at all is still the network sentence.
+  const offline = boot(settingsPage(), { fetchImpl: () => Promise.reject(new Error("offline")) });
+  const field = offline.$("[data-ml-rename]");
+  field.value = "Home";
+  offline.change(field);
+  await offline.settle();
+  assert.equal(offline.$("[data-ml-account] [data-ml-status-line]").textContent, strings.network);
+});
+
+test("the add-account form shows the duplicate-address sentence for a 409 and stays put", async () => {
+  const strings = errorStrings();
+  assert.equal(strings.duplicate_address, "That address is already set up in Crow.");
+  const r = boot(settingsPage(), {
+    fetchImpl: () => jsonResponse(409, { error: "duplicate_address", message: "RAW SERVER TEXT" }),
+  });
+  const form = r.$("[data-ml-add-account]");
+  form.querySelector('[name="password"]').value = "app-password";
+  r.submit(form);
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.equal(r.calls[0].url, "/dashboard/mail/api/accounts");
+  const line = form.querySelector("[data-ml-status-line]");
+  assert.ok(line, "the form carries the sentence");
+  assert.equal(line.getAttribute("role"), "status");
+  assert.equal(line.textContent, "That address is already set up in Crow.");
+  assert.equal(line.textContent.includes("RAW"), false);
+  assert.equal(form.querySelector('[name="password"]').value, "", "the secret is cleared whatever the answer");
+  assert.deepEqual(r.visits, [], "a refused address does not reload");
+});
+
+test("static: the codes ride the hidden element and errorText falls back to the generic sentence", () => {
+  const box = parseHTML(`<body>${mailErrorStrings("en")}</body>`).document.querySelector("[data-ml-errs]");
+  for (const code of ["duplicate_address", "generic", "no_archive_folder", "no_trash_folder"]) {
+    assert.ok(box.hasAttribute(`data-ml-err-${code}`), code);
+  }
+  const source = readFileSync(CLIENT_FILE, "utf8");
+  const body = source.slice(source.indexOf("export function mailClientJs"));
+  assert.ok(body.includes("data-ml-err-generic"), "the fallback reads the generic sentence");
+  assert.match(body, /if \(!text\) \{ text = box\.getAttribute\('data-ml-err-generic'\); \}/);
 });

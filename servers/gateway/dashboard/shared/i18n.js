@@ -5742,6 +5742,23 @@ export const translations = {
   "mail.refresh": { en: "Refresh", es: "Actualizar" },
   "mail.searchPlaceholder": { en: "Search mail", es: "Buscar correo" },
   "mail.noMatch": { en: "No messages match.", es: "Ningún mensaje coincide." },
+  // The reader's approved follow-up copy: the unread dot's accessible name, the heading over the
+  // senders whose images load, the label before the last sync time, the sentence the image banner
+  // shows for a count of blocked images (with its own singular), the settings icon's accessible name,
+  // the name a nameless instance is called, and the three sentences a refused action can show on top
+  // of the ones above: a mailbox with no Archive or Trash folder, an address already set up, and the
+  // fallback every code without a sentence of its own falls back to.
+  "mail.unread": { en: "Unread", es: "Sin leer" },
+  "mail.allowedSendersHeading": { en: "Senders whose images load", es: "Remitentes cuyas imágenes se cargan" },
+  "mail.lastChecked": { en: "Last checked", es: "Última comprobación" },
+  "mail.imagesHidden": { en: "{n} images hidden.", es: "{n} imágenes ocultas." },
+  "mail.imageHiddenOne": { en: "1 image hidden.", es: "1 imagen oculta." },
+  "mail.settings": { en: "Settings", es: "Ajustes" },
+  "mail.anotherCrow": { en: "another Crow", es: "otro Crow" },
+  "mail.error.no_archive_folder": { en: "Crow couldn't find this account's Archive folder.", es: "Crow no pudo encontrar la carpeta Archivo de esta cuenta." },
+  "mail.error.no_trash_folder": { en: "Crow couldn't find this account's Trash folder.", es: "Crow no pudo encontrar la carpeta Papelera de esta cuenta." },
+  "mail.error.duplicate_address": { en: "That address is already set up in Crow.", es: "Esa dirección ya está configurada en Crow." },
+  "mail.error.generic": { en: "Something went wrong. Try again.", es: "Algo salió mal. Inténtalo de nuevo." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
