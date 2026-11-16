@@ -682,6 +682,34 @@ test("every row and chip has min-height 44px in the stylesheet", async () => {
   });
 });
 
+test("the inbox's list flash resolves a moved folder to the name the drawer shows, and is announced", async () => {
+  let ids;
+  await withDb(async (db) => {
+    const { a, aInbox, aLabel } = await seed(db);
+    ids = { aInbox, aLabel };
+    await deliver(db, { accountId: a.id, folderId: aInbox, subject: "Moved mail" });
+  });
+  await withFlag(async () => {
+    const r = await get("/dashboard/mail?flash=moved:" + ids.aLabel);
+    assert.equal(r.status, 200);
+    assert.match(
+      r.body,
+      new RegExp(`<p class="ml-note ml-flash" role="status" aria-live="polite" data-ml-flash="moved" data-folder="${ids.aLabel}">Moved to Label\\.<\\/p>`),
+    );
+    assert.match(
+      r.body,
+      /<a class="ml-folder"[^>]*>Label<span class="ml-count">/,
+      "the drawer shows the same label",
+    );
+
+    const archived = await get("/dashboard/mail?flash=archived");
+    assert.match(
+      archived.body,
+      /<p class="ml-note ml-flash" role="status" aria-live="polite" data-ml-flash="archived">Archived\.<\/p>/,
+    );
+  });
+});
+
 test("no row shows a body", async () => {
   await withDb(async (db) => {
     const { a, aInbox } = await seed(db);

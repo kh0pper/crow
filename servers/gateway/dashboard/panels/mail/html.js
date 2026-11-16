@@ -23,9 +23,11 @@
  * opaque-origin iframe (the body itself is served by the frame route and never written into this
  * page), its attachments, and — after the conversation — the reply slot a later plan fills. A
  * message with nothing to show says so in one sentence instead of a slot. The header carries the
- * action bar for the opened row (Part C): Mark unread, Archive and Delete when this account has
- * somewhere to send the message, and the move select — each control naming that row, so an action
- * taken from a label folder acts on that folder's copy.
+ * action bar for the opened row (Part C): the Mark read / Mark unread pair (one of the two drawn
+ * hidden), Archive and Delete when this account has somewhere to send the message, and the move
+ * select — each control naming that row, so an action taken from a label folder acts on that folder's
+ * copy. Archive, Delete and Move leave a flash on the list they return to, and Mark unread a sentence
+ * in the bar; both come from the approved copy below.
  *
  * The list's own controls (Task 6) live above it: the search box, which is a plain GET form so it
  * works with no client script, the control that refreshes the accounts (also the pull-to-refresh
@@ -202,14 +204,26 @@ function listHeader({ accounts, acct, q = "", withRefresh = false, lang }) {
 }
 
 /**
- * What a reloading action leaves behind: the server says which action ran and how many rows it
- * brought back (`older:<n>`, `remote:<n>`), or that a folder reached its start (`start`). Each kind
- * has its own approved sentence; the older-mail one does not show the count, and the remote one has a
- * singular for exactly one. A kind this page does not know draws nothing at all.
+ * What a reloading or returning action leaves behind: the server says which action ran and how many
+ * rows it brought back (`older:<n>`, `remote:<n>`), that a folder reached its start (`start`), or that
+ * a message was archived, deleted or moved (`archived`, `deleted`, `moved:<folderId>`). Each kind has
+ * its own approved sentence; the older-mail one does not show the count, and the remote one has a
+ * singular for exactly one. A move names a folder by id only, so its sentence is built from the folder
+ * list the view receives: an id that list does not hold draws nothing at all, never a generic
+ * sentence, and the folder's own name is escaped like every other value from outside.
  */
-function flashSentence(flash, lang) {
+function flashSentence(flash, lang, folders = []) {
   if (flash?.kind === "start") return t("mail.flashStart", lang);
   if (flash?.kind === "older") return t("mail.flashOlder", lang);
+  if (flash?.kind === "archived") return t("mail.doneArchived", lang);
+  if (flash?.kind === "deleted") return t("mail.doneDeleted", lang);
+  if (flash?.kind === "moved") {
+    const wanted = Number(flash.folderId);
+    const list = Array.isArray(folders) ? folders : [];
+    const folder = list.find((entry) => Number(entry?.id) === wanted);
+    if (!folder) return null;
+    return fill(t("mail.doneMoved", lang), { folder: folderLabel(folder) });
+  }
   if (flash?.kind === "remote") {
     const count = Number.isInteger(flash.count) ? flash.count : 0;
     return count === 1
@@ -219,12 +233,17 @@ function flashSentence(flash, lang) {
   return null;
 }
 
-function flashHtml(flash, lang) {
+/**
+ * The flash line: one sentence, announced to assistive technology as it appears. A reloaded count
+ * rides the tag as an integer, and a move also carries the folder id it names (never the name).
+ */
+function flashHtml(flash, lang, folders = []) {
   if (!flash || typeof flash.kind !== "string") return "";
-  const sentence = flashSentence(flash, lang);
+  const sentence = flashSentence(flash, lang, folders);
   if (sentence === null) return "";
   const count = Number.isInteger(flash.count) ? ` data-count="${Number(flash.count)}"` : "";
-  return `<p class="ml-note ml-flash" role="status" data-ml-flash="${e(flash.kind)}"${count}>${e(sentence)}</p>`;
+  const folder = flash.kind === "moved" ? ` data-folder="${Number(flash.folderId)}"` : "";
+  return `<p class="ml-note ml-flash" role="status" aria-live="polite" data-ml-flash="${e(flash.kind)}"${count}${folder}>${e(sentence)}</p>`;
 }
 
 /** The folders "Look further back" asks for: the viewed folder, or the inbox of each account shown. */
@@ -432,7 +451,7 @@ export function inboxViewHtml({
   tz = undefined,
   flash = null,
 } = {}) {
-  const head = flashHtml(flash, lang)
+  const head = flashHtml(flash, lang, folders)
     + listHeader({ accounts, acct, withRefresh: true, lang })
     + chips({ accounts, acct, lang })
     + folderDrawer({ accounts, folders, folderId, lang });
@@ -465,10 +484,11 @@ export function inboxViewHtml({
  * heading that repeats them, the local index's hits as the list's own rows (plan 1 dedupes them, so a
  * message in two label folders is one row), and beneath them the control that asks the accounts'
  * servers for mail the local index does not hold yet. The client (Task 8) sends the server search and
- * reloads with a flash, so the answer survives the reload.
+ * reloads with a flash, so the answer survives the reload. `folders` is only there for a flash that
+ * names a folder (a move): the view draws no folders of its own.
  *
  * @param {{
- *   accounts?: object[], hits?: object[], acct?: string, q?: string, lang?: string,
+ *   accounts?: object[], hits?: object[], folders?: object[], acct?: string, q?: string, lang?: string,
  *   now?: number, tz?: string, flash?: object|null
  * }} options
  * @returns {string}
@@ -476,6 +496,7 @@ export function inboxViewHtml({
 export function searchViewHtml({
   accounts = [],
   hits = [],
+  folders = [],
   acct = ALL_ACCOUNTS,
   q = "",
   lang = "en",
@@ -483,7 +504,7 @@ export function searchViewHtml({
   tz = undefined,
   flash = null,
 } = {}) {
-  const head = flashHtml(flash, lang) + listHeader({ accounts, acct, q, lang });
+  const head = flashHtml(flash, lang, folders) + listHeader({ accounts, acct, q, lang });
   const heading = q === "" ? "" : `<h2 class="ml-search-heading">${e(q)}</h2>`;
   const rows = (Array.isArray(hits) ? hits : []).map((item) => row(item, { now, tz, lang })).join("");
   const list = rows || `<p class="ml-note">${e(t("mail.noMatch", lang))}</p>`;
@@ -535,14 +556,18 @@ function archivedFolderIds(folders) {
 }
 
 /** One action control: its verb, the row it acts on, and the one word it shows. */
-function actionButton(action, label, rowId) {
-  return `<button class="ml-btn" type="button" data-ml-action="${e(action)}" data-row="${Number(rowId)}">${e(label)}</button>`;
+function actionButton(action, label, rowId, { hidden = false } = {}) {
+  const off = hidden ? " hidden" : "";
+  return `<button class="ml-btn" type="button"${off} data-ml-action="${e(action)}" data-row="${Number(rowId)}">${e(label)}</button>`;
 }
 
 /**
- * The action bar the message header carries: Mark unread for a message already read, Archive and
- * Delete only when this account has a folder to send the message to and the message is not there
- * already, and Move — a select of the account's other folders and the button that sends it.
+ * The action bar the message header carries: both read controls — Mark read for an unread message,
+ * Mark unread for a read one, both always drawn and one of them hidden so the client can swap them —
+ * Archive and Delete only when this account has a folder to send the message to and the message is
+ * not there already, and Move — a select of the account's other folders and the button that sends it.
+ * The bar also carries the wordless-then-approved sentence Mark unread shows once the server agrees
+ * (`data-ml-done-unread`), because the client builds no sentence of its own.
  *
  * Every control names the opened row (`data-row`), the row the link's hint selected, so an action
  * taken from a label folder acts on that folder's copy. The virtual views plan 1 never syncs are not
@@ -556,8 +581,11 @@ function actionBar({ message, folders, lang }) {
     .filter((folder) => folder && Number.isInteger(Number(folder.id)));
   const current = Number(message.folderId);
   const trash = trashFolder(list);
-  const controls = [];
-  if (message.isRead) controls.push(actionButton("unread", t("mail.markUnread", lang), rowId));
+  const unread = !message.isRead;
+  const controls = [
+    actionButton("read", t("mail.markRead", lang), rowId, { hidden: !unread }),
+    actionButton("unread", t("mail.markUnread", lang), rowId, { hidden: unread }),
+  ];
   if (archiveFolder(list) && !archivedFolderIds(list).has(current)) {
     controls.push(actionButton("archive", t("mail.archive", lang), rowId));
   }
@@ -571,10 +599,11 @@ function actionBar({ message, folders, lang }) {
   const move = `<select class="ml-move-select" data-ml-action="move" data-row="${rowId}" data-ml-move-select>`
     + `<option value="" disabled selected>${e(t("mail.moveTo", lang))}</option>${options}</select>`
     + actionButton("move", t("mail.move", lang), rowId);
-  // An unread message carries the row the client posts `read` for once the page is shown; a read one
-  // carries nothing, so the timer is never armed.
-  const unreadMarker = message.isRead ? "" : ` data-ml-unread-row="${rowId}"`;
-  return `<div class="ml-actions ml-msg-actions" data-ml-actions data-row="${rowId}"${unreadMarker}>`
+  // An unread message carries the row the client posts `read` for once the page is shown, and the
+  // sentence its Mark unread control shows later; a read one carries no row, so the timer is never
+  // armed.
+  const unreadMarker = unread ? ` data-ml-unread-row="${rowId}"` : "";
+  return `<div class="ml-actions ml-msg-actions" data-ml-actions data-row="${rowId}" data-ml-done-unread="${e(t("mail.doneUnread", lang))}"${unreadMarker}>`
     + controls.join("") + move + "</div>";
 }
 
@@ -844,7 +873,7 @@ export function renderMailPage({
   }
 
   if (view === "search") {
-    return pageShell(searchViewHtml({ accounts: usable, hits, acct, q, lang, now, tz, flash }), lang);
+    return pageShell(searchViewHtml({ accounts: usable, hits, folders, acct, q, lang, now, tz, flash }), lang);
   }
 
   // `view` picks the view inside the page; settings is built in a later task, and until then only
