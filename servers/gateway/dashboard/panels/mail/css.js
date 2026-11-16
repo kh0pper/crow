@@ -11,6 +11,10 @@
  * (`.ml-back`) is in the base rules, because a state card rather than the conversation draws it.
  *
  * NOTE: never write a literal closing style tag inside a comment here.
+ *
+ * The one rule that has to name the document rather than .ml — Chrome Android's own pull-to-refresh,
+ * which would otherwise fire beside the reader's — is injected by the panel's client script: every
+ * rule here stays under .ml, so the panel's stylesheet never reaches outside its page.
  */
 
 /** The list header (the search box and the refresh control), account chips, the folder drawer, and one row per message. */
@@ -144,7 +148,7 @@ const SETTINGS_RULES = `
  */
 export function mailCss({ inbox = false, message = false, settings = false } = {}) {
   return `<style>
-  .ml { max-width: 44rem; min-width: 0; display: flex; flex-direction: column; gap: 12px; color: var(--crow-text-primary); }
+  .ml { max-width: 44rem; min-width: 0; overscroll-behavior-y: contain; display: flex; flex-direction: column; gap: 12px; color: var(--crow-text-primary); }
   .ml-title { margin: 0; font-size: 1.5rem; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
   .ml-empty {
     display: flex; flex-direction: column; align-items: flex-start; gap: 12px; min-width: 0; padding: 16px;

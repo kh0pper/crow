@@ -5710,6 +5710,22 @@ export const translations = {
   "mail.fieldSmtpPort": { en: "SMTP port", es: "Puerto SMTP" },
   "mail.fieldSecurity": { en: "Security", es: "Seguridad" },
   "mail.remove": { en: "Remove", es: "Quitar" },
+  // The reader's client script (Task 8): the one word its refresh status line shows, and the fixed
+  // sentence it shows for each API failure code. The English sentences are plan 1's mail error text
+  // verbatim (`servers/gateway/mail/errors.js`), with `changed_on_server` carrying the sentence its
+  // own route answers with.
+  "mail.refreshing": { en: "Refreshing", es: "Actualizando" },
+  "mail.error.auth_failed": { en: "Crow could not sign in to the mail server.", es: "Crow no pudo iniciar sesión en el servidor de correo." },
+  "mail.error.network": { en: "Crow could not reach the mail server.", es: "Crow no pudo conectar con el servidor de correo." },
+  "mail.error.tls": { en: "The mail server's certificate could not be trusted.", es: "No se pudo confiar en el certificado del servidor de correo." },
+  "mail.error.protocol": { en: "The mail server answered with something Crow could not use.", es: "El servidor de correo respondió algo que Crow no pudo usar." },
+  "mail.error.not_found": { en: "That item is not in this mailbox any more.", es: "Ese elemento ya no está en este buzón." },
+  "mail.error.bad_input": { en: "That mail setting is not valid.", es: "Ese ajuste de correo no es válido." },
+  "mail.error.claimed_elsewhere": { en: "This account is connected on another Crow instance.", es: "Esta cuenta está conectada en otra instancia de Crow." },
+  "mail.error.too_large": { en: "That message is too large for Crow to keep.", es: "Ese mensaje es demasiado grande para que Crow lo guarde." },
+  "mail.error.timeout": { en: "The mail server took too long to answer.", es: "El servidor de correo tardó demasiado en responder." },
+  "mail.error.changed": { en: "This message changed on the mail server. Crow is refreshing; try again.", es: "Este mensaje cambió en el servidor de correo. Crow está actualizando; inténtalo de nuevo." },
+  "mail.error.changed_on_server": { en: "This message changed on the mail server. Crow is refreshing; try again.", es: "Este mensaje cambió en el servidor de correo. Crow está actualizando; inténtalo de nuevo." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

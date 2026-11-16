@@ -1,0 +1,718 @@
+/**
+ * Crow Mail's reader client script (plan 2, Task 8), run for real in linkedom + node:vm over the
+ * markup the panel draws:
+ *   - the script never arrives with a body: every iframe is built here from a frame slot, with the
+ *     sandbox set before the src and a fresh per-load nonce in the URL's fragment and in
+ *     data-ml-nonce; a slot whose sandbox names allow-same-origin gets no iframe at all;
+ *   - the one window message listener accepts a frame's report only from that frame's own
+ *     contentWindow with that frame's own nonce, floors and clamps the height, and hides the image
+ *     banner for a zero count and shows it (with the count) for more;
+ *   - Show images rebuilds the frame for this load only, and Always show posts the allow first;
+ *   - refresh, pull-to-refresh, Look further back and the server search post to /dashboard/mail/api
+ *     and reload through Turbo (or the location); a failed call shows the translated sentence for
+ *     the response's error code, never the response's own message;
+ *   - the settings page's rename, local-models switch, password, add-account, remove-sender and
+ *     remove-account controls send their own verbs, and removing an account takes its confirm click.
+ * Static pins: no backtick, no dollar-brace, no markup sink, every request URL under the mail API,
+ * the doubled-backslash cookie regex, and the two overscroll rules that stop Chrome's own refresh.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import vm from "node:vm";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { parseHTML } from "linkedom";
+
+import { mailClientJs } from "../servers/gateway/dashboard/panels/mail/client.js";
+import { mailCss } from "../servers/gateway/dashboard/panels/mail/css.js";
+import { mailErrorStrings, renderMailPage } from "../servers/gateway/dashboard/panels/mail/html.js";
+import { settingsHtml } from "../servers/gateway/dashboard/panels/mail/settings-html.js";
+import { translations } from "../servers/gateway/dashboard/shared/i18n.js";
+import { FRAME_IFRAME_SANDBOX } from "../servers/gateway/mail/reader/frame-doc.js";
+
+const CLIENT_FILE = join(import.meta.dirname, "..", "servers/gateway/dashboard/panels/mail/client.js");
+const T0 = Date.UTC(2026, 4, 14, 9, 0, 0);
+
+/* ------------------------------------------------------------------- fixtures */
+
+const ACC = { id: "ma-aaaaaaaaaaaaaaaa", label: "Personal", address: "alex@example.com", status: "active", localModelsOnly: false };
+const ACC_B = { id: "ma-bbbbbbbbbbbbbbbb", label: "Work", address: "sam@example.com", status: "active", localModelsOnly: false };
+
+function messageRow(over = {}) {
+  return {
+    id: 11,
+    accountId: ACC.id,
+    folderId: 3,
+    threadId: 5,
+    messageId: "<one@mail.example.test>",
+    subject: "Hello there",
+    fromName: "Alex",
+    fromAddr: "alex@example.com",
+    to: [{ name: "Sam", address: "sam@example.com" }],
+    cc: [],
+    date: T0,
+    isRead: false,
+    bodyText: "Hello from Alex",
+    bodyHtml: "<p>Hello from Alex</p>",
+    parseError: null,
+    attachments: [],
+    ...over,
+  };
+}
+
+function summaryRow(over = {}) {
+  return {
+    id: 11,
+    accountId: ACC.id,
+    folderId: 3,
+    messageId: "<one@mail.example.test>",
+    subject: "Hello there",
+    fromName: "Alex",
+    fromAddr: "alex@example.com",
+    snippet: "Hello from Alex",
+    date: T0,
+    isRead: false,
+    ...over,
+  };
+}
+
+/** The message view as the panel serves it: two sections, the opened (and newest) one open. */
+function messagePage() {
+  const opened = messageRow();
+  const earlier = messageRow({ id: 10, messageId: "<zero@mail.example.test>", subject: "Earlier", date: T0 - 60_000 });
+  return renderMailPage({
+    view: "message",
+    accounts: [ACC],
+    lang: "en",
+    message: opened,
+    thread: [earlier, opened],
+    account: ACC,
+    back: "/dashboard/mail?acct=all",
+  });
+}
+
+/** The unified inbox: two accounts, one inbox folder each, no further page. */
+function inboxPage() {
+  const folders = [
+    { id: 3, accountId: ACC.id, name: "Inbox", path: "INBOX", role: "inbox", specialUse: "\\Inbox", unreadCount: 1 },
+    { id: 4, accountId: ACC_B.id, name: "Inbox", path: "INBOX", role: "inbox", specialUse: "\\Inbox", unreadCount: 0 },
+  ];
+  return renderMailPage({
+    view: "inbox",
+    accounts: [ACC, ACC_B],
+    lang: "en",
+    folders,
+    page: { items: [summaryRow(), summaryRow({ id: 12, accountId: ACC_B.id, folderId: 4, subject: "Second" })], nextCursor: null },
+    acct: "all",
+    folderId: null,
+    now: T0 + 3_600_000,
+    tz: "UTC",
+  });
+}
+
+/** The account page as the panel composes it: the hidden error element, then the cards and the form. */
+function settingsPage() {
+  const account = { ...ACC, status: "auth_failed", lastSyncAt: T0 };
+  return mailErrorStrings("en") + settingsHtml({
+    accounts: [account],
+    elsewhere: [],
+    allow: { [ACC.id]: ["sam@example.com"] },
+    lang: "en",
+    tz: "UTC",
+  });
+}
+
+/* ------------------------------------------------------------------------- rig */
+
+const jsonResponse = (status, body) => ({ ok: status < 400, status, json: () => Promise.resolve(body) });
+
+/**
+ * The emitted script, run in a vm over a linkedom page. Fetch is a stub and the timers are kept, so a
+ * test says exactly when something would have fired; every iframe the script builds is recorded with
+ * its attribute order and a stand-in contentWindow, so a message can be posted from it.
+ */
+function boot(html, { fetchImpl = () => jsonResponse(200, { ok: true }), href = "/dashboard/mail", cookie = "crow_session=abc;  crow_csrf=tok%2042" } = {}) {
+  const { window: dom, document } = parseHTML(`<!doctype html><html><head></head><body>${html}</body></html>`);
+  Object.defineProperty(document, "cookie", { configurable: true, get: () => cookie });
+
+  const frames = [];
+  const createElement = document.createElement.bind(document);
+  document.createElement = (name) => {
+    const node = createElement(name);
+    if (String(name).toLowerCase() !== "iframe") return node;
+    const record = { node, attrs: [], contentWindow: { mail: frames.length } };
+    node.contentWindow = record.contentWindow;
+    const setAttribute = node.setAttribute.bind(node);
+    node.setAttribute = (key, value) => {
+      record.attrs.push(String(key));
+      return setAttribute(key, value);
+    };
+    frames.push(record);
+    return node;
+  };
+
+  const calls = [];
+  const visits = [];
+  const timers = [];
+  let seed = 1;
+  const windowListeners = {};
+  // The vm's window is a stand-in: Turbo, the nonce source and the one message listener live here,
+  // so two visits share it while the document is the real linkedom one.
+  const window = {
+    Turbo: { visit: (url) => visits.push(String(url)) },
+    btoa: (text) => Buffer.from(String(text), "binary").toString("base64"),
+    scrollY: 0,
+    __mlTimer: null,
+    __mlBound: false,
+    addEventListener: (type, fn) => { (windowListeners[type] ||= []).push(fn); },
+    crypto: {
+      getRandomValues(array) {
+        for (let i = 0; i < array.length; i += 1) { array[i] = seed++ % 256; }
+        array[0] = 0x41;
+        return array;
+      },
+    },
+  };
+
+  // linkedom's fields expose `value` as a getter only; the page's own controls need a writable one, as
+  // they have in a browser (the client clears a password field after it is sent).
+  for (const field of document.querySelectorAll("input, select, textarea")) {
+    let current = field.getAttribute("value") || "";
+    Object.defineProperty(field, "value", {
+      configurable: true,
+      get: () => current,
+      set: (next) => { current = String(next); field.setAttribute("value", current); },
+    });
+  }
+
+  const location = {
+    href: "http://127.0.0.1" + href,
+    assign: (url) => visits.push(String(url)),
+    reload: () => visits.push("reload"),
+  };
+  const ctx = vm.createContext({
+    window,
+    document,
+    location,
+    fetch: (url, init) => {
+      const options = init || {};
+      calls.push({
+        url: String(url),
+        method: String(options.method || "GET"),
+        headers: options.headers || {},
+        body: options.body == null ? null : JSON.parse(String(options.body)),
+      });
+      return Promise.resolve(fetchImpl(String(url), options));
+    },
+    setTimeout: (fn, ms) => {
+      const timer = { fn, ms, cleared: false, fired: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout: (timer) => { if (timer) timer.cleared = true; },
+  });
+
+  const script = (() => {
+    const emitted = mailClientJs("en");
+    return emitted.slice(emitted.indexOf("<script>") + 8, emitted.lastIndexOf("</script>"));
+  })();
+  const run = () => vm.runInContext(script, ctx);
+  run();
+
+  const settle = async () => { for (let i = 0; i < 12; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  const $ = (selector) => document.querySelector(selector);
+  const $$ = (selector) => [...document.querySelectorAll(selector)];
+  const event = (type, extra = {}) => new dom.Event(type, { bubbles: true, cancelable: true, ...extra });
+  const click = (node) => { node.dispatchEvent(event("click")); return node; };
+  const change = (node) => { node.dispatchEvent(event("change")); return node; };
+  const submit = (node) => {
+    const fired = event("submit");
+    node.dispatchEvent(fired);
+    return fired;
+  };
+  const toggle = (node) => { node.dispatchEvent(event("toggle", { bubbles: false })); };
+  const send = (record, data) => {
+    for (const fn of windowListeners.message || []) fn({ source: record.contentWindow, data });
+  };
+  const touch = (node, type, y) => {
+    const fired = event(type);
+    if (type === "touchstart") fired.touches = [{ clientY: y }];
+    else fired.changedTouches = [{ clientY: y }];
+    node.dispatchEvent(fired);
+  };
+  const pull = (distance, list = $(".ml-list")) => {
+    touch(list, "touchstart", 100);
+    touch(list, "touchend", 100 + distance);
+  };
+  const turboBeforeVisit = () => { document.dispatchEvent(event("turbo:before-visit", { bubbles: false })); };
+
+  return {
+    window, document, location, ctx, run, settle, $, $$, click, change, submit, send, pull, touch, toggle, turboBeforeVisit,
+    frames, calls, visits, timers, windowListeners,
+  };
+}
+
+const errorStrings = (lang = "en") => {
+  const html = mailErrorStrings(lang);
+  const { document } = parseHTML(`<body>${html}</body>`);
+  const box = document.querySelector("[data-ml-errs]");
+  const out = {};
+  for (const attribute of [...box.attributes].map((a) => a.name)) {
+    if (attribute.startsWith("data-ml-err-")) out[attribute.slice("data-ml-err-".length)] = box.getAttribute(attribute);
+  }
+  return out;
+};
+
+/* ------------------------------------------------------------- static pins (Step 1) */
+
+test("static: the script has no backticks, no dollar-brace, and no markup sink", () => {
+  const source = readFileSync(CLIENT_FILE, "utf8");
+  const body = source.slice(source.indexOf("export function mailClientJs"));
+  const script = body.slice(body.indexOf("<script>"), body.lastIndexOf("</script>"));
+  assert.ok(script.length > 500, "the template holds the script");
+  assert.equal(script.includes("`"), false, "no backtick inside the template literal");
+  assert.equal(script.includes("${"), false, "no interpolation inside the template literal");
+  assert.doesNotMatch(script, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+  assert.equal(mailClientJs("en").includes("`"), false, "the emitted script has no backtick either");
+});
+
+test("static: every request URL starts with /dashboard/mail/api/", () => {
+  const source = readFileSync(CLIENT_FILE, "utf8");
+  const body = source.slice(source.indexOf("export function mailClientJs"));
+  const script = body.slice(body.indexOf("<script>"), body.lastIndexOf("</script>"));
+  const literals = [...script.matchAll(/\b(?:post|patch|put|remove)\('([^']*)'/g)].map((match) => match[1]);
+  assert.ok(literals.length >= 8, `the client names its routes: ${literals.length}`);
+  for (const value of literals) assert.ok(value.startsWith("/dashboard/mail/api/"), value);
+  assert.doesNotMatch(script, /fetch\('/, "fetch is only reached through the one request helper");
+  const places = new Set(literals.map((value) => value.split("/").slice(0, 6).join("/")));
+  assert.ok(places.size >= 3, [...places].join(", "));
+});
+
+test("S8 static: the source holds the doubled backslashes of the cookie regex", () => {
+  const source = readFileSync(CLIENT_FILE, "utf8");
+  const body = source.slice(source.indexOf("export function mailClientJs"));
+  assert.ok(body.includes(";\\\\s*"), "client.js is inside a template literal: the regex is written with two backslashes");
+  assert.equal(body.includes(";\\\\\\\\s*"), false, "and not with four, which would leave the script a stray backslash");
+  assert.ok(mailClientJs("en").includes(";\\s*"), "the emitted script holds the one backslash the browser's regex needs");
+  assert.equal(mailClientJs("en").includes(";\\\\s*"), false);
+});
+
+test("S7 static: the stylesheet contains itself on .ml, and the page-level rule ships with the script", () => {
+  const css = mailCss({ inbox: true, message: true, settings: true });
+  assert.match(css, /\.ml \{[^}]*overscroll-behavior-y: contain/);
+  const source = readFileSync(CLIENT_FILE, "utf8");
+  const body = source.slice(source.indexOf("export function mailClientJs"));
+  assert.match(body, /html:has\(\.ml\) \{[^}]*overscroll-behavior-y: contain/);
+});
+
+/* ------------------------------------------------------------------- the frames */
+
+test("every iframe is built from a slot: none in the markup, sandbox before src, one nonce, once per section", () => {
+  const markup = messagePage();
+  assert.doesNotMatch(markup, /<iframe/i, "the served page carries no frame");
+  const slots = [...markup.matchAll(/data-ml-frame-slot/g)].length;
+  assert.equal(slots, 2, "two conversation sections, one slot each");
+
+  const r = boot(markup);
+  const frames = r.$$("[data-ml-frame-slot] iframe");
+  assert.equal(frames.length, 1, "only the open section has a frame at bind time");
+  const record = r.frames[0];
+  assert.equal(record.attrs[0], "sandbox", "the sandbox is set first");
+  assert.ok(record.attrs.indexOf("sandbox") < record.attrs.indexOf("src"));
+  assert.equal(record.node.getAttribute("sandbox"), FRAME_IFRAME_SANDBOX);
+  assert.equal(record.node.getAttribute("referrerpolicy"), "no-referrer");
+  const src = record.node.getAttribute("src");
+  const nonce = /#n=([A-Za-z0-9_-]{16,64})$/.exec(src);
+  assert.ok(nonce, `the nonce rides in the fragment: ${src}`);
+  assert.equal(record.node.getAttribute("data-ml-nonce"), nonce[1]);
+  assert.ok(src.startsWith("/dashboard/mail/api/messages/"), src);
+
+  // The closed section builds its frame the first time it is opened, and never again.
+  const closed = r.$$("[data-ml-msg]").find((node) => !node.hasAttribute("open"));
+  assert.ok(closed, "one section is closed");
+  closed.setAttribute("open", "");
+  r.toggle(closed);
+  closed.removeAttribute("open");
+  r.toggle(closed);
+  closed.setAttribute("open", "");
+  r.toggle(closed);
+  const after = closed.querySelectorAll("[data-ml-frame-slot] iframe");
+  assert.equal(after.length, 1, "one frame, however many toggles");
+  assert.equal(r.frames.length, 2, "one frame per section");
+});
+
+test("a slot whose data-sandbox names allow-same-origin gets no iframe at all", () => {
+  const page = `<div class="ml" data-ml>
+    <details class="ml-msg-section" data-ml-msg="7" open>
+      <div class="ml-frame" data-ml-frame-slot data-src="/dashboard/mail/api/messages/7/frame"
+        data-sandbox="allow-scripts allow-same-origin allow-popups"></div>
+    </details>
+  </div>`;
+  const r = boot(page);
+  assert.equal(r.frames.length, 0, "no frame was built");
+  assert.equal(r.$("[data-ml-frame-slot]").children.length, 0, "the slot is left empty");
+});
+
+/* -------------------------------------------------------------- the frame's report */
+
+test("a frame's report sets a floored, clamped height and shows the banner only for a blocked count above zero", () => {
+  const r = boot(messagePage());
+  const record = r.frames[0];
+  const frame = record.node;
+  const section = r.$("[data-ml-msg][open]");
+  assert.ok(section.contains(frame), "the open section holds the one frame");
+  const banner = section.querySelector("[data-ml-img-banner]");
+  const nonce = frame.getAttribute("data-ml-nonce");
+  assert.ok(banner.hasAttribute("hidden"), "hidden until the frame reports blocked images");
+
+  r.send(record, { t: "crow-mail-frame", nonce, height: 640.7, blocked: 2 });
+  assert.equal(frame.style.height, "640px", "floored");
+
+  assert.equal(banner.hasAttribute("hidden"), false, "shown for blocked 2");
+  assert.equal(banner.getAttribute("data-ml-blocked"), "2");
+
+  r.send(record, { t: "crow-mail-frame", nonce, height: 20.4, blocked: 0 });
+  assert.equal(frame.style.height, "120px", "clamped up to 120");
+  assert.ok(banner.hasAttribute("hidden"), "hidden for 0");
+  assert.equal(banner.hasAttribute("data-ml-blocked"), false);
+
+  r.send(record, { t: "crow-mail-frame", nonce, height: 100000, blocked: 1 });
+  assert.equal(frame.style.height, "20000px", "clamped down to 20000");
+  assert.equal(banner.hasAttribute("hidden"), false);
+});
+
+test("reports from another window, another nonce, another type or with impossible numbers are ignored", () => {
+  const r = boot(messagePage());
+  const record = r.frames[0];
+  const frame = record.node;
+  const section = r.$("[data-ml-msg][open]");
+  const nonce = frame.getAttribute("data-ml-nonce");
+  const banner = section.querySelector("[data-ml-img-banner]");
+  const height = frame.style.height;
+  const good = { t: "crow-mail-frame", nonce, height: 500, blocked: 1 };
+
+  const ignore = (data, source = record.contentWindow) => {
+    for (const fn of r.windowListeners.message || []) fn({ source, data });
+    assert.equal(frame.style.height, height, "no height was written");
+    assert.ok(banner.hasAttribute("hidden"), "no banner was shown");
+  };
+  ignore(good, { notThisFrame: true });
+  ignore({ ...good, nonce: "wrongnonce000000" });
+  ignore({ ...good, nonce: "" });
+  ignore({ ...good, t: "something-else" });
+  ignore({ ...good, height: Number.NaN });
+  ignore({ ...good, height: "500" });
+  ignore({ ...good, height: -40 });
+  ignore({ ...good, blocked: -1 });
+  ignore({ ...good, blocked: 1.5 });
+  ignore({ ...good, blocked: "1" });
+  ignore(null);
+
+  // The same report with everything right still works, so the listener was not disabled by the above.
+  r.send(record, good);
+  assert.equal(frame.style.height, "500px");
+  assert.equal(banner.hasAttribute("hidden"), false);
+});
+
+test("after Show images the old nonce is refused and the new frame's nonce is accepted", async () => {
+  const r = boot(messagePage());
+  const section = r.$("[data-ml-msg][open]");
+  const old = r.frames[0];
+  const oldNonce = old.node.getAttribute("data-ml-nonce");
+  r.click(section.querySelector("[data-ml-show-images]"));
+  assert.equal(r.calls.length, 0, "showing images stores nothing: no request");
+  assert.equal(r.frames.length, 2, "the frame was rebuilt");
+  assert.equal(section.querySelectorAll("[data-ml-frame-slot] iframe").length, 1, "and the old one is gone");
+  const fresh = r.frames[1];
+  const freshNonce = fresh.node.getAttribute("data-ml-nonce");
+  assert.notEqual(freshNonce, oldNonce);
+  assert.match(fresh.node.getAttribute("src"), /\?images=1#n=[A-Za-z0-9_-]{16,64}$/);
+  const height = fresh.node.style.height;
+
+  for (const fn of r.windowListeners.message || []) fn({ source: old.contentWindow, data: { t: "crow-mail-frame", nonce: oldNonce, height: 700, blocked: 1 } });
+  assert.equal(fresh.node.style.height, height, "the old load's report is not this frame's");
+  for (const fn of r.windowListeners.message || []) fn({ source: fresh.contentWindow, data: { t: "crow-mail-frame", nonce: freshNonce, height: 700, blocked: 1 } });
+  assert.equal(fresh.node.style.height, "700px", "the new load's report is");
+});
+
+/* ------------------------------------------------------------- refresh and pull */
+
+test("S7: the script runs twice on one page and one pull still sends exactly one sync per account", async () => {
+  const r = boot(inboxPage());
+  r.run();
+  r.pull(90);
+  await r.settle();
+  const syncs = r.calls.filter((call) => call.url.endsWith("/sync"));
+  assert.deepEqual(syncs.map((call) => call.url).sort(), [
+    "/dashboard/mail/api/accounts/ma-aaaaaaaaaaaaaaaa/sync",
+    "/dashboard/mail/api/accounts/ma-bbbbbbbbbbbbbbbb/sync",
+  ]);
+  assert.equal(syncs.length, 2, "one per account, not two per account");
+});
+
+test("S7: a mark-read timer armed on one visit is cleared before the next and by turbo:before-visit", () => {
+  const r = boot(inboxPage());
+  let posts = 0;
+  r.window.__mlTimer = r.ctx.setTimeout(() => { posts += 1; }, 1500);
+  const armed = r.window.__mlTimer;
+  r.run();
+  assert.equal(armed.cleared, true, "the next visit clears it");
+
+  r.window.__mlTimer = r.ctx.setTimeout(() => { posts += 1; }, 1500);
+  const second = r.window.__mlTimer;
+  r.turboBeforeVisit();
+  assert.equal(second.cleared, true, "leaving the page clears it");
+  assert.equal(posts, 0, "it never posted");
+});
+
+test("refresh posts a sync per account id, shows the translating status line, then visits the page", async () => {
+  const r = boot(inboxPage());
+  r.click(r.$("[data-ml-refresh]"));
+  const line = r.$("[data-ml-status-line]");
+  assert.ok(line, "a status line was added");
+  assert.equal(line.getAttribute("role"), "status");
+  assert.equal(line.textContent, "Refreshing");
+  await r.settle();
+  assert.deepEqual(r.calls.map((call) => call.method), ["POST", "POST"]);
+  assert.equal(r.calls[0].headers["x-crow-csrf"], "tok 42", "the CSRF header comes from the cookie");
+  assert.deepEqual(r.visits, [r.location.href]);
+});
+
+test("a failed refresh shows the fixed sentence for its code, never the response's message, and stays put", async () => {
+  const strings = errorStrings();
+  const r = boot(inboxPage(), {
+    fetchImpl: () => jsonResponse(502, { error: "network", message: "RAW SERVER TEXT: getaddrinfo ENOTFOUND mail.example.test" }),
+  });
+  r.click(r.$("[data-ml-refresh]"));
+  await r.settle();
+  const line = r.$("[data-ml-status-line]");
+  assert.equal(line.textContent, strings.network);
+  assert.equal(line.textContent.includes("RAW SERVER TEXT"), false);
+  assert.equal(line.textContent.includes("mail.example.test"), false);
+  assert.deepEqual(r.visits, [], "a failed sync never reloads the page");
+});
+
+test("a pull of 90px at the top refreshes; 40px, or a scrolled page, does not", async () => {
+  const one = boot(inboxPage());
+  one.pull(90);
+  await one.settle();
+  assert.equal(one.calls.length, 2, "two accounts synced");
+
+  const short = boot(inboxPage());
+  short.pull(40);
+  await short.settle();
+  assert.equal(short.calls.length, 0, "under 80px is not a pull");
+
+  const scrolled = boot(inboxPage());
+  scrolled.window.scrollY = 300;
+  scrolled.pull(90);
+  await scrolled.settle();
+  assert.equal(scrolled.calls.length, 0, "a pull starts at the top only");
+});
+
+test("Look further back posts one call per folder and reloads with flash=older:N", async () => {
+  const r = boot(inboxPage(), {
+    fetchImpl: (url) => jsonResponse(200, url.includes("/folders/3/") ? { added: 3, reachedStart: false } : { added: 2, reachedStart: false }),
+  });
+  const older = r.$("[data-ml-older]");
+  assert.ok(older, "the control is on the last page");
+  r.click(older);
+  await r.settle();
+  assert.deepEqual(r.calls.map((call) => call.url), [
+    "/dashboard/mail/api/folders/3/older",
+    "/dashboard/mail/api/folders/4/older",
+  ]);
+  assert.equal(r.visits.length, 1);
+  const target = decodeURIComponent(r.visits[0]);
+  assert.match(target, /[?&]flash=older:5(&|$)/, target);
+  assert.doesNotMatch(target, /flash=older:5.*flash=/, "the flash is written once");
+});
+
+test("the server search posts the words and the scope, then reloads with flash=remote:N", async () => {
+  const page = renderMailPage({
+    view: "search",
+    accounts: [ACC],
+    lang: "en",
+    q: "garden",
+    acct: "all",
+    hits: [summaryRow()],
+    now: T0 + 3_600_000,
+    tz: "UTC",
+  });
+  const r = boot(page, { fetchImpl: () => jsonResponse(200, { added: 4, failures: [] }) });
+  const button = r.$("[data-ml-search-remote]");
+  r.click(button);
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.equal(r.calls[0].url, "/dashboard/mail/api/search/remote");
+  assert.deepEqual(r.calls[0].body, { q: "garden", account: "all" });
+  assert.match(decodeURIComponent(r.visits[0]), /[?&]flash=remote:4(&|$)/);
+});
+
+/* ------------------------------------------------------------------- the settings */
+
+test("Always show posts the account and sender with the CSRF header, then rebuilds the frame with images", async () => {
+  const r = boot(messagePage());
+  const section = r.$("[data-ml-msg][open]");
+  const before = r.frames.length;
+  r.click(section.querySelector("[data-ml-always-images]"));
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.equal(r.calls[0].method, "POST");
+  assert.equal(r.calls[0].url, "/dashboard/mail/api/image-allow");
+  assert.deepEqual(r.calls[0].body, { accountId: ACC.id, sender: "alex@example.com" });
+  assert.equal(r.calls[0].headers["x-crow-csrf"], "tok 42");
+  assert.equal(r.frames.length, before + 1);
+  assert.match(r.frames[before].node.getAttribute("src"), /\?images=1#n=/);
+});
+
+test("rename and the local-models switch PATCH their own field and report a failure in the card", async () => {
+  const ok = boot(settingsPage());
+  const rename = ok.$("[data-ml-rename]");
+  rename.value = "Home";
+  ok.change(rename);
+  await ok.settle();
+  assert.equal(ok.calls.length, 1);
+  assert.equal(ok.calls[0].method, "PATCH");
+  assert.equal(ok.calls[0].url, "/dashboard/mail/api/accounts/" + ACC.id);
+  assert.deepEqual(ok.calls[0].body, { label: "Home" });
+
+  const local = ok.$("[data-ml-local-models]");
+  local.checked = true;
+  ok.change(local);
+  await ok.settle();
+  assert.deepEqual(ok.calls[1].body, { localModelsOnly: true });
+
+  const strings = errorStrings();
+  const bad = boot(settingsPage(), { fetchImpl: () => jsonResponse(400, { error: "bad_input", message: "RAW" }) });
+  const field = bad.$("[data-ml-rename]");
+  field.value = " ";
+  bad.change(field);
+  await bad.settle();
+  const line = bad.$("[data-ml-account] [data-ml-status-line]");
+  assert.ok(line, "the card carries the line");
+  assert.equal(line.textContent, strings.bad_input);
+});
+
+test("Update password PUTs the secret, clears the field in every outcome and reloads only on success", async () => {
+  const ok = boot(settingsPage());
+  const details = ok.$("[data-ml-update-password]");
+  details.setAttribute("open", "");
+  ok.$("[data-ml-password-input]").value = "new-app-password";
+  ok.click(ok.$("[data-ml-password-save]"));
+  await ok.settle();
+  assert.equal(ok.calls[0].method, "PUT");
+  assert.equal(ok.calls[0].url, "/dashboard/mail/api/accounts/" + ACC.id + "/password");
+  assert.deepEqual(ok.calls[0].body, { password: "new-app-password" });
+  assert.equal(ok.$("[data-ml-password-input]").value, "", "cleared after success");
+  assert.equal(ok.visits.length, 1, "the page reloads so the status word is fresh");
+
+  const strings = errorStrings();
+  const bad = boot(settingsPage(), { fetchImpl: () => jsonResponse(400, { error: "AUTH_FAILED", message: "RAW" }) });
+  bad.$("[data-ml-update-password]").setAttribute("open", "");
+  bad.$("[data-ml-password-input]").value = "wrong-app-password";
+  bad.click(bad.$("[data-ml-password-save]"));
+  await bad.settle();
+  assert.equal(bad.$("[data-ml-password-input]").value, "", "cleared after failure too");
+  assert.deepEqual(bad.visits, [], "a refused password does not reload");
+  const line = bad.$("[data-ml-account] [data-ml-status-line]");
+  assert.equal(line.textContent, strings.auth_failed);
+  assert.equal(bad.document.body.innerHTML.includes("wrong-app-password"), false, "the secret is not written back into the page");
+});
+
+test("the add-account form posts its fields as endpoints, clears the password on success and on error", async () => {
+  const ok = boot(settingsPage(), { fetchImpl: () => jsonResponse(201, { account: { id: ACC.id } }) });
+  const form = ok.$("[data-ml-add-account]");
+  const fill = (name, value) => { form.querySelector('[name="' + name + '"]').value = value; };
+  fill("label", "Home");
+  fill("address", "sam@example.com");
+  fill("password", "app-password");
+  fill("imap-host", "mail.example.test");
+  fill("imap-port", "993");
+  fill("imap-security", "ssl");
+  fill("smtp-host", "mail.example.test");
+  fill("smtp-port", "465");
+  fill("smtp-security", "starttls");
+  const event = ok.submit(form);
+  assert.equal(event.defaultPrevented, true, "the form never posts on its own");
+  assert.equal(form.querySelector('[name="password"]').value, "", "cleared as soon as it was sent");
+  await ok.settle();
+  assert.equal(ok.calls.length, 1);
+  assert.equal(ok.calls[0].method, "POST");
+  assert.equal(ok.calls[0].url, "/dashboard/mail/api/accounts");
+  assert.deepEqual(ok.calls[0].body, {
+    label: "Home",
+    address: "sam@example.com",
+    password: "app-password",
+    imap: { host: "mail.example.test", port: 993, security: "ssl" },
+    smtp: { host: "mail.example.test", port: 465, security: "starttls" },
+  });
+  assert.equal(ok.visits.length, 1, "success reloads");
+  assert.equal(ok.document.body.innerHTML.includes("app-password"), false);
+
+  const strings = errorStrings();
+  const bad = boot(settingsPage(), { fetchImpl: () => jsonResponse(400, { error: "BAD_INPUT", message: "RAW" }) });
+  const other = bad.$("[data-ml-add-account]");
+  other.querySelector('[name="password"]').value = "second-password";
+  bad.submit(other);
+  await bad.settle();
+  assert.equal(other.querySelector('[name="password"]').value, "", "cleared after an error too");
+  assert.deepEqual(bad.visits, [], "an error does not reload");
+  const line = other.querySelector("[data-ml-status-line]");
+  assert.ok(line, "the form carries the line");
+  assert.equal(line.textContent, strings.bad_input, "the sentence for the code, whatever case the server used");
+  assert.equal(bad.document.body.textContent.includes("RAW"), false, "the response's own message is never shown");
+});
+
+test("Remove sender DELETEs the allowance and takes the row out of the list", async () => {
+  const r = boot(settingsPage());
+  const button = r.$("[data-ml-remove-sender]");
+  assert.ok(button, "the allowed sender is listed");
+  r.click(button);
+  await r.settle();
+  assert.equal(r.calls[0].method, "DELETE");
+  assert.equal(r.calls[0].url, "/dashboard/mail/api/image-allow");
+  assert.deepEqual(r.calls[0].body, { accountId: ACC.id, sender: "sam@example.com" });
+  assert.equal(r.$("[data-ml-allow-list]").children.length, 0, "the sender's row is gone");
+});
+
+test("Remove account calls nothing before its confirm click, then DELETEs and reloads", async () => {
+  const r = boot(settingsPage());
+  const button = r.$("[data-ml-remove-account-btn]");
+  r.click(button);
+  await r.settle();
+  assert.deepEqual(r.calls, [], "one click is not the confirmation");
+  r.click(button);
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.equal(r.calls[0].method, "DELETE");
+  assert.equal(r.calls[0].url, "/dashboard/mail/api/accounts/" + ACC.id);
+  assert.equal(r.visits.length, 1, "the page reloads once the account is gone");
+});
+
+test("Sync now posts that one account's sync", async () => {
+  const r = boot(settingsPage(), { fetchImpl: () => jsonResponse(202, { ok: true, started: true }) });
+  const button = r.$("[data-ml-sync]");
+  r.click(button);
+  await r.settle();
+  assert.equal(r.calls[0].method, "POST");
+  assert.equal(r.calls[0].url, "/dashboard/mail/api/accounts/" + ACC.id + "/sync");
+  assert.equal(r.visits.length, 1);
+});
+
+/* ----------------------------------------------------------------- the copy pins */
+
+test("every sentence the client can show is translated, and the error codes have a sentence", () => {
+  const strings = errorStrings("en");
+  const spanish = errorStrings("es");
+  for (const code of ["auth_failed", "network", "tls", "protocol", "not_found", "bad_input",
+    "claimed_elsewhere", "too_large", "timeout", "changed", "changed_on_server"]) {
+    assert.ok(strings[code], `en has a sentence for ${code}`);
+    assert.ok(spanish[code], `es has a sentence for ${code}`);
+    assert.notEqual(strings[code], spanish[code], `${code} is translated`);
+  }
+  assert.equal(translations["mail.refreshing"].en, "Refreshing");
+  assert.notEqual(translations["mail.refreshing"].es, translations["mail.refreshing"].en);
+  const refresh = boot(inboxPage()).$("[data-ml-refresh]");
+  assert.equal(refresh.getAttribute("data-ml-refreshing"), "Refreshing");
+});

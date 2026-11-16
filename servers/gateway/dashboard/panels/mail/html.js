@@ -87,10 +87,46 @@ function elsewhereCard(names, lang) {
     </section>`;
 }
 
-/** The page root: the title, then whichever view was asked for. */
+/**
+ * The API failure codes the client shows a sentence for. The client reads them off the one hidden
+ * element below and lower-cases a response's code before the lookup, because the mail API answers a
+ * code its own way (`AUTH_FAILED`) as well as the fixed request answers (`not_found`). The English
+ * sentences are plan 1's `MAIL_ERROR_TEXT`, verbatim, with `changed_on_server` carrying the sentence
+ * its own route answers with.
+ */
+const CLIENT_ERROR_CODES = Object.freeze([
+  "auth_failed",
+  "network",
+  "tls",
+  "protocol",
+  "not_found",
+  "bad_input",
+  "claimed_elsewhere",
+  "too_large",
+  "timeout",
+  "changed",
+  "changed_on_server",
+]);
+
+/**
+ * The hidden element carrying one translated sentence per API error code. The client script (Task 8)
+ * shows the sentence for a failed call's code and never the response's own message.
+ *
+ * @param {string} [lang]
+ * @returns {string}
+ */
+export function mailErrorStrings(lang = "en") {
+  const attributes = CLIENT_ERROR_CODES
+    .map((code) => ` data-ml-err-${code}="${e(t(`mail.error.${code}`, lang))}"`)
+    .join("");
+  return `<div class="ml-note" data-ml-errs hidden${attributes}></div>`;
+}
+
+/** The page root: the title, the client's error sentences, then whichever view was asked for. */
 function pageShell(inner, lang) {
   return `<div class="ml" data-ml>
     <h1 class="ml-title">${e(t("mail.title", lang))}</h1>
+    ${mailErrorStrings(lang)}
     ${inner}
   </div>`;
 }
@@ -116,8 +152,10 @@ function listHeader({ accounts, acct, q = "", withRefresh = false, lang }) {
       <input class="ml-btn ml-search-input" type="search" name="q" value="${e(q)}" enterkeyhint="search" aria-label="${e(t("common.search", lang))}">
       <button class="ml-btn" type="submit">${e(t("common.search", lang))}</button>
     </form>`;
+  // The status line the client shows while a refresh runs takes its one word from this control, so
+  // the script itself builds no sentence.
   const refresh = withRefresh
-    ? `<button class="ml-btn" type="button" data-ml-refresh data-accounts="${e(accountIds(accounts, acct))}">${e(t("extensions.servers.refresh", lang))}</button>`
+    ? `<button class="ml-btn" type="button" data-ml-refresh data-accounts="${e(accountIds(accounts, acct))}" data-ml-refreshing="${e(t("mail.refreshing", lang))}">${e(t("extensions.servers.refresh", lang))}</button>`
     : "";
   return `<div class="ml-head">${form}${refresh}</div>`;
 }

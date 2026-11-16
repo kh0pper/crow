@@ -44,6 +44,10 @@
  * Hidden from the classic sidebar; the shell's drawer reveals it (shell/chrome.js) only while the
  * flag is on AND the request is the owner's own local password session (the same check as the gate
  * below, made once per page in dispatchPanel).
+ *
+ * Every view also ships the panel's client script (`mail/client.js`), which frames a message body,
+ * runs the refresh, the older-mail and the server-search controls and sends the settings page's own
+ * verbs; the hidden error element beside it carries one translated sentence per API failure code.
  */
 import { t } from "../shared/i18n.js";
 import { isLocalPasswordSessionOn } from "../local-session.js";
@@ -54,9 +58,10 @@ import { getFolder, getMessage, listFolders, listMessages, searchLocal } from ".
 import { listThreadMessages, resolveMessageRef, listImageAllow } from "../../mail/store/reader-queries.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
 import { instanceZone } from "../../../shared/schedule-store.js";
-import { renderMailPage } from "./mail/html.js";
+import { renderMailPage, mailErrorStrings } from "./mail/html.js";
 import { settingsHtml } from "./mail/settings-html.js";
 import { mailCss } from "./mail/css.js";
+import { mailClientJs } from "./mail/client.js";
 
 /** Rows per page. The cursor is the only way to the next one. */
 const INBOX_PAGE_SIZE = 30;
@@ -221,7 +226,8 @@ export default {
       }
       return layout({
         title: t("mail.title", lang),
-        content: mailCss({ settings: true }) + settingsHtml({ accounts, elsewhere, allow, lang, tz }),
+        content: mailCss({ settings: true }) + mailErrorStrings(lang)
+          + settingsHtml({ accounts, elsewhere, allow, lang, tz }) + mailClientJs(lang),
       });
     }
 
@@ -300,7 +306,7 @@ export default {
       content: mailCss({ inbox: page !== null || view === "search", message: message !== null }) + renderMailPage({
         view, accounts, elsewhere, lang, folders, page, acct, folderId, now: Date.now(), tz,
         message, thread, account, back, missing, q, hits, flash,
-      }),
+      }) + mailClientJs(lang),
     });
   },
 };
