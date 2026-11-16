@@ -1722,7 +1722,21 @@ export function appendAuditBridge(projectId, opts) {
 // suspended ones — the block is byte-identical to what it was before shares
 // existed: this header sits at the very start of a turn prompt, so an extra
 // line for the bots that hold no share would move every prompt's prefix.
+// A shared project's NAME is operator-typed text that lands at the start of a
+// prompt, so it is made one short line first (REACHABLE_NAME_MAX): control
+// characters and newlines become spaces, whitespace collapses, and the result
+// is capped. A name can then never open a line of its own, where a reader (or
+// a model) would see it as instructions rather than as a project title.
 const REACHABLE_INSTRUCTION = "  to write in a reachable project, name it explicitly with project_id (a write with no project_id lands in your home project)";
+const REACHABLE_NAME_MAX = 80;
+function reachableName(name) {
+  const flat = String(name == null ? "" : name)
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return flat.length > REACHABLE_NAME_MAX ? flat.slice(0, REACHABLE_NAME_MAX).trim() : flat;
+}
 export function projectContextBlock(space, members, shares = []) {
   if (!space) return "";
   const lines = [];
@@ -1740,7 +1754,7 @@ export function projectContextBlock(space, members, shares = []) {
   const reachable = (Array.isArray(shares) ? shares : []).filter((sh) => sh && !sh.suspended);
   if (reachable.length) {
     const listed = reachable.map((sh) =>
-      sh.name + " (id=" + sh.project_id + ", " + (sh.level === "read_write" ? "read and write" : "read") + ")").join(" ; ");
+      reachableName(sh.name) + " (id=" + sh.project_id + ", " + (sh.level === "read_write" ? "read and write" : "read") + ")").join(" ; ");
     lines.push("REACHABLE PROJECTS (name, id, level): " + listed);
     lines.push(REACHABLE_INSTRUCTION);
   }

@@ -432,16 +432,39 @@ test("a job turn: its spawned memory server refuses an unshared project, and the
     await memory.close();
   }
 
-  // The next job turn is spawned after the share: its pi read roots carry X's workspace, so pi's own
-  // file tools follow the share too (fixed at spawn, as documented — the MCP tools are per call).
+  // The next job turn is spawned after the share: its pi read roots carry X's top-level workspace
+  // entries, so pi's own file tools follow the share too (fixed at spawn, as documented — the MCP
+  // tools are per call). The workspace ROOT itself is never a root, and neither is its bots/
+  // subtree, where every bot homed at X keeps its engine state.
+  const xWorkspace = (await db.execute({ sql: "SELECT workspace_dir FROM project_spaces WHERE id = ?", args: [Number(x)] })).rows[0].workspace_dir;
+  mkdirSync(xWorkspace, { recursive: true });
+  mkdirSync(join(xWorkspace, "bots", "other", "sessions"), { recursive: true });
+  writeFileSync(join(xWorkspace, "brief.txt"), "shared brief\n");
   const second = await jobTurn("second-" + (++jobStubSeq));
   const policy = JSON.parse(second.env.PI_BOT_PERMISSION_POLICY);
-  const xWorkspace = (await db.execute({ sql: "SELECT workspace_dir FROM project_spaces WHERE id = ?", args: [Number(x)] })).rows[0].workspace_dir;
-  assert.ok(Array.isArray(policy.read_paths) && policy.read_paths.includes(xWorkspace),
-    "the shared workspace is a read root for the job's pi: " + JSON.stringify(policy.read_paths));
-  assert.ok(!(policy.write_paths || []).includes(xWorkspace), "a read share is not a write root");
+  assert.ok(Array.isArray(policy.read_paths) && policy.read_paths.includes(join(xWorkspace, "brief.txt")),
+    "the shared workspace's top-level entry is a read root for the job's pi: " + JSON.stringify(policy.read_paths));
+  assert.ok(!policy.read_paths.includes(xWorkspace), "the workspace root itself is not a root");
+  assert.ok(!policy.read_paths.some((p) => p === join(xWorkspace, "bots")),
+    "X's bots subtree is never a read root: " + JSON.stringify(policy.read_paths));
+  assert.ok(!(policy.write_paths || []).some((p) => p === xWorkspace || p === join(xWorkspace, "brief.txt")),
+    "a read share is not a write root");
 
   await hostileBlock("job turn", blockOf(second.config, "crow-memory"), x);
+});
+
+test("a job turn whose def names no write_paths gets no write_paths key from an empty share list (M6)", { timeout: 240_000 }, async () => {
+  const noWrite = botDef();
+  delete noWrite.permission_policy.write_paths;
+  await saveBot(noWrite);
+  try {
+    const { env } = await jobTurn("m6-" + (++jobStubSeq));
+    const policy = JSON.parse(env.PI_BOT_PERMISSION_POLICY);
+    assert.equal(Object.prototype.hasOwnProperty.call(policy, "write_paths"), false,
+      "no share write root => the def's policy is left as it was: " + JSON.stringify(policy));
+  } finally {
+    await saveBot();
+  }
 });
 
 // --- the config writers ----------------------------------------------------

@@ -381,7 +381,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
   try {
     if (typeof bridge.loadBotShares === "function") jobShares = bridge.loadBotShares(job.bot_id) || [];
   } catch { jobShares = []; }
-  const jobShareRoots = shareWorkspaceRoots(jobShares);
+  const jobShareRoots = shareWorkspaceRoots(jobShares, { crowHome, log });
   const sessionDir = mkdtempSync(join(tmpdir(), "pibot-job-"));
   mkdirSync(join(sessionDir, "sessions"), { recursive: true });
   try {
@@ -468,8 +468,10 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
       piSessionId: null, appendSystemPromptFile: sysFile,
       projectWorkspaceDir, mcpDelivery, mcpConfig, botId: job.bot_id,
       // Share-derived file roots, fixed at this spawn (see the jobShares read above).
+      // extraWritePaths only when a `read_write` share contributed one: a present-but-empty list
+      // would rewrite write_paths and add the key to a def whose policy never carried it.
       extraReadPaths: jobShareRoots.read,
-      extraWritePaths: jobShareRoots.write,
+      ...(jobShareRoots.write.length ? { extraWritePaths: jobShareRoots.write } : {}),
       // The listing above is a snapshot of every bare entry's real tool names ({} when the
       // def has none): PiRpc's --tools assembly reads it, never the module cache.
       bareServerTools,

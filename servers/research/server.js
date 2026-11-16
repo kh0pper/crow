@@ -2427,7 +2427,8 @@ export function createProjectServer(dbPath, options = {}) {
       action: z.string().max(100).optional().describe("Filter by action (e.g., 'bot.invoke', 'member.add')"),
     },
     async ({ project_id, limit, action }, extra) => {
-      const pass = await shareGate("crow_audit_log", extra).check(project_id, {});
+      const gate = shareGate("crow_audit_log", extra);
+      const pass = await gate.check(project_id, {});
       if (pass.isError) return pass;
       try {
         await assertProjectExists(db, project_id, { allowArchived: true });
@@ -2435,6 +2436,13 @@ export function createProjectServer(dbPath, options = {}) {
                      FROM project_audit_log WHERE project_id = ?`;
         const args = [project_id];
         if (action) { sql += " AND action = ?"; args.push(action); }
+        // A caller the bot rules bind never reads a share refusal back. A refusal for a
+        // project-less or unreachable row is recorded on the bot's HOME project, while one for a
+        // row that lives in a project the bot cannot reach is recorded on THAT project — so the
+        // presence of these rows in its home log would answer "does this id/key exist?" for a row
+        // the bot may not see. The rows are kept (the owner reads them); a bot's answer is the same
+        // either way. Owner, unidentified caller and the operator's voice bot are untouched.
+        if ((await gate.readScope()) != null) sql += " AND action != 'share.refused'";
         sql += " ORDER BY created_at DESC LIMIT ?";
         args.push(limit);
         const { rows } = await db.execute({ sql, args });

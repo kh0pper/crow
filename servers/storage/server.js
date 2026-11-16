@@ -152,18 +152,21 @@ export function createStorageServer(dbPath, options = {}) {
    * row decides. Every refusal — an unknown key, a project-less row, a project the bot cannot
    * reach, or a bucket argument that is not the row's — is exactly what a missing key gets, so a
    * hidden key and a missing one read the same.
+   * @returns {Promise<{refusal: object|null, row: object|null}>} `row` is the key's own row for a
+   *   caller the rules bind and allow (its bucket is the one the S3 call must use); null for an
+   *   owner/unknown caller, who passes no bucket argument through to the row.
    */
-  async function fileRowRefusal(gate, bound, s3_key, bucketArg) {
-    if (!bound) return null;
+  async function fileRowGate(gate, bound, s3_key, bucketArg) {
+    if (!bound) return { refusal: null, row: null };
     const { rows } = await db.execute({
       sql: "SELECT project_id, bucket FROM storage_files WHERE s3_key = ?",
       args: [s3_key],
     });
     const row = rows[0] || null;
     const refusal = await gate.checkRow(row ? row.project_id : null, {});
-    if (refusal) return refusal;
-    if (row && bucketArg && bucketArg !== row.bucket) return notFoundResult();
-    return null;
+    if (refusal) return { refusal, row: null };
+    if (row && bucketArg && bucketArg !== row.bucket) return { refusal: notFoundResult(), row: null };
+    return { refusal: null, row };
   }
 
   // --- crow_upload_file ---
@@ -372,12 +375,15 @@ export function createStorageServer(dbPath, options = {}) {
       const bound = await boundByShares(gate);
       // A bot reaches only a key whose own row sits in a project it may read; an owner/unknown
       // caller resolves no row check at all and keeps today's behaviour.
-      const refusal = await fileRowRefusal(gate, bound, s3_key, bucket);
+      const { refusal, row } = await fileRowGate(gate, bound, s3_key, bucket);
       if (refusal) return refusal;
       if (!(await s3.isAvailable())) return notConfiguredError();
 
+      // A bot gets the URL of the ROW's object: the bucket a row was stored in, not the default
+      // one, or the presigned URL would point at a different (or missing) object.
+      const targetBucket = bound && row ? row.bucket : bucket;
       const expiresIn = bound ? Math.min(expiry ?? 3600, BOT_URL_TTL_SECONDS) : expiry;
-      const url = await s3.getPresignedUrl(s3_key, { bucket, expiry: expiresIn });
+      const url = await s3.getPresignedUrl(s3_key, { bucket: targetBucket, expiry: expiresIn });
       const expiryMin = Math.round((expiresIn ?? 3600) / 60);
       return {
         content: [{ type: "text", text: `Download URL (expires in ${expiryMin} min):\n${url}` }],
@@ -399,7 +405,7 @@ export function createStorageServer(dbPath, options = {}) {
       // the preview and the confirm finds nothing to delete.
       const gate = shareGate("crow_delete_file", extra);
       const bound = await boundByShares(gate);
-      const refusal = await fileRowRefusal(gate, bound, s3_key, bucket);
+      const { refusal, row } = await fileRowGate(gate, bound, s3_key, bucket);
       if (refusal) return refusal;
       if (!(await s3.isAvailable())) return notConfiguredError();
 
@@ -429,7 +435,9 @@ export function createStorageServer(dbPath, options = {}) {
         }
       }
 
-      await s3.deleteObject(s3_key, bucket || "crow-files");
+      // The row's own bucket (a bot never names one: the gate above refuses a bucket that is not
+      // the row's, so `bucket` is either that value or absent).
+      await s3.deleteObject(s3_key, (bound && row ? row.bucket : bucket) || "crow-files");
       await db.execute({ sql: "DELETE FROM storage_files WHERE s3_key = ?", args: [s3_key] });
 
       return { content: [{ type: "text", text: `Deleted: ${s3_key}` }] };

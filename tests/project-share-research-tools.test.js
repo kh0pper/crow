@@ -33,6 +33,7 @@ let createDbClient = null;
 let S = null;
 let OWNER = null;
 let createProjectServer = null;
+let createStorageServer = null;
 let createProjectSpace = null;
 let Client = null;
 let InMemoryTransport = null;
@@ -68,6 +69,7 @@ before(async () => {
   S = await import("../servers/shared/project-share-scope.js");
   ({ OWNER } = await import("../servers/research/actor.js"));
   ({ createProjectServer } = await import("../servers/research/server.js"));
+  ({ createStorageServer } = await import("../servers/storage/server.js"));
   ({ createProjectSpace } = await import("../servers/shared/project-spaces.js"));
   Client = (await import("@modelcontextprotocol/sdk/client/index.js")).Client;
   ({ InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js"));
@@ -128,6 +130,16 @@ async function clientFor(actor, opts = {}) {
 
 const botClient = (botId) => clientFor({ kind: "bot", id: botId });
 const call = (client, name, args = {}) => client.callTool({ name, arguments: args });
+
+/** The storage server wired to the same DB, for the audit-oracle probe (B2). */
+async function storageClientFor(botId) {
+  const server = createStorageServer(DB_FILE, { baseActor: { kind: "bot", id: botId } });
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  await server.connect(st);
+  const client = new Client({ name: "share-research-storage", version: "0" });
+  await client.connect(ct);
+  return client;
+}
 
 const rowProjectOf = async (table, id) => Number((await db.execute({
   sql: `SELECT project_id FROM ${table} WHERE id = ?`, args: [id],
@@ -394,6 +406,64 @@ test("crow_create_project is refused for a bot", async () => {
   assert.match(refused, /operator only/);
   const made = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM project_spaces WHERE name = 'Bot project'", args: [] })).rows[0];
   assert.equal(Number(made.n), 0);
+});
+
+// --- the audit log is not an oracle (B2) -----------------------------------------------------
+
+test("crow_audit_log cannot tell a bot whether a hidden storage key exists (B2)", async () => {
+  const home = Number((await createProjectSpace(db, { name: "Audit Probe Home" })).id);
+  const hidden = Number((await createProjectSpace(db, { name: "Audit Probe Hidden" })).id);
+  const botId = "share-bot-audit-probe";
+  await db.execute({
+    sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled) VALUES (?,?,?,?,1)",
+    args: [botId, botId, "{}", home],
+  });
+  const hiddenKey = `audit-oracle-hidden-${home}.txt`;
+  await db.execute({
+    sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, project_id)
+          VALUES (?, ?, 'text/plain', 1, 'crow-files', ?)`,
+    args: [hiddenKey, hiddenKey, hidden],
+  });
+
+  const bot = await botClient(botId);
+  const storage = await storageClientFor(botId);
+
+  const baseline = text(await call(bot, "crow_audit_log", { project_id: home, limit: 200 }));
+
+  // A key that does not exist anywhere: the refusal is recorded on the bot's HOME project.
+  const missing = await call(storage, "crow_get_file_url", { s3_key: `audit-oracle-missing-${home}.txt` });
+  assert.equal(missing.isError, true, text(missing));
+  const afterMissing = text(await call(bot, "crow_audit_log", { project_id: home, limit: 200 }));
+
+  // A key that exists in a project the bot holds no share of: the refusal is recorded THERE.
+  const existing = await call(storage, "crow_get_file_url", { s3_key: hiddenKey });
+  assert.equal(existing.isError, true, text(existing));
+  assert.equal(text(existing), text(missing), "the two probes answer identically");
+  const afterHidden = text(await call(bot, "crow_audit_log", { project_id: home, limit: 200 }));
+
+  assert.equal(afterHidden, afterMissing, "the home log reads the same after either probe");
+  assert.equal(afterMissing, baseline, "a refusal adds nothing the bot can read");
+  assert.doesNotMatch(afterMissing, /share\.refused/);
+
+  // Both refusals ARE in the table: the filter is what keeps the bot from reading them.
+  const logged = (await db.execute({
+    sql: `SELECT project_id FROM project_audit_log
+           WHERE action = 'share.refused' AND target = 'tool:crow_get_file_url' AND project_id IN (?, ?)`,
+    args: [home, hidden],
+  })).rows.map((r) => Number(r.project_id));
+  assert.ok(logged.includes(home), "the project-less probe is logged on the home project: " + JSON.stringify(logged));
+  assert.ok(logged.includes(hidden), "the hidden-key probe is logged on the hidden project: " + JSON.stringify(logged));
+
+  // The owner's view is unchanged: share.refused rows are still there.
+  const owner = await clientFor(OWNER);
+  const ownerHome = text(await call(owner, "crow_audit_log", { project_id: home, limit: 200 }));
+  assert.match(ownerHome, /share\.refused/);
+  const ownerHidden = text(await call(owner, "crow_audit_log", { project_id: hidden, limit: 200 }));
+  assert.match(ownerHidden, /share\.refused/);
+
+  // The operator's voice bot is the operator here too, byte for byte.
+  const voice = await clientFor(S.operatorVoiceActor());
+  assert.equal(text(await call(voice, "crow_audit_log", { project_id: home, limit: 200 })), ownerHome);
 });
 
 // --- the operator's voice bot ---------------------------------------------------------------

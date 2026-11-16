@@ -37,8 +37,8 @@
  */
 import { normalizeStoredBashPolicy, resolveClassifierEndpoint } from "../../servers/shared/bot-bash-policy.js";
 import { readBotClassifierSync } from "./bot-classifier.mjs";
-import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync, existsSync, readdirSync, realpathSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { writeBotMcp, removeStaleBotMcp } from "./mcp_writer.mjs";
 import { hasActorKey, presignActors, scopeRefFor } from "./actor-sig.mjs";
@@ -219,27 +219,123 @@ export function projectShowsCards(projectId, def) {
 }
 
 /**
- * The workspace roots a bot's shares contribute to ONE spawn: `read` for every
- * live, non-suspended share that names an absolute workspace_dir, `write` for
- * the `read_write` ones only. A suspended share adds nothing (its project has
- * an outside member right now), and neither does a share whose project is
+ * The workspace roots a bot's shares contribute to ONE spawn: for every live,
+ * non-suspended share that names an absolute workspace_dir, the REAL top-level
+ * entries of that workspace — one root each (`read` always, `write` for the
+ * `read_write` ones only). A suspended share adds nothing (its project has an
+ * outside member right now), and neither does a share whose project is
  * archived/tombstoned or has no workspace_dir — loadBotShares does not return
  * the archived ones, and a row without a usable dir is skipped here.
  *
- * Pure, so the merge into read_paths/write_paths stays in PiRpc. The roots are
- * per-SPAWN: pi's native file tools get them fixed at spawn, while the MCP
- * tools are re-checked on every call (resolveBotAccess).
+ * The workspace root itself is NEVER granted, and neither is its `bots`
+ * subtree: every bot homed at that project keeps its engine state at
+ * <workspace_dir>/bots/<botId> (sessions/ and pi's transcripts, outputs/, .pi/,
+ * and in file mode a .mcp.json carrying signed actor headers), so a share of
+ * the whole workspace would expose them and, at `read_write`, let the bot
+ * rewrite another bot's sessions.
+ *
+ * A workspace_dir that is a dangerous root is dropped with one warning: `/`,
+ * the user's home, the Crow home (crowHome — equal to it or above it), or
+ * anything under <crowHome>/secrets.
+ *
+ * The entries are listed at SPAWN time, so a top-level file or directory
+ * created after this spawn is outside the running child's reach until the next
+ * spawn. The roots are per-SPAWN in any case: pi's native file tools get them
+ * fixed at spawn, while the MCP tools are re-checked on every call
+ * (resolveBotAccess).
+ *
+ * @param {{workspace_dir?: string|null, level?: string, suspended?: boolean}[]|null} shares
+ * @param {{crowHome?: string|null, log?: (m: string) => void}} [opts] `crowHome`
+ *   is the active Crow instance home, for the dangerous-root rule; `log` gets
+ *   one line per share that granted nothing for a reason worth naming.
+ * @returns {{read: string[], write: string[]}}
  */
-export function shareWorkspaceRoots(shares) {
+export function shareWorkspaceRoots(shares, { crowHome = null, log = () => {} } = {}) {
   const read = [];
   const write = [];
   for (const s of Array.isArray(shares) ? shares : []) {
     if (!s || s.suspended === true || !isValidReadPath(s.workspace_dir)) continue;
-    const root = normalizeReadPath(s.workspace_dir);
-    if (!read.includes(root)) read.push(root);
-    if (s.level === "read_write" && !write.includes(root)) write.push(root);
+    const dir = normalizeReadPath(s.workspace_dir);
+    const dangerous = dangerousShareRoot(dir, crowHome);
+    if (dangerous) {
+      log("share workspace not granted (" + dangerous + "): " + dir);
+      continue;
+    }
+    for (const root of shareEntryRoots(dir, { log })) {
+      if (!read.includes(root)) read.push(root);
+      if (s.level === "read_write" && !write.includes(root)) write.push(root);
+    }
   }
   return { read, write };
+}
+
+/**
+ * The most top-level entries one share may contribute as roots. A workspace
+ * with more grants nothing at all: a thousand roots in a spawn policy is not a
+ * project anybody meant to share, and failing loudly beats a slow spawn.
+ */
+export const SHARE_ROOT_ENTRY_CAP = 200;
+
+/**
+ * Why `dir` must never become a share root, or null: the filesystem root, the
+ * user's own home, the Crow home (equal to it or above it), or anything under
+ * <crowHome>/secrets. A share hands a bot a project, never the instance.
+ */
+function dangerousShareRoot(dir, crowHome) {
+  if (dir === "/") return "the filesystem root";
+  let home = null;
+  try { home = normalizeReadPath(homedir()); } catch { home = null; }
+  if (home && home !== "/" && dir === home) return "the user's home";
+  if (!crowHome || !isValidReadPath(crowHome)) return null;
+  const ch = normalizeReadPath(crowHome);
+  if (dir === ch) return "the Crow home";
+  if (ch.startsWith(dir + "/")) return "above the Crow home";
+  const secrets = ch + "/secrets";
+  if (dir === secrets || dir.startsWith(secrets + "/")) return "under the Crow home's secrets";
+  return null;
+}
+
+/**
+ * The roots ONE share contributes: the real top-level entries of its workspace,
+ * one root each — never the workspace itself, never its `bots` subtree (see
+ * shareWorkspaceRoots). An entry that cannot be stat-ed is skipped; a symlink
+ * is followed only when it resolves inside the workspace and outside the bots
+ * subtree. More entries than SHARE_ROOT_ENTRY_CAP grants nothing for the share.
+ * @returns {string[]}
+ */
+function shareEntryRoots(dir, { log = () => {} } = {}) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    log("share workspace not granted (unreadable): " + dir);
+    return [];
+  }
+  if (entries.length > SHARE_ROOT_ENTRY_CAP) {
+    log("share workspace not granted (" + entries.length + " top-level entries, cap " + SHARE_ROOT_ENTRY_CAP + "): " + dir);
+    return [];
+  }
+  let realDir = null;
+  try { realDir = realpathSync(dir); } catch { realDir = null; }
+  const under = (p, root) => p === root || p.startsWith(root + "/");
+  const roots = [];
+  for (const entry of entries) {
+    // `<workspace>/bots` holds every bot homed at this project.
+    if (entry.name === "bots") continue;
+    const full = join(dir, entry.name);
+    // A broken symlink, or a race with a delete: nothing to grant.
+    try { statSync(full); } catch { continue; }
+    if (entry.isSymbolicLink()) {
+      let target = null;
+      try { target = realpathSync(full); } catch { continue; }
+      // Never follow a link out of the workspace, and never one into bots.
+      if (!realDir || !under(target, realDir)) continue;
+      if (under(target, join(realDir, "bots"))) continue;
+    }
+    const root = normalizeReadPath(full);
+    if (!roots.includes(root)) roots.push(root);
+  }
+  return roots;
 }
 
 /**
@@ -365,8 +461,9 @@ export async function bindWorldSession(world, session) {
  *          extraReadPaths, extraWritePaths}>}
  *   `projectShares` is loadBotShares(botId) as read for THIS spawn
  *   ({project_id, level, workspace_dir, name, suspended}), so a UI can list the
- *   bot's shared projects; only its non-suspended workspace dirs reach
- *   extraReadPaths (and extraWritePaths for `read_write`).
+ *   bot's shared projects; only its non-suspended shares' top-level workspace
+ *   entries reach extraReadPaths (and extraWritePaths for `read_write`) — never
+ *   a shared workspace's `bots` subtree (shareWorkspaceRoots).
  */
 export async function buildBotWorld({ botId, threadId, gatewayType = null, log = () => {}, jobId = null, cardBound = false, cwd = null, repoSkillsDir = undefined }) {
   const B = await loadBridge();
@@ -403,7 +500,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
   // tool calls are never one session behind. A `read` share contributes a read
   // root only; a `read_write` share adds its workspace to the write roots too.
   const projectShares = B.loadBotShares(botId);
-  const shareRoots = shareWorkspaceRoots(projectShares);
+  const shareRoots = shareWorkspaceRoots(projectShares, { crowHome, log });
 
   // session_dir resolution: prefer the project workspace when available
   // (new project-native bots). Legacy bots without a project_space row, or
@@ -548,9 +645,10 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
     // "Turn on a board" fallback carry-over (world-root.mjs): entries linked
     // one by one from the bot's own pre-project root resolve outside every
     // root pi-lab's realpath read gate knows, so that old root joins the read
-    // roots. [] for every other bot. Then the share roots (Task 10): every live
-    // non-suspended share is a read root, and only a `read_write` one is a
-    // write root as well.
+    // roots. [] for every other bot. Then the share roots (Task 10): one read
+    // root per live, non-suspended share's top-level workspace entry, and a
+    // write root as well only for a `read_write` one (never the workspace's
+    // `bots` subtree — see shareWorkspaceRoots).
     extraReadPaths: [
       ...carriedReadRoots({ worldRoot: sessionDir, legacyRoot: worldRootFor({ workspaceDir: null, def, crowHome, botId }) }),
       ...shareRoots.read,
@@ -655,6 +753,13 @@ export async function prepareSpawn(world, { escalate = false, log = () => {}, pr
   const piProvider = piProviderIdHere(resolved.provider);
   if (piProvider == null) throw new PiModelUnavailableError(`model "${resolved.provider}/${resolved.model}" is not available to the bot engine`);
 
+  // Task 10: the share-derived WRITE roots a `read_write` share contributes
+  // (PiRpc appends them to write_paths); a `read` share never appears here.
+  // The key is set ONLY when it has entries: PiRpc treats a present-but-empty
+  // list as "rewrite write_paths", which would add a `write_paths` key to a
+  // def whose policy never carried one. Absent on a hand-built world, too.
+  const extraWritePaths = Array.isArray(world.extraWritePaths) ? world.extraWritePaths : [];
+
   return {
     sysFile,
     selfAuthoringDir,
@@ -678,9 +783,7 @@ export async function prepareSpawn(world, { escalate = false, log = () => {}, pr
       // The bot's id, for the workspace env (bot-workspace-env.mjs).
       botId: (world.bot && world.bot.bot_id) || null,
       extraReadPaths: world.extraReadPaths || [],
-      // Task 10: a `read_write` share's workspace joins write_paths (PiRpc); a
-      // `read` share never appears here. Absent on a hand-built world.
-      extraWritePaths: world.extraWritePaths || [],
+      ...(extraWritePaths.length ? { extraWritePaths } : {}),
       // S6-CROW: how the MCP config reaches pi. Absent on a hand-built world
       // (test seams) => PiRpc's pre-S6 file env.
       mcpDelivery: world.mcpDelivery,

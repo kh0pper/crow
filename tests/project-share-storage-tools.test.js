@@ -431,6 +431,56 @@ test("the share gate runs even when confirmation gates are skipped", async () =>
   }
 });
 
+// --- by-id: the row's own bucket (M4) --------------------------------------------------------
+
+test("a bot with no bucket argument presigns and deletes with the row's own bucket (M4)", async () => {
+  const A = await mkProject();
+  const B = await mkProject();
+  const bot = await mkBot({ home: A });
+  await grant(B, bot, "read_write");
+  const urlKey = uniqueKey("bucket-url");
+  const delKey = uniqueKey("bucket-del");
+  await seedFile(urlKey, { projectId: B, bucket: "archive-bucket" });
+  await seedFile(delKey, { projectId: B, bucket: "archive-bucket" });
+  const s3 = fakeS3();
+  const s = await open({ actor: { kind: "bot", id: bot }, s3 });
+  try {
+    const url = await s.call("crow_get_file_url", { s3_key: urlKey, expiry: 120 });
+    assert.equal(url.isError, false, url.text);
+    assert.equal(s3.calls.presign.at(-1).opts.bucket, "archive-bucket", "the row's bucket, not the default");
+
+    const preview = await s.call("crow_delete_file", { s3_key: delKey, confirm_token: "" });
+    assert.equal(preview.isError, false, preview.text);
+    const token = /confirm_token: "([^"]+)"/.exec(preview.text)[1];
+    const confirmed = await s.call("crow_delete_file", { s3_key: delKey, confirm_token: token });
+    assert.equal(confirmed.isError, false, confirmed.text);
+    assert.equal(s3.calls.delete.at(-1).bucket, "archive-bucket", "the row's bucket, not the default");
+    assert.equal(await fileRow(delKey), null);
+  } finally { await s.close(); }
+});
+
+test("the owner's presign and delete with no bucket argument stay on the default bucket (M4)", async () => {
+  const A = await mkProject();
+  const urlKey = uniqueKey("owner-bucket-url");
+  const delKey = uniqueKey("owner-bucket-del");
+  await seedFile(urlKey, { projectId: A, bucket: "archive-bucket" });
+  await seedFile(delKey, { projectId: A, bucket: "archive-bucket" });
+  const s3 = fakeS3();
+  const owner = await open({ actor: OWNER, s3 });
+  try {
+    const url = await owner.call("crow_get_file_url", { s3_key: urlKey });
+    assert.equal(url.isError, false, url.text);
+    assert.equal(s3.calls.presign.at(-1).opts.bucket, undefined, "the caller's own argument, unchanged");
+
+    const preview = await owner.call("crow_delete_file", { s3_key: delKey, confirm_token: "" });
+    assert.equal(preview.isError, false, preview.text);
+    const token = /confirm_token: "([^"]+)"/.exec(preview.text)[1];
+    const confirmed = await owner.call("crow_delete_file", { s3_key: delKey, confirm_token: token });
+    assert.equal(confirmed.isError, false, confirmed.text);
+    assert.equal(s3.calls.delete.at(-1).bucket, "crow-files");
+  } finally { await owner.close(); }
+});
+
 // --- a read share vs a write share ----------------------------------------------------------
 
 test("a read share refuses upload and delete on that project, and the row survives", async () => {

@@ -3,14 +3,22 @@
  *
  * A share row grants a bot a project at `read` or `read_write`. What a bot's
  * NATIVE FILE TOOLS can reach is decided by the read_paths/write_paths pi is
- * spawned with, so the share's `project_spaces.workspace_dir` becomes:
+ * spawned with. The share's `project_spaces.workspace_dir` is NOT one root: its
+ * top-level entries are granted one by one, so
  *
- *   - a read root for every live, non-suspended share (either level);
- *   - a write root as well, ONLY for `read_write`.
+ *   - every top-level entry of the workspace is a read root (either level);
+ *   - it is a write root as well, ONLY for `read_write`;
+ *   - the workspace's own `bots` subtree is NEVER granted: every bot homed at
+ *     that project keeps its engine state (sessions/, outputs/, .pi/,
+ *     .mcp.json with signed actor headers) under <workspace_dir>/bots/<id>, so
+ *     a shared root there would expose — and let a read_write bot rewrite —
+ *     other bots' sessions.
  *
  * A suspended share (either side has an outside member), a revoked one, one
- * whose project is archived/tombstoned, and one with no workspace_dir add
- * nothing — and none of them may break a spawn.
+ * whose project is archived/tombstoned, one with no workspace_dir, and one
+ * whose workspace_dir is a dangerous root (/, the user's home, the Crow home
+ * or above, anything under <crowHome>/secrets) add nothing — and none of them
+ * may break a spawn.
  *
  * The boundary this file pins (and the code documents): file-system reach
  * follows the share at the NEXT SPAWN, because pi's roots are fixed when the
@@ -23,9 +31,9 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 
 // Hermetic env: an ambient PI_*/PIBOT_* var would otherwise reach the stub.
@@ -119,6 +127,16 @@ before(() => {
     env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe", cwd: REPO,
   });
   for (const d of [W_HOME, W_X, W_ARCH, W_TOMB, W_SUSP]) mkdirSync(d, { recursive: true });
+  // The shared project's own top-level entries: each one is granted to a share
+  // on its own. `bots/` is X's engine state (every bot homed at X lives there)
+  // and is never granted.
+  mkdirSync(join(W_X, "docs"), { recursive: true });
+  writeFileSync(join(W_X, "docs", "index.md"), "# Shared\n");
+  writeFileSync(join(W_X, "data.csv"), "a,b\n");
+  mkdirSync(join(W_X, "bots", "other", "sessions"), { recursive: true });
+  writeFileSync(join(W_X, "bots", "other", "sessions", "x.jsonl"), "{}\n");
+  // A plain entry with nothing behind it: a symlink that resolves outside the
+  // workspace is not reachable through the share either.
   const c = new Database(DB_FILE);
   const proj = c.prepare("INSERT INTO project_spaces (id, slug, name, workspace_dir, status, archived_at) VALUES (?,?,?,?,?,?)");
   proj.run(P_HOME, "home", "Home", W_HOME, "active", null);
@@ -133,6 +151,17 @@ before(() => {
   for (const id of ["reader", "writer", "suspended", "arch", "tomb", "nows", "revoked", "nothing", "deadbot"]) {
     ins.run(id, id, def(id), 1, P_HOME);
   }
+  // A def whose permission_policy names no write_paths at all (M6): an empty
+  // extraWritePaths must not add the key to the spawn policy.
+  ins.run("plainbot", "plainbot", JSON.stringify({
+    system_prompt: "You are a test bot.",
+    models: { default: "stub/m1" },
+    tools: { pi_builtin: ["read"], crow_mcp: [] },
+    permission_policy: { bash: "deny" },
+    gateways: [{ type: "gmail" }],
+    tracker_config: { type: "none" },
+    session_dir: join(dir, "bots", "plainbot"),
+  }), 1, P_HOME);
   ins.run("homeless", "homeless", def("homeless"), 1, null);
 
   // An outside member on the project the "suspended" bot is shared: while that
@@ -165,6 +194,15 @@ function arm(leg) {
 }
 const readCap = () => JSON.parse(readFileSync(capFile, "utf8"));
 const policyOf = (cap) => JSON.parse(cap.env.PI_BOT_PERMISSION_POLICY);
+
+// What a share of W_X contributes: one root per top-level entry, never `bots`,
+// never the workspace itself.
+const X_ROOTS = [join(W_X, "data.csv"), join(W_X, "docs")];
+const BOTS_SUBTREE = join(W_X, "bots");
+const OTHER_BOT_SESSION = join(W_X, "bots", "other", "sessions", "x.jsonl");
+const sorted = (xs) => [...(xs || [])].sort();
+/** Does any root in `roots` cover `p`? (pi-lab's own rule: equal, or under it.) */
+const coversPath = (roots, p) => (roots || []).some((r) => p === r || p.startsWith(r.endsWith("/") ? r : r + "/"));
 
 /** One real channel turn; returns what pi was handed. */
 async function channelTurn(botId, leg) {
@@ -235,13 +273,32 @@ test("loadBotShares never throws: a missing table (older DB) is 'no shares'", ()
   assert.equal(loadBotShares("reader").length, 1, "and the live row is back afterwards");
 });
 
-test("shareWorkspaceRoots: read roots for both levels, a write root only for read_write, and nothing for a suspended/unusable row", () => {
+/** A share workspace with two ordinary top-level entries and a `bots` subtree. */
+function shareFixture(name) {
+  const d = join(dir, "unit-roots", name);
+  mkdirSync(join(d, "docs"), { recursive: true });
+  writeFileSync(join(d, "docs", "a.md"), "a\n");
+  writeFileSync(join(d, "top.txt"), "t\n");
+  mkdirSync(join(d, "bots", "other", "sessions"), { recursive: true });
+  writeFileSync(join(d, "bots", "other", "sessions", "x.jsonl"), "{}\n");
+  return d;
+}
+const fixtureRoots = (d) => [join(d, "docs"), join(d, "top.txt")];
+const sortRoots = (r) => ({ read: sorted(r.read), write: sorted(r.write) });
+
+test("shareWorkspaceRoots: one read root per top-level entry, a write root only for read_write, and nothing for a suspended/unusable row", () => {
+  const one = shareFixture("one");
+  const two = shareFixture("two");
+  const three = shareFixture("three");
+  assert.deepEqual(sortRoots(shareWorkspaceRoots([
+    { project_id: 1, level: "read", workspace_dir: one, suspended: false },
+    { project_id: 2, level: "read_write", workspace_dir: two, suspended: false },
+  ])), {
+    read: sorted([...fixtureRoots(one), ...fixtureRoots(two)]),
+    write: sorted(fixtureRoots(two)),
+  });
   assert.deepEqual(shareWorkspaceRoots([
-    { project_id: 1, level: "read", workspace_dir: "/w/one", suspended: false },
-    { project_id: 2, level: "read_write", workspace_dir: "/w/two", suspended: false },
-  ]), { read: ["/w/one", "/w/two"], write: ["/w/two"] });
-  assert.deepEqual(shareWorkspaceRoots([
-    { project_id: 3, level: "read_write", workspace_dir: "/w/three", suspended: true },
+    { project_id: 3, level: "read_write", workspace_dir: three, suspended: true },
     { project_id: 4, level: "read_write", workspace_dir: null, suspended: false },
     { project_id: 5, level: "read", workspace_dir: "relative/dir", suspended: false },
   ]), { read: [], write: [] });
@@ -249,23 +306,104 @@ test("shareWorkspaceRoots: read roots for both levels, a write root only for rea
   assert.deepEqual(shareWorkspaceRoots(null), { read: [], write: [] });
 });
 
+test("shareWorkspaceRoots: the bots subtree is never a root, and neither is the workspace itself", () => {
+  const d = shareFixture("no-bots");
+  const r = shareWorkspaceRoots([{ project_id: 7, level: "read_write", workspace_dir: d, suspended: false }], {});
+  assert.equal(coversPath(r.read, join(d, "bots")), false, "no read root covers <ws>/bots");
+  assert.equal(coversPath(r.read, join(d, "bots", "other", "sessions", "x.jsonl")), false,
+    "another bot's transcript is out of reach");
+  assert.equal(coversPath(r.write, join(d, "bots")), false, "no write root covers <ws>/bots");
+  assert.equal(coversPath(r.read, d), false, "the workspace itself is not a root");
+  for (const root of fixtureRoots(d)) {
+    assert.ok(coversPath(r.read, root), "the top-level entry " + root + " is readable");
+    assert.ok(coversPath(r.write, root), "...and writable for read_write");
+  }
+  assert.equal(r.read.includes(join(d, "bots")), false);
+  assert.equal(r.write.includes(join(d, "bots")), false);
+});
+
+test("shareWorkspaceRoots: a symlink that leaves the workspace (or points into bots) is not granted", () => {
+  const d = shareFixture("links");
+  const outside = join(dir, "unit-roots", "outside-target");
+  mkdirSync(outside, { recursive: true });
+  symlinkSync(outside, join(d, "escape"));
+  symlinkSync(join(d, "bots"), join(d, "bots-alias"));
+  const r = shareWorkspaceRoots([{ project_id: 8, level: "read_write", workspace_dir: d, suspended: false }], {});
+  assert.equal(coversPath(r.read, join(d, "escape")), false, "a link out of the workspace is not a root");
+  assert.equal(coversPath(r.write, join(d, "escape")), false);
+  assert.equal(coversPath(r.read, join(d, "bots-alias")), false, "a link to the bots subtree is not a root");
+  assert.equal(coversPath(r.write, join(d, "bots-alias")), false);
+  for (const root of fixtureRoots(d)) assert.ok(coversPath(r.read, root), root);
+});
+
+test("shareWorkspaceRoots: more top-level entries than the cap grants nothing for that share, with one warning", () => {
+  const d = join(dir, "unit-roots", "wide");
+  mkdirSync(d, { recursive: true });
+  for (let i = 0; i < 201; i++) writeFileSync(join(d, `f${i}.txt`), "");
+  const said = [];
+  const r = shareWorkspaceRoots([{ project_id: 9, level: "read", workspace_dir: d, suspended: false }], { log: (m) => said.push(m) });
+  assert.deepEqual(r, { read: [], write: [] });
+  assert.equal(said.length, 1, "exactly one warning line: " + JSON.stringify(said));
+});
+
+test("shareWorkspaceRoots: a dangerous workspace_dir is dropped with one warning (M3)", () => {
+  const crowHome = join(dir, "crowhome-share-roots");
+  mkdirSync(join(crowHome, "secrets", "keys"), { recursive: true });
+  const cases = [
+    ["the filesystem root", "/"],
+    ["the user's home", process.env.HOME],
+    ["the Crow home", crowHome],
+    ["above the Crow home", dirname(crowHome)],
+    ["under <crowHome>/secrets", join(crowHome, "secrets", "keys")],
+  ];
+  for (const [label, d] of cases) {
+    const said = [];
+    assert.deepEqual(
+      shareWorkspaceRoots([{ project_id: 10, level: "read_write", workspace_dir: d, suspended: false }],
+        { crowHome, log: (m) => said.push(m) }),
+      { read: [], write: [] }, label);
+    assert.equal(said.length, 1, label + " warns once: " + JSON.stringify(said));
+  }
+});
+
 // ---------------------------------------------------------------------------
 // the spawn's effective roots (a real channel turn, real world build)
 // ---------------------------------------------------------------------------
 
-test("a READ share's workspace is a read root and never a write root", async () => {
+test("a READ share's top-level entries are read roots and never write roots", async () => {
   const cap = await channelTurn("reader", "read-share");
   const policy = policyOf(cap);
-  assert.deepEqual(policy.read_paths, [W_HOME, W_X],
-    "the bot's own project workspace, then the shared project's workspace");
+  assert.deepEqual(sorted(policy.read_paths), sorted([W_HOME, ...X_ROOTS]),
+    "the bot's own project workspace, then one root per shared top-level entry");
   assert.deepEqual(policy.write_paths, [], "a read share grants no write reach");
 });
 
-test("a READ_WRITE share's workspace is both a read and a write root", async () => {
+test("a READ_WRITE share's top-level entries are both read and write roots", async () => {
   const cap = await channelTurn("writer", "write-share");
   const policy = policyOf(cap);
-  assert.deepEqual(policy.read_paths, [W_HOME, W_X]);
-  assert.deepEqual(policy.write_paths, [W_X]);
+  assert.deepEqual(sorted(policy.read_paths), sorted([W_HOME, ...X_ROOTS]));
+  assert.deepEqual(sorted(policy.write_paths), sorted(X_ROOTS));
+});
+
+test("a share never reaches the shared project's bots subtree; its other top-level entries are covered", async () => {
+  const read = policyOf(await channelTurn("reader", "bots-read"));
+  assert.equal(coversPath(read.read_paths, OTHER_BOT_SESSION), false,
+    "a read share cannot read X/bots/<other>/sessions/x");
+  assert.equal(coversPath(read.read_paths, BOTS_SUBTREE), false);
+  for (const root of X_ROOTS) assert.ok(coversPath(read.read_paths, root), "covered: " + root);
+
+  const rw = policyOf(await channelTurn("writer", "bots-write"));
+  assert.equal(coversPath(rw.write_paths, BOTS_SUBTREE), false, "a read_write share has no write root over X/bots");
+  assert.equal(coversPath(rw.write_paths, OTHER_BOT_SESSION), false);
+  for (const root of X_ROOTS) assert.ok(coversPath(rw.write_paths, root), "covered: " + root);
+});
+
+test("a bot with no write share gets no write_paths key added to its spawn policy (M6)", async () => {
+  const cap = await channelTurn("plainbot", "no-write-key");
+  const policy = policyOf(cap);
+  assert.equal(Object.prototype.hasOwnProperty.call(policy, "write_paths"), false,
+    "an empty share write list leaves the def's policy untouched: " + JSON.stringify(policy));
+  assert.deepEqual(policy.read_paths, [W_HOME]);
 });
 
 test("a SUSPENDED share adds no root, at either level", async () => {
@@ -310,11 +448,22 @@ test("the world reports the loaded shares as projectShares for a later UI read",
   assert.deepEqual(world.projectShares, [
     { project_id: P_X, level: "read_write", workspace_dir: W_X, name: "Shared X", suspended: false },
   ]);
-  assert.deepEqual(world.extraReadPaths, [W_X]);
-  assert.deepEqual(world.extraWritePaths, [W_X]);
+  assert.deepEqual(sorted(world.extraReadPaths), sorted(X_ROOTS), "one root per top-level entry, never X/bots");
+  assert.deepEqual(sorted(world.extraWritePaths), sorted(X_ROOTS));
   const reader = await buildBotWorld({ botId: "reader", threadId: "world-shares-read", gatewayType: "gmail" });
-  assert.deepEqual(reader.extraReadPaths, [W_X]);
+  assert.deepEqual(sorted(reader.extraReadPaths), sorted(X_ROOTS));
   assert.deepEqual(reader.extraWritePaths, [], "a read share never reaches the write roots");
+});
+
+test("a top-level entry created after a spawn is out of that spawn's reach and in the next one", async () => {
+  const before = policyOf(await channelTurn("reader", "late-before"));
+  const late = join(W_X, "late-comer.txt");
+  writeFileSync(late, "late\n");
+  try {
+    assert.equal(coversPath(before.read_paths, late), false, "the earlier spawn's fixed roots cannot reach it");
+    const after = policyOf(await channelTurn("reader", "late-after"));
+    assert.ok(coversPath(after.read_paths, late), "the next spawn grants it");
+  } finally { rmSync(late, { force: true }); }
 });
 
 test("bypass permission mode is unchanged by shares: read_paths and write_paths are still '/'", async () => {
@@ -404,8 +553,9 @@ test("PERCH open-anywhere, READ share: the chosen cwd stays writable, the shared
   const readPaths = effectiveReadPaths(pi.opts.def, {
     projectWorkspaceDir: pi.opts.projectWorkspaceDir, extra: pi.opts.extraReadPaths,
   });
-  assert.ok(readPaths.includes(W_X), "the shared project's workspace is readable");
-  assert.ok(!pi.opts.extraWritePaths.includes(W_X), "the read share is not in the child's write roots");
+  for (const root of X_ROOTS) assert.ok(readPaths.includes(root), "the shared top-level entry " + root + " is readable");
+  assert.ok(!coversPath(readPaths, OTHER_BOT_SESSION), "the shared project's bots subtree is not readable");
+  assert.ok(!coversPath(pi.opts.extraWritePaths, X_ROOTS[0]), "the read share is not in the child's write roots");
 });
 
 test("PERCH: a READ_WRITE share's workspace joins the child's write roots too", async () => {
@@ -417,7 +567,8 @@ test("PERCH: a READ_WRITE share's workspace joins the child's write roots too", 
   const pi = state.instances[0];
   assert.ok(pi, "the engine started a child");
   const outputsDir = join(pi.opts.sessionDir, "outputs", r.sessionId);
-  assert.deepEqual(pi.opts.extraWritePaths, [outputsDir, chosen, W_X]);
+  assert.deepEqual(sorted(pi.opts.extraWritePaths), sorted([outputsDir, chosen, ...X_ROOTS]));
+  assert.equal(coversPath(pi.opts.extraWritePaths, BOTS_SUBTREE), false, "never X's bots subtree");
 });
 
 // ---------------------------------------------------------------------------
