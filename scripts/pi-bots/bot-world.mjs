@@ -144,13 +144,15 @@ export function botGrantsServer(def, server) {
  * Artifacts smoke fixes S2a (review M7): `artifact_update` is answered with
  * `needs_link` from an unlinked Perch chat, and the way out is
  * `artifact_attach` (plus `artifact_find` to name the artifact). A def that
- * grants Update per tool therefore also needs those two. PURE: returns a new
+ * grants Update per tool therefore also needs those two — and, since a source
+ * too big for one tool argument is refused inline, the two-step upload
+ * (`artifact_upload_begin` + `artifact_upload_commit`). PURE: returns a new
  * list with any missing companion appended; a whole-server `artifacts` grant
  * (which already covers them) or a list without Update is returned as is.
  * Callers (scripts/pi-bots/artifacts-companions.mjs) write the result INTO the
  * stored def — never at runtime — so every crow_mcp consumer sees it.
  */
-const ART_COMPANIONS = ["artifact_find", "artifact_attach"];
+const ART_COMPANIONS = ["artifact_find", "artifact_attach", "artifact_upload_begin", "artifact_upload_commit"];
 export function withArtifactsCompanions(crowMcp) {
   const list = Array.isArray(crowMcp) ? crowMcp.slice() : [];
   const has = (tool) => list.includes(`artifacts/${tool}`) || list.includes(`artifacts__${tool}`);

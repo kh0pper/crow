@@ -693,6 +693,21 @@ test("funnel: the Workspace live-edit API (/api/workspace/live) is never funnel-
   assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => "/api/workspace/live/v1/pending".startsWith(p)));
 });
 
+// The Artifacts two-step upload (bundles/artifacts/server/uploads.js): the PUT leg carries no
+// cookie and no token — its PATH is the capability — so it must never be reachable from Funnel,
+// where anyone who saw a URL could complete someone else's upload.
+test("funnel: the Artifacts upload PUT leg is never funnel-exposed", async () => {
+  for (const path of ["/artifacts/upload", "/artifacts/upload/", `/artifacts/upload/${"a".repeat(64)}`]) {
+    assert.equal(runFunnelMw(path).statusCode, 403, path);
+    assert.equal(runFunnelMw(path, { funnel: false }).nexted, true, `${path} without the Funnel header passes this layer (the token is the gate)`);
+  }
+  const { isFunnelPublicPath, PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const path of ["/artifacts/upload", `/artifacts/upload/${"a".repeat(64)}`]) {
+    assert.equal(isFunnelPublicPath(path), false, path);
+    assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+  }
+});
+
 test("funnel: public prefixes pass, lookalike paths are rejected", () => {
   assert.equal(runFunnelMw("/blog").nexted, true);
   assert.equal(runFunnelMw("/blog/feed.xml").nexted, true);

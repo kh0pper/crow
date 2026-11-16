@@ -23,6 +23,14 @@ export const LIMITS = Object.seal({
   // Not a D17 number: marked has a cliff on long escape-dense input and the
   // document type renders in the gateway process (renderer.js BOT_MD_MAX_INPUT).
   documentMarkdownBytes: 256 * 1024,
+  // A source that came inline (one tool argument) is bounded by the model's
+  // OUTPUT-token limit, not by storage: a 31 KB page lost characters twice at
+  // the hand of the model. Over this, the inline tools point at the two-step
+  // upload (artifact_upload_begin → PUT → artifact_upload_commit).
+  inlineSourceChars: 24_000,
+  // One uploaded file (the upload route, in memory until committed). Markdown
+  // is additionally bounded by documentMarkdownBytes.
+  uploadBytes: 4 * 1024 * 1024,
   titleChars: 200,
   changeNoteChars: 2000,
   summaryChars: 4000,

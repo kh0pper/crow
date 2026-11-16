@@ -484,7 +484,7 @@ export async function mountMcpServers(app, deps) {
     const artDir = join(resolveCrowHome(), "bundles", "artifacts", "server");
     if (existsSync(join(artDir, "mcp.js"))) {
       const imp = (f) => import(pathToFileURL(join(artDir, f)).href);
-      const [{ createArtifactsMcpServer }, { initArtifactsTables }, { createBlobStore }, artStore] = await Promise.all(["mcp.js", "init-tables.js", "blob-store-minio.js", "store.js"].map(imp));
+      const [{ createArtifactsMcpServer }, { initArtifactsTables }, { createBlobStore }, artStore, uploads] = await Promise.all(["mcp.js", "init-tables.js", "blob-store-minio.js", "store.js", "uploads.js"].map(imp));
       const { resolveDataDir } = await import("../../db.js");
       const { markdownBlocks } = await import("../../blog/renderer.js");
       const artDb = createDbClient();
@@ -492,8 +492,10 @@ export async function mountMcpServers(app, deps) {
       const { minted } = await ensureArtifactsToken(artDb);
       if (minted) console.log("[gateway] artifacts token minted");
       // S2a (review M7): once per instance, defs that grant artifact_update
-      // get artifact_find + artifact_attach written in (cap-guarded) — the
-      // needs_link recovery path. Off the boot path; never throws.
+      // get the companion tools written in (cap-guarded) — artifact_find and
+      // artifact_attach (the needs_link recovery path) and the two-step upload
+      // (artifact_upload_begin + artifact_upload_commit, for a source too big
+      // to send in one argument). Off the boot path; never throws.
       setImmediate(async () => {
         try { (await import("../../../scripts/pi-bots/artifacts-companions.mjs")).migrateArtifactsCompanions(artDb, { notify: (n) => createNotification(artDb, n) }).catch(() => {}); }
         catch (e) { console.warn(`[gateway] artifacts companion migration: ${e.message}`); }
@@ -538,6 +540,15 @@ export async function mountMcpServers(app, deps) {
       try { design = (await imp("design.js")).createDesign({ crowHome: resolveCrowHome(), db: artDb }); }
       catch (e) { console.warn(`[gateway] artifacts: the Design kit seam could not be loaded (${e.message}); saving without the kit`); }
       mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks, design }, onRoundDone, emitExternal, cardMadeByOwner: (id) => cardMadeByOwner(id) }), sessionManager, authMiddleware, peerExposureGate);
+      // The two-step upload's PUT leg (artifact_upload_begin → PUT → commit): the
+      // URL path IS the capability (32 random bytes, stored only as a sha256, in
+      // memory in uploads.js), so there is no cookie, no token and no CSRF check
+      // — a bot has no session cookie. It is NOT a Funnel path (it is not in
+      // PUBLIC_FUNNEL_PREFIXES, so the funnel middleware refuses it), and it is
+      // not under /dashboard, so nothing else authenticates it. The handler caps
+      // the body itself, so it is exempt from the global 1mb JSON parser (see
+      // servers/gateway/index.js _hasOwnParser).
+      app.put(`${uploads.UPLOAD_PATH_PREFIX}/:upload_id`, uploads.handleUploadPut);
       const { readReservation } = await import("../box-reservation.js");
       const botDefOf = async (botId) => { const r = (await artDb.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0]; try { return r ? JSON.parse(r.definition || "{}") : null; } catch { return null; } };
       // R2-M5/R2-M2: the sweep runs whether or not a Perch engine exists

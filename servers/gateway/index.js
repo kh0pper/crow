@@ -589,7 +589,8 @@ app.use("/dashboard/login", dashboardLoginLimiter);
 // /dashboard/perch-api/interactive/:sid/{files,message} (10mb parsers in
 // perch-interactive-api.js — Track 3 Task 9: a 5MB post-decode base64 file
 // upload is ~6.7MB of JSON text, and 3 × 2MB post-decode message images are
-// ~8.4MB). /api/workspace/live/v1/ (Crow Workspace K5 plugin endpoints): the bundle's
+// ~8.4MB). /artifacts/upload/ (the Artifacts two-step upload's PUT leg) streams
+// its own body under the bundle's upload cap. /api/workspace/live/v1/ (Crow Workspace K5 plugin endpoints): the bundle's
 // router parses its own body (256kb) only AFTER the editor token was verified.
 // /dashboard/services/api/ (project Services): its connect route parses its own 16kb body so a
 // malformed one (it may hold a pasted secret) is refused without its parser message being logged.
@@ -601,9 +602,12 @@ const _jsonParser = express.json({ limit: "1mb" });
 // bodies carry a draft's addresses and text and a malformed one must be refused by that router's
 // fixed handler, not logged by the global one. Both patterns allow a trailing slash: Express routes
 // non-strictly, so `/…/edit/` reaches the same route with its own parser — it must not be handed to
-// the global one first.
+// the global one first. The Artifacts two-step upload's PUT leg (bundles/artifacts/server/uploads.js) is
+// here for the same reason: its handler streams the body under the upload cap (4 MiB) and stops at it,
+// so the 1mb parser must not eat (or 413) the file first. TWO LINES, always (a test reads this predicate
+// out of this file with a two-line regex).
 const _hasOwnParser = (p) => p.toLowerCase().startsWith("/llm") || p.toLowerCase().startsWith("/api/workspace/live/v1/") || /^\/s\/[^/]+\/feedback$/.test(p) ||
-  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p) || /^\/dashboard\/perch-api\/staged\/[^/]+\/(send|edit|discard)\/?$/i.test(p) || /^\/dashboard\/mail\/api\//i.test(p);
+  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p) || /^\/dashboard\/perch-api\/staged\/[^/]+\/(send|edit|discard)\/?$/i.test(p) || /^\/dashboard\/mail\/api\//i.test(p) || p.toLowerCase().startsWith("/artifacts/upload/");
 app.use((req, res, next) => (_hasOwnParser(req.path) ? next() : _jsonParser(req, res, next)));
 
 // --- Static files (PWA manifest, service worker, icons) ---

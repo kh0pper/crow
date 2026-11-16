@@ -8,6 +8,8 @@ import * as rounds from "./rounds.js";
 import { sessionIsClean, markSessionTainted } from "./trust.js";
 import { notifyHub } from "./notify-hub.js";
 import { activeLink } from "./links.js";
+import { LIMITS } from "./limits.js";
+import { beginUpload, takeUpload, dropUpload } from "./uploads.js";
 
 // Header values are TRIMMED so the attributed id always equals the id the
 // signature was made over (the MAC trims on both sides; review 1a-L2).
@@ -157,12 +159,39 @@ export const TOOL_CLASSES = Object.freeze({
   artifact_create: "writes", artifact_update: "writes", artifact_get: "reads-untrusted", artifact_list: "reads-owner-metadata",
   artifact_comments: "reads-untrusted", artifact_reply: "writes", artifact_resolve: "writes", artifact_round_done: "writes",
   artifact_attach: "writes", artifact_find: "reads-owner-metadata",
+  artifact_upload_begin: "writes", artifact_upload_commit: "writes",
 });
 // CONTRACT: error text reaches the wire UNGATED, so every message thrown at a
 // caller must be a static string — never interpolate a title, change note,
 // comment or any other authored value into an Error message here (review
 // 1a-L1; pinned by the error-path sentinel sweep in tests/artifacts-mcp.test.js).
 const fail = (e) => ({ content: [{ type: "text", text: `[${e.code || "error"}] ${e.message}` }], isError: true });
+
+/** The source fields a caller sends as one tool argument. A text longer than
+ *  LIMITS.inlineSourceChars cannot be written reliably by a model (the output
+ *  limit truncates it), so the INLINE tools refuse it before any store call and
+ *  point at the two-step upload. Assets are not affected (base64 files were
+ *  never token-bound). */
+const INLINE_SOURCE_FIELDS = ["html", "markdown", "svg", "source"];
+export const TOO_BIG_INLINE = "this source is too big to send inline: use artifact_upload_begin, PUT the file to its put_url, then artifact_upload_commit";
+function assertInlineSize(source) {
+  if (!source || typeof source !== "object") return;
+  for (const f of INLINE_SOURCE_FIELDS) {
+    const v = source[f];
+    if (typeof v === "string" && v.length > LIMITS.inlineSourceChars) throw Object.assign(new Error(TOO_BIG_INLINE), { code: "too_big_inline" });
+  }
+}
+
+/** The gateway origin this MCP request came in on: the same base URL the bot's
+ *  own artifacts entry points at, so an upload's put_url works with curl as is. */
+function baseUrlOf(extra) {
+  try {
+    const raw = extra?.requestInfo?.url;
+    const url = raw instanceof URL ? raw : (raw ? new URL(String(raw)) : null);
+    if (url && url.origin && url.origin !== "null") return url.origin;
+  } catch { /* fall through to the loopback default */ }
+  return `http://127.0.0.1:${process.env.CROW_GATEWAY_PORT || 3001}`;
+}
 
 /** Spec §4.1: the tool-level `libs` joins source.libs (deduplicated, order
  *  kept). A non-array source.libs is left alone for the renderer to refuse. */
@@ -256,26 +285,44 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
         if (scope) scope.roundThreads = roundThreads;
         // R2-M1: a locked session writes only to its own round's threads.
         if (scope && args.thread_id !== undefined && !roundThreads.has(Number(args.thread_id))) throw Object.assign(new Error("this round is limited to its own threads"), { code: "forbidden" });
-        return ok(gate(await fn(args, actor, scope), actor, scope, roundThreads));
+        return ok(gate(await fn(args, actor, scope, { baseUrl: baseUrlOf(extra) }), actor, scope, roundThreads));
       } catch (e) { return fail(e); }
     });
   };
   const scopedOut = (scope) => { if (scope) throw Object.assign(new Error("not available in this round"), { code: "forbidden" }); };
 
-  tool("artifact_create", 'Create an artifact the owner can view and comment on. Every source field is a plain string. type page: source {"html": "<!doctype html>…"} (+ assets, libs). type document: source {"markdown": "# Title…"} (with the Design kit, ```vega-lite / ```mermaid / ```d2 fences become pictures). type diagram: source {"svg": "<svg…>…</svg>"}, or {"engine": "mermaid", "source": "…"} with the Design kit.',
-    { title: z.string(), type: z.enum(["page", "document", "diagram"]), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional() },
-    async (a, actor, scope) => {
-      scopedOut(scope);
-      // Re-read at save time: a bot whose session is not provably clean makes a tainted version.
-      const untrusted = actor.kind === "bot" && !(await sessionIsClean(db, actor.id, actor.thread));
-      const out = await store.createArtifact(db, blobs, { title: a.title, type: a.type, source: withLibs(a.source, a.libs), actor, changeNote: a.change_note, untrusted }, await depsFor(actor));
-      if (!out.duplicate) await hub(out.id, 1, "create");   // a client retry already has its card
-      return withDesign({ id: out.id, versionN: out.versionN }, out);
-    });
+  /** doUpdate's cheap pre-checks, up front for artifact_upload_begin: the
+   *  access check always, and the needs_link gate for a Perch chat that holds
+   *  no round for this artifact yet (a chat WITH one is left to the commit,
+   *  which is the only place that can ask for its round_id). Nothing is
+   *  audited here: a begin that stops is not an attempt to write yet. */
+  const earlyUpdateGate = async (artifactId, actor, scope) => {
+    await store.requireAccess(db, actor, artifactId);
+    if (scope || !isPerchChat(actor)) return;
+    const bound = (await db.execute({ sql: `SELECT id FROM artifact_rounds WHERE artifact_id=? AND bot_id=? AND session_id=? AND status IN (${rounds.ACTIVE.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`, args: [String(artifactId), actor.id, actor.thread, ...rounds.ACTIVE] })).rows[0];
+    if (bound) return;
+    if (await chatMayWrite(db, artifactId, actor, { cardMadeByOwner })) throw needsLink();
+  };
 
-  tool("artifact_update", "Make a new version: the whole source again, same shape as artifact_create (plain strings). During a feedback round pass round_id and base_version.",
-    { artifact_id: z.string(), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional(), round_id: z.number().int().optional(), base_version: z.number().int().optional() },
-    async (a, actor, scope) => {
+  // ── The two write bodies ──────────────────────────────────────────────
+  // artifact_create/artifact_update and artifact_upload_commit share them, so
+  // every gate (scope, round, ask-first/link, policy, taint, versioning,
+  // audit, round bookkeeping, hub) applies to a committed upload exactly as it
+  // does to an inline save. `inline` is false only for a commit: text that
+  // came over the upload route never had to fit in one tool argument.
+
+  const doCreate = async (a, actor, scope, { inline = true } = {}) => {
+    scopedOut(scope);
+    if (inline) assertInlineSize(a.source);
+    // Re-read at save time: a bot whose session is not provably clean makes a tainted version.
+    const untrusted = actor.kind === "bot" && !(await sessionIsClean(db, actor.id, actor.thread));
+    const out = await store.createArtifact(db, blobs, { title: a.title, type: a.type, source: withLibs(a.source, a.libs), actor, changeNote: a.change_note, untrusted }, await depsFor(actor));
+    if (!out.duplicate) await hub(out.id, 1, "create");   // a client retry already has its card
+    return withDesign({ id: out.id, versionN: out.versionN }, out);
+  };
+
+  const doUpdate = async (a, actor, scope, { inline = true } = {}) => {
+    if (inline) assertInlineSize(a.source);
       // F7(4): a bot whose chat is mid-round for THIS artifact must attribute
       // its update to the round — the smoke's v2 landed with round_id NULL
       // against the ask-round instructions, so BOTH kinds block: an ask's
@@ -345,6 +392,83 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       }
       await hub(a.artifact_id, v.n, "update");
       return withDesign({ version: v.n, state: v.state }, v);
+  };
+
+  tool("artifact_create", 'Create an artifact the owner can view and comment on. Every source field is a plain string. type page: source {"html": "<!doctype html>…"} (+ assets, libs). type document: source {"markdown": "# Title…"} (with the Design kit, ```vega-lite / ```mermaid / ```d2 fences become pictures). type diagram: source {"svg": "<svg…>…</svg>"}, or {"engine": "mermaid", "source": "…"} with the Design kit. A source over 24000 characters is refused: use artifact_upload_begin.',
+    { title: z.string(), type: z.enum(["page", "document", "diagram"]), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional() },
+    (a, actor, scope) => doCreate(a, actor, scope));
+
+  tool("artifact_update", "Make a new version: the whole source again, same shape as artifact_create (plain strings). During a feedback round pass round_id and base_version. A source over 24000 characters is refused: use artifact_upload_begin, PUT the file, then artifact_upload_commit.",
+    { artifact_id: z.string(), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional(), round_id: z.number().int().optional(), base_version: z.number().int().optional() },
+    (a, actor, scope) => doUpdate(a, actor, scope));
+
+  // ── Two-step upload (a big source never travels in one tool argument) ────
+  // artifact_upload_begin mints a one-time PUT URL; the bot PUTs the file to it
+  // (bundle server/uploads.js — in-memory staging, no table);
+  // artifact_upload_commit then runs doCreate/doUpdate on the stored text. Every
+  // validation, version, audit, round, ask-first and link gate is the inline
+  // one's, unchanged.
+  const UPLOAD_ARGS_HELP = 'put_url is on this gateway (the base URL of your artifacts MCP entry, e.g. http://127.0.0.1:3001); PUT the raw file with `curl -sS -T page.html "<put_url>"`. The file must be UTF-8 text, and the upload expires in 10 minutes.';
+  tool("artifact_upload_begin", 'First step for a source too big to send inline: get a one-time upload URL. PUT the file to put_url, then call artifact_upload_commit with the upload_id. ' + UPLOAD_ARGS_HELP,
+    {
+      field: z.enum(["html", "markdown", "svg", "source"]).describe("the source field the file fills: page html, document markdown, diagram svg, or a Design-kit diagram's source text"),
+      artifact_id: z.string().optional().describe("the artifact this upload will update (omit for a new artifact)"),
+      bytes: z.number().int().describe("the file's size in bytes, as declared now"),
+      sha256: z.string().optional().describe("the file's sha256 in hex, if you know it: a file that does not match is refused"),
+    },
+    async (a, actor, scope, ctx) => {
+      // A verified bot or the operator only (an unattributed caller never got
+      // this far: the wrapper refuses it). A scoped/locked session may target
+      // only its own round's artifact, and may not create.
+      if (actor.kind !== "bot" && actor.kind !== "session") throw Object.assign(new Error("unattributed caller"), { code: "forbidden" });
+      if (a.artifact_id == null) scopedOut(scope);
+      else await earlyUpdateGate(a.artifact_id, actor, scope);
+      const b = beginUpload({ actor, field: a.field, artifactId: a.artifact_id ?? null, declaredBytes: a.bytes, sha256: a.sha256 ?? null });
+      const putUrl = ctx.baseUrl + b.path;
+      return { upload_id: b.token, put_url: putUrl, expires_at: new Date(b.expiresAt).toISOString(), max_bytes: b.maxBytes, how: `curl -sS -T <file> "${putUrl}"` };
+    });
+
+  /** The source a committed upload becomes: its field's text, plus the short
+   *  fields the upload carries as tool arguments (they are small by nature). */
+  const sourceFromUpload = (entry, a) => {
+    const source = { [entry.field]: entry.bytes };
+    if (a.engine) source.engine = a.engine;
+    if (a.lang) source.lang = a.lang;
+    if (a.doc_title) source.title = a.doc_title;
+    return source;
+  };
+
+  tool("artifact_upload_commit", 'Second step: turn an uploaded file into a new artifact (mode "create", with title and type) or a new version (mode "update", like artifact_update: pass round_id and base_version during a feedback round). Runs every check the inline tools run. ' + UPLOAD_ARGS_HELP,
+    {
+      upload_id: z.string().describe("the upload_id artifact_upload_begin returned"),
+      mode: z.enum(["create", "update"]),
+      artifact_id: z.string().optional().describe("update: the artifact to add a version to"),
+      title: z.string().optional().describe("create: the artifact's title"),
+      type: z.enum(["page", "document", "diagram"]).optional().describe("create: page, document or diagram"),
+      libs: libsSchema,
+      change_note: z.string().optional(),
+      round_id: z.number().int().optional(),
+      base_version: z.number().int().optional(),
+      engine: z.string().optional().describe("field source only: the Design kit engine, vega-lite, mermaid or d2"),
+      lang: z.string().optional().describe("document: its language, en or es"),
+      doc_title: z.string().optional().describe("document: its title"),
+    },
+    async (a, actor, scope) => {
+      // TakeUpload marks the entry used BEFORE the store runs (one use), and the
+      // entry is dropped whatever happens next: a failed commit needs a fresh
+      // upload, never a retry of the same token.
+      const entry = takeUpload(a.upload_id, actor);
+      try {
+        const source = sourceFromUpload(entry, a);
+        if (a.mode === "create") {
+          if (a.type == null) throw Object.assign(new Error("create needs a type: page, document or diagram"), { code: "bad_request" });
+          return await doCreate({ title: a.title, type: a.type, source, libs: a.libs, change_note: a.change_note }, actor, scope, { inline: false });
+        }
+        const artifactId = a.artifact_id ?? entry.artifactId;
+        if (artifactId == null) throw Object.assign(new Error("update needs artifact_id"), { code: "bad_request" });
+        if (entry.artifactId != null && String(artifactId) !== entry.artifactId) throw Object.assign(new Error("this upload was started for another artifact"), { code: "forbidden" });
+        return await doUpdate({ artifact_id: artifactId, source, libs: a.libs, change_note: a.change_note, round_id: a.round_id, base_version: a.base_version }, actor, scope, { inline: false });
+      } finally { dropUpload(entry); }
     });
 
   tool("artifact_get", "Read an artifact: metadata, current version, source.",
