@@ -448,6 +448,30 @@ test("the emitted shell script follows the panel's inline rules and names the wi
     /\.st-top \.st-side-toggle \{[^}]*-webkit-touch-callout:\s*none/,
     "and a press on it is never a callout",
   );
+  assert.match(
+    SHELL_CSS,
+    /\.studio \{\s*overflow: hidden; overflow: clip;\s*\}/,
+    "the page clips what runs past it without becoming a scroll container",
+  );
+  assert.ok(
+    SHELL_CSS.indexOf("overflow: clip") < SHELL_CSS.indexOf(".studio .st-top {"),
+    "and that rule lands before the sticky top bar it lets stick",
+  );
+  assert.match(
+    SHELL_CSS,
+    /\.studio \.st-top \{[^}]*position:\s*sticky/,
+    "the top bar sticks to the top of the page",
+  );
+  assert.match(
+    SHELL_CSS,
+    /\.studio \.st-widget-head \{[^}]*touch-action:\s*pan-y/,
+    "a swipe that starts on a frame header reaches the tab handler",
+  );
+  assert.match(
+    SHELL_CSS,
+    /\.studio \.st-chrome\[hidden\] \{\s*display:\s*none/,
+    "the emptied header the page rendered is taken out of the page",
+  );
 });
 
 test("the top bar carries the page's own controls and the new mode switch and layout menu", async () => {
@@ -1305,6 +1329,127 @@ test("the side panels toggle still works when the browser keeps nothing", async 
   assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor", "history"], "editing shows the side panels");
   click(b.domWindow, layoutEntry(b.page, "layout-edit"));
   assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor"], "and Done hides them again");
+
+  b.shell.destroy();
+});
+
+// ---- the unread mark has somewhere to show -------------------------------
+
+/** The Layout menu's own row for the agent widget. */
+function agentRow(page) {
+  return page.querySelector("[data-role=layout-entries] [data-act=layout-agent]");
+}
+
+/** The unread dot inside that row. */
+function agentRowDot(page) {
+  return agentRow(page).querySelector("[data-role=unread-menu]");
+}
+
+/** A reply written into the agent's log while nobody is looking at it. */
+function writeReply(b, text) {
+  const ask = b.page.querySelector("[data-role=ask]");
+  const row = b.document.createElement("div");
+  row.className = "st-ask-reply";
+  row.textContent = text;
+  ask.appendChild(row);
+}
+
+test("the agent's Layout row brings it onto the page, and carries the unread dot a hidden panel cannot", async () => {
+  const b = await bootShell();
+  const row = agentRow(b.page);
+  assert.ok(row, "the Layout menu carries one row for the agent");
+  assert.equal(row.textContent, "Agent");
+  assert.equal(row.getAttribute("aria-pressed"), "false", "the agent starts in the tray");
+  assert.equal(agentRowDot(b.page).hasAttribute("hidden"), true, "nothing unread yet");
+
+  click(b.domWindow, b.page.querySelector("[data-act=layout-menu]"));
+  click(b.domWindow, row);
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history", "agent"], "the row shows the agent");
+  assert.equal(row.getAttribute("aria-pressed"), "true");
+
+  // Hide the side panels: the frame goes, and with it the only place the mark
+  // had to show. The reply must still be marked where the operator can see it.
+  click(b.domWindow, sideToggle(b.page));
+  assert.equal(frame(b.page, "agent").hasAttribute("hidden"), true);
+  assert.equal(b.document.querySelector("#st-ask"), b.refs.askInput, "the box is still on the page");
+
+  writeReply(b, "A two-track sketch at 120.");
+  await tick();
+
+  assert.equal(agentRowDot(b.page).hasAttribute("hidden"), false, "the mark is on the control still on the page");
+  assert.equal(frame(b.page, "agent").hasAttribute("hidden"), true, "and the frame it belongs to is still away");
+
+  click(b.domWindow, sideToggle(b.page));
+  assert.equal(frame(b.page, "agent").hasAttribute("hidden"), false, "the panels are back");
+  assert.equal(agentRowDot(b.page).hasAttribute("hidden"), true, "the agent is on the page, so the row carries no mark");
+  assert.equal(unreadDot(b.page).hasAttribute("hidden"), true, "and opening the page clears it");
+  assert.equal(
+    b.page.querySelector("[data-role=ask]").textContent.includes("two-track sketch"),
+    true,
+    "the reply the mark was about is in the log",
+  );
+
+  b.shell.destroy();
+});
+
+test("a reply behind another phone tab marks the agent's own tab", async () => {
+  const b = await bootShell({ width: 500 });
+  b.layout.saveLayout(b.storage, SONG, "compose", "phone", {
+    v: 1,
+    shown: [{ id: "scene-grid", size: "l" }, { id: "agent", size: "s" }],
+  });
+  b.shell.refresh();
+
+  const agentTab = () => tabNodes(b.page).find((node) => node.getAttribute("data-widget-tab") === "agent");
+  const agentTabDot = () => agentTab().querySelector("[data-role=unread-tab]");
+  assert.deepEqual(tabLabels(b.page), ["Scene grid", "Agent"], "the agent has a tab of its own");
+  assert.equal(activeTab(b.page).textContent, "Scene grid", "the grid is the tab in front");
+  assert.equal(agentTabDot().hasAttribute("hidden"), true, "nothing unread yet");
+
+  writeReply(b, "A two-track sketch at 120.");
+  await tick();
+
+  assert.equal(agentTabDot().hasAttribute("hidden"), false, "the agent's tab says a reply is waiting");
+  assert.equal(frame(b.page, "agent").hasAttribute("hidden"), true, "and the frame is behind that tab");
+
+  click(b.domWindow, agentTab());
+  assert.equal(activeTab(b.page).textContent, "Agent", "opening the tab is how the reply is read");
+  assert.equal(agentTabDot().hasAttribute("hidden"), true, "and the mark goes with it");
+  assert.equal(unreadDot(b.page).hasAttribute("hidden"), true);
+
+  b.shell.destroy();
+});
+
+// ---- the page's own header, and its listeners ----------------------------
+
+test("the header the shell emptied takes no room, and destroy puts the row back", async () => {
+  const b = await bootShell();
+  const chrome = b.page.querySelector(".st-chrome");
+  assert.ok(chrome, "the handler renders a header around the four controls");
+  assert.equal(chrome.hasAttribute("hidden"), true, "the emptied row is out of the page");
+  assert.equal(chrome.children.length, 0, "nothing is left in it either");
+
+  b.shell.destroy();
+
+  assert.equal(chrome.hasAttribute("hidden"), false, "the row the page drew is back");
+  for (const node of [b.refs.back, b.refs.title, b.refs.modes, b.refs.presence]) {
+    assert.equal(node.parentNode, chrome, "every control the shell moved is back where the page put it");
+  }
+});
+
+test("rebuilding a frame's edit controls leaves the listener count flat", async () => {
+  const b = await bootShell();
+  startEditing(b);
+  const before = b.shell.listenerCount();
+  assert.ok(before > 0, "the shell records the listeners it adds");
+
+  for (let i = 0; i < 5; i += 1) {
+    click(b.domWindow, frameAct(b, "editor", "widget-size"));
+  }
+
+  assert.equal(b.shell.listenerCount(), before, "five rebuilds of the editor's controls added no record");
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"], "and the frames are where they were");
+  assert.ok(frameAct(b, "editor", "widget-size"), "the editor still carries its own Size control");
 
   b.shell.destroy();
 });

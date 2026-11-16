@@ -946,11 +946,26 @@ test("the toast sits above the transport bar and the page ends above it", async 
   );
   assert.match(
     styles,
-    /\.studio \.st-toast \{\s*bottom:\s*calc\(var\(--st-transport-h, 0px\) \+ 24px\)/,
-    "the toast rises by the bar's own height",
+    /\.studio \.st-toast \{\s*bottom:\s*calc\(var\(--crow-player-h, 0px\) \+ var\(--shell-tabs-h, 0px\) \+ var\(--st-transport-h, 0px\) \+ 24px\)/,
+    "the toast rises by the player bar, the shell's tabs and the bar",
   );
   assert.match(styles, /\.studio \.st-transport-bar \{[^}]*z-index:\s*1050/, "the bar's layer");
   assert.match(styles, /\.studio \.st-toast \{[^}]*z-index:\s*1200/, "and the toast is above it");
+  assert.match(
+    styles,
+    /\.studio \{\s*overflow: hidden; overflow: clip;\s*\}/,
+    "the page clips without becoming a scroll container, so the top bar can stick",
+  );
+  assert.match(
+    styles,
+    /\.studio \.st-chrome\[hidden\] \{\s*display:\s*none/,
+    "the emptied header the shell takes out of the page stays out",
+  );
+  assert.match(
+    styles,
+    /\.studio \.st-widget-head \{[^}]*touch-action:\s*pan-y/,
+    "a swipe that starts on a frame header reaches the handler",
+  );
 
   // One style block: the page carries the shell's rules as well as its own.
   assert.match(styles, /\.studio \.st-widget\b/, "the shell's widget rules are in the page");

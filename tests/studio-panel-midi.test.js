@@ -2051,6 +2051,117 @@ async function mousePress(page, selector, holdMs = 0) {
   await mouse(page, "mouseReleased", x, y, { buttons: 0 });
 }
 
+/**
+ * The expression that reads one control's own rectangle, in page pixels, after
+ * scrolling it into the middle of the viewport, or null while it has no
+ * rectangle to press (absent, or laid out with no size).
+ * @param {string} selector
+ * @returns {string}
+ */
+function pressBoxExpression(selector) {
+  return `(function () {
+    var node = document.querySelector(${JSON.stringify(selector)});
+    if (!node) return null;
+    node.scrollIntoView({ block: 'center', inline: 'center' });
+    var rect = node.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, w: rect.width, h: rect.height };
+  })()`;
+}
+
+/** @returns {boolean} whether two rectangles are the same place and size */
+function sameBox(one, other) {
+  const near = (a, b) => Math.abs(a - b) < 0.5;
+  return near(one.x, other.x) && near(one.y, other.y) && near(one.w, other.w) && near(one.h, other.h);
+}
+
+/**
+ * One control's rectangle once it has stopped moving: the same on two reads
+ * `settleMs` apart. A rectangle that never stands still in time answers with the
+ * last one read, and a control that is not on the page answers null.
+ * @param {object} page
+ * @param {string} selector
+ * @param {number} settleMs
+ * @param {number} timeoutMs
+ * @returns {Promise<{x: number, y: number, w: number, h: number}|null>}
+ */
+async function settledBox(page, selector, settleMs, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let previous = null;
+  let latest = null;
+  for (;;) {
+    try {
+      latest = await page.evaluate(pressBoxExpression(selector));
+    } catch {
+      latest = null;
+    }
+    if (latest && previous && sameBox(previous, latest)) return latest;
+    previous = latest;
+    if (Date.now() + settleMs >= deadline) return latest;
+    await pause(settleMs);
+  }
+}
+
+/**
+ * Wait until the page is ready for a press: the control is on the page, the
+ * song's own title has replaced the placeholder the page draws before its first
+ * snapshot (`Song`), the replica has drawn the session grid, and the page's own
+ * handlers are attached (the client sets `window.__crowStudioLatency` on the
+ * line after it adds them).
+ * @param {object} page
+ * @param {string} selector the control about to be pressed
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>} whether the page got there in time
+ */
+async function waitForPressable(page, selector, timeoutMs) {
+  const ready = `(function () {
+    if (!document.querySelector(${JSON.stringify(selector)})) return false;
+    var title = document.querySelector('[data-role=title]');
+    var text = title ? String(title.textContent || '').trim() : '';
+    if (text === '' || text === 'Song') return false;
+    if (!document.querySelector('[data-role=grid] .st-corner')) return false;
+    return !!window.__crowStudioLatency;
+  })()`;
+  return !!(await waitFor(page, ready, timeoutMs));
+}
+
+/**
+ * Press one control once, on a page that is ready for it.
+ *
+ * The top bar lays out again as the song's own title and presence arrive, so a
+ * rectangle measured before that can be stale by the time the mouse event lands,
+ * and the event then goes to whatever moved into that place. So the press waits
+ * for the page's own conditions and for the control's rectangle to be the same
+ * on two reads 250 ms apart, and then presses exactly once; what the press
+ * should change is the caller's to wait for. A control that already does its job
+ * may be handed an `already` expression (a mode button, never a toggle).
+ * @param {object} page
+ * @param {string} selector
+ * @param {{already?: string, settleMs?: number, timeoutMs?: number}} [options]
+ * @returns {Promise<{x: number, y: number, w: number, h: number}|null>} the box
+ *   that was pressed, null when the control never became pressable
+ */
+async function pressSettled(page, selector, options = {}) {
+  const settleMs = options.settleMs ?? 250;
+  const timeoutMs = options.timeoutMs ?? 15000;
+  if (!(await waitForPressable(page, selector, timeoutMs))) return null;
+  const box = await settledBox(page, selector, settleMs, timeoutMs);
+  if (!box) return null;
+  if (options.already) {
+    let done = false;
+    try {
+      done = !!(await page.evaluate(options.already));
+    } catch {
+      done = false;
+    }
+    if (done) return box;
+  }
+  await mouse(page, "mouseMoved", box.x, box.y, { button: "none", clickCount: 0 });
+  await mouse(page, "mousePressed", box.x, box.y, { buttons: 1 });
+  await mouse(page, "mouseReleased", box.x, box.y, { buttons: 0 });
+  return box;
+}
+
 /** A song with the FCB1010 test's scenes and one pattern clip, as the operator. */
 async function liveSong(title, scenes = FCB_SCENES) {
   const created = await hub.createSong({ project_id: PROJECT, title, author: LIVE_HUMAN });
@@ -2092,10 +2203,14 @@ test("in Chrome, the operator accepts a bot's FCB1010 proposal and pedal 2 launc
 
   // The controllers are a widget of their own, so Perform — the mode that shows
   // the MIDI widget beside the grid — is where the strip of buttons and the table
-  // it draws are on the page. The press waits for the top bar to settle: it is
-  // laid out again as the song's own title and presence arrive.
-  await pause(500);
-  await mousePress(page, "[data-mode=perform]");
+  // it draws are on the page. The press waits for the top bar's own conditions
+  // (the control on the page, the song's title arrived, the grid drawn, the
+  // page's handlers attached) and for the button's rectangle to stand still: it
+  // is laid out again as the song's own title and presence arrive.
+  const performBox = await pressSettled(page, "[data-mode=perform]", {
+    already: "document.querySelector('[data-mode=perform]').getAttribute('aria-pressed') === 'true'",
+  });
+  assert.ok(performBox, "the Perform button was on the page and was pressed");
   assert.ok(
     await waitFor(page, "document.querySelector('[data-mode=perform]').getAttribute('aria-pressed') === 'true'", 10000),
     "the page is in Perform",
@@ -2105,8 +2220,8 @@ test("in Chrome, the operator accepts a bot's FCB1010 proposal and pedal 2 launc
     "Perform puts the MIDI widget on the page",
   );
 
-  await pause(200);
-  await mousePress(page, "[data-act=midi-connect]");
+  const connectBox = await pressSettled(page, "[data-act=midi-connect]");
+  assert.ok(connectBox, "Connect controllers was on the page and was pressed");
   assert.ok(
     await waitFor(page, "document.querySelector('[data-act=midi-connect]').getAttribute('aria-pressed') === 'true'", 10000),
     "Connect controllers took the fake port",

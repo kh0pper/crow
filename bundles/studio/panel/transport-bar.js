@@ -21,7 +21,9 @@
  * bar measures its own height into `--st-transport-h` on the `.studio` element,
  * which is what the page reserves at its bottom, and `options.sizeClass` says
  * which size class the page is in: a phone keeps the transport controls alone,
- * with the output picker hidden.
+ * with the output picker hidden. The bar watches the page's two width
+ * breakpoints itself, so a rotate or a resize moves the picker even when the
+ * page renders nothing.
  *
  * `hooks` is the page's own reading of the transport:
  * `{snapshot(), isPlaying(), isPaused(), isRecording(), position(),
@@ -164,6 +166,9 @@ export const TRANSPORT_SCRIPT = [
   "    // for its own reason is never overwritten from here.",
   "    var outputHidden = false;",
   "    var pauseDisabled = false;",
+  "    // The width-class queries this bar watches, so the output picker follows a",
+  "    // rotate or a resize even when the page renders nothing.",
+  "    var media = [];",
   "",
   "    function sizeClass() {",
   "      var value = options.sizeClass;",
@@ -186,6 +191,34 @@ export const TRANSPORT_SCRIPT = [
   "      } else if (outputHidden) {",
   "        outputBar.hidden = false;",
   "        outputHidden = false;",
+  "      }",
+  "    }",
+  "",
+  "    // The two breakpoints the page lays out for. A phone rotated into a tablet",
+  "    // moves the picker without anything being rendered, so the bar listens to",
+  "    // them itself and re-applies; a page without matchMedia keeps the class the",
+  "    // last refresh reported.",
+  "    function watchMedia() {",
+  "      if (typeof window.matchMedia !== 'function') return;",
+  "      var queries = [];",
+  "      try {",
+  "        queries.push(window.matchMedia('(min-width: 640px)'));",
+  "        queries.push(window.matchMedia('(min-width: 1024px)'));",
+  "      } catch (err) {",
+  "        return;",
+  "      }",
+  "      for (var i = 0; i < queries.length; i += 1) {",
+  "        var query = queries[i];",
+  "        if (!query) continue;",
+  "        var handler = function () { applySize(); };",
+  "        if (typeof query.addEventListener === 'function') {",
+  "          query.addEventListener('change', handler);",
+  "        } else if (typeof query.addListener === 'function') {",
+  "          query.addListener(handler);",
+  "        } else {",
+  "          continue;",
+  "        }",
+  "        media.push({ query: query, handler: handler });",
   "      }",
   "    }",
   "",
@@ -229,8 +262,18 @@ export const TRANSPORT_SCRIPT = [
   "    }",
   "    refresh();",
   "",
+  "    watchMedia();",
+  "",
   "    function destroy() {",
   "      if (observer) { try { observer.disconnect(); } catch (err) { /* gone */ } }",
+  "      for (var m = 0; m < media.length; m += 1) {",
+  "        var watched = media[m];",
+  "        try {",
+  "          if (typeof watched.query.removeEventListener === 'function') watched.query.removeEventListener('change', watched.handler);",
+  "          else if (typeof watched.query.removeListener === 'function') watched.query.removeListener(watched.handler);",
+  "        } catch (err) { /* gone */ }",
+  "      }",
+  "      media = [];",
   "      for (var i = moved.length - 1; i >= 0; i -= 1) {",
   "        var entry = moved[i];",
   "        if (!entry.parent) continue;",
@@ -264,9 +307,9 @@ export const TRANSPORT_SCRIPT = [
  * The bar is one fixed layer that ENDS on the player bar and the shell's tabs,
  * so it never covers either: its bottom is their two heights added up. The
  * `.studio` element reserves the bar's own measured height, so nothing at the
- * end of the page hides behind it, and the toast moves above it. Every control
- * the bar carries is at least 44 px, and a press on one is a press, never a
- * text selection.
+ * end of the page hides behind it, and the toast clears the player bar, the
+ * shell's tabs and the bar itself. Every control the bar carries is at least
+ * 44 px, and a press on one is a press, never a text selection.
  *
  * The rules belong after the page's own style block: they adjust the toast and
  * the page's bottom padding, and the last rule for a selector is the one that
@@ -300,8 +343,9 @@ export const TRANSPORT_CSS = [
   '  white-space: nowrap;',
   '}',
   '.studio .st-transport-bar .st-scene-next { color: var(--st-text, #E9E6DF); }',
-  '/* The toast is the highest layer of the page and it sits above the bar. */',
-  '.studio .st-toast { bottom: calc(var(--st-transport-h, 0px) + 24px); }',
+  '/* The toast is the highest layer of the page and it sits above the bar, and',
+  '   above the player bar and the shell tabs the bar itself ends on. */',
+  '.studio .st-toast { bottom: calc(var(--crow-player-h, 0px) + var(--shell-tabs-h, 0px) + var(--st-transport-h, 0px) + 24px); }',
 ].join("\n");
 
 /**

@@ -19,8 +19,11 @@
  * and presence arrive after the first draw), so a control's rectangle read the
  * moment it appears can be stale by the time a mouse event lands on it. Every
  * press of a top-bar or transport-bar control therefore goes through
- * `pressSettled`: it waits for the rectangle to stand still, presses, and
- * settles and presses again until the page shows the press took.
+ * `pressSettled`: it waits until the page is really ready to be pressed (the
+ * control is on the page, the song's own title has arrived, the replica has
+ * drawn the grid, the page's handlers are attached) and until the control's own
+ * rectangle has stopped moving, presses ONCE, and leaves the caller to wait for
+ * the state that press should produce.
  */
 
 import { test, before, after } from "node:test";
@@ -465,6 +468,34 @@ async function settledBox(page, selector, settleMs, timeoutMs) {
   }
 }
 
+/**
+ * The document's own scroll height once it has stopped changing: the same on
+ * two reads `settleMs` apart. The replica keeps rendering on after the first
+ * draw, so a height read the moment the page looks ready can still be short,
+ * and scrolling to it lands above the bottom the page ends up with. Answers
+ * with the last height read when it never stands still in time.
+ * @param {object} page
+ * @param {number} settleMs
+ * @param {number} timeoutMs
+ * @returns {Promise<number>} the height in pixels
+ */
+async function settledScrollHeight(page, settleMs = 250, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  let previous = 0;
+  for (;;) {
+    let latest = 0;
+    try {
+      latest = await page.evaluate("document.documentElement.scrollHeight");
+    } catch {
+      latest = 0;
+    }
+    if (latest > 0 && latest === previous) return latest;
+    previous = latest;
+    if (Date.now() + settleMs >= deadline) return latest;
+    await pause(settleMs);
+  }
+}
+
 /** @returns {Promise<boolean>} one read of `doneExpression`, false if it throws */
 async function isDone(page, expression) {
   try {
@@ -475,38 +506,56 @@ async function isDone(page, expression) {
 }
 
 /**
- * Press a top-bar or transport-bar control, and only believe the press once
- * `doneExpression` says it took.
+ * Wait until the page is ready for a press: the control is on the page, the
+ * song's own title has replaced the placeholder the page draws before its first
+ * snapshot (`Song`), the replica has drawn the session grid, and the page's own
+ * handlers are attached (the client sets `window.__crowStudioLatency` on the
+ * line after it adds them).
+ * @param {object} page
+ * @param {string} selector the control about to be pressed
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>} whether the page got there in time
+ */
+async function waitForPressable(page, selector, timeoutMs) {
+  const ready = `(function () {
+    if (!document.querySelector(${JSON.stringify(selector)})) return false;
+    var title = document.querySelector('[data-role=title]');
+    var text = title ? String(title.textContent || '').trim() : '';
+    if (text === '' || text === 'Song') return false;
+    if (!document.querySelector('[data-role=grid] .st-corner')) return false;
+    return !!window.__crowStudioLatency;
+  })()`;
+  return !!(await waitFor(page, ready, timeoutMs));
+}
+
+/**
+ * Press a top-bar or transport-bar control once, on a page that is ready for it.
  *
- * Both bars lay out again as the song's own title and presence arrive, so the
- * rectangle a press measured can be stale by the time the mouse event lands on
- * it — and the event then lands on whatever moved into that place. So the
- * control's rectangle is read twice, 250 ms apart, and only a rectangle that
- * did not move is pressed; a press that does not take settles and is pressed
- * again, up to four times. A control that already does its job is not pressed.
+ * Both bars lay out again as the song's own title and presence arrive, so a
+ * rectangle measured before that can be stale by the time the mouse event lands,
+ * and the event then goes to whatever moved into that place. So the press waits
+ * for the page's own conditions (`waitForPressable`) and for the control's
+ * rectangle to be the same on two reads `settleMs` apart, and then presses
+ * exactly once. What the press should change is the CALLER's to wait for: a
+ * control that toggles is never skipped and never pressed twice.
+ *
+ * A control that is not a toggle (a mode button: Perform, Session,
+ * Arrangement) may be handed an `already` expression: when the page is already
+ * in the state that press would set, the press is not made.
  * @param {object} page
  * @param {string} selector
- * @param {string} doneExpression - what the page shows once the press took
- * @param {{attempts?: number, settleMs?: number, timeoutMs?: number}} [options]
+ * @param {{already?: string, settleMs?: number, timeoutMs?: number}} [options]
  * @returns {Promise<{x: number, y: number, w: number, h: number}|null>} the box
- *   that was pressed (or that already did the job), null when there was none
+ *   that was pressed, null when the control never became pressable
  */
-async function pressSettled(page, selector, doneExpression, options = {}) {
-  const attempts = options.attempts ?? 4;
+async function pressSettled(page, selector, options = {}) {
   const settleMs = options.settleMs ?? 250;
-  const deadline = Date.now() + (options.timeoutMs ?? 20000);
-  let box = null;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    if (Date.now() >= deadline) break;
-    box = await settledBox(page, selector, settleMs, Math.min(8000, Math.max(settleMs * 2, deadline - Date.now())));
-    if (!box) return null;
-    if (await isDone(page, doneExpression)) return box;
-    await clickBox(page.send, box);
-    // Divide what is left of the time between the attempts that remain, so one
-    // slow press cannot spend the whole budget on its own.
-    const share = Math.max(2000, Math.round(Math.max(0, deadline - Date.now()) / (attempts - attempt + 1)));
-    if (await waitFor(page, doneExpression, share)) return box;
-  }
+  const timeoutMs = options.timeoutMs ?? 20000;
+  if (!(await waitForPressable(page, selector, timeoutMs))) return null;
+  const box = await settledBox(page, selector, settleMs, timeoutMs);
+  if (!box) return null;
+  if (options.already && (await isDone(page, options.already))) return box;
+  await clickBox(page.send, box);
   return box;
 }
 
@@ -546,7 +595,9 @@ test("at laptop width the page renders compose, and Perform brings the MIDI widg
     "compose's own widgets are the ones on the page",
   );
 
-  const box = await pressSettled(page, "[data-mode=perform]", MIDI_SHOWN);
+  const box = await pressSettled(page, "[data-mode=perform]", {
+    already: "document.querySelector('[data-mode=perform]').getAttribute('aria-pressed') === 'true'",
+  });
   assert.ok(box, "the Perform button was on the page and was pressed");
   assert.ok(box.w >= 44 && box.h >= 44, `the Perform button is a ${box.w} by ${box.h} target`);
 
@@ -579,19 +630,24 @@ test("Play and Pause work from the transport bar with the page scrolled to the b
     "the transport bar carries Play",
   );
 
+  await settledScrollHeight(page);
   await page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight), true");
+  const atBottom = await waitFor(page, `(function () {
+    var max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    return window.scrollY >= max - 4 || max === 0;
+  })()`, 20000);
   const scrolled = await page.evaluate(`(function () {
     var max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
     return { y: window.scrollY, max: max };
   })()`);
   assert.ok(
-    scrolled.y >= scrolled.max - 4 || scrolled.max === 0,
+    atBottom,
     `the window scrolled to the bottom (at ${scrolled.y} of ${scrolled.max})`,
   );
 
   const before = await page.evaluate("document.querySelector('[data-role=position]').textContent");
   const playing = "document.querySelector('[data-act=play]').getAttribute('aria-pressed') === 'true'";
-  const box = await pressSettled(page, "[data-act=play]", playing);
+  const box = await pressSettled(page, "[data-act=play]");
   assert.ok(box, "the Play button was on the page and was pressed");
   assert.ok(box.w >= 44 && box.h >= 44, `Play is a ${box.w} by ${box.h} target`);
 
@@ -608,7 +664,7 @@ test("Play and Pause work from the transport bar with the page scrolled to the b
   );
 
   const pausing = "document.querySelector('[data-act=pause]').getAttribute('aria-pressed') === 'true'";
-  const pauseBox = await pressSettled(page, "[data-act=pause]", pausing);
+  const pauseBox = await pressSettled(page, "[data-act=pause]");
   assert.ok(pauseBox, "the Pause button was on the page and was pressed");
   assert.ok(
     await waitFor(page, pausing, 20000),
@@ -642,7 +698,7 @@ test("at 500 px wide the phone tab strip shows and exactly one widget is on the 
 
   // The screen a song was last left in is remembered, so come back to the grid
   // the tabs belong to before reading them.
-  const sessionBox = await pressSettled(page, "[data-act=mode-session]", SESSION_OPEN);
+  const sessionBox = await pressSettled(page, "[data-act=mode-session]", { already: SESSION_OPEN });
   assert.ok(sessionBox, "the Session button was on the page and was pressed");
   assert.ok(
     await waitFor(page, SESSION_OPEN, 20000),
@@ -679,7 +735,7 @@ test("a section chip measures at least 56 px wide at every zoom step", async (t)
   await waitForStudio(page);
 
   const chip = "!!document.querySelector('[data-role=section] [data-act=section-rename]')";
-  const arrangementBox = await pressSettled(page, "[data-act=mode-arrangement]", chip);
+  const arrangementBox = await pressSettled(page, "[data-act=mode-arrangement]", { already: chip });
   assert.ok(arrangementBox, "the Arrangement button was on the page and was pressed");
   assert.ok(
     await waitFor(page, chip, 20000),
@@ -772,7 +828,14 @@ test("inside the real dashboard layout the nav sidebar either is absent or colla
     "the sidebar starts expanded at this width",
   );
 
-  await page.clickAt("#sidebar-collapse-btn");
+  // The nav's two controls move the layout itself: the collapse button rides
+  // away with the sidebar and the hamburger goes from no box to one as the
+  // sidebar leaves and the content reclaims its width, so both are pressed the
+  // same way every other control here is — once, on a rectangle that has
+  // stopped moving — and the state each press should produce is waited for
+  // below.
+  const collapseBox = await pressSettled(page, "#sidebar-collapse-btn");
+  assert.ok(collapseBox, "the collapse button was on the page and was pressed");
   assert.ok(
     await waitFor(page, "document.body.classList.contains('sidebar-collapsed')", 10000),
     "the button collapses the nav",
@@ -783,7 +846,8 @@ test("inside the real dashboard layout the nav sidebar either is absent or colla
     "and the collapse is remembered on this device",
   );
 
-  await page.clickAt("#sidebar-reveal-btn");
+  const revealBox = await pressSettled(page, "#sidebar-reveal-btn");
+  assert.ok(revealBox, "the hamburger was on the page and was pressed");
   assert.ok(
     await waitFor(page, "!document.body.classList.contains('sidebar-collapsed')", 10000),
     "and the hamburger opens it again",
@@ -791,7 +855,7 @@ test("inside the real dashboard layout the nav sidebar either is absent or colla
 
   // The studio page is still whole after both moves of the nav, and the grid
   // the widgets belong to is what is open.
-  const backBox = await pressSettled(page, "[data-act=mode-session]", SESSION_OPEN);
+  const backBox = await pressSettled(page, "[data-act=mode-session]", { already: SESSION_OPEN });
   assert.ok(backBox, "the Session button was on the page and was pressed");
   assert.ok(
     await waitFor(page, SESSION_OPEN, 20000),

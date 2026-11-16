@@ -29,6 +29,7 @@ import {
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb, ensureAgentToken } from "../bundles/studio/server/web.js";
+import { buildLayoutTemplate } from "../bundles/studio/panel/routes.js";
 import studioPanel from "../bundles/studio/panel/studio.js";
 
 /** The project every song in these tests belongs to. */
@@ -160,14 +161,15 @@ async function initSettingsTables(db) {
 }
 
 /**
- * The layout-template store the panel loader injects: the real settings registry
- * over this test's database, with the three calls the panel loader builds (a
- * local-scope read, write and clear of one key). The instance id is pinned to a
- * scratch data dir for the length of the test, so the read and the write meet on
- * the same rows and never near a real instance's settings.
+ * The layout-template store the panel loader injects: the SAME three calls the
+ * panel loader builds (`buildLayoutTemplate`, exported by `panel/routes.js`),
+ * over this test's database, so what the routes wire and what a test wires
+ * cannot drift apart. The instance id is pinned to a scratch data dir for the
+ * length of the test, so the read and the write meet on the same rows and never
+ * near a real instance's settings.
  * @param {import("node:test").TestContext} t
  * @param {object} db
- * @returns {{read: Function, write: Function, clear: Function}}
+ * @returns {{read: Function, write: Function, clear: Function}|null}
  */
 function settingsTemplate(t, db) {
   const dataDir = mkdtempSync(join(tmpdir(), "studio-settings-"));
@@ -181,10 +183,36 @@ function settingsTemplate(t, db) {
       else process.env[key] = value;
     }
   });
+  // The registry module as `buildLayoutTemplate` takes it: the three calls the
+  // routes hand it are the registry's own, over this test's client.
+  return buildLayoutTemplate({ readSetting, writeSetting, deleteLocalSetting }, db);
+}
+
+/**
+ * A settings error the way the dashboard's registry raises one: a code of its
+ * own and a message that names an absolute path or the SQL that broke.
+ * @param {string} message
+ * @param {string} code
+ * @returns {Error}
+ */
+function codedError(message, code) {
+  return Object.assign(new Error(message), { code });
+}
+
+/**
+ * The template store of an instance whose settings registry is broken: every
+ * call throws a coded error. What the route answers may contain neither the
+ * path nor the SQL text.
+ * @returns {{read: Function, write: Function, clear: Function}}
+ */
+function failingTemplate() {
+  const fail = (err) => async () => {
+    throw err;
+  };
   return {
-    read: () => readSetting(db, LAYOUT_TEMPLATE_KEY),
-    write: (template) => writeSetting(db, LAYOUT_TEMPLATE_KEY, String(template), { scope: "local" }),
-    clear: () => deleteLocalSetting(db, LAYOUT_TEMPLATE_KEY),
+    read: fail(codedError("/secret/path/data/instance-id", "INSTANCE_ID_UNREADABLE")),
+    write: fail(codedError("SQLITE_ERROR: no such table: dashboard_settings_overrides", "SQLITE_ERROR")),
+    clear: fail(codedError("SQLITE_READONLY: attempt to write a readonly database", "SQLITE_READONLY")),
   };
 }
 
@@ -209,13 +237,20 @@ function sessionGate(req, res, next) {
  * Boot a gateway-shaped server for one test.
  * @param {import("node:test").TestContext} t
  * @param {{allowNetwork?: boolean, botScope?: object, settings?: boolean,
- *          auth?: Function}} [options]
+ *          auth?: Function, owner?: boolean|null, templateStore?: Function}} [options]
  *   `settings: true` gives the web layer the operator's default layout template,
  *   wired the way the panel loader wires it, over the dashboard's settings
  *   tables on this test's own database. `auth` is the dashboard session check the
- *   router sits behind; without one the router sees a pass-through.
+ *   router sits behind; without one the router sees a pass-through. `owner` is
+ *   what the injected owner check answers (`true` by default, the owner at this
+ *   machine's dashboard; `false` the peer session the rule refuses; `null` wires
+ *   no check at all, the case a caller that forgot one lands in).
+ *   `templateStore(db)` replaces the store, for the cases where it fails.
  */
-async function boot(t, { allowNetwork = true, botScope = null, settings = false, auth = null } = {}) {
+async function boot(
+  t,
+  { allowNetwork = true, botScope = null, settings = false, auth = null, owner = true, templateStore = null } = {},
+) {
   const db = scratchDb(t);
   await initStudioTables(db);
   const acl = fakeAcl();
@@ -232,9 +267,13 @@ async function boot(t, { allowNetwork = true, botScope = null, settings = false,
 
   // The template store, when the test asks for one: the real settings registry
   // over tables created as the schema creates them, with the instance id
-  // pinned to a scratch data dir so a run reads back exactly what it wrote.
+  // pinned to a scratch data dir so a run reads back exactly what it wrote. A
+  // test that hands its own store gets that one instead.
   let layoutTemplate = null;
-  if (settings) {
+  if (templateStore) {
+    await initSettingsTables(db);
+    layoutTemplate = templateStore(db);
+  } else if (settings) {
     await initSettingsTables(db);
     layoutTemplate = settingsTemplate(t, db);
   }
@@ -254,6 +293,9 @@ async function boot(t, { allowNetwork = true, botScope = null, settings = false,
     bundleDir: null,
     botScope,
     layoutTemplate,
+    // The owner check the template's writes sit behind, the way the panel
+    // loader wires `isLocalPasswordSessionOn`. `owner: null` omits it.
+    ...(owner === null ? {} : { isOwner: async () => owner === true }),
   });
   webRef.web = web;
 
@@ -750,6 +792,36 @@ test("an internal error does not leak its message", async (t) => {
   const body = await response.json();
   assert.deepEqual(body, { ok: false, code: "internal", error: INTERNAL_TEXT });
   assert.equal(JSON.stringify(body).includes("SQLITE"), false, "the real message stays in the log");
+  assert.ok(logged.some((args) => args[0] === "[studio]"), "the real error is logged");
+});
+
+test("a coded error this module does not answer is not repeated to the caller either", async (t) => {
+  const { base, hub, crowHome } = await boot(t);
+  const token = ensureAgentToken(crowHome);
+  // A code outside STATUS_BY_CODE belongs to somebody else's vocabulary (the
+  // settings registry's, SQLite's) and its message names a path or a query.
+  hub.listSongs = async () => {
+    throw Object.assign(new Error("SQLITE_ERROR: no such table: /secret/path"), { code: "SQLITE_ERROR" });
+  };
+
+  const logged = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => {
+    logged.push(args);
+  };
+  t.after(() => {
+    console.warn = realWarn;
+  });
+
+  const response = await fetch(`${base}/api/studio/agent/songs`, {
+    headers: { "x-studio-token": token },
+  });
+  assert.equal(response.status, 500);
+  const body = await response.json();
+  assert.equal(body.error, INTERNAL_TEXT, "the fixed sentence, not the store's own");
+  const text = JSON.stringify(body);
+  assert.equal(text.includes("SQLITE"), false, "the query text stays in the log");
+  assert.equal(text.includes("/secret/path"), false, "and so does the path");
   assert.ok(logged.some((args) => args[0] === "[studio]"), "the real error is logged");
 });
 
@@ -1271,6 +1343,41 @@ test("a template over 8 KB, at the wrong version or naming an unknown widget is 
   assert.deepEqual(await globalRows(db), [], "in either settings table");
 });
 
+test("a template that is not exactly what this Studio saves is refused and stores nothing", async (t) => {
+  const { base, db } = await boot(t, { settings: true });
+  const saved = await putTemplate(base, TEMPLATE);
+  assert.equal(saved.status, 200);
+  const rowsBefore = await localRows(db);
+
+  // Every one of these normalizes into something else: an unknown mode or width
+  // key is dropped, an extra key disappears, an illegal size becomes a legal
+  // one, a repeated id keeps only its first row, and an empty entry becomes the
+  // built-in default. A value being SAVED must be refused instead.
+  const refused = [
+    ["a mode and width this Studio does not lay out for", { "compose.huge": { v: 1, shown: [{ id: "editor", size: "m" }] } }],
+    ["an entry with a key that is not the version or the list", { "compose.laptop": { v: 1, shown: [{ id: "editor", size: "m" }], pad: 1 } }],
+    ["an entry the wrong version", { "compose.laptop": { v: 2, shown: [{ id: "editor", size: "m" }] } }],
+    ["an entry with no shown list", { "compose.laptop": { v: 1 } }],
+    ["an entry whose shown is not a list", { "compose.laptop": { v: 1, shown: { id: "editor", size: "m" } } }],
+    ["an entry that shows nothing", { "compose.laptop": { v: 1, shown: [] } }],
+    ["a size this widget may not take", { "compose.laptop": { v: 1, shown: [{ id: "midi", size: "l" }] } }],
+    [
+      "the same widget twice",
+      { "compose.laptop": { v: 1, shown: [{ id: "editor", size: "m" }, { id: "editor", size: "l" }] } },
+    ],
+    ["a row with a key that is not the id or the size", { "compose.laptop": { v: 1, shown: [{ id: "editor", size: "m", x: 0 }] } }],
+    ["a row that is not an object", { "compose.laptop": { v: 1, shown: ["editor"] } }],
+  ];
+  for (const [why, layouts] of refused) {
+    const answer = await putTemplate(base, { v: 1, layouts });
+    assert.equal(answer.status, 400, why);
+    assert.equal(typeof answer.body.error, "string", `${why}: the caller is told why`);
+    assert.deepEqual(await localRows(db), rowsBefore, `${why}: the stored template is unchanged`);
+  }
+
+  assert.deepEqual((await getTemplate(base)).body, saved.body, "what was kept is still the saved one");
+});
+
 test("a template write or clear without the CSRF header is refused", async (t) => {
   const { base, db } = await boot(t, { settings: true });
   const noCsrf = { cookie: "crow_session=good" };
@@ -1281,6 +1388,20 @@ test("a template write or clear without the CSRF header is refused", async (t) =
   assert.equal(clear.status, 403);
 
   assert.deepEqual(await localRows(db), [], "nothing was written");
+});
+
+test("a template write or clear with the wrong CSRF token is refused", async (t) => {
+  const { base, db } = await boot(t, { settings: true });
+
+  // The session is there and the header is there: what is wrong is the token,
+  // which is the double-submit check's whole point.
+  const wrong = { ...JSON_HEADERS, "x-crow-csrf": "wrong" };
+  const put = await putTemplate(base, TEMPLATE, wrong);
+  assert.equal(put.status, 403);
+  const clear = await deleteTemplate(base, { ...PAGE_HEADERS, "x-crow-csrf": "wrong" });
+  assert.equal(clear.status, 403);
+
+  assert.deepEqual(await localRows(db), [], "nothing was written and nothing was cleared");
 });
 
 test("an agent caller cannot change the operator's default template", async (t) => {
@@ -1355,4 +1476,70 @@ test("with no settings registry the template routes answer 503 and the page stil
   const html = await studioSongPage("song-1");
   assert.ok(html.includes('data-role="grid-wrap"'), "the grid is on the page");
   assert.ok(html.includes('id="st-ask"'), "so is the ask box");
+});
+
+test("only the owner may change the default template, and the read stays open", async (t) => {
+  const { base, db } = await boot(t, { settings: true, owner: true });
+
+  const saved = await putTemplate(base, TEMPLATE);
+  assert.equal(saved.status, 200, `the owner's own write: ${JSON.stringify(saved.body)}`);
+  assert.equal((await getTemplate(base)).body.template !== null, true, "the owner's template was kept");
+  assert.equal((await deleteTemplate(base)).status, 200, "the owner's own clear");
+  assert.deepEqual(await localRows(db), [], "and it is gone");
+});
+
+test("a session that is not the owner is refused the template's write and clear", async (t) => {
+  // The peer-minted session: `isLocalPasswordSessionOn` answers false for scopes
+  // 'dashboard sso' and for a signed peer call.
+  const { base, db } = await boot(t, { settings: true, owner: false });
+
+  const put = await putTemplate(base, TEMPLATE);
+  assert.equal(put.status, 403);
+  assert.equal(typeof put.body.error, "string", "the caller is told it is the owner's");
+  const clear = await deleteTemplate(base);
+  assert.equal(clear.status, 403);
+
+  assert.deepEqual(await localRows(db), [], "nothing was written and nothing was cleared");
+
+  // The read is any signed-in caller's: every device a song opens on needs it.
+  const read = await getTemplate(base);
+  assert.equal(read.status, 200);
+  assert.deepEqual(read.body, { template: null });
+});
+
+test("with no owner check wired the template's write and clear are refused", async (t) => {
+  const { base, db } = await boot(t, { settings: true, owner: null });
+
+  assert.equal((await putTemplate(base, TEMPLATE)).status, 403);
+  assert.equal((await deleteTemplate(base)).status, 403);
+  assert.deepEqual(await localRows(db), [], "a caller that wired no check gets no write");
+  assert.equal((await getTemplate(base)).status, 200, "the read is unaffected");
+});
+
+test("a settings store that fails is answered with one fixed sentence and never its own text", async (t) => {
+  const { base } = await boot(t, { templateStore: () => failingTemplate() });
+
+  const logged = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => {
+    logged.push(args);
+  };
+  t.after(() => {
+    console.warn = realWarn;
+  });
+
+  const read = await getTemplate(base);
+  const write = await putTemplate(base, TEMPLATE);
+  const clear = await deleteTemplate(base);
+
+  for (const [why, answer] of [["read", read], ["write", write], ["clear", clear]]) {
+    assert.equal(answer.status, 500, `${why}: a store that failed is not the caller's fault`);
+    assert.equal(typeof answer.body.error, "string", `${why}: there is one sentence`);
+    const text = JSON.stringify(answer.body);
+    assert.equal(text.includes("/secret/path"), false, `${why}: the path stays in the log`);
+    assert.equal(text.toLowerCase().includes("sqlite"), false, `${why}: so does the query text`);
+  }
+  assert.equal(read.body.error, write.body.error, "every failure gets the same sentence");
+  assert.equal(write.body.error, clear.body.error, "every failure gets the same sentence");
+  assert.equal(logged.filter((args) => args[0] === "[studio] default layout template:").length, 3, "each failure is logged");
 });

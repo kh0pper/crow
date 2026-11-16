@@ -22,7 +22,9 @@
  * setting (`studio.layout_template`), read and written on this same client
  * through the dashboard's settings registry — the store the kiosk bundle uses.
  * A walled Studio whose settings registry cannot be loaded has no template at
- * all, and the panel keeps the built-in default.
+ * all, and the panel keeps the built-in default. Changing that default is the
+ * owner's alone (the Schedule panel's local-password gate, wired here too), and
+ * every signed-in caller may read it.
  *
  * Request bodies are left to the gateway: its global JSON parser (1 MB cap)
  * runs before the panel router, so nothing here adds one — with one exception.
@@ -75,6 +77,18 @@ const settingsRegistry = await appImport("servers/gateway/dashboard/settings/reg
   console.warn("[studio] no default layout template on this instance:", error?.message || error);
   return null;
 });
+// The owner-only gate the Schedule panel's writes use: a local password session
+// at THIS machine's own dashboard, which a session a peer sign-in minted (scopes
+// 'dashboard sso') and a signed peer call are not. The default layout is the
+// owner's — it seeds every song on every device — so the template's write and
+// clear sit behind this. A gateway that cannot load the module wires no check at
+// all, and the web layer then denies every write rather than allowing one.
+const { isLocalPasswordSessionOn } = await appImport("servers/gateway/dashboard/local-session.js").catch(
+  (error) => {
+    console.warn("[studio] the default layout cannot tell the owner from a peer:", error?.message || error);
+    return {};
+  },
+);
 // The real project ACL module: the hub decides no access by itself.
 const projectAcl = await appImport("servers/shared/project-acl.js");
 const { createHub } = await bImport("server/hub.js");
@@ -112,15 +126,25 @@ const LAYOUT_TEMPLATE_KEY = "studio.layout_template";
  * emitted to a peer — a song's layout is view state, and the default for it is
  * this instance's own preference. Null when the settings registry could not be
  * loaded at all, which is the 503 the template routes answer.
+ *
+ * Built from the registry as a value so the wiring is ONE function a test can
+ * call with its own database (`buildLayoutTemplate`), rather than a test copy of
+ * these three closures that could drift from the routes'.
+ * @param {object|null} registry the dashboard's settings registry module
+ * @param {object} db a crow.db client (the gateway's own, or a scratch one)
+ * @returns {{read: Function, write: Function, clear: Function}|null}
  */
-const layoutTemplate = settingsRegistry
-  ? {
-      read: () => settingsRegistry.readSetting(db, LAYOUT_TEMPLATE_KEY),
-      write: (template) =>
-        settingsRegistry.writeSetting(db, LAYOUT_TEMPLATE_KEY, String(template), { scope: "local" }),
-      clear: () => settingsRegistry.deleteLocalSetting(db, LAYOUT_TEMPLATE_KEY),
-    }
-  : null;
+export function buildLayoutTemplate(registry, db) {
+  if (!registry || typeof registry.readSetting !== "function") return null;
+  return {
+    read: () => registry.readSetting(db, LAYOUT_TEMPLATE_KEY),
+    write: (template) =>
+      registry.writeSetting(db, LAYOUT_TEMPLATE_KEY, String(template), { scope: "local" }),
+    clear: () => registry.deleteLocalSetting(db, LAYOUT_TEMPLATE_KEY),
+  };
+}
+
+const layoutTemplate = buildLayoutTemplate(settingsRegistry, db);
 
 // One hub per gateway process. The hub's broadcasts reach the web layer that
 // is built just below it; by the time any edit runs, `web` is assigned.
@@ -223,6 +247,10 @@ web = createStudioWeb({
   // registry: an instance-local row. Absent it, the template routes answer 503
   // and the page keeps the built-in default.
   layoutTemplate,
+  // ...and who may change it: the owner at this machine's own dashboard, the
+  // same gate the Schedule panel's owner-only writes use, on this same client.
+  isOwner: (req) =>
+    typeof isLocalPasswordSessionOn === "function" ? isLocalPasswordSessionOn(db, req) : false,
   // The instrument catalog and the one stored copy of each file, shared with
   // the housekeeping pass below.
   libraryStore,
