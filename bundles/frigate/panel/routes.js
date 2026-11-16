@@ -42,6 +42,51 @@ const SNAPSHOT_NAME_RE = /^[a-z0-9_-]{1,64}$/;
 const SNAPSHOT_SUFFIX = ".jpg";
 const RTSP_RE = /^rtsps?:\/\//i;
 
+/** The only `Sec-Fetch-Site` value the live route accepts: a request from this very page. */
+const LIVE_FETCH_SITE = "same-origin";
+
+/**
+ * True when the browser says the request came from another site. `Sec-Fetch-Site` is set by every
+ * browser (never by a plain HTTP client), so its absence is not cross-site: a non-browser caller
+ * keeps working, while a page on another Serve port of this host — or an app sharing this
+ * origin's path space — cannot embed the live view in an `<img>` and wake the doorbell.
+ */
+function isCrossSiteRequest(req) {
+  const headers = req && req.headers ? req.headers : null;
+  if (!headers) return false;
+  const value = headers["sec-fetch-site"];
+  if (value === undefined || value === null) return false;
+  const site = String(value).trim().toLowerCase();
+  if (!site) return false;
+  return site !== LIVE_FETCH_SITE;
+}
+
+/**
+ * The gateway's `withoutWriteContext`, when it can be found: a live session's ffmpeg and timers
+ * outlive the dashboard request that started them, so the body that creates them must not keep
+ * that request's write context. Null when neither copy loads — the option is then left out.
+ */
+async function loadWithoutWriteContext() {
+  const relative = "servers/shared/history/write-context.js";
+  const candidates = [];
+  const appRoot = process.env.CROW_APP_ROOT;
+  if (typeof appRoot === "string" && appRoot) candidates.push(join(appRoot, relative));
+  try {
+    candidates.push(fileURLToPath(new URL(`../../../${relative}`, import.meta.url)));
+  } catch {
+    // A module URL that cannot be read as a path: the app-root candidate above still stands.
+  }
+  for (const path of candidates) {
+    try {
+      const mod = await import(pathToFileURL(path).href);
+      if (mod && typeof mod.withoutWriteContext === "function") return mod.withoutWriteContext;
+    } catch {
+      // Not this copy; try the next one.
+    }
+  }
+  return null;
+}
+
 /** The folder a snapshot bridge writes `<name>.jpg` into; blank means no snapshot cameras. */
 function snapshotDir() {
   const value = process.env.FRIGATE_SNAPSHOT_DIR;
@@ -147,6 +192,8 @@ async function liveManager() {
     if (typeof live.createFileCooldownStore === "function") {
       options.cooldownStore = live.createFileCooldownStore(cooldownFilePath());
     }
+    const runDetached = await loadWithoutWriteContext();
+    if (typeof runDetached === "function") options.runDetached = runDetached;
     return live.createLiveManager(options);
   })().catch(() => null);
   liveManagerState = { key, manager: null, pending };
@@ -402,6 +449,11 @@ export default function frigateRouter(authMiddleware) {
   // The live view: the manager takes the response over and streams into it, and owns its close
   // handling. A refusal is answered here, before anything has been written.
   router.get("/api/frigate/live/:name/stream.mjpg", authMiddleware, async (req, res) => {
+    // Starting a view wakes a battery camera on a GET, so a page from another site must not be able
+    // to do it by embedding this URL. Refused here, before the manager is touched at all.
+    if (isCrossSiteRequest(req)) {
+      return res.status(403).json({ error: "Live view must be started from this page" });
+    }
     const name = req.params.name;
     if (!isSnapshotName(name)) return res.status(404).json({ error: "Unknown camera" });
     const manager = await liveManager();
@@ -436,6 +488,12 @@ export default function frigateRouter(authMiddleware) {
     const cooldown = typeof manager.cooldownLeftMs === "function" ? Number(manager.cooldownLeftMs(name)) : NaN;
     const body = { available };
     if (Number.isFinite(cooldown)) body.cooldown_seconds = cooldown > 0 ? Math.ceil(cooldown / 1000) : 0;
+    // What is left of a RUNNING session, so a viewer that joins at second 90 counts down 30 s and
+    // not a fresh two minutes. No session reads as 0; a manager that cannot say stays silent.
+    if (typeof manager.remainingMs === "function") {
+      const remaining = Number(manager.remainingMs(name));
+      body.remaining_seconds = Number.isFinite(remaining) && remaining > 0 ? Math.ceil(remaining / 1000) : 0;
+    }
     res.json(body);
   });
 

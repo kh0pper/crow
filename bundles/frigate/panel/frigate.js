@@ -18,8 +18,8 @@
  * ring-mqtt one) is drawn from that file instead of Frigate's still, with the reason and time of
  * the picture under its name. A camera that also has an entry in FRIGATE_LIVE_SOURCES gets a
  * "Watch live" button; the player is one `<img>` on the MJPEG route, started by a click only and
- * ended by the countdown, the Stop button or leaving the page. Neither the folder nor a stream
- * address is ever printed on the page.
+ * ended by the countdown (which follows the server's own remaining time), the Stop button or
+ * leaving the page. Neither the folder nor a stream address is ever printed on the page.
  *
  * Web UI tab: a link to FRIGATE_UI_URL that opens in a new tab. Frigate's own UI is not
  * embedded: its address is a loopback one only this server can reach (a phone resolves
@@ -690,9 +690,15 @@ function frigateScript() {
       // ----------------------------------------------------------------
       // The live view. One player and one stream at a time: the server allows a session of two
       // minutes and a cooldown after it ends, so nothing here reconnects on its own — every start
-      // is a click, and every end is the countdown, the Stop button or the page going away.
+      // is a click, and every end is the countdown, the Stop button, the page going away, or the
+      // server reporting that the session's own time is up.
       // ----------------------------------------------------------------
       var LIVE_MAX_SECONDS = 120;
+      // The server knows how much of a session is really left, so the countdown is checked against
+      // /status: about a second after the stream starts, then every ten seconds while it plays.
+      // A viewer joining at second 90 then counts down 30 s instead of a fresh two minutes.
+      var LIVE_STATUS_FIRST_MS = 1000;
+      var LIVE_STATUS_EVERY_MS = 10000;
       var livePanel = document.getElementById("fg-live");
       var liveImg = document.getElementById("fg-live-img");
       var liveTitle = document.getElementById("fg-live-title");
@@ -704,6 +710,8 @@ function frigateScript() {
       var liveName = "";
       var liveLeft = 0;
       var liveTimer = null;
+      var liveStatusTimer = null;
+      var liveStatusChecks = 0;
       var livePlaying = false;
 
       function liveSrc(name) {
@@ -718,6 +726,50 @@ function frigateScript() {
         if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
       }
 
+      function drawLiveCount() {
+        if (liveCount) liveCount.textContent = "Live - ends in " + liveLeft + " s";
+      }
+
+      // ----------------------------------------------------------------
+      // The server's own clock. A running session answers with remaining_seconds: an answer inside
+      // the cap replaces the local countdown, and an answer of 0 after the first check means the
+      // server has already ended the stream - a clean end of an MJPEG image fires no onerror, so
+      // without this the page would tick down a frozen frame.
+      // ----------------------------------------------------------------
+      function stopLiveStatus() {
+        if (liveStatusTimer) { clearTimeout(liveStatusTimer); liveStatusTimer = null; }
+      }
+
+      function scheduleLiveStatus(delay) {
+        stopLiveStatus();
+        if (!livePlaying) return;
+        liveStatusTimer = setTimeout(pollLiveStatus, delay);
+      }
+
+      function pollLiveStatus() {
+        liveStatusTimer = null;
+        if (!livePlaying || !liveName) return;
+        var name = liveName;
+        var check = liveStatusChecks;
+        liveStatusChecks = check + 1;
+        fetch("/api/frigate/live/" + encodeURIComponent(name) + "/status").then(function (r) {
+          return r.json();
+        }).then(function (data) {
+          if (!livePlaying || liveName !== name) return; // the player moved on meanwhile
+          var left = data ? Number(data.remaining_seconds) : NaN;
+          if (isFinite(left) && left > 0 && left <= LIVE_MAX_SECONDS) {
+            liveLeft = Math.ceil(left);
+            drawLiveCount();
+          } else if (left === 0 && check > 0) {
+            endLive("Live view ended");
+            return;
+          }
+          scheduleLiveStatus(LIVE_STATUS_EVERY_MS);
+        }).catch(function () {
+          if (livePlaying && liveName === name) scheduleLiveStatus(LIVE_STATUS_EVERY_MS);
+        });
+      }
+
       // Drop the stream: an empty src and then no src attribute at all, so the browser closes the
       // response and the server sees its last viewer leave.
       function dropLiveSrc() {
@@ -730,6 +782,8 @@ function frigateScript() {
       function endLive(message) {
         if (!livePanel) return;
         clearLiveCount();
+        stopLiveStatus();
+        liveStatusChecks = 0;
         livePlaying = false;
         dropLiveSrc();
         if (liveCount) liveCount.textContent = "";
@@ -745,9 +799,10 @@ function frigateScript() {
         liveName = name;
         livePlaying = true;
         liveLeft = LIVE_MAX_SECONDS;
+        liveStatusChecks = 0;
         livePanel.hidden = false;
         if (liveTitle) liveTitle.textContent = name;
-        if (liveCount) liveCount.textContent = "Live - ends in " + liveLeft + " s";
+        drawLiveCount();
         if (liveStartBtn) liveStartBtn.hidden = true;
         if (liveStopBtn) liveStopBtn.hidden = false;
         if (liveAgainBtn) liveAgainBtn.hidden = true;
@@ -759,8 +814,9 @@ function frigateScript() {
         liveTimer = setInterval(function () {
           liveLeft = liveLeft - 1;
           if (liveLeft <= 0) { endLive("Live view ended"); return; }
-          if (liveCount) liveCount.textContent = "Live - ends in " + liveLeft + " s";
+          drawLiveCount();
         }, 1000);
+        scheduleLiveStatus(LIVE_STATUS_FIRST_MS);
       }
 
       // The stream could not be played: say so in one plain line, ask the status route once why,
@@ -768,6 +824,8 @@ function frigateScript() {
       function liveFailed() {
         var name = liveName;
         clearLiveCount();
+        stopLiveStatus();
+        liveStatusChecks = 0;
         livePlaying = false;
         dropLiveSrc();
         if (liveCount) liveCount.textContent = "";

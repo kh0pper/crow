@@ -10,6 +10,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -57,6 +58,8 @@ after(() => {
 });
 
 const routesModule = await import("../bundles/frigate/panel/routes.js");
+// The real manager, for the one case that must prove the ROUTES report what it knows.
+const { createLiveManager } = await import("../bundles/frigate/server/live-session.js");
 
 /** A response object shaped the way the routes and the live manager read one. */
 function recordingResponse() {
@@ -159,6 +162,85 @@ async function withManager(manager, run) {
   }
 }
 
+/** A spawner stand-in for the REAL manager: the -version probe answers, a session child sits still. */
+function fakeSpawner() {
+  const calls = [];
+  function spawn(cmd, args, options) {
+    const isProbe = Array.isArray(args) && args[0] === "-version";
+    const child = new EventEmitter();
+    child.pid = 6000 + calls.length;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    calls.push({ cmd, args, options, isProbe, child });
+    if (isProbe) setImmediate(() => child.emit("exit", 0));
+    return child;
+  }
+  return { calls, spawn };
+}
+
+/** A clock whose timers never fire: these cases only need the manager's numbers to hold still. */
+function stillClock(start = 1_700_000_000_000) {
+  let current = start;
+  return {
+    now: () => current,
+    setTimer: () => null,
+    clearTimer: () => {},
+    advance(ms) { current += ms; },
+  };
+}
+
+/** An in-memory cooldown store: where the real manager keeps its cooldown for these cases. */
+function memoryStore() {
+  const backing = new Map();
+  return {
+    backing,
+    get(name) { return backing.get(name); },
+    set(name, until) { backing.set(name, until); },
+  };
+}
+
+// ─── every route is behind the gate ───────────────────────────────────────
+
+// A route that lost its `authMiddleware` would still pass every other test in this file (the
+// helper takes the route's LAST handler), so the gate is checked directly: it is the first handle
+// on the route, it is the very function the router was built with, and it refuses without next().
+
+test("every new route is gated by the auth middleware the router was built with", async () => {
+  const manager = stubManager();
+  const refused = [];
+  const middleware = (req, res, next) => {
+    refused.push(req.path);
+    res.status(401).json({ error: "Sign in first" });
+  };
+  const router = routesModule.default(middleware);
+
+  await withManager(manager, async () => {
+    const paths = [
+      "/api/frigate/snap/:file",
+      "/api/frigate/live/:name/stream.mjpg",
+      "/api/frigate/live/:name/status",
+      "/api/frigate/cameras",
+    ];
+    for (const path of paths) {
+      const layer = router.stack.find((l) => l.route && l.route.path === path);
+      assert.ok(layer, `the router serves ${path}`);
+      assert.ok(layer.route.stack.length > 1, `${path} has a handler behind its gate`);
+      assert.equal(layer.route.stack[0].handle, middleware,
+        `${path} is gated by the middleware passed to frigateRouter`);
+
+      const res = recordingResponse();
+      let nexted = false;
+      await layer.route.stack[0].handle({ path, query: {}, params: {}, headers: {} }, res, () => { nexted = true; });
+      assert.equal(nexted, false, `${path}: the middleware answers instead of passing the request on`);
+      assert.equal(res.statusCode, 401, `${path}: an unauthenticated request is refused`);
+      assert.deepEqual(res.body, { error: "Sign in first" });
+    }
+    assert.deepEqual(refused, paths, "each gate was the one that answered");
+    assert.equal(manager.calls.length, 0, "nothing behind the gate ran, so no camera was attached");
+  });
+});
+
 // ─── the still route ──────────────────────────────────────────────────────
 
 test("the still route serves the jpg from the folder, never cached", async () => {
@@ -240,6 +322,37 @@ test("the live route hands the response to the manager on success", async () => 
   });
 });
 
+// Starting a view is a GET that wakes a battery doorbell, so a page from another site must not be
+// able to do it by embedding the URL. Browsers always say where a request came from; a plain HTTP
+// client sends no such header and is unaffected.
+
+test("the live route refuses a cross-site request before the manager is touched", async () => {
+  const manager = stubManager();
+  await withManager(manager, async () => {
+    const handler = handlerFor(newRouter(), "/api/frigate/live/:name/stream.mjpg");
+
+    for (const site of ["cross-site", "same-site", "none", "Cross-Site"]) {
+      const res = remember(await callRoute(handler, {
+        params: { name: "front_door" },
+        headers: { "sec-fetch-site": site },
+      }));
+      assert.equal(res.statusCode, 403, `refused: ${site}`);
+      assert.deepEqual(res.body, { error: "Live view must be started from this page" });
+    }
+    assert.equal(manager.calls.length, 0, "the manager was never asked, so nothing was spawned");
+
+    // Our own page (same-origin), and a caller with no site hint at all, still start a view.
+    const allowed = [{ "sec-fetch-site": "same-origin" }, {}, { "sec-fetch-site": "" }];
+    for (const headers of allowed) {
+      const before = manager.calls.length;
+      const res = await callRoute(handler, { params: { name: "front_door" }, headers });
+      assert.equal(manager.calls.length, before + 1, `allowed: ${JSON.stringify(headers)}`);
+      assert.equal(res.statusCode, 200, "the manager owns the response");
+      assert.equal(res.body, null, "and the route wrote nothing itself");
+    }
+  });
+});
+
 test("an unknown but well-formed camera is a 404 from the manager, passed through", async () => {
   const manager = stubManager();
   await withManager(manager, async () => {
@@ -279,6 +392,8 @@ test("the status route answers for a live camera only", async () => {
     assert.equal(known.body.available, true);
     assert.equal(known.body.cooldown_seconds, undefined,
       "a manager that cannot report a cooldown says nothing rather than inventing a zero");
+    assert.equal(known.body.remaining_seconds, undefined,
+      "and one that cannot report its remaining time stays silent too");
 
     for (const name of ["attic", "nope", ".."]) {
       const res = remember(await callRoute(handler, { params: { name } }));
@@ -302,6 +417,70 @@ test("the status route reports a remaining cooldown when the manager knows one",
   await withManager(manager, async () => {
     const res = remember(await callRoute(handlerFor(newRouter(), "/api/frigate/live/:name/status"), { params: { name: "front_door" } }));
     assert.equal(res.body.cooldown_seconds, 31);
+  });
+});
+
+// A viewer that joins a session already running must count down what is left of it, not a fresh
+// two minutes: the route reports the manager's remaining time rounded up.
+
+test("the status route reports what is left of a running session, and 0 when none runs", async () => {
+  let left = 29_800;
+  const manager = stubManager({ remainingMs() { return left; } });
+  await withManager(manager, async () => {
+    const handler = handlerFor(newRouter(), "/api/frigate/live/:name/status");
+
+    const running = remember(await callRoute(handler, { params: { name: "front_door" } }));
+    assert.equal(running.body.remaining_seconds, 30, "29.8 s left is reported as 30 s");
+
+    left = 0;
+    const ended = remember(await callRoute(handler, { params: { name: "front_door" } }));
+    assert.equal(ended.body.remaining_seconds, 0, "no session left, so no time left");
+
+    left = Number.NaN;
+    const junk = remember(await callRoute(handler, { params: { name: "front_door" } }));
+    assert.equal(junk.body.remaining_seconds, 0, "a number the manager cannot give is 0, never NaN");
+  });
+});
+
+// The cooldown the panel shows comes from the REAL manager, so this case builds one (fake spawn,
+// fake clock, in-memory store) and drives it through the routes the gateway mounts.
+
+test("a real manager's cooldown and remaining time reach the status route", async () => {
+  const clock = stillClock();
+  const store = memoryStore();
+  const spawner = fakeSpawner();
+  const manager = createLiveManager({
+    sources: { front_door: "rtsp://someone:hunter2@100.64.20.7:8554/front_door_live" },
+    spawn: spawner.spawn,
+    now: clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    killGroup: () => {},
+    cooldownStore: store,
+  });
+
+  await withManager(manager, async () => {
+    const stream = handlerFor(newRouter(), "/api/frigate/live/:name/stream.mjpg");
+    const status = handlerFor(newRouter(), "/api/frigate/live/:name/status");
+
+    const viewer = await callRoute(stream, { params: { name: "front_door" } });
+    assert.equal(viewer.statusCode, 200, "the real manager took the response over");
+    assert.equal(spawner.calls.filter((call) => !call.isProbe).length, 1, "one session started");
+
+    const running = remember(await callRoute(status, { params: { name: "front_door" } }));
+    assert.equal(running.statusCode, 200);
+    assert.equal(running.body.available, true);
+    assert.equal(running.body.remaining_seconds, 120, "the running session has its whole cap left");
+
+    // The tab goes away: the manager ends the session and records a cooldown from now.
+    for (const onClose of viewer.listeners.close || []) onClose();
+    assert.equal(manager.remainingMs("front_door"), 0, "the session is over");
+
+    const cooling = remember(await callRoute(status, { params: { name: "front_door" } }));
+    assert.equal(cooling.statusCode, 200);
+    assert.ok(cooling.body.cooldown_seconds > 0, "the panel's 'Try again in a minute' branch has a number");
+    assert.equal(cooling.body.cooldown_seconds, 60, "the manager's own cooldown, in seconds");
+    assert.equal(cooling.body.remaining_seconds, 0, "and no session is left to count down");
   });
 });
 
@@ -387,6 +566,116 @@ test("Frigate down with an empty folder is still an error, as before", async () 
     });
   } finally {
     process.env.FRIGATE_SNAPSHOT_DIR = saved;
+  }
+});
+
+// ─── the manager is built with the gateway's own write-context runner ──────
+
+// A live session's ffmpeg and timers outlive the dashboard request that started them, so the body
+// that creates them must run through `withoutWriteContext`. The route loads that module by path
+// (an installed copy cannot import from servers/), which also means a test can stand in for it:
+// the seam is the same one an installed instance uses.
+
+/** A scratch instance whose own bundle carries a stand-in live-session.js. */
+function fakeInstance() {
+  const home = mkdtempSync(join(tmpdir(), "crow-frigate-detached-home-"));
+  const appRoot = mkdtempSync(join(tmpdir(), "crow-frigate-detached-root-"));
+  mkdirSync(join(home, "bundles", "frigate", "server"), { recursive: true });
+  writeFileSync(join(home, "bundles", "frigate", "server", "live-session.js"), [
+    "export function createLiveManager(options) {",
+    "  globalThis.__fgManagerOptions = options;",
+    "  return { has: () => true, available: async () => true, attach: async () => ({ ok: true }) };",
+    "}",
+  ].join("\n"));
+  return { home, appRoot };
+}
+
+/** A stand-in write-context module under `appRoot`; `source` is its ESM body. */
+function writeContextModule(appRoot, source) {
+  mkdirSync(join(appRoot, "servers", "shared", "history"), { recursive: true });
+  writeFileSync(join(appRoot, "servers", "shared", "history", "write-context.js"), source);
+}
+
+/** Point this instance at the stand-in bundle and module, and build its manager through a route. */
+async function buildManagerThroughRoute({ home, appRoot }) {
+  const savedHome = process.env.CROW_HOME;
+  const savedRoot = process.env.CROW_APP_ROOT;
+  process.env.CROW_HOME = home;
+  if (appRoot) process.env.CROW_APP_ROOT = appRoot;
+  else delete process.env.CROW_APP_ROOT;
+  routesModule._setLiveManagerForTest(null);
+  try {
+    const res = await callRoute(handlerFor(newRouter(), "/api/frigate/live/:name/stream.mjpg"),
+      { params: { name: "front_door" } });
+    assert.equal(res.body, null, "the stand-in manager took the response over");
+    return globalThis.__fgManagerOptions;
+  } finally {
+    if (savedHome === undefined) delete process.env.CROW_HOME;
+    else process.env.CROW_HOME = savedHome;
+    if (savedRoot === undefined) delete process.env.CROW_APP_ROOT;
+    else process.env.CROW_APP_ROOT = savedRoot;
+    routesModule._setLiveManagerForTest(null);
+  }
+}
+
+test("the live manager is built with the app root's withoutWriteContext as runDetached", async () => {
+  const instance = fakeInstance();
+  writeContextModule(instance.appRoot, [
+    "globalThis.__fgFakeWithoutWriteContext = withoutWriteContext;",
+    "export function withoutWriteContext(fn) {",
+    "  globalThis.__fgDetachedCalls = (globalThis.__fgDetachedCalls || 0) + 1;",
+    "  return fn();",
+    "}",
+  ].join("\n"));
+  delete globalThis.__fgManagerOptions;
+  globalThis.__fgDetachedCalls = 0;
+  try {
+    const options = await buildManagerThroughRoute(instance);
+    assert.ok(options, "the route built the manager");
+    assert.deepEqual(Object.keys(options.sources).sort(), ["front_door", "side_gate"],
+      "from the instance's own live sources");
+    assert.equal(typeof options.runDetached, "function", "the manager was given a runner to start sessions in");
+    assert.equal(options.runDetached, globalThis.__fgFakeWithoutWriteContext,
+      "and it is that module's own withoutWriteContext");
+
+    // It is the real article: a session body handed to it runs, counted as detached.
+    let ran = 0;
+    options.runDetached(() => { ran += 1; });
+    assert.equal(ran, 1, "the body still runs, exactly once");
+    assert.equal(globalThis.__fgDetachedCalls, 1, "through withoutWriteContext, not a plain call");
+  } finally {
+    delete globalThis.__fgManagerOptions;
+    delete globalThis.__fgFakeWithoutWriteContext;
+    delete globalThis.__fgDetachedCalls;
+    rmSync(instance.home, { recursive: true, force: true });
+    rmSync(instance.appRoot, { recursive: true, force: true });
+  }
+});
+
+test("with no app root the checkout's own withoutWriteContext is found by path", async () => {
+  const instance = fakeInstance();
+  delete globalThis.__fgManagerOptions;
+  try {
+    const options = await buildManagerThroughRoute({ home: instance.home });
+    assert.ok(options, "the route built the manager");
+    assert.equal(typeof options.runDetached, "function", "the repo-relative copy was found without an app root");
+
+    // It behaves as the gateway's own withoutWriteContext: a body it runs sees NO write context,
+    // and the caller's context is intact afterwards.
+    const wc = await import("../servers/shared/history/write-context.js");
+    const seen = [];
+    wc.withWriteContext({ authorKind: "owner", authorId: "abcdef12" }, () => {
+      seen.push(wc.currentWriteContext());
+      seen.push(options.runDetached(() => wc.currentWriteContext()));
+      seen.push(wc.currentWriteContext());
+    });
+    assert.equal(seen[0].authorKind, "owner", "the request's own context is open");
+    assert.equal(seen[1], null, "the session body runs detached from it");
+    assert.equal(seen[2].authorKind, "owner", "and the request's context comes back");
+  } finally {
+    delete globalThis.__fgManagerOptions;
+    rmSync(instance.home, { recursive: true, force: true });
+    rmSync(instance.appRoot, { recursive: true, force: true });
   }
 });
 
