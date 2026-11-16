@@ -208,6 +208,8 @@ const unreadMarkerRow = (html) => {
   const m = /data-ml-unread-row="(\d+)"/.exec(html);
   return m ? Number(m[1]) : null;
 };
+/** One read control's whole element, whether it is drawn or hidden. */
+const readControl = (html, action) => new RegExp(`<button[^>]*data-ml-action="${action}"[^>]*>[^<]*<\\/button>`).exec(html)?.[0] ?? null;
 
 /** The folders an action can need: an inbox, a label, an archive and a trash row. */
 const ACTION_FOLDERS = [
@@ -752,7 +754,10 @@ test("the action bar shows Archive only when an archive target exists and Delete
 
     const unread = await get(messageHref(plainAccount, unreadMid));
     assert.equal(unread.status, 200);
-    assert.deepEqual(actionRows(unread.body, "unread"), [], "an unread message does not offer Mark unread");
+    assert.equal(readControl(unread.body, "unread").includes(" hidden "), true,
+      "an unread message keeps Mark unread hidden, never offered");
+    assert.equal(readControl(unread.body, "read").includes(" hidden "), false,
+      "and offers Mark read instead");
     assert.equal(unreadMarkerRow(unread.body), unreadRow, "and the reader marks it read once it is shown");
 
     const rich = await get(messageHref(richAccount, richMid));
@@ -761,6 +766,42 @@ test("the action bar shows Archive only when an archive target exists and Delete
     assert.deepEqual(actionRows(rich.body, "delete"), [richRow]);
     assert.match(rich.body, /data-ml-action="archive" data-row="\d+">Archive<\/button>/);
     assert.match(rich.body, /data-ml-action="delete" data-row="\d+">Delete<\/button>/);
+  });
+});
+
+test("the bar carries both read controls, one hidden, and the sentence Mark unread leaves behind", async () => {
+  const readMid = "<read-controls@mail.example.test>";
+  const unreadMid = "<unread-controls@mail.example.test>";
+  let accountId, readRow, unreadRow;
+  await withDb(async (db) => {
+    const seeded = await seedWith(db, ACTION_FOLDERS);
+    accountId = seeded.account.id;
+    readRow = (await deliver(db, {
+      accountId, folderId: seeded.folderId("INBOX"), subject: "Already read", messageId: readMid, isRead: true,
+    })).id;
+    unreadRow = (await deliver(db, {
+      accountId, folderId: seeded.folderId("INBOX"), subject: "Still unread", messageId: unreadMid,
+    })).id;
+  });
+  await withFlag(async () => {
+    const read = await get(messageHref(accountId, readMid));
+    assert.equal(read.status, 200);
+    assert.equal(readControl(read.body, "read"),
+      `<button class="ml-btn" type="button" hidden data-ml-action="read" data-row="${readRow}">Mark read</button>`,
+      "a message already read keeps Mark read hidden but drawn");
+    assert.equal(readControl(read.body, "unread"),
+      `<button class="ml-btn" type="button" data-ml-action="unread" data-row="${readRow}">Mark unread</button>`);
+    assert.match(read.body, /data-ml-actions data-row="\d+" data-ml-done-unread="Marked unread\."/,
+      "the bar carries the sentence Mark unread shows");
+
+    const unread = await get(messageHref(accountId, unreadMid));
+    assert.equal(unread.status, 200);
+    assert.equal(readControl(unread.body, "read"),
+      `<button class="ml-btn" type="button" data-ml-action="read" data-row="${unreadRow}">Mark read</button>`,
+      "an unread message offers Mark read");
+    assert.equal(readControl(unread.body, "unread"),
+      `<button class="ml-btn" type="button" hidden data-ml-action="unread" data-row="${unreadRow}">Mark unread</button>`);
+    assert.match(unread.body, /data-ml-done-unread="Marked unread\."/);
   });
 });
 
