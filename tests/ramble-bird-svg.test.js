@@ -120,7 +120,7 @@ test("a bird with no outfit draws byte-identically to the pre-wardrobe engine", 
 });
 
 test("OUTFIT_SLOTS is the catalogue's art vocabulary", () => {
-  assert.deepEqual(Bird.OUTFIT_SLOTS, { hat: ["bow", "leaf", "beanie"], scarf: ["knit", "stripe"], glasses: ["round", "shades"] });
+  assert.deepEqual(Bird.OUTFIT_SLOTS, { hat: ["bow", "leaf", "beanie"], scarf: ["knit", "stripe", "kerchief1", "kerchief2", "kerchief3", "kerchief4", "kerchief5"], glasses: ["round", "shades"] });
 });
 
 test("applyOutfit layers over the rolled genome without mutating it", () => {

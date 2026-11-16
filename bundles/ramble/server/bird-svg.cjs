@@ -18,8 +18,21 @@
   var EYES = ["round","sparkle","sleepy","wink"], MARKS = ["none","cheeks","starburst","collar","freckles"], HATS = ["none","none","none","bow","leaf","beanie"];
   /* What can be WORN (phase 4, spec §5). The hat values are the existing
    * rolled-hat vocabulary; scarf and glasses are new slots a rolled genome
-   * never has, so a bird with no outfit draws exactly as it always did. */
-  var OUTFIT_SLOTS = { hat: ["bow","leaf","beanie"], scarf: ["knit","stripe"], glasses: ["round","shades"] };
+   * never has, so a bird with no outfit draws exactly as it always did.
+   * scarf.kerchief1..5 is the EARNED neckwear (never sold): it sits in the same
+   * slot, so a bird wears it instead of a bought scarf. */
+  var OUTFIT_SLOTS = { hat: ["bow","leaf","beanie"], scarf: ["knit","stripe","kerchief1","kerchief2","kerchief3","kerchief4","kerchief5"], glasses: ["round","shades"] };
+  /* The week kerchief. Colour and dot count both come from its place in the
+   * month (1..5), so the week is never told by colour alone; the two lightest
+   * weeks take the dark ink and the darker three the cream. Dots are bird
+   * coordinates, like every other part. It never uses the bird's accent. */
+  var KERCHIEF = {
+    kerchief1: { colour: "#f6d365", trim: "#2b2350", dots: [[104,107]] },
+    kerchief2: { colour: "#f2925a", trim: "#2b2350", dots: [[98,104],[110,104]] },
+    kerchief3: { colour: "#2f9467", trim: "#fff8e6", dots: [[98,103],[110,103],[104,112]] },
+    kerchief4: { colour: "#3558bd", trim: "#fff8e6", dots: [[95,102],[104,103],[113,102],[104,112]] },
+    kerchief5: { colour: "#5a2a6c", trim: "#fff8e6", dots: [[95,102],[104,103],[113,102],[99,111],[109,111]] }
+  };
   var ACCENTS = ["#f7c948","#5b7cff","#ff7a9c","#7bd389","#c77dff","#ff8a5b"];
   var PARTS = { /* name -> path data; body/head are ellipses computed from genome, the rest are here */
     beak: "M0 0 l20 5 l-20 6 z", longbeak: "M0 0 l34 -3 l-33 9 z", foot: "M0 0 v16 m-8 0 h16",
@@ -91,11 +104,24 @@
     /* Scarf and glasses: drawn only for a known value, and the value is only
      * ever COMPARED, never written into the markup. */
     var scarf = "";
+    var ker = typeof g.scarf === "string" && Object.prototype.hasOwnProperty.call(KERCHIEF, g.scarf) ? KERCHIEF[g.scarf] : null;
     if (g.scarf === "knit" || g.scarf === "stripe") {
       var dash = g.scarf === "stripe" ? ' stroke-dasharray="6 5"' : "";
       scarf = '<path d="M' + n(cx - 28) + ' ' + n(cy - 26) + ' q 28 13 56 0" stroke="' + g.accent + '" stroke-width="10" fill="none" stroke-linecap="round"/>' +
         (g.scarf === "stripe" ? '<path d="M' + n(cx - 28) + ' ' + n(cy - 26) + ' q 28 13 56 0" stroke="#fff" stroke-width="10" fill="none"' + dash + ' opacity=".55"/>' : "") +
         '<path d="M' + n(cx - 16) + ' ' + n(cy - 22) + ' l -7 24 l 10 -2 z" fill="' + g.accent + '"/>';
+    }
+    /* The earned kerchief: knot tails at the back, the scarf's own neck curve,
+     * the drape on the chest, a trim line inside it and the week's dots. Flat
+     * fills and no outline, like the rest of the bird. */
+    if (ker) {
+      var dots = "";
+      for (var d = 0; d < ker.dots.length; d++) dots += '<circle cx="' + n(ker.dots[d][0]) + '" cy="' + n(ker.dots[d][1]) + '" r="2.3"/>';
+      scarf = '<path d="M' + n(cx - 26) + ' ' + n(cy - 25) + ' l -11 3 l 7 4 l -6 9 l 12 -8 z" fill="' + ker.colour + '"/>' +
+        '<path d="M' + n(cx - 28) + ' ' + n(cy - 26) + ' q 28 13 56 0" stroke="' + ker.colour + '" stroke-width="10" fill="none" stroke-linecap="round"/>' +
+        '<path d="M' + n(cx - 23) + ' ' + n(cy - 23) + ' q 23 10 49 -1 q -5 20 -21 31 q -17 -9 -28 -30 z" fill="' + ker.colour + '"/>' +
+        '<path d="M' + n(cx - 21) + ' ' + n(cy - 19) + ' q 10 18 26 26 q 14 -10 19 -27" stroke="' + ker.trim + '" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".85"/>' +
+        '<g fill="' + ker.trim + '">' + dots + '</g>';
     }
     var glasses = "";
     if (g.glasses === "round" || g.glasses === "shades") {

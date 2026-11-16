@@ -31,9 +31,47 @@ export const ACCESSORIES = Object.freeze([
   { id: "scarf.stripe", slot: "scarf", value: "stripe", name: "Striped scarf", price: 20 },
   { id: "glasses.round", slot: "glasses", value: "round", name: "Round glasses", price: 20 },
   { id: "glasses.shades", slot: "glasses", value: "shades", name: "Shades", price: 25 },
+  /* Earned, never sold: a week kerchief is granted by a whole-body week, so it
+   * carries no price and no spend row ever exists for it. Its five values are
+   * the week's colour and dot count (bird-svg.cjs). */
+  { id: "scarf.kerchief1", slot: "scarf", value: "kerchief1", name: "Buttercup kerchief", earned: true },
+  { id: "scarf.kerchief2", slot: "scarf", value: "kerchief2", name: "Apricot kerchief", earned: true },
+  { id: "scarf.kerchief3", slot: "scarf", value: "kerchief3", name: "Fern kerchief", earned: true },
+  { id: "scarf.kerchief4", slot: "scarf", value: "kerchief4", name: "Lake kerchief", earned: true },
+  { id: "scarf.kerchief5", slot: "scarf", value: "kerchief5", name: "Plum kerchief", earned: true },
 ].map((it) => Object.freeze(it)));
 
 const BY_ID = new Map(ACCESSORIES.map((it) => [it.id, it]));
+
+/** The ledger kind for an earned item, keyed by the ISO week that granted it:
+ * one row per week id, delta a constant 1 — the append-only shape the ledger's
+ * MAX(delta) merge needs — so it replicates like any other wallet fact. */
+export const WEEKFULL_KIND = "weekfull";
+
+const WEEK_ID_RE = /^(\d{4})-W(\d{2})$/;
+const DAY_MS = 86400000;
+
+/**
+ * Which kerchief an ISO week id ("YYYY-Www") earns: the week of the month of
+ * its Thursday, 1..5. Pure UTC date arithmetic — the Thursday of ISO week 1 is
+ * the Thursday of the week holding 4 January — so it needs no clock, no locale
+ * and no timezone, and every instance agrees. A malformed id, or a week its
+ * year does not have, is null.
+ */
+export function earnedItemId(weekId) {
+  if (typeof weekId !== "string") return null;
+  const m = WEEK_ID_RE.exec(weekId);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const week = Number(m[2]);
+  if (week < 1 || week > 53) return null;
+  const jan4 = Date.UTC(year, 0, 4);
+  const jan4Dow = new Date(jan4).getUTCDay();            // 0 = Sunday
+  const week1Monday = jan4 - ((jan4Dow + 6) % 7) * DAY_MS;
+  const thursday = new Date(week1Monday + (3 + (week - 1) * 7) * DAY_MS);
+  if (thursday.getUTCFullYear() !== year) return null;  // e.g. a 53rd week this year does not have
+  return "scarf.kerchief" + Math.ceil(thursday.getUTCDate() / 7);
+}
 
 export function itemById(id) {
   return typeof id === "string" && BY_ID.has(id) ? BY_ID.get(id) : null;
@@ -45,14 +83,23 @@ async function safeEmit(emit, table, op, row) {
   catch (err) { try { console.warn(`[ramble] emit ${table} failed:`, err?.message); } catch {} }
 }
 
-/** Item ids the user owns, derived from spend rows. Unknown ids (another
- * version's catalogue) are skipped: not wearable here, still paid for. */
+/** Item ids the user owns: spend rows (purchases) plus a `weekfull` row per
+ * earned week. Unknown ids (another version's catalogue) are skipped: not
+ * wearable here, still paid for. */
 export async function ownedItems(db) {
   const out = new Set();
   try {
-    const { rows } = await db.execute({ sql: "SELECT key FROM ramble_wallet WHERE kind = ?", args: [SPEND_KIND] });
+    const { rows } = await db.execute({
+      sql: "SELECT kind, key FROM ramble_wallet WHERE kind IN (?, ?)",
+      args: [SPEND_KIND, WEEKFULL_KIND],
+    });
     for (const r of rows || []) {
       const key = String(r.key || "");
+      if (r.kind === WEEKFULL_KIND) {
+        const earned = earnedItemId(key);
+        if (earned && BY_ID.has(earned)) out.add(earned);
+        continue;
+      }
       const cut = key.lastIndexOf(":");
       const id = cut > 0 ? key.slice(0, cut) : "";
       if (BY_ID.has(id)) out.add(id);
@@ -69,6 +116,9 @@ export async function ownedItems(db) {
 export async function buyItem(db, itemId, { now = Date.now(), emit, purchaseId } = {}) {
   const item = itemById(itemId);
   if (!item) return { ok: false, reason: "unknown-item", balance: await seedBalance(db) };
+  // An earned item is never for sale, whatever the balance: refuse before any
+  // read-write path, so nothing is written and nothing is emitted.
+  if (item.earned === true) return { ok: false, reason: "earned", balance: await seedBalance(db) };
   const prefix = item.id + ":";
   const key = prefix + (typeof purchaseId === "string" && purchaseId ? purchaseId : randomUUID());
   const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
@@ -173,7 +223,9 @@ export async function wardrobeState(db) {
   } catch { active = null; }
   return {
     seed: await seedBalance(db),
-    items: ACCESSORIES.map((it) => ({ ...it, owned: owned.has(it.id) })),
+    // An earned item joins the shop only once it is owned: an unowned kerchief
+    // is not an offer, it is something next week's walking brings.
+    items: ACCESSORIES.filter((it) => it.earned !== true || owned.has(it.id)).map((it) => ({ ...it, owned: owned.has(it.id) })),
     active,
   };
 }

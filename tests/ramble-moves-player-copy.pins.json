@@ -84,5 +84,19 @@
   "firstRun.done": "47a22081b1c0f674075f44401ab3268587b275b61daed5829e173e55d68552b1",
   "settings.cardsPerDay": "30b1183e43d6957fb61020d78ef160bc8c1f3e644da307625bd6646dda0e2c72",
   "settings.cardsPerDay.note": "e7648e5cc827116900ca305c9219163ad2ef67f7a96e9e4a2c149574cb92ef9e",
-  "settings.windows": "bca029a60a28c7a269b67a09b9874a3e97436eca5e69ae713123b917d9532ece"
+  "settings.windows": "bca029a60a28c7a269b67a09b9874a3e97436eca5e69ae713123b917d9532ece",
+  "week.title": "8c4eef5ab2532515ef24a662db70f6e5b8063c7f924342b2a463f763f1091634",
+  "week.area.upper": "1e8ef1307c968f653e59c6fbb848aadcf9d9fee0c92525ceb4e269e7faa316e0",
+  "week.area.core": "70ea1983c983deacc1b61805aea3d43648afd932f346fb2e5d9b15facd4035c2",
+  "week.area.lower": "38557594d0fce7fe39eac7388333351fb58f3e01fc11d741b5f8eceb4319039b",
+  "week.area.heart": "9f5c3a7854a48da8c2cfa826110563928afab47a1adb413d8bcc80a631c7536b",
+  "week.area.mobility": "938b641a5a38ccc142f06e8833a6c6c4a7e08f7b35a64ad55a48f7ce48b11c4c",
+  "week.area.progress": "707d27fa748888ae428600ba4909c7199b82282d9924a2e6cf1984ed95c24946",
+  "week.comingUp": "b743c760826caba48d0c09a19ad8167fa992491b9951fb94b916adc529a9154f",
+  "week.restDay": "ccea1f3212e8f253242ab4d1955c19bab7140122bdee021064ac9a52ffc1dca9",
+  "week.dayMinutes": "e1bded87ee24b702d6c1baf5edf99fccfc0d2e1d5bca603aef4937fb6c282fe2",
+  "week.whole": "c710f888fe395371a22dccc4b62de6c7d7b171209eedbf216b2fa0f528a8e31a",
+  "week.stage.ask": "40469c52981a5a6049aa6fc455d22e0387f22186a0e9c0b84c87ccff8eaaa9d2",
+  "week.stage.yes": "0b051c87448d3d58a3ee9bebd882cb8a11c7526ff3339f4f31379f80cf0b51a3",
+  "week.stage.no": "5c5e8809cf0a6f04ade70a88f9c2d5fc1a6fc7c7831aea30045a8b289b9f1c42"
 }

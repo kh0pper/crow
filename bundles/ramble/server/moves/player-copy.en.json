@@ -84,5 +84,19 @@
   "firstRun.done": "Show me today",
   "settings.cardsPerDay": "Cards a day",
   "settings.cardsPerDay.note": "A change starts tomorrow.",
-  "settings.windows": "When do you like to move?"
+  "settings.windows": "When do you like to move?",
+  "week.title": "This week",
+  "week.area.upper": "Upper body",
+  "week.area.core": "Core",
+  "week.area.lower": "Legs",
+  "week.area.heart": "Heart and lungs",
+  "week.area.mobility": "Stretch and balance",
+  "week.area.progress": "{done} of 2 days",
+  "week.comingUp": "Coming up",
+  "week.restDay": "Rest day. Part of the plan.",
+  "week.dayMinutes": "{minutes} min",
+  "week.whole": "A whole-body week. Your bird has something new to wear.",
+  "week.stage.ask": "Ready for a little more?",
+  "week.stage.yes": "Yes, a little more",
+  "week.stage.no": "Keep it as it is"
 }
