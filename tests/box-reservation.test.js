@@ -14,7 +14,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, unlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -22,7 +22,22 @@ import {
   readReservation, isStartAllowed, writeReservation, clearReservation,
   ReservedError, DEFAULT_ALLOW, DEFAULT_MAX_HOLD_MS, reservationPath,
   schedulePath, lockPath, withReservationLock, withReservationLockAsync,
+  activateHold, renewHold, releaseHold, HoldConflictError,
+  _activateHoldLocked, _renewHoldLocked, _releaseHoldLocked,
 } from "../servers/gateway/box-reservation.js";
+
+// The box-calendar lock lives beside the CALENDAR file, and the activate /
+// renew / release wrappers take it on every call. Point the calendar (and so
+// the lock) into a scratch directory before anything here touches a hold, so
+// no lock file can ever land in the real state directory.
+const STATE_DIR = mkdtempSync(join(tmpdir(), "box-res-state-"));
+process.env.CROW_BOX_SCHEDULE_PATH = join(STATE_DIR, "box-schedule.json");
+
+/** A hold file, and a lock file, both in a directory of their own. */
+function freshHold() {
+  const d = mkdtempSync(join(tmpdir(), "box-hold-"));
+  return { dir: d, path: join(d, "r.json"), lock: { path: join(d, "crow-box-schedule.lock"), timeoutMs: 2000 } };
+}
 
 const dir = mkdtempSync(join(tmpdir(), "box-res-"));
 const path = join(dir, "r.json");
@@ -342,4 +357,227 @@ test("the lock path follows the schedule path, not the hold path", () => {
     if (prevSchedule === undefined) delete process.env.CROW_BOX_SCHEDULE_PATH; else process.env.CROW_BOX_SCHEDULE_PATH = prevSchedule;
     if (prevHold === undefined) delete process.env.CROW_BOX_RESERVATION_PATH; else process.env.CROW_BOX_RESERVATION_PATH = prevHold;
   }
+});
+
+test("a freshly created empty lock file is not stolen, an old empty one is", () => {
+  // The creator does openSync("wx") and only then writes its pid; between
+  // those two calls the file is empty. Stealing it there would hand the lock
+  // to two processes at once.
+  const d = mkdtempSync(join(tmpdir(), "box-lock-empty-"));
+  const lockFile = join(d, "crow-box-schedule.lock");
+  writeFileSync(lockFile, "");
+  assert.throws(
+    () => withReservationLock(() => "must not run", { path: lockFile, timeoutMs: 300 }),
+    (e) => e && e.code === "box_lock_timeout",
+    "a young empty lock file is waited for, not broken",
+  );
+  assert.equal(existsSync(lockFile), true, "the young empty lock file is left in place");
+  const past = new Date(Date.now() - 10_000);
+  utimesSync(lockFile, past, past);
+  assert.equal(withReservationLock(() => "inside", { path: lockFile, timeoutMs: 2000 }), "inside");
+  assert.equal(existsSync(lockFile), false, "the old empty lock was broken and then released");
+});
+
+// --- owner-checked activate / renew / release -------------------------------
+
+test("activate refuses a foreign unexpired hold", () => {
+  const h = freshHold();
+  activateHold({ owner: "win", reason: "bench", minutes: 60, path: h.path, now: T0, lock: h.lock });
+  assert.throws(
+    () => activateHold({ owner: "casey", reason: "mine", minutes: 60, path: h.path, now: T0 + 60_000, lock: h.lock }),
+    (e) => e instanceof HoldConflictError
+      && e.code === "box_held"
+      && e.holder === "win"
+      && e.message.includes("win")
+      && e.message.includes(iso(T0 + 3_600_000)),
+    "names the holder and its expiry",
+  );
+  assert.equal(readReservation({ path: h.path, now: T0 + 60_000 }).owner, "win", "the holder's record is untouched");
+  assert.equal(readReservation({ path: h.path, now: T0 + 60_000 }).expires_at, iso(T0 + 3_600_000));
+  // A file we cannot read fails closed the same way, with holder "unknown".
+  writeFileSync(h.path, "{not json");
+  assert.throws(
+    () => activateHold({ owner: "casey", minutes: 5, path: h.path, now: T0, lock: h.lock }),
+    (e) => e instanceof HoldConflictError && e.code === "box_held" && e.holder === "unknown",
+  );
+});
+
+test("activate over an expired foreign hold succeeds", () => {
+  const h = freshHold();
+  writeFileSync(h.path, JSON.stringify({
+    owner: "win", reason: "yesterday", started_at: iso(T0 - 3_600_000), expires_at: iso(T0 - 1000), allow: [],
+  }));
+  const rec = activateHold({ owner: "casey", reason: "tonight", minutes: 30, path: h.path, now: T0, lock: h.lock });
+  assert.equal(rec.owner, "casey");
+  assert.equal(rec.started_at, iso(T0));
+  assert.equal(rec.expires_at, iso(T0 + 1_800_000));
+  const back = readReservation({ path: h.path, now: T0 });
+  assert.equal(back.owner, "casey");
+  assert.equal(back.reason, "tonight");
+});
+
+test("activate by the same owner replaces its own hold", () => {
+  const h = freshHold();
+  const first = activateHold({ owner: "win", minutes: 60, path: h.path, now: T0, lock: h.lock });
+  const second = activateHold({ owner: "win", minutes: 30, path: h.path, now: T0 + 600_000, lock: h.lock });
+  assert.equal(first.started_at, iso(T0));
+  assert.equal(second.started_at, iso(T0 + 600_000), "a re-activate starts a fresh record");
+  assert.equal(second.expires_at, iso(T0 + 600_000 + 1_800_000));
+  assert.equal(readReservation({ path: h.path, now: T0 + 600_000 }).expires_at, iso(T0 + 2_400_000));
+});
+
+test("renew keeps started_at and the notice key", () => {
+  const h = freshHold();
+  activateHold({
+    owner: "gpujob-7f3a", reason: "render batch", minutes: 20, mode: "beside", kind: "gpu-job",
+    booking_id: "bk_0123456789ab", job_id: "job_42", gtt_mb: 50000, host_ram_mb: 32768, hip_procs: 4,
+    allow: ["crow-embed"], path: h.path, now: T0, lock: h.lock,
+  });
+  const before = readReservation({ path: h.path, now: T0 });
+  const rec = renewHold({ owner: "gpujob-7f3a", minutes: 20, path: h.path, now: T0 + 300_000, lock: h.lock });
+  const after = readReservation({ path: h.path, now: T0 + 300_000 });
+  assert.equal(after.key, before.key, "the notice key is owner@started_at and does not move");
+  assert.equal(after.started_at, iso(T0));
+  assert.equal(after.expires_at, iso(T0 + 300_000 + 1_200_000));
+  assert.notEqual(after.expires_at, before.expires_at, "the expiry moved");
+  assert.equal(rec.expires_at, after.expires_at);
+  assert.equal(after.reason, "render batch");
+  assert.equal(after.mode, "beside");
+  assert.equal(after.kind, "gpu-job");
+  assert.equal(after.booking_id, "bk_0123456789ab");
+  assert.equal(after.job_id, "job_42");
+  assert.equal(after.gtt_mb, 50000);
+  assert.equal(after.host_ram_mb, 32768);
+  assert.equal(after.hip_procs, 4);
+  assert.deepEqual(after.allow, before.allow);
+});
+
+test("renew by a non-holder throws box_held", () => {
+  const h = freshHold();
+  activateHold({ owner: "win", minutes: 60, path: h.path, now: T0, lock: h.lock });
+  assert.throws(
+    () => renewHold({ owner: "casey", minutes: 20, path: h.path, now: T0 + 60_000, lock: h.lock }),
+    (e) => e instanceof HoldConflictError && e.code === "box_held" && e.holder === "win",
+  );
+  const back = readReservation({ path: h.path, now: T0 + 60_000 });
+  assert.equal(back.owner, "win");
+  assert.equal(back.expires_at, iso(T0 + 3_600_000), "the holder's expiry is untouched");
+});
+
+test("renew past notAfter throws renew_past_next_booking", () => {
+  const h = freshHold();
+  activateHold({ owner: "win", minutes: 60, path: h.path, now: T0, lock: h.lock });
+  assert.throws(
+    () => renewHold({
+      owner: "win", minutes: 60, notAfter: T0 + 30 * 60_000, path: h.path, now: T0 + 10 * 60_000, lock: h.lock,
+    }),
+    (e) => e instanceof RangeError && e.message.includes("renew_past_next_booking"),
+  );
+  assert.equal(readReservation({ path: h.path, now: T0 + 10 * 60_000 }).expires_at, iso(T0 + 3_600_000));
+  const rec = renewHold({
+    owner: "win", minutes: 20, notAfter: T0 + 60 * 60_000, path: h.path, now: T0 + 10 * 60_000, lock: h.lock,
+  });
+  assert.equal(rec.expires_at, iso(T0 + 30 * 60_000), "an extension that ends before notAfter is fine");
+});
+
+test("renew after rm -f (legacy teardown) throws box_held with holder null", () => {
+  const h = freshHold();
+  activateHold({ owner: "win", minutes: 60, path: h.path, now: T0, lock: h.lock });
+  unlinkSync(h.path);
+  assert.throws(
+    () => renewHold({ owner: "win", minutes: 20, path: h.path, now: T0 + 60_000, lock: h.lock }),
+    (e) => e instanceof HoldConflictError && e.code === "box_held" && e.holder === null,
+  );
+  assert.equal(existsSync(h.path), false, "renew never recreates a removed hold");
+});
+
+test("release by a non-holder returns false and leaves the file", () => {
+  const h = freshHold();
+  activateHold({ owner: "win", minutes: 60, path: h.path, now: T0, lock: h.lock });
+  const before = readFileSync(h.path, "utf8");
+  assert.equal(releaseHold({ owner: "casey", path: h.path, lock: h.lock }), false);
+  assert.equal(existsSync(h.path), true);
+  assert.equal(readFileSync(h.path, "utf8"), before, "the holder's record is byte-for-byte unchanged");
+  assert.equal(releaseHold({ owner: "win", path: h.path, lock: h.lock }), true, "the holder may release");
+  assert.equal(existsSync(h.path), false);
+  assert.equal(releaseHold({ owner: "win", path: h.path, lock: h.lock }), false, "no hold -> false");
+});
+
+test("release --force removes any hold", () => {
+  const h = freshHold();
+  activateHold({ owner: "win", minutes: 60, path: h.path, now: T0, lock: h.lock });
+  assert.equal(releaseHold({ owner: "casey", force: true, path: h.path, lock: h.lock }), true);
+  assert.equal(existsSync(h.path), false);
+  // Removing one's own already-expired hold is still a release.
+  activateHold({ owner: "win", minutes: 5, path: h.path, now: T0, lock: h.lock });
+  assert.equal(releaseHold({ owner: "win", path: h.path, now: T0 + 10 * 60_000, lock: h.lock }), true);
+  assert.equal(existsSync(h.path), false);
+});
+
+test("the 8 h cap applies per call and to a non-gpu-job's total span", () => {
+  const h = freshHold();
+  assert.throws(
+    () => activateHold({ owner: "win", minutes: 481, path: h.path, now: T0, lock: h.lock }),
+    (e) => e instanceof RangeError && /8h/.test(e.message),
+  );
+  assert.equal(existsSync(h.path), false, "a refused activate writes nothing");
+  // No `kind`: the legacy record, capped on its total span.
+  activateHold({ owner: "win", reason: "window", minutes: 480, path: h.path, now: T0, lock: h.lock });
+  assert.throws(
+    () => renewHold({ owner: "win", minutes: 481, path: h.path, now: T0 + 60_000, lock: h.lock }),
+    (e) => e instanceof RangeError && /8h/.test(e.message),
+    "per call",
+  );
+  assert.throws(
+    () => renewHold({ owner: "win", minutes: 20, path: h.path, now: T0 + 470 * 60_000, lock: h.lock }),
+    (e) => e instanceof RangeError && /8h/.test(e.message),
+    "total span from started_at",
+  );
+  const rec = renewHold({ owner: "win", minutes: 20, force: true, path: h.path, now: T0 + 470 * 60_000, lock: h.lock });
+  assert.equal(rec.expires_at, iso(T0 + 490 * 60_000), "force allows both caps to be exceeded");
+  assert.equal(rec.started_at, iso(T0));
+  // A named non-gpu-job kind is capped the same way.
+  const h2 = freshHold();
+  activateHold({ owner: "win", kind: "window", minutes: 470, path: h2.path, now: T0, lock: h2.lock });
+  assert.throws(
+    () => renewHold({ owner: "win", minutes: 30, path: h2.path, now: T0 + 460 * 60_000, lock: h2.lock }),
+    (e) => e instanceof RangeError && /8h/.test(e.message),
+  );
+});
+
+test("gpu-job hold renews past 8 h of total span", () => {
+  const h = freshHold();
+  activateHold({
+    owner: "gpujob-9c1d", reason: "render batch", minutes: 480, mode: "beside", kind: "gpu-job",
+    booking_id: "bk_0123456789ab", job_id: "job_7", gtt_mb: 50000, host_ram_mb: 32768, hip_procs: 4,
+    path: h.path, now: T0, lock: h.lock,
+  });
+  let now = T0;
+  for (let i = 0; i < 120; i++) { // 600 min of wall clock in 5 min steps, 20 min leases
+    now += 5 * 60_000;
+    const rec = renewHold({ owner: "gpujob-9c1d", minutes: 20, path: h.path, now, lock: h.lock });
+    assert.equal(rec.started_at, iso(T0));
+  }
+  const back = readReservation({ path: h.path, now });
+  assert.equal(back.kind, "gpu-job");
+  assert.equal(back.owner, "gpujob-9c1d");
+  assert.ok(
+    Date.parse(back.expires_at) - T0 > DEFAULT_MAX_HOLD_MS,
+    `renewed past 8 h of total span (${Date.parse(back.expires_at) - T0} ms)`,
+  );
+});
+
+test("inner locked functions run under one outer lock without box_lock_timeout", () => {
+  const h = freshHold();
+  const out = withReservationLock(() => {
+    const activated = _activateHoldLocked({ owner: "win", reason: "composed", minutes: 20, path: h.path, now: T0 });
+    const renewed = _renewHoldLocked({ owner: "win", minutes: 20, path: h.path, now: T0 + 60_000 });
+    const released = _releaseHoldLocked({ owner: "win", path: h.path });
+    return { activated, renewed, released };
+  }, h.lock);
+  assert.equal(out.activated.owner, "win");
+  assert.equal(out.renewed.started_at, iso(T0));
+  assert.equal(out.renewed.expires_at, iso(T0 + 60_000 + 1_200_000));
+  assert.equal(out.released, true);
+  assert.equal(existsSync(h.path), false);
 });

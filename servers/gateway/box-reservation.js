@@ -179,33 +179,16 @@ export class ReservedError extends Error {
 }
 
 /**
- * Write a reservation atomically (temp file + rename in the same directory).
+ * Legacy entry point: an unconditional hold in the pre-calendar shape. It is
+ * `activateHold({…, takeOver: true})` — it ignores whatever is already held
+ * (a legacy writer overwrote the file), writes the same JSON as before and
+ * takes the same lock.
+ *
  * @returns the record written.
  * @throws RangeError when the hold exceeds DEFAULT_MAX_HOLD_MS and !force.
  */
 export function writeReservation({ owner, reason = "", minutes = DEFAULT_MINUTES, allow = [], force = false, now = Date.now(), path = reservationPath() } = {}) {
-  const who = String(owner || "").trim();
-  if (!who) throw new Error("writeReservation: owner is required");
-  const mins = Number(minutes);
-  if (!Number.isFinite(mins) || mins <= 0) throw new RangeError("writeReservation: minutes must be a positive number");
-  const holdMs = Math.round(mins * 60_000);
-  if (holdMs > DEFAULT_MAX_HOLD_MS && !force) {
-    throw new RangeError(`hold of ${mins} min exceeds the 8h default max; pass force to exceed it`);
-  }
-  const rec = {
-    owner: who,
-    reason: String(reason || ""),
-    started_at: new Date(now).toISOString(),
-    expires_at: new Date(now + holdMs).toISOString(),
-    allow: [...new Set((Array.isArray(allow) ? allow : []).filter((n) => typeof n === "string" && n))],
-  };
-  const dir = dirname(path);
-  try { mkdirSync(dir, { recursive: true }); } catch { /* exists or unwritable — the write below reports it */ }
-  const tmp = join(dir, `.crow-box-reservation.${process.pid}.${Date.now()}.tmp`);
-  writeFileSync(tmp, JSON.stringify(rec, null, 2) + "\n", { mode: 0o644 });
-  renameSync(tmp, path);
-  _cache = null;
-  return rec;
+  return activateHold({ owner, reason, minutes, allow, force, now, path, takeOver: true });
 }
 
 /** @returns true when a file was removed, false when there was none. */
@@ -228,6 +211,10 @@ export function clearReservation({ path = reservationPath() } = {}) {
 // must use the lock-free inner functions rather than nest an acquire.
 
 const LOCK_RETRY_MS = 25;
+// A lock file with no readable pid may belong to a process that has just done
+// openSync("wx") and not yet written its pid. Younger than this, it is left
+// alone; older, it is stale like a dead pid.
+const STALE_EMPTY_LOCK_MS = 2_000;
 
 function lockFs() {
   return { renameSync, unlinkSync, readFileSync };
@@ -265,13 +252,27 @@ function tryCreateLockFile(lockFile) {
   return true;
 }
 
+function lockFileAgeMs(lockFile) {
+  try { return Date.now() - statSync(lockFile).mtimeMs; } catch { return null; }
+}
+
 /** @returns true when this process now holds the lock. */
 function tryAcquireLockFile(lockFile) {
   if (tryCreateLockFile(lockFile)) return true;
   const existingPid = readLockPidFile(lockFile);
-  // A live owner elsewhere: wait. A dead pid or unreadable content: stale.
-  if (existingPid != null && isProcessAlive(existingPid)) return false;
-  stealStaleLock({ fs: lockFs(), lockPath: lockFile, existingPid });
+  if (existingPid != null) {
+    // A live owner elsewhere: wait. A dead pid: stale at once.
+    if (isProcessAlive(existingPid)) return false;
+    stealStaleLock({ fs: lockFs(), lockPath: lockFile, existingPid });
+    return tryCreateLockFile(lockFile);
+  }
+  // No readable pid at all. Its creator may still be between the exclusive
+  // open and the pid write, so a fresh file must not be stolen; only one older
+  // than STALE_EMPTY_LOCK_MS is stale (its creator died mid-write).
+  const ageMs = lockFileAgeMs(lockFile);
+  if (ageMs == null) return tryCreateLockFile(lockFile); // vanished — retry the create
+  if (ageMs < STALE_EMPTY_LOCK_MS) return false;
+  stealStaleLock({ fs: lockFs(), lockPath: lockFile, existingPid: null });
   return tryCreateLockFile(lockFile);
 }
 
@@ -349,4 +350,226 @@ export async function withReservationLockAsync(fn, { path, timeoutMs = 5000 } = 
   } finally {
     releaseLockFile(lockFile);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Owner-checked activate / renew / release (the one box calendar, private
+// engineering notes §6.3).
+//
+// The lock above is NOT re-entrant. Each public wrapper takes it exactly once
+// and then runs the matching `_…Locked` inner function; a composed operation
+// that already holds the lock (book + activate, renew + extend its booking)
+// calls the inner functions directly. The inner functions are exported for
+// exactly that use and must never be called without the lock.
+//
+// Two separate flags, deliberately: `takeOver` ignores a foreign holder (what
+// the legacy writeReservation does), `force` exceeds the 8 h cap.
+
+export class HoldConflictError extends Error {
+  /**
+   * @param {string|null} holder the holder's owner string, `"unknown"` for an
+   *   unreadable file, or null when there is no live hold at all.
+   * @param {{expires_at?: string|null, message?: string}} [detail]
+   */
+  constructor(holder = null, { expires_at = null, message = null } = {}) {
+    const who = holder == null ? null : String(holder);
+    const until = expires_at ? ` until ${expires_at}` : "";
+    super(message || (who ? `box held by ${who}${until}` : "no live hold for this owner"));
+    this.name = "HoldConflictError";
+    this.code = "box_held";
+    this.http = 409;
+    this.holder = who;
+    this.expires_at = expires_at || null;
+  }
+}
+
+const HOLD_MISSING = "missing";
+const HOLD_CORRUPT = "corrupt";
+const HOLD_RECORD = "record";
+
+/** The hold file as it is on disk right now: missing, corrupt, or a record. */
+function readHoldFile(path) {
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { state: HOLD_MISSING, raw: null };
+    return { state: HOLD_CORRUPT, raw: null };
+  }
+  let raw;
+  try { raw = JSON.parse(text); } catch { return { state: HOLD_CORRUPT, raw: null }; }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { state: HOLD_CORRUPT, raw: null };
+  return { state: HOLD_RECORD, raw };
+}
+
+/** Write a hold record atomically (temp file + rename in the same directory). */
+function writeHoldFile(path, rec) {
+  const dir = dirname(path);
+  try { mkdirSync(dir, { recursive: true }); } catch { /* exists or unwritable — the write below reports it */ }
+  const tmp = join(dir, `.crow-box-reservation.${process.pid}.${Date.now()}.tmp`);
+  writeFileSync(tmp, JSON.stringify(rec, null, 2) + "\n", { mode: 0o644 });
+  renameSync(tmp, path);
+  _cache = null;
+  return rec;
+}
+
+/**
+ * Activate (or re-activate one's own) hold. Caller holds the lock.
+ *
+ * @returns the record written. A plain legacy-shaped hold writes exactly the
+ *   old JSON: `mode` is only written for "beside", and the v2 fields only when
+ *   they are given.
+ * @throws {HoldConflictError} an unexpired hold by another owner (or a corrupt
+ *   file) is in the way and !takeOver.
+ * @throws {RangeError} bad minutes/mode, or minutes over the 8 h cap without force.
+ */
+export function _activateHoldLocked({
+  owner, reason = "", minutes = DEFAULT_MINUTES, allow = [], mode = "exclusive",
+  kind = null, booking_id = null, job_id = null,
+  gtt_mb = null, host_ram_mb = null, hip_procs = null,
+  force = false, takeOver = false, now = Date.now(), path = reservationPath(),
+} = {}) {
+  const who = String(owner || "").trim();
+  if (!who) throw new Error("hold: owner is required");
+  const mins = Number(minutes);
+  if (!Number.isFinite(mins) || mins <= 0) throw new RangeError("hold: minutes must be a positive number");
+  if (!MODES.includes(mode)) throw new RangeError(`hold: mode must be one of ${MODES.join(" | ")}`);
+  const holdMs = Math.round(mins * 60_000);
+  if (holdMs > DEFAULT_MAX_HOLD_MS && !force) {
+    throw new RangeError(`hold of ${mins} min exceeds the 8h default max; pass force to exceed it`);
+  }
+  const live = readReservation({ path, now });
+  if (live && !takeOver) {
+    if (live.corrupt) {
+      throw new HoldConflictError("unknown", {
+        message: "the box reservation file is unreadable (box held by unknown)",
+      });
+    }
+    if (live.owner !== who) {
+      throw new HoldConflictError(live.owner, { expires_at: live.expires_at });
+    }
+  }
+  const rec = {
+    owner: who,
+    reason: String(reason || ""),
+    started_at: new Date(now).toISOString(),
+    expires_at: new Date(now + holdMs).toISOString(),
+    allow: [...new Set((Array.isArray(allow) ? allow : []).filter((n) => typeof n === "string" && n))],
+  };
+  if (mode === "beside") rec.mode = "beside";
+  const strings = { kind: optionalString(kind), booking_id: optionalString(booking_id), job_id: optionalString(job_id) };
+  const numbers = {
+    gtt_mb: optionalNumber(gtt_mb), host_ram_mb: optionalNumber(host_ram_mb), hip_procs: optionalNumber(hip_procs),
+  };
+  for (const [k, v] of Object.entries(strings)) if (v != null) rec[k] = v;
+  for (const [k, v] of Object.entries(numbers)) if (v != null) rec[k] = v;
+  return writeHoldFile(path, rec);
+}
+
+/**
+ * Extend the caller's own unexpired hold. Caller holds the lock.
+ *
+ * `started_at` is kept, so the notice key `owner@started_at` does not change
+ * and no second notice goes out. Every other field is preserved. A missing or
+ * expired hold is never recreated: a legacy `rm -f` teardown ends the lease.
+ *
+ * @throws {HoldConflictError} missing file (holder null), corrupt file (holder
+ *   "unknown"), expired hold, or a different owner.
+ * @throws {RangeError} bad minutes; minutes over 8 h without force; a total
+ *   span over 8 h from `started_at` for a hold that is not `kind: "gpu-job"`
+ *   without force; or the extension running past `notAfter`.
+ */
+export function _renewHoldLocked({ owner, minutes, now = Date.now(), path = reservationPath(), notAfter = null, force = false } = {}) {
+  const who = String(owner || "").trim();
+  if (!who) throw new Error("hold: owner is required");
+  const mins = Number(minutes);
+  if (!Number.isFinite(mins) || mins <= 0) throw new RangeError("hold: minutes must be a positive number");
+  const holdMs = Math.round(mins * 60_000);
+  if (holdMs > DEFAULT_MAX_HOLD_MS && !force) {
+    throw new RangeError(`hold of ${mins} min exceeds the 8h default max; pass force to exceed it`);
+  }
+  const file = readHoldFile(path);
+  if (file.state === HOLD_MISSING) {
+    throw new HoldConflictError(null, { message: `no live hold for ${who} to renew (nothing is held)` });
+  }
+  if (file.state === HOLD_CORRUPT) {
+    throw new HoldConflictError("unknown", {
+      message: `no live hold for ${who} to renew (the reservation file is unreadable; box held by unknown)`,
+    });
+  }
+  const raw = file.raw;
+  const expiresMs = Date.parse(raw.expires_at);
+  if (!Number.isFinite(expiresMs)) {
+    throw new HoldConflictError("unknown", {
+      message: `no live hold for ${who} to renew (the reservation file has no readable expiry; box held by unknown)`,
+    });
+  }
+  const expiresIso = new Date(expiresMs).toISOString();
+  if (expiresMs <= now) {
+    throw new HoldConflictError(null, {
+      expires_at: expiresIso,
+      message: `no live hold for ${who} to renew (the hold expired at ${expiresIso})`,
+    });
+  }
+  const recOwner = optionalString(raw.owner) || "unknown";
+  if (recOwner !== who) throw new HoldConflictError(recOwner, { expires_at: expiresIso });
+  const nextExpiresMs = now + holdMs;
+  const startedMs = Date.parse(raw.started_at);
+  // The cap is per call (checked above) AND, for everything but a GPU job's
+  // lease, on the total span from started_at. A legacy record has kind null,
+  // so the total-span cap applies to it.
+  if (!force && optionalString(raw.kind) !== "gpu-job" && Number.isFinite(startedMs)
+      && nextExpiresMs - startedMs > DEFAULT_MAX_HOLD_MS) {
+    throw new RangeError(`renewing to ${new Date(nextExpiresMs).toISOString()} would make the hold span more than 8h from ${raw.started_at}; pass force to exceed it`);
+  }
+  if (notAfter != null && nextExpiresMs > Number(notAfter)) {
+    throw new RangeError("renew_past_next_booking");
+  }
+  return writeHoldFile(path, { ...raw, expires_at: new Date(nextExpiresMs).toISOString() });
+}
+
+/**
+ * Remove the hold. Caller holds the lock.
+ *
+ * @returns {boolean} true when a file was removed. Only the holder's own hold
+ *   is removed, unless `force`; a different owner's hold is left in place.
+ */
+export function _releaseHoldLocked({ owner, force = false, path = reservationPath() } = {}) {
+  const who = String(owner || "").trim();
+  if (!who) throw new Error("hold: owner is required");
+  const file = readHoldFile(path);
+  if (file.state === HOLD_MISSING) return false;
+  const recOwner = file.state === HOLD_CORRUPT ? "unknown" : (optionalString(file.raw.owner) || "unknown");
+  if (!force && recOwner !== who) return false;
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    _cache = null;
+    if (err && err.code === "ENOENT") return false;
+    throw err;
+  }
+  _cache = null;
+  return true;
+}
+
+/**
+ * Take the lock once and activate. `lock` ({path?, timeoutMs?}) is the test
+ * seam for the lock file.
+ * @returns the record written.
+ */
+export function activateHold(options = {}) {
+  const { lock, ...rest } = options;
+  return withReservationLock(() => _activateHoldLocked(rest), lock);
+}
+
+/** Take the lock once and renew the caller's own hold. @returns the record written. */
+export function renewHold(options = {}) {
+  const { lock, ...rest } = options;
+  return withReservationLock(() => _renewHoldLocked(rest), lock);
+}
+
+/** Take the lock once and release the caller's own hold (or any with force). */
+export function releaseHold(options = {}) {
+  const { lock, ...rest } = options;
+  return withReservationLock(() => _releaseHoldLocked(rest), lock);
 }
