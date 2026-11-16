@@ -1,7 +1,7 @@
-// 0030-mail-drafts: Crow Mail's four draft tables on both rails — init-db.js's "mail draft tables"
-// block and this numbered migration, both built from MAIL_DRAFTS_DDL (servers/shared/mail-schema.js).
-// DDL only; additive, no SCHEMA_GENERATION bump. Every table is local-only: a draft never replicates
-// to a paired instance.
+// Crow Mail's four draft tables on both rails — init-db.js's "mail draft tables" block and its own
+// numbered migration, both built from MAIL_DRAFTS_DDL (servers/shared/mail-schema.js). DDL only;
+// additive, no SCHEMA_GENERATION bump. Every table is local-only: a draft never replicates to a
+// paired instance.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -18,6 +18,15 @@ import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
 const { run, id } = mod;
 const REPO = new URL("..", import.meta.url).pathname;
 const SYNC = await import("../servers/sharing/instance-sync.js");
+
+const MIGRATIONS = discoverMigrations(join(REPO, "scripts", "migrations"));
+
+/** A migration file found by its suffix: the numbers are taken at PR time, so nothing here names one. */
+function migrationFile(suffix) {
+  const found = MIGRATIONS.filter((p) => p.endsWith(suffix));
+  assert.equal(found.length, 1, `exactly one migration ends with ${suffix}`);
+  return found[0];
+}
 
 const DIRS = [];
 after(() => { for (const d of DIRS) rmSync(d, { recursive: true, force: true }); });
@@ -69,15 +78,102 @@ function tableNames(dbPath, like) {
   }
 }
 
-function columnsOf(dbPath, table) {
+/** Every sqlite_master object in the database, as a comparable {type, name} list. */
+function shapes(dbPath) {
   const d = new Database(dbPath, { readonly: true });
   try {
-    return d.prepare(`PRAGMA table_info(${table})`).all()
-      .map((c) => ({ name: c.name, type: c.type, notnull: c.notnull, dflt_value: c.dflt_value }));
+    return d.prepare("SELECT type, name FROM sqlite_master ORDER BY type, name").all();
   } finally {
     d.close();
   }
 }
+
+/** One row of PRAGMA table_info, written from the plan's Task 1b Interfaces: the declared type, the
+ *  NOT NULL flag, the default exactly as SQLite reports it, and the 1-based position in the primary
+ *  key (0 for a column that is not part of one). */
+function column(name, type, { notnull = 0, dflt_value = null, pk = 0 } = {}) {
+  return { name, type, notnull, dflt_value, pk };
+}
+
+function tableInfo(dbPath, table) {
+  const d = new Database(dbPath, { readonly: true });
+  try {
+    return d.prepare(`PRAGMA table_info(${table})`).all()
+      .map((c) => column(c.name, c.type, { notnull: c.notnull, dflt_value: c.dflt_value, pk: c.pk }));
+  } finally {
+    d.close();
+  }
+}
+
+// The four tables' columns, in declaration order, from the plan's Task 1b Interfaces.
+const DRAFTS_COLUMNS = [
+  column("id", "TEXT", { pk: 1 }),
+  column("account_id", "TEXT", { notnull: 1 }),
+  column("mode", "TEXT", { notnull: 1 }),
+  column("reply_to_mid", "TEXT"),
+  column("thread_key", "TEXT"),
+  column("project_id", "INTEGER"),
+  column("bot_id", "TEXT"),
+  column("chat_thread_id", "TEXT"),
+  column("audience", "TEXT"),
+  column("state", "TEXT", { notnull: 1 }),
+  column("head_rev", "INTEGER", { notnull: 1 }),
+  column("head_hash", "TEXT", { notnull: 1 }),
+  column("due_at", "INTEGER"),
+  column("hold_until", "INTEGER"),
+  column("message_id", "TEXT"),
+  column("claim_token", "TEXT"),
+  column("claimed_at", "INTEGER"),
+  column("attempt_at", "INTEGER"),
+  column("tap_seal", "TEXT"),
+  column("tap_id", "TEXT"),
+  column("tap_action", "TEXT"),
+  column("attach_digest", "TEXT"),
+  column("reconcile_count", "INTEGER", { notnull: 1, dflt_value: "0" }),
+  column("next_reconcile_at", "INTEGER"),
+  column("sent_at", "INTEGER"),
+  column("fail_reason", "TEXT"),
+  column("notified_at", "INTEGER"),
+  column("created_at", "INTEGER", { notnull: 1 }),
+  column("updated_at", "INTEGER", { notnull: 1 }),
+];
+
+const REVISIONS_COLUMNS = [
+  column("draft_id", "TEXT", { notnull: 1, pk: 1 }),
+  column("rev", "INTEGER", { notnull: 1, pk: 2 }),
+  column("author", "TEXT", { notnull: 1 }),
+  column("to_json", "TEXT", { notnull: 1 }),
+  column("cc_json", "TEXT", { notnull: 1 }),
+  column("bcc_json", "TEXT", { notnull: 1 }),
+  column("subject", "TEXT", { notnull: 1 }),
+  column("body", "TEXT", { notnull: 1 }),
+  column("in_reply_to", "TEXT"),
+  column("references_json", "TEXT"),
+  column("attachments_json", "TEXT", { notnull: 1 }),
+  column("from_json", "TEXT", { notnull: 1 }),
+  column("mode", "TEXT", { notnull: 1 }),
+  column("content_hash", "TEXT", { notnull: 1 }),
+  column("note", "TEXT"),
+  column("created_at", "INTEGER", { notnull: 1 }),
+];
+
+const VOICE_COLUMNS = [
+  column("draft_id", "TEXT", { notnull: 1, pk: 1 }),
+  column("rev", "INTEGER", { notnull: 1, pk: 2 }),
+  column("voice_json", "TEXT", { notnull: 1 }),
+  column("created_at", "INTEGER", { notnull: 1 }),
+];
+
+const COMMENTS_COLUMNS = [
+  column("id", "TEXT", { pk: 1 }),
+  column("draft_id", "TEXT", { notnull: 1 }),
+  column("rev", "INTEGER", { notnull: 1 }),
+  column("line_index", "INTEGER"),
+  column("quote", "TEXT"),
+  column("text", "TEXT", { notnull: 1 }),
+  column("state", "TEXT", { notnull: 1 }),
+  column("created_at", "INTEGER", { notnull: 1 }),
+];
 
 const DRAFTS_INDEXES = [
   "idx_mail_drafts_state_due",
@@ -90,33 +186,14 @@ test("mail draft tables exist after init-db", () => {
   assert.deepEqual(tableNames(dbPath, "mail_draft%"), [...MAIL_DRAFT_TABLES].sort(),
     "init-db creates exactly the four draft tables");
 
-  const draft = columnsOf(dbPath, "mail_drafts");
-  const names = draft.map((c) => c.name);
-  for (const c of [
-    "id", "account_id", "mode", "reply_to_mid", "thread_key", "project_id", "bot_id",
-    "chat_thread_id", "audience", "state", "head_rev", "head_hash", "due_at", "hold_until",
-    "message_id", "claim_token", "claimed_at", "attempt_at", "tap_seal", "tap_id", "tap_action",
-    "attach_digest", "reconcile_count", "next_reconcile_at", "sent_at", "fail_reason",
-    "notified_at", "created_at", "updated_at",
-  ]) assert.ok(names.includes(c), `mail_drafts carries ${c}`);
-  assert.deepEqual(draft.find((c) => c.name === "reconcile_count"),
-    { name: "reconcile_count", type: "INTEGER", notnull: 1, dflt_value: "0" },
-    "reconcile_count starts at 0");
-
-  const revisionNames = columnsOf(dbPath, "mail_draft_revisions").map((c) => c.name);
-  for (const c of ["draft_id", "rev", "author", "to_json", "cc_json", "bcc_json", "subject", "body",
-    "in_reply_to", "references_json", "attachments_json", "from_json", "mode", "content_hash",
-    "note", "created_at"]) assert.ok(revisionNames.includes(c), `mail_draft_revisions carries ${c}`);
-
-  const commentNames = columnsOf(dbPath, "mail_draft_comments").map((c) => c.name);
-  for (const c of ["id", "draft_id", "rev", "line_index", "quote", "text", "state", "created_at"]) {
-    assert.ok(commentNames.includes(c), `mail_draft_comments carries ${c}`);
-  }
-
-  const voiceNames = columnsOf(dbPath, "mail_draft_voice").map((c) => c.name);
-  for (const c of ["draft_id", "rev", "voice_json", "created_at"]) {
-    assert.ok(voiceNames.includes(c), `mail_draft_voice carries ${c}`);
-  }
+  assert.deepEqual(tableInfo(dbPath, "mail_drafts"), DRAFTS_COLUMNS,
+    "mail_drafts is exactly the plan's columns: names, types, NOT NULLs, defaults and primary key");
+  assert.deepEqual(tableInfo(dbPath, "mail_draft_revisions"), REVISIONS_COLUMNS,
+    "mail_draft_revisions is exactly the plan's columns and is keyed by (draft_id, rev)");
+  assert.deepEqual(tableInfo(dbPath, "mail_draft_voice"), VOICE_COLUMNS,
+    "mail_draft_voice is exactly the plan's columns and is keyed by (draft_id, rev)");
+  assert.deepEqual(tableInfo(dbPath, "mail_draft_comments"), COMMENTS_COLUMNS,
+    "mail_draft_comments is exactly the plan's columns");
 
   const objects = tableObjects(dbPath, "mail_drafts").map((o) => o.name);
   for (const name of DRAFTS_INDEXES) assert.ok(objects.includes(name), `init-db created index ${name}`);
@@ -138,9 +215,7 @@ test("the draft migration is additive and idempotent", () => {
 
   const r1 = run({ dbPath, log: () => {} });
   const after1 = tableObjects(dbPath, "mail_drafts");
-  const before = new Database(dbPath, { readonly: true });
-  const firstShape = before.prepare("SELECT type, name, tbl_name FROM sqlite_master ORDER BY type, name").all();
-  before.close();
+  const firstShape = shapes(dbPath);
 
   const db = new Database(dbPath);
   try {
@@ -164,9 +239,7 @@ test("the draft migration is additive and idempotent", () => {
 
   const kept = new Database(dbPath, { readonly: true });
   try {
-    assert.deepEqual(kept.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all(),
-      firstShape.filter((o) => o.type === "table").map((o) => ({ name: o.name })),
-      "a second run creates nothing new");
+    assert.deepEqual(shapes(dbPath), firstShape, "a second run creates nothing new: no table, index or trigger");
     assert.deepEqual(kept.prepare("SELECT id, state, head_rev, reconcile_count FROM mail_drafts").get(),
       { id: "md-0123456789abcdef", state: "draft", head_rev: 1, reconcile_count: 0 },
       "the second run leaves the row alone");
@@ -201,24 +274,26 @@ test("MAIL_DDL is unchanged by this task", () => {
   assert.doesNotMatch(src0027, /mail_draft/, "0027 still runs exactly the approved DDL");
   assert.match(src0027, /db\.exec\(MAIL_DDL\)/);
 
-  const src = readFileSync(new URL("../scripts/migrations/0030-mail-drafts.mjs", import.meta.url), "utf8");
+  const src = readFileSync(migrationFile("-mail-drafts.mjs"), "utf8");
   assert.match(src, /import \{[^}]*\bMAIL_DRAFTS_DDL\b[^}]*\} from "\.\.\/\.\.\/servers\/shared\/mail-schema\.js";/);
   assert.match(src, /db\.exec\(MAIL_DRAFTS_DDL\)/);
 });
 
 test("the migration neither drops nor deletes", () => {
-  const src = readFileSync(new URL("../scripts/migrations/0030-mail-drafts.mjs", import.meta.url), "utf8");
+  const src = readFileSync(migrationFile("-mail-drafts.mjs"), "utf8");
   assert.doesNotMatch(src, /\bDROP\b/);
   assert.doesNotMatch(src, /\bDELETE\b/);
   assert.doesNotMatch(MAIL_DRAFTS_DDL, /\bDROP\s+(TABLE|INDEX|TRIGGER|VIEW|COLUMN)\b/i);
   assert.doesNotMatch(MAIL_DRAFTS_DDL, /\bDELETE\s+FROM\b/i);
 });
 
-test("the module id matches its filename and sorts after 0029", () => {
-  assert.equal(id, "0030-mail-drafts");
-  const found = discoverMigrations(join(REPO, "scripts", "migrations")).map((p) => p.split("/").pop());
-  assert.ok(found.includes("0030-mail-drafts.mjs"), "the registry discovers the file");
-  assert.ok(found.indexOf("0029-mail-account-send-columns.mjs") < found.indexOf("0030-mail-drafts.mjs"),
-    "it sorts after the migration it follows");
-  assert.deepEqual(found, [...found].sort(), "the registry is an ordered list");
+test("the module id matches its filename and sorts after the account columns migration", () => {
+  const files = MIGRATIONS.map((p) => p.split("/").pop());
+  const accountColumns = files.findIndex((n) => n.endsWith("-mail-account-send-columns.mjs"));
+  const drafts = files.findIndex((n) => n.endsWith("-mail-drafts.mjs"));
+  assert.ok(accountColumns >= 0, "the registry discovers the account columns migration");
+  assert.ok(drafts >= 0, "the registry discovers the draft migration");
+  assert.equal(id, files[drafts].replace(/\.mjs$/, ""), "the module id matches its filename");
+  assert.ok(accountColumns < drafts, "the draft migration sorts after the one it follows");
+  assert.deepEqual(files, [...files].sort(), "the registry is an ordered list");
 });
