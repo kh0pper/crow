@@ -21,7 +21,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
@@ -32,6 +32,7 @@ import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb } from "../bundles/studio/server/web.js";
 import studioPanel from "../bundles/studio/panel/studio.js";
+import { TIMELINE_BASE_PX, zoomedBarX } from "../bundles/studio/panel/client.js";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
 /** The SunVox track the timeline places a note clip on. */
@@ -1968,6 +1969,172 @@ test("a recording take blocks Pause and Stop still works", async () => {
   await ui.settle();
   assert.notEqual(recorder.stopped_at, null, "Stop ended the take");
   assert.equal(typeof recorder.stopped_at, "number", "on the frame the take ends on");
+});
+
+// ---- zoom (visual) and readable chips ------------------------------------
+
+/** The zoom the page's timeline is drawn at, as its root reports it. */
+function timelineZoom(ui) {
+  const root = ui.document.querySelector("[data-role=timeline] .st-tl");
+  assert.ok(root, "the timeline is drawn");
+  return root.getAttribute("data-zoom");
+}
+
+/** The timeline root's inline width, in pixels. */
+function timelineWidth(ui) {
+  const root = ui.document.querySelector("[data-role=timeline] .st-tl");
+  assert.ok(root, "the timeline is drawn");
+  return Number.parseFloat(root.style.width);
+}
+
+/** The fixed track-header column, which the zoom does not change. */
+const SIDE_PX = 180;
+
+/** Stub the bar ruler with the lane box the page sized at this zoom. */
+function stubZoomedRuler(ui) {
+  const strip = ui.document.querySelector("[data-role=bar-ruler]");
+  assert.ok(strip, "the timeline draws the bar ruler");
+  const width = timelineWidth(ui) - SIDE_PX;
+  strip.getBoundingClientRect = () => ({
+    left: 0, top: 0, width, height: 18, right: width, bottom: 18, x: 0, y: 0,
+  });
+  return strip;
+}
+
+test("zoomedBarX doubles per step", () => {
+  assert.equal(zoomedBarX(4, 1, TIMELINE_BASE_PX), 4 * TIMELINE_BASE_PX, "a bar's x at zoom 1");
+  let previous = zoomedBarX(4, 0.5, TIMELINE_BASE_PX);
+  for (const zoom of [1, 2, 4, 8]) {
+    const next = zoomedBarX(4, zoom, TIMELINE_BASE_PX);
+    assert.equal(next, previous * 2, `the step to ${zoom} doubles the bar's x`);
+    previous = next;
+  }
+  assert.equal(zoomedBarX(0, 8, TIMELINE_BASE_PX), 0, "the first bar line stays at the left edge");
+});
+
+test("zoom in and out keeps the same bar under the stubbed boxOf pointer position", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const bars = ui.document.querySelectorAll("[data-role=bar-ruler] .st-tl-bar-n").length;
+  assert.equal(bars, 32, "the fixture song's ruler is 32 bars");
+
+  // Press a quarter of the way into the bar, on whatever box the page sized.
+  const pressBar = async (atBar) => {
+    const strip = stubZoomedRuler(ui);
+    const box = strip.getBoundingClientRect();
+    strip.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: ((atBar + 0.25) / bars) * box.width }));
+    await ui.settle();
+    ui.release();
+    await ui.settle();
+    return ui.engine.seeks[ui.engine.seeks.length - 1];
+  };
+
+  const laneAtOne = timelineWidth(ui) - SIDE_PX;
+  assert.equal(timelineZoom(ui), "1", "a browser with no choice starts at 1");
+  assert.equal(await pressBar(20), 20, "at 1x the bar under the pointer is seeked");
+
+  ui.click("[data-act=zoom-in]");
+  await ui.settle();
+  assert.equal(timelineZoom(ui), "2", "zoom in steps up the scale");
+  assert.equal(timelineWidth(ui) - SIDE_PX, laneAtOne * 2, "the lane box doubled with the zoom");
+  assert.equal(await pressBar(20), 20, "the same pointer share is the same bar at 2x");
+
+  ui.click("[data-act=zoom-out]");
+  ui.click("[data-act=zoom-out]");
+  await ui.settle();
+  assert.equal(timelineZoom(ui), "0.5", "zoom out steps down the scale");
+  assert.equal(timelineWidth(ui) - SIDE_PX, laneAtOne * 0.5, "the lane box halved with the zoom");
+  assert.equal(await pressBar(20), 20, "and zoomed out it is still the same bar");
+});
+
+test("zoom persists across reload and a throwing localStorage falls back to 1", async () => {
+  const storage = memoryStorage();
+  const ui = await bootTimeline({ storage });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  ui.click("[data-act=zoom-in]");
+  ui.click("[data-act=zoom-in]");
+  await ui.settle();
+  assert.equal(storage.getItem("crow.studio.zoom.v1"), "4", "the zoom is kept under its own key");
+  assert.equal(timelineZoom(ui), "4", "and the page is drawn at it");
+
+  const again = await bootTimeline({ storage });
+  again.click("[data-act=mode-arrangement]");
+  await again.settle();
+  assert.equal(timelineZoom(again), "4", "a page opened again starts at the zoom it was left at");
+
+  const refusing = {
+    getItem() {
+      throw new Error("this browser keeps no storage");
+    },
+    setItem() {
+      throw new Error("this browser keeps no storage");
+    },
+  };
+  const third = await bootTimeline({ storage: refusing });
+  third.click("[data-act=mode-arrangement]");
+  await third.settle();
+  assert.equal(timelineZoom(third), "1", "a browser that refuses storage falls back to 1");
+  third.click("[data-act=zoom-in]");
+  await third.settle();
+  assert.equal(timelineZoom(third), "2", "and the buttons still work without storage");
+});
+
+test("every section chip, marker and placement carries a title attribute with its full name", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  const section = ui.document.querySelector("[data-role=section][data-section-id=sec-intro]");
+  assert.ok(section, "the section is drawn");
+  assert.ok(String(section.getAttribute("title")).includes("Intro"), "the section's block names it");
+  const sectionChip = section.querySelector("[data-act=section-rename]");
+  assert.ok(sectionChip, "the section's name is a chip");
+  assert.ok(String(sectionChip.getAttribute("title")).includes("Intro"), "the section's chip names it too");
+
+  const marker = ui.document.querySelector("[data-role=marker][data-marker-id=m-key]");
+  assert.ok(marker, "the marker is drawn");
+  assert.ok(String(marker.getAttribute("title")).includes("Key change"), "the marker's block names it");
+  const markerChip = marker.querySelector("[data-act=marker-rename]");
+  assert.ok(markerChip, "the marker's name is a chip");
+  assert.ok(String(markerChip.getAttribute("title")).includes("Key change"), "the marker's chip names it too");
+
+  const block = ui.document.querySelector(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  assert.ok(block, "the placement is drawn");
+  assert.ok(String(block.getAttribute("title")).includes("Bass line"), "the placement names its clip");
+});
+
+test("the chip CSS rule sets min-width 56px and ellipsis", () => {
+  const source = readFileSync(new URL("../bundles/studio/panel/studio.js", import.meta.url), "utf8");
+  const rule = /\.studio \.st-tl-tag-btn \{([^}]*)\}/.exec(source);
+  assert.ok(rule, "the chip rule is in the panel's stylesheet");
+  assert.match(rule[1], /min-width:\s*56px/, "a chip keeps a readable minimum width");
+  assert.match(rule[1], /text-overflow:\s*ellipsis/, "and a long name ends in an ellipsis");
+});
+
+test("at the highest zoom a short placement label is not empty", async () => {
+  const doc = await timelineDoc();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(doc, "clip.rename", { clip_id: NOTE_CLIP, name: "A" });
+
+  const ui = await bootTimeline({ doc });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  for (let i = 0; i < 3; i += 1) {
+    ui.click("[data-act=zoom-in]");
+    await ui.settle();
+  }
+  assert.equal(timelineZoom(ui), "8", "three steps up from 1 is the highest zoom");
+  assert.equal(ui.document.querySelector("[data-act=zoom-in]").disabled, true, "nothing is above it");
+
+  const block = ui.document.querySelector(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  assert.ok(block, "the placement is still drawn at the highest zoom");
+  const label = block.querySelector(".st-tl-block-name");
+  assert.ok(label, "the block carries its label");
+  assert.equal(String(label.textContent).trim(), "A", "and a one-letter name is still said");
+  assert.ok(String(block.getAttribute("title")).includes("A"), "with the full name in its title");
 });
 
 // ---- the same timeline against a real hub, in a real browser ---------------

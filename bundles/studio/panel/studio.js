@@ -762,6 +762,17 @@ const STYLES = `
   .studio .st-mode + .st-mode { border-left: 1px solid var(--st-edge); }
   .studio .st-mode[aria-pressed=true] { background: #2E3A2F; }
   .studio .st-tl-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  /* The timeline's own scale: two 44 px buttons and the step it is on. Zoom is
+     visual, so these change the width of the lanes and nothing about the song. */
+  .studio .st-zoom {
+    min-width: 44px; min-height: 44px; padding: 0 10px;
+    font-size: 16px; font-weight: 700; line-height: 1;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-zoom-read {
+    min-width: 44px; text-align: center;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; color: var(--st-muted);
+  }
   .studio .st-tl-rec { display: flex; align-items: center; gap: 8px; }
   .studio .st-tl-rec[aria-pressed=true] { background: #3A1F1C; border-color: var(--st-danger); }
   .studio .st-tl-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--st-danger); flex: 0 0 auto; }
@@ -792,9 +803,13 @@ const STYLES = `
   /* A marker's and a section's name is a button (so the keyboard can reach it),
      and the small one beside it removes it after a yes. */
   .studio .st-tl-tag-btn {
-    min-height: 22px; padding: 0 4px; border: 0; border-radius: 4px; background: transparent;
+    /* A chip keeps a readable width at every zoom: the full name is its title,
+       and a name too long for the chip ends in an ellipsis instead of running
+       over the bar it sits on. */
+    min-width: 56px; max-width: 150px; min-height: 22px; padding: 0 4px;
+    border: 0; border-radius: 4px; background: transparent;
     color: inherit; font: inherit; font-weight: inherit; cursor: pointer;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .studio .st-tl-tag-btn:focus-visible { outline: 2px solid #FFFFFF; outline-offset: 1px; }
   .studio .st-tl-tag-x {
@@ -1317,6 +1332,9 @@ function studioPage({ songId, render, res }) {
             <span class="st-tl-rec-dot" aria-hidden="true"></span>Record to timeline
           </button>
           <button class="st-btn" type="button" data-act="split" title="Split the selected placement, or the one under the playhead, at the playhead">Split at playhead</button>
+          <button class="st-btn st-zoom" type="button" data-act="zoom-out" aria-label="Zoom out" title="Zoom out: fewer pixels a bar">−</button>
+          <span class="st-zoom-read" data-role="zoom" title="The timeline's zoom">1×</span>
+          <button class="st-btn st-zoom" type="button" data-act="zoom-in" aria-label="Zoom in" title="Zoom in: more pixels a bar">+</button>
           <span class="st-legend"><span class="st-dot" aria-hidden="true"></span>You</span>
           <span class="st-legend"><span class="st-dot st-dot-agent" aria-hidden="true"></span>Crow agent</span>
         </div>

@@ -494,6 +494,59 @@ const COMMANDS_LINE =
   "  var COMMANDS = [" + COMMANDS.map((id) => "'" + id + "'").join(", ") + "];";
 
 /**
+ * The timeline's zoom arithmetic, as the exact lines the page runs.
+ *
+ * Zoom is VISUAL: it changes how wide the lanes (and the ruler over them) are
+ * drawn, so the timeline scrolls sideways in its own container. The song
+ * document and the engine never see it. A bar's x is its distance from the
+ * first bar times the base spacing times the zoom factor, which is what makes
+ * one step double (or halve) every lane and the ruler with it.
+ * @type {readonly string[]}
+ */
+const ZOOM_LINES = Object.freeze([
+  "  // How many pixels one bar takes at zoom 1, before the zoom factor.",
+  "  var TIMELINE_BASE_PX = 32;",
+  "",
+  "  // The pixel x of a bar at one zoom, measured from the first bar line.",
+  "  function zoomedBarX(bar, zoom, basePx) {",
+  "    var at = Number(bar);",
+  "    var scale = Number(zoom);",
+  "    var base = Number(basePx);",
+  "    if (!Number.isFinite(at)) at = 0;",
+  "    if (!(scale > 0)) scale = 1;",
+  "    if (!(base > 0)) base = TIMELINE_BASE_PX;",
+  "    return at * base * scale;",
+  "  }",
+]);
+
+/** The zoom arithmetic as one script fragment, for the named exports below. */
+const ZOOM_SCRIPT = ZOOM_LINES.join("\n");
+
+/**
+ * The zoom arithmetic, evaluated from the very lines the page inlines. The
+ * wrapper is a function of its own, so the page's own `var`s never land on
+ * this module's scope.
+ */
+const zoomApi = new Function(
+  "return (function () {\n" + ZOOM_SCRIPT + "\n  return { base: TIMELINE_BASE_PX, zoomedBarX: zoomedBarX };\n})();",
+)();
+
+/** How many pixels one bar takes at zoom 1. @type {number} */
+export const TIMELINE_BASE_PX = zoomApi.base;
+
+/**
+ * The pixel x of a bar on the zoomed timeline: its distance from the first bar
+ * line times the base spacing times the zoom factor.
+ * @param {number} bar - the bar index (0 is the first bar)
+ * @param {number} zoom - the zoom factor, one of the timeline's five steps
+ * @param {number} basePx - the pixels one bar takes at zoom 1
+ * @returns {number}
+ */
+export function zoomedBarX(bar, zoom, basePx) {
+  return zoomApi.zoomedBarX(bar, zoom, basePx);
+}
+
+/**
  * The client script, one string, safe to inline in a page: no backtick, no
  * `${`, no double quote and no backslash.
  * @type {string}
@@ -503,6 +556,8 @@ export const CLIENT_SCRIPT = [
   "  'use strict';",
   "",
   COMMANDS_LINE,
+  "",
+  ...ZOOM_LINES,
   "",
   "  // Author colours: the operator is amber, an agent is blue (mockup screen 1).",
   "  var HUMAN = '#F2A541';",
@@ -604,6 +659,17 @@ export const CLIENT_SCRIPT = [
   "  var TIMELINE_MIN_BARS = 32;",
   "  var TIMELINE_MAX_BARS = 999;",
   "  var TIMELINE_TAIL_BARS = 8;",
+  "",
+  "  // The fixed header column beside every lane, in pixels: the ruler's labels",
+  "  // and each track's own name. The rest of the row is the lane column.",
+  "  var TIMELINE_SIDE_PX = 180;",
+  "",
+  "  // The timeline's visual zoom: how many pixels a bar takes, as a multiple of",
+  "  // TIMELINE_BASE_PX. It changes the width of the lanes and nothing about the",
+  "  // song, and it is this browser's setting rather than the document's.",
+  "  var ZOOM_LEVELS = [0.5, 1, 2, 4, 8];",
+  "  var ZOOM_DEFAULT = 1;",
+  "  var ZOOM_KEY = 'crow.studio.zoom.v1';",
   "",
   "  // A fade corner snaps to a quarter of a beat; everything on the bars snaps",
   "  // to a whole one.",
@@ -1875,6 +1941,8 @@ export const CLIENT_SCRIPT = [
   "    // The click this song was left on, and the output this browser was left on.",
   "    view.metronome = storedMetronome(activeSongId);",
   "    view.sinkId = storedOutput();",
+  "    // The timeline's visual zoom, kept for this browser as a whole.",
+  "    view.zoom = storedZoom();",
   "",
   "    function storedMode(songId) {",
   "      var value = null;",
@@ -1886,6 +1954,22 @@ export const CLIENT_SCRIPT = [
   "",
   "    function storeMode(songId, mode) {",
   "      try { window.localStorage.setItem(MODE_KEY + String(songId), String(mode)); }",
+  "      catch (err) { /* this browser keeps no choice, which is allowed */ }",
+  "    }",
+  "",
+  "    // The timeline's zoom is one setting of this browser for every song: a",
+  "    // browser that refuses storage starts at the default and the buttons still",
+  "    // work.",
+  "    function storedZoom() {",
+  "      var value = null;",
+  "      try { value = window.localStorage.getItem(ZOOM_KEY); }",
+  "      catch (err) { return ZOOM_DEFAULT; }",
+  "      var at = ZOOM_LEVELS.indexOf(Number(value));",
+  "      return at < 0 ? ZOOM_DEFAULT : ZOOM_LEVELS[at];",
+  "    }",
+  "",
+  "    function storeZoom(zoom) {",
+  "      try { window.localStorage.setItem(ZOOM_KEY, String(zoom)); }",
   "      catch (err) { /* this browser keeps no choice, which is allowed */ }",
   "    }",
   "",
@@ -5709,6 +5793,31 @@ export const CLIENT_SCRIPT = [
   "      return String(Math.round(share * 1000) / 1000) + '%';",
   "    }",
   "",
+  "    // The lane column's width at this zoom: the bars times the base spacing,",
+  "    // scaled, with the fixed header column beside it. The timeline root carries",
+  "    // it, so the grid's lane column (and the ruler under it) IS that width and",
+  "    // the host scrolls it sideways. Nothing here reaches the song or the",
+  "    // engine.",
+  "    function timelineWidthPx(bars) {",
+  "      return Math.round(TIMELINE_SIDE_PX + zoomedBarX(bars, view.zoom, TIMELINE_BASE_PX));",
+  "    }",
+  "",
+  "    // The timeline's zoom is this page's own view setting, like the view",
+  "    // switch: it is kept in this browser and is never a command.",
+  "    function zoomIndex() {",
+  "      var at = ZOOM_LEVELS.indexOf(Number(view.zoom));",
+  "      return at < 0 ? ZOOM_LEVELS.indexOf(ZOOM_DEFAULT) : at;",
+  "    }",
+  "",
+  "    function zoomTimeline(step) {",
+  "      var from = zoomIndex();",
+  "      var next = clamp(from + Number(step), 0, ZOOM_LEVELS.length - 1);",
+  "      if (next === from) return;",
+  "      view.zoom = ZOOM_LEVELS[next];",
+  "      storeZoom(view.zoom);",
+  "      render();",
+  "    }",
+  "",
   "    // The bar line at or before a playhead position, as an integer: every",
   "    // command that takes a bar (a split, a place, a marker, a recording's",
   "    // start) comes through here, so none of them is ever handed a fractional",
@@ -5859,6 +5968,14 @@ export const CLIENT_SCRIPT = [
   "      }",
   "      var split = page.querySelector('[data-act=split]');",
   "      if (split) split.disabled = !arrangement;",
+  "      // The zoom is a visual scale, so its two buttons and the readout follow",
+  "      // whatever this browser was left at.",
+  "      var zoomIn = page.querySelector('[data-act=zoom-in]');",
+  "      var zoomOut = page.querySelector('[data-act=zoom-out]');",
+  "      var zoomRead = page.querySelector('[data-role=zoom]');",
+  "      if (zoomIn) zoomIn.disabled = zoomIndex() >= ZOOM_LEVELS.length - 1;",
+  "      if (zoomOut) zoomOut.disabled = zoomIndex() <= 0;",
+  "      if (zoomRead) zoomRead.textContent = String(view.zoom) + '\u00d7';",
   "      paintCutMark();",
   "    }",
   "",
@@ -5871,6 +5988,13 @@ export const CLIENT_SCRIPT = [
   "      view.timelineBars = bars;",
   "      view.lanes = {};",
   "      var root = el('div', 'st-tl');",
+  "      // Zoom is visual: the root is the lane column's own width at this zoom",
+  "      // plus the fixed track headers, so every lane and the ruler above them",
+  "      // are the same box at every zoom. The host scrolls them sideways.",
+  "      var width = timelineWidthPx(bars);",
+  "      root.setAttribute('data-zoom', String(view.zoom));",
+  "      root.style.width = String(width) + 'px';",
+  "      root.style.minWidth = String(width) + 'px';",
   "      root.appendChild(timelineRuler(snap, bars));",
   "      for (var i = 0; i < snap.tracks.length; i += 1) {",
   "        root.appendChild(timelineLane(snap, snap.tracks[i], bars));",
@@ -5911,6 +6035,9 @@ export const CLIENT_SCRIPT = [
   "",
   "      var strip = el('div', 'st-tl-bars');",
   "      strip.setAttribute('data-role', 'bar-ruler');",
+  "      // One column a bar: the numbers sit on the bar lines they name, at every",
+  "      // zoom, exactly as the blocks under them do.",
+  "      strip.style.gridTemplateColumns = 'repeat(' + String(bars) + ', minmax(0, 1fr))';",
   "      for (i = 1; i <= bars; i += 1) strip.appendChild(el('span', 'st-tl-bar-n', String(i)));",
   "      strip.addEventListener('pointerdown', function (event) { rulerSeek(event, strip, bars); });",
   "      body.appendChild(strip);",
@@ -5925,7 +6052,7 @@ export const CLIENT_SCRIPT = [
   "      var start = Math.max(0, Math.round(Number(section.start_bar) || 0));",
   "      var end = Math.max(start + 1, Math.round(Number(section.end_bar) || start + 1));",
   "      var name = String(section.name || 'Section');",
-  "      var span = 'Section from bar ' + String(start + 1) + ' to bar ' + String(end);",
+  "      var span = name + ' \u2014 section from bar ' + String(start + 1) + ' to bar ' + String(end);",
   "      var node = el('div', 'st-tl-section');",
   "      node.setAttribute('data-role', 'section');",
   "      node.setAttribute('data-section-id', String(section.id));",
@@ -5947,8 +6074,8 @@ export const CLIENT_SCRIPT = [
   "    }",
   "",
   "    function markerBlock(marker, bars) {",
-  "      var at = 'Marker at bar ' + String(Math.round(Number(marker.bar) || 0) + 1);",
   "      var name = String(marker.name || 'Marker');",
+  "      var at = name + ' \u2014 marker at bar ' + String(Math.round(Number(marker.bar) || 0) + 1);",
   "      var node = el('div', 'st-tl-marker');",
   "      node.setAttribute('data-role', 'marker');",
   "      node.setAttribute('data-marker-id', String(marker.id));",
@@ -15233,6 +15360,8 @@ export const CLIENT_SCRIPT = [
   "      if (act === 'mode-mixer') { setMode(MIXER_VIEW); return; }",
   "      if (act === 'rec-timeline') { toggleRecordTimeline(); return; }",
   "      if (act === 'split') { splitAtPlayhead(); return; }",
+  "      if (act === 'zoom-in') { zoomTimeline(1); return; }",
+  "      if (act === 'zoom-out') { zoomTimeline(-1); return; }",
   "      if (act === 'select-placement') { selectPlacement(target.getAttribute('data-placement-id')); return; }",
   "      if (act === 'placement-fade-in') { fadeSelected(0.5, null); return; }",
   "      if (act === 'placement-fade-out') { fadeSelected(null, 1); return; }",
