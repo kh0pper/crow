@@ -13,7 +13,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import {
   DEADLINE_MS, DEPS_MAX_ATTEMPTS, FAILURE_THRESHOLD, STATE_MAX_BYTES, STATE_FILE, decide, exitCountsAsCrash,
-  freshState, loadState, saveState,
+  freshState, loadState, missingTopLevelDeps, saveState,
 } from "../scripts/boot-guard/crow-boot-guard.mjs";
 
 const A = "a".repeat(40);
@@ -277,6 +277,66 @@ test("a deps-pending rollback stops retrying the install after three failures", 
   const exhausted = decide({ ...base, deps_attempts: DEPS_MAX_ATTEMPTS }, { head: A });
   assert.equal(exhausted.action, "idle", "the fourth start must not run npm again");
   assert.equal(exhausted.reason, "deps-blocked");
+});
+
+/* ------------------------------------------------ declared-but-missing deps */
+
+/** A checkout with the given package.json body and node_modules entries. */
+function depTree({ pkg = null, installed = [], raw = null } = {}) {
+  const root = scratch();
+  if (raw !== null) writeFileSync(join(root, "package.json"), raw);
+  else if (pkg !== null) writeFileSync(join(root, "package.json"), JSON.stringify(pkg));
+  for (const name of installed) {
+    const dir = join(root, "node_modules", name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "package.json"), "{}\n");
+  }
+  return root;
+}
+
+test("missingTopLevelDeps names every declared dependency node_modules lacks", () => {
+  const root = depTree({
+    pkg: { dependencies: { present: "1.0.0", absent: "^2.0.0" } },
+    installed: ["present"],
+  });
+  assert.deepEqual(missingTopLevelDeps(root), ["absent"]);
+});
+
+test("missingTopLevelDeps is empty when every dependency is installed", () => {
+  const root = depTree({ pkg: { dependencies: { a: "1" } }, installed: ["a"] });
+  assert.deepEqual(missingTopLevelDeps(root), []);
+});
+
+test("missingTopLevelDeps handles a scoped package", () => {
+  const root = depTree({ pkg: { dependencies: { "@scope/pkg": "1" } } });
+  assert.deepEqual(missingTopLevelDeps(root), ["@scope/pkg"]);
+  mkdirSync(join(root, "node_modules", "@scope", "pkg"), { recursive: true });
+  writeFileSync(join(root, "node_modules", "@scope", "pkg", "package.json"), "{}\n");
+  assert.deepEqual(missingTopLevelDeps(root), []);
+});
+
+test("missingTopLevelDeps ignores devDependencies and optionalDependencies", () => {
+  const root = depTree({
+    pkg: { dependencies: {}, devDependencies: { dev: "1" }, optionalDependencies: { opt: "1" } },
+  });
+  assert.deepEqual(missingTopLevelDeps(root), []);
+});
+
+test("missingTopLevelDeps skips a name optionalDependencies also declares", () => {
+  const root = depTree({
+    pkg: { dependencies: { needed: "1", opt: "1" }, optionalDependencies: { opt: "1" } },
+    installed: ["needed"],
+  });
+  assert.deepEqual(missingTopLevelDeps(root), [], "an optional entry wins over the same name in dependencies");
+  rmSync(join(root, "node_modules", "needed"), { recursive: true, force: true });
+  assert.deepEqual(missingTopLevelDeps(root), ["needed"], "a required dependency is still reported");
+});
+
+test("missingTopLevelDeps is empty without a readable package.json", () => {
+  assert.deepEqual(missingTopLevelDeps(depTree()), [], "no package.json");
+  assert.deepEqual(missingTopLevelDeps(depTree({ raw: "{not json" })), [], "invalid package.json");
+  assert.deepEqual(missingTopLevelDeps(depTree({ pkg: { name: "x" } })), [], "no dependencies field");
+  assert.deepEqual(missingTopLevelDeps(join(scratch(), "does-not-exist")), [], "no such root");
 });
 
 /* ------------------------------------------------------------- state reader */

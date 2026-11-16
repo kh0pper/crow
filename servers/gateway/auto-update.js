@@ -847,6 +847,38 @@ export function releaseCheckoutLock(path) {
 export const _lockPrimitivesForTest = { acquireLock, releaseLock, lockIsStale };
 
 /**
+ * Top-level `dependencies` from `<root>/package.json` whose own package.json is
+ * missing under node_modules. A commit can gain a dependency in a tick that
+ * skipped the install, after which the package*.json diff between the local
+ * commit and HEAD says "unchanged" — and the gateway imports the missing
+ * package and crash-loops on every start. A name an `optionalDependencies`
+ * entry also declares is optional (npm lets that entry win over `dependencies`),
+ * so it is never reported here. devDependencies are not build-time imports.
+ *
+ * Duplicated from scripts/boot-guard/crow-boot-guard.mjs: the guard is installed
+ * standalone, outside the checkout, so the two cannot share code. Never throws.
+ */
+export function missingTopLevelDeps(root) {
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  } catch { return []; }
+  if (!pkg || typeof pkg !== "object") return [];
+  const deps = pkg.dependencies;
+  if (!deps || typeof deps !== "object" || Array.isArray(deps)) return [];
+  const optional = pkg.optionalDependencies;
+  const optionalNames = optional && typeof optional === "object" && !Array.isArray(optional) ? optional : {};
+  const missing = [];
+  for (const name of Object.keys(deps)) {
+    if (!name) continue;
+    if (Object.prototype.hasOwnProperty.call(optionalNames, name)) continue;
+    // join() resolves a scoped name (@scope/pkg) to the right directory.
+    if (!existsSync(join(root, "node_modules", name, "package.json"))) missing.push(name);
+  }
+  return missing;
+}
+
+/**
  * Check for and apply updates
  * Returns { updated, from, to, error, skipped?, message?, branch? }
  */
@@ -1645,10 +1677,12 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
     return { updated: false, error: msg };
   }
 
-  // Install deps (only if package-lock changed)
+  // Install deps when package*.json changed — or when a top-level dependency is
+  // missing from node_modules, which an earlier tick may never have installed.
   const changedFiles = await git(["diff", "--name-only", `${currentVersion}..HEAD`]);
   const depsChanged =
-    changedFiles.stdout.includes("package-lock.json") || changedFiles.stdout.includes("package.json");
+    changedFiles.stdout.includes("package-lock.json") || changedFiles.stdout.includes("package.json")
+    || missingTopLevelDeps(APP_ROOT).length > 0;
   // A failed install leaves node_modules half-written and says nothing about the
   // commit (a registry outage is not a bad sha), but the update cannot continue:
   // the import check would judge a tree whose dependencies nobody installed, and

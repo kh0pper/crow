@@ -232,6 +232,16 @@ export function freshState() {
     launcher_version: null,
     recorder_ran_at: null,
     deps_attempts: 0,
+    // Failed installs of dependencies the checkout declares but node_modules
+    // lacks (see installMissingDependencies). Independent of deps_attempts.
+    // The attempts belong to the commit they were spent on: a new HEAD gets a
+    // fresh budget.
+    missing_deps_attempts: 0,
+    missing_deps_sha: null,
+    // The pending sha whose exit was already excused as "the tree lacked these
+    // packages" (see preStartOnce). One excuse per sha: a package that keeps
+    // vanishing afterwards is a crash of the commit like any other.
+    missing_deps_forgiven_sha: null,
     // The HELD marker THIS instance wrote, and the stamp it carries (see
     // reportRefusal). It survives every later transition — a re-armed trial, a
     // discard, a rollback — because it is the only proof the gateway's stable
@@ -1156,6 +1166,12 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
     return { action: "idle", reason: "no-git" };
   }
 
+  // A dependency an earlier tick declared but never installed: the lock diff
+  // reads "unchanged" from then on, so this is the last place that can install
+  // it. Runs before the attempt is counted, and never blocks the start.
+  const head = gitText(root, ["rev-parse", "HEAD"]) || "";
+  const depsInstalled = installMissingDependencies({ root, gitDir, state, crowHome, env, now, head });
+
   const attemptId = attemptIdFor(env);
   // Whether the attempt that just ended was one we asked for. The "wait" log
   // below must not call a planned restart a crash (F8).
@@ -1170,7 +1186,15 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
   // start after arming has no previous attempt, so it is never counted.
   if (state.state === "pending") {
     const prev = state.attempt;
-    if (prev && prev.started_at) {
+    // The previous exit taught us the tree cannot start without the packages
+    // this start has just installed: that exit is not evidence about the commit,
+    // so the trial keeps its count for the start that follows. At most once per
+    // pending sha — a package that keeps going missing must still reach the
+    // rollback threshold.
+    const explainedByInstall = depsInstalled && head && head === state.pending_sha
+      && state.missing_deps_forgiven_sha !== state.pending_sha;
+    if (explainedByInstall) state.missing_deps_forgiven_sha = state.pending_sha;
+    if (prev && prev.started_at && !explainedByInstall) {
       const planned = Boolean(prev.planned_at);
       if (exitCountsAsCrash(prev.exit, { planned })) {
         state.failures = num(state.failures, 0) + 1;
@@ -1191,7 +1215,6 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
     state.attempt = { id: attemptId, started_at: iso(now), planned_at: null, exit: null };
   }
 
-  const head = gitText(root, ["rev-parse", "HEAD"]) || "";
   const branch = gitText(root, ["symbolic-ref", "-q", "HEAD"]) || "";
   const originMain = gitText(root, ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"]) || "";
   const previous = state.previous_sha;
@@ -1361,6 +1384,119 @@ function armTrial({ state, stateDir, head, attemptId, now }) {
 
 function fileExists(path) {
   try { lstatSync(path); return true; } catch { return false; }
+}
+
+/**
+ * Top-level `dependencies` from `<root>/package.json` whose own package.json is
+ * missing under node_modules. A commit can gain a dependency in an earlier tick
+ * and never install it: the lock diff says "unchanged" from then on, while the
+ * gateway imports the package at boot and crash-loops. devDependencies are not
+ * build-time imports of the gateway, and a name an `optionalDependencies` entry
+ * also declares is optional (npm lets that entry win over `dependencies`), so
+ * its absence must never be blamed for a start.
+ *
+ * Never throws: a missing or unreadable package.json is an empty list.
+ */
+export function missingTopLevelDeps(root) {
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  } catch { return []; }
+  if (!pkg || typeof pkg !== "object") return [];
+  const deps = pkg.dependencies;
+  if (!deps || typeof deps !== "object" || Array.isArray(deps)) return [];
+  const optional = pkg.optionalDependencies;
+  const optionalNames = optional && typeof optional === "object" && !Array.isArray(optional) ? optional : {};
+  const missing = [];
+  for (const name of Object.keys(deps)) {
+    if (!name) continue;
+    if (Object.prototype.hasOwnProperty.call(optionalNames, name)) continue;
+    // join() resolves a scoped name (@scope/pkg) to the right directory.
+    if (!fileExists(join(root, "node_modules", name, "package.json"))) missing.push(name);
+  }
+  return missing;
+}
+
+/**
+ * Install dependencies the checkout declares but node_modules lacks, BEFORE the
+ * trial is counted. It never blocks or aborts the start and never changes
+ * failures/state.state: after a failed install the start proceeds exactly as it
+ * would have.
+ *
+ * @returns {boolean} true only when npm ran, exited 0 AND the packages are
+ *   present afterwards — the caller treats that as the reason the previous exit
+ *   is not a crash of the commit.
+ */
+function installMissingDependencies({ root, gitDir, state, crowHome, env, now, head }) {
+  // That state has its own retry path (retryDependencyInstall).
+  if (state.state === "rolled-back-deps-pending") return false;
+  // The attempts were paid against the commit they were spent on: a new commit
+  // brings its own dependency set, so it starts with a full budget. `head` is
+  // the caller's read of the checkout, so both places judge the same commit.
+  if (head && state.missing_deps_sha !== head) {
+    resetMissingDepsAttempts(state);
+    state.missing_deps_sha = head;
+  }
+  const missing = missingTopLevelDeps(root);
+  if (!missing.length) {
+    resetMissingDepsAttempts(state);
+    return false;
+  }
+  if (num(state.missing_deps_attempts, 0) >= DEPS_MAX_ATTEMPTS) {
+    log(`dependencies still missing (${missing.join(", ")}) — not running npm again`);
+    return false;
+  }
+  // The same checkout lock as the puller and the rollback retry: two npm runs
+  // at once rewrite one node_modules and break both.
+  const lock = acquireLockFileWaiting(join(gitDir, LOCK_FILE), {
+    waitMs: envMs(env, "CROW_BOOT_GUARD_LOCK_WAIT_MS", LOCK_WAIT_MS),
+  });
+  if (!lock) {
+    log("the checkout lock is held elsewhere — the missing dependencies wait for the next start");
+    return false;
+  }
+  try {
+    log(`installing missing dependencies: ${missing.join(", ")}`);
+    const r = runNpmInstall({ root, env, timeoutMs: envMs(env, "CROW_BOOT_GUARD_NPM_TIMEOUT_MS", NPM_TIMEOUT_MS) });
+    // npm exiting 0 says only that it finished; the tree has to hold the
+    // packages, or the next start imports them and dies the same way.
+    const stillMissing = r.code === 0 ? missingTopLevelDeps(root) : missing;
+    if (r.code === 0 && !stillMissing.length) {
+      resetMissingDepsAttempts(state);
+      log("missing dependencies installed");
+      return true;
+    }
+    const attempts = num(state.missing_deps_attempts, 0) + 1;
+    state.missing_deps_attempts = attempts;
+    const how = r.code === 0
+      ? "one reported success, but the packages are still absent"
+      : r.timedOut ? "one timed out" : `one exited ${r.code}`;
+    if (attempts >= DEPS_MAX_ATTEMPTS) {
+      spoolOnce(state, crowHome, "update-deps-missing-blocked", {
+        title: "Crow could not install its dependencies",
+        body: `${stillMissing.join(", ")} is declared in package.json but not installed, and the install failed `
+          + `${attempts} times (the last ${how}), so nothing more will be retried automatically. To recover: run `
+          + `npm install --omit=dev in ${root} by hand, then restart the gateway.`,
+        now,
+      });
+      log(`the missing dependency install failed ${attempts} times — stopped retrying and spooled an alert`);
+      return false;
+    }
+    log(`the missing dependency install failed (${how}) — retried on the next start`);
+    return false;
+  } finally {
+    releaseLockFile(lock);
+  }
+}
+
+/** The counter went back to 0, so a give-up later on is a new message, not a
+ *  repeat of the one already spooled. */
+function resetMissingDepsAttempts(state) {
+  state.missing_deps_attempts = 0;
+  if (!state.alerted || !("update-deps-missing-blocked" in state.alerted)) return;
+  const alerted = { ...state.alerted };
+  delete alerted["update-deps-missing-blocked"];
+  state.alerted = alerted;
 }
 
 /** `npm install --omit=dev` with its own kill, as the puller does it. */
