@@ -116,13 +116,59 @@
    "hidden" element stays visible. */
 #ramble [hidden] { display: none !important; }
 
-/* Five views, one state attribute. The world is home. */
+/* Six views, one state attribute. Today is home; the tab bar below is the way
+   between them. */
 #ramble .rb-view { display: none; flex-direction: column; gap: 14px; }
+#ramble[data-view="today"] .rb-view[data-for="today"],
 #ramble[data-view="world"] .rb-view[data-for="world"],
 #ramble[data-view="egg"] .rb-view[data-for="egg"],
 #ramble[data-view="pet"] .rb-view[data-for="pet"],
 #ramble[data-view="flock"] .rb-view[data-for="flock"],
 #ramble[data-view="learn"] .rb-view[data-for="learn"] { display: flex; }
+
+/* The five-tab bar. Sticky, never fixed: it rides the top of #ramble inside the
+   dashboard's own scroll, so it can never cover the shell's chrome. Equal-width
+   tabs (flex: 1 1 0 + min-width: 0) are what keeps five of them on a 360px
+   phone with no horizontal scroll — the labels are one short word each. */
+#ramble .rb-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 6px;
+  padding: 8px 0;
+  background: var(--rb-bg);
+}
+#ramble .rb-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: var(--rb-tap);
+  padding: 10px 4px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: 999px;
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  font-family: var(--rb-font-display);
+  font-weight: 800;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#ramble .rb-tab:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
+/* The current view's own tab. The egg view is the same bird before it hatches,
+   so it lights the Bird tab too. */
+#ramble[data-view="today"] .rb-tab[data-tab="today"],
+#ramble[data-view="world"] .rb-tab[data-tab="map"],
+#ramble[data-view="egg"] .rb-tab[data-tab="bird"],
+#ramble[data-view="pet"] .rb-tab[data-tab="bird"],
+#ramble[data-view="flock"] .rb-tab[data-tab="flock"],
+#ramble[data-view="learn"] .rb-tab[data-tab="learn"] {
+  background: var(--rb-accent);
+  color: var(--rb-accent-ink);
+  box-shadow: var(--rb-pop-sm);
+}
 
 #ramble .rb-row { display: flex; align-items: center; gap: 10px; }
 #ramble .rb-grow { flex: 1; }
@@ -167,8 +213,8 @@
 #ramble #rb-pref-level { flex: 1; min-width: 90px; accent-color: var(--rb-accent-2); }
 
 /* The reference panel folds away. <details> is native, so the toggle, the
-   keyboard handling and the screen-reader semantics all come for free — and if
-   the remember-my-choice script never runs, it simply stays open. */
+   keyboard handling and the screen-reader semantics all come for free — and
+   without any script the fold simply stays as the markup left it: closed. */
 #ramble .rb-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
 #ramble .rb-fold > summary::-webkit-details-marker { display: none; }
 /* Our own marker, so it matches the display font rather than the OS triangle. */
