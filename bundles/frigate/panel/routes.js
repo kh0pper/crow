@@ -46,43 +46,72 @@ const RTSP_RE = /^rtsps?:\/\//i;
 const LIVE_FETCH_SITE = "same-origin";
 
 /**
- * True when the browser says the request came from another site. `Sec-Fetch-Site` is set by every
- * browser (never by a plain HTTP client), so its absence is not cross-site: a non-browser caller
- * keeps working, while a page on another Serve port of this host — or an app sharing this
- * origin's path space — cannot embed the live view in an `<img>` and wake the doorbell.
+ * True when the request carries a `Referer` whose origin is the request's own: the same host and
+ * port as its `Host` header, over either scheme.
+ *
+ * The scheme is the one thing not known here — this file reads neither `req.protocol` nor
+ * `x-forwarded-proto`, and the gateway may be serving the panel over HTTPS — so `http` and `https`
+ * are both accepted for the host the request itself names. A page on another host, another port,
+ * or an opaque referrer is not the same origin.
+ */
+function hasSameOriginReferer(req) {
+  const headers = req && req.headers ? req.headers : null;
+  if (!headers) return false;
+  const host = typeof headers.host === "string" ? headers.host.trim().toLowerCase() : "";
+  const referer = typeof headers.referer === "string" ? headers.referer.trim() : "";
+  if (!host || !referer) return false;
+  let parsed = null;
+  try {
+    parsed = new URL(referer);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  return parsed.host.toLowerCase() === host;
+}
+
+/**
+ * True when the request did not come from this page.
+ *
+ * `Sec-Fetch-Site` is the browser's own word and is checked first. Browsers send fetch metadata
+ * only to secure origins, so a dashboard reached over plain HTTP — the LAN raw-IP access — gets no
+ * such header at all; the `Referer` then has to prove the request came from this page, and a
+ * missing one is refused too. The panel's own `<img>` always sends a full `Referer` (the global
+ * header is `strict-origin-when-cross-origin`), while a page on another site sends a different
+ * origin or, with `referrerpolicy=no-referrer`, nothing. No non-browser caller of this route
+ * exists, so requiring one of the two headers costs nothing.
+ *
+ * What this cannot stop is an app that shares this origin's path space, such as a `/proxy/<id>/`
+ * view: it is same-origin and says so. That is out of scope — a same-origin app can already act as
+ * the signed-in user — and is not what this guard is for.
  */
 function isCrossSiteRequest(req) {
   const headers = req && req.headers ? req.headers : null;
-  if (!headers) return false;
+  if (!headers) return true;
   const value = headers["sec-fetch-site"];
-  if (value === undefined || value === null) return false;
-  const site = String(value).trim().toLowerCase();
-  if (!site) return false;
+  const site = value === undefined || value === null ? "" : String(value).trim().toLowerCase();
+  if (!site) return !hasSameOriginReferer(req);
   return site !== LIVE_FETCH_SITE;
 }
 
 /**
  * The gateway's `withoutWriteContext`, when it can be found: a live session's ffmpeg and timers
  * outlive the dashboard request that started them, so the body that creates them must not keep
- * that request's write context. Null when neither copy loads — the option is then left out.
+ * that request's write context. Only the app root is looked at. A path relative to this file
+ * would resolve above `CROW_HOME` in an installed instance (the file runs from
+ * `<CROW_HOME>/panels/`), into a tree this process does not own, so it is not a candidate at all.
+ * Null when nothing loads there: the option is then left out, and a session runs inside the
+ * request's write context, which writes nothing.
  */
 async function loadWithoutWriteContext() {
-  const relative = "servers/shared/history/write-context.js";
-  const candidates = [];
   const appRoot = process.env.CROW_APP_ROOT;
-  if (typeof appRoot === "string" && appRoot) candidates.push(join(appRoot, relative));
+  if (typeof appRoot !== "string" || !appRoot) return null;
   try {
-    candidates.push(fileURLToPath(new URL(`../../../${relative}`, import.meta.url)));
+    const path = join(appRoot, "servers/shared/history/write-context.js");
+    const mod = await import(pathToFileURL(path).href);
+    if (mod && typeof mod.withoutWriteContext === "function") return mod.withoutWriteContext;
   } catch {
-    // A module URL that cannot be read as a path: the app-root candidate above still stands.
-  }
-  for (const path of candidates) {
-    try {
-      const mod = await import(pathToFileURL(path).href);
-      if (mod && typeof mod.withoutWriteContext === "function") return mod.withoutWriteContext;
-    } catch {
-      // Not this copy; try the next one.
-    }
+    // No usable copy under the app root: run without the option.
   }
   return null;
 }

@@ -370,6 +370,30 @@ test("a frame split across two chunks reaches the viewer whole", async () => {
   assert.ok(res.chunks[2].equals(secondFrame));
 });
 
+test("a frame whose body ends exactly at a chunk end still forwards its CRLF, and the next part is whole", async () => {
+  const { manager, spawner } = makeManager();
+  const res = fakeResponse();
+  await manager.attach("front_door", res);
+  const { child } = spawner.sessions()[0];
+
+  const frame = jpegFrame(32);
+  const first = mpjpegPart(frame);
+  const bodyEnd = first.length - 2; // the frame's own CRLF lands in the NEXT read
+  child.stdout.emit("data", first.subarray(0, bodyEnd));
+  assert.equal(res.chunks.length, 1, "the frame is forwarded as soon as its body is complete");
+  const forwarded = res.chunks[0];
+  assert.equal(forwarded.length, first.length, "with the CRLF that had not arrived yet");
+  assert.equal(forwarded[forwarded.length - 2], 0x0d, "the part ends with CRLF");
+  assert.equal(forwarded[forwarded.length - 1], 0x0a, "the part ends with CRLF");
+  assert.ok(readPart(forwarded).equals(frame), "and holds the whole frame");
+
+  const second = mpjpegPart(jpegFrame(24));
+  child.stdout.emit("data", Buffer.concat([first.subarray(bodyEnd), second]));
+  assert.equal(res.chunks.length, 2, "the next frame follows at once");
+  assert.ok(res.chunks[1].equals(second), "the late CRLF is dropped, not glued onto the next part");
+  readPart(res.chunks[1]);
+});
+
 test("a slow viewer receives whole frames only, and loses frames instead of buffering them", async () => {
   const { manager, spawner } = makeManager();
   const slow = fakeResponse();
@@ -642,7 +666,7 @@ test("a session records its cooldown at START, so a gateway that dies mid-view s
   assert.deepEqual(await restarted.manager.attach("front_door", fakeResponse()), { ok: true });
 });
 
-test("cooldownLeftMs reports the cooldown in milliseconds", async () => {
+test("cooldownLeftMs reports the cooldown in milliseconds, and none while a session runs", async () => {
   const { manager, clock } = makeManager();
   assert.equal(manager.cooldownLeftMs("front_door"), 0, "no cooldown yet");
   assert.equal(manager.cooldownLeftMs("nobody"), 0);
@@ -650,7 +674,8 @@ test("cooldownLeftMs reports the cooldown in milliseconds", async () => {
 
   const res = fakeResponse();
   await manager.attach("front_door", res);
-  assert.equal(manager.cooldownLeftMs("front_door"), 180_000, "a running session holds its own guard");
+  assert.equal(manager.cooldownLeftMs("front_door"), 0,
+    "a running session's restart guard is not a cooldown for this process");
 
   res.close();
   assert.equal(manager.cooldownLeftMs("front_door"), 60_000);
@@ -809,40 +834,73 @@ test("scrubUrl removes the exact URL, a credentialed URL and a bare user:pass@ f
   assert.equal(scrubUrl(`see ${URL} now`, "not a url"), "see <stream-url> now");
 });
 
-test("a password straddling the reported window's cut point never survives in lastError", async () => {
-  const SECRET_URL = "rtsp://admin:S3cretPassw0rd@example.invalid:8557/front_door_live";
+test("a credential at the reported window's cut point never survives in lastError", async () => {
+  // URL-dense stderr, the way a failing ffmpeg repeats the address it cannot open. Every scrubbed
+  // line shrinks, and that is what pulled the head of the credential into the reported window when
+  // the window was cut BEFORE scrubbing: one extra whole line per step, plus one more byte of
+  // padding, walks the cut point into the credential byte by byte. Each step must leave neither
+  // the URL nor any three characters of its password in lastError.
+  const SECRET_URL = "rtsp://ringuser:S3cretPassw0rd@example.invalid:8557/abc_live";
   const password = "S3cretPassw0rd";
-  const passwordAt = SECRET_URL.indexOf(password);
-  const noise = "just another harmless line of words\n";
-  const filler = (length) => {
-    let out = "";
-    while (out.length < length) out += noise;
-    return out.slice(0, Math.max(0, length));
-  };
+  const line = `${SECRET_URL}: 401\n`;
+  const lines = Math.ceil(8000 / line.length) + 4;
 
-  // The kept raw buffer is 8000 bytes and the reported window is its last 500. By fixing the text
-  // that follows the URL, `k` moves the raw buffer's cut point to `k` bytes into the URL, so k from
-  // passwordAt walks it through the credential one byte at a time. (The old bug: the window was
-  // taken first, so the fragment left at the cut landed inside the reported tail.)
-  for (let k = passwordAt; k <= passwordAt + password.length + 1; k++) {
+  for (let step = 0; step <= line.length; step++) {
     const { manager, spawner } = makeManager({ options: { sources: { front_door: SECRET_URL } } });
     await manager.attach("front_door", fakeResponse());
     const { child } = spawner.sessions()[0];
 
-    const tailLength = 8000 + k - SECRET_URL.length;
-    assert.ok(tailLength > 0, "the layout puts the cut inside the URL");
-    child.stderr.emit("data", Buffer.from(filler(4000) + SECRET_URL));
-    child.stderr.emit("data", Buffer.from(filler(tailLength)));
+    child.stderr.emit("data", Buffer.from(line.repeat(lines + step) + "z".repeat(step)));
 
     const text = manager.lastError("front_door");
-    assert.match(text, /harmless/, `cut ${k}: the window has content`);
-    assert.equal(text.includes(SECRET_URL), false, `cut ${k}: the URL leaked`);
-    assert.equal(text.includes("@"), false, `cut ${k}: a credential fragment leaked`);
+    manager.stopAll();
+    assert.match(text, /<stream-url>/, `cut ${step}: the report has content`);
+    assert.equal(text.includes(SECRET_URL), false, `cut ${step}: the URL leaked`);
+    assert.equal(text.includes("@"), false, `cut ${step}: a credential fragment leaked`);
     for (let at = 0; at + 3 <= password.length; at++) {
       const fragment = password.slice(at, at + 3);
-      assert.equal(text.includes(fragment), false, `cut ${k}: the fragment "${fragment}" lost`);
+      assert.equal(text.includes(fragment), false, `cut ${step}: the fragment "${fragment}" survived`);
     }
   }
+});
+
+test("a stderr read that ends inside the URL publishes no fragment of the credential", async () => {
+  const SECRET_URL = "rtsp://ringuser:S3cretPassw0rd@example.invalid:8557/front_door_live";
+  const password = "S3cretPassw0rd";
+  const { manager, spawner } = makeManager({ options: { sources: { front_door: SECRET_URL } } });
+  await manager.attach("front_door", fakeResponse());
+  const { child } = spawner.sessions()[0];
+
+  const noFragment = (text, where) => {
+    assert.equal(text.includes(SECRET_URL), false, `${where}: the URL leaked`);
+    assert.equal(text.includes("@"), false, `${where}: a credential fragment leaked`);
+    for (let at = 0; at + 3 <= password.length; at++) {
+      const fragment = password.slice(at, at + 3);
+      assert.equal(text.includes(fragment), false, `${where}: the fragment "${fragment}" survived`);
+    }
+  };
+
+  // The read stops inside the password, as a pipe boundary can: no newline has arrived, so none of
+  // that line is published — the `<stream-url>` placeholder for the username would otherwise stop
+  // both scrub patterns and leave the rest of the password standing.
+  child.stderr.emit("data", Buffer.from("Opening rtsp://ringuser:S3cretPassw0r"));
+  assert.equal(manager.lastError("front_door"), "", "an unfinished line is not published");
+  noFragment(manager.lastError("front_door"), "between the two reads");
+
+  child.stderr.emit("data", Buffer.from("d@example.invalid:8557/front_door_live: 401 Unauthorized\n"));
+  const whole = manager.lastError("front_door");
+  assert.match(whole, /401 Unauthorized/, "the finished line is reported");
+  noFragment(whole, "after the line finished");
+
+  // A last line that never finishes: when ffmpeg is gone the tail is reported too, but only up to
+  // a URL, so the credential it was in the middle of writing still does not appear.
+  child.stderr.emit("data", Buffer.from("again rtsp://ringuser:S3cretPassw0r"));
+  child.emit("exit", 1);
+  const afterExit = manager.lastError("front_door");
+  assert.match(afterExit, /401 Unauthorized/, "the finished line is still there");
+  assert.match(afterExit, /again/, "and the tail is reported up to the URL it starts");
+  noFragment(afterExit, "after the exit");
+  assert.equal(afterExit.includes("rtsp://"), false, "the unfinished URL itself is dropped");
 });
 
 test("the URL is never echoed in lastError, in a refusal message or in a console call", async () => {
@@ -853,9 +911,9 @@ test("the URL is never echoed in lastError, in a refusal message or in a console
     const res = fakeResponse();
     assert.deepEqual(await manager.attach("front_door", res), { ok: true });
     const { child } = spawner.sessions()[0];
-    child.stderr.emit("data", Buffer.from(`[rtsp @ 0x1] Could not connect to ${URL}: Connection refused`));
-    child.stderr.emit("data", Buffer.from(`retry ${URL} once`));
-    child.stderr.emit("data", Buffer.from("then rtsp://someone:secret@example.invalid:8557/x failed"));
+    child.stderr.emit("data", Buffer.from(`[rtsp @ 0x1] Could not connect to ${URL}: Connection refused\n`));
+    child.stderr.emit("data", Buffer.from(`retry ${URL} once\n`));
+    child.stderr.emit("data", Buffer.from("then rtsp://someone:secret@example.invalid:8557/x failed\n"));
 
     const lastError = manager.lastError("front_door");
     assert.ok(lastError.length > 0, "the failure is readable");

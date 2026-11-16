@@ -31,7 +31,10 @@
  * Every setting arrives as an argument; nothing here reads the environment, and nothing is
  * logged. Error text that leaves the module — `lastError()`, an `attach()` message — is passed
  * through `scrubUrl`, so the stream URL, any `user:pass@` credential in it and the URL's own
- * username and password are never echoed.
+ * username and password are never echoed. Stderr is published whole lines at a time: only text up
+ * to the last newline of the raw buffer is reported, so a read that ends inside a URL cannot echo
+ * the rest of the credential; the incomplete tail is published when the child is gone, and then
+ * only up to a URL or the head of the URL's own credentials.
  */
 
 import { spawn as nodeSpawn } from "node:child_process";
@@ -56,6 +59,8 @@ const BOUNDARY = "ffmpeg";
 /** ffmpeg's mpjpeg framing: a boundary line, headers, the declared bytes, and a trailing CRLF. */
 const BOUNDARY_LINE = Buffer.from(`--${BOUNDARY}\r\n`, "latin1");
 const PART_HEADER_END = Buffer.from("\r\n\r\n", "latin1");
+/** The CRLF ffmpeg writes after a part's body. */
+const PART_CRLF = Buffer.from("\r\n", "latin1");
 const JPEG_SOI = Buffer.from([0xff, 0xd8]);
 const JPEG_EOI = Buffer.from([0xff, 0xd9]);
 /** A frame bigger than this, or a header block this long, means the stream is not mpjpeg. */
@@ -169,6 +174,21 @@ function defaultKillGroup(signal, child) {
 }
 
 /**
+ * The part that ends at `bodyEnd`, always with a trailing CRLF.
+ *
+ * When the frame's own CRLF is already in the buffer it is taken with the part. When a read ended
+ * exactly at the last body byte the CRLF is added here instead, so no part ever reaches a viewer
+ * without it; the copy that arrives with the next read is then dropped as bytes before the next
+ * boundary line, exactly like any other byte outside a part.
+ */
+function cutPart(buffer, bodyEnd) {
+  if (bodyEnd + PART_CRLF.length <= buffer.length && buffer[bodyEnd] === 0x0d && buffer[bodyEnd + 1] === 0x0a) {
+    return { part: buffer.subarray(0, bodyEnd + PART_CRLF.length), consumed: bodyEnd + PART_CRLF.length };
+  }
+  return { part: Buffer.concat([buffer.subarray(0, bodyEnd), PART_CRLF]), consumed: bodyEnd };
+}
+
+/**
  * Cut the next WHOLE multipart part off the front of `session.stdoutBuffer`.
  *
  * Returns `{ part }` — the part exactly as ffmpeg framed it, boundary line through the trailing
@@ -200,10 +220,8 @@ function takePart(session) {
     if (!Number.isFinite(length) || length <= 0) return { error: "a live frame declared no usable size" };
     if (length > MAX_PART_BYTES) return { error: `a live frame was larger than ${MAX_PART_BYTES} bytes` };
     if (buffer.length < bodyStart + length) return null; // the body is still arriving
-    let end = bodyStart + length;
-    if (end + 2 <= buffer.length && buffer[end] === 0x0d && buffer[end + 1] === 0x0a) end += 2;
-    const part = buffer.subarray(0, end);
-    session.stdoutBuffer = buffer.subarray(end);
+    const { part, consumed } = cutPart(buffer, bodyStart + length);
+    session.stdoutBuffer = buffer.subarray(consumed);
     return { part };
   }
 
@@ -218,10 +236,8 @@ function takePart(session) {
     if (buffer.length - soi > MAX_PART_BYTES) return { error: `a live frame was larger than ${MAX_PART_BYTES} bytes` };
     return null;
   }
-  let end = eoi + JPEG_EOI.length;
-  if (end + 2 <= buffer.length && buffer[end] === 0x0d && buffer[end + 1] === 0x0a) end += 2;
-  const part = buffer.subarray(0, end);
-  session.stdoutBuffer = buffer.subarray(end);
+  const { part, consumed } = cutPart(buffer, eoi + JPEG_EOI.length);
+  session.stdoutBuffer = buffer.subarray(consumed);
   return { part };
 }
 
@@ -359,6 +375,11 @@ export function createLiveManager(options = {}) {
   }
 
   function cooldownLeftMs(name) {
+    // A running session keeps the guard it wrote at START (`start + cap + cooldown`) in the store.
+    // That guard is for a restart, not for this process, and reporting it as a cooldown would tell
+    // a viewer that was refused because the session is full to wait up to three minutes.
+    const running = typeof name === "string" ? sessions.get(name) : undefined;
+    if (running) return 0;
     let until = NaN;
     try {
       until = Number(cooldownStore.get(name));
@@ -638,6 +659,47 @@ export function createLiveManager(options = {}) {
     });
   }
 
+  /**
+   * The incomplete last line of stderr, as much of it as is safe to publish: a tail that carries a
+   * scheme-qualified URL, or the head of the URL's own username or password, is cut back to before
+   * it. Nothing here echoes a fragment that could be the rest of a credential.
+   */
+  function safeStderrTail(tail, url) {
+    if (typeof tail !== "string" || tail.length === 0) return "";
+    let end = tail.length;
+    const schemeAt = tail.lastIndexOf("://");
+    if (schemeAt >= 0 && schemeAt < end) end = schemeAt;
+    for (const secret of urlSecrets(url)) {
+      for (let length = secret.length; length >= 3; length--) {
+        const at = tail.lastIndexOf(secret.slice(0, length));
+        if (at < 0) continue;
+        if (at < end) end = at;
+        break;
+      }
+    }
+    return tail.slice(0, end);
+  }
+
+  /**
+   * Publish stderr into the error text, whole lines only.
+   *
+   * The raw buffer is kept well past the reported window and scrubbed WHOLE, so a cut point that
+   * lands inside a credential has nothing left to leak, and only text up to the last newline is
+   * reported: a read that ended mid-URL (a chunk boundary ffmpeg does not write, but a pipe can
+   * still produce) leaves no half-credential to echo. `includeTail` reports the last, incomplete
+   * line as well, past a URL and the head of a known secret; it is passed when the child is gone
+   * and its last line will never be finished.
+   */
+  function publishStderr(session, includeTail) {
+    const raw = typeof session.stderrRaw === "string" ? session.stderrRaw : "";
+    const newline = raw.lastIndexOf("\n");
+    const complete = newline < 0 ? "" : raw.slice(0, newline + 1);
+    const tail = includeTail ? safeStderrTail(raw.slice(newline + 1), session.url) : "";
+    const text = scrubUrl(complete + tail, session.url).slice(-STDERR_KEEP_CHARS);
+    // Nothing safe to publish yet (no complete line): leave a spawn error's message in place.
+    if (text.length > 0) errors.set(session.name, text);
+  }
+
   function wireStderr(session, child) {
     const stderr = child.stderr;
     if (!stderr || typeof stderr.on !== "function") return;
@@ -648,10 +710,8 @@ export function createLiveManager(options = {}) {
       } catch {
         return;
       }
-      // Keep a buffer well past the reported window, scrub ALL of it, and only then cut the
-      // window: a cut point that lands inside a credential then has nothing left to leak.
       session.stderrRaw = (session.stderrRaw + text).slice(-STDERR_RAW_CHARS);
-      errors.set(session.name, scrubUrl(session.stderrRaw, session.url).slice(-STDERR_KEEP_CHARS));
+      publishStderr(session, false);
     });
   }
 
@@ -748,6 +808,8 @@ export function createLiveManager(options = {}) {
       if (gone) return;
       gone = true;
       liveGroups.delete(entry);
+      // ffmpeg is gone, so its last line will never be finished: report it too, without a URL.
+      publishStderr(session, true);
       if (session.killTimer != null) {
         try {
           clearTimer(session.killTimer);

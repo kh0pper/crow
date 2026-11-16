@@ -123,7 +123,9 @@ function handlerFor(router, path) {
 /** Calls a route handler with a recording response and returns it. */
 async function callRoute(handler, req = {}) {
   const res = recordingResponse();
-  await handler({ query: {}, params: {}, headers: {}, ...req }, res);
+  // The live route only takes a request that comes from the panel itself, so a case that says
+  // nothing about where its request came from is a same-origin one unless it says otherwise.
+  await handler({ query: {}, params: {}, headers: { "sec-fetch-site": "same-origin" }, ...req }, res);
   return res;
 }
 
@@ -323,8 +325,8 @@ test("the live route hands the response to the manager on success", async () => 
 });
 
 // Starting a view is a GET that wakes a battery doorbell, so a page from another site must not be
-// able to do it by embedding the URL. Browsers always say where a request came from; a plain HTTP
-// client sends no such header and is unaffected.
+// able to do it by embedding the URL. The browser's `Sec-Fetch-Site` decides when it is there; when
+// it is not (a dashboard on plain HTTP gets no fetch metadata) the Referer has to be this origin.
 
 test("the live route refuses a cross-site request before the manager is touched", async () => {
   const manager = stubManager();
@@ -339,14 +341,52 @@ test("the live route refuses a cross-site request before the manager is touched"
       assert.equal(res.statusCode, 403, `refused: ${site}`);
       assert.deepEqual(res.body, { error: "Live view must be started from this page" });
     }
+
+    // A Referer for this very host does not talk the browser's own cross-site word around.
+    const spoofed = remember(await callRoute(handler, {
+      params: { name: "front_door" },
+      headers: { "sec-fetch-site": "cross-site", host: "nest.invalid", referer: "http://nest.invalid/dashboard/frigate" },
+    }));
+    assert.equal(spoofed.statusCode, 403, "Sec-Fetch-Site decides whenever it is there");
     assert.equal(manager.calls.length, 0, "the manager was never asked, so nothing was spawned");
 
-    // Our own page (same-origin), and a caller with no site hint at all, still start a view.
-    const allowed = [{ "sec-fetch-site": "same-origin" }, {}, { "sec-fetch-site": "" }];
-    for (const headers of allowed) {
+    // Our own page still starts a view.
+    const res = await callRoute(handler, { params: { name: "front_door" }, headers: { "sec-fetch-site": "same-origin" } });
+    assert.equal(manager.calls.length, 1, "allowed: same-origin");
+    assert.equal(res.statusCode, 200, "the manager owns the response");
+    assert.equal(res.body, null, "and the route wrote nothing itself");
+  });
+});
+
+test("with no Sec-Fetch-Site the live route needs a Referer from this very origin", async () => {
+  const manager = stubManager();
+  await withManager(manager, async () => {
+    const handler = handlerFor(newRouter(), "/api/frigate/live/:name/stream.mjpg");
+    const host = "nest.invalid:8443";
+
+    // Another site, another port of this host, an opaque page, a missing Referer and an empty
+    // fetch-site are all refused: the header a plain-HTTP dashboard never gets cannot be missed.
+    const refusals = [
+      { "sec-fetch-site": "", host },
+      { host },
+      { host, referer: "http://elsewhere.invalid:8443/dashboard/frigate" },
+      { host, referer: "http://nest.invalid:3000/dashboard/frigate" },
+      { host, referer: "https://nest.invalid:8444/dashboard/frigate" },
+      { host, referer: "not a url" },
+      { referer: "http://nest.invalid:8443/dashboard/frigate" },
+    ];
+    for (const headers of refusals) {
+      const res = remember(await callRoute(handler, { params: { name: "front_door" }, headers }));
+      assert.equal(res.statusCode, 403, `refused: ${JSON.stringify(headers)}`);
+      assert.deepEqual(res.body, { error: "Live view must be started from this page" });
+    }
+    assert.equal(manager.calls.length, 0, "no camera was woken by any of them");
+
+    // The panel's own page sends this host and port, over whichever scheme it is served on.
+    for (const referer of ["http://nest.invalid:8443/dashboard/frigate", "https://nest.invalid:8443/dashboard/frigate?x=1"]) {
       const before = manager.calls.length;
-      const res = await callRoute(handler, { params: { name: "front_door" }, headers });
-      assert.equal(manager.calls.length, before + 1, `allowed: ${JSON.stringify(headers)}`);
+      const res = await callRoute(handler, { params: { name: "front_door" }, headers: { host, referer } });
+      assert.equal(manager.calls.length, before + 1, `allowed: ${referer}`);
       assert.equal(res.statusCode, 200, "the manager owns the response");
       assert.equal(res.body, null, "and the route wrote nothing itself");
     }
@@ -471,6 +511,8 @@ test("a real manager's cooldown and remaining time reach the status route", asyn
     assert.equal(running.statusCode, 200);
     assert.equal(running.body.available, true);
     assert.equal(running.body.remaining_seconds, 120, "the running session has its whole cap left");
+    assert.equal(running.body.cooldown_seconds, 0,
+      "a running session is not cooling down: its restart guard is for the next process, not this one");
 
     // The tab goes away: the manager ends the session and records a cooldown from now.
     for (const onClose of viewer.listeners.close || []) onClose();
@@ -652,26 +694,14 @@ test("the live manager is built with the app root's withoutWriteContext as runDe
   }
 });
 
-test("with no app root the checkout's own withoutWriteContext is found by path", async () => {
+test("with no app root the manager is built without a runDetached runner", async () => {
   const instance = fakeInstance();
   delete globalThis.__fgManagerOptions;
   try {
     const options = await buildManagerThroughRoute({ home: instance.home });
     assert.ok(options, "the route built the manager");
-    assert.equal(typeof options.runDetached, "function", "the repo-relative copy was found without an app root");
-
-    // It behaves as the gateway's own withoutWriteContext: a body it runs sees NO write context,
-    // and the caller's context is intact afterwards.
-    const wc = await import("../servers/shared/history/write-context.js");
-    const seen = [];
-    wc.withWriteContext({ authorKind: "owner", authorId: "abcdef12" }, () => {
-      seen.push(wc.currentWriteContext());
-      seen.push(options.runDetached(() => wc.currentWriteContext()));
-      seen.push(wc.currentWriteContext());
-    });
-    assert.equal(seen[0].authorKind, "owner", "the request's own context is open");
-    assert.equal(seen[1], null, "the session body runs detached from it");
-    assert.equal(seen[2].authorKind, "owner", "and the request's context comes back");
+    assert.equal(Object.hasOwn(options, "runDetached"), false,
+      "the option is left out rather than loaded from a path that resolves outside the app");
   } finally {
     delete globalThis.__fgManagerOptions;
     rmSync(instance.home, { recursive: true, force: true });
