@@ -4,24 +4,30 @@
  *   Frames. The page never carries a message body, and it never carries an iframe either: each
  *   conversation section carries a frame slot, and this script builds the frame from it — at bind
  *   time for a section that is open and the first time a closed one is opened. The sandbox is taken
- *   from the slot's own value and set BEFORE the src, a slot whose value would grant the frame this
- *   origin is left empty, and every load gets a fresh nonce in the URL's fragment (`#n=`), never sent
- *   to the server, plus the same nonce on the frame for the reply to check.
+ *   from the slot's own value and set BEFORE the src, and it is used only when it is exactly the
+ *   server's own sandbox value (any other value, one differing only in case included, leaves the
+ *   slot empty). Every load gets a fresh nonce in the URL's fragment (`#n=`), never sent to the
+ *   server, plus the same nonce on the frame for the reply to check.
  *   The frame's own pinned helper posts its height and blocked-image count once. One listener on the
- *   window accepts a report only from that frame's contentWindow with that frame's nonce, floors and
- *   clamps the height and shows the image banner for a count above zero. It never reads the frame's
- *   document: the frame is an opaque origin by design.
+ *   window accepts a report only from that frame's own contentWindow, from the opaque origin such a
+ *   frame reports (`"null"`) and with that frame's nonce; it floors and clamps the height and shows
+ *   the image banner for a count above zero. It never reads the frame's document: the frame is an
+ *   opaque origin by design.
  *   Show images rebuilds this one frame with `images=1` (this view only, nothing stored); Always show
  *   posts the sender to the allow list first, then rebuilds it the same way.
  *
  *   Refresh. The refresh control and a pull down of 80 px or more at the top of the list (the pull is
- *   bound on the list element alone) post one sync per account, then reload through Turbo. Look
- *   further back continues each listed folder's history on the server, and the server search asks the
+ *   bound on the list element alone) post one sync per account, then reload through Turbo. One round
+ *   runs at a time: the control is disabled while it does, and a second trigger — another pull, or a
+ *   click during the pull — is ignored, so the accounts are never synced twice over. Look further
+ *   back continues each listed folder's history on the server, and the server search asks the
  *   accounts' servers; both reload with a `flash` the panel reads back into a sentence.
  *
  *   Settings. Rename and the local-models switch PATCH their own field, Update password PUTs the new
- *   secret, the add-account form posts its fields as the connect body, Remove sender deletes one
- *   allowance, and Remove account deletes the account only after its own second, confirming click.
+ *   secret, the add-account form posts its fields as the connect body to the accounts route this
+ *   script hardcodes, Remove sender deletes one allowance, and Remove account keeps its sentence
+ *   hidden until the first click and deletes the account only on a later click at least 500 ms after
+ *   that; the confirmation lapses after 8 s or when focus leaves the block.
  *
  * Every sentence comes from the page: the panel renders one hidden element carrying the fixed
  * sentence for each API error code (data-ml-err-<code>, lower-cased before the lookup, because the
@@ -39,10 +45,16 @@
  * that must name the document (Chrome Android's own pull-to-refresh would otherwise fire as well) is
  * injected by this script instead.
  */
+import { FRAME_IFRAME_SANDBOX } from "../../../mail/reader/frame-doc.js";
+
 export function mailClientJs(lang = "en") {
   // `lang` is here for the panel's uniform view signature: every word this script can show is a
   // data-ml-* attribute the server already translated.
   void lang;
+  // The sandbox a slot's value is compared against is the server's own constant, written into the
+  // script as a JSON string. It is substituted after the template rather than interpolated inside
+  // it: the pin test reads this template literal as the script, and that script may hold neither a
+  // backtick nor a dollar-brace.
   return `<script>
 (function () {
   function clearMarkTimer() {
@@ -158,10 +170,15 @@ export function mailClientJs(lang = "en") {
     return out;
   }
 
+  var refreshing = false;
   function refreshAll(trigger) {
+    if (refreshing) { return; }
     var button = trigger || root.querySelector('[data-ml-refresh]');
     var ids = accountIds(button ? button.getAttribute('data-accounts') : '');
     if (!ids.length) { return; }
+    refreshing = true;
+    var control = root.querySelector('[data-ml-refresh]');
+    if (control) { control.setAttribute('disabled', ''); }
     var host = button && button.parentNode ? button.parentNode : root;
     say(host, button ? String(button.getAttribute('data-ml-refreshing') || '') : '');
     var calls = [];
@@ -170,7 +187,13 @@ export function mailClientJs(lang = "en") {
     }
     Promise.all(calls).then(function (results) {
       for (var j = 0; j < results.length; j++) {
-        if (!results[j].ok) { sayError(host, results[j]); return; }
+        if (!results[j].ok) {
+          // A failed round frees the control, so the owner can ask again.
+          refreshing = false;
+          if (control) { control.removeAttribute('disabled'); }
+          sayError(host, results[j]);
+          return;
+        }
       }
       reload();
     });
@@ -208,6 +231,8 @@ export function mailClientJs(lang = "en") {
   }
 
   var SLOT_SELECTOR = '[data-ml-frame' + '-slot]';
+  // The one sandbox value a slot may carry: the server's own, substituted into this template.
+  var SLOT_SANDBOX = __ML_SLOT_SANDBOX__;
 
   function makeNonce() {
     var bytes = new Uint8Array(16);
@@ -219,7 +244,7 @@ export function mailClientJs(lang = "en") {
   function buildFrame(slot, extraQuery) {
     var sandbox = String(slot.getAttribute('data-sandbox') || '');
     var src = String(slot.getAttribute('data-src') || '');
-    if (src === '' || sandbox === '' || sandbox.indexOf('allow-same-origin') >= 0) { return null; }
+    if (src === '' || sandbox !== SLOT_SANDBOX) { return null; }
     var frame = document.createElement('iframe');
     frame.setAttribute('sandbox', sandbox);
     frame.setAttribute('referrerpolicy', 'no-referrer');
@@ -282,7 +307,9 @@ export function mailClientJs(lang = "en") {
     return height;
   }
   function onFrameReport(event) {
-    if (!event || !event.data) { return; }
+    // A sandboxed frame without allow-same-origin reports from the opaque origin, which is "null".
+    if (!event || String(event.origin) !== 'null') { return; }
+    if (!event.data) { return; }
     var data = event.data;
     if (typeof data !== 'object' || data.t !== 'crow-mail-frame') { return; }
     var frame = frameFor(event.source);
@@ -305,6 +332,50 @@ export function mailClientJs(lang = "en") {
   }
 
   function cardOf(node) { return closestOf(node, '[data-ml-account]') || root; }
+
+  // Removing an account: the first click only reveals the block's own sentence and arms the button.
+  // A later click sends the delete, but not before the arm has settled for 500 ms (a double tap is
+  // one intention, not two), and the confirmation lapses after 8 s or when focus leaves the block.
+  var CONFIRM_ARM_MS = 500;
+  var CONFIRM_WINDOW_MS = 8000;
+  var confirmBox = null;
+  var confirmReady = false;
+  var confirmArmTimer = null;
+  var confirmWindowTimer = null;
+
+  function disarmConfirm(box) {
+    confirmReady = false;
+    if (confirmArmTimer) { clearTimeout(confirmArmTimer); confirmArmTimer = null; }
+    if (confirmWindowTimer) { clearTimeout(confirmWindowTimer); confirmWindowTimer = null; }
+    if (!box) { return; }
+    var button = box.querySelector('[data-ml-remove-account-btn]');
+    if (button) { button.removeAttribute('data-ml-confirm'); }
+    var sentence = box.querySelector('[data-ml-confirm-sentence]');
+    if (sentence) { sentence.setAttribute('hidden', ''); }
+  }
+  function lapseConfirm() {
+    confirmWindowTimer = null;
+    var previous = confirmBox;
+    confirmBox = null;
+    disarmConfirm(previous);
+  }
+  function armConfirm(box, button) {
+    if (confirmBox && confirmBox !== box) { disarmConfirm(confirmBox); }
+    confirmBox = box;
+    confirmReady = false;
+    if (box) {
+      var sentence = box.querySelector('[data-ml-confirm-sentence]');
+      if (sentence) { sentence.removeAttribute('hidden'); }
+    }
+    button.setAttribute('data-ml-confirm', '1');
+    if (confirmArmTimer) { clearTimeout(confirmArmTimer); }
+    confirmArmTimer = setTimeout(function () {
+      confirmArmTimer = null;
+      confirmReady = true;
+    }, CONFIRM_ARM_MS);
+    if (confirmWindowTimer) { clearTimeout(confirmWindowTimer); }
+    confirmWindowTimer = setTimeout(lapseConfirm, CONFIRM_WINDOW_MS);
+  }
 
   function clickHandler(event) {
     var target = event.target && event.target.closest ? event.target : null;
@@ -387,14 +458,18 @@ export function mailClientJs(lang = "en") {
     if (dropAccount) {
       var dropId = String(dropAccount.getAttribute('data-account') || '');
       if (dropId === '') { return; }
+      var block = closestOf(dropAccount, '[data-ml-remove-account]');
       if (dropAccount.getAttribute('data-ml-confirm') !== '1') {
-        dropAccount.setAttribute('data-ml-confirm', '1');
+        armConfirm(block, dropAccount);
         return;
       }
-      dropAccount.disabled = true;
+      // Armed, but a click that follows the arming too closely is the same tap, not a confirmation.
+      if (!confirmReady) { return; }
+      confirmBox = null;
+      disarmConfirm(block);
+      dropAccount.setAttribute('disabled', '');
       remove('/dashboard/mail/api/accounts/' + encodeURIComponent(dropId), {}).then(function (result) {
-        dropAccount.disabled = false;
-        dropAccount.removeAttribute('data-ml-confirm');
+        dropAccount.removeAttribute('disabled');
         if (!result.ok) { sayError(cardOf(dropAccount), result); return; }
         reload();
       });
@@ -470,6 +545,14 @@ export function mailClientJs(lang = "en") {
     root.addEventListener('click', clickHandler);
     root.addEventListener('change', changeHandler);
     root.addEventListener('submit', submitHandler);
+    root.addEventListener('focusout', function (event) {
+      if (!confirmBox) { return; }
+      var next = event && event.relatedTarget;
+      if (next && confirmBox.contains && confirmBox.contains(next)) { return; }
+      var previous = confirmBox;
+      confirmBox = null;
+      disarmConfirm(previous);
+    });
   }
   var sections = root.querySelectorAll('[data-ml-msg]');
   for (var i = 0; i < sections.length; i++) { bindSection(sections[i]); }
@@ -482,7 +565,7 @@ export function mailClientJs(lang = "en") {
     document.addEventListener('turbo:before-visit', clearMarkTimer);
   }
 })();
-</script>`;
+</script>`.split("__ML_SLOT_SANDBOX__").join(JSON.stringify(FRAME_IFRAME_SANDBOX));
 }
 
 export default mailClientJs;

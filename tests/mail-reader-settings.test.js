@@ -294,7 +294,7 @@ test("elsewhere and no local accounts shows the sentence and the add form", asyn
     const r = await get(SETTINGS);
     assert.equal(r.status, 200);
     assert.match(r.body, /<p class="ml-note">Mail is set up on Studio<\/p>/);
-    assert.match(r.body, /<form[^>]*data-ml-add-account[^>]*data-ml-action="\/accounts"[^>]*>/);
+    assert.match(r.body, /<form[^>]*data-ml-add-account[^>]*method="post"[^>]*>/);
     assert.match(r.body, /Add an account/);
   });
 });
@@ -346,15 +346,15 @@ test("an account with a blank label heads with its address and leaves the rename
   });
 });
 
-test("the add form carries its target as data and no native action or method", async () => {
+test("the add form names POST, has no native action and no client-routed target", async () => {
   await withFlag(async () => {
     const r = await get(SETTINGS);
     assert.equal(r.status, 200);
     const tag = (r.body.match(/<form[^>]*data-ml-add-account[^>]*>/) || [])[0];
     assert.ok(tag, "the add-account form");
-    assert.match(tag, /data-ml-action="\/accounts"/, "the target is a data attribute only");
+    assert.match(tag, /\smethod="post"/, "a native submit is a POST, never a GET with the password in the URL");
     assert.doesNotMatch(tag, /\saction=/, "a native submit has no target");
-    assert.doesNotMatch(tag, /\smethod=/, "a native submit is not named");
+    assert.equal(tag.includes("data-ml-action"), false, "the client hardcodes the accounts route");
     assert.match(r.body, /<option value="ssl">ssl<\/option>/);
     assert.match(r.body, /<option value="starttls">starttls<\/option>/);
     assert.doesNotMatch(r.body, /value="none"/);
@@ -362,19 +362,26 @@ test("the add form carries its target as data and no native action or method", a
       "smtp-host", "smtp-port", "smtp-security"]) {
       assert.match(r.body, new RegExp(`name="${name}"`), name);
     }
+    const address = (r.body.match(/<input[^>]*name="address"[^>]*>/) || [])[0];
+    assert.ok(address, "the address field");
+    assert.match(address, /type="email"/, "the address field is an email field");
+    assert.equal((address.match(/\stype=/g) || []).length, 1, "with one type attribute, not two");
   });
 });
 
-test("remove sits behind its own sentence and the page itself calls nothing", async () => {
+test("remove sits behind its own sentence, hidden until the first click, and the page itself calls nothing", async () => {
   await withDb((db) => stores.accounts.createAccount(db, ACCOUNT("Personal", "alex@example.com", "alexuser")));
   await withFlag(async () => {
     const r = await get(SETTINGS);
     assert.equal(r.status, 200);
-    assert.match(r.body, /This deletes the mail Crow stored for it\. Mail on the server is not touched\./);
+    const sentence = (r.body.match(/<p[^>]*data-ml-confirm-sentence[^>]*>[^<]*This deletes the mail Crow stored for it\. Mail on the server is not touched\.<\/p>/) || [])[0];
+    assert.ok(sentence, "the sentence is on the page");
+    assert.match(sentence, /\shidden(\s|>)/, "and hidden until the first click reveals it");
     assert.match(r.body, /data-ml-remove-account data-account="ma-[0-9a-f]{16}"/);
     const tag = (r.body.match(/<button[^>]*data-ml-remove-account-btn[^>]*>/) || [])[0];
     assert.ok(tag, "the remove control");
     assert.match(tag, /type="button"/, "a person confirms first; no implicit submit");
+    assert.equal(tag.includes("data-ml-confirm"), false, "it is not armed in the markup");
     // The destructive request belongs to the client script (Task 8), never to this markup.
     const source = readFileSync(join(REPO, "servers/gateway/dashboard/panels/mail/settings-html.js"), "utf8");
     assert.doesNotMatch(source, /fetch\(/);

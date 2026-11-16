@@ -119,10 +119,13 @@ function updatePasswordHtml(accountId, lang) {
     + "</details>";
 }
 
-/** Remove, behind its own sentence: the button is inert until the client's own confirmation step. */
+/**
+ * Remove, behind its own sentence. The sentence stays hidden until the client's own first click on the
+ * button, which is inert until then; the client sends the delete only on a later click.
+ */
 function removeAccountHtml(accountId, lang) {
   return `<div class="ml-danger" data-ml-remove-account data-account="${e(accountId)}">`
-    + `<p class="ml-note">${e(t("mail.removeAccountConfirm", lang))}</p>`
+    + `<p class="ml-note" data-ml-confirm-sentence hidden>${e(t("mail.removeAccountConfirm", lang))}</p>`
     + `<button class="ml-btn" type="button" data-ml-remove-account-btn data-account="${e(accountId)}">${e(t("mail.removeAccount", lang))}</button>`
     + "</div>";
 }
@@ -159,22 +162,23 @@ function accountCard(account, { senders = [], lang, tz }) {
  * The add-account form: the smallest set a password account needs, with `ssl` and `starttls` only.
  * Plan 5 replaces this whole function's body; the page above it does not change.
  *
- * The form carries no `method` and no `action`: it is a set of fields for the client script, which
- * reads `data-ml-action` (relative to the mail API's mount) and sends the request itself, so a native
- * submit can never fire against this page's own URL.
+ * The form is a set of fields for the client script, which cancels the submit and posts them to the
+ * mail API's accounts route itself (that route is hardcoded in the script, not read from this markup,
+ * so the markup names no target). It carries no `action` and names `method="post"`: without the
+ * client handler a native submit would otherwise be a GET that puts the password in the URL.
  *
  * @param {string} [lang]
  * @returns {string}
  */
 export function addAccountForm(lang = "en") {
-  const text = (name, label, extra = "") => `<label class="ml-field"><span class="ml-field-label">${e(label)}</span>`
-    + `<input class="ml-input" type="text" name="${name}"${extra}></label>`;
+  const text = (name, label, extra = "", type = "text") => `<label class="ml-field"><span class="ml-field-label">${e(label)}</span>`
+    + `<input class="ml-input" type="${type}" name="${name}"${extra}></label>`;
   const security = (name) => `<label class="ml-field"><span class="ml-field-label">${e(t("mail.fieldSecurity", lang))}</span>`
     + `<select class="ml-input" name="${name}"><option value="ssl">ssl</option><option value="starttls">starttls</option></select></label>`;
-  return `<form class="ml-add" data-ml-add-account data-ml-action="/accounts">
+  return `<form class="ml-add" data-ml-add-account method="post">
       <h2 class="ml-card-title">${e(t("mail.addAccount", lang))}</h2>
       ${text("label", t("mail.fieldLabel", lang))}
-      ${text("address", t("mail.fieldAddress", lang), ' type="email" autocomplete="email"')}
+      ${text("address", t("mail.fieldAddress", lang), ' autocomplete="email"', "email")}
       <label class="ml-field"><span class="ml-field-label">${e(t("mail.fieldPassword", lang))}</span>
         <input class="ml-input" type="password" name="password" autocomplete="new-password"></label>
       ${text("imap-host", t("mail.fieldImapHost", lang))}

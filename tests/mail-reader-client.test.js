@@ -3,16 +3,19 @@
  * markup the panel draws:
  *   - the script never arrives with a body: every iframe is built here from a frame slot, with the
  *     sandbox set before the src and a fresh per-load nonce in the URL's fragment and in
- *     data-ml-nonce; a slot whose sandbox names allow-same-origin gets no iframe at all;
+ *     data-ml-nonce; a slot is used only when its data-sandbox is exactly the server's own sandbox
+ *     value — any other value, including one differing only in case, leaves the slot empty;
  *   - the one window message listener accepts a frame's report only from that frame's own
- *     contentWindow with that frame's own nonce, floors and clamps the height, and hides the image
- *     banner for a zero count and shows it (with the count) for more;
+ *     contentWindow, from the opaque origin ("null") and with that frame's own nonce; it floors and
+ *     clamps the height, and hides the image banner for a zero count and shows it for more;
  *   - Show images rebuilds the frame for this load only, and Always show posts the allow first;
  *   - refresh, pull-to-refresh, Look further back and the server search post to /dashboard/mail/api
- *     and reload through Turbo (or the location); a failed call shows the translated sentence for
- *     the response's error code, never the response's own message;
- *   - the settings page's rename, local-models switch, password, add-account, remove-sender and
- *     remove-account controls send their own verbs, and removing an account takes its confirm click.
+ *     and reload through Turbo (or the location); one round of syncs runs at a time, so a pull plus
+ *     a click posts one round, and a failed call shows the translated sentence for the response's
+ *     error code, never the response's own message;
+ *   - the settings page's rename, local-models switch, password, add-account and remove-sender
+ *     controls send their own verbs; removing an account keeps its sentence hidden until the first
+ *     click, and sends only on a later click at least 500 ms after that.
  * Static pins: no backtick, no dollar-brace, no markup sink, every request URL under the mail API,
  * the doubled-backslash cookie regex, and the two overscroll rules that stop Chrome's own refresh.
  */
@@ -231,8 +234,17 @@ function boot(html, { fetchImpl = () => jsonResponse(200, { ok: true }), href = 
     return fired;
   };
   const toggle = (node) => { node.dispatchEvent(event("toggle", { bubbles: false })); };
-  const send = (record, data) => {
-    for (const fn of windowListeners.message || []) fn({ source: record.contentWindow, data });
+  // A sandboxed frame without allow-same-origin reports from the opaque origin, which is "null".
+  const send = (record, data, origin = "null") => {
+    for (const fn of windowListeners.message || []) fn({ source: record.contentWindow, origin, data });
+  };
+  // The rig's timers never fire on their own, so a test says when one did.
+  const fire = (ms) => {
+    const timer = timers.filter((entry) => entry.ms === ms && !entry.cleared && !entry.fired).pop();
+    if (!timer) return false;
+    timer.fired = true;
+    timer.fn();
+    return true;
   };
   const touch = (node, type, y) => {
     const fired = event(type);
@@ -248,7 +260,7 @@ function boot(html, { fetchImpl = () => jsonResponse(200, { ok: true }), href = 
 
   return {
     window, document, location, ctx, run, settle, $, $$, click, change, submit, send, pull, touch, toggle, turboBeforeVisit,
-    frames, calls, visits, timers, windowListeners,
+    fire, event, frames, calls, visits, timers, windowListeners,
   };
 }
 
@@ -341,16 +353,28 @@ test("every iframe is built from a slot: none in the markup, sandbox before src,
   assert.equal(r.frames.length, 2, "one frame per section");
 });
 
-test("a slot whose data-sandbox names allow-same-origin gets no iframe at all", () => {
-  const page = `<div class="ml" data-ml>
+test("a slot's sandbox is used only when it is exactly the server's own value", () => {
+  const page = (sandbox) => `<div class="ml" data-ml>
     <details class="ml-msg-section" data-ml-msg="7" open>
       <div class="ml-frame" data-ml-frame-slot data-src="/dashboard/mail/api/messages/7/frame"
-        data-sandbox="allow-scripts allow-same-origin allow-popups"></div>
+        data-sandbox="${sandbox}"></div>
     </details>
   </div>`;
-  const r = boot(page);
-  assert.equal(r.frames.length, 0, "no frame was built");
-  assert.equal(r.$("[data-ml-frame-slot]").children.length, 0, "the slot is left empty");
+  const refused = [
+    "allow-scripts allow-same-origin allow-popups",
+    "Allow-Scripts allow-popups allow-popups-to-escape-sandbox",
+    "allow-scripts allow-popups",
+    FRAME_IFRAME_SANDBOX + " allow-same-origin",
+    "",
+  ];
+  for (const sandbox of refused) {
+    const r = boot(page(sandbox));
+    assert.equal(r.frames.length, 0, `no frame for ${JSON.stringify(sandbox)}`);
+    assert.equal(r.$("[data-ml-frame-slot]").children.length, 0, "the slot is left empty");
+  }
+  const accepted = boot(page(FRAME_IFRAME_SANDBOX));
+  assert.equal(accepted.frames.length, 1, "the server's own value builds the frame");
+  assert.equal(accepted.frames[0].node.getAttribute("sandbox"), FRAME_IFRAME_SANDBOX);
 });
 
 /* -------------------------------------------------------------- the frame's report */
@@ -392,7 +416,7 @@ test("reports from another window, another nonce, another type or with impossibl
   const good = { t: "crow-mail-frame", nonce, height: 500, blocked: 1 };
 
   const ignore = (data, source = record.contentWindow) => {
-    for (const fn of r.windowListeners.message || []) fn({ source, data });
+    for (const fn of r.windowListeners.message || []) fn({ source, origin: "null", data });
     assert.equal(frame.style.height, height, "no height was written");
     assert.ok(banner.hasAttribute("hidden"), "no banner was shown");
   };
@@ -414,6 +438,30 @@ test("reports from another window, another nonce, another type or with impossibl
   assert.equal(banner.hasAttribute("hidden"), false);
 });
 
+test("a report from the right window and nonce but another origin is ignored", () => {
+  const r = boot(messagePage());
+  const record = r.frames[0];
+  const frame = record.node;
+  const section = r.$("[data-ml-msg][open]");
+  const banner = section.querySelector("[data-ml-img-banner]");
+  const report = { t: "crow-mail-frame", nonce: frame.getAttribute("data-ml-nonce"), height: 700, blocked: 2 };
+  const height = frame.style.height;
+
+  for (const origin of ["http://127.0.0.1", "https://mail.example.test", "http://127.0.0.1:443", "", "NULL"]) {
+    r.send(record, report, origin);
+    assert.equal(frame.style.height, height, `no height for origin ${JSON.stringify(origin)}`);
+    assert.ok(banner.hasAttribute("hidden"), `no banner for origin ${JSON.stringify(origin)}`);
+  }
+  // And an event that names no origin at all is not this frame's report either.
+  for (const fn of r.windowListeners.message || []) fn({ source: record.contentWindow, data: report });
+  assert.equal(frame.style.height, height);
+  assert.ok(banner.hasAttribute("hidden"));
+
+  r.send(record, report);
+  assert.equal(frame.style.height, "700px", "the opaque origin's report is accepted");
+  assert.equal(banner.hasAttribute("hidden"), false);
+});
+
 test("after Show images the old nonce is refused and the new frame's nonce is accepted", async () => {
   const r = boot(messagePage());
   const section = r.$("[data-ml-msg][open]");
@@ -429,9 +477,9 @@ test("after Show images the old nonce is refused and the new frame's nonce is ac
   assert.match(fresh.node.getAttribute("src"), /\?images=1#n=[A-Za-z0-9_-]{16,64}$/);
   const height = fresh.node.style.height;
 
-  for (const fn of r.windowListeners.message || []) fn({ source: old.contentWindow, data: { t: "crow-mail-frame", nonce: oldNonce, height: 700, blocked: 1 } });
+  r.send(old, { t: "crow-mail-frame", nonce: oldNonce, height: 700, blocked: 1 });
   assert.equal(fresh.node.style.height, height, "the old load's report is not this frame's");
-  for (const fn of r.windowListeners.message || []) fn({ source: fresh.contentWindow, data: { t: "crow-mail-frame", nonce: freshNonce, height: 700, blocked: 1 } });
+  r.send(fresh, { t: "crow-mail-frame", nonce: freshNonce, height: 700, blocked: 1 });
   assert.equal(fresh.node.style.height, "700px", "the new load's report is");
 });
 
@@ -508,6 +556,39 @@ test("a pull of 90px at the top refreshes; 40px, or a scrolled page, does not", 
   scrolled.pull(90);
   await scrolled.settle();
   assert.equal(scrolled.calls.length, 0, "a pull starts at the top only");
+});
+
+test("a pull and a click during one refresh send one round of syncs, from the first trigger", async () => {
+  const r = boot(inboxPage());
+  const button = r.$("[data-ml-refresh]");
+  r.click(button);
+  r.pull(90);
+  r.click(button);
+  await r.settle();
+  assert.equal(r.calls.length, 2, "one sync per account, not one round per trigger");
+  assert.deepEqual(r.visits, [r.location.href], "and one page load");
+});
+
+test("two pulls send one round, and the refresh control is disabled while the round runs", async () => {
+  const r = boot(inboxPage());
+  const button = r.$("[data-ml-refresh]");
+  r.pull(90);
+  r.pull(90);
+  assert.equal(button.hasAttribute("disabled"), true, "the control is disabled while the round runs");
+  await r.settle();
+  assert.equal(r.calls.length, 2, "one sync per account");
+});
+
+test("a failed round frees the refresh control, and the next attempt really posts again", async () => {
+  const r = boot(inboxPage(), {
+    fetchImpl: () => jsonResponse(502, { error: "network", message: "RAW" }),
+  });
+  r.click(r.$("[data-ml-refresh]"));
+  await r.settle();
+  assert.equal(r.$("[data-ml-refresh]").hasAttribute("disabled"), false, "the control is usable again");
+  r.click(r.$("[data-ml-refresh]"));
+  await r.settle();
+  assert.equal(r.calls.length, 4, "the retry is its own round");
 });
 
 test("Look further back posts one call per folder and reloads with flash=older:N", async () => {
@@ -676,18 +757,69 @@ test("Remove sender DELETEs the allowance and takes the row out of the list", as
   assert.equal(r.$("[data-ml-allow-list]").children.length, 0, "the sender's row is gone");
 });
 
-test("Remove account calls nothing before its confirm click, then DELETEs and reloads", async () => {
+test("Remove account reveals its sentence on the first click and still calls nothing", async () => {
   const r = boot(settingsPage());
   const button = r.$("[data-ml-remove-account-btn]");
+  const sentence = r.$("[data-ml-confirm-sentence]");
+  assert.ok(button, "the remove control");
+  assert.ok(sentence, "its sentence");
+  assert.equal(sentence.hasAttribute("hidden"), true, "the sentence is hidden until the first click");
   r.click(button);
   await r.settle();
   assert.deepEqual(r.calls, [], "one click is not the confirmation");
+  assert.equal(sentence.hasAttribute("hidden"), false, "the sentence is revealed");
+  assert.equal(button.getAttribute("data-ml-confirm"), "1", "and the button is armed");
+});
+
+test("two clicks less than 100 ms apart send nothing; a later click sends exactly one DELETE", async () => {
+  const r = boot(settingsPage());
+  const button = r.$("[data-ml-remove-account-btn]");
+  r.click(button);
+  r.click(button);
+  await r.settle();
+  assert.deepEqual(r.calls, [], "the second click came before the arm was ready");
+  assert.equal(button.getAttribute("data-ml-confirm"), "1", "the button is still armed");
+
+  assert.equal(r.fire(500), true, "the arm timer elapses");
   r.click(button);
   await r.settle();
   assert.equal(r.calls.length, 1);
   assert.equal(r.calls[0].method, "DELETE");
   assert.equal(r.calls[0].url, "/dashboard/mail/api/accounts/" + ACC.id);
   assert.equal(r.visits.length, 1, "the page reloads once the account is gone");
+
+  r.click(button);
+  await r.settle();
+  assert.equal(r.calls.length, 1, "one DELETE for the whole confirmation");
+});
+
+test("the confirmation disarms itself after 8 s and a later click only arms it again", async () => {
+  const r = boot(settingsPage());
+  const button = r.$("[data-ml-remove-account-btn]");
+  const sentence = r.$("[data-ml-confirm-sentence]");
+  r.click(button);
+  assert.equal(r.fire(8000), true, "the confirm window elapses");
+  assert.equal(sentence.hasAttribute("hidden"), true, "the sentence is hidden again");
+  assert.equal(button.hasAttribute("data-ml-confirm"), false, "the button is disarmed");
+  r.click(button);
+  await r.settle();
+  assert.deepEqual(r.calls, [], "a lapsed confirmation sends nothing");
+  assert.equal(button.getAttribute("data-ml-confirm"), "1", "the click arms a new one");
+});
+
+test("leaving the remove block disarms it", async () => {
+  const r = boot(settingsPage());
+  const button = r.$("[data-ml-remove-account-btn]");
+  const sentence = r.$("[data-ml-confirm-sentence]");
+  r.click(button);
+  assert.equal(sentence.hasAttribute("hidden"), false);
+  r.$("[data-ml-remove-account]").dispatchEvent(r.event("focusout", { bubbles: true }));
+  assert.equal(sentence.hasAttribute("hidden"), true, "the sentence is hidden on leaving");
+  assert.equal(button.hasAttribute("data-ml-confirm"), false, "and the button is disarmed");
+  r.fire(500);
+  r.click(button);
+  await r.settle();
+  assert.deepEqual(r.calls, [], "a click after leaving only arms again");
 });
 
 test("Sync now posts that one account's sync", async () => {

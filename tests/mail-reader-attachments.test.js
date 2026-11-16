@@ -52,6 +52,9 @@ const OWNER = "owner-local-password-session";
 const SSO = "peer-sso-session";
 const CSRF = "csrf-token-value";
 
+/** The operator-approved copy both 413 `too_large` answers carry, pinned here as the approved text. */
+const ATTACHMENT_TOO_LARGE_TEXT = "This attachment is over about 18 MB, too large to download here.";
+
 const MESSAGES = `${MAIL_API_PREFIX}/messages`;
 const attachmentPath = (id, index) => `${MESSAGES}/${id}/attachments/${index}`;
 
@@ -511,7 +514,7 @@ test("a message the adapter reports with an empty Buffer is 413 too_large, not 4
   const r = await get(attachmentPath(id, 0));
   assert.equal(r.status, 413, r.text);
   assert.equal(r.json.error, "too_large");
-  assert.equal(r.json.message, MAIL_ERROR_TEXT.TOO_LARGE);
+  assert.equal(r.json.message, ATTACHMENT_TOO_LARGE_TEXT);
 });
 
 test("an attachment over MAX_ATTACHMENT_BYTES is 413", async () => {
@@ -566,6 +569,54 @@ test("an attachment over MAX_ATTACHMENT_BYTES is 413", async () => {
   const r = await get(attachmentPath(written.id, 0));
   assert.equal(r.status, 413, r.text.slice(0, 200));
   assert.equal(r.json.error, "too_large");
+  assert.equal(r.json.message, ATTACHMENT_TOO_LARGE_TEXT);
+});
+
+test("the frame, attachment and password routes log no query string and no password", async () => {
+  const s = await setup();
+  const { account, inbox } = await seedAccount(s);
+  const { id } = await storeMessage(s, account, inbox, filesMessage());
+  const password = "seeded-app-password-not-for-a-log";
+
+  // The password is planted where a leak would come from: an adapter failure that quotes it, the way a
+  // driver's own text can. The download must answer the fixed code sentence and log its code only.
+  s.adapterFor(account.id).get = async () => {
+    throw new Error(`cannot open the message with ${password} (asked with images=1)`);
+  };
+  // A claimed account is refused before the probe, so the password route reads its body here and
+  // dials nothing.
+  await updateAccount(s.db, account.id, { status: "claimed_elsewhere" });
+
+  const lines = [];
+  const original = { log: console.log, warn: console.warn, error: console.error };
+  const record = (...args) => { lines.push(args.map((arg) => String(arg)).join(" ")); };
+  console.log = record;
+  console.warn = record;
+  console.error = record;
+  try {
+    const frame = await get(`${MESSAGES}/${id}/frame?images=1`);
+    assert.equal(frame.status, 200, frame.text);
+
+    const download = await get(attachmentPath(id, 0));
+    assert.equal(download.status, 502, download.text);
+    assert.equal(download.text.includes(password), false);
+
+    const refused = await call("PUT", `${MAIL_API_PREFIX}/accounts/${account.id}/password`, {
+      body: { password },
+    });
+    assert.equal(refused.status, 409, refused.text);
+    assert.equal(refused.text.includes(password), false);
+  } finally {
+    console.log = original.log;
+    console.warn = original.warn;
+    console.error = original.error;
+  }
+
+  assert.ok(lines.some((line) => line.includes("PROTOCOL")), "the failed fetch logs its own code");
+  for (const line of lines) {
+    assert.equal(line.includes("images=1"), false, `no log line carries the query string: ${line}`);
+    assert.equal(line.includes(password), false, `no log line carries the password: ${line}`);
+  }
 });
 
 test("a uid the server no longer holds is 404", async () => {

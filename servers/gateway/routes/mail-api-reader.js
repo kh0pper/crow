@@ -20,8 +20,10 @@
  * before serving a byte of it — a UIDVALIDITY reset can leave a different message at the same UID and
  * `get` takes no UIDVALIDITY argument, so the content is the check. A mismatch is the fixed
  * `changed_on_server` answer and a full sync; an empty Buffer is the adapter's way of saying the
- * message is over plan 1's raw-size limit. Every failure is one of plan 1's codes and fixed
- * sentences: a server's text, a filename's markup and a sender's type never reach a header here.
+ * message is over plan 1's raw-size limit, and that answer and the `MAX_ATTACHMENT_BYTES` check share
+ * one approved sentence naming the limit a person actually meets. Every failure is one of plan 1's
+ * codes and fixed sentences: a server's text, a filename's markup and a sender's type never reach a
+ * header here.
  *
  * The password route is the account page's one write: the new app password joins the masking set
  * first (as the connect route does), an account another instance claimed is refused before anything
@@ -58,6 +60,14 @@ const ADDRESS_MAX = 254;
 
 /** The most a password may be: the same ceiling plan 1's connect route reads. */
 const PASSWORD_MAX = 1024;
+
+/**
+ * The sentence both `too_large` answers carry (operator-approved copy). The limit a person meets here
+ * is plan 1's raw-size rule, not `MAX_ATTACHMENT_BYTES`: a 20 MB part is about 27 MB once
+ * base64-encoded, so the raw cap refuses it first, and roughly 18 MB of attachment is what fits under
+ * it.
+ */
+const ATTACHMENT_TOO_LARGE_TEXT = "This attachment is over about 18 MB, too large to download here.";
 
 const BLANK_OR_CONTROL_RE = /[\s\u0000-\u001f\u007f<>]/;
 
@@ -211,7 +221,7 @@ export function registerReaderRoutes(router, ctx) {
       if (!raw) return sendError(res, 404, "not_found");
       // The adapter answers an empty Buffer for a message over its own raw-size limit, and reports no
       // bytes at all for a UID it did not deliver: an empty one here is that limit, not an empty file.
-      if (raw.length === 0) return sendError(res, 413, "too_large", MAIL_ERROR_TEXT.TOO_LARGE);
+      if (raw.length === 0) return sendError(res, 413, "too_large", ATTACHMENT_TOO_LARGE_TEXT);
 
       // One parse answers both questions: the identity check below reads `parsed`, and the part the
       // download serves is read out of the same answer by index, so the two can never disagree.
@@ -233,7 +243,7 @@ export function registerReaderRoutes(router, ctx) {
       const attachment = extractAttachmentFromParsed(full, Number(index));
       if (!attachment) return sendError(res, 404, "not_found");
       if (attachment.size > MAX_ATTACHMENT_BYTES) {
-        return sendError(res, 413, "too_large", MAIL_ERROR_TEXT.TOO_LARGE);
+        return sendError(res, 413, "too_large", ATTACHMENT_TOO_LARGE_TEXT);
       }
 
       const name = safeAttachmentName(attachment.filename);
