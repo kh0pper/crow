@@ -37,7 +37,7 @@
  */
 import { normalizeStoredBashPolicy, resolveClassifierEndpoint } from "../../servers/shared/bot-bash-policy.js";
 import { readBotClassifierSync } from "./bot-classifier.mjs";
-import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync, existsSync, readdirSync, realpathSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync, lstatSync, existsSync, readdirSync, realpathSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { writeBotMcp, removeStaleBotMcp } from "./mcp_writer.mjs";
@@ -233,7 +233,10 @@ export function projectShowsCards(projectId, def) {
  * <workspace_dir>/bots/<botId> (sessions/ and pi's transcripts, outputs/, .pi/,
  * and in file mode a .mcp.json carrying signed actor headers), so a share of
  * the whole workspace would expose them and, at `read_write`, let the bot
- * rewrite another bot's sessions.
+ * rewrite another bot's sessions. `<workspace_dir>/bots` — or any bot home
+ * under it — being a symlink refuses the whole share's roots (fail closed, one
+ * warning), because that bot's state then lives somewhere else in the tree
+ * this share is granting entry by entry.
  *
  * ALLOWLIST, not a denylist: a share's workspace_dir is a candidate only when,
  * after realpathSync, it lies STRICTLY under realpathSync(projectsRoot) — the
@@ -354,9 +357,16 @@ function dangerousShareRoot(dir, crowHome, projectsRoot) {
  * whose realpath leaves the projects area is skipped; a symlink is followed
  * only when it resolves strictly inside the workspace, to neither the
  * workspace itself nor its `bots` subtree, and a granted entry becomes the
- * root as its REALPATH (never the link's own path). The bots subtree is held
- * out both by name and by realpath, so `<workspace>/bots` being a symlink to a
- * sibling entry does not expose that sibling.
+ * root as its REALPATH (never the link's own path).
+ *
+ * The bots subtree is held out by name, by its realpath, AND by the realpath of
+ * every bot home under it: `<workspace>/bots` may be a symlink to a sibling
+ * entry, and `<workspace>/bots/<id>` may be one too, in which case that bot's
+ * state lives at the link's target — possibly an ordinary top-level entry this
+ * share would otherwise grant. Any link anywhere in that tree (in `bots`
+ * itself, or in one of its children) refuses the WHOLE share's roots with one
+ * warning: the tree the entries were listed from is not the tree that holds
+ * the bot homes, so nothing it contains can be held out with confidence.
  * More entries than SHARE_ROOT_ENTRY_CAP grants nothing for the share.
  * @param {string} dir       the workspace_dir as the share row names it
  * @param {{realDir?: string|null, projectsRoot: string, log?: (m: string) => void}} opts
@@ -377,14 +387,29 @@ function shareEntryRoots(dir, { realDir = null, projectsRoot, log = () => {} } =
   }
   const under = (p, root) => p === root || p.startsWith(root + "/");
   const botsDir = realDir ? join(realDir, "bots") : null;
-  // `<workspace>/bots` may itself be a symlink to a sibling entry, and the bots
-  // home is then that entry's realpath rather than a path under `<workspace>/bots`.
-  // Both spellings are held out below.
   let botsReal = null;
+  const botHomes = [];
   if (botsDir) {
+    let kids = null;
+    try {
+      // `<workspace>/bots` itself a link: fail closed (one line, nothing granted).
+      if (lstatSync(botsDir).isSymbolicLink()) {
+        log("share workspace not granted (<workspace>/bots is a symlink): " + dir);
+        return [];
+      }
+      kids = readdirSync(botsDir, { withFileTypes: true });
+    } catch { kids = null; } // no bots dir here, or an unreadable one: no bot homes to hold out
+    for (const kid of kids || []) {
+      // Any bot home that is a link hides its state at a path this share may be granting.
+      if (kid.isSymbolicLink()) {
+        log("share workspace not granted (a bot home under <workspace>/bots is a symlink): " + dir);
+        return [];
+      }
+      try { botHomes.push(normalizeReadPath(realpathSync(join(botsDir, kid.name)))); } catch { /* a broken child holds nothing out */ }
+    }
     try { botsReal = normalizeReadPath(realpathSync(botsDir)); } catch { botsReal = null; }
   }
-  const botsPaths = [botsDir, botsReal].filter(Boolean);
+  const botsPaths = [botsDir, botsReal, ...botHomes].filter(Boolean);
   const roots = [];
   for (const entry of entries) {
     // `<workspace>/bots` holds every bot homed at this project.
@@ -402,8 +427,8 @@ function shareEntryRoots(dir, { realDir = null, projectsRoot, log = () => {} } =
       if (real === realDir) continue;
     }
     // An entry at, above or inside the bots home is that subtree by another name, whichever
-    // spelling of the bots home it reaches: the entry named `bots` (skipped above), the sibling
-    // `<workspace>/bots` links to, or anything under either.
+    // spelling of the bots home it reaches: the entry named `bots` (skipped above), any bot home
+    // under it, or anything under either. A link that made this necessary already refused the share.
     if (botsPaths.some((bots) => under(bots, real) || under(real, bots))) continue;
     // The root is the entry's REALPATH: what pi's file tools are held to, never a link's own path.
     const root = real;

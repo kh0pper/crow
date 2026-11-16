@@ -12,7 +12,10 @@
  *     that project keeps its engine state (sessions/, outputs/, .pi/,
  *     .mcp.json with signed actor headers) under <workspace_dir>/bots/<id>, so
  *     a shared root there would expose — and let a read_write bot rewrite —
- *     other bots' sessions.
+ *     other bots' sessions. A symlink anywhere in that tree (`bots` itself, or
+ *     a bot home under it) refuses the WHOLE share's roots with one warning:
+ *     the state then lives at the link's target, which may be an ordinary
+ *     top-level entry the share would otherwise grant.
  *
  * A suspended share (either side has an outside member), a revoked one, one
  * whose project is archived/tombstoned, one with no workspace_dir, one whose
@@ -397,10 +400,9 @@ test("shareWorkspaceRoots: a link to the workspace itself, or into its bots subt
   assert.equal(r.read.includes(join(d, "docs-alias")), false, "the link's own path is not the root");
 });
 
-test("shareWorkspaceRoots: a `bots` symlink to a sibling entry keeps that sibling (and bots) out of reach", () => {
-  // `<ws>/bots` itself a link to a sibling entry: the bots home really lives at
-  // `<ws>/.state/bots/<id>`, so `.state` — an ordinary directory entry — is the
-  // bots subtree under another name and must not be granted.
+test("shareWorkspaceRoots: a `bots` symlink refuses the whole share's roots, with one warning", () => {
+  // `<ws>/bots` itself a link: the bots home is not the directory the share's own entries were
+  // listed from, so there is no tree this share can hold out with confidence. Fail closed.
   const d = ws("unit-bots-link");
   mkdirSync(join(d, ".state", "bots", "other", "sessions"), { recursive: true });
   writeFileSync(join(d, ".state", "bots", "other", "sessions", "x.jsonl"), "{}\n");
@@ -409,35 +411,70 @@ test("shareWorkspaceRoots: a `bots` symlink to a sibling entry keeps that siblin
   mkdirSync(join(d, "docs"), { recursive: true });
   writeFileSync(join(d, "docs", "a.md"), "a\n");
   writeFileSync(join(d, "top.txt"), "t\n");
-  const workspaceReal = realpathSync(d);
-  const stateReal = realpathSync(join(d, ".state"));
-  const botsReal = realpathSync(join(d, "bots"));
-  const otherSession = join(stateReal, "bots", "other", "sessions", "x.jsonl");
+  const otherSession = join(realpathSync(join(d, ".state")), "bots", "other", "sessions", "x.jsonl");
 
+  const said = [];
   const r = shareWorkspaceRoots([{ project_id: 13, level: "read_write", workspace_dir: d, suspended: false }],
-    { projectsRoot: PROJECTS_ROOT });
+    { projectsRoot: PROJECTS_ROOT, log: (m) => said.push(m) });
 
-  assert.equal(botsReal, stateReal, "the fixture's bots link resolves to the sibling entry");
-  for (const name of [".state", "bots", "state-alias"]) {
-    assert.equal(coversPath(r.read, join(d, name)), false, name + " is not a read root");
-    assert.equal(coversPath(r.write, join(d, name)), false, name + " is not a write root");
-  }
-  assert.equal(r.read.includes(stateReal), false, "the bots home's realpath is never granted");
-  assert.equal(r.write.includes(stateReal), false);
-  assert.equal(r.read.includes(workspaceReal), false, "nor is the workspace itself");
+  assert.deepEqual(r, { read: [], write: [] }, "a symlinked bots tree grants nothing for the workspace");
+  assert.equal(said.length, 1, "exactly one warning line: " + JSON.stringify(said));
   assert.equal(coversPath(r.read, otherSession), false, "another bot's transcript stays out of reach");
-  assert.equal(coversPath(r.write, otherSession), false);
+  assert.equal(r.read.includes(realpathSync(d)), false, "nor is the workspace itself ever a root");
+});
 
-  // The ordinary entries are still granted, as their own realpaths.
+test("shareWorkspaceRoots: a bot home under `<ws>/bots` that is a symlink refuses the whole share, with one warning", () => {
+  // `<ws>/bots/<id>` links to `<ws>/elsewhere`: `elsewhere` is an ordinary top-level entry, so
+  // granting it as a root would hand the bot the state the linked bot home keeps there.
+  const d = ws("unit-bot-home-link");
+  mkdirSync(join(d, "docs"), { recursive: true });
+  writeFileSync(join(d, "docs", "a.md"), "a\n");
+  writeFileSync(join(d, "top.txt"), "t\n");
+  mkdirSync(join(d, "elsewhere", "sessions"), { recursive: true });
+  writeFileSync(join(d, "elsewhere", "sessions", "x.jsonl"), "{}\n");
+  mkdirSync(join(d, "bots", "plain"), { recursive: true });
+  symlinkSync(join(d, "elsewhere"), join(d, "bots", "linked"));
+
+  const clean = shareFixture("clean-alongside");
+  const said = [];
+  const r = shareWorkspaceRoots([
+    { project_id: 15, level: "read_write", workspace_dir: d, suspended: false },
+    { project_id: 16, level: "read", workspace_dir: clean, suspended: false },
+  ], { projectsRoot: PROJECTS_ROOT, log: (m) => said.push(m) });
+
+  assert.equal(coversPath(r.read, join(d, "elsewhere")), false, "the link's target is not a read root");
+  assert.equal(coversPath(r.write, join(d, "elsewhere")), false);
+  for (const name of ["docs", "top.txt"]) {
+    assert.equal(coversPath(r.read, join(d, name)), false, name + " is not granted either: the share fails closed");
+  }
+  assert.deepEqual(sortRoots(r), { read: sorted(fixtureRoots(clean)), write: [] },
+    "the other share in the same call still grants its own entries");
+  assert.equal(said.length, 1, "exactly one warning line: " + JSON.stringify(said));
+  assert.match(said[0], /symlink/);
+});
+
+test("shareWorkspaceRoots: a normal bots tree (real directories) grants the workspace's other entries", () => {
+  const d = shareFixture("normal-bots");
+  const said = [];
+  const r = shareWorkspaceRoots([{ project_id: 14, level: "read_write", workspace_dir: d, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT, log: (m) => said.push(m) });
   assert.deepEqual(sortRoots(r), {
-    read: sorted([realpathSync(join(d, "docs")), join(d, "top.txt")]),
-    write: sorted([realpathSync(join(d, "docs")), join(d, "top.txt")]),
+    read: sorted(fixtureRoots(d)),
+    write: sorted(fixtureRoots(d)),
   });
+  assert.deepEqual(said, [], "a normal bots tree says nothing");
+});
 
-  // ...and a normal layout (bots a real directory) is unaffected.
-  const plain = shareFixture("bots-plain");
-  assert.deepEqual(sortRoots(shareWorkspaceRoots([{ project_id: 14, level: "read", workspace_dir: plain, suspended: false }],
-    { projectsRoot: PROJECTS_ROOT })), { read: sorted(fixtureRoots(plain)), write: [] });
+test("shareWorkspaceRoots: a workspace with no bots directory grants its entries", () => {
+  const d = ws("unit-no-bots-dir");
+  mkdirSync(join(d, "docs"), { recursive: true });
+  writeFileSync(join(d, "docs", "a.md"), "a\n");
+  writeFileSync(join(d, "top.txt"), "t\n");
+  const said = [];
+  const r = shareWorkspaceRoots([{ project_id: 17, level: "read", workspace_dir: d, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT, log: (m) => said.push(m) });
+  assert.deepEqual(sortRoots(r), { read: sorted(fixtureRoots(d)), write: [] });
+  assert.deepEqual(said, []);
 });
 
 test("shareWorkspaceRoots: more top-level entries than the cap grants nothing for that share, with one warning", () => {
