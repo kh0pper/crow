@@ -13,6 +13,13 @@
  *     must land UNDER the allowlist root (default: the user's home dir) and end in .md
  *     and be a regular file — otherwise 404. This defeats path traversal and
  *     symlink-escape.
+ *   - A file is shown only if it is under FILEVIEW_MAX_BYTES (8 MiB, stat'd
+ *     before the read): a whole book buffered into a page is not something this
+ *     view can show, and one document is an OOM in the gateway process. Over it,
+ *     a short notice naming the file's size. UNDER it the file is read and
+ *     rendered; renderMarkdown degrades a long document by itself (the first
+ *     128 KB as markdown, the rest as plain text — see OWNER_MD_MAX_INPUT), so
+ *     nothing between the renderer's cap and this one is refused.
  *   - renderMarkdown() (servers/blog/renderer.js) sanitizes the HTML.
  *
  * Override the allowlist root with CROW_FILEVIEW_ROOT (used by tests).
@@ -24,6 +31,15 @@ import { homedir } from "node:os";
 import { renderMarkdown } from "../../blog/renderer.js";
 import { escapeHtml } from "../dashboard/shared/components.js";
 import { playerShellHtml } from "../dashboard/shared/player-shell.js";
+
+/**
+ * The largest file this page will read, in bytes (8 MiB). A hard cap, checked
+ * with stat() before the read: past it the page shows the file's size and stops.
+ * Under it, renderMarkdown's own long-document split does the degrading, so there
+ * is no second, lower refusal here — a 600 KB .md is a document, and hiding its
+ * content helped nobody (the 1 MiB notice this replaced did exactly that).
+ */
+export const FILEVIEW_MAX_BYTES = 8 * 1024 * 1024;
 
 const DEFAULT_ROOT = process.env.CROW_FILEVIEW_ROOT || homedir();
 if (process.env.CROW_FILEVIEW_ROOT && !DEFAULT_ROOT.startsWith("/home/")) {
@@ -110,6 +126,20 @@ export default function fileviewRouter(dashboardAuth) {
     }
     let md;
     try {
+      // Size FIRST (stat, no read): a file over FILEVIEW_MAX_BYTES is not read
+      // at all — buffering it into the gateway process is the cost this cap
+      // exists for. Under the cap the file is read and rendered; a long document
+      // needs no decision here, renderMarkdown renders its head as markdown and
+      // shows the rest as plain text (see OWNER_MD_MAX_INPUT).
+      const size = statSync(safe).size;
+      if (size > FILEVIEW_MAX_BYTES) {
+        const mb = (size / (1024 * 1024)).toFixed(1);
+        return res.status(200).type("html").send(page(basename(safe),
+          `<p class="crumb">${escapeHtml(safe)}</p>` +
+          `<p lang="en">This file is too large to view here: ${mb} MB (the limit is ` +
+          `${(FILEVIEW_MAX_BYTES / (1024 * 1024)).toFixed(0)} MB). Open it in an editor instead.</p>`,
+          lang));
+      }
       md = readFileSync(safe, "utf8");
     } catch {
       return res.status(404).type("html").send(page("Not found", `<p lang="en">File could not be read.</p>`, lang));

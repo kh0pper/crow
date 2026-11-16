@@ -31,6 +31,29 @@ marked.setOptions({ gfm: true, breaks: true });
  * Links keep Turbo Drive (they are the owner's own navigation) but never get
  * prefetched: Turbo 8 fires a same-origin GET on hover, with the viewer's
  * cookies.
+ *
+ * Like the bot path, container nesting is bounded INSIDE marked's block lexer
+ * (boundedLexer + MD_MAX_NEST, see "THE BLOCK-NESTING CLIFF" below), the input
+ * is capped at OWNER_MD_MAX_INPUT, and a parse that still throws answers its
+ * escaped text instead of a RangeError. All three matter to the OWNER path: a
+ * bot can write a blog post, a memory, a KB article, a workspace .md or a
+ * meta-glasses note, and this function runs synchronously in a route —
+ * uncaught, the stack overflow a deeply nested document used to cause was a 500
+ * on the page (measured: 1356 ms and a RangeError for 64 KB of `1) `), and an
+ * unbounded 4 MB document is an OOM in the gateway process.
+ *
+ * THE LONG-DOCUMENT SPLIT. marked's block lexer is still quadratic on a few
+ * shapes the depth and byte guard below do not cover (`"    x\n>     y\n"`
+ * repeated cost 11 s at 256 KB and ~200 s at 1 MiB), and the owner path is
+ * reachable from public /blog, the file viewer and federated memories. So the
+ * cap is 128 KB, and a document over it is NOT refused: a head of at most
+ * OWNER_MD_MAX_INPUT characters is rendered as markdown exactly as before and
+ * the WHOLE remainder follows as escaped plain text under a short notice (see
+ * ownerMarkdownCut for where the cut lands, and tailHtml for the tail). Nothing
+ * is dropped — the head's source plus the tail's text is the entire document.
+ * Real content is far below the cap (every stored blog post, KB article and
+ * memory is < 60 KB); the file viewer's larger documents are what the tail is
+ * for.
  * @param {string} markdown
  * @param {{ storageOrigin?: string|null }} [options] `storageOrigin` overrides
  *   the module-wide storage origin for this call only. The gateway sets that
@@ -44,8 +67,210 @@ export function renderMarkdown(markdown, options) {
   const storageOrigin = Object.prototype.hasOwnProperty.call(opts, "storageOrigin")
     ? normalizeOrigin(opts.storageOrigin)
     : rendererStorageOrigin;
-  return withImageContext({ policy: "owner", storageOrigin }, () =>
-    sanitizeRendered(ownerMarked.parse(String(markdown)), { imagePolicy: "owner", storageOrigin }));
+  // Normalise line endings FIRST, exactly as marked's Lexer#lex does. marked
+  // treats a bare `\r` as a line break, so "x\r" + "1) " x N is N container
+  // lines to marked — and must be to the cap below too, not one long line.
+  const src = String(markdown).replace(/\r\n?/g, "\n");
+  return withImageContext({ policy: "owner", storageOrigin }, () => {
+    if (src.length <= OWNER_MD_MAX_INPUT) {
+      return sanitizeRendered(renderOwnerHead(src), { imagePolicy: "owner", storageOrigin });
+    }
+    // Over the cap: the head is the same guarded render, the tail is the plain
+    // text this page cannot afford to lex. Both halves meet exactly at `cut`.
+    const cut = ownerMarkdownCut(src);
+    return sanitizeRendered(renderOwnerHead(src.slice(0, cut)), { imagePolicy: "owner", storageOrigin })
+      + tailHtml(src.slice(cut));
+  });
+}
+
+/**
+ * The owner path's markdown half: one guarded parse, or — if the parse still
+ * throws — the document as escaped text (see escapedTextHtml). Never more than
+ * OWNER_MD_MAX_INPUT characters is handed to it.
+ * @param {string} src
+ * @returns {string} unsanitized HTML
+ */
+function renderOwnerHead(src) {
+  try {
+    // Exactly what ownerMarked.parse(src) does — Lexer#lex (block phase, then
+    // the inline phase) and Parser.parse — with the one difference that the
+    // Lexer is depth-bounded and its re-lex path is byte-budgeted. ownerMarked
+    // carries no hooks, extensions or walkTokens; if one is ever added to it,
+    // it has to be plumbed here too (parse's opt.hooks branch is the code that
+    // would otherwise run it).
+    return ownerMarked.parser(boundedLexer(ownerMarked.defaults, src.length).lex(src));
+  } catch {
+    // Fail safe, never a 500: the document as escaped text (see
+    // escapedTextHtml — it drops what the author hid, an HTML comment). The
+    // caller's sanitizer still runs, so the fallback cannot carry markup either.
+    return escapedTextHtml(src);
+  }
+}
+
+/**
+ * The owner path's largest markdown-parsed span, in characters (128 KB).
+ *
+ * It used to be 1 MiB, which was safe only against memory: marked's block lexer
+ * is QUADRATIC on some cheap-looking shapes (`"    x\n>     y\n"` repeated:
+ * 11 s at 256 KB, ~200 s at 1 MiB) and this function runs synchronously in a
+ * route reachable from public /blog, the file viewer and federated memories.
+ * 128 KB bounds that to ~2.8 s on that worst measured shape, and every stored blog
+ * post, KB article and memory is under 60 KB, so nothing real is cut. A document
+ * over it is not refused — see renderMarkdown: the head is rendered, the rest
+ * follows as plain text. Exported so the tests share the number.
+ */
+export const OWNER_MD_MAX_INPUT = 128 * 1024;
+
+/** The notice that introduces the plain-text tail of a long document. */
+const TAIL_NOTICE = '<p class="md-tail-notice">Long document: the rest is shown as plain text.</p>';
+
+/**
+ * The plain-text half of a long document: a short notice, then the WHOLE tail in
+ * one <pre>, escaped.
+ *
+ * Appended AFTER sanitizeRendered, which is why it is built here rather than
+ * passed through it: nothing in it comes from the author except the text, and
+ * that text is escaped by escapeText, so no markup — and no attribute — can
+ * survive. Deliberately NOT stripped of HTML comments the way escapedTextHtml
+ * is: this is plain text on screen, so what the author wrote is what the reader
+ * sees, exactly as in an editor.
+ * @param {string} tail
+ * @returns {string}
+ */
+function tailHtml(tail) {
+  return TAIL_NOTICE + '<pre class="md-tail">' + escapeText(tail) + "</pre>";
+}
+
+/**
+ * Where renderMarkdown splits a document longer than OWNER_MD_MAX_INPUT: the end
+ * of the last blank line at or before the cap that is NOT inside a fenced code
+ * block, else the last newline before the cap, else the cap itself.
+ *
+ * "\n\n" is a block boundary to marked, so the head usually parses cleanly
+ * instead of starting (or ending) mid-paragraph, and a fence is skipped as a cut
+ * point so a code block is never split in half by the notice. One linear pass
+ * (`indexOf` per line, a fence state machine over 4 characters of each line's
+ * start), which is what keeps the split cheap on a 1 MB document.
+ *
+ * A fence is opened by ``` or ~~~ with at most three spaces of indentation
+ * (four would be indented code) and closed by a line of the same character, at
+ * least as long, with nothing but spaces after it — CommonMark's rule, which is
+ * what marked applies. A BACKTICK opener's info string may not itself contain a
+ * backtick, so "```inline``` is how you write it" is a paragraph with inline
+ * code, not a fence: read as one it never closes, every later blank line is
+ * skipped and the cut collapses to a few characters (the head of a 200 KB
+ * document became 7).
+ *
+ * That state machine is an approximation of marked, so a cut is never allowed to
+ * cost the head more than half the cap: when the last usable blank line sits
+ * below that (the signature of a misjudged fence) the cut falls on the last
+ * LINE BREAK before the cap instead.
+ *
+ * The cut is never past the cap — renderOwnerHead's promise — and never inside a
+ * UTF-16 surrogate pair: a blank line only counts when it ENDS at or before the
+ * cap (a run of 7 MB of spaces that starts just under the cap is not a cut
+ * point), and the final index steps back one unit when it would split a pair (a
+ * single-line document of emoji has no line break at all, and half a pair is
+ * not a character).
+ * @param {string} src line-ending-normalised document
+ * @param {number} [cap]
+ * @returns {number} the cut index: head is `src.slice(0, cut)`, tail `src.slice(cut)`
+ */
+export function ownerMarkdownCut(src, cap = OWNER_MD_MAX_INPUT) {
+  const length = String(src).length;
+  const limit = Math.min(cap, length);
+  let lastBlank = -1;
+  /** The open fence: its character and its run length, or null. */
+  let fence = null;
+  for (let start = 0; start < limit;) {
+    const nl = src.indexOf("\n", start);
+    const end = nl === -1 ? length : nl;
+    const line = src.slice(start, end);
+    if (fence) {
+      // A closing fence: same character, at least as long, then spaces only.
+      const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+      if (close && close[1][0] === fence.char && close[1].length >= fence.length) fence = null;
+    } else if (/^[ \t]*$/.test(line)) {
+      // A blank line: the cut is its end, so the head keeps the "\n\n" that
+      // tells marked the block is over. Only one that ENDS at or before the cap
+      // is a cut point — a whitespace line that starts just under the cap and
+      // runs on for megabytes ends megabytes past it, and the head would then be
+      // far over OWNER_MD_MAX_INPUT.
+      if (end + 1 <= limit) lastBlank = end + 1;
+    } else {
+      // A backtick fence's info string may not contain a backtick (CommonMark),
+      // so "```inline```" opens nothing. The lookahead is what keeps a
+      // misjudged opener from swallowing the document (see above).
+      const open = /^ {0,3}(`{3,}(?=[^`\n]*$)|~{3,})/.exec(line);
+      if (open) fence = { char: open[1][0], length: open[1].length };
+    }
+    if (nl === -1) break;
+    start = end + 1;
+  }
+  // The last line break before the cap; a blank line counted above always has
+  // one at lastBlank - 1, so this is never before the blank line's newline.
+  const lineBreak = src.lastIndexOf("\n", limit - 1);
+  let cut;
+  if (lastBlank > 0 && (lastBlank * 2 >= limit || lineBreak + 1 <= lastBlank)) {
+    cut = lastBlank;
+  } else if (lineBreak >= 0) {
+    // No blank line before the cap at all, or only one in the first half of it
+    // (a fence that was not a fence): cut on a plain line break, so the head is
+    // never collapsed to a few characters.
+    cut = lineBreak + 1;
+  } else {
+    cut = lastBlank > 0 ? lastBlank : limit;
+  }
+  // The cap is a hard bound (renderOwnerHead hands marked nothing longer), and a
+  // cut inside a UTF-16 surrogate pair would cut one character in half: the head
+  // would end with a lone high surrogate and the tail begin with its low half
+  // (each renders as U+FFFD, and the split is no longer the characters the
+  // author wrote). Step back one unit instead, so the halves stay at most one
+  // character shorter and still meet on a character boundary.
+  const safe = Math.min(cut, limit);
+  return safe > 0 && isHighSurrogate(src.charCodeAt(safe - 1)) ? safe - 1 : safe;
+}
+
+/** True for the first half of a UTF-16 surrogate pair (U+D800–U+DBFF). */
+function isHighSurrogate(code) {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+/**
+ * Drop the author's HTML comments before text is escaped for display: the
+ * fallback SHOWS what it is given, so an escaped `<!-- note -->` would put a
+ * hidden remark on screen. One linear scan (`indexOf` → `indexOf`, resuming
+ * past each match — no regex backtracking on input full of `<!--`), non-greedy
+ * like the comment rule, and an unclosed `<!--` is left alone.
+ * @param {string} s
+ * @returns {string}
+ */
+function stripHtmlComments(s) {
+  if (!s.includes("<!--")) return s;
+  const pieces = [];
+  let i = 0;
+  for (;;) {
+    const open = s.indexOf("<!--", i);
+    if (open === -1) break;
+    const close = s.indexOf("-->", open + 4);
+    if (close === -1) break;
+    pieces.push(s.slice(i, open));
+    i = close + 3;
+  }
+  pieces.push(s.slice(i));
+  return pieces.join("");
+}
+
+/**
+ * The owner path's fail-safe rendering: the document as escaped text, one <br>
+ * per line (what `breaks: true` draws for a plain paragraph), with the author's
+ * HTML comments removed first. Everything else — markdown syntax, raw HTML, a
+ * link definition's URL — stays visible as the text it literally is.
+ * @param {string} src
+ * @returns {string}
+ */
+function escapedTextHtml(src) {
+  return "<p>" + escapeText(stripHtmlComments(src)).replace(/\n/g, "<br>") + "</p>";
 }
 
 // ---------------------------------------------------------------------------
@@ -617,6 +842,275 @@ function isCheckboxInput(attribs) {
 }
 
 // ---------------------------------------------------------------------------
+// THE BLOCK-NESTING CLIFF — a depth counter inside marked's block lexer
+//
+// marked's BLOCK lexer recurses once per container nesting level, and one line
+// can open tens of thousands of levels by itself: `>>>>…`, `- - - …`,
+// `1) 1) 1) …`, and the mixed `- > 1. - > 1. …` are all nested containers, so
+// 64 KB of a two-character run is ~32,000 levels and every level is paid with
+// the rest of the input in hand. Measured on this tree (marked 17.0.4 + the math
+// extension below; CPU ms for one 64 KB - 1 line, with NOTHING guarding it):
+//
+//   unit (one 64 KB - 1 line)   renderBotMarkdown   renderMarkdown (owner)
+//   "1) "                        964†               1356†
+//   "1. "                       1332†               1325†
+//   "- 1) "                      814†               1374†
+//   "> 1) "                      722†                779†
+//   ">"                          158†                164†
+//   "+ "                        1294†               1321†
+//   "- " / "* "                    2                0
+//   "- > 1. "                    994†                975†
+//   indentation staircase,
+//   each line 2 columns deeper     40                 30
+//   indentation only, no markers    2                  2
+//
+//   † ended in "RangeError: Maximum call stack size exceeded". The bot path's
+//     try/catch already turned that into "" — the callers' plain-text path — but
+//     only AFTER 0.7-1.4 s of blocked event loop; the owner path had no catch at
+//     all, so a RangeError escaped renderMarkdown into a route. "- " and "* "
+//     never nested in the first place: a `- - -` / `* * *` run is a thematic
+//     break under marked's hr rule (hence the 2 ms), which is why only "+ " of
+//     the three bullet characters was a cliff.
+//
+// The bound is enforced WHERE THE RECURSION HAPPENS, not by rewriting the
+// document. marked's block lexer recurses through exactly one method —
+// `blockTokens(src, tokens, lastParagraphClipped)` — which every container
+// tokenizer calls for its own content: the blockquote tokenizer calls
+// `this.lexer.blockTokens(content, tokens, true)` and the list tokenizer
+// `this.lexer.blockTokens(item.text, [])` (verified in node_modules/marked,
+// v17.0.4), so one nesting level is exactly one nested call. boundedLexer
+// (below) wraps that method on the single Lexer one parse creates, with a
+// counter that lives for the duration of that parse: while a container level is
+// open the counter is up; if it is already at MD_MAX_NEST the content is not
+// lexed as blocks at all — it becomes ONE paragraph token holding the whole
+// remainder as plain text, which marked renders (escaped) as text — and the
+// counter comes back down in a `finally`, so even a throwing tokenizer cannot
+// leak a level.
+//
+// There is a SECOND way down, and blockTokens alone does not see it: marked
+// 17.0.4's blockquote tokenizer, when the last token inside a quote is itself a
+// blockquote or a list and lazy continuation lines remain, re-lexes by calling
+// `this.blockquote(f)` / `this.list(f)` straight on the TOKENIZER (never
+// through the lexer). On that path `"> ".repeat(40) + "x\nlazy"` opened 40
+// levels instead of 16, and 64 KB of `">"` + `"x\nlazy"` cost ~6 s on both
+// paths (26 s at 256 KB on the owner path) because each step re-read the rest
+// of the source at the SAME depth value. boundedLexer therefore also wraps
+// those two tokenizer methods, and ONE container token is ONE level no matter
+// which way it was reached.
+//
+// Nothing rewrites the source, which is what keeps CODE intact: a fence, an
+// indented code block, a raw <pre>, a `$$` math block and a deeply indented YAML
+// block are bytes the tokenizers READ, never a document this module rebuilds,
+// so no backslash can appear inside them (`- name:` at 32 spaces stays
+// `- name:`, not `\- name`). Line endings cannot bypass the bound either: the
+// counter sits inside the lexer marked has already normalised (`\r\n` and a
+// bare `\r` → `\n` in Lexer#lex), and renderMarkdown normalises the same way
+// before it looks at the input at all.
+//
+// MD_MAX_NEST = 16 counts container LEVELS around a block: ordinary content
+// sits at 2-4 (a list in a quote in a list), 8-10 is about as deep as
+// hand-written Markdown stays readable, and a 64 KB marker run wants ~32,000.
+// Past the limit the remainder is still SHOWN — as its own escaped text, so
+// nothing is dropped. The digests in tests/bot-markdown-quadratic.test.js
+// (ordinary content) and the pinned digests in tests/md-nesting-depth.test.js
+// (lists in quotes in lists, code in lists, 8 levels deep) prove that content at
+// or under the limit is byte-identical to plain marked.parse. Measured with the
+// counter in place: the worst single 64 KB marker shape is 70 ms (`> 1) `) and
+// the worst of 30 seeded 64 KB marker mixes is 128 ms across both paths, and
+// nothing throws. With a LAZY continuation line appended (the re-lex path — the
+// comment on boundedLexer spells it out) the worst 64 KB shape is 38 ms (`> - `
+// followed by lazy chunks) and 256 KB of `> ` on the owner path is 120 ms, where
+// both used to be seconds.
+// ---------------------------------------------------------------------------
+
+/**
+ * Deepest container nesting (blockquotes + list levels) a document may open
+ * before the remainder of that content is shown as plain text instead of being
+ * lexed into more containers (see boundedLexer). 16 is far above real content
+ * (2-4 levels; ~8-10 is the practical ceiling for readable Markdown) and far
+ * below the ~32,000 levels a 64 KB marker run otherwise opens. Exported so the
+ * tests can pin the bound they exercise.
+ */
+export const MD_MAX_NEST = 16;
+
+/**
+ * The floor of the re-lex path's budget of RE-READ CHARACTERS (see
+ * boundedLexer): 1 MiB, or 8 × the document's length, whichever is larger.
+ * The floor is what keeps ordinary content out of the budget — a quote whose
+ * list carries a lazy continuation line re-reads a few KB per item, and a
+ * document under 128 KB is judged on the floor alone, never on its own length.
+ */
+const RELEX_BUDGET_FLOOR = 1024 * 1024;
+
+/** The document-length factor of that budget: ~8 full re-reads of the input. */
+const RELEX_BUDGET_FACTOR = 8;
+
+/**
+ * The token a container becomes once the nesting limit is reached: ONE
+ * paragraph whose inline tokens are already filled in with a single text token,
+ * so marked neither splits it into blocks nor inline-lexes it (a token that
+ * already has `tokens` is rendered as they are). `raw` is the whole source the
+ * caller was lexing, which is what makes the lexer ADVANCE (blockTokens does
+ * `src.substring(token.raw.length)`) and what keeps the tokenizer re-lex path
+ * (below) from re-parsing a tail it thinks was left over). A text token's
+ * `text` is character data — marked escapes it in parseInline — so no markup,
+ * and no backslash, is ever added to the author's words.
+ * @param {string} src
+ * @returns {{type: string, raw: string, text: string, tokens: object[]}}
+ */
+function flatTextToken(src) {
+  return {
+    type: "paragraph",
+    raw: src,
+    text: src,
+    tokens: [{ type: "text", raw: src, text: src }],
+  };
+}
+
+/**
+ * The container tokenizers that can be re-entered directly (see 2. below):
+ * marked 17.0.4 has no other `this.<tokenizer>(` call in the block phase.
+ */
+const RELEX_TOKENIZERS = ["blockquote", "list"];
+
+/**
+ * A `Lexer` that refuses to lex block content more than MD_MAX_NEST container
+ * levels deep (see "THE BLOCK-NESTING CLIFF" above).
+ *
+ * ONLY the Lexer one parse creates is wrapped — never marked's prototype, so
+ * every other user of marked (markdownBlocks for Crow Artifacts, a test's own
+ * instance, anything else in the gateway) keeps the unguarded behavior it had.
+ * There are TWO ways down, and both are counted, sharing ONE counter (one
+ * container token = one level, whichever way it was reached):
+ *
+ *  1. `blockTokens(src, tokens, lastParagraphClipped)` — what every container
+ *     tokenizer calls for its own content (`this.lexer.blockTokens`), and what
+ *     marked's own `lex()` calls (`this.blockTokens`). Both look the method up
+ *     on the INSTANCE, so the own property installed here shadows the
+ *     prototype method for exactly this lexer, and every recursive call goes
+ *     through the counter.
+ *
+ *  2. `lexer.tokenizer.blockquote` / `lexer.tokenizer.list` — marked 17.0.4's
+ *     blockquote tokenizer has a SECOND way down that never passes through the
+ *     lexer: when the LAST token inside a quote is itself a blockquote (or a
+ *     list) and lazy continuation lines remain, it re-lexes by calling
+ *     `this.blockquote(f)` / `this.list(f)` on the TOKENIZER, with the last
+ *     token's raw plus those lines as the source. Counted only on blockTokens,
+ *     every step of that chain ran at the depth it started from, so a chain of
+ *     them was unbounded and O(n) steps of O(n) work: `"> ".repeat(40) + "x"`
+ *     stopped at 16 levels, `"> ".repeat(40) + "x\nlazy"` opened 40, and 64 KB
+ *     of `">"` + `"x\nlazy"` spent ~6 s on either path. Own properties on the
+ *     Tokenizer INSTANCE, never its prototype.
+ *
+ * DEPTH is not the whole story on that second path: each re-lex step re-reads
+ * everything it has left, so the blockquote tokenizer's chunk loop (which
+ * re-lexes the growing last token once per chunk, all at ONE level) is O(n²):
+ * `"> - x\nlazy\n"` repeated to 64 KB is ~5,300 steps and 1.2 s with only the
+ * depth counter in place. So the re-lex path also carries a per-PARSE budget of
+ * RE-READ CHARACTERS, `max(1 MiB, 8 × the document length)` (computed here from
+ * the length the caller passes in): while the sum of the `src` lengths handed to
+ * this path stays under it nothing changes; past it, the rest of that frame is
+ * shown as text. A per-parse BYTE budget, not a per-frame step count, because a
+ * step count cannot tell a flood from ordinary content: one quote whose list has
+ * 17 items with a lazy continuation line each is ~17 steps of perfectly normal
+ * Markdown, and a step cap turned the tail of that list into literal text.
+ * Bytes measure the work that actually hurt (every step re-reads the rest of the
+ * source), and the 8× factor plus the 1 MiB floor leave a real document several
+ * orders of magnitude of room.
+ *
+ * Over the limit neither wrapper lexes anything: it hands back the source as
+ * ONE flat text token (flatTextToken above). The tokenizer wrappers must return
+ * a real token, not `undefined` — the re-lex path reads `.raw` to splice the
+ * parent and to work out what is left to process — and a token whose raw is the
+ * whole source it was given is what keeps that path advancing instead of
+ * looping.
+ *
+ * The options are COPIED: marked's Lexer constructor caches a Tokenizer on the
+ * options object it is given (`options.tokenizer = new Tokenizer()`) and rebinds
+ * `tokenizer.lexer`, so passing an instance's shared defaults would let two
+ * parses fight over one tokenizer. That per-lexer Tokenizer is also what makes
+ * the own properties below safe: neither Marked instance in this module sets
+ * `defaults.tokenizer`, so `new Tokenizer()` runs once per Lexer. A future
+ * `use({ tokenizer })` on either instance would make ONE Tokenizer shared by
+ * every parse and carry these wrappers (and this parse's counters) into them.
+ * @param {object} options a Marked instance's defaults
+ * @param {number} inputLength the document's length, which sizes the re-lex
+ *   path's byte budget (see above)
+ * @returns {Lexer}
+ */
+function boundedLexer(options, inputLength = 0) {
+  const lexer = new Lexer({ ...options });
+  /** Container levels open right now (blockquotes + list levels). */
+  let depth = 0;
+  /** `blockTokens` frames on the stack — used to tell the two kinds of
+   *  tokenizer call apart (see the wrapper below). */
+  let lexFrames = 0;
+  /** One entry per open container tokenizer frame: the `lexFrames` count when it
+   *  was entered (`mark`), so a call made straight from that frame's tokenizer
+   *  body can be told apart from the block lexer's. */
+  const frames = [];
+  /** The characters this parse may re-read through the re-lex path: 8 × the
+   *  document, never less than 1 MiB (see the comment above). */
+  const relexBudget = Math.max(RELEX_BUDGET_FLOOR, RELEX_BUDGET_FACTOR * inputLength);
+  /** Characters re-read through that path so far in this parse. */
+  let relexBytes = 0;
+
+  // 2. The re-lex path: counted here, because a container token opened by a
+  //    direct `this.blockquote(f)` / `this.list(f)` never reaches blockTokens.
+  const tokenizer = lexer.tokenizer;
+  for (const name of RELEX_TOKENIZERS) {
+    const original = tokenizer[name];
+    tokenizer[name] = function (src) {
+      // Is this the block lexer calling (the ordinary path) or another
+      // tokenizer re-lexing (marked's `this.blockquote(f)` / `this.list(f)`)?
+      // Only a `blockTokens` frame started AFTER the innermost tokenizer frame
+      // means the block lexer is the caller — and the level that call opens is
+      // already counted by the frame that blockTokens belongs to. A call made
+      // straight from a tokenizer body is the re-lex, and IT needs counting.
+      const frame = frames.length ? frames[frames.length - 1] : null;
+      // Only the re-lex path is charged against the budget: the block lexer's
+      // own calls re-read their source too, and charging those would spend it
+      // on ordinary lexing instead of on the O(n²) chunk loop it guards.
+      if (frame && lexFrames === frame.mark
+        && (relexBytes += src.length) > relexBudget) {
+        return flatTextToken(src);
+      }
+      if (depth >= MD_MAX_NEST) return flatTextToken(src);
+      depth++;
+      frames.push({ mark: lexFrames });
+      try {
+        return original.call(this, src);
+      } finally {
+        frames.pop();
+        depth--;
+      }
+    };
+  }
+
+  // 1. The lexer path. This one only REFUSES: the level its container opens is
+  //    counted by the wrapper above, so incrementing here as well would charge
+  //    every blockquote and list twice.
+  const blockTokens = lexer.blockTokens;
+  lexer.blockTokens = function (src, tokens, lastParagraphClipped) {
+    if (depth >= MD_MAX_NEST) {
+      const out = tokens || [];
+      out.push(flatTextToken(src));
+      return out;
+    }
+    // `lastParagraphClipped` is forwarded as given: marked's own default
+    // (`false`) applies when it is undefined, and its blockquote tokenizer
+    // passes `true`.
+    lexFrames++;
+    try {
+      return blockTokens.call(this, src, tokens || [], lastParagraphClipped);
+    } finally {
+      lexFrames--;
+    }
+  };
+  return lexer;
+}
+
+// ---------------------------------------------------------------------------
 // THE INLINE-LEXER CLIFF — a linear pre-pass guard
 //
 // marked's inline lexer is QUADRATIC on mixed emphasis delimiters inside ONE
@@ -690,11 +1184,11 @@ function isCheckboxInput(attribs) {
 // shape, 116 ms for the definitions flood; tests/bot-markdown-quadratic.test.js
 // pins the bounds and records the worst render in a diagnostic).
 //
-// One shape is still slow BEFORE any of these budgets can apply: deeply nested
+// One shape was still slow BEFORE any of these budgets could apply: deeply nested
 // list/quote markers (e.g. `1) ` repeated) cost ~1.5 s inside marked's BLOCK
-// lexer, which runs first — pre-existing and unrelated to the inline budgets
-// above (a RangeError there is caught and answers "", so callers fall back to
-// plain text), and a separate follow-up.
+// lexer, which runs first. That is the block-nesting cliff, and it is guarded
+// separately — by a depth counter INSIDE that lexer, applied to both renderers
+// and running before any of this — see "THE BLOCK-NESTING CLIFF" above.
 // ---------------------------------------------------------------------------
 
 /** The characters marked's inline lexer reacts to: emphasis (`*`, `_`),
@@ -757,7 +1251,12 @@ function guardAndParse(src) {
   // from Windows) kept a `\r` on every line and flattened into one escaped
   // paragraph. Do exactly what marked does.
   src = src.replace(/\r\n|\r/g, "\n");
-  const lexer = new Lexer({ ...botMarked.defaults });
+  // Bound container nesting from INSIDE the block lexer (see "THE
+  // BLOCK-NESTING CLIFF"): "1) " x 64 KB used to spend ~1 s here and then trip
+  // the stack. The guard is a depth counter (plus, on the tokenizer's re-lex
+  // path, a byte budget) inside the lexer, so `src` itself is never rewritten:
+  // code, fences, HTML and math keep every character.
+  const lexer = boundedLexer(botMarked.defaults, src.length);
   lexer.blockTokens(src, lexer.tokens);
   // Cap the link definitions BEFORE any inline lexing: inlineTokens scans
   // `Object.keys(this.tokens.links)` on every inline block, so a flood of
@@ -829,9 +1328,10 @@ const ownerMarked = new Marked({
  * renderMarkdown does, plus math delimiters shown once as source. Over
  * BOT_MD_MAX_INPUT it returns "" (callers fall back to plain text): marked's
  * own lexer degrades sharply on long escape-dense input (see above). Under
- * it, EVERY input takes guardAndParse: a LINEAR pre-pass keeps the
- * inline-lexer cliff out of reach, and the digest tests pin it byte-identical
- * to plain marked.parse for ordinary content.
+ * it, EVERY input takes guardAndParse: a depth counter inside marked's block
+ * lexer bounds container nesting, a linear pre-pass keeps the inline-lexer
+ * cliff out of reach, and the digest tests pin both byte-identical to plain
+ * marked.parse for ordinary content.
  * @param {string} markdown untrusted model output
  * @returns {string} Safe HTML
  */
