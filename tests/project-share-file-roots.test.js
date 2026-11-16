@@ -397,6 +397,49 @@ test("shareWorkspaceRoots: a link to the workspace itself, or into its bots subt
   assert.equal(r.read.includes(join(d, "docs-alias")), false, "the link's own path is not the root");
 });
 
+test("shareWorkspaceRoots: a `bots` symlink to a sibling entry keeps that sibling (and bots) out of reach", () => {
+  // `<ws>/bots` itself a link to a sibling entry: the bots home really lives at
+  // `<ws>/.state/bots/<id>`, so `.state` — an ordinary directory entry — is the
+  // bots subtree under another name and must not be granted.
+  const d = ws("unit-bots-link");
+  mkdirSync(join(d, ".state", "bots", "other", "sessions"), { recursive: true });
+  writeFileSync(join(d, ".state", "bots", "other", "sessions", "x.jsonl"), "{}\n");
+  symlinkSync(".state", join(d, "bots"));
+  symlinkSync(".state", join(d, "state-alias"));
+  mkdirSync(join(d, "docs"), { recursive: true });
+  writeFileSync(join(d, "docs", "a.md"), "a\n");
+  writeFileSync(join(d, "top.txt"), "t\n");
+  const workspaceReal = realpathSync(d);
+  const stateReal = realpathSync(join(d, ".state"));
+  const botsReal = realpathSync(join(d, "bots"));
+  const otherSession = join(stateReal, "bots", "other", "sessions", "x.jsonl");
+
+  const r = shareWorkspaceRoots([{ project_id: 13, level: "read_write", workspace_dir: d, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT });
+
+  assert.equal(botsReal, stateReal, "the fixture's bots link resolves to the sibling entry");
+  for (const name of [".state", "bots", "state-alias"]) {
+    assert.equal(coversPath(r.read, join(d, name)), false, name + " is not a read root");
+    assert.equal(coversPath(r.write, join(d, name)), false, name + " is not a write root");
+  }
+  assert.equal(r.read.includes(stateReal), false, "the bots home's realpath is never granted");
+  assert.equal(r.write.includes(stateReal), false);
+  assert.equal(r.read.includes(workspaceReal), false, "nor is the workspace itself");
+  assert.equal(coversPath(r.read, otherSession), false, "another bot's transcript stays out of reach");
+  assert.equal(coversPath(r.write, otherSession), false);
+
+  // The ordinary entries are still granted, as their own realpaths.
+  assert.deepEqual(sortRoots(r), {
+    read: sorted([realpathSync(join(d, "docs")), join(d, "top.txt")]),
+    write: sorted([realpathSync(join(d, "docs")), join(d, "top.txt")]),
+  });
+
+  // ...and a normal layout (bots a real directory) is unaffected.
+  const plain = shareFixture("bots-plain");
+  assert.deepEqual(sortRoots(shareWorkspaceRoots([{ project_id: 14, level: "read", workspace_dir: plain, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT })), { read: sorted(fixtureRoots(plain)), write: [] });
+});
+
 test("shareWorkspaceRoots: more top-level entries than the cap grants nothing for that share, with one warning", () => {
   const d = ws("unit-wide");
   mkdirSync(d, { recursive: true });
