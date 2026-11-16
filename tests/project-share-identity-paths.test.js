@@ -455,7 +455,9 @@ async function coreUnder(env) {
   };
 }
 
-/** One unshared project, one home project for the bot, and one memory only the owner may read. */
+/** One unshared project, one home project for the bot, one memory only the owner may read, and one
+ *  tracked file row in each project. The file rows need no storage backend: the by-id file gate reads
+ *  the row itself, and nothing in this file has S3 configured. */
 async function coreFixtures(botId, marker) {
   const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
   const unshared = Number((await createProjectSpace(db, { name: `Core unshared ${marker}` })).id);
@@ -469,7 +471,16 @@ async function coreFixtures(botId, marker) {
     sql: "INSERT INTO memories (content, category, importance, project_id) VALUES (?, 'general', 5, ?)",
     args: [`${token} only the owner may read this`, unshared],
   });
-  return { unshared, home, token };
+  const unsharedKey = `${token}-unshared.txt`;
+  const homeKey = `${token}-home.txt`;
+  for (const [key, projectId] of [[unsharedKey, unshared], [homeKey, home]]) {
+    await db.execute({
+      sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, project_id)
+            VALUES (?, ?, 'text/plain', 7, 'crow-files', ?)`,
+      args: [key, key, projectId],
+    });
+  }
+  return { unshared, home, token, unsharedKey, homeKey };
 }
 
 /** Drop the fixture memories: another test in this file counts the instance's memories. */
@@ -477,9 +488,9 @@ async function dropMemories(token) {
   await db.execute({ sql: "DELETE FROM memories WHERE content LIKE ?", args: [`${token}%`] });
 }
 
-test("the combined core server builds memory and projects from the env actor: a bot is refused an unshared project", async () => {
+test("the combined core server builds memory, projects and storage from the env actor: a bot is refused an unshared project", async () => {
   const botId = "core-share-bot";
-  const { unshared, home, token } = await coreFixtures(botId, "bot");
+  const { unshared, home, token, unsharedKey, homeKey } = await coreFixtures(botId, "bot");
   const core = await coreUnder({ CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: botId, CROW_ACTOR_BOT_NAME: "Core Bot" });
   try {
     const search = await core.call("crow_search_memories", { query: token, project_id: unshared, semantic: false });
@@ -497,6 +508,40 @@ test("the combined core server builds memory and projects from the env actor: a 
     const own = await core.call("crow_workspace_dir", { project_id: home });
     assert.equal(own.isError, false, own.text);
     assert.match(own.text, new RegExp(`Project #${home}\\b`));
+
+    // --- the storage half: the same env actor is the storage server's base actor ---
+    // The core builds storage with the env actor (per-call `_meta` is not forwarded) and WITHOUT
+    // the `options.s3` seam, and this scratch instance has no backend, so every call the gate allows
+    // stops at the availability probe and no listing or URL is rendered. The decisions the gate makes
+    // before that probe are what these assertions read: a bot refused the unshared project, and a
+    // bot allowed its own project, are distinguishable without any storage backend.
+    const activatedStorage = await core.call("crow_activate_server", { server: "storage" });
+    assert.match(activatedStorage.text, /Activated "storage"/);
+
+    const unsharedListing = await core.call("crow_list_files", { project_id: unshared });
+    assert.equal(unsharedListing.isError, true, unsharedListing.text);
+    assert.match(unsharedListing.text, /No share grants this bot access to that project/);
+
+    // Naming its home project, or naming none (which the gate resolves to the home project), is not
+    // a refusal: both reach the backend probe, so an omitted project is never the unrestricted list.
+    for (const args of [{ project_id: home }, {}]) {
+      const r = await core.call("crow_list_files", args);
+      assert.doesNotMatch(r.text, /No share grants/, JSON.stringify(args));
+      assert.match(r.text, /Storage is not configured/, JSON.stringify(args));
+    }
+
+    // The by-id tool reads the key's own row: a file of the unshared project answers exactly what a
+    // key that does not exist answers, and the bot's own project's file is not refused at all.
+    const hidden = await core.call("crow_get_file_url", { s3_key: unsharedKey });
+    assert.equal(hidden.isError, true, hidden.text);
+    assert.match(hidden.text, /^Error: Not found\.$/);
+    assert.doesNotMatch(hidden.text, new RegExp(unsharedKey), "a refusal carries no key");
+    const missing = await core.call("crow_get_file_url", { s3_key: `${unsharedKey}.no-such-key` });
+    assert.equal(missing.text, hidden.text, "a hidden key and a missing key read the same");
+
+    const ownFile = await core.call("crow_get_file_url", { s3_key: homeKey });
+    assert.doesNotMatch(ownFile.text, /Not found/, "the bot's own project's row is not refused");
+    assert.match(ownFile.text, /Storage is not configured/, "it reaches the backend probe");
   } finally {
     await core.close();
     await dropMemories(token);
@@ -504,7 +549,7 @@ test("the combined core server builds memory and projects from the env actor: a 
 });
 
 test("the combined core server built for the owner reads the same unshared project", async () => {
-  const { unshared, token } = await coreFixtures("core-owner-bot", "owner");
+  const { unshared, token, unsharedKey } = await coreFixtures("core-owner-bot", "owner");
   const core = await coreUnder({ CROW_ACTOR_KIND: "owner" });
   try {
     const search = await core.call("crow_search_memories", { query: token, project_id: unshared, semantic: false });
@@ -516,6 +561,21 @@ test("the combined core server built for the owner reads the same unshared proje
     const dir = await core.call("crow_workspace_dir", { project_id: unshared });
     assert.equal(dir.isError, false, dir.text);
     assert.match(dir.text, new RegExp(`Project #${unshared}\\b`));
+
+    // The same file tools for the owner: the share gate binds only a bot, so the owner's listing of
+    // the unshared project and its by-id URL for that project's row are neither refused nor read as
+    // a missing key — they run straight through to the backend probe, as they did before the gate
+    // (this instance has no backend, so the listing and the URL themselves are not rendered here).
+    const activatedStorage = await core.call("crow_activate_server", { server: "storage" });
+    assert.match(activatedStorage.text, /Activated "storage"/);
+    for (const [label, r] of [
+      ["listing", await core.call("crow_list_files", { project_id: unshared })],
+      ["url", await core.call("crow_get_file_url", { s3_key: unsharedKey })],
+    ]) {
+      assert.doesNotMatch(r.text, /No share grants/, label);
+      assert.doesNotMatch(r.text, /Not found/, label);
+      assert.match(r.text, /Storage is not configured/, label);
+    }
   } finally {
     await core.close();
     await dropMemories(token);
