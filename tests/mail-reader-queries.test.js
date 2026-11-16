@@ -315,6 +315,33 @@ test("two messages in one thread sharing a Message-ID but not From both appear",
   assert.deepEqual(thread.map((item) => item.fromAddr), [ALEX, SAM]);
 });
 
+test("RF8: a reuse of a known Message-ID from the same sender with a later Date is its own entry", async () => {
+  const db = await freshDb();
+  const { inboxId } = await twoFolders(db);
+  const messageId = "<reused-same-sender@mail.example.test>";
+  const real = await upsertMessage(db, msg({
+    folderId: inboxId, uid: 1, messageId, date: T0, internalDate: T0, subject: "reused",
+  }));
+  const later = await upsertMessage(db, msg({
+    folderId: inboxId,
+    uid: 2,
+    messageId,
+    date: T0 + 60_000,
+    internalDate: T0 + 60_000,
+    subject: "reused",
+  }));
+  assert.equal(real.threadId, later.threadId, "the reuse lands in the same conversation");
+
+  const byMid = await resolveMessageRef(db, { accountId: ACCOUNT, mid: messageId });
+  assert.equal(byMid.id, real.id, "the group that arrived first is the one the id means");
+  assert.equal(byMid.date, T0, "the earlier date, not the later reuse");
+
+  const thread = await listThreadMessages(db, ACCOUNT, real.threadId);
+  assert.deepEqual(thread.map((item) => item.id), [real.id, later.id],
+    "the later reuse is its own entry in the conversation");
+  assert.deepEqual(thread.map((item) => item.date), [T0, T0 + 60_000]);
+});
+
 test("listThreadMessages of an unknown thread is []", async () => {
   const db = await freshDb();
   const { inboxId } = await twoFolders(db);

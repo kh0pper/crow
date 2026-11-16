@@ -83,11 +83,14 @@ export const FRAME_HELPER_CSP_SOURCE = `'sha256-${createHash("sha256").update(FR
 /** An image declared this many pixels or smaller on either side is a tracking pixel, not a picture. */
 const PIXEL_MAX_SIDE = 2;
 
-/** A length attribute that names pixels: bare digits, or digits with a `px` suffix. */
-const PIXEL_DIMENSION_RE = /^(\d{1,4})(?:px)?$/i;
+/** A length attribute that names pixels: digits with an optional decimal part and `px` suffix. */
+const PIXEL_DIMENSION_RE = /^(\d{1,4}(?:\.\d+)?)(?:px)?$/i;
 
-/** A link the frame keeps: absolute http(s), or a `mailto:`/`tel:` with something after the colon. */
-const ABSOLUTE_LINK_RE = /^(?:https?:|mailto:|tel:)/i;
+/**
+ * A link the frame keeps: absolute http(s) (`https://host/...`, never the scheme alone or a single
+ * slash after it), or a `mailto:`/`tel:` with something after the colon.
+ */
+const ABSOLUTE_LINK_RE = /^(?:https?:\/\/.|mailto:.|tel:.)/i;
 
 /** An image source the frame keeps: the sanitiser only ever lets an absolute https URL through. */
 const ABSOLUTE_IMAGE_RE = /^https:\/\/./i;
@@ -128,7 +131,7 @@ function cut(value, limit) {
 function declaredPixels(value) {
   if (typeof value !== "string") return null;
   const match = PIXEL_DIMENSION_RE.exec(value.trim());
-  return match ? Number(match[1]) : null;
+  return match ? Number.parseFloat(match[1]) : null;
 }
 
 /** Whether an `<img>` is declared small enough on either side to be a tracking pixel. */

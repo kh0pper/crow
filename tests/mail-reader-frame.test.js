@@ -345,7 +345,7 @@ test("option C: every hostile construct in a body is gone, and the helper is the
   assert.equal(countOf(document, "<style"), 1, "only the template's stylesheet");
   assert.equal(countOf(document, "<meta"), 3, "only the template's three metas");
   assert.equal(document.includes("pixel.gif"), false, "the tracking pixel is dropped");
-  assert.equal(countOf(document, "<img"), 1, "only the 60 px image is left, and it carries no source");
+  assert.equal(countOf(document, "<img"), 1, "only the 60 px image is left");
 });
 
 test("option C: the helper makes no request, reads no cookie and writes no markup", () => {
@@ -517,6 +517,38 @@ test("S3: a link keeps its href only when it is absolute; a relative link keeps 
   }
   assert.equal(dropped, 0, "no image was dropped");
   assert.equal(droppedBlocked, 0);
+});
+
+test("S3: a link whose scheme carries nothing real loses its href, and its text stays", () => {
+  const { html } = dropTrackingPixels([
+    '<a href="https:/dashboard/x">one-slash</a>',
+    '<a href="http:foo">scheme-only</a>',
+    '<a href="https://example.test/x">https-abs</a>',
+    '<a href="mailto:alex@example.com">mailto-abs</a>',
+    '<a href="tel:+15550100">tel-abs</a>',
+  ].join(""));
+  for (const dropped of ["https:/dashboard/x", "http:foo"]) {
+    assert.equal(html.includes(`href="${dropped}"`), false, `${dropped} loses its href`);
+  }
+  for (const kept of ["one-slash", "scheme-only"]) {
+    assert.equal(html.includes(kept), true, `${kept} keeps its text`);
+  }
+  for (const absolute of ["https://example.test/x", "mailto:alex@example.com", "tel:+15550100"]) {
+    assert.equal(html.includes(`href="${absolute}"`), true, `${absolute} stays`);
+  }
+});
+
+test("S1: a pixel may be declared in fractions, and 2.5 px is a picture", () => {
+  const { html, dropped } = dropTrackingPixels([
+    '<img src="https://cdn.example.test/fraction.png" width="0.5" height="0.5">',
+    '<img src="https://cdn.example.test/fraction-width.png" width="0.5">',
+    '<img src="https://cdn.example.test/over-two.png" width="2.5">',
+  ].join(""));
+  assert.equal(html.includes("fraction.png"), false, "a 0.5 px image is a pixel");
+  assert.equal(html.includes("fraction-width.png"), false, "a 0.5 px width alone is enough");
+  assert.equal(html.includes("over-two.png"), true, "2.5 px is above the pixel line");
+  assert.equal(countOf(html, "<img"), 1);
+  assert.equal(dropped, 2);
 });
 
 /* ------------------------------------------------------------------ RF1 */
