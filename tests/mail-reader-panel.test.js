@@ -287,6 +287,60 @@ test("the stylesheet is scoped under .ml, with min-width: 0 on the root and no s
   });
 });
 
+/* ----------------------------------------------------------------- the gear */
+
+const GEAR_TAG = /<a class="ml-btn ml-gear" href="\/dashboard\/mail\?view=settings" aria-label="Settings">/;
+
+function gears(body) {
+  return body.match(/class="ml-btn ml-gear"/g) || [];
+}
+
+test("every view carries exactly one settings gear, the empty states and settings included", async () => {
+  await withFlag(async () => {
+    const empty = await get("/dashboard/mail");
+    assert.equal(empty.status, 200);
+    assert.equal(gears(empty.body).length, 1, "one gear on the connect page");
+    assert.match(empty.body, GEAR_TAG);
+    assert.match(empty.body, /<svg class="ml-gear-icon"[^>]*aria-hidden="true"/);
+
+    await heldElsewhere("sam@example.com", "Studio");
+    const held = await get("/dashboard/mail");
+    assert.equal(held.status, 200);
+    assert.equal(gears(held.body).length, 1, "one gear where the mail is held elsewhere");
+
+    const settings = await get("/dashboard/mail?view=settings");
+    assert.equal(settings.status, 200);
+    assert.equal(gears(settings.body).length, 1, "one gear on the account page");
+
+    // A link that resolves to nothing still gets the page header, and its one gear.
+    const account = await withDb((db) => store.createAccount(db, ACCOUNT));
+    const gone = await get(`/dashboard/mail?view=message&a=${account.id}&mid=${encodeURIComponent("<never@mail.example.test>")}`);
+    assert.equal(gone.status, 404);
+    assert.equal(gears(gone.body).length, 1, "one gear on the not-here page");
+  });
+});
+
+test("the inbox's gear sits right after the Refresh control, and the gear is a 44px square", async () => {
+  await withDb((db) => store.createAccount(db, ACCOUNT));
+  await withFlag(async () => {
+    const r = await get("/dashboard/mail");
+    assert.equal(r.status, 200);
+    assert.equal(gears(r.body).length, 1, "one gear on the inbox");
+    assert.match(
+      r.body,
+      /data-ml-refresh[^>]*>Refresh<\/button><a class="ml-btn ml-gear" href="\/dashboard\/mail\?view=settings" aria-label="Settings">/,
+      "the gear follows the refresh control",
+    );
+    const css = mailStyle(r.body);
+    const rule = /\.ml-gear \{([^}]*)\}/.exec(css);
+    assert.ok(rule, "the gear has its own rule");
+    assert.match(rule[1], /min-width: 44px/);
+    assert.match(rule[1], /min-height: 44px/);
+    assert.match(rule[1], /align-items: center/);
+    assert.match(rule[1], /justify-content: center/);
+  });
+});
+
 test("the panel's manifest is the hidden /dashboard/mail page and its handler takes the flag as a seam", async () => {
   assert.equal(mailPanel.id, "mail");
   assert.equal(mailPanel.route, "/dashboard/mail");

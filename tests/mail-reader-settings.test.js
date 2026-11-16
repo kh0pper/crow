@@ -332,6 +332,70 @@ test("every allowed sender is listed with its own remove control", async () => {
   });
 });
 
+test("the allowed senders sit under their own heading, and the heading is drawn only with the list", async () => {
+  const withSenders = await withDb((db) => stores.accounts.createAccount(db, ACCOUNT("Personal", "alex@example.com", "alexuser")));
+  await withDb((db) => stores.accounts.addImageAllow(db, withSenders.id, "sam@example.com"));
+  await withDb((db) => stores.accounts.createAccount(db, ACCOUNT("Work", "other@example.com", "otheruser")));
+  await withFlag(async () => {
+    const r = await get(SETTINGS);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.split("Senders whose images load").length - 1, 1, "the heading is drawn once");
+    assert.match(r.body, /<h3 class="ml-allow-title">Senders whose images load<\/h3><ul class="ml-allow" data-ml-allow-list>/);
+    assert.equal(r.body.split("data-ml-allow-list").length - 1, 1, "the list is drawn only for the account that has one");
+  });
+});
+
+test("no allowed senders, no heading", async () => {
+  await withDb((db) => stores.accounts.createAccount(db, ACCOUNT("Personal", "alex@example.com", "alexuser")));
+  await withFlag(async () => {
+    const r = await get(SETTINGS);
+    assert.equal(r.status, 200);
+    assert.doesNotMatch(r.body, /Senders whose images load/);
+    assert.doesNotMatch(r.body, /data-ml-allow-list/);
+  });
+});
+
+test("the last check reads Last checked and then the time, and nothing at all without one", async () => {
+  const account = await withDb((db) => stores.accounts.createAccount(db, ACCOUNT("Personal", "alex@example.com", "alexuser")));
+  await withFlag(async () => {
+    const without = await get(SETTINGS);
+    assert.equal(without.status, 200);
+    assert.doesNotMatch(without.body, /Last checked/);
+    assert.doesNotMatch(without.body, /<time /);
+
+    await withDb((db) => stores.accounts.updateAccount(db, account.id, { lastSyncAt: Date.UTC(2026, 4, 14, 9, 30) }));
+    const withTime = await get(SETTINGS);
+    assert.equal(withTime.status, 200);
+    const line = (withTime.body.match(/<p class="ml-note ml-synced">[\s\S]*?<\/p>/) || [])[0];
+    assert.ok(line, "the line is on the card");
+    assert.match(line, /^<p class="ml-note ml-synced">Last checked <time datetime="[^"]+">[^<]+<\/time><\/p>$/);
+  });
+});
+
+test("the settings page carries the sentences a refused call can show, and each is translated", async () => {
+  await withFlag(async () => {
+    const r = await get(SETTINGS);
+    assert.equal(r.status, 200);
+    assert.match(r.body, /data-ml-err-duplicate_address="That address is already set up in Crow\."/);
+    assert.match(r.body, /data-ml-err-generic="Something went wrong\. Try again\."/);
+    assert.match(r.body, /data-ml-err-no_archive_folder="Crow couldn't find this account's Archive folder\."/);
+    assert.match(r.body, /data-ml-err-no_trash_folder="Crow couldn't find this account's Trash folder\."/);
+    const { mailErrorStrings } = await import("../servers/gateway/dashboard/panels/mail/html.js");
+    const spanish = mailErrorStrings("es");
+    assert.match(spanish, /data-ml-err-duplicate_address="Esa dirección ya está configurada en Crow\."/);
+    assert.match(spanish, /data-ml-err-no_trash_folder="Crow no pudo encontrar la carpeta Papelera de esta cuenta\."/);
+  });
+});
+
+test("the account label fallback is translated, not the fixed English name", async () => {
+  const account = await withDb((db) => stores.accounts.createAccount(db, ACCOUNT("Personal", "alex@example.com", "alexuser")));
+  await withDb((db) => db.execute({ sql: "UPDATE mail_accounts SET label = '', address = '' WHERE id = ?", args: [account.id] }));
+  await withFlag(async () => {
+    const r = await get(SETTINGS);
+    assert.equal(r.status, 200);
+    assert.match(r.body, /<h2 class="ml-card-title">another Crow<\/h2>/);
+  });
+});
 test("an account with a blank label heads with its address and leaves the rename field empty", async () => {
   const account = await withDb((db) => stores.accounts.createAccount(db, ACCOUNT("Personal", "alex@example.com", "alexuser")));
   await withDb((db) => db.execute({ sql: "UPDATE mail_accounts SET label = '' WHERE id = ?", args: [account.id] }));

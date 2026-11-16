@@ -10,9 +10,11 @@
  *   server, plus the same nonce on the frame for the reply to check.
  *   The frame's own pinned helper posts its height and blocked-image count once. One listener on the
  *   window accepts a report only from that frame's own contentWindow, from the opaque origin such a
- *   frame reports (`"null"`) and with that frame's nonce; it floors and clamps the height and shows
- *   the image banner for a count above zero. It never reads the frame's document: the frame is an
- *   opaque origin by design.
+ *   frame reports (`"null"`) and with that frame's nonce; it floors and clamps the height, shows the
+ *   image banner for a count above zero and writes the banner's own sentence for that count into a
+ *   status line inside it (its singular for exactly one, its plural otherwise, the integer put into
+ *   the sentence the server drew), taking both the line and the banner away for a count of 0. It
+ *   never reads the frame's document: the frame is an opaque origin by design.
  *   Show images rebuilds this one frame with `images=1` (this view only, nothing stored); Always show
  *   posts the sender to the allow list first, then rebuilds it the same way.
  *
@@ -36,7 +38,9 @@
  * Every sentence comes from the page: the panel renders one hidden element carrying the fixed
  * sentence for each API error code (data-ml-err-<code>, lower-cased before the lookup, because the
  * mail API answers both a code's own spelling and its upper-case form), and the refresh control
- * carries the word its status line shows. Nothing here is built in JavaScript but nodes and text.
+ * carries the word its status line shows. A code with no sentence of its own shows the element's
+ * generic sentence instead, and a failure that carries no code at all (a network error with no
+ * answer) is still the network sentence. Nothing here is built in JavaScript but nodes and text.
  *
  * Lifecycle: Turbo re-runs this script on every visit. Listeners on an element inside the panel are
  * bound behind a marker on that element (the element is replaced with the page, so a fresh one binds
@@ -114,9 +118,15 @@ export function mailClientJs(lang = "en") {
   }
   function errorText(result) {
     var box = document.querySelector('[data-ml-errs]');
-    var code = result && result.json && typeof result.json.error === 'string' ? result.json.error : 'network';
+    var code = result && result.json && typeof result.json.error === 'string' && result.json.error !== ''
+      ? result.json.error
+      : 'network';
     if (!box) { return ''; }
-    return String(box.getAttribute('data-ml-err-' + code.toLowerCase()) || '');
+    var text = box.getAttribute('data-ml-err-' + code.toLowerCase());
+    // A code with no sentence of its own (owner_only, busy, unavailable, internal, unknown) shows the
+    // generic one rather than nothing.
+    if (!text) { text = box.getAttribute('data-ml-err-generic'); }
+    return String(text || '');
   }
   function statusLine(host) {
     if (!host || typeof host.querySelector !== 'function') { return null; }
@@ -310,6 +320,25 @@ export function mailClientJs(lang = "en") {
     if (height > 20000) { return 20000; }
     return height;
   }
+  // The banner's own sentence for a count of hidden images: the integer the frame reported goes into
+  // the sentence template the server drew for this count (its singular for exactly one, its plural
+  // otherwise). Nothing else is ever put in it, and a count of 0 takes the line away.
+  function blockedNote(banner, count) {
+    var note = banner.querySelector('[data-ml-blocked-note]');
+    if (!(count > 0)) {
+      if (note && note.parentNode) { note.parentNode.removeChild(note); }
+      return;
+    }
+    if (!note) {
+      note = document.createElement('p');
+      note.className = 'ml-note';
+      note.setAttribute('role', 'status');
+      note.setAttribute('data-ml-blocked-note', '');
+      banner.insertBefore(note, banner.firstChild);
+    }
+    var template = String(banner.getAttribute(count === 1 ? 'data-ml-blocked-one' : 'data-ml-blocked-many') || '');
+    note.textContent = template.split('{n}').join(String(count));
+  }
   function onFrameReport(event) {
     // A sandboxed frame without allow-same-origin reports from the opaque origin, which is "null".
     if (!event || String(event.origin) !== 'null') { return; }
@@ -326,8 +355,10 @@ export function mailClientJs(lang = "en") {
     frame.style.height = clampHeight(data.height) + 'px';
     var banner = bannerIn(frame);
     if (!banner) { return; }
-    if (blocked > 0) {
-      banner.setAttribute('data-ml-blocked', String(Math.floor(blocked)));
+    var count = blocked > 0 ? Math.floor(blocked) : 0;
+    blockedNote(banner, count);
+    if (count > 0) {
+      banner.setAttribute('data-ml-blocked', String(count));
       banner.removeAttribute('hidden');
     } else {
       banner.removeAttribute('data-ml-blocked');

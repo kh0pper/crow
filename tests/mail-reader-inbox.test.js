@@ -491,7 +491,9 @@ test("unread rows carry the unread dot, read rows do not", async () => {
     assert.equal(anchors.length, 2);
     const unread = anchors.find((a) => a.includes("Unread one"));
     const read = anchors.find((a) => a.includes("Read one"));
-    assert.match(unread, /<span class="ml-dot" aria-hidden="true"><\/span>/);
+    // The dot is the only mark of an unread message, so it names itself instead of hiding.
+    assert.match(unread, /<span class="ml-dot" role="img" aria-label="Unread"><\/span>/);
+    assert.doesNotMatch(unread, /aria-hidden/);
     assert.doesNotMatch(read, /ml-dot/);
   });
 });

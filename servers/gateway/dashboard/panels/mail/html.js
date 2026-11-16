@@ -30,6 +30,9 @@
  * history on the server. The search view draws the local index's hits as the same rows and, beneath
  * them, the control that asks the servers for mail the index does not hold yet. Every one of those
  * controls names account and folder ids only, and the page never carries a host or a username.
+ *
+ * Every view carries exactly one settings gear: a list view puts it beside its refresh control, and a
+ * page without that row puts it in the header row beside the title.
  */
 import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
@@ -40,10 +43,14 @@ import { FRAME_IFRAME_SANDBOX } from "../../../mail/reader/frame-doc.js";
 const e = escapeHtml;
 
 /**
- * Plan 1's own fallback for a name the claim rows left blank (`claimedElsewhereSentence` uses the
- * same words), so an account whose claim has since cleared still says where its mail is.
+ * The name a nameless instance is called. Plan 1's own fallback for a name the claim rows left blank
+ * (`claimedElsewhereSentence` uses the same words), so an account whose claim has since cleared still
+ * says where its mail is. Every caller has the page's language, so it is asked for here rather than
+ * fixed in English.
  */
-const UNNAMED_INSTANCE = "another Crow";
+export function anotherCrow(lang) {
+  return t("mail.anotherCrow", lang);
+}
 
 /** The reader's own page; every link in it is built from this. */
 const MAIL_HREF = "/dashboard/mail";
@@ -59,14 +66,32 @@ const SKIPPED_SPECIAL_USE = new Set(SKIP_SPECIAL_USE.map((flag) => flag.toLowerC
 
 const LOCALES = { en: "en-US", es: "es-ES" };
 
+/**
+ * The gear drawn in the page header of every view: the one link to the account page. It is an icon
+ * link, so its accessible name is the only text it has, and the glyph itself is hidden from assistive
+ * technology. Its hit area is a 44 px square (css.js).
+ */
+const GEAR_ICON = '<svg class="ml-gear-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+
+/**
+ * The settings icon link. Every view carries exactly one: the list views put it beside the refresh
+ * control, and a view with no such row puts it in the page header row.
+ *
+ * @param {string} [lang]
+ * @returns {string}
+ */
+export function mailGearLink(lang = "en") {
+  return `<a class="ml-btn ml-gear" href="${SETTINGS_HREF}" aria-label="${e(t("mail.settings", lang))}">${GEAR_ICON}</a>`;
+}
+
 /** One name per instance, in the order given, with the blank case filled in. */
-function instanceNames(names) {
+function instanceNames(names, lang) {
   const out = [];
   for (const name of names) {
     const clean = typeof name === "string" ? name.trim() : "";
     if (clean && !out.includes(clean)) out.push(clean);
   }
-  return out.length ? out : [UNNAMED_INSTANCE];
+  return out.length ? out : [anotherCrow(lang)];
 }
 
 /** "Connect your mail": one link to the settings view, which is where an account is added. */
@@ -78,7 +103,7 @@ function connectCard(lang) {
 
 /** "Mail is set up on <instance>", one line per holder, then the way to a different account. */
 function elsewhereCard(names, lang) {
-  const lines = instanceNames(names)
+  const lines = instanceNames(names, lang)
     .map((name) => `<p class="ml-note">${e(fill(t("mail.elsewhereOn", lang), { instance: name }))}</p>`)
     .join("");
   return `<section class="ml-empty" data-ml-empty="elsewhere">
@@ -106,6 +131,10 @@ const CLIENT_ERROR_CODES = Object.freeze([
   "timeout",
   "changed",
   "changed_on_server",
+  "no_archive_folder",
+  "no_trash_folder",
+  "duplicate_address",
+  "generic",
 ]);
 
 /**
@@ -122,10 +151,16 @@ export function mailErrorStrings(lang = "en") {
   return `<div class="ml-note" data-ml-errs hidden${attributes}></div>`;
 }
 
-/** The page root: the title, the client's error sentences, then whichever view was asked for. */
-function pageShell(inner, lang) {
+/**
+ * The page root: the header row (the title and, unless the view's own row carries it, the settings
+ * gear), the client's error sentences, then whichever view was asked for.
+ */
+function pageShell(inner, lang, { gearInHead = false } = {}) {
   return `<div class="ml" data-ml>
-    <h1 class="ml-title">${e(t("mail.title", lang))}</h1>
+    <div class="ml-page-head">
+      <h1 class="ml-title">${e(t("mail.title", lang))}</h1>
+      ${gearInHead ? "" : mailGearLink(lang)}
+    </div>
     ${mailErrorStrings(lang)}
     ${inner}
   </div>`;
@@ -157,7 +192,10 @@ function listHeader({ accounts, acct, q = "", withRefresh = false, lang }) {
   const refresh = withRefresh
     ? `<button class="ml-btn" type="button" data-ml-refresh data-accounts="${e(accountIds(accounts, acct))}" data-ml-refreshing="${e(t("mail.refreshing", lang))}">${e(t("mail.refresh", lang))}</button>`
     : "";
-  return `<div class="ml-head">${form}${refresh}</div>`;
+  // The refresh row is where the settings gear sits on a list view; a view without that row carries
+  // it in the page header instead, so every page has exactly one.
+  const gear = withRefresh ? mailGearLink(lang) : "";
+  return `<div class="ml-head">${form}${refresh}${gear}</div>`;
 }
 
 /**
@@ -208,9 +246,9 @@ function olderButton(folderIds, lang) {
 /* ---------------------------------------------------------------- inbox view */
 
 /** The account's label, escaped; the label is the owner's own text. */
-function accountLabel(account) {
+function accountLabel(account, lang) {
   const label = typeof account?.label === "string" ? account.label.trim() : "";
-  return label || UNNAMED_INSTANCE;
+  return label || anotherCrow(lang);
 }
 
 /** A folder's name as the server reported it, or its path when it sent none. */
@@ -306,7 +344,7 @@ function chips({ accounts, acct, lang }) {
   const perAccount = accounts.map((account) => {
     const href = `${MAIL_HREF}?acct=${encodeURIComponent(account.id)}`;
     const current = acct === account.id ? ' aria-current="page"' : "";
-    return `<a class="ml-chip" href="${e(href)}"${current}>${e(accountLabel(account))}</a>`;
+    return `<a class="ml-chip" href="${e(href)}"${current}>${e(accountLabel(account, lang))}</a>`;
   });
   return `<div class="ml-chips">${all}${perAccount.join("")}</div>`;
 }
@@ -327,7 +365,7 @@ function folderDrawer({ accounts, folders, folderId, lang }) {
       const unread = Number.isFinite(count) && count > 0 ? Math.trunc(count) : 0;
       return `<li class="ml-folder-item"><a class="ml-folder" href="${e(href)}"${current}>${e(folderLabel(folder))}<span class="ml-count">${unread}</span></a></li>`;
     }).join("");
-    return `<p class="ml-drawer-account">${e(accountLabel(account))}</p><ul class="ml-folders">${items}</ul>`;
+    return `<p class="ml-drawer-account">${e(accountLabel(account, lang))}</p><ul class="ml-folders">${items}</ul>`;
   }).filter(Boolean).join("");
   if (!groups) return "";
   const open = folderId === null ? "" : " open";
@@ -346,7 +384,9 @@ function row(item, { now, tz, lang }) {
   if (mid !== null) params.push(`mid=${encodeURIComponent(mid)}`);
   params.push(`row=${Number(item.id)}`);
   const href = `${MAIL_HREF}?${params.join("&")}`;
-  const dot = item.isRead ? "" : '<span class="ml-dot" aria-hidden="true"></span>';
+  // The dot is the row's only mark of an unread message, so it carries its own accessible name
+  // rather than being hidden from assistive technology.
+  const dot = item.isRead ? "" : `<span class="ml-dot" role="img" aria-label="${e(t("mail.unread", lang))}"></span>`;
   const snippet = typeof item.snippet === "string" ? item.snippet : "";
   return `<a class="ml-row" href="${e(href)}">${dot}<span class="ml-sender">${e(senderOf(item, lang))}</span>`
     + `<span class="ml-subject">${e(subjectOf(item, lang))}</span>`
@@ -556,10 +596,14 @@ function attachmentsHtml(row, lang) {
 /**
  * The remote-image controls for one section, hidden until the frame reports blocked images: this load
  * only ("Show images") and from now on for this sender ("Always show from <sender>").
+ *
+ * The client has no i18n of its own, so both sentences for the blocked count ride the banner as data
+ * attributes: the plural with its placeholder and the singular. The client fills the placeholder with
+ * the integer the frame reported and writes it into a status line inside the banner.
  */
 function imageBanner(row, accountId, lang) {
   const sender = typeof row?.fromAddr === "string" ? row.fromAddr : "";
-  return `<div class="ml-img-banner" data-ml-img-banner hidden data-account="${e(accountId)}" data-sender="${e(sender)}">`
+  return `<div class="ml-img-banner" data-ml-img-banner hidden data-account="${e(accountId)}" data-sender="${e(sender)}" data-ml-blocked-many="${e(t("mail.imagesHidden", lang))}" data-ml-blocked-one="${e(t("mail.imageHiddenOne", lang))}">`
     + `<button type="button" class="ml-btn" data-ml-show-images>${e(t("mail.showImages", lang))}</button>`
     + `<button type="button" class="ml-btn" data-ml-always-images>${e(fill(t("mail.alwaysShowFrom", lang), { sender }))}</button>`
     + "</div>";
@@ -725,7 +769,8 @@ export function renderMailPage({
   // `view` picks the view inside the page; settings is built in a later task, and until then only
   // the inbox and the search view have anything to draw.
   if (view === "inbox" && page) {
-    return pageShell(inboxViewHtml({ accounts: usable, folders, page, acct, folderId, now, lang, tz, flash }), lang);
+    // The inbox's own refresh row carries the settings gear, so the page header row does not.
+    return pageShell(inboxViewHtml({ accounts: usable, folders, page, acct, folderId, now, lang, tz, flash }), lang, { gearInHead: true });
   }
   return pageShell("", lang);
 }

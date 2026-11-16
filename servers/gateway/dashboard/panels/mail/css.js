@@ -130,6 +130,7 @@ const SETTINGS_RULES = `
   .ml-switch { display: flex; align-items: center; gap: 8px; min-height: 44px; min-width: 0; font-size: 0.9rem; overflow-wrap: anywhere; }
   .ml-help { margin: 0; min-width: 0; font-size: 0.8rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
   .ml-synced { font-size: 0.8rem; color: var(--crow-text-secondary); }
+  .ml-allow-title { margin: 0; min-width: 0; font-size: 0.9rem; font-weight: 600; overflow-wrap: anywhere; }
   .ml-update-password { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
   .ml-update-password > summary { display: flex; align-items: center; min-height: 44px; cursor: pointer; }
   .ml-allow { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -161,6 +162,13 @@ export function mailCss({ inbox = false, message = false, settings = false } = {
     color: var(--crow-text-primary); font: inherit; font-size: 0.9rem; text-decoration: none; cursor: pointer; text-align: center;
   }
   .ml-btn--primary { background: var(--crow-accent); border-color: var(--crow-accent); color: var(--crow-accent-contrast); font-weight: 600; }
+  .ml-page-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .ml-page-head .ml-title { flex: 1 1 auto; min-width: 0; }
+  .ml-gear {
+    flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px;
+    padding: 0; box-sizing: border-box;
+  }
+  .ml-gear-icon { display: block; width: 20px; height: 20px; }
   .ml-back {
     display: inline-flex; align-items: center; align-self: flex-start; min-height: 44px; padding: 0 12px;
     box-sizing: border-box; border-radius: var(--crow-radius-pill); color: var(--crow-text-primary);
