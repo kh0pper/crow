@@ -444,8 +444,21 @@ const STYLES = `
   .studio .st-th-name { display: flex; flex-direction: column; min-width: 0; }
   .studio .st-name {
     font-size: 13px; font-weight: 600; cursor: pointer;
+    min-width: 44px; min-height: 44px; display: flex; align-items: center;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   }
+  /* The pencil beside a track's name is its own 44 px target: renaming and
+     selecting the track are two different things, so they never share one tap. */
+  .studio .st-track-rename {
+    flex: 0 0 auto; min-width: 44px; min-height: 44px; border-radius: 6px;
+    border: 1px solid var(--st-edge); background: #24282D; color: var(--st-text);
+    font: inherit; font-size: 14px; cursor: pointer;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  /* The track the operator selected by tapping its name (aimTrackId). It is this
+     page's view state: the song does not know which track is aimed at. */
+  .studio .st-th-aimed { box-shadow: inset 0 0 0 2px var(--st-human); }
   .studio .st-kind {
     font-size: 11px; color: var(--st-muted);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -620,6 +633,20 @@ const STYLES = `
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .studio .st-cell { padding: 6px; border-right: 1px solid var(--st-line-soft); border-bottom: 1px solid var(--st-line-soft); }
+  /* What one grid cell is doing, all of it view state and none of it a document
+     change: the clip the engine reported playing on its track (green), the scene
+     a launch queued for the next bar (orange, dashed), a muted track's cells,
+     an empty cell, and the cell of the clip this page has open. */
+  .studio .st-cell-playing { background: #16211B; }
+  .studio .st-cell-playing .st-clip { border-color: #6FCF97; background: #1F3A2A; }
+  .studio .st-cell-next { outline: 2px dashed var(--st-human); outline-offset: -3px; }
+  .studio .st-cell-muted { opacity: 0.5; }
+  .studio .st-cell-empty { background: #191C20; }
+  .studio .st-cell-editing { box-shadow: inset 0 0 0 2px #FFFFFF; }
+  /* The editor header's Copy to scene picker: a scene's own name, so it is wider
+     than the small numeric fields beside it. */
+  .studio .st-copy-scene-field .st-select { width: auto; min-width: 132px; }
+  .studio .st-copy-scene-field .st-select:disabled { opacity: 0.55; cursor: default; }
   .studio .st-clip {
     width: 100%; min-height: 46px; padding: 2px 8px; border-radius: 7px;
     border: 2px solid var(--st-human); background: #24282D; color: var(--st-text);
