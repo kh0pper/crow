@@ -955,26 +955,302 @@ const RELEX_BUDGET_FLOOR = 1024 * 1024;
 /** The document-length factor of that budget: ~8 full re-reads of the input. */
 const RELEX_BUDGET_FACTOR = 8;
 
+// ---------------------------------------------------------------------------
+// TWO MORE QUADRATIC BLOCK-LEXER SHAPES — a table precheck and a scan budget
+//
+// The depth counter above bounds NESTING. It does not bound two other shapes
+// the block lexer is quadratic on, both measured on this tree (marked 17.0.6 +
+// the math extension; CPU ms for one whole render, before the guards below):
+//
+//   shape (repeated to fill)      8 KB   16 KB   32 KB   64 KB   128 KB owner
+//   "a\n-|-\n"                    117     236     795    2850       11374
+//   "|a\n|-|-\n"                   38     125     469    1771        7311
+//   "a\n-\n"                      41     106     395    1070        3942
+//   "a|b\n-|-|-\n"                 30     112     330    1243        5121
+//   "a\n -\n"                     21      80     312    1213        4802
+//   "    x\n>     y\n"             19      53     190     676        2744
+//
+// …i.e. ~4x per doubling. Both are O(rest of the document) work done once per
+// line, and neither is nesting, so neither the depth counter nor the re-lex
+// byte budget (which only counts marked's `this.blockquote(f)` / `this.list(f)`
+// re-lex path) can see them.
+//
+// SHAPE 1, THE TABLE. The block lexer tries `table` at every line. marked's gfm
+// table RULE is header row + delimiter row + `rows` group, and that rows group
+// (`(?:(?! *\n|hr|heading|…).*(\n|$))*`) eats EVERY following line; the
+// tokenizer then rejects the table — the delimiter row has no `|`/`:`
+// (`"a\n-\n"`), or its column count differs from the header's (`"a\n-|-\n"`:
+// one header cell, two delimiter cells) — and the block lexer advances by ONE
+// line and does it again. So each line rescans the rest: measured per
+// TOKENIZER at 8/16/32/64 KB (same shape, plain marked 17.0.6, CPU ms summed
+// over every call), `table` costs 71/170/594/2306 ms and the PARAGRAPH
+// tokenizer another 20/37/162/442 ms, because the gfm paragraph rule folds the
+// same table rule into its stop lookahead (marked's `edit()` strips the `^`
+// anchor, so inside the lookahead it can start anywhere) — the paragraph is
+// what stops the paragraph at a table-shaped start, and it pays the same rows
+// scan to decide (one `paragraph.exec` at a table-shaped start matches 5
+// characters and still costs, like one `table.exec`, a linear pass of 0.03 ms
+// at 8 KB rising to 0.13 ms at 64 KB).
+//
+// The fix is the one marked took upstream (markedjs/marked#4213, #4229, not
+// released in 17.0.6): decide whether a table STARTS from the header and
+// delimiter rows alone. `tableStartsHere` below does exactly that — it runs
+// marked's OWN table rule (and marked's own `tableDelimiter`, `tableAlignChars`
+// and `splitCells` rules, so the acceptance test cannot drift from the
+// tokenizer's) on a source truncated after the delimiter row, and the
+// tokenizer is never called when the answer is no. It cannot reject a table
+// marked accepts: the rows group only ever extends the match, never decides it,
+// and the acceptance checks below are marked's own, in marked's own order.
+// The paragraph rule gets the same treatment: `paragraphWithoutTableScan`
+// swaps the table rule folded into its lookahead for the header-only one, which
+// decides every stop IDENTICALLY (a lookahead only asks "does a table start
+// here?") at O(header) instead of O(rest). That equivalence is exact, not
+// approximate: the full rule is the header-only match followed by
+// `(?:\n(rows)\n*|$)`, `rows` may match ZERO lines, and the header-only form
+// ends with `(?:\n|$)`, so the two rules match exactly the same prefixes of a
+// source — every string one matches, the other does too. The header and
+// delimiter cap groups are within-line for the same reason, so truncating the
+// source after the delimiter row cannot change them either. Both are per-Lexer
+// (the rules object is the Lexer's own, never marked's prototype or the shared
+// rule table), and neither can change the rendered bytes: the differential test
+// in tests/md-block-guard.test.js renders 2,000 seeded table-shaped documents
+// with and without the precheck and requires identical HTML.
+//
+// SHAPE 2, A QUOTE HOLDING INDENTED CODE, `"    x\n>     y\n"`. The line
+// `    x` is an indented code block (one token, one line). The line `>     y`
+// is a quote whose content `    y` is ALSO an indented code block, and that is
+// what makes it quadratic: marked's blockquote RULE matches the WHOLE REMAINING
+// DOCUMENT (on a 32 KB document the rule matches 32,762 of 32,762 characters)
+// while the token it produces is 7 characters long — and it is asked once per
+// quote line (2,341 calls at that size). The rule's folded `paragraph`
+// alternative has no `code` in its stop set — correctly, an indented line
+// continues a paragraph — so after the quoted `    y` it happily swallows every
+// following `    x` line as a lazy continuation, and only stops at the next `>`.
+// The TOKENIZER then throws all of that away: its chunk loop breaks as soon as
+// the last block token of the first chunk is a `code` token, so all it ever
+// returns is the first chunk (7 chars on a four-line sample whose remaining 22
+// the rule had matched in full). Cost: one full-document regex scan per quote
+// line. Measured per tokenizer at 8/16/32/64 KB, the `blockquote` tokenizer is
+// 13.1/52.5/179.5/641.6 ms of the whole lex's 17/58/190/660 ms — the only rule
+// whose cost grows with the rest of the document (`code`, the second most
+// expensive, is 0.8-5.0 ms at all four sizes).
+//
+// There is no cheap precheck that keeps the output identical here (the match is
+// legitimately "everything until the next block start", and a lazy paragraph
+// really is part of the quote), so this one is BOUNDED instead, the same way
+// the re-lex path is: a per-parse budget of BLOCKQUOTE SPAN — the characters
+// the blockquote rule actually matches — `max(1 MiB, 8 × the document)`, the
+// same floor and factor. Ordinary content cannot spend it: for a real quote the
+// token covers the match, so the spans of a document's quotes are disjoint and
+// add up to at most the document (a 64 KB post made entirely of quotes spends
+// 64 KB of a 1 MiB budget). The shape above spends the budget after ~16 quote
+// lines at 64 KB, because every one of those lines is charged the rest of the
+// document; past it the remainder is shown as escaped text, exactly like the
+// depth guard's.
+//
+// Measured WITH both guards (same shapes, CPU ms, one whole render; the 64 KB
+// column is renderBotMarkdown, the 128 KB column renderMarkdown's head):
+//
+//   shape (repeated to fill)     64 KB    128 KB (owner)
+//   "a\n-|-\n"                  161       370
+//   "|a\n|-|-\n"                 136       165
+//   "a\n-\n"                    139       163
+//   "a|b\n-|-|-\n"               122       267
+//   "a\n -\n"                   125       154
+//   "    x\n>     y\n"            25        33
+//
+// …i.e. 18x to 83x faster, and the remaining cost is the per-block work those
+// documents honestly need (32,000 paragraph tokens at 64 KB). Ordinary content
+// pays nothing: a 58 KB post of headings, prose, tables and fences renders in
+// 15 ms with the shape-1 guard on and 14 ms with it off. tests/md-block-guard.test.js
+// holds every number above to 300 ms / 600 ms inside a worker with a 5 s kill,
+// and its differential test requires the guard to be byte-transparent on 2,000
+// seeded table-shaped documents.
+// ---------------------------------------------------------------------------
+
 /**
- * The token a container becomes once the nesting limit is reached: ONE
- * paragraph whose inline tokens are already filled in with a single text token,
- * so marked neither splits it into blocks nor inline-lexes it (a token that
- * already has `tokens` is rendered as they are). `raw` is the whole source the
- * caller was lexing, which is what makes the lexer ADVANCE (blockTokens does
+ * The characters marked's `edit()` strips out of a rule source it folds into
+ * another rule — `valSource.replace(other.caret, '$1')` in marked 17.0.6's
+ * rules.ts, whose `other.caret` this is. Copying the transformation (rather
+ * than the folded regex) is what lets the paragraph rule be rebuilt below from
+ * marked's own table rule instead of from a re-typed copy of it.
+ */
+const RULE_CARET = /(^|[^\[])\^/g;
+
+/**
+ * marked 17.0.6's gfm table rule up to and including the delimiter row —
+ * `block.gfm.table` from its rules.ts, copied verbatim with the trailing
+ * `(?:\n(rows)\n*|$)` group dropped. That group only extends the MATCH (the
+ * rows), so it can never change whether the rule matches; dropping it is what
+ * makes "does a table start here?" an O(header) question. Verified against the
+ * installed marked: `boundedLexer` only uses the header-only form when the
+ * installed `block.table` source still starts with this exact prefix, so a
+ * future marked that changes the rule turns this guard off instead of breaking.
+ */
+const TABLE_HEAD_SOURCE = "^ *([^\\n ].*)\\n {0,3}((?:\\| *)?:?-+:? *(?:\\| *:?-+:? *)*(?:\\| *)?)";
+
+/** The paragraph rule rebuilt per installed source (there are only ever one or
+ *  two: gfm and non-gfm share the folded table rule). `null` means "could not
+ *  rebuild it — keep marked's own", which is a slower parse, never a wrong one. */
+const headerOnlyParagraphs = new Map();
+
+/**
+ * The first two lines of `src` (header row + delimiter row), WITHOUT the line
+ * break that ends the delimiter row, so marked's table rule sees the same
+ * prefix it would see at the head of the full document and can still take its
+ * `$` branch. `null` when there is no second line, i.e. no delimiter row.
+ * @param {string} src
+ * @returns {string|null}
+ */
+function tableHead(src) {
+  const first = src.indexOf("\n");
+  if (first < 0) return null;
+  const second = src.indexOf("\n", first + 1);
+  return second < 0 ? src : src.slice(0, second);
+}
+
+/**
+ * How many cells marked's `splitCells` would find in a table header row — the
+ * count `Tokenizer.table` compares against the delimiter row's. Copied from
+ * marked 17.0.6's helpers.ts (`splitCells(row)` with no count argument): an
+ * even run of backslashes escapes a pipe (so `\|` does not split), the split
+ * is on ` |`, a leading and a trailing empty cell are dropped. The cell TEXT is
+ * not rebuilt here — only the count matters.
+ * @param {string} row
+ * @param {object} other marked's `other` rules
+ * @returns {number}
+ */
+function tableCellCount(row, other) {
+  const piped = row.replace(other.findPipe, (match, offset, str) => {
+    let escaped = false;
+    for (let i = offset - 1; i >= 0 && str[i] === "\\"; i--) escaped = !escaped;
+    return escaped ? "|" : " |";
+  });
+  const cells = piped.split(other.splitPipe);
+  if (!cells[0].trim()) cells.shift();
+  if (cells.length > 0 && !cells[cells.length - 1].trim()) cells.pop();
+  return cells.length;
+}
+
+/**
+ * Would marked's table tokenizer ACCEPT a table that starts at the head of
+ * `src`? This is marked's own acceptance test (see its Tokenizer.table): the
+ * rule must match, the delimiter row must contain a `|` or a `:`, and the
+ * delimiter row must have exactly as many cells as the header row. Everything
+ * it uses (`rules.block.table`, `rules.other.*`) is marked's, so the two cannot
+ * disagree about syntax; the only thing not delegated is `splitCells`, whose
+ * COUNT is re-derived above (a count cannot be read off the tokenizer without
+ * running it).
+ *
+ * The rule runs on the first two lines only: the rows after them extend the
+ * match, never its acceptance, and skipping them is the whole point (see "TWO
+ * MORE QUADRATIC BLOCK-LEXER SHAPES" above). TRUE is only ever an
+ * "I don't know, ask the tokenizer" answer, so a miss here costs a call and
+ * never a table.
+ * @param {object} rules the Lexer's rules (block + other)
+ * @param {string} src
+ * @returns {boolean}
+ */
+function tableStartsHere(rules, src) {
+  const head = tableHead(src);
+  if (head === null) return true;
+  // Cheap first: the delimiter row can only start with `|`, `:` or `-` (after
+  // up to three spaces), so this one indexOf costs a few comparisons instead of
+  // a regex exec at every block position of every document.
+  let at = head.indexOf("\n") + 1;
+  for (let spaces = 0; spaces < 3 && head.charCodeAt(at) === 32 /* space */; spaces++) at++;
+  const first = head.charCodeAt(at);
+  if (first !== 124 /* | */ && first !== 58 /* : */ && first !== 45 /* - */) return false;
+  const cap = rules.block.table.exec(head);
+  // No match, or a delimiter row with no `|`/`:`: marked rejects it — and it
+  // would reject the same prefix in the full source.
+  if (!cap || !rules.other.tableDelimiter.test(cap[2])) return false;
+  const aligns = cap[2].replace(rules.other.tableAlignChars, "").split("|");
+  return tableCellCount(cap[1], rules.other) === aligns.length;
+}
+
+/**
+ * marked's gfm paragraph rule with the table alternative IT FOLDS INTO ITS STOP
+ * LOOKAHEAD replaced by the header-only one (see "SHAPE 1" above). The
+ * lookahead asks only "does a table start here?", and the header-only rule
+ * answers that question identically (the dropped group extends the match, it
+ * never decides it), so the paragraph rule stops in exactly the same places —
+ * at O(header) per stop instead of O(rest of the document).
+ *
+ * The substitution is done on the COMPILED rule source (marked folds the table
+ * rule in at module load, so the rule's own `table` entry is not consulted) and
+ * is guarded: if the installed paragraph rule does not contain the folded table
+ * rule as marked folds it, this returns `null` and the lexer keeps marked's own
+ * rule. Group numbering after the substitution differs only for groups nothing
+ * reads (the paragraph tokenizer uses `match[0]` and `match[1]`; the table
+ * groups inside the lookahead were never captured for anyone).
+ * @param {object} blockRules the Lexer's `rules.block`
+ * @returns {RegExp|null}
+ */
+function paragraphWithoutTableScan(blockRules) {
+  const table = blockRules.table;
+  const paragraph = blockRules.paragraph;
+  if (!table || !paragraph || !table.source.startsWith(TABLE_HEAD_SOURCE)) return null;
+  const cached = headerOnlyParagraphs.get(paragraph.source);
+  if (cached !== undefined) return cached;
+  const folded = table.source.replace(RULE_CARET, "$1");
+  const headerOnly = (TABLE_HEAD_SOURCE + "(?:\\n|$)").replace(RULE_CARET, "$1");
+  const rule = paragraph.source.includes(folded)
+    // A function replacement: the sources contain `$` sequences of their own.
+    ? new RegExp(paragraph.source.replace(folded, () => headerOnly), paragraph.flags)
+    : null;
+  headerOnlyParagraphs.set(paragraph.source, rule);
+  return rule;
+}
+
+/**
+ * TEST SEAM: the shape-1 guard (the table precheck AND the header-only table
+ * rule in the paragraph rule's stop lookahead — the two halves of the same
+ * fix) can be switched off for a render, so tests/md-block-guard.test.js can
+ * render one document both ways and require the HTML to be identical. Nothing
+ * in the product calls this; it is off-switchable state rather than a render
+ * option because the guard lives inside the Lexer, which the Marked instance
+ * does not see.
+ */
+let mdTableGuard = true;
+
+/** @param {boolean} enabled false renders through marked's own table rules */
+export function setMdTableGuardEnabled(enabled) {
+  mdTableGuard = enabled !== false;
+}
+
+/**
+ * The token a guard in boundedLexer hands back instead of lexing: ONE paragraph
+ * holding the whole source the caller was lexing. `raw` is all of that source,
+ * which is what makes the lexer ADVANCE (blockTokens does
  * `src.substring(token.raw.length)`) and what keeps the tokenizer re-lex path
- * (below) from re-parsing a tail it thinks was left over). A text token's
- * `text` is character data — marked escapes it in parseInline — so no markup,
- * and no backslash, is ever added to the author's words.
+ * (below) from re-parsing a tail it thinks was left over). `tokens` starts empty
+ * and is filled with escaped text tokens by guardAndParse (see `guarded`), so a
+ * text token's `text` is character data — marked escapes it in parseInline — and
+ * no markup, and no backslash, is ever added to the author's words.
+ *
+ * It is a PARAGRAPH, exactly like marked's own `Tokenizer.paragraph` output — and
+ * that means it must be indistinguishable from one to marked's
+ * paragraph-CLIPPING branch as well, which is a queue invariant, not a token
+ * one. `this.lexer.inline()` pushes one `{ src, tokens }` entry per paragraph
+ * token, and when a quote's content is lexed with `lastParagraphClipped = true`
+ * marked merges a following paragraph into the previous paragraph token with
+ * `inlineQueue.pop(); inlineQueue.at(-1).src = lastToken.text` (Lexer.ts,
+ * the paragraph branch). A paragraph token with NO queue entry behind it breaks
+ * that pairing: the `pop` takes the NEW paragraph's own entry — the one the
+ * surviving token needs — and `at(-1)` then reads the entry before it, or, at
+ * the start of a lexer frame, `undefined`: measured on this tree, `"> "` x
+ * 32,000 + `"x\nlazy"` threw `TypeError: Cannot set properties of undefined
+ * (setting 'src')` the moment the blockquote-span guard began flattening quote
+ * lines — a parse that threw, i.e. "" on the bot path. So flatGuardToken
+ * (below) pushes the entry, and because that branch rewrites the entry's `src`
+ * to the MERGED text, guardAndParse fills `tokens` from the entry's current
+ * `src`: nothing the merge folded in is dropped.
  * @param {string} src
  * @returns {{type: string, raw: string, text: string, tokens: object[]}}
  */
 function flatTextToken(src) {
-  return {
-    type: "paragraph",
-    raw: src,
-    text: src,
-    tokens: [{ type: "text", raw: src, text: src }],
-  };
+  return { type: "paragraph", raw: src, text: src, tokens: [] };
 }
 
 /**
@@ -1035,6 +1311,15 @@ const RELEX_TOKENIZERS = ["blockquote", "list"];
  * whole source it was given is what keeps that path advancing instead of
  * looping.
  *
+ * A third family of quadratic shapes lives in marked's block RULES, below this
+ * recursion and invisible to both counters above: a table attempt that rescans
+ * the rest of the document and is then rejected, and a blockquote rule that
+ * matches the whole remainder and then has it dropped. See "TWO MORE QUADRATIC
+ * BLOCK-LEXER SHAPES" further up: the first is PRECHECKED away (two cheap
+ * rules-level wrappers, no source rewriting), the second is bounded by a
+ * per-parse budget of blockquote span — same floor and factor as the re-lex
+ * budget, and it degrades the same way once spent.
+ *
  * The options are COPIED: marked's Lexer constructor caches a Tokenizer on the
  * options object it is given (`options.tokenizer = new Tokenizer()`) and rebinds
  * `tokenizer.lexer`, so passing an instance's shared defaults would let two
@@ -1064,10 +1349,77 @@ function boundedLexer(options, inputLength = 0) {
   const relexBudget = Math.max(RELEX_BUDGET_FLOOR, RELEX_BUDGET_FACTOR * inputLength);
   /** Characters re-read through that path so far in this parse. */
   let relexBytes = 0;
+  /** The characters this parse may spend in marked's blockquote RULE — the
+   *  span it matches, which is what that rule's cost is proportional to (see
+   *  "SHAPE 2" above). Same floor and factor as the re-lex budget. */
+  const blockquoteBudget = Math.max(RELEX_BUDGET_FLOOR, RELEX_BUDGET_FACTOR * inputLength);
+  /** Blockquote-rule span spent so far in this parse. */
+  let blockquoteSpan = 0;
+
+  const tokenizer = lexer.tokenizer;
+
+  /**
+   * flatTextToken PLUS the inline-queue entry marked expects behind every
+   * paragraph token (see flatTextToken): `{ src, tokens }` with `tokens` the SAME
+   * array the token carries, and `guarded: true` so guardAndParse knows this
+   * block is already flattened — it fills the text tokens instead of charging
+   * the document's inline budget and inline-lexing them.
+   * @param {string} src
+   * @returns {{type: string, raw: string, text: string, tokens: object[]}}
+   */
+  function flatGuardToken(src) {
+    const token = flatTextToken(src);
+    lexer.inlineQueue.push({ src, tokens: token.tokens, guarded: true });
+    return token;
+  }
+
+  // 0. The two rules-level guards (see "TWO MORE QUADRATIC BLOCK-LEXER
+  //    SHAPES"): the table precheck, the header-only table rule inside the
+  //    paragraph rule's stop lookahead, and the blockquote span budget. All
+  //    three are per-Lexer: `rules` is this Lexer's own object (marked's Lexer
+  //    constructor hands the tokenizer a fresh one), and the paragraph rule is
+  //    REPLACED in a copy of it, never mutated in place — the shared rule table
+  //    every other marked user in this process parses with keeps marked's own
+  //    regex.
+  const rules = tokenizer.rules;
+  const paragraph = mdTableGuard && rules && rules.block
+    ? paragraphWithoutTableScan(rules.block)
+    : null;
+  if (paragraph) tokenizer.rules = { ...rules, block: { ...rules.block, paragraph } };
+
+  // The table tokenizer: rejected before it can run its rows scan.
+  if (mdTableGuard && rules && rules.block && rules.block.table && rules.other) {
+    const table = tokenizer.table;
+    tokenizer.table = function (src) {
+      if (!tableStartsHere(rules, src)) return undefined;
+      return table.call(this, src);
+    };
+  }
+
+  // The blockquote tokenizer: its rule's matched span is what it costs, so
+  // that span is what is charged — before the call, so a document that has
+  // spent the budget never pays for another full-document scan. The charge is
+  // only worked out where the rule can match at all (`blockquoteStart`, marked's
+  // own `^ {0,3}>`): every block position asks the blockquote tokenizer, and
+  // scanning the rest to price a quote that starts with `#` or `- ` would be a
+  // per-block cost the guard itself created.
+  if (rules && rules.block && rules.block.blockquote && rules.other
+    && rules.other.blockquoteStart) {
+    const blockquoteRule = rules.block.blockquote;
+    const blockquoteStart = rules.other.blockquoteStart;
+    const blockquote = tokenizer.blockquote;
+    tokenizer.blockquote = function (src) {
+      if (blockquoteStart.test(src)) {
+        const span = blockquoteRule.exec(src);
+        blockquoteSpan += span ? span[0].length : 0;
+        if (blockquoteSpan > blockquoteBudget) return flatGuardToken(src);
+      }
+      return blockquote.call(this, src);
+    };
+  }
 
   // 2. The re-lex path: counted here, because a container token opened by a
   //    direct `this.blockquote(f)` / `this.list(f)` never reaches blockTokens.
-  const tokenizer = lexer.tokenizer;
   for (const name of RELEX_TOKENIZERS) {
     const original = tokenizer[name];
     tokenizer[name] = function (src) {
@@ -1083,9 +1435,9 @@ function boundedLexer(options, inputLength = 0) {
       // on ordinary lexing instead of on the O(n²) chunk loop it guards.
       if (frame && lexFrames === frame.mark
         && (relexBytes += src.length) > relexBudget) {
-        return flatTextToken(src);
+        return flatGuardToken(src);
       }
-      if (depth >= MD_MAX_NEST) return flatTextToken(src);
+      if (depth >= MD_MAX_NEST) return flatGuardToken(src);
       depth++;
       frames.push({ mark: lexFrames });
       try {
@@ -1104,7 +1456,7 @@ function boundedLexer(options, inputLength = 0) {
   lexer.blockTokens = function (src, tokens, lastParagraphClipped) {
     if (depth >= MD_MAX_NEST) {
       const out = tokens || [];
-      out.push(flatTextToken(src));
+      out.push(flatGuardToken(src));
       return out;
     }
     // `lastParagraphClipped` is forwarded as given: marked's own default
@@ -1633,6 +1985,15 @@ function guardAndParse(src, instance) {
   }
   let budget = BOT_MD_SQ_BUDGET;
   for (const entry of lexer.inlineQueue) {
+    // A block-lexer guard (flatGuardToken) already flattened this block: its
+    // entry is here only because marked's paragraph-clipping branch expects one
+    // behind every paragraph token. Fill it from the entry's CURRENT src — the
+    // clipping branch rewrites that when it merges a following paragraph in —
+    // and charge nothing: there is no inline lexing left to bound.
+    if (entry.guarded) {
+      for (const token of plainTextTokens(entry.src)) entry.tokens.push(token);
+      continue;
+    }
     const d = countDelims(entry.src);
     // Three independent costs share the document budget, each measured in the
     // units it makes marked's inline lexer spend: d² for the emphasis/link
@@ -1737,7 +2098,8 @@ export function renderBotMarkdown(markdown) {
   return withImageContext({ policy: "bot", storageOrigin: null }, () => {
     try {
       html = guardAndParse(src, botMarked);
-    } catch {
+    } catch (e) {
+      if (process.env.CROW_MD_DEBUG) throw e;
       return "";
     }
     return sanitizeRendered(html, { imagePolicy: "bot" });
