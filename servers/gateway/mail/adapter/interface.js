@@ -1,5 +1,5 @@
 /**
- * Crow Mail's provider-neutral adapter: the nine methods a mailbox implementation offers, the shape
+ * Crow Mail's provider-neutral adapter: the eleven methods a mailbox implementation offers, the shape
  * of each answer, and `validateOutgoing` — the one rule an outgoing message passes before any
  * implementation touches it.
  *
@@ -34,6 +34,17 @@
  * should carry — while an address or a message id carrying one is refused like any other control
  * character.
  *
+ * The two actions — `setFlags` and `move` — share one rule, because both change a message the caller
+ * last saw in a listing: the caller says which `uidValidity` it believes the folder has, the adapter
+ * takes the mailbox lock, and only then compares the two. A folder whose UIDVALIDITY moved on is a
+ * different mailbox whose UIDs name other messages, so a mismatch is `CHANGED` before any STORE or
+ * MOVE runs — never a flag change on, or a move of, whatever now holds that UID. When the values
+ * agree, the adapter learns from one UID FETCH which of the named UIDs still exist, acts on those
+ * alone, and answers with their count: nothing there is `{updated: 0}` / `{moved: 0}`, which a caller
+ * reads as "the message is gone", not as a failure. `setFlags` accepts `\Seen` and nothing else —
+ * Crow has no other flag of its own — and both calls take at most 100 UIDs, so one action is one
+ * command line.
+ *
  * @typedef {{name: string|null, address: string}} AdapterAddress
  * @typedef {{path: string, name: string, specialUse: string|null, delimiter: string,
  *            selectable: boolean}} AdapterFolder
@@ -42,6 +53,8 @@
  * @typedef {{uid: number, flags: string[], internalDate: number, raw: Buffer}} AdapterMessage
  * @typedef {{folderPath: string, uid: number|null}} AdapterDraftRef
  * @typedef {{messageId: string, accepted: string[], rejected: string[]}} AdapterSendResult
+ * @typedef {{updated: number}} AdapterFlagResult
+ * @typedef {{moved: number}} AdapterMoveResult
  * @typedef {{from: AdapterAddress, to: AdapterAddress[], cc?: AdapterAddress[],
  *            bcc?: AdapterAddress[], subject: string, text: string, html?: string|null,
  *            inReplyTo?: string|null, references?: string[],
@@ -61,6 +74,8 @@ export const ADAPTER_METHODS = Object.freeze([
   "search",
   "saveDraft",
   "send",
+  "setFlags",
+  "move",
   "watch",
 ]);
 

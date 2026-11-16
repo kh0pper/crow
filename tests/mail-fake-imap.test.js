@@ -758,6 +758,63 @@ test("a mailbox name is escaped in the LIST line and survives the round trip", a
   await client.logout();
 });
 
+test("UID COPY, UID MOVE and UID EXPUNGE act on the uids they name", async () => {
+  const fake = await startFake();
+  const copied = fake.deliver("INBOX", makeRaw({ subject: "copy me" }), { flags: ["\\Seen"] });
+  const moved = fake.deliver("INBOX", makeRaw({ subject: "move me" }));
+  const stays = fake.deliver("INBOX", makeRaw({ subject: "keep me" }));
+
+  const raw = await openRaw(fake);
+  try {
+    await rawLogin(raw);
+    raw.send("a2 SELECT INBOX");
+    assert.match(await raw.next((line) => line.startsWith("a2 ")), /^a2 OK/);
+
+    raw.send(`a3 UID COPY ${copied} Trash`);
+    assert.match(await raw.next((line) => line.startsWith("a3 ")), /^a3 OK UID COPY completed/);
+
+    raw.send(`a4 UID MOVE ${moved} Trash`);
+    assert.match(await raw.next((line) => line.startsWith("a4 ")), /^a4 OK UID MOVE completed/);
+
+    raw.send(`a5 UID COPY ${copied} Gone2024`);
+    assert.match(await raw.next((line) => line.startsWith("a5 ")), /^a5 NO/,
+      "a destination the server does not have is refused");
+
+    // UID EXPUNGE removes only a \Deleted message in the set it names.
+    raw.send(`a6 UID STORE ${stays} +FLAGS (\\Deleted)`);
+    assert.match(await raw.next((line) => line.startsWith("a6 ")), /^a6 OK/);
+    raw.send(`a7 UID EXPUNGE ${copied}`);
+    assert.match(await raw.next((line) => line.startsWith("a7 ")), /^a7 OK/);
+    raw.send("a8 STATUS INBOX (MESSAGES)");
+    assert.match(await raw.next((line) => line.startsWith('* STATUS "INBOX"')), /MESSAGES 2/,
+      "the uid named was not deleted, so nothing went");
+    raw.send(`a9 UID EXPUNGE ${stays}`);
+    assert.match(await raw.next((line) => line.startsWith("a9 ")), /^a9 OK/);
+    raw.send("a10 STATUS INBOX (MESSAGES)");
+    assert.match(await raw.next((line) => line.startsWith('* STATUS "INBOX"')), /MESSAGES 1/);
+
+    assert.ok(fake.commands.includes("UID COPY"));
+    assert.ok(fake.commands.includes("UID MOVE"));
+    assert.ok(fake.commands.includes("UID EXPUNGE"));
+  } finally {
+    raw.close();
+  }
+
+  const client = await connectFake(fake);
+  const trash = await client.mailboxOpen("Trash");
+  assert.equal(trash.exists, 2);
+  const copy = await client.fetchOne("1", { flags: true, source: true }, { uid: true });
+  assert.match(copy.source.toString(), /copy me/);
+  assert.ok(copy.flags.has("\\Seen"), "a copy keeps the flags it had");
+  const movedOn = await client.fetchOne("2", { source: true }, { uid: true });
+  assert.match(movedOn.source.toString(), /move me/);
+  const inbox = await client.mailboxOpen("INBOX");
+  assert.equal(inbox.exists, 1);
+  assert.deepEqual(await client.search({ all: true }, { uid: true }), [copied],
+    "the copied message stayed, the moved one left and the uid EXPUNGE named was the one removed");
+  await client.logout();
+});
+
 /* ----------------------------------------------------------------------------- close */
 
 test("close leaves no socket from the server behind", async () => {

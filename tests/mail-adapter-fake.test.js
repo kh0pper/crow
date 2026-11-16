@@ -20,8 +20,14 @@ function makeAdapter(opts = {}) {
     expunge: fake.expunge,
     moveIn: fake.moveIn,
     bumpUidValidity: fake.bumpUidValidity,
+    resetUidValidity: fake.resetUidValidity,
     dropWatch: fake.dropWatch,
     emit: fake.emit,
+    commands: () => [...fake.wire],
+    // An in-memory mailbox has no deadline: the next call rejects the way the adapter's own command
+    // deadline does when a server answers nothing.
+    silenceNext: (method) => { fake.failNext(method, new MailError("TIMEOUT", "command_deadline")); },
+    credentials: () => [],
   };
 }
 
@@ -101,9 +107,10 @@ test("assertAdapter accepts the fake and names the method an adapter is missing"
   assert.throws(() => assertAdapter({}), (err) => /connect/.test(err.message));
 });
 
-test("the method list is the nine the plan names, in order", () => {
+test("the method list is the eleven the plan names, in order", () => {
   assert.deepEqual([...ADAPTER_METHODS], [
-    "connect", "close", "listFolders", "list", "get", "search", "saveDraft", "send", "watch",
+    "connect", "close", "listFolders", "list", "get", "search", "saveDraft", "send",
+    "setFlags", "move", "watch",
   ]);
   assert.ok(Object.isFrozen(ADAPTER_METHODS));
 });

@@ -65,6 +65,12 @@ const passwordCredentials = (password) => ({ getSecrets: async () => ({ MAIL_PAS
 
 const FAST = { connectMs: 4000, greetingMs: 4000, socketMs: 4000, commandMs: 4001 };
 
+/**
+ * The contract's own budgets: short enough that a silenced command ends at the command deadline, and a
+ * socket watchdog that is far longer, so the deadline is what a silent server is ended by.
+ */
+const CONTRACT_TIMEOUTS = { ...FAST, socketMs: 20_000, commandMs: 2000 };
+
 /** The largest delay `setTimeout` takes before it overflows and fires at once, and one past it. */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const OVER_CEILING_MS = MAX_TIMEOUT_MS + 1;
@@ -270,7 +276,7 @@ runAdapterContract(async (opts = {}) => {
   const adapter = createImapSmtpAdapter({
     account: accountFor(fake, { smtp: { host: smtp.host, port: smtp.port, security: "none" } }),
     credentials: passwordCredentials(FAKE_PASSWORD),
-    timeouts: FAST,
+    timeouts: CONTRACT_TIMEOUTS,
   });
   const close = adapter.close.bind(adapter);
   adapter.close = async () => {
@@ -291,6 +297,12 @@ runAdapterContract(async (opts = {}) => {
     expunge: async (mailbox, uid) => fake.expunge(mailbox, uid),
     moveIn: async (mailbox, raw, options = {}) => fake.moveIn(mailbox, raw, options),
     bumpUidValidity: async (mailbox) => fake.bumpUidValidity(mailbox),
+    resetUidValidity: async (mailbox) => fake.resetUidValidity(mailbox),
+    commands: () => [...fake.commands],
+    // A real server cannot be told to ignore one method's command, so the next command is what goes
+    // unanswered: whichever command an action starts with, the adapter's deadline ends it as TIMEOUT.
+    silenceNext: () => { fake.silenceNext(); },
+    credentials: () => [FAKE_USER, FAKE_PASSWORD],
     dropWatch: async () => {
       fake.dropConnections();
       await tick(50);
@@ -1483,6 +1495,92 @@ test("a budget stop leaves the rest absent even when the bodies arrive out of or
     const second = await adapter.get("INBOX", rest);
     assert.deepEqual(second.map((message) => message.uid), rest, "the next call fetches what was left");
     assert.ok(second.every((message) => message.raw.length > 0));
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+/* ------------------------------------------------------------ plan 2: the adapter's actions */
+
+test("a refused flag, a bad uid list and a missing uidValidity reach no connection", async () => {
+  const fake = await startFake();
+  const uid = fake.deliver("INBOX", makeRaw({ subject: "hands off" }));
+  const adapter = adapterFor(fake);
+  try {
+    await adapter.connect();
+    const listing = await adapter.list("INBOX");
+    const before = { commands: fake.commands.length, connections: fake.connectionCount() };
+
+    await assert.rejects(
+      adapter.setFlags("INBOX", [uid], { add: ["\\Deleted"], expectedUidValidity: listing.uidValidity }),
+      mailCode("BAD_INPUT"),
+    );
+    await assert.rejects(
+      adapter.setFlags("INBOX", [uid], { remove: ["\\Flagged"], expectedUidValidity: listing.uidValidity }),
+      mailCode("BAD_INPUT"),
+    );
+    await assert.rejects(adapter.setFlags("INBOX", [uid], { add: ["\\Seen"] }), mailCode("BAD_INPUT"));
+    await assert.rejects(adapter.move("INBOX", [uid], "Trash", {}), mailCode("BAD_INPUT"));
+    await assert.rejects(
+      adapter.move("INBOX", Array.from({ length: 101 }, (_, index) => uid + index), "Trash", {
+        expectedUidValidity: listing.uidValidity,
+      }),
+      mailCode("BAD_INPUT"),
+    );
+
+    assert.deepEqual(fake.commands.slice(before.commands), [], "a refused call sent no command");
+    assert.equal(fake.connectionCount(), before.connections, "and opened no connection");
+    assert.equal((await adapter.list("INBOX")).items[0].flags.includes("\\Seen"), false,
+      "the message is untouched");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("move to a folder that is not there locks the source and sends no copy", async () => {
+  const fake = await startFake();
+  const uid = fake.deliver("INBOX", makeRaw({ subject: "must stay" }));
+  const adapter = adapterFor(fake);
+  try {
+    await adapter.connect();
+    const { uidValidity } = await adapter.list("INBOX");
+    const before = fake.commands.length;
+    const err = await rejectionOf(
+      adapter.move("INBOX", [uid], "Gone2024", { expectedUidValidity: uidValidity }),
+    );
+    assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+    assert.equal(err.code, "NOT_FOUND");
+    const after = fake.commands.slice(before);
+    assert.ok(after.includes("SELECT"), "the source mailbox was locked first");
+    assert.deepEqual(after.filter((name) => /COPY|STORE|MOVE|EXPUNGE/.test(name)), [],
+      "nothing was copied, flagged or expunged");
+    assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.uid), [uid]);
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("move uses UID MOVE when the server advertises it, and nothing is copied twice", async () => {
+  const fake = await startFake({ capabilities: ["MOVE"] });
+  const staying = fake.deliver("INBOX", makeRaw({ subject: "stays put" }));
+  const moving = fake.deliver("INBOX", makeRaw({ subject: "move me" }));
+  const adapter = adapterFor(fake);
+  try {
+    await adapter.connect();
+    const { uidValidity } = await adapter.list("INBOX");
+    const before = fake.commands.length;
+    assert.deepEqual(
+      await adapter.move("INBOX", [moving], "Trash", { expectedUidValidity: uidValidity }),
+      { moved: 1 },
+    );
+    const after = fake.commands.slice(before);
+    assert.ok(after.includes("UID MOVE"), "the server's own MOVE was used");
+    assert.ok(!after.includes("UID COPY"), "and nothing was copied and flagged as well");
+    assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.uid), [staying]);
+    assert.deepEqual((await adapter.list("Trash")).items.map((item) => item.uid), [1]);
   } finally {
     await adapter.close();
     await stopFake(fake);

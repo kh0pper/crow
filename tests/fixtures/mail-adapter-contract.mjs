@@ -5,8 +5,13 @@
  *
  * `makeAdapter(opts)` is an async factory returning `{adapter, ...seeding hooks}`. How a message gets
  * into a mailbox is the server's business, not the contract's, so seeding is deliberately not part
- * of the adapter: the factory supplies `deliver`, `expunge`, `moveIn`, `bumpUidValidity` and
- * `dropWatch` (drop the watch connection). A step whose hook the factory does not provide fails: a
+ * of the adapter: the factory supplies `deliver`, `expunge`, `moveIn`, `bumpUidValidity`,
+ * `resetUidValidity` (a UIDVALIDITY reset: a new value, an emptied mailbox and a uid space that starts
+ * again at 1, so the next delivery takes the uid an earlier message held) and `dropWatch` (drop the
+ * watch connection). Three hooks describe the wire rather than seed it: `commands()` is the list of
+ * commands the server has received so far (the names only), `silenceNext(method)` makes the server
+ * answer nothing, and `credentials()` is the list of credential strings seeded into the server (empty
+ * when an implementation has none). A step whose hook the factory does not provide fails: a
  * factory that cannot seed a step is a gap in the implementation or in the test, not something to
  * pass over in silence. To leave a step out, name it — or a method it calls, or the hook it needs —
  * in `skip`. Only an exact name in that list skips anything; nothing is inferred from a missing
@@ -28,11 +33,15 @@
  *
  * `skip` holds method names, hook names or step names. Task 12 passes `["saveDraft", "send"]` until
  * Task 13 implements them; each step declares the methods it uses, so that is enough.
+ *
+ * The action steps pin the two rules plan 2 adds: `setFlags` accepts `\Seen` and nothing else, and
+ * both actions take the mailbox lock, compare the caller's `expectedUidValidity` with the value the
+ * locked mailbox reports, and refuse with `CHANGED` before any STORE or MOVE when they differ.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { assertAdapter } from "../../servers/gateway/mail/adapter/interface.js";
-import { MailError } from "../../servers/gateway/mail/errors.js";
+import { MailError, MAIL_ERROR_TEXT } from "../../servers/gateway/mail/errors.js";
 
 /**
  * Poll a predicate until it holds. An adapter that reports a change from another socket answers a few
@@ -57,6 +66,22 @@ export async function waitFor(predicate, { timeoutMs = 3000, intervalMs = 5 } = 
 export function settle(ms = 50) {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
+
+/** Await a call that must reject with one MailError code, and answer with that error. */
+async function expectCode(promise, code) {
+  let caught = null;
+  try {
+    await promise;
+  } catch (err) {
+    caught = err;
+  }
+  assert.ok(caught instanceof MailError, `expected a MailError (${code}), got ${caught && caught.name}`);
+  assert.equal(caught.code, code);
+  return caught;
+}
+
+/** The command names that change or read one message: what a refused action must never have sent. */
+const ACTION_COMMAND = /STORE|COPY|MOVE|EXPUNGE|FETCH/;
 
 /** A small RFC 822 message, CRLF, with the headers every mail server normalises. */
 export function rawMessage({
@@ -267,6 +292,209 @@ const STEPS = [
       assert.match(result.messageId, /^<[^<>\s@]+@[^<>\s@]+>$/);
       assert.deepEqual([...result.accepted].sort(), ["kim@example.com", "sam@example.com"]);
       assert.deepEqual(result.rejected, []);
+    },
+  },
+  {
+    name: "setFlags adds and removes \\Seen and reports the uids that changed",
+    methods: ["setFlags", "list"],
+    hooks: ["deliver"],
+    async run({ adapter, deliver }) {
+      const first = await deliver("INBOX", rawMessage({ subject: "first" }));
+      const second = await deliver("INBOX", rawMessage({ subject: "second" }));
+      const { uidValidity } = await adapter.list("INBOX");
+
+      assert.deepEqual(
+        await adapter.setFlags("INBOX", [first, second], { add: ["\\Seen"], expectedUidValidity: uidValidity }),
+        { updated: 2 },
+        "the count is the uids that existed",
+      );
+      let items = (await adapter.list("INBOX")).items;
+      assert.deepEqual(items.map((item) => item.flags.includes("\\Seen")), [true, true], "both are seen now");
+
+      assert.deepEqual(
+        await adapter.setFlags("INBOX", [first], { remove: ["\\Seen"], expectedUidValidity: uidValidity }),
+        { updated: 1 },
+      );
+      items = (await adapter.list("INBOX")).items;
+      assert.equal(items.find((item) => item.uid === first).flags.includes("\\Seen"), false);
+      assert.equal(items.find((item) => item.uid === second).flags.includes("\\Seen"), true,
+        "a uid the call did not name keeps its flag");
+    },
+  },
+  {
+    name: "an action on a mailbox whose uidValidity changed is refused before anything is sent",
+    methods: ["setFlags", "move", "list"],
+    hooks: ["deliver", "resetUidValidity", "commands"],
+    async run({ adapter, deliver, resetUidValidity, commands }) {
+      const uid = await deliver("INBOX", rawMessage({ subject: "the message that was there" }));
+      const { uidValidity } = await adapter.list("INBOX");
+      const reset = await resetUidValidity("INBOX");
+      assert.notEqual(reset, uidValidity, "the mailbox reports a new uidValidity");
+      const replacement = await deliver("INBOX", rawMessage({ subject: "a different message" }), {
+        flags: ["\\Flagged"],
+      });
+      assert.equal(replacement, uid, "the different message holds the same uid");
+
+      let mark = commands().length;
+      await expectCode(adapter.setFlags("INBOX", [uid], {
+        add: ["\\Seen"], expectedUidValidity: uidValidity,
+      }), "CHANGED");
+      assert.deepEqual(commands().slice(mark).filter((name) => ACTION_COMMAND.test(name)), [],
+        "no flag change was sent after the lock");
+
+      mark = commands().length;
+      await expectCode(adapter.move("INBOX", [uid], "Sent", { expectedUidValidity: uidValidity }), "CHANGED");
+      assert.deepEqual(commands().slice(mark).filter((name) => ACTION_COMMAND.test(name)), [],
+        "no move was sent after the lock");
+
+      const inbox = await adapter.list("INBOX");
+      assert.deepEqual(inbox.items.map((item) => item.uid), [uid], "the different message is still in the inbox");
+      assert.deepEqual(inbox.items[0].flags, ["\\Flagged"], "and keeps the flags it arrived with");
+      assert.deepEqual((await adapter.list("Sent")).items, [], "nothing arrived at the destination");
+    },
+  },
+  {
+    name: "a uid the mailbox no longer has changes nothing and counts zero",
+    methods: ["setFlags", "move", "list"],
+    hooks: ["deliver"],
+    async run({ adapter, deliver }) {
+      const first = await deliver("INBOX", rawMessage({ subject: "first" }));
+      const second = await deliver("INBOX", rawMessage({ subject: "second" }));
+      const { uidValidity } = await adapter.list("INBOX");
+      const gone = second + 40;
+
+      assert.deepEqual(
+        await adapter.setFlags("INBOX", [first, gone], { add: ["\\Seen"], expectedUidValidity: uidValidity }),
+        { updated: 1 },
+        "only the uid that exists is counted",
+      );
+      const items = (await adapter.list("INBOX")).items;
+      assert.equal(items.find((item) => item.uid === first).flags.includes("\\Seen"), true);
+      assert.equal(items.find((item) => item.uid === second).flags.includes("\\Seen"), false);
+
+      assert.deepEqual(
+        await adapter.move("INBOX", [gone], "Sent", { expectedUidValidity: uidValidity }),
+        { moved: 0 },
+        "a vanished uid is not an error",
+      );
+      assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.uid), [first, second]);
+      assert.deepEqual((await adapter.list("Sent")).items, [], "nothing was moved");
+    },
+  },
+  {
+    name: "both actions need the uidValidity the caller expects",
+    methods: ["setFlags", "move"],
+    hooks: [],
+    async run({ adapter }) {
+      for (const expectedUidValidity of [undefined, null, 0, -1, 1.5, "7", Number.NaN]) {
+        await expectCode(adapter.setFlags("INBOX", [1], { add: ["\\Seen"], expectedUidValidity }), "BAD_INPUT");
+        await expectCode(adapter.move("INBOX", [1], "Sent", { expectedUidValidity }), "BAD_INPUT");
+      }
+      await expectCode(adapter.setFlags("INBOX", [1], { add: ["\\Seen"] }), "BAD_INPUT");
+      await expectCode(adapter.move("INBOX", [1], "Sent"), "BAD_INPUT");
+    },
+  },
+  {
+    name: "setFlags refuses every flag but \\Seen before it uses the connection",
+    methods: ["setFlags"],
+    hooks: ["commands"],
+    async run({ adapter, commands }) {
+      const before = commands().length;
+      for (const flag of ["\\Deleted", "\\Flagged", "Seen", "\\\\Seen", "", 7, null]) {
+        await expectCode(adapter.setFlags("INBOX", [1], { add: [flag], expectedUidValidity: 1 }), "BAD_INPUT");
+        await expectCode(adapter.setFlags("INBOX", [1], { remove: [flag], expectedUidValidity: 1 }), "BAD_INPUT");
+      }
+      await expectCode(adapter.setFlags("INBOX", [1], { add: "\\Seen", expectedUidValidity: 1 }), "BAD_INPUT");
+      assert.deepEqual(commands().slice(before), [], "a refused flag reached no command");
+    },
+  },
+  {
+    name: "move takes the message out of the source and puts it in the destination",
+    methods: ["move", "list", "get"],
+    hooks: ["deliver"],
+    async run({ adapter, deliver }) {
+      // Two messages already in the destination, so its own uid space is past the source's.
+      await deliver("Sent", rawMessage({ subject: "already there" }));
+      await deliver("Sent", rawMessage({ subject: "also there" }));
+      const staying = await deliver("INBOX", rawMessage({ subject: "stays put" }));
+      const moving = await deliver("INBOX", rawMessage({ subject: "move me", body: "moving body" }));
+      const { uidValidity } = await adapter.list("INBOX");
+
+      assert.deepEqual(
+        await adapter.move("INBOX", [moving], "Sent", { expectedUidValidity: uidValidity }),
+        { moved: 1 },
+      );
+      assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.uid), [staying],
+        "the moved uid is gone from the source");
+      const destination = (await adapter.list("Sent")).items;
+      assert.equal(destination.length, 3, "the message arrived in the destination");
+      const arrived = destination.find((item) => item.uid !== 1 && item.uid !== 2);
+      assert.ok(arrived, "it took a uid of the destination's own");
+      assert.notEqual(arrived.uid, moving, "and that uid is not the one it had in the source");
+      const [stored] = await adapter.get("Sent", [arrived.uid]);
+      assert.match(stored.raw.toString("utf8"), /moving body/);
+    },
+  },
+  {
+    name: "move to a folder that is not there is NOT_FOUND and leaves the source alone",
+    methods: ["move", "list"],
+    hooks: ["deliver"],
+    async run({ adapter, deliver }) {
+      const uid = await deliver("INBOX", rawMessage({ subject: "must not move" }));
+      const { uidValidity } = await adapter.list("INBOX");
+      await expectCode(adapter.move("INBOX", [uid], "NoSuchFolder", { expectedUidValidity: uidValidity }),
+        "NOT_FOUND");
+      assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.uid), [uid]);
+    },
+  },
+  {
+    name: "an action refuses more than 100 uids and an empty uid list",
+    methods: ["setFlags", "move", "list"],
+    hooks: ["deliver"],
+    async run({ adapter, deliver }) {
+      const uid = await deliver("INBOX", rawMessage({ subject: "one" }));
+      const { uidValidity } = await adapter.list("INBOX");
+      const many = Array.from({ length: 101 }, (_, index) => uid + index);
+      await expectCode(adapter.setFlags("INBOX", many, { add: ["\\Seen"], expectedUidValidity: uidValidity }),
+        "BAD_INPUT");
+      await expectCode(adapter.move("INBOX", many, "Sent", { expectedUidValidity: uidValidity }), "BAD_INPUT");
+      await expectCode(adapter.setFlags("INBOX", [], { add: ["\\Seen"], expectedUidValidity: uidValidity }),
+        "BAD_INPUT");
+      await expectCode(adapter.move("INBOX", [], "Sent", { expectedUidValidity: uidValidity }), "BAD_INPUT");
+    },
+  },
+  {
+    name: "a failed action carries one fixed sentence and no credential",
+    methods: ["move", "list"],
+    hooks: ["deliver", "credentials"],
+    async run({ adapter, deliver, credentials }) {
+      const uid = await deliver("INBOX", rawMessage({ subject: "keep me" }));
+      const { uidValidity } = await adapter.list("INBOX");
+      const err = await expectCode(
+        adapter.move("INBOX", [uid], "NoSuchFolder", { expectedUidValidity: uidValidity }),
+        "NOT_FOUND",
+      );
+      assert.equal(err.message, MAIL_ERROR_TEXT.NOT_FOUND);
+      for (const field of ["response", "responseText", "executedCommand", "command"]) {
+        assert.ok(!Object.hasOwn(err, field), `the library field ${field} does not travel`);
+      }
+      const shown = `${JSON.stringify(err)} ${String(err)} ${String(err.stack)}`;
+      for (const secret of credentials()) {
+        assert.ok(!shown.includes(secret), "no credential travels with the failure");
+      }
+      assert.ok(!shown.includes("NoSuchFolder"), "the folder name does not travel either");
+      assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.uid), [uid]);
+    },
+  },
+  {
+    name: "an action the server never answers rejects TIMEOUT",
+    methods: ["move", "list"],
+    hooks: ["deliver", "silenceNext"],
+    async run({ adapter, deliver, silenceNext }) {
+      const uid = await deliver("INBOX", rawMessage({ subject: "quiet" }));
+      const { uidValidity } = await adapter.list("INBOX");
+      silenceNext("move");
+      await expectCode(adapter.move("INBOX", [uid], "Sent", { expectedUidValidity: uidValidity }), "TIMEOUT");
     },
   },
   {

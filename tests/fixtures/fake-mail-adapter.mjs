@@ -11,13 +11,25 @@
  *   expunge(mailbox, uid?) -> removed                      remove one uid (or every \Deleted one)
  *   moveIn(mailbox, raw, {internalDate}) -> uid            append with the caller's old date
  *   bumpUidValidity(mailbox) -> uidValidity                the next listing shows a new value
+ *   resetUidValidity(mailbox) -> uidValidity               a UIDVALIDITY reset: a new value, an
+ *                                                          emptied mailbox and uids that start again
  *   failNext(method, MailError)                            reject the next call to a method
  *   hangNext(method)                                       never settle the call at all
  *   emit(folderPath, reason?)                              report a change without a delivery
  *   dropWatch(err?)                                        the watch connection is lost
  *
- * `sent`, `drafts` and `calls` record what an implementation would have done on the wire. Two real
- * server behaviours are modelled on purpose, because the adapter contract exists to hide them. A UID
+ * `sent`, `drafts`, `calls` and `wire` record what an implementation would have done on the wire.
+ * `calls` is one entry per adapter method (`{method, args}`), so `failNext` and `hangNext` have
+ * something to hook. `wire` is the command names a server would have seen — `SELECT`, `UID FETCH`,
+ * `UID STORE`, `UID MOVE` — which is what a test reads to show that a refused action reached the
+ * mailbox with nothing.
+ *
+ * The action methods (`setFlags`, `move`) apply the contract's own rules: only `\Seen`, at most 100
+ * uids, an `expectedUidValidity` that must be a positive integer, and a `CHANGED` refusal when the
+ * folder's UIDVALIDITY is not the one the caller expected — raised after the `SELECT` and before any
+ * `UID STORE` or `UID MOVE`.
+ *
+ * Two real server behaviours are modelled on purpose, because the adapter contract exists to hide them. A UID
  * search from above the mailbox's range still answers with the last message (`n:*` matches even when
  * `n` is past the end), so `list` first lets the mailbox answer that way and then applies the
  * adapter's own `uid > afterUid` filter: drop the filter and the quirk shows through. And
@@ -27,7 +39,8 @@
  *
  * `send` validates its message with the same `validateOutgoing` a real adapter uses, so a caller that
  * skipped validation fails here too, and the fake never records a message a real implementation would
- * have refused.
+ * have refused. `setFlags` and `move` are recorded in `wire` the way a server would see them, so a
+ * test can show that a refused action sent nothing at all.
  */
 import { MailError } from "../../servers/gateway/mail/errors.js";
 import { validateOutgoing } from "../../servers/gateway/mail/adapter/interface.js";
@@ -53,6 +66,45 @@ function normaliseFlags(flags) {
   return flags.map(String);
 }
 
+/** The most uids one action names, the same bound every implementation applies. */
+const MAX_ACTION_UIDS = 100;
+
+/** The one flag an action may name: `\Seen`, and nothing else. */
+const SEEN_FLAG = "\\Seen";
+
+/** The uids one action names: at least one, at most MAX_ACTION_UIDS, each a positive safe integer. */
+function actionUids(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ACTION_UIDS) {
+    throw new MailError("BAD_INPUT", "uids");
+  }
+  const uids = [];
+  for (const entry of value) {
+    if (!Number.isSafeInteger(entry) || entry < 1) throw new MailError("BAD_INPUT", "uids");
+    if (!uids.includes(entry)) uids.push(entry);
+  }
+  return uids;
+}
+
+/** The UIDVALIDITY the caller expects: a positive integer, or nothing is done at all. */
+function actionUidValidity(value) {
+  if (!Number.isSafeInteger(value) || value < 1) throw new MailError("BAD_INPUT", "expectedUidValidity");
+  return value;
+}
+
+/** A flag list for `setFlags`: `\Seen` only, refused before the mailbox is touched. */
+function actionFlags(value, detail) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new MailError("BAD_INPUT", detail);
+  const flags = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.trim().toLowerCase() !== SEEN_FLAG.toLowerCase()) {
+      throw new MailError("BAD_INPUT", detail);
+    }
+    if (!flags.includes(SEEN_FLAG)) flags.push(SEEN_FLAG);
+  }
+  return flags;
+}
+
 /**
  * @param {{omitUidNext?: boolean, uidValidity?: number, now?: () => number}} [opts]
  * @returns {object} the adapter (all ADAPTER_METHODS) with the seeding hooks attached
@@ -73,6 +125,7 @@ export function createFakeMailAdapter(opts = {}) {
   });
 
   const calls = [];
+  const wire = [];
   const sent = [];
   const drafts = [];
   const watchers = new Set();
@@ -146,6 +199,15 @@ export function createFakeMailAdapter(opts = {}) {
   function bumpUidValidity(mailbox) {
     const folder = folderFor(mailbox);
     folder.uidValidity += 1;
+    return folder.uidValidity;
+  }
+
+  /** A UIDVALIDITY reset: the folder is emptied and its uid space starts again at 1. */
+  function resetUidValidity(mailbox) {
+    const folder = folderFor(mailbox);
+    folder.uidValidity += 1;
+    folder.messages = [];
+    folder.uidNext = 1;
     return folder.uidValidity;
   }
 
@@ -304,6 +366,59 @@ export function createFakeMailAdapter(opts = {}) {
       return { messageId, accepted, rejected: [] };
     },
 
+    async setFlags(folderPath, uids, options = {}) {
+      const opts = options == null ? {} : options;
+      if (typeof opts !== "object") throw new MailError("BAD_INPUT", "options");
+      const add = actionFlags(opts.add, "add");
+      const remove = actionFlags(opts.remove, "remove");
+      if (!add.length && !remove.length) throw new MailError("BAD_INPUT", "flags");
+      const wanted = actionUids(uids);
+      const expected = actionUidValidity(opts.expectedUidValidity);
+      const folder = folderFor(folderPath);
+      await gate("setFlags", [folderPath, uids, options]);
+      wire.push("SELECT");
+      if (folder.uidValidity !== expected) throw new MailError("CHANGED");
+      const existing = folder.messages.filter((message) => wanted.includes(message.uid));
+      if (existing.length === 0) return { updated: 0 };
+      wire.push("UID FETCH", "UID STORE");
+      for (const message of existing) {
+        for (const flag of add) if (!message.flags.includes(flag)) message.flags.push(flag);
+        message.flags = message.flags.filter((flag) => !remove.includes(flag));
+      }
+      emit(folder.path, "flags");
+      return { updated: existing.length };
+    },
+
+    async move(folderPath, uids, destPath, options = {}) {
+      const opts = options == null ? {} : options;
+      if (typeof opts !== "object") throw new MailError("BAD_INPUT", "options");
+      const wanted = actionUids(uids);
+      const expected = actionUidValidity(opts.expectedUidValidity);
+      const folder = folderFor(folderPath);
+      await gate("move", [folderPath, uids, destPath, options]);
+      wire.push("SELECT");
+      if (folder.uidValidity !== expected) throw new MailError("CHANGED");
+      const destination = folderFor(destPath);
+      const existing = folder.messages.filter((message) => wanted.includes(message.uid));
+      if (existing.length === 0) return { moved: 0 };
+      wire.push("UID FETCH", "UID MOVE");
+      for (const message of existing) {
+        const uid = destination.uidNext;
+        destination.uidNext = uid + 1;
+        destination.messages.push({
+          uid,
+          flags: [...message.flags],
+          internalDate: message.internalDate,
+          size: message.raw.length,
+          raw: Buffer.from(message.raw),
+        });
+        emit(destination.path, "exists");
+      }
+      folder.messages = folder.messages.filter((message) => !wanted.includes(message.uid));
+      emit(folder.path, "expunge");
+      return { moved: existing.length };
+    },
+
     async watch(folderPaths, handlers = {}) {
       await gate("watch", [folderPaths, handlers]);
       const paths = Array.isArray(folderPaths) ? folderPaths : [folderPaths];
@@ -332,6 +447,7 @@ export function createFakeMailAdapter(opts = {}) {
     expunge,
     moveIn,
     bumpUidValidity,
+    resetUidValidity,
     failNext,
     hangNext,
     emit,
@@ -339,5 +455,6 @@ export function createFakeMailAdapter(opts = {}) {
     sent,
     drafts,
     calls,
+    wire,
   });
 }

@@ -60,6 +60,12 @@
  * command deadline and its error wrapping, with `\Draft` and `\Seen` set; a mailbox without a
  * `\Drafts` folder is NOT_FOUND rather than a note filed in some folder Crow chose by name.
  *
+ * `setFlags` and `move` are the two ways a message changes after it is stored, and both refuse to act
+ * on a UID whose mailbox is not the one the caller saw: the folder is locked, its UIDVALIDITY is
+ * compared with the caller's `expectedUidValidity`, and a mismatch is CHANGED before any STORE or
+ * MOVE. Only the UIDs a UID FETCH still finds are acted on, and their count is the answer — zero means
+ * the message is gone (or was already moved), which a caller reports rather than retries blindly.
+ *
  * @typedef {import("./interface.js").AdapterFolder} AdapterFolder
  * @typedef {import("./interface.js").AdapterItem} AdapterItem
  * @typedef {import("./interface.js").AdapterListing} AdapterListing
@@ -102,6 +108,15 @@ const MAX_WATCH_FOLDERS = 2;
 
 /** UIDs per FETCH. A listing can carry a whole window, and one command line has a length limit. */
 const FETCH_CHUNK = 200;
+
+/**
+ * The most UIDs one action names. An action is one command line, and a flag change or a move of a
+ * whole page is not what these methods are for: a caller batches, or acts on what it listed.
+ */
+const MAX_ACTION_UIDS = 100;
+
+/** The one flag Crow sets. `setFlags` refuses anything else rather than passing it to a server. */
+const SEEN_FLAG = "\\Seen";
 
 /** A remote search term longer than this is not a search, it is an attack on the server's parser. */
 const MAX_QUERY_CHARS = 1000;
@@ -539,6 +554,42 @@ function requireUidList(value) {
     uids.push(entry);
   }
   return uids;
+}
+
+/**
+ * The UIDs one action names: at least one and at most `MAX_ACTION_UIDS`, each a positive safe
+ * integer. An empty list is refused rather than answered as "nothing happened", because a caller that
+ * sends no UIDs has lost the message it meant to act on.
+ */
+function requireActionUids(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ACTION_UIDS) {
+    throw new MailError("BAD_INPUT", "uids");
+  }
+  return requireUidList(value);
+}
+
+/** The UIDVALIDITY the caller expects: a positive integer, or the call is refused unread. */
+function requireExpectedUidValidity(value) {
+  if (!Number.isSafeInteger(value) || value < 1) throw new MailError("BAD_INPUT", "expectedUidValidity");
+  return value;
+}
+
+/**
+ * A flag list for `setFlags`: an array of `\Seen` (or nothing at all). Any other flag is refused —
+ * `\Deleted` above all, since removing a message from the server is `move`'s job, never a flag a
+ * caller can set from here.
+ */
+function requireSeenFlags(value, detail) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new MailError("BAD_INPUT", detail);
+  const flags = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.trim().toLowerCase() !== SEEN_FLAG.toLowerCase()) {
+      throw new MailError("BAD_INPUT", detail);
+    }
+    if (!flags.includes(SEEN_FLAG)) flags.push(SEEN_FLAG);
+  }
+  return flags;
 }
 
 function requireWatchPaths(value) {
@@ -1044,6 +1095,114 @@ export function createImapSmtpAdapter(options = {}) {
   }
 
   /**
+   * The two message actions, which share everything but the command they end with. The folder is
+   * locked first, so the UIDVALIDITY that answers is the locked mailbox's own; a caller's
+   * `expectedUidValidity` that differs is `CHANGED` before anything is flagged, moved or even fetched,
+   * because the UIDs a caller holds name other messages in a mailbox whose identity changed. Once the
+   * values agree, one UID FETCH says which of the named UIDs are still there; only those are acted on,
+   * and their count is the answer.
+   *
+   * `prepare` runs under the same lock, between the UIDVALIDITY check and the fetch, for the one check
+   * `move` needs first: a destination the server does not list at all.
+   */
+  async function withFolderAction(folderPath, uids, expectedUidValidity, prepare, act) {
+    const path = requireFolderPath(folderPath);
+    const wanted = requireActionUids(uids);
+    const expected = requireExpectedUidValidity(expectedUidValidity);
+    return runCommand(async (client) => {
+      const lock = await client.getMailboxLock(path);
+      try {
+        // The lock alone is not enough to trust `client.mailbox`: its fast path reuses a selection the
+        // connection already has, and that cached UIDVALIDITY can predate a reset the server has since
+        // reported. The SELECT is repeated under the lock, so the value compared here is the locked
+        // mailbox's own and never a remembered one.
+        const box = await client.mailboxOpen(path);
+        const uidValidity = Number(box && box.uidValidity);
+        if (!Number.isSafeInteger(uidValidity) || uidValidity <= 0) {
+          throw new MailError("PROTOCOL", "uidvalidity");
+        }
+        if (uidValidity !== expected) throw new MailError("CHANGED");
+        if (prepare) await prepare(client);
+
+        // One UID FETCH of just the uids: imapflow's flag and move commands do not report a UID the
+        // mailbox no longer holds, so the count has to come from here.
+        const named = new Set(wanted);
+        const existing = [];
+        for await (const message of client.fetch(wanted.join(","), { uid: true }, { uid: true })) {
+          const uid = Number(message.uid);
+          if (!named.has(uid) || existing.includes(uid)) continue;
+          existing.push(uid);
+        }
+        existing.sort((left, right) => left - right);
+        if (existing.length === 0) return 0;
+        await act(client, existing.join(","));
+        return existing.length;
+      } finally {
+        lock.release();
+      }
+    });
+  }
+
+  /**
+   * Add or remove `\Seen` on the UIDs that still exist. Everything is validated first — the folder,
+   * the uids, the flags, the expected UIDVALIDITY — so a refused call opens no connection and sends no
+   * command. A server that answers a STORE with NO is PROTOCOL: the flags a caller asked for did not
+   * change, and reporting a count would be a lie.
+   *
+   * @param {string} folderPath
+   * @param {number[]} uids
+   * @param {{add?: string[], remove?: string[], expectedUidValidity: number}} options
+   * @returns {Promise<AdapterFlagResult>}
+   */
+  async function setFlags(folderPath, uids, options = {}) {
+    const opts = options == null ? {} : options;
+    if (typeof opts !== "object") throw new MailError("BAD_INPUT", "options");
+    const add = requireSeenFlags(opts.add, "add");
+    const remove = requireSeenFlags(opts.remove, "remove");
+    if (!add.length && !remove.length) throw new MailError("BAD_INPUT", "flags");
+    const updated = await withFolderAction(folderPath, uids, opts.expectedUidValidity, null, async (client, range) => {
+      if (add.length) {
+        const ok = await client.messageFlagsAdd(range, add, { uid: true });
+        if (ok === false) throw new MailError("PROTOCOL", "store_refused");
+      }
+      if (remove.length) {
+        const ok = await client.messageFlagsRemove(range, remove, { uid: true });
+        if (ok === false) throw new MailError("PROTOCOL", "store_refused");
+      }
+    });
+    return { updated };
+  }
+
+  /**
+   * Move the UIDs that still exist into another folder of the same account. The destination has to be
+   * a folder the server lists: a name the server does not have is NOT_FOUND before the message is
+   * copied anywhere, so a typo never loses the source copy. Nothing here expunges a message of its
+   * own: the server's MOVE (or imapflow's COPY + `\Deleted` + EXPUNGE fallback) takes it out of the
+   * source as part of the move.
+   *
+   * @param {string} folderPath
+   * @param {number[]} uids
+   * @param {string} destPath
+   * @param {{expectedUidValidity: number}} options
+   * @returns {Promise<AdapterMoveResult>}
+   */
+  async function move(folderPath, uids, destPath, options = {}) {
+    const opts = options == null ? {} : options;
+    if (typeof opts !== "object") throw new MailError("BAD_INPUT", "options");
+    const destination = requireFolderPath(destPath, "destination");
+    const moved = await withFolderAction(folderPath, uids, opts.expectedUidValidity, async (client) => {
+      const entries = await client.list();
+      if (!Array.isArray(entries)) throw new MailError("PROTOCOL", "list");
+      const found = entries.some((entry) => entry.path === destination && isSelectable(entry));
+      if (!found) throw new MailError("NOT_FOUND", "destination");
+    }, async (client, range) => {
+      const result = await client.messageMove(range, destination, { uid: true });
+      if (result === false) throw new MailError("PROTOCOL", "move_refused");
+    });
+    return { moved };
+  }
+
+  /**
    * Server-side search by text, in one folder or across every selectable folder.
    *
    * @param {string} query
@@ -1325,6 +1484,8 @@ export function createImapSmtpAdapter(options = {}) {
     search,
     saveDraft,
     send,
+    setFlags,
+    move,
     watch,
   });
 }
