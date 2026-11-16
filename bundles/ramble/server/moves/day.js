@@ -19,6 +19,15 @@
  * exactly one of the day's open cards; a stand-in never pays (no budget claim,
  * no pet feed).
  *
+ * A LOGGED "SOMETHING ELSE" also marks its area (markLogArea): one `movearea`
+ * row of its own for a log of ten minutes or more, which is what lets a walk or
+ * a band session count toward the week. It pays no Health — `recordLog`
+ * (ledger.js) is the earner — and it never feeds the bird.
+ *
+ * THE WEEK. Every writer above ends by settling the week (`settleWeek`,
+ * week.js), which grants the week's earned item once its balance is full. A
+ * full week pays no Health and no seed: coverage is artwork, not currency.
+ *
  * WHY COMPLETION IS NEVER STORED BY THE PICKER. The wallet sync applies a row
  * from another instance by plain MIN/MAX with no callback, so nothing runs when
  * a row arrives. `isDayComplete` (day-complete.js) derives the answer from the
@@ -57,7 +66,7 @@ import { feed as petFeed, petState } from "../pet.js";
 import {
   MOVE_ALL_KIND, MOVE_BAL_KIND, MOVE_SLOT_KIND, MOVE_STAND_KIND, isDayComplete,
 } from "./day-complete.js";
-import { MOVE_AREA_KIND, SLOTS } from "./week.js";
+import { MOVE_AREA_KIND, SLOTS, settleWeek } from "./week.js";
 import { AREAS, ACTIVITY_KINDS, BALANCE_AREAS } from "./library.js";
 import { awardStreakHeart, ensureStreakV2 } from "./streak.js";
 import { capDayKey, claimCapped } from "./indoor-cap.js";
@@ -152,6 +161,7 @@ export async function recordSlotDone(db, { day, slot, entry, via, now = Date.now
   if (slotName === null) fresh = created;
 
   const settled = await settleDay(db, { day: d, now: at, emit, need });
+  await settleWeek(db, { now: at, day: d, emit });
   return { fresh, all: settled.complete };
 }
 
@@ -498,6 +508,7 @@ export async function finishOutdoor(db, { day, now = Date.now(), emit, cards } =
   let walkedNew = false;
   if (minutes >= CARD_MIN_MINUTES) {
     await insertOnce(db, MOVE_AREA_KIND, `${d}:heart`, 1, at, emit);
+    await settleWeek(db, { now: at, day: d, emit });
     walkedNew = await insertOnce(db, WALKED_KIND, d, 1, at, emit);
     // A long walk is a movement fact, so the day may now count toward laying.
     if (walkedNew) await settleHappyDay(db, { now: at, emit });
@@ -782,4 +793,47 @@ export async function assignStandIn(db, {
   });
   await writeStandInFlag(db, today, source);
   return { ok: true, slot: chosen.slot, all: done.all };
+}
+
+/* ------------------------------------------------------ "something else" logs */
+
+/**
+ * Mark the area a logged "something else" trains on its day.
+ *
+ * A log pays its Health through `recordLog` (ledger.js); this is the separate
+ * balance a log's own area contributes, so a walk marks the heart and a band
+ * session marks the upper body on the day it happened. The area is `areaFor`'s
+ * answer — the caller's own when it is one of AREAS, else the activity's
+ * default — and it is `null` for `other`, which names no area at all, so such a
+ * log marks nothing.
+ *
+ * A log shorter than CARD_MIN_MINUTES marks nothing either: ten minutes is the
+ * smallest chunk that stands for movement at all, and a shorter one is a note,
+ * not training. A `day` that is not a "YYYY-MM-DD" string, or no day at all,
+ * is refused the same way — the row is keyed by the day it is filed under.
+ *
+ * Writes ONE `movearea` row (`<day>:<area>`, the constant 1, through
+ * `insertOnce`, so a repeat is a no-op that reports itself as not fresh) and
+ * then settles the week, which may grant the week's earned item. It never pays
+ * Health, never feeds the pet and never writes a `seed` row.
+ *
+ * Returns `{ marked, area, fresh }`: `marked` says the area was trained,
+ * `area` which one (`null` when nothing was marked) and `fresh` whether THIS
+ * call created the mark.
+ */
+export async function markLogArea(db, {
+  day, activity, minutes, area, now = Date.now(), emit,
+} = {}) {
+  const at = asAt(now);
+  if (typeof day !== "string" || !DAY_RE.test(day)) return { marked: false, area: null };
+
+  const areaName = areaFor(activity, area);
+  if (areaName === null) return { marked: false, area: null };
+  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes < CARD_MIN_MINUTES) {
+    return { marked: false, area: null };
+  }
+
+  const fresh = await insertOnce(db, MOVE_AREA_KIND, `${day}:${areaName}`, 1, at, emit);
+  await settleWeek(db, { now: at, day, emit });
+  return { marked: true, area: areaName, fresh };
 }

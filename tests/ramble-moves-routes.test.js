@@ -15,6 +15,8 @@
  *     appear in no log line and in no emitted row,
  *   - a card is paid against the entry it was started for, never another one,
  *   - a Done mark the ledger cannot file leaves the chunk pay standing,
+ *   - a repeated log still leaves the area it trains marked, and a week made
+ *     whole three weeks back earns its row on a plain read, once,
  *   - the MCP tool refuses an activity outside the fixed vocabulary.
  */
 import { test, before, after } from "node:test";
@@ -29,10 +31,13 @@ import { createHash } from "node:crypto";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createRambleServer } from "../bundles/ramble/server/server.js";
-import { localDay } from "../bundles/ramble/server/eggs.js";
+import { localDay, startOfLocalDay } from "../bundles/ramble/server/eggs.js";
 import { chunkPoints, MOVE_OUTDOOR_KIND } from "../bundles/ramble/server/moves/ledger.js";
 import { rowDelta } from "../bundles/ramble/server/steps.js";
 import { OUTDOOR_SESSION_KEY, outdoorPoints } from "../bundles/ramble/server/moves/day.js";
+import { AREAS } from "../bundles/ramble/server/moves/library.js";
+import { weekDays, weekIdOf } from "../bundles/ramble/server/moves/week.js";
+import { earnedItemId, itemById } from "../bundles/ramble/server/wardrobe.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dir, "..");
@@ -1513,6 +1518,309 @@ test("day payload: two reads of a finished day settle it once", async () => {
       assert.equal(again.complete, true);
       assert.equal((await walletKeys(db, "moveall", day)).length, 1,
         "a second read settles nothing new");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+/* ------------------------------------------------------------- the week (11.x) */
+
+const weekGet = (url) => fetch(url + "/api/ramble/moves/week", { headers: H });
+
+/** The week's days, the two of them that are not today, so a mark never collides. */
+function twoDaysButToday() {
+  const today = localDay(Date.now());
+  return weekDays(weekIdOf(Date.now())).filter((day) => day !== today).slice(0, 2);
+}
+
+/** Two days in each of the five areas: a whole-body week. */
+async function fillWholeWeek(db) {
+  for (const day of twoDaysButToday()) {
+    for (const area of AREAS) {
+      // eslint-disable-next-line no-await-in-loop
+      await walletFact(db, "movearea", day + ":" + area);
+    }
+  }
+}
+
+test("week: a fresh week is empty, seven days long, and writes no weekfull row", async () => {
+  const mount = await freshMount();
+  try {
+    const r = await weekGet(mount.url);
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.weekId, weekIdOf(Date.now()));
+    assert.deepEqual(body.marks, { upper: [], core: [], lower: [], heart: [], mobility: [] });
+    assert.equal(body.total, 0);
+    assert.equal(body.full, false);
+    assert.deepEqual(body.strip.map((day) => day.day), weekDays(body.weekId),
+      "the strip is the whole week, Monday first");
+    assert.equal(body.strip.length, 7);
+    for (const day of body.strip) {
+      assert.equal(day.minutes, 0, "no minutes on " + day.day);
+      assert.deepEqual(day.areas, [], "no areas on " + day.day);
+    }
+    assert.ok(Array.isArray(body.comingUp));
+    assert.equal(body.stageOffer, null);
+    assert.equal(body.earned, null);
+
+    const db = await mountDb(mount.dir);
+    try {
+      assert.deepEqual(await walletKeys(db, "weekfull"), [],
+        "a read of a week that is not whole-body writes nothing");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("week: a whole-body week answers full, writes one weekfull row, and names the kerchief", async () => {
+  const mount = await freshMount();
+  try {
+    const fresh = await (await weekGet(mount.url)).json();
+    assert.equal(fresh.full, false, "nothing has filled the week yet");
+    const weekId = fresh.weekId;
+
+    const db = await mountDb(mount.dir);
+    try {
+      await fillWholeWeek(db);
+
+      const body = await (await weekGet(mount.url)).json();
+      assert.equal(body.weekId, weekId);
+      assert.equal(body.total, 10);
+      assert.equal(body.full, true);
+      assert.deepEqual(await walletKeys(db, "weekfull", weekId), [weekId],
+        "the week's earned row landed once");
+
+      const itemId = earnedItemId(weekId);
+      assert.equal(body.earned.itemId, itemId);
+      assert.equal(body.earned.name, itemById(itemId).name);
+
+      const again = await (await weekGet(mount.url)).json();
+      assert.equal(again.full, true);
+      assert.deepEqual(again.earned, body.earned);
+      assert.deepEqual(await walletKeys(db, "weekfull"), [weekId],
+        "a second read of a settled week writes no row");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("week: a log marks the area it trains, and a short or repeated one marks nothing new", async () => {
+  const mount = await freshMount();
+  try {
+    const today = localDay(Date.now());
+    const walk = await dayPost(mount.url, "/api/ramble/moves/log", {
+      activity: "walk", minutes: 20, effort: "moderate",
+    });
+    assert.equal(walk.status, 200);
+
+    const db = await mountDb(mount.dir);
+    try {
+      let week = await (await weekGet(mount.url)).json();
+      assert.ok(week.marks.heart.includes(today), "a twenty minute walk marks the heart");
+
+      const band = await dayPost(mount.url, "/api/ramble/moves/log", {
+        activity: "band", minutes: 20, effort: "moderate", area: "lower",
+      });
+      assert.equal(band.status, 200);
+      week = await (await weekGet(mount.url)).json();
+      assert.ok(week.marks.lower.includes(today), "the area the log names is the one marked");
+
+      const before = await walletKeys(db, "movearea");
+      const short = await dayPost(mount.url, "/api/ramble/moves/log", {
+        activity: "walk", minutes: 5, effort: "easy",
+      });
+      assert.equal(short.status, 200);
+      week = await (await weekGet(mount.url)).json();
+      assert.deepEqual(week.marks.heart, [today], "a five minute note trains nothing");
+      assert.deepEqual(await walletKeys(db, "movearea"), before, "and writes no area row");
+
+      const repeat = await dayPost(mount.url, "/api/ramble/moves/log", {
+        activity: "walk", minutes: 20, effort: "moderate",
+      });
+      assert.equal(repeat.status, 200, "a repeated log is not an error");
+      assert.deepEqual(await walletKeys(db, "movearea"), before, "and marks nothing new");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("week: a repeated log still leaves the area it trains marked", async () => {
+  const mount = await freshMount();
+  try {
+    const today = localDay(Date.now());
+    const log = { activity: "walk", minutes: 20, effort: "moderate" };
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/log", log)).status, 200);
+
+    const db = await mountDb(mount.dir);
+    try {
+      const mark = today + ":heart";
+      assert.deepEqual(await walletKeys(db, "movearea", mark), [mark], "the first log marked the heart");
+      await db.execute({
+        sql: "DELETE FROM ramble_wallet WHERE kind = ? AND key = ?",
+        args: ["movearea", mark],
+      });
+      assert.deepEqual(await walletKeys(db, "movearea"), [], "the mark is gone before the repeat");
+
+      const repeat = await dayPost(mount.url, "/api/ramble/moves/log", log);
+      assert.equal(repeat.status, 200);
+      assert.equal((await repeat.json()).log.already, true, "the same minute's log is a repeat");
+      assert.deepEqual(await walletKeys(db, "movearea", mark), [mark],
+        "and the repeat puts the mark back");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("week: a week made whole three weeks back earns its row on a plain read, once", async () => {
+  const mount = await freshMount();
+  try {
+    // The first read is what creates and sets up the scratch db this test writes
+    // into; on a fresh week it settles nothing.
+    assert.equal((await (await weekGet(mount.url)).json()).weekId, weekIdOf(Date.now()));
+    const db = await mountDb(mount.dir);
+    try {
+      // The local day three weeks back, at its noon, named the way the router
+      // names it: a day of that week rather than an instant inside it.
+      const pastDay = localDay(startOfLocalDay(Date.now()) - 21 * 86400000 + 43200000);
+      const pastWeek = weekIdOf(new Date(pastDay + "T12:00:00").getTime());
+      const days = weekDays(pastWeek);
+      assert.equal(days.length, 7, "the day names a real week");
+      assert.notEqual(pastWeek, weekIdOf(Date.now()), "and it is not the week of now");
+
+      for (const day of [days[0], days[1]]) {
+        for (const area of AREAS) {
+          // eslint-disable-next-line no-await-in-loop
+          await walletFact(db, "movearea", day + ":" + area);
+        }
+      }
+      assert.deepEqual(await walletKeys(db, "weekfull"), [], "nothing is settled before the rows are whole");
+
+      const week = await (await weekGet(mount.url)).json();
+      assert.equal(week.weekId, weekIdOf(Date.now()), "the answer is still this week");
+      assert.deepEqual(await walletKeys(db, "weekfull"), [pastWeek],
+        "the whole week three weeks back earned its own row");
+
+      await (await weekGet(mount.url)).json();
+      assert.deepEqual(await walletKeys(db, "weekfull"), [pastWeek],
+        "and a second read of it settles nothing new");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+/**
+ * A library of routines that each carry stages, so a played card can be staged
+ * and then offered by a whole-body week. Every routine trains the core, and the
+ * picker falls back to core for the slots that ask for another area.
+ */
+function stagedRoutine(id, n) {
+  return entry({
+    id,
+    kind: "routine",
+    title: "A staged routine, number " + n,
+    minutes: 10,
+    activity: "bodyweight",
+    areas: ["core"],
+    stages: [{ rounds: 1 }, { rounds: 2 }],
+  });
+}
+const STAGE_LIBRARY = [1, 2, 3, 4, 5].map((n) => stagedRoutine("stage-routine-" + n, n));
+
+test("week: a played staged routine in a whole-body week is offered, and no then yes answer it", async () => {
+  const mount = await freshMount(STAGE_LIBRARY);
+  try {
+    const day = await (await dayGet(mount.url)).json();
+    const db = await mountDb(mount.dir);
+    try {
+      const first = day.slots[0];
+      assert.ok(first?.entry, "the day holds a card");
+      const played = await playSlotCard(mount, db, day, first.slot);
+      assert.equal(played.dayDone.fresh, true, "the card closed its slot");
+      const firstId = first.entry.id;
+
+      await fillWholeWeek(db);
+      let week = await (await weekGet(mount.url)).json();
+      assert.equal(week.full, true);
+      assert.ok(week.stageOffer, "a whole-body week with a played routine offers a stage");
+      assert.equal(week.stageOffer.routineId, firstId);
+      assert.equal(week.stageOffer.title, first.entry.title);
+      assert.equal(week.stageOffer.stage, 1);
+      assert.equal(week.stageOffer.total, 2);
+
+      const no = await dayPost(mount.url, "/api/ramble/moves/stage", {
+        routineId: firstId, answer: "no",
+      });
+      assert.equal(no.status, 200);
+      const declined = await no.json();
+      assert.equal(declined.ok, true);
+      assert.equal(declined.stageOffer, null, "the week is not asked about it again");
+      assert.equal("stage" in declined, false, "a no moves no stage");
+      assert.deepEqual(await walletKeys(db, "stage"), [], "declining writes no stage row");
+
+      const second = day.slots.find((item) => item.entry && item.entry.id !== firstId);
+      assert.ok(second?.entry, "the day holds a second card");
+      await playSlotCard(mount, db, day, second.slot);
+      week = await (await weekGet(mount.url)).json();
+      assert.ok(week.stageOffer, "the second routine is a fresh offer");
+      assert.equal(week.stageOffer.routineId, second.entry.id);
+
+      const yes = await dayPost(mount.url, "/api/ramble/moves/stage", {
+        routineId: second.entry.id, answer: "yes",
+      });
+      assert.equal(yes.status, 200);
+      const accepted = await yes.json();
+      assert.equal(accepted.ok, true);
+      assert.equal(accepted.stage, 2, "the stage row moved to 2");
+      assert.equal(accepted.stageOffer, null, "and that routine is not asked again");
+      assert.deepEqual(await walletKeys(db, "stage"), [second.entry.id],
+        "one stage row, keyed by the routine");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("week: the stage route refuses a junk answer and a routine nobody offered", async () => {
+  const mount = await freshMount(STAGE_LIBRARY);
+  try {
+    const db = await mountDb(mount.dir);
+    try {
+      const maybe = await dayPost(mount.url, "/api/ramble/moves/stage", {
+        routineId: "stage-routine-1", answer: "maybe",
+      });
+      assert.equal(maybe.status, 400, "only yes and no are answers");
+      assert.equal((await dayPost(mount.url, "/api/ramble/moves/stage", { answer: "yes" })).status, 400,
+        "routineId is required");
+
+      const notOffered = await dayPost(mount.url, "/api/ramble/moves/stage", {
+        routineId: "stage-routine-1", answer: "yes",
+      });
+      assert.equal(notOffered.status, 200);
+      const body = await notOffered.json();
+      assert.equal(body.ok, false);
+      assert.equal(body.reason, "not-offered");
+      assert.equal("stage" in body, false);
+      assert.equal(body.stageOffer, null);
+      assert.deepEqual(await walletKeys(db, "stage"), [], "a refusal writes no stage row");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("week: the wardrobe lists the earned kerchief and not the other four", async () => {
+  const mount = await freshMount();
+  try {
+    const fresh = await (await weekGet(mount.url)).json();
+    assert.equal(fresh.full, false);
+
+    const db = await mountDb(mount.dir);
+    try {
+      await fillWholeWeek(db);
+      const week = await (await weekGet(mount.url)).json();
+      assert.equal(week.full, true);
+      const earnedId = week.earned.itemId;
+
+      const wardrobe = await (await fetch(mount.url + "/api/ramble/wardrobe", { headers: H })).json();
+      const listed = wardrobe.items.map((item) => item.id);
+      assert.ok(listed.includes(earnedId), "the earned kerchief is on the sheet");
+      for (const id of ["scarf.kerchief1", "scarf.kerchief2", "scarf.kerchief3", "scarf.kerchief4", "scarf.kerchief5"]) {
+        if (id === earnedId) continue;
+        assert.equal(listed.includes(id), false, "a kerchief not earned yet is no offer: " + id);
+      }
+      const item = wardrobe.items.find((it) => it.id === earnedId);
+      assert.equal(item.owned, true);
     } finally { db.close?.(); }
   } finally { await mount.close(); }
 });

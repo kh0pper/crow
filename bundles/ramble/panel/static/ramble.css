@@ -32,6 +32,10 @@
   --rb-accent-3: #ff7a9c;
   --rb-shadow-col: #2a2d3e;
 
+  /* The week outline's one green, and the pale tint it stripes with. */
+  --rb-wk-ok: #2f9e6b;
+  --rb-wk-tint: #d5efe2;
+
   --rb-radius: 20px;
   --rb-radius-sm: 13px;
   --rb-line-w: 2.5px;
@@ -54,6 +58,8 @@
     --rb-accent-2-ink: #0f111c;
     --rb-accent-3: #ff8fb0;
     --rb-shadow-col: #4a5080;
+    --rb-wk-ok: #5fd39c;
+    --rb-wk-tint: #25463f;
   }
 }
 
@@ -71,6 +77,8 @@
   --rb-accent-2-ink: #0f111c;
   --rb-accent-3: #ff8fb0;
   --rb-shadow-col: #4a5080;
+  --rb-wk-ok: #5fd39c;
+  --rb-wk-tint: #25463f;
 }
 
 [data-theme="light"] #ramble {
@@ -1205,3 +1213,102 @@
   #ramble .rb-pref-card-chip { flex: 1 1 0; }
   #ramble .rb-first-run-btns .rb-btn { flex: 1 1 100%; }
 }
+
+/* ----------------------------------------------------------- the week view */
+
+/* Drawn by static/week.js into #rb-week-view, in a card of its own under the
+ * day's. The outline's three states are told apart by lightness and pattern
+ * only: an area not yet trained is the card's own surface, one day is the pale
+ * tint with diagonal stripes, two days is the solid green. Nothing animates. */
+#ramble #rb-week { gap: 10px; }
+#ramble #rb-week-view { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+#ramble #rb-week-view .rb-wk-title { margin: 0; }
+#ramble .rb-wk-total { font: 800 18px/1.2 var(--rb-font-display); }
+#ramble .rb-wk-outline { display: block; width: 100%; max-width: 180px; height: auto; margin: 0 auto; }
+
+/* The figure's line, its parts and their states. */
+#ramble .rb-wk-line { stroke: var(--rb-line); stroke-width: 2.5; stroke-linejoin: round; }
+#ramble .rb-wk-plain { fill: var(--rb-surface-2); stroke: var(--rb-line); stroke-width: 2.5; stroke-linejoin: round; }
+#ramble .rb-wk-shape.rb-wk-a0 { fill: var(--rb-surface); }
+#ramble .rb-wk-shape.rb-wk-a1 { fill: url(#rb-wk-stripes); }
+#ramble .rb-wk-shape.rb-wk-a2 { fill: var(--rb-wk-ok); }
+#ramble .rb-wk-heart { stroke-width: 2.2; }
+#ramble .rb-wk-stripe-bg { fill: var(--rb-wk-tint); }
+#ramble .rb-wk-stripe-ink { fill: var(--rb-wk-ok); opacity: .55; }
+
+/* Mobility: the ring around the figure. Dotted, then dashed, then solid and
+ * thicker, so its state reads without any hue at all. */
+#ramble .rb-wk-ring { fill: none; stroke-linecap: round; }
+#ramble .rb-wk-ring.rb-wk-a0 { stroke: var(--rb-muted); stroke-width: 2; stroke-dasharray: 2 9; opacity: .7; }
+#ramble .rb-wk-ring.rb-wk-a1 { stroke: var(--rb-wk-ok); stroke-width: 4.5; stroke-dasharray: 14 10; }
+#ramble .rb-wk-ring.rb-wk-a2 { stroke: var(--rb-wk-ok); stroke-width: 7; }
+
+/* The five areas as a list, with two pips each repeating the progress line. */
+#ramble .rb-wk-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+#ramble .rb-wk-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+#ramble .rb-wk-name { font-weight: 800; min-width: 0; }
+#ramble .rb-wk-prog { color: var(--rb-muted); font-size: 13px; margin-left: auto; }
+#ramble .rb-wk-pips { display: inline-flex; gap: 4px; flex: 0 0 auto; }
+#ramble .rb-wk-pip {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid var(--rb-line);
+  background: var(--rb-surface);
+}
+#ramble .rb-wk-pip.rb-wk-pip-on { background: var(--rb-wk-ok); }
+
+/* The seven-day strip: seven equal cells that can shrink to nothing rather than
+ * push the page sideways on a narrow phone. */
+#ramble .rb-wk-strip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; min-width: 0; }
+#ramble .rb-wk-day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 5px 1px;
+  border: 2px solid transparent;
+  border-radius: 10px;
+}
+#ramble .rb-wk-day[aria-current="date"] { border-color: var(--rb-line); background: var(--rb-surface-2); }
+#ramble .rb-wk-dayname {
+  font: 800 10px var(--rb-font-display);
+  text-transform: uppercase;
+  letter-spacing: .02em;
+  color: var(--rb-muted);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+#ramble .rb-wk-daymin { font-size: 10.5px; line-height: 1.2; text-align: center; }
+#ramble .rb-wk-marks { display: flex; flex-wrap: wrap; gap: 2px; justify-content: center; min-width: 0; }
+#ramble .rb-wk-mark {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--rb-wk-ok);
+  border: 1px solid var(--rb-line);
+}
+
+/* The plan for the days still ahead. */
+#ramble .rb-wk-up { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+#ramble .rb-wk-up-title {
+  font: 800 11px var(--rb-font-display);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--rb-muted);
+}
+#ramble .rb-wk-up-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-size: 13px; min-width: 0; }
+#ramble .rb-wk-up-day { font-weight: 800; }
+#ramble .rb-wk-up-area { color: var(--rb-muted); }
+
+/* A full week, and the offer to take on a little more. */
+#ramble .rb-wk-whole { font-weight: 800; }
+#ramble .rb-wk-offer { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+#ramble .rb-wk-offer-title { font-weight: 800; }
+#ramble .rb-wk-offer-ask { font-size: 14px; }
+#ramble .rb-wk-offer-btns { flex-wrap: wrap; }
+#ramble .rb-wk-offer-btns .rb-btn { flex: 1 1 140px; min-height: 44px; }

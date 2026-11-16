@@ -375,6 +375,7 @@ export default {
               <button class="rb-btn rb-btn-ghost" id="rb-customize" type="button">${esc(S.customize)}</button>
             </div>
           </section>
+          <section class="rb-card" id="rb-week"><div id="rb-week-view"></div></section>
         </section>
 
         <!-- ─────────────────────────────────────────────────────── the map -->
@@ -917,6 +918,7 @@ export default {
       <script src="/ramble/static/ramble.js"></script>
       <script src="/ramble/static/moves.js"></script>
       <script src="/ramble/static/today.js"></script>
+      <script src="/ramble/static/week.js"></script>
     `;
 
     res.send(layout({ title: "Ramble", content }));

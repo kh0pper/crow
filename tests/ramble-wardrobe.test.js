@@ -8,11 +8,14 @@ import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { seedBalance, SPEND_KIND } from "../bundles/ramble/server/wallet.js";
-import { ACCESSORIES, itemById, ownedItems, buyItem } from "../bundles/ramble/server/wardrobe.js";
+import { ACCESSORIES, itemById, ownedItems, buyItem, earnedItemId, WEEKFULL_KIND } from "../bundles/ramble/server/wardrobe.js";
 import { createRequire } from "node:module";
 const Bird = createRequire(import.meta.url)("../bundles/ramble/server/bird-svg.cjs");
 
 const NOW = 1_760_000_000_000;
+/** The shop rows: everything the user can buy. An earned item is in the
+ * catalogue (it is drawable and wearable) but is never one of these. */
+const OFFERED = ACCESSORIES.filter((it) => it.earned !== true);
 async function freshDb(seed = 0) {
   const db = createClient({ url: "file::memory:" });
   await initRambleTables(db);
@@ -21,21 +24,27 @@ async function freshDb(seed = 0) {
   }
   return db;
 }
+/** A whole-body week, as the ledger records it: one row per ISO week id. */
+async function weekfull(db, weekId) {
+  await db.execute({ sql: "INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, 1, ?)", args: [WEEKFULL_KIND, weekId, NOW] });
+}
 
-test("the catalogue: unique ids, every slot/value is drawable, every price a positive integer", () => {
+test("the catalogue: unique ids, every slot/value is drawable, a price on what is sold and none on what is earned", () => {
   const ids = new Set();
   for (const it of ACCESSORIES) {
     assert.ok(!ids.has(it.id), `duplicate ${it.id}`); ids.add(it.id);
     assert.equal(it.id, `${it.slot}.${it.value}`);
     assert.ok(Bird.OUTFIT_SLOTS[it.slot].includes(it.value), `${it.id} has art`);
-    assert.ok(Number.isInteger(it.price) && it.price > 0);
+    if (it.earned === true) assert.ok(!("price" in it), `${it.id} is earned, never sold`);
+    else assert.ok(Number.isInteger(it.price) && it.price > 0, `${it.id} is sold for a whole, positive price`);
     assert.ok(typeof it.name === "string" && it.name.length > 0);
   }
   for (const slot of Object.keys(Bird.OUTFIT_SLOTS)) for (const v of Bird.OUTFIT_SLOTS[slot]) {
-    assert.ok(itemById(`${slot}.${v}`), `every drawable ${slot}.${v} is for sale`);
+    assert.ok(itemById(`${slot}.${v}`), `every drawable ${slot}.${v} is in the catalogue`);
   }
   assert.equal(itemById("hat.monocle"), null);
   assert.equal(itemById("__proto__"), null);
+  assert.equal(OFFERED.length, ACCESSORIES.length - 5, "five kerchiefs are earned, the rest are sold");
 });
 
 test("buying writes ONE spend row keyed per purchase, emits it, and the balance drops", async () => {
@@ -57,9 +66,9 @@ test("refusals: unknown item, already owned, not enough seed — nothing written
   const emitted = [];
   const emit = async (...a) => emitted.push(a);
   assert.deepEqual(await buyItem(db, "hat.monocle", { now: NOW, emit }), { ok: false, reason: "unknown-item", balance: 10 });
-  const pricey = ACCESSORIES.find((i) => i.price > 10);
+  const pricey = OFFERED.find((i) => i.price > 10);
   assert.deepEqual(await buyItem(db, pricey.id, { now: NOW, emit }), { ok: false, reason: "short", balance: 10 });
-  const cheap = ACCESSORIES.find((i) => i.price <= 10);
+  const cheap = OFFERED.find((i) => i.price <= 10);
   assert.equal((await buyItem(db, cheap.id, { now: NOW, emit, purchaseId: "a" })).ok, true);
   const again = await buyItem(db, cheap.id, { now: NOW, emit, purchaseId: "b" });
   assert.equal(again.ok, false);
@@ -219,7 +228,7 @@ test("wardrobeState and flockState carry the outfit; a corrupt outfit_json reads
   await db.execute("UPDATE ramble_eggs SET outfit_json = '{broken' WHERE egg_id = 'b2'");
   const w = await wardrobeState(db);
   assert.equal(w.seed, 30 - itemById("hat.bow").price);
-  assert.equal(w.items.length, ACCESSORIES.length);
+  assert.equal(w.items.length, OFFERED.length);
   assert.equal(w.items.find((i) => i.id === "hat.bow").owned, true);
   assert.equal(w.items.find((i) => i.id === "hat.leaf").owned, false);
   assert.deepEqual(w.active, { egg_id: "b1", species: "crow", seed: 1, outfit: { hat: "bow" } });
@@ -233,5 +242,112 @@ test("wardrobeState with no hatched bird: active is null, the shop still lists",
   const w = await wardrobeState(db);
   assert.equal(w.active, null);
   assert.equal(w.seed, 5);
-  assert.equal(w.items.length, ACCESSORIES.length);
+  assert.equal(w.items.length, OFFERED.length);
+});
+
+/* ------------------------- the earned week kerchief ---------------------- */
+
+test("earnedItemId: the week of the month of the ISO week's Thursday", () => {
+  assert.equal(earnedItemId("2026-W46"), "scarf.kerchief2"); // Thursday 2026-11-12
+  assert.equal(earnedItemId("2026-W45"), "scarf.kerchief1"); // Thursday 2026-11-05
+  assert.equal(earnedItemId("2026-W44"), "scarf.kerchief5"); // Thursday 2026-10-29
+  assert.equal(earnedItemId("2026-W49"), "scarf.kerchief1"); // Thursday 2026-12-03
+  assert.equal(earnedItemId("2026-W53"), "scarf.kerchief5"); // Thursday 2026-12-31
+  assert.equal(earnedItemId("2026-W01"), "scarf.kerchief1"); // Thursday 2026-01-01
+  for (const junk of ["junk", "", "2026-W00", "2026-W54", "2026-W4", "2026W46", "26-W46", "2021-W53", null, undefined, 2026, {}, ["2026-W46"]]) {
+    assert.equal(earnedItemId(junk), null, String(junk));
+  }
+});
+
+test("a weekfull row grants its kerchief, and nothing else", async () => {
+  const db = await freshDb(0);
+  await weekfull(db, "2026-W46");
+  assert.deepEqual([...await ownedItems(db)], ["scarf.kerchief2"]);
+  assert.equal(await seedBalance(db), 0, "earning a kerchief is not seed");
+  await weekfull(db, "not-a-week");
+  assert.deepEqual([...await ownedItems(db)], ["scarf.kerchief2"], "a key that is no week grants nothing");
+});
+
+test("two weeks in different months grant two kerchiefs; the same week of the month is one item", async () => {
+  const db = await freshDb(0);
+  await weekfull(db, "2026-W46"); // November, week 2 (Thursday 2026-11-12)
+  await weekfull(db, "2026-W44"); // October, week 5 (Thursday 2026-10-29)
+  assert.deepEqual([...await ownedItems(db)].sort(), ["scarf.kerchief2", "scarf.kerchief5"]);
+  await weekfull(db, "2026-W50"); // December, week 2 too (Thursday 2026-12-10)
+  assert.deepEqual([...await ownedItems(db)].sort(), ["scarf.kerchief2", "scarf.kerchief5"], "one id per week of the month");
+});
+
+test("an earned item cannot be bought at any price: refused before anything is written or emitted", async () => {
+  const db = await freshDb(1000);
+  const emitted = [];
+  const out = await buyItem(db, "scarf.kerchief1", { now: NOW, purchaseId: "e1", emit: async (...a) => emitted.push(a) });
+  assert.deepEqual(out, { ok: false, reason: "earned", balance: 1000 });
+  assert.deepEqual(emitted, [], "nothing emitted");
+  const { rows } = await db.execute("SELECT kind, key, delta FROM ramble_wallet WHERE kind = 'spend'");
+  assert.equal(rows.length, 0, "no spend row");
+  assert.equal(await seedBalance(db), 1000, "the balance is untouched");
+  assert.deepEqual([...await ownedItems(db)], [], "and asking for it does not grant it");
+});
+
+test("a granted kerchief can be worn; an ungranted one is refused", async () => {
+  const db = await freshDb(100);
+  await hatched(db, "b1");
+  assert.equal((await wearItem(db, "b1", "scarf", "scarf.kerchief3", {})).reason, "not-owned");
+  await weekfull(db, "2026-W46");
+  assert.deepEqual(await wearItem(db, "b1", "scarf", "scarf.kerchief2", {}), { ok: true, outfit: { scarf: "kerchief2" } });
+  assert.deepEqual(await birdOutfit(db, "b1"), { scarf: "kerchief2" });
+});
+
+test("wardrobeState hides an unowned kerchief and shows an owned one", async () => {
+  const db = await freshDb(0);
+  let w = await wardrobeState(db);
+  assert.equal(w.items.some((i) => i.id === "scarf.kerchief1"), false, "not a shop row before it is earned");
+  assert.equal(w.items.length, OFFERED.length);
+  await weekfull(db, "2026-W45");
+  w = await wardrobeState(db);
+  const k = w.items.find((i) => i.id === "scarf.kerchief1");
+  assert.ok(k, "listed once it is earned");
+  assert.equal(k.owned, true);
+  assert.equal(k.earned, true);
+  assert.equal("price" in k, false);
+  assert.equal(w.items.length, OFFERED.length + 1);
+  assert.equal(w.items.some((i) => i.id === "scarf.kerchief2"), false, "another week's kerchief stays hidden");
+});
+
+/* ------------------------------ the drawing ------------------------------- */
+
+const KERCHIEFS = [
+  { value: "kerchief1", colour: "#f6d365", trim: "#2b2350", dots: 1 },
+  { value: "kerchief2", colour: "#f2925a", trim: "#2b2350", dots: 2 },
+  { value: "kerchief3", colour: "#2f9467", trim: "#fff8e6", dots: 3 },
+  { value: "kerchief4", colour: "#3558bd", trim: "#fff8e6", dots: 4 },
+  { value: "kerchief5", colour: "#5a2a6c", trim: "#fff8e6", dots: 5 },
+];
+
+test("the drawn kerchief: the week's own colour, its dot count, and five different drawings", () => {
+  const g = Bird.rollGenome(2, "crow");
+  const seen = new Set();
+  for (const k of KERCHIEFS) {
+    const svg = Bird.drawBird(Bird.applyOutfit(g, { scarf: k.value }));
+    assert.ok(Bird.OUTFIT_SLOTS.scarf.includes(k.value), `${k.value} is a drawable scarf value`);
+    assert.ok(svg.includes(`fill="${k.colour}"`), `${k.value} is drawn in its own colour`);
+    assert.ok(svg.includes(`stroke="${k.trim}"`), `${k.value} carries its own trim`);
+    assert.equal((svg.match(/r="2\.3"/g) || []).length, k.dots, `${k.value} counts the week of the month`);
+    assert.equal(svg.indexOf(k.value), -1, "the value is compared, never written into the markup");
+    assert.ok(!seen.has(svg), `${k.value} is its own drawing`);
+    seen.add(svg);
+  }
+  assert.equal(seen.size, 5);
+});
+
+test("the bought scarves draw as before: the bird's accent stroke, the stripe dash, no week dots", () => {
+  const g = Bird.rollGenome(2, "crow");
+  const knit = Bird.drawBird(Bird.applyOutfit(g, { scarf: "knit" }));
+  assert.ok(knit.includes(`stroke="${g.accent}" stroke-width="10"`), "the knit keeps the bird's own accent");
+  assert.equal(knit.indexOf('r="2.3"'), -1, "a bought scarf carries no week dots");
+  const stripe = Bird.drawBird(Bird.applyOutfit(g, { scarf: "stripe" }));
+  assert.ok(stripe.includes(`stroke="${g.accent}" stroke-width="10"`));
+  assert.ok(stripe.includes('stroke-dasharray="6 5"'));
+  const ker = Bird.drawBird(Bird.applyOutfit(g, { scarf: "kerchief1" }));
+  assert.equal((ker.match(/stroke-width="10"/g) || []).length, 1, "the kerchief replaces the scarf, it does not stack on it");
 });

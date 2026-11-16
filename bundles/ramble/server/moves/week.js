@@ -9,10 +9,13 @@
  * `windows` only renames the slots; it never invents a plan the tables do not
  * hold.
  *
- * The wallet side is READ ONLY. A finished card writes one
+ * The week's balance is DERIVED, never stored. A finished card writes one
  * "movearea" row per area it trains (key "<day>:<area>", delta 1), and the
  * week's state is derived from those rows — the same append-only shape as the
  * rest of the currency ledger, so nothing here can lose a mark to a merge.
+ * Reading the week (`weekState`, `weekView`) writes nothing at all;
+ * `settleWeek` is the one writer here, and only ever one constant row for a
+ * week whose balance is full.
  *
  * Days are LOCAL days and weeks are ISO 8601 weeks (Monday first) of the local
  * date, matching what the rest of Ramble files its rows under. All date
@@ -20,7 +23,10 @@
  * day string.
  */
 import { localDay } from "../eggs.js";
+import { insertOnce } from "../steps.js";
+import { WEEKFULL_KIND, earnedItemId } from "../wardrobe.js";
 import { AREAS } from "./library.js";
+import { MOVE_MIN_KIND } from "./progress.js";
 
 /** The three chunk slots of a day, in play order. */
 export const SLOTS = Object.freeze(["morning", "midday", "evening"]);
@@ -31,6 +37,11 @@ export const MOVE_AREA_KIND = "movearea";
 const DAY_MS = 86400000;
 const WEEK_ID = /^(\d{4})-W(\d{2})$/;
 const DAY_STR = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** `now` as a millisecond clock value; anything unreadable is the wall clock. */
+function asAt(now) {
+  return Number.isFinite(Number(now)) ? Number(now) : Date.now();
+}
 
 /** How many cards a day the plan is built for: 1, 2 or 3 (anything else is 3). */
 function cardsOf(cards) {
@@ -216,6 +227,97 @@ export async function weekState(db, { now } = {}) {
 
   const total = totalOf(marks);
   return { weekId, marks, total, full: total === 10 };
+}
+
+/**
+ * The whole minutes accepted on each of `days`, read from the "movemin" rows in
+ * ONE query: a Map of day -> minutes, with a day that has no row simply absent.
+ * The row is grown by compare-and-swap (progress.js), so a value below zero is
+ * unreadable junk and reads as 0.
+ */
+async function minutesOfDays(db, days) {
+  const out = new Map();
+  if (days.length === 0) return out;
+  const wanted = new Set(days);
+  const result = await db.execute({
+    sql: "SELECT key, delta FROM ramble_wallet WHERE kind = ? AND key >= ? AND key < ?",
+    args: [MOVE_MIN_KIND, days[0], days[days.length - 1] + "~"],
+  });
+  for (const row of Array.isArray(result?.rows) ? result.rows : []) {
+    const key = String(row?.key ?? "");
+    if (!wanted.has(key)) continue;
+    out.set(key, Math.max(0, Number(row?.delta) || 0));
+  }
+  return out;
+}
+
+/**
+ * The week as the week view draws it: the balance (`marks`, `total`, `full`),
+ * a `strip` of the seven days with their minutes and the areas they marked,
+ * and `comingUp` — the plan for the days still ahead in this week.
+ *
+ * Each strip entry is `{ day, minutes, areas }`: `minutes` is the day's
+ * "movemin" delta (0 when it has no row) and `areas` is every area whose marks
+ * list names the day, in AREAS order. A day is ahead when its string is past
+ * today's local day, so the last day of the week has nothing coming up. The
+ * plan is `weekPlan`'s, from the caller's own `prefs` (`cards`, `windows`).
+ *
+ * A week id that is not a real week has no days to draw: the strip and
+ * comingUp come back empty. The balance is still answered as `weekState` reads
+ * it. Nothing here writes.
+ */
+export async function weekView(db, { now, prefs } = {}) {
+  const at = asAt(now);
+  const state = await weekState(db, { now: at });
+  const view = {
+    weekId: state.weekId,
+    marks: state.marks,
+    total: state.total,
+    full: state.full,
+    strip: [],
+    comingUp: [],
+  };
+
+  const days = weekDays(state.weekId);
+  if (days.length === 0) return view;
+
+  const minutes = await minutesOfDays(db, days);
+  const today = localDay(at);
+  const plan = weekPlan(state.weekId, prefs?.cards, prefs?.windows);
+
+  days.forEach((day, dayIndex) => {
+    const areas = AREAS.filter((area) => {
+      const marked = state.marks[area];
+      return Array.isArray(marked) && marked.includes(day);
+    });
+    view.strip.push({ day, minutes: minutes.get(day) ?? 0, areas });
+    if (day > today) view.comingUp.push({ day, dayIndex, slots: plan[dayIndex].slots });
+  });
+  return view;
+}
+
+/**
+ * Settle the week of `now` — or of `day`, when it is a "YYYY-MM-DD" string, at
+ * that day's local noon — once its balance is full.
+ *
+ * A full week grants one earned item: the `weekfull` row, keyed by the week id
+ * with the constant 1, is claimed through `insertOnce`, so the first settle
+ * that finds the week full is the only one that writes (and emits) and every
+ * later one reports `fresh: false`. `itemId` is the kerchief that week earns
+ * (`earnedItemId`), answered whether or not this call is the one that granted
+ * it — ownership is derived from the row itself (`ownedItems`).
+ *
+ * Coverage pays NO Health and NO seed: no pet feed, no budget claim, no `seed`
+ * or `spend` row. A week that is not full writes nothing at all.
+ */
+export async function settleWeek(db, { now = Date.now(), day, emit } = {}) {
+  const at = asAt(now);
+  const noon = typeof day === "string" && DAY_STR.test(day) ? noonOf(day) : null;
+  const state = await weekState(db, { now: noon ? noon.getTime() : at });
+  if (!state.full) return { weekId: state.weekId, full: false, fresh: false, itemId: null };
+
+  const fresh = await insertOnce(db, WEEKFULL_KIND, state.weekId, 1, at, emit);
+  return { weekId: state.weekId, full: true, fresh, itemId: earnedItemId(state.weekId) };
 }
 
 /**

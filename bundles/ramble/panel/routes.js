@@ -311,7 +311,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   async function ensureMovesMods(res) {
     if (movesMods) return true;
     try {
-      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod, slotsMod, dayMod, dayCompleteMod, weekMod] = await Promise.all([
+      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod, slotsMod, dayMod, dayCompleteMod, weekMod, stagesMod] = await Promise.all([
         bundleImport("server/moves/library.js"),
         bundleImport("server/moves/picker.js"),
         bundleImport("server/moves/ledger.js"),
@@ -324,10 +324,11 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/moves/day.js"),
         bundleImport("server/moves/day-complete.js"),
         bundleImport("server/moves/week.js"),
+        bundleImport("server/moves/stages.js"),
       ]);
       movesMods = {
         libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod, slotsMod,
-        dayMod, dayCompleteMod, weekMod,
+        dayMod, dayCompleteMod, weekMod, stagesMod,
       };
       return true;
     } catch (err) {
@@ -584,6 +585,48 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     await movesMods.dayMod.settleDay(db, { day: dayOut.day, now, emit, need: dayOut.need });
     const yesterday = mods.eggsMod.localDay(mods.eggsMod.startOfLocalDay(now) - 1);
     await movesMods.dayMod.settleDay(db, { day: yesterday, now, emit });
+  }
+
+  /**
+   * Settle this week and the three weeks before it. The stage offer may come
+   * from the two most recent of them, and any of the four can be made whole by
+   * rows that arrived from another instance, so each one is asked in turn.
+   *
+   * THIS RUNS ON A PLAIN READ, AND IT CAN THEREFORE WRITE ON A READ: settling a
+   * full week claims that week's `weekfull` row through `insertOnce`, once per
+   * week (the constant 1, keyed by the week id), so a second read of the same
+   * week writes nothing new. A week that is not whole-body writes nothing at
+   * all.
+   */
+  async function settleWeeks(now) {
+    await movesMods.weekMod.settleWeek(db, { now, emit });
+    for (const daysBack of [7, 14, 21]) {
+      // The local day that many days back, at its noon, so each week is named by
+      // a day of its own and a DST change inside the week cannot shift it.
+      const day = mods.eggsMod.localDay(
+        mods.eggsMod.startOfLocalDay(now) - daysBack * 86400000 + 43200000,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      await movesMods.weekMod.settleWeek(db, { now, day, emit });
+    }
+  }
+
+  /**
+   * The stage offer the week holds, as the panel reads it: null, or the routine
+   * to ask about, its title, the stage it is at and the stages it can reach.
+   */
+  async function stageOfferPayload(now) {
+    const library = servedMoves();
+    const routineId = await movesMods.stagesMod.offerStage(db, { now, library });
+    if (!routineId) return null;
+    const entry = movesMods.libraryMod.entryById(library, routineId);
+    if (!entry || !Array.isArray(entry.stages)) return null;
+    return {
+      routineId,
+      title: entry.title,
+      stage: await movesMods.stagesMod.stageOf(db, routineId),
+      total: Math.min(movesMods.libraryMod.STAGES_MAX, entry.stages.length),
+    };
   }
 
   /** The whole moves strip: today's card, the bird's Health, steps and the streak. */
@@ -1573,6 +1616,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       day: mods.eggsMod.localDay(now), now, emit,
     });
     await settleRecent(now, payload);
+    await settleWeeks(now);
     // Settling above can complete the day (a heart, a cache row), so the fields
     // that read the rows are refreshed AFTER it: the day's completion and the
     // read-only extras (the streak and the day's finished-slot count among them)
@@ -1583,6 +1627,50 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       : await movesMods.dayCompleteMod.isDayComplete(db, payload.day, { need: payload.need });
     Object.assign(payload, await dayExtras(now, payload));
     res.json(payload);
+  }));
+
+  /**
+   * The week as the panel draws it: the balance and its seven-day strip, the
+   * days still ahead, the stage offer a whole-body week may hold, and the item a
+   * full week earned. The settle pass runs first, so a week made whole by rows
+   * that arrived from another instance grants its item here, once.
+   */
+  router.get("/api/ramble/moves/week", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    await settleWeeks(now);
+    const prefs = await movesMods.todayMod.readPrefs(db);
+    const view = await movesMods.weekMod.weekView(db, { now, prefs });
+    const stageOffer = await stageOfferPayload(now);
+    let earned = null;
+    if (view.full) {
+      const itemId = mods.wardrobeMod.earnedItemId(view.weekId);
+      const item = mods.wardrobeMod.itemById(itemId);
+      earned = { itemId, name: item?.name ?? null };
+    }
+    res.json({ ...view, stageOffer, earned });
+  }));
+
+  /**
+   * Answer the week's stage offer. "yes" raises the routine one stage (never
+   * more, and never on its own); "no" records the week's answer and writes no
+   * stage row. Both answer the offer as it stands afterwards.
+   */
+  router.post("/api/ramble/moves/stage", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    const now = Date.now();
+    const b = req.body || {};
+    const routineId = requireText(b.routineId, 80, "routineId");
+    const answer = requireText(b.answer, 8, "answer");
+    if (answer !== "yes" && answer !== "no") bad("answer must be yes or no");
+    const out = answer === "yes"
+      ? await movesMods.stagesMod.acceptStage(db, { routineId, now, library: servedMoves(), emit })
+      : await movesMods.stagesMod.declineStage(db, { routineId, now, library: servedMoves() });
+    const body = { ok: !!out.ok };
+    if (!out.ok) body.reason = out.reason;
+    if (out.ok && answer === "yes") body.stage = out.stage;
+    body.stageOffer = await stageOfferPayload(now);
+    res.json(body);
   }));
 
   router.post("/api/ramble/moves/slot/swap", handle(async (req, res) => {
@@ -1794,11 +1882,16 @@ export default function rambleRouter(dashboardAuth, options = {}) {
           emit,
           ...(day === dayOut.day ? { need: dayOut.need } : {}),
         });
+        // A played routine is recorded for the week it was done in, so a later
+        // whole-body week can offer its next stage. `now` names the weeks that
+        // record is filed in and kept for, never the card's own day alone.
+        await movesMods.stagesMod.noteRoutineDone(db, { day, entry, now });
       } catch (err) {
         if (err?.name !== "MovesInputError") throw err;
       }
     }
     await settleRecent(now, dayOut);
+    await settleWeeks(now);
     res.json({ ...(await movesSnapshot(now)), progress, dayDone });
   }));
 
@@ -1949,9 +2042,16 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     let logged;
     try {
       logged = await movesMods.ledgerMod.recordLog(db, {
-        activity: b.activity, minutes: b.minutes, effort: b.effort, now, emit,
+        activity: b.activity, minutes: b.minutes, effort: b.effort, area: b.area, now, emit,
       });
     } catch (err) { movesInput(err); }
+    // A log marks the area it trains on its day, which is what lets a walk or a
+    // band session count toward the week's balance. The mark is one constant row
+    // through `insertOnce`, so it runs on EVERY log: a repeat is a no-op that
+    // puts the day's mark back if it is missing.
+    await movesMods.dayMod.markLogArea(db, {
+      day: logged.day, activity: b.activity, minutes: b.minutes, area: logged.area, now, emit,
+    });
     await movesMods.streakMod.awardStreakHeart(db, { now, emit });
     res.json({
       log: {
