@@ -1714,7 +1714,16 @@ export function appendAuditBridge(projectId, opts) {
 // Track 3 Task 6: EXPORTED (additive — no rename) so the interactive engine's
 // dispatch brief (perch-interactive.js loadSeams()) can compose the same
 // header a channel turn gets, instead of growing a second copy.
-export function projectContextBlock(space, members) {
+//
+// Shares (Phase 1): the optional third argument is this spawn's
+// loadBotShares() list. A live, non-suspended share appends one reachable-
+// projects line naming each such project by name, id and level, plus the one
+// instruction line that says how to write there. With no shares — or only
+// suspended ones — the block is byte-identical to what it was before shares
+// existed: this header sits at the very start of a turn prompt, so an extra
+// line for the bots that hold no share would move every prompt's prefix.
+const REACHABLE_INSTRUCTION = "  to write in a reachable project, name it explicitly with project_id (a write with no project_id lands in your home project)";
+export function projectContextBlock(space, members, shares = []) {
   if (!space) return "";
   const lines = [];
   lines.push("PROJECT: " + space.name + "  (id=" + space.id + ", slug=" + space.slug + ")");
@@ -1727,6 +1736,13 @@ export function projectContextBlock(space, members) {
       return who + " (" + m.role + ")";
     }).join(", ");
     lines.push("  members: " + summary);
+  }
+  const reachable = (Array.isArray(shares) ? shares : []).filter((sh) => sh && !sh.suspended);
+  if (reachable.length) {
+    const listed = reachable.map((sh) =>
+      sh.name + " (id=" + sh.project_id + ", " + (sh.level === "read_write" ? "read and write" : "read") + ")").join(" ; ");
+    lines.push("REACHABLE PROJECTS (name, id, level): " + listed);
+    lines.push(REACHABLE_INSTRUCTION);
   }
   return lines.join("\n");
 }
@@ -2039,7 +2055,7 @@ export async function handleInbound(opts) {
   // stability) and serves telegram/slack/fallback hints for the new adapters.
   const gatewayHint = resolveGatewayHint(gateway_type, gateway_thread_id);
   const projectHeader = (projectSpace
-    ? projectContextBlock(projectSpace, projectMembers)
+    ? projectContextBlock(projectSpace, projectMembers, world.projectShares)
     : (projectId != null ? "PROJECT #" + projectId + " (no space metadata)" : "PROJECT: (none)"))
     + gatewayHint;
 
