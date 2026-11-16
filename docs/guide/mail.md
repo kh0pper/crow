@@ -113,22 +113,14 @@ those folders, and adds what it finds. When there is nothing older left, it says
 ## Attachments
 
 A message with attachments lists each one with its name and size and a **Download** link. The file is
-fetched from the mail server at the moment you ask for it, not kept in Crow. Anything over about 18 MB
-cannot be downloaded this way, and the page says so instead of failing silently.
+fetched from the mail server at the moment you ask for it, not kept in Crow. That link is a plain
+download, so anything over about 18 MB comes back as a failed download carrying the message "This
+attachment is over about 18 MB, too large to download here."
 
 ## Acting on a message
 
-From an open message you can:
-
-- **Mark unread** to put the unread dot back;
-- **Archive** it, which moves it to the account's archive folder (or its "All Mail" folder on Gmail);
-  the action is not offered when the account has no such folder;
-- **Delete** it, which moves it to the account's Trash — Crow never deletes mail for good;
-- **Move…** it to any other folder of the same account.
-
-Opening an unread message marks it read once the page has been on screen for a moment. Every action
-happens on the mail server first, so a failed action leaves both the server and Crow's copy as they
-were.
+This release has no message actions yet. **Mark unread**, **Archive**, **Delete**, **Move…** and
+marking an unread message read when you open it arrive with the next release (message actions).
 
 ## Settings
 

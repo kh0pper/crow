@@ -244,8 +244,9 @@ is never put on screen.
    reader draws nothing in either.
 5. **Message actions (read/unread, archive, delete, move) are a separate part of the plan.** The
    reader's first parts ship without them (the unread dot then never clears, which is why the actions
-   part follows immediately), and the action routes refuse a UID whose folder UIDVALIDITY differs
-   from the stored one.
+   part follows immediately). That actions-part PR (Part C) guarantees every action refuses a UID
+   whose folder UIDVALIDITY differs from the stored one; the reader shipped here does not act on a
+   message at all, so the guarantee is not present yet.
 6. **Attachments: download is in, two gaps are named.** `mail/reader/attachments.js`
    (`extractAttachment`, `extractAttachmentFromParsed`) serves one part of the raw message by the same
    index `GET /messages/:id` lists, and plan 3 imports it to forward an attachment. Not covered:

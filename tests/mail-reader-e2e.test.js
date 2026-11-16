@@ -476,13 +476,30 @@ test("a mailbox end to end through the reader: connect, sync, open, frame, image
     assert.equal(navOn.status, 200);
     assert.match(navOn.text, /href="\/dashboard\/mail"/, "the drawer links the reader while the flag is on");
 
+    // The row whose message really carries an attachment: the reset re-stored it under a new id, so
+    // the flag-off download below is checked against a row that answers 200 while the flag is on.
+    const filesRow = await rowValue("SELECT id FROM mail_messages WHERE message_id = ?", ["<files@example.test>"]);
+    assert.ok(filesRow, "the message with a file is stored");
+    const filesId = Number(filesRow.id);
+    const whileOn = await get(attachmentPath(filesId, 0));
+    assert.equal(whileOn.status, 200, whileOn.text.slice(0, 200));
+    assert.deepEqual(whileOn.bytes, Buffer.from(ATTACHMENT_TEXT, "utf8"), "the attachment downloads with the flag on");
+
     delete process.env.CROW_MAIL;
     try {
       // A message is still stored: a flag that stopped being honoured would answer 200 here.
       const offPage = await get(MAIL);
       assert.equal(offPage.status, 404, "the page is a 404");
       assert.equal(offPage.text, "Not found");
-      for (const path of [framePath(reslot[1]), attachmentPath(reslot[1], 0), `${IMAGE_ALLOW}?account=${accountId}`]) {
+      for (const path of [`${MAIL}?view=message`, `${MAIL}?view=search`, `${MAIL}?view=settings`]) {
+        const r = await get(path);
+        assert.equal(r.status, 404, path);
+        assert.equal(r.text, "Not found", path);
+      }
+      const offWrite = await post(IMAGE_ALLOW, { accountId, sender: "sam@example.com" });
+      assert.equal(offWrite.status, 404, "the allow list's write is a 404 too");
+      assert.deepEqual(offWrite.json, { error: "not_found", message: "Not found." });
+      for (const path of [framePath(reslot[1]), attachmentPath(filesId, 0), `${IMAGE_ALLOW}?account=${accountId}`]) {
         const r = await get(path);
         assert.equal(r.status, 404, path);
         assert.deepEqual(r.json, { error: "not_found", message: "Not found." }, path);

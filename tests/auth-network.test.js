@@ -91,14 +91,15 @@ function startTestApp() {
   });
 }
 
-function request(port, path, headers = {}) {
+function request(port, path, headers = {}, { method = "GET", body } = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, path, method: "GET", headers }, (res) => {
-      let body = "";
-      res.on("data", (c) => (body += c));
-      res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location, body }));
+    const req = http.request({ host: "127.0.0.1", port, path, method, headers }, (res) => {
+      let text = "";
+      res.on("data", (c) => (text += c));
+      res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location, body: text }));
     });
     req.on("error", reject);
+    if (body !== undefined) req.write(body);
     req.end();
   });
 }
@@ -345,6 +346,12 @@ test("rejectFunneled middleware: the reader, the frame, the attachment and the a
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
     }
+    // The allow list's write is refused by the same middleware, before a route can read the body.
+    const written = await request(port, "/dashboard/mail/api/image-allow", {
+      "tailscale-funnel-request": "?1",
+      "content-type": "application/json",
+    }, { method: "POST", body: JSON.stringify({ accountId: "ma-0123456789abcdef", sender: "sam@example.com" }) });
+    assert.equal(written.status, 403, `expected 403 on POST /dashboard/mail/api/image-allow, got ${written.status}`);
   } finally {
     server.close();
   }
