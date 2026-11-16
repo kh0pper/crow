@@ -16,8 +16,10 @@
  *         before it existed, which still read as "just the card on screen".
  *   moves.history JSON { done: {id:count}, skipped: {id:count} }
  *         written when a stored pick rolls over to a new day.
+ *   moves.setup.seen true
+ *         the first-run setup was answered (setupNeeded / writeSetup below).
  *
- * Both are `ramble_settings` rows, so they replicate last-writer-wins through
+ * These are `ramble_settings` rows, so they replicate last-writer-wins through
  * applyRambleSetting — the same seam as the step settings. That is what makes
  * two devices agree on the day's challenge: each may pick locally, and after
  * one `moves.today` wins the LWW race both read the same entry back.
@@ -61,6 +63,8 @@ export const PREFS_KEY = "moves.prefs";
 export const TODAY_KEY = "moves.today";
 /** Synced setting: JSON done/skipped counts per entry id. */
 export const HISTORY_KEY = "moves.history";
+/** Synced setting: the first-run setup was answered (true once it is). */
+export const SETUP_SEEN_KEY = "moves.setup.seen";
 
 /** Wallet kind: key `<day>`, delta 1 — the user paused challenges that day. */
 export const MOVE_OFF_KIND = "moveoff";
@@ -257,6 +261,49 @@ export async function writePrefs(db, patch, { emit } = {}) {
   const next = validatePrefsPatch(patch);
   const prefs = { ...(await readPrefs(db)), ...next };
   await writeJson(db, PREFS_KEY, prefs, emit);
+  return prefs;
+}
+
+/**
+ * Whether the first-run setup still has to be asked. It is asked once per
+ * player, never per device: both the answer row and the fact that a prefs row
+ * already exists are `ramble_settings` rows, so a second device of the same
+ * player reads "already answered" the moment either one replicates.
+ *
+ * Nothing a read did writes either row — the picks, the week and the day's
+ * slots all live in their own keys — so a player who has stated nothing still
+ * has both rows absent, and one who has stated anything at all is not asked
+ * again.
+ */
+export async function setupNeeded(db) {
+  const [seen, prefs] = await Promise.all([readJson(db, SETUP_SEEN_KEY), readJson(db, PREFS_KEY)]);
+  return seen === null && prefs === null;
+}
+
+/**
+ * The first-run setup's answer, stored as prefs. Each field it was not given
+ * falls back to the skip default, so skipping the whole thing is an empty body
+ * and stores exactly what the skip says: nothing but the wall, no limits and
+ * the middle level. "none" is always in the equipment list — it is what marks
+ * the entries that need nothing, and without it the picker has nothing at all.
+ *
+ * The store goes through writePrefs, so junk is a MovesPrefsError and never
+ * reaches the synced row. The `moves.setup.seen` row is written ONLY after the
+ * prefs row landed, so a refused answer leaves the question open.
+ */
+export async function writeSetup(db, body = {}, { emit } = {}) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new MovesPrefsError("prefs must be an object");
+  }
+  const { equipment, limits, level } = body;
+  const patch = {};
+  patch.equipment = equipment === undefined
+    ? [...DEFAULT_PREFS.equipment]
+    : (Array.isArray(equipment) ? [...new Set(["none", ...equipment])] : equipment);
+  patch.limits = limits === undefined ? [] : limits;
+  patch.level = level === undefined ? DEFAULT_PREFS.level : level;
+  const prefs = await writePrefs(db, patch, { emit });
+  await writeJson(db, SETUP_SEEN_KEY, true, emit);
   return prefs;
 }
 

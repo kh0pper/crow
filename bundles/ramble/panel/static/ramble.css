@@ -116,13 +116,59 @@
    "hidden" element stays visible. */
 #ramble [hidden] { display: none !important; }
 
-/* Five views, one state attribute. The world is home. */
+/* Six views, one state attribute. Today is home; the tab bar below is the way
+   between them. */
 #ramble .rb-view { display: none; flex-direction: column; gap: 14px; }
+#ramble[data-view="today"] .rb-view[data-for="today"],
 #ramble[data-view="world"] .rb-view[data-for="world"],
 #ramble[data-view="egg"] .rb-view[data-for="egg"],
 #ramble[data-view="pet"] .rb-view[data-for="pet"],
 #ramble[data-view="flock"] .rb-view[data-for="flock"],
 #ramble[data-view="learn"] .rb-view[data-for="learn"] { display: flex; }
+
+/* The five-tab bar. Sticky, never fixed: it rides the top of #ramble inside the
+   dashboard's own scroll, so it can never cover the shell's chrome. Equal-width
+   tabs (flex: 1 1 0 + min-width: 0) are what keeps five of them on a 360px
+   phone with no horizontal scroll — the labels are one short word each. */
+#ramble .rb-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 6px;
+  padding: 8px 0;
+  background: var(--rb-bg);
+}
+#ramble .rb-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: var(--rb-tap);
+  padding: 10px 4px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: 999px;
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  font-family: var(--rb-font-display);
+  font-weight: 800;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#ramble .rb-tab:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
+/* The current view's own tab. The egg view is the same bird before it hatches,
+   so it lights the Bird tab too. */
+#ramble[data-view="today"] .rb-tab[data-tab="today"],
+#ramble[data-view="world"] .rb-tab[data-tab="map"],
+#ramble[data-view="egg"] .rb-tab[data-tab="bird"],
+#ramble[data-view="pet"] .rb-tab[data-tab="bird"],
+#ramble[data-view="flock"] .rb-tab[data-tab="flock"],
+#ramble[data-view="learn"] .rb-tab[data-tab="learn"] {
+  background: var(--rb-accent);
+  color: var(--rb-accent-ink);
+  box-shadow: var(--rb-pop-sm);
+}
 
 #ramble .rb-row { display: flex; align-items: center; gap: 10px; }
 #ramble .rb-grow { flex: 1; }
@@ -167,8 +213,8 @@
 #ramble #rb-pref-level { flex: 1; min-width: 90px; accent-color: var(--rb-accent-2); }
 
 /* The reference panel folds away. <details> is native, so the toggle, the
-   keyboard handling and the screen-reader semantics all come for free — and if
-   the remember-my-choice script never runs, it simply stays open. */
+   keyboard handling and the screen-reader semantics all come for free — and
+   without any script the fold simply stays as the markup left it: closed. */
 #ramble .rb-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
 #ramble .rb-fold > summary::-webkit-details-marker { display: none; }
 /* Our own marker, so it matches the display font rather than the OS triangle. */
@@ -554,6 +600,48 @@
 #ramble .rb-hearts-line { display: flex; align-items: center; gap: 0.45rem; margin: 0.35rem 0 0; flex-wrap: wrap; }
 #ramble .rb-heart-row { display: inline-flex; gap: 0.15rem; }
 #ramble .rb-heart-one { width: 16px; height: 16px; display: block; }
+
+/* ------------------------------------------------------- today's own cards */
+
+/* One card per slot, drawn by static/today.js into #rb-today-view. The header
+   is the whole tap target: a full-width, left-aligned button one tap tall. */
+#ramble #rb-today-view { display: flex; flex-direction: column; gap: 10px; }
+#ramble .rb-streak { display: flex; flex-direction: column; gap: 2px; }
+#ramble .rb-slot-card { gap: 6px; }
+#ramble .rb-slot-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--rb-tap);
+  padding: 6px 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+#ramble .rb-slot-head:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
+#ramble .rb-slot-head .rb-slot-label {
+  font: 800 12px var(--rb-font-display);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--rb-muted);
+}
+#ramble .rb-slot-head .rb-slot-now {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--rb-accent);
+  color: var(--rb-accent-ink);
+  font: 800 11px var(--rb-font-display);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+#ramble .rb-slot-head .rb-slot-headtitle { margin-left: auto; color: var(--rb-muted); font-size: 13px; text-align: right; }
+#ramble .rb-slot-body { padding: 8px 0 2px; }
+#ramble .rb-slot-title { font-weight: 800; }
 
 
 #ramble .rb-stats { display: flex; gap: 20px; }
@@ -1079,3 +1167,41 @@
 #ramble #rb-walk-goal-val { min-width: 4.5em; text-align: center; }
 #ramble .rb-walk-toggle { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 #ramble .rb-walk-toggle input { width: 18px; height: 18px; }
+
+/* ------------------------------------ first run and the cards-a-day settings */
+
+/* The first-run sheet's three screens are drawn into one body: a title, an
+ * optional hint, the choices and the two buttons, each a row of its own. */
+#ramble #rb-first-run-body { display: grid; gap: 8px; min-width: 0; max-width: 100%; }
+#ramble #rb-first-run-body .rb-h { margin: 0; }
+#ramble #rb-first-run-body .rb-first-run-hint { margin: 0; }
+#ramble .rb-first-run-opts { width: 100%; }
+#ramble .rb-first-run-opts .rb-check { flex: 1 1 44%; min-width: 0; }
+#ramble .rb-first-run-btns { flex-wrap: wrap; margin-top: 6px; }
+#ramble .rb-first-run-btns .rb-btn { flex: 1 1 140px; }
+
+/* Cards a day and the windows, inside the customize sheet. */
+#ramble #rb-pref-slots { display: grid; gap: 6px; min-width: 0; max-width: 100%; }
+#ramble .rb-pref-slots-label { width: auto; }
+#ramble .rb-pref-cards { flex-wrap: wrap; }
+#ramble .rb-pref-card-chip {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: var(--rb-tap); min-width: var(--rb-tap);
+  padding: 0 16px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: 999px;
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  font: 800 15px var(--rb-font-display);
+  cursor: pointer;
+}
+#ramble .rb-pref-card-chip input { width: 18px; height: 18px; margin: 0; accent-color: var(--rb-accent-2); cursor: pointer; }
+#ramble .rb-pref-card-chip input:checked + span { color: var(--rb-accent-2); }
+#ramble .rb-pref-note { margin: 0; }
+#ramble .rb-pref-windows { width: 100%; max-width: 100%; }
+#ramble .rb-pref-windows .rb-check { flex: 1 1 44%; min-width: 0; }
+
+@media (max-width: 360px) {
+  #ramble .rb-pref-card-chip { flex: 1 1 0; }
+  #ramble .rb-first-run-btns .rb-btn { flex: 1 1 100%; }
+}

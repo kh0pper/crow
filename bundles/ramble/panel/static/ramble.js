@@ -389,6 +389,40 @@
 
   /* ---------------------------------------------------------------- views */
 
+  /* The tab bar's words and the views they open are not the same words: the
+   * Bird tab opens the pet view, and the Map tab opens the world. Both lookups
+   * are guarded, so a stray attribute can never reach showView(). */
+  var TAB_VIEWS = { today: "today", map: "world", bird: "pet", flock: "flock", learn: "learn" };
+  /* The other direction, for aria-current: which tab is the current one. The
+   * egg view is the bird's own screen before it hatches, so it lights Bird. */
+  var VIEW_TABS = { today: "today", world: "map", egg: "bird", pet: "bird", flock: "flock", learn: "learn" };
+
+  function viewForTab(word) {
+    if (!word || !Object.prototype.hasOwnProperty.call(TAB_VIEWS, word)) return "";
+    return TAB_VIEWS[word];
+  }
+
+  /* aria-current, not a class: a viewer who cannot see the highlight still
+   * hears which tab they are on. Painted from showView, so no navigation can
+   * leave the bar pointing at the view they just left. */
+  function paintTabs(name) {
+    var tabs = document.querySelectorAll("#rb-tabs .rb-tab");
+    var current = VIEW_TABS[name] || "";
+    for (var i = 0; i < tabs.length; i++) {
+      var tab = tabs[i];
+      if (tab.getAttribute("data-tab") === current) tab.setAttribute("aria-current", "page");
+      else tab.removeAttribute("aria-current");
+    }
+  }
+
+  /* Today's card is static markup with a client of its own (static/moves.js);
+   * this page only has to ask it to look again. Nothing here is load-bearing,
+   * so an absent hook is simply nothing to do. */
+  function refreshToday() {
+    var hook = window.RambleToday;
+    if (hook && typeof hook.refresh === "function") hook.refresh();
+  }
+
   function showView(name) {
     /* Any navigation ends the hatch moment. hatchLock freezes the egg card so
      * the reveal is not repainted out from under the reader; leaving it set
@@ -396,16 +430,42 @@
      * for the rest of the session. */
     if (root.getAttribute("data-view") !== name) clearHatch();
     root.setAttribute("data-view", name);
+    paintTabs(name);
     try { window.scrollTo(0, 0); } catch (e) { /* not fatal */ }
     /* Leaflet measures its container once; a container that was display:none
      * when the map was built comes back with a zero size until it is told. */
     if (name === "world" && map) { setTimeout(function () { map.invalidateSize(); }, 0); }
     if (name === "world") refreshNests();
+    if (name === "today") refreshToday();
     if (name === "egg") refreshEgg();
     if (name === "pet") refreshWalk(false);
     if (name === "pet") refreshPet();
     if (name === "flock") { refreshContacts().then(refreshFlock); refreshTrades(); }
   }
+
+  (function wireTabs() {
+    var tabs = document.querySelectorAll("#rb-tabs .rb-tab");
+    var bind = function (tab) {
+      tab.addEventListener("click", function () {
+        var name = viewForTab(tab.getAttribute("data-tab"));
+        if (name) showView(name);
+      });
+    };
+    for (var i = 0; i < tabs.length; i++) bind(tabs[i]);
+    /* Once at start-up, so the bar is right before anything is tapped. */
+    paintTabs(root.getAttribute("data-view"));
+    /* The moves client sets data-view itself (opening a chunk, and the Learn
+     * page's way back to Today), so the bar follows the attribute as well as
+     * showView. Without an observer here it is left to the views that paint. */
+    if (typeof MutationObserver === "function") {
+      try {
+        var viewObserver = new MutationObserver(function () {
+          paintTabs(root.getAttribute("data-view"));
+        });
+        viewObserver.observe(root, { attributes: true, attributeFilter: ["data-view"] });
+      } catch (e) { /* no observer here: showView still paints the bar */ }
+    }
+  })();
 
   /* ------------------------------------------------------------------ map */
 
@@ -2952,6 +3012,28 @@
   refreshEgg().then(refreshPet);
   refreshWalk(true);
   maybeIntro();
+
+  /* ------------------------------------------------------------ deep links */
+
+  /* A link elsewhere in the Crow (a bot's answer, a hand-off card) can name a
+   * view: ?view=learn and friends. This runs ONCE, as the script runs, and
+   * deliberately adds no turbo:load listener: a Turbo visit re-executes this
+   * whole script anyway, so a listener would stack one more copy per visit and
+   * reopen the old tab on every later navigation. The parameter is dropped
+   * from the URL either way (other parameters and the hash stay), so a reload
+   * lands on the tab the reader then chose rather than yanking them back. */
+  (function readViewLink() {
+    var loc = window.location || {};
+    var search = typeof loc.search === "string" ? loc.search : "";
+    if (search.indexOf("view=") < 0) return;
+    var params = new URLSearchParams(search);
+    var name = viewForTab(params.get("view"));
+    params.delete("view");
+    var rest = params.toString();
+    var url = (loc.pathname || "") + (rest ? "?" + rest : "") + (loc.hash || "");
+    try { window.history.replaceState(null, "", url); } catch (e) { /* the tab still opens */ }
+    if (name) showView(name);
+  })();
 
   if (map) {
     startMapWatch();

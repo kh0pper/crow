@@ -1,9 +1,11 @@
 /**
  * Crow's Nest Panel — Ramble.
  *
- * World-first: the map IS the home screen. Five views (world | egg | pet |
- * flock | learn) live in one element and are switched by `data-view` on
- * `#ramble`; the privacy grid moved out of the page flow into
+ * Today first. Six views (today | world | egg | pet | flock | learn) live in
+ * one element and are switched by `data-view` on `#ramble`; a five-tab bar
+ * (`#rb-tabs`) in normal flow at the top of that element is the way between
+ * them, and `?view=` opens one directly. The privacy grid moved out of the
+ * page flow into
  * `#rb-grid-sheet`, reached from the "Visible" chip on the map. Visual direction C — chunky display type,
  * 2.5px outlines, hard offset shadows, amber/indigo/pink — all of it in
  * `static/ramble.css`, which is why this file no longer carries a <style>.
@@ -65,6 +67,9 @@ const STRINGS = {
   en: {
     health: "Health",
     today: "Today",
+    tabMap: "Map",
+    tabBird: "Bird",
+    tabFlock: "Flock",
     challengeLoading: "Getting today's challenge\u2026",
     start: "Start",
     done: "Done",
@@ -137,6 +142,11 @@ const STRINGS = {
   es: {
     health: "Salud",
     today: "Hoy",
+    /* The tab bar is English in both languages for now (a Spanish pass is a
+     * later phase); the Today and Learn tabs reuse `today` and `learn`. */
+    tabMap: "Map",
+    tabBird: "Bird",
+    tabFlock: "Flock",
     challengeLoading: "Preparando el reto de hoy\u2026",
     start: "Empezar",
     done: "Hecho",
@@ -331,9 +341,43 @@ export default {
       <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
       <link rel="stylesheet" href="${esc(FONTS_HREF)}">
 
-      <div id="ramble" data-view="world" data-lang="${esc(L)}">
+      <div id="ramble" data-view="today" data-lang="${esc(L)}">
 
-        <!-- ─────────────────────────────────────────────── world (the home) -->
+        <!-- The five tabs. Every view is one click away from every other, so a
+             player who only ever wants today's moves never has to cross the map.
+             In normal flow and sticky (never fixed): the dashboard scrolls this
+             element, and a fixed bar would sit over the shell's own chrome. -->
+        <nav class="rb-tabs" id="rb-tabs">
+          <button type="button" class="rb-tab" data-tab="today">${esc(S.today)}</button>
+          <button type="button" class="rb-tab" data-tab="map">${esc(S.tabMap)}</button>
+          <button type="button" class="rb-tab" data-tab="bird">${esc(S.tabBird)}</button>
+          <button type="button" class="rb-tab" data-tab="flock">${esc(S.tabFlock)}</button>
+          <button type="button" class="rb-tab" data-tab="learn">${esc(S.learn)}</button>
+        </nav>
+
+        <!-- ─────────────────────────────────────────────── today (the home) -->
+        <section class="rb-view" data-for="today">
+          <section class="rb-card" id="rb-today">
+            <p class="rb-eyebrow">${esc(S.today)}</p>
+            <!-- The day's cards. static/today.js draws them from
+                 /api/ramble/moves/day: this element is only their host. -->
+            <div id="rb-today-view"></div>
+            <p class="rb-muted rb-fine" id="rb-today-status"></p>
+
+            <div class="rb-meter" id="rb-goal-meter">
+              <strong class="rb-meter-label">${esc(S.steps)}</strong>
+              <span class="rb-meter-bar"><i id="rb-goal-fill"></i></span>
+              <strong id="rb-goal-num">0</strong><span class="rb-meter-of">/ <span id="rb-goal-max">6,000</span></span>
+            </div>
+
+            <div class="rb-row rb-actions">
+              <button class="rb-btn rb-btn-ghost rb-grow" id="rb-something-else" type="button">${esc(S.somethingElse)}</button>
+              <button class="rb-btn rb-btn-ghost" id="rb-customize" type="button">${esc(S.customize)}</button>
+            </div>
+          </section>
+        </section>
+
+        <!-- ─────────────────────────────────────────────────────── the map -->
         <section class="rb-view" data-for="world">
 
           <div class="rb-map">
@@ -477,33 +521,6 @@ export default {
             <p class="rb-muted rb-fine" id="rb-mood-line">Checking on it&hellip;</p>
           </section>
 
-          <section class="rb-card" id="rb-today">
-            <p class="rb-eyebrow">${esc(S.today)}</p>
-            <h3 class="rb-h" id="rb-challenge-title">${esc(S.challengeLoading)}</h3>
-            <p class="rb-muted rb-fine" id="rb-challenge-why" hidden></p>
-            <p class="rb-muted rb-fine" id="rb-challenge-meta"></p>
-            <div class="rb-row rb-actions">
-              <button class="rb-btn" id="rb-challenge-start" type="button">${esc(S.start)}</button>
-              <button class="rb-btn rb-btn-ghost" id="rb-challenge-done" type="button">${esc(S.done)}</button>
-              <button class="rb-btn rb-btn-ghost" id="rb-challenge-swap" type="button">${esc(S.swap)}</button>
-            </div>
-            <p class="rb-muted rb-fine" id="rb-today-status"></p>
-
-            <div class="rb-meter" id="rb-goal-meter">
-              <strong class="rb-meter-label">${esc(S.steps)}</strong>
-              <span class="rb-meter-bar"><i id="rb-goal-fill"></i></span>
-              <strong id="rb-goal-num">0</strong><span class="rb-meter-of">/ <span id="rb-goal-max">6,000</span></span>
-            </div>
-            <p class="rb-muted rb-fine" id="rb-goal-line"></p>
-            <p class="rb-muted rb-fine" id="rb-streak-line"></p>
-
-            <div class="rb-row rb-actions">
-              <button class="rb-btn rb-btn-ghost rb-grow" id="rb-something-else" type="button">${esc(S.somethingElse)}</button>
-              <button class="rb-btn rb-btn-ghost" id="rb-customize" type="button">${esc(S.customize)}</button>
-              <button class="rb-btn rb-btn-ghost" id="rb-learn-btn" type="button">${esc(S.learn)}</button>
-            </div>
-          </section>
-
           <section class="rb-card" id="rb-walk">
             <p class="rb-eyebrow">Walking</p>
             <div class="rb-meter" id="rb-walk-meter" hidden>
@@ -531,7 +548,7 @@ export default {
             <p class="rb-muted rb-fine" id="rb-walk-status"></p>
           </section>
 
-          <details class="rb-card rb-fold" id="rb-runs-on" open>
+          <details class="rb-card rb-fold" id="rb-runs-on">
             <summary class="rb-eyebrow rb-fold-sum">What your bird runs on</summary>
             <div class="rb-steps">
               <div class="rb-step">
@@ -630,7 +647,7 @@ export default {
           </section>
 
           <div class="rb-row rb-actions">
-            <button class="rb-btn rb-btn-ghost rb-grow" id="rb-learn-back-pet" type="button">${icon("back")}${esc(S.backToBird)}</button>
+            <button class="rb-btn rb-btn-ghost rb-grow" id="rb-learn-back-pet" type="button">${icon("back")}${esc(S.today)}</button>
           </div>
         </section>
 
@@ -861,12 +878,21 @@ export default {
               <input type="range" id="rb-pref-level" min="1" max="3" step="1" value="2">
               <strong id="rb-pref-level-val">2</strong>
             </div>
+            <!-- Cards a day and the windows, drawn by static/today.js. -->
+            <div id="rb-pref-slots"></div>
             <label class="rb-switch"><input type="checkbox" id="rb-pref-weather"><span>${esc(S.weather)}</span></label>
             <div class="rb-row">
               <span class="rb-label">${esc(S.calendar)}</span>
               <button class="rb-btn rb-btn-ghost" id="rb-pref-calendar" type="button" disabled>${esc(S.later)}</button>
             </div>
             <p class="rb-muted rb-fine" id="rb-customize-status"></p>
+          </div>
+        </div>
+
+        <!-- The first-run questions; today.js draws the three screens into the body. -->
+        <div class="rb-sheet" id="rb-first-run" hidden>
+          <div class="rb-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="rb-first-run-title">
+            <div id="rb-first-run-body"></div>
           </div>
         </div>
 
@@ -890,6 +916,7 @@ export default {
       <script src="/ramble/static/ramble-ar.js"></script>
       <script src="/ramble/static/ramble.js"></script>
       <script src="/ramble/static/moves.js"></script>
+      <script src="/ramble/static/today.js"></script>
     `;
 
     res.send(layout({ title: "Ramble", content }));

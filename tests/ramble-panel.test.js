@@ -247,9 +247,9 @@ test("panel handler renders the world-first shell, its three views and every ass
   });
   assert.ok(sent, "handler sent nothing");
 
-  // The whole panel is one element with a `data-view` state; the world is home.
+  // The whole panel is one element with a `data-view` state; Today is home.
   assert.match(sent, /id="ramble"/);
-  assert.match(sent, /data-view="world"/);
+  assert.match(sent, /data-view="today"/);
 
   // Direction-C surfaces: the perch on the map, the compose card, the grid
   // sheet (no longer an always-open card), and both other views.
@@ -335,16 +335,16 @@ test("panel handler renders the world-first shell, its three views and every ass
   // does not depend on a GPS fix.
   assert.ok(sent.includes('id="rb-perch-open"'), "the world view keeps a door that does not need a GPS fix");
 
-  // The pet page puts the thing you ACT on above the thing you read once.
-  // Asserting the ORDER, not just presence: both cards existed before and the
-  // complaint was that the reference panel pushed the old chore buttons below
-  // the fold. The Today card took their place.
+  // The Today card moved to its own view (the first tab), so the pet page now
+  // opens on the bird itself and the reference panel below it.
   const todayCard = sent.indexOf('id="rb-today"');
   const runsOn = sent.indexOf('id="rb-runs-on"');
-  assert.ok(todayCard > -1 && runsOn > -1, "both the Today card and the reference panel are on the pet page");
+  assert.ok(todayCard > -1 && runsOn > -1, "both the Today card and the reference panel are on the page");
   assert.ok(todayCard < runsOn, "the Today card comes BEFORE what your bird runs on");
-  assert.ok(sent.includes('<details class="rb-card rb-fold" id="rb-runs-on" open>'),
-    "the reference panel folds, and ships open for a player who has not read it yet");
+  assert.ok(sent.includes('<details class="rb-card rb-fold" id="rb-runs-on">'),
+    "the reference panel folds, and ships closed: it is read once, if at all");
+  assert.equal(/<details[^>]*id="rb-runs-on"[^>]*\bopen\b/.test(sent), false,
+    "no open attribute survives on the fold");
   assert.ok(sent.includes('<summary class="rb-eyebrow rb-fold-sum">'), "with a real summary, so it toggles without script");
   // The list used to point DOWN at the chores. The challenge card is above it now.
   assert.ok(!sent.includes("A chore below"), "the copy must not still point below at chores that are gone");
@@ -2357,4 +2357,217 @@ test("the map wrapper is its own stacking context, so map panes cannot draw over
   const rule = css.match(/#ramble \.rb-map \{([^}]*)\}/);
   assert.ok(rule, "the map wrapper rule exists");
   assert.match(rule[1], /isolation:\s*isolate/, "the wrapper isolates the map library's z-indexes");
+});
+
+// --------------------------------------------------------------- tabs (P10)
+
+const CSS_SRC = () => readFileSync(join(REPO_ROOT, "bundles/ramble/panel/static/ramble.css"), "utf8");
+const COPY_EN = () => JSON.parse(readFileSync(join(REPO_ROOT, "bundles/ramble/server/moves/player-copy.en.json"), "utf8"));
+
+/** Render the panel on its own, with no db and no layout wrapper. */
+async function renderPanel(lang) {
+  let sent = null;
+  const res = { send: (html) => { sent = html; } };
+  await panel.handler({ query: {} }, res, {
+    db: null,
+    layout: ({ content }) => content,
+    appRoot: REPO_ROOT,
+    ...(lang ? { lang } : {}),
+  });
+  assert.ok(sent, "the handler sent nothing");
+  return sent;
+}
+
+/** The tab buttons of a rendered panel, in document order. */
+function tabButtons(html) {
+  const nav = /<nav[^>]*id="rb-tabs"[^>]*>([\s\S]*?)<\/nav>/.exec(html);
+  assert.ok(nav, 'the bar is a nav with id="rb-tabs"');
+  const buttons = [...nav[1].matchAll(/<button type="button" class="rb-tab" data-tab="([a-z]+)">([^<]*)<\/button>/g)];
+  assert.equal(buttons.length, 5, "five tabs, no more and no fewer");
+  return buttons.map((m) => ({ tab: m[1], text: m[2] }));
+}
+
+test("tabs: the bar has five tabs in order, in the approved words", async () => {
+  const html = await renderPanel("en");
+  const tabs = tabButtons(html);
+  assert.deepEqual(tabs.map((t) => t.tab), ["today", "map", "bird", "flock", "learn"], "the order is the order");
+  assert.deepEqual(tabs.map((t) => t.text), ["Today", "Map", "Bird", "Flock", "Learn"]);
+});
+
+test("tabs: the nav has no aria-label and sits inside #ramble, above every view", async () => {
+  const html = await renderPanel("en");
+  const navTag = /<nav[^>]*id="rb-tabs"[^>]*>/.exec(html);
+  assert.ok(navTag, "the bar is a nav");
+  assert.equal(/aria-label/.test(navTag[0]), false,
+    "the buttons say what they are; a second name would only be read twice");
+
+  const rootAt = html.indexOf('id="ramble"');
+  const navAt = html.indexOf('id="rb-tabs"');
+  const firstViewAt = html.indexOf('data-for="today"');
+  assert.ok(rootAt > -1 && navAt > rootAt, "the bar is inside #ramble, not beside it");
+  assert.ok(firstViewAt > -1 && navAt < firstViewAt, "and before the first view, so it reads first");
+});
+
+test("tabs: #ramble ships data-view=today whatever the bird is doing", async () => {
+  for (const lang of ["en", "es"]) {
+    const html = await renderPanel(lang);
+    assert.match(html, /<div id="ramble" data-view="today"/, lang + " opens on Today");
+  }
+  // The handler renders one shell for every player, so a hatched bird cannot
+  // decide the tab; and nothing in the client opens another view by itself.
+  const src = STATIC_SRC();
+  const startup = src.slice(src.indexOf("------- startup */"));
+  assert.ok(startup.length > 0, "the startup section is findable");
+  assert.equal(/showView\("(world|pet|egg|flock|learn|today)"\)/.test(startup), false,
+    "no boot path opens a view of its own — only the ?view= reader can");
+});
+
+test("tabs: the tab words are the approved table's", async () => {
+  const copy = COPY_EN();
+  const tabs = tabButtons(await renderPanel("en"));
+  for (const { tab, text } of tabs) {
+    assert.equal(text, copy["tab." + tab], "tab." + tab + " must be the copy table's word");
+    assert.equal(typeof copy["tab." + tab], "string", "tab." + tab + " exists in the table");
+  }
+  // Spanish carries the English word for the three new tabs for now, so no tab
+  // label is ever undefined; Today and Learn keep their own translations.
+  const es = tabButtons(await renderPanel("es"));
+  assert.deepEqual(es.map((t) => t.text), ["Hoy", "Map", "Bird", "Flock", "Aprender"]);
+});
+
+test("tabs: the Today card is on the today view, and the pet page keeps Walking", async () => {
+  const html = await renderPanel("en");
+  const at = (needle) => {
+    const index = html.indexOf(needle);
+    assert.ok(index > -1, needle + " is on the page");
+    return index;
+  };
+  const todayView = at('data-for="today"');
+  const worldView = at('data-for="world"');
+  const petView = at('data-for="pet"');
+  const learnView = at('data-for="learn"');
+  const card = at('id="rb-today"');
+  assert.ok(card > todayView && card < worldView, "the Today card lives inside the today view");
+  assert.ok(card < petView, "and no longer inside the pet view");
+  const walk = at('id="rb-walk"');
+  assert.ok(walk > petView && walk < learnView, "the Walking card stays on the pet view");
+});
+
+test("tabs: the reference fold ships closed", async () => {
+  const html = await renderPanel("en");
+  const tag = /<details[^>]*id="rb-runs-on"[^>]*>/.exec(html);
+  assert.ok(tag, "the fold is on the page");
+  assert.equal(/\bopen\b/.test(tag[0]), false, "no open attribute");
+});
+
+test("tabs: no backticks in the client, and the bar is sticky, never fixed", () => {
+  /* The house rule is the client SCRIPT's: the tooling treats a backtick as its
+   * own delimiter. The stylesheet is not a script and is not held to it. */
+  const src = STATIC_SRC();
+  assert.equal((src.match(/`/g) || []).length, 0, "static/ramble.js must contain no backtick");
+  const css = CSS_SRC();
+  const bar = /#ramble \.rb-tabs \{([^}]*)\}/.exec(css);
+  assert.ok(bar, "the bar has a rule of its own");
+  assert.match(bar[1], /position:\s*sticky/, "in normal flow, so it cannot cover the shell's chrome");
+  assert.match(bar[1], /top:\s*0/);
+  assert.equal(/position:\s*fixed/.test(bar[1]), false, "never fixed");
+  assert.match(bar[1], /display:\s*flex/, "a flex row");
+  assert.match(bar[1], /gap:\s*6px/);
+  assert.match(bar[1], /padding:\s*8px 0/);
+  assert.match(bar[1], /background:\s*var\(--rb-bg\)/, "opaque, so the view does not show through");
+  assert.match(bar[1], /z-index:\s*5/);
+
+  // Five tabs on a 360px phone with no horizontal scroll: equal, shrinkable
+  // widths are the mechanism, so they are what is pinned.
+  const tab = /#ramble \.rb-tab \{([^}]*)\}/.exec(css);
+  assert.ok(tab, "the tab has a rule of its own");
+  assert.match(tab[1], /flex:\s*1 1 0/);
+  assert.match(tab[1], /min-width:\s*0/);
+  assert.match(tab[1], /font-size:\s*14px/);
+  assert.match(tab[1], /padding:\s*10px 4px/);
+  assert.match(tab[1], /text-overflow:\s*ellipsis/);
+  assert.match(tab[1], /white-space:\s*nowrap/);
+  assert.match(tab[1], /border:\s*var\(--rb-line-w\) solid var\(--rb-line\)/, "the same outline the buttons use");
+  assert.match(tab[1], /min-height:\s*var\(--rb-tap\)/, "a 44px tap target");
+
+  // Every view lights its own tab; the egg view lights Bird.
+  for (const [view, tabName] of [["today", "today"], ["world", "map"], ["pet", "bird"], ["egg", "bird"], ["flock", "flock"], ["learn", "learn"]]) {
+    const rule = new RegExp('#ramble\\[data-view="' + view + '"\\] \\.rb-tab\\[data-tab="' + tabName + '"\\]');
+    assert.match(css, rule, view + " highlights the " + tabName + " tab");
+  }
+});
+
+test("tabs: the client maps each tab to its view and marks the current one", () => {
+  const src = STATIC_SRC();
+  assert.ok(src.includes('var TAB_VIEWS = { today: "today", map: "world", bird: "pet", flock: "flock", learn: "learn" };'),
+    "the bar's words are not the views' names");
+  assert.ok(src.includes('tab.setAttribute("aria-current", "page")'));
+  assert.ok(src.includes('tab.removeAttribute("aria-current")'),
+    "the tab they left must not stay current");
+  assert.ok(/paintTabs\(name\);/.test(extractFunction(src, "showView")), "showView repaints the bar");
+  assert.ok(/if \(name === "today"\) refreshToday\(\);/.test(src), "arriving on Today asks its own client to look again");
+  assert.ok(src.includes("var hook = window.RambleToday;"));
+  assert.ok(src.includes("if (hook && typeof hook.refresh === \"function\") hook.refresh();"),
+    "and survives the hook not existing yet");
+});
+
+test("tabs: a data-view set without showView still repaints the bar", () => {
+  /* static/moves.js sets data-view itself: a chunk opens the Learn view and the
+   * Learn page's back button returns to Today. Those go through neither
+   * showView nor its paintTabs call, so the bar follows the attribute. */
+  const src = STATIC_SRC();
+  assert.ok(src.includes('typeof MutationObserver === "function"'),
+    "guarded, so a page without one is not broken by it");
+  const watched = extractFunction(src, "wireTabs");
+  assert.ok(watched, "the observer is set up beside the bar's own wiring");
+  assert.ok(/new MutationObserver\(function \(\) \{\s*paintTabs\(root\.getAttribute\("data-view"\)\);\s*\}\)/.test(watched),
+    "it repaints from the view the root actually carries");
+  assert.ok(watched.includes('{ attributes: true, attributeFilter: ["data-view"] }'),
+    "watching just that one attribute");
+  assert.ok(watched.indexOf('typeof MutationObserver === "function"') < watched.indexOf("new MutationObserver"),
+    "the guard comes before the observer it guards");
+  /* The harness here does not boot static/ramble.js, so this half stays a
+   * source-level assertion; the attribute itself is painted by paintTabs. */
+});
+
+test("tabs: ?view= opens one tab once, then drops only that parameter", () => {
+  const src = STATIC_SRC();
+  const fnSrc = extractFunction(src, "readViewLink");
+  assert.ok(fnSrc, "readViewLink must be defined and extractable");
+  assert.ok(src.includes("new URLSearchParams("), "the query is parsed, not split by hand");
+  assert.ok(src.includes("window.history.replaceState("));
+  assert.equal(/addEventListener\(\s*["']turbo:load["']/.test(src), false,
+    "a Turbo visit re-runs this script, so a turbo:load listener would stack one per visit");
+
+  const boot = (search, hash) => {
+    const seen = { views: [], replaced: [] };
+    const win = {
+      location: { pathname: "/dashboard/ramble", search, hash: hash || "" },
+      history: { replaceState(state, title, url) { seen.replaced.push(url); } },
+    };
+    const views = { today: "today", map: "world", bird: "pet", flock: "flock", learn: "learn" };
+    const viewForTab = (word) => (Object.prototype.hasOwnProperty.call(views, word) ? views[word] : "");
+    const showView = (name) => { seen.views.push(name); };
+    const make = new Function("window", "URLSearchParams", "viewForTab", "showView", fnSrc + "\nreturn readViewLink;");
+    make(win, URLSearchParams, viewForTab, showView)();
+    return seen;
+  };
+
+  assert.deepEqual(boot("?view=today", "").views, ["today"]);
+  assert.deepEqual(boot("?view=map", "").views, ["world"]);
+  assert.deepEqual(boot("?view=bird", "").views, ["pet"]);
+  assert.deepEqual(boot("?view=flock", "").views, ["flock"]);
+  assert.deepEqual(boot("?view=learn", "").views, ["learn"]);
+
+  const kept = boot("?view=map&tab=2", "#bird");
+  assert.deepEqual(kept.replaced, ["/dashboard/ramble?tab=2#bird"],
+    "other parameters and the hash survive; only view goes");
+
+  const odd = boot("?view=nope&a=1", "");
+  assert.deepEqual(odd.views, [], "an unknown tab opens nothing");
+  assert.deepEqual(odd.replaced, ["/dashboard/ramble?a=1"], "and is still dropped");
+
+  const plain = boot("?a=1", "");
+  assert.deepEqual(plain.views, []);
+  assert.deepEqual(plain.replaced, [], "a page with no view= never rewrites the URL");
 });

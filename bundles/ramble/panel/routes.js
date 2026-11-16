@@ -311,7 +311,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   async function ensureMovesMods(res) {
     if (movesMods) return true;
     try {
-      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod, slotsMod, dayMod, dayCompleteMod] = await Promise.all([
+      const [libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod, slotsMod, dayMod, dayCompleteMod, weekMod] = await Promise.all([
         bundleImport("server/moves/library.js"),
         bundleImport("server/moves/picker.js"),
         bundleImport("server/moves/ledger.js"),
@@ -323,10 +323,11 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/moves/slots.js"),
         bundleImport("server/moves/day.js"),
         bundleImport("server/moves/day-complete.js"),
+        bundleImport("server/moves/week.js"),
       ]);
       movesMods = {
         libraryMod, pickerMod, ledgerMod, todayMod, streakMod, learningMod, parseMod, progressMod, slotsMod,
-        dayMod, dayCompleteMod,
+        dayMod, dayCompleteMod, weekMod,
       };
       return true;
     } catch (err) {
@@ -434,14 +435,87 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   }
 
   /**
+   * The read-only facts the day payload carries beside its cards: the hatched
+   * bird and the pet's Health (the same shapes the pet card answers), the hearts
+   * wallet, the day's steps, the streak with how many of the day's own slots are
+   * finished, the week's balance and whether the first-run setup still has to be
+   * asked. Nothing here writes, so a caller may rebuild it as often as it needs
+   * — the day route does, once more, after settling.
+   *
+   * `out` is read for the day and its card count only.
+   */
+  async function dayExtras(now, out) {
+    const day = typeof out?.day === "string" ? out.day : "";
+    const slotNames = movesMods.weekMod.SLOTS;
+    const [pet, bird, steps, streak, week, slotRows] = await Promise.all([
+      mods.petMod.petState(db, { now }),
+      mods.eggsMod.activeBird(db),
+      mods.stepsMod.stepsState(db, { now }),
+      movesMods.streakMod.streakState(db, { now }),
+      movesMods.weekMod.weekState(db, { now }),
+      day === "" || slotNames.length === 0
+        ? Promise.resolve({ rows: [] })
+        : db.execute({
+            sql: `SELECT key FROM ramble_wallet WHERE kind = ? AND key IN (${slotNames.map(() => "?").join(", ")})`,
+            args: [
+              movesMods.dayCompleteMod.MOVE_SLOT_KIND,
+              ...slotNames.map((slot) => `${day}:${slot}`),
+            ],
+          }),
+    ]);
+    // One row per finished slot, so counting the ones that name a real slot is
+    // the day's done count. A row for another name (or another day, which the
+    // query cannot return) is bookkeeping the day never asked for.
+    const finished = new Set();
+    for (const row of Array.isArray(slotRows?.rows) ? slotRows.rows : []) {
+      const key = String(row?.key ?? "");
+      if (key.slice(0, day.length + 1) !== `${day}:`) continue;
+      const slot = key.slice(day.length + 1);
+      if (!slotNames.includes(slot)) continue;
+      finished.add(slot);
+    }
+    // A day has no more cards done than it has cards: rows left by a day with
+    // more windows than this one must not read as more than the day's count.
+    const need = Number(out?.need);
+    const doneToday = Number.isFinite(need) ? Math.min(finished.size, need) : finished.size;
+    return {
+      // The same trio (plus the outfit) the pet card answers with, so a surface
+      // that shows a bird is never a second opinion about which one.
+      bird: bird
+        ? {
+            egg_id: bird.egg_id,
+            species: bird.species,
+            seed: Number(bird.seed),
+            outfit: await mods.wardrobeMod.birdOutfit(db, bird.egg_id),
+          }
+        : null,
+      health: { energy: pet.energy, max: pet.energy_max, mood: pet.mood },
+      hearts: await mods.heartsMod.heartsBalance(db),
+      steps: {
+        day: steps.day,
+        goal: steps.goal,
+        steps: steps.steps,
+        goal_met: steps.goal_met,
+        walked: steps.walked,
+      },
+      streak: { days: streak.days, doneToday, need: out?.need },
+      week: { total: week.total },
+      setup: { needed: await movesMods.todayMod.setupNeeded(db) },
+    };
+  }
+
+  /**
    * The day's cards as the panel reads them: one item per slot, the card without
    * the joint-angle data, the reason line for the slot, and the flag pair the
    * wallet holds. The day's `seen` lists stay in the database — a card that was
    * shown is bookkeeping, not something a surface renders. `refused` is only
    * carried when the caller states it, so a swap's answer has it and a plain
-   * read of the day does not.
+   * read of the day does not. The read-only extras (dayExtras) ride in the same
+   * payload unless the caller asks for the cards alone (`extras: false`): that
+   * is what the day route does, because it settles the day and then reads them
+   * once, on the far side of the settle.
    */
-  async function dayPayload(now, { refused } = {}) {
+  async function dayPayload(now, { refused, extras = true } = {}) {
     const prefs = await movesMods.todayMod.readPrefs(db);
     const library = servedMoves();
     const out = await movesMods.slotsMod.dayCards(db, {
@@ -475,6 +549,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       complete: out.off
         ? false
         : await movesMods.dayCompleteMod.isDayComplete(db, out.day, { need: out.need }),
+      ...(extras ? await dayExtras(now, out) : {}),
     };
     if (refused !== undefined) payload.refused = !!refused;
     // The open (or last finished) outdoor session, so a reload resumes a walk's
@@ -1488,7 +1563,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   router.get("/api/ramble/moves/day", handle(async (req, res) => {
     if (!(await ensureMovesMods(res))) return;
     const now = Date.now();
-    const payload = await dayPayload(now);
+    const payload = await dayPayload(now, { extras: false });
     // This route may write, so it marks the day the streak's all-cards rule
     // starts on this instance (once; a second read writes nothing), then settles
     // the day before the answer: a day already finished by rows that arrived
@@ -1498,6 +1573,15 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       day: mods.eggsMod.localDay(now), now, emit,
     });
     await settleRecent(now, payload);
+    // Settling above can complete the day (a heart, a cache row), so the fields
+    // that read the rows are refreshed AFTER it: the day's completion and the
+    // read-only extras (the streak and the day's finished-slot count among them)
+    // would otherwise answer what the day looked like before it settled. The
+    // extras are read exactly once, here.
+    payload.complete = payload.off
+      ? false
+      : await movesMods.dayCompleteMod.isDayComplete(db, payload.day, { need: payload.need });
+    Object.assign(payload, await dayExtras(now, payload));
     res.json(payload);
   }));
 
@@ -1902,6 +1986,19 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     try { prefs = await movesMods.todayMod.writePrefs(db, patch, { emit }); }
     catch (err) { movesInput(err); }
     res.json({ prefs });
+  }));
+
+  // The first-run setup: the one place that states equipment, limits and level
+  // in one go, every field optional, so a skipped question is an empty body.
+  // It stores through writePrefs (validation is a 400 through movesInput) and
+  // marks the answer seen, and it answers the fresh day so the caller needs no
+  // second request to paint what the answer changed.
+  router.post("/api/ramble/moves/setup", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    let prefs;
+    try { prefs = await movesMods.todayMod.writeSetup(db, req.body ?? {}, { emit }); }
+    catch (err) { movesInput(err); }
+    res.json({ prefs, day: await dayPayload(Date.now()) });
   }));
 
   // The player's words. The panel is copied alone into an install, so this is
