@@ -16,7 +16,7 @@ Use `artifact_create` to make something the owner can open in Crow's Nest → Ar
 
 ## A big document: write a file and upload it
 
-A source sent inline has to fit in one message you write, and a long one will be cut off or lose characters. **When the source is over about 20 KB (roughly 600 lines), do not send it inline** — `artifact_create`/`artifact_update` refuse it with `too_big_inline` above 24000 characters. Write it to a file in your working directory first, then upload it in three steps:
+A source sent inline has to fit in one message you write, and a long one will be cut off or lose characters. **When the source is over about 20 KB (roughly 600 lines), do not send it inline.** If you have a shell (`bash`), `artifact_create`/`artifact_update` also refuse a source over 24000 characters with `too_big_inline`; write it to a file in your working directory first, then upload it in three steps:
 
 1. `artifact_upload_begin` — `{field: "html"}` (or `markdown`, `svg`, or `source` for a Design-kit diagram), plus `bytes` (the file's size, e.g. from `wc -c page.html`), and for an update also `artifact_id`. If you know the file's sha256, pass it: a file that does not match is refused. You get back `upload_id`, `put_url`, `max_bytes` and a ready-made `how` command. The upload expires in 10 minutes and the file must be UTF-8 text.
 2. PUT the file to `put_url`. `put_url` is on the same gateway as your artifacts tools — the base URL of your `artifacts` entry in your MCP config (usually `http://127.0.0.1:3001`) — so:
@@ -26,7 +26,7 @@ A source sent inline has to fit in one message you write, and a long one will be
    A `200` means stored. `413` means the file is bigger than the upload allows (it is capped at 4 MiB; markdown has its own, smaller cap): split it. `400` means the file is not UTF-8 text or its sha256 did not match what you declared.
 3. `artifact_upload_commit` — `{upload_id, mode: "create", title, type}` for a new artifact, or `{upload_id, mode: "update", artifact_id, round_id?, base_version?, change_note?}` for a new version. For a document also pass `doc_title` and `lang`; for a Design-kit diagram pass `engine` (with `field: "source"`). This runs exactly the same checks as `artifact_create`/`artifact_update` — link, round, ask-first and version gates included — and returns the same result.
 
-An upload works once: if the commit fails, begin again (the token is burned). Assets (base64 files) are not affected by this — only the text fields.
+An upload works once: if the commit fails, begin again (the token is burned). Assets (base64 files) are not affected by this — only the text fields. The 24000-character inline refusal applies only when you have a shell: without one there is nothing to upload with, so a long source is saved as you send it, up to the type's own limit.
 
 ## Looks and the Design kit
 
@@ -53,7 +53,7 @@ Make every artifact look intentional, not generic. Your spawn prompt carries one
 A round arrives as a message that starts with `[Crow Artifacts feedback round N]`.
 
 1. `artifact_get` the artifact; read the threads in the message (or `artifact_comments`).
-2. Make the changes and call `artifact_update` with the `round_id` and `base_version` from the message, plus a short `change_note` (a source over 24000 characters goes through `artifact_upload_begin` → PUT → `artifact_upload_commit`, passing the same `round_id` and `base_version`).
+2. Make the changes and call `artifact_update` with the `round_id` and `base_version` from the message, plus a short `change_note` (with a shell, a source over 24000 characters goes through `artifact_upload_begin` → PUT → `artifact_upload_commit`, passing the same `round_id` and `base_version`).
 3. Reply in each thread with `artifact_reply`; `artifact_resolve` the threads you addressed.
 4. Finish with `artifact_round_done` and a one-paragraph summary.
 

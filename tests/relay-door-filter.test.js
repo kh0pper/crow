@@ -201,6 +201,41 @@ test("sse streams through", async () => {
   c.close();
 });
 
+// ---- the artifacts upload door (operator ruling 2026-11-16) -----------------
+
+test("a contained bot's PUT to /artifacts/upload/<token> is forwarded, from the mark", async () => {
+  seen = [];
+  const { r } = await relay();
+  const c = doorClient(r.socketPath, upPort);
+  await c.ready;
+  const token = "a".repeat(64);
+  const body = "<!doctype html><html><body><p>" + "x".repeat(40) + "</p></body></html>";
+  c.write(`PUT /artifacts/upload/${token} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/html\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+  const res = await c.next();
+  assert.equal(res.status, 200, "the upstream answers 200: the request reached it");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].method, "PUT");
+  assert.equal(seen[0].path, `/artifacts/upload/${token}`);
+  assert.equal(seen[0].mark, RELAY_SOURCE_V4, "…through the same mark as every door");
+  c.close();
+});
+
+test("the upload door is that prefix only: a bare /artifacts/upload and any other artifacts path are refused", async () => {
+  seen = [];
+  const { r, logs } = await relay();
+  for (const path of ["/artifacts/upload", `/artifacts/uploads/${"a".repeat(64)}`, "/artifacts/news", "/artifacts/view/art_abcdef"]) {
+    const c = doorClient(r.socketPath, upPort);
+    await c.ready;
+    c.write(`PUT ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}`);
+    const res = await c.next();
+    assert.equal(res.status, 403, path + " is not a door");
+    assert.match(res.head, /connection: close/i);
+    c.close();
+  }
+  assert.equal(seen.length, 0, "the gateway never saw any of them");
+  assert.ok(logs.some((l) => /deny PUT \/artifacts\/news \(not a door\)$/.test(l)), logs.join("\n"));
+});
+
 test("no other loopback port", async () => {
   const otherSeen = [];
   const other = createNetServer((s) => { otherSeen.push("connected"); s.end("X"); });

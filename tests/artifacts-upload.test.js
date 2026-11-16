@@ -31,6 +31,7 @@ import { LIMITS } from "../bundles/artifacts/server/limits.js";
 import { handleUploadPut, readMeter, _resetReadMeter, _resetUploadsForTest, _expireForTest, UPLOAD_PATH_PREFIX, MAX_PENDING_PER_ACTOR, SWEEP_INTERVAL_MS, capForField, findUpload, takeUpload } from "../bundles/artifacts/server/uploads.js";
 import { initGatewayActorKey, signArtifactsActor, verifyArtifactsActorSig } from "../scripts/pi-bots/actor-sig.mjs";
 import { isFunnelPublicPath, rejectFunneledMiddleware } from "../servers/gateway/funnel.js";
+import { isDoorPath } from "../servers/shared/bot-doors.js";
 
 initGatewayActorKey();
 const saved = { CROW_HOME: process.env.CROW_HOME, CROW_DATA_DIR: process.env.CROW_DATA_DIR };
@@ -44,7 +45,8 @@ before(async () => {
     CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE dashboard_settings_overrides (key TEXT NOT NULL, instance_id TEXT NOT NULL, value TEXT NOT NULL,
       updated_at TEXT DEFAULT (datetime('now')), lamport_ts INTEGER DEFAULT 0, PRIMARY KEY (key, instance_id));
-    CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_type TEXT, gateway_thread_id TEXT, kind TEXT, status TEXT, narrowed_tools TEXT, card_id INTEGER);`);
+    CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_type TEXT, gateway_thread_id TEXT, kind TEXT, status TEXT, narrowed_tools TEXT, card_id INTEGER);
+    CREATE TABLE pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, definition TEXT, enabled INTEGER NOT NULL DEFAULT 1, project_id INTEGER);`);
   await initArtifactsTables(s.db);
   s.blobs = createLocalBlobStore(join(s.home, "blobs"));
   s.artToken = await generateArtifactsToken(s.db);
@@ -145,6 +147,13 @@ function abortPut(putUrl) {
 }
 
 const clean = (botId, thread) => s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind, status) VALUES (?, 'perch', ?, 'perch-live', 'active')", args: [botId, thread] });
+/** A stored bot def, the way the Bot Builder writes it: `tools.pi_builtin` is
+ *  the list the spawn is pinned with, and `bash` in it is the shell a bot needs
+ *  to `curl` a file to a put_url. */
+const botDef = (botId, builtin, raw = null) => s.db.execute({
+  sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,1)",
+  args: [botId, botId, raw ?? JSON.stringify({ tools: { pi_builtin: builtin } })],
+});
 
 // ─── the happy path, and its identity with the inline tools ─────────────────
 
@@ -186,6 +195,7 @@ test("begin returns a put_url on this gateway plus a curl line; begin → PUT �
 });
 
 test("a 30 KB page: refused inline with too_big_inline and nothing written, then saved through the upload", async () => {
+  await botDef("bobby", ["read", "bash"]);   // a shell: this bot CAN upload, so the cap is a signpost it can act on
   await clean("bobby", "perchlive-up2");
   const c = await client(s.artToken, bot("bobby", "perchlive-up2"));
   try {
@@ -207,6 +217,7 @@ test("a 30 KB page: refused inline with too_big_inline and nothing written, then
 });
 
 test("the inline cap applies to create too — and only above the limit (24000 chars still passes)", async () => {
+  await botDef("bobby", ["read", "bash"]);
   await clean("bobby", "perchlive-up3");
   const c = await client(s.artToken, bot("bobby", "perchlive-up3"));
   try {
@@ -368,6 +379,95 @@ test("the upload PUT leg is never a public Funnel path", () => {
   let status = null;
   mw({ headers: { "tailscale-funnel-request": "?1" }, path }, { status(c) { status = c; return this; }, type() { return this; }, send() { return this; } }, () => { status = "next"; });
   assert.equal(status, 403);
+});
+
+test("the upload PUT is a bot door, and the gateway still refuses a token it does not hold (404)", async () => {
+  const token = "b".repeat(64);
+  const path = `${UPLOAD_PATH_PREFIX}/${token}`;
+  assert.equal(isDoorPath(path), true, "a contained bot's relay may forward exactly this path");
+  assert.equal(isDoorPath(`${UPLOAD_PATH_PREFIX}s/${token}`), false, "…and only that prefix: not /artifacts/uploads/");
+  assert.equal(isDoorPath(UPLOAD_PATH_PREFIX), false, "the door is the prefix, not its parent");
+  // The door is not an authentication: no live token, no upload.
+  const r = await put(`http://127.0.0.1:${s.port}${path}`, "<p>nothing</p>");
+  assert.equal(r.status, 404);
+  assert.match(r.text, /no such upload/);
+});
+
+// ─── the inline cap is for callers who can act on it (ruling 2026-11-16, A) ──
+// The 24k cap is a signpost to the two-step upload: write a file, PUT it,
+// commit. A caller with no way to PUT (no shell tool, a def that cannot be
+// read) or one the ruling leaves on its round's own gates (a locked/untrusted
+// scope) keeps the old inline save — bounded by the per-type caps, never by
+// 24k. Refusing there would strand a bot with no other way to save.
+
+const BIG_SOURCE = "<!doctype html><html><body><p>" + "x".repeat(30 * 1024) + "</p></body></html>";
+
+test("the inline cap holds for the operator session and for a bot whose def grants a shell", async () => {
+  await botDef("shellbot", ["read", "bash"]);
+  await clean("shellbot", "perchlive-cap-shell");
+  const c = await client(s.artToken, bot("shellbot", "perchlive-cap-shell"));
+  const op = await client(s.fullToken);
+  try {
+    const id = (await call(c, "artifact_create", { title: "Capped", type: "page", source: { html: "<p>v1</p>" } })).data.id;
+    const before = await versions(id);
+    const fromBot = await call(c, "artifact_update", { artifact_id: id, source: { html: BIG_SOURCE } });
+    assert.match(fromBot.err, /^\[too_big_inline\]/, "a bot with a shell can upload: the cap points there");
+    const fromOp = await call(op, "artifact_update", { artifact_id: id, source: { html: BIG_SOURCE } });
+    assert.match(fromOp.err, /^\[too_big_inline\]/, "the operator can always upload");
+    assert.equal(await versions(id), before, "neither refusal wrote a version");
+  } finally { await c.close(); await op.close(); }
+});
+
+test("no shell, an unreadable def and a locked round scope all keep the inline save", async () => {
+  await botDef("noshellbot", ["read", "write", "edit"]);   // no bash: no way to curl a file up
+  await botDef("brokendef", null, "not-json{");              // the def cannot be read
+  await botDef("scopedbot", ["read", "bash"]);               // a shell, but held to a locked round
+  await clean("noshellbot", "perchlive-cap-noshell");
+  await clean("brokendef", "perchlive-cap-broken");
+  await clean("scopedbot", "perchlive-cap-locked");
+  const noshell = await client(s.artToken, bot("noshellbot", "perchlive-cap-noshell"));
+  const broken = await client(s.artToken, bot("brokendef", "perchlive-cap-broken"));
+  const scoped = await client(s.artToken, bot("scopedbot", "perchlive-cap-locked"));
+  try {
+    // A def with no shell tool: the inline save is the only way it has.
+    const noArt = (await call(noshell, "artifact_create", { title: "No shell", type: "page", source: { html: "<p>v1</p>" } })).data.id;
+    const noUp = await call(noshell, "artifact_update", { artifact_id: noArt, source: { html: BIG_SOURCE } });
+    assert.equal(noUp.err, null, noUp.err);
+    assert.equal(JSON.parse((await store.getVersion(s.db, noArt, noUp.data.version)).source_json).html, BIG_SOURCE);
+
+    // A def that cannot be read reads as "cannot upload" (never stranded).
+    const brArt = (await call(broken, "artifact_create", { title: "Unreadable def", type: "page", source: { html: "<p>v1</p>" } })).data.id;
+    const brUp = await call(broken, "artifact_update", { artifact_id: brArt, source: { html: BIG_SOURCE } });
+    assert.equal(brUp.err, null, brUp.err);
+    assert.equal(JSON.parse((await store.getVersion(s.db, brArt, brUp.data.version)).source_json).html, BIG_SOURCE);
+
+    // A shell, but a LOCKED session bound to an untrusted round.
+    const loArt = (await call(scoped, "artifact_create", { title: "Locked", type: "page", source: { html: "<p>v1</p>" } })).data.id;
+    await s.db.execute({ sql: "UPDATE bot_sessions SET narrowed_tools=? WHERE bot_id='scopedbot' AND gateway_thread_id='perchlive-cap-locked'", args: [JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__"])] });
+    await s.db.execute({ sql: "INSERT INTO artifact_rounds (artifact_id,kind,base_version,thread_ids_json,untrusted_input,bot_id,session_id,status) VALUES (?,'round',1,'[]',1,'scopedbot','perchlive-cap-locked','working')", args: [loArt] });
+    const roundId = Number((await s.db.execute({ sql: "SELECT id FROM artifact_rounds WHERE session_id='perchlive-cap-locked' ORDER BY id DESC LIMIT 1", args: [] })).rows[0].id);
+    const loUp = await call(scoped, "artifact_update", { artifact_id: loArt, source: { html: BIG_SOURCE }, round_id: roundId, base_version: 1 });
+    assert.equal(loUp.err, null, loUp.err);
+    const loV = await store.getVersion(s.db, loArt, loUp.data.version);
+    assert.equal(JSON.parse(loV.source_json).html, BIG_SOURCE);
+    assert.equal(Number(loV.round_id), roundId, "the round's own gates still ran");
+  } finally { await noshell.close(); await broken.close(); await scoped.close(); }
+});
+
+test("canUploadSource: the operator always, a bot only with a shell and no scope — the hook the cap hangs on", async () => {
+  const { canUploadSource, defGrantsShell } = await import("../bundles/artifacts/server/mcp.js");
+  await botDef("seam-shell", ["read", "bash"]);
+  await botDef("seam-noshell", ["read"]);
+  await botDef("seam-broken", null, "{oops");
+  assert.equal(await canUploadSource(s.db, { kind: "session" }), true, "the operator can always curl a file up");
+  assert.equal(await canUploadSource(s.db, { kind: "bot", id: "seam-shell" }), true);
+  assert.equal(await canUploadSource(s.db, { kind: "bot", id: "seam-noshell" }), false);
+  assert.equal(await canUploadSource(s.db, { kind: "bot", id: "seam-broken" }), false, "an unreadable def is 'cannot upload'");
+  assert.equal(await canUploadSource(s.db, { kind: "bot", id: "nobody" }), false, "no row at all is 'cannot upload'");
+  assert.equal(await canUploadSource(s.db, { kind: "bot", id: "seam-shell" }, { roundId: 7, artifactId: "art_x1" }), false, "a locked/untrusted scope is on its round's gates");
+  assert.equal(await canUploadSource(s.db, { kind: "unattributed" }), false);
+  assert.equal(await defGrantsShell(s.db, "seam-broken"), false);
+  assert.equal(await defGrantsShell(s.db, "seam-shell"), true);
 });
 
 // ─── every gate the inline tools run, run here too ─────────────────────────

@@ -401,7 +401,10 @@ A contained bot has no NIC. Its only way out is the spawner's egress relay (`scr
 | `/llm/v1/` | the model router: the bot's models, no provider key |
 | `/llm/p/`, `/llm/c/` | a provider door / a consented cloud door |
 | `/board/mcp`, `/phone/mcp`, `/artifacts/mcp` | the bot's own MCP mounts, under their path-scoped tokens |
+| `/artifacts/upload/` | the artifacts upload PUT, under the one-time upload token in the path (operator ruling 2026-11-16) |
 | `/peer-relay/` | the relay to paired peers |
+
+The door list is paths only: a door admits every method on its path. `/artifacts/upload/` is therefore not PUT-only — the route behind it is a PUT route (anything else reaches no handler) and a PUT without a live token is a static `404`, so the token stays the only capability. Restricting a single door to one method would need a method-aware door mechanism, which the ruling deliberately did not add.
 
 The relay terminates HTTP itself instead of splicing bytes, so **every** request on a connection is judged on its own — a second request pipelined behind an allowed one is never carried through with it — and upgrades and `CONNECT` are refused outright. A refused request gets a `403` written by the relay and nothing is opened upstream; one log line per distinct path says why. Anything that could normalise into another route is refused rather than reasoned about: `..`, a second slash, a backslash, any percent-escape, `*`, and absolute-form URLs. Any other loopback port is refused at the `PORT` line, and with no gateway port (an explicit `0`; unset falls back to the default port) **every** `PORT` line is refused. The relay also drops the headers that say who a request came from (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Tailscale-*` and the like): the relay is the only hop a contained bot has, so a bot can never pose as a Tailscale Serve login or a proxied client.
 

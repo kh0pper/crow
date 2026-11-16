@@ -169,9 +169,10 @@ const fail = (e) => ({ content: [{ type: "text", text: `[${e.code || "error"}] $
 
 /** The source fields a caller sends as one tool argument. A text longer than
  *  LIMITS.inlineSourceChars cannot be written reliably by a model (the output
- *  limit truncates it), so the INLINE tools refuse it before any store call and
- *  point at the two-step upload. Assets are not affected (base64 files were
- *  never token-bound). */
+ *  limit truncates it), so an INLINE tool refuses it before any store call and
+ *  points at the two-step upload — but only for a caller that can take that
+ *  path (canUploadSource below, or the canUpload seam a test injects). Assets
+ *  are not affected (base64 files were never token-bound). */
 const INLINE_SOURCE_FIELDS = ["html", "markdown", "svg", "source"];
 export const TOO_BIG_INLINE = "this source is too big to send inline: use artifact_upload_begin, PUT the file to its put_url, then artifact_upload_commit";
 function assertInlineSize(source) {
@@ -180,6 +181,48 @@ function assertInlineSize(source) {
     const v = source[f];
     if (typeof v === "string" && v.length > LIMITS.inlineSourceChars) throw Object.assign(new Error(TOO_BIG_INLINE), { code: "too_big_inline" });
   }
+}
+
+/** The pi builtin that is a shell (def.tools.pi_builtin, as the Bot Builder
+ *  writes it and bridge.mjs's toolAllowlist pins it). A bot that holds `bash`
+ *  can `curl` a file to a put_url; one that does not has no way to reach the
+ *  upload route at all. */
+export const SHELL_TOOL = "bash";
+
+/**
+ * Does this bot's stored def grant a shell? pi_bot_defs.definition.tools
+ * .pi_builtin is the one list the spawn is pinned with. An absent row, an
+ * unparseable definition, and a def with no tools list all answer false: the
+ * caller then keeps the inline save (fail closed toward NOT stranding a bot).
+ * @returns {Promise<boolean>}
+ */
+export async function defGrantsShell(db, botId) {
+  const row = (await db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [String(botId)] })).rows[0];
+  let def;
+  try { def = row ? JSON.parse(row.definition || "{}") : null; } catch { return false; }
+  const builtin = def && typeof def === "object" && def.tools && def.tools.pi_builtin;
+  return Array.isArray(builtin) && builtin.includes(SHELL_TOOL);
+}
+
+/**
+ * Who may reach the two-step upload — and is therefore held to the inline cap
+ * (operator ruling 2026-11-16, option A). The cap is a signpost, not a wall:
+ * "too_big_inline" tells the model to write a file and upload it. Only a
+ * caller that can act on that advice is refused inline:
+ *   - the operator session, always;
+ *   - a verified bot whose stored def grants a shell AND that is not held to a
+ *     locked/untrusted round scope (the ruling leaves a scoped session on its
+ *     round's own gates, so its inline save stays uncapped).
+ * Everyone else — no shell, an unreadable def, a channel turn — keeps the old
+ * inline behaviour: no 24k cap, bounded by the per-type caps and the 1 MB JSON
+ * parser. Never strand a bot that has no other way to save.
+ * @returns {Promise<boolean>}
+ */
+export async function canUploadSource(db, actor, scope) {
+  if (!actor) return false;
+  if (actor.kind === "session") return true;
+  if (actor.kind !== "bot" || !actor.id || scope) return false;
+  try { return await defGrantsShell(db, actor.id); } catch { return false; }
 }
 
 /** The gateway origin this MCP request came in on: the same base URL the bot's
@@ -251,7 +294,7 @@ function sourceSchema(z) {
   }).describe('Strings only. page: {"html": "<!doctype html>…"}; document: {"markdown": "# Title…", "title"?}; diagram: {"svg": "<svg…>…</svg>"} or, with the Design kit, {"engine": "mermaid", "source": "…"}.');
 }
 
-export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {}, emitExternal = null, cardMadeByOwner = async () => false } = {}) {
+export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {}, emitExternal = null, cardMadeByOwner = async () => false, canUpload = null } = {}) {
   // Default: a new current version carries open threads forward (§4.2).
   if (!onVersion) onVersion = async ({ artifactId, n, state, onlyThreads }) => { if (state === "current") await comments.carryForwardTo(db, blobs, artifactId, n, onlyThreads || null); };
   if (!McpServer || !z) throw new Error("createArtifactsMcpServer needs the gateway's McpServer and z");
@@ -263,6 +306,12 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
   const hub = (artifactId, n, event) => notifyHub({ db, artifactId, n, event, emitExternal });
 
   const scopeOfActor = (actor) => scopeOf(db, actor);
+  // The inline 24k cap, decided per caller (operator ruling 2026-11-16,
+  // option A): canUpload is the seam a test injects, the default reads the
+  // bot's stored def. A seam that throws means "cannot upload" — the old
+  // inline save, never a refusal the caller cannot act on.
+  const mayUpload = typeof canUpload === "function" ? canUpload : (actor, scope) => canUploadSource(db, actor, scope);
+  const canUploadInline = async (actor, scope) => { try { return (await mayUpload(actor, scope)) === true; } catch { return false; } };
   // The actor's house style (spec §4.4): a verified bot's project theme or bot
   // default; never for the operator or an unattributed caller.
   const depsFor = async (actor) => {
@@ -313,7 +362,7 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
 
   const doCreate = async (a, actor, scope, { inline = true } = {}) => {
     scopedOut(scope);
-    if (inline) assertInlineSize(a.source);
+    if (inline && (await canUploadInline(actor, scope))) assertInlineSize(a.source);
     // Re-read at save time: a bot whose session is not provably clean makes a tainted version.
     const untrusted = actor.kind === "bot" && !(await sessionIsClean(db, actor.id, actor.thread));
     const out = await store.createArtifact(db, blobs, { title: a.title, type: a.type, source: withLibs(a.source, a.libs), actor, changeNote: a.change_note, untrusted }, await depsFor(actor));
@@ -322,7 +371,7 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
   };
 
   const doUpdate = async (a, actor, scope, { inline = true } = {}) => {
-    if (inline) assertInlineSize(a.source);
+    if (inline && (await canUploadInline(actor, scope))) assertInlineSize(a.source);
       // F7(4): a bot whose chat is mid-round for THIS artifact must attribute
       // its update to the round — the smoke's v2 landed with round_id NULL
       // against the ask-round instructions, so BOTH kinds block: an ask's
@@ -394,11 +443,11 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       return withDesign({ version: v.n, state: v.state }, v);
   };
 
-  tool("artifact_create", 'Create an artifact the owner can view and comment on. Every source field is a plain string. type page: source {"html": "<!doctype html>…"} (+ assets, libs). type document: source {"markdown": "# Title…"} (with the Design kit, ```vega-lite / ```mermaid / ```d2 fences become pictures). type diagram: source {"svg": "<svg…>…</svg>"}, or {"engine": "mermaid", "source": "…"} with the Design kit. A source over 24000 characters is refused: use artifact_upload_begin.',
+  tool("artifact_create", 'Create an artifact the owner can view and comment on. Every source field is a plain string. type page: source {"html": "<!doctype html>…"} (+ assets, libs). type document: source {"markdown": "# Title…"} (with the Design kit, ```vega-lite / ```mermaid / ```d2 fences become pictures). type diagram: source {"svg": "<svg…>…</svg>"}, or {"engine": "mermaid", "source": "…"} with the Design kit. A source over 24000 characters is refused when you have a shell: use artifact_upload_begin.',
     { title: z.string(), type: z.enum(["page", "document", "diagram"]), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional() },
     (a, actor, scope) => doCreate(a, actor, scope));
 
-  tool("artifact_update", "Make a new version: the whole source again, same shape as artifact_create (plain strings). During a feedback round pass round_id and base_version. A source over 24000 characters is refused: use artifact_upload_begin, PUT the file, then artifact_upload_commit.",
+  tool("artifact_update", "Make a new version: the whole source again, same shape as artifact_create (plain strings). During a feedback round pass round_id and base_version. With a shell, a source over 24000 characters is refused: use artifact_upload_begin, PUT the file, then artifact_upload_commit.",
     { artifact_id: z.string(), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional(), round_id: z.number().int().optional(), base_version: z.number().int().optional() },
     (a, actor, scope) => doUpdate(a, actor, scope));
 
