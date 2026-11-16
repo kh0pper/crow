@@ -1917,7 +1917,8 @@ export function createProjectServer(dbPath, options = {}) {
       status: z.string().max(100).optional().describe("Filter by status: connected, disconnected, error"),
     },
     async ({ project_id, status }, extra) => {
-      const pass = await shareGate("crow_list_backends", extra).check(project_id, { status });
+      const gate = shareGate("crow_list_backends", extra);
+      const pass = await gate.check(project_id, { status });
       if (pass.isError) return pass;
       let sql = `
         SELECT b.*, p.name as project_name
@@ -1933,6 +1934,13 @@ export function createProjectServer(dbPath, options = {}) {
         // An omitted project_id is the caller's own scope (a bot's home project).
         sql += " AND b.project_id = ?";
         params.push(pass.projectId);
+      } else {
+        // The gate resolved no project: an omitted project_id is still the caller's own scope, and a
+        // caller with no home project matches no rows. The handler never leans on the gate having
+        // refused the call, so a listing is never unfiltered.
+        const p = scopePredicate(await gate.readScope(), { column: "b.project_id" });
+        sql += p.sql;
+        params.push(...p.args);
       }
       if (status) { sql += " AND b.status = ?"; params.push(status); }
       sql += " ORDER BY b.updated_at DESC";
