@@ -275,9 +275,10 @@ function boot(html, { fetchImpl = () => jsonResponse(200, { ok: true }), href = 
     touch(list, "touchend", 100 + distance);
   };
   const turboBeforeVisit = () => { document.dispatchEvent(event("turbo:before-visit", { bubbles: false })); };
+  const pagehide = () => { for (const fn of windowListeners.pagehide || []) fn(); };
 
   return {
-    window, document, location, ctx, run, settle, $, $$, click, change, submit, send, pull, touch, toggle, turboBeforeVisit,
+    window, document, location, ctx, run, settle, $, $$, click, change, submit, send, pull, touch, toggle, turboBeforeVisit, pagehide,
     fire, event, frames, calls, visits, timers, windowListeners,
     setVisibility: (value) => { visibility = String(value); },
   };
@@ -681,6 +682,19 @@ test("a 409 shows its sentence, keeps the page and frees the controls", async ()
   assert.equal(button.hasAttribute("hidden"), false, "and it is still there");
 });
 
+test("pagehide before the 1.5 s clears the mark-read timer, so nothing is posted", async () => {
+  const r = boot(messagePage());
+  r.run();
+  assert.equal(r.windowListeners.pagehide.length, 1, "the hook is bound once per window");
+  assert.equal(r.timers.filter((timer) => timer.ms === 1500 && !timer.cleared).length, 1, "the unread message armed one timer");
+
+  r.pagehide();
+  assert.equal(r.window.__mlTimer, null, "the hand on the timer is gone");
+  assert.equal(r.fire(1500), false, "the timer no longer fires");
+  await r.settle();
+  assert.equal(r.calls.length, 0, "no mark-read post for a page that is going away");
+});
+
 test("mark read posts read once, 1.5 s after load, only for an unread shown message", async () => {
   const unread = boot(messagePage());
   const armed = unread.timers.filter((timer) => timer.ms === 1500 && !timer.cleared);
@@ -760,6 +774,28 @@ test("a double click on an action posts once and disables every control while it
   await r.settle();
   assert.equal(r.calls.length, 1);
   assert.deepEqual(r.visits, ["/dashboard/mail?acct=all"]);
+});
+
+test("after a successful archive, delete or move no control posts again while the page leaves", async () => {
+  for (const action of ["archive", "delete", "move"]) {
+    const r = boot(messagePage(), { fetchImpl: () => jsonResponse(200, { ok: true, movedTo: 5 }) });
+    if (action === "move") { r.$("[data-ml-move-select]").value = "4"; }
+    r.click(r.$('button[data-ml-action="' + action + '"]'));
+    await r.settle();
+    assert.equal(r.calls.length, 1, action + ": one post");
+    assert.deepEqual(r.visits, ["/dashboard/mail?acct=all"], action + ": the reader goes back to its list");
+
+    const controls = r.$$("[data-ml-actions] [data-ml-action]");
+    assert.ok(controls.length >= 2, action + ": the bar carries controls");
+    for (const control of controls) {
+      const verb = control.getAttribute("data-ml-action");
+      assert.equal(control.hasAttribute("disabled"), true, action + ": " + verb + " stays disabled");
+      r.click(control);
+    }
+    await r.settle();
+    assert.equal(r.calls.length, 1, action + ": a second click posts nothing");
+    assert.deepEqual(r.visits, ["/dashboard/mail?acct=all"], action + ": and navigates once");
+  }
 });
 
 /* ------------------------------------------------------------------- the settings */

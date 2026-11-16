@@ -87,6 +87,7 @@ const MESSAGE_RULES = `
   .ml-msg-date { margin: 0; font-size: 0.85rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
   .ml-msg-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
   .ml-msg-actions .ml-btn, .ml-move-select { min-height: 44px; }
+  .ml-msg-actions .ml-status-line { flex-basis: 100%; }
   .ml-move-select {
     display: block; min-width: 0; max-width: 100%; min-height: 44px; padding: 0 12px; box-sizing: border-box;
     border: 1px solid var(--crow-border-strong, var(--crow-border)); border-radius: var(--crow-radius-pill);
