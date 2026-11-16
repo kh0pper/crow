@@ -5672,6 +5672,16 @@ export const translations = {
   "mail.showImages": { en: "Show images", es: "Mostrar imágenes" },
   "mail.alwaysShowFrom": { en: "Always show from {sender}", es: "Mostrar siempre los de {sender}" },
   "mail.noBody": { en: "This message has no text to show.", es: "Este mensaje no tiene texto que mostrar." },
+  // The reader's state sentences and labels (operator-approved copy): an empty list, the way back
+  // from a folder the server deleted, the message view's own way back, the attachment heading and
+  // its download link, the Cc list's label, and the name a nameless attachment is shown under.
+  "mail.emptyFolder": { en: "No messages here.", es: "No hay mensajes aquí." },
+  "mail.backToInbox": { en: "Back to the inbox", es: "Volver a la bandeja de entrada" },
+  "mail.inbox": { en: "← Inbox", es: "← Recibidos" },
+  "mail.attachments": { en: "Attachments", es: "Archivos adjuntos" },
+  "mail.download": { en: "Download", es: "Descargar" },
+  "mail.cc": { en: "Cc", es: "Con copia" },
+  "mail.untitledAttachment": { en: "Untitled attachment", es: "Archivo adjunto sin nombre" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

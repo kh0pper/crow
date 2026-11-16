@@ -141,7 +141,7 @@ let nextUid = 1;
 async function deliver(db, {
   accountId, folderId, subject = "", from = { name: "Alex", address: "alex@example.com" },
   date = T0, messageId = null, inReplyTo = null, isRead = false, snippet = "", text = "",
-  html = null, parseError = null, attachments = [],
+  html = null, parseError = null, attachments = [], cc = [],
 }) {
   return stores.messages.upsertMessage(db, {
     accountId,
@@ -155,7 +155,7 @@ async function deliver(db, {
     subject,
     from,
     to: [{ name: "Sam", address: "sam@example.com" }],
-    cc: [],
+    cc,
     replyTo: [],
     date,
     text,
@@ -185,8 +185,16 @@ const slotSrcs = (html) => [...html.matchAll(/data-ml-frame-slot data-src="([^"]
 const sandboxes = (html) => [...html.matchAll(/data-sandbox="([^"]*)"/g)].map((m) => m[1]);
 const attachmentHrefs = (html) => [...html.matchAll(/<a class="ml-attachment-link" href="([^"]*)" download/g)]
   .map((m) => m[1]);
+const attachmentNames = (html) => [...html.matchAll(/<span class="ml-attachment-name">([^<]*)<\/span>/g)]
+  .map((m) => m[1]);
+const attachmentSizes = (html) => [...html.matchAll(/<span class="ml-size">([^<]*)<\/span>/g)]
+  .map((m) => m[1]);
 function backHref(html) {
   const m = /<a class="ml-back" href="([^"]*)"/.exec(html);
+  return m ? m[1] : null;
+}
+function backText(html) {
+  const m = /<a class="ml-back" href="[^"]*">([^<]*)<\/a>/.exec(html);
   return m ? m[1] : null;
 }
 
@@ -212,6 +220,7 @@ test("opens by account and Message-ID and shows subject, sender, date", async ()
     assert.match(r.body, /2026/);
     assert.equal(sectionIds(r.body).length, 1);
     assert.equal(slotSrcs(r.body).length, 1);
+    assert.equal(backText(r.body), "← Inbox");
   });
 });
 
@@ -455,6 +464,30 @@ test("a subject with quotes and <script> stays text", async () => {
   });
 });
 
+test("the expanded recipients label the To list and the Cc list", async () => {
+  const mid = "<recipients@mail.example.test>";
+  let accountId;
+  await withDb(async (db) => {
+    const { a, aInbox } = await seed(db);
+    accountId = a.id;
+    await deliver(db, {
+      accountId: a.id,
+      folderId: aInbox,
+      subject: "Two lists",
+      messageId: mid,
+      cc: [{ name: "Kim", address: "kim@example.test" }],
+      text: "hello",
+    });
+  });
+  await withFlag(async () => {
+    const r = await get(messageHref(accountId, mid));
+    assert.equal(r.status, 200);
+    assert.match(r.body, /<p class="ml-recipients-label">to<\/p>/);
+    assert.match(r.body, /<p class="ml-recipients-label">Cc<\/p>/);
+    assert.match(r.body, /<li>Kim &lt;kim@example\.test&gt;<\/li>/);
+  });
+});
+
 test("attachments are listed with name, size and a download link that skips Turbo", async () => {
   const mid = "<attached@mail.example.test>";
   let accountId, rowId;
@@ -477,9 +510,12 @@ test("attachments are listed with name, size and a download link that skips Turb
   await withFlag(async () => {
     const r = await get(messageHref(accountId, mid));
     assert.equal(r.status, 200);
+    assert.match(r.body, /<h3 class="ml-attachments-title">Attachments<\/h3>/);
     assert.match(r.body, />report\.pdf</);
-    assert.match(r.body, /2\.0 KB/);
+    assert.match(r.body, />2 KB</);
     assert.match(r.body, />notes\.txt</);
+    assert.deepEqual(attachmentNames(r.body), ["report.pdf", "notes.txt"]);
+    assert.deepEqual(attachmentSizes(r.body), ["2 KB", "1 KB"]);
     assert.deepEqual(attachmentHrefs(r.body), [
       `/dashboard/mail/api/messages/${rowId}/attachments/0`,
       `/dashboard/mail/api/messages/${rowId}/attachments/1`,
@@ -489,6 +525,59 @@ test("attachments are listed with name, size and a download link that skips Turb
       assert.match(tag, /data-turbo-prefetch="false"/, tag);
       assert.match(tag, / download/, tag);
     }
+    // The download link says "Download": the file's name stands beside it as plain text.
+    assert.equal((r.body.match(/>Download<\/a>/g) || []).length, 2);
+    assert.doesNotMatch(r.body, /<a class="ml-attachment-link"[^>]*>report\.pdf<\/a>/);
+  });
+});
+
+test("attachment sizes are whole KB below 1 MB and one-decimal MB from 1 MB", async () => {
+  const mid = "<sizes@mail.example.test>";
+  let accountId;
+  await withDb(async (db) => {
+    const { a, aInbox } = await seed(db);
+    accountId = a.id;
+    await deliver(db, {
+      accountId: a.id,
+      folderId: aInbox,
+      subject: "Four sizes",
+      messageId: mid,
+      text: "see attached",
+      attachments: [
+        { filename: "empty.bin", contentType: "application/octet-stream", size: 0 },
+        { filename: "tiny.bin", contentType: "application/octet-stream", size: 1 },
+        { filename: "photo.png", contentType: "image/png", size: 240 * 1024 },
+        { filename: "video.mp4", contentType: "video/mp4", size: Math.round(1.2 * 1048576) },
+      ],
+    });
+  });
+  await withFlag(async () => {
+    const r = await get(messageHref(accountId, mid));
+    assert.equal(r.status, 200);
+    assert.deepEqual(attachmentSizes(r.body), ["0 KB", "1 KB", "240 KB", "1.2 MB"]);
+  });
+});
+
+test("a nameless attachment is shown as Untitled attachment", async () => {
+  const mid = "<nameless@mail.example.test>";
+  let accountId, rowId;
+  await withDb(async (db) => {
+    const { a, aInbox } = await seed(db);
+    accountId = a.id;
+    rowId = (await deliver(db, {
+      accountId: a.id,
+      folderId: aInbox,
+      subject: "An unnamed file",
+      messageId: mid,
+      text: "see attached",
+      attachments: [{ filename: "", contentType: "application/octet-stream", size: 1024 }],
+    })).id;
+  });
+  await withFlag(async () => {
+    const r = await get(messageHref(accountId, mid));
+    assert.equal(r.status, 200);
+    assert.deepEqual(attachmentNames(r.body), ["Untitled attachment"]);
+    assert.deepEqual(attachmentHrefs(r.body), [`/dashboard/mail/api/messages/${rowId}/attachments/0`]);
   });
 });
 

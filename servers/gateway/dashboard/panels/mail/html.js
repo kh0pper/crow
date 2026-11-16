@@ -263,9 +263,10 @@ export function inboxViewHtml({
   const head = chips({ accounts, acct, lang }) + folderDrawer({ accounts, folders, folderId, lang });
 
   if (page && page.missing) {
-    // The sentence is the way back: one line of copy, and it is the link to the inbox.
+    // The sentence is plain text, and the way back is its own link beside it.
     return `${head}<section class="ml-empty" data-ml-empty="folder-gone">
-      <a class="ml-note" href="${MAIL_HREF}">${e(t("mail.folderGone", lang))}</a>
+      <p class="ml-note">${e(t("mail.folderGone", lang))}</p>
+      <a class="ml-back" href="${MAIL_HREF}">${e(t("mail.backToInbox", lang))}</a>
     </section>`;
   }
 
@@ -273,10 +274,12 @@ export function inboxViewHtml({
   const cursor = typeof page?.nextCursor === "string" && page.nextCursor ? page.nextCursor : null;
   const digest = acct === ALL_ACCOUNTS && folderId === null ? '<div data-mail-digest-slot></div>' : "";
   const rows = items.map((item) => row(item, { now, tz, lang })).join("");
+  // An empty folder, and an account with nothing in it, say so where the list would be.
+  const list = rows || `<p class="ml-note">${e(t("mail.emptyFolder", lang))}</p>`;
   const more = cursor === null
     ? ""
     : `<a class="ml-more" href="${e(loadMoreHref(acct, folderId, cursor))}">${e(t("mail.loadMore", lang))}</a>`;
-  return `${head}${digest}<div class="ml-list">${rows}</div>${more}`;
+  return `${head}${digest}<div class="ml-list">${list}</div>${more}`;
 }
 
 /* -------------------------------------------------------------- message view */
@@ -313,17 +316,19 @@ function fromHtml(message, lang) {
 
 /**
  * The recipients line, collapsed: its summary says who it is to, and opening it lists the To and Cc
- * addressees. A message with neither shows no line at all.
+ * addressees under their own labels. A message with neither shows no line at all.
  */
 function recipientsHtml(message, lang) {
   const to = Array.isArray(message?.to) ? message.to : [];
   const cc = Array.isArray(message?.cc) ? message.cc : [];
   if (!to.length && !cc.length) return "";
   const summary = `${t("mail.to", lang)} ${to.map(personText).filter(Boolean).join(", ")}`.trim();
-  const list = (people) => (people.length
-    ? `<ul class="ml-recipients">${people.map((person) => `<li>${e(personText(person))}</li>`).join("")}</ul>`
+  const group = (people, label) => (people.length
+    ? `<p class="ml-recipients-label">${e(label)}</p>`
+      + `<ul class="ml-recipients">${people.map((person) => `<li>${e(personText(person))}</li>`).join("")}</ul>`
     : "");
-  return `<details class="ml-msg-recipients"><summary>${e(summary)}</summary>${list(to)}${list(cc)}</details>`;
+  return `<details class="ml-msg-recipients"><summary>${e(summary)}</summary>`
+    + `${group(to, t("mail.to", lang))}${group(cc, t("mail.cc", lang))}</details>`;
 }
 
 /** The full date and time, in the instance's zone. */
@@ -348,32 +353,36 @@ function hasReadableBody(row) {
   return text !== "" || html !== "";
 }
 
-/** A file size in the reader's own units: bytes below 1 KB, then KB, then MB. */
+/**
+ * A file size in the reader's own units: whole KB below 1 MB (0 bytes stays "0 KB", anything else
+ * reads at least 1 KB), then MB with one decimal from 1 MB (1048576 bytes) up.
+ */
 function formatSize(size) {
   const n = Number(size);
   if (!Number.isFinite(n) || n < 0) return "";
-  if (n < 1024) return `${Math.trunc(n)} B`;
-  const kb = n / 1024;
-  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : String(Math.round(kb))} KB`;
-  const mb = kb / 1024;
-  return `${mb < 10 ? mb.toFixed(1) : String(Math.round(mb))} MB`;
+  if (n === 0) return "0 KB";
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /**
- * One message's attachments: a name (the download link's own text), its size, and the download link,
- * which skips Turbo so the file's own response is what the browser gets.
+ * One message's attachments under an "Attachments" heading: the name as plain text, its size, and a
+ * "Download" link beside it that skips Turbo so the file's own response is what the browser gets.
  */
-function attachmentsHtml(row) {
+function attachmentsHtml(row, lang) {
   const list = Array.isArray(row?.attachments) ? row.attachments : [];
   if (!list.length) return "";
   const items = list.map((entry, index) => {
-    const name = (typeof entry?.filename === "string" ? entry.filename.trim() : "") || "attachment";
+    const filename = typeof entry?.filename === "string" ? entry.filename.trim() : "";
+    const name = filename || t("mail.untitledAttachment", lang);
     const size = formatSize(entry?.size);
-    return `<li class="ml-attachment"><a class="ml-attachment-link" href="${e(attachmentHref(row.id, index))}" download data-turbo="false" data-turbo-prefetch="false">${e(name)}</a>`
+    return `<li class="ml-attachment"><span class="ml-attachment-name">${e(name)}</span>`
       + (size ? `<span class="ml-size">${e(size)}</span>` : "")
+      + `<a class="ml-attachment-link" href="${e(attachmentHref(row.id, index))}" download data-turbo="false" data-turbo-prefetch="false">${e(t("mail.download", lang))}</a>`
       + "</li>";
   }).join("");
-  return `<ul class="ml-attachments">${items}</ul>`;
+  return `<h3 class="ml-attachments-title">${e(t("mail.attachments", lang))}</h3>`
+    + `<ul class="ml-attachments">${items}</ul>`;
 }
 
 /**
@@ -405,7 +414,7 @@ function messageSection(row, { accountId, lang, tz, open }) {
       + `<div class="ml-frame" data-ml-frame-slot data-src="${e(frameSrc(row.id))}" data-sandbox="${e(FRAME_IFRAME_SANDBOX)}"></div>`
     : `<p class="ml-note ml-no-body">${e(t("mail.noBody", lang))}</p>`;
   return `<details class="ml-msg-section" data-ml-msg="${Number(row.id)}"${open ? " open" : ""}>`
-    + summary + subject + body + attachmentsHtml(row) + "</details>";
+    + summary + subject + body + attachmentsHtml(row, lang) + "</details>";
 }
 
 /** Whether two stored rows are copies of one message (the same id, sender and date, another folder). */
@@ -436,7 +445,7 @@ function threadRows(message, thread) {
 function notHereCard(back, lang) {
   return `<section class="ml-empty" data-ml-empty="message-gone">
       <p class="ml-note">${e(t("mail.notHere", lang))}</p>
-      <a class="ml-back" href="${e(back)}">&larr; ${e(t("mail.title", lang))}</a>
+      <a class="ml-back" href="${e(back)}">${e(t("mail.inbox", lang))}</a>
     </section>`;
 }
 
@@ -478,7 +487,7 @@ export function messageViewHtml({
   const threadId = message.threadId == null ? "" : String(message.threadId);
 
   return `<article class="ml-message" data-ml-message>
-      <a class="ml-back" href="${e(back)}">&larr; ${e(t("mail.title", lang))}</a>
+      <a class="ml-back" href="${e(back)}">${e(t("mail.inbox", lang))}</a>
       <header class="ml-msg-head">
         <h2 class="ml-msg-subject">${e(subjectOf(message, lang))}</h2>
         <p class="ml-msg-from">${fromHtml(message, lang)}</p>

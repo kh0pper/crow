@@ -382,24 +382,34 @@ test("a folder id deleted by a resync gives the no-longer-here sentence and a li
   await withFlag(async () => {
     const r = await get(`/dashboard/mail?acct=${ids.a.id}&folder=${goneId}`);
     assert.equal(r.status, 200);
-    assert.match(r.body, /That folder is no longer here\./);
-    assert.match(r.body, /<a class="ml-note" href="\/dashboard\/mail">/);
+    // The sentence is plain text, and the way back is a separate link of its own.
+    assert.match(r.body, /<p class="ml-note">That folder is no longer here\.<\/p>/);
+    const back = /<a class="ml-back" href="([^"]*)">([^<]*)<\/a>/.exec(r.body);
+    assert.ok(back, "a separate way back");
+    assert.equal(back[1], "/dashboard/mail");
+    assert.equal(back[2], "Back to the inbox");
     assert.equal(rowIds(r.body).length, 0);
   });
 });
 
-test("an empty folder has no rows and no error", async () => {
+test("an empty folder and an empty account view say No messages here. and have no rows", async () => {
   let ids;
   await withDb(async (db) => {
     const { a, aInbox } = await seed(db);
     ids = { a, aInbox };
   });
   await withFlag(async () => {
-    for (const path of ["/dashboard/mail", `/dashboard/mail?acct=${ids.a.id}&folder=${ids.aInbox}`]) {
+    for (const path of ["/dashboard/mail", `/dashboard/mail?acct=${ids.a.id}`, `/dashboard/mail?acct=${ids.a.id}&folder=${ids.aInbox}`]) {
       const r = await get(path);
       assert.equal(r.status, 200, path);
       assert.equal(rowIds(r.body).length, 0, path);
       assert.match(r.body, /<div class="ml" data-ml>/, path);
+      assert.equal(
+        r.body.split("No messages here.").length - 1,
+        1,
+        `${path}: the sentence is there once, where the list would be`,
+      );
+      assert.match(r.body, /<div class="ml-list"><p class="ml-note">No messages here\.<\/p><\/div>/, path);
     }
   });
 });
