@@ -10,8 +10,9 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import * as mod from "../scripts/migrations/0027-mail-store.mjs";
 import * as accountColumns from "../scripts/migrations/0029-mail-account-send-columns.mjs";
+import * as draftTables from "../scripts/migrations/0030-mail-drafts.mjs";
 import { discoverMigrations } from "../scripts/migrations/runner.mjs";
-import { MAIL_DDL, MAIL_TABLES } from "../servers/shared/mail-schema.js";
+import { MAIL_DDL, MAIL_TABLES, MAIL_DRAFT_TABLES } from "../servers/shared/mail-schema.js";
 
 const { run, id } = mod;
 const REPO = new URL("..", import.meta.url).pathname;
@@ -121,13 +122,16 @@ test("the shape matches what init-db produces", () => {
 
   const dbPath = freshDb("mail-fresh-");
   assert.equal(run({ dbPath, log: () => {} }).applied, true);
-  // init-db now builds more than MAIL_DDL: it also adds the account send columns, so the migration
-  // side applies that migration too before the two shapes are compared.
+  // init-db now builds more than MAIL_DDL: it also adds the account send columns (0029) and the
+  // draft tables (0030), so the migration side applies those too, in order, before the two shapes
+  // are compared.
   assert.equal(accountColumns.run({ dbPath, log: () => {} }).applied, true);
+  assert.equal(draftTables.run({ dbPath, log: () => {} }).applied, true);
   const got = mailObjects(dbPath);
 
   const names = want.map((o) => o.name);
   for (const t of MAIL_TABLES) assert.ok(names.includes(t), `init-db created ${t}`);
+  for (const t of MAIL_DRAFT_TABLES) assert.ok(names.includes(t), `init-db created ${t}`);
   for (const i of ["idx_mail_messages_folder_date", "idx_mail_messages_account_date",
     "idx_mail_messages_thread", "idx_mail_messages_message_id", "idx_mail_messages_in_reply_to",
     "idx_mail_threads_account_last"]) {
@@ -194,8 +198,9 @@ test("run is idempotent and keeps a row", () => {
 
 test("every mail table is local-only and none is synced", () => {
   const tables = mailTableNames(join(initDbDir(), "crow.db")).filter((n) => !isFtsShadow(n));
-  assert.deepEqual(tables, [...MAIL_TABLES].sort(), "sqlite_master's mail tables are exactly MAIL_TABLES");
-  for (const t of [...new Set([...MAIL_TABLES, ...tables])]) {
+  assert.deepEqual(tables, [...MAIL_TABLES, ...MAIL_DRAFT_TABLES].sort(),
+    "sqlite_master's mail tables are exactly MAIL_TABLES plus the draft tables");
+  for (const t of [...new Set([...MAIL_TABLES, ...MAIL_DRAFT_TABLES, ...tables])]) {
     assert.ok(SYNC.LOCAL_ONLY_TABLES.includes(t), `${t} is in LOCAL_ONLY_TABLES`);
     assert.ok(!SYNC.SYNCED_TABLES.includes(t), `${t} is not in SYNCED_TABLES`);
   }
