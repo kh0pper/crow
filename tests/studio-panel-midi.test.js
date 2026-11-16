@@ -2087,6 +2087,7 @@ test("in Chrome, the operator accepts a bot's FCB1010 proposal and pedal 2 launc
 
   const page = await openPage(`${base}/dashboard/studio?song=${encodeURIComponent(id)}`);
   t.after(() => page.close());
+  assert.ok(await waitFor(page, `!!document.querySelector('[data-act=open-clip][data-clip-id=${CLIP}]')`, 20000), "the page drew the song before the pedalboard is connected");
   assert.ok(await waitFor(page, "!!document.querySelector('[data-act=midi-connect]')", 20000), "the page offers Connect controllers");
 
   await mousePress(page, "[data-act=midi-connect]");
