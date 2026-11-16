@@ -5,8 +5,10 @@
  * ffmpeg from becoming a continuous stream is enforced here, not in the browser — one process per
  * camera however many tabs watch, a hard cap timed from the session's start, a kill when the last
  * viewer leaves, no restart after a failure, and a cooldown that a page reload cannot clear. The
- * URL of the camera's stream is a credential, so the same tests check that no refusal message,
- * error tail or console call ever carries it.
+ * pictures are framed MJPEG parts, so the tests feed real parts (and split ones) and check that a
+ * viewer — however slow — only ever receives whole frames. The URL of the camera's stream is a
+ * credential, so the same tests check that no refusal message, error tail or console call ever
+ * carries it.
  *
  * Everything runs on fakes — a clone clock with hand-fired timers, a spawner that hands back an
  * EventEmitter, and an injected killGroup — so no process is started and no signal is sent.
@@ -84,7 +86,7 @@ function fakeResponse() {
     res.headers[name] = value;
   };
   res.write = (chunk) => {
-    res.chunks.push(Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk));
+    res.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "latin1"));
     return res.writeOk;
   };
   res.end = () => {
@@ -157,6 +159,55 @@ function makeManager({ clock = makeClock(), spawner = fakeSpawner(), options = {
 
 /** Let the pending setImmediate callbacks (the fake probe, a fake spawn error) run. */
 const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+// ─── mpjpeg framing ───────────────────────────────────────────────────────
+
+const PART_BOUNDARY = Buffer.from("--ffmpeg\r\n", "latin1");
+const PART_HEADER_END = Buffer.from("\r\n\r\n", "latin1");
+
+/** A JPEG-shaped frame: FFD8, filler bytes (never a marker), FFD9. */
+function jpegFrame(size = 24) {
+  const length = Math.max(4, size);
+  const body = Buffer.alloc(length, 0x41);
+  body[0] = 0xff;
+  body[1] = 0xd8;
+  body[length - 2] = 0xff;
+  body[length - 1] = 0xd9;
+  return body;
+}
+
+/** One whole part, framed the way ffmpeg's `-f mpjpeg` muxer frames it. */
+function mpjpegPart(jpeg = jpegFrame()) {
+  const head = Buffer.from(
+    `--ffmpeg\r\nContent-type: image/jpeg\r\nContent-length: ${jpeg.length}\r\n\r\n`,
+    "latin1",
+  );
+  return Buffer.concat([head, jpeg, Buffer.from("\r\n", "latin1")]);
+}
+
+/**
+ * Read one delivered chunk back as a multipart part and return its JPEG body, failing the test
+ * unless the chunk is exactly one whole part: that a viewer never sees a piece of a frame is the
+ * whole point of the framing tests below.
+ */
+function readPart(chunk) {
+  const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "latin1");
+  assert.ok(buffer.subarray(0, PART_BOUNDARY.length).equals(PART_BOUNDARY), "the part starts at a boundary");
+  const headerEnd = buffer.indexOf(PART_HEADER_END);
+  assert.ok(headerEnd > 0, "the part has a header block");
+  const declared = /content-length:\s*(\d+)/i.exec(buffer.subarray(0, headerEnd).toString("latin1"));
+  assert.ok(declared, "the part declares its length");
+  const length = Number(declared[1]);
+  const bodyStart = headerEnd + PART_HEADER_END.length;
+  assert.equal(buffer.length, bodyStart + length + 2, "the part holds exactly its body plus a CRLF");
+  assert.equal(buffer[bodyStart + length], 0x0d, "the part ends with CRLF");
+  assert.equal(buffer[bodyStart + length + 1], 0x0a, "the part ends with CRLF");
+  assert.equal(buffer[bodyStart], 0xff, "the frame starts with a JPEG SOI");
+  assert.equal(buffer[bodyStart + 1], 0xd8, "the frame starts with a JPEG SOI");
+  assert.equal(buffer[bodyStart + length - 2], 0xff, "the frame ends with a JPEG EOI");
+  assert.equal(buffer[bodyStart + length - 1], 0xd9, "the frame ends with a JPEG EOI");
+  return buffer.subarray(bodyStart, bodyStart + length);
+}
 
 /** Record every console call made while `fn` runs, so a leak into the log can be caught. */
 function spyConsole() {
@@ -261,10 +312,14 @@ test("the first viewer starts exactly one ffmpeg with the agreed arguments and h
     "content-type": "multipart/x-mixed-replace; boundary=ffmpeg",
     "cache-control": "no-store",
     "x-accel-buffering": "no",
+    "x-live-remaining-seconds": "120",
   });
 
-  call.child.stdout.emit("data", Buffer.from("a-frame"));
-  assert.deepEqual(res.chunks, ["a-frame"], "ffmpeg's pictures reach the viewer");
+  const frame = jpegFrame(40);
+  const part = mpjpegPart(frame);
+  call.child.stdout.emit("data", part);
+  assert.equal(res.chunks.length, 1, "ffmpeg's pictures reach the viewer");
+  assert.ok(readPart(res.chunks[0]).equals(frame), "as one whole, unchanged frame");
 });
 
 test("the second and third viewer share the one process, and the fourth is a 429", async () => {
@@ -280,29 +335,170 @@ test("the second and third viewer share the one process, and the fourth is a 429
   assert.equal(refused.status, 429);
   assert.equal(fourth.statusCode, 0, "the refused response is untouched");
 
-  spawner.sessions()[0].child.stdout.emit("data", Buffer.from("frame-1"));
-  for (const res of [first, second, third]) assert.deepEqual(res.chunks, ["frame-1"]);
+  const part = mpjpegPart(jpegFrame(30));
+  spawner.sessions()[0].child.stdout.emit("data", part);
+  for (const res of [first, second, third]) {
+    assert.equal(res.chunks.length, 1);
+    assert.ok(res.chunks[0].equals(part), "every viewer gets the same whole frame");
+  }
   assert.deepEqual(fourth.chunks, []);
 });
 
-test("a slow viewer drops frames instead of buffering them", async () => {
+// ─── whole frames, never pieces of one ───────────────────────────────────
+
+test("a frame split across two chunks reaches the viewer whole", async () => {
+  const { manager, spawner } = makeManager();
+  const res = fakeResponse();
+  await manager.attach("front_door", res);
+  const { child } = spawner.sessions()[0];
+
+  const part = mpjpegPart(jpegFrame(40));
+  const cut = Math.floor(part.length / 2);
+  child.stdout.emit("data", part.subarray(0, cut));
+  assert.deepEqual(res.chunks, [], "half a frame is held back, not forwarded");
+  child.stdout.emit("data", part.subarray(cut));
+  assert.equal(res.chunks.length, 1, "the frame arrives as one write");
+  assert.ok(res.chunks[0].equals(part), "and it is exactly the part ffmpeg wrote");
+  readPart(res.chunks[0]);
+
+  // Two frames arriving in one read are still handed over one whole frame at a time.
+  const firstFrame = mpjpegPart(jpegFrame(20));
+  const secondFrame = mpjpegPart(jpegFrame(24));
+  child.stdout.emit("data", Buffer.concat([firstFrame, secondFrame]));
+  assert.equal(res.chunks.length, 3);
+  assert.ok(res.chunks[1].equals(firstFrame));
+  assert.ok(res.chunks[2].equals(secondFrame));
+});
+
+test("a slow viewer receives whole frames only, and loses frames instead of buffering them", async () => {
   const { manager, spawner } = makeManager();
   const slow = fakeResponse();
   const fast = fakeResponse();
   await manager.attach("front_door", slow);
   await manager.attach("front_door", fast);
-  const { stdout } = spawner.sessions()[0].child;
+  const { child } = spawner.sessions()[0];
 
-  slow.writeOk = false;
-  stdout.emit("data", Buffer.from("f1"));
-  stdout.emit("data", Buffer.from("f2"));
-  assert.deepEqual(slow.chunks, ["f1"], "the frame it could not take is dropped");
-  assert.deepEqual(fast.chunks, ["f1", "f2"]);
+  slow.writeOk = false; // "do not send me more until I have drained"
+  for (let i = 0; i < 8; i++) {
+    const part = mpjpegPart(jpegFrame(30 + i));
+    // ffmpeg's pipe hands a frame over in whatever pieces it happened to read.
+    const cut = 9 + i;
+    child.stdout.emit("data", part.subarray(0, cut));
+    child.stdout.emit("data", part.subarray(cut));
+  }
 
-  slow.emit("drain");
+  assert.equal(fast.chunks.length, 8, "the fast viewer kept every frame");
+  for (const chunk of fast.chunks) readPart(chunk);
+  assert.ok(slow.chunks.length >= 1, "the slow viewer got the frame that was in flight");
+  assert.ok(slow.chunks.length < 8, "and it did not buffer the rest");
+  for (const chunk of slow.chunks) readPart(chunk);
+
   slow.writeOk = true;
-  stdout.emit("data", Buffer.from("f3"));
-  assert.deepEqual(slow.chunks, ["f1", "f3"], "it catches up once it has drained");
+  slow.emit("drain");
+  assert.ok(slow.chunks.length > 1, "the frames it had queued arrive once it drains");
+  for (const chunk of slow.chunks) readPart(chunk);
+});
+
+test("a stuck viewer loses its OLDEST whole frame, never half of one", async () => {
+  const { manager, spawner } = makeManager();
+  const res = fakeResponse();
+  await manager.attach("front_door", res);
+  const { child } = spawner.sessions()[0];
+
+  res.writeOk = false;
+  const parts = [];
+  for (let i = 0; i < 5; i++) {
+    const part = mpjpegPart(jpegFrame(20 + i));
+    parts.push(part);
+    child.stdout.emit("data", part);
+  }
+  assert.equal(res.chunks.length, 1, "the first frame went into the response and stopped it");
+
+  res.writeOk = true;
+  res.emit("drain");
+  const queued = res.chunks.slice(1);
+  assert.equal(queued.length, 3, "three whole frames were queued while it was stuck");
+  for (const chunk of res.chunks) readPart(chunk);
+  assert.ok(queued[0].equals(parts[2]), "the oldest queued frame was dropped");
+  assert.ok(queued[queued.length - 1].equals(parts[4]), "the newest frame survived");
+});
+
+test("a viewer that falls a megabyte behind is disconnected while a fast one carries on", async () => {
+  const { manager, spawner } = makeManager();
+  const stuck = fakeResponse();
+  const fast = fakeResponse();
+  await manager.attach("front_door", stuck);
+  await manager.attach("front_door", fast);
+  const { child } = spawner.sessions()[0];
+  assert.equal(manager.remainingMs("front_door"), 120_000, "the session is running to begin with");
+
+  stuck.writeOk = false;
+  for (let i = 0; i < 4; i++) child.stdout.emit("data", mpjpegPart(jpegFrame(400 * 1024)));
+
+  assert.equal(stuck.ended, true, "the stuck viewer was hung up");
+  assert.equal(stuck.chunks.length, 1, "it only ever got the frame that was in flight");
+  readPart(stuck.chunks[0]);
+
+  child.stdout.emit("data", mpjpegPart(jpegFrame(64)));
+  assert.equal(fast.chunks.length, 5, "the fast viewer is unaffected");
+  for (const chunk of fast.chunks) readPart(chunk);
+  assert.ok(manager.remainingMs("front_door") > 0, "the session itself is still running");
+});
+
+test("a part larger than the cap ends the session instead of being forwarded", async () => {
+  const { manager, spawner } = makeManager();
+  const res = fakeResponse();
+  await manager.attach("front_door", res);
+  const { child } = spawner.sessions()[0];
+
+  const head = Buffer.from("--ffmpeg\r\nContent-type: image/jpeg\r\nContent-length: 3000000\r\n\r\n", "latin1");
+  child.stdout.emit("data", Buffer.concat([head, jpegFrame(32)]));
+
+  assert.equal(res.ended, true, "the viewer is hung up");
+  assert.deepEqual(res.chunks, [], "nothing partial was forwarded");
+  assert.match(manager.lastError("front_door"), /larger than/);
+  assert.equal((await manager.attach("front_door", fakeResponse())).status, 503, "and it cools down");
+});
+
+test("a stream that never yields a whole frame ends the session too", async () => {
+  const { manager, spawner } = makeManager();
+  const res = fakeResponse();
+  await manager.attach("front_door", res);
+  const { child } = spawner.sessions()[0];
+
+  const junk = Buffer.alloc(1024 * 1024, 0x41);
+  for (let i = 0; i < 5; i++) child.stdout.emit("data", junk);
+
+  assert.equal(res.ended, true);
+  assert.deepEqual(res.chunks, []);
+  assert.match(manager.lastError("front_door"), /whole frame/);
+  assert.deepEqual(spawner.kills.map((kill) => kill.signal), ["SIGTERM"], "the group was killed");
+});
+
+test("the session body runs through runDetached, so the host can leave the request's context", async () => {
+  const opened = [];
+  const { manager, spawner } = makeManager({
+    options: {
+      runDetached: (fn) => {
+        opened.push("detached");
+        return fn();
+      },
+    },
+  });
+  const res = fakeResponse();
+  assert.deepEqual(await manager.attach("front_door", res), { ok: true });
+  assert.deepEqual(opened, ["detached"], "startSession's body ran through the hook, once");
+  assert.equal(spawner.sessions().length, 1);
+  assert.equal(res.statusCode, 200);
+
+  // A second viewer joins the same session; no second body is started.
+  assert.deepEqual(await manager.attach("front_door", fakeResponse()), { ok: true });
+  assert.equal(opened.length, 1);
+  assert.equal(spawner.sessions().length, 1);
+
+  // A camera that is not ours never reaches the hook at all.
+  assert.equal((await manager.attach("back_gate", fakeResponse())).status, 404);
+  assert.equal(opened.length, 1);
 });
 
 // ─── ending a session ─────────────────────────────────────────────────────
@@ -348,6 +544,29 @@ test("the cap runs from the session's start, not from the newest viewer", async 
   assert.equal(child.pid, spawner.kills[0].pid);
 });
 
+test("remainingMs and the stream header report what is left of the cap", async () => {
+  const { manager, clock } = makeManager();
+  assert.equal(manager.remainingMs("front_door"), 0, "no session, nothing left");
+  assert.equal(manager.remainingMs("nobody"), 0);
+  assert.equal(manager.remainingMs(null), 0);
+
+  const first = fakeResponse();
+  await manager.attach("front_door", first);
+  assert.equal(manager.remainingMs("front_door"), 120_000);
+  assert.equal(first.headWritten["x-live-remaining-seconds"], "120");
+
+  // A viewer joining in the middle is told what the stream really has left, rounded up.
+  clock.advance(90_200);
+  assert.equal(manager.remainingMs("front_door"), 29_800);
+  const late = fakeResponse();
+  assert.deepEqual(await manager.attach("front_door", late), { ok: true });
+  assert.equal(late.headWritten["x-live-remaining-seconds"], "30", "a late viewer sees 30 s of a 120 s cap");
+  assert.equal(first.headWritten["x-live-remaining-seconds"], "120", "the first viewer was told the full cap");
+
+  clock.advance(29_800);
+  assert.equal(manager.remainingMs("front_door"), 0, "the cap ended the session");
+});
+
 test("after the end a new attach is refused for the cooldown, then starts a fresh process", async () => {
   const { manager, clock, spawner } = makeManager();
   await manager.attach("front_door", fakeResponse());
@@ -389,6 +608,56 @@ test("the cooldown survives a reload: a new manager sharing the store refuses th
 
   clock.advance(60_000);
   assert.deepEqual(await after.manager.attach("front_door", fakeResponse()), { ok: true });
+});
+
+test("a session records its cooldown at START, so a gateway that dies mid-view still cools down", async () => {
+  const clock = makeClock();
+  const backing = new Map();
+  const store = {
+    get: (name) => backing.get(name),
+    set: (name, until) => backing.set(name, until),
+  };
+  const running = makeManager({ clock, options: { cooldownStore: store } });
+  // A second viewer of the SAME manager still shares the session: the guard is not for this one.
+  assert.deepEqual(await running.manager.attach("front_door", fakeResponse()), { ok: true });
+  assert.deepEqual(await running.manager.attach("front_door", fakeResponse()), { ok: true });
+  assert.equal(running.spawner.sessions().length, 1);
+  // The gateway is killed here: the session is never ended, so only the START could have written
+  // the cooldown.
+
+  const restarted = makeManager({ clock, options: { cooldownStore: store } });
+  const refused = await restarted.manager.attach("front_door", fakeResponse());
+  assert.equal(refused.ok, false);
+  assert.equal(refused.status, 503);
+  assert.match(refused.message, /cool/i);
+  assert.equal(refused.retryAfterSec, 180, "the cap plus the cooldown, counted from the start");
+  assert.equal(restarted.spawner.sessions().length, 0, "the restarted gateway starts nothing");
+
+  clock.advance(120_000);
+  const afterCap = await restarted.manager.attach("front_door", fakeResponse());
+  assert.equal(afterCap.status, 503);
+  assert.equal(afterCap.retryAfterSec, 60, "and then the ordinary cooldown is left");
+
+  clock.advance(60_000);
+  assert.deepEqual(await restarted.manager.attach("front_door", fakeResponse()), { ok: true });
+});
+
+test("cooldownLeftMs reports the cooldown in milliseconds", async () => {
+  const { manager, clock } = makeManager();
+  assert.equal(manager.cooldownLeftMs("front_door"), 0, "no cooldown yet");
+  assert.equal(manager.cooldownLeftMs("nobody"), 0);
+  assert.equal(manager.cooldownLeftMs(null), 0);
+
+  const res = fakeResponse();
+  await manager.attach("front_door", res);
+  assert.equal(manager.cooldownLeftMs("front_door"), 180_000, "a running session holds its own guard");
+
+  res.close();
+  assert.equal(manager.cooldownLeftMs("front_door"), 60_000);
+  clock.advance(20_000);
+  assert.equal(manager.cooldownLeftMs("front_door"), 40_000);
+  clock.advance(40_000);
+  assert.equal(manager.cooldownLeftMs("front_door"), 0, "an expired cooldown is 0, never negative");
 });
 
 test("ffmpeg exiting ends every viewer, records a cooldown and never restarts", async () => {
@@ -526,6 +795,54 @@ test("scrubUrl removes the exact URL, a credentialed URL and a bare user:pass@ f
   assert.equal(scrubUrl(`${URL} ${URL}`, URL), "<stream-url> <stream-url>", "every occurrence");
   const awkward = "rtsp://user:p.ss@example.invalid/a?b=1&c=[2]";
   assert.equal(scrubUrl(`see ${awkward} now`, awkward), "see <stream-url> now");
+
+  // The URL's own username and password, on their own, raw and percent-decoded.
+  const encoded = "rtsp://ali%40ce:p%40ssw0rd@example.invalid/live";
+  assert.equal(scrubUrl("login ali%40ce refused", encoded), "login <stream-url> refused");
+  assert.equal(scrubUrl("login ali@ce refused", encoded), "login <stream-url> refused");
+  assert.equal(scrubUrl("login p%40ssw0rd refused", encoded), "login <stream-url> refused");
+  assert.equal(scrubUrl("login p@ssw0rd refused", encoded), "login <stream-url> refused");
+
+  // A credential shorter than three characters is left alone, so ordinary words survive.
+  assert.equal(scrubUrl("ab and cd are short", "rtsp://ab:cd@example.invalid/live"), "ab and cd are short");
+  // A url `new URL` cannot parse is still covered by the pattern replacements.
+  assert.equal(scrubUrl(`see ${URL} now`, "not a url"), "see <stream-url> now");
+});
+
+test("a password straddling the reported window's cut point never survives in lastError", async () => {
+  const SECRET_URL = "rtsp://admin:S3cretPassw0rd@example.invalid:8557/front_door_live";
+  const password = "S3cretPassw0rd";
+  const passwordAt = SECRET_URL.indexOf(password);
+  const noise = "just another harmless line of words\n";
+  const filler = (length) => {
+    let out = "";
+    while (out.length < length) out += noise;
+    return out.slice(0, Math.max(0, length));
+  };
+
+  // The kept raw buffer is 8000 bytes and the reported window is its last 500. By fixing the text
+  // that follows the URL, `k` moves the raw buffer's cut point to `k` bytes into the URL, so k from
+  // passwordAt walks it through the credential one byte at a time. (The old bug: the window was
+  // taken first, so the fragment left at the cut landed inside the reported tail.)
+  for (let k = passwordAt; k <= passwordAt + password.length + 1; k++) {
+    const { manager, spawner } = makeManager({ options: { sources: { front_door: SECRET_URL } } });
+    await manager.attach("front_door", fakeResponse());
+    const { child } = spawner.sessions()[0];
+
+    const tailLength = 8000 + k - SECRET_URL.length;
+    assert.ok(tailLength > 0, "the layout puts the cut inside the URL");
+    child.stderr.emit("data", Buffer.from(filler(4000) + SECRET_URL));
+    child.stderr.emit("data", Buffer.from(filler(tailLength)));
+
+    const text = manager.lastError("front_door");
+    assert.match(text, /harmless/, `cut ${k}: the window has content`);
+    assert.equal(text.includes(SECRET_URL), false, `cut ${k}: the URL leaked`);
+    assert.equal(text.includes("@"), false, `cut ${k}: a credential fragment leaked`);
+    for (let at = 0; at + 3 <= password.length; at++) {
+      const fragment = password.slice(at, at + 3);
+      assert.equal(text.includes(fragment), false, `cut ${k}: the fragment "${fragment}" lost`);
+    }
+  }
 });
 
 test("the URL is never echoed in lastError, in a refusal message or in a console call", async () => {
