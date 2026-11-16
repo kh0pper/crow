@@ -269,7 +269,13 @@ const CONTRACT_SKIP = [];
 if (!HAS_OMIT_UIDNEXT) CONTRACT_SKIP.push("a listing that omits UIDNEXT still yields a uidNext");
 
 runAdapterContract(async (opts = {}) => {
-  const fake = await startFake(opts.omitUidNext ? { omitUidNext: true } : {});
+  const fake = await startFake({
+    ...(opts.omitUidNext ? { omitUidNext: true } : {}),
+    // A move needs MOVE or UIDPLUS: with neither, imapflow's only fallback ends in a mailbox-wide
+    // EXPUNGE, which the adapter refuses outright. The contract's steps are about the move itself, so
+    // this server offers UIDPLUS and they run the UID EXPUNGE fallback.
+    capabilities: ["UIDPLUS"],
+  });
   // `send` needs a server that speaks SMTP, so one fake SMTP server stands behind the account's smtp
   // endpoint for the two contract steps that send a message.
   const smtp = await startSmtpFake();
@@ -1583,6 +1589,195 @@ test("move uses UID MOVE when the server advertises it, and nothing is copied tw
     assert.deepEqual((await adapter.list("Trash")).items.map((item) => item.uid), [1]);
   } finally {
     await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+/* ------------------------------------------------- plan 2: a move never expunges the mailbox */
+
+/**
+ * A message the owner had already flagged `\Deleted`, waiting in the source folder of a move test. A
+ * mailbox-wide EXPUNGE takes it along with the message the move names; a `UID EXPUNGE` of the moved
+ * uids leaves it where it is.
+ */
+function deliverBystander(fake) {
+  return fake.deliver("INBOX", makeRaw({ subject: "already flagged for deletion" }), {
+    flags: ["\\Deleted"],
+  });
+}
+
+test("move on a server with MOVE sends UID MOVE and leaves a flagged bystander alone", async () => {
+  const fake = await startFake({ capabilities: ["MOVE"] });
+  const bystander = deliverBystander(fake);
+  const moving = fake.deliver("INBOX", makeRaw({ subject: "move me" }));
+  const adapter = adapterFor(fake);
+  try {
+    await adapter.connect();
+    const { uidValidity } = await adapter.list("INBOX");
+    const before = fake.commands.length;
+    assert.deepEqual(
+      await adapter.move("INBOX", [moving], "Trash", { expectedUidValidity: uidValidity }),
+      { moved: 1 },
+    );
+    const after = fake.commands.slice(before);
+    assert.ok(after.includes("UID MOVE"), "the server's own MOVE was used");
+    assert.deepEqual(after.filter((name) => /EXPUNGE/.test(name)), [], "no expunge of any kind was sent");
+    assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.uid), [bystander],
+      "the message flagged \\Deleted is still in the source");
+    assert.deepEqual((await adapter.list("Trash")).items.map((item) => item.uid), [1],
+      "and the moved message reached the destination");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("move on a server with UIDPLUS but no MOVE expunges only the moved uids", async () => {
+  const fake = await startFake({ capabilities: ["UIDPLUS"] });
+  const bystander = deliverBystander(fake);
+  const moving = fake.deliver("INBOX", makeRaw({ subject: "move me", body: "moving body" }));
+  const adapter = adapterFor(fake);
+  try {
+    await adapter.connect();
+    const { uidValidity } = await adapter.list("INBOX");
+    const before = fake.commands.length;
+    assert.deepEqual(
+      await adapter.move("INBOX", [moving], "Trash", { expectedUidValidity: uidValidity }),
+      { moved: 1 },
+    );
+    const after = fake.commands.slice(before);
+    assert.deepEqual(after.filter((name) => /(^| )EXPUNGE$/.test(name)), ["UID EXPUNGE"],
+      "the only expunge is a UID EXPUNGE");
+    assert.equal(after[after.length - 1], "UID EXPUNGE", "and it is the move's last command");
+    assert.ok(!after.includes("EXPUNGE"), "a bare EXPUNGE would have taken every message flagged \\Deleted");
+    assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.uid), [bystander],
+      "the bystander is still in the source and the moved message is not");
+    const destination = (await adapter.list("Trash")).items;
+    assert.equal(destination.length, 1, "the moved message arrived");
+    const [stored] = await adapter.get("Trash", [destination[0].uid]);
+    assert.match(stored.raw.toString("utf8"), /moving body/);
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("move on a server with neither MOVE nor UIDPLUS is refused before anything is copied", async () => {
+  const fake = await startFake();
+  const bystander = deliverBystander(fake);
+  const moving = fake.deliver("INBOX", makeRaw({ subject: "move me" }));
+  const adapter = adapterFor(fake);
+  try {
+    await adapter.connect();
+    const { uidValidity } = await adapter.list("INBOX");
+    const before = fake.commands.length;
+    const err = await rejectionOf(
+      adapter.move("INBOX", [moving], "Trash", { expectedUidValidity: uidValidity }),
+    );
+    assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+    assert.equal(err.code, "PROTOCOL");
+    assert.equal(err.detail, "move_unsupported");
+    const after = fake.commands.slice(before);
+    assert.deepEqual(after.filter((name) => /COPY|STORE|MOVE|EXPUNGE/.test(name)), [],
+      "no copy, flag, move or expunge was sent");
+    assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.uid), [bystander, moving],
+      "both messages are still in the source");
+    assert.deepEqual((await adapter.list("Trash")).items, [], "nothing reached the destination");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("a move onto the message's own folder is BAD_INPUT and uses no connection", async () => {
+  const fake = await startFake({ capabilities: ["MOVE", "UIDPLUS"] });
+  const uid = fake.deliver("INBOX", makeRaw({ subject: "stays put" }));
+  const adapter = adapterFor(fake);
+  try {
+    const connections = fake.connectionCount();
+    const commands = fake.commands.length;
+    await assert.rejects(
+      adapter.move("INBOX", [uid], "INBOX", { expectedUidValidity: 1 }),
+      mailCode("BAD_INPUT"),
+    );
+    await assert.rejects(
+      adapter.move("INBOX", [uid], "  INBOX ", { expectedUidValidity: 1 }),
+      mailCode("BAD_INPUT"),
+      "the same folder written with padding is the same folder",
+    );
+    assert.equal(fake.connectionCount(), connections, "a refused move opened no connection");
+    assert.deepEqual(fake.commands.slice(commands), [], "and sent no command");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("a server NO on UID COPY reaches the caller as a MailError with no credential", async () => {
+  const fake = await startFake({ capabilities: ["UIDPLUS"] });
+  const bystander = deliverBystander(fake);
+  const moving = fake.deliver("INBOX", makeRaw({ subject: "cannot move" }));
+  const adapter = adapterFor(fake, {
+    clientFactory: (options) => {
+      const client = new ImapFlow(options);
+      // The refusal the fallback's first command gets. It quotes the login the way a server's NO can;
+      // none of that may travel to the caller.
+      client.messageCopy = async (range, destination) => {
+        const sentence = `${FAKE_USER} ${FAKE_PASSWORD} could not copy to ${destination}`;
+        throw Object.assign(new Error(`A5 NO [TRYCREATE] ${sentence}`), {
+          responseStatus: "NO",
+          responseText: sentence,
+          executedCommand: `A5 UID COPY ${range} ${destination}`,
+        });
+      };
+      return client;
+    },
+  });
+  try {
+    await adapter.connect();
+    const { uidValidity } = await adapter.list("INBOX");
+    const err = await rejectionOf(
+      adapter.move("INBOX", [moving], "Trash", { expectedUidValidity: uidValidity }),
+    );
+    assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+    assert.equal(err.message, MAIL_ERROR_TEXT.PROTOCOL);
+    const shown = `${err.message} ${err.code} ${String(err.detail)} ${JSON.stringify(err)} ` +
+      `${String(err)} ${String(err.stack)}`;
+    assert.ok(!shown.includes(FAKE_PASSWORD), "the password is never in the error");
+    assert.ok(!shown.includes(FAKE_USER), "the username is never in the error");
+    assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.uid), [bystander, moving],
+      "a refused copy expunged nothing");
+  } finally {
+    await adapter.close();
+    await stopFake(fake);
+  }
+});
+
+test("a move the library does not confirm fails whatever falsy answer it gives", async () => {
+  const fake = await startFake({ capabilities: ["MOVE"] });
+  const uid = fake.deliver("INBOX", makeRaw({ subject: "unconfirmed" }));
+  try {
+    for (const answer of [undefined, null, false, 0, ""]) {
+      const adapter = adapterFor(fake, {
+        clientFactory: (options) => {
+          const client = new ImapFlow(options);
+          client.messageMove = async () => answer;
+          return client;
+        },
+      });
+      try {
+        await adapter.connect();
+        const { uidValidity } = await adapter.list("INBOX");
+        const err = await rejectionOf(
+          adapter.move("INBOX", [uid], "Trash", { expectedUidValidity: uidValidity }),
+        );
+        assert.ok(err instanceof MailError, `${JSON.stringify(answer)} is not a confirmed move`);
+        assert.equal(err.code, "PROTOCOL", `${JSON.stringify(answer)} is reported as a failure`);
+      } finally {
+        await adapter.close();
+      }
+    }
+  } finally {
     await stopFake(fake);
   }
 });

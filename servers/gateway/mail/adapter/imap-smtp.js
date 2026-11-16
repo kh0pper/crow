@@ -77,6 +77,9 @@
 import { randomBytes } from "node:crypto";
 import { domainToASCII } from "node:url";
 import { ImapFlow } from "imapflow";
+// imapflow's own capability test, the one its move and expunge commands consult: it reads the
+// connection's `capabilities` Map and folds in what an IMAP4rev2 session carries without naming it.
+import { hasCapability } from "imapflow/lib/tools.js";
 import nodemailer from "nodemailer";
 import { MailError, toMailError } from "../errors.js";
 import { authFor } from "../credentials.js";
@@ -1175,10 +1178,16 @@ export function createImapSmtpAdapter(options = {}) {
 
   /**
    * Move the UIDs that still exist into another folder of the same account. The destination has to be
-   * a folder the server lists: a name the server does not have is NOT_FOUND before the message is
-   * copied anywhere, so a typo never loses the source copy. Nothing here expunges a message of its
-   * own: the server's MOVE (or imapflow's COPY + `\Deleted` + EXPUNGE fallback) takes it out of the
-   * source as part of the move.
+   * another folder the server lists — a name the server does not have is NOT_FOUND and the message's
+   * own folder is BAD_INPUT, before anything is copied anywhere — so a typo never loses the source
+   * copy.
+   *
+   * A server that advertises MOVE takes the message out of the source itself. Without MOVE, imapflow
+   * falls back to COPY + `\Deleted` + EXPUNGE, and that fallback is only allowed when the server also
+   * advertises UIDPLUS: the expunge then names the moved UIDs (`UID EXPUNGE`) and every other message
+   * the owner had already flagged `\Deleted` stays where it is. With neither extension the fallback
+   * ends in a mailbox-wide EXPUNGE, which deletes messages this call never named, so the move is
+   * refused as PROTOCOL before one byte is copied or one flag set.
    *
    * @param {string} folderPath
    * @param {number[]} uids
@@ -1189,15 +1198,26 @@ export function createImapSmtpAdapter(options = {}) {
   async function move(folderPath, uids, destPath, options = {}) {
     const opts = options == null ? {} : options;
     if (typeof opts !== "object") throw new MailError("BAD_INPUT", "options");
+    const source = requireFolderPath(folderPath);
     const destination = requireFolderPath(destPath, "destination");
-    const moved = await withFolderAction(folderPath, uids, opts.expectedUidValidity, async (client) => {
+    // A message "moved" into the folder it is already in would be copied beside itself and the
+    // original then expunged: refused, and refused before any connection is used for it.
+    if (destination === source) throw new MailError("BAD_INPUT", "destination");
+    const moved = await withFolderAction(source, uids, opts.expectedUidValidity, async (client) => {
       const entries = await client.list();
       if (!Array.isArray(entries)) throw new MailError("PROTOCOL", "list");
       const found = entries.some((entry) => entry.path === destination && isSelectable(entry));
       if (!found) throw new MailError("NOT_FOUND", "destination");
+      // Decided before the source is fetched, so a refusal sends no COPY, STORE or EXPUNGE at all.
+      // MOVE and UIDPLUS are what imapflow itself consults to pick the command.
+      if (!hasCapability(client, "MOVE") && !hasCapability(client, "UIDPLUS")) {
+        throw new MailError("PROTOCOL", "move_unsupported");
+      }
     }, async (client, range) => {
       const result = await client.messageMove(range, destination, { uid: true });
-      if (result === false) throw new MailError("PROTOCOL", "move_refused");
+      // Any answer that is not a confirmation — false, undefined, an empty result — is a move that may
+      // not have happened, so the caller is told it failed rather than that it succeeded.
+      if (!result) throw new MailError("PROTOCOL", "move_refused");
     });
     return { moved };
   }
