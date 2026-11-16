@@ -36,7 +36,7 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, symlinkSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
@@ -103,7 +103,8 @@ writeFileSync(STUB_PI, [
 process.env.PIBOT_PI_CLI = STUB_PI;
 
 const { handleInbound, PiRpc, loadBotShares } = await import("../scripts/pi-bots/bridge.mjs");
-const { buildBotWorld, prepareSpawn, shareWorkspaceRoots } = await import("../scripts/pi-bots/bot-world.mjs");
+const { buildBotWorld, prepareSpawn, shareWorkspaceRoots, BOTS_TREE_MAX_DEPTH, BOTS_TREE_MAX_ENTRIES } =
+  await import("../scripts/pi-bots/bot-world.mjs");
 const { effectiveReadPaths } = await import("../scripts/pi-bots/bot-read-paths.mjs");
 const { buildContainPlan, ContainRefused } = await import("../scripts/pi-bots/pi_contain.mjs");
 const { createInteractiveEngine, _resetInteractiveEngineForTest } = await import("../servers/gateway/perch-interactive.js");
@@ -475,6 +476,113 @@ test("shareWorkspaceRoots: a workspace with no bots directory grants its entries
     { projectsRoot: PROJECTS_ROOT, log: (m) => said.push(m) });
   assert.deepEqual(sortRoots(r), { read: sorted(fixtureRoots(d)), write: [] });
   assert.deepEqual(said, []);
+});
+
+// ---------------------------------------------------------------------------
+// the WHOLE bots tree is checked, not only its top level
+// ---------------------------------------------------------------------------
+
+/** shareWorkspaceRoots for one workspace, with the warning lines it emitted. */
+function shareOf(d, projectId, level = "read_write") {
+  const said = [];
+  const r = shareWorkspaceRoots([{ project_id: projectId, level, workspace_dir: d, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT, log: (m) => said.push(m) });
+  return { r, said };
+}
+
+/** The share grants nothing at all, and says why once. */
+function assertRefused(d, projectId, why) {
+  const { r, said } = shareOf(d, projectId);
+  assert.deepEqual(r, { read: [], write: [] }, "nothing granted for " + d);
+  assert.equal(said.length, 1, "exactly one warning line: " + JSON.stringify(said));
+  assert.match(said[0], why, "the warning names the reason: " + said[0]);
+}
+
+/** A share workspace whose ordinary entries are beside a bots tree `tamper` shapes. */
+function botsTreeFixture(name, tamper) {
+  const d = ws("unit-" + name);
+  mkdirSync(join(d, "docs"), { recursive: true });
+  writeFileSync(join(d, "docs", "a.md"), "a\n");
+  writeFileSync(join(d, "top.txt"), "t\n");
+  mkdirSync(join(d, "bots", "other"), { recursive: true });
+  tamper(d, join(d, "bots", "other"));
+  return d;
+}
+
+const IS_ROOT = typeof process.getuid === "function" && process.getuid() === 0;
+
+test("shareWorkspaceRoots: a symlink nested inside a bot home (2 and 4 levels down) refuses the whole share", () => {
+  // `<ws>/bots/<id>/sessions -> <ws>/data` is the same reach as a symlinked bot home: the bot's
+  // transcripts now sit in an ordinary top-level entry this share would otherwise grant.
+  const cases = [
+    ["sessions", ["sessions"]],
+    ["deep", ["a", "b", "c", "sessions"]],
+  ];
+  for (const [label, path] of cases) {
+    const d = botsTreeFixture("nested-link-" + label, (root, home) => {
+      mkdirSync(join(root, "data"), { recursive: true });
+      writeFileSync(join(root, "data", "x.jsonl"), "{}\n");
+      mkdirSync(join(home, ...path.slice(0, -1)), { recursive: true });
+      symlinkSync(join(root, "data"), join(home, ...path));
+    });
+    assertRefused(d, 30, /symlink/);
+  }
+});
+
+test("shareWorkspaceRoots: a file symlink (.mcp.json) inside a bot home refuses the whole share", () => {
+  // A bot's .mcp.json carries signed actor headers; a link to a top-level file would hand them over.
+  const d = botsTreeFixture("mcp-link", (root, home) => {
+    writeFileSync(join(root, "signed-actors.json"), '{"mcpServers":{}}\n');
+    symlinkSync(join(root, "signed-actors.json"), join(home, ".mcp.json"));
+  });
+  assertRefused(d, 31, /symlink/);
+});
+
+test("shareWorkspaceRoots: a bots tree over the entry bound refuses the share instead of half-inspecting it", () => {
+  const d = botsTreeFixture("huge-bots-tree", (_root, home) => {
+    const sessions = join(home, "sessions");
+    mkdirSync(sessions, { recursive: true });
+    // One entry past the bound is enough: the walk stopped, so a link further in could go unseen.
+    for (let i = 0; i <= BOTS_TREE_MAX_ENTRIES; i++) writeFileSync(join(sessions, "s" + i + ".jsonl"), "");
+  });
+  assertRefused(d, 32, /entries/);
+});
+
+test("shareWorkspaceRoots: a bots tree of real dirs and files — a deep one included — still grants the other entries", () => {
+  const d = botsTreeFixture("real-bots-deep", (_root, home) => {
+    // bots/<id>/sessions/2026/01/02/s.jsonl sits five levels below bots; .mcp.json is a real file.
+    assert.ok(5 <= BOTS_TREE_MAX_DEPTH, "the fixture's depth stays inside the walk's bound");
+    mkdirSync(join(home, "sessions", "2026", "01", "02"), { recursive: true });
+    writeFileSync(join(home, "sessions", "2026", "01", "02", "s.jsonl"), "{}\n");
+    writeFileSync(join(home, ".mcp.json"), "{}\n");
+    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  });
+  const { r, said } = shareOf(d, 33);
+  assert.deepEqual(sortRoots(r), { read: sorted(fixtureRoots(d)), write: sorted(fixtureRoots(d)) });
+  assert.deepEqual(said, [], "a normal bots tree says nothing");
+});
+
+test("shareWorkspaceRoots: an unreadable bots directory refuses the share (never 'no bots here')", {
+  skip: IS_ROOT ? "root reads a mode-000 directory" : false,
+}, () => {
+  const d = botsTreeFixture("unreadable-bots", (_root, home) => {
+    mkdirSync(join(home, "sessions"), { recursive: true });
+  });
+  chmodSync(join(d, "bots"), 0o000);
+  try {
+    assertRefused(d, 34, /EACCES/);
+  } finally {
+    chmodSync(join(d, "bots"), 0o755);
+  }
+});
+
+test("shareWorkspaceRoots: a `<ws>/bots` that is a regular file refuses the share (ENOTDIR)", () => {
+  const d = ws("unit-bots-is-a-file");
+  mkdirSync(join(d, "docs"), { recursive: true });
+  writeFileSync(join(d, "docs", "a.md"), "a\n");
+  writeFileSync(join(d, "top.txt"), "t\n");
+  writeFileSync(join(d, "bots"), "not a directory\n");
+  assertRefused(d, 35, /ENOTDIR/);
 });
 
 test("shareWorkspaceRoots: more top-level entries than the cap grants nothing for that share, with one warning", () => {
