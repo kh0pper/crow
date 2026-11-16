@@ -35,6 +35,12 @@
  * client script (Task 8) posts them and reloads with a `flash` this page parses back into a kind and
  * a count.
  *
+ * The `settings` view is the account page (`panels/mail/settings-html.js`): every account — held ones
+ * included — with its status and controls, the addresses other live instances hold, and the
+ * add-account form. Its reads are the same overview plus one account's allowed-image senders each
+ * (`listImageAllow`); `html.js` draws one view per query and holds no settings view of its own, so
+ * this branch answers before the dispatcher and hands it the whole page content.
+ *
  * Hidden from the classic sidebar; the shell's drawer reveals it (shell/chrome.js) only while the
  * flag is on AND the request is the owner's own local password session (the same check as the gate
  * below, made once per page in dispatchPanel).
@@ -45,10 +51,11 @@ import { mailEnabled } from "../../mail/flag.js";
 import { accountsOverview } from "../../mail/accounts-overview.js";
 import { MailError } from "../../mail/errors.js";
 import { getFolder, getMessage, listFolders, listMessages, searchLocal } from "../../mail/store/messages.js";
-import { listThreadMessages, resolveMessageRef } from "../../mail/store/reader-queries.js";
+import { listThreadMessages, resolveMessageRef, listImageAllow } from "../../mail/store/reader-queries.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
 import { instanceZone } from "../../../shared/schedule-store.js";
 import { renderMailPage } from "./mail/html.js";
+import { settingsHtml } from "./mail/settings-html.js";
 import { mailCss } from "./mail/css.js";
 
 /** Rows per page. The cursor is the only way to the next one. */
@@ -202,6 +209,21 @@ export default {
     let missing = false;
     let tz;
     try { tz = await instanceZone(db); } catch { tz = undefined; }
+
+    // The account page: the owner's own view of every account (held ones included), the addresses
+    // other live instances hold and the add-account form. It is drawn here rather than by the view
+    // dispatcher because the empty states that win over the other views must not hide the form that
+    // connects an account.
+    if (view === "settings") {
+      const allow = {};
+      for (const entry of accounts) {
+        allow[entry.id] = await listImageAllow(db, entry.id);
+      }
+      return layout({
+        title: t("mail.title", lang),
+        content: mailCss({ settings: true }) + settingsHtml({ accounts, elsewhere, allow, lang, tz }),
+      });
+    }
 
     if (usable.length && view === "inbox") {
       const ids = new Set(usable.map((entry) => entry.id));

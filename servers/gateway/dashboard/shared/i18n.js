@@ -5688,6 +5688,28 @@ export const translations = {
   // "Refresh" (extensions.servers.refresh) words rather than inventing new copy.
   "mail.searchOlderRemote": { en: "Search older mail on the server", es: "Buscar correo más antiguo en el servidor" },
   "mail.lookFurtherBack": { en: "Look further back", es: "Buscar más atrás" },
+  // Crow Mail's account settings (Task 7): each account's status word, its own controls, the sentence
+  // the remove block sits behind, and the add-account form's heading and field labels. The helper
+  // line under "Local models only" is the plan's own sentence.
+  "mail.statusWorking": { en: "Working", es: "Funcionando" },
+  "mail.statusAuthFailed": { en: "Sign-in failed. Update the password.", es: "No se pudo iniciar sesión. Actualiza la contraseña." },
+  "mail.statusHeld": { en: "Connected on {instance}", es: "Conectado en {instance}" },
+  "mail.syncNow": { en: "Sync now", es: "Sincronizar ahora" },
+  "mail.localModelsOnly": { en: "Local models only", es: "Solo modelos locales" },
+  "mail.localModelsOnlyHelp": { en: "Applies when Crow drafts or summarises with a model.", es: "Se aplica cuando Crow redacta o resume con un modelo." },
+  "mail.updatePassword": { en: "Update password", es: "Actualizar la contraseña" },
+  "mail.removeAccount": { en: "Remove this account", es: "Eliminar esta cuenta" },
+  "mail.removeAccountConfirm": { en: "This deletes the mail Crow stored for it. Mail on the server is not touched.", es: "Esto borra el correo que Crow guardó para ella. El correo en el servidor no se toca." },
+  "mail.addAccount": { en: "Add an account", es: "Añadir una cuenta" },
+  "mail.fieldLabel": { en: "Label", es: "Etiqueta" },
+  "mail.fieldAddress": { en: "Address", es: "Dirección" },
+  "mail.fieldPassword": { en: "Password", es: "Contraseña" },
+  "mail.fieldImapHost": { en: "IMAP host", es: "Servidor IMAP" },
+  "mail.fieldImapPort": { en: "IMAP port", es: "Puerto IMAP" },
+  "mail.fieldSmtpHost": { en: "SMTP host", es: "Servidor SMTP" },
+  "mail.fieldSmtpPort": { en: "SMTP port", es: "Puerto SMTP" },
+  "mail.fieldSecurity": { en: "Security", es: "Seguridad" },
+  "mail.remove": { en: "Remove", es: "Quitar" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

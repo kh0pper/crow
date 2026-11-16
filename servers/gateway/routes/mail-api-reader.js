@@ -22,6 +22,13 @@
  * `changed_on_server` answer and a full sync; an empty Buffer is the adapter's way of saying the
  * message is over plan 1's raw-size limit. Every failure is one of plan 1's codes and fixed
  * sentences: a server's text, a filename's markup and a sender's type never reach a header here.
+ *
+ * The password route is the account page's one write: a new app password is proved against the
+ * server FIRST (the probe runs on a credentials reader holding only the new secret), and only then
+ * replaces the sealed one. It is never echoed, never logged and never compared here; a refused
+ * sign-in leaves the stored secret and the account exactly as they were. An OAuth account is refused
+ * — plan 5's wizards reconnect one — and an accepted password restarts the account, so neither the
+ * sync worker nor a borrowed adapter can keep speaking with the old secret.
  */
 import { MAIL_ERROR_TEXT, toMailError } from "../mail/errors.js";
 import { parseRawMessageFull } from "../mail/parse.js";
@@ -32,18 +39,22 @@ import {
   safeAttachmentName,
 } from "../mail/reader/attachments.js";
 import { bodyForDisplay } from "../mail/sanitize.js";
+import { probeAccount } from "../mail/probe.js";
 import { frameHeaders, renderFrameDocument } from "../mail/reader/frame-doc.js";
-import { getAccount, isImageAllowed } from "../mail/store/accounts.js";
+import { getAccount, isImageAllowed, updateAccount } from "../mail/store/accounts.js";
 import { getFolder, getMessage, storedDate } from "../mail/store/messages.js";
 import { listImageAllow } from "../mail/store/reader-queries.js";
 import { withoutWriteContext } from "../../shared/history/write-context.js";
 // The mount point plan 1's mail-api.js sets on this same router. It is read when routes are
 // registered (that module has finished evaluating by then), never at module load: the two files
 // import each other.
-import { MAIL_API_PREFIX } from "./mail-api.js";
+import { MAIL_ACCOUNT_ID_RE, MAIL_API_PREFIX } from "./mail-api.js";
 
 /** A sender address is at most this long, and the allow-list store refuses more. */
 const ADDRESS_MAX = 254;
+
+/** The most a password may be: the same ceiling plan 1's connect route reads. */
+const PASSWORD_MAX = 1024;
 
 const BLANK_OR_CONTROL_RE = /[\s\u0000-\u001f\u007f<>]/;
 
@@ -60,6 +71,12 @@ const langOf = (req) => (/^\s*es\b/i.test(String(req.headers?.["accept-language"
 
 /** An attachment index as the reader links it: decimal digits, so no sign, no fraction, no exponent. */
 const ATTACHMENT_INDEX_RE = /^[0-9]{1,6}$/;
+
+/** The body's password: a non-empty string within the limit, else null. It is never logged. */
+function readPassword(value) {
+  if (typeof value !== "string" || value === "" || value.length > PASSWORD_MAX) return null;
+  return value;
+}
 
 /** The bytes an adapter reported, whatever binary flavour it used; null for anything that is not bytes. */
 function rawBufferOf(value) {
@@ -225,6 +242,51 @@ export function registerReaderRoutes(router, ctx) {
       res.end(attachment.content);
     },
   ));
+
+  /* ------------------------------------------------------------ password update */
+
+  // PUT /accounts/:id/password — one new app password. The probe runs before anything is stored, so a
+  // refused sign-in changes nothing; an accepted one replaces the sealed secret, marks the account
+  // active and restarts it (the old password's run and both of its connections go, and a fresh full
+  // sync follows), then syncs in the background. The answer holds no secret and no server text.
+  router.put(`${base}/accounts/:id/password`, route("PUT /accounts/:id/password", async (db, req, res) => {
+    const id = String(req.params.id);
+    if (!MAIL_ACCOUNT_ID_RE.test(id)) return sendError(res, 404, "not_found");
+    const account = await getAccount(db, id);
+    if (!account) return sendError(res, 404, "not_found");
+    // An OAuth account has no password to replace: plan 5's wizards reconnect it.
+    if (account.authKind !== "password") return sendError(res, 400, "bad_input");
+    const password = readPassword(req.body?.password);
+    if (password === null) return sendError(res, 400, "bad_input");
+
+    // The credentials reader is the shape plan 1's adapter factory takes, holding only the password
+    // just typed: the probe signs in with the new secret and keeps nothing of it.
+    await probeAccount({
+      adapterFactory: ctx.adapterFactory,
+      account,
+      credentials: { getSecrets: async () => ({ MAIL_PASSWORD: password }) },
+    });
+
+    await ctx.credentials(db).saveSecret(id, "MAIL_PASSWORD", password);
+    await updateAccount(db, id, { status: "active" });
+
+    // A sync outlives the request that asked for it, so it is opened with no write context; its own
+    // failure is the supervisor's to report, never this answer's. `restartAccount` is the step that
+    // makes the next factory call read the keychain again, so no connection keeps the old secret.
+    const supervisor = typeof ctx.supervisor === "function" ? ctx.supervisor() : null;
+    if (supervisor) {
+      const restart = typeof supervisor.restartAccount === "function" ? supervisor.restartAccount.bind(supervisor) : null;
+      const syncNow = typeof supervisor.syncNow === "function" ? supervisor.syncNow.bind(supervisor) : null;
+      withoutWriteContext(() => {
+        Promise.resolve()
+          .then(() => (restart ? restart(id) : undefined))
+          .then(() => (syncNow ? syncNow(id) : undefined))
+          .catch((err) => logCode("PUT /accounts/:id/password", err));
+      });
+    }
+
+    res.json({ ok: true });
+  }));
 
   /* --------------------------------------------------------------- image allow */
 

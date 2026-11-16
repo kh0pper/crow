@@ -5,10 +5,10 @@
  * --crow-* tokens, which follow the OS between light and dark.
  *
  * The list rules (the search box, the refresh control, the chips, the folder drawer and the message
- * rows) come with the inbox view and the conversation's rules with the message view, which is why
- * they are behind `inbox` and `message`: a page that draws only an empty state ships only that
- * state's rules. The way back a card offers (`.ml-back`) is in the base rules, because a state card
- * rather than the conversation draws it.
+ * rows) come with the inbox view, the conversation's rules with the message view and the account
+ * cards with the settings view, which is why they are behind `inbox`, `message` and `settings`: a
+ * page that draws only an empty state ships only that state's rules. The way back a card offers
+ * (`.ml-back`) is in the base rules, because a state card rather than the conversation draws it.
  *
  * NOTE: never write a literal closing style tag inside a comment here.
  */
@@ -102,11 +102,47 @@ const MESSAGE_RULES = `
   .ml-size { margin-left: auto; font-size: 0.8rem; color: var(--crow-text-secondary); white-space: nowrap; }`;
 
 /**
- * @param {{inbox?: boolean, message?: boolean}} options `inbox` adds the list rules (chips, folder
- *   drawer, message rows), `message` the conversation's; a view that draws neither ships neither.
+ * The settings view (Task 7): the account cards (label field, address, status, sync, the local-models
+ * switch, the password control, the allowed senders and the remove block) and the add-account form.
+ * Every input and button is a 44 px target; no rule sets a fixed width, so the page never scrolls
+ * sideways on a phone.
+ */
+const SETTINGS_RULES = `
+  .ml-settings { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .ml-card, .ml-add {
+    display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 16px; box-sizing: border-box;
+    border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 16px); background: var(--crow-bg-surface);
+  }
+  .ml-card-title { margin: 0; min-width: 0; font-size: 1.05rem; font-weight: 700; line-height: 1.3; overflow-wrap: anywhere; }
+  .ml-address { color: var(--crow-text-secondary); }
+  .ml-status { font-weight: 600; }
+  .ml-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; margin: 0; }
+  .ml-field-label { min-width: 0; font-size: 0.8rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
+  .ml-input {
+    display: block; width: 100%; min-height: 44px; min-width: 0; padding: 0 12px; box-sizing: border-box;
+    border: 1px solid var(--crow-border-strong, var(--crow-border)); border-radius: 8px;
+    background: var(--crow-bg-elevated); color: var(--crow-text-primary); font: inherit; font-size: 0.9rem;
+  }
+  .ml-switch { display: flex; align-items: center; gap: 8px; min-height: 44px; min-width: 0; font-size: 0.9rem; overflow-wrap: anywhere; }
+  .ml-help { margin: 0; min-width: 0; font-size: 0.8rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
+  .ml-synced { font-size: 0.8rem; color: var(--crow-text-secondary); }
+  .ml-update-password { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .ml-update-password > summary { display: flex; align-items: center; min-height: 44px; cursor: pointer; }
+  .ml-allow { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .ml-allow-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+  .ml-allow-sender { min-width: 0; font-size: 0.9rem; overflow-wrap: anywhere; }
+  .ml-danger {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0;
+    padding-top: 8px; border-top: 1px solid var(--crow-border);
+  }`;
+
+/**
+ * @param {{inbox?: boolean, message?: boolean, settings?: boolean}} options `inbox` adds the list
+ *   rules (chips, folder drawer, message rows), `message` the conversation's and `settings` the
+ *   account cards and the add-account form; a view that draws none ships none.
  * @returns {string}
  */
-export function mailCss({ inbox = false, message = false } = {}) {
+export function mailCss({ inbox = false, message = false, settings = false } = {}) {
   return `<style>
   .ml { max-width: 44rem; min-width: 0; display: flex; flex-direction: column; gap: 12px; color: var(--crow-text-primary); }
   .ml-title { margin: 0; font-size: 1.5rem; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
@@ -126,7 +162,7 @@ export function mailCss({ inbox = false, message = false } = {}) {
     box-sizing: border-box; border-radius: var(--crow-radius-pill); color: var(--crow-text-primary);
     font-size: 0.9rem; text-decoration: none; overflow-wrap: anywhere;
   }
-  .ml a:focus-visible, .ml button:focus-visible, .ml summary:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }${inbox ? INBOX_RULES : ""}${message ? MESSAGE_RULES : ""}
+  .ml a:focus-visible, .ml button:focus-visible, .ml summary:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }${inbox ? INBOX_RULES : ""}${message ? MESSAGE_RULES : ""}${settings ? SETTINGS_RULES : ""}
 </style>`;
 }
 
