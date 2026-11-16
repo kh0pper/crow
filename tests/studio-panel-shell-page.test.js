@@ -812,7 +812,11 @@ test("a failed template fetch leaves the song unseeded", async () => {
 
   assert.equal(storage.getItem(seededKey(SONG)), null, "no marker: the next boot asks again");
   assert.equal(storage.getItem(layoutKey(SONG, "compose", "laptop")), null, "and no slot was written");
-  assert.deepEqual(shownWidgets(page), ["scene-grid", "editor", "history"], "the page fell back to the built-in default");
+  assert.deepEqual(
+    shownWidgets(page),
+    ["scene-grid", "editor", "pads", "steps", "fx", "history"],
+    "the page fell back to the built-in default",
+  );
   assert.ok(document.querySelector("[data-role=transport-bar]"), "the transport bar mounted as well");
 
   ui.stop();
