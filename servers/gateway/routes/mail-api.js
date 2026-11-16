@@ -615,6 +615,9 @@ export function mailApiRouter(dashboardAuth, deps = {}) {
     supervisor: () => supervisorFor(deps),
     adapterFactory: adapterFactoryFor(deps),
     localInstance: (db) => localInstanceFor(db, deps),
+    // The masking seam the connect route uses for the password it was handed: plan 2's password route
+    // records the new secret the same way, before any path can write it to a log.
+    recordSecrets,
     sendError,
     sendMailError,
     logCode,

@@ -27,9 +27,6 @@ import { t, fill } from "../../shared/i18n.js";
 
 const e = escapeHtml;
 
-/** The mail API's mount point: every control here posts there, never to the page. */
-const MAIL_API = "/dashboard/mail/api";
-
 /** Plan 1's own fallback for a claim row that left its instance name blank. */
 const UNNAMED_INSTANCE = "another Crow";
 
@@ -39,10 +36,15 @@ function localeOf(lang) {
   return LOCALES[lang] ?? LOCALES.en;
 }
 
-/** The account's label as text: the owner's words, else the instance fallback. */
+/** The owner's own label, trimmed, and empty when they left it blank: the rename field's value. */
+function typedLabelOf(account) {
+  return typeof account?.label === "string" ? account.label.trim() : "";
+}
+
+/** The account's heading: the owner's words, else the mailbox address (never the blank label itself). */
 function labelOf(account) {
-  const label = typeof account?.label === "string" ? account.label.trim() : "";
-  return label || UNNAMED_INSTANCE;
+  const address = typeof account?.address === "string" ? account.address.trim() : "";
+  return typedLabelOf(account) || address || UNNAMED_INSTANCE;
 }
 
 /** The name of the instance an account is connected on, or the fallback when none is stored. */
@@ -129,6 +131,7 @@ function removeAccountHtml(accountId, lang) {
 function accountCard(account, { senders = [], lang, tz }) {
   const id = String(account?.id ?? "");
   const label = labelOf(account);
+  const typedLabel = typedLabelOf(account);
   const address = typeof account?.address === "string" ? account.address : "";
   const checked = account?.localModelsOnly ? " checked" : "";
   const update = account?.status === "auth_failed" ? updatePasswordHtml(id, lang) : "";
@@ -138,7 +141,7 @@ function accountCard(account, { senders = [], lang, tz }) {
       ${statusHtml(account, lang)}
       ${lastSyncHtml(account?.lastSyncAt, { lang, tz })}
       <label class="ml-field"><span class="ml-field-label">${e(t("mail.fieldLabel", lang))}</span>
-        <input class="ml-input" type="text" name="label" data-ml-rename data-account="${e(id)}" value="${e(label)}"></label>
+        <input class="ml-input" type="text" name="label" data-ml-rename data-account="${e(id)}" value="${e(typedLabel)}"></label>
       <div class="ml-actions">
         <button class="ml-btn" type="button" data-ml-sync data-account="${e(id)}">${e(t("mail.syncNow", lang))}</button>
       </div>
@@ -156,6 +159,10 @@ function accountCard(account, { senders = [], lang, tz }) {
  * The add-account form: the smallest set a password account needs, with `ssl` and `starttls` only.
  * Plan 5 replaces this whole function's body; the page above it does not change.
  *
+ * The form carries no `method` and no `action`: it is a set of fields for the client script, which
+ * reads `data-ml-action` (relative to the mail API's mount) and sends the request itself, so a native
+ * submit can never fire against this page's own URL.
+ *
  * @param {string} [lang]
  * @returns {string}
  */
@@ -164,7 +171,7 @@ export function addAccountForm(lang = "en") {
     + `<input class="ml-input" type="text" name="${name}"${extra}></label>`;
   const security = (name) => `<label class="ml-field"><span class="ml-field-label">${e(t("mail.fieldSecurity", lang))}</span>`
     + `<select class="ml-input" name="${name}"><option value="ssl">ssl</option><option value="starttls">starttls</option></select></label>`;
-  return `<form class="ml-add" method="post" action="${MAIL_API}/accounts" data-ml-add-account>
+  return `<form class="ml-add" data-ml-add-account data-ml-action="/accounts">
       <h2 class="ml-card-title">${e(t("mail.addAccount", lang))}</h2>
       ${text("label", t("mail.fieldLabel", lang))}
       ${text("address", t("mail.fieldAddress", lang), ' type="email" autocomplete="email"')}

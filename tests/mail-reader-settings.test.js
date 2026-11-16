@@ -10,9 +10,11 @@
  * secret of any stored account in the answer. A label carrying markup stays text, and a person's
  * quotes stay inside the attribute.
  *
- * The route: a refused sign-in stores nothing (400, fixed sentence), an accepted one stores the
- * secret, marks the account active, restarts it and starts a sync, and the next factory call is
- * handed the new password. An OAuth account is refused; nothing is dialled. A failing adapter's own
+ * The route: a refused sign-in stores nothing (400, fixed sentence); an accepted one has its password
+ * masked first, then stores the secret, marks the account active and restarts it — the restart's own
+ * full sync is the only one started — and the next factory call is handed the new password. An account
+ * another instance holds is refused before anything is dialled, and one removed while the probe runs
+ * leaves no secret behind. An OAuth account is refused; nothing is dialled. A failing adapter's own
  * text never reaches the answer.
  */
 import { test, before, after, beforeEach } from "node:test";
@@ -52,13 +54,24 @@ const stores = { accounts: null, credentials: null };
 let createFakeMailAdapter, MailError, MAIL_ERROR_TEXT;
 
 /** The mail API's dependencies for one test: a factory whose answer the test decides, and a supervisor
- *  that records the restart and the sync the route asks for. */
+ *  that records the restart and the sync the route asks for. `runsStarted` counts the full runs those
+ *  calls start: a restart answers with its own full sync, so the two are counted the same way. */
 let factory = () => createFakeMailAdapter();
 let factoryCalls = [];
 let supervisorCalls = [];
+let runsStarted = 0;
+let recordedSecrets = [];
+const recordSecrets = (values) => { recordedSecrets.push(...values); };
+const restartAccount = async (id) => {
+  supervisorCalls.push(["restartAccount", id]);
+  runsStarted += 1;
+};
 const supervisor = {
-  async syncNow(id) { supervisorCalls.push(["syncNow", id]); },
-  async restartAccount(id) { supervisorCalls.push(["restartAccount", id]); },
+  async syncNow(id) {
+    supervisorCalls.push(["syncNow", id]);
+    runsStarted += 1;
+  },
+  restartAccount,
 };
 const adapterFactory = (args) => {
   factoryCalls.push(args);
@@ -107,7 +120,7 @@ before(async () => {
   };
   const apiDash = express.Router();
   apiDash.use("/dashboard", csrfMiddleware);
-  apiDash.use(mailApiRouter(sessionGate, { adapterFactory, supervisor }));
+  apiDash.use(mailApiRouter(sessionGate, { adapterFactory, supervisor, recordSecrets }));
   app.use(apiDash);
   app.use(dashboardRouter((req, res, next) => next()));
   await new Promise((r) => { server = app.listen(0, "127.0.0.1", r); });
@@ -125,6 +138,8 @@ beforeEach(() => {
   factory = () => createFakeMailAdapter();
   factoryCalls = [];
   supervisorCalls = [];
+  runsStarted = 0;
+  recordedSecrets = [];
   const c = new Database(DB_FILE);
   try {
     c.prepare("DELETE FROM mail_messages").run();
@@ -279,7 +294,7 @@ test("elsewhere and no local accounts shows the sentence and the add form", asyn
     const r = await get(SETTINGS);
     assert.equal(r.status, 200);
     assert.match(r.body, /<p class="ml-note">Mail is set up on Studio<\/p>/);
-    assert.match(r.body, /<form[^>]*action="\/dashboard\/mail\/api\/accounts"[^>]*data-ml-add-account>/);
+    assert.match(r.body, /<form[^>]*data-ml-add-account[^>]*data-ml-action="\/accounts"[^>]*>/);
     assert.match(r.body, /Add an account/);
   });
 });
@@ -317,11 +332,29 @@ test("every allowed sender is listed with its own remove control", async () => {
   });
 });
 
-test("the add form offers ssl and starttls and posts to the accounts route", async () => {
+test("an account with a blank label heads with its address and leaves the rename field empty", async () => {
+  const account = await withDb((db) => stores.accounts.createAccount(db, ACCOUNT("Personal", "alex@example.com", "alexuser")));
+  await withDb((db) => db.execute({ sql: "UPDATE mail_accounts SET label = '' WHERE id = ?", args: [account.id] }));
   await withFlag(async () => {
     const r = await get(SETTINGS);
     assert.equal(r.status, 200);
-    assert.match(r.body, /<form[^>]*action="\/dashboard\/mail\/api\/accounts"[^>]*>/);
+    assert.match(r.body, /<h2 class="ml-card-title">alex@example\.com<\/h2>/, "the heading falls back to the address");
+    const input = (r.body.match(/<input[^>]*data-ml-rename[^>]*>/) || [])[0];
+    assert.ok(input, "the rename field");
+    assert.match(input, /value=""/, "the fallback is never typed into the field");
+    assert.equal(input.includes("alex@example.com"), false, "the field holds only what the owner typed");
+  });
+});
+
+test("the add form carries its target as data and no native action or method", async () => {
+  await withFlag(async () => {
+    const r = await get(SETTINGS);
+    assert.equal(r.status, 200);
+    const tag = (r.body.match(/<form[^>]*data-ml-add-account[^>]*>/) || [])[0];
+    assert.ok(tag, "the add-account form");
+    assert.match(tag, /data-ml-action="\/accounts"/, "the target is a data attribute only");
+    assert.doesNotMatch(tag, /\saction=/, "a native submit has no target");
+    assert.doesNotMatch(tag, /\smethod=/, "a native submit is not named");
     assert.match(r.body, /<option value="ssl">ssl<\/option>/);
     assert.match(r.body, /<option value="starttls">starttls<\/option>/);
     assert.doesNotMatch(r.body, /value="none"/);
@@ -389,7 +422,7 @@ test("a wrong password is 400 with the fixed sentence and the stored secret is u
   assert.deepEqual(calls, [], "no restart and no sync for a refused sign-in");
 });
 
-test("a right password is stored, marks the account active, restarts it and starts a sync", async () => {
+test("a right password is stored, marks the account active, restarts it and starts exactly one run", async () => {
   const account = await accountWithSecret();
   await withDb((db) => stores.accounts.updateAccount(db, account.id, { status: "auth_failed", statusDetail: "AUTH_FAILED" }));
   const { calls, factoryCalls } = useFactory();
@@ -398,7 +431,10 @@ test("a right password is stored, marks the account active, restarts it and star
     assert.equal(r.status, 200, r.body);
     assert.equal(r.body.includes(NEW_PASSWORD), false, "the answer never echoes it");
     await flush();
-    assert.deepEqual(calls, [["restartAccount", account.id], ["syncNow", account.id]]);
+    // The restart is the whole answer: it ends the old password's run and starts one full sync, so the
+    // route asks for no second sync on top of it.
+    assert.deepEqual(calls, [["restartAccount", account.id]]);
+    assert.equal(runsStarted, 1, "one full sync, not two");
     // The next factory call is handed the new secret, not the cached one.
     const last = factoryCalls[factoryCalls.length - 1];
     const secrets = await last.credentials.getSecrets(account.id);
@@ -410,6 +446,85 @@ test("a right password is stored, marks the account active, restarts it and star
   });
   assert.equal(await secretOf(account.id), NEW_PASSWORD);
   assert.equal((await withDb((db) => stores.accounts.getAccount(db, account.id))).status, "active");
+});
+
+test("a supervisor with no restartAccount still starts one sync", async () => {
+  const account = await accountWithSecret();
+  const { calls } = useFactory();
+  delete supervisor.restartAccount;
+  try {
+    await withFlag(async () => {
+      const r = await putPassword(account.id, { password: NEW_PASSWORD });
+      assert.equal(r.status, 200, r.body);
+      await flush();
+      assert.deepEqual(calls, [["syncNow", account.id]]);
+      assert.equal(runsStarted, 1);
+    });
+  } finally {
+    supervisor.restartAccount = restartAccount;
+  }
+  assert.equal(await secretOf(account.id), NEW_PASSWORD);
+});
+
+test("the new password joins the masking set before the probe", async () => {
+  const account = await accountWithSecret();
+  useFactory();
+  await withFlag(async () => {
+    const r = await putPassword(account.id, { password: NEW_PASSWORD });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(recordedSecrets, [NEW_PASSWORD]);
+  });
+});
+
+test("an account held elsewhere is refused before anything is dialled", async () => {
+  const account = await accountWithSecret();
+  await withDb((db) => stores.accounts.updateAccount(db, account.id, { status: "claimed_elsewhere" }));
+  const { calls, factoryCalls } = useFactory();
+  await withFlag(async () => {
+    const r = await putPassword(account.id, { password: NEW_PASSWORD });
+    assert.equal(r.status, 409, r.body);
+    assert.deepEqual(r.json, { error: "CLAIMED_ELSEWHERE", message: MAIL_ERROR_TEXT.CLAIMED_ELSEWHERE });
+    assert.equal(r.body.includes(NEW_PASSWORD), false);
+  });
+  assert.deepEqual(factoryCalls, [], "no adapter is opened for an account another instance holds");
+  assert.deepEqual(calls, []);
+  assert.equal(await secretOf(account.id), OLD_PASSWORD);
+  assert.equal((await withDb((db) => stores.accounts.getAccount(db, account.id))).status, "claimed_elsewhere");
+});
+
+test("an account removed during the probe answers 404 and leaves no secret", async () => {
+  const account = await accountWithSecret();
+  // The probe is an await: the row and its secret go while it runs, as the account-delete path takes them.
+  factory = () => {
+    const fake = createFakeMailAdapter();
+    fake.connect = async () => {
+      await withDb(async (db) => {
+        await stores.accounts.deleteAccount(db, account.id);
+        await stores.credentials.createMailCredentials({ db }).deleteSecrets(account.id);
+      });
+    };
+    return fake;
+  };
+  await withFlag(async () => {
+    const r = await putPassword(account.id, { password: NEW_PASSWORD });
+    assert.equal(r.status, 404, r.body);
+    assert.deepEqual(r.json, { error: "not_found", message: "Not found." });
+    assert.equal(r.body.includes(NEW_PASSWORD), false);
+  });
+  assert.equal(await secretOf(account.id), null);
+  assert.equal(await withDb((db) => stores.accounts.getAccount(db, account.id)), null);
+});
+
+test("a PUT without the dashboard CSRF header is refused", async () => {
+  const account = await accountWithSecret();
+  const { factoryCalls } = useFactory();
+  await withFlag(async () => {
+    const r = await putPassword(account.id, { password: NEW_PASSWORD }, { csrf: null });
+    assert.equal(r.status, 403, r.body);
+    assert.equal(r.body.includes(NEW_PASSWORD), false);
+  });
+  assert.deepEqual(factoryCalls, [], "nothing is dialled before the token is echoed");
+  assert.equal(await secretOf(account.id), OLD_PASSWORD);
 });
 
 test("an OAuth account is refused with 400 and nothing changes", async () => {

@@ -23,12 +23,15 @@
  * message is over plan 1's raw-size limit. Every failure is one of plan 1's codes and fixed
  * sentences: a server's text, a filename's markup and a sender's type never reach a header here.
  *
- * The password route is the account page's one write: a new app password is proved against the
- * server FIRST (the probe runs on a credentials reader holding only the new secret), and only then
- * replaces the sealed one. It is never echoed, never logged and never compared here; a refused
- * sign-in leaves the stored secret and the account exactly as they were. An OAuth account is refused
- * — plan 5's wizards reconnect one — and an accepted password restarts the account, so neither the
- * sync worker nor a borrowed adapter can keep speaking with the old secret.
+ * The password route is the account page's one write: the new app password joins the masking set
+ * first (as the connect route does), an account another instance claimed is refused before anything
+ * is dialled, and the secret is proved against the server (the probe runs on a credentials reader
+ * holding only the new secret) and only then replaces the sealed one. It is never echoed, never
+ * logged and never compared here; a refused sign-in leaves the stored secret and the account exactly
+ * as they were. An account removed while the probe runs stores nothing and answers `not_found`. An
+ * OAuth account is refused — plan 5's wizards reconnect one — and an accepted password restarts the
+ * account, whose restart is itself a full sync, so neither the sync worker nor a borrowed adapter can
+ * keep speaking with the old secret.
  */
 import { MAIL_ERROR_TEXT, toMailError } from "../mail/errors.js";
 import { parseRawMessageFull } from "../mail/parse.js";
@@ -129,6 +132,9 @@ function requestSyncInBackground(supervisor, accountId, logCode, label) {
 export function registerReaderRoutes(router, ctx) {
   const { route, sendError } = ctx;
   const logCode = typeof ctx.logCode === "function" ? ctx.logCode : () => {};
+  // The masking seam mail-api.js hands both the connect route and this one: a value it is given is
+  // redacted from later log lines. Absent, it is a no-op rather than a failed request.
+  const recordSecrets = typeof ctx.recordSecrets === "function" ? ctx.recordSecrets : async () => {};
   const base = MAIL_API_PREFIX;
 
   /** The running supervisor, or null when boot started no sync in this process. */
@@ -245,10 +251,12 @@ export function registerReaderRoutes(router, ctx) {
 
   /* ------------------------------------------------------------ password update */
 
-  // PUT /accounts/:id/password — one new app password. The probe runs before anything is stored, so a
-  // refused sign-in changes nothing; an accepted one replaces the sealed secret, marks the account
-  // active and restarts it (the old password's run and both of its connections go, and a fresh full
-  // sync follows), then syncs in the background. The answer holds no secret and no server text.
+  // PUT /accounts/:id/password — one new app password. It joins the masking set first, so no later
+  // log line can carry it; an account another instance holds is refused before anything is dialled;
+  // the probe runs before anything is stored, so a refused sign-in changes nothing; an accepted one
+  // replaces the sealed secret, marks the account active and restarts it (the old password's run and
+  // both of its connections go, and the restart's own full sync is the one that follows). The answer
+  // holds no secret and no server text.
   router.put(`${base}/accounts/:id/password`, route("PUT /accounts/:id/password", async (db, req, res) => {
     const id = String(req.params.id);
     if (!MAIL_ACCOUNT_ID_RE.test(id)) return sendError(res, 404, "not_found");
@@ -259,6 +267,18 @@ export function registerReaderRoutes(router, ctx) {
     const password = readPassword(req.body?.password);
     if (password === null) return sendError(res, 400, "bad_input");
 
+    // Before the probe can reach a log line: a recorder that cannot write its file is logged by code
+    // and must neither fail the update nor echo the value.
+    try {
+      await recordSecrets([password]);
+    } catch (err) {
+      logCode("record_secret", err);
+    }
+
+    // A mailbox another instance claimed is not synced or re-keyed here, and the password could well
+    // be right for it: nothing is stored, and the status the row already carries is left as it is.
+    if (account.status === "claimed_elsewhere") return sendError(res, 409, "CLAIMED_ELSEWHERE");
+
     // The credentials reader is the shape plan 1's adapter factory takes, holding only the password
     // just typed: the probe signs in with the new secret and keeps nothing of it.
     await probeAccount({
@@ -267,20 +287,35 @@ export function registerReaderRoutes(router, ctx) {
       credentials: { getSecrets: async () => ({ MAIL_PASSWORD: password }) },
     });
 
-    await ctx.credentials(db).saveSecret(id, "MAIL_PASSWORD", password);
-    await updateAccount(db, id, { status: "active" });
+    // The probe outlives nothing: the row may have been removed while it ran, and an id that names no
+    // account has nothing to store a secret for.
+    if (!(await getAccount(db, id))) return sendError(res, 404, "not_found");
 
-    // A sync outlives the request that asked for it, so it is opened with no write context; its own
-    // failure is the supervisor's to report, never this answer's. `restartAccount` is the step that
-    // makes the next factory call read the keychain again, so no connection keeps the old secret.
+    const credentials = ctx.credentials(db);
+    await credentials.saveSecret(id, "MAIL_PASSWORD", password);
+    const updated = await updateAccount(db, id, { status: "active", statusDetail: null });
+    if (!updated) {
+      // Removed between the read above and this write: the secret goes the way the account-delete path
+      // takes it, so nothing new is left behind under an id nothing owns.
+      try {
+        await credentials.deleteSecrets(id);
+      } catch (err) {
+        logCode("PUT /accounts/:id/password", err);
+      }
+      return sendError(res, 404, "not_found");
+    }
+
+    // `restartAccount` ends the old password's run, drops both connections and starts one fresh full
+    // sync of its own; a supervisor with no restart gets the sync on its own. A sync outlives the
+    // request that asked for it, so it is opened with no write context; its failure is the supervisor's
+    // to report, never this answer's.
     const supervisor = typeof ctx.supervisor === "function" ? ctx.supervisor() : null;
     if (supervisor) {
       const restart = typeof supervisor.restartAccount === "function" ? supervisor.restartAccount.bind(supervisor) : null;
-      const syncNow = typeof supervisor.syncNow === "function" ? supervisor.syncNow.bind(supervisor) : null;
+      const syncNow = !restart && typeof supervisor.syncNow === "function" ? supervisor.syncNow.bind(supervisor) : null;
       withoutWriteContext(() => {
         Promise.resolve()
-          .then(() => (restart ? restart(id) : undefined))
-          .then(() => (syncNow ? syncNow(id) : undefined))
+          .then(() => (restart ? restart(id) : syncNow ? syncNow(id) : undefined))
           .catch((err) => logCode("PUT /accounts/:id/password", err));
       });
     }
