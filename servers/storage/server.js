@@ -26,7 +26,14 @@ import {
   getBucketStats,
   isAllowedMimeType,
 } from "./s3-client.js";
-import { actorFromEnv, resolveCallActor } from "../research/actor.js";
+import { actorFromEnv, resolveCallActor, auditActor } from "../research/actor.js";
+import {
+  makeShareGate,
+  scopePredicate,
+  refusalResult,
+  notFoundResult,
+  NOT_FOUND_MESSAGE,
+} from "../shared/project-share-scope.js";
 
 // M2b: when an upload claims a reference_id (e.g., source/note/blog_post), the
 // referenced row must belong to the same project_id (or both be project-less).
@@ -38,12 +45,24 @@ const REFERENCE_PROJECT_LOOKUP = {
   blog_post:       null,
 };
 
-async function assertReferenceTargetProjectMatches(db, project_id, reference_type, reference_id) {
+/**
+ * `botBound`: the caller is a bot the share rules bind. Its reference failures all read as the
+ * not-found text — a reference it may not see is indistinguishable from one that does not exist,
+ * and the target must belong to the project the file is uploaded to (a project-less target is not
+ * that project) — so no answer names another project. The owner's messages are unchanged.
+ */
+async function assertReferenceTargetProjectMatches(db, project_id, reference_type, reference_id, { botBound = false } = {}) {
   if (!reference_type || reference_id == null) return;
   const sql = REFERENCE_PROJECT_LOOKUP[reference_type];
   if (sql === undefined) return;  // unknown reference_type — no check (forward compat)
   if (sql === null) return;        // explicit "no project on this target" pass-through
   const { rows } = await db.execute({ sql, args: [reference_id] });
+  if (botBound) {
+    if (rows.length === 0 || project_id == null || Number(rows[0].project_id) !== Number(project_id)) {
+      throw new AclError(NOT_FOUND_MESSAGE, rows.length === 0 ? "ref_not_found" : "ref_project_mismatch");
+    }
+    return;
+  }
   if (rows.length === 0) {
     throw new AclError(
       `Referenced ${reference_type}:${reference_id} does not exist`,
@@ -69,6 +88,11 @@ const MAX_BASE64_SIZE = 1 * 1024 * 1024; // 1MB for base64 uploads
 const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_UPLOAD_SIZE || "104857600", 10); // 100MB
 const STORAGE_QUOTA_MB = parseInt(process.env.STORAGE_QUOTA_MB || "5120", 10); // 5GB
 
+// A bot's presigned URL (download or upload) lasts at most this long: the shortest window the
+// expiry schema allows, so a revoked share stops working quickly.
+const BOT_URL_TTL_SECONDS = 300;
+const BUCKET_OVERRIDE_MESSAGE = "A bot cannot choose a storage bucket.";
+
 function notConfiguredError() {
   return {
     content: [{
@@ -89,7 +113,7 @@ export function createStorageServer(dbPath, options = {}) {
 
   // Who is calling, exactly as the projects and memory servers resolve it: the construction-time
   // base actor (a stdio server's process env, or the actor the gateway built the server with) is
-  // fixed here, and each call may only narrow it. Nothing refuses or filters on it yet.
+  // fixed here, and each call may only narrow it. The share gate below decides with it per call.
   const baseActor = options.baseActor || actorFromEnv(process.env);
   const callActor = (extra) => resolveCallActor(baseActor, extra);
   // Read by tests (and the callers that build this server): who is calling.
@@ -102,10 +126,50 @@ export function createStorageServer(dbPath, options = {}) {
     return actor;
   };
 
+  // --- Project shares (Phase 1) ---
+  // One gate per call (servers/shared/project-share-scope.js) holds every decision about what a
+  // bot may reach: its home project, the projects it holds a live share of, and nothing else. The
+  // owner, an unidentified caller and the operator's own voice bot are untouched by it.
+  const shareGate = (tool, extra) => {
+    actorFor(tool, extra);
+    return makeShareGate(db, tool, { baseActor, extra });
+  };
+
+  /** Is this caller bound by the bot rules? (Not the owner, not the operator's voice bot.) */
+  const boundByShares = async (gate) => (await gate.readScope()) != null;
+
+  // The S3 calls this server makes, with a test seam: `options.s3` overrides any of them, so a test
+  // drives a fake backend and never touches the network. Everything else is the real client.
+  const s3 = {
+    isAvailable, uploadObject, getPresignedUrl, getPresignedUploadUrl, deleteObject, getBucketStats,
+    ...Object.fromEntries(
+      Object.entries(options.s3 || {}).filter(([, fn]) => typeof fn === "function")
+    ),
+  };
+
+  /**
+   * The by-id check file tools make for a caller the bot rules bind: the key's own `storage_files`
+   * row decides. Every refusal — an unknown key, a project-less row, a project the bot cannot
+   * reach, or a bucket argument that is not the row's — is exactly what a missing key gets, so a
+   * hidden key and a missing one read the same.
+   */
+  async function fileRowRefusal(gate, bound, s3_key, bucketArg) {
+    if (!bound) return null;
+    const { rows } = await db.execute({
+      sql: "SELECT project_id, bucket FROM storage_files WHERE s3_key = ?",
+      args: [s3_key],
+    });
+    const row = rows[0] || null;
+    const refusal = await gate.checkRow(row ? row.project_id : null, {});
+    if (refusal) return refusal;
+    if (row && bucketArg && bucketArg !== row.bucket) return notFoundResult();
+    return null;
+  }
+
   // --- crow_upload_file ---
   server.tool(
     "crow_upload_file",
-    "Upload a small file (base64, <1MB) or get an HTTP upload URL for larger files. When project_id is set, the upload is gated on write_files capability and the s3 key is scoped under the project's storage_prefix.",
+    "Upload a small file (base64, <1MB) or get an HTTP upload URL for larger files. When project_id is set, the upload is gated on write_files capability and the s3 key is scoped under the project's storage_prefix. A bot's download URL and upload URL both expire in 5 minutes.",
     {
       file_name: z.string().max(500).describe("Original file name"),
       mime_type: z.string().max(200).optional().describe("MIME type (e.g. image/png)"),
@@ -116,8 +180,17 @@ export function createStorageServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Associate with a project space (M2). Caller must have write_files capability."),
     },
     async ({ file_name, mime_type, data_base64, bucket, reference_type, reference_id, project_id }, extra) => {
-      actorFor("crow_upload_file", extra);
-      if (!(await isAvailable())) return notConfiguredError();
+      // The share gate comes before the storage probe: a refusal needs no backend at all.
+      const gate = shareGate("crow_upload_file", extra);
+      const pass = await gate.check(project_id, {});
+      if (pass.isError) return pass;
+      // The project this upload lands in: the project the gate resolved (a bot's home project when
+      // it named none), or null for a caller the bot rules do not bind — today's project-less file.
+      const targetProjectId = pass.projectId;
+      const bound = await boundByShares(gate);
+      if (bound && bucket) return refusalResult(BUCKET_OVERRIDE_MESSAGE);
+
+      if (!(await s3.isAvailable())) return notConfiguredError();
 
       if (mime_type && !isAllowedMimeType(mime_type)) {
         return {
@@ -129,32 +202,32 @@ export function createStorageServer(dbPath, options = {}) {
       // M2b ACL: when uploading to a project, gate on write_files capability.
       // Reference target must belong to the same project (no cross-project leaks).
       let storagePrefix = null;
-      if (project_id != null) {
+      if (targetProjectId != null) {
         try {
-          await assertLocalCapability(db, project_id, "write_files");
-          await assertReferenceTargetProjectMatches(db, project_id, reference_type, reference_id);
+          await assertLocalCapability(db, targetProjectId, "write_files");
+          await assertReferenceTargetProjectMatches(db, targetProjectId, reference_type, reference_id, { botBound: bound });
           const r = (await db.execute({
             sql: "SELECT storage_prefix FROM project_spaces WHERE id = ?",
-            args: [project_id],
+            args: [targetProjectId],
           })).rows[0];
           storagePrefix = r?.storage_prefix || null;
         } catch (err) {
-          if (err instanceof AclError) return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+          if (err instanceof AclError) return refusalResult(err.message);
           throw err;
         }
       } else {
-        // No project_id but a reference is given — still verify the target isn't
+        // No project but a reference is given — still verify the target isn't
         // pinned to a project we'd be silently bypassing.
         try {
-          await assertReferenceTargetProjectMatches(db, null, reference_type, reference_id);
+          await assertReferenceTargetProjectMatches(db, null, reference_type, reference_id, { botBound: bound });
         } catch (err) {
-          if (err instanceof AclError) return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+          if (err instanceof AclError) return refusalResult(err.message);
           throw err;
         }
       }
 
       // Check quota
-      const stats = await getBucketStats(bucket);
+      const stats = await s3.getBucketStats(bucket);
       const quotaBytes = STORAGE_QUOTA_MB * 1024 * 1024;
       if (stats.totalSizeBytes >= quotaBytes) {
         return {
@@ -179,54 +252,54 @@ export function createStorageServer(dbPath, options = {}) {
           };
         }
 
-        await uploadObject(s3Key, buffer, { bucket, contentType: mime_type });
+        await s3.uploadObject(s3Key, buffer, { bucket, contentType: mime_type });
 
         try {
           // Record in database
           await db.execute({
             sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, project_id)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            args: [s3Key, file_name, mime_type || null, buffer.length, bucket || "crow-files", reference_type || null, reference_id || null, project_id ?? null],
+            args: [s3Key, file_name, mime_type || null, buffer.length, bucket || "crow-files", reference_type || null, reference_id || null, targetProjectId ?? null],
           });
         } catch (err) {
           // Don't leave an untracked orphan object behind
-          try { await deleteObject(s3Key, bucket || "crow-files"); } catch {}
+          try { await s3.deleteObject(s3Key, bucket || "crow-files"); } catch {}
           throw err;
         }
 
-        if (project_id != null) {
+        if (targetProjectId != null) {
           await appendAudit(db, {
-            project_id, actor_type: "local", action: "file.upload",
+            project_id: targetProjectId, ...auditActor(gate.actor), action: "file.upload",
             target: `file:${s3Key}`,
             payload: { file_name, size_bytes: buffer.length, mime_type: mime_type || null },
           });
         }
 
-        const url = await getPresignedUrl(s3Key, { bucket });
+        const url = await s3.getPresignedUrl(s3Key, bound ? { bucket, expiry: BOT_URL_TTL_SECONDS } : { bucket });
         return {
-          content: [{ type: "text", text: `Uploaded "${file_name}" (${(buffer.length / 1024).toFixed(1)}KB)${project_id != null ? ` to project #${project_id}` : ""}\nKey: ${s3Key}\nDownload URL (1hr): ${url}` }],
+          content: [{ type: "text", text: `Uploaded "${file_name}" (${(buffer.length / 1024).toFixed(1)}KB)${targetProjectId != null ? ` to project #${targetProjectId}` : ""}\nKey: ${s3Key}\nDownload URL (${bound ? "5 min" : "1hr"}): ${url}` }],
         };
       } else {
         // Return presigned upload URL for larger files
-        const uploadUrl = await getPresignedUploadUrl(s3Key, { bucket });
+        const uploadUrl = await s3.getPresignedUploadUrl(s3Key, bound ? { bucket, expiry: BOT_URL_TTL_SECONDS } : { bucket });
 
         // Pre-register in database (size will be updated after upload)
         await db.execute({
           sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, project_id)
                 VALUES (?, ?, ?, 0, ?, ?, ?, ?)`,
-          args: [s3Key, file_name, mime_type || null, bucket || "crow-files", reference_type || null, reference_id || null, project_id ?? null],
+          args: [s3Key, file_name, mime_type || null, bucket || "crow-files", reference_type || null, reference_id || null, targetProjectId ?? null],
         });
 
-        if (project_id != null) {
+        if (targetProjectId != null) {
           await appendAudit(db, {
-            project_id, actor_type: "local", action: "file.upload.presign",
+            project_id: targetProjectId, ...auditActor(gate.actor), action: "file.upload.presign",
             target: `file:${s3Key}`,
             payload: { file_name, mime_type: mime_type || null },
           });
         }
 
         return {
-          content: [{ type: "text", text: `Upload URL generated for "${file_name}"${project_id != null ? ` (project #${project_id})` : ""}:\n\nPUT ${uploadUrl}\n\nContent-Type: ${mime_type || "application/octet-stream"}\nMax size: ${(MAX_UPLOAD_SIZE / 1024 / 1024).toFixed(0)}MB\nExpires in 1 hour.\n\nAlternatively, use POST /storage/upload with multipart form data.` }],
+          content: [{ type: "text", text: `Upload URL generated for "${file_name}"${targetProjectId != null ? ` (project #${targetProjectId})` : ""}:\n\nPUT ${uploadUrl}\n\nContent-Type: ${mime_type || "application/octet-stream"}\nMax size: ${(MAX_UPLOAD_SIZE / 1024 / 1024).toFixed(0)}MB\nExpires in ${bound ? "5 minutes" : "1 hour"}.\n\nAlternatively, use POST /storage/upload with multipart form data.` }],
         };
       }
     }
@@ -235,20 +308,31 @@ export function createStorageServer(dbPath, options = {}) {
   // --- crow_list_files ---
   server.tool(
     "crow_list_files",
-    "List stored files with optional filtering",
+    "List stored files with optional filtering. A bot sees its own project's files unless it names a project it holds a share of.",
     {
       bucket: z.string().max(100).optional().describe("Filter by bucket"),
       mime_type: z.string().max(200).optional().describe("Filter by MIME type prefix (e.g. image/)"),
       reference_type: z.string().max(100).optional().describe("Filter by reference type"),
       reference_id: z.number().optional().describe("Filter by reference ID"),
+      project_id: z.number().optional().describe("Filter to one project space"),
       limit: z.number().min(1).max(100).optional().describe("Max results (default 50)"),
     },
-    async ({ bucket, mime_type, reference_type, reference_id, limit }, extra) => {
-      actorFor("crow_list_files", extra);
-      if (!(await isAvailable())) return notConfiguredError();
+    async ({ bucket, mime_type, reference_type, reference_id, project_id, limit }, extra) => {
+      const gate = shareGate("crow_list_files", extra);
+      const pass = await gate.check(project_id, {});
+      if (pass.isError) return pass;
+      if (!(await s3.isAvailable())) return notConfiguredError();
 
       let sql = "SELECT id, s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, created_at FROM storage_files WHERE 1=1";
       const args = [];
+
+      // The project this call may list: the one the gate resolved, or — when it resolved none —
+      // the bot's read scope (a bot with no home project matches nothing).
+      const projected = pass.projectId != null
+        ? { sql: " AND project_id = ?", args: [Number(pass.projectId)] }
+        : scopePredicate(await gate.readScope(), { column: "project_id" });
+      sql += projected.sql;
+      args.push(...projected.args);
 
       if (bucket) { sql += " AND bucket = ?"; args.push(bucket); }
       if (mime_type) { sql += " AND mime_type LIKE ?"; args.push(`${mime_type}%`); }
@@ -277,18 +361,24 @@ export function createStorageServer(dbPath, options = {}) {
   // --- crow_get_file_url ---
   server.tool(
     "crow_get_file_url",
-    "Get a presigned download URL for a file",
+    "Get a presigned download URL for a file. A bot's URL expires in at most 5 minutes.",
     {
       s3_key: z.string().max(500).describe("S3 object key"),
-      expiry: z.number().min(60).max(86400).optional().describe("URL expiry in seconds (default 3600 = 1 hour)"),
+      expiry: z.number().min(60).max(86400).optional().describe("URL expiry in seconds (default 3600 = 1 hour; a bot's URL is capped at 300 = 5 minutes)"),
       bucket: z.string().max(100).optional().describe("Bucket name (default: crow-files)"),
     },
     async ({ s3_key, expiry, bucket }, extra) => {
-      actorFor("crow_get_file_url", extra);
-      if (!(await isAvailable())) return notConfiguredError();
+      const gate = shareGate("crow_get_file_url", extra);
+      const bound = await boundByShares(gate);
+      // A bot reaches only a key whose own row sits in a project it may read; an owner/unknown
+      // caller resolves no row check at all and keeps today's behaviour.
+      const refusal = await fileRowRefusal(gate, bound, s3_key, bucket);
+      if (refusal) return refusal;
+      if (!(await s3.isAvailable())) return notConfiguredError();
 
-      const url = await getPresignedUrl(s3_key, { bucket, expiry });
-      const expiryMin = Math.round((expiry || 3600) / 60);
+      const expiresIn = bound ? Math.min(expiry ?? 3600, BOT_URL_TTL_SECONDS) : expiry;
+      const url = await s3.getPresignedUrl(s3_key, { bucket, expiry: expiresIn });
+      const expiryMin = Math.round((expiresIn ?? 3600) / 60);
       return {
         content: [{ type: "text", text: `Download URL (expires in ${expiryMin} min):\n${url}` }],
       };
@@ -305,8 +395,13 @@ export function createStorageServer(dbPath, options = {}) {
       confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
     async ({ s3_key, bucket, confirm_token }, extra) => {
-      actorFor("crow_delete_file", extra);
-      if (!(await isAvailable())) return notConfiguredError();
+      // The gate runs on BOTH calls, and before the confirmation-gate skip: a share revoked between
+      // the preview and the confirm finds nothing to delete.
+      const gate = shareGate("crow_delete_file", extra);
+      const bound = await boundByShares(gate);
+      const refusal = await fileRowRefusal(gate, bound, s3_key, bucket);
+      if (refusal) return refusal;
+      if (!(await s3.isAvailable())) return notConfiguredError();
 
       if (!shouldSkipGates()) {
         if (confirm_token) {
@@ -334,7 +429,7 @@ export function createStorageServer(dbPath, options = {}) {
         }
       }
 
-      await deleteObject(s3_key, bucket || "crow-files");
+      await s3.deleteObject(s3_key, bucket || "crow-files");
       await db.execute({ sql: "DELETE FROM storage_files WHERE s3_key = ?", args: [s3_key] });
 
       return { content: [{ type: "text", text: `Deleted: ${s3_key}` }] };
@@ -344,13 +439,36 @@ export function createStorageServer(dbPath, options = {}) {
   // --- crow_storage_stats ---
   server.tool(
     "crow_storage_stats",
-    "Get storage usage statistics",
+    "Get storage usage statistics. A bot's numbers cover its own project only.",
     {},
     async (_args, extra) => {
-      actorFor("crow_storage_stats", extra);
-      if (!(await isAvailable())) return notConfiguredError();
+      const gate = shareGate("crow_storage_stats", extra);
+      const pass = await gate.check(null, {});
+      if (pass.isError) return pass;
+      const bound = await boundByShares(gate);
+      if (!(await s3.isAvailable())) return notConfiguredError();
 
-      const stats = await getBucketStats();
+      // A bot counts only its own project's tracked rows: the bucket-wide numbers cover every
+      // project's files and are the owner's.
+      if (bound) {
+        const projected = scopePredicate(await gate.readScope(), { column: "project_id" });
+        const totals = (await db.execute({
+          sql: `SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS total FROM storage_files WHERE 1=1${projected.sql}`,
+          args: projected.args,
+        })).rows[0];
+        const files = Number(totals?.count || 0);
+        const bytes = Number(totals?.total || 0);
+        const usedMB = (bytes / 1024 / 1024).toFixed(1);
+        const pct = ((bytes / (STORAGE_QUOTA_MB * 1024 * 1024)) * 100).toFixed(1);
+        return {
+          content: [{
+            type: "text",
+            text: `Storage Statistics:\n  Files: ${files}\n  Used: ${usedMB}MB / ${STORAGE_QUOTA_MB}MB (${pct}%)\n  Max upload size: ${(MAX_UPLOAD_SIZE / 1024 / 1024).toFixed(0)}MB`,
+          }],
+        };
+      }
+
+      const stats = await s3.getBucketStats();
       const dbResult = await db.execute("SELECT COUNT(*) as count FROM storage_files");
       const trackedFiles = dbResult.rows[0]?.count || 0;
       const usedMB = (stats.totalSizeBytes / 1024 / 1024).toFixed(1);
@@ -378,7 +496,9 @@ export function createStorageServer(dbPath, options = {}) {
       height: z.number().min(256).max(1536).optional().describe("Image height in pixels (default 576)"),
     },
     async ({ prompt, negative_prompt, width, height }, extra) => {
-      actorFor("crow_generate_background", extra);
+      // Project-neutral: a bot keeps the tool, an unverified bot is refused.
+      const pass = await shareGate("crow_generate_background", extra).check(null, {});
+      if (pass.isError) return pass;
       try {
         // Pre-check: is the model currently loading?
         try {
@@ -439,7 +559,9 @@ export function createStorageServer(dbPath, options = {}) {
     "List previously generated background images in the gallery",
     {},
     async (_args, extra) => {
-      actorFor("crow_list_backgrounds", extra);
+      // Project-neutral: a bot keeps the tool, an unverified bot is refused.
+      const pass = await shareGate("crow_list_backgrounds", extra).check(null, {});
+      if (pass.isError) return pass;
       try {
         const resp = await fetch(`${SDXL_SERVICE_URL}/gallery`);
         if (!resp.ok) {
@@ -470,7 +592,9 @@ export function createStorageServer(dbPath, options = {}) {
       name: z.string().max(200).describe("Gallery filename to set as current background"),
     },
     async ({ name }, extra) => {
-      actorFor("crow_set_background", extra);
+      // Project-neutral: a bot keeps the tool, an unverified bot is refused.
+      const pass = await shareGate("crow_set_background", extra).check(null, {});
+      if (pass.isError) return pass;
       try {
         const resp = await fetch(`${SDXL_SERVICE_URL}/set/${encodeURIComponent(name)}`, { method: "POST" });
         if (!resp.ok) {
