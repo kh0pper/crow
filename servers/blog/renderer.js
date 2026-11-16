@@ -4,7 +4,7 @@
  * Uses marked for Markdown parsing and sanitize-html for XSS prevention.
  */
 
-import { marked, Marked } from "marked";
+import { marked, Marked, Lexer } from "marked";
 import sanitizeHtml from "sanitize-html";
 
 // Configure marked for GFM. This is the module-level instance only
@@ -101,6 +101,11 @@ const NUMBER_MATH = /^[0-9][0-9.,]*$/;
 // ~80 ms, 140 KB in ~1.1 s, 300 KB in ~5 s), so bot text over BOT_MD_MAX_INPUT
 // is not markdown-rendered at all: renderBotMarkdown returns "" and both
 // Perch paths fall back to textContent, the documented no-html path.
+//
+// The inline-lexer cliff (mixed emphasis delimiters, QUADRATIC, ~21 s at the
+// cap) is a THIRD, separate cost; it is measured and guarded in
+// "THE INLINE-LEXER CLIFF" below, by a linear pre-pass over the same blocks
+// that this pipeline already splits.
 const MAX_INLINE = 500;
 const MAX_DISPLAY = 2000;
 const START_WINDOW = 4096;
@@ -611,6 +616,168 @@ function isCheckboxInput(attribs) {
   return typeof type === "string" && type.toLowerCase() === "checkbox";
 }
 
+// ---------------------------------------------------------------------------
+// THE INLINE-LEXER CLIFF — a linear pre-pass guard
+//
+// marked's inline lexer is QUADRATIC on mixed emphasis delimiters inside ONE
+// inline block (a paragraph, a list item, a heading, a table cell). Measured
+// on this tree (marked 17.0.4 + the math extension above; CPU ms, one
+// paragraph, before this guard existed):
+//
+//   one paragraph of…     4 KB    8 KB     (~4x per doubling, so ≈21 s of
+//   "*a_"                 169     349     blocked event loop at 64 KB: the
+//   "_*a"                 130     376     measured cliff in the report)
+//   "**a_"                117     418
+//   "**_a"                 64     213
+//
+// …while prose, "~a", "[a](", backtick runs, "<a" and fenced code stay linear
+// (5-25 ms at 8 KB).
+//
+// The cost lives in ONE inline block because marked retries its emphasis and
+// link tokenizers at every delimiter position and an attempt can scan the
+// rest of that block: cost ≈ c·d² for d delimiters, with c ≈ 12–15 ns per
+// pair off the numbers above (349 ms at 5461 delimiters → 11.7 ns;
+// 418 ms at 5461 → 14.0 ns); the worst shapes measured since — a block of
+// ~1,000 `_` separated by `$&/!{` filler — cost 55–67 ns per pair. Delimiter
+// COUNT per block is therefore the quantity to bound, and it can be counted
+// in one linear pass.
+//
+// So EVERY bot render runs marked's own two phases (block tokens, then inline
+// tokens — the same split Lexer#lex does) with a linear scan between them: an
+// inline block that is over budget keeps its place and its container (a <p>
+// stays a <p>, a <td> a <td>) but its text is escaped instead of inline-lexed.
+// The pre-pass is linear, so there is no fast path to preserve: the digest
+// tests pin the guarded path byte-identical to plain marked.parse for ordinary
+// content (a normal ~19 KB reply, a delimiter-dense but legitimate document),
+// and routing everything through ONE path is what puts a CRLF reply, a
+// definition flood and a delimiter flood on the same, guarded, code.
+// Three budgets, so neither one huge block, nor many medium ones, nor a flood
+// of link definitions can add up:
+//   - BOT_MD_BLOCK_DELIMS, one inline block: past it that block is shown as
+//     escaped text. Lexed instead, that block alone would cost c·d² —
+//     ~1024²·15 ns ≈ 16 ms on the shapes at the top of this comment, ~4x
+//     that on the 55–67 ns/pair shapes found since, and a single block
+//     anywhere near the 64 KB input cap is minutes of blocked event loop (the
+//     cliff in the report).
+//   - BOT_MD_SQ_BUDGET, Σd² over the blocks still formatted: the worst a
+//     document can spend inside marked's inline lexer. 4e6 ÷ 1000² = 4 blocks
+//     of ~1,000 delimiters each, ~220–270 ms at the 55–67 ns per pair measured
+//     on exactly that shape (8 blocks of ~1,000 `_` with `$&/!{` filler, i.e.
+//     the old 8e6 budget, took 539 ms — which is why it was halved; the old
+//     comment's "32 blocks" was arithmetic, not a measurement). A legit
+//     document is orders of magnitude below it — a 200-delimiter paragraph
+//     costs 4e4 of it, and a 19 KB reply with a few dozen emphasis spans costs
+//     1e5 — so only delimiter-dense input, i.e. the attack, ever runs out.
+//   - BOT_MD_MAX_LINK_DEFS, link definitions in one document: marked's
+//     inlineTokens rebuilds `Object.keys(this.tokens.links)` and scans it on
+//     EVERY inline block, so thousands of `[N]:x` definitions make every
+//     paragraph O(definitions) — measured 2.2 s for ~39 KB of definitions plus
+//     5,000 tiny `*a*` paragraphs. Past this many the extra definitions are
+//     dropped (insertion order kept; a link to a dropped one renders as its
+//     own text).
+//
+// One cost is bounded but NOT covered by these budgets: marked's email
+// autolink scan is linear yet expensive per character, so a long run of
+// `HTTP` (a plausible word, not just an attack — one 64 KB email local-part
+// candidate) costs ≈0.5 s at the cap, measured 543 ms. It does not compound
+// with the d² term, so it is recorded here and left unguarded.
+//
+// With the budgets in place, every adversarial unit x container shape at the
+// cap, the medium-block case, the `_`+filler worst shape, the definitions
+// flood and 50 random 64 KB delimiter soups all measured ≤ 253 ms of CPU
+// (worst: the `_`+filler shape at 253 ms; 133 ms for a unit x shape, 116 ms
+// for the definitions flood; tests/bot-markdown-quadratic.test.js pins the
+// bounds and records the worst render in a diagnostic).
+// ---------------------------------------------------------------------------
+
+/** The characters marked's inline lexer reacts to: emphasis (`*`, `_`),
+ *  strikethrough (`~`), links and images (`[`, `]`, `(`), code spans
+ *  (backtick) and raw HTML (`<`). Counting a superset is the point — this is
+ *  a cheap linear proxy for inline-lexer work, not a markdown parser. */
+function countDelims(s) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    switch (s.charCodeAt(i)) {
+      case 42: case 40: case 60: case 91: case 93: case 95: case 96: case 126: // * ( < [ ] _ ` ~
+        n++;
+    }
+  }
+  return n;
+}
+
+/** The budgets of the linear pre-pass above, plus the link-definition cap that
+ *  removes the inline lexer's other per-block scan. Exported so the tests can
+ *  prove they really exercise the guarded path (and that an ordinary story
+ *  stays far below every one of them) instead of assuming it. */
+export const BOT_MD_BLOCK_DELIMS = 1024;
+export const BOT_MD_SQ_BUDGET = 4_000_000;
+export const BOT_MD_MAX_LINK_DEFS = 256;
+
+/** `src` as escaped plain text tokens: one per line, a <br> between them (what
+ *  `breaks: true` emits for a plain paragraph today). A text token's `text` is
+ *  character data, not markup — marked escapes it itself in parseInline
+ *  (measured: a text token holding `<b>&` renders `&lt;b&gt;&amp;`) — so the
+ *  RAW line goes in here, never a pre-escaped one (that would double-escape). */
+function plainTextTokens(src) {
+  const lines = String(src).split("\n");
+  const tokens = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0) tokens.push({ type: "br" });
+    tokens.push({ type: "text", raw: lines[i], text: lines[i] });
+  }
+  return tokens;
+}
+
+/** marked's two lexing phases, with the per-block guard in between: block
+ *  tokens (cheap, linear), then the guard, then inline lexing of whatever was
+ *  left formatted. Guarded blocks are filled with escaped text tokens and
+ *  their inline source is never lexed. Splitting the phases this way is what
+ *  keeps the guard per INLINE BLOCK: `lexer.inlineQueue` is exactly the list
+ *  of texts marked was about to inline-lex (paragraphs, headings, list item
+ *  contents, table cells) — no re-implementation of block splitting, so
+ *  rendering stays marked's own. This is the ONLY bot rendering path, so it
+ *  also does what Lexer#lex does around the phases (line-ending
+ *  normalisation) — before that, a CRLF reply kept its `\r`.
+ *
+ *  It leans on that split being stable, and the digest tests in
+ *  tests/bot-markdown-quadratic.test.js pin it: ordinary and delimiter-dense
+ *  documents are rendered through here and must match the unguarded renderer
+ *  byte for byte, so a marked upgrade that moves the phases fails in CI
+ *  instead of silently changing bot output. */
+function guardAndParse(src) {
+  // marked's Lexer#lex normalises line endings before block lexing; calling
+  // blockTokens directly skips that, so a CRLF reply (a tool result pasted
+  // from Windows) kept a `\r` on every line and flattened into one escaped
+  // paragraph. Do exactly what marked does.
+  src = src.replace(/\r\n|\r/g, "\n");
+  const lexer = new Lexer({ ...botMarked.defaults });
+  lexer.blockTokens(src, lexer.tokens);
+  // Cap the link definitions BEFORE any inline lexing: inlineTokens scans
+  // `Object.keys(this.tokens.links)` on every inline block, so a flood of
+  // definitions is paid once per paragraph. Insertion order is kept (numeric
+  // labels sort first, as they do in marked's own map).
+  const links = lexer.tokens.links;
+  if (links) {
+    const labels = Object.keys(links);
+    for (const label of labels.slice(BOT_MD_MAX_LINK_DEFS)) delete links[label];
+  }
+  let budget = BOT_MD_SQ_BUDGET;
+  for (const entry of lexer.inlineQueue) {
+    const d = countDelims(entry.src);
+    if (d <= BOT_MD_BLOCK_DELIMS && d * d <= budget) {
+      budget -= d * d;
+      continue;
+    }
+    entry.guarded = true;
+    for (const token of plainTextTokens(entry.src)) entry.tokens.push(token);
+  }
+  for (const entry of lexer.inlineQueue) {
+    if (!entry.guarded) lexer.inlineTokens(entry.src, entry.tokens);
+  }
+  lexer.inlineQueue.length = 0;
+  return botMarked.parser(lexer.tokens);
+}
+
 /**
  * marked's image renderer, shared by both paths. `false` lets marked draw the
  * `<img>` (the sanitizer's exclusiveFilter then re-checks the same rule);
@@ -654,7 +821,10 @@ const ownerMarked = new Marked({
  * paths call this, so they render identically) to sanitized HTML: everything
  * renderMarkdown does, plus math delimiters shown once as source. Over
  * BOT_MD_MAX_INPUT it returns "" (callers fall back to plain text): marked's
- * own lexer degrades sharply on long escape-dense input (see above).
+ * own lexer degrades sharply on long escape-dense input (see above). Under
+ * it, EVERY input takes guardAndParse: a LINEAR pre-pass keeps the
+ * inline-lexer cliff out of reach, and the digest tests pin it byte-identical
+ * to plain marked.parse for ordinary content.
  * @param {string} markdown untrusted model output
  * @returns {string} Safe HTML
  */
@@ -666,8 +836,25 @@ export function renderBotMarkdown(markdown) {
   blockMemo = makeStartMemo();
   blockValid = new Map();
   cutsLeft = MAX_PARAGRAPH_CUTS;
-  return withImageContext({ policy: "bot", storageOrigin: null }, () =>
-    sanitizeRendered(botMarked.parse(src), { imagePolicy: "bot" }));
+  let html;
+  // guardAndParse drives marked's Lexer itself (blockTokens/inlineQueue/
+  // inlineTokens, public in marked 17 and pinned by the digest tests). If a
+  // future marked moves any of that, answer the way an over-cap reply is
+  // answered — no HTML, the callers' documented plain-text path — rather than
+  // throw on the gateway's event loop or quietly leave the cliff open.
+  //
+  // Both halves run inside the bot image context: the image renderer reads it
+  // DURING the parse (guardAndParse lexes with botMarked's own defaults and
+  // renders with botMarked.parser, so the image hook and the math extensions
+  // are the bot's), and the sanitizer re-checks the same rule after it.
+  return withImageContext({ policy: "bot", storageOrigin: null }, () => {
+    try {
+      html = guardAndParse(src);
+    } catch {
+      return "";
+    }
+    return sanitizeRendered(html, { imagePolicy: "bot" });
+  });
 }
 
 /**
