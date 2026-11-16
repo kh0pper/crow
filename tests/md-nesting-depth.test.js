@@ -28,7 +28,11 @@
 //     tokenizer has — its own `this.blockquote(f)` / `this.list(f)` re-lex for
 //     lazy continuation lines, which never passes through blockTokens — so a
 //     lazy line cannot walk past the limit (`"> ".repeat(40) + "x\nlazy"` used
-//     to open 40 levels where `"> ".repeat(40) + "x"` opens 16);
+//     to open 40 levels where `"> ".repeat(40) + "x"` opens 16), and that same
+//     path is budgeted in RE-READ CHARACTERS (per parse, `max(1 MiB, 8 × the
+//     document)`), never in steps: ordinary content that relies on lazy
+//     continuation lines — one quote whose list has 17+ items with a wrapped
+//     line each — renders byte-identically to plain marked (pinned below);
 //   - CODE IS VERBATIM: fences, indented code, raw <pre> and math blocks come out
 //     with no backslash that was not in the source;
 //   - ordinary deeply-nested content (8 levels of lists in quotes in lists, code
@@ -204,10 +208,13 @@ test("quote + indented marker stacks are bounded at 64 KB and at 256 KB (owner)"
 //
 // boundedLexer wraps those two tokenizer methods too, counting them against the
 // SAME limit — one container token is one level whichever way it was reached —
-// and caps how many re-lex STEPS one tokenizer frame may take (the blockquote
-// tokenizer's chunk loop re-lexes the growing last token once per chunk, all at
-// ONE level: `"> - x\nlazy\n"` repeated to 64 KB is ~5,300 steps, and with the
-// depth counter alone that shape still took 1.2 s).
+// and budgets the characters that path may re-read, per parse (`max(1 MiB,
+// 8 × the document)`): the blockquote tokenizer's chunk loop re-lexes the
+// growing last token once per chunk, all at ONE level (`"> - x\nlazy\n"`
+// repeated to 64 KB is ~5,300 steps, each re-reading the rest of the source —
+// 1.2 s with only the depth counter in place). A step COUNT was the first
+// attempt at that bound and it cut ordinary content, so the budget is bytes;
+// the lazy-content test at the end pins the shapes it must never touch.
 test("a lazy continuation line cannot walk past the bound (both paths)", (t) => {
   const note = tracker(t);
   const deep = "> ".repeat(40) + "x\nlazy";
@@ -531,6 +538,74 @@ test("nesting up to 8 levels renders byte-identical to before the guard (both pa
   assert.ok(!/- level 8/.test(stairHtml.replace(/<[^>]+>/g, " ")), "its bullet was not escaped into text");
   assert.ok((stairHtml.match(/<blockquote>/g) || []).length >= 8, "eight same-line quotes still nest");
   assert.match(stairHtml, /eight same-line bullets/, "the same-line bullet chain still parses");
+});
+
+// --- lazy continuation lines on ORDINARY content ---------------------------
+// A lazy continuation line makes marked's blockquote tokenizer RE-LEX (the
+// "second way down" — see boundedLexer in servers/blog/renderer.js), and that
+// path is bounded by a per-parse budget of RE-READ CHARACTERS, not by a step
+// count: a step count cannot tell a flood from a document. One quote whose list
+// has 17 items with a lazy continuation line each takes 17 steps, and a
+// per-frame step cap turned the tail of that list into literal text (`- item
+// 18`) where plain marked — and main, before this branch — renders a list.
+//
+// The digests below were captured from this tree with the step cap REMOVED,
+// i.e. they are main's own output, for BOTH renderers (the two agree on all of
+// these shapes), and they must keep matching now that the byte budget is what
+// bounds the path. Each case also asserts the STRUCTURE — N list items, and no
+// marker showing up as literal text — so updating a digest cannot quietly
+// accept a truncated list.
+const lazyBullets = (n) => {
+  const out = [];
+  for (let i = 1; i <= n; i++) {
+    out.push(`> - item ${i}`);
+    out.push(`wrapped continuation of item ${i}`);
+  }
+  return out.join("\n");
+};
+const lazySteps = (n) => {
+  const out = [];
+  for (let i = 0; i < n; i++) { out.push("> 1. step"); out.push("continued"); }
+  return out.join("\n");
+};
+// A quote intro, then 25 bullets each with an indented continuation line and a
+// lazy line of its own.
+const lazyQuoteBullets = (n) => {
+  const out = ["> A quote intro that sets up the list:", ">"];
+  for (let i = 1; i <= n; i++) {
+    out.push(`> - bullet ${i}`);
+    out.push(`>   indented continuation of bullet ${i}`);
+    out.push(`lazy line of bullet ${i}`);
+  }
+  return out.join("\n");
+};
+const lazyBlocks = (n) => {
+  const out = [];
+  for (let i = 0; i < n; i++) out.push("> - b\n>   > inner\n>   lazy-ish\nlazy");
+  return out.join("\n");
+};
+
+const LAZY_NORMAL = [
+  { name: "17 quoted bullets with lazy continuations", src: lazyBullets(17), li: 17, literal: /- item \d/, sha: "995ccc868867512f5f5c3aba72feaf3e3e2a3a6fdb4d322060a1fa9552cffdea" },
+  { name: "40 quoted bullets with lazy continuations", src: lazyBullets(40), li: 40, literal: /- item \d/, sha: "6fbfdab4ce4c4cf06fc39a2cb1a7e49fa2707a0ec8918a86383be09e7efa63fa" },
+  { name: "20 quoted ordered steps with lazy continuations", src: lazySteps(20), li: 20, literal: /1\. step/, sha: "cf734921bbfa5af43ea1243ed02d682e5d91babdb1f361e80523b89fa16469ce" },
+  { name: "quote intro + 25 bullets with indented and lazy continuations", src: lazyQuoteBullets(25), li: 25, literal: /- bullet \d/, sha: "bbea8002e3b4fed31ea68bb6b1cf93c2950a0dc61a12fb921baab4f245d03ed9" },
+  { name: "25 quote/list/lazy blocks", src: lazyBlocks(25), li: 25, literal: /- b\b/, sha: "895278b1038c1a1af9d30850a42d1be3688ac178c6c174d95c1a2144b8c022ac" },
+];
+
+test("lazy continuation lines on ordinary content render exactly as main (both paths)", () => {
+  for (const { name, src, li, literal, sha } of LAZY_NORMAL) {
+    for (const [who, render] of [["bot", renderBotMarkdown], ["owner", renderMarkdown]]) {
+      const html = render(src);
+      assert.equal(sha256(html), sha,
+        `${name} (${who}): the lazy re-lex path must not change ordinary content: ${html.slice(0, 400)}`);
+      assert.equal((html.match(/<li>/g) || []).length, li,
+        `${name} (${who}): ${li} list items, got ${(html.match(/<li>/g) || []).length}: ${html.slice(0, 400)}`);
+      const text = html.replace(/<[^>]+>/g, " ");
+      assert.ok(!literal.test(text),
+        `${name} (${who}): a list item came out as literal text (${literal}): ${html.slice(-400)}`);
+    }
+  }
 });
 
 // --- the file viewer refuses a file over the renderer's cap ----------------

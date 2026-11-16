@@ -68,10 +68,11 @@ export function renderMarkdown(markdown, options) {
     try {
       // Exactly what ownerMarked.parse(src) does — Lexer#lex (block phase, then
       // the inline phase) and Parser.parse — with the one difference that the
-      // Lexer is depth-bounded. ownerMarked carries no hooks, extensions or
-      // walkTokens; if one is ever added to it, it has to be plumbed here too
-      // (parse's opt.hooks branch is the code that would otherwise run it).
-      html = ownerMarked.parser(boundedLexer(ownerMarked.defaults).lex(src));
+      // Lexer is depth-bounded and its re-lex path is byte-budgeted. ownerMarked
+      // carries no hooks, extensions or walkTokens; if one is ever added to it,
+      // it has to be plumbed here too (parse's opt.hooks branch is the code that
+      // would otherwise run it).
+      html = ownerMarked.parser(boundedLexer(ownerMarked.defaults, src.length).lex(src));
     } catch {
       // Fail safe, never a 500: the document as escaped text (see
       // escapedTextHtml — it drops what the author hid, an HTML comment). The
@@ -773,20 +774,32 @@ function isCheckboxInput(attribs) {
 // counter in place: the worst single 64 KB marker shape is 70 ms (`> 1) `) and
 // the worst of 30 seeded 64 KB marker mixes is 128 ms across both paths, and
 // nothing throws. With a LAZY continuation line appended (the re-lex path — the
-// comment on boundedLexer spells it out) the worst 64 KB shape is 38 ms and 256
-// KB of `> ` on the owner path is 123 ms, where both used to be seconds.
+// comment on boundedLexer spells it out) the worst 64 KB shape is 38 ms (`> - `
+// followed by lazy chunks) and 256 KB of `> ` on the owner path is 120 ms, where
+// both used to be seconds.
 // ---------------------------------------------------------------------------
 
 /**
  * Deepest container nesting (blockquotes + list levels) a document may open
  * before the remainder of that content is shown as plain text instead of being
- * lexed into more containers, AND the most re-lex steps one container tokenizer
- * frame may take (see boundedLexer). 16 is far above real content (2-4 levels;
- * ~8-10 is the practical ceiling for readable Markdown) and far below the
- * ~32,000 levels a 64 KB marker run otherwise opens. Exported so the tests can
- * pin the bound they exercise.
+ * lexed into more containers (see boundedLexer). 16 is far above real content
+ * (2-4 levels; ~8-10 is the practical ceiling for readable Markdown) and far
+ * below the ~32,000 levels a 64 KB marker run otherwise opens. Exported so the
+ * tests can pin the bound they exercise.
  */
 export const MD_MAX_NEST = 16;
+
+/**
+ * The floor of the re-lex path's budget of RE-READ CHARACTERS (see
+ * boundedLexer): 1 MiB, or 8 × the document's length, whichever is larger.
+ * The floor is what keeps ordinary content out of the budget — a quote whose
+ * list carries a lazy continuation line re-reads a few KB per item, and a
+ * document under 128 KB is judged on the floor alone, never on its own length.
+ */
+const RELEX_BUDGET_FLOOR = 1024 * 1024;
+
+/** The document-length factor of that budget: ~8 full re-reads of the input. */
+const RELEX_BUDGET_FACTOR = 8;
 
 /**
  * The token a container becomes once the nesting limit is reached: ONE
@@ -845,14 +858,21 @@ const RELEX_TOKENIZERS = ["blockquote", "list"];
  *     of `">"` + `"x\nlazy"` spent ~6 s on either path. Own properties on the
  *     Tokenizer INSTANCE, never its prototype.
  *
- * DEPTH is not the whole story on that second path: the blockquote tokenizer's
- * chunk loop can re-lex the last token over and over AT ONE LEVEL (`"> - x\nlazy\n"`
- * repeated to 64 KB is ~5,300 such steps, each re-reading everything left: 1.2 s
- * with only the depth counter in place). So a tokenizer frame may also take at
- * most MD_MAX_NEST re-lex steps of its own; past that, the rest of ITS source is
- * shown as text. A frame is per quote/list, so ordinary documents — many quotes
- * with one lazy continuation line each — are untouched, while the one frame that
- * would re-read the document thousands of times stops after 16.
+ * DEPTH is not the whole story on that second path: each re-lex step re-reads
+ * everything it has left, so the blockquote tokenizer's chunk loop (which
+ * re-lexes the growing last token once per chunk, all at ONE level) is O(n²):
+ * `"> - x\nlazy\n"` repeated to 64 KB is ~5,300 steps and 1.2 s with only the
+ * depth counter in place. So the re-lex path also carries a per-PARSE budget of
+ * RE-READ CHARACTERS, `max(1 MiB, 8 × the document length)` (computed here from
+ * the length the caller passes in): while the sum of the `src` lengths handed to
+ * this path stays under it nothing changes; past it, the rest of that frame is
+ * shown as text. A per-parse BYTE budget, not a per-frame step count, because a
+ * step count cannot tell a flood from ordinary content: one quote whose list has
+ * 17 items with a lazy continuation line each is ~17 steps of perfectly normal
+ * Markdown, and a step cap turned the tail of that list into literal text.
+ * Bytes measure the work that actually hurt (every step re-reads the rest of the
+ * source), and the 8× factor plus the 1 MiB floor leave a real document several
+ * orders of magnitude of room.
  *
  * Over the limit neither wrapper lexes anything: it hands back the source as
  * ONE flat text token (flatTextToken above). The tokenizer wrappers must return
@@ -868,11 +888,13 @@ const RELEX_TOKENIZERS = ["blockquote", "list"];
  * the own properties below safe: neither Marked instance in this module sets
  * `defaults.tokenizer`, so `new Tokenizer()` runs once per Lexer. A future
  * `use({ tokenizer })` on either instance would make ONE Tokenizer shared by
- * every parse and carry these wrappers (and this parse's counter) into them.
+ * every parse and carry these wrappers (and this parse's counters) into them.
  * @param {object} options a Marked instance's defaults
+ * @param {number} inputLength the document's length, which sizes the re-lex
+ *   path's byte budget (see above)
  * @returns {Lexer}
  */
-function boundedLexer(options) {
+function boundedLexer(options, inputLength = 0) {
   const lexer = new Lexer({ ...options });
   /** Container levels open right now (blockquotes + list levels). */
   let depth = 0;
@@ -880,8 +902,14 @@ function boundedLexer(options) {
    *  tokenizer call apart (see the wrapper below). */
   let lexFrames = 0;
   /** One entry per open container tokenizer frame: the `lexFrames` count when it
-   *  was entered (`mark`) and how many re-lex steps it has taken (`relex`). */
+   *  was entered (`mark`), so a call made straight from that frame's tokenizer
+   *  body can be told apart from the block lexer's. */
   const frames = [];
+  /** The characters this parse may re-read through the re-lex path: 8 × the
+   *  document, never less than 1 MiB (see the comment above). */
+  const relexBudget = Math.max(RELEX_BUDGET_FLOOR, RELEX_BUDGET_FACTOR * inputLength);
+  /** Characters re-read through that path so far in this parse. */
+  let relexBytes = 0;
 
   // 2. The re-lex path: counted here, because a container token opened by a
   //    direct `this.blockquote(f)` / `this.list(f)` never reaches blockTokens.
@@ -896,12 +924,16 @@ function boundedLexer(options) {
       // already counted by the frame that blockTokens belongs to. A call made
       // straight from a tokenizer body is the re-lex, and IT needs counting.
       const frame = frames.length ? frames[frames.length - 1] : null;
-      if (frame && lexFrames === frame.mark && ++frame.relex > MD_MAX_NEST) {
+      // Only the re-lex path is charged against the budget: the block lexer's
+      // own calls re-read their source too, and charging those would spend it
+      // on ordinary lexing instead of on the O(n²) chunk loop it guards.
+      if (frame && lexFrames === frame.mark
+        && (relexBytes += src.length) > relexBudget) {
         return flatTextToken(src);
       }
       if (depth >= MD_MAX_NEST) return flatTextToken(src);
       depth++;
-      frames.push({ mark: lexFrames, relex: 0 });
+      frames.push({ mark: lexFrames });
       try {
         return original.call(this, src);
       } finally {
@@ -1077,9 +1109,10 @@ function guardAndParse(src) {
   src = src.replace(/\r\n|\r/g, "\n");
   // Bound container nesting from INSIDE the block lexer (see "THE
   // BLOCK-NESTING CLIFF"): "1) " x 64 KB used to spend ~1 s here and then trip
-  // the stack. The guard is a depth counter on blockTokens, so `src` itself is
-  // never rewritten — code, fences, HTML and math keep every character.
-  const lexer = boundedLexer(botMarked.defaults);
+  // the stack. The guard is a depth counter (plus, on the tokenizer's re-lex
+  // path, a byte budget) inside the lexer, so `src` itself is never rewritten:
+  // code, fences, HTML and math keep every character.
+  const lexer = boundedLexer(botMarked.defaults, src.length);
   lexer.blockTokens(src, lexer.tokens);
   // Cap the link definitions BEFORE any inline lexing: inlineTokens scans
   // `Object.keys(this.tokens.links)` on every inline block, so a flood of
