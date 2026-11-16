@@ -343,6 +343,45 @@ function pointer(domWindow, type, fields) {
   return event;
 }
 
+/** The phone tab strip. */
+function tabsStrip(page) {
+  return page.querySelector("[data-role=studio-tabs]");
+}
+
+/** The strip's tabs, in page order. */
+function tabNodes(page) {
+  const strip = tabsStrip(page);
+  return strip ? Array.from(strip.querySelectorAll("[role=tab]")) : [];
+}
+
+/** The labels of the strip's tabs. */
+function tabLabels(page) {
+  return tabNodes(page).map((node) => node.textContent);
+}
+
+/** The tab the strip says is selected. */
+function activeTab(page) {
+  return tabNodes(page).find((node) => node.getAttribute("aria-selected") === "true") || null;
+}
+
+/** The ids of the frames on the page that are showing right now. */
+function visibleFrames(page) {
+  const area = page.querySelector("[data-role=studio-widgets]");
+  return Array.from(area.children)
+    .filter((node) => node.getAttribute && node.getAttribute("data-widget"))
+    .filter((node) => !node.hasAttribute("hidden"))
+    .map((node) => node.getAttribute("data-widget"));
+}
+
+/** One swipe: a press, a drag along the way, and the release. */
+function swipe(domWindow, node, from, to) {
+  node.dispatchEvent(pointer(domWindow, "pointerdown", {
+    pointerType: "touch", button: 0, pointerId: 7, clientX: from.x, clientY: from.y,
+  }));
+  node.dispatchEvent(pointer(domWindow, "pointermove", { clientX: to.x, clientY: to.y }));
+  node.dispatchEvent(pointer(domWindow, "pointerup", { clientX: to.x, clientY: to.y }));
+}
+
 /** One song's stored layout key. */
 function layoutKey(songId, mode, sizeClass) {
   return `crow.studio.layout.v2.${songId}.${mode}.${sizeClass}`;
@@ -391,6 +430,8 @@ test("the emitted shell script follows the panel's inline rules and names the wi
   assert.equal(emptyNote("editor"), "Pick a clip in the grid to edit it.");
   assert.equal(emptyNote("takes"), "Arm a track to record.");
   assert.equal(emptyNote("scene-grid"), "");
+  assert.match(SHELL_CSS, /\.st-widget-tab\s*\{[^}]*min-height:\s*46px/, "a tab is a 46 px target");
+  assert.match(SHELL_CSS, /\.st-widget\[hidden\]\s*\{\s*display:\s*none/, "a hidden frame is gone");
 });
 
 test("the top bar carries the page's own controls and the new mode switch and layout menu", async () => {
@@ -1006,4 +1047,148 @@ test("a throwing storage lets Edit layout work in memory", async () => {
 
   assert.doesNotThrow(() => b.shell.setMode("record"));
   assert.deepEqual(shownWidgets(b.page), ["scene-grid", "takes", "midi", "history"]);
+});
+
+test("phone shows one widget and a tab strip", async () => {
+  const b = await bootShell({ width: 500 });
+
+  const strip = tabsStrip(b.page);
+  assert.ok(strip, "the phone page carries a tab strip");
+  assert.equal(strip.getAttribute("role"), "tablist");
+  assert.equal(strip.hasAttribute("hidden"), false, "the strip is shown at phone width");
+  assert.deepEqual(tabLabels(b.page), ["Scene grid", "Editor", "History"], "one tab per shown widget, by name");
+  assert.deepEqual(
+    tabNodes(b.page).map((node) => node.getAttribute("role")),
+    ["tab", "tab", "tab"],
+  );
+  assert.deepEqual(
+    tabNodes(b.page).map((node) => node.getAttribute("aria-selected")),
+    ["true", "false", "false"],
+    "the first shown widget is the active tab",
+  );
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid"], "only the active widget is on the page");
+
+  click(b.domWindow, tabNodes(b.page)[2]);
+  assert.equal(activeTab(b.page).textContent, "History");
+  assert.deepEqual(visibleFrames(b.page), ["history"]);
+  assert.equal(
+    b.storage.getItem(layoutKey(SONG, "compose", "phone")),
+    null,
+    "the active tab is view state and is never stored with a layout",
+  );
+
+  // The tab stays valid when the layout moves under it.
+  b.shell.setMode("record");
+  assert.deepEqual(tabLabels(b.page), ["Scene grid", "Takes", "MIDI", "History"], "the tabs follow the mode");
+  assert.deepEqual(visibleFrames(b.page), ["history"], "a tab the new layout still shows stays the active one");
+  assert.equal(activeTab(b.page).textContent, "History");
+
+  startEditing(b);
+  assert.deepEqual(
+    visibleFrames(b.page),
+    ["scene-grid", "takes", "midi", "history"],
+    "editing the layout shows every frame instead of one",
+  );
+  assert.equal(strip.hasAttribute("hidden"), true, "the tabs step aside while the layout is edited");
+
+  click(b.domWindow, frameAct(b, "history", "widget-remove"));
+  click(b.domWindow, layoutEntry(b.page, "layout-edit"));
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid"], "the active widget left, so the first shown one takes over");
+  assert.equal(activeTab(b.page).textContent, "Scene grid");
+
+  b.media.setWidth(1280);
+  assert.equal(strip.hasAttribute("hidden"), true, "a laptop has no tab strip");
+  assert.deepEqual(
+    visibleFrames(b.page),
+    ["scene-grid", "takes", "midi", "history"],
+    "a laptop shows every frame of its own layout",
+  );
+});
+
+test("a left swipe on the tab strip selects the next tab", async () => {
+  const b = await bootShell({ width: 500 });
+  const strip = tabsStrip(b.page);
+
+  swipe(b.domWindow, tabNodes(b.page)[0], { x: 300, y: 24 }, { x: 200, y: 30 });
+  assert.equal(activeTab(b.page).textContent, "Editor", "a left swipe is the next widget");
+  assert.deepEqual(visibleFrames(b.page), ["editor"]);
+
+  // A frame header is a swipe start as well.
+  swipe(
+    b.domWindow,
+    frame(b.page, "editor").querySelector(".st-widget-head"),
+    { x: 300, y: 40 },
+    { x: 190, y: 44 },
+  );
+  assert.equal(activeTab(b.page).textContent, "History", "a left swipe on a header is the next widget too");
+  assert.deepEqual(visibleFrames(b.page), ["history"]);
+
+  swipe(b.domWindow, strip, { x: 200, y: 24 }, { x: 320, y: 20 });
+  assert.equal(activeTab(b.page).textContent, "Editor", "a right swipe is the previous widget");
+  assert.deepEqual(visibleFrames(b.page), ["editor"]);
+
+  swipe(b.domWindow, strip, { x: 300, y: 20 }, { x: 220, y: 120 });
+  assert.equal(activeTab(b.page).textContent, "Editor", "a mostly vertical drag leaves the tab alone");
+
+  swipe(b.domWindow, strip, { x: 300, y: 20 }, { x: 280, y: 20 });
+  assert.equal(activeTab(b.page).textContent, "Editor", "a short drag leaves the tab alone");
+
+  assert.equal(b.storage.getItem(layoutKey(SONG, "compose", "phone")), null, "a swipe writes no layout");
+});
+
+test("a horizontal drag starting in the grid scrolls it and does not change tab", async () => {
+  const b = await bootShell({ width: 500 });
+  const grid = b.refs.gridWrap;
+  grid.setAttribute("data-scroll", "");
+  grid.style.setProperty("overflow-x", "auto");
+
+  swipe(b.domWindow, grid, { x: 300, y: 120 }, { x: 200, y: 124 });
+  assert.equal(activeTab(b.page).textContent, "Scene grid", "a drag in the grid belongs to the grid");
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid"]);
+
+  // A scrolling box is the page's wherever it sits, a frame header included.
+  const head = frame(b.page, "scene-grid").querySelector(".st-widget-head");
+  const scroller = b.document.createElement("div");
+  scroller.setAttribute("data-scroll", "");
+  head.appendChild(scroller);
+  swipe(b.domWindow, scroller, { x: 300, y: 20 }, { x: 200, y: 24 });
+  assert.equal(activeTab(b.page).textContent, "Scene grid");
+
+  const overflowing = b.document.createElement("div");
+  overflowing.style.setProperty("overflow-x", "scroll");
+  head.appendChild(overflowing);
+  swipe(b.domWindow, overflowing, { x: 300, y: 20 }, { x: 200, y: 24 });
+  assert.equal(activeTab(b.page).textContent, "Scene grid");
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid"]);
+});
+
+test("a horizontal drag starting on a step or a pad does not change tab", async () => {
+  const b = await bootShell({ width: 500 });
+  // A frame's own controls can live in its header, so the rule is checked there.
+  const head = frame(b.page, "scene-grid").querySelector(".st-widget-head");
+
+  const step = b.document.createElement("button");
+  step.setAttribute("type", "button");
+  step.setAttribute("data-act", "step");
+  step.textContent = "Step";
+  head.appendChild(step);
+
+  const pad = b.document.createElement("input");
+  pad.setAttribute("type", "range");
+  pad.setAttribute("data-pad-field", "cutoff_hz");
+  head.appendChild(pad);
+
+  const field = b.document.createElement("input");
+  field.setAttribute("type", "text");
+  head.appendChild(field);
+
+  swipe(b.domWindow, step, { x: 300, y: 20 }, { x: 200, y: 22 });
+  assert.equal(activeTab(b.page).textContent, "Scene grid", "a step keeps its press");
+
+  swipe(b.domWindow, pad, { x: 200, y: 20 }, { x: 320, y: 22 });
+  assert.equal(activeTab(b.page).textContent, "Scene grid", "a pad knob keeps its drag");
+
+  swipe(b.domWindow, field, { x: 300, y: 20 }, { x: 200, y: 22 });
+  assert.equal(activeTab(b.page).textContent, "Scene grid", "a field keeps its press");
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid"]);
 });
