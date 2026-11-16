@@ -54,6 +54,9 @@ export const VIEWER_STRINGS = {
     reply: "Reply", sentTo: "Sent to {bot}", busy: "{bot} is already working on this document. Try again when it finishes.",
     mention_not_found: "No bot called @{name}.", mention_forbidden: "@{name} can't open this document.",
     mention_failed: "That didn't reach @{name}. Try again.", mention_stopped: "@{name} couldn't start on this thread. {why}",
+    import_file: "Import file", import_note: "Change note (optional)",
+    import_too_large: "That file is over 4 MB. Pick a smaller one.", import_read_failed: "Couldn't read that file. Try another one.",
+    import_failed: "Couldn't import that file ({e}).",
   },
   es: {
     title: "Artefacto", version: "Versión", current: "actual", proposed: "propuesta", flagged_v: "marcada",
@@ -94,6 +97,9 @@ export const VIEWER_STRINGS = {
     reply: "Responder", sentTo: "Enviado a {bot}", busy: "{bot} ya está trabajando en este documento. Inténtalo cuando termine.",
     mention_not_found: "No hay ningún bot llamado @{name}.", mention_forbidden: "@{name} no puede abrir este documento.",
     mention_failed: "No le llegó a @{name}. Inténtalo de nuevo.", mention_stopped: "@{name} no pudo empezar con este hilo. {why}",
+    import_file: "Importar archivo", import_note: "Nota del cambio (opcional)",
+    import_too_large: "Ese archivo supera los 4 MB. Elige uno más pequeño.", import_read_failed: "No se pudo leer ese archivo. Prueba con otro.",
+    import_failed: "No se pudo importar ese archivo ({e}).",
   },
 };
 
@@ -168,6 +174,8 @@ export function renderViewerPage({ lang = "en", id, v = null, thread = null, bac
 </head><body>
 ${links ? `<div id="cv-links" hidden>${links}</div>\n` : ""}<div id="crow-artifact-viewer" data-lang="${L}" data-artifact="${esc(id)}" data-version="${v == null ? "" : esc(v)}" data-thread="${thread == null ? "" : esc(thread)}" data-strings="${esc(JSON.stringify(T))}"></div>
 <button type="button" class="cv-fs-open" id="cv-full-screen">${esc(T.fullscreen)}</button>
+<button type="button" class="cv-import" id="cv-import-btn" hidden>${esc(T.import_file)}</button>
+<input type="file" id="cv-import-file" accept=".html,.htm,.md,.markdown,.svg,.txt,text/*,image/svg+xml" hidden aria-label="${esc(T.import_file)}">
 <button type="button" class="cv-exit-fullscreen" id="cv-exit-full-screen" hidden>${esc(T.exit_fullscreen)}</button>
 <script src="/artifacts/static/viewer.js"></script>
 <script src="/artifacts/static/viewer-client.js"></script>
