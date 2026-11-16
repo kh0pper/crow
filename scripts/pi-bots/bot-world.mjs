@@ -39,7 +39,7 @@ import { normalizeStoredBashPolicy, resolveClassifierEndpoint } from "../../serv
 import { readBotClassifierSync } from "./bot-classifier.mjs";
 import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync, existsSync, readdirSync, realpathSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { writeBotMcp, removeStaleBotMcp } from "./mcp_writer.mjs";
 import { hasActorKey, presignActors, scopeRefFor } from "./actor-sig.mjs";
 import { validateExtensions } from "./pi_extensions_allowlist.mjs";
@@ -58,6 +58,7 @@ import { applySatelliteBlocks, withSatelliteBlocks } from "./satellite-blocks.mj
 import { primeBareServerTools } from "./bare-server-tools.mjs";
 import { worldRootFor, carriedReadRoots, brokenWorldLink } from "./world-root.mjs";
 import { isValidReadPath, normalizeReadPath } from "./bot-read-paths.mjs";
+import { botsProjectsRoot } from "./instance-paths.mjs";
 import { installedKitDir, readKitThemes, readHouseStyleSync, houseStyleLinks } from "../../servers/shared/design-kit.js";
 
 /** Project services (Task 18): THE seam every rail calls (service-blocks.mjs). */
@@ -234,9 +235,19 @@ export function projectShowsCards(projectId, def) {
  * the whole workspace would expose them and, at `read_write`, let the bot
  * rewrite another bot's sessions.
  *
- * A workspace_dir that is a dangerous root is dropped with one warning: `/`,
- * the user's home, the Crow home (crowHome — equal to it or above it), or
- * anything under <crowHome>/secrets.
+ * ALLOWLIST, not a denylist: a share's workspace_dir is a candidate only when,
+ * after realpathSync, it lies STRICTLY under realpathSync(projectsRoot) — the
+ * instance's projects area (`botsProjectsRoot()`, i.e. `<data>/projects`, where
+ * workspacePathFor puts every project workspace). A missing/unreadable dir, a
+ * dir outside that area, and a dir that is a symlink resolving outside it all
+ * grant nothing; so does every granted ENTRY whose own realpath leaves the
+ * area. With no projects root to check against, nothing is granted at all
+ * (fail closed) and one line says so.
+ *
+ * The denylist below stays as an extra belt (a root at or above the projects
+ * area would otherwise pass the allowlist whenever the two are configured
+ * oddly): `/`, the user's home or any parent of it, the projects root's parent,
+ * the Crow home (equal to it or above it), and <crowHome>/secrets.
  *
  * The entries are listed at SPAWN time, so a top-level file or directory
  * created after this spawn is outside the running child's reach until the next
@@ -245,28 +256,59 @@ export function projectShowsCards(projectId, def) {
  * (resolveBotAccess).
  *
  * @param {{workspace_dir?: string|null, level?: string, suspended?: boolean}[]|null} shares
- * @param {{crowHome?: string|null, log?: (m: string) => void}} [opts] `crowHome`
- *   is the active Crow instance home, for the dangerous-root rule; `log` gets
- *   one line per share that granted nothing for a reason worth naming.
+ * @param {{crowHome?: string|null, projectsRoot?: string|null, log?: (m: string) => void}} [opts]
+ *   `crowHome` is the active Crow instance home and `projectsRoot` this
+ *   instance's projects area (`botsProjectsRoot()`), both for the refusal
+ *   rules; `log` gets one line per share that granted nothing for a reason
+ *   worth naming.
  * @returns {{read: string[], write: string[]}}
  */
-export function shareWorkspaceRoots(shares, { crowHome = null, log = () => {} } = {}) {
+export function shareWorkspaceRoots(shares, { crowHome = null, projectsRoot = null, log = () => {} } = {}) {
   const read = [];
   const write = [];
-  for (const s of Array.isArray(shares) ? shares : []) {
+  const list = Array.isArray(shares) ? shares : [];
+  // Nothing to grant, nothing to resolve (and no warning on every turn of a bot without shares).
+  if (!list.length) return { read, write };
+  const root = realProjectsRoot(projectsRoot);
+  if (!root) {
+    log("share workspace not granted (no projects root to check it against)");
+    return { read, write };
+  }
+  for (const s of list) {
     if (!s || s.suspended === true || !isValidReadPath(s.workspace_dir)) continue;
     const dir = normalizeReadPath(s.workspace_dir);
-    const dangerous = dangerousShareRoot(dir, crowHome);
+    const dangerous = dangerousShareRoot(dir, crowHome, root);
     if (dangerous) {
       log("share workspace not granted (" + dangerous + "): " + dir);
       continue;
     }
-    for (const root of shareEntryRoots(dir, { log })) {
-      if (!read.includes(root)) read.push(root);
-      if (s.level === "read_write" && !write.includes(root)) write.push(root);
+    let realDir = null;
+    try { realDir = normalizeReadPath(realpathSync(dir)); } catch { realDir = null; }
+    if (!realDir) {
+      log("share workspace not granted (missing or unreadable): " + dir);
+      continue;
+    }
+    if (!strictlyUnder(realDir, root)) {
+      log("share workspace not granted (outside the projects area): " + dir);
+      continue;
+    }
+    for (const entryRoot of shareEntryRoots(dir, { realDir, projectsRoot: root, log })) {
+      if (!read.includes(entryRoot)) read.push(entryRoot);
+      if (s.level === "read_write" && !write.includes(entryRoot)) write.push(entryRoot);
     }
   }
   return { read, write };
+}
+
+/** `p` is inside `root` and is not `root` itself (both real paths). */
+function strictlyUnder(p, root) {
+  return p !== root && p.startsWith(root + "/");
+}
+
+/** The real projects area, or null when there is none to check a share against. */
+function realProjectsRoot(projectsRoot) {
+  if (!isValidReadPath(projectsRoot)) return null;
+  try { return normalizeReadPath(realpathSync(normalizeReadPath(projectsRoot))); } catch { return null; }
 }
 
 /**
@@ -278,14 +320,24 @@ export const SHARE_ROOT_ENTRY_CAP = 200;
 
 /**
  * Why `dir` must never become a share root, or null: the filesystem root, the
- * user's own home, the Crow home (equal to it or above it), or anything under
- * <crowHome>/secrets. A share hands a bot a project, never the instance.
+ * user's own home or any parent of it, the projects area's parent, the Crow
+ * home (equal to it or above it), or anything under <crowHome>/secrets. The
+ * allowlist in shareWorkspaceRoots is the rule; this is the belt for a
+ * projects root configured somewhere it should not be. `projectsRoot` is the
+ * resolved projects area.
  */
-function dangerousShareRoot(dir, crowHome) {
+function dangerousShareRoot(dir, crowHome, projectsRoot) {
   if (dir === "/") return "the filesystem root";
   let home = null;
   try { home = normalizeReadPath(homedir()); } catch { home = null; }
-  if (home && home !== "/" && dir === home) return "the user's home";
+  if (home && home !== "/") {
+    if (dir === home) return "the user's home";
+    if (home.startsWith(dir + "/")) return "above the user's home";
+  }
+  if (projectsRoot) {
+    const parent = dirname(projectsRoot);
+    if (dir === parent || parent.startsWith(dir + "/")) return "the projects area's parent or above";
+  }
   if (!crowHome || !isValidReadPath(crowHome)) return null;
   const ch = normalizeReadPath(crowHome);
   if (dir === ch) return "the Crow home";
@@ -298,12 +350,16 @@ function dangerousShareRoot(dir, crowHome) {
 /**
  * The roots ONE share contributes: the real top-level entries of its workspace,
  * one root each — never the workspace itself, never its `bots` subtree (see
- * shareWorkspaceRoots). An entry that cannot be stat-ed is skipped; a symlink
- * is followed only when it resolves inside the workspace and outside the bots
- * subtree. More entries than SHARE_ROOT_ENTRY_CAP grants nothing for the share.
+ * shareWorkspaceRoots). An entry that cannot be resolved is skipped; an entry
+ * whose realpath leaves the projects area is skipped; a symlink is followed
+ * only when it resolves inside the workspace and outside the bots subtree.
+ * More entries than SHARE_ROOT_ENTRY_CAP grants nothing for the share.
+ * @param {string} dir       the workspace_dir as the share row names it
+ * @param {{realDir?: string|null, projectsRoot: string, log?: (m: string) => void}} opts
+ *   `realDir` is dir's own realpath (already checked to be under projectsRoot)
  * @returns {string[]}
  */
-function shareEntryRoots(dir, { log = () => {} } = {}) {
+function shareEntryRoots(dir, { realDir = null, projectsRoot, log = () => {} } = {}) {
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -315,8 +371,6 @@ function shareEntryRoots(dir, { log = () => {} } = {}) {
     log("share workspace not granted (" + entries.length + " top-level entries, cap " + SHARE_ROOT_ENTRY_CAP + "): " + dir);
     return [];
   }
-  let realDir = null;
-  try { realDir = realpathSync(dir); } catch { realDir = null; }
   const under = (p, root) => p === root || p.startsWith(root + "/");
   const roots = [];
   for (const entry of entries) {
@@ -324,13 +378,14 @@ function shareEntryRoots(dir, { log = () => {} } = {}) {
     if (entry.name === "bots") continue;
     const full = join(dir, entry.name);
     // A broken symlink, or a race with a delete: nothing to grant.
-    try { statSync(full); } catch { continue; }
+    let real = null;
+    try { real = normalizeReadPath(realpathSync(full)); } catch { continue; }
+    // An entry that resolves out of the projects area is never granted, however it got there.
+    if (!strictlyUnder(real, projectsRoot)) continue;
     if (entry.isSymbolicLink()) {
-      let target = null;
-      try { target = realpathSync(full); } catch { continue; }
       // Never follow a link out of the workspace, and never one into bots.
-      if (!realDir || !under(target, realDir)) continue;
-      if (under(target, join(realDir, "bots"))) continue;
+      if (!realDir || !under(real, realDir)) continue;
+      if (under(real, join(realDir, "bots"))) continue;
     }
     const root = normalizeReadPath(full);
     if (!roots.includes(root)) roots.push(root);
@@ -500,7 +555,10 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
   // tool calls are never one session behind. A `read` share contributes a read
   // root only; a `read_write` share adds its workspace to the write roots too.
   const projectShares = B.loadBotShares(botId);
-  const shareRoots = shareWorkspaceRoots(projectShares, { crowHome, log });
+  // The projects area this instance creates its project workspaces under
+  // (botsProjectsRoot): a share's workspace_dir, and each entry it contributes,
+  // must really sit there — see shareWorkspaceRoots' allowlist.
+  const shareRoots = shareWorkspaceRoots(projectShares, { crowHome, projectsRoot: botsProjectsRoot(), log });
   // The remote-proxy rule is a different question with a different answer: NOT "does this list have
   // an entry" (it leaves out archived/tombstoned projects and dead bot defs) but "does the bot hold
   // any live project_bot_shares row" — the one rule mcp_writer's CLI, the regen panel and

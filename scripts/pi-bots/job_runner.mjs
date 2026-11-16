@@ -47,7 +47,7 @@ import { crowDefaultsBlock, readWritingRules } from "./crow-defaults.mjs";
 import { turnScopeFor } from "./service-blocks.mjs";
 import { primeBareServerTools } from "./bare-server-tools.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
-import { botsDbPath } from "./instance-paths.mjs";
+import { botsDbPath, botsProjectsRoot } from "./instance-paths.mjs";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
@@ -375,12 +375,14 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
   // Phase 1 bot↔project shares. A job builds its OWN MCP config and its OWN PiRpc below, so it is
   // the same read a channel turn does (bot-world.mjs): the live shares are read once here for the
   // file roots, and holdsShare (below) keeps the remote-proxy blocks out of the job's config.
+  // The projects area (botsProjectsRoot, the anchor project creation writes under) is the allowlist
+  // a share's workspace_dir and each of its entries must really sit in; outside it, nothing.
   // Never throws: no shares (or an older DB) is an empty list.
   let jobShares = [];
   try {
     if (typeof bridge.loadBotShares === "function") jobShares = bridge.loadBotShares(job.bot_id) || [];
   } catch { jobShares = []; }
-  const jobShareRoots = shareWorkspaceRoots(jobShares, { crowHome, log });
+  const jobShareRoots = shareWorkspaceRoots(jobShares, { crowHome, projectsRoot: botsProjectsRoot(), log });
   // holdsShare is NOT jobShares.length > 0: that list drives the file roots and leaves out
   // archived/tombstoned projects, while the remote-proxy rule is "does the bot hold any live
   // project_bot_shares row" — the same rule the channel world, the regen panel and the server-side

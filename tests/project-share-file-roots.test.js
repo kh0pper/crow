@@ -15,10 +15,12 @@
  *     other bots' sessions.
  *
  * A suspended share (either side has an outside member), a revoked one, one
- * whose project is archived/tombstoned, one with no workspace_dir, and one
- * whose workspace_dir is a dangerous root (/, the user's home, the Crow home
- * or above, anything under <crowHome>/secrets) add nothing — and none of them
- * may break a spawn.
+ * whose project is archived/tombstoned, one with no workspace_dir, one whose
+ * workspace_dir is a dangerous root (/, the user's home or a parent of it, the
+ * Crow home or above, anything under <crowHome>/secrets), and one whose
+ * workspace_dir — or any entry it would contribute — does not really sit under
+ * the instance's projects area (a missing dir, a dir elsewhere, a symlink that
+ * resolves out) add nothing. None of them may break a spawn.
  *
  * The boundary this file pins (and the code documents): file-system reach
  * follows the share at the NEXT SPAWN, because pi's roots are fixed when the
@@ -104,14 +106,20 @@ const { buildContainPlan, ContainRefused } = await import("../scripts/pi-bots/pi
 const { createInteractiveEngine, _resetInteractiveEngineForTest } = await import("../servers/gateway/perch-interactive.js");
 
 // ---- fixture ----------------------------------------------------------------
-const ws = (name) => join(dir, "projects", name, "workspace");
+// The instance's projects area (bot-world/job_runner pass exactly this root): a
+// share workspace is a root only when it really sits under it.
+const PROJECTS_ROOT = join(dir, "projects");
+const ws = (name) => join(PROJECTS_ROOT, name, "workspace");
 const W_HOME = ws("home");
 const W_X = ws("shared-x");
 const W_ARCH = ws("archived");
 const W_TOMB = ws("tombstoned");
 const W_SUSP = ws("suspended");
 
-const P_HOME = 201, P_X = 202, P_ARCH = 203, P_TOMB = 204, P_NOWS = 205, P_SUSP = 206;
+const P_HOME = 201, P_X = 202, P_ARCH = 203, P_TOMB = 204, P_NOWS = 205, P_SUSP = 206, P_HOMELINK = 207;
+// A workspace_dir that is a symlink to the (scratch) user's home: a path-level
+// denylist sees nothing wrong with it, the realpath allowlist must refuse it.
+const W_HOMELINK = join(PROJECTS_ROOT, "link-to-home");
 
 const baseDef = () => ({
   system_prompt: "You are a test bot.",
@@ -145,10 +153,12 @@ before(() => {
   proj.run(P_TOMB, "tombstoned-one", "Tombstoned One", W_TOMB, "active", "2026-01-01 00:00:00");
   proj.run(P_NOWS, "no-workspace", "No Workspace", null, "active", null);
   proj.run(P_SUSP, "suspended-one", "Suspended One", W_SUSP, "active", null);
+  symlinkSync(process.env.HOME, W_HOMELINK);
+  proj.run(P_HOMELINK, "link-to-home", "Link To Home", W_HOMELINK, "active", null);
 
   const ins = c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,?,?)");
   const def = (id) => JSON.stringify({ ...baseDef(), session_dir: join(dir, "bots", id) });
-  for (const id of ["reader", "writer", "suspended", "arch", "tomb", "nows", "revoked", "nothing", "deadbot"]) {
+  for (const id of ["reader", "writer", "suspended", "arch", "tomb", "nows", "revoked", "nothing", "deadbot", "homelink"]) {
     ins.run(id, id, def(id), 1, P_HOME);
   }
   // A def whose permission_policy names no write_paths at all (M6): an empty
@@ -177,6 +187,7 @@ before(() => {
   share.run(P_ARCH, "arch", "read", null);
   share.run(P_TOMB, "tomb", "read", null);
   share.run(P_NOWS, "nows", "read_write", null);
+  share.run(P_HOMELINK, "homelink", "read_write", null);
   share.run(P_X, "revoked", "read", "2026-01-02 00:00:00");
   share.run(P_X, "deadbot", "read", null);
   c.close();
@@ -275,7 +286,7 @@ test("loadBotShares never throws: a missing table (older DB) is 'no shares'", ()
 
 /** A share workspace with two ordinary top-level entries and a `bots` subtree. */
 function shareFixture(name) {
-  const d = join(dir, "unit-roots", name);
+  const d = ws("unit-" + name);
   mkdirSync(join(d, "docs"), { recursive: true });
   writeFileSync(join(d, "docs", "a.md"), "a\n");
   writeFileSync(join(d, "top.txt"), "t\n");
@@ -293,7 +304,7 @@ test("shareWorkspaceRoots: one read root per top-level entry, a write root only 
   assert.deepEqual(sortRoots(shareWorkspaceRoots([
     { project_id: 1, level: "read", workspace_dir: one, suspended: false },
     { project_id: 2, level: "read_write", workspace_dir: two, suspended: false },
-  ])), {
+  ], { projectsRoot: PROJECTS_ROOT })), {
     read: sorted([...fixtureRoots(one), ...fixtureRoots(two)]),
     write: sorted(fixtureRoots(two)),
   });
@@ -301,14 +312,15 @@ test("shareWorkspaceRoots: one read root per top-level entry, a write root only 
     { project_id: 3, level: "read_write", workspace_dir: three, suspended: true },
     { project_id: 4, level: "read_write", workspace_dir: null, suspended: false },
     { project_id: 5, level: "read", workspace_dir: "relative/dir", suspended: false },
-  ]), { read: [], write: [] });
-  assert.deepEqual(shareWorkspaceRoots([]), { read: [], write: [] });
-  assert.deepEqual(shareWorkspaceRoots(null), { read: [], write: [] });
+  ], { projectsRoot: PROJECTS_ROOT }), { read: [], write: [] });
+  assert.deepEqual(shareWorkspaceRoots([], { projectsRoot: PROJECTS_ROOT }), { read: [], write: [] });
+  assert.deepEqual(shareWorkspaceRoots(null, { projectsRoot: PROJECTS_ROOT }), { read: [], write: [] });
 });
 
 test("shareWorkspaceRoots: the bots subtree is never a root, and neither is the workspace itself", () => {
   const d = shareFixture("no-bots");
-  const r = shareWorkspaceRoots([{ project_id: 7, level: "read_write", workspace_dir: d, suspended: false }], {});
+  const r = shareWorkspaceRoots([{ project_id: 7, level: "read_write", workspace_dir: d, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT });
   assert.equal(coversPath(r.read, join(d, "bots")), false, "no read root covers <ws>/bots");
   assert.equal(coversPath(r.read, join(d, "bots", "other", "sessions", "x.jsonl")), false,
     "another bot's transcript is out of reach");
@@ -324,11 +336,14 @@ test("shareWorkspaceRoots: the bots subtree is never a root, and neither is the 
 
 test("shareWorkspaceRoots: a symlink that leaves the workspace (or points into bots) is not granted", () => {
   const d = shareFixture("links");
-  const outside = join(dir, "unit-roots", "outside-target");
+  // A neighbour INSIDE the projects area: this test is about the workspace rule,
+  // the projects-root allowlist is the next test's subject.
+  const outside = ws("unit-neighbour");
   mkdirSync(outside, { recursive: true });
   symlinkSync(outside, join(d, "escape"));
   symlinkSync(join(d, "bots"), join(d, "bots-alias"));
-  const r = shareWorkspaceRoots([{ project_id: 8, level: "read_write", workspace_dir: d, suspended: false }], {});
+  const r = shareWorkspaceRoots([{ project_id: 8, level: "read_write", workspace_dir: d, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT });
   assert.equal(coversPath(r.read, join(d, "escape")), false, "a link out of the workspace is not a root");
   assert.equal(coversPath(r.write, join(d, "escape")), false);
   assert.equal(coversPath(r.read, join(d, "bots-alias")), false, "a link to the bots subtree is not a root");
@@ -337,11 +352,12 @@ test("shareWorkspaceRoots: a symlink that leaves the workspace (or points into b
 });
 
 test("shareWorkspaceRoots: more top-level entries than the cap grants nothing for that share, with one warning", () => {
-  const d = join(dir, "unit-roots", "wide");
+  const d = ws("unit-wide");
   mkdirSync(d, { recursive: true });
   for (let i = 0; i < 201; i++) writeFileSync(join(d, `f${i}.txt`), "");
   const said = [];
-  const r = shareWorkspaceRoots([{ project_id: 9, level: "read", workspace_dir: d, suspended: false }], { log: (m) => said.push(m) });
+  const r = shareWorkspaceRoots([{ project_id: 9, level: "read", workspace_dir: d, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT, log: (m) => said.push(m) });
   assert.deepEqual(r, { read: [], write: [] });
   assert.equal(said.length, 1, "exactly one warning line: " + JSON.stringify(said));
 });
@@ -352,6 +368,7 @@ test("shareWorkspaceRoots: a dangerous workspace_dir is dropped with one warning
   const cases = [
     ["the filesystem root", "/"],
     ["the user's home", process.env.HOME],
+    ["a parent of the user's home", dirname(process.env.HOME)],
     ["the Crow home", crowHome],
     ["above the Crow home", dirname(crowHome)],
     ["under <crowHome>/secrets", join(crowHome, "secrets", "keys")],
@@ -360,9 +377,77 @@ test("shareWorkspaceRoots: a dangerous workspace_dir is dropped with one warning
     const said = [];
     assert.deepEqual(
       shareWorkspaceRoots([{ project_id: 10, level: "read_write", workspace_dir: d, suspended: false }],
-        { crowHome, log: (m) => said.push(m) }),
+        { crowHome, projectsRoot: PROJECTS_ROOT, log: (m) => said.push(m) }),
       { read: [], write: [] }, label);
     assert.equal(said.length, 1, label + " warns once: " + JSON.stringify(said));
+  }
+  // The named reasons still name themselves (the belt is not just the projects-root allowlist).
+  const reason = (d) => {
+    const said = [];
+    shareWorkspaceRoots([{ project_id: 11, level: "read", workspace_dir: d, suspended: false }],
+      { crowHome, projectsRoot: PROJECTS_ROOT, log: (m) => said.push(m) });
+    return said[0] || "";
+  };
+  assert.match(reason(process.env.HOME), /the user's home/);
+  assert.match(reason(dirname(process.env.HOME)), /above the user's home/);
+  assert.match(reason(join(crowHome, "secrets", "keys")), /secrets/);
+});
+
+test("shareWorkspaceRoots: the projects area is an allowlist — only a dir that really sits under it is a root", () => {
+  const allowed = shareFixture("allowed");
+  const quiet = [];
+  assert.deepEqual(sortRoots(shareWorkspaceRoots(
+    [{ project_id: 20, level: "read", workspace_dir: allowed, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT, log: (m) => quiet.push(m) },
+  )), { read: sorted(fixtureRoots(allowed)), write: [] }, "a normal <dataDir>/projects/<slug>/workspace is a root");
+  assert.deepEqual(quiet, [], "a granted share says nothing");
+
+  const linkToHome = join(PROJECTS_ROOT, "unit-link-home");
+  symlinkSync(process.env.HOME, linkToHome);
+  const outsideProjects = join(dir, "outside-projects");
+  mkdirSync(join(outsideProjects, "docs"), { recursive: true });
+  writeFileSync(join(outsideProjects, "docs", "a.md"), "a\n");
+  const cases = [
+    ["a workspace_dir that is a symlink to the user's home", linkToHome],
+    ["a workspace_dir outside the projects area", outsideProjects],
+    ["the projects root itself", PROJECTS_ROOT],
+    ["a parent of the projects root", dir],
+    ["a missing dir", join(PROJECTS_ROOT, "unit-gone", "workspace")],
+  ];
+  for (const [label, d] of cases) {
+    const said = [];
+    assert.deepEqual(
+      shareWorkspaceRoots([{ project_id: 21, level: "read_write", workspace_dir: d, suspended: false }],
+        { crowHome: process.env.CROW_HOME, projectsRoot: PROJECTS_ROOT, log: (m) => said.push(m) }),
+      { read: [], write: [] }, label);
+    assert.equal(said.length, 1, label + " warns once: " + JSON.stringify(said));
+  }
+});
+
+test("shareWorkspaceRoots: an entry that is a symlink resolving outside the projects area is not granted", () => {
+  const d = shareFixture("escape-projects");
+  const outside = join(dir, "escape-target");
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "x.txt"), "x\n");
+  symlinkSync(outside, join(d, "escape"));
+  const r = shareWorkspaceRoots([{ project_id: 22, level: "read_write", workspace_dir: d, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT });
+  assert.equal(coversPath(r.read, join(d, "escape")), false, "a link out of the projects area is not a read root");
+  assert.equal(coversPath(r.write, join(d, "escape")), false);
+  assert.equal(coversPath(r.read, outside), false);
+  for (const root of fixtureRoots(d)) assert.ok(coversPath(r.read, root), root);
+});
+
+test("shareWorkspaceRoots: no projects root means nothing is granted (fail closed), with one warning", () => {
+  const d = shareFixture("no-root");
+  const absent = join(dir, "absent-projects-root");
+  for (const projectsRoot of [undefined, null, "", "relative/projects", absent]) {
+    const said = [];
+    assert.deepEqual(
+      shareWorkspaceRoots([{ project_id: 23, level: "read_write", workspace_dir: d, suspended: false }],
+        { projectsRoot, log: (m) => said.push(m) }),
+      { read: [], write: [] }, String(projectsRoot));
+    assert.equal(said.length, 1, String(projectsRoot) + " warns once: " + JSON.stringify(said));
   }
 });
 
@@ -453,6 +538,16 @@ test("the world reports the loaded shares as projectShares for a later UI read",
   const reader = await buildBotWorld({ botId: "reader", threadId: "world-shares-read", gatewayType: "gmail" });
   assert.deepEqual(sorted(reader.extraReadPaths), sorted(X_ROOTS));
   assert.deepEqual(reader.extraWritePaths, [], "a read share never reaches the write roots");
+});
+
+test("a share whose workspace_dir is a symlink to the user's home adds no root at spawn", async () => {
+  const world = await buildBotWorld({ botId: "homelink", threadId: "world-home-link", gatewayType: "gmail" });
+  assert.equal(world.projectShares.length, 1, "the share row itself is still reported");
+  assert.deepEqual(world.extraReadPaths, [], "nothing of the home is reachable through the share");
+  assert.deepEqual(world.extraWritePaths, []);
+  const cap = await channelTurn("homelink", "home-link-share");
+  assert.deepEqual(policyOf(cap).read_paths, [W_HOME], "only the bot's own project workspace");
+  assert.deepEqual(policyOf(cap).write_paths, []);
 });
 
 test("a top-level entry created after a spawn is out of that spawn's reach and in the next one", async () => {
