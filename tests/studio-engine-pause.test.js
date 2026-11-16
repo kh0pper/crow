@@ -476,6 +476,62 @@ test("sequencer: pausedBeat is cleared by stop and by play", () => {
   assert.deepEqual(seq.position(), { bar: 3, beat: 3, sixteenth: 2 });
 });
 
+test("sequencer: click accents stay on bar lines after seek(1.25) in Arrangement", () => {
+  const seq = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 8, [note(0, 1, 60), note(16, 1, 62)])],
+      arrangement: arrangementOf([placement("p1", "t1", "c1", 0, 8)]),
+    }),
+  );
+  seq.setMode("arrangement");
+  // 0-based bar 1, a quarter of a bar in: timeline beat 5. A beat counted off
+  // the seek rather than off the timeline would put every accent one out.
+  seq.seek(1.25);
+  seq.play();
+
+  /** The click frames and accents of the run, in absolute frames. */
+  const clicks = [];
+  const walk = (from, to) => {
+    for (let frame = from; frame < to; frame += 128) {
+      seq.block(frame, 128);
+      const click = seq.clickBeats(frame, 128);
+      for (let at = 0; at < click.count; at += 1) {
+        clicks.push({ frame: frame + click.frames[at], accent: click.accents[at] });
+      }
+    }
+  };
+
+  // Two bars of the seeked run, then a pause part way into the third — off the
+  // beat a click sits on — and the rest of the run after it.
+  const pausedAt = FRAMES_PER_BEAT * 4 + 4096; // beat 9.171 of the timeline
+  walk(0, pausedAt);
+  seq.pause();
+  seq.play();
+  walk(pausedAt, FRAMES_PER_BAR * 3);
+
+  // One click per beat of the timeline, from the seeked beat on: frame 0 of the
+  // run is beat 5, and the pause moves nothing.
+  const expectedFrames = [];
+  for (let beat = 5; beat < 17; beat += 1) expectedFrames.push((beat - 5) * FRAMES_PER_BEAT);
+  assert.deepEqual(
+    clicks.map((click) => click.frame),
+    expectedFrames,
+    "every beat of the seeked run clicks once, across the pause",
+  );
+
+  // And the accents are on the bars of the timeline, not on every fourth beat
+  // counted from the seek: 8, 12 and 16, never 7, 11 or 15.
+  assert.ok(clicks.some((click) => click.frame < pausedAt), "there are clicks before the pause");
+  assert.ok(clicks.some((click) => click.frame > pausedAt), "there are clicks after the pause");
+  assert.deepEqual(
+    clicks.filter((click) => click.accent).map((click) => 5 + click.frame / FRAMES_PER_BEAT),
+    [8, 12, 16],
+    "the accents sit on the bar lines of the timeline the playhead was seeked into",
+  );
+});
+
 // --- the engine --------------------------------------------------------------
 
 /** What a case is told when this host cannot load the engine at all. */

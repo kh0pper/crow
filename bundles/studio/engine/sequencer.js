@@ -1876,9 +1876,9 @@
      * PLAYS rather than the stored meter: time-signature support in the engine
      * is a separate gap, so a 3/4 song still accents every fourth beat here, in
      * step with the grid and the arrangement the engine really renders. Beats
-     * are counted from beat 0 of the transport plus the arrangement's origin
-     * beat (`originBeat()`), so the accents sit on the very bar lines a host
-     * shows, at any tempo and after a seek.
+     * are the transport's own: `originFrame` is already anchored on the view's
+     * origin beat, so `index` counts the beats `position()` reports and accents
+     * sit on the bar lines a host shows, at any tempo and after any seek.
      *
      * A stopped transport (or one that has not run yet) has no beat grid at
      * all, so the answer is empty — the count is 0 and nothing is read.
@@ -1905,15 +1905,14 @@
       // frame: the same "x >= frame - 0.5" rule `nextBarFrom` uses, so a beat
       // boundary found here is the boundary the block itself plays.
       let index = Math.max(0, Math.ceil((start - 0.5 - originFrame) / framesPerBeat - EPSILON_BEATS));
-      const origin = originBeat();
-      const end = start + count;
+            const end = start + count;
       const room = Array.isArray(out.frames) ? out.frames.length : 0;
       while (out.count < room) {
         const frame = Math.round(originFrame + index * framesPerBeat);
         if (frame >= end) break;
         if (frame >= start) {
           out.frames[out.count] = frame - start;
-          out.accents[out.count] = (origin + index) % BEATS_PER_BAR === 0;
+          out.accents[out.count] = index % BEATS_PER_BAR === 0;
           out.count += 1;
         }
         index += 1;
