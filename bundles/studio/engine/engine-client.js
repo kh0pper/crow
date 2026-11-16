@@ -116,7 +116,17 @@
  *   transport plays: the session grid, where launches arm clips, or the song's
  *   arrangement, where its placements sound on their bars. Switching mode
  *   closes every sounding note and voice; `seek()` moves the arrangement
- *   playhead, and the next block plays from that bar.
+ *   playhead, and the next block plays from that bar. A bar is read at beat
+ *   resolution, so `seek(2.25)` is bar 2 beat 2; a seek moves a paused
+ *   transport with it, and a session seek leaves a paused session where it is.
+ * - `play()`, `pause()` and `stop()` drive the transport. `play()` starts it, or
+ *   carries on from a pause. `pause()` closes every sounding note and voice but
+ *   keeps the position, the clips the song has armed and the launches already
+ *   queued for a later bar, so the resumed run's beat counter, its click
+ *   accents and its loops keep their phase; pausing a transport that is not
+ *   running (or is already paused) does nothing. `stop()` puts the transport
+ *   back to the start — bar 1 in the session, the seek bar on the timeline — and
+ *   is what a load that waits for Stop lands on.
  * - `setMetronome(on)` turns the engine's metronome click on or off: while the
  *   transport plays, one short click (~25 ms of a sine with a fast decay) on
  *   every quarter-note beat, 1500 Hz and louder on the first beat of an engine
@@ -2054,6 +2064,20 @@
         post({ type: "play" });
       },
 
+      /**
+       * Stop the transport where it stands: every sounding note and voice is
+       * closed as `stop()` closes them, but the position is kept together with
+       * the clips the song has armed and the launches already queued for a
+       * later bar. The next `play()` carries on from the beat the pause
+       * recorded, so the run's beat counter, its click accents and its loops
+       * keep their phase. A pause while the transport is not running, or is
+       * already paused, does nothing.
+       * @returns {void}
+       */
+      pause() {
+        post({ type: "pause" });
+      },
+
       /** @returns {void} */
       stop() {
         post({ type: "stop" });
@@ -2076,6 +2100,14 @@
        * Move the arrangement playhead to a bar. The next block plays from that
        * bar — the takes the timeline holds there start at that very frame —
        * and the notes and voices that were sounding are closed first.
+       *
+       * The bar is at beat resolution: a quarter of a bar is one beat, so
+       * `2.25` is bar 2 beat 2 (0-based), not bar 2. While the transport is
+       * playing the jump happens at the next block and playback carries on;
+       * while it is stopped or paused it only moves the place `play()` starts
+       * from, and a paused transport is moved with it. A seek in the session
+       * view only stores the bar a later switch to the arrangement starts at: it
+       * never moves a session transport, paused or not.
        * @param {number} bar the 0-based bar; anything below 0 is bar 0
        * @returns {void}
        */

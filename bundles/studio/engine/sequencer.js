@@ -63,6 +63,17 @@
  * is cut there. Notes are emitted only for tracks that are not muted and, when
  * any track is soloed, only for the soloed ones.
  *
+ * ## Transport
+ *
+ * `play()` starts the transport, `pause()` stops it where it stands and
+ * `stop()` puts it back to the start (bar 1 in the session, the seek bar on the
+ * timeline). A pause closes every sounding note and voice exactly as a stop
+ * does and keeps the position, but leaves what the song has armed and the
+ * launches already queued for a later bar alone: `play()` carries on from the
+ * beat the pause recorded, so the beat counter, the click accents and every
+ * loop keep their phase. A pause while the transport is not running (or is
+ * already paused) does nothing at all.
+ *
  * ## Arrangement view
  *
  * `setMode("arrangement")` plays the song's timeline instead of the session
@@ -75,8 +86,11 @@
  *
  * `seek(bar)` moves the arrangement playhead: the next block plays from that
  * bar, and the notes and voices that were sounding are closed first. `play()`
- * starts from the seek bar, which is bar 0 until it is moved. A seek in the
- * session view changes nothing that is playing: it only remembers the bar a
+ * starts from the seek bar, which is bar 0 until it is moved. The bar is read
+ * at beat resolution, so `seek(2.25)` is bar 2 beat 2: a playhead can be put
+ * back on any beat, not only on a bar line. A seek moves a paused transport
+ * with it — `play()` then resumes at the bar that was asked for — and a seek in
+ * the session view changes nothing that is playing: it only remembers the bar a
  * later switch to the arrangement starts at, and `setMode()` keeps that bar
  * rather than resetting it.
  *
@@ -343,6 +357,7 @@
    *            stopTrack: function(string): void,
    *            stopAll: function(): void,
    *            play: function(): void,
+   *            pause: function(): void,
    *            stop: function(): void,
    *            setMode: function(string): void,
    *            seek: function(number): void,
@@ -374,6 +389,13 @@
 
     /** The arrangement playhead, in beats from bar 0 (see `seek`). */
     let arrangementBeat = 0;
+
+    /**
+     * Where a pause stopped the transport, in beats from the view's own bar 0,
+     * or `null` when it is not paused. It is the beat the next `play()` carries
+     * on from (see `play`, `block` and `originBeat`).
+     */
+    let pausedBeat = null;
 
     /**
      * Whether the next block has to start its audio from the timeline afresh:
@@ -974,38 +996,61 @@
     }
 
     /**
-     * Start the transport from its beginning, playing the clips that were
-     * sounding, from beat 0. The position resets to 1.1.1.
+     * Stop the transport where it stands: every sounding note gets its off at
+     * the current frame, the beat the playhead reached is kept for `play()` to
+     * carry on from, and what the song has armed (and the launches queued for a
+     * later bar) is left exactly as it is. A pause while the transport is not
+     * running, or is already paused, does nothing.
      */
-    function play() {
-      if (mode === "arrangement") {
-        // The timeline is not armed by launches: it plays wherever the seek
-        // bar left it, so every block from here starts from the placement the
-        // playhead sits in.
-        forceCloseAll(frameNow());
-        forceCloseAllAudio();
-        segments.clear();
-        pending.length = 0;
-        rebuildArrangement();
-        playing = true;
-        originFrame = null;
-        currentFrame = null;
-        lastFrame = null;
-        resync = true;
-        return;
-      }
-      const keep = currentClips();
+    function pause() {
+      if (!playing || pausedBeat !== null) return;
+      // Before the run's first block there is no anchor to measure from yet, so
+      // the beat it would start at is the one to keep.
+      const beat = originFrame === null ? originBeat() : currentBeat();
       forceCloseAll(frameNow());
       forceCloseAllAudio();
-      segments.clear();
-      for (const [trackId, clipId] of keep) {
-        segments.set(trackId, [{ track_id: trackId, clipId: clipId, startBeat: 0, endBeat: null }]);
+      pausedBeat = beat;
+      playing = false;
+      originFrame = null;
+      lastFrame = null;
+      reconcile(frameNow());
+    }
+
+    /**
+     * Start the transport from its beginning, playing the clips that were
+     * sounding, from beat 0. The position resets to 1.1.1.
+     *
+     * After a pause this is not a beginning: the armed clips and the queued
+     * launches are kept, and the next block anchors the beat counter at the
+     * beat the pause recorded, so the run carries on from there.
+     */
+    function play() {
+      // A paused transport is resumed, not restarted: only the takes the
+      // timeline holds at that beat have to be started again (see `resync`).
+      const resuming = pausedBeat !== null;
+      const keep = mode === "arrangement" || resuming ? null : currentClips();
+      forceCloseAll(frameNow());
+      forceCloseAllAudio();
+      if (!resuming) {
+        segments.clear();
+        if (mode === "arrangement") {
+          // The timeline is not armed by launches: it plays wherever the seek
+          // bar left it, so every block from here starts from the placement the
+          // playhead sits in. Nothing launched in the session can land on it.
+          pending.length = 0;
+          rebuildArrangement();
+        } else {
+          for (const [trackId, clipId] of keep) {
+            segments.set(trackId, [{ track_id: trackId, clipId: clipId, startBeat: 0, endBeat: null }]);
+          }
+          keepFirstBarLaunches();
+        }
       }
-      keepFirstBarLaunches();
       playing = true;
       originFrame = null;
       currentFrame = null;
       lastFrame = null;
+      if (mode === "arrangement") resync = true;
     }
 
     /**
@@ -1020,6 +1065,9 @@
       const wanted = nextMode === "arrangement" ? "arrangement" : "session";
       if (wanted === mode) return;
       mode = wanted;
+      // A pause belongs to the view it happened in: the other view starts from
+      // its own origin (bar 1 in the session, the seek bar on the timeline).
+      pausedBeat = null;
       forceCloseAll(frameNow());
       forceCloseAllAudio();
       pending.length = 0;
@@ -1037,17 +1085,24 @@
     /**
      * Move the arrangement playhead to a bar: the next block plays from that
      * bar, and the notes and voices that were sounding are closed first. A
-     * seek while the transport is stopped only moves the bar `play()` starts
-     * from, and a seek in the session view only stores the bar: the session's
-     * transport, its sounding notes and its scheduled launches are none of a
-     * timeline seek's business.
-     * @param {number} bar the 0-based bar; anything below 0 is bar 0
+     * seek while the transport is stopped or paused only moves the place
+     * `play()` starts from, and a seek in the session view only stores the bar:
+     * the session's transport, its sounding notes, its scheduled launches and
+     * its paused position are none of a timeline seek's business.
+     * @param {number} bar the 0-based bar at beat resolution — `2.25` is bar 2
+     *   beat 2 — anything below 0 is bar 0
      */
     function seek(bar) {
       const value = Number(bar);
       if (!Number.isFinite(value)) return;
-      arrangementBeat = Math.max(0, Math.trunc(value)) * BEATS_PER_BAR;
+      // Beat resolution, never a whole bar: a quarter of a bar is rounded to,
+      // so the playhead can be put back on any beat.
+      const bars = Math.round(value * BEATS_PER_BAR) / BEATS_PER_BAR;
+      arrangementBeat = Math.max(0, bars) * BEATS_PER_BAR;
       if (mode !== "arrangement") return;
+      // A paused transport moves with the ruler: `play()` resumes from the bar
+      // that was asked for.
+      if (pausedBeat !== null) pausedBeat = arrangementBeat;
       forceCloseAll(frameNow());
       forceCloseAllAudio();
       pending.length = 0;
@@ -1473,6 +1528,7 @@
         forceCloseAll(frameNow());
         forceCloseAllAudio();
         playing = false;
+        pausedBeat = null;
         originFrame = null;
         lastFrame = null;
         return;
@@ -1486,6 +1542,7 @@
       }
       keepFirstBarLaunches();
       playing = false;
+      pausedBeat = null;
       originFrame = null;
       lastFrame = null;
     }
@@ -1819,9 +1876,9 @@
      * PLAYS rather than the stored meter: time-signature support in the engine
      * is a separate gap, so a 3/4 song still accents every fourth beat here, in
      * step with the grid and the arrangement the engine really renders. Beats
-     * are counted from beat 0 of the transport plus the arrangement's origin
-     * beat (`originBeat()`), so the accents sit on the very bar lines a host
-     * shows, at any tempo and after a seek.
+     * are the transport's own: `originFrame` is already anchored on the view's
+     * origin beat, so `index` counts the beats `position()` reports and accents
+     * sit on the bar lines a host shows, at any tempo and after any seek.
      *
      * A stopped transport (or one that has not run yet) has no beat grid at
      * all, so the answer is empty — the count is 0 and nothing is read.
@@ -1848,15 +1905,14 @@
       // frame: the same "x >= frame - 0.5" rule `nextBarFrom` uses, so a beat
       // boundary found here is the boundary the block itself plays.
       let index = Math.max(0, Math.ceil((start - 0.5 - originFrame) / framesPerBeat - EPSILON_BEATS));
-      const origin = originBeat();
-      const end = start + count;
+            const end = start + count;
       const room = Array.isArray(out.frames) ? out.frames.length : 0;
       while (out.count < room) {
         const frame = Math.round(originFrame + index * framesPerBeat);
         if (frame >= end) break;
         if (frame >= start) {
           out.frames[out.count] = frame - start;
-          out.accents[out.count] = (origin + index) % BEATS_PER_BAR === 0;
+          out.accents[out.count] = index % BEATS_PER_BAR === 0;
           out.count += 1;
         }
         index += 1;
@@ -1893,8 +1949,12 @@
         // Beat 0 of the transport sits on the timeline's bar 0 in session mode
         // and on the arrangement playhead's beat in arrangement mode — which is
         // what makes `position()` and the bar boundaries read the timeline's
-        // own bars after a seek.
-        if (originFrame === null) originFrame = start - originBeat() * framesPerBeat;
+        // own bars after a seek. A run resumed after a pause is anchored on the
+        // beat the pause recorded instead, so the counter carries on from there.
+        if (originFrame === null) {
+          originFrame = start - originBeat() * framesPerBeat;
+          pausedBeat = null;
+        }
         if (currentFrame === null || start > currentFrame) currentFrame = start;
       }
 
@@ -2490,13 +2550,18 @@
     }
 
     /**
-     * Where the last processed frame sits, 1-based.
+     * Where the last processed frame sits, 1-based. A paused transport reports
+     * the beat the pause kept, so the position stands still where it stopped.
      * @returns {{bar: number, beat: number, sixteenth: number}}
      */
     function position() {
-      if (originFrame === null) return { bar: 1, beat: 1, sixteenth: 1 };
-      const frame = lastFrame === null ? originFrame : lastFrame;
-      const beats = Math.max(0, (frame - originFrame) / framesPerBeat);
+      let beats = 0;
+      if (originFrame !== null) {
+        const frame = lastFrame === null ? originFrame : lastFrame;
+        beats = Math.max(0, (frame - originFrame) / framesPerBeat);
+      } else if (pausedBeat !== null) {
+        beats = pausedBeat;
+      }
       const barIndex = Math.floor(beats / BEATS_PER_BAR);
       const inBar = beats - barIndex * BEATS_PER_BAR;
       const beatIndex = Math.floor(inBar);
@@ -2640,8 +2705,13 @@
       return 3; // "audio"
     }
 
-    /** @returns {number} the timeline beat the transport's beat 0 sits on. */
+    /**
+     * @returns {number} the timeline beat the transport's beat 0 sits on: the
+     *   arrangement playhead's beat, or — after a pause — the beat the pause
+     *   kept, which is where the resumed run's beat counter starts.
+     */
     function originBeat() {
+      if (pausedBeat !== null) return pausedBeat;
       return mode === "arrangement" ? arrangementBeat : 0;
     }
 
@@ -2652,6 +2722,7 @@
       stopTrack: stopTrack,
       stopAll: stopAll,
       play: play,
+      pause: pause,
       stop: stop,
       setMode: setMode,
       seek: seek,

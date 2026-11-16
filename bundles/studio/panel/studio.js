@@ -762,6 +762,17 @@ const STYLES = `
   .studio .st-mode + .st-mode { border-left: 1px solid var(--st-edge); }
   .studio .st-mode[aria-pressed=true] { background: #2E3A2F; }
   .studio .st-tl-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  /* The timeline's own scale: two 44 px buttons and the step it is on. Zoom is
+     visual, so these change the width of the lanes and nothing about the song. */
+  .studio .st-zoom {
+    min-width: 44px; min-height: 44px; padding: 0 10px;
+    font-size: 16px; font-weight: 700; line-height: 1;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-zoom-read {
+    min-width: 44px; text-align: center;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; color: var(--st-muted);
+  }
   .studio .st-tl-rec { display: flex; align-items: center; gap: 8px; }
   .studio .st-tl-rec[aria-pressed=true] { background: #3A1F1C; border-color: var(--st-danger); }
   .studio .st-tl-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--st-danger); flex: 0 0 auto; }
@@ -792,9 +803,13 @@ const STYLES = `
   /* A marker's and a section's name is a button (so the keyboard can reach it),
      and the small one beside it removes it after a yes. */
   .studio .st-tl-tag-btn {
-    min-height: 22px; padding: 0 4px; border: 0; border-radius: 4px; background: transparent;
+    /* A chip keeps a readable width at every zoom: the full name is its title,
+       and a name too long for the chip ends in an ellipsis instead of running
+       over the bar it sits on. */
+    min-width: 56px; max-width: 150px; min-height: 22px; padding: 0 4px;
+    border: 0; border-radius: 4px; background: transparent;
     color: inherit; font: inherit; font-weight: inherit; cursor: pointer;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .studio .st-tl-tag-btn:focus-visible { outline: 2px solid #FFFFFF; outline-offset: 1px; }
   .studio .st-tl-tag-x {
@@ -818,6 +833,12 @@ const STYLES = `
   .studio .st-tl-playhead {
     position: absolute; top: 0; bottom: 0; width: 2px; background: #FFFFFF; pointer-events: none;
   }
+  /* The whole-bar cut a split would make: the bar line the playhead stands on,
+     drawn before the button is pressed (and named by the Split label). */
+  .studio .st-cut-mark {
+    position: absolute; top: 0; bottom: 0; width: 0; pointer-events: none;
+    border-left: 1px dashed #E8C07A; opacity: 0.85;
+  }
   .studio .st-tl-lane-head { display: flex; align-items: center; gap: 8px; }
   .studio .st-tl-color { width: 8px; align-self: stretch; min-height: 30px; border-radius: 3px; flex: 0 0 auto; }
   .studio .st-tl-lane-name { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
@@ -827,7 +848,37 @@ const STYLES = `
   }
   .studio .st-tl-lane-kind { font-size: 11px; color: var(--st-muted); }
   .studio .st-tl-lane-body { position: relative; height: 54px; touch-action: none; }
+  /* A clip dragged out of the grid: the lane it is over is outlined and the one
+     bar it would take is filled in, so a drop is never a guess. */
+  .studio .st-tl-lane-body.st-lane-target {
+    outline: 2px solid var(--st-human); outline-offset: -2px; background-color: #1F2328;
+  }
+  .studio .st-bar-target {
+    position: absolute; top: 0; bottom: 0; pointer-events: none;
+    background: rgba(242, 165, 65, 0.18);
+    border-left: 1px solid var(--st-human); border-right: 1px solid var(--st-human);
+  }
+  /* The ghost beside the pointer, with the name of the clip being placed. It is a
+     child of the page's body rather than of the studio box (see makeDragGhost),
+     so this one rule is written outside the studio scope and brings its own
+     colours. */
+  .st-drag-ghost {
+    position: fixed; z-index: 1300; left: 0; top: 0; pointer-events: none;
+    display: flex; align-items: center; max-width: 240px; min-height: 44px; padding: 0 12px;
+    border-radius: 8px; border: 1px solid #F2A541; background: #24282D; color: #E9E6DF;
+    font-family: Inter, system-ui, sans-serif; font-size: 13px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  /* A timeline with nothing on it says how a first placement is made. */
+  .studio .st-tl-empty { margin: 12px 14px; }
   .studio .st-tl-block {
+    /* A block keeps a readable width at every zoom: a one-bar placement is 16 px
+       wide at half zoom, so it holds a minimum and its label ends in an ellipsis
+       (the full name is its title and its aria-label, and the placement bar
+       names it again when it is selected). */
+    min-width: 28px;
     position: absolute; top: 7px; height: 40px; box-sizing: border-box; padding: 0 8px;
     border-radius: 6px; border: 2px solid var(--st-human); background: #24282D; color: #121417;
     font: inherit; text-align: left; overflow: hidden; cursor: grab; touch-action: none;
@@ -1256,6 +1307,7 @@ function studioPage({ songId, render, res }) {
         <div class="st-transport">
           <button class="st-btn st-transport-btn" type="button" data-act="play" title="Play" aria-label="Play">▶</button>
           <button class="st-btn st-transport-btn" type="button" data-act="stop" title="Stop" aria-label="Stop">■</button>
+          <button class="st-btn st-transport-btn" type="button" data-act="pause" title="Pause" aria-label="Pause">❚❚</button>
           <button class="st-btn st-transport-btn st-record-btn" type="button" data-act="record" title="Record into the armed track" aria-label="Record" disabled>●</button>
           <button class="st-btn st-small st-click-btn" type="button" data-act="metronome" aria-pressed="false"
             title="Metronome: a click on every beat while it plays">Click</button>
@@ -1285,6 +1337,9 @@ function studioPage({ songId, render, res }) {
             <span class="st-tl-rec-dot" aria-hidden="true"></span>Record to timeline
           </button>
           <button class="st-btn" type="button" data-act="split" title="Split the selected placement, or the one under the playhead, at the playhead">Split at playhead</button>
+          <button class="st-btn st-zoom" type="button" data-act="zoom-out" aria-label="Zoom out" title="Zoom out: fewer pixels a bar">−</button>
+          <span class="st-zoom-read" data-role="zoom" title="The timeline's zoom">1×</span>
+          <button class="st-btn st-zoom" type="button" data-act="zoom-in" aria-label="Zoom in" title="Zoom in: more pixels a bar">+</button>
           <span class="st-legend"><span class="st-dot" aria-hidden="true"></span>You</span>
           <span class="st-legend"><span class="st-dot st-dot-agent" aria-hidden="true"></span>Crow agent</span>
         </div>

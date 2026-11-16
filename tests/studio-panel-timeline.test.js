@@ -21,7 +21,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
@@ -32,6 +32,7 @@ import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb } from "../bundles/studio/server/web.js";
 import studioPanel from "../bundles/studio/panel/studio.js";
+import { TIMELINE_BASE_PX, zoomedBarX } from "../bundles/studio/panel/client.js";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
 /** The SunVox track the timeline places a note clip on. */
@@ -56,6 +57,10 @@ const T2 = "0a1b2c3d-0000-4000-8000-000000000012";
 /** The placements the fixture song starts with. */
 const NOTE_PLACEMENT = "p-notes";
 const AUDIO_PLACEMENT = "p-audio";
+
+/** The sample track the pattern clip sits on, and the clip itself. */
+const PATTERN_TRACK = "drums";
+const PATTERN_CLIP = "c-drums";
 
 /** The project the live test's song lives in, and its storage prefix. */
 const PROJECT = 53;
@@ -254,6 +259,8 @@ function fakeEngine() {
     modes: [],
     seeks: [],
     plays: 0,
+    pauses: 0,
+    stops: 0,
     positions: [],
     launches: [],
     node: { connect() {} },
@@ -269,7 +276,12 @@ function fakeEngine() {
     play() {
       engine.plays += 1;
     },
-    stop() {},
+    pause() {
+      engine.pauses += 1;
+    },
+    stop() {
+      engine.stops += 1;
+    },
     stopAll() {},
     launchScene() {},
     onPosition(listener) {
@@ -568,6 +580,21 @@ function timelineBox(top = 0) {
   return { left: 0, top, width: 320, height: 54, right: 320, bottom: top + 54, x: 0, y: top };
 }
 
+/** Stub the bar ruler's own box: 32 bars, 10 px each. */
+function stubRuler(ui) {
+  const strip = ui.document.querySelector("[data-role=bar-ruler]");
+  assert.ok(strip, "the timeline draws the bar ruler");
+  strip.getBoundingClientRect = () => ({
+    left: 0, top: 0, width: 320, height: 18, right: 320, bottom: 18, x: 0, y: 0,
+  });
+  return strip;
+}
+
+/** Press the ruler at a point, the way a pointer would. */
+function rulerPress(ui, strip, clientX) {
+  strip.dispatchEvent(ui.event("pointerdown", { button: 0, clientX }));
+}
+
 /** Stub the box of every lane body, the way a laid-out browser would report it. */
 function stubLanes(ui) {
   const lanes = ui.document.querySelectorAll("[data-role=lane-body]");
@@ -597,6 +624,59 @@ function rollBox() {
 
 /** How tall the piano roll is: 128 rows of 12 px, as the client draws it. */
 const KEY_ROLL_HEIGHT = 128 * 12;
+
+/**
+ * The fixture song with its arrangement emptied: nothing on either lane.
+ * @returns {Promise<import("yjs").Doc>}
+ */
+async function unplacedDoc() {
+  const doc = await timelineDoc();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(doc, "arrangement.remove", { id: NOTE_PLACEMENT });
+  runCommand(doc, "arrangement.remove", { id: AUDIO_PLACEMENT });
+  return doc;
+}
+
+/**
+ * A song with one sampler track and one pattern clip, so the pad-and-steps view
+ * has a clip of its own to offer the timeline.
+ * @returns {Promise<import("yjs").Doc>}
+ */
+async function patternDoc() {
+  const { newSongDoc } = await import("../bundles/studio/server/doc.js");
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  await import("../bundles/studio/server/commands/core.js");
+  await import("../bundles/studio/server/commands/sampler.js");
+
+  const doc = newSongDoc({ title: "Pattern song", bpm: 120 });
+  runCommand(doc, "track.add", { id: PATTERN_TRACK, name: "Drums", kind: "sampler" });
+  runCommand(doc, "scene.add", { id: SCENE, name: "Verse" });
+  runCommand(doc, "clip.add_pattern", {
+    clip_id: PATTERN_CLIP,
+    track_id: PATTERN_TRACK,
+    scene_id: SCENE,
+    name: "Kit loop",
+  });
+  return doc;
+}
+
+/**
+ * Drag the fixture's note clip out of the grid to a point, with the lanes drawn
+ * under it and their boxes given the way a laid-out browser reports them.
+ * @param {object} ui the booted page
+ * @param {{clientX: number, clientY: number}} point where the pointer is
+ */
+async function dragNoteClipTo(ui, point) {
+  const clip = ui.document.querySelector(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  assert.ok(clip, "the clip is on the session grid");
+  clip.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: 100, clientY: 100 }));
+  // The first move brings the lanes up, which is when a browser lays them out.
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: point.clientX, clientY: point.clientY }));
+  await ui.settle();
+  stubLanes(ui);
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: point.clientX, clientY: point.clientY }));
+  await ui.settle();
+}
 
 // ---- the tests that need no browser ---------------------------------------
 
@@ -637,9 +717,238 @@ test("drag from grid places a clip", async () => {
   assert.equal(typeof placed[0].cmd_id, "string", "with a client-generated cmd_id");
   assert.equal(
     ui.document.querySelector("[data-role=timeline]").hidden,
-    true,
-    "and the session view comes back after the drop",
+    false,
+    "and the timeline is the view once the clip is placed",
   );
+  assert.equal(
+    ui.document.querySelector("[data-role=grid-wrap]").hidden,
+    true,
+    "with the grid put away, so the new placement is what the operator is looking at",
+  );
+});
+
+test("dragging shows a ghost with the clip name that follows the pointer", async () => {
+  const ui = await bootTimeline();
+  const clip = ui.document.querySelector(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  assert.ok(clip, "the clip is on the session grid");
+
+  clip.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: 100, clientY: 100 }));
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: 130, clientY: 140 }));
+  await ui.settle();
+
+  const ghost = ui.document.querySelector("[data-role=drag-ghost]");
+  assert.ok(ghost, "the drag carries a ghost");
+  assert.equal(ghost.textContent, "Bass line", "with the clip's own name on it");
+  const firstLeft = Number.parseFloat(ghost.style.left);
+  assert.equal(firstLeft, 142, "beside the pointer, twelve pixels to its right");
+  assert.equal(Number.parseFloat(ghost.style.top), 152, "and twelve pixels below it");
+
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: 200, clientY: 140 }));
+  await ui.settle();
+  assert.equal(
+    ui.document.querySelectorAll("[data-role=drag-ghost]").length,
+    1,
+    "there is still one ghost, not one per move",
+  );
+  assert.equal(Number.parseFloat(ghost.style.left), 212, "and it followed the pointer");
+});
+
+test("the lane and bar under the pointer carry .st-lane-target and .st-bar-target", async () => {
+  const ui = await bootTimeline();
+  // 85 px on a 320 px, 32-bar lane is bar index 8, on the note track's lane.
+  await dragNoteClipTo(ui, { clientX: 85, clientY: 20 });
+
+  const lane = ui.document.querySelector(`[data-lane-id=${NOTE_TRACK}] [data-role=lane-body]`);
+  assert.ok(lane, "the note track has a lane");
+  assert.equal(lane.classList.contains("st-lane-target"), true, "the lane it would land on is outlined");
+  const bands = lane.querySelectorAll("[data-role=bar-target]");
+  assert.equal(bands.length, 1, "and one bar of it is marked");
+  assert.equal(bands[0].classList.contains("st-bar-target"), true, "with the bar target's own class");
+  assert.equal(bands[0].getAttribute("data-bar"), "8", "the bar under the pointer");
+  assert.match(String(bands[0].getAttribute("style")), /left:25%/, "drawn where bar 9 of 32 sits");
+
+  const other = ui.document.querySelector(`[data-lane-id=${AUDIO_TRACK}] [data-role=lane-body]`);
+  assert.ok(other, "the audio track has a lane too");
+  assert.equal(other.classList.contains("st-lane-target"), false, "a lane the pointer is not on is left alone");
+  assert.equal(other.querySelectorAll("[data-role=bar-target]").length, 0, "and marks no bar");
+
+  // Moving onto the other lane moves both marks with the pointer.
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: 85, clientY: 80 }));
+  await ui.settle();
+  assert.equal(
+    ui.document.querySelector(`[data-lane-id=${AUDIO_TRACK}] [data-role=lane-body]`).classList.contains("st-lane-target"),
+    true,
+    "the lane under the pointer is the one outlined",
+  );
+  assert.equal(
+    ui.document.querySelector(`[data-lane-id=${NOTE_TRACK}] [data-role=lane-body]`).classList.contains("st-lane-target"),
+    false,
+    "and the one it left is not",
+  );
+
+  // The release takes both marks off the page.
+  ui.release({ clientX: 85, clientY: 80 });
+  await ui.settle();
+  assert.equal(ui.document.querySelector("[data-role=bar-target]"), null, "no bar is marked after the drop");
+  assert.equal(ui.document.querySelector(".st-lane-target"), null, "and no lane is outlined");
+});
+
+test("one drop sends exactly one arrangement.place; a second pointerup sends none", async () => {
+  const ui = await bootTimeline();
+  await dragNoteClipTo(ui, { clientX: 85, clientY: 20 });
+
+  ui.release({ clientX: 85, clientY: 20 });
+  await ui.settle();
+  assert.equal(commands(ui, "arrangement.place").length, 1, "the whole drag is one placement");
+
+  // The release that ended the drag took its listeners off: a second one, from a
+  // pointer the drop already finished with, writes nothing.
+  ui.release({ clientX: 85, clientY: 20 });
+  await ui.settle();
+  assert.equal(commands(ui, "arrangement.place").length, 1, "a second pointerup sends no placement");
+  assert.equal(allCommands(ui).length, 1, "and nothing else either");
+});
+
+test("after a drop the arrangement is the view and the new placement is selected", async () => {
+  const ui = await bootTimeline();
+  await dragNoteClipTo(ui, { clientX: 85, clientY: 20 });
+  ui.release({ clientX: 85, clientY: 20 });
+  await ui.settle();
+
+  const placed = commands(ui, "arrangement.place");
+  assert.equal(placed.length, 1);
+  assert.equal(ui.document.querySelector("[data-role=timeline]").hidden, false, "the lanes are the view");
+  assert.equal(ui.document.querySelector("[data-role=grid-wrap]").hidden, true, "and the grid is put away");
+  assert.equal(
+    ui.document.querySelector("[data-act=mode-arrangement]").getAttribute("aria-pressed"),
+    "true",
+    "the view switch says which one is on",
+  );
+
+  // The hub's answer carries the placement the page sent; it arrives selected.
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  const { encodeDocState } = await import("../bundles/studio/server/doc.js");
+  runCommand(ui.doc, "arrangement.place", placed[0].args);
+  ui.frame({
+    type: "state",
+    update: Buffer.from(encodeDocState(ui.doc)).toString("base64"),
+    history: [],
+    presence: [],
+  });
+  await ui.settle();
+
+  const block = ui.document.querySelector(`[data-placement-id=${placed[0].args.id}]`);
+  assert.ok(block, "the new placement is drawn on its lane");
+  assert.equal(
+    String(block.getAttribute("class")).includes("st-tl-block-sel"),
+    true,
+    "and it is the selected block",
+  );
+  assert.match(
+    String(ui.document.querySelector("[data-role=placement-bar]").textContent),
+    /Placement: Bass line/,
+    "the placement bar names it",
+  );
+});
+
+test("the toast reads Placed on <track> at bar N, once the hub has taken the place", async () => {
+  const ui = await bootTimeline();
+  await dragNoteClipTo(ui, { clientX: 85, clientY: 20 });
+  ui.release({ clientX: 85, clientY: 20 });
+  await ui.settle();
+
+  const placed = commands(ui, "arrangement.place");
+  assert.equal(placed.length, 1, "the drop sent its place");
+  const toast = ui.document.querySelector("[data-role=toast]");
+  assert.equal(toast.hidden, true, "nothing is claimed before the hub answers");
+  assert.equal(toast.textContent, "", "and no sentence is on the page yet");
+
+  ui.frame({ type: "result", cmd_id: placed[0].cmd_id, ok: true });
+  await ui.settle();
+  assert.equal(toast.hidden, false, "the page says where the clip went");
+  assert.equal(toast.textContent, "Placed on Bass at bar 9", "the lane's name and the bar it landed on");
+});
+
+test("a refused place says why, not where it went", async () => {
+  const ui = await bootTimeline();
+  await dragNoteClipTo(ui, { clientX: 85, clientY: 20 });
+  ui.release({ clientX: 85, clientY: 20 });
+  await ui.settle();
+
+  const placed = commands(ui, "arrangement.place");
+  assert.equal(placed.length, 1, "the drop sent its place");
+  ui.frame({
+    type: "result",
+    cmd_id: placed[0].cmd_id,
+    ok: false,
+    code: "refused",
+    error: "Bars 9 to 10 are already taken on Bass.",
+  });
+  await ui.settle();
+
+  const toast = ui.document.querySelector("[data-role=toast]");
+  assert.equal(toast.hidden, false, "the refusal is said");
+  assert.equal(toast.textContent, "Bars 9 to 10 are already taken on Bass.", "in the hub's own words");
+  assert.equal(String(toast.textContent).includes("Placed on"), false, "and never as a placement");
+});
+
+test("a drop on no lane sends nothing and returns to the previous view", async () => {
+  const ui = await bootTimeline();
+  const clip = ui.document.querySelector(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  clip.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: 100, clientY: 100 }));
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: 140, clientY: 130 }));
+  await ui.settle();
+  stubLanes(ui);
+  assert.equal(
+    ui.document.querySelector("[data-role=timeline]").hidden,
+    false,
+    "the drag brought the lanes up to be dropped on",
+  );
+
+  // Well below the last lane, where no drop target is.
+  ui.release({ clientX: 140, clientY: 400 });
+  await ui.settle();
+
+  assert.deepEqual(allCommands(ui), [], "a drop on nothing writes nothing");
+  assert.equal(
+    ui.document.querySelector("[data-role=timeline]").hidden,
+    true,
+    "and the view it was dragged from is back",
+  );
+  assert.equal(ui.document.querySelector("[data-role=drag-ghost]"), null, "the ghost is gone with the drag");
+  assert.equal(ui.document.querySelector(".st-lane-target"), null, "and no lane is left outlined");
+});
+
+test("a drop while the session is playing leaves the engine's view alone", async () => {
+  const storage = memoryStorage();
+  const ui = await bootTimeline({ storage });
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  assert.equal(ui.engine.plays, 1, "the session transport is running");
+
+  await dragNoteClipTo(ui, { clientX: 85, clientY: 20 });
+  ui.release({ clientX: 85, clientY: 20 });
+  await ui.settle();
+
+  assert.equal(commands(ui, "arrangement.place").length, 1, "the drop still went to the hub");
+  assert.equal(
+    ui.engine.modes.includes("arrangement"),
+    false,
+    "the engine was not switched to the timeline, so the session keeps sounding",
+  );
+  assert.equal(ui.engine.stops, 0, "nothing stopped");
+  assert.equal(ui.engine.pauses, 0, "and nothing paused");
+  assert.equal(
+    storage.getItem("crow-studio-mode:song-1"),
+    null,
+    "and nothing was stored for the engine to open in",
+  );
+  assert.equal(
+    ui.document.querySelector("[data-role=timeline]").hidden,
+    false,
+    "the timeline is what the page shows",
+  );
+  assert.equal(ui.document.querySelector("[data-role=grid-wrap]").hidden, true, "with the grid put away");
 });
 
 test("record to timeline turns 3 launches into 3 placements in one step", async () => {
@@ -1279,6 +1588,77 @@ test("session view places a clip at bar 1 and the timeline keeps its playhead", 
   );
 });
 
+test("Add to timeline is in the clip editor header and in the sampler header", async () => {
+  const ui = await bootTimeline();
+  ui.click(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  await ui.settle();
+
+  const add = ui.document.querySelector("[data-role=editor] [data-act=place-on-timeline]");
+  assert.ok(add, "the clip editor's header offers it");
+  assert.equal(String(add.textContent), "Add to timeline", "named for what it does");
+
+  ui.click("[data-role=editor] [data-act=place-on-timeline]");
+  await ui.settle();
+  const sent = commands(ui, "arrangement.place");
+  assert.equal(sent.length, 1, "pressing it places the clip once");
+  assert.equal(sent[0].args.track_id, NOTE_TRACK, "on the clip's own track");
+  assert.equal(sent[0].args.start_bar, 0, "at bar 1 from Session view, which has no playhead");
+  assert.equal(
+    ui.document.querySelector("[data-role=timeline]").hidden,
+    false,
+    "and the timeline is what the page shows",
+  );
+  // The page says where it went once the hub has taken it.
+  ui.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: true });
+  await ui.settle();
+  assert.equal(
+    ui.document.querySelector("[data-role=toast]").textContent,
+    "Placed on Bass at bar 1",
+    "and the toast says where it went",
+  );
+
+  // A pattern clip's own view carries the same button.
+  const pattern = await bootTimeline({ doc: await patternDoc() });
+  pattern.click(`[data-act=open-clip][data-clip-id=${PATTERN_CLIP}]`);
+  await pattern.settle();
+  const inSampler = pattern.document.querySelector("[data-role=sampler] [data-act=place-on-timeline]");
+  assert.ok(inSampler, "the pad-and-steps view offers it too");
+  assert.equal(String(inSampler.textContent), "Add to timeline", "under the same name");
+
+  pattern.click("[data-role=sampler] [data-act=place-on-timeline]");
+  await pattern.settle();
+  const placed = commands(pattern, "arrangement.place");
+  assert.equal(placed.length, 1, "pressing it places the pattern clip once");
+  assert.equal(placed[0].args.clip_id, PATTERN_CLIP, "the clip it was pressed on");
+  assert.equal(placed[0].args.track_id, PATTERN_TRACK, "on its own track");
+  assert.equal(
+    pattern.document.querySelector("[data-role=timeline]").hidden,
+    false,
+    "and the timeline is the view",
+  );
+  pattern.frame({ type: "result", cmd_id: placed[0].cmd_id, ok: true });
+  await pattern.settle();
+  assert.equal(
+    pattern.document.querySelector("[data-role=toast]").textContent,
+    "Placed on Drums at bar 1",
+    "with the toast naming the lane",
+  );
+});
+
+test("the empty timeline says how a first placement is made", async () => {
+  const ui = await bootTimeline({ doc: await unplacedDoc() });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  const note = ui.document.querySelector("[data-role=timeline-empty]");
+  assert.ok(note, "the empty timeline has something to say");
+  assert.equal(
+    note.textContent,
+    "Drag a clip up here, or press Add to timeline on a clip.",
+    "the two ways a first placement is made",
+  );
+});
+
 test("a marker and a section are renamed and removed from their own buttons", async () => {
   const ui = await bootTimeline();
   ui.click("[data-act=mode-arrangement]");
@@ -1312,6 +1692,613 @@ test("a marker and a section are renamed and removed from their own buttons", as
   const gone = commands(ui, "section.remove");
   assert.equal(gone.length, 1, "and it can be removed");
   assert.deepEqual(gone[0].args, { id: "sec-intro" });
+});
+
+/**
+ * The fixture song with a placement that covers the first four bars, so a split
+ * has something under the playhead, and a second scene, so a recording made
+ * from the timeline has a free slot for its clip.
+ * @returns {Promise<import("yjs").Doc>}
+ */
+async function coverDoc() {
+  const doc = await timelineDoc();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(doc, "arrangement.remove", { id: NOTE_PLACEMENT });
+  runCommand(doc, "arrangement.place", {
+    id: NOTE_PLACEMENT,
+    track_id: NOTE_TRACK,
+    clip_id: NOTE_CLIP,
+    start_bar: 0,
+    bars: 4,
+  });
+  runCommand(doc, "scene.add", { id: "chorus", name: "Chorus" });
+  return doc;
+}
+
+/** One lane's bar for bar N of 32, as the percentage the page draws. */
+function barLeft(n) {
+  return String(Math.round((n / 32) * 100 * 1000) / 1000) + "%";
+}
+
+// ---- the playhead, the cut bar and Pause --------------------------------
+
+test("floorBar(2.75) is 2 and floorBar(3) is 3", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  // Bar 3 beat 4 is two and three quarter bars: the playhead stands inside
+  // bar 3, on the line of bar 2 -- bar 3 to the operator.
+  ui.position({ bar: 3, beat: 4, sixteenth: 1 });
+  const cuts = [...ui.document.querySelectorAll("[data-role=cut-mark]")];
+  assert.ok(cuts.length >= 3, "the cut mark is on the ruler and on every lane");
+  for (const mark of cuts) {
+    assert.equal(mark.classList.contains("st-cut-mark"), true, "it wears the cut mark's class");
+    assert.equal(mark.style.left, barLeft(2), "and stands on bar 2 of 32");
+  }
+  assert.equal(
+    ui.document.querySelector("[data-act=split]").textContent,
+    "Split at bar 3",
+    "the button names the bar it would cut",
+  );
+  assert.equal(
+    commands(ui, "arrangement.split").length,
+    0,
+    "and nothing has been cut: the mark and the label are there before any press",
+  );
+
+  // A playhead exactly on a bar line is that bar, not the one before.
+  ui.position({ bar: 4, beat: 1, sixteenth: 1 });
+  assert.equal(
+    ui.document.querySelector("[data-role=cut-mark]").style.left,
+    barLeft(3),
+    "a playhead on a bar line stands on that line",
+  );
+  assert.equal(
+    ui.document.querySelector("[data-act=split]").textContent,
+    "Split at bar 4",
+    "which the button names too",
+  );
+});
+
+test("Split, Add to timeline, marker add and Record to timeline send whole bars", async () => {
+  const ui = await bootTimeline({ doc: await coverDoc() });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  // Two and three quarter bars: the bar line at or before it is bar 2.
+  ui.position({ bar: 3, beat: 4, sixteenth: 1 });
+
+  // Split at playhead.
+  ui.click("[data-act=split]");
+  await ui.settle();
+  const split = commands(ui, "arrangement.split");
+  assert.equal(split.length, 1, "the split went out");
+  assert.equal(Number.isInteger(split[0].args.at_bar), true, "at_bar is a whole bar");
+  assert.equal(split[0].args.at_bar, 2, "the bar line the playhead stands on");
+
+  // Add to timeline, from the clip's own editor.
+  ui.click(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  await ui.settle();
+  ui.click("[data-role=editor] [data-act=place-on-timeline]");
+  await ui.settle();
+
+  // A marker added on the marker row, inside the same bar.
+  const row = ui.document.querySelector("[data-role=marker-row]");
+  assert.ok(row, "the ruler draws the marker row");
+  row.getBoundingClientRect = () => ({
+    left: 0, top: 0, width: 320, height: 18, right: 320, bottom: 18, x: 0, y: 0,
+  });
+  row.dispatchEvent(ui.event("click", { clientX: 27.5 }));
+  await ui.settle();
+
+  // Record to timeline: with the playhead here and an armed audio track, the
+  // recording starts its new clip and its placement on this bar.
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const placed = commands(ui, "arrangement.place");
+  assert.equal(placed.length, 2, "Add to timeline placed one, and the recording placed its own");
+  for (const message of placed) {
+    assert.equal(Number.isInteger(message.args.start_bar), true, "every start_bar is a whole bar");
+    assert.equal(message.args.start_bar, 2, "on the bar line the playhead stands on");
+  }
+  const marker = commands(ui, "marker.add");
+  assert.equal(marker.length, 1, "the marker went out");
+  assert.equal(Number.isInteger(marker[0].args.bar), true, "on a whole bar");
+  assert.equal(marker[0].args.bar, 2, "the bar the cut mark stands on");
+});
+
+test("a take armed on a fractional playhead starts on the floor bar", async () => {
+  const ui = await bootTimeline({ doc: await coverDoc() });
+  // Play and Stop first: the engine exists, so a position frame reaches the page.
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.click("[data-act=stop]");
+  await ui.settle();
+
+  // Two and three quarter bars: the playhead stands inside bar 3, on the line
+  // of bar 2, which is where the take's placement goes.
+  ui.position({ bar: 3, beat: 4, sixteenth: 1 });
+  assert.equal(
+    ui.document.querySelector("[data-role=playhead]").style.left,
+    barLeft(2.75),
+    "the playhead is where the position frame put it, a beat into the bar",
+  );
+
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  assert.deepEqual(ui.engine.seeks, [2], "the engine was moved to the bar the take's placement is on");
+  assert.equal(
+    ui.document.querySelector("[data-role=playhead]").style.left,
+    barLeft(2),
+    "and the page's playhead stands on that same bar",
+  );
+  const placed = commands(ui, "arrangement.place");
+  assert.equal(placed.length, 1, "the new clip's placement went out");
+  assert.equal(placed[0].args.start_bar, 2, "on the floor bar");
+  const recorder = ui.engine.recorders[0];
+  assert.ok(recorder, "the recorder was built");
+  assert.equal(recorder.armed, 48000, "and armed on the frame the engine reports from that bar");
+});
+
+test("the ruler seeks in Arrangement; the Session view does not seek", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const strip = stubRuler(ui);
+
+  // 65 px of a 32-bar, 320 px ruler is six and a half bars.
+  rulerPress(ui, strip, 65);
+  await ui.settle();
+  ui.release();
+  assert.deepEqual(ui.engine.seeks, [6], "a click seeks the bar under it");
+  assert.equal(Number.isInteger(ui.engine.seeks[0] * 4), true, "a whole number of beats");
+  assert.equal(
+    ui.document.querySelector("[data-role=playhead]").style.left,
+    barLeft(6),
+    "and the playhead is drawn there",
+  );
+
+  // The Session view has no ruler, and the one this page still holds seeks
+  // nothing: a session transport is not the timeline's.
+  ui.click("[data-act=mode-session]");
+  await ui.settle();
+  assert.equal(ui.document.querySelector("[data-role=bar-ruler]"), null, "Session draws no ruler");
+  rulerPress(ui, strip, 45);
+  await ui.settle();
+  ui.release();
+  assert.deepEqual(ui.engine.seeks, [6], "and a press on the one it held seeks nothing");
+});
+
+test("the playhead can be dragged; one seek per pointermove, last position wins", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const strip = stubRuler(ui);
+
+  rulerPress(ui, strip, 65);
+  await ui.settle();
+  assert.deepEqual(ui.engine.seeks, [6], "the press seeks the bar under it");
+
+  // 67.5, 70 and 72.5 px are six and three quarters, seven, and seven and a
+  // quarter bars: a drag reads the ruler in beats.
+  for (const clientX of [67.5, 70, 72.5]) {
+    ui.fireWindow("pointermove", ui.event("pointermove", { clientX }));
+  }
+  await ui.settle();
+  assert.deepEqual(ui.engine.seeks.slice(1), [6.75, 7, 7.25], "one seek per move, at beat resolution");
+  assert.equal(ui.engine.seeks[ui.engine.seeks.length - 1], 7.25, "the last position is the one that stays");
+  assert.equal(
+    ui.document.querySelector("[data-role=playhead]").style.left,
+    barLeft(7.25),
+    "and the playhead was drawn there",
+  );
+
+  ui.release();
+  await ui.settle();
+  assert.equal((ui.windowListeners.pointermove || []).length, 0, "the drag's listeners came off");
+});
+
+test("seek is allowed while playing and while paused in Arrangement", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const strip = stubRuler(ui);
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  assert.equal(ui.engine.plays, 1, "the transport is running");
+
+  rulerPress(ui, strip, 65);
+  await ui.settle();
+  ui.release();
+  assert.deepEqual(ui.engine.seeks, [6], "a running transport jumps to the bar");
+  assert.equal(ui.engine.pauses, 0, "and plays on: nothing paused it");
+  assert.equal(ui.engine.stops, 0, "and nothing stopped it");
+  assert.equal(ui.document.querySelector("[data-role=toast]").hidden, true, "no refusal is said");
+
+  // Paused: a seek moves the paused transport, and the readout says where the
+  // next Play starts.
+  ui.position({ bar: 3, beat: 2, sixteenth: 1 });
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(ui.engine.pauses, 1, "Pause paused the transport");
+  assert.equal(
+    ui.document.querySelector("[data-role=position]").textContent,
+    "003.2.1",
+    "the readout kept the position it was paused at",
+  );
+
+  rulerPress(ui, strip, 45);
+  await ui.settle();
+  ui.release();
+  assert.equal(ui.engine.seeks[ui.engine.seeks.length - 1], 4, "the paused transport was moved to the bar");
+  assert.equal(
+    ui.document.querySelector("[data-role=position]").textContent,
+    "005.1.1",
+    "and the readout moved with it",
+  );
+});
+
+test("Pause calls engine.pause, keeps the position, and Play carries on", async () => {
+  const ui = await bootTimeline();
+  const pause = ui.document.querySelector("[data-act=pause]");
+  assert.ok(pause, "the transport carries a Pause button");
+  assert.equal(pause.getAttribute("title"), "Pause");
+  assert.equal(pause.getAttribute("aria-label"), "Pause");
+
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.position({ bar: 7, beat: 3, sixteenth: 2 });
+  assert.equal(ui.document.querySelector("[data-role=position]").textContent, "007.3.2");
+
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(ui.engine.pauses, 1, "Pause is the engine's own pause");
+  assert.equal(ui.engine.stops, 0, "and nothing was stopped");
+  assert.equal(ui.engine.plays, 1, "and the transport was not restarted");
+  assert.equal(
+    ui.document.querySelector("[data-role=position]").textContent,
+    "007.3.2",
+    "the position stays on the page",
+  );
+  assert.equal(pause.getAttribute("aria-pressed"), "true", "and the button shows the transport is paused");
+
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  assert.equal(ui.engine.plays, 2, "Play carries the paused run on");
+  assert.equal(
+    ui.document.querySelector("[data-role=position]").textContent,
+    "007.3.2",
+    "from the position it was paused at",
+  );
+  assert.equal(pause.getAttribute("aria-pressed"), "false", "and the button shows it is playing again");
+});
+
+test("Stop after Pause shows 001.1.1 in session and the seek bar in arrangement", async () => {
+  const session = await bootTimeline();
+  session.click("[data-act=play]");
+  await session.settle(24);
+  session.position({ bar: 6, beat: 2, sixteenth: 1 });
+  session.click("[data-act=pause]");
+  await session.settle();
+  session.click("[data-act=stop]");
+  await session.settle();
+  assert.equal(session.engine.stops, 1, "Stop stopped the transport");
+  assert.equal(
+    session.document.querySelector("[data-role=position]").textContent,
+    "001.1.1",
+    "a session run starts at its first bar again",
+  );
+
+  const arrangement = await bootTimeline();
+  arrangement.click("[data-act=mode-arrangement]");
+  await arrangement.settle();
+  const strip = stubRuler(arrangement);
+  rulerPress(arrangement, strip, 65);
+  await arrangement.settle();
+  arrangement.release();
+  arrangement.click("[data-act=play]");
+  await arrangement.settle(24);
+  // The run really moves: the playhead follows the engine, so a Stop that only
+  // read back where the run had reached would say bar 11.
+  arrangement.position({ bar: 11, beat: 2, sixteenth: 1 });
+  assert.equal(
+    arrangement.document.querySelector("[data-role=position]").textContent,
+    "011.2.1",
+    "the readout follows the run",
+  );
+  assert.equal(
+    arrangement.document.querySelector("[data-role=playhead]").style.left,
+    barLeft(10.25),
+    "and so does the playhead",
+  );
+  arrangement.click("[data-act=pause]");
+  await arrangement.settle();
+  arrangement.click("[data-act=stop]");
+  await arrangement.settle();
+  assert.equal(arrangement.engine.stops, 1, "Stop stopped the transport");
+  assert.equal(
+    arrangement.document.querySelector("[data-role=position]").textContent,
+    "007.1.1",
+    "the timeline goes back to the bar its last seek put it on, as the engine does",
+  );
+  assert.equal(
+    arrangement.document.querySelector("[data-role=playhead]").style.left,
+    barLeft(6),
+    "and the playhead stands on that bar again",
+  );
+  assert.equal(
+    arrangement.document.querySelector("[data-role=cut-mark]").style.left,
+    barLeft(6),
+    "with the cut mark on it, so Split cuts where the next Play starts",
+  );
+});
+
+test("a view switch and a Stop both let go of Pause", async () => {
+  const ui = await bootTimeline();
+  const pause = ui.document.querySelector("[data-act=pause]");
+  assert.ok(pause, "the transport carries a Pause button");
+
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(pause.getAttribute("aria-pressed"), "true", "Pause shows the transport is paused");
+
+  // A pause belongs to the view it happened in: the engine lets go of it when
+  // its mode is set, and the page lets go of it with the engine.
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  assert.equal(pause.getAttribute("aria-pressed"), "false", "switching the view clears the button");
+
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(pause.getAttribute("aria-pressed"), "true", "a second pause shows again");
+  ui.click("[data-act=stop]");
+  await ui.settle();
+  assert.equal(pause.getAttribute("aria-pressed"), "false", "and Stop clears it too");
+});
+
+test("Pause is disabled while a take records and while Record to timeline collects", async () => {
+  const ui = await bootTimeline();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const pause = ui.document.querySelector("[data-act=pause]");
+  assert.equal(ui.engine.recorders.length, 1, "Record built the recorder");
+  assert.equal(pause.disabled, true, "a take is only ever ended with Stop");
+
+  ui.click("[data-act=stop]");
+  await ui.settle();
+  assert.equal(pause.disabled, false, "with the take over, Pause is offered again");
+
+  // Record to timeline collects launches for as long as it is on: the same
+  // rule, and Stop still ends it.
+  ui.click("[data-act=rec-timeline]");
+  await ui.settle();
+  assert.equal(pause.disabled, true, "a collected performance is only ever ended with Stop");
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  assert.equal(pause.disabled, true, "and the transport cannot be paused either");
+
+  ui.click("[data-act=stop]");
+  await ui.settle();
+  assert.equal(ui.engine.stops, 1, "Stop still works");
+});
+
+test("a recording take blocks Pause and Stop still works", async () => {
+  const ui = await bootTimeline();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.launch({ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, scene_id: SCENE, bar: 0, frame: 0 });
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const recorder = ui.engine.recorders[0];
+  assert.ok(recorder, "Record built the recorder");
+  assert.notEqual(recorder.armed, null, "and the take is armed on the next bar");
+  assert.equal(ui.document.querySelector("[data-act=pause]").disabled, true, "a take cannot be paused");
+
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(ui.engine.pauses, 0, "the press paused nothing");
+
+  ui.click("[data-act=stop]");
+  await ui.settle();
+  assert.notEqual(recorder.stopped_at, null, "Stop ended the take");
+  assert.equal(typeof recorder.stopped_at, "number", "on the frame the take ends on");
+});
+
+// ---- zoom (visual) and readable chips ------------------------------------
+
+/** The zoom the page's timeline is drawn at, as its root reports it. */
+function timelineZoom(ui) {
+  const root = ui.document.querySelector("[data-role=timeline] .st-tl");
+  assert.ok(root, "the timeline is drawn");
+  return root.getAttribute("data-zoom");
+}
+
+/** The timeline root's inline width, in pixels. */
+function timelineWidth(ui) {
+  const root = ui.document.querySelector("[data-role=timeline] .st-tl");
+  assert.ok(root, "the timeline is drawn");
+  return Number.parseFloat(root.style.width);
+}
+
+/** The fixed track-header column, which the zoom does not change. */
+const SIDE_PX = 180;
+
+test("zoomedBarX doubles per step", () => {
+  assert.equal(zoomedBarX(4, 1, TIMELINE_BASE_PX), 4 * TIMELINE_BASE_PX, "a bar's x at zoom 1");
+  let previous = zoomedBarX(4, 0.5, TIMELINE_BASE_PX);
+  for (const zoom of [1, 2, 4, 8]) {
+    const next = zoomedBarX(4, zoom, TIMELINE_BASE_PX);
+    assert.equal(next, previous * 2, `the step to ${zoom} doubles the bar's x`);
+    previous = next;
+  }
+  assert.equal(zoomedBarX(0, 8, TIMELINE_BASE_PX), 0, "the first bar line stays at the left edge");
+});
+
+test("zoom re-anchors the scroll so the playhead's bar keeps its pixel", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const bars = ui.document.querySelectorAll("[data-role=bar-ruler] .st-tl-bar-n").length;
+  assert.equal(bars, 32, "the fixture song's ruler is 32 bars");
+
+  // The bar the pointer seeks is the bar a zoom is anchored on.
+  const strip = stubRuler(ui);
+  rulerPress(ui, strip, (20.25 / bars) * 320);
+  await ui.settle();
+  ui.release();
+  await ui.settle();
+  assert.equal(ui.engine.seeks[ui.engine.seeks.length - 1], 20, "the ruler put the playhead on bar 20");
+
+  // The host scrolls the lanes sideways; this browser's scroll is kept in a
+  // local below, so the offset the page writes is readable.
+  const host = ui.document.querySelector("[data-role=timeline]");
+  assert.ok(host, "the timeline is drawn");
+  let scrolled = 0;
+  Object.defineProperty(host, "scrollLeft", {
+    configurable: true,
+    get: () => scrolled,
+    set: (value) => {
+      scrolled = Number(value) || 0;
+    },
+  });
+  scrolled = 40;
+  const pixelOf = (zoom) => SIDE_PX + zoomedBarX(20, zoom, TIMELINE_BASE_PX) - scrolled;
+  const kept = pixelOf(1);
+
+  ui.click("[data-act=zoom-in]");
+  await ui.settle();
+  assert.equal(timelineZoom(ui), "2", "zoom in steps up the scale");
+  assert.equal(timelineWidth(ui) - SIDE_PX, 32 * TIMELINE_BASE_PX * 2, "the lane box doubled with the zoom");
+  assert.equal(
+    scrolled,
+    SIDE_PX + zoomedBarX(20, 2, TIMELINE_BASE_PX) - kept,
+    "the host is scrolled so bar 20 keeps the pixel it had on screen at 1x",
+  );
+  assert.equal(pixelOf(2), kept, "which is the pixel it was under before the zoom");
+
+  ui.click("[data-act=zoom-out]");
+  await ui.settle();
+  assert.equal(timelineZoom(ui), "1", "zoom out steps back down");
+  assert.equal(scrolled, 40, "and the host is back where it started");
+});
+
+test("zoom persists across reload and a throwing localStorage falls back to 1", async () => {
+  const storage = memoryStorage();
+  const ui = await bootTimeline({ storage });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  ui.click("[data-act=zoom-in]");
+  ui.click("[data-act=zoom-in]");
+  await ui.settle();
+  assert.equal(storage.getItem("crow.studio.zoom.v1"), "4", "the zoom is kept under its own key");
+  assert.equal(timelineZoom(ui), "4", "and the page is drawn at it");
+
+  const again = await bootTimeline({ storage });
+  again.click("[data-act=mode-arrangement]");
+  await again.settle();
+  assert.equal(timelineZoom(again), "4", "a page opened again starts at the zoom it was left at");
+
+  const refusing = {
+    getItem() {
+      throw new Error("this browser keeps no storage");
+    },
+    setItem() {
+      throw new Error("this browser keeps no storage");
+    },
+  };
+  const third = await bootTimeline({ storage: refusing });
+  third.click("[data-act=mode-arrangement]");
+  await third.settle();
+  assert.equal(timelineZoom(third), "1", "a browser that refuses storage falls back to 1");
+  third.click("[data-act=zoom-in]");
+  await third.settle();
+  assert.equal(timelineZoom(third), "2", "and the buttons still work without storage");
+});
+
+test("every section chip, marker and placement carries a title attribute with its full name", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  const section = ui.document.querySelector("[data-role=section][data-section-id=sec-intro]");
+  assert.ok(section, "the section is drawn");
+  assert.ok(String(section.getAttribute("title")).includes("Intro"), "the section's block names it");
+  const sectionChip = section.querySelector("[data-act=section-rename]");
+  assert.ok(sectionChip, "the section's name is a chip");
+  assert.ok(String(sectionChip.getAttribute("title")).includes("Intro"), "the section's chip names it too");
+
+  const marker = ui.document.querySelector("[data-role=marker][data-marker-id=m-key]");
+  assert.ok(marker, "the marker is drawn");
+  assert.ok(String(marker.getAttribute("title")).includes("Key change"), "the marker's block names it");
+  const markerChip = marker.querySelector("[data-act=marker-rename]");
+  assert.ok(markerChip, "the marker's name is a chip");
+  assert.ok(String(markerChip.getAttribute("title")).includes("Key change"), "the marker's chip names it too");
+
+  const block = ui.document.querySelector(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  assert.ok(block, "the placement is drawn");
+  assert.ok(String(block.getAttribute("title")).includes("Bass line"), "the placement names its clip");
+});
+
+test("the chip CSS rule sets min-width 56px and ellipsis", () => {
+  const source = readFileSync(new URL("../bundles/studio/panel/studio.js", import.meta.url), "utf8");
+  const rule = /\.studio \.st-tl-tag-btn \{([^}]*)\}/.exec(source);
+  assert.ok(rule, "the chip rule is in the panel's stylesheet");
+  assert.match(rule[1], /min-width:\s*56px/, "a chip keeps a readable minimum width");
+  assert.match(rule[1], /text-overflow:\s*ellipsis/, "and a long name ends in an ellipsis");
+});
+
+test("the placement block CSS rule keeps a readable minimum width", () => {
+  const source = readFileSync(new URL("../bundles/studio/panel/studio.js", import.meta.url), "utf8");
+  const rule = /\.studio \.st-tl-block \{([^}]*)\}/.exec(source);
+  assert.ok(rule, "the placement block rule is in the panel's stylesheet");
+  assert.match(rule[1], /min-width:\s*(2[4-9]|3[0-2])px/, "a block keeps a readable minimum width at every zoom");
+  assert.match(rule[1], /overflow:\s*hidden/, "and a label too long for the block is cut off");
+});
+
+test("at the highest zoom a short placement label is not empty", async () => {
+  const doc = await timelineDoc();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(doc, "clip.rename", { clip_id: NOTE_CLIP, name: "A" });
+
+  const ui = await bootTimeline({ doc });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  for (let i = 0; i < 3; i += 1) {
+    ui.click("[data-act=zoom-in]");
+    await ui.settle();
+  }
+  assert.equal(timelineZoom(ui), "8", "three steps up from 1 is the highest zoom");
+  assert.equal(ui.document.querySelector("[data-act=zoom-in]").disabled, true, "nothing is above it");
+
+  const block = ui.document.querySelector(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  assert.ok(block, "the placement is still drawn at the highest zoom");
+  const label = block.querySelector(".st-tl-block-name");
+  assert.ok(label, "the block carries its label");
+  assert.equal(String(label.textContent).trim(), "A", "and a one-letter name is still said");
+  assert.ok(String(block.getAttribute("title")).includes("A"), "with the full name in its title");
 });
 
 // ---- the same timeline against a real hub, in a real browser ---------------

@@ -538,8 +538,9 @@
  *
  * client → processor: `{type:"song", snapshot}`, `{type:"launchScene", id}`,
  * `{type:"launchClip", id}`, `{type:"stopTrack", id}`, `{type:"stopAll"}`,
- * `{type:"play"}`, `{type:"stop"}`, `{type:"setMode", mode}`,
- * `{type:"seek", bar}`, `{type:"metronome", on}`, `{type:"flush", id}`,
+ * `{type:"play"}`, `{type:"pause"}`, `{type:"stop"}`, `{type:"setMode", mode}`,
+ * `{type:"seek", bar}` (a bar at beat resolution), `{type:"metronome", on}`,
+ * `{type:"flush", id}`,
  * `{type:"nextBarFrame", id}`, `{type:"audio", take_id, channels}`,
  * `{type:"audio_unload", take_id}`, `{type:"sample", sample_id, channels}`,
  * `{type:"sample_unload", sample_id}`, `{type:"library", library_id, kind,
@@ -2438,6 +2439,13 @@
           break;
         case "stopAll":
           this.sequencer.stopAll();
+          break;
+        case "pause":
+          // A pause is not a stop: it keeps the position, what the song has
+          // armed and the launches already queued for a later bar, so the next
+          // `play` carries on from the beat it recorded. Nothing that waits for
+          // Stop (a load, a capture, a cabinet) is worked off here.
+          this.sequencer.pause();
           break;
         case "nextBarFrame": {
           // Answered from the sequencer's own clock, moved onto the context's:
