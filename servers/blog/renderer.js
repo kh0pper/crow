@@ -12,6 +12,154 @@ import sanitizeHtml from "sanitize-html";
 // instance (ownerMarked, below) so the owner path can carry the image rule.
 marked.setOptions({ gfm: true, breaks: true });
 
+// ---------------------------------------------------------------------------
+// THE LINK-LABEL CLIFF (marked 17.0.4, both renderers)
+//
+// marked's inline `link`/`reflink` rules match a label with
+//
+//   (?:\[(?:\\[\s\S]|[^\[\]\\])*\]|\\[\s\S]|`+[^`]*?`+(?!`)|[^\[\]\\`])*?
+//
+// The code-span alternative has to decide how to split a run of backticks
+// between its opener and its closer, and on a run of N backticks that is
+// EXPONENTIAL in N: "[" + "``a".repeat(n) measured 39 ms at n=30, 97 ms at 32,
+// 258 ms at 34, 649 ms at 36 (x2.5 per +2 runs), and "[" + "```a".repeat(34)
+// — 138 bytes — runs for minutes. `reflink` carries the same label pattern, so
+// a closing `]`, a `][ref]`, an image `![` and a spaced run are all affected.
+// Both renderers were exposed: a bot reply, a memory or a blog post could
+// stall the gateway's event loop for minutes.
+//
+// The fix is a LINEAR pre-pass over the source, before marked ever sees it. A
+// link label cannot span a blank line, so for each `[` the risky region is
+// bounded: up to its matching `]` (nested brackets counted), up to the next
+// blank line, or to the end of the text. In that region we count maximal
+// backtick RUNS; a region with more than LINK_LABEL_BACKTICK_RUNS_MAX of them
+// is the shape that blows up, and every backtick in it gets a backslash in
+// front. marked reads an escaped character as itself, so each run becomes one
+// backtick long — the split is gone and the text stays visible (nothing is
+// removed: the escape renders as the backtick itself). A region with 8 runs or
+// fewer is left byte-for-byte untouched, so ordinary content renders exactly
+// as it did (pinned by tests/md-link-backtrack.test.js).
+//
+// Fenced code (``` / ~~~ opened with at most 3 spaces of indent) and indented
+// code (a line starting with 4+ spaces or a tab) are skipped: marked never
+// inline-lexes either, so they are neither a risk nor something to rewrite.
+// They end the surrounding region too, as a block boundary does.
+// ---------------------------------------------------------------------------
+
+export const LINK_LABEL_BACKTICK_RUNS_MAX = 8;
+
+const LINK_FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const LINK_FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+const LINK_INDENTED_CODE = /^(?: {4,}|\t)/;
+const LINK_BLANK_LINE = /^[ \t]*$/;
+
+/**
+ * Defuse the link-label backtracking cliff: escape the backticks of every
+ * `[`-region that holds more than LINK_LABEL_BACKTICK_RUNS_MAX backtick runs.
+ *
+ * Strictly linear: one classification pass over the lines (each character
+ * visited once), an interval merge in which each interval is popped at most
+ * once, and one emit pass. A source with no `[` or no backtick returns at once.
+ * @param {string} markdown
+ * @returns {string} the same text, with the risky regions' backticks escaped
+ */
+export function defuseLinkLabelBacktracking(markdown) {
+  const src = typeof markdown === "string" ? markdown : String(markdown ?? "");
+  // Linear bails: no bracket means no label; no backtick means no code-span
+  // alternative to split.
+  if (!src.includes("[") || !src.includes("`")) return src;
+
+  const n = src.length;
+  const intervals = [];   // merged, disjoint, ascending [start, end) pairs
+  const open = [];        // open-bracket stack: { pos, runs }
+  let runs = 0;           // completed backtick runs in the text so far
+  let inRun = false;
+  let fence = null;       // { char, len } while inside a fenced code block
+
+  function addInterval(start, end) {
+    if (end <= start) return;
+    let s = start;
+    let e = end;
+    // Frames pop innermost first, so an interval already recorded is either
+    // entirely before this one or contained in it. Each is popped at most
+    // once, which keeps the whole merge linear.
+    while (intervals.length) {
+      const last = intervals[intervals.length - 1];
+      if (last[1] < s) break;
+      intervals.pop();
+      if (last[0] < s) s = last[0];
+      if (last[1] > e) e = last[1];
+    }
+    intervals.push([s, e]);
+  }
+
+  function endRun() {
+    if (inRun) { inRun = false; runs++; }
+  }
+
+  /** A blank line, a fence line or an indented-code line: the region ends. */
+  function closeRegions(at) {
+    endRun();
+    while (open.length) {
+      const frame = open.pop();
+      if (runs - frame.runs > LINK_LABEL_BACKTICK_RUNS_MAX) addInterval(frame.pos, at);
+    }
+  }
+
+  let lineStart = 0;
+  while (lineStart < n) {
+    let nl = src.indexOf("\n", lineStart);
+    if (nl === -1) nl = n;
+    let text = src.slice(lineStart, nl);
+    if (text.endsWith("\r")) text = text.slice(0, -1); // CRLF: classify the line, not the `\r`
+
+    if (fence) {
+      const close = LINK_FENCE_CLOSE.exec(text);
+      if (close && close[1][0] === fence.char && close[1].length >= fence.len) fence = null;
+      closeRegions(lineStart);
+    } else if (LINK_BLANK_LINE.test(text)) {
+      closeRegions(lineStart);
+    } else if (LINK_INDENTED_CODE.test(text)) {
+      // Approximation, deliberately on the safe side: never rewrite a line
+      // that could be code.
+      closeRegions(lineStart);
+    } else {
+      const fenceOpen = LINK_FENCE_OPEN.exec(text);
+      if (fenceOpen && !(fenceOpen[1][0] === "`" && fenceOpen[2].includes("`"))) {
+        fence = { char: fenceOpen[1][0], len: fenceOpen[1].length };
+        closeRegions(lineStart);
+      } else {
+        for (let i = lineStart; i < nl; i++) {
+          const c = src.charCodeAt(i);
+          if (c === 96) { inRun = true; continue; }   // `
+          endRun();
+          if (c === 91) {                             // [
+            open.push({ pos: i, runs });
+          } else if (c === 93) {                      // ]
+            const frame = open.pop();
+            if (frame && runs - frame.runs > LINK_LABEL_BACKTICK_RUNS_MAX) addInterval(frame.pos, i + 1);
+          }
+        }
+        endRun();
+      }
+    }
+    if (nl === n) break;
+    lineStart = nl + 1;
+  }
+  closeRegions(n);
+
+  if (!intervals.length) return src;
+  const out = [];
+  let cursor = 0;
+  for (const [start, end] of intervals) {
+    if (start > cursor) out.push(src.slice(cursor, start));
+    out.push(src.slice(start, end).replace(/`/g, "\\`"));
+    cursor = end;
+  }
+  if (cursor < n) out.push(src.slice(cursor));
+  return out.join("");
+}
+
 /**
  * Render Markdown to sanitized HTML — the OWNER's renderer (blog post and
  * preview, memory panel, knowledge base, file view, meta-glasses notes).
@@ -44,8 +192,11 @@ export function renderMarkdown(markdown, options) {
   const storageOrigin = Object.prototype.hasOwnProperty.call(opts, "storageOrigin")
     ? normalizeOrigin(opts.storageOrigin)
     : rendererStorageOrigin;
+  // Before any parsing: marked's own link-label backtracking cliff (see
+  // defuseLinkLabelBacktracking).
+  const src = defuseLinkLabelBacktracking(String(markdown));
   return withImageContext({ policy: "owner", storageOrigin }, () =>
-    sanitizeRendered(ownerMarked.parse(String(markdown)), { imagePolicy: "owner", storageOrigin }));
+    sanitizeRendered(ownerMarked.parse(src), { imagePolicy: "owner", storageOrigin }));
 }
 
 // ---------------------------------------------------------------------------
@@ -837,13 +988,18 @@ const ownerMarked = new Marked({
  */
 export function renderBotMarkdown(markdown) {
   if (!markdown) return "";
-  const src = String(markdown);
+  let src = String(markdown);
   if (src.length > BOT_MD_MAX_INPUT) return "";
   inlineMemo = makeStartMemo();
   blockMemo = makeStartMemo();
   blockValid = new Map();
   cutsLeft = MAX_PARAGRAPH_CUTS;
   let html;
+  // Before guardAndParse: marked's own link-label backtracking cliff (see
+  // defuseLinkLabelBacktracking). The cap above is on the caller's bytes, so an
+  // escaped source can be longer than BOT_MD_MAX_INPUT by at most one byte per
+  // escaped backtick.
+  src = defuseLinkLabelBacktracking(src);
   // guardAndParse drives marked's Lexer itself (blockTokens/inlineQueue/
   // inlineTokens, public in marked 17 and pinned by the digest tests). If a
   // future marked moves any of that, answer the way an over-cap reply is
