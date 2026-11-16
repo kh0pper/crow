@@ -161,9 +161,10 @@ test("bot links in the preview carry data-turbo-prefetch=\"false\"", async () =>
 
 /* ------------------------- the render budget: long notes are TEXT, not a hang */
 
-/** `pat` repeated and cut to exactly `len` chars. `*a_`, `_*a` and `**_a` are
- *  the mixed-delimiter bodies marked's lexer goes quadratic on (65_535 chars of
- *  `*a_` took ~21.7 s before this cap; `_a_` is the escape-dense control). */
+/** `pat` repeated and cut to exactly `len` chars. `*a_`, `_*a`, `**_a` and
+ *  `**a_` (the worst measured, ~415 ms at 8_192) are the mixed-delimiter bodies
+ *  marked's lexer goes quadratic on (65_535 chars of `*a_` took ~21.7 s before
+ *  this cap; `_a_` is the escape-dense control). */
 const repeatPattern = (pat, len) => pat.repeat(Math.ceil(len / pat.length)).slice(0, len);
 const pathological = (len) => repeatPattern("_a_", len);
 
@@ -190,7 +191,7 @@ test("a 199 KB pathological note answers the escaped <pre> as truncated in under
 // (~5-22 s, measured), yet at the 8_192-char render cap the whole round trip
 // costs a few hundred milliseconds: that is what makes the cap the right rail.
 test("8_192 chars of every mixed-delimiter body renders in under 1.5 s each", async (t) => {
-  for (const pat of ["*a_", "_*a", "**_a", "_a_"]) {
+  for (const pat of ["*a_", "_*a", "**_a", "**a_", "_a_"]) {
     const md = repeatPattern(pat, 8_192);
     assert.equal(md.length, 8_192);
     const t0 = cpuMs();
@@ -220,6 +221,22 @@ test("8_193 and 65_535 chars of \"*a_\" answer the escaped <pre> as truncated in
     assert.equal(body.html, ANCHOR + md + "</pre>", `${len}: the escaped source, nothing else`);
     t.diagnostic(`${len} chars of "*a_" answered in ${ms.toFixed(0)} ms`);
     assert.ok(ms < 100, `${len} chars of "*a_" answered in ${ms.toFixed(0)} ms (budget 100)`);
+  }
+});
+
+// The other side of the flag: a SHORT note that renders to nothing is not
+// long. Whitespace only, or a bare <script> the sanitizer drops, answers the
+// escaped source in a <pre> (the reader still sees what is in the note) but
+// WITHOUT `truncated`, or the editor would print "Long note: …" over one line.
+test("a short note that renders to nothing answers the escaped <pre>, no truncated flag", async () => {
+  for (const md of ["   \n\t\n ", "<script>x</script>"]) {
+    const r = await preview(md);
+    assert.equal(r.status, 200, JSON.stringify(md));
+    const body = await r.json();
+    const escaped = md
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    assert.equal(body.html, ANCHOR + escaped + "</pre>", `${JSON.stringify(md)}: the escaped source, nothing else`);
+    assert.equal(body.truncated, undefined, `${JSON.stringify(md)}: a short note is never truncated`);
   }
 });
 

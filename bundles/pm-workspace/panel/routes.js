@@ -297,20 +297,23 @@ ${isDrawing
   // PREVIEW_RENDER_MAX bounds render TIME, not just size: marked's lexer is
   // QUADRATIC on mixed-delimiter emphasis and the render is synchronous on
   // this server's event loop. Measured through renderBotMarkdown (CPU time,
-  // 2026-09): 8_192 chars of `*a_` 410 ms, `_*a` 376 ms, `**_a` 210 ms; the
-  // same `*a_` run at 32_768 chars 5.4 s, and at 65_535 chars (~64 KB, the
-  // renderer's own BOT_MD_MAX_INPUT) 21.7 s. The renderer's bot cap is
-  // therefore far too late to protect a preview from a single click: 8 KB
-  // renders in well under a second, while the bot cap would still block the
-  // event loop for ~20 s.
+  // 2026-09): 8_192 chars of `**a_` 415 ms (the worst measured), `*a_` 410 ms,
+  // `_*a` 376 ms, `**_a` 210 ms; the same `*a_` run at 32_768 chars 5.4 s, and
+  // at 65_535 chars (~64 KB, the renderer's own BOT_MD_MAX_INPUT) 21.7 s. The
+  // renderer's bot cap is therefore far too late to protect a preview from a
+  // single click: 8 KB renders in well under a second, while the bot cap would
+  // still block the event loop for ~20 s.
   //
   // Over PREVIEW_RENDER_MAX (or over the bot cap, which is above it) is NOT an
   // error: the preview answers the note as ESCAPED TEXT in a <pre> plus
   // `truncated: true` (the editor puts a "shown without formatting" line above
   // it) and the renderer is never called. Above the hard PREVIEW_MAX_MD cap
-  // the request is still refused. A failed (or too old) renderer import
-  // answers the same escaped text — an old install reading markdown is a
-  // cosmetic loss, never a raw sink.
+  // the request is still refused. A SHORT note that legitimately renders to
+  // nothing (whitespace only, comment only, a bare <script> the sanitizer
+  // drops) gets the same escaped <pre> WITHOUT the flag: it is not truncated,
+  // and the editor must never claim it is. A failed (or too old) renderer
+  // import answers that same (unflagged) escaped text — an old install reading
+  // markdown is a cosmetic loss, never a raw sink.
   const PREVIEW_MAX_MD = 200_000; // the same cap the MCP note tool puts on content_md
   const PREVIEW_RENDER_MAX = 8_192; // one preview render may spend this many chars of marked
   router.post("/api/pm/notes/preview", async (req, res) => {
@@ -333,8 +336,10 @@ ${isDrawing
       const html = render(md);
       // renderBotMarkdown answers "" for input it refuses (empty in, empty out,
       // and anything over its own BOT_MD_MAX_INPUT — a backstop only, since
-      // PREVIEW_RENDER_MAX is well below it).
-      if (!html && md) return res.json({ html: fallback(), truncated: true });
+      // PREVIEW_RENDER_MAX is well below it). A short note can render to nothing
+      // for innocent reasons too, so `truncated` belongs to the size branch
+      // above only: a one-line note must not show "Long note: …".
+      if (!html && md) return res.json({ html: fallback() });
       return res.json({ html });
     } catch (err) {
       console.warn(`[pm-workspace routes] markdown preview failed: ${err.message}`);
