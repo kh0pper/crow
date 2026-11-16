@@ -216,9 +216,10 @@ function dayOf(ms, locale, tz) {
 
 /**
  * The list's time column: today `H:MM`, this year `Mon D`, else `Mon D, YYYY`, read in the instance's
- * zone (`instanceZone`) rather than the server's.
+ * zone (`instanceZone`) rather than the server's. Today's hour is the number the parts give, so the
+ * morning reads `8:05` and not `08:05`; only the minute keeps its two digits.
  */
-function rowTime(date, { now, tz, lang }) {
+export function rowTime(date, { now, tz, lang } = {}) {
   const ms = Number(date);
   if (!Number.isFinite(ms)) return "";
   const locale = localeOf(lang);
@@ -226,8 +227,15 @@ function rowTime(date, { now, tz, lang }) {
     const here = dayOf(now, locale, tz);
     const there = dayOf(ms, locale, tz);
     if (there.day && there.day === here.day) {
-      const clock = formatterOf(locale, { hour: "numeric", minute: "2-digit", hourCycle: "h23" }, tz);
-      return clock ? clock.format(new Date(ms)) : "";
+      const clock = formatterOf(locale, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }, tz);
+      if (!clock) return "";
+      const parts = clock.formatToParts(new Date(ms));
+      const value = (type) => parts.find((part) => part.type === type)?.value ?? "";
+      const hourText = value("hour");
+      const minuteText = value("minute");
+      const hour = Number(hourText);
+      if (hourText === "" || !Number.isInteger(hour) || minuteText === "") return "";
+      return `${hour}:${minuteText}`;
     }
     const options = there.year && there.year === here.year
       ? { month: "short", day: "numeric" }

@@ -15,8 +15,11 @@
  * What it reads is `accountsOverview` — the same shape `GET /dashboard/mail/api/accounts` returns,
  * which holds no host, port, username or secret — plus, for the inbox view, plan 1's folder and
  * message stores: `listFolders` for the drawer, `getFolder` to resolve a folder link, and
- * `listMessages` for one page of rows (the `inbox` role across accounts on the All view, one folder
- * when a folder link was followed). The times are drawn in the instance's zone (`instanceZone`).
+ * `listMessages` for one page of rows. On the All view the `inbox` role is read across every account
+ * and the rows of an account held elsewhere are stepped over, so a page is a full page of mail this
+ * instance may read and its cursor lands on the last row it kept. A folder link lists that one folder
+ * only when its account is the chip's (or no chip was asked for): another account's folder is never
+ * listed. The times are drawn in the instance's zone (`instanceZone`).
  *
  * The `message` view reads the row a link names (`resolveMessageRef`: the row id is only a hint, and
  * is used only when it belongs to the account and its Message-ID is the link's) and then the whole
@@ -89,6 +92,47 @@ async function readPage(db, { accountId = null, folderId = null, cursor } = {}) 
   } catch (err) {
     if (wanted === undefined || !(err instanceof MailError) || err.code !== "BAD_INPUT") throw err;
     return listMessages(db, optionsFor(undefined));
+  }
+}
+
+/**
+ * Plan 1's keyset cursor for one summary (`date:id`, base64url): the value `listMessages` reads back
+ * as the place the next page starts after.
+ */
+function cursorOf(item) {
+  return Buffer.from(`${Number(item.date)}:${Number(item.id)}`, "utf8").toString("base64url");
+}
+
+/**
+ * One page of the unified inbox, scoped to the accounts this instance may read. Plan 1's list takes
+ * one account or every account, never a set of ids, so the page is fetched across every account and
+ * the rows of an account held elsewhere are stepped over as they come. The cursor is then the last
+ * row the page kept, not the last row fetched: usable rows can sit below it in the same fetched page,
+ * and a cursor past them would skip them (a short page, or a "Load more" that shows nothing).
+ */
+async function readAllPage(db, ids, cursor) {
+  const wanted = typeof cursor === "string" && cursor !== "" ? cursor : undefined;
+  const kept = [];
+  let after = wanted;
+  for (let round = 0; ; round += 1) {
+    let page;
+    try {
+      page = await listMessages(db, { role: "inbox", limit: INBOX_PAGE_SIZE, cursor: after });
+    } catch (err) {
+      // An edited cursor starts again at the first page, never a 500.
+      if (round > 0 || wanted === undefined || !(err instanceof MailError) || err.code !== "BAD_INPUT") throw err;
+      after = undefined;
+      continue;
+    }
+    for (const item of page.items) {
+      if (ids.has(item.accountId)) kept.push(item);
+    }
+    if (kept.length >= INBOX_PAGE_SIZE) {
+      const items = kept.slice(0, INBOX_PAGE_SIZE);
+      return { items, nextCursor: cursorOf(items[items.length - 1]) };
+    }
+    if (!page.nextCursor) return { items: kept, nextCursor: null };
+    after = page.nextCursor;
   }
 }
 
@@ -168,10 +212,17 @@ export default {
 
       if (askedFolder !== null) {
         const folder = await getFolder(db, askedFolder);
-        if (folder && ids.has(folder.accountId)) {
+        // A folder of an account this instance may read is listed when the chip agrees (a folder
+        // link carries both) or when no chip was asked for at all. A folder of another account than
+        // the chip names is dropped, so the page never lists that account's mail.
+        const owner = folder && ids.has(folder.accountId) ? folder.accountId : null;
+        if (owner !== null && (!ids.has(askedAcct) || askedAcct === owner)) {
           folderId = folder.id;
-          acct = folder.accountId;
+          acct = owner;
           page = await readPage(db, { folderId, cursor: query.cursor });
+        } else if (owner !== null) {
+          acct = askedAcct;
+          page = await readPage(db, { accountId: acct, cursor: query.cursor });
         } else {
           // A folder the server no longer has: the page says so, and nothing is read.
           acct = ids.has(askedAcct) ? askedAcct : "all";
@@ -179,12 +230,10 @@ export default {
         }
       } else {
         acct = ids.has(askedAcct) ? askedAcct : "all";
-        page = await readPage(db, {
-          accountId: acct === "all" ? null : acct,
-          cursor: query.cursor,
-        });
         // The All view is every usable account's inbox, never a claimed account's stored mail.
-        if (acct === "all") page.items = page.items.filter((item) => ids.has(item.accountId));
+        page = acct === "all"
+          ? await readAllPage(db, ids, query.cursor)
+          : await readPage(db, { accountId: acct, cursor: query.cursor });
       }
     }
 

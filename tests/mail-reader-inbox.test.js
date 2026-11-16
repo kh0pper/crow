@@ -175,6 +175,21 @@ function rowIds(html) {
   return [...html.matchAll(/<a class="ml-row" href="[^"]*row=(\d+)"/g)].map((m) => Number(m[1]));
 }
 
+/** The panel's own <style> block: the one that carries a .ml rule. */
+function mailStyle(body) {
+  for (const m of body.matchAll(/<style>([\s\S]*?)<\/style>/g)) {
+    if (/\.ml\s*\{/.test(m[1])) return m[1];
+  }
+  return "";
+}
+
+/** One rule's declarations, or null when that class has no rule at all. */
+function ruleBody(css, selector) {
+  const pattern = new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + " \\{([^}]*)\\}");
+  const m = pattern.exec(css);
+  return m ? m[1] : null;
+}
+
 /** The "Load more" href, with the HTML attribute escaping undone, or null on the last page. */
 function moreHref(html) {
   const m = /<a class="ml-more" href="([^"]+)"/.exec(html);
@@ -389,6 +404,8 @@ test("a folder id deleted by a resync gives the no-longer-here sentence and a li
     assert.equal(back[1], "/dashboard/mail");
     assert.equal(back[2], "Back to the inbox");
     assert.equal(rowIds(r.body).length, 0);
+    // The card's own way back is a 44px target, and its rule ships with the page drawing it.
+    assert.match(ruleBody(mailStyle(r.body), ".ml-back") ?? "", /min-height: 44px/);
   });
 });
 
@@ -496,17 +513,170 @@ test("the digest slot exists on the All view and not on a folder view", async ()
   });
 });
 
+test("the All view pages over usable accounts only, with a claimed account in the way", async () => {
+  const usable = [];
+  await withDb(async (db) => {
+    const { a, b, aInbox, bInbox } = await seed(db);
+    await db.execute({
+      sql: "UPDATE mail_accounts SET status = 'claimed_elsewhere' WHERE id = ?",
+      args: [b.id],
+    });
+    // A claimed message newer than anything usable heads the stored list.
+    await deliver(db, { accountId: b.id, folderId: bInbox, subject: "Claimed top", date: T0 + 9_000_000 });
+    for (let i = 0; i < 40; i += 1) {
+      const row = await deliver(db, {
+        accountId: a.id, folderId: aInbox, subject: `Usable ${i}`, date: T0 + i * 120_000,
+      });
+      usable.push(row.id);
+      await deliver(db, {
+        accountId: b.id, folderId: bInbox, subject: `Claimed ${i}`, date: T0 + i * 120_000 + 60_000,
+      });
+    }
+  });
+  await withFlag(async () => {
+    const first = await get("/dashboard/mail");
+    assert.equal(first.status, 200);
+    const one = rowIds(first.body);
+    assert.equal(one.length, 30, "a full page of messages this instance may read");
+    assert.deepEqual(one, [...usable].reverse().slice(0, 30));
+    assert.doesNotMatch(first.body, /No messages here\./);
+    assert.doesNotMatch(first.body, /Claimed /);
+
+    const href = moreHref(first.body);
+    assert.ok(href, "the rest of the mail is one link away");
+    const second = await get(href);
+    assert.equal(second.status, 200);
+    const two = rowIds(second.body);
+    assert.equal(two.length, 10, "the page after it holds the rest, not an empty list");
+    assert.deepEqual(two, [...usable].reverse().slice(30));
+    assert.equal(new Set([...one, ...two]).size, 40, "no repeat");
+    assert.equal(moreHref(second.body), null, "and the cursor is spent");
+  });
+});
+
+test("a folder name with <script> and quotes in the drawer stays text", async () => {
+  let folderId;
+  const name = 'R&D "quoted" <script>alert(1)</script>';
+  await withDb(async (db) => {
+    const { a } = await seed(db);
+    const added = await stores.messages.upsertFolders(db, a.id, [{ path: "Odd", name }]);
+    folderId = added.folders.find((folder) => folder.path === "Odd").id;
+  });
+  await withFlag(async () => {
+    const r = await get("/dashboard/mail");
+    assert.equal(r.status, 200);
+    assert.doesNotMatch(r.body, /<script>alert/);
+    const escaped = "R&amp;D &quot;quoted&quot; &lt;script&gt;alert(1)&lt;/script&gt;";
+    assert.ok(r.body.includes(escaped), "the folder name is escaped text");
+    const anchors = [...r.body.matchAll(/<a class="ml-folder"[^>]*>[\s\S]*?<\/a>/g)].map((m) => m[0]);
+    const anchor = anchors.find((a) => a.includes("R&amp;D"));
+    assert.ok(anchor, "the folder is listed");
+    assert.match(anchor, new RegExp(`folder=${folderId}"`), "the link keeps its folder id");
+    assert.ok(anchor.includes(escaped), "the name is text inside the link, never markup");
+  });
+});
+
+test("a garbage cursor answers 200 with the first page, never a 500", async () => {
+  await withDb(async (db) => {
+    const { a, aInbox } = await seed(db);
+    for (let i = 0; i < 5; i += 1) {
+      await deliver(db, { accountId: a.id, folderId: aInbox, subject: `Kept ${i}`, date: T0 + i * 60_000 });
+    }
+  });
+  await withFlag(async () => {
+    const plain = await get("/dashboard/mail");
+    assert.equal(plain.status, 200);
+    const expected = rowIds(plain.body);
+    assert.equal(expected.length, 5);
+    for (const cursor of ["not-a-cursor", "%%%", "AAAA", "2026:1", "-1"]) {
+      const r = await get(`/dashboard/mail?cursor=${encodeURIComponent(cursor)}`);
+      assert.equal(r.status, 200, cursor);
+      assert.deepEqual(rowIds(r.body), expected, `${cursor} starts again at the first page`);
+    }
+  });
+});
+
+test("an unknown acct falls back to the All view", async () => {
+  await withDb(async (db) => {
+    const { a, b, aInbox, bInbox } = await seed(db);
+    await deliver(db, { accountId: a.id, folderId: aInbox, subject: "From Alex", date: T0 });
+    await deliver(db, { accountId: b.id, folderId: bInbox, subject: "From Sam", date: T0 + 60_000 });
+  });
+  await withFlag(async () => {
+    for (const acct of ["nope", "0", "all-the-things"]) {
+      const r = await get(`/dashboard/mail?acct=${acct}`);
+      assert.equal(r.status, 200, acct);
+      assert.match(r.body, /<a class="ml-chip" href="\/dashboard\/mail" aria-current="page">All<\/a>/, acct);
+      assert.match(r.body, /From Alex/, acct);
+      assert.match(r.body, /From Sam/, acct);
+    }
+  });
+});
+
+test("a folder of another account than the chip does not list that account's mail", async () => {
+  let ids;
+  await withDb(async (db) => {
+    const { a, b, aInbox, aLabel, bInbox } = await seed(db);
+    ids = { a, b, aLabel };
+    await deliver(db, { accountId: a.id, folderId: aInbox, subject: "Alex inbox" });
+    await deliver(db, { accountId: a.id, folderId: aLabel, subject: "Alex label only", date: T0 + 60_000 });
+    await deliver(db, { accountId: b.id, folderId: bInbox, subject: "Sam inbox", date: T0 + 120_000 });
+  });
+  await withFlag(async () => {
+    const r = await get(`/dashboard/mail?acct=${ids.b.id}&folder=${ids.aLabel}`);
+    assert.equal(r.status, 200);
+    assert.doesNotMatch(r.body, /Alex label only/);
+    assert.match(r.body, /Sam inbox/);
+    assert.match(r.body, new RegExp(`<a class="ml-chip" href="/dashboard/mail\\?acct=${ids.b.id}" aria-current="page">`));
+  });
+});
+
+test("rowTime reads today as H:MM, this year as Mon D, another year as Mon D, YYYY", async () => {
+  const { rowTime } = await import("../servers/gateway/dashboard/panels/mail/html.js");
+  const now = Date.UTC(2026, 4, 14, 20, 0, 0);
+  const at = (options) => rowTime(options.date, { now, tz: "UTC", lang: "en" });
+  assert.equal(at({ date: Date.UTC(2026, 4, 14, 8, 5) }), "8:05");
+  assert.equal(at({ date: Date.UTC(2026, 4, 14, 18, 30) }), "18:30");
+  assert.equal(at({ date: Date.UTC(2026, 4, 14, 0, 0) }), "0:00");
+  assert.equal(at({ date: Date.UTC(2026, 0, 5, 12, 0) }), "Jan 5");
+  assert.equal(at({ date: Date.UTC(2025, 0, 5, 12, 0) }), "Jan 5, 2025");
+});
+
+test("the list header's own elements have rules and the search input is a 44px target", async () => {
+  await withDb(async (db) => { await seed(db); });
+  await withFlag(async () => {
+    const r = await get("/dashboard/mail");
+    assert.equal(r.status, 200);
+    const css = mailStyle(r.body);
+    assert.ok(css, "the panel emits its own stylesheet");
+    for (const selector of [".ml-head", ".ml-search", ".ml-search-input", ".ml-search-heading", ".ml-actions", ".ml-flash"]) {
+      const body = ruleBody(css, selector);
+      assert.ok(body !== null, `${selector} has a rule in the inbox view's stylesheet`);
+      assert.match(body, /min-width: 0/, `${selector} may shrink`);
+    }
+    assert.match(ruleBody(css, ".ml-search-input"), /min-height: 44px/);
+    assert.match(ruleBody(css, ".ml-btn"), /min-height: 44px/);
+    assert.doesNotMatch(css, /overflow-x/);
+    // The controls that are only data-* hooks ride the 44px .ml-btn class.
+    for (const hook of ["data-ml-refresh", "data-ml-older", "data-ml-search-remote"]) {
+      for (const m of r.body.matchAll(new RegExp(`<button[^>]*${hook}[^>]*>`, "g"))) {
+        assert.match(m[0], /class="ml-btn/, hook);
+      }
+    }
+  });
+});
+
 test("every row and chip has min-height 44px in the stylesheet", async () => {
   await withDb(async (db) => { await seed(db); });
   await withFlag(async () => {
     const r = await get("/dashboard/mail");
-    let css = "";
-    for (const m of r.body.matchAll(/<style>([\s\S]*?)<\/style>/g)) {
-      if (/\.ml\s*\{/.test(m[1])) css = m[1];
-    }
+    const css = mailStyle(r.body);
     assert.ok(css, "the panel emits its own stylesheet");
-    assert.match(css, /\.ml-row \{[^}]*min-height: 44px/);
-    assert.match(css, /\.ml-chip[^{]*\{[^}]*min-height: 44px/);
+    for (const selector of [".ml-row", ".ml-chip", ".ml-folder", ".ml-drawer-summary", ".ml-more", ".ml-back", ".ml-btn"]) {
+      const body = ruleBody(css, selector);
+      assert.ok(body !== null, `${selector} has a rule`);
+      assert.match(body, /min-height: 44px/, selector);
+    }
   });
 });
 
