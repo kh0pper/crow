@@ -21,8 +21,14 @@
 //
 // What must stay true:
 //   - 64 KB of any container marker, 30 seeded random mixes of them, marker lines
-//     that arrive with bare `\r` / `\r\n`, and quote+indent+marker stacks render
-//     in well under half a second of CPU on BOTH paths, and neither path throws;
+//     that arrive with bare `\r` / `\r\n`, quote+indent+marker stacks and a
+//     marker run followed by a LAZY continuation line render in well under half
+//     a second of CPU on BOTH paths, and neither path throws;
+//   - the depth counter also sees the SECOND way down marked's blockquote
+//     tokenizer has — its own `this.blockquote(f)` / `this.list(f)` re-lex for
+//     lazy continuation lines, which never passes through blockTokens — so a
+//     lazy line cannot walk past the limit (`"> ".repeat(40) + "x\nlazy"` used
+//     to open 40 levels where `"> ".repeat(40) + "x"` opens 16);
 //   - CODE IS VERBATIM: fences, indented code, raw <pre> and math blocks come out
 //     with no backslash that was not in the source;
 //   - ordinary deeply-nested content (8 levels of lists in quotes in lists, code
@@ -182,6 +188,73 @@ test("quote + indented marker stacks are bounded at 64 KB and at 256 KB (owner)"
   t.diagnostic(`256 KB owner quote+indent stack: ${ms.toFixed(0)} ms`);
   assert.ok(ms < BOUND_MS, `256 KB of quote+indent+marker stacks took ${ms.toFixed(0)} ms on the owner path`);
   assert.ok(ownerHtml.length > 0, "the owner path still renders");
+});
+
+// --- the tokenizer's own re-lex path: the SECOND way down --------------------
+// marked 17.0.4's blockquote tokenizer does not only recurse through the
+// lexer. When the LAST token inside a quote is itself a blockquote (or a list)
+// and lazy continuation lines remain, it re-lexes by calling `this.blockquote(f)`
+// / `this.list(f)` DIRECTLY on the tokenizer, with the last token's raw plus
+// those lines as the source — never through blockTokens, so every step of that
+// chain ran at the depth it started from. `"> ".repeat(40) + "x"` stopped at
+// MD_MAX_NEST; the same line with one lazy continuation line opened all 40
+// levels, and at 64 KB each step re-read the rest of the source (measured 6.2 s
+// on the bot path and 6.0 s on the owner path; 256 KB on the owner path took
+// 26 s, and main failed fast with a RangeError instead).
+//
+// boundedLexer wraps those two tokenizer methods too, counting them against the
+// SAME limit — one container token is one level whichever way it was reached —
+// and caps how many re-lex STEPS one tokenizer frame may take (the blockquote
+// tokenizer's chunk loop re-lexes the growing last token once per chunk, all at
+// ONE level: `"> - x\nlazy\n"` repeated to 64 KB is ~5,300 steps, and with the
+// depth counter alone that shape still took 1.2 s).
+test("a lazy continuation line cannot walk past the bound (both paths)", (t) => {
+  const note = tracker(t);
+  const deep = "> ".repeat(40) + "x\nlazy";
+  const result = both(deep);
+  note(result, "40 quotes + a lazy continuation line");
+  for (const [who, r] of Object.entries(result)) {
+    assert.equal((r.html.match(/<blockquote>/g) || []).length, MD_MAX_NEST,
+      `${who}: 40 quote levels with a lazy line must stop at ${MD_MAX_NEST} `
+      + `blockquotes, got ${(r.html.match(/<blockquote>/g) || []).length}: ${r.html.slice(0, 300)}`);
+    assert.match(r.html, /lazy/, `${who}: the lazy line is still shown`);
+  }
+
+  // The same markers at the 64 KB cap, each with a lazy continuation line: a
+  // re-lex step re-reads the rest of the source, so an uncounted chain was O(n)
+  // steps of O(n) work. Both paths, both markers, and the shapes the report
+  // named.
+  const LAZY_SHAPES = {
+    '">" run + lazy': () => rep(">", CAP - 8) + "x\nlazy",
+    '"> " run + lazy': () => rep("> ", 32000) + "x\nlazy",
+    '"- " run + lazy': () => rep("- ", CAP - 8) + "x\nlazy",
+    '"1) " run + lazy': () => rep("1) ", CAP - 8) + "x\nlazy",
+    '"> - " run + lazy': () => rep("> - ", CAP - 8) + "x\nlazy",
+    "quote+list chunks with lazy lines": () => rep("> - x\nlazy\n", CAP),
+  };
+  for (const [name, make] of Object.entries(LAZY_SHAPES)) {
+    const src = make();
+    assert.equal(src.length <= CAP, true, `fixture stays under the cap (${name})`);
+    const r = both(src);
+    note(r, name);
+    assertBounded(r, `64 KB ${name}`);
+    assert.ok(r.bot.html.length > 0, `${name}: the bot path still renders`);
+    assert.ok(r.owner.html.length > 0, `${name}: the owner path still renders`);
+  }
+
+  // 256 KB is over BOT_MD_MAX_INPUT (the bot path answers "" by design), so
+  // only the owner path parses it — and this is the input that used to take 26 s
+  // there. Its own bound: 1 s.
+  const huge = "> ".repeat(131072) + "x\nlazy";
+  assert.ok(huge.length > OWNER_MD_MAX_INPUT / 4 && huge.length < OWNER_MD_MAX_INPUT);
+  const t0 = cpuMs();
+  const hugeHtml = renderMarkdown(huge);
+  const ms = cpuMs() - t0;
+  t.diagnostic(`256 KB owner "> " run + lazy line: ${ms.toFixed(0)} ms`);
+  assert.ok(ms < 1000, `256 KB of "> " + a lazy line took ${ms.toFixed(0)} ms on the owner path (bound 1000 ms)`);
+  assert.ok(hugeHtml.length > 0, "the owner path still renders");
+  assert.ok((hugeHtml.match(/<blockquote>/g) || []).length <= MD_MAX_NEST,
+    "and the depth is still capped: " + (hugeHtml.match(/<blockquote>/g) || []).length);
 });
 
 // --- random search smoke: 30 seeded 64 KB mixes of the same markers.

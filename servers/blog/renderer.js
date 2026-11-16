@@ -734,12 +734,24 @@ function isCheckboxInput(attribs) {
 // `this.lexer.blockTokens(content, tokens, true)` and the list tokenizer
 // `this.lexer.blockTokens(item.text, [])` (verified in node_modules/marked,
 // v17.0.4), so one nesting level is exactly one nested call. boundedLexer
-// (below) wraps THAT method on the single Lexer one parse creates, with a
-// counter that lives for the duration of that parse: on entry it goes up; if it
-// is already at MD_MAX_NEST the content is not lexed as blocks at all — it
-// becomes ONE paragraph token holding the whole remainder as plain text, which
-// marked renders (escaped) as text — and the counter comes back down in a
-// `finally`, so even a throwing tokenizer cannot leak a level.
+// (below) wraps that method on the single Lexer one parse creates, with a
+// counter that lives for the duration of that parse: while a container level is
+// open the counter is up; if it is already at MD_MAX_NEST the content is not
+// lexed as blocks at all — it becomes ONE paragraph token holding the whole
+// remainder as plain text, which marked renders (escaped) as text — and the
+// counter comes back down in a `finally`, so even a throwing tokenizer cannot
+// leak a level.
+//
+// There is a SECOND way down, and blockTokens alone does not see it: marked
+// 17.0.4's blockquote tokenizer, when the last token inside a quote is itself a
+// blockquote or a list and lazy continuation lines remain, re-lexes by calling
+// `this.blockquote(f)` / `this.list(f)` straight on the TOKENIZER (never
+// through the lexer). On that path `"> ".repeat(40) + "x\nlazy"` opened 40
+// levels instead of 16, and 64 KB of `">"` + `"x\nlazy"` cost ~6 s on both
+// paths (26 s at 256 KB on the owner path) because each step re-read the rest
+// of the source at the SAME depth value. boundedLexer therefore also wraps
+// those two tokenizer methods, and ONE container token is ONE level no matter
+// which way it was reached.
 //
 // Nothing rewrites the source, which is what keeps CODE intact: a fence, an
 // indented code block, a raw <pre>, a `$$` math block and a deeply indented YAML
@@ -760,18 +772,49 @@ function isCheckboxInput(attribs) {
 // or under the limit is byte-identical to plain marked.parse. Measured with the
 // counter in place: the worst single 64 KB marker shape is 70 ms (`> 1) `) and
 // the worst of 30 seeded 64 KB marker mixes is 128 ms across both paths, and
-// nothing throws.
+// nothing throws. With a LAZY continuation line appended (the re-lex path — the
+// comment on boundedLexer spells it out) the worst 64 KB shape is 38 ms and 256
+// KB of `> ` on the owner path is 123 ms, where both used to be seconds.
 // ---------------------------------------------------------------------------
 
 /**
  * Deepest container nesting (blockquotes + list levels) a document may open
  * before the remainder of that content is shown as plain text instead of being
- * lexed into more containers. 16 is far above real content (2-4 levels; ~8-10 is
- * the practical ceiling for readable Markdown) and far below the ~32,000 levels a
- * 64 KB marker run otherwise opens. Exported so the tests can pin the bound they
- * exercise.
+ * lexed into more containers, AND the most re-lex steps one container tokenizer
+ * frame may take (see boundedLexer). 16 is far above real content (2-4 levels;
+ * ~8-10 is the practical ceiling for readable Markdown) and far below the
+ * ~32,000 levels a 64 KB marker run otherwise opens. Exported so the tests can
+ * pin the bound they exercise.
  */
 export const MD_MAX_NEST = 16;
+
+/**
+ * The token a container becomes once the nesting limit is reached: ONE
+ * paragraph whose inline tokens are already filled in with a single text token,
+ * so marked neither splits it into blocks nor inline-lexes it (a token that
+ * already has `tokens` is rendered as they are). `raw` is the whole source the
+ * caller was lexing, which is what makes the lexer ADVANCE (blockTokens does
+ * `src.substring(token.raw.length)`) and what keeps the tokenizer re-lex path
+ * (below) from re-parsing a tail it thinks was left over). A text token's
+ * `text` is character data — marked escapes it in parseInline — so no markup,
+ * and no backslash, is ever added to the author's words.
+ * @param {string} src
+ * @returns {{type: string, raw: string, text: string, tokens: object[]}}
+ */
+function flatTextToken(src) {
+  return {
+    type: "paragraph",
+    raw: src,
+    text: src,
+    tokens: [{ type: "text", raw: src, text: src }],
+  };
+}
+
+/**
+ * The container tokenizers that can be re-entered directly (see 2. below):
+ * marked 17.0.4 has no other `this.<tokenizer>(` call in the block phase.
+ */
+const RELEX_TOKENIZERS = ["blockquote", "list"];
 
 /**
  * A `Lexer` that refuses to lex block content more than MD_MAX_NEST container
@@ -780,49 +823,112 @@ export const MD_MAX_NEST = 16;
  * ONLY the Lexer one parse creates is wrapped — never marked's prototype, so
  * every other user of marked (markdownBlocks for Crow Artifacts, a test's own
  * instance, anything else in the gateway) keeps the unguarded behavior it had.
- * `blockTokens` is looked up on the INSTANCE by all of its callers — marked's
- * own `lex()` (`this.blockTokens`) and each container tokenizer
- * (`this.lexer.blockTokens`) — so the own property installed here shadows the
- * prototype method for exactly this lexer, and every recursive call goes through
- * the counter.
+ * There are TWO ways down, and both are counted, sharing ONE counter (one
+ * container token = one level, whichever way it was reached):
  *
- * Over the limit, `src` is NOT lexed: it is handed back as a single paragraph
- * token whose inline tokens are already filled in with one text token, so marked
- * neither splits it into blocks nor inline-lexes it (a token that already has
- * `tokens` is rendered as they are). A text token's `text` is character data —
- * marked escapes it in parseInline — so no markup, and no backslash, is ever
- * added to the author's words.
+ *  1. `blockTokens(src, tokens, lastParagraphClipped)` — what every container
+ *     tokenizer calls for its own content (`this.lexer.blockTokens`), and what
+ *     marked's own `lex()` calls (`this.blockTokens`). Both look the method up
+ *     on the INSTANCE, so the own property installed here shadows the
+ *     prototype method for exactly this lexer, and every recursive call goes
+ *     through the counter.
+ *
+ *  2. `lexer.tokenizer.blockquote` / `lexer.tokenizer.list` — marked 17.0.4's
+ *     blockquote tokenizer has a SECOND way down that never passes through the
+ *     lexer: when the LAST token inside a quote is itself a blockquote (or a
+ *     list) and lazy continuation lines remain, it re-lexes by calling
+ *     `this.blockquote(f)` / `this.list(f)` on the TOKENIZER, with the last
+ *     token's raw plus those lines as the source. Counted only on blockTokens,
+ *     every step of that chain ran at the depth it started from, so a chain of
+ *     them was unbounded and O(n) steps of O(n) work: `"> ".repeat(40) + "x"`
+ *     stopped at 16 levels, `"> ".repeat(40) + "x\nlazy"` opened 40, and 64 KB
+ *     of `">"` + `"x\nlazy"` spent ~6 s on either path. Own properties on the
+ *     Tokenizer INSTANCE, never its prototype.
+ *
+ * DEPTH is not the whole story on that second path: the blockquote tokenizer's
+ * chunk loop can re-lex the last token over and over AT ONE LEVEL (`"> - x\nlazy\n"`
+ * repeated to 64 KB is ~5,300 such steps, each re-reading everything left: 1.2 s
+ * with only the depth counter in place). So a tokenizer frame may also take at
+ * most MD_MAX_NEST re-lex steps of its own; past that, the rest of ITS source is
+ * shown as text. A frame is per quote/list, so ordinary documents — many quotes
+ * with one lazy continuation line each — are untouched, while the one frame that
+ * would re-read the document thousands of times stops after 16.
+ *
+ * Over the limit neither wrapper lexes anything: it hands back the source as
+ * ONE flat text token (flatTextToken above). The tokenizer wrappers must return
+ * a real token, not `undefined` — the re-lex path reads `.raw` to splice the
+ * parent and to work out what is left to process — and a token whose raw is the
+ * whole source it was given is what keeps that path advancing instead of
+ * looping.
  *
  * The options are COPIED: marked's Lexer constructor caches a Tokenizer on the
  * options object it is given (`options.tokenizer = new Tokenizer()`) and rebinds
  * `tokenizer.lexer`, so passing an instance's shared defaults would let two
- * parses fight over one tokenizer.
+ * parses fight over one tokenizer. That per-lexer Tokenizer is also what makes
+ * the own properties below safe: neither Marked instance in this module sets
+ * `defaults.tokenizer`, so `new Tokenizer()` runs once per Lexer. A future
+ * `use({ tokenizer })` on either instance would make ONE Tokenizer shared by
+ * every parse and carry these wrappers (and this parse's counter) into them.
  * @param {object} options a Marked instance's defaults
  * @returns {Lexer}
  */
 function boundedLexer(options) {
   const lexer = new Lexer({ ...options });
-  const blockTokens = lexer.blockTokens;
+  /** Container levels open right now (blockquotes + list levels). */
   let depth = 0;
+  /** `blockTokens` frames on the stack — used to tell the two kinds of
+   *  tokenizer call apart (see the wrapper below). */
+  let lexFrames = 0;
+  /** One entry per open container tokenizer frame: the `lexFrames` count when it
+   *  was entered (`mark`) and how many re-lex steps it has taken (`relex`). */
+  const frames = [];
+
+  // 2. The re-lex path: counted here, because a container token opened by a
+  //    direct `this.blockquote(f)` / `this.list(f)` never reaches blockTokens.
+  const tokenizer = lexer.tokenizer;
+  for (const name of RELEX_TOKENIZERS) {
+    const original = tokenizer[name];
+    tokenizer[name] = function (src) {
+      // Is this the block lexer calling (the ordinary path) or another
+      // tokenizer re-lexing (marked's `this.blockquote(f)` / `this.list(f)`)?
+      // Only a `blockTokens` frame started AFTER the innermost tokenizer frame
+      // means the block lexer is the caller — and the level that call opens is
+      // already counted by the frame that blockTokens belongs to. A call made
+      // straight from a tokenizer body is the re-lex, and IT needs counting.
+      const frame = frames.length ? frames[frames.length - 1] : null;
+      if (frame && lexFrames === frame.mark && ++frame.relex > MD_MAX_NEST) {
+        return flatTextToken(src);
+      }
+      if (depth >= MD_MAX_NEST) return flatTextToken(src);
+      depth++;
+      frames.push({ mark: lexFrames, relex: 0 });
+      try {
+        return original.call(this, src);
+      } finally {
+        frames.pop();
+        depth--;
+      }
+    };
+  }
+
+  // 1. The lexer path. This one only REFUSES: the level its container opens is
+  //    counted by the wrapper above, so incrementing here as well would charge
+  //    every blockquote and list twice.
+  const blockTokens = lexer.blockTokens;
   lexer.blockTokens = function (src, tokens, lastParagraphClipped) {
     if (depth >= MD_MAX_NEST) {
       const out = tokens || [];
-      out.push({
-        type: "paragraph",
-        raw: src,
-        text: src,
-        tokens: [{ type: "text", raw: src, text: src }],
-      });
+      out.push(flatTextToken(src));
       return out;
     }
-    depth++;
+    // `lastParagraphClipped` is forwarded as given: marked's own default
+    // (`false`) applies when it is undefined, and its blockquote tokenizer
+    // passes `true`.
+    lexFrames++;
     try {
-      // `lastParagraphClipped` is forwarded as given: marked's own default
-      // (`false`) applies when it is undefined, and its blockquote tokenizer
-      // passes `true`.
       return blockTokens.call(this, src, tokens || [], lastParagraphClipped);
     } finally {
-      depth--;
+      lexFrames--;
     }
   };
   return lexer;
