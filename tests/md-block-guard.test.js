@@ -1,10 +1,10 @@
-// Markdown rendering: the two remaining quadratic BLOCK-LEXER shapes.
+// Markdown rendering: the remaining quadratic BLOCK-LEXER shapes.
 //
 // The depth guard (boundedLexer + MD_MAX_NEST, tests/md-nesting-depth.test.js)
-// bounds NESTING. Two shapes are quadratic without nesting and without touching
-// marked's `this.blockquote(f)` re-lex path, so neither the depth counter nor
-// the re-lex byte budget sees them. Measured on this tree (marked 17.0.6), CPU
-// ms of one whole render, before the guards:
+// bounds NESTING. Other shapes are quadratic without nesting and without
+// touching marked's `this.blockquote(f)` re-lex path, so neither the depth
+// counter nor the re-lex byte budget sees them. Measured on this tree (marked
+// 17.0.6), CPU ms of one whole render, before the guards:
 //
 //   shape (repeated to fill)      8 KB  16 KB  32 KB  64 KB  128 KB (owner)
 //   "a\n-|-\n"                    117    236    795   2850    11374
@@ -13,23 +13,41 @@
 //   "a|b\n-|-|-\n"                 30    112    330   1243     5121
 //   "a\n -\n"                      21     80    312   1213     4802
 //   "    x\n>     y\n"             19     53    190    676     2744
+//   "  -\t\n"                       …      …      …   4000    16900
+//   "*\t\n"                         …      …      …   2500    10700
 //
-// …~4x per doubling, i.e. O(rest of the document) work paid once per line (both
-// shapes are explained, with the per-rule attribution and the measured numbers,
-// in "TWO MORE QUADRATIC BLOCK-LEXER SHAPES" in servers/blog/renderer.js).
+// …~4x per doubling, i.e. O(rest of the document) work paid once per line (every
+// shape is explained, with the per-rule attribution and the measured numbers, in
+// "TWO MORE QUADRATIC BLOCK-LEXER SHAPES" and "A THIRD QUADRATIC BLOCK-LEXER
+// SHAPE" in servers/blog/renderer.js).
 //
 // What must stay true:
-//   - every table shape above, and the quote/indented-code shape, renders 64 KB
-//     in < 300 ms of CPU on the bot path and the 128 KB owner head in < 600 ms.
-//     Each render runs in a WORKER with a 5 s kill, so the pre-guard cost (2.8 s
-//     to 11 s per render, minutes at the owner cap for the table shapes) fails
-//     the test instead of hanging the suite;
+//   - every shape above renders 64 KB in < 300 ms of CPU on the bot path and the
+//     128 KB owner head in < 600 ms. Each render runs in a WORKER with a 5 s
+//     kill, so the pre-guard cost (1 s to 17 s per render, minutes at the owner
+//     cap for the table shapes) fails the test instead of hanging the suite;
 //   - the table precheck can NEVER reject a table marked accepts: 2,000 seeded
 //     random table-shaped documents — 2-6 lines of pipes, dashes, colons, spaces
 //     and letters, plus real tables of 1-6 columns with alignment — render
 //     BYTE-IDENTICALLY with the guard on and off, on both paths (the off switch
 //     is the exported test seam setMdTableGuardEnabled, which drops BOTH halves
 //     of the shape-1 fix and leaves marked's own rules in place);
+//   - the blockquote-span budget charges only the OVERRUN (the span the rule
+//     scanned minus the characters the token used), so ordinary nesting is free:
+//     an email-style thread nested 10, 12, 14 and 16 levels at ~80 KB and
+//     ~128 KB must render BYTE-IDENTICALLY to the same render with the budget
+//     off (setMdBlockquoteSpanGuardEnabled) and keep every `<blockquote>` it
+//     opened. Charging the full span instead lost the formatting of a 10-level
+//     128 KB thread from character ~334 on;
+//   - the setext-heading precheck can NEVER reject a heading marked accepts:
+//     2,000 seeded documents of short lines — `-`/`*`/`+`/`=`, digits with `.`
+//     or `)`, tabs, 0-4 spaces, text, blank lines, list items, quotes, code —
+//     render BYTE-IDENTICALLY with it on and off (setMdLheadingGuardEnabled) on
+//     both paths, and every listed unit stays under the 300/600 ms bounds at 16,
+//     32 and 64 KB on the bot path (the cost is not monotone in size) plus the
+//     128 KB owner head;
+//   - a FLATTENED block keeps its line breaks as `<br>` instead of running its
+//     lines together (see plainTextTokens in the renderer);
 //   - ordinary content is untouched: the pinned document below (several real
 //     tables — alignment, escaped pipes, inline code holding a pipe — and code
 //     blocks inside quotes) renders as it did before the guards, and the pins in
@@ -43,7 +61,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import {
-  renderMarkdown, renderBotMarkdown, setMdTableGuardEnabled, BOT_MD_MAX_INPUT,
+  renderMarkdown, renderBotMarkdown, setMdTableGuardEnabled,
+  setMdBlockquoteSpanGuardEnabled, setMdLheadingGuardEnabled, BOT_MD_MAX_INPUT, MD_MAX_NEST,
 } from "../servers/blog/renderer.js";
 
 const CAP = BOT_MD_MAX_INPUT; // renderBotMarkdown refuses only ABOVE this
@@ -119,6 +138,131 @@ test("each pathological shape renders in < 300 ms at 64 KB and < 600 ms at the 1
   }
   t.diagnostic(`worst 64 KB bot render: ${worstBot.ms.toFixed(0)} ms — ${worstBot.what}`);
   t.diagnostic(`worst 128 KB owner render: ${worstOwner.ms.toFixed(0)} ms — ${worstOwner.what}`);
+});
+
+// --- shape 2: the span budget must be blind to ordinary nesting -----------
+// The budget is charged the OVERRUN — what the blockquote rule scanned minus
+// the characters the token it produced used — so a quote that keeps its whole
+// match costs nothing, at any depth. Charging the FULL span charged every
+// nesting level the rest of the document: `deepQuote` below then lost its
+// formatting (measured: 2,566 escaped `&gt;` markers at 10 levels / 128 KB where
+// the fixed render has none, and 14,539 at 16 levels), while the same document
+// with the budget off (main) renders in full. Both fixtures are checked — an
+// ordinary ramp, and a body quoted `levels` deep.
+const THREAD_MARKER = "THREAD-END-MARKER";
+
+/** An email-style thread `levels` deep and about `size` characters: level k is a
+ *  run of lines carrying exactly k `> ` prefixes, so the document opens one
+ *  quote level at a time and each level's quote match covers everything below
+ *  it. Every line is EXPLICITLY quoted — no lazy continuation lines — because at
+ *  this size lazy lines inside a deep quote are the RE-LEX cliff (thousands of
+ *  chunks, bounded by its own byte budget), which flattens a tail with or
+ *  without the span budget and would hide what this fixture is about. */
+function emailThread(levels, size) {
+  const share = Math.floor((size - 1024) / levels);
+  const out = [];
+  for (let k = 1; k <= levels; k++) {
+    const prefix = "> ".repeat(k);
+    const line = `${prefix}reply body line of level ${k}\n`;
+    out.push(line.repeat(Math.max(1, Math.floor(share / line.length))));
+    if (k < levels) out.push(`${prefix}signing off at level ${k}\n`);
+  }
+  out.push("> ".repeat(levels) + `${THREAD_MARKER} **end of thread**\n`);
+  return out.join("");
+}
+
+/** A body quoted `levels` deep from its first line (the report's "body 10 levels
+ *  deep"): every line carries the full prefix, so each of the `levels`
+ *  blockquote tokenizer calls sees a rule match and a token that are BOTH the
+ *  whole remaining document (overrun 0) — and the full-span charge summed to
+ *  1.08 MB at 10 levels / 128 KB and 1.12 MB at 16, past the 1 MiB budget, which
+ *  is the reported regression. */
+function deepQuote(levels, size) {
+  const prefix = "> ".repeat(levels);
+  const line = `${prefix}quoted body line of the thread\n`;
+  const body = line.repeat(Math.max(1, Math.floor((size - 1024) / line.length)));
+  return body + prefix + `${THREAD_MARKER} **end of thread**\n`;
+}
+
+test("a deeply quoted body and an email thread render exactly as the unguarded lexer does, at 10-16 levels and 80/128 KB", async (t) => {
+  for (const [shape, make] of [["email thread", emailThread], ["body 10-16 levels deep", deepQuote]]) {
+    for (const levels of [10, 12, 14, 16]) {
+      for (const size of [80 * 1024, OWNER_HEAD]) {
+        const src = make(levels, size);
+        assert.ok(src.length <= size, `${shape}, ${levels} levels: the fixture stays under ${size} chars (${src.length})`);
+        const guarded = renderMarkdown(src);
+        let plain;
+        setMdBlockquoteSpanGuardEnabled(false);
+        try {
+          plain = renderMarkdown(src);
+        } finally {
+          setMdBlockquoteSpanGuardEnabled(true);
+        }
+        const where = `${shape}, ${levels} levels at ${src.length} chars`;
+        const depth = (guarded.match(/<blockquote>/g) || []).length;
+        assert.equal(depth, levels,
+          `${where}: opened ${levels} blockquotes, got ${depth} `
+          + `(a spent budget shows the rest as escaped text) — ${JSON.stringify(guarded.slice(-200))}`);
+        // Neither document has a `>` in its CONTENT, so escaped `&gt;` means a
+        // guard flattened quote source instead of lexing it.
+        assert.equal((guarded.match(/&gt;/g) || []).length, 0,
+          `${where}: the document was not turned into escaped text`);
+        assert.equal(sha256(guarded), sha256(plain),
+          `${where}: the blockquote-span budget changed the render\n`
+          + `  guarded length: ${guarded.length}, budget-off length: ${plain.length}`);
+        assert.ok(guarded.includes(THREAD_MARKER), `${where}: the thread's end is still there`);
+        // 16 levels is the depth guard's own limit (the innermost paragraph is
+        // flattened there, exactly as it is with the budget off); below it the
+        // deepest line is still rendered as formatting.
+        if (levels < MD_MAX_NEST) {
+          assert.match(guarded, /<strong>end of thread<\/strong>/,
+            `${where}: the deepest line is still formatted, got ${JSON.stringify(guarded.slice(-160))}`);
+        }
+        t.diagnostic(`${where}: identical to the budget-off render, ${depth} blockquotes`);
+      }
+    }
+  }
+});
+
+// --- shape 3: an empty list marker + TAB (the setext-heading rescan) -------
+// A marker with nothing after it but a TAB is not a list item, so the line
+// becomes a one-line paragraph and `lheading` is asked at every line — where a
+// failure has already scanned the whole remaining paragraph run. These are the
+// units from the report. The cost is NOT monotone in size (`"-\t\n"` is ~1.0 s
+// at 32 KB but 82 ms at 64 KB: the regex engine's backtracking, not a guard),
+// so every unit is measured at 16, 32 AND 64 KB, plus the 128 KB owner head.
+const SETEXT_UNITS = {
+  "  -\\t": "  -\t",
+  "\\t\\n  -": "\t\n  -",
+  "   *\\t": "   *\t",
+  "*\\t": "*\t",
+  "+\\t": "+\t",
+  "1.\\t": "1.\t",
+  "1)\\t": "1)\t",
+  "a\\n*\\t": "a\n*\t",
+  "-\\t": "-\t",
+};
+const SETEXT_SIZES = [16, 32, 64];
+
+test("every empty-marker+TAB unit renders in < 300 ms at 16/32/64 KB and < 600 ms at the 128 KB owner head", async (t) => {
+  let worstBot = { ms: 0, what: "" };
+  let worstOwner = { ms: 0, what: "" };
+  for (const [name, unit] of Object.entries(SETEXT_UNITS)) {
+    for (const kb of SETEXT_SIZES) {
+      const src = rep(unit, kb * 1024);
+      const bot = await renderInWorker("bot", src);
+      if (bot.ms > worstBot.ms) worstBot = { ms: bot.ms, what: `${name} @${kb} KB` };
+      assert.ok(bot.length > 0, `${name} @${kb} KB: the bot path still renders`);
+      assert.ok(bot.ms < 300, `${name} @${kb} KB took ${bot.ms.toFixed(0)} ms on the bot path (bound 300 ms)`);
+    }
+    const ownerSrc = rep(unit, OWNER_HEAD);
+    const owner = await renderInWorker("owner", ownerSrc);
+    if (owner.ms > worstOwner.ms) worstOwner = { ms: owner.ms, what: `${name} @128 KB owner` };
+    assert.ok(owner.length > 0, `${name} @128 KB: the owner path still renders`);
+    assert.ok(owner.ms < 600, `${name} @the 128 KB owner head took ${owner.ms.toFixed(0)} ms (bound 600 ms)`);
+  }
+  t.diagnostic(`worst bot render of a setext unit: ${worstBot.ms.toFixed(1)} ms — ${worstBot.what}`);
+  t.diagnostic(`worst owner render of a setext unit: ${worstOwner.ms.toFixed(1)} ms — ${worstOwner.what}`);
 });
 
 // --- the flat token meets marked's paragraph-CLIPPING branch -----------------
@@ -249,6 +393,76 @@ test("differential: 2,000 seeded table-shaped documents render the same with the
   assert.ok(rejected > 0, `the corpus contains rejected table shapes (${rejected} documents)`);
 });
 
+// --- the differential test: the setext precheck never rejects a heading -----
+// Deterministic (mulberry32) like the table differential, so a failure is
+// reproducible. The fragments are the ones that decide marked's `lheading` rule:
+// setext underlines (`=`/`-` runs), things that only LOOK like one, list
+// markers with and without the space the list rule wants, digits with `.`/`)`,
+// tabs, 0-4 leading spaces, ATX headings, quotes, fences, code spans, blank
+// lines and plain text.
+const SETEXT_FRAGMENTS = [
+  "-", "--", "---", "----", "=", "==", "===", "- - -", "_ _ _",
+  "*", "+", "* ", "+ ", "- ", "  -", "  *", "\t-", "  -\t", "*\t", "+\t",
+  "1.", "1)", "12.", "12)", "1. ", "1) ", "0)",
+  "\t", " ", "  ", "   ", "    ", "\t\t",
+  "text", "more text", "a", "b", "word",
+  "`code`", "`a|b`", "> quote", ">", "# h", "#", "```", "    code",
+];
+
+/** 1-8 lines, each 1-4 fragments after 0-4 leading spaces, with blank lines and
+ *  (sometimes) a deliberate setext underline under the previous line — the
+ *  acceptance and the rejection paths both. */
+function randomSetextDoc(rnd) {
+  const lines = 1 + Math.floor(rnd() * 8);
+  const out = [];
+  for (let i = 0; i < lines; i++) {
+    if (rnd() < 0.15) { out.push(""); continue; }
+    let line = " ".repeat(Math.floor(rnd() * 5));
+    const parts = 1 + Math.floor(rnd() * 4);
+    for (let p = 0; p < parts; p++) line += SETEXT_FRAGMENTS[Math.floor(rnd() * SETEXT_FRAGMENTS.length)];
+    out.push(line);
+    if (rnd() < 0.3) out.push(rnd() < 0.5 ? "===" : "---");
+  }
+  return out.join("\n");
+}
+
+test("differential: 2,000 seeded setext-shaped documents render the same with the precheck on and off", () => {
+  const rnd = mulberry32(0x5e7e27);
+  let headings = 0;
+  let candidates = 0;
+  for (let n = 0; n < 2000; n++) {
+    const doc = randomSetextDoc(rnd);
+    const guardedBot = renderBotMarkdown(doc);
+    const guardedOwner = renderMarkdown(doc);
+    setMdLheadingGuardEnabled(false);
+    let plainBot;
+    let plainOwner;
+    try {
+      plainBot = renderBotMarkdown(doc);
+      plainOwner = renderMarkdown(doc);
+    } finally {
+      // Always back on: every later render in this file must be guarded.
+      setMdLheadingGuardEnabled(true);
+    }
+    assert.equal(guardedBot, plainBot,
+      `doc #${n} (bot path) changed with the setext precheck: ${JSON.stringify(doc)}\n`
+      + `  guarded: ${JSON.stringify(guardedBot)}\n  plain:   ${JSON.stringify(plainBot)}`);
+    assert.equal(guardedOwner, plainOwner,
+      `doc #${n} (owner path) changed with the setext precheck: ${JSON.stringify(doc)}\n`
+      + `  guarded: ${JSON.stringify(guardedOwner)}\n  plain:   ${JSON.stringify(plainOwner)}`);
+    if (/<h[12]>/.test(guardedBot)) headings++;
+    // A line AFTER the first that reads as a setext underline: the shape the
+    // precheck decides without asking marked.
+    const lines = doc.split("\n");
+    if (lines.slice(1).some((l) => /^ {0,3}(?:=+|-+) *$/.test(l))) candidates++;
+  }
+  // Not vacuous in either direction: documents where a setext underline was
+  // there (and may or may not have made a heading), and documents that really
+  // did render a heading.
+  assert.ok(candidates > 200, `the corpus contains setext-underline shapes (${candidates} documents)`);
+  assert.ok(headings > 50, `the corpus rendered real setext headings (${headings} documents)`);
+});
+
 // --- ordinary content: a pinned document full of real tables --------------
 // Captured from the renderer BEFORE the block-lexer guards (with
 // setMdTableGuardEnabled(false) — marked's own rules — which is also asserted
@@ -343,4 +557,32 @@ test("the pinned document (real tables, escaped pipes, quoted code) renders exac
     "indented code inside a quote is a code block: " + bot.slice(-800));
   assert.match(bot, /<pre><code class="language-js">const pipe = 'a\|b'/, "the quoted fence is code");
   assert.match(bot, /<div class="table-scroll"><table>/, "tables keep the scroll wrapper");
+});
+
+// --- a flattened block keeps its line breaks --------------------------------
+// A guard that flattens an inline block fills it with plainTextTokens: one text
+// token per line and a `br` between them. That is what `breaks: true` emits for
+// a real paragraph, and it is a DELIBERATE change from main, which put the whole
+// flattened block in ONE text token — a text token's newlines are not breaks (it
+// is the paragraph tokenizer that applies `breaks`), so every line break was a
+// literal `\n` and the block rendered as one run-together line.
+const FLATTEN_DOC = `${"*a* ".repeat(600)}\nsecond line of the same paragraph\nthird line with a [link](/blog/x)`;
+
+test("a flattened block keeps its line breaks as <br> (and stays plain text)", () => {
+  for (const [who, html] of [
+    ["bot", renderBotMarkdown(FLATTEN_DOC)],
+    ["owner", renderMarkdown(FLATTEN_DOC)],
+  ]) {
+    // The block really was flattened: 1,200+ delimiters is past
+    // BOT_MD_BLOCK_DIMS, so no emphasis and no link are rendered.
+    assert.ok(!html.includes("<em>"), `${who}: the flattened block is plain text, got ${JSON.stringify(html.slice(0, 120))}`);
+    assert.ok(!html.includes("<a "), `${who}: the flattened block's link stayed text`);
+    assert.ok(html.includes("*a* *a*"), `${who}: the emphasis markers are shown literally`);
+    // One break per line boundary — two here — and no literal newline in
+    // place of a break.
+    const breaks = html.match(/<br ?\/?>/g) || [];
+    assert.equal(breaks.length, 2,
+      `${who}: both line breaks became <br>, got ${breaks.length}: ${JSON.stringify(html.slice(-200))}`);
+    assert.match(html, /second line of the same paragraph<br ?\/?>third line with a \[link\]\(\/blog\/x\)/, `${who}: the lines are separated by <br>, not by a literal newline`);
+  }
 });

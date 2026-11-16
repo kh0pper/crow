@@ -1038,34 +1038,119 @@ const RELEX_BUDGET_FACTOR = 8;
 // There is no cheap precheck that keeps the output identical here (the match is
 // legitimately "everything until the next block start", and a lazy paragraph
 // really is part of the quote), so this one is BOUNDED instead, the same way
-// the re-lex path is: a per-parse budget of BLOCKQUOTE SPAN — the characters
-// the blockquote rule actually matches — `max(1 MiB, 8 × the document)`, the
-// same floor and factor. Ordinary content cannot spend it: for a real quote the
-// token covers the match, so the spans of a document's quotes are disjoint and
-// add up to at most the document (a 64 KB post made entirely of quotes spends
-// 64 KB of a 1 MiB budget). The shape above spends the budget after ~16 quote
-// lines at 64 KB, because every one of those lines is charged the rest of the
-// document; past it the remainder is shown as escaped text, exactly like the
-// depth guard's.
+// the re-lex path is: a per-parse budget of BLOCKQUOTE OVERRUN — the characters
+// the rule SCANS that the token it produces does NOT use, i.e. the rule's
+// matched span minus the token's `raw.length` — `max(1 MiB, 8 × the document)`,
+// the same floor and factor.
+//
+// The overrun is what makes the budget invisible to ordinary content at ANY
+// depth: when the match IS the token the overrun is zero, and a quote's match
+// always does cover the quotes nested inside it, so a 128 KB document quoted
+// sixteen levels deep is charged nothing at all. Charging the whole span
+// instead — the first cut of this guard — charged EVERY nesting level the
+// whole remaining document: a body quoted ten levels deep at 128 KB (every line
+// carrying the full prefix, so each level's rule match AND its token are the
+// whole remaining document) summed to 1.08 MB of span, past the 1 MiB budget,
+// and everything the guard saw after that point came out as escaped text, on a
+// document that main (no budget at all) renders in full. The shape above still
+// spends the budget, because its rule matches the rest of the document and the
+// token keeps 7 characters of it: each quote line is charged the rest of the
+// document, and the budget is gone after ~16 quote lines at 64 KB. Past it the
+// remainder is shown as escaped text, exactly like the depth guard's.
 //
 // Measured WITH both guards (same shapes, CPU ms, one whole render; the 64 KB
 // column is renderBotMarkdown, the 128 KB column renderMarkdown's head):
 //
 //   shape (repeated to fill)     64 KB    128 KB (owner)
-//   "a\n-|-\n"                  161       370
-//   "|a\n|-|-\n"                 136       165
-//   "a\n-\n"                    139       163
-//   "a|b\n-|-|-\n"               122       267
-//   "a\n -\n"                   125       154
-//   "    x\n>     y\n"            25        33
+//   "a\n-|-\n"                  172       374
+//   "|a\n|-|-\n"                 156       204
+//   "a\n-\n"                    177       195
+//   "a|b\n-|-|-\n"               128       336
+//   "a\n -\n"                   156       188
+//   "    x\n>     y\n"            71       106
 //
-// …i.e. 18x to 83x faster, and the remaining cost is the per-block work those
+// …i.e. 6x to 36x faster, and the remaining cost is the per-block work those
 // documents honestly need (32,000 paragraph tokens at 64 KB). Ordinary content
 // pays nothing: a 58 KB post of headings, prose, tables and fences renders in
 // 15 ms with the shape-1 guard on and 14 ms with it off. tests/md-block-guard.test.js
 // holds every number above to 300 ms / 600 ms inside a worker with a 5 s kill,
 // and its differential test requires the guard to be byte-transparent on 2,000
 // seeded table-shaped documents.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// A THIRD QUADRATIC BLOCK-LEXER SHAPE — an empty list marker followed by a TAB
+//
+// Neither guard above sees this one, and it is not a rejected table attempt
+// either. A list marker with nothing after it but a TAB is not a list item:
+// marked's list rule is `^( {0,3}(?:[*+-]|\d{1,9}[.)]))([ \t][^\n]+?)?(?:\n|$)`,
+// so `[ \t][^\n]+?` needs a character after the tab, and `-\t` leaves the tab
+// unconsumed. The line falls through to `text`, which takes exactly ONE line, so
+// the document becomes a one-line paragraph per line — a fresh block position
+// per line — and every one of those positions asks `lheading`, whose rule is
+// “paragraph run, then `\n {0,3}(=+|-+) *(?:\n+|$)`”. A failed attempt has by
+// then scanned the whole remaining run, and here the run never ends: `  -\t` is
+// neither blank nor the start of any block marked knows (the tab is not the
+// space its list rule wants, and ` {0,3}\t` needs the tab within the first
+// four characters). So each line rescans the rest of the document. Measured
+// before the guard, one whole render, CPU ms:
+//
+//   shape (repeated to fill)     16 KB   32 KB   64 KB   128 KB (owner)
+//   "  -\t\n"                      …       …      4000    16900
+//   "   *\t\n"                     …       …      3300        …
+//   "*\t\n"                        …       …      2500    10700
+//   "+\t\n"                        …       …      2300        …
+//   "1.\t\n" / "1)\t\n"            …       …      1700        …
+//   "a\n*\t\n"                     …       …      1500        …
+//
+// The cost is not even monotone in size (`"-\t\n"` is ~1.0 s at 32 KB and 82 ms
+// at 64 KB) — that is the regex engine's backtracking, not a guard — which is
+// why the test pins every listed unit at 16, 32 and 64 KB rather than testing
+// one size. Profiled at 32 KB, `lheading` is 556 of the render's 586 ms.
+//
+// The fix is a PRECHECK, like shape 1's: `setextPossible` answers “can a setext
+// underline end the paragraph run that starts here?” by walking lines only
+// until the run would end, and the tokenizer is not called at all when the
+// answer is no. Two things make it cheap enough to be quadratic no more:
+//
+//   * the walk is per LINE and allocation-free (`isSetextUnderline`,
+//     `setextRunEnds` do character tests), where marked's rule is a backtracking
+//     scan over the whole run per call; and
+//   * it is MEMOIZED by distance-from-end (makeSetextMemo, sameDoc): every later
+//     call in a frame is on a shorter suffix of the source the answer was
+//     computed on, where a line at distance d from the end is still at distance
+//     d — so a document of nothing but `  -\t` lines is scanned ONCE, and a
+//     paragraph run that keeps being interrupted costs one scan per
+//     interruption, each starting where the last one stopped: linear per frame.
+//
+// It cannot reject a heading marked would make: FALSE is only returned when the
+// walk reaches a line that ends the run (marked's run cannot pass it) and no
+// line before it was an underline, and `setextRunEnds` recognizes a SUBSET of
+// marked's run ends, so the walk can only run further than marked's, never
+// stop earlier. TRUE just means “ask marked”, which still decides. The guard
+// also installs nothing at all unless the installed rule still opens its run
+// with the stop lookahead the walk reproduces (LHEADING_RUN_SOURCE), so a
+// future marked that reworks the rule keeps its own behavior. Tests: 2,000
+// seeded documents — short lines mixing `-`/`*`/`+`/`=`, digits with `.`/`)`,
+// tabs, 0-4 spaces, text, blank lines, list items, quotes and code — must
+// render BYTE-IDENTICALLY with the guard on and off on both paths
+// (setMdLheadingGuardEnabled is the seam), and every unit in the table above
+// must stay under 300 ms at 16/32/64 KB on the bot path and under 600 ms for
+// the 128 KB owner head.
+//
+// Measured WITH the guard (same shapes, CPU ms, one whole render; 16/32/64 KB on
+// the bot path, 128 KB owner head):
+//
+//   shape (repeated to fill)     16 KB   32 KB   64 KB   128 KB (owner)
+//   "  -\t\n"                      2       2       2        2
+//   "\t\n  -"                     68     103     181      204
+//   "   *\t\n"                     2       2       2        2
+//   "*\t\n"                        2       2       2        3
+//   "-\t\n"                        2       2       2        2
+//   "+\t\n"                       18      29      61      118
+//   "1.\t\n"                      16      25      41       68
+//   "1)\t\n"                      16      22      39       62
+//   "a\n*\t\n"                    77     121     217      354
 // ---------------------------------------------------------------------------
 
 /**
@@ -1203,6 +1288,170 @@ function paragraphWithoutTableScan(blockRules) {
   return rule;
 }
 
+// --- the setext-heading precheck (see "A THIRD QUADRATIC BLOCK-LEXER SHAPE") --
+
+/**
+ * The head of marked 17.0.6's `lheading` rule as installed: the paragraph-run
+ * group opens with this stop lookahead (`\n(?!\s*?\n| {0,3}(?:[*+-]|\d{1,9}[.)])
+ * | …`), and its alternatives ARE the lines that end the run `setextRunEnds`
+ * reproduces. A future marked that reworks the rule fails this test and the
+ * precheck installs NOTHING — marked's own rule then runs as before, which is a
+ * slow parse of the shapes above, never a wrong one.
+ */
+const LHEADING_RUN_SOURCE = "\\n(?!\\s*?\\n| {0,3}(?:[*+-]|\\d{1,9}[.)]) ";
+
+/** How many setext-scan answers one parse remembers: marked asks once per block
+ *  position, and every ask inside a frame is on a suffix of the previous one,
+ *  while nested frames interleave — a few slots keep the frame being walked and
+ *  the frames it came from. */
+const SETEXT_MEMO_SLOTS = 4;
+
+/**
+ * Is the line `src[from, to)` — the line break is NOT in that range — a setext
+ * underline, marked's ` {0,3}(=+|-+) *(?:\n+|$)`? Written as character tests
+ * rather than a regex because this runs once per line of every paragraph run
+ * the block lexer walks: a slice plus a regex exec per line is a per-line
+ * allocation, which is the cost this guard exists to avoid.
+ * @param {string} src
+ * @param {number} from line start
+ * @param {number} to line end (exclusive)
+ * @returns {boolean}
+ */
+function isSetextUnderline(src, from, to) {
+  let at = from;
+  for (let spaces = 0; spaces < 3 && at < to && src.charCodeAt(at) === 32; spaces++) at++;
+  const mark = src.charCodeAt(at);
+  if (mark !== 61 /* = */ && mark !== 45 /* - */) return false;
+  while (at < to && src.charCodeAt(at) === mark) at++;
+  while (at < to && src.charCodeAt(at) === 32) at++;
+  return at >= to;
+}
+
+/**
+ * Does the line `src[from, to)` END the paragraph run marked's `lheading` rule
+ * scans? The rule's run is `(?:.|\n(?!STOP))+?`, so it ends where `STOP`
+ * matches: a blank line, indented code, a fence, a quote, an ATX heading, a
+ * list item, an HTML line or a table delimiter row. This recognizes the cheap,
+ * unambiguous half of that set (blank line, indented code, fence, quote, ATX
+ * heading, list item, and nothing else), which is the safe direction: a line
+ * this does not recognize is treated as paragraph text, so the walk only ever
+ * runs FURTHER than marked's own — it can cost a call, never reject a heading
+ * marked would make.
+ * @param {string} src
+ * @param {number} from line start
+ * @param {number} to line end (exclusive)
+ * @returns {boolean}
+ */
+function setextRunEnds(src, from, to) {
+  let at = from;
+  let spaces = 0;
+  while (spaces < 4 && at < to && src.charCodeAt(at) === 32) { at++; spaces++; }
+  if (spaces === 4) return true; // four spaces: indented code
+  // A blank line — spaces and tabs only — ends the run too (marked's `\s*?\n`).
+  let blank = from;
+  while (blank < to) {
+    const c = src.charCodeAt(blank);
+    if (c !== 32 && c !== 9) break;
+    blank++;
+  }
+  if (blank >= to) return true;
+  const mark = src.charCodeAt(at);
+  if (mark === 9 /* tab */) return true; // 0-3 spaces then a tab: indented code
+  if (mark === 62 /* > */) return true; // blockquote
+  if (mark === 35 /* # */) return true; // ATX heading
+  if (mark === 96 /* ` */ || mark === 126 /* ~ */) { // fence
+    let run = 0;
+    for (let i = at; i < to && src.charCodeAt(i) === mark; i++) run++;
+    if (run >= 3) return true;
+  }
+  if (mark === 42 /* * */ || mark === 43 /* + */ || mark === 45 /* - */) {
+    return at + 1 < to && src.charCodeAt(at + 1) === 32; // list item
+  }
+  if (mark >= 48 && mark <= 57) { // 1-9 digits, `.` or `)`, then a space
+    let i = at;
+    while (i < to && i - at < 9 && src.charCodeAt(i) >= 48 && src.charCodeAt(i) <= 57) i++;
+    const dot = src.charCodeAt(i);
+    return i + 1 < to && (dot === 46 || dot === 41) && src.charCodeAt(i + 1) === 32;
+  }
+  return false;
+}
+
+/**
+ * One setext-scan answer: `hit` is the distance from the END of `src` to the
+ * first line after the first that ends the paragraph run (`-1`: none — the run
+ * goes to the end of the source) and `underline` whether that line is a setext
+ * underline. Distances are from the END because every later call in a frame is
+ * on a shorter SUFFIX of the same source, where a line at distance d is still
+ * at distance d (the trick sameDoc and the start memos use).
+ * @returns {{src: string|null, len: number, hit: number, underline: boolean}}
+ */
+function makeSetextMemo() {
+  return { src: null, len: 0, hit: -1, underline: false };
+}
+
+/**
+ * Can a setext underline end the paragraph run that starts at the head of
+ * `src`? FALSE means "marked cannot match here" and is only ever returned by
+ * the walk in setextRunAnswer: it visits lines in the order the rule does and
+ * returns FALSE at the first line that ends the run (no earlier line was an
+ * underline — the walk checked each one) and TRUE at the first underline (which
+ * the rule itself still has to accept, so a TRUE can only cost a call).
+ * @param {string} src
+ * @param {{slots: object[], next: number}} memos
+ * @returns {boolean}
+ */
+function setextPossible(src, memos) {
+  for (const memo of memos.slots) {
+    if (sameDoc(memo, src)) return setextRunAnswer(src, memo);
+  }
+  const memo = memos.slots[memos.next];
+  memos.next = (memos.next + 1) % memos.slots.length;
+  return setextRunAnswer(src, memo);
+}
+
+/**
+ * The walk behind setextPossible, memoized in `memo` (see makeSetextMemo):
+ * lines are visited from the second of `src` (a run needs a line of text before
+ * its underline), each is asked "underline?" and then "does the run end
+ * here?", and the first line that answers either gives the answer for this
+ * source AND for every shorter suffix of it that still starts before that line.
+ * A walk that reaches the end of the source records "no run end from line 1 to
+ * the end", which holds for every shorter suffix too (line 1 of a suffix is
+ * never earlier than line 1 of the source) — so a document of nothing but
+ * paragraph text is scanned once, not once per line.
+ * @param {string} src
+ * @param {object} memo
+ * @returns {boolean}
+ */
+function setextRunAnswer(src, memo) {
+  if (sameDoc(memo, src)) {
+    if (memo.hit < 0) return false;
+    if (src.length > memo.hit) return memo.underline;
+  }
+  const end = src.length;
+  const first = src.indexOf("\n");
+  const start = first < 0 ? end : first + 1;
+  memo.src = src;
+  memo.len = end;
+  memo.hit = -1;
+  memo.underline = false;
+  for (let at = start; at < end;) {
+    const eol = src.indexOf("\n", at);
+    const lineEnd = eol < 0 ? end : eol;
+    if (isSetextUnderline(src, at, lineEnd)) {
+      memo.hit = end - at;
+      memo.underline = true;
+      return true;
+    }
+    if (setextRunEnds(src, at, lineEnd)) {
+      memo.hit = end - at;
+      return false;
+    }
+    at = lineEnd + 1;
+  }
+  return false;
+}
+
 /**
  * TEST SEAM: the shape-1 guard (the table precheck AND the header-only table
  * rule in the paragraph rule's stop lookahead — the two halves of the same
@@ -1217,6 +1466,31 @@ let mdTableGuard = true;
 /** @param {boolean} enabled false renders through marked's own table rules */
 export function setMdTableGuardEnabled(enabled) {
   mdTableGuard = enabled !== false;
+}
+
+/**
+ * TEST SEAM: the blockquote-span budget (see "SHAPE 2") can be switched off for
+ * a render, so tests/md-block-guard.test.js can render one document with and
+ * without it and require the HTML to be identical. Nothing in the product calls
+ * this.
+ */
+let mdBlockquoteSpanGuard = true;
+
+/** @param {boolean} enabled false renders with no blockquote-span budget */
+export function setMdBlockquoteSpanGuardEnabled(enabled) {
+  mdBlockquoteSpanGuard = enabled !== false;
+}
+
+/**
+ * TEST SEAM: the setext-heading precheck (see "A THIRD QUADRATIC BLOCK-LEXER
+ * SHAPE") can be switched off for a render, so tests/md-block-guard.test.js can
+ * require it to be byte-transparent. Nothing in the product calls this.
+ */
+let mdLheadingGuard = true;
+
+/** @param {boolean} enabled false renders through marked's own lheading rule */
+export function setMdLheadingGuardEnabled(enabled) {
+  mdLheadingGuard = enabled !== false;
 }
 
 /**
@@ -1313,12 +1587,14 @@ const RELEX_TOKENIZERS = ["blockquote", "list"];
  *
  * A third family of quadratic shapes lives in marked's block RULES, below this
  * recursion and invisible to both counters above: a table attempt that rescans
- * the rest of the document and is then rejected, and a blockquote rule that
- * matches the whole remainder and then has it dropped. See "TWO MORE QUADRATIC
- * BLOCK-LEXER SHAPES" further up: the first is PRECHECKED away (two cheap
- * rules-level wrappers, no source rewriting), the second is bounded by a
- * per-parse budget of blockquote span — same floor and factor as the re-lex
- * budget, and it degrades the same way once spent.
+ * the rest of the document and is then rejected, a blockquote rule that
+ * matches the whole remainder and then has it dropped, and a setext-heading
+ * rule that scans the whole remaining paragraph and then fails. See "TWO MORE
+ * QUADRATIC BLOCK-LEXER SHAPES" and "A THIRD QUADRATIC BLOCK-LEXER SHAPE"
+ * further up: the table and the setext heading are PRECHECKED away (cheap
+ * rules-level decisions, no source rewriting), the blockquote is bounded by a
+ * per-parse budget of blockquote OVERRUN — same floor and factor as the re-lex
+ * budget — and it degrades the same way once spent.
  *
  * The options are COPIED: marked's Lexer constructor caches a Tokenizer on the
  * options object it is given (`options.tokenizer = new Tokenizer()`) and rebinds
@@ -1349,11 +1625,12 @@ function boundedLexer(options, inputLength = 0) {
   const relexBudget = Math.max(RELEX_BUDGET_FLOOR, RELEX_BUDGET_FACTOR * inputLength);
   /** Characters re-read through that path so far in this parse. */
   let relexBytes = 0;
-  /** The characters this parse may spend in marked's blockquote RULE — the
-   *  span it matches, which is what that rule's cost is proportional to (see
-   *  "SHAPE 2" above). Same floor and factor as the re-lex budget. */
+  /** The characters this parse may WASTE in marked's blockquote RULE — the
+   *  span it scans minus the token it yields, which is what that rule's
+   *  quadratic cost is proportional to (see "SHAPE 2" above). Same floor and
+   *  factor as the re-lex budget. */
   const blockquoteBudget = Math.max(RELEX_BUDGET_FLOOR, RELEX_BUDGET_FACTOR * inputLength);
-  /** Blockquote-rule span spent so far in this parse. */
+  /** Blockquote-rule overrun spent so far in this parse. */
   let blockquoteSpan = 0;
 
   const tokenizer = lexer.tokenizer;
@@ -1396,25 +1673,53 @@ function boundedLexer(options, inputLength = 0) {
     };
   }
 
-  // The blockquote tokenizer: its rule's matched span is what it costs, so
-  // that span is what is charged — before the call, so a document that has
-  // spent the budget never pays for another full-document scan. The charge is
-  // only worked out where the rule can match at all (`blockquoteStart`, marked's
-  // own `^ {0,3}>`): every block position asks the blockquote tokenizer, and
-  // scanning the rest to price a quote that starts with `#` or `- ` would be a
-  // per-block cost the guard itself created.
-  if (rules && rules.block && rules.block.blockquote && rules.other
-    && rules.other.blockquoteStart) {
+  // The blockquote tokenizer: the characters its rule scans and the token it
+  // produces does NOT use are what it costs, so that OVERRUN — the rule's
+  // matched span minus the token's `raw.length` — is what is charged, and the
+  // budget is consulted BEFORE the rule runs, so a document that has spent it
+  // never pays for another full-document scan. Charging the whole span instead
+  // charged every nesting level the rest of the document (see "SHAPE 2");
+  // an ordinary quote, nested or not, keeps its whole match, so its overrun is
+  // 0 and it costs nothing. The overrun is only worked out where the rule can
+  // match at all (`blockquoteStart`, marked's own `^ {0,3}>`): every block
+  // position asks the blockquote tokenizer, and scanning the rest to price a
+  // quote that starts with `#` or `- ` would be a per-block cost the guard
+  // itself created.
+  if (mdBlockquoteSpanGuard && rules && rules.block && rules.block.blockquote
+    && rules.other && rules.other.blockquoteStart) {
     const blockquoteRule = rules.block.blockquote;
     const blockquoteStart = rules.other.blockquoteStart;
     const blockquote = tokenizer.blockquote;
     tokenizer.blockquote = function (src) {
-      if (blockquoteStart.test(src)) {
-        const span = blockquoteRule.exec(src);
-        blockquoteSpan += span ? span[0].length : 0;
-        if (blockquoteSpan > blockquoteBudget) return flatGuardToken(src);
-      }
-      return blockquote.call(this, src);
+      if (blockquoteSpan > blockquoteBudget) return flatGuardToken(src);
+      if (!blockquoteStart.test(src)) return blockquote.call(this, src);
+      const span = blockquoteRule.exec(src);
+      const token = blockquote.call(this, src);
+      // Charged AFTER the call, because the token's `raw` is the only measure of
+      // what the scan actually bought; the next call sees the new total.
+      if (span) blockquoteSpan += Math.max(0, span[0].length - (token ? token.raw.length : 0));
+      return token;
+    };
+  }
+
+  // The lheading (setext heading) tokenizer: asked at every block position,
+  // where a FAILED attempt has already scanned the whole remaining paragraph
+  // run. `setextPossible` answers "can a setext underline end the run that
+  // starts here?" by walking only as far as the run itself, and its memo makes
+  // that walk amortized linear over the frame's successive suffixes (see "A
+  // THIRD QUADRATIC BLOCK-LEXER SHAPE" above). Installed only when the
+  // installed rule still opens its run with the stop lookahead the walk
+  // reproduces: a future marked that changes it keeps its own rule instead.
+  if (mdLheadingGuard && rules && rules.block && rules.block.lheading
+    && rules.block.lheading.source.includes(LHEADING_RUN_SOURCE)) {
+    const lheading = tokenizer.lheading;
+    const memos = {
+      slots: Array.from({ length: SETEXT_MEMO_SLOTS }, makeSetextMemo),
+      next: 0,
+    };
+    tokenizer.lheading = function (src) {
+      if (!setextPossible(src, memos)) return undefined;
+      return lheading.call(this, src);
     };
   }
 
@@ -1924,7 +2229,17 @@ export const BOT_MD_MAX_LINK_DEFS = 256;
  *  `breaks: true` emits for a plain paragraph today). A text token's `text` is
  *  character data, not markup — marked escapes it itself in parseInline
  *  (measured: a text token holding `<b>&` renders `&lt;b&gt;&amp;`) — so the
- *  RAW line goes in here, never a pre-escaped one (that would double-escape). */
+ *  RAW line goes in here, never a pre-escaped one (that would double-escape).
+ *
+ *  The per-line `br` tokens are deliberate: `breaks: true` only turns a newline
+ *  into a break in the PARAGRAPH tokenizer, which a flattened block never
+ *  reaches, so a single text token holding the whole block kept its newlines as
+ *  literal `\n` characters and rendered as one run-together line (main, before
+ *  this helper, did exactly that). Splitting on `\n` keeps the line structure
+ *  the author typed, which is also what the unflattened render would show. It
+ *  is a change of output for GUARDED blocks only — nothing else calls this —
+ *  and tests/md-block-guard.test.js pins it ("a flattened block keeps its line
+ *  breaks"). */
 function plainTextTokens(src) {
   const lines = String(src).split("\n");
   const tokens = [];
