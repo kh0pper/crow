@@ -1110,6 +1110,41 @@ test("a start that installs the missing dependency does not count the previous e
   assert.ok(Number.isFinite(Date.parse(state.attempt.started_at)), "and its start stamp");
 });
 
+test("a second start that installs the same dependency again counts the exit", () => {
+  const f = makeFixture({ withDep: true });
+  installAndStabilize(f);
+  const shim = npmShim(f);
+  const depDir = join(f.work, "node_modules", "fixture-dep");
+  mkdirSync(depDir, { recursive: true });
+  writeFileSync(shim.depPath, "{}\n");
+
+  fastForwardTo(f, f.b);
+  assert.equal(runLauncher(f, shim.env).status, 0);
+  assert.equal(readState(f).failures, 0, "fixture precondition: the trial is armed, nothing counted yet");
+  assert.equal(shim.runs(), 0, "fixture precondition: nothing is missing yet");
+
+  // First crash + a missing package: that exit is excused, once.
+  runRecorder(f, { exit: CRASH });
+  rmSync(depDir, { recursive: true, force: true });
+  assert.equal(runLauncher(f, shim.env).status, 0);
+  assert.equal(shim.runs(), 1, "fixture precondition: the first start installed the package");
+  assert.equal(readState(f).failures, 0, "fixture precondition: the first exit was excused");
+
+  // The same package vanishes again and the crash repeats: the install still
+  // succeeds, but the excuse is spent, so this exit is a crash of the commit.
+  runRecorder(f, { exit: CRASH });
+  rmSync(depDir, { recursive: true, force: true });
+  const run = runLauncher(f, shim.env);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(shim.runs(), 2, "the second start installs the package as well");
+  assert.ok(existsSync(shim.depPath));
+  const state = readState(f);
+  assert.equal(state.failures, 1, "the same pending sha gets its exit excused only once");
+  assert.equal(state.missing_deps_forgiven_sha, f.b, "and the excuse stays spent for this sha");
+  assert.equal(state.state, "pending", "the trial keeps running on the same commit");
+  assert.equal(state.attempt.exit, null, "a fresh attempt record is open");
+});
+
 test("a held checkout lock defers the missing-dependency install", () => {
   const f = makeFixture({ withDep: true });
   installAndStabilize(f);

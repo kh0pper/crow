@@ -238,6 +238,10 @@ export function freshState() {
     // fresh budget.
     missing_deps_attempts: 0,
     missing_deps_sha: null,
+    // The pending sha whose exit was already excused as "the tree lacked these
+    // packages" (see preStartOnce). One excuse per sha: a package that keeps
+    // vanishing afterwards is a crash of the commit like any other.
+    missing_deps_forgiven_sha: null,
     // The HELD marker THIS instance wrote, and the stamp it carries (see
     // reportRefusal). It survives every later transition — a re-armed trial, a
     // discard, a rollback — because it is the only proof the gateway's stable
@@ -1166,7 +1170,7 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
   // reads "unchanged" from then on, so this is the last place that can install
   // it. Runs before the attempt is counted, and never blocks the start.
   const head = gitText(root, ["rev-parse", "HEAD"]) || "";
-  const depsInstalled = installMissingDependencies({ root, gitDir, state, crowHome, env, now });
+  const depsInstalled = installMissingDependencies({ root, gitDir, state, crowHome, env, now, head });
 
   const attemptId = attemptIdFor(env);
   // Whether the attempt that just ended was one we asked for. The "wait" log
@@ -1184,8 +1188,12 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
     const prev = state.attempt;
     // The previous exit taught us the tree cannot start without the packages
     // this start has just installed: that exit is not evidence about the commit,
-    // so the trial keeps its count for the start that follows.
-    const explainedByInstall = depsInstalled && head && head === state.pending_sha;
+    // so the trial keeps its count for the start that follows. At most once per
+    // pending sha — a package that keeps going missing must still reach the
+    // rollback threshold.
+    const explainedByInstall = depsInstalled && head && head === state.pending_sha
+      && state.missing_deps_forgiven_sha !== state.pending_sha;
+    if (explainedByInstall) state.missing_deps_forgiven_sha = state.pending_sha;
     if (prev && prev.started_at && !explainedByInstall) {
       const planned = Boolean(prev.planned_at);
       if (exitCountsAsCrash(prev.exit, { planned })) {
@@ -1419,12 +1427,12 @@ export function missingTopLevelDeps(root) {
  *   present afterwards — the caller treats that as the reason the previous exit
  *   is not a crash of the commit.
  */
-function installMissingDependencies({ root, gitDir, state, crowHome, env, now }) {
+function installMissingDependencies({ root, gitDir, state, crowHome, env, now, head }) {
   // That state has its own retry path (retryDependencyInstall).
   if (state.state === "rolled-back-deps-pending") return false;
   // The attempts were paid against the commit they were spent on: a new commit
-  // brings its own dependency set, so it starts with a full budget.
-  const head = gitText(root, ["rev-parse", "HEAD"]) || "";
+  // brings its own dependency set, so it starts with a full budget. `head` is
+  // the caller's read of the checkout, so both places judge the same commit.
   if (head && state.missing_deps_sha !== head) {
     resetMissingDepsAttempts(state);
     state.missing_deps_sha = head;
