@@ -874,6 +874,11 @@ const STYLES = `
   /* A timeline with nothing on it says how a first placement is made. */
   .studio .st-tl-empty { margin: 12px 14px; }
   .studio .st-tl-block {
+    /* A block keeps a readable width at every zoom: a one-bar placement is 16 px
+       wide at half zoom, so it holds a minimum and its label ends in an ellipsis
+       (the full name is its title and its aria-label, and the placement bar
+       names it again when it is selected). */
+    min-width: 28px;
     position: absolute; top: 7px; height: 40px; box-sizing: border-box; padding: 0 8px;
     border-radius: 6px; border: 2px solid var(--st-human); background: #24282D; color: #121417;
     font: inherit; text-align: left; overflow: hidden; cursor: grab; touch-action: none;
