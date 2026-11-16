@@ -31,6 +31,14 @@ const SONG = "song-shell";
 const MODE_KEY = "crow.studio.mode.v1";
 const SIDE_KEY = "crow.studio.sideCollapsed.v1";
 
+/** The widgets a mode's default layout shows, in page order. */
+const COMPOSE = ["scene-grid", "editor", "pads", "steps", "fx", "history"];
+const PERFORM = ["scene-grid", "pads", "fx", "midi", "history"];
+const RECORD = ["scene-grid", "takes", "midi", "history"];
+
+/** Every widget the shell knows: one frame each. */
+const WIDGET_COUNT = 10;
+
 /** The stand-in dashboard layout: a bare document around the panel content. */
 function minimalLayout({ title, content }) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${title}</title></head>`
@@ -145,7 +153,10 @@ function snapshotHosts(document) {
     gridWrap: q("[data-role=grid-wrap]"),
     hint: q("[data-role=hint]"),
     editor: q("[data-role=editor]"),
-    sampler: q("[data-role=sampler]"),
+    pads: q("[data-role=sampler-pads]"),
+    steps: q("[data-role=sampler-steps]"),
+    chop: q("[data-role=sampler-chop]"),
+    fx: q("[data-role=sampler-fx]"),
     recordings: q("[data-role=recordings]"),
     midi: q("[data-role=midi]"),
     history: q("[data-role=history]"),
@@ -167,10 +178,11 @@ function standardHosts(document) {
       document.querySelector("[data-role=grid-wrap]"),
       document.querySelector("[data-role=hint]"),
     ],
-    editor: [
-      document.querySelector("[data-role=editor]"),
-      document.querySelector("[data-role=sampler]"),
-    ],
+    editor: [document.querySelector("[data-role=editor]")],
+    pads: [document.querySelector("[data-role=sampler-pads]")],
+    steps: [document.querySelector("[data-role=sampler-steps]")],
+    chop: [document.querySelector("[data-role=sampler-chop]")],
+    fx: [document.querySelector("[data-role=sampler-fx]")],
     takes: document.querySelector("[data-role=recordings]"),
     midi: document.querySelector("[data-role=midi]"),
     history: document.querySelector("[data-role=history]"),
@@ -429,11 +441,19 @@ test("the emitted shell script follows the panel's inline rules and names the wi
 
   assert.equal(widgetName("scene-grid"), "Scene grid");
   assert.equal(widgetName("editor"), "Editor");
+  assert.equal(widgetName("pads"), "Pads");
+  assert.equal(widgetName("steps"), "Steps");
+  assert.equal(widgetName("chop"), "Chop");
+  assert.equal(widgetName("fx"), "Effects");
   assert.equal(widgetName("takes"), "Takes");
   assert.equal(widgetName("midi"), "MIDI");
   assert.equal(widgetName("history"), "History");
   assert.equal(widgetName("agent"), "Agent");
   assert.equal(emptyNote("editor"), "Pick a clip in the grid to edit it.");
+  assert.equal(emptyNote("pads"), "Open a pattern clip on a sampler track to play its pads.");
+  assert.equal(emptyNote("steps"), "Open a pattern clip on a sampler track to sequence its pads.");
+  assert.equal(emptyNote("chop"), "Open a pattern clip and pick a pad to chop its sound.");
+  assert.equal(emptyNote("fx"), "Open a pattern clip on a sampler track for the effects and the looper.");
   assert.equal(emptyNote("takes"), "Arm a track to record.");
   assert.equal(emptyNote("scene-grid"), "");
   assert.match(SHELL_CSS, /\.st-widget-tab\s*\{[^}]*min-height:\s*46px/, "a tab is a 46 px target");
@@ -497,8 +517,7 @@ test("the top bar carries the page's own controls and the new mode switch and la
   assert.equal(b.storage.getItem(MODE_KEY), "perform", "the mode is this device's");
   assert.equal(modeSwitch.querySelector("[data-mode=perform]").getAttribute("aria-pressed"), "true");
   assert.equal(modeSwitch.querySelector("[data-mode=compose]").getAttribute("aria-pressed"), "false");
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "midi", "history"]);
-
+  assert.deepEqual(shownWidgets(b.page), PERFORM);
   const layoutButton = top.querySelector("[data-act=layout-menu]");
   const popover = top.querySelector("[data-role=layout-popover]");
   assert.ok(layoutButton, "the Layout button exists");
@@ -514,24 +533,29 @@ test("the top bar carries the page's own controls and the new mode switch and la
   assert.equal(layoutButton.getAttribute("aria-expanded"), "false");
 });
 
-test("compose mounts scene-grid, editor and history; perform and record follow the defaults", async () => {
+test("compose mounts its six widgets; perform and record follow the defaults", async () => {
   const b = await bootShell();
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"]);
+  assert.deepEqual(shownWidgets(b.page), COMPOSE);
   assert.equal(sizeOf(b.page, "scene-grid"), "l");
   assert.equal(sizeOf(b.page, "editor"), "m");
+  assert.equal(sizeOf(b.page, "pads"), "m");
+  assert.equal(sizeOf(b.page, "steps"), "l");
+  assert.equal(sizeOf(b.page, "fx"), "s");
   assert.equal(sizeOf(b.page, "history"), "s");
   assert.equal(frame(b.page, "agent").parentNode, b.page.querySelector("[data-role=widget-tray]"));
 
   b.shell.setMode("perform");
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "midi", "history"]);
+  assert.deepEqual(shownWidgets(b.page), PERFORM);
+  assert.equal(sizeOf(b.page, "pads"), "l");
+  assert.equal(sizeOf(b.page, "fx"), "m");
   assert.equal(sizeOf(b.page, "midi"), "s");
   assert.equal(frame(b.page, "agent").parentNode, b.page.querySelector("[data-role=widget-tray]"));
 
   b.shell.setMode("record");
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "takes", "midi", "history"]);
+  assert.deepEqual(shownWidgets(b.page), RECORD);
   assert.equal(sizeOf(b.page, "takes"), "l");
   assert.equal(frame(b.page, "agent").parentNode, b.page.querySelector("[data-role=widget-tray]"));
-  assert.deepEqual(trayWidgets(b.page), ["editor", "agent"]);
+  assert.deepEqual(trayWidgets(b.page), ["editor", "pads", "steps", "chop", "fx", "agent"]);
 });
 
 test("the page's hosts and header controls are moved, never cloned", async () => {
@@ -548,7 +572,10 @@ test("the page's hosts and header controls are moved, never cloned", async () =>
     ["[data-role=grid-wrap]", refs.gridWrap],
     ["[data-role=hint]", refs.hint],
     ["[data-role=editor]", refs.editor],
-    ["[data-role=sampler]", refs.sampler],
+    ["[data-role=sampler-pads]", refs.pads],
+    ["[data-role=sampler-steps]", refs.steps],
+    ["[data-role=sampler-chop]", refs.chop],
+    ["[data-role=sampler-fx]", refs.fx],
     ["[data-role=recordings]", refs.recordings],
     ["[data-role=midi]", refs.midi],
     ["[data-role=history]", refs.history],
@@ -568,7 +595,10 @@ test("the page's hosts and header controls are moved, never cloned", async () =>
   assert.equal(refs.gridWrap.parentNode, body(page, "scene-grid"));
   assert.equal(refs.hint.parentNode, body(page, "scene-grid"));
   assert.equal(refs.editor.parentNode, body(page, "editor"));
-  assert.equal(refs.sampler.parentNode, body(page, "editor"));
+  assert.equal(refs.pads.parentNode, body(page, "pads"), "our pads are a widget of their own");
+  assert.equal(refs.steps.parentNode, body(page, "steps"));
+  assert.equal(refs.chop.parentNode, body(page, "chop"));
+  assert.equal(refs.fx.parentNode, body(page, "fx"));
   assert.equal(refs.recordings.parentNode, body(page, "takes"));
   assert.equal(refs.midi.parentNode, body(page, "midi"));
   assert.equal(refs.history.parentNode, body(page, "history"));
@@ -605,42 +635,35 @@ test("a hidden host shows its empty note and unhiding removes it", async () => {
   b.shell.setMode("compose");
   const editorNote = noteOf(b.page, "editor");
   assert.equal(editorNote.textContent, "Pick a clip in the grid to edit it.");
-  assert.equal(editorNote.hasAttribute("hidden"), false, "both editor hosts are hidden");
+  assert.equal(editorNote.hasAttribute("hidden"), false, "the editor host is hidden");
 
   b.refs.editor.removeAttribute("hidden");
   await tick();
-  assert.equal(editorNote.hasAttribute("hidden"), true, "one visible host is enough");
+  assert.equal(editorNote.hasAttribute("hidden"), true, "a visible host is enough");
 
   b.refs.editor.setAttribute("hidden", "");
-  b.refs.sampler.removeAttribute("hidden");
-  await tick();
-  assert.equal(editorNote.hasAttribute("hidden"), true, "the sampler counts as the editor");
-
-  b.refs.sampler.setAttribute("hidden", "");
   await tick();
   assert.equal(editorNote.hasAttribute("hidden"), false, "both hidden again");
+
+  const padsNote = noteOf(b.page, "pads");
+  assert.equal(padsNote.textContent, "Open a pattern clip on a sampler track to play its pads.");
+  assert.equal(padsNote.hasAttribute("hidden"), false, "the pads of a closed clipless page say what opens them");
+
+  b.refs.pads.removeAttribute("hidden");
+  await tick();
+  assert.equal(padsNote.hasAttribute("hidden"), true, "and the note goes when the pads host is drawn");
 });
 
-test("the editor frame holds both hosts and shows whichever one is not hidden", async () => {
+test("each sampler widget has a frame of its own with its host inside it", async () => {
   const b = await bootShell();
-  const editorFrame = frame(b.page, "editor");
-  assert.equal(b.refs.editor.parentNode, editorFrame.querySelector(".st-widget-body"));
-  assert.equal(b.refs.sampler.parentNode, editorFrame.querySelector(".st-widget-body"));
-  assert.equal(b.page.querySelectorAll("[data-widget=editor]").length, 1, "one editor frame");
-
-  const editorNote = noteOf(b.page, "editor");
-  b.refs.editor.removeAttribute("hidden");
-  await tick();
-  assert.equal(editorNote.hasAttribute("hidden"), true);
-
-  b.refs.editor.setAttribute("hidden", "");
-  b.refs.sampler.removeAttribute("hidden");
-  await tick();
-  assert.equal(editorNote.hasAttribute("hidden"), true);
-
-  b.refs.sampler.setAttribute("hidden", "");
-  await tick();
-  assert.equal(editorNote.hasAttribute("hidden"), false);
+  for (const id of ["pads", "steps", "chop", "fx"]) {
+    assert.equal(b.page.querySelectorAll(`[data-widget=${id}]`).length, 1, `one ${id} frame`);
+    const host = b.refs[id === "fx" ? "fx" : id];
+    assert.equal(host.parentNode, frame(b.page, id).querySelector(".st-widget-body"), `${id} host is in its own frame`);
+    assert.ok(noteOf(b.page, id), `the ${id} frame carries its own note`);
+  }
+  assert.equal(frame(b.page, "editor").querySelector("[data-role=sampler-pads]"), null, "the editor frame holds no pad host");
+  assert.equal(noteOf(b.page, "editor").hasAttribute("hidden"), false);
 });
 
 test("a widget in the tray is still in the page and shows its body without a song change", async () => {
@@ -657,7 +680,7 @@ test("a widget in the tray is still in the page and shows its body without a son
   const before = b.renderCount();
   b.shell.refresh();
 
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history", "agent"]);
+  assert.deepEqual(shownWidgets(b.page), [...COMPOSE, "agent"]);
   assert.equal(frame(b.page, "agent").parentNode, b.page.querySelector("[data-role=studio-widgets]"));
   assert.equal(b.page.querySelector("#st-ask"), b.refs.askInput);
   assert.equal(b.renderCount(), before + 1, "showing a tray widget asks the page to draw its body");
@@ -726,7 +749,7 @@ test("refresh with an unchanged layout writes nothing and leaves the focused inp
 test("crossing the 640 breakpoint loads the phone layout without detaching a host", async () => {
   const b = await bootShell({ width: 1280 });
   const grid = b.refs.gridWrap;
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"]);
+  assert.deepEqual(shownWidgets(b.page), COMPOSE);
 
   b.layout.saveLayout(b.storage, SONG, "compose", "phone", {
     v: 1,
@@ -744,7 +767,7 @@ test("crossing the 640 breakpoint loads the phone layout without detaching a hos
   assert.equal(b.page.contains(grid), true, "a tray frame keeps its body in the document");
 
   b.media.setWidth(1280);
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"]);
+  assert.deepEqual(shownWidgets(b.page), COMPOSE);
   assert.equal(b.document.querySelector("[data-role=grid-wrap]"), grid);
 });
 
@@ -778,7 +801,7 @@ test("boot, teardown and boot leaves one set of frames and one transport bar", a
 
   const same = domWindow.StudioShell.mount(page, b.hooks);
   assert.equal(same, b.shell, "mount is idempotent while mounted");
-  assert.equal(document.querySelectorAll("[data-widget]").length, 6);
+  assert.equal(document.querySelectorAll("[data-widget]").length, WIDGET_COUNT);
 
   const firstTransport = mountTransport(domWindow, document);
   assert.equal(document.querySelectorAll(".st-transport-bar").length, 1);
@@ -794,7 +817,7 @@ test("boot, teardown and boot leaves one set of frames and one transport bar", a
   b.control.current = second;
   const secondTransport = mountTransport(domWindow, document);
 
-  assert.equal(document.querySelectorAll("[data-widget]").length, 6);
+  assert.equal(document.querySelectorAll("[data-widget]").length, WIDGET_COUNT);
   assert.equal(document.querySelectorAll("[data-role=studio-top]").length, 1);
   assert.equal(document.querySelectorAll("[data-role=studio-widgets]").length, 1);
   assert.equal(document.querySelectorAll("[data-role=studio-screen]").length, 1);
@@ -808,14 +831,14 @@ test("boot, teardown and boot leaves one set of frames and one transport bar", a
 
 test("a throwing storage still renders the default layout", async () => {
   const b = await bootShell({ storage: throwingStorage() });
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"], "compose is the floor");
+  assert.deepEqual(shownWidgets(b.page), COMPOSE, "compose is the floor");
   assert.equal(
     b.page.querySelector("[data-role=mode-switch] [data-mode=compose]").getAttribute("aria-pressed"),
     "true",
   );
 
   assert.doesNotThrow(() => b.shell.setMode("record"));
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "takes", "midi", "history"]);
+  assert.deepEqual(shownWidgets(b.page), RECORD);
   assert.deepEqual(b.modes, ["record"]);
   assert.equal(
     b.page.querySelector("[data-role=mode-switch] [data-mode=record]").getAttribute("aria-pressed"),
@@ -836,12 +859,12 @@ test("Edit layout gives every frame Remove, Size and a drag handle and the tray 
   startEditing(b);
   assert.equal(b.page.querySelector("[data-role=widget-tray]").hasAttribute("hidden"), false, "the tray is shown");
 
-  for (const id of ["scene-grid", "editor", "history"]) {
+  for (const id of COMPOSE) {
     assert.ok(frameAct(b, id, "widget-remove"), `${id} can leave the page`);
     assert.ok(frameAct(b, id, "widget-size"), `${id} can change size`);
     assert.ok(frame(b.page, id).querySelector("[data-role=widget-drag]"), `${id} can be moved`);
   }
-  for (const id of ["takes", "midi", "agent"]) {
+  for (const id of ["chop", "takes", "midi", "agent"]) {
     assert.ok(frameAct(b, id, "widget-add"), `${id} can come back from the tray`);
   }
 
@@ -864,9 +887,9 @@ test("Remove moves a widget to the tray and writes only this song, mode and clas
   startEditing(b);
   click(b.domWindow, frameAct(b, "history", "widget-remove"));
 
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor"]);
-  assert.deepEqual(trayWidgets(b.page), ["takes", "midi", "history", "agent"]);
-  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["scene-grid", "editor"]);
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "pads", "steps", "fx"]);
+  assert.deepEqual(trayWidgets(b.page), ["chop", "takes", "midi", "history", "agent"]);
+  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["scene-grid", "editor", "pads", "steps", "fx"]);
   assert.equal(b.storage.getItem(otherSongKey), otherSongValue, "another song is untouched");
   assert.equal(b.storage.getItem(layoutKey(SONG, "perform", "laptop")), null, "another mode is untouched");
   assert.equal(b.storage.getItem(layoutKey(SONG, "compose", "phone")), null, "another size class is untouched");
@@ -874,8 +897,8 @@ test("Remove moves a widget to the tray and writes only this song, mode and clas
   assert.ok(frameAct(b, "history", "widget-add"), "the tray frame offers Add");
 
   click(b.domWindow, frameAct(b, "history", "widget-add"));
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"], "Add puts it back at the end");
-  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["scene-grid", "editor", "history"]);
+  assert.deepEqual(shownWidgets(b.page), COMPOSE, "Add puts it back at the end");
+  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), COMPOSE);
 
   click(b.domWindow, frameAct(b, "editor", "widget-size"));
   assert.equal(sizeOf(b.page, "editor"), "l", "Size steps from m to l");
@@ -884,6 +907,9 @@ test("Remove moves a widget to the tray and writes only this song, mode and clas
     [
       { id: "scene-grid", size: "l" },
       { id: "editor", size: "l" },
+      { id: "pads", size: "m" },
+      { id: "steps", size: "l" },
+      { id: "fx", size: "s" },
       { id: "history", size: "s" },
     ],
   );
@@ -901,7 +927,7 @@ test("another song's layout is unaffected", async () => {
   click(b.domWindow, frameAct(b, "takes", "widget-size"));
 
   assert.equal(b.storage.getItem(otherKey), otherValue);
-  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["editor", "history", "takes"]);
+  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["editor", "pads", "steps", "fx", "history", "takes"]);
 });
 
 test("Reset restores the built-in default and deletes the song key", async () => {
@@ -909,14 +935,17 @@ test("Reset restores the built-in default and deletes the song key", async () =>
   startEditing(b);
   click(b.domWindow, frameAct(b, "history", "widget-remove"));
   click(b.domWindow, frameAct(b, "takes", "widget-add"));
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "takes"]);
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "pads", "steps", "fx", "takes"]);
   assert.ok(b.storage.getItem(layoutKey(SONG, "compose", "laptop")), "the edit was stored");
 
   click(b.domWindow, layoutEntry(b.page, "layout-reset"));
 
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"], "the built-in default");
+  assert.deepEqual(shownWidgets(b.page), COMPOSE, "the built-in default");
   assert.equal(sizeOf(b.page, "scene-grid"), "l");
   assert.equal(sizeOf(b.page, "editor"), "m");
+  assert.equal(sizeOf(b.page, "pads"), "m");
+  assert.equal(sizeOf(b.page, "steps"), "l");
+  assert.equal(sizeOf(b.page, "fx"), "s");
   assert.equal(sizeOf(b.page, "history"), "s");
   assert.equal(b.storage.getItem(layoutKey(SONG, "compose", "laptop")), null, "the song key is gone");
 });
@@ -1017,8 +1046,8 @@ test("reorder by drag changes the saved order", async () => {
   handle.dispatchEvent(pointer(b.domWindow, "pointermove", { clientX: 10, clientY: 20 }));
   handle.dispatchEvent(pointer(b.domWindow, "pointerup", { clientX: 10, clientY: 20 }));
 
-  assert.deepEqual(shownWidgets(b.page), ["editor", "scene-grid", "history"]);
-  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["editor", "scene-grid", "history"]);
+  assert.deepEqual(shownWidgets(b.page), ["editor", "scene-grid", "pads", "steps", "fx", "history"]);
+  assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["editor", "scene-grid", "pads", "steps", "fx", "history"]);
   assert.deepEqual(storedIds(b.storage, "another-song", "compose", "laptop"), null);
 });
 
@@ -1041,7 +1070,7 @@ test("a touch under 400 ms does not start a drag", async (t) => {
     t.mock.timers.reset();
   }
 
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"]);
+  assert.deepEqual(shownWidgets(b.page), COMPOSE);
   assert.equal(
     b.storage.getItem(layoutKey(SONG, "compose", "laptop")),
     null,
@@ -1074,19 +1103,19 @@ test("a throwing storage lets Edit layout work in memory", async () => {
   startEditing(b);
 
   click(b.domWindow, frameAct(b, "history", "widget-remove"));
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor"]);
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "pads", "steps", "fx"]);
 
   click(b.domWindow, frameAct(b, "editor", "widget-size"));
   assert.equal(sizeOf(b.page, "editor"), "l", "the size steps in memory");
 
   click(b.domWindow, frameAct(b, "takes", "widget-add"));
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "takes"]);
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "pads", "steps", "fx", "takes"]);
 
   click(b.domWindow, layoutEntry(b.page, "layout-reset"));
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"], "reset returns the default");
+  assert.deepEqual(shownWidgets(b.page), COMPOSE, "reset returns the default");
 
   assert.doesNotThrow(() => b.shell.setMode("record"));
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "takes", "midi", "history"]);
+  assert.deepEqual(shownWidgets(b.page), RECORD);
 });
 
 test("phone shows one widget and a tab strip", async () => {
@@ -1096,19 +1125,23 @@ test("phone shows one widget and a tab strip", async () => {
   assert.ok(strip, "the phone page carries a tab strip");
   assert.equal(strip.getAttribute("role"), "tablist");
   assert.equal(strip.hasAttribute("hidden"), false, "the strip is shown at phone width");
-  assert.deepEqual(tabLabels(b.page), ["Scene grid", "Editor", "History"], "one tab per shown widget, by name");
+  assert.deepEqual(
+    tabLabels(b.page),
+    ["Scene grid", "Editor", "Pads", "Steps", "Effects", "History"],
+    "one tab per shown widget, by name",
+  );
   assert.deepEqual(
     tabNodes(b.page).map((node) => node.getAttribute("role")),
-    ["tab", "tab", "tab"],
+    ["tab", "tab", "tab", "tab", "tab", "tab"],
   );
   assert.deepEqual(
     tabNodes(b.page).map((node) => node.getAttribute("aria-selected")),
-    ["true", "false", "false"],
+    ["true", "false", "false", "false", "false", "false"],
     "the first shown widget is the active tab",
   );
   assert.deepEqual(visibleFrames(b.page), ["scene-grid"], "only the active widget is on the page");
 
-  click(b.domWindow, tabNodes(b.page)[2]);
+  click(b.domWindow, tabNodes(b.page)[5]);
   assert.equal(activeTab(b.page).textContent, "History");
   assert.deepEqual(visibleFrames(b.page), ["history"]);
   assert.equal(
@@ -1140,7 +1173,7 @@ test("phone shows one widget and a tab strip", async () => {
   assert.equal(strip.hasAttribute("hidden"), true, "a laptop has no tab strip");
   assert.deepEqual(
     visibleFrames(b.page),
-    ["scene-grid", "takes", "midi", "history"],
+    RECORD,
     "a laptop shows every frame of its own layout",
   );
 });
@@ -1160,8 +1193,8 @@ test("a left swipe on the tab strip selects the next tab", async () => {
     { x: 300, y: 40 },
     { x: 190, y: 44 },
   );
-  assert.equal(activeTab(b.page).textContent, "History", "a left swipe on a header is the next widget too");
-  assert.deepEqual(visibleFrames(b.page), ["history"]);
+  assert.equal(activeTab(b.page).textContent, "Pads", "a left swipe on a header is the next widget too");
+  assert.deepEqual(visibleFrames(b.page), ["pads"]);
 
   swipe(b.domWindow, strip, { x: 200, y: 24 }, { x: 320, y: 20 });
   assert.equal(activeTab(b.page).textContent, "Editor", "a right swipe is the previous widget");
@@ -1249,7 +1282,7 @@ test("the toggle hides history and agent, persists, restores", async () => {
   first.shell.refresh();
   assert.deepEqual(
     visibleFrames(first.page),
-    ["scene-grid", "editor", "history", "agent"],
+    [...COMPOSE, "agent"],
     "both side panels start on the page",
   );
 
@@ -1271,12 +1304,16 @@ test("the toggle hides history and agent, persists, restores", async () => {
   assert.equal(toggle.textContent, "Show side panels", "one button hides both and says what comes next");
   assert.equal(toggle.getAttribute("aria-pressed"), "true");
   assert.equal(storage.getItem(SIDE_KEY), "1", "the choice is this browser's");
-  assert.deepEqual(visibleFrames(first.page), ["scene-grid", "editor"], "history and agent are gone together");
+  assert.deepEqual(
+    visibleFrames(first.page),
+    ["scene-grid", "editor", "pads", "steps", "fx"],
+    "history and agent are gone together",
+  );
   assert.equal(historyList.innerHTML, historyBefore, "hiding a panel is view state, never a history entry");
 
   // The frames are still in the document, only display:none, so the grid has no
   // hole where they were and nothing the page wrote into them is lost.
-  assert.equal(shownWidgets(first.page).length, 4, "the layout itself is untouched");
+  assert.equal(shownWidgets(first.page).length, COMPOSE.length + 1, "the layout itself is untouched");
   assert.equal(frame(first.page, "history").parentNode, first.page.querySelector("[data-role=studio-widgets]"));
   assert.equal(frame(first.page, "agent").parentNode, first.page.querySelector("[data-role=studio-widgets]"));
   assert.equal(frame(first.page, "history").hasAttribute("hidden"), true);
@@ -1285,13 +1322,13 @@ test("the toggle hides history and agent, persists, restores", async () => {
   assert.equal(first.refs.aside.hasAttribute("hidden"), true, "the emptied aside stays out of the page");
   assert.deepEqual(
     storedIds(storage, SONG, "compose", "laptop"),
-    ["scene-grid", "editor", "history", "agent"],
+    [...COMPOSE, "agent"],
     "hiding a panel writes no layout",
   );
 
   // A phone has no tab for a hidden panel, and still shows one widget.
   first.media.setWidth(500);
-  assert.deepEqual(tabLabels(first.page), ["Scene grid", "Editor"]);
+  assert.deepEqual(tabLabels(first.page), ["Scene grid", "Editor", "Pads", "Steps", "Effects"]);
   assert.deepEqual(visibleFrames(first.page), ["scene-grid"]);
   first.media.setWidth(1280);
   first.shell.destroy();
@@ -1300,11 +1337,11 @@ test("the toggle hides history and agent, persists, restores", async () => {
   const second = await bootShell({ storage });
   assert.equal(sideToggle(second.page).textContent, "Show side panels", "the choice outlives the page");
   assert.equal(sideToggle(second.page).getAttribute("aria-pressed"), "true");
-  assert.deepEqual(visibleFrames(second.page), ["scene-grid", "editor"], "and the two side panels are still hidden");
+  assert.deepEqual(visibleFrames(second.page), ["scene-grid", "editor", "pads", "steps", "fx"], "and the two side panels are still hidden");
 
   click(second.domWindow, sideToggle(second.page));
   assert.equal(storage.getItem(SIDE_KEY), "0", "showing them again is kept too");
-  assert.deepEqual(visibleFrames(second.page), ["scene-grid", "editor", "history", "agent"]);
+  assert.deepEqual(visibleFrames(second.page), [...COMPOSE, "agent"]);
   assert.equal(second.page.querySelector("#st-ask"), second.refs.askInput);
 
   second.shell.destroy();
@@ -1313,22 +1350,22 @@ test("the toggle hides history and agent, persists, restores", async () => {
 test("the side panels toggle still works when the browser keeps nothing", async () => {
   const b = await bootShell({ storage: throwingStorage() });
   const toggle = sideToggle(b.page);
-  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor", "history"]);
+  assert.deepEqual(visibleFrames(b.page), COMPOSE);
 
   click(b.domWindow, toggle);
   assert.equal(toggle.textContent, "Show side panels");
-  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor"], "history steps aside anyway");
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor", "pads", "steps", "fx"], "history steps aside anyway");
 
   click(b.domWindow, toggle);
   assert.equal(toggle.textContent, "Hide side panels");
-  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor", "history"]);
+  assert.deepEqual(visibleFrames(b.page), COMPOSE);
 
   // Edit layout shows every frame again, so a hidden panel can still be moved.
   click(b.domWindow, toggle);
   startEditing(b);
-  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor", "history"], "editing shows the side panels");
+  assert.deepEqual(visibleFrames(b.page), COMPOSE, "editing shows the side panels");
   click(b.domWindow, layoutEntry(b.page, "layout-edit"));
-  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor"], "and Done hides them again");
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor", "pads", "steps", "fx"], "and Done hides them again");
 
   b.shell.destroy();
 });
@@ -1364,7 +1401,7 @@ test("the agent's Layout row brings it onto the page, and carries the unread dot
 
   click(b.domWindow, b.page.querySelector("[data-act=layout-menu]"));
   click(b.domWindow, row);
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history", "agent"], "the row shows the agent");
+  assert.deepEqual(shownWidgets(b.page), [...COMPOSE, "agent"], "the row shows the agent");
   assert.equal(row.getAttribute("aria-pressed"), "true");
 
   // Hide the side panels: the frame goes, and with it the only place the mark
@@ -1480,7 +1517,7 @@ test("rebuilding a frame's edit controls leaves the listener count flat", async 
   }
 
   assert.equal(b.shell.listenerCount(), before, "five rebuilds of the editor's controls added no record");
-  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"], "and the frames are where they were");
+  assert.deepEqual(shownWidgets(b.page), COMPOSE, "and the frames are where they were");
   assert.ok(frameAct(b, "editor", "widget-size"), "the editor still carries its own Size control");
 
   b.shell.destroy();

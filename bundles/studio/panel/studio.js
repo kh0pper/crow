@@ -965,18 +965,20 @@ const STYLES = `
   /* The pad-and-steps view (the approved design, mockup screen 2): a sampler
      track's clip is a pattern, so opening one shows the kit instead of the
      piano roll. Pads are real buttons, at least 72 px square, and the pad's
-     own settings sit beside them. */
-  .studio .st-sampler {
-    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-panel);
-    display: flex; flex-direction: column; gap: 10px; padding: 12px;
-  }
+     own settings sit under them.
+
+     The view is FOUR widgets since A2 — the pads, the steps, the chop editor
+     and the effects — each with a host of its own that a frame can hold. The
+     wrapper the handler renders around those hosts is only where they start:
+     the shell moves each one into its frame, so the wrapper takes no room and
+     carries no look of its own. */
+  .studio .st-sampler { display: block; }
   .studio .st-sampler[hidden] { display: none; }
+  .studio .st-sampler-host { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .studio .st-sampler-host[hidden] { display: none; }
   .studio .st-sampler-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
   .studio .st-sampler-title { margin: 0; font-size: 15px; font-weight: 700; }
   .studio .st-sampler-meta { font-size: 12px; color: var(--st-muted); }
-  .studio .st-sampler-body { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
-  .studio .st-sampler-pads { flex: 1 1 380px; max-width: 460px; display: flex; flex-direction: column; gap: 10px; }
-  .studio .st-sampler-right { flex: 999 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
   .studio .st-sampler-sub { margin: 0; font-size: 12px; font-weight: 600; color: var(--st-muted); }
   .studio .st-bank-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
   .studio .st-bank-tabs .st-toggle { flex: 0 0 auto; min-width: 44px; }
@@ -1015,7 +1017,6 @@ const STYLES = `
   }
   .studio .st-pad-check input { width: 20px; height: 20px; accent-color: var(--st-human); }
   .studio .st-resample-target { max-width: 180px; }
-  .studio .st-sampler-slot:empty { display: none; }
   /* The chop editor: the sample's waveform, one marker per slice start, and the
      two ways to chop it plus Assign slices to pads. A marker is dragged on the
      SVG itself, so the whole strip takes no touch scrolling. */
@@ -1422,7 +1423,7 @@ function studioPage({ songId, render, res }) {
           <section class="st-mixer" data-role="mixer" hidden></section>
           <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
-          <section class="st-sampler" data-role="sampler" hidden></section>
+          <section class="st-sampler" data-role="sampler" hidden><div class="st-sampler-host" data-role="sampler-pads" hidden></div><div class="st-sampler-host" data-role="sampler-steps" hidden></div><div class="st-sampler-host" data-role="sampler-chop" hidden></div><div class="st-sampler-host" data-role="sampler-fx" hidden></div></section>
           <section class="st-midi" data-role="midi"></section>
         </main>
         <aside class="st-side">

@@ -2,7 +2,8 @@
  * Crow Studio — the widget shell, as one inline classic script.
  *
  * The song page is a page of widgets now: a scene grid, one editor slot, the
- * takes lane, the MIDI lane, the history and the agent. This file builds that
+ * sampler's pads, steps, chop editor and effects, the takes lane, the MIDI
+ * lane, the history and the agent. This file builds that
  * page around the markup the panel already renders. It MOVES the nodes the
  * page already has (it never clones them), so the page's own script keeps
  * finding the same elements, keeps its delegated click handler and keeps every
@@ -107,6 +108,10 @@ export const SHELL_SCRIPT = [
   "  var WIDGET_NAMES = {",
   "    'scene-grid': 'Scene grid',",
   "    'editor': 'Editor',",
+  "    'pads': 'Pads',",
+  "    'steps': 'Steps',",
+  "    'chop': 'Chop',",
+  "    'fx': 'Effects',",
   "    'takes': 'Takes',",
   "    'midi': 'MIDI',",
   "    'history': 'History',",
@@ -114,18 +119,28 @@ export const SHELL_SCRIPT = [
   "  };",
   "  var WIDGET_NOTES = {",
   "    'editor': 'Pick a clip in the grid to edit it.',",
+  "    'pads': 'Open a pattern clip on a sampler track to play its pads.',",
+  "    'steps': 'Open a pattern clip on a sampler track to sequence its pads.',",
+  "    'chop': 'Open a pattern clip and pick a pad to chop its sound.',",
+  "    'fx': 'Open a pattern clip on a sampler track for the effects and the looper.',",
   "    'takes': 'Arm a track to record.'",
   "  };",
   "",
   "  // Where a widget's hosts are when the caller did not hand them in.",
   "  var HOST_QUERIES = {",
   "    'scene-grid': ['[data-role=grid-wrap]', '[data-role=hint]'],",
-  "    'editor': ['[data-role=editor]', '[data-role=sampler]'],",
+  "    'editor': ['[data-role=editor]'],",
+  "    'pads': ['[data-role=sampler-pads]'],",
+  "    'steps': ['[data-role=sampler-steps]'],",
+  "    'chop': ['[data-role=sampler-chop]'],",
+  "    'fx': ['[data-role=sampler-fx]'],",
   "    'takes': ['[data-role=recordings]'],",
   "    'midi': ['[data-role=midi]'],",
   "    'history': ['[data-role=history]']",
   "  };",
-  "  var WIDGET_ORDER = ['scene-grid', 'editor', 'takes', 'midi', 'history', 'agent'];",
+  "  var WIDGET_ORDER = [",
+  "    'scene-grid', 'editor', 'pads', 'steps', 'chop', 'fx', 'takes', 'midi', 'history', 'agent'",
+  "  ];",
   "",
   "  // A touch drags a widget only after a long press, so a scroll or a swipe is",
   "  // never mistaken for one; a mouse drags at once. The same numbers the",

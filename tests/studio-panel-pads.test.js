@@ -399,16 +399,18 @@ async function bootSong(options = {}) {
       ui.runTimers();
       return node;
     },
-    /** The sampler host, asserted to be the view on screen. */
+    /** The pads host, asserted to be the view on screen. */
     view() {
-      const host = document.querySelector("[data-role=sampler]");
-      assert.ok(host, "the sampler host is on the page");
+      const host = document.querySelector("[data-role=sampler-pads]");
+      assert.ok(host, "the pads host is on the page");
       assert.equal(host.hidden, false, "the pad-and-steps view is open");
+      const box = document.querySelector("[data-role=sampler]");
+      assert.equal(box.hidden, false, "and the view says it is open");
       return host;
     },
     /** @returns {object} the step button for one position */
     step(at) {
-      const node = document.querySelector(`[data-role=sampler] [data-act=step][data-at="${at}"]`);
+      const node = document.querySelector(`[data-role=sampler-steps] [data-act=step][data-at="${at}"]`);
       assert.ok(node, `step ${at} is drawn`);
       return node;
     },
@@ -420,7 +422,7 @@ async function bootSong(options = {}) {
     },
     /** @returns {object[]} the cells marked as the transport's own */
     nowCells() {
-      return [...document.querySelectorAll("[data-role=sampler] .st-step-now")];
+      return [...document.querySelectorAll("[data-role=sampler-steps] .st-step-now")];
     },
     /** Open a pattern clip: the pad-and-steps view is its editor. */
     async openSampler() {
@@ -468,7 +470,7 @@ test("a sampler track's header opens the pads: a pattern in its first scene when
   const view = ui.view();
   assert.match(String(view.querySelector(".st-sampler-head").textContent), /Beat box/);
   assert.ok(view.querySelector('[data-act=pad][data-pad-index="0"]'), "with its pads drawn");
-  assert.ok(ui.document.querySelector('[data-role=sampler] [data-act=step][data-at="0"]'), "and its steps");
+  assert.ok(ui.document.querySelector('[data-role=sampler-steps] [data-act=step][data-at="0"]'), "and its steps");
 });
 
 test("a sampler track that already has a pattern opens it, and sends nothing", async () => {
@@ -486,7 +488,7 @@ test("a sampler track that already has a pattern opens it, and sends nothing", a
   );
   ui.view();
   assert.ok(
-    ui.document.querySelector('[data-role=sampler] [data-act=step][data-at="0"]'),
+    ui.document.querySelector('[data-role=sampler-steps] [data-act=step][data-at="0"]'),
     "the pattern the track has is the one open",
   );
   const focus = ui.sent.filter((message) => message.type === "focus").pop();
@@ -599,7 +601,7 @@ test("the step sequencer marks where the transport is, and clears it on Stop", a
   ui.click("[data-act=stop]");
   await ui.settle();
   assert.equal(ui.nowCells().length, 0, "the mark goes with the transport");
-  for (const cell of ui.document.querySelectorAll("[data-role=sampler] .st-step")) {
+  for (const cell of ui.document.querySelectorAll("[data-role=sampler-steps] .st-step")) {
     assert.equal(cell.getAttribute("data-now"), "false", "and every cell says it is not the one");
   }
 });
@@ -648,14 +650,15 @@ test("the lock strip sits beside the steps, and the steps say how to lock one", 
   // detached now, so every assertion after the render reads the live one.
   const liveBox = ui.stepsBox();
 
-  // It is drawn with the steps, not up in the right column.
-  const holder = ui.document.querySelector("[data-role=sampler] .st-step-strip").parentElement;
+  // It is drawn with the steps, in the steps host, and not in the pads or the
+  // effects host.
+  const holder = ui.document.querySelector("[data-role=sampler-steps] .st-step-strip").parentElement;
   assert.ok(holder.contains(strip), "the strip is inside the box that holds the step strip");
   assert.ok(liveBox.contains(strip), "and that box is the live steps box");
   assert.ok(holder === liveBox, "which is the steps box itself");
-  const right = ui.document.querySelector(".st-sampler-right");
-  assert.ok([...right.children].includes(strip) === false, "and it is not a child of the right column");
-  assert.ok(right.contains(liveBox), "the steps box is where it always was, in the right column");
+  const stepsHost = ui.document.querySelector("[data-role=sampler-steps]");
+  assert.ok(stepsHost.contains(liveBox), "the steps box is in the steps widget's own host");
+  assert.equal(ui.document.querySelector("[data-role=sampler-pads]").contains(strip), false, "and not in the pads host");
 
   // With the lock on, the hint gives the place to the strip.
   assert.ok(liveBox.querySelector(".st-step-hint") === null, "the hint gives way to the strip");
