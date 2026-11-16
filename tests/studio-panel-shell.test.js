@@ -1,0 +1,685 @@
+/**
+ * Studio shell — the widget host.
+ *
+ * The page these cases drive is the one `bundles/studio/panel/studio.js`
+ * renders for a song, parsed with linkedom. The shell's own two scripts are
+ * evaluated into that window, in the order the page inlines them, and mounted
+ * on the page element. No song document and no engine is needed: this task is
+ * the page furniture — the top bar, the screen container, the frames, the
+ * hidden tray, the empty notes and the width classes.
+ *
+ * The hooks are the page's side of the contract: the nodes each widget wraps,
+ * the storage the layout model reads, the screen the page is showing, the
+ * render it wants called when a tray widget comes back, and the mode change it
+ * wants told about.
+ */
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import studioPanel from "../bundles/studio/panel/studio.js";
+import {
+  SHELL_CSS,
+  SHELL_SCRIPT,
+  emptyNote,
+  widgetName,
+} from "../bundles/studio/panel/shell.js";
+import { SHELL_LAYOUT_SCRIPT } from "../bundles/studio/panel/shell-layout.js";
+import { TRANSPORT_SCRIPT } from "../bundles/studio/panel/transport-bar.js";
+
+const SONG = "song-shell";
+const MODE_KEY = "crow.studio.mode.v1";
+
+/** The stand-in dashboard layout: a bare document around the panel content. */
+function minimalLayout({ title, content }) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${title}</title></head>`
+    + `<body>${content}</body></html>`;
+}
+
+/** A database fake for the song page: no project list is read. */
+function panelDb() {
+  return {
+    async execute() {
+      return { rows: [] };
+    },
+  };
+}
+
+/** An in-memory localStorage, so a test can read what the page kept. */
+function memoryStorage() {
+  const values = new Map();
+  return {
+    values,
+    getItem(key) {
+      return values.has(String(key)) ? values.get(String(key)) : null;
+    },
+    setItem(key, value) {
+      values.set(String(key), String(value));
+    },
+    removeItem(key) {
+      values.delete(String(key));
+    },
+  };
+}
+
+/** A store that refuses every read and every write. */
+function throwingStorage() {
+  return {
+    getItem() {
+      throw new Error("this browser keeps nothing");
+    },
+    setItem() {
+      throw new Error("this browser keeps nothing");
+    },
+  };
+}
+
+/** The width media queries the shell listens to. */
+function matchesFor(width, media) {
+  const min = /min-width:\s*(\d+)px/.exec(String(media));
+  if (min) return width >= Number(min[1]);
+  const max = /max-width:\s*(\d+)px/.exec(String(media));
+  if (max) return width <= Number(max[1]);
+  return false;
+}
+
+/**
+ * A window width with the two media queries the shell watches: changing the
+ * width updates `innerWidth` and fires the change listeners that flipped.
+ */
+function widthHarness(domWindow, initial) {
+  let width = initial;
+  const queries = [];
+  domWindow.innerWidth = width;
+  domWindow.matchMedia = (media) => {
+    const query = {
+      media: String(media),
+      matches: matchesFor(width, media),
+      listeners: [],
+      addEventListener(name, handler) {
+        if (name === "change") query.listeners.push(handler);
+      },
+      removeEventListener(name, handler) {
+        if (name !== "change") return;
+        const at = query.listeners.indexOf(handler);
+        if (at >= 0) query.listeners.splice(at, 1);
+      },
+      addListener(handler) {
+        query.listeners.push(handler);
+      },
+      removeListener(handler) {
+        const at = query.listeners.indexOf(handler);
+        if (at >= 0) query.listeners.splice(at, 1);
+      },
+    };
+    queries.push(query);
+    return query;
+  };
+  return {
+    queries,
+    width() {
+      return width;
+    },
+    setWidth(next) {
+      width = next;
+      domWindow.innerWidth = width;
+      for (const query of queries) {
+        const matches = matchesFor(width, query.media);
+        if (matches === query.matches) continue;
+        query.matches = matches;
+        for (const handler of query.listeners.slice()) handler({ matches, media: query.media });
+      }
+    },
+  };
+}
+
+/** The nodes the shell is expected to move, captured before it mounts. */
+function snapshotHosts(document) {
+  const q = (selector) => document.querySelector(selector);
+  return {
+    back: q(".st-back"),
+    title: q("[data-role=title]"),
+    modes: q(".st-modes"),
+    presence: q("[data-role=presence]"),
+    gridWrap: q("[data-role=grid-wrap]"),
+    hint: q("[data-role=hint]"),
+    editor: q("[data-role=editor]"),
+    sampler: q("[data-role=sampler]"),
+    recordings: q("[data-role=recordings]"),
+    midi: q("[data-role=midi]"),
+    history: q("[data-role=history]"),
+    timeline: q("[data-role=timeline]"),
+    mixer: q("[data-role=mixer]"),
+    sideHead: q(".st-side-head"),
+    sideNote: q(".st-side-note"),
+    aside: q(".st-side"),
+    askLabel: q(".st-ask-label"),
+    askBox: q(".st-ask"),
+    askInput: q("#st-ask"),
+  };
+}
+
+/** The hosts the page hands the shell, all but the agent (which it makes). */
+function standardHosts(document) {
+  return {
+    "scene-grid": [
+      document.querySelector("[data-role=grid-wrap]"),
+      document.querySelector("[data-role=hint]"),
+    ],
+    editor: [
+      document.querySelector("[data-role=editor]"),
+      document.querySelector("[data-role=sampler]"),
+    ],
+    takes: document.querySelector("[data-role=recordings]"),
+    midi: document.querySelector("[data-role=midi]"),
+    history: document.querySelector("[data-role=history]"),
+  };
+}
+
+/**
+ * Render the song page, evaluate the shell into its window, mount it and hand
+ * back the page, the controller and the pieces a case looks at.
+ */
+async function bootShell(options = {}) {
+  const { parseHTML } = await import("linkedom");
+  const res = {
+    html: "",
+    send(body) {
+      this.html = String(body);
+    },
+  };
+  await studioPanel.handler({ query: { song: SONG }, headers: {} }, res, {
+    db: panelDb(),
+    layout: minimalLayout,
+  });
+  assert.ok(res.html.includes(`data-studio-song="${SONG}"`), "the handler rendered the song page");
+
+  const { document, window: domWindow } = parseHTML(res.html);
+  const storage = options.storage || memoryStorage();
+  const media = widthHarness(domWindow, options.width === undefined ? 1280 : options.width);
+
+  const view = { screen: options.screen || "session" };
+  const modes = [];
+  const control = { current: null };
+  let renders = 0;
+  const hooks = {
+    hosts: options.hosts === undefined ? standardHosts(document) : options.hosts,
+    songId: SONG,
+    storage,
+    screen: () => view.screen,
+    render: () => {
+      renders += 1;
+      if (control.current) control.current.refresh();
+    },
+    onMode: (mode) => modes.push(mode),
+  };
+
+  const run = new Function("window", "document", `${SHELL_LAYOUT_SCRIPT}\n${SHELL_SCRIPT}`);
+  run(domWindow, document);
+
+  const page = document.querySelector(".studio");
+  const refs = snapshotHosts(document);
+  const shell = domWindow.StudioShell.mount(page, hooks);
+  control.current = shell;
+
+  return {
+    document,
+    domWindow,
+    page,
+    shell,
+    hooks,
+    refs,
+    // The boot helper's render hook reads this, so a re-mount can point it at
+    // the controller that is live.
+    control,
+    storage,
+    media,
+    view,
+    layout: domWindow.StudioShellLayout,
+    modes,
+    renderCount: () => renders,
+  };
+}
+
+/** One frame by widget id. */
+function frame(page, id) {
+  return page.querySelector(`[data-widget=${id}]`);
+}
+
+/** The body of one frame. */
+function body(page, id) {
+  return frame(page, id).querySelector(".st-widget-body");
+}
+
+/** The widgets shown in the widget area, in page order. */
+function shownWidgets(page) {
+  const area = page.querySelector("[data-role=studio-widgets]");
+  return Array.from(area.children)
+    .filter((node) => node.getAttribute && node.getAttribute("data-widget"))
+    .map((node) => node.getAttribute("data-widget"));
+}
+
+/** The widget ids waiting in the tray, in page order. */
+function trayWidgets(page) {
+  const area = page.querySelector("[data-role=widget-tray]");
+  return Array.from(area.children)
+    .filter((node) => node.getAttribute && node.getAttribute("data-widget"))
+    .map((node) => node.getAttribute("data-widget"));
+}
+
+/** The size a shown frame carries. */
+function sizeOf(page, id) {
+  return frame(page, id).getAttribute("data-size");
+}
+
+/** The empty note of one frame. */
+function noteOf(page, id) {
+  return frame(page, id).querySelector(".st-widget-note");
+}
+
+/** The agent frame's unread dot. */
+function unreadDot(page) {
+  return frame(page, "agent").querySelector("[data-role=unread]");
+}
+
+/** A click a person could make. */
+function click(domWindow, node) {
+  assert.ok(node, "the control exists");
+  node.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
+}
+
+/** Let linkedom's MutationObserver callbacks run. */
+function tick() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** The transport bar's hooks: nothing is playing on this page. */
+function transportHooks() {
+  return {
+    snapshot: () => null,
+    isPlaying: () => false,
+    isPaused: () => false,
+    isRecording: () => false,
+    currentSceneId: () => null,
+    queuedSceneId: () => null,
+  };
+}
+
+/** Mount the transport bar the same way the page will, for the re-boot case. */
+function mountTransport(domWindow, document) {
+  new Function("window", "document", TRANSPORT_SCRIPT)(domWindow, document);
+  return domWindow.StudioTransport.mount(
+    document.querySelector(".studio"),
+    transportHooks(),
+    { sizeClass: "laptop" },
+  );
+}
+
+test("the emitted shell script follows the panel's inline rules and names the widgets", () => {
+  assert.equal(SHELL_SCRIPT.includes("\u0060"), false, "no backtick in the emitted text");
+  assert.equal(SHELL_SCRIPT.includes("$" + "{"), false, "no template interpolation in the emitted text");
+  assert.equal(SHELL_SCRIPT.includes('"'), false, "no double quote in the emitted text");
+  assert.equal(SHELL_SCRIPT.includes("\\"), false, "no backslash in the emitted text");
+  assert.equal(SHELL_SCRIPT.includes("</script"), false, "it cannot close its own tag");
+  assert.equal(SHELL_CSS.includes("\u0060"), false, "no backtick in the styles");
+  assert.equal(SHELL_CSS.includes("$" + "{"), false, "no template interpolation in the styles");
+  assert.doesNotThrow(() => new Function(SHELL_SCRIPT), "the emitted text parses as a classic script");
+
+  assert.equal(widgetName("scene-grid"), "Scene grid");
+  assert.equal(widgetName("editor"), "Editor");
+  assert.equal(widgetName("takes"), "Takes");
+  assert.equal(widgetName("midi"), "MIDI");
+  assert.equal(widgetName("history"), "History");
+  assert.equal(widgetName("agent"), "Agent");
+  assert.equal(emptyNote("editor"), "Pick a clip in the grid to edit it.");
+  assert.equal(emptyNote("takes"), "Arm a track to record.");
+  assert.equal(emptyNote("scene-grid"), "");
+});
+
+test("the top bar carries the page's own controls and the new mode switch and layout menu", async () => {
+  const b = await bootShell();
+  const top = b.page.querySelector("[data-role=studio-top]");
+  assert.ok(top, "one top bar");
+  assert.equal(b.page.querySelectorAll("[data-role=studio-top]").length, 1);
+  assert.equal(b.refs.back.parentNode, top);
+  assert.equal(b.refs.title.parentNode, top);
+  assert.equal(b.refs.modes.parentNode, top);
+  assert.equal(b.refs.presence.parentNode, top);
+  assert.match(b.refs.back.textContent, /Songs/, "the existing back link is the Songs control");
+  assert.equal(b.page.querySelector("[data-role=songs]"), null, "there is no separate songs host on the song page");
+
+  const modeSwitch = top.querySelector("[data-role=mode-switch]");
+  const labels = Array.from(modeSwitch.querySelectorAll("button")).map((node) => node.textContent);
+  assert.deepEqual(labels, ["Compose", "Perform", "Record"]);
+  assert.equal(modeSwitch.querySelector("[data-mode=compose]").getAttribute("aria-pressed"), "true");
+  assert.equal(modeSwitch.querySelector("[data-mode=perform]").getAttribute("aria-pressed"), "false");
+
+  click(b.domWindow, modeSwitch.querySelector("[data-mode=perform]"));
+  assert.deepEqual(b.modes, ["perform"], "the page is told about the change");
+  assert.equal(b.storage.getItem(MODE_KEY), "perform", "the mode is this device's");
+  assert.equal(modeSwitch.querySelector("[data-mode=perform]").getAttribute("aria-pressed"), "true");
+  assert.equal(modeSwitch.querySelector("[data-mode=compose]").getAttribute("aria-pressed"), "false");
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "midi", "history"]);
+
+  const layoutButton = top.querySelector("[data-act=layout-menu]");
+  const popover = top.querySelector("[data-role=layout-popover]");
+  assert.ok(layoutButton, "the Layout button exists");
+  assert.ok(popover, "the popover exists");
+  assert.ok(popover.querySelector("[data-role=layout-entries]"), "S2b has an entries container");
+  assert.ok(popover.querySelector("[data-role=layout-midi]"), "S4 has a MIDI container");
+  assert.equal(popover.hasAttribute("hidden"), true, "the popover starts closed");
+  click(b.domWindow, layoutButton);
+  assert.equal(popover.hasAttribute("hidden"), false, "the button opens it");
+  assert.equal(layoutButton.getAttribute("aria-expanded"), "true");
+  click(b.domWindow, layoutButton);
+  assert.equal(popover.hasAttribute("hidden"), true, "and closes it again");
+  assert.equal(layoutButton.getAttribute("aria-expanded"), "false");
+});
+
+test("compose mounts scene-grid, editor and history; perform and record follow the defaults", async () => {
+  const b = await bootShell();
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"]);
+  assert.equal(sizeOf(b.page, "scene-grid"), "l");
+  assert.equal(sizeOf(b.page, "editor"), "m");
+  assert.equal(sizeOf(b.page, "history"), "s");
+  assert.equal(frame(b.page, "agent").parentNode, b.page.querySelector("[data-role=widget-tray]"));
+
+  b.shell.setMode("perform");
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "midi", "history"]);
+  assert.equal(sizeOf(b.page, "midi"), "s");
+  assert.equal(frame(b.page, "agent").parentNode, b.page.querySelector("[data-role=widget-tray]"));
+
+  b.shell.setMode("record");
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "takes", "midi", "history"]);
+  assert.equal(sizeOf(b.page, "takes"), "l");
+  assert.equal(frame(b.page, "agent").parentNode, b.page.querySelector("[data-role=widget-tray]"));
+  assert.deepEqual(trayWidgets(b.page), ["editor", "agent"]);
+});
+
+test("the page's hosts and header controls are moved, never cloned", async () => {
+  const b = await bootShell();
+  const { document, page, refs } = b;
+  const top = page.querySelector("[data-role=studio-top]");
+  const screen = page.querySelector("[data-role=studio-screen]");
+
+  for (const [selector, node] of [
+    [".st-back", refs.back],
+    ["[data-role=title]", refs.title],
+    [".st-modes", refs.modes],
+    ["[data-role=presence]", refs.presence],
+    ["[data-role=grid-wrap]", refs.gridWrap],
+    ["[data-role=hint]", refs.hint],
+    ["[data-role=editor]", refs.editor],
+    ["[data-role=sampler]", refs.sampler],
+    ["[data-role=recordings]", refs.recordings],
+    ["[data-role=midi]", refs.midi],
+    ["[data-role=history]", refs.history],
+    ["[data-role=timeline]", refs.timeline],
+    ["[data-role=mixer]", refs.mixer],
+    [".st-side-head", refs.sideHead],
+    [".st-side-note", refs.sideNote],
+    [".st-ask-label", refs.askLabel],
+    [".st-ask", refs.askBox],
+    ["#st-ask", refs.askInput],
+  ]) {
+    assert.equal(document.querySelector(selector), node, `${selector} is the same node`);
+  }
+
+  assert.equal(refs.timeline.parentNode, screen);
+  assert.equal(refs.mixer.parentNode, screen);
+  assert.equal(refs.gridWrap.parentNode, body(page, "scene-grid"));
+  assert.equal(refs.hint.parentNode, body(page, "scene-grid"));
+  assert.equal(refs.editor.parentNode, body(page, "editor"));
+  assert.equal(refs.sampler.parentNode, body(page, "editor"));
+  assert.equal(refs.recordings.parentNode, body(page, "takes"));
+  assert.equal(refs.midi.parentNode, body(page, "midi"));
+  assert.equal(refs.history.parentNode, body(page, "history"));
+
+  const agentBody = body(page, "agent");
+  const ask = page.querySelector("[data-role=ask]");
+  assert.equal(ask.parentNode, agentBody);
+  assert.equal(refs.askBox.parentNode, ask, "the ask box is a DIRECT child of the wrapper");
+  assert.equal(refs.askLabel.parentNode, ask);
+  assert.equal(refs.askInput.parentNode, refs.askBox, "#st-ask keeps its parent");
+  assert.equal(refs.sideHead.parentNode, frame(page, "history").querySelector(".st-widget-head"));
+  assert.equal(refs.sideNote.parentNode, frame(page, "history").querySelector(".st-widget-head"));
+  assert.equal(refs.aside.hasAttribute("hidden"), true, "the emptied aside is hidden");
+  assert.equal(top.querySelector("[data-role=studio-top]"), null);
+});
+
+test("a hidden host shows its empty note and unhiding removes it", async () => {
+  const b = await bootShell();
+  b.shell.setMode("record");
+
+  const takesNote = noteOf(b.page, "takes");
+  assert.ok(takesNote, "the takes frame carries a note");
+  assert.equal(takesNote.textContent, "Arm a track to record.");
+  assert.equal(takesNote.hasAttribute("hidden"), false, "the hidden takes host shows the note: " + body(b.page, "takes").outerHTML);
+
+  b.refs.recordings.removeAttribute("hidden");
+  await tick();
+  assert.equal(takesNote.hasAttribute("hidden"), true, "the note goes when the host is shown");
+
+  b.refs.recordings.setAttribute("hidden", "");
+  await tick();
+  assert.equal(takesNote.hasAttribute("hidden"), false, "and comes back when it is hidden again");
+
+  b.shell.setMode("compose");
+  const editorNote = noteOf(b.page, "editor");
+  assert.equal(editorNote.textContent, "Pick a clip in the grid to edit it.");
+  assert.equal(editorNote.hasAttribute("hidden"), false, "both editor hosts are hidden");
+
+  b.refs.editor.removeAttribute("hidden");
+  await tick();
+  assert.equal(editorNote.hasAttribute("hidden"), true, "one visible host is enough");
+
+  b.refs.editor.setAttribute("hidden", "");
+  b.refs.sampler.removeAttribute("hidden");
+  await tick();
+  assert.equal(editorNote.hasAttribute("hidden"), true, "the sampler counts as the editor");
+
+  b.refs.sampler.setAttribute("hidden", "");
+  await tick();
+  assert.equal(editorNote.hasAttribute("hidden"), false, "both hidden again");
+});
+
+test("the editor frame holds both hosts and shows whichever one is not hidden", async () => {
+  const b = await bootShell();
+  const editorFrame = frame(b.page, "editor");
+  assert.equal(b.refs.editor.parentNode, editorFrame.querySelector(".st-widget-body"));
+  assert.equal(b.refs.sampler.parentNode, editorFrame.querySelector(".st-widget-body"));
+  assert.equal(b.page.querySelectorAll("[data-widget=editor]").length, 1, "one editor frame");
+
+  const editorNote = noteOf(b.page, "editor");
+  b.refs.editor.removeAttribute("hidden");
+  await tick();
+  assert.equal(editorNote.hasAttribute("hidden"), true);
+
+  b.refs.editor.setAttribute("hidden", "");
+  b.refs.sampler.removeAttribute("hidden");
+  await tick();
+  assert.equal(editorNote.hasAttribute("hidden"), true);
+
+  b.refs.sampler.setAttribute("hidden", "");
+  await tick();
+  assert.equal(editorNote.hasAttribute("hidden"), false);
+});
+
+test("a widget in the tray is still in the page and shows its body without a song change", async () => {
+  const b = await bootShell();
+  const tray = b.page.querySelector("[data-role=widget-tray]");
+  assert.equal(frame(b.page, "agent").parentNode, tray);
+  assert.equal(b.page.querySelector("#st-ask"), b.refs.askInput, "the tray body is still found");
+
+  const layout = b.layout.showWidget(
+    b.layout.loadLayout(b.storage, SONG, "compose", "laptop"),
+    "agent",
+  );
+  assert.equal(b.layout.saveLayout(b.storage, SONG, "compose", "laptop", layout), true);
+  const before = b.renderCount();
+  b.shell.refresh();
+
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history", "agent"]);
+  assert.equal(frame(b.page, "agent").parentNode, b.page.querySelector("[data-role=studio-widgets]"));
+  assert.equal(b.page.querySelector("#st-ask"), b.refs.askInput);
+  assert.equal(b.renderCount(), before + 1, "showing a tray widget asks the page to draw its body");
+});
+
+test("an agent frame in the tray grows an unread dot while it is hidden", async () => {
+  const b = await bootShell();
+  const ask = b.page.querySelector("[data-role=ask]");
+  const dot = unreadDot(b.page);
+  assert.equal(dot.hasAttribute("hidden"), true, "nothing unread yet");
+
+  const log = b.document.createElement("div");
+  log.setAttribute("data-role", "ask-log");
+  ask.appendChild(log);
+  await tick();
+  assert.equal(dot.hasAttribute("hidden"), false, "a reply written while the agent is in the tray is unread");
+
+  const layout = b.layout.showWidget(
+    b.layout.loadLayout(b.storage, SONG, "compose", "laptop"),
+    "agent",
+  );
+  b.layout.saveLayout(b.storage, SONG, "compose", "laptop", layout);
+  b.shell.refresh();
+  assert.equal(dot.hasAttribute("hidden"), true, "showing the agent clears it");
+});
+
+test("refresh with an unchanged layout writes nothing and leaves the focused input where it is", async () => {
+  const b = await bootShell();
+  const { document, domWindow } = b;
+
+  const input = b.refs.askInput;
+  input.focus();
+  document.activeElement = input;
+  const parent = input.parentNode;
+
+  const counts = { insertBefore: 0, appendChild: 0, setAttribute: 0, removeAttribute: 0 };
+  const restore = [];
+  const nodes = [document.documentElement, ...document.querySelectorAll("*")];
+  for (const node of nodes) {
+    for (const name of Object.keys(counts)) {
+      const original = node[name];
+      if (typeof original !== "function") continue;
+      node[name] = function (...args) {
+        counts[name] += 1;
+        return original.apply(this, args);
+      };
+      restore.push(() => {
+        node[name] = original;
+      });
+    }
+  }
+
+  try {
+    b.shell.refresh();
+  } finally {
+    for (const undo of restore.reverse()) undo();
+  }
+
+  assert.deepEqual(counts, { insertBefore: 0, appendChild: 0, setAttribute: 0, removeAttribute: 0 });
+  assert.equal(document.activeElement, input);
+  assert.equal(input.parentNode, parent);
+  assert.equal(b.document.querySelector("#st-ask"), input);
+  assert.equal(domWindow.innerWidth, 1280);
+});
+
+test("crossing the 640 breakpoint loads the phone layout without detaching a host", async () => {
+  const b = await bootShell({ width: 1280 });
+  const grid = b.refs.gridWrap;
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"]);
+
+  b.layout.saveLayout(b.storage, SONG, "compose", "phone", {
+    v: 1,
+    shown: [
+      { id: "takes", size: "l" },
+      { id: "agent", size: "s" },
+    ],
+  });
+
+  b.media.setWidth(500);
+  assert.equal(b.domWindow.innerWidth, 500);
+  assert.deepEqual(shownWidgets(b.page), ["takes", "agent"], "the phone key is the one loaded");
+  assert.equal(b.document.querySelector("[data-role=grid-wrap]"), grid, "the host is the same node");
+  assert.equal(grid.parentNode, body(b.page, "scene-grid"), "it is still in its own frame");
+  assert.equal(b.page.contains(grid), true, "a tray frame keeps its body in the document");
+
+  b.media.setWidth(1280);
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"]);
+  assert.equal(b.document.querySelector("[data-role=grid-wrap]"), grid);
+});
+
+test("a grid drag shows the timeline screen and a drop leaves it showing", async () => {
+  const b = await bootShell();
+  const widgets = b.page.querySelector("[data-role=studio-widgets]");
+  const screen = b.page.querySelector("[data-role=studio-screen]");
+  assert.equal(screen.getAttribute("data-screen"), "session");
+  assert.equal(widgets.hasAttribute("hidden"), false);
+
+  b.view.screen = "arrangement";
+  b.refs.timeline.removeAttribute("hidden");
+  b.shell.refresh();
+  assert.equal(widgets.hasAttribute("hidden"), true, "the widget area gives the timeline the page");
+  assert.equal(screen.getAttribute("data-screen"), "arrangement");
+  assert.equal(b.refs.timeline.hasAttribute("hidden"), false);
+
+  b.hooks.render();
+  assert.equal(widgets.hasAttribute("hidden"), true, "a drop leaves the timeline showing");
+  assert.equal(b.refs.timeline.hasAttribute("hidden"), false);
+
+  b.view.screen = "session";
+  b.hooks.render();
+  assert.equal(widgets.hasAttribute("hidden"), false, "back on the grid the widgets return");
+  assert.equal(screen.getAttribute("data-screen"), "session");
+});
+
+test("boot, teardown and boot leaves one set of frames and one transport bar", async () => {
+  const b = await bootShell();
+  const { document, domWindow, page } = b;
+
+  const same = domWindow.StudioShell.mount(page, b.hooks);
+  assert.equal(same, b.shell, "mount is idempotent while mounted");
+  assert.equal(document.querySelectorAll("[data-widget]").length, 6);
+
+  const firstTransport = mountTransport(domWindow, document);
+  assert.equal(document.querySelectorAll(".st-transport-bar").length, 1);
+
+  firstTransport.destroy();
+  b.shell.destroy();
+  assert.equal(document.querySelectorAll("[data-widget]").length, 0, "the shell takes its frames with it");
+  assert.equal(document.querySelector("[data-role=studio-top]"), null);
+  assert.equal(document.querySelector("[data-role=grid-wrap]"), b.refs.gridWrap, "the hosts are back on the page");
+  assert.equal(document.querySelector("[data-role=timeline]").parentNode, document.querySelector(".st-main"));
+
+  const second = domWindow.StudioShell.mount(page, b.hooks);
+  b.control.current = second;
+  const secondTransport = mountTransport(domWindow, document);
+
+  assert.equal(document.querySelectorAll("[data-widget]").length, 6);
+  assert.equal(document.querySelectorAll("[data-role=studio-top]").length, 1);
+  assert.equal(document.querySelectorAll("[data-role=studio-widgets]").length, 1);
+  assert.equal(document.querySelectorAll("[data-role=studio-screen]").length, 1);
+  assert.equal(document.querySelectorAll("[data-role=widget-tray]").length, 1);
+  assert.equal(document.querySelectorAll(".st-transport-bar").length, 1);
+  assert.equal(document.querySelector("[data-role=grid-wrap]"), b.refs.gridWrap);
+
+  secondTransport.destroy();
+  second.destroy();
+});
+
+test("a throwing storage still renders the default layout", async () => {
+  const b = await bootShell({ storage: throwingStorage() });
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "history"], "compose is the floor");
+  assert.equal(
+    b.page.querySelector("[data-role=mode-switch] [data-mode=compose]").getAttribute("aria-pressed"),
+    "true",
+  );
+
+  assert.doesNotThrow(() => b.shell.setMode("record"));
+  assert.deepEqual(shownWidgets(b.page), ["scene-grid", "takes", "midi", "history"]);
+  assert.deepEqual(b.modes, ["record"]);
+  assert.equal(
+    b.page.querySelector("[data-role=mode-switch] [data-mode=record]").getAttribute("aria-pressed"),
+    "true",
+  );
+});
