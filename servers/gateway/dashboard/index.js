@@ -97,6 +97,7 @@ import makePanel, { openMakeItem } from "./panels/make.js";
 import projectHomePanel from "./panels/project-home.js";
 import projectServicesPanel from "./panels/project-services.js";
 import forYouPanel from "./panels/for-you.js";
+import mailPanel from "./panels/mail.js";
 import widgetsPanel from "./panels/widgets.js";
 import { servicesUiEnabled } from "../services/ui-flag.js";
 import "../services/launcher-tile.js"; // registers the "Add a service" launcher tile
@@ -119,6 +120,7 @@ import { shellRouter, resolveRequestMode, resolveShellPage, nestIsExplicit } fro
 import { isLocalPasswordSessionOn } from "./local-session.js";
 import { withForYouOwner } from "./shell/chrome.js";
 import { forYouEnabled } from "../for-you/flag.js";
+import { mailEnabled } from "../mail/flag.js";
 
 /** A first-run gate message: where the token lives is described (this machine or
  * the container), never as a host path the browser could be told to read. */
@@ -175,6 +177,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   registerPanel(projectHomePanel);
   registerPanel(projectServicesPanel);
   registerPanel(forYouPanel); // 404s unless CROW_FOR_YOU=1 (the panel checks per request)
+  registerPanel(mailPanel); // 404s unless CROW_MAIL=1 (the panel checks per request)
   // The generic widget page (widgets phase 2, Task 3): the same gate and flag as For You, one swipe in.
   registerPanel(widgetsPanel);
 
@@ -1277,13 +1280,13 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
         shellOpts.shell = { ...shellOpts.shell, tray };
       }
 
-      // For You's entry points (the drawer's card, the mascot sheet's link and, through the
-      // drawer, the phone drag reveal's target) are the OWNER's alone: the page itself 404s for
-      // every other session, so linking it would only offer dead ends. One check per page, and
-      // only while the flag is on. The chrome takes it as `forYouOwner`; the card, sheet and
-      // swipe all follow that one attribute.
+      // For You's and Mail's entry points (the drawer's card, the mascot sheet's link and, through
+      // the drawer, the phone drag reveal's target) are the OWNER's alone: those pages 404 for every
+      // other session, so linking them would only offer dead ends. One check per page, made only
+      // while either flag is on. The chrome takes it as `forYouOwner`; the card, sheet and swipe all
+      // follow that one attribute, and each entry still checks its own flag.
       let forYouOwner = false;
-      if (forYouEnabled()) {
+      if (forYouEnabled() || mailEnabled()) {
         try { forYouOwner = await isLocalPasswordSessionOn(db, req); } catch (err) { forYouOwner = false; console.warn("[for-you] owner check failed:", err && err.message); }
       }
 

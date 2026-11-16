@@ -5649,6 +5649,13 @@ export const translations = {
   "settings.historySaved": { en: "Saved.", es: "Guardado." },
   "settings.historyNotOwner": { en: "Only the owner can change these settings.", es: "Solo el propietario puede cambiar estos ajustes." },
   "settings.historyBadDays": { en: "Nothing was saved: the Trash period must be a whole number of days from 1 to 365.", es: "No se guardó nada: el período de la papelera debe ser un número entero de días entre 1 y 365." },
+  // Crow Mail's reader (panels/mail.js, shell/chrome.js): the panel name, the page title and the
+  // empty states — an address held by another instance, and the way to a different account.
+  "nav.mail": { en: "Mail", es: "Correo" },
+  "mail.title": { en: "Mail", es: "Correo" },
+  "mail.emptyConnect": { en: "Connect your mail", es: "Conecta tu correo" },
+  "mail.elsewhereOn": { en: "Mail is set up on {instance}", es: "El correo está configurado en {instance}" },
+  "mail.elsewhereConnect": { en: "Connect a different account here", es: "Conecta otra cuenta aquí" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
