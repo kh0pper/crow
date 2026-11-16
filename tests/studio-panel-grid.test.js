@@ -583,11 +583,20 @@ test("perform: a scene header calls launchScene once, a filled cell calls launch
   );
   await ui.settle();
 
-  // A scene header is the launch target, once per tap.
+  // In Perform a scene's NAME is the launch target, once per tap, and it is a
+  // real button; the header around it is not a control of its own.
   const header = ui.document.querySelector(`.st-scene[data-scene-id=${VERSE}]`);
   assert.ok(header, "the verse's scene header is drawn");
-  assert.equal(header.getAttribute("data-act"), "launch-scene", "the header itself launches in Perform");
-  ui.click(header);
+  assert.equal(header.getAttribute("data-act"), null, "the header itself is not a control");
+  assert.equal(header.getAttribute("role"), null, "and does not claim to be a button");
+  const launchName = header.querySelector(".st-scene-name");
+  assert.equal(launchName.tagName, "BUTTON", "the scene's name is a real button");
+  assert.equal(
+    launchName.getAttribute("data-act"),
+    "launch-scene",
+    "and the name is what launches in Perform",
+  );
+  ui.click(launchName);
   await ui.waitFor(() => engine.launched.length === 1, "the scene launch");
   assert.deepEqual(engine.launched, [VERSE], "one tap is one launch");
 
@@ -616,6 +625,82 @@ test("perform: a scene header calls launchScene once, a filled cell calls launch
   await ui.settle();
   assert.equal(ui.commands().length, before, "an empty cell sends no command");
   assert.deepEqual(engine.launched, [VERSE, BASS_CLIP], "and launches nothing");
+
+  ui.stop();
+});
+
+test("perform: a press inside a scene's rename field launches nothing, and the scene's name still launches once", async () => {
+  const engine = fakeEngine();
+  const ui = await bootPage({ engine });
+  await ui.waitFor(
+    () => ui.document.querySelector("[data-role=mode-switch] [data-mode=perform]"),
+    "the shell's mode switch",
+  );
+  await ui.settle();
+
+  ui.click("[data-role=mode-switch] [data-mode=perform]");
+  await ui.waitFor(
+    () => ui.document.querySelector("[data-mode=perform]").getAttribute("aria-pressed") === "true",
+    "Perform to be the pressed mode",
+  );
+  await ui.settle();
+
+  const header = ui.document.querySelector(`.st-scene[data-scene-id=${VERSE}]`);
+  assert.ok(header, "the verse's scene header is drawn");
+  assert.equal(header.getAttribute("data-act"), null, "the header is not a control in Perform");
+
+  // The pencil opens a field on the header's own name, inside the header.
+  ui.click(header.querySelector("[data-act=rename-scene]"));
+  await ui.settle();
+  const field = header.querySelector(".st-inline");
+  assert.ok(field, "the rename pencil opens a field in the header");
+  assert.equal(field.parentNode, header, "and the field sits inside the header itself");
+  assert.equal(field.closest("[data-act]"), null, "no launch control wraps the field");
+  assert.deepEqual(engine.launched, [], "opening the field launches nothing");
+
+  // A press inside the field is a press in a text field: it never launches.
+  ui.click(field);
+  await ui.settle();
+  assert.deepEqual(engine.launched, [], "a press inside the rename field launches nothing");
+
+  // Closing the field leaves the header as it was, and its name still launches.
+  field.dispatchEvent(new ui.domWindow.Event("blur"));
+  await ui.settle();
+  assert.equal(header.querySelector(".st-inline"), null, "the field is gone");
+  const launchName = header.querySelector(".st-scene-name");
+  assert.equal(launchName.tagName, "BUTTON", "the name is the header's own launch button");
+  ui.click(launchName);
+  await ui.waitFor(() => engine.launched.length === 1, "the scene launch");
+  assert.deepEqual(engine.launched, [VERSE], "the dedicated area launches exactly once");
+
+  ui.stop();
+});
+
+test("the track name is a real button: labelled, in the tab order, and one press selects its track", async () => {
+  const ui = await bootPage();
+  await ui.settle();
+
+  const bass = ui.document.querySelector(`.st-th[data-track-id=${BASS}] .st-name`);
+  assert.ok(bass, "the bass's name is drawn");
+  assert.equal(bass.tagName, "BUTTON", "the name is a real button, not a span claiming a role");
+  assert.equal(
+    bass.getAttribute("aria-label"),
+    "Select track Bass and open its editor",
+    "with a label that says what it does",
+  );
+  assert.equal(bass.hasAttribute("tabindex"), false, "it carries no tabindex");
+  assert.notEqual(bass.getAttribute("tabindex"), "-1", "so the keyboard reaches it");
+  assert.notEqual(bass.disabled, true, "and it is enabled");
+
+  const aimed = () =>
+    [...ui.document.querySelectorAll(".st-th-aimed")].map((head) => head.getAttribute("data-track-id"));
+  assert.deepEqual(aimed(), [], "nothing is aimed at first");
+
+  // A button activated from the keyboard fires the same click a pointer sends,
+  // so the press a keyboard makes is this one.
+  ui.click(bass);
+  await ui.settle();
+  assert.deepEqual(aimed(), [BASS], "activating the name aims at its track and opens the editor");
 
   ui.stop();
 });

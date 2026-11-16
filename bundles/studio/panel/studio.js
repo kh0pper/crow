@@ -442,9 +442,17 @@ const STYLES = `
   .studio .st-th-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .studio .st-color { width: 8px; height: 26px; border-radius: 3px; flex: 0 0 auto; }
   .studio .st-th-name { display: flex; flex-direction: column; min-width: 0; }
+  /* The track's name is a real button — a tap, or Enter and Space, selects the
+     track and opens its editor — drawn as plain text: no chrome, one line, and
+     an ellipsis when the name is long. It is a BLOCK box on purpose, because
+     text-overflow needs one; a flex box here clipped a long name with no
+     ellipsis. Its height is the name's own line, so the header keeps the pitch
+     it had before the name became a control, and the 44 px target is the pencil
+     beside it, in the same row. */
   .studio .st-name {
-    font-size: 13px; font-weight: 600; cursor: pointer;
-    min-width: 44px; min-height: 44px; display: flex; align-items: center;
+    display: block; min-width: 44px; padding: 0; margin: 0;
+    border: 0; background: none; color: inherit; font: inherit;
+    font-size: 13px; font-weight: 600; text-align: left; cursor: pointer;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   }
@@ -631,6 +639,15 @@ const STYLES = `
   .studio .st-scene-name {
     flex: 1 1 auto; min-width: 0; font-size: 12px; font-weight: 600;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* In Perform the scene's name is its launch control, and a real button: it
+     drops the button chrome and keeps the name's own look and its place in the
+     header. The 44 px target costs no height here, because the three icons
+     beside it already hold the row at that size. */
+  .studio button.st-scene-name {
+    min-height: 44px; padding: 0 6px; border: 0; background: none; color: inherit;
+    font: inherit; font-size: 12px; font-weight: 600; text-align: left; cursor: pointer;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   }
   .studio .st-cell { padding: 6px; border-right: 1px solid var(--st-line-soft); border-bottom: 1px solid var(--st-line-soft); }
   /* What one grid cell is doing, all of it view state and none of it a document

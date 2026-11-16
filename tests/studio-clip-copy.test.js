@@ -28,11 +28,17 @@ import { AclError } from "../servers/shared/project-acl.js";
 // the package's ESM build, not the CommonJS one.
 import * as Y from "../bundles/studio/node_modules/yjs/dist/yjs.mjs";
 import {
+  LIMITS,
   checkInvariants,
+  getClip,
   newSongDoc,
+  objectMap,
   patternKey,
+  patternMap,
   snapshot,
+  stepEntries,
   stepKey,
+  stepMap,
 } from "../bundles/studio/server/doc.js";
 import { StudioError, listCommands, runCommand } from "../bundles/studio/server/commands/registry.js";
 import "../bundles/studio/server/commands/core.js";
@@ -226,6 +232,44 @@ function clipsInCell(song, trackId, sceneId) {
     .filter((clip) => clip.track_id === trackId && clip.scene_id === sceneId)
     .map((clip) => clip.id)
     .sort();
+}
+
+/**
+ * Write steps straight into the document's step map, in bulk, spreading them
+ * over the slots in order: one step per pad of a slot's pattern, position by
+ * position. A song near `LIMITS.stepsPerSong` cannot be built one `step.toggle`
+ * at a time.
+ * @param {import("yjs").Doc} doc
+ * @param {Array<{clip_id: string, pattern_id: string, bank_id: string, length_steps: number}>} slots
+ * @param {number} count - how many steps to write
+ * @returns {number} how many were written
+ */
+function bulkSteps(doc, slots, count) {
+  const steps = stepMap(doc);
+  let written = 0;
+  doc.transact(() => {
+    for (const slot of slots) {
+      for (let at = 0; at < slot.length_steps && written < count; at += 1) {
+        for (let index = 0; index < LIMITS.padsPerBank && written < count; index += 1) {
+          steps.set(
+            stepKey(slot.clip_id, slot.pattern_id, at, slot.bank_id, index),
+            objectMap({
+              clip_id: slot.clip_id,
+              pattern_id: slot.pattern_id,
+              at,
+              bank_id: slot.bank_id,
+              index,
+              v: 100,
+              locks: {},
+            }),
+          );
+          written += 1;
+        }
+      }
+      if (written >= count) break;
+    }
+  });
+  return written;
 }
 
 /** A scratch libsql client for one test, closed when the test ends. */
@@ -689,6 +733,203 @@ test("a copy while another peer edits the source converges", (t) => {
   );
   assert.deepEqual(checkInvariants(s.doc), []);
   assert.ok(playClip(song, "copy", 4 * FRAMES_PER_BEAT).length >= 1, "the copy plays its own steps");
+});
+
+test("the copy leaves out an orphan step and a chain entry that names no pattern", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const verse = addScene(s.doc, "Verse");
+  const chorus = addScene(s.doc, "Chorus");
+  const source = addPatternClip(s.doc, trackId, verse, { length_steps: 16 });
+  s.run("step.toggle", { clip_id: source, pattern_id: "a", at: 0, bank_id: bankId, index: 0 });
+  s.run("chain.set", { clip_id: source, chain: ["a"] });
+
+  // A step whose pattern is not in the clip, and a chain entry naming no
+  // pattern of it: a merged write can leave both, and neither is part of the
+  // clip's own shape.
+  s.doc.transact(() => {
+    stepMap(s.doc).set(
+      stepKey(source, "ghost", 4, bankId, 1),
+      objectMap({
+        clip_id: source,
+        pattern_id: "ghost",
+        at: 4,
+        bank_id: bankId,
+        index: 1,
+        v: 100,
+        locks: {},
+      }),
+    );
+    getClip(s.doc, source).set("chain", ["a", "ghost"]);
+  });
+  const reasons = checkInvariants(s.doc);
+  assert.equal(reasons.length, 2, "the source carries one reason for each of the two");
+
+  const copied = s.run("clip.copy_to_scene", { clip_id: source, scene_id: chorus, new_clip_id: "copy" });
+  const song = snapshot(s.doc);
+  assert.deepEqual(song.clips.copy.chain, ["a"], "the copy's chain names only patterns it has");
+  assert.equal(
+    song.steps[stepKey("copy", "ghost", 4, bankId, 1)],
+    undefined,
+    "the orphan step stayed behind",
+  );
+  assert.equal(song.patterns[patternKey("copy", "ghost")], undefined, "and brought no pattern with it");
+  assert.ok(song.steps[stepKey("copy", "a", 0, bankId, 0)], "the clip's own step was copied");
+  assert.deepEqual(checkInvariants(s.doc), reasons, "the copy adds no reason of its own");
+  assert.deepEqual(
+    copied.result.touched.filter((ref) => ref.startsWith("step:")),
+    [`step:copy/a/0/${bankId}.0`],
+    "the copy names exactly the steps it writes",
+  );
+
+  const undone = s.undo(copied.entry);
+  assert.deepEqual(undone.plan.conflicts, []);
+  assert.deepEqual(undone.plan.blocked, [], "the undo of the copy goes through");
+  assert.equal(snapshot(s.doc).clips.copy, undefined, "the copy went whole");
+  assert.ok(snapshot(s.doc).steps[stepKey(source, "a", 0, bankId, 0)], "the source kept its step");
+
+  const redone = s.redo(undone.entry);
+  assert.deepEqual(redone.plan.conflicts, []);
+  assert.deepEqual(redone.plan.blocked, [], "and so does the redo");
+  const back = snapshot(s.doc);
+  assert.deepEqual(back.clips.copy.chain, ["a"]);
+  assert.equal(back.steps[stepKey("copy", "ghost", 4, bankId, 1)], undefined);
+  assert.ok(back.steps[stepKey("copy", "a", 0, bankId, 0)], "the copy came back with its step");
+  assert.deepEqual(checkInvariants(s.doc), reasons);
+});
+
+test("a pattern with no id of its own is copied under the key it sits at", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const verse = addScene(s.doc, "Verse");
+  const chorus = addScene(s.doc, "Chorus");
+  const source = addPatternClip(s.doc, trackId, verse, { length_steps: 8 });
+
+  // A pattern written without an id, the way a merged write can leave one: the
+  // part of its key after the clip is the only name it has.
+  s.doc.transact(() => {
+    patternMap(s.doc).set(
+      patternKey(source, "ghost"),
+      objectMap({ clip_id: source, name: "Ghost", order: 1 }),
+    );
+    stepMap(s.doc).set(
+      stepKey(source, "ghost", 2, bankId, 3),
+      objectMap({
+        clip_id: source,
+        pattern_id: "ghost",
+        at: 2,
+        bank_id: bankId,
+        index: 3,
+        v: 100,
+        locks: {},
+      }),
+    );
+  });
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  s.run("clip.copy_to_scene", { clip_id: source, scene_id: chorus, new_clip_id: "copy" });
+  const song = snapshot(s.doc);
+  const ghost = song.patterns[patternKey("copy", "ghost")];
+  assert.ok(ghost, "the copy holds the pattern under the id its own key names");
+  assert.equal(ghost.id, "ghost", "the pattern's id is no clip id");
+  assert.equal(ghost.clip_id, "copy");
+  assert.ok(song.steps[stepKey("copy", "ghost", 2, bankId, 3)], "and its step came with it");
+  for (const key of Object.keys(song.patterns)) {
+    assert.equal(key.split("/").length, 2, `the pattern key "${key}" names one clip and one pattern`);
+  }
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("the song-wide step cap refuses the copy and step.toggle once the song is full", (t) => {
+  const s = studio(t, "Full song");
+  const { trackId, bankId } = addKit(s.doc);
+
+  // 64 patterns, each able to hold the per-pattern cap of 1024 steps: 64
+  // positions of a pattern's loop times the 16 pads of one bank.
+  const slots = [];
+  for (let n = 0; n < 4; n += 1) {
+    const scene = addScene(s.doc, `Filler ${n + 1}`);
+    const clip = addPatternClip(s.doc, trackId, scene, {
+      name: `Filler ${n + 1}`,
+      length_steps: LIMITS.stepPositions,
+    });
+    const slot = { clip_id: clip, pattern_id: "a", bank_id: bankId, length_steps: LIMITS.stepPositions };
+    slots.push(slot);
+    for (let p = 1; p < LIMITS.patternsPerClip; p += 1) {
+      const patternId = runCommand(s.doc, "pattern.add", { clip_id: clip, name: `P${p + 1}` }).args.id;
+      slots.push({ ...slot, pattern_id: patternId });
+    }
+  }
+
+  const sourceScene = addScene(s.doc, "Source");
+  const source = addPatternClip(s.doc, trackId, sourceScene, { name: "Source loop", length_steps: 16 });
+  const targetOne = addScene(s.doc, "Target 1");
+  const targetTwo = addScene(s.doc, "Target 2");
+  const targetThree = addScene(s.doc, "Target 3");
+
+  // 63 patterns filled to their own cap and one holding 65,533 − 64,512 = 1,021
+  // steps: the song starts 3 steps short of the cap.
+  assert.equal(bulkSteps(s.doc, slots, 63 * LIMITS.stepEntriesPerPattern + 1021), 65533);
+  s.run("step.toggle", { clip_id: source, pattern_id: "a", at: 0, bank_id: bankId, index: 0 });
+  assert.equal(stepEntries(s.doc).length, 65534);
+
+  // Two copies of the one-step source reach the cap exactly.
+  s.run("clip.copy_to_scene", { clip_id: source, scene_id: targetOne, new_clip_id: "copy-1" });
+  assert.equal(stepEntries(s.doc).length, 65535);
+  s.run("clip.copy_to_scene", { clip_id: source, scene_id: targetTwo, new_clip_id: "copy-2" });
+  assert.equal(stepEntries(s.doc).length, 65536, "the song holds exactly the most steps it may");
+
+  // One more copy, one more step: both are refused, and neither writes.
+  const fullCopy = refuses(
+    () => s.run("clip.copy_to_scene", { clip_id: source, scene_id: targetThree, new_clip_id: "copy-3" }),
+    "limit",
+  );
+  assert.match(fullCopy.message, /65,536/);
+  assert.equal(getClip(s.doc, "copy-3"), null, "the refused copy wrote nothing");
+  assert.equal(stepEntries(s.doc).length, 65536);
+
+  // Taking a step off is always allowed, and putting it back lands at the cap.
+  s.run("step.toggle", { clip_id: source, pattern_id: "a", at: 0, bank_id: bankId, index: 0 });
+  assert.equal(stepEntries(s.doc).length, 65535, "a step comes off a full song");
+  s.run("step.toggle", { clip_id: source, pattern_id: "a", at: 0, bank_id: bankId, index: 0 });
+  assert.equal(stepEntries(s.doc).length, 65536, "and goes back on to exactly the cap");
+
+  const fullStep = refuses(
+    () => s.run("step.toggle", { clip_id: source, pattern_id: "a", at: 1, bank_id: bankId, index: 0 }),
+    "limit",
+  );
+  assert.match(fullStep.message, /65,536/);
+  assert.equal(stepEntries(s.doc).length, 65536, "the refused step was not written");
+
+  // A song a merge took past the cap keeps refusing both commands, and still
+  // lets a step come off.
+  s.doc.transact(() =>
+    stepMap(s.doc).set(
+      stepKey(source, "a", 2, bankId, 0),
+      objectMap({
+        clip_id: source,
+        pattern_id: "a",
+        at: 2,
+        bank_id: bankId,
+        index: 0,
+        v: 100,
+        locks: {},
+      }),
+    ),
+  );
+  assert.equal(stepEntries(s.doc).length, 65537);
+  const overStep = refuses(
+    () => s.run("step.toggle", { clip_id: source, pattern_id: "a", at: 3, bank_id: bankId, index: 0 }),
+    "limit",
+  );
+  assert.match(overStep.message, /65,536/);
+  const overCopy = refuses(
+    () => s.run("clip.copy_to_scene", { clip_id: source, scene_id: targetThree, new_clip_id: "copy-3" }),
+    "limit",
+  );
+  assert.match(overCopy.message, /65,536/);
+  assert.equal(getClip(s.doc, "copy-3"), null);
+  assert.equal(stepEntries(s.doc).length, 65537);
 });
 
 test("a locked track refuses the copy to an agent and the person's copy lands", async (t) => {
