@@ -11,6 +11,10 @@
  * it; the "Look further back" button on the last page of a list, naming the folder ids it would ask
  * for (the viewed folder, or each account's inbox on All); the refresh button in the header naming the
  * account ids; and the flash a reloading action leaves behind, carrying its count as an integer.
+ *
+ * The copy this file pins is the operator-approved set: the search box's placeholder, the refresh
+ * button's own word, "No messages match." on a search that found nothing (an empty inbox keeps "No
+ * messages here."), and one sentence per flash kind — with the singular of the remote-search count.
  */
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -239,7 +243,7 @@ test("hostile queries answer a no-results page, never a 500", async () => {
       const r = await get("/dashboard/mail?view=search&q=" + encodeURIComponent(q));
       assert.equal(r.status, 200, `${JSON.stringify(q).slice(0, 24)} answers a page`);
       assert.equal(rowAnchors(r.body).length, 0, `${JSON.stringify(q).slice(0, 24)} matches nothing`);
-      assert.match(r.body, /<p class="ml-note">No messages here\.<\/p>/, JSON.stringify(q).slice(0, 24));
+      assert.match(r.body, /<p class="ml-note">No messages match\.<\/p>/, JSON.stringify(q).slice(0, 24));
     }
   });
 });
@@ -371,6 +375,7 @@ test("the refresh button carries the account ids and the older button the folder
       "each account's inbox on All",
     );
     assert.match(all.body, />Look further back<\/button>/);
+    assert.match(all.body, /<button[^>]*data-ml-refresh[^>]*>Refresh<\/button>/, "the refresh control's own word");
 
     const one = await get(`/dashboard/mail?acct=${ids.b.id}`);
     assert.equal(attrOf(buttonHtml(one.body, "data-ml-refresh"), "data-accounts"), ids.b.id);
@@ -389,7 +394,7 @@ test("the refresh button carries the account ids and the older button the folder
   });
 });
 
-test("a flash value renders its count as an integer and any other value nothing", async () => {
+test("a flash value renders its approved sentence with N as an integer and any other value nothing", async () => {
   await withDb(async (db) => {
     const { a, aInbox } = await seed(db);
     await deliver(db, { accountId: a.id, folderId: aInbox, subject: "Flash base" });
@@ -397,25 +402,67 @@ test("a flash value renders its count as an integer and any other value nothing"
   await withFlag(async () => {
     const older = await get("/dashboard/mail?flash=older:12");
     assert.equal(older.status, 200);
-    assert.match(older.body, /<p class="ml-note ml-flash" role="status" data-ml-flash="older" data-count="12"><\/p>/);
+    assert.match(older.body, /<p class="ml-note ml-flash" role="status" data-ml-flash="older" data-count="12">Loaded older mail\.<\/p>/);
+    assert.doesNotMatch(older.body, /Loaded older mail\. 12/, "the older sentence does not show the count");
 
     const padded = await get("/dashboard/mail?flash=older:0012");
     assert.equal(/data-ml-flash="older" data-count="([^"]*)"/.exec(padded.body)?.[1], "12", "N as an integer");
+    assert.match(padded.body, />Loaded older mail\.<\/p>/);
 
     const start = await get("/dashboard/mail?flash=start");
     assert.equal(start.status, 200);
-    assert.match(start.body, /data-ml-flash="start"/);
+    assert.match(start.body, /<p class="ml-note ml-flash" role="status" data-ml-flash="start">That's the oldest mail on the server\.<\/p>/);
     assert.doesNotMatch(start.body, /data-count=/, "the start flash has no count");
 
     const remote = await get("/dashboard/mail?view=search&q=flash&flash=remote:7");
     assert.equal(remote.status, 200);
-    assert.match(remote.body, /data-ml-flash="remote" data-count="7"/);
+    assert.match(remote.body, /data-ml-flash="remote" data-count="7">Found 7 more on the server\.<\/p>/);
+
+    const one = await get("/dashboard/mail?view=search&q=flash&flash=remote:1");
+    assert.equal(one.status, 200);
+    assert.match(one.body, /data-ml-flash="remote" data-count="1">Found 1 more on the server\.<\/p>/, "the singular sentence");
+
+    const paddedOne = await get("/dashboard/mail?view=search&q=flash&flash=remote:0001");
+    assert.match(paddedOne.body, /data-count="1">Found 1 more on the server\.<\/p>/, "the singular takes the integer");
+
+    const zero = await get("/dashboard/mail?view=search&q=flash&flash=remote:0");
+    assert.match(zero.body, /data-ml-flash="remote" data-count="0">Found 0 more on the server\.<\/p>/);
 
     for (const bad of ["older", "older:", "older:-1", "older:1.5", "remote:7.5", "start:2", "junk:3", "remote:", "12"]) {
       const r = await get("/dashboard/mail?flash=" + encodeURIComponent(bad));
       assert.equal(r.status, 200, bad);
       assert.doesNotMatch(r.body, /data-ml-flash/, `"${bad}" renders nothing`);
+      assert.doesNotMatch(r.body, /Loaded older mail\.|That's the oldest mail|more on the server\./, bad);
     }
+  });
+});
+
+test("the search box carries the approved placeholder and the button keeps its word", async () => {
+  await withDb(async (db) => { await seed(db); });
+  await withFlag(async () => {
+    for (const path of ["/dashboard/mail", "/dashboard/mail?view=search&q=placeholder"]) {
+      const r = await get(path);
+      assert.equal(r.status, 200, path);
+      const input = /<input class="ml-btn ml-search-input"[^>]*>/.exec(r.body)?.[0];
+      assert.ok(input, `${path}: the search box is on the page`);
+      assert.equal(attrOf(input, "placeholder"), "Search mail", path);
+      assert.match(r.body, /<button class="ml-btn" type="submit">Search<\/button>/, path);
+    }
+  });
+});
+
+test("no hits says No messages match. while an empty inbox still says No messages here.", async () => {
+  await withDb(async (db) => { await seed(db); });
+  await withFlag(async () => {
+    const search = await get("/dashboard/mail?view=search&q=nothingmatchesthis");
+    assert.equal(search.status, 200);
+    assert.match(search.body, /<div class="ml-list"><p class="ml-note">No messages match\.<\/p><\/div>/);
+    assert.doesNotMatch(search.body, /No messages here\./);
+
+    const inbox = await get("/dashboard/mail");
+    assert.equal(inbox.status, 200);
+    assert.match(inbox.body, /<div class="ml-list"><p class="ml-note">No messages here\.<\/p><\/div>/);
+    assert.doesNotMatch(inbox.body, /No messages match\./);
   });
 });
 

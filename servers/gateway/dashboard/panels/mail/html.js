@@ -149,26 +149,41 @@ function listHeader({ accounts, acct, q = "", withRefresh = false, lang }) {
   const form = `<form class="ml-search" method="get" action="${MAIL_HREF}" role="search">
       <input type="hidden" name="view" value="search">
       <input type="hidden" name="acct" value="${e(acct)}">
-      <input class="ml-btn ml-search-input" type="search" name="q" value="${e(q)}" enterkeyhint="search" aria-label="${e(t("common.search", lang))}">
+      <input class="ml-btn ml-search-input" type="search" name="q" value="${e(q)}" placeholder="${e(t("mail.searchPlaceholder", lang))}" enterkeyhint="search" aria-label="${e(t("common.search", lang))}">
       <button class="ml-btn" type="submit">${e(t("common.search", lang))}</button>
     </form>`;
   // The status line the client shows while a refresh runs takes its one word from this control, so
   // the script itself builds no sentence.
   const refresh = withRefresh
-    ? `<button class="ml-btn" type="button" data-ml-refresh data-accounts="${e(accountIds(accounts, acct))}" data-ml-refreshing="${e(t("mail.refreshing", lang))}">${e(t("extensions.servers.refresh", lang))}</button>`
+    ? `<button class="ml-btn" type="button" data-ml-refresh data-accounts="${e(accountIds(accounts, acct))}" data-ml-refreshing="${e(t("mail.refreshing", lang))}">${e(t("mail.refresh", lang))}</button>`
     : "";
   return `<div class="ml-head">${form}${refresh}</div>`;
 }
 
 /**
  * What a reloading action leaves behind: the server says which action ran and how many rows it
- * brought back (`older:<n>`, `remote:<n>`), or that a folder reached its start (`start`). The line
- * carries that kind and count as data; its sentence has no approved copy yet, so it is empty.
+ * brought back (`older:<n>`, `remote:<n>`), or that a folder reached its start (`start`). Each kind
+ * has its own approved sentence; the older-mail one does not show the count, and the remote one has a
+ * singular for exactly one. A kind this page does not know draws nothing at all.
  */
-function flashHtml(flash) {
+function flashSentence(flash, lang) {
+  if (flash?.kind === "start") return t("mail.flashStart", lang);
+  if (flash?.kind === "older") return t("mail.flashOlder", lang);
+  if (flash?.kind === "remote") {
+    const count = Number.isInteger(flash.count) ? flash.count : 0;
+    return count === 1
+      ? t("mail.flashRemoteOne", lang)
+      : fill(t("mail.flashRemote", lang), { n: count });
+  }
+  return null;
+}
+
+function flashHtml(flash, lang) {
   if (!flash || typeof flash.kind !== "string") return "";
+  const sentence = flashSentence(flash, lang);
+  if (sentence === null) return "";
   const count = Number.isInteger(flash.count) ? ` data-count="${Number(flash.count)}"` : "";
-  return `<p class="ml-note ml-flash" role="status" data-ml-flash="${e(flash.kind)}"${count}></p>`;
+  return `<p class="ml-note ml-flash" role="status" data-ml-flash="${e(flash.kind)}"${count}>${e(sentence)}</p>`;
 }
 
 /** The folders "Look further back" asks for: the viewed folder, or the inbox of each account shown. */
@@ -374,7 +389,7 @@ export function inboxViewHtml({
   tz = undefined,
   flash = null,
 } = {}) {
-  const head = flashHtml(flash)
+  const head = flashHtml(flash, lang)
     + listHeader({ accounts, acct, withRefresh: true, lang })
     + chips({ accounts, acct, lang })
     + folderDrawer({ accounts, folders, folderId, lang });
@@ -425,10 +440,10 @@ export function searchViewHtml({
   tz = undefined,
   flash = null,
 } = {}) {
-  const head = flashHtml(flash) + listHeader({ accounts, acct, q, lang });
+  const head = flashHtml(flash, lang) + listHeader({ accounts, acct, q, lang });
   const heading = q === "" ? "" : `<h2 class="ml-search-heading">${e(q)}</h2>`;
   const rows = (Array.isArray(hits) ? hits : []).map((item) => row(item, { now, tz, lang })).join("");
-  const list = rows || `<p class="ml-note">${e(t("mail.emptyFolder", lang))}</p>`;
+  const list = rows || `<p class="ml-note">${e(t("mail.noMatch", lang))}</p>`;
   const remote = q === ""
     ? ""
     : `<div class="ml-actions"><button class="ml-btn" type="button" data-ml-search-remote data-q="${e(q)}" data-acct="${e(acct)}">${e(t("mail.searchOlderRemote", lang))}</button></div>`;

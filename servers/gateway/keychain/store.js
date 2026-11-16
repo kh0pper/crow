@@ -38,6 +38,20 @@ export class KeychainServiceRowError extends Error {
 }
 
 /**
+ * A Crow Mail password is a `service` row whose connection is a `mail_accounts` row, not a
+ * `service_connections` one, so the orphan rule in deleteEntry would call a mailbox's password
+ * purgeable from the keychain page and silently break the account. Such a row never goes from
+ * here, whatever its status (and whether or not its account row is still there): it goes with its
+ * account, through the mail credentials module's deleteSecrets.
+ */
+export class KeychainMailRowError extends Error {
+  constructor() {
+    super("This password belongs to a Mail account. Remove the account in Mail settings.");
+    this.code = "KEYCHAIN_MAIL_ROW";
+  }
+}
+
+/**
  * One or more of an add-on's listed env keys has no usable row: missing, not 'active' (an
  * uninstall's extension_removed), sealed under another key id (a crow.db restored without
  * its key file), or unreadable/empty. All or nothing — callers never start an add-on with a
@@ -110,6 +124,9 @@ export async function ensureWriteKey(db, { crowHome, onNewKey } = {}) {
   }
   return key;
 }
+
+/** The bundle id Crow Mail's keychain rows carry (servers/gateway/mail/credentials.js, MAIL_BUNDLE_ID). */
+export const MAIL_BUNDLE = "crow-mail";
 
 /** Keychain "bundle ids" that belong to Crow itself, never to an add-on: the off-site backup key
  *  (servers/shared/crow-vault.js OFFSITE_KEY). An add-on installed under such an id must not be able
@@ -431,23 +448,20 @@ export async function consumeFirstView(db, key, id, { now } = {}) {
  * disconnect its connection first. A disconnected service row may be deleted: that is how the
  * owner purges a disconnected connection's secret for good (it then stops being masked).
  *
- * A Crow Mail password is a `service` row with no `service_connections` row (its connection is a
- * `mail_accounts` row), so the orphan rule below would call a LIVE mailbox password purgeable from the
- * keychain page. While that account row exists the row is refused, like any other live connection's;
- * once the account is gone the secret is an orphan again and stays purgeable.
+ * A Crow Mail password is refused outright (KeychainMailRowError), before either rule above runs:
+ * its connection is a `mail_accounts` row, so the orphan rule below would call it purgeable and a
+ * delete here would silently break the account. It is removed only with its account.
  */
 export async function deleteEntry(db, id) {
   await ensureKeychainTable(db);
+  const mail = await db.execute({ sql: "SELECT 1 AS mail FROM crow_keychain WHERE id = ? AND bundle_id = ?", args: [Number(id), MAIL_BUNDLE] });
+  if (mail.rows.length > 0) throw new KeychainMailRowError();
   // An orphan (its connection row is gone, e.g. a project was deleted) is purgeable like a disconnected one.
   const hasConnections = (await db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'service_connections'")).rows.length > 0;
   const orphan = hasConnections
     ? "NOT EXISTS (SELECT 1 FROM service_connections c WHERE c.uuid = crow_keychain.connection_uuid AND c.status != 'disconnected')"
     : "0"; // no table: nothing proves it an orphan
-  const hasMailAccounts = (await db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mail_accounts'")).rows.length > 0;
-  const liveMail = hasMailAccounts
-    ? "NOT (kind = 'service' AND bundle_id = 'crow-mail' AND EXISTS (SELECT 1 FROM mail_accounts m WHERE m.id = crow_keychain.connection_uuid))"
-    : "1"; // no mail table: no live mailbox to protect
-  const r = await db.execute({ sql: `DELETE FROM crow_keychain WHERE id = ? AND (kind != 'service' OR status = 'disconnected' OR ${orphan}) AND ${liveMail}`, args: [Number(id)] });
+  const r = await db.execute({ sql: `DELETE FROM crow_keychain WHERE id = ? AND (kind != 'service' OR status = 'disconnected' OR ${orphan})`, args: [Number(id)] });
   if (r.rowsAffected > 0) return true;
   const svc = await db.execute({ sql: "SELECT 1 FROM crow_keychain WHERE id = ? AND kind = 'service'", args: [Number(id)] });
   if (svc.rows.length) throw new KeychainServiceRowError();

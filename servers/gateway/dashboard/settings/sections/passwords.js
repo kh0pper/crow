@@ -6,6 +6,7 @@
  */
 import { t, tJs, fill } from "../../shared/i18n.js";
 import { escapeHtml } from "../../shared/components.js";
+import { MAIL_BUNDLE } from "../../../keychain/store.js";
 
 const ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>`;
 
@@ -19,7 +20,8 @@ export function renderPasswordsPage({ entries, method, vaultAvailable, vaultNeed
   const none = method === "none";
   const dis = none ? " disabled" : "";
   const rows = (entries || []).map((e) => {
-    const ext = e.kind === "manual" ? t("passwords.manual", lang) : escapeHtml(e.bundle_id || "");
+    // A Crow Mail password is a keychain row of Crow's own mail account, not of an add-on.
+    const ext = e.kind === "manual" ? t("passwords.manual", lang) : escapeHtml(e.bundle_id === MAIL_BUNDLE ? t("passwords.mailRow", lang) : (e.bundle_id || ""));
     const status = e.readable === false
       ? `<span class="pw-unreadable">${t("passwords.statusUnreadable", lang)}</span>`
       : e.status === "extension_removed" ? t("passwords.statusRemoved", lang)
@@ -139,6 +141,9 @@ export function passwordsClientJS(lang) {
       var pending = null;
       var vaultTarget = null;
       var shown = [];
+      // The project-connection sentence the page was rendered with; a mail refusal replaces it.
+      var refusedBox = document.getElementById("pw-delete-refused");
+      var refusedText = refusedBox.textContent;
 
       function post(path, body) {
         return fetch(API + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) })
@@ -226,13 +231,15 @@ export function passwordsClientJS(lang) {
           });
         });
         row.querySelector(".pw-delete").addEventListener("click", function() {
-          document.getElementById("pw-delete-refused").hidden = true;
+          refusedBox.hidden = true;
           var generated = row.getAttribute("data-origin") === "generated" && row.getAttribute("data-status") === "active";
           if (!confirm(generated ? '${tJs("passwords.deleteGeneratedConfirm", lang)}' : '${tJs("passwords.deleteConfirm", lang)}')) return;
           guarded("/delete", generated ? { id: id, confirm_generated: true } : { id: id }, function(res) {
             if (res.status === 200) { row.remove(); return; }
             // A project connection's key: the server refuses, and the page says where to disconnect it.
-            if (res.status === 409 && res.d.error === "service_row") document.getElementById("pw-delete-refused").hidden = false;
+            if (res.status === 409 && res.d.error === "service_row") { refusedBox.textContent = refusedText; refusedBox.hidden = false; return; }
+            // A Mail password: it goes away with its account in Mail settings, never here.
+            if (res.status === 409 && res.d.error === "mail_row") { refusedBox.textContent = '${tJs("passwords.deleteMailRow", lang)}'; refusedBox.hidden = false; }
           });
         });
         var vaultBtn = row.querySelector(".pw-vault");

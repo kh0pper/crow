@@ -101,6 +101,8 @@ export function keychainApiRouter({
     } catch (err) {
       if (err?.code === "KEYCHAIN_KEY_MISSING") { if (!res.headersSent) res.status(409).json(KEY_MISSING); return; }
       if (err?.code === "KEYCHAIN_SERVICE_ROW") { if (!res.headersSent) res.status(409).json({ error: "service_row" }); return; }
+      // A Crow Mail password is removed with its account, never here (plan 2, Task 9).
+      if (err?.code === "KEYCHAIN_MAIL_ROW") { if (!res.headersSent) res.status(409).json({ error: "mail_row" }); return; }
       if (err?.code === "KEYCHAIN_KEY_INVALID") { if (!res.headersSent) res.status(409).json({ code: "key_invalid", error: err.message }); return; }
       console.error("[keychain] request failed:", err?.code || err?.name || "error");
       if (!res.headersSent) res.status(500).json({ error: "Keychain error. Nothing was revealed." });
