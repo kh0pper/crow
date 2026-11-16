@@ -601,6 +601,48 @@
 #ramble .rb-heart-row { display: inline-flex; gap: 0.15rem; }
 #ramble .rb-heart-one { width: 16px; height: 16px; display: block; }
 
+/* ------------------------------------------------------- today's own cards */
+
+/* One card per slot, drawn by static/today.js into #rb-today-view. The header
+   is the whole tap target: a full-width, left-aligned button one tap tall. */
+#ramble #rb-today-view { display: flex; flex-direction: column; gap: 10px; }
+#ramble .rb-streak { display: flex; flex-direction: column; gap: 2px; }
+#ramble .rb-slot-card { gap: 6px; }
+#ramble .rb-slot-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--rb-tap);
+  padding: 6px 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+#ramble .rb-slot-head:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
+#ramble .rb-slot-head .rb-slot-label {
+  font: 800 12px var(--rb-font-display);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--rb-muted);
+}
+#ramble .rb-slot-head .rb-slot-now {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--rb-accent);
+  color: var(--rb-accent-ink);
+  font: 800 11px var(--rb-font-display);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+#ramble .rb-slot-head .rb-slot-headtitle { margin-left: auto; color: var(--rb-muted); font-size: 13px; text-align: right; }
+#ramble .rb-slot-body { padding: 8px 0 2px; }
+#ramble .rb-slot-title { font-weight: 800; }
+
 
 #ramble .rb-stats { display: flex; gap: 20px; }
 #ramble .rb-stats div { display: flex; flex-direction: column; }

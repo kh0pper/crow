@@ -463,6 +463,16 @@
       .catch(function () { setText($("rb-today-status"), t("offline")); });
   }
 
+  /* The day's own cards are drawn by static/today.js from the day route. Nothing
+   * here is load-bearing: a page without that script has no hook and nothing to
+   * ask, so an absent one is simply nothing to do. */
+  function refreshDay() {
+    var hook = null;
+    try { hook = window.RambleToday; } catch (e) { hook = null; }
+    if (!hook || typeof hook.refresh !== "function") return;
+    try { hook.refresh(); } catch (e) { /* the cards keep their own counsel */ }
+  }
+
   /* ---------------------------------------------------- outdoor sessions */
 
   /* A walk is a Start/Done session of its own, not a chunk. Its minutes are
@@ -549,7 +559,7 @@
   function startOutdoorSession(id) {
     var btn = $("rb-challenge-start");
     if (btn) btn.disabled = true;
-    jsonFetch("/api/ramble/moves/outdoor/start", { method: "POST", body: { entryId: id } })
+    return jsonFetch("/api/ramble/moves/outdoor/start", { method: "POST", body: { entryId: id } })
       .then(function (out) {
         if (btn) btn.disabled = false;
         if (!out) return null;
@@ -567,7 +577,7 @@
     var btn = $("rb-challenge-done");
     if (btn) btn.disabled = true;
     setText($("rb-today-status"), t("saving"));
-    jsonFetch("/api/ramble/moves/outdoor/done", { method: "POST", body: {} })
+    return jsonFetch("/api/ramble/moves/outdoor/done", { method: "POST", body: {} })
       .then(function (out) {
         clearOutdoor();
         var filled = out && Array.isArray(out.filled) ? out.filled : [];
@@ -581,6 +591,7 @@
         }
         setText($("rb-today-status"), lines.join(" "));
         refreshToday();
+        refreshDay();
       })
       .catch(function (err) {
         setText($("rb-today-status"), err.message);
@@ -822,7 +833,7 @@
       .then(function (out) {
         paintPrefs(out);
         setText($("rb-customize-status"), t("logged"));
-        return refreshToday();
+        return refreshToday().then(refreshDay);
       })
       .catch(function (err) { setText($("rb-customize-status"), err.message); });
   }
@@ -1067,7 +1078,12 @@
   var learnBack = $("rb-learn-back");
   if (learnBack) learnBack.addEventListener("click", function () { stopPlayer(); showLearnList(); });
   var learnBackPet = $("rb-learn-back-pet");
-  if (learnBackPet) learnBackPet.addEventListener("click", function () { stopPlayer(); root.setAttribute("data-view", "pet"); refreshToday(); });
+  if (learnBackPet) learnBackPet.addEventListener("click", function () {
+    stopPlayer();
+    root.setAttribute("data-view", "today");
+    refreshToday();
+    refreshDay();
+  });
 
   /* --------------------------------------------------------------- player */
 
@@ -1356,7 +1372,12 @@
    * body scripts on every visit. It opens the matching screen straight from
    * the moves client, so it does not depend on the pet view, which a player
    * with no hatched bird cannot reach. The parameter is removed from the URL
-   * once it has been read, so a reload or Back does not fire it again. */
+   * once it has been read, so a reload or Back does not fire it again.
+   *
+   * The slot a deep link names, if any: only the three names a day holds. */
+  var SLOT_NAMES = ["morning", "midday", "evening"];
+  var linkedSlot = null;
+
   function takeMovesParam() {
     var want = null;
     try {
@@ -1365,12 +1386,45 @@
       want = params.get("moves");
       if (want === null) return null;
       params.delete("moves");
+      /* A slot rides along with Start (?moves=start&slot=evening). It is read
+       * here with the same erase, so a reload does not fire it twice, and only
+       * one of the day's own slot names is ever kept. */
+      var slot = params.get("slot");
+      if (slot !== null) {
+        params.delete("slot");
+        if (SLOT_NAMES.indexOf(slot) !== -1) linkedSlot = slot;
+      }
       var qs = params.toString();
       if (window.history && typeof window.history.replaceState === "function") {
         window.history.replaceState(window.history.state, "", loc.pathname + (qs ? "?" + qs : "") + (loc.hash || ""));
       }
     } catch (e) { /* no URL to read: nothing to do */ }
     return want === "start" || want === "log" || want === "prefs" ? want : null;
+  }
+
+  /* The card Start has always meant: the day's challenge, or the Learn list
+   * when there is none to start (paused, or nothing fits). */
+  function startTodayCard() {
+    return refreshToday().then(function () {
+      var c = today && today.challenge;
+      if (c && !c.off && c.entry) startChallenge();
+      else showLearn();
+    });
+  }
+
+  /* A link that names a slot starts THAT card. A slot with nothing to start
+   * (empty, already done, or a day that answered without it) is the card Start
+   * has always been, so the link never becomes a dead end. */
+  function startLinkedSlot(name) {
+    return jsonFetch("/api/ramble/moves/day").then(function (payload) {
+      var slots = payload && Array.isArray(payload.slots) ? payload.slots : [];
+      var item = null;
+      for (var i = 0; i < slots.length; i += 1) {
+        if (slots[i] && slots[i].slot === name) item = slots[i];
+      }
+      if (!item || item.empty || item.done || !item.entry) return startTodayCard();
+      return api.startSlot(item, payload.day);
+    }).catch(function () { return startTodayCard(); });
   }
 
   function openFromLink(want) {
@@ -1382,16 +1436,31 @@
     } else if (want === "prefs") {
       openSheet("rb-customize-sheet");
       loadPrefs();
+    } else if (linkedSlot) {
+      startLinkedSlot(linkedSlot);
     } else {
-      /* Start: needs the day's challenge, so wait for the snapshot. With no
-       * challenge to start (paused, or nothing fits) show the Learn list. */
-      refreshToday().then(function () {
-        var c = today && today.challenge;
-        if (c && !c.off && c.entry) startChallenge();
-        else showLearn();
-      });
+      /* Start: needs the day's challenge, so wait for the snapshot. */
+      startTodayCard();
     }
   }
+
+  /* ---------------------------------------------------- the hooks today.js uses */
+
+  /* static/today.js draws the day's cards and asks for the words and the two
+   * actions it needs by name; every member here is one of its hooks. */
+  api.copy = function (key, values) { return copyFill(key, values || {}); };
+  api.whenCopy = function () { return whenCopy(); };
+  api.outdoorRunning = function () { return outdoor !== null; };
+  api.finishWalk = function () { return postOutdoorDone(); };
+  api.startSlot = function (item, day) {
+    if (!item || item.empty === true || item.done === true || !item.entry) return Promise.resolve();
+    if (item.entry.kind === "walk") return startOutdoorSession(item.entry.id);
+    aroundSafety(function () {
+      showLearnView();
+      openLearnEntry(item.entry.id, true, { cardSlot: item.slot });
+    });
+    return Promise.resolve();
+  };
 
   var linked = takeMovesParam();
   if (linked) openFromLink(linked);

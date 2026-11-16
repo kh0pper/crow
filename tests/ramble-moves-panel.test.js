@@ -28,6 +28,7 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dir, "..");
 const PANEL_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/ramble.js"), "utf8");
 const CLIENT_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/moves.js"), "utf8");
+const TODAY_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/today.js"), "utf8");
 const PLAYER_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/player.js"), "utf8");
 const CSS_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/ramble.css"), "utf8");
 const AUDIO_SRC = () => readFileSync(resolve(ROOT, "bundles/ramble/panel/static/player-audio.js"), "utf8");
@@ -67,13 +68,16 @@ test("the panel renders the moves screens, not the old chores", async () => {
   assert.equal(html.includes(">Play<"), false);
   assert.equal(html.includes("/api/ramble/pet/chore"), false, "the client must not call the removed route");
 
-  // The Today card: challenge actions, the self-checking step goal, the streak.
-  for (const id of ["rb-today", "rb-challenge-title", "rb-challenge-start", "rb-challenge-done", "rb-challenge-swap",
-    "rb-goal-meter", "rb-goal-num", "rb-goal-max", "rb-goal-line", "rb-streak-line"]) {
+  // The Today card: the host the day's cards are drawn into (static/today.js),
+  // the status line and the steps meter. The one challenge card's own markup
+  // (title, why, meta, Start/Done/Swap, the goal and streak lines) has left the
+  // page; its words come from the approved copy table now.
+  for (const id of ["rb-today", "rb-today-view", "rb-today-status", "rb-goal-meter", "rb-goal-num", "rb-goal-max"]) {
     assert.ok(html.includes('id="' + id + '"'), id);
   }
-  for (const label of ["Start", "Done", "Swap"]) {
-    assert.match(html, new RegExp("<button[^>]*>(?:" + label + ")</button>"), label + " is a real button");
+  for (const gone of ["rb-challenge-title", "rb-challenge-why", "rb-challenge-meta", "rb-challenge-start",
+    "rb-challenge-done", "rb-challenge-swap", "rb-goal-line", "rb-streak-line", "rb-learn-btn"]) {
+    assert.equal(html.includes('id="' + gone + '"'), false, gone + " has left the rendered page");
   }
 
   // "I did something else": text, the parse button, and the three fallbacks.
@@ -103,7 +107,7 @@ test("the panel renders the moves screens, not the old chores", async () => {
 
   // Learn: the list, the friendly empty state, an entry page and the player.
   assert.ok(html.includes('data-for="learn"'), "learn is a fifth view");
-  for (const id of ["rb-learn-btn", "rb-learn-list", "rb-learn-empty", "rb-learn-entry-card", "rb-entry-title",
+  for (const id of ["rb-learn-list", "rb-learn-empty", "rb-learn-entry-card", "rb-entry-title",
     "rb-entry-figure", "rb-entry-body", "rb-player"]) {
     assert.ok(html.includes('id="' + id + '"'), id);
   }
@@ -141,6 +145,7 @@ test("the panel is bilingual: Spanish copy for the new screens, including the sa
 test("the client and the player have zero backticks", () => {
   for (const [label, src] of [
     ["moves.js", CLIENT_SRC()],
+    ["today.js", TODAY_SRC()],
     ["player.js", PLAYER_SRC()],
     ["player-audio.js", AUDIO_SRC()],
     ["player.css", PLAYER_CSS_SRC()],
@@ -149,6 +154,15 @@ test("the client and the player have zero backticks", () => {
       label + " must contain no backtick: panel client scripts must not carry one, the tooling treats it as its own delimiter");
     assert.ok(src.length > 100, label + " looks empty");
   }
+});
+
+test("the panel loads the day's cards script right after the moves client", async () => {
+  const html = await render("en");
+  const clientAt = html.indexOf("/ramble/static/moves.js");
+  const todayAt = html.indexOf("/ramble/static/today.js");
+  assert.ok(clientAt > 0, "the moves client is loaded");
+  assert.ok(todayAt > clientAt, "today.js loads AFTER moves.js, whose hooks it draws with");
+  assert.ok(html.indexOf('id="rb-today-view"') < todayAt, "and its host is in the markup before the script");
 });
 
 test("the client fetches the spoken lines from their own route, once per page", () => {
@@ -993,4 +1007,150 @@ test("a running session leaves Done its own route only while the card on screen 
   assert.deepEqual(done.body, { day: "2026-10-30" });
   assert.equal(booted.calls.some((c) => c.url === "/api/ramble/moves/outdoor/done"), false,
     "the clock running behind another card is not finished by this Done");
+});
+
+/* ------------------------------- the hooks the day's cards draw with (10.3) */
+
+/* static/today.js asks moves.js for the words and for the two actions a card
+ * carries, by name. A click on a card's Start or Done must reach the same
+ * routes the old single card used, so the hooks are pinned here. */
+
+const SLOT_WALK = {
+  slot: "morning",
+  entry: { id: "walk-10", kind: "walk", title: "A ten minute walk", minutes: 10 },
+  reasons: [], why: "", swap: 0, done: false, standIn: false, empty: false,
+};
+
+const SLOT_CHUNK = {
+  slot: "evening",
+  entry: { id: "walk-10", kind: "landmark", title: "A ten minute walk", minutes: 10 },
+  reasons: [], why: "", swap: 0, done: false, standIn: false, empty: false,
+};
+
+const DAY_SLOTS = (slots) => ({
+  day: "2026-10-30", need: 3, nowSlot: "morning", off: false, slots,
+  complete: false, outdoor: null,
+  steps: { day: "2026-10-30", goal: 6000, steps: 1200, goal_met: false, walked: false },
+  streak: { days: 3, doneToday: 0, need: 3 },
+  week: { total: 0 }, setup: { needed: false },
+});
+
+test("startSlot opens a walk's own clock with the entry's id", async () => {
+  const now = Date.parse("2026-10-30T10:00:00");
+  const booted = bootMoves(null, "", undefined, { now, routes: outdoorRoutes(now, 0) });
+  await flush();
+
+  const out = booted.sandbox.window.RambleMoves.startSlot(SLOT_WALK, "2026-10-30");
+  assert.equal(typeof out.then, "function", "a walk's start answers with its promise");
+  await out;
+  await flush();
+
+  const start = booted.calls.find((c) => c.url === "/api/ramble/moves/outdoor/start");
+  assert.ok(start, "a walk item starts the outdoor session");
+  assert.equal(start.method, "POST");
+  assert.deepEqual(start.body, { entryId: "walk-10" });
+  assert.equal(booted.calls.some((c) => c.url.startsWith("/api/ramble/moves/library/")), false,
+    "a walk never opens the player");
+});
+
+test("startSlot on a chunk opens the player under the card's own slot", async () => {
+  const mounted = { count: 0 };
+  const booted = bootMoves((sb) => {
+    sb.localStorage.setItem("ramble.moves.safetySeen", "1");
+    sb.RamblePlayer = {
+      mount(host, opts) {
+        mounted.count += 1;
+        mounted.opts = opts;
+        return { destroy() {}, state() { return {}; } };
+      },
+    };
+  });
+  await flush();
+
+  await booted.sandbox.window.RambleMoves.startSlot(SLOT_CHUNK, "2026-10-30");
+  await flush();
+
+  assert.equal(mounted.count, 1, "a chunk opens the player");
+  assert.equal(mounted.opts.cardSlot, "evening", "the card the session started under is the item's slot");
+  assert.deepEqual(JSON.parse(JSON.stringify(mounted.opts.chain)), [{ chunkId: "walk-10" }]);
+});
+
+test("finishWalk posts the outdoor done route and answers with its promise", async () => {
+  const now = Date.parse("2026-10-30T10:00:00");
+  const booted = bootMoves(null, "", undefined, { now, routes: outdoorRoutes(now, 5 * 60000) });
+  await flush();
+
+  const out = booted.sandbox.window.RambleMoves.finishWalk();
+  assert.equal(typeof out.then, "function", "finishing a walk answers with its promise");
+  await out;
+  await flush();
+
+  const done = booted.calls.find((c) => c.url === "/api/ramble/moves/outdoor/done");
+  assert.ok(done, "the walk is finished through its own route");
+  assert.equal(done.method, "POST");
+  assert.equal(booted.calls.some((c) => c.url === "/api/ramble/moves/done"), false,
+    "and never through the indoor Done");
+});
+
+test("outdoorRunning answers whether a walk's clock is running", async () => {
+  const now = Date.parse("2026-10-30T10:00:00");
+  const idle = bootMoves(null, "", undefined, { now, routes: outdoorRoutes(now, 0) });
+  await flush();
+  assert.equal(idle.sandbox.window.RambleMoves.outdoorRunning(), false, "no session, no clock");
+
+  const running = bootMoves(null, "", undefined, {
+    now,
+    routes: outdoorRoutes(now, 0, {
+      outdoor: { day: "2026-10-30", startedAt: now - 60000, entryId: "walk-10", sessionKey: "k", finished: false },
+    }),
+  });
+  await flush();
+  assert.equal(running.sandbox.window.RambleMoves.outdoorRunning(), true, "a resumed session reads as running");
+});
+
+test("?moves=start&slot=evening starts the evening card and takes the slot out of the URL", async () => {
+  const mounted = { count: 0 };
+  const booted = bootMoves((sb) => {
+    sb.localStorage.setItem("ramble.moves.safetySeen", "1");
+    sb.RamblePlayer = {
+      mount(host, opts) {
+        mounted.count += 1;
+        mounted.opts = opts;
+        return { destroy() {}, state() { return {}; } };
+      },
+    };
+  }, "?moves=start&slot=evening", { id: "walk-10", kind: "landmark", title: "A ten minute walk", minutes: 10, steps: ["Walk at a pace you can talk at."] }, {
+    routes: { "/api/ramble/moves/day": DAY_SLOTS([SLOT_WALK, SLOT_CHUNK]) },
+  });
+  await flush();
+  await flush();
+
+  assert.equal(mounted.count, 1, "the named slot is what starts");
+  assert.equal(mounted.opts.cardSlot, "evening", "and it starts under its own slot");
+  assert.equal(booted.root.getAttribute("data-view"), "learn", "the player's screen took over");
+  assert.deepEqual(booted.sandbox.history.replaced, ["/dashboard/ramble"],
+    "moves and slot are both removed, so a reload does not fire them again");
+  assert.equal(booted.calls.some((c) => c.method === "POST" && c.url === "/api/ramble/moves/outdoor/start"), false,
+    "the day's own card Start did not run");
+});
+
+test("?moves=start&slot=evening on a finished card falls back to the day's card", async () => {
+  const now = Date.parse("2026-10-30T10:00:00");
+  const booted = bootMoves((sb) => { sb.localStorage.setItem("ramble.moves.safetySeen", "1"); },
+    "?moves=start&slot=evening", undefined, {
+      now,
+      routes: {
+        ...outdoorRoutes(now, 0),
+        "/api/ramble/moves/day": DAY_SLOTS([SLOT_WALK, { ...SLOT_CHUNK, done: true }]),
+      },
+    });
+  await flush();
+  await flush();
+
+  const start = booted.calls.find((c) => c.method === "POST" && c.url === "/api/ramble/moves/outdoor/start");
+  assert.ok(start, "a finished slot falls back to the card Start always meant");
+  assert.deepEqual(start.body, { entryId: "walk-10" });
+  assert.equal(booted.calls.some((c) => c.url.startsWith("/api/ramble/moves/library/")), false,
+    "nothing was opened from the finished slot");
+  assert.deepEqual(booted.sandbox.history.replaced, ["/dashboard/ramble"], "the slot still leaves the URL");
 });

@@ -359,14 +359,9 @@ export default {
         <section class="rb-view" data-for="today">
           <section class="rb-card" id="rb-today">
             <p class="rb-eyebrow">${esc(S.today)}</p>
-            <h3 class="rb-h" id="rb-challenge-title">${esc(S.challengeLoading)}</h3>
-            <p class="rb-muted rb-fine" id="rb-challenge-why" hidden></p>
-            <p class="rb-muted rb-fine" id="rb-challenge-meta"></p>
-            <div class="rb-row rb-actions">
-              <button class="rb-btn" id="rb-challenge-start" type="button">${esc(S.start)}</button>
-              <button class="rb-btn rb-btn-ghost" id="rb-challenge-done" type="button">${esc(S.done)}</button>
-              <button class="rb-btn rb-btn-ghost" id="rb-challenge-swap" type="button">${esc(S.swap)}</button>
-            </div>
+            <!-- The day's cards. static/today.js draws them from
+                 /api/ramble/moves/day: this element is only their host. -->
+            <div id="rb-today-view"></div>
             <p class="rb-muted rb-fine" id="rb-today-status"></p>
 
             <div class="rb-meter" id="rb-goal-meter">
@@ -374,13 +369,10 @@ export default {
               <span class="rb-meter-bar"><i id="rb-goal-fill"></i></span>
               <strong id="rb-goal-num">0</strong><span class="rb-meter-of">/ <span id="rb-goal-max">6,000</span></span>
             </div>
-            <p class="rb-muted rb-fine" id="rb-goal-line"></p>
-            <p class="rb-muted rb-fine" id="rb-streak-line"></p>
 
             <div class="rb-row rb-actions">
               <button class="rb-btn rb-btn-ghost rb-grow" id="rb-something-else" type="button">${esc(S.somethingElse)}</button>
               <button class="rb-btn rb-btn-ghost" id="rb-customize" type="button">${esc(S.customize)}</button>
-              <button class="rb-btn rb-btn-ghost" id="rb-learn-btn" type="button">${esc(S.learn)}</button>
             </div>
           </section>
         </section>
@@ -915,6 +907,7 @@ export default {
       <script src="/ramble/static/ramble-ar.js"></script>
       <script src="/ramble/static/ramble.js"></script>
       <script src="/ramble/static/moves.js"></script>
+      <script src="/ramble/static/today.js"></script>
     `;
 
     res.send(layout({ title: "Ramble", content }));
