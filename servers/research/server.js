@@ -30,6 +30,8 @@ import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 import { SOURCE_TYPES } from "./source-types.js";
 import { statusLabel, UNFETCHED_LABEL } from "./fetch-labels.js";
 import { UNKNOWN, resolveCallActor, auditActor, actorLabel } from "./actor.js";
+import { makeShareGate, notFoundResult, scopePredicate } from "../shared/project-share-scope.js";
+import { listSharesForBot, resolveBotAccess } from "../shared/project-bot-shares.js";
 import { ensureProvenanceSchema, ensureWithdrawalSchema } from "./ensure-schema.js";
 import { fetchPage as defaultFetchPage, splitFetchedText, storedTextMaybeTruncated, PREVIEW_CHARS, FETCHED_TEXT_MAX, REFETCH_AFTER_DAYS } from "../shared/fetch-page.js";
 import { matchQuote } from "./quote-match.js";
@@ -469,6 +471,42 @@ export function createProjectServer(dbPath, options = {}) {
   // Read by the tool handlers' callers and tests: who is calling and whether provenance is ready.
   server.research = { actor: baseActor, schema, callActor, refreshSchema };
 
+  // One share gate per call. It is the first thing every project tool does: it resolves who is
+  // calling (the construction-time base narrowed by the call) and answers with the tool-result
+  // shape the tools already return for an ACL error, so a bot is refused before any lookup, any
+  // owner-ACL check, or any message that could tell it whether a row exists.
+  const shareGate = (tool, extra) => makeShareGate(db, tool, { baseActor, extra });
+
+  // The level a project is listed with for a bot: the share levels spelled out.
+  const levelLabel = (level) => (level === "read_write" ? "read and write" : "read");
+
+  /**
+   * The projects a bound bot may see named, and the level it holds on each: its home project (full
+   * access) plus every live, non-suspended share. Nothing else is in the map, so a name looked up
+   * here is a name the bot is allowed to learn.
+   */
+  async function reachableProjects(actor, homeProjectId) {
+    const out = new Map();
+    if (homeProjectId != null) {
+      const { rows } = await db.execute({
+        sql: `SELECT id, name FROM project_spaces
+               WHERE id = ? AND archived_at IS NULL AND (status IS NULL OR status != 'archived')`,
+        args: [Number(homeProjectId)],
+      });
+      if (rows[0]) out.set(Number(rows[0].id), { id: Number(rows[0].id), name: String(rows[0].name), level: "read_write" });
+    }
+    if (actor && actor.id) {
+      for (const share of await listSharesForBot(db, actor.id)) {
+        const id = Number(share.project_id);
+        if (out.has(id)) continue;
+        const access = await resolveBotAccess(db, actor.id, id);
+        if (access.kind !== "share" || access.suspended) continue;
+        out.set(id, { id, name: String(share.project_name ?? ""), level: String(access.level) });
+      }
+    }
+    return out;
+  }
+
   // --- Project Tools ---
 
   server.tool(
@@ -480,7 +518,9 @@ export function createProjectServer(dbPath, options = {}) {
       type: z.string().max(100).default("research").describe("Project type: 'research' (default), 'data_connector', or custom"),
       tags: z.string().max(500).optional().describe("Comma-separated tags"),
     },
-    async ({ name, description, type, tags }) => {
+    async ({ name, description, type, tags }, extra) => {
+      const pass = await shareGate("crow_create_project", extra).check(null, {});
+      if (pass.isError) return pass;
       const { id: projectId } = await createProjectSpace(db, {
         name,
         description: description ?? null,
@@ -507,7 +547,18 @@ export function createProjectServer(dbPath, options = {}) {
       limit: z.number().max(100).default(20).describe("Maximum results to return"),
       offset: z.number().default(0).describe("Number of results to skip"),
     },
-    async ({ status, include_archived, type, limit, offset }) => {
+    async ({ status, include_archived, type, limit, offset }, extra) => {
+      const gate = shareGate("crow_list_projects", extra);
+      const pass = await gate.check(null, {});
+      if (pass.isError) return pass;
+      // A bot sees its own project and the ones shared with it, by name and level only: never
+      // another project's name, and never any content of one.
+      const scope = await gate.readScope();
+      const reach = scope ? await reachableProjects(gate.actor, scope.homeProjectId) : null;
+      if (reach && reach.size === 0) {
+        return { content: [{ type: "text", text: "No projects found." }] };
+      }
+
       let sql = `
         SELECT p.*, COUNT(s.id) as source_count,
                (SELECT COUNT(*) FROM research_notes n WHERE n.project_id = p.id${liveNote("n")}) as note_count
@@ -535,12 +586,26 @@ export function createProjectServer(dbPath, options = {}) {
       if (conditions.length > 0) {
         sql += " AND " + conditions.join(" AND ");
       }
+      if (reach) {
+        const ids = [...reach.keys()];
+        sql += ` AND p.id IN (${ids.map(() => "?").join(", ")})`;
+        params.push(...ids);
+      }
       sql += " GROUP BY p.id ORDER BY p.updated_at DESC LIMIT ? OFFSET ?";
       params.push(limit, offset);
 
       const { rows } = await db.execute({ sql, args: params });
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No projects found." }] };
+      }
+
+      if (reach) {
+        const listed = rows.filter((r) => reach.has(Number(r.id)));
+        if (listed.length === 0) {
+          return { content: [{ type: "text", text: "No projects found." }] };
+        }
+        const lines = listed.map((r) => `[#${r.id}] ${r.name} (${levelLabel(reach.get(Number(r.id)).level)})`);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
       }
 
       const formatted = rows
@@ -566,6 +631,8 @@ export function createProjectServer(dbPath, options = {}) {
       tags: z.string().max(500).optional(),
     },
     async ({ id, name, description, status, type, tags }, extra) => {
+      const pass = await shareGate("crow_update_project", extra).check(id, { name, description, status, type, tags });
+      if (pass.isError) return pass;
       const actor = callActor(extra);
       const patch = {};
       if (name !== undefined) patch.name = name;
@@ -651,18 +718,23 @@ export function createProjectServer(dbPath, options = {}) {
       relevance_score: z.number().min(1).max(10).default(5).describe("How relevant to the project (1-10)"),
     },
     async (params, extra) => {
+      const gate = shareGate("crow_add_source", extra);
+      const pass = await gate.check(params.project_id, params);
+      if (pass.isError) return pass;
       const actor = callActor(extra);
-      // M2b ACL: writes to a project require write_sources on the project_spaces row.
-      // Sources with no project_id stay project-less (legacy / personal scope).
-      if (params.project_id != null) {
+      // M2b ACL: writes to a project require write_sources on the project_spaces row. This stays
+      // the owner-ACL layer beneath the share gate.
+      // Sources with no project_id stay project-less for the owner (legacy / personal scope); a bot
+      // with no project_id has already been resolved to its home project by the gate.
+      const projectId = pass.projectId ?? null;
+      if (projectId != null) {
         try {
-          await assertLocalCapability(db, params.project_id, "write_sources");
+          await assertLocalCapability(db, projectId, "write_sources");
         } catch (err) {
           if (err instanceof AclError) return aclErrorToToolResult(err);
           throw err;
         }
       }
-      const projectId = params.project_id ?? null;
       const url = params.url ? params.url : null;
       // Not ready (the deploy window): keep to the pre-0013 columns and fetch nothing, since the
       // result could not be stored.
@@ -718,9 +790,9 @@ export function createProjectServer(dbPath, options = {}) {
       });
 
       const sourceId = Number(result.lastInsertRowid);
-      if (params.project_id != null) {
+      if (projectId != null) {
         await appendAudit(db, {
-          project_id: params.project_id,
+          project_id: projectId,
           ...auditActor(actor),
           action: "source.add",
           target: `source:${sourceId}`,
@@ -785,6 +857,7 @@ export function createProjectServer(dbPath, options = {}) {
       force: z.boolean().optional().describe("Owner only: replace the stored page text even when passing quote checks rely on it"),
     },
     async ({ id, force }, extra) => {
+      const gate = shareGate("crow_fetch_source", extra);
       const actor = callActor(extra);
       const fail = (t) => ({ content: [{ type: "text", text: t }], isError: true });
       if (!(schema.ready || refreshSchema().ready)) {
@@ -795,7 +868,11 @@ export function createProjectServer(dbPath, options = {}) {
         args: [id],
       });
       const src = rows[0];
-      if (!src) return fail(`Source #${id} not found.`);
+      if (!src) return notFoundResult();
+      // Who may touch it: a source in a project outside the caller's reach reads exactly like a
+      // missing one, and a read-only share refuses a fetch (it writes the page text).
+      const hidden = await gate.checkRow(src.project_id, { force });
+      if (hidden) return hidden;
       if (src.project_id != null) {
         try {
           await assertLocalCapability(db, src.project_id, "write_sources");
@@ -899,7 +976,10 @@ export function createProjectServer(dbPath, options = {}) {
       verified_only: z.boolean().default(false).describe("Only return verified sources"),
       limit: z.number().max(100).default(10).describe("Max results"),
     },
-    async ({ query, project_id, source_type, verified_only, limit }) => {
+    async ({ query, project_id, source_type, verified_only, limit }, extra) => {
+      const gate = shareGate("crow_search_sources", extra);
+      const pass = await gate.check(project_id, { source_type, verified_only, limit, query });
+      if (pass.isError) return pass;
       const sanitized = sanitizeFtsQuery(query);
       if (!sanitized) {
         return { content: [{ type: "text", text: "No sources found." }] };
@@ -913,7 +993,16 @@ export function createProjectServer(dbPath, options = {}) {
       `;
       const params = [sanitized];
 
-      if (project_id) { sql += " AND s.project_id = ?"; params.push(project_id); }
+      if (project_id) {
+        sql += " AND s.project_id = ?";
+        params.push(project_id);
+      } else {
+        // No project named: the caller's own scope (a bot's home project) is the whole result, and
+        // project-less rows are never part of it.
+        const p = scopePredicate(await gate.readScope(), { column: "s.project_id" });
+        sql += p.sql;
+        params.push(...p.args);
+      }
       if (source_type) { sql += " AND s.source_type = ?"; params.push(source_type); }
       if (verified_only) { sql += " AND s.verified = 1"; }
 
@@ -941,16 +1030,21 @@ export function createProjectServer(dbPath, options = {}) {
     "crow_get_source",
     "Get full details of a specific source by ID.",
     { id: z.number().describe("Source ID") },
-    async ({ id }) => {
+    async ({ id }, extra) => {
+      const gate = shareGate("crow_get_source", extra);
       const ready = schema.ready || refreshSchema().ready;
       const { rows: sourceRows } = await db.execute({
         sql: `SELECT ${sourceColumns(ready)}${ready ? ", length(fetched_text) AS fetched_len" : ""} FROM research_sources WHERE id = ?`,
         args: [id],
       });
       if (sourceRows.length === 0) {
-        return { content: [{ type: "text", text: `Source #${id} not found.` }] };
+        return notFoundResult();
       }
       const source = sourceRows[0];
+      // A row in a project the caller cannot reach, and a project-less row for a bot, read exactly
+      // like a missing id (the true reason goes to the audit log, never into this text).
+      const hidden = await gate.checkRow(source.project_id);
+      if (hidden) return hidden;
 
       const wReady = withdrawalReady();
       const { rows: notes } = await db.execute({
@@ -1040,6 +1134,7 @@ export function createProjectServer(dbPath, options = {}) {
       notes: z.string().max(50000).optional().describe("Verification notes"),
     },
     async ({ id, verified, method, notes }, extra) => {
+      const gate = shareGate("crow_verify_source", extra);
       const actor = callActor(extra);
       const fail = (t) => ({ content: [{ type: "text", text: t }], isError: true });
       const ok = (t) => ({ content: [{ type: "text", text: t }] });
@@ -1052,7 +1147,11 @@ export function createProjectServer(dbPath, options = {}) {
         args: [id],
       });
       const src = rows[0];
-      if (!src) return fail(`Source #${id} not found.`);
+      if (!src) return notFoundResult();
+      // Verification writes the source's row, so a read share refuses it; a row outside the
+      // caller's reach, and a project-less row for a bot, read like a missing id.
+      const hidden = await gate.checkRow(src.project_id, { verified, method });
+      if (hidden) return hidden;
 
       // Who may touch it: a project's sources need write_sources there; a source in no project has
       // no ACL to check, so only the owner may verify (or unverify) it.
@@ -1235,12 +1334,23 @@ export function createProjectServer(dbPath, options = {}) {
       sort_by: z.enum(["recent", "relevance", "title"]).default("recent"),
       limit: z.number().max(100).default(20),
     },
-    async ({ project_id, backend_id, source_type, verified_only, sort_by, limit }) => {
+    async ({ project_id, backend_id, source_type, verified_only, sort_by, limit }, extra) => {
+      const gate = shareGate("crow_list_sources", extra);
+      const pass = await gate.check(project_id, { backend_id, source_type, verified_only, sort_by, limit });
+      if (pass.isError) return pass;
       const ready = schema.ready || refreshSchema().ready;
       let sql = `SELECT ${sourceColumns(ready)} FROM research_sources WHERE 1=1`;
       const params = [];
 
-      if (project_id) { sql += " AND project_id = ?"; params.push(project_id); }
+      if (project_id) {
+        sql += " AND project_id = ?";
+        params.push(project_id);
+      } else {
+        // An omitted project_id is the caller's own scope: a bot's home project, no project-less row.
+        const p = scopePredicate(await gate.readScope(), { column: "project_id" });
+        sql += p.sql;
+        params.push(...p.args);
+      }
       if (backend_id) { sql += " AND backend_id = ?"; params.push(backend_id); }
       if (source_type) { sql += " AND source_type = ?"; params.push(source_type); }
       if (verified_only) { sql += " AND verified = 1"; }
@@ -1317,12 +1427,26 @@ export function createProjectServer(dbPath, options = {}) {
       tags: z.string().max(500).optional().describe("Comma-separated tags"),
     },
     async ({ content, note_type, provenance, locator, project_id, source_id, title, tags }, extra) => {
+      const gate = shareGate("crow_add_note", extra);
+      const pass = await gate.check(project_id, { content, note_type, provenance, locator, source_id, title, tags });
+      if (pass.isError) return pass;
       const actor = callActor(extra);
       const fail = (t) => ({ content: [{ type: "text", text: t }], isError: true });
+      // An omitted project_id is the bot's home project (resolved by the gate above); the owner keeps
+      // writing project-less notes when naming none.
+      const resolvedProjectId = pass.projectId ?? null;
+      // The source's own project is gated too, so a source the caller cannot reach reads like a
+      // missing one instead of answering "belongs to a different project".
+      if (source_id != null) {
+        const r = await db.execute({ sql: "SELECT project_id FROM research_sources WHERE id = ?", args: [source_id] });
+        if (!r.rows[0]) return notFoundResult();
+        const hidden = await gate.checkRow(r.rows[0].project_id);
+        if (hidden) return hidden;
+      }
       // M2b ACL: writes to a project require write_notes capability.
-      if (project_id != null) {
+      if (resolvedProjectId != null) {
         try {
-          await assertLocalCapability(db, project_id, "write_notes");
+          await assertLocalCapability(db, resolvedProjectId, "write_notes");
         } catch (err) {
           if (err instanceof AclError) return aclErrorToToolResult(err);
           throw err;
@@ -1335,9 +1459,9 @@ export function createProjectServer(dbPath, options = {}) {
         const cols = ready ? "id, project_id, fetch_status, content_sha256, fetched_text" : "id, project_id";
         const { rows } = await db.execute({ sql: `SELECT ${cols} FROM research_sources WHERE id = ?`, args: [source_id] });
         src = rows[0];
-        if (!src) return fail(`Source #${source_id} not found.`);
+        if (!src) return notFoundResult();
         // A source that belongs to a project can only back notes in that same project.
-        if (src.project_id != null && Number(src.project_id) !== project_id) {
+        if (src.project_id != null && Number(src.project_id) !== resolvedProjectId) {
           return fail(`Source #${source_id} belongs to a different project, so this note cannot be attached to it.`);
         }
       }
@@ -1369,7 +1493,7 @@ export function createProjectServer(dbPath, options = {}) {
       if (beforeNoteInsert) await beforeNoteInsert({ source_id: source_id ?? null });
 
       let sql = "INSERT INTO research_notes (content, note_type, project_id, source_id, title, tags";
-      const args = [content, note_type, project_id ?? null, source_id ?? null, title ?? null, tags ?? null];
+      const args = [content, note_type, resolvedProjectId, source_id ?? null, title ?? null, tags ?? null];
       if (ready) {
         sql += ", provenance, quote_found, locator";
         args.push(prov, quoteFound, locator ?? null);
@@ -1424,9 +1548,9 @@ export function createProjectServer(dbPath, options = {}) {
           });
         } catch {}
       }
-      if (project_id != null) {
+      if (resolvedProjectId != null) {
         await appendAudit(db, {
-          project_id, ...auditActor(actor), action: "note.add",
+          project_id: resolvedProjectId, ...auditActor(actor), action: "note.add",
           target: `note:${noteId}`,
           payload: { note_type, source_id: source_id ?? null, provenance: ready ? prov : null, quote_found: quoteFound },
         });
@@ -1450,6 +1574,7 @@ export function createProjectServer(dbPath, options = {}) {
       reason: z.string().min(1).max(500).describe("Why the note is wrong (kept on record)"),
     },
     async ({ id, reason }, extra) => {
+      const gate = shareGate("crow_withdraw_note", extra);
       const actor = callActor(extra);
       const fail = (t) => ({ content: [{ type: "text", text: t }], isError: true });
       if (!withdrawalReady()) {
@@ -1461,7 +1586,11 @@ export function createProjectServer(dbPath, options = {}) {
         args: [id],
       });
       const n = rows[0];
-      if (!n) return fail(`Note #${id} not found.`);
+      if (!n) return notFoundResult();
+      // Withdrawal writes the note's row, so a read share refuses it; a note outside the caller's
+      // reach, and a project-less note for a bot, read exactly like a missing id.
+      const hidden = await gate.checkRow(n.project_id, { reason });
+      if (hidden) return hidden;
 
       // Who may withdraw it: the owner any note; a bot only a note it wrote. Unknown and peer
       // callers never, and a note with no recorded author is the owner's to judge.
@@ -1536,12 +1665,23 @@ export function createProjectServer(dbPath, options = {}) {
       note_type: z.enum(["note", "quote", "summary", "analysis", "question", "insight"]).optional(),
       limit: z.number().max(100).default(10),
     },
-    async ({ query, project_id, note_type, limit }) => {
+    async ({ query, project_id, note_type, limit }, extra) => {
+      const gate = shareGate("crow_search_notes", extra);
+      const pass = await gate.check(project_id, { note_type, limit, query });
+      if (pass.isError) return pass;
       const escaped = escapeLikePattern(query);
       let sql = `SELECT * FROM research_notes WHERE content LIKE ? ESCAPE '\\'${liveNote()}`;
       const params = [`%${escaped}%`];
 
-      if (project_id) { sql += " AND project_id = ?"; params.push(project_id); }
+      if (project_id) {
+        sql += " AND project_id = ?";
+        params.push(project_id);
+      } else {
+        // An omitted project_id is the caller's own scope: a bot's home project, no project-less row.
+        const p = scopePredicate(await gate.readScope(), { column: "project_id" });
+        sql += p.sql;
+        params.push(...p.args);
+      }
       if (note_type) { sql += " AND note_type = ?"; params.push(note_type); }
       sql += " ORDER BY created_at DESC LIMIT ?";
       params.push(limit);
@@ -1571,11 +1711,22 @@ export function createProjectServer(dbPath, options = {}) {
       format: z.enum(["apa", "mla", "chicago", "web", "all"]).default("apa").describe("Citation format (or 'all' for every format)"),
       include_unfetched: z.boolean().default(false).describe("Also list sources Crow never fetched, marked [NOT FETCHED]"),
     },
-    async ({ project_id, tag, verified_only, format, include_unfetched }) => {
+    async ({ project_id, tag, verified_only, format, include_unfetched }, extra) => {
+      const gate = shareGate("crow_generate_bibliography", extra);
+      const pass = await gate.check(project_id, { tag, verified_only, format, include_unfetched });
+      if (pass.isError) return pass;
       const ready = schema.ready || refreshSchema().ready;
       let where = " WHERE 1=1";
       const params = [];
-      if (project_id) { where += " AND project_id = ?"; params.push(project_id); }
+      if (project_id) {
+        where += " AND project_id = ?";
+        params.push(project_id);
+      } else {
+        // An omitted project_id is the caller's own scope: a bot's home project, no project-less row.
+        const p = scopePredicate(await gate.readScope(), { column: "project_id" });
+        where += p.sql;
+        params.push(...p.args);
+      }
       if (tag) { where += " AND tags LIKE ? ESCAPE '\\'"; params.push(`%${escapeLikePattern(tag)}%`); }
       if (verified_only) { where += " AND verified = 1"; }
 
@@ -1631,24 +1782,41 @@ export function createProjectServer(dbPath, options = {}) {
     "crow_project_stats",
     "Get statistics about the project database.",
     {},
-    async () => {
-      const projects = (await db.execute("SELECT COUNT(*) as count FROM project_spaces WHERE (type IS NULL OR type != 'learner_profile') AND archived_at IS NULL")).rows[0];
-      const sources = (await db.execute("SELECT COUNT(*) as count FROM research_sources")).rows[0];
-      const verified = (await db.execute("SELECT COUNT(*) as count FROM research_sources WHERE verified = 1")).rows[0];
-      const byType = (await db.execute("SELECT source_type, COUNT(*) as count FROM research_sources GROUP BY source_type ORDER BY count DESC")).rows;
+    async (_args, extra) => {
+      const gate = shareGate("crow_project_stats", extra);
+      const pass = await gate.check(null, {});
+      if (pass.isError) return pass;
+      // A bot's statistics are its home project's: the counts of everything else are not its to read.
+      const scope = await gate.readScope();
+      const scoped = (column) => {
+        if (!scope) return { sql: "", args: [] };
+        if (scope.homeProjectId == null) return { sql: " AND 1 = 0", args: [] };
+        return { sql: ` AND ${column} = ?`, args: [Number(scope.homeProjectId)] };
+      };
+      const projectScope = scoped("id");
+      const sourceScope = scoped("project_id");
+      const noteScope = scoped("project_id");
+
+      const projects = (await db.execute({
+        sql: `SELECT COUNT(*) as count FROM project_spaces WHERE (type IS NULL OR type != 'learner_profile') AND archived_at IS NULL${projectScope.sql}`,
+        args: projectScope.args,
+      })).rows[0];
+      const sources = (await db.execute({ sql: `SELECT COUNT(*) as count FROM research_sources WHERE 1=1${sourceScope.sql}`, args: sourceScope.args })).rows[0];
+      const verified = (await db.execute({ sql: `SELECT COUNT(*) as count FROM research_sources WHERE verified = 1${sourceScope.sql}`, args: sourceScope.args })).rows[0];
+      const byType = (await db.execute({ sql: `SELECT source_type, COUNT(*) as count FROM research_sources WHERE 1=1${sourceScope.sql} GROUP BY source_type ORDER BY count DESC`, args: sourceScope.args })).rows;
       const live = liveNote();
-      const notes = (await db.execute(`SELECT COUNT(*) as count FROM research_notes WHERE 1=1${live}`)).rows[0];
-      const byNoteType = (await db.execute(`SELECT note_type, COUNT(*) as count FROM research_notes WHERE 1=1${live} GROUP BY note_type ORDER BY count DESC`)).rows;
+      const notes = (await db.execute({ sql: `SELECT COUNT(*) as count FROM research_notes WHERE 1=1${live}${noteScope.sql}`, args: noteScope.args })).rows[0];
+      const byNoteType = (await db.execute({ sql: `SELECT note_type, COUNT(*) as count FROM research_notes WHERE 1=1${live}${noteScope.sql} GROUP BY note_type ORDER BY count DESC`, args: noteScope.args })).rows;
       const withdrawnNotes = live
-        ? Number((await db.execute("SELECT COUNT(*) as count FROM research_notes WHERE withdrawn_at IS NOT NULL")).rows[0].count)
+        ? Number((await db.execute({ sql: `SELECT COUNT(*) as count FROM research_notes WHERE withdrawn_at IS NOT NULL${noteScope.sql}`, args: noteScope.args })).rows[0].count)
         : 0;
-      const byProjectType = (await db.execute("SELECT COALESCE(type, 'research') as type, COUNT(*) as count FROM project_spaces WHERE archived_at IS NULL GROUP BY type ORDER BY count DESC")).rows;
+      const byProjectType = (await db.execute({ sql: `SELECT COALESCE(type, 'research') as type, COUNT(*) as count FROM project_spaces WHERE archived_at IS NULL${projectScope.sql} GROUP BY type ORDER BY count DESC`, args: projectScope.args })).rows;
 
       let backends = { count: 0 };
       let connectedBackends = { count: 0 };
       try {
-        backends = (await db.execute("SELECT COUNT(*) as count FROM data_backends")).rows[0];
-        connectedBackends = (await db.execute("SELECT COUNT(*) as count FROM data_backends WHERE status = 'connected'")).rows[0];
+        backends = (await db.execute({ sql: `SELECT COUNT(*) as count FROM data_backends WHERE 1=1${sourceScope.sql}`, args: sourceScope.args })).rows[0];
+        connectedBackends = (await db.execute({ sql: `SELECT COUNT(*) as count FROM data_backends WHERE status = 'connected'${sourceScope.sql}`, args: sourceScope.args })).rows[0];
       } catch {
         // data_backends table may not exist yet
       }
@@ -1678,7 +1846,9 @@ export function createProjectServer(dbPath, options = {}) {
       connection_ref: z.string().max(5000).describe("JSON. mcp_server: {\"command\":\"npx\",\"args\":[\"-y\",\"mcp-server-postgres\"],\"envVars\":[\"POSTGRES_URL\"]}. sqlite: {\"path\":\"/abs/path/to/data/datasets/survey.db\"}"),
       tags: z.string().max(500).optional().describe("Comma-separated tags"),
     },
-    async ({ name, backend_type, project_id, connection_ref, tags }) => {
+    async ({ name, backend_type, project_id, connection_ref, tags }, extra) => {
+      const pass = await shareGate("crow_register_backend", extra).check(project_id, { name, backend_type, connection_ref });
+      if (pass.isError) return pass;
       const fail = (text) => ({ content: [{ type: "text", text }], isError: true });
       let connRef;
       try {
@@ -1707,7 +1877,7 @@ export function createProjectServer(dbPath, options = {}) {
       }
 
       // Auto-create project if not provided
-      let actualProjectId = project_id;
+      let actualProjectId = pass.projectId ?? null;
       if (!actualProjectId) {
         const { id: newProjectId } = await createProjectSpace(db, {
           name,
@@ -1746,7 +1916,9 @@ export function createProjectServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Filter by project"),
       status: z.string().max(100).optional().describe("Filter by status: connected, disconnected, error"),
     },
-    async ({ project_id, status }) => {
+    async ({ project_id, status }, extra) => {
+      const pass = await shareGate("crow_list_backends", extra).check(project_id, { status });
+      if (pass.isError) return pass;
       let sql = `
         SELECT b.*, p.name as project_name
         FROM data_backends b
@@ -1754,7 +1926,14 @@ export function createProjectServer(dbPath, options = {}) {
         WHERE 1=1
       `;
       const params = [];
-      if (project_id) { sql += " AND b.project_id = ?"; params.push(project_id); }
+      if (project_id) {
+        sql += " AND b.project_id = ?";
+        params.push(project_id);
+      } else if (pass.projectId != null) {
+        // An omitted project_id is the caller's own scope (a bot's home project).
+        sql += " AND b.project_id = ?";
+        params.push(pass.projectId);
+      }
       if (status) { sql += " AND b.status = ?"; params.push(status); }
       sql += " ORDER BY b.updated_at DESC";
 
@@ -1780,17 +1959,20 @@ export function createProjectServer(dbPath, options = {}) {
       id: z.number().describe("Backend ID to remove"),
       confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
-    async ({ id, confirm_token }) => {
+    async ({ id, confirm_token }, extra) => {
+      const gate = shareGate("crow_remove_backend", extra);
       const { rows } = await db.execute({
-        sql: `SELECT b.name, b.status, p.name as project_name
+        sql: `SELECT b.name, b.status, b.project_id, p.name as project_name
               FROM data_backends b
               JOIN project_spaces p ON p.id = b.project_id AND p.archived_at IS NULL
               WHERE b.id = ?`,
         args: [id],
       });
       if (rows.length === 0) {
-        return { content: [{ type: "text", text: `Backend #${id} not found.` }] };
+        return notFoundResult();
       }
+      const hidden = await gate.checkRow(rows[0].project_id, { id });
+      if (hidden) return hidden;
       const backend = rows[0];
 
       if (!shouldSkipGates()) {
@@ -1830,11 +2012,14 @@ export function createProjectServer(dbPath, options = {}) {
     {
       id: z.number().describe("Backend ID"),
     },
-    async ({ id }) => {
+    async ({ id }, extra) => {
+      const gate = shareGate("crow_backend_schema", extra);
       const { rows } = await db.execute({ sql: "SELECT * FROM data_backends WHERE id = ?", args: [id] });
       if (rows.length === 0) {
-        return { content: [{ type: "text", text: `Backend #${id} not found.` }] };
+        return notFoundResult();
       }
+      const hidden = await gate.checkRow(rows[0].project_id, { id });
+      if (hidden) return hidden;
 
       const backend = rows[0];
       let text = `Backend #${id}: ${backend.name} (${backend.status})\n`;
@@ -1896,7 +2081,9 @@ export function createProjectServer(dbPath, options = {}) {
     {
       project_id: z.number().describe("Project ID"),
     },
-    async ({ project_id }) => {
+    async ({ project_id }, extra) => {
+      const pass = await shareGate("crow_workspace_dir", extra).check(project_id, {});
+      if (pass.isError) return pass;
       try {
         const project = await assertProjectExists(db, project_id);
         const { rows } = await db.execute({
@@ -1923,7 +2110,9 @@ export function createProjectServer(dbPath, options = {}) {
     {
       project_id: z.number().describe("Project ID"),
     },
-    async ({ project_id }) => {
+    async ({ project_id }, extra) => {
+      const pass = await shareGate("crow_project_get", extra).check(project_id, {});
+      if (pass.isError) return pass;
       try {
         await assertProjectExists(db, project_id, { allowArchived: true });
 
@@ -2013,7 +2202,9 @@ export function createProjectServer(dbPath, options = {}) {
       project_id: z.number().describe("Project ID"),
       contact_id: z.number().optional().describe("Contact ID (omit for local user)"),
     },
-    async ({ project_id, contact_id }) => {
+    async ({ project_id, contact_id }, extra) => {
+      const pass = await shareGate("crow_project_capabilities", extra).check(project_id, {});
+      if (pass.isError) return pass;
       try {
         await assertProjectExists(db, project_id, { allowArchived: true });
         const eff = await effectiveCapabilities(db, project_id, contact_id ?? null);
@@ -2042,7 +2233,9 @@ export function createProjectServer(dbPath, options = {}) {
       project_id: z.number().describe("Project ID"),
       include_revoked: z.boolean().optional().describe("Include revoked members (default false)"),
     },
-    async ({ project_id, include_revoked }) => {
+    async ({ project_id, include_revoked }, extra) => {
+      const pass = await shareGate("crow_list_members", extra).check(project_id, {});
+      if (pass.isError) return pass;
       try {
         await assertProjectExists(db, project_id, { allowArchived: true });
         const sql = include_revoked
@@ -2083,7 +2276,9 @@ export function createProjectServer(dbPath, options = {}) {
       capabilities: z.string().max(2000).optional().describe("JSON object overriding role defaults, e.g. {\"invoke_bot\":false,\"query_backend:tea-data\":true}"),
       mode: z.enum(["clone", "subscription"]).optional().describe("Share mode for remote members (Phase 1 ships clone)"),
     },
-    async ({ project_id, contact_id, role, capabilities, mode }) => {
+    async ({ project_id, contact_id, role, capabilities, mode }, extra) => {
+      const pass = await shareGate("crow_add_member", extra).check(project_id, {});
+      if (pass.isError) return pass;
       try {
         await assertProjectExists(db, project_id);
         // Require manage_members on the project from the local user UNLESS the
@@ -2153,7 +2348,9 @@ export function createProjectServer(dbPath, options = {}) {
       project_id: z.number().describe("Project ID"),
       contact_id: z.number().describe("Contact ID of the member to revoke"),
     },
-    async ({ project_id, contact_id }) => {
+    async ({ project_id, contact_id }, extra) => {
+      const pass = await shareGate("crow_remove_member", extra).check(project_id, {});
+      if (pass.isError) return pass;
       try {
         await assertProjectExists(db, project_id);
         await assertLocalCapability(db, project_id, "manage_members");
@@ -2196,7 +2393,9 @@ export function createProjectServer(dbPath, options = {}) {
       limit: z.number().max(500).default(50).describe("Max entries (default 50)"),
       action: z.string().max(100).optional().describe("Filter by action (e.g., 'bot.invoke', 'member.add')"),
     },
-    async ({ project_id, limit, action }) => {
+    async ({ project_id, limit, action }, extra) => {
+      const pass = await shareGate("crow_audit_log", extra).check(project_id, {});
+      if (pass.isError) return pass;
       try {
         await assertProjectExists(db, project_id, { allowArchived: true });
         let sql = `SELECT created_at, actor_type, actor_id, action, target, payload

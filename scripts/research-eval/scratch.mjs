@@ -28,11 +28,12 @@ const INIT = join(import.meta.dirname, "scratch-init.mjs");
 const INIT_TIMEOUT_MS = 120_000;
 
 /** Runs scratch-init.mjs in `home` (init-db + one project, one child) → its projectId. */
-async function initHome(home, botId) {
+async function initHome(home, botId, { botGrant = false } = {}) {
   const resultPath = join(home, "init-result.json");
   try {
     await execFileP(process.execPath, [INIT, resultPath], {
-      env: scratchEnv(home, botId), cwd: ROOT, timeout: INIT_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
+      env: { ...scratchEnv(home, botId), ...(botGrant ? { CROW_EVAL_BOT_GRANT: "1" } : {}) },
+      cwd: ROOT, timeout: INIT_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
     });
   } catch (err) {
     const tail = String(err.stderr || "").trim().split("\n").slice(-5).join("\n");
@@ -46,13 +47,20 @@ async function initHome(home, botId) {
 /**
  * The template home: one scratch-init child, built ONCE per run or per test file. Keep it until
  * the last scratch copied from it is done (the copies keep its workspace_dir).
- * @returns {Promise<{home: string, dbPath: string, projectId: number, cleanup: () => void}>}
+ *
+ * `botGrant` shares the eval project with the acting bot (level read_write), so the fixture server
+ * lets that bot's calls through: the eval flows ask for it, a caller that seeds its own bot row
+ * does not, and the grant rides in the template's crow.db into every scratch copied from it.
+ * @returns {Promise<{home: string, dbPath: string, projectId: number, botGrant: boolean, cleanup: () => void}>}
  */
-export async function makeTemplate({ botId = "research-eval" } = {}) {
+export async function makeTemplate({ botId = "research-eval", botGrant = false } = {}) {
   const home = freshHome();
   try {
-    const projectId = await initHome(home, botId);
-    return { home, dbPath: join(home, "data", "crow.db"), projectId, cleanup: () => rmSync(home, { recursive: true, force: true }) };
+    const projectId = await initHome(home, botId, { botGrant });
+    return {
+      home, dbPath: join(home, "data", "crow.db"), projectId, botGrant,
+      cleanup: () => rmSync(home, { recursive: true, force: true }),
+    };
   } catch (err) {
     rmSync(home, { recursive: true, force: true });
     throw err;
@@ -64,7 +72,7 @@ export async function makeTemplate({ botId = "research-eval" } = {}) {
  * it runs its own scratch-init child.
  * @returns {Promise<{home, dataDir, dbPath, projectId, botId, granted: string[], env, sessionPath, fetchLogPath, cleanup}>}
  */
-export async function makeScratch({ botId = "research-eval", template } = {}) {
+export async function makeScratch({ botId = "research-eval", template, botGrant } = {}) {
   const home = freshHome();
   const cleanup = () => rmSync(home, { recursive: true, force: true });
   try {
@@ -76,7 +84,7 @@ export async function makeScratch({ botId = "research-eval", template } = {}) {
       copyFileSync(template.dbPath, dbPath);
       projectId = template.projectId;
     } else {
-      projectId = await initHome(home, botId);
+      projectId = await initHome(home, botId, { botGrant: botGrant ?? template?.botGrant ?? false });
     }
     return {
       home, dataDir, dbPath, projectId, botId,

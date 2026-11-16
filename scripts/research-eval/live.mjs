@@ -636,7 +636,7 @@ export async function runLive(arg, { log = (m) => console.error(m) } = {}) {
 
   let template;
   try {
-    template = await makeTemplate({ botId: EVAL_BOT_ID });
+    template = await makeTemplate({ botId: EVAL_BOT_ID, botGrant: true });
   } catch (err) { say(`cannot build a scratch template: ${err.message}`); return 1; }
 
   let code = 0;

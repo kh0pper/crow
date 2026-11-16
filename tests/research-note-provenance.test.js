@@ -137,7 +137,7 @@ test("a snippet note is stored with a reminder", async () => {
 test("a missing source_id is not found", async () => {
   const r = await addNote({ content: "x", note_type: "note", source_id: 999999 });
   assert.ok(r.isError);
-  assert.match(text(r), /Source #999999 not found/);
+  assert.equal(text(r), "Error: Not found.");
 });
 
 test("locator is stored", async () => {

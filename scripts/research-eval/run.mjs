@@ -151,7 +151,7 @@ export async function runRows({ cases, trajectory, reps = 3, arm, model = "stub"
   if (units.length === 0) return { rows: 0 };
   mkdirSync(dirname(resolve(out)), { recursive: true });
   const shas = provenanceShas();
-  const template = await makeTemplate({});
+  const template = await makeTemplate({ botGrant: true });
   let rows = 0;
   let next = 0;
   // On the first error no worker takes a new unit, and the template is removed only after every

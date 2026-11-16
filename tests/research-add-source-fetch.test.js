@@ -86,6 +86,15 @@ function insertRow(cols) {
   } finally { d.close(); }
 }
 const idOf = (r) => Number(text(r).match(/\(id: (\d+)/)[1]);
+// A bot reaches its own project: home it in `pid` so its calls are not refused as unreachable.
+function homeBot(pid, botId = BOT.id) {
+  const d = raw();
+  try {
+    d.prepare(`INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled)
+               VALUES (?, ?, '{}', ?, 1)
+               ON CONFLICT(bot_id) DO UPDATE SET project_id = excluded.project_id`).run(botId, botId, pid);
+  } finally { d.close(); }
+}
 
 let projectSeq = 0;
 async function newProject(client) {
@@ -283,6 +292,7 @@ test("add_source as a bot records that bot in the audit row", async () => {
   const stub = makeStub({ "https://example.com/bot-add": okPage("https://example.com/bot-add", "bot page") });
   const owner = await clientFor(stub);
   const pid = await newProject(owner);
+  homeBot(pid);
   const bot = await clientFor(stub, BOT);
   const id = idOf(await add(bot, { url: "https://example.com/bot-add", project_id: pid }));
   const d = raw();
@@ -364,6 +374,7 @@ test("crow_fetch_source never replaces text a passing quote check relies on", as
   assert.ok(text(r).includes(`#${relied}`), `the result names the kept check: ${text(r)}`);
 
   const bot = await clientFor(stub, BOT);
+  homeBot(pid);
   const rb = await refetch(bot, { id, force: true });
   assert.ok(rb.isError, text(rb));
   assert.match(text(rb), /only the owner/);
@@ -426,7 +437,7 @@ test("crow_fetch_source on a missing id is not found", async () => {
   const client = await clientFor(makeStub());
   const r = await refetch(client, { id: 999999 });
   assert.ok(r.isError);
-  assert.match(text(r), /Source #999999 not found/);
+  assert.match(text(r), /Not found/);
 });
 
 test("a legacy row that fetches becomes fetched", async () => {

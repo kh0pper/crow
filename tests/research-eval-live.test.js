@@ -491,7 +491,7 @@ test("completionTokensOf sums assistant usage.output, and is null when no messag
 // ---- the runner, with the stub pi (plan Task 7) ------------------------------------------------
 
 let templateP;
-const tpl = () => (templateP ??= makeTemplate({ botId: EVAL_BOT_ID }));
+const tpl = () => (templateP ??= makeTemplate({ botId: EVAL_BOT_ID, botGrant: true }));
 test.after(async () => (await templateP?.catch(() => null))?.cleanup());
 
 const caseSet = () => caseSetIdentity(CASES_DIR);
@@ -525,8 +525,7 @@ test("runLiveRows with the stub pi writes one contaminated row per (case, rep): 
   assert.deepEqual(rows.map((r) => [r.case, r.rep]), [[RR12.id, 0], [RR12.id, 1]]);
   for (const r of rows) {
     assert.equal(r.ok, false);
-    assert.equal(r.contaminated, "no model request passed the sampling proxy");
-    assert.equal(r.attempts, 1, "not retried: it is not a transport failure");
+    assert.equal(r.contaminated, "no model request passed the sampling proxy");    assert.equal(r.attempts, 1, "not retried: it is not a transport failure");
     assert.deepEqual(r.attempt_reasons, []);
     assert.equal(r.config.mode, "live");
     assert.equal(r.config.judge, null, "--no-judge: no judge identity in the row");

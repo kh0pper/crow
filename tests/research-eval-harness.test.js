@@ -44,7 +44,7 @@ const rec = (calls) => async (q) => { calls.push(q); return noJudge(q); };
 // Memoize the PROMISE: concurrent pool workers share one template (a value memo would race).
 let templateP;
 let templateBuilds = 0;
-const tpl = () => (templateP ??= (templateBuilds++, makeTemplate({})));
+const tpl = () => (templateP ??= (templateBuilds++, makeTemplate({ botGrant: true })));
 after(async () => (await templateP?.catch(() => null))?.cleanup());
 
 test("concurrent tpl() callers share one template (no leaked template dirs)", async () => {
