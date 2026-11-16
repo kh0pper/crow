@@ -824,7 +824,11 @@ export function createProjectServer(dbPath, options = {}) {
       query: z.string().max(400).describe("Search query"),
       count: z.number().int().min(1).max(10).default(5).describe("Number of results (1-10)"),
     },
-    async ({ query, count }) => {
+    async ({ query, count }, extra) => {
+      // A search writes nothing and touches no project-scoped row, so the gate allows normal bots;
+      // an unverified bot (the engine's marker with no bot identity) is refused everything.
+      const pass = await shareGate("crow_web_search", extra).check(null, {});
+      if (pass.isError) return pass;
       const r = await webSearchImpl({ query, count });
       if (!r.ok) {
         if (r.reason === "not_configured") {
@@ -2054,19 +2058,40 @@ export function createProjectServer(dbPath, options = {}) {
 
   // --- Resources ---
 
-  server.resource("projects", "projects://list", async (uri) => {
+  // A resource read carries the same `extra` a tool call does (the SDK hands the request's
+  // `_meta` and headers to both), so the one share gate decides it too: the actor is the
+  // construction-time base actor, narrowed by whatever the read claims. A read a bot may not make
+  // answers with an empty list rather than an error: a resource result has no `isError`.
+  const resourceJson = (uri, value) => ({
+    contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(value, null, 2) }],
+  });
+
+  server.resource("projects", "projects://list", async (uri, extra) => {
+    // The same decision crow_list_projects makes: the owner and an unidentified caller keep the
+    // full rows; a bot sees its home project plus the projects it holds a live, non-suspended
+    // share of, by id and name only; an unverified bot sees nothing.
+    const gate = shareGate("crow_list_projects", extra);
+    const pass = await gate.check(null);
+    if (pass.isError) return resourceJson(uri, []);
+    const scope = await gate.readScope();
+    if (scope) {
+      const reach = await reachableProjects(gate.actor, scope.homeProjectId);
+      if (reach.size === 0) return resourceJson(uri, []);
+      const ids = [...reach.keys()];
+      const { rows: reachable } = await db.execute({
+        sql: `SELECT id, name FROM project_spaces
+               WHERE id IN (${ids.map(() => "?").join(", ")})
+                 AND (type IS NULL OR type != 'learner_profile')
+                 AND archived_at IS NULL AND (status IS NULL OR status != 'archived')
+               ORDER BY updated_at DESC`,
+        args: ids,
+      });
+      return resourceJson(uri, reachable.map((r) => ({ id: Number(r.id), name: String(r.name) })));
+    }
     const { rows: projects } = await db.execute(
       "SELECT id, name, type, status, description FROM project_spaces WHERE (type IS NULL OR type != 'learner_profile') AND archived_at IS NULL AND (status IS NULL OR status != 'archived') ORDER BY updated_at DESC"
     );
-    return {
-      contents: [
-        {
-          uri: uri.href,
-          mimeType: "application/json",
-          text: JSON.stringify(projects, null, 2),
-        },
-      ],
-    };
+    return resourceJson(uri, projects);
   });
 
   // --- Project Space tools (Phase 1, M2: 2026-05-26) ---

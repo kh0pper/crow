@@ -1606,7 +1606,12 @@ export function createMemoryServer(dbPath, options = {}) {
       body: z.string().max(5000).optional().describe("Longer description"),
       metadata: jsonObject().optional().describe("Structured data as an object of JSON values (stored as JSON)"),
     },
-    async ({ title, body, type, priority, action_url, metadata, expires_in_minutes }) => {
+    async ({ title, body, type, priority, action_url, metadata, expires_in_minutes }, extra) => {
+      // Sending a notification touches no project-scoped row, so the gate allows normal bots; but
+      // an unverified bot (the engine's marker with no bot identity) is refused everything, this
+      // message to the operator included.
+      const pass = await shareGate("crow_create_notification", extra).check(null, {});
+      if (pass.isError) return pass;
       const result = await createNotification(db, {
         title,
         body,
@@ -1730,17 +1735,40 @@ export function createMemoryServer(dbPath, options = {}) {
 
   // --- Resources ---
 
-  server.resource("crow-context", "crow://context", async (uri) => {
-    const markdown = await generateCrowContext(db, { includeDynamic: true, platform: "generic" });
-    return {
-      contents: [{ uri: uri.href, mimeType: "text/markdown", text: markdown }],
-    };
+  // A resource read carries the same `extra` a tool call does (the SDK hands the request's
+  // `_meta` and headers to both), so the one share gate decides these too: the actor is the
+  // construction-time base actor, narrowed by whatever the read claims. A read nothing may see
+  // answers with empty content rather than an error: a resource result has no `isError`.
+  const emptyResource = (uri, mimeType, text = "") => ({ contents: [{ uri: uri.href, mimeType, text }] });
+
+  server.resource("crow-context", "crow://context", async (uri, extra) => {
+    // The same decision crow_get_context makes: a bot reads its home project's merge and no
+    // dynamic block (the instance-wide stats and project names in it are the operator's), and a
+    // bot with no home project or no identity reads nothing.
+    const gate = shareGate("crow_get_context", extra);
+    const pass = await gate.check(null);
+    const boundByShares = (await gate.readScope()) != null;
+    if (pass.isError) return emptyResource(uri, "text/markdown");
+    const markdown = await generateCrowContext(db, {
+      includeDynamic: boundByShares ? false : true,
+      platform: "generic",
+      projectId: pass.projectId ?? null,
+    });
+    return { contents: [{ uri: uri.href, mimeType: "text/markdown", text: markdown }] };
   });
 
-  server.resource("memory-categories", "memory://categories", async (uri) => {
-    const { rows: categories } = await db.execute(
-      "SELECT DISTINCT category, COUNT(*) as count FROM memories GROUP BY category ORDER BY count DESC"
-    );
+  server.resource("memory-categories", "memory://categories", async (uri, extra) => {
+    // A bot counts its read scope only (its home project; project-less rows are the owner's).
+    const gate = shareGate("crow_list_memories", extra);
+    const pass = await gate.check(null);
+    if (pass.isError) return emptyResource(uri, "application/json", "[]");
+    const scope = await gate.readScope();
+    const predicate = scopePredicate(scope, { column: "project_id" });
+    const where = scope == null ? "" : ` WHERE 1 = 1${predicate.sql}`;
+    const { rows: categories } = await db.execute({
+      sql: `SELECT DISTINCT category, COUNT(*) as count FROM memories${where} GROUP BY category ORDER BY count DESC`,
+      args: predicate.args,
+    });
     return {
       contents: [
         {
