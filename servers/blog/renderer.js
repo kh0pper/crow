@@ -144,9 +144,7 @@ function tailHtml(tail) {
 /**
  * Where renderMarkdown splits a document longer than OWNER_MD_MAX_INPUT: the end
  * of the last blank line at or before the cap that is NOT inside a fenced code
- * block, else the last newline before the cap, else the cap itself (stepped back
- * one unit when the cap would split a UTF-16 surrogate pair — a single-line
- * document of emoji has no newline at all, and half a pair is not a character).
+ * block, else the last newline before the cap, else the cap itself.
  *
  * "\n\n" is a block boundary to marked, so the head usually parses cleanly
  * instead of starting (or ending) mid-paragraph, and a fence is skipped as a cut
@@ -157,7 +155,23 @@ function tailHtml(tail) {
  * A fence is opened by ``` or ~~~ with at most three spaces of indentation
  * (four would be indented code) and closed by a line of the same character, at
  * least as long, with nothing but spaces after it — CommonMark's rule, which is
- * what marked applies.
+ * what marked applies. A BACKTICK opener's info string may not itself contain a
+ * backtick, so "```inline``` is how you write it" is a paragraph with inline
+ * code, not a fence: read as one it never closes, every later blank line is
+ * skipped and the cut collapses to a few characters (the head of a 200 KB
+ * document became 7).
+ *
+ * That state machine is an approximation of marked, so a cut is never allowed to
+ * cost the head more than half the cap: when the last usable blank line sits
+ * below that (the signature of a misjudged fence) the cut falls on the last
+ * LINE BREAK before the cap instead.
+ *
+ * The cut is never past the cap — renderOwnerHead's promise — and never inside a
+ * UTF-16 surrogate pair: a blank line only counts when it ENDS at or before the
+ * cap (a run of 7 MB of spaces that starts just under the cap is not a cut
+ * point), and the final index steps back one unit when it would split a pair (a
+ * single-line document of emoji has no line break at all, and half a pair is
+ * not a character).
  * @param {string} src line-ending-normalised document
  * @param {number} [cap]
  * @returns {number} the cut index: head is `src.slice(0, cut)`, tail `src.slice(cut)`
@@ -178,25 +192,43 @@ export function ownerMarkdownCut(src, cap = OWNER_MD_MAX_INPUT) {
       if (close && close[1][0] === fence.char && close[1].length >= fence.length) fence = null;
     } else if (/^[ \t]*$/.test(line)) {
       // A blank line: the cut is its end, so the head keeps the "\n\n" that
-      // tells marked the block is over.
-      lastBlank = end + 1;
+      // tells marked the block is over. Only one that ENDS at or before the cap
+      // is a cut point — a whitespace line that starts just under the cap and
+      // runs on for megabytes ends megabytes past it, and the head would then be
+      // far over OWNER_MD_MAX_INPUT.
+      if (end + 1 <= limit) lastBlank = end + 1;
     } else {
-      const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+      // A backtick fence's info string may not contain a backtick (CommonMark),
+      // so "```inline```" opens nothing. The lookahead is what keeps a
+      // misjudged opener from swallowing the document (see above).
+      const open = /^ {0,3}(`{3,}(?=[^`\n]*$)|~{3,})/.exec(line);
       if (open) fence = { char: open[1][0], length: open[1].length };
     }
     if (nl === -1) break;
     start = end + 1;
   }
-  if (lastBlank > 0) return lastBlank;
-  const nl = src.lastIndexOf("\n", limit - 1);
-  if (nl >= 0) return nl + 1;
-  // No line break to cut at, so the cut is the cap itself — and a cap inside a
-  // UTF-16 surrogate pair would cut one character in half: the head would end
-  // with a lone high surrogate and the tail would begin with its low half (each
-  // renders as U+FFFD, and the split is no longer the characters the author
-  // wrote). Step back one unit instead, so the head is at most one character
-  // shorter and both halves still meet on a character boundary.
-  return limit > 0 && isHighSurrogate(src.charCodeAt(limit - 1)) ? limit - 1 : limit;
+  // The last line break before the cap; a blank line counted above always has
+  // one at lastBlank - 1, so this is never before the blank line's newline.
+  const lineBreak = src.lastIndexOf("\n", limit - 1);
+  let cut;
+  if (lastBlank > 0 && (lastBlank * 2 >= limit || lineBreak + 1 <= lastBlank)) {
+    cut = lastBlank;
+  } else if (lineBreak >= 0) {
+    // No blank line before the cap at all, or only one in the first half of it
+    // (a fence that was not a fence): cut on a plain line break, so the head is
+    // never collapsed to a few characters.
+    cut = lineBreak + 1;
+  } else {
+    cut = lastBlank > 0 ? lastBlank : limit;
+  }
+  // The cap is a hard bound (renderOwnerHead hands marked nothing longer), and a
+  // cut inside a UTF-16 surrogate pair would cut one character in half: the head
+  // would end with a lone high surrogate and the tail begin with its low half
+  // (each renders as U+FFFD, and the split is no longer the characters the
+  // author wrote). Step back one unit instead, so the halves stay at most one
+  // character shorter and still meet on a character boundary.
+  const safe = Math.min(cut, limit);
+  return safe > 0 && isHighSurrogate(src.charCodeAt(safe - 1)) ? safe - 1 : safe;
 }
 
 /** True for the first half of a UTF-16 surrogate pair (U+D800–U+DBFF). */

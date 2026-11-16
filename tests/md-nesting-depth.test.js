@@ -42,9 +42,12 @@
 //     and a LONGER document is not dropped: the head is rendered, a notice
 //     follows, and the WHOLE remainder comes out as escaped plain text under a
 //     <pre> — the head's source plus the tail's text is the whole document, the
-//     cut never lands inside a fenced code block, and a cut that falls AT the
-//     cap never splits a UTF-16 surrogate pair (one emoji in half is not a
-//     character, and both halves would render as U+FFFD);
+//     cut is never PAST the cap, it never lands inside a fenced code block while
+//     a blank line in the cap's second half is available (a fence that was not a
+//     fence — "```inline```" is inline code — may cost the head at most half the
+//     cap, then a line break is the cut), and a cut that falls AT the cap never
+//     splits a UTF-16 surrogate pair (one emoji in half is not a character, and
+//     both halves would render as U+FFFD);
 //   - the owner path's parse-failure fallback (escaped text, HTML comments
 //     stripped) is still what a < cap document gets when marked throws;
 //   - the file viewer reads a file up to 8 MiB and refuses only past that (it
@@ -633,6 +636,82 @@ test("a cut at the cap never splits a UTF-16 surrogate pair", (t) => {
   assert.ok(!isLow(shifted.charCodeAt(shiftedCut)), "as does the tail");
   assert.ok(isHigh(shifted.charCodeAt(shiftedCut)) && isLow(shifted.charCodeAt(shiftedCut + 1)),
     "the tail begins with a whole pair: " + shifted.charCodeAt(shiftedCut).toString(16));
+});
+
+test("inline backticks do not open a fence, so the head is not collapsed", () => {
+  // A backtick fence's info string may not itself contain a backtick
+  // (CommonMark), so this line is a paragraph with inline code in it, not an
+  // opener. Read as one — the bug — the "fence" never closes, every later blank
+  // line is skipped, and the cut lands 7 characters into a 200 KB document: the
+  // whole thing becomes plain text.
+  const paragraphs = rep("A paragraph of ordinary prose, long enough to be worth wrapping.\n\n", 200 * 1024);
+  const src = "intro\n\n```inline``` is how you write it\n\n" + paragraphs;
+  assert.ok(src.length > 200 * 1024, `the fixture is a long document (${src.length})`);
+
+  const cut = ownerMarkdownCut(src);
+  assert.ok(cut > 100_000, `the head keeps most of the cap (${cut} of ${OWNER_MD_MAX_INPUT})`);
+  assert.ok(cut <= OWNER_MD_MAX_INPUT, `cut ${cut} is inside the cap`);
+  assert.equal(src[cut - 1], "\n", "the cut is at a line boundary");
+
+  const { text } = tailOf(renderMarkdown(src));
+  assert.equal(text, src.slice(cut), "the tail is exactly the rest of the document");
+  assert.equal(cut + text.length, src.length, "head + tail is the whole input");
+
+  // The fence state machine can still be wrong about something marked knows
+  // better, so a misjudged fence may cost the head at most HALF the cap: with
+  // only one blank line — right at the top — and none after it, the cut falls on
+  // the last line break before the cap instead of at character 7.
+  const noBlanks = "intro\n\n```inline``` is how you write it\n" + rep("a line of prose\n", 200 * 1024);
+  assert.ok(!noBlanks.slice(7).includes("\n\n"), "the only blank line is the one at the top");
+  const fallbackCut = ownerMarkdownCut(noBlanks);
+  assert.ok(fallbackCut > 100_000, `the line-break fallback keeps the head (${fallbackCut})`);
+  assert.ok(fallbackCut <= OWNER_MD_MAX_INPUT, `and stays inside the cap (${fallbackCut})`);
+  assert.equal(noBlanks[fallbackCut - 1], "\n", "the fallback cut is still a line boundary");
+  const fallback = tailOf(renderMarkdown(noBlanks));
+  assert.equal(fallback.text, noBlanks.slice(fallbackCut), "the fallback tail is the whole remainder");
+  assert.equal(fallbackCut + fallback.text.length, noBlanks.length, "head + tail is the whole input");
+});
+
+test("a whitespace line that ends past the cap is not a cut point", () => {
+  // The cut is the end of a blank line. A run of spaces that STARTS just under
+  // the cap and runs on for 7 MB ended 7 MB past it, so the "head" handed to
+  // marked was 7.1 MB — far over the cap the whole split exists for.
+  const unit = "Filler paragraph of ordinary prose for the cap test.\n\n";
+  const lead = unit.repeat(Math.floor((OWNER_MD_MAX_INPUT - 20) / unit.length));
+  const spaces = " ".repeat(7 * 1024 * 1024);
+  const src = lead + spaces;
+  assert.ok(lead.length < OWNER_MD_MAX_INPUT && lead.length > OWNER_MD_MAX_INPUT / 2,
+    `the whitespace line starts just under the cap (${lead.length})`);
+  assert.equal(src.indexOf(spaces), lead.length, "and the whitespace line is the last line");
+  assert.ok(!lead.includes("```") && !lead.includes("~~~"), "no fence in the lead");
+
+  const cut = ownerMarkdownCut(src);
+  assert.ok(cut > 0 && cut <= OWNER_MD_MAX_INPUT, `cut ${cut} is inside the cap`);
+  assert.equal(cut, lead.length, "the cut is the last blank line that ends before the cap");
+
+  const { text } = tailOf(renderMarkdown(src));
+  assert.equal(text, src.slice(cut), "the tail is exactly the rest of the document");
+  assert.equal(cut + text.length, src.length, "head + tail is the whole input");
+});
+
+test("a real fence opened just under the cap is still never split", () => {
+  const unit = "Ordinary prose paragraph for the fence test.\n\n";
+  const lead = unit.repeat(Math.floor((OWNER_MD_MAX_INPUT - 200) / unit.length));
+  const openAt = lead.length;
+  assert.ok(openAt < OWNER_MD_MAX_INPUT && openAt > OWNER_MD_MAX_INPUT / 2,
+    `the fence opens just under the cap (${openAt})`);
+  const src = lead + "```text\n" + rep("straddling code line\n", 40 * 1024) + "```\n\n" + "after the fence\n\nEND\n";
+
+  const cut = ownerMarkdownCut(src);
+  assert.equal(cut, openAt, "the cut lands on the blank line before the fence");
+  assert.ok(cut <= OWNER_MD_MAX_INPUT, `cut ${cut} is inside the cap`);
+
+  const { head, text } = tailOf(renderMarkdown(src));
+  assert.ok(!head.includes("straddling code line"), "no fence body in the head");
+  assert.ok(!head.includes("```"), "and no unbalanced fence marker either: " + head.slice(-200));
+  assert.ok(text.startsWith("```text\n"), "the whole fence came out as text: " + text.slice(0, 40));
+  assert.equal(text, src.slice(cut), "the tail is exactly the rest of the document");
+  assert.equal(cut + text.length, src.length, "head + tail is the whole input");
 });
 
 test("a document under the cap is rendered exactly as before (no notice, no tail)", () => {
