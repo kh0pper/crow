@@ -201,6 +201,15 @@
  * with nobody listening nothing is recorded and nothing is posted. A block with
  * no trigger posts nothing.
  *
+ * A pad's LIGHT is not a hit: it stays on while the pad sounds and goes off when
+ * the last of its voices is gone. A voice ends in a dozen places (its range, its
+ * envelope, a choke fade, a steal, the song-wide cap, a track torn down by a new
+ * song), so the light is not reported where a voice ends — it is read once per
+ * block, after the block rendered, from the track's 16 voices and its fade
+ * tails, and posted in the same message as the block's hits as
+ * `{frame, track_id, bank_id, index, kind: "state", state}`. `state` is one of
+ * `pad-events.js`'s four codes: off, on, loop or held (see `scanPadStates`).
+ *
  * ## Motion
  *
  * A pattern's motion lanes (`sequencer.js`, "Motion") sweep one of a pad's
@@ -837,6 +846,25 @@
    */
   const PAD_EVENT_HIT = 0;
   const PAD_EVENT_STATE = 1;
+
+  /**
+   * `pad-events.js`'s state codes, duplicated here for the same reason as the
+   * kinds: a scope composed without that file still posts the code the page
+   * reads. `pad-events.js` owns the values, and off (its `STATE_OFF`) is 0 — the
+   * absence of any lit state, which is what an all-zero packed bank means. A
+   * pad's state is packed in two bits, so these values ARE its priority: held
+   * beats looping beats sounding, and a pad with more than one voice takes the
+   * highest code any of them holds.
+   */
+  const PAD_STATE_ON = 1;
+  const PAD_STATE_LOOP = 2;
+  const PAD_STATE_HELD = 3;
+
+  /**
+   * How many pads one bank holds: the 16 a bank packs into its `Int32` light
+   * state, two bits each.
+   */
+  const PADS_PER_BANK = 16;
 
   /**
    * How many bytes of decoded samples may be loaded at once when the client
@@ -2156,6 +2184,18 @@
        * a page that listens to nothing pays nothing.
        */
       this.padEventsOn = false;
+
+      /**
+       * The pad lights' state, one entry per bank: `codes[0]` is the packed
+       * state the last block reported and `codes[1]` the one this block holds,
+       * two bits per pad (`PAD_STATE_*`). The arrays are allocated in `readKit`
+       * from the song's own banks and never inside a block, so a block's scan
+       * allocates nothing. A bank the song dropped keeps its entry in
+       * `retiredPadBanks` until its packed state reads off, so the page is told
+       * about the light going out.
+       */
+      this.padStates = new Map();
+      this.retiredPadBanks = [];
 
       /**
        * The performance-effects bus and the looper (`perf-fx.js`): live state
@@ -3763,6 +3803,106 @@
     }
 
     /**
+     * Read every sampler pad's light state once, after a block rendered, and
+     * record one `state` event for each pad whose state changed.
+     *
+     * A voice ends in many places and none of them can say what the PAD's light
+     * should read afterwards: a pad with two voices (a loop and a press, a
+     * re-trigger over a tail) is dark only when the last of them is gone. So the
+     * state is not reported where a voice ends — it is read here, from the
+     * voices and the fade tails themselves, and compared with what the last
+     * block reported. That also catches a cut that happens off the render path
+     * (a choke fade, the song-wide cap, a track torn down by `setSong`).
+     *
+     * The state of one pad is two bits: off, sounding, looping or held, the
+     * highest one any of its sounding voices says (a held voice outranks a
+     * looping one, which outranks a plain sounding one). A bank's 16 pads are
+     * packed into the `Int32` pair `readKit` allocated, so a block reads 16
+     * voices plus two tails per bank and allocates nothing at all.
+     *
+     * The frame a state event carries is the block's first frame: the change is
+     * somewhere inside it and the light is drawn once per block anyway.
+     * @returns {void}
+     */
+    scanPadStates() {
+      if (!this.padEventsOn || this.padEvents === null) return;
+      const frame = this.contextOffset() + this.frame;
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        const banks = record.padBanks;
+        if (!banks || banks.length === 0) continue;
+        for (let at = 0; at < banks.length; at += 1) banks[at].codes[1] = 0;
+        this.collectPadStates(record.voices, banks);
+        if (record.tails) this.collectPadStates(record.tails, banks);
+        for (let at = 0; at < banks.length; at += 1) this.reportBankState(banks[at], frame);
+      }
+      // A bank the song no longer has nothing sounds on any more: its light goes
+      // out here, and its entry is dropped once the page has that off.
+      const retired = this.retiredPadBanks;
+      if (retired.length === 0) return;
+      let kept = 0;
+      for (let at = 0; at < retired.length; at += 1) {
+        const bank = retired[at];
+        bank.codes[1] = 0;
+        this.reportBankState(bank, frame);
+        if (bank.codes[0] !== 0 || bank.codes[1] !== 0) {
+          retired[kept] = bank;
+          kept += 1;
+        }
+      }
+      retired.length = kept;
+    }
+
+    /**
+     * Fold one list of a sampler record's voices into its banks' scratch state:
+     * each sounding voice raises its pad's two bits to its own code.
+     * @param {object[]} voices the record's voices or its fade tails
+     * @param {object[]} banks the record's bank entries
+     * @returns {void}
+     */
+    collectPadStates(voices, banks) {
+      for (const voice of voices) {
+        if (!voice.sounding) continue;
+        const index = voice.light_index === undefined ? voice.index : voice.light_index;
+        if (!(index >= 0 && index < PADS_PER_BANK)) continue;
+        let bank = null;
+        for (let at = 0; at < banks.length; at += 1) {
+          if (banks[at].bankId === voice.bankId) {
+            bank = banks[at];
+            break;
+          }
+        }
+        if (bank === null) continue;
+        const state = voice.held === true ? PAD_STATE_HELD : voice.looping === true ? PAD_STATE_LOOP : PAD_STATE_ON;
+        const shift = index * 2;
+        const packed = bank.codes[1];
+        if (state <= ((packed >> shift) & 3)) continue;
+        bank.codes[1] = (packed & ~(3 << shift)) | (state << shift);
+      }
+    }
+
+    /**
+     * Compare one bank's packed state with the one its last block reported and
+     * record one event per pad that changed, then keep this block's state.
+     * @param {object} bank a bank entry
+     * @param {number} frame the block's first frame, in the context's clock
+     * @returns {void}
+     */
+    reportBankState(bank, frame) {
+      const codes = bank.codes;
+      const before = codes[0];
+      const after = codes[1];
+      if (before === after) return;
+      codes[0] = after;
+      for (let index = 0; index < PADS_PER_BANK; index += 1) {
+        const shift = index * 2;
+        const state = (after >> shift) & 3;
+        if (((before >> shift) & 3) === state) continue;
+        this.pushPadEvent(frame, bank.trackId, bank.bankId, index, PAD_EVENT_STATE, 0, state);
+      }
+    }
+
+    /**
      * Turn a tap on or off: `"master"` for the mix, or a track's id for that
      * track's own output. Off is the default and costs nothing.
      * @param {unknown} target
@@ -3855,6 +3995,7 @@
       this.pads = new Map();
       this.slices = new Map();
       this.sampleRates = new Map();
+      this.readPadStates(snap);
 
       const pads = snap.pads && typeof snap.pads === "object" ? snap.pads : {};
       for (const key of Object.keys(pads)) {
@@ -3871,6 +4012,77 @@
         const sample = samples[key];
         const rate = Number(sample && sample.rate);
         this.sampleRates.set(key, Number.isFinite(rate) && rate > 0 ? rate : sampleRate);
+      }
+    }
+
+    /**
+     * Read the song's banks into the pad lights' per-bank state: one entry per
+     * bank, with the packed two-bit state of its 16 pads in an `Int32` pair.
+     *
+     * The arrays are made HERE, off the audio thread, and the entry for a bank
+     * the song still has is kept — with the state it last reported — so a song
+     * edit does not read as every sounding pad starting again. A bank the song
+     * dropped cannot be read from any more, so its entry is kept in
+     * `retiredPadBanks` until its light is off and the page has been told.
+     * @param {object} snapshot the song as `server/doc.js`'s `snapshot()` returns it
+     * @returns {void}
+     */
+    readPadStates(snapshot) {
+      const snap = snapshot && typeof snapshot === "object" ? snapshot : {};
+      const banks = snap.banks && typeof snap.banks === "object" ? snap.banks : {};
+      const previous = this.padStates;
+      const next = new Map();
+      for (const key of Object.keys(banks)) {
+        const bank = banks[key];
+        if (!bank || typeof bank !== "object") continue;
+        const trackId = asId(bank.track_id);
+        const bankId = asId(bank.id);
+        if (trackId === "" || bankId === "") continue;
+        // A bank the song still has keeps the entry — and so the state it last
+        // reported — so an edit does not read as every sounding pad starting
+        // again. A bank that comes back after a song dropped it takes its own
+        // retired entry over, so its light is never turned on and off for one
+        // state.
+        const kept = previous.get(key) || this.retiredPadBank(key);
+        next.set(key, kept || { key: key, trackId: trackId, bankId: bankId, codes: new Int32Array(2) });
+      }
+      for (const [key, bank] of previous) {
+        if (next.has(key)) continue;
+        if (bank.codes[0] !== 0 || bank.codes[1] !== 0) this.retiredPadBanks.push(bank);
+      }
+      this.padStates = next;
+    }
+
+    /**
+     * Take one bank's retired entry back, so a bank the song dropped and then
+     * re-added is the same light throughout.
+     * @param {string} key the song's own `<track_id>/<bank_id>` key
+     * @returns {object|null} the entry, or null when that bank is not retired
+     */
+    retiredPadBank(key) {
+      const retired = this.retiredPadBanks;
+      for (let at = 0; at < retired.length; at += 1) {
+        if (retired[at].key !== key) continue;
+        const bank = retired[at];
+        // Order means nothing here: the last entry takes the free slot.
+        retired[at] = retired[retired.length - 1];
+        retired.length -= 1;
+        return bank;
+      }
+      return null;
+    }
+
+    /**
+     * Point one sampler track's record at the bank entries its pads live in,
+     * refilling the record's own array rather than making a new one.
+     * @param {object} record a sampler track's record
+     * @returns {void}
+     */
+    readPadBanks(record) {
+      const list = record.padBanks;
+      list.length = 0;
+      for (const bank of this.padStates.values()) {
+        if (bank.trackId === record.track_id) list.push(bank);
       }
     }
 
@@ -3946,6 +4158,10 @@
         // The font host assigns channels in snapshot order, so the song's own
         // track order is collected here, as the song arrived.
         if (font) fontTracks.push(fontSpecOf(track));
+        // A sampler track's banks are the ones its pad lights are read from: the
+        // list is the same array on every song, refilled here, so a block never
+        // builds one.
+        if (sampler) this.readPadBanks(record);
         if (record.failed) continue;
         if (!record.audio && !record.sampler && !record.font && !record.engine) continue;
         this.applyMix(record, track, anySolo);
@@ -4026,6 +4242,8 @@
         voices: voices,
         /** Stolen voices ringing out their 64-frame fade; empty until one is needed. */
         tails: [],
+        /** This track's bank light entries, filled in by `syncSlots`. */
+        padBanks: [],
       };
     }
 
@@ -6739,6 +6957,11 @@
         cursor += frames;
       }
 
+      // The pads' lights are read once, from the voices and the fade tails, on
+      // this block's first frame: every place a voice can end is covered at
+      // once, and a page that is not listening has nothing to read (the scan
+      // returns before it walks anything).
+      this.scanPadStates();
       this.frame += count;
       // A font that failed while rendering was dropped by its host mid-run; it is
       // reported once here, after the block, and its tracks stay silent.

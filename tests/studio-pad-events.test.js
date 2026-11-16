@@ -119,6 +119,40 @@ test("a state record carries its state code and no velocity", () => {
   });
 });
 
+test("the four state codes are off, on, loop and held, in that priority", () => {
+  // The processor packs a pad's state in two bits and resolves a pad with more
+  // than one voice by the HIGHEST code, so the order of these values is the
+  // rule: held beats loop beats sounding beats off.
+  assert.deepEqual(
+    [StudioPadEvents.STATE_OFF, StudioPadEvents.STATE_ON, StudioPadEvents.STATE_LOOP, StudioPadEvents.STATE_HELD],
+    [0, 1, 2, 3],
+    "two bits hold these four codes, and their order is their priority",
+  );
+
+  // A ring carries each of them through untouched: the page reads the code the
+  // scan packed, not a name the worklet had to build.
+  const ring = StudioPadEvents.create();
+  const codes = [
+    StudioPadEvents.STATE_OFF,
+    StudioPadEvents.STATE_ON,
+    StudioPadEvents.STATE_LOOP,
+    StudioPadEvents.STATE_HELD,
+  ];
+  for (let at = 0; at < codes.length; at += 1) {
+    ring.push(128 * at, "track-1", BANK, at, StudioPadEvents.KIND_STATE, 0, codes[at]);
+  }
+  assert.deepEqual(
+    Array.from(ring.drain(), (event) => [event.index, event.state]),
+    [
+      [0, 0],
+      [1, 1],
+      [2, 2],
+      [3, 3],
+    ],
+    "every state code survives the ring as it was pushed",
+  );
+});
+
 test("the file evaluates as a classic script and as require()", async () => {
   // The way the worklet gets it: one module, no `module`, no imports.
   const vm = await import("node:vm");
@@ -135,6 +169,10 @@ test("the file evaluates as a classic script and as require()", async () => {
   assert.equal(fromScript.RING_SIZE, StudioPadEvents.RING_SIZE);
   assert.equal(fromScript.KIND_HIT, StudioPadEvents.KIND_HIT);
   assert.equal(fromScript.KIND_STATE, StudioPadEvents.KIND_STATE);
+  assert.equal(fromScript.STATE_OFF, StudioPadEvents.STATE_OFF);
+  assert.equal(fromScript.STATE_ON, StudioPadEvents.STATE_ON);
+  assert.equal(fromScript.STATE_LOOP, StudioPadEvents.STATE_LOOP);
+  assert.equal(fromScript.STATE_HELD, StudioPadEvents.STATE_HELD);
 
   // And both copies behave the same, so a test's ring is the worklet's ring.
   // (Compared field by field: a `vm` scope's objects have that scope's

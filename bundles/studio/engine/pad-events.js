@@ -32,7 +32,8 @@
  *   the message happened to arrive in.
  * - `kind` is `"hit"` (a voice started; `v` is its EFFECTIVE velocity, 1..127 —
  *   the one the voice's own gain was worked out from) or `"state"` (the pad's
- *   stored state changed; `state` is that code).
+ *   stored state changed; `state` is that code, one of `STATE_OFF`,
+ *   `STATE_ON`, `STATE_LOOP` or `STATE_HELD`).
  *
  * It is a classic script (no `import`/`export`): it assigns
  * `globalThis.StudioPadEvents` for the worklet scope and `module.exports` when a
@@ -50,6 +51,17 @@
   /** The kinds a record can hold, as the numbers `push` is given. */
   const KIND_HIT = 0;
   const KIND_STATE = 1;
+
+  /**
+   * A pad's state, as the processor scans it out of its voices: off, sounding,
+   * looping or held. The order is the priority a pad with more than one voice
+   * resolves by — the highest one wins — so a held pad never reads as merely
+   * sounding while its held voice is there.
+   */
+  const STATE_OFF = 0;
+  const STATE_ON = 1;
+  const STATE_LOOP = 2;
+  const STATE_HELD = 3;
 
   /**
    * The kind a code stands for: anything but the state code is a hit, so a
@@ -97,7 +109,8 @@
      *   pads move it off the pad's own index)
      * @param {number} kindCode `KIND_HIT` or `KIND_STATE`
      * @param {number} v the effective velocity, 1..127 (0 for a state)
-     * @param {number} stateCode the pad's state (0 for a hit)
+     * @param {number} stateCode the pad's state, one of the `STATE_*` codes (0
+     *   for a hit)
      * @returns {void}
      */
     function push(frame, trackId, bankId, index, kindCode, v, stateCode) {
@@ -170,6 +183,10 @@
     RING_SIZE: RING_SIZE,
     KIND_HIT: KIND_HIT,
     KIND_STATE: KIND_STATE,
+    STATE_OFF: STATE_OFF,
+    STATE_ON: STATE_ON,
+    STATE_LOOP: STATE_LOOP,
+    STATE_HELD: STATE_HELD,
   };
 
   if (typeof globalThis !== "undefined") globalThis.StudioPadEvents = api;
