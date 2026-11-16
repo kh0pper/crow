@@ -847,9 +847,14 @@ test("recall filters summary memories by the asking bot's model rank; an unknown
   await mk("lan/big", "otherbox");
   await mk(CLOUD, "cloudbox");
   run("INSERT INTO memories (content, category, importance, source) VALUES ('ZEBRAGATE ordinary note', 'general', 5, 'manual')");
-  run("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('localbot', 'L', ?, 1)", JSON.stringify({ models: { default: LOCAL_SESSION } }));
-  run("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('lanbot', 'N', ?, 1)", JSON.stringify({ models: { default: "lan/big" } }));
-  run("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('cloudbot', 'C', ?, 1)", JSON.stringify({ models: { default: CLOUD } }));
+  // A bot reads only its home project's rows, so the fixtures are filed into one project and every
+  // asking bot is given that same project as its home.
+  const shareHome = Number(run("INSERT INTO project_spaces (slug, name) VALUES ('summary-home', 'Summary home')").lastInsertRowid);
+  run("UPDATE memories SET project_id = ?", shareHome);
+  run("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('localbot', 'L', ?, 1, ?)", JSON.stringify({ models: { default: LOCAL_SESSION } }), shareHome);
+  run("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('lanbot', 'N', ?, 1, ?)", JSON.stringify({ models: { default: "lan/big" } }), shareHome);
+  run("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('cloudbot', 'C', ?, 1, ?)", JSON.stringify({ models: { default: CLOUD } }), shareHome);
+  run("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('ghostbot', 'G', '{}', 1, ?)", shareHome);
   const where = (k) => ({ [LOCAL_SESSION]: "here", "lan/big": "other_box", [CLOUD]: "cloud" }[k] || "unproven");
   const { askerRank } = await import("../servers/memory/summary-recall.js");
   const asBot = (id) => ({ actor: { kind: "bot", id }, actorThread: null, summaryAskerRank: (actor) => withDb((db) => askerRank(db, actor, { where, resolveRole: async () => ({ key: null }) })) });
@@ -881,7 +886,7 @@ test("recall filters summary memories by the asking bot's model rank; an unknown
     try {
       const got = await c.call("crow_get_memory", { id: hereId });
       if (sees) assert.match(got, /herebox/, label + ": get");
-      else assert.equal(got, `{"error":"not_found","id":${hereId}}`, label + ": a gated summary is not found");
+      else assert.equal(got, "Error: Not found.", label + ": a gated summary is not found");
       assert.match(await c.call("crow_get_memory", { id: cloudId }), /cloudbox/, label + ": a cloud-rank summary is visible");
       const listed = await c.call("crow_list_memories", { limit: 100 });
       assert.equal(listed.includes("herebox"), sees, label + ": list");

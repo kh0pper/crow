@@ -258,8 +258,12 @@ test("bot routines are the operator's: a bot caller can't create one or change o
   assert.equal(made.isError, true);
   assert.match(made.text, /Only the operator can create a bot routine/);
   assert.equal(q("SELECT COUNT(*) AS n FROM schedules")[0].n, before, "nothing stored");
-  // A reminder from a bot is unchanged.
-  assert.equal((await asBot("crow_create_schedule", { task: "water the plants", cron_expression: "0 9 * * *" })).isError, false);
+  // A reminder from a bot is refused too: the schedules table has no project column, so nothing
+  // about a schedule can be scoped to the bot's own project.
+  const reminder = await asBot("crow_create_schedule", { task: "water the plants", cron_expression: "0 9 * * *" });
+  assert.equal(reminder.isError, true);
+  assert.match(reminder.text, /operator only/);
+  assert.equal(q("SELECT COUNT(*) AS n FROM schedules")[0].n, before, "a bot stores no schedule at all");
   // The operator's routine can't be re-targeted or switched by a bot.
   const id = idOf((await create({ task: "pipeline:botcron:alpha", cron_expression: "0 7 * * *" })).text);
   for (const args of [{ id, task: "pipeline:botcron:other-bot" }, { id, enabled: false }]) {
