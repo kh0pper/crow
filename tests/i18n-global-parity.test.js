@@ -110,6 +110,13 @@ const IDENTICAL_OK = new Set([
   "providers.preset.modelstudio",
   // Project services Task 14: a connection's child state (the plan's exact copy)
   "services.child.error", // "Error" is Spanish too
+  // For You: Move's day line (P13)
+  "forYou.movesLenOr", // English until the Spanish pass (P22)
+  "forYou.movesMinutesToday", // English until the Spanish pass (P22)
+  "forYou.movesWeek", // English until the Spanish pass (P22)
+  "forYou.slot.morning", // English until the Spanish pass (P22)
+  "forYou.slot.midday", // English until the Spanish pass (P22)
+  "forYou.slot.evening", // English until the Spanish pass (P22)
 ]);
 
 const keys = Object.keys(translations);

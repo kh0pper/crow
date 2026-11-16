@@ -12,6 +12,13 @@
  *     health: { energy, max },      // the bird's Health, energy of max
  *     steps: { today, goal },       // today's counted steps against the live goal
  *     streak: { days },             // consecutive qualifying local days
+ *     // The day's own cards, present only when the day was drawn (dayCards did
+ *     // not throw and challenges are not off):
+ *     slot: string | null,          // the day's Now slot
+ *     lengths: [10, 20, 30],        // the chunk lengths the card offers
+ *     slots: [{ slot, done }],      // one per NON-empty slot of the day, in order
+ *     minutesToday: number,         // whole active minutes filed under the day
+ *     week: { total },              // the week's balance so far
  *   }
  *
  * The challenge is today's pick, the same one Ramble's own panel shows: both surfaces call the
@@ -38,9 +45,14 @@
  */
 import { readPrefs, todayForSurface } from "./moves/today.js";
 import { dayCards } from "./moves/slots.js";
+import { MOVE_MIN_KIND } from "./moves/progress.js";
+import { weekState } from "./moves/week.js";
 import { streakState } from "./moves/streak.js";
 import { petState } from "./pet.js";
-import { stepsState } from "./steps.js";
+import { rowDelta, stepsState } from "./steps.js";
+
+/** The chunk lengths the card offers, shortest first. */
+const LENGTHS = Object.freeze([10, 20, 30]);
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
@@ -53,9 +65,13 @@ export async function forYouMoves(db, { now = Date.now(), weather = null, librar
   // The day's cards are drawn first (moves/slots.js dayCards), because that
   // draw is what mirrors the Now card into the one card `moves.today` carries —
   // the row todayForSurface reads back. A failure drawing them is logged and
-  // the card below is still assembled from the stored one.
+  // the card below is still assembled from the stored one. The draw's answer is
+  // kept for the day's own fields (slot, lengths, slots, minutesToday, week);
+  // an off day or a failed draw reports none of them at all.
+  let drawn = null;
   try {
-    await dayCards(db, { now, weather: dayWeather, emit, library });
+    const day = await dayCards(db, { now, weather: dayWeather, emit, library });
+    if (day && day.off !== true) drawn = day;
   } catch (err) {
     try { console.warn(`[ramble for-you] moves day cards unavailable: ${err?.message ?? err}`); } catch {}
   }
@@ -68,7 +84,7 @@ export async function forYouMoves(db, { now = Date.now(), weather = null, librar
   ]);
 
   const entry = today && !today.off ? today.entry : null;
-  return {
+  const out = {
     challenge: entry ? {
       day: String(today.day),
       title: String(entry.title || ""),
@@ -84,4 +100,29 @@ export async function forYouMoves(db, { now = Date.now(), weather = null, librar
     steps: { today: num(steps && steps.steps), goal: num(steps && steps.goal) },
     streak: { days: num(streak && streak.days) },
   };
+
+  // The day's own cards. Only a day that was drawn has them: an off day and a
+  // failed draw leave the answer above exactly as it always was, so an older
+  // reader of this module keeps rendering what it rendered before.
+  if (drawn) {
+    out.slot = typeof drawn.nowSlot === "string" ? drawn.nowSlot : null;
+    out.lengths = [...LENGTHS];
+    out.slots = (Array.isArray(drawn.slots) ? drawn.slots : [])
+      .filter((item) => item && item.empty !== true)
+      .map((item) => ({ slot: String(item.slot), done: item.done === true }));
+    // Each of the two reads stands on its own: one failing omits its own field
+    // and leaves the other, and the card, untouched.
+    try {
+      out.minutesToday = num(await rowDelta(db, MOVE_MIN_KIND, String(drawn.day)));
+    } catch (err) {
+      try { console.warn(`[ramble for-you] moves minutes unavailable: ${err?.message ?? err}`); } catch {}
+    }
+    try {
+      const week = await weekState(db, { now });
+      out.week = { total: num(week && week.total) };
+    } catch (err) {
+      try { console.warn(`[ramble for-you] moves week unavailable: ${err?.message ?? err}`); } catch {}
+    }
+  }
+  return out;
 }

@@ -8,6 +8,8 @@
  *   Show again (customize) -> POST /api/media/sources/:id/hidden {hidden:false}
  *   Done / Swap (Move) -> POST /api/ramble/moves/done {day} and /api/ramble/moves/swap, then the
  *     card is repainted from the JSON those routes return (textContent only, never HTML).
+ *   A length (Move) -> no request at all: one longer length is chosen for the Start link at a time
+ *     (pressing the chosen one again clears it), and a Done fills the Now slot's dot.
  *   Play (Listen) -> the shared player bar (window.crowPlayer.load; a briefing with ready shows is queued
  *     with them, crowPlayer.queue), as Media Hub plays; without the bar,
  *     the tile's own <audio> element (Play / Pause, one at a time). A podcast episode that starts
@@ -92,6 +94,22 @@ export function forYouClientJs() {
         : (card.getAttribute('data-fy-done-label') || doneBtn.textContent);
       doneBtn.disabled = !!c.done;
       if (c.day) doneBtn.setAttribute('data-day', String(c.day));
+    }
+    // A Done closes the Now slot, so its dot fills and its label gains the done wording the card
+    // was drawn with (the words come from the card, never from the response).
+    if (c.done) {
+      var nowSlot = card.getAttribute('data-fy-move-slot') || '';
+      var doneWords = card.getAttribute('data-fy-done-state') || '';
+      var dots = card.querySelectorAll('[data-fy-dot]');
+      for (var d = 0; d < dots.length; d++) {
+        if (dots[d].getAttribute('data-fy-dot') !== nowSlot) continue;
+        dots[d].setAttribute('data-done', '1');
+        dots[d].setAttribute('style', 'display:inline-block;width:10px;height:10px;border-radius:50%;vertical-align:middle;margin-right:3px;border:1px solid var(--crow-accent);background:var(--crow-accent)');
+        var words = dots[d].getAttribute('aria-label') || '';
+        if (doneWords && words.indexOf(doneWords) < 0) {
+          dots[d].setAttribute('aria-label', words ? words + ' · ' + doneWords : doneWords);
+        }
+      }
     }
   }
 
@@ -330,6 +348,24 @@ export function forYouClientJs() {
           unhide.disabled = false;
           unhide.textContent = root.getAttribute('data-fy-failed') || unhide.textContent;
         });
+      return;
+    }
+    // A length button is a choice the page keeps in the Start link: one at a time, and pressing the
+    // chosen one again goes back to the card's own length. Nothing is posted.
+    var lenBtn = t.closest('[data-fy-len]');
+    if (lenBtn) {
+      var lenCard = lenBtn.closest('[data-fy-move-card]');
+      if (!lenCard) return;
+      var wasOn = lenBtn.getAttribute('aria-pressed') === 'true';
+      var lenBtns = lenCard.querySelectorAll('[data-fy-len]');
+      for (var ln = 0; ln < lenBtns.length; ln++) lenBtns[ln].setAttribute('aria-pressed', 'false');
+      if (!wasOn) lenBtn.setAttribute('aria-pressed', 'true');
+      var startLink = lenCard.querySelector('[data-fy-move-start]');
+      var startBase = startLink ? (startLink.getAttribute('data-fy-start-base') || '') : '';
+      if (startLink && startBase) {
+        var picked = wasOn ? '' : String(lenBtn.getAttribute('data-fy-len') || '');
+        startLink.setAttribute('href', picked ? startBase + '&len=' + encodeURIComponent(picked) : startBase);
+      }
       return;
     }
     var mv = t.closest('[data-fy-move]');
