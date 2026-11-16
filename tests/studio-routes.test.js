@@ -12,7 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
@@ -20,9 +20,16 @@ import express, { Router } from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { AclError } from "../servers/shared/project-acl.js";
 import { GENERAL_LIMITER_SKIP_PREFIXES, generalLimiterSkip } from "../servers/gateway/middleware/rate-limit.js";
+import {
+  deleteLocalSetting,
+  readSetting,
+  setSettingsSyncManager,
+  writeSetting,
+} from "../servers/gateway/dashboard/settings/registry.js";
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb, ensureAgentToken } from "../bundles/studio/server/web.js";
+import studioPanel from "../bundles/studio/panel/studio.js";
 
 /** The project every song in these tests belongs to. */
 const PROJECT = 21;
@@ -121,12 +128,94 @@ function classifyPeer(req) {
   return { via: LOOPBACK.has(address) && !forwarded ? "local" : "remote" };
 }
 
+/** The instance-local setting key the operator's default layout template lives under. */
+const LAYOUT_TEMPLATE_KEY = "studio.layout_template";
+
+/** The instance id these tests pin: 32 hex characters, the shape the registry requires. */
+const INSTANCE_ID = "0123456789abcdef0123456789abcdef";
+
+/**
+ * The dashboard's settings tables, created as `scripts/init-db.js` creates them,
+ * for a scratch database that otherwise carries only the studio tables.
+ * @param {object} db
+ * @returns {Promise<void>}
+ */
+async function initSettingsTables(db) {
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS dashboard_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      lamport_ts INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS dashboard_settings_overrides (
+      key TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      lamport_ts INTEGER DEFAULT 0,
+      PRIMARY KEY (key, instance_id)
+    );
+  `);
+}
+
+/**
+ * The layout-template store the panel loader injects: the real settings registry
+ * over this test's database, with the three calls the panel loader builds (a
+ * local-scope read, write and clear of one key). The instance id is pinned to a
+ * scratch data dir for the length of the test, so the read and the write meet on
+ * the same rows and never near a real instance's settings.
+ * @param {import("node:test").TestContext} t
+ * @param {object} db
+ * @returns {{read: Function, write: Function, clear: Function}}
+ */
+function settingsTemplate(t, db) {
+  const dataDir = mkdtempSync(join(tmpdir(), "studio-settings-"));
+  writeFileSync(join(dataDir, "instance-id"), INSTANCE_ID);
+  const saved = { CROW_HOME: process.env.CROW_HOME, CROW_DATA_DIR: process.env.CROW_DATA_DIR };
+  process.env.CROW_HOME = join(dataDir, "home");
+  process.env.CROW_DATA_DIR = dataDir;
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  return {
+    read: () => readSetting(db, LAYOUT_TEMPLATE_KEY),
+    write: (template) => writeSetting(db, LAYOUT_TEMPLATE_KEY, String(template), { scope: "local" }),
+    clear: () => deleteLocalSetting(db, LAYOUT_TEMPLATE_KEY),
+  };
+}
+
+/**
+ * The dashboard's session check as the panel receives it: a request without the
+ * session cookie is refused 401 before any route runs. The gateway supplies the
+ * real one; this is its shape, for the one test that needs the check in front of
+ * the router (every other test hands the router a pass-through, because its
+ * callers are the ones a real check has already let through).
+ * @param {object} req
+ * @param {object} res
+ * @param {Function} next
+ */
+function sessionGate(req, res, next) {
+  if (cookieOf(req.headers.cookie, "crow_session") !== "good") {
+    return res.status(401).json({ ok: false, error: "unauthorized" });
+  }
+  return next();
+}
+
 /**
  * Boot a gateway-shaped server for one test.
  * @param {import("node:test").TestContext} t
- * @param {{allowNetwork?: boolean, botScope?: object}} [options]
+ * @param {{allowNetwork?: boolean, botScope?: object, settings?: boolean,
+ *          auth?: Function}} [options]
+ *   `settings: true` gives the web layer the operator's default layout template,
+ *   wired the way the panel loader wires it, over the dashboard's settings
+ *   tables on this test's own database. `auth` is the dashboard session check the
+ *   router sits behind; without one the router sees a pass-through.
  */
-async function boot(t, { allowNetwork = true, botScope = null } = {}) {
+async function boot(t, { allowNetwork = true, botScope = null, settings = false, auth = null } = {}) {
   const db = scratchDb(t);
   await initStudioTables(db);
   const acl = fakeAcl();
@@ -140,6 +229,15 @@ async function boot(t, { allowNetwork = true, botScope = null } = {}) {
     acl,
     onBroadcast: (song_id, payload) => webRef.web?.broadcast(song_id, payload),
   });
+
+  // The template store, when the test asks for one: the real settings registry
+  // over tables created as the schema creates them, with the instance id
+  // pinned to a scratch data dir so a run reads back exactly what it wrote.
+  let layoutTemplate = null;
+  if (settings) {
+    await initSettingsTables(db);
+    layoutTemplate = settingsTemplate(t, db);
+  }
 
   const web = createStudioWeb({
     hub,
@@ -155,6 +253,7 @@ async function boot(t, { allowNetwork = true, botScope = null } = {}) {
     crowHome,
     bundleDir: null,
     botScope,
+    layoutTemplate,
   });
   webRef.web = web;
 
@@ -170,7 +269,7 @@ async function boot(t, { allowNetwork = true, botScope = null } = {}) {
   // The gateway parses JSON for every route before the panel router (1 MB cap),
   // so the studio routes read `req.body` without a parser of their own.
   app.use(express.json({ limit: "1mb" }));
-  app.use(web.router((_req, _res, next) => next()));
+  app.use(web.router(auth || ((_req, _res, next) => next())));
 
   const server = createServer(app);
   const upgrades = web.attachUpgrade(server);
@@ -1032,4 +1131,228 @@ test("an agent that is neither the operator's MCP nor a bot sees nothing (fail c
   const operator = await agentGet(base, token, "/api/studio/agent/songs", "mcp");
   assert.equal(operator.status, 200);
   assert.equal(operator.body.length, 1);
+});
+
+// ---- the operator's default layout template ------------------------------
+
+/** The headers the Studio page sends with a read: a dashboard session and the CSRF token. */
+const PAGE_HEADERS = Object.freeze({
+  cookie: "crow_session=good; crow_csrf=csrf-ok",
+  "x-crow-csrf": "csrf-ok",
+});
+
+/** Those same headers, for a call that carries a JSON body. */
+const JSON_HEADERS = Object.freeze({ ...PAGE_HEADERS, "content-type": "application/json" });
+
+/** One default layout: the editor alone, full width, on a laptop in compose. */
+const TEMPLATE = Object.freeze({
+  v: 1,
+  layouts: { "compose.laptop": { v: 1, shown: [{ id: "editor", size: "l" }] } },
+});
+
+/** GET the operator's default layout template. */
+async function getTemplate(base, headers = PAGE_HEADERS) {
+  const response = await fetch(`${base}/api/studio/layout-template`, { headers });
+  return { status: response.status, body: await response.json() };
+}
+
+/** PUT one default layout template. */
+async function putTemplate(base, template, headers = JSON_HEADERS) {
+  const response = await fetch(`${base}/api/studio/layout-template`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ template }),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+/** DELETE the operator's saved default. */
+async function deleteTemplate(base, headers = PAGE_HEADERS) {
+  const response = await fetch(`${base}/api/studio/layout-template`, { method: "DELETE", headers });
+  return { status: response.status, body: await response.json() };
+}
+
+/** Every row the template key has in the per-instance settings table. */
+async function localRows(db) {
+  const { rows } = await db.execute({
+    sql: "SELECT key, instance_id, value FROM dashboard_settings_overrides WHERE key = ?",
+    args: [LAYOUT_TEMPLATE_KEY],
+  });
+  return rows;
+}
+
+/** Every row the template key has in the settings table peers are emitted from. */
+async function globalRows(db) {
+  const { rows } = await db.execute({
+    sql: "SELECT key, value FROM dashboard_settings WHERE key = ?",
+    args: [LAYOUT_TEMPLATE_KEY],
+  });
+  return rows;
+}
+
+/** A response fake with the two properties the panel handler uses. */
+function fakeRes() {
+  return {
+    headersSent: false,
+    html: "",
+    send(body) {
+      this.html = String(body);
+      this.headersSent = true;
+    },
+    type() {
+      return this;
+    },
+  };
+}
+
+/** The dashboard layout stand-in: the body surrounded by a marker. */
+function layoutFor({ content }) {
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body>MARKER${content}</body></html>`;
+}
+
+/**
+ * One song's Studio page, exactly as the panel route renders it.
+ * @param {string} songId
+ * @returns {Promise<string>} the page HTML
+ */
+async function studioSongPage(songId) {
+  const res = fakeRes();
+  await studioPanel.handler(
+    { method: "GET", query: { song: songId }, headers: {} },
+    res,
+    { db: { async execute() { return { rows: [] }; } }, layout: layoutFor },
+  );
+  assert.equal(res.headersSent, true, "the panel route should have sent a page");
+  return res.html;
+}
+
+test("the default layout template starts empty, round-trips and can be cleared", async (t) => {
+  const { base } = await boot(t, { settings: true });
+
+  const nothing = await getTemplate(base);
+  assert.equal(nothing.status, 200);
+  assert.deepEqual(nothing.body, { template: null }, "an operator who never saved one has no template");
+
+  const saved = await putTemplate(base, TEMPLATE);
+  assert.equal(saved.status, 200);
+  assert.deepEqual(saved.body, { template: TEMPLATE }, "the answer is the canonical template");
+
+  const back = await getTemplate(base);
+  assert.equal(back.status, 200);
+  assert.deepEqual(back.body, saved.body, "what was saved is what comes back");
+
+  const cleared = await deleteTemplate(base);
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(cleared.body, { template: null });
+  assert.deepEqual((await getTemplate(base)).body, { template: null }, "and it is gone");
+});
+
+test("a template over 8 KB, at the wrong version or naming an unknown widget is refused and stores nothing", async (t) => {
+  const { base, db } = await boot(t, { settings: true });
+
+  const refused = [
+    ["over the 8 KB cap", { v: 1, layouts: {}, pad: "x".repeat(8192) }],
+    ["the wrong version", { v: 2, layouts: {} }],
+    ["no layouts table", { v: 1 }],
+    [
+      "a widget this Studio does not have",
+      { v: 1, layouts: { "compose.laptop": { v: 1, shown: [{ id: "not-a-widget", size: "m" }] } } },
+    ],
+    ["nothing at all", null],
+  ];
+  for (const [why, template] of refused) {
+    const answer = await putTemplate(base, template);
+    assert.equal(answer.status, 400, why);
+    assert.equal(typeof answer.body.error, "string", `${why}: the caller is told why`);
+  }
+
+  assert.deepEqual((await getTemplate(base)).body, { template: null }, "nothing was kept");
+  assert.deepEqual(await localRows(db), [], "and no row was written");
+  assert.deepEqual(await globalRows(db), [], "in either settings table");
+});
+
+test("a template write or clear without the CSRF header is refused", async (t) => {
+  const { base, db } = await boot(t, { settings: true });
+  const noCsrf = { cookie: "crow_session=good" };
+
+  const put = await putTemplate(base, TEMPLATE, { ...noCsrf, "content-type": "application/json" });
+  assert.equal(put.status, 403);
+  const clear = await deleteTemplate(base, noCsrf);
+  assert.equal(clear.status, 403);
+
+  assert.deepEqual(await localRows(db), [], "nothing was written");
+});
+
+test("an agent caller cannot change the operator's default template", async (t) => {
+  const { base, db, crowHome } = await boot(t, { settings: true });
+  const token = ensureAgentToken(crowHome);
+
+  const put = await putTemplate(base, TEMPLATE, { ...JSON_HEADERS, "x-studio-token": token });
+  assert.equal(put.status, 403);
+  assert.equal(typeof put.body.error, "string", "the agent is told it is the operator's own");
+
+  const clear = await deleteTemplate(base, { ...PAGE_HEADERS, "x-studio-token": token });
+  assert.equal(clear.status, 403);
+
+  assert.deepEqual(await localRows(db), [], "nothing was written and nothing was cleared");
+});
+
+test("an unauthenticated caller is refused on the template routes as on the other studio routes", async (t) => {
+  const { base } = await boot(t, { settings: true, auth: sessionGate });
+
+  const songs = await fetch(`${base}/api/studio/songs`);
+  assert.equal(songs.status, 401);
+
+  assert.equal((await getTemplate(base, {})).status, songs.status);
+  assert.equal((await putTemplate(base, TEMPLATE, { "content-type": "application/json" })).status, songs.status);
+  assert.equal((await deleteTemplate(base, {})).status, songs.status);
+});
+
+test("the template lands in the per-instance settings table and is never emitted to a peer", async (t) => {
+  const { base, db } = await boot(t, { settings: true });
+  const emitted = [];
+  setSettingsSyncManager({
+    feedsDisabled: false,
+    emitChange: async (table, op, row) => {
+      emitted.push({ table, op, row });
+      return null;
+    },
+  });
+  t.after(() => setSettingsSyncManager(null));
+
+  const saved = await putTemplate(base, TEMPLATE);
+  assert.equal(saved.status, 200);
+
+  const local = await localRows(db);
+  assert.equal(local.length, 1, "one row, in the per-instance table");
+  assert.equal(local[0].key, LAYOUT_TEMPLATE_KEY);
+  assert.equal(local[0].instance_id, INSTANCE_ID, "keyed by this instance");
+  assert.deepEqual(JSON.parse(local[0].value), saved.body.template, "holding the canonical template");
+
+  assert.deepEqual(await globalRows(db), [], "dashboard_settings keeps no row, so nothing can replicate");
+  assert.deepEqual(emitted, [], "and no change was emitted");
+
+  await deleteTemplate(base);
+  assert.deepEqual(await localRows(db), [], "a clear removes the row rather than writing an empty one");
+  assert.deepEqual(emitted, []);
+
+  // The recorder is live, so the empty list above means the template never
+  // emits: a key that IS meant to replicate takes the same path and does.
+  await writeSetting(db, "unified_dashboard_enabled", "true", { scope: "global" });
+  assert.equal(emitted.length, 1, "a syncable key emits");
+  assert.deepEqual(await globalRows(db), [], "and the template still holds no synced row");
+});
+
+test("with no settings registry the template routes answer 503 and the page still renders", async (t) => {
+  const { base } = await boot(t);
+
+  assert.equal((await getTemplate(base)).status, 503);
+  assert.equal((await putTemplate(base, TEMPLATE)).status, 503);
+  assert.equal((await deleteTemplate(base)).status, 503);
+
+  // The page is a shell the client fills in: it asks for the template at boot
+  // and keeps the built-in default when the answer is not a template.
+  const html = await studioSongPage("song-1");
+  assert.ok(html.includes('data-role="grid-wrap"'), "the grid is on the page");
+  assert.ok(html.includes('id="st-ask"'), "so is the ask box");
 });

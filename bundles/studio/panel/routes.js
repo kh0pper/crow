@@ -17,7 +17,12 @@
  * to give that bot the Studio tools: the def edit itself lives in
  * `server/give-tools.js`, wired here with the gateway's own client, the audit
  * append and Bot Builder's defs-changed emit. A render's measured figures come
- * from the `studio.render` audit row the renderer wrote (`renderInfoOf`).
+ * from the `studio.render` audit row the renderer wrote (`renderInfoOf`). The
+ * operator's default layout template is wired here too: an instance-local
+ * setting (`studio.layout_template`), read and written on this same client
+ * through the dashboard's settings registry — the store the kiosk bundle uses.
+ * A walled Studio whose settings registry cannot be loaded has no template at
+ * all, and the panel keeps the built-in default.
  *
  * Request bodies are left to the gateway: its global JSON parser (1 MB cap)
  * runs before the panel router, so nothing here adds one — with one exception.
@@ -62,6 +67,14 @@ const { validateAddonDoorToken } = await appImport("servers/shared/addon-doors.j
 // The one definition of Crow's voice bot, so the Studio agent API never keeps a
 // second copy of that id: the voice bot reads every song and writes none.
 const { isVoiceBotId } = await appImport("servers/gateway/voice/crow-voice.js");
+// The dashboard's own settings store, for the operator's default layout
+// template: one instance-local row, never emitted to a peer. A Studio that
+// cannot load it (an add-on wall, a core without the module) has no template,
+// and the template routes answer 503 rather than fail the whole panel.
+const settingsRegistry = await appImport("servers/gateway/dashboard/settings/registry.js").catch((error) => {
+  console.warn("[studio] no default layout template on this instance:", error?.message || error);
+  return null;
+});
 // The real project ACL module: the hub decides no access by itself.
 const projectAcl = await appImport("servers/shared/project-acl.js");
 const { createHub } = await bImport("server/hub.js");
@@ -88,6 +101,26 @@ const s3 = await appImport("servers/storage/s3-client.js").catch(() => null);
 
 const db = createDbClient();
 const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+
+/** The instance-local setting key the operator's default layout template lives under. */
+const LAYOUT_TEMPLATE_KEY = "studio.layout_template";
+
+/**
+ * The operator's default layout template, as the web layer's three calls: the
+ * stored TEXT (null when unset), a write of it, and a clear. A "local" write
+ * lands in `dashboard_settings_overrides`, keyed by this instance, and is never
+ * emitted to a peer — a song's layout is view state, and the default for it is
+ * this instance's own preference. Null when the settings registry could not be
+ * loaded at all, which is the 503 the template routes answer.
+ */
+const layoutTemplate = settingsRegistry
+  ? {
+      read: () => settingsRegistry.readSetting(db, LAYOUT_TEMPLATE_KEY),
+      write: (template) =>
+        settingsRegistry.writeSetting(db, LAYOUT_TEMPLATE_KEY, String(template), { scope: "local" }),
+      clear: () => settingsRegistry.deleteLocalSetting(db, LAYOUT_TEMPLATE_KEY),
+    }
+  : null;
 
 // One hub per gateway process. The hub's broadcasts reach the web layer that
 // is built just below it; by the time any edit runs, `web` is assigned.
@@ -186,6 +219,10 @@ web = createStudioWeb({
   },
   crowHome,
   bundleDir: BUNDLE_DIR,
+  // The operator's default layout template, over the gateway's settings
+  // registry: an instance-local row. Absent it, the template routes answer 503
+  // and the page keeps the built-in default.
+  layoutTemplate,
   // The instrument catalog and the one stored copy of each file, shared with
   // the housekeeping pass below.
   libraryStore,

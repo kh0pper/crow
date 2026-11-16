@@ -79,6 +79,12 @@ import { createLibraryStore } from "./library-store.js";
 // The one sentence a bot that is not this project's gets — the same one the
 // grant's own `not_found` refusal carries (see `server/give-tools.js`).
 import { NOT_FOUND_TEXT as GIVE_TOOLS_NOT_FOUND_TEXT } from "./give-tools.js";
+// The shell's layout model, which the page runs as an inline script
+// (`panel/shell-layout.js`). Its named exports are evaluated from that very
+// text, so `parseTemplate` here is the page's own rule for what a default
+// layout may be, and `WIDGETS` names the ids a template may show. Server code
+// importing a panel script this way follows `server/commands/midi.js`.
+import { WIDGETS, parseTemplate } from "../panel/shell-layout.js";
 
 /** File under CROW_HOME holding the per-boot token the MCP process presents. */
 const TOKEN_FILE = "studio-agent-token";
@@ -165,6 +171,17 @@ const AGENT_GIVE_TOOLS_REFUSED_TEXT =
 
 /** What the give-tools route answers when this instance cannot edit a bot's def. */
 const GIVE_TOOLS_UNAVAILABLE_TEXT = "Studio cannot change a bot's tools on this instance.";
+
+/** What an agent is told when it asks to change the operator's default layout. */
+const AGENT_LAYOUT_TEMPLATE_REFUSED_TEXT =
+  "The default Studio layout is the operator's own; an agent cannot change it.";
+
+/** What the layout-template routes answer when this instance stores no settings. */
+const LAYOUT_TEMPLATE_UNAVAILABLE_TEXT = "Studio cannot keep a default layout on this instance.";
+
+/** What a caller is told when the template it sent is not one. */
+const LAYOUT_TEMPLATE_INVALID_TEXT =
+  "A default layout is this Studio's own widgets, at their sizes, under 8 KB.";
 
 /** What a caller is told when the project's bot is no longer the one it named. */
 const STALE_BOT_TEXT = "That is not this song project's bot any more. Reload the page and try again.";
@@ -620,6 +637,38 @@ function sendError(res, err) {
   });
 }
 
+/**
+ * Whether a handed-in default template names only widgets this build has.
+ *
+ * `parseTemplate` DROPS an id no widget has, which is right for a layout read
+ * back out of storage; a template the operator is SAVING is their intent, and
+ * a typo in it must not quietly become a narrower default for every song, so
+ * the route refuses it instead.
+ * @param {string|object|null|undefined} raw
+ * @returns {boolean}
+ */
+function templateNamesKnownWidgets(raw) {
+  let value = raw;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return false;
+    }
+  }
+  const table = value && typeof value === "object" ? value.layouts : null;
+  if (!table || typeof table !== "object" || Array.isArray(table)) return false;
+  for (const entry of Object.values(table)) {
+    const shown = entry && typeof entry === "object" ? entry.shown : null;
+    if (!Array.isArray(shown)) continue;
+    for (const row of shown) {
+      if (!row || typeof row !== "object") continue;
+      if (!Object.prototype.hasOwnProperty.call(WIDGETS, String(row.id))) return false;
+    }
+  }
+  return true;
+}
+
 /** Wrap an async route so a thrown error becomes a response, not a rejection. */
 function handled(fn) {
   return (req, res) => {
@@ -804,6 +853,14 @@ function refuse(socket, status, text) {
  *   fetches anything, so a read-only member never reaches the network. Injected
  *   because this module owns no database; without it a download is refused,
  *   because this Crow cannot prove the caller may write.
+ * @param {{read: Function, write: Function, clear: Function}|null}
+ *   [options.layoutTemplate] the operator's default layout template: an
+ *   instance-local setting (`read()` answers the stored TEXT or null,
+ *   `write(text)` keeps it in the per-instance store, `clear()` removes it).
+ *   The panel loader builds it over the gateway's settings registry, so it
+ *   never syncs to a peer. Injected for the same reason as everything above —
+ *   this module owns no database — and absent, the template routes answer 503
+ *   and the page keeps the built-in default.
  * @returns {{router: Function, attachUpgrade: Function, broadcast: Function}}
  *   `router(dashboardAuth)` builds the Express router, `attachUpgrade(server)`
  *   installs the `/api/studio/ws` handler, and `broadcast(song_id, payload)`
@@ -826,6 +883,7 @@ export function createStudioWeb({
   songRowOf = null,
   libraryStore = null,
   assertCanWrite = null,
+  layoutTemplate = null,
 } = {}) {
   if (!hub || typeof hub.openSong !== "function" || typeof hub.runCommand !== "function") {
     throw new TypeError("Studio web: the session hub is required");
@@ -871,6 +929,16 @@ export function createStudioWeb({
   // The project's write capability, checked before a download fetches anything.
   // Absent it, no download runs: this Crow cannot prove the caller may write.
   const canWrite = typeof assertCanWrite === "function" ? assertCanWrite : null;
+
+  // The operator's default layout template. Absent it, nothing in this module
+  // can read or keep one, and the template routes say so rather than guess.
+  const templateStore =
+    layoutTemplate &&
+    typeof layoutTemplate.read === "function" &&
+    typeof layoutTemplate.write === "function" &&
+    typeof layoutTemplate.clear === "function"
+      ? layoutTemplate
+      : null;
 
   /**
    * The row of one song: through the store's single-row lookup when one is
@@ -1689,6 +1757,47 @@ export function createStudioWeb({
         if (!status) throw err;
         return res.status(status).json({ error: String(err?.message || STALE_BOT_TEXT) });
       }
+    }));
+
+    // ---- the operator's default layout template --------------------------
+    //
+    // Where a song's widgets sit is VIEW STATE and lives in the browser, one
+    // key per song, mode and size class (see `panel/shell-layout.js`). What an
+    // operator sets here is their DEFAULT for a song this device has never
+    // opened, kept as an instance-local setting so it is there on the phone as
+    // well as the laptop. It is a person's own preference: an agent never
+    // changes it, and the row lives in the per-instance settings table, which
+    // is never emitted to a peer.
+
+    r.get("/api/studio/layout-template", dashboardAuth, handled(async (req, res) => {
+      if (!templateStore) return res.status(503).json({ error: LAYOUT_TEMPLATE_UNAVAILABLE_TEXT });
+      // A stored value the layout model refuses reads as "no template", which
+      // is the same answer an operator who never saved one gets.
+      return res.json({ template: parseTemplate(await templateStore.read()) });
+    }));
+
+    r.put("/api/studio/layout-template", dashboardAuth, requireCsrf, handled(async (req, res) => {
+      if (agentCaller(req)) return res.status(403).json({ error: AGENT_LAYOUT_TEMPLATE_REFUSED_TEXT });
+      if (!templateStore) return res.status(503).json({ error: LAYOUT_TEMPLATE_UNAVAILABLE_TEXT });
+      const handed = req.body?.template;
+      // `parseTemplate` is the page's own rule: the wrong version, no layouts
+      // table and anything over the 8 KB cap are already null, and every entry
+      // is narrowed to a layout the page could have saved itself.
+      const template = parseTemplate(handed);
+      if (!template || !templateNamesKnownWidgets(handed)) {
+        return res.status(400).json({ error: LAYOUT_TEMPLATE_INVALID_TEXT });
+      }
+      // What is kept is the canonical text the model produces, so the page's
+      // `seedSong` materializes exactly what was validated here.
+      await templateStore.write(JSON.stringify(template));
+      return res.json({ template });
+    }));
+
+    r.delete("/api/studio/layout-template", dashboardAuth, requireCsrf, handled(async (req, res) => {
+      if (agentCaller(req)) return res.status(403).json({ error: AGENT_LAYOUT_TEMPLATE_REFUSED_TEXT });
+      if (!templateStore) return res.status(503).json({ error: LAYOUT_TEMPLATE_UNAVAILABLE_TEXT });
+      await templateStore.clear();
+      return res.json({ template: null });
     }));
 
     // The engine's worklet module, composed here from the same source files a
