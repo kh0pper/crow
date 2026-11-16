@@ -57,6 +57,10 @@ const T2 = "0a1b2c3d-0000-4000-8000-000000000012";
 const NOTE_PLACEMENT = "p-notes";
 const AUDIO_PLACEMENT = "p-audio";
 
+/** The sample track the pattern clip sits on, and the clip itself. */
+const PATTERN_TRACK = "drums";
+const PATTERN_CLIP = "c-drums";
+
 /** The project the live test's song lives in, and its storage prefix. */
 const PROJECT = 53;
 const PREFIX = "projects/53/";
@@ -598,6 +602,59 @@ function rollBox() {
 /** How tall the piano roll is: 128 rows of 12 px, as the client draws it. */
 const KEY_ROLL_HEIGHT = 128 * 12;
 
+/**
+ * The fixture song with its arrangement emptied: nothing on either lane.
+ * @returns {Promise<import("yjs").Doc>}
+ */
+async function unplacedDoc() {
+  const doc = await timelineDoc();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(doc, "arrangement.remove", { id: NOTE_PLACEMENT });
+  runCommand(doc, "arrangement.remove", { id: AUDIO_PLACEMENT });
+  return doc;
+}
+
+/**
+ * A song with one sampler track and one pattern clip, so the pad-and-steps view
+ * has a clip of its own to offer the timeline.
+ * @returns {Promise<import("yjs").Doc>}
+ */
+async function patternDoc() {
+  const { newSongDoc } = await import("../bundles/studio/server/doc.js");
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  await import("../bundles/studio/server/commands/core.js");
+  await import("../bundles/studio/server/commands/sampler.js");
+
+  const doc = newSongDoc({ title: "Pattern song", bpm: 120 });
+  runCommand(doc, "track.add", { id: PATTERN_TRACK, name: "Drums", kind: "sampler" });
+  runCommand(doc, "scene.add", { id: SCENE, name: "Verse" });
+  runCommand(doc, "clip.add_pattern", {
+    clip_id: PATTERN_CLIP,
+    track_id: PATTERN_TRACK,
+    scene_id: SCENE,
+    name: "Kit loop",
+  });
+  return doc;
+}
+
+/**
+ * Drag the fixture's note clip out of the grid to a point, with the lanes drawn
+ * under it and their boxes given the way a laid-out browser reports them.
+ * @param {object} ui the booted page
+ * @param {{clientX: number, clientY: number}} point where the pointer is
+ */
+async function dragNoteClipTo(ui, point) {
+  const clip = ui.document.querySelector(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  assert.ok(clip, "the clip is on the session grid");
+  clip.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: 100, clientY: 100 }));
+  // The first move brings the lanes up, which is when a browser lays them out.
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: point.clientX, clientY: point.clientY }));
+  await ui.settle();
+  stubLanes(ui);
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: point.clientX, clientY: point.clientY }));
+  await ui.settle();
+}
+
 // ---- the tests that need no browser ---------------------------------------
 
 test("drag from grid places a clip", async () => {
@@ -637,9 +694,176 @@ test("drag from grid places a clip", async () => {
   assert.equal(typeof placed[0].cmd_id, "string", "with a client-generated cmd_id");
   assert.equal(
     ui.document.querySelector("[data-role=timeline]").hidden,
-    true,
-    "and the session view comes back after the drop",
+    false,
+    "and the timeline is the view once the clip is placed",
   );
+  assert.equal(
+    ui.document.querySelector("[data-role=grid-wrap]").hidden,
+    true,
+    "with the grid put away, so the new placement is what the operator is looking at",
+  );
+});
+
+test("dragging shows a ghost with the clip name that follows the pointer", async () => {
+  const ui = await bootTimeline();
+  const clip = ui.document.querySelector(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  assert.ok(clip, "the clip is on the session grid");
+
+  clip.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: 100, clientY: 100 }));
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: 130, clientY: 140 }));
+  await ui.settle();
+
+  const ghost = ui.document.querySelector("[data-role=drag-ghost]");
+  assert.ok(ghost, "the drag carries a ghost");
+  assert.equal(ghost.textContent, "Bass line", "with the clip's own name on it");
+  const firstLeft = Number.parseFloat(ghost.style.left);
+  assert.equal(firstLeft, 142, "beside the pointer, twelve pixels to its right");
+  assert.equal(Number.parseFloat(ghost.style.top), 152, "and twelve pixels below it");
+
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: 200, clientY: 140 }));
+  await ui.settle();
+  assert.equal(
+    ui.document.querySelectorAll("[data-role=drag-ghost]").length,
+    1,
+    "there is still one ghost, not one per move",
+  );
+  assert.equal(Number.parseFloat(ghost.style.left), 212, "and it followed the pointer");
+});
+
+test("the lane and bar under the pointer carry .st-lane-target and .st-bar-target", async () => {
+  const ui = await bootTimeline();
+  // 85 px on a 320 px, 32-bar lane is bar index 8, on the note track's lane.
+  await dragNoteClipTo(ui, { clientX: 85, clientY: 20 });
+
+  const lane = ui.document.querySelector(`[data-lane-id=${NOTE_TRACK}] [data-role=lane-body]`);
+  assert.ok(lane, "the note track has a lane");
+  assert.equal(lane.classList.contains("st-lane-target"), true, "the lane it would land on is outlined");
+  const bands = lane.querySelectorAll("[data-role=bar-target]");
+  assert.equal(bands.length, 1, "and one bar of it is marked");
+  assert.equal(bands[0].classList.contains("st-bar-target"), true, "with the bar target's own class");
+  assert.equal(bands[0].getAttribute("data-bar"), "8", "the bar under the pointer");
+  assert.match(String(bands[0].getAttribute("style")), /left:25%/, "drawn where bar 9 of 32 sits");
+
+  const other = ui.document.querySelector(`[data-lane-id=${AUDIO_TRACK}] [data-role=lane-body]`);
+  assert.ok(other, "the audio track has a lane too");
+  assert.equal(other.classList.contains("st-lane-target"), false, "a lane the pointer is not on is left alone");
+  assert.equal(other.querySelectorAll("[data-role=bar-target]").length, 0, "and marks no bar");
+
+  // Moving onto the other lane moves both marks with the pointer.
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: 85, clientY: 80 }));
+  await ui.settle();
+  assert.equal(
+    ui.document.querySelector(`[data-lane-id=${AUDIO_TRACK}] [data-role=lane-body]`).classList.contains("st-lane-target"),
+    true,
+    "the lane under the pointer is the one outlined",
+  );
+  assert.equal(
+    ui.document.querySelector(`[data-lane-id=${NOTE_TRACK}] [data-role=lane-body]`).classList.contains("st-lane-target"),
+    false,
+    "and the one it left is not",
+  );
+
+  // The release takes both marks off the page.
+  ui.release({ clientX: 85, clientY: 80 });
+  await ui.settle();
+  assert.equal(ui.document.querySelector("[data-role=bar-target]"), null, "no bar is marked after the drop");
+  assert.equal(ui.document.querySelector(".st-lane-target"), null, "and no lane is outlined");
+});
+
+test("one drop sends exactly one arrangement.place; a second pointerup sends none", async () => {
+  const ui = await bootTimeline();
+  await dragNoteClipTo(ui, { clientX: 85, clientY: 20 });
+
+  ui.release({ clientX: 85, clientY: 20 });
+  await ui.settle();
+  assert.equal(commands(ui, "arrangement.place").length, 1, "the whole drag is one placement");
+
+  // The release that ended the drag took its listeners off: a second one, from a
+  // pointer the drop already finished with, writes nothing.
+  ui.release({ clientX: 85, clientY: 20 });
+  await ui.settle();
+  assert.equal(commands(ui, "arrangement.place").length, 1, "a second pointerup sends no placement");
+  assert.equal(allCommands(ui).length, 1, "and nothing else either");
+});
+
+test("after a drop the arrangement is the view and the new placement is selected", async () => {
+  const ui = await bootTimeline();
+  await dragNoteClipTo(ui, { clientX: 85, clientY: 20 });
+  ui.release({ clientX: 85, clientY: 20 });
+  await ui.settle();
+
+  const placed = commands(ui, "arrangement.place");
+  assert.equal(placed.length, 1);
+  assert.equal(ui.document.querySelector("[data-role=timeline]").hidden, false, "the lanes are the view");
+  assert.equal(ui.document.querySelector("[data-role=grid-wrap]").hidden, true, "and the grid is put away");
+  assert.equal(
+    ui.document.querySelector("[data-act=mode-arrangement]").getAttribute("aria-pressed"),
+    "true",
+    "the view switch says which one is on",
+  );
+
+  // The hub's answer carries the placement the page sent; it arrives selected.
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  const { encodeDocState } = await import("../bundles/studio/server/doc.js");
+  runCommand(ui.doc, "arrangement.place", placed[0].args);
+  ui.frame({
+    type: "state",
+    update: Buffer.from(encodeDocState(ui.doc)).toString("base64"),
+    history: [],
+    presence: [],
+  });
+  await ui.settle();
+
+  const block = ui.document.querySelector(`[data-placement-id=${placed[0].args.id}]`);
+  assert.ok(block, "the new placement is drawn on its lane");
+  assert.equal(
+    String(block.getAttribute("class")).includes("st-tl-block-sel"),
+    true,
+    "and it is the selected block",
+  );
+  assert.match(
+    String(ui.document.querySelector("[data-role=placement-bar]").textContent),
+    /Placement: Bass line/,
+    "the placement bar names it",
+  );
+});
+
+test("the toast reads Placed on <track> at bar N", async () => {
+  const ui = await bootTimeline();
+  await dragNoteClipTo(ui, { clientX: 85, clientY: 20 });
+  ui.release({ clientX: 85, clientY: 20 });
+  await ui.settle();
+
+  const toast = ui.document.querySelector("[data-role=toast]");
+  assert.equal(toast.hidden, false, "the page says where the clip went");
+  assert.equal(toast.textContent, "Placed on Bass at bar 9", "the lane's name and the bar it landed on");
+});
+
+test("a drop on no lane sends nothing and returns to the previous view", async () => {
+  const ui = await bootTimeline();
+  const clip = ui.document.querySelector(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  clip.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: 100, clientY: 100 }));
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: 140, clientY: 130 }));
+  await ui.settle();
+  stubLanes(ui);
+  assert.equal(
+    ui.document.querySelector("[data-role=timeline]").hidden,
+    false,
+    "the drag brought the lanes up to be dropped on",
+  );
+
+  // Well below the last lane, where no drop target is.
+  ui.release({ clientX: 140, clientY: 400 });
+  await ui.settle();
+
+  assert.deepEqual(allCommands(ui), [], "a drop on nothing writes nothing");
+  assert.equal(
+    ui.document.querySelector("[data-role=timeline]").hidden,
+    true,
+    "and the view it was dragged from is back",
+  );
+  assert.equal(ui.document.querySelector("[data-role=drag-ghost]"), null, "the ghost is gone with the drag");
+  assert.equal(ui.document.querySelector(".st-lane-target"), null, "and no lane is left outlined");
 });
 
 test("record to timeline turns 3 launches into 3 placements in one step", async () => {
@@ -1276,6 +1500,72 @@ test("session view places a clip at bar 1 and the timeline keeps its playhead", 
     ui.document.querySelector("[data-act=place-on-timeline]").getAttribute("title"),
     "Place this clip on its track at the playhead bar",
     "from the timeline the button names the playhead's bar",
+  );
+});
+
+test("Add to timeline is in the clip editor header and in the sampler header", async () => {
+  const ui = await bootTimeline();
+  ui.click(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  await ui.settle();
+
+  const add = ui.document.querySelector("[data-role=editor] [data-act=place-on-timeline]");
+  assert.ok(add, "the clip editor's header offers it");
+  assert.equal(String(add.textContent), "Add to timeline", "named for what it does");
+
+  ui.click("[data-role=editor] [data-act=place-on-timeline]");
+  await ui.settle();
+  const sent = commands(ui, "arrangement.place");
+  assert.equal(sent.length, 1, "pressing it places the clip once");
+  assert.equal(sent[0].args.track_id, NOTE_TRACK, "on the clip's own track");
+  assert.equal(sent[0].args.start_bar, 0, "at bar 1 from Session view, which has no playhead");
+  assert.equal(
+    ui.document.querySelector("[data-role=timeline]").hidden,
+    false,
+    "and the timeline is what the page shows",
+  );
+  assert.equal(
+    ui.document.querySelector("[data-role=toast]").textContent,
+    "Placed on Bass at bar 1",
+    "and the toast says where it went",
+  );
+
+  // A pattern clip's own view carries the same button.
+  const pattern = await bootTimeline({ doc: await patternDoc() });
+  pattern.click(`[data-act=open-clip][data-clip-id=${PATTERN_CLIP}]`);
+  await pattern.settle();
+  const inSampler = pattern.document.querySelector("[data-role=sampler] [data-act=place-on-timeline]");
+  assert.ok(inSampler, "the pad-and-steps view offers it too");
+  assert.equal(String(inSampler.textContent), "Add to timeline", "under the same name");
+
+  pattern.click("[data-role=sampler] [data-act=place-on-timeline]");
+  await pattern.settle();
+  const placed = commands(pattern, "arrangement.place");
+  assert.equal(placed.length, 1, "pressing it places the pattern clip once");
+  assert.equal(placed[0].args.clip_id, PATTERN_CLIP, "the clip it was pressed on");
+  assert.equal(placed[0].args.track_id, PATTERN_TRACK, "on its own track");
+  assert.equal(
+    pattern.document.querySelector("[data-role=timeline]").hidden,
+    false,
+    "and the timeline is the view",
+  );
+  assert.equal(
+    pattern.document.querySelector("[data-role=toast]").textContent,
+    "Placed on Drums at bar 1",
+    "with the toast naming the lane",
+  );
+});
+
+test("the empty timeline says how a first placement is made", async () => {
+  const ui = await bootTimeline({ doc: await unplacedDoc() });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  const note = ui.document.querySelector("[data-role=timeline-empty]");
+  assert.ok(note, "the empty timeline has something to say");
+  assert.equal(
+    note.textContent,
+    "Drag a clip up here, or press Add to timeline on a clip.",
+    "the two ways a first placement is made",
   );
 });
 

@@ -1102,6 +1102,33 @@ test("render loads only the samples its patterns use", async () => {
   assert.deepEqual(fallback, [SAMPLE_A, SAMPLE_B], "the clip's first pattern still loads its samples");
 });
 
+test("a scene render of the chain A,B,A at 120 bpm is 3 bars (6 s)", async () => {
+  const song = samplerSong();
+  // One pattern clip whose chain walks three slots: A, B, then A again. At
+  // 120 bpm a bar lasts two seconds, so a full pass of it is six.
+  song.clips["clip-1"].chain = ["a", "b", "a"];
+
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const renderer = createRenderer({ db, storage, acl: fakeAcl(), maxSeconds: 300, now: () => CLOCK });
+
+  // No seconds asked: the render's own length is one full pass of the chain the
+  // launched scene plays.
+  const result = await renderer.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: song,
+    scene_id: "scene-1",
+  });
+
+  assert.equal(result.seconds, 6, "three bars at 120 bpm");
+  assert.equal(storage.uploads.length, 1, "the render is filed");
+  const audio = decodeWav(storage.uploads[0].data);
+  assert.equal(audio.rate, SAMPLE_RATE);
+  assert.equal(audio.channels.length, 2, "a stereo render");
+  assert.equal(audio.channels[0].length, 6 * SAMPLE_RATE, "six seconds of audio");
+});
+
 test("a render whose samples pass 256 MB keeps every one", async (t) => {
   // Three samples on three steps of one pattern. `sampleCapBytes` stands in for
   // the browser's 256 MB, lowered so three tiny samples pass it: an engine built
