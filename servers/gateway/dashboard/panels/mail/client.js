@@ -175,8 +175,8 @@ export function mailClientJs(lang = "en") {
   }
   function reload() { navigate(String(location.href || '')); }
 
-  function flashHref(value, base) {
-    var href = String(base || location.href || '');
+  function flashHref(value, from) {
+    var href = String(from || location.href || '');
     var hash = '';
     var hashAt = href.indexOf('#');
     if (hashAt >= 0) { hash = href.slice(hashAt); href = href.slice(0, hashAt); }
@@ -313,6 +313,18 @@ export function mailClientJs(lang = "en") {
       read.removeAttribute('hidden');
     }
   }
+  // The automatic mark-read swaps the controls only while the bar still shows Mark read: an answer
+  // that arrived first has already changed the bar, and it is the newer one.
+  function readControlShown(bar) {
+    if (!bar || typeof bar.querySelectorAll !== 'function') { return false; }
+    var found = bar.querySelectorAll('[data-ml-action]');
+    for (var i = 0; i < found.length; i++) {
+      if (String(found[i].getAttribute('data-ml-action') || '') === 'read') {
+        return !found[i].hasAttribute('hidden');
+      }
+    }
+    return false;
+  }
   // The list the person came from: the page's own back link, never a URL built here.
   function backHref() {
     var back = root.querySelector('a.ml-back');
@@ -337,11 +349,13 @@ export function mailClientJs(lang = "en") {
         return;
       }
       // Mark unread and Mark read leave the reader on the message: the bar is usable again and the two
-      // read controls swap. Mark unread also says its own sentence, which the bar carries; Mark read
-      // says nothing, because the plan approved no sentence for it.
+      // read controls swap. Any answer about the read state first clears what the bar was saying — the
+      // sentence for a mark unread belongs to that state and must not outlive it. Mark unread then says
+      // its own sentence; Mark read says nothing, because the plan approved no sentence for it.
       if (action === 'unread' || action === 'read') {
         actionBusy = false;
         setActionsWaiting(false);
+        say(bar, '');
         swapReadControls(bar, action);
         if (action === 'unread') { say(bar, bar ? String(bar.getAttribute('data-ml-done-unread') || '') : ''); }
         return;
@@ -376,7 +390,9 @@ export function mailClientJs(lang = "en") {
   // Opening an unread message marks it read once, 1.5 s after the page is shown, and only while the
   // page is visible: the GET itself writes nothing, so a prefetch marks nothing read. The timer lives
   // in window.__mlTimer, which this run already cleared and every departure clears again; a click on
-  // either read control clears it too, so it can never override the person's own choice.
+  // either read control clears it too, so it can never override the person's own choice. While the post
+  // is in flight the bar is busy exactly as it is for a click (actionBusy and every control disabled),
+  // so a click that lands in that moment is ignored rather than sent as a second request.
   function bindMarkRead() {
     var bar = root.querySelector('[data-ml-actions][data-ml-unread-row]');
     if (!bar) { return; }
@@ -385,9 +401,13 @@ export function mailClientJs(lang = "en") {
     window.__mlTimer = setTimeout(function () {
       window.__mlTimer = null;
       if (String(document.visibilityState || '') !== 'visible') { return; }
+      actionBusy = true;
+      setActionsWaiting(true);
       post(actionUrl(row), { action: 'read' }).then(function (result) {
+        actionBusy = false;
+        setActionsWaiting(false);
         if (!result.ok) { sayError(bar, result); return; }
-        swapReadControls(bar, 'read');
+        if (readControlShown(bar)) { swapReadControls(bar, 'read'); }
       });
     }, MARK_READ_DELAY_MS);
   }

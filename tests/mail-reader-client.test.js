@@ -854,7 +854,31 @@ test("Mark read posts read, swaps the controls and says nothing", async () => {
   assert.equal(r.calls[0].headers["x-crow-csrf"], "tok 42");
   assert.equal(read.hasAttribute("hidden"), true, "Mark read goes away");
   assert.equal(unread.hasAttribute("hidden"), false, "and Mark unread is shown");
-  assert.equal(r.$("[data-ml-actions] [data-ml-status-line]"), null, "no sentence: the plan approved none");
+  const line = r.$("[data-ml-actions] [data-ml-status-line]");
+  assert.ok(!line || line.textContent === "", "no sentence: the plan approved none");
+  assert.ok(!line || line.hasAttribute("hidden"), "and nothing is shown");
+  assert.deepEqual(r.visits, [], "the reader stays on the message");
+});
+
+test("Mark read after Mark unread clears the bar's sentence instead of leaving it visible", async () => {
+  const r = boot(messagePage({ isRead: true }));
+  const bar = r.$("[data-ml-actions]");
+  const unread = r.$('button[data-ml-action="unread"]');
+  const read = r.$('button[data-ml-action="read"]');
+  r.click(unread);
+  await r.settle();
+  const line = bar.querySelector("[data-ml-status-line]");
+  assert.equal(line.textContent, "Marked unread.");
+  assert.equal(line.hasAttribute("hidden"), false, "the sentence is shown");
+
+  r.click(read);
+  await r.settle();
+  assert.equal(r.calls.length, 2, "both answers arrived");
+  assert.deepEqual(r.calls[1].body, { action: "read" });
+  assert.equal(line.textContent, "", "the sentence that belonged to the unread state is gone");
+  assert.equal(line.hasAttribute("hidden"), true, "and the line is hidden again");
+  assert.equal(read.hasAttribute("hidden"), true, "Mark read goes away");
+  assert.equal(unread.hasAttribute("hidden"), false, "and Mark unread is shown");
   assert.deepEqual(r.visits, [], "the reader stays on the message");
 });
 
@@ -892,6 +916,33 @@ test("the automatic mark-read swaps the two read controls once the server agrees
   assert.equal(read.hasAttribute("hidden"), true, "Mark read goes away by itself");
   assert.equal(unread.hasAttribute("hidden"), false, "and Mark unread is shown");
   assert.deepEqual(r.visits, []);
+});
+
+test("a click while the automatic mark-read is in flight posts nothing more", async () => {
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const r = boot(messagePage(), { fetchImpl: () => pending });
+  assert.equal(r.fire(1500), true, "the automatic read goes out");
+  assert.equal(r.calls.length, 1);
+  assert.deepEqual(r.calls[0].body, { action: "read" });
+
+  const unread = r.$('button[data-ml-action="unread"]');
+  const archive = r.$('button[data-ml-action="archive"]');
+  assert.equal(unread.hasAttribute("disabled"), true, "the bar waits for the automatic answer");
+  r.click(unread);
+  r.click(archive);
+  assert.equal(r.calls.length, 1, "a click during the automatic post is not a second post");
+
+  release(jsonResponse(200, { ok: true }));
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.deepEqual(r.visits, [], "no archive and no unread went out");
+  const read = r.$('button[data-ml-action="read"]');
+  assert.equal(read.hasAttribute("hidden"), true, "the answer that did arrive swaps them");
+  assert.equal(unread.hasAttribute("hidden"), false, "and Mark unread is shown");
+  for (const control of r.$$("[data-ml-actions] [data-ml-action]")) {
+    assert.equal(control.hasAttribute("disabled"), false, "the bar is usable again");
+  }
 });
 
 /* ------------------------------------------------------------------- the settings */
