@@ -604,10 +604,12 @@ const _jsonParser = express.json({ limit: "1mb" });
 // non-strictly, so `/…/edit/` reaches the same route with its own parser — it must not be handed to
 // the global one first. The Artifacts two-step upload's PUT leg (bundles/artifacts/server/uploads.js) is
 // here for the same reason: its handler streams the body under the upload cap (4 MiB) and stops at it,
-// so the 1mb parser must not eat (or 413) the file first. TWO LINES, always (a test reads this predicate
-// out of this file with a two-line regex).
+// so the 1mb parser must not eat (or 413) the file first. The owner's Artifacts "Import file"
+// (`POST /api/artifacts/<id>/import`, bundles/artifacts/panel/routes.js) is here too: the viewer offers a
+// 4 MiB file, and the router's own json({limit:"60mb"}) parses it before its own 4 MiB text cap answers 413.
+// TWO LINES, always (a test reads this predicate out of this file with a two-line regex).
 const _hasOwnParser = (p) => p.toLowerCase().startsWith("/llm") || p.toLowerCase().startsWith("/api/workspace/live/v1/") || /^\/s\/[^/]+\/feedback$/.test(p) ||
-  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p) || /^\/dashboard\/perch-api\/staged\/[^/]+\/(send|edit|discard)\/?$/i.test(p) || /^\/dashboard\/mail\/api\//i.test(p) || p.toLowerCase().startsWith("/artifacts/upload/");
+  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p) || /^\/dashboard\/perch-api\/staged\/[^/]+\/(send|edit|discard)\/?$/i.test(p) || /^\/dashboard\/mail\/api\//i.test(p) || p.toLowerCase().startsWith("/artifacts/upload/") || /^\/api\/artifacts\/[^/]+\/import\/?$/i.test(p);
 app.use((req, res, next) => (_hasOwnParser(req.path) ? next() : _jsonParser(req, res, next)));
 
 // --- Static files (PWA manifest, service worker, icons) ---

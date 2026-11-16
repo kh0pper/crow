@@ -189,40 +189,120 @@ function assertInlineSize(source) {
  *  upload route at all. */
 export const SHELL_TOOL = "bash";
 
+/** The two tools the upload path is made of (`artifact_upload_begin` → PUT →
+ *  `artifact_upload_commit`). Both, never one: a def granting only Begin has no
+ *  way to land the file it began. */
+export const UPLOAD_TOOLS = Object.freeze(["artifact_upload_begin", "artifact_upload_commit"]);
+
 /**
- * Does this bot's stored def grant a shell? pi_bot_defs.definition.tools
- * .pi_builtin is the one list the spawn is pinned with. An absent row, an
- * unparseable definition, and a def with no tools list all answer false: the
- * caller then keeps the inline save (fail closed toward NOT stranding a bot).
- * @returns {Promise<boolean>}
+ * The bot's stored def, read the way the spawn reads it. null for an absent
+ * row, an unparseable definition and a JSON value that is not an object — the
+ * caller then reads "cannot upload" (fail closed toward NOT stranding a bot).
+ * @returns {Promise<object|null>}
  */
-export async function defGrantsShell(db, botId) {
+export async function readBotDef(db, botId) {
   const row = (await db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [String(botId)] })).rows[0];
+  if (!row) return null;
   let def;
-  try { def = row ? JSON.parse(row.definition || "{}") : null; } catch { return false; }
-  const builtin = def && typeof def === "object" && def.tools && def.tools.pi_builtin;
+  try { def = JSON.parse(row.definition || "{}"); } catch { return null; }
+  return def && typeof def === "object" && !Array.isArray(def) ? def : null;
+}
+
+/** Does a def grant a shell? `bash` in tools.pi_builtin is the one list the
+ *  spawn is pinned with (bridge.mjs buildToolsCsv). */
+export function defHasShellTool(def) {
+  const builtin = def && def.tools && def.tools.pi_builtin;
   return Array.isArray(builtin) && builtin.includes(SHELL_TOOL);
 }
 
 /**
+ * Does a def grant the two-step upload? Either the whole server entry
+ * (`artifacts`) or both upload tools per tool (`artifacts/artifact_upload_begin`,
+ * or the bridge's `artifacts__…` spelling). This is the same reading the Bot
+ * Builder's companion writer does (scripts/pi-bots/bot-world.mjs
+ * withArtifactsCompanions) — copied here because an installed copy of this
+ * bundle cannot resolve app modules, and pinned by a test in
+ * tests/artifacts-upload.test.js so the two cannot drift.
+ */
+export function defGrantsUpload(def) {
+  const list = def && def.tools && def.tools.crow_mcp;
+  if (!Array.isArray(list)) return false;
+  if (list.includes("artifacts")) return true;
+  const has = (tool) => list.includes(`artifacts/${tool}`) || list.includes(`artifacts__${tool}`);
+  return UPLOAD_TOOLS.every(has);
+}
+
+/**
+ * Does a `bash_allow` list let the bot run `curl`? An entry is a command PREFIX
+ * (bot-builder bash-mode.js, pi-lab's allowlist gate), so the command has to be
+ * its first word: "curl", "curl -sS" and "curl -T" do, "grep curl.log" does
+ * not. An empty or malformed list has no way to PUT a file: false.
+ */
+export function allowlistAllowsCurl(allow) {
+  if (!Array.isArray(allow)) return false;
+  return allow.some((e) => typeof e === "string" && e.trim().split(/\s+/)[0] === "curl");
+}
+
+/**
+ * Can a def's bot actually take the upload path (operator ruling on the 24k
+ * inline cap)? ALL of these, or no:
+ *   (a) a shell — `bash` in tools.pi_builtin (nothing else can curl a file up);
+ *   (b) the upload tools — the whole `artifacts` grant, or both upload tools;
+ *   (c) a shell policy that is not deny and, when it is an allowlist, one that
+ *       allows `curl`.
+ * `shellMode` is the gateway's effectiveShellMode (servers/shared/
+ * bot-permission-policy.js), injected by the mount: it is the SAME rule the
+ * bridge spawns with ask/auto under, so "deny" here means the bot would be
+ * denied there too. Absent (a bare harness), a throw, or any unknown value
+ * reads as false: the old inline save.
+ */
+export function defCanUpload(def, actor, shellMode) {
+  if (!def || typeof shellMode !== "function") return false;
+  if (!defHasShellTool(def)) return false;
+  if (!defGrantsUpload(def)) return false;
+  let mode;
+  try { mode = shellMode(def, { interactive: actor && actor.gateway === "perch" }); } catch { return false; }
+  if (typeof mode !== "string" || mode === "deny") return false;
+  if (mode === "allowlist") return allowlistAllowsCurl(def.permission_policy && def.permission_policy.bash_allow);
+  // ask / auto: a person (or the classifier, in a live Perch chat) can say yes.
+  // Anything else is not a policy this bundle knows: no cap.
+  return mode === "ask" || mode === "auto";
+}
+
+/**
+ * Does this bot's stored def grant a shell? Kept for the def reader's callers
+ * and tests; see defHasShellTool for the rule and defCanUpload for the whole
+ * verdict.
+ * @returns {Promise<boolean>}
+ */
+export async function defGrantsShell(db, botId) {
+  try { return defHasShellTool(await readBotDef(db, botId)); } catch { return false; }
+}
+
+/**
  * Who may reach the two-step upload — and is therefore held to the inline cap
- * (operator ruling 2026-11-16, option A). The cap is a signpost, not a wall:
+ * (operator ruling 2026-11-16, option A; tightened 2026-11 by the follow-up
+ * review: a shell alone is not enough). The cap is a signpost, not a wall:
  * "too_big_inline" tells the model to write a file and upload it. Only a
  * caller that can act on that advice is refused inline:
  *   - the operator session, always;
- *   - a verified bot whose stored def grants a shell AND that is not held to a
- *     locked/untrusted round scope (the ruling leaves a scoped session on its
- *     round's own gates, so its inline save stays uncapped).
- * Everyone else — no shell, an unreadable def, a channel turn — keeps the old
- * inline behaviour: no 24k cap, bounded by the per-type caps and the 1 MB JSON
- * parser. Never strand a bot that has no other way to save.
+ *   - a verified bot that holds the upload pair AND can run it — a shell tool,
+ *     a shell policy that is not deny (allowlist: one that allows curl) — and
+ *     that is not held to a locked/untrusted round scope (the ruling leaves a
+ *     scoped session on its round's own gates, so its inline save stays
+ *     uncapped).
+ * Everyone else — no shell, no upload tools, a deny/curl-less allowlist, an
+ * unreadable def, a channel turn — keeps the old inline behaviour: no 24k cap,
+ * bounded by the per-type caps and the 1 MB JSON parser. Never strand a bot
+ * that has no other way to save.
+ * @param {{shellMode?: Function}} [opts] the gateway's effectiveShellMode.
  * @returns {Promise<boolean>}
  */
-export async function canUploadSource(db, actor, scope) {
+export async function canUploadSource(db, actor, scope, { shellMode = null } = {}) {
   if (!actor) return false;
   if (actor.kind === "session") return true;
   if (actor.kind !== "bot" || !actor.id || scope) return false;
-  try { return await defGrantsShell(db, actor.id); } catch { return false; }
+  try { return defCanUpload(await readBotDef(db, actor.id), actor, shellMode); } catch { return false; }
 }
 
 /** The gateway origin this MCP request came in on: the same base URL the bot's
@@ -294,7 +374,7 @@ function sourceSchema(z) {
   }).describe('Strings only. page: {"html": "<!doctype html>…"}; document: {"markdown": "# Title…", "title"?}; diagram: {"svg": "<svg…>…</svg>"} or, with the Design kit, {"engine": "mermaid", "source": "…"}.');
 }
 
-export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {}, emitExternal = null, cardMadeByOwner = async () => false, canUpload = null } = {}) {
+export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {}, emitExternal = null, cardMadeByOwner = async () => false, canUpload = null, shellMode = null } = {}) {
   // Default: a new current version carries open threads forward (§4.2).
   if (!onVersion) onVersion = async ({ artifactId, n, state, onlyThreads }) => { if (state === "current") await comments.carryForwardTo(db, blobs, artifactId, n, onlyThreads || null); };
   if (!McpServer || !z) throw new Error("createArtifactsMcpServer needs the gateway's McpServer and z");
@@ -308,9 +388,11 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
   const scopeOfActor = (actor) => scopeOf(db, actor);
   // The inline 24k cap, decided per caller (operator ruling 2026-11-16,
   // option A): canUpload is the seam a test injects, the default reads the
-  // bot's stored def. A seam that throws means "cannot upload" — the old
-  // inline save, never a refusal the caller cannot act on.
-  const mayUpload = typeof canUpload === "function" ? canUpload : (actor, scope) => canUploadSource(db, actor, scope);
+  // bot's stored def and holds it to the gateway's own shell policy
+  // (shellMode = effectiveShellMode, injected by the mount — this bundle copy
+  // cannot import app modules). A seam that throws means "cannot upload" — the
+  // old inline save, never a refusal the caller cannot act on.
+  const mayUpload = typeof canUpload === "function" ? canUpload : (actor, scope) => canUploadSource(db, actor, scope, { shellMode });
   const canUploadInline = async (actor, scope) => { try { return (await mayUpload(actor, scope)) === true; } catch { return false; } };
   // The actor's house style (spec §4.4): a verified bot's project theme or bot
   // default; never for the operator or an unattributed caller.

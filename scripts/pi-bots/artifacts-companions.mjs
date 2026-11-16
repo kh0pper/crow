@@ -23,7 +23,7 @@ import { primeBareServerTools } from "./bare-server-tools.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { isVoiceBotId, isVoiceBotDef } from "../../servers/shared/voice-bot.js";
 
-// v2 (2026-10): v1 shipped before the upload pair existed, so an instance
+// v2 (2026-11): v1 shipped before the upload pair existed, so an instance
 // that already carries the v1 marker has defs with Find and Attach but no
 // artifact_upload_begin/commit. The bump makes the migration run once more;
 // a def already fully augmented is a no-op (added = []).

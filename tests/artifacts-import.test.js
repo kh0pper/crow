@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import http from "node:http";
 import express from "express";
 import { createDbClient } from "../servers/db.js";
@@ -18,13 +19,14 @@ import * as runtime from "../servers/gateway/artifact-origin/runtime.js";
 import * as policy from "../servers/gateway/artifact-origin/policy.js";
 import { createLocalBlobStore } from "../bundles/artifacts/server/blob-store.js";
 import { initArtifactsTables } from "../bundles/artifacts/server/init-tables.js";
-import { _overrideLimitsForTest } from "../bundles/artifacts/server/limits.js";
+import { LIMITS, _overrideLimitsForTest } from "../bundles/artifacts/server/limits.js";
 import * as store from "../bundles/artifacts/server/store.js";
 import * as comments from "../bundles/artifacts/server/comments.js";
 import artifactsRouter from "../bundles/artifacts/panel/routes.js";
 import { VIEWER_STRINGS, renderViewerPage } from "../bundles/artifacts/panel/viewer-page.js";
 
 const RENDERED = '<svg viewBox="0 0 10 10"><rect id="n1" width="5" height="5"><title>Node one</title></rect></svg>';
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="5" height="5"/></svg>';
 const s = { engine: [], notes: [] };
 // The Design kit seam: a diagram's { engine, source } renders through it, so
@@ -44,6 +46,17 @@ before(async () => {
   runtime._resetForTest();
   const dashboardAuth = (req, res, next) => (/crow_session=good/.test(req.headers.cookie || "") ? next() : res.status(401).json({ error: "login" }));
   const app = express();
+  // servers/gateway/index.js's split, with the REAL predicate (read from its
+  // source, the idiom the other gateway tests use): the global 1mb parser skips
+  // the paths whose router parses its own body — the import route's own
+  // json({limit:"60mb"}) must be the one that sees a multi-megabyte file.
+  const indexSrc = readFileSync(join(REPO, "servers/gateway/index.js"), "utf8");
+  const predicate = /const _hasOwnParser = \(p\) => ([^\n]*\n[^\n]*);/.exec(indexSrc);
+  assert.ok(predicate, "index.js's _hasOwnParser is where it was");
+  const hasOwnParser = new Function("p", `return ${predicate[1]};`);
+  s.hasOwnParser = hasOwnParser;
+  const globalJson = express.json({ limit: "1mb" });
+  app.use((req, res, next) => (hasOwnParser(req.path) ? next() : globalJson(req, res, next)));
   app.use(artifactsRouter(dashboardAuth, {
     db: s.db, blobs: s.blobs, runtime, policy, csrf: csrfMiddleware, renderDeps,
     design: null,             // the fake kit above is the only one this harness has
@@ -137,8 +150,66 @@ test("over the upload cap → 413, no version is written; a document's markdown 
   } finally { restore(); }
 });
 
-test("an empty (or non-string) text is refused with 400", async () => {
-  const art = await mk("page", { html: "<p>v1</p>" }, "Empty");
+test("a 2 MB file gets through the gateway's global 1 MB parser (the route parses its own body); a 5 MB one is the route's own 413", async () => {
+  // The viewer offers up to 4 MiB. The global express.json({limit:"1mb"}) in
+  // servers/gateway/index.js would 413 that long before the router's own parser
+  // ran, so `_hasOwnParser` names this route — the harness above wires the real
+  // predicate, so this is the prod path, not a stand-in.
+  assert.equal(s.hasOwnParser("/api/artifacts/art_abc12345/import"), true, "the import route parses its own body");
+  assert.equal(s.hasOwnParser("/API/Artifacts/art_abc12345/Import"), true, "…case-insensitively");
+  assert.equal(s.hasOwnParser("/api/artifacts/art_abc12345/import/"), true, "…and with a trailing slash (Express is non-strict)");
+  assert.equal(s.hasOwnParser("/api/artifacts/art_abc12345/versions"), false, "every other artifact route keeps the global parser");
+  assert.equal(s.hasOwnParser("/api/artifacts/import"), false, "…and so does a look-alike path with no id");
+
+  const art = await mk("page", { html: "<p>v1</p>" }, "Two megabytes");
+  const big = "<p>" + "x".repeat(2 * 1024 * 1024) + "</p>";
+  const r = await imp(art.id, { text: big });
+  assert.equal(r.status, 200, "2 MB of text is over the 1 MB global parser and under the route's 4 MiB cap");
+  assert.equal(r.body.state, "current");
+  assert.equal((await sourceOf(art.id, 2)).html.length, big.length, "nothing was truncated on the way");
+
+  const over = await imp(art.id, { text: "<p>" + "y".repeat(5 * 1024 * 1024) + "</p>" });
+  assert.equal(over.status, 413, "5 MB is the ROUTE's own answer, not the parser's");
+  assert.equal(over.body.error, "too_large", "…with the route's JSON code, so the parser never saw it");
+  assert.equal(await currentOf(art.id), 2, "no version beyond the good import");
+});
+
+test("a Design-kit diagram's spec is capped at diagramSourceBytes (the upload path's own ceiling); an svg import is not", async () => {
+  const kit = await mk("diagram", { engine: "mermaid", source: "flowchart LR\n  a --> b" }, "Kit cap");
+  const svgArt = await mk("diagram", { svg: SVG }, "Svg cap");
+  const spec = "flowchart LR\n" + "  a --> b\n".repeat(Math.ceil(LIMITS.diagramSourceBytes / 10) + 4);
+  assert.ok(Buffer.byteLength(spec) > LIMITS.diagramSourceBytes, "the fixture is over the spec cap");
+  assert.ok(Buffer.byteLength(spec) < LIMITS.uploadBytes, "…and well under the 4 MiB upload cap");
+  const r = await imp(kit.id, { text: spec });
+  assert.equal(r.status, 413);
+  assert.equal(r.body.error, "too_large");
+  assert.equal((await versions(kit.id)).length, 1, "no version was written");
+  // The same size as an SVG is fine: a finished drawing is a page-sized file.
+  const rect = '<rect x="1" y="1" width="2" height="2"/>';
+  const bigSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">' + rect.repeat(Math.ceil((LIMITS.diagramSourceBytes + 1024) / rect.length)) + '</svg>';
+  assert.ok(Buffer.byteLength(bigSvg) > LIMITS.diagramSourceBytes);
+  assert.equal((await imp(svgArt.id, { text: bigSvg })).status, 200, "an svg diagram keeps the 4 MiB cap");
+  // …and a spec just under the cap still lands.
+  const ok = "flowchart TD\n  x --> y";
+  assert.equal((await imp(kit.id, { text: ok })).status, 200);
+  assert.deepEqual(await sourceOf(kit.id, 2), { engine: "mermaid", source: ok });
+});
+
+test("an over-long change note is refused with 400 (never silently truncated)", async () => {
+  const art = await mk("page", { html: "<p>v1</p>" }, "Note cap");
+  const long = "n".repeat(LIMITS.changeNoteChars + 1);
+  const r = await imp(art.id, { text: "<p>v2</p>", change_note: long });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, "too_long");
+  assert.equal(r.body.message, `a change note is limited to ${LIMITS.changeNoteChars} characters`);
+  assert.equal((await versions(art.id)).length, 1, "nothing was written");
+  // Exactly the cap is allowed, and stored whole.
+  const atCap = "m".repeat(LIMITS.changeNoteChars);
+  assert.equal((await imp(art.id, { text: "<p>v2</p>", change_note: atCap })).status, 200);
+  assert.equal((await versions(art.id)).at(-1).change_note, atCap);
+});
+
+test("an empty (or non-string) text is refused with 400", async () => {  const art = await mk("page", { html: "<p>v1</p>" }, "Empty");
   assert.equal((await imp(art.id, { text: "   \n " })).status, 400);
   assert.equal((await imp(art.id, {})).status, 400);
   assert.equal((await versions(art.id)).length, 1);

@@ -751,6 +751,14 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
    * the version is not tainted. It rides addVersion, so a received artifact is
    * refused and a current version carries open threads forward, exactly as the
    * decide route does.
+   *
+   * Bodies: this router's own json({limit:"60mb"}) parses the POST — index.js's
+   * `_hasOwnParser` names `POST /api/artifacts/<id>/import`, so the gateway's
+   * 1 MB global parser never 413s a file the viewer offers at up to 4 MiB.
+   * The caps here are what actually bound it, and each refusal is static:
+   * uploadBytes for a page's html, documentMarkdownBytes for a document's
+   * markdown, diagramSourceBytes for a Design-kit diagram's spec, and
+   * changeNoteChars for the note (refused, never silently truncated).
    */
   router.post("/api/artifacts/:id/import", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
@@ -765,12 +773,22 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       source = { markdown: text };
     } else if (art.type === "diagram") {
       // A Design-kit diagram keeps rendering ITS engine: the file is that
-      // diagram's spec, not a finished SVG.
+      // diagram's spec, not a finished SVG. A spec is short by nature (the kit
+      // refuses one over 64 KB), so it carries the upload path's own tighter
+      // ceiling rather than the 4 MiB a page may import.
       const cur = await M.store.getVersion(S.db, art.id, art.current_version);
       let prev = null; try { prev = cur && cur.source_json ? JSON.parse(cur.source_json) : null; } catch { prev = null; }
-      source = prev && typeof prev.engine === "string" && prev.engine ? { engine: prev.engine, source: text } : { svg: text };
+      if (prev && typeof prev.engine === "string" && prev.engine) {
+        if (bytes > S.limits.diagramSourceBytes) throw Object.assign(new Error(`a diagram's spec is limited to ${S.limits.diagramSourceBytes} bytes`), { code: "too_large" });
+        source = { engine: prev.engine, source: text };
+      } else source = { svg: text };
     } else throw Object.assign(new Error("this artifact can't be imported"), { code: "bad_request" });
-    const note = typeof req.body?.change_note === "string" && req.body.change_note.trim() ? req.body.change_note : null;
+    // The note is the owner's one line about the import. The store TRUNCATES an
+    // over-long one; here it is refused instead, so nothing the owner typed is
+    // lost without an answer.
+    const rawNote = typeof req.body?.change_note === "string" ? req.body.change_note : null;
+    if (rawNote && rawNote.length > S.limits.changeNoteChars) throw Object.assign(new Error(`a change note is limited to ${S.limits.changeNoteChars} characters`), { code: "too_long" });
+    const note = rawNote && rawNote.trim() ? rawNote : null;
     const v = await M.store.addVersion(S.db, S.blobs, { artifactId: art.id, source, actor: OWNER, changeNote: note || "Imported from a file", untrusted: false }, S.renderDeps);
     if (v.state === "current") await M.comments.carryForwardTo(S.db, S.blobs, art.id, v.n);
     res.json({ version: v.n, state: v.state });

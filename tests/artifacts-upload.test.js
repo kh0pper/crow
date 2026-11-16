@@ -7,7 +7,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
@@ -30,6 +30,7 @@ import * as store from "../bundles/artifacts/server/store.js";
 import { LIMITS } from "../bundles/artifacts/server/limits.js";
 import { handleUploadPut, readMeter, _resetReadMeter, _resetUploadsForTest, _expireForTest, UPLOAD_PATH_PREFIX, MAX_PENDING_PER_ACTOR, SWEEP_INTERVAL_MS, capForField, findUpload, takeUpload } from "../bundles/artifacts/server/uploads.js";
 import { initGatewayActorKey, signArtifactsActor, verifyArtifactsActorSig } from "../scripts/pi-bots/actor-sig.mjs";
+import { effectiveShellMode } from "../servers/shared/bot-permission-policy.js";
 import { isFunnelPublicPath, rejectFunneledMiddleware } from "../servers/gateway/funnel.js";
 import { isDoorPath } from "../servers/shared/bot-doors.js";
 
@@ -56,7 +57,7 @@ before(async () => {
   app.use(localTokenAuthMiddleware(s.db));
   const noAuth = (req, res) => res.status(401).json({ jsonrpc: "2.0", id: req.body?.id ?? null, error: { code: -32001, message: "unauthorized" } });
   const sm = new SessionManager();
-  mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: s.db, blobs: s.blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks } }), sm, noAuth);
+  mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: s.db, blobs: s.blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks }, shellMode: effectiveShellMode }), sm, noAuth);
   // The PUT leg, exactly as the gateway mounts it (mcp-mounts.js).
   app.put(`${UPLOAD_PATH_PREFIX}/:upload_id`, handleUploadPut);
   s.http = app.listen(0); await new Promise((r) => s.http.once("listening", r));
@@ -154,6 +155,17 @@ const botDef = (botId, builtin, raw = null) => s.db.execute({
   sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,1)",
   args: [botId, botId, raw ?? JSON.stringify({ tools: { pi_builtin: builtin } })],
 });
+/** The def the inline cap's TARGET has to hold (operator ruling, follow-up
+ *  review): the shell tool, the upload pair in crow_mcp, and a shell policy that
+ *  actually runs. `bash: "auto"` is the ordinary case; the allowlist variants
+ *  are the tighter ones the ruling names. */
+const capBotDef = (botId, { builtin = ["read", "bash"], bash = "auto", allow = ["curl"], uploaded = true } = {}) => botDef(botId, builtin, JSON.stringify({
+  tools: {
+    pi_builtin: builtin,
+    crow_mcp: ["artifacts/artifact_create", "artifacts/artifact_update", ...(uploaded ? ["artifacts/artifact_upload_begin", "artifacts/artifact_upload_commit"] : [])],
+  },
+  permission_policy: { bash, bash_allow: allow },
+}));
 
 // ─── the happy path, and its identity with the inline tools ─────────────────
 
@@ -195,7 +207,7 @@ test("begin returns a put_url on this gateway plus a curl line; begin → PUT �
 });
 
 test("a 30 KB page: refused inline with too_big_inline and nothing written, then saved through the upload", async () => {
-  await botDef("bobby", ["read", "bash"]);   // a shell: this bot CAN upload, so the cap is a signpost it can act on
+  await capBotDef("bobby");   // the shell, the upload pair and a shell policy: this bot CAN upload, so the cap is a signpost it can act on
   await clean("bobby", "perchlive-up2");
   const c = await client(s.artToken, bot("bobby", "perchlive-up2"));
   try {
@@ -217,7 +229,7 @@ test("a 30 KB page: refused inline with too_big_inline and nothing written, then
 });
 
 test("the inline cap applies to create too — and only above the limit (24000 chars still passes)", async () => {
-  await botDef("bobby", ["read", "bash"]);
+  await capBotDef("bobby");
   await clean("bobby", "perchlive-up3");
   const c = await client(s.artToken, bot("bobby", "perchlive-up3"));
   try {
@@ -402,8 +414,8 @@ test("the upload PUT is a bot door, and the gateway still refuses a token it doe
 
 const BIG_SOURCE = "<!doctype html><html><body><p>" + "x".repeat(30 * 1024) + "</p></body></html>";
 
-test("the inline cap holds for the operator session and for a bot whose def grants a shell", async () => {
-  await botDef("shellbot", ["read", "bash"]);
+test("the inline cap holds for the operator session and for a bot that can actually upload", async () => {
+  await capBotDef("shellbot");
   await clean("shellbot", "perchlive-cap-shell");
   const c = await client(s.artToken, bot("shellbot", "perchlive-cap-shell"));
   const op = await client(s.fullToken);
@@ -411,7 +423,7 @@ test("the inline cap holds for the operator session and for a bot whose def gran
     const id = (await call(c, "artifact_create", { title: "Capped", type: "page", source: { html: "<p>v1</p>" } })).data.id;
     const before = await versions(id);
     const fromBot = await call(c, "artifact_update", { artifact_id: id, source: { html: BIG_SOURCE } });
-    assert.match(fromBot.err, /^\[too_big_inline\]/, "a bot with a shell can upload: the cap points there");
+    assert.match(fromBot.err, /^\[too_big_inline\]/, "a bot that holds the upload pair and a working shell can upload: the cap points there");
     const fromOp = await call(op, "artifact_update", { artifact_id: id, source: { html: BIG_SOURCE } });
     assert.match(fromOp.err, /^\[too_big_inline\]/, "the operator can always upload");
     assert.equal(await versions(id), before, "neither refusal wrote a version");
@@ -421,7 +433,10 @@ test("the inline cap holds for the operator session and for a bot whose def gran
 test("no shell, an unreadable def and a locked round scope all keep the inline save", async () => {
   await botDef("noshellbot", ["read", "write", "edit"]);   // no bash: no way to curl a file up
   await botDef("brokendef", null, "not-json{");              // the def cannot be read
-  await botDef("scopedbot", ["read", "bash"]);               // a shell, but held to a locked round
+  await botDef("scopedbot", null, JSON.stringify({   // a full uploader, but held to a locked round
+    tools: { pi_builtin: ["read", "bash"], crow_mcp: ["artifacts/artifact_upload_begin", "artifacts/artifact_upload_commit"] },
+    permission_policy: { bash: "auto", bash_allow: ["curl"] },
+  }));
   await clean("noshellbot", "perchlive-cap-noshell");
   await clean("brokendef", "perchlive-cap-broken");
   await clean("scopedbot", "perchlive-cap-locked");
@@ -454,20 +469,55 @@ test("no shell, an unreadable def and a locked round scope all keep the inline s
   } finally { await noshell.close(); await broken.close(); await scoped.close(); }
 });
 
-test("canUploadSource: the operator always, a bot only with a shell and no scope — the hook the cap hangs on", async () => {
-  const { canUploadSource, defGrantsShell } = await import("../bundles/artifacts/server/mcp.js");
-  await botDef("seam-shell", ["read", "bash"]);
+test("canUploadSource: the operator always; a bot only with the upload pair, a shell and a shell policy that runs — and no scope", async () => {
+  const { canUploadSource, defGrantsShell, defGrantsUpload, allowlistAllowsCurl, defCanUpload } = await import("../bundles/artifacts/server/mcp.js");
+  const perch = { kind: "bot", gateway: "perch" };
+  await capBotDef("seam-ok");                                                        // shell + pair + auto
+  await capBotDef("seam-listed", { bash: "allowlist", allow: ["ls", "curl -sS"] });   // an allowlist that allows curl
+  await capBotDef("seam-nocurl", { bash: "allowlist", allow: ["ls", "grep curl.log"] });
+  await capBotDef("seam-deny", { bash: "deny" });                                     // a stored deny
+  await botDef("seam-bare", ["read", "bash"], JSON.stringify({ tools: { pi_builtin: ["read", "bash"], crow_mcp: ["artifacts/artifact_upload_begin", "artifacts/artifact_upload_commit"] } }));  // no permission_policy
+  await capBotDef("seam-nopair", { uploaded: false });                                 // bash, no upload tools
+  await botDef("seam-gmail", null, JSON.stringify({ tools: { pi_builtin: ["read", "bash"], crow_mcp: ["artifacts/artifact_upload_begin", "artifacts/artifact_upload_commit"] }, permission_policy: { bash: "ask" }, gateways: [{ type: "gmail" }] }));  // ask, but the bot answers on Gmail
   await botDef("seam-noshell", ["read"]);
   await botDef("seam-broken", null, "{oops");
-  assert.equal(await canUploadSource(s.db, { kind: "session" }), true, "the operator can always curl a file up");
-  assert.equal(await canUploadSource(s.db, { kind: "bot", id: "seam-shell" }), true);
-  assert.equal(await canUploadSource(s.db, { kind: "bot", id: "seam-noshell" }), false);
-  assert.equal(await canUploadSource(s.db, { kind: "bot", id: "seam-broken" }), false, "an unreadable def is 'cannot upload'");
-  assert.equal(await canUploadSource(s.db, { kind: "bot", id: "nobody" }), false, "no row at all is 'cannot upload'");
-  assert.equal(await canUploadSource(s.db, { kind: "bot", id: "seam-shell" }, { roundId: 7, artifactId: "art_x1" }), false, "a locked/untrusted scope is on its round's gates");
-  assert.equal(await canUploadSource(s.db, { kind: "unattributed" }), false);
+
+  assert.equal(await canUploadSource(s.db, { kind: "session" }, null, { shellMode: effectiveShellMode }), true, "the operator can always curl a file up");
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-ok" }, null, { shellMode: effectiveShellMode }), true, "shell + pair + auto");
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-listed" }, null, { shellMode: effectiveShellMode }), true, "an allowlist that allows curl");
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-nocurl" }, null, { shellMode: effectiveShellMode }), false, "an allowlist with no curl cannot PUT a file");
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-deny" }, null, { shellMode: effectiveShellMode }), false, "a stored deny");
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-bare" }, null, { shellMode: effectiveShellMode }), false, "no permission_policy reads as deny (effectiveShellMode)");
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-nopair" }, null, { shellMode: effectiveShellMode }), false, "bash without the upload pair is not an uploader");
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-gmail" }, null, { shellMode: effectiveShellMode }), false, "ask on a bot that also answers on Gmail runs as deny");
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-noshell" }, null, { shellMode: effectiveShellMode }), false);
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-broken" }, null, { shellMode: effectiveShellMode }), false, "an unreadable def is 'cannot upload'");
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "nobody" }, null, { shellMode: effectiveShellMode }), false, "no row at all is 'cannot upload'");
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-ok" }, { roundId: 7, artifactId: "art_x1" }, { shellMode: effectiveShellMode }), false, "a locked/untrusted scope is on its round's gates");
+  assert.equal(await canUploadSource(s.db, { kind: "unattributed" }, null, { shellMode: effectiveShellMode }), false);
+  // Any unknown: no policy reader injected, or a reader that throws → no cap.
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-ok" }), false, "no shellMode injected reads as 'cannot upload'");
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-ok" }, null, { shellMode: () => { throw new Error("boom"); } }), false);
+  assert.equal(await canUploadSource(s.db, { ...perch, id: "seam-ok" }, null, { shellMode: () => "whatever" }), false, "an unknown mode is not 'allowed'");
+  // The pieces, directly.
   assert.equal(await defGrantsShell(s.db, "seam-broken"), false);
-  assert.equal(await defGrantsShell(s.db, "seam-shell"), true);
+  assert.equal(await defGrantsShell(s.db, "seam-ok"), true);
+  assert.equal(defGrantsUpload({ tools: { crow_mcp: ["artifacts"] } }), true, "the whole server entry covers the pair");
+  assert.equal(defGrantsUpload({ tools: { crow_mcp: ["artifacts__artifact_upload_begin", "artifacts__artifact_upload_commit"] } }), true, "the bridge's __ spelling too");
+  assert.equal(defGrantsUpload({ tools: { crow_mcp: ["artifacts/artifact_upload_begin"] } }), false, "Begin without Commit lands nothing");
+  assert.equal(defGrantsUpload({ tools: {} }), false);
+  assert.equal(allowlistAllowsCurl(["curl", "ls"]), true);
+  assert.equal(allowlistAllowsCurl(["curl -T"]), true, "an entry is a command prefix");
+  assert.equal(allowlistAllowsCurl(["grep curl"]), false, "curl as an argument is not the command");
+  assert.equal(allowlistAllowsCurl([]), false);
+  assert.equal(allowlistAllowsCurl("curl"), false, "a bare string is not a list");
+  assert.equal(defCanUpload({ tools: { pi_builtin: ["bash"], crow_mcp: ["artifacts"] } }, { kind: "bot" }, null), false, "no policy reader at all");
+});
+
+test("the mount injects the gateway's own effectiveShellMode (the installed bundle copy cannot import it)", () => {
+  const src = readFileSync(new URL("../servers/gateway/boot/mcp-mounts.js", import.meta.url), "utf8");
+  assert.match(src, /const \{ effectiveShellMode \} = await import\("\.\.\/\.\.\/shared\/bot-permission-policy\.js"\)/);
+  assert.match(src, /createArtifactsMcpServer\(\{[\s\S]*?shellMode: effectiveShellMode/);
 });
 
 // ─── every gate the inline tools run, run here too ─────────────────────────

@@ -539,7 +539,13 @@ export async function mountMcpServers(app, deps) {
       let design = null;
       try { design = (await imp("design.js")).createDesign({ crowHome: resolveCrowHome(), db: artDb }); }
       catch (e) { console.warn(`[gateway] artifacts: the Design kit seam could not be loaded (${e.message}); saving without the kit`); }
-      mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks, design }, onRoundDone, emitExternal, cardMadeByOwner: (id) => cardMadeByOwner(id) }), sessionManager, authMiddleware, peerExposureGate);
+      // The inline 24k cap applies only to a caller that can take the upload
+      // path, which includes the bot's OWN shell policy: the same
+      // effectiveShellMode the bridge spawns it under (ask/auto run only in a
+      // live Perch chat; a channel turn is deny). The installed bundle copy
+      // cannot import app modules, so the rule is injected here.
+      const { effectiveShellMode } = await import("../../shared/bot-permission-policy.js");
+      mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks, design }, onRoundDone, emitExternal, cardMadeByOwner: (id) => cardMadeByOwner(id), shellMode: effectiveShellMode }), sessionManager, authMiddleware, peerExposureGate);
       // The two-step upload's PUT leg (artifact_upload_begin → PUT → commit): the
       // URL path IS the capability (32 random bytes, stored only as a sha256, in
       // memory in uploads.js), so there is no cookie, no token and no CSRF check
