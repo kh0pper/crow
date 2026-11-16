@@ -110,6 +110,7 @@ const SOURCE_NAMES = Object.freeze([
   "sequencer.js",
   "resample.js",
   "sampler-voice.js",
+  "pad-events.js",
   "perf-fx.js",
   "meter.js",
   "dynamics.js",

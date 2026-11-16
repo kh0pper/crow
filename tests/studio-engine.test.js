@@ -69,6 +69,7 @@ const ASSETS = {
   "sequencer.js": readFileSync(join(ENGINE_DIR, "sequencer.js"), "utf8"),
   "resample.js": readFileSync(join(ENGINE_DIR, "resample.js"), "utf8"),
   "sampler-voice.js": readFileSync(join(ENGINE_DIR, "sampler-voice.js"), "utf8"),
+  "pad-events.js": readFileSync(join(ENGINE_DIR, "pad-events.js"), "utf8"),
   "perf-fx.js": readFileSync(join(ENGINE_DIR, "perf-fx.js"), "utf8"),
   "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
   // The vendored SoundFont synth is part of the worklet module (engine-client's
@@ -934,6 +935,7 @@ const SERVED = {
   "/assets/sequencer.js": ["text/javascript; charset=utf-8", () => ASSETS["sequencer.js"]],
   "/assets/resample.js": ["text/javascript; charset=utf-8", () => ASSETS["resample.js"]],
   "/assets/sampler-voice.js": ["text/javascript; charset=utf-8", () => ASSETS["sampler-voice.js"]],
+  "/assets/pad-events.js": ["text/javascript; charset=utf-8", () => ASSETS["pad-events.js"]],
   "/assets/perf-fx.js": ["text/javascript; charset=utf-8", () => ASSETS["perf-fx.js"]],
   "/assets/sunvox.js": ["text/javascript; charset=utf-8", () => ASSETS["sunvox.js"]],
   "/assets/spessasynth.js": ["text/javascript; charset=utf-8", () => ASSETS["spessasynth.js"]],

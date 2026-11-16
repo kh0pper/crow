@@ -341,6 +341,9 @@ const ASSET_FILES = new Map([
   ["sequencer.js", join("engine", "sequencer.js")],
   ["resample.js", join("engine", "resample.js")],
   ["sampler-voice.js", join("engine", "sampler-voice.js")],
+  // The pad-event ring the processor fills for the page's lights, part of the
+  // worklet module (engine-client.js's SOURCE_FILES) like the rest.
+  ["pad-events.js", join("engine", "pad-events.js")],
   ["perf-fx.js", join("engine", "perf-fx.js")],
   ["resample-worker.js", join("engine", "resample-worker.js")],
   ["chop.js", join("engine", "chop.js")],
