@@ -1252,3 +1252,218 @@ test("POST /moves/standin: a refusal is a 409 with the day's reason", async () =
     })).status, 400, "a log key is bounded");
   } finally { await mount.close(); }
 });
+
+/* ------------------------------------------ the day payload's extras (10.1) */
+
+/**
+ * A library that lets a stated limit be seen to bite: every chunk of an area
+ * carries the knee tag, and the one chunk per area that does not needs a mat —
+ * out of reach until the user says they have one, so the first day can only
+ * draw a knee-tagged card.
+ */
+function limitLibrary() {
+  return CHUNK_AREAS.flatMap((area) => [
+    ...[1, 2, 3, 4, 5].map((n) => entry({
+      id: `${area}-knee-${n}`, title: `A ${area} chunk, number ${n}`, areas: [area], skipIf: ["knee"],
+    })),
+    entry({ id: `${area}-mat`, title: `A ${area} mat chunk`, areas: [area], equipment: ["mat"] }),
+  ]);
+}
+
+/** One wallet row, written the way the ledger writes it. */
+async function walletFact(db, kind, key, delta = 1) {
+  await db.execute({
+    sql: "INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, ?, ?)",
+    args: [kind, key, delta, 0],
+  });
+}
+
+test("day payload: the bird, Health, hearts, steps, the streak, the week and the setup ride along", async () => {
+  const mount = await freshMount();
+  try {
+    const r = await dayGet(mount.url);
+    assert.equal(r.status, 200);
+    const body = await r.json();
+
+    assert.equal(body.bird, null, "no bird has hatched on a fresh db");
+    assert.ok(Number.isFinite(body.health.energy));
+    assert.ok(Number.isFinite(body.health.max));
+    assert.equal(typeof body.health.mood, "string");
+    assert.equal(typeof body.hearts, "number");
+    assert.deepEqual(Object.keys(body.steps).sort(), ["day", "goal", "goal_met", "steps", "walked"]);
+    assert.equal(body.steps.day, localDay(Date.now()));
+    assert.equal(body.steps.goal, 6000);
+    assert.equal(body.steps.steps, 0);
+    assert.equal(body.streak.days, 0);
+    assert.equal(body.streak.doneToday, 0);
+    assert.equal(body.streak.need, body.need, "the streak carries the day's card count");
+    assert.equal(typeof body.week.total, "number");
+    assert.equal(body.setup.needed, true, "nothing has been stated yet");
+
+    // The fields the day answered before are still there beside them.
+    assert.equal(body.day, localDay(Date.now()));
+    assert.equal(body.off, false);
+    assert.equal(body.complete, false);
+    assert.ok(Array.isArray(body.slots));
+
+    // A swap answers the same payload, so the extras travel with it too.
+    const slot = body.slots[0].slot;
+    const swapped = await (await dayPost(mount.url, "/api/ramble/moves/slot/swap", { slot })).json();
+    assert.equal("bird" in swapped, true);
+    assert.ok(Number.isFinite(swapped.health.energy));
+    assert.equal(typeof swapped.streak.doneToday, "number");
+    assert.equal(typeof swapped.week.total, "number");
+    assert.equal(typeof swapped.setup.needed, "boolean");
+  } finally { await mount.close(); }
+});
+
+test("day payload: streak.doneToday counts the day's own moveslot rows", async () => {
+  const mount = await freshMount();
+  try {
+    const first = await (await dayGet(mount.url)).json();
+    assert.equal(first.streak.doneToday, 0);
+    const day = first.day;
+    const db = await mountDb(mount.dir);
+    try {
+      await walletFact(db, "moveslot", day + ":morning");
+      await walletFact(db, "moveslot", day + ":midday");
+      // Not one of the day's slot names, so it is no card of it.
+      await walletFact(db, "moveslot", day + ":early");
+
+      const after = await (await dayGet(mount.url)).json();
+      assert.equal(after.streak.doneToday, 2, "two of the day's slots are finished");
+      assert.equal(after.streak.need, after.need);
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
+
+test("day payload: the setup is needed until a prefs row or an answer exists", async () => {
+  const fresh = await freshMount();
+  try {
+    assert.equal((await (await dayGet(fresh.url)).json()).setup.needed, true);
+  } finally { await fresh.close(); }
+
+  // A prefs row written before the first read of the day is an answer too.
+  const stated = await freshMount();
+  try {
+    assert.equal((await dayPost(stated.url, "/api/ramble/moves/prefs", { level: 1 })).status, 200);
+    assert.equal((await (await dayGet(stated.url)).json()).setup.needed, false);
+  } finally { await stated.close(); }
+
+  const answered = await freshMount();
+  try {
+    assert.equal((await dayPost(answered.url, "/api/ramble/moves/setup", {})).status, 200);
+    assert.equal((await (await dayGet(answered.url)).json()).setup.needed, false);
+  } finally { await answered.close(); }
+});
+
+test("day payload: POST /moves/setup with an empty body stores the skip defaults", async () => {
+  const mount = await freshMount();
+  try {
+    // The setup route sits behind the session auth like the rest of the moves API.
+    assert.equal((await fetch(mount.url + "/api/ramble/moves/setup", { method: "POST" })).status, 401);
+
+    const r = await dayPost(mount.url, "/api/ramble/moves/setup", {});
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.deepEqual([...body.prefs.equipment].sort(), ["none", "wall"]);
+    assert.deepEqual(body.prefs.limits, []);
+    assert.equal(body.prefs.level, 2);
+    assert.ok(body.day, "the answer carries the fresh day");
+    assert.equal(body.day.day, localDay(Date.now()));
+    assert.ok(Array.isArray(body.day.slots));
+    assert.equal(body.day.setup.needed, false);
+
+    const db = await mountDb(mount.dir);
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT value FROM ramble_settings WHERE key = ?", args: ["moves.setup.seen"],
+      });
+      assert.equal(rows.length, 1, "the answer is marked as seen");
+      assert.equal(JSON.parse(String(rows[0].value)), true);
+    } finally { db.close?.(); }
+
+    // A post with no body at all is the same skip.
+    const bare = await fetch(mount.url + "/api/ramble/moves/setup", { method: "POST", headers: H });
+    assert.equal(bare.status, 200);
+    assert.deepEqual([...(await bare.json()).prefs.limits], []);
+  } finally { await mount.close(); }
+});
+
+test("day payload: POST /moves/setup stores what it was given, with none always present", async () => {
+  const mount = await freshMount();
+  try {
+    const r = await dayPost(mount.url, "/api/ramble/moves/setup", {
+      equipment: ["mat", "wall"], limits: ["knee"], level: 3,
+    });
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.deepEqual([...body.prefs.equipment].sort(), ["mat", "none", "wall"], "none is always in the kit");
+    assert.deepEqual(body.prefs.limits, ["knee"]);
+    assert.equal(body.prefs.level, 3);
+    assert.equal(body.day.setup.needed, false);
+    assert.deepEqual(body.day.slots.map((item) => item.slot), ["morning", "midday", "evening"]);
+
+    const stored = await (await fetch(mount.url + "/api/ramble/moves/prefs", { headers: H })).json();
+    assert.equal(stored.prefs.level, 3, "the answer was stored as the live prefs");
+    assert.deepEqual(stored.prefs.limits, ["knee"]);
+
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/setup", { limits: ["elbow"] })).status, 400,
+      "a limit outside the fixed vocabulary is a bad request");
+    assert.equal((await dayPost(mount.url, "/api/ramble/moves/setup", { level: 9 })).status, 400,
+      "a level that is not 1, 2 or 3 is a bad request");
+  } finally { await mount.close(); }
+});
+
+test("day payload: a limit added through the prefs re-picks the day's affected card", async () => {
+  const mount = await freshMount(limitLibrary());
+  try {
+    const first = await (await dayGet(mount.url)).json();
+    // The morning slot asks the week plan for mobility, and every mobility
+    // chunk within reach without a mat carries the knee tag.
+    const slot = first.slots.find((item) => item.plannedArea === "mobility" && item.entry);
+    assert.ok(slot, "the day holds a card for the mobility slot");
+    assert.ok(slot.entry.skipIf.includes("knee"), "the card on screen is knee-tagged");
+
+    const set = await dayPost(mount.url, "/api/ramble/moves/prefs", {
+      limits: ["knee"], equipment: ["none", "mat", "wall"],
+    });
+    assert.equal(set.status, 200);
+
+    const after = await (await dayGet(mount.url)).json();
+    const repicked = after.slots.find((item) => item.slot === slot.slot);
+    assert.ok(repicked?.entry, "the slot still holds a card");
+    assert.equal(repicked.entry.skipIf.includes("knee"), false, "the stated limit ruled the old card out");
+    assert.equal(repicked.entry.id, slot.plannedArea + "-mat", "the card that needs the mat is the one left");
+    assert.notEqual(repicked.entry.id, slot.entry.id, "and it is not the card that was on screen");
+  } finally { await mount.close(); }
+});
+
+test("day payload: two reads of a finished day settle it once", async () => {
+  const mount = await freshMount();
+  try {
+    const first = await (await dayGet(mount.url)).json();
+    assert.equal(first.complete, false, "nothing has been finished yet");
+    const day = first.day;
+    const db = await mountDb(mount.dir);
+    try {
+      // A day finished the way a peer's rows would leave it: every slot of its
+      // own and its balance.
+      for (const slot of ["morning", "midday", "evening"]) {
+        // eslint-disable-next-line no-await-in-loop
+        await walletFact(db, "moveslot", day + ":" + slot);
+      }
+      await walletFact(db, "movebal", day);
+
+      const settled = await (await dayGet(mount.url)).json();
+      assert.equal(settled.complete, true, "the day is complete from its rows");
+      assert.equal(settled.streak.doneToday, 3, "all three of its slots are finished");
+      assert.equal((await walletKeys(db, "moveall", day)).length, 1, "the settle wrote its cache row once");
+
+      const again = await (await dayGet(mount.url)).json();
+      assert.equal(again.complete, true);
+      assert.equal((await walletKeys(db, "moveall", day)).length, 1,
+        "a second read settles nothing new");
+    } finally { db.close?.(); }
+  } finally { await mount.close(); }
+});
