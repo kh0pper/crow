@@ -15,10 +15,11 @@
 // display_name stays NULL until the operator names the account. sent_copy is validated in the account
 // store, not by a CHECK.
 //
-// mail_accounts is core crow.db — init-db creates it on every instance — so an "absent" read here is
-// a store from before the mail tables existed. Recording applied is then correct: init-db's own
-// addColumnIfMissing calls add the three columns when they create the table, and there is nothing
-// left to retry (0005's reasoning).
+// Under the runner mail_accounts always exists here: 0027-mail-store.mjs sorts before this file, and
+// the runner goes in file order and stops on a throw, so 0029 never runs before 0027's MAIL_DDL has
+// created the table — 0027 is the real dependency. An "absent" read is therefore reachable only by a
+// direct call made outside the runner, and recording applied is then correct: there is nothing left
+// for a retry to find.
 import Database from "better-sqlite3";
 import { addColumnIfMissing } from "./0005-bot-sessions-label-cwd.mjs";
 import { MAIL_ACCOUNT_SEND_COLUMNS } from "../../servers/shared/mail-schema.js";

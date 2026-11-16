@@ -127,6 +127,8 @@ test("the migration is idempotent and rollbackSafe", () => {
   assert.equal(mod.rollbackSafe, true);
   assert.deepEqual(accountColumns(dbPath), shapeAfter1, "a second run adds nothing");
   assert.equal(accountTableSql(dbPath), sqlAfter1, "a second run does not rewrite the table");
+  assert.equal(lines.length, MAIL_ACCOUNT_SEND_COLUMNS.length,
+    "the second run logs one line per column, so the no-op check below cannot pass on an empty list");
   assert.ok(lines.every((l) => l.includes("no-op")), "the second run reports every column as a no-op");
 
   const kept = new Database(dbPath, { readonly: true });
@@ -144,7 +146,8 @@ test("the migration does not run on a DB without mail_accounts and says so", () 
   const lines = [];
   const r = run({ dbPath, log: (m) => lines.push(m) });
 
-  assert.equal(r.applied, true, "recording applied is correct: init-db adds the columns when it creates the table");
+  assert.equal(r.applied, true,
+    "recording applied is correct: under the runner 0027 has already created the table, so only a direct call gets here");
   assert.ok(r.results.some((line) => line.includes("absent")), `the result says why nothing happened: ${r.results.join(", ")}`);
   assert.ok(lines.some((line) => line.includes("absent")), "the log says so too");
 
@@ -167,7 +170,7 @@ test("init-db and the migration produce the same mail_accounts columns", () => {
   assert.equal(accountTableSql(dbPath), wantSql);
 });
 
-test("0027's file and MAIL_DDL are byte-unchanged", () => {
+test("0027 and MAIL_DDL carry none of the A3 columns", () => {
   for (const column of SEND_COLUMNS) {
     assert.ok(!MAIL_DDL.includes(column), `MAIL_DDL does not carry ${column}: the columns are an ALTER`);
   }
@@ -200,7 +203,7 @@ test("the module id matches its filename", () => {
   assert.equal(id, "0029-mail-account-send-columns");
   const found = discoverMigrations(join(REPO, "scripts", "migrations")).map((p) => p.split("/").pop());
   assert.ok(found.includes("0029-mail-account-send-columns.mjs"), "the registry discovers the file");
-  assert.ok(found.indexOf("0028-project-bot-shares.mjs") < found.indexOf("0029-mail-account-send-columns.mjs"),
-    "it sorts after the migration it follows");
+  assert.ok(found.indexOf("0027-mail-store.mjs") < found.indexOf("0029-mail-account-send-columns.mjs"),
+    "it sorts after 0027, the migration that creates mail_accounts");
   assert.deepEqual(found, [...found].sort(), "the registry is an ordered list");
 });
