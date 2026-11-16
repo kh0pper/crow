@@ -420,7 +420,7 @@ test("a mail row lists in the keychain panel without its secret", async () => {
   const { renderPasswordsPage } = await import("../servers/gateway/dashboard/settings/sections/passwords.js");
   const html = renderPasswordsPage({ entries, method: "none", lang: "en" });
   assert.match(html, /Mail: alex@example\.com/);
-  assert.match(html, /Crow Mail/);
+  assert.match(html, /<td>Crow Mail<\/td>/);
   assert.ok(!html.includes(PASSWORD), "the rendered page never carries the secret");
   assert.ok(!html.includes(sealed), "the rendered page never carries the sealed text");
 });

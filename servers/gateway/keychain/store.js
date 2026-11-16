@@ -129,9 +129,11 @@ export async function ensureWriteKey(db, { crowHome, onNewKey } = {}) {
 export const MAIL_BUNDLE = "crow-mail";
 
 /** Keychain "bundle ids" that belong to Crow itself, never to an add-on: the off-site backup key
- *  (servers/shared/crow-vault.js OFFSITE_KEY). An add-on installed under such an id must not be able
- *  to overwrite the entry or be handed it, so every add-on path skips or refuses these ids. */
-export const SYSTEM_BUNDLE_IDS = Object.freeze(new Set(["offsite-backup"]));
+ *  (servers/shared/crow-vault.js OFFSITE_KEY) and Crow Mail's own rows (kind 'service', bundle id
+ *  MAIL_BUNDLE, written by the mail credentials module; no installed bundle stands behind them).
+ *  An add-on installed under such an id must neither overwrite the entry, be handed it, revive it
+ *  from 'extension_removed' nor mark it removed, so every add-on path skips or refuses these ids. */
+export const SYSTEM_BUNDLE_IDS = Object.freeze(new Set(["offsite-backup", MAIL_BUNDLE]));
 export const isSystemBundleId = (id) => SYSTEM_BUNDLE_IDS.has(String(id));
 
 /** The reserved-id refusal, kept ahead of any DB work, exactly as saveExtensionSecret had it. */
@@ -469,6 +471,8 @@ export async function deleteEntry(db, id) {
 }
 
 export async function markBundleRemoved(db, bundleId) {
+  // A caller that does not check (the satellite's install and uninstall) still never touches Crow's own rows.
+  if (isSystemBundleId(bundleId)) return 0;
   await ensureKeychainTable(db);
   const r = await db.execute({ sql: "UPDATE crow_keychain SET status = 'extension_removed', first_view_until = NULL, updated_at = ? WHERE kind IN ('extension', 'service') AND bundle_id = ? AND status = 'active'", args: [iso(), bundleId] });
   return r.rowsAffected;
@@ -482,6 +486,7 @@ export async function hasExtensionEntry(db, bundleId, envKey) {
 }
 
 export async function reactivateBundleEntries(db, bundleId, envKeys) {
+  if (isSystemBundleId(bundleId)) return 0; // Crow's own rows are never an add-on's to revive
   await ensureKeychainTable(db);
   let n = 0;
   for (const k of envKeys || []) {
