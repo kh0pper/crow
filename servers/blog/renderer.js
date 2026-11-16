@@ -7,17 +7,45 @@
 import { marked, Marked } from "marked";
 import sanitizeHtml from "sanitize-html";
 
-// Configure marked for GFM
+// Configure marked for GFM. This is the module-level instance only
+// markdownBlocks (Crow Artifacts) parses with; renderMarkdown has its own
+// instance (ownerMarked, below) so the owner path can carry the image rule.
 marked.setOptions({ gfm: true, breaks: true });
 
 /**
- * Render Markdown to sanitized HTML.
+ * Render Markdown to sanitized HTML — the OWNER's renderer (blog post and
+ * preview, memory panel, knowledge base, file view, meta-glasses notes).
+ *
+ * A bot can write every one of those surfaces, so the owner path carries the
+ * same image rule a bot reply does (see `isAllowedImageSrc`), with five owner
+ * exceptions: a URL on the instance's storage origin (presigned object URLs),
+ * an inline `data:image/…;base64,`, a published case-study figure under
+ * `/blog/figures/` in the one filename shape its read-only route serves (see
+ * OWNER_FIGURE_PREFIX), a knowledge-base media file under `/kb/media/` (see
+ * OWNER_KB_MEDIA_PREFIX), and a meta-glasses note photo on disk under
+ * `/api/meta-glasses/photo/` (see OWNER_PHOTO_PREFIX). None of the five can hit
+ * a state-changing route: an object store, no request at all, and three GETs
+ * that only ever return a stored file. A refused image leaves its escaped alt
+ * text, exactly like the bot path.
+ *
+ * Links keep Turbo Drive (they are the owner's own navigation) but never get
+ * prefetched: Turbo 8 fires a same-origin GET on hover, with the viewer's
+ * cookies.
  * @param {string} markdown
+ * @param {{ storageOrigin?: string|null }} [options] `storageOrigin` overrides
+ *   the module-wide storage origin for this call only. The gateway sets that
+ *   module-wide value once, with the same origin its CSP `img-src` names
+ *   (see setRendererStorageOrigin).
  * @returns {string} Safe HTML
  */
-export function renderMarkdown(markdown) {
+export function renderMarkdown(markdown, options) {
   if (!markdown) return "";
-  return sanitizeRendered(marked.parse(markdown));
+  const opts = options && typeof options === "object" ? options : {};
+  const storageOrigin = Object.prototype.hasOwnProperty.call(opts, "storageOrigin")
+    ? normalizeOrigin(opts.storageOrigin)
+    : rendererStorageOrigin;
+  return withImageContext({ policy: "owner", storageOrigin }, () =>
+    sanitizeRendered(ownerMarked.parse(String(markdown)), { imagePolicy: "owner", storageOrigin }));
 }
 
 // ---------------------------------------------------------------------------
@@ -36,9 +64,8 @@ export function renderMarkdown(markdown) {
 // Delimiters are dropped; the body is HTML-escaped here and the result still
 // goes through the same sanitizer as everything else, so no raw HTML can pass.
 //
-// A SEPARATE Marked instance, so the public blog's parser (and every other
-// renderMarkdown caller) is untouched — a blog post about prices keeps its
-// dollar signs exactly as before.
+// A SEPARATE Marked instance, so the owner's parser (ownerMarked, and every
+// renderMarkdown caller) keeps its dollar signs exactly as before.
 //
 // Inline `$…$` follows pandoc's tex_math_dollars rule so currency is not
 // eaten: the opening `$` must be followed by a non-space, the closing `$`
@@ -285,15 +312,13 @@ const botMarked = new Marked({
   // returns false falls through to marked's own image renderer; walkTokens
   // was measured far too slow on long input.)
   //
-  // An image also only survives from `/blog/media/` (isAllowedBotImageSrc):
-  // a bot's markdown is untrusted model output rendered in the OWNER's
-  // browser, so any other `<img src>` — `/dashboard/logout`, `/api/…`, a
-  // protocol-relative `//evil.example/x.png` — is a same-origin GET (or a
-  // third-party beacon) fired with the viewer's cookies just by reading the
-  // reply. A refused image becomes its alt text and nothing else: never a
-  // link, so it cannot become a click target either. `storage:` is rewritten
-  // to `/blog/media/<key>` here first, and THAT is what gets judged (and
-  // sanitizeRendered's bot-only rule checks the rewritten src again).
+  // An image only survives the shared rule (renderImageToken /
+  // isAllowedImageSrc): a bot's markdown is untrusted model output rendered in
+  // the OWNER's browser, so any other `<img src>` — `/dashboard/logout`, a
+  // `/api/…`, a protocol-relative `//evil.example/x.png` — is a same-origin
+  // GET (or a third-party beacon) fired with the viewer's cookies just by
+  // reading the reply. A refused image becomes its alt text and nothing else:
+  // never a link, so it cannot become a click target either.
   renderer: {
     image(token) {
       if (Array.isArray(token.tokens) && token.tokens.some((t) => t.type === "mathInline")) {
@@ -301,53 +326,149 @@ const botMarked = new Marked({
           ? { type: "text", raw: t.raw, text: escapeMathHtml(t.text), escaped: true }
           : t));
       }
-      const href = String(token.href ?? "");
-      // Judge the src the sanitizer will actually emit: a `storage:<key>` src is
-      // rewritten to `/blog/media/<key>` below, so `storage:../../x` must be
-      // refused HERE — it would resolve out of the media route — instead of
-      // passing a `storage:` prefix test and losing its alt text to the
-      // sanitize step.
-      const src = href.startsWith("storage:")
-        ? BOT_IMAGE_PREFIX + href.slice("storage:".length)
-        : href;
-      if (!isAllowedBotImageSrc(src)) {
-        // The alt source, escaped by us: this string lands in the HTML as
-        // character data (not inside an attribute), so it must never carry
-        // markup of its own.
-        return escapeText(String(token.text ?? ""));
-      }
-      return false;
+      return renderImageToken(token);
     },
   },
 });
 
 // ---------------------------------------------------------------------------
-// BOT IMAGES — `/blog/media/` or nothing.
+// IMAGE RULES — the `<img src>` values the renderer keeps, for both paths.
 //
-// A bot reply is rendered as HTML in the owner's browser, so every `<img src>`
-// in it is a request the VIEWER makes, carrying the viewer's cookies. A reply
+// Both paths render HTML in a BROWSER, so every `<img src>` in the output is a
+// request the VIEWER makes, same-origin and carrying the viewer's cookies. A
+// reply — or a note, a memory, a blog post, a workspace .md, a KB article —
 // containing `![x](/dashboard/logout)` therefore signed the owner out on read;
 // `/api/…` and `/dashboard/…` were the same trick against other routes, and
 // `//evil.example/x.png` / `https://evil.example/x.png` pinged a third party.
+// Bots can write every surface the OWNER renderer draws, so both paths need
+// the rule.
 //
-// So the bot path keeps exactly one image source: our own public media route.
-// The rule is checked twice, deliberately: at parse time (so the alt text can
-// be shown instead — marked's image renderer above) and again in the bot-only
-// sanitize call (which is what actually decides: raw HTML `<img>` in the
-// markdown never goes through marked's renderer at all). The OWNER's renderer
-// (renderMarkdown, the blog and memory panels) is untouched: its authors are
-// the owner and its images are the blog's own.
+// ONE predicate, two policies (isAllowedImageSrc):
+//   "bot"   `/blog/media/` and nothing else.
+//   "owner" `/blog/media/`; a published case-study figure under `/blog/figures/`,
+//           a knowledge-base media file under `/kb/media/` and a meta-glasses
+//           note photo under `/api/meta-glasses/photo/`, each in the exact shape
+//           its read-only route serves (see OWNER_FIGURE_PREFIX,
+//           OWNER_KB_MEDIA_PREFIX, OWNER_PHOTO_PREFIX); an absolute http(s) URL
+//           whose PATHNAME is one of those same paths (own host written out in
+//           full — another host is blocked by the page CSP anyway); a URL on
+//           the storage origin (presigned object URLs); and an inline
+//           `data:image/(png|jpeg|gif|webp)` (never svg — and a data: URL makes
+//           no request at all).
+//
+// The rule is checked twice, deliberately: at parse time (so a refused image
+// leaves its ALT TEXT behind — marked's image renderer) and again in the
+// sanitize call's exclusiveFilter, which is what actually decides: a raw HTML
+// `<img>` in the markdown never goes through marked's renderer at all.
+//
+// Crow Artifacts' document blocks (markdownBlocks) keep the unrestricted
+// behaviour: their HTML renders inside the sandboxed artifact frame, whose own
+// CSP rules images, and their figures are relative paths (`__render/b2.svg`)
+// by design.
 // ---------------------------------------------------------------------------
 
 /** The only image path a bot reply may use — the public blog media route. */
 const BOT_IMAGE_PREFIX = "/blog/media/";
+/**
+ * A published case-study figure — one of the OWNER path's read-only
+ * same-origin paths, and NEVER one a bot reply may use.
+ *
+ * `bundles/data-dashboard` writes `<img src="/blog/figures/<section>-<hash>.png">`
+ * into a post's markdown (buildFigureHtml, server.js), and the read-only route
+ * that serves it (servers/gateway/routes/blog-embed-api.js,
+ * `GET /blog/figures/:filename`) accepts exactly ONE filename shape:
+ * `<digits>-<8..64 lowercase hex>.png`. This is that same regex, so a src that
+ * passes here can never 400 there — and nothing else under `/blog/figures/`
+ * passes: the character class admits no `/`, `?`, `#`, `%` or `\`, so there is
+ * no second segment, no query string and no encoded character.
+ */
+const OWNER_FIGURE_PREFIX = "/blog/figures/";
+const OWNER_FIGURE_NAME = /^\d+-[0-9a-f]{8,64}\.png$/;
+/**
+ * Knowledge-base media — the images extracted from a guide, which a KB
+ * article's markdown refers to as `<img src="/kb/media/<sha1>.jpg" alt="…">`.
+ *
+ * Served read-only by bundles/knowledge-base/routes/kb-public.js
+ * (`GET /kb/media/:filename`): it strips every character outside
+ * `[a-zA-Z0-9._-]` from the name and streams the file out of
+ * `<CROW_DATA_DIR>/kb-media`, so a GET there can only ever return a stored
+ * file — never a state change.
+ *
+ * The name pattern is deliberately narrower than the route's: one segment with
+ * a raster extension the route names a mime for (never svg — an svg is a
+ * document, the same reason INLINE_IMAGE refuses it), and no `.` of its own, so
+ * `..`, a query string, a fragment and a second segment can never match.
+ */
+const OWNER_KB_MEDIA_PREFIX = "/kb/media/";
+const OWNER_KB_MEDIA_NAME = /^[A-Za-z0-9_-]+\.(?:png|jpe?g|gif|webp)$/;
+/**
+ * A meta-glasses note photo on disk — the src remintPhotoRefs writes in place
+ * of a `photo://<id>` sentinel when the object-store upload is unavailable
+ * (bundles/meta-glasses/panel/routes.js).
+ *
+ * Served read-only by `GET /api/meta-glasses/photo/:name`, which sanitizes the
+ * name to `[\w.-]` and `sendFile`s it from the bundle's photo directory (404
+ * when absent). This is that same character class — the ONE thing the route
+ * does not strip is `..`, which `join(_photoDir, "..")` resolves out of the
+ * directory, so a `..` is refused here explicitly.
+ */
+const OWNER_PHOTO_PREFIX = "/api/meta-glasses/photo/";
+const OWNER_PHOTO_NAME = /^[\w.-]+$/;
 /** The Turbo opt-outs every bot link carries (see sanitizeRendered). */
 const BOT_LINK_ATTRS = ["data-turbo-prefetch", "data-turbo"];
+/** The owner's links opt out of Turbo's prefetch only — Drive stays on. */
+const OWNER_LINK_ATTRS = ["data-turbo-prefetch"];
 /** Every bot image src is resolved against this fixed origin (never the request's). */
 const BOT_IMAGE_ORIGIN = "http://crow.invalid";
+/** An inline image: no request at all, and the page CSP allows data:. Never svg. */
+const INLINE_IMAGE = /^data:image\/(?:png|jpeg|gif|webp);base64,/i;
 
 /**
- * True when `src` is a same-origin absolute path under `/blog/media/` and
+ * The instance's storage origin (where presigned object URLs point), or null.
+ * Set by the gateway when it first resolves the origin its CSP `img-src` names
+ * (servers/gateway/index.js, resolveCspStorageOrigin), so the two cannot drift.
+ *
+ * Module state rather than an import: servers/storage/s3-client.js pulls the
+ * MinIO SDK and the sealed-secret opener into every importer (bundles, panels,
+ * CLI) and only learns its config at boot — not a dependency a markdown
+ * renderer should carry.
+ */
+let rendererStorageOrigin = null;
+
+/**
+ * The policy in force for the render happening NOW. marked's image renderer
+ * runs inside the parse call, so it reads the policy from here; a render is
+ * synchronous, so nesting cannot interleave.
+ */
+let imageContext = { policy: "none", storageOrigin: null };
+
+/** `http://host:port` / `https://host:port` as the URL parser normalizes it, or null. */
+function normalizeOrigin(origin) {
+  if (typeof origin !== "string" || !origin) return null;
+  let url;
+  try { url = new URL(origin); } catch { return null; }
+  return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null;
+}
+
+/**
+ * Point the owner renderer at the instance's storage origin, so a presigned
+ * object URL survives. Called by the gateway with the value it resolves for the
+ * CSP; null (or an unparseable value) clears it.
+ * @param {string|null} origin
+ */
+export function setRendererStorageOrigin(origin) {
+  rendererStorageOrigin = normalizeOrigin(origin);
+}
+
+/** Run a synchronous render with `context` in force for its image decisions. */
+function withImageContext(context, fn) {
+  const previous = imageContext;
+  imageContext = context;
+  try { return fn(); } finally { imageContext = previous; }
+}
+
+/**
+ * True when `path` is a same-origin absolute path under `/blog/media/` and
  * nothing else: no backslash (a browser may read it as a slash), no `//` after
  * the leading slash (protocol-relative), and nothing that resolves out of the
  * prefix.
@@ -367,19 +488,166 @@ const BOT_IMAGE_ORIGIN = "http://crow.invalid";
  * `%2f` and `%5c` (slashes a downstream layer may decode after our check).
  * Refusing them by raw source text keeps the verdict independent of the order
  * in which any later parser normalizes or decodes.
+ *
+ * Used for a same-origin path AND for the pathname of an absolute URL, so both
+ * spellings of the media route get exactly the same verdict.
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isMediaPath(path) {
+  if (typeof path !== "string" || !path.startsWith(BOT_IMAGE_PREFIX)) return false;
+  if (path.includes("\\") || path.slice(1).includes("//")) return false;
+  if (/%2e|%2f|%5c/i.test(path)) return false;
+  let url;
+  try { url = new URL(path, BOT_IMAGE_ORIGIN); } catch { return false; }
+  if (url.origin !== BOT_IMAGE_ORIGIN) return false;
+  return url.pathname.startsWith(BOT_IMAGE_PREFIX) && !url.pathname.includes("..");
+}
+
+/**
+ * True when `src` is a same-origin absolute path under `/blog/media/` (see
+ * isMediaPath for the exact rule). The bot path keeps nothing else.
  * @param {string} src
  * @returns {boolean}
  */
 export function isAllowedBotImageSrc(src) {
-  if (typeof src !== "string" || !src.startsWith(BOT_IMAGE_PREFIX)) return false;
-  if (src.includes("\\") || src.slice(1).includes("//")) return false;
-  if (/%2e|%2f|%5c/i.test(src)) return false;
-  let url;
-  try { url = new URL(src, BOT_IMAGE_ORIGIN); } catch { return false; }
-  if (url.origin !== BOT_IMAGE_ORIGIN) return false;
-  if (!url.pathname.startsWith(BOT_IMAGE_PREFIX) || url.pathname.includes("..")) return false;
-  return true;
+  return isMediaPath(src);
 }
+
+/**
+ * True when `path` is a same-origin absolute path to a published case-study
+ * figure and nothing else — `/blog/figures/` plus one filename matching the
+ * route's own regex (OWNER_FIGURE_NAME).
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isOwnerFigurePath(path) {
+  if (typeof path !== "string" || !path.startsWith(OWNER_FIGURE_PREFIX)) return false;
+  return OWNER_FIGURE_NAME.test(path.slice(OWNER_FIGURE_PREFIX.length));
+}
+
+/**
+ * True when `path` is a knowledge-base media file and nothing else —
+ * `/kb/media/` plus one filename matching OWNER_KB_MEDIA_NAME.
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isOwnerKbMediaPath(path) {
+  if (typeof path !== "string" || !path.startsWith(OWNER_KB_MEDIA_PREFIX)) return false;
+  return OWNER_KB_MEDIA_NAME.test(path.slice(OWNER_KB_MEDIA_PREFIX.length));
+}
+
+/**
+ * True when `path` is a meta-glasses note photo on disk and nothing else —
+ * `/api/meta-glasses/photo/` plus one name matching OWNER_PHOTO_NAME, with no
+ * `..` anywhere in it (a dot segment the read-only route would resolve out of
+ * the photo directory) and no leading `.` (`.` is the directory itself, and a
+ * dotfile is nothing the upload route ever makes — the route refuses both).
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isOwnerPhotoPath(path) {
+  if (typeof path !== "string" || !path.startsWith(OWNER_PHOTO_PREFIX)) return false;
+  const name = path.slice(OWNER_PHOTO_PREFIX.length);
+  if (name.includes("..") || name.startsWith(".")) return false;
+  return OWNER_PHOTO_NAME.test(name);
+}
+
+/**
+ * The one image predicate. `src` is judged AFTER the `storage:` rewrite, i.e.
+ * it is exactly the string the browser would request.
+ * @param {string} src
+ * @param {"none"|"bot"|"owner"} policy
+ * @param {string|null} storageOrigin
+ * @returns {boolean}
+ */
+function isAllowedImageSrc(src, policy, storageOrigin) {
+  if (typeof src !== "string" || !src) return false;
+  // (a) `/blog/media/…` — the only src a bot reply may use, and the owner's own
+  // media route.
+  if (isAllowedBotImageSrc(src)) return true;
+  if (policy !== "owner") return false;
+  // (a2) a read-only owner route, as a same-origin path: a published case-study
+  // figure, a KB media file, a meta-glasses note photo on disk.
+  if (isOwnerFigurePath(src) || isOwnerKbMediaPath(src) || isOwnerPhotoPath(src)) return true;
+  // (d) an inline data: image — no request is made at all.
+  if (INLINE_IMAGE.test(src)) return true;
+  let url;
+  try { url = new URL(src); } catch { return false; } // relative srcs were judged by (a)/(a2)
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  // (c) the storage origin (presigned object URLs): exact scheme, host and port.
+  if (storageOrigin && url.origin === storageOrigin) return true;
+  // (b) the same routes written out in full: only the PATHNAME is judged, by the
+  // same rules as (a) — a `..` that resolves out of the prefix, an encoded
+  // separator or a second `//` is refused exactly as it is there. The pathname
+  // of an owner-only path (a2) must ALSO be the whole URL:
+  // `/blog/figures/x.png?a=1` is not the shape the route serves, so it keeps
+  // its alt text — and the same for `/kb/media/x.jpg?…` and
+  // `/api/meta-glasses/photo/x.jpg?…`, whose routes ignore a query too but
+  // whose name shapes are matched exactly. (The media route has no such rule —
+  // a cache-busting query is allowed there, isMediaPath judges the pathname.)
+  // Another host reaching this point is a third-party request the page CSP
+  // blocks anyway (`img-src 'self' data: blob: <storage>`).
+  if (isOwnerFigurePath(url.pathname) || isOwnerKbMediaPath(url.pathname) || isOwnerPhotoPath(url.pathname)) {
+    return !url.search && !url.hash;
+  }
+  return isMediaPath(url.pathname);
+}
+
+/**
+ * True when an `<input>` is a GFM task-list checkbox — the ONLY `<input>` the
+ * shared sanitizer keeps on either rendered path.
+ *
+ * An `<input>` is never markdown: it is the owner's or a bot's raw HTML, and
+ * `type="image" src="…"` is a GET in the viewer's browser (the same trick the
+ * image rule above stops), while a text/submit input is a form control in the
+ * middle of the owner's page. The type test matches a browser's: ASCII
+ * case-insensitive, and an absent or invalid type reads as `text` — dropped.
+ * @param {Record<string,string>|undefined} attribs
+ * @returns {boolean}
+ */
+function isCheckboxInput(attribs) {
+  const type = attribs && attribs.type;
+  return typeof type === "string" && type.toLowerCase() === "checkbox";
+}
+
+/**
+ * marked's image renderer, shared by both paths. `false` lets marked draw the
+ * `<img>` (the sanitizer's exclusiveFilter then re-checks the same rule);
+ * otherwise the alt text, escaped by us, is emitted as character data in its
+ * place — text, never a link, so a refused image cannot become a click target.
+ * @param {{ href?: string, text?: string }} token
+ * @returns {string|false}
+ */
+function renderImageToken(token) {
+  const href = String(token.href ?? "");
+  // Judge the src the sanitizer will actually emit: a `storage:<key>` src is
+  // rewritten to `/blog/media/<key>` in sanitizeRendered, so `storage:../../x`
+  // must be refused HERE — it would resolve out of the media route — instead
+  // of passing a `storage:` prefix test and losing its alt text to the
+  // sanitize step.
+  const src = href.startsWith("storage:")
+    ? BOT_IMAGE_PREFIX + href.slice("storage:".length)
+    : href;
+  if (isAllowedImageSrc(src, imageContext.policy, imageContext.storageOrigin)) return false;
+  // This string lands in the HTML as character data (not inside an attribute),
+  // so it must never carry markup of its own.
+  return escapeText(String(token.text ?? ""));
+}
+
+/**
+ * The owner's parser: marked exactly as the blog always had it (gfm, breaks,
+ * NO math extensions — a post about prices keeps its dollar signs), plus the
+ * image rule, so a refused image leaves its escaped alt text where the <img>
+ * would have been.
+ */
+const ownerMarked = new Marked({
+  gfm: true,
+  breaks: true,
+  renderer: {
+    image(token) { return renderImageToken(token); },
+  },
+});
 
 /**
  * Render a bot's markdown (Perch live frames and transcript history — both
@@ -398,11 +666,22 @@ export function renderBotMarkdown(markdown) {
   blockMemo = makeStartMemo();
   blockValid = new Map();
   cutsLeft = MAX_PARAGRAPH_CUTS;
-  return sanitizeRendered(botMarked.parse(src), { bot: true });
+  return withImageContext({ policy: "bot", storageOrigin: null }, () =>
+    sanitizeRendered(botMarked.parse(src), { imagePolicy: "bot" }));
 }
 
-/** The shared post-parse half: storage: rewrite, allow-list sanitize, tables. */
-function sanitizeRendered(raw, { bot = false } = {}) {
+/**
+ * The shared post-parse half: storage: rewrite, allow-list sanitize, tables.
+ * `imagePolicy` picks the image rule and the link opt-outs:
+ *   "none"  — no rule (Crow Artifacts' blocks; their sandboxed frame owns this)
+ *   "bot"   — `/blog/media/` images only; links opt out of prefetch AND Drive
+ *   "owner" — the owner's rule (see isAllowedImageSrc); links opt out of
+ *             prefetch only, so the owner's own navigation stays on Turbo
+ */
+function sanitizeRendered(raw, { imagePolicy = "none", storageOrigin = null } = {}) {
+  const bot = imagePolicy === "bot";
+  const governed = imagePolicy !== "none";
+  const linkAttrs = governed ? (bot ? BOT_LINK_ATTRS : OWNER_LINK_ATTRS) : [];
   // Rewrite storage: URLs to public blog media route. The same prefix the image
   // renderer judges at parse time (BOT_IMAGE_PREFIX), so the two cannot drift.
   const processed = raw.replace(
@@ -420,12 +699,11 @@ function sanitizeRendered(raw, { bot = false } = {}) {
     allowedAttributes: {
       ...sanitizeHtml.defaults.allowedAttributes,
       img: ["src", "alt", "title", "width", "height", "loading"],
-      // The two Turbo opt-outs below are allow-listed on `a` ONLY on the bot
-      // path (the owner's posts and previews keep exactly the attributes they
-      // always had). sanitize-html runs transformTags BEFORE it filters
-      // attributes, so the values here are the ones the transform writes — a
-      // bot can never supply its own.
-      a: ["href", "title", "target", "rel", ...(bot ? BOT_LINK_ATTRS : [])],
+      // The renderer's own Turbo opt-outs are allow-listed on `a` — both on
+      // the bot path, only the prefetch one on the owner's. sanitize-html runs
+      // transformTags BEFORE it filters attributes, so the values here are the
+      // ones the transform writes; an author-supplied data-* never survives.
+      a: ["href", "title", "target", "rel", ...linkAttrs],
       code: ["class"],
       span: ["class"],
       pre: ["class"],
@@ -449,30 +727,48 @@ function sanitizeRendered(raw, { bot = false } = {}) {
       article: ["*"],
     },
     selfClosing: ["img", "br", "hr", "input"],
-    // Bot output only (never the owner's blog/memory renderer):
+    // The owner path is the only one that may keep a `data:` image (inline, so
+    // no request; the page CSP allows data:). The bot path keeps the scheme
+    // list it always had — its image rule drops a data: URL either way.
+    ...(imagePolicy === "owner" ? { allowedSchemesByTag: { img: ["http", "https", "data"] } } : {}),
+    // Both rendered paths (bot replies and the owner's markdown) get three
+    // rules; the artifact blocks get none.
     //
-    // (1) An image that is not from /blog/media/ is dropped after the storage:
-    // rewrite, so the viewer's browser never makes that request. A markdown
-    // image's alt text has already been emitted in its place by the image
-    // renderer above; a raw HTML <img> in the markdown simply disappears.
-    // sanitize-html's own filter (not a regex over the HTML) owns this
-    // decision.
+    // (1) An <img> whose src is not allowed for this policy is dropped after
+    // the storage: rewrite, so the viewer's browser never makes that request
+    // (isAllowedImageSrc owns the decision — /blog/media/ and, on the owner
+    // path only, a published /blog/figures/ figure, a /kb/media/ file, a
+    // /api/meta-glasses/photo/ note photo, the storage origin and inline
+    // images). A markdown image's alt text has already been emitted in
+    // its place by marked's image renderer; a raw HTML <img> in the markdown
+    // simply disappears. sanitize-html's own filter (not a regex over the
+    // HTML) owns this decision.
     //
     // `exclusiveFilter` is ONE function, `(frame) => boolean`, called on the
     // CLOSING tag, and a truthy return DROPS the element together with its
-    // content (sanitize-html 2.x — it is not a per-tag map). So: drop every
-    // <img> whose src is not allowed, let everything else through.
+    // content (sanitize-html 2.x — it is not a per-tag map). It runs after the
+    // attribute filter, so `frame.attribs.src` is the src the browser would
+    // have received. So: drop every <img> whose src is not allowed, plus (3)
+    // below — one function, both decisions, never one replacing the other.
     //
-    // (2) Every <a> gets data-turbo-prefetch="false" and data-turbo="false".
-    // A bot's markdown is rendered in the OWNER's browser, and Turbo 8 (the
-    // vendored turbo-8.0.5.umd.js) PREFETCHES a same-origin link on hover: a
-    // GET fired with the viewer's cookies just by pointing at the link — the
-    // same trick the <img> rule above exists to stop (it was
-    // `![x](/dashboard/logout)`; a link to a state-changing GET is the same
-    // move). A click would also navigate via Turbo Drive. Both are opted out
-    // here, and the values are written by us, after the bot's own attributes,
-    // so a bot cannot ask for `data-turbo-prefetch="true"` back.
-    ...(bot
+    // (2) Every <a> gets data-turbo-prefetch="false". Rendered markdown is
+    // shown in the OWNER's browser, and Turbo 8 (the vendored
+    // turbo-8.0.5.umd.js) PREFETCHES a same-origin link on hover: a GET fired
+    // with the viewer's cookies just by pointing at the link — the same trick
+    // the <img> rule above exists to stop (it was `![x](/dashboard/logout)`; a
+    // link to a state-changing GET is the same move). A bot reply ALSO gets
+    // data-turbo="false": a click there must not navigate via Turbo Drive.
+    // The owner's own links keep Drive — that is the owner's navigation — and
+    // only lose the prefetch. The values are written by us, after the author's
+    // own attributes, so a bot cannot ask for `data-turbo-prefetch="true"`
+    // back.
+    //
+    // (3) An <input> survives ONLY as a GFM task-list checkbox: every other
+    // type (and a missing type, which reads as `text`) is dropped whole —
+    // `type="image"` is the `src` GET the image rule above exists to stop, and
+    // a text/submit control has no business in rendered prose. It runs in the
+    // same exclusiveFilter as (1).
+    ...(governed
       ? {
         transformTags: {
           a: (tagName, attribs) => ({
@@ -480,12 +776,17 @@ function sanitizeRendered(raw, { bot = false } = {}) {
             attribs: {
               ...attribs,
               "data-turbo-prefetch": "false",
-              "data-turbo": "false",
+              ...(bot ? { "data-turbo": "false" } : {}),
             },
           }),
         },
-        exclusiveFilter: (frame) => frame.tag === "img"
-          && !isAllowedBotImageSrc(frame.attribs && frame.attribs.src),
+        exclusiveFilter: (frame) => {
+          if (frame.tag === "img") {
+            return !isAllowedImageSrc(frame.attribs && frame.attribs.src, imagePolicy, storageOrigin);
+          }
+          if (frame.tag === "input") return !isCheckboxInput(frame.attribs);
+          return false;
+        },
       }
       : {}),
   });
@@ -572,6 +873,8 @@ export function markdownBlocks(markdown) {
       type: t.type,
       ...(t.type === "code" ? { lang: String(t.lang || "").trim().split(/\s+/)[0].toLowerCase(), code: String(t.text || "") } : {}),
       text: String(t.text || t.raw || "").replace(/\s+/g, " ").trim().slice(0, 400),
+      // No imagePolicy: the artifact frame's own CSP rules images there, and
+      // its figures are relative paths (`__render/b2.svg`) by design.
       html: sanitizeRendered(marked.parser([t])),
     }));
 }

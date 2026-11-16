@@ -415,6 +415,14 @@ async function resolveCspStorageOrigin() {
   } catch {
     _cspStorageOrigin = "";
   }
+  // The markdown renderer keeps an image on the storage origin (a presigned
+  // object URL) and must name exactly the origin this CSP allows — one value,
+  // resolved here, so the two rules cannot drift. Without it the renderer
+  // keeps its stricter rule and shows the image's alt text instead.
+  try {
+    const { setRendererStorageOrigin } = await import("../blog/renderer.js");
+    setRendererStorageOrigin(_cspStorageOrigin || null);
+  } catch { /* no renderer module: nothing renders markdown in this process */ }
   return _cspStorageOrigin;
 }
 

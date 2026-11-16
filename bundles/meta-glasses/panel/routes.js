@@ -87,6 +87,7 @@ const { csrfMiddleware } = await appImport("servers/gateway/dashboard/shared/csr
 const { musicUpstreamConfig, openPinnedUpstream, UpstreamRefused } = await appImport("servers/gateway/media/pinned-upstream.js");
 const { registerSchedulerHook } = await appImport("servers/gateway/scheduler-hooks.js");
 const { readEnvelope } = await bImport("server/envelope.js");
+const { replacePhotoRefs } = await bImport("server/photo-refs.js");
 const { createLimiter } = await bImport("server/limits.js");
 const { fetchImagePinned, FetchRefused } = await bImport("server/net-guard.js");
 const { acquireVisionProvider } = await bImport("server/vision-acquire.js");
@@ -388,6 +389,11 @@ export async function runCaptionBackfill(db) {
  * boundary so a literal `photo://xyz` in operator-typed text is
  * preserved verbatim. Caps at 200 unique IDs per render (SQLite's
  * default SQLITE_MAX_VARIABLE_NUMBER is 999; 200 gives headroom).
+ *
+ * A photo that is GONE (no row, no object, no file on disk) resolves to `null`,
+ * and replacePhotoRefs (../server/photo-refs.js) emits the caption text in
+ * place of the image instead of a placeholder src the renderer would refuse —
+ * a missing photo must still say what it was.
  */
 export async function remintPhotoRefs(db, content) {
   const matches = [...String(content || "").matchAll(/photo:\/\/(\d+)\b/g)];
@@ -408,19 +414,18 @@ export async function remintPhotoRefs(db, content) {
     s3Ready = await s3.isAvailable();
     getPresignedUrl = s3.getPresignedUrl;
   } catch {}
-  const PLACEHOLDER = "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20fill%3D%22%23888%22%2F%3E%3Ctext%20x%3D%2232%22%20y%3D%2234%22%20text-anchor%3D%22middle%22%20font-size%3D%2210%22%20fill%3D%22%23fff%22%3Emissing%3C%2Ftext%3E%3C%2Fsvg%3E";
   const resolved = new Map();
   for (const id of ids) {
     const row = byId.get(id);
-    let url = PLACEHOLDER;
+    let url = null;
     if (row?.minio_key && s3Ready && getPresignedUrl) {
-      try { url = await getPresignedUrl(row.minio_key, { expiry: 3600 }); } catch {}
+      try { url = await getPresignedUrl(row.minio_key, { expiry: 3600 }); } catch { url = null; }
     } else if (row?.disk_path) {
       url = `/api/meta-glasses/photo/${encodeURIComponent(String(row.disk_path).split("/").pop())}`;
     }
-    resolved.set(id, url);
+    resolved.set(id, url || null);
   }
-  return String(content).replace(/photo:\/\/(\d+)\b/g, (_, idStr) => resolved.get(Number(idStr)) || PLACEHOLDER);
+  return replacePhotoRefs(content, resolved);
 }
 
 /* ---------- The voice turn: the shared runner, driven by the glasses session adapter ---------- */
@@ -950,7 +955,11 @@ export default function metaGlassesRouter(dashboardAuth) {
   router.get("/api/meta-glasses/photo/:name", async (req, res) => {
     const name = req.params.name.replace(/[^\w.\-]/g, "");
     const p = join(_photoDir, name);
-    if (!existsSync(p)) return res.status(404).json({ ok: false, error: "not found" });
+    // Stripping the name is not enough: `.` survives the class, and
+    // join(_photoDir, "..") is the directory ABOVE the photo folder. The resolved
+    // path must stay inside it — the same rule photoPathOk applies to a stored
+    // disk_path (and the KB's media route to its own file name).
+    if (!photoPathOk(p) || !existsSync(p)) return res.status(404).json({ ok: false, error: "not found" });
     res.sendFile(p);
   });
 
