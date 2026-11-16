@@ -66,7 +66,11 @@ export function forYouClientJs() {
       return String(card.getAttribute(attr) || '{n}').replace('{n}', String(n));
     }
     put('[data-fy-move-title]', entry.title || '');
-    put('[data-fy-move-minutes]', entry.minutes ? tpl('data-fy-minutes-fmt', entry.minutes) : '');
+    // The card's length is written twice when the day block is drawn (the old line, which stays
+    // hidden then, and the lengths line's first span): both carry the same words.
+    var minutesText = entry.minutes ? tpl('data-fy-minutes-fmt', entry.minutes) : '';
+    put('[data-fy-move-minutes]', minutesText);
+    put('[data-fy-move-len-first]', minutesText);
     put('[data-fy-move-why]', c.why || '');
     var why = card.querySelector('[data-fy-move-why]');
     if (why) {

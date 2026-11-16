@@ -449,7 +449,8 @@ test("the card: a done challenge shows the done state; challenges off is one qui
   assert.match(none, /href="\/dashboard\/ramble\?moves=start">Open Ramble</);
 });
 
-test("the card: missing, outdated or failing Ramble hides the whole section; es has its own words", () => {  for (const state of [{ ramble: "missing" }, { ramble: "update" }, { ramble: "error" }, { ramble: "ok", moves: null }, null]) {
+test("the card: missing, outdated or failing Ramble hides the whole section; es has its own words", () => {
+  for (const state of [{ ramble: "missing" }, { ramble: "update" }, { ramble: "error" }, { ramble: "ok", moves: null }, null]) {
     assert.equal(H.movesHtml(state, "en"), "", JSON.stringify(state));
   }
   const es = H.movesHtml(movesOk(), "es");
@@ -482,6 +483,29 @@ test("the card: the day's block draws the Now slot's Start link, the lengths, th
   assert.match(out, /20 min today/);
   assert.match(out, /Week: 6 of 10/);
   assert.match(out, /<a class="fy-btn fy-btn--primary" href="\/dashboard\/ramble\?moves=start&amp;slot=morning" data-fy-move-start data-fy-start-base="\/dashboard\/ramble\?moves=start&amp;slot=morning">Start<\/a>/);
+});
+
+test("the card: the day's block hides the old length line and gives the lengths line its own first span", () => {
+  const out = H.movesHtml(movesDay(), "en");
+  assert.match(out, /<p class="fy-tile-meta" data-fy-move-minutes hidden>10 min<\/p>/,
+    "the length is shown once, by the lengths line");
+  assert.match(out, /<p class="fy-tile-meta" data-fy-move-lengths><span data-fy-move-len-first>10 min<\/span>/);
+  assert.equal(out.includes("data-fy-move-len-first"), true);
+
+  const older = H.movesHtml(movesOk(), "en");
+  assert.match(older, /<p class="fy-tile-meta" data-fy-move-minutes>10 min<\/p>/,
+    "without a day block the old line is not hidden");
+  assert.equal(older.includes("data-fy-move-len-first"), false);
+});
+
+test("the card: a card of 0 minutes offers no other length", () => {
+  const out = H.movesHtml(movesDay({ challenge: {
+    day: DAY, title: "Stand up", minutes: 0, why: "", done: false, entryId: "ex-1",
+  } }), "en");
+  assert.match(out, /data-fy-move-lengths/, "the day block is still drawn");
+  assert.match(out, /data-fy-move-len-first>0 min</);
+  assert.doesNotMatch(out, /data-fy-len/, "nothing to press next to 0 min");
+  assert.doesNotMatch(out, /or 20|or 30/);
 });
 
 test("the card: no minutes today says nothing about them; an unknown slot name keeps the old Start link", () => {
@@ -591,6 +615,17 @@ test("the client: the streak line is singular at one day", async () => {
   plural.click("done");
   await plural.settle();
   assert.equal(plural.document.querySelector("[data-fy-move-streak]").textContent, "4-day streak");
+});
+
+test("the client: a Swap repaint writes the new length into the lengths line's first span", async () => {
+  const r = await movesRig(movesDay().moves);
+  const first = () => r.document.querySelector("[data-fy-move-len-first]");
+  assert.equal(first().textContent, "10 min");
+  r.reply(routeSnapshot({ challenge: { entry: { id: "ex-2", title: "Another one", minutes: 25 } } }));
+  r.click("swap");
+  await r.settle();
+  assert.equal(r.document.querySelector("[data-fy-move-minutes]").textContent, "25 min");
+  assert.equal(first().textContent, "25 min", "the line that is shown follows the card too");
 });
 
 test("the client: a length button rewrites the Start link, one at a time, with no call", async () => {

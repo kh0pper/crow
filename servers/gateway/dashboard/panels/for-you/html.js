@@ -162,10 +162,13 @@ function moveDotsHtml(slots, lang) {
  */
 function moveDayHtml(m, minutes, lang) {
   if (!Array.isArray(m.slots) || !m.slots.length) return { lengths: "", dots: "", meta: "" };
-  const offered = (Array.isArray(m.lengths) ? m.lengths : [])
-    .map((n) => Number(n))
-    .filter((n) => Number.isFinite(n) && n > minutes);
-  const parts = [`<span>${e(fill(t("forYou.minutes", lang), { n: minutes }))}</span>`];
+  // No length to offer when the card has none: a card of 0 minutes offers nothing longer.
+  const offered = minutes > 0
+    ? (Array.isArray(m.lengths) ? m.lengths : [])
+      .map((n) => Number(n))
+      .filter((n) => Number.isFinite(n) && n > minutes)
+    : [];
+  const parts = [`<span data-fy-move-len-first>${e(fill(t("forYou.minutes", lang), { n: minutes }))}</span>`];
   for (const n of offered) {
     parts.push(`<span aria-hidden="true"> · </span>`);
     parts.push(`<button type="button" class="fy-btn fy-len" data-fy-len="${e(n)}" aria-pressed="false">${e(fill(t("forYou.movesLenOr", lang), { n }))}</button>`);
@@ -238,7 +241,7 @@ export function movesHtml(mv, lang = "en") {
   return `<section class="fy-moves" aria-labelledby="fy-moves-h">${head}
       <div class="fy-card fy-tile fy-move" data-fy-move-card${slot ? ` data-fy-move-slot="${e(slot)}"` : ""} data-fy-minutes-fmt="${e(t("forYou.minutes", lang))}" data-fy-health-fmt="${e(t("forYou.movesHealth", lang))}" data-fy-steps-fmt="${e(t("forYou.movesSteps", lang))}" data-fy-streak-one-fmt="${e(t("forYou.movesStreak.one", lang))}" data-fy-streak-other-fmt="${e(t("forYou.movesStreak.other", lang))}" data-fy-done-label="${e(t("forYou.movesDone", lang))}" data-fy-done-state="${e(t("forYou.movesDoneToday", lang))}" data-fy-refused="${e(t("forYou.movesSwapRefused", lang))}">
         <p class="fy-tile-title" data-fy-move-title>${e(c.title)}</p>
-        <p class="fy-tile-meta" data-fy-move-minutes>${e(fill(t("forYou.minutes", lang), { n: Number(c.minutes) || 0 }))}</p>
+        <p class="fy-tile-meta" data-fy-move-minutes${day.lengths ? " hidden" : ""}>${e(fill(t("forYou.minutes", lang), { n: Number(c.minutes) || 0 }))}</p>
         <p class="fy-tile-meta" data-fy-move-why${c.why ? "" : " hidden"}>${e(c.why || "")}</p>${dayBlock}
         <div class="fy-acts">
           <a class="fy-btn fy-btn--primary" href="${e(startBase)}"${startAttrs}>${e(t("forYou.movesStart", lang))}</a>
