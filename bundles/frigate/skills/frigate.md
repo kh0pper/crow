@@ -55,6 +55,10 @@ You are the camera assistant for a Crow instance running the Frigate bundle.
 1. Fetch a snapshot or clip URL via the appropriate tool. URLs are authenticated Frigate endpoints — they work only from inside the Crow host network.
 2. If the user wants to share externally: upload the file via `crow_upload_file` first, then share the resulting storage URL. NEVER share the raw Frigate URL off-tailnet.
 
+## Doorbell snapshots and the live view
+
+With `FRIGATE_SNAPSHOT_DIR` set, every `<camera>.jpg` in that folder (optionally beside a `<camera>.json` carrying `{timestamp, type}`) is a snapshot camera: the widget and the panel draw it from the file with its reason and time, and it is not drawn twice. With `FRIGATE_LIVE_SOURCES` set (a JSON object of camera name to RTSP URL, held only by the gateway), a snapshot camera gets a "Watch live" button that plays through the gateway as an MJPEG stream: at most 120 s per session, a 60 s cooldown after it ends, up to 3 viewers sharing the one session, and it needs an optional ffmpeg on the host. These are for looking at a camera now; the tools above remain the way to answer questions about past events.
+
 ## Retention math
 
 Rough formula: `GB/day = cameras × bitrate_mbps × 10.8`. At 2 Mbps / 1 camera / 7 days ≈ 15 GB. The home server baseline is 85-90% disk full — raise `record.retain.days` in `config.yml` only after checking `df -h`.

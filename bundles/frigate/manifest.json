@@ -1,7 +1,7 @@
 {
   "id": "frigate",
   "name": "Frigate NVR",
-  "version": "1.2.4",
+  "version": "1.3.0",
   "refreshFiles": ["docker-compose.yml"],
   "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
   "type": "bundle",
@@ -26,7 +26,9 @@
     { "name": "FRIGATE_PASSWORD", "description": "Password for FRIGATE_USER.", "required": false, "secret": true },
     { "name": "FRIGATE_CONFIG_PATH", "description": "Host path for Frigate config directory.", "default": "~/.crow/data/frigate/config", "required": false },
     { "name": "FRIGATE_MEDIA_PATH", "description": "Host path for recordings and snapshots.", "default": "~/.crow/data/frigate/media", "required": false },
-    { "name": "FRIGATE_RTSP_PASSWORD", "description": "Your cameras' RTSP password, if your config.yml writes {FRIGATE_RTSP_PASSWORD} in a camera URL. Not the Frigate login. If config.yml uses it, set it here, or the camera login will fail. Leave blank if you don't use it.", "required": false, "secret": true }
+    { "name": "FRIGATE_RTSP_PASSWORD", "description": "Your cameras' RTSP password, if your config.yml writes {FRIGATE_RTSP_PASSWORD} in a camera URL. Not the Frigate login. If config.yml uses it, set it here, or the camera login will fail. Leave blank if you don't use it.", "required": false, "secret": true },
+    { "name": "FRIGATE_SNAPSHOT_DIR", "description": "Folder of `<camera>.jpg` stills, plus an optional `<camera>.json` carrying {timestamp, type}, written by a snapshot bridge such as a ring-mqtt sidecar. Each file becomes a doorbell camera on the widget and the panel, served through the gateway. Blank = no snapshot cameras.", "required": false },
+    { "name": "FRIGATE_LIVE_SOURCES", "description": "JSON object mapping a camera name to its RTSP URL for the on-demand live view, for example {\"front_door\":\"rtsp://user:pass@host:8554/stream\"}. Used only server-side; the address is never sent to the browser. Needs ffmpeg on the host, which is optional. Blank = no live view.", "required": false, "secret": true }
   ],
   "ports": [8971, 8554, 8555],
   "webUI": { "port": 8971, "path": "/", "label": "Frigate" },
@@ -38,5 +40,5 @@
     "secretEnv": "FRIGATE_PASSWORD",
     "userEnv": "FRIGATE_USER"
   },
-  "notes": "Recordings default to 7-day retention per config.yml.example. Increase retain.days at your own disk risk — the home server baseline is already tight. Port 5000 (internal unauthenticated API) is intentionally NOT exposed."
+  "notes": "Recordings default to 7-day retention per config.yml.example. Increase retain.days at your own disk risk — the home server baseline is already tight. Port 5000 (internal unauthenticated API) is intentionally NOT exposed. The on-demand live view needs an optional ffmpeg on the host and runs at most 120 s per session, with a cooldown after it ends."
 }

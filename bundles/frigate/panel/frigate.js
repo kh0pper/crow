@@ -14,6 +14,13 @@
  * downscale hint such as ?h=360 would be dropped — the panel asks for the still as-is
  * and appends only a cache-busting `t`.
  *
+ * A "snapshot camera" (a `<name>.jpg` in FRIGATE_SNAPSHOT_DIR, written by a sidecar such as a
+ * ring-mqtt one) is drawn from that file instead of Frigate's still, with the reason and time of
+ * the picture under its name. A camera that also has an entry in FRIGATE_LIVE_SOURCES gets a
+ * "Watch live" button; the player is one `<img>` on the MJPEG route, started by a click only and
+ * ended by the countdown (which follows the server's own remaining time), the Stop button or
+ * leaving the page. Neither the folder nor a stream address is ever printed on the page.
+ *
  * Web UI tab: a link to FRIGATE_UI_URL that opens in a new tab. Frigate's own UI is not
  * embedded: its address is a loopback one only this server can reach (a phone resolves
  * "localhost" to itself), and a cross-origin frame is also blocked by the dashboard's
@@ -29,6 +36,9 @@
 
 /** How long the Overview waits for Frigate's camera list before drawing the empty shell. */
 const CAMERA_LIST_BUDGET_MS = 2000;
+/** The snapshot name rule: a name that reaches the page is always one of these. */
+const SNAPSHOT_NAME_RE = /^[a-z0-9_-]{1,64}$/;
+const RTSP_RE = /^rtsps?:\/\//i;
 
 export default {
   id: "frigate",
@@ -60,7 +70,11 @@ export default {
     if (tab === "webui") {
       body = renderWebUI(browserUiUrl(), escapeHtml);
     } else {
-      body = renderOverview(await readCameras(appRoot), escapeHtml);
+      const snapshots = await readSnapshots(appRoot);
+      const cameras = await readCameras(appRoot);
+      const wanted = req.query.live;
+      const preselect = snapshots.isName(wanted) && snapshots.live.has(wanted) ? String(wanted) : "";
+      body = renderOverview(cameras, snapshots, preselect, escapeHtml);
     }
 
     const content = `
@@ -99,19 +113,54 @@ function stillSrc(name) {
   return `/api/frigate/${encodeURIComponent(String(name == null ? "" : name))}/latest.jpg`;
 }
 
+/** The gateway's route for one still in the snapshot folder. The name is URL-encoded. */
+function snapshotSrc(name) {
+  return `/api/frigate/snap/${encodeURIComponent(String(name == null ? "" : name))}.jpg`;
+}
+
+/** The snapshot folder this instance reads (manifest env var FRIGATE_SNAPSHOT_DIR). */
+function snapshotFolder() {
+  const value = process.env.FRIGATE_SNAPSHOT_DIR;
+  return typeof value === "string" ? value : "";
+}
+
 /**
- * This bundle's own Frigate client. A panel file runs from <CROW_HOME>/panels/<id>.js when
- * installed and from bundles/<id>/panel/ in a checkout, so its own code is loaded by path:
- * this instance's installed copy first, then the app's own copy.
+ * The KEY NAMES in FRIGATE_LIVE_SOURCES. Each value is an address carrying credentials, so it is
+ * only checked for shape and dropped: nothing here keeps it or returns it.
  */
-async function loadBundleClient(appRoot) {
+function liveSourceNames() {
+  const names = new Set();
+  const raw = process.env.FRIGATE_LIVE_SOURCES;
+  if (typeof raw !== "string" || !raw.trim()) return names;
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return names;
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return names;
+  for (const [name, url] of Object.entries(data)) {
+    if (!SNAPSHOT_NAME_RE.test(name)) continue;
+    if (typeof url !== "string") continue;
+    if (!RTSP_RE.test(url)) continue;
+    names.add(name);
+  }
+  return names;
+}
+
+/**
+ * One of this bundle's own server modules. A panel file runs from <CROW_HOME>/panels/<id>.js when
+ * installed and from bundles/<id>/panel/ in a checkout, so it is loaded by path: this instance's
+ * installed copy first, then the app's own copy. Null when neither is there.
+ */
+async function loadBundleModule(appRoot, fileName) {
   const { join } = await import("node:path");
   const { homedir } = await import("node:os");
   const { pathToFileURL } = await import("node:url");
 
   const home = process.env.CROW_HOME || join(homedir(), ".crow");
-  const candidates = [join(home, "bundles", "frigate", "server", "frigate-api.js")];
-  if (appRoot) candidates.push(join(appRoot, "bundles", "frigate", "server", "frigate-api.js"));
+  const candidates = [join(home, "bundles", "frigate", "server", fileName)];
+  if (appRoot) candidates.push(join(appRoot, "bundles", "frigate", "server", fileName));
 
   for (const path of candidates) {
     try {
@@ -121,6 +170,72 @@ async function loadBundleClient(appRoot) {
     }
   }
   return null;
+}
+
+/** This bundle's own Frigate client. */
+async function loadBundleClient(appRoot) {
+  return loadBundleModule(appRoot, "frigate-api.js");
+}
+
+/**
+ * What the Overview knows about the snapshot folder: its cameras, one label each (reason and time,
+ * in English like the rest of this page), and which of them can be watched live. A missing folder,
+ * a missing module or a broken sidecar is simply nothing to draw.
+ */
+async function readSnapshots(appRoot) {
+  const info = {
+    entries: [],
+    labels: {},
+    live: new Set(),
+    isName: (name) => typeof name === "string" && SNAPSHOT_NAME_RE.test(name),
+  };
+  const doorbell = await loadBundleModule(appRoot, "doorbell.js");
+  if (!doorbell) return info;
+  if (typeof doorbell.isSnapshotName === "function") info.isName = (name) => doorbell.isSnapshotName(name);
+  if (typeof doorbell.listSnapshotCameras !== "function") return info;
+  const entries = await doorbell.listSnapshotCameras(snapshotFolder()).catch(() => []);
+  const now = Date.now();
+  for (const entry of entries) {
+    if (!entry || typeof entry.name !== "string") continue;
+    info.entries.push(entry);
+    if (typeof doorbell.snapshotLabel === "function") {
+      info.labels[entry.name] = doorbell.snapshotLabel(entry, now, "en");
+    }
+  }
+  info.live = liveSourceNames();
+  return info;
+}
+
+/**
+ * The first paint's camera list. A snapshot camera is whichever name has a still in the folder;
+ * a camera that only exists as such a still is appended after Frigate's own, exactly as
+ * /api/frigate/cameras reports it, so the server-rendered grid and the browser's refill agree.
+ */
+function mergeCameras(frigateCameras, snapshots) {
+  const entries = snapshots && Array.isArray(snapshots.entries) ? snapshots.entries : [];
+  const live = snapshots && snapshots.live instanceof Set ? snapshots.live : new Set();
+  const snapshotNames = new Set(entries.map((entry) => entry.name));
+  const list = (frigateCameras || []).map((camera) => ({
+    ...camera,
+    snapshot: snapshotNames.has(camera.name),
+    live: live.has(camera.name),
+  }));
+  const known = new Set(list.map((camera) => camera.name));
+  for (const entry of entries) {
+    if (known.has(entry.name)) continue;
+    known.add(entry.name);
+    list.push({
+      name: entry.name,
+      enabled: true,
+      detect_enabled: false,
+      width: null,
+      height: null,
+      tracked_objects: [],
+      snapshot: true,
+      live: live.has(entry.name),
+    });
+  }
+  return list;
 }
 
 /** Frigate's /api/config camera map, mapped the way panel/routes.js maps it. */
@@ -163,12 +278,13 @@ async function readCameras(appRoot) {
 }
 
 /** One card per camera: the current still, its name, and what Frigate is detecting on it. */
-function cameraCards(cameras, escapeHtml) {
+function cameraCards(cameras, escapeHtml, labels = {}) {
   if (!cameras || cameras.length === 0) {
     return `<div class="fg-empty">No cameras configured. Edit config.yml to add RTSP sources.</div>`;
   }
   return cameras.map((camera) => {
     const name = String(camera.name == null ? "" : camera.name);
+    if (camera.snapshot === true) return snapshotCard(name, camera, labels, escapeHtml);
     const resolution = camera.width && camera.height ? `${camera.width}×${camera.height}` : "?";
     const tracked = (camera.tracked_objects || []).join(", ") || "none";
     const detect = camera.detect_enabled ? "detect" : "detect off";
@@ -182,15 +298,68 @@ function cameraCards(cameras, escapeHtml) {
   }).join("");
 }
 
-function renderOverview(cameras, escapeHtml) {
-  const cards = cameras === null
+/** A camera drawn from the snapshot folder: the still, its name, the reason and time, and live. */
+function snapshotCard(name, camera, labels, escapeHtml) {
+  const label = labels && typeof labels[name] === "string" ? labels[name] : "";
+  const liveButton = camera && camera.live === true
+    ? `<button type="button" class="fg-live-btn fg-live-start-card" data-live="${escapeHtml(name)}">Watch live</button>`
+    : "";
+  return `
+      <div class="fg-camera">
+        <img class="fg-cam-img" data-cam="${escapeHtml(name)}" data-snapshot="1" src="${escapeHtml(snapshotSrc(name))}" alt="${escapeHtml(name)}" loading="lazy">
+        <div class="fg-camera-name">${escapeHtml(name)}</div>
+        ${label ? `<div class="fg-camera-meta fg-cam-label">${escapeHtml(label)}</div>` : ""}
+        <div class="fg-camera-meta"><span class="fg-badge off">snapshot</span></div>
+        ${liveButton}
+      </div>`;
+}
+
+/** JSON inside a script element: the angle brackets and ampersand are escaped, never closed early. */
+function jsonInScript(value) {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026");
+}
+
+/**
+ * The one live player on the page. It is drawn empty: no `src` until a click, so a link that only
+ * preselects a camera can never start a stream.
+ */
+function livePlayer(preselect, escapeHtml) {
+  const attrs = preselect ? ` data-preselect="${escapeHtml(preselect)}"` : "";
+  return `
+        <div id="fg-live" class="fg-live"${attrs} hidden>
+          <div class="fg-live-head">
+            <span id="fg-live-title" class="fg-live-title"></span>
+            <span id="fg-live-count" class="fg-live-count"></span>
+          </div>
+          <img id="fg-live-img" class="fg-live-img" alt="">
+          <div id="fg-live-note" class="fg-live-note"></div>
+          <div class="fg-live-actions">
+            <button type="button" id="fg-live-start" class="fg-live-btn">Watch live</button>
+            <button type="button" id="fg-live-stop" class="fg-live-btn" hidden>Stop</button>
+            <button type="button" id="fg-live-again" class="fg-live-btn" hidden>Watch again</button>
+          </div>
+        </div>`;
+}
+
+function renderOverview(cameras, snapshots, preselect, escapeHtml) {
+  const list = mergeCameras(cameras, snapshots);
+  const cards = cameras === null && list.length === 0
     ? `<div class="fg-loading">Loading cameras…</div>`
-    : cameraCards(cameras, escapeHtml);
+    : cameraCards(list, escapeHtml, snapshots ? snapshots.labels : {});
+  const labels = snapshots && snapshots.labels ? snapshots.labels : {};
+  const labelScript = Object.keys(labels).length
+    ? `<script type="application/json" id="fg-camera-labels">${jsonInScript(labels)}</script>`
+    : "";
 
   return `
     <div class="fg-overview">
+      ${labelScript}
       <div class="fg-section">
         <h3>Cameras</h3>
+        ${livePlayer(preselect, escapeHtml)}
         <div id="fg-cameras" class="fg-cameras">
           ${cards}
         </div>
@@ -262,6 +431,17 @@ function frigateStyles() {
     .fg-cam-img { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: #000; border-radius: 4px; display: block; margin-bottom: 0.5rem; }
     .fg-camera-name { font-weight: 600; margin-bottom: 0.25rem; }
     .fg-camera-meta { font-size: 0.85rem; color: var(--muted, #888); }
+    .fg-cam-label { margin-bottom: 0.25rem; }
+    .fg-live { margin-bottom: 0.75rem; padding: 0.75rem; background: var(--panel, #1a1a1a); border: 1px solid var(--border, #333); border-radius: 6px; }
+    .fg-live-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem; }
+    .fg-live-title { font-weight: 600; }
+    .fg-live-count { font-size: 0.85rem; color: var(--muted, #888); }
+    .fg-live-img { width: 100%; max-height: 60vh; object-fit: contain; background: #000; border-radius: 4px; display: block; }
+    .fg-live-img.fg-live-off { display: none; }
+    .fg-live-note { font-size: 0.85rem; color: var(--muted, #888); margin-top: 0.5rem; }
+    .fg-live-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+    .fg-live-btn { padding: 0.35rem 0.75rem; border-radius: 6px; border: 1px solid var(--border, #333); background: var(--accent, #d9a521); color: #111; font-weight: 600; cursor: pointer; }
+    .fg-live-start-card { margin-top: 0.5rem; }
     .fg-badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.75rem; margin-right: 0.25rem; }
     .fg-badge.on { background: rgba(34, 197, 94, 0.2); color: #22c55e; }
     .fg-badge.off { background: rgba(148, 163, 184, 0.2); color: #94a3b8; }
@@ -297,7 +477,13 @@ function frigateScript() {
       var previous = window.__fgStills;
       if (previous && typeof previous.stop === "function") {
         previous.stop();
+        if (previous.stopLive) previous.stopLive();
         if (previous.onVisibility) document.removeEventListener("visibilitychange", previous.onVisibility);
+        if (previous.onLiveVisibility) document.removeEventListener("visibilitychange", previous.onLiveVisibility);
+        if (previous.onLiveClick) document.removeEventListener("click", previous.onLiveClick);
+        if (previous.onLivePageHide && typeof window.removeEventListener === "function") {
+          window.removeEventListener("pagehide", previous.onLivePageHide);
+        }
         if (previous.onPageLeave) {
           document.removeEventListener("turbo:before-cache", previous.onPageLeave);
           document.removeEventListener("turbo:before-visit", previous.onPageLeave);
@@ -309,7 +495,7 @@ function frigateScript() {
       var stillBusy = {};
 
       // This instance's slot on window; the next visit reads it to stop this one.
-      var state = { stop: stopStills, onVisibility: onVisibilityChange, onPageLeave: onPageLeave };
+      var state = { stop: stopStills, stopLive: endLive, onVisibility: onVisibilityChange, onPageLeave: onPageLeave };
       window.__fgStills = state;
 
       function clearKids(el) { while (el && el.firstChild) el.removeChild(el.firstChild); }
@@ -337,24 +523,31 @@ function frigateScript() {
         return "/api/frigate/" + encodeURIComponent(name) + "/latest.jpg";
       }
 
-      function cameraStill(name) {
+      // The snapshot folder's still route, for a camera drawn from a file.
+      function snapSrc(name) {
+        return "/api/frigate/snap/" + encodeURIComponent(name) + ".jpg";
+      }
+
+      function cameraStill(name, snapshot) {
         var img = document.createElement("img");
         img.className = "fg-cam-img";
         img.loading = "lazy";
         img.alt = name;
         img.setAttribute("data-cam", name);
+        if (snapshot) img.setAttribute("data-snapshot", "1");
         img.onerror = function () { this.style.display = "none"; };
-        img.src = stillSrc(name);
+        img.src = snapshot ? snapSrc(name) : stillSrc(name);
         return img;
       }
 
       // Fetch the next still off-screen and swap it in only once it has loaded, so the
-      // card never flashes while it refreshes.
+      // card never flashes while it refreshes. A snapshot camera refreshes its own file.
       function refreshStill(img) {
         var name = img.getAttribute("data-cam");
         if (!name) return;
         if (stillBusy[name]) return;  // the previous still for this camera has not settled
         stillBusy[name] = true;
+        var snapshot = img.getAttribute("data-snapshot") === "1";
         var next = new Image();
         next.onload = function () {
           img.style.display = "";
@@ -362,7 +555,7 @@ function frigateScript() {
           stillBusy[name] = false;
         };
         next.onerror = function () { stillBusy[name] = false; };
-        next.src = stillSrc(name) + "?t=" + Date.now();
+        next.src = (snapshot ? snapSrc(name) : stillSrc(name)) + "?t=" + Date.now();
       }
 
       function refreshStills() {
@@ -389,8 +582,9 @@ function frigateScript() {
         if (document.hidden) stopStills(); else startStills(true);
       }
 
-      // Turbo is caching this page or navigating away: stop asking Frigate for stills.
-      function onPageLeave() { stopStills(); }
+      // Turbo is caching this page or navigating away: stop asking Frigate for stills, and hang up
+      // the live view — the server counts a viewer that never left as a viewer.
+      function onPageLeave() { stopStills(); endLive(); }
 
       function renderCameras(cams) {
         var host = document.getElementById("fg-cameras");
@@ -400,9 +594,22 @@ function frigateScript() {
           host.appendChild(div("fg-empty", "No cameras configured. Edit config.yml to add RTSP sources."));
           return;
         }
+        var labels = cameraLabels();
         cams.forEach(function (c) {
           var card = div("fg-camera");
-          card.appendChild(cameraStill(c.name));
+          if (c.snapshot) {
+            card.appendChild(cameraStill(c.name, true));
+            card.appendChild(div("fg-camera-name", c.name));
+            var label = labels[c.name];
+            if (label) card.appendChild(div("fg-camera-meta fg-cam-label", label));
+            var tag = div("fg-camera-meta");
+            tag.appendChild(span("fg-badge off", "snapshot"));
+            card.appendChild(tag);
+            if (c.live) card.appendChild(liveButton(c.name));
+            host.appendChild(card);
+            return;
+          }
+          card.appendChild(cameraStill(c.name, false));
           card.appendChild(div("fg-camera-name", c.name));
           var meta = div("fg-camera-meta");
           meta.appendChild(span(c.detect_enabled ? "fg-badge on" : "fg-badge off", c.detect_enabled ? "detect" : "detect off"));
@@ -458,6 +665,223 @@ function frigateScript() {
         if (!host) return;
         clearKids(host);
         host.appendChild(div("fg-error", "Error: " + msg));
+      }
+
+      // The labels the page was rendered with: reason and time per snapshot camera, kept in a
+      // JSON island so a refill of the grid can print the same line the first paint did.
+      function cameraLabels() {
+        var node = document.getElementById("fg-camera-labels");
+        if (!node) return {};
+        var parsed = null;
+        try { parsed = JSON.parse(node.textContent || "{}"); } catch (e) { parsed = null; }
+        return (parsed && typeof parsed === "object") ? parsed : {};
+      }
+
+      // The per-card button that opens the player below the section heading.
+      function liveButton(name) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "fg-live-btn fg-live-start-card";
+        b.setAttribute("data-live", name);
+        b.textContent = "Watch live";
+        return b;
+      }
+
+      // ----------------------------------------------------------------
+      // The live view. One player and one stream at a time: the server allows a session of two
+      // minutes and a cooldown after it ends, so nothing here reconnects on its own — every start
+      // is a click, and every end is the countdown, the Stop button, the page going away, or the
+      // server reporting that the session's own time is up.
+      // ----------------------------------------------------------------
+      var LIVE_MAX_SECONDS = 120;
+      // The server knows how much of a session is really left, so the countdown is checked against
+      // /status: about a second after the stream starts, then every ten seconds while it plays.
+      // A viewer joining at second 90 then counts down 30 s instead of a fresh two minutes.
+      var LIVE_STATUS_FIRST_MS = 1000;
+      var LIVE_STATUS_EVERY_MS = 10000;
+      var livePanel = document.getElementById("fg-live");
+      var liveImg = document.getElementById("fg-live-img");
+      var liveTitle = document.getElementById("fg-live-title");
+      var liveCount = document.getElementById("fg-live-count");
+      var liveNote = document.getElementById("fg-live-note");
+      var liveStartBtn = document.getElementById("fg-live-start");
+      var liveStopBtn = document.getElementById("fg-live-stop");
+      var liveAgainBtn = document.getElementById("fg-live-again");
+      var liveName = "";
+      var liveLeft = 0;
+      var liveTimer = null;
+      var liveStatusTimer = null;
+      var liveStatusChecks = 0;
+      var livePlaying = false;
+
+      function liveSrc(name) {
+        return "/api/frigate/live/" + encodeURIComponent(name) + "/stream.mjpg";
+      }
+
+      function liveNoteText(text) {
+        if (liveNote) liveNote.textContent = text;
+      }
+
+      function clearLiveCount() {
+        if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+      }
+
+      function drawLiveCount() {
+        if (liveCount) liveCount.textContent = "Live - ends in " + liveLeft + " s";
+      }
+
+      // ----------------------------------------------------------------
+      // The server's own clock. A running session answers with remaining_seconds: an answer inside
+      // the cap replaces the local countdown, and an answer of 0 after the first check means the
+      // server has already ended the stream - a clean end of an MJPEG image fires no onerror, so
+      // without this the page would tick down a frozen frame.
+      // ----------------------------------------------------------------
+      function stopLiveStatus() {
+        if (liveStatusTimer) { clearTimeout(liveStatusTimer); liveStatusTimer = null; }
+      }
+
+      function scheduleLiveStatus(delay) {
+        stopLiveStatus();
+        if (!livePlaying) return;
+        liveStatusTimer = setTimeout(pollLiveStatus, delay);
+      }
+
+      function pollLiveStatus() {
+        liveStatusTimer = null;
+        if (!livePlaying || !liveName) return;
+        var name = liveName;
+        var check = liveStatusChecks;
+        liveStatusChecks = check + 1;
+        fetch("/api/frigate/live/" + encodeURIComponent(name) + "/status").then(function (r) {
+          return r.json();
+        }).then(function (data) {
+          if (!livePlaying || liveName !== name) return; // the player moved on meanwhile
+          var left = data ? Number(data.remaining_seconds) : NaN;
+          if (isFinite(left) && left > 0 && left <= LIVE_MAX_SECONDS) {
+            liveLeft = Math.ceil(left);
+            drawLiveCount();
+          } else if (left === 0 && check > 0) {
+            endLive("Live view ended");
+            return;
+          }
+          scheduleLiveStatus(LIVE_STATUS_EVERY_MS);
+        }).catch(function () {
+          if (livePlaying && liveName === name) scheduleLiveStatus(LIVE_STATUS_EVERY_MS);
+        });
+      }
+
+      // Drop the stream: an empty src and then no src attribute at all, so the browser closes the
+      // response and the server sees its last viewer leave.
+      function dropLiveSrc() {
+        if (!liveImg) return;
+        liveImg.onerror = null;
+        liveImg.src = "";
+        liveImg.removeAttribute("src");
+      }
+
+      function endLive(message) {
+        if (!livePanel) return;
+        clearLiveCount();
+        stopLiveStatus();
+        liveStatusChecks = 0;
+        livePlaying = false;
+        dropLiveSrc();
+        if (liveCount) liveCount.textContent = "";
+        if (liveImg) liveImg.classList.add("fg-live-off");
+        if (liveStopBtn) liveStopBtn.hidden = true;
+        if (liveStartBtn) liveStartBtn.hidden = liveName ? true : false;
+        if (liveAgainBtn) liveAgainBtn.hidden = liveName ? false : true;
+        liveNoteText(message || "Live view ended");
+      }
+
+      function startLive(name) {
+        if (!livePanel || !liveImg || !name || livePlaying) return;
+        liveName = name;
+        livePlaying = true;
+        liveLeft = LIVE_MAX_SECONDS;
+        liveStatusChecks = 0;
+        livePanel.hidden = false;
+        if (liveTitle) liveTitle.textContent = name;
+        drawLiveCount();
+        if (liveStartBtn) liveStartBtn.hidden = true;
+        if (liveStopBtn) liveStopBtn.hidden = false;
+        if (liveAgainBtn) liveAgainBtn.hidden = true;
+        liveImg.classList.remove("fg-live-off");
+        liveNoteText("Connecting…");
+        clearLiveCount();
+        liveImg.onerror = liveFailed;
+        liveImg.src = liveSrc(name) + "?t=" + Date.now();
+        liveTimer = setInterval(function () {
+          liveLeft = liveLeft - 1;
+          if (liveLeft <= 0) { endLive("Live view ended"); return; }
+          drawLiveCount();
+        }, 1000);
+        scheduleLiveStatus(LIVE_STATUS_FIRST_MS);
+      }
+
+      // The stream could not be played: say so in one plain line, ask the status route once why,
+      // and leave the Watch again button for the next click. Nothing retries by itself.
+      function liveFailed() {
+        var name = liveName;
+        clearLiveCount();
+        stopLiveStatus();
+        liveStatusChecks = 0;
+        livePlaying = false;
+        dropLiveSrc();
+        if (liveCount) liveCount.textContent = "";
+        if (liveStopBtn) liveStopBtn.hidden = true;
+        if (liveStartBtn) liveStartBtn.hidden = true;
+        if (liveAgainBtn) liveAgainBtn.hidden = false;
+        liveNoteText("Live view is not available");
+        if (!name) return;
+        fetch("/api/frigate/live/" + encodeURIComponent(name) + "/status").then(function (r) {
+          return r.json();
+        }).then(function (data) {
+          if (!data || typeof data !== "object") return;
+          if (Number(data.cooldown_seconds) > 0) { liveNoteText("Try again in a minute"); return; }
+          if (data.available === false) { liveNoteText("Live view is not available"); return; }
+          liveNoteText("Live view stopped - tap Watch again");
+        }).catch(function () { /* the plain line stands */ });
+      }
+
+      function onLiveVisibility() {
+        if (document.hidden) endLive("Live view ended");
+      }
+
+      function onLivePageHide() { endLive("Live view ended"); }
+
+      function onLiveClick(event) {
+        var target = event && event.target;
+        if (!target || typeof target.closest !== "function") return;
+        var card = target.closest("[data-live]");
+        if (card) { startLive(card.getAttribute("data-live") || ""); return; }
+        if (liveStartBtn && target.closest("#fg-live-start")) { startLive(liveName); return; }
+        if (liveStopBtn && target.closest("#fg-live-stop")) { endLive("Live view ended"); return; }
+        if (liveAgainBtn && target.closest("#fg-live-again")) { startLive(liveName); }
+      }
+
+      if (livePanel) {
+        state.onLiveClick = onLiveClick;
+        state.onLiveVisibility = onLiveVisibility;
+        state.onLivePageHide = onLivePageHide;
+        document.addEventListener("click", onLiveClick);
+        document.addEventListener("visibilitychange", onLiveVisibility);
+        if (window && typeof window.addEventListener === "function") {
+          window.addEventListener("pagehide", onLivePageHide);
+        }
+        // A link from the widget only preselects the camera: the panel opens with its name and
+        // the button, and the stream waits for that click.
+        var preselect = livePanel.getAttribute("data-preselect") || "";
+        if (preselect) {
+          liveName = preselect;
+          livePanel.hidden = false;
+          if (liveTitle) liveTitle.textContent = preselect;
+          if (liveStartBtn) liveStartBtn.hidden = false;
+          if (liveStopBtn) liveStopBtn.hidden = true;
+          if (liveAgainBtn) liveAgainBtn.hidden = true;
+          liveImg.classList.add("fg-live-off");
+          liveNoteText("Live view is off");
+        }
       }
 
       function loadCameras() {
