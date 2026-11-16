@@ -327,6 +327,35 @@ test("rejectFunneled middleware: the mail API is never funnel-exposed", async ()
   assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => "/dashboard/mail".startsWith(p)), "/dashboard/mail is not public");
 });
 
+// Crow Mail (plan 2, Task 10): the reader's page, the message frame, the attachment download and the
+// image allow list are the owner's own mail, so not one of them may be reachable from Funnel.
+test("rejectFunneled middleware: the reader, the frame, the attachment and the allow list are never funnel-exposed", async () => {
+  const server = await startTestApp();
+  const paths = [
+    "/dashboard/mail",
+    "/dashboard/mail?view=message&a=ma-0123456789abcdef&mid=%3Cm%40mail.example.test%3E&row=1",
+    "/dashboard/mail/api/messages/1/frame",
+    "/dashboard/mail/api/messages/1/frame?images=1",
+    "/dashboard/mail/api/messages/1/attachments/0",
+    "/dashboard/mail/api/image-allow?account=ma-0123456789abcdef",
+  ];
+  try {
+    const port = server.address().port;
+    for (const path of paths) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+  const { isFunnelPublicPath, PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const path of paths) {
+    assert.equal(isFunnelPublicPath(path), false, path);
+    assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+  }
+  assert.equal(isFunnelPublicPath("/dashboard/mail"), false, "/dashboard/mail is not public");
+});
+
 // Crow-to-Crow plan 1, task 7B: the sharing API names contacts, projects and visits —
 // who shares what with whom — so not one of its routes may be reachable from Funnel.
 test("rejectFunneled middleware: the Crow-to-Crow sharing API is never funnel-exposed", async () => {

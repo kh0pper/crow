@@ -349,6 +349,7 @@ export default defineConfig({
           { text: 'Phone (assistant calls)', link: '/guide/phone' },
           { text: 'Your First Bot (Tutorial)', link: '/guide/bot-builder-tutorial' },
           { text: 'Crow Messages', link: '/guide/crow-messages' },
+          { text: 'Mail', link: '/guide/mail' },
           { text: 'Meta Glasses', link: '/guide/meta-glasses' },
           { text: 'Kiosk Mode', link: '/guide/kiosk-mode' },
           { text: 'Ramble', link: '/guide/ramble' },

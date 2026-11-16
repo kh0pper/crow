@@ -9,8 +9,8 @@ This page describes the architecture, the feature flag, the tables, the provider
 contract, the one-instance-per-address rule, and the limits this first version accepts.
 
 Nothing here is user-visible while `CROW_MAIL` is unset, and this plan adds **no MCP tool, no router
-category and no nav link**: a bot has no mail surface, and the reader that consumes the API is a later
-plan.
+category and no nav link**: a bot has no mail surface, and the reader that consumes the API is a
+hidden owner-only panel (see "The reader" below).
 
 ## Layout
 
@@ -199,6 +199,209 @@ Consequences worth knowing:
 - **Liveness is each instance's own view.** A claim only counts while its instance is in the *local*
   `crow_instances` as `active` or `offline`. If A has revoked B but B still lists A as active, the two
   disagree about which claims count, and both (or neither) can win until their views agree.
+
+## The reader
+
+With `CROW_MAIL=1` the owner opens **Mail** from the shell's drawer ("More of Crow") at
+`/dashboard/mail`, on a phone or a desktop. It is one hidden dashboard panel —
+`servers/gateway/dashboard/panels/mail.js` plus `panels/mail/{html,css,client,settings-html}.js` —
+server-rendered like For You, with every view chosen by the query string. It reads this module's
+stores directly (`mail/store/reader-queries.js` answers the link and conversation questions) and
+calls `/dashboard/mail/api` only for actions. It is core code, never a bundle, so a copy cannot drift
+from the schema.
+
+Gates, in order, on every method: the flag, then `isLocalPasswordSessionOn` (the owner's own local
+password session), then GET and HEAD only. A peer's SSO session, a shared-project member and an unset
+flag all get 404 from the page, the page itself posts nothing, and `/dashboard/mail` is not in
+`PUBLIC_FUNNEL_PREFIXES`. The JSON API under `/dashboard/mail/api` answers its own guards — 404 while
+the flag is unset and 403 `owner_only` for a session that is not this machine's own — and a
+Funnel-flagged request is refused before either reaches a mail row.
+
+The panel's own client script (`panels/mail/client.js`) does only what a plain link cannot: build the
+message frame, resize it, the image buttons, refresh, older mail, the server search, and the settings
+verbs. Every sentence it can show comes from a `data-ml-*` attribute the server already translated; the
+one hidden error element carries a fixed sentence per API code, so a response's own English `message`
+is never put on screen.
+
+### Decisions behind the shape
+
+1. **A panel, not a gateway route set.** Pages follow `panels/for-you.js`: flag gate, owner gate, hidden
+   panel, reached from the drawer. They are server-rendered with plain links (Turbo Drive navigates);
+   the client script fills the gaps a link cannot.
+2. **A frame route, not `srcdoc`.** The page's CSP (`img-src 'self' data: blob:`) cannot be loosened for
+   one message, and a separate response can carry its own header. The frame response sets
+   `sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox` — never `allow-same-origin` —
+   and a `script-src` equal to the one helper's hash. Links in the frame keep an absolute `http`,
+   `https`, `mailto` or `tel` only: a relative href would open a signed-in dashboard page in the tab
+   the link asks for.
+3. **This module's sanitiser is the first line** (`bodyForDisplay`), and the CSP plus the sandbox are
+   the second. The frame document is rendered from the sanitised body on every load, never from stored
+   html, so remote images are this load's decision and a stored body cannot smuggle markup in later.
+4. **Seams for later plans.** The message view carries an empty
+   `<div data-mail-reply-slot data-account data-mid data-thread>` (plan 3: Reply, Reply all, Forward,
+   "Draft a reply with…", the bot picker and the "the bot sees only this thread" line; plan 4: the
+   suggestion), and the inbox carries `<div data-mail-digest-slot>` on the All view only (plan 4). The
+   reader draws nothing in either.
+5. **Message actions (read/unread, archive, delete, move) are a separate part of the plan.** The
+   reader's first parts ship without them (the unread dot then never clears, which is why the actions
+   part follows immediately), and the action routes refuse a UID whose folder UIDVALIDITY differs
+   from the stored one.
+6. **Attachments: download is in, two gaps are named.** `mail/reader/attachments.js`
+   (`extractAttachment`, `extractAttachmentFromParsed`) serves one part of the raw message by the same
+   index `GET /messages/:id` lists, and plan 3 imports it to forward an attachment. Not covered:
+   `cid:` inline images (the frame's `img-src` never allows them, so a body that only carries them
+   renders without its pictures), and "open in Crow's file viewer" (a download link is v1). The
+   sender's own content type is never echoed: every download is `application/octet-stream` with
+   `Content-Disposition: attachment` and a `sandbox; default-src 'none'` policy.
+7. **A minimal add-account form.** Label, address, password, IMAP and SMTP host, port and security —
+   no provider presets, no Gmail app-password steps and no OAuth wizard. Plan 5 replaces the form's
+   body; the settings page and its routes stay as they are.
+
+### The URL contract
+
+One route, `/dashboard/mail`, and a query string. Every value is read defensively: an unknown account
+id falls back to the unified view, an edited `cursor` starts at the first page, and a `back` value that
+is not a `/dashboard/mail?` path becomes the inbox.
+
+| Parameter | Meaning |
+| --- | --- |
+| `view` | `inbox` (default), `message`, `search` or `settings` |
+| `acct` | an account id, or `all`: the account chips. A folder link carries the folder's own account |
+| `folder` | a `mail_folders.id`; lists that one folder instead of the inbox |
+| `cursor` | plan 1's opaque keyset cursor for the next page ("Load more") |
+| `a` | the account id of a message link |
+| `mid` | the message's Message-ID, `encodeURIComponent`-ed; odd and very long ids round-trip |
+| `row` | the row id, a hint used only when it belongs to `a` and its Message-ID is `mid` |
+| `q` | the search words, trimmed and cut at 200 characters; an empty `q` draws the inbox |
+
+Two more values travel without being a view: `back`, the list a message should return to (accepted
+only as a `/dashboard/mail?...` path), and `flash`, the reload an action leaves behind (`older:<n>`,
+`remote:<n>` or `start`), which the server turns back into a sentence so it survives the reload.
+
+A message link therefore carries `a` + `mid` + `row`, and a message with no Message-ID is linked by
+`a` + `row` alone. `resolveMessageRef` uses the row only when it belongs to that account and its
+`message_id` equals `mid`; otherwise the Message-ID lookup runs, groups the account's candidates by
+`(from_addr, date)`, and takes the group holding the lowest id (the real message arrived first) and
+inside it the `inbox`-role row, else the lowest id. A conversation lists one entry per logical message:
+rows that are copies of one another (same Message-ID, From and Date, another folder) collapse to the
+row the reader stands on, while two rows that share only a Message-ID stay separate.
+
+### The frame route
+
+```
+GET /dashboard/mail/api/messages/:id/frame            # remote images blocked
+GET /dashboard/mail/api/messages/:id/frame?images=1   # this load only, nothing stored
+```
+
+An allow-listed sender (`mail_image_allow`, compared lower-case) gets images without `images=1`. The
+response is `text/html; charset=utf-8` and carries its headers from `frameHeaders()`:
+
+```
+Content-Security-Policy: default-src 'none'; script-src 'sha256-<helper>'; img-src 'none'|https:;
+  style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self';
+  sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+Cache-Control: no-store
+```
+
+The route sets that CSP in its handler, after the gateway's global middleware, so it replaces the
+dashboard page's policy rather than adding to it. `img-src` is `'none'` unless this load allows
+images, in which case it is `https:` and nothing else. `frame-ancestors 'self'` is the dashboard's own
+origin: a dashboard that is itself embedded by another origin will not show the reader's frame, which
+is acceptable because the reader is owner-only.
+
+A second pass over the already-sanitised body (`dropTrackingPixels`) drops any `<img>` declaring 2 px
+or less on either side (`width`/`height`, `"1px"`, `0`), and strips the `href` of any link that is not
+absolute. The document's `<meta name="crow-blocked-images">` carries the blocked count minus the
+pixels this pass dropped after this module had already counted them as blocked, so a tracking pixel
+never raises the banner twice.
+
+### Option C: the opaque-origin frame
+
+The body is never in the page and never in `srcdoc`. It is shown in an `<iframe>` with `sandbox`
+`allow-scripts allow-popups allow-popups-to-escape-sandbox` (no `allow-same-origin`), so the document
+has an opaque origin: a script inside it could not read the `crow_csrf` cookie or call the private
+APIs, and there is no such script because the sanitiser drops `script` and every handler first.
+
+Exactly one script runs in the frame — `FRAME_HELPER_SOURCE` in `mail/reader/frame-doc.js` — and
+`script-src` is its `sha256-` hash and nothing else (no `'unsafe-inline'`, no host, no `'self'`).
+Two things follow from this being a dashboard route rather than the artifact origin:
+
+- **The helper is inline, not served from a path.** A subresource request from an opaque origin carries
+  no session cookie, so a script path under the owner-guarded API would answer 403. A hash allows
+  exactly that one piece of text and nothing else.
+- **The nonce lives in the fragment.** The per-load nonce cannot be inside the pinned text, so the
+  parent puts it in the iframe URL as `#n=<nonce>` (never sent to the server) and the helper reads
+  `location.hash`, posting only when it matches `^[A-Za-z0-9_-]{16,64}$`.
+
+The helper writes nothing, makes no request, and posts `{t: "crow-mail-frame", nonce, height, blocked}`
+to `parent` with target `*` (an opaque frame cannot know its parent's origin, and the payload holds no
+secret) on `load` and from a `ResizeObserver` on the body, at most four times a second. The parent's
+one `message` listener accepts a report only when the source is that iframe's own `contentWindow`, the
+type matches, the nonce equals the one it generated for this load, and the height is a finite number;
+it floors and clamps the height to 120–20000 px and shows the image banner for a blocked count above
+zero. It never reads the frame's document.
+
+"Show images" rebuilds that one frame with `&images=1` and a **new** nonce. "Always show from
+&lt;sender&gt;" first POSTs `/image-allow`, then rebuilds the frame the same way; nothing about images is
+stored per view.
+
+### Connections the reader borrows
+
+The reader's attachment and action paths never open an adapter of their own and never reuse the sync
+worker's. A download and any action go through `supervisor.withAdapter(accountId, fn)` for the one call
+at a time that account allows, refused outright for a `claimed_elsewhere` or `auth_failed` account. On
+a success the adapter stays open for up to 30 seconds, so a burst — open a message, mark it read,
+archive it — costs one login rather than three; a failure closes it at once. That is a fourth
+connection on top of this module's budget of three (the sync worker's read connection and up to two
+IDLE connections, for Inbox and Sent), and every imapflow call inside it takes the mailbox lock. The
+download route re-fetches the message from the server by UID under that account's folder and compares
+its Message-ID, lower-cased From and Date with the stored row before serving a byte; a mismatch is 409
+`changed_on_server` and a requested full sync. An empty Buffer is the adapter's way of saying the
+message is over `MAX_RAW_BYTES`, and it answers 413 with the "about 18 MB" sentence.
+
+The account page's password update is the one path that dials on its own: `probeAccount` signs in with
+the password just typed (through the injected adapter factory, holding no stored secret) before
+anything is written, and only then is the secret sealed and the account restarted.
+
+### Mail passwords in the Passwords page
+
+A mail secret is a `kind: "service"` keychain row with `bundle_id = "crow-mail"` and no
+`service_connections` row, which is exactly the shape the Passwords page treats as a deletable orphan.
+So `deleteEntry` refuses any `crow-mail` row with `KeychainMailRowError` (code `KEYCHAIN_MAIL_ROW`),
+the API answers 409 `{error: "mail_row"}`, and the page shows the extension column as "Crow Mail"
+with the sentence "This password belongs to a Mail account. Remove the account in Mail settings."
+Removing the account still works: `deleteSecrets` goes through `deleteServiceSecrets`, not
+`deleteEntry`. Reveal and Copy keep their re-auth gate unchanged.
+
+### Known limits
+
+- **A forged Message-ID can win after a UIDVALIDITY reset.** The tie-break assumes the real message
+  arrived first: the group of rows sharing `(from_addr, date)` with the lowest row id wins. Row ids
+  survive nothing — a UIDVALIDITY reset wipes the folder and every row is stored again — so after a
+  reset the ids no longer say which delivery came first, and a forged message reusing a known
+  Message-ID can tie-break to the forged row. A link that still carries the original `row` and `mid`
+  opens the original, because the row is used when its Message-ID matches; the gap is the
+  Message-ID-only path. This is a spec gap, with no fix in this plan.
+- **A message in a Gmail-style label folder shows once.** The label copy collapses into the inbox row
+  (`copyRows`: same Message-ID, From and Date, different folder), so a conversation and the unified
+  counts list one entry. Opening it from the label folder still serves that folder's copy, because the
+  link's `row` hint names it.
+- **The not-here page answers 404 for every unresolved link.** A message that never existed, one from
+  another account, and one whose row a resync removed all get the same status and the same sentence.
+  That is deliberate: one status for every miss leaks less about which ids exist.
+- **The attachment GET talks to IMAP.** It fetches the message from the server for that one download,
+  and on an identity mismatch it answers 409 and asks the supervisor for a full sync. So a download
+  can be slow, can fail with a connection error, and can start a resync; nothing is stored locally to
+  serve it from.
+- **The All view re-encodes the cursor.** `listMessages` takes one account or every account, never a
+  set of ids, so the panel reads across every account, steps over rows of accounts this instance may
+  not read, and then re-encodes the last row it kept as plan 1's `date:id` cursor. Using the fetched
+  page's own cursor would sit past usable rows and skip them.
+- **No read POST ships yet.** The client keeps the mark-read timer slot (`window.__mlTimer`, cleared on
+  every run and on `turbo:before-visit`) so the lifecycle is in place, but nothing arms it: opening a
+  message writes nothing, and the unread dot stays until message actions land (Part C).
 
 ## Known gaps
 
