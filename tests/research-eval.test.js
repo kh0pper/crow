@@ -1116,7 +1116,7 @@ const careful12 = [
 ];
 
 let template7P;
-const tpl = () => (template7P ??= makeTemplate({}));
+const tpl = () => (template7P ??= makeTemplate({ botGrant: true }));
 after(async () => (await template7P?.catch(() => null))?.cleanup());
 const strictlyUnderTmp = (p) => within7(realish7(p), realish7(tmpdir())) && realish7(p) !== realish7(tmpdir());
 

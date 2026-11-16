@@ -45,10 +45,29 @@ const CONTEXT_DDL = `
 `;
 
 /** A fresh DB file holding the operator's writing rules (plus a device override on request). */
-async function freshDb(name, { deviceOverride = false } = {}) {
+async function freshDb(name, { deviceOverride = false, botHome = null } = {}) {
   const file = join(scratch, "data", `${name}.db`);
   const db = createDbClient(file);
   await db.executeMultiple(CONTEXT_DDL);
+  // The minimum a bot's home project needs: the share gate reads pi_bot_defs joined to
+  // project_spaces to resolve it.
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS project_spaces (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT,
+      status TEXT,
+      archived_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS pi_bot_defs (
+      bot_id TEXT PRIMARY KEY,
+      project_id INTEGER
+    );
+  `);
+  let home = null;
+  if (botHome) {
+    home = Number((await db.execute("INSERT INTO project_spaces (name, status) VALUES ('Bot home', 'active')")).lastInsertRowid);
+    await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, project_id) VALUES (?, ?)", args: [botHome, home] });
+  }
   await db.execute({
     sql: "INSERT INTO crow_context (section_key, section_title, content, sort_order) VALUES (?, ?, ?, ?)",
     args: ["writing_style", "Writing Style", "Operator rules v1", 70],
@@ -59,7 +78,7 @@ async function freshDb(name, { deviceOverride = false } = {}) {
       args: ["writing_style", "Writing Style", "Device rules v1", 70, "laptop"],
     });
   }
-  return { db, file };
+  return { db, file, home };
 }
 
 /** The memory server wired to an in-process client, as the gateway and crow-core wire it. */
@@ -217,9 +236,13 @@ test("an unknown-actor server with no actor meta still updates the writing rules
   }
 });
 
-test("a bot actor can still add and update another section", async () => {
-  const { db, file } = await freshDb("other-section");
+test("a bot actor can still add, update and delete a section in its own project", async () => {
+  const { db, file, home } = await freshDb("other-section", { botHome: "b3" });
   const { client, close } = await openMemoryServer(file, { actor: { kind: "bot", id: "b3" } });
+  const projectRow = async (sectionKey) => (await db.execute({
+    sql: "SELECT section_key, content, project_id FROM crow_context WHERE section_key = ? AND project_id = ?",
+    args: [sectionKey, home],
+  })).rows[0] ?? null;
   try {
     const add = await callTool(client, "crow_add_context_section", {
       section_key: "project_guidelines",
@@ -227,18 +250,20 @@ test("a bot actor can still add and update another section", async () => {
       content: "v1",
     });
     assert.match(add.text, /added to crow\.md/);
-    assert.equal((await sectionRow(db, { sectionKey: "project_guidelines" })).content, "v1");
+    assert.equal((await projectRow("project_guidelines")).content, "v1");
+    assert.equal(await sectionRow(db, { sectionKey: "project_guidelines" }), null,
+      "the bot's section is the home project's, never a global one");
 
     const update = await callTool(client, "crow_update_context_section", {
       section_key: "project_guidelines",
       content: "v2",
     });
     assert.match(update.text, /updated/);
-    assert.equal((await sectionRow(db, { sectionKey: "project_guidelines" })).content, "v2");
+    assert.equal((await projectRow("project_guidelines")).content, "v2");
 
     const del = await callTool(client, "crow_delete_context_section", { section_key: "project_guidelines" });
     assert.match(del.text, /deleted/);
-    assert.equal(await sectionRow(db, { sectionKey: "project_guidelines" }), null);
+    assert.equal(await projectRow("project_guidelines"), null);
   } finally {
     await close();
   }

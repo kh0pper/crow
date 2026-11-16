@@ -69,6 +69,7 @@ import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { createEgressRelay } from "./pi_egress.mjs";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
+import { botSessionEnv } from "./actor-env.mjs";
 import { impliedServers } from "./mcp_writer.mjs";
 import { SECRETS_SERVER } from "./crow-server-catalog.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
@@ -291,8 +292,8 @@ const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 
 // production and better-sqlite3 has no URI support, so the scheme is stripped
 // at the OPEN. Every card-database path in this module flows through here.
 /** C-12 spawn_env hygiene: drops engine-reserved keys (PI_BOT_*, PIBOT_*,
- *  CROW_PI_SANDBOX, CROW_MODEL_ROLES_FILE) and CROW_ACTOR_* (a def must not
- *  spoof the actor). */
+ *  CROW_PI_SANDBOX, CROW_MODEL_ROLES_FILE) and the actor identity (CROW_ACTOR_* and the
+ *  engine marker CROW_BOT_SESSION: a def must not spoof who its pi is). */
 export function filterSpawnEnvWithReport(def) {
   const spawnEnv = {};
   const stripped = [];
@@ -303,7 +304,7 @@ export function filterSpawnEnvWithReport(def) {
     // must not point pi at a file of its choosing.
     // PEER_CREDENTIAL_ENV (item 46 PR-B): no bot process may be pointed at the
     // peer credential store.
-    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_DATA_KEEP" || k === "CROW_PI_CONTAIN_NET" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
+    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_BOT_SESSION" || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_DATA_KEEP" || k === "CROW_PI_CONTAIN_NET" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
     // Loader hooks run code before pi starts (and a bot can edit its own def
     // through its DB-touching tools): never from a def. A NODE_OPTIONS made
     // only of heap-size flags is kept.
@@ -314,6 +315,37 @@ export function filterSpawnEnvWithReport(def) {
   return { spawnEnv, stripped };
 }
 export function filterSpawnEnv(def) { return filterSpawnEnvWithReport(def).spawnEnv; }
+
+/** The identity env this spawn puts on pi's own process (re-exported: the one builder a test or a
+ *  later task should call, never a copy). */
+export { botSessionEnv };
+
+/**
+ * Applies this spawn's identity to the FINAL pi env (`env` is mutated and returned).
+ *
+ * On BOTH paths every inherited `CROW_ACTOR_*` key and the marker are deleted FIRST: an identity
+ * this spawn sets is the only actor env pi (and every MCP server it spawns) ever sees, so no
+ * inherited actor key can ride along beside it.
+ *
+ * With a bot id: the bot's identity plus the engine marker (botSessionEnv).
+ *
+ * With NO bot id: the marker is set to the literal "unbound". `actorFromEnv`
+ * (servers/research/actor.js) then resolves the unverified bot, which every share rule refuses —
+ * without it an actor-less env reads as unknown, which is the operator's own client, so a bot-less
+ * spawn would fail OPEN. Applied last, so nothing merged before it (a def's spawn_env is already
+ * stripped by filterSpawnEnvWithReport; `opts.extraEnv` is not) can leave a caller identity behind.
+ * Nothing sets an actor key after this call; a per-turn thread reaches the MCP servers through each
+ * stdio block's own env (scripts/pi-bots/actor-env.mjs), not through pi's process env.
+ */
+export function piIdentityEnv(env, { botId, displayName } = {}) {
+  const out = env && typeof env === "object" ? env : {};
+  for (const key of Object.keys(out)) {
+    if (/^CROW_ACTOR_/.test(key) || key === "CROW_BOT_SESSION") delete out[key];
+  }
+  if (typeof botId === "string" && botId) return Object.assign(out, botSessionEnv(botId, displayName));
+  out.CROW_BOT_SESSION = "unbound";
+  return out;
+}
 
 export function db(p) { const d = new Database(resolveSqlitePath(p)); d.pragma("busy_timeout = 10000"); return d; }
 
@@ -799,6 +831,15 @@ export class PiRpc {
     } else {
       delete env.PI_BOT_MCP_CONFIG_FD;
     }
+    // The bot's identity on pi's OWN env, set in BOTH delivery modes (it is not tied to
+    // PI_BOT_MCP_CONFIG, which fd mode rewrites): every stdio MCP server pi spawns inherits it, and
+    // `servers/research/actor.js` turns it into a bot actor — or, when the marker and the bot id
+    // disagree (or no bot id is set), into the unverified bot that is refused everywhere. Applied
+    // after the def's spawn_env, whose CROW_ACTOR_*/CROW_BOT_SESSION keys were stripped above, so a
+    // bot definition can never choose its own identity. The id is the engine's opts.botId only; a
+    // spawn with NO bot id (skill review) leaves no inherited actor and marks the session "unbound",
+    // so its children resolve the unverified bot instead of falling back to unknown = the operator.
+    piIdentityEnv(env, { botId: opts.botId, displayName: opts.displayName });
     // detached:true puts pi in its own process group so close() can SIGTERM
     // the whole tree (pi + its MCP children). Without this, killing pi leaves
     // its MCP server children (brave-search, google-workspace, github, etc.)

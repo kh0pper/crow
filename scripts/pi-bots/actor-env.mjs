@@ -27,6 +27,23 @@ export function actorEnvFor({ botId, displayName, threadId }) {
   return env;
 }
 
+/**
+ * The env the bot engine puts on pi's OWN process, so every MCP server pi spawns inherits the
+ * bot's identity even when its block carries no env of its own:
+ *
+ *   CROW_ACTOR_KIND / CROW_ACTOR_BOT_ID / CROW_ACTOR_BOT_NAME  who the bot is (actor-env above)
+ *   CROW_BOT_SESSION=<botId>                                   the engine-reserved session marker
+ *
+ * The marker is not a claim a caller can make: it is engine-owned and `actorFromEnv` refuses any
+ * env where it disagrees with the bot id, so a bot reaching an MCP server cannot borrow the
+ * operator's scope by leaving the actor out. `botId` must come from the engine (never a bot
+ * definition, which is bot-writable).
+ */
+export function botSessionEnv(botId, displayName) {
+  const id = String(botId);
+  return { ...actorEnvFor({ botId: id, displayName }), CROW_BOT_SESSION: id };
+}
+
 /** Replaces each active stdio block (never mutates the shared block object). */
 export function applyActorEnv(mcpServers, actorEnv) {
   for (const [name, block] of Object.entries(mcpServers || {})) {

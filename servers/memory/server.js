@@ -26,6 +26,7 @@ import { insertMemory, updateMemory, deleteMemory } from "./memory-write.js";
 import { isSummaryMemorySource, SUMMARY_SOURCE_RESERVED } from "../shared/summary-source.js";
 import { summaryRecallClause, askerRank } from "./summary-recall.js";
 import { actorFromEnv, resolveCallActor } from "../research/actor.js";
+import { makeShareGate, scopePredicate, notFoundResult } from "../shared/project-share-scope.js";
 import { jsonObject } from "../shared/tool-schema-types.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
 import { scheduleKind, reminderText, zoneFor, cronNext, cadenceMinutes, SCHEDULE_OWNERS, ONCE, REMINDER_PREFIX } from "../shared/schedule-core.js";
@@ -57,6 +58,22 @@ export function createMemoryServer(dbPath, options = {}) {
       if (baseActor && baseActor.kind === "bot" && call && call.kind === "bot" && call.id === baseActor.id) rank = await rankAsker(baseActor, extra);
     } catch { rank = 2; }
     return summaryRecallClause(rank, alias);
+  }
+
+  // --- Project shares (Phase 1) ---
+  // One gate per call (servers/shared/project-share-scope.js) holds every decision about what a
+  // bot may reach: its home project, the projects it holds a live share of, and nothing else. The
+  // owner, an unidentified caller and the operator's own voice bot are untouched by it.
+  const shareGate = (tool, extra) => makeShareGate(db, tool, { baseActor, extra });
+
+  /**
+   * The `AND …` fragment a read appends for its project: the project the gate resolved, or — when
+   * it resolved none — the bot's read scope (a bot with no home project matches no rows; a caller
+   * the bot rules do not bind is unrestricted).
+   */
+  async function readProjectSql(gate, pass, column) {
+    if (pass.projectId != null) return { sql: ` AND ${column} = ?`, args: [Number(pass.projectId)] };
+    return scopePredicate(await gate.readScope(), { column });
   }
 
   // --- Phase 4: BLOB-based semantic memory ---
@@ -116,11 +133,16 @@ export function createMemoryServer(dbPath, options = {}) {
       instance_id: z.string().max(100).optional().describe("Instance ID (origin). Omit to use local instance."),
       project_id: z.number().optional().describe("Project ID for project-scoped memories"),
     },
-    async ({ content, category, context, tags, source, importance, instance_id, project_id }) => {
+    async ({ content, category, context, tags, source, importance, instance_id, project_id }, extra) => {
       // The session-summary source is reserved for the summary job.
       if (isSummaryMemorySource(source)) {
         return { content: [{ type: "text", text: "Refused: the source prefix \"session-summary:\" is reserved for session summaries. Use another source." }], isError: true };
       }
+      // A bot writes into the project it named (one it holds a write share of) or, with none named,
+      // into its home project; a bot with no home project must name one.
+      const gate = shareGate("crow_store_memory", extra);
+      const pass = await gate.check(project_id, {});
+      if (pass.isError) return pass;
       // One insert path (memory-write.js), shared with the gateway's session
       // summary job: the INSERT, the async embedding and the sync emit.
       // No project_uuid here on purpose: deferred until every paired instance
@@ -128,7 +150,7 @@ export function createMemoryServer(dbPath, options = {}) {
       // whose memories table lacks the column, and that entry is never
       // retried (the peer's checkpoint moves past it).
       const memoryId = await insertMemory(db, {
-        content, category, context, tags, source, importance, instance_id, project_id,
+        content, category, context, tags, source, importance, instance_id, project_id: pass.projectId,
       }, { syncManager, onStored: storeEmbedding });
 
       return {
@@ -155,7 +177,15 @@ export function createMemoryServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Filter by project ID"),
     },
     async ({ query, category, min_importance, limit, semantic, instance_id, project_id }, extra) => {
-      const gate = await summaryGate(extra, "m.");
+      const summarySql = await summaryGate(extra, "m.");
+      // The project this call may read: one the bot named and holds a share of, its home project
+      // when it named none, or nothing.
+      const gate = shareGate("crow_search_memories", extra);
+      const pass = await gate.check(project_id, {});
+      if (pass.isError) return pass;
+      const projected = await readProjectSql(gate, pass, "m.project_id");
+      // The same scope for the semantic fetch, which selects from `memories` with no alias.
+      const projectedBare = await readProjectSql(gate, pass, "project_id");
       // Try semantic search first if requested and available
       let semanticRows = [];
 
@@ -175,12 +205,11 @@ export function createMemoryServer(dbPath, options = {}) {
               const ids = topCandidates.map((c) => c.memory_id);
               if (ids.length > 0) {
                 const placeholders = ids.map(() => "?").join(",");
-                let fetchSql = `SELECT * FROM memories WHERE id IN (${placeholders})${await summaryGate(extra, "")}`;
-                const fetchArgs = [...ids];
+                let fetchSql = `SELECT * FROM memories WHERE id IN (${placeholders})${await summaryGate(extra, "")}${projectedBare.sql}`;
+                const fetchArgs = [...ids, ...projectedBare.args];
                 if (category) { fetchSql += " AND category = ?"; fetchArgs.push(category); }
                 if (min_importance) { fetchSql += " AND importance >= ?"; fetchArgs.push(min_importance); }
                 if (instance_id) { fetchSql += " AND instance_id = ?"; fetchArgs.push(instance_id); }
-                if (project_id) { fetchSql += " AND project_id = ?"; fetchArgs.push(project_id); }
                 const { rows: rawRows } = await db.execute({ sql: fetchSql, args: fetchArgs });
                 const byId = new Map(rawRows.map((r) => [r.id, r]));
                 // Preserve cosine-sorted order + attach score
@@ -228,11 +257,9 @@ export function createMemoryServer(dbPath, options = {}) {
           sql += " AND m.instance_id = ?";
           params.push(instance_id);
         }
-        if (project_id) {
-          sql += " AND m.project_id = ?";
-          params.push(project_id);
-        }
-        sql += gate;
+        sql += projected.sql;
+        params.push(...projected.args);
+        sql += summarySql;
 
         sql += " ORDER BY rank LIMIT ?";
         params.push(limit);
@@ -289,6 +316,11 @@ export function createMemoryServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: "Context too short to search." }] };
       }
 
+      const gate = shareGate("crow_recall_by_context", extra);
+      const pass = await gate.check(project_id, {});
+      if (pass.isError) return pass;
+      const projected = await readProjectSql(gate, pass, "m.project_id");
+
       let sql = `
         SELECT m.*, rank FROM memories_fts fts
         JOIN memories m ON m.id = fts.rowid
@@ -297,7 +329,8 @@ export function createMemoryServer(dbPath, options = {}) {
       const params = [safeQuery];
 
       if (instance_id) { sql += " AND m.instance_id = ?"; params.push(instance_id); }
-      if (project_id) { sql += " AND m.project_id = ?"; params.push(project_id); }
+      sql += projected.sql;
+      params.push(...projected.args);
       if (!include_maker_lab) {
         sql += " AND (m.source IS NULL OR m.source != 'maker-lab')";
       }
@@ -338,7 +371,17 @@ export function createMemoryServer(dbPath, options = {}) {
     async ({ topic, per_source_limit, include_sources, project_id, min_importance }, extra) => {
       const safeQuery = sanitizeFtsQuery(topic);
       const safeLike = escapeLikePattern(topic);
-      const sources = include_sources || ["memories", "research_sources", "research_notes", "blog_posts"];
+      const gate = shareGate("crow_deep_recall", extra);
+      const pass = await gate.check(project_id, {});
+      if (pass.isError) return pass;
+      // Blog posts carry no project of their own, so a caller the bot rules bind gets no blog
+      // results at all (the four families a share covers never included them).
+      const boundByShares = (await gate.readScope()) != null;
+      const memProjected = await readProjectSql(gate, pass, "m.project_id");
+      const sourceProjected = await readProjectSql(gate, pass, "s.project_id");
+      const noteProjected = await readProjectSql(gate, pass, "rn.project_id");
+      let sources = include_sources || ["memories", "research_sources", "research_notes", "blog_posts"];
+      if (boundByShares) sources = sources.filter((s) => s !== "blog_posts");
       const searched = [];
       const failed = [];
       const allResults = [];
@@ -353,7 +396,8 @@ export function createMemoryServer(dbPath, options = {}) {
               WHERE memories_fts MATCH ?
             `;
             const params = [safeQuery];
-            if (project_id) { sql += " AND m.project_id = ?"; params.push(project_id); }
+            sql += memProjected.sql;
+            params.push(...memProjected.args);
             if (min_importance) { sql += " AND m.importance >= ?"; params.push(min_importance); }
             sql += await summaryGate(extra, "m.");
             sql += " ORDER BY rank LIMIT ?";
@@ -392,7 +436,8 @@ export function createMemoryServer(dbPath, options = {}) {
               WHERE sources_fts MATCH '{title authors abstract content_summary tags} : ' || ?
             `;
             const params = [safeQuery];
-            if (project_id) { sql += " AND s.project_id = ?"; params.push(project_id); }
+            sql += sourceProjected.sql;
+            params.push(...sourceProjected.args);
             sql += " ORDER BY rank LIMIT ?";
             params.push(per_source_limit);
 
@@ -419,13 +464,18 @@ export function createMemoryServer(dbPath, options = {}) {
         try {
           if (safeLike) {
             const likeParam = `%${safeLike}%`;
+            // The note's own project scopes the note; the source's project scopes the title it lends
+            // the note. Without the join condition a home note could show a bound bot the title of a
+            // project-less source (or one from another project). The owner's rows are unchanged.
+            const sourceJoin = boundByShares ? " AND (rs.id IS NULL OR rs.project_id = rn.project_id)" : "";
             let sql = `
               SELECT rn.*, rs.title as source_title FROM research_notes rn
-              LEFT JOIN research_sources rs ON rn.source_id = rs.id
+              LEFT JOIN research_sources rs ON rn.source_id = rs.id${sourceJoin}
               WHERE (rn.content LIKE ? ESCAPE '\\' OR rn.title LIKE ? ESCAPE '\\')
             `;
             const params = [likeParam, likeParam];
-            if (project_id) { sql += " AND rn.project_id = ?"; params.push(project_id); }
+            sql += noteProjected.sql;
+            params.push(...noteProjected.args);
             sql += " ORDER BY rn.created_at DESC LIMIT ?";
             params.push(per_source_limit);
 
@@ -499,14 +549,15 @@ export function createMemoryServer(dbPath, options = {}) {
       id: z.number().describe("Memory ID"),
     },
     async ({ id }, extra) => {
-      // A summary the asker may not see answers exactly like a missing id.
+      // A summary the asker may not see answers exactly like a missing id, and so does a row in a
+      // project this caller may not read.
       const { rows } = await db.execute({
         sql: "SELECT id, content, category, importance, tags, source, created_at, updated_at, accessed_at, access_count, context, instance_id, project_id FROM memories WHERE id = ?" + await summaryGate(extra, ""),
         args: [id],
       });
-      if (rows.length === 0) {
-        return { content: [{ type: "text", text: `{"error":"not_found","id":${id}}` }] };
-      }
+      if (rows.length === 0) return notFoundResult();
+      const refusal = await shareGate("crow_get_memory", extra).checkRow(rows[0].project_id);
+      if (refusal) return refusal;
       const r = rows[0];
       // Serialize numeric fields explicitly — libsql may return BigInt for INTEGER columns.
       const payload = {
@@ -541,8 +592,14 @@ export function createMemoryServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Filter by project ID"),
     },
     async ({ category, tag, min_importance, sort_by, limit, instance_id, project_id }, extra) => {
+      const gate = shareGate("crow_list_memories", extra);
+      const pass = await gate.check(project_id, {});
+      if (pass.isError) return pass;
+      const projected = await readProjectSql(gate, pass, "project_id");
       let sql = "SELECT * FROM memories WHERE 1=1" + await summaryGate(extra, "");
       const params = [];
+      sql += projected.sql;
+      params.push(...projected.args);
 
       if (category) {
         sql += " AND category = ?";
@@ -559,10 +616,6 @@ export function createMemoryServer(dbPath, options = {}) {
       if (instance_id) {
         sql += " AND instance_id = ?";
         params.push(instance_id);
-      }
-      if (project_id) {
-        sql += " AND project_id = ?";
-        params.push(project_id);
       }
 
       const sortMap = {
@@ -601,11 +654,11 @@ export function createMemoryServer(dbPath, options = {}) {
       importance: z.number().min(1).max(10).optional().describe("New importance"),
       context: z.string().max(50000).optional().describe("Updated context"),
     },
-    async ({ id, content, category, tags, importance, context }) => {
+    async ({ id, content, category, tags, importance, context }, extra) => {
       const { rows } = await db.execute({ sql: "SELECT * FROM memories WHERE id = ?", args: [id] });
-      if (rows.length === 0) {
-        return { content: [{ type: "text", text: `Memory #${id} not found.` }] };
-      }
+      if (rows.length === 0) return notFoundResult();
+      const refusal = await shareGate("crow_update_memory", extra).checkRow(rows[0].project_id);
+      if (refusal) return refusal;
 
       // A session summary is written only by the summary job on its origin
       // instance (single-writer): never edited here, on any instance.
@@ -631,7 +684,10 @@ export function createMemoryServer(dbPath, options = {}) {
       category: z.string().max(500).optional().describe("Filter by category (omit = all)"),
       id_list: z.array(z.number()).optional().describe("Specific memory IDs to re-embed (omit = all)"),
     },
-    async ({ category, id_list }) => {
+    async ({ category, id_list }, extra) => {
+      // Re-embedding rewrites every project's vectors: the operator's alone.
+      const pass = await shareGate("crow_regenerate_embeddings", extra).check(null);
+      if (pass.isError) return pass;
       const info = await phase4ProviderHealthy();
       if (!info.ok) {
         return { content: [{ type: "text", text: `Embedding provider not available: ${info.error}.` }] };
@@ -676,11 +732,13 @@ export function createMemoryServer(dbPath, options = {}) {
       id: z.number().describe("Memory ID to delete"),
       confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
-    async ({ id, confirm_token }) => {
+    async ({ id, confirm_token }, extra) => {
       const existing = await db.execute({ sql: "SELECT * FROM memories WHERE id = ?", args: [id] });
-      if (existing.rows.length === 0) {
-        return { content: [{ type: "text", text: `Memory #${id} not found.` }] };
-      }
+      // Rechecked on the confirming call too: a share revoked between the preview and the confirm
+      // finds nothing to delete.
+      if (existing.rows.length === 0) return notFoundResult();
+      const refusal = await shareGate("crow_delete_memory", extra).checkRow(existing.rows[0].project_id);
+      if (refusal) return refusal;
       const memory = existing.rows[0];
 
       if (!shouldSkipGates()) {
@@ -711,11 +769,15 @@ export function createMemoryServer(dbPath, options = {}) {
     "Get statistics about stored memories - counts by category, total count, importance distribution.",
     {},
     async (_args, extra) => {
-      const total = (await db.execute("SELECT COUNT(*) as count FROM memories")).rows[0];
-      const byCategory = (await db.execute("SELECT category, COUNT(*) as count FROM memories GROUP BY category ORDER BY count DESC")).rows;
-      const byImportance = (await db.execute("SELECT importance, COUNT(*) as count FROM memories GROUP BY importance ORDER BY importance DESC")).rows;
+      const gate = shareGate("crow_memory_stats", extra);
+      const pass = await gate.check(null, {});
+      if (pass.isError) return pass;
+      const projected = await readProjectSql(gate, pass, "project_id");
+      const total = (await db.execute({ sql: `SELECT COUNT(*) as count FROM memories WHERE 1=1${projected.sql}`, args: projected.args })).rows[0];
+      const byCategory = (await db.execute({ sql: `SELECT category, COUNT(*) as count FROM memories WHERE 1=1${projected.sql} GROUP BY category ORDER BY count DESC`, args: projected.args })).rows;
+      const byImportance = (await db.execute({ sql: `SELECT importance, COUNT(*) as count FROM memories WHERE 1=1${projected.sql} GROUP BY importance ORDER BY importance DESC`, args: projected.args })).rows;
       // Counts carry no content; the previews are gated like every recall.
-      const recent = (await db.execute(`SELECT id, category, substr(content, 1, 80) as preview, created_at FROM memories WHERE 1=1${await summaryGate(extra, "")} ORDER BY created_at DESC LIMIT 5`)).rows;
+      const recent = (await db.execute({ sql: `SELECT id, category, substr(content, 1, 80) as preview, created_at FROM memories WHERE 1=1${await summaryGate(extra, "")}${projected.sql} ORDER BY created_at DESC LIMIT 5`, args: projected.args })).rows;
 
       let text = `Memory Statistics:\n`;
       text += `  Total memories: ${total.count}\n\n`;
@@ -739,8 +801,14 @@ export function createMemoryServer(dbPath, options = {}) {
     },
     async ({ stale_days, low_importance_threshold, dry_run }, extra) => {
       const staleDaysModifier = `-${stale_days} days`;
+      // With dry_run false this tool may update or delete memories, so it is the operator's alone;
+      // the dry run is a cross-project report scoped like every listing.
+      const share = shareGate("crow_dream", extra);
+      const pass = await share.check(null, { dry_run });
+      if (pass.isError) return pass;
+      const projected = await readProjectSql(share, pass, "project_id");
       // The report quotes content: summaries the asker may not see are left out.
-      const gate = await summaryGate(extra, "");
+      const summarySql = await summaryGate(extra, "");
 
       // 1. Stale memories: not accessed in N days AND importance <= threshold
       const { rows: staleRows } = await db.execute({
@@ -748,9 +816,9 @@ export function createMemoryServer(dbPath, options = {}) {
               FROM memories
               WHERE ((accessed_at IS NULL AND created_at < datetime('now', ?))
                  OR (accessed_at < datetime('now', ?)))
-              AND importance <= ?${gate}
+              AND importance <= ?${summarySql}${projected.sql}
               ORDER BY importance ASC, accessed_at ASC`,
-        args: [staleDaysModifier, staleDaysModifier, low_importance_threshold],
+        args: [staleDaysModifier, staleDaysModifier, low_importance_threshold, ...projected.args],
       });
 
       // 2. Category health stats
@@ -759,11 +827,12 @@ export function createMemoryServer(dbPath, options = {}) {
                      ROUND(AVG(importance), 1) as avg_importance,
                      MIN(accessed_at) as oldest_access,
                      SUM(CASE WHEN accessed_at < datetime('now', '-30 days') OR accessed_at IS NULL THEN 1 ELSE 0 END) as stale_count
-              FROM memories GROUP BY category`,
+              FROM memories WHERE 1=1${projected.sql} GROUP BY category`,
+        args: projected.args,
       });
 
       // 3. Total count
-      const { rows: totalRows } = await db.execute("SELECT COUNT(*) as count FROM memories");
+      const { rows: totalRows } = await db.execute({ sql: `SELECT COUNT(*) as count FROM memories WHERE 1=1${projected.sql}`, args: projected.args });
       const totalMemories = totalRows[0].count;
 
       // 4. Duplicate detection via shingle similarity (within same category, capped)
@@ -785,7 +854,8 @@ export function createMemoryServer(dbPath, options = {}) {
       // Get recent memories grouped by category for duplicate detection
       const { rows: recentMemories } = await db.execute({
         sql: `SELECT id, category, content, importance, created_at
-              FROM memories WHERE 1=1${gate} ORDER BY created_at DESC LIMIT 1000`,
+              FROM memories WHERE 1=1${summarySql}${projected.sql} ORDER BY created_at DESC LIMIT 1000`,
+        args: projected.args,
       });
 
       const byCategory = {};
@@ -941,8 +1011,19 @@ export function createMemoryServer(dbPath, options = {}) {
       device_id: z.string().max(200).optional().describe("Device ID to merge device-specific overrides with global context"),
       project_id: z.number().optional().describe("Project ID to merge project-specific overrides with global context"),
     },
-    async ({ include_dynamic, platform, device_id, project_id }) => {
-      const markdown = await generateCrowContext(db, { includeDynamic: include_dynamic, platform, deviceId: device_id ?? null, projectId: project_id ?? null });
+    async ({ include_dynamic, platform, device_id, project_id }, extra) => {
+      // A bot reads its home project's merge and names no device; its context carries no dynamic
+      // block (the instance-wide stats and project names in it are the operator's).
+      const gate = shareGate("crow_get_context", extra);
+      const pass = await gate.check(project_id, { device_id });
+      if (pass.isError) return pass;
+      const boundByShares = (await gate.readScope()) != null;
+      const markdown = await generateCrowContext(db, {
+        includeDynamic: boundByShares ? false : include_dynamic,
+        platform,
+        deviceId: device_id ?? null,
+        projectId: pass.projectId ?? null,
+      });
       return { content: [{ type: "text", text: markdown }] };
     }
   );
@@ -964,6 +1045,11 @@ export function createMemoryServer(dbPath, options = {}) {
       // sync entry is emitted for a writing_style write it may not make.
       if (refusesWritingStyle(section_key, extra)) return writingStyleRefusal();
 
+      // The section a bot touches is its own project's, never the global one.
+      const pass = await shareGate("crow_update_context_section", extra).check(project_id, { device_id });
+      if (pass.isError) return pass;
+      const scopedProjectId = pass.projectId;
+
       // Build WHERE clause based on device_id and project_id
       const whereParts = ["section_key = ?"];
       const whereArgs = [section_key];
@@ -971,7 +1057,7 @@ export function createMemoryServer(dbPath, options = {}) {
       if (device_id) { whereParts.push("device_id = ?"); whereArgs.push(device_id); }
       else { whereParts.push("device_id IS NULL"); }
 
-      if (project_id) { whereParts.push("project_id = ?"); whereArgs.push(project_id); }
+      if (scopedProjectId != null) { whereParts.push("project_id = ?"); whereArgs.push(scopedProjectId); }
       else { whereParts.push("project_id IS NULL"); }
 
       const whereClause = whereParts.join(" AND ");
@@ -981,7 +1067,7 @@ export function createMemoryServer(dbPath, options = {}) {
         args: whereArgs,
       });
       if (rows.length === 0) {
-        const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
+        const scope = [device_id ? `device: ${device_id}` : null, scopedProjectId != null ? `project: ${scopedProjectId}` : null].filter(Boolean).join(", ");
         const target = scope ? ` (${scope})` : "";
         return { content: [{ type: "text", text: `Section "${section_key}"${target} not found.` }] };
       }
@@ -1025,7 +1111,7 @@ export function createMemoryServer(dbPath, options = {}) {
         }
       }
 
-      const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
+      const scope = [device_id ? `device: ${device_id}` : null, scopedProjectId != null ? `project: ${scopedProjectId}` : null].filter(Boolean).join(", ");
       const target = scope ? ` (${scope})` : "";
       return { content: [{ type: "text", text: `Section "${section_key}"${target} updated.` }] };
     }
@@ -1045,15 +1131,20 @@ export function createMemoryServer(dbPath, options = {}) {
     async ({ section_key, section_title, content, sort_order, device_id, project_id }, extra) => {
       if (refusesWritingStyle(section_key, extra)) return writingStyleRefusal();
 
+      // A bot adds a section to its own project, never a global one.
+      const pass = await shareGate("crow_add_context_section", extra).check(project_id, { device_id });
+      if (pass.isError) return pass;
+      const scopedProjectId = pass.projectId;
+
       // Protected sections can have scoped overrides but not new global entries
-      if (PROTECTED_SECTIONS.includes(section_key) && !device_id && !project_id) {
+      if (PROTECTED_SECTIONS.includes(section_key) && !device_id && scopedProjectId == null) {
         return { content: [{ type: "text", text: `Cannot create section with protected key "${section_key}". Use crow_update_context_section to modify it.` }] };
       }
 
       try {
         await db.execute({
           sql: "INSERT INTO crow_context (section_key, section_title, content, sort_order, device_id, project_id) VALUES (?, ?, ?, ?, ?, ?)",
-          args: [section_key, section_title, content, sort_order, device_id ?? null, project_id ?? null],
+          args: [section_key, section_title, content, sort_order, device_id ?? null, scopedProjectId],
         });
         invalidateContextCache();
 
@@ -1064,7 +1155,7 @@ export function createMemoryServer(dbPath, options = {}) {
           if (buildCrowContextWireRow) {
             const { rows: emitRows } = await db.execute({
               sql: "SELECT * FROM crow_context WHERE section_key = ? AND device_id IS ? AND project_id IS ?",
-              args: [section_key, device_id ?? null, project_id ?? null],
+              args: [section_key, device_id ?? null, scopedProjectId],
             });
             if (emitRows.length > 0) {
               const uuid = await crowContextProjectUuid(db, emitRows[0].project_id ?? null);
@@ -1073,12 +1164,12 @@ export function createMemoryServer(dbPath, options = {}) {
           }
         }
 
-        const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
+        const scope = [device_id ? `device: ${device_id}` : null, scopedProjectId != null ? `project: ${scopedProjectId}` : null].filter(Boolean).join(", ");
         const target = scope ? ` (${scope})` : "";
         return { content: [{ type: "text", text: `Section "${section_key}"${target} added to crow.md.` }] };
       } catch (err) {
         if (err.message?.includes("UNIQUE")) {
-          const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
+          const scope = [device_id ? `device: ${device_id}` : null, scopedProjectId != null ? `project: ${scopedProjectId}` : null].filter(Boolean).join(", ");
           const target = scope ? ` (${scope})` : "";
           return { content: [{ type: "text", text: `Section "${section_key}"${target} already exists. Use crow_update_context_section to modify it.` }] };
         }
@@ -1094,7 +1185,16 @@ export function createMemoryServer(dbPath, options = {}) {
       device_id: z.string().max(200).optional().describe("Filter to sections for this device (also shows global sections). Omit to show all sections."),
       project_id: z.number().optional().describe("Filter to sections for this project (also shows global sections). Omit to show all sections."),
     },
-    async ({ device_id, project_id } = {}) => {
+    async ({ device_id, project_id } = {}, extra) => {
+      // A scoped listing: a bot sees the global sections and its own project's, and naming another
+      // project is refused (a share buys memories and files, never another project's section names).
+      const gate = shareGate("crow_list_context_sections", extra);
+      const pass = await gate.check(project_id, { device_id });
+      if (pass.isError) return pass;
+      // A bot sees the global sections plus its own project's; with no home project it sees the
+      // global ones only, never another project's section names.
+      const boundByShares = (await gate.readScope()) != null;
+      const projectFilter = pass.projectId != null ? Number(pass.projectId) : null;
       const { rows } = await db.execute(
         "SELECT section_key, section_title, sort_order, enabled, updated_at, device_id, project_id FROM crow_context ORDER BY sort_order ASC, id ASC"
       );
@@ -1106,7 +1206,9 @@ export function createMemoryServer(dbPath, options = {}) {
       // Filter: show global + matching device/project sections
       const filtered = rows.filter((r) => {
         const deviceMatch = !device_id || !r.device_id || r.device_id === device_id;
-        const projectMatch = !project_id || !r.project_id || r.project_id === project_id;
+        const projectMatch = projectFilter != null
+          ? !r.project_id || Number(r.project_id) === projectFilter
+          : boundByShares ? !r.project_id : true;
         return deviceMatch && projectMatch;
       });
 
@@ -1135,8 +1237,13 @@ export function createMemoryServer(dbPath, options = {}) {
     async ({ section_key, device_id, project_id }, extra) => {
       if (refusesWritingStyle(section_key, extra)) return writingStyleRefusal();
 
+      // A bot deletes its own project's override, never a global section.
+      const pass = await shareGate("crow_delete_context_section", extra).check(project_id, { device_id });
+      if (pass.isError) return pass;
+      const scopedProjectId = pass.projectId;
+
       // Protected global sections cannot be deleted, but scoped overrides can
-      if (PROTECTED_SECTIONS.includes(section_key) && !device_id && !project_id) {
+      if (PROTECTED_SECTIONS.includes(section_key) && !device_id && scopedProjectId == null) {
         return {
           content: [{ type: "text", text: `Cannot delete protected section "${section_key}". Use crow_update_context_section with enabled=false to disable it instead.` }],
         };
@@ -1148,7 +1255,7 @@ export function createMemoryServer(dbPath, options = {}) {
       if (device_id) { whereParts.push("device_id = ?"); whereArgs.push(device_id); }
       else { whereParts.push("device_id IS NULL"); }
 
-      if (project_id) { whereParts.push("project_id = ?"); whereArgs.push(project_id); }
+      if (scopedProjectId != null) { whereParts.push("project_id = ?"); whereArgs.push(scopedProjectId); }
       else { whereParts.push("project_id IS NULL"); }
 
       const whereClause = whereParts.join(" AND ");
@@ -1158,7 +1265,6 @@ export function createMemoryServer(dbPath, options = {}) {
       // shouldSyncRow refuses it). Keys match the WHERE clause above, where a
       // falsy id or device means the unscoped section.
       const { crowContextProjectUuid } = await import("../sharing/instance-sync.js").catch(() => ({}));
-      const scopedProjectId = project_id || null;
       const projectUuid = scopedProjectId != null && crowContextProjectUuid ? await crowContextProjectUuid(db, scopedProjectId) : null;
 
       const result = await db.execute({
@@ -1170,7 +1276,7 @@ export function createMemoryServer(dbPath, options = {}) {
       // Emit sync entry
       emitOrQueue(syncManager, db, "crow_context", "delete", { section_key, device_id: device_id || null, project_id: scopedProjectId, project_uuid: projectUuid }).catch(() => {});
 
-      const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
+      const scope = [device_id ? `device: ${device_id}` : null, scopedProjectId != null ? `project: ${scopedProjectId}` : null].filter(Boolean).join(", ");
       const target = scope ? ` (${scope})` : "";
       return {
         content: [
@@ -1217,6 +1323,10 @@ export function createMemoryServer(dbPath, options = {}) {
       if ((type === "bot_routine" || derived === "bot_routine") && notOperatorCall(extra)) {
         return scheduleError("Only the operator can create a bot routine (in Bot Builder).");
       }
+      // A schedule belongs to this instance, not to a project: there is nothing to scope it to, so
+      // every schedule tool stays the operator's alone.
+      const pass = await shareGate("crow_create_schedule", extra).check(null, {});
+      if (pass.isError) return pass;
       if (type === "briefing" || derived === "briefing") return briefingError();
       if (derived === "system") return scheduleError("Tasks starting with \"pipeline:\" are reserved for bot routines (pipeline:botcron:<bot_id>).");
       const kind = type || derived;
@@ -1290,7 +1400,9 @@ export function createMemoryServer(dbPath, options = {}) {
       enabled_only: z.boolean().optional().describe("If true, only return enabled schedules"),
       type: z.enum(["reminder", "bot_routine", "briefing", "system"]).optional().describe("Only schedules of this type"),
     },
-    async ({ enabled_only, type }) => {
+    async ({ enabled_only, type }, extra) => {
+      const pass = await shareGate("crow_list_schedules", extra).check(null, {});
+      if (pass.isError) return pass;
       let sql = "SELECT * FROM schedules";
       const params = [];
 
@@ -1335,6 +1447,11 @@ export function createMemoryServer(dbPath, options = {}) {
       delete: z.boolean().optional().describe("If true, delete the schedule and its run history"),
     },
     async ({ id, enabled, task, cron_expression, tz, run_now, delete: doDelete }, extra) => {
+      // The share gate comes before ANY row lookup: for a bot every schedule tool is owner-only, so
+      // an existing id and a missing one get the same refusal (the routine check below would
+      // otherwise let a bot learn whether an id exists and is a routine).
+      const pass = await shareGate("crow_update_schedule", extra).check(null, {});
+      if (pass.isError) return pass;
       const { rows } = await db.execute({ sql: "SELECT * FROM schedules WHERE id = ?", args: [id] });
       // Changing a bot routine (re-targeting its bot, switching it on) is the operator's too.
       if (rows[0] && scheduleKind(rows[0].task) === "bot_routine" && notOperatorCall(extra)) {
@@ -1428,7 +1545,12 @@ export function createMemoryServer(dbPath, options = {}) {
       type: z.string().max(50).optional().describe("Filter by type: reminder, media, peer, system, attention"),
       limit: z.number().max(100).default(20).describe("Maximum results"),
     },
-    async ({ unread_only, type, limit }) => {
+    async ({ unread_only, type, limit }, extra) => {
+      // Notification text carries other projects' names and card titles, and dismissing one clears
+      // the operator's own alerts: reading and dismissing are the operator's alone (sending one is
+      // a message to the operator and stays available).
+      const pass = await shareGate("crow_check_notifications", extra).check(null, {});
+      if (pass.isError) return pass;
       // Clean expired on each check
       await cleanupNotifications(db);
 
@@ -1511,7 +1633,9 @@ export function createMemoryServer(dbPath, options = {}) {
       id: z.number().describe("Notification ID to dismiss"),
       snooze_minutes: z.number().optional().describe("Snooze for N minutes instead of dismissing permanently"),
     },
-    async ({ id, snooze_minutes }) => {
+    async ({ id, snooze_minutes }, extra) => {
+      const pass = await shareGate("crow_dismiss_notification", extra).check(null, {});
+      if (pass.isError) return pass;
       const { rows } = await db.execute({ sql: "SELECT * FROM notifications WHERE id = ?", args: [id] });
       if (rows.length === 0) {
         return { content: [{ type: "text", text: `Notification #${id} not found.` }] };
@@ -1541,7 +1665,9 @@ export function createMemoryServer(dbPath, options = {}) {
       type: z.string().max(50).optional().describe("Only dismiss this type"),
       before: z.string().max(50).optional().describe("Only dismiss notifications created before this ISO date"),
     },
-    async ({ type, before }) => {
+    async ({ type, before }, extra) => {
+      const pass = await shareGate("crow_dismiss_all_notifications", extra).check(null, {});
+      if (pass.isError) return pass;
       let sql = "UPDATE notifications SET is_dismissed = 1, updated_at = datetime('now') WHERE is_dismissed = 0";
       const params = [];
 
@@ -1566,7 +1692,11 @@ export function createMemoryServer(dbPath, options = {}) {
       action: z.enum(["get", "set"]).describe("Get current settings or set new ones"),
       types_enabled: z.array(z.string()).optional().describe("Enabled notification types (only for action=set). E.g. ['reminder', 'media', 'peer', 'system', 'attention']"),
     },
-    async ({ action, types_enabled }) => {
+    async ({ action, types_enabled }, extra) => {
+      // The `set` action rewrites instance-wide preferences, so a bot could silence the operator's
+      // alerts with it; `get` would show which alerts exist. Both are the operator's.
+      const pass = await shareGate("crow_notification_settings", extra).check(null, {});
+      if (pass.isError) return pass;
       if (action === "get") {
         const { rows } = await db.execute({
           sql: "SELECT value FROM dashboard_settings WHERE key = 'notification_prefs'",

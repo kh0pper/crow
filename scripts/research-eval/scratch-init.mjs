@@ -39,6 +39,20 @@ try {
   let projectId;
   try {
     ({ id: projectId } = await createProjectSpace(db, { name: "research eval", type: "research" }));
+    // The acting bot reaches the eval project through a share of it when the caller asked for one
+    // (the eval flows do). A share is what a bot gets in Phase 1 when a project is not its own home,
+    // and the bot needs no home here, so nothing about its project context, session dir or tracker
+    // changes for these runs. A caller that seeds its own bot row is left alone.
+    if (env.CROW_EVAL_BOT_GRANT === "1" && env.CROW_ACTOR_BOT_ID) {
+      const { grantShare } = await import("../../servers/shared/project-bot-shares.js");
+      await db.execute({
+        sql: `INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled)
+              VALUES (?, ?, '{}', 1)
+              ON CONFLICT(bot_id) DO NOTHING`,
+        args: [env.CROW_ACTOR_BOT_ID, env.CROW_ACTOR_BOT_ID],
+      });
+      await grantShare(db, { projectId, botId: env.CROW_ACTOR_BOT_ID, level: "read_write" });
+    }
   } finally {
     db.close();
   }

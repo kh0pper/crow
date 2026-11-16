@@ -67,7 +67,13 @@ const auditRows = (action, target) => withDb((d) => d.prepare("SELECT * FROM pro
 let seq = 0;
 async function newProject() {
   const r = await owner.callTool({ name: "crow_create_project", arguments: { name: `withdraw-${++seq}` } });
-  return Number(text(r).match(/id: (\d+)/)[1]);
+  const pid = Number(text(r).match(/id: (\d+)/)[1]);
+  // The bot reaches its own project and nothing else: home it in the project under test.
+  withDb((d) => d.prepare(`INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled)
+                           VALUES (?, ?, '{}', ?, 1)
+                           ON CONFLICT(bot_id) DO UPDATE SET project_id = excluded.project_id`)
+    .run(BOT.id, BOT.id, pid));
+  return pid;
 }
 function insertSource(cols = {}) {
   const full = {
@@ -88,6 +94,7 @@ const verify = (client, id) => client.callTool({ name: "crow_verify_source", arg
 const noteId = (r) => Number(text(r).match(/id: (\d+)/)[1]);
 
 test("crow_add_note records who wrote it", async () => {
+  await newProject();
   const unknown = await clientFor(UNKNOWN);
   for (const [client, want] of [[owner, "owner"], [bot, "bot:b1"], [unknown, null]]) {
     const r = await client.callTool({ name: "crow_add_note", arguments: { content: "x", note_type: "note" } });
@@ -210,7 +217,7 @@ test("a project-less note withdraws without an audit row and says so", async () 
 test("a missing note is not found", async () => {
   const r = await withdraw(owner, 999999);
   assert.equal(r.isError, true);
-  assert.equal(text(r), "Note #999999 not found.");
+  assert.equal(text(r), "Error: Not found.");
 });
 
 test("withdrawn notes are skipped by checks and counts and shown in get_source", async () => {

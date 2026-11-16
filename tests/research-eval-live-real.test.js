@@ -55,7 +55,7 @@ function scriptOf(caseId, name, projectId) {
 
 /** One live unit against the stub model; the caller cleans up {stub, template}. */
 async function liveUnit({ caseId, name }) {
-  const template = await makeTemplate({ botId: EVAL_BOT_ID });
+  const template = await makeTemplate({ botId: EVAL_BOT_ID, botGrant: true });
   const stub = await startStubModel({ script: scriptOf(caseId, name, template.projectId) });
   const botDefSha = sha(stableStringify(evalBotDef({ model: MODEL, crowHome: template.home })));
   try {

@@ -612,6 +612,11 @@ test("a bound bot's tool write is stamped as the bot, not the owner", async () =
   let executor = null;
   try {
     const { createToolExecutor } = await import("../servers/gateway/ai/tool-executor.js");
+    // The bot needs a home project: a write with no project_id lands in it (Phase 1 shares).
+    const seed = rawHandle(fx.dbPath);
+    const home = seed.prepare("INSERT INTO project_spaces (slug, name) VALUES ('hank-home', 'Hank home')").run().lastInsertRowid;
+    seed.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled) VALUES ('hank', 'Hank', '{}', ?, 1)").run(home);
+    seed.close();
     // A bot turn driven while the owner's dashboard request is in flight (a
     // crow.voice turn asked for from the dashboard): the write is the bot's.
     executor = createToolExecutor({ botDef: { bot_id: "hank", display_name: "Hank" }, threadId: "perch-9" });

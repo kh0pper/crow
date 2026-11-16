@@ -29,6 +29,7 @@ import { localFirst, satelliteVisible } from "../satellites/tool-entry.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
 import { createDbClient } from "../../db.js";
 import { isVoiceBotId } from "../../shared/voice-bot.js";
+import { operatorVoiceActor } from "../../shared/project-share-scope.js";
 import { CATEGORY_PROXY_RE, normalizeExternalParams } from "./proxy-args.js";
 import { CronExpressionParser } from "cron-parser";
 import { sanitizeActorName } from "../../../scripts/pi-bots/actor-env.mjs";
@@ -236,7 +237,35 @@ function resolveToolCategory(action) {
  */
 export function createToolExecutor(opts = {}) {
   const clients = new Map(); // category → Client
+  // The in-process server each client is paired with (one per category, built lazily). Read by
+  // tests: it is how the actor a server was ACTUALLY constructed with is observable off the
+  // server's own reported base actor (server.research.actor, server.storage.actor), instead of
+  // only the option this module meant to hand it.
+  const inProcessServers = new Map(); // category → McpServer
   const boundBotId = opts.botDef && opts.botDef.bot_id ? opts.botDef.bot_id : null;
+  // The bound bot's identity, as a construction-time base actor for the in-process project servers.
+  //
+  // A bound bot that is the operator's own voice bot gets the frozen operator actor, so EVERY
+  // executor bound to it — including a relay turn whose transcript is not the operator's own
+  // words — has operator scope on projects, memory and storage. The reserved id is the ONLY
+  // thing that grants this: a def is bot-editable data, so its `kind` can never be a credential.
+  // A plain {kind:"bot", id} actor would not be enough for the voice bot, because the
+  // frozen actor carries the marker `isOperatorVoice` checks and nothing per call can add it.
+  // Every other bound bot gets the plain actor, which the share rules bind.
+  const boundBotIsVoice = !!(boundBotId && isVoiceBotId(boundBotId));
+  const baseActor = boundBotId ? (boundBotIsVoice ? operatorVoiceActor() : { kind: "bot", id: boundBotId }) : undefined;
+  /** The base actor an in-process server of `category` is built with (the project servers build
+   *  all three the same way; every other category gets none). */
+  const baseActorFor = (category) => (category === "projects" || category === "memory" || category === "storage" ? baseActor : undefined);
+  /** The factory OPTIONS that actor means for `category` — the one place the actor→option mapping
+   *  lives: the projects and memory factories take `actor`, the storage factory takes `baseActor`.
+   *  getClient builds servers from this and from nothing else. */
+  const factoryOptionsFor = (category) => {
+    if (baseActorFor(category) === undefined) return undefined;
+    return category === "storage" ? { baseActor }
+      : category === "memory" || category === "projects" ? { actor: baseActor }
+        : undefined;
+  };
   const defaultDeliverTo = opts.defaultDeliverTo || null;
   // The turn's thread (version-history job `turn:<threadId>`): named directly, else
   // taken from the deliver target the caller already passed for this turn. Null when
@@ -296,12 +325,11 @@ export function createToolExecutor(opts = {}) {
       throw new Error(`Unknown category: ${category}`);
     }
 
-    // The project server's base actor is the bound bot (unbound executors stay unknown).
-    const factoryOptions = {
-      projects: { actor: boundBotId ? { kind: "bot", id: boundBotId } : undefined },
-    }[category];
-    const { client } = await createInProcessClient(category, factory, factoryOptions);
+    // The project servers' base actor is the bound bot (unbound executors stay unknown and resolve
+    // their own env), taken from baseActorFor alone and mapped to each factory's own option name.
+    const { client, server } = await createInProcessClient(category, factory, factoryOptionsFor(category));
     clients.set(category, client);
+    inProcessServers.set(category, server);
     return client;
   }
 
@@ -750,9 +778,10 @@ export function createToolExecutor(opts = {}) {
       } catch {}
     }
     clients.clear();
+    inProcessServers.clear();
   }
 
-  return { executeTool, executeToolCalls, close };
+  return { executeTool, executeToolCalls, close, baseActorFor, _inProcessServers: inProcessServers };
 }
 
 /**

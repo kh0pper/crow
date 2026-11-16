@@ -72,9 +72,18 @@ const note = (id) => withDb((d) => d.prepare("SELECT * FROM research_notes WHERE
 const audits = (pid) => withDb((d) => d.prepare("SELECT * FROM project_audit_log WHERE project_id = ? AND action = 'source.verify' ORDER BY id").all(pid));
 
 let seq = 0;
-async function newProject(client) {
-  const r = await client.callTool({ name: "crow_create_project", arguments: { name: `verify-${++seq}` } });
-  return Number(text(r).match(/id: (\d+)/)[1]);
+let ownerClient = null;
+// Creating a project is the owner's: the owner makes it and the test bot is homed in it, so the
+// bot reaches it (a bot reaches its own project and the ones shared with it, nothing else).
+async function newProject() {
+  ownerClient = ownerClient || await clientFor(OWNER);
+  const r = await ownerClient.callTool({ name: "crow_create_project", arguments: { name: `verify-${++seq}` } });
+  const pid = Number(text(r).match(/id: (\d+)/)[1]);
+  withDb((d) => d.prepare(`INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled)
+                           VALUES (?, ?, '{}', ?, 1)
+                           ON CONFLICT(bot_id) DO UPDATE SET project_id = excluded.project_id`)
+    .run(BOT.id, BOT.id, pid));
+  return pid;
 }
 function insertSource(cols) {
   const full = {
@@ -97,7 +106,7 @@ test("a missing id is not found, never a false success", async () => {
   for (const method of ["quotes_checked", "manual_owner"]) {
     const r = await verify(client, { id: 9999, method });
     assert.equal(r.isError, true, text(r));
-    assert.match(text(r), /Source #9999 not found/);
+    assert.equal(text(r), "Error: Not found.");
   }
   const r = await verify(client, { id: 9999, verified: false });
   assert.equal(r.isError, true);
@@ -124,17 +133,20 @@ test("verify needs write_sources on the source's project", async () => {
 
 test("project-less sources: only the owner may verify", async () => {
   const sid = insertSource({ project_id: null, fetch_status: "not_applicable", fetched_text: null, source_type: "book", url: null });
-  for (const actor of [BOT, UNKNOWN]) {
-    const r = await verify(await clientFor(actor), { id: sid, method: "manual_owner" });
-    assert.equal(r.isError, true, text(r));
-    assert.match(text(r), /only the owner/);
-  }
+  // A caller that is not a bot is refused by the owner-only rule; a bot reads the row as missing,
+  // because a project-less row is owner-only and a by-id answer never says a row is real.
+  const ru = await verify(await clientFor(UNKNOWN), { id: sid, method: "manual_owner" });
+  assert.equal(ru.isError, true, text(ru));
+  assert.match(text(ru), /only the owner/);
+  const rb = await verify(await clientFor(BOT), { id: sid, method: "manual_owner" });
+  assert.equal(rb.isError, true, text(rb));
+  assert.equal(text(rb), "Error: Not found.");
   // A quote check is refused too: a bot cannot reach a project-less source at all.
   const sid2 = insertSource({ project_id: null });
   insertQuote(sid2, null, "We will ship weekly");
   const rq = await verify(await clientFor(BOT), { id: sid2 });
   assert.equal(rq.isError, true, text(rq));
-  assert.match(text(rq), /only the owner/);
+  assert.equal(text(rq), "Error: Not found.");
   assert.equal(source(sid2).verified, 0);
 
   const r = await verify(await clientFor(OWNER), { id: sid, method: "manual_owner" });
@@ -337,12 +349,14 @@ test("a downgrade header on an owner mount refuses manual_owner, direct and thro
     const direct = await connectWithHeaders(createProjectServer(CORE, { fetchPage: makeStub(), actor: OWNER }), headers);
     const r = await verify(direct, { id: sid, method: "manual_owner" });
     assert.equal(r.isError, true, text(r));
-    assert.match(text(r), /only the owner/);
+    // An unknown caller is refused by the owner-only rule; a bot without a reach to the project is
+    // refused earlier, as the missing row it may not see.
+    assert.match(text(r), /only the owner|Not found/);
     assert.equal(source(sid).verified, 0);
 
     const routed = await connectWithHeaders(createRouterServer({ actor: OWNER }), headers);
     const rr = await routed.callTool({ name: "crow_projects", arguments: { action: "verify_source", params: { id: sid, method: "manual_owner" } } });
-    assert.match(text(rr), /only the owner/);
+    assert.match(text(rr), /only the owner|Not found/);
     assert.equal(source(sid).verified, 0);
   }
   // a header claiming owner on an unknown mount is ignored
@@ -382,7 +396,8 @@ test("a gateway-bound bot cannot verify by hand", async () => {
   const exec = createToolExecutor({ botDef: { bot_id: "b7", display_name: "B" } });
   const r = await exec.executeTool("crow_verify_source", { id: sid, method: "manual_owner" });
   assert.equal(r.isError, true, r.result);
-  assert.match(r.result, /only the owner/);
+  // The bot cannot reach the project, so it is refused as a missing row; either way, never verified.
+  assert.match(r.result, /only the owner|Not found/);
   assert.equal(source(sid).verified, 0);
   const rp = await exec.executeTool("crow_projects", { action: "verify_source", params: { id: sid, method: "manual_owner" } });
   assert.equal(rp.isError, true, rp.result);

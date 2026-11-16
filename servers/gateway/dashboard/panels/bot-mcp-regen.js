@@ -36,7 +36,7 @@ export async function resolveBotSessionDir(db, botId, def, projectId, crowHome =
  */
 export async function regenerateBotMcp(db, botId, opts = {}) {
   const row = (await db.execute({
-    sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?",
+    sql: "SELECT definition, display_name, project_id FROM pi_bot_defs WHERE bot_id=?",
     args: [botId],
   })).rows[0];
   if (!row) throw new Error("bot_not_found");
@@ -48,7 +48,11 @@ export async function regenerateBotMcp(db, botId, opts = {}) {
   try { def = (await addSkillToolsGuarded(stored, { crowHome, repoSkillsDir: opts.repoSkillsDir })).def; }
   catch (e) { console.warn("[bot-mcp-regen] skill tools skipped: " + ((e && e.message) || e)); }
   const sessionDir = await resolveBotSessionDir(db, botId, def, row.project_id, crowHome);
-  const r = writeBotMcp(def, { sessionDir, crowHome, write: mcpConfigDelivery() === "file" });
+  // The bot's identity rides along: every stdio block the regenerated file carries gets the
+  // actor env, exactly as a bridge-written config does (a file with no actor would let its
+  // servers resolve the caller from whatever env they happen to inherit).
+  const r = writeBotMcp(def, { sessionDir, crowHome, botId, displayName: row.display_name,
+    write: mcpConfigDelivery() === "file" });
   const { json: _omit, ...safe } = r;
   return safe;
 }
