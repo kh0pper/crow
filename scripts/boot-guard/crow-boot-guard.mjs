@@ -232,6 +232,9 @@ export function freshState() {
     launcher_version: null,
     recorder_ran_at: null,
     deps_attempts: 0,
+    // Failed installs of dependencies the checkout declares but node_modules
+    // lacks (see installMissingDependencies). Independent of deps_attempts.
+    missing_deps_attempts: 0,
     // The HELD marker THIS instance wrote, and the stamp it carries (see
     // reportRefusal). It survives every later transition — a re-armed trial, a
     // discard, a rollback — because it is the only proof the gateway's stable
@@ -1156,6 +1159,11 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
     return { action: "idle", reason: "no-git" };
   }
 
+  // A dependency an earlier tick declared but never installed: the lock diff
+  // reads "unchanged" from then on, so this is the last place that can install
+  // it. Runs before the attempt is counted, and never blocks the start.
+  installMissingDependencies({ root, gitDir, state, crowHome, env, now });
+
   const attemptId = attemptIdFor(env);
   // Whether the attempt that just ended was one we asked for. The "wait" log
   // below must not call a planned restart a crash (F8).
@@ -1361,6 +1369,86 @@ function armTrial({ state, stateDir, head, attemptId, now }) {
 
 function fileExists(path) {
   try { lstatSync(path); return true; } catch { return false; }
+}
+
+/**
+ * Top-level `dependencies` from `<root>/package.json` whose own package.json is
+ * missing under node_modules. A commit can gain a dependency in an earlier tick
+ * and never install it: the lock diff says "unchanged" from then on, while the
+ * gateway imports the package at boot and crash-loops. devDependencies and
+ * optionalDependencies are not build-time imports of the gateway.
+ *
+ * Never throws: a missing or unreadable package.json is an empty list.
+ */
+export function missingTopLevelDeps(root) {
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  } catch { return []; }
+  const deps = pkg && typeof pkg === "object" ? pkg.dependencies : null;
+  if (!deps || typeof deps !== "object" || Array.isArray(deps)) return [];
+  const missing = [];
+  for (const name of Object.keys(deps)) {
+    if (!name) continue;
+    // join() resolves a scoped name (@scope/pkg) to the right directory.
+    if (!fileExists(join(root, "node_modules", name, "package.json"))) missing.push(name);
+  }
+  return missing;
+}
+
+/**
+ * Install dependencies the checkout declares but node_modules lacks, BEFORE the
+ * trial is counted. It never blocks or aborts the start and never changes
+ * failures/state.state: after a failed install the start proceeds exactly as it
+ * would have.
+ */
+function installMissingDependencies({ root, gitDir, state, crowHome, env, now }) {
+  // That state has its own retry path (retryDependencyInstall).
+  if (state.state === "rolled-back-deps-pending") return;
+  const missing = missingTopLevelDeps(root);
+  if (!missing.length) {
+    state.missing_deps_attempts = 0;
+    return;
+  }
+  if (num(state.missing_deps_attempts, 0) >= DEPS_MAX_ATTEMPTS) {
+    log(`dependencies still missing (${missing.join(", ")}) — not running npm again`);
+    return;
+  }
+  // The same checkout lock as the puller and the rollback retry: two npm runs
+  // at once rewrite one node_modules and break both.
+  const lock = acquireLockFileWaiting(join(gitDir, LOCK_FILE), {
+    waitMs: envMs(env, "CROW_BOOT_GUARD_LOCK_WAIT_MS", LOCK_WAIT_MS),
+  });
+  if (!lock) {
+    log("the checkout lock is held elsewhere — the missing dependencies wait for the next start");
+    return;
+  }
+  try {
+    log(`installing missing dependencies: ${missing.join(", ")}`);
+    const r = runNpmInstall({ root, env, timeoutMs: envMs(env, "CROW_BOOT_GUARD_NPM_TIMEOUT_MS", NPM_TIMEOUT_MS) });
+    if (r.code === 0) {
+      state.missing_deps_attempts = 0;
+      log("missing dependencies installed");
+      return;
+    }
+    const attempts = num(state.missing_deps_attempts, 0) + 1;
+    state.missing_deps_attempts = attempts;
+    if (attempts >= DEPS_MAX_ATTEMPTS) {
+      spoolOnce(state, crowHome, "update-deps-missing-blocked", {
+        title: "Crow could not install its dependencies",
+        body: `${missing.join(", ")} is declared in package.json but not installed, and the install failed `
+          + `${attempts} times (the last ${r.timedOut ? "one timed out" : `one exited ${r.code}`}), so nothing `
+          + `more will be retried automatically. To recover: run npm install --omit=dev in ${root} by hand, `
+          + "then restart the gateway.",
+        now,
+      });
+      log(`the missing dependency install failed ${attempts} times — stopped retrying and spooled an alert`);
+      return;
+    }
+    log(`the missing dependency install failed (${r.timedOut ? "timed out" : `exit ${r.code}`}) — retried on the next start`);
+  } finally {
+    releaseLockFile(lock);
+  }
 }
 
 /** `npm install --omit=dev` with its own kill, as the puller does it. */

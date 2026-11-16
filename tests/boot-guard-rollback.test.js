@@ -23,11 +23,11 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 
 import { markPlanned, markStable } from "../servers/gateway/boot-guard-state.js";
-import { checkForUpdates, _setAppRootForTest, _setDbForTest } from "../servers/gateway/auto-update.js";
+import { checkForUpdates, missingTopLevelDeps as updaterMissingTopLevelDeps, _setAppRootForTest, _setDbForTest } from "../servers/gateway/auto-update.js";
 import {
   ownerForHome, readUpdateQuarantine, updateQuarantineHeldAtHead, writeUpdateQuarantine,
 } from "../servers/shared/update-quarantine.js";
-import { freshState, saveState } from "../scripts/boot-guard/crow-boot-guard.mjs";
+import { depsChangedBetween, freshState, saveState } from "../scripts/boot-guard/crow-boot-guard.mjs";
 
 const REPO = join(import.meta.dirname, "..");
 const repoFile = (p) => readFileSync(join(REPO, p), "utf8");
@@ -46,7 +46,9 @@ const INDEX_B = `import "./boom.js";
 const BOOM_B = `throw new Error("this gateway graph does not load");\n`;
 const INIT_DB = `// fixture init-db\nprocess.exit(0);\n`;
 
-function makeFixture({ changeInitDb = false, changePkg = false, userVersion = 9, noSchemaVersion = false } = {}) {
+function makeFixture({
+  changeInitDb = false, changePkg = false, userVersion = 9, noSchemaVersion = false, withDep = false,
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), "bg-int-"));
   const origin = join(root, "origin.git");
   const work = join(root, "work");
@@ -78,7 +80,9 @@ function makeFixture({ changeInitDb = false, changePkg = false, userVersion = 9,
   }
   writeFileSync(join(work, "scripts", "init-db.js"), INIT_DB);
   writeFileSync(join(work, "scripts", "boot-guard", "crow-boot-guard.mjs"), repoFile("scripts/boot-guard/crow-boot-guard.mjs"));
-  writeFileSync(join(work, "package.json"), '{\n  "name": "fixture",\n  "version": "1.0.0"\n}\n');
+  writeFileSync(join(work, "package.json"), withDep
+    ? '{\n  "name": "fixture",\n  "version": "1.0.0",\n  "dependencies": {\n    "fixture-dep": "1.0.0"\n  }\n}\n'
+    : '{\n  "name": "fixture",\n  "version": "1.0.0"\n}\n');
   writeFileSync(join(work, "package-lock.json"), '{\n  "lockfileVersion": 3\n}\n');
   git(work, "add", "-A");
   git(work, "commit", "-m", "A");
@@ -950,6 +954,136 @@ test("three failed dependency retries raise ONE blocked alert and stop retrying"
   assert.equal(after.status, 0, after.stderr);
   assert.equal(attempts(), 3, "the installer must not run on every start forever");
   assert.equal(spoolCodes(f.crowHome).filter((c) => c === "update-rollback-blocked").length, 1);
+});
+
+/** A `npm` on PATH that records every run and "installs" fixture-dep. */
+function npmShim(f, { exit = 0 } = {}) {
+  const shimDir = join(f.root, "shim-missing");
+  mkdirSync(shimDir, { recursive: true });
+  const npmPath = join(shimDir, "npm");
+  const marker = join(f.out, "npm-missing-ran");
+  const depDir = join(f.work, "node_modules", "fixture-dep");
+  const install = exit === 0
+    ? `mkdir -p ${JSON.stringify(depDir)}\necho '{}' > ${JSON.stringify(join(depDir, "package.json"))}\n`
+    : "";
+  writeFileSync(npmPath, `#!/bin/sh\necho x >> ${JSON.stringify(marker)}\n${install}exit ${exit}\n`);
+  chmodSync(npmPath, 0o755);
+  return {
+    env: { PATH: `${shimDir}:${process.env.PATH}` },
+    marker,
+    depPath: join(depDir, "package.json"),
+    runs: () => (existsSync(marker) ? readFileSync(marker, "utf8").split("\n").filter(Boolean).length : 0),
+  };
+}
+
+test("a dependency missing from node_modules is installed on the next start, lock unchanged", () => {
+  // The bug: package.json gained fixture-dep in an EARLIER commit, node_modules
+  // never got it, and the lock diff between A and B is empty — so depsChangedBetween
+  // says nothing changed and nothing ever installs.
+  const f = makeFixture({ withDep: true });
+  installAndStabilize(f);
+  assert.equal(depsChangedBetween(f.work, f.a, f.b), false, "fixture precondition: the lock diff is empty");
+  const shim = npmShim(f);
+  assert.equal(existsSync(shim.depPath), false, "fixture precondition: the dependency is not installed");
+
+  const run = runLauncher(f, shim.env);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(shim.runs(), 1, "the missing dependency must be installed");
+  assert.ok(existsSync(shim.depPath), "and it must be there afterwards");
+  const state = readState(f);
+  assert.equal(state.missing_deps_attempts, 0);
+  assert.equal(state.state, "ok", "installing a dependency must not touch the trial state");
+});
+
+test("an installed dependency runs no npm on start", () => {
+  const f = makeFixture({ withDep: true });
+  installAndStabilize(f);
+  const shim = npmShim(f);
+  mkdirSync(join(f.work, "node_modules", "fixture-dep"), { recursive: true });
+  writeFileSync(shim.depPath, "{}\n");
+
+  const run = runLauncher(f, shim.env);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(shim.runs(), 0, "npm must not run when every declared dependency is present");
+});
+
+test("three failed missing-dependency installs raise ONE alert and stop retrying", () => {
+  const f = makeFixture({ withDep: true });
+  installAndStabilize(f);
+  const shim = npmShim(f, { exit: 1 });
+
+  for (let i = 0; i < 3; i += 1) {
+    const run = runLauncher(f, shim.env);
+    assert.equal(run.status, 0, `the launcher must always exit 0 (stderr: ${run.stderr})`);
+  }
+  assert.equal(shim.runs(), 3, "every start before the limit retries");
+  const codes = spoolCodes(f.crowHome).filter((c) => c === "update-deps-missing-blocked");
+  assert.equal(codes.length, 1, "the give-up alert is spooled exactly once");
+  const state = readState(f);
+  assert.equal(state.missing_deps_attempts, 3);
+  assert.equal(state.state, "ok", "a failed install never blocks or aborts the start");
+  assert.equal(state.failures, 0);
+
+  const after = runLauncher(f, shim.env);
+  assert.equal(after.status, 0, after.stderr);
+  assert.equal(shim.runs(), 3, "the installer must not run on every start forever");
+  assert.equal(spoolCodes(f.crowHome).filter((c) => c === "update-deps-missing-blocked").length, 1);
+});
+
+test("a held checkout lock defers the missing-dependency install", () => {
+  const f = makeFixture({ withDep: true });
+  installAndStabilize(f);
+  const shim = npmShim(f);
+
+  const lockPath = join(f.gitDir, "crow-auto-update.lock");
+  writeFileSync(lockPath, `${process.pid}\n${new Date().toISOString()}\n`);
+  try {
+    const run = runLauncher(f, { ...shim.env, CROW_BOOT_GUARD_LOCK_WAIT_MS: "50" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stderr, /checkout lock/);
+    assert.equal(shim.runs(), 0, "npm must not run while another process holds the checkout lock");
+    assert.equal(readState(f).missing_deps_attempts, 0, "a deferred install must not count an attempt");
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
+});
+
+test("an update whose package files are unchanged still installs a missing dependency", async () => {
+  // Same bug on the auto-update side: `git diff --name-only A..HEAD` names no
+  // package file, so depsChanged was false and npm never ran.
+  const f = makeFixture({ withDep: true });
+  const shim = npmShim(f);
+  const fix = pushToOrigin(f, "fix.txt", "no package change\n");
+  f.git("fetch", "origin");
+  const changed = f.git("diff", "--name-only", `${f.a}..origin/main`);
+  assert.ok(!changed.includes("package.json"), `fixture precondition, package files unchanged: ${changed}`);
+  assert.ok(!changed.includes("package-lock.json"), `fixture precondition, package files unchanged: ${changed}`);
+  assert.notEqual(fix, f.a);
+  assert.equal(existsSync(shim.depPath), false, "fixture precondition: the dependency is not installed");
+
+  const savedPath = process.env.PATH;
+  process.env.PATH = shim.env.PATH;
+  _setAppRootForTest(f.work);
+  _setDbForTest({ execute: async () => ({ rows: [] }) });
+  try {
+    const r = await checkForUpdates();
+    assert.equal(r.updated, true, JSON.stringify(r));
+  } finally {
+    process.env.PATH = savedPath;
+    _setDbForTest(null);
+    _setAppRootForTest(REPO);
+  }
+  assert.equal(shim.runs(), 1, "the install must run for a missing dependency even when package*.json did not change");
+  assert.ok(existsSync(shim.depPath));
+});
+
+test("the updater's own missingTopLevelDeps sees what the guard's does", () => {
+  const f = makeFixture({ withDep: true });
+  assert.deepEqual(updaterMissingTopLevelDeps(f.work), ["fixture-dep"]);
+  mkdirSync(join(f.work, "node_modules", "fixture-dep"), { recursive: true });
+  writeFileSync(join(f.work, "node_modules", "fixture-dep", "package.json"), "{}\n");
+  assert.deepEqual(updaterMissingTopLevelDeps(f.work), []);
+  assert.deepEqual(updaterMissingTopLevelDeps(join(f.work, "nope")), [], "a missing root never throws");
 });
 
 /* ---------------------------------------------------------------- recorder */
