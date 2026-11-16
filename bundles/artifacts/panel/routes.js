@@ -41,8 +41,8 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   const S = { ...seams };
 
   async function init() {
-    const [store, comments, rounds, delivery, tables, blobMinio, links, mentions] = await Promise.all(
-      ["server/store.js", "server/comments.js", "server/rounds.js", "server/delivery.js", "server/init-tables.js", "server/blob-store-minio.js", "server/links.js", "server/mentions.js"].map(bundleImport));
+    const [store, comments, rounds, delivery, tables, blobMinio, links, mentions, limits] = await Promise.all(
+      ["server/store.js", "server/comments.js", "server/rounds.js", "server/delivery.js", "server/init-tables.js", "server/blob-store-minio.js", "server/links.js", "server/mentions.js", "server/limits.js"].map(bundleImport));
     if (!S.db) { const { createDbClient } = await appImport("servers/db.js"); S.db = createDbClient(); }
     await tables.initArtifactsTables(S.db);
     if (!S.blobs) { const { resolveDataDir } = await appImport("servers/db.js"); S.blobs = await blobMinio.createBlobStore(S.db, resolveDataDir()); }
@@ -69,6 +69,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       }
     }
     if (!S.renderDeps) { const r = await appImport("servers/blog/renderer.js"); S.renderDeps = { markdownBlocks: r.markdownBlocks, design: S.design }; }
+    if (!S.limits) S.limits = limits.LIMITS;
     if (!S.designShared) S.designShared = await appImport("servers/shared/design-kit.js");
     if (!S.csrf) S.csrf = (await appImport("servers/gateway/dashboard/shared/csrf.js")).csrfMiddleware;
     if (!S.policy) S.policy = await appImport("servers/gateway/artifact-origin/policy.js");
@@ -737,6 +738,60 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   router.post("/api/artifacts/:id/versions/:n/approve", wrap(async (req, res) => {
     await M.store.requireAccess(S.db, OWNER, req.params.id);
     res.json(await M.store.approveVersion(S.db, { artifactId: req.params.id, n: Number(req.params.n), actor: OWNER }));
+  }));
+
+  /**
+   * The owner's "Import file" (the viewer's toolbar button). The file's TEXT
+   * becomes the artifact's next version, shaped by its own type: a page takes
+   * `{html}`, a document `{markdown}`, a diagram `{svg}` — or, when the current
+   * version is a Design-kit diagram (`{engine, source}`), that same engine with
+   * the text as its spec. Owner-only (dashboard session + CSRF), never
+   * bot-callable: no MCP tool writes it. The text is capped HERE, before any
+   * render, and every refusal is a static string. The owner's own words, so
+   * the version is not tainted. It rides addVersion, so a received artifact is
+   * refused and a current version carries open threads forward, exactly as the
+   * decide route does.
+   *
+   * Bodies: this router's own json({limit:"60mb"}) parses the POST — index.js's
+   * `_hasOwnParser` names `POST /api/artifacts/<id>/import`, so the gateway's
+   * 1 MB global parser never 413s a file the viewer offers at up to 4 MiB.
+   * The caps here are what actually bound it, and each refusal is static:
+   * uploadBytes for a page's html, documentMarkdownBytes for a document's
+   * markdown, diagramSourceBytes for a Design-kit diagram's spec, and
+   * changeNoteChars for the note (refused, never silently truncated).
+   */
+  router.post("/api/artifacts/:id/import", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const text = typeof req.body?.text === "string" ? req.body.text : "";
+    if (!text.trim()) throw Object.assign(new Error("the file is empty"), { code: "bad_request" });
+    const bytes = Buffer.byteLength(text);
+    if (bytes > S.limits.uploadBytes) throw Object.assign(new Error(`that file is over ${S.limits.uploadBytes} bytes`), { code: "too_large" });
+    let source;
+    if (art.type === "page") source = { html: text };
+    else if (art.type === "document") {
+      if (bytes > S.limits.documentMarkdownBytes) throw Object.assign(new Error(`a document's markdown is limited to ${S.limits.documentMarkdownBytes} bytes`), { code: "too_large" });
+      source = { markdown: text };
+    } else if (art.type === "diagram") {
+      // A Design-kit diagram keeps rendering ITS engine: the file is that
+      // diagram's spec, not a finished SVG. A spec is short by nature (the kit
+      // refuses one over 64 KB), so it carries the upload path's own tighter
+      // ceiling rather than the 4 MiB a page may import.
+      const cur = await M.store.getVersion(S.db, art.id, art.current_version);
+      let prev = null; try { prev = cur && cur.source_json ? JSON.parse(cur.source_json) : null; } catch { prev = null; }
+      if (prev && typeof prev.engine === "string" && prev.engine) {
+        if (bytes > S.limits.diagramSourceBytes) throw Object.assign(new Error(`a diagram's spec is limited to ${S.limits.diagramSourceBytes} bytes`), { code: "too_large" });
+        source = { engine: prev.engine, source: text };
+      } else source = { svg: text };
+    } else throw Object.assign(new Error("this artifact can't be imported"), { code: "bad_request" });
+    // The note is the owner's one line about the import. The store TRUNCATES an
+    // over-long one; here it is refused instead, so nothing the owner typed is
+    // lost without an answer.
+    const rawNote = typeof req.body?.change_note === "string" ? req.body.change_note : null;
+    if (rawNote && rawNote.length > S.limits.changeNoteChars) throw Object.assign(new Error(`a change note is limited to ${S.limits.changeNoteChars} characters`), { code: "too_long" });
+    const note = rawNote && rawNote.trim() ? rawNote : null;
+    const v = await M.store.addVersion(S.db, S.blobs, { artifactId: art.id, source, actor: OWNER, changeNote: note || "Imported from a file", untrusted: false }, S.renderDeps);
+    if (v.state === "current") await M.comments.carryForwardTo(S.db, S.blobs, art.id, v.n);
+    res.json({ version: v.n, state: v.state });
   }));
 
   return router;

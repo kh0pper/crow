@@ -2,7 +2,7 @@
 name: artifacts
 description: Make pages, documents and diagrams the owner can view and comment on, and revise them from feedback rounds.
 triggers: ["artifact", "mockup", "make a page", "make a document", "diagram", "feedback round"]
-tools: ["artifact_create", "artifact_update", "artifact_get", "artifact_list", "artifact_find", "artifact_attach", "artifact_comments", "artifact_reply", "artifact_resolve", "artifact_round_done"]
+tools: ["artifact_create", "artifact_update", "artifact_upload_begin", "artifact_upload_commit", "artifact_get", "artifact_list", "artifact_find", "artifact_attach", "artifact_comments", "artifact_reply", "artifact_resolve", "artifact_round_done"]
 ---
 
 # Artifacts
@@ -13,6 +13,20 @@ Use `artifact_create` to make something the owner can open in Crow's Nest → Ar
 - `document`: `{ markdown, title?, libs? }` — each top-level block becomes a section people can comment on.
 - `diagram`: `{ svg }` — one SVG element; no scripts, event handlers or foreignObject. Give important shapes an `id` and a `<title>`. With the Design kit, `{ engine, source }` instead (see below).
 - Every `source` field is ONE plain string, never an object: `{"html": "<!doctype html>…"}`, not `{"html": {"content": "…"}}`. `artifact_update` takes the whole source again in the same shape.
+
+## A big document: write a file and upload it
+
+A source sent inline has to fit in one message you write, and a long one will be cut off or lose characters. **When the source is over about 20 KB (roughly 600 lines), do not send it inline.** If you can use the upload path — you have the `artifact_upload_begin` and `artifact_upload_commit` tools, and a shell that is allowed to run and whose policy allows `curl` — a long source must go through it: `artifact_create`/`artifact_update` refuse an inline source over 24000 characters with `too_big_inline`. Write it to a file in your working directory first, then upload it in three steps:
+
+1. `artifact_upload_begin` — `{field: "html"}` (or `markdown`, `svg`, or `source` for a Design-kit diagram), plus `bytes` (the file's size, e.g. from `wc -c page.html`), and for an update also `artifact_id`. If you know the file's sha256, pass it: a file that does not match is refused. You get back `upload_id`, `put_url`, `max_bytes` and a ready-made `how` command. The upload expires in 10 minutes and the file must be UTF-8 text.
+2. PUT the file to `put_url`. `put_url` is on the same gateway as your artifacts tools — the base URL of your `artifacts` entry in your MCP config (usually `http://127.0.0.1:3001`) — so:
+   ```bash
+   curl -sS -T page.html "http://127.0.0.1:3001/artifacts/upload/<upload_id>"
+   ```
+   A `200` means stored. `413` means the file is bigger than the upload allows (it is capped at 4 MiB; markdown has its own, smaller cap): split it. `400` means the file is not UTF-8 text or its sha256 did not match what you declared.
+3. `artifact_upload_commit` — `{upload_id, mode: "create", title, type}` for a new artifact, or `{upload_id, mode: "update", artifact_id, round_id?, base_version?, change_note?}` for a new version. For a document also pass `doc_title` and `lang`; for a Design-kit diagram pass `engine` (with `field: "source"`). This runs exactly the same checks as `artifact_create`/`artifact_update` — link, round, ask-first and version gates included — and returns the same result.
+
+An upload works once: if the commit fails, begin again (the token is burned). Assets (base64 files) are not affected by this — only the text fields. So: if you can use the upload path (the upload tools plus a working shell that can run `curl`), a long source must go through it and an inline source over 24000 characters is refused; otherwise there is no way to upload, and a long source is saved as sent, up to the type's own limit.
 
 ## Looks and the Design kit
 
@@ -31,14 +45,15 @@ Make every artifact look intentional, not generic. Your spawn prompt carries one
 
 - When the owner names an artifact (by title, id or viewer link), use `artifact_find` with what they gave you first; do not guess from `artifact_list`. Several matches come back as candidates: ask which one they mean.
 - An artifact you made in another chat is not linked to this one. To work on it here, call `artifact_attach`: the owner sees a "Link it to this chat?" card and decides. Tell them you asked; nothing is linked until they say yes. Do not ask again if they said no.
-- If `artifact_update` or `artifact_round_done` answers `needs_link` (this chat is not linked to the artifact, or you passed a round_id from another chat), call `artifact_attach`, tell the owner, and stop until they answer. Do not retry the update until they say yes.
+- If `artifact_update` or `artifact_round_done` answers `needs_link` (this chat is not linked to the artifact, or you passed a round_id from another chat), call `artifact_attach`, tell the owner, and stop until they answer. Do not retry the update until they say yes. `artifact_upload_begin` answers `needs_link` the same way when it names an artifact.
+- If `artifact_update` answers `too_big_inline`, write the source to a file and use the three upload steps above. Do not try to send it again inline, and do not shorten it to fit.
 
 ## Feedback rounds
 
 A round arrives as a message that starts with `[Crow Artifacts feedback round N]`.
 
 1. `artifact_get` the artifact; read the threads in the message (or `artifact_comments`).
-2. Make the changes and call `artifact_update` with the `round_id` and `base_version` from the message, plus a short `change_note`.
+2. Make the changes and call `artifact_update` with the `round_id` and `base_version` from the message, plus a short `change_note` (if you can use the upload path, a source over 24000 characters must go through `artifact_upload_begin` → PUT → `artifact_upload_commit`, passing the same `round_id` and `base_version`).
 3. Reply in each thread with `artifact_reply`; `artifact_resolve` the threads you addressed.
 4. Finish with `artifact_round_done` and a one-paragraph summary.
 

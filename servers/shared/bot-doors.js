@@ -24,6 +24,17 @@
  * /llm/acquire) are deliberately absent, and an operator's ruling fixed the
  * list. A family added later (a new bot-only mount) is added by the PR that
  * mounts it.
+ *
+ * THE 2026-11-16 OPERATOR RULING adds `/artifacts/upload/`: the one-time
+ * 256-bit upload token bound to bot+thread is the capability, so a contained
+ * bot may PUT its file to its own upload's put_url.
+ *
+ * The doors are PATHS ONLY — isDoorPath never sees the request method, so a
+ * door admits every method on its path. That is the whole of the upload door:
+ * the route behind it is a PUT route, so any other method reaches no handler
+ * (express answers 404) and a PUT without a live token is refused 404 by the
+ * handler itself. Restricting one door to PUT would need a new method-aware
+ * door mechanism, which this ruling deliberately does not build.
  */
 
 export const BOT_DOOR_PREFIXES = Object.freeze([
@@ -33,6 +44,7 @@ export const BOT_DOOR_PREFIXES = Object.freeze([
   "/board/mcp",    // its own board mount, under the board token
   "/phone/mcp",    // phone plans, under the phone token and the actor signature
   "/artifacts/mcp",
+  "/artifacts/upload/",  // the upload PUT: the one-time token in the path is the capability (2026-11-16 ruling)
   "/secrets/mcp",  // the bot-only credential-card mount, under the secrets token and a signed Perch actor
   "/peer-relay/",  // the relay to paired peers, under the relay token
 ]);

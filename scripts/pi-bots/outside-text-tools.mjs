@@ -36,6 +36,7 @@ export const CLEAN_MCP_TOOLS = Object.freeze([
   "mcp__artifacts__artifact_create", "mcp__artifacts__artifact_update", "mcp__artifacts__artifact_get", "mcp__artifacts__artifact_list",
   "mcp__artifacts__artifact_comments", "mcp__artifacts__artifact_reply", "mcp__artifacts__artifact_resolve", "mcp__artifacts__artifact_round_done",
   "mcp__artifacts__artifact_attach", "mcp__artifacts__artifact_find",
+  "mcp__artifacts__artifact_upload_begin", "mcp__artifacts__artifact_upload_commit",
 ]);
 
 export function taintsSession(toolName, { thirdPartyExtensions = false } = {}) {

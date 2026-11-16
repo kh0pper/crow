@@ -197,6 +197,8 @@ test("taint-gate parity: every registered tool has a class, and NO tool returns 
       artifact_reply: { artifact_id: s.artId, thread_id: Number(th), text: "ok" },
       artifact_resolve: { artifact_id: s.artId, thread_id: Number(th) },
       artifact_round_done: { artifact_id: s.artId, round_id: 999999, summary: "x" },
+      artifact_upload_begin: { field: "html", bytes: 11 },
+      artifact_upload_commit: { upload_id: "0".repeat(64), mode: "create" },
     };
     for (const name of Object.keys(TOOL_CLASSES)) {
       const r = await c.callTool({ name, arguments: calls[name] });
@@ -226,6 +228,8 @@ test("error paths carry no authored text either: every tool forced to fail with 
       artifact_reply: { artifact_id: s.artId, thread_id: 999999, text: "x" },
       artifact_resolve: { artifact_id: s.artId, thread_id: 999999 },
       artifact_round_done: { artifact_id: s.artId, round_id: 999999, summary: "x" },
+      artifact_upload_begin: { field: "html", bytes: 99 * 1024 * 1024 },
+      artifact_upload_commit: { upload_id: "f".repeat(64), mode: "create" },
     };
     for (const [name, args] of Object.entries(bad)) {
       const r = await c.callTool({ name, arguments: args });

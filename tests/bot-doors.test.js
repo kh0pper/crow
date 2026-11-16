@@ -25,6 +25,9 @@ test("path spellings", () => {
     "/board/mcp/",
     "/phone/mcp",
     "/artifacts/mcp",
+    "/artifacts/upload/",
+    "/artifacts/upload/" + "a".repeat(64),
+    "/artifacts/upload/" + "0".repeat(64) + "?x=1",
     "/secrets/mcp",
     "/secrets/mcp?x=1",
     "/peer-relay/i/m/mcp",
@@ -46,6 +49,12 @@ test("path spellings", () => {
     "/llm/acquire",
     "/LLM/v1/x",
     "/board/mcpx",
+    // The upload door is the PREFIX and nothing else: no bare "/artifacts/upload",
+    // no longer word, and the other artifacts paths stay shut.
+    "/artifacts/upload",
+    "/artifacts/uploads/" + "a".repeat(64),
+    "/artifacts/upload-x/",
+    "/artifacts/view/x",
     "/secrets/mcpx",
     "/memory/mcp",
     "/dashboard",
@@ -62,7 +71,7 @@ test("path spellings", () => {
 
 test("the door list is exactly the doors the operator's ruling fixed, frozen", () => {
   assert.deepEqual([...BOT_DOOR_PREFIXES],
-    ["/llm/v1/", "/llm/p/", "/llm/c/", "/board/mcp", "/phone/mcp", "/artifacts/mcp", "/secrets/mcp", "/peer-relay/"]);
+    ["/llm/v1/", "/llm/p/", "/llm/c/", "/board/mcp", "/phone/mcp", "/artifacts/mcp", "/artifacts/upload/", "/secrets/mcp", "/peer-relay/"]);
   assert.equal(Object.isFrozen(BOT_DOOR_PREFIXES), true);
   assert.equal(RELAY_SOURCE_V4, "127.0.77.1");
 });

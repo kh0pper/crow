@@ -676,6 +676,41 @@
     }, function (e) { banner(e.message, "warn"); });
   }
 
+  // ── Import file ────────────────────────────────────────────────────────
+  // The owner's own gesture: the file's TEXT becomes the next version (the
+  // server shapes it by the artifact's type). This page is owner-only
+  // (dashboardAuth), so the button has no shared/non-owner mode to hide in.
+  // The input and the button come from the page markup; nothing here builds
+  // a string: every message goes through banner() (textContent).
+  var IMPORT_MAX = 4 * 1024 * 1024;
+  var importInput = document.getElementById("cv-import-file");
+  var importBtn = document.getElementById("cv-import-btn");
+  if (importBtn && importInput) {
+    importBtn.removeAttribute("hidden");
+    headTools.insertBefore(importBtn, more);
+    importBtn.addEventListener("click", function () { importInput.click(); });
+    importInput.addEventListener("change", function () {
+      var f = importInput.files && importInput.files[0];
+      importInput.value = "";   // picking the same file twice still fires
+      if (!f) return;
+      if (f.size > IMPORT_MAX) { banner(T.import_too_large, "warn"); return; }
+      var reader = new FileReader();
+      reader.onerror = function () { banner(T.import_read_failed, "warn"); };
+      reader.onload = function () {
+        var text = typeof reader.result === "string" ? reader.result : "";
+        var note = window.prompt(T.import_note, "");
+        if (note === null) return;   // the owner changed their mind
+        api("POST", BASE + "/import", { text: text, change_note: note }).then(function (j) {
+          // Reload the viewer on the version the import made.
+          S.n = Number(j && j.version) || S.n;
+          S.editing = null;
+          return refresh().then(mountFrame);
+        }, function (e) { banner(fmt(T.import_failed, { e: (e && e.message) || "" }), "warn"); });
+      };
+      reader.readAsText(f);
+    });
+  }
+
   refresh().then(mountFrame, function (e) {
     showPanel("cv-gone", e.status === 404 ? T.gone : e.message);
   });

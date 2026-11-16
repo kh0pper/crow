@@ -8,6 +8,8 @@ import * as rounds from "./rounds.js";
 import { sessionIsClean, markSessionTainted } from "./trust.js";
 import { notifyHub } from "./notify-hub.js";
 import { activeLink } from "./links.js";
+import { LIMITS } from "./limits.js";
+import { beginUpload, takeUpload, dropUpload } from "./uploads.js";
 
 // Header values are TRIMMED so the attributed id always equals the id the
 // signature was made over (the MAC trims on both sides; review 1a-L2).
@@ -157,12 +159,162 @@ export const TOOL_CLASSES = Object.freeze({
   artifact_create: "writes", artifact_update: "writes", artifact_get: "reads-untrusted", artifact_list: "reads-owner-metadata",
   artifact_comments: "reads-untrusted", artifact_reply: "writes", artifact_resolve: "writes", artifact_round_done: "writes",
   artifact_attach: "writes", artifact_find: "reads-owner-metadata",
+  artifact_upload_begin: "writes", artifact_upload_commit: "writes",
 });
 // CONTRACT: error text reaches the wire UNGATED, so every message thrown at a
 // caller must be a static string — never interpolate a title, change note,
 // comment or any other authored value into an Error message here (review
 // 1a-L1; pinned by the error-path sentinel sweep in tests/artifacts-mcp.test.js).
 const fail = (e) => ({ content: [{ type: "text", text: `[${e.code || "error"}] ${e.message}` }], isError: true });
+
+/** The source fields a caller sends as one tool argument. A text longer than
+ *  LIMITS.inlineSourceChars cannot be written reliably by a model (the output
+ *  limit truncates it), so an INLINE tool refuses it before any store call and
+ *  points at the two-step upload — but only for a caller that can take that
+ *  path (canUploadSource below, or the canUpload seam a test injects). Assets
+ *  are not affected (base64 files were never token-bound). */
+const INLINE_SOURCE_FIELDS = ["html", "markdown", "svg", "source"];
+export const TOO_BIG_INLINE = "this source is too big to send inline: use artifact_upload_begin, PUT the file to its put_url, then artifact_upload_commit";
+function assertInlineSize(source) {
+  if (!source || typeof source !== "object") return;
+  for (const f of INLINE_SOURCE_FIELDS) {
+    const v = source[f];
+    if (typeof v === "string" && v.length > LIMITS.inlineSourceChars) throw Object.assign(new Error(TOO_BIG_INLINE), { code: "too_big_inline" });
+  }
+}
+
+/** The pi builtin that is a shell (def.tools.pi_builtin, as the Bot Builder
+ *  writes it and bridge.mjs's toolAllowlist pins it). A bot that holds `bash`
+ *  can `curl` a file to a put_url; one that does not has no way to reach the
+ *  upload route at all. */
+export const SHELL_TOOL = "bash";
+
+/** The two tools the upload path is made of (`artifact_upload_begin` → PUT →
+ *  `artifact_upload_commit`). Both, never one: a def granting only Begin has no
+ *  way to land the file it began. */
+export const UPLOAD_TOOLS = Object.freeze(["artifact_upload_begin", "artifact_upload_commit"]);
+
+/**
+ * The bot's stored def, read the way the spawn reads it. null for an absent
+ * row, an unparseable definition and a JSON value that is not an object — the
+ * caller then reads "cannot upload" (fail closed toward NOT stranding a bot).
+ * @returns {Promise<object|null>}
+ */
+export async function readBotDef(db, botId) {
+  const row = (await db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [String(botId)] })).rows[0];
+  if (!row) return null;
+  let def;
+  try { def = JSON.parse(row.definition || "{}"); } catch { return null; }
+  return def && typeof def === "object" && !Array.isArray(def) ? def : null;
+}
+
+/** Does a def grant a shell? `bash` in tools.pi_builtin is the one list the
+ *  spawn is pinned with (bridge.mjs buildToolsCsv). */
+export function defHasShellTool(def) {
+  const builtin = def && def.tools && def.tools.pi_builtin;
+  return Array.isArray(builtin) && builtin.includes(SHELL_TOOL);
+}
+
+/**
+ * Does a def grant the two-step upload? Either the whole server entry
+ * (`artifacts`) or both upload tools per tool (`artifacts/artifact_upload_begin`,
+ * or the bridge's `artifacts__…` spelling). This is the same reading the Bot
+ * Builder's companion writer does (scripts/pi-bots/bot-world.mjs
+ * withArtifactsCompanions) — copied here because an installed copy of this
+ * bundle cannot resolve app modules, and pinned by a test in
+ * tests/artifacts-upload.test.js so the two cannot drift.
+ */
+export function defGrantsUpload(def) {
+  const list = def && def.tools && def.tools.crow_mcp;
+  if (!Array.isArray(list)) return false;
+  if (list.includes("artifacts")) return true;
+  const has = (tool) => list.includes(`artifacts/${tool}`) || list.includes(`artifacts__${tool}`);
+  return UPLOAD_TOOLS.every(has);
+}
+
+/**
+ * Does a `bash_allow` list let the bot run `curl`? An entry is a command PREFIX
+ * (bot-builder bash-mode.js, pi-lab's allowlist gate), so the command has to be
+ * its first word: "curl", "curl -sS" and "curl -T" do, "grep curl.log" does
+ * not. An empty or malformed list has no way to PUT a file: false.
+ */
+export function allowlistAllowsCurl(allow) {
+  if (!Array.isArray(allow)) return false;
+  return allow.some((e) => typeof e === "string" && e.trim().split(/\s+/)[0] === "curl");
+}
+
+/**
+ * Can a def's bot actually take the upload path (operator ruling on the 24k
+ * inline cap)? ALL of these, or no:
+ *   (a) a shell — `bash` in tools.pi_builtin (nothing else can curl a file up);
+ *   (b) the upload tools — the whole `artifacts` grant, or both upload tools;
+ *   (c) a shell policy that is not deny and, when it is an allowlist, one that
+ *       allows `curl`.
+ * `shellMode` is the gateway's effectiveShellMode (servers/shared/
+ * bot-permission-policy.js), injected by the mount: it is the SAME rule the
+ * bridge spawns with ask/auto under, so "deny" here means the bot would be
+ * denied there too. Absent (a bare harness), a throw, or any unknown value
+ * reads as false: the old inline save.
+ */
+export function defCanUpload(def, actor, shellMode) {
+  if (!def || typeof shellMode !== "function") return false;
+  if (!defHasShellTool(def)) return false;
+  if (!defGrantsUpload(def)) return false;
+  let mode;
+  try { mode = shellMode(def, { interactive: actor && actor.gateway === "perch" }); } catch { return false; }
+  if (typeof mode !== "string" || mode === "deny") return false;
+  if (mode === "allowlist") return allowlistAllowsCurl(def.permission_policy && def.permission_policy.bash_allow);
+  // ask / auto: a person (or the classifier, in a live Perch chat) can say yes.
+  // Anything else is not a policy this bundle knows: no cap.
+  return mode === "ask" || mode === "auto";
+}
+
+/**
+ * Does this bot's stored def grant a shell? Kept for the def reader's callers
+ * and tests; see defHasShellTool for the rule and defCanUpload for the whole
+ * verdict.
+ * @returns {Promise<boolean>}
+ */
+export async function defGrantsShell(db, botId) {
+  try { return defHasShellTool(await readBotDef(db, botId)); } catch { return false; }
+}
+
+/**
+ * Who may reach the two-step upload — and is therefore held to the inline cap
+ * (operator ruling 2026-11-16, option A; tightened 2026-11 by the follow-up
+ * review: a shell alone is not enough). The cap is a signpost, not a wall:
+ * "too_big_inline" tells the model to write a file and upload it. Only a
+ * caller that can act on that advice is refused inline:
+ *   - the operator session, always;
+ *   - a verified bot that holds the upload pair AND can run it — a shell tool,
+ *     a shell policy that is not deny (allowlist: one that allows curl) — and
+ *     that is not held to a locked/untrusted round scope (the ruling leaves a
+ *     scoped session on its round's own gates, so its inline save stays
+ *     uncapped).
+ * Everyone else — no shell, no upload tools, a deny/curl-less allowlist, an
+ * unreadable def, a channel turn — keeps the old inline behaviour: no 24k cap,
+ * bounded by the per-type caps and the 1 MB JSON parser. Never strand a bot
+ * that has no other way to save.
+ * @param {{shellMode?: Function}} [opts] the gateway's effectiveShellMode.
+ * @returns {Promise<boolean>}
+ */
+export async function canUploadSource(db, actor, scope, { shellMode = null } = {}) {
+  if (!actor) return false;
+  if (actor.kind === "session") return true;
+  if (actor.kind !== "bot" || !actor.id || scope) return false;
+  try { return defCanUpload(await readBotDef(db, actor.id), actor, shellMode); } catch { return false; }
+}
+
+/** The gateway origin this MCP request came in on: the same base URL the bot's
+ *  own artifacts entry points at, so an upload's put_url works with curl as is. */
+function baseUrlOf(extra) {
+  try {
+    const raw = extra?.requestInfo?.url;
+    const url = raw instanceof URL ? raw : (raw ? new URL(String(raw)) : null);
+    if (url && url.origin && url.origin !== "null") return url.origin;
+  } catch { /* fall through to the loopback default */ }
+  return `http://127.0.0.1:${process.env.CROW_GATEWAY_PORT || 3001}`;
+}
 
 /** Spec §4.1: the tool-level `libs` joins source.libs (deduplicated, order
  *  kept). A non-array source.libs is left alone for the renderer to refuse. */
@@ -222,7 +374,7 @@ function sourceSchema(z) {
   }).describe('Strings only. page: {"html": "<!doctype html>…"}; document: {"markdown": "# Title…", "title"?}; diagram: {"svg": "<svg…>…</svg>"} or, with the Design kit, {"engine": "mermaid", "source": "…"}.');
 }
 
-export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {}, emitExternal = null, cardMadeByOwner = async () => false } = {}) {
+export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {}, emitExternal = null, cardMadeByOwner = async () => false, canUpload = null, shellMode = null } = {}) {
   // Default: a new current version carries open threads forward (§4.2).
   if (!onVersion) onVersion = async ({ artifactId, n, state, onlyThreads }) => { if (state === "current") await comments.carryForwardTo(db, blobs, artifactId, n, onlyThreads || null); };
   if (!McpServer || !z) throw new Error("createArtifactsMcpServer needs the gateway's McpServer and z");
@@ -234,6 +386,14 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
   const hub = (artifactId, n, event) => notifyHub({ db, artifactId, n, event, emitExternal });
 
   const scopeOfActor = (actor) => scopeOf(db, actor);
+  // The inline 24k cap, decided per caller (operator ruling 2026-11-16,
+  // option A): canUpload is the seam a test injects, the default reads the
+  // bot's stored def and holds it to the gateway's own shell policy
+  // (shellMode = effectiveShellMode, injected by the mount — this bundle copy
+  // cannot import app modules). A seam that throws means "cannot upload" — the
+  // old inline save, never a refusal the caller cannot act on.
+  const mayUpload = typeof canUpload === "function" ? canUpload : (actor, scope) => canUploadSource(db, actor, scope, { shellMode });
+  const canUploadInline = async (actor, scope) => { try { return (await mayUpload(actor, scope)) === true; } catch { return false; } };
   // The actor's house style (spec §4.4): a verified bot's project theme or bot
   // default; never for the operator or an unattributed caller.
   const depsFor = async (actor) => {
@@ -256,26 +416,44 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
         if (scope) scope.roundThreads = roundThreads;
         // R2-M1: a locked session writes only to its own round's threads.
         if (scope && args.thread_id !== undefined && !roundThreads.has(Number(args.thread_id))) throw Object.assign(new Error("this round is limited to its own threads"), { code: "forbidden" });
-        return ok(gate(await fn(args, actor, scope), actor, scope, roundThreads));
+        return ok(gate(await fn(args, actor, scope, { baseUrl: baseUrlOf(extra) }), actor, scope, roundThreads));
       } catch (e) { return fail(e); }
     });
   };
   const scopedOut = (scope) => { if (scope) throw Object.assign(new Error("not available in this round"), { code: "forbidden" }); };
 
-  tool("artifact_create", 'Create an artifact the owner can view and comment on. Every source field is a plain string. type page: source {"html": "<!doctype html>…"} (+ assets, libs). type document: source {"markdown": "# Title…"} (with the Design kit, ```vega-lite / ```mermaid / ```d2 fences become pictures). type diagram: source {"svg": "<svg…>…</svg>"}, or {"engine": "mermaid", "source": "…"} with the Design kit.',
-    { title: z.string(), type: z.enum(["page", "document", "diagram"]), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional() },
-    async (a, actor, scope) => {
-      scopedOut(scope);
-      // Re-read at save time: a bot whose session is not provably clean makes a tainted version.
-      const untrusted = actor.kind === "bot" && !(await sessionIsClean(db, actor.id, actor.thread));
-      const out = await store.createArtifact(db, blobs, { title: a.title, type: a.type, source: withLibs(a.source, a.libs), actor, changeNote: a.change_note, untrusted }, await depsFor(actor));
-      if (!out.duplicate) await hub(out.id, 1, "create");   // a client retry already has its card
-      return withDesign({ id: out.id, versionN: out.versionN }, out);
-    });
+  /** doUpdate's cheap pre-checks, up front for artifact_upload_begin: the
+   *  access check always, and the needs_link gate for a Perch chat that holds
+   *  no round for this artifact yet (a chat WITH one is left to the commit,
+   *  which is the only place that can ask for its round_id). Nothing is
+   *  audited here: a begin that stops is not an attempt to write yet. */
+  const earlyUpdateGate = async (artifactId, actor, scope) => {
+    await store.requireAccess(db, actor, artifactId);
+    if (scope || !isPerchChat(actor)) return;
+    const bound = (await db.execute({ sql: `SELECT id FROM artifact_rounds WHERE artifact_id=? AND bot_id=? AND session_id=? AND status IN (${rounds.ACTIVE.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`, args: [String(artifactId), actor.id, actor.thread, ...rounds.ACTIVE] })).rows[0];
+    if (bound) return;
+    if (await chatMayWrite(db, artifactId, actor, { cardMadeByOwner })) throw needsLink();
+  };
 
-  tool("artifact_update", "Make a new version: the whole source again, same shape as artifact_create (plain strings). During a feedback round pass round_id and base_version.",
-    { artifact_id: z.string(), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional(), round_id: z.number().int().optional(), base_version: z.number().int().optional() },
-    async (a, actor, scope) => {
+  // ── The two write bodies ──────────────────────────────────────────────
+  // artifact_create/artifact_update and artifact_upload_commit share them, so
+  // every gate (scope, round, ask-first/link, policy, taint, versioning,
+  // audit, round bookkeeping, hub) applies to a committed upload exactly as it
+  // does to an inline save. `inline` is false only for a commit: text that
+  // came over the upload route never had to fit in one tool argument.
+
+  const doCreate = async (a, actor, scope, { inline = true } = {}) => {
+    scopedOut(scope);
+    if (inline && (await canUploadInline(actor, scope))) assertInlineSize(a.source);
+    // Re-read at save time: a bot whose session is not provably clean makes a tainted version.
+    const untrusted = actor.kind === "bot" && !(await sessionIsClean(db, actor.id, actor.thread));
+    const out = await store.createArtifact(db, blobs, { title: a.title, type: a.type, source: withLibs(a.source, a.libs), actor, changeNote: a.change_note, untrusted }, await depsFor(actor));
+    if (!out.duplicate) await hub(out.id, 1, "create");   // a client retry already has its card
+    return withDesign({ id: out.id, versionN: out.versionN }, out);
+  };
+
+  const doUpdate = async (a, actor, scope, { inline = true } = {}) => {
+    if (inline && (await canUploadInline(actor, scope))) assertInlineSize(a.source);
       // F7(4): a bot whose chat is mid-round for THIS artifact must attribute
       // its update to the round — the smoke's v2 landed with round_id NULL
       // against the ask-round instructions, so BOTH kinds block: an ask's
@@ -345,6 +523,88 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       }
       await hub(a.artifact_id, v.n, "update");
       return withDesign({ version: v.n, state: v.state }, v);
+  };
+
+  tool("artifact_create", 'Create an artifact the owner can view and comment on. Every source field is a plain string. type page: source {"html": "<!doctype html>…"} (+ assets, libs). type document: source {"markdown": "# Title…"} (with the Design kit, ```vega-lite / ```mermaid / ```d2 fences become pictures). type diagram: source {"svg": "<svg…>…</svg>"}, or {"engine": "mermaid", "source": "…"} with the Design kit. A source over 24000 characters is refused when you have a shell: use artifact_upload_begin.',
+    { title: z.string(), type: z.enum(["page", "document", "diagram"]), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional() },
+    (a, actor, scope) => doCreate(a, actor, scope));
+
+  tool("artifact_update", "Make a new version: the whole source again, same shape as artifact_create (plain strings). During a feedback round pass round_id and base_version. With a shell, a source over 24000 characters is refused: use artifact_upload_begin, PUT the file, then artifact_upload_commit.",
+    { artifact_id: z.string(), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional(), round_id: z.number().int().optional(), base_version: z.number().int().optional() },
+    (a, actor, scope) => doUpdate(a, actor, scope));
+
+  // ── Two-step upload (a big source never travels in one tool argument) ────
+  // artifact_upload_begin mints a one-time PUT URL; the bot PUTs the file to it
+  // (bundle server/uploads.js — in-memory staging, no table);
+  // artifact_upload_commit then runs doCreate/doUpdate on the stored text. Every
+  // validation, version, audit, round, ask-first and link gate is the inline
+  // one's, unchanged.
+  const UPLOAD_ARGS_HELP = 'put_url is on this gateway (the base URL of your artifacts MCP entry, e.g. http://127.0.0.1:3001); PUT the raw file with `curl -sS -T page.html "<put_url>"`. The file must be UTF-8 text, and the upload expires in 10 minutes.';
+  tool("artifact_upload_begin", 'First step for a source too big to send inline: get a one-time upload URL. PUT the file to put_url, then call artifact_upload_commit with the upload_id. ' + UPLOAD_ARGS_HELP,
+    {
+      field: z.enum(["html", "markdown", "svg", "source"]).describe("the source field the file fills: page html, document markdown, diagram svg, or a Design-kit diagram's source text"),
+      artifact_id: z.string().optional().describe("the artifact this upload will update (omit for a new artifact)"),
+      bytes: z.number().int().describe("the file's size in bytes, as declared now"),
+      sha256: z.string().optional().describe("the file's sha256 in hex, if you know it: a file that does not match is refused"),
+    },
+    async (a, actor, scope, ctx) => {
+      // A verified bot or the operator only (an unattributed caller never got
+      // this far: the wrapper refuses it). A scoped/locked session may target
+      // only its own round's artifact, and may not create.
+      if (actor.kind !== "bot" && actor.kind !== "session") throw Object.assign(new Error("unattributed caller"), { code: "forbidden" });
+      if (a.artifact_id == null) scopedOut(scope);
+      else await earlyUpdateGate(a.artifact_id, actor, scope);
+      const b = beginUpload({ actor, field: a.field, artifactId: a.artifact_id ?? null, declaredBytes: a.bytes, sha256: a.sha256 ?? null });
+      const putUrl = ctx.baseUrl + b.path;
+      return { upload_id: b.token, put_url: putUrl, expires_at: new Date(b.expiresAt).toISOString(), max_bytes: b.maxBytes, how: `curl -sS -T <file> "${putUrl}"` };
+    });
+
+  /** The source a committed upload becomes: its field's text, plus the short
+   *  fields the upload carries as tool arguments (they are small by nature). */
+  const sourceFromUpload = (entry, a) => {
+    const source = { [entry.field]: entry.bytes };
+    if (a.engine) source.engine = a.engine;
+    if (a.lang) source.lang = a.lang;
+    if (a.doc_title) source.title = a.doc_title;
+    return source;
+  };
+
+  tool("artifact_upload_commit", 'Second step: turn an uploaded file into a new artifact (mode "create", with title and type) or a new version (mode "update", like artifact_update: pass round_id and base_version during a feedback round). Runs every check the inline tools run. ' + UPLOAD_ARGS_HELP,
+    {
+      upload_id: z.string().describe("the upload_id artifact_upload_begin returned"),
+      mode: z.enum(["create", "update"]),
+      artifact_id: z.string().optional().describe("update: the artifact to add a version to"),
+      title: z.string().optional().describe("create: the artifact's title"),
+      type: z.enum(["page", "document", "diagram"]).optional().describe("create: page, document or diagram"),
+      libs: libsSchema,
+      change_note: z.string().optional(),
+      round_id: z.number().int().optional(),
+      base_version: z.number().int().optional(),
+      engine: z.string().optional().describe("field source only: the Design kit engine, vega-lite, mermaid or d2"),
+      lang: z.string().optional().describe("document: its language, en or es"),
+      doc_title: z.string().optional().describe("document: its title"),
+    },
+    async (a, actor, scope) => {
+      // TakeUpload marks the entry used BEFORE the store runs (one use), and the
+      // entry is dropped whatever happens next: a failed commit needs a fresh
+      // upload, never a retry of the same token.
+      const entry = takeUpload(a.upload_id, actor);
+      try {
+        const source = sourceFromUpload(entry, a);
+        // C2 scope: the artifact this commit would WRITE must be the round's
+        // own (from the tool argument or the one the upload was begun for).
+        // Checked here, before either write body runs, and for create too (a
+        // scoped session may not create: it has no artifact of its own).
+        const artifactId = a.artifact_id ?? entry.artifactId;
+        if (scope && (artifactId == null || String(artifactId) !== String(scope.artifactId))) throw Object.assign(new Error("this round is limited to its own artifact"), { code: "forbidden" });
+        if (a.mode === "create") {
+          if (a.type == null) throw Object.assign(new Error("create needs a type: page, document or diagram"), { code: "bad_request" });
+          return await doCreate({ title: a.title, type: a.type, source, libs: a.libs, change_note: a.change_note }, actor, scope, { inline: false });
+        }
+        if (artifactId == null) throw Object.assign(new Error("update needs artifact_id"), { code: "bad_request" });
+        if (entry.artifactId != null && String(artifactId) !== entry.artifactId) throw Object.assign(new Error("this upload was started for another artifact"), { code: "forbidden" });
+        return await doUpdate({ artifact_id: artifactId, source, libs: a.libs, change_note: a.change_note, round_id: a.round_id, base_version: a.base_version }, actor, scope, { inline: false });
+      } finally { dropUpload(entry); }
     });
 
   tool("artifact_get", "Read an artifact: metadata, current version, source.",
