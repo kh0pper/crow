@@ -323,21 +323,26 @@ export { botSessionEnv };
 /**
  * Applies this spawn's identity to the FINAL pi env (`env` is mutated and returned).
  *
+ * On BOTH paths every inherited `CROW_ACTOR_*` key and the marker are deleted FIRST: an identity
+ * this spawn sets is the only actor env pi (and every MCP server it spawns) ever sees, so no
+ * inherited actor key can ride along beside it.
+ *
  * With a bot id: the bot's identity plus the engine marker (botSessionEnv).
  *
- * With NO bot id: every inherited `CROW_ACTOR_*` and the marker are deleted and the marker is set
- * to the literal "unbound". `actorFromEnv` (servers/research/actor.js) then resolves the unverified
- * bot, which every share rule refuses — without it an actor-less env reads as unknown, which is the
- * operator's own client, so a bot-less spawn would fail OPEN. Applied last, so nothing merged
- * before it (a def's spawn_env is already stripped by filterSpawnEnvWithReport; `opts.extraEnv` is
- * not) can leave a caller identity behind.
+ * With NO bot id: the marker is set to the literal "unbound". `actorFromEnv`
+ * (servers/research/actor.js) then resolves the unverified bot, which every share rule refuses —
+ * without it an actor-less env reads as unknown, which is the operator's own client, so a bot-less
+ * spawn would fail OPEN. Applied last, so nothing merged before it (a def's spawn_env is already
+ * stripped by filterSpawnEnvWithReport; `opts.extraEnv` is not) can leave a caller identity behind.
+ * Nothing sets an actor key after this call; a per-turn thread reaches the MCP servers through each
+ * stdio block's own env (scripts/pi-bots/actor-env.mjs), not through pi's process env.
  */
 export function piIdentityEnv(env, { botId, displayName } = {}) {
   const out = env && typeof env === "object" ? env : {};
-  if (typeof botId === "string" && botId) return Object.assign(out, botSessionEnv(botId, displayName));
   for (const key of Object.keys(out)) {
     if (/^CROW_ACTOR_/.test(key) || key === "CROW_BOT_SESSION") delete out[key];
   }
+  if (typeof botId === "string" && botId) return Object.assign(out, botSessionEnv(botId, displayName));
   out.CROW_BOT_SESSION = "unbound";
   return out;
 }

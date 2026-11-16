@@ -220,6 +220,19 @@ test("a def's spawn_env cannot set the bot identity or the engine marker", () =>
   assert.deepEqual(out, { KEEP: "1" });
 });
 
+test("piIdentityEnv drops every inherited actor key on both paths", () => {
+  const bound = bridge.piIdentityEnv(
+    { CROW_ACTOR_THREAD: "t-inherited", CROW_ACTOR_OTHER: "x", CROW_BOT_SESSION: "someone-else", KEEP: "1" },
+    { botId: BOT, displayName: "Glasses" });
+  assert.deepEqual(bound, { KEEP: "1", ...bridge.botSessionEnv(BOT, "Glasses") });
+  assert.ok(!("CROW_ACTOR_THREAD" in bound), "no inherited actor thread survives the bound path");
+  assert.ok(!("CROW_ACTOR_OTHER" in bound), "no other inherited actor key survives the bound path");
+
+  const unbound = bridge.piIdentityEnv(
+    { CROW_ACTOR_THREAD: "t-inherited", CROW_ACTOR_OTHER: "x", KEEP: "1" });
+  assert.deepEqual(unbound, { KEEP: "1", CROW_BOT_SESSION: "unbound" });
+});
+
 test("botSessionEnv is the identity env the engine puts on pi's own process", () => {
   assert.deepEqual(bridge.botSessionEnv("glass", "Glasses"), {
     CROW_ACTOR_KIND: "bot",
@@ -232,8 +245,8 @@ test("botSessionEnv is the identity env the engine puts on pi's own process", ()
 });
 
 /** A stub pi that captures its own environment and stays alive long enough to be read. */
-async function spawnStubPi(mode, overrides = {}) {
-  const d = join(dir, "pirpc-" + mode);
+async function spawnStubPi(mode, overrides = {}, tag = "") {
+  const d = join(dir, "pirpc-" + mode + tag);
   mkdirSync(join(d, "sessions"), { recursive: true });
   const capture = join(d, "env.json");
   const stub = join(d, "stub-pi.mjs");
@@ -309,7 +322,7 @@ for (const mode of ["file", "fd"]) {
       // Whatever merged before the identity (opts.extraEnv is not stripped) does not survive it.
       extraEnv: {
         CROW_ACTOR_KIND: "owner", CROW_ACTOR_BOT_ID: "someone-else", CROW_ACTOR_BOT_NAME: "Someone",
-        CROW_BOT_SESSION: "someone-else",
+        CROW_ACTOR_THREAD: "t-inherited", CROW_BOT_SESSION: "someone-else",
       },
     });
     assert.ok(env.PI_BOT_PERMISSION_POLICY, "the stub really is pi as the bridge spawns it");
@@ -317,11 +330,34 @@ for (const mode of ["file", "fd"]) {
     assert.ok(!("CROW_ACTOR_KIND" in env), "no inherited actor kind");
     assert.ok(!("CROW_ACTOR_BOT_ID" in env), "no inherited bot id");
     assert.ok(!("CROW_ACTOR_BOT_NAME" in env), "no inherited bot name");
+    assert.ok(!("CROW_ACTOR_THREAD" in env), "no inherited actor thread");
     assert.ok(!JSON.stringify(env).includes("someone-else"), "the stale identity is gone");
     assert.deepEqual(actorMod.actorFromEnv(env), { kind: "bot", id: null, unverified: true },
       "the unverified bot, which every share rule refuses — never the unknown that is the operator");
     if (mode === "fd") assert.equal(env.PI_BOT_MCP_CONFIG_FD, "4", "fd delivery");
     else assert.ok(!("PI_BOT_MCP_CONFIG_FD" in env), "file delivery");
+  });
+
+  // An actor key merged before the identity (opts.extraEnv is not stripped) never reaches pi on
+  // either path: only the engine's own identity keys do.
+  test(`an inherited actor thread never reaches pi in ${mode} mode`, { timeout: 30_000 }, async () => {
+    const bound = await spawnStubPi(mode, {
+      extraEnv: { CROW_ACTOR_THREAD: "t-inherited", CROW_ACTOR_OTHER: "x" },
+    }, "-thread");
+    assert.ok(bound.PI_BOT_PERMISSION_POLICY, "the stub really is pi as the bridge spawns it");
+    assert.ok(!("CROW_ACTOR_THREAD" in bound), "no inherited actor thread on the bound path");
+    assert.ok(!("CROW_ACTOR_OTHER" in bound), "no other inherited actor key on the bound path");
+    assert.equal(bound.CROW_ACTOR_BOT_ID, BOT);
+    assert.equal(bound.CROW_BOT_SESSION, BOT);
+
+    const unbound = await spawnStubPi(mode, {
+      botId: undefined,
+      displayName: undefined,
+      extraEnv: { CROW_ACTOR_THREAD: "t-inherited" },
+    }, "-thread-unbound");
+    assert.ok(unbound.PI_BOT_PERMISSION_POLICY, "the stub really is pi as the bridge spawns it");
+    assert.ok(!("CROW_ACTOR_THREAD" in unbound), "no inherited actor thread on the unbound path");
+    assert.equal(unbound.CROW_BOT_SESSION, "unbound");
   });
 }
 
@@ -347,6 +383,18 @@ test("actorFromEnv: the engine marker makes a bot session, or an unverified bot"
   assert.equal(session.botSession, true);
   assert.equal(share.isOperatorVoice(session), false);
   assert.equal(share.isOperatorVoice(share.operatorVoiceActor()), true);
+});
+
+test("actorFromEnv: a present but empty marker counts as a marker", () => {
+  const { actorFromEnv } = actorMod;
+  // The key is on the env, so this is a bot session; no valid bot id can match an empty marker, so
+  // it is the unverified bot rather than the owner the kind claims.
+  assert.deepEqual(actorFromEnv({ CROW_BOT_SESSION: "", CROW_ACTOR_KIND: "owner" }),
+    { kind: "bot", id: null, unverified: true });
+  assert.deepEqual(actorFromEnv({ CROW_BOT_SESSION: "", CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: BOT }),
+    { kind: "bot", id: null, unverified: true });
+  // A key that is absent is not a marker: the owner stays the owner.
+  assert.equal(actorFromEnv({ CROW_ACTOR_KIND: "owner" }).kind, "owner");
 });
 
 test("an unknown actor in a bot session is refused every covered tool; the operator's own env is not", async () => {

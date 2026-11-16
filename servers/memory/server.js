@@ -464,9 +464,13 @@ export function createMemoryServer(dbPath, options = {}) {
         try {
           if (safeLike) {
             const likeParam = `%${safeLike}%`;
+            // The note's own project scopes the note; the source's project scopes the title it lends
+            // the note. Without the join condition a home note could show a bound bot the title of a
+            // project-less source (or one from another project). The owner's rows are unchanged.
+            const sourceJoin = boundByShares ? " AND (rs.id IS NULL OR rs.project_id = rn.project_id)" : "";
             let sql = `
               SELECT rn.*, rs.title as source_title FROM research_notes rn
-              LEFT JOIN research_sources rs ON rn.source_id = rs.id
+              LEFT JOIN research_sources rs ON rn.source_id = rs.id${sourceJoin}
               WHERE (rn.content LIKE ? ESCAPE '\\' OR rn.title LIKE ? ESCAPE '\\')
             `;
             const params = [likeParam, likeParam];
@@ -1443,13 +1447,16 @@ export function createMemoryServer(dbPath, options = {}) {
       delete: z.boolean().optional().describe("If true, delete the schedule and its run history"),
     },
     async ({ id, enabled, task, cron_expression, tz, run_now, delete: doDelete }, extra) => {
+      // The share gate comes before ANY row lookup: for a bot every schedule tool is owner-only, so
+      // an existing id and a missing one get the same refusal (the routine check below would
+      // otherwise let a bot learn whether an id exists and is a routine).
+      const pass = await shareGate("crow_update_schedule", extra).check(null, {});
+      if (pass.isError) return pass;
       const { rows } = await db.execute({ sql: "SELECT * FROM schedules WHERE id = ?", args: [id] });
       // Changing a bot routine (re-targeting its bot, switching it on) is the operator's too.
       if (rows[0] && scheduleKind(rows[0].task) === "bot_routine" && notOperatorCall(extra)) {
         return scheduleError("Only the operator can change a bot routine (in Bot Builder).");
       }
-      const pass = await shareGate("crow_update_schedule", extra).check(null, {});
-      if (pass.isError) return pass;
       if (rows.length === 0) {
         return { content: [{ type: "text", text: `Schedule #${id} not found.` }] };
       }

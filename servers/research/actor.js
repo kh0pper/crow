@@ -82,7 +82,9 @@ const UNVERIFIED_BOT = Object.freeze({ kind: "bot", id: null, unverified: true }
  */
 export function actorFromEnv(env) {
   const e = env || {};
-  const marker = typeof e.CROW_BOT_SESSION === "string" && e.CROW_BOT_SESSION !== "";
+  // A PRESENT key is the marker, even when it is empty: the engine sets it, so an empty value is a
+  // bot session whose id no valid bot id can match (the unverified bot), never the owner.
+  const marker = typeof e.CROW_BOT_SESSION === "string";
   const botId = e.CROW_ACTOR_KIND === "bot" && typeof e.CROW_ACTOR_BOT_ID === "string" && e.CROW_ACTOR_BOT_ID
     ? e.CROW_ACTOR_BOT_ID
     : null;

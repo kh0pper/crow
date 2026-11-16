@@ -264,12 +264,16 @@ test("bot routines are the operator's: a bot caller can't create one or change o
   assert.equal(reminder.isError, true);
   assert.match(reminder.text, /operator only/);
   assert.equal(q("SELECT COUNT(*) AS n FROM schedules")[0].n, before, "a bot stores no schedule at all");
-  // The operator's routine can't be re-targeted or switched by a bot.
+  // The operator's routine can't be re-targeted or switched by a bot. For a bot the share gate
+  // refuses every schedule tool before any row is read, so the answer never says whether the id
+  // exists or is a routine: an existing routine and a missing id read exactly the same.
   const id = idOf((await create({ task: "pipeline:botcron:alpha", cron_expression: "0 7 * * *" })).text);
+  const missing = await asBot("crow_update_schedule", { id: id + 100000, enabled: false });
   for (const args of [{ id, task: "pipeline:botcron:other-bot" }, { id, enabled: false }]) {
     const r = await asBot("crow_update_schedule", args);
     assert.equal(r.isError, true, JSON.stringify(args));
-    assert.match(r.text, /Only the operator can change a bot routine/);
+    assert.match(r.text, /operator only/);
+    assert.equal(r.text, missing.text, "a routine id answers like a missing one");
   }
   assert.equal(q("SELECT task FROM schedules WHERE id = ?", id)[0].task, "pipeline:botcron:alpha");
 });

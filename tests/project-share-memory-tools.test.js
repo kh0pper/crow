@@ -140,10 +140,10 @@ async function seedSource(title, projectId) {
   return Number(r.lastInsertRowid);
 }
 
-async function seedNote(title, projectId) {
+async function seedNote(title, projectId, sourceId = null) {
   const r = await db.execute({
-    sql: "INSERT INTO research_notes (title, content, project_id) VALUES (?, ?, ?)",
-    args: [title, `${title} body`, projectId == null ? null : Number(projectId)],
+    sql: "INSERT INTO research_notes (title, content, project_id, source_id) VALUES (?, ?, ?, ?)",
+    args: [title, `${title} body`, projectId == null ? null : Number(projectId), sourceId == null ? null : Number(sourceId)],
   });
   return Number(r.lastInsertRowid);
 }
@@ -399,6 +399,41 @@ test("deep_recall scopes every project-scoped subquery and leaves blog posts out
     for (const marker of ["home memory", "loose memory", "home source", "loose source", "home note",
       "loose note", "blog post"]) {
       assert.doesNotMatch(named.text, new RegExp(marker), `the shared project's recall must not carry ${marker}`);
+    }
+  } finally { await owner.close(); await s.close(); }
+});
+
+// A home note may name a source the note's reader cannot reach: the note's own project scopes the
+// note, and the source's project must scope the title it lends the note.
+test("deep_recall never lends a home note a source title the bot cannot read, and the owner still sees it", async () => {
+  const A = await mkProject();
+  const B = await mkProject();
+  const bot = await mkBot({ home: A });
+  const t = token();
+  const homeTitle = `${t} home source title`;
+  const looseTitle = `${t} loose source title`;
+  const otherTitle = `${t} other project source title`;
+  const homeSource = await seedSource(homeTitle, A);
+  const looseSource = await seedSource(looseTitle, null);
+  const otherSource = await seedSource(otherTitle, B);
+  await seedNote(`${t} home note on a home source`, A, homeSource);
+  await seedNote(`${t} home note on a loose source`, A, looseSource);
+  await seedNote(`${t} home note on another project's source`, A, otherSource);
+
+  const owner = await open({ actor: OWNER });
+  const s = await open({ actor: { kind: "bot", id: bot } });
+  try {
+    const mine = await s.call("crow_deep_recall", { topic: t, per_source_limit: 20 });
+    assert.match(mine.text, /home note on a home source/, "the bot reads its home project's note");
+    assert.ok(mine.text.includes(`re: "${homeTitle}"`), "a home note's home-project source is still named");
+    assert.ok(!mine.text.includes(`re: "${looseTitle}"`),
+      "a project-less source's title never rides a home note");
+    assert.ok(!mine.text.includes(`re: "${otherTitle}"`),
+      "another project's source title never rides a home note");
+
+    const seen = await owner.call("crow_deep_recall", { topic: t, per_source_limit: 20 });
+    for (const title of [homeTitle, looseTitle, otherTitle]) {
+      assert.ok(seen.text.includes(`re: "${title}"`), `the owner still sees ${title}`);
     }
   } finally { await owner.close(); await s.close(); }
 });
@@ -668,6 +703,28 @@ test("a bot is refused every schedule tool; the owner is unchanged", async () =>
     assert.equal(made.isError, false, made.text);
     assert.match(made.text, /Schedule created/);
   } finally { await s.close(); await owner.close(); }
+});
+
+test("a bot's update_schedule answers an existing routine id and a missing id identically", async () => {
+  const A = await mkProject();
+  const bot = await mkBot({ home: A });
+  const made = await db.execute({
+    sql: "INSERT INTO schedules (task, cron_expression, description, enabled) VALUES (?, '0 9 * * *', 'a bot routine', 1)",
+    args: [`pipeline:botcron:${bot}`],
+  });
+  const routineId = Number(made.lastInsertRowid);
+  const s = await open({ actor: { kind: "bot", id: bot } });
+  try {
+    const existing = await s.call("crow_update_schedule", { id: routineId, enabled: false });
+    const missing = await s.call("crow_update_schedule", { id: 987654321, enabled: false });
+    assert.equal(existing.isError, true);
+    assert.equal(existing.text, missing.text,
+      "a bot must not learn from the answer whether an id exists or is a routine");
+    assert.match(existing.text, /operator only/);
+    assert.doesNotMatch(existing.text, /Bot Builder/);
+    const still = await rows("SELECT enabled FROM schedules WHERE id = ?", [routineId]);
+    assert.equal(Number(still[0].enabled), 1, "nothing was changed");
+  } finally { await s.close(); }
 });
 
 test("a bot is refused the notification tools; sending one is still allowed", async () => {
