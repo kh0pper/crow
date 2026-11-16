@@ -5656,6 +5656,14 @@ export const translations = {
   "mail.emptyConnect": { en: "Connect your mail", es: "Conecta tu correo" },
   "mail.elsewhereOn": { en: "Mail is set up on {instance}", es: "El correo está configurado en {instance}" },
   "mail.elsewhereConnect": { en: "Connect a different account here", es: "Conecta otra cuenta aquí" },
+  // The reader's inbox: the account chips, the folder drawer, the row placeholders and the two
+  // navigation lines (one more page of rows, and a folder the server deleted).
+  "mail.chipAll": { en: "All", es: "Todos" },
+  "mail.folders": { en: "Folders", es: "Carpetas" },
+  "mail.unknownSender": { en: "Unknown sender", es: "Remitente desconocido" },
+  "mail.noSubject": { en: "(no subject)", es: "(sin asunto)" },
+  "mail.loadMore": { en: "Load more", es: "Cargar más" },
+  "mail.folderGone": { en: "That folder is no longer here.", es: "Esa carpeta ya no está aquí." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

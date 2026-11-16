@@ -13,7 +13,10 @@
  * The GET only reads (Turbo prefetches it).
  *
  * What it reads is `accountsOverview` — the same shape `GET /dashboard/mail/api/accounts` returns,
- * which holds no host, port, username or secret — and nothing else, until the inbox view lands.
+ * which holds no host, port, username or secret — plus, for the inbox view, plan 1's folder and
+ * message stores: `listFolders` for the drawer, `getFolder` to resolve a folder link, and
+ * `listMessages` for one page of rows (the `inbox` role across accounts on the All view, one folder
+ * when a folder link was followed). The times are drawn in the instance's zone (`instanceZone`).
  *
  * Hidden from the classic sidebar; the shell's drawer reveals it (shell/chrome.js) only while the
  * flag is on AND the request is the owner's own local password session (the same check as the gate
@@ -23,9 +26,32 @@ import { t } from "../shared/i18n.js";
 import { isLocalPasswordSessionOn } from "../local-session.js";
 import { mailEnabled } from "../../mail/flag.js";
 import { accountsOverview } from "../../mail/accounts-overview.js";
+import { MailError } from "../../mail/errors.js";
+import { getFolder, listFolders, listMessages } from "../../mail/store/messages.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
+import { instanceZone } from "../../../shared/schedule-store.js";
 import { renderMailPage } from "./mail/html.js";
 import { mailCss } from "./mail/css.js";
+
+/** Rows per page. The cursor is the only way to the next one. */
+const INBOX_PAGE_SIZE = 30;
+
+/**
+ * One page of summaries. A cursor is opaque and comes back from a link a person may have edited, so
+ * one that does not decode starts again at the first page instead of failing the whole view.
+ */
+async function readPage(db, { accountId = null, folderId = null, cursor } = {}) {
+  const optionsFor = (want) => (folderId === null
+    ? { accountId, role: "inbox", limit: INBOX_PAGE_SIZE, cursor: want }
+    : { folderId, limit: INBOX_PAGE_SIZE, cursor: want });
+  const wanted = typeof cursor === "string" && cursor !== "" ? cursor : undefined;
+  try {
+    return await listMessages(db, optionsFor(wanted));
+  } catch (err) {
+    if (wanted === undefined || !(err instanceof MailError) || err.code !== "BAD_INPUT") throw err;
+    return listMessages(db, optionsFor(undefined));
+  }
+}
 
 export default {
   id: "mail",
@@ -45,13 +71,54 @@ export default {
       res.status(404).type("text").send("Not found");
       return null;
     }
-    const view = typeof req.query.view === "string" && req.query.view ? req.query.view : "inbox";
+    const query = req.query || {};
+    const view = typeof query.view === "string" && query.view ? query.view : "inbox";
     // This instance's own id: the claim rules compare every held address against it.
     const localInstanceId = getOrCreateLocalInstanceId();
     const { accounts, elsewhere } = await accountsOverview(db, { localInstanceId });
+    const usable = accounts.filter((account) => account.status !== "claimed_elsewhere");
+
+    let folders = [];
+    let page = null;
+    let acct = "all";
+    let folderId = null;
+    let tz;
+    try { tz = await instanceZone(db); } catch { tz = undefined; }
+
+    if (usable.length && view === "inbox") {
+      const ids = new Set(usable.map((account) => account.id));
+      for (const account of usable) folders.push(...await listFolders(db, account.id));
+
+      const askedAcct = typeof query.acct === "string" ? query.acct : "";
+      const askedFolder = typeof query.folder === "string" && query.folder !== "" ? query.folder : null;
+
+      if (askedFolder !== null) {
+        const folder = await getFolder(db, askedFolder);
+        if (folder && ids.has(folder.accountId)) {
+          folderId = folder.id;
+          acct = folder.accountId;
+          page = await readPage(db, { folderId, cursor: query.cursor });
+        } else {
+          // A folder the server no longer has: the page says so, and nothing is read.
+          acct = ids.has(askedAcct) ? askedAcct : "all";
+          page = { items: [], nextCursor: null, missing: true };
+        }
+      } else {
+        acct = ids.has(askedAcct) ? askedAcct : "all";
+        page = await readPage(db, {
+          accountId: acct === "all" ? null : acct,
+          cursor: query.cursor,
+        });
+        // The All view is every usable account's inbox, never a claimed account's stored mail.
+        if (acct === "all") page.items = page.items.filter((item) => ids.has(item.accountId));
+      }
+    }
+
     return layout({
       title: t("mail.title", lang),
-      content: mailCss() + renderMailPage({ view, accounts, elsewhere, lang }),
+      content: mailCss({ inbox: page !== null }) + renderMailPage({
+        view, accounts, elsewhere, lang, folders, page, acct, folderId, now: Date.now(), tz,
+      }),
     });
   },
 };
