@@ -120,10 +120,13 @@ test("the shape is exactly the plan's: no host, port, username, secret, claim ke
   assert.equal(view.lastSyncAt, NOW);
   assert.equal(view.unreadCount, 1);
 
-  const text = JSON.stringify(overview);
+  // The account id is random hex: it can hold a port-looking digit run, so scan a copy
+  // with every id replaced by a fixed non-digit string.
+  assert.match(view.id, /^ma-[0-9a-f]{16}$/);
+  const scanned = JSON.stringify(overview, (k, v) => (k === "id" ? "ID" : v));
   for (const needle of ["mail.example.test", "993", "465", "alexuser", "imap", "smtp", "MAIL_PASSWORD",
     addressHash("alex@example.com"), "mail_claim"]) {
-    assert.equal(text.includes(needle), false, `the overview holds ${needle}`);
+    assert.equal(scanned.includes(needle), false, `the overview holds ${needle}`);
   }
 });
 
