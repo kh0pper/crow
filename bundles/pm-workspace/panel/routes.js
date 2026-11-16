@@ -123,6 +123,13 @@ export default function pmWorkspaceRouter(dashboardAuth) {
   router.use("/api/pm", express.text({ type: ["text/plain", "text/*"], limit: "25mb" }));
 
   // ── Static assets (bundle panel/static) ──
+  //
+  // The drawing editor's two libraries (fabric.js, perfect-freehand) are
+  // vendored here instead of loaded from a CDN: the gateway CSP is
+  // `script-src 'self' 'unsafe-inline'`, so a CDN script is blocked and the
+  // editor never boots. Module scripts are refused by the browser unless the
+  // response carries a JavaScript content type, so `.js` is set explicitly
+  // rather than trusting the mime lookup.
   router.get("/pm/static/:file", (req, res) => {
     const staticDir = resolve(join(BUNDLE_DIR, "panel", "static"));
     const target = resolve(normalize(join(staticDir, req.params.file)));
@@ -130,6 +137,7 @@ export default function pmWorkspaceRouter(dashboardAuth) {
       return res.status(400).send("Bad path");
     }
     if (!existsSync(target)) return res.status(404).send("Not found");
+    if (target.endsWith(".js")) res.type("application/javascript; charset=utf-8");
     res.sendFile(target);
   });
 
@@ -158,11 +166,11 @@ export default function pmWorkspaceRouter(dashboardAuth) {
 <link rel="stylesheet" href="/pm/static/pm.css">
 ${isDrawing ? `<script type="importmap">
 {
-  "imports": { "perfect-freehand": "https://cdn.jsdelivr.net/npm/perfect-freehand@1.2.2/dist/esm/index.mjs" },
-  "integrity": { "https://cdn.jsdelivr.net/npm/perfect-freehand@1.2.2/dist/esm/index.mjs": "sha384-5l3A2yfUaPsFT9OELkOpJOX0+bzd81Hi6euWa2tIwITOu+z8k9dMuxvIu78wYkxL" }
+  "imports": { "perfect-freehand": "/pm/static/perfect-freehand-1.2.2.js" },
+  "integrity": { "/pm/static/perfect-freehand-1.2.2.js": "sha384-5l3A2yfUaPsFT9OELkOpJOX0+bzd81Hi6euWa2tIwITOu+z8k9dMuxvIu78wYkxL" }
 }
 </script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js" integrity="sha384-sLpuECXYCB5TUyTbC06pftm/rgurDambREZmV4eRHwEqJzCQtU6lxI2Ve00z4XW5" crossorigin="anonymous"></script>` : ""}
+<script src="/pm/static/fabric-5.3.1.min.js" integrity="sha384-sLpuECXYCB5TUyTbC06pftm/rgurDambREZmV4eRHwEqJzCQtU6lxI2Ve00z4XW5"></script>` : ""}
 </head>
 <body>
 <div class="editor-page" id="editor-page">
