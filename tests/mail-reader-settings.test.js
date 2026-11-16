@@ -366,6 +366,31 @@ test("the add form names POST, has no native action and no client-routed target"
     assert.ok(address, "the address field");
     assert.match(address, /type="email"/, "the address field is an email field");
     assert.equal((address.match(/\stype=/g) || []).length, 1, "with one type attribute, not two");
+    const password = (r.body.match(/<input[^>]*name="password"[^>]*>/) || [])[0];
+    assert.ok(password, "the password field");
+    assert.match(password, /type="password"/);
+    assert.doesNotMatch(password, /\svalue=/, "no password is ever drawn into the field");
+  });
+});
+
+test("the update-password control is a disclosure with a plain button, not a form", async () => {
+  const failed = await withDb((db) => stores.accounts.createAccount(db, ACCOUNT("Personal", "alex@example.com", "alexuser")));
+  await withDb((db) => stores.accounts.updateAccount(db, failed.id, { status: "auth_failed", statusDetail: "AUTH_FAILED" }));
+
+  await withFlag(async () => {
+    const r = await get(SETTINGS);
+    assert.equal(r.status, 200);
+    const start = r.body.indexOf(`data-ml-update-password data-account="${failed.id}"`);
+    assert.ok(start > 0, "the control is on the card");
+    const end = r.body.indexOf("</details>", start);
+    const block = r.body.slice(start, end);
+    assert.equal(block.includes("<form"), false, "nothing here can submit on its own");
+    const save = (block.match(/<button[^>]*data-ml-password-save[^>]*>/) || [])[0];
+    assert.ok(save, "the save control");
+    assert.match(save, /type="button"/, "a button that never submits");
+    const field = (block.match(/<input[^>]*name="password"[^>]*>/) || [])[0];
+    assert.ok(field, "the new-password field");
+    assert.doesNotMatch(field, /\svalue=/, "the field arrives empty");
   });
 });
 

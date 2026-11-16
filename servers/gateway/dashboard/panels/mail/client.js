@@ -28,6 +28,10 @@
  *   script hardcodes, Remove sender deletes one allowance, and Remove account keeps its sentence
  *   hidden until the first click and deletes the account only on a later click at least 500 ms after
  *   that; the confirmation lapses after 8 s or when focus leaves the block.
+ *   The add-account form is the one form here that must never reach the browser, so its listener is
+ *   bound on the form itself and cancels the submit as its very first act, before it looks at the
+ *   event or reads a field. The header's search box is a plain GET form and is left alone: it must
+ *   search with no script at all.
  *
  * Every sentence comes from the page: the panel renders one hidden element carrying the fixed
  * sentence for each API error code (data-ml-err-<code>, lower-cased before the lookup, because the
@@ -497,27 +501,35 @@ export function mailClientJs(lang = "en") {
     }
   }
 
-  function submitHandler(event) {
-    var form = event.target;
-    if (!form || !form.getAttribute || form.getAttribute('data-ml-add-account') === null) { return; }
-    if (typeof event.preventDefault === 'function') { event.preventDefault(); }
-    var field = function (name) {
-      var input = form.querySelector('[name="' + name + '"]');
-      return input ? String(input.value || '') : '';
-    };
-    var passwordInput = form.querySelector('[name="password"]');
-    var body = {
-      label: field('label'),
-      address: field('address'),
-      password: field('password'),
-      imap: { host: field('imap-host'), port: Number(field('imap-port')), security: field('imap-security') },
-      smtp: { host: field('smtp-host'), port: Number(field('smtp-port')), security: field('smtp-security') }
-    };
-    // Emptied as it is sent, so a secret is never left in the form whatever the answer is.
-    if (passwordInput) { passwordInput.value = ''; }
-    post('/dashboard/mail/api/accounts', body).then(function (result) {
-      if (!result.ok) { sayError(form, result); return; }
-      reload();
+  /**
+   * The add-account form's own submit: cancelled first, every time, and only then read. Its fields
+   * include a secret and the form names no target, so a submit the browser performed could carry the
+   * password into the page URL; there is no state — a missing cookie or a field the form does not
+   * have — in which the form is handed back to the browser instead.
+   */
+  function bindAddForm(form) {
+    if (form.getAttribute('data-ml-bound') === 'form') { return; }
+    form.setAttribute('data-ml-bound', 'form');
+    form.addEventListener('submit', function (event) {
+      if (typeof event.preventDefault === 'function') { event.preventDefault(); }
+      var field = function (name) {
+        var input = form.querySelector('[name="' + name + '"]');
+        return input ? String(input.value || '') : '';
+      };
+      var passwordInput = form.querySelector('[name="password"]');
+      var body = {
+        label: field('label'),
+        address: field('address'),
+        password: field('password'),
+        imap: { host: field('imap-host'), port: Number(field('imap-port')), security: field('imap-security') },
+        smtp: { host: field('smtp-host'), port: Number(field('smtp-port')), security: field('smtp-security') }
+      };
+      // Emptied as it is sent, so a secret is never left in the form whatever the answer is.
+      if (passwordInput) { passwordInput.value = ''; }
+      post('/dashboard/mail/api/accounts', body).then(function (result) {
+        if (!result.ok) { sayError(form, result); return; }
+        reload();
+      });
     });
   }
 
@@ -544,7 +556,6 @@ export function mailClientJs(lang = "en") {
     root.setAttribute('data-ml-bound', 'root');
     root.addEventListener('click', clickHandler);
     root.addEventListener('change', changeHandler);
-    root.addEventListener('submit', submitHandler);
     root.addEventListener('focusout', function (event) {
       if (!confirmBox) { return; }
       var next = event && event.relatedTarget;
@@ -558,6 +569,8 @@ export function mailClientJs(lang = "en") {
   for (var i = 0; i < sections.length; i++) { bindSection(sections[i]); }
   var lists = root.querySelectorAll('.ml-list');
   for (var j = 0; j < lists.length; j++) { bindPull(lists[j]); }
+  var addForms = root.querySelectorAll('[data-ml-add-account]');
+  for (var k = 0; k < addForms.length; k++) { bindAddForm(addForms[k]); }
 
   if (!window.__mlBound) {
     window.__mlBound = true;

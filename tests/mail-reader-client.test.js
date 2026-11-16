@@ -745,6 +745,82 @@ test("the add-account form posts its fields as endpoints, clears the password on
   assert.equal(bad.document.body.textContent.includes("RAW"), false, "the response's own message is never shown");
 });
 
+test("a cancelable submit on the add-account form is cancelled before a field is read, then posted once", async () => {
+  const r = boot(settingsPage(), { fetchImpl: () => jsonResponse(201, { account: { id: ACC.id } }) });
+  const form = r.$("[data-ml-add-account]");
+  const fill = (name, value) => { form.querySelector('[name="' + name + '"]').value = value; };
+  fill("label", "Home");
+  fill("address", "sam@example.com");
+  fill("password", "app-password");
+  fill("imap-host", "mail.example.test");
+  fill("imap-port", "993");
+  fill("imap-security", "ssl");
+  fill("smtp-host", "mail.example.test");
+  fill("smtp-port", "465");
+  fill("smtp-security", "starttls");
+
+  // Every read of the form — its attribute as much as its fields — reports whether the submit had
+  // already been cancelled at that moment: the form is never given an instant in which the browser
+  // could start a submission.
+  const fired = r.event("submit");
+  const accesses = [];
+  const watch = (name) => {
+    const call = form[name].bind(form);
+    form[name] = (selector) => {
+      accesses.push({ name: `${name}(${String(selector)})`, prevented: fired.defaultPrevented });
+      return call(selector);
+    };
+  };
+  watch("getAttribute");
+  watch("querySelector");
+  form.dispatchEvent(fired);
+
+  assert.equal(fired.defaultPrevented, true, "the form never submits itself");
+  assert.ok(accesses.some((entry) => entry.name.startsWith("querySelector(")), "the handler read the fields");
+  for (const entry of accesses) {
+    assert.equal(entry.prevented, true, `the submit was already cancelled before ${entry.name}`);
+  }
+  assert.equal(form.querySelector('[name="password"]').value, "", "the secret leaves the page as it is sent");
+
+  await r.settle();
+  assert.equal(r.calls.length, 1, "exactly one request");
+  assert.equal(r.calls[0].method, "POST");
+  assert.equal(r.calls[0].url, "/dashboard/mail/api/accounts");
+  assert.equal(r.calls[0].headers["x-crow-csrf"], "tok 42", "the header comes from the cookie");
+  assert.deepEqual(r.calls[0].body, {
+    label: "Home",
+    address: "sam@example.com",
+    password: "app-password",
+    imap: { host: "mail.example.test", port: 993, security: "ssl" },
+    smtp: { host: "mail.example.test", port: 465, security: "starttls" },
+  });
+});
+
+test("a submit with no CSRF cookie is still cancelled and never becomes a native post", async () => {
+  const r = boot(settingsPage(), {
+    cookie: "crow_session=abc",
+    fetchImpl: () => jsonResponse(403, { error: "bad_input" }),
+  });
+  const form = r.$("[data-ml-add-account]");
+  form.querySelector('[name="password"]').value = "app-password";
+  const fired = r.submit(form);
+  assert.equal(fired.defaultPrevented, true, "a missing cookie does not hand the form back to the browser");
+  assert.equal(form.getAttribute("method"), "post", "what the browser would post, if it ever did");
+  assert.equal(form.getAttribute("action"), null, "and there is no target for it");
+  await r.settle();
+  assert.deepEqual(r.visits, [], "nothing navigated and nothing reloaded");
+});
+
+test("the header's search box stays a plain GET form: its submit is not cancelled", () => {
+  const r = boot(inboxPage());
+  const form = r.$("form.ml-search");
+  assert.ok(form, "the search box");
+  assert.equal(form.getAttribute("method"), "get", "it works with no client script");
+  const fired = r.submit(form);
+  assert.equal(fired.defaultPrevented, false, "the browser performs the search itself");
+  assert.deepEqual(r.calls, [], "and no request is made for it");
+});
+
 test("Remove sender DELETEs the allowance and takes the row out of the list", async () => {
   const r = boot(settingsPage());
   const button = r.$("[data-ml-remove-sender]");
