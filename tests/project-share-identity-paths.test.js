@@ -416,11 +416,110 @@ test("an unknown actor in a bot session is refused every covered tool; the opera
   assert.deepEqual(server.research.actor, { kind: "bot", id: null, unverified: true });
 });
 
-test("the combined core server gives memory and storage the env actor too", () => {
-  const src = readFileSync(join(REPO, "servers/core/server.js"), "utf8");
-  assert.match(src, /const envActor = actorFromEnv\(process\.env\)/);
-  assert.match(src, /name === "storage" \? factory\(dbPath, \{ baseActor: envActor \}\)/);
-  assert.match(src, /name === "memory" \|\| name === "projects" \? factory\(dbPath, \{ actor: envActor \}\)/);
+/** Build the real combined core server under `env` and connect an in-process MCP client. The env
+ *  is restored before the result is returned, so a later call cannot pick the actor up at call
+ *  time: whatever a proxied server answers is the actor it was BUILT with. */
+async function coreUnder(env) {
+  const { createCoreServer } = await import("../servers/core/server.js");
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const KEYS = ["CROW_ACTOR_KIND", "CROW_ACTOR_BOT_ID", "CROW_ACTOR_BOT_NAME", "CROW_ACTOR_THREAD", "CROW_BOT_SESSION"];
+  const saved = new Map(KEYS.map((k) => [k, process.env[k]]));
+  let server = null;
+  let client = null;
+  try {
+    for (const k of KEYS) delete process.env[k];
+    Object.assign(process.env, env);
+    server = await createCoreServer(DB_FILE);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    client = new Client({ name: "share-identity-core", version: "0" });
+    await client.connect(clientTransport);
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+  return {
+    async call(name, args = {}) {
+      const r = await client.callTool({ name, arguments: args });
+      return {
+        text: (r.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n"),
+        isError: !!r.isError,
+      };
+    },
+    async close() {
+      try { await client.close(); } catch {}
+      try { await server.close(); } catch {}
+    },
+  };
+}
+
+/** One unshared project, one home project for the bot, and one memory only the owner may read. */
+async function coreFixtures(botId, marker) {
+  const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+  const unshared = Number((await createProjectSpace(db, { name: `Core unshared ${marker}` })).id);
+  const home = Number((await createProjectSpace(db, { name: `Core home ${marker}` })).id);
+  await db.execute({
+    sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled) VALUES (?,?,?,?,1) ON CONFLICT(bot_id) DO NOTHING",
+    args: [botId, "Core Bot", "{}", home],
+  });
+  const token = `zqcore${marker}x`;
+  await db.execute({
+    sql: "INSERT INTO memories (content, category, importance, project_id) VALUES (?, 'general', 5, ?)",
+    args: [`${token} only the owner may read this`, unshared],
+  });
+  return { unshared, home, token };
+}
+
+/** Drop the fixture memories: another test in this file counts the instance's memories. */
+async function dropMemories(token) {
+  await db.execute({ sql: "DELETE FROM memories WHERE content LIKE ?", args: [`${token}%`] });
+}
+
+test("the combined core server builds memory and projects from the env actor: a bot is refused an unshared project", async () => {
+  const botId = "core-share-bot";
+  const { unshared, home, token } = await coreFixtures(botId, "bot");
+  const core = await coreUnder({ CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: botId, CROW_ACTOR_BOT_NAME: "Core Bot" });
+  try {
+    const search = await core.call("crow_search_memories", { query: token, project_id: unshared, semantic: false });
+    assert.equal(search.isError, true);
+    assert.match(search.text, /No share grants this bot access to that project/);
+    assert.doesNotMatch(search.text, new RegExp(token), "a refusal carries no memory content");
+
+    const activated = await core.call("crow_activate_server", { server: "projects" });
+    assert.match(activated.text, /Activated "projects"/);
+    const elsewhere = await core.call("crow_workspace_dir", { project_id: unshared });
+    assert.equal(elsewhere.isError, true);
+    assert.match(elsewhere.text, /No share grants this bot access to that project/);
+
+    // The bot's own project is still reachable: the refusal is the share rule, not a dead server.
+    const own = await core.call("crow_workspace_dir", { project_id: home });
+    assert.equal(own.isError, false, own.text);
+    assert.match(own.text, new RegExp(`Project #${home}\\b`));
+  } finally {
+    await core.close();
+    await dropMemories(token);
+  }
+});
+
+test("the combined core server built for the owner reads the same unshared project", async () => {
+  const { unshared, token } = await coreFixtures("core-owner-bot", "owner");
+  const core = await coreUnder({ CROW_ACTOR_KIND: "owner" });
+  try {
+    const search = await core.call("crow_search_memories", { query: token, project_id: unshared, semantic: false });
+    assert.equal(search.isError, false, search.text);
+    assert.match(search.text, new RegExp(`${token} only the owner may read this`));
+
+    const activated = await core.call("crow_activate_server", { server: "projects" });
+    assert.match(activated.text, /Activated "projects"/);
+    const dir = await core.call("crow_workspace_dir", { project_id: unshared });
+    assert.equal(dir.isError, false, dir.text);
+    assert.match(dir.text, new RegExp(`Project #${unshared}\\b`));
+  } finally {
+    await core.close();
+    await dropMemories(token);
+  }
 });
 
 // --- the storage server resolves who is calling ----------------------------
@@ -566,14 +665,59 @@ test("the servers the executor actually builds hold the base actor, voice bot an
   }
 });
 
-// The actor is written down in ONE place: getClient builds a server's options from baseActorFor
-// through factoryOptionsFor, never from a second copy of the actor.
-test("the executor's factory options come from its one base-actor helper", () => {
-  const src = readFileSync(join(REPO, "servers/gateway/ai/tool-executor.js"), "utf8");
-  assert.match(src, /createInProcessClient\(category, factory, factoryOptionsFor\(category\)\)/);
-  assert.equal(src.match(/\{ baseActor \}/g).length, 1, "one storage option shape");
-  assert.ok(src.indexOf('category === "storage" ? { baseActor }') > src.indexOf("const factoryOptionsFor"),
-    "the actor→option mapping lives inside factoryOptionsFor");
+// The actor a server is built with reaches it through ONE helper (baseActorFor → the factory's own
+// option name), so the servers the executor builds answer a bound bot with the bot rules and the
+// operator's voice bot with operator scope.
+test("the servers the executor builds refuse an unshared project for a bound bot and allow it for the operator's voice bot", async () => {
+  const { createToolExecutor } = await import("../servers/gateway/ai/tool-executor.js");
+  const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+  const unshared = Number((await createProjectSpace(db, { name: "Executor unshared project" })).id);
+  const home = Number((await createProjectSpace(db, { name: "Executor bot home" })).id);
+  const botId = "executor-share-bot";
+  await db.execute({
+    sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled) VALUES (?,?,?,?,1) ON CONFLICT(bot_id) DO NOTHING",
+    args: [botId, "Executor Bot", "{}", home],
+  });
+  const token = `zqexec${Date.now().toString(36)}`;
+  await db.execute({
+    sql: "INSERT INTO memories (content, category, importance, project_id) VALUES (?, 'general', 5, ?)",
+    args: [`${token} executor memory`, unshared],
+  });
+
+  const bot = createToolExecutor({ botDef: { bot_id: botId, display_name: "Executor Bot" } });
+  const voice = createToolExecutor({ botDef: { bot_id: CROW_VOICE_BOT_ID, display_name: "Crow" } });
+  const search = (ex) => ex.executeTool("crow_memory", {
+    action: "search_memories", params: { query: token, project_id: unshared, semantic: false },
+  });
+  const workspaceDir = (ex, projectId) => ex.executeTool("crow_projects", {
+    action: "workspace_dir", params: { project_id: projectId },
+  });
+  try {
+    const botSearch = await search(bot);
+    assert.equal(botSearch.isError, true, botSearch.result);
+    assert.match(botSearch.result, /No share grants this bot access to that project/);
+    assert.doesNotMatch(botSearch.result, new RegExp(token), "a refusal carries no memory content");
+
+    const voiceSearch = await search(voice);
+    assert.equal(voiceSearch.isError, false, voiceSearch.result);
+    assert.match(voiceSearch.result, new RegExp(token));
+
+    const botDir = await workspaceDir(bot, unshared);
+    assert.equal(botDir.isError, true, botDir.result);
+    assert.match(botDir.result, /No share grants this bot access to that project/);
+    // The bot's own project is still reachable: the refusal is the share rule, not a dead server.
+    const botHome = await workspaceDir(bot, home);
+    assert.equal(botHome.isError, false, botHome.result);
+    assert.match(botHome.result, new RegExp(`Project #${home}\\b`));
+
+    const voiceDir = await workspaceDir(voice, unshared);
+    assert.equal(voiceDir.isError, false, voiceDir.result);
+    assert.match(voiceDir.result, new RegExp(`Project #${unshared}\\b`));
+  } finally {
+    await bot.close();
+    await voice.close();
+    await dropMemories(token);
+  }
 });
 
 // --- the router's base actor ----------------------------------------------
