@@ -17,6 +17,13 @@
  * A name that is not in the map is refused (fail closed): a tool added without a class is refused
  * for a bot rather than silently exposed.
  *
+ * Two registration shapes cannot be guarded, and are refused AT REGISTRATION rather than left open:
+ * a `server.tool(...)` call with no schema (or annotations) object between the name and the handler,
+ * where the handler is called with `extra` alone and the guard could not tell it from the call's
+ * `args`; and `server.registerTool(name, config, cb)`, whose config object the `tool()` wrapper
+ * never sees. Every registration on this server therefore ends up guarded, or the server refuses to
+ * build.
+ *
  * Owner, unknown and peer actors are untouched: this file only ever narrows a bot.
  */
 import { UNKNOWN, resolveCallActor } from "../research/actor.js";
@@ -122,9 +129,20 @@ export function guardSharingServer(server, { baseActor, onCallActor } = {}) {
     const name = String(args[0]);
     const last = args.length - 1;
     const handler = args[last];
-    // Not a registration shape this guard knows (the MCP SDK's `tool()` always ends in its
-    // callback): hand it through untouched rather than pretend it is guarded.
-    if (typeof handler !== "function") return registerTool(...args);
+    // Not a registration shape the guard knows (the MCP SDK's `tool()` always ends in its
+    // callback): refuse it rather than register a handler nothing guards.
+    if (typeof handler !== "function") {
+      throw new Error("sharing guard: " + name + " must be registered as server.tool(name, description, schema, handler)");
+    }
+    // Everything between the name and the handler is the description and, necessarily, one object:
+    // the input schema (or the annotations object of the schema-less shape). Without it `tool()`
+    // calls the handler as handler(extra) alone, and the guard's `(callArgs, extra)` reading would
+    // take the call's own `extra` for `callArgs` — so it is refused at registration time instead.
+    const described = args.slice(1, last);
+    if (!described.some((a) => a !== null && typeof a === "object")) {
+      throw new Error("sharing guard: " + name + " is registered without a schema object before its handler, "
+        + "which cannot be guarded; register it as server.tool(name, description, schema, handler)");
+    }
 
     const guarded = (callArgs, extra) => {
       const actor = resolveCallActor(baseActor || UNKNOWN, extra);
@@ -138,6 +156,14 @@ export function guardSharingServer(server, { baseActor, onCallActor } = {}) {
     const next = args.slice();
     next[last] = guarded;
     return registerTool(...next);
+  };
+
+  // `registerTool(name, config, cb)` never goes through `tool()`, so this wrapper would not see its
+  // handler. It is refused outright: on this server a tool is registered through `tool()` or not
+  // at all.
+  server.registerTool = (name) => {
+    throw new Error("sharing guard: " + String(name) + " cannot be registered through registerTool(); "
+      + "use server.tool(name, description, schema, handler) so the owner-only guard sees it");
   };
 
   return server;

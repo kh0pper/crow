@@ -131,8 +131,10 @@ export function createRouterServer(options = {}) {
 
     // The project servers learn who is calling from the mount (owner or unknown); each call's
     // forwarded _meta (below) can only narrow it. Projects, memory and storage all take it —
-    // projects and memory as `actor`, storage as `baseActor` (the same actor, not a second one).
-    const factoryOptions = category === "storage" ? { baseActor: options.actor || UNKNOWN }
+    // projects and memory as `actor`, storage and sharing as `baseActor` (the same actor, not a
+    // second one). Sharing is here for the same reason as storage: a session's router is built once
+    // with the caller's actor, and a call carrying no _meta must still be resolved as that caller.
+    const factoryOptions = category === "storage" || category === "sharing" ? { baseActor: options.actor || UNKNOWN }
       : category === "memory" || category === "projects" ? { actor: options.actor || UNKNOWN }
         : undefined;
     const { client, server } = await createInProcessClient(category, factory, factoryOptions);

@@ -12,10 +12,16 @@
  *     that project keeps its engine state (sessions/, outputs/, .pi/,
  *     .mcp.json with signed actor headers) under <workspace_dir>/bots/<id>, so
  *     a shared root there would expose — and let a read_write bot rewrite —
- *     other bots' sessions. A symlink anywhere in that tree (`bots` itself, or
- *     a bot home under it) refuses the WHOLE share's roots with one warning:
- *     the state then lives at the link's target, which may be an ordinary
- *     top-level entry the share would otherwise grant.
+ *     other bots' sessions. A `bots` directory that is itself a symlink refuses
+ *     the whole share's roots with one warning, and so does any other link in
+ *     that tree that resolves INSIDE the workspace (the state would then live
+ *     at an ordinary top-level entry this share would otherwise grant) or that
+ *     cannot be resolved at all (fail closed). A link that resolves OUTSIDE the
+ *     workspace is accepted: that is a carried-over bot world
+ *     (scripts/pi-bots/world-root.mjs links a bot home, or its
+ *     sessions/outputs/.pi/.mcp.json, to the bot's legacy root), and no entry
+ *     this share grants can reach it — every granted entry resolves under the
+ *     workspace's own realpath.
  *
  * A suspended share (either side has an outside member), a revoked one, one
  * whose project is archived/tombstoned, one with no workspace_dir, one whose
@@ -483,10 +489,10 @@ test("shareWorkspaceRoots: a workspace with no bots directory grants its entries
 // ---------------------------------------------------------------------------
 
 /** shareWorkspaceRoots for one workspace, with the warning lines it emitted. */
-function shareOf(d, projectId, level = "read_write") {
+function shareOf(d, projectId, level = "read_write", opts = {}) {
   const said = [];
   const r = shareWorkspaceRoots([{ project_id: projectId, level, workspace_dir: d, suspended: false }],
-    { projectsRoot: PROJECTS_ROOT, log: (m) => said.push(m) });
+    { projectsRoot: PROJECTS_ROOT, ...opts, log: (m) => said.push(m) });
   return { r, said };
 }
 
@@ -538,14 +544,84 @@ test("shareWorkspaceRoots: a file symlink (.mcp.json) inside a bot home refuses 
   assertRefused(d, 31, /symlink/);
 });
 
+test("shareWorkspaceRoots: a carried-over bot world whose entries link OUTSIDE the workspace still grants the other entries", () => {
+  // world-root.mjs "root" mode: the whole bot home is one link to the bot's legacy root.
+  const whole = ws("unit-carried-root");
+  mkdirSync(join(whole, "docs"), { recursive: true });
+  writeFileSync(join(whole, "docs", "a.md"), "a\n");
+  writeFileSync(join(whole, "top.txt"), "t\n");
+  const legacyWhole = join(dir, "legacy-worlds", "whole");
+  mkdirSync(join(legacyWhole, "sessions"), { recursive: true });
+  writeFileSync(join(legacyWhole, "sessions", "s.jsonl"), "{}\n");
+  mkdirSync(join(whole, "bots"), { recursive: true });
+  symlinkSync(legacyWhole, join(whole, "bots", "carried"));
+
+  const rootShare = shareOf(whole, 36);
+  assert.deepEqual(sortRoots(rootShare.r), { read: sorted(fixtureRoots(whole)), write: sorted(fixtureRoots(whole)) },
+    "a bot home linked to its legacy root grants the workspace's own entries");
+  assert.deepEqual(rootShare.said, [], "and says nothing: the link cannot be reached from any granted root");
+
+  // world-root.mjs "entries" mode: sessions/outputs/.pi/.mcp.json each link to the legacy root.
+  const legacy = join(dir, "legacy-worlds", "other");
+  mkdirSync(join(legacy, "sessions"), { recursive: true });
+  writeFileSync(join(legacy, "sessions", "s.jsonl"), "{}\n");
+  mkdirSync(join(legacy, "outputs"), { recursive: true });
+  mkdirSync(join(legacy, ".pi", "agent"), { recursive: true });
+  writeFileSync(join(legacy, ".mcp.json"), "{}\n");
+  const d = botsTreeFixture("carried-entries", (_root, home) => {
+    for (const name of ["sessions", "outputs", ".pi", ".mcp.json"]) {
+      symlinkSync(join(legacy, name), join(home, name));
+    }
+  });
+  const entryShare = shareOf(d, 37);
+  assert.deepEqual(sortRoots(entryShare.r), { read: sorted(fixtureRoots(d)), write: sorted(fixtureRoots(d)) },
+    "carried-over entries resolve outside the workspace, so the other entries are still granted");
+  assert.deepEqual(entryShare.said, [], "a carried-over world says nothing");
+  for (const name of ["sessions", "outputs", ".pi", ".mcp.json"]) {
+    assert.equal(coversPath(entryShare.r.read, join(legacy, name)), false, name + ": the link's target is no root");
+  }
+});
+
+test("shareWorkspaceRoots: a link inside a bot home that resolves INSIDE the workspace refuses the share", () => {
+  // The same shape as a carried-over entry, but pointing at a top-level entry of this very
+  // workspace: granting that entry would hand over the bot home's state through it.
+  const d = botsTreeFixture("inside-link", (root, home) => {
+    mkdirSync(join(root, "elsewhere", "sessions"), { recursive: true });
+    writeFileSync(join(root, "elsewhere", "sessions", "x.jsonl"), "{}\n");
+    symlinkSync(join(root, "elsewhere"), join(home, "sessions"));
+  });
+  assertRefused(d, 38, /symlink/);
+});
+
+test("shareWorkspaceRoots: a link in a bot home with no resolvable target refuses the share", () => {
+  // Nothing to check the target against, so nothing can vouch for it: fail closed.
+  const d = botsTreeFixture("dangling-link", (_root, home) => {
+    symlinkSync(join(dir, "legacy-worlds", "gone"), join(home, "sessions"));
+  });
+  assertRefused(d, 39, /unresolvable symlink/);
+});
+
 test("shareWorkspaceRoots: a bots tree over the entry bound refuses the share instead of half-inspecting it", () => {
+  // Sizing note: the bound is a real constant (pi session transcripts and outputs/ files accumulate
+  // in a bot home), so the test passes a SMALL bound down the walk rather than creating 100,000 files.
+  assert.equal(BOTS_TREE_MAX_ENTRIES, 100_000, "the bound is sized for real pi trees");
   const d = botsTreeFixture("huge-bots-tree", (_root, home) => {
     const sessions = join(home, "sessions");
     mkdirSync(sessions, { recursive: true });
     // One entry past the bound is enough: the walk stopped, so a link further in could go unseen.
-    for (let i = 0; i <= BOTS_TREE_MAX_ENTRIES; i++) writeFileSync(join(sessions, "s" + i + ".jsonl"), "");
+    for (let i = 0; i < 6; i++) writeFileSync(join(sessions, "s" + i + ".jsonl"), "");
   });
-  assertRefused(d, 32, /entries/);
+  const said = [];
+  const r = shareWorkspaceRoots([{ project_id: 32, level: "read_write", workspace_dir: d, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT, botsTreeMaxEntries: 4, log: (m) => said.push(m) });
+  assert.deepEqual(r, { read: [], write: [] }, "a tree past the bound grants nothing");
+  assert.equal(said.length, 1, "exactly one warning line: " + JSON.stringify(said));
+  assert.match(said[0], /entries/, said[0]);
+
+  // The very same tree is well inside the default bound, so the share is granted there.
+  const under = shareOf(d, 32);
+  assert.deepEqual(sortRoots(under.r), { read: sorted(fixtureRoots(d)), write: sorted(fixtureRoots(d)) });
+  assert.deepEqual(under.said, []);
 });
 
 test("shareWorkspaceRoots: a bots tree of real dirs and files — a deep one included — still grants the other entries", () => {

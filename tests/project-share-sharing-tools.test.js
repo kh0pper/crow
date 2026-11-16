@@ -13,8 +13,12 @@
  *       `shared_items` row, no `crosspost_log` row, no peer/nostr call:
  *         stdio env actor, per-call `_meta` actor, `x-crow-actor-*` header actor, an unverified-bot
  *         env (the engine marker with no bot identity), the frozen operator-voice actor as the
- *         server's base actor, and the in-process tool executor bound to a normal bot and to the
- *         voice bot;
+ *         server's base actor, the in-process tool executor bound to a normal bot and to the
+ *         voice bot, and a gateway router BUILT for a bot actor (a call carrying no `_meta` at all
+ *         is still that bot's call);
+ *   (b3) a registration the guard cannot see the call's actor through — `server.tool` with no
+ *       schema object before its handler, or `server.registerTool` — is refused when it happens,
+ *       so no tool can be added to this surface unguarded;
  *   (c) the one harmless tool still works for a bot;
  *   (d) the owner and an unidentified caller still reach the server (status, contacts);
  *   (e) a bot that holds a live project share is refused exactly the same.
@@ -58,6 +62,7 @@ const DB_FILE = join(DATA, "crow.db");
 const ENV_BOT = "sharing-env-bot";
 const META_BOT = "sharing-meta-bot";
 const HDR_BOT = "sharing-header-bot";
+const ROUTER_BOT = "sharing-router-bot";
 const UNVERIFIED_SESSION = "sharing-unverified-session";
 
 const OWNER_ONLY_TEXT = "Error: That tool is for the operator only.";
@@ -382,6 +387,87 @@ test("a bot is refused crow_share, crow_send_message and crow_crosspost on every
   assert.equal(executed.isError, false, executed.text);
   assert.match(executed.text, /^Shared memory #/, executed.text);
   assert.equal(await count("SELECT COUNT(*) AS n FROM shared_items"), 1, "exactly the owner's share is recorded");
+});
+
+// --- (b2) a router built FOR a bot actor ---------------------------------------------------
+
+test("a router built for a bot actor refuses crow_share with no per-call _meta", { timeout: 120_000 }, async () => {
+  const { createRouterServer } = await import("../servers/gateway/router.js");
+  // A bot session mounts the router ONCE, built with that bot's actor — the same way the storage
+  // category is built. A call that carries no `_meta` at all (the ordinary case for a local MCP
+  // client) is still that bot's call, so the sharing server must be constructed with the bot as its
+  // base actor: without it the base actor is whatever the process env says, which for the gateway
+  // is nobody in particular.
+  const botRouter = await mount(createRouterServer({ actor: { kind: "bot", id: ROUTER_BOT } }));
+  const viaRouter = (tool, args) => botRouter.call("crow_sharing", { action: tool, params: args });
+
+  await expectOwnerOnly(viaRouter, "bot-actor router (no _meta)", "crow_share", shareArgs("bot-router-token"), "This will share");
+  await expectOwnerOnly(viaRouter, "bot-actor router (no _meta)", "crow_list_contacts", {});
+  await expectOwnerOnly(viaRouter, "bot-actor router (no _meta)", "crow_send_message", sendArgs());
+
+  // The category is mounted, not merely refused: the one harmless tool still answers a bot. This
+  // call is also what builds the router's in-process sharing server, so the base actor it holds can
+  // be read back — the same seam the storage category is checked through.
+  const harmless = await viaRouter("crow_list_crosspost_transforms", {});
+  assert.equal(harmless.isError, false, harmless.text);
+  assert.match(harmless.text, /writefreely→mastodon/, harmless.text);
+  const builtSharing = botRouter.server._inProcessServers.get("sharing");
+  assert.ok(builtSharing, "the router built its in-process sharing server");
+  assert.deepEqual(builtSharing.sharing.actor, { kind: "bot", id: ROUTER_BOT },
+    "the router hands the sharing server the actor it was built with, as it does for storage");
+
+  // And an owner-built router is unchanged: no `_meta` still reaches the server as the owner.
+  const ownerRouter = await mount(createRouterServer({ actor: actor.OWNER }));
+  const status = await ownerRouter.call("crow_sharing", { action: "crow_sharing_status", params: {} });
+  assert.equal(status.isError, false, status.text);
+  assert.match(status.text, /Crow Sharing Status/, status.text);
+  assert.equal(ownerRouter.server._inProcessServers.get("sharing").sharing.actor, actor.OWNER,
+    "the owner's router hands the sharing server the owner");
+});
+
+// --- (b3) a registration the guard could not guard is refused at registration --------------
+
+test("the sharing guard refuses to register a tool it could not see the call's actor through", async () => {
+  const { guardSharingServer } = await import("../servers/sharing/bot-owner-only.js");
+  const registered = [];
+  const fake = {
+    tool: (name, ...rest) => registered.push([name, ...rest]),
+    registerTool: () => { throw new Error("the guard must replace registerTool"); },
+  };
+  guardSharingServer(fake, { baseActor: actor.OWNER });
+
+  // The guard reads the call's `extra` from the handler's second argument. A registration with no
+  // schema (or annotations) object between the name and the handler calls that handler with
+  // `extra` alone, which the guard cannot tell from the call's `args` — so it refuses the
+  // registration instead of installing a handler it cannot guard.
+  assert.throws(() => fake.tool("crow_no_schema", "a description", () => ({ content: [] })),
+    /sharing guard[\s\S]*schema/, "tool(name, description, handler) is refused");
+  assert.throws(() => fake.tool("crow_bare", () => ({ content: [] })),
+    /sharing guard[\s\S]*schema/, "tool(name, handler) is refused");
+  assert.throws(() => fake.tool("crow_no_handler"),
+    /sharing guard/, "a registration with no callback at all is refused");
+  assert.deepEqual(registered, [], "nothing was registered behind the guard's back");
+
+  // registerTool() takes a config object and a callback: the tool() wrapper never sees it, so a
+  // tool registered that way would reach its handler unguarded. It throws instead.
+  assert.throws(() => fake.registerTool("crow_via_register_tool", { description: "x" }, () => ({ content: [] })),
+    /sharing guard[\s\S]*registerTool/, "registerTool() is refused on a guarded server");
+  assert.deepEqual(registered, [], "still nothing registered");
+
+  // A well-shaped registration is still installed, and is still the guard: a bot is refused and the
+  // handler does not run.
+  let ran = false;
+  const botGuard = guardSharingServer(
+    { tool: (name, ...rest) => registered.push([name, ...rest]), registerTool: () => {} },
+    { baseActor: { kind: "bot", id: ROUTER_BOT } },
+  );
+  assert.ok(botGuard, "guardSharingServer returns the server it guarded");
+  botGuard.tool("crow_share", "share something", {}, () => { ran = true; return { content: [] }; });
+  assert.equal(registered.length, 1, "a well-shaped registration goes through");
+  const botRefused = await registered.at(-1).at(-1)({}, undefined);
+  assert.equal(ran, false, "a bot never reaches the guarded handler");
+  assert.equal(botRefused.isError, true);
+  assert.equal(botRefused.content[0].text, OWNER_ONLY_TEXT);
 });
 
 // --- (c) the one harmless tool still works for a bot ---------------------------------------

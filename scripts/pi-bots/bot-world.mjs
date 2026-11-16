@@ -233,12 +233,16 @@ export function projectShowsCards(projectId, def) {
  * <workspace_dir>/bots/<botId> (sessions/ and pi's transcripts, outputs/, .pi/,
  * and in file mode a .mcp.json carrying signed actor headers), so a share of
  * the whole workspace would expose them and, at `read_write`, let the bot
- * rewrite another bot's sessions. A symlink ANYWHERE in that tree — `bots`
- * itself, a bot home, or a `sessions`/`.pi`/`outputs`/`.mcp.json` link deeper
- * inside a bot home — refuses the whole share's roots (fail closed, one
- * warning), because that bot's state then lives somewhere else in the tree this
- * share is granting entry by entry. So does a bots tree the holdout could not
- * inspect in full (too deep, too large, unreadable).
+ * rewrite another bot's sessions. A `bots` directory that is itself a symlink
+ * refuses the whole share's roots (fail closed, one warning), and so does any
+ * other link in that tree — a bot home, or a `sessions`/`.pi`/`outputs`/
+ * `.mcp.json` link deeper inside a bot home — that resolves INSIDE the
+ * workspace (that bot's state then lives at a path this share is granting entry
+ * by entry) or that cannot be resolved at all. A link resolving OUTSIDE the
+ * workspace's realpath is accepted instead: that is the carry-over
+ * world-root.mjs makes when a bot is homed at a project, and no entry this
+ * share grants can reach it. So does a bots tree the holdout could not inspect
+ * in full (too deep, too large, unreadable).
  *
  * ALLOWLIST, not a denylist: a share's workspace_dir is a candidate only when,
  * after realpathSync, it lies STRICTLY under realpathSync(projectsRoot) — the
@@ -261,14 +265,19 @@ export function projectShowsCards(projectId, def) {
  * (resolveBotAccess).
  *
  * @param {{workspace_dir?: string|null, level?: string, suspended?: boolean}[]|null} shares
- * @param {{crowHome?: string|null, projectsRoot?: string|null, log?: (m: string) => void}} [opts]
+ * @param {{crowHome?: string|null, projectsRoot?: string|null, log?: (m: string) => void,
+ *   botsTreeMaxEntries?: number}} [opts]
  *   `crowHome` is the active Crow instance home and `projectsRoot` this
  *   instance's projects area (`botsProjectsRoot()`), both for the refusal
  *   rules; `log` gets one line per share that granted nothing for a reason
- *   worth naming.
+ *   worth naming; `botsTreeMaxEntries` overrides the holdout walk's entry
+ *   bound (defaults to BOTS_TREE_MAX_ENTRIES — tests pass a small one instead
+ *   of building a six-figure tree).
  * @returns {{read: string[], write: string[]}}
  */
-export function shareWorkspaceRoots(shares, { crowHome = null, projectsRoot = null, log = () => {} } = {}) {
+export function shareWorkspaceRoots(shares, {
+  crowHome = null, projectsRoot = null, log = () => {}, botsTreeMaxEntries = BOTS_TREE_MAX_ENTRIES,
+} = {}) {
   const read = [];
   const write = [];
   const list = Array.isArray(shares) ? shares : [];
@@ -297,7 +306,7 @@ export function shareWorkspaceRoots(shares, { crowHome = null, projectsRoot = nu
       log("share workspace not granted (outside the projects area): " + dir);
       continue;
     }
-    for (const entryRoot of shareEntryRoots(dir, { realDir, projectsRoot: root, log })) {
+    for (const entryRoot of shareEntryRoots(dir, { realDir, projectsRoot: root, log, botsTreeMaxEntries })) {
       if (!read.includes(entryRoot)) read.push(entryRoot);
       if (s.level === "read_write" && !write.includes(entryRoot)) write.push(entryRoot);
     }
@@ -337,8 +346,15 @@ export const BOTS_TREE_MAX_DEPTH = 6;
  * across the WHOLE `<workspace>/bots` tree. A larger tree is refused, for the
  * same reason as a deeper one: a walk that stopped at the bound has not seen
  * every link in the tree.
+ *
+ * Sized for a real bot home rather than for a tidy one: pi keeps every session
+ * transcript under `<bot home>/sessions`, and every turn's files under
+ * `<bot home>/outputs/<session>/`, so both grow for as long as the bot lives —
+ * a long-running bot homed at a shared project passes a few thousand entries
+ * without anybody doing anything unusual. The bound is here to stop a walk that
+ * would never finish, not to cap the size of an honest tree.
  */
-export const BOTS_TREE_MAX_ENTRIES = 5000;
+export const BOTS_TREE_MAX_ENTRIES = 100000;
 
 /**
  * Why `dir` must never become a share root, or null: the filesystem root, the
@@ -383,19 +399,25 @@ function dangerousShareRoot(dir, crowHome, projectsRoot) {
  * entry, and `<workspace>/bots/<id>` may be one too, in which case that bot's
  * state lives at the link's target — possibly an ordinary top-level entry this
  * share would otherwise grant. The whole tree below `bots` is therefore walked
- * (never through a link) by botsHoldout(): ANY link anywhere in it — `bots`
- * itself, a bot home, or a `sessions`/`.pi`/`outputs`/`.mcp.json` link deeper
- * inside a bot home — refuses the WHOLE share's roots with one warning, as does
- * a tree the walk could not finish (deeper than BOTS_TREE_MAX_DEPTH, larger
- * than BOTS_TREE_MAX_ENTRIES, or unreadable): a tree the holdout has not seen
- * all of is not one it can vouch for.
+ * (never through a link) by botsHoldout(): a link anywhere in it refuses the
+ * WHOLE share's roots with one warning — `bots` itself, any link that resolves
+ * inside the workspace (the state is then reachable through an entry this share
+ * grants), any link nothing can resolve (fail closed), and so does a tree the
+ * walk could not finish (deeper than BOTS_TREE_MAX_DEPTH, larger than
+ * BOTS_TREE_MAX_ENTRIES, or unreadable): a tree the holdout has not seen all of
+ * is not one it can vouch for. A link that resolves OUTSIDE the workspace's
+ * realpath is accepted: it is the bot world's carry-over to its legacy root,
+ * and no granted entry can reach it.
  * More top-level entries than SHARE_ROOT_ENTRY_CAP grants nothing for the share.
  * @param {string} dir       the workspace_dir as the share row names it
- * @param {{realDir?: string|null, projectsRoot: string, log?: (m: string) => void}} opts
+ * @param {{realDir?: string|null, projectsRoot: string, log?: (m: string) => void,
+ *   botsTreeMaxEntries?: number}} opts
  *   `realDir` is dir's own realpath (already checked to be under projectsRoot)
  * @returns {string[]}
  */
-function shareEntryRoots(dir, { realDir = null, projectsRoot, log = () => {} } = {}) {
+function shareEntryRoots(dir, {
+  realDir = null, projectsRoot, log = () => {}, botsTreeMaxEntries = BOTS_TREE_MAX_ENTRIES,
+} = {}) {
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -412,7 +434,7 @@ function shareEntryRoots(dir, { realDir = null, projectsRoot, log = () => {} } =
   let botsReal = null;
   let botHomes = [];
   if (botsDir) {
-    const held = botsHoldout(botsDir);
+    const held = botsHoldout(botsDir, { realDir, maxEntries: botsTreeMaxEntries });
     if (!held.ok) {
       log("share workspace not granted (" + held.reason + "): " + dir);
       return [];
@@ -464,16 +486,24 @@ function isMissing(err) {
  * direct child (a bot home) — the paths a granted entry must never reach.
  *
  * `{ok: true, real, homes}` or `{ok: false, reason}`; a reason always refuses
- * the share's roots. Fail closed: a link anywhere below `bots` puts a bot
- * home's state at a path this share may otherwise grant as an ordinary entry,
- * and a tree the walk could not finish cannot be vouched for.
+ * the share's roots. Fail closed: a link that resolves INSIDE the workspace (or
+ * that nothing can resolve) puts a bot home's state at a path this share may
+ * otherwise grant as an ordinary entry, and a tree the walk could not finish
+ * cannot be vouched for. A link resolving outside the workspace's realpath
+ * (`realDir`) is the carry-over to the bot's legacy root and is accepted: no
+ * granted entry can reach it.
+ *
+ * @param {string} botsDir  `<workspace>/bots`
+ * @param {{realDir?: string|null, maxEntries?: number}} [opts]
+ *   `realDir` is the workspace's realpath (the tree a granted entry can reach),
+ *   `maxEntries` the walk's entry bound
  *
  * Errors refuse too, with two ENOENT exceptions: ENOENT on `<workspace>/bots`
  * means this project homes no bot (no holdout needed), and ENOENT on a child is
  * a race with a delete (that child holds nothing out). Every other error —
  * EACCES, ENOTDIR, ELOOP, EIO, … — must not read as "no bots".
  */
-function botsHoldout(botsDir) {
+function botsHoldout(botsDir, { realDir = null, maxEntries = BOTS_TREE_MAX_ENTRIES } = {}) {
   let st = null;
   try { st = lstatSync(botsDir); } catch (err) {
     if (isMissing(err)) return { ok: true, real: null, homes: [] };
@@ -481,7 +511,7 @@ function botsHoldout(botsDir) {
   }
   // `<workspace>/bots` itself a link: the tree the entries were listed from is not the bot homes' tree.
   if (st.isSymbolicLink()) return { ok: false, reason: "<workspace>/bots is a symlink" };
-  const walked = walkBotsTree(botsDir);
+  const walked = walkBotsTree(botsDir, { realDir, maxEntries });
   if (!walked.ok) return walked;
 
   let real = null;
@@ -501,13 +531,22 @@ function botsHoldout(botsDir) {
 /**
  * Walks everything below `<workspace>/bots`, breadth first, WITHOUT following a
  * symlink: a Dirent from readdirSync({withFileTypes}) is the lstat answer, so a
- * link is never descended into — it is reported instead. A child directory
- * deeper than BOTS_TREE_MAX_DEPTH, or an entry past BOTS_TREE_MAX_ENTRIES, ends
- * the walk with a refusal rather than a partial answer.
+ * link is never descended into. A link is reported instead: accepted when its
+ * own realpath resolves OUTSIDE the workspace (`realDir` — the carry-over
+ * world-root.mjs makes to a bot's legacy root, which no granted entry can
+ * reach), and a refusal when it resolves inside the workspace or when nothing
+ * can resolve it (fail closed). A child directory deeper than
+ * BOTS_TREE_MAX_DEPTH, or an entry past `maxEntries`, ends the walk with a
+ * refusal rather than a partial answer.
+ * @param {string} botsDir
+ * @param {{realDir?: string|null, maxEntries?: number}} [opts]
  * @returns {{ok: true, children: string[], entries: number}|{ok: false, reason: string}}
  *   `children` are the direct children of `bots` (the bot homes).
  */
-function walkBotsTree(botsDir) {
+function walkBotsTree(botsDir, { realDir = null, maxEntries = BOTS_TREE_MAX_ENTRIES } = {}) {
+  // With no realDir the walk cannot show a target lands outside the workspace, so every link counts
+  // as landing inside it (fail closed).
+  const landsInWorkspace = (p) => !realDir || p === realDir || p.startsWith(realDir + "/");
   let entries = 0;
   let children = null;
   let frontier = [{ dir: botsDir, depth: 0 }];
@@ -522,10 +561,21 @@ function walkBotsTree(botsDir) {
       if (at.depth === 0) children = kids.map((kid) => kid.name);
       for (const kid of kids) {
         entries += 1;
-        if (entries > BOTS_TREE_MAX_ENTRIES) {
-          return { ok: false, reason: "bots tree over " + BOTS_TREE_MAX_ENTRIES + " entries" };
+        if (entries > maxEntries) {
+          return { ok: false, reason: "bots tree over " + maxEntries + " entries" };
         }
-        if (kid.isSymbolicLink()) return { ok: false, reason: "a symlink in the bots tree" };
+        if (kid.isSymbolicLink()) {
+          // Never followed: only resolved, and only to decide whose side of the workspace line it
+          // lands on. An unresolvable link, or one that lands in the workspace, is a refusal.
+          let real = null;
+          try { real = normalizeReadPath(realpathSync(join(at.dir, kid.name))); } catch (err) {
+            return { ok: false, reason: "unresolvable symlink in the bots tree (" + errCode(err) + ")" };
+          }
+          if (landsInWorkspace(real)) {
+            return { ok: false, reason: "a symlink in the bots tree resolving inside the workspace" };
+          }
+          continue;
+        }
         if (!kid.isDirectory()) continue;
         const depth = at.depth + 1;
         if (depth > BOTS_TREE_MAX_DEPTH) {
