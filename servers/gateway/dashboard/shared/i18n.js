@@ -5759,6 +5759,13 @@ export const translations = {
   "mail.error.no_trash_folder": { en: "Crow couldn't find this account's Trash folder.", es: "Crow no pudo encontrar la carpeta Papelera de esta cuenta." },
   "mail.error.duplicate_address": { en: "That address is already set up in Crow.", es: "Esa dirección ya está configurada en Crow." },
   "mail.error.generic": { en: "Something went wrong. Try again.", es: "Algo salió mal. Inténtalo de nuevo." },
+  // The message actions' own words (Task 13): the four controls the opened message's bar carries and
+  // the first, disabled option of the move select. The plan approves no success line, so none exists.
+  "mail.markUnread": { en: "Mark unread", es: "Marcar como no leído" },
+  "mail.archive": { en: "Archive", es: "Archivar" },
+  "mail.delete": { en: "Delete", es: "Eliminar" },
+  "mail.move": { en: "Move", es: "Mover" },
+  "mail.moveTo": { en: "Move…", es: "Mover…" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

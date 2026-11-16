@@ -84,14 +84,23 @@ function summaryRow(over = {}) {
   };
 }
 
+/** The account's folders, as the panel hands them to the message view for its action bar. */
+const FOLDERS = [
+  { id: 3, accountId: ACC.id, name: "Inbox", path: "INBOX", specialUse: "\\Inbox" },
+  { id: 4, accountId: ACC.id, name: "Label", path: "Label" },
+  { id: 5, accountId: ACC.id, name: "Archive", path: "Archive", specialUse: "\\Archive" },
+  { id: 6, accountId: ACC.id, name: "Trash", path: "Trash", specialUse: "\\Trash" },
+];
+
 /** The message view as the panel serves it: two sections, the opened (and newest) one open. */
-function messagePage() {
-  const opened = messageRow();
+function messagePage(rowOver = {}) {
+  const opened = messageRow(rowOver);
   const earlier = messageRow({ id: 10, messageId: "<zero@mail.example.test>", subject: "Earlier", date: T0 - 60_000 });
   return renderMailPage({
     view: "message",
     accounts: [ACC],
     lang: "en",
+    folders: FOLDERS,
     message: opened,
     thread: [earlier, opened],
     account: ACC,
@@ -142,6 +151,10 @@ const jsonResponse = (status, body) => ({ ok: status < 400, status, json: () => 
 function boot(html, { fetchImpl = () => jsonResponse(200, { ok: true }), href = "/dashboard/mail", cookie = "crow_session=abc;  crow_csrf=tok%2042" } = {}) {
   const { window: dom, document } = parseHTML(`<!doctype html><html><head></head><body>${html}</body></html>`);
   Object.defineProperty(document, "cookie", { configurable: true, get: () => cookie });
+  // The reader marks a message read only while the page is visible, so the page's own reading of
+  // visibilityState is the test's to set.
+  let visibility = "visible";
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
 
   const frames = [];
   const createElement = document.createElement.bind(document);
@@ -266,6 +279,7 @@ function boot(html, { fetchImpl = () => jsonResponse(200, { ok: true }), href = 
   return {
     window, document, location, ctx, run, settle, $, $$, click, change, submit, send, pull, touch, toggle, turboBeforeVisit,
     fire, event, frames, calls, visits, timers, windowListeners,
+    setVisibility: (value) => { visibility = String(value); },
   };
 }
 
@@ -633,6 +647,119 @@ test("the server search posts the words and the scope, then reloads with flash=r
   assert.equal(r.calls[0].url, "/dashboard/mail/api/search/remote");
   assert.deepEqual(r.calls[0].body, { q: "garden", account: "all" });
   assert.match(decodeURIComponent(r.visits[0]), /[?&]flash=remote:4(&|$)/);
+});
+
+/* ------------------------------------------------------------ the actions */
+
+test("Archive posts the action with the row id and the csrf header, then navigates to the back url", async () => {
+  const r = boot(messagePage(), { fetchImpl: () => jsonResponse(200, { ok: true, movedTo: 5 }) });
+  r.click(r.$('button[data-ml-action="archive"]'));
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.equal(r.calls[0].method, "POST");
+  assert.equal(r.calls[0].url, "/dashboard/mail/api/messages/11/actions");
+  assert.deepEqual(r.calls[0].body, { action: "archive" });
+  assert.equal(r.calls[0].headers["x-crow-csrf"], "tok 42", "the header comes from the cookie");
+  assert.deepEqual(r.visits, ["/dashboard/mail?acct=all"], "the back link the page carries");
+});
+
+test("a 409 shows its sentence, keeps the page and frees the controls", async () => {
+  const strings = errorStrings();
+  const r = boot(messagePage(), {
+    fetchImpl: () => jsonResponse(409, { error: "changed_on_server", message: "RAW SERVER TEXT" }),
+  });
+  const button = r.$('button[data-ml-action="archive"]');
+  r.click(button);
+  await r.settle();
+  const line = r.$("[data-ml-actions] [data-ml-status-line]");
+  assert.ok(line, "the bar carries the sentence");
+  assert.equal(line.getAttribute("role"), "status");
+  assert.equal(line.textContent, strings.changed_on_server);
+  assert.equal(line.textContent.includes("RAW"), false, "the response's own message is never shown");
+  assert.deepEqual(r.visits, [], "a changed message does not navigate");
+  assert.equal(button.hasAttribute("disabled"), false, "the control is usable again");
+  assert.equal(button.hasAttribute("hidden"), false, "and it is still there");
+});
+
+test("mark read posts read once, 1.5 s after load, only for an unread shown message", async () => {
+  const unread = boot(messagePage());
+  const armed = unread.timers.filter((timer) => timer.ms === 1500 && !timer.cleared);
+  assert.equal(armed.length, 1, "one timer for the opened unread message");
+  assert.equal(unread.fire(1500), true, "it fires when the 1.5 s have passed");
+  await unread.settle();
+  assert.equal(unread.calls.length, 1);
+  assert.equal(unread.calls[0].method, "POST");
+  assert.equal(unread.calls[0].url, "/dashboard/mail/api/messages/11/actions");
+  assert.deepEqual(unread.calls[0].body, { action: "read" });
+  assert.equal(unread.calls[0].headers["x-crow-csrf"], "tok 42");
+  assert.equal(unread.fire(1500), false, "the timer is one-shot");
+  await unread.settle();
+  assert.equal(unread.calls.length, 1, "and never posts twice");
+
+  const read = boot(messagePage({ isRead: true }));
+  assert.equal(read.timers.filter((timer) => timer.ms === 1500 && !timer.cleared).length, 0,
+    "a message already read arms no timer");
+  assert.equal(read.fire(1500), false);
+  await read.settle();
+  assert.equal(read.calls.length, 0);
+
+  const hidden = boot(messagePage());
+  hidden.setVisibility("hidden");
+  hidden.fire(1500);
+  await hidden.settle();
+  assert.equal(hidden.calls.length, 0, "a page that is not visible writes nothing");
+
+  const left = boot(messagePage());
+  left.turboBeforeVisit();
+  assert.equal(left.fire(1500), false, "leaving the page clears the timer");
+  await left.settle();
+  assert.equal(left.calls.length, 0);
+});
+
+test("Mark unread posts unread and hides itself", async () => {
+  const r = boot(messagePage({ isRead: true }));
+  const button = r.$('button[data-ml-action="unread"]');
+  assert.ok(button, "a read message offers Mark unread");
+  assert.equal(button.textContent, "Mark unread");
+  r.click(button);
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.equal(r.calls[0].method, "POST");
+  assert.equal(r.calls[0].url, "/dashboard/mail/api/messages/11/actions");
+  assert.deepEqual(r.calls[0].body, { action: "unread" });
+  assert.equal(r.calls[0].headers["x-crow-csrf"], "tok 42");
+  assert.equal(button.hasAttribute("hidden"), true, "the control goes away");
+  assert.deepEqual(r.visits, [], "and the page stays");
+});
+
+test("Move sends the folder chosen in the select", async () => {
+  const r = boot(messagePage(), { fetchImpl: () => jsonResponse(200, { ok: true, movedTo: 4 }) });
+  const select = r.$("[data-ml-move-select]");
+  assert.ok(select, "the move select");
+  select.value = "4";
+  r.click(r.$('button[data-ml-action="move"]'));
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.equal(r.calls[0].url, "/dashboard/mail/api/messages/11/actions");
+  assert.deepEqual(r.calls[0].body, { action: "move", folderId: 4 });
+  assert.deepEqual(r.visits, ["/dashboard/mail?acct=all"]);
+});
+
+test("a double click on an action posts once and disables every control while it is in flight", async () => {
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const r = boot(messagePage(), { fetchImpl: () => pending });
+  const archive = r.$('button[data-ml-action="archive"]');
+  r.click(archive);
+  r.click(archive);
+  assert.equal(r.calls.length, 1, "the second click is not a second action");
+  for (const control of r.$$("[data-ml-actions] [data-ml-action]")) {
+    assert.equal(control.hasAttribute("disabled"), true, "every control waits for the answer");
+  }
+  release(jsonResponse(200, { ok: true, movedTo: 5 }));
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.deepEqual(r.visits, ["/dashboard/mail?acct=all"]);
 });
 
 /* ------------------------------------------------------------------- the settings */

@@ -161,10 +161,9 @@ against the new adapter with the provider's own fake, and skip nothing.
   once and stops retrying until the owner asks for a sync.
 - **Connections per account.** Three long-lived connections (one read connection — the sync
   worker's — and up to two IDLE connections, one per watched folder: Inbox and Sent) plus a
-  short-lived action connection — a remote search, a load-older fetch or an attachment fetch
-  today — which `withAdapter` keeps open for up to 30 seconds so a burst costs one login; the
-  message actions of the next part (mark read/unread, archive, delete, move) will use that same
-  connection. `watch` refuses a third folder rather than opening another long-lived connection.
+  short-lived action connection — a remote search, a load-older fetch, an attachment fetch or a
+  message action — which `withAdapter` keeps open for up to 30 seconds so a burst costs one login.
+  `watch` refuses a third folder rather than opening another long-lived connection.
 - **Deleting an account.** `stopAccount(accountId)` retires the worker, its timers and its connections,
   but it does not by itself cancel work already running through `withAdapter` (a backfill page, a
   remote search): that work stops on the `cancelled` flag it is handed, and the flag reads the
@@ -219,10 +218,10 @@ the flag is unset and 403 `owner_only` for a session that is not this machine's 
 Funnel-flagged request is refused before either reaches a mail row.
 
 The panel's own client script (`panels/mail/client.js`) does only what a plain link cannot: build the
-message frame, resize it, the image buttons, refresh, older mail, the server search, and the settings
-verbs. Every sentence it can show comes from a `data-ml-*` attribute the server already translated; the
-one hidden error element carries a fixed sentence per API code, so a response's own English `message`
-is never put on screen.
+message frame, resize it, the image buttons, the message actions, refresh, older mail, the server
+search, and the settings verbs. Every sentence it can show comes from a `data-ml-*` attribute the
+server already translated; the one hidden error element carries a fixed sentence per API code, so a
+response's own English `message` is never put on screen.
 
 ### Decisions behind the shape
 
@@ -243,11 +242,11 @@ is never put on screen.
    "Draft a reply with…", the bot picker and the "the bot sees only this thread" line; plan 4: the
    suggestion), and the inbox carries `<div data-mail-digest-slot>` on the All view only (plan 4). The
    reader draws nothing in either.
-5. **Message actions (read/unread, archive, delete, move) are a separate part of the plan.** The
-   reader's first parts ship without them (the unread dot then never clears, which is why the actions
-   part follows immediately). That actions-part PR (Part C) guarantees every action refuses a UID
-   whose folder UIDVALIDITY differs from the stored one; the reader shipped here does not act on a
-   message at all, so the guarantee is not present yet.
+5. **Message actions (read/unread, archive, delete, move) are Part C, the plan's last part.** They
+   are the opened message's own header controls over
+   `POST /dashboard/mail/api/messages/:id/actions`, and every one of them refuses a UID whose folder
+   UIDVALIDITY differs from the stored one (see "Message actions" below). Opening an unread message
+   marks it read from the client, never from the GET (see "Mark read on open").
 6. **Attachments: download is in, two gaps are named.** `mail/reader/attachments.js`
    (`extractAttachment`, `extractAttachmentFromParsed`) serves one part of the raw message by the same
    index `GET /messages/:id` lists, and plan 3 imports it to forward an attachment. Not covered:
@@ -349,14 +348,75 @@ zero. It never reads the frame's document.
 &lt;sender&gt;" first POSTs `/image-allow`, then rebuilds the frame the same way; nothing about images is
 stored per view.
 
+### Message actions
+
+The message header carries the opened message's actions, and every control names that row
+(`data-row`) — the row the link's hint selected, so an action taken from a label folder acts on that
+folder's copy, never on the inbox one:
+
+| Control | Shown | Sends |
+| --- | --- | --- |
+| Mark unread | the message is read | `{action: "unread"}` |
+| Archive | the account has an archive target and the message is not already there | `{action: "archive"}` |
+| Delete | the account has a Trash folder and the message is not in it | `{action: "delete"}` |
+| Move… + Move | always; the select lists the account's other real folders | `{action: "move", folderId}` |
+| (no control) | an unread message, 1.5 s after it is shown | `{action: "read"}` |
+
+All five go to `POST /dashboard/mail/api/messages/:id/actions`, whose `:id` is the opened row's id.
+One action runs at a time: every control in the bar waits for the answer, so a double tap is one
+intention. Mark unread hides itself once the server agrees; Archive, Delete and Move send the reader
+back to the list the page's own back link names (`Turbo.visit`, or `location.assign` without Turbo).
+A failure shows the fixed sentence for its API code and stays put; the plan approved no success line,
+so no status line is shown.
+
+**Archive's rule is Gmail-shaped.** It goes to the account's `archive`-role folder when there is one,
+else to its `\All` folder (Gmail's All Mail, and its lookalikes), else the route answers 409
+`no_archive_folder` and the page shows "Crow couldn't find this account's Archive folder." A message
+sitting in an archive-role folder or in an `\All` folder gets no Archive control — there is nothing
+to do — and `\All` is never offered as a move destination, because it is a virtual view rather than a
+folder a move can land in.
+
+**Delete is a move to Trash**, never an expunge, and only to the `trash`-role folder: no Trash folder
+means 409 `no_trash_folder`. Move takes a `folderId` of the same account that is not the folder the
+message is already in; anything else is 400 `bad_input`.
+
+**The UIDVALIDITY guard.** The route reads the source folder's *stored* `uid_validity` and passes it as
+`expectedUidValidity`; the adapter locks the mailbox, compares, and refuses with `CHANGED` before any
+`STORE` or `MOVE` when the mailbox is not the one the row was stored from. A reset can leave a
+different message at the same UID, so no action ever acts on a UID it cannot vouch for. `CHANGED`, a
+folder whose stored UIDVALIDITY is missing, and a UID the server no longer has (`updated`/`moved` of
+0) all answer 409 `changed_on_server`, change nothing locally, and ask the supervisor for a full sync.
+
+**Server first, local store second.** Only after the server agreed does the row change: read/unread
+flags every copy (one `setFlags` per folder, each with that folder's own UIDVALIDITY) and then
+`setReadForCopies`; archive, delete and move ask the adapter for one `move`, then `deleteMessageRow`,
+then note the local change (so a sync already running reruns in full instead of writing its older
+listing back) and request a sync of the destination folder only — skipped when the destination is a
+virtual view the engine never syncs. A failed adapter call changes nothing locally.
+
+**The capability rule.** A server that advertises neither `MOVE` nor `UIDPLUS` cannot be asked to move
+a message safely (there is no `UID MOVE`, and no `UIDPLUS` to expunge the source by UID), so the
+adapter refuses `move` with `PROTOCOL`/`move_unsupported` before it sends a `COPY`, a `STORE` or an
+`EXPUNGE`; the reader shows the protocol sentence. Read/unread needs only `STORE`, so it keeps
+working on such a server.
+
+### Mark read on open
+
+The page's GET writes nothing (Turbo prefetches it), so opening an unread message marks it read from
+the client: 1.5 s after the page is shown, and only while `document.visibilityState` is `visible`, the
+script POSTs `{action: "read"}` once for the opened row. The timer lives in `window.__mlTimer` and is
+cleared at the start of every run and on `turbo:before-visit`, so a page that is left first marks
+nothing read and a prefetch never marks anything at all. A failed mark-read shows its sentence in the
+message's action bar.
+
 ### Connections the reader borrows
 
 The reader's remote-search, load-older and attachment paths never open an adapter of their own and
 never reuse the sync worker's. A search, a load-older fetch or a download goes through
 `supervisor.withAdapter(accountId, fn)` for the one call at a time that account allows, refused
 outright for a `claimed_elsewhere` or `auth_failed` account. On a success the adapter stays open
-for up to 30 seconds; the message actions of the next part (open a message, mark it read, archive it)
-will go through the same call, so a burst of them costs one login rather than three, and a failure
+for up to 30 seconds; the message actions (read/unread, archive, delete, move) go through the same
+call, so opening a message and archiving it costs one login rather than three, and a failure
 closes it at once. That is a fourth connection on top of this module's budget of three (the
 sync worker's read connection and up to two IDLE connections, for Inbox and Sent), and every imapflow
 call inside it takes the mailbox lock. The download route re-fetches the message from the server by UID
@@ -403,9 +463,11 @@ Removing the account still works: `deleteSecrets` goes through `deleteServiceSec
   set of ids, so the panel reads across every account, steps over rows of accounts this instance may
   not read, and then re-encodes the last row it kept as plan 1's `date:id` cursor. Using the fetched
   page's own cursor would sit past usable rows and skip them.
-- **No read POST ships yet.** The client keeps the mark-read timer slot (`window.__mlTimer`, cleared on
-  every run and on `turbo:before-visit`) so the lifecycle is in place, but nothing arms it: opening a
-  message writes nothing, and the unread dot stays until message actions land (Part C).
+- **A move needs an adapter that can move.** The message actions ride the short-lived action
+  connection, so an account that is `auth_failed` or `claimed_elsewhere` refuses them with the same
+  fixed sentence a download gets, and a server without `MOVE`/`UIDPLUS` refuses the move itself. That
+  refusal covers all three moves (archive, delete, move); read/unread needs only `STORE` and keeps
+  working on such a server.
 
 ## Known gaps
 
