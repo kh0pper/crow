@@ -5366,6 +5366,7 @@ export const translations = {
   "widgets.today.nextUp": { en: "Next up", es: "Lo próximo" },
   "widgets.today.allDay": { en: "All day", es: "Todo el día" },
   "widgets.today.move": { en: "Today's move", es: "El movimiento de hoy" },
+  "widgets.today.nowLine": { en: "Now: {title} · {minutes} min · {done} of {total} done", es: "Now: {title} · {minutes} min · {done} of {total} done" },
   "widgets.today.stepsLabel": { en: "Steps today", es: "Pasos de hoy" },
   "widgets.today.steps": { en: "{n} of {goal} steps", es: "{n} de {goal} pasos" },
   "widgets.today.moodLabel": { en: "Mood", es: "Ánimo" },

@@ -30,6 +30,7 @@ import { translations, SUPPORTED_LANGS, fill } from "../servers/gateway/dashboar
 const IDENTICAL_OK = new Set([
   "nav.blog",
   "widgets.needsMe.no", // "No" is the same word in Spanish
+  "widgets.today.nowLine", // English until the Spanish pass (P22)
   "perch.stagedCc", // "Cc" is the same label in Spanish mail clients
   "services.field.HA_TOKEN", // "Token" is the same word in Spanish
   "services.field.GITHUB_PERSONAL_ACCESS_TOKEN", // "Token" is the same word in Spanish

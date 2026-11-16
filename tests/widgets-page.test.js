@@ -406,3 +406,60 @@ test("the Today card starts the move when it carries one, and plainly opens Ramb
   assert.match(without, /href="\/dashboard\/ramble"/);
   assert.doesNotMatch(without, /moves=/);
 });
+test("the Today card tells where the move's day stands, and links to Today, when Ramble sends its slots", () => {
+  const html = todayHtml({ move: { title: "Sunrise flow", minutes: 10, slotsDone: 1, slotsTotal: 3 } }, "en", NOW);
+  assert.match(html, /Now: Sunrise flow · 10 min · 1 of 3 done/);
+  assert.match(html, /href="\/dashboard\/ramble\?view=today"/, "the tap opens Today");
+  assert.doesNotMatch(html, /moves=start/);
+  assert.match(html, /<span class="fy-line-tag">Today's move<\/span>/, "the line's tag is still the move's own");
+
+  // The title is escaped there too, like every other value on the card.
+  const escaped = todayHtml({ move: { title: 'Sunrise <b>"flow"</b>', minutes: 20, slotsDone: 0, slotsTotal: 2 } }, "en", NOW);
+  assert.match(escaped, /Now: Sunrise &lt;b&gt;&quot;flow&quot;&lt;\/b&gt; · 20 min · 0 of 2 done/);
+  assert.ok(!escaped.includes("<b>"));
+
+  // A card with no length keeps the line it always had, and the tap that starts the move.
+  const noMinutes = todayHtml({ move: { title: "Sunrise flow", minutes: 0, slotsDone: 1, slotsTotal: 3 } }, "en", NOW);
+  assert.doesNotMatch(noMinutes, /Now:/);
+  assert.match(noMinutes, /Sunrise flow/);
+  assert.match(noMinutes, /href="\/dashboard\/ramble\?moves=start"/);
+});
+
+test("an older Ramble's move line and tap are untouched: title · minutes, and moves=start", () => {
+  const html = todayHtml({ move: { title: "A ten minute walk", minutes: 10 } }, "en", NOW);
+  assert.match(html, /A ten minute walk · 10 min/);
+  assert.match(html, /href="\/dashboard\/ramble\?moves=start"/);
+  assert.doesNotMatch(html, /view=today/);
+  assert.doesNotMatch(html, /Now:/);
+});
+
+test("loadToday: the move carries the day's slots when Ramble sends them, and neither key when it does not", async () => {
+  const { _setMovesModuleForTest } = await import("../servers/gateway/for-you/moves.js");
+  const ctx = { crowHome: HOME, now: NOW, tz: "UTC", lang: "en" };
+  const challenge = { day: "2026-11-03", title: "Sunrise flow", minutes: 10, why: "", done: false, entryId: "e1" };
+  try {
+    _setTodaySeamsForTest({ ramble: async () => null });
+    _setMovesModuleForTest({
+      forYouMoves: async () => ({
+        challenge,
+        slots: [{ slot: "morning", done: true }, { slot: "midday", done: false }, { slot: "evening", done: false }],
+      }),
+    });
+    const withSlots = await loadToday(null, ctx);
+    assert.deepEqual(withSlots.move, { title: "Sunrise flow", minutes: 10, done: false, slotsDone: 1, slotsTotal: 3 });
+
+    // A bundle older than the day's slots sends none: neither key is invented.
+    _setMovesModuleForTest({ forYouMoves: async () => ({ challenge }) });
+    const without = await loadToday(null, ctx);
+    assert.deepEqual(without.move, { title: "Sunrise flow", minutes: 10, done: false });
+    assert.equal("slotsDone" in without.move, false);
+    assert.equal("slotsTotal" in without.move, false);
+
+    // An empty slot list is no day's slots either.
+    _setMovesModuleForTest({ forYouMoves: async () => ({ challenge, slots: [] }) });
+    assert.deepEqual((await loadToday(null, ctx)).move, { title: "Sunrise flow", minutes: 10, done: false });
+  } finally {
+    _setMovesModuleForTest(null);
+    _setTodaySeamsForTest({});
+  }
+});

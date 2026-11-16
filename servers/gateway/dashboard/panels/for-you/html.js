@@ -273,9 +273,24 @@ export function todayHtml(data, lang = "en", now = Date.now()) {
     lines.push(line("calendar", t("widgets.today.nextUp", lang), cal.when ? `${cal.summary} · ${cal.when}` : String(cal.summary)));
   }
   const move = data.move;
+  // A bundle new enough to send the day's slots says where the day stands ("Now: <title> · 10 min ·
+  // 1 of 3 done") and the card's tap opens Today; an older one sends none, and the line and the tap
+  // are the ones they have always been.
+  let moveNow = false;
   if (move && move.title) {
-    const minutes = Number(move.minutes) > 0 ? minutesText(move.minutes, lang) : "";
-    lines.push(line("move", t("widgets.today.move", lang), minutes ? `${move.title} · ${minutes}` : String(move.title)));
+    const minutes = Number(move.minutes) || 0;
+    const total = Number(move.slotsTotal) || 0;
+    if (total > 0 && minutes > 0) {
+      moveNow = true;
+      const done = Math.max(0, Math.min(total, Number(move.slotsDone) || 0));
+      lines.push(line("move", t("widgets.today.move", lang), fill(t("widgets.today.nowLine", lang), {
+        title: move.title, minutes, done, total,
+      })));
+    } else {
+      // The move's own minutes (not minutesText's seconds); a card with no length is its title alone.
+      const length = minutes > 0 ? fill(t("forYou.minutes", lang), { n: minutes }) : "";
+      lines.push(line("move", t("widgets.today.move", lang), length ? `${move.title} · ${length}` : String(move.title)));
+    }
   }
   const ramble = data.ramble;
   if (ramble) {
@@ -288,8 +303,11 @@ export function todayHtml(data, lang = "en", now = Date.now()) {
     if (mood) lines.push(line("mood", t("widgets.today.moodLabel", lang), t(mood, lang)));
   }
   if (!lines.length) return "";
-  // With a move on the card, the tap starts it (Ramble reads ?moves=start); otherwise it just opens Ramble.
-  const href = move && move.title ? "/dashboard/ramble?moves=start" : "/dashboard/ramble";
+  // With a move that carries its day's slots, the tap opens Today; with an older move the tap starts
+  // it (Ramble reads ?moves=start); otherwise it just opens Ramble.
+  const href = moveNow
+    ? "/dashboard/ramble?view=today"
+    : move && move.title ? "/dashboard/ramble?moves=start" : "/dashboard/ramble";
   return `<a class="fy-card fy-today" href="${href}" data-fy-today-card>
       <span class="fy-kicker">${e(t("widgets.today.title", lang))}</span>
       ${lines.join("\n      ")}
