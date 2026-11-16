@@ -48,7 +48,9 @@ export function escapePhotoCaption(caption) {
   return String(caption ?? "")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(CAPTION_ESCAPE, "\\$1");
+    // `$&` is the whole match — CAPTION_ESCAPE has no capture group, so `$1`
+    // would put a literal "$1" in place of every metacharacter.
+    .replace(CAPTION_ESCAPE, "\\$&");
 }
 
 /**

@@ -955,7 +955,11 @@ export default function metaGlassesRouter(dashboardAuth) {
   router.get("/api/meta-glasses/photo/:name", async (req, res) => {
     const name = req.params.name.replace(/[^\w.\-]/g, "");
     const p = join(_photoDir, name);
-    if (!existsSync(p)) return res.status(404).json({ ok: false, error: "not found" });
+    // Stripping the name is not enough: `.` survives the class, and
+    // join(_photoDir, "..") is the directory ABOVE the photo folder. The resolved
+    // path must stay inside it — the same rule photoPathOk applies to a stored
+    // disk_path (and the KB's media route to its own file name).
+    if (!photoPathOk(p) || !existsSync(p)) return res.status(404).json({ ok: false, error: "not found" });
     res.sendFile(p);
   });
 

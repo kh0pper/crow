@@ -138,6 +138,41 @@ test("photo upload: thirty a minute per device, then 429", async () => {
   assert.equal((await upload("a", "glasses-a", "")).status, 200, "another device is not affected");
 });
 
+/** GET over a RAW request: fetch() collapses `%2e%2e` before the request leaves,
+ *  which is exactly the segment under test. → { status, body, type }. */
+const rawGet = (path, headers = SESSION) => new Promise((res, rej) => {
+  const req = http.request(
+    { host: "127.0.0.1", port: srv.address().port, path, method: "GET", headers: { ...TAILNET, ...headers } },
+    (r) => {
+      const chunks = [];
+      r.on("data", (c) => chunks.push(c));
+      r.on("end", () => res({ status: r.statusCode, body: Buffer.concat(chunks).toString("utf8"), type: r.headers["content-type"] || "" }));
+    }
+  );
+  req.on("error", rej);
+  req.end();
+});
+
+test("photo download: a name that resolves out of the photo folder is a 404, and a real photo is still served", async () => {
+  // One level up, where join(photoDir, "..") lands. Stripping `[^\w.\-]` keeps `..`;
+  // the resolved path must stay inside the folder (the rule photoPathOk applies to disk_path).
+  writeFileSync(join(HOME, "data", "outside-photo.txt"), "precious");
+  for (const path of [
+    "/api/meta-glasses/photo/%2e%2e",              // the data dir: a directory, and not ours to serve
+    "/api/meta-glasses/photo/%2e",                 // the photo dir itself
+    "/api/meta-glasses/photo/%2e%2e%2foutside-photo.txt",
+    "/api/meta-glasses/photo/..%2Foutside-photo.txt",
+  ]) {
+    const r = await rawGet(path);
+    assert.equal(r.status, 404, `${path}: ${r.status} ${r.body}`);
+    assert.doesNotMatch(r.body, /precious/, `${path} served a file from outside the photo folder`);
+  }
+  const made = await (await upload("a", "glasses-a", "")).json();
+  const ok = await rawGet(made.url);
+  assert.equal(ok.status, 200, `${made.url}: ${ok.body}`);
+  assert.equal(ok.body, "JPEGDATA", "the photo the upload route made is served byte for byte");
+});
+
 test("session upgrade: Funnel and non-tailnet callers are refused; the token is read from the header only; a display token is not accepted", async () => {
   const hdr = { authorization: `Bearer ${tokens.a}` };
   assert.equal((await openSession("glasses-a", { headers: { ...hdr, "tailscale-funnel-request": "?1" } })).status, 403);

@@ -541,14 +541,15 @@ function isOwnerKbMediaPath(path) {
  * True when `path` is a meta-glasses note photo on disk and nothing else —
  * `/api/meta-glasses/photo/` plus one name matching OWNER_PHOTO_NAME, with no
  * `..` anywhere in it (a dot segment the read-only route would resolve out of
- * the photo directory).
+ * the photo directory) and no leading `.` (`.` is the directory itself, and a
+ * dotfile is nothing the upload route ever makes — the route refuses both).
  * @param {string} path
  * @returns {boolean}
  */
 function isOwnerPhotoPath(path) {
   if (typeof path !== "string" || !path.startsWith(OWNER_PHOTO_PREFIX)) return false;
   const name = path.slice(OWNER_PHOTO_PREFIX.length);
-  if (name.includes("..")) return false;
+  if (name.includes("..") || name.startsWith(".")) return false;
   return OWNER_PHOTO_NAME.test(name);
 }
 

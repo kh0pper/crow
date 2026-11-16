@@ -339,6 +339,10 @@ const PHOTO_REFUSED = [
   "/api/meta-glasses/photo/a.jpg#x",
   "/api/meta-glasses/photo/%2e%2e/x",
   "/api/meta-glasses/photo/a%2fb",
+  "/api/meta-glasses/photo/.",
+  "/api/meta-glasses/photo/.env",
+  "/api/meta-glasses/photo/.hidden.jpg",
+  "https://host.example/api/meta-glasses/photo/.env",
   "https://host.example/api/meta-glasses/photo/a.jpg?x=1",
   "https://host.example/api/meta-glasses/photo/a.jpg#x",
 ];
@@ -396,6 +400,49 @@ test("a missing photo's ref outside image syntax disappears, and a caption canno
   assert.doesNotMatch(html, /<img|<a[\s>]/i, html);
   assert.match(text(html), /\[x\]\(\/dashboard\/logout\) \*boom\*/, html);
   assert.equal(replacePhotoRefs("![](photo://9)", resolved), "", "no caption, no image, nothing");
+});
+
+// The caption is escaped as markdown TEXT: one backslash before every
+// metacharacter, and nothing else. (CAPTION_ESCAPE has no capture group, so a
+// `$1` replacement would write a literal "$1" in place of each one —
+// "A red-brick building." came out as "A red$1brick building$1".)
+
+test("a missing photo's caption is escaped character by character, not with a $1 artefact", () => {
+  const missing = new Map([[11, null]]);
+  const sentence = "A red-brick building, seen from the street.";
+  assert.equal(
+    replacePhotoRefs(`![${sentence}](photo://11)`, missing),
+    "A red\\-brick building, seen from the street\\.",
+    "one backslash per metacharacter and the text otherwise untouched"
+  );
+  const html = renderMarkdown(replacePhotoRefs(`![${sentence}](photo://11)`, missing));
+  assert.doesNotMatch(html, /\$/, `no $1 in the rendered output: ${html}`);
+  assert.equal(text(html).trim(), sentence, `the sentence exactly as written: ${html}`);
+});
+
+test("a missing photo's caption cannot become markup, whatever it contains", () => {
+  const missing = new Map([[12, null]]);
+  const captions = [
+    "*bold*", // emphasis
+    "_under_", // emphasis
+    "`code`", // code span
+    "<b>tag</b>", // raw HTML
+    "# heading", // a heading, since the caption starts the line
+    "- list", // a list item
+    "1. list",
+    "| cell |", // a table cell
+    "~~gone~~", // strikethrough
+    "a & b", // an entity start
+  ];
+  for (const caption of captions) {
+    const out = replacePhotoRefs(`![${caption}](photo://12)`, missing);
+    assert.ok(!out.includes("$"), caption + ": " + out);
+    const html = renderMarkdown(out);
+    assert.doesNotMatch(html, /<(em|strong|code|h[1-6]|ul|ol|li|del|table|blockquote|a|img|b|i)[\s>]/i, `${caption}: ${html}`);
+    const shown = text(html)
+      .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+    assert.equal(shown.trim(), caption, `the caption as literal text, got ${html}`);
+  }
 });
 
 // ---- the bot path is untouched -------------------------------------------
