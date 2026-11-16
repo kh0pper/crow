@@ -1629,6 +1629,56 @@ export function loadProjectMembers(projectId) {
   c.close();
   return rows;
 }
+// Phase 1 bot↔project shares: the live (never revoked) shares this bot holds,
+// with each project's name and workspace_dir and the CURRENT suspension state —
+// the better-sqlite3 mirror of servers/shared/project-bot-shares.js, which
+// resolves the same tables through libsql (resolveBotAccess's live-share join +
+// outside-member counts, and botHoldsLiveShare's "any live row" rule). The
+// bridge opens its own client, so the SQL is repeated here rather than awaited
+// through the async store; the two must agree.
+//   - a project that is archived (`status='archived'`) or tombstoned
+//     (`archived_at` set) is not listed, so it contributes no access;
+//   - a bot whose pi_bot_defs row is gone holds nothing (the join drops it);
+//   - `suspended` = an active `project_members` row with a contact on EITHER
+//     side (the shared project or the bot's own), mirroring the store's rule.
+// Read on every world build: file-system reach follows a share at the NEXT
+// SPAWN, while the MCP tools are rechecked per call.
+// Never throws: an older DB without the table, or any read error, is "no
+// shares" (a bot must still be spawnable).
+export function loadBotShares(botId) {
+  if (botId == null || String(botId) === "") return [];
+  let c = null;
+  try {
+    c = db(CROW_DB);
+    const rows = c.prepare(`
+      SELECT s.project_id, s.level, p.name, p.workspace_dir,
+             (SELECT COUNT(*) FROM project_members m
+               WHERE m.project_id = s.project_id AND m.contact_id IS NOT NULL AND m.revoked_at IS NULL) AS project_outside,
+             (SELECT COUNT(*) FROM project_members m
+               WHERE m.project_id = d.project_id AND m.contact_id IS NOT NULL AND m.revoked_at IS NULL) AS home_outside
+        FROM project_bot_shares s
+        JOIN project_spaces p ON p.id = s.project_id
+        JOIN pi_bot_defs d ON d.bot_id = s.bot_id
+       WHERE s.bot_id = ? AND s.revoked_at IS NULL
+         AND p.archived_at IS NULL AND p.status <> 'archived'
+       ORDER BY s.project_id ASC
+    `).all(String(botId));
+    return rows.map((r) => {
+      const suspended = Number(r.project_outside) > 0 || Number(r.home_outside) > 0;
+      return {
+        project_id: Number(r.project_id),
+        level: String(r.level),
+        workspace_dir: r.workspace_dir == null ? null : String(r.workspace_dir),
+        name: r.name == null ? null : String(r.name),
+        suspended,
+      };
+    });
+  } catch {
+    return [];
+  } finally {
+    try { if (c) c.close(); } catch { /* already closed */ }
+  }
+}
 // M3b: appendAudit (mirror of the libsql helper in servers/shared/project-acl.js,
 // but using the better-sqlite3 client the bridge already opens). Best-effort —
 // failures must never break the primary action (the bot turn).

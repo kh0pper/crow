@@ -57,6 +57,7 @@ import { applyServiceBlocks, withServiceBlocks, offerableConnections } from "./s
 import { applySatelliteBlocks, withSatelliteBlocks } from "./satellite-blocks.mjs";
 import { primeBareServerTools } from "./bare-server-tools.mjs";
 import { worldRootFor, carriedReadRoots, brokenWorldLink } from "./world-root.mjs";
+import { isValidReadPath, normalizeReadPath } from "./bot-read-paths.mjs";
 import { installedKitDir, readKitThemes, readHouseStyleSync, houseStyleLinks } from "../../servers/shared/design-kit.js";
 
 /** Project services (Task 18): THE seam every rail calls (service-blocks.mjs). */
@@ -218,6 +219,30 @@ export function projectShowsCards(projectId, def) {
 }
 
 /**
+ * The workspace roots a bot's shares contribute to ONE spawn: `read` for every
+ * live, non-suspended share that names an absolute workspace_dir, `write` for
+ * the `read_write` ones only. A suspended share adds nothing (its project has
+ * an outside member right now), and neither does a share whose project is
+ * archived/tombstoned or has no workspace_dir — loadBotShares does not return
+ * the archived ones, and a row without a usable dir is skipped here.
+ *
+ * Pure, so the merge into read_paths/write_paths stays in PiRpc. The roots are
+ * per-SPAWN: pi's native file tools get them fixed at spawn, while the MCP
+ * tools are re-checked on every call (resolveBotAccess).
+ */
+export function shareWorkspaceRoots(shares) {
+  const read = [];
+  const write = [];
+  for (const s of Array.isArray(shares) ? shares : []) {
+    if (!s || s.suspended === true || !isValidReadPath(s.workspace_dir)) continue;
+    const root = normalizeReadPath(s.workspace_dir);
+    if (!read.includes(root)) read.push(root);
+    if (s.level === "read_write" && !write.includes(root)) write.push(root);
+  }
+  return { read, write };
+}
+
+/**
  * Write (or, in fd mode, build) the per-bot MCP config for this turn, with its
  * actor signatures bound to `sessionId` (bot_sessions.id, or null). A
  * key-less host (the pibot-* systemd units) first asks its gateway's loopback
@@ -332,8 +357,13 @@ export async function bindWorldSession(world, session) {
  *   (pi-lab's mcp-client reads `cwd/.mcp.json`). NULL/unset keeps today's
  *   behavior byte-identically: cwd === sessionDir (the world root).
  * @returns {Promise<{def, bot, crowHome, projectId, projectSpace, projectMembers,
- *          sessionDir, cwd, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
- *          narrowedTools, gatewayType, kitInstalled, houseStyle}>}
+ *          projectShares, sessionDir, cwd, tasksDbPath, remoteEnabled, peerGatewayUrls,
+ *          session, narrowedTools, gatewayType, kitInstalled, houseStyle,
+ *          extraReadPaths, extraWritePaths}>}
+ *   `projectShares` is loadBotShares(botId) as read for THIS spawn
+ *   ({project_id, level, workspace_dir, name, suspended}), so a UI can list the
+ *   bot's shared projects; only its non-suspended workspace dirs reach
+ *   extraReadPaths (and extraWritePaths for `read_write`).
  */
 export async function buildBotWorld({ botId, threadId, gatewayType = null, log = () => {}, jobId = null, cardBound = false, cwd = null, repoSkillsDir = undefined }) {
   const B = await loadBridge();
@@ -361,6 +391,16 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
     { wanted: !!(jobId || cardBound || projectBoard), readOnly: boardReadOnly, log });
   const projectSpace = B.loadProjectSpace(projectId);
   const projectMembers = B.loadProjectMembers(projectId);
+  // Phase 1 bot↔project shares (Task 10): the projects this bot holds a live
+  // share of, read fresh on EVERY world build. FILE-SYSTEM REACH FOLLOWS THE
+  // SHARE AT THE NEXT SPAWN: read_paths/write_paths are fixed when pi starts,
+  // so a revoke or a suspension cannot recall a root from a running child (a
+  // live Perch session picks it up at its next spawn/wake; a channel turn at
+  // its next turn). THE MCP TOOLS ARE RECHECKED PER CALL (resolveBotAccess), so
+  // tool calls are never one session behind. A `read` share contributes a read
+  // root only; a `read_write` share adds its workspace to the write roots too.
+  const projectShares = B.loadBotShares(botId);
+  const shareRoots = shareWorkspaceRoots(projectShares);
   // session_dir resolution: prefer the project workspace when available
   // (new project-native bots). Legacy bots without a project_space row, or
   // whose row has no workspace_dir, fall back to def.session_dir (the
@@ -490,7 +530,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
   // no file is written (PiRpc still names the absent path, see its fdMode
   // block); mcpConfig (the built JSON) is what PiRpc pipes instead.
   // mcpDelivery: "fd" | "file" (S6-CROW).
-  return { def, bot, crowHome, projectId, projectSpace, projectMembers, sessionDir,
+  return { def, bot, crowHome, projectId, projectSpace, projectMembers, projectShares, sessionDir,
     cwd: resolvedCwd, mcpConfigPath: mcpDelivery === "file" ? join(sessionDir, ".mcp.json") : null,
     mcpDelivery, mcpConfig, tasksDbPath, remoteEnabled, peerGatewayUrls, session, botClassifier,
     narrowedTools, gatewayType, kitInstalled, houseStyle,
@@ -501,8 +541,14 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
     // "Turn on a board" fallback carry-over (world-root.mjs): entries linked
     // one by one from the bot's own pre-project root resolve outside every
     // root pi-lab's realpath read gate knows, so that old root joins the read
-    // roots. [] for every other bot.
-    extraReadPaths: carriedReadRoots({ worldRoot: sessionDir, legacyRoot: worldRootFor({ workspaceDir: null, def, crowHome, botId }) }) };
+    // roots. [] for every other bot. Then the share roots (Task 10): every live
+    // non-suspended share is a read root, and only a `read_write` one is a
+    // write root as well.
+    extraReadPaths: [
+      ...carriedReadRoots({ worldRoot: sessionDir, legacyRoot: worldRootFor({ workspaceDir: null, def, crowHome, botId }) }),
+      ...shareRoots.read,
+    ],
+    extraWritePaths: shareRoots.write };
 }
 
 /**
@@ -625,6 +671,9 @@ export async function prepareSpawn(world, { escalate = false, log = () => {}, pr
       // The bot's id, for the workspace env (bot-workspace-env.mjs).
       botId: (world.bot && world.bot.bot_id) || null,
       extraReadPaths: world.extraReadPaths || [],
+      // Task 10: a `read_write` share's workspace joins write_paths (PiRpc); a
+      // `read` share never appears here. Absent on a hand-built world.
+      extraWritePaths: world.extraWritePaths || [],
       // S6-CROW: how the MCP config reaches pi. Absent on a hand-built world
       // (test seams) => PiRpc's pre-S6 file env.
       mcpDelivery: world.mcpDelivery,

@@ -2961,9 +2961,20 @@ export function createInteractiveEngine({
       // (world.cwd differs from the world root), it is added too so the bot can
       // do real work there like bare pi did. A DEFAULT session (cwd === the
       // world root) keeps its exact pre-change write_paths — no widening.
-      extraWritePaths: (world.cwd && world.cwd !== world.sessionDir)
-        ? [outputsDir, world.cwd]
-        : [outputsDir],
+      // Phase 1 bot↔project shares (Task 10): the world's share-derived WRITE
+      // roots (a `read_write` share's workspace) are appended. A `read` share
+      // contributes none — its workspace is only in the spawn's read roots,
+      // carried through prep.piRpcOpts.extraReadPaths, so an open-anywhere
+      // session working outside the bot's home workspace gains no write reach
+      // from it. The boundary is per SPAWN: a share granted or revoked
+      // mid-session reaches pi's native file tools at the next spawn/wake,
+      // while the MCP tools are rechecked per call.
+      extraWritePaths: [
+        ...((world.cwd && world.cwd !== world.sessionDir)
+          ? [outputsDir, world.cwd]
+          : [outputsDir]),
+        ...(Array.isArray(world.extraWritePaths) ? world.extraWritePaths : []),
+      ],
     }));
     s.pi = pi;
     s.piSessionId = resume;
