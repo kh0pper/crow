@@ -258,6 +258,8 @@ function fakeEngine() {
     modes: [],
     seeks: [],
     plays: 0,
+    pauses: 0,
+    stops: 0,
     positions: [],
     launches: [],
     node: { connect() {} },
@@ -273,7 +275,12 @@ function fakeEngine() {
     play() {
       engine.plays += 1;
     },
-    stop() {},
+    pause() {
+      engine.pauses += 1;
+    },
+    stop() {
+      engine.stops += 1;
+    },
     stopAll() {},
     launchScene() {},
     onPosition(listener) {
@@ -570,6 +577,21 @@ function allCommands(ui) {
 /** A 32-bar ruler or lane, 10 px a bar. */
 function timelineBox(top = 0) {
   return { left: 0, top, width: 320, height: 54, right: 320, bottom: top + 54, x: 0, y: top };
+}
+
+/** Stub the bar ruler's own box: 32 bars, 10 px each. */
+function stubRuler(ui) {
+  const strip = ui.document.querySelector("[data-role=bar-ruler]");
+  assert.ok(strip, "the timeline draws the bar ruler");
+  strip.getBoundingClientRect = () => ({
+    left: 0, top: 0, width: 320, height: 18, right: 320, bottom: 18, x: 0, y: 0,
+  });
+  return strip;
+}
+
+/** Press the ruler at a point, the way a pointer would. */
+function rulerPress(ui, strip, clientX) {
+  strip.dispatchEvent(ui.event("pointerdown", { button: 0, clientX }));
 }
 
 /** Stub the box of every lane body, the way a laid-out browser would report it. */
@@ -1602,6 +1624,350 @@ test("a marker and a section are renamed and removed from their own buttons", as
   const gone = commands(ui, "section.remove");
   assert.equal(gone.length, 1, "and it can be removed");
   assert.deepEqual(gone[0].args, { id: "sec-intro" });
+});
+
+/**
+ * The fixture song with a placement that covers the first four bars, so a split
+ * has something under the playhead, and a second scene, so a recording made
+ * from the timeline has a free slot for its clip.
+ * @returns {Promise<import("yjs").Doc>}
+ */
+async function coverDoc() {
+  const doc = await timelineDoc();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(doc, "arrangement.remove", { id: NOTE_PLACEMENT });
+  runCommand(doc, "arrangement.place", {
+    id: NOTE_PLACEMENT,
+    track_id: NOTE_TRACK,
+    clip_id: NOTE_CLIP,
+    start_bar: 0,
+    bars: 4,
+  });
+  runCommand(doc, "scene.add", { id: "chorus", name: "Chorus" });
+  return doc;
+}
+
+/** One lane's bar for bar N of 32, as the percentage the page draws. */
+function barLeft(n) {
+  return String(Math.round((n / 32) * 100 * 1000) / 1000) + "%";
+}
+
+// ---- the playhead, the cut bar and Pause --------------------------------
+
+test("floorBar(2.75) is 2 and floorBar(3) is 3", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  // Bar 3 beat 4 is two and three quarter bars: the playhead stands inside
+  // bar 3, on the line of bar 2 -- bar 3 to the operator.
+  ui.position({ bar: 3, beat: 4, sixteenth: 1 });
+  const cuts = [...ui.document.querySelectorAll("[data-role=cut-mark]")];
+  assert.ok(cuts.length >= 3, "the cut mark is on the ruler and on every lane");
+  for (const mark of cuts) {
+    assert.equal(mark.classList.contains("st-cut-mark"), true, "it wears the cut mark's class");
+    assert.equal(mark.style.left, barLeft(2), "and stands on bar 2 of 32");
+  }
+  assert.equal(
+    ui.document.querySelector("[data-act=split]").textContent,
+    "Split at bar 3",
+    "the button names the bar it would cut",
+  );
+  assert.equal(
+    commands(ui, "arrangement.split").length,
+    0,
+    "and nothing has been cut: the mark and the label are there before any press",
+  );
+
+  // A playhead exactly on a bar line is that bar, not the one before.
+  ui.position({ bar: 4, beat: 1, sixteenth: 1 });
+  assert.equal(
+    ui.document.querySelector("[data-role=cut-mark]").style.left,
+    barLeft(3),
+    "a playhead on a bar line stands on that line",
+  );
+  assert.equal(
+    ui.document.querySelector("[data-act=split]").textContent,
+    "Split at bar 4",
+    "which the button names too",
+  );
+});
+
+test("Split, Add to timeline, marker add and Record to timeline send whole bars", async () => {
+  const ui = await bootTimeline({ doc: await coverDoc() });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  // Two and three quarter bars: the bar line at or before it is bar 2.
+  ui.position({ bar: 3, beat: 4, sixteenth: 1 });
+
+  // Split at playhead.
+  ui.click("[data-act=split]");
+  await ui.settle();
+  const split = commands(ui, "arrangement.split");
+  assert.equal(split.length, 1, "the split went out");
+  assert.equal(Number.isInteger(split[0].args.at_bar), true, "at_bar is a whole bar");
+  assert.equal(split[0].args.at_bar, 2, "the bar line the playhead stands on");
+
+  // Add to timeline, from the clip's own editor.
+  ui.click(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  await ui.settle();
+  ui.click("[data-role=editor] [data-act=place-on-timeline]");
+  await ui.settle();
+
+  // A marker added on the marker row, inside the same bar.
+  const row = ui.document.querySelector("[data-role=marker-row]");
+  assert.ok(row, "the ruler draws the marker row");
+  row.getBoundingClientRect = () => ({
+    left: 0, top: 0, width: 320, height: 18, right: 320, bottom: 18, x: 0, y: 0,
+  });
+  row.dispatchEvent(ui.event("click", { clientX: 27.5 }));
+  await ui.settle();
+
+  // Record to timeline: with the playhead here and an armed audio track, the
+  // recording starts its new clip and its placement on this bar.
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const placed = commands(ui, "arrangement.place");
+  assert.equal(placed.length, 2, "Add to timeline placed one, and the recording placed its own");
+  for (const message of placed) {
+    assert.equal(Number.isInteger(message.args.start_bar), true, "every start_bar is a whole bar");
+    assert.equal(message.args.start_bar, 2, "on the bar line the playhead stands on");
+  }
+  const marker = commands(ui, "marker.add");
+  assert.equal(marker.length, 1, "the marker went out");
+  assert.equal(Number.isInteger(marker[0].args.bar), true, "on a whole bar");
+  assert.equal(marker[0].args.bar, 2, "the bar the cut mark stands on");
+});
+
+test("the ruler seeks in Arrangement; the Session view does not seek", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const strip = stubRuler(ui);
+
+  // 65 px of a 32-bar, 320 px ruler is six and a half bars.
+  rulerPress(ui, strip, 65);
+  await ui.settle();
+  ui.release();
+  assert.deepEqual(ui.engine.seeks, [6], "a click seeks the bar under it");
+  assert.equal(Number.isInteger(ui.engine.seeks[0] * 4), true, "a whole number of beats");
+  assert.equal(
+    ui.document.querySelector("[data-role=playhead]").style.left,
+    barLeft(6),
+    "and the playhead is drawn there",
+  );
+
+  // The Session view has no ruler, and the one this page still holds seeks
+  // nothing: a session transport is not the timeline's.
+  ui.click("[data-act=mode-session]");
+  await ui.settle();
+  assert.equal(ui.document.querySelector("[data-role=bar-ruler]"), null, "Session draws no ruler");
+  rulerPress(ui, strip, 45);
+  await ui.settle();
+  ui.release();
+  assert.deepEqual(ui.engine.seeks, [6], "and a press on the one it held seeks nothing");
+});
+
+test("the playhead can be dragged; one seek per pointermove, last position wins", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const strip = stubRuler(ui);
+
+  rulerPress(ui, strip, 65);
+  await ui.settle();
+  assert.deepEqual(ui.engine.seeks, [6], "the press seeks the bar under it");
+
+  // 67.5, 70 and 72.5 px are six and three quarters, seven, and seven and a
+  // quarter bars: a drag reads the ruler in beats.
+  for (const clientX of [67.5, 70, 72.5]) {
+    ui.fireWindow("pointermove", ui.event("pointermove", { clientX }));
+  }
+  await ui.settle();
+  assert.deepEqual(ui.engine.seeks.slice(1), [6.75, 7, 7.25], "one seek per move, at beat resolution");
+  assert.equal(ui.engine.seeks[ui.engine.seeks.length - 1], 7.25, "the last position is the one that stays");
+  assert.equal(
+    ui.document.querySelector("[data-role=playhead]").style.left,
+    barLeft(7.25),
+    "and the playhead was drawn there",
+  );
+
+  ui.release();
+  await ui.settle();
+  assert.equal((ui.windowListeners.pointermove || []).length, 0, "the drag's listeners came off");
+});
+
+test("seek is allowed while playing and while paused in Arrangement", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const strip = stubRuler(ui);
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  assert.equal(ui.engine.plays, 1, "the transport is running");
+
+  rulerPress(ui, strip, 65);
+  await ui.settle();
+  ui.release();
+  assert.deepEqual(ui.engine.seeks, [6], "a running transport jumps to the bar");
+  assert.equal(ui.engine.pauses, 0, "and plays on: nothing paused it");
+  assert.equal(ui.engine.stops, 0, "and nothing stopped it");
+  assert.equal(ui.document.querySelector("[data-role=toast]").hidden, true, "no refusal is said");
+
+  // Paused: a seek moves the paused transport, and the readout says where the
+  // next Play starts.
+  ui.position({ bar: 3, beat: 2, sixteenth: 1 });
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(ui.engine.pauses, 1, "Pause paused the transport");
+  assert.equal(
+    ui.document.querySelector("[data-role=position]").textContent,
+    "003.2.1",
+    "the readout kept the position it was paused at",
+  );
+
+  rulerPress(ui, strip, 45);
+  await ui.settle();
+  ui.release();
+  assert.equal(ui.engine.seeks[ui.engine.seeks.length - 1], 4, "the paused transport was moved to the bar");
+  assert.equal(
+    ui.document.querySelector("[data-role=position]").textContent,
+    "005.1.1",
+    "and the readout moved with it",
+  );
+});
+
+test("Pause calls engine.pause, keeps the position, and Play carries on", async () => {
+  const ui = await bootTimeline();
+  const pause = ui.document.querySelector("[data-act=pause]");
+  assert.ok(pause, "the transport carries a Pause button");
+  assert.equal(pause.getAttribute("title"), "Pause");
+  assert.equal(pause.getAttribute("aria-label"), "Pause");
+
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.position({ bar: 7, beat: 3, sixteenth: 2 });
+  assert.equal(ui.document.querySelector("[data-role=position]").textContent, "007.3.2");
+
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(ui.engine.pauses, 1, "Pause is the engine's own pause");
+  assert.equal(ui.engine.stops, 0, "and nothing was stopped");
+  assert.equal(ui.engine.plays, 1, "and the transport was not restarted");
+  assert.equal(
+    ui.document.querySelector("[data-role=position]").textContent,
+    "007.3.2",
+    "the position stays on the page",
+  );
+  assert.equal(pause.getAttribute("aria-pressed"), "true", "and the button shows the transport is paused");
+
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  assert.equal(ui.engine.plays, 2, "Play carries the paused run on");
+  assert.equal(
+    ui.document.querySelector("[data-role=position]").textContent,
+    "007.3.2",
+    "from the position it was paused at",
+  );
+  assert.equal(pause.getAttribute("aria-pressed"), "false", "and the button shows it is playing again");
+});
+
+test("Stop after Pause shows 001.1.1 in session and the seek bar in arrangement", async () => {
+  const session = await bootTimeline();
+  session.click("[data-act=play]");
+  await session.settle(24);
+  session.position({ bar: 6, beat: 2, sixteenth: 1 });
+  session.click("[data-act=pause]");
+  await session.settle();
+  session.click("[data-act=stop]");
+  await session.settle();
+  assert.equal(session.engine.stops, 1, "Stop stopped the transport");
+  assert.equal(
+    session.document.querySelector("[data-role=position]").textContent,
+    "001.1.1",
+    "a session run starts at its first bar again",
+  );
+
+  const arrangement = await bootTimeline();
+  arrangement.click("[data-act=mode-arrangement]");
+  await arrangement.settle();
+  const strip = stubRuler(arrangement);
+  rulerPress(arrangement, strip, 65);
+  await arrangement.settle();
+  arrangement.release();
+  arrangement.click("[data-act=play]");
+  await arrangement.settle(24);
+  arrangement.click("[data-act=pause]");
+  await arrangement.settle();
+  arrangement.click("[data-act=stop]");
+  await arrangement.settle();
+  assert.equal(arrangement.engine.stops, 1, "Stop stopped the transport");
+  assert.equal(
+    arrangement.document.querySelector("[data-role=position]").textContent,
+    "007.1.1",
+    "the timeline keeps the bar its playhead stands on",
+  );
+});
+
+test("Pause is disabled while a take records and while Record to timeline collects", async () => {
+  const ui = await bootTimeline();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const pause = ui.document.querySelector("[data-act=pause]");
+  assert.equal(ui.engine.recorders.length, 1, "Record built the recorder");
+  assert.equal(pause.disabled, true, "a take is only ever ended with Stop");
+
+  ui.click("[data-act=stop]");
+  await ui.settle();
+  assert.equal(pause.disabled, false, "with the take over, Pause is offered again");
+
+  // Record to timeline collects launches for as long as it is on: the same
+  // rule, and Stop still ends it.
+  ui.click("[data-act=rec-timeline]");
+  await ui.settle();
+  assert.equal(pause.disabled, true, "a collected performance is only ever ended with Stop");
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  assert.equal(pause.disabled, true, "and the transport cannot be paused either");
+
+  ui.click("[data-act=stop]");
+  await ui.settle();
+  assert.equal(ui.engine.stops, 1, "Stop still works");
+});
+
+test("a recording take blocks Pause and Stop still works", async () => {
+  const ui = await bootTimeline();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.launch({ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, scene_id: SCENE, bar: 0, frame: 0 });
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const recorder = ui.engine.recorders[0];
+  assert.ok(recorder, "Record built the recorder");
+  assert.notEqual(recorder.armed, null, "and the take is armed on the next bar");
+  assert.equal(ui.document.querySelector("[data-act=pause]").disabled, true, "a take cannot be paused");
+
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(ui.engine.pauses, 0, "the press paused nothing");
+
+  ui.click("[data-act=stop]");
+  await ui.settle();
+  assert.notEqual(recorder.stopped_at, null, "Stop ended the take");
+  assert.equal(typeof recorder.stopped_at, "number", "on the frame the take ends on");
 });
 
 // ---- the same timeline against a real hub, in a real browser ---------------

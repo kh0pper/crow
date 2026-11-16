@@ -818,6 +818,12 @@ const STYLES = `
   .studio .st-tl-playhead {
     position: absolute; top: 0; bottom: 0; width: 2px; background: #FFFFFF; pointer-events: none;
   }
+  /* The whole-bar cut a split would make: the bar line the playhead stands on,
+     drawn before the button is pressed (and named by the Split label). */
+  .studio .st-cut-mark {
+    position: absolute; top: 0; bottom: 0; width: 0; pointer-events: none;
+    border-left: 1px dashed #E8C07A; opacity: 0.85;
+  }
   .studio .st-tl-lane-head { display: flex; align-items: center; gap: 8px; }
   .studio .st-tl-color { width: 8px; align-self: stretch; min-height: 30px; border-radius: 3px; flex: 0 0 auto; }
   .studio .st-tl-lane-name { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
@@ -1281,6 +1287,7 @@ function studioPage({ songId, render, res }) {
         <div class="st-transport">
           <button class="st-btn st-transport-btn" type="button" data-act="play" title="Play" aria-label="Play">▶</button>
           <button class="st-btn st-transport-btn" type="button" data-act="stop" title="Stop" aria-label="Stop">■</button>
+          <button class="st-btn st-transport-btn" type="button" data-act="pause" title="Pause" aria-label="Pause">❚❚</button>
           <button class="st-btn st-transport-btn st-record-btn" type="button" data-act="record" title="Record into the armed track" aria-label="Record" disabled>●</button>
           <button class="st-btn st-small st-click-btn" type="button" data-act="metronome" aria-pressed="false"
             title="Metronome: a click on every beat while it plays">Click</button>
