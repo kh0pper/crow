@@ -31,6 +31,15 @@ marked.setOptions({ gfm: true, breaks: true });
  * Links keep Turbo Drive (they are the owner's own navigation) but never get
  * prefetched: Turbo 8 fires a same-origin GET on hover, with the viewer's
  * cookies.
+ *
+ * Like the bot path, the input is bounded before marked's BLOCK lexer by a
+ * linear pre-pass that caps container nesting (limitContainerNesting, see "THE
+ * BLOCK-NESTING CLIFF" below), and a parse that still throws answers its
+ * escaped text instead of a RangeError. Both matter to the OWNER path: a bot
+ * can write a blog post, a memory, a KB article, a workspace .md or a
+ * meta-glasses note, and this function runs synchronously in a route —
+ * uncaught, the stack overflow a deeply nested document used to cause was a 500
+ * on the page (measured: 1356 ms and a RangeError for 64 KB of `1) `).
  * @param {string} markdown
  * @param {{ storageOrigin?: string|null }} [options] `storageOrigin` overrides
  *   the module-wide storage origin for this call only. The gateway sets that
@@ -44,8 +53,19 @@ export function renderMarkdown(markdown, options) {
   const storageOrigin = Object.prototype.hasOwnProperty.call(opts, "storageOrigin")
     ? normalizeOrigin(opts.storageOrigin)
     : rendererStorageOrigin;
-  return withImageContext({ policy: "owner", storageOrigin }, () =>
-    sanitizeRendered(ownerMarked.parse(String(markdown)), { imagePolicy: "owner", storageOrigin }));
+  const src = String(markdown);
+  return withImageContext({ policy: "owner", storageOrigin }, () => {
+    let html;
+    try {
+      html = ownerMarked.parse(limitContainerNesting(src));
+    } catch {
+      // Fail safe, never a 500: the document as escaped text, one <br> per line
+      // (what `breaks: true` draws for a plain paragraph). The sanitizer below
+      // still runs, so the fallback cannot carry markup either.
+      html = "<p>" + escapeText(src).replace(/\n/g, "<br>") + "</p>";
+    }
+    return sanitizeRendered(html, { imagePolicy: "owner", storageOrigin });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -617,6 +637,214 @@ function isCheckboxInput(attribs) {
 }
 
 // ---------------------------------------------------------------------------
+// THE BLOCK-NESTING CLIFF — a linear pre-pass guard
+//
+// marked's BLOCK lexer recurses once per container nesting level, and one line
+// can open tens of thousands of levels by itself: `>>>>…`, `- - - …`,
+// `1) 1) 1) …`, and the mixed `- > 1. - > 1. …` are all nested containers, so
+// 64 KB of a two-character run is ~32,000 levels and every level is paid with
+// the rest of the input in hand. Measured on this tree (marked 17.0.4 + the math
+// extension below; CPU ms for one 64 KB - 1 line, before and after this guard):
+//
+//   unit (one 64 KB - 1 line)   renderBotMarkdown   renderMarkdown (owner)
+//                               before   after      before   after
+//   "1) "                        964†     101       1356†      82
+//   "1. "                       1332†      87       1325†      78
+//   "- 1) "                      814†      96       1374†      87
+//   "> 1) "                      722†     104        779†      97
+//   ">"                          158†     214        164†     207
+//   "> " (with the space)          —      132          —     124
+//   "+ "                        1294†     116       1321†     109
+//   "- " / "* "                    2    22/119          0   106/105
+//   "- > 1. "                    994†     108        975†     127
+//   indentation staircase,
+//   each line 2 columns deeper     40       16          30      25
+//   indentation only, no markers    2        1           2       2
+//
+//   † ended in "RangeError: Maximum call stack size exceeded". The bot path's
+//     try/catch already turned that into "" — the callers' plain-text path — but
+//     only AFTER 0.7-1.4 s of blocked event loop; the owner path had no catch at
+//     all, so a RangeError escaped renderMarkdown into a route. "- " and "* "
+//     never nested in the first place: a `- - -` / `* * *` run is a thematic
+//     break under marked's hr rule (hence the 2 ms), which is why only "+ " of
+//     the three bullet characters was a cliff. ">" is the worst row now only
+//     because 16 nested blockquotes each re-lex the whole remainder (64 KB in,
+//     262 KB of HTML out); 30 seeded 64 KB marker mixes measured 122 ms at
+//     worst across both paths.
+//
+// So the input is bounded BEFORE the block lexer, in ONE LINEAR PASS: per line,
+// count the container markers marked would open on it plus a cheap indentation
+// proxy, and past MD_MAX_NEST escape the marker characters (`>` → `\>`, `-` →
+// `\-`, `1)` → `1\)`) so marked stops opening containers and renders the rest as
+// text. A CommonMark backslash escape renders as the character itself, so the
+// line's TEXT survives (`> > …` still reads `> > …`); only its structure is
+// cut. A marker is escaped only on a line whose own total is over the limit, so
+// every line at or under it is left byte-for-byte alone — the digests in
+// tests/bot-markdown-quadratic.test.js (ordinary content) and the pinned
+// before/after digests in tests/md-nesting-depth.test.js (lists in quotes in
+// lists, code in lists, 8 levels deep) are that proof.
+//
+// The proxy, and what was measured to choose it:
+//   - Same-line markers are counted the way marked's own rules read them: `>`
+//     anywhere in the leading prefix (`>x` is a quote too, and one optional
+//     space after it is consumed), `-`/`*`/`+` followed by a space/tab or ending
+//     the line, `\d{1,9}` + `.`/`)` likewise, with spaces/tabs allowed between
+//     markers (`- - 1) > text`). Counting a BARE marker at end of line is
+//     deliberate over-counting: `- - -` is really a thematic break (the 2 ms
+//     row above), so such a degenerate line is cut a little early — never a
+//     normal one.
+//   - Indentation is width/2, a tab widened to the next multiple of 4 exactly as
+//     marked expands it: one container level is two columns of indent in a list
+//     (`- ` plus two spaces), and marked's list rule allows at most three
+//     columns before a bullet. Measured, this proxy is a safety net rather than
+//     the cliff itself: nesting that grows by indentation alone can only reach
+//     ~180 levels at the cap, because the indentation costs quadratic SPACE
+//     (the staircase row: 40 ms bot / 30 ms owner before, 16 ms / 25 ms after),
+//     and indentation with no marker nests nothing at all (2 ms). It also means
+//     a line that opens no container is never rebuilt, so indented code keeps
+//     every space.
+//   - MD_MAX_NEST = 16: ordinary content sits around 2-4 levels (a list in a
+//     quote in a list), 8-10 is about as deep as hand-written Markdown stays
+//     readable, and the escape only ever applies ABOVE the limit. Measured with
+//     16 in place: the worst render over all eleven shapes above and 30 seeded
+//     64 KB marker mixes, both paths, is 214 ms — and no throw anywhere.
+// ---------------------------------------------------------------------------
+
+/**
+ * Deepest container nesting (blockquotes + list levels + indentation proxy) a
+ * document may use before the excess markers are escaped as text. 16 is far
+ * above real content (2-4 levels; ~8-10 is the practical ceiling for readable
+ * Markdown) and far below the ~32,000 levels a 64 KB marker run otherwise
+ * opens. Exported so the tests can pin the bound they exercise.
+ */
+export const MD_MAX_NEST = 16;
+
+/**
+ * One line with a `\` inserted before every offset in `excess` (ascending), so
+ * the character is read as text instead of opening a container: for an ordered
+ * marker the DELIMITER is escaped (`1)` → `1\)`) — `\1` is not a CommonMark
+ * escape and would keep its backslash on screen. One pass, so a line with tens of
+ * thousands of excess markers stays linear.
+ * @param {string} src whole document
+ * @param {number} start first character of the line
+ * @param {number} end the line's "\n" (exclusive), or src.length
+ * @param {number[]} excess ascending offsets in src
+ * @returns {string}
+ */
+function escapeMarkers(src, start, end, excess) {
+  const pieces = [];
+  let last = start;
+  for (const at of excess) {
+    pieces.push(src.slice(last, at), "\\");
+    last = at;
+  }
+  pieces.push(src.slice(last, end));
+  return pieces.join("");
+}
+
+/**
+ * One line's container markers, as absolute offsets of the character to escape,
+ * in ascending order. Linear: the scan stops at the first character that is not
+ * a marker, and every step of it advances at least one character.
+ *
+ * `budget` is how many markers this line may still keep (MD_MAX_NEST minus the
+ * indentation proxy); every marker past it is escaped. Returns null when the
+ * line needs no change — the common case, and the reason normal documents come
+ * out byte-identical.
+ * @param {string} src whole document (one string, so lines are never copied)
+ * @param {number} start first character of the line
+ * @param {number} end the line's "\n" (exclusive), or src.length
+ * @param {number} budget how many markers this line may keep
+ * @returns {number[]|null}
+ */
+function excessMarkers(src, start, end, budget) {
+  let excess = null;
+  let markers = 0;
+  let i = start;
+  for (;;) {
+    while (i < end) {
+      const c = src.charCodeAt(i);
+      if (c !== 32 && c !== 9) break;
+      i++;
+    }
+    if (i >= end) break;
+    const c = src.charCodeAt(i);
+    let escapeAt = -1;
+    let next = -1;
+    if (c === 62) { // ">" — a blockquote opens with or without a space after it
+      escapeAt = i;
+      next = i + 1;
+    } else if (c === 45 || c === 42 || c === 43) { // "-", "*", "+"
+      // "- " at the end of a line, a CRLF line and the very end all count.
+      const after = i + 1 < end ? src.charCodeAt(i + 1) : -1;
+      if (after === -1 || after === 13 || after === 32 || after === 9) { escapeAt = i; next = i + 1; }
+    } else if (c >= 48 && c <= 57) { // "1." / "1)", up to nine digits as marked allows
+      let k = i;
+      while (k < end && k - i < 9) {
+        const d = src.charCodeAt(k);
+        if (d < 48 || d > 57) break;
+        k++;
+      }
+      const d = k < end ? src.charCodeAt(k) : -1;
+      if (d === 46 || d === 41) {
+        const after = k + 1 < end ? src.charCodeAt(k + 1) : -1;
+        if (after === -1 || after === 13 || after === 32 || after === 9) { escapeAt = k; next = k + 1; }
+      }
+    }
+    if (escapeAt === -1) break;
+    if (++markers > budget) (excess || (excess = [])).push(escapeAt);
+    i = next;
+  }
+  return excess;
+}
+
+/**
+ * Cap container nesting so marked's block lexer cannot recurse without bound
+ * (see "THE BLOCK-NESTING CLIFF"): every line that would open more than
+ * MD_MAX_NEST containers — markers on that line, plus one level per two columns
+ * of leading indentation — has its excess markers escaped, so they render as
+ * their own text. Linear in the input, and it returns `src` itself (same object,
+ * no allocation) when no line is over the limit.
+ * @param {string} src
+ * @returns {string}
+ */
+function limitContainerNesting(src) {
+  if (typeof src !== "string" || src.length === 0) return src;
+  const pieces = [];
+  let copied = 0;
+  let lineStart = 0;
+  let changed = false;
+  for (;;) {
+    const nl = src.indexOf("\n", lineStart);
+    const end = nl === -1 ? src.length : nl;
+    // Leading indentation, in COLUMNS: marked widens a tab to the next multiple
+    // of 4 (its own tab expansion). Two columns is one container level in a
+    // list, and marked allows at most three columns before a bullet.
+    let col = 0;
+    let i = lineStart;
+    while (i < end) {
+      const c = src.charCodeAt(i);
+      if (c === 32) col += 1;
+      else if (c === 9) col += 4 - (col % 4);
+      else break;
+      i++;
+    }
+    const indentDepth = Math.min(Math.floor(col / 2), MD_MAX_NEST);
+    const excess = excessMarkers(src, lineStart, end, MD_MAX_NEST - indentDepth);
+    if (excess) {
+      pieces.push(src.slice(copied, lineStart), escapeMarkers(src, lineStart, end, excess));
+      copied = end;
+      changed = true;
+    }
+    if (nl === -1) break;
+    lineStart = nl + 1;
+  }
+  if (!changed) return src;
+  pieces.push(src.slice(copied));
+  return pieces.join("");
+}
+
+// ---------------------------------------------------------------------------
 // THE INLINE-LEXER CLIFF — a linear pre-pass guard
 //
 // marked's inline lexer is QUADRATIC on mixed emphasis delimiters inside ONE
@@ -690,11 +918,11 @@ function isCheckboxInput(attribs) {
 // shape, 116 ms for the definitions flood; tests/bot-markdown-quadratic.test.js
 // pins the bounds and records the worst render in a diagnostic).
 //
-// One shape is still slow BEFORE any of these budgets can apply: deeply nested
+// One shape was still slow BEFORE any of these budgets could apply: deeply nested
 // list/quote markers (e.g. `1) ` repeated) cost ~1.5 s inside marked's BLOCK
-// lexer, which runs first — pre-existing and unrelated to the inline budgets
-// above (a RangeError there is caught and answers "", so callers fall back to
-// plain text), and a separate follow-up.
+// lexer, which runs first. That is the block-nesting cliff, and it is guarded
+// separately and before this one — see "THE BLOCK-NESTING CLIFF" above, applied
+// to both renderers before the block lexer runs.
 // ---------------------------------------------------------------------------
 
 /** The characters marked's inline lexer reacts to: emphasis (`*`, `_`),
@@ -757,6 +985,10 @@ function guardAndParse(src) {
   // from Windows) kept a `\r` on every line and flattened into one escaped
   // paragraph. Do exactly what marked does.
   src = src.replace(/\r\n|\r/g, "\n");
+  // Bound container nesting BEFORE blockTokens recurses into it (see "THE
+  // BLOCK-NESTING CLIFF"): "1) " x 64 KB used to spend ~1 s here and then trip
+  // the stack. Normal replies come back as the same string, untouched.
+  src = limitContainerNesting(src);
   const lexer = new Lexer({ ...botMarked.defaults });
   lexer.blockTokens(src, lexer.tokens);
   // Cap the link definitions BEFORE any inline lexing: inlineTokens scans
@@ -829,8 +1061,9 @@ const ownerMarked = new Marked({
  * renderMarkdown does, plus math delimiters shown once as source. Over
  * BOT_MD_MAX_INPUT it returns "" (callers fall back to plain text): marked's
  * own lexer degrades sharply on long escape-dense input (see above). Under
- * it, EVERY input takes guardAndParse: a LINEAR pre-pass keeps the
- * inline-lexer cliff out of reach, and the digest tests pin it byte-identical
+ * it, EVERY input takes guardAndParse: a LINEAR pre-pass bounds container
+ * nesting before marked's block lexer sees it, another keeps the
+ * inline-lexer cliff out of reach, and the digest tests pin both byte-identical
  * to plain marked.parse for ordinary content.
  * @param {string} markdown untrusted model output
  * @returns {string} Safe HTML
