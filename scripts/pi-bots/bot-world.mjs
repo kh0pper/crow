@@ -352,7 +352,9 @@ function dangerousShareRoot(dir, crowHome, projectsRoot) {
  * one root each — never the workspace itself, never its `bots` subtree (see
  * shareWorkspaceRoots). An entry that cannot be resolved is skipped; an entry
  * whose realpath leaves the projects area is skipped; a symlink is followed
- * only when it resolves inside the workspace and outside the bots subtree.
+ * only when it resolves strictly inside the workspace, to neither the
+ * workspace itself nor its `bots` subtree, and a granted entry becomes the
+ * root as its REALPATH (never the link's own path).
  * More entries than SHARE_ROOT_ENTRY_CAP grants nothing for the share.
  * @param {string} dir       the workspace_dir as the share row names it
  * @param {{realDir?: string|null, projectsRoot: string, log?: (m: string) => void}} opts
@@ -372,6 +374,7 @@ function shareEntryRoots(dir, { realDir = null, projectsRoot, log = () => {} } =
     return [];
   }
   const under = (p, root) => p === root || p.startsWith(root + "/");
+  const botsDir = realDir ? join(realDir, "bots") : null;
   const roots = [];
   for (const entry of entries) {
     // `<workspace>/bots` holds every bot homed at this project.
@@ -383,11 +386,16 @@ function shareEntryRoots(dir, { realDir = null, projectsRoot, log = () => {} } =
     // An entry that resolves out of the projects area is never granted, however it got there.
     if (!strictlyUnder(real, projectsRoot)) continue;
     if (entry.isSymbolicLink()) {
-      // Never follow a link out of the workspace, and never one into bots.
+      // Never follow a link out of the workspace, and never one into bots. A link that resolves to
+      // the workspace ITSELF is the same reach as granting the workspace — which would hand over
+      // `<workspace>/bots` — and one that resolves at or above `bots`, or inside it, is that
+      // subtree by another name.
       if (!realDir || !under(real, realDir)) continue;
-      if (under(real, join(realDir, "bots"))) continue;
+      if (real === realDir) continue;
+      if (under(botsDir, real) || under(real, botsDir)) continue;
     }
-    const root = normalizeReadPath(full);
+    // The root is the entry's REALPATH: what pi's file tools are held to, never a link's own path.
+    const root = real;
     if (!roots.includes(root)) roots.push(root);
   }
   return roots;

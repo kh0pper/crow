@@ -277,6 +277,55 @@ test("a failed share read refuses 503 (fail closed), not a relay", async () => {
   for (const l of lines) assert.ok(!l.includes(relayToken), "no relay token in a log line");
 });
 
+/** A DB client whose project_bot_shares read fails the way `message` says; every other read works. */
+function sharesFailingWith(message) {
+  const real = () => createDbClient(DB_FILE);
+  return () => {
+    const db = real();
+    const exec = db.execute.bind(db);
+    return {
+      ...db,
+      close: () => db.close(),
+      execute: (q) => (typeof q === "object" && /project_bot_shares/.test(String(q.sql)) ? Promise.reject(new Error(message)) : exec(q)),
+    };
+  };
+}
+
+const relayDeps = () => ({ keyLookup: () => null, getCreds: () => ({ auth_token: "peer-bearer" }), localId: () => "inst-local-0001" });
+
+test("a DB without the project_bot_shares table means no share (the relay proceeds); any other read error stays 503", async () => {
+  // An older DB has no share table at all: there is no share to hold, which is exactly how
+  // bridge.mjs botHoldsLiveShareSync reads the same failure. Refusing here would turn every bot's
+  // remote tools off on such a DB.
+  hits.length = 0;
+  const missing = await routerWith({ createDbClient: sharesFailingWith("SQLITE_ERROR: no such table: project_bot_shares"), deps: relayDeps() });
+  let res;
+  try {
+    res = await relayPost({ base: missing.base });
+  } finally {
+    await missing.close();
+  }
+  assert.equal(res.status, 200, "a missing share table relays: " + res.text);
+  assert.equal(hits.length, 1, "the request reached the peer");
+
+  // Every other failure is still the relay's own fault: fail closed, and the peer sees nothing.
+  hits.length = 0;
+  const broken = await routerWith({ createDbClient: sharesFailingWith("database is locked"), deps: relayDeps() });
+  const lines = [];
+  const orig = console.error;
+  console.error = (...a) => { lines.push(a.join(" ")); };
+  try {
+    res = await relayPost({ base: broken.base });
+  } finally {
+    console.error = orig;
+    await broken.close();
+  }
+  assert.equal(res.status, 503, res.text);
+  assert.match(res.json.error.message, READ_FAILURE);
+  assert.equal(hits.length, 0, "a share read that failed relays nothing");
+  assert.ok(lines.some((l) => l.includes("database is locked")), lines.join("\n"));
+});
+
 // ---------------------------------------------------------------------------
 // M-B — one rule everywhere: bridge.botHoldsLiveShareSync
 // ---------------------------------------------------------------------------

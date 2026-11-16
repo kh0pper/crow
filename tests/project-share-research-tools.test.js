@@ -461,9 +461,20 @@ test("crow_audit_log cannot tell a bot whether a hidden storage key exists (B2)"
   const ownerHidden = text(await call(owner, "crow_audit_log", { project_id: hidden, limit: 200 }));
   assert.match(ownerHidden, /share\.refused/);
 
+  // crow_project_get carries a recent-audit window over the same table: it may not hand the bot
+  // what crow_audit_log withholds. The bot reads its own project's details; the owner reads the
+  // same window, share refusals included.
+  const botDetails = text(await call(bot, "crow_project_get", { project_id: home }));
+  assert.match(botDetails, /Recent audit \(\d+\)/, botDetails);
+  assert.doesNotMatch(botDetails, /share\.refused/, "crow_project_get is no oracle either");
+  const ownerDetails = text(await call(owner, "crow_project_get", { project_id: home }));
+  assert.match(ownerDetails, /Recent audit \(\d+\)/, ownerDetails);
+  assert.match(ownerDetails, /share\.refused/, "the owner still reads the refusals");
+
   // The operator's voice bot is the operator here too, byte for byte.
   const voice = await clientFor(S.operatorVoiceActor());
   assert.equal(text(await call(voice, "crow_audit_log", { project_id: home, limit: 200 })), ownerHome);
+  assert.equal(text(await call(voice, "crow_project_get", { project_id: home })), ownerDetails);
 });
 
 // --- the operator's voice bot ---------------------------------------------------------------

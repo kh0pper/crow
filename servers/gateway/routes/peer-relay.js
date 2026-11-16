@@ -26,7 +26,8 @@
  *   4. feature_flags.remote_invocation                               else 403
  *   5. <mount> is a remote capability                                else 404
  *      the bot is enabled                                            else 403
- *      and the bot holds no live project share (botHoldsLiveShare)   else 403
+ *      and the bot holds no live project share (botHoldsLiveShare; a DB that
+ *      predates the table holds none; any other read failure)        else 403/503
  *      and the bot's row selected (instanceId, capability)          else 403
  *   6. a trusted peer row with a gateway_url                         else 404
  *      and a peer bearer                                             else 502
@@ -166,14 +167,20 @@ export function peerRelayRouter({ createDbClient, deps = {} } = {}) {
       // bot's. The config builder already withholds the proxy blocks (mcp_writer.mjs holdsShare),
       // but a share granted while a session is live must not keep relaying until the next respawn,
       // so the same rule is enforced here on EVERY request. Suspended shares count too (they grant
-      // no access, and a suspension must not be usable to regain the proxy). A failed read is
-      // fail-closed: it is the relay's fault, not the bot's.
+      // no access, and a suspension must not be usable to regain the proxy). A DB that predates the
+      // table has no share to hold (`no such table`), exactly as botHoldsLiveShareSync reads it;
+      // any other failed read is fail-closed: it is the relay's fault, not the bot's.
       let holdsShare = false;
       try {
         holdsShare = await botHoldsLiveShare(db, bot);
       } catch (err) {
-        console.error(`[peer-relay] share lookup failed: ${err && err.message}`);
-        return refuse(res, 503, "the peer relay could not read the bot's settings", { id });
+        const msg = err && err.message ? String(err.message) : "";
+        if (/no such table/i.test(msg)) {
+          holdsShare = false;
+        } else {
+          console.error(`[peer-relay] share lookup failed: ${msg}`);
+          return refuse(res, 503, "the peer relay could not read the bot's settings", { id });
+        }
       }
       if (holdsShare) return refuse(res, 403, "remote tools are off while this bot holds a project share", { id });
       let def = null;

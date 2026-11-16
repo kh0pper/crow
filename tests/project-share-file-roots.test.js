@@ -351,6 +351,52 @@ test("shareWorkspaceRoots: a symlink that leaves the workspace (or points into b
   for (const root of fixtureRoots(d)) assert.ok(coversPath(r.read, root), root);
 });
 
+test("shareWorkspaceRoots: a link to the workspace itself, or into its bots subtree, is not a root", () => {
+  const d = shareFixture("self-links");
+  const real = realpathSync(d);
+  // self -> . and an absolute link to the workspace's own realpath: either would put the workspace
+  // (and everything under it, bots included) back in reach as one root.
+  symlinkSync(".", join(d, "self-rel"));
+  symlinkSync(real, join(d, "self-abs"));
+  // bots-alias -> bots, and a link straight into one bot's sessions directory.
+  symlinkSync(join(d, "bots"), join(d, "bots-alias"));
+  symlinkSync(join(d, "bots", "other", "sessions"), join(d, "sessions-alias"));
+  // A link that leaves the workspace altogether.
+  const outside = ws("unit-neighbour-self");
+  mkdirSync(outside, { recursive: true });
+  symlinkSync(outside, join(d, "escape"));
+  // A plain directory and a link to a sibling directory inside the workspace are fine.
+  symlinkSync(join(d, "docs"), join(d, "docs-alias"));
+
+  const r = shareWorkspaceRoots([{ project_id: 12, level: "read_write", workspace_dir: d, suspended: false }],
+    { projectsRoot: PROJECTS_ROOT });
+
+  for (const name of ["self-rel", "self-abs"]) {
+    assert.equal(coversPath(r.read, d), false, name + ": the workspace itself is not covered");
+    assert.equal(coversPath(r.read, join(d, name)), false, name + " is not a read root");
+    assert.equal(coversPath(r.write, join(d, name)), false, name + " is not a write root");
+  }
+  assert.equal(r.read.includes(real), false, "the workspace realpath is never a granted entry");
+  assert.equal(r.write.includes(real), false);
+  for (const name of ["bots-alias", "sessions-alias"]) {
+    assert.equal(coversPath(r.read, join(d, name)), false, name + ": the bots subtree stays out");
+    assert.equal(coversPath(r.write, join(d, name)), false);
+  }
+  assert.equal(coversPath(r.read, join(d, "bots")), false, "no root covers <ws>/bots");
+  assert.equal(coversPath(r.read, join(d, "bots", "other", "sessions", "x.jsonl")), false,
+    "another bot's transcript stays out of reach");
+  assert.equal(r.read.includes(join(d, "bots")), false, "the bots realpath is not a root");
+  assert.equal(coversPath(r.read, join(d, "escape")), false, "a link out of the workspace is not a root");
+  assert.equal(coversPath(r.read, outside), false);
+
+  // A granted entry is the entry's REALPATH: the plain dir, the sibling link, the plain file.
+  assert.deepEqual(sortRoots(r), {
+    read: sorted([realpathSync(join(d, "docs")), join(d, "top.txt")]),
+    write: sorted([realpathSync(join(d, "docs")), join(d, "top.txt")]),
+  });
+  assert.equal(r.read.includes(join(d, "docs-alias")), false, "the link's own path is not the root");
+});
+
 test("shareWorkspaceRoots: more top-level entries than the cap grants nothing for that share, with one warning", () => {
   const d = ws("unit-wide");
   mkdirSync(d, { recursive: true });
