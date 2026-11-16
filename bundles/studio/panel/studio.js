@@ -231,6 +231,34 @@ const MIDI_SCRIPT = await loadPanelScript("midi.js", "MIDI_SCRIPT");
 const MIDI_ROUTE_SCRIPT = await loadPanelScript("midi-route.js", "MIDI_ROUTE_SCRIPT");
 
 /**
+ * The shell's layout model, loaded once: which widget is on the page, in what
+ * order and at which size is this device's own view state, and the model that
+ * decides it comes BEFORE the shell that reads it and before the client, which
+ * hands a song the operator's template through `seedSong` at boot.
+ */
+const SHELL_LAYOUT_SCRIPT = await loadPanelScript("shell-layout.js", "SHELL_LAYOUT_SCRIPT");
+
+/**
+ * The shell: the top bar, the three modes, the Layout menu, the widget frames
+ * and the tray. It MOVES the nodes this page already renders, so it reaches the
+ * page before the client, which keeps finding the same elements.
+ */
+const SHELL_SCRIPT = await loadPanelScript("shell.js", "SHELL_SCRIPT");
+
+/** The shell's styles, which land after this page's own rules. */
+const SHELL_CSS = await loadPanelScript("shell.js", "SHELL_CSS");
+
+/**
+ * The transport bar: play, stop, pause, record, the bpm, the position, the
+ * recording status, the click and the output picker, in one bar that ends on
+ * the player bar. Like the shell it takes over the page's own controls.
+ */
+const TRANSPORT_SCRIPT = await loadPanelScript("transport-bar.js", "TRANSPORT_SCRIPT");
+
+/** The transport bar's styles: the page's bottom padding and the toast's rise. */
+const TRANSPORT_CSS = await loadPanelScript("transport-bar.js", "TRANSPORT_CSS");
+
+/**
  * The head tag that makes Turbo do a full load of this page.
  *
  * The gateway adds `'wasm-unsafe-eval'` to the Content-Security-Policy only for
@@ -265,6 +293,10 @@ function escapeHtml(value) {
  * inside its own box, so the whole page works at phone width. The toast is the
  * only fixed layer: it sits at the bottom centre, never covering the viewport,
  * and at z-index 1200 — above the player bar and every dashboard layer.
+ *
+ * The shell's and the transport bar's own rules come after these (they adjust
+ * the toast and the page's bottom padding, and the last rule for a selector is
+ * the one that counts), so the page is one style block.
  */
 const STYLES = `
   .studio {
@@ -279,10 +311,27 @@ const STYLES = `
   }
   .studio * { box-sizing: border-box; }
   .studio a { color: #8CC4F5; }
+  /* The top bar, the widget frames and the transport bar are the shell's own
+     (panel/shell.js and panel/transport-bar.js carry their styles). What the
+     page keeps under that bar is the strip of timeline tools, the notices a
+     render can set, and the transport controls before the bar takes them. */
+  /* The library page's own header. The song page has no .st-bar any more: its
+     top bar is the shell's, and the header the handler renders is the row the
+     shell moves those four controls out of. */
   .studio .st-bar {
     display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
     padding: 10px 14px; background: var(--st-head); border-bottom: 1px solid var(--st-line);
   }
+  .studio .st-chrome { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 10px 14px; }
+  .studio .st-strips { display: flex; flex-direction: column; gap: 8px; }
+  /* A strip the page is not using takes no room, whatever it draws with. */
+  .studio .st-strips > [hidden] { display: none; }
+  .studio .st-strips .st-tl-tools { padding: 8px 12px 0; }
+  .studio .st-strips .st-midi-bar { padding: 0 12px; }
+  .studio .st-strips .st-notices {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 12px;
+  }
+  .studio .st-strips .st-notices > [hidden] { display: none; }
   .studio .st-back { font-size: 13px; text-decoration: none; color: var(--st-muted); }
   .studio .st-title { font-size: 15px; font-weight: 700; }
   .studio .st-logo { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 700; }
@@ -636,6 +685,10 @@ const STYLES = `
     background: var(--st-panel);
   }
   .studio .st-notice-text { margin: 0; font-size: 13px; }
+  /* The agent's host: the Ask label and its box, side by side inside one
+     wrapper the shell wraps in the agent widget. Nothing else goes between
+     them: the client puts the transcript beside the box. */
+  .studio [data-role=ask] { display: flex; flex-direction: column; gap: 6px; padding: 12px; }
   .studio .st-ask-label { font-size: 12px; color: var(--st-muted); }
   .studio .st-ask { display: flex; gap: 6px; }
   .studio .st-ask input {
@@ -1205,7 +1258,7 @@ const STYLES = `
     .studio .st-strip { flex: 0 0 152px; }
     .studio .st-strip-master { flex: 0 0 216px; }
   }
-`;
+` + SHELL_CSS + TRANSPORT_CSS;
 
 /**
  * The "New song" form's project picker: every live project space, newest name
@@ -1296,7 +1349,10 @@ function studioPage({ songId, render, res }) {
   const content = `
     <style>${STYLES}</style>
     <div class="studio" data-studio-song="${id}" data-catalog-default="${escapeHtml(CATALOG_DEFAULT)}">
-      <header class="st-bar">
+      <!-- The shell (panel/shell.js) moves these four controls into its own top
+           bar: the back link is the way to the song list, and the three views
+           and the presence row sit beside it. -->
+      <header class="st-chrome">
         <a class="st-back" href="/dashboard/studio">← Songs</a>
         <span class="st-title" data-role="title">Song</span>
         <div class="st-modes" role="group" aria-label="View">
@@ -1304,35 +1360,13 @@ function studioPage({ songId, render, res }) {
           <button class="st-mode" type="button" data-act="mode-arrangement" aria-pressed="false" title="Play the song on the timeline">Arrangement</button>
           <button class="st-mode" type="button" data-act="mode-mixer" aria-pressed="false" title="Mix the tracks, the returns and the master">Mixer</button>
         </div>
-        <div class="st-transport">
-          <button class="st-btn st-transport-btn" type="button" data-act="play" title="Play" aria-label="Play">▶</button>
-          <button class="st-btn st-transport-btn" type="button" data-act="stop" title="Stop" aria-label="Stop">■</button>
-          <button class="st-btn st-transport-btn" type="button" data-act="pause" title="Pause" aria-label="Pause">❚❚</button>
-          <button class="st-btn st-transport-btn st-record-btn" type="button" data-act="record" title="Record into the armed track" aria-label="Record" disabled>●</button>
-          <button class="st-btn st-small st-click-btn" type="button" data-act="metronome" aria-pressed="false"
-            title="Metronome: a click on every beat while it plays">Click</button>
-          <span class="st-rec" data-role="rec-status" hidden></span>
-          <label class="st-bpm">bpm
-            <input data-role="bpm" type="number" min="20" max="300" step="1" value="120" aria-label="Tempo in beats per minute">
-          </label>
-          <span class="st-pos" data-role="position">001.1.1</span>
-          <span class="st-latency" data-role="output-latency" hidden></span>
-        </div>
-        <div class="st-out-bar" data-role="output-bar" hidden>
-          <label class="st-out-label">Output
-            <select class="st-select st-out-select" data-role="output-device" aria-label="Output device"></select>
-          </label>
-          <span class="st-output-note" data-role="output-note" hidden></span>
-        </div>
-        <div class="st-midi-bar">
-          <button class="st-btn st-small" type="button" data-act="midi-connect" aria-pressed="false"
-            title="Let this browser show Studio the MIDI controllers plugged in">Connect controllers</button>
-          <button class="st-btn st-small" type="button" data-act="midi-learn" aria-pressed="false"
-            title="Click a control, then move a knob or press a pad on your controller">Learn</button>
-          <span class="st-midi-state" data-role="midi-state"></span>
-        </div>
-        <span class="st-rec-notice" data-role="rec-notice" hidden></span>
-        <div class="st-tl-tools">
+        <div class="st-presence" data-role="presence"></div>
+      </header>
+      <!-- Directly under the top bar: the timeline's tools (shown only while the
+           lanes are open), the notices a render can set, and the controllers'
+           strip before the shell moves it into the MIDI widget's own header. -->
+      <div class="st-strips">
+        <div class="st-tl-tools" data-role="tl-tools" hidden>
           <button class="st-btn st-tl-rec" type="button" data-act="rec-timeline" aria-pressed="false" title="Collect the scene launches you play into the timeline">
             <span class="st-tl-rec-dot" aria-hidden="true"></span>Record to timeline
           </button>
@@ -1343,10 +1377,41 @@ function studioPage({ songId, render, res }) {
           <span class="st-legend"><span class="st-dot" aria-hidden="true"></span>You</span>
           <span class="st-legend"><span class="st-dot st-dot-agent" aria-hidden="true"></span>Crow agent</span>
         </div>
-        <span class="st-tl-notice" data-role="timeline-notice" hidden></span>
-        <div class="st-perf-notice" data-role="performance-notice" hidden></div>
-        <div class="st-presence" data-role="presence"></div>
-      </header>
+        <div class="st-notices">
+          <span class="st-rec-notice" data-role="rec-notice" hidden></span>
+          <span class="st-tl-notice" data-role="timeline-notice" hidden></span>
+          <div class="st-perf-notice" data-role="performance-notice" hidden></div>
+        </div>
+        <div class="st-midi-bar" data-role="midi-bar">
+          <button class="st-btn st-small" type="button" data-act="midi-connect" aria-pressed="false"
+            title="Let this browser show Studio the MIDI controllers plugged in">Connect controllers</button>
+          <button class="st-btn st-small" type="button" data-act="midi-learn" aria-pressed="false"
+            title="Click a control, then move a knob or press a pad on your controller">Learn</button>
+          <span class="st-midi-state" data-role="midi-state"></span>
+        </div>
+      </div>
+      <!-- The transport bar (panel/transport-bar.js) takes these over, so they
+           live here only until it mounts. -->
+      <div class="st-transport">
+        <button class="st-btn st-transport-btn" type="button" data-act="play" title="Play" aria-label="Play">▶</button>
+        <button class="st-btn st-transport-btn" type="button" data-act="stop" title="Stop" aria-label="Stop">■</button>
+        <button class="st-btn st-transport-btn" type="button" data-act="pause" title="Pause" aria-label="Pause">❚❚</button>
+        <button class="st-btn st-transport-btn st-record-btn" type="button" data-act="record" title="Record into the armed track" aria-label="Record" disabled>●</button>
+        <button class="st-btn st-small st-click-btn" type="button" data-act="metronome" aria-pressed="false"
+          title="Metronome: a click on every beat while it plays">Click</button>
+        <span class="st-rec" data-role="rec-status" hidden></span>
+        <label class="st-bpm">bpm
+          <input data-role="bpm" type="number" min="20" max="300" step="1" value="120" aria-label="Tempo in beats per minute">
+        </label>
+        <span class="st-pos" data-role="position">001.1.1</span>
+        <span class="st-latency" data-role="output-latency" hidden></span>
+      </div>
+      <div class="st-out-bar" data-role="output-bar" hidden>
+        <label class="st-out-label">Output
+          <select class="st-select st-out-select" data-role="output-device" aria-label="Output device"></select>
+        </label>
+        <span class="st-output-note" data-role="output-note" hidden></span>
+      </div>
       <div class="st-body">
         <main class="st-main">
           <section class="st-timeline" data-role="timeline" hidden></section>
@@ -1367,10 +1432,16 @@ function studioPage({ songId, render, res }) {
           </div>
           <p class="st-side-note">Every change, yours or the agent's, is one step here. Undo any step; the agent never edits a locked track or the clip you have open.</p>
           <div class="st-history" data-role="history"></div>
-          <label class="st-ask-label" for="st-ask">Ask the agent</label>
-          <div class="st-ask">
-            <input id="st-ask" type="text" placeholder="Connect a project bot to ask" aria-label="Ask the agent" disabled>
-            <button type="button" disabled>Send</button>
+          <!-- One wrapper around the Ask label and its box, as a direct child of
+               which they are the only two nodes: the shell makes the agent
+               widget out of it and the client puts the transcript beside the
+               box, never inside it. -->
+          <div class="st-ask-body" data-role="ask">
+            <label class="st-ask-label" for="st-ask">Ask the agent</label>
+            <div class="st-ask">
+              <input id="st-ask" type="text" placeholder="Connect a project bot to ask" aria-label="Ask the agent" disabled>
+              <button type="button" disabled>Send</button>
+            </div>
           </div>
         </aside>
       </div>
@@ -1382,6 +1453,9 @@ function studioPage({ songId, render, res }) {
       <script>${TAKE_STORE_SCRIPT}
 ${MIDI_ROUTE_SCRIPT}
 ${MIDI_SCRIPT}
+${SHELL_LAYOUT_SCRIPT}
+${SHELL_SCRIPT}
+${TRANSPORT_SCRIPT}
 ${MIXER_EFFECTS_SCRIPT}
 ${CLIENT_SCRIPT}</script>
       <script src="/dashboard/studio/assets/resample.js"></script>

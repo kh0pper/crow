@@ -14,9 +14,10 @@
  *
  * `mount(page, hooks, options)` MOVES the page's existing controls into one
  * `.st-transport-bar`: play, stop, pause and record, the bpm field, the
- * position readout, the recording status, the click toggle and the output
- * picker. They stay the page's own nodes, so the client's delegated click
- * handler and every render that paints one of them keep working untouched. The
+ * position readout, the recording status, its latency reading, the click toggle
+ * and the output picker. They stay the page's own nodes, so the client's
+ * delegated click handler and every render that paints one of them keep
+ * working untouched. The
  * bar measures its own height into `--st-transport-h` on the `.studio` element,
  * which is what the page reserves at its bottom, and `options.sizeClass` says
  * which size class the page is in: a phone keeps the transport controls alone,
@@ -110,6 +111,9 @@ export const TRANSPORT_SCRIPT = [
   "    nodes.push(page.querySelector('label.st-bpm') || page.querySelector('[data-role=bpm]'));",
   "    nodes.push(page.querySelector('[data-role=position]'));",
   "    nodes.push(page.querySelector('[data-role=rec-status]'));",
+  "    // The context's own latency reading belongs beside the recording status:",
+  "    // it is a fact about this device's audio, not about the song.",
+  "    nodes.push(page.querySelector('[data-role=output-latency]'));",
   "    nodes.push(page.querySelector('[data-act=metronome]'));",
   "    nodes.push(page.querySelector('[data-role=output-bar]'));",
   "    return nodes;",

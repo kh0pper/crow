@@ -2090,6 +2090,22 @@ test("in Chrome, the operator accepts a bot's FCB1010 proposal and pedal 2 launc
   assert.ok(await waitFor(page, `!!document.querySelector('[data-act=open-clip][data-clip-id=${CLIP}]')`, 20000), "the page drew the song before the pedalboard is connected");
   assert.ok(await waitFor(page, "!!document.querySelector('[data-act=midi-connect]')", 20000), "the page offers Connect controllers");
 
+  // The controllers are a widget of their own, so Perform — the mode that shows
+  // the MIDI widget beside the grid — is where the strip of buttons and the table
+  // it draws are on the page. The press waits for the top bar to settle: it is
+  // laid out again as the song's own title and presence arrive.
+  await pause(500);
+  await mousePress(page, "[data-mode=perform]");
+  assert.ok(
+    await waitFor(page, "document.querySelector('[data-mode=perform]').getAttribute('aria-pressed') === 'true'", 10000),
+    "the page is in Perform",
+  );
+  assert.ok(
+    await waitFor(page, "!document.querySelector('[data-widget=midi]').hasAttribute('hidden')", 10000),
+    "Perform puts the MIDI widget on the page",
+  );
+
+  await pause(200);
   await mousePress(page, "[data-act=midi-connect]");
   assert.ok(
     await waitFor(page, "document.querySelector('[data-act=midi-connect]').getAttribute('aria-pressed') === 'true'", 10000),
