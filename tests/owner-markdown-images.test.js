@@ -10,13 +10,18 @@
  * 2FA secret.
  *
  * So the owner path keeps the bot path's rule — `/blog/media/` or the escaped
- * alt text — plus exactly three sources that are NOT a state-changing
+ * alt text — plus exactly five sources that are NOT a state-changing
  * same-origin GET:
  *   - a URL on the instance's storage origin (presigned object URLs),
  *   - an inline `data:image/(png|jpeg|gif|webp);base64,` (no request at all;
  *     never svg), and
  *   - a published case-study figure under `/blog/figures/` in the one filename
- *     shape its read-only route serves (data-dashboard's buildFigureHtml).
+ *     shape its read-only route serves (data-dashboard's buildFigureHtml),
+ *   - a knowledge-base media file under `/kb/media/` in the one filename shape
+ *     the KB's public route streams out of `<CROW_DATA_DIR>/kb-media` (the 12
+ *     live kb_articles that embed a raw `<img src="/kb/media/<sha1>.jpg">`),
+ *   - a meta-glasses note photo on disk under `/api/meta-glasses/photo/` —
+ *     what remintPhotoRefs writes when the object store cannot presign.
  * Anything else is refused, exactly like the bot path.
  *
  * The shared sanitizer also keeps an `<input>` only when it is a GFM task-list
@@ -31,6 +36,7 @@ import assert from "node:assert/strict";
 import {
   renderMarkdown, renderBotMarkdown, setRendererStorageOrigin,
 } from "../servers/blog/renderer.js";
+import { replacePhotoRefs } from "../bundles/meta-glasses/server/photo-refs.js";
 
 const STORAGE = "https://storage.example.test:9000";
 const text = (html) => html.replace(/<[^>]+>/g, "");
@@ -262,6 +268,136 @@ test("the checkbox test is case-insensitive, and a raw checkbox keeps no other a
   }
 });
 
+// ---- knowledge-base media (bundles/knowledge-base) -----------------------
+//
+// A KB article's markdown embeds the images extracted from its guide as a raw
+// `<img src="/kb/media/<sha1>.jpg">`. `GET /kb/media/:filename`
+// (bundles/knowledge-base/routes/kb-public.js) strips everything outside
+// `[a-zA-Z0-9._-]` from the name and streams the stored file — a read-only GET.
+// The owner renderer keeps exactly that one segment with a raster extension.
+
+const KB_MEDIA = "/kb/media/0123456789abcdef0123456789abcdef01234567.jpg";
+
+const KB_MEDIA_REFUSED = [
+  "/kb/media/../x.jpg",
+  "/kb/media/a.svg",
+  "/kb/media/a.jpg?x=1",
+  "/kb/media/a.jpg#x",
+  "/kb/media/sub/a.jpg",
+  "/kb/media/a.bmp",
+  "/kb/media/a%2ejpg",
+  "/kb/media/",
+  "https://host.example/kb/media/a.jpg?x=1",
+  "https://host.example/kb/media/a.jpg#x",
+  "https://host.example/kb/media/a.svg",
+];
+
+test("a KB media image is kept: the raw <img> the live kb_articles use", () => {
+  const html = renderMarkdown(`<img src="${KB_MEDIA}" alt="a">`);
+  assert.match(html, /<img[^>]*src="\/kb\/media\/0123456789abcdef0123456789abcdef01234567\.jpg"/, html);
+  assert.match(html, /alt="a"/, html);
+  // markdown form, every extension the route names a mime for
+  for (const src of [
+    "/kb/media/sha1abc.png",
+    "/kb/media/sha1abc.jpg",
+    "/kb/media/sha1abc.jpeg",
+    "/kb/media/sha1abc.gif",
+    "/kb/media/sha1abc.webp",
+  ]) {
+    assert.match(renderMarkdown(`![a](${src})`), /<img/i, src);
+  }
+  // written out in full: the pathname is what is judged
+  assert.match(
+    renderMarkdown("![a](https://host.example/kb/media/abcd1234.png)"),
+    /src="https:\/\/host\.example\/kb\/media\/abcd1234\.png"/
+  );
+});
+
+test("nothing else under /kb/media/ is kept", () => {
+  for (const src of KB_MEDIA_REFUSED) {
+    const html = renderMarkdown(`![a](${src})`);
+    assert.doesNotMatch(html, /<img/i, `${src}: ${html}`);
+    assert.equal(text(html).trim(), "a", `${src}: alt text only, got ${html}`);
+  }
+});
+
+// ---- meta-glasses note photos on disk -------------------------------------
+//
+// remintPhotoRefs writes `/api/meta-glasses/photo/<file>` for a photo whose
+// object-store upload is unavailable; `GET /api/meta-glasses/photo/:name`
+// (bundles/meta-glasses/panel/routes.js) sanitizes the name to `[\w.-]` and
+// sendFile()s it from the bundle's photo directory. The renderer keeps exactly
+// that shape, minus the one thing the route does not strip: `..`.
+
+const PHOTO_REFUSED = [
+  "/api/meta-glasses/photo/../x",
+  "/api/meta-glasses/photo/..",
+  "/api/meta-glasses/photo/a/b",
+  "/api/meta-glasses/photos/a",
+  "/api/meta-glasses/photo/",
+  "/api/meta-glasses/photo/a.jpg?x=1",
+  "/api/meta-glasses/photo/a.jpg#x",
+  "/api/meta-glasses/photo/%2e%2e/x",
+  "/api/meta-glasses/photo/a%2fb",
+  "https://host.example/api/meta-glasses/photo/a.jpg?x=1",
+  "https://host.example/api/meta-glasses/photo/a.jpg#x",
+];
+
+test("a meta-glasses note photo on disk is kept", () => {
+  const html = renderMarkdown('<img src="/api/meta-glasses/photo/IMG_1.jpg" alt="a">');
+  assert.match(html, /<img[^>]*src="\/api\/meta-glasses\/photo\/IMG_1\.jpg"/, html);
+  assert.match(html, /alt="a"/, html);
+  assert.match(renderMarkdown("![a](/api/meta-glasses/photo/IMG_1.jpg)"), /src="\/api\/meta-glasses\/photo\/IMG_1\.jpg"/);
+  assert.match(
+    renderMarkdown("![a](https://host.example/api/meta-glasses/photo/IMG_1.jpg)"),
+    /src="https:\/\/host\.example\/api\/meta-glasses\/photo\/IMG_1\.jpg"/
+  );
+});
+
+test("nothing else on /api/meta-glasses/photo/ is kept", () => {
+  for (const src of PHOTO_REFUSED) {
+    const html = renderMarkdown(`![a](${src})`);
+    assert.doesNotMatch(html, /<img/i, `${src}: ${html}`);
+    assert.equal(text(html).trim(), "a", `${src}: alt text only, got ${html}`);
+  }
+});
+
+// ---- a missing note photo keeps its caption ------------------------------
+
+test("a missing note photo renders as its caption text, never a data: URL", () => {
+  const resolved = new Map([
+    [7, null], // the photo is gone: no row, no object, no file on disk
+    [8, `${STORAGE}/crow-files/p8.jpg?X-Amz-Signature=abc`],
+  ]);
+  const out = replacePhotoRefs("![Sunday market](photo://7) ![Kept](photo://8)", resolved);
+  assert.doesNotMatch(out, /data:/i, `no placeholder src of any kind: ${out}`);
+  assert.doesNotMatch(out, /photo:\/\//, `every ref is rewritten: ${out}`);
+  assert.match(out, /!\[Kept\]\(https:\/\/storage\.example\.test:9000\/crow-files\/p8\.jpg\?X-Amz-Signature=abc\)/, out);
+
+  // Through the owner renderer: one <img> (the live photo), the missing
+  // photo's caption as text — and the SVG placeholder the panel used to emit
+  // would have been refused, leaving the reader nothing at all.
+  setRendererStorageOrigin(STORAGE);
+  const html = renderMarkdown(out);
+  setRendererStorageOrigin(null);
+  assert.equal((html.match(/<img/gi) || []).length, 1, html);
+  assert.match(html, /Sunday market/, html);
+  assert.match(html, /<img[^>]*src="https:\/\/storage\.example\.test:9000\/crow-files\/p8\.jpg/, html);
+});
+
+test("a missing photo's ref outside image syntax disappears, and a caption cannot become markup", () => {
+  const resolved = new Map([[9, null], [10, "https://storage.example.test:9000/crow-files/p10.jpg"]]);
+  assert.equal(replacePhotoRefs("before photo://9 after", resolved), "before  after");
+  assert.equal(replacePhotoRefs("before photo://10 after", resolved), "before https://storage.example.test:9000/crow-files/p10.jpg after");
+  assert.equal(replacePhotoRefs("photo://xyz stays", resolved), "photo://xyz stays", "a non-numeric ref is operator text");
+
+  const escaped = replacePhotoRefs("![[x](/dashboard/logout) *boom*](photo://9)", resolved);
+  const html = renderMarkdown(escaped);
+  assert.doesNotMatch(html, /<img|<a[\s>]/i, html);
+  assert.match(text(html), /\[x\]\(\/dashboard\/logout\) \*boom\*/, html);
+  assert.equal(replacePhotoRefs("![](photo://9)", resolved), "", "no caption, no image, nothing");
+});
+
 // ---- the bot path is untouched -------------------------------------------
 
 test("the bot path keeps its own, stricter rule", () => {
@@ -276,4 +412,14 @@ test("the bot path keeps its own, stricter rule", () => {
     assert.equal(text(html).trim(), "a", html);
     setRendererStorageOrigin(null);
   }
+
+  // the two owner-only read-only routes too, in both spellings and as raw HTML
+  for (const src of [KB_MEDIA, "/kb/media/sha1abc.png", "/api/meta-glasses/photo/IMG_1.jpg", "https://host.example/kb/media/a.png", "https://host.example/api/meta-glasses/photo/a.jpg"]) {
+    const md = renderBotMarkdown(`![a](${src})`);
+    assert.doesNotMatch(md, /<img/i, `${src}: ${md}`);
+    assert.equal(text(md).trim(), "a", `${src}: alt text only, got ${md}`);
+    assert.doesNotMatch(renderBotMarkdown(`<img src="${src}" alt="a">`), /<img/i, src);
+  }
+  // and the figure rule, which stays owner-only
+  assert.doesNotMatch(renderBotMarkdown("![a](/blog/figures/12-abcdef12.png)"), /<img/i);
 });

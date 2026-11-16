@@ -17,13 +17,16 @@ marked.setOptions({ gfm: true, breaks: true });
  * preview, memory panel, knowledge base, file view, meta-glasses notes).
  *
  * A bot can write every one of those surfaces, so the owner path carries the
- * same image rule a bot reply does (see `isAllowedImageSrc`), with three owner
+ * same image rule a bot reply does (see `isAllowedImageSrc`), with five owner
  * exceptions: a URL on the instance's storage origin (presigned object URLs),
- * an inline `data:image/…;base64,`, and a published case-study figure under
+ * an inline `data:image/…;base64,`, a published case-study figure under
  * `/blog/figures/` in the one filename shape its read-only route serves (see
- * OWNER_FIGURE_PREFIX). None of the three can hit a state-changing route: an
- * object store, no request at all, and a GET that only ever returns a PNG. A
- * refused image leaves its escaped alt text, exactly like the bot path.
+ * OWNER_FIGURE_PREFIX), a knowledge-base media file under `/kb/media/` (see
+ * OWNER_KB_MEDIA_PREFIX), and a meta-glasses note photo on disk under
+ * `/api/meta-glasses/photo/` (see OWNER_PHOTO_PREFIX). None of the five can hit
+ * a state-changing route: an object store, no request at all, and three GETs
+ * that only ever return a stored file. A refused image leaves its escaped alt
+ * text, exactly like the bot path.
  *
  * Links keep Turbo Drive (they are the owner's own navigation) but never get
  * prefetched: Turbo 8 fires a same-origin GET on hover, with the viewer's
@@ -342,12 +345,14 @@ const botMarked = new Marked({
 //
 // ONE predicate, two policies (isAllowedImageSrc):
 //   "bot"   `/blog/media/` and nothing else.
-//   "owner" `/blog/media/`; a published case-study figure under `/blog/figures/`
-//           in the exact filename shape the read-only route serves (see
-//           OWNER_FIGURE_PREFIX); an absolute http(s) URL whose PATHNAME is one
-//           of those same two paths (own host written out in full — another
-//           host is blocked by the page CSP anyway); a URL on the storage
-//           origin (presigned object URLs); and an inline
+//   "owner" `/blog/media/`; a published case-study figure under `/blog/figures/`,
+//           a knowledge-base media file under `/kb/media/` and a meta-glasses
+//           note photo under `/api/meta-glasses/photo/`, each in the exact shape
+//           its read-only route serves (see OWNER_FIGURE_PREFIX,
+//           OWNER_KB_MEDIA_PREFIX, OWNER_PHOTO_PREFIX); an absolute http(s) URL
+//           whose PATHNAME is one of those same paths (own host written out in
+//           full — another host is blocked by the page CSP anyway); a URL on
+//           the storage origin (presigned object URLs); and an inline
 //           `data:image/(png|jpeg|gif|webp)` (never svg — and a data: URL makes
 //           no request at all).
 //
@@ -365,8 +370,8 @@ const botMarked = new Marked({
 /** The only image path a bot reply may use — the public blog media route. */
 const BOT_IMAGE_PREFIX = "/blog/media/";
 /**
- * A published case-study figure — the OWNER path's one extra same-origin path,
- * and NEVER one a bot reply may use.
+ * A published case-study figure — one of the OWNER path's read-only
+ * same-origin paths, and NEVER one a bot reply may use.
  *
  * `bundles/data-dashboard` writes `<img src="/blog/figures/<section>-<hash>.png">`
  * into a post's markdown (buildFigureHtml, server.js), and the read-only route
@@ -379,6 +384,36 @@ const BOT_IMAGE_PREFIX = "/blog/media/";
  */
 const OWNER_FIGURE_PREFIX = "/blog/figures/";
 const OWNER_FIGURE_NAME = /^\d+-[0-9a-f]{8,64}\.png$/;
+/**
+ * Knowledge-base media — the images extracted from a guide, which a KB
+ * article's markdown refers to as `<img src="/kb/media/<sha1>.jpg" alt="…">`.
+ *
+ * Served read-only by bundles/knowledge-base/routes/kb-public.js
+ * (`GET /kb/media/:filename`): it strips every character outside
+ * `[a-zA-Z0-9._-]` from the name and streams the file out of
+ * `<CROW_DATA_DIR>/kb-media`, so a GET there can only ever return a stored
+ * file — never a state change.
+ *
+ * The name pattern is deliberately narrower than the route's: one segment with
+ * a raster extension the route names a mime for (never svg — an svg is a
+ * document, the same reason INLINE_IMAGE refuses it), and no `.` of its own, so
+ * `..`, a query string, a fragment and a second segment can never match.
+ */
+const OWNER_KB_MEDIA_PREFIX = "/kb/media/";
+const OWNER_KB_MEDIA_NAME = /^[A-Za-z0-9_-]+\.(?:png|jpe?g|gif|webp)$/;
+/**
+ * A meta-glasses note photo on disk — the src remintPhotoRefs writes in place
+ * of a `photo://<id>` sentinel when the object-store upload is unavailable
+ * (bundles/meta-glasses/panel/routes.js).
+ *
+ * Served read-only by `GET /api/meta-glasses/photo/:name`, which sanitizes the
+ * name to `[\w.-]` and `sendFile`s it from the bundle's photo directory (404
+ * when absent). This is that same character class — the ONE thing the route
+ * does not strip is `..`, which `join(_photoDir, "..")` resolves out of the
+ * directory, so a `..` is refused here explicitly.
+ */
+const OWNER_PHOTO_PREFIX = "/api/meta-glasses/photo/";
+const OWNER_PHOTO_NAME = /^[\w.-]+$/;
 /** The Turbo opt-outs every bot link carries (see sanitizeRendered). */
 const BOT_LINK_ATTRS = ["data-turbo-prefetch", "data-turbo"];
 /** The owner's links opt out of Turbo's prefetch only — Drive stays on. */
@@ -492,6 +527,32 @@ function isOwnerFigurePath(path) {
 }
 
 /**
+ * True when `path` is a knowledge-base media file and nothing else —
+ * `/kb/media/` plus one filename matching OWNER_KB_MEDIA_NAME.
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isOwnerKbMediaPath(path) {
+  if (typeof path !== "string" || !path.startsWith(OWNER_KB_MEDIA_PREFIX)) return false;
+  return OWNER_KB_MEDIA_NAME.test(path.slice(OWNER_KB_MEDIA_PREFIX.length));
+}
+
+/**
+ * True when `path` is a meta-glasses note photo on disk and nothing else —
+ * `/api/meta-glasses/photo/` plus one name matching OWNER_PHOTO_NAME, with no
+ * `..` anywhere in it (a dot segment the read-only route would resolve out of
+ * the photo directory).
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isOwnerPhotoPath(path) {
+  if (typeof path !== "string" || !path.startsWith(OWNER_PHOTO_PREFIX)) return false;
+  const name = path.slice(OWNER_PHOTO_PREFIX.length);
+  if (name.includes("..")) return false;
+  return OWNER_PHOTO_NAME.test(name);
+}
+
+/**
  * The one image predicate. `src` is judged AFTER the `storage:` rewrite, i.e.
  * it is exactly the string the browser would request.
  * @param {string} src
@@ -505,8 +566,9 @@ function isAllowedImageSrc(src, policy, storageOrigin) {
   // media route.
   if (isAllowedBotImageSrc(src)) return true;
   if (policy !== "owner") return false;
-  // (a2) a published case-study figure, as a same-origin path...
-  if (isOwnerFigurePath(src)) return true;
+  // (a2) a read-only owner route, as a same-origin path: a published case-study
+  // figure, a KB media file, a meta-glasses note photo on disk.
+  if (isOwnerFigurePath(src) || isOwnerKbMediaPath(src) || isOwnerPhotoPath(src)) return true;
   // (d) an inline data: image — no request is made at all.
   if (INLINE_IMAGE.test(src)) return true;
   let url;
@@ -516,13 +578,18 @@ function isAllowedImageSrc(src, policy, storageOrigin) {
   if (storageOrigin && url.origin === storageOrigin) return true;
   // (b) the same routes written out in full: only the PATHNAME is judged, by the
   // same rules as (a) — a `..` that resolves out of the prefix, an encoded
-  // separator or a second `//` is refused exactly as it is there. A figure's
-  // pathname must ALSO be the whole URL: `/blog/figures/x.png?a=1` is not the
-  // shape the route serves, so it keeps its alt text (the media route has no
-  // such rule — a cache-busting query is allowed there). Another host reaching
-  // this point is a third-party request the page CSP blocks anyway
-  // (`img-src 'self' data: blob: <storage>`).
-  if (isOwnerFigurePath(url.pathname)) return !url.search && !url.hash;
+  // separator or a second `//` is refused exactly as it is there. The pathname
+  // of an owner-only path (a2) must ALSO be the whole URL:
+  // `/blog/figures/x.png?a=1` is not the shape the route serves, so it keeps
+  // its alt text — and the same for `/kb/media/x.jpg?…` and
+  // `/api/meta-glasses/photo/x.jpg?…`, whose routes ignore a query too but
+  // whose name shapes are matched exactly. (The media route has no such rule —
+  // a cache-busting query is allowed there, isMediaPath judges the pathname.)
+  // Another host reaching this point is a third-party request the page CSP
+  // blocks anyway (`img-src 'self' data: blob: <storage>`).
+  if (isOwnerFigurePath(url.pathname) || isOwnerKbMediaPath(url.pathname) || isOwnerPhotoPath(url.pathname)) {
+    return !url.search && !url.hash;
+  }
   return isMediaPath(url.pathname);
 }
 
@@ -669,8 +736,9 @@ function sanitizeRendered(raw, { imagePolicy = "none", storageOrigin = null } = 
     // (1) An <img> whose src is not allowed for this policy is dropped after
     // the storage: rewrite, so the viewer's browser never makes that request
     // (isAllowedImageSrc owns the decision — /blog/media/ and, on the owner
-    // path only, a published /blog/figures/ figure, the storage origin and
-    // inline images). A markdown image's alt text has already been emitted in
+    // path only, a published /blog/figures/ figure, a /kb/media/ file, a
+    // /api/meta-glasses/photo/ note photo, the storage origin and inline
+    // images). A markdown image's alt text has already been emitted in
     // its place by marked's image renderer; a raw HTML <img> in the markdown
     // simply disappears. sanitize-html's own filter (not a regex over the
     // HTML) owns this decision.
