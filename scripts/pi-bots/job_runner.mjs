@@ -42,7 +42,7 @@ import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
 import { hasActorKey, presignActors } from "./actor-sig.mjs";
-import { withSkillTools, botGrantsServer, withServiceBlocks, withSatelliteBlocks } from "./bot-world.mjs";
+import { withSkillTools, botGrantsServer, withServiceBlocks, withSatelliteBlocks, shareWorkspaceRoots } from "./bot-world.mjs";
 import { crowDefaultsBlock, readWritingRules } from "./crow-defaults.mjs";
 import { turnScopeFor } from "./service-blocks.mjs";
 import { primeBareServerTools } from "./bare-server-tools.mjs";
@@ -372,6 +372,16 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
   // copy, before the skills are inlined and writeBotMcp runs, so the job's
   // MCP config and tool csv use it.
   const def = await withSkillTools(bot.def, { crowHome, log, repoSkillsDir });
+  // Phase 1 bot↔project shares. A job builds its OWN MCP config and its OWN PiRpc below, so it is
+  // the same read a channel turn does (bot-world.mjs): the live shares are read once here, the file
+  // roots join the spawn, and a live share keeps the remote-proxy blocks out of the job's config.
+  // A suspension contributes no root and keeps the blocks out all the same. Never throws: no
+  // shares (or an older DB) is an empty list.
+  let jobShares = [];
+  try {
+    if (typeof bridge.loadBotShares === "function") jobShares = bridge.loadBotShares(job.bot_id) || [];
+  } catch { jobShares = []; }
+  const jobShareRoots = shareWorkspaceRoots(jobShares);
   const sessionDir = mkdtempSync(join(tmpdir(), "pibot-job-"));
   mkdirSync(join(sessionDir, "sessions"), { recursive: true });
   try {
@@ -397,6 +407,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     }
     try {
       const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {}, ...jobActor(job), displayName: bot.display_name,
+        holdsShare: jobShares.length > 0,
         write: mcpDelivery === "file" });
       mcpConfig = (w && w.json) || null;
     } catch (e) { log("job mcp.json write skipped (non-fatal): " + ((e && e.message) || e)); }
@@ -456,6 +467,9 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
       def, sessionDir, resolved, piProvider, selfAuthoringDir: null,
       piSessionId: null, appendSystemPromptFile: sysFile,
       projectWorkspaceDir, mcpDelivery, mcpConfig, botId: job.bot_id,
+      // Share-derived file roots, fixed at this spawn (see the jobShares read above).
+      extraReadPaths: jobShareRoots.read,
+      extraWritePaths: jobShareRoots.write,
       // The listing above is a snapshot of every bare entry's real tool names ({} when the
       // def has none): PiRpc's --tools assembly reads it, never the module cache.
       bareServerTools,

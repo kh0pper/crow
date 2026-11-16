@@ -277,6 +277,9 @@ async function writeWorldMcp(a, sessionId) {
       sessionDir: a.sessionDir, crowHome: a.crowHome, remoteEnabled: a.remoteEnabled, peerGatewayUrls: a.peerGatewayUrls,
       botId: a.botId, jobId: a.jobId, threadId: a.threadId, gatewayType: a.gatewayType, sessionId: sid,
       displayName: a.displayName,
+      // Phase 1 shares: a bot holding a live share gets no remote-proxy blocks (mcp_writer.mjs);
+      // the world's own share read decides, so the next build after a revoke restores them.
+      holdsShare: a.holdsShare === true,
       ensureServers: (a.jobId || a.cardBound || a.projectBoard) ? ["board"] : [],
       // Credential card: the implied crow-secrets entry only for a Perch (interactive) turn,
       // never a channel or job turn (mcp_writer.mjs buildBotMcp).
@@ -401,6 +404,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
   // root only; a `read_write` share adds its workspace to the write roots too.
   const projectShares = B.loadBotShares(botId);
   const shareRoots = shareWorkspaceRoots(projectShares);
+
   // session_dir resolution: prefer the project workspace when available
   // (new project-native bots). Legacy bots without a project_space row, or
   // whose row has no workspace_dir, fall back to def.session_dir (the
@@ -503,7 +507,10 @@ export async function buildBotWorld({ botId, threadId, gatewayType = null, log =
   // config with its id before anything is spawned.
   const session = B.getSession(botId, threadId);
   const mcpArgs = { def, sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId, threadId, gatewayType,
-    displayName: bot.display_name, cardBound, projectBoard, mcpDelivery, log };
+    displayName: bot.display_name, cardBound, projectBoard, mcpDelivery, log,
+    // A live share (suspended ones included: a suspension must not be usable to regain the proxy
+    // blocks) keeps every remote-proxy block out of this turn's config.
+    holdsShare: projectShares.length > 0 };
   const { mcpConfig, signedSessionId } = await writeWorldMcp(mcpArgs, session ? session.id : null);
 
   // Install-approval gate (Phase 2.4): refuse non-allowlisted pi_extensions
