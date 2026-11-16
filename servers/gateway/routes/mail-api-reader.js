@@ -28,7 +28,7 @@ import { parseRawMessageFull } from "../mail/parse.js";
 import {
   MAX_ATTACHMENT_BYTES,
   encodeRfc5987,
-  extractAttachment,
+  extractAttachmentFromParsed,
   safeAttachmentName,
 } from "../mail/reader/attachments.js";
 import { bodyForDisplay } from "../mail/sanitize.js";
@@ -190,7 +190,10 @@ export function registerReaderRoutes(router, ctx) {
       // bytes at all for a UID it did not deliver: an empty one here is that limit, not an empty file.
       if (raw.length === 0) return sendError(res, 413, "too_large", MAIL_ERROR_TEXT.TOO_LARGE);
 
-      const parsed = (await parseRawMessageFull(raw)).parsed;
+      // One parse answers both questions: the identity check below reads `parsed`, and the part the
+      // download serves is read out of the same answer by index, so the two can never disagree.
+      const full = await parseRawMessageFull(raw);
+      const parsed = full.parsed;
       const internalDate = Number(item.internalDate);
       const date = storedDate(parsed.date, Number.isFinite(internalDate) ? internalDate : null);
       const rowFrom = typeof message.fromAddr === "string" && message.fromAddr !== ""
@@ -204,7 +207,7 @@ export function registerReaderRoutes(router, ctx) {
         return sendError(res, 409, "changed_on_server", MAIL_ERROR_TEXT.CHANGED);
       }
 
-      const attachment = await extractAttachment(raw, Number(index));
+      const attachment = extractAttachmentFromParsed(full, Number(index));
       if (!attachment) return sendError(res, 404, "not_found");
       if (attachment.size > MAX_ATTACHMENT_BYTES) {
         return sendError(res, 413, "too_large", MAIL_ERROR_TEXT.TOO_LARGE);

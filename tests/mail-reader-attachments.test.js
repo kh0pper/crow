@@ -42,7 +42,8 @@ const {
   getMessage, upsertFolders, upsertMessage,
 } = await import("../servers/gateway/mail/store/messages.js");
 const {
-  MAX_ATTACHMENT_BYTES, encodeRfc5987, extractAttachment, safeAttachmentName,
+  MAX_ATTACHMENT_BYTES, encodeRfc5987, extractAttachment, extractAttachmentFromParsed,
+  safeAttachmentName,
 } = await import("../servers/gateway/mail/reader/attachments.js");
 const { messageViewHtml } = await import("../servers/gateway/dashboard/panels/mail/html.js");
 const { createFakeMailAdapter } = await import("./fixtures/fake-mail-adapter.mjs");
@@ -227,6 +228,14 @@ const DEFAULT_FOLDERS = [
 const DATE_HEADER = "Wed, 01 Oct 2025 10:00:00 +0000";
 const DATE_MS = Date.parse(DATE_HEADER);
 const BOUNDARY = "b1";
+
+/** The invisible format characters a filename may not carry into a header: the zero-width and bidi
+ *  marks, the bidi embeddings and overrides, the bidi isolates, the Arabic letter mark and a BOM. */
+const INVISIBLE_CODES = [
+  0x061c, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f,
+  0x202a, 0x202b, 0x202c, 0x202d, 0x202e,
+  0x2066, 0x2067, 0x2068, 0x2069, 0xfeff,
+];
 
 const TEXT_BYTES = Buffer.from("first attachment body\n", "utf8");
 const PDF_BYTES = Buffer.from("%PDF-1.4\n% a small pdf\n", "utf8");
@@ -414,6 +423,16 @@ test("encodeRfc5987 escapes the four characters encodeURIComponent leaves alone"
   assert.equal(encoded, "na%C3%AFve%20report%20%281%29%2A.txt");
 });
 
+test("safeAttachmentName drops bidi and invisible format characters", () => {
+  assert.equal(safeAttachmentName("report\u202efdp.exe"), "reportfdp.exe");
+  for (const code of INVISIBLE_CODES) {
+    const ch = String.fromCodePoint(code);
+    const label = `U+${code.toString(16).toUpperCase()}`;
+    assert.equal(safeAttachmentName(`a${ch}b.txt`), "ab.txt", `${label} is dropped`);
+    assert.equal(safeAttachmentName(`${ch}${ch}`), "attachment", `${label} alone leaves no name`);
+  }
+});
+
 test("safeAttachmentName strips separators, quotes and control characters, and caps at 120", () => {
   assert.equal(safeAttachmentName("../../se\"cret\r\nname naïve.txt"), "....secretname naïve.txt");
   assert.equal(safeAttachmentName("notes.txt"), "notes.txt");
@@ -422,6 +441,34 @@ test("safeAttachmentName strips separators, quotes and control characters, and c
   const long = safeAttachmentName("a".repeat(200));
   assert.equal(long.length, 120);
   assert.equal(Array.from(long).length, 120);
+});
+
+test("a filename carrying a right-to-left override keeps none of it in either header form", async () => {
+  const s = await setup();
+  const { account, inbox } = await seedAccount(s);
+  const raw = messageWith([
+    TEXT_PART,
+    attachmentPart({
+      type: "application/octet-stream",
+      bytes: TEXT_BYTES,
+      filenameHeader: "; filename*=UTF-8''report%E2%80%AEfdp.exe",
+    }),
+  ]);
+  const { id } = await storeMessage(s, account, inbox, raw);
+
+  const r = await get(attachmentPath(id, 0));
+  assert.equal(r.status, 200, r.text);
+  const disposition = r.headers["content-disposition"];
+  assert.equal(
+    disposition,
+    "attachment; filename=\"reportfdp.exe\"; filename*=UTF-8''reportfdp.exe",
+  );
+  for (const code of INVISIBLE_CODES) {
+    const ch = String.fromCodePoint(code);
+    const label = `U+${code.toString(16).toUpperCase()}`;
+    assert.equal(disposition.includes(ch), false, `${label} is absent from the header`);
+    assert.equal(disposition.includes(encodeRfc5987(ch)), false, `${label} is absent from filename*`);
+  }
 });
 
 test("the attachment index is the one GET /messages/:id lists, for inline and attached parts", async () => {
@@ -651,6 +698,32 @@ test("extractAttachment returns null for garbage and never throws", async () => 
   assert.equal(first.contentType, "text/plain");
   assert.equal(first.size, TEXT_BYTES.length);
   assert.deepEqual(first.content, TEXT_BYTES);
+});
+
+test("extractAttachmentFromParsed answers what extractAttachment does, from one parse", async () => {
+  const raw = filesMessage();
+  const full = await parseRawMessageFull(raw);
+
+  for (const index of [0, 1, 2, "1"]) {
+    assert.deepEqual(
+      extractAttachmentFromParsed(full, index),
+      await extractAttachment(raw, index),
+      `index ${index}`,
+    );
+  }
+  for (const index of [3, 99, -1, 1.5, "zero", null]) {
+    assert.equal(extractAttachmentFromParsed(full, index), null, `index ${String(index)}`);
+  }
+
+  assert.equal(extractAttachmentFromParsed(null, 0), null);
+  assert.equal(extractAttachmentFromParsed(undefined, 0), null);
+  assert.equal(extractAttachmentFromParsed({}, 0), null);
+  assert.equal(extractAttachmentFromParsed({ parsed: null, attachmentContents: [] }, 0), null);
+  assert.equal(extractAttachmentFromParsed({ parsed: { attachments: [] }, attachmentContents: [] }, 0), null);
+  assert.equal(extractAttachmentFromParsed({ parsed: { attachments: [{}] }, attachmentContents: [] }, 0), null);
+
+  const failed = await parseRawMessageFull(Buffer.from("not a message at all\r\n\r\n"));
+  assert.equal(extractAttachmentFromParsed(failed, 0), null);
 });
 
 /* ------------------------------------------------------------- the page link */

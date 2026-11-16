@@ -9,9 +9,13 @@
  * therefore the same index, and a message whose parts moved is a mismatch the route refuses rather
  * than an attachment it serves from the wrong part.
  *
- * `extractAttachment` never throws and never refuses a call with an exception: a bad index, a parse
- * failure and a stored `parseError` are all null. Plan 3 imports this module to forward an
- * attachment, so it must not depend on a route, a database row or a response object.
+ * `extractAttachmentFromParsed` is the extractor proper: it reads plan 1's parse answer, which holds
+ * `parsed.attachments` and `attachmentContents`, so a caller that already parsed the raw message (the
+ * download route parses it once, to compare what came back with the stored row) pays for one parse,
+ * not two. `extractAttachment` is the thin wrapper for a caller holding only the raw bytes: it parses,
+ * then asks the same function. Neither throws and neither refuses a call with an exception: a bad
+ * index, a parse failure and a stored `parseError` are all null. Plan 3 imports this module to forward
+ * an attachment, so it must not depend on a route, a database row or a response object.
  *
  * `MAX_ATTACHMENT_BYTES` is a defensive second check, not the limit a person meets. The effective
  * limit is plan 1's `MAX_RAW_BYTES` (25 MB): the adapter answers an empty Buffer for any message
@@ -54,9 +58,25 @@ function withoutLoneSurrogates(value) {
 }
 
 /**
+ * The invisible format characters a filename may hold and a header may not: the zero-width and bidi
+ * marks (U+200B..U+200F), the bidi embeddings and overrides (U+202A..U+202E), the bidi isolates
+ * (U+2066..U+2069), the Arabic letter mark (U+061C) and a byte-order mark (U+FEFF). They reorder or
+ * hide the characters around them, so a name carrying one does not read as the characters it is made
+ * of.
+ */
+function isInvisibleFormatCode(code) {
+  return (code >= 0x200b && code <= 0x200f)
+    || (code >= 0x202a && code <= 0x202e)
+    || (code >= 0x2066 && code <= 0x2069)
+    || code === 0xfeff
+    || code === 0x061c;
+}
+
+/**
  * The characters of a filename that may not survive into a header: path separators (either spelling),
- * the double quote that would end the quoted form, and the C0/C1 control characters a header cannot
- * carry. A lone surrogate is dropped too: it names no character and `encodeURIComponent` throws on it.
+ * the double quote that would end the quoted form, the C0/C1 control characters a header cannot
+ * carry, and the invisible format characters that reorder or hide their neighbours. A lone surrogate
+ * is dropped too: it names no character and `encodeURIComponent` throws on it.
  */
 function withoutUnsafeNameChars(value) {
   let out = "";
@@ -74,16 +94,17 @@ function withoutUnsafeNameChars(value) {
     if (code >= 0xdc00 && code <= 0xdfff) continue;
     if (ch === "/" || ch === "\\" || ch === "\"") continue;
     if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) continue;
+    if (isInvisibleFormatCode(code)) continue;
     out += ch;
   }
   return out;
 }
 
 /**
- * One attachment's name as a download answer may carry it: path separators, control characters and
- * double quotes gone, at most 120 characters, and an empty result becomes "attachment". The quote is
- * the only quote stripped: an apostrophe is an ordinary filename character, and the extended form
- * percent-encodes it instead (see `encodeRfc5987`).
+ * One attachment's name as a download answer may carry it: path separators, control characters,
+ * invisible format characters and double quotes gone, at most 120 characters, and an empty result
+ * becomes "attachment". The quote is the only quote stripped: an apostrophe is an ordinary filename
+ * character, and the extended form percent-encodes it instead (see `encodeRfc5987`).
  *
  * @param {unknown} name
  * @returns {string}
@@ -127,21 +148,29 @@ function attachmentIndex(index) {
 }
 
 /**
- * The bytes and metadata of one attachment of one raw message.
+ * The bytes and metadata of one attachment out of an already-parsed message.
  *
- * @param {Buffer|Uint8Array|ArrayBuffer|string} raw the message as the adapter fetched it
- * @param {number} index the attachment's position, the same index `parsed.attachments` uses
- * @returns {Promise<{filename: string, contentType: string, size: number, content: Buffer}|null>}
+ * `result` is what plan 1's `parseRawMessageFull` answered: `parsed` (which carries `attachments`)
+ * together with `attachmentContents`, one pass over postal-mime's list having built both, so index i of
+ * each is the same part by construction.
+ *
+ * Never throws: a bad index, a missing parse, a stored `parseError` and no attachment at that index are
+ * all null.
+ *
+ * @param {{parsed?: object, attachmentContents?: ArrayLike<Uint8Array>}|null} result
+ *   plan 1's parse answer
+ * @param {number|string} index the attachment's position, the same index `parsed.attachments` uses
+ * @returns {{filename: string, contentType: string, size: number, content: Buffer}|null}
  *   null for a bad index, a parse failure, a stored `parseError` or no attachment at that index
  */
-export async function extractAttachment(raw, index) {
+export function extractAttachmentFromParsed(result, index) {
   const wanted = attachmentIndex(index);
-  if (wanted === null) return null;
+  if (wanted === null || !result || typeof result !== "object") return null;
   try {
-    const { parsed, attachmentContents } = await parseRawMessageFull(raw);
-    if (parsed.parseError) return null;
+    const parsed = result.parsed && typeof result.parsed === "object" ? result.parsed : null;
+    if (!parsed || parsed.parseError) return null;
     const part = Array.isArray(parsed.attachments) ? parsed.attachments[wanted] : null;
-    const bytes = Array.isArray(attachmentContents) ? attachmentContents[wanted] : null;
+    const bytes = Array.isArray(result.attachmentContents) ? result.attachmentContents[wanted] : null;
     if (!part || !bytes) return null;
     const content = Buffer.from(bytes);
     return {
@@ -151,9 +180,23 @@ export async function extractAttachment(raw, index) {
       content,
     };
   } catch {
-    // parseRawMessageFull answers rather than throws; a caller handing over something unparseable
-    // gets null, never an exception on a download path.
+    // Nothing here is expected to throw; a caller handing over a mutated or foreign answer gets null,
+    // never an exception on a download path.
     return null;
   }
+}
+
+/**
+ * The bytes and metadata of one attachment of one raw message: the parse, then
+ * `extractAttachmentFromParsed`. Plan 3 imports this to forward an attachment fetched by a caller that
+ * holds only the bytes.
+ *
+ * @param {Buffer|Uint8Array|ArrayBuffer|string} raw the message as the adapter fetched it
+ * @param {number} index the attachment's position, the same index `parsed.attachments` uses
+ * @returns {Promise<{filename: string, contentType: string, size: number, content: Buffer}|null>}
+ *   null for a bad index, a parse failure, a stored `parseError` or no attachment at that index
+ */
+export async function extractAttachment(raw, index) {
+  return extractAttachmentFromParsed(await parseRawMessageFull(raw), index);
 }
 
