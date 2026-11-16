@@ -29,6 +29,35 @@ import { pathToFileURL } from "node:url";
 
 const BUNDLE_DIR = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "pm-workspace");
 
+// Inlined app-root resolver: this file is copied ALONE to
+// <CROW_HOME>/panels/pm-workspace-routes.js, so neither its `../server/*`
+// siblings nor a repo-relative path exist on an installed copy. The gateway
+// sets CROW_APP_ROOT to the checkout at boot (servers/gateway/index.js); the
+// guess is only the run-from-the-repo fallback. Same shape as the maker-lab
+// bundle's inline resolver (that file travels alone too).
+function looksLikeAppRoot(p) {
+  return !!p && existsSync(join(p, "servers", "blog", "renderer.js"));
+}
+const APP_ROOT_GUESS = resolve(import.meta.dirname, "..", "..", "..");
+const APP_ROOT = looksLikeAppRoot(process.env.CROW_APP_ROOT) ? process.env.CROW_APP_ROOT
+  : looksLikeAppRoot(APP_ROOT_GUESS) ? APP_ROOT_GUESS
+  : (process.env.CROW_APP_ROOT || APP_ROOT_GUESS);
+
+// The sanitizing markdown renderer (marked + sanitize-html), loaded lazily the
+// way the knowledge-base panel loads it. `null` = not tried yet, `false` = the
+// import failed (answer escaped text, never raw markdown).
+let rendererMod = null;
+async function loadRenderer() {
+  if (rendererMod !== null) return rendererMod;
+  try {
+    rendererMod = await import(pathToFileURL(join(APP_ROOT, "servers", "blog", "renderer.js")).href);
+  } catch (err) {
+    console.warn(`[pm-workspace routes] failed to load the markdown renderer: ${err.message}`);
+    rendererMod = false;
+  }
+  return rendererMod;
+}
+
 async function importBundleModule(rel) {
   try {
     return await import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
@@ -133,7 +162,7 @@ ${isDrawing ? `<script type="importmap">
   "integrity": { "https://cdn.jsdelivr.net/npm/perfect-freehand@1.2.2/dist/esm/index.mjs": "sha384-5l3A2yfUaPsFT9OELkOpJOX0+bzd81Hi6euWa2tIwITOu+z8k9dMuxvIu78wYkxL" }
 }
 </script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js" integrity="sha384-sLpuECXYCB5TUyTbC06pftm/rgurDambREZmV4eRHwEqJzCQtU6lxI2Ve00z4XW5" crossorigin="anonymous"></script>` : `<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>`}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js" integrity="sha384-sLpuECXYCB5TUyTbC06pftm/rgurDambREZmV4eRHwEqJzCQtU6lxI2Ve00z4XW5" crossorigin="anonymous"></script>` : ""}
 </head>
 <body>
 <div class="editor-page" id="editor-page">
@@ -247,6 +276,74 @@ ${isDrawing
       res.json({ ok: true, note: { ...note, strokes_json: undefined } });
     } catch (err) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Markdown → sanitized HTML for the editor's Preview tab.
+  //
+  // The browser never parses markdown itself: the ONLY markup it receives is
+  // the renderer's output (marked + sanitize-html, the same pipeline the blog
+  // and the knowledge base use), so a note written by a bot through the
+  // pm-workspace MCP create-note tool cannot carry a live handler. Same
+  // protection as POST /api/pm/notes above: the path-scoped dashboardAuth on
+  // /api/pm is the auth rail, and the body is read the same way (text/plain
+  // JSON string, or an already-parsed object).
+  //
+  // It is renderBotMarkdown, not renderMarkdown, because note text can be bot
+  // text: that path refuses every image outside /blog/media/ (a same-origin
+  // `<img src="/dashboard/logout">` would fire a GET with the reader's
+  // cookies) and opts every link out of Turbo prefetch.
+  //
+  // PREVIEW_RENDER_MAX bounds render TIME, not just size: marked's lexer is
+  // QUADRATIC on mixed-delimiter emphasis and the render is synchronous on
+  // this server's event loop. Measured through renderBotMarkdown (CPU time,
+  // 2026-09): 8_192 chars of `**a_` 415 ms (the worst measured), `*a_` 410 ms,
+  // `_*a` 376 ms, `**_a` 210 ms; the same `*a_` run at 32_768 chars 5.4 s, and
+  // at 65_535 chars (~64 KB, the renderer's own BOT_MD_MAX_INPUT) 21.7 s. The
+  // renderer's bot cap is therefore far too late to protect a preview from a
+  // single click: 8 KB renders in well under a second, while the bot cap would
+  // still block the event loop for ~20 s.
+  //
+  // Over PREVIEW_RENDER_MAX (or over the bot cap, which is above it) is NOT an
+  // error: the preview answers the note as ESCAPED TEXT in a <pre> plus
+  // `truncated: true` (the editor puts a "shown without formatting" line above
+  // it) and the renderer is never called. Above the hard PREVIEW_MAX_MD cap
+  // the request is still refused. A SHORT note that legitimately renders to
+  // nothing (whitespace only, comment only, a bare <script> the sanitizer
+  // drops) gets the same escaped <pre> WITHOUT the flag: it is not truncated,
+  // and the editor must never claim it is. A failed (or too old) renderer
+  // import answers that same (unflagged) escaped text — an old install reading
+  // markdown is a cosmetic loss, never a raw sink.
+  const PREVIEW_MAX_MD = 200_000; // the same cap the MCP note tool puts on content_md
+  const PREVIEW_RENDER_MAX = 8_192; // one preview render may spend this many chars of marked
+  router.post("/api/pm/notes/preview", async (req, res) => {
+    const body = parseBody(req);
+    const md = typeof body.content_md === "string" ? body.content_md : "";
+    if (md.length > PREVIEW_MAX_MD) {
+      return res.status(400).json({ error: `content_md is too long (max ${PREVIEW_MAX_MD} characters)` });
+    }
+    const fallback = () => `<pre style="white-space:pre-wrap">${escapeHtml(md)}</pre>`;
+    // The render budget is checked before the renderer is even imported: a long
+    // note is unformatted text, and marked never sees it.
+    if (md.length > PREVIEW_RENDER_MAX) return res.json({ html: fallback(), truncated: true });
+    const mod = await loadRenderer();
+    // Bot renderer first; an install whose renderer predates it keeps the
+    // escaped-text answer rather than falling back to the image-allowing
+    // renderMarkdown.
+    const render = mod && typeof mod.renderBotMarkdown === "function" ? mod.renderBotMarkdown : null;
+    if (!render) return res.json({ html: fallback() });
+    try {
+      const html = render(md);
+      // renderBotMarkdown answers "" for input it refuses (empty in, empty out,
+      // and anything over its own BOT_MD_MAX_INPUT — a backstop only, since
+      // PREVIEW_RENDER_MAX is well below it). A short note can render to nothing
+      // for innocent reasons too, so `truncated` belongs to the size branch
+      // above only: a one-line note must not show "Long note: …".
+      if (!html && md) return res.json({ html: fallback() });
+      return res.json({ html });
+    } catch (err) {
+      console.warn(`[pm-workspace routes] markdown preview failed: ${err.message}`);
+      return res.json({ html: fallback() });
     }
   });
 

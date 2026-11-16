@@ -290,13 +290,18 @@ export default {
           <td>${actions}</td>
         </tr>`;
 
+      // Planner actions carry their arguments in data-* attributes and are
+      // handled by ONE delegated listener in this panel's script (below). An
+      // inline onclick would have to interpolate the uid into a JS string
+      // literal, which only ever held because of its shape (an event uid is
+      // `prov:id:start` today, but a future source could carry a quote).
       const queueHtml = queue.map((e) => eventRow(e, `
-        <button class="pm-btn" onclick="pmPlanDecide('${escapeHtml(e.uid)}','approved')">Approve</button>
-        <button class="pm-btn pm-btn-danger" onclick="pmPlanDecide('${escapeHtml(e.uid)}','rejected')">Reject</button>`)).join("");
+        <button class="pm-btn" data-pm-decide="approved" data-uid="${escapeHtml(e.uid)}">Approve</button>
+        <button class="pm-btn pm-btn-danger" data-pm-decide="rejected" data-uid="${escapeHtml(e.uid)}">Reject</button>`)).join("");
 
       const approvedHtml = approved.map((e) => eventRow(e, `
         <span class="pm-muted">approved ${escapeHtml((e.decided_at || "").slice(0, 16))} via ${escapeHtml(e.decided_via || "?")}</span>
-        <button class="pm-btn pm-btn-danger" onclick="pmPlanDecide('${escapeHtml(e.uid)}','cancelled')">Cancel</button>`)).join("");
+        <button class="pm-btn pm-btn-danger" data-pm-decide="cancelled" data-uid="${escapeHtml(e.uid)}">Cancel</button>`)).join("");
 
       const exportedHtml = exported.map((e) => eventRow(e, `
         <span class="pm-muted">exported ${escapeHtml((e.exported_at || "").slice(0, 16))} — awaiting confirmation</span>`)).join("");
@@ -411,6 +416,14 @@ export default {
         }
         function pmPlanExport() { pmPlanApi('/api/pm/plan/export', {}, 'Exporting'); }
         function pmPlanReconcile() { pmPlanApi('/api/pm/plan/reconcile', {}, 'Reconciling'); }
+        // One delegated listener for every plan-decide button: the arguments
+        // are read from the button's dataset, never parsed out of markup.
+        document.addEventListener('click', function (ev) {
+          var t = ev.target;
+          var btn = t && t.closest ? t.closest('[data-pm-decide]') : null;
+          if (!btn) return;
+          pmPlanDecide(btn.dataset.uid || '', btn.dataset.pmDecide || '');
+        });
       </script>`;
 
     res.send(layout({ title: "PM Workspace", content }));
