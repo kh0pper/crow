@@ -57,6 +57,9 @@ class MiniEl {
     this.className = "";
     this.disabled = false;
     this.type = "";
+    this.value = "";
+    this.checked = false;
+    this.name = "";
     this._text = "";
   }
 
@@ -121,6 +124,13 @@ class MiniEl {
   click() {
     for (const fn of (this.listeners.click || []).slice()) fn({ type: "click", target: this });
   }
+
+  /** Fire one listener type, the way a browser would on a user's own change. */
+  fire(type) {
+    for (const fn of (this.listeners[type] || []).slice()) fn({ type, target: this });
+  }
+
+  change() { this.fire("change"); }
 
   /** Every descendant (not this element itself) the predicate takes. */
   findAll(predicate) {
@@ -219,9 +229,17 @@ function boot(opts) {
 
   const calls = [];
   const spy = { started: [], finished: 0 };
-  const state = { running: options.running === true };
-  const dayAnswer = options.day || DAY;
-  const responses = Object.assign({ "/api/ramble/moves/day": dayAnswer }, options.responses || {});
+  /* The day and the prefs the stubs answer with can change under the script: a
+   * test finishes the setup and then reads the day again. */
+  const state = { running: options.running === true, day: options.day || DAY };
+  const prefsState = { prefs: options.prefs || { cards: 3, windows: [] } };
+  const responses = Object.assign({}, options.responses || {});
+
+  /* The sheet is in the panel markup, hidden, before today.js ever runs. */
+  const sheetEl = new MiniEl("div");
+  sheetEl.id = "rb-first-run";
+  sheetEl.setAttribute("hidden", "");
+  byId.set("rb-first-run", sheetEl);
 
   function answer(body, statusOk) {
     const ok = statusOk !== false;
@@ -240,6 +258,18 @@ function boot(opts) {
     const u = String(url);
     if (method === "POST" && u === "/api/ramble/moves/slot/swap" && options.swapFails === true) {
       return answer({ error: "no swaps left" }, false);
+    }
+    if (u === "/api/ramble/moves/day") return answer(state.day);
+    if (u === "/api/ramble/moves/setup") {
+      if (options.setupFails === true) return answer({ error: "refused" }, false);
+      return answer({ prefs: prefsState.prefs, day: state.day });
+    }
+    if (u === "/api/ramble/moves/prefs") {
+      if (method === "POST") {
+        prefsState.prefs = Object.assign({}, prefsState.prefs, body || {});
+        return answer({ prefs: prefsState.prefs });
+      }
+      return answer({ prefs: prefsState.prefs });
     }
     if (Object.prototype.hasOwnProperty.call(responses, u)) return answer(responses[u]);
     return answer({});
@@ -277,6 +307,8 @@ function boot(opts) {
     spy,
     get,
     setRunning(value) { state.running = value === true; },
+    setDay(next) { state.day = next; },
+    setPrefs(next) { prefsState.prefs = next; },
   };
 }
 
@@ -524,5 +556,375 @@ describe("cards", () => {
     assert.equal(SRC.includes("innerHTML"), false, "every server string is written with textContent");
     assert.ok(SRC.endsWith("\n"), "the file ends with a newline");
     assert.ok(readFileSync(fileURLToPath(import.meta.url), "utf8").endsWith("\n"), "and so does this test file");
+  });
+});
+
+/* ------------------------------------------------------- the first-run sheet */
+
+function inputsOf(root, type) {
+  return root.findAll((node) => node.tagName === "INPUT" && (!type || node.type === type));
+}
+
+function inputWith(root, value) {
+  return inputsOf(root).find((node) => node.value === value) || null;
+}
+
+function neededDay() {
+  const day = deep(DAY);
+  day.setup = { needed: true };
+  return day;
+}
+
+function firstRunBody(booted) { return booted.get("rb-first-run-body"); }
+function firstRunSheet(booted) { return booted.get("rb-first-run"); }
+
+function setupPosts(booted) {
+  return booted.calls.filter((call) => call.url === "/api/ramble/moves/setup");
+}
+
+function dayReads(booted) {
+  return booted.calls.filter((call) => call.url === "/api/ramble/moves/day").length;
+}
+
+function titleOf(root) {
+  const titles = root.findAll((node) => node.tagName === "H3");
+  return titles.length === 1 ? titles[0] : null;
+}
+
+const LIMIT_TAGS = [
+  "knee", "lower_back", "neck", "shoulder", "wrist",
+  "hip", "ankle", "balance", "pregnancy", "high_blood_pressure",
+];
+
+describe("first run", () => {
+  test("setup.needed true opens the sheet on the equipment screen", async () => {
+    const booted = boot({ day: neededDay() });
+    await flush();
+
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), false, "the sheet is open");
+    const body = firstRunBody(booted);
+    const title = titleOf(body);
+    assert.ok(title, "one title");
+    assert.equal(title.textContent, expected("firstRun.equipment.title"));
+    assert.equal(title.id, "rb-first-run-title", "the panel names the title by its id");
+    assert.ok(body.textContent.includes(expected("firstRun.equipment.hint")), "with the hint under it");
+
+    const boxes = inputsOf(body, "checkbox");
+    assert.deepEqual(boxes.map((box) => box.value), ["mat", "band", "chair", "wall"], "a box per thing you may have");
+    assert.deepEqual(boxes.map((box) => box.checked), [false, false, false, true], "only the wall starts ticked");
+    for (const tag of ["mat", "band", "chair", "wall"]) {
+      assert.ok(body.textContent.includes(expected("firstRun.equipment." + tag)), "the line for " + tag);
+    }
+
+    assert.ok(buttonNamed(body, expected("firstRun.skip")), "every screen can be skipped");
+    assert.ok(buttonNamed(body, expected("firstRun.next")), "and the first two say Next");
+    assert.equal(buttonNamed(body, expected("firstRun.done")), null, "the last one finishes, not this one");
+  });
+
+  test("Next walks to the limits screen: ten boxes, every one off", async () => {
+    const booted = boot({ day: neededDay() });
+    await flush();
+    buttonNamed(firstRunBody(booted), expected("firstRun.next")).click();
+
+    const body = firstRunBody(booted);
+    assert.equal(titleOf(body).textContent, expected("firstRun.limits.title"));
+    assert.ok(body.textContent.includes(expected("firstRun.limits.hint")));
+
+    const boxes = inputsOf(body, "checkbox");
+    assert.deepEqual(boxes.map((box) => box.value), LIMIT_TAGS, "a box per limit tag");
+    assert.equal(boxes.every((box) => box.checked === false), true, "and none of them ticked");
+    assert.ok(body.textContent.includes(expected("firstRun.limit.knee")), "Knees");
+    assert.ok(body.textContent.includes("Knees"), "a tag reads as its own name");
+    assert.equal(inputsOf(body, "radio").length, 0, "the level is not asked here");
+    assert.ok(buttonNamed(body, expected("firstRun.next")));
+    assert.ok(buttonNamed(body, expected("firstRun.skip")));
+  });
+
+  test("Next again walks to the level screen with Steady selected", async () => {
+    const booted = boot({ day: neededDay() });
+    await flush();
+    buttonNamed(firstRunBody(booted), expected("firstRun.next")).click();
+    buttonNamed(firstRunBody(booted), expected("firstRun.next")).click();
+
+    const body = firstRunBody(booted);
+    assert.equal(titleOf(body).textContent, expected("firstRun.level.title"));
+    const radios = inputsOf(body, "radio");
+    assert.deepEqual(radios.map((radio) => radio.value), ["1", "2", "3"]);
+    assert.equal(new Set(radios.map((radio) => radio.name)).size, 1, "one name group");
+    assert.deepEqual(radios.map((radio) => radio.checked), [false, true, false], "Steady is the one selected");
+    assert.ok(body.textContent.includes(expected("firstRun.level.1")));
+    assert.ok(body.textContent.includes(expected("firstRun.level.3")));
+    assert.ok(buttonNamed(body, expected("firstRun.done")), "the last screen finishes");
+    assert.equal(buttonNamed(body, expected("firstRun.next")), null, "it does not say Next");
+    assert.ok(buttonNamed(body, expected("firstRun.skip")));
+  });
+
+  test("the untouched path posts none plus the wall, no limits and the middle level", async () => {
+    const booted = boot({ day: neededDay() });
+    await flush();
+    const before = dayReads(booted);
+
+    buttonNamed(firstRunBody(booted), expected("firstRun.next")).click();
+    buttonNamed(firstRunBody(booted), expected("firstRun.next")).click();
+    buttonNamed(firstRunBody(booted), expected("firstRun.done")).click();
+    await flush();
+
+    const posts = setupPosts(booted);
+    assert.equal(posts.length, 1, "one setup request carries all three screens");
+    assert.equal(posts[0].method, "POST");
+    assert.equal(posts[0].credentials, "same-origin");
+    assert.deepEqual(posts[0].body, { equipment: ["none", "wall"], limits: [], level: 2 });
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true, "the sheet closes");
+    assert.equal(dayReads(booted), before + 1, "and the day is read again");
+  });
+
+  test("what is ticked becomes the answer: none first, then the tags in page order", async () => {
+    const booted = boot({ day: neededDay() });
+    await flush();
+
+    inputWith(firstRunBody(booted), "mat").checked = true;
+    buttonNamed(firstRunBody(booted), expected("firstRun.next")).click();
+    inputWith(firstRunBody(booted), "knee").checked = true;
+    buttonNamed(firstRunBody(booted), expected("firstRun.next")).click();
+
+    const challenging = inputWith(firstRunBody(booted), "3");
+    challenging.checked = true;
+    challenging.change();
+    assert.deepEqual(inputsOf(firstRunBody(booted), "radio").map((radio) => radio.checked), [false, false, true],
+      "one level at a time");
+
+    buttonNamed(firstRunBody(booted), expected("firstRun.done")).click();
+    await flush();
+
+    assert.deepEqual(setupPosts(booted)[0].body, {
+      equipment: ["none", "mat", "wall"],
+      limits: ["knee"],
+      level: 3,
+    });
+  });
+
+  test("Skip on the first screen leaves the equipment out of the body", async () => {
+    const booted = boot({ day: neededDay() });
+    await flush();
+
+    buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+    assert.equal(titleOf(firstRunBody(booted)).textContent, expected("firstRun.limits.title"), "Skip moves on");
+
+    buttonNamed(firstRunBody(booted), expected("firstRun.next")).click();
+    buttonNamed(firstRunBody(booted), expected("firstRun.done")).click();
+    await flush();
+
+    const body = setupPosts(booted)[0].body;
+    assert.equal(Object.prototype.hasOwnProperty.call(body, "equipment"), false,
+      "a skipped screen states nothing at all");
+    assert.deepEqual(body, { limits: [], level: 2 });
+  });
+
+  test("skipping every screen sends an empty answer", async () => {
+    const booted = boot({ day: neededDay() });
+    await flush();
+
+    buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+    buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+    buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+    await flush();
+
+    assert.deepEqual(setupPosts(booted)[0].body, {}, "the defaults are the server's to fill in");
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true, "the sheet still closes");
+  });
+
+  test("a refused answer still closes the sheet and reads the day again", async () => {
+    const booted = boot({ day: neededDay(), setupFails: true });
+    await flush();
+    const before = dayReads(booted);
+
+    buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+    buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+    buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+    await flush();
+
+    assert.equal(setupPosts(booted).length, 1, "the answer was sent");
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true, "and the sheet closed anyway");
+    assert.equal(dayReads(booted), before + 1);
+  });
+
+  test("a day that needs nothing never opens the sheet", async () => {
+    const off = boot();
+    await flush();
+    assert.equal(dayReads(off), 1, "the day was read");
+    assert.equal(firstRunSheet(off).hasAttribute("hidden"), true, "needed false is no sheet");
+
+    const absent = deep(DAY);
+    delete absent.setup;
+    const none = boot({ day: absent });
+    await flush();
+    assert.equal(firstRunSheet(none).hasAttribute("hidden"), true, "an absent setup is no sheet either");
+    assert.equal(setupPosts(none).length, 0, "and nothing was answered");
+  });
+
+  test("the setup is asked once per page, whatever the day says next", async () => {
+    const booted = boot({ day: neededDay() });
+    await flush();
+    buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+    buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+    buttonNamed(firstRunBody(booted), expected("firstRun.skip")).click();
+    await flush();
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true);
+
+    booted.setDay(deep(DAY));
+    await booted.sandbox.RambleToday.refresh();
+    await flush();
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true, "a day that needs nothing keeps it shut");
+
+    booted.setDay(neededDay());
+    await booted.sandbox.RambleToday.refresh();
+    await flush();
+    assert.equal(firstRunSheet(booted).hasAttribute("hidden"), true, "and it is never asked twice");
+    assert.equal(setupPosts(booted).length, 1, "no second answer was sent");
+  });
+});
+
+/* ----------------------------------------------- cards a day and the windows */
+
+function slotsBlock(booted) { return booted.get("rb-pref-slots"); }
+
+function blockInputs(booted, type) { return inputsOf(slotsBlock(booted), type); }
+
+function prefsPosts(booted) {
+  return booted.calls.filter((call) => call.method === "POST" && call.url === "/api/ramble/moves/prefs");
+}
+
+async function openCustomize(booted) {
+  booted.get("rb-customize").click();
+  await flush();
+  return slotsBlock(booted);
+}
+
+describe("settings", () => {
+  test("clicking the customize button loads the prefs into the block", async () => {
+    const booted = boot({ prefs: { cards: 2, windows: [] } });
+    await flush();
+    const block = await openCustomize(booted);
+
+    const cards = blockInputs(booted, "radio");
+    assert.deepEqual(cards.map((input) => input.value), ["1", "2", "3"]);
+    assert.deepEqual(cards.map((input) => input.checked), [false, true, false], "the stored count is the one selected");
+
+    const windows = blockInputs(booted, "checkbox");
+    assert.deepEqual(windows.map((input) => input.value), ["morning", "midday", "evening"]);
+    assert.deepEqual(windows.map((input) => input.checked), [true, false, true],
+      "an empty list means the default windows for two cards");
+
+    assert.ok(block.textContent.includes(expected("settings.cardsPerDay.note")), "the note sits under the count");
+  });
+
+  test("the windows are ticked as stored, in slot order", async () => {
+    const booted = boot({ prefs: { cards: 3, windows: ["evening", "morning"] } });
+    await flush();
+    await openCustomize(booted);
+
+    assert.deepEqual(blockInputs(booted, "checkbox").map((input) => input.checked), [true, false, true],
+      "the stored pair, and no midday");
+  });
+
+  test("choosing two cards posts the count and re-ticks the default windows", async () => {
+    const booted = boot({ prefs: { cards: 3, windows: [] } });
+    await flush();
+    await openCustomize(booted);
+    const before = dayReads(booted);
+
+    const two = blockInputs(booted, "radio").find((input) => input.value === "2");
+    two.checked = true;
+    two.change();
+    await flush();
+
+    const posts = prefsPosts(booted);
+    assert.equal(posts.length, 1, "one request");
+    assert.equal(posts[0].credentials, "same-origin");
+    assert.deepEqual(posts[0].body, { cards: 2, windows: [] }, "the windows go back to that count's defaults");
+
+    assert.deepEqual(blockInputs(booted, "checkbox").map((input) => input.checked), [true, false, true],
+      "morning and evening are ticked");
+    assert.deepEqual(blockInputs(booted, "radio").map((input) => input.checked), [false, true, false],
+      "and two is the one selected");
+    assert.equal(dayReads(booted), before + 1, "the day is read again");
+  });
+
+  test("a tick that would not match the count is put back and posts nothing", async () => {
+    const booted = boot({ prefs: { cards: 3, windows: [] } });
+    await flush();
+    await openCustomize(booted);
+
+    const midday = blockInputs(booted, "checkbox").find((input) => input.value === "midday");
+    assert.equal(midday.checked, true, "three cards tick all three windows");
+    midday.checked = false;
+    midday.change();
+    await flush();
+
+    assert.equal(prefsPosts(booted).length, 0, "nothing is sent");
+    assert.equal(midday.checked, true, "and the tick is exactly where it was");
+  });
+
+  test("the tick that matches the count posts the windows in slot order", async () => {
+    const booted = boot({ prefs: { cards: 3, windows: ["evening", "morning"] } });
+    await flush();
+    await openCustomize(booted);
+
+    const midday = blockInputs(booted, "checkbox").find((input) => input.value === "midday");
+    assert.equal(midday.checked, false);
+    midday.checked = true;
+    midday.change();
+    await flush();
+
+    const posts = prefsPosts(booted);
+    assert.equal(posts.length, 1);
+    assert.deepEqual(posts[0].body, { windows: ["morning", "midday", "evening"] });
+  });
+
+  test("one more tick than the count is put back too", async () => {
+    const booted = boot({ prefs: { cards: 2, windows: [] } });
+    await flush();
+    await openCustomize(booted);
+
+    const midday = blockInputs(booted, "checkbox").find((input) => input.value === "midday");
+    assert.equal(midday.checked, false);
+    midday.checked = true;
+    midday.change();
+    await flush();
+
+    assert.equal(prefsPosts(booted).length, 0, "two cards take two windows");
+    assert.equal(midday.checked, false, "so the third tick is undone");
+  });
+
+  test("the block is built from the table's lines and nothing else", async () => {
+    const booted = boot({ prefs: { cards: 1, windows: [] } });
+    await flush();
+    const block = await openCustomize(booted);
+
+    let rest = block.textContent;
+    for (const key of [
+      "settings.cardsPerDay", "settings.cardsPerDay.note", "settings.windows",
+      "settings.slot.morning", "settings.slot.midday", "settings.slot.evening",
+    ]) {
+      const line = expected(key);
+      assert.ok(line !== "", key + " is in the table");
+      assert.ok(rest.includes(line), key + " is on screen");
+      rest = rest.split(line).join("");
+    }
+    for (const digit of ["1", "2", "3"]) rest = rest.split(digit).join("");
+    assert.equal(rest, "", "no other word is drawn");
+  });
+
+  test("the two buttons beside the cards say the table's lines", async () => {
+    const booted = boot();
+    await flush();
+    assert.equal(booted.get("rb-customize").textContent, expected("today.settings"));
+    assert.equal(booted.get("rb-something-else").textContent, expected("today.somethingElse"));
+
+    const table = Object.assign({}, COPY);
+    delete table["today.settings"];
+    const plain = boot({ table });
+    await flush();
+    assert.equal(plain.get("rb-customize").textContent, "", "a missing line leaves the server's label alone");
   });
 });

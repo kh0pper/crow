@@ -391,7 +391,7 @@ function bootMoves(beforeRun, search, detail, extra) {
       getElementById: el,
       createElement: (tag) => new FakeEl(tag),
       createElementNS: (ns, tag) => new FakeEl(tag),
-      querySelectorAll: () => [],
+      querySelectorAll: (selector) => (extra && typeof extra.queryAll === "function" ? extra.queryAll(selector) : []),
       addEventListener: (type, fn) => { (docListeners[type] || (docListeners[type] = [])).push(fn); },
     },
     fetch: fetchStub,
@@ -1153,4 +1153,49 @@ test("?moves=start&slot=evening on a finished card falls back to the day's card"
   assert.equal(booted.calls.some((c) => c.url.startsWith("/api/ramble/moves/library/")), false,
     "nothing was opened from the finished slot");
   assert.deepEqual(booted.sandbox.history.replaced, ["/dashboard/ramble"], "the slot still leaves the URL");
+});
+
+/* ---------------------------------------- a limits change redraws the cards */
+
+test("a limit ticked in Customize redraws Today's cards through savePrefs", async () => {
+  /* One limit checkbox on the page, the way the customize sheet renders it. */
+  const knee = new FakeEl("rb-pref-limit-knee");
+  knee.setAttribute("class", "rb-pref-limit");
+  knee.setAttribute("data-value", "knee");
+
+  const refreshed = [];
+  const booted = bootMoves((sandbox) => {
+    sandbox.RambleToday = { refresh: () => { refreshed.push(1); } };
+  }, "", undefined, {
+    queryAll: (selector) => (selector === ".rb-pref-limit" ? [knee] : []),
+  });
+  await flush();
+
+  assert.equal(refreshed.length, 0, "nothing has changed yet");
+
+  knee.checked = true;
+  for (const fn of (knee.listeners.change || []).slice()) fn({ type: "change", target: knee });
+  await flush();
+
+  const post = booted.calls.find((c) => c.method === "POST" && c.url === "/api/ramble/moves/prefs");
+  assert.ok(post, "the tick is saved");
+  assert.deepEqual(post.body, { limits: ["knee"] });
+  assert.equal(refreshed.length, 1, "and Today's cards are asked to draw themselves again");
+});
+
+test("with no RambleToday hook a limits change still saves and nothing throws", async () => {
+  const knee = new FakeEl("rb-pref-limit-knee");
+  knee.setAttribute("data-value", "hip");
+  const booted = bootMoves(null, "", undefined, {
+    queryAll: (selector) => (selector === ".rb-pref-limit" ? [knee] : []),
+  });
+  await flush();
+
+  knee.checked = true;
+  for (const fn of (knee.listeners.change || []).slice()) fn({ type: "change", target: knee });
+  await flush();
+
+  const post = booted.calls.find((c) => c.method === "POST" && c.url === "/api/ramble/moves/prefs");
+  assert.ok(post, "the tick is saved");
+  assert.deepEqual(post.body, { limits: ["hip"] });
 });

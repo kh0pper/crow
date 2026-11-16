@@ -1167,3 +1167,41 @@
 #ramble #rb-walk-goal-val { min-width: 4.5em; text-align: center; }
 #ramble .rb-walk-toggle { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 #ramble .rb-walk-toggle input { width: 18px; height: 18px; }
+
+/* ------------------------------------ first run and the cards-a-day settings */
+
+/* The first-run sheet's three screens are drawn into one body: a title, an
+ * optional hint, the choices and the two buttons, each a row of its own. */
+#ramble #rb-first-run-body { display: grid; gap: 8px; min-width: 0; max-width: 100%; }
+#ramble #rb-first-run-body .rb-h { margin: 0; }
+#ramble #rb-first-run-body .rb-first-run-hint { margin: 0; }
+#ramble .rb-first-run-opts { width: 100%; }
+#ramble .rb-first-run-opts .rb-check { flex: 1 1 44%; min-width: 0; }
+#ramble .rb-first-run-btns { flex-wrap: wrap; margin-top: 6px; }
+#ramble .rb-first-run-btns .rb-btn { flex: 1 1 140px; }
+
+/* Cards a day and the windows, inside the customize sheet. */
+#ramble #rb-pref-slots { display: grid; gap: 6px; min-width: 0; max-width: 100%; }
+#ramble .rb-pref-slots-label { width: auto; }
+#ramble .rb-pref-cards { flex-wrap: wrap; }
+#ramble .rb-pref-card-chip {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: var(--rb-tap); min-width: var(--rb-tap);
+  padding: 0 16px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: 999px;
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  font: 800 15px var(--rb-font-display);
+  cursor: pointer;
+}
+#ramble .rb-pref-card-chip input { width: 18px; height: 18px; margin: 0; accent-color: var(--rb-accent-2); cursor: pointer; }
+#ramble .rb-pref-card-chip input:checked + span { color: var(--rb-accent-2); }
+#ramble .rb-pref-note { margin: 0; }
+#ramble .rb-pref-windows { width: 100%; max-width: 100%; }
+#ramble .rb-pref-windows .rb-check { flex: 1 1 44%; min-width: 0; }
+
+@media (max-width: 360px) {
+  #ramble .rb-pref-card-chip { flex: 1 1 0; }
+  #ramble .rb-first-run-btns .rb-btn { flex: 1 1 100%; }
+}

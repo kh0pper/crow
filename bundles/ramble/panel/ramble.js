@@ -878,12 +878,21 @@ export default {
               <input type="range" id="rb-pref-level" min="1" max="3" step="1" value="2">
               <strong id="rb-pref-level-val">2</strong>
             </div>
+            <!-- Cards a day and the windows, drawn by static/today.js. -->
+            <div id="rb-pref-slots"></div>
             <label class="rb-switch"><input type="checkbox" id="rb-pref-weather"><span>${esc(S.weather)}</span></label>
             <div class="rb-row">
               <span class="rb-label">${esc(S.calendar)}</span>
               <button class="rb-btn rb-btn-ghost" id="rb-pref-calendar" type="button" disabled>${esc(S.later)}</button>
             </div>
             <p class="rb-muted rb-fine" id="rb-customize-status"></p>
+          </div>
+        </div>
+
+        <!-- The first-run questions; today.js draws the three screens into the body. -->
+        <div class="rb-sheet" id="rb-first-run" hidden>
+          <div class="rb-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="rb-first-run-title">
+            <div id="rb-first-run-body"></div>
           </div>
         </div>
 
