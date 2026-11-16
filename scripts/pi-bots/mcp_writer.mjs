@@ -106,16 +106,17 @@ export function impliedServers(def) {
 // The gateway mounts that serve the project tools with a gateway token's authority: routes/mcp.js
 // treats a valid local MCP token as the owner, and a url block gets no actor env, so a bot handed
 // one of these would act as the owner. Each mount (mountMcpServer) answers on <prefix>/mcp,
-// <prefix>/sse and <prefix>/messages; the prefixes are /router, /projects, /research, /tools and
-// /tools-<name> (servers/gateway/boot/mcp-mounts.js). These paths exist only on Crow gateways (any
-// host, any scheme: loopback, LAN, a Serve HTTPS front); legitimate peer access goes through stdio
-// crow-remote-proxy blocks. Board/phone/artifacts mounts carry signed actor headers instead.
-// /memory too: a bot reaching it with the gateway token would run as an unknown caller (e.g.
-// able to change the operator's writing rules). The gateway's root /mcp is matched only on a
-// loopback host (isOwnerProjectUrl): `/mcp` is the ordinary path of third-party remote MCP
-// servers. The gateway reached by a tailnet or LAN name at its root is a known limit until bot
-// containment keeps the gateway token from bots.
-const OWNER_MOUNT_PATH = /^\/(router|projects|research|memory|tools(-[a-z0-9-]+)?)\/(mcp|sse|messages)$/;
+// <prefix>/sse and <prefix>/messages; the prefixes are /router, /projects, /research, /memory,
+// /storage, /blog-mcp, /tools and /tools-<name> (servers/gateway/boot/mcp-mounts.js for the first
+// group, boot/feature-mounts.js for /storage and /blog-mcp). These paths exist only on Crow
+// gateways (any host, any scheme: loopback, LAN, a Serve HTTPS front); legitimate peer access goes
+// through stdio crow-remote-proxy blocks. Board/phone/artifacts mounts carry signed actor headers
+// instead. /memory and /storage too: a bot reaching them with the gateway token would run as an
+// unknown caller (e.g. able to change the operator's writing rules, or read every project's
+// files). The gateway's root /mcp is matched only on a loopback host (isOwnerProjectUrl): `/mcp`
+// is the ordinary path of third-party remote MCP servers. The gateway reached by a tailnet or LAN
+// name at its root is a known limit until bot containment keeps the gateway token from bots.
+const OWNER_MOUNT_PATH = /^\/(router|projects|research|memory|storage|blog-mcp|tools(-[a-z0-9-]+)?)\/(mcp|sse|messages)$/;
 
 /** True if a url block reaches a Crow gateway's owner-capable mounts. */
 export function isOwnerProjectUrl(rawUrl) {
@@ -135,6 +136,50 @@ export function isOwnerProjectUrl(rawUrl) {
 /** True if a server block touches crow.db (so the journal guard applies). */
 function touchesCrowDb(block) {
   return !!(block && block.env && block.env.CROW_DB_PATH);
+}
+
+/**
+ * The bot identity a writer call carries, in ONE shape. The two call styles differ —
+ * `buildBotMcp` takes `opts.actor` ({botId, displayName, threadId}), `writeBotMcp` takes the flat
+ * `opts.botId`/`displayName`/`threadId` — so a caller that passes either (or `buildBotMcp` with
+ * only `opts.botId`) still gets the actor. A flat id wins when both are given. null when the call
+ * names no bot (a caller that predates the actor plumbing stays byte-identical).
+ */
+function actorOf(opts = {}) {
+  const nested = opts.actor && typeof opts.actor === "object" ? opts.actor : null;
+  const botId = opts.botId || (nested && nested.botId) || null;
+  if (!botId) return null;
+  const pick = (flat, fromNested) => (flat !== undefined ? flat : (fromNested === undefined ? undefined : fromNested));
+  return {
+    botId: String(botId),
+    displayName: pick(opts.displayName, nested ? nested.displayName : undefined),
+    threadId: pick(opts.threadId, nested ? nested.threadId : undefined),
+  };
+}
+
+/** Keys that name WHO the caller is: an actor env or the engine-reserved bot-session marker. */
+const ACTOR_ENV_NAME = /^CROW_ACTOR_/;
+const ENGINE_ACTOR_KEYS = new Set(["CROW_BOT_SESSION"]);
+
+/** True for a name a block must not set: it would let a file choose the caller's identity. */
+function isActorEnvName(key) {
+  return ACTOR_ENV_NAME.test(String(key)) || ENGINE_ACTOR_KEYS.has(String(key));
+}
+
+/**
+ * Strip every actor-identity name from every block's env (replacing, never mutating, a block).
+ * A block's env is laid OVER the env the child inherits from pi (pi-lab's mcp-client), so a value
+ * left in a block would win over the one the engine wrote into pi's own env: a canonical file
+ * generated for the owner (CROW_ACTOR_KIND=owner), a hand-edited block naming another bot, or a
+ * CROW_BOT_SESSION marker would otherwise let a file choose whose scope a bot runs with.
+ */
+function stripActorEnv(mcpServers) {
+  for (const [name, block] of Object.entries(mcpServers || {})) {
+    if (!block || typeof block !== "object" || !block.env || typeof block.env !== "object") continue;
+    const env = Object.fromEntries(Object.entries(block.env).filter(([k]) => !isActorEnvName(k)));
+    if (Object.keys(env).length === Object.keys(block.env).length) continue;
+    mcpServers[name] = { ...block, env };
+  }
 }
 
 // ---- A5: extension addon servers -> minted per-bot pi blocks ---------------
@@ -353,16 +398,13 @@ export function buildBotMcp(def, canonical, opts = {}) {
   }
 
   // A canonical file generated for the owner (scripts/generate-mcp-config.js) marks its project
-  // server CROW_ACTOR_KIND=owner; a bot must never inherit that. Replace, never mutate, the block
-  // (it may be the shared canonical or catalog object).
-  for (const [name, block] of Object.entries(out.mcpServers)) {
-    if (block && block.env && block.env.CROW_ACTOR_KIND === "owner") {
-      const { CROW_ACTOR_KIND: _owner, ...env } = block.env;
-      out.mcpServers[name] = { ...block, env };
-    }
-  }
+  // server CROW_ACTOR_KIND=owner; a bot must never inherit that — nor any other actor name a block
+  // carries (another bot's id, the engine's bot-session marker). Stripped BEFORE applyActorEnv
+  // below, which then writes this turn's actor onto every stdio block.
+  stripActorEnv(out.mcpServers);
 
-  if (opts.actor && opts.actor.botId) applyActorEnv(out.mcpServers, actorEnvFor(opts.actor));
+  const actor = actorOf(opts);
+  if (actor) applyActorEnv(out.mcpServers, actorEnvFor(actor));
 
   return { json: out, servers: active, warnings, journalGuarded, minted, rebound, disabled };
 }
@@ -424,7 +466,7 @@ export function writeBotMcp(def, opts = {}) {
     extraServers, catalog, unconfigured, binding, crowHome,
     ensureServers: opts.ensureServers,
     interactive: opts.interactive === true,
-    actor: opts.botId ? { botId: opts.botId, displayName: opts.displayName, threadId: opts.threadId } : undefined,
+    actor: actorOf(opts) || undefined,
   });
   // F4a L2b: merge cross-instance forward-proxy blocks when the caller has
   // confirmed feature_flags.remote_invocation is on (the DB read is done by the
@@ -450,7 +492,8 @@ export function writeBotMcp(def, opts = {}) {
       actor,
     });
     // Like every other stdio block, the proxy carries the bot's actor env.
-    if (opts.botId) applyActorEnv(blocks, actorEnvFor({ botId: opts.botId, displayName: opts.displayName, threadId: opts.threadId }));
+    const actorEnv = actorOf(opts);
+    if (actorEnv) applyActorEnv(blocks, actorEnvFor(actorEnv));
     remoteWarnings = warnings;
     for (const [name, block] of Object.entries(blocks)) built.json.mcpServers[name] = block;
   }
@@ -719,7 +762,7 @@ if (import.meta.url === "file://" + process.argv[1]) {
       const d = new Database(CROW_DB);
       d.pragma("busy_timeout = 10000");
       const row = d
-        .prepare("SELECT definition FROM pi_bot_defs WHERE bot_id=?")
+        .prepare("SELECT definition, display_name FROM pi_bot_defs WHERE bot_id=?")
         .get(arg);
       d.close();
       if (!row) {
@@ -731,8 +774,11 @@ if (import.meta.url === "file://" + process.argv[1]) {
       // so minted addon blocks resolve against the same instance as CROW_DB.
       // S6-CROW: honour the delivery mode — in fd mode the bridge pipes the
       // config per turn, so this only validates (and removes a stale file).
+      // The bot's identity (botId + display name) rides along so every stdio
+      // block carries the actor, as a bridge-written config does.
       // Never print the built config: it carries signed headers and tokens.
-      const res = writeBotMcp(def, { crowHome: resolveCrowHome(), write: mcpConfigDelivery() === "file" });
+      const res = writeBotMcp(def, { crowHome: resolveCrowHome(), botId: arg, displayName: row.display_name,
+        write: mcpConfigDelivery() === "file" });
       const { json: _omit, ...printable } = res;
       console.log(JSON.stringify(printable, null, 2));
       process.exit(0);

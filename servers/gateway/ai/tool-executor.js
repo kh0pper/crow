@@ -28,7 +28,8 @@ import {
 import { localFirst, satelliteVisible } from "../satellites/tool-entry.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
 import { createDbClient } from "../../db.js";
-import { isVoiceBotId } from "../../shared/voice-bot.js";
+import { isVoiceBotId, isVoiceBotDef } from "../../shared/voice-bot.js";
+import { operatorVoiceActor } from "../../shared/project-share-scope.js";
 import { CATEGORY_PROXY_RE, normalizeExternalParams } from "./proxy-args.js";
 import { CronExpressionParser } from "cron-parser";
 import { sanitizeActorName } from "../../../scripts/pi-bots/actor-env.mjs";
@@ -237,6 +238,19 @@ function resolveToolCategory(action) {
 export function createToolExecutor(opts = {}) {
   const clients = new Map(); // category → Client
   const boundBotId = opts.botDef && opts.botDef.bot_id ? opts.botDef.bot_id : null;
+  // The bound bot's identity, as a construction-time base actor for the in-process project servers.
+  //
+  // A bound bot that is the operator's own voice bot (`crow.voice`, by id or by the `kind: "voice"`
+  // def) gets the frozen operator actor, so EVERY executor bound to the voice bot — including a
+  // relay turn whose transcript is not the operator's own words — has operator scope on projects,
+  // memory and storage. The id alone would not be enough: the frozen actor carries the marker
+  // `isOperatorVoice` checks, and nothing per call can add it. Every other bound bot gets a plain
+  // {kind:"bot", id} actor, which the share rules bind.
+  const boundBotIsVoice = !!(boundBotId && (isVoiceBotId(boundBotId) || isVoiceBotDef(opts.botDef)));
+  const baseActor = boundBotId ? (boundBotIsVoice ? operatorVoiceActor() : { kind: "bot", id: boundBotId }) : undefined;
+  /** The base actor an in-process server of `category` is built with (the project servers build
+   *  all three the same way; every other category gets none). */
+  const baseActorFor = (category) => (category === "projects" || category === "memory" || category === "storage" ? baseActor : undefined);
   const defaultDeliverTo = opts.defaultDeliverTo || null;
   // The turn's thread (version-history job `turn:<threadId>`): named directly, else
   // taken from the deliver target the caller already passed for this turn. Null when
@@ -296,11 +310,13 @@ export function createToolExecutor(opts = {}) {
       throw new Error(`Unknown category: ${category}`);
     }
 
-    // The project server's base actor is the bound bot (unbound executors stay unknown).
-    const factoryOptions = {
-      projects: { actor: boundBotId ? { kind: "bot", id: boundBotId } : undefined },
-    }[category];
-    const { client } = await createInProcessClient(category, factory, factoryOptions);
+    // The project servers' base actor is the bound bot (unbound executors stay unknown and resolve
+    // their own env). The projects and memory factories take `actor`, storage takes `baseActor`.
+    const actorOptions = baseActor === undefined ? undefined
+      : category === "storage" ? { baseActor }
+        : category === "memory" || category === "projects" ? { actor: baseActor }
+          : undefined;
+    const { client } = await createInProcessClient(category, factory, actorOptions);
     clients.set(category, client);
     return client;
   }
@@ -752,7 +768,7 @@ export function createToolExecutor(opts = {}) {
     clients.clear();
   }
 
-  return { executeTool, executeToolCalls, close };
+  return { executeTool, executeToolCalls, close, baseActorFor };
 }
 
 /**

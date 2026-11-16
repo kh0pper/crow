@@ -51,12 +51,44 @@ function headerActor(extra) {
   return UNKNOWN;
 }
 
-/** The base actor from a process env: a bot with an id, an explicit owner, else unknown. */
+/**
+ * A bot session with no verifiable bot identity: refused for every project tool. The engine's
+ * marker (`CROW_BOT_SESSION`) is on the env, but the actor an env names is not a usable bot (no
+ * kind/id, or an id that disagrees with the marker). Frozen so nothing can widen it later.
+ */
+const UNVERIFIED_BOT = Object.freeze({ kind: "bot", id: null, unverified: true });
+
+/**
+ * The base actor from a process env: a bot with an id, an explicit owner, else unknown.
+ *
+ * `CROW_BOT_SESSION` is the engine-reserved marker the bot engine puts on the pi process's own
+ * env (scripts/pi-bots/bridge.mjs): every stdio MCP child inherits it, so "this really is a bot
+ * session" is knowable from the env alone. When the marker is present, the marker wins:
+ *
+ *   - no valid bot actor in the env, or a bot id that differs from the marker's → the unverified
+ *     bot (refused everywhere; an unknown actor is otherwise the operator's own client);
+ *   - a valid bot actor whose id matches → that bot, carrying `botSession: true`, which is what
+ *     `isOperatorVoice` checks: a pi session on the voice bot's id is an ordinary bound bot, so it
+ *     can never borrow the operator's voice scope.
+ *
+ * Nothing else in the env can produce the operator-voice marker.
+ *
+ * What the marker does NOT close: a bot with a shell that spawns one of these servers itself, with a
+ * clean env (no marker), is indistinguishable from the operator's own client. That is the existing
+ * containment caveat, not something this function can fix; every path the bot engine itself
+ * controls (pi's spawn env, the per-bot MCP config) yields a bot actor or the unverified bot.
+ */
 export function actorFromEnv(env) {
   const e = env || {};
-  if (e.CROW_ACTOR_KIND === "bot" && typeof e.CROW_ACTOR_BOT_ID === "string" && e.CROW_ACTOR_BOT_ID) {
-    return { kind: "bot", id: e.CROW_ACTOR_BOT_ID };
+  const marker = typeof e.CROW_BOT_SESSION === "string" && e.CROW_BOT_SESSION !== "";
+  const botId = e.CROW_ACTOR_KIND === "bot" && typeof e.CROW_ACTOR_BOT_ID === "string" && e.CROW_ACTOR_BOT_ID
+    ? e.CROW_ACTOR_BOT_ID
+    : null;
+  if (marker) {
+    if (!botId || botId !== e.CROW_BOT_SESSION) return UNVERIFIED_BOT;
+    return { kind: "bot", id: botId, botSession: true };
   }
+  if (botId) return { kind: "bot", id: botId };
   if (e.CROW_ACTOR_KIND === "owner") return OWNER;
   return UNKNOWN;
 }

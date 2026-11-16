@@ -26,6 +26,7 @@ import {
   getBucketStats,
   isAllowedMimeType,
 } from "./s3-client.js";
+import { actorFromEnv, resolveCallActor } from "../research/actor.js";
 
 // M2b: when an upload claims a reference_id (e.g., source/note/blog_post), the
 // referenced row must belong to the same project_id (or both be project-less).
@@ -86,6 +87,21 @@ export function createStorageServer(dbPath, options = {}) {
 
   const db = createDbClient(dbPath);
 
+  // Who is calling, exactly as the projects and memory servers resolve it: the construction-time
+  // base actor (a stdio server's process env, or the actor the gateway built the server with) is
+  // fixed here, and each call may only narrow it. Nothing refuses or filters on it yet.
+  const baseActor = options.baseActor || actorFromEnv(process.env);
+  const callActor = (extra) => resolveCallActor(baseActor, extra);
+  // Read by tests (and the callers that build this server): who is calling.
+  server.storage = { actor: baseActor, callActor };
+  // Resolves one call's actor. `options.onCallActor` is a test seam that sees every resolution —
+  // the handler's own answer is otherwise not observable until the share gate decides with it.
+  const actorFor = (tool, extra) => {
+    const actor = callActor(extra);
+    if (typeof options.onCallActor === "function") options.onCallActor(actor, tool);
+    return actor;
+  };
+
   // --- crow_upload_file ---
   server.tool(
     "crow_upload_file",
@@ -99,7 +115,8 @@ export function createStorageServer(dbPath, options = {}) {
       reference_id: z.number().optional().describe("ID of the referenced item"),
       project_id: z.number().optional().describe("Associate with a project space (M2). Caller must have write_files capability."),
     },
-    async ({ file_name, mime_type, data_base64, bucket, reference_type, reference_id, project_id }) => {
+    async ({ file_name, mime_type, data_base64, bucket, reference_type, reference_id, project_id }, extra) => {
+      actorFor("crow_upload_file", extra);
       if (!(await isAvailable())) return notConfiguredError();
 
       if (mime_type && !isAllowedMimeType(mime_type)) {
@@ -226,7 +243,8 @@ export function createStorageServer(dbPath, options = {}) {
       reference_id: z.number().optional().describe("Filter by reference ID"),
       limit: z.number().min(1).max(100).optional().describe("Max results (default 50)"),
     },
-    async ({ bucket, mime_type, reference_type, reference_id, limit }) => {
+    async ({ bucket, mime_type, reference_type, reference_id, limit }, extra) => {
+      actorFor("crow_list_files", extra);
       if (!(await isAvailable())) return notConfiguredError();
 
       let sql = "SELECT id, s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, created_at FROM storage_files WHERE 1=1";
@@ -265,7 +283,8 @@ export function createStorageServer(dbPath, options = {}) {
       expiry: z.number().min(60).max(86400).optional().describe("URL expiry in seconds (default 3600 = 1 hour)"),
       bucket: z.string().max(100).optional().describe("Bucket name (default: crow-files)"),
     },
-    async ({ s3_key, expiry, bucket }) => {
+    async ({ s3_key, expiry, bucket }, extra) => {
+      actorFor("crow_get_file_url", extra);
       if (!(await isAvailable())) return notConfiguredError();
 
       const url = await getPresignedUrl(s3_key, { bucket, expiry });
@@ -285,7 +304,8 @@ export function createStorageServer(dbPath, options = {}) {
       bucket: z.string().max(100).optional().describe("Bucket name (default: crow-files)"),
       confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
-    async ({ s3_key, bucket, confirm_token }) => {
+    async ({ s3_key, bucket, confirm_token }, extra) => {
+      actorFor("crow_delete_file", extra);
       if (!(await isAvailable())) return notConfiguredError();
 
       if (!shouldSkipGates()) {
@@ -326,7 +346,8 @@ export function createStorageServer(dbPath, options = {}) {
     "crow_storage_stats",
     "Get storage usage statistics",
     {},
-    async () => {
+    async (_args, extra) => {
+      actorFor("crow_storage_stats", extra);
       if (!(await isAvailable())) return notConfiguredError();
 
       const stats = await getBucketStats();
@@ -356,7 +377,8 @@ export function createStorageServer(dbPath, options = {}) {
       width: z.number().min(256).max(1536).optional().describe("Image width in pixels (default 1024)"),
       height: z.number().min(256).max(1536).optional().describe("Image height in pixels (default 576)"),
     },
-    async ({ prompt, negative_prompt, width, height }) => {
+    async ({ prompt, negative_prompt, width, height }, extra) => {
+      actorFor("crow_generate_background", extra);
       try {
         // Pre-check: is the model currently loading?
         try {
@@ -416,7 +438,8 @@ export function createStorageServer(dbPath, options = {}) {
     "crow_list_backgrounds",
     "List previously generated background images in the gallery",
     {},
-    async () => {
+    async (_args, extra) => {
+      actorFor("crow_list_backgrounds", extra);
       try {
         const resp = await fetch(`${SDXL_SERVICE_URL}/gallery`);
         if (!resp.ok) {
@@ -446,7 +469,8 @@ export function createStorageServer(dbPath, options = {}) {
     {
       name: z.string().max(200).describe("Gallery filename to set as current background"),
     },
-    async ({ name }) => {
+    async ({ name }, extra) => {
+      actorFor("crow_set_background", extra);
       try {
         const resp = await fetch(`${SDXL_SERVICE_URL}/set/${encodeURIComponent(name)}`, { method: "POST" });
         if (!resp.ok) {
