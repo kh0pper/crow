@@ -41,6 +41,19 @@ marked.setOptions({ gfm: true, breaks: true });
  * uncaught, the stack overflow a deeply nested document used to cause was a 500
  * on the page (measured: 1356 ms and a RangeError for 64 KB of `1) `), and an
  * unbounded 4 MB document is an OOM in the gateway process.
+ *
+ * THE LONG-DOCUMENT SPLIT. marked's block lexer is still quadratic on a few
+ * shapes the depth and byte guard below do not cover (`"    x\n>     y\n"`
+ * repeated cost 11 s at 256 KB and ~200 s at 1 MiB), and the owner path is
+ * reachable from public /blog, the file viewer and federated memories. So the
+ * cap is 128 KB, and a document over it is NOT refused: a head of at most
+ * OWNER_MD_MAX_INPUT characters is rendered as markdown exactly as before and
+ * the WHOLE remainder follows as escaped plain text under a short notice (see
+ * ownerMarkdownCut for where the cut lands, and tailHtml for the tail). Nothing
+ * is dropped — the head's source plus the tail's text is the entire document.
+ * Real content is far below the cap (every stored blog post, KB article and
+ * memory is < 60 KB); the file viewer's larger documents are what the tail is
+ * for.
  * @param {string} markdown
  * @param {{ storageOrigin?: string|null }} [options] `storageOrigin` overrides
  *   the module-wide storage origin for this call only. The gateway sets that
@@ -59,38 +72,137 @@ export function renderMarkdown(markdown, options) {
   // lines to marked — and must be to the cap below too, not one long line.
   const src = String(markdown).replace(/\r\n?/g, "\n");
   return withImageContext({ policy: "owner", storageOrigin }, () => {
-    if (src.length > OWNER_MD_MAX_INPUT) {
-      // Too big to parse at all (a whole book, or a bot-written OOM): never
-      // buffered into marked's token tree — the escaped text is the answer.
-      return sanitizeRendered(escapedTextHtml(src), { imagePolicy: "owner", storageOrigin });
+    if (src.length <= OWNER_MD_MAX_INPUT) {
+      return sanitizeRendered(renderOwnerHead(src), { imagePolicy: "owner", storageOrigin });
     }
-    let html;
-    try {
-      // Exactly what ownerMarked.parse(src) does — Lexer#lex (block phase, then
-      // the inline phase) and Parser.parse — with the one difference that the
-      // Lexer is depth-bounded and its re-lex path is byte-budgeted. ownerMarked
-      // carries no hooks, extensions or walkTokens; if one is ever added to it,
-      // it has to be plumbed here too (parse's opt.hooks branch is the code that
-      // would otherwise run it).
-      html = ownerMarked.parser(boundedLexer(ownerMarked.defaults, src.length).lex(src));
-    } catch {
-      // Fail safe, never a 500: the document as escaped text (see
-      // escapedTextHtml — it drops what the author hid, an HTML comment). The
-      // sanitizer below still runs, so the fallback cannot carry markup either.
-      html = escapedTextHtml(src);
-    }
-    return sanitizeRendered(html, { imagePolicy: "owner", storageOrigin });
+    // Over the cap: the head is the same guarded render, the tail is the plain
+    // text this page cannot afford to lex. Both halves meet exactly at `cut`.
+    const cut = ownerMarkdownCut(src);
+    return sanitizeRendered(renderOwnerHead(src.slice(0, cut)), { imagePolicy: "owner", storageOrigin })
+      + tailHtml(src.slice(cut));
   });
 }
 
 /**
- * The owner path's largest accepted document, in characters (1 MiB). Over it
- * renderMarkdown does not parse at all: one 4 MB document is an OOM in the V8
- * heap of the gateway process, and no page here renders one anyway (fileview
- * refuses a file this big before reading it — see routes/fileview.js). Exported
- * so the tests and the file viewer share the same number.
+ * The owner path's markdown half: one guarded parse, or — if the parse still
+ * throws — the document as escaped text (see escapedTextHtml). Never more than
+ * OWNER_MD_MAX_INPUT characters is handed to it.
+ * @param {string} src
+ * @returns {string} unsanitized HTML
  */
-export const OWNER_MD_MAX_INPUT = 1024 * 1024;
+function renderOwnerHead(src) {
+  try {
+    // Exactly what ownerMarked.parse(src) does — Lexer#lex (block phase, then
+    // the inline phase) and Parser.parse — with the one difference that the
+    // Lexer is depth-bounded and its re-lex path is byte-budgeted. ownerMarked
+    // carries no hooks, extensions or walkTokens; if one is ever added to it,
+    // it has to be plumbed here too (parse's opt.hooks branch is the code that
+    // would otherwise run it).
+    return ownerMarked.parser(boundedLexer(ownerMarked.defaults, src.length).lex(src));
+  } catch {
+    // Fail safe, never a 500: the document as escaped text (see
+    // escapedTextHtml — it drops what the author hid, an HTML comment). The
+    // caller's sanitizer still runs, so the fallback cannot carry markup either.
+    return escapedTextHtml(src);
+  }
+}
+
+/**
+ * The owner path's largest markdown-parsed span, in characters (128 KB).
+ *
+ * It used to be 1 MiB, which was safe only against memory: marked's block lexer
+ * is QUADRATIC on some cheap-looking shapes (`"    x\n>     y\n"` repeated:
+ * 11 s at 256 KB, ~200 s at 1 MiB) and this function runs synchronously in a
+ * route reachable from public /blog, the file viewer and federated memories.
+ * 128 KB bounds that to ~2.8 s on that worst measured shape, and every stored blog
+ * post, KB article and memory is under 60 KB, so nothing real is cut. A document
+ * over it is not refused — see renderMarkdown: the head is rendered, the rest
+ * follows as plain text. Exported so the tests share the number.
+ */
+export const OWNER_MD_MAX_INPUT = 128 * 1024;
+
+/** The notice that introduces the plain-text tail of a long document. */
+const TAIL_NOTICE = '<p class="md-tail-notice">Long document: the rest is shown as plain text.</p>';
+
+/**
+ * The plain-text half of a long document: a short notice, then the WHOLE tail in
+ * one <pre>, escaped.
+ *
+ * Appended AFTER sanitizeRendered, which is why it is built here rather than
+ * passed through it: nothing in it comes from the author except the text, and
+ * that text is escaped by escapeText, so no markup — and no attribute — can
+ * survive. Deliberately NOT stripped of HTML comments the way escapedTextHtml
+ * is: this is plain text on screen, so what the author wrote is what the reader
+ * sees, exactly as in an editor.
+ * @param {string} tail
+ * @returns {string}
+ */
+function tailHtml(tail) {
+  return TAIL_NOTICE + '<pre class="md-tail">' + escapeText(tail) + "</pre>";
+}
+
+/**
+ * Where renderMarkdown splits a document longer than OWNER_MD_MAX_INPUT: the end
+ * of the last blank line at or before the cap that is NOT inside a fenced code
+ * block, else the last newline before the cap, else the cap itself (stepped back
+ * one unit when the cap would split a UTF-16 surrogate pair — a single-line
+ * document of emoji has no newline at all, and half a pair is not a character).
+ *
+ * "\n\n" is a block boundary to marked, so the head usually parses cleanly
+ * instead of starting (or ending) mid-paragraph, and a fence is skipped as a cut
+ * point so a code block is never split in half by the notice. One linear pass
+ * (`indexOf` per line, a fence state machine over 4 characters of each line's
+ * start), which is what keeps the split cheap on a 1 MB document.
+ *
+ * A fence is opened by ``` or ~~~ with at most three spaces of indentation
+ * (four would be indented code) and closed by a line of the same character, at
+ * least as long, with nothing but spaces after it — CommonMark's rule, which is
+ * what marked applies.
+ * @param {string} src line-ending-normalised document
+ * @param {number} [cap]
+ * @returns {number} the cut index: head is `src.slice(0, cut)`, tail `src.slice(cut)`
+ */
+export function ownerMarkdownCut(src, cap = OWNER_MD_MAX_INPUT) {
+  const length = String(src).length;
+  const limit = Math.min(cap, length);
+  let lastBlank = -1;
+  /** The open fence: its character and its run length, or null. */
+  let fence = null;
+  for (let start = 0; start < limit;) {
+    const nl = src.indexOf("\n", start);
+    const end = nl === -1 ? length : nl;
+    const line = src.slice(start, end);
+    if (fence) {
+      // A closing fence: same character, at least as long, then spaces only.
+      const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+      if (close && close[1][0] === fence.char && close[1].length >= fence.length) fence = null;
+    } else if (/^[ \t]*$/.test(line)) {
+      // A blank line: the cut is its end, so the head keeps the "\n\n" that
+      // tells marked the block is over.
+      lastBlank = end + 1;
+    } else {
+      const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+      if (open) fence = { char: open[1][0], length: open[1].length };
+    }
+    if (nl === -1) break;
+    start = end + 1;
+  }
+  if (lastBlank > 0) return lastBlank;
+  const nl = src.lastIndexOf("\n", limit - 1);
+  if (nl >= 0) return nl + 1;
+  // No line break to cut at, so the cut is the cap itself — and a cap inside a
+  // UTF-16 surrogate pair would cut one character in half: the head would end
+  // with a lone high surrogate and the tail would begin with its low half (each
+  // renders as U+FFFD, and the split is no longer the characters the author
+  // wrote). Step back one unit instead, so the head is at most one character
+  // shorter and both halves still meet on a character boundary.
+  return limit > 0 && isHighSurrogate(src.charCodeAt(limit - 1)) ? limit - 1 : limit;
+}
+
+/** True for the first half of a UTF-16 surrogate pair (U+D800–U+DBFF). */
+function isHighSurrogate(code) {
+  return code >= 0xd800 && code <= 0xdbff;
+}
 
 /**
  * Drop the author's HTML comments before text is escaped for display: the
