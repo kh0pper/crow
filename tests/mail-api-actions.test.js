@@ -562,6 +562,43 @@ test("read does not touch a row that shares only the Message-ID", async () => {
   assert.equal(flags[0].args[0], "INBOX");
 });
 
+test("read over several copies answers 409 changed_on_server, changes nothing locally and asks for a full sync when a copy's uid is gone", async () => {
+  const s = await setup();
+  const { account, byPath } = await seedAccount(s, {
+    folders: storeFolders([
+      { path: "INBOX", name: "INBOX", specialUse: "\\Inbox", delimiter: "/" },
+      { path: "Archive", name: "Archive", specialUse: "\\Archive", delimiter: "/" },
+    ]),
+  });
+  const adapter = s.adapterFor(account.id);
+  const date = Date.UTC(2025, 8, 3, 9, 0, 0);
+  adapter.deliver("INBOX", makeRaw({ subject: "Copies", messageId: "<copies@mail.example.test>", date: new Date(date) }), { internalDate: date });
+  const row = await seedRow(s, account, byPath("INBOX"), { uid: 1, messageId: "<copies@mail.example.test>", date, internalDate: date });
+  // The second folder's copy names a uid the mailbox does not hold: that folder flags fewer uids than
+  // it was handed, which is the message being gone rather than a flag change.
+  const copy = await seedRow(s, account, byPath("Archive"), { uid: 9, messageId: "<copies@mail.example.test>", date, internalDate: date });
+
+  const read = await post(actionPath(row.id), { action: "read" });
+  assert.equal(read.status, 409, read.text);
+  assert.deepEqual(read.json, { error: "changed_on_server", message: MAIL_ERROR_TEXT.CHANGED });
+  assert.equal((await getMessage(s.db, row.id)).isRead, false, "no row is marked read");
+  assert.equal((await getMessage(s.db, copy.id)).isRead, false);
+  // The copy in the first folder was flagged before the second folder's answer came back: the full
+  // sync behind the answer is what repairs the local row that flagging left as it was.
+  assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.flags), [["\\Seen"]]);
+  assert.deepEqual(s.supervisor.calls.filter((entry) => entry[0] === "requestSync"),
+    [["requestSync", account.id, null]], "a full sync is asked for");
+
+  // The same answer when a folder reports the change itself.
+  adapter.failNext("setFlags", new MailError("CHANGED"));
+  const again = await post(actionPath(row.id), { action: "unread" });
+  assert.equal(again.status, 409, again.text);
+  assert.deepEqual(again.json, { error: "changed_on_server", message: MAIL_ERROR_TEXT.CHANGED });
+  assert.equal((await getMessage(s.db, row.id)).isRead, false);
+  assert.equal(s.supervisor.calls.filter((entry) => entry[0] === "requestSync").length, 2,
+    "each answer asks for a full sync");
+});
+
 test("archive moves to the archive folder and the local row is gone", async () => {
   const s = await setup();
   const { account, byPath } = await seedAccount(s, {
@@ -589,10 +626,11 @@ test("archive moves to the archive folder and the local row is gone", async () =
   assert.deepEqual(inbox.items.map((item) => item.uid), [], "the source no longer holds it");
   assert.deepEqual((await adapter.list("Archive")).items.map((item) => item.uid), [uid]);
 
-  const syncs = s.supervisor.calls.filter((entry) => entry[0] === "requestSync");
-  assert.deepEqual(syncs, [["requestSync", account.id, [byPath("Archive").id]]],
-    "the destination folder is what is synced");
-  assert.equal(s.supervisor.calls.filter((entry) => entry[0] === "noteChange").length, 0);
+  const reported = s.supervisor.calls.filter((entry) => entry[0] === "noteChange" || entry[0] === "requestSync");
+  assert.deepEqual(reported, [
+    ["noteChange", account.id],
+    ["requestSync", account.id, [byPath("Archive").id]],
+  ], "the local change is reported before the destination folder is asked for");
 });
 
 test("archive in an account with only \\All uses it", async () => {
@@ -809,6 +847,45 @@ test("a uid that vanished (updated 0) returns the same 409", async () => {
     [["requestSync", account.id, null]], "a full sync is asked for");
 });
 
+test("archive, delete and move answer 409 changed_on_server, change nothing and ask for a full sync when the uid has vanished (moved 0)", async () => {
+  const s = await setup();
+  const { account, byPath } = await seedAccount(s, {
+    folders: storeFolders([
+      { path: "INBOX", name: "INBOX", specialUse: "\\Inbox", delimiter: "/" },
+      { path: "Archive", name: "Archive", specialUse: "\\Archive", delimiter: "/" },
+      { path: "Drafts", name: "Trash", specialUse: "\\Trash", delimiter: "/" },
+    ]),
+  });
+  const adapter = s.adapterFor(account.id);
+  // One message the mailbox really holds, and a row that names a uid it does not: the adapter's move
+  // answers {moved: 0} for every action here.
+  adapter.deliver("INBOX", makeRaw({ messageId: "<untouched@mail.example.test>" }));
+  const row = await seedRow(s, account, byPath("INBOX"), { uid: 9, messageId: "<vanished@mail.example.test>" });
+
+  const attempts = [
+    ["archive", { action: "archive" }],
+    ["delete", { action: "delete" }],
+    ["move", { action: "move", folderId: byPath("Archive").id }],
+  ];
+  for (const [what, body] of attempts) {
+    const r = await post(actionPath(row.id), body);
+    assert.equal(r.status, 409, `${what}: ${r.text}`);
+    assert.deepEqual(r.json, { error: "changed_on_server", message: MAIL_ERROR_TEXT.CHANGED }, what);
+    assert.notEqual(await getMessage(s.db, row.id), null, `${what}: the row is still there`);
+  }
+
+  const moves = adapter.calls.filter((entry) => entry.method === "move");
+  assert.equal(moves.length, 3, "each action reached the mailbox");
+  assert.deepEqual((await adapter.list("INBOX")).items.map((item) => item.uid), [1], "nothing was moved");
+  assert.deepEqual((await adapter.list("Archive")).items, []);
+  assert.deepEqual((await adapter.list("Drafts")).items, []);
+  assert.equal(adapter.wire.includes("UID MOVE"), false, "a move that found nothing sent no MOVE");
+
+  const syncs = s.supervisor.calls.filter((entry) => entry[0] === "requestSync");
+  assert.equal(syncs.length, attempts.length, "each refused action asks for a sync");
+  for (const sync of syncs) assert.deepEqual(sync, ["requestSync", account.id, null], "a full one");
+});
+
 test("the adapter receives the folder's stored uid_validity as expectedUidValidity", async () => {
   const s = await setup();
   const { account, byPath } = await seedAccount(s, {
@@ -947,47 +1024,89 @@ test("S5: read while a sync is running calls noteChange and the rerun happens; r
   assert.equal(listCalls(), mark + 2, "the run in flight plus the one full rerun noteChange asked for");
 });
 
-test("S5: an action that lands while a sync of its source folder is mid-flight does not bring the moved message back (the rerun removes it)", async () => {
+test("S5: a move that lands while a sync of its source folder is mid-flight does not bring the moved message back (the dirty rerun removes it)", async () => {
   const s = await setupReal();
-  const uid = s.fake.deliver("INBOX", makeRaw({ subject: "Moved", messageId: "<moved@mail.example.test>" }));
+  const messageId = "<moved@mail.example.test>";
+  s.fake.deliver("INBOX", makeRaw({ subject: "Moved", messageId }));
   await s.supervisor.syncNow(s.accountId);
   await flush();
   const inbox = await s.folderByRole("inbox");
-  const { rows } = await s.db.execute({
-    sql: "SELECT id FROM mail_messages WHERE account_id = ? AND folder_id = ?",
-    args: [s.accountId, inbox.id],
-  });
-  const row = Number(rows[0].id);
+  const archive = await s.folderByRole("archive");
+  const sent = await s.folderByRole("sent");
+  assert.ok(inbox && archive && sent, "the sync stored the folders");
 
+  const rowsOf = async (folderId, mid) => (await s.db.execute({
+    sql: `SELECT id FROM mail_messages
+           WHERE account_id = ? AND folder_id = ? AND message_id = ?`,
+    args: [s.accountId, folderId, mid],
+  })).rows.map((row) => Number(row.id));
+  const [row] = await rowsOf(inbox.id, messageId);
+  assert.ok(row, "the message is stored in INBOX");
+  // The IDLE watch reports a flag change of its own; this test is about what the route asks for.
+  s.fake.dropWatch();
+  await flush();
+
+  // The in-flight run re-reads INBOX from the start, so its listing and its body fetch both see the
+  // message BEFORE the move: the row it writes afterwards is the one a rerun has to take back.
+  await setFolderSyncState(s.db, inbox.id, { highestUid: 0, floorUid: null });
+
+  // The hold sits in the body fetch, the call after the source folder's listing: the bytes are the
+  // mailbox's before the move, while the write of them lands after it.
+  const realGet = s.fake.get;
   let release = null;
-  s.gate.hold = new Promise((resolve) => { release = resolve; });
-  const run = s.supervisor.syncNow(s.accountId);
-  await waitFor(async () => (await s.supervisor.status(s.accountId)).running === true, "the run to be in flight");
+  let held = false;
+  const gate = new Promise((resolve) => { release = resolve; });
+  s.fake.get = async (path, uids) => {
+    const answer = await realGet(path, uids);
+    if (!held && path === "INBOX") {
+      held = true;
+      await gate;
+    }
+    return answer;
+  };
 
-  const archived = await post(actionPath(row), { action: "archive" });
-  assert.equal(archived.status, 200, archived.text);
-  assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM mail_messages WHERE id = ?", args: [row] }))
-    .rows[0].n, 0, "the local row is gone straight away");
+  const listCalls = () => s.fake.calls.filter((entry) => entry.method === "listFolders").length;
+  const mark = listCalls();
+  const run = s.supervisor.requestSync(s.accountId, { folderIds: [inbox.id] });
+  await waitFor(() => held, "the in-flight run to reach its body fetch");
+
+  const moved = await post(actionPath(row), { action: "archive" });
+  assert.equal(moved.status, 200, moved.text);
+  assert.deepEqual(await rowsOf(inbox.id, messageId), [], "the local row is gone straight away");
 
   release();
-  s.gate.hold = null;
   await run;
-  const archiveFolder = await s.folderByRole("archive");
-  await waitFor(async () => (await s.db.execute({
-    sql: "SELECT id FROM mail_messages WHERE account_id = ? AND folder_id = ?",
-    args: [s.accountId, archiveFolder.id],
-  })).rows.length === 1, "the follow-up sync to store the moved message");
+  await waitFor(async () => (await rowsOf(archive.id, messageId)).length === 1,
+    "the destination folder to hold the moved message");
 
-  const back = await s.db.execute({
-    sql: "SELECT COUNT(*) AS n FROM mail_messages WHERE account_id = ? AND folder_id = ? AND message_id = ?",
-    args: [s.accountId, inbox.id, "<moved@mail.example.test>"],
-  });
-  assert.equal(back.rows[0].n, 0, "the moved message is not back in its source folder");
-  const moved = await s.db.execute({
-    sql: "SELECT id FROM mail_messages WHERE account_id = ? AND folder_id = ? AND message_id = ?",
-    args: [s.accountId, archiveFolder.id, "<moved@mail.example.test>"],
-  });
-  assert.equal(moved.rows.length, 1, "and it is in the archive folder");
+  assert.equal(listCalls(), mark + 1, "the run in flight, then one full rerun");
+  assert.equal((await s.supervisor.status(s.accountId)).running, false);
+  assert.deepEqual(await rowsOf(inbox.id, messageId), [],
+    "the row the in-flight run wrote back is gone from its source folder");
+
+  // With nothing in flight the note is a no-op: only the route's own request for the destination can
+  // store a moved message there.
+  s.fake.get = realGet;
+  s.fake.dropWatch();
+  await flush();
+  const secondId = "<moved-later@mail.example.test>";
+  s.fake.deliver("INBOX", makeRaw({ subject: "Later", messageId: secondId }));
+  await s.supervisor.syncNow(s.accountId);
+  await flush();
+  s.fake.dropWatch();
+  await flush();
+  const [second] = await rowsOf(inbox.id, secondId);
+  assert.ok(second, "the second message is stored in INBOX");
+  assert.equal((await s.supervisor.status(s.accountId)).running, false, "nothing is in flight for it");
+
+  const sentListCalls = () => s.fake.calls.filter((entry) => entry.method === "list" && entry.args[0] === "Sent").length;
+  const listedBefore = sentListCalls();
+
+  const later = await post(actionPath(second), { action: "move", folderId: sent.id });
+  assert.equal(later.status, 200, later.text);
+  await waitFor(async () => (await rowsOf(sent.id, secondId)).length === 1,
+    "the destination sync to read the sent folder and store the moved message");
+  assert.ok(sentListCalls() > listedBefore, "the sent folder was read again, by the sync the route asked for");
 });
 
 test("move requests a sync of the destination folder only (spy on syncFolder), and none when the destination is a \\All folder", async () => {

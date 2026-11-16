@@ -24,9 +24,12 @@
  * Message-ID, sender and date in another folder — plan 1's `copyRows`, one `setFlags` per folder with
  * that folder's own stored UIDVALIDITY) through `setReadForCopies`, then tells the supervisor that
  * local mail changed, so a sync that is already running does one more pass instead of writing its older
- * flag snapshot back over the change. Archive, delete and move remove the row (`deleteMessageRow`) and
- * ask for the destination folder to be synced — the one folder that must be re-read so the message
- * appears there with the UID the server gave it. A destination the sync engine never syncs (the
+ * flag snapshot back over the change. Archive, delete and move remove the row (`deleteMessageRow`),
+ * tell the supervisor that local mail changed, and ask for the destination folder to be synced — the
+ * one folder that must be re-read so the message appears there with the UID the server gave it. The
+ * note comes first, because a sync that is already running still holds a listing of the SOURCE folder
+ * taken before the move: marking it dirty makes its rerun a full pass, which re-reads that folder and
+ * drops the row that run would otherwise write back. A destination the sync engine never syncs (the
  * virtual `\All`, `\Flagged`, `\Important` views) asks for nothing, because there is nothing to ask
  * for.
  *
@@ -253,9 +256,11 @@ export function registerActionRoutes(router, ctx) {
               ...(isRead ? { add: [SEEN] } : { remove: [SEEN] }),
               expectedUidValidity: storedValidity(group.folder),
             });
-            // Nothing there is the message being gone, not a flag change: the caller reads it as
-            // changed on the server.
-            if (Number(answer?.updated) === 0) throw new MailError("CHANGED", "uid");
+            // Fewer uids flagged than were handed over is the message being gone, not a flag change:
+            // the caller reads it as changed on the server. A copy an earlier folder already flagged
+            // stays flagged on the server, and the full sync behind that answer is what repairs the
+            // local row a later folder's failure left as it was.
+            if (!(Number(answer?.updated) >= uids.length)) throw new MailError("CHANGED", "uid");
           }
         }
       });
@@ -299,6 +304,9 @@ export function registerActionRoutes(router, ctx) {
     if (!agreed) return changedOnServer();
 
     await deleteMessageRow(db, row.id);
+    // Before the destination is asked for: a run already in flight holds a listing of the source
+    // folder from before the move, so it is marked dirty and its full rerun re-reads that folder.
+    noteChangeQuietly(supervisor, account.id, logCode, label);
     if (!isSkippedFolder(destinationFolder)) {
       requestSyncInBackground(supervisor, account.id, [destinationFolder.id], logCode, label);
     }
