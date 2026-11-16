@@ -684,10 +684,17 @@ function isCheckboxInput(attribs) {
 //
 // With the budgets in place, every adversarial unit x container shape at the
 // cap, the medium-block case, the `_`+filler worst shape, the definitions
-// flood and 50 random 64 KB delimiter soups all measured ≤ 253 ms of CPU
-// (worst: the `_`+filler shape at 253 ms; 133 ms for a unit x shape, 116 ms
-// for the definitions flood; tests/bot-markdown-quadratic.test.js pins the
-// bounds and records the worst render in a diagnostic).
+// flood and 50 random 64 KB delimiter soups all measured about 300 ms of CPU
+// worst case (304 ms measured on 8 blocks of ~1,000 `*` each followed by
+// fourteen `a\n` lines; 253 ms for the `_`+filler shape, 133 ms for a unit x
+// shape, 116 ms for the definitions flood; tests/bot-markdown-quadratic.test.js
+// pins the bounds and records the worst render in a diagnostic).
+//
+// One shape is still slow BEFORE any of these budgets can apply: deeply nested
+// list/quote markers (e.g. `1) ` repeated) cost ~1.5 s inside marked's BLOCK
+// lexer, which runs first — pre-existing and unrelated to the inline budgets
+// above (a RangeError there is caught and answers "", so callers fall back to
+// plain text), and a separate follow-up.
 // ---------------------------------------------------------------------------
 
 /** The characters marked's inline lexer reacts to: emphasis (`*`, `_`),
