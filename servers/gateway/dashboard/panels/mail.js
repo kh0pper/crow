@@ -24,6 +24,14 @@
  * body and which attachments it has). A link that resolves to nothing gets the not-here page.
  * Neither view writes anything: the body comes from the frame route, never from this page.
  *
+ * The `search` view reads plan 1's local index (`searchLocal`, which already collapses a message's
+ * label copies to one hit), scoped to one account or to every usable one; the words are trimmed and
+ * cut at 200 characters, and an empty query is not a search at all, so it draws the inbox instead.
+ * The list views also carry the two controls a link cannot be — refresh and, once a folder's local
+ * rows are exhausted, "Look further back" — as buttons naming account and folder ids only; the
+ * client script (Task 8) posts them and reloads with a `flash` this page parses back into a kind and
+ * a count.
+ *
  * Hidden from the classic sidebar; the shell's drawer reveals it (shell/chrome.js) only while the
  * flag is on AND the request is the owner's own local password session (the same check as the gate
  * below, made once per page in dispatchPanel).
@@ -33,7 +41,7 @@ import { isLocalPasswordSessionOn } from "../local-session.js";
 import { mailEnabled } from "../../mail/flag.js";
 import { accountsOverview } from "../../mail/accounts-overview.js";
 import { MailError } from "../../mail/errors.js";
-import { getFolder, getMessage, listFolders, listMessages } from "../../mail/store/messages.js";
+import { getFolder, getMessage, listFolders, listMessages, searchLocal } from "../../mail/store/messages.js";
 import { listThreadMessages, resolveMessageRef } from "../../mail/store/reader-queries.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
 import { instanceZone } from "../../../shared/schedule-store.js";
@@ -43,8 +51,29 @@ import { mailCss } from "./mail/css.js";
 /** Rows per page. The cursor is the only way to the next one. */
 const INBOX_PAGE_SIZE = 30;
 
+/** The longest query the search view runs: the same 200 characters plan 1's search route cuts at. */
+const QUERY_MAX_CHARS = 200;
+
 /** The list a message view goes back to when its `back` says nothing usable. */
 const INBOX_HREF = "/dashboard/mail";
+
+/** The search view's own words: trimmed, cut at 200 characters, empty when there is nothing to ask. */
+function readQuery(value) {
+  return typeof value === "string" ? value.trim().slice(0, QUERY_MAX_CHARS) : "";
+}
+
+/**
+ * The reload an action leaves behind: `older:<n>` or `remote:<n>` brought that many rows back, and
+ * `start` says a folder reached its own beginning. Any other value means nothing at all. The count is
+ * an integer, whatever the digits looked like in the URL.
+ */
+function readFlash(value) {
+  if (typeof value !== "string" || value === "") return null;
+  if (value === "start") return { kind: "start", count: null };
+  const match = /^(older|remote):(\d{1,9})$/.exec(value);
+  if (!match) return null;
+  return { kind: match[1], count: Number(match[2]) };
+}
 
 /**
  * One page of summaries. A cursor is opaque and comes back from a link a person may have edited, so
@@ -107,7 +136,11 @@ export default {
       return null;
     }
     const query = req.query || {};
-    const view = typeof query.view === "string" && query.view ? query.view : "inbox";
+    const asked = typeof query.view === "string" && query.view ? query.view : "inbox";
+    const q = readQuery(query.q);
+    // An empty query is not a search: the inbox it falls back to carries the box that asks for one.
+    const view = asked === "search" && q === "" ? "inbox" : asked;
+    const flash = readFlash(query.flash);
     // This instance's own id: the claim rules compare every held address against it.
     const localInstanceId = getOrCreateLocalInstanceId();
     const { accounts, elsewhere } = await accountsOverview(db, { localInstanceId });
@@ -115,6 +148,7 @@ export default {
 
     let folders = [];
     let page = null;
+    let hits = [];
     let acct = "all";
     let folderId = null;
     let message = null;
@@ -154,6 +188,21 @@ export default {
       }
     }
 
+    // Searching: plan 1's local index, one row per logical message, narrowed to one account when a
+    // chip's id is asked for and to every usable account otherwise. A claimed account's stored mail
+    // is never searched for.
+    if (usable.length && view === "search") {
+      const ids = new Set(usable.map((entry) => entry.id));
+      const askedAcct = typeof query.acct === "string" ? query.acct : "";
+      acct = ids.has(askedAcct) ? askedAcct : "all";
+      const found = await searchLocal(db, {
+        q,
+        accountId: acct === "all" ? null : acct,
+        limit: INBOX_PAGE_SIZE,
+      });
+      hits = acct === "all" ? found.filter((item) => ids.has(item.accountId)) : found;
+    }
+
     // Opening a message: the link names the account and the Message-ID, with the row id as a hint
     // resolved against that id (Decision 9). A link that means nothing gets the not-here page.
     if (usable.length && view === "message") {
@@ -177,9 +226,9 @@ export default {
 
     return layout({
       title: t("mail.title", lang),
-      content: mailCss({ inbox: page !== null, message: message !== null }) + renderMailPage({
+      content: mailCss({ inbox: page !== null || view === "search", message: message !== null }) + renderMailPage({
         view, accounts, elsewhere, lang, folders, page, acct, folderId, now: Date.now(), tz,
-        message, thread, account, back, missing,
+        message, thread, account, back, missing, q, hits, flash,
       }),
     });
   },

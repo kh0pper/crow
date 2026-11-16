@@ -23,10 +23,18 @@
  * opaque-origin iframe (the body itself is served by the frame route and never written into this
  * page), its attachments, and — after the conversation — the reply slot a later plan fills. A
  * message with nothing to show says so in one sentence instead of a slot.
+ *
+ * The list's own controls (Task 6) live above it: the search box, which is a plain GET form so it
+ * works with no client script, the control that refreshes the accounts (also the pull-to-refresh
+ * target), and — on the last page of a list — "Look further back", which continues a folder's
+ * history on the server. The search view draws the local index's hits as the same rows and, beneath
+ * them, the control that asks the servers for mail the index does not hold yet. Every one of those
+ * controls names account and folder ids only, and the page never carries a host or a username.
  */
 import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { SKIP_SPECIAL_USE } from "../../../mail/sync/engine.js";
+import { folderRole } from "../../../mail/store/messages.js";
 import { FRAME_IFRAME_SANDBOX } from "../../../mail/reader/frame-doc.js";
 
 const e = escapeHtml;
@@ -85,6 +93,63 @@ function pageShell(inner, lang) {
     <h1 class="ml-title">${e(t("mail.title", lang))}</h1>
     ${inner}
   </div>`;
+}
+
+/* ---------------------------------------------------- the list's own controls */
+
+/** The account ids a control may name: only ids ever reach an attribute, never a host or a user. */
+function accountIds(accounts, acct) {
+  const ids = accounts.map((account) => String(account.id ?? "")).filter((id) => id !== "");
+  if (acct !== ALL_ACCOUNTS && ids.includes(String(acct))) return String(acct);
+  return ids.join(",");
+}
+
+/**
+ * The list header: the search box and — on the inbox and folder views — the control that asks each
+ * account's server for new mail. The box is a plain GET form, so it works with no client script; the
+ * refresh control names only account ids, which the client (Task 8) posts to the sync route.
+ */
+function listHeader({ accounts, acct, q = "", withRefresh = false, lang }) {
+  const form = `<form class="ml-search" method="get" action="${MAIL_HREF}" role="search">
+      <input type="hidden" name="view" value="search">
+      <input type="hidden" name="acct" value="${e(acct)}">
+      <input class="ml-btn ml-search-input" type="search" name="q" value="${e(q)}" enterkeyhint="search" aria-label="${e(t("common.search", lang))}">
+      <button class="ml-btn" type="submit">${e(t("common.search", lang))}</button>
+    </form>`;
+  const refresh = withRefresh
+    ? `<button class="ml-btn" type="button" data-ml-refresh data-accounts="${e(accountIds(accounts, acct))}">${e(t("extensions.servers.refresh", lang))}</button>`
+    : "";
+  return `<div class="ml-head">${form}${refresh}</div>`;
+}
+
+/**
+ * What a reloading action leaves behind: the server says which action ran and how many rows it
+ * brought back (`older:<n>`, `remote:<n>`), or that a folder reached its start (`start`). The line
+ * carries that kind and count as data; its sentence has no approved copy yet, so it is empty.
+ */
+function flashHtml(flash) {
+  if (!flash || typeof flash.kind !== "string") return "";
+  const count = Number.isInteger(flash.count) ? ` data-count="${Number(flash.count)}"` : "";
+  return `<p class="ml-note ml-flash" role="status" data-ml-flash="${e(flash.kind)}"${count}></p>`;
+}
+
+/** The folders "Look further back" asks for: the viewed folder, or the inbox of each account shown. */
+function olderFolderIds({ accounts, folders, folderId, acct }) {
+  if (folderId !== null && Number.isInteger(Number(folderId))) return [Number(folderId)];
+  const shown = acct === ALL_ACCOUNTS ? accounts : accounts.filter((account) => account.id === acct);
+  const ids = [];
+  for (const account of shown) {
+    const inbox = folders.find((folder) => folder.accountId === account.id && folderRole(folder) === "inbox");
+    if (inbox) ids.push(Number(inbox.id));
+  }
+  return ids;
+}
+
+/** "Look further back": continue the folders' history on the server, below the lowest mail held. */
+function olderButton(folderIds, lang) {
+  const ids = folderIds.filter((id) => Number.isInteger(id) && id > 0);
+  if (!ids.length) return "";
+  return `<div class="ml-actions"><button class="ml-btn" type="button" data-ml-older data-folders="${e(ids.join(","))}">${e(t("mail.lookFurtherBack", lang))}</button></div>`;
 }
 
 /* ---------------------------------------------------------------- inbox view */
@@ -242,11 +307,13 @@ function loadMoreHref(acct, folderId, cursor) {
  * then the rows and "Load more".
  *
  * `page` is plan 1's `listMessages` answer — `{items, nextCursor}` — or `{missing: true}` for a
- * folder id that no longer exists (deleted on the server, so a resync removed it).
+ * folder id that no longer exists (deleted on the server, so a resync removed it). "Look further
+ * back" is offered only once no cursor remains: the rows held locally are exhausted, so the next mail
+ * is on the server.
  *
  * @param {{
  *   accounts?: object[], folders?: object[], page?: object|null, acct?: string,
- *   folderId?: number|null, now?: number, lang?: string, tz?: string
+ *   folderId?: number|null, now?: number, lang?: string, tz?: string, flash?: object|null
  * }} options
  * @returns {string}
  */
@@ -259,8 +326,12 @@ export function inboxViewHtml({
   now = Date.now(),
   lang = "en",
   tz = undefined,
+  flash = null,
 } = {}) {
-  const head = chips({ accounts, acct, lang }) + folderDrawer({ accounts, folders, folderId, lang });
+  const head = flashHtml(flash)
+    + listHeader({ accounts, acct, withRefresh: true, lang })
+    + chips({ accounts, acct, lang })
+    + folderDrawer({ accounts, folders, folderId, lang });
 
   if (page && page.missing) {
     // The sentence is plain text, and the way back is its own link beside it.
@@ -279,7 +350,43 @@ export function inboxViewHtml({
   const more = cursor === null
     ? ""
     : `<a class="ml-more" href="${e(loadMoreHref(acct, folderId, cursor))}">${e(t("mail.loadMore", lang))}</a>`;
-  return `${head}${digest}<div class="ml-list">${list}</div>${more}`;
+  const older = cursor === null ? olderButton(olderFolderIds({ accounts, folders, folderId, acct }), lang) : "";
+  return `${head}${digest}<div class="ml-list">${list}</div>${more}${older}`;
+}
+
+/* --------------------------------------------------------------- search view */
+
+/**
+ * The search view: the same box the list header carries, holding the words this search ran on, the
+ * heading that repeats them, the local index's hits as the list's own rows (plan 1 dedupes them, so a
+ * message in two label folders is one row), and beneath them the control that asks the accounts'
+ * servers for mail the local index does not hold yet. The client (Task 8) sends the server search and
+ * reloads with a flash, so the answer survives the reload.
+ *
+ * @param {{
+ *   accounts?: object[], hits?: object[], acct?: string, q?: string, lang?: string,
+ *   now?: number, tz?: string, flash?: object|null
+ * }} options
+ * @returns {string}
+ */
+export function searchViewHtml({
+  accounts = [],
+  hits = [],
+  acct = ALL_ACCOUNTS,
+  q = "",
+  lang = "en",
+  now = Date.now(),
+  tz = undefined,
+  flash = null,
+} = {}) {
+  const head = flashHtml(flash) + listHeader({ accounts, acct, q, lang });
+  const heading = q === "" ? "" : `<h2 class="ml-search-heading">${e(q)}</h2>`;
+  const rows = (Array.isArray(hits) ? hits : []).map((item) => row(item, { now, tz, lang })).join("");
+  const list = rows || `<p class="ml-note">${e(t("mail.emptyFolder", lang))}</p>`;
+  const remote = q === ""
+    ? ""
+    : `<div class="ml-actions"><button class="ml-btn" type="button" data-ml-search-remote data-q="${e(q)}" data-acct="${e(acct)}">${e(t("mail.searchOlderRemote", lang))}</button></div>`;
+  return `${head}${heading}<div class="ml-list">${list}</div>${remote}`;
 }
 
 /* -------------------------------------------------------------- message view */
@@ -512,7 +619,8 @@ export function messageViewHtml({
  * @param {{
  *   view?: string, accounts?: object[], elsewhere?: object[], lang?: string, folders?: object[],
  *   page?: object|null, acct?: string, folderId?: number|null, now?: number, tz?: string,
- *   message?: object|null, thread?: object[], account?: object|null, back?: string, missing?: boolean
+ *   message?: object|null, thread?: object[], account?: object|null, back?: string, missing?: boolean,
+ *   q?: string, hits?: object[], flash?: object|null
  * }} options
  * @returns {string}
  */
@@ -532,6 +640,9 @@ export function renderMailPage({
   account = null,
   back = MAIL_HREF,
   missing = false,
+  q = "",
+  hits = [],
+  flash = null,
 } = {}) {
   const usable = accounts.filter((a) => a.status !== "claimed_elsewhere");
 
@@ -546,10 +657,14 @@ export function renderMailPage({
     return pageShell(messageViewHtml({ message, thread, account, lang, back, tz }), lang);
   }
 
-  // `view` picks the view inside the page; search and settings are built in later tasks, and until
-  // then only the inbox has anything to draw.
+  if (view === "search") {
+    return pageShell(searchViewHtml({ accounts: usable, hits, acct, q, lang, now, tz, flash }), lang);
+  }
+
+  // `view` picks the view inside the page; settings is built in a later task, and until then only
+  // the inbox and the search view have anything to draw.
   if (view === "inbox" && page) {
-    return pageShell(inboxViewHtml({ accounts: usable, folders, page, acct, folderId, now, lang, tz }), lang);
+    return pageShell(inboxViewHtml({ accounts: usable, folders, page, acct, folderId, now, lang, tz, flash }), lang);
   }
   return pageShell("", lang);
 }

@@ -5682,6 +5682,12 @@ export const translations = {
   "mail.download": { en: "Download", es: "Descargar" },
   "mail.cc": { en: "Cc", es: "Con copia" },
   "mail.untitledAttachment": { en: "Untitled attachment", es: "Archivo adjunto sin nombre" },
+  // The reader's two server-side controls (Task 6): searching the accounts' servers for mail the local
+  // index does not hold, and continuing a folder's history below the lowest mail stored here. The
+  // search box's own label and the refresh control borrow the shipped "Search" (common.search) and
+  // "Refresh" (extensions.servers.refresh) words rather than inventing new copy.
+  "mail.searchOlderRemote": { en: "Search older mail on the server", es: "Buscar correo más antiguo en el servidor" },
+  "mail.lookFurtherBack": { en: "Look further back", es: "Buscar más atrás" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
