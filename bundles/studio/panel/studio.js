@@ -442,10 +442,31 @@ const STYLES = `
   .studio .st-th-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .studio .st-color { width: 8px; height: 26px; border-radius: 3px; flex: 0 0 auto; }
   .studio .st-th-name { display: flex; flex-direction: column; min-width: 0; }
+  /* The track's name is a real button — a tap, or Enter and Space, selects the
+     track and opens its editor — drawn as plain text: no chrome, one line, and
+     an ellipsis when the name is long. It is a BLOCK box on purpose, because
+     text-overflow needs one; a flex box here clipped a long name with no
+     ellipsis. Its height is the name's own line, so the header keeps the pitch
+     it had before the name became a control, and the 44 px target is the pencil
+     beside it, in the same row. */
   .studio .st-name {
-    font-size: 13px; font-weight: 600; cursor: pointer;
+    display: block; min-width: 44px; padding: 0; margin: 0;
+    border: 0; background: none; color: inherit; font: inherit;
+    font-size: 13px; font-weight: 600; text-align: left; cursor: pointer;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   }
+  /* The pencil beside a track's name is its own 44 px target: renaming and
+     selecting the track are two different things, so they never share one tap. */
+  .studio .st-track-rename {
+    flex: 0 0 auto; min-width: 44px; min-height: 44px; border-radius: 6px;
+    border: 1px solid var(--st-edge); background: #24282D; color: var(--st-text);
+    font: inherit; font-size: 14px; cursor: pointer;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  /* The track the operator selected by tapping its name (aimTrackId). It is this
+     page's view state: the song does not know which track is aimed at. */
+  .studio .st-th-aimed { box-shadow: inset 0 0 0 2px var(--st-human); }
   .studio .st-kind {
     font-size: 11px; color: var(--st-muted);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -619,7 +640,30 @@ const STYLES = `
     flex: 1 1 auto; min-width: 0; font-size: 12px; font-weight: 600;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  /* In Perform the scene's name is its launch control, and a real button: it
+     drops the button chrome and keeps the name's own look and its place in the
+     header. The 44 px target costs no height here, because the three icons
+     beside it already hold the row at that size. */
+  .studio button.st-scene-name {
+    min-height: 44px; padding: 0 6px; border: 0; background: none; color: inherit;
+    font: inherit; font-size: 12px; font-weight: 600; text-align: left; cursor: pointer;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
   .studio .st-cell { padding: 6px; border-right: 1px solid var(--st-line-soft); border-bottom: 1px solid var(--st-line-soft); }
+  /* What one grid cell is doing, all of it view state and none of it a document
+     change: the clip the engine reported playing on its track (green), the scene
+     a launch queued for the next bar (orange, dashed), a muted track's cells,
+     an empty cell, and the cell of the clip this page has open. */
+  .studio .st-cell-playing { background: #16211B; }
+  .studio .st-cell-playing .st-clip { border-color: #6FCF97; background: #1F3A2A; }
+  .studio .st-cell-next { outline: 2px dashed var(--st-human); outline-offset: -3px; }
+  .studio .st-cell-muted { opacity: 0.5; }
+  .studio .st-cell-empty { background: #191C20; }
+  .studio .st-cell-editing { box-shadow: inset 0 0 0 2px #FFFFFF; }
+  /* The editor header's Copy to scene picker: a scene's own name, so it is wider
+     than the small numeric fields beside it. */
+  .studio .st-copy-scene-field .st-select { width: auto; min-width: 132px; }
+  .studio .st-copy-scene-field .st-select:disabled { opacity: 0.55; cursor: default; }
   .studio .st-clip {
     width: 100%; min-height: 46px; padding: 2px 8px; border-radius: 7px;
     border: 2px solid var(--st-human); background: #24282D; color: var(--st-text);

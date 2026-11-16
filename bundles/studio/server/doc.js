@@ -172,6 +172,7 @@ import * as Y from "yjs";
  *         banksPerKit: number, padsPerBank: number, samplesPerSong: number,
  *         sampleSamples: number, slicesPerSample: number,
  *         stepPositions: number, stepEntriesPerPattern: number,
+ *         stepsPerSong: number,
  *         patternsPerClip: number, chainLength: number, locksPerStep: number,
  *         motionPointsPerLane: number, motionLanesPerPattern: number,
  *         midiMaps: number, fontsPerSong: number,
@@ -209,6 +210,11 @@ export const LIMITS = Object.freeze({
   slicesPerSample: 64,
   stepPositions: 64,
   stepEntriesPerPattern: 1024,
+  // The whole song's steps: a command that would add steps past this is
+  // refused (clip.copy_to_scene counts the steps it would add, step.toggle the
+  // one it would put on). It is a command's own check, not an invariant, so a
+  // song that already holds more is left as it is.
+  stepsPerSong: 65536,
   patternsPerClip: 16,
   chainLength: 64,
   locksPerStep: 8,
