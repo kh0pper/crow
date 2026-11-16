@@ -15,6 +15,9 @@
 //     paragraphs, list items, table cells, headings), in the `_`+filler shape
 //     the total budget was halved for, and as a flood of link definitions
 //     (which marked scans on every inline block);
+//   - the email-autolink run shapes (`a…@a…`, `HTTP…@a…`, a long `HTTP` run, an
+//     `@` every 4,096 `a`s) stay under 500 ms at the cap while ordinary email
+//     content still autolinks and renders byte-identically;
 //   - ordinary bot prose renders EXACTLY as it did before the guard (pinned
 //     below: the digest was captured from the renderer before the change),
 //     whether it arrives with LF or CRLF line endings;
@@ -313,6 +316,79 @@ test("reference links still resolve on the guarded path", () => {
 
 test("the cap still returns \"\" (the caller's plain-text path)", () => {
   assert.equal(renderBotMarkdown(rep("*a_", BOT_MD_MAX_INPUT + 1)), "");
+});
+
+// --- the email-autolink run cliff (the bot path shares the guard) ---------
+// marked's inline text rule ends a token at EVERY position of a run of
+// `[A-Za-z0-9.!#$%&'*+/=?_`{|}~-]` that `@` follows, and each of those stops
+// retries the url tokenizer's email alternative (`^[A-Za-z0-9._+-]+@…`), which
+// walks the rest of the run and then the domain: quadratic in the run length,
+// with no protocol word involved, so the whole-document url-scan budget cannot
+// see it. Measured on the owner path before the run-length guard: `a…@a…` at
+// 64 KB = 1833 ms, an `@` every 4,096 `a`s at 64 KB = 415 ms. The bot path
+// shares the guard, so these are its shapes at its own cap.
+function aThen(unit, n) {
+  const local = rep(unit, Math.floor((n - 1) * 4 / 5));
+  return local + "@" + "a".repeat(n - 1 - local.length);
+}
+function aEveryAt(n, gap) {
+  const parts = [];
+  let size = 0;
+  while (size < n) {
+    const len = Math.min(gap, n - size);
+    parts.push("a".repeat(len));
+    size += len;
+    if (size < n) { parts.push("@"); size += 1; }
+  }
+  return parts.join("");
+}
+
+test("email-autolink runs at the cap are flattened: each < 500 ms", (t) => {
+  const note = tracker(t);
+  const shapes = {
+    "`a…@a…`": aThen("a", CAP),
+    "`HTTP…@a…`": aThen("HTTP", CAP),
+    "`HTTP` repeated": rep("HTTP", CAP),
+    "`a` with `@` every 4096": aEveryAt(CAP, 4096),
+  };
+  for (const [name, src] of Object.entries(shapes)) {
+    assert.equal(src.length, CAP, `${name}: fixture size`);
+    const { html, ms } = timed(src);
+    note(ms, name);
+    assert.ok(html.length > 0, `${name}: still rendered (never "")`);
+    assert.ok(ms < 500, `${name} took ${ms.toFixed(0)} ms`);
+    assert.ok(!/<a[\s>]/.test(html), `${name}: nothing was autolinked`);
+  }
+});
+
+// --- normal email content is untouched, and still autolinks ---------------
+// Digest captured from the renderer BEFORE the run-length guard.
+function emailDoc() {
+  const out = ["# Contacts", ""];
+  out.push("Write to alex@example.com or to sam@example.org for details.");
+  out.push("");
+  out.push("A bare address in a sentence: first.last+tag@sub.example.co.uk works too.");
+  out.push("");
+  out.push("[mail alex](mailto:alex@example.com) or <mailto:sam@example.org>.");
+  out.push("");
+  for (let i = 0; i < 200; i++) out.push(`- person ${i}: user${i}@example.com`);
+  out.push("");
+  out.push(Array.from({ length: 200 }, (_, i) => `u${i}@example.com`).join(", "));
+  return out.join("\n");
+}
+
+const EMAIL_DOC_BOT_SHA = "fb08ca092f668e1055970435d0caa7d60306e668e6602575f53bb01617f84146";
+
+test("normal email content renders byte-identical, and still autolinks (bot)", () => {
+  const doc = emailDoc();
+  const html = renderBotMarkdown(doc);
+  assert.equal(sha256(html), EMAIL_DOC_BOT_SHA,
+    "the run-length guard must not touch ordinary email content: " + html.slice(0, 400));
+  assert.equal((html.match(/href="mailto:/g) || []).length, 405);
+  assert.match(html, /<a href="mailto:alex@example\.com"/);
+  assert.match(html, /<a href="mailto:first\.last\+tag@sub\.example\.co\.uk"/);
+  assert.match(html, /<a href="mailto:u199@example\.com"/);
+  assert.match(html, /data-turbo="false"/, "bot links still carry their opt-outs");
 });
 
 // --- reference-definition flood: marked's inlineTokens rebuilds
