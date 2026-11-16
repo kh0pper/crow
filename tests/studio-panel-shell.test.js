@@ -29,6 +29,7 @@ import { TRANSPORT_SCRIPT } from "../bundles/studio/panel/transport-bar.js";
 
 const SONG = "song-shell";
 const MODE_KEY = "crow.studio.mode.v1";
+const SIDE_KEY = "crow.studio.sideCollapsed.v1";
 
 /** The stand-in dashboard layout: a bare document around the panel content. */
 function minimalLayout({ title, content }) {
@@ -322,6 +323,11 @@ function layoutEntry(page, act) {
   return page.querySelector(`[data-role=layout-entries] [data-act=${act}]`);
 }
 
+/** The top bar's side panels toggle. */
+function sideToggle(page) {
+  return page.querySelector("[data-role=studio-top] [data-act=side-toggle]");
+}
+
 /** Turn edit mode on. */
 function startEditing(b) {
   const toggle = layoutEntry(b.page, "layout-edit");
@@ -432,6 +438,16 @@ test("the emitted shell script follows the panel's inline rules and names the wi
   assert.equal(emptyNote("scene-grid"), "");
   assert.match(SHELL_CSS, /\.st-widget-tab\s*\{[^}]*min-height:\s*46px/, "a tab is a 46 px target");
   assert.match(SHELL_CSS, /\.st-widget\[hidden\]\s*\{\s*display:\s*none/, "a hidden frame is gone");
+  assert.match(
+    SHELL_CSS,
+    /\.st-top \.st-side-toggle \{[^}]*min-height:\s*44px/,
+    "the side panels toggle is a 44 px target",
+  );
+  assert.match(
+    SHELL_CSS,
+    /\.st-top \.st-side-toggle \{[^}]*-webkit-touch-callout:\s*none/,
+    "and a press on it is never a callout",
+  );
 });
 
 test("the top bar carries the page's own controls and the new mode switch and layout menu", async () => {
@@ -1191,4 +1207,104 @@ test("a horizontal drag starting on a step or a pad does not change tab", async 
   swipe(b.domWindow, field, { x: 300, y: 20 }, { x: 200, y: 22 });
   assert.equal(activeTab(b.page).textContent, "Scene grid", "a field keeps its press");
   assert.deepEqual(visibleFrames(b.page), ["scene-grid"]);
+});
+
+// ---- the side panels toggle ----------------------------------------------
+
+test("the toggle hides history and agent, persists, restores", async () => {
+  const storage = memoryStorage();
+  const first = await bootShell({ storage });
+
+  // Put both side panels on the page, so the button has the two of them to
+  // hide: compose's default leaves the agent in the tray.
+  const withAgent = first.layout.showWidget(
+    first.layout.loadLayout(storage, SONG, "compose", "laptop"),
+    "agent",
+  );
+  assert.equal(first.layout.saveLayout(storage, SONG, "compose", "laptop", withAgent), true);
+  first.shell.refresh();
+  assert.deepEqual(
+    visibleFrames(first.page),
+    ["scene-grid", "editor", "history", "agent"],
+    "both side panels start on the page",
+  );
+
+  const toggle = sideToggle(first.page);
+  assert.ok(toggle, "the top bar carries one side panels toggle");
+  assert.equal(toggle.textContent, "Hide side panels");
+  assert.equal(toggle.getAttribute("aria-pressed"), "false");
+
+  // A step in the history list, so hiding the panels can be checked against it.
+  const historyList = first.page.querySelector("[data-role=history]");
+  const step = first.document.createElement("div");
+  step.className = "st-entry";
+  step.textContent = "One step";
+  historyList.appendChild(step);
+  const historyBefore = historyList.innerHTML;
+
+  click(first.domWindow, toggle);
+
+  assert.equal(toggle.textContent, "Show side panels", "one button hides both and says what comes next");
+  assert.equal(toggle.getAttribute("aria-pressed"), "true");
+  assert.equal(storage.getItem(SIDE_KEY), "1", "the choice is this browser's");
+  assert.deepEqual(visibleFrames(first.page), ["scene-grid", "editor"], "history and agent are gone together");
+  assert.equal(historyList.innerHTML, historyBefore, "hiding a panel is view state, never a history entry");
+
+  // The frames are still in the document, only display:none, so the grid has no
+  // hole where they were and nothing the page wrote into them is lost.
+  assert.equal(shownWidgets(first.page).length, 4, "the layout itself is untouched");
+  assert.equal(frame(first.page, "history").parentNode, first.page.querySelector("[data-role=studio-widgets]"));
+  assert.equal(frame(first.page, "agent").parentNode, first.page.querySelector("[data-role=studio-widgets]"));
+  assert.equal(frame(first.page, "history").hasAttribute("hidden"), true);
+  assert.equal(frame(first.page, "agent").hasAttribute("hidden"), true);
+  assert.equal(first.page.querySelector("#st-ask"), first.refs.askInput, "the agent's box is still on the page");
+  assert.equal(first.refs.aside.hasAttribute("hidden"), true, "the emptied aside stays out of the page");
+  assert.deepEqual(
+    storedIds(storage, SONG, "compose", "laptop"),
+    ["scene-grid", "editor", "history", "agent"],
+    "hiding a panel writes no layout",
+  );
+
+  // A phone has no tab for a hidden panel, and still shows one widget.
+  first.media.setWidth(500);
+  assert.deepEqual(tabLabels(first.page), ["Scene grid", "Editor"]);
+  assert.deepEqual(visibleFrames(first.page), ["scene-grid"]);
+  first.media.setWidth(1280);
+  first.shell.destroy();
+
+  // A reload comes back with the panels hidden.
+  const second = await bootShell({ storage });
+  assert.equal(sideToggle(second.page).textContent, "Show side panels", "the choice outlives the page");
+  assert.equal(sideToggle(second.page).getAttribute("aria-pressed"), "true");
+  assert.deepEqual(visibleFrames(second.page), ["scene-grid", "editor"], "and the two side panels are still hidden");
+
+  click(second.domWindow, sideToggle(second.page));
+  assert.equal(storage.getItem(SIDE_KEY), "0", "showing them again is kept too");
+  assert.deepEqual(visibleFrames(second.page), ["scene-grid", "editor", "history", "agent"]);
+  assert.equal(second.page.querySelector("#st-ask"), second.refs.askInput);
+
+  second.shell.destroy();
+});
+
+test("the side panels toggle still works when the browser keeps nothing", async () => {
+  const b = await bootShell({ storage: throwingStorage() });
+  const toggle = sideToggle(b.page);
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor", "history"]);
+
+  click(b.domWindow, toggle);
+  assert.equal(toggle.textContent, "Show side panels");
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor"], "history steps aside anyway");
+
+  click(b.domWindow, toggle);
+  assert.equal(toggle.textContent, "Hide side panels");
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor", "history"]);
+
+  // Edit layout shows every frame again, so a hidden panel can still be moved.
+  click(b.domWindow, toggle);
+  startEditing(b);
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor", "history"], "editing shows the side panels");
+  click(b.domWindow, layoutEntry(b.page, "layout-edit"));
+  assert.deepEqual(visibleFrames(b.page), ["scene-grid", "editor"], "and Done hides them again");
+
+  b.shell.destroy();
 });
