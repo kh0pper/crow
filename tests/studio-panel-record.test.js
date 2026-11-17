@@ -661,7 +661,9 @@ test("loop-record of 3 passes makes 3 takes", async (t) => {
   assert.equal(takes.length, 3, `three passes are three takes (got ${takes.length})`);
   const ids = new Set(takes.map((take) => take.id));
   assert.equal(ids.size, 3, "each pass is its own take");
-  for (const take of takes) assert.ok(take.frames > 0, "every take holds audio");
+  takes.forEach((take, pass) => {
+    assert.ok(take.frames > 0, `pass ${pass} holds audio`);
+  });
 });
 
 test("a take recorded offline uploads after reconnect", async (t) => {
