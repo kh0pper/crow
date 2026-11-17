@@ -55,6 +55,16 @@
 //     1,000 ms bounds;
 //   - the per-block cap is far above real content: the most expensive markdown
 //     file in this repository has a br cost of 715.
+//
+// The SECOND half of this file covers a different, pre-existing quadratic on the
+// OWNER path only: a run of plain ASCII spaces inside a paragraph (marked's
+// inline text rule rescans the rest of the space run at every position of its
+// lazy `[\s\S]*?`), which no budget or charge could see and which the bot path
+// never had because its math extension's start() already caps each text-rule
+// scan at 4,096 characters. The owner path now carries the same window; see
+// "--- plain ASCII spaces: a FIFTH inline-lexer quadratic" below for what must
+// stay true (bounds at 64 KB / 128 KB / 1 MiB, and a 3,000-document
+// differential that must be byte-identical with the window on and off).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -62,9 +72,11 @@ import { Worker } from "node:worker_threads";
 import {
   renderMarkdown, renderBotMarkdown, BOT_MD_MAX_INPUT,
   setMdBrScanGuardEnabled, mdBrScanStats, MD_BR_SCAN_MAX,
+  setOwnerTextWindowEnabled, mdOwnerTextWindowStats,
 } from "../servers/blog/renderer.js";
 
 const CAP = BOT_MD_MAX_INPUT; // renderBotMarkdown refuses only ABOVE this
+
 const OWNER_HEAD = 128 * 1024; // the owner path's markdown-parsed head
 const CHUNKED = 1024 * 1024; // a document the owner path renders in chunks
 const rep = (u, n) => u.repeat(Math.ceil(n / u.length)).slice(0, n);
@@ -425,4 +437,212 @@ test("differential: 2,000 seeded documents mixing normal lines with Unicode-whit
   // breaks the rule exists for.
   assert.ok(stats.withWs > 1000, `the corpus contains Unicode-whitespace lines (${stats.withWs} documents)`);
   assert.ok(stats.brFromHardBreak > 500, `the corpus renders real <br> hard breaks (${stats.brFromHardBreak} documents)`);
+});
+
+// --- plain ASCII spaces: a FIFTH inline-lexer quadratic, owner path only ----
+//
+// marked's inline `text` rule stops at ` *\n` (its hard-break alternative) and
+// its lazy `[\s\S]*?` retries that lookahead at EVERY position, so a run of
+// plain spaces with no newline after it makes each retry walk the rest of the
+// run: Σ(rest of the run), quadratic in the run and ~4x per doubling. It is
+// pre-existing on the owner path (marked on its own measures the same) and no
+// other guard can see it — spaces are no delimiter, no protocol word, no `@`
+// and no line break — and the BOT path never had it because its math
+// extension's inline start() caps each text-rule scan at 4,096 characters
+// (START_WINDOW). The owner path now carries the same window (see "THE OWNER
+// PATH'S TEXT-RUN WINDOW" in servers/blog/renderer.js), from an extension with
+// a start() and a tokenizer that never matches.
+//
+// Measured on this tree, CPU ms of one whole render in a worker (before → after):
+//
+//   'a' + ' ' x N + 'b'      64 KB          128 KB
+//   owner path            ~1,735 → 106   ~5,826 → 196
+//
+// What must stay true:
+//   - the shape renders the 64 KB and the 128 KB owner head in < 1,000 ms, and
+//     so does the same line inside a heading, a blockquote, a list item, a
+//     table cell, a link label and an emphasis span (each is one inline block);
+//   - the CHUNKED owner path renders 1 MiB of 120 KB space runs (separated by
+//     the blank lines that make them separate chunks) and one 1 MiB space line
+//     in < 2,500 ms in total;
+//   - the output is unchanged: a cut at the window is not a lexical boundary —
+//     marked's text tokenizer keeps the RAW source and merges the pieces
+//     (`p.raw += o.raw, p.text += o.text`) — so 3,000 seeded documents plus a
+//     set of boundary documents (an HTML entity straddling the cut, mixed
+//     spaces and tabs, math-like `$` text, every container) must render BYTE
+//     IDENTICALLY with the window on and with it off, and the corpus must
+//     really reach the window (the cuts are counted);
+//   - every other pin in the suite is untouched (they are run alongside this
+//     file, and the pins in this one are checked above).
+/** `prefix` + spaces + `suffix`, exactly `n` characters — every container shape
+ *  is one inline block of the size under test. */
+const fillSpace = (prefix, suffix, n) => prefix + " ".repeat(n - prefix.length - suffix.length) + suffix;
+
+const SPACE_SHAPES = {
+  // The plain shape. The first and last characters are what make marked's
+  // block lexer see a paragraph at all (a line of only spaces is a blank line).
+  plain: (n) => "a" + " ".repeat(n - 2) + "b",
+  heading: (n) => fillSpace("# a", "b\n", n),
+  quote: (n) => fillSpace("> a", "b\n", n),
+  list: (n) => fillSpace("- a", "b\n", n),
+  cell: (n) => fillSpace("| a", "b | x |\n| - | - |\n| c | d |\n", n),
+  link: (n) => fillSpace("[a", "b](/blog/x)\n", n),
+  emphasis: (n) => fillSpace("*a", "b*\n", n),
+};
+
+test("a run of plain spaces renders in < 1000 ms at 64 KB and at the 128 KB owner head, in every container", async (t) => {
+  let worst = { ms: 0, what: "" };
+  for (const [name, shape] of Object.entries(SPACE_SHAPES)) {
+    // The plain shape at both sizes; every container at the owner head (each is
+    // one inline block of the same length, so it is the same scan).
+    const sizes = name === "plain" ? [CAP, OWNER_HEAD] : [OWNER_HEAD];
+    for (const size of sizes) {
+      const src = shape(size);
+      assert.equal(src.length, size, `${name}: the fixture is ${size} chars`);
+      const r = await renderInWorker("owner", src);
+      if (r.ms > worst.ms) worst = { ms: r.ms, what: `${name} @ ${size}` };
+      assert.ok(r.ms < 1000,
+        `${name} at ${size} chars took ${r.ms.toFixed(0)} ms on the owner path (bound 1000 ms)`);
+      // The text survives: this shape is a paragraph, not something flattened.
+      assert.ok(r.length >= src.length * 0.99,
+        `${name}: the content is on the page (got ${r.length} chars of HTML for ${src.length})`);
+    }
+  }
+  t.diagnostic(`worst plain-space render: ${worst.ms.toFixed(0)} ms — ${worst.what}`);
+});
+
+test("the CHUNKED owner path renders 1 MiB of plain-space runs in < 2500 ms in total", async (t) => {
+  // 120 KB runs, each ended by a blank line so every chunk holds ONE of them —
+  // the shape that makes the per-chunk cost, rather than the split, the thing
+  // under test.
+  const runs = rep("a" + " ".repeat(120000 - 2) + "b\n\n", CHUNKED);
+  const r = await renderInWorker("owner", runs);
+  // Over the per-document budget the remainder becomes the plain-text tail, so
+  // the bound is "budget plus one chunk" (see OWNER_MD_RENDER_BUDGET_MS) — and
+  // nothing is dropped either way.
+  assert.ok(r.ms < 2500, `1 MiB of 120 KB space runs took ${r.ms.toFixed(0)} ms through the chunked owner path (bound 2500 ms)`);
+  assert.ok(r.html.length >= CHUNKED, `all 1 MiB of content is on the page (got ${r.html.length} chars of HTML)`);
+
+  const one = SPACE_SHAPES.plain(CHUNKED);
+  const r2 = await renderInWorker("owner", one);
+  assert.ok(r2.ms < 2500, `one 1 MiB space line took ${r2.ms.toFixed(0)} ms through the chunked owner path (bound 2500 ms)`);
+  assert.ok(r2.length > 0, "the 1 MiB space line still renders");
+  t.diagnostic(`1 MiB space runs: ${r.ms.toFixed(0)} ms; one 1 MiB line: ${r2.ms.toFixed(0)} ms`);
+});
+
+// Documents that put something interesting exactly AT the window boundary: the
+// cut is a character count, so whatever sits there must not be able to notice.
+// (`&#123;` is the case worth naming: `&` is the one character whose escaping
+// looks at what follows it — measured identical, because marked's inline text
+// tokenizer keeps the raw source and merges the pieces.)
+const BOUNDARY_DOCS = [
+  "x ".repeat(2048) + "&#123;" + "y ".repeat(2000),
+  "x ".repeat(2048) + "&amp;" + "y ".repeat(2000),
+  "x ".repeat(2046) + "&&#123;" + "y ".repeat(2000),
+  "a" + "\t ".repeat(2100) + "b",
+  "a" + " ".repeat(4096) + "$5 and $10, $x$ and $$y$$, \\(z\\) " + " ".repeat(4096) + "b",
+  "    a" + " ".repeat(5000) + "b\n",
+  "```\na" + " ".repeat(5000) + "b\n```\n",
+  "*a" + " ".repeat(5000) + "b* [link](/blog/x) `code` **strong** _em_\n",
+];
+
+test("the owner text-run window is on by default, counts its cuts, and boundary documents render identically with it on and off", () => {
+  // On by default: a > 4 KB run is cut without anyone setting a switch.
+  renderMarkdown(SPACE_SHAPES.plain(8192));
+  assert.ok(mdOwnerTextWindowStats.cuts > 0,
+    `a 8 KB space run is cut at the window by default (${mdOwnerTextWindowStats.cuts} cuts)`);
+
+  for (const doc of BOUNDARY_DOCS) {
+    const on = renderMarkdown(doc);
+    const cuts = mdOwnerTextWindowStats.cuts;
+    let off;
+    setOwnerTextWindowEnabled(false);
+    try {
+      off = renderMarkdown(doc);
+      assert.equal(mdOwnerTextWindowStats.cuts, 0, `the window is off (${JSON.stringify(doc.slice(0, 40))})`);
+    } finally {
+      // Always back on: every later render in this file must be windowed.
+      setOwnerTextWindowEnabled(true);
+    }
+    assert.equal(on, off,
+      `a window boundary changed the render of ${JSON.stringify(doc.slice(0, 60))} (${cuts} cuts)\n`
+      + `  on:  ${JSON.stringify(on)}\n  off: ${JSON.stringify(off)}`);
+  }
+});
+
+/** One seeded owner document: ordinary markdown (prose, indentation, hard
+ *  breaks, emphasis, links, code spans, tables, headings, math-like `$` text —
+ *  the owner path has no math extension, so `$` is just a character there) with
+ *  some blocks replaced by — or wrapped around — a long run of plain spaces. */
+function randomOwnerDoc(rnd) {
+  const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+  /** One in four runs is long enough to cross the 4,096-character window (a
+   *  run below it is never cut, so the rest of the tier stays cheap). */
+  const size = () => (rnd() < 0.25 ? 4100 + Math.floor(rnd() * 200) : 8 + Math.floor(rnd() * 392));
+  const run = (s) => "a" + " ".repeat(s) + "b";
+  const container = (s) => pick([
+    () => "# " + run(s),
+    () => "> " + run(s),
+    () => "- " + run(s),
+    () => "| " + run(s) + " | y |\n| - | - |\n| c | d |",
+    () => "[" + run(s) + "](/blog/x) and *" + run(s) + "*",
+    () => run(s),
+    () => "a" + "\t ".repeat(Math.max(1, Math.floor(s / 2))) + "b",
+    () => run(s).replace(/ {8}/, " $5 and $10 $$"),
+  ])();
+  const blocks = [];
+  const count = 1 + Math.floor(rnd() * 5);
+  let spaceRuns = 0;
+  for (let b = 0; b < count; b++) {
+    const kind = rnd();
+    if (kind < 0.45) {
+      // Ordinary lines, straight out of the br differential's corpus.
+      blocks.push(pick(NORMAL_LINES));
+    } else if (kind < 0.55) {
+      blocks.push("    an indented line");
+    } else {
+      blocks.push(container(size()));
+      spaceRuns++;
+    }
+  }
+  return { doc: blocks.join("\n"), spaceRuns };
+}
+
+test("differential: 3,000 seeded owner documents render byte-identically with the owner text-run window on and off", () => {
+  const rnd = mulberry32(0x5c4e11);
+  const stats = { cuts: 0, docsWithCuts: 0, maxCuts: 0, withRuns: 0, differed: 0 };
+  const docs = BOUNDARY_DOCS.slice();
+  for (let n = 0; n < 3000; n++) {
+    const { doc, spaceRuns } = randomOwnerDoc(rnd);
+    if (spaceRuns > 0) stats.withRuns++;
+    docs.push(doc);
+  }
+  for (let n = 0; n < docs.length; n++) {
+    const doc = docs[n];
+    const on = renderMarkdown(doc);
+    const cuts = mdOwnerTextWindowStats.cuts;
+    stats.cuts += cuts;
+    if (cuts > 0) stats.docsWithCuts++;
+    if (cuts > stats.maxCuts) stats.maxCuts = cuts;
+    let off;
+    setOwnerTextWindowEnabled(false);
+    try {
+      off = renderMarkdown(doc);
+      assert.equal(mdOwnerTextWindowStats.cuts, 0, `doc #${n}: no cut with the window off`);
+    } finally {
+      setOwnerTextWindowEnabled(true);
+    }
+    // Nothing changes output: a cut is not a lexical boundary at all, so this
+    // holds for EVERY document here, cut or not.
+    if (on !== off) stats.differed++;
+    assert.equal(on, off,
+      `doc #${n} (owner path) changed with the text-run window (${cuts} cuts): ${JSON.stringify(doc)}\n`
+      + `  windowed: ${JSON.stringify(on)}\n  unlimited: ${JSON.stringify(off)}`);
+  }
+  assert.equal(stats.differed, 0, "no document rendered differently with the window on");
+  // Not vacuous: the corpus really does carry plain-space runs, and the window
+  // really does fire on a large part of it.
+  assert.ok(stats.withRuns > 1500, `the corpus contains plain-space runs (${stats.withRuns} documents)`);
+  assert.ok(stats.docsWithCuts > 500,
+    `the window really cut text runs (${stats.docsWithCuts} documents, ${stats.cuts} cuts, worst ${stats.maxCuts})`);
 });

@@ -35,8 +35,10 @@ marked.setOptions({ gfm: true, breaks: true });
  * Like the bot path, this is the SAME guarded pipeline (guardAndParse, driven
  * with ownerMarked's own defaults, image renderer and link opt-out): container
  * nesting is bounded INSIDE marked's block lexer (boundedLexer + MD_MAX_NEST,
- * see "THE BLOCK-NESTING CLIFF" below), and the inline-lexer cliff is guarded
- * by the same linear pre-pass the bot path uses (see "THE INLINE-LEXER CLIFF").
+ * see "THE BLOCK-NESTING CLIFF" below), the inline-lexer cliff is guarded by
+ * the same linear pre-pass the bot path uses (see "THE INLINE-LEXER CLIFF"),
+ * and long inline TEXT runs are cut at the same 4,096-character window the bot
+ * path gets from its math extension (see "THE OWNER PATH'S TEXT-RUN WINDOW").
  * Both matter to the OWNER path: /blog and /kb are PUBLIC and uncached, so any
  * reader can hand this function a document — which is exactly how the owner
  * path's quadratic render went from an operator-only annoyance to an
@@ -214,9 +216,13 @@ function renderOwnerHead(src, seedLinks = null, depthState = null) {
     // phases with the inline guard between them, plus the depth-bounded block
     // lexer — driven with ownerMarked, so the defaults are the owner's (the
     // image renderer leaves a refused image as its escaped alt text) and there
-    // is no math extension. ownerMarked carries no hooks, extensions or
-    // walkTokens; if one is ever added to it, guardAndParse has to be told
-    // (parse's opt.hooks branch is the code that would otherwise run it).
+    // is no math extension; it carries one extension of its own instead, a
+    // text-run window (see "THE OWNER PATH'S TEXT-RUN WINDOW" below) with a
+    // start() and a tokenizer that never matches — no token type, no renderer.
+    // ownerMarked carries no hooks, no renderer/childTokens extensions and no
+    // walkTokens; if a future extension does any of that, guardAndParse has to
+    // be told (parse's opt.hooks branch is the code that would otherwise run
+    // it).
     return guardAndParse(src, ownerMarked, seedLinks, depthState);
   } catch {
     // Fail safe, never a 500 and never an empty page: the document as escaped
@@ -263,12 +269,16 @@ export const OWNER_MD_MAX_TOTAL_INPUT = 8 * 1024 * 1024;
  *
  * The budget never covers the LAST chunk it started, because it is checked
  * before each chunk rather than inside one: the worst total is therefore this
- * budget plus one worst-case chunk. The worst chunk measured today is a 128 KB
- * chunk of Unicode-whitespace-only lines, 180 ms — marked's inline `br` rule is
- * quadratic on it, and that shape has its own guard now (brScanCost /
- * MD_BR_SCAN_MAX), so it is no longer the chunk that sets the worst case; every
- * shape under the existing block guards costs tens of milliseconds per chunk.
- * Hence the number: 1000 ms of budget, not the 1500 it used to be.
+ * budget plus one worst-case chunk. The worst chunk measured today is 128 KB of
+ * ONE run of plain ASCII spaces (`'a' + ' ' x N + 'b'`, a single paragraph with
+ * no newline in it), ~200 ms — marked's inline text rule is quadratic on it, and
+ * the owner path now cuts every text run at 4,096 characters (see "THE OWNER
+ * PATH'S TEXT-RUN WINDOW" below), which is what brought that chunk down from
+ * 5.8 s. Next is a 128 KB chunk of Unicode-whitespace-only lines, ~180 ms —
+ * marked's inline `br` rule is quadratic on it, and that shape has its own guard
+ * (brScanCost / MD_BR_SCAN_MAX) — and every other shape under the existing
+ * block guards costs tens of milliseconds per chunk. Hence the number: 1000 ms
+ * of budget, not the 1500 it used to be.
  */
 export const OWNER_MD_RENDER_BUDGET_MS = 1000;
 
@@ -694,7 +704,10 @@ const NUMBER_MATH = /^[0-9][0-9.,]*$/;
 // "THE INLINE-LEXER CLIFF" below, by a linear pre-pass over the same blocks
 // that this pipeline already splits — together with that lexer's url-scan,
 // email-run and `br`-lookahead quadratics (the last one on a paragraph of
-// Unicode-whitespace lines), all four charged to one per-document budget.
+// Unicode-whitespace lines), all four charged to one per-document budget. A
+// FIFTH, a run of plain ASCII spaces in the text rule itself, is not charged:
+// it is cut at the window below — and that window is the OWNER path's too (see
+// "THE OWNER PATH'S TEXT-RUN WINDOW"), which is why the number lives here.
 const MAX_INLINE = 500;
 const MAX_DISPLAY = 2000;
 const START_WINDOW = 4096;
@@ -2286,7 +2299,10 @@ function boundedLexer(options, inputLength = 0, depthState = null) {
 // FLATTENS a block outright — it can only flatten, never admit one. The inline
 // "br" rule's lookahead scan is a FOURTH cost paid from that same pool, also
 // with a per-block cap of its own (brScanCost and MD_BR_SCAN_MAX, below) — see
-// "A FOURTH QUADRATIC" below.
+// "A FOURTH QUADRATIC" below. A FIFTH, a run of plain ASCII spaces in the text
+// rule itself, is not charged at all: it is CUT (the owner path's text-run
+// window, see "THE OWNER PATH'S TEXT-RUN WINDOW" below), which is cheaper than
+// either charging it or flattening the block it sits in.
 //
 // AT THE OWNER CAP: 1 MiB THEN, 128 KB NOW. The budgets are per document, so
 // they bound marked's inline lexer at the owner cap exactly as they do at
@@ -2415,10 +2431,14 @@ function boundedLexer(options, inputLength = 0, depthState = null) {
 // over the block, so it is linear — into the same per-document pool, and a block
 // whose own br cost is over MD_BR_SCAN_MAX is flattened outright, the way an
 // email run over its per-run cap is. Guarded, every unit above renders in
-// 82–123 ms at 64 KB on the bot path and 106–180 ms at the 128 KB owner head
+// 79–125 ms at 64 KB on the bot path and 104–198 ms at the 128 KB owner head
 // (from 436–996 and 1,695–3,520), and a 1 MiB document of them through the
-// CHUNKED owner path in 1,085 ms worst (from 3,518 — the budget plus one ~2.75 s
-// chunk, see OWNER_MD_RENDER_BUDGET_MS).
+// CHUNKED owner path in 1,041 ms worst (from 3,518 — the budget plus one ~2.75 s
+// chunk, see OWNER_MD_RENDER_BUDGET_MS). These are the numbers as last measured
+// WITH the owner path's text-run window in place (see "THE OWNER PATH'S
+// TEXT-RUN WINDOW" below); that window cuts text runs rather than flattening
+// or charging them, so it does not change this shape — a flattened block is
+// never inline-lexed — and the range is the same as it was without it.
 //
 // With the budgets in place, every adversarial unit x container shape at the
 // cap, the medium-block case, the `_`+filler worst shape, the definitions
@@ -2871,8 +2891,9 @@ function openContainerDepth(tokens) {
  *
  *  `instance` is the Marked instance to drive, and it is the ONLY difference
  *  between the two paths: its defaults are the Lexer's options (so botMarked
- *  carries the math extensions and ownerMarked carries none — a post about
- *  prices keeps its dollar signs) and its parser is what renders the tokens
+ *  carries the math extensions and ownerMarked carries one of its own — a
+ *  text-run window with no token type and no renderer, so a post about prices
+ *  still keeps its dollar signs) and its parser is what renders the tokens
  *  (so each keeps its own image renderer and link opt-out). Nothing else is
  *  shared, and nothing about the budgets depends on the instance, because they
  *  bound marked's inline lexer, which is the same code in both.
@@ -2939,6 +2960,7 @@ function guardAndParse(src, instance, seedLinks = null, depthState = null) {
   mdBrScanStats.flattened = 0;
   mdBrScanStats.brFlattened = 0;
   mdBrScanStats.charged = 0;
+  mdOwnerTextWindowStats.cuts = 0;
   for (const entry of lexer.inlineQueue) {
     // A block-lexer guard (flatGuardToken) already flattened this block: its
     // entry is here only because marked's paragraph-clipping branch expects one
@@ -3017,15 +3039,131 @@ function renderImageToken(token) {
   return escapeText(String(token.text ?? ""));
 }
 
+// ---------------------------------------------------------------------------
+// THE OWNER PATH'S TEXT-RUN WINDOW.
+//
+// marked's inline text rule is the ONE rule with no anchor of its own: a plain
+// run of characters is consumed by a lazy `[\s\S]*?` that stops only at a
+// delimiter, at a protocol word or at the end of the block, so the text
+// tokenizer rescan is as long as the run. A run of plain ASCII SPACES is the
+// cheap-looking input that makes that scan expensive: the rule's own stop set
+// contains ` *\n` (the hard-break alternative), and the lazy expansion retries
+// that lookahead at EVERY position, each retry walking the rest of the space
+// run looking for the newline that is not there — Σ(rest of the run), i.e.
+// quadratic. One paragraph of `'a' + ' ' x N + 'b'` (no newline at all, so no
+// block boundary, no hard break, no delimiter) measured 1,735 ms of CPU at
+// 64 KB and 5,826 ms at 128 KB on THIS tree's owner path — ~4x per doubling —
+// and marked on its own, with no guard of any kind, measures the same, so all
+// of it is marked's. The same shape inside a heading, a blockquote, a list item,
+// a table cell, a link label or an emphasis span is the same cost (each is one
+// inline block of its own). It is pre-existing — main renders it the same way —
+// and it is the one inline-lexer cliff none of the four costs in guardAndParse
+// can see: whitespace is no delimiter, no protocol word, no `@` and no line
+// break.
+//
+// The BOT path never had it: botMarked's math extension has an inline start()
+// (inlineStart, above) that caps each text-rule scan at START_WINDOW (4,096)
+// characters — a window added for the `$`/`\(` scan, and its side effect is
+// that no bot text run is ever longer than 4,097 characters. ownerMarked has
+// no math extension, so its runs were unlimited.
+//
+// So the owner parser gets the same window, from an extension whose ONLY job
+// is that stop: no token type, no renderer, and a tokenizer that never
+// matches. marked reports a start() hint as "the next position this extension
+// could tokenize at" and cuts the text token there; the pieces are merged back
+// into the very same text the author wrote — marked's inline text tokenizer
+// keeps the RAW source (`{ type: "text", raw: t[0], text: t[0] }`) and its
+// inline loop does `p.raw += o.raw, p.text += o.text`, so escaping, emphasis,
+// code spans and every other token are decided on the character stream, not on
+// the token boundaries, and a cut is invisible in the output. That is why the
+// window can be a plain character count with no regard for what sits at the
+// cut — the same reason the trick was already safe on the bot path.
+//
+// Measured after it (CPU ms, one whole `renderMarkdown` call, this box; "off"
+// is the same document with setOwnerTextWindowEnabled(false), i.e. marked's own
+// unlimited text runs):
+//
+//   'a' + ' ' x N + 'b'      16 KB   32 KB   64 KB   128 KB
+//   window off                 106     411   1,735    5,826
+//   window on                   29      57     106      196
+//
+// …i.e. ~4x per doubling becomes ~2x, and the same line inside a heading, a
+// blockquote, a list item, a table cell, a link label or an emphasis span costs
+// the same (128 KB: 197–204 ms). The 1 MiB CHUNKED path renders 120 KB space
+// runs separated by blank lines in 1,066 ms — the per-document budget plus one
+// chunk, so the remainder becomes the plain-text tail, nothing dropped — and a
+// single 1 MiB line of spaces in 220 ms. Output is unchanged: 3,000 seeded
+// owner documents render byte for byte the same with the window on and off
+// (tests/md-unicode-ws.test.js counts the cuts, so the comparison is not
+// vacuous), and every digest pin in the suite — ordinary prose, tables,
+// math-like `$` text, the real-shaped documents — is untouched.
+
+/** The window is on by default; false is the differential test's "off" side
+ *  (marked's own unlimited text runs). */
+let ownerTextWindowOn = true;
+
+/** @param {boolean} enabled false renders the owner path with no text-run
+ *  window at all — the shape this fix is measured against. */
+export function setOwnerTextWindowEnabled(enabled) {
+  ownerTextWindowOn = enabled !== false;
+}
+
+/**
+ * What the owner path's text-run window did in the LAST guarded parse: how many
+ * times marked was told to stop a text run at the window. Reset at the start of
+ * every guardAndParse call (so a chunked render reports its LAST chunk). Read by
+ * tests/md-unicode-ws.test.js, which has to show that the documents it compares
+ * byte for byte are not all too short to reach the window.
+ */
+export const mdOwnerTextWindowStats = { cuts: 0 };
+
+/**
+ * marked's inline start() hint for the owner path: "stop this text run after at
+ * most START_WINDOW characters", the same window botMarked's math extension
+ * reports for content with no `$` in it. Returning undefined leaves marked's own
+ * (unlimited) text scan alone.
+ *
+ * The argument is the source AFTER the first character (that is what marked
+ * passes to a start()), and the return value is the number of characters the
+ * text token may consume MINUS ONE — so START_WINDOW cuts a 4,097-character
+ * token. The position is otherwise arbitrary: a text token boundary here is not
+ * a lexical boundary (the pieces are merged back as raw text), and marked's own
+ * masks (`maskedSrc` for emphasis, the `prevChar` it carries) are indexed from
+ * the same source, so nothing depends on where the cut lands.
+ * @param {string} src the rest of the inline source, minus its first character
+ * @returns {number|undefined}
+ */
+function ownerTextStart(src) {
+  if (!ownerTextWindowOn || src.length <= START_WINDOW) return undefined;
+  mdOwnerTextWindowStats.cuts++;
+  return START_WINDOW;
+}
+
+/**
+ * The extension above: a start() and NOTHING else. marked only registers a
+ * start() hint for an extension that also carries a `tokenizer` (Marked#use),
+ * so there is one here and it never matches — no token type, no renderer, no
+ * change to what the lexer produces.
+ */
+const ownerTextWindow = {
+  name: "ownerTextWindow",
+  level: "inline",
+  start(src) { return ownerTextStart(src); },
+  tokenizer() { return undefined; },
+};
+
 /**
  * The owner's parser: marked exactly as the blog always had it (gfm, breaks,
  * NO math extensions — a post about prices keeps its dollar signs), plus the
  * image rule, so a refused image leaves its escaped alt text where the <img>
- * would have been.
+ * would have been, and the text-run window (see "THE OWNER PATH'S TEXT-RUN
+ * WINDOW" above), which cuts long text runs at 4,096 characters and changes
+ * nothing else about the output.
  */
 const ownerMarked = new Marked({
   gfm: true,
   breaks: true,
+  extensions: [ownerTextWindow],
   renderer: {
     image(token) { return renderImageToken(token); },
   },
