@@ -184,6 +184,17 @@ function memoryStorage() {
   };
 }
 
+/**
+ * This device's count-in, stored the way a browser stores it.
+ * @param {number} bars
+ * @returns {object} the storage the page reads it from
+ */
+function countInStorage(bars) {
+  const storage = memoryStorage();
+  storage.setItem("crow.studio.countin.v1", String(bars));
+  return storage;
+}
+
 /** The panel's take store, in memory: every call answers, nothing is kept. */
 function fakeTakeStore() {
   const chunks = new Map();
@@ -234,12 +245,15 @@ function fakeTakeStore() {
 }
 
 /** A context stand-in: the nodes the page builds for monitoring and its clock. */
-function fakeContext() {
+function fakeContext(clock = 0) {
+  const secondsOf = () => (typeof clock === "number" ? clock : Number(clock.seconds) || 0);
   const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
   return {
     sampleRate: 48000,
     state: "running",
-    currentTime: 0,
+    get currentTime() {
+      return secondsOf();
+    },
     destination: {},
     createGain: () => gain,
     createMediaStreamSource: () => ({ connect() {}, disconnect() {} }),
@@ -253,12 +267,15 @@ function fakeContext() {
  * was handed, and the position listener the page registered, so a test can
  * report a position the way the processor would.
  */
-function fakeEngine() {
+function fakeEngine(clock = { seconds: 0 }) {
+  const nowOf = () => Math.round((Number(clock.seconds) || 0) * 48000);
   const engine = {
     songs: [],
     modes: [],
     seeks: [],
     plays: 0,
+    /** Every `play` the page sent, with its options (`{countInBars}` or none). */
+    playCalls: [],
     pauses: 0,
     stops: 0,
     positions: [],
@@ -272,9 +289,9 @@ function fakeEngine() {
     },
     seek(bar) {
       engine.seeks.push(bar);
-    },
-    play() {
+    },    play(options) {
       engine.plays += 1;
+      engine.playCalls.push(options || null);
     },
     pause() {
       engine.pauses += 1;
@@ -283,7 +300,10 @@ function fakeEngine() {
       engine.stops += 1;
     },
     stopAll() {},
-    launchScene() {},
+    launched: [],
+    launchScene(sceneId) {
+      engine.launched.push(String(sceneId));
+    },
     onPosition(listener) {
       engine.positions.push(listener);
       return () => {};
@@ -291,6 +311,38 @@ function fakeEngine() {
     onLaunch(listener) {
       engine.launches.push(listener);
       return () => {};
+    },
+    // The count-in's own messages: the frame the song will start on, one per
+    // click, and the frame it started on. A test posts them in that order, the
+    // way the processor does.
+    countInListeners: [],
+    events: [],
+    onCountIn(listener) {
+      engine.countInListeners.push(listener);
+      return () => {};
+    },
+    countIn(event) {
+      engine.events.push(event && event.type ? String(event.type) : "");
+      for (const listener of engine.countInListeners) listener(event);
+    },
+    /** Walk a count-in of `bars` bars from its start to its downbeat. */
+    countBar(bars = 1, playFrame = 96000, beatFrames = 12000) {
+      const beats = bars * 4;
+      engine.countIn({ type: "count_in_start", play_frame: playFrame });
+      for (let beat = 1; beat <= beats; beat += 1) {
+        engine.countIn({
+          type: "count_in",
+          beat,
+          beats,
+          frame: playFrame - (beats - beat) * beatFrames,
+          play_frame: playFrame,
+        });
+      }
+      engine.countIn({ type: "count_in_done", frame: playFrame });
+    },
+    cancels: 0,
+    cancelCountIn() {
+      engine.cancels += 1;
     },
     onError() {
       return () => {};
@@ -319,6 +371,9 @@ function fakeEngine() {
         },
         armAt(frame) {
           recorder.armed = frame;
+          // The frame the page's own clock stood on as the arm was sent: an arm
+          // is always in the future, so this is never past it.
+          recorder.armNow = nowOf();
         },
         stopAt(frame) {
           recorder.stopped_at = frame;
@@ -357,7 +412,7 @@ function fakeNavigator() {
 /**
  * Boot the emitted client script against the page the handler renders, with a
  * fake browser around it, and hand back what it drew and what it sent.
- * @param {{doc?: object, storage?: object, history?: object[]}} [options]
+ * @param {{doc?: object, storage?: object, history?: object[], clock?: number}} [options]
  */
 async function bootTimeline(options = {}) {
   const { parseHTML } = await import("linkedom");
@@ -390,7 +445,10 @@ async function bootTimeline(options = {}) {
   }
 
   const store = fakeTakeStore();
-  const engine = fakeEngine();
+  // The page's own clock: a recorder armed while it stands at `clock` seconds
+  // can be checked against the frame it was armed on.
+  const clock = { seconds: options.clock || 0 };
+  const engine = fakeEngine(clock);
   const sent = [];
 
   const response = (status, body) => ({
@@ -437,7 +495,7 @@ async function bootTimeline(options = {}) {
     confirm: () => true,
     prompt: () => null,
     AudioContext: function AudioContextStub() {
-      return fakeContext();
+      return fakeContext(clock);
     },
     StudioTakeStore: store,
     StudioEngine: { create: async () => engine },
@@ -1701,6 +1759,31 @@ test("a marker and a section are renamed and removed from their own buttons", as
   assert.deepEqual(gone[0].args, { id: "sec-intro" });
 });
 
+/** @returns {object[]} the count-in `play` calls the page sent */
+function countInPlays(ui) {
+  return ui.engine.playCalls.filter((options) => options && options.countInBars);
+}
+
+/**
+ * The fixture song with the audio clip's placement moved to a bar, so a take
+ * recorded from the timeline has a placement under the playhead to record into.
+ * @param {number} startBar the bar the placement begins on
+ * @returns {Promise<import("yjs").Doc>}
+ */
+async function placedDoc(startBar) {
+  const doc = await timelineDoc();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(doc, "arrangement.remove", { id: AUDIO_PLACEMENT });
+  runCommand(doc, "arrangement.place", {
+    id: AUDIO_PLACEMENT,
+    track_id: AUDIO_TRACK,
+    clip_id: AUDIO_CLIP,
+    start_bar: startBar,
+    bars: 4,
+  });
+  return doc;
+}
+
 /**
  * The fixture song with a placement that covers the first four bars, so a split
  * has something under the playhead, and a second scene, so a recording made
@@ -1857,6 +1940,290 @@ test("a take armed on a fractional playhead starts on the floor bar", async () =
   const recorder = ui.engine.recorders[0];
   assert.ok(recorder, "the recorder was built");
   assert.equal(recorder.armed, 48000, "and armed on the frame the engine reports from that bar");
+});
+
+// ---- recording in the arrangement view (R17) ------------------------------
+//
+// The plan view records into the placement under the playhead: its clip, and
+// the bar that placement begins on, so the take's beat 0 is the clip's beat 0.
+// Stopped, the count-in plays the plan from that bar and the take begins on the
+// frame the engine announces; a running transport keeps the bar it is playing
+// and arms on the next bar line, which is the limit the last case pins.
+
+test("today: arrangement record arms on nextBarFrame and ignores launch reports", async () => {
+  const ui = await bootTimeline({ doc: await placedDoc(0) });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+
+  // A launch report, of the kind the Session view's sequencer posts. The plan
+  // plays by itself and launches no scene, so the frame it names has nothing to
+  // do with where this take begins.
+  ui.launch({ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, scene_id: SCENE, bar: 0, frame: 24000 });
+  await ui.settle();
+
+  ui.engine.nextBarFrame = async () => ({ frame: 96000, bar: 2 });
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const recorder = ui.engine.recorders[0];
+  assert.ok(recorder, "Record built the recorder");
+  assert.equal(recorder.armed, 96000, "the take armed on the bar frame the engine named");
+  assert.notEqual(recorder.armed, 24000, "not on the frame a launch report named");
+  assert.equal(ui.engine.plays, 0, "and the page started no transport of its own");
+
+  // A launch report that arrives once the take is armed changes nothing.
+  ui.launch({ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, scene_id: SCENE, bar: 0, frame: 48000 });
+  await ui.settle();
+  assert.equal(recorder.armed, 96000, "a launch report never re-anchors an armed take");
+});
+
+test("today: arrangement record while playing arms on the next bar", async () => {
+  const ui = await bootTimeline({ doc: await placedDoc(3) });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  // The transport runs, and the playhead stands two bars inside the placement
+  // that begins on bar 3.
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.position({ bar: 5, beat: 1, sixteenth: 1 });
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+
+  ui.engine.nextBarFrame = async () => ({ frame: 240000, bar: 6 });
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const recorder = ui.engine.recorders[0];
+  assert.ok(recorder, "Record built the recorder");
+  assert.equal(recorder.armed, 240000, "the take armed on the bar line the engine named");
+  assert.deepEqual(ui.engine.seeks, [], "a running transport is not moved to the placement's bar");
+  assert.equal(
+    ui.document.querySelector("[data-role=playhead]").style.left,
+    barLeft(4),
+    "the playhead keeps the bar it was playing, one bar into the placement",
+  );
+  assert.notEqual(
+    ui.document.querySelector("[data-role=playhead]").style.left,
+    barLeft(3),
+    "so the take's beat 0 is not the clip's beat 0 while the plan runs",
+  );
+});
+
+test("R17: arrangement record from stopped with a playhead inside a placement seeks to the placement start, counts in, and arms on the announced play_frame", async () => {
+  const ui = await bootTimeline({ doc: await placedDoc(3), storage: countInStorage(1), clock: 0.5 });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  // 55 px of a 32-bar, 320 px ruler is bar 5: two bars into the placement.
+  const strip = stubRuler(ui);
+  rulerPress(ui, strip, 55);
+  await ui.settle();
+  ui.release();
+  await ui.settle();
+  assert.deepEqual(ui.engine.seeks, [5], "the ruler put the playhead on bar 5");
+
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.engine.seeks.length = 0;
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  assert.deepEqual(ui.engine.seeks, [3], "the placement begins on bar 3, and the engine was moved there");
+  assert.equal(
+    ui.document.querySelector("[data-role=playhead]").style.left,
+    barLeft(3),
+    "and the page's playhead stands where the take begins",
+  );
+  assert.equal(countInPlays(ui).length, 1, "the count-in was asked for");
+  assert.equal(countInPlays(ui)[0].countInBars, 1, "one bar of it");
+  assert.deepEqual(ui.engine.launched, [], "the plan launches no scene, so nothing was queued");
+
+  const recorder = ui.engine.recorders[0];
+  assert.ok(recorder, "Record built the recorder");
+  assert.equal(recorder.armed, null, "nothing is armed while the clicks run");
+
+  ui.engine.countBar(1, 192000, 24000);
+  await ui.settle(24);
+
+  assert.equal(recorder.armed, 192000, "the recorder armed on the frame the count-in announced");
+  assert.ok(
+    recorder.armed >= recorder.armNow,
+    `a frame the engine had not rendered when it was sent (${recorder.armed} vs ${recorder.armNow})`,
+  );
+  assert.equal(
+    ui.document.querySelector("[data-role=rec-status]").textContent,
+    "Recording, pass 1",
+    "the take is recording from the bar its placement begins on",
+  );
+});
+
+test("R17: the arrangement take of a placement started at bar 3 has take beat 0 at the placement's clip beat 0", async () => {
+  const ui = await bootTimeline({ doc: await placedDoc(3), storage: countInStorage(1) });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const strip = stubRuler(ui);
+  rulerPress(ui, strip, 55);
+  await ui.settle();
+  ui.release();
+  await ui.settle();
+  ui.engine.seeks.length = 0;
+
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  ui.engine.countBar(1, 192000, 24000);
+  await ui.settle(24);
+
+  assert.deepEqual(ui.engine.seeks, [3], "the plan plays from the bar the placement begins on");
+  const recorder = ui.engine.recorders[0];
+  assert.equal(recorder.armed, 192000, "the take begins on that bar's frame, the count-in's play_frame");
+  // One bar at 120 BPM is 96,000 frames: the clip's own length, from the
+  // placement's first frame, so take beat 0 lands on clip beat 0.
+  const clipFrames = Math.round(4 * ((48000 * 60) / 120));
+  assert.equal(recorder.splits[0] - recorder.armed, clipFrames, "its first pass is exactly one clip long");
+  assert.equal(
+    ui.page.__studioTest.view.rec.clip_id,
+    AUDIO_CLIP,
+    "the take records into the placement's clip",
+  );
+  assert.equal(ui.page.__studioTest.view.rec.length_bars, 1, "whose length is one bar");
+  assert.equal(commands(ui, "clip.add_audio").length, 0, "no clip was added for it");
+  assert.equal(commands(ui, "arrangement.place").length, 0, "and the plan was not written into");
+});
+
+test("R17: arrangement record with count-in Off arms on nextBarFrame as today", async () => {
+  // The rig's storage holds the count-in Off, which is the path a timeline take
+  // has always had (R4).
+  const ui = await bootTimeline({ doc: await placedDoc(0) });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  assert.equal(countInPlays(ui).length, 0, "Off sends no count-in play");
+  assert.deepEqual(ui.engine.seeks, [], "the playhead already stood on the placement's first bar");
+  assert.equal(ui.engine.playCalls.length, 0, "and no play was sent");
+  const recorder = ui.engine.recorders[0];
+  assert.equal(recorder.armed, 48000, "the take armed on the frame the engine's bar answer named");
+  assert.equal(ui.page.__studioTest.view.rec.clip_id, AUDIO_CLIP, "into the placement's clip");
+  assert.equal(commands(ui, "clip.add_audio").length, 0, "which was not replaced");
+});
+
+test("R17: the count-in is not in the take", async () => {
+  const ui = await bootTimeline({ doc: await placedDoc(0), storage: countInStorage(2), clock: 0.5 });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  assert.equal(countInPlays(ui)[0].countInBars, 2, "two bars were asked for");
+  const beatFrames = 24000;
+  const playFrame = 384000;
+  ui.engine.countBar(2, playFrame, beatFrames);
+  await ui.settle(24);
+
+  const recorder = ui.engine.recorders[0];
+  assert.equal(recorder.armed, playFrame, "the take begins on the downbeat");
+  assert.ok(recorder.armed >= recorder.armNow, "a frame still ahead when the arm was sent");
+  // Eight clicks stood before it, the first of them eight beats earlier: none
+  // of them is inside the take.
+  assert.ok(recorder.armed > playFrame - 8 * beatFrames, "every click stands before the take's first frame");
+  assert.equal(
+    recorder.splits[0],
+    playFrame + Math.round(4 * ((48000 * 60) / 120)),
+    "and the first pass is one clip, counted from the downbeat",
+  );
+
+  recorder.chunk(new Uint8Array(64).buffer, 0, 0);
+  await ui.settle(24);
+  const rows = Array.from(ui.store.pendings.values());
+  assert.equal(rows.length, 1, "the take is on this device");
+  assert.equal(rows[0].clip_id, AUDIO_CLIP, "in the placement's own clip");
+});
+
+test("R17: a new clip is written when an arrangement count-in arms, not when it starts", async () => {
+  // Nothing under the playhead: this take gets a new clip, and the placement that
+  // puts it on the timeline. Neither is written before the take is armed, so a
+  // count-in that is cancelled leaves the song exactly as it was (R7).
+  const cancelled = await bootTimeline({ doc: await coverDoc(), storage: countInStorage(1) });
+  cancelled.click("[data-act=mode-arrangement]");
+  await cancelled.settle();
+  cancelled.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await cancelled.settle();
+  cancelled.click("[data-act=record]");
+  await cancelled.settle(24);
+  assert.equal(countInPlays(cancelled).length, 1, "the count-in began");
+  assert.equal(commands(cancelled, "clip.add_audio").length, 0, "and nothing was written for the take yet");
+  assert.equal(commands(cancelled, "arrangement.place").length, 0, "no clip and no placement");
+
+  cancelled.click("[data-act=stop]");
+  await cancelled.settle(24);
+  assert.equal(commands(cancelled, "clip.add_audio").length, 0, "a cancelled count-in leaves no clip behind");
+  assert.equal(commands(cancelled, "arrangement.place").length, 0, "and nothing placed");
+  assert.equal(cancelled.store.pendings.size, 0, "and no take row");
+
+  // The same take, counted all the way in: the clip and its placement are
+  // written at the arm, on the bar the count-in plays from.
+  const armed = await bootTimeline({ doc: await coverDoc(), storage: countInStorage(1) });
+  armed.click("[data-act=mode-arrangement]");
+  await armed.settle();
+  armed.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await armed.settle();
+  armed.click("[data-act=record]");
+  await armed.settle(24);
+  armed.engine.countBar(1, 192000, 24000);
+  await armed.settle(24);
+
+  assert.equal(armed.engine.recorders[0].armed, 192000, "the take armed on the announced frame");
+  const added = commands(armed, "clip.add_audio");
+  assert.equal(added.length, 1, "the new clip is written now");
+  assert.equal(added[0].args.scene_id, "chorus", "in the first scene whose slot on that track is empty");
+  assert.equal(added[0].args.length_bars, 4, "four bars long");
+  const placedNow = commands(armed, "arrangement.place");
+  assert.equal(placedNow.length, 1, "with the placement that puts it on the timeline");
+  assert.equal(placedNow[0].args.clip_id, added[0].args.clip_id, "the clip it was made with");
+  assert.equal(placedNow[0].args.start_bar, 0, "on the bar the playhead stands on");
+});
+
+test("R17: Stop during an arrangement count-in cancels and leaves the engine stopped", async () => {
+  const ui = await bootTimeline({ doc: await placedDoc(0), storage: countInStorage(1) });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  assert.equal(countInPlays(ui).length, 1, "the count-in had begun");
+
+  // One of its four beats has clicked: nothing is armed yet.
+  ui.engine.countIn({ type: "count_in_start", play_frame: 192000 });
+  ui.engine.countIn({ type: "count_in", beat: 1, beats: 4, frame: 96000, play_frame: 192000 });
+  await ui.settle();
+  assert.equal(ui.engine.recorders[0].armed, null, "nothing is armed while the clicks run");
+  assert.equal(ui.document.querySelector("[data-act=pause]").disabled, false, "Pause is offered while counting");
+
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  assert.equal(ui.engine.cancels, 1, "the count-in was cancelled");
+  assert.ok(ui.engine.stops > 0, "and the transport was stopped");
+  assert.equal(ui.page.__studioTest.view.rec, null, "no take is left armed");
+  assert.equal(ui.page.__studioTest.view.playing, false, "and nothing runs by itself");
+  assert.equal(ui.document.querySelector("[data-role=rec-status]").hidden, true, "the status is gone");
+  assert.equal(ui.store.pendings.size, 0, "no take row was made");
+  assert.equal(commands(ui, "clip.add_audio").length, 0, "and no clip was made");
+  assert.equal(commands(ui, "arrangement.place").length, 0, "and nothing was placed");
+  assert.match(
+    String(ui.document.querySelector("[data-role=rec-notice]").textContent),
+    /Count-in cancelled/,
+    "the page says the count-in was cancelled",
+  );
 });
 
 test("the ruler seeks in Arrangement; the Session view does not seek", async () => {
