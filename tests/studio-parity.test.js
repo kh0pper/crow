@@ -84,8 +84,8 @@ const stubRenderer = {
 /** A catalogue stub: the real catalogue has its own test below. */
 const stubCatalogue = async () => ({ modules: {} });
 
-/** @returns {Promise<string[]>} every tool name the server exposes. */
-async function toolNames() {
+/** @returns {Promise<object[]>} every tool the server lists, schema and all. */
+async function listedTools() {
   const server = createStudioServer({
     hub: stubHub(),
     renderer: stubRenderer,
@@ -97,12 +97,85 @@ async function toolNames() {
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   try {
-    const listed = await client.listTools();
-    return listed.tools.map((tool) => tool.name);
+    return (await client.listTools()).tools;
   } finally {
     await client.close();
   }
 }
+
+/** @returns {Promise<string[]>} every tool name the server exposes. */
+async function toolNames() {
+  return (await listedTools()).map((tool) => tool.name);
+}
+
+test("the pad tool's schema names the mute groups A to J and leaves keep_pitch out", async () => {
+  const padSet = (await listedTools()).find((tool) => tool.name === "studio_pad_set");
+  assert.ok(padSet, "studio_pad_set is a tool");
+  const fields = padSet.inputSchema.properties.fields;
+  assert.ok(fields && fields.properties, "the tool describes the pad fields it takes");
+
+  const choke = fields.properties.choke;
+  assert.ok(choke, "the pad's fields carry a mute group");
+  assert.match(choke.description, /mute group/);
+  assert.match(choke.description, /A-J/, "the letters the groups are named by");
+  assert.equal(choke.maximum, 10, "the last group is J");
+
+  // The playback fields are the pad's own settings, and the reserved one is not
+  // among them: a future time-stretch is not something an agent may set yet.
+  const described = Object.keys(fields.properties).sort();
+  for (const field of ["mode", "loop", "bpm_sync", "source_bpm_x10", "speed_pct", "fixed_velocity", "hold_ms"]) {
+    assert.ok(described.includes(field), `${field} is part of the pad's fields`);
+  }
+  assert.equal(described.includes("keep_pitch"), false, "keep_pitch is reserved and read-only");
+  assert.deepEqual(fields.properties.mode.enum, ["oneshot", "gate", "normal"]);
+  assert.deepEqual(fields.properties.loop.enum, ["off", "loop", "pingpong"]);
+});
+
+test("the whole-bank pad tool takes the playback fields a bank shares and no others", async () => {
+  const setBank = (await listedTools()).find((tool) => tool.name === "studio_pad_set_bank");
+  assert.ok(setBank, "studio_pad_set_bank is a tool");
+  const fields = setBank.inputSchema.properties.fields;
+  assert.ok(fields && fields.properties, "the tool describes the bank fields it takes");
+
+  assert.deepEqual(Object.keys(fields.properties).sort(), [
+    "attack_ms",
+    "bpm_sync",
+    "decay_ms",
+    "fixed_velocity",
+    "hold_ms",
+    "loop",
+    "mode",
+    "pitch",
+    "release_ms",
+    "reverse",
+    "speed_pct",
+    "sustain",
+  ]);
+  assert.deepEqual(fields.properties.mode.enum, ["oneshot", "gate", "normal"]);
+  assert.deepEqual(fields.properties.loop.enum, ["off", "loop", "pingpong"]);
+
+  // What a bank-wide step must not carry: a name, a filter or sample tempo per
+  // pad, the mix, and the mute group that would cut every pad in the bank.
+  for (const field of ["name", "filter", "choke", "keep_pitch", "source_bpm_x10", "gain_db", "pan"]) {
+    assert.equal(field in fields.properties, false, `${field} is not a whole-bank field`);
+  }
+
+  // Each bank field is the very shape pad.set takes, so the two schemas cannot
+  // describe one field two different ways: they are built from one table.
+  const padSet = (await listedTools()).find((tool) => tool.name === "studio_pad_set");
+  const padFields = padSet.inputSchema.properties.fields.properties;
+  for (const field of Object.keys(fields.properties)) {
+    assert.deepEqual(fields.properties[field], padFields[field], `${field} is pad.set's own shape`);
+  }
+});
+
+test("the whole-bank command is in both the registry and the panel's command list", () => {
+  assert.ok(
+    listCommands({ public: true }).some((command) => command.id === "pad.set_bank"),
+    "the registry holds pad.set_bank",
+  );
+  assert.ok(panelCommandIds().includes("pad.set_bank"), "the panel's command list holds pad.set_bank");
+});
 
 test("every public non-humanOnly command has exactly one tool and the rest have none", async () => {
   const names = await toolNames();

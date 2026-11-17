@@ -1081,11 +1081,33 @@ const STYLES = `
     padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
   }
   .studio .st-pad-title { margin: 0; font-size: 13px; font-weight: 600; }
+  /* One group of the pad's settings (Playback, Tuning, Envelope, Mute group,
+     Level, Filter): its heading, then its controls. */
+  .studio .st-pad-group { display: flex; flex-direction: column; gap: 4px; }
+  .studio .st-pad-group-title {
+    margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--st-muted);
+  }
   .studio .st-pad-fields {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px 12px;
   }
+  /* One control and, where the setting may be set on the whole bank, the small
+     button beside it: the button sits under the control it sends. */
+  .studio .st-pad-field { display: flex; flex-direction: column; gap: 2px; }
+  .studio .st-pad-note { margin: 2px 0 0; font-size: 11px; color: var(--st-muted); }
+  .studio .st-pad-bank {
+    min-height: 44px; min-width: 44px; padding: 0 8px;
+    font: inherit; font-size: 10px; color: var(--st-muted);
+    background: none; border: 1px solid var(--st-line); border-radius: 8px;
+    cursor: pointer;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-pad-bank:hover { color: var(--st-text); border-color: var(--st-edge); }
   .studio .st-pad-range { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--st-muted); }
   .studio .st-pad-range-input { width: 100%; min-height: 44px; accent-color: var(--st-human); }
+  /* The sample tempo slider's readout: the tempo in BPM, or that the pad has none
+     yet, under the control it follows. */
+  .studio .st-pad-readout { font-size: 11px; color: var(--st-text); }
   .studio .st-pad-select { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--st-muted); }
   .studio .st-pad-check {
     display: flex; align-items: center; gap: 6px; min-height: 44px;

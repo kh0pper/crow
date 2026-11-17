@@ -18,6 +18,12 @@
  *     comes back to drops what went stale while no frames ran;
  *   - lock mode's strip lives with the steps (not in the right column), and the
  *     sentence about locking a step is the visible hint while no lock is on;
+ *   - the selected pad's settings, in the SP-404's groups: one pad.set per
+ *     control, a whole-bank button that sends one pad.set_bank, the mute group's
+ *     eleven options, the sample tempo that reads in BPM, and a pad written
+ *     before those fields existed;
+ *   - the live state is released (engine.resetLive) only when a DIFFERENT song
+ *     opens, never on the snapshot an ordinary edit sends;
  *   - a controller's effect hold outlives a tap on the page, and a rebuilt host
  *     gives the keyboard back to the control it was on.
  */
@@ -208,7 +214,7 @@ function audioContextClass() {
  * engine sends every 50 ms.
  */
 function fakeStudioEngine() {
-  const calls = { play: 0, stop: 0, songs: 0 };
+  const calls = { play: 0, stop: 0, songs: 0, reset: 0 };
   const engine = {
     calls,
     node: { connect() {} },
@@ -224,6 +230,10 @@ function fakeStudioEngine() {
     setSong() {
       calls.songs += 1;
     },
+    resetLive() {
+      calls.reset += 1;
+    },
+    dispose() {},
     setMode() {},
     setMetronome() {},
     onPosition(listener) {
@@ -570,6 +580,22 @@ async function bootSong(options = {}) {
       const { runCommand } = await commandsApi();
       runCommand(doc, command, args);
       frame(stateFrame());
+      await ui.settle();
+    },
+    /**
+     * Open another song in the same page element, the way a fresh visit does:
+     * the page is taken down, the element names the other song, and it boots
+     * again with that song's document.
+     */
+    async openSong(songId, nextDoc) {
+      document.dispatchEvent(event("turbo:before-cache", {}));
+      await ui.settle();
+      const element = document.querySelector(".studio");
+      assert.equal(typeof element.__studioBoot, "function", "the page can boot its element again");
+      element.setAttribute("data-studio-song", String(songId));
+      element.__studioBoot();
+      await ui.settle();
+      frame(stateFrame(nextDoc));
       await ui.settle();
     },
   };
@@ -1247,4 +1273,392 @@ test("focus comes back to the effect it was on, not the first one like it", asyn
     prototype.focus = original;
     ui.document.activeElement = null;
   }
+});
+
+// --- the selected pad's settings, in groups ----------------------------------
+
+/** The settings every playback, tuning and envelope control may set on the bank. */
+const BANK_FIELDS = [
+  "mode", "loop", "reverse", "bpm_sync", "fixed_velocity",
+  "pitch", "speed_pct",
+  "attack_ms", "hold_ms", "decay_ms", "sustain", "release_ms",
+];
+
+/** One control of the selected pad, by the field it writes. */
+function padControl(ui, field, index = 0) {
+  const node = ui.document.querySelector(
+    `[data-role=sampler-pads] [data-pad-field="${field}"][data-pad-index="${index}"]`,
+  );
+  assert.ok(node, `the ${field} control is drawn`);
+  return node;
+}
+
+/** The one option a select has selected. */
+function selectedOption(select) {
+  const chosen = [...select.querySelectorAll("option")].filter((option) => option.selected === true);
+  assert.equal(chosen.length, 1, "exactly one option is selected");
+  return chosen[0];
+}
+
+/** Change one control the way a person does: set it, then let it go. */
+async function changeControl(ui, node, value) {
+  if (String(node.type) === "checkbox") {
+    node.checked = value;
+  } else if (String(node.tagName) === "SELECT") {
+    // A select's own value is read-only in this document: the option is picked
+    // the way a person picks one.
+    for (const option of [...node.querySelectorAll("option")]) {
+      if (String(option.value) === String(value)) option.selected = true;
+    }
+    assert.equal(node.value, String(value), `the ${String(node.getAttribute("data-pad-field"))} select took the pick`);
+  } else {
+    node.value = String(value);
+  }
+  node.dispatchEvent(ui.event("change", { target: node }));
+  await ui.settle();
+}
+
+/** The fixture pad as the song stores it (pad 1 of its one bank). */
+async function storedPad(doc) {
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const bankId = await firstBankId(doc);
+  return snapshot(doc).pads[`${TRACK}/${bankId}/0`];
+}
+
+/**
+ * Take the fields a song written before this phase does not carry off the
+ * fixture pad, so the page reads it the way it reads an old song.
+ * @returns {Promise<string>} the bank id
+ */
+async function stripNewPadKeys(doc) {
+  const bankId = await firstBankId(doc);
+  const pads = doc.getMap("song").get("pads");
+  const pad = pads.get(`${TRACK}/${bankId}/0`);
+  assert.ok(pad, "the fixture pad is in the song");
+  for (const key of ["mode", "loop", "bpm_sync", "source_bpm_x10", "speed_pct",
+    "fixed_velocity", "hold_ms", "keep_pitch"]) {
+    pad.delete(key);
+  }
+  assert.equal(pad.has("loop"), false, "the loop key is gone from the document");
+  return bankId;
+}
+
+test("each pad control sends exactly one pad.set with the field and its value", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc });
+  const bankId = await firstBankId(ui.doc);
+  await ui.openSampler();
+
+  // Every control of the panel, with a value and the one field it must send.
+  const table = [
+    ["mode", "normal", { mode: "normal" }],
+    ["loop", "pingpong", { loop: "pingpong" }],
+    ["reverse", true, { reverse: true }],
+    ["bpm_sync", true, { bpm_sync: true }],
+    ["source_bpm_x10", 1240, { source_bpm_x10: 1240 }],
+    ["fixed_velocity", true, { fixed_velocity: true }],
+    ["pitch", 7, { pitch: 7 }],
+    ["speed_pct", 120, { speed_pct: 120 }],
+    ["attack_ms", 40, { attack_ms: 40 }],
+    ["hold_ms", 300, { hold_ms: 300 }],
+    ["decay_ms", 250, { decay_ms: 250 }],
+    ["sustain", 0.4, { sustain: 0.4 }],
+    ["release_ms", 120, { release_ms: 120 }],
+    ["choke", 10, { choke: 10 }],
+    ["gain_db", -3, { gain_db: -3 }],
+    ["pan", -0.5, { pan: -0.5 }],
+  ];
+
+  let sent = 0;
+  for (const [field, value, fields] of table) {
+    // The host is drawn again from the song, so the control is a new node.
+    await changeControl(ui, padControl(ui, field), value);
+    const commands = ui.commands("pad.set");
+    assert.equal(commands.length, sent + 1, `${field}: one release, one pad.set`);
+    assert.equal(commands[sent].args.track_id, TRACK);
+    assert.equal(commands[sent].args.bank_id, bankId);
+    assert.equal(commands[sent].args.index, 0, "on the selected pad");
+    assert.deepEqual(commands[sent].args.fields, fields, `${field} carries its own value`);
+    sent += 1;
+  }
+  assert.equal(ui.commands("pad.set_bank").length, 0, "no control wrote the bank on its own");
+});
+
+test("a checkbox sends a boolean and the loop select sends its string", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc });
+  await ui.openSampler();
+
+  await changeControl(ui, padControl(ui, "reverse"), true);
+  const first = ui.commands("pad.set");
+  assert.equal(first.length, 1);
+  assert.equal(typeof first[0].args.fields.reverse, "boolean", "a switch is a boolean");
+  assert.equal(first[0].args.fields.reverse, true);
+
+  await changeControl(ui, padControl(ui, "loop"), "loop");
+  const second = ui.commands("pad.set");
+  assert.equal(second.length, 2);
+  assert.equal(typeof second[1].args.fields.loop, "string", "the loop is the word it stores");
+  assert.deepEqual(second[1].args.fields, { loop: "loop" });
+});
+
+test("a slider held between two steps sends the whole number the field takes", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc });
+  await ui.openSampler();
+
+  // A browser hands a range a value between two of its steps: the field is an
+  // integer, so the page rounds it instead of being refused.
+  await changeControl(ui, padControl(ui, "speed_pct"), "99.6");
+  const sent = ui.commands("pad.set");
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].args.fields, { speed_pct: 100 }, "99.6 is sent as 100");
+
+  // And the hub takes it: the song holds the whole number.
+  await ui.apply("pad.set", sent[0].args);
+  assert.equal((await storedPad(ui.doc)).speed_pct, 100);
+});
+
+test("the sample tempo reads in BPM and is sent as a tempo the field takes", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc });
+  await ui.openSampler();
+
+  // The control is the sample's own tempo in BPM, and 0 is the pad having none.
+  const label = padControl(ui, "source_bpm_x10").parentNode.querySelector(".st-pad-range-label");
+  assert.ok(label, "the sample tempo control has its label");
+  assert.equal(String(label.textContent), "Sample tempo (BPM)", "which says the unit in words");
+  assert.equal(padControl(ui, "source_bpm_x10").min, "0", "0 is not set");
+  assert.equal(padControl(ui, "source_bpm_x10").max, "3000", "300.0 BPM is the top, times ten");
+
+  const readout = () => String(
+    padControl(ui, "source_bpm_x10").parentNode.querySelector("[data-pad-readout]").textContent,
+  );
+  assert.equal(readout(), "Not set", "a pad with no tempo of its own says so");
+
+  // The stored field reads 0 (not set) or 20.0-300.0 BPM times ten and refuses
+  // the band between. The slider still passes through that band, so a value in
+  // it is sent as the reading it is nearest: none below 10.0 BPM, 20.0 from
+  // there up. The readout follows the value the field receives.
+  const cases = [
+    [50, 0, "Not set"],
+    [150, 200, "20.0 BPM"],
+    [1200, 1200, "120.0 BPM"],
+  ];
+  let sent = 0;
+  for (const [value, field, shown] of cases) {
+    await changeControl(ui, padControl(ui, "source_bpm_x10"), value);
+    const commands = ui.commands("pad.set");
+    assert.equal(commands.length, sent + 1, `${value}: one release, one pad.set`);
+    assert.deepEqual(commands[sent].args.fields, { source_bpm_x10: field },
+      `${value} is sent as ${field}`);
+    assert.equal(readout(), shown, `${value} reads as ${shown}`);
+    sent += 1;
+  }
+});
+
+test("whole bank sends one pad.set_bank with only that field", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc });
+  const bankId = await firstBankId(ui.doc);
+  await ui.openSampler();
+
+  // Every playback, tuning and envelope control has a whole-bank button.
+  for (const field of BANK_FIELDS) {
+    assert.ok(
+      ui.document.querySelector(`[data-act=pad-bank][data-bank-field="${field}"]`),
+      `the ${field} control can be set on the whole bank`,
+    );
+  }
+  // The mute group never does, and neither do the mix, the filter and the
+  // sample's own tempo: those are not whole-bank fields.
+  for (const field of ["choke", "gain_db", "pan", "filter.type", "filter.cutoff_hz",
+    "filter.resonance", "source_bpm_x10"]) {
+    assert.equal(
+      ui.document.querySelector(`[data-bank-field="${field}"]`),
+      null,
+      `${field} is not a whole-bank field`,
+    );
+  }
+
+  // A press sends ONE pad.set_bank, carrying the value the control holds.
+  padControl(ui, "speed_pct").value = "130";
+  ui.click("[data-act=pad-bank][data-bank-field=speed_pct]");
+  await ui.settle();
+  const sent = ui.commands("pad.set_bank");
+  assert.equal(sent.length, 1, "one press is one pad.set_bank");
+  assert.deepEqual(sent[0].args, {
+    track_id: TRACK, bank_id: bankId, fields: { speed_pct: 130 },
+  }, "only the field its button names, and no other");
+  assert.equal(ui.commands("pad.set").length, 0, "the selected pad is not written a second time");
+
+  // A switch reaches the bank as the boolean it is.
+  padControl(ui, "bpm_sync").checked = true;
+  ui.click("[data-act=pad-bank][data-bank-field=bpm_sync]");
+  await ui.settle();
+  const both = ui.commands("pad.set_bank");
+  assert.equal(both.length, 2, "the second press is one more command");
+  assert.deepEqual(both[1].args.fields, { bpm_sync: true }, "and its own field is the only one in it");
+});
+
+test("the mute group offers None and A to J, and an older song's group keeps its letter", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc });
+  await ui.openSampler();
+  const bankId = await firstBankId(ui.doc);
+
+  const select = padControl(ui, "choke");
+  const options = [...select.querySelectorAll("option")];
+  assert.equal(options.length, 11, "None and ten groups");
+  assert.deepEqual(options.map((option) => option.value), ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+    "the groups are the stored integers 0 and 1-10");
+  assert.deepEqual(options.map((option) => String(option.textContent)),
+    ["None", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+    "and they are lettered A to J: A is 1 and J is 10");
+  assert.equal(select.value, "0", "an empty pad is in no group");
+
+  // An older song stores 3 for group C, and the panel says so rather than
+  // showing no group at all.
+  await ui.apply("pad.set", { track_id: TRACK, bank_id: bankId, index: 0, fields: { choke: 3 } });
+  const after = padControl(ui, "choke");
+  assert.equal(after.value, "3");
+  assert.equal(String(selectedOption(after).textContent), "C", "group 3 reads as C");
+});
+
+test("a stored oneshot pad reads as One-shot (overlap), and normal reads as Normal", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc });
+  await ui.openSampler();
+  const bankId = await firstBankId(ui.doc);
+
+  const mode = padControl(ui, "mode");
+  assert.equal(mode.value, "oneshot", "every existing pad stores the one-shot");
+  assert.equal(String(selectedOption(mode).textContent), "One-shot (overlap)",
+    "which says what it does: presses overlap");
+  assert.deepEqual([...mode.querySelectorAll("option")].map((option) => option.value),
+    ["gate", "normal", "oneshot"], "Gate, Normal and One-shot, in that order");
+
+  await ui.apply("pad.set", { track_id: TRACK, bank_id: bankId, index: 0, fields: { mode: "normal" } });
+  const normal = padControl(ui, "mode");
+  assert.equal(normal.value, "normal");
+  assert.equal(String(selectedOption(normal).textContent), "Normal");
+});
+
+test("a pad with no loop key shows Off", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  await stripNewPadKeys(doc);
+  const ui = await bootSong({ doc });
+  await ui.openSampler();
+
+  const loop = padControl(ui, "loop");
+  assert.equal(loop.value, "off", "a song with no loop key plays once");
+  assert.equal(String(selectedOption(loop).textContent), "Off");
+  assert.deepEqual([...loop.querySelectorAll("option")].map((option) => String(option.textContent)),
+    ["Off", "Loop", "Ping-pong"], "with the two loop settings beside it");
+});
+
+test("the panel draws a pad that carries none of the new keys", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  await stripNewPadKeys(doc);
+  const ui = await bootSong({ doc });
+  await ui.openSampler();
+
+  for (const name of ["playback", "tuning", "envelope", "mute", "level", "filter"]) {
+    assert.ok(ui.document.querySelector(`[data-pad-group="${name}"]`), `the ${name} group is drawn`);
+  }
+  assert.equal(padControl(ui, "speed_pct").value, "100", "a pad with no speed plays at 100 %");
+  assert.equal(padControl(ui, "source_bpm_x10").value, "0", "with no tempo of its own");
+  assert.equal(padControl(ui, "hold_ms").value, "0", "and no hold");
+  assert.equal(padControl(ui, "bpm_sync").checked, false, "no BPM sync");
+  assert.equal(padControl(ui, "fixed_velocity").checked, false, "and no fixed velocity");
+  assert.equal(padControl(ui, "choke").value, "0", "in no mute group");
+  assert.equal(padControl(ui, "gain_db").value, "0", "the pad's own settings are there too");
+
+  // Nothing was written: an old song is never rewritten by opening it.
+  assert.equal(ui.commands("pad.set").length, 0, "opening an old song writes nothing");
+  assert.equal(ui.commands("pad.set_bank").length, 0, "and nothing to the bank");
+});
+
+test("BPM sync says there is no tempo to sync to until the pad has one", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc });
+  const bankId = await firstBankId(ui.doc);
+  await ui.openSampler();
+
+  const note = () => {
+    const node = ui.document.querySelector("[data-pad-note=bpm_sync]");
+    assert.ok(node, "the BPM sync row has its note");
+    return String(node.textContent);
+  };
+  assert.match(note(), /set a tempo/i, "with no tempo of its own the row says so");
+
+  // Use song tempo takes the song's own 120 bpm onto this pad, times ten (the
+  // integer the field is stored as).
+  ui.click("[data-act=use-song-tempo]");
+  await ui.settle();
+  const sent = ui.commands("pad.set");
+  assert.equal(sent.length, 1, "one press is one pad.set");
+  assert.deepEqual(sent[0].args, {
+    track_id: TRACK, bank_id: bankId, index: 0, fields: { source_bpm_x10: 1200 },
+  }, "the song's tempo, times ten");
+
+  await ui.apply("pad.set", sent[0].args);
+  assert.match(note(), /120 BPM/, "and once it has one the row names it");
+  assert.equal(padControl(ui, "source_bpm_x10").value, "1200", "the tempo control holds the stored value");
+});
+
+test("nothing in the panel writes keep_pitch", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc });
+  await ui.openSampler();
+
+  // The field is reserved for the later time-stretch: no control offers it, and
+  // no whole-bank button sends it.
+  const fields = [...ui.document.querySelectorAll("[data-pad-field]")]
+    .map((node) => String(node.getAttribute("data-pad-field")));
+  const bankFields = [...ui.document.querySelectorAll("[data-bank-field]")]
+    .map((node) => String(node.getAttribute("data-bank-field")));
+  assert.equal(fields.includes("keep_pitch"), false, "no control writes keep_pitch");
+  assert.equal(bankFields.includes("keep_pitch"), false, "and no bank button sends it");
+  assert.equal(/keep pitch/i.test(String(ui.view().textContent)), false,
+    "the panel does not offer it either");
+});
+
+test("an ordinary snapshot never releases the live state; another song releases it once", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+
+  // Play builds the engine and hands it this song.
+  ui.click("[data-act=play]");
+  await ui.settle();
+  assert.equal(ui.engine.calls.songs, 1, "the engine was handed the song it was built for");
+  assert.equal(ui.engine.calls.reset, 0, "a new engine has nothing live to release");
+
+  // An ordinary edit — the snapshot every change sends — releases nothing.
+  await ui.apply("pad.set", { track_id: TRACK, bank_id: bankId, index: 0, fields: { gain_db: -3 } });
+  assert.equal(ui.engine.calls.songs, 2, "the edit handed the song over");
+  assert.equal(ui.engine.calls.reset, 0, "and released nothing");
+  await ui.apply("pad.set", { track_id: TRACK, bank_id: bankId, index: 0, fields: { gain_db: -6 } });
+  assert.equal(ui.engine.calls.reset, 0, "nor did the one after it");
+
+  // Another song opens under the same page element: the live state belongs to
+  // the song that went away, so it is released, once.
+  const other = await samplerDoc({ scenes: [SCENE], pattern: true });
+  await ui.openSong("song-2", other);
+  ui.click("[data-act=play]");
+  await ui.settle();
+  assert.equal(ui.engine.calls.reset, 0, "nothing has been released yet");
+
+  const songs = ui.engine.calls.songs;
+  ui.frame(ui.stateFrame(other));
+  await ui.settle();
+  assert.equal(ui.engine.calls.reset, 1, "opening a different song released the live state once");
+  assert.ok(ui.engine.calls.songs > songs, "and the new song was handed over");
+
+  // The next snapshot is an ordinary one again.
+  ui.frame(ui.stateFrame(other));
+  await ui.settle();
+  assert.equal(ui.engine.calls.reset, 1, "an ordinary snapshot after it releases nothing");
 });

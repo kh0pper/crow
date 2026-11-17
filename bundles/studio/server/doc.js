@@ -45,13 +45,19 @@
  *                     start_frame, end_frame}
  *   banks     Y.Map of "<track_id>/<bank_id>" → Y.Map {id, track_id, name, order}
  *   pads      Y.Map of "<track_id>/<bank_id>/<index>" → Y.Map {track_id,
- *                     bank_id, index, sample_id, slice_id, name, mode, pitch,
+ *                     bank_id, index, sample_id, slice_id, name, mode, loop,
+ *                     bpm_sync, source_bpm_x10, speed_pct, fixed_velocity,
+ *                     hold_ms, keep_pitch, pitch,
  *                     gain_db, pan, attack_ms, decay_ms, sustain, release_ms,
  *                     filter {type, cutoff_hz, resonance}, choke, reverse}
  *   patterns  Y.Map of "<clip_id>/<pattern_id>" → Y.Map {id, clip_id, name, order,
  *                     "motion|<bank>.<index>|<param>": [{step_frac, value}]}
  *   steps     Y.Map of "<clip_id>/<pattern_id>/<at>/<bank_id>.<index>" → Y.Map
  *                     {clip_id, pattern_id, at, bank_id, index, v, locks}
+ *
+ * A pad key a song does not carry reads as its default through `normalizePad`,
+ * so a reader that knows a key and one that does not play the same song.
+ * `keep_pitch` is reserved for the later time-stretch and no command writes it.
  *
  * A pattern's motion is one KEY per lane directly on the pattern's own map,
  * `"motion|<bank_id>.<index>|<param>"` → `[{step_frac, value}]` sorted by
@@ -578,8 +584,19 @@ export const INSERT_SET_BY = Object.freeze(["operator", "agent"]);
 /** The filter kinds one pad may use; "off" is a pad that filters nothing. */
 export const PAD_FILTER_TYPES = Object.freeze(["off", "lp", "hp", "bp"]);
 
-/** The two ways a pad's voice ends: it runs out, or its step releases it. */
-export const PAD_MODES = Object.freeze(["oneshot", "gate"]);
+/**
+ * How a pad answers a press. `oneshot` (what every pad stored before this) plays
+ * to the end and presses overlap; `normal` restarts the sample on each press;
+ * `gate` plays while held and its step's end releases it. The order matters:
+ * the first one is the default a pad without a readable value reads as.
+ */
+export const PAD_MODES = Object.freeze(["oneshot", "gate", "normal"]);
+
+/**
+ * How a pad's playback repeats: not at all, forwards, or reflected at each end.
+ * The first one is the default, so a pad that stores no loop reads as "off".
+ */
+export const PAD_LOOPS = Object.freeze(["off", "loop", "pingpong"]);
 
 /**
  * The pad fields a motion lane may sweep, each with the range the pad's own
@@ -2030,9 +2047,11 @@ export function stepsForClip(doc, clipId) {
  * @param {string} bankId
  * @param {number} index - 0-15
  * @returns {{track_id: string, bank_id: string, index: number, sample_id: null,
- *            slice_id: null, name: string, mode: string, pitch: number,
- *            gain_db: number, pan: number, attack_ms: number, decay_ms: number,
- *            sustain: number, release_ms: number,
+ *            slice_id: null, name: string, mode: string, loop: string,
+ *            bpm_sync: boolean, source_bpm_x10: number, speed_pct: number,
+ *            fixed_velocity: boolean, hold_ms: number, keep_pitch: boolean,
+ *            pitch: number, gain_db: number, pan: number, attack_ms: number,
+ *            decay_ms: number, sustain: number, release_ms: number,
  *            filter: {type: string, cutoff_hz: number, resonance: number},
  *            choke: number, reverse: boolean}}
  */
@@ -2045,6 +2064,15 @@ export function defaultPad(trackId, bankId, index) {
     slice_id: ABSENT,
     name: "",
     mode: "oneshot",
+    loop: "off",
+    bpm_sync: false,
+    source_bpm_x10: 0,
+    speed_pct: 100,
+    fixed_velocity: false,
+    hold_ms: 0,
+    // RESERVED for a later time-stretch: nothing writes it and the engine
+    // ignores it, so every pad of this phase is plain varispeed.
+    keep_pitch: false,
     pitch: 0,
     gain_db: 0,
     pan: 0,
@@ -4667,6 +4695,35 @@ function integerOr(value, fallback) {
   return Number.isInteger(value) ? value : fallback;
 }
 
+/**
+ * A pad number as a snapshot carries it: floored to a whole number and clamped
+ * into the field's range. A value that is not a finite number reads as the
+ * field's default, the way `integerOr` reads any other broken field.
+ * @param {unknown} value
+ * @param {number} min
+ * @param {number} max
+ * @param {number} fallback
+ * @returns {number}
+ */
+function clampedIntOr(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+/**
+ * A pad's own sample tempo as a snapshot carries it: times ten, 20.0-300.0 BPM,
+ * or 0 for "not set". A number too slow to be a tempo reads as not set rather
+ * than clamped up, so a broken value never syncs a pad to a tempo nobody chose.
+ * @param {unknown} value
+ * @returns {number}
+ */
+function sourceBpmOr(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  const tenths = Math.floor(value);
+  if (tenths < 200) return 0;
+  return Math.min(3000, tenths);
+}
+
 /** A track as a snapshot carries it: every field present, nothing extra. */
 function normalizeTrack(value) {
   const plain = stripHints(value);
@@ -4816,6 +4873,9 @@ function normalizeBank(id, value) {
 /**
  * A pad as a snapshot carries it: every field present, nothing extra. An empty
  * pad carries `sample_id: null`, which is how "no sound on this pad" is spelled.
+ * A playback field out of its range is clamped to the range and a whole-number
+ * one is floored, so a restored or hand-written value still reads as a usable
+ * one; a key the song does not carry reads as that field's default.
  */
 function normalizePad(id, value) {
   const plain = stripHints(value);
@@ -4828,6 +4888,13 @@ function normalizePad(id, value) {
     slice_id: typeof plain.slice_id === "string" ? plain.slice_id : ABSENT,
     name: typeof plain.name === "string" ? plain.name : "",
     mode: PAD_MODES.includes(plain.mode) ? plain.mode : PAD_MODES[0],
+    loop: PAD_LOOPS.includes(plain.loop) ? plain.loop : PAD_LOOPS[0],
+    bpm_sync: plain.bpm_sync === true,
+    source_bpm_x10: sourceBpmOr(plain.source_bpm_x10),
+    speed_pct: clampedIntOr(plain.speed_pct, 50, 150, 100),
+    fixed_velocity: plain.fixed_velocity === true,
+    hold_ms: clampedIntOr(plain.hold_ms, 0, 10000, 0),
+    keep_pitch: plain.keep_pitch === true,
     pitch: numberOr(plain.pitch, 0),
     gain_db: numberOr(plain.gain_db, 0),
     pan: numberOr(plain.pan, 0),
@@ -4840,7 +4907,7 @@ function normalizePad(id, value) {
       cutoff_hz: numberOr(filter.cutoff_hz, 20000),
       resonance: numberOr(filter.resonance, 0),
     },
-    choke: integerOr(plain.choke, 0),
+    choke: clampedIntOr(plain.choke, 0, 10, 0),
     reverse: plain.reverse === true,
   };
 }

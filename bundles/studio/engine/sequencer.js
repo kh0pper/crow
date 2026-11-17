@@ -150,12 +150,15 @@
  * patterns, whose steps live in the song's own `steps` container. Its notes are
  * empty. For every step that sounds this file emits
  *
- *     {frame, type: "pad", track_id, bank_id, index, v, locks, gate_frames}
+ *     {frame, type: "pad", track_id, bank_id, index, v, locks, gate_frames,
+ *      clip_id}
  *
  * A pad trigger is not a note: nothing is released, so it has no entry in the
  * open set — the pad's own mode (one-shot or gate) decides how its voice ends,
  * which is the processor's business. `gate_frames` is the plain step length in
  * frames (`step_beats × framesPerBeat`), which a `gate` pad releases at.
+ * `clip_id` is the clip that played the step, so a voice the step started can be
+ * ended when that track moves on to another clip (see "Clip changes").
  *
  * **Swing.** A step sounds `at × step_beats` beats into its pattern's loop, and
  * an ODD step is delayed by `swing × step_beats` beats more (swing is 0 to
@@ -257,6 +260,23 @@
  * A launch scheduled while the transport is stopped takes effect at beat 0, so
  * it is reported in the block that starts the transport, not in the block the
  * launch was asked in.
+ *
+ * ## Clip changes
+ *
+ * A pad's voice can outlive the step that started it (a Loop pad plays until it
+ * is stopped), so a host has to be told when the clip that started such a voice
+ * stops being the clip its track plays. Every block carries that as a
+ * non-enumerable `clipChanges` array, one entry per track whose playing segment
+ * ended or turned over onto a DIFFERENT clip inside that block:
+ *
+ *     {track_id, clip_id|null, frame}
+ *
+ * `frame` is the offset inside that block of the boundary frame
+ * (`0 <= frame < frames`), so a host adds its own frame at the block's start to
+ * get an absolute frame; `clip_id` is `null` for a track that has nothing
+ * playing any more. The array is reused like `launches`, and a track whose clip
+ * did not change — including a relaunch of the very clip it plays — is not
+ * reported at all.
  *
  * `stop()` halts the transport: every sounding note gets its off at the
  * current frame, the position goes back to 1.1.1, and the clips that were
@@ -524,6 +544,25 @@
       writable: false,
       configurable: false,
     });
+
+    /**
+     * The tracks whose playing clip changed in the block being built, in block
+     * frames. Reused like `events` and hung off it as a non-enumerable
+     * `clipChanges` property (see "Clip changes" in the header).
+     */
+    const clipChanges = [];
+    Object.defineProperty(events, "clipChanges", {
+      value: clipChanges,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+
+    /**
+     * track id → the clip its playing segment had when it was last reported, so
+     * a block can say which track moved on and which one merely played on.
+     */
+    const playingClips = new Map();
 
     /**
      * Launches scheduled but not yet inside a processed block, in the order
@@ -1583,6 +1622,78 @@
     }
 
     /**
+     * The block `reportTrackClip` is reading, set once per block by
+     * `reportClipChanges`: the walk hands the map's own iteration a function
+     * made once, instead of building a closure (and an entry array per track)
+     * in the block path.
+     */
+    let clipWalkStart = 0;
+    let clipWalkEnd = 0;
+
+    /**
+     * Report one track's clip turning over, as `reportClipChanges` walks the
+     * song's segments. `segs` and `trackId` are the very pair the map's
+     * `forEach` hands over, so this runs for one track of one block.
+     * @param {object[]} segs that track's segments, in beat order
+     * @param {string} trackId
+     * @returns {void}
+     */
+    function reportTrackClip(segs, trackId) {
+      let clipId = null;
+      let frame = -1;
+      for (let at = 0; at < segs.length; at += 1) {
+        const seg = segs[at];
+        if (seg.clipId === null) continue;
+        const startFrame = beatToFrame(seg.startBeat);
+        const endFrame = seg.endBeat === null ? Infinity : beatToFrame(seg.endBeat);
+        if (startFrame >= clipWalkEnd) break;
+        if (endFrame <= clipWalkStart) continue;
+        clipId = seg.clipId;
+        frame = startFrame > clipWalkStart ? startFrame - clipWalkStart : 0;
+        // A segment that also ends inside this block leaves nothing playing (a
+        // launch onto no clip, a stop): the change is to no clip at all.
+        if (endFrame < clipWalkEnd) {
+          clipId = null;
+          frame = endFrame > clipWalkStart ? endFrame - clipWalkStart : 0;
+        }
+      }
+      const before = playingClips.has(trackId) ? playingClips.get(trackId) : null;
+      if (frame < 0) {
+        // Nothing of this track covers the block. That is only news when the
+        // last block said it played something: a segment that stopped has
+        // already been reported at its own boundary.
+        if (before === null) return;
+        playingClips.delete(trackId);
+        clipChanges.push({ track_id: trackId, clip_id: null, frame: 0 });
+        return;
+      }
+      if (before === clipId) return;
+      // The map is only written when the track really moved on, so a block that
+      // merely plays on touches nothing.
+      if (clipId === null) playingClips.delete(trackId);
+      else playingClips.set(trackId, clipId);
+      clipChanges.push({ track_id: trackId, clip_id: clipId, frame: frame });
+    }
+
+    /**
+     * Report the tracks whose playing segment ended or turned over onto a
+     * different clip inside this block (see "Clip changes" in the header).
+     *
+     * The clip a track plays is read off its own segments, so nothing keeps a
+     * running total: the clip standing at the block's end, and the frame the
+     * block's last transition onto it happened at, are compared with what the
+     * last block reported.
+     * @param {number} frameStart the block's first frame
+     * @param {number} frameEnd the frame it stops at (exclusive)
+     * @returns {void}
+     */
+    function reportClipChanges(frameStart, frameEnd) {
+      clipWalkStart = frameStart;
+      clipWalkEnd = frameEnd;
+      segments.forEach(reportTrackClip);
+    }
+
+    /**
      * Report the launches whose boundary frame falls inside this block.
      * @param {number} frameStart
      * @param {number} frames
@@ -1971,6 +2082,7 @@
       events.length = 0;
       fadeQueue.length = 0;
       motions.length = 0;
+      clipChanges.length = 0;
       patterns.clear();
       const frameEnd = frameStart + frames;
 
@@ -2096,6 +2208,9 @@
 
       events.sort(compareEvents);
       if (motions.length > 1) motions.sort(byMotionFrame);
+      // The clips that ended or turned over in this block: a host ends the
+      // voices a step started on one that is gone (see "Clip changes").
+      reportClipChanges(frameStart, frameEnd);
       // The launches this block applied, reported after the notes they brought
       // in: a host posts them as they are, so their offsets are framed against
       // the very block start the events use.
@@ -2376,6 +2491,9 @@
             v: step.v,
             locks: step.locks,
             gate_frames: gateFrames,
+            // The clip that played this step, so a voice this step starts can
+            // end when its track moves to another clip.
+            clip_id: seg.clipId,
           });
         }
       }

@@ -25,9 +25,12 @@ import {
   LIMITS,
   MOTION_PARAM_RANGES,
   MOTION_PARAMS,
+  PAD_LOOPS,
+  PAD_MODES,
   SAMPLER_DEVICE,
   bankKey,
   checkInvariants,
+  defaultPad,
   isSamplerTrack,
   lengthBarsForSteps,
   newSongDoc,
@@ -43,6 +46,7 @@ import {
   StudioError,
   getCommand,
   listCommands,
+  prepareCommand,
   runCommand,
 } from "../bundles/studio/server/commands/registry.js";
 import "../bundles/studio/server/commands/core.js";
@@ -821,6 +825,479 @@ test("re-chop after Clear pad succeeds", (t) => {
   assert.deepEqual(again.result.before, {});
   assert.deepEqual(again.result.after, {});
   assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+/** The sample an old song's pad plays: one that is really in the song the fixture is used in. */
+const OLD_PAD_SAMPLE = "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b";
+
+/**
+ * One pad exactly as a song written before the playback fields carries it: the
+ * object a snapshot produced then, with none of the new keys on it. It is the
+ * golden fixture those fields must leave alone.
+ * @param {string} trackId
+ * @param {string} bankId
+ * @param {number} index
+ * @returns {object}
+ */
+function oldPad(trackId, bankId, index) {
+  return {
+    track_id: trackId,
+    bank_id: bankId,
+    index,
+    sample_id: OLD_PAD_SAMPLE,
+    slice_id: null,
+    name: "Kick",
+    mode: "gate",
+    pitch: -3,
+    gain_db: -2,
+    pan: 0.25,
+    attack_ms: 2,
+    decay_ms: 120,
+    sustain: 0.6,
+    release_ms: 80,
+    filter: { type: "lp", cutoff_hz: 2400, resonance: 0.3 },
+    choke: 2,
+    reverse: true,
+  };
+}
+
+/** Every key these playback fields add to a pad, with the value a pad reads as without it. */
+const PLAYBACK_DEFAULTS = Object.freeze({
+  loop: "off",
+  bpm_sync: false,
+  source_bpm_x10: 0,
+  speed_pct: 100,
+  fixed_velocity: false,
+  hold_ms: 0,
+  keep_pitch: false,
+});
+
+/**
+ * Store one pad the way a song from before the playback fields does: none of
+ * those keys on it, and the fields the caller names, verbatim.
+ * @returns {import("yjs").Map<any, any>} the stored pad, for its key list
+ */
+function writeOldPad(doc, trackId, bankId, index, fields) {
+  const pad = songMap(doc).get("pads").get(padKey(trackId, bankId, index));
+  doc.transact(() => {
+    for (const key of Object.keys(PLAYBACK_DEFAULTS)) pad.delete(key);
+    for (const [field, value] of Object.entries(fields)) pad.set(field, value);
+  });
+  return pad;
+}
+
+test("a pad from before the playback fields snapshots to the defaults, its older keys unchanged", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const index = 4;
+  const pad = padKey(trackId, bankId, index);
+  addSample(s.doc, { id: OLD_PAD_SAMPLE });
+  const before = oldPad(trackId, bankId, index);
+  const stored = writeOldPad(s.doc, trackId, bankId, index, before);
+  assert.deepEqual([...stored.keys()].sort(), Object.keys(before).sort(), "the old song's pad carries no new key");
+
+  const read = snapshot(s.doc).pads[pad];
+  // Every key the pad already had reads exactly as the old song wrote it.
+  for (const [field, value] of Object.entries(before)) {
+    assert.deepEqual(read[field], value, `${field} reads as the old song wrote it`);
+  }
+  // The only difference is the added keys, each at its own default.
+  assert.deepEqual(
+    Object.keys(read).sort(),
+    [...Object.keys(before), ...Object.keys(PLAYBACK_DEFAULTS)].sort(),
+    "the pad carries its old keys and the new ones, nothing else",
+  );
+  assert.deepEqual(read, { ...before, ...PLAYBACK_DEFAULTS }, "the old pad plus the defaults");
+  assert.equal(read.keep_pitch, false, "keep_pitch is reserved and reads false");
+
+  // The defaults are the first of each list, so a pad storing neither reads as one.
+  assert.deepEqual([...PAD_MODES], ["oneshot", "gate", "normal"], "a pad's modes, the stored one-shot first");
+  assert.deepEqual([...PAD_LOOPS], ["off", "loop", "pingpong"], "a pad's loops, off first");
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("each playback field round-trips through pad.set, and one undo puts the default back", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const index = 0;
+  const pad = padKey(trackId, bankId, index);
+  const written = [
+    ["loop", "pingpong"],
+    ["bpm_sync", true],
+    ["source_bpm_x10", 1745],
+    ["speed_pct", 75],
+    ["fixed_velocity", true],
+    ["hold_ms", 4000],
+    ["mode", "normal"],
+    ["choke", 10],
+  ];
+  for (const [field, value] of written) {
+    const { entry } = s.run("pad.set", { track_id: trackId, bank_id: bankId, index, fields: { [field]: value } });
+    assert.deepEqual(entry.inverse.after, { [`pad:${pad}|${field}`]: value }, `${field} is a history field of its own`);
+    assert.deepEqual(snapshot(s.doc).pads[pad][field], value, `${field} was written`);
+
+    // One undo, and the pad reads as a new pad again.
+    const undone = s.undo(entry);
+    assert.deepEqual(undone.plan.blocked, []);
+    assert.deepEqual(
+      snapshot(s.doc).pads[pad],
+      defaultPad(trackId, bankId, index),
+      `${field}'s undo left the default pad`,
+    );
+  }
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("undoing the first write of a playback field on an old pad leaves the default pad", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const index = 3;
+  const pad = padKey(trackId, bankId, index);
+  // An old song's pad: the playback keys were never written, and it sounds as
+  // it does today, every other field at its default.
+  const stored = writeOldPad(s.doc, trackId, bankId, index, {});
+  const oldKeys = [...stored.keys()].sort();
+  assert.deepEqual(snapshot(s.doc).pads[pad], defaultPad(trackId, bankId, index), "an old pad reads as the default one");
+
+  const fields = { loop: "loop", bpm_sync: true, source_bpm_x10: 1200, speed_pct: 60, fixed_velocity: true, hold_ms: 250 };
+  const { entry } = s.run("pad.set", { track_id: trackId, bank_id: bankId, index, fields });
+  assert.equal(snapshot(s.doc).pads[pad].loop, "loop");
+  assert.equal(snapshot(s.doc).pads[pad].hold_ms, 250);
+
+  // None of those keys was on the pad, so the step recorded "no value" for each.
+  assert.deepEqual(entry.inverse.before, {
+    [`pad:${pad}|loop`]: null,
+    [`pad:${pad}|bpm_sync`]: null,
+    [`pad:${pad}|source_bpm_x10`]: null,
+    [`pad:${pad}|speed_pct`]: null,
+    [`pad:${pad}|fixed_velocity`]: null,
+    [`pad:${pad}|hold_ms`]: null,
+  });
+
+  const undone = s.undo(entry);
+  assert.deepEqual(undone.plan.blocked, []);
+  // Undo deletes the keys the step created rather than writing the defaults back...
+  assert.deepEqual([...stored.keys()].sort(), oldKeys, "the pad carries its old keys again");
+  // ...and the pad reads as the default pad again, key for key.
+  assert.deepEqual(snapshot(s.doc).pads[pad], defaultPad(trackId, bankId, index));
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("a raw playback value outside its range or of the wrong type normalizes to a legal pad", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const index = 6;
+  const pad = padKey(trackId, bankId, index);
+  const stored = songMap(s.doc).get("pads").get(pad);
+  s.doc.transact(() => {
+    stored.set("speed_pct", 9999);
+    stored.set("source_bpm_x10", -5);
+    stored.set("loop", "x");
+    stored.set("choke", 99);
+    stored.set("mode", "wat");
+    stored.set("bpm_sync", "yes");
+    stored.set("hold_ms", 100000);
+    stored.set("fixed_velocity", 1);
+    stored.set("keep_pitch", "yes");
+  });
+
+  const read = snapshot(s.doc).pads[pad];
+  assert.equal(read.mode, "oneshot", 'a mode outside the pad modes reads as "oneshot"');
+  assert.equal(read.loop, "off");
+  assert.equal(read.bpm_sync, false);
+  assert.equal(read.source_bpm_x10, 0, "a tempo too slow to be one reads as not set");
+  assert.equal(read.speed_pct, 150, "a speed past the top is clamped to it");
+  assert.equal(read.fixed_velocity, false);
+  assert.equal(read.hold_ms, 10000);
+  assert.equal(read.choke, 10);
+  assert.equal(read.keep_pitch, false, "only true reads true");
+
+  // A whole-number field is floored, and the old draft's mode word reads as a one-shot.
+  s.doc.transact(() => {
+    stored.set("speed_pct", 99.7);
+    stored.set("mode", "once");
+    stored.set("choke", 2.9);
+  });
+  assert.equal(snapshot(s.doc).pads[pad].speed_pct, 99);
+  assert.equal(snapshot(s.doc).pads[pad].mode, "oneshot");
+  assert.equal(snapshot(s.doc).pads[pad].choke, 2);
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("pad.set refuses a playback value outside its range, naming the field", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const pad = padKey(trackId, bankId, 0);
+  const before = snapshot(s.doc).pads[pad];
+  const cases = [
+    [{ speed_pct: 49.5 }, /fields\.speed_pct/],
+    [{ speed_pct: 151 }, /fields\.speed_pct/],
+    [{ source_bpm_x10: 199 }, /fields\.source_bpm_x10/],
+    [{ source_bpm_x10: 3001 }, /fields\.source_bpm_x10/],
+    [{ choke: 11 }, /fields\.choke/],
+    [{ mode: "wat" }, /fields\.mode/],
+    [{ loop: "x" }, /fields\.loop/],
+    [{ hold_ms: -1 }, /fields\.hold_ms/],
+    [{ fixed_velocity: "yes" }, /fields\.fixed_velocity/],
+    [{ keep_pitch: true }, /keep_pitch/],
+  ];
+  for (const [fields, named] of cases) {
+    const refused = refuses(
+      () => s.run("pad.set", { track_id: trackId, bank_id: bankId, index: 0, fields }),
+      "invalid",
+    );
+    assert.match(refused.message, named, `${Object.keys(fields)[0]} is named in the refusal`);
+  }
+  assert.deepEqual(snapshot(s.doc).pads[pad], before, "the refused writes wrote nothing");
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("mute groups I and J (9 and 10) and the normal pad mode are accepted", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const pad = padKey(trackId, bankId, 2);
+  for (const group of [9, 10]) {
+    s.run("pad.set", { track_id: trackId, bank_id: bankId, index: 2, fields: { choke: group } });
+    assert.equal(snapshot(s.doc).pads[pad].choke, group, `mute group ${group} is stored as itself`);
+  }
+  s.run("pad.set", { track_id: trackId, bank_id: bankId, index: 2, fields: { mode: "normal" } });
+  assert.equal(snapshot(s.doc).pads[pad].mode, "normal");
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("pad.set_bank changes all 16 pads in one step, and one undo and redo carry the whole bank", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const fields = { mode: "gate", reverse: true, speed_pct: 80 };
+  const set = s.run("pad.set_bank", { track_id: trackId, bank_id: bankId, fields });
+
+  // The whole bank is one step, but each pad's field is its own history key.
+  assert.equal(Object.keys(set.result.after).length, LIMITS.padsPerBank * 3);
+  assert.ok(set.result.touched.includes(`track:${trackId}`), "the step names the track, as pad.set does");
+  assert.equal(
+    set.result.touched.filter((ref) => ref.startsWith(`pad:${trackId}/${bankId}/`)).length,
+    LIMITS.padsPerBank,
+    "the step names all sixteen pads",
+  );
+  for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+    const pad = snapshot(s.doc).pads[padKey(trackId, bankId, index)];
+    assert.equal(pad.mode, "gate", `pad ${index + 1} took the mode`);
+    assert.equal(pad.reverse, true, `pad ${index + 1} took reverse`);
+    assert.equal(pad.speed_pct, 80, `pad ${index + 1} took the speed`);
+  }
+
+  // One undo puts every pad back, and one redo applies the set again.
+  const undone = s.undo(set.entry);
+  assert.deepEqual(undone.plan.conflicts, []);
+  assert.deepEqual(undone.plan.blocked, []);
+  assert.equal(undone.plan.apply.size, LIMITS.padsPerBank * 3);
+  for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+    assert.deepEqual(
+      snapshot(s.doc).pads[padKey(trackId, bankId, index)],
+      defaultPad(trackId, bankId, index),
+      `pad ${index + 1} reads as a new pad again`,
+    );
+  }
+
+  const redone = s.redo(undone.entry);
+  assert.deepEqual(redone.plan.conflicts, []);
+  assert.deepEqual(redone.plan.blocked, []);
+  for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+    const pad = snapshot(s.doc).pads[padKey(trackId, bankId, index)];
+    assert.equal(pad.mode, "gate", `pad ${index + 1} took the mode back`);
+    assert.equal(pad.reverse, true);
+    assert.equal(pad.speed_pct, 80);
+  }
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("pad.set_bank records only the fields a pad does not already hold", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  // Pad 1 already holds the mode the whole-bank step asks for.
+  s.run("pad.set", { track_id: trackId, bank_id: bankId, index: 0, fields: { mode: "gate" } });
+
+  const set = s.run("pad.set_bank", {
+    track_id: trackId,
+    bank_id: bankId,
+    fields: { mode: "gate", sustain: 0.5 },
+  });
+  const first = `pad:${trackId}/${bankId}/0`;
+  assert.equal(set.result.before[`${first}|mode`], undefined, "pad 1's mode already held the value");
+  assert.equal(set.result.after[`${first}|mode`], undefined);
+  assert.equal(set.result.after[`${first}|sustain`], 0.5, "its sustain did not");
+  for (let index = 1; index < LIMITS.padsPerBank; index += 1) {
+    assert.equal(set.result.after[`pad:${trackId}/${bankId}/${index}|mode`], "gate");
+  }
+  assert.equal(
+    Object.keys(set.result.after).length,
+    LIMITS.padsPerBank - 1 + LIMITS.padsPerBank,
+    "fifteen modes and sixteen sustains, and nothing for the field pad 1 held",
+  );
+
+  // The same field set again writes nothing at all.
+  const again = s.run("pad.set_bank", {
+    track_id: trackId,
+    bank_id: bankId,
+    fields: { mode: "gate", sustain: 0.5 },
+  });
+  assert.deepEqual(again.result.before, {});
+  assert.deepEqual(again.result.after, {});
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("undo of a whole-bank step restores the other pads and leaves a pad's field another writer changed", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const set = s.run("pad.set_bank", {
+    track_id: trackId,
+    bank_id: bankId,
+    fields: { mode: "gate", hold_ms: 250 },
+  });
+
+  // Another writer changes pad 5's mode after the whole-bank step.
+  s.run("pad.set", { track_id: trackId, bank_id: bankId, index: 4, fields: { mode: "normal" } });
+
+  const undone = s.undo(set.entry);
+  assert.deepEqual(undone.plan.blocked, [], "a partial undo is not refused");
+  assert.equal(undone.plan.conflicts.length, 1);
+  assert.equal(undone.plan.conflicts[0].ref, `pad:${trackId}/${bankId}/4`);
+  assert.equal(undone.plan.conflicts[0].field, "mode");
+  assert.equal(undone.plan.apply.size, LIMITS.padsPerBank * 2 - 1, "every key but the newer writer's went back");
+
+  for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+    const pad = snapshot(s.doc).pads[padKey(trackId, bankId, index)];
+    assert.equal(pad.hold_ms, 0, `pad ${index + 1}'s hold went back`);
+    assert.equal(
+      pad.mode,
+      index === 4 ? "normal" : "oneshot",
+      `pad ${index + 1}'s mode is its own again`,
+    );
+  }
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("pad.set_bank refuses a missing bank, a non-sampler track, an empty field set and a field outside the whitelist", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const pad = padKey(trackId, bankId, 0);
+  const before = snapshot(s.doc).pads[pad];
+
+  const missing = refuses(
+    () => s.run("pad.set_bank", { track_id: trackId, bank_id: "nope", fields: { mode: "gate" } }),
+    "not_found",
+  );
+  assert.match(missing.message, /nope/);
+
+  const bass = runCommand(s.doc, "track.add", { name: "Bass", kind: "sunvox" }).args.id;
+  const notSampler = refuses(
+    () => s.run("pad.set_bank", { track_id: bass, bank_id: bankId, fields: { mode: "gate" } }),
+    "invalid",
+  );
+  assert.match(notSampler.message, /not a sampler track/);
+
+  const empty = refuses(
+    () => s.run("pad.set_bank", { track_id: trackId, bank_id: bankId, fields: {} }),
+    "invalid",
+  );
+  assert.match(empty.message, /at least one field/);
+
+  // The fields a bank-wide change must not carry: a name, a filter, the sample's
+  // tempo, the mix, the mute group and the reserved keep_pitch.
+  for (const fields of [
+    { choke: 2 },
+    { name: "Kick" },
+    { filter: { type: "lp", cutoff_hz: 1000, resonance: 0.2 } },
+    { keep_pitch: true },
+    { source_bpm_x10: 1200 },
+    { gain_db: -3 },
+    { pan: 0.5 },
+  ]) {
+    const refused = refuses(
+      () => s.run("pad.set_bank", { track_id: trackId, bank_id: bankId, fields }),
+      "invalid",
+    );
+    assert.match(refused.message, new RegExp(Object.keys(fields)[0]), "the refusal names the field");
+  }
+  // The whitelisted fields keep pad.set's own ranges.
+  refuses(
+    () => s.run("pad.set_bank", { track_id: trackId, bank_id: bankId, fields: { speed_pct: 151 } }),
+    "invalid",
+  );
+  refuses(
+    () => s.run("pad.set_bank", { track_id: trackId, bank_id: bankId, fields: { mode: "wat" } }),
+    "invalid",
+  );
+
+  // Every refusal came before the first write.
+  assert.deepEqual(snapshot(s.doc).pads[pad], before);
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("pad.set_bank names the track a locked track's refusal is decided on", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  s.run("track.lock", { track_id: trackId });
+  assert.equal(
+    snapshot(s.doc).tracks.find((track) => track.id === trackId).locked,
+    true,
+    "the track is locked",
+  );
+
+  // The refusal itself is the hub's: it reads the track of every ref a command
+  // names (hub.js checkAgentRules), before anything is applied. This file runs
+  // commands without a hub, so what it holds here is that mapping — the track
+  // ref this command names — and that naming it writes nothing by itself.
+  const prepared = prepareCommand(s.doc, "pad.set_bank", {
+    track_id: trackId,
+    bank_id: bankId,
+    fields: { mode: "gate" },
+  });
+  assert.ok(prepared.touched.includes(`track:${trackId}`), "the track ref is what the lock check reads");
+  assert.equal(
+    prepared.touched.filter((ref) => ref.startsWith(`pad:${trackId}/${bankId}/`)).length,
+    LIMITS.padsPerBank,
+    "and every pad of the bank is named with it",
+  );
+  assert.equal(
+    snapshot(s.doc).pads[padKey(trackId, bankId, 0)].mode,
+    "oneshot",
+    "preparing the command wrote nothing",
+  );
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("a whole-bank write on one bank and a single-pad write on another merge with no loss", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const second = runCommand(s.doc, "bank.add", { id: "bank-b", track_id: trackId, name: "B" }).args.id;
+  const { other, sync } = pair(t, s);
+
+  s.run("pad.set_bank", {
+    track_id: trackId,
+    bank_id: bankId,
+    fields: { mode: "gate", loop: "loop" },
+  });
+  runCommand(other, "pad.set", {
+    track_id: trackId,
+    bank_id: second,
+    index: 3,
+    fields: { mode: "normal", pitch: 5 },
+  });
+  sync();
+
+  for (const doc of [s.doc, other]) {
+    const pads = snapshot(doc).pads;
+    for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+      assert.equal(pads[padKey(trackId, bankId, index)].mode, "gate", `bank A pad ${index + 1}'s mode`);
+      assert.equal(pads[padKey(trackId, bankId, index)].loop, "loop", `bank A pad ${index + 1}'s loop`);
+    }
+    assert.equal(pads[padKey(trackId, second, 3)].mode, "normal", "the other writer's pad kept its mode");
+    assert.equal(pads[padKey(trackId, second, 3)].pitch, 5, "and its pitch");
+    assert.equal(pads[padKey(trackId, second, 0)].mode, "oneshot", "the rest of bank B is untouched");
+  }
+  assert.deepEqual(checkInvariants(s.doc), []);
+  assert.deepEqual(checkInvariants(other), []);
 });
 
 test("motion over 4096 points refused", (t) => {

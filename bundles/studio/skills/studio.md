@@ -195,12 +195,15 @@ You may write patterns, steps, locks, chains, slices and pad settings, but only 
 | `studio_bank_add` | Add a bank of 16 empty pads to a kit (at most 8 banks per kit). |
 | `studio_bank_rename` | Rename a bank. |
 | `studio_pad_assign` | Put a sample, or one of its slices (`slice_id`), on a pad. An empty pad is yours to fill; a pad that already plays a sound is the operator's, and repointing it is refused. |
-| `studio_pad_set` | One pad's own fields, inside `fields` (`{track_id, bank_id, index, fields: {…}}`): `name`, `mode` (`oneshot` plays to the end, `gate` releases at the step end), `pitch` ±24 semitones, `gain_db`, `pan`, `attack_ms`/`decay_ms`/`sustain`/`release_ms`, `filter {type, cutoff_hz, resonance}`, `choke` group 1–8 (a hit cuts the other voices in its group) and `reverse`. |
+| `studio_pad_set` | One pad's own fields, inside `fields` (`{track_id, bank_id, index, fields: {…}}`): `name`; `mode` (`oneshot` plays to the end and presses overlap, `normal` restarts on each press, `gate` plays while held and releases at the step end); `loop` (`off`, `loop`, `pingpong`); `bpm_sync` (follow the song tempo); `source_bpm_x10` (the sample's own tempo times ten, 200–3000, or 0 for not set); `speed_pct` 50–150; `fixed_velocity`; `hold_ms` 0–10000; `pitch` ±24 semitones, `gain_db`, `pan`, `attack_ms`/`decay_ms`/`sustain`/`release_ms`, `filter {type, cutoff_hz, resonance}`, mute group `choke` 0–10 (0 none, 1–10 = A–J: a hit cuts the other voices in its group) and `reverse`. Speed and `bpm_sync` move pitch with them; there is no time-stretch. |
+| `studio_pad_set_bank` | The same field set on every pad of one bank, in one undoable step: `{track_id, bank_id, fields}`. Only the bank-wide playback fields: `mode`, `loop`, `reverse`, `bpm_sync`, `fixed_velocity`, `pitch`, `speed_pct`, `attack_ms`, `hold_ms`, `decay_ms`, `sustain`, `release_ms`. Not `name`, `filter`, `source_bpm_x10`, `gain_db`, `pan`, `choke` or `keep_pitch` — a whole-bank mute group would cut every pad. A pad already holding a value is not changed; undoing restores each pad per field, leaving a field another writer changed since as they set it. |
 | `studio_slice_set` | Replace a sample's slices — `{id?, start_frame, end_frame}` in order, at most 64. A kept slice id keeps its pads playing it; removing a slice a pad plays is refused. |
 | `studio_sample_rename` | Rename a sample. |
 | *(no tool)* `pad.clear` | Take the sound off a pad and keep its settings. The operator's own step (the panel's **Clear pad**), so you have no tool for it: ask them. It is what a re-chop needs when a pad still plays a slice the new chop drops. |
 
 A pad whose sample you do not name plays the whole sample; `slice_id` narrows it to one slice. Pitches are resampling: `pitch` +12 plays an octave up in half the time, so a repitched hit changes length with its pitch.
+
+A pad also carries `keep_pitch`, and it is reserved and read-only: every pad reads it as `false` today, `studio_pad_set` does not take it, and nothing plays differently because of it. Leave it alone — speed and BPM sync move the pitch with them.
 
 ## Motion
 

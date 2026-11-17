@@ -156,27 +156,64 @@
  *   id ("Sample <id> is not loaded yet."), and is also posted as
  *   `{type:"sample_needed", sample_id}` so the client can load it again.
  * - **Voice stealing:** 16 voices per track, 64 for the whole song. The 17th
- *   voice on a track steals that track's oldest, and a start that would take
- *   the song past 64 steals the song's oldest — a voice that is already fading
- *   out (choked, or already releasing) goes before one that is still held. A
- *   track's own steal fades: the stolen voice is moved into one of the track's
+ *   voice on a track takes that track's best candidate, and a start that would
+ *   take the song past 64 takes the song's. A voice that is already fading out
+ *   (choked, or already releasing) goes first, then an ordinary sounding voice,
+ *   and a voice the operator is holding on to — one that is `looping`, `held`
+ *   or `paused` — goes only when there is nothing else to take (see
+ *   `stealRank`). A track's own steal fades: the stolen voice is moved into one
+ *   of the track's
  *   two fade tails and rung out over 64 frames while the new voice takes its
  *   slot (with both tails in use it is cut instead — the pool stays 16). The
  *   song-wide steal cuts, so a song past its 64-voice cap really is 64 voices.
  *   Nothing is stolen until the new voice's own range is known to be playable.
- * - **Choke groups:** a start in choke group *n* fades every other sounding
- *   voice of group *n* on that track out over 64 frames.
+ * - **Choke groups:** a start in choke group *n* — the pad's plain integer
+ *   `choke`, 1..10 (the mute groups A..J; 0 is none) — fades every other
+ *   sounding voice of group *n* on that track out over 64 frames. The integer is
+ *   compared as it stands, so a group the panel does not offer still cuts its
+ *   own.
  * - **Modes:** a `oneshot` pad plays to the end of its range and stops there
  *   (with a 64-frame fade when it is still at level); a `gate` pad releases at
- *   `gate_frames`, the step's own length.
+ *   `gate_frames`, the step's own length; a `normal` pad restarts on every press
+ *   — the voices of that very pad fade out over the crossfade length as the new
+ *   one starts.
+ * - **Loop:** with `loop` `"loop"` or `"pingpong"`, a `gate` pad loops until it
+ *   is released, and a `oneshot` or `normal` pad's live press TOGGLES (a press
+ *   while it loops ends it, and a press never overlaps a loop). A step starts a
+ *   loop only when that pad is not looping already, and never ends one.
+ * - **Clip ownership:** a voice a step started remembers the clip that played
+ *   the step, and is released when its track stops playing that clip (the clip
+ *   ended, or a launch replaced it). A voice a live press started belongs to no
+ *   clip, so a scene launch never ends it. A song change (`setSong`), which runs
+ *   on every edit, releases nothing that still exists: only a voice whose pad is
+ *   gone from the new snapshot, or whose pad no longer names the sample (or
+ *   slice) that voice is playing, ends, through the normal release.
+ * - **Stop** releases the live state — every loop now — and so does
+ *   `{type:"reset_live"}`, which the page sends when a DIFFERENT song opens.
+ *   Neither touches the song, and an ordinary song update never sends one.
  * - **Live pads:** `{type:"live", track_id, bank_id, index, v, on}` starts or
  *   releases a pad from the panel (on-screen audition, MIDI later). A live
  *   start never goes through history and is never quantized. A release only
  *   releases `gate` voices: a `oneshot` pad that was pressed plays to its end.
+ * - **Speed:** `speed_pct` (50..150 %) and, while `bpm_sync` is on and the pad
+ *   names a `source_bpm_x10`, the song's tempo against the sample's own move
+ *   the voice's playback speed, held inside 0.25×..4×. It is varispeed: the
+ *   pitch moves with the speed. A synced voice that is already sounding follows
+ *   a later tempo change from the next block on (`reconcileTempo`), and a pad's
+ *   Reverse flipped while it sounds turns that pad's voices round where they
+ *   stand (`flipChangedPadReverses`). `keep_pitch` is reserved for a later
+ *   time-stretch and is deliberately not read here.
+ * - **Fixed velocity:** a pad with `fixed_velocity` plays every trigger at 127,
+ *   whichever velocity the step carries: the voice's own gain, the
+ *   `velocity_gain` a gain lane starts from, and the hit event the page lights
+ *   are all the full 127.
+ * - **Hold:** a `hold_ms` makes the voice sit at level 1 for that long between
+ *   the attack and the decay (`sampler-voice.js`, "The hold stage").
  * - **Locks:** every one of a pad's own fields can be locked per step —
  *   `attack_ms`, `decay_ms`, `sustain`, `release_ms`, `pitch`, `gain_db`,
  *   `pan`, `reverse`, `cutoff_hz`, `resonance` and the filter's kind under
- *   `filter_type` — and all of them go through the same `field()` lookup.
+ *   `filter_type` — and all of them go through the same `field()` lookup. The
+ *   playback settings above are NOT lockable: they come from the pad alone.
  *
  * ## Pad events: the lights follow the hits, not the clock
  *
@@ -244,6 +281,13 @@
  * `gain_db`, `pan` and the envelope's times hold their sub-step value between
  * boundaries (they are written, not ramped); a filter is re-tuned at most once
  * per sub-step even when cutoff and resonance both move.
+ *
+ * A pitch lane moves the voice's `pitch_semis` and asks the voice to work its
+ * step out again (`StudioSamplerVoice.refreshStep`), so it stacks on the pad's
+ * own Speed %, on its tempo sync and on the direction it is reading in, instead
+ * of replacing them: a ping-pong voice a pitch lane sweeps keeps reflecting
+ * where it stands, and clearing the lane puts the pad's own pitch back without
+ * touching the speed or the direction.
  *
  * **Precedence:** a step's lock beats motion, and motion beats the pad's own
  * field. A voice remembers the lock names its step carried, and a lane that
@@ -571,7 +615,9 @@
  *
  * client → processor: `{type:"song", snapshot}`, `{type:"launchScene", id}`,
  * `{type:"launchClip", id}`, `{type:"stopTrack", id}`, `{type:"stopAll"}`,
- * `{type:"play"}`, `{type:"pause"}`, `{type:"stop"}`, `{type:"setMode", mode}`,
+ * `{type:"play"}`, `{type:"pause"}`, `{type:"stop"}` (which also releases
+ * the pads' live state — every loop), `{type:"reset_live"}` (the same release,
+ * sent when a DIFFERENT song opens), `{type:"setMode", mode}`,
  * `{type:"seek", bar}` (a bar at beat resolution), `{type:"metronome", on}`,
  * `{type:"flush", id}`,
  * `{type:"nextBarFrame", id}`, `{type:"audio", take_id, channels}`,
@@ -1102,6 +1148,14 @@
   const DEFAULT_BPM = 120;
 
   /**
+   * The bounds one pad's playback speed is held inside — Speed % and tempo sync
+   * multiplied together — so a mis-set `source_bpm_x10` cannot ask a voice for a
+   * step no host can render.
+   */
+  const LOWEST_PAD_SPEED = 0.25;
+  const HIGHEST_PAD_SPEED = 4;
+
+  /**
    * A song's tempo, from its own `meta.bpm`; a missing or unusable one is 120.
    * @param {object} snapshot
    * @returns {number}
@@ -1118,6 +1172,12 @@
     if (value < low) return low;
     if (value > high) return high;
     return value;
+  }
+
+  /** @returns {number} the value when it is a finite number, else the fallback. */
+  function numberOr(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
   }
 
   /**
@@ -1276,6 +1336,30 @@
    */
   function padKey(trackId, bankId, index) {
     return `${asId(trackId)}/${asId(bankId)}/${Math.trunc(Number(index) || 0)}`;
+  }
+
+  /**
+   * One pad's playback mode, as the document spells it: `"oneshot"`, `"gate"`
+   * or `"normal"`. A pad written before the modes existed (or one carrying
+   * anything else) is a one-shot pad, which is exactly how it sounds today.
+   * @param {unknown} value
+   * @returns {string}
+   */
+  function padMode(value) {
+    if (value === "gate" || value === "normal") return value;
+    return "oneshot";
+  }
+
+  /**
+   * One pad's Loop setting, as the document spells it: `"off"`, `"loop"` or
+   * `"pingpong"`. A pad that stores nothing (every pad written before the
+   * setting existed) does not loop.
+   * @param {unknown} value
+   * @returns {string}
+   */
+  function padLoop(value) {
+    if (value === "loop" || value === "pingpong") return value;
+    return "off";
   }
 
   /**
@@ -2207,6 +2291,13 @@
       this.bpm = DEFAULT_BPM;
 
       /**
+       * The tempo the sounding, synced voices were last brought onto: a block
+       * compares it with `this.bpm` and walks the voices only when they differ
+       * (`reconcileTempo`).
+       */
+      this.reconciledBpm = DEFAULT_BPM;
+
+      /**
        * The transport the bus reads each block, kept as one object so the audio
        * thread allocates nothing: its first frame, whether the playhead runs, the
        * tempo, the frame of the bar line it is inside and the sequencer's own next
@@ -2563,6 +2654,9 @@
           break;
         case "stop":
           this.sequencer.stop();
+          // Stop releases the pads' live state: every loop ends through the
+          // normal release (holds, rolls and pause join them as they land).
+          this.releaseLive();
           // Parsing a bank or a capture happens only while the transport is
           // stopped, so a load that arrived while the song played lands here.
           this.drainDeferredFonts();
@@ -2579,6 +2673,12 @@
           break;
         case "setMode":
           this.sequencer.setMode(message.mode);
+          break;
+        case "reset_live":
+          // A DIFFERENT song is being opened: the live state belongs to the one
+          // that is going away, so it goes as Stop's does. An ordinary song
+          // update never sends this — it runs on every edit (`setSong`).
+          this.releaseLive();
           break;
         case "metronome":
           // The metronome is live state, not a command: it is heard from the
@@ -3980,6 +4080,9 @@
       this.mixer = mixerSpecOf(snapshot);
       this.bpm = bpmOf(snapshot);
       this.sequencer.setSong(snapshot);
+      // The pad map above is the new one, so a Reverse that was flipped while the
+      // pad sounds is applied to its voices here, before the block that follows.
+      this.flipChangedPadReverses();
       this.enqueue(() => this.syncSlots(tracks));
     }
 
@@ -4181,6 +4284,11 @@
       // them (one insert object per insert, outside `process()`), so the next
       // block runs the song's effects, sends, returns and master.
       this.applyMixer();
+      // A song change runs on every edit, so it ends only a voice whose pad (or
+      // whose whole track) the new snapshot no longer has, or whose pad no
+      // longer names the sound that voice is playing, and through the normal
+      // release: everything that still exists, sounding as it did, plays on.
+      this.releaseVanishedPads();
     }
 
     /**
@@ -6917,15 +7025,21 @@
       const events = this.sequencer.block(this.frame, count);
       this.reportLaunches(events.launches);
       const motions = events.motions;
+      const clipChanges = events.clipChanges;
 
       if (!this.ready || this.failure) {
         this.frame += count;
         return;
       }
 
+      // A tempo change (an edit, an undo, MIDI) moves the voices that follow it:
+      // one compare here, and a scan only on the block the tempo really changed.
+      this.reconcileTempo();
+
       let cursor = 0;
       let next = 0;
       let nextMotion = 0;
+      let nextClip = 0;
       // Motion is read on a fixed absolute grid, so the runs are cut on it: a
       // run never crosses a sub-step boundary, which is what holds a swept voice
       // to the same value for the same frame at any block size. A block with no
@@ -6933,6 +7047,13 @@
       // did.
       const onGrid = motions.length > 0;
       while (cursor < count) {
+        // A clip that ended or turned over is paid before the events of its own
+        // frame: a loop it started is released there, and the new clip's first
+        // step starts its voice on the same frame.
+        while (nextClip < clipChanges.length && clipChanges[nextClip].frame <= cursor) {
+          this.applyClipChange(clipChanges[nextClip]);
+          nextClip += 1;
+        }
         while (next < events.length && events[next].frame <= cursor) {
           this.applyEvent(events[next]);
           next += 1;
@@ -6945,6 +7066,7 @@
         }
         let boundary = next < events.length ? Math.min(count, events[next].frame) : count;
         if (nextMotion < motions.length) boundary = Math.min(boundary, motions[nextMotion].frame);
+        if (nextClip < clipChanges.length) boundary = Math.min(boundary, clipChanges[nextClip].frame);
         if (onGrid) {
           // A DISTANCE to the next sub-step, added to the cursor before it is
           // compared with the block-relative event frames.
@@ -7706,7 +7828,8 @@
     restoreMotionParam(voice, param) {
       switch (param) {
         case "pitch":
-          voice.step = voice.base_step;
+          voice.pitch_semis = voice.base_pitch;
+          StudioSamplerVoice.refreshStep(voice);
           return;
         case "gain_db":
           voice.gain = voice.base_gain;
@@ -7789,7 +7912,12 @@
       const held = clamp(value, range[0], range[1]);
       switch (param) {
         case "pitch":
-          voice.step = voice.reverse_sign * Math.pow(2, held / 12);
+          // The pitch is one of the three things a voice's step is made of
+          // (`refreshStep`): a lane moves the semitones and the voice works the
+          // product out again, so the pad's Speed %, its tempo sync and the
+          // direction a ping-pong turned in all stand under the sweep.
+          voice.pitch_semis = held;
+          StudioSamplerVoice.refreshStep(voice);
           return;
         case "gain_db":
           voice.gain = StudioSamplerVoice.dbToLinear(held) * voice.velocity_gain;
@@ -7975,13 +8103,29 @@
      * own, so a motion lane over its pad sweeps it exactly like a step's voice
      * (see "Motion" in the file header).
      *
+     * The pad's `mode` and `loop` decide how the voice ends: a `gate` pad plays
+     * while it is held, a `oneshot` pad plays to its range's end and presses
+     * overlap, and a `normal` pad restarts (its earlier voices of that pad fade
+     * out as the new one starts). With Loop on, a `gate` pad loops until it is
+     * released, and a `oneshot` or `normal` pad's live press toggles the loop
+     * (a press while it loops ends it), while a step only ever starts one that
+     * is not already playing.
+     *
      * Every one of the pad's own fields can be locked for this one voice, and
      * they all go through the same `field()` lookup: `attack_ms`, `decay_ms`,
      * `sustain`, `release_ms`, `pitch`, `gain_db`, `pan`, `reverse`,
      * `cutoff_hz`, `resonance`, and the filter's kind under `filter_type` (the
      * document spells the pad's own one `filter.type`).
+     *
+     * The playback settings come from the pad alone and are never locked: a
+     * `fixed_velocity` pad plays this trigger at 127 (the voice AND the hit
+     * event, so a gain lane's `velocity_gain` is full too); `speed_pct` and,
+     * when `bpm_sync` is on and the pad names a `source_bpm_x10`, the song's
+     * tempo against the sample's own move the voice's varispeed, held inside
+     * 0.25×..4× (`keep_pitch` is reserved and is not read); and `hold_ms` is the
+     * level-1 hold the voice sits in between its attack and its decay.
      * @param {{track_id: string, bank_id: string, index: number, v: number,
-     *          locks?: object, gate_frames?: number}} event
+     *          locks?: object, gate_frames?: number, clip_id?: string}} event
      * @param {boolean} live whether this is a live press rather than a step
      * @returns {void}
      */
@@ -8004,6 +8148,29 @@
       const locks = event.locks && typeof event.locks === "object" ? event.locks : null;
       const field = (name, fallback) => (locks && locks[name] !== undefined ? locks[name] : fallback);
 
+      // The velocity this trigger really plays at. A pad with `fixed_velocity`
+      // ignores the one its step (or its press) carries and plays at full level:
+      // the voice and the hit event both read 127, so a gain lane's
+      // `velocity_gain` is full too. It is worked out from the trigger, not held
+      // as a voice flag, so nothing downstream has to know where it came from.
+      const triggerVelocity = pad.fixed_velocity === true ? 127 : Number(event.v);
+      const velocityHeld = Number.isFinite(triggerVelocity) ? clamp(triggerVelocity, 1, 127) : 127;
+
+      // Varispeed: the pad's own Speed % and, while it is synced to a tempo it
+      // knows, the song's tempo against the sample's own. Pitch rises and falls
+      // with the speed — `keep_pitch` is reserved for a later time-stretch and
+      // is deliberately not read, so every pad of this phase is varispeed. The
+      // speed is held inside 0.25×..4× whatever the pad and the tempo ask for.
+      const speedPct = numberOr(pad.speed_pct, 100);
+      const sourceBpmX10 = numberOr(pad.source_bpm_x10, 0);
+      const sourceBpm = sourceBpmX10 > 0 ? sourceBpmX10 / 10 : 0;
+      const synced = pad.bpm_sync === true && sourceBpm > 0;
+      const speed = clamp(
+        (speedPct / 100) * (synced ? this.bpm / sourceBpm : 1),
+        LOWEST_PAD_SPEED,
+        HIGHEST_PAD_SPEED,
+      );
+
       const range = this.padRange(pad, stored);
       // An empty range plays nothing, so it must not take (and so steal) a
       // voice: the check is made here, before a slot is chosen, so a start that
@@ -8011,7 +8178,20 @@
       if (!(range.end > range.start)) return;
 
       stored.lastUsed = this.sampleClock += 1;
-      const mode = typeof pad.mode === "string" ? pad.mode : "oneshot";
+      const mode = padMode(pad.mode);
+      const loop = padLoop(pad.loop);
+      const looping = loop !== "off";
+      // A looping pad that is not a Gate pad toggles instead of starting: a live
+      // press starts the loop and the next press ends it (One-shot and Normal
+      // alike), and a step starts one only while that pad is not looping
+      // already — it never restarts a loop and never stops one.
+      if (looping && mode !== "gate") {
+        const running = this.loopingVoice(record, bankId, index);
+        if (running !== null) {
+          if (live) StudioSamplerVoice.release(running);
+          return;
+        }
+      }
       const gateFrames = mode === "gate" && !live ? Number(event.gate_frames) : NaN;
       const filter = pad.filter && typeof pad.filter === "object" ? pad.filter : {};
       const filterType = field("filter_type", filter.type);
@@ -8025,18 +8205,21 @@
         reverse: field("reverse", pad.reverse === true) === true,
         pitch: field("pitch", pad.pitch),
         gainDb: field("gain_db", pad.gain_db),
-        velocity: event.v,
+        velocity: velocityHeld,
         pan: field("pan", pad.pan),
         attackMs: field("attack_ms", pad.attack_ms),
         decayMs: field("decay_ms", pad.decay_ms),
         sustain: field("sustain", pad.sustain),
         releaseMs: field("release_ms", pad.release_ms),
+        holdMs: numberOr(pad.hold_ms, 0),
+        speed: speed,
         filterType: typeof filterType === "string" ? filterType : "off",
         cutoffHz: field("cutoff_hz", filter.cutoff_hz),
         resonance: field("resonance", filter.resonance),
         gateFrames: Number.isFinite(gateFrames) ? gateFrames : -1,
         choke: pad.choke,
         mode: mode,
+        loop: loop,
         trackId: asId(event.track_id),
         bankId: bankId,
         index: index,
@@ -8047,28 +8230,52 @@
 
       // What a motion lane needs of this voice: the pad it came from, the lock
       // names its step carried (a lock beats motion), and the values a lane
-      // overrides — the velocity gain, the reverse direction, and the filter the
-      // voice was built with. The `base_*` values are the ones a curve that stops
-      // applying puts back (`restorePadMotion`), so they are captured here, after
-      // the voice has worked them out for itself, never re-derived later.
+      // overrides — the velocity gain, the pitch, and the filter the voice was
+      // built with. The pitch is kept in semitones, apart from the speed and the
+      // direction the voice also works its step out of, so a pitch lane stacks
+      // on both. The `base_*` values are the ones a curve that stops applying
+      // puts back (`restorePadMotion`), so they are captured here, after the
+      // voice has worked them out for itself, never re-derived later.
       // The cutoff and the resonance are kept RAW, exactly as `setFilter` took
       // them from the pad: it is the one place that clamps them, so a restore
       // lands on the very coefficients the start did.
-      const velocity = Number(event.v);
-      const velocityHeld = Number.isFinite(velocity) ? clamp(velocity, 1, 127) : 127;
       const cutoff = Number(field("cutoff_hz", filter.cutoff_hz));
       const resonance = Number(field("resonance", filter.resonance));
       voice.pad_key = bankId + "." + index;
+      // The sound this voice started with (the sample and, when the pad named
+      // one, the slice). `releaseVanishedPads` compares it with the pad's own on
+      // every song, so a cleared or repointed pad ends the voice instead of
+      // leaving a loop playing a sound the song no longer has. Two string
+      // references, so a start still allocates nothing.
+      voice.sample_id = sampleId;
+      voice.slice_id = asId(pad.slice_id);
       // The pad the panel lights for this voice. C1c (chromatic pads) moves this
       // off the pad's own index; every pad event and every light reads it here.
       voice.light_index = index;
+      // The clip this voice belongs to: a step's voice is owned by the clip that
+      // played the step, so it ends when its track moves to another clip; a
+      // live press belongs to no clip and survives a scene launch.
+      voice.clip_id = live ? "" : asId(event.clip_id);
+      // What a later tempo change needs to follow this pad's own setting (B4c):
+      // whether the pad is synced, and the source tempo it is synced against (0
+      // when it names none).
+      voice.bpm_sync = pad.bpm_sync === true;
+      voice.source_bpm = sourceBpm;
+      voice.speed_pct = speedPct;
+      // The pad's own Reverse as this voice was started with. `dir` cannot stand
+      // for it, because a ping-pong turns `dir` round as it reflects; a flip of
+      // the pad's Reverse is applied to this voice only when it differs (B4c).
+      voice.reverse_src = pad.reverse === true;
       voice.locked = locks ? Object.keys(locks) : null;
       voice.velocity_gain = (velocityHeld / 127) * (velocityHeld / 127);
-      voice.reverse_sign = field("reverse", pad.reverse === true) === true ? -1 : 1;
       voice.motion_filter_type = typeof filterType === "string" ? filterType : "off";
       voice.motion_cutoff = Number.isFinite(cutoff) ? cutoff : 20000;
       voice.motion_resonance = Number.isFinite(resonance) ? resonance : 0;
-      voice.base_step = voice.step;
+      // The pitch, in semitones. It is captured apart from the speed and the
+      // direction (which live on the voice's own `dir`, and which a ping-pong or
+      // a flipped Reverse moves while the pad plays): a pitch lane works the step
+      // out again and must not force either of them back.
+      voice.base_pitch = voice.pitch_semis;
       voice.base_gain = voice.gain;
       voice.base_pan_left = voice.panLeft;
       voice.base_pan_right = voice.panRight;
@@ -8094,6 +8301,18 @@
         for (const other of record.voices) {
           if (other === voice) continue;
           if (!other.sounding || other.choke !== choke) continue;
+          StudioSamplerVoice.beginFadeOut(other);
+        }
+      }
+
+      // Normal without Loop restarts: every other voice of this very pad fades
+      // out over the crossfade length while the new one starts, so a press never
+      // overlaps the one before it. With Loop on the press toggled instead (see
+      // above), so this never runs for a looping pad.
+      if (mode === "normal" && !looping) {
+        for (const other of record.voices) {
+          if (other === voice || !other.sounding) continue;
+          if (other.bankId !== bankId || other.index !== index) continue;
           StudioSamplerVoice.beginFadeOut(other);
         }
       }
@@ -8183,6 +8402,13 @@
       tail.gateRemaining = -1;
       tail.fadeRemaining = StudioSamplerVoice.FADE_FRAMES;
       tail.sounding = true;
+      // A tail is a 64-frame ring-out, nothing else: it is not the operator's
+      // live state any more, so it stops looping, stops holding and stays
+      // unpaused — its fade then runs to its end instead of keeping a loop
+      // alive beside the voice that took the slot.
+      tail.looping = false;
+      tail.held = false;
+      tail.paused = false;
       // The tail is on its way out, so no curve is read for it (see
       // `renderSampler`): it keeps the very values it had at the moment it was
       // stolen, instead of jumping back to its pad's own during the 64-frame
@@ -8208,14 +8434,26 @@
 
     /**
      * How good a steal candidate a voice is: the lower the value, the sooner it
-     * goes. A voice already fading out is never heard again in any case, so it
-     * goes before a held one; within a class the oldest goes first.
+     * goes. Three classes, in the order a start takes them:
+     *
+     * 0. a voice already fading out (choked, releasing) is never heard again in
+     *    any case;
+     * 1. an ordinary sounding voice;
+     * 2. a voice the operator is holding on to — `looping`, `held` (HOLD) or
+     *    `paused` (Pause-all) — which a start only takes when every slot of the
+     *    track (or of the song) is one of those.
+     *
+     * Within a class the oldest voice goes first. Both `takeVoice` and
+     * `stealSongWide` read this, so the 16-voice track cap and the 64-voice song
+     * cap steal in the same order.
      * @param {object} voice
      * @returns {number}
      */
     stealRank(voice) {
       const fading = voice.fadeRemaining > 0 || voice.stage === StudioSamplerVoice.STAGE_RELEASE;
-      return (fading ? 0 : 1) * 1000000000 + voice.serial;
+      const protectedVoice =
+        !fading && (voice.looping === true || voice.held === true || voice.paused === true);
+      return (fading ? 0 : protectedVoice ? 2 : 1) * 1000000000 + voice.serial;
     }
 
     /**
@@ -8243,8 +8481,13 @@
           }
         }
         if (!victim) return;
+        // The cut voice is dead: it is not the operator's any more, so it stops
+        // looping, stops holding and stays unpaused.
         victim.sounding = false;
         victim.channels = null;
+        victim.looping = false;
+        victim.held = false;
+        victim.paused = false;
         sounding -= 1;
       }
     }
@@ -8271,6 +8514,167 @@
         if (voice.mode !== "gate") continue;
         if (voice.bankId !== bankId || voice.index !== index) continue;
         StudioSamplerVoice.release(voice);
+      }
+    }
+
+    /**
+     * @param {object} record a sampler track's record
+     * @param {string} bankId
+     * @param {number} index
+     * @returns {object|null} the voice of that pad that is looping, or null
+     */
+    loopingVoice(record, bankId, index) {
+      for (const voice of record.voices) {
+        if (!voice.sounding || !voice.looping) continue;
+        if (voice.bankId !== bankId || voice.index !== index) continue;
+        return voice;
+      }
+      return null;
+    }
+
+    /**
+     * End the loops a track's steps started on a clip its track no longer plays.
+     *
+     * A loop a STEP started belongs to that clip: it is released through the
+     * normal release when the clip stops (a stop or a launch onto no clip), when
+     * the track turns over onto a different clip, at the frame the sequencer put
+     * on that boundary. A relaunch of the very clip it plays is no change and
+     * leaves the loop alone, and a loop a live press started belongs to no clip
+     * at all, so a scene launch never ends it.
+     * @param {{track_id: string, clip_id: string|null, frame: number}} change
+     * @returns {void}
+     */
+    applyClipChange(change) {
+      const record = this.samplerRecord(asId(change.track_id));
+      if (!record) return;
+      const clipId = change.clip_id === null || change.clip_id === undefined ? "" : asId(change.clip_id);
+      for (const voice of record.voices) {
+        if (!voice.sounding || !voice.looping) continue;
+        if (voice.clip_id === "") continue;
+        if (voice.clip_id === clipId) continue;
+        StudioSamplerVoice.release(voice);
+      }
+    }
+
+    /**
+     * Release the pads' live state: every loop now, through the normal release.
+     *
+     * This is what Stop and `reset_live` (a DIFFERENT song being opened) do, and
+     * it is the one place the later live state — HOLD latches, ROLL and
+     * Pause-all — is released from as well. An ordinary `setSong` never comes
+     * here: it runs on every document edit, so it must not touch what still
+     * exists (see `releaseVanishedPads`).
+     * @returns {void}
+     */
+    releaseLive() {
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        for (const voice of record.voices) {
+          if (!voice.sounding || !voice.looping) continue;
+          StudioSamplerVoice.release(voice);
+        }
+      }
+    }
+
+    /**
+     * End, through the normal release, the voices whose pad the new snapshot no
+     * longer has or whose pad no longer names the sound they are playing: a pad
+     * (with its bank) that was deleted, a whole track that the rebuilt slots
+     * already tore down, a pad the operator cleared (**Clear pad** keeps the pad
+     * and drops only its `sample_id` and `slice_id`), and a pad pointed at
+     * another sample or slice.
+     *
+     * The comparison is against the sound the voice started with (`sample_id`,
+     * `slice_id`), never against what the pad holds now: a voice left sounding on
+     * a pad with no sample could never be pressed off (`startPad` refuses a pad
+     * that names none), so a loop there would play until the song was closed. A
+     * voice whose pad still names the very sound it started with is left alone —
+     * an edit that touches something else never cuts what the operator is
+     * hearing.
+     * @returns {void}
+     */
+    releaseVanishedPads() {
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        for (const voice of record.voices) {
+          if (!voice.sounding) continue;
+          const pad = this.pads.get(padKey(voice.trackId, voice.bankId, voice.index));
+          if (!pad) {
+            StudioSamplerVoice.release(voice);
+            continue;
+          }
+          if (asId(pad.sample_id) !== voice.sample_id) {
+            StudioSamplerVoice.release(voice);
+            continue;
+          }
+          if (asId(pad.slice_id) !== voice.slice_id) StudioSamplerVoice.release(voice);
+        }
+      }
+    }
+
+    /**
+     * Bring the sounding, tempo-synced voices onto the song's current tempo.
+     *
+     * A `bpm_sync` voice is started at the tempo its pad was synced against, so
+     * without this a later tempo change would leave it running at the old rate
+     * for the rest of its life. Once per block the tempo is compared with the
+     * one the voices were last reconciled onto (`this.reconciledBpm`): the usual
+     * block is one compare and nothing else, and only a block that finds a new
+     * tempo walks the voices. Each synced voice's speed is worked out again from
+     * its pad's own `speed_pct` and the source tempo it stored at its start — the
+     * very formula, and the very bounds, its start used — and then `refreshStep`
+     * is asked for the product, so a pitch a lane has moved stays where the lane
+     * put it.
+     * @returns {void}
+     */
+    reconcileTempo() {
+      if (this.bpm === this.reconciledBpm) return;
+      this.reconciledBpm = this.bpm;
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        for (const voice of record.voices) {
+          if (!voice.sounding || !voice.bpm_sync) continue;
+          // A pad with no known source tempo was never synced (its start read
+          // the setting as off), so it is left at its own Speed % alone.
+          if (!(voice.source_bpm > 0)) continue;
+          voice.speed = clamp(
+            (numberOr(voice.speed_pct, 100) / 100) * (this.bpm / voice.source_bpm),
+            LOWEST_PAD_SPEED,
+            HIGHEST_PAD_SPEED,
+          );
+          StudioSamplerVoice.refreshStep(voice);
+        }
+      }
+    }
+
+    /**
+     * Follow a pad's `reverse` while its voices sound: an edit that flips Reverse
+     * (the panel's switch, an undo, an agent) turns the voices of that very pad
+     * round where they stand, with no position jump, instead of waiting for the
+     * next press.
+     *
+     * `setSong` runs on every edit, so it is the one place a sounding voice
+     * learns that its pad changed. Each voice remembers the pad's `reverse` it
+     * was started with (`voice.reverse_src`, updated on every flip it takes), and
+     * `dir` is NOT compared: a ping-pong voice turns `dir` round as it reflects,
+     * and an edit that has nothing to do with the pad must not turn it. A voice
+     * whose start carried a `reverse` lock keeps the direction its own step
+     * asked for.
+     * @returns {void}
+     */
+    flipChangedPadReverses() {
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        for (const voice of record.voices) {
+          if (!voice.sounding) continue;
+          if (voice.locked && voice.locked.indexOf("reverse") >= 0) continue;
+          const pad = this.pads.get(padKey(voice.trackId, voice.bankId, voice.index));
+          if (!pad) continue;
+          const reverse = pad.reverse === true;
+          if (reverse === voice.reverse_src) continue;
+          voice.reverse_src = reverse;
+          StudioSamplerVoice.flipReverse(voice);
+        }
       }
     }
 

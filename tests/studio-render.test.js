@@ -1029,6 +1029,73 @@ function renderHub(snapshot, projectId = PROJECT) {
   };
 }
 
+test("an old pad (no new keys) renders the same 2 bars as the pre-change golden", async () => {
+  const frames = 4800;
+  /** A constant 0.5 sample, at the rate the song declares. */
+  const sampleAudio = async () => ({ rate: SAMPLE_RATE, channels: [new Float32Array(frames).fill(0.5)] });
+
+  // A pad exactly as a song written before the playback fields carries it: the
+  // ones `padOf` builds have none of `loop`, `bpm_sync`, `source_bpm_x10`,
+  // `speed_pct`, `fixed_velocity`, `hold_ms` or `keep_pitch` on them.
+  const song = samplerSong();
+  for (const pad of Object.values(song.pads)) {
+    for (const key of ["loop", "bpm_sync", "source_bpm_x10", "speed_pct", "fixed_velocity", "hold_ms", "keep_pitch"]) {
+      assert.equal(Object.hasOwn(pad, key), false, `an old pad carries no ${key}`);
+    }
+    assert.equal(pad.mode, "oneshot", "and it is the one-shot pad every old song stores");
+  }
+
+  const golden = await renderSong(song, { scene_id: "scene-1", seconds: 4, sampleAudio });
+  assert.equal(golden.seconds, 4, "two bars at 120 bpm are four seconds");
+  assert.equal(golden.left.length, SAMPLE_RATE * 4);
+
+  // The pre-change numbers: a velocity-100 step on a 0.5 constant, centre pan,
+  // one bar's chain slot A (steps at 0, 4 and 8) then slot B (a step at 0). A
+  // voice that runs out holds its last sample for a 64-frame fade.
+  const voice = 0.5 * Math.pow(100 / 127, 2) * Math.cos(Math.PI / 4);
+  const STEP = SAMPLE_RATE / 8; // one 16th at 120 bpm, 6000 frames
+  const bar = SAMPLE_RATE * 2;
+  const FADE = 64;
+  const windows = [
+    [0, frames, voice],
+    [frames + FADE, STEP * 4, 0],
+    [STEP * 4, STEP * 4 + frames, voice],
+    [STEP * 4 + frames + FADE, STEP * 8, 0],
+    [STEP * 8, STEP * 8 + frames, voice],
+    [STEP * 8 + frames + FADE, bar, 0],
+    [bar, bar + frames, voice],
+    [bar + frames + FADE, bar + STEP * 4, 0],
+  ];
+  for (const [from, to, expected] of windows) {
+    for (const at of [from, Math.trunc((from + to) / 2), to - 1]) {
+      assert.ok(
+        Math.abs(golden.left[at] - expected) < 1e-6,
+        `frame ${at}: expected ${expected}, got ${golden.left[at]}`,
+      );
+    }
+  }
+
+  // The very same song with every new key at its default renders the same two
+  // bars, sample for sample: the fields an old pad does not carry change nothing.
+  const spelled = structuredClone(song);
+  for (const key of Object.keys(spelled.pads)) {
+    spelled.pads[key] = {
+      ...spelled.pads[key],
+      loop: "off",
+      bpm_sync: false,
+      source_bpm_x10: 0,
+      speed_pct: 100,
+      fixed_velocity: false,
+      hold_ms: 0,
+      keep_pitch: false,
+    };
+  }
+  const defaults = await renderSong(spelled, { scene_id: "scene-1", seconds: 4, sampleAudio });
+  assert.deepEqual(defaults.left, golden.left, "every left sample is the same");
+  assert.deepEqual(defaults.right, golden.right, "and so is every right sample");
+  assert.deepEqual(defaults.missing_samples, []);
+});
+
 test("render loads only the samples its patterns use", async () => {
   const song = samplerSong();
   const asked = [];

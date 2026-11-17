@@ -116,6 +116,7 @@ const COMMAND_IDS = [
   "pad.assign_if_empty",
   "pad.clear",
   "pad.set",
+  "pad.set_bank",
   "pattern.add",
   "pattern.remove",
   "pattern.rename",
@@ -202,6 +203,8 @@ const MINIMAL_ARGS = {
   "bank.add": { track_id: "t1" },
   "bank.rename": { track_id: "t1", bank_id: "b1", name: "A" },
   "pad.set": { track_id: "t1", bank_id: "b1", index: 0, fields: { gain_db: 0 } },
+  // The whole-bank twin: the same kind of fields, on every pad of the bank.
+  "pad.set_bank": { track_id: "t1", bank_id: "b1", fields: { mode: "gate" } },
   "pad.assign": { track_id: "t1", bank_id: "b1", index: 0, sample_id: SAMPLE_ID },
   // The operator's own way to empty a pad: no MCP tool, one GUI button.
   "pad.clear": { track_id: "t1", bank_id: "b1", index: 0 },
@@ -792,6 +795,16 @@ test("apply returns before/after for every touched field", (t) => {
       },
       keys: [`${padOf("kit-b", 0)}|gain_db`, `${padOf("kit-b", 0)}|filter`],
     },
+    // The whole-bank twin: one field on every pad, each pad keeping its own
+    // history field so an undo restores the bank pad by pad.
+    {
+      id: "pad.set_bank",
+      args: { track_id: kitTrack, bank_id: "kit-b", fields: { mode: "gate" } },
+      keys: Array.from(
+        { length: LIMITS.padsPerBank },
+        (_, index) => `${padOf("kit-b", index)}|mode`,
+      ),
+    },
     {
       id: "clip.add_pattern",
       args: { clip_id: "kit-clip", track_id: kitTrack, scene_id: scene, length_steps: 16, name: "Kit loop" },
@@ -1055,11 +1068,16 @@ test("apply returns before/after for every touched field", (t) => {
     for (const key of keys) {
       assert.ok(touched.has(refOf(key)), `${id}: "${key}" is not one of its touched objects`);
     }
-    // The command's own target always carries the change. (A clip command
-    // also names its track, which it reads for the lock check but does not
-    // edit, so that ref may legitimately have no field.)
+    // The command's own target always carries the change. (A clip or pad
+    // command also names its track, which it reads for the lock check but does
+    // not edit, so that ref may legitimately have no field — and for
+    // `pad.set_bank` the track is the first ref it names.)
+    const withField = new Set(keys.map(refOf));
     const target = result.touched[0];
-    assert.ok(keys.some((key) => refOf(key) === target), `${id} has no after entry for ${target}`);
+    assert.ok(
+      withField.has(target) || target.startsWith("track:"),
+      `${id} has no after entry for ${target}`,
+    );
 
     // What the command handed back is a copy: scribbling over it afterwards
     // must leave the document exactly as the command left it.

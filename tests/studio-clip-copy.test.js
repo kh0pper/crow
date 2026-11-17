@@ -461,7 +461,16 @@ test("chain, loop, swing, locks and motion lanes are copied and the copy plays t
   const original = playClip(song, source, cycleFrames);
   const duplicated = playClip(song, "copy", cycleFrames);
   assert.ok(original.length >= 3, "the original plays its steps");
-  assert.deepEqual(duplicated, original, "the copy triggers the same pads at the same frames");
+  // A copy is a different clip, so each event names its own clip id and the
+  // comparison drops it: the pads, values, locks and frames must match.
+  const withoutClip = (events) => events.map(({ clip_id, ...rest }) => rest);
+  assert.deepEqual(
+    withoutClip(duplicated),
+    withoutClip(original),
+    "the copy triggers the same pads at the same frames",
+  );
+  for (const event of original) assert.equal(event.clip_id, source, "the source plays as itself");
+  for (const event of duplicated) assert.equal(event.clip_id, "copy", "the copy plays as itself");
   // Both chain slots sounded, so the comparison covers the second pattern too.
   assert.ok(original.some((event) => event.frame >= 4 * FRAMES_PER_BEAT));
   assert.deepEqual(checkInvariants(s.doc), []);

@@ -145,6 +145,8 @@ const COMMAND_NOTES = Object.freeze({
     "An agent may remove only a proposal; an accepted mapping is the operator's, and removing it needs their own click.",
   "midi.propose_profile":
     "Every row the profile lays out arrives as a proposal, which the operator accepts one by one or all at once. Read studio_midi first, so you can say which rows you proposed.",
+  "pad.set_bank":
+    "One field set goes to all sixteen pads of one bank in a single step, and only the bank-wide playback fields are accepted (no name, filter, sample tempo, level, pan, mute group or keep_pitch: a whole-bank mute group would cut every pad). A pad already holding a value is not changed, and taking the step back restores each pad per field: a field another writer changed since is left as they set it.",
 });
 
 /** Clips per page of `studio_session_summary` (the plan's Task 9 interface). */
