@@ -6,10 +6,12 @@ Forms, BigQuery and Looker Studio. It runs on this computer as a `uv` project
 from the installed copy — no container and no port — and it signs in with your
 own OAuth client, so nothing is proxied through a third party.
 
-The source here is the upstream MIT project of the same name, vendored
-unchanged (see `LICENSE`): `google_workspace_mcp/` is the server,
-`apps-script-shim/` is an optional Apps Script helper for one Forms tool, and
-`tests/` holds the Python unit tests (`python3 -m unittest discover -s tests`).
+The source here is the upstream MIT project of the same name, vendored from it
+(see `LICENSE`): `google_workspace_mcp/` is the server, `apps-script-shim/` is
+an optional Apps Script helper for one Forms tool, and `tests/` holds the
+Python unit tests (`python3 -m unittest discover -s tests`). Crow's copy differs
+from upstream in its packaging only: these READMEs are replaced with Crow's own
+and the test fixtures are scrubbed of personal data.
 
 ## What it can do
 

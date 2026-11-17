@@ -6,10 +6,12 @@ Script, Forms, BigQuery y Looker Studio. Corre en este equipo como un proyecto
 `uv` desde la copia instalada —sin contenedor y sin puerto— y se identifica con
 tu propio cliente OAuth, así que nada pasa por un tercero.
 
-El código es el proyecto upstream MIT del mismo nombre, incluido sin cambios
-(ver `LICENSE`): `google_workspace_mcp/` es el servidor, `apps-script-shim/` es
-un ayudante opcional de Apps Script para una herramienta de Forms, y `tests/`
+El código procede del proyecto upstream MIT del mismo nombre, incluido desde
+él (ver `LICENSE`): `google_workspace_mcp/` es el servidor, `apps-script-shim/`
+es un ayudante opcional de Apps Script para una herramienta de Forms, y `tests/`
 tiene las pruebas unitarias de Python (`python3 -m unittest discover -s tests`).
+En la copia de Crow solo cambia el empaquetado: estos README están reescritos
+para Crow y las fixtures de las pruebas están limpiadas de datos personales.
 
 ## Qué puede hacer
 

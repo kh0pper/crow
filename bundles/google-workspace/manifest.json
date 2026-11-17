@@ -18,8 +18,7 @@
       "GMAIL_SEND_TO_SELF_ALLOWLIST",
       "GOOGLE_BIGQUERY_PROJECT",
       "GDOCS_DEFAULT_FONT",
-      "GWS_FORMS_SHIM_SCRIPT_ID",
-      "GOOGLE_OAUTH_LOCAL_PORT"
+      "GWS_FORMS_SHIM_SCRIPT_ID"
     ]
   },
   "requires": { "env": ["GOOGLE_CREDENTIALS_FILE", "GOOGLE_TOKEN_FILE"], "bins": ["uv"] },
