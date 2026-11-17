@@ -203,8 +203,13 @@ function minimalLayout({ title, content }) {
     + `<body>${content}</body></html>`;
 }
 
-/** The panel's take store, in memory: every call answers, nothing is kept. */
-function fakeTakeStore() {
+/**
+ * The panel's take store, in memory: every call answers, nothing is kept. A case
+ * may hand it the measurement an interface would have stored, which is what a
+ * new take is cut by.
+ * @param {{latency?: object}} [options]
+ */
+function fakeTakeStore(options = {}) {
   const chunks = new Map();
   const pendings = new Map();
   return {
@@ -235,7 +240,7 @@ function fakeTakeStore() {
       return true;
     },
     async getLatency() {
-      return null;
+      return options.latency || null;
     },
     async putLatency() {
       return true;
@@ -252,13 +257,19 @@ function fakeTakeStore() {
   };
 }
 
-/** A context stand-in: the two nodes the page builds for an arm, and its clock. */
-function fakeContext() {
+/**
+ * A context stand-in: the two nodes the page builds for an arm, and its clock.
+ * `clock` is the context's own time in seconds, and `outputLatency` the seconds
+ * between a frame being mixed and being heard: the lanes' playhead is put behind
+ * by that much, and never by an estimate of the page's own.
+ */
+function fakeContext({ clock = 0, outputLatency } = {}) {
   const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
   return {
     sampleRate: 48000,
     state: "running",
-    currentTime: 0,
+    currentTime: clock,
+    outputLatency,
     destination: {},
     createGain: () => gain,
     createMediaStreamSource: () => ({ connect() {}, disconnect() {} }),
@@ -450,11 +461,15 @@ async function bootLanes(options = {}) {
     Object.defineProperty(Object.getPrototypeOf(document), "visibilityState", visibilityProperty);
   }
 
-  const store = fakeTakeStore();
+  const store = fakeTakeStore({ latency: options.latency });
   const storage = memoryStorage();
   const sessionValues = new Map();
   const engine = fakeEngine();
   const sent = [];
+  // The animation frames the page asks for, run by hand: the lanes' one loop
+  // paints on a frame, and a page that is not painting must not.
+  const frames = [];
+  const context = fakeContext({ clock: options.clock, outputLatency: options.outputLatency });
 
   const response = (status, body) => ({
     ok: status >= 200 && status < 300,
@@ -514,10 +529,15 @@ async function bootLanes(options = {}) {
     confirm: () => true,
     prompt: () => null,
     AudioContext: function AudioContextStub() {
-      return fakeContext();
+      return context;
     },
     StudioTakeStore: store,
     StudioEngine: { create: async () => engine },
+    requestAnimationFrame(fn) {
+      frames.push(fn);
+      return frames.length;
+    },
+    cancelAnimationFrame() {},
     addEventListener() {},
     removeEventListener() {},
   };
@@ -660,6 +680,27 @@ async function bootLanes(options = {}) {
     meterNode,
     setVisibility(next) {
       visibility = String(next);
+    },
+    context,
+    frames,
+    /**
+     * Run every animation frame waiting right now, `rounds` times, at one stamp.
+     * A frame may ask for another; that one waits for the next round.
+     * @returns {number} how many frames ran
+     */
+    runFrames(rounds = 1, stamped = 0) {
+      let ran = 0;
+      for (let round = 0; round < rounds; round += 1) {
+        const due = frames.splice(0, frames.length);
+        if (!due.length) break;
+        for (const run of due) run(stamped);
+        ran += due.length;
+      }
+      return ran;
+    },
+    /** Move the context's own clock, in seconds. */
+    setClock(seconds) {
+      context.currentTime = Number(seconds) || 0;
     },
   };
 }
@@ -1128,4 +1169,131 @@ test("the lane shows the chain's amp only as what the operator hears (amp off, a
   ui.click(`[data-act=monitor][data-track-id=${AUDIO_TRACK}]`);
   await ui.settle(24);
   assert.equal(String(chain().textContent), "amp off", "turning it off says so again");
+});
+
+// ---- the live waveform and the one animation frame loop (A4b-2) ------------
+
+/** A 3,408-frame (71 ms) round trip at 48 kHz, the way an interface measures one. */
+const TAP_LATENCY = { latency_frames: 3408, rate: 48000, spread_frames: 0 };
+
+/** The frame the launch reports: the pass the take starts in starts here. */
+const ARM_FRAME = 48000;
+
+/** The output latency the fake context reports, in seconds. */
+const OUTPUT_LATENCY = 0.05;
+
+/** The song's tempo (the lanes fixture seeds it), and its frames per bar at 48 kHz. */
+const BPM = 120;
+const RATE = 48000;
+const FRAMES_PER_BAR = ((RATE * 60) / BPM) * 4;
+
+test("the waveform lands on its own frames and the playhead sits at the audible frame", async () => {
+  // A context that is five seconds in, on an output that reports 50 ms of
+  // latency: a page that painted the newest report would put the playhead at
+  // where the engine IS, and this one puts it where the operator HEARS it.
+  const ui = await bootLanes({ latency: TAP_LATENCY, clock: 5, outputLatency: OUTPUT_LATENCY });
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the meter");
+  const meter = ui.engine.meters[0];
+
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  assert.ok(recorder, "the page built a recorder");
+  for (const listener of ui.engine.launches) {
+    listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 0, frame: ARM_FRAME });
+  }
+  await ui.settle();
+
+  const rec = ui.view().rec;
+  assert.equal(rec.active, true, "the take is armed on the frame the launch reported");
+  assert.equal(rec.arm_frame, ARM_FRAME, "on that very frame");
+  assert.equal(rec.offset_frames, TAP_LATENCY.latency_frames, "the take is cut by the measured round trip");
+  assert.equal(ui.view().recWave.pass, 0, "the lane draws the pass the take starts in");
+  assert.equal(ui.view().recWave.ring.passStartFrame, ARM_FRAME, "which starts on the take's own frame");
+
+  // One level message: a column every 480 frames of the dry input, each one
+  // carrying the context frame of its own first sample.
+  const loopFrames = Math.round(rec.loop_frames);
+  const offset = rec.offset_frames;
+  const cols = [];
+  for (let at = 0; at < 5; at += 1) cols.push(ARM_FRAME + offset + at * 480, -0.5, 0.5);
+  meter.post({ frame: ARM_FRAME + offset, peak: 0.5, rms: 0.2, cols: new Float32Array(cols) });
+
+  const wave = ui.view().recWave;
+  const newest = ARM_FRAME + 4 * 480;
+  assert.equal(wave.ring.newestFrame, newest, "the newest column is its frame less the take's offset");
+  const lastColumn = Math.floor(((newest - ARM_FRAME) * wave.cols) / loopFrames);
+  assert.equal(wave.ring.read(0).min, -0.5, "the pass start is column 0, and it holds the signal");
+  assert.equal(wave.ring.read(lastColumn).max, 0.5, `the newest frame is column ${lastColumn}`);
+  let filled = 0;
+  for (let at = 0; at < wave.cols; at += 1) {
+    if (wave.ring.read(at).min !== 0 || wave.ring.read(at).max !== 0) filled = at + 1;
+  }
+  assert.equal(filled, lastColumn + 1, "the waveform ends on the newest column and no other is drawn");
+
+  // A position report names the frame it was made for. From there the playhead
+  // advances to the frame that is heard now: the context's own time less the
+  // output latency, never the arrival of the report.
+  const reportFrame = 200000;
+  for (const listener of ui.engine.positions) listener({ bar: 1, beat: 1, sixteenth: 1, frame: reportFrame });
+  await ui.settle();
+  assert.equal(ui.runFrames(1) > 0, true, "the lanes' loop has a frame to paint");
+
+  const heardBar = (5 - OUTPUT_LATENCY) * RATE - reportFrame;
+  const expected = String(Math.round(((heardBar / FRAMES_PER_BAR) / 32) * 100 * 1000) / 1000) + "%";
+  const head = () => String(ui.document.querySelector("[data-role=rec-playhead]").style.left);
+  assert.equal(head(), expected, "the playhead is where the sound is, not where the engine is");
+  const arrivalBar = 5 * RATE - reportFrame;
+  const arrival = String(Math.round(((arrivalBar / FRAMES_PER_BAR) / 32) * 100 * 1000) / 1000) + "%";
+  assert.notEqual(expected, arrival, "and the output latency is not painted over");
+
+  // The pass moved on: the message that carries a frame of the next pass clears
+  // the picture, because the pass before it is a take in the song now.
+  const nextPass = ARM_FRAME + Math.round(loopFrames);
+  meter.post({
+    frame: nextPass + offset,
+    peak: 0.25,
+    rms: 0.1,
+    cols: new Float32Array([nextPass + offset, -0.25, 0.25]),
+  });
+  assert.equal(ui.view().recWave.pass, 1, "the lane draws the second pass now");
+  assert.equal(
+    ui.view().recWave.ring.passStartFrame,
+    nextPass,
+    "which starts at the take's anchor plus one loop",
+  );
+  assert.equal(ui.view().recWave.ring.read(0).max, 0.25, "and its first column is that pass's own signal");
+  assert.equal(ui.view().recWave.ring.newestFrame, nextPass, "no column of the pass before it is left in the ring");
+});
+
+test("the lanes' one animation frame loop stops when the widget is hidden and when nothing is armed", async () => {
+  const ui = await bootLanes();
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the meter");
+  await ui.settle(24);
+
+  // A meter on a lane that is on the page starts the loop, and every frame of it
+  // asks for the next one.
+  assert.equal(ui.frames.length > 0, true, "a meter on a visible lane starts the loop");
+  assert.equal(ui.runFrames(3) >= 3, true, "each frame paints and asks for the next");
+  assert.equal(ui.frames.length > 0, true, "and the loop is still running");
+
+  // A mode the lanes widget is not part of: the frame that runs next paints
+  // nothing and asks for no other.
+  await ui.mode("compose");
+  assert.equal(ui.frames.length > 0, true, "a frame was waiting when the widget went away");
+  ui.runFrames(1);
+  assert.equal(ui.frames.length, 0, "the frame that runs after it asks for no other");
+  assert.equal(ui.runFrames(1), 0, "and nothing is waiting to paint");
+
+  // Back in Record the meter is on the page again, so the loop starts again.
+  await ui.mode("record");
+  assert.equal(ui.frames.length > 0, true, "the loop starts again with the lane");
+  // Nothing armed is nothing to paint: the next frame stops it for good.
+  await ui.arm(AUDIO_TRACK);
+  ui.runFrames(2);
+  assert.equal(ui.frames.length, 0, "a disarmed target leaves no loop running");
 });

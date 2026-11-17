@@ -1155,7 +1155,6 @@ const STYLES = `
      and red, so the one lane a take lands on is never a guess. */
   .studio .st-rec-lane-target { box-shadow: inset 0 0 0 2px var(--st-danger); }
   .studio .st-rec-lane-target .st-rec-side { background: #2A1A18; }
-  .studio .st-rec-lane-target .st-rec-lane-body { height: 96px; }
   .studio .st-rec-block {
     position: absolute; top: 6px; height: 28px; box-sizing: border-box; padding: 0 6px;
     border-radius: 5px; border: 1px solid var(--st-edge); background: #24282D; color: var(--st-text);
@@ -1170,9 +1169,46 @@ const STYLES = `
   .studio .st-rec-source,
   .studio .st-rec-chain { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .studio .st-rec-note { margin: 10px 12px; font-size: 12px; line-height: 1.5; color: var(--st-muted); }
+  /* The record target's dry-input meter (A4b): a fill from the meter's own floor
+     (-60 dB) to full scale, the peak the lane holds, and a CLIP chip that latches
+     until the operator clears it. What it reads is the DRY input, so the lane says
+     so beside it; the chain is named only as what the operator hears. The meter
+     itself is not a control, and the chip is a 44 px target. */
+  .studio .st-rec-meter {
+    display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-rec-meter-track {
+    position: relative; display: block; flex: 0 0 auto; width: 96px; height: 10px;
+    border-radius: 5px; border: 1px solid var(--st-line); background: #14171A; overflow: hidden;
+  }
+  .studio .st-rec-meter-fill {
+    display: block; height: 100%; width: 0; background: var(--st-danger); border-radius: 4px;
+  }
+  .studio .st-rec-peak {
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px;
+    color: var(--st-text); min-width: 46px; white-space: nowrap;
+  }
+  .studio .st-rec-clip {
+    flex: 0 0 auto; padding: 0 8px;
+    border-color: var(--st-danger); color: var(--st-danger); font-weight: 700;
+  }
+  .studio .st-rec-clip[hidden] { display: none; }
+  .studio .st-rec-dry { font-size: 10px; color: var(--st-muted); white-space: nowrap; }
+  .studio .st-rec-cal { min-height: 44px; }
+  /* The live waveform of the pass being recorded: the dry input's own columns,
+     drawn by the lanes' one animation frame loop on the record target's lane and
+     nowhere else. It is a picture, so a press goes straight through it, and the
+     lane is taller so the picture and the meter both have room. */
+  .studio .st-rec-lane-target .st-rec-lane-body { height: 128px; }
+  .studio .st-rec-wave {
+    position: absolute; left: 0; right: 0; top: 0; display: block;
+    width: 100%; height: 68px; pointer-events: none;
+  }
   /* A phone keeps the lane headers narrow enough to leave a usable bar axis. */
   @media (max-width: 639px) {
     .studio .st-rec-row { grid-template-columns: 116px minmax(0, 1fr); }
+    .studio .st-rec-meter-track { width: 72px; }
   }
   /* The pad-and-steps view (the approved design, mockup screen 2): a sampler
      track's clip is a pattern, so opening one shows the kit instead of the
