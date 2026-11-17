@@ -839,15 +839,65 @@ function panelDb() {
   };
 }
 
-/** The document the mock client draws: one audio track and one scene. */
-async function recordingDoc(bpm = 240) {
+/**
+ * The document the mock client draws: one audio track and one scene, and — when
+ * a test asks for it — an audio clip in that scene's slot on the armed track.
+ * @param {number} [bpm]
+ * @param {{clip?: boolean}} [options]
+ */
+async function recordingDoc(bpm = 240, options = {}) {
   const { newSongDoc } = await import("../bundles/studio/server/doc.js");
   const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
   await import("../bundles/studio/server/commands/core.js");
   const doc = newSongDoc({ title: "Recording song", bpm });
   runCommand(doc, "track.add", { id: AUDIO_TRACK, name: "Guitar", kind: "audio" });
   runCommand(doc, "scene.add", { id: SCENE, name: "Verse" });
+  if (options.clip === true) {
+    runCommand(doc, "clip.add_audio", {
+      clip_id: CLIP,
+      track_id: AUDIO_TRACK,
+      scene_id: SCENE,
+      length_bars: 4,
+      name: "Guitar",
+    });
+  }
   return doc;
+}
+
+/** The audio clip `recordingDoc` can seed on the armed track. */
+const CLIP = "c-guitar";
+
+/**
+ * A `localStorage` that keeps what it is given: the page's own settings
+ * (the count-in, the click, the output pick) are read from it.
+ * @param {Record<string, string>} [initial]
+ */
+function makeStorage(initial = {}) {
+  const map = new Map(Object.entries(initial));
+  return {
+    getItem(key) {
+      const name = String(key);
+      return map.has(name) ? map.get(name) : null;
+    },
+    setItem(key, value) {
+      map.set(String(key), String(value));
+    },
+    removeItem(key) {
+      map.delete(String(key));
+    },
+  };
+}
+
+/**
+ * The stored count-in: this device's own setting, in bars.
+ *
+ * Every test here that records starts from the count-in Off, which is the path
+ * recording has always had (R4); a test about the count-in asks for a number of
+ * bars, and `makeStorage()` with nothing in it is the page's own default.
+ * @param {number} bars
+ */
+function countInStorage(bars) {
+  return makeStorage({ "crow.studio.countin.v1": String(bars) });
 }
 
 /**
@@ -921,13 +971,22 @@ function fakeTakeStore({ latency = null, log = [] } = {}) {
   };
 }
 
-/** A context stand-in: the three nodes the panel builds, and its clock. */
-function fakeContext(nowSeconds = 0) {
+/**
+ * A context stand-in: the three nodes the panel builds, and its clock.
+ *
+ * `clock` is a number of seconds or an object whose `seconds` a test moves, so
+ * "now" on the page's own clock can be read at the moment a message is sent.
+ * @param {number|{seconds: number}} [clock]
+ */
+function fakeContext(clock = 0) {
+  const secondsOf = () => (typeof clock === "number" ? clock : Number(clock.seconds) || 0);
   const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
   return {
     sampleRate: 48000,
     state: "running",
-    currentTime: nowSeconds,
+    get currentTime() {
+      return secondsOf();
+    },
     destination: {},
     createGain: () => gain,
     createMediaStreamSource: () => ({ connect() {}, disconnect() {} }),
@@ -973,18 +1032,37 @@ function fakeStream() {
   return { getTracks: () => [track], getAudioTracks: () => [track] };
 }
 
-/** The engine stand-in: one fake recorder the test drives by hand. */
-function fakeEngine() {
+/**
+ * The engine stand-in: one fake recorder the test drives by hand, the count-in's
+ * own messages, and the loop start a take is anchored on.
+ * @param {{seconds: number}} [clock] the page's own clock, so a recorder can
+ *   report the frame the page's "now" stood on when it was armed
+ */
+function fakeEngine(clock = { seconds: 0 }) {
+  const nowOf = () => Math.round((Number(clock.seconds) || 0) * 48000);
   const engine = {
     recorders: [],
     launches: [],
+    launched: [],
     node: { connect() {} },
     setSong() {},
-    play() {},
-    stop() {},
+    plays: 0,
+    /** Every `play` the page sent, with its options (`{countInBars}` or none). */
+    playCalls: [],
+    play(options) {
+      engine.plays += 1;
+      engine.playCalls.push(options || null);
+    },
+    stops: 0,
+    stop() {
+      engine.stops += 1;
+    },
     stopAll() {},
     unloadAudio() {},
     async loadAudio() {},
+    launchScene(sceneId) {
+      engine.launched.push(String(sceneId));
+    },
     onPosition() {
       return () => {};
     },
@@ -994,6 +1072,56 @@ function fakeEngine() {
     onLaunch(listener) {
       engine.launches.push(listener);
       return () => {};
+    },
+    // The count-in: the page starts it with `play({countInBars})` and follows
+    // what the engine posts. A test posts the messages itself, in the order the
+    // processor does, and `events` keeps that order beside the loop asks.
+    countInListeners: [],
+    events: [],
+    onCountIn(listener) {
+      engine.countInListeners.push(listener);
+      return () => {};
+    },
+    countIn(event) {
+      engine.events.push(event && event.type ? String(event.type) : "");
+      for (const listener of engine.countInListeners) listener(event);
+    },
+    /** Walk a count-in of `bars` bars from its start to its downbeat. */
+    countBar(bars = 1, playFrame = 96000, beatFrames = 12000) {
+      const beats = bars * 4;
+      engine.countIn({ type: "count_in_start", play_frame: playFrame });
+      for (let beat = 1; beat <= beats; beat += 1) {
+        engine.countIn({
+          type: "count_in",
+          beat,
+          beats,
+          frame: playFrame - (beats - beat) * beatFrames,
+          play_frame: playFrame,
+        });
+      }
+      engine.countIn({ type: "count_in_done", frame: playFrame });
+    },
+    cancels: 0,
+    cancelCountIn() {
+      engine.cancels += 1;
+    },
+    pauses: 0,
+    pause() {
+      engine.pauses += 1;
+    },
+    // The loop start of the armed clip: `looping` false is the engine's own
+    // answer for a track that is not playing that clip (the bar line instead).
+    loopFrame: 96000,
+    loopBar: 2,
+    looping: false,
+    loopAsks: [],
+    async nextLoopFrame(trackId, clipId) {
+      engine.loopAsks.push({ track_id: trackId, clip_id: clipId });
+      engine.events.push("nextLoopFrame");
+      return { frame: engine.loopFrame, bar: engine.loopBar, looping: engine.looping };
+    },
+    async nextBarFrame() {
+      return { frame: 48000, bar: 1 };
     },
     // The engine reports the whole master path's delay (the limiter's look-ahead
     // plus the mix delay a converted amp adds) whenever it changes. A test
@@ -1011,9 +1139,6 @@ function fakeEngine() {
       engine.latencyPending = latency;
       for (const listener of engine.latencyListeners) listener(latency);
     },
-    async nextBarFrame() {
-      return { frame: 48000, bar: 1 };
-    },
     async calibrate() {
       return { latency_frames: 3408, rate: 48000, spread_frames: 0, clicks_heard: 14 };
     },
@@ -1030,6 +1155,9 @@ function fakeEngine() {
         },
         armAt(frame) {
           recorder.armFrame = frame;
+          // The frame the page's clock stood on as the arm was sent: an arm is
+          // always in the future, so this is never past it (rule 9).
+          recorder.armNow = nowOf();
         },
         stopAt(frame) {
           recorder.stopFrame = frame;
@@ -1055,7 +1183,8 @@ function fakeEngine() {
  * @param {{latency?: object, gateFinish?: boolean, bpm?: number,
  *          store?: object, locks?: object, pending?: object[],
  *          chunks?: Array<[string, number, ArrayBuffer]>, clock?: number,
- *          hold?: Promise<void>, confirm?: boolean,
+ *          hold?: Promise<void>, confirm?: boolean, countIn?: number,
+ *          storage?: object, clip?: boolean, failInput?: boolean,
  *          respond?: (url: string, init: object) => ({status: number, body: object}|null)}} [options]
  */
 async function bootPanel(options = {}) {
@@ -1065,7 +1194,7 @@ async function bootPanel(options = {}) {
   const { CLIENT_SCRIPT } = await import("../bundles/studio/panel/client.js");
   const { TAKE_STORE_SCRIPT } = await import("../bundles/studio/panel/take-store.js");
 
-  const doc = await recordingDoc(options.bpm);
+  const doc = await recordingDoc(options.bpm, { clip: options.clip === true });
   const res = {
     html: "",
     headersSent: false,
@@ -1082,12 +1211,13 @@ async function bootPanel(options = {}) {
   const { document, window: domWindow } = parseHTML(res.html);
 
   const log = [];
+  const clock = { seconds: options.clock || 0 };
   const store = options.store || fakeTakeStore({ latency: options.latency || null, log });
   // A take the previous page left behind, and the chunks it kept: what a
   // resumed upload and an interrupted recording are made of.
   for (const row of options.pending || []) store.pendings.set(row.take_id, row);
   for (const [takeId, index, bytes] of options.chunks || []) store.chunks.set(takeId + ":" + index, bytes);
-  const engine = fakeEngine();
+  const engine = fakeEngine(clock);
   const sent = [];
   const requests = [];
   let releaseFinish = () => {};
@@ -1148,6 +1278,9 @@ async function bootPanel(options = {}) {
   const stream = fakeStream();
   const mediaDevices = {
     async getUserMedia() {
+      if (options.failInput === true || mediaDevices.failNext === true) {
+        throw new Error("The input could not be opened.");
+      }
       return stream;
     },
     async enumerateDevices() {
@@ -1155,13 +1288,21 @@ async function bootPanel(options = {}) {
     },
   };
 
+  // This device's own settings: the count-in a test asks for, stored the way a
+  // browser stores it. With none named, the page starts on the count-in Off —
+  // the path recording has always had — and `makeStorage()` alone is the page's
+  // own default of one bar.
+  const storage = options.storage
+    || countInStorage(options.countIn === undefined ? 0 : options.countIn);
+
   const windowStub = {
     crypto: globalThis.crypto,
     location: { protocol: "http:", host: "127.0.0.1:1", reload() {} },
     atob: globalThis.atob,
+    localStorage: storage,
     confirm: () => options.confirm !== false,
     AudioContext: function AudioContextStub() {
-      return fakeContext(options.clock || 0);
+      return fakeContext(clock);
     },
     StudioTakeStore: store,
     StudioEngine: { create: async () => engine },
@@ -1242,7 +1383,7 @@ async function bootPanel(options = {}) {
     return node;
   };
 
-  return { document, store, engine, sent, requests, log, page, click, settle, frame, releaseFinish, timers };
+  return { document, doc, store, storage, engine, clock, mediaDevices, sent, requests, log, page, click, settle, frame, releaseFinish, timers };
 }
 
 /**
@@ -2137,7 +2278,10 @@ test("teardown mid-record keeps every chunk and uploads the take", async (t) => 
 // reports, not on the armed clip's loop grid; and Pause is off while a take
 // runs.
 
-test("today: Record while stopped in session view shows the launch-a-scene notice and waits", async () => {
+test("today: Record while stopped with the count-in Off shows the launch-a-scene notice and waits", async () => {
+  // The count-in is Off here (the rig's default), which is the path recording
+  // has always had (R4): nothing is queued, no play is sent, and a launch report
+  // is what starts the take.
   const ui = await bootPanel();
   ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
   await ui.settle();
@@ -2206,7 +2350,7 @@ test("today: a launch report arms the recorder on its frame and sends one split 
   assert.equal(added[0].args.length_bars, 4, "as long as the scene");
 });
 
-test("today: Record while playing arms at nextBarFrame, not at a loop start", async () => {
+test("today: Record while playing arms on the bar frame when the armed slot is not the playing clip", async () => {
   const ui = await bootPanel();
   ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
   await ui.settle();
@@ -2225,10 +2369,16 @@ test("today: Record while playing arms at nextBarFrame, not at a loop start", as
   );
   await ui.settle();
 
+  // The engine's own answer for a slot it is not playing: the next bar line, and
+  // `looping` false (the clip this take belongs to is another one).
   let asked = 0;
   ui.engine.nextBarFrame = async () => {
     asked += 1;
     return { frame: 96000, bar: 2 };
+  };
+  ui.engine.nextLoopFrame = async () => {
+    asked += 1;
+    return { frame: 96000, bar: 2, looping: false };
   };
 
   ui.click("[data-act=record]");
@@ -2236,8 +2386,9 @@ test("today: Record while playing arms at nextBarFrame, not at a loop start", as
 
   const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
   assert.ok(recorder, "the panel built a recorder");
-  assert.equal(asked, 1, "the take's frame was asked of the engine's bar clock");
+  assert.equal(asked, 1, "the take's frame was asked of the engine's own clock");
   assert.equal(ui.engine.plays, 1, "and the transport was not started a second time");
+  assert.equal(ui.engine.playCalls.filter((options) => options && options.countInBars).length, 0, "no count-in was asked for while the transport runs");
   assert.equal(recorder.armFrame, 96000, "the recorder armed on exactly that frame");
 
   const fpb = (48000 * 60) / 240;
@@ -2284,12 +2435,15 @@ test("today: Pause is disabled while a take runs", async () => {
     listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 0, frame: 48000 }),
   );
   await ui.settle();
+  // The loop start the engine names for the armed slot's clip.
+  ui.engine.loopFrame = 48000;
+  ui.engine.looping = true;
   ui.click("[data-act=record]");
   await ui.settle(24);
 
   const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
   assert.ok(recorder, "the panel built a recorder");
-  assert.equal(recorder.armFrame, 48000, "and armed it on the frame the engine's bar clock gave");
+  assert.equal(recorder.armFrame, 48000, "and armed it on the frame the engine named");
   assert.equal(pause.disabled, true, "Pause is disabled while the take runs");
   assert.equal(pause.getAttribute("title"), "Stop ends a recording", "and says Stop is what ends it");
 
@@ -2302,4 +2456,405 @@ test("today: Pause is disabled while a take runs", async () => {
     "1",
     "and the take is still recording",
   );
+});
+
+// ---- the count-in and the anchor (R1-R4, R9) -------------------------------
+//
+// A take begins on a frame the ENGINE names, always in the future: the
+// count-in's announced play frame when the transport is stopped, the loop start
+// it names after a paused count-in or while the transport already runs, and the
+// launch report a count-in-off take starts from. Nothing below reads a frame the
+// page worked out for itself, and every arm is at or after the page's own
+// "now" when it is sent.
+
+/**
+ * Put the page where the record scene is the one that launched: a launch report
+ * on the armed track, which is what says so.
+ * @param {object} ui a booted panel
+ */
+async function launchReported(ui) {
+  ui.engine.launches.forEach((listener) =>
+    listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 0, frame: 48000 }),
+  );
+  await ui.settle();
+}
+
+/**
+ * Arm the fake panel's audio track and press Record.
+ * @param {object} ui a booted panel
+ * @returns {Promise<object>} the fake recorder, before anything armed it
+ */
+async function pressRecord(ui) {
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  assert.ok(recorder, "the panel built a recorder for the armed track");
+  return recorder;
+}
+
+/** @returns {object[]} the count-in `play` calls the page sent */
+function countInPlays(ui) {
+  return ui.engine.playCalls.filter((options) => options && options.countInBars);
+}
+
+test("the count-in defaults to one bar on a device that has never chosen one", async () => {
+  // The page reads the setting from this device's storage; with nothing stored
+  // it counts one bar in, which is what a first Record press does.
+  const ui = await bootPanel({ storage: makeStorage() });
+  assert.equal(ui.page.__studioTest.view.countIn, 1, "the stored setting starts at one bar");
+
+  await pressRecord(ui);
+  assert.equal(countInPlays(ui).length, 1, "Record asked the engine to count in");
+  assert.equal(countInPlays(ui)[0].countInBars, 1, "one bar of clicks");
+});
+
+test("R4: count-in 0 sends exactly the arm and split messages of the characterisation test", async () => {
+  // Off is the path recording always had, taken as a golden: the launch report's
+  // frame is the take's first frame, one split per pass from there, the same
+  // clip command, and the same offset on every pass that lands (nothing is
+  // calibrated here, so it is zero).
+  const ui = await bootPanel({ countIn: 0, gateFinish: true });
+  await pressRecord(ui);
+  assert.equal(countInPlays(ui).length, 0, "Off sends no count-in play");
+  assert.deepEqual(ui.engine.launched, [], "and queues no launch");
+  assert.equal(
+    ui.engine.recorders[0].armFrame,
+    null,
+    "the take waits for the operator's own launch",
+  );
+
+  await launchReported(ui);
+  const recorder = ui.engine.recorders[0];
+  assert.equal(recorder.armFrame, 48000, "the launch report's frame is the take's first frame");
+
+  const fpb = (48000 * 60) / 240;
+  const bars = 4;
+  assert.deepEqual(
+    recorder.splits,
+    Array.from({ length: recorder.splits.length }, (_unused, at) =>
+      48000 + Math.round((at + 1) * bars * 4 * fpb)),
+    "one split per pass, each rounded once on its own absolute position",
+  );
+  const added = ui.sent.filter((message) => message.command === "clip.add_audio");
+  assert.equal(added.length, 1, "the empty slot got one audio clip");
+  assert.deepEqual(
+    added[0].args,
+    {
+      clip_id: added[0].args.clip_id,
+      track_id: AUDIO_TRACK,
+      scene_id: SCENE,
+      length_bars: 4,
+      name: "Guitar",
+    },
+    "in the slot the launch named, as long as the scene",
+  );
+
+  // The take's rows: one per pass, each cut by the offset of the moment it was
+  // armed — zero here, which is what an uncalibrated input gives.
+  recorder.chunk(new Uint8Array(64).buffer, 0, 0);
+  recorder.chunk(new Uint8Array(64).buffer, 0, 1);
+  await ui.settle(24);
+  const rows = Array.from(ui.store.pendings.values());
+  assert.equal(rows.length, 2, "both passes are on this device");
+  for (const row of rows) assert.equal(row.offset_frames, 0, "an uncalibrated take carries no offset");
+  ui.releaseFinish();
+});
+
+test("R1: count-in 1 plays with countInBars 1 and arms on the announced play_frame", async () => {
+  const ui = await bootPanel({ storage: makeStorage(), clock: 0.75 });
+  const recorder = await pressRecord(ui);
+
+  assert.equal(countInPlays(ui).length, 1, "Record asked for a count-in");
+  assert.equal(countInPlays(ui)[0].countInBars, 1, "one bar of it");
+  assert.deepEqual(ui.engine.launched, [SCENE], "the record scene's launch was queued for the downbeat");
+  assert.equal(ui.engine.plays, 1, "the engine was started once, by the count-in");
+  assert.equal(recorder.armFrame, null, "nothing is armed while the clicks run");
+
+  // The engine announces the frame the song starts on, then one click per beat.
+  ui.engine.countIn({ type: "count_in_start", play_frame: 96000 });
+  await ui.settle();
+  for (const beat of [1, 2, 3]) {
+    ui.engine.countIn({ type: "count_in", beat, beats: 4, frame: 96000 - (4 - beat) * 12000, play_frame: 96000 });
+    await ui.settle();
+  }
+  assert.equal(recorder.armFrame, null, "the take is not armed before the last click");
+
+  // The last beat's click is a beat ahead of the downbeat: a true future frame.
+  ui.engine.countIn({ type: "count_in", beat: 4, beats: 4, frame: 84000, play_frame: 96000 });
+  await ui.settle(24);
+  assert.equal(recorder.armFrame, 96000, "the recorder armed on the frame the count-in announced");
+  assert.ok(recorder.armFrame >= recorder.armNow, "and that frame is ahead of the page's own now");
+  assert.equal(recorder.splits[0], 96000 + Math.round(4 * 4 * ((48000 * 60) / 240)), "its first pass ends a loop after it");
+
+  // The take holds none of the count-in: it begins on the downbeat, not before
+  // it, and the clip is the record scene's slot.
+  const added = ui.sent.filter((message) => message.command === "clip.add_audio");
+  assert.equal(added.length, 1, "the empty slot got one audio clip");
+  assert.equal(added[0].args.scene_id, SCENE, "in the record scene");
+  assert.equal(
+    ui.document.querySelector("[data-role=rec-status]").textContent,
+    "Recording, pass 1",
+    "the take is recording once it is armed",
+  );
+});
+
+test("R2: from paused it counts in, resumes, and arms at nextLoopFrame asked after count_in_done", async () => {
+  const ui = await bootPanel({ storage: makeStorage(), clock: 0.75, clip: true });
+  ui.click("[data-act=play]");
+  await ui.settle();
+  await launchReported(ui);
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(ui.page.__studioTest.view.paused, true, "the transport stands paused where it was");
+
+  ui.engine.loopFrame = 120000;
+  ui.engine.looping = true;
+  ui.engine.events.length = 0;
+  const recorder = await pressRecord(ui);
+  assert.deepEqual(ui.engine.launched, [], "the paused scene is the record scene, so nothing is queued");
+
+  // A paused count-in arms nothing on its clicks: the downbeat resumes the
+  // transport, and the take starts on the clip's loop grid from there.
+  ui.engine.countBar(1, 96000);
+  await ui.settle(24);
+
+  assert.equal(recorder.armFrame, 120000, "the take armed on the loop start the engine named");
+  assert.notEqual(recorder.armFrame, 96000, "and not on the beat-0 frame the resumed launch reports");
+  assert.ok(recorder.armFrame >= recorder.armNow, "and that frame is ahead of the page's own now");
+  assert.equal(ui.engine.loopAsks.length, 1, "the loop start was asked for once");
+  assert.equal(ui.engine.loopAsks[0].track_id, AUDIO_TRACK, "about the armed track");
+  assert.equal(ui.engine.loopAsks[0].clip_id, CLIP, "and the clip the take records into");
+  assert.ok(
+    ui.engine.events.indexOf("count_in_done") < ui.engine.events.indexOf("nextLoopFrame"),
+    "the loop start was asked for after the count-in finished",
+  );
+});
+
+test("R2: a launch is queued for a paused count-in only when the record scene is another one", async () => {
+  // The record scene is the one that last launched, so a paused transport that
+  // is sitting on it has nothing to queue (R2).
+  const same = await bootPanel({ storage: makeStorage(), clip: true });
+  same.click("[data-act=play]");
+  await same.settle();
+  await launchReported(same);
+  same.click("[data-act=pause]");
+  await same.settle();
+  await pressRecord(same);
+  assert.deepEqual(same.engine.launched, [], "the paused scene is the record scene: no launch is queued");
+
+  // A paused page that has no record scene of its own picks the first scene
+  // holding a clip on the armed track, and queues it for the downbeat.
+  const unknown = await bootPanel({ storage: makeStorage(), clip: true });
+  unknown.click("[data-act=play]");
+  await unknown.settle();
+  unknown.click("[data-act=pause]");
+  await unknown.settle();
+  unknown.page.__studioTest.view.lastScene = "";
+  await pressRecord(unknown);
+  assert.deepEqual(unknown.engine.launched, [SCENE], "the record scene was queued for the downbeat");
+});
+
+test("R3: while playing there is no count-in and the arm frame is the engine's loop start", async () => {
+  const ui = await bootPanel({ storage: makeStorage(), clock: 0.75, clip: true });
+  ui.click("[data-act=play]");
+  await ui.settle();
+  await launchReported(ui);
+
+  ui.engine.loopFrame = 144000;
+  ui.engine.looping = true;
+  ui.engine.events.length = 0;
+  const recorder = await pressRecord(ui);
+
+  assert.equal(countInPlays(ui).length, 0, "a running transport counts nothing in");
+  assert.equal(ui.engine.events.indexOf("count_in_start"), -1, "and no count-in message arrives");
+  assert.equal(ui.engine.loopAsks.length, 1, "the loop start was asked for once");
+  assert.equal(ui.engine.loopAsks[0].clip_id, CLIP, "about the clip the take records into");
+  assert.equal(recorder.armFrame, 144000, "the recorder armed on the frame the engine named");
+  assert.ok(recorder.armFrame >= recorder.armNow, "never on a frame the engine has already rendered");
+  assert.equal(recorder.splits[0], 144000 + Math.round(4 * 4 * ((48000 * 60) / 240)), "its first pass ends a loop after it");
+});
+
+test("R3: the anchor stays on the clip's loop grid after a stop, a pause and a tempo change", async () => {
+  // view.launches keeps the last report a track ever made, so it says nothing
+  // about where the transport is now: an anchor read from it would sit on a
+  // frame the run left behind long ago. A Stop, a Pause and a tempo edit are the
+  // three things that leave it behind.
+  const scenarios = ["stop then play", "pause then resume", "tempo change"];
+  for (const scenario of scenarios) {
+    const ui = await bootPanel({ storage: makeStorage(), clock: 0.75, clip: true });
+    ui.click("[data-act=play]");
+    await ui.settle();
+    await launchReported(ui);
+    if (scenario === "stop then play") {
+      ui.click("[data-act=stop]");
+      await ui.settle();
+      ui.click("[data-act=play]");
+      await ui.settle();
+    } else if (scenario === "pause then resume") {
+      ui.click("[data-act=pause]");
+      await ui.settle();
+      ui.click("[data-act=play]");
+      await ui.settle();
+    }
+
+    // A stale report, of the kind the page keeps after any of those: a frame the
+    // song has long passed.
+    ui.page.__studioTest.view.launches[AUDIO_TRACK] = {
+      track_id: AUDIO_TRACK,
+      clip_id: CLIP,
+      scene_id: SCENE,
+      bar: 0,
+      frame: 48000,
+    };
+    ui.engine.loopFrame = 168000;
+    ui.engine.looping = true;
+    ui.engine.loopAsks.length = 0;
+
+    const recorder = await pressRecord(ui);
+    assert.equal(recorder.armFrame, 168000, `${scenario}: the anchor is the engine's loop start`);
+    assert.notEqual(recorder.armFrame, 48000, `${scenario}: and never the stale report's frame`);
+    assert.equal(ui.engine.loopAsks.length, 1, `${scenario}: the engine was asked, once`);
+    assert.equal(ui.engine.loopAsks[0].clip_id, CLIP, `${scenario}: about the armed clip`);
+  }
+});
+
+test("R3: an empty armed slot anchors on the next bar", async () => {
+  const ui = await bootPanel({ storage: makeStorage(), clock: 0.75 });
+  ui.click("[data-act=play]");
+  await ui.settle();
+  await launchReported(ui);
+
+  // The engine's own answer for a slot with no clip on it: the bar line, and
+  // `looping` false.
+  ui.engine.loopFrame = 48000;
+  ui.engine.looping = false;
+  const recorder = await pressRecord(ui);
+
+  assert.equal(ui.engine.loopAsks.length, 1, "the anchor was asked for");
+  assert.equal(ui.engine.loopAsks[0].clip_id, null, "with no clip, because the slot holds none");
+  assert.equal(recorder.armFrame, 48000, "the recorder armed on the bar frame");
+  const added = ui.sent.filter((message) => message.command === "clip.add_audio");
+  assert.equal(added.length, 1, "the empty slot got its clip");
+});
+
+test("R3: a playing clip that is not the armed slot's clip anchors on the next bar", async () => {
+  const ui = await bootPanel({ storage: makeStorage(), clock: 0.75, clip: true });
+  ui.click("[data-act=play]");
+  await ui.settle();
+  await launchReported(ui);
+
+  // The engine says the armed clip's loop is not what plays: the bar line again.
+  ui.engine.loopFrame = 72000;
+  ui.engine.loopBar = 1;
+  ui.engine.looping = false;
+  const recorder = await pressRecord(ui);
+
+  assert.equal(ui.engine.loopAsks[0].clip_id, CLIP, "the clip the take records into was named");
+  assert.equal(recorder.armFrame, 72000, "and the answer was the bar frame it gave");
+  assert.equal(
+    ui.sent.filter((message) => message.command === "clip.add_audio").length,
+    0,
+    "the clip already there is recorded into, not replaced",
+  );
+});
+
+test("R3 and R2: every arm is sent on a frame the engine has not rendered yet", async () => {
+  const arms = [];
+  for (const how of ["playing", "paused"]) {
+    const ui = await bootPanel({ storage: makeStorage(), clock: 1.5, clip: true });
+    ui.click("[data-act=play]");
+    await ui.settle();
+    await launchReported(ui);
+    if (how === "paused") {
+      ui.click("[data-act=pause]");
+      await ui.settle();
+    }
+    ui.engine.loopFrame = 240000;
+    ui.engine.looping = true;
+    const recorder = await pressRecord(ui);
+    if (how === "paused") {
+      ui.engine.countBar(1, 192000);
+      await ui.settle(24);
+    }
+    assert.ok(recorder.armFrame !== null, `${how}: the take was armed`);
+    assert.ok(
+      recorder.armFrame >= recorder.armNow,
+      `${how}: the arm frame is ahead of the page's own now (${recorder.armFrame} vs ${recorder.armNow})`,
+    );
+    arms.push(recorder.armFrame);
+  }
+  assert.deepEqual(arms, [240000, 240000], "both paths armed on the frame the engine named");
+});
+
+test("R9: the anchor is the splitAt rounding of a later pass (anchor + round(k * loop))", async () => {
+  const fpb = (48000 * 60) / 130;
+  const ui = await bootPanel({ bpm: 130, storage: makeStorage() });
+  const recorder = await pressRecord(ui);
+  ui.engine.countBar(1, 96000);
+  await ui.settle(24);
+  assert.equal(recorder.armFrame, 96000, "the anchor is the count-in's play frame");
+
+  const loop = 4 * 4 * fpb;
+  for (let pass = 1; pass <= 10; pass += 1) {
+    assert.equal(
+      recorder.splits[pass - 1],
+      96000 + Math.round(pass * loop),
+      `pass ${pass} starts on the frame the sequencer gives that boundary`,
+    );
+  }
+  const roundedLoop = Math.round(loop);
+  let drifted = false;
+  for (let pass = 1; pass <= 10; pass += 1) {
+    if (96000 + pass * roundedLoop !== recorder.splits[pass - 1]) drifted = true;
+  }
+  assert.ok(drifted, "a rounded pass length would drift off the boundaries it should land on");
+});
+
+test("an input that fails to open during the count-in cancels it and stops the transport", async () => {
+  const ui = await bootPanel({ storage: makeStorage(), clock: 0.75 });
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  // The arm's stream is gone (the interface was unplugged), so the input has to
+  // be opened again when the take starts — and it refuses.
+  ui.page.__studioTest.view.armed[AUDIO_TRACK].stream = null;
+  ui.mediaDevices.failNext = true;
+
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  assert.equal(countInPlays(ui).length, 1, "the count-in had begun");
+  assert.equal(ui.engine.cancels, 1, "the count-in was cancelled");
+  assert.ok(ui.engine.stops > 0, "and the transport was stopped");
+  assert.equal(ui.page.__studioTest.view.rec, null, "no take is left armed");
+  assert.equal(ui.page.__studioTest.view.playing, false, "and nothing is playing");
+  assert.equal(ui.document.querySelector("[data-role=rec-status]").hidden, true, "the status is gone");
+  assert.equal(ui.store.pendings.size, 0, "no take row was made");
+  assert.equal(
+    ui.sent.filter((message) => message.command === "clip.add_audio").length,
+    0,
+    "and no clip was made for it",
+  );
+});
+
+test("the rec status reads the count-in from the engine's clicks, then the take", async () => {
+  const ui = await bootPanel({ storage: makeStorage() });
+  await pressRecord(ui);
+  const status = () => ui.document.querySelector("[data-role=rec-status]");
+  assert.equal(status().textContent, "Count-in 4..3..2..1", "the beats still to come, before any click");
+  assert.equal(status().getAttribute("data-recording"), "0", "nothing is being recorded yet");
+
+  ui.engine.countIn({ type: "count_in_start", play_frame: 96000 });
+  await ui.settle();
+  assert.equal(status().textContent, "Count-in 4..3..2..1", "the start alone does not move it");
+
+  ui.engine.countIn({ type: "count_in", beat: 2, beats: 4, frame: 96000 - 2 * 12000, play_frame: 96000 });
+  await ui.settle();
+  assert.equal(status().textContent, "Count-in 3..2..1", "each click counts one beat off");
+
+  ui.engine.countIn({ type: "count_in", beat: 4, beats: 4, frame: 84000, play_frame: 96000 });
+  await ui.settle(24);
+  assert.equal(status().textContent, "Recording, pass 1", "the take replaces the count-in");
+  assert.equal(status().getAttribute("data-recording"), "1", "and says it is recording");
 });

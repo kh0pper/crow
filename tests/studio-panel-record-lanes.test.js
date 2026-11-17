@@ -465,6 +465,9 @@ async function bootLanes(options = {}) {
 
   const store = fakeTakeStore({ latency: options.latency });
   const storage = memoryStorage();
+  // This device's count-in: the rig records with it Off, which is the path a take
+  // has always taken (R4), so a launch report is what arms the recorder here.
+  storage.setItem("crow.studio.countin.v1", "0");
   const sessionValues = new Map();
   const engine = fakeEngine();
   const sent = [];

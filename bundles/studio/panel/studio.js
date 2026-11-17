@@ -249,6 +249,15 @@ const PAD_INPUT_SCRIPT = await loadPanelScript("pad-input.js", "PAD_INPUT_SCRIPT
 const RECORD_VIEW_SCRIPT = await loadPanelScript("record-view.js", "RECORD_VIEW_SCRIPT");
 
 /**
+ * The punch rules, loaded once: the comp splice and its comparison, the range
+ * that fits a clip, and the frames one pass's gate opens and closes on. It is
+ * the SAME text `panel/punch.js` evaluates in Node, so a page and a test can
+ * never disagree about a punch. It comes before the client, which asks
+ * `window.StudioPunch` for those rules (see panel/punch.js).
+ */
+const PUNCH_SCRIPT = await loadPanelScript("punch.js", "PUNCH_SCRIPT");
+
+/**
  * The shell's layout model, loaded once: which widget is on the page, in what
  * order and at which size is this device's own view state, and the model that
  * decides it comes BEFORE the shell that reads it and before the client, which
@@ -1856,6 +1865,7 @@ function studioPage({ songId, render, res }) {
       <script>${TAKE_STORE_SCRIPT}
 ${PAD_INPUT_SCRIPT}
 ${RECORD_VIEW_SCRIPT}
+${PUNCH_SCRIPT}
 ${MIDI_ROUTE_SCRIPT}
 ${MIDI_SCRIPT}
 ${SHELL_LAYOUT_SCRIPT}

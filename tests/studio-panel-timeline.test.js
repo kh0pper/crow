@@ -451,6 +451,13 @@ async function bootTimeline(options = {}) {
     },
   };
   if (options.storage) windowStub.localStorage = options.storage;
+  else {
+    // This device's count-in: the rig starts with it Off, which is the path a
+    // take has always taken (R4), so a launch report or a bar frame arms it.
+    const rigStorage = memoryStorage();
+    rigStorage.setItem("crow.studio.countin.v1", "0");
+    windowStub.localStorage = rigStorage;
+  }
 
   const yjsUrl = pathToFileURL(
     new URL("../bundles/studio/node_modules/yjs/dist/yjs.mjs", import.meta.url).pathname,
