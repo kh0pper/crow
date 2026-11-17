@@ -20,10 +20,12 @@ Upload a small file (base64, <1MB) or get an HTTP upload URL for larger files.
 | `mime_type` | string | No | 200 | MIME type (e.g., `image/png`) |
 | `data_base64` | string | No | 1500000 | Base64-encoded file data (for files <1MB) |
 | `bucket` | string | No | 100 | Target bucket (default: `crow-files`) |
-| `reference_type` | string | No | 100 | What this file is attached to (e.g., `blog_post`, `project_source`) |
+| `reference_type` | string | No | 100 | What this file is attached to (`research_source`, `research_note`). `blog_post` is the owner's: a BOT-BOUND caller asking for it is refused ("Only the owner can attach files to blog posts.") |
 | `reference_id` | number | No | — | ID of the referenced item |
 
 When `data_base64` is provided, the file is uploaded directly. When omitted, a presigned upload URL is returned for larger files.
+
+A `blog_post` reference never makes a file public by itself: `GET /blog/media/<key>` serves a key only while a PUBLISHED PUBLIC post uses it — as its cover image, or linked from its content. And only media comes back inline (a raster image, audio, video, a `.sunvox` project); HTML, SVG and PDF are served as attachments under a sandboxing CSP.
 
 **Returns (direct upload):**
 
@@ -169,7 +171,8 @@ Upload a file via multipart form data.
 ```
 
 **Errors:**
-- `400` — No file provided or invalid MIME type
+- `400` — No file provided, or a MIME type that is not a single `type/subtype` (parameters such as `; charset=x` are fine; a comma-separated list or a control character is not)
+- `415` — Blocked MIME type (an executable type)
 - `413` — File exceeds size limit
 - `507` — Storage quota exceeded
 
@@ -245,4 +248,4 @@ Get bucket statistics. Returns `{ fileCount, totalSizeBytes }`.
 
 ### isAllowedMimeType(mimeType)
 
-Validate that a MIME type is allowed for upload (blocks executable types). Returns `boolean`.
+Validate that a MIME type is allowed for upload (blocks executable types). Returns `boolean`. This is the OLD allowlist check; it does not decide what may be served. A stored type is served only as a clean single `type/subtype` essence — anything else (a comma-separated list, a control character) is an `application/octet-stream` attachment (see `servers/blog/media-policy.js`), and the upload paths refuse such a value outright.

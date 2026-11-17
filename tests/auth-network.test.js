@@ -108,10 +108,16 @@ test("rejectFunneled middleware: private paths blocked with Funnel header", asyn
   const server = await startTestApp();
   try {
     const port = server.address().port;
-    for (const path of ["/dashboard/nest", "/router/mcp", "/api/chat/conversations", "/storage/upload", "/dashboard/frigate", "/api/frigate/cameras", "/frigate/", "/dashboard/motioneye", "/llm/v1/chat/completions", "/llm/v1/models", "/llm/p/x/v1/chat/completions", "/llm/c/x/v1/chat/completions", "/llm/v1/embeddings", "/llm/models", "/"]) {
+    for (const path of ["/dashboard/nest", "/router/mcp", "/api/chat/conversations", "/storage/upload", "/storage/file/x.png", "/dashboard/media/x.png", "/dashboard/frigate", "/api/frigate/cameras", "/frigate/", "/dashboard/motioneye", "/llm/v1/chat/completions", "/llm/v1/models", "/llm/p/x/v1/chat/completions", "/llm/c/x/v1/chat/completions", "/llm/v1/embeddings", "/llm/models", "/"]) {
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
     }
+    // The owner's media route (servers/gateway/routes/owner-media.js) serves any
+    // stored file the owner's session may see, drafts included: it must never be
+    // a Funnel-public path.
+    const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+    assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => "/dashboard/media/x.png".startsWith(p)),
+      "/dashboard/media is not in PUBLIC_FUNNEL_PREFIXES");
   } finally {
     server.close();
   }

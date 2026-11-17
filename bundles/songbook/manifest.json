@@ -1,7 +1,7 @@
 {
   "id": "songbook",
   "name": "Songbook",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Personal chord book — ChordPro charts, transposition, chord diagrams, setlists, audio, interactive SunVox backing tracks, and peer sharing",
   "type": "skill",
   "author": "Crow",

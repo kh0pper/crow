@@ -26,10 +26,16 @@ function mimeCategory(mime) {
   return "other";
 }
 
+/**
+ * The link/copy URL a file card shows. Always the DASHBOARD's own media route:
+ * this panel is the owner's own file manager (it lists drafts' and untyped
+ * uploads too), and the public /blog/media route serves a key only while a
+ * published public post uses it — so a blog-typed file linked there would be a
+ * 404 for everything not yet published. `/storage/file/` is not an option
+ * either: it is behind the MCP bearer auth, which the browser does not send.
+ */
 function fileUrl(file) {
-  return file.reference_type === "blog_post"
-    ? `/blog/media/${file.s3_key}`
-    : `/storage/file/${file.s3_key}`;
+  return `/dashboard/media/${encodeURIComponent(file.s3_key)}`;
 }
 
 export default {

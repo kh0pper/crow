@@ -11,8 +11,11 @@
 
 /** reference_type values this bundle may set. Others (research_source,
  *  research_note) carry project ACL checks in the storage server, which a
- *  bundle must not bypass. blog_post makes the file publicly readable at
- *  /blog/media/<key>, which is what a song page's player fetches. */
+ *  bundle must not bypass. blog_post marks a file a post may use; the gateway's
+ *  /blog/media/<key> serves it only while a PUBLISHED PUBLIC post actually uses
+ *  it (as its cover, or linked in its text), which is where a song page's
+ *  player fetches it. This bundle writes its own storage_files row (a bot-bound
+ *  crow_upload_file may not set blog_post at all), so that rule is unchanged. */
 import { randomBytes } from "node:crypto";
 
 export const REFERENCE_TYPES = Object.freeze(["blog_post"]);
@@ -60,7 +63,8 @@ export async function saveToStorage({
     throw new Error(`storage quota exceeded (${Math.round(quotaBytes / 1024 / 1024)} MB, STORAGE_QUOTA_MB); delete files to free space`);
   }
   const safe = String(fileName).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "sunvox";
-  // A random part keeps keys unguessable: a blog_post file is public at /blog/media/<key>.
+  // A random part keeps keys unguessable: once a published public post uses the
+  // file, /blog/media/<key> serves it without a session.
   const key = `sunvox-studio/${kind}/${now}-${rand()}-${safe}`;
   await s3.uploadObject(key, buf, { bucket, contentType: mimeType });
   try {

@@ -240,7 +240,7 @@ async function renderToFile(buf, { name, format, sampleRate = 44100 }) {
 
 const OUTPUT_SCHEMA = {
   save_to_storage: z.boolean().optional().describe("Save to Crow storage (default: yes when storage is available; true = fail if it is not; false = local file only)"),
-  reference_type: z.enum(REFERENCE_TYPES).optional().describe("blog_post: attach to a blog/song post, which makes the stored file PUBLIC at /blog/media/<key> (a song page's player fetches it there)"),
+  reference_type: z.enum(REFERENCE_TYPES).optional().describe("blog_post: for a file a blog or song post will use — /blog/media/<key> serves it only once a PUBLISHED PUBLIC post uses it (a song page's player fetches it there)"),
   reference_id: z.number().int().optional().describe("ID of the referenced post"),
 };
 const RENDER_OPTS_SCHEMA = {

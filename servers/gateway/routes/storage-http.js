@@ -1,8 +1,11 @@
 /**
  * Storage HTTP Routes — Binary file upload/download
  *
- * POST /storage/upload  — Multipart file upload (auth required)
- * GET  /storage/file/:key — Presigned redirect or proxy download (auth required)
+ * POST /storage/upload  — Multipart file upload (auth required; a BOT-BOUND caller
+ *                         may not use `reference_type: blog_post`)
+ * GET  /storage/file/:key — Presigned redirect or proxy download (auth required;
+ *                         a browser <img> cannot send this bearer, so the owner's
+ *                         own views use routes/owner-media.js instead)
  */
 
 import { Router } from "express";
@@ -21,6 +24,9 @@ import {
   isAllowedMimeType,
   getBucketStats,
 } from "../../storage/s3-client.js";
+import { resolveCallActor, UNKNOWN } from "../../research/actor.js";
+import { botReadScope } from "../../shared/project-share-scope.js";
+import { BLOG_POST_REFERENCE_TYPE, BLOG_POST_OWNER_ONLY_MESSAGE, INVALID_MIME_TYPE_MESSAGE, isCleanMediaType } from "../../blog/media-policy.js";
 
 const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_UPLOAD_SIZE || "104857600", 10);
 const STORAGE_QUOTA_MB = parseInt(process.env.STORAGE_QUOTA_MB || "5120", 10);
@@ -75,11 +81,9 @@ export default function storageHttpRouter(authMiddleware) {
   // POST /storage/upload — Multipart file upload
   router.post("/storage/upload", ...auth, upload.single("file"), async (req, res) => {
     let db = null;
+    /** Close the request's db client whatever path the handler takes from here. */
+    const closeDb = () => { if (db) { try { db.close(); } catch {} db = null; } };
     try {
-      if (!(await isAvailable())) {
-        return res.status(503).json({ error: "Storage not configured" });
-      }
-
       if (!req.file) {
         return res.status(400).json({ error: "No file provided. Use field name 'file'." });
       }
@@ -90,14 +94,50 @@ export default function storageHttpRouter(authMiddleware) {
         return res.status(415).json({ error: `Blocked MIME type: ${mimetype}` });
       }
 
+      // The multipart part's own Content-Type is the uploader's string — this
+      // route stores it as the row's mime_type and as the object's content-type.
+      // Only one clean `type/subtype` (optional ;params) is accepted, for the
+      // owner and a bot alike: a comma-shaped list such as
+      // "video/mp4, text/html" would otherwise be served as a page by the media
+      // routes (they parse it defensively too — servers/blog/media-policy.js).
+      // An absent type is not a list and stays allowed.
+      if (mimetype && !isCleanMediaType(mimetype)) {
+        return res.status(400).json({ error: INVALID_MIME_TYPE_MESSAGE });
+      }
+
       const bucket = req.body?.bucket || "crow-files";
       const referenceType = req.body?.reference_type || null;
       const referenceId = req.body?.reference_id ? parseInt(req.body.reference_id, 10) : null;
       const projectId = req.body?.project_id ? parseInt(req.body.project_id, 10) : null;
 
+      db = createDbClient();
+
+      // The bot-bound rule, as the MCP upload tool determines it: a bot actor
+      // (the `x-crow-actor-kind: bot` header the engine's clients send) whose
+      // share scope binds it. A bot may not attach a file to a blog post —
+      // /blog/media serves what a published public post uses, and the reference
+      // is the uploader's claim — so this is refused before the storage probe,
+      // exactly as crow_upload_file does. Owner/unknown callers unchanged.
+      //
+      // Plainly: this check reads a header the CALLER sets, so it is ADVISORY —
+      // defense in depth against a cooperative bot, not a trust boundary. What
+      // keeps a stored object safe is the serving rule in
+      // servers/blog/media-policy.js (the inline allowlist and the parsed
+      // Content-Type), which decides on the object, not on who uploaded it.
+      const actor = resolveCallActor(UNKNOWN, { requestInfo: { headers: req.headers } });
+      const botBound = (await botReadScope(db, actor)) != null;
+      if (botBound && referenceType === BLOG_POST_REFERENCE_TYPE) {
+        closeDb();
+        return res.status(403).json({ error: BLOG_POST_OWNER_ONLY_MESSAGE });
+      }
+
+      if (!(await isAvailable())) {
+        closeDb();
+        return res.status(503).json({ error: "Storage not configured" });
+      }
+
       // M2b ACL: when uploading to a project, gate on write_files capability.
       // Reference target must belong to the same project (no cross-project leaks).
-      db = createDbClient();
       let storagePrefix = null;
       try {
         if (projectId != null) {
@@ -111,7 +151,7 @@ export default function storageHttpRouter(authMiddleware) {
         await checkReferenceTarget(db, projectId, referenceType, referenceId);
       } catch (err) {
         if (err instanceof AclError) {
-          db.close();
+          closeDb();
           return res.status(403).json({ error: err.message, code: err.code });
         }
         throw err;
@@ -121,7 +161,7 @@ export default function storageHttpRouter(authMiddleware) {
       const stats = await getBucketStats();
       const quotaBytes = STORAGE_QUOTA_MB * 1024 * 1024;
       if (stats.totalSizeBytes + size > quotaBytes) {
-        db.close();
+        closeDb();
         return res.status(507).json({ error: `Storage quota exceeded (${STORAGE_QUOTA_MB}MB)` });
       }
 
@@ -161,13 +201,13 @@ export default function storageHttpRouter(authMiddleware) {
         }
         throw err;
       } finally {
-        db.close();
+        closeDb();
       }
 
       const url = await getPresignedUrl(s3Key, { bucket });
       res.status(201).json({ key: s3Key, name: originalname, size, url, project_id: projectId });
     } catch (err) {
-      if (db) { try { db.close(); } catch {} }
+      closeDb();
       console.error("[storage] Upload error:", err);
       res.status(500).json({ error: "Upload failed" });
     }

@@ -27,6 +27,7 @@ import {
   isAllowedMimeType,
 } from "./s3-client.js";
 import { actorFromEnv, resolveCallActor, auditActor } from "../research/actor.js";
+import { BLOG_POST_REFERENCE_TYPE, BLOG_POST_OWNER_ONLY_MESSAGE, INVALID_MIME_TYPE_MESSAGE, isCleanMediaType } from "../blog/media-policy.js";
 import {
   makeShareGate,
   scopePredicate,
@@ -38,6 +39,15 @@ import {
 // M2b: when an upload claims a reference_id (e.g., source/note/blog_post), the
 // referenced row must belong to the same project_id (or both be project-less).
 // Otherwise file ACL and content ACL silently disagree.
+//
+// Public serving: a file's `reference_id` is never what makes it public.
+// GET /blog/media/<key> serves a key only when a blog post that is BOTH
+// published and public USES it — as its cover image, or linked from its
+// content — so storing reference_type='blog_post' here, with or without a
+// reference_id, publishes nothing until a post actually uses the file. And a
+// BOT-BOUND caller may not attach a file to a blog post at all: the reference
+// is the uploader's claim, so a bot could otherwise park arbitrary bytes (a
+// text/html object, say) behind any published post's id.
 const REFERENCE_PROJECT_LOOKUP = {
   research_source: "SELECT project_id FROM research_sources WHERE id = ?",
   research_note:   "SELECT project_id FROM research_notes   WHERE id = ?",
@@ -192,6 +202,22 @@ export function createStorageServer(dbPath, options = {}) {
       const targetProjectId = pass.projectId;
       const bound = await boundByShares(gate);
       if (bound && bucket) return refusalResult(BUCKET_OVERRIDE_MESSAGE);
+      // A bot may not attach a file to a blog post (see the note above
+      // REFERENCE_PROJECT_LOOKUP). Checked before the storage probe, so the
+      // refusal needs no backend and nothing is written. The owner, an
+      // unidentified caller and sunvox-studio's own saveToStorage path (which
+      // writes its storage_files row itself) are unaffected.
+      if (bound && reference_type === BLOG_POST_REFERENCE_TYPE) return refusalResult(BLOG_POST_OWNER_ONLY_MESSAGE);
+
+      // One clean `type/subtype` (optional ;params), or nothing: the type is what
+      // a media route may one day serve, and a comma-shaped list like
+      // "video/mp4, text/html" is read by a browser as a list whose last valid
+      // type wins. Refused before the storage probe (no backend needed), for the
+      // owner and a bot alike, and it covers BOTH branches below — the base64
+      // upload and the presigned upload URL this tool hands out, whose PUT the
+      // object store records as the object's content-type. The serving side
+      // parses it again (servers/blog/media-policy.js).
+      if (mime_type && !isCleanMediaType(mime_type)) return refusalResult(INVALID_MIME_TYPE_MESSAGE);
 
       if (!(await s3.isAvailable())) return notConfiguredError();
 
