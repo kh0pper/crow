@@ -154,7 +154,7 @@ A song can be played from a floor pedalboard or a pad keyboard. Every **mapping*
 
 One tab per song listens to the controllers, so two open windows never double-trigger a pedal; a tab that is not the listener says so at the top of the section. A mapping the bot wrote for you (a row it proposed and you accepted) is played as you: the actions a controller can run are the page's own controls, never a change to the song.
 
-The keys are not played yet: `keys.play` stays on the list of what a mapping can run for when they are, and no profile proposes one.
+The **Keyboard** widget plays the keys: press or click one and it sounds the note track you last selected (tap a track's name, or open one of its clips, to select it), and a `keys.play` mapping plays that same track at the controller's own pitch. Learn still does not propose `keys.play` rows, so a mapping for the keys is added by hand — or by the agent, as a proposal you accept.
 
 ## Performance effects and the looper
 

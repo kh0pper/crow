@@ -28,7 +28,13 @@
  *     SHA-256 over the left+right float bytes), a song with an audio clip the
  *     same way, and the same holds for an arrangement render (placements, a
  *     split and a fade). Gated like the other live tests: it skips without a
- *     browser unless CROW_REQUIRE_TEST_CHROME=1.
+ *     browser unless CROW_REQUIRE_TEST_CHROME=1;
+ *   - a live note sounds and stops on a SunVox track (on event tracks of its
+ *     own, below the sequencer's) and on a soundfont track, a two-note chord
+ *     keeps its other note when one is released, a live note leaves a sequenced
+ *     note of the same track sounding, a step's note emits a note event on its
+ *     own frame, Stop releases what is still held, and an unknown track is a
+ *     no-op.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -2742,5 +2748,539 @@ test("mixer song bit-identical in Chromium and Node", async (t) => {
     );
   } finally {
     tab.close();
+  }
+});
+
+// --- live notes -------------------------------------------------------------
+
+/**
+ * The worklet module the way `engine-client.js` joins it: every SOURCE_FILES
+ * entry as one classic script, so a test can instantiate the processor itself
+ * and hand it blocks of its own size.
+ */
+const LIVE_PROCESSOR_SOURCE = studioEngine.composeEngineModule(
+  studioEngine.SOURCE_FILES.map((name) => ASSETS[name]),
+);
+
+/** The processor class, evaluated once per process (the module carries a synth). */
+let liveProcessorClass = null;
+
+/** @returns {Function} the studio processor class the module registered. */
+function liveProcessor() {
+  if (liveProcessorClass !== null) return liveProcessorClass;
+  let registered = null;
+  class StandInProcessor {
+    constructor() {
+      this.port = { onmessage: null, postMessage: () => {}, start: () => {} };
+    }
+  }
+  const evaluate = new Function(
+    "AudioWorkletProcessor",
+    "registerProcessor",
+    "sampleRate",
+    "currentFrame",
+    LIVE_PROCESSOR_SOURCE,
+  );
+  evaluate(
+    StandInProcessor,
+    (name, cls) => {
+      registered = cls;
+    },
+    SAMPLE_RATE,
+    0,
+  );
+  assert.ok(registered, "the module has to register the studio processor");
+  liveProcessorClass = registered;
+  return registered;
+}
+
+/** The block size this host hands the processor. */
+const LIVE_BLOCK = 128;
+
+/**
+ * One processor in a stand-in worklet scope, with helpers to post protocol
+ * messages between blocks and render them by hand. The frame a note event
+ * carries and the voice a note-off ends are facts about the processor, so the
+ * blocks are the test's to choose.
+ * @param {object} song a snapshot, as `server/doc.js` writes it
+ * @param {{fonts?: Array<{id: string, bytes: Uint8Array}>, testHooks?: boolean}} [options]
+ * @returns {Promise<object>} the host
+ */
+async function liveHost(song, { fonts = [], testHooks = false } = {}) {
+  const Processor = liveProcessor();
+  const messages = [];
+  const processor = new Processor({
+    processorOptions: {
+      wasmBinary: new Uint8Array(ASSETS["sunvox.wasm"]),
+      ...(testHooks ? { testHooks: true } : {}),
+    },
+  });
+  processor.port.postMessage = (message) => messages.push(message);
+  const ready = await waitFor(() => messages.some((message) => message.type === "ready"), 5000);
+  assert.ok(ready, `the processor has to come up and report ready, it posted ${JSON.stringify(messages)}`);
+
+  const post = (message) => processor.port.onmessage({ data: message });
+  for (const font of fonts) {
+    post({
+      type: "library",
+      request_id: 1,
+      library_id: font.id,
+      kind: "font",
+      bytes: Uint8Array.from(font.bytes),
+    });
+  }
+  post({ type: "song", snapshot: song });
+
+  let flushSeq = 0;
+  const flush = async () => {
+    flushSeq += 1;
+    const id = flushSeq;
+    post({ type: "flush", id: id });
+    const applied = await waitFor(
+      () => messages.some((message) => message.type === "flushed" && message.id === id),
+      5000,
+    );
+    if (!applied) throw new Error("the processor never answered a flush");
+  };
+  await flush();
+
+  let rendered = 0;
+  /**
+   * Render `blocks` blocks of `LIVE_BLOCK` frames and hand back the mix.
+   * @param {number} blocks
+   * @returns {{left: Float32Array, right: Float32Array}}
+   */
+  const run = (blocks) => {
+    const total = blocks * LIVE_BLOCK;
+    const left = new Float32Array(total);
+    const right = new Float32Array(total);
+    for (let index = 0; index < blocks; index += 1) {
+      const start = index * LIVE_BLOCK;
+      processor.process([], [[left.subarray(start, start + LIVE_BLOCK), right.subarray(start, start + LIVE_BLOCK)]]);
+    }
+    rendered += blocks;
+    return { left: left, right: right };
+  };
+
+  return {
+    processor: processor,
+    /** Every message the processor posted, in order. */
+    messages: messages,
+    post: post,
+    flush: flush,
+    run: run,
+  };
+}
+
+/**
+ * The note events of every `pad_events` post, flattened and in order.
+ * @param {object[]} messages
+ * @returns {object[]}
+ */
+function noteEvents(messages) {
+  const events = [];
+  for (const message of messages) {
+    if (!message || message.type !== "pad_events") continue;
+    for (const entry of message.events) if (entry.kind === "note") events.push(entry);
+  }
+  return events;
+}
+
+/**
+ * The amplitude of one frequency in a window of samples: a Hann-windowed
+ * single-bin DFT, scaled so a pure tone of amplitude A reads back A.
+ * @param {Float32Array} samples
+ * @param {number} from the first frame of the window
+ * @param {number} count the frames in it
+ * @param {number} freq Hz
+ * @returns {number}
+ */
+function toneLevel(samples, from, count, freq) {
+  let real = 0;
+  let imaginary = 0;
+  let windowSum = 0;
+  for (let frame = 0; frame < count; frame += 1) {
+    const window = 0.5 - 0.5 * Math.cos((2 * Math.PI * frame) / (count - 1));
+    const phase = (2 * Math.PI * freq * frame) / SAMPLE_RATE;
+    const value = samples[from + frame] * window;
+    real += value * Math.cos(phase);
+    imaginary -= value * Math.sin(phase);
+    windowSum += window;
+  }
+  return (2 * Math.hypot(real, imaginary)) / windowSum;
+}
+
+/**
+ * One soundfont track on the tiny test bank, and the bank it plays.
+ * @returns {{song: object, fonts: Array<{id: string, bytes: Uint8Array}>}}
+ */
+function liveFontSong() {
+  const fontId = "font-tiny";
+  const bytes = tinySf2();
+  const song = makeSong({
+    notes: [],
+    track: { device: { engine: "soundfont", font_id: fontId, bank: 0, program: 0 } },
+  });
+  song.library = {
+    [fontId]: {
+      id: fontId,
+      kind: "font",
+      name: "Tiny Test Font",
+      source: "upload",
+      sha256: "",
+      bytes: bytes.byteLength,
+      licence: "test",
+      credit: "",
+      author_label: "",
+    },
+  };
+  return { song: song, fonts: [{ id: fontId, bytes: bytes }] };
+}
+
+test("liveNote on and off sound and silence a SunVox track and a soundfont track", async () => {
+  const sunvox = await liveHost(makeSong({ notes: [] }));
+  sunvox.post({ type: "live_note", track_id: "track-1", p: 60, v: 100, on: true });
+  await sunvox.flush();
+  const held = sunvox.run(40);
+  assert.ok(peakOf(held.left) > 0.01, `a live note has to sound, peak was ${peakOf(held.left)}`);
+  sunvox.post({ type: "live_note", track_id: "track-1", p: 60, v: 100, on: false });
+  await sunvox.flush();
+  const off = sunvox.run(800);
+  const tail = off.left.subarray(off.left.length - 4800);
+  assert.ok(peakOf(tail) < 1e-3, `after a live note-off the track has to be silent, peak was ${peakOf(tail)}`);
+
+  const font = liveFontSong();
+  const host = await liveHost(font.song, { fonts: font.fonts });
+  host.post({ type: "live_note", track_id: "track-1", p: 60, v: 110, on: true });
+  await host.flush();
+  const fontHeld = host.run(40);
+  assert.ok(
+    peakOf(fontHeld.left) > 0.005,
+    `a live note on a soundfont track has to sound, peak was ${peakOf(fontHeld.left)}`,
+  );
+  host.post({ type: "live_note", track_id: "track-1", p: 60, v: 110, on: false });
+  await host.flush();
+  const fontOff = host.run(800);
+  const fontTail = fontOff.left.subarray(fontOff.left.length - 4800);
+  assert.ok(
+    peakOf(fontTail) < 1e-3,
+    `after a live note-off the soundfont track has to be silent, peak was ${peakOf(fontTail)}`,
+  );
+});
+
+test("a two-note live chord sounds both notes and note-off silences only its note", async () => {
+  const host = await liveHost(makeSong({ notes: [] }));
+  host.post({ type: "live_note", track_id: "track-1", p: 60, v: 100, on: true });
+  host.post({ type: "live_note", track_id: "track-1", p: 64, v: 100, on: true });
+  await host.flush();
+  const both = host.run(40);
+  const low = toneLevel(both.left, 512, 4096, 261.63);
+  const high = toneLevel(both.left, 512, 4096, 329.63);
+  assert.ok(low > 0.005, `the C4 of the chord has to sound, it reads ${low.toFixed(4)}`);
+  assert.ok(high > 0.005, `the E4 of the chord has to sound, it reads ${high.toFixed(4)}`);
+
+  host.post({ type: "live_note", track_id: "track-1", p: 60, v: 100, on: false });
+  await host.flush();
+  const after = host.run(300);
+  const from = after.left.length - 8192;
+  const lowAfter = toneLevel(after.left, from, 8192, 261.63);
+  const highAfter = toneLevel(after.left, from, 8192, 329.63);
+  assert.ok(highAfter > 0.005, `the note still held has to sound on, it reads ${highAfter.toFixed(4)}`);
+  assert.ok(
+    lowAfter < highAfter / 10,
+    `the released note has to be gone and the held one untouched, they read ${lowAfter.toFixed(4)} and ${highAfter.toFixed(4)}`,
+  );
+});
+
+test("a live note over a sequenced note on the same track leaves the sequenced note sounding", async () => {
+  const host = await liveHost(makeSong({ notes: [{ t: 0, d: 4, p: 48, v: 100 }] }));
+  host.post({ type: "launchScene", id: "scene-1" });
+  host.post({ type: "play" });
+  await host.flush();
+  const sequence = host.run(40);
+  const onItsOwn = toneLevel(sequence.left, 512, 4096, 130.81);
+  assert.ok(onItsOwn > 0.005, `the sequenced C3 has to sound, it reads ${onItsOwn.toFixed(4)}`);
+
+  host.post({ type: "live_note", track_id: "track-1", p: 72, v: 100, on: true });
+  await host.flush();
+  const together = host.run(40);
+  const live = toneLevel(together.left, 512, 4096, 523.25);
+  const sequenced = toneLevel(together.left, 512, 4096, 130.81);
+  assert.ok(live > 0.005, `the live C5 has to sound over the sequence, it reads ${live.toFixed(4)}`);
+  assert.ok(
+    sequenced > 0.005,
+    `the sequenced note has to keep sounding under a live press, it reads ${sequenced.toFixed(4)}`,
+  );
+
+  host.post({ type: "live_note", track_id: "track-1", p: 72, v: 100, on: false });
+  await host.flush();
+  const released = host.run(40);
+  const remaining = toneLevel(released.left, 512, 4096, 130.81);
+  const gone = toneLevel(released.left, 512, 4096, 523.25);
+  assert.ok(
+    remaining > 0.005,
+    `the sequenced note has to survive the live note-off, it reads ${remaining.toFixed(4)}`,
+  );
+  assert.ok(gone < remaining / 10, `the live note has to be gone, it reads ${gone.toFixed(4)}`);
+});
+
+test("a sequenced note emits a note event at its frame", async () => {
+  const host = await liveHost(makeSong({ notes: [{ t: 1, d: 1, p: 60, v: 100 }] }));
+  host.post({ type: "pad_events_on", on: true });
+  host.post({ type: "launchScene", id: "scene-1" });
+  host.post({ type: "play" });
+  await host.flush();
+  // One beat at 120 bpm is 24000 frames, so the note starts inside the 188th
+  // block and ends a beat later: both are the frame, never the block's.
+  host.run(500);
+  assert.deepEqual(
+    Array.from(noteEvents(host.messages), (event) => [event.frame, event.track_id, event.kind, event.p, event.on]),
+    [
+      [24000, "track-1", "note", 60, true],
+      [48000, "track-1", "note", 60, false],
+    ],
+    "a step's note has to light its key on the frame it sounds and darken on the frame it ends",
+  );
+});
+
+test("Stop releases a held live note", async () => {
+  const host = await liveHost(makeSong({ notes: [] }));
+  host.post({ type: "live_note", track_id: "track-1", p: 60, v: 100, on: true });
+  await host.flush();
+  const held = host.run(40);
+  assert.ok(peakOf(held.left) > 0.01, `the live note has to sound before Stop, peak was ${peakOf(held.left)}`);
+  assert.equal(host.processor.slots[0].liveNotes.size, 1, "the processor has to be holding the note");
+
+  host.post({ type: "stop" });
+  await host.flush();
+  assert.equal(host.processor.slots[0].liveNotes.size, 0, "Stop has to forget the note it released");
+  const after = host.run(800);
+  const tail = after.left.subarray(after.left.length - 4800);
+  assert.ok(peakOf(tail) < 1e-3, `after Stop the note has to be silent, peak was ${peakOf(tail)}`);
+});
+
+test("liveNote for an unknown track is a no-op", async () => {
+  const host = await liveHost(makeSong({ notes: [] }));
+  host.post({ type: "pad_events_on", on: true });
+  host.post({ type: "live_note", track_id: "no-such-track", p: 60, v: 100, on: true });
+  await host.flush();
+  const out = host.run(100);
+  host.post({ type: "live_note", track_id: "no-such-track", p: 60, v: 100, on: false });
+  await host.flush();
+  host.run(10);
+  assert.equal(peakOf(out.left), 0, "an unknown track has nothing to sound");
+  assert.deepEqual(noteEvents(host.messages), [], "and nothing to light");
+  assert.deepEqual(
+    host.messages.filter((message) => message.type === "error"),
+    [],
+    "and nothing to report",
+  );
+});
+
+test("liveNote holds pitch and velocity inside their range, and an unheld release stands down", async () => {
+  const host = await liveHost(makeSong({ notes: [] }));
+  host.post({ type: "pad_events_on", on: true });
+  // A pitch past 127 and a velocity of 0: the note is 127 at the lowest velocity.
+  host.post({ type: "live_note", track_id: "track-1", p: 400, v: 0, on: true });
+  await host.flush();
+  host.run(40);
+  host.post({ type: "live_note", track_id: "track-1", p: 400, v: 0, on: false });
+  await host.flush();
+  host.run(40);
+  // A pitch below 0 is 0, and a release for a pitch nobody holds says nothing.
+  host.post({ type: "live_note", track_id: "track-1", p: -9, v: 100, on: true });
+  await host.flush();
+  host.run(40);
+  host.post({ type: "live_note", track_id: "track-1", p: -9, v: 100, on: false });
+  await host.flush();
+  host.run(40);
+  host.post({ type: "live_note", track_id: "track-1", p: 12, v: 100, on: false });
+  await host.flush();
+  host.run(10);
+  assert.deepEqual(
+    Array.from(noteEvents(host.messages), (event) => [event.p, event.on]),
+    [
+      [127, true],
+      [127, false],
+      [0, true],
+      [0, false],
+    ],
+    "the pitch is held between 0 and 127 and an unheld release is not a note event",
+  );
+  assert.equal(host.processor.slots[0].liveNotes.size, 0, "nothing is left held");
+});
+
+test("a live note emits its event on the block's first frame, in a hit's clock", async () => {
+  const host = await liveHost(makeSong({ notes: [] }));
+  host.post({ type: "pad_events_on", on: true });
+  await host.flush();
+  // Three blocks are frames 0..383, so the message below is handled while the
+  // processor stands on frame 384 and the block it lands in starts there.
+  host.run(3);
+  host.post({ type: "live_note", track_id: "track-1", p: 60, v: 100, on: true });
+  await host.flush();
+  host.run(1);
+  assert.deepEqual(
+    Array.from(noteEvents(host.messages), (event) => [event.frame, event.track_id, event.kind, event.p, event.on]),
+    [[3 * LIVE_BLOCK, "track-1", "note", 60, true]],
+    "a live note stands on the first frame of its block, the frame a live pad hit stands on",
+  );
+});
+
+test("a held live note keeps its event track while another live event track is free", async () => {
+  const host = await liveHost(makeSong({ notes: [] }));
+  host.post({ type: "pad_events_on", on: true });
+  host.post({ type: "live_note", track_id: "track-1", p: 60, v: 100, on: true });
+  await host.flush();
+  host.run(4);
+  const notes = host.processor.slots[0].liveNotes;
+  const droneTrack = notes.get(60);
+  assert.equal(typeof droneTrack, "number", "the drone has to stand on an event track");
+
+  // Seven more presses, each with the drone still held: seven of the eight live
+  // event tracks are still free, so none of them may take the drone's.
+  const others = [62, 64, 65, 67, 69, 71, 72];
+  for (const p of others) {
+    host.post({ type: "live_note", track_id: "track-1", p: p, v: 100, on: true });
+    await host.flush();
+    host.run(4);
+    assert.equal(
+      notes.get(60),
+      droneTrack,
+      `the drone has to keep event track ${droneTrack} when ${p} is pressed`,
+    );
+  }
+  const taken = others.map((p) => notes.get(p));
+  assert.equal(new Set(taken).size, 7, `seven presses take seven different event tracks, got ${taken}`);
+  assert.equal(taken.includes(droneTrack), false, "and not one of them takes the drone's");
+  assert.equal(notes.size, 8, "eight held notes fill the eight live event tracks");
+  assert.deepEqual(
+    noteEvents(host.messages).filter((event) => event.p === 60 && event.on === false),
+    [],
+    "the drone's key never goes dark while it is held",
+  );
+
+  // With the others released, the drone is the one voice left: if its event
+  // track had been retriggered, this would be silence.
+  for (const p of others) host.post({ type: "live_note", track_id: "track-1", p: p, v: 100, on: false });
+  await host.flush();
+  const out = host.run(60);
+  assert.equal(notes.size, 1, "only the drone is still held");
+  const level = toneLevel(out.left, out.left.length - 4096, 4096, 261.63);
+  assert.ok(level > 0.005, `the held drone has to still sound, it reads ${level.toFixed(4)}`);
+});
+
+test("a ninth held live note steals the oldest, whose key goes dark and whose release is a no-op", async () => {
+  const host = await liveHost(makeSong({ notes: [] }));
+  host.post({ type: "pad_events_on", on: true });
+  const held = [60, 61, 62, 63, 64, 65, 66, 67];
+  for (const p of held) host.post({ type: "live_note", track_id: "track-1", p: p, v: 100, on: true });
+  await host.flush();
+  host.run(4);
+  const notes = host.processor.slots[0].liveNotes;
+  assert.equal(notes.size, 8, "eight presses fill the eight live event tracks");
+  const oldestTrack = notes.get(60);
+  assert.equal(new Set(held.map((p) => notes.get(p))).size, 8, "on eight different event tracks");
+
+  // Every live event track is held, so the ninth press steals the OLDEST note.
+  host.post({ type: "live_note", track_id: "track-1", p: 68, v: 100, on: true });
+  await host.flush();
+  host.run(4);
+  assert.equal(notes.size, 8, "a steal makes room instead of growing the map");
+  assert.equal(notes.has(60), false, "the note held longest is the one stolen");
+  assert.equal(notes.get(68), oldestTrack, "and the new note takes its event track");
+  for (const p of held.slice(1)) assert.equal(notes.has(p), true, `the note on ${p} is still held`);
+  assert.deepEqual(
+    Array.from(noteEvents(host.messages).filter((event) => event.p === 60), (event) => event.on),
+    [true, false],
+    "the stolen note's key has to go dark",
+  );
+
+  // The stolen pitch is not held any more, so releasing it says nothing — and it
+  // must not cut the note that took its event track.
+  const before = noteEvents(host.messages).length;
+  host.post({ type: "live_note", track_id: "track-1", p: 60, v: 100, on: false });
+  await host.flush();
+  host.run(4);
+  assert.equal(noteEvents(host.messages).length, before, "a release for a stolen pitch is no note event");
+  assert.equal(notes.size, 8, "and it changes nothing that is held");
+  assert.equal(notes.get(68), oldestTrack, "the note that stole the track is untouched");
+
+  // The seven notes held under the stolen one still sound; with only the newest
+  // left, it is the one voice a measurement can name.
+  for (const p of held.slice(1)) host.post({ type: "live_note", track_id: "track-1", p: p, v: 100, on: false });
+  await host.flush();
+  const out = host.run(60);
+  assert.equal(notes.size, 1, "only the newest note is still held");
+  const level = toneLevel(out.left, out.left.length - 4096, 4096, 415.3);
+  assert.ok(level > 0.005, `the note that stole an event track has to sound, it reads ${level.toFixed(4)}`);
+});
+
+test("a sequenced note on a track with no device emits no note event", async () => {
+  // The failing type is the test hooks' own (see the processor header): the
+  // record exists and the track is silent, so nothing may light for it.
+  const silentSong = makeSong({ notes: [{ t: 1, d: 1, p: 60, v: 100 }] });
+  silentSong.tracks[0].device = { engine: "sunvox", type: "__fail_device", params: {} };
+  const silent = await liveHost(silentSong, { testHooks: true });
+  silent.post({ type: "pad_events_on", on: true });
+  silent.post({ type: "launchScene", id: "scene-1" });
+  silent.post({ type: "play" });
+  await silent.flush();
+  silent.run(500);
+  assert.deepEqual(
+    noteEvents(silent.messages),
+    [],
+    "a track with no device stays silent, so no key may light for it",
+  );
+
+  // The same song on a device that builds does light its keys, so the silence
+  // above is the missing device and not a sequencer that never played.
+  const playing = await liveHost(makeSong({ notes: [{ t: 1, d: 1, p: 60, v: 100 }] }));
+  playing.post({ type: "pad_events_on", on: true });
+  playing.post({ type: "launchScene", id: "scene-1" });
+  playing.post({ type: "play" });
+  await playing.flush();
+  playing.run(500);
+  assert.deepEqual(
+    Array.from(noteEvents(playing.messages), (event) => [event.frame, event.p, event.on]),
+    [
+      [24000, 60, true],
+      [48000, 60, false],
+    ],
+    "the same notes on a working device light and darken their key",
+  );
+});
+
+test("engine-client drops a live note whose pitch is not a finite number", async () => {
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: LIVE_BLOCK,
+    sampleRate: SAMPLE_RATE,
+  });
+  let engine = null;
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    const posted = [];
+    const port = engine.node.port;
+    const realPost = port.postMessage.bind(port);
+    port.postMessage = function recordingPost(...args) {
+      posted.push(args[0]);
+      return realPost(...args);
+    };
+    engine.liveNote("track-1", Number.NaN, 100, true);
+    engine.liveNote("track-1", Number.POSITIVE_INFINITY, 100, true);
+    engine.liveNote("track-1", "not a pitch", 100, true);
+    engine.liveNote("track-1", 60, 100, true);
+    assert.deepEqual(
+      Array.from(
+        posted.filter((message) => message && message.type === "live_note"),
+        (message) => [message.p, message.on],
+      ),
+      [[60, true]],
+      "a pitch that is not a finite number is dropped, never posted as pitch 0",
+    );
+  } finally {
+    if (engine) engine.dispose();
+    await releaseWorklet(context);
   }
 });

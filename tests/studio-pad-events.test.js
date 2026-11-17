@@ -104,6 +104,44 @@ test("push creates no new record object (record identity is stable across 1000 p
   }
 });
 
+test("a note record carries its pitch and whether it started, and no pad fields", () => {
+  const ring = StudioPadEvents.create();
+  ring.pushNote(24000, "track-1", 60, true);
+  // A hit between two notes: the note's own fields mean nothing to it, and the
+  // hit's pad fields mean nothing to the notes.
+  pushHit(ring, 2, { frame: 24100 });
+  ring.pushNote(24200, "track-1", 64, false);
+  const events = ring.drain();
+  assert.equal(events.length, 3);
+  assert.deepEqual(events[0], { frame: 24000, track_id: "track-1", kind: "note", p: 60, on: true });
+  assert.equal(events[1].kind, "hit");
+  assert.deepEqual(events[2], { frame: 24200, track_id: "track-1", kind: "note", p: 64, on: false });
+  assert.equal(ring.size(), 0, "a drain empties the ring");
+});
+
+test("pushNote reuses the ring's records, and a note can push the oldest hit out", () => {
+  const ring = StudioPadEvents.create();
+  const records = ring.records;
+  const before = Array.from(records);
+  for (let index = 0; index < 1000; index += 1) {
+    ring.pushNote(index, "track-1", index % 128, index % 2 === 0);
+    if (index % 5 === 0) ring.drain();
+  }
+  for (let at = 0; at < records.length; at += 1) {
+    assert.equal(records[at], before[at], `record ${at} is the very object it was at the start`);
+  }
+
+  const full = StudioPadEvents.create();
+  pushHit(full, 9);
+  for (let index = 0; index < StudioPadEvents.RING_SIZE; index += 1) {
+    full.pushNote(index, "track-1", 60, true);
+  }
+  const events = full.drain();
+  assert.equal(events.length, StudioPadEvents.RING_SIZE, "the ring holds one block's worth and no more");
+  assert.equal(events[0].frame, 0, "the hit that came first was pushed out");
+  assert.equal(events[events.length - 1].frame, StudioPadEvents.RING_SIZE - 1);
+});
+
 test("a state record carries its state code and no velocity", () => {
   const ring = StudioPadEvents.create();
   ring.push(12000, "track-1", BANK, 4, StudioPadEvents.KIND_STATE, 0, 2);
@@ -169,6 +207,7 @@ test("the file evaluates as a classic script and as require()", async () => {
   assert.equal(fromScript.RING_SIZE, StudioPadEvents.RING_SIZE);
   assert.equal(fromScript.KIND_HIT, StudioPadEvents.KIND_HIT);
   assert.equal(fromScript.KIND_STATE, StudioPadEvents.KIND_STATE);
+  assert.equal(fromScript.KIND_NOTE, StudioPadEvents.KIND_NOTE);
   assert.equal(fromScript.STATE_OFF, StudioPadEvents.STATE_OFF);
   assert.equal(fromScript.STATE_ON, StudioPadEvents.STATE_ON);
   assert.equal(fromScript.STATE_LOOP, StudioPadEvents.STATE_LOOP);
@@ -185,4 +224,9 @@ test("the file evaluates as a classic script and as require()", async () => {
     [events[0].frame, events[0].track_id, events[0].bank_id, events[0].index, events[0].kind, events[0].v],
     [96, "track-1", BANK, 1, "hit", 64],
   );
+
+  const notes = fromScript.create();
+  notes.pushNote(192, "track-1", 67, false);
+  const note = notes.drain()[0];
+  assert.deepEqual([note.frame, note.track_id, note.kind, note.p, note.on], [192, "track-1", "note", 67, false]);
 });

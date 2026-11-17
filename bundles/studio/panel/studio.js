@@ -612,6 +612,61 @@ const STYLES = `
   .studio .st-fx-btn:hover { border-color: #4A5058; }
   .studio .st-fx-btn.st-on { background: var(--st-agent); border-color: var(--st-agent); color: #0E1A26; }
   .studio .st-fx-capture { font-weight: 500; }
+  /* The on-screen keyboard: the aimed note track's two octaves, with the octave
+     shift beside them. Every key is a 44 px target, a press on one is never a
+     text selection or a browser callout, and the strip scrolls sideways on a
+     phone so two octaves keep their size. A key the engine reports sounding
+     wears one class and no new node. */
+  .studio .st-keyboard { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .studio .st-keyboard-head {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+  }
+  .studio .st-keyboard-title { margin: 0; font-size: 14px; font-weight: 600; }
+  .studio .st-keyboard-octave {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 12px; color: var(--st-muted);
+  }
+  .studio .st-keyboard-shift {
+    min-width: 44px; min-height: 44px; padding: 0 10px;
+    border: 1px solid var(--st-edge); border-radius: 8px;
+    background: #24282D; color: var(--st-text); font: inherit; font-size: 16px;
+    cursor: pointer;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-keyboard-scroll {
+    min-width: 0; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }
+  .studio .st-keyboard-keys {
+    display: flex; gap: 2px; min-width: max-content; padding: 0 0 4px;
+  }
+  .studio .st-keyboard-octave-box {
+    position: relative; display: flex; flex: 0 0 auto;
+    width: calc(7 * 64px); height: 124px;
+  }
+  .studio .st-key {
+    border: 1px solid #121417; font: inherit; cursor: pointer;
+    touch-action: none;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-key-white {
+    flex: 1 1 0; min-width: 44px; height: 120px; padding: 0 0 6px;
+    display: flex; align-items: flex-end; justify-content: center;
+    background: #E9E6DF; color: #1B1E22; font-size: 10px;
+    border-radius: 0 0 6px 6px;
+  }
+  .studio .st-key-black {
+    position: absolute; top: 0; z-index: 1;
+    width: 44px; min-width: 44px; height: 74px; padding: 0 0 4px;
+    display: flex; align-items: flex-end; justify-content: center;
+    background: #1B1E22; color: #E9E6DF; font-size: 9px;
+    border-radius: 0 0 4px 4px;
+  }
+  .studio .st-key-at-1 { left: calc(14.2857% - 22px); }
+  .studio .st-key-at-2 { left: calc(28.5714% - 22px); }
+  .studio .st-key-at-4 { left: calc(57.1428% - 22px); }
+  .studio .st-key-at-5 { left: calc(71.4285% - 22px); }
+  .studio .st-key-at-6 { left: calc(85.7142% - 22px); }
+  .studio .st-key.st-key-on { background: var(--st-accent, #E8A33D); color: #1B1E22; border-color: #FFFFFF; }
   /* The control Learn is waiting on: outlined until its message arrives. */
   .studio .st-learn { outline: 2px solid var(--st-human); outline-offset: 2px; }
   .studio .st-midi-bar .st-btn { min-height: 40px; }
@@ -1418,6 +1473,18 @@ const STYLES = `
   .studio .st-mix-latency { margin: 0; font-size: 11px; color: var(--st-muted); }
   .studio .st-mix-latency[hidden] { display: none; }
   .studio .st-mix-note { margin: 0; font-size: 11px; line-height: 1.45; color: var(--st-muted); }
+  /* The compact strip (D3): the aimed track's level, pan, mute, solo and arm in
+     a widget of its own beside the full Mixer. It draws with the mixer's own
+     controls, so the two surfaces send one set of commands; every control is a
+     44 px target and a press on one is never a text selection or a callout. */
+  .studio .st-mix-strip-host {
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-mix-strip { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }
+  .studio .st-mix-strip-who { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .studio .st-mix-strip-note {
+    margin: 0; padding: 10px 12px; font-size: 13px; line-height: 1.45; color: var(--st-muted);
+  }
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
@@ -1592,10 +1659,10 @@ function studioPage({ songId, render, res }) {
             <div class="st-grid" data-role="grid"></div>
           </div>
           <p class="st-hint" data-role="hint">Add a track and a scene to start.</p>
-          <section class="st-mixer" data-role="mixer" hidden></section>
+          <section class="st-mixer" data-role="mixer" hidden></section><section class="st-mix-strip-host" data-role="mixer-strip" hidden></section>
           <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
-          <section class="st-sampler" data-role="sampler" hidden><div class="st-sampler-host" data-role="sampler-pads" hidden></div><div class="st-sampler-host" data-role="sampler-steps" hidden></div><div class="st-sampler-host" data-role="sampler-chop" hidden></div><div class="st-sampler-host" data-role="sampler-fx" hidden></div></section>
+          <section class="st-sampler" data-role="sampler" hidden><div class="st-sampler-host" data-role="sampler-pads" hidden></div><div class="st-sampler-host" data-role="sampler-steps" hidden></div><div class="st-sampler-host" data-role="sampler-chop" hidden></div><div class="st-sampler-host" data-role="sampler-fx" hidden></div><div class="st-sampler-host" data-role="sampler-keyboard" hidden></div></section>
           <section class="st-midi" data-role="midi"></section>
         </main>
         <aside class="st-side">
