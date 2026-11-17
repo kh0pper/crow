@@ -294,8 +294,10 @@
  *
  * A note travels on the same channel: a note a sequencer step starts or ends,
  * and one a page's keyboard sends, is recorded as
- * `{frame, track_id, kind: "note", p, on}` — the frame it sounds on, its pitch,
- * and whether it started — so a key lights with the note it hears.
+ * `{frame, track_id, kind: "note", p, on}` — the frame it stands on (a step's
+ * own, the block's first frame for a live press), its pitch, and whether it
+ * started — so a page can paint a key on the frame the note is heard rather
+ * than on the block that carried the event.
  *
  * A pad's LIGHT is not a hit: it stays on while the pad sounds and goes off when
  * the last of its voices is gone. A voice ends in a dozen places (its range, its
@@ -972,9 +974,10 @@
    * The SunVox event tracks a live note stands on: 1..8, round robin, never
    * track 0. Track 0 is the sequencer's own — every sequenced note is sent on
    * it — so a live press never cuts a sequenced note, and two live notes of one
-   * track land on different event tracks so a chord stays a chord. SunVox
-   * numbers its event tracks 0..15, so 1..8 sits well inside what the library
-   * takes.
+   * track land on different event tracks so a chord stays a chord. The round
+   * robin only takes a track no held note is standing on (see `liveNote`).
+   * SunVox numbers its event tracks 0..15, so 1..8 sits well inside what the
+   * library takes.
    */
   const FIRST_LIVE_EVENT_TRACK = 1;
   const LIVE_EVENT_TRACKS = 8;
@@ -4053,7 +4056,12 @@
      * step started or ended, or one the page's keyboard sent. Nothing is recorded
      * while no page listens, exactly as for a pad event, and a push allocates
      * nothing.
-     * @param {number} frame the context frame the note sounds on
+     *
+     * The frame is the note's own, in the very clock a pad hit's frame is in, so
+     * the page can paint the key on the frame the note stands on rather than on
+     * the block that happened to carry it. The engine only REPORTS the frame: a
+     * page that paints an event as it arrives is painting on arrival.
+     * @param {number} frame the context frame the note stands on
      * @param {string} trackId
      * @param {number} p the MIDI pitch, 0..127
      * @param {boolean} on whether the note started (true) or ended (false)
@@ -8822,17 +8830,27 @@
      *
      * A SunVox track keeps event track 0 for the sequencer, so a live note takes
      * one of its own: tracks 1..8 round robin, remembered per slot against the
-     * pitch it holds. The release is then sent on the very event track that note
-     * started on, so it leaves every other note alone — a sequenced note playing
-     * under the fingers, or the other half of a chord — and Stop can release what
-     * is still held (`releaseLiveNotes`). A soundfont track needs no event track:
-     * its host is per MIDI channel and polyphonic (`fonts.noteOn`/`noteOff`, the
-     * very calls a step makes).
+     * pitch it holds. The round robin takes the next track no held note already
+     * stands on, so a press never retriggers a track another finger is holding.
+     * The release is then sent on the very event track that note started on, so
+     * it leaves every other note alone — a sequenced note playing under the
+     * fingers, or the other half of a chord — and Stop can release what is still
+     * held (`releaseLiveNotes`). A soundfont track needs no event track: its host
+     * is per MIDI channel and polyphonic (`fonts.noteOn`/`noteOff`, the very calls
+     * a step makes).
+     *
+     * Eight live notes at once is what the tracks allow: a press made while all
+     * eight are held steals the OLDEST held note, which is cut with a note-off on
+     * its own event track and whose key goes dark (a note event with `on` false).
+     * That pitch is no longer held, so releasing it afterwards is a no-op and its
+     * old event track now carries the new note.
      *
      * An unknown track is a no-op. A pitch is held between 0 and 127, a velocity
      * between 1 and 127, and a release for a pitch that is not held is a no-op.
      * The note also goes out as a note event for the page's keys when one is
-     * listening.
+     * listening, and only where the note itself was sent: a track with no device
+     * (or a soundfont track with no font loaded) stays silent, so nothing is
+     * recorded for it.
      * @param {unknown} trackId
      * @param {unknown} p the MIDI pitch, 0..127
      * @param {unknown} v the velocity, 1..127
@@ -8868,8 +8886,37 @@
         // note-off elsewhere.
         let eventTrack = record.liveNotes.get(pitch);
         if (eventTrack === undefined) {
-          eventTrack = FIRST_LIVE_EVENT_TRACK + record.liveNoteNext;
-          record.liveNoteNext = (record.liveNoteNext + 1) % LIVE_EVENT_TRACKS;
+          // The next track from `liveNoteNext` that no held note stands on: an
+          // eight-step scan, on the message path only.
+          eventTrack = FIRST_LIVE_EVENT_TRACK - 1;
+          for (let step = 0; step < LIVE_EVENT_TRACKS; step += 1) {
+            const candidate = FIRST_LIVE_EVENT_TRACK + ((record.liveNoteNext + step) % LIVE_EVENT_TRACKS);
+            let busy = false;
+            for (const heldTrack of record.liveNotes.values()) {
+              if (heldTrack === candidate) {
+                busy = true;
+                break;
+              }
+            }
+            if (busy) continue;
+            eventTrack = candidate;
+            record.liveNoteNext = (record.liveNoteNext + step + 1) % LIVE_EVENT_TRACKS;
+            break;
+          }
+          if (eventTrack < FIRST_LIVE_EVENT_TRACK) {
+            // Every event track is holding a note, so the OLDEST one is stolen
+            // and the press still sounds. The map iterates in insertion order,
+            // so its first entry is the note that has been held longest: it is
+            // cut with a note-off on its own track (first, so the new note-on
+            // below retriggers a clean track) and its key goes dark.
+            const oldestPitch = record.liveNotes.keys().next().value;
+            const oldestTrack = record.liveNotes.values().next().value;
+            record.liveNotes.delete(oldestPitch);
+            record.engine.sendEvent(SLOT, oldestTrack, NOTECMD_NOTE_OFF, 0, module, 0, 0);
+            this.pushPadNote(this.contextOffset() + this.frame, record.track_id, oldestPitch, false);
+            eventTrack = oldestTrack;
+            record.liveNoteNext = (oldestTrack - FIRST_LIVE_EVENT_TRACK + 1) % LIVE_EVENT_TRACKS;
+          }
         }
         record.liveNotes.set(pitch, eventTrack);
         record.engine.sendEvent(
@@ -9497,8 +9544,13 @@
      * or of a soundfont track's channel.
      *
      * The note is also recorded for the page (while one listens) as a note event
-     * on the frame it sounds on, so a key lights with the note it hears instead of
-     * with the block that happened to carry it.
+     * carrying the frame it stands on, in the very clock a pad hit's frame is in,
+     * so the page can paint the key on the frame the note is heard instead of on
+     * the block that happened to carry it. The engine only REPORTS that frame.
+     *
+     * A note event is recorded ONLY where the note itself is sent: a track with
+     * no engine, or a soundfont track whose font is not loaded, stays silent, so
+     * its key never lights.
      * @param {{track_id: string, type: string, p: number, v: number}} event
      * @returns {void}
      */
@@ -9512,12 +9564,9 @@
       // step's own frame, and 0 for a live message (which sounds on the block's
       // first frame).
       const offset = Number(event.frame);
-      this.pushPadNote(
-        this.contextOffset() + this.frame + (Number.isFinite(offset) && offset > 0 ? Math.trunc(offset) : 0),
-        asId(event.track_id),
-        Math.trunc(clamp(numberOr(event.p, 0), 0, 127)),
-        down,
-      );
+      const noteFrame =
+        this.contextOffset() + this.frame + (Number.isFinite(offset) && offset > 0 ? Math.trunc(offset) : 0);
+      const notePitch = Math.trunc(clamp(numberOr(event.p, 0), 0, 127));
       if (record.font) {
         // A soundfont track's note goes to its own MIDI channel. A track whose
         // font is not loaded has no channel and stays silent; the engine has
@@ -9525,6 +9574,7 @@
         if (this.fonts === null) return;
         if (event.type === "on") this.fonts.noteOn(record.track_id, event.p, event.v);
         else this.fonts.noteOff(record.track_id, event.p);
+        this.pushPadNote(noteFrame, asId(event.track_id), notePitch, down);
         return;
       }
       if (!record.engine || record.module < 0) return;
@@ -9534,6 +9584,7 @@
       } else {
         record.engine.sendEvent(SLOT, 0, NOTECMD_NOTE_OFF, 0, module, 0, 0);
       }
+      this.pushPadNote(noteFrame, asId(event.track_id), notePitch, down);
     }
 
     /**

@@ -9,7 +9,9 @@
  * block, as `{type:"pad_events", events:[…]}`.
  *
  * A note rides the same ring: a step's note and one the page's keyboard sends
- * (`pushNote`) are recorded so a key can light on the frame the note sounds.
+ * (`pushNote`) are recorded with the frame the note stands on, so a page can
+ * paint a key on the frame the note is heard rather than on the block that
+ * carried the event.
  *
  * ## Why a ring and not an array
  *
@@ -33,13 +35,15 @@
  * - `frame` is the CONTEXT frame the voice starts on, in the very clock
  *   `launched`, `next_bar` and a `position` report use, so a light is timed
  *   against the audible hit (output latency included) and not against the block
- *   the message happened to arrive in.
+ *   the message happened to arrive in. A note's frame is its own frame in that
+ *   same clock: a step's own frame, and the block's first frame for a live
+ *   press.
  * - `kind` is `"hit"` (a voice started; `v` is its EFFECTIVE velocity, 1..127 —
  *   the one the voice's own gain was worked out from) or `"state"` (the pad's
  *   stored state changed; `state` is that code, one of `STATE_OFF`,
  *   `STATE_ON`, `STATE_LOOP` or `STATE_HELD`) or `"note"` (a note started or
- *   ended on a track; `p` is its MIDI pitch and `on` says which, so a page's
- *   keys light and go dark on the frame the note sounds).
+ *   ended on a track; `p` is its MIDI pitch and `on` says which, so a page can
+ *   paint a key for the frame the note stands on).
  *
  * It is a classic script (no `import`/`export`): it assigns
  * `globalThis.StudioPadEvents` for the worklet scope and `module.exports` when a
@@ -162,8 +166,8 @@
     /**
      * Record one note event: a note a sequencer step or a live press started or
      * ended on a track. Its record carries the pitch and whether the note started
-     * or ended, so a page's key can light on the frame the note is heard and go
-     * dark on the frame it is released.
+     * or ended, and the frame the note stands on, so a page can paint the key on
+     * the frame the note is heard and darken it on the frame it is released.
      * @param {number} frame the context frame the note starts (or ends) on
      * @param {string} trackId
      * @param {number} p the MIDI pitch, 0..127

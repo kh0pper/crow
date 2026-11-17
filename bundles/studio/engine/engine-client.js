@@ -226,10 +226,13 @@
  *   `liveNote(track_id, p, v, on)` sounds one note on a track's device from the
  *   page's own keyboard — a press or a release, straight to the engine and never
  *   quantized. A SunVox track keeps event track 0 for the sequencer and gives a
- *   live note one of its own (1..8, picked by the engine and remembered against
- *   the pitch), so a live note never cuts a sequenced one and a chord stays a
- *   chord; a soundfont track plays it on its channel. A release for a pitch that
- *   is not held is a no-op, and Stop sends the note-offs of what is still held.
+ *   live note one of its own (1..8, picked by the engine, kept off the tracks a
+ *   held note stands on and remembered against the pitch), so a live note never
+ *   cuts a sequenced one and a chord stays a chord; a soundfont track plays it
+ *   on its channel. A press made while all eight are held steals the oldest
+ *   live note, which the engine cuts and reports dark. A release for a pitch that
+ *   is not held is a no-op, and Stop sends the note-offs of what is still held. A
+ *   pitch that is not a number is dropped at the client and never posted.
  * - `tap(target, on)` turns a copy of the master (`"master"`) or of one track's
  *   own output (`track_id`) on, per block, as `{type:"tap_block", target, frame,
  *   channels}`: `frame` is the context frame the block's first sample sits on,
@@ -246,8 +249,10 @@
  *   page polling, so a light can land on the frame the hit is heard. `kind`
  *   `"state"` (with a `state` code) is a pad whose stored state changed, and
  *   `kind` `"note"` (`p` and `on`) is a note a step or a live press started or
- *   ended, so the page's keys light on the frame the note sounds. The
- *   engine only records while somebody listens: the first subscription posts
+ *   ended, carrying the frame the note stands on in that same clock (for a step
+ *   its own frame, for a live press the block's first frame) so the page can
+ *   paint the key on the frame the note sounds. The engine only records while
+ *   somebody listens: the first subscription posts
  *   `{type:"pad_events_on", on:true}`.
  * - `fxHold(name, amount)` and `fxRelease(name)` hold or let go one performance
  *   effect (`filter_sweep`, `lofi`, `stutter`, `tape_stop`, `reverb_throw`).
@@ -2069,8 +2074,9 @@
           let event;
           if (entry.kind === "note") {
             // A note a step started or ended, or one the page's own keyboard
-            // played: its pitch and whether it started, so a key can light on the
-            // very frame the note is heard.
+            // played: its pitch, whether it started, and the frame it stands on
+            // (the step's own, or the block's first frame for a live press), so a
+            // page can paint the key on the frame the note is heard.
             event = {
               frame: frame,
               track_id: trackId,
@@ -2710,12 +2716,16 @@
        * never touches the song.
        *
        * A SunVox track sends its sequenced notes on event track 0, so the engine
-       * gives a live note one of its own (1..8, round robin, remembered against
-       * the pitch): a live note never cuts a sequenced one, and two live notes
-       * are two notes rather than one. A soundfont track plays it on its own MIDI
-       * channel. An unknown track is a no-op, the pitch is held between 0 and 127
-       * and the velocity between 1 and 127, and a release for a pitch that is not
-       * held is a no-op. Stop sends the note-offs of what is still held.
+       * gives a live note one of its own (1..8, the next track no held note stands
+       * on, remembered against the pitch): a live note never cuts a sequenced one,
+       * and two live notes are two notes rather than one. A soundfont track plays
+       * it on its own MIDI channel. An unknown track is a no-op, the pitch is held
+       * between 0 and 127 and the velocity between 1 and 127, and a release for a
+       * pitch that is not held is a no-op. Stop sends the note-offs of what is
+       * still held.
+       *
+       * A pitch that is not a finite number is dropped here and nothing is
+       * posted: the engine would take it as pitch 0 and play C-1.
        * @param {string} trackId
        * @param {number} p the MIDI pitch, 0..127
        * @param {number} v the velocity, 1..127
@@ -2724,11 +2734,12 @@
        */
       liveNote(trackId, p, v, on) {
         const pitch = Number(p);
+        if (!Number.isFinite(pitch)) return;
         const velocity = Number(v);
         post({
           type: "live_note",
           track_id: String(trackId),
-          p: Number.isFinite(pitch) ? pitch : 0,
+          p: pitch,
           v: Number.isFinite(velocity) ? velocity : 127,
           on: on !== false,
         });
@@ -3005,8 +3016,8 @@
        * The engine records nothing until the first subscription posts
        * `pad_events_on`, and then records each block's hits into a preallocated
        * ring. A note rides the same channel as `{frame, track_id, kind: "note",
-       * p, on}`: a note a step started or ended, or one the page played, so its
-       * key can light on the frame it sounds.
+       * p, on}`: a note a step started or ended, or one the page played, with the
+       * frame it stands on in the same clock a hit carries.
        * @param {(event: {frame: number, track_id: string, bank_id?: string,
        *                  index?: number, kind: string, v?: number,
        *                  state?: number, p?: number, on?: boolean}) => void} listener
