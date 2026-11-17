@@ -264,10 +264,11 @@ export const OWNER_MD_MAX_TOTAL_INPUT = 8 * 1024 * 1024;
  * The budget never covers the LAST chunk it started, because it is checked
  * before each chunk rather than inside one: the worst total is therefore this
  * budget plus one worst-case chunk. The worst chunk measured today is a 128 KB
- * chunk of Unicode-whitespace-only lines, ≈2.75 s — marked's inline `br` rule is
- * quadratic on it — so that shape is a follow-up guard of its own; every shape
- * under the existing block guards costs tens of milliseconds per chunk. Hence the
- * number: 1000 ms of budget, not the 1500 it used to be.
+ * chunk of Unicode-whitespace-only lines, 180 ms — marked's inline `br` rule is
+ * quadratic on it, and that shape has its own guard now (brScanCost /
+ * MD_BR_SCAN_MAX), so it is no longer the chunk that sets the worst case; every
+ * shape under the existing block guards costs tens of milliseconds per chunk.
+ * Hence the number: 1000 ms of budget, not the 1500 it used to be.
  */
 export const OWNER_MD_RENDER_BUDGET_MS = 1000;
 
@@ -691,7 +692,9 @@ const NUMBER_MATH = /^[0-9][0-9.,]*$/;
 // The inline-lexer cliff (mixed emphasis delimiters, QUADRATIC, ~21 s at the
 // cap) is a THIRD, separate cost; it is measured and guarded in
 // "THE INLINE-LEXER CLIFF" below, by a linear pre-pass over the same blocks
-// that this pipeline already splits.
+// that this pipeline already splits — together with that lexer's url-scan,
+// email-run and `br`-lookahead quadratics (the last one on a paragraph of
+// Unicode-whitespace lines), all four charged to one per-document budget.
 const MAX_INLINE = 500;
 const MAX_DISPLAY = 2000;
 const START_WINDOW = 4096;
@@ -2280,7 +2283,10 @@ function boundedLexer(options, inputLength = 0, depthState = null) {
 //
 // …plus the email autolink's run scan (emailRunScan, below), whose cost is paid
 // from that same pool, and a run-length cap on email-local-part characters that
-// FLATTENS a block outright — it can only flatten, never admit one.
+// FLATTENS a block outright — it can only flatten, never admit one. The inline
+// "br" rule's lookahead scan is a FOURTH cost paid from that same pool, also
+// with a per-block cap of its own (brScanCost and MD_BR_SCAN_MAX, below) — see
+// "A FOURTH QUADRATIC" below.
 //
 // AT THE OWNER CAP: 1 MiB THEN, 128 KB NOW. The budgets are per document, so
 // they bound marked's inline lexer at the owner cap exactly as they do at
@@ -2382,6 +2388,37 @@ function boundedLexer(options, inputLength = 0, depthState = null) {
 // `data:` payload, a very long hash — is shown as escaped text instead of being
 // parsed. That is the cost of not re-deriving marked's stop positions, and a
 // markdown IMAGE normally names a URL.
+//
+// A FOURTH QUADRATIC in the same lexer, on the SAME input: marked's inline `br`
+// rule is `^( {2,}|\\)\n(?!\s*$)` (rules.inline.br), and that negative
+// lookahead walks the WHOLE run of `\s` after the line break before it can
+// answer. A paragraph whose lines hold only Unicode whitespace is ONE paragraph
+// — marked's block rules read such a line as TEXT, not as a blank line — so the
+// tokenizer is retried at every line and every retry walks the rest of the run:
+// Σ(the rest of the run), quadratic. Measured on this tree (CPU ms of one whole
+// render, before this guard; every render in its own worker):
+//
+//   one paragraph of lines holding only…         64 KB bot   128 KB owner
+//   U+FEFF (BOM / ZWNBSP)                             857        3,340
+//   U+3000 (ideographic space)                        831        3,323
+//   U+2028 (LINE SEPARATOR)                           996        3,466
+//   U+2029 (PARAGRAPH SEPARATOR)                      812        3,311
+//   U+202F, U+2003, the U+2000–U+200A block        855–888    3,449–3,520
+//   U+000B (VT) / U+00A0 (NBSP)                   576 / 436    2,003 / 1,695
+//   U+FEFF+U+3000 mixed                               704        2,657
+//   U+0085 (NEL) — NOT `\s`, so not this shape        138          234
+//
+// …~4x per doubling, ~93% of the profile inside the br tokenizer, and not one
+// of the other three costs sees any of it: whitespace is no delimiter, no
+// protocol word and no `@`. So it is charged like them: brScanCost (below) pays
+// the exact characters the lookahead would scan — computed in ONE BACKWARD pass
+// over the block, so it is linear — into the same per-document pool, and a block
+// whose own br cost is over MD_BR_SCAN_MAX is flattened outright, the way an
+// email run over its per-run cap is. Guarded, every unit above renders in
+// 82–123 ms at 64 KB on the bot path and 106–180 ms at the 128 KB owner head
+// (from 436–996 and 1,695–3,520), and a 1 MiB document of them through the
+// CHUNKED owner path in 1,085 ms worst (from 3,518 — the budget plus one ~2.75 s
+// chunk, see OWNER_MD_RENDER_BUDGET_MS).
 //
 // With the budgets in place, every adversarial unit x container shape at the
 // cap, the medium-block case, the `_`+filler worst shape, the definitions
@@ -2628,6 +2665,106 @@ function emailRunScan(s) {
   return { cost, flatten: false };
 }
 
+/**
+ * True for the characters JS's `\s` matches — exactly the class marked's inline
+ * `br` rule's lookahead scans (`(?!\s*$)`): TAB, LF, VT, FF, CR, space, NBSP
+ * (U+00A0), OGHAM SPACE MARK (U+1680), the EN QUAD..HAIR SPACE block
+ * (U+2000–U+200A), LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR (U+2029),
+ * NARROW NO-BREAK SPACE (U+202F), MEDIUM MATHEMATICAL SPACE (U+205F),
+ * IDEOGRAPHIC SPACE (U+3000) and the BOM / ZWNBSP (U+FEFF). Written as one
+ * numeric test rather than a regex because brScanCost runs it per character of
+ * every inline block. U+0085 (NEL) is deliberately NOT here: it is not `\s` in
+ * JS, so the br lookahead does not scan it.
+ * @param {number} c char code
+ * @returns {boolean}
+ */
+function isInlineWhitespace(c) {
+  if (c === 32 || c === 10 || c === 9 || c === 12 || c === 13 || c === 11) return true;
+  if (c < 0xa0) return false;
+  if (c === 0xa0 || c === 0x1680 || c === 0x2028 || c === 0x2029 || c === 0x202f
+    || c === 0x205f || c === 0x3000 || c === 0xfeff) return true;
+  return c >= 0x2000 && c <= 0x200a;
+}
+
+/**
+ * What marked's inline `br` rule will scan in `s`.
+ *
+ * The rule is `^( {2,}|\\)\n(?!\s*$)` (marked 17.0.6's own `rules.inline.br`).
+ * The negative lookahead scans the WHOLE run of `\s` after the line break before
+ * it can decide, and the tokenizer is retried at line after line of the same
+ * block — so a block whose lines are made of Unicode whitespace (each line is
+ * TEXT to marked's block rules, so the whole document is ONE paragraph) costs
+ * Σ(the rest of the run) at every line break: measured 855 ms for 64 KB on the
+ * bot path and 3,340 ms for the 128 KB owner head for a paragraph of U+FEFF
+ * lines, 436/1,695 for U+00A0, 996/3,466 for U+2028 — ~4x per doubling, and
+ * none of the delimiter, url-scan or email-run budgets above see any of it.
+ *
+ * The quantity is charged here in one BACKWARD pass: `run` is the length of the
+ * `\s` run starting at the current position, so at a `\n` the lookahead scans
+ * exactly `run - 1` characters. That makes the estimate exact (not an upper
+ * bound) for the br lookahead, linear to compute, and quadratic exactly where
+ * marked is quadratic.
+ *
+ * Ordinary content is nowhere near it: the largest br cost of any markdown file
+ * in this repository is 715 (a 13.6 KB document of hard-wrapped prose and
+ * indented list continuations, i.e. ~0.05 per character), so a 128 KB prose
+ * chunk of the same shape is ~6,000 — three orders of magnitude below
+ * MD_BR_SCAN_MAX.
+ * @param {string} s one inline block's source
+ * @returns {number} the characters marked's br lookahead would scan in it
+ */
+function brScanCost(s) {
+  let cost = 0;
+  let run = 0;
+  for (let i = s.length - 1; i >= 0; i--) {
+    const c = s.charCodeAt(i);
+    if (isInlineWhitespace(c)) {
+      run++;
+      // The run STARTING at i+1 is what the lookahead after a `\n` at i scans.
+      if (c === 10) cost += run - 1;
+    } else {
+      run = 0;
+    }
+  }
+  return cost;
+}
+
+/** The largest br-scan cost ONE inline block may carry before that block is
+ *  flattened instead of inline-lexed (see brScanCost). Chosen from measurement:
+ *  the most expensive markdown file in this repository costs 715, a 128 KB
+ *  prose chunk of the same shape ~6,000 (all of it linear work in marked), the
+ *  pathological Unicode-whitespace paragraphs 1.07e9 at 64 KB. 1e6 is ~150x
+ *  above any real document and ~1,000x below the shape it guards, so it never
+ *  bites ordinary content, while a block that DOES trip it caps marked's br
+ *  scanning at ~1.5 ms (measured ~1.5 ns per scanned character) instead of
+ *  letting one paragraph spend the whole document budget. Exported so the tests
+ *  can pin the bound they exercise. */
+export const MD_BR_SCAN_MAX = 1_000_000;
+
+/** The br-scan guard's switch: false renders through marked's own br rule with
+ *  no br charge and no per-block cap, which is what the differential test
+ *  compares against (tests/md-unicode-ws.test.js). */
+let mdBrScanGuard = true;
+
+/** @param {boolean} enabled false renders with no br-scan charge or cap */
+export function setMdBrScanGuardEnabled(enabled) {
+  mdBrScanGuard = enabled !== false;
+}
+
+/**
+ * What the br-scan guard did in the LAST guarded parse: how many inline blocks
+ * were flattened (`flattened`, for any reason — a delimiter flood as much as a
+ * br flood) and how many of those would have been lexed had the br charge not
+ * been added (`brFlattened`), plus the br cost the parse charged (`charged`).
+ *
+ * Reset at the start of every guardAndParse call, so a render reports its own
+ * numbers (a chunked owner render reports its LAST chunk). Read by
+ * tests/md-unicode-ws.test.js, which can only claim a document rendered
+ * byte-identically to the unguarded renderer after establishing that the guard
+ * left it alone: `flattened === 0`.
+ */
+export const mdBrScanStats = { flattened: 0, brFlattened: 0, charged: 0 };
+
 /** The budgets of the linear pre-pass above, plus the link-definition cap that
  *  removes the inline lexer's other per-block scan. Shared by BOTH rendered
  *  paths (bot and owner) because they bound the same inline lexer, and per
@@ -2640,13 +2777,14 @@ export const BOT_MD_BLOCK_DELIMS = 1024;
  *  of d² (the emphasis/link retries) PLUS the characters marked's url EMAIL
  *  alternative would scan there — urlScanCost for the protocol-word stops
  *  (~2.4 ns each at 1 MiB) and emailRunScan for the `@` runs (Σrun² + run ×
- *  domain per `@`), the same quadratic reached without a protocol word. All
- *  three are paid
- *  from this one pool, so a document cannot spend 4e6 on delimiters and another
- *  4e6 on scans: the worst case is 4e6 attempts of any kind, ~50 ms of d² or
- *  ~10 ms of url scan. Real prose stays orders of magnitude below it (a 1 MiB
- *  post quoting `HTTP` a hundred times costs ~1e3; forty links cost ~1e3; the
- *  contacts document below costs ~2e4; the 24 KB pinned post in
+ *  domain per `@`), the same quadratic reached without a protocol word — PLUS
+ *  the characters marked's inline `br` lookahead would scan (brScanCost, ~1.5 ns
+ *  each). All four are paid from this one pool, so a document cannot spend 4e6
+ *  on delimiters and another 4e6 on scans: the worst case is 4e6 attempts of any
+ *  kind, ~50 ms of d², ~10 ms of url scan or ~6 ms of br scan. Real prose stays
+ *  orders of magnitude below it (a 1 MiB post quoting `HTTP` a hundred times
+ *  costs ~1e3; forty links cost ~1e3; the contacts document below costs ~2e4; a
+ *  128 KB prose chunk's br scan is ~6e3; the 24 KB pinned post in
  *  tests/owner-markdown-guard.test.js costs under 2e4). */
 export const BOT_MD_SQ_BUDGET = 4_000_000;
 export const BOT_MD_MAX_LINK_DEFS = 256;
@@ -2798,6 +2936,9 @@ function guardAndParse(src, instance, seedLinks = null, depthState = null) {
     for (const label of labels.slice(BOT_MD_MAX_LINK_DEFS)) delete links[label];
   }
   let budget = BOT_MD_SQ_BUDGET;
+  mdBrScanStats.flattened = 0;
+  mdBrScanStats.brFlattened = 0;
+  mdBrScanStats.charged = 0;
   for (const entry of lexer.inlineQueue) {
     // A block-lexer guard (flatGuardToken) already flattened this block: its
     // entry is here only because marked's paragraph-clipping branch expects one
@@ -2809,26 +2950,39 @@ function guardAndParse(src, instance, seedLinks = null, depthState = null) {
       continue;
     }
     const d = countDelims(entry.src);
-    // Three independent costs share the document budget, each measured in the
+    // Four independent costs share the document budget, each measured in the
     // units it makes marked's inline lexer spend: d² for the emphasis/link
     // retries (see the table at the top of this section), the url email scan
     // (urlScanCost, ~2.4 ns per character) and the email autolink's run scan
     // (emailRunScan: Σrun² + run × domain per `@` — the same quadratic,
     // reached with no protocol word, that urlScanCost cannot see; see "A THIRD
-    // quadratic"
-    // above). A block is flattened when its delimiter count is over the
-    // per-block cap, or when what is left of the document budget cannot pay for
-    // all three costs — which also covers one block whose url or email-run scan
-    // alone would exceed the whole budget. emailRunScan's per-run caps are an
-    // EXTRA trigger alongside them: they only flatten, never admit, and they
-    // keep the cost arithmetic small.
+    // quadratic" above), and the characters marked's inline `br` rule would scan
+    // in it (brScanCost — the FOURTH quadratic in the same lexer, on a paragraph
+    // of Unicode-whitespace lines; see "A FOURTH QUADRATIC" above). A block is
+    // flattened when its delimiter count is over the per-block cap, when its br
+    // scan is over MD_BR_SCAN_MAX, or when what is left of the document budget
+    // cannot pay for all four costs — which also covers one block whose url,
+    // email-run or br scan alone would exceed the whole budget. emailRunScan's
+    // per-run caps are an EXTRA trigger alongside them: they only flatten, never
+    // admit, and they keep the cost arithmetic small.
     const scan = urlScanCost(entry.src);
     const email = emailRunScan(entry.src);
-    const cost = d * d + scan + email.cost;
-    if (d <= BOT_MD_BLOCK_DELIMS && cost <= budget && !email.flatten) {
+    // What the three earlier costs charge, kept apart so the stats can say
+    // whether the br charge is what decided a block (see mdBrScanStats).
+    const before = d * d + scan + email.cost;
+    const br = mdBrScanGuard ? brScanCost(entry.src) : 0;
+    const cost = before + br;
+    if (mdBrScanGuard) mdBrScanStats.charged += br;
+    const brOverCap = br > MD_BR_SCAN_MAX;
+    if (d <= BOT_MD_BLOCK_DELIMS && cost <= budget && !email.flatten && !brOverCap) {
       budget -= cost;
       continue;
     }
+    // `before` alone would have let this block through, so the br charge is what
+    // decided it (see mdBrScanStats.brFlattened).
+    const brDecided = brOverCap || (br > 0 && before <= budget && d <= BOT_MD_BLOCK_DELIMS && !email.flatten);
+    if (mdBrScanGuard && brDecided) mdBrScanStats.brFlattened++;
+    mdBrScanStats.flattened++;
     entry.guarded = true;
     for (const token of plainTextTokens(entry.src)) entry.tokens.push(token);
   }
