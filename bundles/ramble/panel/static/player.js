@@ -66,26 +66,28 @@
     if (typeof scope.clearInterval === "function") scope.clearInterval(id);
   }
 
-  /* The page's own frame beat, when it has both halves of one. A page with
-   * neither, or with only one of them, gets the tick alone. */
+  /* The frame beat one source owns, whole: the caller's clock when it carries
+   * both halves, otherwise the page's own when it carries both. A source with
+   * only half of a pair is never mixed with the other's, and a page with no
+   * complete pair gets the tick alone. */
   function frameApiOf(source) {
     var scope = globalScope();
-    var ask = null;
-    var drop = null;
-    if (source && typeof source.requestAnimationFrame === "function") {
-      ask = function (fn) { return source.requestAnimationFrame(fn); };
+    if (source
+        && typeof source.requestAnimationFrame === "function"
+        && typeof source.cancelAnimationFrame === "function") {
+      return {
+        request: function (fn) { return source.requestAnimationFrame(fn); },
+        cancel: function (id) { source.cancelAnimationFrame(id); }
+      };
     }
-    if (source && typeof source.cancelAnimationFrame === "function") {
-      drop = function (id) { source.cancelAnimationFrame(id); };
+    if (typeof scope.requestAnimationFrame === "function"
+        && typeof scope.cancelAnimationFrame === "function") {
+      return {
+        request: function (fn) { return scope.requestAnimationFrame(fn); },
+        cancel: function (id) { scope.cancelAnimationFrame(id); }
+      };
     }
-    if (!ask && typeof scope.requestAnimationFrame === "function") {
-      ask = function (fn) { return scope.requestAnimationFrame(fn); };
-    }
-    if (!drop && typeof scope.cancelAnimationFrame === "function") {
-      drop = function (id) { scope.cancelAnimationFrame(id); };
-    }
-    if (!ask || !drop) return null;
-    return { request: ask, cancel: drop };
+    return null;
   }
 
   /* ---------- small helpers ---------- */
@@ -1958,13 +1960,15 @@
     /* Whether the drawing changes with time inside a segment: a rep between its
      * two key positions, a step easing into its own, a held rep swapping at its
      * midpoint. A still rep, a rest, a quiet move or a step with no position
-     * stays as it is, so no frame is asked for. */
+     * stays as it is, so no frame is asked for, and under reduced motion nothing
+     * moves between beats at all: the beat's own swap is the whole of it. */
     function segmentMoves(index, elapsed) {
       var segment = segmentAt(index);
       if (!segment || !poseFor(index)) return false;
       if (segment.still === true) return false;
+      if (reduced) return false;
       if (hasTempo(segment)) return true;
-      if (reduced || !isWork(segment)) return false;
+      if (!isWork(segment)) return false;
       var span = Math.min(TWEEN_SECONDS, segment.seconds);
       var into = typeof elapsed === "number" && isFinite(elapsed) ? elapsed : 0;
       return span > 0 && into < span;
@@ -2090,6 +2094,9 @@
      * called from here: a tick that is running would only read a zero-length
      * stretch. */
     unsubscribe = clock.on(function (event) {
+      /* A clock read has just happened, so the frame beat counts from it: a jump
+       * to another step never measures the stretch the read before it left. */
+      resyncFrames();
       paint();
       if (!event) return;
       if (event.type === "end") {

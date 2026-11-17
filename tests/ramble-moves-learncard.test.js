@@ -582,7 +582,7 @@ test("keys: with the sheet closed Escape is not listened for, and other keys nev
   assert.equal(escape.defaultPrevented, false, "and the key is not swallowed either");
 });
 
-test("destroy: a card taken down with its sheet open leaves no Escape listener behind", () => {
+test("destroy: a card taken down with its sheet open forgets Escape and hands no focus back", () => {
   const booted = boot();
   const card = mountCard(booted, SQUAT);
   const see = openFromButton(booted);
@@ -591,6 +591,8 @@ test("destroy: a card taken down with its sheet open leaves no Escape listener b
   card.destroy();
 
   assert.equal(booted.doc.listenerCount("keydown"), 0, "the listener goes with the card");
+  assert.notEqual(booted.doc.activeElement, see,
+    "the card is being removed, so no focus is handed back to the button that opened it");
   assert.equal(booted.host.children.length, 0, "and the host is empty");
   assert.doesNotThrow(() => booted.doc.keydown("Escape"), "a stray Escape finds nothing to close");
   assert.equal(attachedTo(see, booted.host), false);

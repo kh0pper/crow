@@ -759,9 +759,10 @@
         stepNodes[i8].node.removeEventListener("click", stepNodes[i8].handler);
       }
       if (sheetOpen) {
+        /* The card is being taken down, so there is nothing to hand focus back
+         * to: only the Escape listener is forgotten. */
         sheetOpen = false;
         forgetEscape();
-        returnFocus();
       }
       sheetStep = -1;
       sheetNode = null;

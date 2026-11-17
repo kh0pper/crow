@@ -696,11 +696,47 @@ test("frames: destroy cancels the pending frame", () => {
   assert.equal(booted.host.children.length, 0);
 });
 
-test("frames: reduced motion swaps the key positions at the rep's midpoint and blends nothing", () => {
+test("frames: a jump to another step counts the next frame from that step's own start", () => {
   const booted = boot();
   const segments = segmentsOfChain(booted.sandbox, TEMPO_CHAIN);
   const at = segments.findIndex((one) => one.entryId === "ex-curl");
   const segment = segments[at];
+
+  const Figure = booted.sandbox.RambleFigure;
+  const realSvg = Figure.poseSvg;
+  const realTween = Figure.tween;
+  const drawn = [];
+  Figure.poseSvg = (pose, opts) => { drawn.push(plain(pose)); return realSvg(pose, opts); };
+
+  mountPlayer(booted, { chain: TEMPO_CHAIN, reducedMotion: false });
+  byRole(booted.host, "start").click();
+
+  /* One beat, and then most of a second of the page's clock that no beat has
+   * counted yet. */
+  advance(booted.clock, 1);
+  booted.clock.time += 900;
+
+  seekTo(booted, at);
+  assert.equal(booted.clock.frames.length, 1, "the step the jump landed on asks for a frame");
+  const drawnAtJump = drawn.length;
+
+  /* The frame after the jump counts from the jump, not from the stale read the
+   * beat before it made: 0.9 s of a 4 s rep would show it a quarter of the way
+   * round. */
+  flushFrames(booted.clock);
+  assert.equal(drawn.length, drawnAtJump + 1, "one frame drew the figure");
+  assert.deepEqual(drawn[drawn.length - 1], plain(realTween(segment.fromPose, segment.toPose, 0)),
+    "the frame draws the rep at the very start of its step");
+  assert.equal(drawn[drawn.length - 1].elbowL, plain(segment.fromPose).elbowL,
+    "the first key position, not a blend carried over from the read before");
+});
+
+test("frames: reduced motion asks for no frame on a tempo step and swaps on the beats", () => {
+  const booted = boot();
+  const segments = segmentsOfChain(booted.sandbox, TEMPO_CHAIN);
+  const at = segments.findIndex((one) => one.entryId === "ex-curl");
+  const segment = segments[at];
+  assert.equal(segment.tempoSeconds, 4);
 
   const Figure = booted.sandbox.RambleFigure;
   const realSvg = Figure.poseSvg;
@@ -717,20 +753,24 @@ test("frames: reduced motion swaps the key positions at the rep's midpoint and b
   byRole(booted.host, "start").click();
   seekTo(booted, at);
 
+  assert.equal(booted.clock.frames.length, 0,
+    "a tempo step under reduced motion draws on the beat and asks for no frame");
+
   const startPose = plain(segment.fromPose);
   const endPose = plain(segment.toPose);
   assert.deepEqual(drawn[drawn.length - 1], startPose, "the rep opens on the first key position");
 
-  advance(booted.clock, 1);
-  booted.clock.time += 900;
-  flushFrames(booted.clock);
+  advance(booted.clock, 1.9);
   assert.deepEqual(drawn[drawn.length - 1], startPose, "1.9 s in, the first position still shows");
+  assert.equal(booted.clock.frames.length, 0, "the beats ask for no frame either");
 
-  booted.clock.time += 200;
-  flushFrames(booted.clock);
-  assert.deepEqual(drawn[drawn.length - 1], endPose, "past the midpoint the second position takes over");
+  advance(booted.clock, 0.1);
+  assert.deepEqual(drawn[drawn.length - 1], endPose, "the beat at the midpoint swaps the position");
 
-  assert.equal(blent, 0, "a frame under reduced motion never blends a rep");
+  advance(booted.clock, 2);
+  assert.deepEqual(drawn[drawn.length - 1], startPose, "and the next rep's beat swaps it back");
+
+  assert.equal(blent, 0, "reduced motion never blends a rep");
   assert.equal(interpolated, 0, "and never eases one");
 });
 
