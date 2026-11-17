@@ -24,19 +24,28 @@
  * only when a notification was really created, and the `missed` card state is the primary signal
  * either way.
  *
+ * The schedule sheet's two shortcuts come from `schedulePresets`: 7:30 and 8:00 local when no working
+ * hours are set, and the person's own working start when they are (`mail.working_hours_start` /
+ * `mail.working_hours_end`, both or neither).
+ *
+ * The tick's last step is the daily prune: `sent` and `discarded` drafts older than
+ * `DRAFT_RETENTION_MS` (ninety days) go with their revisions, voice notes and comments, at most once a
+ * day behind one compare-and-set. A `failed`, `unknown` or `missed` draft is never pruned.
+ *
  * Every sentence is fixed: a `fail_reason` is one of `SEND_FAIL_REASONS`' phrases and nothing else, a
  * log line carries an event name and a code, and the bell never carries mail content.
  */
 import { MailError } from "../errors.js";
 import { getAccount } from "../store/accounts.js";
 import { claimedElsewhereSentence, makeIsClaimedElsewhere } from "../claims.js";
-import { getDraft, listRevisions, transition } from "../drafts/store.js";
+import { getDraft, listRevisions, transition, ACCOUNT_REMOVED_REASON } from "../drafts/store.js";
 import { preflight } from "../drafts/preflight.js";
 import { newTapId, sealFor } from "../drafts/seal.js";
 import { loadKeychainKey } from "../../keychain/key.js";
 import { createNotification } from "../../../shared/notifications.js";
 import { instanceZone } from "../../../shared/schedule-store.js";
 import { validTimeZone } from "../../../shared/relative-dates.js";
+import { readSetting } from "../../dashboard/settings/registry.js";
 import {
   GRACE_MS, KEYCHAIN_KEY_MISSING_SENTENCE, SEND_FAIL_REASONS,
   deliver, inFlight as sendInFlight, isStaleSending, markStaleUnknown, reconcileUnknown,
@@ -51,6 +60,29 @@ export const SCHEDULE_MAX_AHEAD_MS = 90 * 24 * 60 * 60 * 1000;
 
 /** The title of every bell this module rings. The text carries no mail content, so the title says which. */
 export const MISSED_TITLE = "Crow Mail";
+
+/**
+ * The two `dashboard_settings` keys a person's working hours live under, as `HH:MM` text in the
+ * instance's zone. Both are written together or cleared together: one of the two alone is not a
+ * working day, so `readWorkingHours` answers nothing for it and the presets keep their defaults.
+ */
+export const WORKING_HOURS_START_SETTING = "mail.working_hours_start";
+export const WORKING_HOURS_END_SETTING = "mail.working_hours_end";
+
+/** `HH:MM`, 24-hour, the only form the settings route stores and this module reads. */
+export const HOUR_MINUTE_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+
+/**
+ * How long a finished draft (a `sent` or a `discarded` one) is kept: ninety days (Q5). A `failed`,
+ * `unknown` or `missed` draft is never pruned — an outcome nobody could confirm is not history.
+ */
+export const DRAFT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** The `dashboard_settings` key that records when the last prune ran, so two ticks cannot both prune. */
+export const PRUNE_SETTING_KEY = "mail_drafts_prune_at";
+
+/** How often the prune may run: once a day, whatever the tick's own interval is. */
+export const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /** The states a schedule may be taken from. */
 const SCHEDULABLE_STATES = Object.freeze(["draft", "failed", "missed"]);
@@ -243,34 +275,78 @@ export function missedNoticeText(dueAt, zone) {
 /* ---------------------------------------------------------------------- the presets */
 
 /**
- * The two presets the schedule sheet offers, when no working hours are set (the only branch plan 3
- * has): tomorrow morning at 7:30 local, and the next work day at 8:00 local, skipping Saturday and
- * Sunday. "Next work day" is the earliest work day whose 08:00 is still ahead, so on a Thursday morning
- * it is that morning and on a Friday afternoon it is Monday.
+ * The working hours a person set, or null when they set none. Both values must be `HH:MM`; a row with
+ * only one of them — a hand edit, a half-written save — is "no working hours", never half a day.
+ *
+ * @param {unknown} start `mail.working_hours_start`
+ * @param {unknown} end `mail.working_hours_end`
+ * @returns {{start: string, end: string, hour: number, minute: number}|null}
+ */
+export function parseWorkingHours(start, end) {
+  const from = typeof start === "string" ? start.trim() : "";
+  const to = typeof end === "string" ? end.trim() : "";
+  if (!HOUR_MINUTE_RE.test(from) || !HOUR_MINUTE_RE.test(to)) return null;
+  const [hour, minute] = from.split(":").map(Number);
+  return { start: from, end: to, hour, minute };
+}
+
+/**
+ * The working hours stored on this instance, read the way every other owner setting is read
+ * (`readSetting`, so this instance's own row wins) and validated by `parseWorkingHours`. A settings
+ * read that fails is "none set": the presets fall back to their defaults rather than fail a sheet.
+ *
+ * @param {object} db
+ * @returns {Promise<{start: string, end: string, hour: number, minute: number}|null>}
+ */
+export async function readWorkingHours(db) {
+  try {
+    return parseWorkingHours(
+      await readSetting(db, WORKING_HOURS_START_SETTING),
+      await readSetting(db, WORKING_HOURS_END_SETTING),
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The two presets the schedule sheet offers. With no working hours set — the default — tomorrow
+ * morning is 7:30 local and the next work day is 8:00 local (the mockup's own defaults, D5). With
+ * working hours set, both presets use the start time: tomorrow morning at that time, and the next work
+ * day at that time. "Next work day" is the earliest work day whose start is still ahead, skipping
+ * Saturday and Sunday, so on a Thursday morning it is that morning and on a Friday afternoon it is
+ * Monday.
  *
  * Both are Date objects of the exact instant, computed in the instance zone (`instanceZone(db)`) — a
  * bundle's own zone setting is never consulted — and a wall time the zone skips moves forward to the
  * first minute that exists.
  *
  * @param {object} db
- * @param {{now?: number, zone?: string}} [options]
+ * @param {{now?: number, zone?: string, workingHours?: object|null}} [options] `workingHours` is the
+ *   override a caller (or a test) may pass instead of the stored setting
  * @returns {Promise<{tomorrowMorning: Date, nextWorkDay: Date}>}
  */
 export async function schedulePresets(db, options = {}) {
   const at = Math.floor(Number(options?.now ?? Date.now()));
   if (!Number.isFinite(at) || at < 0) throw new MailError("BAD_INPUT", "now");
   const zone = options?.zone != null ? requireZone(options.zone) : requireZone(await instanceZone(db));
+  const hours = options?.workingHours !== undefined
+    ? parseWorkingHours(options.workingHours?.start, options.workingHours?.end)
+    : await readWorkingHours(db);
+  // The two wall times the presets name: the mockup's 7:30 and 8:00, or the person's working start.
+  const morning = hours ? { hour: hours.hour, minute: hours.minute } : { hour: 7, minute: 30 };
+  const workDay = hours ? { hour: hours.hour, minute: hours.minute } : { hour: 8, minute: 0 };
   const today = wallClockAt(at, zone);
   const tomorrow = addDays(today, 1);
-  const tomorrowMorning = localTimeToInstant({ ...tomorrow, hour: 7, minute: 30 }, zone);
+  const tomorrowMorning = localTimeToInstant({ ...tomorrow, ...morning }, zone);
 
   let nextWorkDay = null;
   for (let step = 0; step <= 7 && nextWorkDay == null; step += 1) {
     const day = addDays(today, step);
     const weekday = weekdayOf(day);
     if (weekday === 0 || weekday === 6) continue;
-    const morning = localTimeToInstant({ ...day, hour: 8, minute: 0 }, zone);
-    if (morning > at) nextWorkDay = morning;
+    const start = localTimeToInstant({ ...day, ...workDay }, zone);
+    if (start > at) nextWorkDay = start;
   }
   if (nextWorkDay == null) throw new MailError("BAD_INPUT", "zone");
 
@@ -562,26 +638,27 @@ async function failDue(db, d, row, now, block) {
  *       `unknown`, through the send service's `markStaleUnknown`, which is guarded by the claim token
  *       and points the first Sent-folder check a minute after the attempt;
  *   (4) `unknown` rows whose reconcile is due and whose account still exists: one Sent-folder check;
- *   (5) the daily prune — a no-op placeholder this task leaves for Task 13.
+ *   (5) the daily prune of `sent` and `discarded` drafts older than `DRAFT_RETENTION_MS` (Task 13), at
+ *       most once a day, behind its own compare-and-set.
  *
  * Before a delivery it refuses the row outright when the account is gone (`account_removed`), signed out
  * (`auth_failed`, with a bell) or connected on another Crow (`claimed_elsewhere`) — never a socket, never
  * a silent drop. Two ticks seeing the same due row produce one claim and one send, because `deliver`'s
  * claim is the same single guarded UPDATE this sweep leaves to it.
  *
- * `delivered` counts the deliveries this tick started, not the ones that finished; `missed`, `unknown`
- * and `reconciled` count the rows this tick moved or checked.
+ * `delivered` counts the deliveries this tick started, not the ones that finished; `missed`, `unknown`,
+ * `reconciled` and `pruned` count the rows this tick moved, checked or removed.
  *
  * @param {object} db
  * @param {object} deps see the module note
  * @param {{now?: number|Function}} [options]
  * @returns {Promise<{delivered: number, missed: number, reconciled: number, unknown: number,
- *   failed: Array<{draftId: string, reason: string, sentence: string}>}>}
+ *   pruned: number, failed: Array<{draftId: string, reason: string, sentence: string}>}>}
  */
 export async function sweepMailSends(db, deps, options = {}) {
   const d = resolveDeps(db, deps);
   const now = nowOf(d, options);
-  const counts = { delivered: 0, missed: 0, reconciled: 0, unknown: 0, failed: [] };
+  const counts = { delivered: 0, missed: 0, reconciled: 0, unknown: 0, failed: [], pruned: 0 };
 
   const { rows } = await db.execute({
     sql: `SELECT id, account_id, state, due_at, hold_until FROM mail_drafts
@@ -646,11 +723,14 @@ export async function sweepMailSends(db, deps, options = {}) {
 
   // ---- (4) one Sent-folder check for each unknown row whose check is due, where the account exists.
   const unknown = await db.execute({
-    sql: `SELECT id, account_id FROM mail_drafts
+    sql: `SELECT id, account_id, fail_reason FROM mail_drafts
            WHERE state = 'unknown' AND next_reconcile_at IS NOT NULL AND next_reconcile_at <= ?`,
     args: [now],
   });
   for (const row of unknown.rows) {
+    // A row an account's removal marked is terminal: the account it would check is gone, so there is
+    // no Sent folder to look in and no adapter to look with (Task 13).
+    if (row.fail_reason === ACCOUNT_REMOVED_REASON) continue;
     const account = await getAccount(db, String(row.account_id));
     // A removed account's row stays terminal: there is no Sent folder left to look in (Task 13).
     if (!account) continue;
@@ -658,19 +738,76 @@ export async function sweepMailSends(db, deps, options = {}) {
     if (outcome.outcome === "sent" || outcome.outcome === "unknown") counts.reconciled += 1;
   }
 
-  // ---- (5) the daily prune: Task 13 fills this in.
-  await pruneMailDrafts(db, { now });
+  // ---- (5) the daily prune of sent and discarded drafts. A prune that cannot run (a settings table a
+  // restored copy has not built yet) is a code in the log and the next tick's work, never a failed
+  // sweep: the sends above already happened.
+  try {
+    counts.pruned = (await pruneMailDrafts(db, { now })).pruned;
+  } catch (err) {
+    logCode("prune_failed", err instanceof MailError ? err.code : "unknown");
+  }
 
   return counts;
 }
 
 /**
- * The daily prune of old drafts, their revisions and their comments — a placeholder, and the sweep's
- * last step. Task 13 fills it in when the retention rule is decided; this module invents no rule of its
- * own, so it removes nothing and says so.
+ * The daily prune of old drafts, their revisions, their voice notes and their comments (Q5: ninety
+ * days). Only `sent` and `discarded` drafts are ever removed: a `failed`, `unknown` or `missed` draft
+ * records an outcome nobody could confirm, so it is kept until the person acts on it.
  *
- * @returns {Promise<{pruned: number}>}
+ * The prune runs at most once a day, whatever the tick's interval is, and the guard is one
+ * compare-and-set on `dashboard_settings.mail_drafts_prune_at`: `UPDATE … WHERE value < ?` (the cutoff
+ * a day back) and the work happens only when that UPDATE changed exactly one row, so two ticks — or two
+ * Crows on one file — cannot both prune for one day. The first run on a host with no such row inserts
+ * it with a value old enough to win the next compare-and-set.
+ *
+ * The whole step is one transaction: the guard, the candidate read, each guarded draft delete and its
+ * children go together, so a crash leaves either the day's prune or nothing. A row that moved out of
+ * `sent`/`discarded` between the read and its delete (a row a late success settled) fails its own
+ * guarded delete and is left alone.
+ *
+ * @param {object} db
+ * @param {{now?: number}} [options]
+ * @returns {Promise<{pruned: number}>} how many drafts (with everything that hung off them) were removed
  */
 export async function pruneMailDrafts(db, options = {}) {
-  return { pruned: 0 };
+  const now = Math.floor(Number(options?.now ?? Date.now()));
+  if (!Number.isFinite(now) || now < 0) throw new MailError("BAD_INPUT", "now");
+  const tooOld = now - DRAFT_RETENTION_MS;
+  return db.runTransaction((run) => {
+    // A host that has never pruned has no row: the insert-if-missing seeds one old enough that the
+    // compare-and-set below wins this first time and every day after it.
+    run({
+      sql: "INSERT INTO dashboard_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+      args: [PRUNE_SETTING_KEY, "0"],
+    });
+    const claimed = run({
+      sql: "UPDATE dashboard_settings SET value = ? WHERE key = ? AND value < ?",
+      args: [String(now), PRUNE_SETTING_KEY, String(now - PRUNE_INTERVAL_MS)],
+    });
+    // Lost the day's compare-and-set: another tick is pruning, or this one already did.
+    if (claimed.rowsAffected !== 1) return { pruned: 0 };
+
+    const stale = run({
+      sql: `SELECT id FROM mail_drafts
+             WHERE state IN ('sent', 'discarded') AND updated_at < ?`,
+      args: [tooOld],
+    });
+    let pruned = 0;
+    for (const row of stale.rows) {
+      const id = String(row.id);
+      // The state and the age are checked again here: a row that moved after the read keeps its rows.
+      const removed = run({
+        sql: `DELETE FROM mail_drafts
+               WHERE id = ? AND state IN ('sent', 'discarded') AND updated_at < ?`,
+        args: [id, tooOld],
+      });
+      if (removed.rowsAffected !== 1) continue;
+      run({ sql: "DELETE FROM mail_draft_comments WHERE draft_id = ?", args: [id] });
+      run({ sql: "DELETE FROM mail_draft_voice WHERE draft_id = ?", args: [id] });
+      run({ sql: "DELETE FROM mail_draft_revisions WHERE draft_id = ?", args: [id] });
+      pruned += 1;
+    }
+    return { pruned };
+  });
 }

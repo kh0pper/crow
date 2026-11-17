@@ -49,6 +49,16 @@ export const REVISION_AUTHORS = Object.freeze(["bot", "user", "system"]);
 /** A comment's life: waiting for the next revision, folded into one, or dropped. */
 export const COMMENT_STATES = Object.freeze(["queued", "applied", "dropped"]);
 
+/**
+ * The `fail_reason` marker an account's removal leaves on a draft whose outcome cannot be known: the
+ * row was `sending` when the account went, or was already `unknown`, and no Sent folder is left to
+ * check. It reads as a code, not a sentence, because nobody was there to see what happened — the card
+ * shows its own "we could not confirm" line — and the sweep never reconciles such a row (there is no
+ * adapter for a removed account). Exported here, the module that owns every draft column's meaning, so
+ * the removal guard that writes it and the sweep that skips it agree on one spelling.
+ */
+export const ACCOUNT_REMOVED_REASON = "account_removed";
+
 /** Where an attachment's bytes come from: the thread being answered, or Crow's own storage. */
 export const ATTACHMENT_SOURCES = Object.freeze(["thread", "storage"]);
 

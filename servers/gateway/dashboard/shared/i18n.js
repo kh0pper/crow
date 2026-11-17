@@ -5759,6 +5759,29 @@ export const translations = {
   "mail.fieldSmtpPort": { en: "SMTP port", es: "Puerto SMTP" },
   "mail.fieldSecurity": { en: "Security", es: "Seguridad" },
   "mail.remove": { en: "Remove", es: "Quitar" },
+  // Plan 3, Task 13's settings controls. The plan gives no Spanish copy (and, for the two switches and
+  // the Sent-copy rule, no sentence at all): every key here is TODO(copy) — pending operator copy —
+  // with the English placeholder in both languages, listed in the parity test's IDENTICAL_OK.
+  // TODO(copy): pending operator copy
+  "mail.mailSettings": { en: "Mail settings", es: "Mail settings" },
+  // TODO(copy): pending operator copy
+  "mail.workingHoursStart": { en: "Working hours start", es: "Working hours start" },
+  // TODO(copy): pending operator copy
+  "mail.workingHoursEnd": { en: "Working hours end", es: "Working hours end" },
+  // The plan's own English for the Q1 switch (", allowing cloud models to draft"); Spanish pending.
+  // TODO(copy): pending operator copy
+  "mail.cloudDrafting": { en: "Allow cloud models to draft", es: "Allow cloud models to draft" },
+  // TODO(copy): pending operator copy
+  "mail.cloudDraftingHelp": { en: "When this is off, only local models draft mail.", es: "When this is off, only local models draft mail." },
+  // The plan's own English for the per-account Sent-copy choice; Spanish pending.
+  // TODO(copy): pending operator copy
+  "mail.sentCopy": { en: "Save a copy to Sent", es: "Save a copy to Sent" },
+  // TODO(copy): pending operator copy
+  "mail.sentCopyProvider": { en: "The server keeps its own copy", es: "The server keeps its own copy" },
+  // TODO(copy): pending operator copy
+  "mail.sentCopyAppend": { en: "Crow adds a copy to Sent", es: "Crow adds a copy to Sent" },
+  // TODO(copy): pending operator copy
+  "mail.saveSettings": { en: "Save", es: "Save" },
   // The reader's client script (Task 8): the one word its refresh status line shows, and the fixed
   // sentence it shows for each API failure code. The English sentences are plan 1's mail error text
   // verbatim (`servers/gateway/mail/errors.js`), with `changed_on_server` carrying the sentence its

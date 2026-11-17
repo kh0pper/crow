@@ -118,6 +118,17 @@ const IDENTICAL_OK = new Set([
   "forYou.slot.morning", // English until the Spanish pass (P22)
   "forYou.slot.midday", // English until the Spanish pass (P22)
   "forYou.slot.evening", // English until the Spanish pass (P22)
+  // Crow Mail's plan 3 settings controls: pending operator copy (the plan gives no Spanish, and for
+  // some of them no sentence at all), so the placeholder reads the same in both languages.
+  "mail.mailSettings",
+  "mail.workingHoursStart",
+  "mail.workingHoursEnd",
+  "mail.cloudDrafting",
+  "mail.cloudDraftingHelp",
+  "mail.sentCopy",
+  "mail.sentCopyProvider",
+  "mail.sentCopyAppend",
+  "mail.saveSettings",
 ]);
 
 const keys = Object.keys(translations);

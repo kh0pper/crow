@@ -26,8 +26,10 @@
  *      running supervisor instead of building its own;
  *   6. publishes the same supervisor to the send service (`setMailSendSupervisor`) and, only when
  *      `mailEnabled()`, registers the `mail-send` scheduler hook that delivers held and scheduled
- *      sends. `stop()` unregisters the hook, clears the supervisor and then closes what it opened, so
- *      no tick outlives the connection it would borrow.
+ *      sends and the account-removal guard (`onAccountDeleting`, which cancels an account's unsent
+ *      mail before its rows go). `stop()` unregisters both, clears the supervisor and then closes what
+ *      it opened, so no tick outlives the connection it would borrow and no removal runs against a
+ *      stopped mail service.
  *
  * `startMailSync` never throws: every failure is caught and reported through the log sink as an event
  * name and a MailError code, never as an error's text (a library's message can quote a server reply or
@@ -50,12 +52,15 @@
  */
 import { createDbClient } from "../../db.js";
 import { cleanPeerName } from "../../shared/peer-label.js";
+import { createNotification } from "../../shared/notifications.js";
 import { getInstance, getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { createImapSmtpAdapter } from "../mail/adapter/imap-smtp.js";
 import { makeIsClaimedElsewhere, refreshClaim as refreshOwnClaimInDb } from "../mail/claims.js";
 import { createMailCredentials, createRotationWriter } from "../mail/credentials.js";
+import { ACCOUNT_REMOVED_REASON, transition } from "../mail/drafts/store.js";
 import { mailEnabled } from "../mail/flag.js";
 import { toMailError } from "../mail/errors.js";
+import { onAccountDeleting } from "../mail/store/accounts.js";
 import { createMailSupervisor, shouldRunMailSync } from "../mail/sync/supervisor.js";
 import { registerMailSendHook } from "../mail/send/hook.js";
 // The two attachment readers the sweep's own preflight needs (a thread attachment's raw bytes, and
@@ -155,6 +160,165 @@ function defaultAdapterFactory(credentials, tokenProvider) {
       onTokenRotated,
     });
   };
+}
+
+/**
+ * The title of the one bell an account's removal rings. The text never carries an address, a subject
+ * or a body, and the title says only which part of Crow is speaking (the schedule service's own
+ * `MISSED_TITLE`, kept here too so this module needs no send or schedule service on its import path).
+ */
+export const MAIL_NOTIFICATION_TITLE = "Crow Mail";
+
+/**
+ * The bell a removal rings: it says what Crow did to the account's unsent mail and nothing about the
+ * mail itself.
+ *
+ * TODO(copy): pending operator copy — the plan fixes no sentence for this bell.
+ */
+export const ACCOUNT_REMOVED_BELL_BODY = "Unsent mail for a removed account was cancelled.";
+
+/**
+ * The `fail_reason` a discarded draft carries once its account is gone (Q2 option 1: the mail is
+ * cancelled and one bell says so).
+ */
+export const ACCOUNT_REMOVED_DISCARD_REASON = "Account removed";
+
+/** The states a removal turns into `discarded`: everything still waiting on the person or on a tick. */
+const REMOVABLE_DRAFT_STATES = Object.freeze(["draft", "failed", "missed", "holding", "scheduled"]);
+
+/**
+ * The account-removal guard (plan 3, Task 13; Q2 option 1: cancel the unsent mail and say so, never
+ * block the removal). Registered with `onAccountDeleting`, so it runs before `deleteAccount` opens its
+ * transaction, while the account and its drafts are still whole.
+ *
+ * In order:
+ *
+ *  1. every `draft|failed|missed|holding|scheduled` draft of the account becomes `discarded` through
+ *     the store's guarded `transition()`, with the fixed reason above — a `holding` or `scheduled`
+ *     one loses its tap seal in the same UPDATE, so nothing a person tapped can still go out;
+ *  2. a row that is `sending` cannot be confirmed either way, so it becomes `unknown` with the
+ *     `account_removed` reason, and so does every row that was already `unknown`. No reconcile can run
+ *     for them (there is no adapter for an account that is gone), so the sweep skips them and the card
+ *     keeps its "we could not confirm" line. A send still in flight can settle its own row by its
+ *     `claim_token` after this, which is the honest outcome;
+ *  3. one bell, `source: "mail"`, whose text carries no address, subject or body. A settings filter
+ *     that drops the type (a null from `createNotification`) is fine: nothing depends on the bell;
+ *  4. the drafts this hook discarded are deleted with their revisions, voice notes and comments — the
+ *     `unknown` ones are kept, because they are the only thing that can still tell the person a
+ *     message may have gone out. `sent` rows stay too: the daily retention prune owns them.
+ *
+ * Nothing here refuses and nothing here throws for a live draft: removal is never blocked. A draft row
+ * that moves under the loop (a delivery claiming it, a person discarding it) simply fails its own
+ * guarded write and is left as it is. `mark` is the run's own account of what it did.
+ *
+ * @param {object} db the crow.db client `deleteAccount` was handed
+ * @param {string} accountId the account about to be removed
+ * @param {{now?: number|(() => number), createNotification?: Function}} [deps] the test seam
+ * @returns {Promise<{discarded: number, unknown: number, deleted: number}>}
+ */
+export async function guardAccountRemoval(db, accountId, deps = {}) {
+  const result = { discarded: 0, unknown: 0, deleted: 0 };
+  if (typeof accountId !== "string" || !accountId) return result;
+  const clock = deps.now ?? Date.now;
+  const read = Number(typeof clock === "function" ? clock() : clock);
+  // A clock a caller injected badly is never a reason to block a removal: the system clock answers.
+  const now = Number.isFinite(read) && read >= 0 ? Math.floor(read) : Date.now();
+  const ring = typeof deps.createNotification === "function" ? deps.createNotification : createNotification;
+
+  const { rows } = await db.execute({
+    sql: "SELECT id, state, fail_reason FROM mail_drafts WHERE account_id = ?",
+    args: [accountId],
+  });
+  for (const raw of rows) {
+    const id = String(raw.id);
+    const state = String(raw.state);
+    if (REMOVABLE_DRAFT_STATES.includes(state)) {
+      const moved = await transition(db, id, [state], "discarded",
+        { fail_reason: ACCOUNT_REMOVED_DISCARD_REASON }, { now });
+      if (moved) result.discarded += 1;
+      continue;
+    }
+    if (state === "sending") {
+      const moved = await transition(db, id, ["sending"], "unknown",
+        { fail_reason: ACCOUNT_REMOVED_REASON }, { now });
+      if (moved) result.unknown += 1;
+      continue;
+    }
+    if (state === "unknown" && raw.fail_reason !== ACCOUNT_REMOVED_REASON) {
+      // The reason is the row's own record that no check will ever run for it; a row that already
+      // carries it is left alone, so a second guard on the same account changes nothing.
+      const marked = await db.execute({
+        sql: `UPDATE mail_drafts SET fail_reason = ?, updated_at = ?
+               WHERE id = ? AND state = 'unknown' AND (fail_reason IS NULL OR fail_reason <> ?)`,
+        args: [ACCOUNT_REMOVED_REASON, now, id, ACCOUNT_REMOVED_REASON],
+      });
+      if (marked.rowsAffected === 1) result.unknown += 1;
+    }
+  }
+
+  if (result.discarded + result.unknown > 0) {
+    // One bell for the account, and a filtered type or a failing creator is not a failed removal.
+    try {
+      await ring(db, {
+        title: MAIL_NOTIFICATION_TITLE,
+        body: ACCOUNT_REMOVED_BELL_BODY,
+        type: "attention",
+        source: "mail",
+        priority: "normal",
+      });
+    } catch {
+      // Nothing depends on the bell: the cards carry the states.
+    }
+  }
+
+  // The drafts this hook discarded go with their revisions, voice notes and comments, in one
+  // transaction. The `unknown` rows stay (with their own children): they are the only record that a
+  // message may have gone out, and the card still has to be able to say so.
+  const doomed = await db.execute({
+    sql: "SELECT id FROM mail_drafts WHERE account_id = ? AND state = 'discarded'",
+    args: [accountId],
+  });
+  if (doomed.rows.length) {
+    result.deleted = await db.runTransaction((run) => {
+      let deleted = 0;
+      for (const raw of doomed.rows) {
+        const id = String(raw.id);
+        const removed = run({
+          sql: "DELETE FROM mail_drafts WHERE id = ? AND state = 'discarded'",
+          args: [id],
+        });
+        if (removed.rowsAffected !== 1) continue;
+        run({ sql: "DELETE FROM mail_draft_comments WHERE draft_id = ?", args: [id] });
+        run({ sql: "DELETE FROM mail_draft_voice WHERE draft_id = ?", args: [id] });
+        run({ sql: "DELETE FROM mail_draft_revisions WHERE draft_id = ?", args: [id] });
+        deleted += 1;
+      }
+      return deleted;
+    });
+  }
+  return result;
+}
+
+/** The account-removal hook this module registered, or null. */
+let currentAccountRemovalHook = null;
+
+/** Register the removal guard once. Idempotent, so a restart does not stack the same hook twice. */
+function startAccountRemovalHook() {
+  if (currentAccountRemovalHook != null) return currentAccountRemovalHook;
+  currentAccountRemovalHook = onAccountDeleting((db, accountId) => guardAccountRemoval(db, accountId));
+  return currentAccountRemovalHook;
+}
+
+/** Take the removal guard back. Idempotent, and never a reason to fail a shutdown. */
+function stopAccountRemovalHook() {
+  const off = currentAccountRemovalHook;
+  currentAccountRemovalHook = null;
+  if (off == null) return;
+  try {
+    off();
+  } catch {
+    // Bookkeeping at shutdown; the process is going down either way.
+  }
 }
 
 /** The gate is closed: a handle that says so and does nothing. */
@@ -341,15 +505,20 @@ async function beginStart(options) {
     // closed gate nothing registers, and an instance that never turned mail on never looks at a draft
     // table. Its claim answer is the wrapper above, whose shape is `{claimed, instanceName}` — the
     // supervisor's own copy of it is the strict boolean underneath.
-    if (mailEnabled(env) && currentMailSendHook == null) {
-      try {
-        currentMailSendHook = registerMailSendHook(db, {
-          isClaimedElsewhere: claimOf,
-          ...makeDraftReaders({ db, supervisor }),
-        });
-      } catch (err) {
-        // A hook that cannot register is a gateway without scheduled sends, never a failed boot.
-        say({ event: "hook_failed", code: toMailError(err).code });
+    if (mailEnabled(env)) {
+      // The account-removal guard rides the same gate as the tick: with mail off there are no drafts
+      // to cancel, and a removal must not go looking at tables a mail-free box never built.
+      startAccountRemovalHook();
+      if (currentMailSendHook == null) {
+        try {
+          currentMailSendHook = registerMailSendHook(db, {
+            isClaimedElsewhere: claimOf,
+            ...makeDraftReaders({ db, supervisor }),
+          });
+        } catch (err) {
+          // A hook that cannot register is a gateway without scheduled sends, never a failed boot.
+          say({ event: "hook_failed", code: toMailError(err).code });
+        }
       }
     }
 
@@ -363,6 +532,7 @@ async function beginStart(options) {
       if (currentHandle === handle) currentHandle = null;
       // The hook first: no tick may reach a supervisor this stop is taking away, or a db it closes.
       stopMailSendHook();
+      stopAccountRemovalHook();
       try {
         if (typeof supervisor.stop === "function") await supervisor.stop();
       } catch (err) {
@@ -408,6 +578,7 @@ export async function stopMailSync() {
   if (handle == null) {
     // Nothing was started, so nothing may still point at a supervisor or a hook.
     stopMailSendHook();
+    stopAccountRemovalHook();
     setMailSendSupervisor(null);
     return false;
   }

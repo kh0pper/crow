@@ -40,11 +40,15 @@
  *   back continues each listed folder's history on the server, and the server search asks the
  *   accounts' servers; both reload with a `flash` the panel reads back into a sentence.
  *
- *   Settings. Rename and the local-models switch PATCH their own field, Update password PUTs the new
- *   secret, the add-account form posts its fields as the connect body to the accounts route this
+ *   Settings. Rename and the local-models switch PATCH their own field, the Sent-copy choice PATCHes
+ *   the account's own rule, the mail settings card saves the three owner-wide settings (working hours,
+ *   cloud drafting) in one request, Update password PUTs the new secret, the add-account form posts its
+ *   fields as the connect body to the accounts route this
  *   script hardcodes, Remove sender deletes one allowance, and Remove account keeps its sentence
  *   hidden until the first click and deletes the account only on a later click at least 500 ms after
- *   that; the confirmation lapses after 8 s or when focus leaves the block.
+ *   that; the confirmation lapses after 8 s or when focus leaves the block. The card's stored values
+ *   are read once when the settings view is shown (GET /dashboard/mail/api/settings), so the page's
+ *   markup carries no setting and a save answers with the same shape the read does.
  *   The add-account form is the one form here that must never reach the browser, so its listener is
  *   bound on the form itself and cancels the submit as its very first act, before it looks at the
  *   event or reads a field. The header's search box is a plain GET form and is left alone: it must
@@ -630,6 +634,9 @@ export function mailClientJs(lang = "en") {
       return;
     }
 
+    var settingsSave = target.closest('[data-ml-settings-save]');
+    if (settingsSave) { saveMailSettings(settingsSave); return; }
+
     var save = target.closest('[data-ml-password-save]');
     if (save) {
       var passwordId = String(save.getAttribute('data-account') || '');
@@ -703,6 +710,15 @@ export function mailClientJs(lang = "en") {
       if (localId === '') { return; }
       patch('/dashboard/mail/api/accounts/' + encodeURIComponent(localId), { localModelsOnly: Boolean(local.checked) })
         .then(function (result) { if (!result.ok) { sayError(cardOf(local), result); } });
+      return;
+    }
+    var sentCopy = target.closest ? target.closest('[data-ml-sent-copy]') : null;
+    if (sentCopy) {
+      var copyId = String(sentCopy.getAttribute('data-account') || '');
+      var copyValue = String(sentCopy.value || '');
+      if (copyId === '') { return; }
+      patch('/dashboard/mail/api/accounts/' + encodeURIComponent(copyId), { sentCopy: copyValue })
+        .then(function (result) { if (!result.ok) { sayError(cardOf(sentCopy), result); } });
     }
   }
 
@@ -712,6 +728,63 @@ export function mailClientJs(lang = "en") {
    * password into the page URL; there is no state — a missing cookie or a field the form does not
    * have — in which the form is handed back to the browser instead.
    */
+  /* ---- the mail settings card: working hours, cloud drafting and each account's Sent copy ---- */
+
+  /**
+   * Fill the settings card's controls and the accounts' Sent-copy choices from one answer of
+   * GET /dashboard/mail/api/settings (the same shape a save answers with). Nothing is invented here:
+   * a value the answer does not carry leaves its control as the page drew it.
+   */
+  function fillMailSettings(json) {
+    var settings = json && json.settings ? json.settings : {};
+    var start = root.querySelector('[data-ml-working-start]');
+    var end = root.querySelector('[data-ml-working-end]');
+    var cloud = root.querySelector('[data-ml-cloud-drafting]');
+    if (start) { start.value = typeof settings.workingHoursStart === 'string' ? settings.workingHoursStart : ''; }
+    if (end) { end.value = typeof settings.workingHoursEnd === 'string' ? settings.workingHoursEnd : ''; }
+    if (cloud) { cloud.checked = settings.cloudDrafting === true; }
+    var copies = json && json.sentCopies && typeof json.sentCopies === 'object' ? json.sentCopies : {};
+    var selects = root.querySelectorAll('[data-ml-sent-copy]');
+    for (var i = 0; i < selects.length; i++) {
+      var id = String(selects[i].getAttribute('data-account') || '');
+      var value = copies[id];
+      if (value === 'provider' || value === 'append') { selects[i].value = value; }
+    }
+  }
+
+  /** Read the stored mail settings. A failure leaves the card as it was: nothing is sent by a read. */
+  function loadMailSettings() {
+    if (!root.querySelector('[data-ml-mail-settings]')) { return; }
+    request('GET', '/dashboard/mail/api/settings').then(function (result) {
+      if (!result.ok) { return; }
+      fillMailSettings(result.json);
+    }, function () {});
+  }
+
+  /**
+   * Save the card's three settings. The two working-hour fields travel together, because the route
+   * refuses one without the other; an empty field is "no working hours" and the route clears both.
+   */
+  function saveMailSettings(button) {
+    var section = closestOf(button, '[data-ml-mail-settings]');
+    var startInput = section ? section.querySelector('[data-ml-working-start]') : null;
+    var endInput = section ? section.querySelector('[data-ml-working-end]') : null;
+    var cloudInput = section ? section.querySelector('[data-ml-cloud-drafting]') : null;
+    var start = startInput ? String(startInput.value || '').trim() : '';
+    var end = endInput ? String(endInput.value || '').trim() : '';
+    button.setAttribute('disabled', '');
+    patch('/dashboard/mail/api/settings', {
+      workingHoursStart: start === '' ? null : start,
+      workingHoursEnd: end === '' ? null : end,
+      cloudDrafting: Boolean(cloudInput && cloudInput.checked)
+    }).then(function (result) {
+      button.removeAttribute('disabled');
+      if (!result.ok) { sayError(section || root, result); return; }
+      say(section || root, '');
+      fillMailSettings(result.json);
+    });
+  }
+
   function bindAddForm(form) {
     if (form.getAttribute('data-ml-bound') === 'form') { return; }
     form.setAttribute('data-ml-bound', 'form');
@@ -776,6 +849,9 @@ export function mailClientJs(lang = "en") {
   for (var j = 0; j < lists.length; j++) { bindPull(lists[j]); }
   var addForms = root.querySelectorAll('[data-ml-add-account]');
   for (var k = 0; k < addForms.length; k++) { bindAddForm(addForms[k]); }
+  // The mail settings card exists only on the settings view, whose URL says so; a page that happens
+  // to carry the markup for another reason (a preview, a fixture) reads nothing.
+  if (String((location && location.href) || '').indexOf('view=settings') >= 0) { loadMailSettings(); }
   bindMarkRead();
 
   if (!window.__mlBound) {
