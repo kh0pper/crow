@@ -53,6 +53,40 @@ export const DEFAULT_ALLOW = Object.freeze(["crow-embed"]);
 const DEFAULT_MINUTES = 480;
 const CACHE_MS = 2_000;
 
+const MODULE_START_MS = Date.now();
+let _processStartMs = MODULE_START_MS;
+
+/**
+ * The epoch ms this gateway process began (module load, to the millisecond).
+ *
+ * A beside hold that started before it began before this process did: the
+ * providers a PREVIOUS process admitted beside it are not in the admitted-peak
+ * tally (which only ever holds what this process itself admitted), so their
+ * growth would be read as the job's own — its remaining footprint would be
+ * counted too small, and the job could look like it outgrew its booking.
+ * `startDecision` compares a hold's `started_at` against this and, when the
+ * hold is older, sizes the job at its full booking.
+ */
+export function processStartMs() { return _processStartMs; }
+
+/** Test seam: pretend this process began at `ms` (null restores module load). */
+export function _setProcessStartForTest(ms) {
+  _processStartMs = ms == null ? MODULE_START_MS : Number(ms);
+}
+
+/**
+ * The error a beside hold or booking without a footprint gets: it would
+ * reserve nothing at all, so the gate could not size a single start beside it.
+ * `code` is what the CLI and the routes report.
+ */
+export function besideNeedsFootprint(where) {
+  const err = new RangeError(
+    `${where}: a beside hold needs positive gtt_mb and host_ram_mb (without them it reserves nothing)`,
+  );
+  err.code = "beside_needs_footprint";
+  return err;
+}
+
 export function reservationPath() {
   if (process.env.CROW_BOX_RESERVATION_PATH) return process.env.CROW_BOX_RESERVATION_PATH;
   const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
@@ -229,13 +263,29 @@ function finiteOrNull(v) {
  *   gateway started beside the hold: their growth is theirs, not the job's
  *   progress, and charging it to the job would under-count what the job still
  *   has to take (and could make a job look like it had outgrown its booking).
- *   `admitted` is a per-process tally, so a gateway restart under a live hold
- *   forgets it — see the comment on the map in gpu-orchestrator.js.
+ *
+ *   A hold that began before this process did (its `started_at` is older than
+ *   `processStart`) has an UNKNOWN tally: whatever a previous process admitted
+ *   beside it is not in `admitted`, so the growth since activation cannot be
+ *   attributed. Such a job is sized at its full booked footprint (nothing of
+ *   it is counted as loaded yet — the gate fails closed) and is never reported
+ *   over budget.
+ *
+ *   The requirement is the larger of what the live reading already implies
+ *   (`used + remaining`) and what is COMMITTED: the booking's whole footprint
+ *   plus the admitted peaks, on top of the activation baseline. A provider
+ *   that was admitted but has not loaded yet, or a snapshot older than its
+ *   load, therefore still reserves its room: without that, two starts would be
+ *   admitted into the same not-yet-taken space.
  *
  *   A job whose own growth exceeds its booked `gtt_mb` is outgrowing its
  *   booking: every start not on the allow list is refused with
  *   `job_over_budget: true` (the orchestrator logs that once), whether or not
  *   the provider's peak would fit.
+ *
+ *   A beside hold with no `gtt_mb` or no `host_ram_mb` reserves nothing the
+ *   gate can size, so every start not on the allow list is refused (fail
+ *   closed); the booking and hold layers refuse to create one.
  *
  * Pure: every input is passed in (no file, no sysfs).
  *
@@ -245,13 +295,16 @@ function finiteOrNull(v) {
  *          live?: {gttUsedMb: number, gttTotalMb: number, memAvailableMb: number, at: number}|null,
  *          profile?: object|null,
  *          admitted?: {gtt_peak_mb?: number, host_ram_peak_mb?: number}|null,
- *          now?: number}} [inputs]
+ *          now?: number, processStart?: number}} [inputs]
  *   `admitted` is the SUM of the declared peaks of the providers started
- *   beside this hold since it began (zeros when absent).
+ *   beside this hold since it began (zeros when absent); `processStart`
+ *   defaults to this process's own start (see `processStartMs`).
  * @returns {{allowed: boolean, reason: null|"reserved"|"gpu_job_beside",
  *            job_over_budget?: true}}
  */
-export function startDecision(reservation, providerName, { peak = null, live = null, profile = null, admitted = null, now = Date.now() } = {}) {
+export function startDecision(reservation, providerName, {
+  peak = null, live = null, profile = null, admitted = null, now = Date.now(), processStart = processStartMs(),
+} = {}) {
   if (!reservation) return { allowed: true, reason: null };
   if (reservation.corrupt) return { allowed: false, reason: "reserved" };
   if (reservation.mode !== "beside") {
@@ -273,9 +326,11 @@ export function startDecision(reservation, providerName, { peak = null, live = n
   const hostProfile = profile || DEFAULT_HOST_PROFILE;
   const safetyMargin = finiteOrNull(hostProfile.safety_margin_mb) ?? DEFAULT_HOST_PROFILE.safety_margin_mb;
   const ramFloor = finiteOrNull(hostProfile.ram_floor_mb) ?? DEFAULT_HOST_PROFILE.ram_floor_mb;
-  const gttBooking = optionalNumber(reservation.gtt_mb);
-  const gttHold = gttBooking ?? 0;
-  const ramHold = optionalNumber(reservation.host_ram_mb) ?? 0;
+  const gttHold = optionalNumber(reservation.gtt_mb);
+  const ramHold = optionalNumber(reservation.host_ram_mb);
+  // A beside hold that booked no footprint cannot be sized: refuse every start
+  // that is not on the allow list rather than let it through unmeasured.
+  if (!(gttHold > 0) || !(ramHold > 0)) return refuse;
   const gttBase = optionalNumber(reservation.gtt_used_at_activation_mb);
   const ramBase = optionalNumber(reservation.mem_available_at_activation_mb);
   // Growth since activation that belongs to the JOB: everything the live
@@ -284,21 +339,38 @@ export function startDecision(reservation, providerName, { peak = null, live = n
   // be counted as the job's own progress.
   const admittedGtt = finiteOrNull(admitted && admitted.gtt_peak_mb) ?? 0;
   const admittedRam = finiteOrNull(admitted && admitted.host_ram_peak_mb) ?? 0;
-  const jobGrowthGtt = gttBase == null ? null : Math.max(0, gttUsed - gttBase - admittedGtt);
-  const jobGrowthRam = ramBase == null ? null : Math.max(0, ramBase - memAvailable - admittedRam);
+  // A hold older than this process: the tally cannot describe it, so nothing of
+  // its booking counts as loaded yet and it is never called over budget.
+  const startedMs = Date.parse(reservation.started_at);
+  const tallyUnknown = !Number.isFinite(startedMs) || startedMs < Number(processStart);
+  const jobGrowthGtt = gttBase == null ? null
+    : (tallyUnknown ? 0 : Math.max(0, gttUsed - gttBase - admittedGtt));
+  const jobGrowthRam = ramBase == null ? null
+    : (tallyUnknown ? 0 : Math.max(0, ramBase - memAvailable - admittedRam));
   // What the job still has to take: its declared footprint minus the job's own
   // growth so far. Without a baseline, assume none of it has loaded yet (the
   // conservative reading: the whole booked amount is still to come).
   const remainingGtt = jobGrowthGtt == null ? gttHold : Math.max(0, gttHold - jobGrowthGtt);
   const remainingRam = jobGrowthRam == null ? ramHold : Math.max(0, ramHold - jobGrowthRam);
+  // What is already committed, whatever the counters show yet: the baseline
+  // plus the job's whole footprint plus every admitted peak. Once a provider is
+  // admitted its room is spoken for even before it has loaded, so a second
+  // start is never admitted into the same space.
+  const committedGtt = gttBase == null ? null : gttBase + Math.max(gttHold, jobGrowthGtt ?? 0) + admittedGtt;
+  const committedAvail = ramBase == null
+    ? null
+    : ramBase - Math.max(ramHold, jobGrowthRam ?? 0) - admittedRam;
   // The job is outgrowing its booking: refuse starts that would share the card
   // with it, and say so, so the operator can re-book or extend it. An allow[]
   // provider returned above is never refused here.
-  if (gttBooking != null && jobGrowthGtt != null && jobGrowthGtt > gttBooking) {
+  if (!tallyUnknown && gttBase != null && jobGrowthGtt != null && jobGrowthGtt > gttHold) {
     return Object.freeze({ allowed: false, reason: "gpu_job_beside", job_over_budget: true });
   }
-  const fitsGtt = gttUsed + remainingGtt + peakGtt <= gttTotal - safetyMargin;
-  const fitsRam = memAvailable - remainingRam - peakRam >= ramFloor;
+  const requiredGtt = Math.max(gttUsed + remainingGtt, committedGtt ?? -Infinity);
+  const availAfterJob = memAvailable - remainingRam;
+  const effectiveAvail = committedAvail == null ? availAfterJob : Math.min(availAfterJob, committedAvail);
+  const fitsGtt = requiredGtt + peakGtt <= gttTotal - safetyMargin;
+  const fitsRam = effectiveAvail - peakRam >= ramFloor;
   return fitsGtt && fitsRam ? { allowed: true, reason: null } : refuse;
 }
 
@@ -326,19 +398,31 @@ export function clearReservation({ path = reservationPath() } = {}) {
 // either layer goes under one lock; tmp+rename alone cannot do compare-and-set).
 //
 // `O_CREAT|O_EXCL` on a pid file, the same primitive models/native-lock.js uses.
-// A lockfile whose owner pid is gone (or whose content can't be read as a pid)
-// is stale and is discarded through `stealStaleLock` — rename-atomic, so two
-// processes that both decide to steal cannot end up both believing they hold
-// it. A bare unlink-then-create would hand the lock to both.
+// A lockfile whose owner pid is gone, whose content can't be read as a pid, or
+// that is older than STALE_LOCK_AGE_MS (however alive its pid looks) is stale
+// and is discarded rename-atomically — so two processes that both decide to
+// steal cannot end up both believing they hold it. A bare unlink-then-create
+// would hand the lock to both.
 //
 // Not re-entrant: a caller that already holds the lock (a composed operation)
-// must use the lock-free inner functions rather than nest an acquire.
+// must use the lock-free inner functions rather than nest an acquire, and the
+// synchronous form reports that as `box_lock_reentrant` instead of waiting.
 
 const LOCK_RETRY_MS = 25;
 // A lock file with no readable pid may belong to a process that has just done
 // openSync("wx") and not yet written its pid. Younger than this, it is left
 // alone; older, it is stale like a dead pid.
 const STALE_EMPTY_LOCK_MS = 2_000;
+// A critical section lasts milliseconds, so a lock file older than this is
+// stale WHATEVER its pid says. After a reboot the pid in a leftover lock file
+// very likely belongs to some unrelated live process: honouring it would wedge
+// the box for as long as that process lives.
+const STALE_LOCK_AGE_MS = 60_000;
+
+// Test seam: runs between the staleness decision and the empty-lock steal's
+// rename, so a test can replace the lock file in that window.
+let _beforeEmptyLockSteal = null;
+export function _setBeforeEmptyLockStealForTest(fn) { _beforeEmptyLockSteal = fn; }
 
 function lockFs() {
   return { renameSync, unlinkSync, readFileSync };
@@ -385,8 +469,10 @@ function tryAcquireLockFile(lockFile) {
   if (tryCreateLockFile(lockFile)) return true;
   const existingPid = readLockPidFile(lockFile);
   if (existingPid != null) {
-    // A live owner elsewhere: wait. A dead pid: stale at once.
-    if (isProcessAlive(existingPid)) return false;
+    const ageMs = lockFileAgeMs(lockFile);
+    // A live owner elsewhere: wait — unless the file is older than any critical
+    // section could be (a leftover lock whose pid a reboot has since reused).
+    if (isProcessAlive(existingPid) && !(ageMs != null && ageMs > STALE_LOCK_AGE_MS)) return false;
     stealStaleLock({ fs: lockFs(), lockPath: lockFile, existingPid });
     return tryCreateLockFile(lockFile);
   }
@@ -396,8 +482,34 @@ function tryAcquireLockFile(lockFile) {
   const ageMs = lockFileAgeMs(lockFile);
   if (ageMs == null) return tryCreateLockFile(lockFile); // vanished — retry the create
   if (ageMs < STALE_EMPTY_LOCK_MS) return false;
-  stealStaleLock({ fs: lockFs(), lockPath: lockFile, existingPid: null });
+  stealStaleEmptyLock(lockFile);
   return tryCreateLockFile(lockFile);
+}
+
+/**
+ * Steal an empty (no readable pid) lock file, rename-atomic like
+ * `stealStaleLock`. The rename is content-blind: another process may have
+ * replaced the file between the age check and the rename, so the captured file
+ * is re-examined afterwards. If its mtime is younger than
+ * STALE_EMPTY_LOCK_MS the file belongs to someone else (a creator mid-write, or
+ * a fresh lock) and goes straight back; only a genuinely old file is discarded.
+ */
+function stealStaleEmptyLock(lockFile) {
+  const stagingPath = `${lockFile}.empty.${process.pid}.${Date.now()}`;
+  if (_beforeEmptyLockSteal) _beforeEmptyLockSteal(lockFile);
+  try {
+    renameSync(lockFile, stagingPath);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return; // another racer got there first
+    throw err;
+  }
+  let stagedAgeMs = null;
+  try { stagedAgeMs = Date.now() - statSync(stagingPath).mtimeMs; } catch { stagedAgeMs = null; }
+  if (stagedAgeMs != null && stagedAgeMs < STALE_EMPTY_LOCK_MS) {
+    try { renameSync(stagingPath, lockFile); } catch { /* its owner's problem now */ }
+    return;
+  }
+  try { unlinkSync(stagingPath); } catch { /* already gone */ }
 }
 
 function releaseLockFile(lockFile) {
@@ -411,6 +523,19 @@ function releaseLockFile(lockFile) {
 function lockTimeoutError(lockFile, timeoutMs) {
   const err = new Error(`could not take ${lockFile} within ${timeoutMs} ms`);
   err.code = "box_lock_timeout";
+  err.lockPath = lockFile;
+  return err;
+}
+
+/**
+ * The lock is not re-entrant, so waiting on a file that already names THIS
+ * process can only end in a timeout — after blocking the whole thread for it.
+ */
+function reentrancyError(lockFile) {
+  const err = new Error(
+    `this process already holds ${lockFile}: the box lock is not re-entrant (a composed operation calls the _\u2026Locked inner functions)`,
+  );
+  err.code = "box_lock_reentrant";
   err.lockPath = lockFile;
   return err;
 }
@@ -429,7 +554,9 @@ function prepareLockFile(lockFile) {
 /**
  * Run `fn` under the box-calendar lock, synchronously (the CLI and tests).
  * Waits up to `timeoutMs` (default 5 s) for a live holder to finish, then
- * throws an Error with `code === "box_lock_timeout"`.
+ * throws an Error with `code === "box_lock_timeout"`. A file that already
+ * names THIS process is not waited for: it throws `box_lock_reentrant` at
+ * once (the lock is not re-entrant).
  *
  * @template T
  * @param {() => T} fn
@@ -441,6 +568,9 @@ export function withReservationLock(fn, { path, timeoutMs = 5000 } = {}) {
   prepareLockFile(lockFile);
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
   while (!tryAcquireLockFile(lockFile)) {
+    // Re-entrancy is a programming error, not contention: say so at once
+    // instead of sleeping toward the timeout.
+    if (readLockPidFile(lockFile) === process.pid) throw reentrancyError(lockFile);
     if (Date.now() >= deadline) throw lockTimeoutError(lockFile, timeoutMs);
     sleepSync(LOCK_RETRY_MS);
   }
@@ -559,6 +689,11 @@ export function _activateHoldLocked({
   const mins = Number(minutes);
   if (!Number.isFinite(mins) || mins <= 0) throw new RangeError("hold: minutes must be a positive number");
   if (!MODES.includes(mode)) throw new RangeError(`hold: mode must be one of ${MODES.join(" | ")}`);
+  // A beside hold reserves part of the card for a job: without both footprint
+  // numbers it reserves nothing, and the gate could not size a start beside it.
+  if (mode === "beside" && !(optionalNumber(gtt_mb) > 0 && optionalNumber(host_ram_mb) > 0)) {
+    throw besideNeedsFootprint("hold");
+  }
   const holdMs = Math.round(mins * 60_000);
   if (holdMs > DEFAULT_MAX_HOLD_MS && !force) {
     throw new RangeError(`hold of ${mins} min exceeds the 8h default max; pass force to exceed it`);

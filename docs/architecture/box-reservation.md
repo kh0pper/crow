@@ -85,7 +85,7 @@ The box is the holder's. A start is allowed only for a provider on `allow[]` (wh
 
 ### `beside`
 
-A render/video job is sharing the card. A start is allowed when:
+A render/video job is sharing the card. A beside hold needs **both** footprint numbers — `gtt_mb` and `host_ram_mb` — and the CLI (`book`, `hold`) and the hold layer refuse one without them (`beside_needs_footprint`, exit 1): a beside hold that booked nothing would reserve nothing, and the gate sizes every start against what the job booked. A start is allowed when:
 
 - the provider is on `allow[]`; or
 - its **declared peak** (from the host profile) fits next to the job's *remaining* footprint under the live readings.
@@ -97,20 +97,19 @@ Live readings come from `/sys/class/drm` (`mem_info_gtt_used`, `mem_info_gtt_tot
 The decision, once the job's remaining footprint is known:
 
 ```
-gttUsedMb + remainingGtt + peak.gtt_peak_mb        <= gttTotalMb - safety_margin_mb
-memAvailableMb - remainingRam - peak.host_ram_peak_mb >= ram_floor_mb
+max(gttUsedMb + remainingGtt, committedGtt) + peak.gtt_peak_mb <= gttTotalMb - safety_margin_mb
+min(memAvailableMb - remainingRam, committedAvailRam) - peak.host_ram_peak_mb >= ram_floor_mb
 ```
 
-**Fail closed** for a beside hold: no declared peak for the provider, no snapshot at all, or a snapshot older than 15 s all refuse the start. Only beside holds read any of this; an exclusive hold is decided from the record alone.
+`committed` is the activation baseline plus the job's **whole** booked footprint plus every admitted peak. It is what makes a start that was admitted but has not loaded yet still hold its room: without it, two starts would be let into the same not-yet-taken space whenever the counters had not caught up with the first.
+
+**Fail closed** for a beside hold: a footprint of zero or missing, no declared peak for the provider, no snapshot at all, or a snapshot older than 15 s all refuse the start. Only beside holds read any of this; an exclusive hold is decided from the record alone.
 
 **Admitted-peak accounting.** A beside hold records `gtt_used_at_activation_mb` and `mem_available_at_activation_mb` when it is activated (filled from one synchronous read if the writer did not supply them). The job's own growth is the live counters' movement since that baseline, *minus* the declared peaks of the providers this gateway started beside the hold — that growth is those providers', not the job's progress. The job's remaining footprint is its booked `gtt_mb` / `host_ram_mb` minus its own growth; with no baseline the whole booked amount is assumed still to come.
 
-That tally of admitted providers is **per gateway process**, keyed by the hold's notice key (`owner@started_at`), and only the live hold's tally is kept. A gateway restart under a live hold loses it, and then:
+That tally of admitted providers is **per gateway process**, keyed by the hold's notice key (`owner@started_at`), and only the live hold's tally is kept. A hold whose `started_at` is older than the gateway process — a restart under a live hold — has an **unknown tally**: the providers a previous process admitted are not in it, so their growth cannot be told apart from the job's.
 
-- the growth of models started beside the job is read as the job's own, so the job's remaining footprint is counted too **small** — the gate can admit a start that does not truly fit;
-- the same reading can make the job look like it outgrew its booking, so the over-budget refusal below can fire wrongly.
-
-Neither can be recovered from inside the process: the tally only ever holds what this process itself admitted.
+**After a gateway restart under a live beside hold the gate fails closed:** the job is sized at its **full booking** (nothing of it counts as loaded yet, so its whole footprint is still to come) and it is never reported `job_over_budget`. Starts that fit beside the job's whole booking are still allowed.
 
 **`job_over_budget`.** A job whose own growth exceeds its booked `gtt_mb` is outgrowing its booking. Every start that is not on `allow[]` is then refused with `job_over_budget: true`, whether or not the provider's peak would fit, so the operator can re-book or extend the job. The orchestrator logs that once per hold.
 
@@ -119,9 +118,9 @@ A beside refusal uses the existing `box_reserved` code with `reason: "gpu_job_be
 ## Lease, renew and the 8 h cap
 
 - **Activate** is owner-checked: an unexpired hold by another owner (or an unreadable file) is a `box_held` conflict. Only the legacy `writeReservation` entry point takes over unconditionally, which is what an overwriting legacy writer needs.
-- **Renew** extends the caller's own unexpired hold and keeps `started_at`, so the notice key `owner@started_at` does not change and no second notice goes out. A renew by a non-holder is `box_held`; renewing a hold that is missing or already expired is `box_held` with `holder: null` and never recreates the hold (a legacy `rm -f` teardown ends the lease). A renew that would run into the next booking fails with `renew_past_next_booking`, and the holder has to wind down and resume in a later gap.
+- **Renew** extends the caller's own unexpired hold and keeps `started_at`, so the notice key `owner@started_at` does not change and no second notice goes out. A renew by a non-holder is `box_held`; renewing a hold that is missing or already expired is `box_held` with `holder: null` and never recreates the hold (a legacy `rm -f` teardown ends the lease). A **booking-backed** renew (`renewBooking`, what the runner and the CLI's `renew` on a booking-backed hold use) also requires the live hold to name that very booking (or occurrence) and the booking to still be `booked`/`active`; a hold that names a different booking is `box_held`. Such a renew that would run into the next booking fails with `renew_past_next_booking` (the calendar is the arbiter), and the holder has to wind down and resume in a later gap. A hold with no booking behind it (a plain manual or legacy hold renewed with `renew --owner`) has no calendar row to run into, so only the 8 h cap applies.
 - **The 8 h cap.** A single `minutes` over 8 h needs `force`, and for every hold except `kind: "gpu-job"` the *total span* from `started_at` also may not exceed 8 h without `force`. A GPU job's hold is exempt from the total-span limit: its holder renews a short lease often enough that a dead holder's hold lapses on its own, and no long TTL is guessed up front.
-- **Release** is owner-checked too: only the holder's own hold is removed unless `force`. Releasing marks the booking the hold named `done`.
+- **Release** is owner-checked too: only the holder's own hold is removed unless `force`; `releaseHold` removes the hold file and does nothing else. Marking the booking the hold named `done` is the **CLI's** job (`box-reserve release`), which reads the hold first and updates the calendar in the same critical section.
 
 ## The lock
 
@@ -129,9 +128,10 @@ Every read-modify-write of either file runs under one lock file beside the **cal
 
 - It is a pid file created with `O_CREAT|O_EXCL`.
 - A lock whose pid is gone is stale. The break is rename-atomic (the same primitive `models/native-lock.js` uses), so two processes that both decide to steal cannot both end up holding it.
-- A lock file with no readable pid may belong to a process that has just created it and not yet written its pid: younger than 2 s it is left alone, older it is stale.
+- A lock file **older than 60 s is stale whatever its pid says**: a critical section lasts milliseconds, and after a reboot the pid in a leftover lock file very likely belongs to some unrelated live process. Without that rule the box would stay wedged for as long as that process lives.
+- A lock file with no readable pid may belong to a process that has just created it and not yet written its pid: younger than 2 s it is left alone, older it is stale. The empty-lock steal re-checks the file it captured (same rename-atomic move) and puts it straight back if its mtime is younger than 2 s — a file a racer created in that window is not destroyed.
 - Waiting is capped (5 s by default) and a timeout is an error with `code: "box_lock_timeout"`. The gateway uses the async form, which polls with `setTimeout` so the event loop keeps running; the synchronous form is for the CLI and tests.
-- The lock is not re-entrant. A composed operation (book + activate, renew + extend its booking) calls the lock-free inner functions, not a second acquire.
+- The lock is not re-entrant. A composed operation (book + activate, renew + extend its booking) calls the lock-free inner functions, not a second acquire. The synchronous form says so at once — `code: "box_lock_reentrant"` — instead of blocking the thread toward the timeout.
 
 ## Approval
 
@@ -206,8 +206,9 @@ node scripts/ops/box-reserve.mjs status
 
 - `book` needs `--minutes` unless it is a `--daily` series, and `--until` only goes with `--daily`. `--start` is an ISO time, `now` (the default) or `asap`.
 - `calendar` defaults to the next 14 days. `--markdown` prints `| when (local) | owner | kind | mode | status | approval |`; `--json` prints the expanded bookings; neither flag prints plain columns.
-- `hold` is one operation under the lock: it marks its own overlapping bookings `done`, preempts a `gpujob:` booking or live hold (see below), refuses to overlap anyone else's booking or hold, then books and activates. If activation fails after the booking was written the booking is cancelled, so a refused hold never leaves a ghost booking.
+- `hold` is one operation under the lock, and it destroys nothing up front: it refuses a conflict with anyone else's booking or hold first, then **books** over exactly the bookings this hold preempts, **activates** it (one atomic rename replaces the old hold, so there is never a moment with none), and only then marks the overlap `done` (its own) or `lapsed` (the preempted job). If activation fails, the new booking is cancelled and every other booking and the old hold are left exactly as they were.
 - `hold --booking <id>` derives the owner from the booking when `--owner` is not given.
+- A `--mode beside` hold needs `--gtt-mb` and `--host-ram-mb`: without them it exits 1 with `beside_needs_footprint` and writes nothing.
 - `renew` extends the booking the hold names along with the hold, so the calendar's `end` moves with the lease and a gap search does not hand out the running job's time. A hold with no booking is renewed on its own.
 - `release` with no `--owner` frees the current hold when its `kind` is null (a legacy writer) or `manual`, and refuses a `gpu-job` hold without `--force`. The release marks the booking the hold named `done`.
 - `status` prints the active hold plus the next 3 bookings as JSON (`none` when there is neither).

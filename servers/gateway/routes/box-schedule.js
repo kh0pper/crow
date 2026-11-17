@@ -64,7 +64,11 @@ const STATUS_BY_CODE = Object.freeze({
   booking_not_owner: 403,
   booking_approval_not_pending: 409,
   booking_approval_expired: 409,
+  // Another booking (or the live hold) took the slot while the request waited:
+  // the approve re-check under the lock refused it.
+  booking_conflict: 409,
   calendar_corrupt: 503,
+  hold_corrupt: 503,
   box_lock_timeout: 503,
 });
 
@@ -145,14 +149,17 @@ function ownerOfRow(rows, id) {
 /**
  * One error mapper for every route here: the codes the calendar and the hold
  * layer raise keep their status; anything else is a generic 500 that names
- * nothing (no stack, no internal message).
+ * nothing (no stack, no internal message). A conflict carries the booking that
+ * is in the way, so the panel can say whose booking blocks the approval.
  */
 function sendErr(res, err) {
   const code = err && typeof err.code === "string" && err.code ? err.code : null;
   const status = code ? STATUS_BY_CODE[code] : null;
   if (status) {
     if (status >= 500) console.warn("[box-schedule] request refused:", code);
-    return res.status(status).json({ error: err.message || code, code });
+    const body = { error: err.message || code, code };
+    if (err.conflict !== undefined) body.conflict = err.conflict;
+    return res.status(status).json(body);
   }
   console.warn("[box-schedule] request failed:", (err && err.message) || String(err));
   return res.status(500).json({ error: "The box schedule request failed", code: "internal_error" });

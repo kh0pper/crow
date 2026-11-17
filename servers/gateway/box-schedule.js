@@ -41,8 +41,11 @@
  * Occurrences expand in local wall-clock time: `new Date(y, m, d, hh, mm)` in
  * the process's zone, so a window keeps its clock across a DST change. A wall
  * time that does not exist (spring forward) becomes the top of the next hour,
- * and a window whose end is not after its start crosses midnight (the
- * occurrence belongs to the day it starts on).
+ * and whether a window crosses midnight is decided from the clock times in its
+ * spec (end at or before start), never from the resolved instants: a window
+ * that does not cross midnight but collapses to zero length in the
+ * spring-forward gap occupies nothing that day. An occurrence belongs to the
+ * day it starts on.
  *
  * A pending approval older than 12 h (the private engineering notes §7.10)
  * reads as declined without writing the file, so a stale request can never be
@@ -58,8 +61,8 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
-  _activateHoldLocked, _renewHoldLocked, lockPath, readReservation, reservationPath,
-  schedulePath, withReservationLock,
+  _activateHoldLocked, _renewHoldLocked, besideNeedsFootprint, HoldConflictError, lockPath,
+  readReservation, reservationPath, schedulePath, withReservationLock,
 } from "./box-reservation.js";
 
 // The path helper is part of the calendar's public surface.
@@ -221,9 +224,13 @@ function wallClock(y, m, d, hh, mm) {
 /** One occurrence starting on local date (y, m, d): `{start, end}` in ms. */
 function occurrenceBounds(y, m, d, spec) {
   const start = wallClock(y, m, d, spec.startH, spec.startM);
-  let end = wallClock(y, m, d, spec.endH, spec.endM);
-  // A window whose end is not after its start crosses midnight.
-  if (end <= start) end = wallClock(y, m, d + 1, spec.endH, spec.endM);
+  // Whether the window crosses midnight is a property of the SPEC, not of the
+  // resolved instants: on a spring-forward day a wall time that does not exist
+  // resolves to the top of the next hour, so 02:10-02:50 becomes 03:00-03:00.
+  // Reading that as "end <= start" would stretch it to the next day; whether
+  // it crosses midnight is decided here, from the clock times it names.
+  const crossesMidnight = (spec.endH * 60 + spec.endM) <= (spec.startH * 60 + spec.startM);
+  const end = wallClock(y, m, d + (crossesMidnight ? 1 : 0), spec.endH, spec.endM);
   return { start, end };
 }
 
@@ -268,10 +275,13 @@ function expandSeries(series, fromMs = null, toMs = null) {
     const key = localDayKey(bounds.start);
     if (seen.has(key)) continue;
     if (fromMs != null && bounds.end <= fromMs) continue;
-    seen.add(key);
     const override = overrides[key] && typeof overrides[key] === "object" ? overrides[key] : null;
     const storedEndMs = override ? msOf(override.end) : null;
     const endMs = storedEndMs != null && storedEndMs > bounds.end ? storedEndMs : bounds.end;
+    // A window that does not cross midnight but resolves to no time at all
+    // (both ends inside the spring-forward gap) occupies nothing that day.
+    if (endMs <= bounds.start) continue;
+    seen.add(key);
     const status = series.status === "cancelled"
       ? "cancelled"
       : (override && ALL_STATUSES.includes(override.status) ? override.status : "booked");
@@ -575,23 +585,29 @@ function holdNamesLiveBooking(cal, hold, now) {
  * `{start, end, conflict}` intervals. `ignoreId` leaves one booking out (a
  * hold that names it is represented by it, not counted separately), which is
  * what an approval re-check needs: the booking being approved must not be
- * found in its own way. Throws `hold_corrupt` when the hold file cannot be
- * read: guessing an interval for it would be worse than refusing.
+ * found in its own way. `ignoreIds` leaves a whole list out (an occurrence id
+ * included) — the composed `hold` books over exactly the bookings it is about
+ * to preempt, so nothing is destroyed before the new hold exists. Throws
+ * `hold_corrupt` when the hold file cannot be read: guessing an interval for
+ * it would be worse than refusing.
  */
 function occupiedIntervals(cal, {
-  now = Date.now(), holdPath, from = null, to = null, ignoreId = null,
+  now = Date.now(), holdPath, from = null, to = null, ignoreId = null, ignoreIds = null,
 } = {}) {
   const expandFrom = from == null ? now - PRUNE_AFTER_MS : from;
   const expandTo = to == null ? now + GAP_HORIZON_MS : to;
+  const ignored = ignoreIds == null ? null : new Set(ignoreIds);
   const out = [];
   for (const booking of cal.bookings) {
     if (!booking || typeof booking !== "object") continue;
     if (ignoreId != null && booking.id === ignoreId) continue;
+    if (ignored && ignored.has(booking.id)) continue;
     if (approvalWithholdsTime(booking, now)) continue;
     const view = bookingForRead(booking, now);
     if (booking.recur) {
       for (const occ of expandSeries(view, expandFrom, expandTo)) {
         if (!LIVE_STATUSES.includes(occ.status)) continue;
+        if (ignored && ignored.has(`${view.id}@${occ.key}`)) continue;
         out.push({ start: occ.start, end: occ.end, conflict: occurrenceEntry(view, occ) });
       }
       continue;
@@ -721,7 +737,13 @@ function firstOccurrenceAtOrAfter(spec, now) {
  *
  * `start` is epoch ms, "now" (the `now` clock) or "asap" (the first free gap
  * long enough). Adjacent intervals are free; an evict booking is not exempt
- * from conflicts. Throws BookingConflictError naming the blocker.
+ * from conflicts. Throws BookingConflictError naming the blocker. A beside
+ * booking needs a positive `gtt_mb` and `host_ram_mb` (or it reserves
+ * nothing): without both it is refused with `beside_needs_footprint`.
+ *
+ * `ignoreIds` leaves those bookings (or `<series id>@<day>` occurrences) out
+ * of the conflict check, so a composed `hold` can book the time it is about to
+ * preempt without destroying anything first.
  *
  * A `daily` window creates ONE series row instead: `start` is the first
  * occurrence at or after `now`, `end` is null (open-ended) or the last
@@ -730,12 +752,17 @@ function firstOccurrenceAtOrAfter(spec, now) {
 export function bookLocked({
   owner, kind, mode = "exclusive", start, minutes, reason = "", allow = [],
   gtt_mb, host_ram_mb, hip_procs, evict = [], needs_approval = false,
-  daily, until, job_id, created_by, now = Date.now(), path = schedulePath(), holdPath,
+  daily, until, job_id, created_by, ignoreIds = [], now = Date.now(), path = schedulePath(), holdPath,
 } = {}) {
   const who = typeof owner === "string" ? owner.trim() : "";
   if (!who) throw badBooking("book: owner is required");
   if (!BOOKING_KINDS.includes(kind)) throw badBooking(`book: kind must be one of ${BOOKING_KINDS.join(" | ")}`);
   if (!BOOKING_MODES.includes(mode)) throw badBooking(`book: mode must be one of ${BOOKING_MODES.join(" | ")}`);
+  // A beside booking reserves part of the card for a job: without both numbers
+  // it reserves nothing, and the gate could not size a start beside it.
+  if (mode === "beside" && !(optionalNumber(gtt_mb) > 0 && optionalNumber(host_ram_mb) > 0)) {
+    throw besideNeedsFootprint("book");
+  }
   const cal = readCalendar(path);
   const dailySpec = daily == null || daily === "" ? null : parseDaily(daily);
   if (daily != null && daily !== "" && !dailySpec) throw badBooking("book: daily must be \"HH:MM-HH:MM\"");
@@ -761,7 +788,9 @@ export function bookLocked({
     startMs = first.start;
     endMs = lastBounds == null ? null : lastBounds.end;
     const checkToMs = endMs == null ? now + GAP_HORIZON_MS : endMs;
-    const intervals = occupiedIntervals(cal, { now, holdPath, from: startMs - DAY_MS, to: checkToMs + DAY_MS });
+    const intervals = occupiedIntervals(cal, {
+      now, holdPath, from: startMs - DAY_MS, to: checkToMs + DAY_MS, ignoreIds,
+    });
     const draft = {
       id: "draft", start: iso(startMs), recur: { daily: String(daily).trim() }, until: untilKey, occurrences: {},
     };
@@ -770,7 +799,7 @@ export function bookLocked({
     }
   } else if (start === "now" || start === "asap") {
     const intervals = occupiedIntervals(cal, {
-      now, holdPath, from: now - DAY_MS, to: now + GAP_HORIZON_MS,
+      now, holdPath, from: now - DAY_MS, to: now + GAP_HORIZON_MS, ignoreIds,
     });
     if (start === "now") startMs = now;
     else startMs = firstGap(intervals, mins, now);
@@ -780,7 +809,9 @@ export function bookLocked({
     startMs = msOf(start);
     if (startMs == null) throw badBooking("book: start must be epoch ms, \"now\" or \"asap\"");
     endMs = startMs + durationMs;
-    const intervals = occupiedIntervals(cal, { now, holdPath, from: startMs - DAY_MS, to: endMs + DAY_MS });
+    const intervals = occupiedIntervals(cal, {
+      now, holdPath, from: startMs - DAY_MS, to: endMs + DAY_MS, ignoreIds,
+    });
     assertFree(intervals, startMs, endMs);
   }
 
@@ -945,10 +976,15 @@ function nextLiveStartAfter(cal, view, now) {
  * `booking_not_active_status`; re-activating one's own active booking is
  * allowed. A `HoldConflictError` from the hold layer propagates untouched.
  *
+ * `takeOver` passes through to the hold layer: the caller has already decided
+ * that a foreign hold may be replaced (the composed `hold`, which preempts a
+ * `gpujob:` job). It makes the replacement one atomic rename, so there is no
+ * moment with no hold at all.
+ *
  * @returns the hold record written.
  */
 export function activateBookingLocked(id, {
-  owner, now = Date.now(), force = false, path = schedulePath(), holdPath,
+  owner, now = Date.now(), force = false, takeOver = false, path = schedulePath(), holdPath,
 } = {}) {
   const cal = readCalendar(path);
   const view = targetView(cal, id, now);
@@ -984,6 +1020,7 @@ export function activateBookingLocked(id, {
     host_ram_mb: view.host_ram_mb,
     hip_procs: view.hip_procs,
     force,
+    takeOver,
     now,
     path: holdPath || reservationPath(),
   });
@@ -1012,6 +1049,10 @@ export function activateBooking(id, options = {}) {
  * it. Caller holds the lock. `notAfter` is the next booked/active start, so a
  * lease can never run into the booking behind it.
  *
+ * The live hold must name THIS booking (or this occurrence) and belong to
+ * `owner`, and the booking must still be booked or active: a hold that names
+ * another booking is not this one's to extend.
+ *
  * @returns the hold record written.
  * @throws RangeError("renew_past_next_booking") and HoldConflictError props.
  */
@@ -1023,9 +1064,27 @@ export function renewBookingLocked(id, {
   if (view.target === "series") {
     throw codeError("booking_needs_occurrence", `booking ${id} is a daily series; name the occurrence (${id}@YYYY-MM-DD)`);
   }
+  if (!LIVE_STATUSES.includes(view.status)) {
+    throw codeError("booking_not_active_status", `booking ${id} is ${view.status} and cannot be renewed`);
+  }
+  // The lease belongs to the hold this booking NAMES: a hold that names another
+  // booking (or none) is not this booking's to renew, however its owner reads.
+  const holdFile = holdPath || reservationPath();
+  const current = readReservation({ path: holdFile, now });
+  if (current && !current.corrupt) {
+    if (String(owner || "") !== String(current.owner || "")) {
+      throw new HoldConflictError(current.owner, { expires_at: current.expires_at });
+    }
+    if (current.booking_id !== view.id) {
+      throw new HoldConflictError(current.owner, {
+        expires_at: current.expires_at,
+        message: `the live hold names booking ${current.booking_id || "none"}, not ${id}`,
+      });
+    }
+  }
   const notAfter = nextLiveStartAfter(cal, view, now);
   const hold = _renewHoldLocked({
-    owner, minutes, now, notAfter, force, path: holdPath || reservationPath(),
+    owner, minutes, now, notAfter, force, path: holdFile,
   });
   const expiresMs = msOf(hold.expires_at);
   if (expiresMs != null && (view.end == null || expiresMs > view.end)) {

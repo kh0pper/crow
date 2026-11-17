@@ -136,7 +136,7 @@ test("a hold that belongs to a booking is not double counted", () => {
   fresh();
   const linked = book({
     owner: "runner", kind: "gpu-job", mode: "beside", start: at(10), minutes: 60,
-    gtt_mb: 50_000, now: NOW,
+    gtt_mb: 50_000, host_ram_mb: 30_000, now: NOW,
   });
   // The lease outlives the booking's end; only the booking's [10:00, 11:00)
   // occupies the calendar, the hold is represented by it.
@@ -164,7 +164,7 @@ test("evict booking is pending approval; approve flips it with by and at", () =>
   fresh();
   const b = book({
     owner: "alex", kind: "gpu-job", mode: "beside", start: at(10), minutes: 60,
-    evict: ["crow-chat"], gtt_mb: 40_000, now: NOW,
+    evict: ["crow-chat"], gtt_mb: 40_000, host_ram_mb: 30_000, now: NOW,
   });
   assert.equal(b.approval.state, "pending");
   assert.deepEqual(b.evict, ["crow-chat"]);
@@ -180,7 +180,7 @@ test("approval pending past 12 h reads as declined", () => {
   fresh();
   const b = book({
     owner: "alex", kind: "gpu-job", mode: "beside", start: at(10), minutes: 60,
-    needs_approval: true, now: NOW,
+    needs_approval: true, gtt_mb: 40_000, host_ram_mb: 30_000, now: NOW,
   });
   assert.equal(b.approval.state, "pending");
   const before = readFileSync(SCHEDULE, "utf8");
@@ -333,7 +333,10 @@ test("daily 02:15-04:15 blocks a 03:00 booking on any day", () => {
 test("daily 23:30-01:00 crosses midnight", () => {
   fresh();
   const now = local(2026, 10, 27, 12);
-  const series = book({ owner: "runner", kind: "gpu-job", mode: "beside", daily: "23:30-01:00", now });
+  const series = book({
+    owner: "runner", kind: "gpu-job", mode: "beside", daily: "23:30-01:00",
+    gtt_mb: 40_000, host_ram_mb: 30_000, now,
+  });
   const [occ] = listBookings({ from: local(2026, 10, 27, 22), to: local(2026, 10, 28, 2), now });
   assert.equal(occ.id, `${series.id}@2026-10-27`);
   assert.equal(occ.series_id, series.id);
@@ -562,7 +565,8 @@ test("renewBooking extends end so findGap does not hand out the running job's ti
   fresh();
   const start = local(2026, 10, 27, 10);
   const b = book({
-    owner: "runner", kind: "gpu-job", mode: "beside", start, minutes: 60, now: local(2026, 10, 27, 9),
+    owner: "runner", kind: "gpu-job", mode: "beside", start, minutes: 60,
+    gtt_mb: 40_000, host_ram_mb: 30_000, now: local(2026, 10, 27, 9),
   });
   activateBooking(b.id, { owner: "runner", now: start });
   const hold = renewBooking(b.id, { owner: "runner", minutes: 120, now: local(2026, 10, 27, 10, 30) });
@@ -577,7 +581,7 @@ test("renewBooking refuses to run into the next booking", () => {
   const now = local(2026, 10, 27, 9);
   const a = book({
     owner: "runner", kind: "gpu-job", mode: "beside", start: local(2026, 10, 27, 10),
-    minutes: 60, now,
+    minutes: 60, gtt_mb: 40_000, host_ram_mb: 30_000, now,
   });
   book({ owner: "alex", kind: "window", start: local(2026, 10, 27, 12), minutes: 60, now });
   activateBooking(a.id, { owner: "runner", now: local(2026, 10, 27, 10) });
@@ -614,12 +618,12 @@ test("a declined or expired-pending booking does not block the calendar", () => 
   const now = local(2026, 10, 27, 9);
   const declined = book({
     owner: "alex", kind: "gpu-job", mode: "beside", start: local(2026, 10, 27, 10),
-    minutes: 60, needs_approval: true, now,
+    minutes: 60, needs_approval: true, gtt_mb: 40_000, host_ram_mb: 30_000, now,
   });
   declineBooking(declined.id, { by: "alex", now });
   book({
     owner: "alex", kind: "gpu-job", mode: "beside", start: local(2026, 10, 27, 12),
-    minutes: 60, needs_approval: true, now,
+    minutes: 60, needs_approval: true, gtt_mb: 40_000, host_ram_mb: 30_000, now,
   });
   // 13 h later the second request is past the 12 h TTL and reads as declined.
   const laterNow = now + 13 * 3_600_000;
@@ -632,6 +636,93 @@ test("a declined or expired-pending booking does not block the calendar", () => 
   });
   assert.ok(first.id);
   assert.ok(second.id);
+});
+
+test("a beside booking needs both footprint numbers", () => {
+  fresh();
+  for (const over of [{}, { gtt_mb: 50_000 }, { host_ram_mb: 50_000 }, { gtt_mb: 0, host_ram_mb: 50_000 }]) {
+    let err;
+    try {
+      book({
+        owner: "runner", kind: "gpu-job", mode: "beside", start: at(10), minutes: 60, now: NOW, ...over,
+      });
+    } catch (e) { err = e; }
+    assert.equal(err && err.code, "beside_needs_footprint", JSON.stringify(over));
+  }
+  assert.deepEqual(listBookings({ now: NOW }), [], "nothing was booked");
+  // An exclusive booking reserves the whole box and needs no footprint.
+  assert.ok(book({ owner: "runner", kind: "gpu-job", mode: "exclusive", start: at(10), minutes: 60, now: NOW }).id);
+});
+
+// ---------------------------------------------------------------------------
+// Renewal belongs to the booking the live hold names.
+
+test("renewBooking refuses a hold that names another booking", () => {
+  fresh();
+  const now = local(2026, 10, 27, 9);
+  const a = book({
+    owner: "runner", kind: "gpu-job", mode: "beside", start: local(2026, 10, 27, 10),
+    minutes: 60, gtt_mb: 40_000, host_ram_mb: 30_000, now,
+  });
+  const b = book({
+    owner: "runner", kind: "gpu-job", mode: "beside", start: local(2026, 10, 27, 12),
+    minutes: 60, gtt_mb: 40_000, host_ram_mb: 30_000, now,
+  });
+  activateBooking(a.id, { owner: "runner", now: local(2026, 10, 27, 10) });
+  const later = local(2026, 10, 27, 10, 5);
+  let err;
+  try { renewBooking(b.id, { owner: "runner", minutes: 20, now: later }); } catch (e) { err = e; }
+  assert.ok(err instanceof HoldConflictError);
+  assert.equal(err.code, "box_held");
+  assert.match(err.message, new RegExp(a.id));
+  // Neither the hold nor the other booking moved.
+  assert.equal(readReservation({ now: later }).booking_id, a.id);
+  assert.equal(readReservation({ now: later }).expires_at, iso(local(2026, 10, 27, 11)));
+  assert.equal(listBookings({ now }).find((x) => x.id === b.id).end, iso(local(2026, 10, 27, 13)));
+});
+
+test("renewBooking refuses a booking that is no longer live", () => {
+  fresh();
+  const now = local(2026, 10, 27, 9);
+  const a = book({
+    owner: "runner", kind: "gpu-job", mode: "beside", start: local(2026, 10, 27, 10),
+    minutes: 60, gtt_mb: 40_000, host_ram_mb: 30_000, now,
+  });
+  activateBooking(a.id, { owner: "runner", now: local(2026, 10, 27, 10) });
+  const later = local(2026, 10, 27, 10, 10);
+  setBookingStatus(a.id, "done", { now: later });
+  let err;
+  try { renewBooking(a.id, { owner: "runner", minutes: 20, now: later }); } catch (e) { err = e; }
+  assert.equal(err && err.code, "booking_not_active_status");
+  assert.equal(readReservation({ now: later }).expires_at, iso(local(2026, 10, 27, 11)), "the lease is untouched");
+});
+
+// ---------------------------------------------------------------------------
+// A daily window decides whether it crosses midnight from its OWN clock
+// times, not from the instants the spring-forward gap resolves them to.
+
+test("02:10-02:50 on a spring-forward day does not become a 23 h block", () => {
+  fresh();
+  // 2027-03-14 is the spring-forward night in America/Chicago: neither 02:10
+  // nor 02:50 exists, so both ends resolve to 03:00 local.
+  const now = local(2027, 3, 13, 12);
+  const series = book({
+    owner: "pi-lab-nightly-audit", kind: "audit", mode: "exclusive", daily: "02:10-02:50", now,
+  });
+  const occ = listBookings({ from: local(2027, 3, 14), to: local(2027, 3, 15), now })
+    .find((entry) => entry.id === `${series.id}@2027-03-14`);
+  if (occ) assert.equal(Date.parse(occ.end), Date.parse(occ.start), "it occupies no time that day");
+  // The rest of the day stays free, including 03:00 (where the collapsed
+  // window starts) and 05:00.
+  assert.ok(book({ owner: "sam", kind: "manual", start: local(2027, 3, 14, 3), minutes: 20, now }).id);
+  assert.ok(book({ owner: "sam", kind: "manual", start: local(2027, 3, 14, 5), minutes: 30, now }).id);
+  // The next night's window is real again and still blocks.
+  let err;
+  try {
+    book({ owner: "sam", kind: "manual", start: local(2027, 3, 15, 2, 30), minutes: 10, now });
+  } catch (e) { err = e; }
+  assert.ok(err instanceof BookingConflictError);
+  assert.equal(err.conflict.id, `${series.id}@2027-03-15`);
 });
 
 // A pending approval holds its slot: approving it later can never double-book

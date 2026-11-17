@@ -14,7 +14,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -309,4 +309,66 @@ test("bad range is 400", async () => {
       assert.equal((await r.json()).code, "bad_range", query);
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// A conflict found while approving, and an unreadable hold, keep their own
+// statuses (409 with the blocker, 503) instead of the generic 500.
+
+test("approving a booking that now conflicts answers 409 booking_conflict and leaves it pending", async () => {
+  resetState();
+  const h = await harness();
+  const token = "approve-conflict-session-token";
+  await seedSession(h.db, token);
+  const pending = book({
+    owner: "alex", kind: "gpu-job", mode: "exclusive", start: Date.now() + HOUR, minutes: 60,
+    evict: ["crow-chat"], created_by: "test",
+  });
+  assert.equal(pending.approval.state, "pending");
+  // A row written straight into the calendar file, the way a second writer
+  // that never went through book() would: it overlaps the pending slot.
+  const raw = JSON.parse(readFileSync(schedulePath(), "utf8"));
+  const startMs = Date.parse(pending.start);
+  const intruder = {
+    id: "bk_00000000feed", owner: "sam", kind: "manual", mode: "exclusive",
+    start: new Date(startMs + 15 * 60_000).toISOString(),
+    end: new Date(startMs + 45 * 60_000).toISOString(),
+    reason: "", allow: [], evict: [], approval: { state: "not_needed" },
+    status: "booked", created_by: "sam", created_at: new Date().toISOString(),
+  };
+  raw.bookings.push(intruder);
+  writeFileSync(schedulePath(), JSON.stringify(raw, null, 2) + "\n");
+
+  await withBoxServer(async (base) => {
+    const r = await post(base, `/api/box/bookings/${pending.id}/approve`, authHeaders(token));
+    assert.equal(r.status, 409);
+    const body = await r.json();
+    assert.equal(body.code, "booking_conflict");
+    assert.equal(body.conflict.id, intruder.id, "the answer names the booking in the way");
+    assert.equal(body.conflict.owner, "sam");
+  });
+
+  const stored = listBookings({ from: Date.now() - HOUR, to: Date.now() + 6 * HOUR });
+  assert.equal(stored.find((b) => b.id === pending.id).approval.state, "pending", "it stays pending");
+});
+
+test("a corrupt hold file answers 503 hold_corrupt on approve", async () => {
+  resetState();
+  const h = await harness();
+  const token = "hold-corrupt-session-token";
+  await seedSession(h.db, token);
+  const pending = book({
+    owner: "alex", kind: "manual", mode: "exclusive", start: Date.now() + HOUR, minutes: 30,
+    needs_approval: true, reason: "ask first", created_by: "test",
+  });
+  writeFileSync(reservationPath(), "{ this is not json", "utf8");
+
+  await withBoxServer(async (base) => {
+    const r = await post(base, `/api/box/bookings/${pending.id}/approve`, authHeaders(token));
+    assert.equal(r.status, 503);
+    assert.equal((await r.json()).code, "hold_corrupt");
+  });
+
+  const stored = listBookings({ from: Date.now() - HOUR, to: Date.now() + 6 * HOUR });
+  assert.equal(stored.find((b) => b.id === pending.id).approval.state, "pending");
 });

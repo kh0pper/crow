@@ -315,3 +315,54 @@ test("daily book then calendar --markdown shows the series", () => {
   assert.ok(rows[0].includes("pi-lab-nightly-audit"));
   assert.ok(rows[0].includes("audit"));
 });
+
+// ---------------------------------------------------------------------------
+// A beside hold reserves part of the card: it must say how much.
+
+test("hold --mode beside without a footprint exits 1 and writes nothing", () => {
+  const p = freshPaths();
+  const r = runIn(p, "hold", "--owner", "gpujob:abc", "--kind", "gpu-job", "--mode", "beside", "--minutes", "30");
+  assert.equal(r.code, 1);
+  assert.match(r.err, /beside_needs_footprint/);
+  assert.equal(existsSync(p.holdPath), false, "no hold file");
+  const cal = runIn(p, "calendar", "--json");
+  assert.equal(cal.code, 0, cal.err);
+  assert.deepEqual(JSON.parse(cal.out), [], "no ghost booking");
+  const ok = runIn(p, "hold", "--owner", "gpujob:abc", "--kind", "gpu-job", "--mode", "beside",
+    "--minutes", "30", "--gtt-mb", "50000", "--host-ram-mb", "30000");
+  assert.equal(ok.code, 0, ok.err);
+  const rec = JSON.parse(readFileSync(p.holdPath, "utf8"));
+  assert.equal(rec.mode, "beside");
+  assert.equal(rec.gtt_mb, 50000);
+  assert.equal(rec.host_ram_mb, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// Nothing is destroyed before the new hold exists: the overlapped bookings are
+// marked only after the hold was written.
+
+test("a hold that cannot write the hold file leaves the preempted booking booked", () => {
+  const p = freshPaths();
+  const job = runIn(p, "book", "--owner", "gpujob:abc", "--kind", "gpu-job", "--start", "now", "--minutes", "120");
+  assert.equal(job.code, 0, job.err);
+  const jobId = idOf(job.out);
+  // The hold file's parent is a regular file, so the hold write (which happens
+  // after the new booking exists) fails.
+  const blocker = join(dirname(p.holdPath), "not-a-directory");
+  writeFileSync(blocker, "x");
+  const r = runIn(
+    { holdPath: join(blocker, "reservation.json"), schedPath: p.schedPath },
+    "hold", "--owner", "alex", "--reason", "urgent", "--minutes", "30",
+  );
+  assert.equal(r.code, 1);
+  const cal = JSON.parse(runIn(p, "calendar", "--json").out);
+  assert.equal(
+    cal.find((booking) => booking.id === jobId).status, "booked",
+    "the booking it would have preempted is untouched",
+  );
+  assert.deepEqual(
+    cal.filter((booking) => booking.owner === "alex" && booking.status !== "cancelled"),
+    [],
+    "the booking that could not activate was cancelled",
+  );
+});

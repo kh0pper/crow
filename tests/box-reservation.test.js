@@ -23,7 +23,8 @@ import {
   ReservedError, DEFAULT_ALLOW, DEFAULT_MAX_HOLD_MS, reservationPath,
   schedulePath, lockPath, withReservationLock, withReservationLockAsync,
   activateHold, renewHold, releaseHold, HoldConflictError, startDecision,
-  _activateHoldLocked, _renewHoldLocked, _releaseHoldLocked,
+  processStartMs, _activateHoldLocked, _renewHoldLocked, _releaseHoldLocked,
+  _setProcessStartForTest, _setBeforeEmptyLockStealForTest,
 } from "../servers/gateway/box-reservation.js";
 
 // The box-calendar lock lives beside the CALENDAR file, and the activate /
@@ -573,6 +574,11 @@ test("gpu-job hold renews past 8 h of total span", () => {
 // snapshot, `peak` the provider's declared footprint from the host profile.
 
 const PROFILE = { safety_margin_mb: 8192, ram_floor_mb: 12288, gtt_total_mb: 131072 };
+// These fixtures describe a hold that began at T0 while this process has been
+// up since a minute before it, so the admitted-peak tally counts as known. The
+// gateway-restart case sets its own process start (see the test below).
+const PROC = T0 - 60_000;
+_setProcessStartForTest(PROC);
 
 /** A beside hold whose job has booked 50000 mb of GTT and 30000 mb of RAM. */
 function besideReservation(over = {}) {
@@ -824,4 +830,172 @@ test("inner locked functions run under one outer lock without box_lock_timeout",
   assert.equal(out.renewed.expires_at, iso(T0 + 60_000 + 1_200_000));
   assert.equal(out.released, true);
   assert.equal(existsSync(h.path), false);
+});
+
+// --- a gateway restart under a live beside hold -----------------------------
+
+test("restart under a live beside hold sizes the job at its full booking", () => {
+  assert.equal(processStartMs(), PROC, "the seam is what the beside fixtures rely on");
+  // The hold began a minute before this gateway process did. Providers started
+  // beside it before the restart are not in the admitted tally, so the growth
+  // the counters show since activation cannot be told apart from the job's own.
+  const r = besideReservation({
+    gtt_mb: 60000, host_ram_mb: 30000,
+    gtt_used_at_activation_mb: 20000, mem_available_at_activation_mb: 100000,
+  });
+  const live = { gttUsedMb: 70000, gttTotalMb: 131072, memAvailableMb: 95000, at: T0 };
+  const processStart = T0 + 60_000;
+  const budget = live.gttTotalMb - PROFILE.safety_margin_mb;
+  // Read as the job's own progress, 50000 of its 60000 would look taken and
+  // this peak would be admitted into room the job has not taken yet.
+  assert.ok(live.gttUsedMb + 10000 + PEAK.gtt_peak_mb <= budget, "the understated reading would admit it");
+  assert.deepEqual(
+    startDecision(r, "crow-chat", { peak: PEAK, live, profile: PROFILE, now: T0, processStart }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+  // The over-budget report is suppressed for the same reason: that growth is
+  // not the job's to answer for.
+  const tight = besideReservation({
+    gtt_mb: 40000, host_ram_mb: 30000,
+    gtt_used_at_activation_mb: 20000, mem_available_at_activation_mb: 100000,
+  });
+  const small = { gtt_peak_mb: 1000, host_ram_peak_mb: 1000 };
+  const d = startDecision(tight, "crow-chat", { peak: small, live, profile: PROFILE, now: T0, processStart });
+  assert.deepEqual(d, { allowed: true, reason: null });
+  assert.equal(d.job_over_budget, undefined, "never called over budget on an unknown tally");
+  // The full booking still sizes the start, and a hold that began while this
+  // process was up keeps the tally.
+  assert.deepEqual(
+    startDecision(r, "crow-chat", { peak: { gtt_peak_mb: 20000, host_ram_peak_mb: 1000 }, live, profile: PROFILE, now: T0, processStart }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+  assert.deepEqual(
+    startDecision(r, "crow-small", { peak: { gtt_peak_mb: 5000, host_ram_peak_mb: 1000 }, live, profile: PROFILE, now: T0, processStart: PROC }),
+    { allowed: true, reason: null },
+  );
+});
+
+// --- a start admitted but not yet loaded still reserves its room ------------
+
+test("A admitted, snapshot unchanged, B refused", () => {
+  // The job was activated before either provider loaded: nothing has moved in
+  // the live counters, so its whole booking is still to come.
+  const r = besideReservation({
+    gtt_mb: 60000, host_ram_mb: 30000,
+    gtt_used_at_activation_mb: 20000, mem_available_at_activation_mb: 110000,
+  });
+  const live = { gttUsedMb: 20000, gttTotalMb: 131072, memAvailableMb: 110000, at: T0 };
+  const peak = { gtt_peak_mb: 30000, host_ram_peak_mb: 2000 };
+  const budget = live.gttTotalMb - PROFILE.safety_margin_mb;
+  assert.ok(live.gttUsedMb + 60000 + peak.gtt_peak_mb <= budget, "A fits beside the job");
+  assert.deepEqual(
+    startDecision(r, "crow-a", { peak, live, profile: PROFILE, now: T0 }),
+    { allowed: true, reason: null },
+  );
+  // A was admitted and has not loaded yet (the snapshot has not moved), so its
+  // peak is committed: 20000 (baseline) + 60000 (job) + 30000 (A) + 30000 (B).
+  assert.deepEqual(
+    startDecision(r, "crow-b", { peak, live, profile: PROFILE, admitted: peak, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+});
+
+// --- a beside hold without a footprint reserves nothing --------------------
+
+test("a beside hold without a footprint is refused", () => {
+  const h = freshHold();
+  for (const over of [{}, { gtt_mb: 50000 }, { host_ram_mb: 30000 }, { gtt_mb: 0, host_ram_mb: 30000 }]) {
+    assert.throws(
+      () => activateHold({
+        owner: "gpujob-7f3a", minutes: 20, mode: "beside", kind: "gpu-job",
+        path: h.path, now: T0, lock: h.lock, ...over,
+      }),
+      (e) => e && e.code === "beside_needs_footprint",
+      JSON.stringify(over),
+    );
+  }
+  assert.equal(existsSync(h.path), false, "a refused beside hold writes nothing");
+  const rec = activateHold({
+    owner: "gpujob-7f3a", minutes: 20, mode: "beside", kind: "gpu-job",
+    gtt_mb: 50000, host_ram_mb: 30000, path: h.path, now: T0, lock: h.lock,
+  });
+  assert.equal(rec.mode, "beside");
+  // An exclusive hold never needs a footprint.
+  const h2 = freshHold();
+  assert.equal(activateHold({ owner: "alex", minutes: 20, path: h2.path, now: T0, lock: h2.lock }).owner, "alex");
+});
+
+test("startDecision refuses a beside hold with no footprint", () => {
+  for (const over of [{ gtt_mb: null }, { host_ram_mb: null }, { gtt_mb: null, host_ram_mb: null }]) {
+    assert.deepEqual(
+      startDecision(besideReservation(over), "crow-chat", { peak: PEAK, live: liveAt(T0), profile: PROFILE, now: T0 }),
+      { allowed: false, reason: "gpu_job_beside" },
+      JSON.stringify(over),
+    );
+  }
+  // The allow list does not depend on the job's footprint.
+  assert.deepEqual(
+    startDecision(besideReservation({ gtt_mb: null }), "crow-embed", { peak: null, live: null, profile: null, now: T0 }),
+    { allowed: true, reason: null },
+  );
+});
+
+// --- the lock across a reboot, the empty-lock steal, and re-entrancy --------
+
+test("a lock file older than 60 s is stale even when its pid is alive", () => {
+  const d = mkdtempSync(join(tmpdir(), "box-lock-old-"));
+  const lockFile = join(d, "crow-box-schedule.lock");
+  // A rebooted box's leftover lock: the pid still exists (an unrelated
+  // process), but no critical section lasts a minute.
+  writeFileSync(lockFile, String(process.pid));
+  const past = new Date(Date.now() - 90_000);
+  utimesSync(lockFile, past, past);
+  const started = Date.now();
+  assert.equal(withReservationLock(() => "inside", { path: lockFile, timeoutMs: 2000 }), "inside");
+  assert.ok(Date.now() - started < 1000, `took the lock at once (${Date.now() - started} ms)`);
+  assert.equal(existsSync(lockFile), false, "the stolen lock was released again");
+});
+
+test("an empty lock replaced between the age check and the steal is put back", () => {
+  // The steal's rename is content-blind: a racer (or a creator finishing its
+  // pid write) can put a NEW file at the path in that window, and destroying it
+  // would hand the lock to two processes.
+  const d = mkdtempSync(join(tmpdir(), "box-lock-replaced-"));
+  const lockFile = join(d, "crow-box-schedule.lock");
+  writeFileSync(lockFile, "");
+  const past = new Date(Date.now() - 10_000);
+  utimesSync(lockFile, past, past);
+  let swaps = 0;
+  _setBeforeEmptyLockStealForTest(() => {
+    swaps++;
+    unlinkSync(lockFile);
+    writeFileSync(lockFile, ""); // young again: someone else's lock
+  });
+  try {
+    assert.throws(
+      () => withReservationLock(() => "must not run", { path: lockFile, timeoutMs: 400 }),
+      (e) => e && e.code === "box_lock_timeout",
+    );
+  } finally {
+    _setBeforeEmptyLockStealForTest(null);
+  }
+  assert.equal(swaps, 1, "only the genuinely old file was considered for a steal");
+  assert.equal(existsSync(lockFile), true, "the young lock was put back, not destroyed");
+});
+
+test("the sync lock refuses to wait on itself (re-entrancy)", () => {
+  const d = mkdtempSync(join(tmpdir(), "box-lock-reentrant-"));
+  const lockFile = join(d, "crow-box-schedule.lock");
+  let inner = null;
+  const started = Date.now();
+  withReservationLock(() => {
+    try {
+      withReservationLock(() => "must not run", { path: lockFile, timeoutMs: 5000 });
+    } catch (e) {
+      inner = e;
+    }
+  }, { path: lockFile, timeoutMs: 5000 });
+  assert.ok(inner, "the nested acquire must not be silent");
+  assert.equal(inner.code, "box_lock_reentrant");
+  assert.ok(Date.now() - started < 1000, `it said so at once (${Date.now() - started} ms)`);
 });

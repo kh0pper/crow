@@ -13,7 +13,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as orch from "../servers/gateway/gpu-orchestrator.js";
-import { ReservedError } from "../servers/gateway/box-reservation.js";
+import { ReservedError, _setProcessStartForTest } from "../servers/gateway/box-reservation.js";
+
+// The beside holds below began on 2026-09-04. A hold that began BEFORE the
+// gateway process is the unknown-tally case (sized at its full booking), so
+// tell the gate this process has been up since before the fixtures — every
+// case here is about a tally this process itself built.
+_setProcessStartForTest(Date.parse("2026-01-01T00:00:00Z"));
 
 const RES = Object.freeze({
   owner: "win", reason: "bench", started_at: "2026-09-04T20:00:00.000Z", expires_at: "2026-09-04T23:00:00.000Z",

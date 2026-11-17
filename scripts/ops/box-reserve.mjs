@@ -30,8 +30,12 @@
  * owner's overlapping bookings `done` (a re-hold replaces your own hold),
  * preempts a `gpujob:` owner's gpu-job booking or live hold, refuses to
  * overlap anyone else's window / manual / audit booking or hold, then books
- * and activates. A failure after the booking was written cancels it, so a
- * refused hold never leaves a ghost booking.
+ * and activates. The new booking is written FIRST, over exactly the bookings
+ * this hold preempts (`ignoreIds`), and the activation replaces the old hold
+ * in one atomic rename (`takeOver`) — so nothing is destroyed up front, and
+ * there is never a moment with no hold at all. Only after both succeed is the
+ * overlap marked done or lapsed; if activation fails the new booking is
+ * cancelled and every other booking and the old hold are left as they were.
  *
  * A bare `release` (no --owner) frees the current hold when its kind is null
  * (a legacy writer) or "manual", and refuses a gpu-job hold without --force;
@@ -427,17 +431,12 @@ function holdCmd(args) {
     }
 
     // Our own overlapping bookings give way (a re-hold replaces your own), and
-    // so does anything this hold may preempt.
-    for (const entry of overlapping) {
-      setBookingStatusLocked(entry.id, entry.owner === owner ? "done" : "lapsed", { path: calPath, now });
-    }
-    if (current) {
-      _releaseHoldLocked(
-        foreignHold ? { owner: foreignHold.owner, force: true, path: holdPath } : { owner, path: holdPath },
-      );
-    }
-
+    // so does anything this hold may preempt — but only AFTER the new booking
+    // and the new hold exist. Booking over them now (`ignoreIds`) and activating
+    // with `takeOver` (one atomic rename, no gap) means a failure here leaves
+    // the old hold and every booking untouched.
     let booking = null;
+    let rec = null;
     try {
       booking = bookLocked({
         owner,
@@ -451,12 +450,14 @@ function holdCmd(args) {
         host_ram_mb: hostRamMb,
         hip_procs: hipProcs,
         created_by: owner,
+        ignoreIds: overlapping.map((entry) => entry.id),
         now,
         path: calPath,
         holdPath,
       });
-      const rec = activateBookingLocked(booking.id, { owner, now, force, path: calPath, holdPath });
-      console.log(`held by ${rec.owner} until ${rec.expires_at} (${holdPath})`);
+      rec = activateBookingLocked(booking.id, {
+        owner, now, force, takeOver: true, path: calPath, holdPath,
+      });
     } catch (err) {
       // No ghost booking: a hold that could not activate leaves nothing behind.
       if (booking) {
@@ -466,6 +467,10 @@ function holdCmd(args) {
       }
       throw err;
     }
+    for (const entry of overlapping) {
+      setBookingStatusLocked(entry.id, entry.owner === owner ? "done" : "lapsed", { path: calPath, now });
+    }
+    console.log(`held by ${rec.owner} until ${rec.expires_at} (${holdPath})`);
   });
   return 0;
 }
