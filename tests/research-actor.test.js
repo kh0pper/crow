@@ -162,12 +162,22 @@ test("the wiring passes the actor at every construction site", () => {
 
   const exec = read("servers/gateway/ai/tool-executor.js");
   assert.match(exec, /kind: "bot", id: boundBotId/);
-  // The project servers and the sharing server all get the bound bot as their base actor; the
-  // operator's voice bot gets the frozen factory actor instead (it keeps operator scope there).
+  // The project servers, the sharing server and the blog server all get the bound bot as their base
+  // actor; the operator's voice bot gets the frozen factory actor instead (it keeps operator scope
+  // there, and the blog/sharing guards read that frozen marker).
   assert.match(exec, /import \{ operatorVoiceActor \} from "\.\.\/\.\.\/shared\/project-share-scope\.js"/);
   assert.match(exec, /const baseActor = boundBotId \? \(boundBotIsVoice \? operatorVoiceActor\(\) : \{ kind: "bot", id: boundBotId \}\) : undefined/);
-  assert.match(exec, /category === "storage" \|\| category === "sharing" \? \{ baseActor \}/);
+  assert.match(exec, /category === "storage" \|\| category === "sharing" \|\| category === "blog" \? \{ baseActor \}/);
   assert.match(exec, /category === "memory" \|\| category === "projects" \? \{ actor: baseActor \}/);
+  assert.match(exec, /category === "projects" \|\| category === "memory" \|\| category === "storage" \|\| category === "sharing" \|\| category === "blog" \? baseActor : undefined/);
+
+  // The blog server is one of the servers that scopes by actor, and the router and the core server
+  // hand it the actor they resolved, exactly as they do for storage and sharing.
+  const blogServer = read("servers/blog/server.js");
+  assert.match(blogServer, /const baseActor = options\.baseActor \|\| actorFromEnv\(process\.env\)/);
+  assert.match(blogServer, /guardBlogServer\(server, \{ baseActor, onCallActor: options\.onCallActor \}\)/);
+  assert.match(router, /category === "storage" \|\| category === "sharing" \|\| category === "blog" \? \{ baseActor: options\.actor \|\| UNKNOWN \}/);
+  assert.match(core, /name === "storage" \|\| name === "blog" \? factory\(dbPath, \{ baseActor: envActor \}\)/);
 });
 
 test("the server readies its own schema at construction", () => {

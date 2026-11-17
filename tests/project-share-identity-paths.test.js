@@ -632,12 +632,12 @@ test("the storage server keeps an operator-voice base actor as the frozen single
 
 // --- the gateway executor's base actor -------------------------------------
 
-test("an executor bound to the voice bot gives projects, memory and storage operator scope", async () => {
+test("an executor bound to the voice bot gives projects, memory, storage and blog operator scope", async () => {
   const { createToolExecutor } = await import("../servers/gateway/ai/tool-executor.js");
   const op = share.operatorVoiceActor();
   const voice = createToolExecutor({ botDef: { bot_id: CROW_VOICE_BOT_ID, kind: "voice", display_name: "Crow" } });
   try {
-    for (const category of ["projects", "memory", "storage"]) {
+    for (const category of ["projects", "memory", "storage", "blog"]) {
       const actor = voice.baseActorFor(category);
       assert.equal(actor, op, category);
       assert.equal(share.isOperatorVoice(actor), true, category);
@@ -657,7 +657,7 @@ test("a def that merely says kind:'voice' on another bot's id is still a plain b
   // A bot writes its own def, so `kind` is the bot's own word and never a credential.
   const ex = createToolExecutor({ botDef: { bot_id: "other.bot", kind: "voice", display_name: "Not Crow" } });
   try {
-    for (const category of ["projects", "memory", "storage"]) {
+    for (const category of ["projects", "memory", "storage", "blog"]) {
       const actor = ex.baseActorFor(category);
       assert.deepEqual(actor, { kind: "bot", id: "other.bot" }, category);
       assert.equal(share.isOperatorVoice(actor), false, category);
@@ -667,11 +667,11 @@ test("a def that merely says kind:'voice' on another bot's id is still a plain b
   }
 });
 
-test("an executor bound to another bot gives projects, memory and storage a plain bot actor", async () => {
+test("an executor bound to another bot gives projects, memory, storage and blog a plain bot actor", async () => {
   const { createToolExecutor } = await import("../servers/gateway/ai/tool-executor.js");
   const ex = createToolExecutor({ botDef: { bot_id: BOT, display_name: "Glasses" } });
   try {
-    for (const category of ["projects", "memory", "storage"]) {
+    for (const category of ["projects", "memory", "storage", "blog"]) {
       const actor = ex.baseActorFor(category);
       assert.deepEqual(actor, { kind: "bot", id: BOT }, category);
       assert.equal(share.isOperatorVoice(actor), false, category);
@@ -682,7 +682,7 @@ test("an executor bound to another bot gives projects, memory and storage a plai
   // An unbound executor passes none: its servers resolve their own env (the operator's chat).
   const unbound = createToolExecutor({});
   try {
-    for (const category of ["projects", "memory", "storage"]) {
+    for (const category of ["projects", "memory", "storage", "blog"]) {
       assert.equal(unbound.baseActorFor(category), undefined, category);
     }
   } finally {
@@ -715,6 +715,8 @@ test("the servers the executor actually builds hold the base actor, voice bot an
     assert.deepEqual((await buildCategory(other, "projects")).research.actor, { kind: "bot", id: BOT }, "projects");
     assert.equal((await buildCategory(voice, "storage")).storage.actor, op, "storage");
     assert.deepEqual((await buildCategory(other, "storage")).storage.actor, { kind: "bot", id: BOT }, "storage");
+    assert.equal((await buildCategory(voice, "blog")).blog.actor, op, "blog");
+    assert.deepEqual((await buildCategory(other, "blog")).blog.actor, { kind: "bot", id: BOT }, "blog");
 
     const stats = async (ex) => (await ex.executeTool("crow_memory", { action: "memory_stats", params: {} })).result;
     assert.match(await stats(voice), /Total memories: 1/, "the operator-voice base actor reads the project-less memory");
@@ -811,8 +813,10 @@ test("a router gives the memory and storage servers the same base actor it gives
     // The mount's own actor object, not a copy of it.
     assert.equal((await built(ownerRouter, owner, "projects")).research.actor, OWNER, "projects");
     assert.equal((await built(ownerRouter, owner, "storage")).storage.actor, OWNER, "storage");
+    assert.equal((await built(ownerRouter, owner, "blog")).blog.actor, OWNER, "blog");
     assert.equal((await built(botRouter, bot, "projects")).research.actor.kind, "bot", "projects");
     assert.equal((await built(botRouter, bot, "storage")).storage.actor.id, BOT, "storage");
+    assert.equal((await built(botRouter, bot, "blog")).blog.actor.id, BOT, "blog");
 
     // Memory reports no actor of its own: the writing rules refuse a bot base and only a bot base,
     // so the refusal is what shows which base actor the memory server holds.
@@ -825,5 +829,57 @@ test("a router gives the memory and storage servers the same base actor it gives
   } finally {
     try { await owner.close(); } catch {}
     try { await bot.close(); } catch {}
+  }
+});
+
+// A bot session mounts the router ONCE, built with that bot's actor — the way the blog category is
+// built now. A call carrying no `_meta` at all (the ordinary case for a local MCP client) is still
+// that bot's call, so the blog server must be constructed with the bot as its base actor: without it
+// the base actor is whatever the process env says, which for the gateway is nobody in particular.
+test("a router built for a bot actor refuses crow_blog create_post with no per-call _meta", async () => {
+  const { createRouterServer } = await import("../servers/gateway/router.js");
+  const { OWNER } = actorMod;
+  const OWNER_ONLY = "Error: That tool is for the operator only.";
+  const title = "A router blog post " + Date.now().toString(36);
+
+  const botRouter = createRouterServer({ actor: { kind: "bot", id: BOT } });
+  const bot = await connect(botRouter);
+  const call = (name, args) => bot.callTool({ name, arguments: args });
+  try {
+    const refused = await call("crow_blog", { action: "create_post", params: { title, content: "Bot words." } });
+    assert.equal(refused.isError, true, text(refused));
+    assert.equal(text(refused), OWNER_ONLY, "the fixed owner-only refusal");
+    const listed = await call("crow_blog", { action: "list_posts", params: {} });
+    assert.equal(text(listed), OWNER_ONLY, "and the read tools are refused too");
+
+    // Nothing was written: the refusal is the guard, not a failed insert.
+    const written = await db.execute({ sql: "SELECT COUNT(*) AS n FROM blog_posts WHERE title = ?", args: [title] });
+    assert.equal(Number(written.rows[0].n), 0, "no post row");
+
+    const harmless = await call("crow_blog", { action: "get_chord_diagram", params: { chord: "Am7" } });
+    assert.equal(harmless.isError || false, false, text(harmless));
+    assert.match(text(harmless), /<svg/, "the one harmless tool still answers a bot");
+
+    const builtBlog = botRouter._inProcessServers.get("blog");
+    assert.ok(builtBlog, "the router built its in-process blog server");
+    assert.deepEqual(builtBlog.blog.actor, { kind: "bot", id: BOT },
+      "the router hands the blog server the actor it was built with, as it does for storage and sharing");
+  } finally {
+    try { await bot.close(); } catch {}
+  }
+
+  // And an owner-built router is unchanged: no `_meta` still reaches the blog server as the owner.
+  const ownerRouter = createRouterServer({ actor: OWNER });
+  const owner = await connect(ownerRouter);
+  try {
+    const created = await owner.callTool({ name: "crow_blog", arguments: { action: "create_post", params: { title, content: "The operator's words." } } });
+    assert.equal(created.isError || false, false, text(created));
+    assert.match(text(created), /Created draft/, text(created));
+    const written = await db.execute({ sql: "SELECT COUNT(*) AS n FROM blog_posts WHERE title = ?", args: [title] });
+    assert.equal(Number(written.rows[0].n), 1, "the owner's post exists");
+    assert.equal(ownerRouter._inProcessServers.get("blog").blog.actor, OWNER,
+      "the owner's router hands the blog server the owner");
+  } finally {
+    try { await owner.close(); } catch {}
   }
 });

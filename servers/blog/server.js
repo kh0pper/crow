@@ -15,6 +15,8 @@ import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm
 import { createNotification } from "../shared/notifications.js";
 import { parseChordPro, transposeAst, renderChordProHtml, extractChords, isChordPro, parseSongMeta } from "./chordpro.js";
 import { getChordDiagram } from "./chord-diagrams.js";
+import { actorFromEnv } from "../research/actor.js";
+import { guardBlogServer } from "./bot-owner-only.js";
 
 export function createBlogServer(dbPath, options = {}) {
   const server = new McpServer(
@@ -23,6 +25,19 @@ export function createBlogServer(dbPath, options = {}) {
   );
 
   const db = createDbClient(dbPath);
+
+  // Who is calling, exactly as the projects, memory, storage and sharing servers resolve it: the
+  // construction-time base actor (a stdio server's process env, or the actor the gateway built the
+  // server with) is fixed here, and each call may only narrow it.
+  const baseActor = options.baseActor || actorFromEnv(process.env);
+  // Read by tests (and the callers that build this server): who is calling.
+  server.blog = { actor: baseActor };
+
+  // Every post, song and setting tool of this server is owner-only for a bot (servers/blog/
+  // bot-owner-only.js): the wrapper is installed on `server.tool` BEFORE the registrations below, so
+  // each handler checks the call's actor first and a bot never reaches one. It does not move a
+  // registration, so the order below stays the contract it is.
+  guardBlogServer(server, { baseActor, onCallActor: options.onCallActor });
 
   /**
    * Ensure slug is unique, appending -2, -3, etc. if needed.

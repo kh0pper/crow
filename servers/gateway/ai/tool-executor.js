@@ -215,7 +215,10 @@ function resolveToolCategory(action) {
 /**
  * @param {object} [opts]
  * @param {object} [opts.botDef]          bound bot definition — sets the default
- *                                        delegate target (crow_delegate's `bot`).
+ *                                        delegate target (crow_delegate's `bot`), the base actor
+ *                                        the in-process servers are built with, and the add-on
+ *                                        tools this executor may reach (its tools.crow_mcp
+ *                                        selection; an unselected add-on tool is refused).
  * @param {object} [opts.defaultDeliverTo] deliver_to spec to use when crow_delegate
  *                                        is called without one (e.g. the current
  *                                        gateway turn's thread). Falls back to poll.
@@ -268,15 +271,16 @@ export function createToolExecutor(opts = {}) {
   // never reach an owner-only tool (crow_send_message, crow_voice_memo) as the operator.
   const boundBotIsVoice = !!(boundBotId && isVoiceBotId(boundBotId) && !relay);
   const baseActor = boundBotId ? (boundBotIsVoice ? operatorVoiceActor() : { kind: "bot", id: boundBotId }) : undefined;
-  /** The base actor an in-process server of `category` is built with (the project servers and the
-   *  sharing server build all four the same way; every other category gets none). */
-  const baseActorFor = (category) => (category === "projects" || category === "memory" || category === "storage" || category === "sharing" ? baseActor : undefined);
+  /** The base actor an in-process server of `category` is built with (the project servers, the
+   *  sharing server and the blog server build all of them the same way; every other category gets
+   *  none). */
+  const baseActorFor = (category) => (category === "projects" || category === "memory" || category === "storage" || category === "sharing" || category === "blog" ? baseActor : undefined);
   /** The factory OPTIONS that actor means for `category` — the one place the actor→option mapping
-   *  lives: the projects and memory factories take `actor`, the storage and sharing factories take
-   *  `baseActor`. getClient builds servers from this and from nothing else. */
+   *  lives: the projects and memory factories take `actor`, the storage, sharing and blog factories
+   *  take `baseActor`. getClient builds servers from this and from nothing else. */
   const factoryOptionsFor = (category) => {
     if (baseActorFor(category) === undefined) return undefined;
-    return category === "storage" || category === "sharing" ? { baseActor }
+    return category === "storage" || category === "sharing" || category === "blog" ? { baseActor }
       : category === "memory" || category === "projects" ? { actor: baseActor }
         : undefined;
   };
@@ -320,6 +324,15 @@ export function createToolExecutor(opts = {}) {
   const actorMeta = boundBotId
     ? { _meta: { "crow/actor": { kind: "bot", id: boundBotId, name: sanitizeActorName(opts.botDef.display_name ?? boundBotId, boundBotId) } } }
     : opts.peerActor === true ? { _meta: { "crow/actor": { kind: "peer" } } } : {};
+
+  // The add-on tool allowlist gate. The advertised set is already scoped to a bound bot's selection
+  // (getChatTools), but a model can force-call an addon tool it was never offered — directly, or
+  // through the crow_tools proxy — so the selection is enforced again here, on the way in, for BOTH
+  // routes. A relay turn bound to the voice id is gated too (boundBotIsVoice is false for it), which
+  // is the point: relayed words are not the operator's. The refusal names the tool and nothing else.
+  const addonScope = boundBotId && !boundBotIsVoice ? botVoiceScope(opts.botDef) : null;
+  const addonDenied = (name) => !!addonScope && !addonScope.selectedToolNames.has(name);
+  const ADDON_NOT_GRANTED = (name) => `Error: this assistant has not been given "${name}". Tell the user it isn't available to this assistant.`;
 
   async function getClient(category) {
     if (clients.has(category)) return clients.get(category);
@@ -470,6 +483,8 @@ export function createToolExecutor(opts = {}) {
           if (!satelliteVisible(entry)) continue; // a peer never reaches a satellite's tools
           const hasTool = entry.tools?.some((t) => t.name === name);
           if (hasTool) {
+            // The bot did not select this addon tool: refuse it, before the call.
+            if (addonDenied(name)) return { result: ADDON_NOT_GRANTED(name), isError: true };
             try {
               const result = await entry.client.callTool({ name, arguments: args, ...actorMeta });
               return formatResult(result);
@@ -764,6 +779,12 @@ export function createToolExecutor(opts = {}) {
 
     // Normalize params from the formats weaker models produce (shared with the voice confirm gate).
     const { params } = normalizeExternalParams(args);
+
+    // A connected addon tool the bound bot did not select is refused here too: crow_tools is the
+    // other way to reach one, and the allowlist is the bot's, not the wrapper's.
+    if (isConnectedAddonTool(action) && addonDenied(action)) {
+      return { result: ADDON_NOT_GRANTED(action), isError: true };
+    }
 
     for (const [integrationId, entry] of localFirst(connectedServers)) {
       if (entry.status !== "connected" || !entry.client) continue;
