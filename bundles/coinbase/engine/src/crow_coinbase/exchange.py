@@ -5,13 +5,15 @@ DryRunExchange - same interface, simulated order book for any number of products
                  fills are driven by live public 1-minute candles per product.
                  Never sends an authenticated write.
 
-Normalized order dict: order_id, client_order_id, side, status, price, size,
-                       filled_size, filled_value, total_fees
-Normalized fill dict:  trade_id, order_id, side, size, price, commission, trade_time
+Normalized order dict: order_id, client_order_id, product, side, status, price,
+                       size, filled_size, filled_value, total_fees
+Normalized fill dict:  trade_id, order_id, product, side, size, price, commission,
+                       trade_time
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import sqlite3
@@ -93,6 +95,7 @@ def _norm_order(o: dict) -> dict:
     return {
         "order_id": o.get("order_id"),
         "client_order_id": o.get("client_order_id") or "",
+        "product": o.get("product_id"),
         "side": o.get("side"),
         "status": o.get("status"),
         "price": D(str(lim.get("limit_price") or o.get("average_filled_price") or "0")),
@@ -110,6 +113,7 @@ def _norm_fill(f: dict) -> dict:
     return {
         "trade_id": f["trade_id"],
         "order_id": f["order_id"],
+        "product": f.get("product_id"),
         "side": f["side"],
         "size": size,
         "price": price,
@@ -421,13 +425,38 @@ class DryRunExchange:
         self.conn_factory = conn_factory
         self.market_for = market_for
         self.fee_rate = fee_rate
+        db = conn_factory()
+        db.row_factory = sqlite3.Row
+        db.executescript(SIM_SCHEMA)
+        columns = {r["name"] for r in db.execute("PRAGMA table_info(sim_orders)")}
+        if "product" not in columns:
+            raise RuntimeError(
+                "dry-run DB predates schema v1; reset the coinbase-data volume"
+            )
 
     def _db(self) -> sqlite3.Connection:
         """A connection for THIS call only (never cached, so threads never share one)."""
         db = self.conn_factory()
         db.row_factory = sqlite3.Row
-        db.executescript(SIM_SCHEMA)
         return db
+
+    @contextlib.contextmanager
+    def _tx(self):
+        """One immediate write transaction, committed on success, rolled back on error.
+
+        Works whether the connection runs in autocommit (`isolation_level=None`) or
+        under the default implicit-transaction handling.
+        """
+        db = self._db()
+        if db.in_transaction:
+            db.commit()
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            yield db
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
 
     # -- balances (total minus holds of open orders = available)
     def _total(self, db, cur: str) -> Decimal:
@@ -444,12 +473,15 @@ class DryRunExchange:
         )
 
     def deposit(self, currency: str, amount: Decimal, note: str) -> None:
-        db = self._db()
-        self._add(db, currency, D(amount))
-        db.execute(
-            "INSERT INTO sim_deposits(currency,amount,note,ts) VALUES(?,?,?,?)",
-            (currency, str(amount), note, time.time()),
-        )
+        amt = D(amount)
+        if amt <= 0:
+            raise ValueError(f"deposit amount must be positive, got {amount}")
+        with self._tx() as db:
+            self._add(db, currency, amt)
+            db.execute(
+                "INSERT INTO sim_deposits(currency,amount,note,ts) VALUES(?,?,?,?)",
+                (currency, str(amount), note, time.time()),
+            )
 
     def _holds(self, db) -> dict[str, Decimal]:
         """Currency -> funds held by OPEN orders, summed over every product."""
@@ -502,6 +534,7 @@ class DryRunExchange:
         return {
             "order_id": r["order_id"],
             "client_order_id": r["client_order_id"],
+            "product": r["product"],
             "side": r["side"],
             "status": r["status"],
             "price": price,
@@ -536,9 +569,15 @@ class DryRunExchange:
             raise PermanentError("HTTP 404: order not found")
         return self._row(r)
 
-    def find_by_client_id(self, cid: str, since: float) -> Optional[dict]:
+    def find_by_client_id(
+        self, cid: str, since: float, product: Optional[str] = None
+    ) -> Optional[dict]:
         r = self._find_cid(self._db(), cid)
-        return self._row(r) if r else None
+        if not r:
+            return None
+        if product is not None and r["product"] != product:
+            return None
+        return self._row(r)
 
     def fills(self, order_id: str) -> list[dict]:
         db = self._db()
@@ -551,6 +590,7 @@ class DryRunExchange:
             {
                 "trade_id": "sim-" + r["order_id"],
                 "order_id": r["order_id"],
+                "product": r["product"],
                 "side": r["side"],
                 "size": D(r["size"]),
                 "price": D(r["price"]),
@@ -563,12 +603,6 @@ class DryRunExchange:
     def place_limit(
         self, cid: str, product: str, side: str, size: Decimal, price: Decimal
     ) -> dict:
-        db = self._db()
-        existing = self._find_cid(db, cid)
-        if (
-            existing
-        ):  # same semantics as Coinbase: duplicate cid returns the existing order
-            return {"ok": True, "order_id": existing["order_id"], "reason": None}
         base, quote = product.split("-", 1)
         bid, ask = self.market_for(product).best_bid_ask()
         if (side == BUY and price >= ask) or (side == SELL and price <= bid):
@@ -577,28 +611,34 @@ class DryRunExchange:
                 "order_id": None,
                 "reason": "INVALID_LIMIT_PRICE_POST_ONLY",
             }
-        bal = self._balances(db)
-        need = size * price * (1 + self.fee_rate) if side == BUY else size
-        have = bal.get(quote if side == BUY else base, D(0))
-        if need > have:
-            return {"ok": False, "order_id": None, "reason": "INSUFFICIENT_FUND"}
-        oid = "sim-" + uuid.uuid4().hex[:12]
-        db.execute(
-            "INSERT INTO sim_orders(order_id,client_order_id,product,side,price,size,status,created_at) "
-            "VALUES(?,?,?,?,?,?, 'OPEN', ?)",
-            (oid, cid, product, side, str(price), str(size), time.time()),
-        )
-        return {"ok": True, "order_id": oid, "reason": None}
+        with self._tx() as db:
+            existing = self._find_cid(db, cid)
+            if (
+                existing
+            ):  # same semantics as Coinbase: duplicate cid returns the existing order
+                return {"ok": True, "order_id": existing["order_id"], "reason": None}
+            bal = self._balances(db)
+            need = size * price * (1 + self.fee_rate) if side == BUY else size
+            have = bal.get(quote if side == BUY else base, D(0))
+            if need > have:
+                return {"ok": False, "order_id": None, "reason": "INSUFFICIENT_FUND"}
+            oid = "sim-" + uuid.uuid4().hex[:12]
+            db.execute(
+                "INSERT INTO sim_orders(order_id,client_order_id,product,side,price,size,status,created_at) "
+                "VALUES(?,?,?,?,?,?, 'OPEN', ?)",
+                (oid, cid, product, side, str(price), str(size), time.time()),
+            )
+            return {"ok": True, "order_id": oid, "reason": None}
 
     def cancel(self, order_ids: list[str]) -> dict[str, bool]:
-        db = self._db()
         out = {}
-        for oid in order_ids:
-            cur = db.execute(
-                "UPDATE sim_orders SET status='CANCELLED' WHERE order_id=? AND status='OPEN'",
-                (oid,),
-            )
-            out[oid] = cur.rowcount == 1
+        with self._tx() as db:
+            for oid in order_ids:
+                cur = db.execute(
+                    "UPDATE sim_orders SET status='CANCELLED' WHERE order_id=? AND status='OPEN'",
+                    (oid,),
+                )
+                out[oid] = cur.rowcount == 1
         return out
 
     # -- simulation step
@@ -617,7 +657,11 @@ class DryRunExchange:
         for product, rows in by_product.items():
             base, quote = product.split("-", 1)
             oldest = min(r["created_at"] for r in rows)
-            candles = self.market_for(product).candles(oldest, now)
+            try:
+                candles = self.market_for(product).candles(oldest, now)
+            except Exception as e:  # noqa: BLE001
+                log.warning("candles failed for %s: %s", product, e)
+                continue
             for r in rows:
                 price, size = D(r["price"]), D(r["size"])
                 eligible = [c for c in candles if c["start"] >= r["created_at"]]
@@ -636,17 +680,25 @@ class DryRunExchange:
                 if not hit:
                     continue
                 fee = size * price * self.fee_rate
-                if r["side"] == BUY:
-                    self._add(db, quote, -(size * price + fee))
-                    self._add(db, base, size)
-                else:
-                    self._add(db, base, -size)
-                    self._add(db, quote, size * price - fee)
-                db.execute(
-                    "UPDATE sim_orders SET status='FILLED', filled_at=?, fee=? WHERE order_id=?",
-                    (max(hit["start"] + 60, r["created_at"]), str(fee), r["order_id"]),
-                )
-                filled.append(r["client_order_id"])
+                with self._tx() as tdb:
+                    cur = tdb.execute(
+                        "UPDATE sim_orders SET status='FILLED', filled_at=?, fee=?"
+                        " WHERE order_id=? AND status='OPEN'",
+                        (
+                            max(hit["start"] + 60, r["created_at"]),
+                            str(fee),
+                            r["order_id"],
+                        ),
+                    )
+                    if cur.rowcount != 1:  # a concurrent cancel won: change nothing
+                        continue
+                    if r["side"] == BUY:
+                        self._add(tdb, quote, -(size * price + fee))
+                        self._add(tdb, base, size)
+                    else:
+                        self._add(tdb, base, -size)
+                        self._add(tdb, quote, size * price - fee)
+                    filled.append(r["client_order_id"])
         return filled
 
 

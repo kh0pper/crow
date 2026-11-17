@@ -150,8 +150,15 @@ def test_list_open_orders_unfiltered_returns_all_products():
     assert ex.place_limit("grid-B-1-x", XRP, "BUY", D("10"), D("0.9"))["ok"]
     assert ex.place_limit("grid-B-1-b", BTC, "BUY", D("0.01"), D("59000"))["ok"]
 
-    everywhere = sorted(o["client_order_id"] for o in ex.list_open_orders())
-    assert everywhere == ["grid-B-1-b", "grid-B-1-x"]
+    everywhere = ex.list_open_orders()
+    assert sorted(o["client_order_id"] for o in everywhere) == [
+        "grid-B-1-b",
+        "grid-B-1-x",
+    ]
+    assert {o["client_order_id"]: o["product"] for o in everywhere} == {
+        "grid-B-1-x": XRP,
+        "grid-B-1-b": BTC,
+    }
 
     xrp_only = ex.list_open_orders(XRP)
     assert [o["client_order_id"] for o in xrp_only] == ["grid-B-1-x"]
@@ -173,45 +180,193 @@ def test_deposit_seeds_balances():
     assert ex.totals()["USDC"] == D("300")
 
 
-WRITE_CAPABLE_SDK_METHODS = {
+def test_deposit_rejects_non_positive():
+    db = new_db()
+    ex = DryRunExchange(lambda: db, lambda p: Mkt(), FEE)
+
+    for bad in (D("0"), D("-5")):
+        with pytest.raises(ValueError):
+            ex.deposit("USDC", bad, "bad")
+    assert ex.totals() == {}
+
+
+def test_deposit_visible_across_connections_default_isolation(tmp_path):
+    path = tmp_path / "sim.db"
+    c1 = sqlite3.connect(path)  # default isolation level, not autocommit
+    c2 = sqlite3.connect(path)
+    markets = {XRP: Mkt()}
+    first = DryRunExchange(lambda: c1, lambda p: markets[p], FEE)
+    second = DryRunExchange(lambda: c2, lambda p: markets[p], FEE)
+
+    first.deposit("USDC", D("125.5"), "seed")
+
+    assert second.totals()["USDC"] == D("125.5")
+
+
+def test_cancel_between_advance_read_and_write_is_not_filled(tmp_path):
+    path = tmp_path / "sim.db"
+    c1 = sqlite3.connect(path)
+    c2 = sqlite3.connect(path)
+    state = {}
+
+    class CancelThenTradeThrough(Mkt):
+        def candles(self, start, end):
+            other.cancel([state["order_id"]])
+            return [{"start": state["start"], "low": D("0.8"), "high": D("1")}]
+
+    markets = {XRP: CancelThenTradeThrough()}
+    ex_a = DryRunExchange(lambda: c1, lambda p: markets[p], FEE)
+    other = DryRunExchange(lambda: c2, lambda p: markets[p], FEE)
+    ex_a.deposit("USDC", D("1000"), "seed")
+    placed = ex_a.place_limit("grid-B-1-c", XRP, "BUY", D("10"), D("0.9"))
+    assert placed["ok"]
+    state["order_id"] = placed["order_id"]
+    state["start"] = int(created_at(c1, placed["order_id"])) + 60
+    before = ex_a.totals()
+
+    assert ex_a.advance(state["start"] + 120) == []
+    assert ex_a.get_order(placed["order_id"])["status"] == "CANCELLED"
+    assert ex_a.totals() == before
+
+
+def test_fills_carry_product():
+    ex, m, db = sim()
+    oid = ex.place_limit("grid-B-1-p", XRP, "BUY", D("10"), D("0.9"))["order_id"]
+    placed = created_at(db, oid)
+    m.cs = [{"start": int(placed) + 60, "low": D("0.8999"), "high": D("1")}]
+
+    assert ex.advance(placed + 200) == ["grid-B-1-p"]
+    assert ex.fills(oid)[0]["product"] == XRP
+
+
+def test_norm_order_and_fill_carry_product():
+    order = exchange_mod._norm_order({"order_id": "o", "product_id": BTC, "side": "BUY"})
+    assert order["product"] == BTC
+
+    fill = exchange_mod._norm_fill(
+        {
+            "product_id": BTC,
+            "trade_id": "t",
+            "order_id": "o",
+            "side": "BUY",
+            "size": "1",
+            "price": "2",
+            "trade_time": "x",
+        }
+    )
+    assert fill["product"] == BTC
+
+
+def test_dry_find_by_client_id_product_filter():
+    db = new_db()
+    markets = {XRP: Mkt(), BTC: Mkt("60000", "60010")}
+    ex = DryRunExchange(lambda: db, lambda p: markets[p], FEE)
+    ex.deposit("USDC", D("1000"), "seed")
+    placed = ex.place_limit("grid-B-1-f", XRP, "BUY", D("10"), D("0.9"))
+    assert placed["ok"]
+
+    assert ex.find_by_client_id("grid-B-1-f", 0)["order_id"] == placed["order_id"]
+    assert (
+        ex.find_by_client_id("grid-B-1-f", 0, XRP)["order_id"] == placed["order_id"]
+    )
+    assert ex.find_by_client_id("grid-B-1-f", 0, BTC) is None
+    assert ex.find_by_client_id("grid-B-1-missing", 0) is None
+
+
+def test_advance_continues_after_one_products_candles_error():
+    class BrokenMkt(Mkt):
+        def candles(self, start, end):
+            raise TransientError("candles down")
+
+    db = new_db()
+    markets = {XRP: BrokenMkt(), BTC: Mkt("60000", "60010")}
+    ex = DryRunExchange(lambda: db, lambda p: markets[p], FEE)
+    ex.deposit("USDC", D("1000"), "seed")
+    xrp = ex.place_limit("grid-B-1-x", XRP, "BUY", D("10"), D("0.9"))
+    btc = ex.place_limit("grid-B-1-b", BTC, "BUY", D("0.01"), D("59000"))
+    assert xrp["ok"] and btc["ok"]
+
+    start = int(max(created_at(db, xrp["order_id"]), created_at(db, btc["order_id"])))
+    markets[BTC].cs = [{"start": start + 60, "low": D("58000"), "high": D("60000")}]
+
+    assert ex.advance(start + 120) == ["grid-B-1-b"]
+    assert ex.get_order(btc["order_id"])["status"] == "FILLED"
+    assert ex.get_order(xrp["order_id"])["status"] == "OPEN"
+
+
+def test_totals_and_balances_per_currency_after_cross_product_fill():
+    db = new_db()
+    markets = {XRP: Mkt("0.9644", "0.9646"), BTC: Mkt("60000", "60010")}
+    ex = DryRunExchange(lambda: db, lambda p: markets[p], FEE)
+    ex.deposit("USDC", D("1000"), "seed")
+
+    btc = ex.place_limit("grid-B-1-b", BTC, "BUY", D("0.01"), D("59000"))
+    xrp = ex.place_limit("grid-B-1-x", XRP, "BUY", D("10"), D("0.9"))
+    assert btc["ok"] and xrp["ok"]
+
+    start = int(max(created_at(db, btc["order_id"]), created_at(db, xrp["order_id"])))
+    markets[BTC].cs = [{"start": start + 60, "low": D("58000"), "high": D("60000")}]
+    assert ex.advance(start + 120) == ["grid-B-1-b"]
+
+    cost = D("59000") * D("0.01")
+    assert ex.totals()["BTC"] == D("0.01")
+    assert ex.totals()["USDC"] == D("1000") - cost - cost * FEE
+    assert ex.totals().get("XRP", D(0)) == D(0)
+    xrp_hold = D("10") * D("0.9") * (1 + FEE)
+    assert ex.balances()["USDC"] == ex.totals()["USDC"] - xrp_hold
+
+
+OLD_SIM_ORDERS = """
+CREATE TABLE sim_orders (
+  order_id TEXT PRIMARY KEY, client_order_id TEXT UNIQUE, side TEXT, price TEXT,
+  size TEXT, status TEXT, created_at REAL, filled_at REAL, fee TEXT DEFAULT '0');
+"""
+
+
+def test_old_schema_dry_db_refused(tmp_path):
+    db = sqlite3.connect(tmp_path / "old.db")
+    db.executescript(OLD_SIM_ORDERS)
+
+    with pytest.raises(RuntimeError, match="predates schema v1"):
+        DryRunExchange(lambda: db, lambda p: Mkt(), FEE)
+
+
+ALLOWED_SDK_METHODS = {
+    "get_api_key_permissions",
+    "get_transaction_summary",
+    "get_accounts",
+    "get_unix_time",
+    "list_orders",
+    "get_order",
+    "get_fills",
+    "get_public_product",
+    "get_public_product_book",
+    "get_public_candles",
     "limit_order_gtc",
     "cancel_orders",
-    "market_order",
-    "market_order_buy",
-    "market_order_sell",
-    "limit_order_gtd",
-    "limit_order_ioc",
-    "limit_order_fok",
-    "stop_limit_order_gtc",
-    "stop_limit_order_gtd",
-    "create_order",
-    "edit_order",
-    "close_position",
-    "create_convert_quote",
-    "commit_convert_trade",
-    "allocate_portfolio",
-    "move_portfolio_funds",
 }
 
-ALLOWED_WRITES = {"limit_order_gtc", "cancel_orders"}
+SDK_CLIENTS = ("client", "pub")
 
 
-def _client_calls(node):
-    """`self.client.<attr>(...)` call nodes grouped by attribute name."""
+def _self_sdk_ref(node):
+    """`self.client` / `self.pub` attribute nodes."""
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        and node.attr in SDK_CLIENTS
+    )
+
+
+def _sdk_calls(node):
+    """`self.client.<attr>(...)` / `self.pub.<attr>(...)` calls by attribute name."""
     out = {}
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Call):
             continue
         fn = sub.func
-        if not isinstance(fn, ast.Attribute):
-            continue
-        owner = fn.value
-        if (
-            isinstance(owner, ast.Attribute)
-            and isinstance(owner.value, ast.Name)
-            and owner.value.id == "self"
-            and owner.attr == "client"
-        ):
+        if isinstance(fn, ast.Attribute) and _self_sdk_ref(fn.value):
             out.setdefault(fn.attr, []).append(sub)
     return out
 
@@ -219,19 +374,33 @@ def _client_calls(node):
 def test_exchange_sdk_calls_only_post_only_limit_and_cancel():
     src = pathlib.Path(exchange_mod.__file__).read_text()
     tree = ast.parse(src)
-    calls = _client_calls(tree)
+    calls = _sdk_calls(tree)
 
-    called_writes = set(calls) & WRITE_CAPABLE_SDK_METHODS
-    assert called_writes
-    assert called_writes <= ALLOWED_WRITES
+    # non-vacuous: the two write paths are actually used
+    assert "limit_order_gtc" in calls
+    assert "cancel_orders" in calls
+    assert set(calls) <= ALLOWED_SDK_METHODS
 
-    limit_calls = calls.get("limit_order_gtc", [])
-    assert limit_calls
-    for call in limit_calls:
+    for call in calls["limit_order_gtc"]:
         kw = {k.arg: k.value for k in call.keywords if k.arg}
         assert "post_only" in kw
         node = kw["post_only"]
         assert isinstance(node, ast.Constant) and node.value is True
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+        ):
+            assert node.args, "getattr() without arguments"
+            first = node.args[0]
+            assert not (isinstance(first, ast.Name) and first.id == "self")
+            if len(node.args) > 1:
+                name = node.args[1]
+                assert not (isinstance(name, ast.Constant) and name.value in SDK_CLIENTS)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            assert not _self_sdk_ref(node.value), "SDK client aliased to another name"
 
 
 def test_with_retry_retries_transient_only():
@@ -287,3 +456,125 @@ def test_live_server_time_reads_epoch_seconds():
     ex.sleep = lambda s: None
     ex.client = FakeClient()
     assert ex.server_time() == 1767225600.0
+
+
+class Resp:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def to_dict(self):
+        return self.payload
+
+
+class FakeAccounts:
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+
+    def get_accounts(self, limit=None, cursor=None):
+        self.calls.append({"limit": limit, "cursor": cursor})
+        return Resp(self.pages[len(self.calls) - 1])
+
+
+class FakeOrders:
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+
+    def list_orders(self, **kwargs):
+        self.calls.append(kwargs)
+        return Resp(self.pages[len(self.calls) - 1])
+
+
+def live(client):
+    ex = LiveExchange.__new__(LiveExchange)
+    ex.sleep = lambda s: None
+    ex.client = client
+    return ex
+
+
+def test_live_totals_adds_hold_across_pages():
+    fake = FakeAccounts(
+        [
+            {
+                "accounts": [
+                    {
+                        "currency": "USDC",
+                        "available_balance": {"value": "10"},
+                        "hold": {"value": "2.5"},
+                    },
+                    {"currency": "BTC", "available_balance": {"value": "0.5"}},
+                ],
+                "has_next": True,
+                "cursor": "c2",
+            },
+            {
+                "accounts": [
+                    {"currency": "ETH", "available_balance": {"value": "2"}},
+                ],
+                "has_next": False,
+            },
+        ]
+    )
+
+    totals = live(fake).totals()
+
+    assert totals == {"USDC": D("12.5"), "BTC": D("0.5"), "ETH": D("2")}
+    assert len(fake.calls) == 2
+    assert fake.calls[1]["cursor"] == "c2"
+
+
+def test_live_list_open_orders_unfiltered_follows_cursor():
+    def order(order_id, product):
+        return {
+            "order_id": order_id,
+            "client_order_id": "cid-" + order_id,
+            "product_id": product,
+            "side": "BUY",
+            "status": "OPEN",
+            "order_configuration": {
+                "limit_limit_gtc": {"limit_price": "0.9", "base_size": "10"}
+            },
+        }
+
+    fake = FakeOrders(
+        [
+            {
+                "orders": [order("o1", XRP)],
+                "has_next": True,
+                "cursor": "c2",
+            },
+            {"orders": [order("o2", BTC)], "has_next": False},
+        ]
+    )
+    ex = live(fake)
+
+    everywhere = ex.list_open_orders()
+
+    assert [o["order_id"] for o in everywhere] == ["o1", "o2"]
+    assert all("product_ids" not in c for c in fake.calls)
+    assert fake.calls[1]["cursor"] == "c2"
+
+    fake.calls = []
+    fake.pages = [{"orders": [order("o1", XRP)], "has_next": False}]
+    assert [o["order_id"] for o in ex.list_open_orders(XRP)] == ["o1"]
+    assert fake.calls[0]["product_ids"] == [XRP]
+
+
+def test_live_place_limit_sends_post_only():
+    class FakePlace:
+        def __init__(self):
+            self.calls = []
+
+        def limit_order_gtc(self, **kwargs):
+            self.calls.append(kwargs)
+            return Resp({"success": True, "success_response": {"order_id": "o1"}})
+
+    fake = FakePlace()
+    res = live(fake).place_limit("cid-1", XRP, "BUY", D("10"), D("0.9"))
+
+    sent = fake.calls[0]
+    assert sent["post_only"] is True
+    assert sent["product_id"] == XRP
+    assert sent["client_order_id"] == "cid-1"
+    assert res["ok"] and res["order_id"] == "o1"
