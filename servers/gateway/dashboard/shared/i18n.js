@@ -5966,6 +5966,31 @@ export const translations = {
   "mail.draftScheduleUnavailable": { en: "Scheduling is not open yet.", es: "Scheduling is not open yet." },
   // TODO(copy): pending operator copy
   "mail.draftSavedDraft": { en: "Saved to {folder}.", es: "Saved to {folder}." },
+  // Crow Mail's schedule sheet (plan 3, Task 10b). The three option names and the box-must-be-on line
+  // are the plan's own English; the plan gives no Spanish, and the date/time labels, the empty-pick
+  // line and the ninety-day refusal are not in the plan at all — so every key here is TODO(copy),
+  // pending operator copy, with the English placeholder in both languages and an entry in the
+  // parity test's IDENTICAL_OK.
+  // TODO(copy): pending operator copy
+  "mail.scheduleTomorrowMorning": { en: "Tomorrow morning", es: "Tomorrow morning" },
+  // TODO(copy): pending operator copy
+  "mail.scheduleNextWorkDay": { en: "Next work day", es: "Next work day" },
+  // TODO(copy): pending operator copy
+  "mail.schedulePick": { en: "Pick date and time", es: "Pick date and time" },
+  // TODO(copy): pending operator copy
+  "mail.schedulePickMissing": { en: "Choose a date and a time.", es: "Choose a date and a time." },
+  // TODO(copy): pending operator copy
+  "mail.scheduleDateLabel": { en: "Date", es: "Date" },
+  // TODO(copy): pending operator copy
+  "mail.scheduleTimeLabel": { en: "Time", es: "Time" },
+  // The plan's sentence, verbatim (Global Constraints and Task 10b): a scheduled send is held by this
+  // Crow, so the box must be on.
+  // TODO(copy): pending operator copy
+  "mail.scheduleBoxOn": { en: "It goes out at that time only because you scheduled it. You can change or cancel it until then. Crow sends it itself, so this computer must be on.", es: "It goes out at that time only because you scheduled it. You can change or cancel it until then. Crow sends it itself, so this computer must be on." },
+  // The plan names no sentence for the ninety-day refusal (D4's window is enforced server-side), so
+  // this is a placeholder until the operator writes one.
+  // TODO(copy): pending operator copy
+  "mail.scheduleTooFar": { en: "A send can be scheduled up to 90 days ahead.", es: "A send can be scheduled up to 90 days ahead." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

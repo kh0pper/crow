@@ -433,6 +433,18 @@ border-collapse:collapse;margin:0 0 8px;font-size:13px}
 #perch-hub-root .mdraft-history-list{display:grid;gap:4px}
 #perch-hub-root .mdraft-history-list[hidden]{display:none}
 #perch-hub-root .mdraft-history-row{font-size:12.5px;color:var(--dim)}
+/* --- the schedule sheet (plan 3, task 10b) ----------------------------- */
+/* The sheet opens inside the card it belongs to: the two shortcuts, the picked date and time, the
+   line that the computer must be on, and Cancel. Every target is 44 px and both inputs 16 px, so
+   iOS does not zoom on focus. No layer here covers the page, so nothing needs a z-index. */
+#perch-hub-root .msched-sheet{border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:grid;gap:8px;background:var(--card);min-width:0}
+#perch-hub-root .msched-options{display:grid;gap:8px;min-width:0}
+#perch-hub-root .msched-pick{align-items:flex-end}
+#perch-hub-root .msched-field{display:grid;gap:4px;min-width:0}
+#perch-hub-root .msched-field input{width:100%;min-width:0;box-sizing:border-box;min-height:44px;font-size:16px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px}
+#perch-hub-root .msched-shortcuts button,#perch-hub-root .msched-pick button{min-height:44px;padding:10px 14px}
+#perch-hub-root .msched-sheet button:disabled{opacity:.55;cursor:default}
+#perch-hub-root .msched-box{font-size:12.5px;color:var(--dim);overflow-wrap:anywhere}
 /* --- hub layout ------------------------------------------------------- */
 /* Two views, one at a time on a phone, side by side on a wide screen.
    List is the default (no attribute needed): the old standalone page

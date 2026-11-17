@@ -7,6 +7,7 @@ import { perchSecretWarnJs } from "./secret-warn.js";
 import { perchConnectCardJs } from "./connect-card.js";
 import { perchStagedCardJs } from "./staged-card.js";
 import { perchMailDraftCardJs } from "./mail-draft-card.js";
+import { perchMailScheduleSheetJs } from "../panels/mail/schedule-sheet.js";
 import { perchCardChipJs } from "./card-chip.js";
 import { perchBriefingJs } from "./briefing-card.js";
 import { sessionCardsJs } from "../shared/session-cards.js";
@@ -4444,6 +4445,7 @@ ${perchSecretWarnJs(lang)}
 ${perchConnectCardJs(lang)}
 ${perchStagedCardJs(lang)}
 ${perchMailDraftCardJs(lang)}
+${perchMailScheduleSheetJs(lang)}
   /* The staged card's host hooks (spec 12): the composer for "Ask for a change" — the note goes
      into the ordinary message box, so the normal send path and its paste detector run — and the
      refetch after a replacement. */

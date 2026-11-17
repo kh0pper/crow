@@ -147,6 +147,13 @@ const IDENTICAL_OK = new Set([
   "mail.draftFrozen", "mail.draftCloudOff", "mail.draftLocalOnly", "mail.draftTurnOff",
   "mail.draftNotScheduled", "mail.draftNotDiscardable", "mail.draftNeedsCancel",
   "mail.draftScheduleUnavailable", "mail.draftSavedDraft", // pending operator copy
+  // Crow Mail's schedule sheet (plan 3, Task 10b): the three option names and the box-must-be-on
+  // line are the plan's own English, and the plan gives no Spanish; the date/time labels, the
+  // empty-pick line and the ninety-day refusal are not in the plan at all. Every key is TODO(copy)
+  // — pending operator copy — with the English placeholder in both languages.
+  "mail.scheduleTomorrowMorning", "mail.scheduleNextWorkDay", "mail.schedulePick",
+  "mail.schedulePickMissing", "mail.scheduleDateLabel", "mail.scheduleTimeLabel",
+  "mail.scheduleBoxOn", "mail.scheduleTooFar", // pending operator copy
 ]);
 
 const keys = Object.keys(translations);

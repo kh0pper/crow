@@ -23,9 +23,9 @@ import { tJs } from "../shared/i18n.js";
  *    eyes (409 `changed`), and this client then re-reads and says why.
  *  - Nothing here can send by itself: Send and Schedule are two POSTs a finger makes, and a draft in
  *    any state that is not editable renders no Send at all.
- *  - The schedule sheet is NOT this module's: both the Schedule button and Change time call
- *    `mailDraftSheet(draft, dueAtMs, onDone)` when client.js has assigned one (Task 10b) and say so
- *    when it has not.
+ *  - The schedule sheet is the module spliced beside this one (panels/mail/schedule-sheet.js,
+ *    Task 10b): both the Schedule button and Change time call `mailDraftSheet(draft, dueAtMs, onDone)`
+ *    when that module has assigned it, and say so when it has not.
  */
 export function perchMailDraftCardJs(lang = "en") {
   return `
@@ -109,8 +109,9 @@ export function perchMailDraftCardJs(lang = "en") {
   var mdraftNodes={};
   var mdraftKeys={};
   var mdraftQueryId=null;
-  /* Task 10b assigns the schedule sheet here: mailDraftSheet(draft, dueAt, onDone). Until then both
-     schedule controls say so instead of doing nothing. */
+  /* The schedule sheet, assigned by the module spliced beside this one (Task 10b):
+     mailDraftSheet(draft, dueAt, onDone). Both schedule controls open it; a build that drops that
+     module from the splice says so instead of doing nothing. */
   var mailDraftSheet=null;
 
   function mdraftFill(s,vals){

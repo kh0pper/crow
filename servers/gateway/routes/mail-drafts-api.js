@@ -93,7 +93,17 @@ import {
   requestSend,
   undoSend,
 } from "../mail/send/send-service.js";
-import { cancelSchedule, parseRouteDueAt, scheduleDraft } from "../mail/send/schedule-service.js";
+import {
+  SCHEDULE_MAX_AHEAD_MS,
+  SCHEDULE_MIN_LEAD_MS,
+  cancelSchedule,
+  localTimeToInstant,
+  parseRouteDueAt,
+  scheduleDraft,
+  schedulePresets,
+  wallClockAt,
+  zoneOffsetMinutesAt,
+} from "../mail/send/schedule-service.js";
 import { instanceZone } from "../../shared/schedule-store.js";
 // The mount point mail-api.js sets on this same router. It is read when routes are registered (that
 // module has finished evaluating by then), never at module load: the two files import each other.
@@ -338,6 +348,69 @@ function readAudienceBody(body) {
   return { audience: body.audience };
 }
 
+/* ------------------------------------------------------------- the presets */
+
+/** The zone's own wall clock at one instant, as the zone-qualified ISO text the sheet posts back. */
+function zonedIso(instant, zone) {
+  const wall = wallClockAt(instant, zone);
+  const offset = zoneOffsetMinutesAt(instant, zone);
+  const two = (value) => String(value).padStart(2, "0");
+  const sign = offset < 0 ? "-" : "+";
+  const abs = Math.abs(offset);
+  return `${wall.year}-${two(wall.month)}-${two(wall.day)}T${two(wall.hour)}:${two(wall.minute)}:${two(wall.second)}`
+    + `${sign}${two(Math.floor(abs / 60))}:${two(abs % 60)}`;
+}
+
+/**
+ * A wall time the sheet's date and time inputs name (`2026-11-12T07:30`), as the instant the instance
+ * zone shows it, or null. The zone's own helpers do the arithmetic (`localTimeToInstant`), and the
+ * instant is only accepted when the zone really shows that wall clock: an hour a spring-forward skips
+ * and a date the calendar does not have are both refused rather than moved.
+ *
+ * @param {string} text `yyyy-mm-ddThh:mm`, the bare wall time and nothing else
+ * @param {string} zone the instance zone
+ * @returns {number|null} epoch ms
+ */
+function wallTimeAt(text, zone) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})$/.exec(text);
+  if (!match) return null;
+  const parts = {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(match[4]),
+    minute: Number(match[5]),
+  };
+  let instant;
+  try {
+    instant = localTimeToInstant(parts, zone);
+  } catch {
+    return null;
+  }
+  const shown = wallClockAt(instant, zone);
+  if (shown.year !== parts.year || shown.month !== parts.month || shown.day !== parts.day
+    || shown.hour !== parts.hour || shown.minute !== parts.minute) {
+    return null;
+  }
+  return instant;
+}
+
+/**
+ * One preset as the sheet reads it: the zone-qualified instant it stands for, and the short label of
+ * its clock time, formatted here in the instance zone. The label is the time alone — the sheet already
+ * names the day in its own words (Tomorrow morning, Next work day) — so it carries no weekday a second
+ * language would have to agree with.
+ */
+function presetAnswer(date, zone) {
+  const instant = date instanceof Date ? date.getTime() : Number(date);
+  const label = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone,
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(instant));
+  return { iso: zonedIso(instant, zone), label };
+}
+
 /* --------------------------------------------------------------- the answers */
 
 /**
@@ -504,6 +577,38 @@ export function registerDraftRoutes(router, ctx) {
   }));
 
   /* ------------------------------------------------------------------- reads */
+
+  // GET /schedule-presets — the schedule sheet's two shortcuts, the instant each one stands for and
+  // the window a schedule may fall in. Registered BEFORE GET /:id: a route below would read this path
+  // as a draft id. The sheet never computes a time, so `iso` is produced here, in the instance zone,
+  // and `label` is its short clock time formatted here too.
+  //
+  // With `?at=<local yyyy-mm-ddThh:mm>` the same route answers `{iso}` for that wall time in the
+  // instance zone — the picked date and time of the sheet's third option — or 400 `bad_input`. A wall
+  // time the zone does not show (the hour a spring-forward skips, a date no calendar has) is a refusal,
+  // never a quietly moved instant: the offset the tap will be stored with must be the one the person
+  // saw. The client therefore posts text the server built and never carries an offset of its own.
+  router.get(`${base}/schedule-presets`, route("GET /drafts/schedule-presets", async (db, req, res) => {
+    const zone = await instanceZone(db);
+    const raw = req.query?.at;
+    const at = typeof raw === "string" ? raw.trim() : raw == null ? "" : null;
+    // A repeated `at` is not one wall time: refused rather than answered with the shortcuts.
+    if (at === null) return sendError(res, 400, "bad_input");
+    if (at !== "") {
+      const instant = wallTimeAt(at, zone);
+      if (instant == null) return sendError(res, 400, "bad_input");
+      return res.json({ iso: zonedIso(instant, zone) });
+    }
+    const now = Math.floor(Number(typeof runtime.now === "function" ? runtime.now() : Date.now()));
+    const presets = await schedulePresets(db, { now, zone });
+    res.json({
+      zone,
+      tomorrowMorning: presetAnswer(presets.tomorrowMorning, zone),
+      nextWorkDay: presetAnswer(presets.nextWorkDay, zone),
+      minLeadMs: SCHEDULE_MIN_LEAD_MS,
+      maxAheadMs: SCHEDULE_MAX_AHEAD_MS,
+    });
+  }));
 
   // GET /:id — the card: the row, the head revision, the flags preflight marks, every comment, the
   // history line per revision and the head revision's voice note (null while plan 4 has not checked
