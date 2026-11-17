@@ -22,7 +22,10 @@
 //
 // What must stay true:
 //   - the shapes in the report, at 64 KB and at the owner cap, render in well
-//     under a second of CPU each (they used to be seconds to minutes);
+//     under a second of CPU each (they used to be seconds to minutes; measured
+//     1-6 ms and 33 ms for a normal owner-cap post, and the definition flood at
+//     the owner cap — the slowest of the family — 213 ms against a 2,000 ms
+//     bound sized for a CI runner a few times slower than the dev box);
 //   - the email-autolink run shapes (`a…@a…`, `HTTP…@a…`, a long `HTTP` run, an
 //     `@` every 4,096 `a`s) do too — < 500 ms at both sizes — while ordinary
 //     email content still autolinks and renders byte-identically; and so do runs
@@ -146,7 +149,7 @@ function refFlood(cap, paragraphs) {
   return { src: defs.join("") + "\n" + paras, defs: size };
 }
 
-test("the reference-definition flood is capped at 256 definitions and renders in < 1000 ms", (t) => {
+test("the reference-definition flood is capped at 256 definitions and renders in < 2000 ms at the owner cap", (t) => {
   const note = tracker(t);
   // The report's fixture: ~39 KB of definitions + 5,000 tiny paragraphs.
   const small = refFlood(CAP64, 5000);
@@ -166,7 +169,10 @@ test("the reference-definition flood is capped at 256 definitions and renders in
   const bigRun = timed(big.src);
   note(bigRun.ms, `owner-cap definition flood (${(big.defs / 1024).toFixed(0)} KB of definitions)`);
   assert.ok(bigRun.html.length > 0, "still rendered");
-  assert.ok(bigRun.ms < 1000, `owner-cap definition flood took ${bigRun.ms.toFixed(0)} ms`);
+  // Measured 213 ms on the dev box (the fixture took > 10 minutes before the
+  // definition cap), so 2,000 ms covers a CI runner a few times slower than this
+  // box and is still nowhere near the cliff.
+  assert.ok(bigRun.ms < 2000, `owner-cap definition flood took ${bigRun.ms.toFixed(0)} ms`);
   assert.match(bigRun.html, /<em>a<\/em>/);
 });
 

@@ -26,10 +26,12 @@
 //     the 128 KB owner head in < 2,000 ms. The bounds were 300/600 ms; the box
 //     and the CI runners are slower than the measurements below (CI ran ~3.5x
 //     slower than the dev box on the same work), so they are set to leave that
-//     room while staying far below the cliffs they guard (4 s to 27 s). Each
-//     render runs in a WORKER with a 5 s kill, so the pre-guard cost (1 s to
-//     17 s per render, minutes at the owner cap for the table shapes) fails the
-//     test instead of hanging the suite;
+//     room while staying far below the cliffs they guard (4 s to 27 s). Measured
+//     on the dev box, worst per family: 179/431 ms (the shapes), 223/310 ms (the
+//     setext units at 16-64 KB / the owner head) and 227/304 ms (the missed run
+//     ends). Each render runs in a WORKER with a 5 s kill, so the pre-guard cost
+//     (1 s to 17 s per render, minutes at the owner cap for the table shapes)
+//     fails the test instead of hanging the suite;
 //   - the setext precheck stops the walk at EXACTLY the lines marked's own run
 //     stops at. It used to re-type only part of that set (an HTML line, a table
 //     delimiter row, a line of Unicode whitespace and a line holding U+2028 were

@@ -281,8 +281,42 @@ export const OWNER_MD_MAX_TOTAL_INPUT = 8 * 1024 * 1024;
  * (brScanCost / MD_BR_SCAN_MAX) — and every other shape under the existing
  * block guards costs tens of milliseconds per chunk. Hence the number: 1000 ms
  * of budget, not the 1500 it used to be.
+ *
+ * `let`, not `const`, because of setOwnerRenderBudgetMs below: the tests have to
+ * be able to take the budget out of the way. Imports see the current value (ES
+ * module live binding), so a test can still read this as the DEFAULT.
  */
-export const OWNER_MD_RENDER_BUDGET_MS = 1000;
+export let OWNER_MD_RENDER_BUDGET_MS = 1000;
+
+/**
+ * A TEST SEAM for the total-time budget: set it for the duration of one
+ * assertion and get a restore function back (the same shape the other seams in
+ * this file expose, but restoring a value rather than a boolean).
+ *
+ * Two properties the tests need to hold apart, and why this exists:
+ *   - "the WHOLE document is formatted, nothing dropped to the plain-text tail"
+ *     is a statement about the CHUNKER (every chunk rendered, in order, with
+ *     the whole document's link definitions), and must not depend on how fast
+ *     the box is. With the budget raised, the answer is the same on any runner.
+ *   - "a render finishes in bounded time, and whatever the budget did not reach
+ *     is the plain-text tail — the WHOLE remainder, nothing dropped" is the
+ *     statement about the budget, and it is checked with the DEFAULT (see
+ *     tests/md-chunked-render.test.js and tests/md-unicode-ws.test.js).
+ *
+ * Production never calls this: the default is the number above.
+ * @param {number} ms CPU milliseconds of chunk rendering one renderMarkdown
+ *   call may spend before the rest becomes plain text
+ * @returns {() => void} restores the budget that was in force before the call
+ */
+export function setOwnerRenderBudgetMs(ms) {
+  const previous = OWNER_MD_RENDER_BUDGET_MS;
+  const next = Number(ms);
+  if (!Number.isFinite(next) || next < 0) {
+    throw new RangeError(`setOwnerRenderBudgetMs: ${ms} is not a CPU budget in milliseconds`);
+  }
+  OWNER_MD_RENDER_BUDGET_MS = next;
+  return () => { OWNER_MD_RENDER_BUDGET_MS = previous; };
+}
 
 /** The notice that introduces the plain-text tail of a long document. */
 const TAIL_NOTICE = '<p class="md-tail-notice">Long document: the rest is shown as plain text.</p>';
