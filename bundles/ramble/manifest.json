@@ -1,7 +1,7 @@
 {
   "id": "ramble",
   "name": "Ramble",
-  "version": "0.24.2",
+  "version": "0.25.0",
   "type": "mcp-server",
   "author": "Crow",
   "category": "social",

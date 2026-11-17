@@ -101,13 +101,34 @@ const SIDE_BLOCKS = routineBlocks({
 const LIB = [
   ...POSE_IDS.map((id) => poseEntry(id)),
   poseEntry("pose-side", { perSide: true }),
-  exerciseEntry("ex-reps", { reps: 10, poses: [{ rootAngle: 1 }, { rootAngle: 2 }] }),
+  exerciseEntry("ex-reps", { reps: 10, tempoSeconds: 4, poses: [{ rootAngle: 1 }, { rootAngle: 2 }] }),
   exerciseEntry("ex-timed", { poses: [{ rootAngle: 3 }, { rootAngle: 4 }] }),
+  exerciseEntry("ex-still", {
+    reps: 3, tempoSeconds: 20, still: true, poses: [{ kneeL: 10 }, { kneeL: 40 }],
+  }),
+  exerciseEntry("ex-side", {
+    reps: 6, tempoSeconds: 4, perSide: true, poses: [{ hipL: 5 }, { hipL: 45 }],
+  }),
   routineEntry("routine-a"),
   routineEntry("routine-b"),
   routineEntry("routine-c"),
   routineEntry("routine-side", { blocks: SIDE_BLOCKS }),
   routineEntry("routine-stage", { stages: [{ rounds: 1 }, { reps: 4 }] }),
+  routineEntry("routine-still", {
+    blocks: routineBlocks({
+      warmup: [{ id: "pose-a", seconds: 60 }],
+      main: [{ id: "ex-still", seconds: 60 }],
+      cooldown: [{ id: "pose-d", seconds: 60 }],
+    }),
+  }),
+  routineEntry("routine-ex-side", {
+    rounds: 1,
+    blocks: routineBlocks({
+      warmup: [{ id: "pose-a", seconds: 60 }],
+      main: [{ id: "ex-side", seconds: 60 }],
+      cooldown: [{ id: "pose-d", seconds: 60 }],
+    }),
+  }),
   routineEntry("routine-hard-a", { level: 3, areas: ["knees", "ankles"] }),
   routineEntry("routine-hard-b", { level: 3, areas: ["knees"] }),
   routineEntry("routine-hard-c", { level: 3, areas: ["shoulders"] }),
@@ -430,6 +451,7 @@ test("every segment has the whole shape and the counts agree with the segments",
   const KEYS = [
     "type", "chunkIndex", "block", "entryId", "stepIndex", "seconds", "active",
     "fromPose", "toPose", "reps", "side", "cue", "say", "anatomyStep",
+    "tempoSeconds", "still",
   ].sort();
   const COUNTED = new Set(["hold", "reps", "timed", "rest"]);
   const timeline = compileSession(CHAIN3, LIB);
@@ -450,6 +472,8 @@ test("every segment has the whole shape and the counts agree with the segments",
       assert.equal(segment.say, "");
       assert.equal(segment.anatomyStep, null);
     }
+    assert.ok(segment.tempoSeconds === null || typeof segment.tempoSeconds === "number");
+    assert.equal(typeof segment.still, "boolean");
   }
 
   timeline.chunks.forEach((chunk, index) => {
@@ -503,6 +527,61 @@ test("every segment has the whole shape and the counts agree with the segments",
   assert.deepEqual(timedSegment.fromPose, { rootAngle: 3 });
   assert.deepEqual(timedSegment.toPose, { rootAngle: 4 });
   assert.equal(timedSegment.seconds, 60);
+});
+
+/* ---------------------------------------------------- one rep's own pace */
+
+test("an exercise's segments carry its own tempo and still flag, and nothing else does", () => {
+  const timeline = compileTimeline("routine-a", LIB);
+  const reps = timeline.segments.filter((s) => s.type === "reps");
+  assert.ok(reps.length > 0, "the fixture routine has a reps step");
+  assert.ok(reps.every((s) => s.tempoSeconds === 4), "the entry's own tempo on every round");
+  assert.ok(reps.every((s) => s.still === false), "a moving rep is not still");
+
+  /* A pose the flow holds has no tempo of its own and is never marked still. */
+  const holds = timeline.segments.filter((s) => s.type === "hold");
+  assert.ok(holds.length > 0);
+  assert.ok(holds.every((s) => s.tempoSeconds === null && s.still === false), "a hold carries neither");
+
+  /* Nor does a transition, a switch of sides, a rest or a chunk break. */
+  const quiet = timeline.segments.filter((s) => !s.active);
+  assert.ok(quiet.length > 0);
+  assert.ok(quiet.every((s) => s.tempoSeconds === null && s.still === false), "a quiet segment carries neither");
+
+  /* An exercise with no tempo of its own gets none. */
+  const timed = compileTimeline("routine-timed", LIB);
+  const timedSegment = timed.segments.find((s) => s.entryId === "ex-timed");
+  assert.equal(timedSegment.type, "timed");
+  assert.equal(timedSegment.tempoSeconds, null);
+  assert.equal(timedSegment.still, false);
+
+  /* A held exercise says so, and keeps its own pace. */
+  const still = compileTimeline("routine-still", LIB);
+  const stillSegment = still.segments.find((s) => s.entryId === "ex-still");
+  assert.equal(stillSegment.type, "reps");
+  assert.equal(stillSegment.tempoSeconds, 20);
+  assert.equal(stillSegment.still, true);
+});
+
+test("a per-side exercise starts its second side from its own first key position", () => {
+  const entry = LIB_BY_ID.get("ex-side");
+  const timeline = compileTimeline("routine-ex-side", LIB);
+  const sides = timeline.segments.filter((s) => s.side !== null);
+
+  assert.deepEqual(sides.map((s) => s.side), ["left", "right"]);
+  assert.equal(sides[0].seconds + sides[1].seconds, 60);
+  assert.deepEqual(sides[0].fromPose, entry.poses[0], "the first side starts on the entry's first pose");
+  assert.deepEqual(sides[1].fromPose, entry.poses[0], "so does the second side");
+  assert.deepEqual(sides[0].toPose, entry.poses[1]);
+  assert.deepEqual(sides[1].toPose, entry.poses[1]);
+  assert.deepEqual(sides.map((s) => s.tempoSeconds), [4, 4]);
+  assert.deepEqual(sides.map((s) => s.still), [false, false]);
+
+  /* Flipped, the same two starting points. */
+  const flipped = compileTimeline("routine-ex-side", LIB, { perSideOrder: "right" });
+  const flippedSides = flipped.segments.filter((s) => s.side !== null);
+  assert.deepEqual(flippedSides.map((s) => s.side), ["right", "left"]);
+  assert.ok(flippedSides.every((s) => JSON.stringify(s.fromPose) === JSON.stringify(entry.poses[0])));
 });
 
 /* ---------------------------------------------------- the clock (Task 2.2) */

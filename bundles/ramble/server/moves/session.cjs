@@ -165,6 +165,8 @@
       ownStart: fields.ownStart,
       startPose: fields.startPose,
       endPose: fields.endPose,
+      tempoSeconds: fields.tempoSeconds,
+      still: fields.still,
       restSeconds: fields.restSeconds
     };
   }
@@ -177,6 +179,10 @@
     var type = "hold";
     var reps = null;
     var ownStart = false;
+    /* An exercise's own pace for one rep, and whether it is held rather than
+     * moved. Neither belongs to a pose, a flow hold or a walk. */
+    var tempoSeconds = null;
+    var still = false;
     if (target.kind === "pose") {
       var pose = isObject(target.pose) ? target.pose : null;
       startPose = pose;
@@ -184,6 +190,8 @@
     } else if (target.kind === "exercise") {
       /* An exercise carries its own two key positions. */
       ownStart = true;
+      tempoSeconds = isSeconds(target.tempoSeconds) ? target.tempoSeconds : null;
+      still = target.still === true;
       if (target.reps !== undefined) {
         type = "reps";
         reps = isPositiveInt(repsOverride) ? repsOverride
@@ -209,6 +217,8 @@
       ownStart: ownStart,
       startPose: startPose,
       endPose: endPose,
+      tempoSeconds: tempoSeconds,
+      still: still,
       restSeconds: isSeconds(step.restSeconds) ? step.restSeconds : 0
     });
   }
@@ -228,6 +238,8 @@
       ownStart: false,
       startPose: pose,
       endPose: pose,
+      tempoSeconds: null,
+      still: false,
       restSeconds: 0
     });
   }
@@ -246,6 +258,8 @@
       ownStart: false,
       startPose: null,
       endPose: null,
+      tempoSeconds: null,
+      still: false,
       restSeconds: 0
     });
   }
@@ -386,7 +400,9 @@
       side: fields.side,
       cue: fields.cue,
       say: fields.say,
-      anatomyStep: fields.anatomyStep
+      anatomyStep: fields.anatomyStep,
+      tempoSeconds: fields.tempoSeconds,
+      still: fields.still
     };
   }
 
@@ -405,7 +421,9 @@
       side: side,
       cue: step.cue,
       say: step.say,
-      anatomyStep: anatomyStep
+      anatomyStep: anatomyStep,
+      tempoSeconds: item.ownStart ? item.tempoSeconds : null,
+      still: item.ownStart === true && item.still === true
     });
   }
 
@@ -424,7 +442,9 @@
       side: null,
       cue: "",
       say: "",
-      anatomyStep: null
+      anatomyStep: null,
+      tempoSeconds: null,
+      still: false
     });
   }
 
@@ -462,7 +482,8 @@
           fromPose: state.prevPose,
           toPose: item.endPose
         }));
-        segments.push(workSegment(item, secondSide, item.seconds - firstSeconds, state.prevPose, step, anatomyStep, chunkIndex));
+        segments.push(workSegment(item, secondSide, item.seconds - firstSeconds,
+          item.ownStart ? item.startPose : state.prevPose, step, anatomyStep, chunkIndex));
       } else {
         segments.push(workSegment(item, null, item.seconds, fromPose, step, anatomyStep, chunkIndex));
       }
