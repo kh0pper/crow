@@ -70,9 +70,50 @@ const LIB = [
       cooldown: [{ id: "pose-fold", seconds: 30 }],
     },
   },
+  {
+    id: "ex-curl",
+    kind: "exercise",
+    title: "Tempo curl",
+    minutes: 2,
+    reps: 8,
+    tempoSeconds: 4,
+    poses: [{ elbowL: 10, elbowR: 10 }, { elbowL: 120, elbowR: 120 }],
+    steps: [{ text: "Curl up slowly", cue: "Curl up slowly", say: "Curl up slowly" }],
+    anatomy: [{ main: "biceps" }],
+  },
+  {
+    id: "ex-side-hold",
+    kind: "exercise",
+    title: "Still side hold",
+    minutes: 2,
+    reps: 2,
+    tempoSeconds: 15,
+    still: true,
+    poses: [{ hipL: 20, hipR: 20 }, { hipL: 60, hipR: 60 }],
+    steps: [{ text: "Hold the side", cue: "Hold the side", say: "Hold the side" }],
+    anatomy: [{ main: "obliques" }],
+  },
+  {
+    id: "chunk-tempo",
+    kind: "routine",
+    title: "Tempo routine",
+    minutes: 10,
+    rounds: 1,
+    steps: [{ text: "tempo work", cue: "tempo work", say: "tempo work" }],
+    blocks: {
+      warmup: [{ id: "pose-reach", seconds: 30 }],
+      main: [
+        { id: "ex-curl", seconds: 60 },
+        { id: "ex-side-hold", seconds: 30 },
+      ],
+      cooldown: [{ id: "pose-fold", seconds: 30 }],
+    },
+  },
 ];
 
 const CHAIN = [{ chunkId: "chunk-a" }];
+/* A chunk whose work steps carry their own pace for one rep. */
+const TEMPO_CHAIN = [{ chunkId: "chunk-tempo" }];
 
 function entryTitle(id) {
   const entry = LIB.find((one) => one.id === id);
@@ -237,6 +278,19 @@ function advance(clock, seconds) {
   latest.fn();
 }
 
+/* The segments of any chain of the same fixtures. */
+function segmentsOfChain(sandbox, chain) {
+  return sandbox.RambleSession.compileSession(chain, LIB, { guidance: "full" }).segments;
+}
+
+/* Go to one segment the way a reader does: by tapping its strip step. */
+function seekTo(booted, index) {
+  const strip = byRole(booted.host, "strip");
+  const step = strip.children.find((one) => one.getAttribute("data-index") === String(index));
+  assert.ok(step, "the strip offers segment " + index);
+  step.click();
+}
+
 function fillCopy(template, values) {
   return template.replace(/\{([a-z]+)\}/g, (whole, key) => String(values[key]));
 }
@@ -344,6 +398,118 @@ test("render: reduced motion draws the toPose and never interpolates", () => {
   byRole(moving.host, "start").click();
   advance(moving.clock, 0.5);
   assert.equal(movingInterpolated > 0, true, "without the preference the pose tweens in");
+});
+
+test("figure: one rep is one cycle of the segment's tempoSeconds", () => {
+  const booted = boot();
+  const segments = segmentsOfChain(booted.sandbox, TEMPO_CHAIN);
+  const at = segments.findIndex((s) => s.entryId === "ex-curl");
+  const segment = segments[at];
+  assert.equal(segment.type, "reps");
+  assert.equal(segment.tempoSeconds, 4, "the fixture entry's own tempo");
+  assert.ok(segment.fromPose && segment.toPose, "a rep moves between two key positions");
+
+  const Figure = booted.sandbox.RambleFigure;
+  const realSvg = Figure.poseSvg;
+  const realTween = Figure.tween;
+  const drawn = [];
+  let blent = 0;
+  Figure.tween = (from, to, t) => { blent += 1; return realTween(from, to, t); };
+  Figure.poseSvg = (pose, opts) => { drawn.push(plain(pose)); return realSvg(pose, opts); };
+
+  mountPlayer(booted, { chain: TEMPO_CHAIN, reducedMotion: false });
+  byRole(booted.host, "start").click();
+  seekTo(booted, at);
+
+  const startPose = plain(Figure.clampPose(segment.fromPose));
+  const endPose = plain(Figure.clampPose(segment.toPose));
+  assert.deepEqual(drawn[drawn.length - 1], startPose, "the rep opens on the first key position");
+
+  advance(booted.clock, 1);
+  assert.equal(drawn[drawn.length - 1].elbowL, 65, "a second in, the elbow is half way round");
+  assert.equal(drawn[drawn.length - 1].elbowR, 65);
+
+  advance(booted.clock, 1);
+  assert.deepEqual(drawn[drawn.length - 1], endPose, "at 2 s the rep reaches the second key position");
+
+  advance(booted.clock, 2);
+  assert.deepEqual(drawn[drawn.length - 1], startPose, "at 4 s the next rep begins");
+  assert.ok(blent > 0, "the pose is blended between the two key positions");
+});
+
+test("figure: a still exercise draws one pose at every time and never tweens", () => {
+  const booted = boot();
+  const segments = segmentsOfChain(booted.sandbox, TEMPO_CHAIN);
+  const at = segments.findIndex((s) => s.entryId === "ex-side-hold");
+  const segment = segments[at];
+  assert.equal(segment.still, true, "the fixture entry is held still");
+  assert.ok(segment.tempoSeconds > 0);
+
+  const Figure = booted.sandbox.RambleFigure;
+  const realSvg = Figure.poseSvg;
+  const realTween = Figure.tween;
+  const realInterpolate = Figure.interpolate;
+  const drawn = [];
+  let blent = 0;
+  let interpolated = 0;
+  Figure.tween = (from, to, t) => { blent += 1; return realTween(from, to, t); };
+  Figure.interpolate = (from, to, t) => { interpolated += 1; return realInterpolate(from, to, t); };
+  Figure.poseSvg = (pose, opts) => { drawn.push(plain(pose)); return realSvg(pose, opts); };
+
+  mountPlayer(booted, { chain: TEMPO_CHAIN, reducedMotion: false });
+  byRole(booted.host, "start").click();
+  seekTo(booted, at);
+
+  /* The hold the session opens on is blended on the way here; from this step
+   * on nothing may be. */
+  const blentBefore = blent;
+  const interpolatedBefore = interpolated;
+
+  const shown = plain(segment.toPose);
+  assert.deepEqual(drawn[drawn.length - 1], shown);
+  for (const span of [0.5, 5, 5, 5, 5, 5]) {
+    advance(booted.clock, span);
+    assert.deepEqual(drawn[drawn.length - 1], shown, "the same position after " + span + " s");
+  }
+  assert.equal(blent - blentBefore, 0, "a still rep never blends between the key positions");
+  assert.equal(interpolated - interpolatedBefore, 0, "and never eases into one either");
+  assert.notDeepEqual(shown, plain(segment.fromPose), "the two key positions differ");
+});
+
+test("figure: reduced motion on a tempo segment swaps the key positions at the midpoint", () => {
+  const booted = boot();
+  const segments = segmentsOfChain(booted.sandbox, TEMPO_CHAIN);
+  const at = segments.findIndex((s) => s.entryId === "ex-curl");
+  const segment = segments[at];
+
+  const Figure = booted.sandbox.RambleFigure;
+  const realSvg = Figure.poseSvg;
+  const realTween = Figure.tween;
+  const realInterpolate = Figure.interpolate;
+  const drawn = [];
+  let blent = 0;
+  let interpolated = 0;
+  Figure.tween = (from, to, t) => { blent += 1; return realTween(from, to, t); };
+  Figure.interpolate = (from, to, t) => { interpolated += 1; return realInterpolate(from, to, t); };
+  Figure.poseSvg = (pose, opts) => { drawn.push(plain(pose)); return realSvg(pose, opts); };
+
+  mountPlayer(booted, { chain: TEMPO_CHAIN, reducedMotion: true });
+  byRole(booted.host, "start").click();
+  seekTo(booted, at);
+
+  const startPose = plain(segment.fromPose);
+  const endPose = plain(segment.toPose);
+  assert.deepEqual(drawn[drawn.length - 1], startPose, "the first key position, as it is");  advance(booted.clock, 1.9);
+  assert.deepEqual(drawn[drawn.length - 1], startPose, "1.9 s in, the first position still shows");
+
+  advance(booted.clock, 0.1);
+  assert.deepEqual(drawn[drawn.length - 1], endPose, "at the midpoint the second position takes over");
+
+  advance(booted.clock, 2);
+  assert.deepEqual(drawn[drawn.length - 1], startPose, "the next rep swaps back");
+
+  assert.equal(blent, 0, "reduced motion never blends a rep");
+  assert.equal(interpolated, 0, "and never eases one");
 });
 
 test("render: the safety note shows before the first Start only", () => {

@@ -180,6 +180,22 @@
     out.support = t < 0.5 ? ca.support : cb.support;
     return out;
   }
+  /* Per-angle LINEAR blend (no easing): one rep of an exercise is one steady
+   * trip from its first key position to its second, so the pace belongs to the
+   * entry's own tempo and not to a curve. t<=0 and t>=1 return exact copies of
+   * the clamped endpoints, the same way interpolate does. */
+  function tween(poseA, poseB, t) {
+    var ca = clampPose(poseA), cb = clampPose(poseB);
+    if (!isNum(t) || t <= 0) return copyPose(ca);
+    if (t >= 1) return copyPose(cb);
+    var out = {}, i, k;
+    for (i = 0; i < ANGLE_KEYS.length; i++) {
+      k = ANGLE_KEYS[i];
+      out[k] = clampAngle(ca[k] + (cb[k] - ca[k]) * t, limitFor(k));
+    }
+    out.support = t < 0.5 ? ca.support : cb.support;
+    return out;
+  }
   function copyPose(p) {
     var out = {}, k;
     for (k in p) if (Object.prototype.hasOwnProperty.call(p, k)) out[k] = p[k];
@@ -222,6 +238,6 @@
   return {
     SEGMENTS: SEGMENTS, JOINT_LIMITS: JOINT_LIMITS, ROOT_LIMIT: ROOT_LIMIT,
     SUPPORTS: SUPPORTS, SUPPORT_POINTS: SUPPORT_POINTS, SEAT_HEIGHT_FRAC: SEAT_HEIGHT_FRAC,
-    clampPose: clampPose, solve: solve, interpolate: interpolate, poseSvg: poseSvg
+    clampPose: clampPose, solve: solve, interpolate: interpolate, tween: tween, poseSvg: poseSvg
   };
 });

@@ -394,6 +394,27 @@
       return segment.toPose ? segment.toPose : null;
     }
 
+    /* A work segment whose entry names a pace for one rep: the figure makes one
+     * complete trip from its first key position to its second inside that many
+     * seconds, and then again for the next rep. */
+    function hasTempo(segment) {
+      return isWork(segment)
+        && typeof segment.tempoSeconds === "number"
+        && isFinite(segment.tempoSeconds) && segment.tempoSeconds > 0
+        && Boolean(segment.fromPose) && Boolean(segment.toPose);
+    }
+
+    /* Where in its rep the clock stands: 0 at the start pose, 0.5 at the end
+     * pose, and back around to 0 as the next rep begins. */
+    function repPhase(segment, segmentElapsed) {
+      var cycle = segment.tempoSeconds;
+      var into = typeof segmentElapsed === "number" && isFinite(segmentElapsed) && segmentElapsed > 0
+        ? segmentElapsed
+        : 0;
+      var phase = (into % cycle) / cycle;
+      return phase >= 0 && phase < 1 ? phase : 0;
+    }
+
     function figureHtml(index, segmentElapsed) {
       if (!Figure || typeof Figure.poseSvg !== "function") return "";
       var segment = segmentAt(index);
@@ -401,7 +422,25 @@
       var toPose = poseFor(index);
       if (!toPose) return "";
       var pose = toPose;
-      if (!reduced && isWork(segment)) {
+      if (segment.still === true) {
+        /* A rep held still shows one position all the way through: it never
+         * swaps ends and never moves between them. */
+        pose = toPose;
+      } else if (hasTempo(segment)) {
+        var phase = repPhase(segment, segmentElapsed);
+        if (reduced) {
+          /* No blend at all: the two key positions and nothing in between. */
+          pose = phase < 0.5 ? segment.fromPose : toPose;
+        } else {
+          /* Out on the first half of the rep, back on the second. */
+          var u = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
+          try {
+            pose = Figure.tween(segment.fromPose, toPose, u);
+          } catch (err) {
+            pose = toPose;
+          }
+        }
+      } else if (!reduced && isWork(segment)) {
         var span = Math.min(TWEEN_SECONDS, segment.seconds);
         var t = span > 0 ? Math.min(1, segmentElapsed / span) : 1;
         try {

@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const Figure = require("../bundles/ramble/server/moves/figure.cjs");
@@ -151,6 +152,85 @@ test("interpolate: a knee between 10° and 90° never bends backwards", () => {
   }
 });
 
+/* The shipped library's exercises, each with the two key positions a rep moves
+ * between. Read off disk, never written. */
+const LIBRARY_DIR = new URL("../bundles/ramble/server/moves/library/", import.meta.url);
+function libraryExercises() {
+  const out = [];
+  for (const name of readdirSync(LIBRARY_DIR)) {
+    if (!name.endsWith(".json")) continue;
+    const entry = JSON.parse(readFileSync(new URL(name, LIBRARY_DIR), "utf8"));
+    if (!entry || entry.kind !== "exercise" || !Array.isArray(entry.poses)) continue;
+    if (entry.poses.length < 2) continue;
+    out.push(entry);
+  }
+  return out;
+}
+
+/* A pose's own value for a key, with clampPose's default for a key it leaves
+ * out. */
+const valueOf = (pose, key) => (typeof pose[key] === "number" ? pose[key] : 0);
+
+function insideLimits(pose, where) {
+  for (const [joint, lim] of Object.entries(Figure.JOINT_LIMITS)) {
+    for (const side of ["L", "R"]) {
+      const key = joint + side;
+      if (!Object.prototype.hasOwnProperty.call(pose, key)) continue;
+      assert.ok(pose[key] >= lim.min - 1e-9 && pose[key] <= lim.max + 1e-9,
+        where + ": " + key + " = " + pose[key]);
+    }
+  }
+  assert.ok(pose.rootAngle >= Figure.ROOT_LIMIT.min && pose.rootAngle <= Figure.ROOT_LIMIT.max,
+    where + ": rootAngle = " + pose.rootAngle);
+}
+
+test("tween: endpoints exact, support switches at t=0.5, no easing", () => {
+  const pairs = [[STANDING, FOLD], [FOLD, DOWNDOG], [DOWNDOG, SEATED], [SEATED, TREE], [TREE, LUNGE]];
+  for (const [a, b] of pairs) {
+    assert.deepEqual(Figure.tween(a, b, 0), Figure.clampPose(a));
+    assert.deepEqual(Figure.tween(a, b, 1), Figure.clampPose(b));
+    assert.deepEqual(Figure.tween(a, b, -1), Figure.clampPose(a), "before the start is the start");
+    assert.deepEqual(Figure.tween(a, b, 4), Figure.clampPose(b), "past the end is the end");
+    assert.deepEqual(Figure.tween(a, b, "half"), Figure.clampPose(a), "a non-number is no motion");
+    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+      const p = Figure.tween(a, b, t);
+      insideLimits(p, "t=" + t);
+      const expected = t < 0.5 ? Figure.clampPose(a).support : Figure.clampPose(b).support;
+      assert.equal(p.support, expected, "support@" + t);
+    }
+  }
+
+  /* Linear, not eased: half way through is half way round the joint. */
+  const mid = Figure.tween({ kneeL: 10 }, { kneeL: 90 }, 0.5);
+  assert.equal(mid.kneeL, 50);
+  assert.equal(Figure.tween({ kneeL: 10 }, { kneeL: 90 }, 0.25).kneeL, 30);
+  assert.equal(mid.support, "feet", "support comes from the first half");
+  assert.equal(Figure.tween({ kneeL: 10, support: "seat" }, { kneeL: 90 }, 0.49).support, "seat");
+  assert.equal(Figure.tween({ kneeL: 10, support: "seat" }, { kneeL: 90 }, 0.5).support, "feet");
+});
+
+test("tween: every shipped exercise's two key positions are inside the limits", () => {
+  const exercises = libraryExercises();
+  assert.ok(exercises.length > 0, "the shipped library carries exercises");
+
+  for (const entry of exercises) {
+    const [start, end] = entry.poses;
+    for (const pose of [start, end]) {
+      const clamped = Figure.clampPose(pose);
+      for (const key of Object.keys(clamped)) {
+        if (key === "support") continue;
+        assert.equal(clamped[key], valueOf(pose, key), entry.id + ": " + key + " is unchanged by clampPose");
+      }
+      insideLimits(clamped, entry.id);
+    }
+    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+      insideLimits(Figure.tween(start, end, t), entry.id + " tween@" + t);
+    }
+    assert.deepEqual(Figure.tween(start, end, 0), Figure.clampPose(start), entry.id + " starts on its first pose");
+    assert.deepEqual(Figure.tween(start, end, 1), Figure.clampPose(end), entry.id + " ends on its second pose");
+  }
+});
+
 test("poseSvg: inert decorative markup, deterministic, muscles accepted and ignored", () => {
   for (const [name, pose] of POSES) {
     const svg = Figure.poseSvg(pose, { size: 200 });
@@ -174,7 +254,6 @@ test("poseSvg output survives a junk pose without NaN in the markup", () => {
 });
 
 test("no ESM syntax (must load as a classic browser script)", async () => {
-  const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../bundles/ramble/server/moves/figure.cjs", import.meta.url), "utf8");
   assert.ok(!/^\s*(import|export)\s/m.test(src));
 });
