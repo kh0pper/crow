@@ -607,6 +607,37 @@
  * at a negative context frame: those first samples are the master chain's
  * pre-roll, and they belong where they will be heard.)
  *
+ * ## The count-in
+ *
+ * A Record pressed with the transport stopped (or paused) can be counted in:
+ * `{type:"play", count_in_bars}` with 1, 2 or 4 bars makes the engine count
+ * that many bars of clicks and start the song on a frame it chooses itself. It
+ * is live state, never song data and never a command, and it has nothing to do
+ * with the metronome's toggle.
+ *
+ * The start is a few numbers and no schedule. On accepting the play the engine
+ * reads the tempo ONCE (a tempo edit during the count-in moves the song from
+ * its downbeat, never the count-in's own spacing), sets `playFrame` to the
+ * first BLOCK start at or after `now + 4N beats`, and posts
+ * `{type:"count_in_start", play_frame}` immediately. Each block then adds the
+ * click whose frame it holds — click *i* at `playFrame - (beats - i) * fpb`,
+ * rounded once, accent on the first beat of every count-in bar — through the
+ * metronome's own click state, after the master tap, so the count-in is heard
+ * and never mixed, metered, tapped or recorded. The block that starts ON
+ * `playFrame` calls the ordinary `sequencer.play()` before it renders, so the
+ * song's beat 0 sits on a block's first frame, and posts
+ * `{type:"count_in_done", frame}`. A paused transport resumes at the beat it
+ * was paused on: the count-in only delays the resume, it does not restart it.
+ *
+ * `{type:"count_in_cancel"}`, and a `stop` or a `pause` that arrives during a
+ * count-in, cancel it: no further click starts (one already ringing finishes),
+ * the sequencer is left exactly as it was — stopped, or paused at its position —
+ * and nothing else changes. A `play` during a count-in is ignored, so a page
+ * cannot restart or short-cut it. The play frame is always in the future when it
+ * is announced, which is what lets a recorder arm a take on it (the plan's
+ * "no planned catch-up" rule); the recorder's own replay of a late arm frame
+ * stays the safety net it always was.
+ *
  * ## The performance bus and the looper
  *
  * `perf-fx.js` (`StudioPerfFx`) sits on the master bus, and the order it is
@@ -676,7 +707,11 @@
  *
  * client → processor: `{type:"song", snapshot}`, `{type:"launchScene", id}`,
  * `{type:"launchClip", id}`, `{type:"stopTrack", id}`, `{type:"stopAll"}`,
- * `{type:"play"}`, `{type:"pause"}`, `{type:"stop"}` (which also releases
+ * `{type:"play", count_in_bars}` (with `count_in_bars` 1, 2 or 4 and the
+ * transport not playing, the song waits for a count-in: see "The count-in";
+ * anything else, or no option at all, is today's Play),
+ * `{type:"count_in_cancel"}` (stop a count-in and change nothing else),
+ * `{type:"pause"}`, `{type:"stop"}` (which also releases
  * the pads' live state — every loop, every HOLD and the pause),
  * `{type:"reset_live"}` (the
  * same release,
@@ -705,7 +740,12 @@
  * right}`, `{type:"looper_take", id}`, `{type:"faust-modules", modules}`,
  * `{type:"pad_events_on", on}` (a page subscribed to the pad lights)
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
- * error}`, `{type:"position", bar, beat, sixteenth, patterns, frame}` (at most
+ * error}`, `{type:"count_in_start", play_frame}` (the frame the song will start
+ * on, posted the moment a count-in is accepted, before its first click),
+ * `{type:"count_in", beat, beats, frame, play_frame}` (one per click, `beat`
+ * 1-based, in the context's frames), `{type:"count_in_done", frame}` (the block
+ * that started the song), `{type:"position", bar, beat, sixteenth, patterns,
+ * frame}` (at most
  * every 50 ms of audio, `frame` being the context frame of the block the report
  * is for; `patterns` maps each sampler track that was playing a pattern
  * clip in that block to `{pattern_id, slot_start_beat, slot_beats, chain_index}`
@@ -1170,6 +1210,13 @@
   const METRONOME_ACCENT_LEVEL = 0.5;
   const METRONOME_TWO_PI = Math.PI * 2;
 
+  /**
+   * The block size assumed before a host has handed over a block: every host in
+   * the plan hands 128 frames, and the count-in only needs it to round its play
+   * frame onto a block start (see `startCountIn`).
+   */
+  const DEFAULT_BLOCK_FRAMES = 128;
+
   /** The mixer an engine with no song (or no mixer containers) runs: nothing. */
   const NO_MIXER = Object.freeze({
     chains: new Map(),
@@ -1259,6 +1306,17 @@
     const meta = snapshot && typeof snapshot.meta === "object" && snapshot.meta ? snapshot.meta : {};
     const value = Number(meta.bpm);
     return Number.isFinite(value) && value > 0 ? value : DEFAULT_BPM;
+  }
+
+  /**
+   * The count-in length a page asked for: Off unless it is exactly 1, 2 or 4
+   * bars, so the engine only ever counts in a length the options row offers.
+   * @param {*} value the `count_in_bars` of a `play` message
+   * @returns {number} 0, 1, 2 or 4
+   */
+  function countInBarsOf(value) {
+    const bars = Math.trunc(Number(value));
+    return bars === 1 || bars === 2 || bars === 4 ? bars : 0;
   }
 
   /** @returns {number} the value held between two bounds. */
@@ -2476,6 +2534,28 @@
       this.metronomeFrames = Math.max(1, Math.round(sampleRate * METRONOME_CLICK_SECONDS));
       this.metronomeDecay = Math.exp(-1 / (METRONOME_DECAY_SECONDS * sampleRate));
 
+      /**
+       * The count-in (see "The count-in"): whether one is running, how many
+       * beats it counts, the tempo it started at, which click comes next and the
+       * processor frame the song really starts on. Only numbers, made here and
+       * nowhere else: the clicks are computed from them on the fly (audio-thread
+       * rule 7), and the play frame is announced before the first click so the
+       * page can arm a take on a frame the engine has not rendered yet (rule 9).
+       */
+      this.countInActive = false;
+      this.countInBeats = 0;
+      this.countInFpb = 0;
+      this.countInNext = 0;
+      this.countInPlayFrame = 0;
+
+      /**
+       * The block size the host last asked for. The count-in rounds its play
+       * frame onto one of those starts, so the song begins on a block's first
+       * frame — which is what keeps the sequencer's `originFrame` on a block
+       * start (see `finishCountIn`).
+       */
+      this.blockFrames = DEFAULT_BLOCK_FRAMES;
+
       /** track index → its tap's stereo scratch, allocated only while a track is tapped. */
       this.tapIndex = -1;
       this.tapLeft = null;
@@ -2760,6 +2840,14 @@
           this.sequencer.stopAll();
           break;
         case "pause":
+          // A pause during a count-in is a cancel and nothing more (R7): the
+          // sequencer is not playing yet, so there is no run to pause and the
+          // transport has to be left exactly where it was — stopped, or paused
+          // at the beat it was paused on. A click already ringing finishes.
+          if (this.countInActive) {
+            this.cancelCountIn();
+            break;
+          }
           // A pause is not a stop: it keeps the position, what the song has
           // armed and the launches already queued for a later bar, so the next
           // `play` carries on from the beat it recorded. Nothing that waits for
@@ -2795,14 +2883,35 @@
           });
           break;
         }
-        case "play":
+        case "play": {
+          // A count-in is the engine's own start: with one asked for, and the
+          // transport not playing (stopped or paused), `sequencer.play()` waits
+          // for the play frame the count-in announced (R1, R2). A play while a
+          // count-in is running is ignored — it neither restarts nor short-cuts
+          // it (R19) — and Off is today's path untouched (R4).
+          const countInBars = countInBarsOf(message.count_in_bars);
+          if (this.countInActive) break;
+          if (countInBars > 0 && !this.sequencer.isPlaying()) {
+            this.startCountIn(countInBars);
+            break;
+          }
           this.sequencer.play();
           // The integrated measurement and the true peak start again on every
           // Play (plan 1d, Task 9), and the first reading is 100 ms away.
           if (this.meter !== null) this.meter.reset();
           this.sinceMeter = 0;
           break;
+        }
+        case "count_in_cancel":
+          // The page's Pause during a count-in (R7), and the page's own cancel:
+          // no further click is added, the sequencer is untouched (stopped, or
+          // paused at its position) and a ringing click finishes on its own.
+          this.cancelCountIn();
+          break;
         case "stop":
+          // Stop cancels a count-in and then does what Stop always does (R7): no
+          // clip, no take and no position left running behind the operator.
+          this.cancelCountIn();
           this.sequencer.stop();
           // Stop releases the pads' live state: every loop ends through the
           // normal release (holds, rolls and pause join them as they land).
@@ -2826,8 +2935,10 @@
           break;
         case "reset_live":
           // A DIFFERENT song is being opened: the live state belongs to the one
-          // that is going away, so it goes as Stop's does. An ordinary song
+          // that is going away, so it goes as Stop's does — a count-in toward a
+          // song that is no longer open with it. An ordinary song
           // update never sends this — it runs on every edit (`setSong`).
+          this.cancelCountIn();
           this.releaseLive();
           break;
         case "metronome":
@@ -7094,28 +7205,38 @@
     }
 
     /**
-     * Add the metronome's click to the engine's OUTPUT.
+     * Add the metronome's and the count-in's click to the engine's OUTPUT.
      *
      * It is added AFTER `postTap()`, and never inside `block()`: the click does
      * not pass through the mixer, a master insert, the master clip, the master
      * tap or the meter, so no mix, tap, loudness reading or mixdown contains it.
      * `server/render.js` and every offline render never send
-     * `{type:"metronome"}`, so a render stays click-free.
+     * `{type:"metronome"}` and never play with a count-in, so a render stays
+     * click-free.
      *
      * One click is about 25 ms of a sine with a fast exponential decay: 1500 Hz
      * and 0.5 at the first beat of an engine bar, 1000 Hz and 0.35 at the
-     * others. Its frames come from the sequencer's own beat clock
+     * others. The metronome's frames come from the sequencer's own beat clock
      * (`clickBeats()`), so it follows a tempo change and stays on the grid the
      * sequencer plays, sample-accurate. The engine's bars are four beats
      * (`BEATS_PER_BAR`) whatever the song's `meta.meter` says — time-signature
      * support in the engine is a separate gap, so the song's stored meter is
      * not read here at all.
      *
+     * **The count-in clicks are the same sound and the same state** (see "The
+     * count-in"): its own grid (`playFrame - (beats - i) * fpb`, rounded once),
+     * its first beat of a count-in bar accented, and independent of
+     * `metronomeOn` — the operator counts in to the count-in, so it rings even
+     * with the metronome switched off (R5). A count-in click and a metronome
+     * beat never coincide (the count-in runs before the song's first downbeat,
+     * and its clicks stop one beat short of it), so they can share one click
+     * voice.
+     *
      * A click that starts near the end of a block rings into the next one (the
      * state carried between blocks is the samples left plus the phase and level
-     * of the next sample). Turning the metronome off, or stopping the
-     * transport, starts no new click and lets the one already ringing finish.
-     * Nothing is allocated per block.
+     * of the next sample). Turning the metronome off, cancelling a count-in, or
+     * stopping the transport starts no new click and lets the one already
+     * ringing finish. Nothing is allocated per block.
      * @param {Float32Array} left the master's left channel
      * @param {Float32Array|null} right the master's right channel
      * @param {number} count the frames this block holds
@@ -7126,18 +7247,27 @@
       // The beats this block holds, filled into the sequencer's own scratch.
       const beats = this.metronomeOn ? this.sequencer.clickBeats(firstFrame, count) : null;
       const clicks = beats !== null && beats.count > 0 ? beats : null;
-      if (clicks === null && this.metronomeLeft <= 0) return;
+      // The count-in's next click, if it has one left: computed from the announced
+      // play frame and the tempo it started at (R6), so the count-in holds no
+      // schedule and allocates nothing (rule 7).
+      let countInFrame =
+        this.countInActive && this.countInNext < this.countInBeats ? this.countInClickFrame() : null;
+      if (clicks === null && countInFrame === null && this.metronomeLeft <= 0) return;
       let next = 0;
       for (let at = 0; at < count; at += 1) {
         while (clicks !== null && next < clicks.count && clicks.frames[next] <= at) {
-          const accent = clicks.accents[next] === true;
-          this.metronomeLeft = this.metronomeFrames;
-          // Starting at the top of the sine is what makes the click begin on
-          // its own frame instead of a frame or two after the beat.
-          this.metronomePhase = 0;
-          this.metronomeLevel = accent ? METRONOME_ACCENT_LEVEL : METRONOME_LEVEL;
-          this.metronomeStep = (METRONOME_TWO_PI * (accent ? METRONOME_ACCENT_HZ : METRONOME_HZ)) / sampleRate;
+          this.startClick(clicks.accents[next] === true);
           next += 1;
+        }
+        // A count-in click is placed by its OWN frame (the grid is absolute), so a
+        // block that holds the boundary starts it on the very frame the operator
+        // hears it on. A click whose frame the block has already passed (a
+        // stalled page, a long block) starts at the block's first frame.
+        while (countInFrame !== null && countInFrame <= firstFrame + at) {
+          this.startClick(this.countInNext % BEATS_PER_BAR === 0);
+          this.postCountInClick(countInFrame);
+          this.countInNext += 1;
+          countInFrame = this.countInNext < this.countInBeats ? this.countInClickFrame() : null;
         }
         if (this.metronomeLeft <= 0) continue;
         const sample = Math.cos(this.metronomePhase) * this.metronomeLevel;
@@ -7147,6 +7277,113 @@
         this.metronomeLevel *= this.metronomeDecay;
         this.metronomeLeft -= 1;
       }
+    }
+
+    /**
+     * Begin one click of the monitor signal: the metronome's click state, shared
+     * with the count-in because both are that one sound.
+     * @param {boolean} accent
+     * @returns {void}
+     */
+    startClick(accent) {
+      this.metronomeLeft = this.metronomeFrames;
+      // Starting at the top of the sine is what makes the click begin on its own
+      // frame instead of a frame or two after the beat.
+      this.metronomePhase = 0;
+      this.metronomeLevel = accent === true ? METRONOME_ACCENT_LEVEL : METRONOME_LEVEL;
+      this.metronomeStep =
+        (METRONOME_TWO_PI * (accent === true ? METRONOME_ACCENT_HZ : METRONOME_HZ)) / sampleRate;
+    }
+
+    /**
+     * Start a count-in: `bars` bars of clicks, then the song.
+     *
+     * The page asks for it with `engine.play({countInBars})` and never counts
+     * itself: the start is decided here, on the audio thread, from this
+     * processor's own frame counter, so a page timer cannot drift it. The play
+     * frame is the first BLOCK start at or after `now + 4N beats`, and it is
+     * announced at once as `count_in_start` — a true future frame, hundreds of
+     * ms ahead — which is the frame a recorder arms a take on (rule 9).
+     *
+     * The tempo is read ONCE, here (R6): a tempo edit during the count-in moves
+     * the song from its downbeat and leaves the count-in's own spacing alone.
+     * @param {number} bars 1, 2 or 4
+     * @returns {void}
+     */
+    startCountIn(bars) {
+      const bpm = Number.isFinite(this.bpm) && this.bpm > 0 ? this.bpm : DEFAULT_BPM;
+      const fpb = (sampleRate * 60) / bpm;
+      const beats = bars * BEATS_PER_BAR;
+      const lead = Math.round(beats * fpb);
+      const block = this.blockFrames > 0 ? this.blockFrames : DEFAULT_BLOCK_FRAMES;
+      this.countInBeats = beats;
+      this.countInFpb = fpb;
+      this.countInNext = 0;
+      this.countInPlayFrame = this.frame + Math.ceil(lead / block) * block;
+      this.countInActive = true;
+      this.port.postMessage({
+        type: "count_in_start",
+        play_frame: this.contextOffset() + this.countInPlayFrame,
+      });
+    }
+
+    /**
+     * The frame the count-in's next click sits on, in this processor's own clock:
+     * `playFrame - (beats - i) * fpb`, rounded once (R1). One multiply and one
+     * round per click, so a click needs neither a schedule nor an allocation.
+     * @returns {number}
+     */
+    countInClickFrame() {
+      return Math.round(this.countInPlayFrame - (this.countInBeats - this.countInNext) * this.countInFpb);
+    }
+
+    /**
+     * Announce one count-in click, in the CONTEXT's frames like every other frame
+     * the page moves a take against. `beat` is 1-based for the operator, so the
+     * accented clicks are beats 1, 5, 9 … of the count-in.
+     * @param {number} frame this click's frame, in the processor's own clock
+     * @returns {void}
+     */
+    postCountInClick(frame) {
+      this.port.postMessage({
+        type: "count_in",
+        beat: this.countInNext + 1,
+        beats: this.countInBeats,
+        frame: this.contextOffset() + frame,
+        play_frame: this.contextOffset() + this.countInPlayFrame,
+      });
+    }
+
+    /**
+     * The block that starts on the count-in's play frame starts the song — before
+     * it renders, so the sequencer anchors `originFrame` on this block's first
+     * frame and no bar of the first bar lands mid-block (R1). Its clicks are a
+     * monitor signal, so the count-in is never in the song, the take or a render
+     * (R5).
+     * @returns {void}
+     */
+    finishCountIn() {
+      const playFrame = this.countInPlayFrame;
+      this.countInActive = false;
+      this.countInNext = 0;
+      this.sequencer.play();
+      // The integrated measurement and the true peak start again on the Play the
+      // count-in was counting down to, as they do after any other Play.
+      if (this.meter !== null) this.meter.reset();
+      this.sinceMeter = 0;
+      this.port.postMessage({ type: "count_in_done", frame: this.contextOffset() + playFrame });
+    }
+
+    /**
+     * Cancel a count-in (R7): no further click is started, the sequencer is left
+     * exactly as it was — stopped, or paused at its position — and a click
+     * already ringing finishes through the metronome's own state.
+     * @returns {void}
+     */
+    cancelCountIn() {
+      this.countInActive = false;
+      this.countInBeats = 0;
+      this.countInNext = 0;
     }
 
     /**
@@ -7221,6 +7458,9 @@
      * @returns {void}
      */
     block(left, right, count) {
+      // The block size the host asks for, remembered for the count-in's rounding
+      // (it only ever starts a song on a block's first frame).
+      this.blockFrames = count;
       if (this.failNextBlock) {
         this.failNextBlock = false;
         throw new Error("test hook: the processor was asked to fail inside process()");
@@ -7234,6 +7474,11 @@
       // The performance bus's transport is read BEFORE the sequencer moves its
       // own clock to the end of the block.
       this.updateTransport();
+
+      // The block that starts on the count-in's play frame starts the song,
+      // BEFORE this block renders: the sequencer anchors its beat 0 on a block
+      // start, so no event of the first bar lands mid-block (R1, rule 9).
+      if (this.countInActive && this.frame >= this.countInPlayFrame) this.finishCountIn();
 
       // The sequencer must see every block, ready or not: its events are
       // measured from contiguous frame starts. A motion curve is stamped with

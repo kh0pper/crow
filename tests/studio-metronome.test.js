@@ -23,6 +23,14 @@
  *     metronome on really does change the engine's output (so the comparison
  *     proves something);
  *   - turning it off before Play leaves the output silent.
+ *
+ * The count-in (R1, R5) lives here too, because a count-in is the same monitor
+ * signal on the same output: its clicks land on a grid of their own with the
+ * metronome switched off, the metronome's own beats follow their toggle after it,
+ * and a master tap and the meter hold none of it. The last case counts the arrays
+ * the count-in's block path builds, in a stand-in worklet scope whose array
+ * constructors count, so "it allocates nothing per block" is a number rather
+ * than a claim.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -31,6 +39,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import vm from "node:vm";
 import { renderSong as renderThroughServer } from "../bundles/studio/server/render.js";
 
 const ENGINE_DIR = fileURLToPath(new URL("../bundles/studio/engine/", import.meta.url));
@@ -158,11 +167,14 @@ function channelOf(buffer, channel) {
  * Render one song offline through the real engine, the way the panel does:
  * build the engine, hand it the song, launch its first scene, play, render.
  * @param {{song: object, seconds?: number, sampleRate?: number,
- *          metronome?: boolean, off?: boolean, tap?: boolean}} options
+ *          metronome?: boolean, off?: boolean, tap?: boolean,
+ *          countIn?: number, meter?: boolean}} options
  *   `metronome` turns it on before Play, `off` turns it on and straight back
- *   off before Play, and `tap` turns a master tap on
+ *   off before Play, `tap` turns a master tap on, `countIn` plays with that many
+ *   bars of count-in, and `meter` follows the master meter's readings
  * @returns {Promise<{left: Float32Array, right: Float32Array,
- *                    taps: object[], sampleRate: number}>}
+ *                    taps: object[], readings: object[], countIns: object[],
+ *                    sampleRate: number}>}
  */
 async function renderEngine({
   song,
@@ -171,6 +183,8 @@ async function renderEngine({
   metronome = false,
   off = false,
   tap = false,
+  countIn = 0,
+  meter = false,
 } = {}) {
   const context = new OfflineAudioContext({
     numberOfChannels: 2,
@@ -180,23 +194,28 @@ async function renderEngine({
   let engine = null;
   let rendered = false;
   const taps = [];
+  const readings = [];
+  const countIns = [];
   try {
     engine = await studioEngine.create(context, { assetBytes: ASSETS, namCores: 0 });
     engine.setSong(song);
     if (Array.isArray(song.scenes) && song.scenes.length > 0) engine.launchScene(song.scenes[0].id);
     if (tap) engine.onTap((block) => taps.push(block));
+    if (meter) engine.onMeter((reading) => readings.push(reading));
+    if (countIn > 0) engine.onCountIn((event) => countIns.push(event));
     if (metronome) engine.setMetronome(true);
     if (off) {
       engine.setMetronome(true);
       engine.setMetronome(false);
     }
-    engine.play();
+    if (countIn > 0) engine.play({ countInBars: countIn });
+    else engine.play();
     if (tap) engine.tap("master", true);
     engine.node.connect(context.destination);
     await engine.flush();
     const buffer = await context.startRendering();
     rendered = true;
-    return { left: channelOf(buffer, 0), right: channelOf(buffer, 1), taps, sampleRate };
+    return { left: channelOf(buffer, 0), right: channelOf(buffer, 1), taps, readings, countIns, sampleRate };
   } finally {
     if (engine) engine.dispose();
     if (!rendered) await releaseWorklet(context);
@@ -362,4 +381,264 @@ test("turning the metronome off after turning it on leaves the output silent", a
   const { left, right } = await renderEngine({ song: emptySong(), seconds: 2, off: true });
   assertSilent(left, "left");
   assertSilent(right, "right");
+});
+
+// --- the count-in -------------------------------------------------------------
+
+/**
+ * The count-in's own click grid, in frames: click `i` (0-based) sits at
+ * `playFrame - (beats - i) * fpb`, and the song starts on `playFrame`.
+ * @param {number} playFrame
+ * @param {number} beats how many beats the count-in counts
+ * @param {number} fpb frames per beat
+ * @returns {number[]}
+ */
+function countInGrid(playFrame, beats, fpb) {
+  const frames = [];
+  for (let index = 0; index < beats; index += 1) frames.push(Math.round(playFrame - (beats - index) * fpb));
+  return frames;
+}
+
+test("count_in: one bar of clicks on their own grid, with the metronome off, and the song on the announced frame", async () => {
+  // At 120 bpm one beat is 24,000 frames and one bar is 96,000, which is 750
+  // blocks of 128 — so the play frame is exactly four beats after the message.
+  const fpb = 24000;
+  const beats = 4;
+  const playFrame = 4 * fpb;
+  const expected = countInGrid(playFrame, beats, fpb);
+  assert.deepEqual(expected, [0, 24000, 48000, 72000], "the count-in's grid, in frames");
+
+  // The metronome is OFF: the count-in clicks anyway, and nothing follows them.
+  const off = await renderEngine({ song: emptySong(), seconds: 3, countIn: 1 });
+  assertOnsets(onsetsOf(off.left), expected);
+  assertOnsets(onsetsOf(off.right), expected);
+
+  // The first beat of the count-in bar is the accent, the others are plain.
+  const accentPeak = peakIn(off.left, expected[0], expected[0] + 64);
+  assert.ok(
+    Math.abs(accentPeak - ACCENT_PEAK) < 0.01,
+    `the first count-in click should peak near ${ACCENT_PEAK}, it peaked ${accentPeak}`,
+  );
+  for (const frame of expected.slice(1)) {
+    const peak = peakIn(off.left, frame, frame + 64);
+    assert.ok(Math.abs(peak - PLAIN_PEAK) < 0.01, `the click at ${frame} should peak near ${PLAIN_PEAK}, it peaked ${peak}`);
+  }
+
+  // Nothing follows the last count-in click: the song is empty and the metronome
+  // is off, so the count-in is the whole sound.
+  assert.equal(
+    peakIn(off.left, expected[expected.length - 1] + 1300, off.left.length),
+    0,
+    "the count-in is the only sound, and it stops one beat before the song",
+  );
+
+  // The engine announced the frame the song starts on, before the first click.
+  assert.ok(off.countIns.length > 0, "the count-in was announced");
+  assert.equal(off.countIns[0].type, "count_in_start", "the start comes first");
+  assert.equal(off.countIns[0].play_frame, playFrame, "and it names the frame the song starts on");
+
+  // With the metronome ON, the beats after the count-in follow the toggle: the
+  // song's own click is on the very same grid from its first downbeat on.
+  const on = await renderEngine({ song: emptySong(), seconds: 3, countIn: 1, metronome: true });
+  const withClicks = [...expected, 96000, 120000];
+  assertOnsets(onsetsOf(on.left), withClicks);
+  const downbeat = peakIn(on.left, 96000, 96000 + 64);
+  assert.ok(
+    Math.abs(downbeat - ACCENT_PEAK) < 0.01,
+    `the song's first beat is an accent like any other bar line, it peaked ${downbeat}`,
+  );
+});
+
+test("count_in: a master tap and the meter hold none of the click", async () => {
+  const { left, taps, readings } = await renderEngine({
+    song: emptySong(),
+    seconds: 3,
+    countIn: 1,
+    metronome: true,
+    tap: true,
+    meter: true,
+  });
+  // The clicks have to be sounding, or the comparison proves nothing.
+  assert.ok(onsetsOf(left).length >= 6, `the count-in and the click have to be heard, onsets: ${onsetsOf(left)}`);
+
+  assert.ok(taps.length > 0, "the master tap delivered no blocks");
+  for (const block of taps) {
+    assert.equal(block.target, "master", "the tap names the master");
+    for (const channel of block.channels) assertSilent(channel, `tap of ${block.channels.length} channels`);
+  }
+
+  // The meter only reads while the transport runs, so it can hold nothing of the
+  // count-in at all — and after the song starts, an empty song is silence.
+  for (const reading of readings) {
+    assert.ok(
+      !(reading.momentary > -70),
+      `a momentary reading of ${reading.momentary} LUFS would carry click energy`,
+    );
+    assert.ok(
+      !(reading.true_peak_db > -60),
+      `a true peak of ${reading.true_peak_db} dBTP would carry click energy`,
+    );
+  }
+
+  // A render never plays with a count-in: `server/render.js` cannot ask for one.
+  const renderSource = readFileSync(fileURLToPath(new URL("../bundles/studio/server/render.js", import.meta.url)), "utf8");
+  assert.ok(!/count_in|countInBars|cancelCountIn|onCountIn/.test(renderSource), "server/render.js must never ask for a count-in");
+});
+
+/**
+ * The files a processor needs to exist at all: the hosts `studio-processor.js`
+ * guards (the fonts, Faust, NAM, cabinets and the master meter) are left out, so
+ * a song with no tracks needs none of them.
+ */
+const COUNT_IN_FILES = [
+  "sequencer.js",
+  "resample.js",
+  "sampler-voice.js",
+  "pad-events.js",
+  "roll-clock.js",
+  "perf-fx.js",
+  "studio-processor.js",
+];
+
+/** The smallest valid wasm module: enough for the processor's own compile. */
+const EMPTY_WASM = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+/** The block this host hands the processor. */
+const COUNT_IN_BLOCK = 128;
+
+/** @returns {Promise<void>} a macrotask, so the compile's promise work settles */
+async function settle() {
+  await new Promise((resolve) => setTimeout(resolve, 1));
+}
+
+/**
+ * Wait for something the processor posts to arrive.
+ * @param {() => boolean} predicate
+ * @param {number} [ms]
+ * @returns {Promise<boolean>} whether it happened in time
+ */
+async function waitFor(predicate, ms = 5000) {
+  const deadline = Date.now() + ms;
+  while (!predicate() && Date.now() < deadline) await settle();
+  return predicate();
+}
+
+/**
+ * One Studio processor in a bare worklet-like scope, with the array constructors
+ * it would allocate through replaced by counting subclasses — the way the level
+ * core's own no-allocation case counts them. Every `Float32Array`, `Float64Array`
+ * and `Array` the block path builds inside the evaluated module is counted; an
+ * array LITERAL is the scope's own intrinsic array and is never counted (the
+ * same limit the level core's case documents).
+ * @returns {Promise<{send: Function, scope: object, processor: object, counts: object}>}
+ */
+async function countingProcessor() {
+  const counts = { Float32Array: 0, Float64Array: 0, Array: 0 };
+  class CountingFloat32Array extends Float32Array {
+    constructor(...args) {
+      super(...args);
+      counts.Float32Array += 1;
+    }
+  }
+  class CountingFloat64Array extends Float64Array {
+    constructor(...args) {
+      super(...args);
+      counts.Float64Array += 1;
+    }
+  }
+  class CountingArray extends Array {
+    constructor(...args) {
+      super(...args);
+      counts.Array += 1;
+    }
+  }
+  let Processor = null;
+  /** @type {any} */
+  const scope = {
+    console: { log() {}, warn() {}, error() {} },
+    sampleRate: SAMPLE_RATE,
+    currentFrame: 0,
+    WebAssembly,
+    Float32Array: CountingFloat32Array,
+    Float64Array: CountingFloat64Array,
+    Array: CountingArray,
+    AudioWorkletProcessor: class {
+      constructor() {
+        this.port = {
+          postMessage: (message) => scope.posts.push(message),
+          onmessage: null,
+          start() {},
+        };
+      }
+    },
+    registerProcessor: (_name, registered) => {
+      Processor = registered;
+    },
+    posts: [],
+  };
+  vm.createContext(scope);
+  const source = studioEngine.composeEngineModule(COUNT_IN_FILES.map((name) => ASSETS[name]));
+  vm.runInContext(source, scope, { filename: "studio-engine.js" });
+  assert.ok(Processor, "the module has to register the studio processor");
+  const processor = new Processor({ processorOptions: { wasmBinary: EMPTY_WASM } });
+  const ready = await waitFor(() => scope.posts.some((message) => message.type === "ready"));
+  assert.ok(ready, `the processor has to come up and report ready, it posted ${JSON.stringify(scope.posts)}`);
+  return {
+    scope: scope,
+    processor: processor,
+    counts: counts,
+    send: (message) => processor.port.onmessage({ data: message }),
+  };
+}
+
+test("count_in: the count-in path creates no array or object per block", async () => {
+  const counter = await countingProcessor();
+  // The counters really are wired to the module's own constructors: building the
+  // processor made some.
+  assert.ok(
+    counter.counts.Float64Array + counter.counts.Array > 0,
+    "the counting constructors have to be the ones the processor builds through",
+  );
+  counter.send({ type: "song", snapshot: emptySong() });
+
+  // One warm-up block: the mixer's scratch is sized once per block size, which
+  // is the same one-off the level core's rings are.
+  const output = [new Float32Array(COUNT_IN_BLOCK), new Float32Array(COUNT_IN_BLOCK)];
+  counter.processor.process([], [output]);
+
+  counter.send({ type: "play", count_in_bars: 1 });
+  const start = counter.scope.posts.find((message) => message.type === "count_in_start");
+  assert.ok(start, "the count-in was accepted");
+  // One bar of count-in from the frame the warm-up left behind, on a block start.
+  const playFrame = start.play_frame;
+  assert.equal(playFrame, COUNT_IN_BLOCK + 4 * 24000, "one bar of count-in at 120 bpm, on a block's first frame");
+  for (const name of Object.keys(counter.counts)) counter.counts[name] = 0;
+
+  // A bar of count-in and a little of the song: 760 blocks of 128 frames.
+  const blocks = 760;
+  let frame = COUNT_IN_BLOCK;
+  for (let index = 0; index < blocks; index += 1) {
+    counter.scope.currentFrame = frame;
+    counter.processor.process([], [output]);
+    frame += COUNT_IN_BLOCK;
+  }
+
+  assert.deepEqual(
+    { ...counter.counts },
+    { Float32Array: 0, Float64Array: 0, Array: 0 },
+    "the count-in's block path builds no array at all, per block or otherwise",
+  );
+
+  // The only messages the blocks posted are the count-in's own, one per click,
+  // and the transport's position and meter posts: nothing is built per block.
+  const posted = counter.scope.posts.filter((message) => message.type !== "ready");
+  const countIn = posted.filter((message) => message.type.indexOf("count_in") === 0);
+  assert.deepEqual(
+    countIn.map((message) => message.type),
+    ["count_in_start", "count_in", "count_in", "count_in", "count_in", "count_in_done"],
+    "one start, four clicks and one done",
+  );
+  assert.deepEqual(countIn.slice(1, 5).map((message) => message.frame), countInGrid(playFrame, 4, 24000));
+  const other = posted.filter((message) => ["position", "meter", "launched", "count_in_start", "count_in", "count_in_done"].indexOf(message.type) === -1);
+  assert.deepEqual(other, [], "no other message is posted while a count-in runs");
 });

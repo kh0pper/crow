@@ -142,6 +142,19 @@
  *   running (or is already paused) does nothing. `stop()` puts the transport
  *   back to the start — bar 1 in the session, the seek bar on the timeline — and
  *   is what a load that waits for Stop lands on.
+ * - `play({countInBars})` with 1, 2 or 4 bars counts the song in instead of
+ *   starting it at once. The engine picks the frame the song starts on (the
+ *   first block start at least that many beats ahead), rings one click per beat
+ *   with the first beat of every count-in bar accented, and starts the song —
+ *   or, after a pause, resumes it at the paused position — on that frame. The
+ *   count-in is a monitor signal: it is never in a take, a tap, a meter reading
+ *   or a render, and it clicks with the metronome switched off. `onCountIn()`
+ *   follows `{type:"count_in_start", play_frame}` (at once, before the first
+ *   click), `{type:"count_in", beat, beats, frame, play_frame}` (one per click)
+ *   and `{type:"count_in_done", frame}`; every frame is in AudioContext frames.
+ *   `cancelCountIn()` stops the clicks and leaves the transport exactly as it
+ *   was. Stop and Pause cancel a count-in too, and a `play()` during one is
+ *   ignored.
  * - `setMetronome(on)` turns the engine's metronome click on or off: while the
  *   transport plays, one short click (~25 ms of a sine with a fast decay) on
  *   every quarter-note beat, 1500 Hz and louder on the first beat of an engine
@@ -1122,7 +1135,8 @@
    *                    launchClip: function(string): void,
    *                    stopTrack: function(string): void,
    *                    stopAll: function(): void,
-   *                    play: function(): void,
+   *                    play: function(object): void,
+   *                    cancelCountIn: function(): void,
    *                    stop: function(): void,
    *                    resetLive: function(): void,
    *                    pauseVoices: function(boolean): void,
@@ -1135,6 +1149,7 @@
    *                    flush: function(): Promise<void>,
    *                    onPosition: function(function): function,
    *                    onLaunch: function(function): function,
+   *                    onCountIn: function(function): function,
    *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
    *                    nextLoopFrame: function(string, string): Promise<{frame: number,
    *                      bar: number, looping: boolean}>,
@@ -1805,6 +1820,8 @@
     /** Whether the engine was already asked to record pad events. */
     let padEventsAsked = false;
     const meterListeners = new Set();
+    /** Followers of the count-in's own messages (see `onCountIn`). */
+    const countInListeners = new Set();
     const masterLatencyListeners = new Set();
     const insertFaultListeners = new Set();
     const insertLoadingListeners = new Set();
@@ -2021,6 +2038,33 @@
             listener(launch);
           } catch {
             /* one bad listener must not stop the others hearing about it */
+          }
+        }
+        return;
+      }
+      if (message.type === "count_in_start" || message.type === "count_in" || message.type === "count_in_done") {
+        // The count-in's own three messages, passed on as the processor spelled
+        // them: `play_frame` is the frame the song starts on (and the one a take
+        // arms on), `frame` a click's frame or the frame the song did start on.
+        // A page that follows no count-in costs nothing here.
+        if (countInListeners.size === 0) return;
+        const countIn =
+          message.type === "count_in"
+            ? {
+                type: "count_in",
+                beat: Number(message.beat),
+                beats: Number(message.beats),
+                frame: Number(message.frame),
+                play_frame: Number(message.play_frame),
+              }
+            : message.type === "count_in_start"
+              ? { type: "count_in_start", play_frame: Number(message.play_frame) }
+              : { type: "count_in_done", frame: Number(message.frame) };
+        for (const listener of countInListeners) {
+          try {
+            listener(countIn);
+          } catch {
+            /* one bad listener must not stop the count-in for the others */
           }
         }
         return;
@@ -2457,9 +2501,37 @@
         post({ type: "stopAll" });
       },
 
-      /** @returns {void} */
-      play() {
-        post({ type: "play" });
+      /**
+       * Start the transport, or carry on from a pause — with a count-in when one
+       * is asked for.
+       *
+       * `countInBars` of 1, 2 or 4 makes the ENGINE count that many bars of
+       * clicks and pick the frame the song starts on (the first block start at
+       * least that many beats ahead), announced to `onCountIn()` before the first
+       * click. The page never counts itself, so a timer cannot drift the start. A
+       * count-in on a paused transport resumes it at the paused position instead
+       * of restarting it. With no option, with 0, or with any other number this
+       * is the plain Play it always was.
+       * @param {{countInBars?: number}} [options]
+       * @returns {void}
+       */
+      play(options) {
+        const countInBars = options && typeof options === "object" ? Math.trunc(Number(options.countInBars)) : 0;
+        post({
+          type: "play",
+          count_in_bars: countInBars === 1 || countInBars === 2 || countInBars === 4 ? countInBars : 0,
+        });
+      },
+
+      /**
+       * Stop a count-in and change nothing else: no further click starts (one
+       * already ringing finishes) and the transport is left exactly as it was —
+       * stopped, or paused at the position it was paused on. Stop and Pause
+       * cancel a count-in as well, so this is the page's own "cancel" only.
+       * @returns {void}
+       */
+      cancelCountIn() {
+        post({ type: "count_in_cancel" });
       },
 
       /**
@@ -2593,6 +2665,33 @@
         launchListeners.add(listener);
         return function unsubscribe() {
           launchListeners.delete(listener);
+        };
+      },
+
+      /**
+       * Follow a count-in (`play({countInBars})`). The listener is handed the
+       * engine's own messages as it posts them:
+       *
+       *     {type: "count_in_start", play_frame}
+       *     {type: "count_in", beat, beats, frame, play_frame}
+       *     {type: "count_in_done", frame}
+       *
+       * `play_frame` is the AudioContext frame the song will start on (or the
+       * one it did start on), posted the moment the count-in is accepted and
+       * hundreds of ms before the first click, so a recorder can arm a take on a
+       * frame the engine has not rendered yet. `beat` is 1-based, so the
+       * accented clicks are beats 1, 5, 9 … and `frame` is a click's own frame in
+       * the same clock. `count_in_done` is posted by the block that started the
+       * song — a cancelled count-in posts none.
+       * @param {(event: {type: string, play_frame?: number, beat?: number,
+       *                 beats?: number, frame?: number}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onCountIn(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        countInListeners.add(listener);
+        return function unsubscribe() {
+          countInListeners.delete(listener);
         };
       },
 
@@ -3437,6 +3536,7 @@
         tapListeners.clear();
         padEventListeners.clear();
         meterListeners.clear();
+        countInListeners.clear();
         masterLatencyListeners.clear();
         insertFaultListeners.clear();
         insertLoadingListeners.clear();
