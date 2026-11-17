@@ -1312,3 +1312,75 @@
 #ramble .rb-wk-offer-ask { font-size: 14px; }
 #ramble .rb-wk-offer-btns { flex-wrap: wrap; }
 #ramble .rb-wk-offer-btns .rb-btn { flex: 1 1 140px; min-height: 44px; }
+
+/* ------------------------------------------- the Learn card (learning step) */
+
+/* The card sits inside the entry's figure frame: the figure first, then the
+ * chips that colour it, then the way to the words, then the entry's own steps. */
+#ramble .rb-learn-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+#ramble .rb-learn-figure {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 170px;
+}
+#ramble .rb-learn-figure > svg { width: min(240px, 72vw); height: auto; }
+#ramble .rb-learn-chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+/* A chip that is on says so with its shape as well as its fill. */
+#ramble .rb-chip[aria-pressed="true"] { background: var(--rb-accent-2); color: var(--rb-accent-2-ink); box-shadow: 0 0 0 var(--rb-shadow-col); }
+#ramble .rb-learn-steps { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+#ramble button.rb-learn-step {
+  width: 100%;
+  padding: 11px 13px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius-sm);
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  box-shadow: var(--rb-pop-sm);
+  font: 800 14px var(--rb-font-body);
+  text-align: left;
+  cursor: pointer;
+}
+/* The step being held reads as the current one without relying on colour. */
+#ramble button.rb-learn-step[aria-current="true"] {
+  border-width: 4px;
+  background: var(--rb-surface-2);
+}
+#ramble button.rb-learn-step:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
+
+/* The anatomy sheet. It is above every Ramble layer and above the dashboard's
+ * player bar (z-index 1000), like the panel's other sheets. */
+#ramble .rb-learn-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(20, 22, 36, .5);
+  padding: 0;
+}
+#ramble .rb-learn-sheet-panel {
+  width: 100%;
+  max-width: 560px;
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius) var(--rb-radius) 0 0;
+  padding: 16px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+#ramble .rb-learn-why { font-size: 14px; }
+#ramble .rb-learn-structure { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 4px 0; }
+#ramble .rb-learn-structure > strong { min-width: 0; }

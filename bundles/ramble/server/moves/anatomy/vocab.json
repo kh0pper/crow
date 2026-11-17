@@ -1,0 +1,1017 @@
+{
+  "reviewed": true,
+  "sources": [
+    {
+      "title": "BodyParts3D parts list (names of structures)",
+      "url": "https://dbarchive.biosciencedbc.jp/data/bodyparts3d/LATEST/isa_parts_list_e.txt",
+      "license": "CC BY 4.0 (BodyParts3D, Database Center for Life Science; licence page https://dbarchive.biosciencedbc.jp/en/bodyparts3d/lic.html)"
+    },
+    {
+      "title": "Z-Anatomy, Models of human anatomy (names of structures only; no models or pictures used)",
+      "url": "https://github.com/Z-Anatomy/Models-of-human-anatomy",
+      "license": "CC BY-SA 4.0. Credit: Z-Anatomy - The libre 3D atlas of anatomy - CC-BY-SA 4.0 (built on BodyParts3D, Database Center for Life Science)"
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.3 Axial muscles of the head, neck and back",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-3-axial-muscles-of-the-head-neck-and-back",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.4 Axial muscles of the abdominal wall and thorax",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-4-axial-muscles-of-the-abdominal-wall-and-thorax",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.5 Muscles of the pectoral girdle and upper limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-5-muscles-of-the-pectoral-girdle-and-upper-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    },
+    {
+      "title": "OpenStax Anatomy and Physiology 2e: 11.6 Appendicular muscles of the pelvic girdle and lower limbs",
+      "url": "https://openstax.org/books/anatomy-and-physiology-2e/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs",
+      "license": "Facts checked only; no text reused. The wording is ours."
+    }
+  ],
+  "zAnatomyNote": "The 15 Z-Anatomy entries are names only. Nine anatomy records name them (see ANATOMY-RECORD-CHANGES.md). No record names a nerve, the coccyx or transversus abdominis, and every record's nerves list is empty.",
+  "vocab": [
+    {
+      "id": "shoulders",
+      "layer": "muscle",
+      "name": "Shoulder muscle",
+      "anatomical": "Deltoid",
+      "area": "upper",
+      "segments": [
+        "upperArm"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "acromial part of deltoid",
+        "clavicular part of deltoid",
+        "spinal part of deltoid"
+      ]
+    },
+    {
+      "id": "chest",
+      "layer": "muscle",
+      "name": "Chest muscles",
+      "anatomical": "Pectoralis major and minor",
+      "area": "upper",
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "clavicular part of pectoralis major",
+        "sternocostal part of pectoralis major",
+        "abdominal part of pectoralis major",
+        "pectoralis minor"
+      ]
+    },
+    {
+      "id": "trapezius",
+      "layer": "muscle",
+      "name": "Upper back and neck",
+      "anatomical": "Trapezius",
+      "area": "upper",
+      "segments": [
+        "torso",
+        "neck"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "descending part of trapezius",
+        "transverse part of trapezius",
+        "ascending part of trapezius"
+      ]
+    },
+    {
+      "id": "rhomboids",
+      "layer": "muscle",
+      "name": "Between the shoulder blades",
+      "anatomical": "Rhomboids",
+      "area": "upper",
+      "segments": [
+        "torso"
+      ],
+      "sideView": false,
+      "bodyParts3D": [
+        "rhomboid major",
+        "rhomboid minor"
+      ]
+    },
+    {
+      "id": "biceps",
+      "layer": "muscle",
+      "name": "Front of the upper arm",
+      "anatomical": "Biceps brachii",
+      "area": "upper",
+      "segments": [
+        "upperArm"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "long head of biceps brachii",
+        "short head of biceps brachii"
+      ]
+    },
+    {
+      "id": "triceps",
+      "layer": "muscle",
+      "name": "Back of the upper arm",
+      "anatomical": "Triceps brachii",
+      "area": "upper",
+      "segments": [
+        "upperArm"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "long head of triceps brachii",
+        "lateral head of triceps brachii",
+        "medial head of triceps brachii"
+      ]
+    },
+    {
+      "id": "serratus",
+      "layer": "muscle",
+      "name": "Side of the ribs",
+      "anatomical": "Serratus anterior",
+      "area": "upper",
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "serratus anterior"
+      ]
+    },
+    {
+      "id": "rotator-cuff",
+      "layer": "muscle",
+      "name": "Deep shoulder muscles",
+      "anatomical": "Rotator cuff",
+      "area": "upper",
+      "segments": [
+        "upperArm",
+        "torso"
+      ],
+      "sideView": false,
+      "bodyParts3D": [
+        "supraspinatus",
+        "infraspinatus",
+        "teres minor",
+        "subscapularis"
+      ]
+    },
+    {
+      "id": "teres-major",
+      "layer": "muscle",
+      "name": "Under the shoulder blade",
+      "anatomical": "Teres major",
+      "area": "upper",
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "teres major"
+      ]
+    },
+    {
+      "id": "forearm-flexors",
+      "layer": "muscle",
+      "name": "Palm side of the forearm",
+      "anatomical": "Wrist and finger flexors",
+      "area": "upper",
+      "segments": [
+        "forearm"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "flexor carpi radialis",
+        "flexor digitorum superficialis",
+        "flexor digitorum profundus"
+      ]
+    },
+    {
+      "id": "forearm-extensors",
+      "layer": "muscle",
+      "name": "Back of the forearm",
+      "anatomical": "Wrist and finger extensors",
+      "area": "upper",
+      "segments": [
+        "forearm"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "extensor carpi radialis longus",
+        "extensor carpi radialis brevis",
+        "extensor carpi ulnaris",
+        "extensor digitorum"
+      ]
+    },
+    {
+      "id": "neck-front",
+      "layer": "muscle",
+      "name": "Front and side of the neck",
+      "anatomical": "Sternocleidomastoid and scalenes",
+      "area": "upper",
+      "segments": [
+        "neck"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "sternocleidomastoid",
+        "scalenus anterior",
+        "scalenus medius",
+        "scalenus posterior"
+      ]
+    },
+    {
+      "id": "neck-back",
+      "layer": "muscle",
+      "name": "Back of the neck",
+      "anatomical": "Splenius and semispinalis",
+      "area": "upper",
+      "segments": [
+        "neck"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "splenius capitis",
+        "splenius cervicis",
+        "semispinalis capitis",
+        "semispinalis cervicis"
+      ]
+    },
+    {
+      "id": "abdominals",
+      "layer": "muscle",
+      "name": "Belly muscles",
+      "anatomical": "Muscles of the abdominal wall",
+      "area": "core",
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "muscle of anterior abdominal wall"
+      ]
+    },
+    {
+      "id": "side-waist",
+      "layer": "muscle",
+      "name": "Side of the waist",
+      "anatomical": "External oblique",
+      "area": "core",
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "external oblique"
+      ]
+    },
+    {
+      "id": "back-extensors",
+      "layer": "muscle",
+      "name": "Muscles along the spine",
+      "anatomical": "Erector spinae",
+      "area": "core",
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "iliocostalis",
+        "longissimus",
+        "postvertebral muscle"
+      ]
+    },
+    {
+      "id": "diaphragm",
+      "layer": "muscle",
+      "name": "Breathing muscle",
+      "anatomical": "Diaphragm",
+      "area": "core",
+      "segments": [
+        "torso"
+      ],
+      "sideView": false,
+      "bodyParts3D": [
+        "diaphragm"
+      ]
+    },
+    {
+      "id": "pelvic-floor",
+      "layer": "muscle",
+      "name": "Pelvic floor",
+      "anatomical": "Pelvic floor muscles",
+      "area": "core",
+      "segments": [
+        "pelvis"
+      ],
+      "sideView": false,
+      "bodyParts3D": [
+        "coccygeus",
+        "iliococcygeus",
+        "pubococcygeus"
+      ]
+    },
+    {
+      "id": "hip-flexors",
+      "layer": "muscle",
+      "name": "Front of the hip",
+      "anatomical": "Iliacus and psoas major",
+      "area": "lower",
+      "segments": [
+        "pelvis",
+        "thigh"
+      ],
+      "sideView": false,
+      "bodyParts3D": [
+        "iliacus",
+        "psoas major"
+      ]
+    },
+    {
+      "id": "glutes",
+      "layer": "muscle",
+      "name": "Buttock",
+      "anatomical": "Gluteus maximus",
+      "area": "lower",
+      "segments": [
+        "pelvis"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "gluteus maximus"
+      ]
+    },
+    {
+      "id": "side-hip",
+      "layer": "muscle",
+      "name": "Side of the hip",
+      "anatomical": "Gluteus medius, gluteus minimus and tensor fasciae latae",
+      "area": "lower",
+      "segments": [
+        "pelvis"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "gluteus medius",
+        "gluteus minimus",
+        "tensor fasciae latae"
+      ]
+    },
+    {
+      "id": "deep-hip",
+      "layer": "muscle",
+      "name": "Deep hip rotators",
+      "anatomical": "Piriformis, obturators, gemelli and quadratus femoris",
+      "area": "lower",
+      "segments": [
+        "pelvis"
+      ],
+      "sideView": false,
+      "bodyParts3D": [
+        "piriformis",
+        "obturator internus",
+        "obturator externus",
+        "gemellus superior",
+        "gemellus inferior",
+        "quadratus femoris"
+      ]
+    },
+    {
+      "id": "quadriceps",
+      "layer": "muscle",
+      "name": "Front of the thigh",
+      "anatomical": "Quadriceps",
+      "area": "lower",
+      "segments": [
+        "thigh"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "rectus femoris",
+        "vastus lateralis",
+        "vastus medialis",
+        "vastus intermedius"
+      ]
+    },
+    {
+      "id": "hamstrings",
+      "layer": "muscle",
+      "name": "Back of the thigh",
+      "anatomical": "Hamstrings",
+      "area": "lower",
+      "segments": [
+        "thigh"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "long head of biceps femoris",
+        "short head of biceps femoris",
+        "semitendinosus",
+        "semimembranosus"
+      ]
+    },
+    {
+      "id": "inner-thigh",
+      "layer": "muscle",
+      "name": "Inner thigh",
+      "anatomical": "Hip adductors",
+      "area": "lower",
+      "segments": [
+        "thigh"
+      ],
+      "sideView": false,
+      "bodyParts3D": [
+        "adductor longus",
+        "adductor brevis",
+        "adductor magnus",
+        "gracilis",
+        "pectineus"
+      ]
+    },
+    {
+      "id": "calf",
+      "layer": "muscle",
+      "name": "Calf",
+      "anatomical": "Gastrocnemius and soleus",
+      "area": "lower",
+      "segments": [
+        "shin"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "lateral head of gastrocnemius",
+        "medial head of gastrocnemius",
+        "soleus"
+      ]
+    },
+    {
+      "id": "shin",
+      "layer": "muscle",
+      "name": "Front of the shin",
+      "anatomical": "Tibialis anterior",
+      "area": "lower",
+      "segments": [
+        "shin"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "tibialis anterior"
+      ]
+    },
+    {
+      "id": "outer-shin",
+      "layer": "muscle",
+      "name": "Outside of the shin",
+      "anatomical": "Fibularis muscles",
+      "area": "lower",
+      "segments": [
+        "shin"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "fibularis longus",
+        "fibularis brevis"
+      ]
+    },
+    {
+      "id": "skull",
+      "layer": "bone",
+      "name": "Skull",
+      "anatomical": "Skull",
+      "area": null,
+      "segments": [
+        "head"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "skull"
+      ]
+    },
+    {
+      "id": "cervical-spine",
+      "layer": "bone",
+      "name": "Neck bones",
+      "anatomical": "Cervical vertebrae",
+      "area": null,
+      "segments": [
+        "neck"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "cervical vertebral column"
+      ]
+    },
+    {
+      "id": "thoracic-spine",
+      "layer": "bone",
+      "name": "Upper back bones",
+      "anatomical": "Thoracic vertebrae",
+      "area": null,
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "thoracic vertebral column"
+      ]
+    },
+    {
+      "id": "lumbar-spine",
+      "layer": "bone",
+      "name": "Lower back bones",
+      "anatomical": "Lumbar vertebrae",
+      "area": null,
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "lumbar vertebral column"
+      ]
+    },
+    {
+      "id": "sacrum",
+      "layer": "bone",
+      "name": "Base of the spine",
+      "anatomical": "Sacrum",
+      "area": null,
+      "segments": [
+        "pelvis"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "sacrum"
+      ]
+    },
+    {
+      "id": "rib-cage",
+      "layer": "bone",
+      "name": "Ribs",
+      "anatomical": "Rib cage",
+      "area": null,
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "rib cage"
+      ]
+    },
+    {
+      "id": "sternum",
+      "layer": "bone",
+      "name": "Breastbone",
+      "anatomical": "Sternum",
+      "area": null,
+      "segments": [
+        "torso"
+      ],
+      "sideView": false,
+      "bodyParts3D": [
+        "sternum"
+      ]
+    },
+    {
+      "id": "clavicle",
+      "layer": "bone",
+      "name": "Collarbone",
+      "anatomical": "Clavicle",
+      "area": null,
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "clavicle"
+      ]
+    },
+    {
+      "id": "scapula",
+      "layer": "bone",
+      "name": "Shoulder blade",
+      "anatomical": "Scapula",
+      "area": null,
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "scapula"
+      ]
+    },
+    {
+      "id": "humerus",
+      "layer": "bone",
+      "name": "Upper arm bone",
+      "anatomical": "Humerus",
+      "area": null,
+      "segments": [
+        "upperArm"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "humerus"
+      ]
+    },
+    {
+      "id": "radius",
+      "layer": "bone",
+      "name": "Forearm bone, thumb side",
+      "anatomical": "Radius",
+      "area": null,
+      "segments": [
+        "forearm"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "radius"
+      ]
+    },
+    {
+      "id": "ulna",
+      "layer": "bone",
+      "name": "Forearm bone, little-finger side",
+      "anatomical": "Ulna",
+      "area": null,
+      "segments": [
+        "forearm"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "ulna"
+      ]
+    },
+    {
+      "id": "hand-bones",
+      "layer": "bone",
+      "name": "Bones of the hand",
+      "anatomical": "Carpals, metacarpals and phalanges",
+      "area": null,
+      "segments": [
+        "hand"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "carpal bone",
+        "metacarpal bone",
+        "phalanx of finger"
+      ]
+    },
+    {
+      "id": "hip-bone",
+      "layer": "bone",
+      "name": "Hip bone",
+      "anatomical": "Hip bone",
+      "area": null,
+      "segments": [
+        "pelvis"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "hip bone"
+      ]
+    },
+    {
+      "id": "femur",
+      "layer": "bone",
+      "name": "Thigh bone",
+      "anatomical": "Femur",
+      "area": null,
+      "segments": [
+        "thigh"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "femur"
+      ]
+    },
+    {
+      "id": "patella",
+      "layer": "bone",
+      "name": "Kneecap",
+      "anatomical": "Patella",
+      "area": null,
+      "segments": [
+        "thigh",
+        "shin"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "patella"
+      ]
+    },
+    {
+      "id": "tibia",
+      "layer": "bone",
+      "name": "Shin bone",
+      "anatomical": "Tibia",
+      "area": null,
+      "segments": [
+        "shin"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "tibia"
+      ]
+    },
+    {
+      "id": "fibula",
+      "layer": "bone",
+      "name": "Outer shin bone",
+      "anatomical": "Fibula",
+      "area": null,
+      "segments": [
+        "shin"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "fibula"
+      ]
+    },
+    {
+      "id": "calcaneus",
+      "layer": "bone",
+      "name": "Heel bone",
+      "anatomical": "Calcaneus",
+      "area": null,
+      "segments": [
+        "foot"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "calcaneus"
+      ]
+    },
+    {
+      "id": "talus",
+      "layer": "bone",
+      "name": "Ankle bone",
+      "anatomical": "Talus",
+      "area": null,
+      "segments": [
+        "foot"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "talus"
+      ]
+    },
+    {
+      "id": "foot-bones",
+      "layer": "bone",
+      "name": "Bones of the foot",
+      "anatomical": "Tarsals, metatarsals and phalanges",
+      "area": null,
+      "segments": [
+        "foot"
+      ],
+      "sideView": true,
+      "bodyParts3D": [
+        "tarsal bone",
+        "metatarsal bone",
+        "phalanx of toe"
+      ]
+    },
+    {
+      "id": "lats",
+      "layer": "muscle",
+      "name": "Broad muscle of the back",
+      "anatomical": "Latissimus dorsi",
+      "area": "upper",
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Latissimus dorsi muscle"
+      ]
+    },
+    {
+      "id": "rectus-abdominis",
+      "layer": "muscle",
+      "name": "Front belly muscle",
+      "anatomical": "Rectus abdominis",
+      "area": "core",
+      "segments": [
+        "torso"
+      ],
+      "sideView": true,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Rectus abdominis muscle"
+      ]
+    },
+    {
+      "id": "transversus-abdominis",
+      "layer": "muscle",
+      "name": "Deep belly muscle",
+      "anatomical": "Transversus abdominis",
+      "area": "core",
+      "segments": [
+        "torso"
+      ],
+      "sideView": false,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Transversus abdominis muscle"
+      ]
+    },
+    {
+      "id": "internal-oblique",
+      "layer": "muscle",
+      "name": "Deep side of the waist",
+      "anatomical": "Internal oblique",
+      "area": "core",
+      "segments": [
+        "torso"
+      ],
+      "sideView": false,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Internal abdominal oblique muscle"
+      ]
+    },
+    {
+      "id": "multifidus",
+      "layer": "muscle",
+      "name": "Deep muscles beside the spine",
+      "anatomical": "Multifidus",
+      "area": "core",
+      "segments": [
+        "torso"
+      ],
+      "sideView": false,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Multifidus lumborum muscle"
+      ]
+    },
+    {
+      "id": "quadratus-lumborum",
+      "layer": "muscle",
+      "name": "Deep lower-back muscle",
+      "anatomical": "Quadratus lumborum",
+      "area": "core",
+      "segments": [
+        "torso"
+      ],
+      "sideView": false,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Quadratus lumborum muscle"
+      ]
+    },
+    {
+      "id": "coccyx",
+      "layer": "bone",
+      "name": "Tailbone",
+      "anatomical": "Coccyx",
+      "area": null,
+      "segments": [
+        "pelvis"
+      ],
+      "sideView": true,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Coccyx"
+      ]
+    },
+    {
+      "id": "sciatic-nerve",
+      "layer": "nerve",
+      "name": "Main nerve down the back of the leg",
+      "anatomical": "Sciatic nerve",
+      "area": null,
+      "segments": [
+        "pelvis",
+        "thigh"
+      ],
+      "sideView": true,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Sciatic nerve"
+      ]
+    },
+    {
+      "id": "femoral-nerve",
+      "layer": "nerve",
+      "name": "Nerve to the front of the thigh",
+      "anatomical": "Femoral nerve",
+      "area": null,
+      "segments": [
+        "pelvis",
+        "thigh"
+      ],
+      "sideView": true,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Femoral nerve"
+      ]
+    },
+    {
+      "id": "tibial-nerve",
+      "layer": "nerve",
+      "name": "Nerve down the back of the lower leg",
+      "anatomical": "Tibial nerve",
+      "area": null,
+      "segments": [
+        "shin",
+        "foot"
+      ],
+      "sideView": true,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Tibial nerve"
+      ]
+    },
+    {
+      "id": "common-fibular-nerve",
+      "layer": "nerve",
+      "name": "Nerve round the outside of the knee",
+      "anatomical": "Common fibular nerve",
+      "area": null,
+      "segments": [
+        "thigh",
+        "shin"
+      ],
+      "sideView": true,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Common fibular nerve"
+      ]
+    },
+    {
+      "id": "median-nerve",
+      "layer": "nerve",
+      "name": "Nerve down the middle of the arm",
+      "anatomical": "Median nerve",
+      "area": null,
+      "segments": [
+        "upperArm",
+        "forearm",
+        "hand"
+      ],
+      "sideView": true,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Median nerve"
+      ]
+    },
+    {
+      "id": "ulnar-nerve",
+      "layer": "nerve",
+      "name": "Nerve behind the elbow to the little finger",
+      "anatomical": "Ulnar nerve",
+      "area": null,
+      "segments": [
+        "upperArm",
+        "forearm",
+        "hand"
+      ],
+      "sideView": true,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Ulnar nerve"
+      ]
+    },
+    {
+      "id": "radial-nerve",
+      "layer": "nerve",
+      "name": "Nerve down the back of the arm",
+      "anatomical": "Radial nerve",
+      "area": null,
+      "segments": [
+        "upperArm",
+        "forearm",
+        "hand"
+      ],
+      "sideView": true,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Radial nerve"
+      ]
+    },
+    {
+      "id": "axillary-nerve",
+      "layer": "nerve",
+      "name": "Nerve to the shoulder muscle",
+      "anatomical": "Axillary nerve",
+      "area": null,
+      "segments": [
+        "upperArm"
+      ],
+      "sideView": true,
+      "bodyParts3D": [],
+      "zAnatomy": [
+        "Axillary nerve"
+      ]
+    }
+  ]
+}

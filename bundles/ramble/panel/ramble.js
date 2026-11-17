@@ -916,6 +916,7 @@ export default {
       <script src="/ramble/static/player.js"></script>
       <script src="/ramble/static/ramble-ar.js"></script>
       <script src="/ramble/static/ramble.js"></script>
+      <script src="/ramble/static/learn-card.js"></script>
       <script src="/ramble/static/moves.js"></script>
       <script src="/ramble/static/today.js"></script>
       <script src="/ramble/static/week.js"></script>

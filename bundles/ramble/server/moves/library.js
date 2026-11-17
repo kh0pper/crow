@@ -20,6 +20,12 @@
  * runs them over the shipped library and SKIPS anything invalid with a console
  * warning naming the id — one broken entry must never take the whole moves
  * surface down.
+ *
+ * The anatomy ids an entry's `anatomy` groups name are checked against the
+ * shared anatomy vocabulary (anatomy/vocab.json, read by loadVocab), so an
+ * entry may only point at a part the figure knows how to draw. Like the
+ * library, a vocab file that is missing, unreadable or partly broken never
+ * throws: bad records are warned over and the rest still load.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -78,6 +84,7 @@ const MINUTES_MAX = 600;
 /** A cue is one line on the player. */
 const CUE_MAX_CHARS = 60;
 const DEFAULT_DIR = fileURLToPath(new URL("./library/", import.meta.url));
+const DEFAULT_VOCAB = fileURLToPath(new URL("./anatomy/vocab.json", import.meta.url));
 
 const isStr = (v) => typeof v === "string" && v.trim() !== "";
 /** An array of non-empty strings (possibly empty unless the caller checks length). */
@@ -456,6 +463,49 @@ export function validateEntry(obj, lib = null, opts = {}) {
 }
 
 /**
+ * Read the anatomy vocabulary (default: anatomy/vocab.json beside this module)
+ * into an id -> record Map. Never throws: a file that cannot be read or parsed
+ * gives an empty Map, and a record without a string id or layer is skipped
+ * with a console warning while the rest still load.
+ */
+export function loadVocab(file) {
+  const path = file ? String(file) : DEFAULT_VOCAB;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    console.warn(`[ramble moves] anatomy vocabulary ${path} unreadable: ${err?.message ?? "unknown error"}`);
+    return new Map();
+  }
+  const list = Array.isArray(parsed) ? parsed : parsed?.vocab;
+  if (!Array.isArray(list)) {
+    console.warn(`[ramble moves] anatomy vocabulary ${path} has no vocab array`);
+    return new Map();
+  }
+  const out = new Map();
+  list.forEach((record, i) => {
+    if (!isPlainObject(record)) {
+      console.warn(`[ramble moves] skipping anatomy record #${i}: not an object`);
+      return;
+    }
+    if (!isStr(record.id)) {
+      console.warn(`[ramble moves] skipping anatomy record #${i}: no string id`);
+      return;
+    }
+    if (!isStr(record.layer)) {
+      console.warn(`[ramble moves] skipping anatomy ${record.id}: no string layer`);
+      return;
+    }
+    if (out.has(record.id)) {
+      console.warn(`[ramble moves] skipping anatomy ${record.id}: duplicate id`);
+      return;
+    }
+    out.set(record.id, record);
+  });
+  return out;
+}
+
+/**
  * Read every .json file in `root`, parsed. One bad file becomes one
  * { file, error } and never stops the walk. A missing directory comes back as
  * `dirError` so each caller can decide what to say about it.
@@ -487,7 +537,9 @@ function readEntryFiles(root) {
  * SKIPPED with a console warning naming the id (or the file, when there is no
  * readable id) — never thrown. Two passes: shape first, then cross-references
  * against everything that passed shape, so a flow can only name a pose that
- * itself is valid.
+ * itself is valid. Anatomy ids are checked against the shared vocabulary; an
+ * unreadable vocabulary turns those checks off rather than dropping every
+ * entry that carries anatomy.
  */
 export function loadLibrary(dir) {
   const root = dir ? String(dir) : DEFAULT_DIR;
@@ -497,6 +549,8 @@ export function loadLibrary(dir) {
     return [];
   }
   const warn = (id, errors) => console.warn(`[ramble moves] skipping entry ${id}: ${errors.join("; ")}`);
+  const vocab = loadVocab();
+  const options = vocab.size > 0 ? { vocab: new Set(vocab.keys()) } : {};
   for (const { file, error } of problems) {
     console.warn(`[ramble moves] skipping file ${file}: ${error}`);
   }
@@ -504,7 +558,7 @@ export function loadLibrary(dir) {
   const pool = [];
   const byId = new Map();
   for (const { file, obj } of files) {
-    const basic = validateEntry(obj);
+    const basic = validateEntry(obj, null, options);
     if (!basic.ok) { warn(obj?.id ?? file, basic.errors); continue; }
     if (byId.has(obj.id)) { warn(obj.id, ["duplicate id, already loaded from an earlier file"]); continue; }
     byId.set(obj.id, obj);
@@ -513,7 +567,7 @@ export function loadLibrary(dir) {
 
   const out = [];
   for (const entry of pool) {
-    const full = validateEntry(entry, byId);
+    const full = validateEntry(entry, byId, options);
     if (!full.ok) { warn(entry.id, full.errors); continue; }
     out.push(entry);
   }

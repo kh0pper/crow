@@ -1050,6 +1050,94 @@
     catch (e) { el.textContent = ""; }
   }
 
+  /* ------------------------------------------------ the Learn card (anatomy) */
+
+  /* The kinds static/learn-card.js draws: a pose or an exercise that carries
+   * anatomy. A flow, a walk or a routine plays in the player instead. */
+  var LEARN_KINDS = { pose: true, exercise: true };
+
+  var learnCardHandle = null;
+  /* Bumped by every stopPlayer, so a vocabulary that arrives after the screen
+   * has moved on cannot mount a card behind it. */
+  var learnCardToken = 0;
+  var anatomyPromise = null;
+
+  function stopLearnCard() {
+    learnCardToken += 1;
+    if (learnCardHandle) {
+      try { learnCardHandle.destroy(); } catch (e) { /* already gone */ }
+      learnCardHandle = null;
+    }
+  }
+
+  /* The anatomy vocabulary the card draws with, fetched once per page. A fetch
+   * that fails is no vocabulary at all, and the page falls back to the plain
+   * figure; a later paint may ask again. */
+  function loadAnatomyVocab() {
+    if (anatomyPromise) return anatomyPromise;
+    anatomyPromise = jsonFetch("/api/ramble/moves/anatomy").then(function (out) {
+      return out && Array.isArray(out.vocab) ? out.vocab : [];
+    }).catch(function () {
+      anatomyPromise = null;
+      return null;
+    });
+    return anatomyPromise;
+  }
+
+  function prefersReducedMotion() {
+    try {
+      if (typeof window.matchMedia !== "function") return false;
+      var query = window.matchMedia("(prefers-reduced-motion: reduce)");
+      return Boolean(query && query.matches);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /* The pose the plain figure can stand in for the card with: an entry's own
+   * pose, or the first key position of an exercise, which has no single pose of
+   * its own. */
+  function fallbackPoseOf(entry) {
+    if (!entry) return null;
+    if (entry.pose && typeof entry.pose === "object") return entry.pose;
+    if (Array.isArray(entry.poses) && entry.poses.length > 0) {
+      var first = entry.poses[0];
+      if (first && typeof first === "object") return first;
+    }
+    return null;
+  }
+
+  /* The card replaces the plain figure for an entry it can draw. No card script,
+   * no vocabulary or a mount that refuses all leave the plain figure behind. */
+  function mountLearnCard(host, entry) {
+    var Card = window.RambleLearnCard;
+    var fallbackPose = fallbackPoseOf(entry);
+    /* The last entry's figure goes before the fetch starts, so this entry never
+     * shows under the figure of the one before it while the vocabulary loads. */
+    if (host) host.textContent = "";
+    if (!Card || typeof Card.mount !== "function") { figureInto(host, fallbackPose); return; }
+    var token = learnCardToken;
+    loadAnatomyVocab().then(function (vocab) {
+      if (token !== learnCardToken) return;
+      if (!vocab) { figureInto(host, fallbackPose); return; }
+      var handle = null;
+      try {
+        handle = Card.mount(host, {
+          entry: entry,
+          vocab: vocab,
+          library: library,
+          storage: playerStorage(),
+          copy: {},
+          reducedMotion: prefersReducedMotion()
+        });
+      } catch (e) {
+        handle = null;
+      }
+      if (!handle) { figureInto(host, fallbackPose); return; }
+      learnCardHandle = handle;
+    });
+  }
+
   /* The entry's static page: the figure, the lists and the easier/harder
    * links. It comes back whenever an entry is painted, and steps aside while
    * the player has the screen. */
@@ -1072,11 +1160,18 @@
     if (body) body.textContent = "";
     if (links) links.textContent = "";
 
+    /* Whatever the last page left behind goes first: the player, and the Learn
+     * card that may have been over the figure. */
+    stopPlayer();
+
     var isFlow = entry.kind === "flow";
-    var hasFigure = !isFlow && entry.kind === "pose";
+    var wantsCard = LEARN_KINDS[entry.kind] === true
+      && Array.isArray(entry.anatomy) && entry.anatomy.length > 0;
+    var hasFigure = wantsCard || (!isFlow && entry.kind === "pose");
     if (fig) {
       setHidden(fig, !hasFigure);
-      if (hasFigure) figureInto(fig, entry.pose);
+      if (wantsCard) mountLearnCard(fig, entry);
+      else if (hasFigure) figureInto(fig, entry.pose);
       else fig.textContent = "";
     }
 
@@ -1094,7 +1189,6 @@
     /* A chunk plays in the player; every other kind keeps this page. */
     setStaticEntry(true);
     if (fig) setHidden(fig, !hasFigure);
-    stopPlayer();
     if (CHUNK_STYLE[entry.kind] === true) openPlayer(entry, level, ctx);
   }
 
@@ -1400,6 +1494,7 @@
       playerHandle = null;
     }
     stopVoice();
+    stopLearnCard();
     setHidden($("rb-player"), true);
   }
 

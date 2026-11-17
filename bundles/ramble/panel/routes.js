@@ -2115,6 +2115,15 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     res.json({ lines: loadVoiceLines() });
   }));
 
+  // The anatomy vocabulary the Learn card draws with: one record per structure
+  // (id, layer, its common and anatomical names, the segments a side view can
+  // draw), read from the moves module's own anatomy/vocab.json so the panel
+  // never carries a second copy of it. Read-only, no db.
+  router.get("/api/ramble/moves/anatomy", handle(async (req, res) => {
+    if (!(await ensureMovesMods(res))) return;
+    res.json({ vocab: Array.from(movesMods.libraryMod.loadVocab().values()) });
+  }));
+
   // Only reviewed, licensed entries are served, and the joint-angle data is a
   // detail-view payload — the list carries everything else.
   router.get("/api/ramble/moves/library", handle(async (req, res) => {
