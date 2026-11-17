@@ -895,9 +895,11 @@ test("readMessageRaw reads the opened row's own UID from its own folder and noth
   assert.equal(gone, null, "a UID the server no longer holds reads as nothing");
 });
 
-test("readStorageFile answers null: Crow storage has no owner-checked read by file id", async () => {
+test("readStorageFile refuses an id that is not a storage file id", async () => {
   const s = await setup();
   const readers = makeDraftReaders({ db: s.db, supervisor: s.supervisor });
+  // The reader takes a digits-only row id and nothing else: a key-shaped or path-shaped string names
+  // no row, so it never reaches the object store (see tests/mail-drafts-attach.test.js).
   assert.equal(await readers.readStorageFile("file-1"), null);
   assert.equal(await makeDraftReaders({ db: s.db }).readStorageFile("file-1"), null);
 });

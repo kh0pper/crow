@@ -23,7 +23,17 @@
  *     scheduled draft returns it to `draft` and the person re-schedules it. The 409
  *     `{error:"scheduled", needsCancel:true}` branch exists only for `cancelSchedule: false`, which
  *     this route never sends, so it is not here.
- *   - `POST /:id/save-draft` belongs to a later task and is not registered here.
+ *
+ * `POST /:id/save-draft` (Task 12) files the head revision in the provider's own Drafts folder through
+ * plan 1's `saveDraft(raw)`: preflight, `composeRaw` with the Bcc kept, one borrowed adapter, one
+ * append. It is not a send and not an edit — the row keeps its state and writes no revision — and the
+ * answer names the folder the copy landed in, never its content. A draft a tap or a schedule has
+ * frozen cannot be filed; a mailbox with no Drafts folder answers the mail `NOT_FOUND` sentence.
+ *
+ * `GET /:id/attachable` (Task 12) is the card's attachment picker: the thread's own parts, read from
+ * the store's attachment metadata and never from the network, and the owner's newest Crow files, by
+ * id. It also carries the head revision's raw attachment total against the send ceiling, so the card
+ * can show how much of it a draft already uses.
  *
  * The revision loop is `drafts/revise.js`'s (Task 9): `POST /:id/comments` queues one comment on one
  * line (a comment on a revision the draft has left is 409 `changed`) and revises at once when it is
@@ -48,9 +58,12 @@
  * configs as files instead of over the fd answers 503 `{error:"delivery_unsupported"}` — the code
  * alone, because the card owns that copy.
  */
-import { MAIL_ERROR_TEXT } from "../mail/errors.js";
+import { MAIL_ERROR_TEXT, MailError } from "../mail/errors.js";
 import { getAccount } from "../mail/store/accounts.js";
-import { resolveMessageRef } from "../mail/store/reader-queries.js";
+import { folderRole, getFolder } from "../mail/store/messages.js";
+import { listThreadMessages, resolveMessageRef } from "../mail/store/reader-queries.js";
+import { composeRaw } from "../mail/adapter/compose.js";
+import { safeAttachmentName } from "../mail/reader/attachments.js";
 import {
   DRAFT_MODES,
   addRevision,
@@ -60,7 +73,7 @@ import {
   listComments,
   listRevisions,
 } from "../mail/drafts/store.js";
-import { preflight } from "../mail/drafts/preflight.js";
+import { MAX_SEND_BYTES, preflight } from "../mail/drafts/preflight.js";
 import { deriveForward, deriveReply } from "../mail/drafts/recipients.js";
 import { queueComment, reviseNow } from "../mail/drafts/revise.js";
 import { makeDraftReaders } from "../mail/drafts/readers.js";
@@ -93,6 +106,10 @@ const SCHEDULE_KEYS = Object.freeze(["hash", "dueAt"]);
 const TURN_KEYS = Object.freeze(["botId", "instruction", "reviseFrom"]);
 const COMMENT_KEYS = Object.freeze(["rev", "lineIndex", "quote", "text"]);
 const REVISE_KEYS = Object.freeze(["expectHash", "chatNote"]);
+const SAVE_DRAFT_KEYS = Object.freeze(["expectHash"]);
+
+/** How many of the owner's Crow files the attachment picker lists: the newest, and no more. */
+const ATTACHABLE_STORAGE_LIMIT = 50;
 
 /* --------------------------------------------------------------------- the seam */
 
@@ -295,6 +312,13 @@ function readScheduleBody(body) {
   return { hash: body.hash, dueAt: body.dueAt };
 }
 
+/** The save-draft body, or null: only the hash the card was drawn from. */
+function readSaveDraftBody(body) {
+  if (!keysWithin(body, SAVE_DRAFT_KEYS)) return null;
+  if (typeof body.expectHash !== "string" || body.expectHash === "") return null;
+  return { expectHash: body.expectHash };
+}
+
 /* --------------------------------------------------------------- the answers */
 
 /**
@@ -484,6 +508,25 @@ export function registerDraftRoutes(router, ctx) {
         created_at: entry.createdAt,
         note: entry.note ?? null,
       })),
+      // A sent draft's receipt: when, which Message-ID, from which account, and the reader link once
+      // the Sent copy is in the store (until then the card says "Sent, syncing...").
+      receipt: await receiptFor(db, draft),
+    });
+  }));
+
+  // GET /:id/attachable — the card's attachment picker: the draft's own thread parts, from the stored
+  // attachment metadata and never from a mailbox, and the owner's newest Crow files. The head
+  // revision's raw attachment total rides along, against the send ceiling the card shows.
+  router.get(`${base}/:id/attachable`, route("GET /drafts/:id/attachable", async (db, req, res) => {
+    const draft = await draftFor(db, req);
+    if (!draft) return sendError(res, 404, "not_found");
+    const revisions = await listRevisions(db, draft.id);
+    const head = revisions.find((entry) => entry.rev === draft.headRev) ?? null;
+    res.json({
+      thread: await threadAttachables(db, draft),
+      storage: await storageAttachables(db, draft),
+      totalBytes: attachmentBytes(head),
+      maxBytes: MAX_SEND_BYTES,
     });
   }));
 
@@ -663,6 +706,65 @@ export function registerDraftRoutes(router, ctx) {
     }
   }));
 
+  // POST /:id/save-draft — Save as draft (Task 12): file the head revision in the provider's own
+  // Drafts folder. Preflight, then `composeRaw` with the Bcc kept, then ONE borrowed adapter and ONE
+  // `saveDraft(raw)`. Nothing is sent, no revision is written and the row keeps the state it had, so
+  // this is not a tap: it carries the hash only to prove the card and the row agree. The answer names
+  // the folder the copy landed in and never its content; a mailbox with no Drafts folder answers the
+  // mail NOT_FOUND sentence, and a Crow with no mail connection answers the send service's own
+  // `not_sendable` refusal.
+  router.post(`${base}/:id/save-draft`, route("POST /drafts/:id/save-draft", async (db, req, res) => {
+    const draft = await draftFor(db, req);
+    if (!draft) return sendError(res, 404, "not_found");
+    const body = bodyOf(req);
+    if (body == null) return sendError(res, 400, "bad_input");
+    const input = readSaveDraftBody(body);
+    if (input == null) return sendError(res, 400, "bad_input");
+    if (!EDITABLE_STATES.includes(draft.state)) return answerFrozen(res, draft);
+    // The row's own head hash is the guard a save needs: nothing moves either way, so a stale card is
+    // told to look again rather than filing a revision the person never saw.
+    if (input.expectHash !== draft.headHash) return sendError(res, 409, "changed", CHANGED_SENTENCE);
+
+    const revisions = await listRevisions(db, draft.id);
+    const head = revisions.find((entry) => entry.rev === draft.headRev) ?? null;
+    if (!head) return sendError(res, 404, "not_found");
+
+    const supervisor = supervisorNow();
+    if (!supervisor) {
+      return answerTapFailure(res, sendError, { code: "not_sendable", reason: "supervisor_missing" });
+    }
+
+    const deps = serviceDeps(db, supervisor);
+    const checked = await preflight(db, draft, head, {
+      accountId: draft.accountId,
+      deps: { readMessageRaw: deps.readMessageRaw, readStorageFile: deps.readStorageFile },
+    });
+    if (!checked.ok) return answerPreflight(res, checked);
+
+    let raw;
+    try {
+      // The Drafts copy is a copy: it keeps the Bcc the person put on the draft (Task 2's rule).
+      raw = await composeRaw(checked.message, { keepBcc: true });
+    } catch (err) {
+      if (err instanceof MailError && err.code === "BAD_INPUT") return answerPreflight(res, { code: "bad_input" });
+      throw err;
+    }
+
+    let saved;
+    try {
+      saved = await supervisor.withAdapter(draft.accountId, (adapter) => adapter.saveDraft(raw));
+    } catch (err) {
+      // A mailbox with no Drafts folder is NOT_FOUND from the adapter, and the person-facing sentence
+      // for it is the mail one, not the generic "Not found." this API answers a missing row with.
+      if (err instanceof MailError && err.code === "NOT_FOUND") {
+        return sendError(res, 404, "not_found", MAIL_ERROR_TEXT.NOT_FOUND);
+      }
+      throw err;
+    }
+
+    res.json({ ok: true, folder: typeof saved?.folderPath === "string" ? saved.folderPath : null });
+  }));
+
   // POST /:id/send — the tap. The hash the card was drawn from is the one thing that may move the
   // row into `holding`; the ten-second hold, the seal and the delivery are the send service's.
   router.post(`${base}/:id/send`, route("POST /drafts/:id/send", async (db, req, res) => {
@@ -811,6 +913,171 @@ async function threadKeyFor(db, parent) {
     }
   }
   return typeof parent.messageId === "string" && parent.messageId !== "" ? `mid:${parent.messageId}` : null;
+}
+
+/* -------------------------------------------------------- attachments and receipt */
+
+/**
+ * The thread id this draft's attachment picker reads: the stored thread the draft's key names, else
+ * the thread the message it answers is in. A draft with neither (a blank one) has no thread to read.
+ */
+async function threadIdFor(db, draft) {
+  const key = typeof draft?.threadKey === "string" ? draft.threadKey : "";
+  if (key !== "") {
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT id FROM mail_threads WHERE account_id = ? AND thread_key = ?",
+        args: [draft.accountId, key],
+      });
+      const id = Number(rows[0]?.id);
+      if (Number.isInteger(id) && id > 0) return id;
+    } catch {
+      // A thread table that cannot be read leaves the reply's own row below, never a failed read.
+    }
+  }
+  if (typeof draft?.replyToMid === "string" && draft.replyToMid !== "") {
+    const row = await resolveMessageRef(db, { accountId: draft.accountId, mid: draft.replyToMid });
+    const id = Number(row?.threadId);
+    if (Number.isInteger(id) && id > 0) return id;
+  }
+  return null;
+}
+
+/** A stored `attachments_json` value as the list it holds, or an empty list. */
+function parseParts(value) {
+  if (value == null) return [];
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+/**
+ * Every part of every message in the draft's thread, as the picker's own reference: the message's
+ * Message-ID, the part's index and the metadata the store kept. Read from `mail_messages` only — no
+ * mailbox is asked anything, so the list costs no network and works while the server is away.
+ *
+ * @returns {Promise<Array<{mid: string, index: number, filename: string, size: number|null,
+ *   contentType: string}>>}
+ */
+async function threadAttachables(db, draft) {
+  const threadId = await threadIdFor(db, draft);
+  if (threadId == null) return [];
+  const messages = await listThreadMessages(db, draft.accountId, threadId);
+  const out = [];
+  for (const message of messages) {
+    const mid = typeof message.messageId === "string" ? message.messageId : "";
+    if (mid === "") continue;
+    let parts = [];
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT attachments_json FROM mail_messages WHERE id = ?",
+        args: [message.id],
+      });
+      parts = parseParts(rows[0]?.attachments_json);
+    } catch {
+      parts = [];
+    }
+    parts.forEach((part, index) => {
+      out.push({
+        mid,
+        index,
+        filename: safeAttachmentName(part?.filename),
+        size: Number.isInteger(part?.size) ? part.size : null,
+        contentType: typeof part?.contentType === "string" ? part.contentType : "",
+      });
+    });
+  }
+  return out;
+}
+
+/**
+ * The owner's own Crow files the picker may offer: the newest `ATTACHABLE_STORAGE_LIMIT` rows that are
+ * unscoped or scoped to this draft's project. A file of another project is never listed, exactly as
+ * the storage reader never reads one, and `fileId` is the digits-only id that reader accepts.
+ */
+async function storageAttachables(db, draft) {
+  const projectId = draft?.projectId == null ? null : Number(draft.projectId);
+  const scope = projectId == null ? "project_id IS NULL" : "(project_id IS NULL OR project_id = ?)";
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT id, original_name, mime_type, size_bytes FROM storage_files
+             WHERE ${scope}
+             ORDER BY id DESC
+             LIMIT ${ATTACHABLE_STORAGE_LIMIT}`,
+      args: projectId == null ? [] : [projectId],
+    });
+    return rows.map((row) => {
+      const size = Number(row.size_bytes);
+      return {
+        fileId: String(row.id),
+        filename: safeAttachmentName(row.original_name),
+        size: Number.isFinite(size) && size > 0 ? size : 0,
+        contentType: typeof row.mime_type === "string" && row.mime_type !== "" ? row.mime_type : null,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** The raw bytes the head revision's attachments add up to, as the card shows them against the cap. */
+function attachmentBytes(head) {
+  let total = 0;
+  for (const ref of Array.isArray(head?.attachments) ? head.attachments : []) {
+    const size = Number(ref?.size);
+    if (Number.isFinite(size) && size > 0) total += size;
+  }
+  return total;
+}
+
+/**
+ * The reader link a sent draft's receipt carries, or null: the plan-2 message link, built only once
+ * `resolveMessageRef` finds the Message-ID in one of this account's Sent-role folders. Before the
+ * Sent copy is synced the card says "Sent, syncing..." rather than linking a message that is not here.
+ */
+async function readerLinkFor(db, draft, messageId) {
+  if (messageId == null) return null;
+  try {
+    const row = await resolveMessageRef(db, { accountId: draft.accountId, mid: messageId });
+    if (!row) return null;
+    const folder = await getFolder(db, row.folderId);
+    if (!folder || folderRole(folder) !== "sent") return null;
+  } catch {
+    return null;
+  }
+  return `/dashboard/mail?view=message&a=${encodeURIComponent(draft.accountId)}&mid=${encodeURIComponent(messageId)}`;
+}
+
+/**
+ * A sent draft's receipt — when, which Message-ID, from which account and where it is readable — or
+ * null for every other state. The account label is the display name the row carries, else its
+ * address; nothing here reads the content of the message that went out.
+ */
+async function receiptFor(db, draft) {
+  if (draft?.state !== "sent") return null;
+  const messageId = typeof draft.messageId === "string" && draft.messageId !== "" ? draft.messageId : null;
+  let accountLabel = null;
+  try {
+    const account = await getAccount(db, draft.accountId);
+    if (account) {
+      const name = typeof account.displayName === "string" ? account.displayName.trim() : "";
+      accountLabel = name !== "" ? name : account.address;
+    }
+  } catch {
+    accountLabel = null;
+  }
+  return {
+    sentAt: draft.sentAt ?? null,
+    messageId,
+    accountLabel,
+    readerLink: await readerLinkFor(db, draft, messageId),
+  };
 }
 
 export default registerDraftRoutes;
