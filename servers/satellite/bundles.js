@@ -222,10 +222,10 @@ export function createBundleManager({
   /**
    * Write one add-on's mcp-addons.json entry (task 1.10).
    *
-   * `env` is built exactly as before. Sealing OFF (PR1's default, 0.3 row 4): a name the entry
-   * already listed in `keychainEnv` that this install wrote a PLAIN value for is un-listed, so
-   * the value just written is the one the child uses — its keychain row is kept (the owner's key,
-   * in Settings).
+   * `env` is built exactly as before. Sealing is ON by default; with sealing off (the
+   * operator's `CROW_ADDON_SECRETS_KEYCHAIN=0`, 0.3 row 4) a name the entry already listed in
+   * `keychainEnv` that this install wrote a PLAIN value for is un-listed, so the value just
+   * written is the one the child uses — its keychain row is kept (the owner's key, in Settings).
    *
    * Sealing ON: every value sealableEnv() picks (a manifest secret/generate, or a name the entry
    * already listed — the list is authoritative) becomes a keychain row with its origin, is read
@@ -539,8 +539,8 @@ export function createBundleManager({
    * sealed). `null` clears the value: a listed name stops being listed and its keychain row is
    * KEPT (the owner's key, in Settings; a re-typed value reactivates it).
    *
-   * Sealing OFF: a listed name written plain is un-listed (0.3 row 4) so the value just typed is
-   * the one the child uses, and the row is kept.
+   * Sealing off (`CROW_ADDON_SECRETS_KEYCHAIN=0`): a listed name written plain is un-listed
+   * (0.3 row 4) so the value just typed is the one the child uses, and the row is kept.
    */
   async function putEnv(id, body = {}) {
     installedId(id);

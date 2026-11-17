@@ -8,8 +8,9 @@
  *   2. a seal failure leaves mcp-addons.json AND the .env byte-identical;
  *   3. two concurrent saves of ONE add-on agree across the .env, the keychain row and the
  *      entry; concurrent saves of TWO add-ons both survive;
- *   4. with sealing OFF (PR1's default) the output is today's plain one — and a failed
- *      entry write now stops the .env write (the deliberate reorder);
+ *   4. with sealing OFF (`CROW_ADDON_SECRETS_KEYCHAIN=0`, the operator's opt-out) the output
+ *      is today's plain one — and a failed entry write now stops the .env write (the
+ *      deliberate reorder);
  *   5. the opt-out after sealing (flag 0) writes the value plain and un-lists the name;
  *   6. a tax-shaped previous_key slot is filled from the OLD KEYCHAIN value;
  *   7. the sentinel never reaches the console, an audit row, a notification or the file.
@@ -38,7 +39,7 @@ process.env.CROW_AUTO_UPDATE = "0";
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
 process.env.CROW_DISABLE_NOSTR = "1";
-// PR1 ships sealing OFF: nothing turns it on but the operator's flag. Each test sets it.
+// Sealing is ON by default; each section sets the switch explicitly (off = the operator's "0").
 delete process.env.CROW_ADDON_SECRETS_KEYCHAIN;
 execFileSync(process.execPath, ["scripts/init-db.js"], { env: process.env, stdio: "pipe" });
 
@@ -68,11 +69,10 @@ after(() => {
   try { rmSync(HOME, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
-/** Run one section with the sealing switch at `on`; restores it afterwards. */
+/** Run one section with the sealing switch at `on` (off is the operator's explicit "0"). */
 async function withSealing(on, fn) {
   const before = process.env.CROW_ADDON_SECRETS_KEYCHAIN;
-  if (on) process.env.CROW_ADDON_SECRETS_KEYCHAIN = "1";
-  else delete process.env.CROW_ADDON_SECRETS_KEYCHAIN;
+  process.env.CROW_ADDON_SECRETS_KEYCHAIN = on ? "1" : "0";
   try { return await fn(); } finally {
     if (before === undefined) delete process.env.CROW_ADDON_SECRETS_KEYCHAIN;
     else process.env.CROW_ADDON_SECRETS_KEYCHAIN = before;
@@ -273,9 +273,9 @@ test("a .env write failure after the seal answers env_write, with the key alread
   );
 });
 
-// ─── 4. sealing OFF (PR1's default) ─────────────────────────────────────────
+// ─── 4. sealing OFF (the operator's opt-out) ────────────────────────────────
 
-test("sealing off (the flag unset): today's plain output, and no keychain row is made", async () => {
+test("sealing off (CROW_ADDON_SECRETS_KEYCHAIN=0): today's plain output, and no keychain row is made", async () => {
   const dir = seedBundle("cfg-plain", HA_MANIFEST("cfg-plain"), { dotEnv: "HA_TOKEN=\n" });
   await withSealing(false, () => withServer(async (post) => {
     const r = await save(post, "cfg-plain", { HA_URL: "http://ha.local:8123", HA_TOKEN: SENTINEL });
@@ -292,7 +292,7 @@ test("sealing off (the flag unset): today's plain output, and no keychain row is
   );
 });
 
-// The reorder (1.5a) is NOT inert with the flag off: the MCP entry is written before the
+// The reorder (1.5a) is NOT inert with the flag at 0: the MCP entry is written before the
 // .env, so a failed entry write now fails the whole save instead of leaving a stale entry
 // beside a fresh .env. Deliberate: one consistent state beats two half-applied files.
 // A read-only CROW_HOME is how the failure is produced; root ignores the mode bits.
