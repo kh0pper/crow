@@ -20,21 +20,16 @@ const skip = SANDBOX.ok ? false : "bubblewrap unavailable: " + SANDBOX.reason;
 // spawn needs a providers row with a door, and the rows/consent come from this
 // instance's crow.db — init-db in before() creates its schema. Only CROW_HOME
 // and CROW_DATA_DIR move; the suite's other scratch paths are untouched.
+// `pi-scratch-home` first: a spawn's hideFiles/hidden dirs come from every Crow
+// home the host has (the operator's real ~/.crow included), so HOME must be
+// scratch before bridge.mjs is imported.
+import "./helpers/pi-scratch-home.mjs";
 const INST = mkdtempSync(join(tmpdir(), "crow-pi-contain-inst-"));
 process.env.CROW_HOME = join(INST, "home");
 process.env.CROW_DATA_DIR = join(INST, "data");
 delete process.env.CROW_DB_PATH;
 mkdirSync(process.env.CROW_HOME, { recursive: true });
 mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
-// The co-host scan must not read the HOST's /etc (a dev box with a declared
-// extra Crow home would change these spawns): point its /etc half at scratch,
-// empty dirs.
-const SCAN_UNITS = join(INST, "scan-units");
-const SCAN_ENV = join(INST, "scan-etc-crow");
-mkdirSync(SCAN_UNITS, { recursive: true });
-mkdirSync(SCAN_ENV, { recursive: true });
-const { _setSystemScanDirsForTest } = await import("../servers/shared/secret-values.js");
-_setSystemScanDirsForTest({ unitDirs: [SCAN_UNITS], envFileDirs: [SCAN_ENV] });
 
 // One local row (bundle shape) stands in for the bot's provider.
 const DOOR_ROW = "contain-test-local";

@@ -16,18 +16,14 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// A scratch HOME/CROW_HOME (and the /etc half of the co-host scan) BEFORE
+// bridge.mjs is imported: every spawn here builds its hideFiles from the homes
+// the co-host scan finds, so without it the operator's REAL ~/.crow decides —
+// and a bundle installed there as a symlink into another checkout refuses the
+// spawn. See tests/helpers/pi-scratch-home.mjs.
+await import("./helpers/pi-scratch-home.mjs");
+
 const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
-// The co-host scan must not read the HOST's /etc (a dev box with a declared
-// extra Crow home would change these spawns): point its /etc half at scratch,
-// empty dirs.
-const SCAN_ROOT = mkdtempSync(join(tmpdir(), "crow-tools-scan-"));
-process.on("exit", () => { try { rmSync(SCAN_ROOT, { recursive: true, force: true }); } catch { /* gone */ } });
-const SCAN_UNITS = join(SCAN_ROOT, "units");
-const SCAN_ENV = join(SCAN_ROOT, "etc-crow");
-mkdirSync(SCAN_UNITS, { recursive: true });
-mkdirSync(SCAN_ENV, { recursive: true });
-const { _setSystemScanDirsForTest } = await import("../servers/shared/secret-values.js");
-_setSystemScanDirsForTest({ unitDirs: [SCAN_UNITS], envFileDirs: [SCAN_ENV] });
 
 /** Spawn PiRpc against a stub that dumps argv, and return the args pi saw. */
 async function spawnArgs(def, narrowedTools, extraEnv = {}) {

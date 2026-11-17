@@ -14,7 +14,11 @@
  * argv and exits, so the turn fails fast through the bridge's own error path
  * AFTER the session upsert and the spawn — which is exactly what is under test.
  * CROW_DATA_DIR/CROW_HOME are scratch, so the operator's ~/.crow is untouchable.
+ * `pi-scratch-home` first: the spawn's hideFiles come from every Crow home on
+ * the host (the operator's real ~/.crow included, found through HOME), so HOME
+ * must be scratch before bridge.mjs is imported.
  */
+import "./helpers/pi-scratch-home.mjs";
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";

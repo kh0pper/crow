@@ -10,28 +10,20 @@
  * sendReply as "(bridge error: ...)".
  *
  * Uses the PiRpc nodeBin/cliPath test seam with a stub child so no real pi
- * (and none of its live MCP servers) is ever spawned.
+ * (and none of its live MCP servers) is ever spawned. `pi-scratch-home` first:
+ * a spawn's hideFiles come from every Crow home the host has (the operator's
+ * real ~/.crow included), so HOME must be scratch before bridge.mjs imports.
  */
 process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS = "8000"; // read at module load — set BEFORE import
 
+import "./helpers/pi-scratch-home.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
-// The co-host scan must not read the HOST's /etc (a dev box with a declared
-// extra Crow home would change these spawns): point its /etc half at scratch,
-// empty dirs.
-const SCAN_ROOT = mkdtempSync(join(tmpdir(), "crow-pirpc-exit-scan-"));
-process.on("exit", () => { try { rmSync(SCAN_ROOT, { recursive: true, force: true }); } catch { /* gone */ } });
-const SCAN_UNITS = join(SCAN_ROOT, "units");
-const SCAN_ENV = join(SCAN_ROOT, "etc-crow");
-mkdirSync(SCAN_UNITS, { recursive: true });
-mkdirSync(SCAN_ENV, { recursive: true });
-const { _setSystemScanDirsForTest } = await import("../servers/shared/secret-values.js");
-_setSystemScanDirsForTest({ unitDirs: [SCAN_UNITS], envFileDirs: [SCAN_ENV] });
 
 function makeStub(dir, body) {
   const p = join(dir, "stub-pi.mjs");

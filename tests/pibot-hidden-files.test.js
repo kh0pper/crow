@@ -418,6 +418,34 @@ test("secretFilesFor / secretPinDirsFor: a symlinked bundle is listed only with 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("secretFilesFor / secretPinDirsFor: a bundle entry that is a dangling (or looping) symlink is skipped, never a throw", () => {
+  // An operator's home really holds entries like this (a bundle removed under a
+  // link, a half-migrated install). The bundle scan must step over them: a dir
+  // scan that threw here would fail every bot spawn, and a co-hosted home is
+  // scanned too, so one odd entry there would take down another instance.
+  const root = mkdtempSync(join(tmpdir(), "crow-hidden-dangling-bundle-"));
+  const crowHome = join(root, ".crow");
+  const bundles = join(crowHome, "bundles");
+  mkdirSync(bundles, { recursive: true });
+  mkdirSync(join(bundles, "real"), { recursive: true });
+  writeFileSync(join(bundles, "real", ".env"), "fake-real-env\n");
+  symlinkSync(join(root, "nowhere"), join(bundles, "gone-bundle"));
+  symlinkSync(join(bundles, "loop-b"), join(bundles, "loop-a"));
+  symlinkSync(join(bundles, "loop-a"), join(bundles, "loop-b"));
+  symlinkSync(join(crowHome, "manifest-elsewhere.json"), join(bundles, "file-link"));
+  writeFileSync(join(crowHome, "manifest-elsewhere.json"), "{}\n");
+  try {
+    const files = secretFilesFor({ crowHome });
+    assert.ok(files.includes(join(bundles, "real", ".env")), "the real bundle is still masked");
+    for (const odd of ["gone-bundle", "loop-a", "loop-b", "file-link"]) {
+      assert.ok(!files.some((f) => f.includes(join("bundles", odd))), "no candidate from " + odd);
+    }
+    assert.deepEqual(secretPinDirsFor({ crowHome }), [bundles, join(bundles, "real")],
+      "only the real dirs are pinned (a link is never pinned)");
+    assert.doesNotThrow(() => secretFilesFor({ crowHome }), "a second scan is just as quiet");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("unmaskableRefusal: one plain sentence per cause (hard link, outside, hidden folder, link out, link inside)", () => {
   assert.equal(unmaskableRefusal("bundles/x/.env", "hardlink"),
     "A bot could not start: bundles/x/.env has another name on disk, so Crow can't hide it. Remove the extra link.");
