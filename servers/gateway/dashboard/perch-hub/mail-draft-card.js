@@ -26,8 +26,10 @@ import { tJs } from "../shared/i18n.js";
  *    node of the card that replaces the tapped one: the sentence has to land where the person is
  *    now looking, not on a node that is about to be gone.
  *  - A draft in `holding`, `sending` or `unknown` is still moving on the server's side, so the card
- *    polls its own read every 3 s until the state leaves those, and a session switch stops the poll
- *    with the transcript. An answer that changes nothing redraws nothing: the card is keyed.
+ *    polls its own read until the state leaves those: every 3 s for its first five polls in one
+ *    state, then every 15 s, then every minute, with a new state starting the count again. A hidden
+ *    tab asks for nothing, and a session switch stops the polls the transcript took with it. An answer
+ *    that changes nothing redraws nothing: the card is keyed.
  *  - Nothing here can send by itself: Send and Schedule are two POSTs a finger makes, and a draft in
  *    any state that is not editable renders no Send at all (a claimed `sending` draft renders none).
  *  - The schedule sheet is the module spliced beside this one (panels/mail/schedule-sheet.js,
@@ -51,6 +53,7 @@ export function perchMailDraftCardJs(lang = "en") {
   var MDRAFT_SEND='${tJs("mail.draftSend", lang)}';
   var MDRAFT_SCHEDULE='${tJs("mail.draftSchedule", lang)}';
   var MDRAFT_MORE='${tJs("mail.draftMore", lang)}';
+  var MDRAFT_MORE_NAME='${tJs("mail.draft.moreName", lang)}';
   var MDRAFT_EDIT='${tJs("mail.draftEdit", lang)}';
   var MDRAFT_SAVE='${tJs("mail.draftSaveDraft", lang)}';
   var MDRAFT_DISCARD='${tJs("mail.draftDiscard", lang)}';
@@ -85,7 +88,7 @@ export function perchMailDraftCardJs(lang = "en") {
   var MDRAFT_COMMENT='${tJs("mail.draftComment", lang)}';
   var MDRAFT_REVISE='${tJs("mail.draftRevise", lang)}';
   var MDRAFT_NOTE_SEND='${tJs("mail.draftNoteSend", lang)}';
-  var MDRAFT_CANCEL='${tJs("mail.draftCancel", lang)}';
+  var MDRAFT_CANCEL='${tJs("common.cancel", lang)}';
   var MDRAFT_OFFLINE='${tJs("mail.draftOffline", lang)}';
   var MDRAFT_ERROR='${tJs("mail.draftError", lang)}';
   var MDRAFT_NOTOWNER='${tJs("mail.draftNotOwner", lang)}';
@@ -98,6 +101,18 @@ export function perchMailDraftCardJs(lang = "en") {
   var MDRAFT_NEEDS_CANCEL='${tJs("mail.draftNeedsCancel", lang)}';
   var MDRAFT_SHEET_MISSING='${tJs("mail.draftScheduleUnavailable", lang)}';
   var MDRAFT_SAVED='${tJs("mail.draftSavedDraft", lang)}';
+  var MDRAFT_SAVE_NOT_FOUND='${tJs("mail.draft.saveDraft.notFound", lang)}';
+  var MDRAFT_PARTIAL='${tJs("mail.draft.partialRejected", lang)}';
+  var MDRAFT_NOT_SENDABLE='${tJs("mail.draft.notSendable", lang)}';
+  var MDRAFT_UNAVAILABLE='${tJs("mail.draft.refuse.unavailable", lang)}';
+  var MDRAFT_PLACEHOLDERS='${tJs("mail.draft.refuse.placeholders", lang)}';
+  var MDRAFT_NO_RECIPIENTS='${tJs("mail.draft.refuse.no_recipients", lang)}';
+  var MDRAFT_BAD_ADDRESS='${tJs("mail.draft.refuse.bad_address", lang)}';
+  var MDRAFT_TOO_LARGE='${tJs("mail.draft.refuse.too_large", lang)}';
+  var MDRAFT_PAST='${tJs("mail.sched.past", lang)}';
+  var MDRAFT_TOO_FAR='${tJs("mail.scheduleTooFar", lang)}';
+  /* The send cap the size line counts against: the server's own 18 MiB ceiling. */
+  var MDRAFT_MAX_MB=18;
   var MDRAFT_NL=String.fromCharCode(10);
   var MDRAFT_DOT=' \\u00b7 ';
   /* A draft id, and nothing else, may reach a URL. */
@@ -124,10 +139,17 @@ export function perchMailDraftCardJs(lang = "en") {
   var mdraftQueryId=null;
   /* The query card is mounted once a page load: a session switch does not mount a second one. */
   var mdraftQueryMounted=false;
-  /* The states whose server-side work is still going on, and the poll that watches them. */
+  /* The states whose server-side work is still going on, and the poll that watches them. The gap
+     widens as a card stays in one state: 3 s for its first five polls, then 15 s, then a minute, so a
+     hold that somehow never settles stops costing a request every three seconds. A hidden tab pauses
+     it too: no request is made while document.hidden is set. */
   var MDRAFT_POLL_MS=3000;
+  var MDRAFT_POLL_SLOW_MS=15000;
+  var MDRAFT_POLL_SLOWEST_MS=60000;
+  var MDRAFT_POLL_FAST=5;
   var MDRAFT_POLL_STATES={'holding':true,'sending':true,'unknown':true};
-  var mdraftPollTimer=null;
+  var mdraftPollTimers={};
+  var mdraftPollCounts={};
   /* The refusals that mean the row moved: the card re-reads and carries the sentence across. */
   var MDRAFT_STALE={'changed':true,'frozen':true,'not_holding':true,'too_late':true,
     'not_scheduled':true,'not_discardable':true};
@@ -192,6 +214,21 @@ export function perchMailDraftCardJs(lang = "en") {
         : new Date(t).toLocaleTimeString(MDRAFT_LANG,{hour:'numeric',minute:'2-digit'});
     }catch(e){ return new Date(t).toLocaleString(); }
   }
+  /* The weekday a schedule names, in the card's own language (the day half of the scheduled line). */
+  function mdraftDay(ms){
+    var t=Number(ms);
+    if(!isFinite(t)) return '';
+    try{ return new Date(t).toLocaleDateString(MDRAFT_LANG,{weekday:'short'}); }
+    catch(e){ return ''; }
+  }
+  /* The clock the missed line names, worded exactly as the missed bell words it: 24-hour H:MM. */
+  function mdraftBellTime(ms){
+    var t=Number(ms);
+    if(!isFinite(t)) return '';
+    try{
+      return new Intl.DateTimeFormat('en-GB',{hourCycle:'h23',hour:'numeric',minute:'2-digit'}).format(new Date(t));
+    }catch(e){ return ''; }
+  }
   /* One call on the owner's draft route. A rejected socket answers the offline line, never a throw. */
   function mdraftApi(method,path,body){
     var opts={method:method,headers:{'X-Crow-Csrf':csrf()}};
@@ -200,18 +237,32 @@ export function perchMailDraftCardJs(lang = "en") {
       return r.json().catch(function(){return null;}).then(function(j){ return {ok:r.ok,status:r.status,j:j}; });
     },function(){ return {ok:false,status:0,j:null}; });
   }
-  /* A refusal's line: a fixed sentence of our own per code, else the server's own message, which is
-     a fixed sentence too (no address, no subject, no body ever rides it). */
+  /* A refusal's line: the fixed sentence of the code the server answered, in the active language. The
+     codes are the routes' own (the copy table's refusal rows); a code with no row of its own falls
+     back to the server's fixed message, which never carries an address, a subject or a body. */
   function mdraftRefusal(r){
     var j=(r&&r.j)||null;
     if(!r||r.status===0) return MDRAFT_OFFLINE;
     var code=(j&&typeof j.error==='string')?j.error:'';
+    var pre=(j&&typeof j.preflight==='string')?j.preflight:'';
+    var reason=(j&&typeof j.reason==='string')?j.reason:'';
+    if(pre==='placeholders') return MDRAFT_PLACEHOLDERS;
+    if(pre==='no_recipients') return MDRAFT_NO_RECIPIENTS;
+    if(pre==='bad_address') return MDRAFT_BAD_ADDRESS;
+    if(pre==='too_large') return MDRAFT_TOO_LARGE;
+    if(code==='too_large') return MDRAFT_TOO_LARGE;
+    if(reason==='past') return MDRAFT_PAST;
+    if(reason==='too_far') return MDRAFT_TOO_FAR;
+    if(code==='needsCancel') return MDRAFT_NEEDS_CANCEL;
+    if(code==='frozen') return (j&&j.needsCancel)?MDRAFT_NEEDS_CANCEL:MDRAFT_FROZEN;
     if(code==='cloud_drafting_off') return MDRAFT_CLOUD_OFF;
     if(code==='local_models_only') return MDRAFT_LOCAL_ONLY;
-    if(code==='delivery_unsupported'||code==='unavailable') return MDRAFT_TURN_OFF;
+    if(code==='delivery_unsupported') return MDRAFT_TURN_OFF;
+    if(code==='unavailable') return MDRAFT_UNAVAILABLE;
     if(code==='not_scheduled') return MDRAFT_NOT_SCHEDULED;
     if(code==='not_discardable') return MDRAFT_NOT_DISCARDABLE;
-    if(code==='frozen') return (j&&j.needsCancel)?MDRAFT_NEEDS_CANCEL:MDRAFT_FROZEN;
+    if(code==='partialRejected'||code==='partial_rejected') return MDRAFT_PARTIAL;
+    if(code==='not_sendable') return MDRAFT_NOT_SENDABLE;
     if(code==='changed') return MDRAFT_CHANGED_SENTENCE;
     if(r.status===403) return MDRAFT_NOTOWNER;
     if(j&&typeof j.message==='string'&&j.message) return j.message;
@@ -522,7 +573,8 @@ export function perchMailDraftCardJs(lang = "en") {
     }
     if(state==='scheduled'){
       var from=mdraftText(head.from&&head.from.name?head.from.name:(head.from?head.from.address:''));
-      status.textContent=mdraftFill(MDRAFT_SCHEDULED,{time:mdraftTime(draft.dueAt,true),account:from});
+      status.textContent=mdraftFill(MDRAFT_SCHEDULED,{day:mdraftDay(draft.dueAt),
+        time:mdraftTime(draft.dueAt,false),account:from});
       mdraftBtn(actions,'mdraft-change-time',MDRAFT_CHANGE_TIME,function(){
         mdraftOpenSheet(draft,status,refetch);
       });
@@ -544,7 +596,7 @@ export function perchMailDraftCardJs(lang = "en") {
     }
     if(state==='failed'||state==='missed'){
       status.textContent=state==='missed'
-        ? mdraftFill(MDRAFT_MISSED,{time:mdraftTime(draft.dueAt,false)})
+        ? mdraftFill(MDRAFT_MISSED,{time:mdraftBellTime(draft.dueAt)})
         : MDRAFT_FAILED;
       mdraftBtn(actions,'primary mdraft-send',MDRAFT_SEND,function(){ send(false); });
       mdraftBtn(actions,'mdraft-schedule',MDRAFT_SCHEDULE,function(){ mdraftOpenSheet(draft,status,refetch); });
@@ -571,6 +623,8 @@ export function perchMailDraftCardJs(lang = "en") {
           status.textContent=mdraftFill(MDRAFT_SAVED,{folder:folder});
           return;
         }
+        /* A mailbox with no Drafts folder answers 404: that has its own approved sentence. */
+        if(r&&r.status===404){ mdraftBusy(menu,false); status.textContent=MDRAFT_SAVE_NOT_FOUND; return; }
         status.textContent=mdraftSettleRefusal(r,refetch);
       });
     });
@@ -584,7 +638,11 @@ export function perchMailDraftCardJs(lang = "en") {
       });
     });
     card.appendChild(menu);
-    mdraftBtn(actions,'mdraft-more',MDRAFT_MORE,function(){ menu.hidden=!menu.hidden; });
+    var more=mdraftBtn(actions,'mdraft-more',MDRAFT_MORE,function(){ menu.hidden=!menu.hidden; });
+    /* The button is "..." on screen, so its name for a screen reader (and its tooltip) says what it
+       opens: More / Más. */
+    more.setAttribute('aria-label',MDRAFT_MORE_NAME);
+    more.setAttribute('title',MDRAFT_MORE_NAME);
   }
 
   /* One card, from one answer of the draft route. The notice is a sentence a refusal handed to the
@@ -626,7 +684,7 @@ export function perchMailDraftCardJs(lang = "en") {
 
     mdraftBody(card,payload,refetch);
     var bytes=mdraftBytes(head.attachments);
-    if(bytes>0) card.appendChild(line('mdraft-size',mdraftFill(MDRAFT_SIZE,{n:mdraftMb(bytes)})));
+    if(bytes>0) card.appendChild(line('mdraft-size',mdraftFill(MDRAFT_SIZE,{n:mdraftMb(bytes),max:MDRAFT_MAX_MB})));
 
     var editable=!!MDRAFT_EDITABLE[String(draft.state||'')];
     if(editable) mdraftAudience(card,payload,refetch);
@@ -712,8 +770,11 @@ export function perchMailDraftCardJs(lang = "en") {
     mdraftNodes[id]=node; mdraftKeys[id]=key;
     mdraftSid[id]=(opts&&opts.sid)?String(opts.sid):null;
     mdraftTop[id]=!!(opts&&opts.top);
-    mdraftState[id]=mdraftText(draft.state);
-    mdraftPollKeep();
+    var nextState=mdraftText(draft.state);
+    var movedState=mdraftState[id]!==nextState;
+    mdraftState[id]=nextState;
+    if(movedState) mdraftPollReset(id);
+    else mdraftPollKeep();
     return node;
   }
   /* Read one draft and draw it. opts.top mounts it at the top of the panel (the query card);
@@ -762,37 +823,67 @@ export function perchMailDraftCardJs(lang = "en") {
   function mdraftForget(id){
     delete mdraftNodes[id]; delete mdraftKeys[id]; delete mdraftSid[id];
     delete mdraftState[id]; delete mdraftTop[id];
+    delete mdraftPollCounts[id];
+    mdraftPollDisarm(id);
   }
   /* ---- the poll ------------------------------------------------------------ */
   /* While a draft is holding, in flight or unconfirmed, its state can change with nobody touching the
-     card. One timer covers every such card; it starts when the first one is drawn, reads each on its
-     own turn (with the same current.sid guard the list loads carry), and dies when the last one
-     settles or the transcript does. An unchanged answer redraws nothing: mdraftDraw keys on what
-     the card shows. */
-  function mdraftPollStop(){ if(mdraftPollTimer!==null){ clearInterval(mdraftPollTimer); mdraftPollTimer=null; } }
-  function mdraftPollTick(){
+     card. Each such card has its own timer: it reads the draft on its own turn (with the same
+     current.sid guard the list loads carry), and its gap widens from 3 s to 15 s to a minute while
+     the state it was drawn from stays put. A new state starts the count again (mdraftPollReset), and a
+     hidden tab pauses the poll without losing its place. An unchanged answer redraws nothing:
+     mdraftDraw keys on what the card shows. */
+  function mdraftPollWatched(id){
+    var node=mdraftNodes[id];
+    if(!node||!node.parentNode) return false;
+    return !!MDRAFT_POLL_STATES[mdraftText(mdraftState[id])];
+  }
+  function mdraftPollDelay(id){
+    var n=Number(mdraftPollCounts[id])||0;
+    if(n<MDRAFT_POLL_FAST) return MDRAFT_POLL_MS;
+    if(n===MDRAFT_POLL_FAST) return MDRAFT_POLL_SLOW_MS;
+    return MDRAFT_POLL_SLOWEST_MS;
+  }
+  function mdraftPollDisarm(id){
+    if(mdraftPollTimers[id]===undefined) return;
+    clearTimeout(mdraftPollTimers[id]);
+    delete mdraftPollTimers[id];
+  }
+  function mdraftPollArm(id){
+    if(mdraftPollTimers[id]!==undefined) return;
+    if(!mdraftPollWatched(id)) return;
+    mdraftPollTimers[id]=setTimeout(function(){ mdraftPollOne(id); },mdraftPollDelay(id));
+  }
+  function mdraftPollOne(id){
+    mdraftPollDisarm(id);
     if(!live()){ mdraftPollStop(); return; }
-    var ids=Object.keys(mdraftNodes);
-    var watching=0;
-    for(var i=0;i<ids.length;i++){
-      var id=ids[i];
-      var node=mdraftNodes[id];
-      if(!node||!node.parentNode) continue;
-      if(!MDRAFT_POLL_STATES[mdraftText(mdraftState[id])]) continue;
-      watching+=1;
-      /* mdraftLoad carries the session guard itself: a read that lands after a switch draws nothing. */
-      mdraftLoad(id,{sid:mdraftSid[id]||undefined,top:!!mdraftTop[id]});
-    }
-    if(!watching) mdraftPollStop();
+    if(!mdraftPollWatched(id)){ mdraftPollKeep(); return; }
+    var hidden=false;
+    try{ hidden=!!document.hidden; }catch(e){ hidden=false; }
+    /* A tab nobody is looking at asks for nothing; the timer keeps its place and its gap. */
+    if(hidden){ mdraftPollArm(id); return; }
+    mdraftPollCounts[id]=(Number(mdraftPollCounts[id])||0)+1;
+    /* mdraftLoad carries the session guard itself: a read that lands after a switch draws nothing. */
+    mdraftLoad(id,{sid:mdraftSid[id]||undefined,top:!!mdraftTop[id]});
+    mdraftPollArm(id);
+  }
+  function mdraftPollStop(){
+    var ids=Object.keys(mdraftPollTimers);
+    for(var i=0;i<ids.length;i++) mdraftPollDisarm(ids[i]);
   }
   function mdraftPollKeep(){
     var ids=Object.keys(mdraftNodes);
     for(var i=0;i<ids.length;i++){
-      if(!MDRAFT_POLL_STATES[mdraftText(mdraftState[ids[i]])]) continue;
-      if(mdraftPollTimer===null) mdraftPollTimer=setInterval(mdraftPollTick,MDRAFT_POLL_MS);
-      return;
+      if(mdraftPollWatched(ids[i])) mdraftPollArm(ids[i]);
+      else mdraftPollDisarm(ids[i]);
     }
-    mdraftPollStop();
+  }
+  /* The state a card was drawn from moved: the widened gap belonged to the old state, so the new one
+     starts at 3 s again. */
+  function mdraftPollReset(id){
+    delete mdraftPollCounts[id];
+    mdraftPollDisarm(id);
+    mdraftPollArm(id);
   }
   /* The draft id in the page's own query, checked against the store's shape BEFORE any request. */
   function mdraftQuery(){

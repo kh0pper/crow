@@ -155,7 +155,8 @@ function sentCopyHtml(account, lang) {
     + `<select class="ml-input" name="sentCopy" data-ml-sent-copy data-account="${e(id)}">`
     + option("provider", t("mail.sentCopyProvider", lang))
     + option("append", t("mail.sentCopyAppend", lang))
-    + "</select></label>";
+    + "</select></label>"
+    + `<p class="ml-help">${e(t("mail.sentCopyHelp", lang))}</p>`;
 }
 
 /**
@@ -167,16 +168,18 @@ function sentCopyHtml(account, lang) {
 function mailSettingsHtml(lang) {
   return `<section class="ml-card" data-ml-mail-settings>`
     + `<h2 class="ml-card-title">${e(t("mail.mailSettings", lang))}</h2>`
+    + `<h3 class="ml-card-subtitle">${e(t("mail.workingHoursHeading", lang))}</h3>`
     + `<label class="ml-field"><span class="ml-field-label">${e(t("mail.workingHoursStart", lang))}</span>`
     + `<input class="ml-input" type="time" name="workingHoursStart" data-ml-working-start></label>`
     + `<label class="ml-field"><span class="ml-field-label">${e(t("mail.workingHoursEnd", lang))}</span>`
     + `<input class="ml-input" type="time" name="workingHoursEnd" data-ml-working-end></label>`
+    + `<p class="ml-help">${e(t("mail.workingHoursHelp", lang))}</p>`
     + `<div class="ml-field">`
     + `<label class="ml-switch"><input type="checkbox" name="cloudDrafting" data-ml-cloud-drafting> ${e(t("mail.cloudDrafting", lang))}</label>`
     + `<p class="ml-help">${e(t("mail.cloudDraftingHelp", lang))}</p>`
     + "</div>"
     + `<div class="ml-actions">`
-    + `<button class="ml-btn ml-btn--primary" type="button" data-ml-settings-save>${e(t("mail.saveSettings", lang))}</button>`
+    + `<button class="ml-btn ml-btn--primary" type="button" data-ml-settings-save>${e(t("common.save", lang))}</button>`
     + "</div>"
     + "</section>";
 }

@@ -644,7 +644,9 @@ export function registerDraftRoutes(router, ctx) {
 
   // GET /:id — the card: the row, the head revision, the flags preflight marks, every comment, the
   // history line per revision and the head revision's voice note (null while plan 4 has not checked
-  // it, which is what the card's "Not checked for voice" line reads). The flags are null when the
+  // it, which is what the card's "Not checked for your writing style" line reads). The row carries the
+  // display name of the bot it was written under (`botName`, from `pi_bot_defs`), so the card's header
+  // names that bot without a second request. The flags are null when the
   // draft does not pass preflight (nothing is invented for it here): the card's own refusal copy is
   // the panel's.
   router.get(`${base}/:id`, route("GET /drafts/:id", async (db, req, res) => {
@@ -672,7 +674,7 @@ export function registerDraftRoutes(router, ctx) {
     }
 
     res.json({
-      draft,
+      draft: { ...draft, botName: await botNameFor(db, draft.botId) },
       head,
       flags,
       comments: await listComments(db, draft.id),
@@ -1070,6 +1072,30 @@ function parseBotDef(value) {
     }
   }
   return def != null && typeof def === "object" && !Array.isArray(def) ? def : {};
+}
+
+/**
+ * The display name of the bot a draft was written under, read from `pi_bot_defs`, or null: a draft
+ * with no bot, or one whose bot row is gone, names nothing (the card falls back to the bot id). A
+ * read-only lookup — no row is written here.
+ *
+ * @param {object} db
+ * @param {string|null} botId
+ * @returns {Promise<string|null>}
+ */
+async function botNameFor(db, botId) {
+  const id = typeof botId === "string" ? botId.trim() : "";
+  if (id === "") return null;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id = ?",
+      args: [id],
+    });
+    const name = typeof rows[0]?.display_name === "string" ? rows[0].display_name.trim() : "";
+    return name === "" ? null : name;
+  } catch {
+    return null;
+  }
 }
 
 /**

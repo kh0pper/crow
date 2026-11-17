@@ -118,48 +118,35 @@ const IDENTICAL_OK = new Set([
   "forYou.slot.morning", // English until the Spanish pass (P22)
   "forYou.slot.midday", // English until the Spanish pass (P22)
   "forYou.slot.evening", // English until the Spanish pass (P22)
-  // Crow Mail's plan 3 settings controls: pending operator copy (the plan gives no Spanish, and for
-  // some of them no sentence at all), so the placeholder reads the same in both languages.
-  "mail.mailSettings",
-  "mail.workingHoursStart",
-  "mail.workingHoursEnd",
-  "mail.cloudDrafting",
-  "mail.cloudDraftingHelp",
-  "mail.sentCopy",
-  "mail.sentCopyProvider",
-  "mail.sentCopyAppend",
-  "mail.saveSettings",
-  // Crow Mail's draft card in chat (plan 3, Task 10a): the English is the plan's own sentence and the
-  // Spanish is pending operator copy; the keys the plan does not fix (refusal states, chip labels,
-  // form buttons) carry an English placeholder in both languages for the same reason.
-  "mail.draftHead", "mail.draftHeadNew", "mail.draftTo", "mail.draftCc", "mail.draftBcc", "mail.draftSubject",
-  "mail.draftNoSubject", "mail.draftFromLine", "mail.draftFollowsRules", "mail.draftNotChecked",
-  "mail.draftSend", "mail.draftSchedule", "mail.draftMore", "mail.draftEdit", "mail.draftSaveDraft",
-  "mail.draftDiscard", "mail.draftHistory", "mail.draftHistoryRow", "mail.draftNewRecipient",
-  "mail.draftChanged", "mail.draftReplyToDiffers", "mail.draftNote", "mail.draftRevising",
-  "mail.draftSending", "mail.draftSendingState", "mail.draftUndo", "mail.draftScheduled",
-  "mail.draftChangeTime",
-  "mail.draftCancelSend", "mail.draftMissed", "mail.draftChangedSentence", "mail.draftUnknown",
-  "mail.draftSent", "mail.draftSyncing", "mail.draftSize", "mail.draftFailed", "mail.draftDiscarded",
-  "mail.draftConfirmSend", "mail.draftEditCancelsSchedule", "mail.draftWritingRules",
-  "mail.draftAudience", "mail.draftAudienceColleague", "mail.draftAudienceClient",
-  "mail.draftAudiencePersonal", "mail.draftComment", "mail.draftRevise", "mail.draftNoteSend",
-  "mail.draftCancel", "mail.draftOffline", "mail.draftError", "mail.draftNotOwner",
-  "mail.draftFrozen", "mail.draftCloudOff", "mail.draftLocalOnly", "mail.draftTurnOff",
-  "mail.draftNotScheduled", "mail.draftNotDiscardable", "mail.draftNeedsCancel",
-  "mail.draftScheduleUnavailable", "mail.draftSavedDraft", // pending operator copy
-  // Crow Mail's schedule sheet (plan 3, Task 10b): the three option names and the box-must-be-on
-  // line are the plan's own English, and the plan gives no Spanish; the date/time labels, the
-  // empty-pick line and the ninety-day refusal are not in the plan at all. Every key is TODO(copy)
-  // — pending operator copy — with the English placeholder in both languages.
-  "mail.scheduleTomorrowMorning", "mail.scheduleNextWorkDay", "mail.schedulePick",
-  "mail.schedulePickMissing", "mail.scheduleDateLabel", "mail.scheduleTimeLabel",
-  "mail.scheduleBoxOn", "mail.scheduleTooFar", // pending operator copy
-  // Crow Mail's reply slot (plan 3, Task 11): the plan's own English for the five action labels and
-  // the picker's two lines, with the Spanish pending operator copy; the reason frame and the bot's
-  // instruction are not in the plan at all, so they carry an English placeholder in both languages.
-  "mail.reply", "mail.replyAll", "mail.forward", "mail.draftWith", "mail.newEmail",
-  "mail.draftNoProject", "mail.draftSeesOnly", "mail.draftSuggestReason", "mail.draftAsk", // pending operator copy
+  // Crow Mail's plan 3 copy: every approved row carries its own Spanish, so the only entries left
+  // here are the strings that genuinely have no words to translate (an ellipsis, the "Cc" label, two
+  // templates that are placeholders only) and the ones whose copy the operator has not supplied yet.
+  "mail.mailSettings", // operator copy not yet supplied (the settings card's title)
+  "mail.draftHeadNew", // a template of two placeholders and a dot: no words to translate
+  "mail.draftTo", // operator copy not yet supplied
+  "mail.draftCc", // "Cc" is the same label in Spanish mail clients
+  "mail.draftBcc", // operator copy not yet supplied
+  "mail.draftSubject", // operator copy not yet supplied
+  "mail.draftMore", // "...", an ellipsis
+  "mail.draftHistoryRow", // operator copy not yet supplied
+  "mail.draftSendingState", // operator copy not yet supplied
+  "mail.draftAudience", // operator copy not yet supplied (the audience chip row)
+  "mail.draftAudienceColleague", // operator copy not yet supplied
+  "mail.draftAudienceClient", // operator copy not yet supplied
+  "mail.draftAudiencePersonal", // operator copy not yet supplied
+  "mail.draftComment", // operator copy not yet supplied
+  "mail.draftNoteSend", // operator copy not yet supplied
+  "mail.draftOffline", // operator copy not yet supplied
+  "mail.draftNotOwner", // operator copy not yet supplied
+  "mail.draftFailed", // operator copy not yet supplied
+  "mail.draftDiscarded", // operator copy not yet supplied
+  "mail.draftConfirmSend", // operator copy not yet supplied
+  "mail.draftScheduleUnavailable", // operator copy not yet supplied
+  "mail.schedulePickMissing", // operator copy not yet supplied
+  "mail.scheduleDateLabel", // operator copy not yet supplied
+  "mail.scheduleTimeLabel", // operator copy not yet supplied
+  "mail.draftSuggestReason", // a single placeholder: no words to translate
+  "mail.draftAsk", // operator copy not yet supplied (the instruction a chosen bot is handed)
 ]);
 
 const keys = Object.keys(translations);

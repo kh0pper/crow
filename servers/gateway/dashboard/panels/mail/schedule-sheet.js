@@ -56,8 +56,8 @@ export function perchMailScheduleSheetJs(lang = "en") {
     var label=mdraftText(preset&&preset.label);
     return label?name+MDRAFT_DOT+label:name;
   }
-  /* A refusal's line. The ninety-day window has its own fixed sentence (the plan names none for it);
-     every other answer reads as the card's refusals do. */
+  /* A refusal's line. Both windows the schedule tap can refuse (the minute's lead and the ninety-day
+     horizon) have their own approved sentences; every other answer reads as the card's refusals do. */
   function mschedRefusal(r){
     var j=(r&&r.j)||null;
     if(j&&j.reason==='too_far') return MSCHED_TOO_FAR;

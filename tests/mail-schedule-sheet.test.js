@@ -67,11 +67,12 @@ const PRESETS = {
 /* The plan's own sentence, verbatim, and the sheet's three option names. */
 const BOX_ON_SENTENCE = "It goes out at that time only because you scheduled it. You can change or "
   + "cancel it until then. Crow sends it itself, so this computer must be on.";
-const TOO_FAR_SENTENCE = "A send can be scheduled up to 90 days ahead.";
+const TOO_FAR_SENTENCE = "You can schedule up to 90 days ahead.";
+const PAST_SENTENCE = "Pick a time at least a minute from now.";
 
-/* Every i18n key the sheet emits. All of them are pending operator copy (the plan gives the English
-   and no Spanish, and the date/time labels, the empty-pick line and the ninety-day refusal are not
-   in the plan at all), so es === en for each and each is listed in the parity test's IDENTICAL_OK. */
+/* Every i18n key the sheet emits. The three unmatched labels (the empty-pick line and the two
+   field labels) have no approved copy yet, so they keep their English on both sides and each is
+   listed in the parity test's IDENTICAL_OK. */
 const SHEET_KEYS = [
   "mail.scheduleTomorrowMorning",
   "mail.scheduleNextWorkDay",
@@ -81,8 +82,13 @@ const SHEET_KEYS = [
   "mail.scheduleTimeLabel",
   "mail.scheduleBoxOn",
   "mail.scheduleTooFar",
+  "mail.sched.past",
 ];
-const PENDING_COPY = new Set(SHEET_KEYS);
+const PENDING_COPY = new Set([
+  "mail.schedulePickMissing",
+  "mail.scheduleDateLabel",
+  "mail.scheduleTimeLabel",
+]);
 
 const OWNER = "owner-local-password-session";
 const SSO = "peer-sso-session";
@@ -415,6 +421,22 @@ test("a picked time past ninety days shows the fixed sentence and schedules noth
   assert.ok(one(hub, "msched-sheet"), "the sheet stays open so another time can be chosen");
 });
 
+test("a time already gone shows the sheet's own past sentence and schedules nothing", async () => {
+  const { hub, calls } = await mount({
+    drafts: { [ID]: payload() },
+    reply: { status: 400, json: { error: "bad_input", message: "That request is not valid.", reason: "past" } },
+  });
+  await open(hub);
+  await openSheet(hub);
+
+  findByClass(hub.els["perch-transcript"], "msched-tomorrow").onclick();
+  await settle();
+
+  assert.equal(text(hub, "msched-status"), PAST_SENTENCE);
+  assert.equal(posts(calls).filter((c) => c.path.endsWith("/schedule")).length, 1, "one tap, refused");
+  assert.ok(one(hub, "msched-sheet"), "the sheet stays open so another time can be chosen");
+});
+
 test("a pick with no date or no time says which and asks the server nothing", async () => {
   const { hub, calls } = await mount({ drafts: { [ID]: payload() } });
   await open(hub);
@@ -462,13 +484,15 @@ test("the sheet's i18n keys exist in en and es, and differ unless the copy is pe
     assert.equal(
       entry.es === entry.en,
       PENDING_COPY.has(key),
-      `${key}: ${PENDING_COPY.has(key) ? "the Spanish is pending operator copy" : "the Spanish must differ"}`,
+      `${key}: ${PENDING_COPY.has(key) ? "the Spanish copy is not supplied yet" : "the Spanish must differ"}`,
     );
   }
   assert.equal(translations["mail.scheduleBoxOn"].en, BOX_ON_SENTENCE, "the plan's sentence, verbatim");
   assert.equal(translations["mail.scheduleTomorrowMorning"].en, "Tomorrow morning");
   assert.equal(translations["mail.scheduleNextWorkDay"].en, "Next work day");
   assert.equal(translations["mail.schedulePick"].en, "Pick date and time");
+  assert.equal(translations["mail.scheduleTooFar"].en, TOO_FAR_SENTENCE);
+  assert.equal(translations["mail.sched.past"].en, PAST_SENTENCE);
 });
 
 /* ------------------------------------------------- the presets route, server */

@@ -791,7 +791,7 @@ function replySlotStrings(lang = "en") {
     + attribute("refusal-cloud_drafting_off", t("mail.draftCloudOff", lang))
     + attribute("refusal-local_models_only", t("mail.draftLocalOnly", lang))
     + attribute("refusal-delivery_unsupported", t("mail.draftTurnOff", lang))
-    + attribute("refusal-unavailable", t("mail.draftTurnOff", lang))
+    + attribute("refusal-unavailable", t("mail.draft.refuse.unavailable", lang))
     + attribute("refusal-generic", t("mail.draftError", lang))
     + "></div>";
 }

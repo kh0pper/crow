@@ -434,6 +434,47 @@ test("GET /:id is the card: the row, the head, the flags, the comments and the h
   assert.equal(missing.status, 404, missing.text);
 });
 
+test("GET /:id carries the bot's display name, and null when no bot row has it", async () => {
+  const s = await setup();
+  const seed = new Database(s.crow);
+  try {
+    seed.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,1)")
+      .run("draft-bot", "R4 Assistant", JSON.stringify({ models: { default: "stub/m1" } }));
+  } finally {
+    seed.close();
+  }
+
+  const first = {
+    to: [{ address: SAM }], cc: [], bcc: [], subject: "Weekend", body: "Saturday?", attachments: [],
+  };
+  const named = await createDraft(s.db, {
+    accountId: s.account.id, mode: "new", botId: "draft-bot", first, author: "bot",
+  });
+  const read = await s.call("GET", `${DRAFTS}/${named.id}`);
+  assert.equal(read.status, 200, read.text);
+  assert.equal(read.json?.draft?.botId, "draft-bot");
+  assert.equal(read.json?.draft?.botName, "R4 Assistant", "the card's read names the bot");
+
+  const orphan = await createDraft(s.db, {
+    accountId: s.account.id, mode: "new", botId: "gone-bot", first, author: "bot",
+  });
+  const orphaned = await s.call("GET", `${DRAFTS}/${orphan.id}`);
+  assert.equal(orphaned.status, 200, orphaned.text);
+  assert.equal(orphaned.json?.draft?.botName, null, "a bot row that is gone names nothing");
+
+  const blank = await newDraft(s);
+  const bare = await s.call("GET", `${DRAFTS}/${blank.id}`);
+  assert.equal(bare.json?.draft?.botId, null);
+  assert.equal(bare.json?.draft?.botName, null);
+
+  // One read only: the create route answers the row as the store holds it.
+  const created = await s.call("POST", DRAFTS, {
+    body: { accountId: s.account.id, mode: "new", botId: "draft-bot" },
+  });
+  assert.equal(created.status, 200, created.text);
+  assert.equal(Object.hasOwn(created.json?.draft ?? {}, "botName"), false);
+});
+
 test("PATCH /:id/audience writes one of the store's words, and refuses everything else", async () => {
   const s = await setup();
   const draft = await newDraft(s);

@@ -166,7 +166,7 @@ async function mount(state = {}) {
     }
     return stdFetch()(method, path);
   };
-  const hub = await mountHub({ fetchImpl: impl });
+  const hub = await mountHub({ fetchImpl: impl, lang: state.lang || "en" });
   return { hub, calls };
 }
 
@@ -239,7 +239,7 @@ test("the card renders its recipients and its subject as text", async () => {
   assert.ok(all(hub, "mdraft-linetext").some((n) => n.textContent === "<script>alert(1)</script>"));
   // The one sentence the plan gives for this block, and the voice line while plan 4 has no note.
   assert.equal(text(hub, "mdraft-from"),
-    "From alex · Draft 1 · Not checked for voice");
+    "From alex · Draft 1 · Not checked for your writing style");
 });
 
 test("Send posts the hash the card was drawn from", async () => {
@@ -293,7 +293,7 @@ test("scheduled shows Change time and Cancel send, and no Edit", async () => {
   assert.ok(findByClass(hub.els["perch-transcript"], "mdraft-cancel-send"), "Cancel send is there");
   assert.equal(findByClass(hub.els["perch-transcript"], "mdraft-edit"), null, "a scheduled draft has no Edit");
   assert.equal(findByClass(hub.els["perch-transcript"], "mdraft-send"), null, "and no Send");
-  assert.equal(text(hub, "mdraft-edit-note"), "Editing cancels the scheduled send.");
+  assert.equal(text(hub, "mdraft-edit-note"), "Editing cancels the schedule.");
 
   findByClass(hub.els["perch-transcript"], "mdraft-cancel-send").onclick();
   await settle();
@@ -334,15 +334,16 @@ function transcriptOf(node) {
   return deep(node);
 }
 
-test("Not checked for voice shows while there is no voice row, and the rules line when there is", async () => {
+test("Not checked for your writing style shows while there is no voice row, and the rules line when there is", async () => {
   const without = await mount({ drafts: { [ID]: payload({ voice: null }) } });
   await open(without.hub);
-  assert.equal(text(without.hub, "mdraft-from"), "From alex · Draft 1 · Not checked for voice");
+  assert.equal(text(without.hub, "mdraft-from"),
+    "From alex · Draft 1 · Not checked for your writing style");
 
   const withVoice = await mount({ drafts: { [ID]: payload({ voice: { transcript: "warmer" } }) } });
   await open(withVoice.hub);
   assert.equal(text(withVoice.hub, "mdraft-from"), "From alex · Draft 1 · follows your writing rules");
-  assert.ok(transcriptText(withVoice.hub).includes("Not checked for voice") === false);
+  assert.ok(transcriptText(withVoice.hub).includes("Not checked for your writing style") === false);
 });
 
 test("an unknown outcome shows the could-not-confirm sentence and never says it was not sent", async () => {
@@ -473,7 +474,7 @@ test("a 409 changed leaves its sentence on the card that replaces the tapped one
 
   assert.equal(reads(calls).length, before + 1, "the card reads the draft it no longer matches");
   assert.equal(all(hub, "mdraft-card").length, 1, "one card: the new one");
-  assert.equal(text(hub, "mdraft-from"), "From alex · Draft 2 · Not checked for voice",
+  assert.equal(text(hub, "mdraft-from"), "From alex · Draft 2 · Not checked for your writing style",
     "the card on screen is the revision the server holds");
   assert.equal(text(hub, "mdraft-status"), CHANGED,
     "the sentence rides to the card that replaces the tapped one");
@@ -482,10 +483,10 @@ test("a 409 changed leaves its sentence on the card that replaces the tapped one
 
 test("every other stale answer refetches too, and its sentence rides to the new card", async () => {
   const cases = [
-    { reply: { error: "frozen", state: "sending" }, notice: "This draft can no longer be changed." },
+    { reply: { error: "frozen", state: "sending" }, notice: "This draft is on its way, so it cannot be changed now." },
     { reply: { error: "too_late", state: "sent", message: "It already went out." }, notice: "It already went out." },
-    { reply: { error: "not_scheduled", state: "draft" }, notice: "This draft has no scheduled send." },
-    { reply: { error: "not_discardable", state: "sent" }, notice: "This draft can no longer be discarded." },
+    { reply: { error: "not_scheduled", state: "draft" }, notice: "This message is no longer scheduled." },
+    { reply: { error: "not_discardable", state: "sent" }, notice: "This message cannot be discarded now. Cancel the send first, or it may already be sent." },
   ];
   const sent = payload({
     draft: { state: "sent", sentAt: 7 },
@@ -777,4 +778,251 @@ test("the ?maildraft= card mounts once and stays at the top through a session sw
     "the same card, back at the top");
   assert.equal(hub.els["perch-transcript"].children[0], card, "and still the first thing in the panel");
   assert.equal(reads(calls).length, mountedReads, "a switch mounts no second card");
+});
+
+/* -------------------------------------------------------- the approved refusal copy */
+
+/** Every refusal code the card renders, its answer, and the approved sentence in both languages. */
+const REFUSALS = [
+  ["frozen", 409, { error: "frozen" },
+    "This draft is on its way, so it cannot be changed now.",
+    "Este borrador ya está en camino, así que no se puede cambiar ahora."],
+  ["needsCancel", 409, { error: "frozen", needsCancel: true },
+    "This message is scheduled. Cancel the send first to change it.",
+    "Este mensaje está programado. Cancela el envío primero para poder cambiarlo."],
+  ["needsCancel (its own code)", 409, { error: "needsCancel" },
+    "This message is scheduled. Cancel the send first to change it.",
+    "Este mensaje está programado. Cancela el envío primero para poder cambiarlo."],
+  ["cloud_drafting_off", 403, { error: "cloud_drafting_off" },
+    "This bot uses a cloud model, and cloud drafting is off. Turn it on in Mail settings, or pick a bot that runs on this computer.",
+    "Este bot usa un modelo en la nube y el borrador con modelos en la nube está desactivado. Actívalo en los ajustes de Correo o elige un bot que se ejecute en este equipo."],
+  ["local_models_only", 403, { error: "local_models_only" },
+    "This account only allows bots that run on this computer. Pick a different bot.",
+    "Esta cuenta solo permite bots que se ejecutan en este equipo. Elige otro bot."],
+  ["delivery_unsupported", 503, { error: "delivery_unsupported" },
+    "Drafting with a bot is not available on this Crow right now. You can still write the message by hand.",
+    "Redactar con un bot no está disponible en este Crow por ahora. Aun así, puedes escribir el mensaje a mano."],
+  ["unavailable", 503, { error: "unavailable" },
+    "Crow could not start the bot just now. Try again.",
+    "Crow no pudo iniciar el bot ahora. Inténtalo de nuevo."],
+  ["not_scheduled", 409, { error: "not_scheduled" },
+    "This message is no longer scheduled.",
+    "Este mensaje ya no está programado."],
+  ["not_discardable", 409, { error: "not_discardable" },
+    "This message cannot be discarded now. Cancel the send first, or it may already be sent.",
+    "Este mensaje no se puede descartar ahora. Cancela el envío primero; puede que ya se haya enviado."],
+  ["past", 400, { error: "bad_input", reason: "past" },
+    "Pick a time at least a minute from now.",
+    "Elige una hora que falte al menos un minuto."],
+  ["too_far", 400, { error: "bad_input", reason: "too_far" },
+    "You can schedule up to 90 days ahead.",
+    "Puedes programar hasta con 90 días de anticipación."],
+  ["partialRejected", 409, { error: "partialRejected" },
+    "Sent. The mail server refused some recipients.",
+    "Enviado. El servidor de correo rechazó a algunos destinatarios."],
+  ["notSendable", 409, { error: "not_sendable" },
+    "This account cannot send mail yet.",
+    "Esta cuenta todavía no puede enviar correo."],
+  ["placeholders", 400, { error: "bad_input", preflight: "placeholders" },
+    "Fill in the [bracketed] parts before sending.",
+    "Completa las partes entre [corchetes] antes de enviar."],
+  ["no_recipients", 400, { error: "bad_input", preflight: "no_recipients" },
+    "Add at least one recipient.",
+    "Añade al menos un destinatario."],
+  ["bad_address", 400, { error: "bad_input", preflight: "bad_address" },
+    "One of the addresses is not valid.",
+    "Una de las direcciones no es válida."],
+  ["too_large", 413, { error: "too_large", preflight: "too_large" },
+    "The attachments are over about 18 MB. Remove some to send.",
+    "Los adjuntos pasan de unos 18 MB. Quita alguno para poder enviar."],
+];
+
+/** The sentence a code puts on the card, in one language. */
+async function refusalSentence(status, json, lang) {
+  const { hub } = await mount({ lang, drafts: { [ID]: payload() }, reply: { status, json } });
+  await open(hub);
+  findByClass(hub.els["perch-transcript"], "mdraft-send").onclick();
+  await settle();
+  return text(hub, "mdraft-status");
+}
+
+test("every refusal code shows its approved sentence, in the active language", async () => {
+  for (const [name, status, json, en, es] of REFUSALS) {
+    assert.notEqual(en, es, `${name}: the Spanish is its own sentence`);
+    assert.equal(await refusalSentence(status, json, "en"), en, `${name} (en)`);
+    assert.equal(await refusalSentence(status, json, "es"), es, `${name} (es)`);
+  }
+});
+
+test("Save as draft names the folder as text, and a missing Drafts folder has its own sentence", async () => {
+  const saved = await mount({
+    drafts: { [ID]: payload() },
+    reply: { status: 200, json: { ok: true, folder: "<b>Drafts</b>" } },
+  });
+  await open(saved.hub);
+  findByClass(saved.hub.els["perch-transcript"], "mdraft-more").onclick();
+  findByClass(saved.hub.els["perch-transcript"], "mdraft-save").onclick();
+  await settle();
+  assert.equal(text(saved.hub, "mdraft-status"), "Saved to <b>Drafts</b>.", "the folder is text");
+  assert.equal(all(saved.hub, "mdraft-status")[0].children.length, 0, "and never markup");
+
+  const missing = await mount({
+    drafts: { [ID]: payload() },
+    reply: { status: 404, json: { error: "not_found" } },
+  });
+  await open(missing.hub);
+  findByClass(missing.hub.els["perch-transcript"], "mdraft-more").onclick();
+  findByClass(missing.hub.els["perch-transcript"], "mdraft-save").onclick();
+  await settle();
+  assert.equal(text(missing.hub, "mdraft-status"), "Crow could not find this account's Drafts folder.");
+
+  const spanish = await mount({
+    lang: "es",
+    drafts: { [ID]: payload() },
+    reply: { status: 200, json: { ok: true, folder: "Borradores" } },
+  });
+  await open(spanish.hub);
+  findByClass(spanish.hub.els["perch-transcript"], "mdraft-more").onclick();
+  findByClass(spanish.hub.els["perch-transcript"], "mdraft-save").onclick();
+  await settle();
+  assert.equal(text(spanish.hub, "mdraft-status"), "Guardado en Borradores.");
+});
+
+/* ------------------------------------------------------------ the approved controls */
+
+test("Revise is Request changes in English and Pedir cambios in Spanish", async () => {
+  const comments = [{ id: "c1", rev: 1, lineIndex: 0, quote: "Hello Sam,", text: "Softer.", state: "queued" }];
+  const english = await mount({ drafts: { [ID]: payload({ comments }) } });
+  await open(english.hub);
+  assert.equal(text(english.hub, "mdraft-revise"), "Request changes");
+
+  const spanish = await mount({ lang: "es", drafts: { [ID]: payload({ comments }) } });
+  await open(spanish.hub);
+  assert.equal(text(spanish.hub, "mdraft-revise"), "Pedir cambios");
+});
+
+test("the ... overflow button is named More in English and Más in Spanish", async () => {
+  const english = await mount({ drafts: { [ID]: payload() } });
+  await open(english.hub);
+  const more = findByClass(english.hub.els["perch-transcript"], "mdraft-more");
+  assert.equal(more.textContent, "...");
+  assert.equal(more.getAttribute("aria-label"), "More");
+  assert.equal(more.getAttribute("title"), "More");
+
+  const spanish = await mount({ lang: "es", drafts: { [ID]: payload() } });
+  await open(spanish.hub);
+  const otro = findByClass(spanish.hub.els["perch-transcript"], "mdraft-more");
+  assert.equal(otro.textContent, "...");
+  assert.equal(otro.getAttribute("aria-label"), "Más");
+  assert.equal(otro.getAttribute("title"), "Más");
+});
+
+/* ------------------------------------------------------------- the state sentences */
+
+test("the missed card names the real due time, the way the bell words it", async () => {
+  const dueAt = new Date(2026, 10, 12, 7, 30).getTime();
+  const english = await mount({ drafts: { [ID]: payload({ draft: { state: "missed", dueAt } }) } });
+  await open(english.hub);
+  assert.equal(text(english.hub, "mdraft-status"),
+    "This was due at 7:30 and did not go out. Send now, pick a new time, or cancel.");
+
+  const spanish = await mount({ lang: "es", drafts: { [ID]: payload({ draft: { state: "missed", dueAt } }) } });
+  await open(spanish.hub);
+  assert.equal(text(spanish.hub, "mdraft-status"),
+    "Esto debía salir a las 7:30 y no se envió. Envíalo ahora, elige otra hora o cancélalo.");
+});
+
+test("the scheduled line names the day, the clock and the account", async () => {
+  const dueAt = new Date(2026, 10, 12, 13, 30).getTime();
+  const english = await mount({ drafts: { [ID]: payload({ draft: { state: "scheduled", dueAt } }) } });
+  await open(english.hub);
+  assert.match(text(english.hub, "mdraft-status"), /^Scheduled for \S+ \d{1,2}:\d{2}.* from alex$/);
+
+  const spanish = await mount({ lang: "es", drafts: { [ID]: payload({ draft: { state: "scheduled", dueAt } }) } });
+  await open(spanish.hub);
+  assert.match(text(spanish.hub, "mdraft-status"), /^Programado para el .+ a las .+ desde alex$/);
+});
+
+/* ----------------------------------------------------------------- the backoff */
+
+/** The armed timers whose gap is one of the poll's (the card's own, plus the hub's own long timers). */
+const armedGaps = (hub) => [...hub.timerDelays.entries()]
+  .filter(([id, delay]) => hub.timers.has(id)
+    && (delay === 3000 || delay === 15000 || delay === 60000));
+
+/** Fire one timer by its id. */
+function fireTimer(hub, id) {
+  const fn = id === undefined ? null : hub.timers.get(id);
+  if (fn) fn();
+}
+
+/** The timer ids armed since `seen` was taken, as [id, delay]. */
+const freshGaps = (hub, seen) => armedGaps(hub).filter(([id]) => !seen.has(id));
+
+/** Record every armed timer in `seen`, so the next step can tell what is new. */
+function rememberGaps(hub, seen) {
+  for (const [id] of armedGaps(hub)) seen.add(id);
+}
+
+test("the poll backs off from 3 s to 15 s to a minute, and pauses while the tab is hidden", async () => {
+  const { hub, calls } = await mount({ drafts: { [ID]: payload({ draft: { state: "holding", holdUntil: 10 } }) } });
+  await open(hub);
+  let current = pollTimerIds(hub)[0];
+  assert.ok(current !== undefined, "the card arms one poll at 3 s");
+  const seen = new Set();
+  rememberGaps(hub, seen);
+
+  const step = async (want, label) => {
+    fireTimer(hub, current);
+    await settle();
+    const fresh = freshGaps(hub, seen);
+    rememberGaps(hub, seen);
+    assert.equal(fresh.length, 1, `${label}: one new poll timer`);
+    assert.equal(fresh[0][1], want, `${label}: its gap`);
+    current = fresh[0][0];
+  };
+
+  for (let poll = 1; poll <= 4; poll += 1) await step(3000, `the gap after poll ${poll}`);
+  await step(15000, "the gap after poll 5");
+  await step(60000, "the gap after poll 6");
+
+  hub.doc.hidden = true;
+  const quiet = reads(calls).length;
+  fireTimer(hub, current);
+  await settle();
+  assert.equal(reads(calls).length, quiet, "no request while the tab is hidden");
+  const held = freshGaps(hub, seen);
+  rememberGaps(hub, seen);
+  assert.equal(held.length, 1, "the timer is armed again");
+  assert.equal(held[0][1], 60000, "and the gap stays where it was");
+  current = held[0][0];
+
+  hub.doc.hidden = false;
+  fireTimer(hub, current);
+  await settle();
+  assert.equal(reads(calls).length, quiet + 1, "visible again, it reads");
+});
+
+test("a change of state starts the poll at 3 s again", async () => {
+  let state = "holding";
+  const { hub } = await mount({ drafts: { [ID]: () => payload({ draft: { state } }) } });
+  await open(hub);
+  let current = pollTimerIds(hub)[0];
+  const seen = new Set();
+  rememberGaps(hub, seen);
+
+  const step = async () => {
+    fireTimer(hub, current);
+    await settle();
+    const fresh = freshGaps(hub, seen);
+    rememberGaps(hub, seen);
+    if (fresh.length) current = fresh[0][0];
+    return fresh.map(([, delay]) => delay);
+  };
+
+  for (let poll = 0; poll < 6; poll += 1) await step();
+  assert.deepEqual(await step(), [60000], "a long-run hold is on the minute");
+
+  state = "unknown";
+  assert.deepEqual(await step(), [3000], "a new state is a fresh matter");
 });

@@ -174,11 +174,9 @@ export const MAIL_NOTIFICATION_TITLE = "Crow Mail";
 
 /**
  * The bell a removal rings: it says what Crow did to the account's unsent mail and nothing about the
- * mail itself.
- *
- * TODO(copy): pending operator copy — the plan fixes no sentence for this bell.
+ * mail itself (the operator-approved copy's own sentence for this bell).
  */
-export const ACCOUNT_REMOVED_BELL_BODY = "Unsent mail for a removed account was cancelled.";
+export const ACCOUNT_REMOVED_BELL_BODY = "Unsent messages for a removed account were cancelled.";
 
 /**
  * The `fail_reason` a discarded draft carries once its account is gone (Q2 option 1: the mail is
