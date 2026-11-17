@@ -539,6 +539,7 @@ test("refresh posts a sync per account id, shows the translating status line, th
   const line = r.$("[data-ml-status-line]");
   assert.ok(line, "a status line was added");
   assert.equal(line.getAttribute("role"), "status");
+  assert.equal(line.getAttribute("aria-live"), "polite", "and screen readers announce it");
   assert.equal(line.textContent, "Refreshing");
   await r.settle();
   assert.deepEqual(r.calls.map((call) => call.method), ["POST", "POST"]);
@@ -661,7 +662,7 @@ test("Archive posts the action with the row id and the csrf header, then navigat
   assert.equal(r.calls[0].url, "/dashboard/mail/api/messages/11/actions");
   assert.deepEqual(r.calls[0].body, { action: "archive" });
   assert.equal(r.calls[0].headers["x-crow-csrf"], "tok 42", "the header comes from the cookie");
-  assert.deepEqual(r.visits, ["/dashboard/mail?acct=all"], "the back link the page carries");
+  assert.deepEqual(r.visits, ["/dashboard/mail?acct=all&flash=archived"], "the back link the page carries, with the note");
 });
 
 test("a 409 shows its sentence, keeps the page and frees the controls", async () => {
@@ -756,7 +757,7 @@ test("Move sends the folder chosen in the select", async () => {
   assert.equal(r.calls.length, 1);
   assert.equal(r.calls[0].url, "/dashboard/mail/api/messages/11/actions");
   assert.deepEqual(r.calls[0].body, { action: "move", folderId: 4 });
-  assert.deepEqual(r.visits, ["/dashboard/mail?acct=all"]);
+  assert.deepEqual(r.visits, ["/dashboard/mail?acct=all&flash=moved%3A4"], "back to the list, naming the folder it went to");
 });
 
 test("a double click on an action posts once and disables every control while it is in flight", async () => {
@@ -773,17 +774,19 @@ test("a double click on an action posts once and disables every control while it
   release(jsonResponse(200, { ok: true, movedTo: 5 }));
   await r.settle();
   assert.equal(r.calls.length, 1);
-  assert.deepEqual(r.visits, ["/dashboard/mail?acct=all"]);
+  assert.deepEqual(r.visits, ["/dashboard/mail?acct=all&flash=archived"]);
 });
 
 test("after a successful archive, delete or move no control posts again while the page leaves", async () => {
+  const FLASH = { archive: "archived", delete: "deleted", move: "moved%3A4" };
   for (const action of ["archive", "delete", "move"]) {
     const r = boot(messagePage(), { fetchImpl: () => jsonResponse(200, { ok: true, movedTo: 5 }) });
     if (action === "move") { r.$("[data-ml-move-select]").value = "4"; }
     r.click(r.$('button[data-ml-action="' + action + '"]'));
     await r.settle();
     assert.equal(r.calls.length, 1, action + ": one post");
-    assert.deepEqual(r.visits, ["/dashboard/mail?acct=all"], action + ": the reader goes back to its list");
+    const expected = ["/dashboard/mail?acct=all&flash=" + FLASH[action]];
+    assert.deepEqual(r.visits, expected, action + ": the reader goes back to its list, with its own note");
 
     const controls = r.$$("[data-ml-actions] [data-ml-action]");
     assert.ok(controls.length >= 2, action + ": the bar carries controls");
@@ -794,8 +797,176 @@ test("after a successful archive, delete or move no control posts again while th
     }
     await r.settle();
     assert.equal(r.calls.length, 1, action + ": a second click posts nothing");
-    assert.deepEqual(r.visits, ["/dashboard/mail?acct=all"], action + ": and navigates once");
+    assert.deepEqual(r.visits, expected, action + ": and navigates once");
   }
+});
+
+test("Archive, Delete and Move each go back to the list carrying their own note", async () => {
+  const cases = [
+    ["archive", "flash=archived"],
+    ["delete", "flash=deleted"],
+    ["move", "flash=moved:4"],
+  ];
+  for (const [action, flash] of cases) {
+    const r = boot(messagePage(), { fetchImpl: () => jsonResponse(200, { ok: true }) });
+    if (action === "move") { r.$("[data-ml-move-select]").value = "4"; }
+    r.click(r.$('button[data-ml-action="' + action + '"]'));
+    await r.settle();
+    assert.equal(r.calls.length, 1, action);
+    assert.equal(r.visits.length, 1, action + ": one visit");
+    const target = decodeURIComponent(r.visits[0]);
+    assert.match(target, new RegExp("[?&]" + flash + "(&|$)"), target);
+    assert.equal(new URL("http://127.0.0.1" + target).pathname, "/dashboard/mail", action + ": back in the list");
+  }
+});
+
+test("Mark unread says Marked unread. in the bar and swaps the two read controls", async () => {
+  const r = boot(messagePage({ isRead: true }));
+  const unread = r.$('button[data-ml-action="unread"]');
+  const read = r.$('button[data-ml-action="read"]');
+  assert.equal(read.hasAttribute("hidden"), true, "a read message hides Mark read");
+  r.click(unread);
+  await r.settle();
+  const line = r.$("[data-ml-actions] [data-ml-status-line]");
+  assert.ok(line, "the bar carries the sentence");
+  assert.equal(line.getAttribute("role"), "status");
+  assert.equal(line.getAttribute("aria-live"), "polite");
+  assert.equal(line.textContent, "Marked unread.");
+  assert.equal(unread.hasAttribute("hidden"), true, "Mark unread goes away");
+  assert.equal(read.hasAttribute("hidden"), false, "and Mark read is shown");
+  assert.deepEqual(r.visits, [], "the reader stays on the message");
+});
+
+test("Mark read posts read, swaps the controls and says nothing", async () => {
+  const r = boot(messagePage());
+  const read = r.$('button[data-ml-action="read"]');
+  const unread = r.$('button[data-ml-action="unread"]');
+  assert.ok(read, "an unread message offers Mark read");
+  assert.equal(read.textContent, "Mark read");
+  assert.equal(read.hasAttribute("hidden"), false);
+  assert.equal(unread.hasAttribute("hidden"), true);
+  r.click(read);
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.equal(r.calls[0].method, "POST");
+  assert.equal(r.calls[0].url, "/dashboard/mail/api/messages/11/actions");
+  assert.deepEqual(r.calls[0].body, { action: "read" });
+  assert.equal(r.calls[0].headers["x-crow-csrf"], "tok 42");
+  assert.equal(read.hasAttribute("hidden"), true, "Mark read goes away");
+  assert.equal(unread.hasAttribute("hidden"), false, "and Mark unread is shown");
+  const line = r.$("[data-ml-actions] [data-ml-status-line]");
+  assert.ok(!line || line.textContent === "", "no sentence: the plan approved none");
+  assert.ok(!line || line.hasAttribute("hidden"), "and nothing is shown");
+  assert.deepEqual(r.visits, [], "the reader stays on the message");
+});
+
+test("Mark read after Mark unread clears the bar's sentence instead of leaving it visible", async () => {
+  const r = boot(messagePage({ isRead: true }));
+  const bar = r.$("[data-ml-actions]");
+  const unread = r.$('button[data-ml-action="unread"]');
+  const read = r.$('button[data-ml-action="read"]');
+  r.click(unread);
+  await r.settle();
+  const line = bar.querySelector("[data-ml-status-line]");
+  assert.equal(line.textContent, "Marked unread.");
+  assert.equal(line.hasAttribute("hidden"), false, "the sentence is shown");
+
+  r.click(read);
+  await r.settle();
+  assert.equal(r.calls.length, 2, "both answers arrived");
+  assert.deepEqual(r.calls[1].body, { action: "read" });
+  assert.equal(line.textContent, "", "the sentence that belonged to the unread state is gone");
+  assert.equal(line.hasAttribute("hidden"), true, "and the line is hidden again");
+  assert.equal(read.hasAttribute("hidden"), true, "Mark read goes away");
+  assert.equal(unread.hasAttribute("hidden"), false, "and Mark unread is shown");
+  assert.deepEqual(r.visits, [], "the reader stays on the message");
+});
+
+test("either read control clears the pending automatic mark-read when it is clicked", async () => {
+  const marked = boot(messagePage());
+  const armed = marked.window.__mlTimer;
+  assert.ok(armed, "the opened unread message armed the timer");
+  marked.click(marked.$('button[data-ml-action="read"]'));
+  await marked.settle();
+  assert.equal(armed.cleared, true, "the click clears the pending mark-read");
+  assert.equal(marked.fire(1500), false, "so it cannot fire as well");
+  await marked.settle();
+  assert.equal(marked.calls.length, 1, "one post, the click's own");
+  assert.deepEqual(marked.calls[0].body, { action: "read" });
+
+  const unread = boot(messagePage({ isRead: true }));
+  let fired = 0;
+  unread.window.__mlTimer = unread.ctx.setTimeout(() => { fired += 1; }, 1500);
+  const pending = unread.window.__mlTimer;
+  unread.click(unread.$('button[data-ml-action="unread"]'));
+  await unread.settle();
+  assert.equal(pending.cleared, true, "Mark unread clears it too");
+  assert.equal(fired, 0);
+});
+
+test("the automatic mark-read swaps the two read controls once the server agrees", async () => {
+  const r = boot(messagePage());
+  const read = r.$('button[data-ml-action="read"]');
+  const unread = r.$('button[data-ml-action="unread"]');
+  assert.equal(read.hasAttribute("hidden"), false);
+  assert.equal(unread.hasAttribute("hidden"), true);
+  assert.equal(r.fire(1500), true);
+  await r.settle();
+  assert.deepEqual(r.calls[0].body, { action: "read" });
+  assert.equal(read.hasAttribute("hidden"), true, "Mark read goes away by itself");
+  assert.equal(unread.hasAttribute("hidden"), false, "and Mark unread is shown");
+  assert.deepEqual(r.visits, []);
+});
+
+test("a click while the automatic mark-read is in flight posts nothing more", async () => {
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const r = boot(messagePage(), { fetchImpl: () => pending });
+  assert.equal(r.fire(1500), true, "the automatic read goes out");
+  assert.equal(r.calls.length, 1);
+  assert.deepEqual(r.calls[0].body, { action: "read" });
+
+  const unread = r.$('button[data-ml-action="unread"]');
+  const archive = r.$('button[data-ml-action="archive"]');
+  assert.equal(unread.hasAttribute("disabled"), true, "the bar waits for the automatic answer");
+  r.click(unread);
+  r.click(archive);
+  assert.equal(r.calls.length, 1, "a click during the automatic post is not a second post");
+
+  release(jsonResponse(200, { ok: true }));
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.deepEqual(r.visits, [], "no archive and no unread went out");
+  const read = r.$('button[data-ml-action="read"]');
+  assert.equal(read.hasAttribute("hidden"), true, "the answer that did arrive swaps them");
+  assert.equal(unread.hasAttribute("hidden"), false, "and Mark unread is shown");
+  for (const control of r.$$("[data-ml-actions] [data-ml-action]")) {
+    assert.equal(control.hasAttribute("disabled"), false, "the bar is usable again");
+  }
+});
+
+test("the automatic mark-read stands aside while another action is in flight", async () => {
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const r = boot(messagePage(), { fetchImpl: () => pending });
+  r.click(r.$('button[data-ml-action="archive"]'));
+  assert.equal(r.calls.length, 1, "the archive post is out");
+  assert.deepEqual(r.calls[0].body, { action: "archive" });
+
+  assert.equal(r.fire(1500), true, "the automatic mark-read fires while the archive is in flight");
+  await r.settle();
+  assert.equal(r.calls.length, 1, "it posts nothing over the action that is already out");
+  assert.deepEqual(r.calls.map((call) => call.body), [{ action: "archive" }], "no read went out");
+  for (const control of r.$$("[data-ml-actions] [data-ml-action]")) {
+    assert.equal(control.hasAttribute("disabled"), true, "the bar still waits for the archive's own answer");
+  }
+
+  release(jsonResponse(200, { ok: true, movedTo: 5 }));
+  await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.deepEqual(r.visits, ["/dashboard/mail?acct=all&flash=archived"], "the archive's answer still carries the page away");
+  assert.equal(r.$('button[data-ml-action="read"]').hasAttribute("hidden"), false,
+    "no read answer arrived, so the read controls were never swapped");
 });
 
 /* ------------------------------------------------------------------- the settings */
@@ -1109,6 +1280,11 @@ test("the approved sentences read exactly as given, and each has its own Spanish
     "mail.error.no_trash_folder": "Crow couldn't find this account's Trash folder.",
     "mail.error.duplicate_address": "That address is already set up in Crow.",
     "mail.error.generic": "Something went wrong. Try again.",
+    "mail.markRead": "Mark read",
+    "mail.doneArchived": "Archived.",
+    "mail.doneDeleted": "Deleted.",
+    "mail.doneMoved": "Moved to {folder}.",
+    "mail.doneUnread": "Marked unread.",
   };
   for (const [key, en] of Object.entries(COPY)) {
     assert.equal(translations[key]?.en, en, key);

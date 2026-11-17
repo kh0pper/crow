@@ -402,7 +402,7 @@ test("a flash value renders its approved sentence with N as an integer and any o
   await withFlag(async () => {
     const older = await get("/dashboard/mail?flash=older:12");
     assert.equal(older.status, 200);
-    assert.match(older.body, /<p class="ml-note ml-flash" role="status" data-ml-flash="older" data-count="12">Loaded older mail\.<\/p>/);
+    assert.match(older.body, /<p class="ml-note ml-flash" role="status" aria-live="polite" data-ml-flash="older" data-count="12">Loaded older mail\.<\/p>/);
     assert.doesNotMatch(older.body, /Loaded older mail\. 12/, "the older sentence does not show the count");
 
     const padded = await get("/dashboard/mail?flash=older:0012");
@@ -411,7 +411,7 @@ test("a flash value renders its approved sentence with N as an integer and any o
 
     const start = await get("/dashboard/mail?flash=start");
     assert.equal(start.status, 200);
-    assert.match(start.body, /<p class="ml-note ml-flash" role="status" data-ml-flash="start">That's the oldest mail on the server\.<\/p>/);
+    assert.match(start.body, /<p class="ml-note ml-flash" role="status" aria-live="polite" data-ml-flash="start">That's the oldest mail on the server\.<\/p>/);
     assert.doesNotMatch(start.body, /data-count=/, "the start flash has no count");
 
     const remote = await get("/dashboard/mail?view=search&q=flash&flash=remote:7");
@@ -433,6 +433,84 @@ test("a flash value renders its approved sentence with N as an integer and any o
       assert.equal(r.status, 200, bad);
       assert.doesNotMatch(r.body, /data-ml-flash/, `"${bad}" renders nothing`);
       assert.doesNotMatch(r.body, /Loaded older mail\.|That's the oldest mail|more on the server\./, bad);
+    }
+  });
+});
+
+/* --------------------------------------------------- the actions' own flashes */
+
+/** One flash element's opening tag and sentence, or null when the page drew none. */
+function flashTag(html) {
+  return /<p class="ml-note ml-flash"[^>]*>[^<]*<\/p>/.exec(html)?.[0] ?? null;
+}
+
+test("the action flashes read as approved, name the folder a move went to, and draw nothing they cannot name", async () => {
+  let ids;
+  await withDb(async (db) => {
+    const { a, aInbox } = await seed(db);
+    const folders = (await stores.messages.upsertFolders(db, a.id, [
+      { path: "INBOX", name: "Inbox" },
+      { path: "Label", name: "Label" },
+      { path: "Archive", name: "Archive", specialUse: "\\Archive" },
+      { path: "Odd", name: 'R&D <b>"quoted"</b>' },
+    ])).folders;
+    const pick = (path) => folders.find((folder) => folder.path === path).id;
+    ids = { label: pick("Label"), archive: pick("Archive"), odd: pick("Odd") };
+    await deliver(db, { accountId: a.id, folderId: aInbox, subject: "Flash base" });
+  });
+  await withFlag(async () => {
+    const archived = await get("/dashboard/mail?flash=archived");
+    assert.equal(archived.status, 200);
+    assert.match(
+      archived.body,
+      /<p class="ml-note ml-flash" role="status" aria-live="polite" data-ml-flash="archived">Archived\.<\/p>/,
+    );
+
+    const deleted = await get("/dashboard/mail?flash=deleted");
+    assert.equal(deleted.status, 200);
+    assert.match(
+      deleted.body,
+      /<p class="ml-note ml-flash" role="status" aria-live="polite" data-ml-flash="deleted">Deleted\.<\/p>/,
+    );
+
+    // A move carries the folder's id and nothing else, so the sentence is built from the folder list
+    // the view already receives: its display name is the one the drawer shows.
+    const moved = await get("/dashboard/mail?flash=moved:" + ids.label);
+    assert.equal(moved.status, 200);
+    assert.match(
+      moved.body,
+      new RegExp(`<p class="ml-note ml-flash" role="status" aria-live="polite" data-ml-flash="moved" data-folder="${ids.label}">Moved to Label\\.<\\/p>`),
+    );
+
+    // The search view draws no folders of its own, and still resolves the id.
+    const searched = await get("/dashboard/mail?view=search&q=flash&flash=moved:" + ids.archive);
+    assert.equal(searched.status, 200);
+    assert.match(
+      searched.body,
+      new RegExp(`data-ml-flash="moved" data-folder="${ids.archive}">Moved to Archive\\.<\\/p>`),
+    );
+
+    // A folder id no list holds draws no sentence at all: there is no fallback wording.
+    const unknown = await get("/dashboard/mail?flash=moved:999999");
+    assert.equal(unknown.status, 200);
+    assert.equal(flashTag(unknown.body), null, "an unknown folder renders nothing");
+    assert.doesNotMatch(unknown.body, /Moved to /);
+
+    // The folder's name is mail-server text: escaped wherever it lands, never markup.
+    const odd = await get("/dashboard/mail?flash=moved:" + ids.odd);
+    assert.equal(odd.status, 200);
+    assert.doesNotMatch(odd.body, /<b>/);
+    assert.match(odd.body, /Moved to R&amp;D &lt;b&gt;&quot;quoted&quot;&lt;\/b&gt;\.<\/p>/);
+
+    // Only the three shapes a link may carry are read back; anything else is no flash at all.
+    for (const bad of [
+      "moved", "moved:", "moved:abc", "moved:1x", "moved:0", "moved:-1", "moved:1.5",
+      "moved:0123", "moved:1234567890", "archived:5", "deleted:5", "unread", "started",
+    ]) {
+      const r = await get("/dashboard/mail?flash=" + encodeURIComponent(bad));
+      assert.equal(r.status, 200, bad);
+      assert.doesNotMatch(r.body, /data-ml-flash/, `"${bad}" renders nothing`);
+      assert.doesNotMatch(r.body, /Archived\.|Deleted\.|Moved to /, bad);
     }
   });
 });

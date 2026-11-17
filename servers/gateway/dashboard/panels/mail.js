@@ -33,7 +33,7 @@
  * The list views also carry the two controls a link cannot be — refresh and, once a folder's local
  * rows are exhausted, "Look further back" — as buttons naming account and folder ids only; the
  * client script (Task 8) posts them and reloads with a `flash` this page parses back into a kind and
- * a count.
+ * a count (or, for an archive, a delete or a move, into the note the action left).
  *
  * The `settings` view is the account page (`panels/mail/settings-html.js`): every account — held ones
  * included — with its status and controls, the addresses other live instances hold, and the
@@ -78,13 +78,20 @@ function readQuery(value) {
 }
 
 /**
- * The reload an action leaves behind: `older:<n>` or `remote:<n>` brought that many rows back, and
- * `start` says a folder reached its own beginning. Any other value means nothing at all. The count is
- * an integer, whatever the digits looked like in the URL.
+ * What a reloading or returning action leaves behind: `older:<n>` or `remote:<n>` brought that many
+ * rows back, and `start` says a folder reached its own beginning. `archived`, `deleted` and
+ * `moved:<folderId>` are the three a message action leaves on the list it goes back to; a move names
+ * the folder by id alone, never by name, so the page cannot be made to show text of the link's
+ * choosing. Any other value means nothing at all. The count is an integer, whatever the digits looked
+ * like in the URL.
  */
 function readFlash(value) {
   if (typeof value !== "string" || value === "") return null;
   if (value === "start") return { kind: "start", count: null };
+  if (value === "archived") return { kind: "archived", count: null };
+  if (value === "deleted") return { kind: "deleted", count: null };
+  const moved = /^moved:([1-9]\d{0,8})$/.exec(value);
+  if (moved) return { kind: "moved", folderId: Number(moved[1]), count: null };
   const match = /^(older|remote):(\d{1,9})$/.exec(value);
   if (!match) return null;
   return { kind: match[1], count: Number(match[2]) };
@@ -302,6 +309,13 @@ export default {
         folders = await listFolders(db, found.accountId);
         thread = await readThread(db, found);
       }
+    }
+
+    // A `moved` flash names a folder id only, so its sentence is resolved against the account's own
+    // folder list. The list views already read theirs; the search view draws none, and reads them
+    // here (for every usable account) so the name still resolves.
+    if (flash?.kind === "moved" && folders.length === 0) {
+      for (const entry of usable) folders.push(...await listFolders(db, entry.id));
     }
 
     return layout({

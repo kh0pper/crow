@@ -87,6 +87,7 @@ const COMMAND_IDS = [
   "chain.set",
   "clip.add_audio",
   "clip.add_pattern",
+  "clip.copy_to_scene",
   "clip.edit_notes",
   "clip.remove",
   "clip.rename",
@@ -230,6 +231,7 @@ const MINIMAL_ARGS = {
   "motion.clear": { clip_id: "c1", pattern_id: "p1", bank_id: "b1", index: 0 },
   "chain.set": { clip_id: "c1", chain: [] },
   "clip.add_pattern": { track_id: "t1", scene_id: "s1" },
+  "clip.copy_to_scene": { clip_id: "c1", scene_id: "s1" },
   "midi.map": {
     device_name: "FCB1010",
     message: { type: "pc", channel: 1, number: 0 },
@@ -860,6 +862,18 @@ test("apply returns before/after for every touched field", (t) => {
       id: "chain.set",
       args: { clip_id: "kit-clip", chain: ["a", "pb"] },
       keys: ["clip:kit-clip|chain"],
+    },
+    // A copy of the clip into an empty scene: the clip, each of its patterns and
+    // the step one of them holds, all in one step.
+    {
+      id: "clip.copy_to_scene",
+      args: { clip_id: "kit-clip", scene_id: "bridge", new_clip_id: "kit-copy" },
+      keys: [
+        "clip:kit-copy|*",
+        "pattern:kit-copy/a|*",
+        "pattern:kit-copy/pb|*",
+        "step:kit-copy/a/0/kit-b.0|*",
+      ],
     },
     // The MIDI commands: an agent's proposal, the FCB1010 profile's rows, the
     // operator's accept and the removal that takes the mapping away again.
