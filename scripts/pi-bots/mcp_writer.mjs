@@ -169,6 +169,9 @@ function actorOf(opts = {}) {
   };
 }
 
+/** Reported instead of a remote-proxy block while the bot holds a live project share. */
+const REMOTE_SHARE_OFF_WARNING = "remote tools are off while this bot holds a project share";
+
 /** Keys that name WHO the caller is: an actor env or the engine-reserved bot-session marker. */
 const ACTOR_ENV_NAME = /^CROW_ACTOR_/;
 const ENGINE_ACTOR_KEYS = new Set(["CROW_BOT_SESSION"]);
@@ -579,8 +582,19 @@ export function writeBotMcp(def, opts = {}) {
   // confirmed feature_flags.remote_invocation is on (the DB read is done by the
   // caller — bridge/panel/CLI — since this module is DB-agnostic). Default
   // off: callers that don't pass remoteEnabled get byte-identical output.
+  //
+  // Phase 1 project shares: a bot holding a live share gets NO remote-proxy
+  // block. Its relayed calls arrive at the peer as a relayed actor, not as this
+  // bot, so the gate there is not the bot's (P2 adds signed identity
+  // forwarding). A live share blocks the proxy whether or not it is currently
+  // suspended, so a suspension can never be used to regain it; the decision is
+  // re-made on EVERY build, so a revoke restores the blocks at the next spawn.
+  // opts.holdsShare is false/absent for every caller without the DB at hand,
+  // which keeps the flag-off output byte-identical.
   let remoteWarnings = [];
-  if (opts.remoteEnabled) {
+  if (opts.holdsShare) {
+    remoteWarnings = [REMOTE_SHARE_OFF_WARNING];
+  } else if (opts.remoteEnabled) {
     const node = opts.node || process.execPath;
     const proxyPath = opts.proxyPath || join(import.meta.dirname, "crow-remote-proxy.mjs");
     // Item 46 PR-B: the proxy calls THIS gateway's loopback relay (same port
@@ -970,6 +984,15 @@ if (import.meta.url === "file://" + process.argv[1]) {
       const row = d
         .prepare("SELECT definition, display_name FROM pi_bot_defs WHERE bot_id=?")
         .get(arg);
+      // Phase 1 shares: this CLI has the DB open, so it can tell whether the bot holds a live share
+      // (the better-sqlite3 mirror of botHoldsLiveShare, servers/shared/project-bot-shares.js) and
+      // keep the remote-proxy blocks out of the config it writes. FAIL CLOSED: a read error counts
+      // as a share, so a broken read can never hand the proxy blocks back; only a DB that predates
+      // the table (`no such table`) is "no share".
+      let holdsShare = true;
+      try {
+        holdsShare = !!d.prepare("SELECT 1 AS x FROM project_bot_shares WHERE bot_id=? AND revoked_at IS NULL LIMIT 1").get(arg);
+      } catch (err) { holdsShare = !/no such table/i.test(String((err && err.message) || "")); }
       d.close();
       if (!row) {
         console.error("no such bot: " + arg);
@@ -983,7 +1006,7 @@ if (import.meta.url === "file://" + process.argv[1]) {
       // The bot's identity (botId + display name) rides along so every stdio
       // block carries the actor, as a bridge-written config does.
       // Never print the built config: it carries signed headers and tokens.
-      const res = writeBotMcp(def, { crowHome: resolveCrowHome(), botId: arg, displayName: row.display_name,
+      const res = writeBotMcp(def, { crowHome: resolveCrowHome(), botId: arg, displayName: row.display_name, holdsShare,
         write: mcpConfigDelivery() === "file" });
       const { json: _omit, ...printable } = res;
       console.log(JSON.stringify(printable, null, 2));

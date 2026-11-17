@@ -42,12 +42,12 @@ import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
 import { hasActorKey, presignActors } from "./actor-sig.mjs";
-import { withSkillTools, botGrantsServer, withServiceBlocks, withSatelliteBlocks } from "./bot-world.mjs";
+import { withSkillTools, botGrantsServer, withServiceBlocks, withSatelliteBlocks, shareWorkspaceRoots } from "./bot-world.mjs";
 import { crowDefaultsBlock, readWritingRules } from "./crow-defaults.mjs";
 import { turnScopeFor } from "./service-blocks.mjs";
 import { primeBareServerTools } from "./bare-server-tools.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
-import { botsDbPath } from "./instance-paths.mjs";
+import { botsDbPath, botsProjectsRoot } from "./instance-paths.mjs";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
@@ -372,6 +372,26 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
   // copy, before the skills are inlined and writeBotMcp runs, so the job's
   // MCP config and tool csv use it.
   const def = await withSkillTools(bot.def, { crowHome, log, repoSkillsDir });
+  // Phase 1 bot↔project shares. A job builds its OWN MCP config and its OWN PiRpc below, so it is
+  // the same read a channel turn does (bot-world.mjs): the live shares are read once here for the
+  // file roots, and holdsShare (below) keeps the remote-proxy blocks out of the job's config.
+  // The projects area (botsProjectsRoot, the anchor project creation writes under) is the allowlist
+  // a share's workspace_dir and each of its entries must really sit in; outside it, nothing.
+  // Never throws: no shares (or an older DB) is an empty list.
+  let jobShares = [];
+  try {
+    if (typeof bridge.loadBotShares === "function") jobShares = bridge.loadBotShares(job.bot_id) || [];
+  } catch { jobShares = []; }
+  const jobShareRoots = shareWorkspaceRoots(jobShares, { crowHome, projectsRoot: botsProjectsRoot(), log });
+  // holdsShare is NOT jobShares.length > 0: that list drives the file roots and leaves out
+  // archived/tombstoned projects, while the remote-proxy rule is "does the bot hold any live
+  // project_bot_shares row" — the same rule the channel world, the regen panel and the server-side
+  // share checks apply (bridge.mjs botHoldsLiveShareSync, fail closed on a read error). A bridge
+  // injected by a test without the mirror keeps the list's answer.
+  let holdsShare = jobShares.length > 0;
+  try {
+    if (typeof bridge.botHoldsLiveShareSync === "function") holdsShare = bridge.botHoldsLiveShareSync(job.bot_id) === true;
+  } catch { holdsShare = true; }
   const sessionDir = mkdtempSync(join(tmpdir(), "pibot-job-"));
   mkdirSync(join(sessionDir, "sessions"), { recursive: true });
   try {
@@ -397,6 +417,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     }
     try {
       const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {}, ...jobActor(job), displayName: bot.display_name,
+        holdsShare,
         write: mcpDelivery === "file",
         // Task 2.3: a sealed add-on's values may only reach a child on the config fd
         // (mcp-delivery.mjs) — hydrate there, never for a file.
@@ -459,6 +480,11 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
       def, sessionDir, resolved, piProvider, selfAuthoringDir: null,
       piSessionId: null, appendSystemPromptFile: sysFile,
       projectWorkspaceDir, mcpDelivery, mcpConfig, botId: job.bot_id,
+      // Share-derived file roots, fixed at this spawn (see the jobShares read above).
+      // extraWritePaths only when a `read_write` share contributed one: a present-but-empty list
+      // would rewrite write_paths and add the key to a def whose policy never carried it.
+      extraReadPaths: jobShareRoots.read,
+      ...(jobShareRoots.write.length ? { extraWritePaths: jobShareRoots.write } : {}),
       // The listing above is a snapshot of every bare entry's real tool names ({} when the
       // def has none): PiRpc's --tools assembly reads it, never the module cache.
       bareServerTools,

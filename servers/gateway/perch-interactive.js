@@ -950,6 +950,10 @@ export function createInteractiveEngine({
       tasksDbPath: null,
       projectSpace: null,
       projectMembers: [],
+      // Phase 1 shares: the world's projectShares as read at the last
+      // startChild (spawn and wake alike), carried into the dispatch brief so
+      // the composed header can list the projects this bot can reach.
+      projectShares: [],
       // Track 3 Task 7: safe-victim eviction's recency signal — the oldest
       // `lastEventAt` among awake/idle candidates is the eviction victim.
       // Stamped at session-object creation (so a freshly spawned, never-yet-
@@ -2791,6 +2795,7 @@ export function createInteractiveEngine({
     s.tasksDbPath = world.tasksDbPath;
     s.projectSpace = world.projectSpace;
     s.projectMembers = world.projectMembers;
+    s.projectShares = world.projectShares || [];
     // Open-anywhere B4: the world builder resolved the effective working
     // directory (the operator's choice if one was passed, else the world root).
     // Record it as the session's truth so snapshot()/stateEvent() report where
@@ -2961,9 +2966,20 @@ export function createInteractiveEngine({
       // (world.cwd differs from the world root), it is added too so the bot can
       // do real work there like bare pi did. A DEFAULT session (cwd === the
       // world root) keeps its exact pre-change write_paths — no widening.
-      extraWritePaths: (world.cwd && world.cwd !== world.sessionDir)
-        ? [outputsDir, world.cwd]
-        : [outputsDir],
+      // Phase 1 bot↔project shares (Task 10): the world's share-derived WRITE
+      // roots (a `read_write` share's workspace) are appended. A `read` share
+      // contributes none — its workspace is only in the spawn's read roots,
+      // carried through prep.piRpcOpts.extraReadPaths, so an open-anywhere
+      // session working outside the bot's home workspace gains no write reach
+      // from it. The boundary is per SPAWN: a share granted or revoked
+      // mid-session reaches pi's native file tools at the next spawn/wake,
+      // while the MCP tools are rechecked per call.
+      extraWritePaths: [
+        ...((world.cwd && world.cwd !== world.sessionDir)
+          ? [outputsDir, world.cwd]
+          : [outputsDir]),
+        ...(Array.isArray(world.extraWritePaths) ? world.extraWritePaths : []),
+      ],
     }));
     s.pi = pi;
     s.piSessionId = resume;
@@ -4116,6 +4132,7 @@ export function createInteractiveEngine({
         tasksDbPath: s.tasksDbPath,
         projectSpace: s.projectSpace,
         projectMembers: s.projectMembers,
+        projectShares: s.projectShares,
       };
     }
     emit(s, stateEvent(s));
@@ -4251,7 +4268,7 @@ export function createInteractiveEngine({
     let promptText = text;
     if (s.dispatchBrief) {
       const brief = s.dispatchBrief;
-      const header = S.projectContextBlock(brief.projectSpace, brief.projectMembers);
+      const header = S.projectContextBlock(brief.projectSpace, brief.projectMembers, brief.projectShares);
       promptText = header + "\n\n" + cardBriefBlock({
         cardId: brief.cardId,
         tasksDbPath: brief.tasksDbPath,

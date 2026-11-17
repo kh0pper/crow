@@ -1629,6 +1629,81 @@ export function loadProjectMembers(projectId) {
   c.close();
   return rows;
 }
+// Phase 1 bot↔project shares: the live (never revoked) shares this bot holds,
+// with each project's name and workspace_dir and the CURRENT suspension state —
+// the better-sqlite3 mirror of servers/shared/project-bot-shares.js, which
+// resolves the same tables through libsql (resolveBotAccess's live-share join +
+// outside-member counts, and botHoldsLiveShare's "any live row" rule). The
+// bridge opens its own client, so the SQL is repeated here rather than awaited
+// through the async store; the two must agree.
+//   - a project that is archived (`status='archived'`) or tombstoned
+//     (`archived_at` set) is not listed, so it contributes no access;
+//   - a bot whose pi_bot_defs row is gone holds nothing (the join drops it);
+//   - `suspended` = an active `project_members` row with a contact on EITHER
+//     side (the shared project or the bot's own), mirroring the store's rule.
+// Read on every world build: file-system reach follows a share at the NEXT
+// SPAWN, while the MCP tools are rechecked per call.
+// Never throws: an older DB without the table, or any read error, is "no
+// shares" (a bot must still be spawnable).
+export function loadBotShares(botId) {
+  if (botId == null || String(botId) === "") return [];
+  let c = null;
+  try {
+    c = db(CROW_DB);
+    const rows = c.prepare(`
+      SELECT s.project_id, s.level, p.name, p.workspace_dir,
+             (SELECT COUNT(*) FROM project_members m
+               WHERE m.project_id = s.project_id AND m.contact_id IS NOT NULL AND m.revoked_at IS NULL) AS project_outside,
+             (SELECT COUNT(*) FROM project_members m
+               WHERE m.project_id = d.project_id AND m.contact_id IS NOT NULL AND m.revoked_at IS NULL) AS home_outside
+        FROM project_bot_shares s
+        JOIN project_spaces p ON p.id = s.project_id
+        JOIN pi_bot_defs d ON d.bot_id = s.bot_id
+       WHERE s.bot_id = ? AND s.revoked_at IS NULL
+         AND p.archived_at IS NULL AND p.status <> 'archived'
+       ORDER BY s.project_id ASC
+    `).all(String(botId));
+    return rows.map((r) => {
+      const suspended = Number(r.project_outside) > 0 || Number(r.home_outside) > 0;
+      return {
+        project_id: Number(r.project_id),
+        level: String(r.level),
+        workspace_dir: r.workspace_dir == null ? null : String(r.workspace_dir),
+        name: r.name == null ? null : String(r.name),
+        suspended,
+      };
+    });
+  } catch {
+    return [];
+  } finally {
+    try { if (c) c.close(); } catch { /* already closed */ }
+  }
+}
+// Phase 1 bot↔project shares, the OTHER read: does the bot hold ANY live share? That is the rule
+// mcp_writer.mjs's CLI, the regen panel and servers/shared/project-bot-shares.js
+// (botHoldsLiveShare) all apply — one row of project_bot_shares with `revoked_at IS NULL`, whatever
+// the project's lifecycle state and whatever the bot def says. It is deliberately NOT
+// loadBotShares().length > 0: that list serves the file roots and the reachable-projects line, so
+// it leaves out archived/tombstoned projects and dead bot defs, while the remote-proxy rule is
+// about the share the bot holds. A first version derived holdsShare from it, so a share of an
+// archived project still minted remote-proxy blocks while the MCP side already refused it.
+// FAIL CLOSED: only a DB that predates the table (`no such table`) is "no share"; any other read
+// error reports a share, because a broken read must never hand the proxy blocks back.
+// Never throws: this runs inside a spawn.
+export function botHoldsLiveShareSync(botId) {
+  if (botId == null || String(botId) === "") return false;
+  let c = null;
+  try {
+    c = db(CROW_DB);
+    const row = c.prepare("SELECT 1 AS x FROM project_bot_shares WHERE bot_id=? AND revoked_at IS NULL LIMIT 1").get(String(botId));
+    return !!row;
+  } catch (err) {
+    const msg = err && err.message ? String(err.message) : "";
+    return !/no such table/i.test(msg);
+  } finally {
+    try { if (c) c.close(); } catch { /* already closed */ }
+  }
+}
 // M3b: appendAudit (mirror of the libsql helper in servers/shared/project-acl.js,
 // but using the better-sqlite3 client the bridge already opens). Best-effort —
 // failures must never break the primary action (the bot turn).
@@ -1664,7 +1739,30 @@ export function appendAuditBridge(projectId, opts) {
 // Track 3 Task 6: EXPORTED (additive — no rename) so the interactive engine's
 // dispatch brief (perch-interactive.js loadSeams()) can compose the same
 // header a channel turn gets, instead of growing a second copy.
-export function projectContextBlock(space, members) {
+//
+// Shares (Phase 1): the optional third argument is this spawn's
+// loadBotShares() list. A live, non-suspended share appends one reachable-
+// projects line naming each such project by name, id and level, plus the one
+// instruction line that says how to write there. With no shares — or only
+// suspended ones — the block is byte-identical to what it was before shares
+// existed: this header sits at the very start of a turn prompt, so an extra
+// line for the bots that hold no share would move every prompt's prefix.
+// A shared project's NAME is operator-typed text that lands at the start of a
+// prompt, so it is made one short line first (REACHABLE_NAME_MAX): control
+// characters and newlines become spaces, whitespace collapses, and the result
+// is capped. A name can then never open a line of its own, where a reader (or
+// a model) would see it as instructions rather than as a project title.
+const REACHABLE_INSTRUCTION = "  to write in a reachable project, name it explicitly with project_id (a write with no project_id lands in your home project)";
+const REACHABLE_NAME_MAX = 80;
+function reachableName(name) {
+  const flat = String(name == null ? "" : name)
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return flat.length > REACHABLE_NAME_MAX ? flat.slice(0, REACHABLE_NAME_MAX).trim() : flat;
+}
+export function projectContextBlock(space, members, shares = []) {
   if (!space) return "";
   const lines = [];
   lines.push("PROJECT: " + space.name + "  (id=" + space.id + ", slug=" + space.slug + ")");
@@ -1677,6 +1775,13 @@ export function projectContextBlock(space, members) {
       return who + " (" + m.role + ")";
     }).join(", ");
     lines.push("  members: " + summary);
+  }
+  const reachable = (Array.isArray(shares) ? shares : []).filter((sh) => sh && !sh.suspended);
+  if (reachable.length) {
+    const listed = reachable.map((sh) =>
+      reachableName(sh.name) + " (id=" + sh.project_id + ", " + (sh.level === "read_write" ? "read and write" : "read") + ")").join(" ; ");
+    lines.push("REACHABLE PROJECTS (name, id, level): " + listed);
+    lines.push(REACHABLE_INSTRUCTION);
   }
   return lines.join("\n");
 }
@@ -1989,7 +2094,7 @@ export async function handleInbound(opts) {
   // stability) and serves telegram/slack/fallback hints for the new adapters.
   const gatewayHint = resolveGatewayHint(gateway_type, gateway_thread_id);
   const projectHeader = (projectSpace
-    ? projectContextBlock(projectSpace, projectMembers)
+    ? projectContextBlock(projectSpace, projectMembers, world.projectShares)
     : (projectId != null ? "PROJECT #" + projectId + " (no space metadata)" : "PROJECT: (none)"))
     + gatewayHint;
 

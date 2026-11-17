@@ -254,15 +254,15 @@ export function createToolExecutor(opts = {}) {
   // Every other bound bot gets the plain actor, which the share rules bind.
   const boundBotIsVoice = !!(boundBotId && isVoiceBotId(boundBotId));
   const baseActor = boundBotId ? (boundBotIsVoice ? operatorVoiceActor() : { kind: "bot", id: boundBotId }) : undefined;
-  /** The base actor an in-process server of `category` is built with (the project servers build
-   *  all three the same way; every other category gets none). */
-  const baseActorFor = (category) => (category === "projects" || category === "memory" || category === "storage" ? baseActor : undefined);
+  /** The base actor an in-process server of `category` is built with (the project servers and the
+   *  sharing server build all four the same way; every other category gets none). */
+  const baseActorFor = (category) => (category === "projects" || category === "memory" || category === "storage" || category === "sharing" ? baseActor : undefined);
   /** The factory OPTIONS that actor means for `category` — the one place the actor→option mapping
-   *  lives: the projects and memory factories take `actor`, the storage factory takes `baseActor`.
-   *  getClient builds servers from this and from nothing else. */
+   *  lives: the projects and memory factories take `actor`, the storage and sharing factories take
+   *  `baseActor`. getClient builds servers from this and from nothing else. */
   const factoryOptionsFor = (category) => {
     if (baseActorFor(category) === undefined) return undefined;
-    return category === "storage" ? { baseActor }
+    return category === "storage" || category === "sharing" ? { baseActor }
       : category === "memory" || category === "projects" ? { actor: baseActor }
         : undefined;
   };

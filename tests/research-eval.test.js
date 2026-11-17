@@ -152,7 +152,29 @@ test("a seam that is not a function refuses (no silent fallback to the real fetc
 test("createFixtureServer serves the fixture search through the real crow_web_search tool", async () => {
   const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-  const server = createFixtureServer(join(H, "seam.db"), tinyCase, { actor: { kind: "bot", id: "eval" } });
+  // crow_web_search is project-neutral for a bot, but the share gate still reads the bot's own
+  // pi_bot_defs row (its home project) on every call, so a bare DB file is not enough: build the
+  // scratch DB from the real schema the way the share tests do, then seed the acting bot.
+  const seamDb = join(H, "seam.db");
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    cwd: ROOT, stdio: "pipe",
+    env: {
+      PATH: process.env.PATH,
+      HOME: join(H, "seam-home"),
+      CROW_HOME: join(H, "seam-crow"),
+      CROW_DATA_DIR: join(H, "seam-data"),
+      CROW_DB_PATH: seamDb,
+      CROW_DISABLE_INSTANCE_SYNC: "1",
+    },
+  });
+  const SeamDb = (await import("better-sqlite3")).default;
+  const seam = new SeamDb(seamDb);
+  try {
+    seam.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?, ?, '{}', 1)").run("eval", "eval");
+  } finally {
+    seam.close();
+  }
+  const server = createFixtureServer(seamDb, tinyCase, { actor: { kind: "bot", id: "eval" } });
   const [a, b] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "1" });
   await Promise.all([server.connect(b), client.connect(a)]);

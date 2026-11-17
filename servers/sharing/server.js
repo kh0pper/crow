@@ -4,16 +4,19 @@
  * Creates a configured McpServer with P2P sharing tools.
  * Transport-agnostic: used by both stdio (index.js) and HTTP (gateway).
  *
- * 33 MCP tools registered via tools/ modules:
- *   tools/contacts.js       — crow_generate_invite, crow_accept_invite, crow_list_contacts (#1-3)
- *   tools/share-inbox.js    — crow_share, crow_inbox (#4-5)
- *   tools/messaging.js      — crow_send_message, crow_create_message_group, crow_list_message_groups, crow_send_group_message (#6-9)
- *   tools/sharing-admin.js  — crow_revoke_access, crow_sharing_status (#10-11)
- *   tools/discovery.js      — crow_find_contacts, crow_set_discoverable (#12-13)
- *   tools/instances.js      — crow_discover_relays, crow_add_relay, crow_list_instances, crow_register_instance, crow_update_instance, crow_revoke_instance, crow_list_sync_conflicts (#14-20)
- *   tools/rooms-social.js   — crow_room_invite, crow_room_close, crow_voice_memo, crow_react (#21-24)
- *   tools/identity.js       — crow_identity_attest, crow_identity_verify, crow_identity_revoke, crow_identity_list (#25-28)
- *   tools/crosspost.js      — crow_list_crosspost_transforms, crow_crosspost, crow_crosspost_cancel, crow_crosspost_mark_published, crow_list_crossposts (#29-33)
+ * 37 MCP tools registered via tools/ modules (the register* calls below number them in
+ * registration order, which is a frozen contract):
+ *   tools/contacts.js       — crow_generate_invite, crow_accept_invite, crow_generate_short_invite,
+ *                             crow_accept_short_invite, crow_add_contact, crow_accept_bot_invite,
+ *                             crow_list_contacts (#1-7)
+ *   tools/share-inbox.js    — crow_share, crow_inbox (#8-9)
+ *   tools/messaging.js      — crow_send_message, crow_create_message_group, crow_list_message_groups, crow_send_group_message (#10-13)
+ *   tools/sharing-admin.js  — crow_revoke_access, crow_sharing_status (#14-15)
+ *   tools/discovery.js      — crow_find_contacts, crow_set_discoverable (#16-17)
+ *   tools/instances.js      — crow_discover_relays, crow_add_relay, crow_list_instances, crow_register_instance, crow_update_instance, crow_revoke_instance, crow_list_sync_conflicts (#18-24)
+ *   tools/rooms-social.js   — crow_room_invite, crow_room_close, crow_voice_memo, crow_react (#25-28)
+ *   tools/identity.js       — crow_identity_attest, crow_identity_verify, crow_identity_revoke, crow_identity_list (#29-32)
+ *   tools/crosspost.js      — crow_list_crosspost_transforms, crow_crosspost, crow_crosspost_cancel, crow_crosspost_mark_published, crow_list_crossposts (#33-37)
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -21,6 +24,8 @@ import { getSharedManagers } from "./managers.js";
 export { getInstanceSyncManager } from "./managers.js";
 import { createCloneBundleHelpers } from "./clone-bundle.js";
 import { initSharingRuntime } from "./boot.js";
+import { actorFromEnv, resolveCallActor } from "../research/actor.js";
+import { guardSharingServer } from "./bot-owner-only.js";
 import { registerContactsTools } from "./tools/contacts.js";
 import { registerShareInboxTools } from "./tools/share-inbox.js";
 import { registerMessagingTools } from "./tools/messaging.js";
@@ -69,33 +74,48 @@ export function createSharingServer(dbPath, options = {}) {
     options.instructions ? { instructions: options.instructions } : undefined
   );
 
+  // Who is calling, exactly as the projects, memory and storage servers resolve it: the
+  // construction-time base actor (a stdio server's process env, or the actor the gateway built the
+  // server with) is fixed here, and each call may only narrow it.
+  const baseActor = options.baseActor || actorFromEnv(process.env);
+  const callActor = (extra) => resolveCallActor(baseActor, extra);
+  // Read by tests (and the callers that build this server): who is calling.
+  server.sharing = { actor: baseActor, callActor };
+
+  // Every tool of this server is owner-only for a bot (servers/sharing/bot-owner-only.js): the
+  // wrapper is installed on `server.tool` BEFORE the register* calls below, so each handler checks
+  // the call's actor first and a bot never reaches one. It does not move a registration, so the
+  // order below stays the frozen contract it is.
+  guardSharingServer(server, { baseActor, onCallActor: options.onCallActor });
+
   // Registration order below is a FROZEN CONTRACT — clients see tools in
   // registration order; do not reorder these calls (tool-surface harness asserts it).
   // fullCtx fields: db/identity/peerManager/syncManager/nostrManager are tool-consumed;
   // instanceSyncManager + applyProjectCloneBundle ride along for shape-completeness (boot-only).
-  // tools/contacts.js — crow_generate_invite, crow_accept_invite, crow_list_contacts (#1-3)
+  // tools/contacts.js — crow_generate_invite, crow_accept_invite, crow_generate_short_invite,
+  // crow_accept_short_invite, crow_add_contact, crow_accept_bot_invite, crow_list_contacts (#1-7)
   const fullCtx = { db, identity, peerManager, syncManager, instanceSyncManager, nostrManager, buildProjectCloneBundle, applyProjectCloneBundle };
   registerContactsTools(server, fullCtx);
 
-  // tools/share-inbox.js — crow_share, crow_inbox (#4-5)
+  // tools/share-inbox.js — crow_share, crow_inbox (#8-9)
   registerShareInboxTools(server, fullCtx);
 
-  // tools/messaging.js — crow_send_message, crow_create_message_group, crow_list_message_groups, crow_send_group_message (#6-9)
+  // tools/messaging.js — crow_send_message, crow_create_message_group, crow_list_message_groups, crow_send_group_message (#10-13)
   registerMessagingTools(server, fullCtx);
 
-  // tools/sharing-admin.js — crow_revoke_access, crow_sharing_status (#10-11)
+  // tools/sharing-admin.js — crow_revoke_access, crow_sharing_status (#14-15)
   registerSharingAdminTools(server, fullCtx);
 
-  // tools/discovery.js — crow_find_contacts, crow_set_discoverable (#12-13)
+  // tools/discovery.js — crow_find_contacts, crow_set_discoverable (#16-17)
   registerDiscoveryTools(server, fullCtx);
 
-  // tools/instances.js — crow_discover_relays, crow_add_relay, crow_list_instances, crow_register_instance, crow_update_instance, crow_revoke_instance, crow_list_sync_conflicts (#14-20)
+  // tools/instances.js — crow_discover_relays, crow_add_relay, crow_list_instances, crow_register_instance, crow_update_instance, crow_revoke_instance, crow_list_sync_conflicts (#18-24)
   registerInstancesTools(server, fullCtx);
 
-  // tools/rooms-social.js — crow_room_invite, crow_room_close, crow_voice_memo, crow_react (#21-24)
+  // tools/rooms-social.js — crow_room_invite, crow_room_close, crow_voice_memo, crow_react (#25-28)
   registerRoomsSocialTools(server, fullCtx);
 
-  // --- Prompts --- (placed here to preserve original insertion order: after #21-24, before #25-28)
+  // --- Prompts --- (placed here to preserve original insertion order: after #25-28, before #29-32)
 
   server.prompt(
     "sharing-guide",
@@ -134,10 +154,10 @@ export function createSharingServer(dbPath, options = {}) {
     }
   );
 
-  // tools/identity.js — crow_identity_attest, crow_identity_verify, crow_identity_revoke, crow_identity_list (#25-28)
+  // tools/identity.js — crow_identity_attest, crow_identity_verify, crow_identity_revoke, crow_identity_list (#29-32)
   registerIdentityTools(server, fullCtx);
 
-  // tools/crosspost.js — crow_list_crosspost_transforms, crow_crosspost, crow_crosspost_cancel, crow_crosspost_mark_published, crow_list_crossposts (#29-33)
+  // tools/crosspost.js — crow_list_crosspost_transforms, crow_crosspost, crow_crosspost_cancel, crow_crosspost_mark_published, crow_list_crossposts (#33-37)
   registerCrosspostTools(server, fullCtx);
 
   return server;
