@@ -991,6 +991,28 @@ const STYLES = `
   }
   .studio .st-pad:hover { border-color: var(--st-edge); }
   .studio .st-pad.st-pad-sel { border-color: #FFFFFF; }
+  /* The live lights (G9). A pad the engine reports sounding, looping or held
+     keeps a colour of its own, and a hit flashes it for a moment. Only classes
+     and one custom property change, so the button the finger is on is never
+     rebuilt. The hit's strength is --hit (0..1, the velocity over 127). */
+  .studio .st-pad.st-pad-on { background: #3A3222; }
+  .studio .st-pad.st-pad-loop { background: #1E2C3A; }
+  .studio .st-pad.st-pad-held { background: #3A2A1C; }
+  .studio .st-pad.st-pad-hit {
+    background: #F2A541; border-color: #FFFFFF;
+    animation: st-pad-flash 180ms ease-out;
+  }
+  @keyframes st-pad-flash {
+    0% { box-shadow: inset 0 0 0 4px rgba(255, 255, 255, var(--hit, 0.6)); }
+    100% { box-shadow: inset 0 0 0 4px rgba(255, 255, 255, 0); }
+  }
+  /* A browser asked for less motion gets the colour and no animation at all. */
+  @media (prefers-reduced-motion: reduce) {
+    .studio .st-pad.st-pad-hit {
+      animation: none; background: #F2A541;
+      box-shadow: inset 0 0 0 4px rgba(255, 255, 255, var(--hit, 0.6));
+    }
+  }
   .studio .st-pad-num {
     font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px;
     font-weight: 600; color: var(--st-muted);
