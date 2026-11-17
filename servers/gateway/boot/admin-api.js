@@ -268,8 +268,30 @@ export async function mountAdminApi(app, deps) {
         const soon = () => { clearTimeout(timer); timer = setTimeout(run, 2000); timer.unref?.(); };
         setProviderChangeHook(soon);
         onCloudConsentChange(soon); // "Let bots use this provider" reaches pi in seconds, not the hourly tick
-        setInterval(run, reconcileIntervalMs()).unref(); // replicated changes reach pi within the hour
+        setInterval(run, reconcileIntervalMs()).unref(); // replicated changes reach pi within the hour; rows written by ANOTHER process are the fingerprint watch's job (below)
+        // setProviderChangeHook only sees writes made in THIS process, and the
+        // interval above is an hour — a row written by a script or CLI (a
+        // second connection to the same providers table) would stay invisible
+        // to pi until then. One cheap aggregate per tick closes that gap.
+        const { createProviderChangeWatch } = await import("../../shared/provider-change-watch.js");
+        const { providersFingerprint } = await import("../../shared/providers-db.js");
+        const watchEvery = Number(process.env.CROW_PI_MODELS_WATCH_MS);
+        const watch = createProviderChangeWatch({
+          // One short-lived DB client per tick, always closed: a per-tick
+          // client keeps no handle open between ticks.
+          fingerprintFn: async () => {
+            const db = createDbClient();
+            try { return await providersFingerprint(db); }
+            finally { try { db.close(); } catch { /* already closed */ } }
+          },
+          onChange: soon,
+          intervalMs: Number.isFinite(watchEvery) && watchEvery >= 1000 ? watchEvery : 10000,
+        });
+        // The baseline is taken BEFORE run(), so a row written while run() is in
+        // flight is a change the first tick reports, not one folded into it.
+        await watch.poll();
         await run();
+        watch.start();
       } else {
         console.log("[pi-models-sync] off on this host (no pi here, not the primary CROW_HOME, or CROW_PI_MODELS_SYNC=0)");
       }

@@ -95,6 +95,11 @@ import { startParentWatch } from "./parent-watch.js";
 // toward the launcher's crash threshold. Static import so a shutdown handler
 // never has to await a dynamic one mid-exit.
 import { markPlanned } from "./boot-guard-state.js";
+// The process-wide "our own shutdown has begun" marker (Perch's interrupted
+// exits). Static and side-effect free: gracefulShutdown sets it synchronously
+// as its first statement, so no cold module load can lose the race with a
+// child's exit.
+import { markGatewayStopping } from "../shared/gateway-stopping.js";
 import { generateInstructions } from "../shared/instructions.js";
 // Add-on secrets (PR1): this process is the one allowed to unseal a listed add-on secret into
 // a child's env. A module shared with an add-on child calls processUnsealer() and gets null
@@ -949,6 +954,10 @@ function closeAndWait(listener) {
 }
 
 async function gracefulShutdown() {
+  // A child the gateway's own shutdown SIGTERMs is an interruption, not a
+  // crash: say so before anything else, so a per-session engine that sees the
+  // signal reports it that way instead of as an unexpected exit.
+  markGatewayStopping();
   if (shuttingDown) return;
   shuttingDown = true;                                           // step 1
   // SIGTERM/SIGINT is an operator or service-manager stop, never a crash.

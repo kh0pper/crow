@@ -47,6 +47,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { jsonError } from "./_error.js";
 import { stripSecrets } from "../../shared/secret-detect.js";
+import { maskSecrets } from "../../shared/secret-mask.js";
 import { isBodyParserError } from "../body-error-handler.js";
 import { openDeliveredDir, openDeliveredFile, unlinkDelivered } from "../../shared/perch-delivered.js";
 import { SHOT_KEEP } from "../browser-tile/shots.js";
@@ -348,11 +349,17 @@ function mapEngineError(res, err) {
   const mapped = code && Object.hasOwn(ERROR_MAP, code) ? ERROR_MAP[code] : null;
   // `detail` is the engine's human reason (pi_gone: pi's own exit message,
   // e.g. an unknown provider) so the drawer can say WHY, not just "pi_gone".
+  // `interrupted` rides along when the child died because the gateway was
+  // restarting — the drawer then says that instead of quoting pi's exit text.
   if (mapped) {
-    const detail = err && typeof err.detail === "string" && err.detail ? { detail: err.detail.slice(0, 1000) } : undefined;
-    return jsonError(res, mapped[0], mapped[1], detail);
+    const extra = {};
+    if (err && typeof err.detail === "string" && err.detail) extra.detail = err.detail.slice(0, 1000);
+    if (err && err.interrupted === true) extra.interrupted = true;
+    return jsonError(res, mapped[0], mapped[1], Object.keys(extra).length ? extra : undefined);
   }
-  return jsonError(res, 500, String((err && err.message) || err));
+  // Unrecognized: the message can quote pi's stderr, a provider error body or
+  // a path, so it is masked and capped like every other display string here.
+  return jsonError(res, 500, maskSecrets(String((err && err.message) || err)).slice(0, 300));
 }
 
 /** Parse a request body's `card_id` into a strict integer, or null if it is

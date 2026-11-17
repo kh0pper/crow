@@ -406,6 +406,23 @@ test("POST /bots/:id/interactive maps an unrecognized engine throw to a plain 50
   assert.equal(body.error, "disk full");
 });
 
+test("a 500 body is masked and capped: a token-shaped secret never reaches the client, and a long message is cut at 300", async () => {
+  // An unrecognized throw is the one place an engine's own message is echoed
+  // to the client. pi's stderr and a provider's error body can carry a key, so
+  // the body goes through the display mask first.
+  const token = "sk-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4";
+  engineImpl.spawn = async () => { throw new Error("upstream refused key " + token + " for /v1/models"); };
+  const { status, body } = await postJson("/bots/chatty/interactive", {});
+  assert.equal(status, 500);
+  assert.equal(body.error.includes(token), false, "the token is masked out");
+  assert.ok(body.error.includes("[REDACTED]"), "masked with the display marker");
+
+  engineImpl.spawn = async () => { throw new Error("y".repeat(1000)); };
+  const long = await postJson("/bots/chatty/interactive", {});
+  assert.equal(long.status, 500);
+  assert.equal(long.body.error.length, 300, "the message is capped at 300 characters");
+});
+
 test("an err.code that collides with Object.prototype ('constructor') still maps to a clean 500 (fix-round F2)", async () => {
   // Pre-fix, `ERROR_MAP[err.code]` walked the prototype chain: code
   // "constructor" yielded Object's constructor function (truthy, not an
@@ -467,6 +484,22 @@ test("POST /interactive/:sid/message: pi_gone carries the engine's detail (pi's 
   engineImpl.message = async () => { throw engineErr("turn_in_progress"); };
   const r2 = await postJson("/interactive/sess-1/message", { message: "hi" });
   assert.equal(r2.body.detail, undefined, "no detail key when the engine gave none");
+});
+
+test("POST /interactive/:sid/message: a pi_gone interrupted by a gateway restart carries interrupted:true", async () => {
+  engineImpl.message = async () => {
+    throw Object.assign(engineErr("pi_gone"), { detail: "pi exited (code -1) before responding", interrupted: true });
+  };
+  const r = await postJson("/interactive/sess-1/message", { message: "hi" });
+  assert.equal(r.status, 409);
+  assert.deepEqual(r.body, { error: "pi_gone", detail: "pi exited (code -1) before responding", interrupted: true });
+
+  engineImpl.message = async () => {
+    throw Object.assign(engineErr("pi_gone"), { detail: "pi exited (code 1) before responding" });
+  };
+  const r2 = await postJson("/interactive/sess-1/message", { message: "hi" });
+  assert.equal(r2.status, 409);
+  assert.equal(Object.hasOwn(r2.body, "interrupted"), false, "a plain death is not labelled an interruption");
 });
 
 test("POST /interactive/:sid/message (strand 2): tool_budget is a 422 carrying the engine's refusal text", async () => {

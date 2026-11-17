@@ -999,6 +999,38 @@ test("pi_exit error frame alone (the 202 raced the death) still puts the reason 
   assert.ok(transcriptTexts(hub).some((t) => t.startsWith("Bot could not start:")));
 });
 
+test("a restart interruption is named as one — not 'Bot could not start' and not pi's exit text — via the stream frame and via the pi_gone 409", async () => {
+  const EXIT_TEXT = "pi exited (code -1) before responding — pi said: (no stderr)";
+  // The stream's pi_exit frame.
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/message": () => makeResponse(202, { turnId: "t1" }) }) });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "hi";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  FakeEventSource.instances[0]._serverFrame("error", { text: EXIT_TEXT, reason: "pi_exit", interrupted: true });
+  await new Promise((r) => setTimeout(r, 0));
+  let rows = transcriptTexts(hub);
+  assert.ok(rows.includes("turn interrupted by gateway restart"), "the note is that sentence alone");
+  assert.ok(!rows.some((t) => t.includes("Bot could not start")), "not a failed start — the bot was running");
+  assert.ok(!rows.some((t) => t.includes("code -1")), "pi's raw exit text is not what the operator reads");
+  // The same death again: the note is per-send, not per-frame.
+  FakeEventSource.instances[0]._serverFrame("error", { text: EXIT_TEXT, reason: "pi_exit", interrupted: true });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(transcriptTexts(hub).filter((t) => t === "turn interrupted by gateway restart").length, 1, "one note per send");
+
+  // The POST's own pi_gone, flagged the same way.
+  const hub2 = await mountHub({
+    fetchImpl: stdFetch({ "/message": () => makeResponse(409, { error: "pi_gone", detail: EXIT_TEXT, interrupted: true }) }),
+  });
+  await openChatSession(hub2);
+  hub2.els["perch-input"].value = "hi";
+  hub2.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  rows = transcriptTexts(hub2);
+  assert.ok(rows.includes("turn interrupted by gateway restart"), "a pi_gone 409 reads the same");
+  assert.ok(!rows.some((t) => t.includes("Bot could not start")));
+});
+
 test("an exit with NO send outstanding (idle reap / OOM) stays on the Activity rail — no 'could not start' in the chat, nothing replayed", async () => {
   const hub = await mountHub({ fetchImpl: stdFetch() });
   await openChatSession(hub);
@@ -2231,6 +2263,30 @@ test("F6: a 403 and a shapeless 200 report on the launcher too", async () => {
     assert.equal(hub.els["perch-launch-note"].textContent, expected);
     assert.equal(hub.els["perch-list-body"].children.length, 3, "rows survive: " + expected);
   }
+});
+
+test("F6: a refused spawn shows WHY beside the launcher; a response with no reason keeps the bare sentence", async () => {
+  const MODEL = 'model "crow-c-nowhere/m1" is not available to the bot engine';
+  for (const [resp, expected] of [
+    [makeResponse(400, { error: "bad_request", detail: MODEL }), "Could not start a session. " + MODEL],
+    [makeResponse(422, { error: "tool_budget", detail: MODEL }), "Could not start a session. " + MODEL],
+    [makeResponse(500, { error: "boom" }), "Could not start a session. boom"],
+  ]) {
+    const hub = await mountHub({
+      fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/interactive": () => resp }),
+    });
+    hub.els["perch-new"].onclick();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(hub.els["perch-launch-note"].textContent, expected);
+  }
+
+  // A dropped connection carries no body at all: the bare sentence, nothing else.
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/interactive": () => Promise.reject(new Error("network down")) }),
+  });
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-launch-note"].textContent, "Could not start a session.");
 });
 
 // ---------------------------------------------------------------------------

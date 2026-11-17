@@ -178,6 +178,7 @@ import { storeShot } from "./browser-tile/shots.js";
 import { createTakeOver as createBrowserTakeOver, createAppTakeOvers } from "./browser-tile/take-over.js";
 import { appTileInfo, desktopApp, takeOverOffered, appLeaseDir } from "./apps/app-tile.js";
 import { getSecretRequest, expireSessionRequests, forgetSession as forgetSecretSession } from "./secrets/request-store.js";
+import { isGatewayStopping } from "../shared/gateway-stopping.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -741,6 +742,9 @@ export function createInteractiveEngine({
   const adopting = new Map();
   let seams = null;
   let leaseTimer = null;
+  // True from the moment stopAll() begins: a child that dies after that was
+  // killed by the gateway going down, not by a crash.
+  let shuttingDown = false;
 
   // ---- env knobs, all read at call time -----------------------------------
   const numEnv = (key, dflt) => {
@@ -2859,7 +2863,9 @@ export function createInteractiveEngine({
       // with this engine's env like every other Perch mapping (never
       // process.env), and refuse a row the bot engine cannot run.
       const piProvider = piProviderIdHere(prep.resolved.provider, { env: piEnv() });
-      if (piProvider == null) throw engineError("bad_request");
+      if (piProvider == null) {
+        throw engineError("bad_request", { detail: "model \"" + prep.resolved.provider + "/" + prep.resolved.model + "\" is not available to the bot engine" });
+      }
       prep.piRpcOpts = Object.assign({}, prep.piRpcOpts, { resolved: prep.resolved, piProvider });
     }
     s.resolved = prep.resolved;
@@ -3049,6 +3055,7 @@ export function createInteractiveEngine({
     if (s.pi !== pi) return pi;
     s.state = "awake";
     s.lastError = null;
+    s.exitInterrupted = false;
     writeLeases();
     return pi;
   }
@@ -3062,6 +3069,13 @@ export function createInteractiveEngine({
       if (s.pi !== pi) return;                       // an expected close
       const deadTurn = s.turn;                       // strand 1: the frame names it
       const deferred = s.overflowTurn;               // review M1: dies with the child too
+      // A gateway restart kills the child with SIGTERM: that exit is not a
+      // crash and the operator is told so. Only the two shutdown paths say
+      // the gateway is stopping — stopAll() on this engine, or
+      // shared/gateway-stopping.js's markGatewayStopping() from the process's
+      // own shutdown — because a reaper's or a hand-typed SIGTERM leaves the
+      // same signal on the child and is still an unexpected exit.
+      const interrupted = shuttingDown || (isGatewayStopping() && pi && pi._exitSignal === "SIGTERM");
       let message = "pi exited unexpectedly";
       try {
         if (typeof pi._exitError === "function") message = pi._exitError("responding").message;
@@ -3081,11 +3095,12 @@ export function createInteractiveEngine({
       dropAsk(s);                                    // r1 S4 (+ PR-A dance state; 2026-10-20 group)
       expireSecretCard(s);                           // credential card: dies with its child
       s.lastError = message;
+      s.exitInterrupted = interrupted;
       // Operators read the gateway log, not the drawer: without this line a
       // child that dies at spawn (an unknown provider) left only "world
       // rebuilt / model warm" behind, every time.
       // Capped: pi's stderr tail can echo provider error bodies.
-      log(s.sessionId + ": pi exited: " + String(message).slice(-2000));
+      log(s.sessionId + ": pi exited: " + String(message).slice(-2000) + (interrupted ? " (interrupted by a gateway restart)" : ""));
       if (s.state !== "stopped") s.state = "hibernating";
       // Track 3 Task 6: a card claim outlives hibernation (occupancy rule
       // (c)) — release it ONLY in the branch where this exit lands on a
@@ -3100,7 +3115,8 @@ export function createInteractiveEngine({
       writeLeases();
       // reason "pi_exit": the drawer shows this one IN the chat (the operator's
       // message went nowhere), not only on the Activity rail.
-      emit(s, { type: "error", text: message, reason: "pi_exit", turnId: deadTurn ? deadTurn.id : null });
+      emit(s, { type: "error", text: message, reason: "pi_exit", turnId: deadTurn ? deadTurn.id : null,
+        ...(interrupted ? { interrupted: true } : {}) });
       emit(s, stateEvent(s));
       writeRow(s, { status: "waiting-user" }).catch(() => {});
       finishBrowser(s, deadTurn);                    // live browser tile: the child is gone
@@ -3936,7 +3952,8 @@ export function createInteractiveEngine({
     s.lastError = message;
     turnEnded(s, turn, "refused", message);          // voice hand-off
     writeLeases();
-    emit(s, { type: "error", text: message, reason: "pi_exit" });
+    emit(s, { type: "error", text: message, reason: "pi_exit",
+      ...(s.exitInterrupted ? { interrupted: true } : {}) });
     emit(s, stateEvent(s));
     writeRow(s, { status: "waiting-user" }).catch(() => {});
     return true;
@@ -4084,6 +4101,7 @@ export function createInteractiveEngine({
         finally { try { bdb.close(); } catch { /* closed */ } }
       }
     } catch (e) {
+      log(s.sessionId + ": spawn failed: " + (e && e.code ? e.code + " " : "") + String((e && (e.detail || e.message)) || e).slice(-1000));
       sessions.delete(s.sessionId);                  // release the reservation
       if (cid != null) releaseCard(cid, s.sessionId); // …and the card claim
       // I-3 discipline: detach the child BEFORE closing (attachExit's
@@ -4251,11 +4269,11 @@ export function createInteractiveEngine({
     clearIdle(s);
     // D1: the child may already be gone (killed the instant before this call
     // landed) — refuse honestly rather than null-deref s.pi below.
-    if (refuseIfPiGone(s, turn)) throw engineError("pi_gone", { detail: s.lastError });
+    if (refuseIfPiGone(s, turn)) throw engineError("pi_gone", { detail: s.lastError, interrupted: !!s.exitInterrupted });
     refuseIfOverBudget(S, s, turn);
     turn.statsBefore = await s.pi.getSessionStats().catch(() => null);
     // D1: …or it died WHILE that stats call was in flight.
-    if (refuseIfPiGone(s, turn)) throw engineError("pi_gone", { detail: s.lastError });
+    if (refuseIfPiGone(s, turn)) throw engineError("pi_gone", { detail: s.lastError, interrupted: !!s.exitInterrupted });
     armStall(s);
     emit(s, stateEvent(s));
     // Track 3 Task 6: the FIRST message() after a card-bound spawn composes
@@ -4323,7 +4341,7 @@ export function createInteractiveEngine({
     if (!message.trim()) throw engineError("empty_message");
     if (!s.turn) throw engineError("no_turn");
     const alive = !!(s.pi && s.pi._exitCode == null);
-    if (!alive) throw engineError("pi_gone", { detail: s.lastError || "pi exited" });
+    if (!alive) throw engineError("pi_gone", { detail: s.lastError || "pi exited", interrupted: !!s.exitInterrupted });
     s.pi.send({ type: "steer", message });
     emit(s, { type: "log", text: "steered: " + message.slice(0, 200) });
     return { ok: true };
@@ -4517,7 +4535,9 @@ export function createInteractiveEngine({
       // A bare built-in PiRpc would refuse is refused here, awake or asleep,
       // before any warm.
       const piProvider = piProviderIdHere(provider, { env: piEnv() });
-      if (piProvider == null) throw engineError("bad_request");
+      if (piProvider == null) {
+        throw engineError("bad_request", { detail: "model \"" + provider + "/" + modelId + "\" is not available to the bot engine" });
+      }
       if (s.pi) {
         // Warm BEFORE the switch (spec: pi-lab's local-models starter
         // self-disables when a bot spawns it, so the provider must already be
@@ -5202,6 +5222,7 @@ export function createInteractiveEngine({
    * ignoring SIGTERM must not hold the gateway's shutdown open.
    */
   async function stopAll({ timeoutMs = DEFAULT_STOP_ALL_MS } = {}) {
+    shuttingDown = true;
     stopLeaseRefresh();
     const live = [...sessions.values()].filter((s) => s.pi);
     // Item 46 PR-B: a spawn still before its post-spawn row write has no child
