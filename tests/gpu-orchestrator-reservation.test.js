@@ -54,6 +54,7 @@ beforeEach(() => {
   orch._setReservationReaderForTest(null);
   orch._setLiveMemReaderForTest(null);
   orch._resetReservationNoticesForTest();
+  orch._resetAdmittedForTest();
   // The default notice sender writes a notification row through createDbClient().
   // Every test here trips a notice (deferred residency, refusals), so the sender
   // MUST be stubbed for the whole file — run raw (outside scripts/run-suite.mjs's
@@ -67,6 +68,7 @@ afterEach(() => {
   orch._setReservationReaderForTest(null);
   orch._setLiveMemReaderForTest(null);
   orch._setReservationNoticeSenderForTest(null);
+  orch._resetAdmittedForTest();
   if (ORIGINAL_PROFILE_PATH === undefined) delete process.env.CROW_GPU_HOST_PROFILE_PATH;
   else process.env.CROW_GPU_HOST_PROFILE_PATH = ORIGINAL_PROFILE_PATH;
   if (profileDir) rmSync(profileDir, { recursive: true, force: true });
@@ -226,4 +228,110 @@ test("beside hold: refusal is a ReservedError with reason gpu_job_beside", async
   );
   assert.equal(started, 0, "nothing was started");
   assert.ok(logs.some((l) => /refusing to start crow-chat/.test(l)), logs.join("\n"));
+});
+
+// --- admitted-peak accounting: growth the gateway caused is not the job's ---
+//
+// `startDecision` subtracts the declared peaks of the providers this gateway
+// started beside the hold from the live growth, so their footprint is not read
+// as the job's own progress. The tally is keyed by the hold key.
+
+const HOLD_A = Object.freeze({
+  owner: "gpujob-a", reason: "render batch", started_at: "2026-09-04T20:00:00.000Z", expires_at: "2026-09-04T23:00:00.000Z",
+  allow: ["crow-embed"], corrupt: false, key: "gpujob-a@2026-09-04T20:00:00.000Z",
+  mode: "beside", kind: "gpu-job", booking_id: "bk_00000000000a", job_id: "job_a",
+  gtt_mb: 40000, host_ram_mb: 30000, hip_procs: 2,
+  gtt_used_at_activation_mb: 60000, mem_available_at_activation_mb: 100000,
+});
+// A second hold: same numbers, different key (it began half an hour later).
+const HOLD_B = Object.freeze({
+  ...HOLD_A,
+  owner: "gpujob-b", started_at: "2026-09-04T20:30:00.000Z",
+  key: "gpujob-b@2026-09-04T20:30:00.000Z", booking_id: "bk_00000000000b", job_id: "job_b",
+});
+const LIVE_BESIDE = Object.freeze({ gttUsedMb: 75000, gttTotalMb: 131072, memAvailableMb: 96000 });
+const cfgBeside = {
+  providers: {
+    "crow-small": { bundleId: "llamacpp-vulkan-qwen3-embed", baseUrl: "http://127.0.0.1:8005/v1", host: "local" },
+    "crow-chat": { bundleId: "llamacpp-vulkan-qwen36-35b-a3b", baseUrl: "http://127.0.0.1:8003/v1", host: "local" },
+  },
+};
+
+/** An acquireProvider's opts that start (counting into `started`) and warm up. */
+function besideOpts(started) {
+  return {
+    cfg: cfgBeside, probeReadyFn: notReady, bundleUpFn: async () => { started.push(1); },
+    waitForReadyFn: async () => true, bundleStopFn: async () => {},
+  };
+}
+
+test("admitted peaks are per hold key and reset when the hold changes", async () => {
+  // 10000 mb of prod peak beside the job, and the job's own booking is 40000.
+  useHostProfile({
+    "crow-small": { gtt_peak_mb: 10000, host_ram_peak_mb: 1000 },
+    "crow-chat": { gtt_peak_mb: 20000, host_ram_peak_mb: 1000 },
+  });
+  orch._setLiveMemReaderForTest(() => ({ ...LIVE_BESIDE, at: Date.now() }));
+  const started = [];
+
+  // Under hold A the small provider (10000) fits and is admitted.
+  orch._setReservationReaderForTest(() => HOLD_A);
+  assert.equal(await orch.acquireProvider("crow-small", besideOpts(started)), true);
+  assert.equal(started.length, 1);
+
+  // Its peak is added back out, so the job still has 35000 of its booking to
+  // take: 75000 + 35000 + 20000 does not fit. Without the tally (25000
+  // remaining) this start would be admitted.
+  await assert.rejects(
+    () => orch.acquireProvider("crow-chat", { ...besideOpts(started), bundleUpFn: mustNotStart }),
+    (e) => e instanceof ReservedError && e.reason === "gpu_job_beside",
+  );
+  assert.equal(started.length, 1, "the refused start never reached bundleUp");
+
+  // A different hold key starts from an empty tally: the same start is allowed,
+  // which also prunes hold A's entries (only the live key's map is kept).
+  orch._setReservationReaderForTest(() => HOLD_B);
+  assert.equal(await orch.acquireProvider("crow-chat", besideOpts(started)), true);
+
+  // Back under hold A the entries recorded before B went live are gone, so the
+  // start it refused above is admitted again.
+  orch._setReservationReaderForTest(() => HOLD_A);
+  assert.equal(await orch.acquireProvider("crow-chat", besideOpts(started)), true);
+
+  // The seam forgets everything.
+  orch._resetAdmittedForTest();
+  assert.equal(await orch.acquireProvider("crow-chat", besideOpts(started)), true);
+});
+
+test("a job over its booking is refused and the over-budget line is logged once", async () => {
+  useHostProfile({
+    "crow-chat": { gtt_peak_mb: 1000, host_ram_peak_mb: 1000 },
+  });
+  // 105000 - 60000 = 45000 mb of growth against a 40000 mb booking.
+  orch._setLiveMemReaderForTest(() => ({
+    gttUsedMb: 105000, gttTotalMb: 131072, memAvailableMb: 97000, at: Date.now(),
+  }));
+  orch._setReservationReaderForTest(() => HOLD_A);
+  const started = [];
+  const cfgTwo = {
+    providers: {
+      "crow-chat": { bundleId: "llamacpp-vulkan-qwen36-35b-a3b", baseUrl: "http://127.0.0.1:8003/v1", host: "local" },
+      "crow-embed": { bundleId: "llamacpp-vulkan-qwen3-embed", baseUrl: "http://127.0.0.1:8005/v1", host: "local" },
+    },
+  };
+  const opts = { ...besideOpts(started), cfg: cfgTwo };
+  for (let i = 0; i < 2; i++) {
+    await assert.rejects(
+      () => orch.acquireProvider("crow-chat", { ...opts, bundleUpFn: mustNotStart }),
+      (e) => e instanceof ReservedError && e.reason === "gpu_job_beside",
+    );
+  }
+  assert.equal(started.length, 0);
+  assert.equal(
+    logs.filter((l) => /gpu job exceeded its booked footprint/.test(l)).length, 1,
+    logs.join("\n"),
+  );
+  // The allow list is still exempt from the over-budget refusal.
+  assert.equal(await orch.acquireProvider("crow-embed", opts), true);
+  assert.equal(started.length, 1);
 });

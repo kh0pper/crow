@@ -673,6 +673,68 @@ test("during the job's load phase a 35B-sized start is refused although live GTT
   );
 });
 
+test("a prod provider started beside an active hold doesn't eat the hold's remainder", () => {
+  // The job booked 40000 mb of GTT and began when 60000 mb were already in use.
+  const r = besideReservation({
+    gtt_mb: 40000, host_ram_mb: 30000,
+    gtt_used_at_activation_mb: 60000, mem_available_at_activation_mb: 100000,
+  });
+  // A prod provider was admitted beside it (declared peak 10000) and the job
+  // itself has taken 5000 since activation: 60000 + 10000 + 5000 = 75000.
+  const admitted = { gtt_peak_mb: 10000, host_ram_peak_mb: 4000 };
+  const live = { gttUsedMb: 75000, gttTotalMb: 131072, memAvailableMb: 96000, at: T0 };
+  const budget = live.gttTotalMb - PROFILE.safety_margin_mb; // 122880
+  // The job's own growth is 5000, so 35000 mb of its booking is still to come.
+  const fits = { gtt_peak_mb: budget - live.gttUsedMb - 35000, host_ram_peak_mb: 1000 };
+  assert.equal(fits.gtt_peak_mb, 12880);
+  assert.deepEqual(
+    startDecision(r, "crow-chat", { peak: fits, live, profile: PROFILE, admitted, now: T0 }),
+    { allowed: true, reason: null },
+  );
+  assert.deepEqual(
+    startDecision(r, "crow-chat", { peak: { ...fits, gtt_peak_mb: fits.gtt_peak_mb + 1 }, live, profile: PROFILE, admitted, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+  // Without `admitted` the prod provider's growth is charged to the job, which
+  // then looks like it has only 25000 still to come: this peak would be let
+  // through although the job's booking leaves 10000 mb less room than that.
+  const tooBig = { gtt_peak_mb: 20000, host_ram_peak_mb: 1000 };
+  assert.deepEqual(
+    startDecision(r, "crow-chat", { peak: tooBig, live, profile: PROFILE, admitted, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+  assert.deepEqual(
+    startDecision(r, "crow-chat", { peak: tooBig, live, profile: PROFILE, now: T0 }),
+    { allowed: true, reason: null },
+  );
+});
+
+test("the job growing past its booking is refused and flagged", () => {
+  const r = besideReservation({
+    gtt_mb: 40000, host_ram_mb: 30000,
+    gtt_used_at_activation_mb: 60000, mem_available_at_activation_mb: 100000,
+  });
+  // 105000 - 60000 = 45000 mb of growth, more than the 40000 mb it booked.
+  const live = { gttUsedMb: 105000, gttTotalMb: 131072, memAvailableMb: 97000, at: T0 };
+  const small = { gtt_peak_mb: 1000, host_ram_peak_mb: 1000 };
+  assert.deepEqual(
+    startDecision(r, "crow-chat", { peak: small, live, profile: PROFILE, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside", job_over_budget: true },
+  );
+  // The allow list still starts (it never reads the live counters here).
+  assert.deepEqual(
+    startDecision(r, "crow-embed", { peak: PEAK, live, profile: PROFILE, now: T0 }),
+    { allowed: true, reason: null },
+  );
+  // The flag follows the job's OWN growth: with 6000 mb of that growth coming
+  // from a provider admitted beside the hold, 39000 mb went to the job and the
+  // booking still holds.
+  const admitted = { gtt_peak_mb: 6000, host_ram_peak_mb: 3000 };
+  const d = startDecision(r, "crow-chat", { peak: { gtt_peak_mb: 16000, host_ram_peak_mb: 1000 }, live, profile: PROFILE, admitted, now: T0 });
+  assert.deepEqual(d, { allowed: true, reason: null });
+  assert.equal(d.job_over_budget, undefined);
+});
+
 test("stale snapshot refuses beside starts", () => {
   const now = T0 + 60_000;
   assert.deepEqual(

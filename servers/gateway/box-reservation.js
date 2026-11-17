@@ -221,8 +221,21 @@ function finiteOrNull(v) {
  * - `beside` (a render/video job sharing the card): an allowed provider
  *   starts; otherwise the provider's declared peak must fit next to the
  *   job's REMAINING footprint (its `gtt_mb`/`host_ram_mb` minus what the live
- *   counters show it has already taken), under the safety margin and above
- *   the RAM floor. No peak, no snapshot, or a stale snapshot refuses.
+ *   counters show the JOB has already taken), under the safety margin and
+ *   above the RAM floor. No peak, no snapshot, or a stale snapshot refuses.
+ *
+ *   What the job has taken is the growth of the live counters since
+ *   activation LESS `admitted`, the declared peaks of the providers this
+ *   gateway started beside the hold: their growth is theirs, not the job's
+ *   progress, and charging it to the job would under-count what the job still
+ *   has to take (and could make a job look like it had outgrown its booking).
+ *   `admitted` is a per-process tally, so a gateway restart under a live hold
+ *   forgets it — see the comment on the map in gpu-orchestrator.js.
+ *
+ *   A job whose own growth exceeds its booked `gtt_mb` is outgrowing its
+ *   booking: every start not on the allow list is refused with
+ *   `job_over_budget: true` (the orchestrator logs that once), whether or not
+ *   the provider's peak would fit.
  *
  * Pure: every input is passed in (no file, no sysfs).
  *
@@ -230,10 +243,15 @@ function finiteOrNull(v) {
  * @param {string} providerName
  * @param {{peak?: {gtt_peak_mb: number, host_ram_peak_mb: number}|null,
  *          live?: {gttUsedMb: number, gttTotalMb: number, memAvailableMb: number, at: number}|null,
- *          profile?: object|null, now?: number}} [inputs]
- * @returns {{allowed: boolean, reason: null|"reserved"|"gpu_job_beside"}}
+ *          profile?: object|null,
+ *          admitted?: {gtt_peak_mb?: number, host_ram_peak_mb?: number}|null,
+ *          now?: number}} [inputs]
+ *   `admitted` is the SUM of the declared peaks of the providers started
+ *   beside this hold since it began (zeros when absent).
+ * @returns {{allowed: boolean, reason: null|"reserved"|"gpu_job_beside",
+ *            job_over_budget?: true}}
  */
-export function startDecision(reservation, providerName, { peak = null, live = null, profile = null, now = Date.now() } = {}) {
+export function startDecision(reservation, providerName, { peak = null, live = null, profile = null, admitted = null, now = Date.now() } = {}) {
   if (!reservation) return { allowed: true, reason: null };
   if (reservation.corrupt) return { allowed: false, reason: "reserved" };
   if (reservation.mode !== "beside") {
@@ -255,15 +273,30 @@ export function startDecision(reservation, providerName, { peak = null, live = n
   const hostProfile = profile || DEFAULT_HOST_PROFILE;
   const safetyMargin = finiteOrNull(hostProfile.safety_margin_mb) ?? DEFAULT_HOST_PROFILE.safety_margin_mb;
   const ramFloor = finiteOrNull(hostProfile.ram_floor_mb) ?? DEFAULT_HOST_PROFILE.ram_floor_mb;
-  const gttHold = optionalNumber(reservation.gtt_mb) ?? 0;
+  const gttBooking = optionalNumber(reservation.gtt_mb);
+  const gttHold = gttBooking ?? 0;
   const ramHold = optionalNumber(reservation.host_ram_mb) ?? 0;
   const gttBase = optionalNumber(reservation.gtt_used_at_activation_mb);
   const ramBase = optionalNumber(reservation.mem_available_at_activation_mb);
-  // What the job still has to take: its declared footprint minus the growth
-  // already visible since activation. Without a baseline, assume none of it
-  // has loaded yet.
-  const remainingGtt = gttBase == null ? gttHold : Math.max(0, gttHold - (gttUsed - gttBase));
-  const remainingRam = ramBase == null ? ramHold : Math.max(0, ramHold - (ramBase - memAvailable));
+  // Growth since activation that belongs to the JOB: everything the live
+  // counters gained, less the declared peaks of the providers admitted beside
+  // it. Without that subtraction a prod provider started beside the hold would
+  // be counted as the job's own progress.
+  const admittedGtt = finiteOrNull(admitted && admitted.gtt_peak_mb) ?? 0;
+  const admittedRam = finiteOrNull(admitted && admitted.host_ram_peak_mb) ?? 0;
+  const jobGrowthGtt = gttBase == null ? null : Math.max(0, gttUsed - gttBase - admittedGtt);
+  const jobGrowthRam = ramBase == null ? null : Math.max(0, ramBase - memAvailable - admittedRam);
+  // What the job still has to take: its declared footprint minus the job's own
+  // growth so far. Without a baseline, assume none of it has loaded yet (the
+  // conservative reading: the whole booked amount is still to come).
+  const remainingGtt = jobGrowthGtt == null ? gttHold : Math.max(0, gttHold - jobGrowthGtt);
+  const remainingRam = jobGrowthRam == null ? ramHold : Math.max(0, ramHold - jobGrowthRam);
+  // The job is outgrowing its booking: refuse starts that would share the card
+  // with it, and say so, so the operator can re-book or extend it. An allow[]
+  // provider returned above is never refused here.
+  if (gttBooking != null && jobGrowthGtt != null && jobGrowthGtt > gttBooking) {
+    return Object.freeze({ allowed: false, reason: "gpu_job_beside", job_over_budget: true });
+  }
   const fitsGtt = gttUsed + remainingGtt + peakGtt <= gttTotal - safetyMargin;
   const fitsRam = memAvailable - remainingRam - peakRam >= ramFloor;
   return fitsGtt && fitsRam ? { allowed: true, reason: null } : refuse;
