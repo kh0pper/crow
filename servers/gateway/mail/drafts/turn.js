@@ -30,14 +30,14 @@
  */
 import { randomBytes } from "node:crypto";
 import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { MailError } from "../errors.js";
 import { getAccount } from "../store/accounts.js";
 import { getDraft, listComments } from "./store.js";
 import { forgetTurnCommentIds, noteTurnCommentIds } from "./revise.js";
 import { mintTurnToken, revokeTurnToken, TURN_TOKEN_MARGIN_MS } from "./turn-token.js";
 import {
-  DRAFTING_TURN_TOOLS, MAIL_DRAFT_TURNS_DIRNAME, isMailDraftDirSegment, mailDraftBlock, mailDraftTurnDir,
+  DRAFTING_TURN_TOOLS, MAIL_DRAFT_TURNS_DIRNAME, isMailDraftDirSegment, mailDraftBlock, resolvedMailDraftTurnDir,
 } from "../../../../scripts/pi-bots/mcp_writer.mjs";
 import { isCloudKey, isRoleRef } from "../../../shared/model-roles.js";
 import { mcpConfigDelivery } from "../../../../scripts/pi-bots/mcp-delivery.mjs";
@@ -140,6 +140,15 @@ function refusal(code) {
 function codeOf(err) {
   if (err && typeof err.code === "string" && /^[A-Za-z0-9_.:-]{1,40}$/.test(err.code)) return err.code;
   return "error";
+}
+
+/**
+ * The code of a turn the bridge refused with `{action: "error"}`: its own `code` when it has one, else
+ * `refused`. Never the result's `error` text, which can carry a person's words or a driver message.
+ */
+function resultCodeOf(result) {
+  const code = result && result.code;
+  return typeof code === "string" && /^[A-Za-z0-9_.:-]{1,40}$/.test(code) ? code : "refused";
 }
 
 /* ------------------------------------------------------------------------- settings */
@@ -260,8 +269,9 @@ function makeDir(dir) {
 
 /**
  * Create (mode 0700) and verify this turn's own world root: `<CROW_HOME>/mail-draft-turns/<botId>/<draftId>`.
- * The home itself may be a symlink (a Crow home linked onto another disk is a supported layout), so it
- * is realpath'd first; every directory below it must be exactly the path built here.
+ * The home itself may be a symlink (a Crow home linked onto another disk is a supported layout), so the
+ * path comes from `resolvedMailDraftTurnDir` — the home's REAL path — and every directory below it must
+ * be exactly the path built here. bridge.mjs compares the dir it is handed against the same helper.
  *
  * @param {string} crowHome this instance's home
  * @param {string} botId the bot the turn runs as
@@ -269,14 +279,14 @@ function makeDir(dir) {
  * @returns {{sessionDir: string, turnsRoot: string}} absolute, symlink-free paths
  */
 export function prepareDraftTurnDir(crowHome, botId, draftId) {
-  const expected = mailDraftTurnDir(crowHome, botId, draftId);
-  if (!expected) throw new MailError("BAD_INPUT", "draft_turn_dir");
+  if (!isMailDraftDirSegment(botId) || !isMailDraftDirSegment(draftId)) throw new MailError("BAD_INPUT", "draft_turn_dir");
+  // The home may not exist yet on a first turn; create it (its ancestors resolve as they are) before
+  // the real path is derived, so the turn's dir is the one realpath reports for the rest of its life.
   makeDir(String(crowHome));
-  let homeReal;
-  try { homeReal = realpathSync(String(crowHome)); } catch { throw dirRefusal(); }
-  const base = assertPlainDir(makeDir(join(homeReal, DRAFT_TURNS_DIRNAME)));
-  const turnsRoot = assertPlainDir(makeDir(join(base, botId)));
-  const sessionDir = join(turnsRoot, draftId);
+  const sessionDir = resolvedMailDraftTurnDir(crowHome, botId, draftId);
+  if (!sessionDir) throw new MailError("BAD_INPUT", "draft_turn_dir");
+  const base = assertPlainDir(makeDir(dirname(dirname(sessionDir))));
+  const turnsRoot = assertPlainDir(makeDir(dirname(sessionDir)));
   makeDir(join(sessionDir, "sessions"));
   assertPlainDir(sessionDir);
   return { sessionDir, turnsRoot };
@@ -465,7 +475,7 @@ export async function startDraftingTurn(db, deps = {}, { draftId, botId = null, 
   } catch { /* nothing is marked applied, so every comment stays queued */ }
   const run = (async () => {
     try {
-      await resolved.handleInbound({
+      const result = await resolved.handleInbound({
         bot_id: turnBotId,
         gateway_thread_id: TURN_THREAD_PREFIX + draft.id,
         gateway_type: "mail-draft",
@@ -485,6 +495,10 @@ export async function startDraftingTurn(db, deps = {}, { draftId, botId = null, 
         },
         log,
       });
+      // A turn the bridge refused before a spawn (the model gate, the tool budget) comes back as
+      // `{action: "error"}` rather than a throw, so it is logged here too — as a code, through the
+      // same logger, and never with the result's own text.
+      if (result && result.action === "error") log("turn_error:" + resultCodeOf(result));
     } catch (err) {
       log("turn_error:" + codeOf(err));
     } finally {

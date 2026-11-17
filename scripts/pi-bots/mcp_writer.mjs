@@ -37,8 +37,8 @@ import { resolveAddonCommand, checkLauncherArgs } from "../../servers/shared/res
 import { buildBotBaseEnv } from "../../servers/shared/bot-env.js";
 import { withoutLoaderEnv } from "../../servers/shared/loader-env.js";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { botsDbPath } from "./instance-paths.mjs";
 import { mintRemoteBlocks } from "./remote-blocks.mjs";
@@ -185,6 +185,43 @@ export function mailDraftTurnDir(crowHome, botId, draftId) {
   if (typeof crowHome !== "string" || crowHome === "") return null;
   if (!isMailDraftDirSegment(botId) || !isMailDraftDirSegment(draftId)) return null;
   return join(crowHome, MAIL_DRAFT_TURNS_DIRNAME, botId, draftId);
+}
+
+/** `p` with the links of its deepest existing ancestor resolved (a path that does not exist yet stays a path). */
+function realHomePath(p) {
+  let cur = resolve(p);
+  const rest = [];
+  for (;;) {
+    try {
+      return join(realpathSync(cur), ...rest.reverse());
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur) return resolve(p);
+      rest.push(basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+/**
+ * The ONE path a drafting turn's world root may be, with the home's links resolved:
+ * `<realpath(CROW_HOME)>/mail-draft-turns/<botId>/<draftId>`.
+ *
+ * A Crow home linked onto another disk is a supported layout, and so is a link on an ancestor of it.
+ * The turn's dirs are therefore created at the home's REAL path — every directory below it is checked
+ * for being its own real path — so the expected path has to be built from that same real path. Built
+ * from the unresolved home instead, the two disagree on a linked install and every drafting turn is
+ * refused. turn.js and bridge.mjs both take the path from here, so they cannot drift again.
+ *
+ * @param {string|null|undefined} crowHome this instance's home (default: the resolved CROW_HOME)
+ * @param {string} botId the bot the turn runs as
+ * @param {string} draftId the draft the turn is for
+ * @returns {string|null} null when the home or an id cannot be one path segment
+ */
+export function resolvedMailDraftTurnDir(crowHome, botId, draftId) {
+  const home = crowHome == null ? resolveCrowHome() : crowHome;
+  if (typeof home !== "string" || home === "") return null;
+  return mailDraftTurnDir(realHomePath(home), botId, draftId);
 }
 
 /**
@@ -450,12 +487,22 @@ function forEachUnselectedServer(canonical, selected, fn) {
   }
 }
 
-/** The canonical file's names, or none when there is no readable file (a fresh install has none). */
+/**
+ * The canonical file's names, or none when there is no file at all.
+ *
+ * Only `ENOENT` may mean "no global servers": a fresh install has no `~/.pi/agent/mcp.json`, and that
+ * is a normal state. Any other read or parse failure (EACCES, a directory in its place, invalid JSON,
+ * a wrong shape) means this process does not know which servers pi would inherit from that file, so a
+ * config that only disables the names it could read would let the rest start as children of a turn
+ * that must have exactly one server. It throws instead, and the drafting turn is refused before a
+ * spawn.
+ */
 function canonicalOrEmpty(canonicalPath) {
   try {
     return readCanonicalMcp(canonicalPath);
-  } catch {
-    return { mcpServers: {} };
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { mcpServers: {} };
+    throw err;
   }
 }
 

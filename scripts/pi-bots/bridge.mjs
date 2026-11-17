@@ -70,7 +70,7 @@ import { createEgressRelay } from "./pi_egress.mjs";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD, mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { botSessionEnv } from "./actor-env.mjs";
-import { impliedServers, DRAFTING_TURN_TOOLS, isDraftingTurnTools, draftingTurnMcpConfig, mailDraftTurnDir } from "./mcp_writer.mjs";
+import { impliedServers, DRAFTING_TURN_TOOLS, isDraftingTurnTools, draftingTurnMcpConfig, resolvedMailDraftTurnDir } from "./mcp_writer.mjs";
 import { SECRETS_SERVER } from "./crow-server-catalog.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // C-11: the per-turn world assembly (identity + spawn readiness) lives in
@@ -1919,8 +1919,9 @@ async function recordStagedDrafts({ calls, mcpConfig, log, session, threadId, bo
  *     signature — a url block with headers and nothing else;
  *   - `checkModel` is the model gate, run below on the model the resolver actually produced;
  *   - `sessionDir` is EXACTLY `<CROW_HOME>/mail-draft-turns/<botId>/<draftId>` (mcp_writer.mjs's
- *     `mailDraftTurnDir`), under this instance's home and outside every bot-writable world root, so a
- *     chat thread of the same bot can never resume this turn and a bot cannot plant its config path.
+ *     `resolvedMailDraftTurnDir`, built from the home's REAL path so a linked home is not a mismatch),
+ *     under this instance's home and outside every bot-writable world root, so a chat thread of the
+ *     same bot can never resume this turn and a bot cannot plant its config path.
  *     An absolute path is not enough: the whole point is that this one path, and no other.
  * The caller builds the block (mcp_writer.mjs `mailDraftBlock`) in the process that minted the token
  * and holds the actor key; a key-less bot host must not start a drafting turn at all.
@@ -1957,7 +1958,7 @@ function draftingTurnOf(opts) {
   const thread = typeof opts.gateway_thread_id === "string" ? opts.gateway_thread_id : "";
   const threadPrefix = "mail-draft:";
   if (!thread.startsWith(threadPrefix)) refuse("the thread is not a drafting thread");
-  const expected = mailDraftTurnDir(resolveCrowHome(), headers["X-Crow-Actor-Id"], thread.slice(threadPrefix.length));
+  const expected = resolvedMailDraftTurnDir(resolveCrowHome(), headers["X-Crow-Actor-Id"], thread.slice(threadPrefix.length));
   if (!expected) refuse("the thread names no draft");
   const sessionDir = value.sessionDir == null ? "" : String(value.sessionDir);
   // String equality, not resolve(): a path that only normalises to the expected one ("…/x/..")

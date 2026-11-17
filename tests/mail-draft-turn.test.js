@@ -14,9 +14,9 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
@@ -106,6 +106,7 @@ const {
 } = await import("../servers/gateway/mail/drafts/turn.js");
 const {
   DRAFTING_TURN_TOOLS, MAIL_DRAFT_SERVER, isDraftingTurnTools, mailDraftBlock, mailDraftTurnDir,
+  resolvedMailDraftTurnDir,
 } = await import("../scripts/pi-bots/mcp_writer.mjs");
 const { getOrCreateLocalInstanceId } = await import("../servers/gateway/instance-registry.js");
 const { buildToolsCsv, toolAllowlist, handleInbound } = await import("../scripts/pi-bots/bridge.mjs");
@@ -553,6 +554,37 @@ describe("startDraftingTurn", () => {
     assert.ok(!logs.some((l) => l.includes("turn timed out")), "never the error's own message");
   });
 
+  test("a turn the bridge answers with {action:'error'} is logged as a turn_error code, never as its text", async () => {
+    // A refusal before a spawn (the model gate, the tool budget) is a return value, not a throw, so
+    // it used to leave no trace at all. It is logged through the same code-only logger.
+    const logs = [];
+    const turns = [
+      { result: { action: "error", code: "local_models_only" }, want: "turn_error:local_models_only" },
+      { result: { action: "error", error: "drafting model not allowed: local_models_only" }, want: "turn_error:refused" },
+      { result: { action: "error" }, want: "turn_error:refused" },
+      { result: { action: "completed" }, want: null },
+      { result: undefined, want: null },
+    ];
+    for (const { result, want } of turns) {
+      const deps = {
+        log: (code) => logs.push(String(code)),
+        now: () => 1_700_000_000_000,
+        setTimeout: () => ({ unref() { /* unref'd timer */ } }),
+        handleInbound: async () => result,
+      };
+      const draft = await makeDraft({ account });
+      await startDraftingTurn(mailDb, deps, { draftId: draft.id, instruction: "Be brief." });
+      await settle();
+      if (want === null) {
+        assert.ok(!logs.some((l) => l.startsWith("turn_error")), "nothing to log: " + logs.join(","));
+      } else {
+        assert.ok(logs.includes(want), "expected " + want + " in " + logs.join(","));
+      }
+      assert.ok(!logs.some((l) => l.includes("drafting model not allowed")), "never the refusal's sentence");
+      logs.length = 0;
+    }
+  });
+
   test("a drafting turn writes no config of its own: its dir holds only pi's session dir", async () => {
     const { deps, calls, timers } = recordingDeps();
     const draft = await makeDraft({ account });
@@ -591,6 +623,34 @@ describe("startDraftingTurn", () => {
     assert.notEqual(dir, DRAFTBOT_ROOT, "never the world root a chat turn resumes from");
     assert.equal(existsSync(join(dir, "sessions")), true, "pi's --session-dir has a place to write");
     assert.equal(statSync(dir).mode & 0o777, 0o700, "the turn's own directory is private");
+  });
+
+  test("a CROW_HOME reached through a symlinked ancestor still runs the turn", async () => {
+    // A Crow home on another disk, linked into place, is a supported layout — and so is a link on an
+    // ancestor of it. The turn's dir must then be built from the home's REAL path (every directory
+    // below it is checked for being its own real path), and the bridge must compare what it is handed
+    // against that same path. Built from the linked spelling on one side, every turn was refused.
+    const realHome = realpathSync(CROW_HOME);
+    const linkParent = join(ROOT, "linked-home");
+    mkdirSync(linkParent, { recursive: true });
+    const linkHome = join(linkParent, "crowhome");
+    symlinkSync(realHome, linkHome);
+    try {
+      const { deps, calls } = recordingDeps();
+      deps.crowHome = linkHome;
+      const draft = await makeDraft({ account });
+      await startDraftingTurn(mailDb, deps, { draftId: draft.id, instruction: "Be brief." });
+      await settle();
+      assert.equal(calls.length, 1, "the turn ran");
+      const dir = calls[0].draftingTurn.sessionDir;
+      assert.equal(dir, resolvedMailDraftTurnDir(linkHome, "draftbot", draft.id), "the home's real path is the turn's path");
+      assert.equal(dir, join(realHome, DRAFT_TURNS_DIRNAME, "draftbot", draft.id));
+      assert.equal(existsSync(join(dir, "sessions")), true, "and the turn's dir was created there");
+      assert.notEqual(dir, join(linkHome, DRAFT_TURNS_DIRNAME, "draftbot", draft.id), "never the linked spelling");
+    } finally {
+      rmSync(linkHome, { force: true });
+      rmSync(linkParent, { recursive: true, force: true });
+    }
   });
 
   test("a sweep on start removes turn dirs older than a day and leaves the new one", async () => {
@@ -979,6 +1039,72 @@ describe("the drafting turn at the bridge", () => {
     } finally {
       writeFileSync(canonical, before);
     }
+  });
+
+  test("only a missing global config means no global servers; any other read or parse failure refuses the turn", async () => {
+    const canonical = join(HOME_DIR, ".pi", "agent", "mcp.json");
+    const before = readFileSync(canonical, "utf8");
+    let paths = null;
+    const runTurn = (draftId) => {
+      paths = capturePaths();
+      const { option } = draftingTurnFor(draftId);
+      return handleInbound({
+        bot_id: "draftbot", gateway_type: "mail-draft", gateway_thread_id: "mail-draft:" + draftId,
+        user_message: "draft it", log: () => {}, sendReply: async () => {}, draftingTurn: option,
+      });
+    };
+    try {
+      // A fresh install has no `~/.pi/agent/mcp.json` at all: the turn runs with its own server only.
+      rmSync(canonical, { force: true });
+      await runTurn("md-00000000000000f7");
+      assert.equal(existsSync(paths.argvPath), true, "a missing file is a fresh install, not a refusal");
+      const config = JSON.parse(readFileSync(paths.mcpPath, "utf8"));
+      assert.deepEqual(Object.keys(config.mcpServers), [MAIL_DRAFT_SERVER]);
+
+      // A file that is not JSON: what pi would inherit is unknown, so nothing may be spawned.
+      writeFileSync(canonical, "{ this is not json");
+      await assert.rejects(runTurn("md-00000000000000f8"), (err) => err.code === "EJSON");
+      assert.equal(existsSync(paths.argvPath), false, "no pi was spawned for the unreadable config");
+
+      // And a file this process may not read at all is the same refusal.
+      if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+        writeFileSync(canonical, JSON.stringify({ mcpServers: {} }));
+        chmodSync(canonical, 0o000);
+        await assert.rejects(runTurn("md-00000000000000f9"), (err) => err.code === "EACCES");
+        assert.equal(existsSync(paths.argvPath), false, "no pi was spawned for the denied config");
+      }
+    } finally {
+      chmodSync(canonical, 0o600);
+      writeFileSync(canonical, before);
+    }
+  });
+
+  test("a turn whose CROW_HOME is reached through a symlinked ancestor runs at the bridge", async () => {
+    const realHome = realpathSync(process.env.CROW_HOME);
+    const linkParent = join(ROOT, "linked-home-bridge");
+    mkdirSync(linkParent, { recursive: true });
+    const linkHome = join(linkParent, "crowhome");
+    symlinkSync(realHome, linkHome);
+    const draftId = "md-00000000000000f6";
+    // The path turn.js hands over: built from the home's real path, which is what the world root's
+    // own "real path" checks require.
+    const sessionDir = resolvedMailDraftTurnDir(linkHome, "draftbot", draftId);
+    const paths = capturePaths();
+    const { option } = draftingTurnFor(draftId, { sessionDir });
+    const beforeHome = process.env.CROW_HOME;
+    process.env.CROW_HOME = linkHome;
+    try {
+      await handleInbound({
+        bot_id: "draftbot", gateway_type: "mail-draft", gateway_thread_id: "mail-draft:" + draftId,
+        user_message: "draft it", log: () => {}, sendReply: async () => {}, draftingTurn: option,
+      });
+    } finally {
+      process.env.CROW_HOME = beforeHome;
+      rmSync(linkHome, { force: true });
+      rmSync(linkParent, { recursive: true, force: true });
+    }
+    assert.equal(existsSync(paths.argvPath), true, "the turn ran although the home is reached through a link");
+    assert.ok(String(sessionDir).startsWith(realHome), "the turn's dir is the home's real path");
   });
 
   test("a drafting turn is refused when the host delivers MCP configs as files, before anything is spawned or written", async () => {
