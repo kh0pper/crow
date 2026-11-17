@@ -52,6 +52,7 @@ import { createAccount, deleteAccount, getAccount, listAccounts, updateAccount }
 import { listFolders } from "../mail/store/messages.js";
 import { SKIP_SPECIAL_USE } from "../mail/sync/engine.js";
 import { registerActionRoutes } from "./mail-api-actions.js";
+import { registerDraftRoutes } from "./mail-drafts-api.js";
 import { registerMessageRoutes } from "./mail-api-messages.js";
 import { registerReaderRoutes } from "./mail-api-reader.js";
 
@@ -631,6 +632,10 @@ export function mailApiRouter(dashboardAuth, deps = {}) {
   registerReaderRoutes(router, ctx);
   // Plan 2's message actions: read/unread, archive, delete and move, behind the same guards.
   registerActionRoutes(router, ctx);
+  // Plan 3's draft card: create, read, edit, turn, send, undo, schedule, cancel and discard, behind
+  // the same flag/owner/no-store/CSRF/64 KB chain (servers/gateway/index.js's `_hasOwnParser` already
+  // hands every `/dashboard/mail/api/` path to this router's own parser).
+  registerDraftRoutes(router, ctx);
 
   return router;
 }
