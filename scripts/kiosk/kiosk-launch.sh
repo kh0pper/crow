@@ -10,7 +10,9 @@ PROFILE="${HOME}/.config/chromium-kiosk"
 if [ -n "${BT_SINK:-}" ] && command -v pactl >/dev/null; then
   want="bluez_output.$(printf '%s' "$BT_SINK" | tr ':a-f' '_A-F')"
   for _ in $(seq 1 20); do
-    pactl list short sinks 2>/dev/null | grep -q "	$want" && break
+    # The sink list is read whole, then grepped: `pactl … | grep -q` ends grep at its first
+    # match and SIGPIPEs pactl, and under pipefail that read as "the sink is not there yet".
+    if grep -q "	$want" <<<"$(pactl list short sinks 2>/dev/null)"; then break; fi
     sleep 1
   done
 fi
@@ -21,7 +23,9 @@ case "${ROTATE:-0}" in
   *) TRANSFORM="" ;;
 esac
 if [ -n "$TRANSFORM" ] && command -v wlr-randr >/dev/null; then
-  OUTPUT="$(wlr-randr 2>/dev/null | awk '/^[^ ]/ {print $1; exit}')"
+  # awk reads to EOF and prints only the first match: `{print $1; exit}` quit early and
+  # SIGPIPEd wlr-randr, and under `set -e` + pipefail that killed the whole launcher.
+  OUTPUT="$(wlr-randr 2>/dev/null | awk '/^[^ ]/ && !seen {print $1; seen = 1}')"
   if [ -n "$OUTPUT" ]; then
     wlr-randr --output "$OUTPUT" --transform "$TRANSFORM" || echo "kiosk-launch: rotation failed on $OUTPUT" >&2
   fi

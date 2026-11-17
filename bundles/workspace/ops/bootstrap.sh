@@ -180,7 +180,11 @@ occ config:system:set allow_user_to_change_display_name --value=false --type=boo
 
 step "Menu calendar"
 # 6. The shared "Menu" calendar, owned by the admin (shared with people in the Calendar app).
-if occ dav:list-calendars "$ADMIN_USER" 2>/dev/null | grep -qE '^\| Menu +\|'; then
+# The calendar list is read in FULL first and then grepped from a here-string: a `grep -q`
+# at the end of a pipe makes `occ` die of SIGPIPE, and under pipefail that reads as "no
+# match" — a calendar that exists would be created again.
+CAL_LIST="$(occ dav:list-calendars "$ADMIN_USER" 2>/dev/null || true)"
+if grep -qE '^\| Menu +\|' <<<"$CAL_LIST"; then
   log "calendar Menu: exists"
 else
   occ dav:create-calendar "$ADMIN_USER" Menu >/dev/null

@@ -31,8 +31,10 @@
 #   5. docker compose -p <project> up -d --build --force-recreate.
 #   6. verify: GET /json/version without a token -> 401; with the token -> 200 (the header
 #      travels in a 0600 file read by `curl -H @file`, never on a command line); and the
-#      token appears in no /proc/<pid>/cmdline and in no `docker inspect` output (only
-#      "found"/"not found" is printed).
+#      token appears in no /proc/<pid>/cmdline, in no `docker inspect` output and in no
+#      container log (found / not found / cannot verify — a producer that fails, or a grep
+#      that cannot read its pattern file, cannot be verified and FAILS the gate; only
+#      "found"/"not found"/"cannot verify" is printed).
 #   7. print the exact rollback commands.
 # --dry-run prints the plan and changes nothing (it does not need docker or git).
 #
@@ -48,7 +50,7 @@ FILES=(docker-compose.yml Dockerfile entrypoint.sh cdp-relay.mjs)
 say() { echo "[crow-cdp-gate] $*"; }
 fail() { echo "[crow-cdp-gate] REFUSED: $*" >&2; exit 1; }
 usage() {
-  sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -125,7 +127,8 @@ if [ "$DRY_RUN" = 1 ]; then
   say "  would run:     ( cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME CROW_GATEWAY_UID=$RELAY_UID CROW_GATEWAY_GID=$RELAY_GID docker compose -p $PROJECT up -d --build --force-recreate )"
   say "  would verify:  GET http://127.0.0.1:$CDP_PORT/json/version -> 401 without a token;"
   say "                 with the token (curl -H @<0600 file>) -> 200;"
-  say "                 no token in /proc/<pid>/cmdline or in docker inspect (found/not found only)"
+  say "                 no token in /proc/<pid>/cmdline, docker inspect or the log"
+  say "                 (found / not found / cannot verify — the last one fails the gate)"
   say "  would print:   the exact rollback commands"
   if [ -n "$FROM_SHA" ]; then
     if ! have "$GIT"; then say "  note: git is not available here, so --from-sha cannot be checked in this run"
@@ -143,14 +146,19 @@ have "$GIT" || fail "git is not available: --from-sha cannot be read"
 "$GIT" -C "$REPO" cat-file -e "$FROM_SHA:bundles/browser/entrypoint.sh" 2>/dev/null \
   || fail "--from-sha '$FROM_SHA' has no bundles/browser/entrypoint.sh in $REPO"
 # The sha must be a PRE-gate tree, or the "backup" would be the new files.
-if ! "$GIT" -C "$REPO" show "$FROM_SHA:bundles/browser/entrypoint.sh" 2>/dev/null | grep -q -- '--remote-debugging-port'; then
+# Read it first and grep the text from a here-string: a `grep -q` at the end of a pipe makes
+# `git show` die of SIGPIPE, and under `set -o pipefail` that reads as "no match".
+PRE_ENTRYPOINT="$("$GIT" -C "$REPO" show "$FROM_SHA:bundles/browser/entrypoint.sh" 2>/dev/null)" \
+  || fail "cannot read bundles/browser/entrypoint.sh at --from-sha '$FROM_SHA' from $REPO"
+if ! grep -q -- '--remote-debugging-port' <<<"$PRE_ENTRYPOINT"; then
   fail "--from-sha '$FROM_SHA' is not a pre-CDP-gate tree (its entrypoint has no Chromium --remote-debugging-port): pick the commit before this change"
 fi
 have "$DOCKER" || fail "no '$DOCKER': this needs Docker Compose to recreate the container"
 have "$CURL" || fail "no '$CURL': the verification step needs curl"
 CV="$("$DOCKER" compose version --short 2>/dev/null | sed 's/^v//')"
 [ -n "$CV" ] || fail "cannot run '$DOCKER compose version'"
-[ "$(printf '%s\n%s\n' 2.23.1 "$CV" | sort -V | head -n 1)" = "2.23.1" ] \
+# `sed -n 1p` and not `head -n 1`: head stops reading at the first line and SIGPIPEs `sort`.
+[ "$(printf '%s\n%s\n' 2.23.1 "$CV" | sort -V | sed -n '1p')" = "2.23.1" ] \
   || fail "Docker Compose $CV is older than 2.23.1 (the compose's token file needs it)"
 CONTAINER="$("$DOCKER" inspect "$SERVICE" --format '{{.Name}}' 2>/dev/null | sed 's|^/||')"
 if [ -n "$CONTAINER" ]; then
@@ -164,7 +172,7 @@ else
 fi
 # Was the old ufw rule opened for 9222? The new manifest drops that port; say how to remove it.
 UFW_NOTE=""
-if have ufw && ufw status 2>/dev/null | grep -q '9222'; then
+if have ufw && grep -q '9222' <<<"$(ufw status 2>/dev/null)"; then
   UFW_NOTE="sudo ufw delete allow from 100.64.0.0/10 to any port 9222 proto tcp"
 fi
 
@@ -286,19 +294,53 @@ AUTH="$("$CURL" -s -o /dev/null -w '%{http_code}' --max-time 5 -H "@$HDR" "http:
 say "unauthenticated /json/version -> $UNAUTH"
 say "with the token           -> $AUTH"
 
-# No token anywhere it must not be. Only "found"/"not found" is printed.
-FOUND_ARGV=0
+# No token anywhere it must not be. Only found / not found / cannot verify is printed,
+# never the token and never its context. THIS CHECK MAY NOT FAIL OPEN: the old shape was
+# `producer | grep -qFf "$TOK"`, which ends grep on its first match and SIGPIPEs the
+# producer, and under `set -o pipefail` that made a MATCH read as "not found" — a leaked
+# token reported clean and the gate passed. So no detector feeds grep from the end of a
+# pipe: every producer is run to completion (a here-string, or a file) and THEN grepped,
+# and a producer that fails is "cannot verify" — which fails the gate, never passes it.
+# grep still reads the pattern from the 0600 file (`-Ff "$TOK"`): never an argv.
+PROBE_DIR="$TMPDIR_GATE/probe"
+mkdir -m 700 "$PROBE_DIR" || fail "cannot create $PROBE_DIR for the leak probes"
+# token_state text TEXT / token_state file FILE — is the token in it? No upstream writer either
+# way. Only grep's exit 1 ("no match") is an answer: 2 is grep failing to run at all (an
+# unreadable pattern file, a bad argument), and reading that as "not found" fails open exactly
+# like the pipe bug above. So the answer is one of three words, and the gate decides.
+token_state() {
+  local rc=0
+  if [ "$1" = file ]; then grep -qFf "$TOK" -- "$2" 2>/dev/null || rc=$?
+  else grep -qFf "$TOK" <<<"$2" 2>/dev/null || rc=$?; fi
+  case "$rc" in
+    0) printf found ;;
+    1) printf 'not found' ;;
+    *) printf 'cannot verify' ;;
+  esac
+}
+
+ARGV_STATE='not found'
 for pid in /proc/[0-9]*; do
   [ -r "$pid/cmdline" ] || continue
-  if tr '\0' ' ' < "$pid/cmdline" 2>/dev/null | grep -qFf "$TOK" 2>/dev/null; then FOUND_ARGV=1; break; fi
+  # The process exited between the two lines: its cmdline cannot carry a live leak now.
+  CMDLINE="$(tr '\0' ' ' < "$pid/cmdline" 2>/dev/null)" || continue
+  ARGV_ONE="$(token_state text "$CMDLINE")"
+  if [ "$ARGV_ONE" = found ]; then ARGV_STATE=found; break; fi
+  # A detector that could not run is neither a leak nor a clean bill: remember it, and let
+  # the verdict below fail the gate. A later "found" still wins over it.
+  [ "$ARGV_ONE" = 'not found' ] || ARGV_STATE="$ARGV_ONE"
 done
-INSPECT_FOUND=0
-if "$DOCKER" inspect "$SERVICE" 2>/dev/null | grep -qFf "$TOK" 2>/dev/null; then INSPECT_FOUND=1; fi
-say "token in any /proc/<pid>/cmdline: $([ "$FOUND_ARGV" = 1 ] && echo found || echo 'not found')"
-say "token in docker inspect output:   $([ "$INSPECT_FOUND" = 1 ] && echo found || echo 'not found')"
-LOGS_FOUND=0
-if "$DOCKER" logs "$SERVICE" 2>&1 | grep -qFf "$TOK" 2>/dev/null; then LOGS_FOUND=1; fi
-say "token in the container log:       $([ "$LOGS_FOUND" = 1 ] && echo found || echo 'not found')"
+INSPECT_STATE='cannot verify'
+if "$DOCKER" inspect "$SERVICE" > "$PROBE_DIR/inspect" 2>/dev/null; then
+  INSPECT_STATE="$(token_state file "$PROBE_DIR/inspect")"
+fi
+LOGS_STATE='cannot verify'
+if "$DOCKER" logs "$SERVICE" > "$PROBE_DIR/logs" 2>&1; then
+  LOGS_STATE="$(token_state file "$PROBE_DIR/logs")"
+fi
+say "token in any /proc/<pid>/cmdline: $ARGV_STATE"
+say "token in docker inspect output:   $INSPECT_STATE"
+say "token in the container log:       $LOGS_STATE"
 rm -rf "$TMPDIR_GATE"
 TMPDIR_GATE=""
 
@@ -308,11 +350,15 @@ trap - EXIT
 VERDICT=ok
 [ "$UNAUTH" = "401" ] || VERDICT=failed
 [ "$AUTH" = "200" ] || VERDICT=failed
-[ "$FOUND_ARGV$INSPECT_FOUND$LOGS_FOUND" = "000" ] || VERDICT=failed
+# All three must be a VERIFIED "not found": "found" is a leak and "cannot verify" is an
+# unread producer (docker inspect or docker logs failed), never a pass.
+[ "$ARGV_STATE" = 'not found' ] || VERDICT=failed
+[ "$INSPECT_STATE" = 'not found' ] || VERDICT=failed
+[ "$LOGS_STATE" = 'not found' ] || VERDICT=failed
 if [ "$VERDICT" = ok ]; then
   say "verified: the relay refuses an unauthenticated request, answers with the token, and the token is nowhere it must not be."
 else
-  say "VERIFICATION INCOMPLETE — expected 401/200 above and 'not found' three times."
+  say "VERIFICATION INCOMPLETE — expected 401/200 above and 'not found' three times (no 'found', no 'cannot verify')."
 fi
 [ -n "$UFW_NOTE" ] && say "the old install's ufw rule for 9222 is still there; it is no longer needed: $UFW_NOTE"
 

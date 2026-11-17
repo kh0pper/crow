@@ -1290,7 +1290,7 @@ CRODOCKEREOF
     fi
     if [ "$legacy_readable" = "0" ]; then
       warn "Kept the legacy file $legacy_list: it could not be read, so it is not known whether it is Docker's"
-    elif printf '%s\n' "$legacy_body" | grep -qE '^[[:space:]]*[^#[:space:]].*download\.docker\.com'; then
+    elif grep -qE '^[[:space:]]*[^#[:space:]].*download\.docker\.com' <<<"$legacy_body"; then
       if sudo_cmd rm -f "$legacy_list"; then
         log "Removed the legacy Docker file $legacy_list"
       else

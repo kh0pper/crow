@@ -89,7 +89,8 @@ dryrun_one() { # $1=label  $2=src-db
 
   snapshot "$cp" "$work/post"
   post_uv=$(sqlite3 "$cp" "PRAGMA user_version;")
-  integ=$(sqlite3 "$cp" "PRAGMA integrity_check;" | head -1)
+  # `sed -n 1p`, not `head -1`: head stops reading at the first line and SIGPIPEs sqlite3.
+  integ=$(sqlite3 "$cp" "PRAGMA integrity_check;" | sed -n '1p')
 
   echo "════════ $label ════════"
   # Always name the script that ran — a stale exported DRYRUN_INIT_SCRIPT must
@@ -113,7 +114,10 @@ dryrun_one() { # $1=label  $2=src-db
   obj_delta=$(diff "$work/pre.schema" "$work/post.schema" | grep -E '^[<>]' || true)
   if [ -n "$obj_delta" ]; then
     printf '%s\n' "$obj_delta" | sed 's/^/    /'
-    if printf '%s\n' "$obj_delta" | grep -q '^<'; then
+    # The here-string is the fix, not decoration: `printf … | grep -q` ends grep at its first
+    # match and SIGPIPEs the writer, and under pipefail that made a MATCH read as "no match"
+    # — a removed index/trigger/view passing as "(none)". Same shape below, twice.
+    if grep -q '^<' <<<"$obj_delta"; then
       echo "    ^^^ STOP — schema object(s) REMOVED (index/trigger/view loss is invisible to every other section)"
       FAILED=1
     fi
@@ -122,10 +126,13 @@ dryrun_one() { # $1=label  $2=src-db
   fi
 
   echo "  ── ROW-COUNT DELTAS (what integrity_check cannot see) ──"
-  if join -t$'\t' "$work/pre.counts" "$work/post.counts" 2>/dev/null \
-       | awk -F'\t' '$2!=$3 {print "    " $1 ": " $2 " -> " $3}' | grep -q .; then
-    join -t$'\t' "$work/pre.counts" "$work/post.counts" \
-      | awk -F'\t' '$2!=$3 {print "    " $1 ": " $2 " -> " $3}'
+  # Captured whole, then judged: `join | awk | grep -q .` had two writers that could die of
+  # SIGPIPE, and its exit 1 ("no difference") is indistinguishable from a real failure.
+  local row_delta
+  row_delta=$(join -t$'\t' "$work/pre.counts" "$work/post.counts" 2>/dev/null \
+    | awk -F'\t' '$2!=$3 {print "    " $1 ": " $2 " -> " $3}')
+  if [ -n "$row_delta" ]; then
+    printf '%s\n' "$row_delta"
     echo "    ^^^ STOP — unexplained row loss"
     FAILED=1
   else
@@ -152,8 +159,12 @@ dryrun_one() { # $1=label  $2=src-db
   fi
 
   echo "  ── tables that DISAPPEARED ──"
-  if comm -23 <(cut -f1 "$work/pre.counts" | sort) <(cut -f1 "$work/post.counts" | sort) | grep -q .; then
-    comm -23 <(cut -f1 "$work/pre.counts" | sort) <(cut -f1 "$work/post.counts" | sort) | sed 's/^/    LOST: /'
+  # Captured whole, then judged: `comm … | grep -q .` had the same SIGPIPE inversion, and a
+  # lost table would have printed "(none)".
+  local lost_tables
+  lost_tables=$(comm -23 <(cut -f1 "$work/pre.counts" | sort) <(cut -f1 "$work/post.counts" | sort))
+  if [ -n "$lost_tables" ]; then
+    printf '%s\n' "$lost_tables" | sed 's/^/    LOST: /'
     FAILED=1
   else
     echo "    (none)"
@@ -163,7 +174,7 @@ dryrun_one() { # $1=label  $2=src-db
   rm -rf "$work"
 }
 
-[ $# -lt 2 ] && { grep '^# ' "$0" | sed 's/^# \?//' | head -44; exit 2; }
+[ $# -lt 2 ] && { grep '^# ' "$0" | sed 's/^# \?//' | sed -n '1,44p'; exit 2; }
 while [ $# -ge 2 ]; do dryrun_one "$1" "$2"; shift 2; echo; done
 
 if [ "$FAILED" -eq 0 ]; then

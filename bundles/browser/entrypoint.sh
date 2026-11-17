@@ -234,10 +234,14 @@ listener_uid_is() {
 # child_pid_matching PARENT REGEX — a child of PARENT whose command line matches REGEX.
 # pgrep does it when procps is in the image; /proc answers the same way when it is not, so
 # a missing pgrep can never turn a healthy container into a fatal one.
+# No `cmd | grep -q` here: grep stops at its first match and SIGPIPEs the producer, and under
+# `set -o pipefail` that made a MATCH read as "no match" (see the CDP-token detector in
+# scripts/ops/browser-cdp-gate.sh for the same shape). The producer is read in full first.
 child_pid_matching() {
   local parent="$1" want="$2" pid found=""
   if command -v pgrep >/dev/null 2>&1; then
-    pgrep -P "$parent" -f "$want" 2>/dev/null | head -n 1
+    # `sed -n 1p`, never `head -n 1`: head stops reading and SIGPIPEs pgrep.
+    pgrep -P "$parent" -f "$want" 2>/dev/null | sed -n '1p'
     return 0
   fi
   for pid in /proc/[0-9]*; do
@@ -245,7 +249,7 @@ child_pid_matching() {
     # comm comes second and is parenthesised; the processes looked at here have a
     # one-word comm (chrome, node), so $4 is the ppid.
     [ "$(awk '{print $4}' "/proc/${pid}/stat" 2>/dev/null)" = "$parent" ] || continue
-    tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | grep -qE "$want" || continue
+    grep -qE "$want" <<<"$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)" || continue
     found="$pid"; break
   done
   [ -n "$found" ] && printf '%s\n' "$found"
@@ -352,7 +356,9 @@ kill -0 "$WEBSOCKIFY_PID" 2>/dev/null || die "websockify failed to start"
 require_loopback "${NOVNC_PORT}" websockify
 
 # --- Chromium, behind the CDP relay ---
-CHROME_PATH=$(find /root/.cache/ms-playwright -name "chrome" -type f 2>/dev/null | head -1)
+# `find … | sed -n 1p`, not `find … | head -1`: head stops reading and SIGPIPEs find, and
+# under pipefail the assignment would take find's 141 instead of its own match.
+CHROME_PATH=$(find /root/.cache/ms-playwright -name "chrome" -type f 2>/dev/null | sed -n '1p')
 [ -n "$CHROME_PATH" ] || die "Chrome not found in Playwright cache"
 
 # Optional upstream proxy (http://host:port or socks5://host:port). Empty = direct.

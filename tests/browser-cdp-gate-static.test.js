@@ -164,8 +164,8 @@ test("the CDP token arrives as a 0400 file, is checked before the browser starts
   assert.doesNotMatch(SHELL, /export CROW_BROWSER_CDP_TOKEN/);
 });
 
-test("the manifest bumps to 1.7.0, refreshes the four files, requires the token, and drops 9222 from ports", () => {
-  assert.equal(MANIFEST.version, "1.7.0", "the uid split changes the container, so installed copies must refresh");
+test("the manifest bumps to 1.7.1, refreshes the four files, requires the token, and drops 9222 from ports", () => {
+  assert.equal(MANIFEST.version, "1.7.1", "the uid split changes the container, so installed copies must refresh");
   assert.deepEqual(
     MANIFEST.refreshFiles,
     ["docker-compose.yml", "Dockerfile", "entrypoint.sh", "cdp-relay.mjs"],

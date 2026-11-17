@@ -78,7 +78,9 @@ cleanup() {
 
   # 5. verify
   docker exec "$CTR" test ! -e "$PLUGIN_DIR" && echo "[cleanup] verified: plugin dir gone" || warn "plugin dir still present"
-  curl -s "http://127.0.0.1:3071/plugins.json" | grep -q "0C0FFEE0" && warn "plugins.json still lists the probe" || echo "[cleanup] verified: plugins.json does not list the probe"
+  # Producers are read whole, then grepped from a here-string: `curl … | grep -q` ends grep at
+  # its first match and SIGPIPEs curl, and under pipefail that reads as "no match".
+  if grep -q "0C0FFEE0" <<<"$(curl -s "http://127.0.0.1:3071/plugins.json")"; then warn "plugins.json still lists the probe"; else echo "[cleanup] verified: plugins.json does not list the probe"; fi
   # 6. the Serve map must be exactly the pre-probe baseline (the 8457 root -> 127.0.0.1:3071 handler is the live editor)
   if [ -s "$STATE/serve-baseline.json" ]; then
     if serve_map "$TSBIN" "$NODE" >"$STATE/serve-after.json" 2>/dev/null && cmp -s "$STATE/serve-baseline.json" "$STATE/serve-after.json"; then
@@ -135,7 +137,7 @@ NODE=$(command -v node) || { echo "node not found" >&2; exit 1; }
 TSBIN=$(command -v tailscale) || { echo "tailscale not found" >&2; exit 1; }
 for f in config.json index.html probe.js icon.png listener.mjs; do [ -f "$KIT/$f" ] || { echo "missing $KIT/$f" >&2; exit 1; }; done
 for e in docx xlsx pptx; do [ -f "$REPO/tests/fixtures/workspace/rich.$e" ] || { echo "missing rich.$e (run make-fixtures.py)" >&2; exit 1; }; done
-docker inspect -f '{{.State.Running}}' "$CTR" 2>/dev/null | grep -q true || { echo "$CTR is not running" >&2; exit 1; }
+grep -q true <<<"$(docker inspect -f '{{.State.Running}}' "$CTR" 2>/dev/null)" || { echo "$CTR is not running" >&2; exit 1; }
 if (exec 3<>/dev/tcp/127.0.0.1/3399) 2>/dev/null; then echo "port 3399 is busy; stop whatever holds it first" >&2; exit 1; fi
 if docker exec "$CTR" test -e "$PLUGIN_DIR"; then warn "a probe plugin dir is already in the container (an earlier run?); it will be replaced and removed"; fi
 
@@ -198,7 +200,9 @@ docker cp "$STAGE" "$CTR:$PLUGIN_DIR" || exit 1
 docker exec "$CTR" documentserver-flush-cache.sh >/dev/null || exit 1
 pj=$(curl -s "http://127.0.0.1:3071/sdkjs-plugins/%7B0C0FFEE0-5EED-4C8B-9B57-000000000001%7D/config.json" -o /dev/null -w '%{http_code}')
 echo "plugin config.json served: HTTP $pj"
-if curl -s http://127.0.0.1:3071/plugins.json | grep -q 0C0FFEE0; then echo "plugins.json lists the probe"
+# Read the list whole, then grep it: `curl … | grep -q` SIGPIPEs curl at grep's first match,
+# and under pipefail that would report "does NOT list the probe" for a probe that is listed.
+if grep -q 0C0FFEE0 <<<"$(curl -s http://127.0.0.1:3071/plugins.json)"; then echo "plugins.json lists the probe"
 else
   warn "plugins.json does NOT list the probe. The document server may build its plugin list only at start;"
   warn "restarting the editor container would cut open sessions, so this script stops here. Tell Claude: S9 needs a restart decision."

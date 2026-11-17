@@ -179,5 +179,6 @@ fi
 log "Update complete."
 echo ""
 echo "  Previous: ${PREV_REF:0:8}"
-echo "  Current:  $(git "${GIT_SAFE[@]}" rev-parse HEAD | head -c 8)"
+# `cut`, not `head -c 8`: head stops reading after 8 bytes and SIGPIPEs git.
+echo "  Current:  $(git "${GIT_SAFE[@]}" rev-parse HEAD | cut -c 1-8)"
 echo "  Log:      ${LOG_FILE}"

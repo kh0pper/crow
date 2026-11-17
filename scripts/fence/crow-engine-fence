@@ -947,7 +947,8 @@ boot_backend() { # prints the backend word from daemon.json
 
 facts_field() { # <key> -> the first string value, or nothing
   [ -r "$FACTS" ] || return 1
-  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" -- "$FACTS" | head -n1
+  # `sed -n 1p`, not `head -n1`: head stops reading at the first line and SIGPIPEs sed.
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" -- "$FACTS" | sed -n '1p'
 }
 
 facts_bridge_label_ok() { # <name> -> true | false | missing
@@ -956,7 +957,7 @@ facts_bridge_label_ok() { # <name> -> true | false | missing
     printf 'missing'
     return 0
   }
-  line=$(grep -F "\"$name\": {" -- "$FACTS" 2>/dev/null | head -n1) || line=''
+  line=$(grep -F "\"$name\": {" -- "$FACTS" 2>/dev/null | sed -n '1p') || line=''
   case $line in
     '') printf 'missing' ;;
     *'"label_ok": true'*) printf 'true' ;;
@@ -1348,7 +1349,10 @@ cmd_status() {
       printf '  %s port %s: port-only (tailnet address unresolved)\n' "$id" "${PUB_PORT[i]}"
     fi
     tag="crow-engine-fence:$id:"
-    if ! printf '%s\n%s\n' "$live4" "$live6" | grep -qF "$tag"; then
+    # The here-string is the fix: `printf … | grep -qF` ends grep at its first match and SIGPIPEs
+    # printf, and under pipefail that made a MATCH read as "no rule carries the tag" — a WARN
+    # for a rule that is right there in the live chain.
+    if ! grep -qF "$tag" <<<"$(printf '%s\n%s\n' "$live4" "$live6")"; then
       printf '  WARN: %s is in the conf but no live rule carries its tag: a removed rule comes back on the next apply\n' "$id"
     fi
   done
