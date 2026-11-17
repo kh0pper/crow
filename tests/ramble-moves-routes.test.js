@@ -195,6 +195,20 @@ test("GET /moves/library: reviewed entries only, no pose data; the detail route 
   assert.equal((await get("/api/ramble/moves/library/Bad%20Id")).status, 400);
 });
 
+test("GET /moves/anatomy: the whole anatomy vocabulary, one record per structure", async () => {
+  const r = await get("/api/ramble/moves/anatomy");
+  assert.equal(r.status, 200);
+  const body = await r.json();
+  assert.equal(Array.isArray(body.vocab), true, "the route answers a vocab array");
+  assert.equal(body.vocab.length, 64, "every structure anatomy/vocab.json names");
+  assert.equal(new Set(body.vocab.map((record) => record.id)).size, 64, "no id twice");
+  for (const record of body.vocab) {
+    assert.equal(typeof record.id, "string", "a record carries its id");
+    assert.ok(["muscle", "bone", "nerve"].includes(record.layer), record.id + " names its layer");
+    assert.equal(Array.isArray(record.segments), true, record.id + " names the segments it is drawn on");
+  }
+});
+
 /* ---------------------------------------- the player's words (7.6) */
 
 const COPY_PINS = JSON.parse(readFileSync(join(__dir, "ramble-moves-player-copy.pins.json"), "utf8"));

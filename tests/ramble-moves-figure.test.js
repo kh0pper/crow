@@ -253,6 +253,204 @@ test("poseSvg output survives a junk pose without NaN in the markup", () => {
   assert.ok(!/NaN|Infinity/.test(svg), svg);
 });
 
+/* ── Colour bands, arrows and labels ──────────────────────────────────────
+ * The decoration layers are optional: without them poseSvg draws exactly the
+ * bare figure above, so the tests below always anchor on that bare call. */
+const LINES = /<line /g;
+const CIRCLES = /<circle /g;
+const count = (svg, re) => (svg.match(re) || []).length;
+const frame = (svg) => svg.match(/viewBox="([^"]+)"/)[1].split(" ").map(Number);
+const groups = (svg, attr) => {
+  const re = new RegExp('<g data-layer="' + attr + '"[^>]*>([\\s\\S]*?)<\\/g>', "g");
+  const out = [];
+  let m;
+  while ((m = re.exec(svg))) out.push(m[1]);
+  return out;
+};
+const group = (svg, attr) => groups(svg, attr)[0] || "";
+
+test("poseSvg: no bands, arrows, labels or layers is the bare figure", () => {
+  for (const [name, pose] of POSES) {
+    const bare = Figure.poseSvg(pose, { size: 200 });
+    assert.equal(Figure.poseSvg(pose, {
+      size: 200, bands: undefined, arrows: undefined, labels: undefined, layers: undefined,
+    }), bare, name + ": an opts object with nothing in it changes nothing");
+    assert.equal(Figure.poseSvg(pose, {
+      size: 200, bands: {}, arrows: [], labels: [], layers: {},
+    }), bare, name + ": empty decoration lists change nothing");
+    assert.ok(!bare.includes("data-layer"), name + ": no decoration groups in the bare figure");
+    assert.ok(!bare.includes("<text"), name + ": no text nodes in the bare figure");
+  }
+});
+
+test("poseSvg bands: working is blue over the base line, lengthening red and dashed, both sides", () => {
+  const bare = Figure.poseSvg(DOWNDOG, { size: 200 });
+  const svg = Figure.poseSvg(DOWNDOG, {
+    size: 200, bands: { working: ["thigh", "upperArm"], lengthening: ["shin"] },
+  });
+  const muscles = groups(svg, "muscles");
+  assert.equal(muscles.length, 2, "one group for working, one for lengthening");
+  assert.match(svg, /<g data-layer="muscles" stroke="#2f6fdb"/, "working bands are blue");
+  assert.match(svg, /<g data-layer="muscles" stroke="#c8423b" stroke-width="[\d.]+" stroke-dasharray="[^"]+"/,
+    "lengthening bands are red and dashed, so colour is not the only signal");
+  assert.equal(count(muscles[0], LINES), 4, "thigh and upperArm are each drawn near and far");
+  assert.equal(count(muscles[1], LINES), 2, "shin is drawn near and far");
+  assert.equal(count(svg, LINES), count(bare, LINES) + 6, "bands are extra strokes over the base figure");
+  assert.deepEqual(frame(svg), frame(bare), "bands need no extra room");
+
+  const head = Figure.poseSvg(STANDING, { size: 160, bands: { working: ["head"] } });
+  assert.match(group(head, "muscles"), /^<circle /, "the head circle can be banded too");
+
+  const dashed = Figure.poseSvg(STANDING, { size: 160, bands: { lengthening: ["foot"] } });
+  assert.equal(count(group(dashed, "muscles"), LINES), 2, "feet are two segments");
+});
+
+test("poseSvg: unknown segment names are ignored in bands and labels", () => {
+  const bare = Figure.poseSvg(STANDING, { size: 160 });
+  assert.equal(Figure.poseSvg(STANDING, {
+    size: 160, bands: { working: ["wing", 42, null], lengthening: "torso" },
+  }), bare, "unknown names and a non-array list draw nothing");
+  assert.equal(Figure.poseSvg(STANDING, {
+    size: 160, labels: [{ segment: "wing", text: "wing" }, { segment: "__proto__", text: "x" }],
+  }), bare, "an unknown or inherited segment name gets no label");
+});
+
+test("poseSvg layers: skeleton dots per joint, nerves dotted along the spine, muscles switchable", () => {
+  const bare = Figure.poseSvg(TREE, { size: 160 });
+  const joints = Object.keys(Figure.solve(TREE, 100).joints);
+
+  const skel = Figure.poseSvg(TREE, { size: 160, layers: { skeleton: true } });
+  assert.equal(count(group(skel, "skeleton"), CIRCLES), joints.length, "one dot per solved joint");
+  assert.equal(count(skel, CIRCLES), count(bare, CIRCLES) + joints.length,
+    "the dots are added on top of the head circle");
+  assert.match(group(skel, "skeleton"), /^<circle /, "the layer holds plain circles");
+
+  const nerves = Figure.poseSvg(TREE, { size: 160, layers: { nerves: true } });
+  assert.match(nerves, /<g data-layer="nerves"[^>]*stroke-dasharray="[^"]+"/, "the spine line is dotted");
+  assert.equal(count(group(nerves, "nerves"), LINES), 2, "mid to shoulder, shoulder to chin");
+  assert.equal(count(nerves, LINES), count(bare, LINES) + 2);
+
+  assert.equal(Figure.poseSvg(TREE, { size: 160, layers: { skeleton: "yes", nerves: 1 } }), bare,
+    "only true turns a layer on");
+
+  const bands = { working: ["thigh"] };
+  assert.ok(Figure.poseSvg(TREE, { size: 160, bands }).includes("#2f6fdb"), "bands are on by default");
+  assert.equal(Figure.poseSvg(TREE, { size: 160, bands, layers: { muscles: false } }), bare,
+    "layers.muscles === false turns the bands off");
+  assert.notEqual(Figure.poseSvg(TREE, { size: 160, bands, layers: { muscles: true } }), bare);
+});
+
+test("poseSvg arrows: one line group each, drawn from the anchor joint in the asked direction", () => {
+  const bare = Figure.poseSvg(LUNGE, { size: 180 });
+  const one = Figure.poseSvg(LUNGE, { size: 180, arrows: [{ from: "hips", direction: "forward" }] });
+  assert.equal(count(one, /<g data-layer="arrow"/g), 1, "one group per arrow");
+  const shaft = group(one, "arrow").match(/<line x1="([-\d.]+)" y1="([-\d.]+)" x2="([-\d.]+)" y2="([-\d.]+)"/);
+  assert.ok(shaft, "the group starts with the shaft");
+  const [, x1, y1, x2, y2] = shaft.map(Number);
+  assert.ok(Number.isFinite(x1) && Number.isFinite(y1) && Number.isFinite(x2) && Number.isFinite(y2));
+  assert.ok(x2 > x1, "forward is +x (the figure faces right)");
+  assert.equal(y2, y1, "a forward arrow is level");
+  const hip = Figure.solve(LUNGE, 100).joints.hip;
+  assert.ok(Math.abs(x1 - hip.x) < 0.06 && Math.abs(y1 - hip.y) < 0.06, "it starts at the solved hip");
+  assert.equal(count(group(one, "arrow"), LINES), 3, "shaft plus a two-line head");
+
+  const all = Figure.poseSvg(LUNGE, {
+    size: 180,
+    arrows: ["hands", "feet", "knees", "hips", "elbows", "shoulders", "head", "back", "chest", "heels"]
+      .map((from, i) => ({ from, direction: ["up", "down", "forward", "back", "out"][i % 5] })),
+  });
+  assert.equal(count(all, /<g data-layer="arrow"/g), 10, "every documented anchor draws");
+  assert.equal(count(all, LINES), count(bare, LINES) + 30);
+  assert.ok(!/NaN|Infinity/.test(all));
+
+  const none = Figure.poseSvg(LUNGE, {
+    size: 180,
+    arrows: [
+      { from: "wings", direction: "up" }, { from: "hands", direction: "sideways" },
+      { from: "hips" }, "hips", null, 7, { from: 5, direction: "up" },
+    ],
+  });
+  assert.equal(none, bare, "unknown anchors, unknown directions and junk entries draw nothing");
+});
+
+test("poseSvg labels: text is escaped and capped, a leader line is drawn, the frame widens", () => {
+  const bare = Figure.poseSvg(FOLD, { size: 220 });
+  const one = Figure.poseSvg(FOLD, { size: 220, labels: [{ segment: "torso", text: "<b>x</b>" }] });
+  assert.ok(!one.includes("<b>"), "markup in a label is escaped, never raw");
+  assert.ok(one.includes("&lt;b&gt;x&lt;/b&gt;"), "it reaches the markup as text");
+  assert.equal(count(group(one, "labels"), LINES), 1, "one leader line per label");
+  assert.equal(count(one, LINES), count(bare, LINES) + 1);
+  assert.ok(frame(one)[2] > frame(bare)[2], "the viewBox widens, so the figure zooms out to make room");
+  assert.equal(frame(one)[1], frame(bare)[1], "the top of the frame is unchanged");
+  assert.ok(one.includes('aria-hidden="true"'));
+
+  const escaped = Figure.poseSvg(STANDING, {
+    size: 200, labels: [{ segment: "neck", text: "a&b<c>d\"e'f" }],
+  });
+  assert.ok(escaped.includes("a&amp;b&lt;c&gt;d&quot;e&#39;f"), "all five characters are escaped");
+  assert.ok(!escaped.includes("a&b<c>d"), "the raw text never reaches the markup");
+
+  const long = Figure.poseSvg(STANDING, {
+    size: 200, labels: [{ segment: "torso", text: "x".repeat(120) }],
+  });
+  assert.ok(long.includes(">" + "x".repeat(40) + "<"), "label text is capped at 40 characters");
+  assert.ok(!long.includes("x".repeat(41)));
+
+  const stacked = Figure.poseSvg(STANDING, {
+    size: 200,
+    labels: [{ segment: "head", text: "Head" }, { segment: "shin", text: "Shin" },
+      { segment: "hand", text: 12 }],
+  });
+  assert.equal(count(group(stacked, "labels"), LINES), 3, "each placed label gets its leader");
+  assert.ok(stacked.includes(">12<"), "a number is rendered as its own digits");
+  const narrow = Figure.poseSvg(STANDING, { size: 200, labels: [{ segment: "head", text: "Head" }] });
+  const wider = Figure.poseSvg(STANDING, { size: 200, labels: [{ segment: "head", text: "Head and neck" }] });
+  assert.ok(frame(wider)[2] > frame(narrow)[2], "the column follows the widest label");
+  assert.deepEqual(frame(stacked), frame(narrow), "stacking more short labels does not widen the frame");
+  assert.equal(Figure.poseSvg(STANDING, { size: 200, labels: [
+    { segment: "head", text: "Head" }, { segment: "shin", text: "Shin" }, { segment: "hand", text: 12 },
+  ] }), stacked, "deterministic");
+});
+
+test("poseSvg decorations stay inert and never put junk in the markup", () => {
+  const svg = Figure.poseSvg(DOWNDOG, {
+    size: 200,
+    bands: { working: ["torso", "thigh"], lengthening: ["neck", "shin"] },
+    arrows: [{ from: "hips", direction: "up", label: "Hips" }, { from: "hands", direction: "down" }],
+    labels: [{ segment: "head", text: "Head" }],
+    layers: { skeleton: true, nerves: true },
+  });
+  assert.ok(svg.startsWith("<svg "));
+  assert.ok(svg.endsWith("</svg>"));
+  assert.ok(svg.includes('aria-hidden="true"'));
+  assert.ok(!svg.includes("xmlns"), "no namespace attribute");
+  assert.ok(!/https?:|javascript:|\/\//i.test(svg), "no URL-shaped strings");
+  assert.ok(!/<script/i.test(svg));
+  assert.ok(!/\son[a-z]+\s*=/i.test(svg), "no on* handlers");
+  assert.ok(!/NaN|Infinity/.test(svg));
+  assert.ok(!svg.includes("`") && !svg.includes("${"), "safe inside a template literal");
+
+  const junk = [null, undefined, "bands", 7, NaN, [], true, { bands: "torso" },
+    { bands: { working: "torso", lengthening: { 0: "shin" } } },
+    { bands: { working: [null, {}, [], "thigh"], lengthening: [NaN] } },
+    { arrows: "hands", labels: "torso", layers: "skeleton" },
+    { arrows: [NaN, {}, { from: null, direction: 3 }, { from: "hands", direction: "up", label: {} }] },
+    { labels: [null, 5, "torso", { segment: 7 }, { segment: "torso" },
+      { segment: "torso", text: {} }, { segment: "head", text: "" }, { segment: "head", text: NaN }] },
+    { layers: { skeleton: "yes", nerves: [], muscles: "no" } },
+    { size: NaN, bands: { working: ["head"] }, arrows: [{ from: "head", direction: "down" }],
+      labels: [{ segment: "pelvis", text: "Pelvis" }], layers: { skeleton: true, nerves: true } }];
+  for (const opts of junk) {
+    assert.doesNotThrow(() => Figure.poseSvg(LUNGE, opts), "opts " + JSON.stringify(opts));
+    const out = Figure.poseSvg(LUNGE, opts);
+    assert.ok(!/NaN|Infinity|undefined/.test(out), "no junk values for opts " + JSON.stringify(opts));
+    assert.ok(out.startsWith("<svg ") && out.endsWith("</svg>"), "still a whole svg");
+  }
+  assert.equal(Figure.poseSvg(LUNGE, { arrows: [{ from: "hands", direction: "up", label: {} }] }),
+    Figure.poseSvg(LUNGE, { arrows: [{ from: "hands", direction: "up" }] }),
+    "a non-text arrow label adds nothing");
+});
+
 test("no ESM syntax (must load as a classic browser script)", async () => {
   const src = readFileSync(new URL("../bundles/ramble/server/moves/figure.cjs", import.meta.url), "utf8");
   assert.ok(!/^\s*(import|export)\s/m.test(src));
