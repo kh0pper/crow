@@ -5759,6 +5759,21 @@ export const translations = {
   "mail.fieldSmtpPort": { en: "SMTP port", es: "Puerto SMTP" },
   "mail.fieldSecurity": { en: "Security", es: "Seguridad" },
   "mail.remove": { en: "Remove", es: "Quitar" },
+  // Plan 3, Task 13's settings controls, in the operator-approved copy: the working-hours heading,
+  // its two fields and their help line, the cloud-drafting switch and its help, and the per-account
+  // Sent-copy choice with its own help. The card's own title has no approved Spanish yet, so it keeps
+  // its English on both sides.
+  "mail.mailSettings": { en: "Mail settings", es: "Mail settings" }, // operator copy not yet supplied
+  "mail.workingHoursHeading": { en: "Working hours", es: "Horario de trabajo" },
+  "mail.workingHoursStart": { en: "Start", es: "Inicio" },
+  "mail.workingHoursEnd": { en: "End", es: "Fin" },
+  "mail.workingHoursHelp": { en: "Used for the \"Tomorrow morning\" and \"Next work day\" times when you schedule a message.", es: "Se usa para las horas de \"Mañana por la mañana\" y \"Próximo día laborable\" al programar un mensaje." },
+  "mail.cloudDrafting": { en: "Allow cloud models to draft", es: "Permitir que modelos en la nube redacten" },
+  "mail.cloudDraftingHelp": { en: "Off by default. When on, the text of an email thread is sent to the cloud model the bot uses.", es: "Desactivado de forma predeterminada. Si lo activas, el texto de un hilo de correo se envía al modelo en la nube que usa el bot." },
+  "mail.sentCopy": { en: "Save a copy to Sent", es: "Guardar una copia en Enviados" },
+  "mail.sentCopyProvider": { en: "The mail provider saves it", es: "El proveedor de correo la guarda" },
+  "mail.sentCopyAppend": { en: "Crow saves it", es: "Crow la guarda" },
+  "mail.sentCopyHelp": { en: "Gmail and Microsoft accounts file their own copy. Pick \"Crow saves it\" for other accounts.", es: "Las cuentas de Gmail y Microsoft guardan su propia copia. Elige \"Crow la guarda\" para las demás cuentas." },
   // The reader's client script (Task 8): the one word its refresh status line shows, and the fixed
   // sentence it shows for each API failure code. The English sentences are plan 1's mail error text
   // verbatim (`servers/gateway/mail/errors.js`), with `changed_on_server` carrying the sentence its
@@ -5822,6 +5837,111 @@ export const translations = {
   "mail.doneDeleted": { en: "Deleted.", es: "Eliminado." },
   "mail.doneMoved": { en: "Moved to {folder}.", es: "Movido a {folder}." },
   "mail.doneUnread": { en: "Marked unread.", es: "Marcado como no leído." },
+  // Crow Mail's draft card in chat (plan 3, Task 10a), in the operator-approved copy: the card's own
+  // sentences, its controls and its refusal lines. A key with no approved row keeps its English on
+  // both sides and says so.
+  "mail.draftHead": { en: "{bot} · Reply to: {subject}", es: "{bot} · Responder a: {subject}" },
+  // A draft written from nothing has no reply to name: two placeholders and a dot, no words.
+  "mail.draftHeadNew": { en: "{bot} · {subject}", es: "{bot} · {subject}" },
+  "mail.draftTo": { en: "To", es: "To" }, // operator copy not yet supplied
+  "mail.draftCc": { en: "Cc", es: "Cc" }, // "Cc" is the same label in Spanish mail clients
+  "mail.draftBcc": { en: "Bcc", es: "Bcc" }, // operator copy not yet supplied
+  "mail.draftSubject": { en: "Subject", es: "Subject" }, // operator copy not yet supplied
+  "mail.draftNoSubject": { en: "(no subject)", es: "(sin asunto)" },
+  "mail.draftFromLine": { en: "From {account} · Draft {n}", es: "Desde {account} · Borrador {n}" },
+  "mail.draftFollowsRules": { en: "follows your writing rules", es: "sigue tus reglas de redacción" },
+  "mail.draftNotChecked": { en: "Not checked for your writing style", es: "Sin revisar tu estilo de escritura" },
+  "mail.draftSend": { en: "Send", es: "Enviar" },
+  "mail.draftSchedule": { en: "Schedule", es: "Programar" },
+  "mail.draftMore": { en: "...", es: "..." }, // an ellipsis: no words to translate
+  // The accessible name of the "..." overflow button (the approved copy's own row for it).
+  "mail.draft.moreName": { en: "More", es: "Más" },
+  "mail.draftEdit": { en: "Edit by hand", es: "Editar a mano" },
+  "mail.draftSaveDraft": { en: "Save as draft", es: "Guardar como borrador" },
+  "mail.draftDiscard": { en: "Discard", es: "Descartar" },
+  "mail.draftHistory": { en: "Draft history", es: "Historial del borrador" },
+  "mail.draftHistoryRow": { en: "Draft {n} · {author}", es: "Draft {n} · {author}" }, // operator copy not yet supplied
+  "mail.draftNewRecipient": { en: "New recipient", es: "Destinatario nuevo" },
+  "mail.draftChanged": { en: "Changed in Draft {n}", es: "Cambió en el borrador {n}" },
+  "mail.draftReplyToDiffers": { en: "Reply goes to {address}, not the sender", es: "La respuesta va a {address}, no al remitente" },
+  "mail.draftNote": { en: "Tell the bot...", es: "Dile algo al bot..." },
+  "mail.draftRevising": { en: "Bot is revising this line...", es: "El bot está revisando esta línea..." },
+  "mail.draftSending": { en: "Sending in 10 s", es: "Se envía en 10 s" },
+  // The claimed, in-flight state: no hold is left to count down, so the card says nothing it cannot
+  // know. Neutral on purpose, and not the hold's line above.
+  "mail.draftSendingState": { en: "Sending...", es: "Sending..." }, // operator copy not yet supplied
+  "mail.draftUndo": { en: "Undo", es: "Deshacer" },
+  "mail.draftScheduled": { en: "Scheduled for {day} {time} from {account}", es: "Programado para el {day} a las {time} desde {account}" },
+  "mail.draftChangeTime": { en: "Change time", es: "Cambiar la hora" },
+  "mail.draftCancelSend": { en: "Cancel send", es: "Cancelar el envío" },
+  "mail.draftMissed": { en: "This was due at {time} and did not go out. Send now, pick a new time, or cancel.", es: "Esto debía salir a las {time} y no se envió. Envíalo ahora, elige otra hora o cancélalo." },
+  "mail.draftChangedSentence": { en: "The draft just changed. Check it and press Send again.", es: "El borrador acaba de cambiar. Revísalo y pulsa Enviar de nuevo." },
+  "mail.draftUnknown": { en: "We could not confirm this went out. Check your Sent folder, then press Send again only if it is not there.", es: "No pudimos confirmar que se envió. Revisa tu carpeta de enviados y pulsa Enviar de nuevo solo si no está ahí." },
+  "mail.draftSent": { en: "Sent from {account} at {time}", es: "Enviado desde {account} a las {time}" },
+  "mail.draftSyncing": { en: "Sent, syncing...", es: "Enviado, sincronizando..." },
+  "mail.draftSize": { en: "{n} MB of {max} MB", es: "{n} MB de {max} MB" },
+  "mail.draftFailed": { en: "This draft did not go out.", es: "This draft did not go out." }, // operator copy not yet supplied
+  "mail.draftDiscarded": { en: "Discarded.", es: "Discarded." }, // operator copy not yet supplied
+  "mail.draftConfirmSend": { en: "Send it again", es: "Send it again" }, // operator copy not yet supplied
+  "mail.draftEditCancelsSchedule": { en: "Editing cancels the schedule.", es: "Si lo editas, se cancela la programación." },
+  "mail.draftWritingRules": { en: "Writing rules", es: "Reglas de redacción" },
+  // The audience chips' labels have no approved copy yet: they keep their English on both sides.
+  "mail.draftAudience": { en: "Who it is for", es: "Who it is for" }, // operator copy not yet supplied
+  "mail.draftAudienceColleague": { en: "Colleague", es: "Colleague" }, // operator copy not yet supplied
+  "mail.draftAudienceClient": { en: "Client", es: "Client" }, // operator copy not yet supplied
+  "mail.draftAudiencePersonal": { en: "Personal", es: "Personal" }, // operator copy not yet supplied
+  "mail.draftComment": { en: "Comment", es: "Comment" }, // operator copy not yet supplied
+  "mail.draftRevise": { en: "Request changes", es: "Pedir cambios" },
+  "mail.draftNoteSend": { en: "Ask the bot", es: "Ask the bot" }, // operator copy not yet supplied
+  "mail.draftOffline": { en: "No connection.", es: "No connection." }, // operator copy not yet supplied
+  "mail.draftError": { en: "Something went wrong. Try again.", es: "Algo salió mal. Inténtalo de nuevo." },
+  "mail.draftNotOwner": { en: "Only the owner can see this draft.", es: "Only the owner can see this draft." }, // operator copy not yet supplied
+  // The card's refusal lines, one per code the routes answer (the approved copy's refusal table).
+  "mail.draftFrozen": { en: "This draft is on its way, so it cannot be changed now.", es: "Este borrador ya está en camino, así que no se puede cambiar ahora." },
+  "mail.draftCloudOff": { en: "This bot uses a cloud model, and cloud drafting is off. Turn it on in Mail settings, or pick a bot that runs on this computer.", es: "Este bot usa un modelo en la nube y el borrador con modelos en la nube está desactivado. Actívalo en los ajustes de Correo o elige un bot que se ejecute en este equipo." },
+  "mail.draftLocalOnly": { en: "This account only allows bots that run on this computer. Pick a different bot.", es: "Esta cuenta solo permite bots que se ejecutan en este equipo. Elige otro bot." },
+  "mail.draftTurnOff": { en: "Drafting with a bot is not available on this Crow right now. You can still write the message by hand.", es: "Redactar con un bot no está disponible en este Crow por ahora. Aun así, puedes escribir el mensaje a mano." },
+  "mail.draft.refuse.unavailable": { en: "Crow could not start the bot just now. Try again.", es: "Crow no pudo iniciar el bot ahora. Inténtalo de nuevo." },
+  "mail.draftNotScheduled": { en: "This message is no longer scheduled.", es: "Este mensaje ya no está programado." },
+  "mail.draftNotDiscardable": { en: "This message cannot be discarded now. Cancel the send first, or it may already be sent.", es: "Este mensaje no se puede descartar ahora. Cancela el envío primero; puede que ya se haya enviado." },
+  "mail.draftNeedsCancel": { en: "This message is scheduled. Cancel the send first to change it.", es: "Este mensaje está programado. Cancela el envío primero para poder cambiarlo." },
+  "mail.draft.refuse.placeholders": { en: "Fill in the [bracketed] parts before sending.", es: "Completa las partes entre [corchetes] antes de enviar." },
+  "mail.draft.refuse.no_recipients": { en: "Add at least one recipient.", es: "Añade al menos un destinatario." },
+  "mail.draft.refuse.bad_address": { en: "One of the addresses is not valid.", es: "Una de las direcciones no es válida." },
+  "mail.draft.refuse.too_large": { en: "The attachments are over about 18 MB. Remove some to send.", es: "Los adjuntos pasan de unos 18 MB. Quita alguno para poder enviar." },
+  "mail.draft.partialRejected": { en: "Sent. The mail server refused some recipients.", es: "Enviado. El servidor de correo rechazó a algunos destinatarios." },
+  "mail.draft.notSendable": { en: "This account cannot send mail yet.", es: "Esta cuenta todavía no puede enviar correo." },
+  "mail.draft.saveDraft.notFound": { en: "Crow could not find this account's Drafts folder.", es: "Crow no pudo encontrar la carpeta Borradores de esta cuenta." },
+  "mail.draftSavedDraft": { en: "Saved to {folder}.", es: "Guardado en {folder}." },
+  "mail.draftScheduleUnavailable": { en: "Scheduling is not open yet.", es: "Scheduling is not open yet." }, // operator copy not yet supplied
+  // Crow Mail's schedule sheet (plan 3, Task 10b), in the operator-approved copy: the two shortcuts,
+  // the picked date and time, the box-must-be-on line and the two window refusals.
+  "mail.scheduleTomorrowMorning": { en: "Tomorrow morning", es: "Mañana por la mañana" },
+  "mail.scheduleNextWorkDay": { en: "Next work day", es: "Próximo día laborable" },
+  "mail.schedulePick": { en: "Pick date and time", es: "Elegir fecha y hora" },
+  "mail.schedulePickMissing": { en: "Choose a date and a time.", es: "Choose a date and a time." }, // operator copy not yet supplied
+  "mail.scheduleDateLabel": { en: "Date", es: "Date" }, // operator copy not yet supplied
+  "mail.scheduleTimeLabel": { en: "Time", es: "Time" }, // operator copy not yet supplied
+  // The plan's sentence, verbatim (Global Constraints and Task 10b): a scheduled send is held by this
+  // Crow, so the box must be on.
+  "mail.scheduleBoxOn": { en: "It goes out at that time only because you scheduled it. You can change or cancel it until then. Crow sends it itself, so this computer must be on.", es: "Se envía a esa hora solo porque lo programaste. Puedes cambiarlo o cancelarlo hasta entonces. Crow lo envía por sí mismo, así que este equipo debe estar encendido." },
+  "mail.scheduleTooFar": { en: "You can schedule up to 90 days ahead.", es: "Puedes programar hasta con 90 días de anticipación." },
+  // The other window the server refuses: a time already gone, or inside the minute's lead.
+  "mail.sched.past": { en: "Pick a time at least a minute from now.", es: "Elige una hora que falte al menos un minuto." },
+  // Crow Mail's reply slot (plan 3, Task 11), in the operator-approved copy: the five action labels,
+  // the picker's two lines and the reason frame. The instruction a chosen bot is handed has no
+  // approved row, so it keeps its English on both sides.
+  "mail.reply": { en: "Reply", es: "Responder" },
+  "mail.replyAll": { en: "Reply all", es: "Responder a todos" },
+  "mail.forward": { en: "Forward", es: "Reenviar" },
+  "mail.draftWith": { en: "Draft a reply with...", es: "Redactar una respuesta con..." },
+  "mail.newEmail": { en: "New email", es: "Correo nuevo" },
+  "mail.draftNoProject": { en: "No project", es: "Sin proyecto" },
+  "mail.draftSeesOnly": { en: "The bot sees only this thread.", es: "El bot solo ve este hilo." },
+  // The frame a suggested bot's reason goes into, a single placeholder: no words to translate.
+  "mail.draftSuggestReason": { en: "{project}", es: "{project}" },
+  // The instruction a chosen bot's first turn is asked for (the turn route refuses an empty one).
+  "mail.draftAsk": { en: "Draft a reply to this thread.", es: "Draft a reply to this thread." }, // operator copy not yet supplied
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

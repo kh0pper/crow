@@ -250,6 +250,36 @@ test("address with CRLF or angle brackets is refused", async () => {
   assert.deepEqual(parsed.invalid, []);
 });
 
+test("an invalid Bcc address is refused exactly as To and Cc are", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const { draft, rev } = await makeDraft(db, account);
+
+  // One token, the same three ways: the strict single-address rule is the revision's, not a field's.
+  const token = `Sam <${HIDDEN}>`;
+  const asBcc = rejected(await preflight(db, draft, { ...rev, bcc: [{ name: null, address: token }] }, {
+    accountId: account.id,
+  }));
+  const asCc = rejected(await preflight(db, draft, { ...rev, cc: [{ name: null, address: token }] }, {
+    accountId: account.id,
+  }));
+  const asTo = rejected(await preflight(db, draft, { ...rev, to: [...rev.to, { name: null, address: token }] }, {
+    accountId: account.id,
+  }));
+  for (const [field, out] of [["bcc", asBcc], ["cc", asCc], ["to", asTo]]) {
+    assert.equal(out.code, "bad_address", `${field}: the code`);
+    assert.deepEqual(out.detail, [token], `${field}: the offending token is named`);
+  }
+
+  // A CR/LF in a Bcc is the same header-injection attempt in a Bcc as in a To.
+  const crlf = `hidden@example.test\r\nBcc: ${HIDDEN}`;
+  const injected = rejected(await preflight(db, draft, { ...rev, bcc: [{ name: null, address: crlf }] }, {
+    accountId: account.id,
+  }));
+  assert.equal(injected.code, "bad_address");
+  assert.deepEqual(injected.detail, [crlf]);
+});
+
 test("display-name trick \"a@x.test\" <b@y.test> is parsed as one address b@y.test and flagged as changed", async () => {
   const db = await freshDb();
   const account = await makeAccount(db);

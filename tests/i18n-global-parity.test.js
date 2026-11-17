@@ -118,6 +118,35 @@ const IDENTICAL_OK = new Set([
   "forYou.slot.morning", // English until the Spanish pass (P22)
   "forYou.slot.midday", // English until the Spanish pass (P22)
   "forYou.slot.evening", // English until the Spanish pass (P22)
+  // Crow Mail's plan 3 copy: every approved row carries its own Spanish, so the only entries left
+  // here are the strings that genuinely have no words to translate (an ellipsis, the "Cc" label, two
+  // templates that are placeholders only) and the ones whose copy the operator has not supplied yet.
+  "mail.mailSettings", // operator copy not yet supplied (the settings card's title)
+  "mail.draftHeadNew", // a template of two placeholders and a dot: no words to translate
+  "mail.draftTo", // operator copy not yet supplied
+  "mail.draftCc", // "Cc" is the same label in Spanish mail clients
+  "mail.draftBcc", // operator copy not yet supplied
+  "mail.draftSubject", // operator copy not yet supplied
+  "mail.draftMore", // "...", an ellipsis
+  "mail.draftHistoryRow", // operator copy not yet supplied
+  "mail.draftSendingState", // operator copy not yet supplied
+  "mail.draftAudience", // operator copy not yet supplied (the audience chip row)
+  "mail.draftAudienceColleague", // operator copy not yet supplied
+  "mail.draftAudienceClient", // operator copy not yet supplied
+  "mail.draftAudiencePersonal", // operator copy not yet supplied
+  "mail.draftComment", // operator copy not yet supplied
+  "mail.draftNoteSend", // operator copy not yet supplied
+  "mail.draftOffline", // operator copy not yet supplied
+  "mail.draftNotOwner", // operator copy not yet supplied
+  "mail.draftFailed", // operator copy not yet supplied
+  "mail.draftDiscarded", // operator copy not yet supplied
+  "mail.draftConfirmSend", // operator copy not yet supplied
+  "mail.draftScheduleUnavailable", // operator copy not yet supplied
+  "mail.schedulePickMissing", // operator copy not yet supplied
+  "mail.scheduleDateLabel", // operator copy not yet supplied
+  "mail.scheduleTimeLabel", // operator copy not yet supplied
+  "mail.draftSuggestReason", // a single placeholder: no words to translate
+  "mail.draftAsk", // operator copy not yet supplied (the instruction a chosen bot is handed)
 ]);
 
 const keys = Object.keys(translations);

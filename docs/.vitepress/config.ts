@@ -311,6 +311,7 @@ export default defineConfig({
           { text: 'Gateway', link: '/architecture/gateway' },
           { text: 'Add-on Walls', link: '/architecture/addon-walls' },
           { text: 'Box Reservation', link: '/architecture/box-reservation' },
+          { text: 'Mail Send', link: '/architecture/mail-send' },
           { text: 'Artifacts', link: '/architecture/artifacts' },
           { text: 'Models', link: '/architecture/models' },
           { text: 'Crow OS', link: '/architecture/crow-os' },

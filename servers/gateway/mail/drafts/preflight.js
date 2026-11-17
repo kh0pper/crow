@@ -27,10 +27,13 @@
  * Attachments are resolved to bytes here rather than at send time, so the digest a tap seals is a
  * digest of what the recipient would actually get. A thread attachment is the part at `index` of the
  * message `mid` names, read through `deps.readMessageRaw`; a storage attachment is
- * `deps.readStorageFile(fileId)`, which does the owner check. Neither source is reachable without its
- * reader, and an attachment this module cannot resolve refuses the draft instead of sending it short.
- * A reader that throws is caught here: an unreachable server is a refusal a person can retry, never an
- * exception out of preflight.
+ * `deps.readStorageFile(fileId, {projectId})`, which does the owner check — the draft's own project is
+ * the scope it checks a file against, so a file of another project reads as nothing. A reader may
+ * answer bytes alone or a `{content, filename, contentType}` record (the storage reader names the
+ * attachment from the stored row); either way the name is sanitized and the media type checked here.
+ * Neither source is reachable without its reader, and an attachment this module cannot resolve
+ * refuses the draft instead of sending it short. A reader that throws is caught here: an unreachable
+ * server is a refusal a person can retry, never an exception out of preflight.
  *
  * The digest a tap seals frames every attachment — the sanitized filename, its media type and its
  * bytes, each preceded by its own length, in the revision's order — so a byte moved from one
@@ -50,15 +53,17 @@ import { validateOutgoing } from "../adapter/interface.js";
 import { getAccount } from "../store/accounts.js";
 import { resolveMessageRef } from "../store/reader-queries.js";
 import { extractAttachment, safeAttachmentName } from "../reader/attachments.js";
+import { MAX_SEND_BYTES } from "./readers.js";
 import { listRevisions, revisionToInput } from "./store.js";
 import { changedRecipients, deriveReply, newRecipients } from "./recipients.js";
 
 /**
  * The largest total an outgoing message may carry, in the attachments' own bytes (base64 is not
  * counted): plan 2's effective ceiling, where an attachment above roughly 18 MB is already refused by
- * the raw-message rule before this one is reached.
+ * the raw-message rule before this one is reached. The value lives in `readers.js`, so the storage
+ * reader refuses an over-size file and this module counts an over-size message against one number.
  */
-export const MAX_SEND_BYTES = 18 * 1024 * 1024;
+export { MAX_SEND_BYTES };
 
 /** C0 controls, DEL, C1 controls and the Unicode line and paragraph separators. */
 const CONTROL_CHARS = /[\u0000-\u001f\u007f\u0080-\u009f\u2028\u2029]/;
@@ -160,10 +165,13 @@ function mediaTypeOf(value) {
  * `NETWORK` or `TIMEOUT` mail error is `attachment_unavailable` (the part exists, this Crow cannot
  * fetch it right now). Nothing a reader throws escapes this module.
  *
+ * `projectId` is the draft's own project, handed to the storage reader's owner check: a file scoped to
+ * another project comes back as nothing, exactly as one that is not there does.
+ *
  * @returns {Promise<{attachment: {filename: string, contentType: string, content: Buffer}}
  *   | {refusal: "bad_input"|"attachment_unavailable"}>}
  */
-async function resolveAttachment(db, accountId, ref, deps) {
+async function resolveAttachment(db, accountId, ref, deps, projectId) {
   if (ref == null || typeof ref !== "object") return { refusal: "bad_input" };
 
   if (ref.source === "thread") {
@@ -197,20 +205,44 @@ async function resolveAttachment(db, accountId, ref, deps) {
     const read = deps?.readStorageFile;
     if (!fileId || typeof read !== "function") return { refusal: "bad_input" };
     // The reader owns the ownership check: a file the operator does not own comes back as nothing.
-    const reading = await readerOutcome(() => read(fileId));
+    const reading = await readerOutcome(() => read(fileId, { projectId }));
     if (reading.refusal) return reading;
-    const content = bytesOf(reading.value);
-    if (!content) return { refusal: "bad_input" };
-    return {
-      attachment: {
-        filename: safeAttachmentName(ref.filename),
-        contentType: DEFAULT_MEDIA_TYPE,
-        content,
-      },
-    };
+    const attachment = storageAttachment(reading.value, ref);
+    if (!attachment) return { refusal: "bad_input" };
+    return { attachment };
   }
 
   return { refusal: "bad_input" };
+}
+
+/** True for the `{content, filename, contentType}` record a storage reader may answer with. */
+function isAttachmentRecord(value) {
+  return value != null && typeof value === "object"
+    && !Buffer.isBuffer(value) && !(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value);
+}
+
+/**
+ * A storage read as the message carries it: the reader's own name and media type when it answered a
+ * record (the row's `original_name` and `mime_type`), the ref's name and the neutral type when it
+ * answered bytes alone. Either name is sanitized here, and a media type Crow cannot write as a header
+ * becomes the neutral one, so an implementation builds every part from this value.
+ *
+ * @returns {{filename: string, contentType: string, content: Buffer}|null}
+ */
+function storageAttachment(value, ref) {
+  if (!isAttachmentRecord(value)) {
+    const content = bytesOf(value);
+    if (!content) return null;
+    return { filename: safeAttachmentName(ref.filename), contentType: DEFAULT_MEDIA_TYPE, content };
+  }
+  const content = bytesOf(value.content);
+  if (!content) return null;
+  const named = typeof value.filename === "string" && value.filename.trim() !== "" ? value.filename : ref.filename;
+  return {
+    filename: safeAttachmentName(named),
+    contentType: mediaTypeOf(value.contentType),
+    content,
+  };
 }
 
 /**
@@ -228,10 +260,10 @@ async function readerOutcome(read) {
 }
 
 /** Every attachment's bytes, in the revision's order, or the first refusal a read answered with. */
-async function resolveAttachments(db, accountId, refs, deps) {
+async function resolveAttachments(db, accountId, refs, deps, projectId) {
   const attachments = [];
   for (const ref of Array.isArray(refs) ? refs : []) {
-    const resolved = await resolveAttachment(db, accountId, ref, deps);
+    const resolved = await resolveAttachment(db, accountId, ref, deps, projectId);
     if (resolved.refusal) return resolved;
     attachments.push(resolved.attachment);
   }
@@ -333,7 +365,8 @@ async function replyToDiffers(db, draft, account) {
  * @param {object} rev the revision the person is looking at (listRevisions' shape)
  * @param {{accountId?: string, deps?: {readMessageRaw?: Function, readStorageFile?: Function}}} [options]
  *   `accountId` must be the draft's own account; `deps.readMessageRaw({accountId, mid, row})` answers
- *   the raw bytes of a stored message and `deps.readStorageFile(fileId)` the bytes of a Crow file
+ *   the raw bytes of a stored message and `deps.readStorageFile(fileId, {projectId})` the bytes of a
+ *   Crow file, checked against the draft's own project
  * @returns {Promise<{ok: true, message: object, attachDigest: string, fromAddress: string,
  *   flags: {newRecipients: string[], changedRecipients: string[], replyToDiffers: string|null}}
  *   | {ok: false, code: "placeholders"|"no_recipients"|"bad_address"|"too_large"|"bad_input"
@@ -375,7 +408,7 @@ export async function preflight(db, draft, rev, options = {}) {
   if (bad.length) return refuse("bad_address", bad);
   if (to.length === 0) return refuse("no_recipients");
 
-  const resolved = await resolveAttachments(db, account.id, rev.attachments, options?.deps);
+  const resolved = await resolveAttachments(db, account.id, rev.attachments, options?.deps, draft.projectId);
   if (resolved.refusal) return refuse(resolved.refusal);
   const attachments = resolved.attachments;
   let total = 0;

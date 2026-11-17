@@ -767,10 +767,40 @@ function notHereCard(back, lang) {
 }
 
 /**
+ * The reply slot's own copy (plan 3, Task 11), as one hidden element of data attributes. The reader's
+ * client script carries no translated text of its own (the whole panel's strings arrive from the
+ * page), so the five action labels, the picker's two lines, the instruction a chosen bot is handed and
+ * the refusal sentence for each code the turn route can answer all travel from here. `data-ml-reason`
+ * is the frame the reason of a suggested bot — the project's own name — is put into.
+ *
+ * @param {string} [lang]
+ * @returns {string}
+ */
+function replySlotStrings(lang = "en") {
+  const attribute = (name, value) => ` data-ml-${name}="${e(value)}"`;
+  return `<div class="ml-note" data-ml-reply-strings hidden`
+    + attribute("reply", t("mail.reply", lang))
+    + attribute("reply-all", t("mail.replyAll", lang))
+    + attribute("forward", t("mail.forward", lang))
+    + attribute("draft-with", t("mail.draftWith", lang))
+    + attribute("new-email", t("mail.newEmail", lang))
+    + attribute("no-project", t("mail.draftNoProject", lang))
+    + attribute("sees-only", t("mail.draftSeesOnly", lang))
+    + attribute("ask", t("mail.draftAsk", lang))
+    + attribute("reason", t("mail.draftSuggestReason", lang))
+    + attribute("refusal-cloud_drafting_off", t("mail.draftCloudOff", lang))
+    + attribute("refusal-local_models_only", t("mail.draftLocalOnly", lang))
+    + attribute("refusal-delivery_unsupported", t("mail.draftTurnOff", lang))
+    + attribute("refusal-unavailable", t("mail.draft.refuse.unavailable", lang))
+    + attribute("refusal-generic", t("mail.draftError", lang))
+    + "></div>";
+}
+
+/**
  * The message view: the opened message's header (with the action bar for that row), then its whole
- * conversation oldest first, then the slot a later plan fills with the reply actions. Every section
- * carries a frame slot and no iframe: the body is served by the frame route and the client builds the
- * frame.
+ * conversation oldest first, then the reply slot a later plan fills with the reply actions. Every
+ * section carries a frame slot and no iframe: the body is served by the frame route and the client
+ * builds the frame.
  *
  * `thread` holds full rows (the caller looks each summary up, so a section can tell whether it has
  * a body and list its own attachments); `folders` is the account's own folder list, which is what the
@@ -817,6 +847,7 @@ export function messageViewHtml({
       </header>
       <div class="ml-thread">${sections}</div>
       <div data-mail-reply-slot data-account="${e(accountId)}" data-mid="${e(mid)}" data-thread="${e(threadId)}"></div>
+      ${replySlotStrings(lang)}
     </article>`;
 }
 

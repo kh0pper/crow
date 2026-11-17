@@ -23,7 +23,22 @@
  *     scheduled draft returns it to `draft` and the person re-schedules it. The 409
  *     `{error:"scheduled", needsCancel:true}` branch exists only for `cancelSchedule: false`, which
  *     this route never sends, so it is not here.
- *   - `POST /:id/save-draft` belongs to a later task and is not registered here.
+ *
+ * `POST /:id/save-draft` (Task 12) files the head revision in the provider's own Drafts folder through
+ * plan 1's `saveDraft(raw)`: preflight, `composeRaw` with the Bcc kept, one borrowed adapter, one
+ * append. It is not a send and not an edit — the row keeps its state and writes no revision — and the
+ * answer names the folder the copy landed in, never its content. A draft a tap or a schedule has
+ * frozen cannot be filed; a mailbox with no Drafts folder answers the mail `NOT_FOUND` sentence.
+ *
+ * `GET /:id/attachable` (Task 12) is the card's attachment picker: the thread's own parts, read from
+ * the store's attachment metadata and never from the network, and the owner's newest Crow files, by
+ * id — the default bucket's rows, minus any recorded as over the send cap, so the list is what the
+ * storage reader would actually read. It also carries the head revision's raw attachment total
+ * against the send ceiling, so the card can show how much of it a draft already uses.
+ *
+ * `PATCH /:id/audience` is the card's one-tap audience chip: one word from the store's `DRAFT_AUDIENCES`
+ * list, written to the draft's `audience` column (or null, to clear it). It is neither a tap nor a
+ * revision — no state moves, no hash is compared — and a frozen draft answers its state.
  *
  * The revision loop is `drafts/revise.js`'s (Task 9): `POST /:id/comments` queues one comment on one
  * line (a comment on a revision the draft has left is 409 `changed`) and revises at once when it is
@@ -31,6 +46,12 @@
  * `POST /:id/turn` with `reviseFrom` is the card's note box — the wording the person typed, handed to
  * the bot as theirs. A revise or a turn on a frozen draft is 409 `frozen`, with `needsCancel` when
  * there is a schedule to give up first.
+ *
+ * `GET /bot-options` (Task 11) is the reader's reply-slot picker: every enabled bot whose model may
+ * draft for this account (`allowDraftModel`, the same verdict a turn is held to), the projects those
+ * bots belong to, and the one bot the thread's filing suggests. A bot that may not draft is never
+ * listed, so the picker cannot offer a bot the turn would then refuse; when every bot is refused the
+ * answer carries the refusal code instead and the slot shows the sentence the panel drew for it.
  *
  * Error bodies are `{error, message}`: `changed` answers `CHANGED_SENTENCE`, a tap's own refusal
  * passes the service's sentence through, a preflight refusal answers the `bad_input` (or
@@ -48,19 +69,26 @@
  * configs as files instead of over the fd answers 503 `{error:"delivery_unsupported"}` — the code
  * alone, because the card owns that copy.
  */
-import { MAIL_ERROR_TEXT } from "../mail/errors.js";
+import { MAIL_ERROR_TEXT, MailError } from "../mail/errors.js";
 import { getAccount } from "../mail/store/accounts.js";
-import { resolveMessageRef } from "../mail/store/reader-queries.js";
+import { folderRole, getFolder } from "../mail/store/messages.js";
+import { defaultBucket } from "../../storage/s3-client.js";
+import { listThreadMessages, resolveMessageRef } from "../mail/store/reader-queries.js";
+import { composeRaw } from "../mail/adapter/compose.js";
+import { safeAttachmentName } from "../mail/reader/attachments.js";
 import {
+  DRAFT_AUDIENCES,
   DRAFT_MODES,
   addRevision,
   createDraft,
   discardDraft,
   getDraft,
+  getVoice,
   listComments,
   listRevisions,
+  setAudience,
 } from "../mail/drafts/store.js";
-import { preflight } from "../mail/drafts/preflight.js";
+import { MAX_SEND_BYTES, preflight } from "../mail/drafts/preflight.js";
 import { deriveForward, deriveReply } from "../mail/drafts/recipients.js";
 import { queueComment, reviseNow } from "../mail/drafts/revise.js";
 import { makeDraftReaders } from "../mail/drafts/readers.js";
@@ -71,11 +99,22 @@ import {
   requestSend,
   undoSend,
 } from "../mail/send/send-service.js";
-import { cancelSchedule, parseRouteDueAt, scheduleDraft } from "../mail/send/schedule-service.js";
+import {
+  SCHEDULE_MAX_AHEAD_MS,
+  SCHEDULE_MIN_LEAD_MS,
+  cancelSchedule,
+  localTimeToInstant,
+  parseRouteDueAt,
+  scheduleDraft,
+  schedulePresets,
+  wallClockAt,
+  zoneOffsetMinutesAt,
+} from "../mail/send/schedule-service.js";
 import { instanceZone } from "../../shared/schedule-store.js";
 // The mount point mail-api.js sets on this same router. It is read when routes are registered (that
 // module has finished evaluating by then), never at module load: the two files import each other.
 import { MAIL_API_PREFIX } from "./mail-api.js";
+import { CROW_VOICE_BOT_ID } from "../../shared/voice-bot.js";
 
 /** A draft id, exactly what the store mints. Anything else is a 404 here. */
 export const MAIL_DRAFT_ID_RE = /^md-[0-9a-f]{16}$/;
@@ -86,13 +125,18 @@ const EDITABLE_STATES = Object.freeze(["draft", "failed", "missed"]);
 /** The keys each body may carry, and nothing else: no `from`, no `headers`, no `envelope`. */
 const CREATE_KEYS = Object.freeze(["accountId", "mode", "replyToMid", "projectId", "botId", "audience"]);
 const REVISION_KEYS = Object.freeze([
-  "expectHash", "to", "cc", "subject", "body", "attachments", "cancelSchedule",
+  "expectHash", "to", "cc", "bcc", "subject", "body", "attachments", "cancelSchedule",
 ]);
 const SEND_KEYS = Object.freeze(["hash", "confirmUnknown"]);
 const SCHEDULE_KEYS = Object.freeze(["hash", "dueAt"]);
 const TURN_KEYS = Object.freeze(["botId", "instruction", "reviseFrom"]);
 const COMMENT_KEYS = Object.freeze(["rev", "lineIndex", "quote", "text"]);
 const REVISE_KEYS = Object.freeze(["expectHash", "chatNote"]);
+const SAVE_DRAFT_KEYS = Object.freeze(["expectHash"]);
+const AUDIENCE_KEYS = Object.freeze(["audience"]);
+
+/** How many of the owner's Crow files the attachment picker lists: the newest, and no more. */
+const ATTACHABLE_STORAGE_LIMIT = 50;
 
 /* --------------------------------------------------------------------- the seam */
 
@@ -224,16 +268,23 @@ function readCreateBody(body) {
   };
 }
 
-/** The hand-edit body, or null. `cancelSchedule` is accepted and ignored: this route always cancels. */
+/**
+ * The hand-edit body, or null. `cancelSchedule` is accepted and ignored: this route always cancels.
+ * `bcc` is an address list like `to` and `cc`, and absent is not the same as empty: absent leaves the
+ * head revision's Bcc alone (a client that does not carry the field never drops it silently), an
+ * empty list clears it. `null` for `bcc` says the field was not sent at all.
+ */
 function readRevisionBody(body) {
   if (!keysWithin(body, REVISION_KEYS)) return null;
   if (typeof body.expectHash !== "string" || body.expectHash === "") return null;
-  if (!isArrayOrAbsent(body.to) || !isArrayOrAbsent(body.cc) || !isArrayOrAbsent(body.attachments)) return null;
+  if (!isArrayOrAbsent(body.to) || !isArrayOrAbsent(body.cc) || !isArrayOrAbsent(body.bcc)) return null;
+  if (!isArrayOrAbsent(body.attachments)) return null;
   if (!isStringOrAbsent(body.subject) || !isStringOrAbsent(body.body)) return null;
   return {
     expectHash: body.expectHash,
     to: Array.isArray(body.to) ? body.to : [],
     cc: Array.isArray(body.cc) ? body.cc : [],
+    bcc: Array.isArray(body.bcc) ? body.bcc : null,
     subject: typeof body.subject === "string" ? body.subject : "",
     body: typeof body.body === "string" ? body.body : "",
     attachments: Array.isArray(body.attachments) ? body.attachments : [],
@@ -293,6 +344,85 @@ function readScheduleBody(body) {
   if (!keysWithin(body, SCHEDULE_KEYS)) return null;
   if (typeof body.hash !== "string" || body.hash === "") return null;
   return { hash: body.hash, dueAt: body.dueAt };
+}
+
+/** The save-draft body, or null: only the hash the card was drawn from. */
+function readSaveDraftBody(body) {
+  if (!keysWithin(body, SAVE_DRAFT_KEYS)) return null;
+  if (typeof body.expectHash !== "string" || body.expectHash === "") return null;
+  return { expectHash: body.expectHash };
+}
+
+/** The audience body, or null: one word from the store's own list, or null to clear it. */
+function readAudienceBody(body) {
+  if (!keysWithin(body, AUDIENCE_KEYS)) return null;
+  if (!Object.hasOwn(body, "audience")) return null;
+  if (body.audience === null) return { audience: null };
+  if (typeof body.audience !== "string" || !DRAFT_AUDIENCES.includes(body.audience)) return null;
+  return { audience: body.audience };
+}
+
+/* ------------------------------------------------------------- the presets */
+
+/** The zone's own wall clock at one instant, as the zone-qualified ISO text the sheet posts back. */
+function zonedIso(instant, zone) {
+  const wall = wallClockAt(instant, zone);
+  const offset = zoneOffsetMinutesAt(instant, zone);
+  const two = (value) => String(value).padStart(2, "0");
+  const sign = offset < 0 ? "-" : "+";
+  const abs = Math.abs(offset);
+  return `${wall.year}-${two(wall.month)}-${two(wall.day)}T${two(wall.hour)}:${two(wall.minute)}:${two(wall.second)}`
+    + `${sign}${two(Math.floor(abs / 60))}:${two(abs % 60)}`;
+}
+
+/**
+ * A wall time the sheet's date and time inputs name (`2026-11-12T07:30`), as the instant the instance
+ * zone shows it, or null. The zone's own helpers do the arithmetic (`localTimeToInstant`), and the
+ * instant is only accepted when the zone really shows that wall clock: an hour a spring-forward skips
+ * and a date the calendar does not have are both refused rather than moved.
+ *
+ * @param {string} text `yyyy-mm-ddThh:mm`, the bare wall time and nothing else
+ * @param {string} zone the instance zone
+ * @returns {number|null} epoch ms
+ */
+function wallTimeAt(text, zone) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})$/.exec(text);
+  if (!match) return null;
+  const parts = {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(match[4]),
+    minute: Number(match[5]),
+  };
+  let instant;
+  try {
+    instant = localTimeToInstant(parts, zone);
+  } catch {
+    return null;
+  }
+  const shown = wallClockAt(instant, zone);
+  if (shown.year !== parts.year || shown.month !== parts.month || shown.day !== parts.day
+    || shown.hour !== parts.hour || shown.minute !== parts.minute) {
+    return null;
+  }
+  return instant;
+}
+
+/**
+ * One preset as the sheet reads it: the zone-qualified instant it stands for, and the short label of
+ * its clock time, formatted here in the instance zone. The label is the time alone — the sheet already
+ * names the day in its own words (Tomorrow morning, Next work day) — so it carries no weekday a second
+ * language would have to agree with.
+ */
+function presetAnswer(date, zone) {
+  const instant = date instanceof Date ? date.getTime() : Number(date);
+  const label = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone,
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(instant));
+  return { iso: zonedIso(instant, zone), label };
 }
 
 /* --------------------------------------------------------------- the answers */
@@ -409,7 +539,6 @@ export function registerDraftRoutes(router, ctx) {
   };
 
   /* ------------------------------------------------------------------ create */
-
   // POST / — one draft and its first revision, from the reply's own derivation when the mode names a
   // message. No bot is started here; the card starts a turn when the person asks for one.
   router.post(base, route("POST /drafts", async (db, req, res) => {
@@ -444,11 +573,82 @@ export function registerDraftRoutes(router, ctx) {
     res.json({ draft });
   }));
 
+  // PATCH /:id/audience — the card's one-tap audience chip: one word from `DRAFT_AUDIENCES`, written
+  // to the draft's `audience` column (what a drafting turn reads as the draft's audience) or null to
+  // clear it. It is not a tap and not a revision: no state moves and the hash is not needed, because
+  // nothing a person reads before pressing Send changes. A draft a tap or a schedule has frozen
+  // answers 409 with its state, like the other write routes.
+  router.patch(`${base}/:id/audience`, route("PATCH /drafts/:id/audience", async (db, req, res) => {
+    const draft = await draftFor(db, req);
+    if (!draft) return sendError(res, 404, "not_found");
+    const body = bodyOf(req);
+    if (body == null) return sendError(res, 400, "bad_input");
+    const input = readAudienceBody(body);
+    if (input == null) return sendError(res, 400, "bad_input");
+    const out = await setAudience(db, draft.id, input.audience, runtime.now == null ? {} : { now: runtime.now });
+    if (out?.ok) return res.json({ ok: true, audience: out.audience });
+    res.status(409).json({ error: "frozen", state: out?.state ?? null });
+  }));
+
   /* ------------------------------------------------------------------- reads */
 
-  // GET /:id — the card: the row, the head revision, the flags preflight marks, every comment and the
-  // history line per revision. The flags are null when the draft does not pass preflight (nothing is
-  // invented for it here): the card's own refusal copy is the panel's.
+  // GET /schedule-presets — the schedule sheet's two shortcuts, the instant each one stands for and
+  // the window a schedule may fall in. Registered BEFORE GET /:id: a route below would read this path
+  // as a draft id. The sheet never computes a time, so `iso` is produced here, in the instance zone,
+  // and `label` is its short clock time formatted here too.
+  //
+  // With `?at=<local yyyy-mm-ddThh:mm>` the same route answers `{iso}` for that wall time in the
+  // instance zone — the picked date and time of the sheet's third option — or 400 `bad_input`. A wall
+  // time the zone does not show (the hour a spring-forward skips, a date no calendar has) is a refusal,
+  // never a quietly moved instant: the offset the tap will be stored with must be the one the person
+  // saw. The client therefore posts text the server built and never carries an offset of its own.
+  router.get(`${base}/schedule-presets`, route("GET /drafts/schedule-presets", async (db, req, res) => {
+    const zone = await instanceZone(db);
+    const raw = req.query?.at;
+    const at = typeof raw === "string" ? raw.trim() : raw == null ? "" : null;
+    // A repeated `at` is not one wall time: refused rather than answered with the shortcuts.
+    if (at === null) return sendError(res, 400, "bad_input");
+    if (at !== "") {
+      const instant = wallTimeAt(at, zone);
+      if (instant == null) return sendError(res, 400, "bad_input");
+      return res.json({ iso: zonedIso(instant, zone) });
+    }
+    const now = Math.floor(Number(typeof runtime.now === "function" ? runtime.now() : Date.now()));
+    const presets = await schedulePresets(db, { now, zone });
+    res.json({
+      zone,
+      tomorrowMorning: presetAnswer(presets.tomorrowMorning, zone),
+      nextWorkDay: presetAnswer(presets.nextWorkDay, zone),
+      minLeadMs: SCHEDULE_MIN_LEAD_MS,
+      maxAheadMs: SCHEDULE_MAX_AHEAD_MS,
+    });
+  }));
+
+  // GET /bot-options — the reply slot's picker (Task 11): the bots whose model may draft for this
+  // account, the projects those bots belong to, and the one bot a thread's filing suggests. Registered
+  // BEFORE GET /:id, which would read this path as a draft id. Every bot is filtered here, by the same
+  // rule a turn is held to (`allowDraftModel`): a bot that may not draft is never listed, so the picker
+  // can never offer a bot the turn would then refuse. When every bot is refused the answer carries the
+  // refusal code instead, and the slot shows the sentence the panel drew for it.
+  router.get(`${base}/bot-options`, route("GET /drafts/bot-options", async (db, req, res) => {
+    const raw = req.query?.accountId;
+    const accountId = typeof raw === "string" ? raw : "";
+    if (accountId === "") return sendError(res, 400, "bad_input");
+    const account = await getAccount(db, accountId);
+    if (!account) return sendError(res, 404, "not_found");
+    const rawMid = req.query?.mid;
+    const mid = typeof rawMid === "string" && rawMid !== "" ? rawMid : null;
+    res.json(await botOptionsFor(db, { account, mid }));
+  }));
+
+
+  // GET /:id — the card: the row, the head revision, the flags preflight marks, every comment, the
+  // history line per revision and the head revision's voice note (null while plan 4 has not checked
+  // it, which is what the card's "Not checked for your writing style" line reads). The row carries the
+  // display name of the bot it was written under (`botName`, from `pi_bot_defs`), so the card's header
+  // names that bot without a second request. The flags are null when the
+  // draft does not pass preflight (nothing is invented for it here): the card's own refusal copy is
+  // the panel's.
   router.get(`${base}/:id`, route("GET /drafts/:id", async (db, req, res) => {
     const draft = await draftFor(db, req);
     if (!draft) return sendError(res, 404, "not_found");
@@ -474,7 +674,7 @@ export function registerDraftRoutes(router, ctx) {
     }
 
     res.json({
-      draft,
+      draft: { ...draft, botName: await botNameFor(db, draft.botId) },
       head,
       flags,
       comments: await listComments(db, draft.id),
@@ -484,6 +684,28 @@ export function registerDraftRoutes(router, ctx) {
         created_at: entry.createdAt,
         note: entry.note ?? null,
       })),
+      // A sent draft's receipt: when, which Message-ID, from which account, and the reader link once
+      // the Sent copy is in the store (until then the card says "Sent, syncing...").
+      receipt: await receiptFor(db, draft),
+      // The head revision's voice note, or null: the card says "Not checked for voice" while plan 4
+      // has written none. Part of the card's one read, so the card never guesses.
+      voice: await getVoice(db, draft.id, draft.headRev),
+    });
+  }));
+
+  // GET /:id/attachable — the card's attachment picker: the draft's own thread parts, from the stored
+  // attachment metadata and never from a mailbox, and the owner's newest Crow files. The head
+  // revision's raw attachment total rides along, against the send ceiling the card shows.
+  router.get(`${base}/:id/attachable`, route("GET /drafts/:id/attachable", async (db, req, res) => {
+    const draft = await draftFor(db, req);
+    if (!draft) return sendError(res, 404, "not_found");
+    const revisions = await listRevisions(db, draft.id);
+    const head = revisions.find((entry) => entry.rev === draft.headRev) ?? null;
+    res.json({
+      thread: await threadAttachables(db, draft),
+      storage: await storageAttachables(db, draft),
+      totalBytes: attachmentBytes(head),
+      maxBytes: MAX_SEND_BYTES,
     });
   }));
 
@@ -504,9 +726,10 @@ export function registerDraftRoutes(router, ctx) {
   // POST /:id/revisions — the person's own edit. The store's compare-and-set on `expectHash` is the
   // guard, and `cancelSchedule: true` is what returns a scheduled draft to `draft` (so the edit is
   // never silently lost to a frozen row) and clears the tap seal in the same transaction. The body
-  // changes words, recipients and attachments only: the head revision's `bcc`, `inReplyTo` and
-  // `references` are carried over (as `mail_draft_propose` carries them), so a hand-edited reply stays
-  // threaded and keeps the audience the card showed.
+  // changes words, every recipient list (To, Cc and Bcc alike) and attachments only: the head
+  // revision's `inReplyTo` and `references` are carried over (as `mail_draft_propose` carries them),
+  // so a hand-edited reply stays threaded. A body with no `bcc` keeps the head revision's Bcc; an
+  // empty list clears it.
   router.post(`${base}/:id/revisions`, route("POST /drafts/:id/revisions", async (db, req, res) => {
     const draft = await draftFor(db, req);
     if (!draft) return sendError(res, 404, "not_found");
@@ -522,9 +745,8 @@ export function registerDraftRoutes(router, ctx) {
     const outcome = await addRevision(db, draft.id, {
       to: input.to,
       cc: input.cc,
-      // Carried from the head revision, exactly as `mail_draft_propose` does: a hand edit changes the
-      // words, never the audience or the threading. The request body cannot name them (REVISION_KEYS).
-      bcc: head.bcc,
+      // Absent keeps the Bcc the card showed; an empty list is the person clearing it.
+      bcc: input.bcc === null ? head.bcc : input.bcc,
       subject: input.subject,
       body: input.body,
       inReplyTo: head.inReplyTo,
@@ -663,6 +885,66 @@ export function registerDraftRoutes(router, ctx) {
     }
   }));
 
+  // POST /:id/save-draft — Save as draft (Task 12): file the head revision in the provider's own
+  // Drafts folder. Preflight, then `composeRaw` with the Bcc kept, then ONE borrowed adapter and ONE
+  // `saveDraft(raw)`. Nothing is sent, no revision is written and the row keeps the state it had, so
+  // this is not a tap: it carries the hash only to prove the card and the row agree. The answer names
+  // the folder the copy landed in and never its content; a mailbox with no Drafts folder answers the
+  // mail NOT_FOUND sentence, and a Crow with no mail connection answers the send service's own
+  // `not_sendable` refusal.
+  router.post(`${base}/:id/save-draft`, route("POST /drafts/:id/save-draft", async (db, req, res) => {
+    const draft = await draftFor(db, req);
+    if (!draft) return sendError(res, 404, "not_found");
+    const body = bodyOf(req);
+    if (body == null) return sendError(res, 400, "bad_input");
+    const input = readSaveDraftBody(body);
+    if (input == null) return sendError(res, 400, "bad_input");
+    if (!EDITABLE_STATES.includes(draft.state)) return answerFrozen(res, draft);
+    // The row's own head hash is the guard a save needs: nothing moves either way, so a stale card is
+    // told to look again rather than filing a revision the person never saw.
+    if (input.expectHash !== draft.headHash) return sendError(res, 409, "changed", CHANGED_SENTENCE);
+
+    const revisions = await listRevisions(db, draft.id);
+    const head = revisions.find((entry) => entry.rev === draft.headRev) ?? null;
+    if (!head) return sendError(res, 404, "not_found");
+
+    const supervisor = supervisorNow();
+    if (!supervisor) {
+      return answerTapFailure(res, sendError, { code: "not_sendable", reason: "supervisor_missing" });
+    }
+
+    const deps = serviceDeps(db, supervisor);
+    const checked = await preflight(db, draft, head, {
+      accountId: draft.accountId,
+      deps: { readMessageRaw: deps.readMessageRaw, readStorageFile: deps.readStorageFile },
+    });
+    if (!checked.ok) return answerPreflight(res, checked);
+
+    let raw;
+    try {
+      // The Drafts copy is a copy: it keeps the Bcc the person put on the draft (Task 2's rule).
+      raw = await composeRaw(checked.message, { keepBcc: true });
+    } catch (err) {
+      if (err instanceof MailError && err.code === "BAD_INPUT") return answerPreflight(res, { code: "bad_input" });
+      throw err;
+    }
+
+    let saved;
+    try {
+      saved = await supervisor.withAdapter(draft.accountId, (adapter) => adapter.saveDraft(raw));
+    } catch (err) {
+      // Only a mailbox with no Drafts folder says the mail NOT_FOUND sentence. Any other NOT_FOUND —
+      // the account going away under the tap, say — is a missing row and nothing more.
+      if (err instanceof MailError && err.code === "NOT_FOUND") {
+        if (err.detail === "drafts") return sendError(res, 404, "not_found", MAIL_ERROR_TEXT.NOT_FOUND);
+        return sendError(res, 404, "not_found");
+      }
+      throw err;
+    }
+
+    res.json({ ok: true, folder: typeof saved?.folderPath === "string" ? saved.folderPath : null });
+  }));
+
   // POST /:id/send — the tap. The hash the card was drawn from is the one thing that may move the
   // row into `holding`; the ten-second hold, the seal and the delivery are the send service's.
   router.post(`${base}/:id/send`, route("POST /drafts/:id/send", async (db, req, res) => {
@@ -756,6 +1038,207 @@ export function registerDraftRoutes(router, ctx) {
   }
 }
 
+/* -------------------------------------------------------------- the bot picker */
+
+/**
+ * The two rules a drafting turn is held to, loaded once per picker read: `readDraftingSettings` (the
+ * owner's cloud-drafting switch and the provider rows) and `allowDraftModel` (the one verdict on a
+ * bot's model). They live in the module that owns a turn, so the picker can never drift from the
+ * refusal a turn would give; a build without that module lists nothing at all.
+ *
+ * `allowDraftModel` reads the bot def's default model, which is the same key the turn checks first.
+ * A bot whose turn would pick another model (an escalation) is still checked again by the bridge, so
+ * a listed bot is one the turn may legitimately start.
+ */
+async function draftingRulesFor(db) {
+  try {
+    const turn = await import("../mail/drafts/turn.js");
+    if (typeof turn.readDraftingSettings !== "function" || typeof turn.allowDraftModel !== "function") return null;
+    return { settings: await turn.readDraftingSettings(db), allow: turn.allowDraftModel };
+  } catch {
+    return null;
+  }
+}
+
+/** A stored bot definition as the object it holds, or an empty one: a corrupt def proves nothing. */
+function parseBotDef(value) {
+  if (value == null) return {};
+  let def = value;
+  if (typeof value === "string") {
+    try {
+      def = JSON.parse(value);
+    } catch {
+      return {};
+    }
+  }
+  return def != null && typeof def === "object" && !Array.isArray(def) ? def : {};
+}
+
+/**
+ * The display name of the bot a draft was written under, read from `pi_bot_defs`, or null: a draft
+ * with no bot, or one whose bot row is gone, names nothing (the card falls back to the bot id). A
+ * read-only lookup — no row is written here.
+ *
+ * @param {object} db
+ * @param {string|null} botId
+ * @returns {Promise<string|null>}
+ */
+async function botNameFor(db, botId) {
+  const id = typeof botId === "string" ? botId.trim() : "";
+  if (id === "") return null;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id = ?",
+      args: [id],
+    });
+    const name = typeof rows[0]?.display_name === "string" ? rows[0].display_name.trim() : "";
+    return name === "" ? null : name;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The project a mail thread was filed under, or null. The store is the only source: today's schema
+ * records no filing for a thread (mail_threads carries no project), so this answers null and the
+ * picker suggests nothing — a reason is never invented for a bot the store does not point at.
+ *
+ * @param {object} db
+ * @param {{accountId: string, mid?: string|null}} args
+ * @returns {Promise<number|null>}
+ */
+async function suggestedProjectFor(db, { accountId, mid = null } = {}) {
+  if (mid == null || mid === "") return null;
+  let threadId = null;
+  try {
+    const message = await resolveMessageRef(db, { accountId, mid });
+    const id = Number(message?.threadId);
+    if (Number.isInteger(id) && id > 0) threadId = id;
+  } catch {
+    return null;
+  }
+  if (threadId == null) return null;
+  try {
+    const { rows } = await db.execute({ sql: "SELECT project_id FROM mail_threads WHERE id = ?", args: [threadId] });
+    const value = Number(rows[0]?.project_id);
+    return Number.isInteger(value) && value > 0 ? value : null;
+  } catch {
+    // A thread table with no filing column is a store that records none.
+    return null;
+  }
+}
+
+/** A project's name, or null: the only text a suggestion's reason is ever built from. */
+async function projectNameFor(db, projectId) {
+  try {
+    const { rows } = await db.execute({ sql: "SELECT name FROM project_spaces WHERE id = ?", args: [projectId] });
+    const name = typeof rows[0]?.name === "string" ? rows[0].name.trim() : "";
+    return name === "" ? null : name;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The picker's answer: every enabled bot whose model may draft for this account, the projects those
+ * bots belong to, and the one bot a thread's filing suggests.
+ *
+ * `bots` is ordered with the suggested bot first, and `projects` with the suggested bot's project
+ * first, so the picker draws the suggestion at the top with its reason (the project's own name). A bot
+ * is grouped under its home project; a bot in no project (or one whose project row is gone) is drawn
+ * under the picker's always-present "No project" group. `refused` is present only when the owner may
+ * use no bot at all, and carries the code of the first refusal — the cloud gate's code wins, because
+ * switching it on is what would offer those bots.
+ *
+ * @param {object} db
+ * @param {{account: object, mid?: string|null}} args
+ * @returns {Promise<{bots: object[], projects: object[], refused?: string}>}
+ */
+async function botOptionsFor(db, { account, mid = null } = {}) {
+  const rules = await draftingRulesFor(db);
+  if (!rules || !account) return { bots: [], projects: [] };
+
+  let rows = [];
+  try {
+    const read = await db.execute({
+      sql: `SELECT bot_id, display_name, definition, project_id FROM pi_bot_defs
+             WHERE enabled = 1 AND bot_id != ?`,
+      args: [CROW_VOICE_BOT_ID],
+    });
+    rows = read.rows ?? [];
+  } catch {
+    return { bots: [], projects: [] };
+  }
+
+  const projectIdOf = (row) => {
+    const value = Number(row?.project_id);
+    return Number.isInteger(value) && value > 0 ? value : null;
+  };
+
+  const usable = [];
+  const refusalCodes = [];
+  for (const row of rows) {
+    const id = typeof row?.bot_id === "string" ? row.bot_id : "";
+    if (id === "") continue;
+    const verdict = rules.allow(parseBotDef(row.definition), account, rules.settings);
+    if (!verdict?.ok) {
+      if (typeof verdict?.code === "string") refusalCodes.push(verdict.code);
+      continue;
+    }
+    const name = typeof row.display_name === "string" ? row.display_name.trim() : "";
+    usable.push({ id, name: name === "" ? id : name, projectId: projectIdOf(row) });
+  }
+
+  const suggestedProject = await suggestedProjectFor(db, { accountId: account.id, mid });
+  const suggestedName = suggestedProject == null ? null : await projectNameFor(db, suggestedProject);
+
+  usable.sort((a, b) => {
+    const leftSuggested = a.projectId !== null && a.projectId === suggestedProject ? 0 : 1;
+    const rightSuggested = b.projectId !== null && b.projectId === suggestedProject ? 0 : 1;
+    if (leftSuggested !== rightSuggested) return leftSuggested - rightSuggested;
+    if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+
+  const bots = usable.map((bot) => {
+    const suggested = suggestedProject != null && bot.projectId === suggestedProject;
+    return {
+      id: bot.id,
+      name: bot.name,
+      suggested,
+      // The reason is the project's name and nothing else; a filing whose project row is gone names
+      // nothing, so that bot is suggested with no reason rather than with an invented one.
+      reason: suggested ? suggestedName : null,
+    };
+  });
+
+  // The projects the listed bots belong to, the suggested one first; a name the store does not have
+  // leaves its bots under "No project" instead of a group with a blank heading.
+  const groups = new Map();
+  for (const bot of usable) {
+    if (bot.projectId === null) continue;
+    if (!groups.has(bot.projectId)) groups.set(bot.projectId, []);
+    groups.get(bot.projectId).push(bot.id);
+  }
+  const projects = [];
+  const orderedIds = [...groups.keys()].sort((a, b) => {
+    if (a === suggestedProject) return -1;
+    if (b === suggestedProject) return 1;
+    return a - b;
+  });
+  for (const id of orderedIds) {
+    const name = id === suggestedProject && suggestedName != null ? suggestedName : await projectNameFor(db, id);
+    if (name == null) continue;
+    projects.push({ id, name, bots: groups.get(id) });
+  }
+
+  const answer = { bots, projects };
+  if (bots.length === 0 && refusalCodes.length > 0) {
+    answer.refused = refusalCodes.includes("cloud_drafting_off") ? "cloud_drafting_off" : refusalCodes[0];
+  }
+  return answer;
+}
+
 /* ---------------------------------------------------------------- derivation */
 /**
  * The first revision of a new draft. A reply or a reply-all starts from `deriveReply`, a forward from
@@ -811,6 +1294,189 @@ async function threadKeyFor(db, parent) {
     }
   }
   return typeof parent.messageId === "string" && parent.messageId !== "" ? `mid:${parent.messageId}` : null;
+}
+
+/* -------------------------------------------------------- attachments and receipt */
+
+/**
+ * The thread id this draft's attachment picker reads: the stored thread the draft's key names, else
+ * the thread the message it answers is in. A draft with neither (a blank one) has no thread to read.
+ */
+async function threadIdFor(db, draft) {
+  const key = typeof draft?.threadKey === "string" ? draft.threadKey : "";
+  if (key !== "") {
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT id FROM mail_threads WHERE account_id = ? AND thread_key = ?",
+        args: [draft.accountId, key],
+      });
+      const id = Number(rows[0]?.id);
+      if (Number.isInteger(id) && id > 0) return id;
+    } catch {
+      // A thread table that cannot be read leaves the reply's own row below, never a failed read.
+    }
+  }
+  if (typeof draft?.replyToMid === "string" && draft.replyToMid !== "") {
+    const row = await resolveMessageRef(db, { accountId: draft.accountId, mid: draft.replyToMid });
+    const id = Number(row?.threadId);
+    if (Number.isInteger(id) && id > 0) return id;
+  }
+  return null;
+}
+
+/** A stored `attachments_json` value as the list it holds, or an empty list. */
+function parseParts(value) {
+  if (value == null) return [];
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+/**
+ * Every part of every message in the draft's thread, as the picker's own reference: the message's
+ * Message-ID, the part's index and the metadata the store kept. Read from `mail_messages` only — no
+ * mailbox is asked anything, so the list costs no network and works while the server is away.
+ *
+ * @returns {Promise<Array<{mid: string, index: number, filename: string, size: number|null,
+ *   contentType: string}>>}
+ */
+async function threadAttachables(db, draft) {
+  const threadId = await threadIdFor(db, draft);
+  if (threadId == null) return [];
+  const messages = await listThreadMessages(db, draft.accountId, threadId);
+  const out = [];
+  for (const message of messages) {
+    const mid = typeof message.messageId === "string" ? message.messageId : "";
+    if (mid === "") continue;
+    let parts = [];
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT attachments_json FROM mail_messages WHERE id = ?",
+        args: [message.id],
+      });
+      parts = parseParts(rows[0]?.attachments_json);
+    } catch {
+      parts = [];
+    }
+    parts.forEach((part, index) => {
+      out.push({
+        mid,
+        index,
+        filename: safeAttachmentName(part?.filename),
+        size: Number.isInteger(part?.size) ? part.size : null,
+        contentType: typeof part?.contentType === "string" ? part.contentType : "",
+      });
+    });
+  }
+  return out;
+}
+
+/**
+ * The owner's own Crow files the picker may offer: the newest `ATTACHABLE_STORAGE_LIMIT` rows that
+ * are unscoped or scoped to this draft's project. A file of another project is never listed, exactly
+ * as the storage reader never reads one, and `fileId` is the digits-only id that reader accepts. The
+ * list is what the reader would actually accept: the default bucket's rows only, and no row recorded
+ * as over the send cap (a row with no recorded size is listed, and preflight is where its real size
+ * is measured).
+ */
+async function storageAttachables(db, draft) {
+  const projectId = draft?.projectId == null ? null : Number(draft.projectId);
+  const scope = projectId == null ? "project_id IS NULL" : "(project_id IS NULL OR project_id = ?)";
+  const args = projectId == null ? [] : [projectId];
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT id, original_name, mime_type, size_bytes FROM storage_files
+             WHERE bucket = ? AND (size_bytes IS NULL OR size_bytes <= ?) AND ${scope}
+             ORDER BY id DESC
+             LIMIT ${ATTACHABLE_STORAGE_LIMIT}`,
+      args: [defaultBucket(), MAX_SEND_BYTES, ...args],
+    });
+    return rows.map((row) => {
+      const size = Number(row.size_bytes);
+      return {
+        fileId: String(row.id),
+        filename: safeAttachmentName(row.original_name),
+        size: Number.isFinite(size) && size > 0 ? size : 0,
+        contentType: typeof row.mime_type === "string" && row.mime_type !== "" ? row.mime_type : null,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The raw bytes the head revision's attachments add up to, as the card shows them against the cap.
+ * `totalBytes` is a display figure, from the sizes the revision recorded; preflight enforces the real
+ * cap on the bytes themselves.
+ */
+function attachmentBytes(head) {
+  let total = 0;
+  for (const ref of Array.isArray(head?.attachments) ? head.attachments : []) {
+    const size = Number(ref?.size);
+    if (Number.isFinite(size) && size > 0) total += size;
+  }
+  return total;
+}
+
+/**
+ * The reader link a sent draft's receipt carries, or null: the plan-2 message link, built only once a
+ * copy of the Message-ID sits in one of this account's Sent-role folders. A send to self leaves the
+ * same Message-ID in INBOX as well, and `resolveMessageRef` prefers the inbox row of such a pair, so
+ * the account's rows for the id are asked which one is in a Sent folder and the link is built from
+ * that copy. Before the Sent copy is synced the card says "Sent, syncing..." rather than linking a
+ * message that is not here.
+ */
+async function readerLinkFor(db, draft, messageId) {
+  if (messageId == null) return null;
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT id, folder_id FROM mail_messages
+             WHERE account_id = ? AND message_id = ? ORDER BY id ASC`,
+      args: [draft.accountId, messageId],
+    });
+    for (const row of rows) {
+      const folder = await getFolder(db, row.folder_id);
+      if (folder && folderRole(folder) === "sent") {
+        return `/dashboard/mail?view=message&a=${encodeURIComponent(draft.accountId)}&mid=${encodeURIComponent(messageId)}`;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A sent draft's receipt — when, which Message-ID, from which account and where it is readable — or
+ * null for every other state. The account label is the display name the row carries, else its
+ * address; nothing here reads the content of the message that went out.
+ */
+async function receiptFor(db, draft) {
+  if (draft?.state !== "sent") return null;
+  const messageId = typeof draft.messageId === "string" && draft.messageId !== "" ? draft.messageId : null;
+  let accountLabel = null;
+  try {
+    const account = await getAccount(db, draft.accountId);
+    if (account) {
+      const name = typeof account.displayName === "string" ? account.displayName.trim() : "";
+      accountLabel = name !== "" ? name : account.address;
+    }
+  } catch {
+    accountLabel = null;
+  }
+  return {
+    sentAt: draft.sentAt ?? null,
+    messageId,
+    accountLabel,
+    readerLink: await readerLinkFor(db, draft, messageId),
+  };
 }
 
 export default registerDraftRoutes;

@@ -394,6 +394,57 @@ border-collapse:collapse;margin:0 0 8px;font-size:13px}
 #perch-hub-root .staged-field{display:grid;gap:4px;min-width:0}
 #perch-hub-root .staged-field input,#perch-hub-root .staged-field textarea{width:100%;min-width:0;box-sizing:border-box;min-height:44px;font-size:16px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px}
 #perch-hub-root .staged-field textarea{min-height:120px;resize:vertical;white-space:pre-wrap}
+/* Mail draft card (plan 3, task 10a): the draft a bot wrote, the line it answers, and the person's
+   own press. Like the staged card it lives in the transcript; the body is a line at a time (a line
+   is the unit a comment is left on), every address and every line wraps instead of widening the
+   column, every target is 44 px and every field 16 px so iOS does not zoom on focus. No layer here
+   covers the page, so nothing needs a z-index. */
+#perch-hub-root .mdraft-card{border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:grid;gap:6px;background:var(--sky);min-width:0}
+#perch-hub-root .mdraft-head{font-weight:600;overflow-wrap:anywhere}
+#perch-hub-root .mdraft-rcpt{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;min-width:0}
+#perch-hub-root .mdraft-label{font-size:11px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:var(--teal)}
+#perch-hub-root .mdraft-name,#perch-hub-root .mdraft-addr,#perch-hub-root .mdraft-subject,#perch-hub-root .mdraft-replyto{overflow-wrap:anywhere;min-width:0}
+#perch-hub-root .mdraft-subject{font-weight:600}
+#perch-hub-root .mdraft-new,#perch-hub-root .mdraft-changed{font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:0 6px}
+#perch-hub-root .mdraft-from,#perch-hub-root .mdraft-size,#perch-hub-root .mdraft-note,#perch-hub-root .mdraft-syncing,#perch-hub-root .mdraft-edit-note{font-size:12.5px;color:var(--dim)}
+#perch-hub-root .mdraft-body{display:grid;gap:1px;max-height:40vh;overflow:auto;overscroll-behavior:contain}
+#perch-hub-root .mdraft-lineseg{display:grid;gap:4px;min-width:0}
+#perch-hub-root .mdraft-line{white-space:pre-wrap;overflow-wrap:anywhere;padding:2px 4px;border-radius:6px;min-height:22px}
+#perch-hub-root .mdraft-line:not(.mdraft-line-static){cursor:pointer}
+#perch-hub-root .mdraft-line:not(.mdraft-line-static):active{background:var(--card)}
+#perch-hub-root .mdraft-revising{font-size:12.5px;color:var(--dim);font-style:italic;padding:0 4px}
+#perch-hub-root .mdraft-status{font-size:12.5px;color:var(--dim);overflow-wrap:anywhere}
+#perch-hub-root .mdraft-status:empty{display:none}
+#perch-hub-root .mdraft-audience-status,#perch-hub-root .mdraft-comment-status{font-size:12.5px;color:var(--dim);overflow-wrap:anywhere}
+#perch-hub-root .mdraft-audience-status:empty,#perch-hub-root .mdraft-comment-status:empty{display:none}
+#perch-hub-root .mdraft-sent{color:inherit}
+#perch-hub-root .mdraft-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#perch-hub-root .mdraft-actions button,#perch-hub-root .mdraft-rules{min-height:44px;padding:10px 14px;display:inline-flex;align-items:center;justify-content:center}
+#perch-hub-root .mdraft-actions button:disabled{opacity:.55;cursor:default}
+#perch-hub-root .mdraft-audience{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
+#perch-hub-root .mdraft-chip{min-height:36px;padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--ink)}
+#perch-hub-root .mdraft-chip-on{border-color:var(--teal);font-weight:700}
+#perch-hub-root .mdraft-form{display:grid;gap:8px}
+#perch-hub-root .mdraft-field{display:grid;gap:4px;min-width:0}
+#perch-hub-root .mdraft-field input,#perch-hub-root .mdraft-field textarea,#perch-hub-root .mdraft-note,#perch-hub-root .mdraft-comment{width:100%;min-width:0;box-sizing:border-box;min-height:44px;font-size:16px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px}
+#perch-hub-root .mdraft-field textarea,#perch-hub-root .mdraft-note{min-height:96px;resize:vertical;white-space:pre-wrap}
+#perch-hub-root .mdraft-menu{display:grid;gap:8px}
+#perch-hub-root .mdraft-menu[hidden]{display:none}
+#perch-hub-root .mdraft-history-list{display:grid;gap:4px}
+#perch-hub-root .mdraft-history-list[hidden]{display:none}
+#perch-hub-root .mdraft-history-row{font-size:12.5px;color:var(--dim)}
+/* --- the schedule sheet (plan 3, task 10b) ----------------------------- */
+/* The sheet opens inside the card it belongs to: the two shortcuts, the picked date and time, the
+   line that the computer must be on, and Cancel. Every target is 44 px and both inputs 16 px, so
+   iOS does not zoom on focus. No layer here covers the page, so nothing needs a z-index. */
+#perch-hub-root .msched-sheet{border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:grid;gap:8px;background:var(--card);min-width:0}
+#perch-hub-root .msched-options{display:grid;gap:8px;min-width:0}
+#perch-hub-root .msched-pick{align-items:flex-end}
+#perch-hub-root .msched-field{display:grid;gap:4px;min-width:0}
+#perch-hub-root .msched-field input{width:100%;min-width:0;box-sizing:border-box;min-height:44px;font-size:16px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px}
+#perch-hub-root .msched-shortcuts button,#perch-hub-root .msched-pick button{min-height:44px;padding:10px 14px}
+#perch-hub-root .msched-sheet button:disabled{opacity:.55;cursor:default}
+#perch-hub-root .msched-box{font-size:12.5px;color:var(--dim);overflow-wrap:anywhere}
 /* --- hub layout ------------------------------------------------------- */
 /* Two views, one at a time on a phone, side by side on a wide screen.
    List is the default (no attribute needed): the old standalone page

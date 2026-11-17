@@ -7,11 +7,18 @@
  * A card shows the owner's own label (editable) and the mailbox address, a status in words — working,
  * a sign-in that needs the password again, or an account another instance holds — the last sync time
  * under its own "Last checked" label, the sync control, the local-models switch with its helper line,
- * the update-password control (only for an account the server refused), the senders whose images show
- * unasked (under their own heading), and remove behind its own sentence. Nothing drawn here is a
+ * the Sent-copy rule, the update-password control (only for an account the server refused), the
+ * senders whose images show unasked (under their own heading), and remove behind its own sentence.
+ * Nothing drawn here is a
  * connection setting: `accountsOverview` carries no host, port or username, and this module never asks
  * the account store for one. The senders arrive from the caller as `allow[accountId] = [sender, …]`,
  * already lower-cased and sorted.
+ *
+ * Above the accounts sits the owner-wide mail settings card (plan 3, Task 13): working hours, which the
+ * schedule sheet's shortcuts use, and the cloud-drafting switch (off until the owner turns it on). Its
+ * controls carry no stored value in this markup — the client reads them from
+ * `GET /dashboard/mail/api/settings` when the settings view is shown and saves them with one PATCH — so
+ * the page never has to be handed a setting to draw, and a value never ends up in an attribute.
  *
  * Every value that came from the owner or from the wire (a label, an address, a sender) is escaped:
  * a label is text in the heading and an attribute in the rename field, and no value is ever used for
@@ -134,6 +141,49 @@ function removeAccountHtml(accountId, lang) {
     + "</div>";
 }
 
+/**
+ * The Sent-copy rule of one account: two words the account store accepts, drawn as a select so the
+ * choice is one tap. The value the page can know (`account.sentCopy`) is selected here; the settings
+ * view's own read (`GET /dashboard/mail/api/settings`) corrects it on load, so a page drawn from a
+ * summary without the field still ends up showing the stored rule.
+ */
+function sentCopyHtml(account, lang) {
+  const id = String(account?.id ?? "");
+  const current = account?.sentCopy === "append" ? "append" : "provider";
+  const option = (value, label) => `<option value="${value}"${value === current ? " selected" : ""}>${e(label)}</option>`;
+  return `<label class="ml-field"><span class="ml-field-label">${e(t("mail.sentCopy", lang))}</span>`
+    + `<select class="ml-input" name="sentCopy" data-ml-sent-copy data-account="${e(id)}">`
+    + option("provider", t("mail.sentCopyProvider", lang))
+    + option("append", t("mail.sentCopyAppend", lang))
+    + "</select></label>"
+    + `<p class="ml-help">${e(t("mail.sentCopyHelp", lang))}</p>`;
+}
+
+/**
+ * The owner-wide mail settings: working hours (which the schedule sheet's shortcuts use) and the
+ * cloud-drafting switch (Q1: off until the owner turns it on). The controls carry no values here — the
+ * client reads them from `GET /dashboard/mail/api/settings` when the settings view is shown — and the
+ * save control sends all of them, so the two working-hour fields always travel together.
+ */
+function mailSettingsHtml(lang) {
+  return `<section class="ml-card" data-ml-mail-settings>`
+    + `<h2 class="ml-card-title">${e(t("mail.mailSettings", lang))}</h2>`
+    + `<h3 class="ml-card-subtitle">${e(t("mail.workingHoursHeading", lang))}</h3>`
+    + `<label class="ml-field"><span class="ml-field-label">${e(t("mail.workingHoursStart", lang))}</span>`
+    + `<input class="ml-input" type="time" name="workingHoursStart" data-ml-working-start></label>`
+    + `<label class="ml-field"><span class="ml-field-label">${e(t("mail.workingHoursEnd", lang))}</span>`
+    + `<input class="ml-input" type="time" name="workingHoursEnd" data-ml-working-end></label>`
+    + `<p class="ml-help">${e(t("mail.workingHoursHelp", lang))}</p>`
+    + `<div class="ml-field">`
+    + `<label class="ml-switch"><input type="checkbox" name="cloudDrafting" data-ml-cloud-drafting> ${e(t("mail.cloudDrafting", lang))}</label>`
+    + `<p class="ml-help">${e(t("mail.cloudDraftingHelp", lang))}</p>`
+    + "</div>"
+    + `<div class="ml-actions">`
+    + `<button class="ml-btn ml-btn--primary" type="button" data-ml-settings-save>${e(t("common.save", lang))}</button>`
+    + "</div>"
+    + "</section>";
+}
+
 /** One account's card: its label, address, status and every control the owner may use on it. */
 function accountCard(account, { senders = [], lang, tz }) {
   const id = String(account?.id ?? "");
@@ -156,6 +206,7 @@ function accountCard(account, { senders = [], lang, tz }) {
         <label class="ml-switch"><input type="checkbox" name="localModelsOnly" data-ml-local-models data-account="${e(id)}"${checked}> ${e(t("mail.localModelsOnly", lang))}</label>
         <p class="ml-help">${e(t("mail.localModelsOnlyHelp", lang))}</p>
       </div>
+      ${sentCopyHtml(account, lang)}
       ${update}
       ${allowListHtml(id, senders, lang)}
       ${removeAccountHtml(id, lang)}
@@ -228,7 +279,7 @@ export function settingsHtml({
       <h1 class="ml-title">${e(t("mail.title", lang))}</h1>
       ${mailGearLink(lang)}
     </div>
-    <div class="ml-settings" data-ml-settings>${held}${cards}${addAccountForm(lang)}</div>
+    <div class="ml-settings" data-ml-settings>${held}${mailSettingsHtml(lang)}${cards}${addAccountForm(lang)}</div>
   </div>`;
 }
 

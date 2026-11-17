@@ -48,8 +48,9 @@ import { createMailCredentials } from "../mail/credentials.js";
 import { MailError, MAIL_ERROR_TEXT, toMailError } from "../mail/errors.js";
 import { mailEnabled } from "../mail/flag.js";
 import { probeAccount } from "../mail/probe.js";
-import { createAccount, deleteAccount, getAccount, listAccounts, updateAccount } from "../mail/store/accounts.js";
+import { createAccount, deleteAccount, getAccount, listAccounts, updateAccount, MAIL_SENT_COPY_VALUES } from "../mail/store/accounts.js";
 import { listFolders } from "../mail/store/messages.js";
+import { readSetting, writeSetting } from "../dashboard/settings/registry.js";
 import { SKIP_SPECIAL_USE } from "../mail/sync/engine.js";
 import { registerActionRoutes } from "./mail-api-actions.js";
 import { registerDraftRoutes } from "./mail-drafts-api.js";
@@ -95,8 +96,21 @@ const HOST_MAX = 253;
 const ADDRESS_MAX = 254;
 const DIGEST_TIME_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
-const PATCH_FIELDS = new Set(["label", "localModelsOnly", "digestOptIn", "digestTime"]);
+const PATCH_FIELDS = new Set(["label", "localModelsOnly", "digestOptIn", "digestTime", "sentCopy"]);
 const SKIPPED_SPECIAL_USE = new Set(SKIP_SPECIAL_USE.map((flag) => flag.toLowerCase()));
+
+/**
+ * The three settings this router's own pair reads and writes, and the `dashboard_settings` keys they
+ * live under. The two working-hours keys are the schedule service's (`schedulePresets` reads them);
+ * the spellings are exported here so one test can hold the two modules to the same strings.
+ */
+export const MAIL_WORKING_HOURS_START_SETTING = "mail.working_hours_start";
+export const MAIL_WORKING_HOURS_END_SETTING = "mail.working_hours_end";
+/** The owner's cloud-drafting switch, the same key `mail/drafts/turn.js` reads. Local-only, always. */
+export const MAIL_CLOUD_DRAFTING_SETTING = "mail.cloud_drafting";
+const MAIL_SETTINGS_FIELDS = new Set(["workingHoursStart", "workingHoursEnd", "cloudDrafting"]);
+/** `HH:MM`, 24-hour: the only form a working hour is stored or accepted in. */
+const HOUR_MINUTE_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
 /* ------------------------------------------------------------------- runtime */
 
@@ -214,12 +228,59 @@ function readAccountPatch(body) {
     } else if (key === "digestTime") {
       if (typeof value !== "string" || !DIGEST_TIME_RE.test(value)) return null;
       patch.digestTime = value;
+    } else if (key === "sentCopy") {
+      // `provider` or `append` and nothing else: the account store validates it again, and a value
+      // outside the two words is refused here so no row is ever written with a third rule.
+      if (!MAIL_SENT_COPY_VALUES.includes(value)) return null;
+      patch.sentCopy = value;
     } else {
       if (typeof value !== "boolean") return null;
       patch[key] = value;
     }
   }
   return patch;
+}
+
+/**
+ * The three mail settings body, or null when a key is unknown or a value is not one this Crow stores.
+ *
+ * Working hours are text `HH:MM`; they are written together or cleared together (`null` or `""`), so a
+ * body that names one of the two without the other is refused rather than stored as half a day.
+ * Cloud drafting is a boolean.
+ */
+function readMailSettingsPatch(body) {
+  if (body == null || typeof body !== "object" || Array.isArray(body)) return null;
+  const patch = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (!MAIL_SETTINGS_FIELDS.has(key)) return null;
+    if (key === "cloudDrafting") {
+      if (typeof value !== "boolean") return null;
+      patch.cloudDrafting = value;
+      continue;
+    }
+    if (value === null || value === "") {
+      patch[key] = null;
+      continue;
+    }
+    if (typeof value !== "string" || !HOUR_MINUTE_RE.test(value)) return null;
+    patch[key] = value;
+  }
+  const hasStart = Object.hasOwn(patch, "workingHoursStart");
+  const hasEnd = Object.hasOwn(patch, "workingHoursEnd");
+  if (hasStart !== hasEnd) return null;
+  if (hasStart && (patch.workingHoursStart === null) !== (patch.workingHoursEnd === null)) return null;
+  return patch;
+}
+
+/** A stored setting as the mail settings answer it: a valid `HH:MM`, else null. */
+function storedHourMinute(value) {
+  return typeof value === "string" && HOUR_MINUTE_RE.test(value.trim()) ? value.trim() : null;
+}
+
+/** A stored boolean setting: this feature treats "1" and "true" as on, and nothing else. */
+function storedFlag(value) {
+  if (value === true) return true;
+  return typeof value === "string" && ["1", "true", "on", "yes"].includes(value.trim().toLowerCase());
 }
 
 /* ------------------------------------------------------------------ helpers */
@@ -235,6 +296,31 @@ function accountSummary(account) {
     localModelsOnly: account.localModelsOnly,
     digestOptIn: account.digestOptIn,
     digestTime: account.digestTime,
+  };
+}
+
+/**
+ * The mail settings page's own read: the three owner-wide settings and, per account, the Sent-copy
+ * rule (a per-account choice that the settings cards show beside the account). Nothing secret and no
+ * connection detail is in it.
+ *
+ * @param {object} db
+ */
+async function mailSettingsView(db) {
+  const [start, end, cloud] = await Promise.all([
+    readSetting(db, MAIL_WORKING_HOURS_START_SETTING),
+    readSetting(db, MAIL_WORKING_HOURS_END_SETTING),
+    readSetting(db, MAIL_CLOUD_DRAFTING_SETTING),
+  ]);
+  const sentCopies = {};
+  for (const account of await listAccounts(db)) sentCopies[account.id] = account.sentCopy;
+  return {
+    settings: {
+      workingHoursStart: storedHourMinute(start),
+      workingHoursEnd: storedHourMinute(end),
+      cloudDrafting: storedFlag(cloud),
+    },
+    sentCopies,
   };
 }
 
@@ -488,7 +574,33 @@ export function mailApiRouter(dashboardAuth, deps = {}) {
     });
   }));
 
+  // GET /settings — the three owner-wide mail settings and each account's Sent-copy rule. Owner-only
+  // like every route here; nothing on it is a connection detail or a secret. The settings page reads
+  // its stored values from this one read (the same shape the write answers with), so the markup never
+  // has to carry them.
+  router.get(`${MAIL_API_PREFIX}/settings`, route("GET /settings", async (db, req, res) => {
+    res.json(await mailSettingsView(db));
+  }));
+
   /* ------------------------------------------------------------------ writes */
+
+  // PATCH /settings — working hours (both together, or both cleared) and the cloud-drafting switch.
+  // An unknown key or a value this Crow does not store is a 400 and writes nothing. The cloud-drafting
+  // key is written LOCAL-ONLY: whether this box may hand draft text to a cloud model is this box's
+  // decision, never a setting a paired peer may turn on for it.
+  router.patch(`${MAIL_API_PREFIX}/settings`, route("PATCH /settings", async (db, req, res) => {
+    const patch = readMailSettingsPatch(req.body);
+    if (!patch) return sendError(res, 400, "bad_input");
+    if (Object.hasOwn(patch, "workingHoursStart")) {
+      // Both keys move together, and clearing writes the empty string both readers read as "none set".
+      await writeSetting(db, MAIL_WORKING_HOURS_START_SETTING, patch.workingHoursStart ?? "");
+      await writeSetting(db, MAIL_WORKING_HOURS_END_SETTING, patch.workingHoursEnd ?? "");
+    }
+    if (Object.hasOwn(patch, "cloudDrafting")) {
+      await writeSetting(db, MAIL_CLOUD_DRAFTING_SETTING, patch.cloudDrafting ? "1" : "0", { scope: "local" });
+    }
+    res.json(await mailSettingsView(db));
+  }));
 
   // POST /accounts — a duplicate is refused before anything dials, the probe comes before anything is
   // stored, then one claim; a claim that is lost afterwards is undone whole, so an address is never

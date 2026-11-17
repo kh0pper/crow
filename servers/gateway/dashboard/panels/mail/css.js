@@ -111,7 +111,24 @@ const MESSAGE_RULES = `
     display: inline-flex; align-items: center; min-height: 44px; color: var(--crow-accent);
     font-size: 0.9rem; text-decoration: none; overflow-wrap: anywhere;
   }
-  .ml-size { margin-left: auto; font-size: 0.8rem; color: var(--crow-text-secondary); white-space: nowrap; }`;
+  .ml-size { margin-left: auto; font-size: 0.8rem; color: var(--crow-text-secondary); white-space: nowrap; }
+  /* The reply slot (plan 3, Task 11): the five actions, then the bot picker the client fills. Every
+     control is a 44 px target, like the message bar's. */
+  .ml-reply-slot { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .ml-reply-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+  .ml-bot-picker {
+    display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 12px; box-sizing: border-box;
+    border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 16px); background: var(--crow-bg-surface);
+  }
+  .ml-bot-picker[hidden] { display: none; }
+  .ml-picker-refusal { color: var(--crow-text-primary); }
+  .ml-picker-refusal[hidden] { display: none; }
+  .ml-picker-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .ml-picker-group { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .ml-picker-group-name { margin: 0; font-size: 0.8rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
+  .ml-bot-pick { flex-direction: column; align-items: flex-start; min-width: 0; width: 100%; }
+  .ml-pick-name { min-width: 0; overflow-wrap: anywhere; }
+  .ml-pick-reason { min-width: 0; font-size: 0.8rem; font-weight: 400; color: var(--crow-text-secondary); overflow-wrap: anywhere; }`;
 
 /**
  * The settings view (Task 7): the account cards (label field, address, status, sync, the local-models

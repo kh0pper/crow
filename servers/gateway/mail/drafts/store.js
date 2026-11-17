@@ -49,6 +49,16 @@ export const REVISION_AUTHORS = Object.freeze(["bot", "user", "system"]);
 /** A comment's life: waiting for the next revision, folded into one, or dropped. */
 export const COMMENT_STATES = Object.freeze(["queued", "applied", "dropped"]);
 
+/**
+ * The `fail_reason` marker an account's removal leaves on a draft whose outcome cannot be known: the
+ * row was `sending` when the account went, or was already `unknown`, and no Sent folder is left to
+ * check. It reads as a code, not a sentence, because nobody was there to see what happened — the card
+ * shows its own "we could not confirm" line — and the sweep never reconciles such a row (there is no
+ * adapter for a removed account). Exported here, the module that owns every draft column's meaning, so
+ * the removal guard that writes it and the sweep that skips it agree on one spelling.
+ */
+export const ACCOUNT_REMOVED_REASON = "account_removed";
+
 /** Where an attachment's bytes come from: the thread being answered, or Crow's own storage. */
 export const ATTACHMENT_SOURCES = Object.freeze(["thread", "storage"]);
 
@@ -712,6 +722,42 @@ export async function listDraftsForChat(db, chatThreadId) {
     args: [key],
   });
   return rows.map(toDraft);
+}
+
+/**
+ * The audiences the card's one-tap chip row offers. A fixed list, so a chip can only ever write a
+ * value this list names: what a bot reads as the draft's `audience` (`mail_draft_read_context`) is one
+ * of these words and nothing a page typed. The stored value is the token; the chip's label is the
+ * dashboard's own copy.
+ */
+export const DRAFT_AUDIENCES = Object.freeze(["colleague", "client", "personal"]);
+
+/**
+ * Set (or clear) the audience a draft is written for. Not a state change: the column is a hint for the
+ * drafting turn, so it moves under the same editable states a person may still change and nowhere
+ * else — a scheduled, holding, sending, sent or discarded draft keeps the audience it was frozen with.
+ * An audience outside `DRAFT_AUDIENCES` is BAD_INPUT; `null` clears it.
+ *
+ * @param {object} db
+ * @param {string} draftId
+ * @param {string|null} audience one of `DRAFT_AUDIENCES`, or null
+ * @param {{now?: (() => number)|number}} [options]
+ * @returns {Promise<{ok: true, audience: string|null}|{refused: true, state: string|null}>}
+ */
+export async function setAudience(db, draftId, audience, options = {}) {
+  const clock = clockOf(options);
+  const id = requireId(draftId, "draft_id");
+  const value = audience == null ? null : requireMember(audience, DRAFT_AUDIENCES, "audience");
+  const draft = await getDraft(db, id);
+  if (!draft) throw missing("draft");
+  if (!EDITABLE_STATES.includes(draft.state)) return { refused: true, state: draft.state };
+  const result = await db.execute({
+    sql: `UPDATE mail_drafts SET audience = ?, updated_at = ?
+           WHERE id = ? AND state IN (${EDITABLE_STATES.map(() => "?").join(", ")})`,
+    args: [value, stamp(clock), id, ...EDITABLE_STATES],
+  });
+  if (result.rowsAffected !== 1) return { refused: true, state: (await getDraft(db, id))?.state ?? null };
+  return { ok: true, audience: value };
 }
 
 /** A draft's revisions, oldest first: the "Draft history" view. */

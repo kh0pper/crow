@@ -40,11 +40,15 @@
  *   back continues each listed folder's history on the server, and the server search asks the
  *   accounts' servers; both reload with a `flash` the panel reads back into a sentence.
  *
- *   Settings. Rename and the local-models switch PATCH their own field, Update password PUTs the new
- *   secret, the add-account form posts its fields as the connect body to the accounts route this
+ *   Settings. Rename and the local-models switch PATCH their own field, the Sent-copy choice PATCHes
+ *   the account's own rule, the mail settings card saves the three owner-wide settings (working hours,
+ *   cloud drafting) in one request, Update password PUTs the new secret, the add-account form posts its
+ *   fields as the connect body to the accounts route this
  *   script hardcodes, Remove sender deletes one allowance, and Remove account keeps its sentence
  *   hidden until the first click and deletes the account only on a later click at least 500 ms after
- *   that; the confirmation lapses after 8 s or when focus leaves the block.
+ *   that; the confirmation lapses after 8 s or when focus leaves the block. The card's stored values
+ *   are read once when the settings view is shown (GET /dashboard/mail/api/settings), so the page's
+ *   markup carries no setting and a save answers with the same shape the read does.
  *   The add-account form is the one form here that must never reach the browser, so its listener is
  *   bound on the form itself and cancels the submit as its very first act, before it looks at the
  *   event or reads a field. The header's search box is a plain GET form and is left alone: it must
@@ -56,6 +60,23 @@
  * carries the word its status line shows. A code with no sentence of its own shows the element's
  * generic sentence instead, and a failure that carries no code at all (a network error with no
  * answer) is still the network sentence. Nothing here is built in JavaScript but nodes and text.
+ *
+ * The reply slot (plan 3, Task 11). The server draws an empty `[data-mail-reply-slot]` and, beside it,
+ * one hidden element of data attributes holding that slot's copy (html.js's `replySlotStrings`): this
+ * script has no translated text of its own, so every label, line and refusal sentence is read from
+ * there. The slot is filled here with five actions — Reply, Reply all, Forward, "Draft a reply
+ * with..." and New email — and the bot picker. Reply, Reply all and Forward create a draft by hand
+ * (no bot, no turn) and open its card on Perch; New email creates a blank one the same way. The
+ * picker asks GET /drafts/bot-options once per page: it draws a "No project" group always, one group
+ * per project the answer names, and one button per bot, so a bot the person may not use is never
+ * drawn. Picking a bot creates the reply draft, starts that bot's turn over it, and opens that bot's
+ * card. A refused turn — the owner's cloud switch off, an account that drafts with local models
+ * only, a host that cannot start a turn — still opens that draft's card, without a bot in the URL,
+ * because the draft exists and the card is where the person fills it by hand; the sentence the page
+ * drew for that code is kept for the one case the card cannot be opened at all (no usable draft id).
+ * A draft id that is not a draft id, and a bot id that is not a bot id, never become a URL or a
+ * control.
+ * Bot names and reasons, and every project name, are written with textContent.
  *
  * Lifecycle: Turbo re-runs this script on every visit. Listeners on an element inside the panel are
  * bound behind a marker on that element (the element is replaced with the page, so a fresh one binds
@@ -590,6 +611,21 @@ export function mailClientJs(lang = "en") {
     var actionControl = target.closest('[data-ml-action]');
     if (actionControl) { clickAction(actionControl); return; }
 
+    var slotReply = target.closest('[data-ml-reply]');
+    if (slotReply) {
+      draftByHand(slotOf(slotReply), String(slotReply.getAttribute('data-ml-reply') || ''));
+      return;
+    }
+
+    var newEmail = target.closest('[data-ml-new-email]');
+    if (newEmail) { draftByHand(slotOf(newEmail), 'new'); return; }
+
+    var pickerToggle = target.closest('[data-ml-reply-bot]');
+    if (pickerToggle) { openPicker(slotOf(pickerToggle), pickerToggle); return; }
+
+    var botPick = target.closest('[data-ml-bot-pick]');
+    if (botPick) { chooseBot(slotOf(botPick), botPick); return; }
+
     var show = target.closest('[data-ml-show-images]');
     if (show) { paintFrame(slotIn(show), '?images=1'); return; }
 
@@ -629,6 +665,9 @@ export function mailClientJs(lang = "en") {
       });
       return;
     }
+
+    var settingsSave = target.closest('[data-ml-settings-save]');
+    if (settingsSave) { saveMailSettings(settingsSave); return; }
 
     var save = target.closest('[data-ml-password-save]');
     if (save) {
@@ -703,6 +742,15 @@ export function mailClientJs(lang = "en") {
       if (localId === '') { return; }
       patch('/dashboard/mail/api/accounts/' + encodeURIComponent(localId), { localModelsOnly: Boolean(local.checked) })
         .then(function (result) { if (!result.ok) { sayError(cardOf(local), result); } });
+      return;
+    }
+    var sentCopy = target.closest ? target.closest('[data-ml-sent-copy]') : null;
+    if (sentCopy) {
+      var copyId = String(sentCopy.getAttribute('data-account') || '');
+      var copyValue = String(sentCopy.value || '');
+      if (copyId === '') { return; }
+      patch('/dashboard/mail/api/accounts/' + encodeURIComponent(copyId), { sentCopy: copyValue })
+        .then(function (result) { if (!result.ok) { sayError(cardOf(sentCopy), result); } });
     }
   }
 
@@ -712,6 +760,331 @@ export function mailClientJs(lang = "en") {
    * password into the page URL; there is no state — a missing cookie or a field the form does not
    * have — in which the form is handed back to the browser instead.
    */
+  /* ---- the mail settings card: working hours, cloud drafting and each account's Sent copy ---- */
+
+  /**
+   * Fill the settings card's controls and the accounts' Sent-copy choices from one answer of
+   * GET /dashboard/mail/api/settings (the same shape a save answers with). Nothing is invented here:
+   * a value the answer does not carry leaves its control as the page drew it.
+   */
+  function fillMailSettings(json) {
+    var settings = json && json.settings ? json.settings : {};
+    var start = root.querySelector('[data-ml-working-start]');
+    var end = root.querySelector('[data-ml-working-end]');
+    var cloud = root.querySelector('[data-ml-cloud-drafting]');
+    if (start) { start.value = typeof settings.workingHoursStart === 'string' ? settings.workingHoursStart : ''; }
+    if (end) { end.value = typeof settings.workingHoursEnd === 'string' ? settings.workingHoursEnd : ''; }
+    if (cloud) { cloud.checked = settings.cloudDrafting === true; }
+    var copies = json && json.sentCopies && typeof json.sentCopies === 'object' ? json.sentCopies : {};
+    var selects = root.querySelectorAll('[data-ml-sent-copy]');
+    for (var i = 0; i < selects.length; i++) {
+      var id = String(selects[i].getAttribute('data-account') || '');
+      var value = copies[id];
+      if (value === 'provider' || value === 'append') { selects[i].value = value; }
+    }
+  }
+
+  /** Read the stored mail settings. A failure leaves the card as it was: nothing is sent by a read. */
+  function loadMailSettings() {
+    if (!root.querySelector('[data-ml-mail-settings]')) { return; }
+    request('GET', '/dashboard/mail/api/settings').then(function (result) {
+      if (!result.ok) { return; }
+      fillMailSettings(result.json);
+    }, function () {});
+  }
+
+  /**
+   * Save the card's three settings. The two working-hour fields travel together, because the route
+   * refuses one without the other; an empty field is "no working hours" and the route clears both.
+   */
+  function saveMailSettings(button) {
+    var section = closestOf(button, '[data-ml-mail-settings]');
+    var startInput = section ? section.querySelector('[data-ml-working-start]') : null;
+    var endInput = section ? section.querySelector('[data-ml-working-end]') : null;
+    var cloudInput = section ? section.querySelector('[data-ml-cloud-drafting]') : null;
+    var start = startInput ? String(startInput.value || '').trim() : '';
+    var end = endInput ? String(endInput.value || '').trim() : '';
+    button.setAttribute('disabled', '');
+    patch('/dashboard/mail/api/settings', {
+      workingHoursStart: start === '' ? null : start,
+      workingHoursEnd: end === '' ? null : end,
+      cloudDrafting: Boolean(cloudInput && cloudInput.checked)
+    }).then(function (result) {
+      button.removeAttribute('disabled');
+      if (!result.ok) { sayError(section || root, result); return; }
+      say(section || root, '');
+      fillMailSettings(result.json);
+    });
+  }
+
+  /* ---- the reply slot: reply by hand, or hand the reply to a bot ---------------------------- */
+
+  // The slot's own selector, built in two pieces for the same reason the frame slot's is: the panel's
+  // client script is on every mail page, and a message view that is not here carries no slot at all —
+  // so the attribute must never appear in the page's text.
+  var REPLY_SLOT = '[data-mail-reply' + '-slot]';
+  var DRAFTS_PATH = '/dashboard/mail/api/drafts';
+  var PERCH_PATH = '/dashboard/perch';
+  // The two ids that may be built into a URL or a control: the draft id the server mints ('md-' and
+  // sixteen hex characters) and a bot id. Anything else is a failure, never a link.
+  var DRAFT_ID_RE = /^md-[0-9a-f]{16}$/;
+  var BOT_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
+  // One action at a time per page: a second tap while a draft is being made is ignored.
+  var slotBusy = false;
+
+  function node(tag, className) {
+    var made = document.createElement(tag);
+    if (className) { made.className = className; }
+    return made;
+  }
+  function textOf(value) {
+    return document.createTextNode(value === null || value === undefined ? '' : String(value));
+  }
+  // One sentence the server drew for the slot. The element is hidden on the page, never in the slot.
+  function slotText(name) {
+    var box = document.querySelector('[data-ml-reply-strings]');
+    var value = box ? box.getAttribute('data-ml-' + name) : null;
+    return value === null || value === undefined ? '' : String(value);
+  }
+  function slotOf(clicked) { return closestOf(clicked, REPLY_SLOT); }
+  function slotAccount(slot) { return String((slot && slot.getAttribute('data-account')) || ''); }
+  function slotMid(slot) { return String((slot && slot.getAttribute('data-mid')) || ''); }
+
+  function slotButton(label, attribute, value) {
+    var made = node('button', 'ml-btn');
+    made.setAttribute('type', 'button');
+    if (attribute) { made.setAttribute(attribute, value); }
+    made.appendChild(textOf(label));
+    return made;
+  }
+
+  // The slot's own markup: the five actions and the picker. Built once per page from the page's own
+  // strings; the bot buttons are added when the picker first asks for them.
+  function buildSlot(slot) {
+    if (!slot || slot.getAttribute('data-ml-built') === '1') { return; }
+    slot.setAttribute('data-ml-built', '1');
+
+    var actions = node('div', 'ml-reply-actions');
+    actions.appendChild(slotButton(slotText('reply'), 'data-ml-reply', 'reply'));
+    actions.appendChild(slotButton(slotText('reply-all'), 'data-ml-reply', 'reply_all'));
+    actions.appendChild(slotButton(slotText('forward'), 'data-ml-reply', 'forward'));
+    var toggle = slotButton(slotText('draft-with'), 'data-ml-reply-bot', '');
+    toggle.setAttribute('aria-expanded', 'false');
+    actions.appendChild(toggle);
+    actions.appendChild(slotButton(slotText('new-email'), 'data-ml-new-email', ''));
+    slot.appendChild(actions);
+
+    var picker = node('div', 'ml-bot-picker');
+    picker.setAttribute('data-ml-bot-picker', '');
+    picker.setAttribute('hidden', '');
+    var seesOnly = node('p', 'ml-note ml-picker-note');
+    seesOnly.appendChild(textOf(slotText('sees-only')));
+    picker.appendChild(seesOnly);
+    var refusal = node('p', 'ml-note ml-picker-refusal');
+    refusal.setAttribute('data-ml-picker-refusal', '');
+    refusal.setAttribute('role', 'status');
+    refusal.setAttribute('hidden', '');
+    picker.appendChild(refusal);
+    var list = node('div', 'ml-picker-list');
+    list.setAttribute('data-ml-picker-list', '');
+    // "No project" is drawn before any bot is known and stays, so the picker always offers it.
+    var group = node('div', 'ml-picker-group');
+    group.setAttribute('data-ml-picker-group', 'no-project');
+    var heading = node('p', 'ml-picker-group-name');
+    heading.appendChild(textOf(slotText('no-project')));
+    group.appendChild(heading);
+    list.appendChild(group);
+    picker.appendChild(list);
+    slot.appendChild(picker);
+  }
+
+  function pickerOf(slot) {
+    return slot && typeof slot.querySelector === 'function' ? slot.querySelector('[data-ml-bot-picker]') : null;
+  }
+
+  /** The sentence the page drew for a refusal code, or its generic one for a code it does not name. */
+  function refusalText(code) {
+    var text = code === 'cloud_drafting_off' || code === 'local_models_only'
+      || code === 'delivery_unsupported' || code === 'unavailable'
+      ? slotText('refusal-' + code)
+      : '';
+    return text === '' ? slotText('refusal-generic') : text;
+  }
+  function showRefusal(slot, code) {
+    var picker = pickerOf(slot);
+    var box = picker ? picker.querySelector('[data-ml-picker-refusal]') : null;
+    if (!box) { return; }
+    box.textContent = refusalText(code);
+    box.removeAttribute('hidden');
+  }
+
+  function perchHref(draftId, botId) {
+    var query = '?maildraft=' + encodeURIComponent(String(draftId));
+    if (botId) { query = '?bot=' + encodeURIComponent(String(botId)) + '&maildraft=' + encodeURIComponent(String(draftId)); }
+    return PERCH_PATH + query;
+  }
+
+  function draftIdOf(result) {
+    var draft = result && result.json && result.json.draft ? result.json.draft : null;
+    var id = draft ? String(draft.id || '') : '';
+    return DRAFT_ID_RE.test(id) ? id : null;
+  }
+
+  // The person's own path: a draft made from this message (or from nothing) and its card, no bot.
+  function draftByHand(slot, mode) {
+    if (slotBusy || !slot) { return; }
+    var account = slotAccount(slot);
+    if (account === '') { return; }
+    var body = { accountId: account, mode: mode };
+    if (mode !== 'new') {
+      var mid = slotMid(slot);
+      if (mid === '') { return; }
+      body.replyToMid = mid;
+    }
+    slotBusy = true;
+    post(DRAFTS_PATH, body).then(function (result) {
+      slotBusy = false;
+      var id = draftIdOf(result);
+      if (!result.ok || id === null) { sayError(slot, result); return; }
+      navigate(perchHref(id, null));
+    });
+  }
+
+  /** One bot button: its name, and — for the suggested bot — the reason the server gave. */
+  function botButton(bot, projectId) {
+    var made = node('button', 'ml-btn ml-bot-pick');
+    made.setAttribute('type', 'button');
+    made.setAttribute('data-ml-bot-pick', '');
+    made.setAttribute('data-bot', String(bot.id));
+    made.setAttribute('data-project', projectId === null ? '' : String(projectId));
+    var name = node('span', 'ml-pick-name');
+    name.appendChild(textOf(bot.name));
+    made.appendChild(name);
+    if (bot.suggested === true && bot.reason !== '') {
+      var reason = node('span', 'ml-pick-reason');
+      reason.appendChild(textOf(slotText('reason').split('{project}').join(bot.reason)));
+      made.appendChild(reason);
+    }
+    return made;
+  }
+
+  /** The picker's bot list from one answer: a group per project, then the bots with no project. */
+  function fillPicker(slot, json) {
+    var picker = pickerOf(slot);
+    var list = picker ? picker.querySelector('[data-ml-picker-list]') : null;
+    if (!list) { return; }
+    var bots = [];
+    var raw = json && Array.isArray(json.bots) ? json.bots : [];
+    for (var i = 0; i < raw.length; i += 1) {
+      var entry = raw[i];
+      if (!entry || typeof entry.id !== 'string' || !BOT_ID_RE.test(entry.id)) { continue; }
+      bots.push({
+        id: entry.id,
+        name: typeof entry.name === 'string' && entry.name !== '' ? entry.name : entry.id,
+        suggested: entry.suggested === true,
+        reason: typeof entry.reason === 'string' ? entry.reason : '',
+      });
+    }
+    var placed = {};
+    var noProject = list.querySelector('[data-ml-picker-group="no-project"]');
+    var projects = json && Array.isArray(json.projects) ? json.projects : [];
+    for (var p = 0; p < projects.length; p += 1) {
+      var project = projects[p];
+      if (!project || project.id === null || project.id === undefined) { continue; }
+      var ids = Array.isArray(project.bots) ? project.bots : [];
+      var group = node('div', 'ml-picker-group');
+      group.setAttribute('data-ml-picker-group', String(project.id));
+      var heading = node('p', 'ml-picker-group-name');
+      heading.appendChild(textOf(typeof project.name === 'string' ? project.name : ''));
+      group.appendChild(heading);
+      for (var b = 0; b < bots.length; b += 1) {
+        if (ids.indexOf(bots[b].id) < 0 || placed[bots[b].id]) { continue; }
+        placed[bots[b].id] = true;
+        group.appendChild(botButton(bots[b], project.id));
+      }
+      list.insertBefore(group, noProject);
+    }
+    if (noProject) {
+      for (var n = 0; n < bots.length; n += 1) {
+        if (placed[bots[n].id]) { continue; }
+        placed[bots[n].id] = true;
+        noProject.appendChild(botButton(bots[n], null));
+      }
+    }
+  }
+
+  /** Ask GET /drafts/bot-options once per page and draw what it answers. */
+  function loadBots(slot) {
+    var picker = pickerOf(slot);
+    if (!picker || picker.getAttribute('data-ml-loaded') === '1') { return; }
+    var account = slotAccount(slot);
+    if (account === '') { return; }
+    picker.setAttribute('data-ml-loaded', '1');
+    var mid = slotMid(slot);
+    var url = DRAFTS_PATH + '/bot-options?accountId=' + encodeURIComponent(account);
+    if (mid !== '') { url += '&mid=' + encodeURIComponent(mid); }
+    request('GET', url).then(function (result) {
+      if (!result.ok) {
+        // A read that failed leaves the picker unmarked, so opening it again asks once more.
+        picker.removeAttribute('data-ml-loaded');
+        showRefusal(slot, result.json && result.json.error ? String(result.json.error) : 'generic');
+        return;
+      }
+      fillPicker(slot, result.json || {});
+      if (result.json && typeof result.json.refused === 'string') { showRefusal(slot, result.json.refused); }
+    });
+  }
+
+  function openPicker(slot, toggle) {
+    var picker = pickerOf(slot);
+    if (!picker) { return; }
+    if (!picker.hasAttribute('hidden')) {
+      picker.setAttribute('hidden', '');
+      if (toggle) { toggle.setAttribute('aria-expanded', 'false'); }
+      return;
+    }
+    picker.removeAttribute('hidden');
+    if (toggle) { toggle.setAttribute('aria-expanded', 'true'); }
+    loadBots(slot);
+  }
+
+  // Choosing a bot: one reply draft for this message, that bot's first turn over it, then its card.
+  function chooseBot(slot, button) {
+    if (slotBusy || !slot || !button) { return; }
+    var account = slotAccount(slot);
+    var mid = slotMid(slot);
+    var bot = String(button.getAttribute('data-bot') || '');
+    var project = String(button.getAttribute('data-project') || '');
+    if (account === '' || mid === '' || !BOT_ID_RE.test(bot)) { return; }
+    var body = { accountId: account, mode: 'reply', replyToMid: mid, botId: bot };
+    if (project !== '') { body.projectId = Number(project); }
+    slotBusy = true;
+    button.setAttribute('disabled', '');
+    post(DRAFTS_PATH, body).then(function (created) {
+      var id = draftIdOf(created);
+      if (!created.ok || id === null) {
+        slotBusy = false;
+        button.removeAttribute('disabled');
+        sayError(slot, created);
+        return;
+      }
+      post(DRAFTS_PATH + '/' + encodeURIComponent(id) + '/turn', { botId: bot, instruction: slotText('ask') })
+        .then(function (turned) {
+          button.removeAttribute('disabled');
+          if (!turned.ok) {
+            // The draft exists, but nothing was written into it. It is not left behind: the reader
+            // opens that draft's card, with no bot in the URL, which is where the person fills it by
+            // hand. The refusal sentence is only for a card that cannot be opened at all.
+            slotBusy = false;
+            if (id !== null) { navigate(perchHref(id, null)); return; }
+            showRefusal(slot, turned.json && turned.json.error ? String(turned.json.error) : 'generic');
+            return;
+          }
+          navigate(perchHref(id, bot));
+        });
+    });
+  }
+
   function bindAddForm(form) {
     if (form.getAttribute('data-ml-bound') === 'form') { return; }
     form.setAttribute('data-ml-bound', 'form');
@@ -776,6 +1149,13 @@ export function mailClientJs(lang = "en") {
   for (var j = 0; j < lists.length; j++) { bindPull(lists[j]); }
   var addForms = root.querySelectorAll('[data-ml-add-account]');
   for (var k = 0; k < addForms.length; k++) { bindAddForm(addForms[k]); }
+  // The reply slot exists on the message view only, and is filled once per page from the page's own
+  // copy: the five actions, and the picker with its always-present "No project" group.
+  var replySlots = root.querySelectorAll(REPLY_SLOT);
+  for (var r = 0; r < replySlots.length; r++) { buildSlot(replySlots[r]); }
+  // The mail settings card exists only on the settings view, whose URL says so; a page that happens
+  // to carry the markup for another reason (a preview, a fixture) reads nothing.
+  if (String((location && location.href) || '').indexOf('view=settings') >= 0) { loadMailSettings(); }
   bindMarkRead();
 
   if (!window.__mlBound) {

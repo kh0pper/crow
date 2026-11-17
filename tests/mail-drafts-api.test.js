@@ -402,7 +402,6 @@ test("routes accept no raw From, no headers and no envelope key", async () => {
     { from: { address: "sam@example.com" } },
     { headers: { "X-Anything": "1" } },
     { envelope: { from: ADDRESS, to: [SAM] } },
-    { bcc: [{ address: SAM }] },
   ]) {
     const res = await s.call("POST", `${DRAFTS}/${draft.id}/revisions`, { body: { ...base, ...extra } });
     assert.equal(res.status, 400, `${Object.keys(extra)[0]}: ${res.text}`);
@@ -422,9 +421,95 @@ test("GET /:id is the card: the row, the head, the flags, the comments and the h
   assert.deepEqual(res.json?.comments, []);
   assert.deepEqual(res.json?.history?.map((entry) => entry.rev), [1]);
   assert.equal(res.json?.history?.[0]?.author, "user");
+  assert.equal(res.json?.voice, null, "no voice note until plan 4 writes one");
+
+  // The card's voice line reads this: one note per head revision, and never another revision's.
+  const { setVoice } = await import("../servers/gateway/mail/drafts/store.js");
+  assert.equal(await setVoice(s.db, draft.id, 1, { transcript: "warmer" }, { now: () => NOW }), true);
+  const voiced = await s.call("GET", `${DRAFTS}/${draft.id}`);
+  assert.equal(voiced.json?.voice?.rev, 1);
+  assert.deepEqual(voiced.json?.voice?.voice, { transcript: "warmer" });
 
   const missing = await s.call("GET", `${DRAFTS}/${SEEDED_ID}`);
   assert.equal(missing.status, 404, missing.text);
+});
+
+test("GET /:id carries the bot's display name, and null when no bot row has it", async () => {
+  const s = await setup();
+  const seed = new Database(s.crow);
+  try {
+    seed.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,1)")
+      .run("draft-bot", "R4 Assistant", JSON.stringify({ models: { default: "stub/m1" } }));
+  } finally {
+    seed.close();
+  }
+
+  const first = {
+    to: [{ address: SAM }], cc: [], bcc: [], subject: "Weekend", body: "Saturday?", attachments: [],
+  };
+  const named = await createDraft(s.db, {
+    accountId: s.account.id, mode: "new", botId: "draft-bot", first, author: "bot",
+  });
+  const read = await s.call("GET", `${DRAFTS}/${named.id}`);
+  assert.equal(read.status, 200, read.text);
+  assert.equal(read.json?.draft?.botId, "draft-bot");
+  assert.equal(read.json?.draft?.botName, "R4 Assistant", "the card's read names the bot");
+
+  const orphan = await createDraft(s.db, {
+    accountId: s.account.id, mode: "new", botId: "gone-bot", first, author: "bot",
+  });
+  const orphaned = await s.call("GET", `${DRAFTS}/${orphan.id}`);
+  assert.equal(orphaned.status, 200, orphaned.text);
+  assert.equal(orphaned.json?.draft?.botName, null, "a bot row that is gone names nothing");
+
+  const blank = await newDraft(s);
+  const bare = await s.call("GET", `${DRAFTS}/${blank.id}`);
+  assert.equal(bare.json?.draft?.botId, null);
+  assert.equal(bare.json?.draft?.botName, null);
+
+  // One read only: the create route answers the row as the store holds it.
+  const created = await s.call("POST", DRAFTS, {
+    body: { accountId: s.account.id, mode: "new", botId: "draft-bot" },
+  });
+  assert.equal(created.status, 200, created.text);
+  assert.equal(Object.hasOwn(created.json?.draft ?? {}, "botName"), false);
+});
+
+test("PATCH /:id/audience writes one of the store's words, and refuses everything else", async () => {
+  const s = await setup();
+  const draft = await newDraft(s);
+
+  const ok = await s.call("PATCH", `${DRAFTS}/${draft.id}/audience`, { body: { audience: "client" } });
+  assert.equal(ok.status, 200, ok.text);
+  assert.deepEqual(ok.json, { ok: true, audience: "client" });
+  const row = await getDraft(s.db, draft.id);
+  assert.equal(row.audience, "client");
+  assert.equal(row.headRev, 1, "the audience is not a revision");
+  assert.equal(row.headHash, draft.headHash, "and it moves no head");
+
+  for (const bad of [{ audience: "Everyone" }, { audience: "" }, { audience: 3 }, {}, { audience: "client", extra: 1 }]) {
+    const res = await s.call("PATCH", `${DRAFTS}/${draft.id}/audience`, { body: bad });
+    assert.equal(res.status, 400, `${JSON.stringify(bad)}: ${res.text}`);
+    assert.equal(res.json?.error, "bad_input");
+  }
+  assert.equal((await getDraft(s.db, draft.id)).audience, "client", "a refused body wrote nothing");
+
+  const cleared = await s.call("PATCH", `${DRAFTS}/${draft.id}/audience`, { body: { audience: null } });
+  assert.equal(cleared.status, 200, cleared.text);
+  assert.equal((await getDraft(s.db, draft.id)).audience, null);
+
+  // A draft a tap has frozen answers its state and keeps the audience it was frozen with.
+  const scheduled = await s.call("POST", `${DRAFTS}/${draft.id}/schedule`, {
+    body: { hash: draft.headHash, dueAt: await zonedTime(s.db, NOW + 2 * 60 * 60 * 1000) },
+  });
+  assert.equal(scheduled.status, 200, scheduled.text);
+  const frozen = await s.call("PATCH", `${DRAFTS}/${draft.id}/audience`, { body: { audience: "personal" } });
+  assert.equal(frozen.status, 409, frozen.text);
+  assert.deepEqual(frozen.json, { error: "frozen", state: "scheduled" });
+  assert.equal((await getDraft(s.db, draft.id)).audience, null);
+
+  assert.equal((await s.call("PATCH", `${DRAFTS}/${SEEDED_ID}/audience`, { body: { audience: "client" } })).status, 404);
+  assert.equal((await s.call("PATCH", `${DRAFTS}/not-an-id/audience`, { body: { audience: "client" } })).status, 404);
 });
 
 test("a hand edit writes the next revision and always cancels a schedule", async () => {
@@ -487,6 +572,69 @@ test("a hand edit of a reply keeps the head's Bcc, In-Reply-To and References", 
   assert.deepEqual(head.bcc.map((entry) => entry.address), ["jo@example.com"], "the person's Bcc is carried over");
   assert.equal(head.inReplyTo, "<m-1@mail.example.test>", "the reply stays threaded");
   assert.deepEqual(head.references, ["<m-0@mail.example.test>", "<m-1@mail.example.test>"]);
+});
+
+test("a hand edit writes the Bcc it is given, keeps the head's when it is absent, and clears it when empty", async () => {
+  const s = await setup();
+  const draft = await newDraft(s, { bcc: [{ address: "jo@example.com" }] });
+  const edit = (body) => s.call("POST", `${DRAFTS}/${draft.id}/revisions`, {
+    body: { to: [{ address: SAM }], cc: [], subject: "Weekend", body: "Sunday it is.", attachments: [], ...body },
+  });
+  const headOf = async () => {
+    const row = await getDraft(s.db, draft.id);
+    return (await listRevisions(s.db, draft.id)).find((entry) => entry.rev === row.headRev);
+  };
+
+  const given = await edit({ expectHash: draft.headHash, bcc: [{ name: "Dan", address: "dan@example.com" }] });
+  assert.equal(given.status, 200, given.text);
+  const first = await headOf();
+  assert.deepEqual(first.bcc.map((entry) => entry.address), ["dan@example.com"], "the posted Bcc is stored");
+  assert.deepEqual(first.bcc.map((entry) => entry.name), ["Dan"], "with the name that was posted");
+
+  const carried = await edit({ expectHash: given.json.hash });
+  assert.equal(carried.status, 200, carried.text);
+  const second = await headOf();
+  assert.deepEqual(second.bcc.map((entry) => entry.address), ["dan@example.com"],
+    "a body with no bcc key keeps the head's, never drops it silently");
+
+  const cleared = await edit({ expectHash: carried.json.hash, bcc: [] });
+  assert.equal(cleared.status, 200, cleared.text);
+  const third = await headOf();
+  assert.deepEqual(third.bcc, [], "an explicit empty list clears it");
+});
+
+test("a Bcc is refused for the same reasons a To or a Cc is", async () => {
+  const s = await setup();
+  const draft = await newDraft(s);
+  const base = {
+    expectHash: draft.headHash,
+    to: [{ address: SAM }],
+    cc: [],
+    subject: "Weekend",
+    body: "Are we still on?",
+    attachments: [],
+  };
+  const token = `Sam <${SAM}>`;
+  const answers = [];
+
+  for (const field of ["to", "cc", "bcc"]) {
+    const listed = field === "to" ? [...base.to, { address: token }] : [{ address: token }];
+    const res = await s.call("POST", `${DRAFTS}/${draft.id}/revisions`, { body: { ...base, [field]: listed } });
+    assert.equal(res.status, 400, `${field}: ${res.text}`);
+    answers.push(res.json);
+  }
+  assert.deepEqual(answers[1], answers[0], "a bad Cc answers exactly what a bad To does");
+  assert.deepEqual(answers[2], answers[0], "and so does a bad Bcc");
+  assert.equal((await getDraft(s.db, draft.id)).headRev, 1, "a refused address wrote no revision");
+
+  // The route's own body cap is the same for every recipient field: the parser refuses the body whole.
+  const wide = (prefix) => Array.from({ length: 4_000 }, (_, index) => ({ address: `${prefix}${index}@example.com` }));
+  for (const field of ["to", "cc", "bcc"]) {
+    const res = await s.call("POST", `${DRAFTS}/${draft.id}/revisions`, { body: { ...base, [field]: wide(field) } });
+    assert.equal(res.status, 413, `${field}: ${res.text}`);
+    assert.equal(res.json?.error, "too_large", field);
+  }
+  assert.equal((await getDraft(s.db, draft.id)).headRev, 1);
 });
 
 test("a hand edit against a stale hash is refused changed", async () => {
@@ -895,9 +1043,11 @@ test("readMessageRaw reads the opened row's own UID from its own folder and noth
   assert.equal(gone, null, "a UID the server no longer holds reads as nothing");
 });
 
-test("readStorageFile answers null: Crow storage has no owner-checked read by file id", async () => {
+test("readStorageFile refuses an id that is not a storage file id", async () => {
   const s = await setup();
   const readers = makeDraftReaders({ db: s.db, supervisor: s.supervisor });
+  // The reader takes a digits-only row id and nothing else: a key-shaped or path-shaped string names
+  // no row, so it never reaches the object store (see tests/mail-drafts-attach.test.js).
   assert.equal(await readers.readStorageFile("file-1"), null);
   assert.equal(await makeDraftReaders({ db: s.db }).readStorageFile("file-1"), null);
 });

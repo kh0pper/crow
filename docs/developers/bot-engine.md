@@ -402,6 +402,7 @@ A contained bot has no NIC. Its only way out is the spawner's egress relay (`scr
 | `/llm/p/`, `/llm/c/` | a provider door / a consented cloud door |
 | `/board/mcp`, `/phone/mcp`, `/artifacts/mcp` | the bot's own MCP mounts, under their path-scoped tokens |
 | `/artifacts/upload/` | the artifacts upload PUT, under the one-time upload token in the path (operator ruling 2026-11-16) |
+| `/mail-draft/mcp` | Crow Mail's drafting mount: three tools, under a per-turn `mdt_` token plus a `mail-draft` actor signature; present only while a drafting turn runs; it is in `servers/shared/bot-doors.js` |
 | `/peer-relay/` | the relay to paired peers |
 
 The door list is paths only: a door admits every method on its path. `/artifacts/upload/` is therefore not PUT-only — the route behind it is a PUT route (anything else reaches no handler) and a PUT without a live token is a static `404`, so the token stays the only capability. Restricting a single door to one method would need a method-aware door mechanism, which the ruling deliberately did not add.
