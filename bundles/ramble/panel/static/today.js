@@ -36,6 +36,14 @@
   var cardBySlot = {};
   var expandedBy = {};
 
+  /* The last line the moves client said (a running walk's time, a refused
+   * start, the result), the entry that line belongs to, and the walk cards'
+   * own elements that carry it. A line names one entry, so a day with more than
+   * one walk says it under that card and nowhere else. */
+  var statusText = "";
+  var statusEntry = null;
+  var statusEls = [];
+
   /* ------------------------------------------------------------ words */
 
   function movesApi() {
@@ -120,6 +128,42 @@
     return btn;
   }
 
+  /* ---------------------------------------------- a walk's own line */
+
+  /* A walk's status lives under the card's own buttons, so a phone sees the
+   * running time (or a refused start) without scrolling past every card to the
+   * day's one line. Only the card whose entry the line belongs to says it; a
+   * line with no entry says nothing anywhere. It says nothing while there is
+   * nothing to say. */
+  function paintStatus(target) {
+    if (!target) return;
+    var entryId = target.getAttribute("data-entry");
+    var mine = statusText !== "" && typeof entryId === "string" && entryId !== "" &&
+      entryId === statusEntry;
+    setText(target, mine ? statusText : "");
+    setHidden(target, !mine);
+  }
+
+  function paintStatuses() {
+    for (var i = 0; i < statusEls.length; i += 1) paintStatus(statusEls[i]);
+  }
+
+  /** The moves client's status changed: keep it and show it on its own card. */
+  function rememberStatus(text, entryId) {
+    statusText = typeof text === "string" ? text : "";
+    statusEntry = statusText !== "" && typeof entryId === "string" && entryId !== ""
+      ? entryId
+      : null;
+    paintStatuses();
+  }
+
+  /* The cards carry no walk line of their own from here on; the day's own line
+   * keeps whatever was said for as long as it says it. */
+  function forgetStatus() {
+    statusText = "";
+    statusEntry = null;
+  }
+
   /* --------------------------------------------------------- the day's meter */
 
   /* The steps meter stays in the page markup; this only fills it in. */
@@ -177,9 +221,19 @@
     if (!moves || typeof moves.finishWalk !== "function") return;
     var out = null;
     try { out = moves.finishWalk(); } catch (e) { return; }
-    if (out && typeof out.then === "function") {
-      out.then(function () { refresh(); }, function () { refresh(); });
-    }
+    if (!out || typeof out.then !== "function") return;
+    out.then(function () {
+      /* The result line has had its repaint under the card it was said for.
+       * From the next one on the cards carry no walk line at all: the day's own
+       * line goes on saying it. */
+      var painted = refresh();
+      if (painted && typeof painted.then === "function") painted.then(forgetStatus);
+      else forgetStatus();
+    }, function () {
+      /* A finish that did not land leaves the walk running, and its line with
+       * it: only a repaint is asked for. */
+      refresh();
+    });
   }
 
   function outdoorRunning() {
@@ -274,10 +328,15 @@
     var row = node("div");
     row.className = "rb-row rb-actions";
     var drew = 0;
+    var statusLine = null;
 
     var startLabel = copy("today.card.start");
     if (startLabel !== "") {
-      row.appendChild(actionButton("rb-btn", startLabel, function () { startItem(item, payload); }));
+      var startBtn = actionButton("rb-btn", startLabel, function () { startItem(item, payload); });
+      /* A walk already running cannot be started twice: the card's Start says
+       * so by being unpressed, and re-enables once the walk is finished. */
+      if (item.entry.kind === "walk") startBtn.disabled = outdoorRunning();
+      row.appendChild(startBtn);
       drew += 1;
     }
     if (item.entry.kind === "walk") {
@@ -288,6 +347,15 @@
         row.appendChild(doneBtn);
         drew += 1;
       }
+      statusLine = node("p");
+      statusLine.className = "rb-muted rb-fine rb-slot-status";
+      /* The entry this card speaks for: a walk's line is drawn on the card it
+       * was pressed on, and on no other. */
+      statusLine.setAttribute("data-entry", typeof item.entry.id === "string" ? item.entry.id : "");
+      statusLine.setAttribute("role", "status");
+      statusLine.setAttribute("aria-live", "polite");
+      paintStatus(statusLine);
+      statusEls.push(statusLine);
     }
     var swapLabel = copy("today.card.swap");
     if (swapLabel !== "") {
@@ -301,6 +369,7 @@
       drew += 1;
     }
     if (drew > 0) body.appendChild(row);
+    if (statusLine) body.appendChild(statusLine);
     return body;
   }
 
@@ -808,6 +877,8 @@
     if (!host || !payload || typeof payload !== "object") return;
     day = payload;
     cardBySlot = {};
+    /* Every element that carries the walk's line is drawn again from here. */
+    statusEls = [];
     /* A repaint keeps what the reader opened and shut: a card still in the day
      * holds its own state, and a slot not seen before starts open only when it
      * is the Now card. */
@@ -875,6 +946,26 @@
 
   try { window.RambleToday = { refresh: refresh, paint: paint, loadSlots: loadSlots }; }
   catch (e) { /* no window: nothing to expose */ }
+
+  /* The moves client keeps one status line for the whole day. A walk card
+   * carries it under its own buttons, so register for it (and take whatever it
+   * already says, since it may have spoken before this script ran). */
+  var statusMoves = movesApi();
+  if (statusMoves) {
+    if (typeof statusMoves.status === "function") {
+      var currentStatus = null;
+      try { currentStatus = statusMoves.status(); } catch (e) { currentStatus = null; }
+      if (typeof currentStatus === "string") statusText = currentStatus;
+      var currentEntry = null;
+      if (typeof statusMoves.statusEntry === "function") {
+        try { currentEntry = statusMoves.statusEntry(); } catch (e) { currentEntry = null; }
+      }
+      if (statusText !== "" && typeof currentEntry === "string") statusEntry = currentEntry;
+    }
+    if (typeof statusMoves.onStatus === "function") {
+      try { statusMoves.onStatus(rememberStatus); } catch (e) { /* no line, no harm */ }
+    }
+  }
 
   if (!host) return;
   /* moves.js handles ?moves=prefs at the end of its own script, and it is loaded

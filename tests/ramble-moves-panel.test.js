@@ -896,8 +896,14 @@ function outdoorRoutes(now, startedAgoMs, day) {
   };
 }
 
+/** The copy lines as one sentence, the way moves.js joins them: a line that does
+ * not end itself gets a full stop, so a timer line and the line under it never
+ * run together as "... so far Each full ...". */
 function timerLine(...lines) {
-  return lines.join(" ");
+  return lines
+    .filter((line) => line !== "")
+    .map((line) => (/[.!?]$/.test(line) ? line : line + "."))
+    .join(" ");
 }
 
 test("a walk card's Start opens an outdoor session instead of the player", async () => {
