@@ -19,7 +19,12 @@
  *     hidden, which is what shows the widget's own sentence;
  *   - the octave shift moves the drawn pitches by 12 semitones;
  *   - a `keys.play` mapping plays the aimed track at the controller's own pitch
- *     and velocity and lights its key.
+ *     and velocity and lights its key, and its note-off goes to the track the
+ *     press started on even after the aim moved (a blur or a hidden page lets
+ *     every held note go, once);
+ *   - a note's key waits for the frame it is heard on, like a pad hit;
+ *   - moving the aim, or hiding the host for a sampler track, clears the lights,
+ *     and a track rename redraws the keyboard's title.
  */
 
 import { test } from "node:test";
@@ -302,6 +307,8 @@ async function bootSong(options = {}) {
   const timers = [];
   /** The page's window listeners, so a release can be dispatched. */
   const windowListeners = {};
+  /** The animation frames the page asked for, run on demand. */
+  const frames = [];
 
   function makeSocket() {
     const socket = { readyState: 1, handlers: {} };
@@ -334,8 +341,9 @@ async function bootSong(options = {}) {
     AudioContext: AudioContextStub,
     location: { protocol: "http:", host: "127.0.0.1:1", reload() {} },
     atob: globalThis.atob,
-    requestAnimationFrame() {
-      return 1;
+    requestAnimationFrame(fn) {
+      frames.push(fn);
+      return frames.length;
     },
     cancelAnimationFrame() {},
     addEventListener(name, handler) {
@@ -455,6 +463,23 @@ async function bootSong(options = {}) {
     stateFrame,
     event,
     settle,
+    Ctx: AudioContextStub,
+    /** Run the animation frames the page asked for, once. */
+    runFrames() {
+      const waiting = frames.splice(0, frames.length);
+      const list = AudioContextStub.instances;
+      const stamped = list.length > 0 ? Number(list[list.length - 1].currentTime) * 1000 : 0;
+      for (const fn of waiting) fn(stamped);
+      return waiting.length;
+    },
+    /** Say the page went hidden, or came back, the way a phone reports it. */
+    setVisibility(state) {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => String(state),
+      });
+      document.dispatchEvent(new domWindow.Event("visibilitychange"));
+    },
     /** The page's own test handle (see bootStudio). */
     hook() {
       return page.__studioTest;
@@ -647,13 +672,16 @@ test("a note event lights its key and clears at the note off, adding no node", a
   assert.equal(String(key.className).includes("st-key-on"), false, "the key starts dark");
 
   ui.padEvent({ frame: 0, track_id: LEAD, kind: "note", p: BASE, on: true });
+  ui.runFrames();
   assert.equal(String(key.className).includes("st-key-on"), true, "the note lights the key");
   assert.equal(ui.keyboard().querySelectorAll("*").length, before, "painting adds no DOM node");
 
   ui.padEvent({ frame: 0, track_id: LEAD, kind: "note", p: BASE, on: false });
+  ui.runFrames();
   assert.equal(String(key.className).includes("st-key-on"), false, "and its end takes the light away");
 
   ui.padEvent({ frame: 0, track_id: KIT, kind: "note", p: BASE, on: true });
+  ui.runFrames();
   assert.equal(String(key.className).includes("st-key-on"), false, "a note on another track lights nothing here");
   assert.equal(ui.keyboard().querySelectorAll("*").length, before, "still no node added");
 });
@@ -719,4 +747,198 @@ test("a keys.play MIDI note plays the aimed track and lights its key", async () 
   assert.equal(ui.notes()[1].p, 60);
   assert.equal(String(key.className).includes("st-key-on"), false, "and the key goes dark");
   assert.equal(ui.sent.filter((message) => message.type === "command").length, 0, "the keys are live state, never a command");
+});
+
+test("a keys.play note-off goes to the track its press started on, not the aim it left", async () => {
+  const doc = await keyboardDoc();
+  await mapKeysPlay(doc, 60);
+  const ui = await bootSong({ doc });
+  ui.click(`[data-role=grid] [data-track-id=${LEAD}] .st-name`);
+  await ui.settle();
+  ui.connectMidi();
+  await ui.settle();
+
+  ui.pedal([0x90, 60, 96]);
+  await ui.settle();
+  assert.deepEqual(ui.notes(), [{ track_id: LEAD, p: 60, v: 96, on: true }], "the press sounds the aimed track");
+
+  // The aim moves while the controller's key is still down: the off belongs to
+  // the track the note started on.
+  ui.click(`[data-role=grid] [data-track-id=${BASS}] .st-name`);
+  await ui.settle();
+  assert.equal(String(ui.aim().id), BASS, "the other note track is aimed now");
+
+  ui.pedal([0x80, 60, 0]);
+  await ui.settle();
+  const offs = ui.notes().filter((note) => note.on === false);
+  assert.deepEqual(offs.map((note) => note.track_id), [LEAD], "the off goes to the track that started the note");
+
+  // A second release has nothing left to end.
+  ui.pedal([0x80, 60, 0]);
+  await ui.settle();
+  assert.equal(ui.notes().filter((note) => note.on === false).length, 1, "a release with no recorded press is dropped");
+
+  // Aiming a sampler does not swallow the off either: it still goes where the
+  // note started.
+  ui.pedal([0x90, 62, 80]);
+  await ui.settle();
+  ui.click(`[data-role=grid] [data-track-id=${KIT}] .st-name`);
+  await ui.settle();
+  assert.equal(ui.keyboard().hidden, true, "a sampler track is aimed");
+  ui.pedal([0x80, 62, 0]);
+  await ui.settle();
+  const last = ui.notes()[ui.notes().length - 1];
+  assert.equal(last.on, false, "the release still ends the note");
+  assert.equal(last.p, 62);
+  assert.equal(last.track_id, BASS, "on the track it started on");
+});
+
+test("a blur or a hidden page lets every note a controller holds go, once each", async () => {
+  const doc = await keyboardDoc();
+  await mapKeysPlay(doc, 60);
+  const ui = await bootSong({ doc });
+  ui.click(`[data-role=grid] [data-track-id=${LEAD}] .st-name`);
+  await ui.settle();
+  ui.connectMidi();
+  await ui.settle();
+
+  ui.pedal([0x90, 60, 96]);
+  ui.pedal([0x90, 64, 96]);
+  await ui.settle();
+  assert.equal(ui.notes().filter((note) => note.on).length, 2, "two controller keys are held");
+
+  const offs = () => ui.notes().filter((note) => note.on === false);
+
+  ui.windowPointer("blur", {});
+  await ui.settle();
+  assert.deepEqual(offs().map((note) => note.p).sort((a, b) => a - b), [60, 64], "the blur sends one off per held note");
+  assert.equal(offs().every((note) => note.track_id === LEAD), true, "each on the track it started on");
+
+  ui.windowPointer("blur", {});
+  await ui.settle();
+  assert.equal(offs().length, 2, "a second blur sends nothing more");
+
+  // The page goes to the background, where no note-off is heard either.
+  ui.pedal([0x90, 60, 96]);
+  await ui.settle();
+  ui.setVisibility("hidden");
+  await ui.settle();
+  assert.equal(offs().length, 3, "the hidden page lets the held note go");
+  assert.equal(offs()[2].p, 60);
+  assert.equal(offs()[2].track_id, LEAD);
+
+  ui.setVisibility("visible");
+  ui.setVisibility("hidden");
+  await ui.settle();
+  assert.equal(offs().length, 3, "and only once");
+});
+
+test("moving the aim clears the lights the old track left on the keys", async () => {
+  const doc = await keyboardDoc();
+  const ui = await bootSong({ doc });
+  ui.click(`[data-role=grid] [data-track-id=${LEAD}] .st-name`);
+  await ui.settle();
+
+  const lit = (pitch) => String(ui.key(pitch).className).includes("st-key-on");
+  // The page makes its engine on the first sound: one key press is enough, and
+  // the note reports arrive on the listener that engine registers.
+  ui.key(BASE).dispatchEvent(ui.event("pointerdown", { button: 0, pointerId: 13 }));
+  await ui.settle();
+  ui.windowPointer("pointerup", { pointerId: 13 });
+  await ui.settle();
+  assert.equal(lit(60), false, "the key starts dark");
+
+  ui.padEvent({ frame: 0, track_id: LEAD, kind: "note", p: 60, on: true });
+  ui.runFrames();
+  assert.equal(lit(60), true, "the tracked note lights its key");
+
+  ui.click(`[data-role=grid] [data-track-id=${BASS}] .st-name`);
+  await ui.settle();
+  assert.equal(String(ui.aim().id), BASS, "the other note track is aimed now");
+  assert.ok(ui.key(60), "pitch 60 is drawn on the new keyboard");
+  assert.equal(lit(60), false, "no key wears the old track's light");
+
+  // A sampler hides the host; coming back to a note track draws a dark keyboard.
+  ui.click(`[data-role=grid] [data-track-id=${KIT}] .st-name`);
+  await ui.settle();
+  assert.equal(ui.keyboard().hidden, true, "a sampler track hides the keys");
+  ui.click(`[data-role=grid] [data-act=open-clip][data-clip-id=${BASS_CLIP}]`);
+  await ui.settle();
+  assert.equal(ui.keyboard().hidden, false, "the note track brings them back");
+  assert.equal(lit(48), false, "and no light comes back with them");
+  assert.equal(lit(60), false);
+});
+
+test("a long press on a key or an octave shift is the press it started", async () => {
+  const doc = await keyboardDoc();
+  const ui = await bootSong({ doc });
+  ui.click(`[data-role=grid] [data-track-id=${LEAD}] .st-name`);
+  await ui.settle();
+
+  const onKey = ui.event("contextmenu", {});
+  ui.key(BASE).dispatchEvent(onKey);
+  assert.equal(onKey.defaultPrevented, true, "the menu is cancelled on a key");
+
+  const octave = ui.document.querySelector("[data-act=keyboard-octave-up]");
+  assert.ok(octave, "the head carries the octave shift");
+  const onOctave = ui.event("contextmenu", {});
+  octave.dispatchEvent(onOctave);
+  assert.equal(onOctave.defaultPrevented, true, "and on the octave shift");
+
+  // The title that names the track keeps its own long press: only the controls a
+  // finger plays cancel the menu.
+  const title = ui.keyboard().querySelector(".st-keyboard-title");
+  assert.ok(title, "the widget is titled for the track it plays");
+  const onTitle = ui.event("contextmenu", {});
+  title.dispatchEvent(onTitle);
+  assert.equal(onTitle.defaultPrevented, false, "text in the page is left alone");
+});
+
+test("a note event waits for the frame it is heard on, like a pad hit", async () => {
+  const doc = await keyboardDoc();
+  const ui = await bootSong({ doc });
+  ui.click(`[data-role=grid] [data-track-id=${LEAD}] .st-name`);
+  await ui.settle();
+
+  // The page makes its engine and its context on the first sound.
+  ui.key(BASE).dispatchEvent(ui.event("pointerdown", { button: 0, pointerId: 11 }));
+  await ui.settle();
+  ui.windowPointer("pointerup", { pointerId: 11 });
+  await ui.settle();
+
+  const clock = ui.Ctx.instances[ui.Ctx.instances.length - 1];
+  assert.ok(clock, "the page made an audio context");
+  clock.currentTime = 0;
+  clock.outputLatency = 0.05;
+  assert.equal(clock.outputLatency, 0.05, "the fake clock has 50 ms of output latency");
+
+  const key = ui.key(BASE);
+  assert.equal(String(key.className).includes("st-key-on"), false, "the key starts dark");
+
+  // Frame 4800 at 48 kHz is 0.1 s of context time, and it is heard 50 ms later.
+  ui.padEvent({ frame: 4800, track_id: LEAD, kind: "note", p: BASE, on: true });
+  assert.equal(ui.window.__crowStudioPadQueue.length, 1, "the note waits in the queue");
+  assert.equal(String(key.className).includes("st-key-on"), false, "nothing is painted on arrival");
+
+  clock.currentTime = 0.149;
+  ui.runFrames();
+  assert.equal(String(key.className).includes("st-key-on"), false, "just short of the latency is still too early");
+
+  clock.currentTime = 0.15;
+  ui.runFrames();
+  assert.equal(String(key.className).includes("st-key-on"), true, "painted 50 ms after its context time");
+  assert.equal(ui.window.__crowStudioPadQueue.length, 0, "and the queue is empty");
+});
+
+test("renaming the aimed track redraws the keyboard's title", async () => {
+  const doc = await keyboardDoc();
+  const ui = await bootSong({ doc });
+  ui.click(`[data-role=grid] [data-track-id=${LEAD}] .st-name`);
+  await ui.settle();
+
+  const title = () => String(ui.keyboard().querySelector(".st-keyboard-title").textContent);
+  assert.equal(title(), "Lead", "the keys are titled for the track they play");
+
+  await ui.apply("track.rename", { track_id: LEAD, name: "Lead guitar" });
+  assert.equal(title(), "Lead guitar", "a rename redraws the title");
 });

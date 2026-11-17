@@ -131,7 +131,7 @@ export const SHELL_SCRIPT = [
   "    'fx': 'Open a pattern clip on a sampler track for the effects and the looper.',",
   "    'keyboard': 'Pick a note track to play it',",
   "    'mixer-strip': 'Pick a track to see its strip',",
-  "    'takes': 'Arm a track to record.'",,
+  "    'takes': 'Arm a track to record.'",
   "  };",
   "",
   "  // Where a widget's hosts are when the caller did not hand them in.",

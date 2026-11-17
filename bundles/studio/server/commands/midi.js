@@ -805,8 +805,10 @@ function planProfile(snap, args) {
 
   // The MPK Mini: its pads play the first sampler track's bank A pads 1-8 and
   // its knobs turn the selected track's macro knobs. Its keys propose nothing:
-  // the page does not play keys yet, so a `keys.play` row would claim a channel
-  // and play silence. (`keys.play` stays on the allow-list for when it does.)
+  // Learn does not propose `keys.play` rows, so a keys row is added by hand or by
+  // the agent. (The page does play such a row: the Keyboard widget's keys and a
+  // `keys.play` mapping both play the note track last selected, which is why
+  // `keys.play` stays on the allow-list.)
   const pads = MPK_MINI_PROFILE.pads;
   const sampler = (snap.tracks ?? []).find((track) => track?.device?.engine === SAMPLER_DEVICE.engine);
   const bank = sampler

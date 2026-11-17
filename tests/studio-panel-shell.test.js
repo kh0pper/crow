@@ -435,6 +435,7 @@ test("the emitted shell script follows the panel's inline rules and names the wi
   assert.equal(SHELL_SCRIPT.includes('"'), false, "no double quote in the emitted text");
   assert.equal(SHELL_SCRIPT.includes("\\"), false, "no backslash in the emitted text");
   assert.equal(SHELL_SCRIPT.includes("</script"), false, "it cannot close its own tag");
+  assert.equal(SHELL_SCRIPT.includes(",,"), false, "no double comma: it would be an array hole the join turns into a blank line");
   assert.equal(SHELL_CSS.includes("\u0060"), false, "no backtick in the styles");
   assert.equal(SHELL_CSS.includes("$" + "{"), false, "no template interpolation in the styles");
   assert.doesNotThrow(() => new Function(SHELL_SCRIPT), "the emitted text parses as a classic script");
