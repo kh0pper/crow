@@ -77,12 +77,20 @@ const EARLY_EXIT = [
 
 /** Every early-exit reader that sits behind a `|` in `text`, as `<line>:<kind>:<segment>`.
  *  `firstLine` is the source line `text` starts on, so a fragment lifted out of a stub reports
- *  the line of the file it came from. */
+ *  the line of the file it came from.
+ *
+ *  One exemption, and it is written ON the line it covers: a deliberate old shape kept as a
+ *  POSITIVE CONTROL (a fixture that proves the bug is real by failing on the old text). It
+ *  cannot be a mode or a file-level flag — the marker exempts exactly that line, and the test
+ *  below holds that an unmarked line with the same shape is still a violation. */
+const DELIBERATE_OLD_SHAPE = "# pipefail-guard: deliberate old shape (positive control)";
+
 function earlyExitReaders(text, firstLine = 1) {
   const found = [];
   text.split("\n").forEach((raw, i) => {
     const line = raw.trim();
     if (!line || line.startsWith("#")) return;
+    if (line.includes(DELIBERATE_OLD_SHAPE)) return;
     // `||` is not a pipe; anything else separates pipeline stages.
     const stages = line.split(/(?<!\|)\|(?!\|)/);
     for (const stage of stages.slice(1)) {
@@ -214,6 +222,24 @@ test("static guard: no test stub that sets pipefail ends a pipe with an early-ex
       "a call the script DID make as failed. Read the whole stream (`sed -n '1p'` instead of\n" +
       '`head -n 1`) or feed the reader a here-string:\n  ' +
       [...offenders].join("\n  "),
+  );
+});
+
+test("static guard: the deliberate-old-shape marker exempts that one line and nothing else", () => {
+  // The positive controls are old-shape pipelines ON PURPOSE (they fail on the old text). They
+  // name themselves on the exact line the guard would report — never by file or by mode.
+  assert.deepEqual(
+    earlyExitReaders(`set -uo pipefail\nproducer | grep -qFf "$TOK" 2>/dev/null  ${DELIBERATE_OLD_SHAPE}`),
+    [],
+  );
+  // Unmarked, the identical line is still a violation.
+  assert.deepEqual(earlyExitReaders(`set -uo pipefail\nproducer | grep -qFf "$TOK" 2>/dev/null`), [
+    '2:grep -q:grep -qFf "$TOK" 2>/dev/null',
+  ]);
+  // …and a marker elsewhere does not launder a pipeline below it.
+  assert.equal(
+    earlyExitReaders(`set -uo pipefail\n${DELIBERATE_OLD_SHAPE}\nproducer | grep -qFf "$TOK"`).length,
+    1,
   );
 });
 

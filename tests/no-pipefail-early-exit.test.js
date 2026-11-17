@@ -17,10 +17,9 @@
  * This scans EVERY shell script in the repo that enables pipefail (`set -euo pipefail`,
  * `set -uo pipefail`, `set -e -o pipefail`, `set -o pipefail`): every *.sh, plus every
  * extension-less file whose shebang says bash or sh (scripts/crow, scripts/crow-satellite,
- * scripts/fence/crow-publish-snapshot, scripts/hooks/pre-push, …). bundles/<app>/scripts/*.sh
- * is the sibling PR's territory (it fixes the same bug class there); it is exempted here by
- * path so this guard can land first, and the exemption is asserted dead the moment that PR
- * merges (its files clean here) instead of quietly outliving its reason.
+ * scripts/fence/crow-publish-snapshot, scripts/hooks/pre-push, …), bundles/<app>/scripts/*.sh
+ * included. No path is exempt: an exemption outlives its reason and then hides the next
+ * offender in the very place it covers, so there is none.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -66,13 +65,6 @@ function shellScripts(dir = ROOT, out = []) {
   }
   return out;
 }
-
-/**
- * The sibling PR fixes bundles/<app>/scripts/*.sh: exempted by path, never by file name.
- * DELETE THIS the moment that PR is on main — the `sibling` assertion in the repo-wide test
- * fails as soon as the exemption has nothing left to hide, so an orphaned regex cannot linger.
- */
-const SIBLING_OWNED = /^bundles\/[^/]+\/scripts\/[^/]+\.sh$/;
 
 const relOf = (file) => relative(ROOT, file).split(sep).join("/");
 
@@ -256,7 +248,7 @@ test("a pipeline continued on the next line is read as one pipeline (trailing `|
   assert.deepEqual(violations('# docker logs | grep -q x\n# head -1\n'), []);
 });
 
-test("no shell script that sets pipefail ends a pipeline with an early-exit reader (repo-wide)", (t) => {
+test("no shell script that sets pipefail ends a pipeline with an early-exit reader (repo-wide)", () => {
   const files = shellScripts();
   const offenders = [];
   let scanned = 0;
@@ -275,24 +267,8 @@ test("no shell script that sets pipefail ends a pipeline with an early-exit read
     assert.ok(files.some((f) => relOf(f) === name), "the shebang scan reaches " + name);
   }
 
-  // The sibling PR's files, reported but not failed on (see the header comment).
-  const sibling = offenders.filter((o) => SIBLING_OWNED.test(o.file));
-  const mine = offenders.filter((o) => !SIBLING_OWNED.test(o.file));
-  if (sibling.length > 0) {
-    t.diagnostic(`bundles/<app>/scripts/*.sh (the sibling PR's): ${sibling.length} site(s)`);
-    for (const v of sibling) t.diagnostic(`  ${v.file}:${v.line}: ${v.text}`);
-  }
-  // The exemption must not outlive its reason: once the sibling PR is on main, its files are
-  // clean here, `sibling` is empty, and SIBLING_OWNED has to go or it would hide the next
-  // offender in bundles/<app>/scripts/*.sh forever.
-  assert.ok(
-    sibling.length > 0,
-    "SIBLING_OWNED exempts bundles/<app>/scripts/*.sh from this guard because the sibling " +
-      "pipefail PR fixes them, and that exemption now covers NO offender: the sibling PR is on " +
-      "main, so delete SIBLING_OWNED (and its comment) instead of leaving it to hide a future one",
-  );
   assert.deepEqual(
-    mine.map((o) => `${o.file}:${o.line}: ${o.text}`),
+    offenders.map((o) => `${o.file}:${o.line}: ${o.text}`),
     [],
     "these must not pipe into an early-exit reader: read the producer whole first " +
       '(grep -qFf "$TOK" <<<"$(producer)", or producer > file then grep the file), use ' +

@@ -189,13 +189,15 @@ test("both ops scripts carry the relay's uid: from the home's owner, refusing ro
 // leaked token is reported clean and the gate passes. Both halves are tested here — a
 // scratch copy of the OLD shape (proving the bug is real in this shell), and full runs of
 // the REAL script with a stand-in docker/git/curl that leaks, stays clean, or fails.
+// The `old` branch below is that proof, not a stand-in to be fixed: it names itself so the
+// stub guard in tests/first-admin-pipefail.test.js exempts exactly that one line.
 
 const PIPE_SHAPES = String.raw`#!/usr/bin/env bash
 set -uo pipefail
 TOK="$1"
 producer() { printf '%s\n' "SUBJECT-TOKEN"; head -c 1048576 /dev/zero | tr '\0' 'x'; printf '\n'; }
 case "$2" in
-  old)  if producer | grep -qFf "$TOK" 2>/dev/null; then echo found; else echo 'not found'; fi ;;
+  old)  if producer | grep -qFf "$TOK" 2>/dev/null; then echo found; else echo 'not found'; fi ;; # pipefail-guard: deliberate old shape (positive control)
   here) OUT="$(producer)"; if grep -qFf "$TOK" <<<"$OUT" 2>/dev/null; then echo found; else echo 'not found'; fi ;;
   file) producer > "$3"; if grep -qFf "$TOK" -- "$3" 2>/dev/null; then echo found; else echo 'not found'; fi ;;
 esac
