@@ -164,8 +164,11 @@
  *   slot (with both tails in use it is cut instead — the pool stays 16). The
  *   song-wide steal cuts, so a song past its 64-voice cap really is 64 voices.
  *   Nothing is stolen until the new voice's own range is known to be playable.
- * - **Choke groups:** a start in choke group *n* fades every other sounding
- *   voice of group *n* on that track out over 64 frames.
+ * - **Choke groups:** a start in choke group *n* — the pad's plain integer
+ *   `choke`, 1..10 (the mute groups A..J; 0 is none) — fades every other
+ *   sounding voice of group *n* on that track out over 64 frames. The integer is
+ *   compared as it stands, so a group the panel does not offer still cuts its
+ *   own.
  * - **Modes:** a `oneshot` pad plays to the end of its range and stops there
  *   (with a 64-frame fade when it is still at level); a `gate` pad releases at
  *   `gate_frames`, the step's own length; a `normal` pad restarts on every press
@@ -188,10 +191,22 @@
  *   releases a pad from the panel (on-screen audition, MIDI later). A live
  *   start never goes through history and is never quantized. A release only
  *   releases `gate` voices: a `oneshot` pad that was pressed plays to its end.
+ * - **Speed:** `speed_pct` (50..150 %) and, while `bpm_sync` is on and the pad
+ *   names a `source_bpm_x10`, the song's tempo against the sample's own move
+ *   the voice's playback speed, held inside 0.25×..4×. It is varispeed: the
+ *   pitch moves with the speed. `keep_pitch` is reserved for a later
+ *   time-stretch and is deliberately not read here.
+ * - **Fixed velocity:** a pad with `fixed_velocity` plays every trigger at 127,
+ *   whichever velocity the step carries: the voice's own gain, the
+ *   `velocity_gain` a gain lane starts from, and the hit event the page lights
+ *   are all the full 127.
+ * - **Hold:** a `hold_ms` makes the voice sit at level 1 for that long between
+ *   the attack and the decay (`sampler-voice.js`, "The hold stage").
  * - **Locks:** every one of a pad's own fields can be locked per step —
  *   `attack_ms`, `decay_ms`, `sustain`, `release_ms`, `pitch`, `gain_db`,
  *   `pan`, `reverse`, `cutoff_hz`, `resonance` and the filter's kind under
- *   `filter_type` — and all of them go through the same `field()` lookup.
+ *   `filter_type` — and all of them go through the same `field()` lookup. The
+ *   playback settings above are NOT lockable: they come from the pad alone.
  *
  * ## Pad events: the lights follow the hits, not the clock
  *
@@ -1119,6 +1134,14 @@
   const DEFAULT_BPM = 120;
 
   /**
+   * The bounds one pad's playback speed is held inside — Speed % and tempo sync
+   * multiplied together — so a mis-set `source_bpm_x10` cannot ask a voice for a
+   * step no host can render.
+   */
+  const LOWEST_PAD_SPEED = 0.25;
+  const HIGHEST_PAD_SPEED = 4;
+
+  /**
    * A song's tempo, from its own `meta.bpm`; a missing or unusable one is 120.
    * @param {object} snapshot
    * @returns {number}
@@ -1135,6 +1158,12 @@
     if (value < low) return low;
     if (value > high) return high;
     return value;
+  }
+
+  /** @returns {number} the value when it is a finite number, else the fallback. */
+  function numberOr(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
   }
 
   /**
@@ -8052,6 +8081,14 @@
      * `sustain`, `release_ms`, `pitch`, `gain_db`, `pan`, `reverse`,
      * `cutoff_hz`, `resonance`, and the filter's kind under `filter_type` (the
      * document spells the pad's own one `filter.type`).
+     *
+     * The playback settings come from the pad alone and are never locked: a
+     * `fixed_velocity` pad plays this trigger at 127 (the voice AND the hit
+     * event, so a gain lane's `velocity_gain` is full too); `speed_pct` and,
+     * when `bpm_sync` is on and the pad names a `source_bpm_x10`, the song's
+     * tempo against the sample's own move the voice's varispeed, held inside
+     * 0.25×..4× (`keep_pitch` is reserved and is not read); and `hold_ms` is the
+     * level-1 hold the voice sits in between its attack and its decay.
      * @param {{track_id: string, bank_id: string, index: number, v: number,
      *          locks?: object, gate_frames?: number, clip_id?: string}} event
      * @param {boolean} live whether this is a live press rather than a step
@@ -8075,6 +8112,29 @@
 
       const locks = event.locks && typeof event.locks === "object" ? event.locks : null;
       const field = (name, fallback) => (locks && locks[name] !== undefined ? locks[name] : fallback);
+
+      // The velocity this trigger really plays at. A pad with `fixed_velocity`
+      // ignores the one its step (or its press) carries and plays at full level:
+      // the voice and the hit event both read 127, so a gain lane's
+      // `velocity_gain` is full too. It is worked out from the trigger, not held
+      // as a voice flag, so nothing downstream has to know where it came from.
+      const triggerVelocity = pad.fixed_velocity === true ? 127 : Number(event.v);
+      const velocityHeld = Number.isFinite(triggerVelocity) ? clamp(triggerVelocity, 1, 127) : 127;
+
+      // Varispeed: the pad's own Speed % and, while it is synced to a tempo it
+      // knows, the song's tempo against the sample's own. Pitch rises and falls
+      // with the speed — `keep_pitch` is reserved for a later time-stretch and
+      // is deliberately not read, so every pad of this phase is varispeed. The
+      // speed is held inside 0.25×..4× whatever the pad and the tempo ask for.
+      const speedPct = numberOr(pad.speed_pct, 100);
+      const sourceBpmX10 = numberOr(pad.source_bpm_x10, 0);
+      const sourceBpm = sourceBpmX10 > 0 ? sourceBpmX10 / 10 : 0;
+      const synced = pad.bpm_sync === true && sourceBpm > 0;
+      const speed = clamp(
+        (speedPct / 100) * (synced ? this.bpm / sourceBpm : 1),
+        LOWEST_PAD_SPEED,
+        HIGHEST_PAD_SPEED,
+      );
 
       const range = this.padRange(pad, stored);
       // An empty range plays nothing, so it must not take (and so steal) a
@@ -8110,12 +8170,14 @@
         reverse: field("reverse", pad.reverse === true) === true,
         pitch: field("pitch", pad.pitch),
         gainDb: field("gain_db", pad.gain_db),
-        velocity: event.v,
+        velocity: velocityHeld,
         pan: field("pan", pad.pan),
         attackMs: field("attack_ms", pad.attack_ms),
         decayMs: field("decay_ms", pad.decay_ms),
         sustain: field("sustain", pad.sustain),
         releaseMs: field("release_ms", pad.release_ms),
+        holdMs: numberOr(pad.hold_ms, 0),
+        speed: speed,
         filterType: typeof filterType === "string" ? filterType : "off",
         cutoffHz: field("cutoff_hz", filter.cutoff_hz),
         resonance: field("resonance", filter.resonance),
@@ -8140,8 +8202,6 @@
       // The cutoff and the resonance are kept RAW, exactly as `setFilter` took
       // them from the pad: it is the one place that clamps them, so a restore
       // lands on the very coefficients the start did.
-      const velocity = Number(event.v);
-      const velocityHeld = Number.isFinite(velocity) ? clamp(velocity, 1, 127) : 127;
       const cutoff = Number(field("cutoff_hz", filter.cutoff_hz));
       const resonance = Number(field("resonance", filter.resonance));
       voice.pad_key = bankId + "." + index;
@@ -8152,6 +8212,11 @@
       // played the step, so it ends when its track moves to another clip; a
       // live press belongs to no clip and survives a scene launch.
       voice.clip_id = live ? "" : asId(event.clip_id);
+      // What a later tempo change needs to follow this pad's own setting (B4c):
+      // whether the pad is synced, and the source tempo it is synced against (0
+      // when it names none).
+      voice.bpm_sync = pad.bpm_sync === true;
+      voice.source_bpm = sourceBpm;
       voice.locked = locks ? Object.keys(locks) : null;
       voice.velocity_gain = (velocityHeld / 127) * (velocityHeld / 127);
       voice.reverse_sign = field("reverse", pad.reverse === true) === true ? -1 : 1;

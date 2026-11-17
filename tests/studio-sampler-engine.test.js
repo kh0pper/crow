@@ -2828,3 +2828,208 @@ test("M23 a looping voice with sustain 0 ends when the envelope reaches 0 and em
   assert.equal(offs.length, 1, `the looping voice's light goes off exactly once, got ${offs.length}`);
   assert.deepEqual(statePairs(offs), [["track-1", BANK, 0, StudioPadEvents.STATE_OFF]]);
 });
+
+// --- playback settings: speed, tempo sync, fixed velocity, hold, mute groups --
+
+/** A gain in dB as the linear factor the engine uses (`dbToLinear`). */
+function dbGain(db) {
+  return Math.pow(10, db / 20);
+}
+
+test("speed_pct 200 plays an octave up in half the frames", async () => {
+  // The same shape the pitch test uses: an odd length whose last sample is 0, so
+  // a voice that reads every OTHER frame lands on that zero with its very last
+  // read and the half-length is exact.
+  const frames = 4801;
+  const samples = ramp(frames);
+  samples[frames - 1] = 0;
+
+  const song = kitSong({ pads: [pad("track-1", 0, { speed_pct: 200 })], frames });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [samples] }]);
+
+  pressPad(engine, 0);
+  const out = await engine.process(128, 4000);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+
+  // Twice the read per frame is an octave up (the pitch moves with the speed)
+  // and half the length: frame `at` reads sample `at * 2`.
+  for (const at of [0, 1, 2, 100, 2399]) {
+    assertLevel(out.left[at], samples[at * 2] * CENTRE, `frame ${at} reads sample ${at * 2}`, 1e-7);
+  }
+
+  assertLevel(out.left[2400], 0, "frame 2400 reads the sample's own last frame, which is zero");
+  for (const at of [2401, 2500, 3999]) {
+    assert.equal(out.left[at], 0, `frame ${at} is past half the sample and has to be silent`);
+  }
+});
+
+test("bpm_sync with source 100 BPM at song 120 BPM runs 1.2x, and with source_bpm_x10 0 it is ignored", async () => {
+  // A ramp is read exactly through the voice's linear interpolation: at a step
+  // of 1.2 frame `at` holds sample (1.2 * at), whatever the fraction.
+  const frames = 48000;
+  const samples = ramp(frames);
+
+  /** One render of a synced pad, pressed live, over `frames` frames of audio. */
+  const render = async (sourceBpmX10) => {
+    const song = kitSong({
+      pads: [pad("track-1", 0, { bpm_sync: true, source_bpm_x10: sourceBpmX10 })],
+      frames,
+    });
+    const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [Float32Array.from(samples)] }]);
+    pressPad(engine, 0);
+    const out = await engine.process(128, 2400);
+    assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+    return out;
+  };
+
+  // A 100 BPM sample in a 120 BPM song runs at 120/100 = 1.2x: the pitch (and
+  // with it the read rate) follows the speed.
+  const synced = await render(1000);
+  for (const at of [0, 1, 100, 1001, 2399]) {
+    const want = ((1.2 * at + 1) / 100000) * CENTRE;
+    assertLevel(synced.left[at], want, `frame ${at} reads 1.2 frames ahead`, 1e-7);
+  }
+
+  // A source of 0 means the tempo is not known, so the setting is ignored: the
+  // voice plays at the pad's own 100 %.
+  const unsynced = await render(0);
+  for (const at of [0, 1, 100, 2399]) {
+    assertLevel(unsynced.left[at], ((at + 1) / 100000) * CENTRE, `frame ${at} reads its own frame`, 1e-7);
+  }
+  assert.notEqual(
+    synced.left[1000],
+    unsynced.left[1000],
+    "a known source tempo has to change the speed; an unknown one has to leave it alone",
+  );
+});
+
+test("hold_ms 10 holds level 1 for 480 frames", async () => {
+  // The pad settles at sustain 0.5 with a decay of 0, so without the hold its
+  // level would drop to 0.5 on the very frame it starts.
+  const song = kitSong({ pads: [pad("track-1", 0, { hold_ms: 10, sustain: 0.5 })] });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+
+  pressPad(engine, 0);
+  const out = await engine.process(128, 1200);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+
+  // 10 ms at 48 kHz is exactly 480 frames of level 1.
+  for (const at of [0, 1, 479]) {
+    assertLevel(out.left[at], ONE_VOICE, `frame ${at} is inside the hold`);
+  }
+  for (const at of [480, 481, 1000]) {
+    assertLevel(out.left[at], ONE_VOICE * 0.5, `frame ${at} is past the hold and at the pad's sustain`);
+  }
+});
+
+test("mute group 9 and 10 cut each other and leave group 1 alone", async () => {
+  // Mute groups are the pad's plain `choke` integer: 9 and 10 are I and J, the
+  // two the range gained, and they behave exactly as A..H do — a start in group
+  // n fades the other voices of THAT group out, and never touches another one.
+  const song = kitSong({
+    pads: [
+      pad("track-1", 0, { choke: 1 }),
+      pad("track-1", 1, { choke: 9, gain_db: -6 }),
+      pad("track-1", 2, { choke: 9, gain_db: -12 }),
+      pad("track-1", 3, { choke: 10, gain_db: -18 }),
+      pad("track-1", 4, { choke: 10, gain_db: -24 }),
+    ],
+    frames: 48000,
+    clips: [patternClip("clip-1", "track-1")],
+    steps: [
+      step("clip-1", 0, 0, { v: 127 }),
+      step("clip-1", 1, 1, { v: 127 }),
+      step("clip-1", 2, 2, { v: 127 }),
+      step("clip-1", 3, 3, { v: 127 }),
+      step("clip-1", 4, 4, { v: 127 }),
+    ],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  const out = await engine.process(128, 30000);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+
+  const group1 = ONE_VOICE;
+  const nineA = ONE_VOICE * dbGain(-6);
+  const nineB = ONE_VOICE * dbGain(-12);
+  const tenA = ONE_VOICE * dbGain(-18);
+  const tenB = ONE_VOICE * dbGain(-24);
+  const at = (stepIndex) => stepIndex * FRAMES_PER_SIXTEENTH;
+
+  assertLevel(out.left[at(1) - 1], group1, "the group 1 pad plays alone before the next step");
+  assertLevel(out.left[at(1)], group1 + nineA, "a group 9 start does not cut the group 1 voice");
+  assertLevel(out.left[at(2) - 1], group1 + nineA, "and the group 9 voice is still there a step later");
+  assertLevel(out.left[at(2)], group1 + nineA + nineB, "the next group 9 start's own frame still holds both");
+  assertLevel(out.left[at(2) + 64], group1 + nineB, "64 frames later the earlier group 9 voice is gone");
+  assertLevel(out.left[at(3)], group1 + nineB + tenA, "a group 10 start sits beside the group 9 voice");
+  assertLevel(out.left[at(4)], group1 + nineB + tenA + tenB, "the second group 10 start still holds both of its group");
+  assertLevel(out.left[at(4) + 64], group1 + nineB + tenB, "and the earlier group 10 voice is gone");
+  assertLevel(
+    out.left[at(5) - 1],
+    group1 + nineB + tenB,
+    "the group 1 voice the first step started is still sounding at the end",
+  );
+});
+
+test("fixed_velocity makes a v 20 step as loud as v 127 and the hit event reports 127", async () => {
+  const song = kitSong({
+    pads: [pad("track-1", 0, { fixed_velocity: true }), pad("track-1", 1)],
+    frames: 4800,
+    clips: [patternClip("clip-1", "track-1")],
+    // The same velocity-20 step on both pads, half a bar apart so the two voices
+    // never overlap.
+    steps: [step("clip-1", 0, 0, { v: 20 }), step("clip-1", 8, 1, { v: 20 })],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(4800, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  const out = await engine.process(128, 9 * FRAMES_PER_SIXTEENTH);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+
+  // The pad with the flag plays the step at full level, the one without it keeps
+  // the step's own velocity.
+  for (const at of [0, 1, 4799]) {
+    assertLevel(out.left[at], ONE_VOICE, `frame ${at}: a fixed-velocity pad plays a v 20 step at full level`);
+  }
+  const quiet = ONE_VOICE * Math.pow(20 / 127, 2);
+  const second = 8 * FRAMES_PER_SIXTEENTH;
+  for (const at of [second, second + 1, second + 4799]) {
+    assertLevel(out.left[at], quiet, `frame ${at}: a pad without the flag keeps the step's velocity`);
+  }
+
+  // The hit event is the velocity the voice really plays at, so the page's own
+  // reading of the hit and a gain lane's `velocity_gain` are full too.
+  assert.deepEqual(
+    allPadEvents(engine.messages)
+      .filter((event) => event.kind === "hit")
+      .map((event) => [event.index, event.v]),
+    [
+      [0, 127],
+      [1, 20],
+    ],
+    "the fixed pad's hit reports 127 and the other pad's its own step velocity",
+  );
+});
+
+test("keep_pitch true on a pad changes nothing (ignored)", async () => {
+  const frames = 4800;
+  // A speed of 150 % with a +7 semitone pitch: a varispeed voice of this pad runs
+  // out well inside the render, so the whole voice is compared, fade included.
+  const songFor = (keepPitch) =>
+    kitSong({
+      pads: [pad("track-1", 0, { speed_pct: 150, pitch: 7, keep_pitch: keepPitch })],
+      frames,
+      clips: [patternClip("clip-1", "track-1")],
+      steps: [step("clip-1", 0, 0, { v: 127 })],
+    });
+
+  const ignored = await renderProcessor(songFor(true), 128, 6000, [
+    { id: SAMPLE_ID, channels: [constant(frames, 0.5)] },
+  ]);
+  const plain = await renderProcessor(songFor(false), 128, 6000, [
+    { id: SAMPLE_ID, channels: [constant(frames, 0.5)] },
+  ]);
+
+  assert.ok(peakOf(ignored.left) > 0.01, "the pad has to sound, so the two renders really are compared");
+  assert.deepEqual(ignored.left, plain.left, "keep_pitch is reserved: it moves no sample of the left channel");
+  assert.deepEqual(ignored.right, plain.right, "and none of the right channel");
+});
