@@ -1,16 +1,22 @@
 /**
- * Studio panel — the recording lanes widget (A4a).
+ * Studio panel — the recording lanes widget (A4a) and the record target's meter
+ * (A4b).
  *
  * The emitted client script runs against a linkedom document built from the page
- * the handler renders, with a real Yjs song and a fake engine: what these cases
- * check is the STATIC picture the widget draws — one lane per track on the
+ * the handler renders — with the shell's own two scripts evaluated first, so the
+ * page has modes and a layout — with a real Yjs song and a fake engine: what
+ * these cases check is the picture the widget draws — one lane per track on the
  * arrangement's own bar axis, each lane's arm, mute and solo (the grid's and the
  * mixer strip's own controls), the clips the ARRANGEMENT places on it, a ruler
  * with the section bands and the transport's playhead, and the two sentences a
  * song with nothing to draw gets. The record target (the first armed audio
  * track, as `startRecording` reads it) is drawn tall and red and named Armed,
- * and every other armed lane only says Armed; the meter and the live waveform
- * are A4b's, so nothing here draws one.
+ * and every other armed lane only says Armed.
+ *
+ * The meter is the DRY input's own reading: one node on the record target, moved
+ * when the target changes, off while the lanes widget is not on the page, and
+ * disposed with the stream. Its readout is the page's own view state, drawn by
+ * `paintArmedMeter` from what the meter posted.
  *
  * The widget is view state from end to end: no case sends a command except the
  * mute, solo and arm buttons, which are the existing ones.
@@ -18,6 +24,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { SHELL_SCRIPT } from "../bundles/studio/panel/shell.js";
+import { SHELL_LAYOUT_SCRIPT } from "../bundles/studio/panel/shell-layout.js";
 
 /** The note track, whose lane shows a placement and cannot be armed. */
 const NOTE_TRACK = "bass";
@@ -57,6 +65,8 @@ async function commands() {
   await import("../bundles/studio/server/commands/core.js");
   await import("../bundles/studio/server/commands/takes.js");
   await import("../bundles/studio/server/commands/arrangement.js");
+  await import("../bundles/studio/server/commands/mixer.js");
+  await import("../bundles/studio/server/commands/library.js");
   return runCommand;
 }
 
@@ -118,6 +128,65 @@ async function lanesDoc(options = {}) {
 }
 
 // ---- the fake browser ------------------------------------------------------
+
+/** An in-memory localStorage, so the shell's own layout store has somewhere to read. */
+function memoryStorage() {
+  const values = new Map();
+  return {
+    values,
+    getItem(key) {
+      return values.has(String(key)) ? values.get(String(key)) : null;
+    },
+    setItem(key, value) {
+      values.set(String(key), String(value));
+    },
+    removeItem(key) {
+      values.delete(String(key));
+    },
+  };
+}
+
+/** The width media queries the shell watches, answered from one page width. */
+function matchesFor(width, media) {
+  const min = /min-width:\s*(\d+)px/.exec(String(media));
+  if (min) return width >= Number(min[1]);
+  const max = /max-width:\s*(\d+)px/.exec(String(media));
+  if (max) return width <= Number(max[1]);
+  return false;
+}
+
+/**
+ * The same song, with an amp on the recording track's chain: what the lane names
+ * while the operator hears the chain the take stays dry of.
+ * @returns {Promise<object>}
+ */
+async function lanesDocWithAmp() {
+  const doc = await lanesDoc();
+  const runCommand = await commands();
+  // An amp plays a library file, and an insert is issued behind one.
+  runCommand(doc, "library.add", {
+    entry: {
+      id: "lib-capture",
+      kind: "nam",
+      name: "My capture",
+      source: "upload",
+      upload_id: "cap-upload",
+      storage_key: "projects/61/studio/song-1/library/lib-capture-upload.nam",
+      sha256: "a".repeat(64),
+      bytes: 1024,
+      licence: "",
+      credit: "My capture by me",
+      author_label: "You",
+    },
+  });
+  runCommand(doc, "insert.add", {
+    id: "ins-amp",
+    owner: "track:" + AUDIO_TRACK,
+    kind: "amp",
+    params: { model_id: "lib-capture" },
+  });
+  return doc;
+}
 
 /** A database fake for the panel handler: no projects to list. */
 function panelDb() {
@@ -199,9 +268,51 @@ function fakeContext() {
 }
 
 /**
+ * A meter stand-in: it keeps what the page did to it, and lets a case post the
+ * level messages the worklet posts.
+ */
+function fakeMeter() {
+  const meter = {
+    input: null,
+    levels: [],
+    active: [],
+    cleared: 0,
+    disposed: false,
+    listeners: [],
+    onLevel(listener) {
+      meter.listeners.push(listener);
+      return () => {};
+    },
+    setActive(on) {
+      meter.active.push(on === true);
+    },
+    clearClip() {
+      meter.cleared += 1;
+    },
+    dispose() {
+      meter.disposed = true;
+    },
+    /** One level message, shaped the way the worklet posts it. */
+    post(level) {
+      const full = {
+        frame: 0,
+        peak: 0,
+        rms: 0,
+        clipped: false,
+        cols: new Float32Array(0),
+        ...level,
+      };
+      meter.levels.push(full);
+      for (const listener of meter.listeners) listener(full);
+    },
+  };
+  return meter;
+}
+
+/**
  * The engine stand-in: it keeps the listeners the page registered, so a case can
- * report a position or end a take from the engine's side, and it builds one
- * recorder per take.
+ * report a position or end a take from the engine's side, it builds one recorder
+ * per take and one meter per build.
  */
 function fakeEngine() {
   const engine = {
@@ -210,6 +321,7 @@ function fakeEngine() {
     launches: [],
     errors: [],
     recorders: [],
+    meters: [],
     node: { connect() {} },
     setSong(song) {
       engine.songs.push(song);
@@ -242,6 +354,12 @@ function fakeEngine() {
     },
     async loadAudio() {},
     unloadAudio() {},
+    createInputMeter(options) {
+      const meter = fakeMeter();
+      meter.input = options ? options.input : null;
+      engine.meters.push(meter);
+      return Promise.resolve(meter);
+    },
     createRecorder() {
       const recorder = {
         armed: null,
@@ -322,7 +440,19 @@ async function bootLanes(options = {}) {
   );
   const { document, window: domWindow } = parseHTML(res.html);
 
+  // A phone's page reports its visibility, and a case drives it: a hidden page
+  // queues what its meter posts.
+  let visibility = "visible";
+  const visibilityProperty = { configurable: true, get: () => visibility };
+  try {
+    Object.defineProperty(document, "visibilityState", visibilityProperty);
+  } catch (err) {
+    Object.defineProperty(Object.getPrototypeOf(document), "visibilityState", visibilityProperty);
+  }
+
   const store = fakeTakeStore();
+  const storage = memoryStorage();
+  const sessionValues = new Map();
   const engine = fakeEngine();
   const sent = [];
 
@@ -364,6 +494,21 @@ async function bootLanes(options = {}) {
 
   const windowStub = {
     crypto: globalThis.crypto,
+    innerWidth: 1280,
+    localStorage: storage,
+    sessionStorage: {
+      getItem: (key) => (sessionValues.has(String(key)) ? sessionValues.get(String(key)) : null),
+      setItem: (key, value) => sessionValues.set(String(key), String(value)),
+      removeItem: (key) => sessionValues.delete(String(key)),
+    },
+    matchMedia: (media) => ({
+      media: String(media),
+      matches: matchesFor(1280, media),
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+    }),
     location: { protocol: "http:", host: "127.0.0.1:1", reload() {} },
     atob: globalThis.atob,
     confirm: () => true,
@@ -376,6 +521,17 @@ async function bootLanes(options = {}) {
     addEventListener() {},
     removeEventListener() {},
   };
+
+  // The page's own two shell scripts, in the order it carries them: the layout
+  // model, then the shell that mounts on it. The modes a case clicks live here.
+  const shellScripts = new Function(
+    "window",
+    "document",
+    `${SHELL_LAYOUT_SCRIPT}\n${SHELL_SCRIPT}`,
+  );
+  shellScripts(windowStub, document);
+  assert.ok(windowStub.StudioShell, "the shell script is evaluated");
+  assert.ok(windowStub.StudioShellLayout, "the layout model script is evaluated");
 
   // The record view's rules are emitted before the client in the page, and they
   // are run in that order here: the lanes ask them for the two labels.
@@ -453,8 +609,59 @@ async function bootLanes(options = {}) {
     node.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
     return node;
   };
+  const waitFor = async (predicate, what, ms = 4000) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.fail("timed out waiting for " + what);
+  };
+  /** The page's own view state, as the page keeps it. */
+  const view = () => page.__studioTest.view;
+  /** One of the shell's three modes, the way the operator presses it. */
+  const mode = async (which) => {
+    const node = document.querySelector(`[data-role=mode-switch] [data-mode=${which}]`);
+    assert.ok(node, `the shell offers ${which}`);
+    node.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
+    await waitFor(
+      () => document.querySelector(`[data-mode=${which}]`).getAttribute("aria-pressed") === "true",
+      `${which} to be the pressed mode`,
+    );
+    await settle();
+  };
+  /** Arm one track from its lane, and wait for the input and its meter. */
+  const arm = async (trackId) => {
+    click(`[data-role=rec-lane][data-track-id=${trackId}] [data-act=arm-audio]`);
+    await settle(24);
+  };
+  /** The one meter node the page built, or undefined. */
+  const meterNode = () => document.querySelector("[data-role=rec-meter]");
 
-  return { document, domWindow, doc, store, engine, sent, page, host, lane, click, settle, frame, pushState };
+  return {
+    document,
+    domWindow,
+    doc,
+    store,
+    storage,
+    engine,
+    sent,
+    page,
+    host,
+    lane,
+    click,
+    settle,
+    waitFor,
+    frame,
+    pushState,
+    view,
+    mode,
+    arm,
+    meterNode,
+    setVisibility(next) {
+      visibility = String(next);
+    },
+  };
 }
 
 /** Hand the engine one position report, the way the processor does. */
@@ -508,8 +715,7 @@ test("unarmed lanes show their placements, arm, mute and solo and no meter", asy
     "a lane with nothing placed on it is an empty lane",
   );
 
-  // Nothing is armed, so nothing is a target and no meter is drawn anywhere:
-  // the meter and the live waveform are A4b's.
+  // Nothing is armed, so nothing is a target and nothing is metered.
   assert.equal(ui.document.querySelectorAll("[data-role=rec-armed]").length, 0);
   assert.equal(ui.document.querySelectorAll("[data-role=rec-meter]").length, 0, "one meter only, and not yet");
   assert.equal(ui.lane(AUDIO_TRACK).getAttribute("class").includes("st-rec-lane-target"), false);
@@ -669,7 +875,7 @@ test("the record target lane is tall and red and other armed lanes read Armed", 
   assert.ok(targetChip, "the target lane says Armed");
   assert.equal(targetChip.textContent, "Armed");
   assert.ok(otherChip, "so does every other armed lane");
-  assert.equal(otherChip.textContent, "Armed", "and it says nothing else: the meter and waveform are the target's");
+  assert.equal(otherChip.textContent, "Armed", "and it says nothing else: the meter is the target's");
 
   assert.ok(
     targetLane.querySelector("[data-role=rec-target-info]"),
@@ -686,5 +892,240 @@ test("the record target lane is tall and red and other armed lanes read Armed", 
     null,
     "a lane that cannot be armed never reads Armed",
   );
-  assert.equal(ui.document.querySelectorAll("[data-role=rec-meter]").length, 0, "no meter is drawn here");
+  // One meter on the page, on the target lane: the second armed track has none.
+  assert.equal(ui.document.querySelectorAll("[data-role=rec-meter]").length, 1, "one meter, on the target");
+  assert.ok(targetLane.querySelector("[data-role=rec-meter]"), "the target lane carries it");
+  assert.equal(otherLane.querySelector("[data-role=rec-meter]"), null, "and no other lane does");
+});
+
+// ---- the record target's meter (A4b) --------------------------------------
+
+test("arming an audio track builds one input meter and disarming disposes it", async () => {
+  const ui = await bootLanes();
+  await ui.mode("record");
+
+  assert.equal(ui.engine.meters.length, 0, "nothing is metered before a track is armed");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the arm's meter");
+
+  const meter = ui.engine.meters[0];
+  assert.equal(ui.view().armed[AUDIO_TRACK].meter, meter, "the arm holds its own meter");
+  assert.equal(meter.disposed, false, "a live meter is not disposed");
+  assert.equal(meter.input, ui.view().armed[AUDIO_TRACK].stream, "built on the input the arm opened");
+  assert.equal(ui.document.querySelectorAll("[data-role=rec-meter]").length, 1, "one meter on the page");
+  assert.deepEqual(meter.active, [true], "and it listens while its lane is on the page");
+
+  await ui.arm(AUDIO_TRACK);
+  assert.equal(meter.disposed, true, "disarming lets the meter go");
+  assert.equal(ui.view().armed[AUDIO_TRACK], undefined, "with the arm it belonged to");
+  assert.equal(ui.document.querySelectorAll("[data-role=rec-meter]").length, 0, "and the lane draws none");
+});
+
+test("two armed tracks build ONE meter, on the first; disarming it moves the meter to the second", async () => {
+  const ui = await bootLanes();
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the first arm's meter");
+  const first = ui.engine.meters[0];
+
+  await ui.arm(SECOND_AUDIO_TRACK);
+  await ui.settle(24);
+  assert.equal(ui.engine.meters.length, 1, "a second armed track builds no second meter");
+  assert.equal(Boolean(ui.view().armed[SECOND_AUDIO_TRACK].meter), false, "and holds none of its own");
+  assert.equal(ui.meterNode().getAttribute("data-track-id"), AUDIO_TRACK, "the meter is the target's");
+
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 2, "the second arm's meter");
+  assert.equal(first.disposed, true, "the old target's meter is disposed, not left listening");
+  const moved = ui.engine.meters[1];
+  assert.equal(ui.view().armed[SECOND_AUDIO_TRACK].meter, moved, "the second arm holds the one meter now");
+  assert.equal(ui.meterNode().getAttribute("data-track-id"), SECOND_AUDIO_TRACK, "and the lane draws it there");
+  assert.deepEqual(moved.active, [true], "the moved meter listens on the new target's lane");
+});
+
+test("the meter is sent off in Compose and Perform and on again in Record", async () => {
+  const ui = await bootLanes();
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the meter");
+  const meter = ui.engine.meters[0];
+  assert.deepEqual(meter.active, [true], "it listens while the lanes are on the page");
+
+  await ui.mode("compose");
+  assert.deepEqual(meter.active, [true, false], "leaving Record turns it off");
+  await ui.mode("perform");
+  assert.deepEqual(meter.active, [true, false], "and a mode that keeps it off writes nothing again");
+  await ui.mode("record");
+  assert.deepEqual(meter.active, [true, false, true], "back in Record it listens again");
+});
+
+test("forgetStaleArms disposes the meter of a removed track", async () => {
+  const ui = await bootLanes();
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the meter");
+  const meter = ui.engine.meters[0];
+
+  const runCommand = await commands();
+  runCommand(ui.doc, "track.remove", { track_id: AUDIO_TRACK });
+  await ui.pushState();
+
+  assert.equal(meter.disposed, true, "a track that is gone takes its meter with it");
+  assert.equal(ui.view().armed[AUDIO_TRACK], undefined, "and its arm");
+  assert.equal(ui.document.querySelectorAll("[data-role=rec-meter]").length, 0, "no lane draws a meter now");
+});
+
+test("a level message moves the meter fill, the peak text and the CLIP chip, and the chip clears it", async () => {
+  const ui = await bootLanes();
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the meter");
+  const meter = ui.engine.meters[0];
+
+  const fill = () => String(ui.document.querySelector("[data-role=rec-meter-fill]").style.width);
+  const peak = () => String(ui.document.querySelector("[data-role=rec-peak]").textContent);
+  const clip = () => ui.document.querySelector("[data-role=rec-clip]");
+
+  // Half of full scale is -6 dB, and most of a meter that runs up from -60.
+  meter.post({ frame: 48000, peak: 0.5, rms: 0.3 });
+  assert.equal(peak(), "-6 dB", "the peak reads the level in whole dB");
+  const half = Number.parseFloat(fill());
+  assert.equal(half > 85 && half < 95, true, `half scale fills most of the meter (${fill()})`);
+  assert.equal(clip().hidden, true, "nothing clipped yet");
+
+  // A full-scale sample latches CLIP, and the louder reading is the held peak.
+  meter.post({ frame: 48100, peak: 1, rms: 0.6, clipped: true });
+  assert.equal(peak(), "0 dB", "full scale is 0 dB");
+  assert.equal(fill(), "100%", "and fills the meter");
+  assert.equal(clip().hidden, false, "a clipped sample latches the CLIP chip");
+
+  // The chip is the operator's: the engine's latch is let go and the page's own
+  // copy with it, and a later clipped sample latches it again.
+  ui.click("[data-role=rec-clip]");
+  assert.equal(meter.cleared, 1, "the click lets the engine's latch go");
+  assert.equal(clip().hidden, true, "and the chip goes at once");
+  meter.post({ frame: 48200, peak: 0.7, rms: 0.4, clipped: false });
+  assert.equal(clip().hidden, true, "a sample that did not clip does not bring it back");
+  meter.post({ frame: 48300, peak: 1.1, rms: 0.7, clipped: true });
+  assert.equal(clip().hidden, false, "a clipped one does");
+
+  // The peak stands still for its hold, then falls towards what the input is
+  // doing now (a quiet reading, so the fall is what is drawn).
+  meter.post({ frame: 48400, peak: 1, rms: 0.5, clipped: false });
+  const held = peak();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  meter.post({ frame: 48500, peak: 0.0001, rms: 0.0001, clipped: false });
+  assert.equal(peak(), held, "inside the hold the peak stands still");
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  meter.post({ frame: 48600, peak: 0.0001, rms: 0.0001, clipped: false });
+  const fallen = Number.parseFloat(peak());
+  assert.equal(fallen < 0 && fallen >= -12, true, `past the hold it has fallen (${peak()})`);
+});
+
+test("before the first level message the meter reads the floor, not NaN", async () => {
+  const ui = await bootLanes();
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the meter");
+
+  const fill = ui.document.querySelector("[data-role=rec-meter-fill]");
+  const peak = ui.document.querySelector("[data-role=rec-peak]");
+  assert.equal(String(fill.style.width), "0%", "nothing has been heard, so the meter fills nothing");
+  assert.equal(String(peak.textContent), "-60 dB", "and the peak reads the floor");
+  assert.equal(/NaN|Infinity/.test(String(fill.style.width) + String(peak.textContent)), false, "never NaN");
+
+  // The lane says where it listens, that the take is the dry input, and that
+  // nothing measured this input and output.
+  assert.equal(String(ui.document.querySelector("[data-role=rec-source]").textContent), "Test input \u00b7 stereo");
+  assert.equal(String(ui.document.querySelector("[data-role=rec-dry]").textContent), "dry input");
+  const calibrate = ui.document.querySelector("[data-role=rec-not-calibrated]");
+  assert.ok(calibrate, "an unmeasured input says so in the lane");
+  assert.equal(String(calibrate.textContent).indexOf("Not calibrated") === 0, true);
+
+  // Digital silence (a peak of exactly zero) reads as the floor as well: a
+  // dynamic level is drawn from a number, and silence is not NaN.
+  ui.engine.meters[0].post({ frame: 48000, peak: 0, rms: 0 });
+  assert.equal(String(fill.style.width), "0%", "silence fills nothing");
+  assert.equal(String(peak.textContent), "-60 dB", "and reads the floor");
+});
+
+test("a hidden page keeps at most 256 levels and paints none", async () => {
+  const ui = await bootLanes();
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the meter");
+  const meter = ui.engine.meters[0];
+
+  const drawn = () => String(ui.document.querySelector("[data-role=rec-meter-fill]").style.width)
+    + "|" + String(ui.document.querySelector("[data-role=rec-peak]").textContent);
+  const before = drawn();
+  assert.equal(before, "0%|-60 dB", "the lane starts at the floor");
+
+  ui.setVisibility("hidden");
+  for (let index = 0; index < 1000; index += 1) {
+    meter.post({ frame: index * 480, peak: 1, rms: 1, clipped: true });
+  }
+  assert.equal(ui.view().recMeter.queue.length, 256, "the queue is capped at 256 messages");
+  assert.equal(drawn(), before, "and a hidden page paints nothing");
+  assert.equal(ui.document.querySelector("[data-role=rec-clip]").hidden, true, "not even the CLIP chip");
+
+  // The page comes back: the queue is drawn and then forgotten. The fill is the
+  // newest level's; the peak still holds the loud ones the queue kept.
+  ui.setVisibility("visible");
+  meter.post({ frame: 0, peak: 0.5, rms: 0.2, clipped: false });
+  assert.equal(ui.view().recMeter.queue.length, 0, "a returning page drains what it kept");
+  assert.equal(drawn(), "90%|0 dB", "and draws it");
+  assert.equal(ui.document.querySelector("[data-role=rec-clip]").hidden, false, "a level that clipped while hidden latched the chip");
+});
+
+test("drawing a level message adds or removes no node and moves no focus", async () => {
+  const ui = await bootLanes();
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the meter");
+
+  const armButton = ui.document.querySelector(`[data-role=rec-lane][data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  assert.ok(armButton, "the lane's own arm button");
+  // Everything the arm set going (the input labels, the stored measurement) has
+  // landed by now, so a node count taken here is the page's steady state.
+  await ui.settle(48);
+  armButton.focus();
+  ui.document.activeElement = armButton;
+  const nodes = ui.document.querySelectorAll("*").length;
+
+  for (let index = 0; index < 100; index += 1) {
+    ui.engine.meters[0].post({ frame: index * 480, peak: index / 100, rms: 0.1 });
+  }
+  assert.equal(ui.document.querySelectorAll("*").length, nodes, "a level message builds no node");
+  assert.equal(ui.document.activeElement, armButton, "and takes the focus from nowhere");
+  ui.document.activeElement = null;
+});
+
+test("the lane shows the chain's amp only as what the operator hears (amp off, amp on)", async () => {
+  const plain = await bootLanes();
+  await plain.mode("record");
+  await plain.arm(AUDIO_TRACK);
+  await plain.waitFor(() => plain.engine.meters.length === 1, "the meter");
+  assert.equal(
+    plain.document.querySelector("[data-role=rec-chain]"),
+    null,
+    "a track with no amp says nothing about a chain",
+  );
+
+  const ui = await bootLanes({ doc: await lanesDocWithAmp() });
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the meter");
+  const chain = () => ui.document.querySelector("[data-role=rec-chain]");
+  assert.ok(chain(), "a track with an amp names it");
+  assert.equal(String(chain().textContent), "amp off", "off while the chain is not heard");
+
+  ui.click(`[data-act=monitor][data-track-id=${AUDIO_TRACK}]`);
+  await ui.settle(24);
+  assert.equal(ui.view().monitor.on, true, "Hear the chain is on");
+  assert.equal(String(chain().textContent), "amp on", "and the lane says the amp is what is heard");
+
+  ui.click(`[data-act=monitor][data-track-id=${AUDIO_TRACK}]`);
+  await ui.settle(24);
+  assert.equal(String(chain().textContent), "amp off", "turning it off says so again");
 });
