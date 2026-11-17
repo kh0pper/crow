@@ -18,7 +18,7 @@
  * render from a fixed sentence.
  */
 import { parseAddressListDetailed } from "../../staged/canonical.js";
-import { folderRole } from "../store/messages.js";
+import { folderRole, listFolders } from "../store/messages.js";
 
 /** A reply's References chain keeps the last this-many ids; the tail is the part a sender controls. */
 const REFERENCES_MAX = 50;
@@ -26,12 +26,9 @@ const REFERENCES_MAX = 50;
 /** One Message-ID as plan 1's header rules spell it. */
 const REPLY_ID = /^<[^<>\s]{1,250}>$/;
 
-/** The stored address lists, as JSON columns in mail_messages. */
-const SENT_HISTORY_SQL = `SELECT f.id AS folder_id, f.path AS path, f.name AS name,
-    f.special_use AS special_use, m.from_addr AS from_addr, m.to_json AS to_json, m.cc_json AS cc_json
-  FROM mail_messages AS m
-  JOIN mail_folders AS f ON f.id = m.folder_id
- WHERE m.account_id = ? AND f.account_id = ?`;
+/** The address lists of one stored message, read by the Sent-history query. */
+const SENT_HISTORY_SQL = `SELECT from_addr, to_json, cc_json FROM mail_messages
+ WHERE account_id = ? AND folder_id IN (SELECT value FROM json_each(?))`;
 
 const CONTACT_EMAILS_SQL = "SELECT email FROM contacts WHERE email IS NOT NULL AND email <> ''";
 
@@ -102,9 +99,10 @@ function addRowAddresses(known, row) {
 /**
  * The addresses among `addrs` that this account has never written to: not a sender or a recipient of
  * any message in one of its Sent-role folders, and not in `contacts`. Lower-cased and de-duplicated,
- * in the order the caller gave them. One query reads the Sent history (the folder's role is decided by
- * `folderRole`, so a server whose Sent folder is named rather than flagged still counts) and one the
- * address book.
+ * in the order the caller gave them. The account's folders are listed first and the Sent-role ones
+ * (`folderRole`, so a server whose Sent folder is named rather than flagged still counts) bound the
+ * one message query, so the account's whole mailbox is never read for this; when the account has no
+ * Sent folder the Sent half is empty and only the address book is checked.
  *
  * @param {object} db
  * @param {string} accountId
@@ -118,11 +116,12 @@ export async function newRecipients(db, accountId, addrs = []) {
   if (!account || !wanted.length) return [];
 
   const known = new Set();
-  const { rows } = await db.execute({ sql: SENT_HISTORY_SQL, args: [account, account] });
-  for (const row of rows) {
-    const role = folderRole({ path: row.path, name: row.name, specialUse: row.special_use });
-    if (role !== "sent") continue;
-    addRowAddresses(known, row);
+  const sentFolders = (await listFolders(db, account))
+    .filter((folder) => folderRole(folder) === "sent")
+    .map((folder) => folder.id);
+  if (sentFolders.length) {
+    const { rows } = await db.execute({ sql: SENT_HISTORY_SQL, args: [account, JSON.stringify(sentFolders)] });
+    for (const row of rows) addRowAddresses(known, row);
   }
 
   const { rows: contacts } = await db.execute({ sql: CONTACT_EMAILS_SQL, args: [] });
@@ -208,6 +207,11 @@ function replyReferences(message) {
  * quietly. `cc` is the message's own To and Cc with the account's addresses and aliases removed and
  * the primary recipient never repeated.
  *
+ * When that primary recipient is one of the account's own addresses or aliases — the message was sent
+ * by this account, or it steers replies back to it — the reply falls back to the people the message was
+ * addressed to (its To list, own addresses removed), which is what a mail client does with a reply to
+ * one's own message. `replyToDiffers` is null then: the reply does not go to that address at all.
+ *
  * @param {object} message a stored message row (getMessage's shape)
  * @param {{address: string, aliases?: string[]}} account
  * @param {{all?: boolean}} [options] `all: true` for Reply all
@@ -221,22 +225,31 @@ export function deriveReply(message, account, options = {}) {
   const sender = lower(message?.fromAddr);
   const replyTo = addressEntries(message?.replyTo)[0]?.address ?? "";
   const primary = replyTo || sender;
+  const ownSender = Boolean(primary) && own.has(primary);
 
+  // Everyone already placed, plus the account's own addresses: neither enters To a second time nor Cc.
+  const placed = new Set(own);
   const to = [];
-  if (primary) {
+  if (ownSender) {
+    for (const entry of addressEntries(message?.to)) {
+      if (placed.has(entry.address)) continue;
+      placed.add(entry.address);
+      to.push({ name: entry.name, address: entry.address });
+    }
+  } else if (primary) {
     const name = primary === sender && typeof message?.fromName === "string" && message.fromName.trim() !== ""
       ? message.fromName.trim()
       : null;
+    placed.add(primary);
     to.push({ name, address: primary });
   }
 
   const cc = [];
   if (all) {
-    const seen = new Set(to.map((entry) => entry.address));
     for (const key of ["to", "cc"]) {
       for (const entry of addressEntries(message?.[key])) {
-        if (own.has(entry.address) || seen.has(entry.address)) continue;
-        seen.add(entry.address);
+        if (placed.has(entry.address)) continue;
+        placed.add(entry.address);
         cc.push({ name: entry.name, address: entry.address });
       }
     }
@@ -248,7 +261,7 @@ export function deriveReply(message, account, options = {}) {
     subject: replySubject(message?.subject),
     inReplyTo: messageIdOrNull(message?.messageId),
     references: replyReferences(message),
-    replyToDiffers: primary && sender && primary !== sender ? primary : null,
+    replyToDiffers: !ownSender && primary && sender && primary !== sender ? primary : null,
   };
 }
 

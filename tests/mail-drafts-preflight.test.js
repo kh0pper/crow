@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS, MAIL_DRAFTS_DDL } from "../servers/shared/mail-schema.js";
 import { parseAddressListDetailed } from "../servers/gateway/staged/canonical.js";
+import { MailError } from "../servers/gateway/mail/errors.js";
 import { composeRaw } from "../servers/gateway/mail/adapter/compose.js";
 import { createAccount, updateAccount } from "../servers/gateway/mail/store/accounts.js";
 import { extractAttachment, safeAttachmentName } from "../servers/gateway/mail/reader/attachments.js";
@@ -304,6 +305,30 @@ test("a draft whose account address no longer matches the head revision's from a
   assert.equal(moved.code, "bad_input");
 });
 
+test("a revision that belongs to another draft is refused bad_input", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const { draft, rev } = await makeDraft(db, account);
+  const { draft: other } = await makeDraft(db, account, { first: revInput({ subject: "Re: Wednesday" }) });
+  assert.notEqual(other.id, draft.id);
+
+  const own = await preflight(db, draft, rev, { accountId: account.id });
+  assert.equal(own.ok, true, "the draft's own revision passes");
+
+  const foreign = rejected(await preflight(db, draft, { ...rev, draftId: other.id }, { accountId: account.id }));
+  assert.equal(foreign.code, "bad_input", "another draft's revision names another body and audience");
+
+  // The revision row's own column is `draft_id`, which the store reads back as `draftId`; a caller that
+  // hands the stored row over is read the same way.
+  const columnForm = rejected(await preflight(db, draft, { ...rev, draftId: undefined, draft_id: other.id }, {
+    accountId: account.id,
+  }));
+  assert.equal(columnForm.code, "bad_input");
+
+  const unnamed = rejected(await preflight(db, draft, { ...rev, draftId: undefined }, { accountId: account.id }));
+  assert.equal(unnamed.code, "bad_input", "a revision that names no draft is not this draft's");
+});
+
 test("subject CRLF becomes one space", async () => {
   const db = await freshDb();
   const account = await makeAccount(db);
@@ -361,6 +386,49 @@ test("reply-all drops own address and aliases", async () => {
   const result = await preflight(db, draft, rev, { accountId: account.id });
   assert.equal(result.ok, true);
   assert.equal(result.flags.replyToDiffers, null);
+});
+
+test("a reply to one of the account's own addresses falls back to the message's To list", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db, { aliases: ["alex.alias@example.test"] });
+  const own = {
+    accountId: account.id,
+    messageId: "<parent-1@mail.example.test>",
+    fromName: "Alex",
+    fromAddr: "ALEX@example.test",
+    to: [
+      { name: "Sam", address: SAM },
+      { address: ALEX },
+      { address: "Alex.Alias@example.test" },
+      { address: JO },
+    ],
+    cc: [{ address: "kim@example.test" }],
+    replyTo: [],
+    references: [],
+    subject: "Tuesday",
+    date: T0,
+  };
+
+  const reply = deriveReply(own, account, {});
+  assert.deepEqual(reply.to, [{ name: "Sam", address: SAM }, { name: null, address: JO }],
+    "the sender is this account, so the reply goes to the people the message was addressed to");
+  assert.deepEqual(reply.cc, [], "a single reply copies nobody");
+  assert.equal(reply.replyToDiffers, null);
+
+  const all = deriveReply(own, account, { all: true });
+  assert.deepEqual(all.to, [{ name: "Sam", address: SAM }, { name: null, address: JO }]);
+  assert.deepEqual(all.cc, [{ name: null, address: "kim@example.test" }],
+    "the original Cc stays, the account's own addresses do not");
+
+  // A Reply-To naming one of the account's own addresses is the same situation.
+  const viaReplyTo = deriveReply({ ...own, fromAddr: SAM, fromName: "Sam", replyTo: [{ address: ALEX }] }, account, {});
+  assert.deepEqual(viaReplyTo.to, [{ name: "Sam", address: SAM }, { name: null, address: JO }]);
+  assert.equal(viaReplyTo.replyToDiffers, null,
+    "the card's Reply-To line only names an address the reply actually goes to");
+
+  // Somebody else's message is unaffected: the reply goes to its sender alone.
+  const theirs = deriveReply({ ...own, fromAddr: SAM, fromName: "Sam", to: [{ address: ALEX }] }, account, {});
+  assert.deepEqual(theirs.to, [{ name: "Sam", address: SAM }]);
 });
 
 test("a Reply-To on the message routes the reply to it and sets replyToDiffers", async () => {
@@ -529,6 +597,61 @@ test("an address on another domain that was mailed before is not flagged", async
     "another account's Sent folder is not this account's history");
 });
 
+test("a Sent folder named without the special-use flag still counts", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  // A server whose Sent folder is only a name: no \\Sent flag anywhere in the mailbox.
+  const sent = await seedFolder(db, account.id, { path: "Sent Messages", name: "Sent Messages", specialUse: null });
+  await seedMessage(db, account.id, sent, { uid: 1, messageId: "<s1@mail.example.test>", to: [{ address: JO }] });
+
+  assert.deepEqual(await newRecipients(db, account.id, [{ address: JO }, { address: SAM }]), [SAM],
+    "the Sent role is decided by folderRole, not only by the special-use flag");
+
+  // An account with no Sent folder at all: the Sent half is empty and the address book still counts.
+  await db.execute({
+    sql: `INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, email)
+          VALUES (?, ?, ?, ?, ?)`,
+    args: ["crow-2", "Kim", "pk-ed-2", "pk-sec-2", "kim@example.test"],
+  });
+  const bare = await makeAccount(db, { label: "Bare", address: "alex@bare.example.test" });
+  assert.deepEqual(await newRecipients(db, bare.id, [{ address: JO }, { address: "kim@example.test" }]),
+    [JO], "without a Sent folder only the address book is history");
+});
+
+test("addresses are compared in any case, in a Sent message and in the address book", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const sent = await seedFolder(db, account.id, { path: "Sent", name: "Sent", specialUse: "\\Sent" });
+  await seedMessage(db, account.id, sent, {
+    uid: 1,
+    messageId: "<s1@mail.example.test>",
+    fromAddr: "Alex@Example.TEST",
+    to: [{ name: "Jo", address: "JO@Example.TEST" }],
+    cc: [{ address: "CC@Example.TEST" }],
+  });
+  await db.execute({
+    sql: `INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, email)
+          VALUES (?, ?, ?, ?, ?)`,
+    args: ["crow-1", "Kim", "pk-ed", "pk-sec", "Kim@Example.TEST"],
+  });
+
+  assert.deepEqual(await newRecipients(db, account.id, [
+    { address: "jo@example.test" },
+    { address: "cc@example.test" },
+    { address: "alex@example.test" },
+    { address: "kim@example.test" },
+    { address: "sam@example.test" },
+  ]), [SAM], "only the address that appears in no case anywhere is new");
+
+  // The card's flag agrees.
+  const { draft, rev } = await makeDraft(db, account, {
+    first: revInput({ to: [{ address: "JO@Example.TEST" }, { address: "SAM@Example.TEST" }] }),
+  });
+  const result = await preflight(db, draft, rev, { accountId: account.id });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.flags.newRecipients, [SAM]);
+});
+
 /* -------------------------------------------------------------- attachments */
 
 test("total attachment size over 18 MiB gives too_large", async () => {
@@ -595,6 +718,89 @@ test("attachDigest changes when a thread attachment's bytes change", async () =>
   assert.equal(noReader.code, "bad_input");
 });
 
+test("attachDigest frames each attachment's name, type and bytes", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const { draft, rev } = await makeDraft(db, account);
+
+  const two = (firstFile, secondFile, firstBytes, secondBytes) => {
+    const files = { [firstFile]: Buffer.from(firstBytes), [secondFile]: Buffer.from(secondBytes) };
+    const attachments = [firstFile, secondFile].map((fileId) => ({
+      source: "storage", fileId, filename: fileId, size: files[fileId].length,
+    }));
+    return preflight(db, draft, { ...rev, attachments }, {
+      accountId: account.id,
+      deps: { readStorageFile: async (fileId) => files[fileId] },
+    });
+  };
+
+  const base = await two("a.txt", "b.txt", "ab", "c");
+  assert.equal(base.ok, true);
+  assert.match(base.attachDigest, /^[0-9a-f]{64}$/);
+  const same = await two("a.txt", "b.txt", "ab", "c");
+  assert.equal(same.attachDigest, base.attachDigest, "the same attachments give the same digest");
+
+  // "ab" then "c" and "a" then "bc": the same bytes, one boundary moved.
+  const moved = await two("a.txt", "b.txt", "a", "bc");
+  assert.equal(moved.ok, true);
+  assert.notEqual(moved.attachDigest, base.attachDigest, "where one attachment ends is part of the digest");
+
+  // The same bytes with the two names swapped.
+  const swappedNames = await two("b.txt", "a.txt", "ab", "c");
+  assert.equal(swappedNames.ok, true);
+  assert.notEqual(swappedNames.attachDigest, base.attachDigest, "a name belongs to its own attachment");
+  assert.notEqual(swappedNames.attachDigest, moved.attachDigest);
+});
+
+test("a throwing attachment reader refuses the draft instead of throwing out of preflight", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const inbox = await seedFolder(db, account.id, { path: "INBOX", name: "INBOX", specialUse: "\\Inbox" });
+  await seedMessage(db, account.id, inbox, {
+    uid: 1, messageId: THREAD_MID, fromAddr: SAM, fromName: "Sam", subject: "Files",
+  });
+  const { draft, rev } = await makeDraft(db, account, { first: revInput({ attachments: [threadRef()] }) });
+
+  const unreachable = rejected(await preflight(db, draft, rev, {
+    accountId: account.id,
+    deps: { readMessageRaw: async () => { throw new MailError("NETWORK"); } },
+  }));
+  assert.equal(unreachable.code, "attachment_unavailable",
+    "the message is here, this Crow cannot reach the server to read its part");
+
+  const slow = rejected(await preflight(db, draft, rev, {
+    accountId: account.id,
+    deps: { readMessageRaw: async () => { throw new MailError("TIMEOUT"); } },
+  }));
+  assert.equal(slow.code, "attachment_unavailable");
+
+  const broken = rejected(await preflight(db, draft, rev, {
+    accountId: account.id,
+    deps: { readMessageRaw: async () => { throw new Error("reader failed"); } },
+  }));
+  assert.equal(broken.code, "bad_input", "anything that is not a network or timeout failure is a refusal");
+
+  // The storage reader is caught the same way.
+  const stored = { ...rev, attachments: [{ source: "storage", fileId: "f-1", filename: "notes.txt", size: 5 }] };
+  const storedUnreachable = rejected(await preflight(db, draft, stored, {
+    accountId: account.id,
+    deps: { readStorageFile: async () => { throw new MailError("NETWORK"); } },
+  }));
+  assert.equal(storedUnreachable.code, "attachment_unavailable");
+
+  const storedSlow = rejected(await preflight(db, draft, stored, {
+    accountId: account.id,
+    deps: { readStorageFile: async () => { throw new MailError("TIMEOUT"); } },
+  }));
+  assert.equal(storedSlow.code, "attachment_unavailable");
+
+  const storedBroken = rejected(await preflight(db, draft, stored, {
+    accountId: account.id,
+    deps: { readStorageFile: async () => { throw new Error("reader failed"); } },
+  }));
+  assert.equal(storedBroken.code, "bad_input");
+});
+
 test("attachment filename with ../ or CRLF is sanitized", async () => {
   const db = await freshDb();
   const account = await makeAccount(db);
@@ -631,6 +837,39 @@ test("attachment filename with ../ or CRLF is sanitized", async () => {
   for (const character of ["/", "\\", "\"", "\r", "\n"]) {
     assert.equal(name.includes(character), false, `no ${JSON.stringify(character)} in the filename`);
   }
+});
+
+test("the display-name trick \"a@x.test\" <b@y.test> is refused through preflight and flagged as changed", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const token = '"a@x.test" <b@y.test>';
+
+  // What the RFC 5322 reader makes of the token: the angle-addr is the one address, the quoted text
+  // before it is a display name and never a recipient.
+  const parsed = parseAddressListDetailed(token);
+  assert.deepEqual(parsed.addresses, ["b@y.test"]);
+  assert.deepEqual(parsed.invalid, []);
+
+  const { draft, rev } = await makeDraft(db, account);
+
+  // Posted whole as one address, the token is not exactly one clean addr-spec: preflight refuses it
+  // and names the token it refused.
+  const result = rejected(await preflight(db, draft, { ...rev, to: [{ name: null, address: token }] }, {
+    accountId: account.id,
+  }));
+  assert.equal(result.code, "bad_address");
+  assert.deepEqual(result.detail, [token]);
+
+  // Read the way the parser reads it, the revision's recipient is b@y.test and that is what the send
+  // would be addressed to.
+  const widened = { ...rev, to: [{ name: null, address: parsed.addresses[0] }] };
+  const accepted = await preflight(db, draft, widened, { accountId: account.id });
+  assert.equal(accepted.ok, true);
+  assert.deepEqual(accepted.message.to, [{ name: null, address: "b@y.test" }]);
+  assert.deepEqual(accepted.flags.changedRecipients, ["b@y.test"], "a first revision adds every address it carries");
+
+  // The swap itself is what the card marks: a@x.test was on the previous revision, b@y.test was not.
+  assert.deepEqual(changedRecipients({ ...rev, to: [{ address: "a@x.test" }] }, widened), ["b@y.test"]);
 });
 
 test("bcc never appears in the composed headers", async () => {

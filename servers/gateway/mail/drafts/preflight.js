@@ -4,15 +4,18 @@
  *
  * The send and schedule services both call `preflight` before they claim anything, and `deliver` calls
  * it again after the claim, so the bytes and the size a person agreed to are the bytes and the size
- * that go out. It answers one of five refusals and never throws over a draft:
+ * that go out. It answers one of six refusals and never throws over a draft:
  *
  *  - `placeholders` — an unfilled `[bracket]` in the subject or the body;
  *  - `no_recipients` — nobody in To (a Cc alone is not a message);
  *  - `bad_address` — an address that is not exactly one clean addr-spec (a CR/LF, angle brackets, a
  *    second address);
  *  - `too_large` — the attachments together over `MAX_SEND_BYTES` (plan 2's effective ceiling);
- *  - `bad_input` — the draft does not belong to the account asked for, or the account's address is no
- *    longer the address the revision was written from.
+ *  - `bad_input` — the draft does not belong to the account asked for, the revision row belongs to
+ *    another draft, the account's address is no longer the address the revision was written from, or
+ *    an attachment cannot be resolved at all;
+ *  - `attachment_unavailable` — an attachment's own reader failed with a mail error that says the
+ *    server could not be reached or timed out, so the bytes a tap would seal cannot be read now.
  *
  * The From is the account's, always: its address and its display name, never the revision's. A revision
  * whose `from` names another address is refused rather than reinterpreted, because the account's
@@ -23,6 +26,13 @@
  * message `mid` names, read through `deps.readMessageRaw`; a storage attachment is
  * `deps.readStorageFile(fileId)`, which does the owner check. Neither source is reachable without its
  * reader, and an attachment this module cannot resolve refuses the draft instead of sending it short.
+ * A reader that throws is caught here: an unreachable server is a refusal a person can retry, never an
+ * exception out of preflight.
+ *
+ * The digest a tap seals frames every attachment — the sanitized filename, its media type and its
+ * bytes, each preceded by its own length, in the revision's order — so a byte moved from one
+ * attachment's tail to the next one's head, or a name swapped between two attachments, is a different
+ * digest.
  *
  * `toOutgoing` is the one mapping to plan 1's `OutgoingMessage`: `body` becomes `text`, `html` is never
  * set, and the message id is the draft row's. The result always goes through `validateOutgoing`, so an
@@ -122,52 +132,100 @@ function mediaTypeOf(value) {
 }
 
 /**
- * One attachment as the message carries it, or null when it cannot be resolved: a ref with no usable
- * identity, no reader for its source, or a part the stored message no longer holds.
+ * One attachment as the message carries it, or a refusal: a ref with no usable identity, no reader for
+ * its source, or a part the stored message no longer holds is `bad_input`; a reader that fails with a
+ * `NETWORK` or `TIMEOUT` mail error is `attachment_unavailable` (the part exists, this Crow cannot
+ * fetch it right now). Nothing a reader throws escapes this module.
+ *
+ * @returns {Promise<{attachment: {filename: string, contentType: string, content: Buffer}}
+ *   | {refusal: "bad_input"|"attachment_unavailable"}>}
  */
 async function resolveAttachment(db, accountId, ref, deps) {
-  if (ref == null || typeof ref !== "object") return null;
+  if (ref == null || typeof ref !== "object") return { refusal: "bad_input" };
 
   if (ref.source === "thread") {
     const mid = typeof ref.mid === "string" ? ref.mid.trim() : "";
     const index = Number(ref.index);
-    if (!mid || !Number.isInteger(index) || index < 0) return null;
+    if (!mid || !Number.isInteger(index) || index < 0) return { refusal: "bad_input" };
     const read = deps?.readMessageRaw;
-    if (typeof read !== "function") return null;
+    if (typeof read !== "function") return { refusal: "bad_input" };
     // The message is scoped to this account, so a ref naming another mailbox's Message-ID names nothing.
     const row = await resolveMessageRef(db, { accountId, mid });
-    if (!row) return null;
-    const raw = bytesOf(await read({ accountId, mid, row }));
-    if (!raw) return null;
+    if (!row) return { refusal: "bad_input" };
+    const reading = await readerOutcome(() => read({ accountId, mid, row }));
+    if (reading.refusal) return reading;
+    const raw = bytesOf(reading.value);
+    if (!raw) return { refusal: "bad_input" };
     const part = await extractAttachment(raw, index);
-    if (!part) return null;
+    if (!part) return { refusal: "bad_input" };
     const content = bytesOf(part.content);
-    if (!content) return null;
-    return { filename: safeAttachmentName(part.filename), contentType: mediaTypeOf(part.contentType), content };
+    if (!content) return { refusal: "bad_input" };
+    return {
+      attachment: {
+        filename: safeAttachmentName(part.filename),
+        contentType: mediaTypeOf(part.contentType),
+        content,
+      },
+    };
   }
 
   if (ref.source === "storage") {
     const fileId = typeof ref.fileId === "string" ? ref.fileId.trim() : "";
     const read = deps?.readStorageFile;
-    if (!fileId || typeof read !== "function") return null;
+    if (!fileId || typeof read !== "function") return { refusal: "bad_input" };
     // The reader owns the ownership check: a file the operator does not own comes back as nothing.
-    const content = bytesOf(await read(fileId));
-    if (!content) return null;
-    return { filename: safeAttachmentName(ref.filename), contentType: DEFAULT_MEDIA_TYPE, content };
+    const reading = await readerOutcome(() => read(fileId));
+    if (reading.refusal) return reading;
+    const content = bytesOf(reading.value);
+    if (!content) return { refusal: "bad_input" };
+    return {
+      attachment: {
+        filename: safeAttachmentName(ref.filename),
+        contentType: DEFAULT_MEDIA_TYPE,
+        content,
+      },
+    };
   }
 
-  return null;
+  return { refusal: "bad_input" };
 }
 
-/** Every attachment's bytes, in the revision's order, or null when one of them cannot be resolved. */
+/**
+ * One attachment read, caught. A mail error that says the server could not be reached or timed out is a
+ * part this Crow cannot fetch yet; every other failure — a file that is gone, a reader that answered
+ * nonsense — is the revision naming something that is not there.
+ */
+async function readerOutcome(read) {
+  try {
+    return { value: await read() };
+  } catch (err) {
+    const unreachable = err instanceof MailError && (err.code === "NETWORK" || err.code === "TIMEOUT");
+    return { refusal: unreachable ? "attachment_unavailable" : "bad_input" };
+  }
+}
+
+/** Every attachment's bytes, in the revision's order, or the first refusal a read answered with. */
 async function resolveAttachments(db, accountId, refs, deps) {
-  const out = [];
+  const attachments = [];
   for (const ref of Array.isArray(refs) ? refs : []) {
     const resolved = await resolveAttachment(db, accountId, ref, deps);
-    if (!resolved) return null;
-    out.push(resolved);
+    if (resolved.refusal) return resolved;
+    attachments.push(resolved.attachment);
   }
-  return out;
+  return { attachments };
+}
+
+/**
+ * Fold one value into the digest behind its length in four big-endian bytes, so one attachment's
+ * fields and the boundary between two attachments can never be read as other fields: the same bytes
+ * split differently, or the same names in a different order, is a different digest.
+ */
+function frame(digest, value) {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(String(value ?? ""), "utf8");
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(Math.min(bytes.length, 0xffffffff));
+  digest.update(length);
+  digest.update(bytes);
 }
 
 /* ---------------------------------------------------------------- the message */
@@ -236,13 +294,21 @@ async function replyToDiffers(db, draft, account) {
  *   the raw bytes of a stored message and `deps.readStorageFile(fileId)` the bytes of a Crow file
  * @returns {Promise<{ok: true, message: object, attachDigest: string, fromAddress: string,
  *   flags: {newRecipients: string[], changedRecipients: string[], replyToDiffers: string|null}}
- *   | {ok: false, code: "placeholders"|"no_recipients"|"bad_address"|"too_large"|"bad_input",
- *      detail?: string[]}>}
+ *   | {ok: false, code: "placeholders"|"no_recipients"|"bad_address"|"too_large"|"bad_input"
+ *      |"attachment_unavailable", detail?: string[]}>}
  */
 export async function preflight(db, draft, rev, options = {}) {
   if (draft == null || typeof draft !== "object" || rev == null || typeof rev !== "object") {
     throw new MailError("NOT_FOUND", "draft");
   }
+
+  // The revision must be this draft's own row: another draft's revision carries a body, an audience and
+  // a From that belong to a draft this caller is not asking about. The store reads `draft_id` back as
+  // `draftId`; a stored row is accepted the same way.
+  const revisionDraftId = typeof rev.draftId === "string"
+    ? rev.draftId
+    : (typeof rev.draft_id === "string" ? rev.draft_id : null);
+  if (revisionDraftId !== draft.id) return refuse("bad_input");
 
   // The account is the draft's own, and only that one: a caller cannot point the send at another.
   const accountId = options?.accountId ?? draft.accountId;
@@ -266,8 +332,9 @@ export async function preflight(db, draft, rev, options = {}) {
   if (bad.length) return refuse("bad_address", bad);
   if (to.length === 0) return refuse("no_recipients");
 
-  const attachments = await resolveAttachments(db, account.id, rev.attachments, options?.deps);
-  if (!attachments) return refuse("bad_input");
+  const resolved = await resolveAttachments(db, account.id, rev.attachments, options?.deps);
+  if (resolved.refusal) return refuse(resolved.refusal);
+  const attachments = resolved.attachments;
   let total = 0;
   for (const attachment of attachments) total += attachment.content.length;
   if (total > MAX_SEND_BYTES) return refuse("too_large");
@@ -283,7 +350,11 @@ export async function preflight(db, draft, rev, options = {}) {
   }
 
   const digest = createHash("sha256");
-  for (const attachment of attachments) digest.update(attachment.content);
+  for (const attachment of attachments) {
+    frame(digest, attachment.filename);
+    frame(digest, attachment.contentType);
+    frame(digest, attachment.content);
+  }
 
   const flags = {
     newRecipients: await newRecipients(db, account.id, [...to, ...cc, ...bcc]),
