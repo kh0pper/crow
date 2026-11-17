@@ -400,6 +400,8 @@ const STYLES = `
   .studio .st-clip,
   .studio .st-tl-block,
   .studio .st-roll-svg,
+  .studio .st-rec-punch,
+  .studio .st-plan-punch,
   .studio rect.st-note {
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   }
@@ -1219,6 +1221,20 @@ const STYLES = `
   .studio .st-rec-clip[hidden] { display: none; }
   .studio .st-rec-dry { font-size: 10px; color: var(--st-muted); white-space: nowrap; }
   .studio .st-rec-cal { min-height: 44px; }
+  /* The punch range (B7) on the record target's lane: a shaded band over the
+     clip's own beats that says it applies on every pass. It is a picture, so a
+     press goes through it to the lane under it, and that lane body is the 44 px
+     surface a drag across it sets another range on. */
+  .studio .st-rec-lane-punch { min-height: 44px; touch-action: none; cursor: crosshair; }
+  .studio .st-rec-punch {
+    position: absolute; top: 0; bottom: 0; box-sizing: border-box;
+    min-height: 44px; padding: 2px 6px; overflow: hidden;
+    border-left: 2px solid var(--st-human); border-right: 2px solid var(--st-human);
+    background: rgba(242, 165, 65, 0.22); color: var(--st-human);
+    font-size: 11px; line-height: 1.3; white-space: nowrap;
+    pointer-events: none;
+  }
+  .studio .st-rec-punch-pick { opacity: 0.75; }
   /* The live waveform of the pass being recorded: the dry input's own columns,
      drawn by the lanes' one animation frame loop on the record target's lane and
      nowhere else. It is a picture, so a press goes straight through it, and the
@@ -1244,6 +1260,10 @@ const STYLES = `
     .studio .st-rec-lane { grid-template-columns: minmax(0, 1fr); }
     .studio .st-rec-lane .st-rec-side { border-right: 0; border-bottom: 1px solid var(--st-line); }
     .studio .st-rec-meter-track { width: 72px; }
+    /* A phone's options row: the punch range takes a line of its own, so its
+       Clear button keeps its 44 px target beside the reading. */
+    .studio .st-plan-punch { flex: 1 1 100%; }
+    .studio .st-plan-punch-text { flex: 1 1 100%; }
     .studio .st-take { flex-wrap: wrap; }
     .studio .st-take-acts { margin-left: 0; flex: 1 1 100%; }
   }
@@ -1268,6 +1288,17 @@ const STYLES = `
     margin: 0; font-size: 12px; line-height: 1.5; color: var(--st-muted);
   }
   .studio .st-plan-sampler-label { font-weight: 600; color: var(--st-text); }
+  /* The punch row (B7): the range the next take replaces, in clip beats, and the
+     one button that lets it go. Clear is a 44 px target, and a press on it (or
+     on the row) is a press, never a text selection. */
+  .studio .st-plan-punch {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+    min-width: 0; font-size: 12px; line-height: 1.5; color: var(--st-muted);
+  }
+  .studio .st-plan-punch-label { font-weight: 600; color: var(--st-text); }
+  .studio .st-plan-punch .st-btn { flex: 0 0 auto; min-width: 44px; min-height: 44px; }
+  .studio .st-plan-punch-text { min-width: 0; }
+  .studio .st-plan-punch-next { flex: 1 1 100%; font-size: 11px; color: var(--st-human); }
   /* The pad-and-steps view (the approved design, mockup screen 2): a sampler
      track's clip is a pattern, so opening one shows the kit instead of the
      piano roll. Pads are real buttons, at least 72 px square, and the pad's

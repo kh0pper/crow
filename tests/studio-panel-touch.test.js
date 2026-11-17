@@ -1128,3 +1128,67 @@ test("the count-in choices are 44 px targets and the row never selects its text"
   );
   assert.ok(complete, "with the webkit pair Android needs, so a hold is not a callout");
 });
+
+// --- B7: the punch range's controls -----------------------------------------
+
+test("the punch band and its Clear button are 44 px targets on a phone", async () => {
+  const css = String(styleText(await render({ song: "song-1" })));
+  const rules = cssRules(css);
+
+  // Clear is the punch row's one control: a 44 px target in both directions.
+  assert.ok(
+    touchTargetRule(rules, ".studio .st-plan-punch .st-btn"),
+    "the punch Clear button carries a 44 px floor in width and height",
+  );
+
+  // The band fills the record target's lane, and that lane's body is the
+  // surface a drag sets another range on: both are at least 44 px tall.
+  const band = rules.filter((rule) => rule.selectors.includes(".studio .st-rec-punch"));
+  assert.ok(band.length > 0, "the punch band has a rule of its own");
+  assert.ok(
+    band.some((rule) => /(?:^|;|\s)min-height\s*:\s*44px/.test(rule.body)),
+    "the band is at least 44 px tall",
+  );
+
+  const surface = rules.filter((rule) => rule.selectors.includes(".studio .st-rec-lane-punch"));
+  assert.ok(surface.length > 0, "the lane body a range is dragged on has a rule of its own");
+  assert.ok(
+    surface.some(
+      (rule) =>
+        /(?:^|;|\s)min-height\s*:\s*44px/.test(rule.body) &&
+        /(?:^|;|\s)touch-action\s*:\s*none/.test(rule.body),
+    ),
+    "and it is a 44 px surface that does not scroll the page under a drag",
+  );
+
+  // A phone gives the row a line of its own, so the reading and the button fit
+  // a thumb's width.
+  const phone = phoneBlock(css);
+  assert.match(
+    phone,
+    /\.studio \.st-plan-punch \{[^}]*flex: 1 1 100%/,
+    "on a phone the punch row takes a line of its own",
+  );
+});
+
+test("the punch band and its Clear button never select their text", async () => {
+  const rules = await sheetRules();
+
+  for (const selector of [".studio .st-rec-punch", ".studio .st-plan-punch"]) {
+    const locking = rules.filter((rule) => rule.selectors.includes(selector) && locksSelection(rule.body));
+    assert.ok(locking.length > 0, `${selector} is named by a rule that turns selection off`);
+    const complete = locking.some(
+      (rule) =>
+        /-webkit-user-select\s*:\s*none/.test(rule.body) &&
+        /-webkit-touch-callout\s*:\s*none/.test(rule.body),
+    );
+    assert.ok(complete, `${selector} carries -webkit-user-select and -webkit-touch-callout none`);
+  }
+
+  // The Clear button is a button, and the page's one hold-is-a-press rule names
+  // every button it has.
+  const buttons = rules.filter(
+    (rule) => rule.selectors.includes(".studio button") && locksSelection(rule.body),
+  );
+  assert.ok(buttons.length > 0, "every button of the page turns selection off");
+});
