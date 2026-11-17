@@ -509,10 +509,18 @@ function formatDate(dateStr) {
 }
 
 /**
+ * @param {object} [deps]
+ * @param {{ isAvailable?: Function, getObject?: Function }} [deps.storage]
+ *   Test seam for the object store: the suite has no ESM module mocks, and a
+ *   test that asserts which media keys a public request may reach must not
+ *   need a live S3/MinIO. Production passes nothing and the storage client is
+ *   used as-is.
  * @returns {Router}
  */
-export default function blogPublicRouter() {
+export default function blogPublicRouter({ storage = {} } = {}) {
   const router = Router();
+  const storageIsAvailable = storage.isAvailable || isAvailable;
+  const storageGetObject = storage.getObject || getObject;
 
   // POST /blog/preview — Render markdown to HTML (auth-required via dashboard auth)
   router.post("/blog/preview", async (req, res) => {
@@ -821,26 +829,65 @@ export default function blogPublicRouter() {
     try {
       const s3Key = req.params.key;
 
-      // Security: only serve files linked to published public blog posts
+      // Security: serve a key only when it belongs to a PUBLISHED PUBLIC blog
+      // post — one of:
+      //   (a) a storage_files row attached to such a post (reference_id names
+      //       it; the column is TEXT-y, so compare cast text-to-text),
+      //   (b) a published public post's cover_image_key, or
+      //   (c) a key one of their bodies links, i.e. the rendered
+      //       `/blog/media/<key>`, the `storage:<key>` form the renderer and
+      //       the songbook turn into it, or its percent-encoded spelling.
+      // A bare reference_type = 'blog_post' row proves nothing — the upload
+      // API accepts that with no reference_id — so on this Funnel-public route
+      // it would let any caller with storage tools host arbitrary files, and
+      // would publish a draft's images before the post is published.
+      // `instr`, not LIKE: a `%` or `_` inside a key stays literal, so no key
+      // can ever match another key's link. No SQL is built from the key — the
+      // markers are plain bound parameters. (A key that happens to be a prefix
+      // of a longer linked key matches too; the object served is still that
+      // exact key, and only one that exists in storage_files.)
+      if (!s3Key) return res.status(404).send("Not found");
+      const mediaLink = `/blog/media/${s3Key}`;
+      let encodedLink = mediaLink;
+      try {
+        // Encoded per segment: a whole-key encodeURIComponent would escape the
+        // slashes too, and no rendered link ever contains %2F.
+        encodedLink = "/blog/media/" + s3Key.split("/").map(encodeURIComponent).join("/");
+      } catch {
+        // A lone surrogate has no percent-encoded spelling; the raw form stands.
+      }
       const allowed = await db.execute({
         sql: `SELECT sf.mime_type FROM storage_files sf
-              WHERE sf.s3_key = ? AND sf.reference_type = 'blog_post'
-              UNION
-              SELECT sf2.mime_type FROM blog_posts bp
-              JOIN storage_files sf2 ON sf2.s3_key = bp.cover_image_key
-              WHERE bp.cover_image_key = ? AND bp.status = 'published' AND bp.visibility = 'public'`,
-        args: [s3Key, s3Key],
+              WHERE sf.s3_key = ?
+                AND (
+                  (sf.reference_type = 'blog_post' AND EXISTS (
+                     SELECT 1 FROM blog_posts bp_ref
+                      WHERE CAST(bp_ref.id AS TEXT) = CAST(sf.reference_id AS TEXT)
+                        AND bp_ref.status = 'published' AND bp_ref.visibility = 'public'))
+                  OR EXISTS (
+                     SELECT 1 FROM blog_posts bp_cover
+                      WHERE bp_cover.cover_image_key = sf.s3_key
+                        AND bp_cover.status = 'published' AND bp_cover.visibility = 'public')
+                  OR EXISTS (
+                     SELECT 1 FROM blog_posts bp_content
+                      WHERE bp_content.status = 'published' AND bp_content.visibility = 'public'
+                        AND (instr(bp_content.content, ?) > 0
+                          OR instr(bp_content.content, ?) > 0
+                          OR instr(bp_content.content, ?) > 0))
+                )
+              LIMIT 1`,
+        args: [s3Key, mediaLink, encodedLink, `storage:${s3Key}`],
       });
 
       if (allowed.rows.length === 0) {
         return res.status(404).send("Not found");
       }
 
-      if (!(await isAvailable())) {
+      if (!(await storageIsAvailable())) {
         return res.status(503).send("Storage unavailable");
       }
 
-      const { stream, stat } = await getObject(s3Key);
+      const { stream, stat } = await storageGetObject(s3Key);
       const contentType = allowed.rows[0].mime_type || stat.metaData?.["content-type"] || "application/octet-stream";
 
       res.set("Content-Type", contentType);

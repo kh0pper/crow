@@ -38,6 +38,13 @@ import {
 // M2b: when an upload claims a reference_id (e.g., source/note/blog_post), the
 // referenced row must belong to the same project_id (or both be project-less).
 // Otherwise file ACL and content ACL silently disagree.
+//
+// Public serving: a `blog_post` reference no longer makes a file public by
+// itself. GET /blog/media/<key> serves a key only when it is attached to a
+// blog post that is BOTH published and public (by reference_id), is such a
+// post's cover image, or is linked from such a post's content — so storing
+// reference_type='blog_post' here, with or without a reference_id, publishes
+// nothing until a post actually uses the file.
 const REFERENCE_PROJECT_LOOKUP = {
   research_source: "SELECT project_id FROM research_sources WHERE id = ?",
   research_note:   "SELECT project_id FROM research_notes   WHERE id = ?",
