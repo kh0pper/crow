@@ -178,6 +178,7 @@ import { storeShot } from "./browser-tile/shots.js";
 import { createTakeOver as createBrowserTakeOver, createAppTakeOvers } from "./browser-tile/take-over.js";
 import { appTileInfo, desktopApp, takeOverOffered, appLeaseDir } from "./apps/app-tile.js";
 import { getSecretRequest, expireSessionRequests, forgetSession as forgetSecretSession } from "./secrets/request-store.js";
+import { isGatewayStopping } from "../shared/gateway-stopping.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -185,17 +186,6 @@ export const LEASE_FILENAME = "perch-interactive-leases.json";
 const LEASE_TTL_MS = 180_000;
 /** How often an awake engine re-stamps its leases. */
 const LEASE_REFRESH_MS = 60_000;
-
-/**
- * True once the gateway's own shutdown has begun (index.js's
- * gracefulShutdown calls markGatewayStopping). A child that dies on SIGTERM
- * is only "interrupted by a restart" when THIS process asked for that
- * shutdown (stopAll) or announced it (this marker): a reaper's or a
- * hand-typed SIGTERM leaves the same signal behind and is still an
- * unexpected exit.
- */
-let gatewayStopping = false;
-export function markGatewayStopping() { gatewayStopping = true; }
 
 const DEFAULT_IDLE_MS = 600_000;
 const DEFAULT_STALL_MS = 600_000;
@@ -3082,10 +3072,10 @@ export function createInteractiveEngine({
       // A gateway restart kills the child with SIGTERM: that exit is not a
       // crash and the operator is told so. Only the two shutdown paths say
       // the gateway is stopping — stopAll() on this engine, or
-      // markGatewayStopping() from the process's own shutdown — because a
-      // reaper's or a hand-typed SIGTERM leaves the same signal on the child
-      // and is still an unexpected exit.
-      const interrupted = shuttingDown || (gatewayStopping && pi && pi._exitSignal === "SIGTERM");
+      // shared/gateway-stopping.js's markGatewayStopping() from the process's
+      // own shutdown — because a reaper's or a hand-typed SIGTERM leaves the
+      // same signal on the child and is still an unexpected exit.
+      const interrupted = shuttingDown || (isGatewayStopping() && pi && pi._exitSignal === "SIGTERM");
       let message = "pi exited unexpectedly";
       try {
         if (typeof pi._exitError === "function") message = pi._exitError("responding").message;

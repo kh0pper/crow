@@ -45,7 +45,7 @@ const DB_FILE = join(dir, "crow.db");
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const LEASE_PATH = join(CROW_HOME, "perch-interactive-leases.json");
 
-let createInteractiveEngine, getInteractiveEngine, _resetInteractiveEngineForTest, _setInteractiveEngineForTest, notifyCardToResident, emitExternalToResident, markGatewayStopping;
+let createInteractiveEngine, getInteractiveEngine, _resetInteractiveEngineForTest, _setInteractiveEngineForTest, notifyCardToResident, emitExternalToResident, markGatewayStopping, _resetGatewayStoppingForTests;
 
 function raw() {
   return new Database(DB_FILE);
@@ -296,11 +296,18 @@ before(async () => {
   _setInteractiveEngineForTest = mod._setInteractiveEngineForTest;
   notifyCardToResident = mod.notifyCardToResident;
   emitExternalToResident = mod.emitExternalToResident;
-  markGatewayStopping = mod.markGatewayStopping;
+  // The "gateway's own shutdown began" marker is process-wide and lives in
+  // shared/gateway-stopping.js (index.js's gracefulShutdown sets it
+  // synchronously). Imported here so the SIGTERM-interruption test below can
+  // set it, and reset after each test so no other test inherits it.
+  const stopping = await import("../servers/shared/gateway-stopping.js");
+  markGatewayStopping = stopping.markGatewayStopping;
+  _resetGatewayStoppingForTests = stopping._resetGatewayStoppingForTests;
 });
 
 beforeEach(() => {
   if (_resetInteractiveEngineForTest) _resetInteractiveEngineForTest();
+  if (_resetGatewayStoppingForTests) _resetGatewayStoppingForTests();
   try { rmSync(LEASE_PATH, { force: true }); } catch { /* not there */ }
 });
 
