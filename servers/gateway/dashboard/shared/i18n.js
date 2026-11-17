@@ -5998,6 +5998,32 @@ export const translations = {
   // this is a placeholder until the operator writes one.
   // TODO(copy): pending operator copy
   "mail.scheduleTooFar": { en: "A send can be scheduled up to 90 days ahead.", es: "A send can be scheduled up to 90 days ahead." },
+  // Crow Mail's reply slot (plan 3, Task 11). The five action labels and the picker's two lines are the
+  // plan's own words; the plan gives no Spanish for them, and the reason frame and the instruction a
+  // chosen bot is handed are not in the plan at all — so every key here is TODO(copy), pending
+  // operator copy, with the English placeholder in both languages and an entry in the parity test's
+  // IDENTICAL_OK.
+  // TODO(copy): pending operator copy
+  "mail.reply": { en: "Reply", es: "Reply" },
+  // TODO(copy): pending operator copy
+  "mail.replyAll": { en: "Reply all", es: "Reply all" },
+  // TODO(copy): pending operator copy
+  "mail.forward": { en: "Forward", es: "Forward" },
+  // TODO(copy): pending operator copy
+  "mail.draftWith": { en: "Draft a reply with...", es: "Draft a reply with..." },
+  // TODO(copy): pending operator copy
+  "mail.newEmail": { en: "New email", es: "New email" },
+  // TODO(copy): pending operator copy
+  "mail.draftNoProject": { en: "No project", es: "No project" },
+  // TODO(copy): pending operator copy
+  "mail.draftSeesOnly": { en: "The bot sees only this thread.", es: "The bot sees only this thread." },
+  // The frame a suggested bot's reason goes into. The reason itself is the store's: the name of the
+  // project the thread was filed under, and nothing else.
+  // TODO(copy): pending operator copy
+  "mail.draftSuggestReason": { en: "{project}", es: "{project}" },
+  // The instruction a chosen bot's first turn is asked for (the turn route refuses an empty one).
+  // TODO(copy): pending operator copy
+  "mail.draftAsk": { en: "Draft a reply to this thread.", es: "Draft a reply to this thread." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

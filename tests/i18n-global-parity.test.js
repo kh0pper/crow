@@ -155,6 +155,11 @@ const IDENTICAL_OK = new Set([
   "mail.scheduleTomorrowMorning", "mail.scheduleNextWorkDay", "mail.schedulePick",
   "mail.schedulePickMissing", "mail.scheduleDateLabel", "mail.scheduleTimeLabel",
   "mail.scheduleBoxOn", "mail.scheduleTooFar", // pending operator copy
+  // Crow Mail's reply slot (plan 3, Task 11): the plan's own English for the five action labels and
+  // the picker's two lines, with the Spanish pending operator copy; the reason frame and the bot's
+  // instruction are not in the plan at all, so they carry an English placeholder in both languages.
+  "mail.reply", "mail.replyAll", "mail.forward", "mail.draftWith", "mail.newEmail",
+  "mail.draftNoProject", "mail.draftSeesOnly", "mail.draftSuggestReason", "mail.draftAsk", // pending operator copy
 ]);
 
 const keys = Object.keys(translations);

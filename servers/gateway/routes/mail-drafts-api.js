@@ -47,6 +47,12 @@
  * the bot as theirs. A revise or a turn on a frozen draft is 409 `frozen`, with `needsCancel` when
  * there is a schedule to give up first.
  *
+ * `GET /bot-options` (Task 11) is the reader's reply-slot picker: every enabled bot whose model may
+ * draft for this account (`allowDraftModel`, the same verdict a turn is held to), the projects those
+ * bots belong to, and the one bot the thread's filing suggests. A bot that may not draft is never
+ * listed, so the picker cannot offer a bot the turn would then refuse; when every bot is refused the
+ * answer carries the refusal code instead and the slot shows the sentence the panel drew for it.
+ *
  * Error bodies are `{error, message}`: `changed` answers `CHANGED_SENTENCE`, a tap's own refusal
  * passes the service's sentence through, a preflight refusal answers the `bad_input` (or
  * `too_large`) fixed sentence with the reason beside it, and `confirm_needed` answers the sentence
@@ -108,6 +114,7 @@ import { instanceZone } from "../../shared/schedule-store.js";
 // The mount point mail-api.js sets on this same router. It is read when routes are registered (that
 // module has finished evaluating by then), never at module load: the two files import each other.
 import { MAIL_API_PREFIX } from "./mail-api.js";
+import { CROW_VOICE_BOT_ID } from "../../shared/voice-bot.js";
 
 /** A draft id, exactly what the store mints. Anything else is a 404 here. */
 export const MAIL_DRAFT_ID_RE = /^md-[0-9a-f]{16}$/;
@@ -617,6 +624,24 @@ export function registerDraftRoutes(router, ctx) {
     });
   }));
 
+  // GET /bot-options — the reply slot's picker (Task 11): the bots whose model may draft for this
+  // account, the projects those bots belong to, and the one bot a thread's filing suggests. Registered
+  // BEFORE GET /:id, which would read this path as a draft id. Every bot is filtered here, by the same
+  // rule a turn is held to (`allowDraftModel`): a bot that may not draft is never listed, so the picker
+  // can never offer a bot the turn would then refuse. When every bot is refused the answer carries the
+  // refusal code instead, and the slot shows the sentence the panel drew for it.
+  router.get(`${base}/bot-options`, route("GET /drafts/bot-options", async (db, req, res) => {
+    const raw = req.query?.accountId;
+    const accountId = typeof raw === "string" ? raw : "";
+    if (accountId === "") return sendError(res, 400, "bad_input");
+    const account = await getAccount(db, accountId);
+    if (!account) return sendError(res, 404, "not_found");
+    const rawMid = req.query?.mid;
+    const mid = typeof rawMid === "string" && rawMid !== "" ? rawMid : null;
+    res.json(await botOptionsFor(db, { account, mid }));
+  }));
+
+
   // GET /:id — the card: the row, the head revision, the flags preflight marks, every comment, the
   // history line per revision and the head revision's voice note (null while plan 4 has not checked
   // it, which is what the card's "Not checked for voice" line reads). The flags are null when the
@@ -1009,6 +1034,183 @@ export function registerDraftRoutes(router, ctx) {
       return null;
     }
   }
+}
+
+/* -------------------------------------------------------------- the bot picker */
+
+/**
+ * The two rules a drafting turn is held to, loaded once per picker read: `readDraftingSettings` (the
+ * owner's cloud-drafting switch and the provider rows) and `allowDraftModel` (the one verdict on a
+ * bot's model). They live in the module that owns a turn, so the picker can never drift from the
+ * refusal a turn would give; a build without that module lists nothing at all.
+ *
+ * `allowDraftModel` reads the bot def's default model, which is the same key the turn checks first.
+ * A bot whose turn would pick another model (an escalation) is still checked again by the bridge, so
+ * a listed bot is one the turn may legitimately start.
+ */
+async function draftingRulesFor(db) {
+  try {
+    const turn = await import("../mail/drafts/turn.js");
+    if (typeof turn.readDraftingSettings !== "function" || typeof turn.allowDraftModel !== "function") return null;
+    return { settings: await turn.readDraftingSettings(db), allow: turn.allowDraftModel };
+  } catch {
+    return null;
+  }
+}
+
+/** A stored bot definition as the object it holds, or an empty one: a corrupt def proves nothing. */
+function parseBotDef(value) {
+  if (value == null) return {};
+  let def = value;
+  if (typeof value === "string") {
+    try {
+      def = JSON.parse(value);
+    } catch {
+      return {};
+    }
+  }
+  return def != null && typeof def === "object" && !Array.isArray(def) ? def : {};
+}
+
+/**
+ * The project a mail thread was filed under, or null. The store is the only source: today's schema
+ * records no filing for a thread (mail_threads carries no project), so this answers null and the
+ * picker suggests nothing — a reason is never invented for a bot the store does not point at.
+ *
+ * @param {object} db
+ * @param {{accountId: string, mid?: string|null}} args
+ * @returns {Promise<number|null>}
+ */
+async function suggestedProjectFor(db, { accountId, mid = null } = {}) {
+  if (mid == null || mid === "") return null;
+  let threadId = null;
+  try {
+    const message = await resolveMessageRef(db, { accountId, mid });
+    const id = Number(message?.threadId);
+    if (Number.isInteger(id) && id > 0) threadId = id;
+  } catch {
+    return null;
+  }
+  if (threadId == null) return null;
+  try {
+    const { rows } = await db.execute({ sql: "SELECT project_id FROM mail_threads WHERE id = ?", args: [threadId] });
+    const value = Number(rows[0]?.project_id);
+    return Number.isInteger(value) && value > 0 ? value : null;
+  } catch {
+    // A thread table with no filing column is a store that records none.
+    return null;
+  }
+}
+
+/** A project's name, or null: the only text a suggestion's reason is ever built from. */
+async function projectNameFor(db, projectId) {
+  try {
+    const { rows } = await db.execute({ sql: "SELECT name FROM project_spaces WHERE id = ?", args: [projectId] });
+    const name = typeof rows[0]?.name === "string" ? rows[0].name.trim() : "";
+    return name === "" ? null : name;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The picker's answer: every enabled bot whose model may draft for this account, the projects those
+ * bots belong to, and the one bot a thread's filing suggests.
+ *
+ * `bots` is ordered with the suggested bot first, and `projects` with the suggested bot's project
+ * first, so the picker draws the suggestion at the top with its reason (the project's own name). A bot
+ * is grouped under its home project; a bot in no project (or one whose project row is gone) is drawn
+ * under the picker's always-present "No project" group. `refused` is present only when the owner may
+ * use no bot at all, and carries the code of the first refusal — the cloud gate's code wins, because
+ * switching it on is what would offer those bots.
+ *
+ * @param {object} db
+ * @param {{account: object, mid?: string|null}} args
+ * @returns {Promise<{bots: object[], projects: object[], refused?: string}>}
+ */
+async function botOptionsFor(db, { account, mid = null } = {}) {
+  const rules = await draftingRulesFor(db);
+  if (!rules || !account) return { bots: [], projects: [] };
+
+  let rows = [];
+  try {
+    const read = await db.execute({
+      sql: `SELECT bot_id, display_name, definition, project_id FROM pi_bot_defs
+             WHERE enabled = 1 AND bot_id != ?`,
+      args: [CROW_VOICE_BOT_ID],
+    });
+    rows = read.rows ?? [];
+  } catch {
+    return { bots: [], projects: [] };
+  }
+
+  const projectIdOf = (row) => {
+    const value = Number(row?.project_id);
+    return Number.isInteger(value) && value > 0 ? value : null;
+  };
+
+  const usable = [];
+  const refusalCodes = [];
+  for (const row of rows) {
+    const id = typeof row?.bot_id === "string" ? row.bot_id : "";
+    if (id === "") continue;
+    const verdict = rules.allow(parseBotDef(row.definition), account, rules.settings);
+    if (!verdict?.ok) {
+      if (typeof verdict?.code === "string") refusalCodes.push(verdict.code);
+      continue;
+    }
+    const name = typeof row.display_name === "string" ? row.display_name.trim() : "";
+    usable.push({ id, name: name === "" ? id : name, projectId: projectIdOf(row) });
+  }
+
+  const suggestedProject = await suggestedProjectFor(db, { accountId: account.id, mid });
+  const suggestedName = suggestedProject == null ? null : await projectNameFor(db, suggestedProject);
+
+  usable.sort((a, b) => {
+    const leftSuggested = a.projectId !== null && a.projectId === suggestedProject ? 0 : 1;
+    const rightSuggested = b.projectId !== null && b.projectId === suggestedProject ? 0 : 1;
+    if (leftSuggested !== rightSuggested) return leftSuggested - rightSuggested;
+    if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+
+  const bots = usable.map((bot) => {
+    const suggested = suggestedProject != null && bot.projectId === suggestedProject;
+    return {
+      id: bot.id,
+      name: bot.name,
+      suggested,
+      // The reason is the project's name and nothing else; a filing whose project row is gone names
+      // nothing, so that bot is suggested with no reason rather than with an invented one.
+      reason: suggested ? suggestedName : null,
+    };
+  });
+
+  // The projects the listed bots belong to, the suggested one first; a name the store does not have
+  // leaves its bots under "No project" instead of a group with a blank heading.
+  const groups = new Map();
+  for (const bot of usable) {
+    if (bot.projectId === null) continue;
+    if (!groups.has(bot.projectId)) groups.set(bot.projectId, []);
+    groups.get(bot.projectId).push(bot.id);
+  }
+  const projects = [];
+  const orderedIds = [...groups.keys()].sort((a, b) => {
+    if (a === suggestedProject) return -1;
+    if (b === suggestedProject) return 1;
+    return a - b;
+  });
+  for (const id of orderedIds) {
+    const name = id === suggestedProject && suggestedName != null ? suggestedName : await projectNameFor(db, id);
+    if (name == null) continue;
+    projects.push({ id, name, bots: groups.get(id) });
+  }
+
+  const answer = { bots, projects };
+  if (bots.length === 0 && refusalCodes.length > 0) {
+    answer.refused = refusalCodes.includes("cloud_drafting_off") ? "cloud_drafting_off" : refusalCodes[0];
+  }
+  return answer;
 }
 
 /* ---------------------------------------------------------------- derivation */

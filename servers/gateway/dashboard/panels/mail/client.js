@@ -61,6 +61,19 @@
  * generic sentence instead, and a failure that carries no code at all (a network error with no
  * answer) is still the network sentence. Nothing here is built in JavaScript but nodes and text.
  *
+ * The reply slot (plan 3, Task 11). The server draws an empty `[data-mail-reply-slot]` and, beside it,
+ * one hidden element of data attributes holding that slot's copy (html.js's `replySlotStrings`): this
+ * script has no translated text of its own, so every label, line and refusal sentence is read from
+ * there. The slot is filled here with five actions — Reply, Reply all, Forward, "Draft a reply
+ * with..." and New email — and the bot picker. Reply, Reply all and Forward create a draft by hand
+ * (no bot, no turn) and open its card on Perch; New email creates a blank one the same way. The
+ * picker asks GET /drafts/bot-options once per page: it draws a "No project" group always, one group
+ * per project the answer names, and one button per bot, so a bot the person may not use is never
+ * drawn. Picking a bot creates the reply draft, starts that bot's turn over it, and opens that bot's
+ * card; a refusal — the owner's cloud switch off, an account that drafts with local models only, a
+ * host that cannot start a turn — shows the sentence the page drew for that code and opens nothing.
+ * Bot names and reasons, and every project name, are written with textContent.
+ *
  * Lifecycle: Turbo re-runs this script on every visit. Listeners on an element inside the panel are
  * bound behind a marker on that element (the element is replaced with the page, so a fresh one binds
  * again); the window's message listener and the document's turbo:before-visit hook are bound once
@@ -594,6 +607,21 @@ export function mailClientJs(lang = "en") {
     var actionControl = target.closest('[data-ml-action]');
     if (actionControl) { clickAction(actionControl); return; }
 
+    var slotReply = target.closest('[data-ml-reply]');
+    if (slotReply) {
+      draftByHand(slotOf(slotReply), String(slotReply.getAttribute('data-ml-reply') || ''));
+      return;
+    }
+
+    var newEmail = target.closest('[data-ml-new-email]');
+    if (newEmail) { draftByHand(slotOf(newEmail), 'new'); return; }
+
+    var pickerToggle = target.closest('[data-ml-reply-bot]');
+    if (pickerToggle) { openPicker(slotOf(pickerToggle), pickerToggle); return; }
+
+    var botPick = target.closest('[data-ml-bot-pick]');
+    if (botPick) { chooseBot(slotOf(botPick), botPick); return; }
+
     var show = target.closest('[data-ml-show-images]');
     if (show) { paintFrame(slotIn(show), '?images=1'); return; }
 
@@ -785,6 +813,268 @@ export function mailClientJs(lang = "en") {
     });
   }
 
+  /* ---- the reply slot: reply by hand, or hand the reply to a bot ---------------------------- */
+
+  // The slot's own selector, built in two pieces for the same reason the frame slot's is: the panel's
+  // client script is on every mail page, and a message view that is not here carries no slot at all —
+  // so the attribute must never appear in the page's text.
+  var REPLY_SLOT = '[data-mail-reply' + '-slot]';
+  var DRAFTS_PATH = '/dashboard/mail/api/drafts';
+  var PERCH_PATH = '/dashboard/perch';
+  // One action at a time per page: a second tap while a draft is being made is ignored.
+  var slotBusy = false;
+
+  function node(tag, className) {
+    var made = document.createElement(tag);
+    if (className) { made.className = className; }
+    return made;
+  }
+  function textOf(value) {
+    return document.createTextNode(value === null || value === undefined ? '' : String(value));
+  }
+  // One sentence the server drew for the slot. The element is hidden on the page, never in the slot.
+  function slotText(name) {
+    var box = document.querySelector('[data-ml-reply-strings]');
+    var value = box ? box.getAttribute('data-ml-' + name) : null;
+    return value === null || value === undefined ? '' : String(value);
+  }
+  function slotOf(clicked) { return closestOf(clicked, REPLY_SLOT); }
+  function slotAccount(slot) { return String((slot && slot.getAttribute('data-account')) || ''); }
+  function slotMid(slot) { return String((slot && slot.getAttribute('data-mid')) || ''); }
+
+  function slotButton(label, attribute, value) {
+    var made = node('button', 'ml-btn');
+    made.setAttribute('type', 'button');
+    if (attribute) { made.setAttribute(attribute, value); }
+    made.appendChild(textOf(label));
+    return made;
+  }
+
+  // The slot's own markup: the five actions and the picker. Built once per page from the page's own
+  // strings; the bot buttons are added when the picker first asks for them.
+  function buildSlot(slot) {
+    if (!slot || slot.getAttribute('data-ml-built') === '1') { return; }
+    slot.setAttribute('data-ml-built', '1');
+
+    var actions = node('div', 'ml-reply-actions');
+    actions.appendChild(slotButton(slotText('reply'), 'data-ml-reply', 'reply'));
+    actions.appendChild(slotButton(slotText('reply-all'), 'data-ml-reply', 'reply_all'));
+    actions.appendChild(slotButton(slotText('forward'), 'data-ml-reply', 'forward'));
+    var toggle = slotButton(slotText('draft-with'), 'data-ml-reply-bot', '');
+    toggle.setAttribute('aria-expanded', 'false');
+    actions.appendChild(toggle);
+    actions.appendChild(slotButton(slotText('new-email'), 'data-ml-new-email', ''));
+    slot.appendChild(actions);
+
+    var picker = node('div', 'ml-bot-picker');
+    picker.setAttribute('data-ml-bot-picker', '');
+    picker.setAttribute('hidden', '');
+    var seesOnly = node('p', 'ml-note ml-picker-note');
+    seesOnly.appendChild(textOf(slotText('sees-only')));
+    picker.appendChild(seesOnly);
+    var refusal = node('p', 'ml-note ml-picker-refusal');
+    refusal.setAttribute('data-ml-picker-refusal', '');
+    refusal.setAttribute('role', 'status');
+    refusal.setAttribute('hidden', '');
+    picker.appendChild(refusal);
+    var list = node('div', 'ml-picker-list');
+    list.setAttribute('data-ml-picker-list', '');
+    // "No project" is drawn before any bot is known and stays, so the picker always offers it.
+    var group = node('div', 'ml-picker-group');
+    group.setAttribute('data-ml-picker-group', 'no-project');
+    var heading = node('p', 'ml-picker-group-name');
+    heading.appendChild(textOf(slotText('no-project')));
+    group.appendChild(heading);
+    list.appendChild(group);
+    picker.appendChild(list);
+    slot.appendChild(picker);
+  }
+
+  function pickerOf(slot) {
+    return slot && typeof slot.querySelector === 'function' ? slot.querySelector('[data-ml-bot-picker]') : null;
+  }
+
+  /** The sentence the page drew for a refusal code, or its generic one for a code it does not name. */
+  function refusalText(code) {
+    var text = code === 'cloud_drafting_off' || code === 'local_models_only'
+      || code === 'delivery_unsupported' || code === 'unavailable'
+      ? slotText('refusal-' + code)
+      : '';
+    return text === '' ? slotText('refusal-generic') : text;
+  }
+  function showRefusal(slot, code) {
+    var picker = pickerOf(slot);
+    var box = picker ? picker.querySelector('[data-ml-picker-refusal]') : null;
+    if (!box) { return; }
+    box.textContent = refusalText(code);
+    box.removeAttribute('hidden');
+  }
+
+  function perchHref(draftId, botId) {
+    var query = '?maildraft=' + encodeURIComponent(String(draftId));
+    if (botId) { query = '?bot=' + encodeURIComponent(String(botId)) + '&maildraft=' + encodeURIComponent(String(draftId)); }
+    return PERCH_PATH + query;
+  }
+
+  function draftIdOf(result) {
+    var draft = result && result.json && result.json.draft ? result.json.draft : null;
+    var id = draft ? String(draft.id || '') : '';
+    return id === '' ? null : id;
+  }
+
+  // The person's own path: a draft made from this message (or from nothing) and its card, no bot.
+  function draftByHand(slot, mode) {
+    if (slotBusy || !slot) { return; }
+    var account = slotAccount(slot);
+    if (account === '') { return; }
+    var body = { accountId: account, mode: mode };
+    if (mode !== 'new') {
+      var mid = slotMid(slot);
+      if (mid === '') { return; }
+      body.replyToMid = mid;
+    }
+    slotBusy = true;
+    post(DRAFTS_PATH, body).then(function (result) {
+      slotBusy = false;
+      var id = draftIdOf(result);
+      if (!result.ok || id === null) { sayError(slot, result); return; }
+      navigate(perchHref(id, null));
+    });
+  }
+
+  /** One bot button: its name, and — for the suggested bot — the reason the server gave. */
+  function botButton(bot, projectId) {
+    var made = node('button', 'ml-btn ml-bot-pick');
+    made.setAttribute('type', 'button');
+    made.setAttribute('data-ml-bot-pick', '');
+    made.setAttribute('data-bot', String(bot.id));
+    made.setAttribute('data-project', projectId === null ? '' : String(projectId));
+    var name = node('span', 'ml-pick-name');
+    name.appendChild(textOf(bot.name));
+    made.appendChild(name);
+    if (bot.suggested === true && bot.reason !== '') {
+      var reason = node('span', 'ml-pick-reason');
+      reason.appendChild(textOf(slotText('reason').split('{project}').join(bot.reason)));
+      made.appendChild(reason);
+    }
+    return made;
+  }
+
+  /** The picker's bot list from one answer: a group per project, then the bots with no project. */
+  function fillPicker(slot, json) {
+    var picker = pickerOf(slot);
+    var list = picker ? picker.querySelector('[data-ml-picker-list]') : null;
+    if (!list) { return; }
+    var bots = [];
+    var raw = json && Array.isArray(json.bots) ? json.bots : [];
+    for (var i = 0; i < raw.length; i += 1) {
+      var entry = raw[i];
+      if (!entry || typeof entry.id !== 'string' || entry.id === '') { continue; }
+      bots.push({
+        id: entry.id,
+        name: typeof entry.name === 'string' && entry.name !== '' ? entry.name : entry.id,
+        suggested: entry.suggested === true,
+        reason: typeof entry.reason === 'string' ? entry.reason : '',
+      });
+    }
+    var placed = {};
+    var noProject = list.querySelector('[data-ml-picker-group="no-project"]');
+    var projects = json && Array.isArray(json.projects) ? json.projects : [];
+    for (var p = 0; p < projects.length; p += 1) {
+      var project = projects[p];
+      if (!project || project.id === null || project.id === undefined) { continue; }
+      var ids = Array.isArray(project.bots) ? project.bots : [];
+      var group = node('div', 'ml-picker-group');
+      group.setAttribute('data-ml-picker-group', String(project.id));
+      var heading = node('p', 'ml-picker-group-name');
+      heading.appendChild(textOf(typeof project.name === 'string' ? project.name : ''));
+      group.appendChild(heading);
+      for (var b = 0; b < bots.length; b += 1) {
+        if (ids.indexOf(bots[b].id) < 0 || placed[bots[b].id]) { continue; }
+        placed[bots[b].id] = true;
+        group.appendChild(botButton(bots[b], project.id));
+      }
+      list.insertBefore(group, noProject);
+    }
+    if (noProject) {
+      for (var n = 0; n < bots.length; n += 1) {
+        if (placed[bots[n].id]) { continue; }
+        placed[bots[n].id] = true;
+        noProject.appendChild(botButton(bots[n], null));
+      }
+    }
+  }
+
+  /** Ask GET /drafts/bot-options once per page and draw what it answers. */
+  function loadBots(slot) {
+    var picker = pickerOf(slot);
+    if (!picker || picker.getAttribute('data-ml-loaded') === '1') { return; }
+    var account = slotAccount(slot);
+    if (account === '') { return; }
+    picker.setAttribute('data-ml-loaded', '1');
+    var mid = slotMid(slot);
+    var url = DRAFTS_PATH + '/bot-options?accountId=' + encodeURIComponent(account);
+    if (mid !== '') { url += '&mid=' + encodeURIComponent(mid); }
+    request('GET', url).then(function (result) {
+      if (!result.ok) {
+        // A read that failed leaves the picker unmarked, so opening it again asks once more.
+        picker.removeAttribute('data-ml-loaded');
+        showRefusal(slot, result.json && result.json.error ? String(result.json.error) : 'generic');
+        return;
+      }
+      fillPicker(slot, result.json || {});
+      if (result.json && typeof result.json.refused === 'string') { showRefusal(slot, result.json.refused); }
+    });
+  }
+
+  function openPicker(slot, toggle) {
+    var picker = pickerOf(slot);
+    if (!picker) { return; }
+    if (!picker.hasAttribute('hidden')) {
+      picker.setAttribute('hidden', '');
+      if (toggle) { toggle.setAttribute('aria-expanded', 'false'); }
+      return;
+    }
+    picker.removeAttribute('hidden');
+    if (toggle) { toggle.setAttribute('aria-expanded', 'true'); }
+    loadBots(slot);
+  }
+
+  // Choosing a bot: one reply draft for this message, that bot's first turn over it, then its card.
+  function chooseBot(slot, button) {
+    if (slotBusy || !slot || !button) { return; }
+    var account = slotAccount(slot);
+    var mid = slotMid(slot);
+    var bot = String(button.getAttribute('data-bot') || '');
+    var project = String(button.getAttribute('data-project') || '');
+    if (account === '' || mid === '' || bot === '') { return; }
+    var body = { accountId: account, mode: 'reply', replyToMid: mid, botId: bot };
+    if (project !== '') { body.projectId = Number(project); }
+    slotBusy = true;
+    button.setAttribute('disabled', '');
+    post(DRAFTS_PATH, body).then(function (created) {
+      var id = draftIdOf(created);
+      if (!created.ok || id === null) {
+        slotBusy = false;
+        button.removeAttribute('disabled');
+        sayError(slot, created);
+        return;
+      }
+      post(DRAFTS_PATH + '/' + encodeURIComponent(id) + '/turn', { botId: bot, instruction: slotText('ask') })
+        .then(function (turned) {
+          button.removeAttribute('disabled');
+          if (!turned.ok) {
+            // The draft exists, but nothing was written into it: the person sees why, and the card
+            // they can open from the reader is theirs to fill by hand.
+            slotBusy = false;
+            showRefusal(slot, turned.json && turned.json.error ? String(turned.json.error) : 'generic');
+            return;
+          }
+          navigate(perchHref(id, bot));
+        });
+    });
+  }
+
   function bindAddForm(form) {
     if (form.getAttribute('data-ml-bound') === 'form') { return; }
     form.setAttribute('data-ml-bound', 'form');
@@ -849,6 +1139,10 @@ export function mailClientJs(lang = "en") {
   for (var j = 0; j < lists.length; j++) { bindPull(lists[j]); }
   var addForms = root.querySelectorAll('[data-ml-add-account]');
   for (var k = 0; k < addForms.length; k++) { bindAddForm(addForms[k]); }
+  // The reply slot exists on the message view only, and is filled once per page from the page's own
+  // copy: the five actions, and the picker with its always-present "No project" group.
+  var replySlots = root.querySelectorAll(REPLY_SLOT);
+  for (var r = 0; r < replySlots.length; r++) { buildSlot(replySlots[r]); }
   // The mail settings card exists only on the settings view, whose URL says so; a page that happens
   // to carry the markup for another reason (a preview, a fixture) reads nothing.
   if (String((location && location.href) || '').indexOf('view=settings') >= 0) { loadMailSettings(); }
