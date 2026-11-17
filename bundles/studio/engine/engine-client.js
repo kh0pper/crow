@@ -80,17 +80,22 @@
  * waits for both and then calls `startRendering()` renders a deterministic
  * number of frames after the engine came up.
  *
- * ## The calibration and recording worklets
+ * ## The calibration, recording and metering worklets
  *
- * Two more AudioWorkletProcessors ride on the same context, each loaded from its
- * own file with its own `addModule()` (never as part of the engine module, so an
+ * More AudioWorkletProcessors ride on the same context, each loaded from its own
+ * file with its own `addModule()` (never as part of the engine module, so an
  * engine that failed to come up cannot take them with it):
  *
  * - `calibrate-emitter.js` (`studio-calibrate-emitter`) clicks a loopback cable;
  * - `calibrate-detector.js` (`studio-calibrate-detector`) finds those clicks by
  *   cross-correlation and reports each one's lag in frames;
  * - `recorder-processor.js` (`studio-recorder`) turns an input into 24-bit PCM
- *   chunks of a take.
+ *   chunks of a take;
+ * - `input-level.js` is not a processor at all: it is the level core the meter
+ *   measures with (`globalThis.StudioInputLevel`), loaded before the file that
+ *   reads it;
+ * - `input-meter-processor.js` (`studio-input-meter`) posts the armed input's
+ *   level and waveform columns, which is the recording lane's meter.
  *
  * `loadStudioWorklets()` below adds them once per context and remembers the
  * promise in a WeakMap, so two recorders (or a recorder and a calibration) on
@@ -392,12 +397,17 @@
     "calibrate-emitter.js",
     "calibrate-detector.js",
     "recorder-processor.js",
+    // The level core comes before the meter that reads it: each file is its own
+    // module, and `input-level.js` hands the next one its global.
+    "input-level.js",
+    "input-meter-processor.js",
   ]);
 
   /** The processor names those files register. */
   const CALIBRATE_EMITTER_PROCESSOR = "studio-calibrate-emitter";
   const CALIBRATE_DETECTOR_PROCESSOR = "studio-calibrate-detector";
   const RECORDER_PROCESSOR = "studio-recorder";
+  const INPUT_METER_PROCESSOR = "studio-input-meter";
 
   /**
    * The audio contexts whose calibration and recording worklets are added. The
@@ -1129,6 +1139,7 @@
    *                    onError: function(function): function,
    *                    calibrate: function(object): Promise<object>,
    *                    createRecorder: function(object): Promise<object>,
+   *                    createInputMeter: function(object): Promise<object>,
    *                    throwForTest: function(): void,
    *                    dispose: function(): void}>}
    */
@@ -1514,6 +1525,166 @@
       dispose() {
         chunkListeners.clear();
         doneListeners.clear();
+        node.port.onmessage = null;
+        try {
+          node.disconnect();
+        } catch {
+          /* never connected */
+        }
+        try {
+          alone.disconnect();
+        } catch {
+          /* never connected */
+        }
+        if (source) {
+          try {
+            source.disconnect();
+          } catch {
+            /* never connected */
+          }
+        }
+      },
+    };
+  }
+
+  /**
+   * An input meter on this context: the armed input in, level payloads out.
+   *
+   * The reading is the DRY input (a take is the dry signal), so the recording
+   * lane's meter, peak hold and live waveform all come from one node on the
+   * record target's input and nowhere else. The page turns it on while the
+   * lanes widget is shown and off otherwise, so a hidden lane — or one on a
+   * track that is not the record target — costs only `process()`.
+   *
+   * @param {BaseAudioContext} context
+   * @param {{assetBase?: string, assetBytes?: object}} engineOptions
+   * @param {{input?: MediaStream|AudioNode, channels?: number}} [options]
+   * @param {(text: string) => void} notifyError
+   * @returns {Promise<{node: AudioWorkletNode,
+   *                    onLevel: function(function): function,
+   *                    setActive: function(boolean): void,
+   *                    clearClip: function(number): void,
+   *                    dispose: function(): void}>}
+   */
+  async function runInputMeter(context, engineOptions, options, notifyError) {
+    const settings = options || {};
+    const input = settings.input;
+    if (!input) throw new Error("StudioEngine: createInputMeter needs an input (a MediaStream or an AudioNode)");
+    const channels = Number(settings.channels) === 2 ? 2 : 1;
+
+    await loadStudioWorklets(context, engineOptions);
+    const Node = workletNodeClass();
+    const node = new Node(context, INPUT_METER_PROCESSOR, {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      channelCount: channels,
+      channelCountMode: "explicit",
+      processorOptions: { channels: channels },
+    });
+
+    let source = null;
+    // The meter reads an input and writes silence, but a host only runs the
+    // processors the destination can reach, so it is connected through a gain of
+    // 0 — the same plumbing, and the same reason, as the recorder's.
+    const alone = context.createGain();
+    alone.gain.value = 0;
+    if (typeof input.connect === "function") {
+      input.connect(node);
+    } else if (isMediaStream(input)) {
+      if (typeof context.createMediaStreamSource !== "function") {
+        throw new Error("StudioEngine: this host cannot read a MediaStream");
+      }
+      source = context.createMediaStreamSource(input);
+      source.connect(node);
+    } else {
+      throw new Error("StudioEngine: createInputMeter needs a MediaStream or an AudioNode as its input");
+    }
+    node.connect(alone);
+    alone.connect(context.destination);
+
+    const levelListeners = new Set();
+    node.port.onmessage = (event) => {
+      const message = event && event.data;
+      if (!message || typeof message !== "object") return;
+      if (message.type === "level") {
+        const level = {
+          frame: message.frame,
+          peak: message.peak,
+          rms: message.rms,
+          clipped: message.clipped,
+          clearSeq: message.clearSeq,
+          cols: message.cols,
+        };
+        for (const listener of levelListeners) {
+          try {
+            listener(level);
+          } catch {
+            /* one bad listener must not stop the meter for the others */
+          }
+        }
+        return;
+      }
+      if (message.type === "error") notifyError(String(message.error));
+    };
+    if (typeof node.port.start === "function") node.port.start();
+
+    const post = (message) => node.port.postMessage(message);
+
+    return {
+      node: node,
+
+      /**
+       * Follow the level: `listener({frame, peak, rms, clipped, clearSeq, cols})`,
+       * once per post, about thirty times a second of rendered audio. `frame` and
+       * every column's frame are CONTEXT frames; `cols` is a `Float32Array` of
+       * `3 * n` values `frame, min, max`; `clearSeq` is the number the last
+       * `clearClip(seq)` carried.
+       * @param {(level: {frame: number, peak: number, rms: number,
+       *                 clipped: boolean, clearSeq: number,
+       *                 cols: Float32Array}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onLevel(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        levelListeners.add(listener);
+        return function unsubscribe() {
+          levelListeners.delete(listener);
+        };
+      },
+
+      /**
+       * Post readings (`true`) or stop posting (`false`). It posts nothing
+       * before the first `true`, and a window in progress is dropped on `false`
+       * so no reading spans the two.
+       * @param {boolean} on
+       * @returns {void}
+       */
+      setActive(on) {
+        post({ type: on ? "on" : "off" });
+      },
+
+      /**
+       * Let the CLIP latch go, naming the clear: every reading from then on
+       * carries this number as `clearSeq`, so a caller can drop the `clipped`
+       * flag of a reading that was taken before the clear it sent. A clear with
+       * no sequence is sequence 0 — one a caller sends before it has begun
+       * counting still lets the latch go.
+       * @param {number} [seq] the caller's own clear counter
+       * @returns {void}
+       */
+      clearClip(seq) {
+        const value = Number(seq);
+        post({ type: "clear", seq: Number.isFinite(value) ? value : 0 });
+      },
+
+      /**
+       * Leave the graph and drop this meter's callbacks. The caller owns the
+       * input stream and the context.
+       * @returns {void}
+       */
+      dispose() {
+        levelListeners.clear();
         node.port.onmessage = null;
         try {
           node.disconnect();
@@ -3174,6 +3345,16 @@
       },
 
       /**
+       * Build an input meter on this context: `{node, onLevel, setActive,
+       * clearClip, dispose}` (see `runInputMeter` above for the whole contract).
+       * @param {{input: MediaStream|AudioNode, channels?: number}} options
+       * @returns {Promise<object>}
+       */
+      createInputMeter(options) {
+        return runInputMeter(context, opts, options, notifyError);
+      },
+
+      /**
        * Stop listening and leave the graph. The caller owns the context and the
        * node's connections; this only drops this client's port handler.
        * @returns {void}
@@ -3212,6 +3393,7 @@
     CALIBRATE_EMITTER_PROCESSOR: CALIBRATE_EMITTER_PROCESSOR,
     CALIBRATE_DETECTOR_PROCESSOR: CALIBRATE_DETECTOR_PROCESSOR,
     RECORDER_PROCESSOR: RECORDER_PROCESSOR,
+    INPUT_METER_PROCESSOR: INPUT_METER_PROCESSOR,
     CALIBRATION_REFUSAL: CALIBRATION_REFUSAL,
     loadWorklets: loadStudioWorklets,
   };

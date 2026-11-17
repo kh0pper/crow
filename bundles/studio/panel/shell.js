@@ -2,8 +2,9 @@
  * Crow Studio — the widget shell, as one inline classic script.
  *
  * The song page is a page of widgets now: a scene grid, one editor slot, the
- * sampler's pads, steps, chop editor and effects, the takes lane, the MIDI
- * lane, the history and the agent. This file builds that
+ * sampler's pads, steps, chop editor and effects, the record lanes and the
+ * scene plan, the takes lane, the MIDI lane, the history and the agent. This
+ * file builds that
  * page around the markup the panel already renders. It MOVES the nodes the
  * page already has (it never clones them), so the page's own script keeps
  * finding the same elements, keeps its delegated click handler and keeps every
@@ -114,6 +115,8 @@ export const SHELL_SCRIPT = [
   "    'fx': 'Effects',",
   "    'keyboard': 'Keyboard',",
   "    'mixer-strip': 'Mixer strip',",
+  "    'rec-lanes': 'Record lanes',",
+  "    'scene-plan': 'Scene plan',",
   "    'takes': 'Takes',",
   "    'midi': 'MIDI',",
   "    'history': 'History',",
@@ -131,6 +134,8 @@ export const SHELL_SCRIPT = [
   "    'fx': 'Open a pattern clip on a sampler track for the effects and the looper.',",
   "    'keyboard': 'Pick a note track to play it',",
   "    'mixer-strip': 'Pick a track to see its strip',",
+  "    'rec-lanes': 'Add an audio track and arm it to record.',",
+  "    'scene-plan': 'Add a scene to plan.',",
   "    'takes': 'Arm a track to record.'",
   "  };",
   "",
@@ -144,12 +149,13 @@ export const SHELL_SCRIPT = [
   "    'fx': ['[data-role=sampler-fx]'],",
   "    'keyboard': ['[data-role=sampler-keyboard]'],",
   "    'mixer-strip': ['[data-role=mixer-strip]'],",
+  "    'rec-lanes': ['[data-role=rec-lanes]'],",
   "    'takes': ['[data-role=recordings]'],",
   "    'midi': ['[data-role=midi]'],",
   "    'history': ['[data-role=history]']",
   "  };",
   "  var WIDGET_ORDER = [",
-  "    'scene-grid', 'editor', 'pads', 'steps', 'chop', 'fx', 'keyboard', 'mixer-strip', 'takes', 'midi', 'history', 'agent'",
+  "    'scene-grid', 'editor', 'pads', 'steps', 'chop', 'fx', 'keyboard', 'mixer-strip', 'rec-lanes', 'scene-plan', 'takes', 'midi', 'history', 'agent'",
   "  ];",
   "",
   "  // A touch drags a widget only after a long press, so a scroll or a swipe is",

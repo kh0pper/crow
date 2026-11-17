@@ -1,10 +1,12 @@
 /**
- * Studio calibration and recording worklets — the loopback measurement and the
- * 24-bit take recorder.
+ * Studio calibration, recording and metering worklets — the loopback
+ * measurement, the 24-bit take recorder and the input meter's reading.
  *
  * Everything runs on `node-web-audio-api`'s OfflineAudioContext with the real
  * `bundles/studio/engine/engine-client.js` and the real worklet files, so the
- * test measures the code the browser and the renderer run.
+ * test measures the code the browser and the renderer run. The meter's own
+ * reading is also driven block by block in a bare worklet-like scope, where the
+ * arrays it allocates can be counted.
  *
  * - **Calibration** has no cable to loop back through, so the graph is
  *   `emitter → test-delay (a worklet defined here) → detector`. That is the one
@@ -58,6 +60,8 @@ const ASSETS = {
 const EMITTER_SOURCE = readFileSync(join(ENGINE_DIR, "calibrate-emitter.js"), "utf8");
 const DETECTOR_SOURCE = readFileSync(join(ENGINE_DIR, "calibrate-detector.js"), "utf8");
 const RECORDER_SOURCE = readFileSync(join(ENGINE_DIR, "recorder-processor.js"), "utf8");
+const INPUT_LEVEL_SOURCE = readFileSync(join(ENGINE_DIR, "input-level.js"), "utf8");
+const INPUT_METER_SOURCE = readFileSync(join(ENGINE_DIR, "input-meter-processor.js"), "utf8");
 
 const SAMPLE_RATE = 48000;
 
@@ -508,4 +512,309 @@ test("an arm frame older than the pre-roll starts on its frame with silence for 
   const first = decode24(rec.scope.posted.find((message) => message.type === "chunk" && message.index === 0).bytes, 1);
   assert.equal(first[0], 0, "frames older than the pre-roll are silence");
   assert.ok(Math.abs(first[first.length - 1] - 0.5) < 1e-6, "kept frames are the input");
+});
+
+/**
+ * `input-level.js` makes every buffer it uses in its constructor, so a count of
+ * the arrays a block creates is a count of the arrays the audio thread makes.
+ * The wrappers below are injected INTO the worklet-like scope as its
+ * `Float32Array`, `Float64Array` and `Array`, which is what the core and the
+ * meter construct through. Array LITERALS are not counted, and cannot be: a
+ * literal in the evaluated source makes the scope's own intrinsic array, not the
+ * global `Array` binding the wrappers replace.
+ * @returns {{counts: object, globals: object}}
+ */
+function countingArrays() {
+  const counts = { Float32Array: 0, Float64Array: 0, Array: 0 };
+  class CountingFloat32Array extends Float32Array {
+    constructor(...args) {
+      super(...args);
+      counts.Float32Array += 1;
+    }
+  }
+  class CountingFloat64Array extends Float64Array {
+    constructor(...args) {
+      super(...args);
+      counts.Float64Array += 1;
+    }
+  }
+  class CountingArray extends Array {
+    constructor(...args) {
+      super(...args);
+      counts.Array += 1;
+    }
+  }
+  return {
+    counts: counts,
+    globals: { Float32Array: CountingFloat32Array, Float64Array: CountingFloat64Array, Array: CountingArray },
+  };
+}
+
+/**
+ * Load `input-level.js` and `input-meter-processor.js` in a bare worklet-like
+ * scope (no `module`, no imports, counting array constructors) and return a
+ * processor the test drives block by block.
+ * @param {number} channels
+ */
+function bareMeter(channels) {
+  const counting = countingArrays();
+  let Processor = null;
+  /** @type {any} */
+  const scope = {
+    console: { log() {}, warn() {}, error() {} },
+    sampleRate: SAMPLE_RATE,
+    currentFrame: 0,
+    Float32Array: counting.globals.Float32Array,
+    Float64Array: counting.globals.Float64Array,
+    Array: counting.globals.Array,
+    AudioWorkletProcessor: class {
+      constructor() {
+        this.port = {
+          postMessage: (...args) => {
+            scope.posts.push(args);
+          },
+          onmessage: null,
+        };
+      }
+    },
+    registerProcessor: (_name, ctor) => {
+      Processor = ctor;
+    },
+    posts: [],
+  };
+  vm.createContext(scope);
+  // The core first, the way WORKLET_FILES loads them: the meter reads its global.
+  vm.runInContext(INPUT_LEVEL_SOURCE, scope, { filename: "input-level.js" });
+  vm.runInContext(INPUT_METER_SOURCE, scope, { filename: "input-meter-processor.js" });
+  assert.ok(scope.StudioInputLevel, "input-level.js hands the meter its core");
+  const processor = new Processor({ processorOptions: { channels: channels } });
+  // One silence output per channel, reused: the test's own blocks are not part
+  // of the count (they are made in this realm, not the scope's constructors).
+  const output = [new Float32Array(128)];
+  return {
+    scope: scope,
+    processor: processor,
+    counts: counting.counts,
+    send: (message) => processor.port.onmessage({ data: message }),
+    levels: () => scope.posts.filter((args) => args[0] && args[0].type === "level").map((args) => args[0]),
+    /** @param {number} fromFrame @param {number} frames @param {(frame: number) => number} sampleOf */
+    run(fromFrame, frames, sampleOf) {
+      for (let at = 0; at + 128 <= frames; at += 128) {
+        scope.currentFrame = fromFrame + at;
+        const input = new Float32Array(128);
+        for (let index = 0; index < 128; index += 1) input[index] = sampleOf(fromFrame + at + index);
+        processor.process([[input]], [output]);
+      }
+    },
+    /**
+     * The same, as a stereo arm's input arrives: one block per channel.
+     * @param {number} fromFrame @param {number} frames
+     * @param {(frame: number) => number} leftOf
+     * @param {(frame: number) => number} rightOf
+     */
+    runStereo(fromFrame, frames, leftOf, rightOf) {
+      for (let at = 0; at + 128 <= frames; at += 128) {
+        scope.currentFrame = fromFrame + at;
+        const left = new Float32Array(128);
+        const right = new Float32Array(128);
+        for (let index = 0; index < 128; index += 1) {
+          left[index] = leftOf(fromFrame + at + index);
+          right[index] = rightOf(fromFrame + at + index);
+        }
+        processor.process([[left, right]], [output]);
+      }
+    },
+  };
+}
+
+/** @param {number} frame @returns {number} a bounded sample no two frames share */
+function meterRamp(frame) {
+  return ((frame % 1000) - 500) / 2000;
+}
+
+test("process creates no typed array of its own: one payload per post, and the core's arrays keep their identity", () => {
+  const meter = bareMeter(1);
+  const core = meter.processor.core;
+  const minRing = core.minRing;
+  const maxRing = core.maxRing;
+  const frameRing = core.frameRing;
+  assert.ok(minRing instanceof Float32Array, "the core's buffers were made in its constructor");
+
+  // Count from here: the constructor's own buffers are behind us.
+  for (const name of Object.keys(meter.counts)) meter.counts[name] = 0;
+
+  // A hidden lane makes nothing at all: no window, no payload, no post.
+  meter.run(0, 1000 * 128, meterRamp);
+  assert.deepEqual({ ...meter.counts }, { Float32Array: 0, Float64Array: 0, Array: 0 });
+  assert.deepEqual(meter.scope.posts, []);
+
+  // Shown, the one allocation per post is the payload's `cols` — the object a
+  // structured clone carries — and nothing per block.
+  meter.send({ type: "on" });
+  meter.run(1000 * 128, 1000 * 128, meterRamp);
+  const levels = meter.levels();
+  assert.ok(levels.length > 0, "a shown lane posts");
+  assert.equal(meter.counts.Float32Array, levels.length, "one Float32Array per post, none per block");
+  assert.equal(meter.counts.Float64Array, 0, "the column frames are the ring's own buffer");
+  assert.equal(meter.counts.Array, 0, "no array is built by the block path");
+  for (const level of levels) assert.equal(level.cols.length % 3, 0, "columns are frame, min, max");
+
+  assert.equal(core.minRing, minRing, "the same minimums buffer, 128,000 frames later");
+  assert.equal(core.maxRing, maxRing, "the same maximums buffer");
+  assert.equal(core.frameRing, frameRing, "the same frames buffer");
+});
+
+test("the meter posts nothing until on, and nothing after off", () => {
+  const meter = bareMeter(1);
+  const half = () => 0.5;
+
+  meter.run(0, 32 * 128, half);
+  assert.deepEqual(meter.scope.posts, [], "a lane nobody showed is silent");
+
+  meter.send({ type: "on" });
+  meter.run(32 * 128, 64 * 128, half);
+  assert.ok(meter.levels().length > 0, "turning it on starts the posts");
+
+  meter.send({ type: "off" });
+  const posted = meter.scope.posts.length;
+  meter.run(96 * 128, 200 * 128, half);
+  assert.equal(meter.scope.posts.length, posted, "turning it off stops them");
+});
+
+test("a level post carries exactly one payload object", () => {
+  const meter = bareMeter(1);
+  meter.send({ type: "on" });
+  meter.run(0, 64 * 128, (frame) => Math.sin(frame / 10) * 0.25);
+  const levels = meter.levels();
+  assert.ok(levels.length > 0, "the meter posted");
+
+  for (const args of meter.scope.posts) {
+    assert.equal(args.length, 1, "one argument per post: the payload, and nothing beside it");
+    const payload = args[0];
+    assert.deepEqual(
+      Object.keys(payload).sort(),
+      ["clearSeq", "clipped", "cols", "frame", "peak", "rms", "type"],
+      "the payload is the drained reading, under one type",
+    );
+    assert.equal(payload.type, "level");
+    assert.equal(typeof payload.frame, "number");
+    assert.equal(typeof payload.peak, "number");
+    assert.equal(typeof payload.rms, "number");
+    assert.equal(typeof payload.clipped, "boolean");
+    assert.equal(typeof payload.clearSeq, "number", "the clear sequence rides on the payload as a plain number");
+    assert.ok(payload.cols instanceof Float32Array, "the columns travel as one typed array");
+  }
+});
+
+test("a clear message lets the CLIP latch go", () => {
+  const meter = bareMeter(1);
+  meter.send({ type: "on" });
+  meter.run(0, 16 * 128, () => 1);
+  assert.equal(meter.levels().some((level) => level.clipped), true, "a full-scale sample latches CLIP");
+
+  meter.send({ type: "clear" });
+  const before = meter.levels().length;
+  meter.run(16 * 128, 32 * 128, () => 0.25);
+  const after = meter.levels().slice(before);
+  assert.ok(after.length > 0, "it keeps posting after a clear");
+  assert.deepEqual(after.map((level) => level.clipped), after.map(() => false), "and nothing quiet latches it again");
+  assert.deepEqual(
+    after.map((level) => level.clearSeq),
+    after.map(() => 0),
+    "a clear that named no sequence is sequence 0",
+  );
+});
+
+test("a clear names its sequence, and every reading after it carries it", () => {
+  const meter = bareMeter(1);
+  meter.send({ type: "on" });
+  meter.run(0, 16 * 128, () => 1);
+  const latched = meter.levels();
+  assert.equal(latched.some((level) => level.clipped), true, "a full-scale sample latches CLIP");
+  assert.deepEqual(
+    latched.map((level) => level.clearSeq),
+    latched.map(() => 0),
+    "and nothing has named a clear yet",
+  );
+
+  meter.send({ type: "clear", seq: 3 });
+  let before = meter.levels().length;
+  meter.run(16 * 128, 32 * 128, () => 0.25);
+  const after = meter.levels().slice(before);
+  assert.ok(after.length > 0, "it keeps posting after the clear");
+  assert.deepEqual(after.map((level) => level.clearSeq), after.map(() => 3), "every reading carries sequence 3");
+  assert.deepEqual(after.map((level) => level.clipped), after.map(() => false), "and the latch is let go");
+
+  // The latch can be set again by a later sample, and the sequence stays where
+  // the last clear put it: a reading this page takes now is never mistaken for
+  // one taken before its clear.
+  before = meter.levels().length;
+  meter.run(32 * 128, 16 * 128, () => 1);
+  const relatched = meter.levels().slice(before);
+  assert.equal(relatched.some((level) => level.clipped), true, "a full-scale sample latches it again");
+  assert.deepEqual(relatched.map((level) => level.clearSeq), relatched.map(() => 3), "under the same sequence");
+
+  // A clear that names no sequence is sequence 0, not the sequence before it.
+  meter.send({ type: "clear" });
+  before = meter.levels().length;
+  meter.run(48 * 128, 16 * 128, () => 0.25);
+  const unnamed = meter.levels().slice(before);
+  assert.ok(unnamed.length > 0, "it keeps posting after the clear");
+  assert.deepEqual(unnamed.map((level) => level.clearSeq), unnamed.map(() => 0), "a clear with no sequence is 0");
+  assert.deepEqual(unnamed.map((level) => level.clipped), unnamed.map(() => false), "and it still lets the latch go");
+});
+
+test("a stereo arm meters a signal that only reaches the right channel", () => {
+  const meter = bareMeter(2);
+  meter.send({ type: "on" });
+  // Silence on the left, a constant negative reading on the right.
+  meter.runStereo(0, 32 * 128, () => 0, () => -0.5);
+
+  const levels = meter.levels();
+  assert.ok(levels.length > 0, "the meter posted");
+  for (const level of levels) {
+    assert.ok(Math.abs(level.peak - 0.5) <= 1e-6, `the right channel is the peak, was ${level.peak}`);
+    // Two channels of squares, one of them silent: the whole reading's RMS.
+    assert.ok(Math.abs(level.rms - 0.5 / Math.SQRT2) <= 1e-6, `the rms covers both channels, was ${level.rms}`);
+    assert.equal(level.clipped, false, "half scale does not latch CLIP");
+    for (let at = 0; at + 2 < level.cols.length; at += 3) {
+      assert.equal(level.cols[at + 1], -0.5, `column ${at / 3} takes the right channel's minimum`);
+      assert.equal(level.cols[at + 2], 0, `column ${at / 3} and the left channel's maximum`);
+    }
+  }
+
+  // A mono arm is unchanged: one channel, its own reading.
+  const mono = bareMeter(1);
+  mono.send({ type: "on" });
+  mono.run(0, 32 * 128, () => -0.5);
+  for (const level of mono.levels()) {
+    assert.ok(Math.abs(level.peak - 0.5) <= 1e-6, "a mono reading is its one channel");
+    assert.ok(Math.abs(level.rms - 0.5) <= 1e-6, "with no second channel folded in");
+  }
+});
+
+test("showing a lane again starts from an empty ring, so no stale column is posted", () => {
+  const meter = bareMeter(1);
+  const half = () => 0.5;
+  meter.send({ type: "on" });
+  // Nine blocks are 1152 frames: two 480-frame columns have closed and no post
+  // is due yet (a post is 1600 frames), so both are still in the ring.
+  meter.run(0, 9 * 128, half);
+  assert.equal(meter.levels().length, 0, "no post was due yet");
+  assert.equal(meter.processor.core.count, 2, "two columns are waiting in the ring");
+
+  meter.send({ type: "off" });
+  meter.send({ type: "on" });
+  assert.equal(meter.processor.core.count, 0, "showing the lane again empties the ring");
+  assert.equal(meter.processor.core.head, 0, "and starts at its first slot");
+
+  meter.run(9 * 128, 13 * 128, half);
+  const levels = meter.levels();
+  assert.equal(levels.length, 1, "one post came due");
+  const cols = levels[0].cols;
+  assert.equal(cols.length, 3 * 3, "three columns closed after the lane was shown again");
+  assert.equal(cols[0], 9 * 128, "the first one starts on the block the lane was shown on");
+  for (let at = 0; at + 2 < cols.length; at += 3) {
+    assert.ok(cols[at] >= 9 * 128, `column ${at / 3} is not one from before the lane was hidden`);
+  }
 });

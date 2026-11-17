@@ -34,10 +34,10 @@ const SIDE_KEY = "crow.studio.sideCollapsed.v1";
 /** The widgets a mode's default layout shows, in page order. */
 const COMPOSE = ["scene-grid", "editor", "pads", "steps", "fx", "history"];
 const PERFORM = ["scene-grid", "pads", "fx", "midi", "history"];
-const RECORD = ["scene-grid", "takes", "midi", "history"];
+const RECORD = ["rec-lanes", "scene-plan", "takes", "pads", "scene-grid", "midi", "history"];
 
 /** Every widget the shell knows: one frame each. */
-const WIDGET_COUNT = 12;
+const WIDGET_COUNT = 14;
 
 /** The stand-in dashboard layout: a bare document around the panel content. */
 function minimalLayout({ title, content }) {
@@ -448,6 +448,8 @@ test("the emitted shell script follows the panel's inline rules and names the wi
   assert.equal(widgetName("fx"), "Effects");
   assert.equal(widgetName("keyboard"), "Keyboard");
   assert.equal(widgetName("mixer-strip"), "Mixer strip");
+  assert.equal(widgetName("rec-lanes"), "Record lanes");
+  assert.equal(widgetName("scene-plan"), "Scene plan");
   assert.equal(widgetName("takes"), "Takes");
   assert.equal(widgetName("midi"), "MIDI");
   assert.equal(widgetName("history"), "History");
@@ -459,6 +461,8 @@ test("the emitted shell script follows the panel's inline rules and names the wi
   assert.equal(emptyNote("fx"), "Open a pattern clip on a sampler track for the effects and the looper.");
   assert.equal(emptyNote("keyboard"), "Pick a note track to play it");
   assert.equal(emptyNote("mixer-strip"), "Pick a track to see its strip");
+  assert.equal(emptyNote("rec-lanes"), "Add an audio track and arm it to record.");
+  assert.equal(emptyNote("scene-plan"), "Add a scene to plan.");
   assert.equal(emptyNote("takes"), "Arm a track to record.");
   assert.equal(emptyNote("scene-grid"), "");
   assert.match(SHELL_CSS, /\.st-widget-tab\s*\{[^}]*min-height:\s*46px/, "a tab is a 46 px target");
@@ -558,9 +562,12 @@ test("compose mounts its six widgets; perform and record follow the defaults", a
 
   b.shell.setMode("record");
   assert.deepEqual(shownWidgets(b.page), RECORD);
-  assert.equal(sizeOf(b.page, "takes"), "l");
+  assert.equal(sizeOf(b.page, "rec-lanes"), "l");
+  assert.equal(sizeOf(b.page, "scene-plan"), "m");
+  assert.equal(sizeOf(b.page, "takes"), "m");
+  assert.equal(sizeOf(b.page, "pads"), "m");
   assert.equal(frame(b.page, "agent").parentNode, b.page.querySelector("[data-role=widget-tray]"));
-  assert.deepEqual(trayWidgets(b.page), ["editor", "pads", "steps", "chop", "fx", "keyboard", "mixer-strip", "agent"]);
+  assert.deepEqual(trayWidgets(b.page), ["editor", "steps", "chop", "fx", "keyboard", "mixer-strip", "agent"]);
 });
 
 test("the page's hosts and header controls are moved, never cloned", async () => {
@@ -926,7 +933,7 @@ test("Edit layout gives every frame Remove, Size and a drag handle and the tray 
     assert.ok(frameAct(b, id, "widget-size"), `${id} can change size`);
     assert.ok(frame(b.page, id).querySelector("[data-role=widget-drag]"), `${id} can be moved`);
   }
-  for (const id of ["chop", "keyboard", "mixer-strip", "takes", "midi", "agent"]) {
+  for (const id of ["chop", "keyboard", "mixer-strip", "rec-lanes", "scene-plan", "takes", "midi", "agent"]) {
     assert.ok(frameAct(b, id, "widget-add"), `${id} can come back from the tray`);
   }
 
@@ -950,7 +957,7 @@ test("Remove moves a widget to the tray and writes only this song, mode and clas
   click(b.domWindow, frameAct(b, "history", "widget-remove"));
 
   assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "pads", "steps", "fx"]);
-  assert.deepEqual(trayWidgets(b.page), ["chop", "keyboard", "mixer-strip", "takes", "midi", "history", "agent"]);
+  assert.deepEqual(trayWidgets(b.page), ["chop", "keyboard", "mixer-strip", "rec-lanes", "scene-plan", "takes", "midi", "history", "agent"]);
   assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["scene-grid", "editor", "pads", "steps", "fx"]);
   assert.equal(b.storage.getItem(otherSongKey), otherSongValue, "another song is untouched");
   assert.equal(b.storage.getItem(layoutKey(SONG, "perform", "laptop")), null, "another mode is untouched");
@@ -1214,22 +1221,22 @@ test("phone shows one widget and a tab strip", async () => {
 
   // The tab stays valid when the layout moves under it.
   b.shell.setMode("record");
-  assert.deepEqual(tabLabels(b.page), ["Scene grid", "Takes", "MIDI", "History"], "the tabs follow the mode");
+  assert.deepEqual(
+    tabLabels(b.page),
+    ["Record lanes", "Scene plan", "Takes", "Pads", "Scene grid", "MIDI", "History"],
+    "the tabs follow the mode",
+  );
   assert.deepEqual(visibleFrames(b.page), ["history"], "a tab the new layout still shows stays the active one");
   assert.equal(activeTab(b.page).textContent, "History");
 
   startEditing(b);
-  assert.deepEqual(
-    visibleFrames(b.page),
-    ["scene-grid", "takes", "midi", "history"],
-    "editing the layout shows every frame instead of one",
-  );
+  assert.deepEqual(visibleFrames(b.page), RECORD, "editing the layout shows every frame instead of one");
   assert.equal(strip.hasAttribute("hidden"), true, "the tabs step aside while the layout is edited");
 
   click(b.domWindow, frameAct(b, "history", "widget-remove"));
   click(b.domWindow, layoutEntry(b.page, "layout-edit"));
-  assert.deepEqual(visibleFrames(b.page), ["scene-grid"], "the active widget left, so the first shown one takes over");
-  assert.equal(activeTab(b.page).textContent, "Scene grid");
+  assert.deepEqual(visibleFrames(b.page), ["rec-lanes"], "the active widget left, so the first shown one takes over");
+  assert.equal(activeTab(b.page).textContent, "Record lanes");
 
   b.media.setWidth(1280);
   assert.equal(strip.hasAttribute("hidden"), true, "a laptop has no tab strip");

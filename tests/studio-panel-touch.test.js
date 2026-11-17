@@ -51,6 +51,9 @@ const CONTROL_CLASSES = [
 const SAMPLER_TRACK = "drums";
 const SAMPLER_CLIP = "c-beat";
 
+/** The audio track the recording lanes' cases arm. */
+const AUDIO_TRACK = "gtr";
+
 // --- the page's server side -------------------------------------------------
 
 /** A database fake: enough of `execute` for the project picker. */
@@ -351,7 +354,8 @@ function fakeStudioEngine() {
  * document, a stubbed socket and the fake AudioContext above.
  *
  * `sampler` builds a song with a sampler track and a pattern clip instead of a
- * note clip, so the pad-and-steps view can be opened; `innerWidth` is the width
+ * note clip, so the pad-and-steps view can be opened; `audio` builds it with an
+ * audio track, whose recording lane a take lands on; `innerWidth` is the width
  * the page lays out for (a laptop's 1280 unless a test asks for a phone's).
  *
  * @param {{Ctx?: Function, visibility?: string, sampler?: boolean, innerWidth?: number}} [options]
@@ -377,6 +381,9 @@ async function bootClient(options = {}) {
       name: "Beat",
       length_steps: 16,
     });
+  } else if (options.audio === true) {
+    // The recording lanes' fixture: one audio track, which a take lands on.
+    runCommand(doc, "track.add", { id: AUDIO_TRACK, name: "Guitar", kind: "audio" });
   } else {
     runCommand(doc, "track.add", { id: "bass", name: "Bass" });
     runCommand(doc, "clip.write", {
@@ -524,19 +531,27 @@ async function bootClient(options = {}) {
     document.dispatchEvent(new domWindow.Event("visibilitychange"));
   };
 
-  await settle();
-  frame({
+  const stateMessage = () => ({
     type: "state",
     update: Buffer.from(encodeDocState(doc)).toString("base64"),
     history: [],
     presence: [],
   });
+
+  await settle();
+  frame(stateMessage());
   await settle();
 
   return {
     document,
+    page: document.querySelector(".studio"),
     window: windowStub,
     windowListeners,
+    /** Draw the song again, as the hub's next state frame would. */
+    async pushState() {
+      frame(stateMessage());
+      await settle();
+    },
     Ctx,
     engine: engineStub,
     sent,
@@ -975,4 +990,117 @@ test("touch velocity stays at 100 for a constant reading, and a real one is used
 
   assert.equal(ui.engine.live[2].v, 100, "the press that taught the page played at the fixed 100");
   assert.equal(ui.engine.live[3].v, 76, "0.6 of the reading range through the linear curve is 76");
+});
+
+// --- A5: the record lanes' targets, and a phone's take list -----------------
+
+/** The studio sheet's rules, as the record cases below read them. */
+async function sheetRules() {
+  return cssRules(String(styleText(await render({ song: "song-1" }))));
+}
+
+/** The sheet's phone block, as text. */
+function phoneBlock(css) {
+  const found = /@media \(max-width: 639px\) \{([\s\S]*?)\n  \}/.exec(String(css));
+  assert.ok(found, "the sheet has a phone block");
+  return found[1];
+}
+
+/** Arm the fixture's audio track, then draw the page again. */
+async function armFixtureTrack(ui) {
+  ui.page.__studioTest.view.armed[AUDIO_TRACK] = {
+    device_id: "in-1",
+    label: "Input 1",
+    channels: 2,
+    stream: null,
+  };
+  await ui.pushState();
+}
+
+test("arm, meter chip, lane header and take buttons are 44 px targets", async () => {
+  const rules = await sheetRules();
+
+  // The one control of a lane a thumb presses (Arm), the meter's CLIP chip, the
+  // lane's own header and a take row's buttons.
+  const controls = [
+    ".studio .st-rec-arm",
+    ".studio .st-rec-clip",
+    ".studio .st-rec-lane-head",
+    ".studio .st-take-acts .st-btn",
+  ];
+  for (const selector of controls) {
+    assert.ok(touchTargetRule(rules, selector), `${selector} carries a 44 px floor in width and height`);
+  }
+
+  const shared = rules.find((rule) => controls.every((selector) => rule.selectors.includes(selector)));
+  assert.ok(shared, "one rule gives all four the 44 px floor");
+  assert.match(shared.body, /min-width: 44px/);
+  assert.match(shared.body, /min-height: 44px/);
+});
+
+test("lanes and take rows never select their text or call out a menu", async () => {
+  const rules = await sheetRules();
+
+  for (const selector of [".studio .st-rec-side", ".studio .st-takes", ".studio .st-take"]) {
+    const locking = rules.filter((rule) => rule.selectors.includes(selector) && locksSelection(rule.body));
+    assert.ok(locking.length > 0, `${selector} is named by a rule that turns selection off`);
+    const complete = locking.some(
+      (rule) =>
+        /-webkit-user-select\s*:\s*none/.test(rule.body) &&
+        /-webkit-touch-callout\s*:\s*none/.test(rule.body),
+    );
+    assert.ok(complete, `${selector} carries -webkit-user-select and -webkit-touch-callout none`);
+  }
+});
+
+test("on a phone the lanes stack one per row and the armed lane keeps its meter", async () => {
+  const css = String(styleText(await render({ song: "song-1" })));
+  const phone = phoneBlock(css);
+  assert.match(
+    phone,
+    /\.studio \.st-rec-lane \{[^}]*grid-template-columns: minmax\(0, 1fr\)/,
+    "each lane stacks its header over its own bar row",
+  );
+  assert.match(
+    phone,
+    /\.studio \.st-take \{[^}]*flex-wrap: wrap/,
+    "and a take row wraps its buttons under the name",
+  );
+
+  const ui = await bootClient({ audio: true, innerWidth: 390 });
+  await armFixtureTrack(ui);
+
+  const lanes = [...ui.document.querySelectorAll("[data-role=rec-lane]")];
+  assert.equal(lanes.length, 1, "one lane per track, so one lane a row");
+  assert.equal(lanes[0].getAttribute("data-track-id"), AUDIO_TRACK, "the lane is the song's own track");
+  assert.match(String(lanes[0].getAttribute("class")), /st-rec-lane-target/, "and it is the record target");
+
+  const meter = lanes[0].querySelector("[data-role=rec-meter]");
+  assert.ok(meter, "the armed lane keeps its meter");
+  assert.ok(meter.querySelector("[data-role=rec-meter-fill]"), "with the fill a level moves");
+  assert.ok(meter.querySelector("[data-role=rec-peak]"), "the peak it holds");
+  assert.ok(lanes[0].querySelector("[data-role=rec-source]"), "and what the lane listens to");
+});
+
+test("a long press on Arm is the press it started, not the browser's menu", async () => {
+  const ui = await bootClient({ audio: true });
+  await armFixtureTrack(ui);
+
+  const arm = ui.document.querySelector(
+    `[data-role=rec-lane][data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`,
+  );
+  assert.ok(arm, "the lane offers Arm");
+  const onArm = ui.event("contextmenu", {});
+  arm.dispatchEvent(onArm);
+  assert.equal(onArm.defaultPrevented, true, "the menu is cancelled on Arm");
+
+  // The track's own name keeps its long press: only the controls a finger plays
+  // cancel the menu.
+  const title = ui.document.querySelector(
+    `[data-role=rec-lane][data-track-id=${AUDIO_TRACK}] .st-rec-lane-title`,
+  );
+  assert.ok(title, "the lane carries the track's name");
+  const onTitle = ui.event("contextmenu", {});
+  title.dispatchEvent(onTitle);
+  assert.equal(onTitle.defaultPrevented, false, "the name is left alone");
 });
