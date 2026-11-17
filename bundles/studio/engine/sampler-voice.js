@@ -22,18 +22,31 @@
  *       → gain (dB) × (v/127)²
  *       → constant-power pan (unity at centre: the track's pan positions it)
  *
- * The pitch ratio is the per-frame step through the sample, so the read is a
- * plain double position with linear interpolation: at ratio 1 the voice is
- * sample-exact, at ratio 2 every other sample is read (an octave up, half the
- * length), and a fractional ratio blends the two neighbours. Reversed playback
- * runs the same position backwards from the end of the range. The blended
- * neighbour is held inside the range (end − 1 forwards, start backwards), so a
- * voice never reads into the slice next door.
+ * The step is the per-frame distance through the sample, so the read is a plain
+ * double position with linear interpolation: at a step of 1 the voice is
+ * sample-exact, at 2 every other sample is read (an octave up, half the length),
+ * and a fractional step blends the two neighbours. Reversed playback runs the
+ * same position backwards from the end of the range. The blended neighbour is
+ * held inside the range (end − 1 forwards, start backwards), so a voice never
+ * reads into the slice next door.
  *
- * A voice ends in exactly two ways: its envelope reaches DONE (a release
- * finished, or a decay bottomed out at sustain 0) or its read range runs out.
- * A start therefore sounds from its own first frame, even while an attack is
- * still climbing from 0.
+ * The step is three things kept apart and multiplied in one place
+ * (`refreshStep`): `dir` (the initial reverse sign, +1 or −1), `speed` (a
+ * multiplier, for varispeed and tempo sync) and `pitch_semis`. A pitch sweep only
+ * has to move `pitch_semis` and ask for the product again, and a ping-pong that
+ * turns around only flips `dir`.
+ *
+ * A `loop` voice wraps at its range end: forwards, past the last frame to the
+ * first; backwards, past the first frame to the last. A `pingpong` voice mirrors
+ * the step that would have left the range and turns around, so it reads the same
+ * range out and back. Both keep `looping` set until the voice is released (or
+ * faded), which is what makes a released voice end in the ordinary way.
+ *
+ * A voice ends in exactly three ways: its envelope reaches DONE (a release
+ * finished, or a decay bottomed out at sustain 0), its read range runs out, or —
+ * in a loop — its envelope runs out (a looping voice is never left alive and
+ * silent at level 0). A start therefore sounds from its own first frame, even
+ * while an attack is still climbing from 0.
  *
  * ## Why it is bit-identical in Chromium and Node
  *
@@ -56,6 +69,33 @@
 
   /** How long a choke (and a range that runs out at level) fades for, in frames. */
   const FADE_FRAMES = 64;
+
+  /**
+   * The shortest range a loop can turn around in, in frames. A range of one frame
+   * has no second frame to come back to, so a voice in one runs out instead of
+   * spinning in place.
+   */
+  const SHORTEST_LOOP_FRAMES = 2;
+
+  /**
+   * How many times one frame may wrap or reflect before the voice gives up and
+   * runs out. A step this side of sane turns once or twice; the cap is here so a
+   * pathological speed leaves the voice rather than spinning the audio thread.
+   */
+  const MOST_LOOP_TURNS = 1024;
+
+  /**
+   * How much of one frame's decay step the level may still sit above its target
+   * and count as arrived, as a fraction of that step. A decay subtracts a
+   * rounded increment frame after frame, so the last subtraction can leave a few
+   * ulps above the target; taken as sound they would be a voice that is meant to
+   * be at level 0 rendering a silent-but-nonzero frame (M23).
+   */
+  const LEVEL_ARRIVED = 1e-6;
+
+  /** The speed multiplier is held inside these bounds (0 and below have no meaning). */
+  const LOWEST_SPEED = 0.01;
+  const HIGHEST_SPEED = 16;
 
   /** The envelope's stages, in the order a voice moves through them. */
   const STAGE_ATTACK = 0;
@@ -161,8 +201,18 @@
       reverse: false,
       /** The read position, in sample frames, in doubles. */
       position: 0,
-      /** The step per frame: 2^(pitch/12), negated when reversed. */
+      /** The step per frame, as `refreshStep` works it out: dir × speed × 2^(pitch/12). */
       step: 1,
+      /** The direction the position moves in: −1 when the voice started reversed. */
+      dir: 1,
+      /** The speed multiplier (varispeed and tempo sync), 1 for an untouched pad. */
+      speed: 1,
+      /** The pitch, in semitones, kept apart from the speed that also moves it. */
+      pitch_semis: 0,
+      /** "off", "loop" or "pingpong", as the pad's Loop setting spells it. */
+      loop: "off",
+      /** Whether the voice is turning at its range ends (cleared by a release or a fade). */
+      looping: false,
       /** dB gain × (velocity/127)², and the constant-power pan pair. */
       gain: 0,
       panLeft: 1,
@@ -295,6 +345,57 @@
     voice.level = 0;
     voice.stage = STAGE_DONE;
     voice.sounding = false;
+    voice.looping = false;
+  }
+
+  /**
+   * Work the voice's step out from the three things it is made of. This is the
+   * only place that product exists: a start sets the three, a pitch sweep moves
+   * `pitch_semis`, and a ping-pong that turns around flips `dir`.
+   * @param {object} voice
+   * @returns {void}
+   */
+  function refreshStep(voice) {
+    voice.step = voice.dir * voice.speed * Math.pow(2, voice.pitch_semis / 12);
+  }
+
+  /**
+   * Keep a looping voice inside its read range, one frame before it is read: a
+   * plain loop jumps from one end to the other, a ping-pong mirrors the step that
+   * would have left the range and turns around (a direction change, so the step
+   * is worked out again).
+   *
+   * A range too short to turn in, or a step so big it never comes back, ends the
+   * loop: the voice then runs out exactly as it would without Loop.
+   * @param {object} voice
+   * @param {number} bound the exclusive end of the frames there are to read
+   * @returns {void}
+   */
+  function holdLoop(voice, bound) {
+    if (bound - voice.start < SHORTEST_LOOP_FRAMES) {
+      voice.looping = false;
+      return;
+    }
+    const span = bound - voice.start;
+    for (let turn = 0; turn < MOST_LOOP_TURNS; turn += 1) {
+      const position = voice.position;
+      if (position >= voice.start && position < bound) return;
+      if (voice.loop === "pingpong") {
+        // Mirrored about the end frame that was read last (or the start frame),
+        // so neither end is heard twice on the way round.
+        if (position >= bound) {
+          voice.position = 2 * (bound - 1) - position;
+          voice.dir = -1;
+        } else {
+          voice.position = 2 * voice.start - position;
+          voice.dir = 1;
+        }
+        refreshStep(voice);
+        continue;
+      }
+      voice.position = position >= bound ? position - span : position + span;
+    }
+    if (voice.position < voice.start || voice.position >= bound) voice.looping = false;
   }
 
   /**
@@ -310,7 +411,8 @@
    *          attackMs?: number, decayMs?: number, sustain?: number,
    *          releaseMs?: number, filterType?: string, cutoffHz?: number,
    *          resonance?: number, gateFrames?: number, choke?: number,
-   *          mode?: string, trackId?: string, bankId?: string, index?: number,
+   *          mode?: string, loop?: string, speed?: number,
+   *          trackId?: string, bankId?: string, index?: number,
    *          serial?: number, sampleRate: number}} config
    * @returns {boolean} whether the voice started
    */
@@ -326,9 +428,9 @@
     if (!(end > start)) return false;
 
     const rate = finiteOr(settings.sampleRate, 48000);
-    const pitch = clamp(finiteOr(settings.pitch, 0), -48, 48);
-    const ratio = Math.pow(2, pitch / 12);
     const reverse = settings.reverse === true;
+    const loop =
+      settings.loop === "loop" || settings.loop === "pingpong" ? settings.loop : "off";
     const pan = panCoefficients(settings.pan);
     const velocity = clamp(finiteOr(settings.velocity, 127), 1, 127);
     const velocityGain = (velocity / 127) * (velocity / 127);
@@ -339,7 +441,12 @@
     voice.end = end;
     voice.reverse = reverse;
     voice.position = reverse ? end - 1 : start;
-    voice.step = reverse ? -ratio : ratio;
+    voice.dir = reverse ? -1 : 1;
+    voice.speed = clamp(finiteOr(settings.speed, 1), LOWEST_SPEED, HIGHEST_SPEED);
+    voice.pitch_semis = clamp(finiteOr(settings.pitch, 0), -48, 48);
+    refreshStep(voice);
+    voice.loop = loop;
+    voice.looping = loop !== "off";
     voice.gain = dbToLinear(settings.gainDb) * velocityGain;
     voice.panLeft = pan.left;
     voice.panRight = pan.right;
@@ -398,6 +505,7 @@
    */
   function releaseVoice(voice) {
     if (!voice.sounding) return;
+    voice.looping = false;
     if (voice.stage === STAGE_RELEASE || voice.stage === STAGE_DONE) return;
     if (voice.releaseFrames <= 0) {
       voice.level = 0;
@@ -417,6 +525,7 @@
    */
   function beginFadeOut(voice) {
     if (!voice.sounding) return;
+    voice.looping = false;
     if (voice.fadeRemaining > 0) return;
     voice.fadeRemaining = FADE_FRAMES;
   }
@@ -442,7 +551,10 @@
     }
     if (voice.stage === STAGE_DECAY) {
       voice.level -= voice.increment;
-      if (voice.level <= voice.sustain) settleAtSustain(voice);
+      // The decay's last step lands on the sustain exactly, whatever the rounding
+      // of the subtractions added up to, so a sustain of 0 ends the voice on the
+      // frame the decay reaches it instead of one frame of rounding later (M23).
+      if (voice.level - voice.sustain <= voice.increment * LEVEL_ARRIVED) settleAtSustain(voice);
       return;
     }
     if (voice.stage === STAGE_RELEASE) {
@@ -506,8 +618,12 @@
       countdown(voice);
       if (voice.stage === STAGE_DONE) {
         voice.sounding = false;
+        voice.looping = false;
         break;
       }
+
+      // A looping voice turns at its range ends instead of running out of them.
+      if (voice.looping) holdLoop(voice, Math.min(voice.end, length));
 
       let signalLeft = 0;
       let signalRight = 0;
@@ -521,6 +637,7 @@
           // The range has run out: hold the last sample for the 64-frame fade
           // (a voice still at level would otherwise click), then stop.
           voice.ending = true;
+          voice.looping = false;
           if (voice.level <= 0) {
             voice.sounding = false;
             break;
@@ -535,7 +652,7 @@
           // stops at end − 1, a reversed one at start, so the last frame of a
           // slice cannot bleed the next slice's audio into it. A shorter second
           // channel caps it too (both channels are read at one position).
-          const limit = Math.min(voice.reverse ? voice.start : voice.end - 1, length - 1);
+          const limit = Math.min(voice.dir < 0 ? voice.start : voice.end - 1, length - 1);
           const next = base + 1 > limit ? (limit > base ? limit : base) : base + 1;
 
           const a = channel0[base];
@@ -592,7 +709,10 @@
       if (voice.fadeRemaining > 0) {
         fade = voice.fadeRemaining / FADE_FRAMES;
         voice.fadeRemaining -= 1;
-        if (voice.fadeRemaining === 0) voice.sounding = false;
+        if (voice.fadeRemaining === 0) {
+          voice.sounding = false;
+          voice.looping = false;
+        }
       }
 
       if (audible) {
@@ -611,12 +731,15 @@
     render: renderVoice,
     release: releaseVoice,
     beginFadeOut: beginFadeOut,
+    refreshStep: refreshStep,
     setFilter: setFilter,
     dbToLinear: dbToLinear,
     msToFrames: msToFrames,
     panCoefficients: panCoefficients,
     FADE_FRAMES: FADE_FRAMES,
     DENORMAL_FLOOR: DENORMAL_FLOOR,
+    /** The shortest range a loop can turn around in, in frames. */
+    SHORTEST_LOOP_FRAMES: SHORTEST_LOOP_FRAMES,
     /** The envelope's release stage, for a caller that asks "is it going away?". */
     STAGE_RELEASE: STAGE_RELEASE,
   };
