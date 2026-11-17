@@ -2858,3 +2858,290 @@ test("the rec status reads the count-in from the engine's clicks, then the take"
   assert.equal(status().textContent, "Recording, pass 1", "the take replaces the count-in");
   assert.equal(status().getAttribute("data-recording"), "1", "and says it is recording");
 });
+
+// ---- cancelling a count-in, and the transport bar while it runs (R7-R8) ----
+//
+// A count-in is not a take, so it can be given up: Stop ends it with the
+// transport, Pause ends it and leaves the transport exactly where it stood, and
+// either way there is no clip, no take row and no `view.rec` left behind. While
+// it runs Pause is offered and the Record button reads pressed.
+
+/** @param {object} ui a booted panel @returns {string} its notice text */
+function noticeText(ui) {
+  return String(ui.document.querySelector("[data-role=rec-notice]").textContent || "");
+}
+
+/** @param {object} ui a booted panel @returns {number} how many commands it sent */
+function commandsSent(ui) {
+  return ui.sent.filter((message) => typeof message.command === "string").length;
+}
+
+/**
+ * A second scene in the page's song, drawn the way the hub pushes one.
+ * @param {object} ui a booted panel
+ * @param {string} id
+ * @param {string} name
+ */
+async function addScene(ui, id, name) {
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  const { encodeDocState } = await import("../bundles/studio/server/doc.js");
+  runCommand(ui.doc, "scene.add", { id, name });
+  ui.frame({ type: "update", update: Buffer.from(encodeDocState(ui.doc)).toString("base64") });
+  await ui.settle();
+}
+
+test("R7: Stop during the count-in clears view.rec, creates no clip, sends no command, shows Count-in cancelled", async () => {
+  const ui = await bootPanel({ storage: makeStorage() });
+  const recorder = await pressRecord(ui);
+  ui.engine.countIn({ type: "count_in_start", play_frame: 96000 });
+  await ui.settle();
+  const commandsBefore = commandsSent(ui);
+
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const view = ui.page.__studioTest.view;
+  assert.equal(view.rec, null, "no take is left armed");
+  assert.equal(ui.engine.cancels, 1, "the engine's count-in was cancelled");
+  assert.ok(ui.engine.stops > 0, "and the transport was stopped");
+  assert.equal(view.playing, false, "nothing is playing");
+  assert.equal(recorder.armFrame, null, "nothing was ever armed");
+  assert.deepEqual(recorder.splits, [], "and no pass boundary was sent");
+  assert.equal(commandsSent(ui), commandsBefore, "a take that never started sends nothing to the hub");
+  assert.equal(
+    ui.sent.filter((message) => message.command === "clip.add_audio").length,
+    0,
+    "no clip was made for it",
+  );
+  assert.equal(ui.store.pendings.size, 0, "no take row exists");
+  assert.ok(
+    noticeText(ui).includes("Count-in cancelled"),
+    `the notice says the count-in was cancelled (got: ${noticeText(ui)})`,
+  );
+  assert.equal(ui.document.querySelector("[data-role=rec-status]").hidden, true, "the status is gone");
+});
+
+test("R7: Pause during the count-in from stopped leaves the engine stopped and cancels the take", async () => {
+  const ui = await bootPanel({ storage: makeStorage() });
+  const recorder = await pressRecord(ui);
+  const view = ui.page.__studioTest.view;
+  ui.engine.countIn({ type: "count_in_start", play_frame: 96000 });
+  await ui.settle();
+
+  ui.click("[data-act=pause]");
+  await ui.settle(24);
+
+  assert.equal(ui.engine.cancels, 1, "the count-in was cancelled on the audio thread");
+  assert.equal(ui.engine.pauses, 0, "a stopped transport has nothing to pause");
+  assert.equal(ui.engine.stops, 0, "and nothing was stopped: the engine is left as it was");
+  assert.equal(view.rec, null, "no take is left armed");
+  assert.equal(view.playing, false, "the page says nothing is playing");
+  assert.equal(view.paused, false, "and nothing is paused");
+  assert.equal(recorder.armFrame, null, "nothing was ever armed");
+  assert.equal(ui.store.pendings.size, 0, "no take row exists");
+  assert.ok(noticeText(ui).includes("Count-in cancelled"), "the notice says so");
+
+  // The page is where it started: a Record press counts in again.
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  assert.equal(countInPlays(ui).length, 2, "a second Record press asks for its own count-in");
+  assert.equal(ui.engine.recorders.length, 2, "with a recorder of its own");
+  assert.equal(ui.engine.recorders[1].armFrame, null, "that waits for the clicks it just asked for");
+});
+
+test("R7: Pause during the count-in from paused leaves it paused at the same position", async () => {
+  const ui = await bootPanel({ storage: makeStorage(), clip: true });
+  ui.click("[data-act=play]");
+  await ui.settle();
+  await launchReported(ui);
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  const view = ui.page.__studioTest.view;
+  assert.equal(view.paused, true, "the transport stands paused where it was");
+
+  await pressRecord(ui);
+  assert.equal(view.rec.started_paused, true, "the count-in carries the paused transport on (R2)");
+  ui.engine.countIn({ type: "count_in_start", play_frame: 96000 });
+  await ui.settle();
+
+  ui.click("[data-act=pause]");
+  await ui.settle(24);
+
+  assert.equal(ui.engine.cancels, 1, "the count-in was cancelled");
+  assert.equal(view.rec, null, "no take is left armed");
+  assert.equal(view.paused, true, "the transport is still paused");
+  assert.equal(view.playing, false, "and nothing is playing");
+  assert.equal(ui.engine.stops, 0, "nothing was stopped");
+  assert.equal(ui.store.pendings.size, 0, "no take row exists");
+  assert.ok(noticeText(ui).includes("Count-in cancelled"), "the notice says so");
+});
+
+test("R7: Pause cancels a count-in with view.recTimeline.on forced true (the By-hand case)", async () => {
+  // By hand (C3) forces the performance collection on for the take, and a
+  // performance being collected is only ever ended with Stop. A count-in is not
+  // that: the counting branch runs before the performance's own guard.
+  const ui = await bootPanel({ storage: makeStorage() });
+  const view = ui.page.__studioTest.view;
+  view.recTimeline.on = true;
+  await pressRecord(ui);
+
+  ui.click("[data-act=pause]");
+  await ui.settle(24);
+
+  assert.equal(ui.engine.cancels, 1, "the count-in was cancelled");
+  assert.equal(view.rec, null, "no take is left armed");
+  assert.equal(view.playing, false, "nothing is playing");
+  assert.equal(ui.store.pendings.size, 0, "no take row exists");
+  assert.ok(noticeText(ui).includes("Count-in cancelled"), "the notice says so");
+});
+
+test("R7: Pause is enabled in the transport bar while counting and disabled once the take runs", async () => {
+  const ui = await bootPanel({ storage: makeStorage() });
+  const pause = () => ui.document.querySelector("[data-act=pause]");
+  assert.equal(pause().disabled, false, "Pause is offered while nothing runs");
+
+  await pressRecord(ui);
+  assert.equal(pause().disabled, false, "counting is not recording: Pause is still offered");
+  assert.equal(pause().getAttribute("aria-pressed"), "false", "and the transport is not paused");
+
+  ui.engine.countBar(1, 96000);
+  await ui.settle(24);
+  assert.equal(ui.engine.recorders[0].armFrame, 96000, "the take it counted in is armed");
+  assert.equal(pause().disabled, true, "and Pause goes with the take");
+  assert.equal(pause().getAttribute("title"), "Stop ends a recording", "the title says what ends it");
+});
+
+test("R8: Pause stays disabled while a take runs", async () => {
+  const ui = await bootPanel({ storage: makeStorage() });
+  ui.engine.paused = 0;
+  ui.engine.pause = function () {
+    ui.engine.paused += 1;
+  };
+  const pause = () => ui.document.querySelector("[data-act=pause]");
+  assert.equal(pause().disabled, false, "Pause is offered before the take starts");
+
+  await pressRecord(ui);
+  ui.engine.countBar(1, 96000);
+  await ui.settle(24);
+  assert.equal(pause().disabled, true, "a running take is what takes Pause away");
+
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(ui.engine.paused, 0, "pressing it leaves the engine alone");
+  assert.equal(pause().disabled, true, "and Pause stays disabled");
+  assert.equal(
+    ui.document.querySelector("[data-role=rec-status]").getAttribute("data-recording"),
+    "1",
+    "the take goes on recording",
+  );
+});
+
+test("R7: the page leaving during the count-in leaves no take and no clip", async () => {
+  const ui = await bootPanel({ storage: makeStorage() });
+  const recorder = await pressRecord(ui);
+  ui.engine.countIn({ type: "count_in_start", play_frame: 96000 });
+  await ui.settle();
+  const view = ui.page.__studioTest.view;
+  const commandsBefore = commandsSent(ui);
+
+  ui.document.dispatchEvent(new ui.document.defaultView.Event("turbo:before-cache"));
+  await ui.settle(24);
+
+  assert.equal(view.closed, true, "the page is torn down");
+  assert.equal(view.rec, null, "no take is left armed");
+  assert.equal(ui.engine.cancels, 1, "the count-in went with the page");
+  assert.equal(recorder.armFrame, null, "nothing was ever armed");
+  assert.equal(commandsSent(ui), commandsBefore, "nothing was sent for a take that never started");
+  assert.equal(ui.store.pendings.size, 0, "no take row exists");
+  assert.equal(ui.timers.length, 0, "and nothing was left scheduled");
+});
+
+test("a recorder error during the count-in cancels it and leaves no take row", async () => {
+  // The interface went away between the click and the recorder being built: the
+  // count-in it began cannot lead to a take, so it goes with the recorder.
+  const ui = await bootPanel({ storage: makeStorage() });
+  ui.engine.createRecorder = async () => {
+    throw new Error("The input went away.");
+  };
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const view = ui.page.__studioTest.view;
+  assert.equal(countInPlays(ui).length, 1, "the count-in had begun");
+  assert.equal(ui.engine.cancels, 1, "and it was cancelled with the input");
+  assert.ok(ui.engine.stops > 0, "the transport was stopped too");
+  assert.equal(view.rec, null, "no take is left armed");
+  assert.equal(view.playing, false, "and nothing is playing");
+  assert.equal(ui.store.pendings.size, 0, "no take row was made");
+  assert.equal(
+    ui.sent.filter((message) => message.command === "clip.add_audio").length,
+    0,
+    "and no clip was made for it",
+  );
+});
+
+// ---- a scene tapped during the count-in, and a Play that does nothing (R18, R19)
+
+test("R18: a scene tap during the count-in sends launchScene and no play, and the launch applies at playFrame", async () => {
+  const ui = await bootPanel({ storage: makeStorage(), clock: 0.75 });
+  await addScene(ui, "chorus", "Chorus");
+  const recorder = await pressRecord(ui);
+  assert.equal(ui.engine.plays, 1, "the count-in is what started the engine");
+  assert.deepEqual(ui.engine.launched, [SCENE], "the record scene's launch is queued for the downbeat");
+
+  // The operator taps another scene while the clicks run: it queues for the
+  // downbeat and nothing else — a play from the page would reach a counting
+  // engine.
+  ui.click("[data-scene-id=chorus] [data-act=launch-scene]");
+  await ui.settle(24);
+
+  assert.equal(ui.engine.plays, 1, "the tap asked for no play");
+  assert.deepEqual(ui.engine.launched, [SCENE, "chorus"], "the tapped scene was launched for the downbeat");
+  assert.equal(ui.page.__studioTest.view.rec.scene_id, "chorus", "the take now records into that slot");
+
+  // The engine starts on the announced frame, which is the only thing the take
+  // is armed on.
+  ui.engine.countBar(1, 96000);
+  await ui.settle(24);
+  assert.equal(recorder.armFrame, 96000, "the take armed on the frame the count-in announced");
+  assert.equal(ui.engine.plays, 1, "and the engine was started once, by the count-in");
+});
+
+test("R18: a scene tapped during the count-in sets the take's clip when it changes the armed slot before the final-beat arm", async () => {
+  const ui = await bootPanel({ storage: makeStorage(), clock: 0.75 });
+  await addScene(ui, "chorus", "Chorus");
+  const recorder = await pressRecord(ui);
+  ui.engine.countIn({ type: "count_in_start", play_frame: 96000 });
+  await ui.settle();
+
+  ui.click("[data-scene-id=chorus] [data-act=launch-scene]");
+  await ui.settle();
+  assert.equal(recorder.armFrame, null, "nothing is armed before the last click");
+
+  // The last beat's click is a beat ahead of the downbeat: the take's clip is
+  // chosen there, from the slot the tap named.
+  ui.engine.countIn({ type: "count_in", beat: 4, beats: 4, frame: 84000, play_frame: 96000 });
+  await ui.settle(24);
+
+  assert.equal(recorder.armFrame, 96000, "the take armed on the count-in's frame");
+  const added = ui.sent.filter((message) => message.command === "clip.add_audio");
+  assert.equal(added.length, 1, "the empty tapped slot got one audio clip");
+  assert.equal(added[0].args.scene_id, "chorus", "in the scene the tap named");
+});
+
+test("R19: the Play button during the count-in does nothing", async () => {
+  const ui = await bootPanel({ storage: makeStorage() });
+  const recorder = await pressRecord(ui);
+  const view = ui.page.__studioTest.view;
+  assert.equal(ui.engine.plays, 1, "the count-in asked for the transport once");
+  assert.equal(view.rec.counting, true, "and the clicks are running");
+
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  assert.equal(ui.engine.plays, 1, "Play reached no engine");
+  assert.equal(view.rec.counting, true, "the count-in is neither restarted nor cut short");
+  assert.equal(recorder.armFrame, null, "and nothing was armed by it");
+});

@@ -238,3 +238,103 @@ test("a page without matchMedia still mounts, hides the picker on a phone and te
   assert.equal(picker.hidden, true);
   assert.doesNotThrow(() => bar.destroy());
 });
+
+// ---- counting and recording on the Record and Pause buttons ----------------
+//
+// A count-in is not a take: it never takes Pause away, and it does show Record
+// pressed, because the take it counts for is about to start (R7, R8, R19).
+
+/**
+ * A page whose transport controls the bar can read, with one state its hooks
+ * report and a test can move.
+ * @param {{playing?: boolean, paused?: boolean, recording?: boolean, counting?: boolean}} [state]
+ */
+function controlPage(state = {}) {
+  const values = {
+    playing: false,
+    paused: false,
+    recording: false,
+    counting: false,
+    ...state,
+  };
+  const page = fakeNode("div");
+  page.classList = { contains: (name) => name === "studio" };
+  const controls = {};
+  for (const act of ["play", "stop", "pause", "record", "metronome"]) {
+    const node = fakeNode("button");
+    node.setAttribute("data-act", act);
+    controls[act] = node;
+    page.appendChild(node);
+  }
+  const picker = fakeNode("div");
+  picker.setAttribute("data-role", "output-bar");
+  page.appendChild(picker);
+  page.querySelector = (selector) => {
+    const act = /^\[data-act=([\w-]+)\]$/.exec(String(selector));
+    if (act) return controls[act[1]] || null;
+    if (selector === "[data-role=output-bar]") return picker;
+    return null;
+  };
+  const hooks = {
+    snapshot: () => null,
+    isPlaying: () => values.playing === true,
+    isPaused: () => values.paused === true,
+    isRecording: () => values.recording === true,
+    isCounting: () => values.counting === true,
+    position: () => null,
+    currentSceneId: () => null,
+    queuedSceneId: () => null,
+  };
+  return { page, controls, values, hooks };
+}
+
+test("the Record button reads pressed while counting and while a take runs, and idle otherwise", () => {
+  const ui = controlPage();
+  const bar = transportFor({}).mount(ui.page, ui.hooks, { sizeClass: () => "laptop" });
+  assert.equal(ui.controls.record.getAttribute("aria-pressed"), "false", "a page that records nothing reads idle");
+
+  ui.values.counting = true;
+  bar.refresh();
+  assert.equal(
+    ui.controls.record.getAttribute("aria-pressed"),
+    "true",
+    "a count-in shows Record pressed: its take is about to start",
+  );
+
+  ui.values.counting = false;
+  ui.values.recording = true;
+  bar.refresh();
+  assert.equal(ui.controls.record.getAttribute("aria-pressed"), "true", "and a take does too");
+
+  ui.values.recording = false;
+  bar.refresh();
+  assert.equal(ui.controls.record.getAttribute("aria-pressed"), "false", "a stopped page reads idle again");
+});
+
+test("Pause is left alone while a count-in runs and taken away while a take does", () => {
+  const ui = controlPage();
+  const bar = transportFor({}).mount(ui.page, ui.hooks, { sizeClass: () => "laptop" });
+  assert.equal(ui.controls.pause.disabled, false, "Pause is offered while nothing runs");
+
+  ui.values.counting = true;
+  bar.refresh();
+  assert.equal(ui.controls.pause.disabled, false, "counting is not recording, so Pause stays offered");
+
+  ui.values.counting = false;
+  ui.values.recording = true;
+  bar.refresh();
+  assert.equal(ui.controls.pause.disabled, true, "a running take is what takes Pause away");
+
+  // A second take after the first: the count-in it starts with gives Pause back.
+  ui.values.recording = false;
+  ui.values.counting = true;
+  bar.refresh();
+  assert.equal(ui.controls.pause.disabled, false, "and the next count-in gives it back");
+
+  // A page that tells the bar nothing about a count-in is read as no count-in.
+  const plain = controlPage({ recording: true });
+  delete plain.hooks.isCounting;
+  transportFor({}).mount(plain.page, plain.hooks, { sizeClass: () => "laptop" });
+  assert.equal(plain.controls.pause.disabled, true, "a take still takes Pause away");
+  assert.equal(plain.controls.record.getAttribute("aria-pressed"), "true", "and still reads pressed");
+});
