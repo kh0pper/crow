@@ -25,6 +25,8 @@ const VOCAB_FILE = join(MOVES_DIR, "anatomy", "vocab.json");
 const vocab = loadVocab(VOCAB_FILE);
 const records = [...vocab.values()];
 const vocabIds = new Set(vocab.keys());
+/** The vocabulary file's own array, read straight off disk (not through loadVocab). */
+const fileVocab = JSON.parse(readFileSync(VOCAB_FILE, "utf8")).vocab;
 
 /** Every shipped library entry, read straight off disk (not through loadLibrary). */
 const shipped = readdirSync(LIB_DIR)
@@ -56,7 +58,8 @@ const TREATMENT_CLAIM = /\b(cure|cures|treat|treats|treating|treatment|heal|heal
 // 1 -------------------------------------------------------------- the file
 test("loadVocab reads 64 records, each with an id, a name and a layer from muscle, bone and nerve", () => {
   assert.equal(vocab.size, 64, "the shipped vocabulary holds 64 records");
-  assert.equal(records.length, vocab.size, "every record has its own id");
+  assert.equal(records.length, fileVocab.length,
+    `one loaded record per record in vocab.json (the file holds ${fileVocab.length})`);
   assert.ok(records.length > 0, "the vocabulary is not empty");
 
   const problems = [];
@@ -113,6 +116,31 @@ test("loadVocab skips a record with no string id or layer and keeps the rest", (
     const [loaded, warnings] = captureWarnings(() => loadVocab(path));
     assert.deepEqual([...loaded.keys()], ["kept-one", "kept-two"]);
     assert.equal(warnings.length, 4, `one warning per skipped record, got: ${warnings.join(" | ")}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadVocab skips a duplicate id and keeps the first record", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ramble-moves-vocab-duplicate-"));
+  try {
+    const path = join(dir, "vocab.json");
+    writeFileSync(path, JSON.stringify({
+      reviewed: true,
+      vocab: [
+        { id: "first-wins", layer: "muscle", name: "First one", anatomical: "First one" },
+        { id: "first-wins", layer: "bone", name: "Second one", anatomical: "Second one" },
+        { id: "other-part", layer: "nerve", name: "Other one", anatomical: "Other one" },
+      ],
+    }));
+    const [loaded, warnings] = captureWarnings(() => loadVocab(path));
+    assert.deepEqual([...loaded.keys()], ["first-wins", "other-part"],
+      "a repeated id does not add a second record");
+    assert.equal(loaded.size, 2);
+    assert.equal(loaded.get("first-wins").name, "First one", "the first record is the one kept");
+    assert.equal(warnings.length, 1, `one warning for the duplicate, got: ${warnings.join(" | ")}`);
+    assert.ok(warnings[0].includes("duplicate"), `the warning names the duplicate: ${warnings[0]}`);
+    assert.ok(warnings[0].includes("first-wins"), `and names the id: ${warnings[0]}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

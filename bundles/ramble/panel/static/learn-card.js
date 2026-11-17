@@ -493,6 +493,9 @@
 
     var sheetNode = null;
     var sheetBody = null;
+    /* The step index the sheet body was last built for. The sheet says the same
+     * thing for the whole of one hold, so a tick inside that step leaves it be. */
+    var sheetStep = -1;
 
     /* The parts one section lists: the main part first in Muscles, then the
      * parts that work and the parts that lengthen. */
@@ -532,6 +535,7 @@
      * the record names. A layer the record says nothing about has no section. */
     function paintSheetBody() {
       if (!sheetBody) return;
+      sheetStep = clock.state().segmentIndex;
       while (sheetBody.firstChild) sheetBody.removeChild(sheetBody.firstChild);
       if (isStr(record.why)) {
         var why = build("p", "why");
@@ -642,7 +646,10 @@
     function paint() {
       paintFigure();
       paintSteps();
-      if (sheetOpen) paintSheetBody();
+      /* Rebuild the sheet's body only when the step it names has changed (or when
+       * it has just been opened), never on every clock tick: replacing its nodes
+       * under a reader's finger for nothing is what this avoids. */
+      if (sheetOpen && sheetStep !== clock.state().segmentIndex) paintSheetBody();
     }
 
     /* ---------- moving, and the beat ---------- */
@@ -699,6 +706,7 @@
         stepNodes[i8].node.removeEventListener("click", stepNodes[i8].handler);
       }
       sheetOpen = false;
+      sheetStep = -1;
       sheetNode = null;
       sheetBody = null;
       nodes.length = 0;

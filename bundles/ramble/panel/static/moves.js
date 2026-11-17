@@ -1094,16 +1094,32 @@
     }
   }
 
+  /* The pose the plain figure can stand in for the card with: an entry's own
+   * pose, or the first key position of an exercise, which has no single pose of
+   * its own. */
+  function fallbackPoseOf(entry) {
+    if (!entry) return null;
+    if (entry.pose && typeof entry.pose === "object") return entry.pose;
+    if (Array.isArray(entry.poses) && entry.poses.length > 0) {
+      var first = entry.poses[0];
+      if (first && typeof first === "object") return first;
+    }
+    return null;
+  }
+
   /* The card replaces the plain figure for an entry it can draw. No card script,
-   * no vocabulary or a mount that refuses all leave the figure the page already
-   * had. */
+   * no vocabulary or a mount that refuses all leave the plain figure behind. */
   function mountLearnCard(host, entry) {
     var Card = window.RambleLearnCard;
-    if (!Card || typeof Card.mount !== "function") { figureInto(host, entry.pose); return; }
+    var fallbackPose = fallbackPoseOf(entry);
+    /* The last entry's figure goes before the fetch starts, so this entry never
+     * shows under the figure of the one before it while the vocabulary loads. */
+    if (host) host.textContent = "";
+    if (!Card || typeof Card.mount !== "function") { figureInto(host, fallbackPose); return; }
     var token = learnCardToken;
     loadAnatomyVocab().then(function (vocab) {
       if (token !== learnCardToken) return;
-      if (!vocab) { figureInto(host, entry.pose); return; }
+      if (!vocab) { figureInto(host, fallbackPose); return; }
       var handle = null;
       try {
         handle = Card.mount(host, {
@@ -1117,7 +1133,7 @@
       } catch (e) {
         handle = null;
       }
-      if (!handle) { figureInto(host, entry.pose); return; }
+      if (!handle) { figureInto(host, fallbackPose); return; }
       learnCardHandle = handle;
     });
   }

@@ -115,13 +115,17 @@ function fakeClock() {
   return {
     time: 0,
     intervals: [],
+    /* The ids still running, so a test can say an interval was really stopped. */
+    active: new Map(),
     cleared: [],
     now() { return this.time; },
     setInterval(fn, ms) {
       this.intervals.push({ fn, ms });
-      return this.intervals.length;
+      const id = this.intervals.length;
+      this.active.set(id, fn);
+      return id;
     },
-    clearInterval(id) { this.cleared.push(id); },
+    clearInterval(id) { this.cleared.push(id); this.active.delete(id); },
   };
 }
 
@@ -183,6 +187,20 @@ function advance(clock, seconds) {
   assert.ok(latest, "the card must have started its interval");
   latest.fn();
 }
+
+/* Whether a node is still inside the host, following parentNode upwards. */
+function attachedTo(node, host) {
+  let at = node;
+  while (at) {
+    if (at === host) return true;
+    at = at.parentNode;
+  }
+  return false;
+}
+
+/* How long learn-card.js tweens from one step's pose into the next, read out of
+ * the script itself so the test names the same span the card uses. */
+const TWEEN_SECONDS = Number((CARD_SRC.match(/var TWEEN_SECONDS = ([0-9.]+);/) || [])[1]);
 
 function plain(value) {
   return JSON.parse(JSON.stringify(value));
@@ -293,6 +311,43 @@ test("steps: tapping a step moves the figure, the highlight and the lit anatomy 
       "the colour band follows the record, on step " + index);
     assert.equal(steps[index].getAttribute("aria-current"), "true");
   }
+});
+
+/* ---------- motion ---------- */
+
+test("motion: the figure tweens into a step and holds that step's pose once the tween is over", () => {
+  assert.ok(Number.isFinite(TWEEN_SECONDS) && TWEEN_SECONDS > 0, "the card's tween span is readable");
+  const booted = boot();
+  const Figure = booted.sandbox.RambleFigure;
+  const realSvg = Figure.poseSvg;
+  /* The decoration the card draws with, kept so the comparison uses it too. */
+  const optsSeen = [];
+  Figure.poseSvg = (pose, opts) => { optsSeen.push(opts); return realSvg(pose, opts); };
+
+  mountCard(booted, SQUAT, { reducedMotion: false });
+
+  /* Step 2 of the squat (index 1) is the one that moves from the standing key
+   * position to the squat; step 1 (index 0) holds the standing pose it came from. */
+  const steps = allByRole(booted.host, "step");
+  steps[1].click();
+  const fromPose = fromPoseOf(SQUAT, 1);
+  const toPose = toPoseOf(SQUAT, 1);
+  const markupFor = (pose, opts) => realSvg(Figure.clampPose(pose), opts);
+
+  advance(booted.clock, TWEEN_SECONDS / 3);
+  const midOpts = optsSeen[optsSeen.length - 1];
+  const midway = figureMarkup(booted);
+  assert.notEqual(midway, markupFor(fromPose, midOpts), "partway in the figure is not the pose it came from");
+  assert.notEqual(midway, markupFor(toPose, midOpts), "nor the pose it is heading for");
+  assert.equal(midway, realSvg(Figure.tween(fromPose, toPose, 1 / 3), midOpts),
+    "it is the tween in between the two");
+
+  /* Past the tween span, on the same step, it holds that step's own pose. */
+  advance(booted.clock, TWEEN_SECONDS);
+  assert.equal(steps[1].getAttribute("aria-current"), "true",
+    "the tween finished inside the same step");
+  const endOpts = optsSeen[optsSeen.length - 1];
+  assert.equal(figureMarkup(booted), markupFor(toPose, endOpts), "the step's own pose is held");
 });
 
 test("steps: the clock running past a step moves on, and the last step loops to the first", () => {
@@ -417,6 +472,29 @@ test("sheet: the Back label comes from the page's copy when it carries one", () 
   assert.equal(byRole(booted.host, "sheet-close").textContent, "Volver");
 });
 
+test("sheet: a tick inside the same step leaves the open sheet's nodes where they are", () => {
+  const booted = boot();
+  mountCard(booted, SQUAT);
+  byRole(booted.host, "anatomy").click();
+
+  const why = byRole(booted.host, "why");
+  assert.ok(why, "the sheet has its own line");
+  const body = why.parentNode;
+  assert.ok(attachedTo(why, booted.host), "and it is on the sheet on the host");
+
+  advance(booted.clock, 2);
+  assert.equal(allByRole(booted.host, "step")[0].getAttribute("aria-current"), "true", "still the same step");
+  assert.equal(why.parentNode, body, "the sheet's body was not rebuilt for a tick");
+  assert.ok(attachedTo(why, booted.host), "the same node is still on the sheet");
+  assert.equal(byRole(booted.host, "why"), why);
+
+  /* On a step change it is rebuilt, as it must be. */
+  advance(booted.clock, 4);
+  assert.equal(allByRole(booted.host, "step")[1].getAttribute("aria-current"), "true");
+  assert.notEqual(byRole(booted.host, "why"), why, "a new step's sheet is a new body");
+  assert.equal(attachedTo(why, booted.host), false, "and the old line is gone with the old one");
+});
+
 /* ---------- nothing to draw ---------- */
 
 test("mount: an entry of another kind, or one with no anatomy, draws nothing", () => {
@@ -435,10 +513,36 @@ test("mount: an entry of another kind, or one with no anatomy, draws nothing", (
   assert.equal(booted.host.children.length, 0);
 });
 
+/* ---------- nothing left behind ---------- */
+
+test("destroy: the beat is off the clock and the host is empty", () => {
+  const booted = boot();
+  const card = mountCard(booted, MOUNTAIN);
+  assert.equal(booted.clock.active.size, 1, "the card runs one beat while it is up");
+
+  card.destroy();
+
+  assert.equal(booted.clock.active.size, 0, "no interval is left running");
+  assert.deepEqual(booted.clock.cleared, [1], "the one interval the card started is cleared");
+  assert.equal(booted.host.children.length, 0, "nothing is left on the host");
+  assert.equal(byRole(booted.host, "figure"), null);
+  assert.equal(allByRole(booted.host, "step").length, 0);
+
+  /* A tick that arrives late, after destroy, still changes nothing. */
+  advance(booted.clock, 5);
+  assert.equal(booted.host.children.length, 0);
+});
+
 /* ---------- the words the card can say ---------- */
 
 test("copy: no vocabulary name and no why line promises a cure or a treatment", () => {
-  const banned = /\b(cure|cures|treat|treats|treatment|heal|heals|fix your)\b/i;
+  const banned = /\b(cure|cures|treat|treats|treating|treatment|heal|heals|healing|fix your)\b/i;
+  /* The guard itself: it has to catch the wording it exists for. */
+  assert.equal(banned.test("This movement cures back pain."), true);
+  assert.equal(banned.test("It treats the knee."), true);
+  assert.equal(banned.test("A gentle way of treating the knee."), true);
+  assert.equal(banned.test("A week of healing."), true);
+  assert.equal(banned.test("A gentle way to fix your posture."), true);
   for (const record of VOCAB) {
     assert.equal(banned.test(record.name), false, "vocabulary name: " + record.id);
     assert.equal(banned.test(record.anatomical), false, "anatomical name: " + record.id);
