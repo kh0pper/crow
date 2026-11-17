@@ -152,6 +152,20 @@ export const MAIL_DDL = `
   );
 `;
 
+// The columns plan 3's A3 adds to mail_accounts, as ADD COLUMN specs rather than part of MAIL_DDL:
+// 0027's approved DDL stays exactly as it is, and both rails add these afterwards — init-db.js loops
+// this list right after its "mail tables" block, scripts/migrations/0029-mail-account-send-columns.mjs
+// runs the same list through the same guard. display_name is the name that goes on From (NULL until
+// the operator names the account), aliases_json the account's other addresses (a JSON array, used by
+// reply-all) and sent_copy how the Sent copy is kept ('provider' | 'append'). sent_copy's value is
+// validated in the account store, never by a CHECK. mail_accounts is LOCAL ONLY, so there is no sync
+// column list to change.
+export const MAIL_ACCOUNT_SEND_COLUMNS = Object.freeze([
+  { table: "mail_accounts", column: "display_name", definition: "TEXT" },
+  { table: "mail_accounts", column: "aliases_json", definition: "TEXT NOT NULL DEFAULT '[]'" },
+  { table: "mail_accounts", column: "sent_copy", definition: "TEXT NOT NULL DEFAULT 'provider'" },
+]);
+
 export const MAIL_TABLES = Object.freeze([
   "mail_accounts",
   "mail_folders",

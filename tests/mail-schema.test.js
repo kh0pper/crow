@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import * as mod from "../scripts/migrations/0027-mail-store.mjs";
+import * as accountColumns from "../scripts/migrations/0029-mail-account-send-columns.mjs";
 import { discoverMigrations } from "../scripts/migrations/runner.mjs";
 import { MAIL_DDL, MAIL_TABLES } from "../servers/shared/mail-schema.js";
 
@@ -120,6 +121,9 @@ test("the shape matches what init-db produces", () => {
 
   const dbPath = freshDb("mail-fresh-");
   assert.equal(run({ dbPath, log: () => {} }).applied, true);
+  // init-db now builds more than MAIL_DDL: it also adds the account send columns, so the migration
+  // side applies that migration too before the two shapes are compared.
+  assert.equal(accountColumns.run({ dbPath, log: () => {} }).applied, true);
   const got = mailObjects(dbPath);
 
   const names = want.map((o) => o.name);
@@ -146,7 +150,7 @@ test("MAIL_TABLES names the tables, never the fts5 shadow tables", () => {
 
 test("init-db runs the same DDL through initTable", () => {
   const init = readFileSync(new URL("../scripts/init-db.js", import.meta.url), "utf8");
-  assert.match(init, /import \{ MAIL_DDL \} from "\.\.\/servers\/shared\/mail-schema\.js";/);
+  assert.match(init, /import \{[^}]*\bMAIL_DDL\b[^}]*\} from "\.\.\/servers\/shared\/mail-schema\.js";/);
   assert.ok(init.includes('await initTable("mail tables", MAIL_DDL);'));
 });
 
