@@ -321,13 +321,17 @@ test("buildLayeredSvg: only skin and side-view bones and muscles are drawn", () 
   const ids = [...svg.matchAll(/<path id="([^"]+)"/g)].map((match) => match[1]);
   const vocabIds = new Set(vocab.map((record) => record.id));
   for (const id of ids) {
-    assert.ok(id === "skin" || vocabIds.has(id), "every path is the skin or a vocabulary id, got " + id);
+    assert.ok(id === "skin-outline" || vocabIds.has(id), "a path id is skin-outline or a vocabulary id, got " + id);
   }
-  assert.ok(ids.includes("skin") && ids.includes("femur") && ids.includes("quadriceps"));
+  assert.ok(ids.includes("skin-outline") && ids.includes("femur") && ids.includes("quadriceps"));
+  assert.ok(!ids.includes("skin"), "the skin path is not named after its group");
   assert.ok(!ids.includes("rhomboids"), "sideView false is not drawn from the side");
   assert.ok(!ids.includes("not-a-part"), "an id the vocabulary does not know is skipped");
   assert.deepEqual(report.ids.map((entry) => entry.id), ids, "the report lists the paths in drawing order");
   assert.equal(new Set(ids).size, ids.length, "one path per id");
+  const everyId = [...svg.matchAll(/ id="([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(new Set(everyId).size, everyId.length, "no id appears twice in the document: " + everyId.join(", "));
+  assert.ok(everyId.includes("skin"), "the layer group keeps its own id");
 });
 
 test("buildLayeredSvg: the layer groups come in skin, skeleton, muscles, nerves order", () => {
@@ -369,7 +373,8 @@ test("buildLayeredSvg: muscle fill follows the vocabulary's area, bone and skin 
   assert.ok(pathFor("hamstrings").includes('fill="#d9822b"'));
   assert.ok(pathFor("abdominals").includes('fill="#b5446e"'), "a core muscle has its own red");
   assert.ok(!pathFor("femur").includes("fill="), "the bone takes its fill from the group");
-  assert.ok(!pathFor("skin").includes("fill="), "and so does the skin");
+  assert.ok(!pathFor("skin-outline").includes("fill="), "and so does the skin");
+  assert.ok(!/<path id="skin"/.test(svg), "no path is id'd after its layer");
   assert.match(svg, /<g id="skeleton" fill="#f3efe6"/);
   assert.match(svg, /<g id="muscles" fill-opacity="0\.62"/);
   assert.ok(!/<script/i.test(svg), "no scripts");

@@ -7,6 +7,11 @@
  * skin, skeleton, muscles, nerves — with one path per part, sorted far to near
  * so the near side of the body covers the far side.
  *
+ * Ids: a layer group carries the layer's name, so the skin layer's group is
+ * <g id="skin">. Every path under it carries either SKIN_PATH_ID (the whole-body
+ * skin mesh) or a vocabulary id, never a bare layer name — that way no id
+ * appears twice in one document.
+ *
  * The credit wording is never written here: the caller passes a string and it
  * lands in <metadata>, XML-escaped, or there is no <metadata> element at all.
  */
@@ -29,6 +34,8 @@ const MUSCLE_FILL = { upper: "#c8423b", lower: "#d9822b", core: "#b5446e" };
 const MUSCLE_FALLBACK_FILL = "#c8423b";
 const BUDGET_BYTES = 25600;
 const DECIMALS = 2;
+/* The skin group is <g id="skin">, so its one path needs an id of its own. */
+const SKIN_PATH_ID = "skin-outline";
 
 const isRecord = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const isNumber = (v) => typeof v === "number" && Number.isFinite(v);
@@ -47,6 +54,11 @@ function escapeXml(text) {
 function num(value) {
   const rounded = Number(value.toFixed(DECIMALS));
   return rounded === 0 ? "0" : String(rounded);
+}
+
+/** The path id for a mesh id: the skin gets SKIN_PATH_ID, everything else its own id. */
+function pathIdOf(meshId) {
+  return meshId === "skin" ? SKIN_PATH_ID : meshId;
 }
 
 /** Which layer a mesh id belongs to, or null when it is not drawn from the side. */
@@ -162,11 +174,12 @@ export function buildLayeredSvg({
     for (const loop of loops) for (const point of loop) frame = extend(frame, point);
     const d = pathData(loops);
     const fill = item.layer === "muscles" ? (MUSCLE_FILL[item.area] || MUSCLE_FALLBACK_FILL) : null;
+    const pathId = pathIdOf(item.id);
     const markup = fill
-      ? '<path id="' + escapeXml(item.id) + '" fill="' + fill + '" d="' + d + '"/>'
-      : '<path id="' + escapeXml(item.id) + '" d="' + d + '"/>';
+      ? '<path id="' + escapeXml(pathId) + '" fill="' + fill + '" d="' + d + '"/>'
+      : '<path id="' + escapeXml(pathId) + '" d="' + d + '"/>';
     paths[item.layer].push({
-      id: item.id,
+      id: pathId,
       depth: item.depth,
       markup,
       loops: loops.length,
