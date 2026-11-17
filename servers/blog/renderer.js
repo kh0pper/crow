@@ -74,6 +74,18 @@ marked.setOptions({ gfm: true, breaks: true });
  *     whole document linearly first (same fence rules, at most three spaces of
  *     indent, marked's own def tokenizer for label/href/title, the first 256
  *     labels — marked's first-wins) and every chunk is handed that map.
+ *   - CROSS-CHUNK NESTING: a cut usually lands on a blank line, i.e. with every
+ *     container closed, but a document with no block boundary in the window (one
+ *     256 KB line of `> ` markers, a list running past the cap) is cut
+ *     MID-BLOCK. The next chunk then reopens the containers the cut fell inside
+ *     — so those levels are still on the page, and a fresh depth counter per
+ *     chunk would let a 256 KB marker run show 2 x MD_MAX_NEST nested
+ *     blockquotes where one parse shows MD_MAX_NEST. The chunk loop therefore
+ *     carries the number of container levels the cut left OPEN (openContainerDepth,
+ *     `depthState` in boundedLexer) into the next chunk's lexer, which starts its
+ *     depth counter at that value: one document, one MD_MAX_NEST bound, however
+ *     many chunks it takes. A cut on a blank line leaves 0 open, which is every
+ *     chunk of a real document — those render exactly as they did before.
  *   - the TOTAL-TIME BUDGET: a document whose chunks are EACH pathological is
  *     still bounded, because the render stops once it has spent
  *     OWNER_MD_RENDER_BUDGET_MS (1500 ms) of CPU and every remaining chunk
@@ -139,13 +151,18 @@ function renderOwnerLongDocument(src, storageOrigin) {
   let html = "";
   /** Where the markdown-rendered part ends — where a tail would begin. */
   let rendered = 0;
+  /** The container levels the PREVIOUS chunk's cut left open, so the next chunk
+   *  continues at that depth instead of starting a fresh MD_MAX_NEST budget
+   *  (see "CROSS-CHUNK NESTING" above and depthState in boundedLexer). A cut on
+   *  a blank line — every chunk of a real document — leaves 0. */
+  const depthState = { open: 0 };
   for (const [start, end] of ownerMarkdownChunks(src)) {
     // Over the budget: this chunk and every one after it become the plain-text
     // tail below. Checked BEFORE the chunk starts (so a pathological chunk
     // cannot commit another 128 KB of work) and only after the first chunk (so a
     // long document always shows at least one formatted chunk).
     if (rendered > 0 && elapsedCpuMs(started) > OWNER_MD_RENDER_BUDGET_MS) break;
-    html += sanitizeRendered(renderOwnerHead(src.slice(start, end), seedLinks), context);
+    html += sanitizeRendered(renderOwnerHead(src.slice(start, end), seedLinks, depthState), context);
     rendered = end;
   }
   // The remainder: the chunks the budget stopped before, and anything past
@@ -169,9 +186,13 @@ function elapsedCpuMs(start) {
  * @param {object|null} [seedLinks] the whole document's link definitions, for a
  *   chunk of a longer document (see collectLinkDefinitions); omitted for the
  *   single-chunk path, which must stay byte-identical to what it always rendered
+ * @param {{open: number}|null} [depthState] the container levels the previous
+ *   chunk's cut left open, and where this chunk's own residual depth is written
+ *   back (see "CROSS-CHUNK NESTING" and depthState in boundedLexer); omitted for
+ *   the single-chunk path, which starts at depth 0 and stays byte-identical
  * @returns {string} unsanitized HTML
  */
-function renderOwnerHead(src, seedLinks = null) {
+function renderOwnerHead(src, seedLinks = null, depthState = null) {
   try {
     // The same guarded pipeline as the bot path — marked's own two lexing
     // phases with the inline guard between them, plus the depth-bounded block
@@ -180,7 +201,7 @@ function renderOwnerHead(src, seedLinks = null) {
     // is no math extension. ownerMarked carries no hooks, extensions or
     // walkTokens; if one is ever added to it, guardAndParse has to be told
     // (parse's opt.hooks branch is the code that would otherwise run it).
-    return guardAndParse(src, ownerMarked, seedLinks);
+    return guardAndParse(src, ownerMarked, seedLinks, depthState);
   } catch {
     // Fail safe, never a 500 and never an empty page: the document as escaped
     // text (see escapedTextHtml — it drops what the author hid, an HTML
@@ -1875,12 +1896,22 @@ const RELEX_TOKENIZERS = ["blockquote", "list"];
  * @param {object} options a Marked instance's defaults
  * @param {number} inputLength the document's length, which sizes the re-lex
  *   path's byte budget (see above)
+ * @param {{open: number}|null} [depthState] the container levels ALREADY open
+ *   around this content, for a chunk of a longer document whose cut fell
+ *   mid-block (see "CROSS-CHUNK NESTING" at the top of the file): the depth
+ *   counter starts there and the chunks of one document therefore share ONE
+ *   MD_MAX_NEST bound — a 256 KB run of `> ` cannot show 2 x MD_MAX_NEST nested
+ *   blockquotes just because it was parsed in two pieces. Omitted (null) for
+ *   every single-document parse, which starts at 0 as it always did. The
+ *   residual depth at the END of this content is computed by the caller from the
+ *   tokens (openContainerDepth), not here.
  * @returns {Lexer}
  */
-function boundedLexer(options, inputLength = 0) {
+function boundedLexer(options, inputLength = 0, depthState = null) {
   const lexer = new Lexer({ ...options });
-  /** Container levels open right now (blockquotes + list levels). */
-  let depth = 0;
+  /** Container levels open right now (blockquotes + list levels) — including the
+   *  ones this chunk inherited from the previous one (see depthState). */
+  let depth = depthState && depthState.open > 0 ? depthState.open : 0;
   /** `blockTokens` frames on the stack — used to tell the two kinds of
    *  tokenizer call apart (see the wrapper below). */
   let lexFrames = 0;
@@ -2530,6 +2561,49 @@ function plainTextTokens(src) {
   return tokens;
 }
 
+/**
+ * How many container levels (blockquotes and lists) are still OPEN at the end of
+ * a block-token list — i.e. how deep the document was when it ran out.
+ *
+ * This is the state the chunk loop carries between chunks (see "CROSS-CHUNK
+ * NESTING" at the top of the file). marked closes every container implicitly at
+ * the end of the source it was given, so a chunk cut inside 16 open blockquotes
+ * ends with a 16-long chain of `blockquote` tokens whose innermost child holds
+ * the last text; the next chunk reopens that chain on the page, so its lexer has
+ * to start counting from 16 or the two halves get 16 levels each.
+ *
+ * Only the LAST token can still be open (any earlier sibling was closed by the
+ * next one), so this walks down the last-child chain: a `blockquote` continues
+ * through its `tokens`, a `list` through its last item's `tokens` (its items are
+ * lexed as blocks, so a nested list is a list token inside an item's tokens).
+ * Counting one level per container TOKEN is exactly what boundedLexer's counter
+ * charges — one container token = one level. A trailing `space` token (a blank
+ * line), a paragraph, a fence or a table ends 0 levels open, which is why a cut
+ * on a blank line — every cut of a real document — carries nothing over.
+ * @param {object[]} tokens
+ * @returns {number}
+ */
+function openContainerDepth(tokens) {
+  let levels = 0;
+  let children = tokens;
+  for (;;) {
+    const last = Array.isArray(children) && children.length
+      ? children[children.length - 1]
+      : null;
+    if (last && last.type === "blockquote" && Array.isArray(last.tokens)) {
+      levels++;
+      children = last.tokens;
+      continue;
+    }
+    if (last && last.type === "list" && Array.isArray(last.items) && last.items.length) {
+      levels++;
+      children = last.items[last.items.length - 1].tokens;
+      continue;
+    }
+    return levels;
+  }
+}
+
 /** marked's two lexing phases, with the per-block guard in between: block
  *  tokens (cheap, linear), then the guard, then inline lexing of whatever was
  *  left formatted. Guarded blocks are filled with escaped text tokens and
@@ -2562,8 +2636,14 @@ function plainTextTokens(src) {
  *  marked resolves references against the lexer's own map and a definition in
  *  another chunk would otherwise be invisible. Omitted on every single-document
  *  path, where it would change nothing.
+ *
+ *  `depthState`, also only for a chunk, is the container depth the chunk loop
+ *  carries across cuts (see "CROSS-CHUNK NESTING" above): it goes IN as the
+ *  levels the previous cut left open and comes back out as the levels THIS
+ *  chunk's cut leaves open (openContainerDepth), so a document parsed in pieces
+ *  is bounded by the same MD_MAX_NEST as one parsed whole.
  */
-function guardAndParse(src, instance, seedLinks = null) {
+function guardAndParse(src, instance, seedLinks = null, depthState = null) {
   // marked's Lexer#lex normalises line endings before block lexing; calling
   // blockTokens directly skips that, so a CRLF reply (a tool result pasted
   // from Windows) kept a `\r` on every line and flattened into one escaped
@@ -2574,8 +2654,17 @@ function guardAndParse(src, instance, seedLinks = null) {
   // the stack. The guard is a depth counter (plus, on the tokenizer's re-lex
   // path, a byte budget) inside the lexer, so `src` itself is never rewritten:
   // code, fences, HTML and math keep every character.
-  const lexer = boundedLexer(instance.defaults, src.length);
+  const lexer = boundedLexer(instance.defaults, src.length, depthState);
+  // A chunk of a longer document: the depth it INHERITED is cleared before block
+  // lexing and the residual it leaves OPEN is written back after, so the next
+  // chunk's lexer continues at that depth instead of starting a fresh MD_MAX_NEST
+  // budget (see depthState in boundedLexer). Clearing first is what makes a parse
+  // that THROWS (renderOwnerHead then answers escaped text — nothing is opened)
+  // carry 0 forward instead of the previous chunk's depth. The block tokens are
+  // exactly what says whether the content ends inside a container.
+  if (depthState) depthState.open = 0;
   lexer.blockTokens(src, lexer.tokens);
+  if (depthState) depthState.open = openContainerDepth(lexer.tokens);
   // Cap the link definitions BEFORE any inline lexing: inlineTokens scans
   // `Object.keys(this.tokens.links)` on every inline block, so a flood of
   // definitions is paid once per paragraph. Insertion order is kept (numeric
