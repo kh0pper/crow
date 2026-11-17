@@ -80,6 +80,19 @@ def test_sim_post_only_and_funds():
     assert ex.balances()["USDC"] == D("1000") - D("10") * D("0.9") * (1 + FEE)
 
 
+def test_duplicate_cid_after_market_moved_returns_same_order():
+    ex, m, _ = sim()
+    placed = ex.place_limit("grid-B-1-dup", XRP, "BUY", D("10"), D("0.9"))
+    assert placed["ok"]
+
+    # The market moves above the resting price before the resend.
+    m.bid, m.ask = D("0.80"), D("0.85")
+
+    resend = ex.place_limit("grid-B-1-dup", XRP, "BUY", D("10"), D("0.9"))
+    assert resend["ok"] is True
+    assert resend["order_id"] == placed["order_id"]
+
+
 def test_sim_fills_only_when_later_candle_trades_through():
     ex, m, db = sim()
     oid = ex.place_limit("grid-B-1-c", XRP, "BUY", D("10"), D("0.9"))["order_id"]
@@ -201,6 +214,69 @@ def test_deposit_visible_across_connections_default_isolation(tmp_path):
     first.deposit("USDC", D("125.5"), "seed")
 
     assert second.totals()["USDC"] == D("125.5")
+
+
+def test_tx_inside_callers_transaction_is_rolled_back_with_it():
+    db = new_db()
+    markets = {XRP: Mkt()}
+    ex = DryRunExchange(lambda: db, lambda p: markets[p], FEE)
+    db.execute("CREATE TABLE marker(x)")
+
+    db.execute("BEGIN")
+    db.execute("INSERT INTO marker(x) VALUES('outer')")
+    ex.deposit("USDC", D("10"), "t")
+    db.execute("ROLLBACK")
+
+    assert db.execute("SELECT * FROM marker").fetchall() == []
+    assert ex.totals().get("USDC", D(0)) == D(0)
+    assert db.execute("SELECT * FROM sim_deposits").fetchall() == []
+
+
+def test_failing_deposit_inside_callers_transaction_leaves_it_usable(monkeypatch):
+    db = new_db()
+    markets = {XRP: Mkt()}
+    ex = DryRunExchange(lambda: db, lambda p: markets[p], FEE)
+    db.execute("CREATE TABLE marker(x)")
+
+    db.execute("BEGIN")
+    db.execute("INSERT INTO marker(x) VALUES('first')")
+    with pytest.raises(ValueError):
+        ex.deposit("USDC", D("-1"), "bad")
+    db.execute("INSERT INTO marker(x) VALUES('second')")
+    db.execute("COMMIT")
+
+    assert [r[0] for r in db.execute("SELECT x FROM marker ORDER BY rowid")] == [
+        "first",
+        "second",
+    ]
+
+    # A raise from inside the transaction body must leave the caller's rows alone.
+    db2 = new_db()
+    ex2 = DryRunExchange(lambda: db2, lambda p: markets[p], FEE)
+    db2.execute("CREATE TABLE marker(x)")
+
+    def failing_add(dbc, cur, delta):
+        dbc.execute(
+            "INSERT INTO sim_balances(currency,amount) VALUES(?,?)", (cur, "999")
+        )
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ex2, "_add", failing_add)
+    db2.execute("BEGIN")
+    db2.execute("INSERT INTO marker(x) VALUES('first')")
+    with pytest.raises(RuntimeError):
+        ex2.deposit("USDC", D("10"), "bad")
+
+    assert db2.execute("SELECT * FROM sim_deposits").fetchall() == []
+    assert ex2.totals().get("USDC", D(0)) == D(0)
+    assert [r[0] for r in db2.execute("SELECT x FROM marker")] == ["first"]
+
+    db2.execute("INSERT INTO marker(x) VALUES('second')")
+    db2.execute("COMMIT")
+    assert [r[0] for r in db2.execute("SELECT x FROM marker ORDER BY rowid")] == [
+        "first",
+        "second",
+    ]
 
 
 def test_cancel_between_advance_read_and_write_is_not_filled(tmp_path):
@@ -371,10 +447,65 @@ def _sdk_calls(node):
     return out
 
 
+def sdk_guard_violations(src: str) -> list[str]:
+    """Ways *src* reaches around the "only these SDK client calls" rule."""
+    tree = ast.parse(src)
+    parent = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    def _is_rest_client_call(call):
+        if not isinstance(call, ast.Call):
+            return False
+        fn = call.func
+        return (isinstance(fn, ast.Name) and fn.id == "RESTClient") or (
+            isinstance(fn, ast.Attribute) and fn.attr == "RESTClient"
+        )
+
+    def _assigned_to_client(call):
+        """True when *call* sits in the value expression of `self.client = ...`."""
+        child = call
+        node = parent.get(child)
+        while node is not None:
+            if isinstance(node, ast.Assign):
+                if len(node.targets) != 1 or not _self_sdk_ref(node.targets[0]):
+                    return False
+                return child is node.value
+            child = node
+            node = parent.get(node)
+        return False
+
+    violations = []
+    for node in ast.walk(tree):
+        if _self_sdk_ref(node) and isinstance(node.ctx, ast.Load):
+            holder = parent.get(node)
+            call = parent.get(holder) if holder is not None else None
+            if not (
+                isinstance(holder, ast.Attribute)
+                and holder.value is node
+                and isinstance(call, ast.Call)
+                and call.func is holder
+                and holder.attr in ALLOWED_SDK_METHODS
+            ):
+                violations.append(
+                    f"line {node.lineno}: self.{node.attr} used outside an "
+                    "allowlisted call"
+                )
+        if _is_rest_client_call(node) and not _assigned_to_client(node):
+            violations.append(
+                f"line {node.lineno}: RESTClient() not assigned to "
+                "self.client/self.pub"
+            )
+    return violations
+
+
 def test_exchange_sdk_calls_only_post_only_limit_and_cancel():
     src = pathlib.Path(exchange_mod.__file__).read_text()
     tree = ast.parse(src)
     calls = _sdk_calls(tree)
+
+    assert sdk_guard_violations(src) == []
 
     # non-vacuous: the two write paths are actually used
     assert "limit_order_gtc" in calls
@@ -387,20 +518,31 @@ def test_exchange_sdk_calls_only_post_only_limit_and_cancel():
         node = kw["post_only"]
         assert isinstance(node, ast.Constant) and node.value is True
 
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "getattr"
-        ):
-            assert node.args, "getattr() without arguments"
-            first = node.args[0]
-            assert not (isinstance(first, ast.Name) and first.id == "self")
-            if len(node.args) > 1:
-                name = node.args[1]
-                assert not (isinstance(name, ast.Constant) and name.value in SDK_CLIENTS)
-        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
-            assert not _self_sdk_ref(node.value), "SDK client aliased to another name"
+
+def test_sdk_guard_flags_bypasses():
+    assert sdk_guard_violations(
+        'class X:\n    def f(self):\n        return getattr(self.client, "market_order_buy")\n'
+    )
+    assert sdk_guard_violations(
+        "class X:\n"
+        "    def f(self):\n"
+        "        c = self.client\n"
+        "        return c.market_order_buy()\n"
+    )
+    assert sdk_guard_violations(
+        "from coinbase.rest import RESTClient\n"
+        "def f():\n"
+        '    return RESTClient().market_order(product_id="A-B")\n'
+    )
+    assert (
+        sdk_guard_violations(
+            "class X:\n"
+            "    def f(self):\n"
+            "        self.client = RESTClient()\n"
+            "        return self.client.cancel_orders(order_ids=[])\n"
+        )
+        == []
+    )
 
 
 def test_with_retry_retries_transient_only():

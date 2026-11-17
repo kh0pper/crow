@@ -445,11 +445,21 @@ class DryRunExchange:
         """One immediate write transaction, committed on success, rolled back on error.
 
         Works whether the connection runs in autocommit (`isolation_level=None`) or
-        under the default implicit-transaction handling.
+        under the default implicit-transaction handling.  When the caller already
+        has a transaction open, a savepoint is used instead: the work joins the
+        caller's transaction and their commit/rollback decides its fate.
         """
         db = self._db()
         if db.in_transaction:
-            db.commit()
+            db.execute("SAVEPOINT sim")
+            try:
+                yield db
+            except BaseException:
+                db.execute("ROLLBACK TO sim")
+                db.execute("RELEASE sim")
+                raise
+            db.execute("RELEASE sim")
+            return
         db.execute("BEGIN IMMEDIATE")
         try:
             yield db
@@ -603,6 +613,11 @@ class DryRunExchange:
     def place_limit(
         self, cid: str, product: str, side: str, size: Decimal, price: Decimal
     ) -> dict:
+        # A resend of an already-placed cid returns that order, even if the market
+        # has since moved past the price (the re-check inside _tx covers races).
+        existing = self._find_cid(self._db(), cid)
+        if existing:
+            return {"ok": True, "order_id": existing["order_id"], "reason": None}
         base, quote = product.split("-", 1)
         bid, ask = self.market_for(product).best_bid_ask()
         if (side == BUY and price >= ask) or (side == SELL and price <= bid):
