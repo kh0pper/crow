@@ -757,3 +757,198 @@ test("an old proposal whose message cannot work is not accepted", (t) => {
   assert.match(refused.message, /program change has no release/);
   assert.equal(snapshot(s.doc).midi_maps.old.proposed, true);
 });
+
+// ---- the pad performance bar: HOLD, ROLL and Pause --------------------------
+
+/**
+ * The router's own text with one kind's name swapped, evaluated the way the page
+ * runs it: the allow-list as it stood before that kind existed.
+ * @param {string} script - the routing script the page inlines
+ * @param {string} from
+ * @param {string} to
+ * @returns {object} that older routing rule
+ */
+function olderRouteApi(script, from, to) {
+  const older = script.split(from).join(to);
+  assert.notEqual(older, script, "the copy of the script really changed");
+  return new Function("window", `${older}\nreturn window.StudioMidiRoute;`)({});
+}
+
+test("HOLD, ROLL and Pause are live actions a control can drive", (t) => {
+  const s = studio(t);
+  const hold = { kind: "pad.hold" };
+  const roll = { kind: "pad.roll" };
+  const pause = { kind: "pad.pause_all" };
+
+  // HOLD and ROLL are pressed and let go, so they take a note or a CC, as a held
+  // effect does. Pause is a toggle, so a program change is enough for it.
+  s.run("midi.map", { id: "hold-note", device_name: "Pad kit", message: message("note", 10, 36), action: hold }, HUMAN);
+  s.run("midi.map", { id: "roll-cc", device_name: "Pad kit", message: message("cc", 10, 20), action: roll }, HUMAN);
+  s.run("midi.map", { id: "pause-pc", device_name: "FCB1010", message: message("pc", 1, 3), action: pause }, HUMAN);
+
+  const maps = snapshot(s.doc).midi_maps;
+  for (const [id, action] of [["hold-note", hold], ["roll-cc", roll], ["pause-pc", pause]]) {
+    assert.deepEqual(maps[id].action, action, `${id} is stored as its kind and nothing else`);
+    assert.equal(maps[id].proposed, false, `${id} is the operator's, so live`);
+    assert.deepEqual(maps[id].accepted_action, action, `${id} is live for what it holds`);
+  }
+  assert.deepEqual(routed(s.doc, { device_name: "Pad kit", ...message("note", 10, 36) }), {
+    id: "hold-note",
+    action: hold,
+  });
+  assert.deepEqual(routed(s.doc, { device_name: "FCB1010", ...message("pc", 1, 3) }), {
+    id: "pause-pc",
+    action: pause,
+  });
+
+  // A program change has no release, so it cannot hold HOLD or ROLL down. The
+  // refusal is the router's own sentence, and nothing is written.
+  const before = s.entries.length;
+  const needs = {
+    "pad.hold": "HOLD is a press and a release, so it needs a note or a CC; a program change has no release.",
+    "pad.roll": "ROLL is held down, so it needs a note or a CC; a program change has no release.",
+  };
+  for (const [kind, action, slot] of [["pad.hold", hold, "hold"], ["pad.roll", roll, "roll"]]) {
+    const refused = refuses(
+      () => s.run("midi.map", { id: `pc-${slot}`, device_name: "FCB1010", message: message("pc", 1, 4), action }, HUMAN),
+      "invalid",
+    );
+    assert.equal(refused.message, `Invalid arguments for midi.map: ${needs[kind]}`);
+    assert.equal(snapshot(s.doc).midi_maps[`pc-${slot}`], undefined, `${kind} on a program change wrote nothing`);
+  }
+
+  // None of the three takes an argument: the kind IS the whole action.
+  for (const [kind, action, slot] of [
+    ["pad.hold", { kind: "pad.hold", index: 0 }, "hold"],
+    ["pad.roll", { kind: "pad.roll", name: "stutter" }, "roll"],
+    ["pad.pause_all", { kind: "pad.pause_all", paused: true }, "pause"],
+  ]) {
+    const { kind: _kind, ...args } = action;
+    assert.equal(MIDI_ACTIONS[kind].safeParse(args).success, false, `${kind} takes no argument`);
+    const refused = refuses(
+      () => s.run("midi.map", { id: `extra-${slot}`, device_name: "Pad kit", message: message("note", 10, 40), action }, HUMAN),
+      "invalid",
+    );
+    assert.match(refused.message, /wrong arguments/);
+  }
+  assert.equal(s.entries.length, before, "and a refused mapping is not a history step");
+});
+
+test("the router gates HOLD, ROLL and Pause on their own kind and keys", async () => {
+  const { MIDI_ROUTE_SCRIPT, acceptsMessageType, messageNeedsText, validRoutedAction } = await import(
+    "../bundles/studio/panel/midi-route.js"
+  );
+  const page = new Function("window", `${MIDI_ROUTE_SCRIPT}\nreturn window.StudioMidiRoute;`)({});
+
+  const note = message("note", 1, 3);
+  const cc = message("cc", 1, 3);
+  const pc = message("pc", 1, 3);
+
+  /** One live mapping on "D": this action, on this stored message. */
+  const live = (action, stored) => ({
+    id: "m",
+    device_name: "D",
+    message: stored,
+    action,
+    accepted_action: JSON.parse(JSON.stringify(action)),
+    set_by: "operator",
+    proposed: false,
+  });
+
+  /** What the server and the page answer, side by side. */
+  const ask = (action, stored) => {
+    const snap = { midi_maps: { m: live(action, stored) } };
+    const incoming = { device_name: "D", ...stored };
+    return [routeFor(snap, incoming), page.routeFor(snap, incoming)];
+  };
+
+  // The three kinds, each on every message type, the two sides answering alike.
+  const cases = [
+    [{ kind: "pad.hold" }, note, true],
+    [{ kind: "pad.hold" }, cc, true],
+    [{ kind: "pad.hold" }, pc, false],
+    [{ kind: "pad.roll" }, note, true],
+    [{ kind: "pad.roll" }, cc, true],
+    [{ kind: "pad.roll" }, pc, false],
+    [{ kind: "pad.pause_all" }, note, true],
+    [{ kind: "pad.pause_all" }, cc, true],
+    [{ kind: "pad.pause_all" }, pc, true],
+  ];
+  for (const [action, stored, routes] of cases) {
+    const [server, client] = ask(action, stored);
+    assert.deepEqual(client, server, `${action.kind} on a ${stored.type}: the page answers what the server answers`);
+    assert.equal(server === null, !routes, `${action.kind} on a ${stored.type}: ${routes ? "routes" : "routes nothing"}`);
+  }
+
+  // The Learn wording is one sentence per kind, and the same one the refusal uses.
+  assert.equal(
+    messageNeedsText("pad.hold"),
+    "HOLD is a press and a release, so it needs a note or a CC; a program change has no release.",
+  );
+  assert.equal(
+    messageNeedsText("pad.roll"),
+    "ROLL is held down, so it needs a note or a CC; a program change has no release.",
+  );
+  assert.equal(messageNeedsText("pad.pause_all"), "Pausing everything takes a note, a CC or a program change.");
+  assert.equal(acceptsMessageType("pad.pause_all", "pc"), true);
+  assert.equal(acceptsMessageType("pad.hold", "pc"), false);
+  assert.equal(acceptsMessageType("pad.roll", "pc"), false);
+
+  // Exactly the kind and no other key: a field the document added on its own is
+  // not part of an action, so a mapping holding one runs nothing.
+  for (const action of [
+    { kind: "pad.hold", index: 0 },
+    { kind: "pad.roll", name: "stutter" },
+    { kind: "pad.pause_all", paused: true },
+  ]) {
+    assert.equal(validRoutedAction(action), false, `${action.kind} with an extra key is not a live action`);
+    assert.deepEqual(ask(action, cc), [null, null], "and such a mapping routes nothing on either side");
+  }
+
+  // A kind nobody allow-listed runs nothing, inherited names included.
+  for (const kind of ["pad.hold_all", "pad.pause", "toString", "__proto__", "hasOwnProperty", "constructor"]) {
+    assert.equal(validRoutedAction({ kind }), false, `${kind} is not a live action kind`);
+    assert.deepEqual(ask({ kind }, note), [null, null], `a mapping of ${kind} routes nothing`);
+  }
+  const inherited = Object.create({ kind: "pad.hold" });
+  assert.equal(validRoutedAction(inherited), false, "the kind has to be the action's own key");
+  assert.deepEqual(ask(inherited, note), [null, null], "and a mapping whose kind is inherited routes nothing");
+
+  // The rules around a mapping are the same for the new kinds: a proposal is
+  // never routed, and neither is an action whose accepted copy moved on.
+  const proposal = { midi_maps: { m: { ...live({ kind: "pad.pause_all" }, pc), proposed: true } } };
+  assert.equal(routeFor(proposal, { device_name: "D", ...pc }), null, "a proposed pause-all routes nothing");
+  const moved = {
+    midi_maps: { m: { ...live({ kind: "pad.pause_all" }, pc), accepted_action: { kind: "stop_all" } } },
+  };
+  assert.equal(routeFor(moved, { device_name: "D", ...pc }), null, "a pause-all changed after accept routes nothing");
+});
+
+test("an older allow-list ignores a mapping of a kind it never heard of", async (t) => {
+  const s = studio(t);
+  const incoming = { device_name: "Pad kit", ...message("note", 10, 36) };
+  s.run(
+    "midi.map",
+    { id: "hold", device_name: "Pad kit", message: message("note", 10, 36), action: { kind: "pad.hold" } },
+    HUMAN,
+  );
+
+  // The song holds the mapping whole, and this build's rule routes it.
+  assert.deepEqual(snapshot(s.doc).midi_maps.hold.action, { kind: "pad.hold" });
+  assert.deepEqual(routed(s.doc, incoming), { id: "hold", action: { kind: "pad.hold" } });
+
+  // The same script from before the kind was allow-listed: it has no rule for
+  // the kind and no branch that accepts it, so the mapping is simply not live.
+  const { MIDI_ROUTE_SCRIPT } = await import("../bundles/studio/panel/midi-route.js");
+  const older = olderRouteApi(MIDI_ROUTE_SCRIPT, "'pad.hold'", "'pad.hold_legacy'");
+  assert.equal(older.acceptsMessageType("pad.hold", "note"), false, "the older rule knows no pad.hold");
+  assert.equal(older.validRoutedAction({ kind: "pad.hold" }), false, "nor a branch that accepts it");
+  assert.equal(older.routeFor(snapshot(s.doc), incoming), null, "so the mapping answers nothing");
+
+  // Nothing throws and nothing is lost: the song still loads with the mapping in
+  // it, and the build that does know the kind routes it again.
+  const loaded = snapshot(s.doc);
+  assert.deepEqual(Object.keys(loaded.midi_maps), ["hold"], "the song's mapping is still there");
+  assert.equal(loaded.midi_maps.hold.proposed, false, "and it is still the operator's");
+  assert.deepEqual(routed(s.doc, incoming), { id: "hold", action: { kind: "pad.hold" } });
+});

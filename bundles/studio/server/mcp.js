@@ -831,6 +831,12 @@ export function actionWords(action, snapshot) {
       return `sweep ${String(action.param)} from ${Number(action.min)} to ${Number(action.max)} on the selected pad of "${nameFrom(snapshot?.tracks, action.track_id)}"`;
     case "track.macro":
       return `turn macro knob ${(Number(action.index) || 0) + 1} on "${nameFrom(snapshot?.tracks, action.track_id)}"`;
+    case "pad.hold":
+      return "press HOLD on the pads";
+    case "pad.roll":
+      return "hold ROLL on the pads";
+    case "pad.pause_all":
+      return "pause everything, and resume it";
     case "fx.hold":
       return `hold the ${String(action.name).split("_").join(" ")} effect`;
     case "looper.cycle":

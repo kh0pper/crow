@@ -161,6 +161,11 @@ export const MIDI_ACTIONS = Object.freeze({
       index: padIndexSchema,
     })
     .strict(),
+  // The pad performance bar: HOLD and ROLL are held (so a program change, which
+  // has no release, cannot drive them) and Pause is a toggle.
+  "pad.hold": z.object({}).strict(),
+  "pad.roll": z.object({}).strict(),
+  "pad.pause_all": z.object({}).strict(),
   "pad.param": z
     .object({
       track_id: idSchema.describe("the sampler track whose pad it is"),
@@ -389,6 +394,12 @@ function actionText(action, snap, message = null) {
       return `sweep ${action.param} from ${action.min} to ${action.max} on the selected pad of "${trackName(snap, action.track_id)}"`;
     case "track.macro":
       return `turn macro knob ${Number(action.index) + 1} on "${trackName(snap, action.track_id)}"`;
+    case "pad.hold":
+      return "press HOLD on the pads";
+    case "pad.roll":
+      return "hold ROLL on the pads";
+    case "pad.pause_all":
+      return "pause everything, and resume it";
     case "fx.hold":
       return `hold the ${fxName(action.name)} effect`;
     case "looper.cycle":

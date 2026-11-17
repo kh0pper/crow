@@ -239,6 +239,9 @@ A song can be played from the floor: a pedal launches a scene, a pad plays a pad
 | `record.toggle` | Start or stop recording |
 | `stop_all` | Stop everything |
 | `pad.play {track_id, bank_id, index}` | Play a sampler pad, at the note's velocity |
+| `pad.hold` | Press HOLD on the pads |
+| `pad.roll` | Hold ROLL, the pads' repeat, for as long as the control is down |
+| `pad.pause_all` | Pause everything (the next press resumes it) |
 | `pad.param {track_id, param, min, max}` | Sweep one pad field on the selected pad, from `min` to `max` |
 | `track.macro {track_id, index}` | Turn one of that track's eight macro knobs |
 | `macro.set {index}` | Turn macro knob n on the selected track |
@@ -249,6 +252,8 @@ A song can be played from the floor: a pedal launches a scene, a pad plays a pad
 | `keys.play` | Play the selected instrument from the keys (one row claims its channel's notes; a pad mapping on a note wins over it) |
 
 **The keys are not played yet.** `keys.play` stays on the allow-list for when they are, so no device profile proposes one.
+
+**HOLD, ROLL and Pause are the operator's hands as well.** `pad.hold`, `pad.roll` and `pad.pause_all` are live state — a performance, never a history step, never in the song — and no tool of yours presses one: an `fx.hold` mapping and these run only on the operator's own page.
 
 **The two device profiles** are factory defaults — check the operator's unit, because every unit can be reprogrammed:
 
