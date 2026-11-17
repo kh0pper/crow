@@ -8,6 +8,11 @@
 // first gap long enough, a legacy hold occupies its interval, a corrupt
 // calendar refuses writes and is never replaced, and every write serialises
 // on the one box lock.
+//
+// A daily booking is one series row with one entry per occurrence; it expands
+// in local wall-clock time, so the DST nights below are read in a real zone.
+
+process.env.TZ = "America/Chicago";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,10 +23,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import {
-  book, listBookings, findGap, cancelBooking, approveBooking,
-  BookingConflictError, CalendarCorruptError, schedulePath,
+  book, bookLocked, listBookings, findGap, cancelBooking, approveBooking, declineBooking,
+  activateBooking, activateBookingLocked, renewBooking, setBookingStatus, schedulePath,
+  BookingConflictError, CalendarCorruptError,
 } from "../servers/gateway/box-schedule.js";
-import { readReservation } from "../servers/gateway/box-reservation.js";
+import { HoldConflictError, readReservation, withReservationLock } from "../servers/gateway/box-reservation.js";
 
 // Every state file this module touches lives in a scratch directory, set
 // before the first call that resolves a path.
@@ -39,10 +45,20 @@ const iso = (ms) => new Date(ms).toISOString();
 const NOW = at(9);
 const MODULE_URL = new URL("../servers/gateway/box-schedule.js", import.meta.url).href;
 
+/** Local wall-clock ms: `local(2026, 10, 27, 12)` is noon on 2026-10-27. */
+const local = (y, mo, d, h = 0, mi = 0) => new Date(y, mo - 1, d, h, mi, 0, 0).getTime();
+const DAY = 86_400_000;
+
 function fresh() {
   for (const p of [SCHEDULE, HOLD, LOCK]) {
     try { unlinkSync(p); } catch (err) { if (!err || err.code !== "ENOENT") throw err; }
   }
+}
+
+/** The calendar file as it is on disk, for the series row itself. */
+function calendarRow(id) {
+  const raw = JSON.parse(readFileSync(SCHEDULE, "utf8"));
+  return raw.bookings.find((b) => b && b.id === id);
 }
 
 test("missing file is an empty calendar", () => {
@@ -280,4 +296,340 @@ test("writes prune old done bookings", () => {
     listBookings({ now: NOW }).map((b) => b.id),
     [recentDone.id, added.id],
   );
+});
+
+// ---------------------------------------------------------------------------
+// Daily recurrence. One series row, one entry per occurrence, expanded in
+// local wall-clock time.
+
+test("daily 02:15-04:15 blocks a 03:00 booking on any day", () => {
+  fresh();
+  const now = local(2026, 10, 27, 12);
+  const series = book({
+    owner: "pi-lab-nightly-audit", kind: "audit", mode: "exclusive",
+    daily: "02:15-04:15", reason: "nightly audit", created_by: "alex", now,
+  });
+  assert.match(series.id, /^bk_[0-9a-f]{12}$/);
+  assert.deepEqual(series.recur, { daily: "02:15-04:15" });
+  assert.equal(series.status, "booked");
+  // The first occurrence at or after `now`: 02:15 on the 27th has passed.
+  assert.equal(series.start, iso(local(2026, 10, 28, 2, 15)));
+  assert.equal(series.end, null);
+  for (const day of [28, 29, 30, 31]) {
+    let err;
+    try {
+      book({ owner: "sam", kind: "manual", start: local(2026, 10, day, 3), minutes: 30, now });
+    } catch (e) { err = e; }
+    assert.ok(err instanceof BookingConflictError, `day ${day}`);
+    assert.equal(err.conflict.id, `${series.id}@2026-10-${day}`);
+    assert.equal(err.conflict.series_id, series.id);
+    assert.deepEqual(err.conflict.recur, { daily: "02:15-04:15" });
+  }
+  // 05:00 sits outside the window on every day.
+  const free = book({ owner: "sam", kind: "manual", start: local(2026, 11, 2, 5), minutes: 30, now });
+  assert.match(free.id, /^bk_[0-9a-f]{12}$/);
+});
+
+test("daily 23:30-01:00 crosses midnight", () => {
+  fresh();
+  const now = local(2026, 10, 27, 12);
+  const series = book({ owner: "runner", kind: "gpu-job", mode: "beside", daily: "23:30-01:00", now });
+  const [occ] = listBookings({ from: local(2026, 10, 27, 22), to: local(2026, 10, 28, 2), now });
+  assert.equal(occ.id, `${series.id}@2026-10-27`);
+  assert.equal(occ.series_id, series.id);
+  assert.equal(occ.start, iso(local(2026, 10, 27, 23, 30)));
+  assert.equal(occ.end, iso(local(2026, 10, 28, 1)));
+  // 00:30 the next day is inside the occurrence that started the night before.
+  let err;
+  try {
+    book({
+      owner: "sam", kind: "manual", start: local(2026, 10, 28, 0, 30), minutes: 20,
+      now: local(2026, 10, 27, 20),
+    });
+  } catch (e) { err = e; }
+  assert.ok(err instanceof BookingConflictError);
+  assert.equal(err.conflict.id, `${series.id}@2026-10-27`);
+  // 23:00-23:30 the next evening is adjacent to that evening's window.
+  const before = book({
+    owner: "sam", kind: "manual", start: local(2026, 10, 28, 23), minutes: 30,
+    now: local(2026, 10, 27, 20),
+  });
+  assert.ok(before.id);
+});
+
+test("daily window holds wall-clock on the DST change night", () => {
+  fresh();
+  const now = local(2026, 10, 30, 12);
+  const series = book({
+    owner: "pi-lab-nightly-audit", kind: "audit", mode: "exclusive", daily: "02:15-04:15", now,
+  });
+  // 2026-11-01 is the fall-back night in America/Chicago: 02:15 and 04:15 are
+  // both real local times, so the window keeps its wall clock.
+  const occ = listBookings({ from: local(2026, 11, 1), to: local(2026, 11, 2), now })
+    .find((entry) => entry.id === `${series.id}@2026-11-01`);
+  assert.ok(occ);
+  assert.equal(new Date(occ.start).getHours(), 2);
+  assert.equal(new Date(occ.start).getMinutes(), 15);
+  assert.equal(new Date(occ.end).getHours(), 4);
+  assert.equal(new Date(occ.end).getMinutes(), 15);
+  let err;
+  try {
+    book({ owner: "sam", kind: "manual", start: local(2026, 11, 1, 3), minutes: 30, now });
+  } catch (e) { err = e; }
+  assert.ok(err instanceof BookingConflictError);
+  assert.equal(err.conflict.id, `${series.id}@2026-11-01`);
+});
+
+test("daily 02:15-04:15 on 2027-03-14 (02:15 doesn't exist, America/Chicago) starts at 03:00 local and still blocks", () => {
+  fresh();
+  const now = local(2027, 3, 13, 12);
+  const series = book({
+    owner: "pi-lab-nightly-audit", kind: "audit", mode: "exclusive", daily: "02:15-04:15", now,
+  });
+  const occ = listBookings({ from: local(2027, 3, 14), to: local(2027, 3, 15), now })
+    .find((entry) => entry.id === `${series.id}@2027-03-14`);
+  assert.ok(occ);
+  const start = new Date(occ.start);
+  assert.equal(start.getHours(), 3);
+  assert.equal(start.getMinutes(), 0);
+  assert.equal(start.getDate(), 14);
+  let err;
+  try {
+    book({ owner: "sam", kind: "manual", start: local(2027, 3, 14, 3, 30), minutes: 20, now });
+  } catch (e) { err = e; }
+  assert.ok(err instanceof BookingConflictError);
+  assert.equal(err.conflict.id, `${series.id}@2027-03-14`);
+});
+
+test("activating one audit occurrence does not mark the series done", () => {
+  fresh();
+  const now = local(2026, 10, 27, 12);
+  const series = book({
+    owner: "pi-lab-nightly-audit", kind: "audit", mode: "exclusive",
+    daily: "02:15-04:15", reason: "nightly audit", now,
+  });
+  const dayKey = "2026-10-28";
+  const occId = `${series.id}@${dayKey}`;
+  const startNow = local(2026, 10, 28, 2, 30);
+  const hold = activateBooking(occId, { owner: "pi-lab-nightly-audit", now: startNow });
+  assert.equal(hold.owner, "pi-lab-nightly-audit");
+  assert.equal(hold.kind, "audit");
+  assert.equal(hold.booking_id, occId);
+  const row = calendarRow(series.id);
+  assert.equal(row.status, "booked");
+  assert.equal(row.occurrences[dayKey].status, "active");
+  assert.equal(row.occurrences[dayKey].activated_at, iso(startNow));
+  const expanded = listBookings({ from: local(2026, 10, 28), to: local(2026, 10, 30), now: startNow });
+  assert.equal(expanded.find((e) => e.id === occId).status, "active");
+  assert.equal(expanded.find((e) => e.id === `${series.id}@2026-10-29`).status, "booked");
+  // A per-occurrence status change leaves the series where it was.
+  const done = setBookingStatus(occId, "done", { now: startNow });
+  assert.equal(done.status, "done");
+  assert.equal(done.id, occId);
+  assert.equal(calendarRow(series.id).status, "booked");
+  assert.equal(calendarRow(series.id).occurrences[dayKey].status, "done");
+  assert.throws(() => setBookingStatus(occId, "finished", { now: startNow }), TypeError);
+});
+
+test("series survives the 30-day prune", () => {
+  fresh();
+  const now = local(2026, 10, 27, 12);
+  const series = book({
+    owner: "pi-lab-nightly-audit", kind: "audit", mode: "exclusive", daily: "02:15-04:15", now,
+  });
+  // A write two months later prunes finished one-off bookings, never a series.
+  const later = now + 60 * DAY;
+  book({ owner: "sam", kind: "manual", start: later + 3 * 3_600_000, minutes: 30, now: later });
+  const row = calendarRow(series.id);
+  assert.ok(row);
+  assert.equal(row.status, "booked");
+  assert.deepEqual(row.recur, { daily: "02:15-04:15" });
+  const upcoming = listBookings({ now: later });
+  assert.ok(upcoming.some((entry) => entry.series_id === series.id));
+});
+
+test("cancel one occurrence leaves the series; cancel the series id cancels all", () => {
+  fresh();
+  const now = local(2026, 10, 27, 12);
+  const series = book({
+    owner: "pi-lab-nightly-audit", kind: "audit", mode: "exclusive", daily: "02:15-04:15", now,
+  });
+  const cancelledDay = `${series.id}@2026-10-28`;
+  const cancelled = cancelBooking(cancelledDay, { owner: "pi-lab-nightly-audit", now });
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.series_id, series.id);
+  const row = calendarRow(series.id);
+  assert.equal(row.status, "booked");
+  assert.equal(row.occurrences["2026-10-28"].status, "cancelled");
+  // The cancelled night is free, the next one is not.
+  const free = book({ owner: "sam", kind: "manual", start: local(2026, 10, 28, 3), minutes: 30, now });
+  assert.ok(free.id);
+  let err;
+  try {
+    book({ owner: "sam", kind: "manual", start: local(2026, 10, 29, 3), minutes: 30, now });
+  } catch (e) { err = e; }
+  assert.ok(err instanceof BookingConflictError);
+  // Cancelling the series id cancels every remaining occurrence.
+  const all = cancelBooking(series.id, { owner: "pi-lab-nightly-audit", now });
+  assert.equal(all.status, "cancelled");
+  const after = listBookings({ from: local(2026, 10, 29), to: local(2026, 11, 2), now });
+  assert.ok(after.length > 0);
+  assert.ok(after.every((entry) => entry.status === "cancelled"));
+  const also = book({ owner: "sam", kind: "manual", start: local(2026, 10, 30, 3), minutes: 30, now });
+  assert.ok(also.id);
+});
+
+// ---------------------------------------------------------------------------
+// Activation, renewal and status changes.
+
+test("approve then activate writes the hold with booking_id and mode", () => {
+  fresh();
+  const now = local(2026, 10, 27, 12);
+  const b = book({
+    owner: "alex", kind: "gpu-job", mode: "beside", start: local(2026, 10, 27, 13), minutes: 120,
+    needs_approval: true, gtt_mb: 50_000, host_ram_mb: 32_000, hip_procs: 1, reason: "render job", now,
+  });
+  assert.equal(b.approval.state, "pending");
+  const startNow = local(2026, 10, 27, 13, 10);
+  approveBooking(b.id, { by: "alex", now });
+  const hold = activateBooking(b.id, { owner: "alex", now: startNow });
+  assert.equal(hold.booking_id, b.id);
+  assert.equal(hold.mode, "beside");
+  assert.equal(hold.kind, "gpu-job");
+  assert.equal(hold.owner, "alex");
+  const read = readReservation({ now: startNow });
+  assert.equal(read.booking_id, b.id);
+  assert.equal(read.mode, "beside");
+  assert.equal(read.kind, "gpu-job");
+  assert.equal(read.gtt_mb, 50_000);
+  assert.equal(read.expires_at, iso(local(2026, 10, 27, 15)));
+  const [stored] = listBookings({ now: startNow });
+  assert.equal(stored.status, "active");
+});
+
+test("evict booking cannot activate until approved", () => {
+  fresh();
+  const now = local(2026, 10, 27, 12);
+  const b = book({
+    owner: "sam", kind: "gpu-job", mode: "exclusive", start: local(2026, 10, 27, 13),
+    minutes: 60, evict: ["crow-chat"], now,
+  });
+  assert.equal(b.approval.state, "pending");
+  let err;
+  try { activateBooking(b.id, { owner: "sam", now: local(2026, 10, 27, 13, 5) }); } catch (e) { err = e; }
+  assert.equal(err && err.code, "booking_not_approved");
+  // A refused activation leaves no hold behind.
+  assert.equal(readReservation({ now: local(2026, 10, 27, 13, 5) }), null);
+  assert.equal(listBookings({ now }).find((x) => x.id === b.id).status, "booked");
+});
+
+test("activate before start refuses", () => {
+  fresh();
+  const now = local(2026, 10, 27, 12);
+  const b = book({ owner: "alex", kind: "window", start: local(2026, 10, 27, 14), minutes: 60, now });
+  let early;
+  try { activateBooking(b.id, { owner: "alex", now: local(2026, 10, 27, 13, 59) }); } catch (e) { early = e; }
+  assert.equal(early && early.code, "booking_not_started");
+  let late;
+  try { activateBooking(b.id, { owner: "alex", now: local(2026, 10, 27, 15) }); } catch (e) { late = e; }
+  assert.equal(late && late.code, "booking_ended");
+  assert.equal(readReservation({ now: local(2026, 10, 27, 14) }), null);
+});
+
+test("activate refuses a foreign owner and a foreign unexpired hold", () => {
+  fresh();
+  const now = local(2026, 10, 27, 12);
+  const b = book({ owner: "alex", kind: "window", start: local(2026, 10, 27, 13), minutes: 60, now });
+  let err;
+  try { activateBooking(b.id, { owner: "sam", now: local(2026, 10, 27, 13, 5) }); } catch (e) { err = e; }
+  assert.equal(err && err.code, "booking_not_owner");
+  writeFileSync(HOLD, JSON.stringify({
+    owner: "pi-lab-dsv4",
+    reason: "model window",
+    started_at: iso(now),
+    expires_at: iso(now + 4 * 3_600_000),
+    allow: [],
+  }) + "\n");
+  let held;
+  try { activateBooking(b.id, { owner: "alex", now: local(2026, 10, 27, 13, 5) }); } catch (e) { held = e; }
+  assert.ok(held instanceof HoldConflictError);
+  assert.equal(held.code, "box_held");
+  assert.equal(held.holder, "pi-lab-dsv4");
+  assert.equal(readReservation({ now: local(2026, 10, 27, 13, 5) }).owner, "pi-lab-dsv4");
+});
+
+test("renewBooking extends end so findGap does not hand out the running job's time", () => {
+  fresh();
+  const start = local(2026, 10, 27, 10);
+  const b = book({
+    owner: "runner", kind: "gpu-job", mode: "beside", start, minutes: 60, now: local(2026, 10, 27, 9),
+  });
+  activateBooking(b.id, { owner: "runner", now: start });
+  const hold = renewBooking(b.id, { owner: "runner", minutes: 120, now: local(2026, 10, 27, 10, 30) });
+  assert.equal(hold.expires_at, iso(local(2026, 10, 27, 12, 30)));
+  assert.equal(hold.started_at, iso(start));
+  const asked = local(2026, 10, 27, 11, 5);
+  assert.equal(findGap({ minutes: 15, after: asked, now: asked }), local(2026, 10, 27, 12, 30));
+});
+
+test("renewBooking refuses to run into the next booking", () => {
+  fresh();
+  const now = local(2026, 10, 27, 9);
+  const a = book({
+    owner: "runner", kind: "gpu-job", mode: "beside", start: local(2026, 10, 27, 10),
+    minutes: 60, now,
+  });
+  book({ owner: "alex", kind: "window", start: local(2026, 10, 27, 12), minutes: 60, now });
+  activateBooking(a.id, { owner: "runner", now: local(2026, 10, 27, 10) });
+  const fiveToEleven = local(2026, 10, 27, 10, 55);
+  let err;
+  try { renewBooking(a.id, { owner: "runner", minutes: 180, now: fiveToEleven }); } catch (e) { err = e; }
+  assert.ok(err instanceof RangeError);
+  assert.equal(err.message, "renew_past_next_booking");
+  assert.equal(listBookings({ now }).find((x) => x.id === a.id).end, iso(local(2026, 10, 27, 11)));
+  assert.equal(readReservation({ now: fiveToEleven }).expires_at, iso(local(2026, 10, 27, 11)));
+});
+
+test("hold = book + activate completes under one lock without box_lock_timeout", () => {
+  fresh();
+  const start = local(2026, 10, 27, 10);
+  const out = withReservationLock(() => {
+    const booking = bookLocked({
+      owner: "alex", kind: "manual", mode: "exclusive", start: "now", minutes: 60,
+      now: start, path: SCHEDULE, holdPath: HOLD,
+    });
+    const hold = activateBookingLocked(booking.id, {
+      owner: "alex", now: start, path: SCHEDULE, holdPath: HOLD,
+    });
+    return { booking, hold };
+  }, { path: LOCK, timeoutMs: 1_000 });
+  assert.equal(out.hold.owner, "alex");
+  assert.equal(out.hold.booking_id, out.booking.id);
+  assert.equal(out.hold.expires_at, iso(local(2026, 10, 27, 11)));
+  assert.equal(listBookings({ now: start }).find((x) => x.id === out.booking.id).status, "active");
+});
+
+test("a declined or expired-pending booking does not block the calendar", () => {
+  fresh();
+  const now = local(2026, 10, 27, 9);
+  const declined = book({
+    owner: "alex", kind: "gpu-job", mode: "beside", start: local(2026, 10, 27, 10),
+    minutes: 60, needs_approval: true, now,
+  });
+  declineBooking(declined.id, { by: "alex", now });
+  book({
+    owner: "alex", kind: "gpu-job", mode: "beside", start: local(2026, 10, 27, 12),
+    minutes: 60, needs_approval: true, now,
+  });
+  // 13 h later the second request is past the 12 h TTL and reads as declined.
+  const laterNow = now + 13 * 3_600_000;
+  assert.equal(findGap({ minutes: 60, after: local(2026, 10, 27, 10), now: laterNow }), local(2026, 10, 27, 10));
+  const first = book({
+    owner: "sam", kind: "manual", start: local(2026, 10, 27, 10, 15), minutes: 30, now: laterNow,
+  });
+  const second = book({
+    owner: "sam", kind: "manual", start: local(2026, 10, 27, 12, 15), minutes: 30, now: laterNow,
+  });
+  assert.ok(first.id);
+  assert.ok(second.id);
 });
