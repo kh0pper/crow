@@ -2,16 +2,19 @@
  * Studio panel — a looped recording split into one take per pass, and where
  * playback puts each take.
  *
- * Four tests, no browser: the emitted client script runs against a linkedom
+ * Six tests, no browser: the emitted client script runs against a linkedom
  * document built from the page the handler renders, with a real Yjs song, a
  * fake take store, a fake recorder and a fake audio context. A calibrated
  * input measures a 1,200-frame round trip at 48 kHz, the recorder is armed at
  * frame 48,000, and three loop passes are recorded — one chunk per pass, so the
  * page writes a pending row for each pass. The rows the page kept are then read
  * back and placed with the sequencer's own formula, which is what an operator
- * hears. The other three pin the offset each row is given: the first pass
- * keeps it, every later pass stores 0, a one-pass recording is the row it was
- * before, and a row this device resumes keeps the offset it was written with.
+ * hears. The others pin the offset each row is given: the first pass keeps it,
+ * every later pass stores 0, a one-pass recording is the row it was before, a
+ * row this device resumes keeps the offset it was written with, a recording
+ * stopped partway through a later pass keeps that pass's frames under that same
+ * 0, and a pass holding no more than its round trip is dropped for the first
+ * pass only.
  *
  * The model: a click played at the start of pass k sits at context frame
  * `arm + round(k * loop)`, and the interface hands it back `rec_offset` frames
@@ -65,6 +68,13 @@ const PASS_FRAMES = 4000;
 
 /** That pass's chunks in bytes: 24-bit stereo. */
 const PASS_BYTES = PASS_FRAMES * 3 * 2;
+
+/**
+ * A later pass stopped partway: more frames than none, and fewer than the round
+ * trip in front of the first pass. Its own offset is 0, so nothing about it is
+ * dropped for being short.
+ */
+const PARTIAL_FRAMES = 500;
 
 /** A database fake for the panel handler: no projects to list. */
 function panelDb() {
@@ -639,6 +649,92 @@ test("a one-pass recording (stopped before the first split) stores the same row 
   assert.equal(row.bpm, BPM, "at the song's tempo");
   assert.equal(row.rate, RATE, "at the context's rate");
   assert.equal(row.song_id, "song-1", "for the song this page has open");
+
+  ui.releaseFinish();
+  await ui.settle();
+});
+
+test("a recording stopped partway through pass 2 keeps pass 2's frames and stores offset 0", async () => {
+  // Two whole passes, then a third that was cut off 500 frames in. Passes 1 and
+  // 2 begin on their own split frames, which already carry the round trip, so
+  // neither holds a delay of its own: pass 1 is a whole pass, and pass 2 keeps
+  // the frames it did capture instead of being dropped for holding too few.
+  const tracked = trackingStore(fakeTakeStore({ latency: CALIBRATED, log: [] }));
+  const ui = await bootPanel({ store: tracked.store, gateFinish: true });
+  const recorder = await startFakeRecording(ui, ARM_FRAME);
+
+  recorder.chunk(new Uint8Array(PASS_BYTES).buffer, 0, 0);
+  await ui.settle(24);
+  recorder.chunk(new Uint8Array(PASS_BYTES).buffer, 0, 1);
+  await ui.settle(24);
+  // Pass 2's one chunk: fewer frames than the round trip, and more than none.
+  recorder.chunk(new Uint8Array(PARTIAL_FRAMES * 3 * 2).buffer, 0, 2);
+  await ui.settle(24);
+
+  const frames = [PASS_FRAMES, PASS_FRAMES, PARTIAL_FRAMES];
+  recorder.done({
+    segments: frames.map((count, pass) => ({
+      segment: pass,
+      start_frame: pass === 0 ? recorder.armFrame : recorder.splits[pass - 1],
+      frames: count,
+    })),
+    frames: frames.reduce((total, count) => total + count, 0),
+    start_frame: ARM_FRAME,
+  });
+  await ui.settle(24);
+
+  const rows = tracked.created.map((takeId, pass) => {
+    const row = tracked.store.pendings.get(takeId);
+    assert.ok(row, `pass ${pass} has a pending row on this device`);
+    return row;
+  });
+  assert.equal(rows.length, 3, `three passes made three rows (got ${rows.length})`);
+  assert.equal(rows[0].offset_frames, ROUND_TRIP, "pass 0 is cut by the round trip it holds in front of its beat 0");
+  assert.equal(rows[1].offset_frames, 0, "pass 1 begins on its own beat 0, so it stores no offset");
+  assert.equal(rows[2].offset_frames, 0, "and pass 2 begins on its own beat 0 too, however little it holds");
+  assert.equal(rows[2].frames, PARTIAL_FRAMES, `pass 2 keeps the ${PARTIAL_FRAMES} frames its chunk holds`);
+  assert.ok(rows[2].frames > 0, "so a pass stopped partway is kept, not dropped");
+
+  ui.releaseFinish();
+  await ui.settle();
+});
+
+test("a pass holding no more than its round trip is dropped for pass 0 only", async () => {
+  // The same number of frames in two passes: 1,200, exactly the round trip this
+  // input measured. Pass 0 is cut by that round trip, so it holds nothing that
+  // was played and goes. Pass 1 is cut by nothing, so the very same frames are
+  // audio and the pass is kept.
+  const tracked = trackingStore(fakeTakeStore({ latency: CALIBRATED, log: [] }));
+  const ui = await bootPanel({ store: tracked.store, gateFinish: true });
+  const recorder = await startFakeRecording(ui, ARM_FRAME);
+
+  recorder.chunk(new Uint8Array(ROUND_TRIP * 3 * 2).buffer, 0, 0);
+  await ui.settle(24);
+  recorder.chunk(new Uint8Array(ROUND_TRIP * 3 * 2).buffer, 0, 1);
+  await ui.settle(24);
+  recorder.done({
+    segments: [0, 1].map((pass) => ({
+      segment: pass,
+      start_frame: pass === 0 ? recorder.armFrame : recorder.splits[pass - 1],
+      frames: ROUND_TRIP,
+    })),
+    frames: ROUND_TRIP * 2,
+    start_frame: ARM_FRAME,
+  });
+  await ui.settle(24);
+
+  assert.equal(tracked.created.length, 2, "each pass made a row when its first chunk arrived");
+  assert.equal(
+    tracked.store.pendings.get(tracked.created[0]),
+    undefined,
+    `pass 0 holds exactly the ${ROUND_TRIP} frames it is cut by, so it is dropped`,
+  );
+  const kept = tracked.store.pendings.get(tracked.created[1]);
+  assert.ok(kept, "pass 1 is cut by nothing, so it is kept");
+  assert.equal(kept.offset_frames, 0, "and stores no offset");
+  assert.equal(kept.frames, ROUND_TRIP, `holding the ${ROUND_TRIP} frames it captured`);
+  assert.ok(kept.frames > 0, "which is audio, since none of it is cut away");
+  assert.equal(ui.store.pendings.size, 1, "one row on this device: the pass that holds audio");
 
   ui.releaseFinish();
   await ui.settle();

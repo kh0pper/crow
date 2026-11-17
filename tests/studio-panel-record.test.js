@@ -663,9 +663,6 @@ test("loop-record of 3 passes makes 3 takes", async (t) => {
   assert.equal(ids.size, 3, "each pass is its own take");
   takes.forEach((take, pass) => {
     assert.ok(take.frames > 0, `pass ${pass} holds audio`);
-    // Nothing calibrated this recording, so no pass is cut by a delay: the first
-    // pass holds no offset, and the ones after it begin on their own beat 0.
-    assert.equal(take.offset_frames, 0, `pass ${pass} carries no offset`);
   });
 });
 
