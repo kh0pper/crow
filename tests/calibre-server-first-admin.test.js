@@ -137,7 +137,9 @@ const FAKE_CURL = [
   'printf "curl %s" "$*" > "$dir/curl.$n.argv"',
   'cat > "$dir/curl.$n.stdin"',
   'cfg="$dir/curl.$n.stdin"',
-  'url="$(printf "%s\\n" "$(cat "$cfg")" | sed -n \'s/^url = "\\(.*\\)"$/\\1/p\' | head -n 1)"',
+  // `sed -n '1p'` reads its whole input; `head -n 1` leaves early and dies of SIGPIPE under
+  // this stub's `pipefail`, which would report a request the script DID make as failed.
+  'url="$(printf "%s\\n" "$(cat "$cfg")" | sed -n \'s/^url = "\\(.*\\)"$/\\1/p\' | sed -n \'1p\')"',
   "",
   ...NEXT_FN,
   "",
@@ -499,7 +501,7 @@ test("the manifest passes the bundle contract and declares the setup script Crow
   const manifest = manifestOf("calibre-server");
   const { errors } = validateManifest(manifest, B, { bundleExists: () => true });
   assert.deepEqual(errors, [], "the whole manifest");
-  assert.equal(manifest.version, "1.0.6", "a bundle change is a version bump (the installed copy refreshes on it)");
+  assert.equal(manifest.version, "1.0.7", "a bundle change is a version bump (the installed copy refreshes on it)");
   assert.deepEqual(manifest.refreshFiles, ["docker-compose.yml"], "an installed copy receives the fixed compose");
   assert.deepEqual(manifest.firstAdmin, {
     mode: "crow",

@@ -166,7 +166,7 @@ answer=""
 if ! answer="$(printf '{"password":"%s"}' "$PW" | docker exec -i "$CONTAINER" python3 -c "$SET_PY" "$ADMIN_USER" 2>/dev/null)"; then
   die "Frigate refused the new password; the old one is unchanged."
 fi
-printf '%s' "$answer" | grep -Eq '"success"[[:space:]]*:[[:space:]]*true' ||
+grep -Eq '"success"[[:space:]]*:[[:space:]]*true' <<<"$answer" ||
   die "Frigate did not confirm the new password; check Frigate itself."
 
 # Frigate rate-limits these calls to about one per second.

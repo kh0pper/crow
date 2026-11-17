@@ -152,18 +152,18 @@ if [[ $EUID -eq 0 ]]; then
   SUBNET=$(docker network inspect "$ROOKERY_NETWORK" \
     --format '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null)
   for fam in iptables ip6tables; do
-    if "$fam" -w -S DOCKER-USER | grep -qF -- "-i $BRIDGE -m comment --comment rookery-lock -j ROOKERY-EGRESS"; then
+    if grep -qF -- "-i $BRIDGE -m comment --comment rookery-lock -j ROOKERY-EGRESS" <<<"$("$fam" -w -S DOCKER-USER)"; then
       pass "$fam DOCKER-USER egress jump present for $BRIDGE"
     else
       fail "$fam DOCKER-USER egress jump MISSING or keyed to a stale bridge (want $BRIDGE) — re-run rookery-egress-lock.sh"
     fi
-    if "$fam" -w -S INPUT | grep -qF -- "-i $BRIDGE -m comment --comment rookery-lock -j ROOKERY-HOSTIN"; then
+    if grep -qF -- "-i $BRIDGE -m comment --comment rookery-lock -j ROOKERY-HOSTIN" <<<"$("$fam" -w -S INPUT)"; then
       pass "$fam INPUT jump present for $BRIDGE"
     else
       fail "$fam INPUT jump MISSING or stale (want $BRIDGE)"
     fi
   done
-  if iptables -w -S DOCKER-USER | grep -qF -- "-s $SUBNET"; then
+  if grep -qF -- "-s $SUBNET" <<<"$(iptables -w -S DOCKER-USER)"; then
     pass "subnet tripwire present for $SUBNET"
   else
     fail "subnet tripwire MISSING or stale (want $SUBNET)"

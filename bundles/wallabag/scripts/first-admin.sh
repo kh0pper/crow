@@ -127,7 +127,9 @@ esac
 answer=""
 answer="$(printf '%s\n' "$PW" | console "fos:user:change-password $ADMIN_USER" 2>&1)" ||
   die "Wallabag refused the new password; the default login is unchanged."
-printf '%s' "$answer" | grep -q "Changed password" ||
+# The console output reaches grep on a here-string: an early-exiting reader at the end of a pipe
+# would be a SIGPIPE race under `pipefail`, turning a confirmation into a false failure.
+grep -q "Changed password" <<<"$answer" ||
   die "Wallabag did not confirm the new password; check Wallabag itself."
 
 # ── prove the new login works (three tries, a few seconds apart) ────────────────────

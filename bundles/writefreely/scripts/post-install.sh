@@ -8,7 +8,7 @@ if [ -f "$ENV_FILE" ]; then
   set -a; . "$ENV_FILE"; set +a
 fi
 
-if ! docker inspect crow-writefreely --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null | grep -qw crow-federation; then
+if ! grep -qw crow-federation <<<"$(docker inspect crow-writefreely --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null)"; then
   echo "WARN: crow-writefreely is not on crow-federation — Caddy can't reach it by service name" >&2
 fi
 

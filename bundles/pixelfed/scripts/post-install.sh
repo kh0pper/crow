@@ -18,7 +18,7 @@ fi
 
 echo "Waiting for Pixelfed to report healthy (up to 180s)…"
 for i in $(seq 1 36); do
-  if docker inspect crow-pixelfed --format '{{.State.Health.Status}}' 2>/dev/null | grep -qw healthy; then
+  if grep -qw healthy <<<"$(docker inspect crow-pixelfed --format '{{.State.Health.Status}}' 2>/dev/null)"; then
     echo "  → healthy"
     break
   fi
@@ -37,7 +37,7 @@ if [ -n "${PIXELFED_S3_ENDPOINT:-}" ]; then
   fi
 fi
 
-if ! docker inspect crow-pixelfed --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null | grep -qw crow-federation; then
+if ! grep -qw crow-federation <<<"$(docker inspect crow-pixelfed --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null)"; then
   echo "WARN: crow-pixelfed is not on the crow-federation network — Caddy federation sites will not reach it by service name" >&2
 fi
 

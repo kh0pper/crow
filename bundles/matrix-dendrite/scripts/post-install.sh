@@ -15,7 +15,7 @@ fi
 # Wait for Dendrite to become healthy (first boot can take 60+ seconds)
 echo "Waiting for Dendrite to report healthy (up to 120s)…"
 for i in $(seq 1 24); do
-  if docker inspect crow-dendrite --format '{{.State.Health.Status}}' 2>/dev/null | grep -qw healthy; then
+  if grep -qw healthy <<<"$(docker inspect crow-dendrite --format '{{.State.Health.Status}}' 2>/dev/null)"; then
     echo "  → healthy"
     break
   fi

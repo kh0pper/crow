@@ -92,14 +92,16 @@ alive() {
 # token_of BODY: the access token from Stirling's login answer, without printing it.
 token_of() {
   local t
-  t="$(printf '%s\n' "$1" | grep -o '"access_token"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | sed 's/^[^:]*:[[:space:]]*"//; s/"$//')"
-  [ -n "$t" ] || t="$(printf '%s\n' "$1" | grep -o '"token"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | sed 's/^[^:]*:[[:space:]]*"//; s/"$//')"
+  t="$(printf '%s\n' "$1" | grep -o '"access_token"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -n '1p' | sed 's/^[^:]*:[[:space:]]*"//; s/"$//')"
+  [ -n "$t" ] || t="$(printf '%s\n' "$1" | grep -o '"token"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -n '1p' | sed 's/^[^:]*:[[:space:]]*"//; s/"$//')"
   printf '%s' "$t"
 }
 
 # locked BODY: whether this answer says the account is locked (the password did not decide).
-# The WORD only: an answer that merely carries it inside another word decided nothing.
-locked() { printf '%s' "$1" | grep -qiE '\blocked\b'; }
+# The WORD only: an answer that merely carries it inside another word decided nothing. Fed on a
+# here-string, not a pipe: `grep -q` exits at the first match and a writer still writing would die
+# of SIGPIPE, which `pipefail` would report as "not locked".
+locked() { grep -qiE '\blocked\b' <<<"$1"; }
 
 # ── wait for the app (a first start prepares its own configuration first) ──────────
 # Bounded twice: a $SECONDS budget well inside the manifest's 240 s, and max-time 5 in the

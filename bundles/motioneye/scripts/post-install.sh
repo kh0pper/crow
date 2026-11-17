@@ -44,7 +44,7 @@ fi
 # Health-check wait — motionEye boots quickly
 echo "Waiting for motionEye to report healthy (up to 60s)..."
 for i in $(seq 1 12); do
-  if docker inspect crow-motioneye --format '{{.State.Health.Status}}' 2>/dev/null | grep -qw healthy; then
+  if grep -qw healthy <<<"$(docker inspect crow-motioneye --format '{{.State.Health.Status}}' 2>/dev/null)"; then
     echo "  → healthy"
     break
   fi

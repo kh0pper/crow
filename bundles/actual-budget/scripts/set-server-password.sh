@@ -34,21 +34,21 @@ fi
 already_set() {
   # Kept data from an earlier install has its own password: say so when ours doesn't open it.
   login="$(printf '{"password":"%s"}' "$pw" | curl -sS --max-time 10 -H 'Content-Type: application/json' --data-binary @- "$URL/account/login" || true)"
-  if printf '%s' "$login" | grep -q '"token"'; then
+  if grep -q '"token"' <<<"$login"; then
     echo "The Actual server already has this password; left unchanged."
   else
     echo "The Actual server kept its password from an earlier install, so the one Crow generated does not open it. Type the old password into ACTUAL_PASSWORD in Configure (and ignore the generated one in Settings → Passwords)."
   fi
 }
-if ! printf '%s' "$state" | grep -q '"bootstrapped":false'; then
+if ! grep -q '"bootstrapped":false' <<<"$state"; then
   already_set
   exit 0
 fi
 # The body goes in on stdin, so the password never appears in a process list.
 resp="$(printf '{"password":"%s"}' "$pw" | curl -sS --max-time 10 -H 'Content-Type: application/json' --data-binary @- "$URL/account/bootstrap" || true)"
-if printf '%s' "$resp" | grep -q '"status":"ok"'; then
+if grep -q '"status":"ok"' <<<"$resp"; then
   echo "Set the generated password on the Actual server (Settings → Passwords)."
-elif printf '%s' "$resp" | grep -q 'already-bootstrapped'; then
+elif grep -q 'already-bootstrapped' <<<"$resp"; then
   already_set
 else
   echo "Could not set the Actual server password; Crow tries again the first time it connects."

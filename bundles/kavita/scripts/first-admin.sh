@@ -71,7 +71,12 @@ cfg_post() {
 roles_of() {
   printf '%s' "$1" | tr -d '[:space:]' | grep -o '"roles":\[[^]]*\]' | tail -n 1 | sed 's/^"roles":\[//; s/\]$//' || true
 }
-is_admin() { printf '%s' "$1" | tr ',' '\n' | grep -qx '"Admin"'; }
+# `is_admin ROLES`: whether that comma-separated list holds the Admin role, exactly. Bash-native
+# on purpose: an early-exiting reader (`grep -q`) at the end of a pipe dies of SIGPIPE when the
+# writer still has data, and under `pipefail` that turns a matched role into "not an admin".
+# Framing the list with commas makes each entry a whole token: `"Admin"` matches, a username
+# such as `"AdminFan"` does not.
+is_admin() { [[ ",$1," == *',"Admin",'* ]]; }
 
 # FRESH (no admin yet) / DONE / UNKNOWN / OFFLINE. Kavita answers this one anonymously with
 # a bare JSON boolean. Only a POSITIVE `false` may lead to a change; anything else is

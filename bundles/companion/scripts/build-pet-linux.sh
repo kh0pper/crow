@@ -101,7 +101,7 @@ log "step 3/4: npm install + electron-builder (Linux AppImage)"
 log "step 4/4: installing AppImage to ${OUT_PATH}"
 mkdir -p "${OUT_DIR}"
 # electron-builder writes into release/${version}/; also check dist/ as a fallback.
-APPIMAGE="$(find "${SUBMODULE_DIR}/release" "${SUBMODULE_DIR}/dist" -name '*.AppImage' 2>/dev/null | head -n1 || true)"
+APPIMAGE="$(find "${SUBMODULE_DIR}/release" "${SUBMODULE_DIR}/dist" -name '*.AppImage' 2>/dev/null | sed -n '1p' || true)"
 [[ -n "${APPIMAGE}" ]] || die "no AppImage produced under ${SUBMODULE_DIR}/release or dist"
 install -m 0755 "${APPIMAGE}" "${OUT_PATH}"
 log "installed: ${OUT_PATH} ($(du -h "${OUT_PATH}" | cut -f1))"

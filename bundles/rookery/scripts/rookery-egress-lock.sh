@@ -141,7 +141,7 @@ derive_network() {
 derive_published_dst() {
   local publish=$1 hostip hostport cid
   hostip=${publish%:*} hostport=${publish##*:}
-  cid=$(docker ps --filter "publish=${hostport}" -q 2>/dev/null | head -1)
+  cid=$(docker ps --filter "publish=${hostport}" -q 2>/dev/null | sed -n '1p')
   [[ -n $cid ]] || return 1
   docker inspect "$cid" | python3 -c '
 import json, sys
@@ -198,7 +198,7 @@ remove_all() {
     for chain in DOCKER-USER INPUT; do
       # Re-scan after each delete: rule numbers shift.
       while line=$("$fam" -w -S "$chain" 2>/dev/null \
-                   | grep -F -- '--comment rookery-lock' | head -1); [[ -n $line ]]; do
+                   | grep -F -- '--comment rookery-lock' | sed -n '1p'); [[ -n $line ]]; do
         # shellcheck disable=SC2086  # rule specs are space-safe token lists
         "$fam" -w ${line/#-A/-D}
       done

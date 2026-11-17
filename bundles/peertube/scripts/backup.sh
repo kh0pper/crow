@@ -18,7 +18,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # Postgres dump
-if docker ps --format '{{.Names}}' | grep -qw crow-peertube-postgres; then
+if grep -qw crow-peertube-postgres <<<"$(docker ps --format '{{.Names}}')"; then
   docker exec -e PGPASSWORD="${PEERTUBE_DB_PASSWORD:-}" crow-peertube-postgres \
     pg_dump -U peertube -Fc -f /tmp/peertube-${STAMP}.pgcustom peertube_prod
   docker cp "crow-peertube-postgres:/tmp/peertube-${STAMP}.pgcustom" "$WORK/peertube.pgcustom"

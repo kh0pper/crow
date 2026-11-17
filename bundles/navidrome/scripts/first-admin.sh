@@ -64,8 +64,10 @@ cfg_post() {
     "$1" "$(esc "$2")"
 }
 
-# Does the body carry this pattern? `grep` exiting 1 on no match is not an error here.
-has() { printf '%s' "$1" | grep -q -- "$2"; }
+# Does the body carry this pattern? `grep` exiting 1 on no match is not an error here. The body
+# reaches grep on a here-string, never through a pipe: `grep -q` exits at the first match, and a
+# writer still writing would die of SIGPIPE — which `pipefail` would report as "no match".
+has() { grep -q -- "$2" <<<"$1"; }
 # One boolean field of a JSON document, whitespace stripped first so formatting cannot
 # hide it: `true` / `false` / nothing readable.
 json_flag() {

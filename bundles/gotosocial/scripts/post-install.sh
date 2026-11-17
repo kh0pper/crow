@@ -21,7 +21,7 @@ fi
 
 # 1. Ensure the container is on crow-federation (compose already declares
 #    it, but guard against a partial compose that forgot the network).
-if ! docker inspect crow-gotosocial --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null | grep -qw crow-federation; then
+if ! grep -qw crow-federation <<<"$(docker inspect crow-gotosocial --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null)"; then
   echo "WARN: crow-gotosocial is not on the crow-federation network — federation sites via Caddy will not reach it by service name" >&2
 fi
 

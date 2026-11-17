@@ -64,7 +64,7 @@ for rec in "${BRIDGE_RECORDS[@]}"; do
 done
 
 # Copy each registration.yaml into crow-dendrite
-if ! docker ps --format '{{.Names}}' | grep -qw crow-dendrite; then
+if ! grep -qw crow-dendrite <<<"$(docker ps --format '{{.Names}}')"; then
   echo "ERROR: crow-dendrite is not running. Start matrix-dendrite bundle first." >&2
   exit 1
 fi
@@ -117,7 +117,7 @@ fi
 # Wait for Dendrite to come back healthy
 echo "Waiting for Dendrite to report healthy after restart (up to 60s)…"
 for i in $(seq 1 12); do
-  if docker inspect crow-dendrite --format '{{.State.Health.Status}}' 2>/dev/null | grep -qw healthy; then
+  if grep -qw healthy <<<"$(docker inspect crow-dendrite --format '{{.State.Health.Status}}' 2>/dev/null)"; then
     echo "  → dendrite healthy"
     break
   fi

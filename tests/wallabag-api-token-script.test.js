@@ -399,7 +399,7 @@ const manifestOf = () => JSON.parse(readFileSync(join(BUNDLE, "manifest.json"), 
 
 test("wallabag: the manifest declares BOTH values, the stdin password, and the version bump", () => {
   const manifest = manifestOf();
-  assert.equal(manifest.version, "1.0.6", "the installed copy refreshes only on a version change");
+  assert.equal(manifest.version, "1.0.7", "the installed copy refreshes only on a version change");
   const token = manifest.firstAdmin.setup.token;
   assert.deepEqual(
     { script: token.script, env: token.env, stdin: token.stdin, timeout_s: token.timeout_s },

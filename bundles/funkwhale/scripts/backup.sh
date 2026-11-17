@@ -16,7 +16,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # Postgres dump
-if docker ps --format '{{.Names}}' | grep -qw crow-funkwhale-postgres; then
+if grep -qw crow-funkwhale-postgres <<<"$(docker ps --format '{{.Names}}')"; then
   docker exec -e PGPASSWORD="${FUNKWHALE_POSTGRES_PASSWORD:-}" crow-funkwhale-postgres \
     pg_dump -U funkwhale -Fc -f /tmp/funkwhale-${STAMP}.pgcustom funkwhale
   docker cp "crow-funkwhale-postgres:/tmp/funkwhale-${STAMP}.pgcustom" "$WORK/funkwhale.pgcustom"

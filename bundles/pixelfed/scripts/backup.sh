@@ -12,7 +12,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # Postgres dump
-if docker ps --format '{{.Names}}' | grep -qw crow-pixelfed-postgres; then
+if grep -qw crow-pixelfed-postgres <<<"$(docker ps --format '{{.Names}}')"; then
   docker exec -e PGPASSWORD="${PIXELFED_DB_PASSWORD:-}" crow-pixelfed-postgres \
     pg_dump -U pixelfed -Fc -f /tmp/pixelfed-${STAMP}.pgcustom pixelfed
   docker cp "crow-pixelfed-postgres:/tmp/pixelfed-${STAMP}.pgcustom" "$WORK/pixelfed.pgcustom"
