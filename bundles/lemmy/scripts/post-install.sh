@@ -16,7 +16,7 @@ fi
 
 echo "Waiting for Lemmy to report healthy (up to 120s)…"
 for i in $(seq 1 24); do
-  if docker inspect crow-lemmy --format '{{.State.Health.Status}}' 2>/dev/null | grep -qw healthy; then
+  if grep -qw healthy <<<"$(docker inspect crow-lemmy --format '{{.State.Health.Status}}' 2>/dev/null)"; then
     echo "  → lemmy healthy"
     break
   fi
@@ -25,7 +25,7 @@ done
 
 echo "Waiting for Lemmy-UI to report healthy (up to 60s)…"
 for i in $(seq 1 12); do
-  if docker inspect crow-lemmy-ui --format '{{.State.Health.Status}}' 2>/dev/null | grep -qw healthy; then
+  if grep -qw healthy <<<"$(docker inspect crow-lemmy-ui --format '{{.State.Health.Status}}' 2>/dev/null)"; then
     echo "  → lemmy-ui healthy"
     break
   fi
@@ -33,7 +33,7 @@ for i in $(seq 1 12); do
 done
 
 for c in crow-lemmy crow-lemmy-ui; do
-  if ! docker inspect "$c" --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null | grep -qw crow-federation; then
+  if ! grep -qw crow-federation <<<"$(docker inspect "$c" --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null)"; then
     echo "WARN: $c is not on the crow-federation network — Caddy federation site will not reach it by service name" >&2
   fi
 done

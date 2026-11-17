@@ -191,7 +191,9 @@ const FAKE_DOCKER = [
   "fi",
   "",
   // The three curl-based apps: the URL is the config line the script wrote on stdin.
-  'url="$(sed -n \'s/^url = "\\(.*\\)"$/\\1/p\' "$stdinf" | head -n 1)"',
+  // `sed -n '1p'` (not `head -n 1`): this stub runs under `pipefail`, and an early-exit reader
+  // behind a writer dies of SIGPIPE — the stub would report a call the script DID make as failed.
+  'url="$(sed -n \'s/^url = "\\(.*\\)"$/\\1/p\' "$stdinf" | sed -n \'1p\')"',
   'case "$url" in',
   '  *:8096/System/Info/Public*) next JELLYFIN_STATE "$FAKE_JELLYFIN_STATE"; emit ;;',
   '  *:8096/Startup/Configuration*) next JELLYFIN_CONFIG "$FAKE_JELLYFIN_CONFIG"; emit ;;',

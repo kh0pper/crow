@@ -1,7 +1,7 @@
 {
   "id": "bookstack",
   "name": "BookStack",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "refreshFiles": ["docker-compose.yml"],
   "description": "Self-hosted wiki platform — organize knowledge in shelves, books, chapters, and pages",
   "type": "bundle",

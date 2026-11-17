@@ -1,7 +1,7 @@
 {
   "id": "stirling-pdf",
   "name": "Stirling PDF",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Local PDF manipulation toolbox — merge, split, OCR, convert, compress, and 50+ other operations in-browser",
   "type": "bundle",
   "author": "Crow",

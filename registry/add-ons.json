@@ -4,7 +4,7 @@
     {
       "id": "actual-budget",
       "name": "Actual Budget",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Privacy-first personal finance — track spending, manage budgets, and view financial reports",
       "type": "bundle",
       "author": "Crow",
@@ -343,7 +343,7 @@
     {
       "id": "bookstack",
       "name": "BookStack",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "refreshFiles": [
         "docker-compose.yml"
       ],
@@ -749,7 +749,7 @@
     {
       "id": "calibre-server",
       "name": "Calibre Server",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
       "type": "bundle",
       "author": "Crow",
@@ -1631,7 +1631,7 @@
     {
       "id": "frigate",
       "name": "Frigate NVR",
-      "version": "1.3.0",
+      "version": "1.3.1",
       "refreshFiles": [
         "docker-compose.yml"
       ],
@@ -1782,7 +1782,7 @@
     {
       "id": "funkwhale",
       "name": "Funkwhale",
-      "version": "1.0.8",
+      "version": "1.0.9",
       "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Upload your own library; follow remote channels and artists across the fediverse.",
       "type": "bundle",
       "author": "Crow",
@@ -2315,7 +2315,7 @@
     {
       "id": "gotosocial",
       "name": "GoToSocial",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Lightweight ActivityPub microblog server (fediverse). Pi-friendly single-binary alternative to Mastodon — joins the public fediverse with a sub-500 MB footprint.",
       "type": "bundle",
       "author": "Crow",
@@ -2777,7 +2777,7 @@
     {
       "id": "kavita",
       "name": "Kavita",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "Self-hosted manga, comics, and ebook reader — browse series, track reading progress",
       "type": "bundle",
       "author": "Crow",
@@ -3173,7 +3173,7 @@
     {
       "id": "lemmy",
       "name": "Lemmy",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "description": "Federated link aggregator and discussion platform over ActivityPub — Reddit-alternative on the fediverse. Posts, comments, communities, votes; remote Lemmy/Mastodon/Kbin users can follow your communities and comment cross-server.",
       "type": "bundle",
       "author": "Crow",
@@ -3629,7 +3629,7 @@
     {
       "id": "mastodon",
       "name": "Mastodon",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "description": "The flagship ActivityPub server — federated microblogging at scale. Heaviest of the small-AP bundles. Hosts a public (or invite-only) Mastodon instance with the full v1/v2 API surface, web UI, and Sidekiq background job processing. Media is kept on local disk.",
       "type": "bundle",
       "author": "Crow",
@@ -3823,7 +3823,7 @@
     {
       "id": "matrix-bridges",
       "name": "Matrix Bridges",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Meta-bundle for Matrix appservice bridges (Signal, Telegram, WhatsApp, custom crow-matrix-bridge). Opt-in per bridge; each has its own consent text and hardware requirements. Installs appservice registrations into Dendrite and restarts the homeserver.",
       "type": "bundle",
       "author": "Crow",
@@ -3925,7 +3925,7 @@
     {
       "id": "matrix-dendrite",
       "name": "Matrix (Dendrite)",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "Matrix homeserver on Dendrite — federated real-time chat with end-to-end encryption. Lighter than Synapse, monolithic binary. Joins the Matrix federation graph via HTTPS federation (:8448 or .well-known delegation).",
       "type": "bundle",
       "author": "Crow",
@@ -4625,7 +4625,7 @@
     {
       "id": "motioneye",
       "name": "motionEye",
-      "version": "0.44.3",
+      "version": "0.44.4",
       "description": "Lightweight web frontend for the Motion daemon. Pi-friendly camera recording + motion detection. No AI — use the Frigate bundle if you want object detection.",
       "type": "bundle",
       "author": "Crow",
@@ -4733,7 +4733,7 @@
     {
       "id": "navidrome",
       "name": "Navidrome",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "description": "Lightweight music streaming server — browse albums, artists, playlists, and stream music",
       "type": "bundle",
       "author": "Crow",
@@ -5345,7 +5345,7 @@
     {
       "id": "peertube",
       "name": "PeerTube",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "description": "Federated video platform over ActivityPub — YouTube-alternative on the fediverse. Upload and transcode video, federate channels, stream via WebTorrent or HLS. Heaviest bundle in the federated line — video is kept on local disk, so plan for disk space and keep the transcoding/retention policy tight.",
       "type": "bundle",
       "author": "Crow",
@@ -5553,7 +5553,7 @@
     {
       "id": "pixelfed",
       "name": "Pixelfed",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "Federated photo-sharing server over ActivityPub — Instagram-alternative on the fediverse. Publish photos/stories/collections; remote Mastodon/GoToSocial/Funkwhale followers see your posts in their timelines. Media is kept on local disk.",
       "type": "bundle",
       "author": "Crow",
@@ -6304,7 +6304,7 @@
       "id": "rookery",
       "name": "Open Science Reviewer",
       "origin": "community",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "description": "Self-hosted OpenScience reviewer + experiment-audit workspace assembler — audit a report's numeric claims against its registered evidence, on your own local model",
       "type": "bundle",
       "author": "kh0pper",
@@ -6611,7 +6611,7 @@
     {
       "id": "shiori",
       "name": "Shiori",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Simple bookmark manager — save web pages with cached content for offline reading",
       "type": "bundle",
       "author": "Crow",
@@ -6724,7 +6724,7 @@
     {
       "id": "stirling-pdf",
       "name": "Stirling PDF",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Local PDF manipulation toolbox — merge, split, OCR, convert, compress, and 50+ other operations in-browser",
       "type": "bundle",
       "author": "Crow",
@@ -7114,7 +7114,7 @@
     {
       "id": "trilium",
       "name": "TriliumNext",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Knowledge base and note-taking — organize notes, clip web pages, and build a personal wiki with ETAPI",
       "type": "bundle",
       "author": "Crow",
@@ -7490,7 +7490,7 @@
     {
       "id": "vikunja",
       "name": "Vikunja",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
       "type": "bundle",
       "author": "Crow",
@@ -7891,7 +7891,7 @@
     {
       "id": "wallabag",
       "name": "Wallabag",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "description": "Self-hosted read-it-later — save articles, read offline, and organize with tags",
       "type": "bundle",
       "author": "Crow",
@@ -8182,7 +8182,7 @@
     {
       "id": "writefreely",
       "name": "WriteFreely",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Lightweight, minimalist ActivityPub blogging platform. Single-binary, single-SQLite-file footprint — ideal for long-form writing federated to the fediverse. Complements GoToSocial (microblog) and Crow's own blog.",
       "type": "bundle",
       "author": "Crow",

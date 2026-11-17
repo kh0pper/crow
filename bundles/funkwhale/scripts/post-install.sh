@@ -19,7 +19,7 @@ fi
 
 echo "Waiting for Funkwhale API to report healthy (up to 180s)…"
 for i in $(seq 1 36); do
-  if docker inspect crow-funkwhale-api --format '{{.State.Health.Status}}' 2>/dev/null | grep -qw healthy; then
+  if grep -qw healthy <<<"$(docker inspect crow-funkwhale-api --format '{{.State.Health.Status}}' 2>/dev/null)"; then
     echo "  → healthy"
     break
   fi
@@ -39,7 +39,7 @@ if [ -n "${FUNKWHALE_S3_ENDPOINT:-}" ]; then
 fi
 
 # Verify federation network
-if ! docker inspect crow-funkwhale-nginx --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null | grep -qw crow-federation; then
+if ! grep -qw crow-federation <<<"$(docker inspect crow-funkwhale-nginx --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null)"; then
   echo "WARN: crow-funkwhale-nginx is not on the crow-federation network — Caddy federation sites will not reach it by service name" >&2
 fi
 

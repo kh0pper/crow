@@ -147,7 +147,9 @@ const FAKE_CURL = [
   'cfg="$(cat)"',
   'printf "%s" "$cfg" > "$dir/call.$n.stdin"',
   ...NEXT_FN,
-  'url="$(printf "%s\\n" "$cfg" | sed -n \'s/^url = "\\(.*\\)"$/\\1/p\' | head -n 1)"',
+  // `sed -n '1p'` reads its whole input; `head -n 1` leaves early and dies of SIGPIPE under
+  // this stub's `pipefail`, which would report a request the script DID make as failed.
+  'url="$(printf "%s\\n" "$cfg" | sed -n \'s/^url = "\\(.*\\)"$/\\1/p\' | sed -n \'1p\')"',
   'case "$url" in',
   '  */api/v1/info) next INFO "${FAKE_INFO}" ;;',
   '  */api/v1/register) next REGISTER "${FAKE_REGISTER}" ;;',

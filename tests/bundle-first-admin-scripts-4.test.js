@@ -195,7 +195,9 @@ const FAKE_DOCKER = [
   'if [[ "$args" == *"bookstack:create-admin"* ]]; then next BOOKSTACK_CREATE 0; exit "$NEXT"; fi',
   'if [[ "$args" == *" -o /dev/null http://localhost:80/login"* ]]; then next BOOKSTACK_UP 0; exit "$NEXT"; fi',
   'if grep -q "localhost:80/login" "$stdinf"; then',
-  '  jar="$(sed -n \'s/^cookie = "\\(.*\\)"$/\\1/p\' "$stdinf" | head -n 1)"',
+  // `sed -n '1p'` reads its whole input; `head -n 1` leaves early and dies of SIGPIPE under
+  // this stub's `pipefail`, which would report a request the script DID make as failed.
+  '  jar="$(sed -n \'s/^cookie = "\\(.*\\)"$/\\1/p\' "$stdinf" | sed -n \'1p\')"',
   '  jarn="$jars/$(basename "$jar")"',
   '  if grep -q \'request = "POST"\' "$stdinf"; then',
   '    if grep -q "email=admin@admin.com" "$stdinf"; then next BOOKSTACK_LOGIN "$FAKE_BOOKSTACK_LOGIN"; else next BOOKSTACK_PROVE "$FAKE_BOOKSTACK_PROVE"; fi',
@@ -249,7 +251,8 @@ const FAKE_CURL = [
   "}",
   "",
   'args="$*"',
-  'url="$(sed -n \'s/^url = "\\(.*\\)"$/\\1/p\' "$stdinf" | head -n 1)"',
+  // Same rule as the docker stand-in above: the reader must read its whole input.
+  'url="$(sed -n \'s/^url = "\\(.*\\)"$/\\1/p\' "$stdinf" | sed -n \'1p\')"',
   'case "$url" in',
   '  *:8086/api/v1/auth/login*)',
   '    if grep -q gopher "$stdinf"; then next SHIORI_DEFAULT "$FAKE_SHIORI_DEFAULT"; else next SHIORI_NEWLOGIN "$FAKE_SHIORI_NEWLOGIN"; fi',

@@ -81,7 +81,7 @@ info_state() {
   body="$(body_of "$resp")"
   if [ -z "$resp" ] || [ -z "$code" ] || [ "$code" = "000" ]; then printf '%s' "OFFLINE"; return 0; fi
   if [ "$code" != "200" ]; then printf '%s' "UNREADABLE"; return 0; fi
-  flag="$(printf '%s' "$body" | tr -d '[:space:]' | grep -o '"registration_enabled":\(true\|false\)' | head -n 1 || true)"
+  flag="$(printf '%s' "$body" | tr -d '[:space:]' | grep -o '"registration_enabled":\(true\|false\)' | sed -n '1p' || true)"
   case "$flag" in
     '"registration_enabled":true') printf '%s' "OPEN" ;;
     '"registration_enabled":false') printf '%s' "CLOSED" ;;
@@ -172,7 +172,7 @@ confirmed=""
 resp="$(http_post "$(cfg_post "$BASE_URL/api/v1/register" "$register_body")")"
 code="$(code_of "$resp")"
 body="$(body_of "$resp")"
-if [ "$code" = "200" ] && printf '%s' "$body" | grep -q '"username"'; then confirmed=1; fi
+if [ "$code" = "200" ] && grep -q '"username"' <<<"$body"; then confirmed=1; fi
 resp=""
 body=""
 if [ -z "$confirmed" ]; then

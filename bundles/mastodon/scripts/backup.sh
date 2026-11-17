@@ -12,7 +12,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # Postgres dump
-if docker ps --format '{{.Names}}' | grep -qw crow-mastodon-postgres; then
+if grep -qw crow-mastodon-postgres <<<"$(docker ps --format '{{.Names}}')"; then
   docker exec -e PGPASSWORD="${MASTODON_DB_PASSWORD:-}" crow-mastodon-postgres \
     pg_dump -U mastodon -Fc -f /tmp/mastodon-${STAMP}.pgcustom mastodon_production
   docker cp "crow-mastodon-postgres:/tmp/mastodon-${STAMP}.pgcustom" "$WORK/mastodon.pgcustom"

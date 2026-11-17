@@ -10,7 +10,7 @@ mkdir -p "$BACKUP_ROOT"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-if docker ps --format '{{.Names}}' | grep -qw crow-writefreely; then
+if grep -qw crow-writefreely <<<"$(docker ps --format '{{.Names}}')"; then
   docker exec crow-writefreely sqlite3 /go/keys/writefreely.db \
     ".backup /go/keys/wf-backup-${STAMP}.db"
   docker cp "crow-writefreely:/go/keys/wf-backup-${STAMP}.db" "$WORK/writefreely.db"

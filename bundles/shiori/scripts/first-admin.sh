@@ -78,8 +78,8 @@ alive() {
 # token_of BODY: the login token from Shiori's answer, without ever printing it.
 token_of() {
   local t
-  t="$(printf '%s\n' "$1" | grep -o '"access_token"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | sed 's/^[^:]*:[[:space:]]*"//; s/"$//')"
-  [ -n "$t" ] || t="$(printf '%s\n' "$1" | grep -o '"token"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | sed 's/^[^:]*:[[:space:]]*"//; s/"$//')"
+  t="$(printf '%s\n' "$1" | grep -o '"access_token"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -n '1p' | sed 's/^[^:]*:[[:space:]]*"//; s/"$//')"
+  [ -n "$t" ] || t="$(printf '%s\n' "$1" | grep -o '"token"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -n '1p' | sed 's/^[^:]*:[[:space:]]*"//; s/"$//')"
   printf '%s' "$t"
 }
 
@@ -87,10 +87,10 @@ token_of() {
 # as a string, the id as digits — and nothing when it is not there. Neither prints the
 # object itself, so no secret can reach this script's output.
 str_field() {
-  printf '%s\n' "$1" | grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n 1 | sed 's/^[^:]*:[[:space:]]*"//; s/"$//' || true
+  printf '%s\n' "$1" | grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | sed -n '1p' | sed 's/^[^:]*:[[:space:]]*"//; s/"$//' || true
 }
 id_field() {
-  printf '%s\n' "$1" | grep -o "\"$2\"[[:space:]]*:[[:space:]]*[0-9][0-9]*" | head -n 1 | sed 's/^[^:]*:[[:space:]]*//' || true
+  printf '%s\n' "$1" | grep -o "\"$2\"[[:space:]]*:[[:space:]]*[0-9][0-9]*" | sed -n '1p' | sed 's/^[^:]*:[[:space:]]*//' || true
 }
 
 # ── wait for Shiori (a first start prepares its database first) ─────────────────────

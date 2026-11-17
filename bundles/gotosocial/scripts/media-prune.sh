@@ -11,7 +11,7 @@ set -euo pipefail
 CONTAINER="${GTS_CONTAINER:-crow-gotosocial}"
 DAYS="${GTS_MEDIA_RETENTION_DAYS:-14}"
 
-if ! docker ps --format '{{.Names}}' | grep -qw "$CONTAINER"; then
+if ! grep -qw -- "$CONTAINER" <<<"$(docker ps --format '{{.Names}}')"; then
   echo "gotosocial container not running — skipping prune"
   exit 0
 fi

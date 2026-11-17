@@ -17,7 +17,7 @@ fi
 
 echo "Waiting for Mastodon web to report healthy (up to 240s — first-boot migrations + asset precompile)…"
 for i in $(seq 1 48); do
-  if docker inspect crow-mastodon-web --format '{{.State.Health.Status}}' 2>/dev/null | grep -qw healthy; then
+  if grep -qw healthy <<<"$(docker inspect crow-mastodon-web --format '{{.State.Health.Status}}' 2>/dev/null)"; then
     echo "  → web healthy"
     break
   fi
@@ -26,7 +26,7 @@ done
 
 echo "Waiting for Mastodon streaming to report healthy (up to 60s)…"
 for i in $(seq 1 12); do
-  if docker inspect crow-mastodon-streaming --format '{{.State.Health.Status}}' 2>/dev/null | grep -qw healthy; then
+  if grep -qw healthy <<<"$(docker inspect crow-mastodon-streaming --format '{{.State.Health.Status}}' 2>/dev/null)"; then
     echo "  → streaming healthy"
     break
   fi
@@ -45,7 +45,7 @@ if [ -n "${MASTODON_S3_ENDPOINT:-}" ]; then
 fi
 
 for c in crow-mastodon-web crow-mastodon-streaming crow-mastodon-sidekiq; do
-  if ! docker inspect "$c" --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null | grep -qw crow-federation; then
+  if ! grep -qw crow-federation <<<"$(docker inspect "$c" --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null)"; then
     echo "WARN: $c is not on the crow-federation network — Caddy federation sites will not reach it by service name" >&2
   fi
 done

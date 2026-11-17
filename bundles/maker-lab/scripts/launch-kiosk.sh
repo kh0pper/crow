@@ -51,7 +51,7 @@ fi
 SCREEN_W=1920
 SCREEN_H=1080
 if command -v xrandr >/dev/null 2>&1; then
-  read -r SCREEN_W SCREEN_H < <(xrandr --current | awk '/\*/ {print $1; exit}' | awk -F'x' '{print $1" "$2}' || echo "1920 1080")
+  read -r SCREEN_W SCREEN_H < <(xrandr --current | awk '/\*/ && !seen {print $1; seen=1}' | awk -F'x' '{print $1" "$2}' || echo "1920 1080")
 fi
 LEFT_W=$((SCREEN_W * 2 / 3))
 RIGHT_W=$((SCREEN_W - LEFT_W))

@@ -76,7 +76,7 @@ answer_status() {
   case "$last" in
     [0-9][0-9][0-9]) printf '%s' "$last"; return 0 ;;
   esac
-  printf '%s' "$(printf '%s' "$1" | tail -n 2 | head -n 1 | tr -d '[:space:]')"
+  printf '%s' "$(printf '%s' "$1" | tail -n 2 | sed -n '1p' | tr -d '[:space:]')"
 }
 answer_redirect() {
   local last
@@ -197,7 +197,7 @@ confirmed=""
 resp="$(http_post "$(cfg_setpw)")"
 code="$(answer_status "$resp")"
 target="$(answer_redirect "$resp")"
-if [ "$code" = "302" ] && printf '%s' "$target" | grep -q 'login'; then confirmed=1; fi
+if [ "$code" = "302" ] && grep -q 'login' <<<"$target"; then confirmed=1; fi
 if [ -z "$confirmed" ]; then
   # TriliumNext did not say what it did. Its own login page decides: a password that is now
   # set may be Crow's, and a real login says whether it really is. A page that still offers

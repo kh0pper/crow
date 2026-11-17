@@ -11,7 +11,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # Postgres dump — use pg_dumpall to capture roles + schemas in one file
-if docker ps --format '{{.Names}}' | grep -qw crow-dendrite-postgres; then
+if grep -qw crow-dendrite-postgres <<<"$(docker ps --format '{{.Names}}')"; then
   docker exec -e PGPASSWORD="${MATRIX_POSTGRES_PASSWORD:-}" crow-dendrite-postgres \
     pg_dump -U dendrite -Fc -f /tmp/dendrite-${STAMP}.pgcustom dendrite
   docker cp "crow-dendrite-postgres:/tmp/dendrite-${STAMP}.pgcustom" "$WORK/dendrite.pgcustom"

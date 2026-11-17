@@ -90,7 +90,7 @@ esc() { local s="${1//\\/\\\\}"; printf '%s' "${s//\"/\\\"}"; }
 token_of() {
   printf '%s\n' "$1" | tr '>' '\n' \
     | sed -n -e 's/.*name="_token"[^>]*value="\([^"]*\)".*/\1/p' -e 's/.*value="\([^"]*\)"[^>]*name="_token".*/\1/p' \
-    | head -n 1 | tr -d '[:space:]'
+    | sed -n '1p' | tr -d '[:space:]'
 }
 
 # new_jar: the path of a fresh cookie jar inside the container, or nothing when the

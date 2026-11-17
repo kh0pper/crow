@@ -52,7 +52,7 @@ fi
 # Health-check wait — Frigate takes up to 120s on first boot while detector initializes
 echo "Waiting for Frigate to report healthy (up to 180s)..."
 for i in $(seq 1 36); do
-  if docker inspect crow-frigate --format '{{.State.Health.Status}}' 2>/dev/null | grep -qw healthy; then
+  if grep -qw healthy <<<"$(docker inspect crow-frigate --format '{{.State.Health.Status}}' 2>/dev/null)"; then
     echo "  → healthy"
     break
   fi

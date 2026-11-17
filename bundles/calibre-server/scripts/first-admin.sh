@@ -90,7 +90,9 @@ read_users() {
   USERS_RAW="$raw"
   return 0
 }
-has_account() { printf '%s\n' "$USERS_RAW" | grep -qxF -- "$ADMIN_USER"; }
+# The list is fed with a here-string, never a pipe: `grep -q` exits at the first match, and a
+# writer still writing would die of SIGPIPE — which `pipefail` would report as "no such account".
+has_account() { grep -qxF -- "$ADMIN_USER" <<<"$USERS_RAW"; }
 
 read_users || die "Calibre's account list could not be read; nothing was changed." 4
 if [ -n "$(printf '%s' "$USERS_RAW" | tr -d '[:space:]')" ]; then

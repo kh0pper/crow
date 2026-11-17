@@ -211,7 +211,9 @@ const FAKE_DOCKER = [
   // ── TriliumNext: curl, the request is a config on stdin ──────────────────────────
   'if [[ "$args" == *"curl -sS"* ]]; then',
   '  cfg="$(cat "$stdinf")"',
-  '  url="$(printf "%s\\n" "$cfg" | sed -n \'s/^url = "\\(.*\\)"$/\\1/p\' | head -n 1)"',
+  // `sed -n '1p'` reads its whole input; `head -n 1` leaves early and dies of SIGPIPE under
+  // this stub's `pipefail`, which would report a request the script DID make as failed.
+  '  url="$(printf "%s\\n" "$cfg" | sed -n \'s/^url = "\\(.*\\)"$/\\1/p\' | sed -n \'1p\')"',
   '  case "$url" in',
   '    http://127.0.0.1:8080/api/setup/status) next TL_SETUP "$FAKE_TL_SETUP" ;;',
   '    "http://127.0.0.1:8080/api/setup/new-document?skipDemoDb") next TL_NEWDB "$FAKE_TL_NEWDB" ;;',
