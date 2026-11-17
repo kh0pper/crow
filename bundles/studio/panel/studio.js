@@ -231,6 +231,15 @@ const MIDI_SCRIPT = await loadPanelScript("midi.js", "MIDI_SCRIPT");
 const MIDI_ROUTE_SCRIPT = await loadPanelScript("midi-route.js", "MIDI_ROUTE_SCRIPT");
 
 /**
+ * The pad input rules, loaded once: press velocity and the chromatic / 16
+ * velocity pitches, the SAME pure functions the pad grid, the 16 velocity mode
+ * and the on-screen keyboard all read. They reach the page before the client,
+ * which asks `window.StudioPadInput` for them; a page served without the script
+ * plays its pads plainly instead of failing (see panel/pad-input.js).
+ */
+const PAD_INPUT_SCRIPT = await loadPanelScript("pad-input.js", "PAD_INPUT_SCRIPT");
+
+/**
  * The shell's layout model, loaded once: which widget is on the page, in what
  * order and at which size is this device's own view state, and the model that
  * decides it comes BEFORE the shell that reads it and before the client, which
@@ -1102,6 +1111,32 @@ const STYLES = `
     flex: 0 0 auto; min-width: 44px; min-height: 44px;
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   }
+  /* The pad mode's three buttons and its scale and key pickers, on the same bar:
+     44 px targets each, and none of them selects its own label or calls out a
+     menu on a long press. */
+  .studio .st-pad-bar .st-pad-modes {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 0 0 auto;
+  }
+  .studio .st-pad-bar .st-pad-choice {
+    flex: 0 0 auto; min-width: 44px; min-height: 44px;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  /* The sensitivity popover: its summary is the 44 px control that opens it, and
+     its body holds the curve picker and the two ranges. */
+  .studio .st-pad-bar .st-pad-sense { flex: 0 0 auto; }
+  .studio .st-pad-bar .st-pad-sense-open {
+    display: flex; align-items: center; justify-content: center;
+    min-width: 44px; min-height: 44px; padding: 0 8px;
+    font-size: 12px; color: var(--st-text);
+    background: var(--st-head); border: 1px solid var(--st-line); border-radius: 8px;
+    cursor: pointer;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-pad-bar .st-pad-sense-body {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+    padding: 6px 0 0;
+  }
+  .studio .st-pad-bar .st-pad-sense-body .st-pad-range { flex: 1 1 140px; }
   .studio .st-pad-bar-note { flex: 1 1 100%; margin: 0; font-size: 11px; color: var(--st-muted); }
   .studio .st-import { position: relative; display: inline-flex; align-items: center; }
   .studio .st-file { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
@@ -1472,6 +1507,7 @@ async function libraryPage({ db, render, res }) {
       </div>
       <div class="st-toast" data-role="toast" hidden></div>
       <script>${TAKE_STORE_SCRIPT}
+${PAD_INPUT_SCRIPT}
 ${MIDI_ROUTE_SCRIPT}
 ${MIDI_SCRIPT}
 ${CLIENT_SCRIPT}</script>
@@ -1588,6 +1624,7 @@ function studioPage({ songId, render, res }) {
            client converts a take recorded at another rate with it, and so does
            its worker. -->
       <script>${TAKE_STORE_SCRIPT}
+${PAD_INPUT_SCRIPT}
 ${MIDI_ROUTE_SCRIPT}
 ${MIDI_SCRIPT}
 ${SHELL_LAYOUT_SCRIPT}

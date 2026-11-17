@@ -366,6 +366,7 @@ async function bootMidi(options = {}) {
   const { CLIENT_SCRIPT } = await import("../bundles/studio/panel/client.js");
   const { MIDI_SCRIPT } = await import("../bundles/studio/panel/midi.js");
   const { MIDI_ROUTE_SCRIPT } = await import("../bundles/studio/panel/midi-route.js");
+  const { PAD_INPUT_SCRIPT } = await import("../bundles/studio/panel/pad-input.js");
 
   const doc = options.doc || (await midiDoc());
   const res = {
@@ -481,7 +482,7 @@ async function bootMidi(options = {}) {
     "clearTimeout",
     "setInterval",
     "clearInterval",
-    `${MIDI_ROUTE_SCRIPT}\n${MIDI_SCRIPT}\n${clientText}`,
+    `${PAD_INPUT_SCRIPT}\n${MIDI_ROUTE_SCRIPT}\n${MIDI_SCRIPT}\n${clientText}`,
   );
   run(
     document,

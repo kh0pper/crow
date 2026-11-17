@@ -27,6 +27,7 @@ import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import studioPanel from "../bundles/studio/panel/studio.js";
 import { CLIENT_SCRIPT } from "../bundles/studio/panel/client.js";
+import { PAD_INPUT_SCRIPT } from "../bundles/studio/panel/pad-input.js";
 
 const YJS_URL = pathToFileURL(
   new URL("../bundles/studio/node_modules/yjs/dist/yjs.mjs", import.meta.url).pathname,
@@ -298,11 +299,23 @@ function fakeStudioEngine() {
         onSampleNeeded() {
           return () => {};
         },
-        livePad(trackId, bankId, index) {
-          engine.live.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+        livePad(trackId, bankId, index, v, locks, sourceIndex) {
+          engine.live.push({
+            track_id: String(trackId),
+            bank_id: String(bankId),
+            index: Number(index),
+            v: Number(v),
+            locks: locks && typeof locks === "object" ? locks : null,
+            source_index: sourceIndex === undefined || sourceIndex === null ? null : Number(sourceIndex),
+          });
         },
-        liveRelease(trackId, bankId, index) {
-          engine.releases.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+        liveRelease(trackId, bankId, index, sourceIndex) {
+          engine.releases.push({
+            track_id: String(trackId),
+            bank_id: String(bankId),
+            index: Number(index),
+            source_index: sourceIndex === undefined || sourceIndex === null ? null : Number(sourceIndex),
+          });
         },
         rollStart(trackId, bankId, index, interval, v) {
           engine.rolls.push({
@@ -467,7 +480,7 @@ async function bootClient(options = {}) {
     "clearTimeout",
     "setInterval",
     "clearInterval",
-    scriptText,
+    `${PAD_INPUT_SCRIPT}\n${scriptText}`,
   );
   run(
     document,
@@ -811,7 +824,7 @@ test("a cancelled pad press lets the pad go exactly once", async () => {
   await ui.settle();
   assert.deepEqual(
     ui.engine.live,
-    [{ track_id: SAMPLER_TRACK, bank_id: bankId, index: 0 }],
+    [{ track_id: SAMPLER_TRACK, bank_id: bankId, index: 0, v: 100, locks: null, source_index: 0 }],
     "the press played the pad",
   );
 
@@ -821,7 +834,7 @@ test("a cancelled pad press lets the pad go exactly once", async () => {
   await ui.settle();
   assert.deepEqual(
     ui.engine.releases,
-    [{ track_id: SAMPLER_TRACK, bank_id: bankId, index: 0 }],
+    [{ track_id: SAMPLER_TRACK, bank_id: bankId, index: 0, source_index: 0 }],
     "the cancelled press sends one liveRelease",
   );
 
@@ -911,4 +924,55 @@ test("visibilitychange to hidden calls rollStopAll and holds are left held", asy
   assert.equal(ui.engine.rollStopsAll, 1, "coming back does not end them a second time");
   assert.equal(hold().getAttribute("aria-pressed"), "true", "the hold was left held");
   assert.equal(rollKey(ui).getAttribute("aria-pressed"), "false", "while ROLL is up again");
+});
+
+// --- the touch velocity the device's pressure asks for (C5b-2) --------------
+
+/** One pad pressed with a finger the pointer says the pressure of. */
+function touchDown(ui, index, pressure) {
+  ui.pad(index).dispatchEvent(ui.event("pointerdown", { button: 0, pointer: { pressure } }));
+}
+
+/** A reading the device sends while the finger moves on the pad. */
+function touchMove(ui, index, pressure) {
+  ui.pad(index).dispatchEvent(ui.event("pointermove", { pointer: { pressure } }));
+}
+
+/** The finger coming up anywhere: the page hears it on the window. */
+function touchUp(ui) {
+  ui.fire("pointerup", {});
+}
+
+test("touch velocity stays at 100 for a constant reading, and a real one is used", async () => {
+  const ui = await bootClient({ sampler: true });
+  await ui.openSampler();
+
+  // A device that sends one constant reading has no pressure to report: many
+  // Android WebViews send 0.5 whatever the finger does.
+  for (let press = 0; press < 2; press += 1) {
+    touchDown(ui, 0, 0.5);
+    await ui.settle();
+    touchMove(ui, 0, 0.5);
+    touchUp(ui);
+    await ui.settle();
+  }
+  assert.deepEqual(ui.engine.live.map((one) => one.v), [100, 100],
+    "a constant reading plays at the fixed touch velocity, press after press");
+
+  // A press whose readings CHANGE within it is real pressure. That press still
+  // played at 100 (the page had not learned the device yet), and the presses
+  // after it take the reading at pointerdown.
+  touchDown(ui, 0, 0.3);
+  await ui.settle();
+  touchMove(ui, 0, 0.6);
+  touchUp(ui);
+  await ui.settle();
+
+  touchDown(ui, 0, 0.6);
+  await ui.settle();
+  touchUp(ui);
+  await ui.settle();
+
+  assert.equal(ui.engine.live[2].v, 100, "the press that taught the page played at the fixed 100");
+  assert.equal(ui.engine.live[3].v, 76, "0.6 of the reading range through the linear curve is 76");
 });
