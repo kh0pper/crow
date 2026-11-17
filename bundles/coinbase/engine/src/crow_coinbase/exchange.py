@@ -1,8 +1,9 @@
-"""Exchange adapters.
+"""Exchange adapters (multi-product).
 
 LiveExchange  - Coinbase Advanced Trade via the official coinbase-advanced-py SDK.
-DryRunExchange - same interface, simulated order book; fills are driven by live
-                 public 1-minute candles. Never sends an authenticated write.
+DryRunExchange - same interface, simulated order book for any number of products;
+                 fills are driven by live public 1-minute candles per product.
+                 Never sends an authenticated write.
 
 Normalized order dict: order_id, client_order_id, side, status, price, size,
                        filled_size, filled_value, total_fees
@@ -194,9 +195,8 @@ class LiveExchange:
 
     def __init__(
         self,
-        product_id: str,
         creds: dict,
-        market: Optional[MarketData] = None,
+        market_for: Optional[Callable[[str], MarketData]] = None,
         sleep=time.sleep,
     ):
         from coinbase.rest import RESTClient
@@ -205,9 +205,8 @@ class LiveExchange:
             raise PermanentError(
                 "live mode needs COINBASE_KEY_FILE or COINBASE_API_KEY/COINBASE_API_SECRET in .env"
             )
-        self.pid = product_id
         self.client = RESTClient(timeout=15, verbose=False, **creds)
-        self.market = market or MarketData(product_id, sleep=sleep)
+        self.market_for = market_for or (lambda p: MarketData(p, sleep=sleep))
         self.sleep = sleep
 
     # -- read
@@ -241,16 +240,39 @@ class LiveExchange:
                 return out
             cursor = r.get("cursor")
 
-    def list_open_orders(self) -> list[dict]:
-        out, cursor = [], None
+    def totals(self) -> dict[str, Decimal]:
+        """Per currency: available + held (the hold field may be absent)."""
+        out, cursor = {}, None
         while True:
             r = with_retry(
-                lambda: self.client.list_orders(
-                    product_ids=[self.pid],
-                    order_status=["OPEN"],
-                    limit=250,
-                    cursor=cursor,
-                ).to_dict(),
+                lambda: self.client.get_accounts(limit=250, cursor=cursor).to_dict(),
+                "accounts",
+                sleep=self.sleep,
+            )
+            for a in r.get("accounts", []):
+                avail = D(str(a["available_balance"]["value"]))
+                hold = D(str((a.get("hold") or {}).get("value") or "0"))
+                out[a["currency"]] = avail + hold
+            if not r.get("has_next"):
+                return out
+            cursor = r.get("cursor")
+
+    def server_time(self) -> float:
+        r = with_retry(
+            lambda: self.client.get_unix_time(),
+            "server_time",
+            sleep=self.sleep,
+        )
+        return float(r.to_dict()["epoch_seconds"])
+
+    def list_open_orders(self, product: Optional[str] = None) -> list[dict]:
+        out, cursor = [], None
+        while True:
+            kwargs = {"order_status": ["OPEN"], "limit": 250, "cursor": cursor}
+            if product:
+                kwargs["product_ids"] = [product]
+            r = with_retry(
+                lambda k=kwargs: self.client.list_orders(**k).to_dict(),
                 "list_open_orders",
                 sleep=self.sleep,
             )
@@ -267,17 +289,17 @@ class LiveExchange:
         )
         return _norm_order(r["order"])
 
-    def find_by_client_id(self, cid: str, since: float) -> Optional[dict]:
+    def find_by_client_id(
+        self, cid: str, since: float, product: Optional[str] = None
+    ) -> Optional[dict]:
         """Look an order up by client_order_id (used before re-sending after a timeout)."""
         cursor = None
         for _ in range(10):
+            kwargs = {"start_date": iso(since - 120), "limit": 250, "cursor": cursor}
+            if product:
+                kwargs["product_ids"] = [product]
             r = with_retry(
-                lambda: self.client.list_orders(
-                    product_ids=[self.pid],
-                    start_date=iso(since - 120),
-                    limit=250,
-                    cursor=cursor,
-                ).to_dict(),
+                lambda k=kwargs: self.client.list_orders(**k).to_dict(),
                 "find_by_client_id",
                 sleep=self.sleep,
             )
@@ -305,13 +327,15 @@ class LiveExchange:
             cursor = r.get("cursor")
 
     # -- write
-    def place_limit(self, cid: str, side: str, size: Decimal, price: Decimal) -> dict:
+    def place_limit(
+        self, cid: str, product: str, side: str, size: Decimal, price: Decimal
+    ) -> dict:
         """ONE attempt, post-only GTC limit. Returns {ok, order_id, reason}.
         Raises TransientError when the outcome is unknown (caller must look up by cid)."""
         try:
             r = self.client.limit_order_gtc(
                 client_order_id=cid,
-                product_id=self.pid,
+                product_id=product,
                 side=side,
                 base_size=format(size, "f"),
                 limit_price=format(price, "f"),
@@ -364,15 +388,22 @@ class LiveExchange:
 
 SIM_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sim_orders (
-  order_id TEXT PRIMARY KEY, client_order_id TEXT UNIQUE, side TEXT, price TEXT, size TEXT,
-  status TEXT, created_at REAL, filled_at REAL, fee TEXT DEFAULT '0');
+  order_id TEXT PRIMARY KEY, client_order_id TEXT UNIQUE, product TEXT, side TEXT,
+  price TEXT, size TEXT, status TEXT, created_at REAL, filled_at REAL,
+  fee TEXT DEFAULT '0');
 CREATE TABLE IF NOT EXISTS sim_balances (currency TEXT PRIMARY KEY, amount TEXT);
+CREATE TABLE IF NOT EXISTS sim_deposits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, currency TEXT, amount TEXT, note TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS sim_kv (key TEXT PRIMARY KEY, value TEXT);
 """
 
 
 class DryRunExchange:
     """Simulates the exchange in the dry-run database. Never sends an authenticated request.
+
+    One simulated account over any number of products: every currency of every product
+    lives in the same `sim_balances` table, and an open order holds funds in its own
+    product's currencies.
 
     Fill rule (conservative): a resting buy fills only if a later 1-minute candle traded
     strictly BELOW its price; a sell only if one traded strictly ABOVE. Candles that began
@@ -383,50 +414,80 @@ class DryRunExchange:
 
     def __init__(
         self,
-        product_id: str,
-        db,
-        market: MarketData,
+        conn_factory: Callable[[], sqlite3.Connection],
+        market_for: Callable[[str], MarketData],
         fee_rate: Decimal,
-        start_usdc: Decimal,
-        start_xrp: Decimal,
-        base="XRP",
-        quote="USDC",
     ):
-        self.pid, self.db, self.market, self.fee_rate = product_id, db, market, fee_rate
-        self.base, self.quote = base, quote
+        self.conn_factory = conn_factory
+        self.market_for = market_for
+        self.fee_rate = fee_rate
+
+    def _db(self) -> sqlite3.Connection:
+        """A connection for THIS call only (never cached, so threads never share one)."""
+        db = self.conn_factory()
         db.row_factory = sqlite3.Row
         db.executescript(SIM_SCHEMA)
-        if not db.execute("SELECT 1 FROM sim_balances").fetchone():
-            db.execute("INSERT INTO sim_balances VALUES(?,?)", (quote, str(start_usdc)))
-            db.execute("INSERT INTO sim_balances VALUES(?,?)", (base, str(start_xrp)))
+        return db
 
     # -- balances (total minus holds of open orders = available)
-    def _total(self, cur: str) -> Decimal:
-        return D(
-            self.db.execute(
-                "SELECT amount FROM sim_balances WHERE currency=?", (cur,)
-            ).fetchone()[0]
+    def _total(self, db, cur: str) -> Decimal:
+        r = db.execute(
+            "SELECT amount FROM sim_balances WHERE currency=?", (cur,)
+        ).fetchone()
+        return D(r[0]) if r else D(0)
+
+    def _add(self, db, cur: str, delta: Decimal) -> None:
+        db.execute(
+            "INSERT INTO sim_balances(currency,amount) VALUES(?,?)"
+            " ON CONFLICT(currency) DO UPDATE SET amount=excluded.amount",
+            (cur, str(self._total(db, cur) + delta)),
         )
 
-    def _add(self, cur: str, delta: Decimal) -> None:
-        self.db.execute(
-            "UPDATE sim_balances SET amount=? WHERE currency=?",
-            (str(self._total(cur) + delta), cur),
+    def deposit(self, currency: str, amount: Decimal, note: str) -> None:
+        db = self._db()
+        self._add(db, currency, D(amount))
+        db.execute(
+            "INSERT INTO sim_deposits(currency,amount,note,ts) VALUES(?,?,?,?)",
+            (currency, str(amount), note, time.time()),
         )
+
+    def _holds(self, db) -> dict[str, Decimal]:
+        """Currency -> funds held by OPEN orders, summed over every product."""
+        holds: dict[str, Decimal] = {}
+        for r in db.execute(
+            "SELECT product,side,price,size FROM sim_orders WHERE status='OPEN'"
+        ):
+            base, quote = r["product"].split("-", 1)
+            size, price = D(r["size"]), D(r["price"])
+            if r["side"] == BUY:
+                cur, amt = quote, size * price * (1 + self.fee_rate)
+            else:
+                cur, amt = base, size
+            holds[cur] = holds.get(cur, D(0)) + amt
+        return holds
+
+    def _balances(self, db) -> dict[str, Decimal]:
+        out = {
+            r["currency"]: D(r["amount"])
+            for r in db.execute("SELECT currency, amount FROM sim_balances")
+        }
+        for cur, amt in self._holds(db).items():
+            out[cur] = out.get(cur, D(0)) - amt
+        return out
 
     def balances(self) -> dict[str, Decimal]:
-        usdc, xrp = self._total(self.quote), self._total(self.base)
-        for r in self.db.execute(
-            "SELECT side,price,size FROM sim_orders WHERE status='OPEN'"
-        ):
-            if r[0] == BUY:
-                usdc -= D(r[2]) * D(r[1]) * (1 + self.fee_rate)
-            else:
-                xrp -= D(r[2])
-        return {self.quote: usdc, self.base: xrp}
+        return self._balances(self._db())
 
     def totals(self) -> dict[str, Decimal]:
-        return {self.quote: self._total(self.quote), self.base: self._total(self.base)}
+        """Every currency in the simulated account, INCLUDING open-order holds."""
+        db = self._db()
+        return {
+            r["currency"]: D(r["amount"])
+            for r in db.execute("SELECT currency, amount FROM sim_balances")
+        }
+
+    def server_time(self) -> float:
+        return time.time()
 
     def key_permissions(self) -> dict:
         return {}
@@ -450,29 +511,38 @@ class DryRunExchange:
             "total_fees": D(r["fee"]),
         }
 
-    def _q(self, sql, args=()):
-        return self.db.execute(sql, args)
+    def _find_cid(self, db, cid: str):
+        return db.execute(
+            "SELECT * FROM sim_orders WHERE client_order_id=?", (cid,)
+        ).fetchone()
 
-    def list_open_orders(self) -> list[dict]:
-        return [
-            self._row(r)
-            for r in self._q("SELECT * FROM sim_orders WHERE status='OPEN'")
-        ]
+    def list_open_orders(self, product: Optional[str] = None) -> list[dict]:
+        db = self._db()
+        if product is None:
+            rows = db.execute("SELECT * FROM sim_orders WHERE status='OPEN'")
+        else:
+            rows = db.execute(
+                "SELECT * FROM sim_orders WHERE status='OPEN' AND product=?",
+                (product,),
+            )
+        return [self._row(r) for r in rows]
 
     def get_order(self, order_id: str) -> dict:
-        r = self._q("SELECT * FROM sim_orders WHERE order_id=?", (order_id,)).fetchone()
+        db = self._db()
+        r = db.execute(
+            "SELECT * FROM sim_orders WHERE order_id=?", (order_id,)
+        ).fetchone()
         if not r:
             raise PermanentError("HTTP 404: order not found")
         return self._row(r)
 
     def find_by_client_id(self, cid: str, since: float) -> Optional[dict]:
-        r = self._q(
-            "SELECT * FROM sim_orders WHERE client_order_id=?", (cid,)
-        ).fetchone()
+        r = self._find_cid(self._db(), cid)
         return self._row(r) if r else None
 
     def fills(self, order_id: str) -> list[dict]:
-        r = self._q(
+        db = self._db()
+        r = db.execute(
             "SELECT * FROM sim_orders WHERE order_id=? AND status='FILLED'", (order_id,)
         ).fetchone()
         if not r:
@@ -490,36 +560,41 @@ class DryRunExchange:
             }
         ]
 
-    def place_limit(self, cid: str, side: str, size: Decimal, price: Decimal) -> dict:
-        existing = self.find_by_client_id(cid, 0)
+    def place_limit(
+        self, cid: str, product: str, side: str, size: Decimal, price: Decimal
+    ) -> dict:
+        db = self._db()
+        existing = self._find_cid(db, cid)
         if (
             existing
         ):  # same semantics as Coinbase: duplicate cid returns the existing order
             return {"ok": True, "order_id": existing["order_id"], "reason": None}
-        bid, ask = self.market.best_bid_ask()
+        base, quote = product.split("-", 1)
+        bid, ask = self.market_for(product).best_bid_ask()
         if (side == BUY and price >= ask) or (side == SELL and price <= bid):
             return {
                 "ok": False,
                 "order_id": None,
                 "reason": "INVALID_LIMIT_PRICE_POST_ONLY",
             }
-        bal = self.balances()
+        bal = self._balances(db)
         need = size * price * (1 + self.fee_rate) if side == BUY else size
-        have = bal[self.quote] if side == BUY else bal[self.base]
+        have = bal.get(quote if side == BUY else base, D(0))
         if need > have:
             return {"ok": False, "order_id": None, "reason": "INSUFFICIENT_FUND"}
         oid = "sim-" + uuid.uuid4().hex[:12]
-        self.db.execute(
-            "INSERT INTO sim_orders(order_id,client_order_id,side,price,size,status,created_at) "
-            "VALUES(?,?,?,?,?, 'OPEN', ?)",
-            (oid, cid, side, str(price), str(size), time.time()),
+        db.execute(
+            "INSERT INTO sim_orders(order_id,client_order_id,product,side,price,size,status,created_at) "
+            "VALUES(?,?,?,?,?,?, 'OPEN', ?)",
+            (oid, cid, product, side, str(price), str(size), time.time()),
         )
         return {"ok": True, "order_id": oid, "reason": None}
 
     def cancel(self, order_ids: list[str]) -> dict[str, bool]:
+        db = self._db()
         out = {}
         for oid in order_ids:
-            cur = self.db.execute(
+            cur = db.execute(
                 "UPDATE sim_orders SET status='CANCELLED' WHERE order_id=? AND status='OPEN'",
                 (oid,),
             )
@@ -528,38 +603,50 @@ class DryRunExchange:
 
     # -- simulation step
     def advance(self, now: float) -> list[str]:
-        """Fill resting orders that the market traded through since they were placed."""
-        open_rows = list(self._q("SELECT * FROM sim_orders WHERE status='OPEN'"))
+        """Fill resting orders that their own market traded through since placement."""
+        db = self._db()
+        open_rows = [
+            dict(r) for r in db.execute("SELECT * FROM sim_orders WHERE status='OPEN'")
+        ]
         if not open_rows:
             return []
-        oldest = min(r["created_at"] for r in open_rows)
-        candles = self.market.candles(oldest, now)
-        filled = []
+        by_product: dict[str, list[dict]] = {}
         for r in open_rows:
-            price, size = D(r["price"]), D(r["size"])
-            eligible = [c for c in candles if c["start"] >= r["created_at"]]
-            hit = next(
-                (
-                    c
-                    for c in eligible
-                    if (c["low"] < price if r["side"] == BUY else c["high"] > price)
-                ),
-                None,
-            )
-            if not hit:
-                continue
-            fee = size * price * self.fee_rate
-            if r["side"] == BUY:
-                self._add(self.quote, -(size * price + fee))
-                self._add(self.base, size)
-            else:
-                self._add(self.base, -size)
-                self._add(self.quote, size * price - fee)
-            self.db.execute(
-                "UPDATE sim_orders SET status='FILLED', filled_at=?, fee=? WHERE order_id=?",
-                (max(hit["start"] + 60, r["created_at"]), str(fee), r["order_id"]),
-            )
-            filled.append(r["client_order_id"])
+            by_product.setdefault(r["product"], []).append(r)
+        filled = []
+        for product, rows in by_product.items():
+            base, quote = product.split("-", 1)
+            oldest = min(r["created_at"] for r in rows)
+            candles = self.market_for(product).candles(oldest, now)
+            for r in rows:
+                price, size = D(r["price"]), D(r["size"])
+                eligible = [c for c in candles if c["start"] >= r["created_at"]]
+                hit = next(
+                    (
+                        c
+                        for c in eligible
+                        if (
+                            c["low"] < price
+                            if r["side"] == BUY
+                            else c["high"] > price
+                        )
+                    ),
+                    None,
+                )
+                if not hit:
+                    continue
+                fee = size * price * self.fee_rate
+                if r["side"] == BUY:
+                    self._add(db, quote, -(size * price + fee))
+                    self._add(db, base, size)
+                else:
+                    self._add(db, base, -size)
+                    self._add(db, quote, size * price - fee)
+                db.execute(
+                    "UPDATE sim_orders SET status='FILLED', filled_at=?, fee=? WHERE order_id=?",
+                    (max(hit["start"] + 60, r["created_at"]), str(fee), r["order_id"]),
+                )
+                filled.append(r["client_order_id"])
         return filled
 
 
