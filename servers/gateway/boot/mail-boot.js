@@ -23,7 +23,11 @@
  *      runs each account concurrently, so one unreachable server neither delays boot nor stops another
  *      account; the rejection is caught here anyway and logged as a code;
  *   5. calls `setMailApiRuntime({supervisor, adapterFactory})` so every later request shares this
- *      running supervisor instead of building its own.
+ *      running supervisor instead of building its own;
+ *   6. publishes the same supervisor to the send service (`setMailSendSupervisor`) and, only when
+ *      `mailEnabled()`, registers the `mail-send` scheduler hook that delivers held and scheduled
+ *      sends. `stop()` unregisters the hook, clears the supervisor and then closes what it opened, so
+ *      no tick outlives the connection it would borrow.
  *
  * `startMailSync` never throws: every failure is caught and reported through the log sink as an event
  * name and a MailError code, never as an error's text (a library's message can quote a server reply or
@@ -53,6 +57,8 @@ import { createMailCredentials, createRotationWriter } from "../mail/credentials
 import { mailEnabled } from "../mail/flag.js";
 import { toMailError } from "../mail/errors.js";
 import { createMailSupervisor, shouldRunMailSync } from "../mail/sync/supervisor.js";
+import { registerMailSendHook } from "../mail/send/hook.js";
+import { setMailSendSupervisor } from "../mail/send/send-service.js";
 import { clearMailApiRuntime, setMailApiRuntime } from "../routes/mail-api.js";
 
 /** The current handle, so the shutdown path can reach the supervisor `startMailSync` started. */
@@ -69,6 +75,24 @@ let starting = null;
  * when shutdown begins must not publish a runtime or leave a supervisor running behind the drain.
  */
 let shuttingDown = false;
+
+/**
+ * The mail-send scheduler hook this boot registered, or null. Kept here rather than in the handle
+ * because the shutdown path reaches it through `stopMailSync` as well as through the handle's `stop()`.
+ */
+let currentMailSendHook = null;
+
+/** Take back the scheduler hook this module registered, if any. Idempotent, and never a reason to fail. */
+function stopMailSendHook() {
+  const hook = currentMailSendHook;
+  currentMailSendHook = null;
+  if (hook == null) return;
+  try {
+    hook.unregister();
+  } catch {
+    // Unregistering is bookkeeping at shutdown; the process is going down either way.
+  }
+}
 
 /** One log line: an event name and, when there is one, an allow-listed code. Nothing else. */
 function defaultLog(line) {
@@ -305,6 +329,23 @@ async function beginStart(options) {
       .then(() => supervisor.start())
       .catch((err) => say({ event: "start_failed", code: toMailError(err).code }));
 
+    // The send service's own defaults (`withAdapter`, `requestSync`) are this running supervisor's, so
+    // held and scheduled sends deliver through the same borrowed connections the sync uses.
+    setMailSendSupervisor(supervisor);
+
+    // The scheduler tick that delivers those sends is registered only when mail is really on: behind a
+    // closed gate nothing registers, and an instance that never turned mail on never looks at a draft
+    // table. Its claim answer is the wrapper above, whose shape is `{claimed, instanceName}` — the
+    // supervisor's own copy of it is the strict boolean underneath.
+    if (mailEnabled(env) && currentMailSendHook == null) {
+      try {
+        currentMailSendHook = registerMailSendHook(db, { isClaimedElsewhere: claimOf });
+      } catch (err) {
+        // A hook that cannot register is a gateway without scheduled sends, never a failed boot.
+        say({ event: "hook_failed", code: toMailError(err).code });
+      }
+    }
+
     say({ event: "started" });
     return handle;
 
@@ -313,11 +354,14 @@ async function beginStart(options) {
       if (handle.stopped === true) return;
       handle.stopped = true;
       if (currentHandle === handle) currentHandle = null;
+      // The hook first: no tick may reach a supervisor this stop is taking away, or a db it closes.
+      stopMailSendHook();
       try {
         if (typeof supervisor.stop === "function") await supervisor.stop();
       } catch (err) {
         say({ event: "stop_failed", code: toMailError(err).code });
       }
+      setMailSendSupervisor(null);
       try {
         unpublishRuntime();
       } catch {
@@ -354,7 +398,12 @@ export async function stopMailSync() {
   shuttingDown = true;
   const handle = currentHandle;
   currentHandle = null;
-  if (handle == null) return false;
+  if (handle == null) {
+    // Nothing was started, so nothing may still point at a supervisor or a hook.
+    stopMailSendHook();
+    setMailSendSupervisor(null);
+    return false;
+  }
   await handle.stop();
   return true;
 }
