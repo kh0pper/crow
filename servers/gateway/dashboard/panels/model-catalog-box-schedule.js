@@ -21,6 +21,13 @@
  * reload the page so the section is re-rendered from the calendar itself —
  * never from a value the client guessed.
  *
+ * The buttons are drawn for whoever the dashboard let in; the authority is the
+ * API, not this markup. Every POST under `/api/box` answers
+ * `403 {code: "OWNER_REQUIRED"}` to anything but the owner's own local password
+ * session, and the section is rendered without a request (the panel handler
+ * passes only the schedule and the language), so it draws no verdict of its
+ * own — a refused click shows the API's error line under the table.
+ *
  * ABSOLUTE RULE: the client <script> at the bottom is built inside a
  * template literal and must never contain a literal backtick. Browser
  * strings are single/double quoted; the only `${…}` sequences are the

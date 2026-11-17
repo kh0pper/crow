@@ -20,6 +20,16 @@
  * argument (unused) purely so the call site in `boot/feature-mounts.js`
  * matches every sibling router's `xRouter(dashboardAuth)` shape.
  *
+ * A session is not enough to CHANGE the calendar: approve, decline and cancel
+ * are the owner's alone (`isLocalPasswordSessionOn`, the same rule the phone
+ * call approvals and connected services use), so a peer's single-sign-on
+ * session, a session minted by a login from this machine and this machine's
+ * own console all get `403 {code: "OWNER_REQUIRED"}`. There is no
+ * "cancel only your own booking" fallback: a non-owner cannot cancel at all.
+ * The gate runs for every POST under `/api/box`, before the lock and before
+ * any calendar or hold read, so a refused request writes nothing. Reading
+ * (`GET /api/box/schedule`) stays on the plain session gate.
+ *
  * The Funnel refusal is explicit and comes BEFORE the session check: a
  * request carrying `Tailscale-Funnel-Request` is answered 403 NETWORK_DENIED
  * whatever `CROW_DASHBOARD_PUBLIC` says, so this surface stays private even
@@ -42,7 +52,9 @@
 import { Router } from "express";
 import { createHash } from "node:crypto";
 
+import { createDbClient } from "../../db.js";
 import { requireDashboardSessionJson } from "./models.js";
+import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 import { csrfMiddleware } from "../dashboard/shared/csrf.js";
 import {
   approveBookingLocked, cancelBookingLocked, declineBookingLocked, listBookings,
@@ -170,6 +182,8 @@ function sendErr(res, err) {
  *   sibling router (`xRouter(dashboardAuth)`); NOT used — see module doc.
  * @param {object} [deps] - injectable seams (tests only; production omits
  *   all of these, using the real implementations imported above).
+ *   `isOwnerFn(db, req)` is the owner rule, `dbFactory()` mints the crow.db
+ *   client it reads (one per request, closed in `finally`).
  */
 export default function boxScheduleRouter(dashboardAuth, deps = {}) {
   const {
@@ -180,6 +194,8 @@ export default function boxScheduleRouter(dashboardAuth, deps = {}) {
     cancelFn = cancelBookingLocked,
     withLockAsyncFn = withReservationLockAsync,
     nowFn = Date.now,
+    isOwnerFn = isLocalPasswordSessionOn,
+    dbFactory = createDbClient,
   } = deps;
 
   const router = Router();
@@ -197,6 +213,31 @@ export default function boxScheduleRouter(dashboardAuth, deps = {}) {
   // Every /api/box route requires a valid dashboard session — the same gate
   // (and the same reasons) as /api/models.
   router.use("/api/box", requireDashboardSessionJson);
+
+  // ...and every POST under /api/box is the OWNER's alone, whatever the
+  // session says. A throw while asking (dbFactory, the rule itself) counts as
+  // not-owner: this is a refusal, never a 500, and it happens before the lock
+  // and before any calendar or hold read.
+  router.use("/api/box", async (req, res, next) => {
+    if (req.method !== "POST") return next();
+    let owner = false;
+    let db = null;
+    try {
+      db = dbFactory();
+      owner = (await isOwnerFn(db, req)) === true;
+    } catch {
+      owner = false;
+    } finally {
+      if (db) { try { db.close(); } catch { /* already closed */ } }
+    }
+    if (!owner) {
+      return res.status(403).json({
+        error: "Only the owner can change the box schedule",
+        code: "OWNER_REQUIRED",
+      });
+    }
+    return next();
+  });
 
   const badId = (id) => !BOOKING_ID_RE.test(String(id == null ? "" : id));
   const refuseId = (res) => res.status(400).json({
@@ -256,7 +297,7 @@ export default function boxScheduleRouter(dashboardAuth, deps = {}) {
     const id = req.params.id;
     if (badId(id)) return refuseId(res);
     try {
-      // The dashboard user IS the box owner, so a cancel is forced: a bot's or
+      // Only the owner reaches this handler, so a cancel is forced: a bot's or
       // the audit's booking is the owner's to drop. The booking's own owner is
       // read first, in the same critical section, so the calendar records who
       // the booking belonged to rather than guessing.

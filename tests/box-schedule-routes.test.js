@@ -9,6 +9,12 @@
  * the `oauth_tokens` row this seeds). The calendar and the hold file are
  * redirected into a scratch directory with CROW_BOX_SCHEDULE_PATH /
  * CROW_BOX_RESERVATION_PATH, so no test touches a real box.
+ *
+ * The mutating routes are the OWNER's alone. Most tests inject an owner-true
+ * seam so they exercise what they are about; the owner tests pass the real
+ * `isLocalPasswordSessionOn` over the scratch crow.db, with a session a
+ * peer's single sign-on minted (scopes 'dashboard sso') standing in for a
+ * signed-in non-owner.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -24,6 +30,7 @@ import {
 import boxScheduleRouter from "../servers/gateway/routes/box-schedule.js";
 import { book, listBookings, schedulePath } from "../servers/gateway/box-schedule.js";
 import { activateHold, reservationPath } from "../servers/gateway/box-reservation.js";
+import { isLocalPasswordSessionOn } from "../servers/gateway/dashboard/local-session.js";
 
 const SCRATCH = mkdtempSync(join(tmpdir(), "box-schedule-routes-"));
 process.env.CROW_BOX_RESERVATION_PATH = join(SCRATCH, "reservation.json");
@@ -52,11 +59,55 @@ after(async () => {
   rmSync(SCRATCH, { recursive: true, force: true });
 });
 
+/**
+ * The real owner rule over the scratch crow.db. `close()` is a no-op because the
+ * route closes the client it opened and the test's client is shared.
+ */
+function scratchOwnerDb(h) {
+  return () => ({ execute: (stmt) => h.db.execute(stmt), close: () => {} });
+}
+
+/** An owner-true seam, for the tests that are not about the owner gate. */
+const ownerYes = { isOwnerFn: async () => true };
+
+/** A session a peer's single sign-on minted: a valid dashboard session, never the owner. */
+async function seedSsoSession(db, token) {
+  await db.execute({
+    sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)",
+    args: [
+      createHash("sha256").update(token).digest("hex"),
+      "dashboard sso",
+      new Date(Date.now() + 60_000).toISOString(),
+    ],
+  });
+  return token;
+}
+
 /** The real router on an ephemeral port; `dashboardAuth` is accepted unused. */
-async function withBoxServer(fn) {
+async function withBoxServer(fn, deps = ownerYes) {
   const app = express();
   app.use(express.json());
-  app.use(boxScheduleRouter((req, res, next) => next()));
+  app.use(boxScheduleRouter((req, res, next) => next(), deps));
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await fn(base);
+  } finally {
+    server.close();
+  }
+}
+
+/**
+ * The real router behind a middleware standing in for the peer-auth layer,
+ * which marks a peer-signed request with `req.crossHostAuth` before the route
+ * sees it.
+ */
+async function withSignedPeerServer(fn, deps) {
+  const app = express();
+  app.use(express.json());
+  app.use((req, res, next) => { req.crossHostAuth = { peer: "peer-host" }; next(); });
+  app.use(boxScheduleRouter((req, res, next) => next(), deps));
   const server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -371,4 +422,138 @@ test("a corrupt hold file answers 503 hold_corrupt on approve", async () => {
 
   const stored = listBookings({ from: Date.now() - HOUR, to: Date.now() + 6 * HOUR });
   assert.equal(stored.find((b) => b.id === pending.id).approval.state, "pending");
+});
+
+// ---------------------------------------------------------------------------
+// The owner gate: a dashboard session is not enough to approve, decline or
+// cancel. The real isLocalPasswordSessionOn runs over the scratch crow.db.
+
+const storedRows = () => listBookings({ from: Date.now() - HOUR, to: Date.now() + 6 * HOUR });
+const rowFor = (rows, id) => rows.find((row) => row.id === id);
+
+/** A pending booking (approval) or a plain booked one, one hour out each. */
+function seedBooking(minutesAhead, overrides = {}) {
+  return book({
+    owner: "alex", kind: "manual", mode: "exclusive",
+    start: Date.now() + minutesAhead * 60_000, minutes: 30,
+    created_by: "test", ...overrides,
+  });
+}
+
+test("non-owner session gets 403 OWNER_REQUIRED on approve", async () => {
+  resetState();
+  const h = await harness();
+  const token = await seedSsoSession(h.db, "sso-approve-token");
+  const booking = seedBooking(60, { needs_approval: true, reason: "ask first" });
+  assert.equal(booking.approval.state, "pending");
+
+  await withBoxServer(async (base) => {
+    const r = await post(base, `/api/box/bookings/${booking.id}/approve`, authHeaders(token));
+    assert.equal(r.status, 403);
+    assert.equal((await r.json()).code, "OWNER_REQUIRED");
+  }, { isOwnerFn: isLocalPasswordSessionOn, dbFactory: scratchOwnerDb(h) });
+
+  assert.equal(rowFor(storedRows(), booking.id).approval.state, "pending", "nothing was decided");
+});
+
+test("non-owner session gets 403 OWNER_REQUIRED on decline", async () => {
+  resetState();
+  const h = await harness();
+  const token = await seedSsoSession(h.db, "sso-decline-token");
+  const booking = seedBooking(60, { needs_approval: true, reason: "ask first" });
+
+  await withBoxServer(async (base) => {
+    const r = await post(base, `/api/box/bookings/${booking.id}/decline`, authHeaders(token));
+    assert.equal(r.status, 403);
+    assert.equal((await r.json()).code, "OWNER_REQUIRED");
+  }, { isOwnerFn: isLocalPasswordSessionOn, dbFactory: scratchOwnerDb(h) });
+
+  assert.equal(rowFor(storedRows(), booking.id).approval.state, "pending", "nothing was decided");
+});
+
+test("non-owner session gets 403 OWNER_REQUIRED on cancel", async () => {
+  resetState();
+  const h = await harness();
+  const token = await seedSsoSession(h.db, "sso-cancel-token");
+  const booking = seedBooking(60, { owner: "nightly-audit", kind: "audit", reason: "audit" });
+
+  await withBoxServer(async (base) => {
+    const r = await post(base, `/api/box/bookings/${booking.id}/cancel`, authHeaders(token));
+    assert.equal(r.status, 403);
+    assert.equal((await r.json()).code, "OWNER_REQUIRED");
+  }, { isOwnerFn: isLocalPasswordSessionOn, dbFactory: scratchOwnerDb(h) });
+
+  assert.equal(rowFor(storedRows(), booking.id).status, "booked", "the booking is untouched");
+});
+
+test("owner session can approve, decline and cancel", async () => {
+  resetState();
+  const h = await harness();
+  const token = "owner-gate-session-token";
+  await seedSession(h.db, token);
+  const toApprove = seedBooking(60, { needs_approval: true, reason: "ask first" });
+  const toDecline = seedBooking(180, { needs_approval: true, reason: "ask first" });
+  const toCancel = seedBooking(300, { owner: "nightly-audit", kind: "audit", reason: "audit" });
+
+  await withBoxServer(async (base) => {
+    const approved = await post(base, `/api/box/bookings/${toApprove.id}/approve`, authHeaders(token));
+    assert.equal(approved.status, 200);
+    assert.equal((await approved.json()).booking.approval.state, "approved");
+
+    const declined = await post(base, `/api/box/bookings/${toDecline.id}/decline`, authHeaders(token));
+    assert.equal(declined.status, 200);
+    assert.equal((await declined.json()).booking.approval.state, "declined");
+
+    const cancelled = await post(base, `/api/box/bookings/${toCancel.id}/cancel`, authHeaders(token));
+    assert.equal(cancelled.status, 200);
+    assert.equal((await cancelled.json()).booking.status, "cancelled");
+  }, { isOwnerFn: isLocalPasswordSessionOn, dbFactory: scratchOwnerDb(h) });
+
+  const rows = storedRows();
+  assert.equal(rowFor(rows, toApprove.id).approval.state, "approved");
+  assert.equal(rowFor(rows, toDecline.id).approval.state, "declined");
+  assert.equal(rowFor(rows, toCancel.id).status, "cancelled");
+});
+
+test("a signed peer request (crossHostAuth) is refused", async () => {
+  resetState();
+  const h = await harness();
+  const token = "peer-signed-session-token";
+  await seedSession(h.db, token);
+  const pending = seedBooking(60, { needs_approval: true, reason: "ask first" });
+  const booked = seedBooking(180, { owner: "nightly-audit", kind: "audit", reason: "audit" });
+
+  await withSignedPeerServer(async (base) => {
+    for (const [path, label] of [
+      [`/api/box/bookings/${pending.id}/approve`, "approve"],
+      [`/api/box/bookings/${pending.id}/decline`, "decline"],
+      [`/api/box/bookings/${booked.id}/cancel`, "cancel"],
+    ]) {
+      const r = await post(base, path, authHeaders(token));
+      assert.equal(r.status, 403, label);
+      assert.equal((await r.json()).code, "OWNER_REQUIRED", label);
+    }
+  }, { isOwnerFn: isLocalPasswordSessionOn, dbFactory: scratchOwnerDb(h) });
+
+  const rows = storedRows();
+  assert.equal(rowFor(rows, pending.id).approval.state, "pending");
+  assert.equal(rowFor(rows, booked.id).status, "booked");
+});
+
+// GET stays the plain session gate: a non-owner may still read the schedule.
+test("non-owner session can still read the schedule", async () => {
+  resetState();
+  const h = await harness();
+  const token = await seedSsoSession(h.db, "sso-read-token");
+  const booking = seedBooking(60);
+
+  await withBoxServer(async (base) => {
+    const r = await fetch(`${base}/api/box/schedule?${rangeQuery(Date.now() - HOUR, Date.now() + 6 * HOUR)}`, {
+      headers: authHeaders(token),
+    });
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.bookings.length, 1);
+    assert.equal(body.bookings[0].id, booking.id);
+  }, { isOwnerFn: isLocalPasswordSessionOn, dbFactory: scratchOwnerDb(h) });
 });
