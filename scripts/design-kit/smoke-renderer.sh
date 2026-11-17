@@ -10,7 +10,9 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 IMG=crow-design-kit-renderer:smoke
 case "${1:-}" in
   up)
-    if ss -ltnH | awk '{print $4}' | grep -qE ':18018$'; then echo "18018 in use" >&2; exit 1; fi
+    # The whole listener table is read first, then grepped: `ss | awk | grep -q` made ss/awk
+    # die of SIGPIPE on grep's first match, and under pipefail that read as "port is free".
+    if grep -qE ':18018$' <<<"$(ss -ltnH | awk '{print $4}')"; then echo "18018 in use" >&2; exit 1; fi
     # Any failure from here on tears the half-built instance down.
     trap 'trap - ERR; "$0" down >&2' ERR
     docker build -t "$IMG" "$ROOT/bundles/design-kit/renderer"

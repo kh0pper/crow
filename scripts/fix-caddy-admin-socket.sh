@@ -116,7 +116,9 @@ DROP_IN_ONLY=0
 if [ -n "$ADMIN_OPTIONS" ]; then
   # Only the first word after `admin` counts: a trailing `{` or `# comment` on
   # the line does not change which address it names.
-  FIRST_ADMIN="$(printf '%s\n' "$ADMIN_OPTIONS" | head -n 1 | awk '{ print $2 }')"
+  # No `head -n 1` here: it stops reading after one line, and under pipefail the SIGPIPE it
+  # sends to the printer is a failure the caller would take for "no admin option".
+  FIRST_ADMIN="$(printf '%s\n' "$ADMIN_OPTIONS" | awk 'NR == 1 { print $2 }')"
   case "$FIRST_ADMIN" in
     off)
       log "Already set up: $CADDYFILE has 'admin off', so nothing on this machine can reach Caddy's admin API — nothing to do."

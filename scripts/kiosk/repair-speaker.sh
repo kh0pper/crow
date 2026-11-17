@@ -38,7 +38,9 @@ SCAN=$!
 trap 'kill "$SCAN" 2>/dev/null || true' EXIT
 seen=0
 for _ in $(seq 1 30); do
-  if "$BTCTL" devices 2>/dev/null | grep -qi "^Device $MAC"; then seen=1; break; fi
+  # Read the device list whole, then grep it: `bluetoothctl devices | grep -qi` ended grep at its
+  # first match and SIGPIPEd bluetoothctl, and under pipefail that read as "speaker not seen".
+  if grep -qi "^Device $MAC" <<<"$("$BTCTL" devices 2>/dev/null)"; then seen=1; break; fi
   sleep 2
 done
 [ "$seen" = 1 ] || { echo "speaker $MAC not seen: is it in pairing mode and near the Pi?" >&2; exit 1; }
@@ -52,7 +54,7 @@ step "trust"
 step "connect"
 ok=0
 for _ in 1 2 3; do
-  if "$BTCTL" connect "$MAC" && "$BTCTL" info "$MAC" | grep -q "Connected: yes"; then ok=1; break; fi
+  if "$BTCTL" connect "$MAC" && grep -q "Connected: yes" <<<"$("$BTCTL" info "$MAC")"; then ok=1; break; fi
   sleep 3
 done
 [ "$ok" = 1 ] || { echo "paired and trusted, but the connection did not come up" >&2; exit 1; }

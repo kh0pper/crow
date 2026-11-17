@@ -127,7 +127,8 @@ cmd_bundle_status() {
     bundle_id=$(basename "$bundle_dir")
 
     if [ -f "${bundle_dir}docker-compose.yml" ]; then
-      status=$(cd "$bundle_dir" && docker compose ps --format "{{.Status}}" 2>/dev/null | head -1 || echo "unknown")
+      # `sed -n 1p`, not `head -1`: head stops reading at the first line and SIGPIPEs docker.
+      status=$(cd "$bundle_dir" && docker compose ps --format "{{.Status}}" 2>/dev/null | sed -n '1p' || echo "unknown")
       if [ -z "$status" ]; then
         status="stopped"
       fi
@@ -178,7 +179,7 @@ cmd_bundle_install() {
   # container runtime env, not compose's YAML-level substitution.
   if [ -f "${dest_dir}/docker-compose.yml" ] && [ ! -e "${dest_dir}/.env" ]; then
     local shared_env
-    shared_env=$(grep -oE '\$\{HOME\}/\.crow/env/[^[:space:]"]+' "${dest_dir}/docker-compose.yml" | head -1 | sed "s|\${HOME}|$HOME|")
+    shared_env=$(grep -oE '\$\{HOME\}/\.crow/env/[^[:space:]"]+' "${dest_dir}/docker-compose.yml" | sed -n '1p' | sed "s|\${HOME}|$HOME|")
     if [ -n "$shared_env" ] && [ -f "$shared_env" ]; then
       ln -s "$shared_env" "${dest_dir}/.env"
       echo "Linked .env -> $shared_env (for YAML substitution)"

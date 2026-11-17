@@ -124,7 +124,8 @@ grep -q "${VOLUME_KEY}:${PROFILE_DIR}" "$SOURCE/docker-compose.yml" \
 # configs `content:` (the token file) needs Docker Compose 2.23.1+.
 CV="$("$DOCKER" compose version --short 2>/dev/null | sed 's/^v//')"
 [ -n "$CV" ] || fail "cannot run '$DOCKER compose version'"
-[ "$(printf '%s\n%s\n' 2.23.1 "$CV" | sort -V | head -n 1)" = "2.23.1" ] || fail "Docker Compose $CV is older than 2.23.1 (the new compose's token file needs it)"
+# `sed -n 1p` and not `head -n 1`: head stops reading at the first line and SIGPIPEs `sort`.
+[ "$(printf '%s\n%s\n' 2.23.1 "$CV" | sort -V | sed -n '1p')" = "2.23.1" ] || fail "Docker Compose $CV is older than 2.23.1 (the new compose's token file needs it)"
 
 # ---- 1. checks --------------------------------------------------------------
 label() { "$DOCKER" inspect "$CONTAINER" --format "{{index .Config.Labels \"$1\"}}" 2>/dev/null; }
@@ -150,7 +151,13 @@ RELAY_GID="$(stat -c %g "$INSTANCE_HOME" 2>/dev/null)"
 if [ "$RELAY_UID" = 0 ] && [ "$ALLOW_ROOT_GATEWAY" != 1 ]; then
   fail "$INSTANCE_HOME is owned by root (uid 0), so the CDP relay would listen as root and a walled browser add-on would be refused its own browser. Run Crow as a non-root user, or pass --allow-root-gateway if this instance really is a root gateway."
 fi
-if "$DOCKER" inspect "$CONTAINER" --format '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' | grep -qx "$PROFILE_DIR"; then
+# Read the mounts first and grep the text from a here-string: `docker inspect … | grep -qx`
+# ended grep at its first match and SIGPIPEd docker, and under `set -o pipefail` that also
+# read as "no match" — the refusal below would be skipped and a container that already has
+# this volume would be migrated under itself. A failed inspect is a refusal too.
+MOUNTS="$("$DOCKER" inspect "$CONTAINER" --format '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' 2>/dev/null)" \
+  || fail "cannot read the mounts of '$CONTAINER' (docker inspect failed): refusing to move a profile it may already have"
+if grep -qx "$PROFILE_DIR" <<<"$MOUNTS"; then
   fail "'$CONTAINER' already has a volume on $PROFILE_DIR: nothing to move"
 fi
 IMAGE="$("$DOCKER" inspect "$CONTAINER" --format '{{.Image}}')"
