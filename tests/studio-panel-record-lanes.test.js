@@ -288,6 +288,7 @@ function fakeMeter() {
     levels: [],
     active: [],
     cleared: 0,
+    clears: [],
     disposed: false,
     listeners: [],
     onLevel(listener) {
@@ -297,8 +298,9 @@ function fakeMeter() {
     setActive(on) {
       meter.active.push(on === true);
     },
-    clearClip() {
+    clearClip(seq) {
       meter.cleared += 1;
+      meter.clears.push(Number(seq) || 0);
     },
     dispose() {
       meter.disposed = true;
@@ -507,6 +509,7 @@ async function bootLanes(options = {}) {
     socket.readyState = 3;
   };
 
+  const windowListeners = {};
   const windowStub = {
     crypto: globalThis.crypto,
     innerWidth: 1280,
@@ -538,8 +541,14 @@ async function bootLanes(options = {}) {
       return frames.length;
     },
     cancelAnimationFrame() {},
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(name, handler) {
+      (windowListeners[name] ||= []).push(handler);
+    },
+    removeEventListener(name, handler) {
+      const list = windowListeners[name] || [];
+      const at = list.indexOf(handler);
+      if (at >= 0) list.splice(at, 1);
+    },
   };
 
   // The page's own two shell scripts, in the order it carries them: the layout
@@ -701,6 +710,10 @@ async function bootLanes(options = {}) {
     /** Move the context's own clock, in seconds. */
     setClock(seconds) {
       context.currentTime = Number(seconds) || 0;
+    },
+    /** Fire one of the window's own events, the way the browser would. */
+    fireWindow(name, made) {
+      for (const handler of [...(windowListeners[name] || [])]) handler(made);
     },
   };
 }
@@ -1047,8 +1060,8 @@ test("a level message moves the meter fill, the peak text and the CLIP chip, and
   assert.equal(clip().hidden, true, "and the chip goes at once");
   meter.post({ frame: 48200, peak: 0.7, rms: 0.4, clipped: false });
   assert.equal(clip().hidden, true, "a sample that did not clip does not bring it back");
-  meter.post({ frame: 48300, peak: 1.1, rms: 0.7, clipped: true });
-  assert.equal(clip().hidden, false, "a clipped one does");
+  meter.post({ frame: 48300, peak: 1.1, rms: 0.7, clipped: true, clearSeq: ui.view().recMeter.clear_seq });
+  assert.equal(clip().hidden, false, "a clipped one at the current sequence does");
 
   // The peak stands still for its hold, then falls towards what the input is
   // doing now (a quiet reading, so the fall is what is drawn).
@@ -1187,6 +1200,28 @@ const BPM = 120;
 const RATE = 48000;
 const FRAMES_PER_BAR = ((RATE * 60) / BPM) * 4;
 
+/**
+ * Arm the audio track and land a take on it, the way the waveform case does.
+ * @param {object} ui a booted lanes page
+ * @param {{frame?: number, bar?: number}} [options]
+ * @returns {Promise<{meter: object, rec: object}>}
+ */
+async function startTake(ui, options = {}) {
+  const frame = options.frame === undefined ? ARM_FRAME : options.frame;
+  const bar = options.bar === undefined ? 0 : options.bar;
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the meter");
+  const meter = ui.engine.meters[0];
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  for (const listener of ui.engine.launches) {
+    listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar, frame });
+  }
+  await ui.settle();
+  return { meter, rec: ui.view().rec };
+}
+
 test("the waveform lands on its own frames and the playhead sits at the audible frame", async () => {
   // A context that is five seconds in, on an output that reports 50 ms of
   // latency: a page that painted the newest report would put the playhead at
@@ -1205,6 +1240,11 @@ test("the waveform lands on its own frames and the playhead sits at the audible 
     listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 0, frame: ARM_FRAME });
   }
   await ui.settle();
+  // The audible playhead is the one the transport is running on (F8): Play is
+  // the page's own flag, and a take does not stand in for it.
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  assert.equal(ui.view().playing, true, "the transport runs");
 
   const rec = ui.view().rec;
   assert.equal(rec.active, true, "the take is armed on the frame the launch reported");
@@ -1268,6 +1308,146 @@ test("the waveform lands on its own frames and the playhead sits at the audible 
   assert.equal(ui.view().recWave.ring.newestFrame, nextPass, "no column of the pass before it is left in the ring");
 });
 
+test("the live waveform is drawn over the bars its pass covers", async () => {
+  const ui = await bootLanes({ latency: TAP_LATENCY, clock: 5, outputLatency: OUTPUT_LATENCY });
+  const { meter, rec } = await startTake(ui, { bar: 8 });
+  // The clip this take lands in is four bars long, so each pass is four bars.
+  rec.length_bars = 4;
+  rec.loop_frames = 4 * 4 * rec.fpb;
+  await ui.pushState();
+
+  const canvas = () => ui.document.querySelector("[data-role=rec-wave]");
+  assert.ok(canvas(), "the record target's lane carries the canvas");
+  assert.equal(ui.view().recLanesBars, 32, "the lane's axis is the timeline's thirty-two bars");
+  assert.equal(canvas().style.left, "25%", "a pass starting on the lane's bar 8 starts a quarter along");
+  assert.equal(canvas().style.width, "12.5%", "and a four-bar pass is an eighth of the lane wide");
+
+  // The next loop is another clip length along the same axis.
+  const nextPass = ARM_FRAME + Math.round(rec.loop_frames);
+  const offset = Math.max(0, Math.round(Number(rec.offset_frames) || 0));
+  meter.post({
+    frame: nextPass + offset,
+    peak: 0.25,
+    rms: 0.1,
+    cols: new Float32Array([nextPass + offset, -0.25, 0.25]),
+  });
+  assert.equal(ui.view().recWave.pass, 1, "the lane draws the second pass now");
+  assert.equal(canvas().style.left, "37.5%", "which starts one clip length after the first");
+  assert.equal(canvas().style.width, "12.5%", "and is the same length");
+});
+
+test("the playhead follows the audible clock outside a take while the transport plays", async () => {
+  const ui = await bootLanes({ clock: 5, outputLatency: OUTPUT_LATENCY });
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  assert.equal(ui.view().playing, true, "the transport runs");
+  assert.equal(ui.view().rec, null, "and nothing is being recorded");
+
+  const reportFrame = 200000;
+  for (const listener of ui.engine.positions) {
+    listener({ bar: 1, beat: 1, sixteenth: 1, frame: reportFrame });
+  }
+  await ui.settle();
+
+  const heardBar = (5 - OUTPUT_LATENCY) * RATE - reportFrame;
+  const expected = String(Math.round(((heardBar / FRAMES_PER_BAR) / 32) * 100 * 1000) / 1000) + "%";
+  assert.equal(
+    String(ui.document.querySelector("[data-role=rec-playhead]").style.left),
+    expected,
+    "the line is on the frame that is heard, not the one the report named",
+  );
+});
+
+test("a clip reading from before the CLIP click does not relight the chip", async () => {
+  const ui = await bootLanes();
+  await ui.mode("record");
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => ui.engine.meters.length === 1, "the meter");
+  const meter = ui.engine.meters[0];
+  const clip = () => ui.document.querySelector("[data-role=rec-clip]");
+
+  meter.post({ frame: 48000, peak: 1, rms: 0.5, clipped: true, clearSeq: 0 });
+  assert.equal(clip().hidden, false, "a clipped sample latches the chip");
+
+  ui.click("[data-role=rec-clip]");
+  assert.equal(meter.clears[meter.clears.length - 1], 1, "the click names its sequence to the meter");
+  assert.equal(clip().hidden, true, "and the chip goes at once");
+
+  // A message already on its way when the click happened carries the sequence
+  // the engine had then, which is older than the click.
+  meter.post({ frame: 48400, peak: 1, rms: 0.5, clipped: true, clearSeq: 0 });
+  assert.equal(clip().hidden, true, "a reading from before the click does not relight it");
+
+  meter.post({ frame: 48800, peak: 1, rms: 0.5, clipped: true, clearSeq: 1 });
+  assert.equal(clip().hidden, false, "a new clipped sample at the current sequence does");
+});
+
+test("a rebuild inside the meter's load window keeps one live meter and disposes the stale one", async () => {
+  const ui = await bootLanes();
+  await ui.mode("record");
+  const builds = [];
+  // The engine holds each meter back, so a case can disarm and arm again while
+  // the first build is still on its way.
+  ui.engine.createInputMeter = (options) => new Promise((resolve) => {
+    const meter = fakeMeter();
+    meter.input = options ? options.input : null;
+    builds.push({ meter, resolve });
+  });
+
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => builds.length === 1, "the first meter build");
+  await ui.arm(AUDIO_TRACK);
+  await ui.arm(AUDIO_TRACK);
+  await ui.waitFor(() => builds.length === 2, "the rebuilt meter");
+
+  builds[0].resolve(builds[0].meter);
+  builds[1].resolve(builds[1].meter);
+  await ui.settle(24);
+
+  assert.equal(builds[0].meter.disposed, true, "the stale build's meter is disposed, not kept");
+  assert.equal(builds[1].meter.disposed, false, "the current build's meter is kept");
+  assert.equal(ui.view().armed[AUDIO_TRACK].meter, builds[1].meter, "the arm holds the current meter");
+  assert.equal(ui.document.querySelectorAll("[data-role=rec-meter]").length, 1, "one meter on the page");
+  const live = builds.filter((build) => build.meter.disposed !== true).length;
+  assert.equal(live, 1, "and exactly one live meter");
+});
+
+test("many level messages measure the lane once", async () => {
+  const ui = await bootLanes({ latency: TAP_LATENCY, clock: 5, outputLatency: OUTPUT_LATENCY });
+  const { meter } = await startTake(ui);
+
+  const body = ui.lane(AUDIO_TRACK).querySelector("[data-role=rec-lane-body]");
+  assert.ok(body, "the target lane's body is on the page");
+  let reads = 0;
+  Object.defineProperty(body, "clientWidth", {
+    configurable: true,
+    get() {
+      reads += 1;
+      return 480;
+    },
+  });
+  assert.equal(reads, 0, "nothing has measured the lane since it was drawn");
+
+  const cols = new Float32Array([ARM_FRAME, -0.5, 0.5]);
+  for (let index = 0; index < 60; index += 1) {
+    meter.post({ frame: ARM_FRAME + index * 480, peak: 0.5, rms: 0.2, cols });
+  }
+  assert.equal(reads, 1, "sixty level messages measure the lane once");
+
+  for (let index = 0; index < 60; index += 1) {
+    meter.post({ frame: ARM_FRAME + index * 480, peak: 0.5, rms: 0.2, cols });
+  }
+  assert.equal(reads, 1, "and not again while the lane has not changed");
+
+  // A resize says the lane may be another width now: the next reading measures
+  // it once, and every reading after that uses what it found.
+  ui.fireWindow("resize", new ui.domWindow.Event("resize"));
+  for (let index = 0; index < 60; index += 1) {
+    meter.post({ frame: ARM_FRAME + index * 480, peak: 0.5, rms: 0.2, cols });
+  }
+  assert.equal(reads, 2, "the resize costs one measurement, not one a message");
+});
+
 test("the lanes' one animation frame loop stops when the widget is hidden and when nothing is armed", async () => {
   const ui = await bootLanes();
   await ui.mode("record");
@@ -1296,4 +1476,36 @@ test("the lanes' one animation frame loop stops when the widget is hidden and wh
   await ui.arm(AUDIO_TRACK);
   ui.runFrames(2);
   assert.equal(ui.frames.length, 0, "a disarmed target leaves no loop running");
+});
+
+// ---- a phone's bar axis (F7) ---------------------------------------------
+
+/** The studio sheet's phone block, as text. */
+function phoneRules(html) {
+  const style = /<style>([\s\S]*?)<\/style>/.exec(String(html));
+  assert.ok(style, "the page carries the studio sheet");
+  const found = /@media \(max-width: 639px\) \{([\s\S]*?)\n  \}/.exec(style[1]);
+  assert.ok(found, "the sheet has a phone block");
+  return found[1];
+}
+
+test("on a phone the ruler drops its side column so the bars line up with the lanes", async () => {
+  const res = {
+    html: "",
+    send(body) {
+      this.html = String(body);
+    },
+  };
+  await (await import("../bundles/studio/panel/studio.js")).default.handler(
+    { query: { song: "song-1" }, headers: {} },
+    res,
+    { db: panelDb(), layout: minimalLayout },
+  );
+  const phone = phoneRules(res.html);
+  assert.match(
+    phone,
+    /\.studio \.st-rec-ruler \{[^}]*grid-template-columns: minmax\(0, 1fr\)/,
+    "the ruler is one column, like the stacked lane body it sits over",
+  );
+  assert.doesNotMatch(phone, /116px/, "the 116 px side column is gone");
 });

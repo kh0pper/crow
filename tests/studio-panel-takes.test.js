@@ -826,6 +826,37 @@ test("with the editor showing the same clip the takes widget leaves it alone", a
   assert.equal(ui.document.querySelectorAll("[data-role=comp-bar]").length, 1, "still one comp bar on the page");
 });
 
+test("with the timeline's takes row open the takes widget leaves the clip to it", async () => {
+  const ui = await bootTakesPanel();
+  await armRecordClip(ui);
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  assert.equal(
+    ui.document.querySelector("[data-role=timeline]").hidden,
+    false,
+    "the timeline is on the page",
+  );
+
+  ui.page.__studioTest.view.takesOpen[AUDIO_TRACK] = true;
+  await ui.pushState();
+
+  assert.ok(
+    ui.document.querySelector("[data-role=timeline-takes]"),
+    "the timeline draws its own take rows for the lane",
+  );
+  assert.equal(
+    ui.document.querySelectorAll(`[data-role=takes-lane][data-clip-id=${CLIP}]`).length,
+    1,
+    "the page carries exactly one takes lane for the clip",
+  );
+  assert.equal(ui.document.querySelectorAll("[data-role=comp-bar]").length, 1, "and one comp bar");
+  assert.equal(
+    takesWidget(ui).querySelector("[data-role=takes-lane]"),
+    null,
+    "the takes widget leaves the clip to the timeline's row",
+  );
+});
+
 test("a take that lands appears in the takes widget without a manual refresh", async () => {
   const ui = await bootTakesPanel();
   recordMode(ui);

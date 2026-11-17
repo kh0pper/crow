@@ -1215,8 +1215,11 @@ const STYLES = `
      nowhere else. It is a picture, so a press goes straight through it, and the
      lane is taller so the picture and the meter both have room. */
   .studio .st-rec-lane-target .st-rec-lane-body { height: 128px; }
+  /* The canvas sits over the span the pass being recorded covers on the lane's
+     own bar axis (the client sets left and width), so the waveform grows under
+     the playhead rather than across the whole lane. */
   .studio .st-rec-wave {
-    position: absolute; left: 0; right: 0; top: 0; display: block;
+    position: absolute; left: 0; top: 0; display: block;
     width: 100%; height: 68px; pointer-events: none;
   }
   /* A phone keeps the lane headers narrow enough to leave a usable bar axis,
@@ -1224,7 +1227,11 @@ const STYLES = `
      across the page, its meter and controls with it. A take row wraps its
      buttons under the name, so nothing has to be scrolled sideways. */
   @media (max-width: 639px) {
-    .studio .st-rec-ruler { grid-template-columns: 116px minmax(0, 1fr); }
+    /* The ruler drops its side column with the lanes: a stacked lane body starts
+       at x=0, so the ruler's bar numbers and section bands do too, and the Bars
+       label rides inline above them instead of taking a column of its own. */
+    .studio .st-rec-ruler { grid-template-columns: minmax(0, 1fr); }
+    .studio .st-rec-ruler .st-rec-side { border-right: 0; padding: 2px 8px; }
     .studio .st-rec-lane { grid-template-columns: minmax(0, 1fr); }
     .studio .st-rec-lane .st-rec-side { border-right: 0; border-bottom: 1px solid var(--st-line); }
     .studio .st-rec-meter-track { width: 72px; }
