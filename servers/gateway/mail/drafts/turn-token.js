@@ -8,9 +8,11 @@
  * store is this module's own memory and why the map is keyed by the token's SHA-256: the raw value is
  * handed to the turn once and is not kept here to leak from a heap dump or a log.
  *
- * A token is bound to three things, all supplied by the turn that mints it:
+ * A token is bound to four things, all supplied by the turn that mints it:
  *   - `draftId` and `turnId`, so the mount can tell one draft's thread from another's (and one turn of
  *     the same draft from the next);
+ *   - `botId`, the bot the turn runs as, so the mount can refuse a signature presented for any other
+ *     bot of the same tuple;
  *   - `startHash`, the draft's head hash at the moment the turn started, so `mail_draft_propose` can
  *     refuse a revision written against a draft the person has edited since (the store's compare-and-set
  *     takes that hash as `expectHash`).
@@ -35,11 +37,11 @@ const TOKEN_BYTES = 32;
  */
 const DEFAULT_TURN_TIMEOUT_MS = 600_000;
 /** The margin on top of the turn's timeout (plan 3, review 2 should-fix S2). */
-const TURN_TOKEN_MARGIN_MS = 60_000;
+export const TURN_TOKEN_MARGIN_MS = 60_000;
 
 /**
  * Live tokens: `sha256(token)` hex → the claims it was minted for. Module memory, never a file.
- * @type {Map<string, {draftId: string, turnId: string, startHash: string, expiresAt: number}>}
+ * @type {Map<string, {draftId: string, turnId: string, botId: string, startHash: string, expiresAt: number}>}
  */
 const turnTokens = new Map();
 
@@ -79,19 +81,22 @@ export function turnTokenTtlMs(env = process.env) {
  * Mint one turn's token. Returns the raw value (the only copy of it that exists) and stores nothing but
  * its hash.
  *
- * @param {{draftId: string, turnId: string, startHash: string,
- *   ttlMs?: number}} fields `startHash` is the draft's head hash when the turn started
+ * @param {{draftId: string, turnId: string, botId: string, startHash: string,
+ *   ttlMs?: number}} fields `startHash` is the draft's head hash when the turn started, `botId` the
+ *   bot the turn runs as, `ttlMs` the turn's own timeout plus the margin (defaulted here when a caller
+ *   has none)
  * @returns {string} the bearer token, `mdt_` + 32 random bytes as hex
  */
-export function mintTurnToken({ draftId, turnId, startHash, ttlMs } = {}) {
+export function mintTurnToken({ draftId, turnId, botId, startHash, ttlMs } = {}) {
   const draft = requireText(draftId, "draftId");
   const turn = requireText(turnId, "turnId");
+  const bot = requireText(botId, "botId");
   const head = requireText(startHash, "startHash");
   const ttl = Number.isFinite(ttlMs) && ttlMs >= 0 ? Number(ttlMs) : turnTokenTtlMs();
   const now = Date.now();
   sweep(now);
   const token = TURN_TOKEN_PREFIX + randomBytes(TOKEN_BYTES).toString("hex");
-  turnTokens.set(sha256Hex(token), { draftId: draft, turnId: turn, startHash: head, expiresAt: now + ttl });
+  turnTokens.set(sha256Hex(token), { draftId: draft, turnId: turn, botId: bot, startHash: head, expiresAt: now + ttl });
   return token;
 }
 
@@ -112,7 +117,7 @@ export function revokeTurnToken(token) {
  * is by the hash of the exact string, so a token with one character changed is simply not in the map.
  *
  * @param {string} token
- * @returns {{draftId: string, turnId: string, startHash: string}|null}
+ * @returns {{draftId: string, turnId: string, botId: string, startHash: string, expiresAt: number}|null}
  */
 export function verifyTurnToken(token) {
   if (typeof token !== "string" || !token.startsWith(TURN_TOKEN_PREFIX)) return null;
@@ -123,7 +128,13 @@ export function verifyTurnToken(token) {
     turnTokens.delete(key);
     return null;
   }
-  return { draftId: entry.draftId, turnId: entry.turnId, startHash: entry.startHash };
+  return {
+    draftId: entry.draftId,
+    turnId: entry.turnId,
+    botId: entry.botId,
+    startHash: entry.startHash,
+    expiresAt: entry.expiresAt,
+  };
 }
 
 /** Test seam only: forget every minted token (module state is per process, like a restart). */

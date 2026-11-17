@@ -70,7 +70,7 @@ import { createEgressRelay } from "./pi_egress.mjs";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
 import { botSessionEnv } from "./actor-env.mjs";
-import { impliedServers } from "./mcp_writer.mjs";
+import { impliedServers, DRAFTING_TURN_TOOLS, MAIL_DRAFT_SERVER, isDraftingTurnTools } from "./mcp_writer.mjs";
 import { SECRETS_SERVER } from "./crow-server-catalog.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // C-11: the per-turn world assembly (identity + spawn readiness) lives in
@@ -425,7 +425,16 @@ export function canonicalToolOrder(csv) {
  * which feed PI_BOT_PERMISSION_POLICY.
  * @returns {{csv: string, maOptIn: boolean, maCapable: boolean}}
  */
-export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactive = false, narrowedTools = null, serviceBlocks = null, serviceSkippedTools = [], satelliteBlocks = null, bareServerTools } = {}) {
+export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactive = false, narrowedTools = null, serviceBlocks = null, serviceSkippedTools = [], satelliteBlocks = null, bareServerTools, exactTools = null } = {}) {
+  // Crow Mail's drafting turn (plan 3, Task 8b): `exactTools` names the whole csv, so the bot's
+  // envelope, the interactive appends, the secrets append, the subagent belt and per-session narrowing
+  // are all skipped — a drafting turn gets the three draft tools and nothing else. Absent (the default
+  // for every other caller) leaves every line below byte-identical.
+  if (exactTools !== null && exactTools !== undefined) {
+    if (!isDraftingTurnTools(exactTools)) throw new Error("buildToolsCsv refused: exactTools is not the drafting tool set");
+    // No envelope, so nothing for the subagent gate to open: pi-lab's permission gate reads these.
+    return { csv: canonicalToolOrder(DRAFTING_TURN_TOOLS.join(",")), maOptIn: false, maCapable: false };
+  }
   const maOptIn = !!(def.permission_policy && def.permission_policy.multi_agent === true);
   const maCapable = isMultiAgentCapable(resolved.provider, resolved.model);
   // Belt (R7 — pi `--tools` provably filters extension-registered tools
@@ -634,6 +643,7 @@ export class PiRpc {
       serviceSkippedTools: opts.serviceSkippedTools || [],
       satelliteBlocks: opts.satelliteBlocks || null,
       bareServerTools: opts.bareServerTools || undefined,
+      exactTools: opts.exactTools,
     });
     // Wave 2: the FINAL csv, exposed so the interactive engine's Session-tab
     // facts can report the tool count the child was actually pinned with
@@ -1889,6 +1899,52 @@ async function recordStagedDrafts({ calls, mcpConfig, log, session, threadId, bo
   }
 }
 
+/**
+ * `handleInbound`'s `draftingTurn` option (Crow Mail plan 3, Task 8b), or null when absent.
+ *
+ * This is the ONLY way a turn may be pinned to the three draft tools and to a single MCP server, and
+ * its shape is checked here, before `buildBotWorld` writes anything or pi is spawned:
+ *   - `exactTools` is an array whose sorted contents are exactly DRAFTING_TURN_TOOLS (mcp_writer.mjs);
+ *   - `mcpBlock` is this box's own `/mail-draft/mcp` with a `mdt_` bearer and a `mail-draft` actor
+ *     signature — a url block with headers and nothing else;
+ *   - `sessionDir` is the turn's own absolute world root (`<sessionDir>/mail-drafts/<draftId>`), so a
+ *     chat thread of the same bot can never resume this turn.
+ * The caller builds the block (mcp_writer.mjs `mailDraftBlock`) in the process that minted the token
+ * and holds the actor key; a key-less bot host must not start a drafting turn at all.
+ *
+ * @returns {{exactTools: string[], mcpBlock: {url: string, headers: Record<string, string>}, sessionDir: string}|null}
+ */
+function draftingTurnOf(opts) {
+  if (!Object.hasOwn(opts, "draftingTurn") || opts.draftingTurn == null) return null;
+  const refuse = (why) => { throw new Error("draftingTurn refused: " + why); };
+  const value = opts.draftingTurn;
+  if (typeof value !== "object" || Array.isArray(value)) refuse("not an object");
+  if (!isDraftingTurnTools(value.exactTools)) refuse("exactTools is not the drafting tool set");
+  const block = value.mcpBlock;
+  if (!block || typeof block !== "object" || Array.isArray(block)) refuse("no mcpBlock");
+  for (const key of Object.keys(block)) if (key !== "url" && key !== "headers") refuse("the block carries " + key);
+  if (typeof block.url !== "string" || !/^http:\/\/127\.0\.0\.1:[0-9]{1,5}\/mail-draft\/mcp$/.test(block.url)) {
+    refuse("the block is not this box's /mail-draft/mcp");
+  }
+  const headers = block.headers;
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) refuse("the block has no headers");
+  if (typeof headers.Authorization !== "string" || !/^Bearer mdt_[0-9a-f]{64}$/.test(headers.Authorization)) {
+    refuse("the block's bearer is not a turn token");
+  }
+  if (headers["X-Crow-Actor-Kind"] !== "mail-draft") refuse("the block's actor kind is not mail-draft");
+  if (typeof headers["X-Crow-Actor-Id"] !== "string" || !/^[^\s:]+$/.test(headers["X-Crow-Actor-Id"])) refuse("the block names no bot");
+  if (typeof headers["X-Crow-Actor-Sig"] !== "string" || !/^[0-9a-f]{64}$/.test(headers["X-Crow-Actor-Sig"])) {
+    refuse("the block carries no actor signature");
+  }
+  const sessionDir = value.sessionDir == null ? "" : String(value.sessionDir);
+  if (!sessionDir.startsWith("/")) refuse("it needs an absolute sessionDir");
+  return {
+    exactTools: [...DRAFTING_TURN_TOOLS],
+    mcpBlock: { url: block.url, headers: { ...headers } },
+    sessionDir,
+  };
+}
+
 export async function handleInbound(opts) {
   // Eval-only seam (the live pi driver, scripts/lib/live-pi-driver.mjs): a caller-supplied
   // transform of this spawn's PiRpc options. Refused unless THIS process is an eval scratch (the
@@ -1913,6 +1969,9 @@ export async function handleInbound(opts) {
   // makes it an own key, and the rest spread keeps it) would put mcpOverrides on the prototype and
   // this line would still take it.
   const mcpOverridesOpt = Object.hasOwn(opts, "mcpOverrides") ? opts.mcpOverrides : undefined; // read once
+  // Crow Mail's drafting turn (plan 3, Task 8b): validated here, before buildBotWorld writes a config
+  // or anything is spawned, so a malformed option can never reach a child half-applied.
+  const drafting = draftingTurnOf(opts);
   let evalMcp = null;
   if (mcpOverridesOpt !== undefined && mcpOverridesOpt !== null) {
     const guard = await import("../lib/eval-guard.mjs");
@@ -1945,6 +2004,14 @@ export async function handleInbound(opts) {
     // match a job-dispatched turn against its OWN bot_jobs row.
     jobId: opts.job_id || null,
   });
+  // A drafting turn runs in its OWN world root, handed in by the caller
+  // (`<sessionDir>/mail-drafts/<draftId>`): pi's --session-dir, the world root and the per-turn
+  // .mcp.json all move with it, so a chat thread of the same bot neither resumes this turn nor shares
+  // its config. Set before the destructuring below, which every later use follows.
+  if (drafting !== null) {
+    world.sessionDir = drafting.sessionDir;
+    mkdirSync(join(world.sessionDir, "sessions"), { recursive: true });
+  }
   const def = world.def;
   const crowHome = world.crowHome;
   const projectId = world.projectId;
@@ -2012,6 +2079,12 @@ export async function handleInbound(opts) {
   }
   const resolved = spawnPrep.resolved;
 
+  // The same csv reaches the tool-budget preflight below AND the spawn (PiRpc reads opts.exactTools),
+  // so the count and the child can never disagree about what a drafting turn may call.
+  if (drafting !== null) {
+    spawnPrep.piRpcOpts = Object.assign({}, spawnPrep.piRpcOpts, { exactTools: drafting.exactTools });
+  }
+
   // Project services (Task 18): the owner's connected accounts, as labelled blocks, BEFORE the
   // tool-budget preflight so it counts them (R6); carried in world._mcpArgs so PR-B's
   // bindWorldSession rebuild below keeps them. Only a job turn can be the owner's here: its
@@ -2057,6 +2130,7 @@ export async function handleInbound(opts) {
       serviceSkippedTools: po.serviceSkippedTools || [],
       satelliteBlocks: po.satelliteBlocks || null,
       bareServerTools: po.bareServerTools || undefined,
+      exactTools: po.exactTools,
     });
     const budget = checkToolBudget(csv, capFor(resolved));
     if (!budget.ok) {
@@ -2191,6 +2265,22 @@ export async function handleInbound(opts) {
       evalMcp.guard.writeOverrideConfig(path, config, evalMcp.sealedHome);
     }
     mcpOverridden = changed;
+  }
+
+  // A drafting turn's config is exactly ONE server (Crow Mail plan 3, Task 8b): this box's
+  // `/mail-draft/mcp` with the turn's token and actor signature, and none of the bot's own servers,
+  // implied service blocks, satellites, extensions or remote blocks. Placed where the eval seam replaces
+  // the config (after bindWorldSession, before warmModel), so BOTH delivery modes carry it: fd mode
+  // pipes piRpcOpts.mcpConfig, and file mode reads the world .mcp.json written here — which the caller
+  // removes when the turn ends.
+  if (drafting !== null) {
+    const config = { mcpServers: { [MAIL_DRAFT_SERVER]: drafting.mcpBlock } };
+    spawnPrep.piRpcOpts = Object.assign({}, spawnPrep.piRpcOpts, { mcpConfig: config });
+    world.mcpConfig = config;
+    if (world.mcpDelivery === "file") {
+      mkdirSync(world.sessionDir, { recursive: true });
+      writeFileSync(join(world.sessionDir, ".mcp.json"), JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+    }
   }
 
   // Warm the resolved model bundle before spawning pi (same as runJob). The
@@ -2414,7 +2504,7 @@ if (import.meta.url === "file://" + process.argv[1]) {
   for (const k of ["__proto__", "constructor", "prototype"]) {
     if (Object.hasOwn(payload, k)) { console.error(`bridge.mjs --inject refuses a payload with a ${k} key`); process.exit(2); }
   }
-  const { mcpOverrides: _mcpOverrides, evalSpawnTransform: _evalSpawnTransform, ...rest } = payload;
+  const { mcpOverrides: _mcpOverrides, evalSpawnTransform: _evalSpawnTransform, draftingTurn: _draftingTurn, ...rest } = payload;
   // A spread, not Object.assign: it defines own properties, so no prototype setter can run.
   handleInbound({ ...rest,
     log: (m) => console.error("[bridge] " + m),

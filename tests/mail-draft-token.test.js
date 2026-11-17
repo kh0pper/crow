@@ -14,10 +14,12 @@ const DRAFT_A = "md-0123456789abcdef";
 const DRAFT_B = "md-fedcba9876543210";
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
+const BOT_A = "alex-bot";
+const BOT_B = "sam-bot";
 const MINUTE = 60_000;
 
 const mintA = (over = {}) => mintTurnToken({
-  draftId: DRAFT_A, turnId: "turn-a", startHash: HASH_A, ...over,
+  draftId: DRAFT_A, turnId: "turn-a", startHash: HASH_A, botId: BOT_A, ...over,
 });
 
 beforeEach(() => { _resetTurnTokensForTests(); });
@@ -25,7 +27,38 @@ beforeEach(() => { _resetTurnTokensForTests(); });
 test("a token verifies to the draft, turn and head hash it was minted for", () => {
   const token = mintA({ ttlMs: 5 * MINUTE });
   assert.match(token, /^mdt_[0-9a-f]{64}$/, "mdt_ and 32 random bytes as hex");
-  assert.deepEqual(verifyTurnToken(token), { draftId: DRAFT_A, turnId: "turn-a", startHash: HASH_A });
+  const claims = verifyTurnToken(token);
+  assert.equal(claims.draftId, DRAFT_A);
+  assert.equal(claims.turnId, "turn-a");
+  assert.equal(claims.startHash, HASH_A);
+  assert.equal(typeof claims.expiresAt, "number");
+});
+
+test("the token names the bot its turn runs as, and minting without one is refused", () => {
+  const token = mintA({ ttlMs: 5 * MINUTE });
+  assert.equal(verifyTurnToken(token).botId, BOT_A, "the mount checks the actor id against this");
+  // A token with no bot id would admit any bot's signature for the tuple.
+  assert.throws(
+    () => mintTurnToken({ draftId: DRAFT_A, turnId: "turn-a", startHash: HASH_A }),
+    TypeError,
+  );
+  assert.throws(
+    () => mintTurnToken({ draftId: DRAFT_A, turnId: "turn-a", startHash: HASH_A, botId: "  " }),
+    TypeError,
+  );
+});
+
+test("a token minted with no ttlMs expires at turnTokenTtlMs(), the turn's timeout plus the margin", () => {
+  const ttl = turnTokenTtlMs();
+  const before = Date.now();
+  const claims = verifyTurnToken(mintA());
+  const after = Date.now();
+  assert.ok(claims, "the default lifetime is still a live token");
+  assert.ok(
+    claims.expiresAt >= before + ttl && claims.expiresAt <= after + ttl,
+    `expiresAt ${claims.expiresAt} is one default lifetime from the mint`,
+  );
+  assert.ok(ttl > MINUTE, "the default lifetime includes the margin, not a bare timeout");
 });
 
 test("two mints are two different tokens for the same turn", () => {
@@ -38,7 +71,7 @@ test("two mints are two different tokens for the same turn", () => {
 
 test("token for draft A cannot read thread B", () => {
   const a = mintA();
-  const b = mintTurnToken({ draftId: DRAFT_B, turnId: "turn-b", startHash: HASH_B });
+  const b = mintTurnToken({ draftId: DRAFT_B, turnId: "turn-b", startHash: HASH_B, botId: BOT_B });
   assert.equal(verifyTurnToken(a).draftId, DRAFT_A);
   assert.equal(verifyTurnToken(b).draftId, DRAFT_B);
   // A changed token is not a token: the map key is the hash of the exact string.
@@ -81,7 +114,7 @@ test("a token minted before a simulated restart is refused", async () => {
 
 test("a token is refused after revokeTurnToken even before its expiry", () => {
   const token = mintA({ ttlMs: 30 * MINUTE });
-  assert.deepEqual(verifyTurnToken(token), { draftId: DRAFT_A, turnId: "turn-a", startHash: HASH_A });
+  assert.equal(verifyTurnToken(token).draftId, DRAFT_A, "live before the revoke");
   revokeTurnToken(token);
   assert.equal(verifyTurnToken(token), null, "revoked at once, not at its expiry");
 });

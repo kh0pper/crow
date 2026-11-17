@@ -142,12 +142,17 @@ async function setup({ turn = false } = {}) {
     // the send service's tests.
     schedule: () => null,
     now: () => NOW,
-    startDraftingTurn: turn
+    startDraftingTurn: typeof turn === "function"
       ? async (db, deps, options) => {
         turns.push({ options, deps });
-        return { turnId: "turn-1" };
+        return turn(db, deps, options);
       }
-      : null,
+      : turn
+        ? async (db, deps, options) => {
+          turns.push({ options, deps });
+          return { turnId: "turn-1" };
+        }
+        : null,
   });
 
   const db = createDbClient(crow);
@@ -244,13 +249,16 @@ async function setup({ turn = false } = {}) {
 async function newDraft(s, over = {}) {
   return createDraft(s.db, {
     accountId: s.account.id,
-    mode: "new",
+    mode: over.mode ?? "new",
+    replyToMid: over.replyToMid ?? null,
     first: {
       to: over.to ?? [{ address: SAM }],
       cc: over.cc ?? [],
-      bcc: [],
+      bcc: over.bcc ?? [],
       subject: over.subject ?? "Weekend",
       body: over.body ?? "Are we still on for Saturday?",
+      inReplyTo: over.inReplyTo,
+      references: over.references,
       attachments: over.attachments ?? [],
     },
     author: "user",
@@ -394,6 +402,7 @@ test("routes accept no raw From, no headers and no envelope key", async () => {
     { from: { address: "sam@example.com" } },
     { headers: { "X-Anything": "1" } },
     { envelope: { from: ADDRESS, to: [SAM] } },
+    { bcc: [{ address: SAM }] },
   ]) {
     const res = await s.call("POST", `${DRAFTS}/${draft.id}/revisions`, { body: { ...base, ...extra } });
     assert.equal(res.status, 400, `${Object.keys(extra)[0]}: ${res.text}`);
@@ -449,6 +458,37 @@ test("a hand edit writes the next revision and always cancels a schedule", async
   assert.equal(revisions[1].body, "Are we still on for Sunday?");
 });
 
+test("a hand edit of a reply keeps the head's Bcc, In-Reply-To and References", async () => {
+  const s = await setup();
+  const draft = await newDraft(s, {
+    mode: "reply",
+    subject: "Re: Weekend",
+    bcc: [{ address: "jo@example.com" }],
+    inReplyTo: "<m-1@mail.example.test>",
+    references: ["<m-0@mail.example.test>", "<m-1@mail.example.test>"],
+  });
+  const [first] = await listRevisions(s.db, draft.id);
+  assert.deepEqual(first.bcc.map((entry) => entry.address), ["jo@example.com"], "precondition: the head has a Bcc");
+
+  const edit = await s.call("POST", `${DRAFTS}/${draft.id}/revisions`, {
+    body: {
+      expectHash: draft.headHash,
+      to: [{ address: SAM }],
+      cc: [],
+      subject: "Re: Weekend",
+      body: "Sunday then, if that is easier.",
+      attachments: [],
+    },
+  });
+  assert.equal(edit.status, 200, edit.text);
+
+  const head = (await listRevisions(s.db, draft.id)).find((entry) => entry.rev === edit.json.rev);
+  assert.equal(head.body, "Sunday then, if that is easier.");
+  assert.deepEqual(head.bcc.map((entry) => entry.address), ["jo@example.com"], "the person's Bcc is carried over");
+  assert.equal(head.inReplyTo, "<m-1@mail.example.test>", "the reply stays threaded");
+  assert.deepEqual(head.references, ["<m-0@mail.example.test>", "<m-1@mail.example.test>"]);
+});
+
 test("a hand edit against a stale hash is refused changed", async () => {
   const s = await setup();
   const draft = await newDraft(s);
@@ -490,8 +530,54 @@ test("POST /turn on a holding draft is refused, and on a draft it starts one tur
   assert.equal(started.json?.turnId, "turn-1");
   assert.equal(s.turns.length, 1);
   assert.equal(s.turns[0].options.draftId, draft.id);
+  assert.equal(s.turns[0].options.botId, "bot-1", "the bot the person named reaches the turn");
   assert.equal(s.turns[0].options.instruction, "tighten the second line");
-  assert.equal(typeof s.turns[0].deps.readMessageRaw, "function", "the turn reads attachments the same way");
+  // Only what a turn reads: no adapter, no sync, nothing a send needs.
+  assert.deepEqual(Object.keys(s.turns[0].deps), ["now"]);
+});
+
+test("a drafting turn's refusals answer by their own code", async () => {
+  const refuseWith = (code) => async () => {
+    const err = new Error(code);
+    err.name = "MailError";
+    err.code = code;
+    throw err;
+  };
+
+  // A draft that took a turn while it was still editable, then froze under it.
+  const frozen = await setup({ turn: refuseWith("frozen") });
+  const drafted = await newDraft(frozen);
+  const onFrozen = await frozen.call("POST", `${DRAFTS}/${drafted.id}/turn`, {
+    body: { botId: "bot-1", instruction: "tighten the second line" },
+  });
+  assert.equal(onFrozen.status, 409, onFrozen.text);
+  assert.equal(onFrozen.json?.error, "frozen");
+  assert.notEqual(onFrozen.json?.needsCancel, true, "nothing to cancel on an unscheduled draft");
+
+  // The store's own pre-check: a scheduled draft cannot take a turn, and its card offers Cancel send.
+  const scheduledSetup = await setup({ turn: true });
+  const scheduled = await newDraft(scheduledSetup);
+  const tap = await scheduledSetup.call("POST", `${DRAFTS}/${scheduled.id}/schedule`, {
+    body: { hash: scheduled.headHash, dueAt: await zonedTime(scheduledSetup.db, NOW + 2 * 60 * 60 * 1000) },
+  });
+  assert.equal(tap.status, 200, tap.text);
+  const onScheduled = await scheduledSetup.call("POST", `${DRAFTS}/${scheduled.id}/turn`, {
+    body: { botId: "bot-1", instruction: "tighten the second line" },
+  });
+  assert.equal(onScheduled.status, 409, onScheduled.text);
+  assert.equal(onScheduled.json?.error, "frozen");
+  assert.equal(onScheduled.json?.needsCancel, true, "a scheduled draft needs its schedule cancelled first");
+  assert.deepEqual(scheduledSetup.turns, [], "no turn was started");
+
+  for (const code of ["cloud_drafting_off", "local_models_only"]) {
+    const gated = await setup({ turn: refuseWith(code) });
+    const draft = await newDraft(gated);
+    const res = await gated.call("POST", `${DRAFTS}/${draft.id}/turn`, {
+      body: { botId: "bot-1", instruction: "tighten the second line" },
+    });
+    assert.equal(res.status, 403, `${code}: ${res.text}`);
+    assert.deepEqual(res.json, { error: code }, "the code alone: the card owns that copy");
+  }
 });
 
 test("schedule takes zone-qualified text only, and a number is bad input", async () => {

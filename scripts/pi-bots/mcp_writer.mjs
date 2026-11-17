@@ -45,6 +45,7 @@ import { mintRemoteBlocks } from "./remote-blocks.mjs";
 import { crowServerCatalog, instanceBinding, rebindBlock, SECRETS_SERVER, addonKeychainNeeds, withoutKeychainValues } from "./crow-server-catalog.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { applyActorEnv, actorEnvFor } from "./actor-env.mjs";
+import { signMailDraftActor } from "./actor-sig.mjs";
 // Task 2.2: the ONLY place on the bot-config path that unseals — and only for an fd turn.
 // readAddonSecretsSync is all-or-throw (a name with no active row is ROWS_MISSING), so it is
 // never handed another add-on's shared names: those are read through their OWN entry.
@@ -111,6 +112,86 @@ export const SECRETS_GRANTING_SERVERS = Object.freeze(["crow-browser", "browser"
 export function impliedServers(def) {
   const sel = new Set(serversForBot(def));
   return SECRETS_GRANTING_SERVERS.some((n) => sel.has(n)) ? [SECRETS_SERVER] : [];
+}
+
+// ---- Crow Mail's drafting turn (plan 3, Task 8b) ----------------------------
+//
+// A drafting turn is not a channel turn: it gets three tools and ONE MCP server, and that server is
+// this instance's own `/mail-draft/mcp` mount, reached with a per-turn `mdt_` token and a
+// `mail-draft` actor signature (servers/gateway/mail-draft-mcp.js). Nothing else is in its config —
+// no bot's selected servers, no implied secrets block, no service, satellite, extension or remote
+// block — so a pi spawned for a drafting turn never starts a credential-bearing child it could not
+// call anyway.
+//
+// The three names are the whole surface, and they exist only for this spawn: `toolAllowlist` never
+// builds them, and `buildToolsCsv` takes them through the separate `exactTools` option.
+
+/** The block name pi-lab turns into `mcp__<name>__<tool>`, and the single server of a drafting turn. */
+export const MAIL_DRAFT_SERVER = "crow-mail-draft";
+
+/** The three names, in the code-unit order `buildToolsCsv`'s canonical ordering uses. */
+export const DRAFTING_TURN_TOOLS = Object.freeze([
+  `mcp__${MAIL_DRAFT_SERVER}__mail_draft_propose`,
+  `mcp__${MAIL_DRAFT_SERVER}__mail_draft_read_context`,
+  `mcp__${MAIL_DRAFT_SERVER}__mail_draft_read_thread`,
+]);
+
+/**
+ * Is `value` exactly the drafting tool set — the same three names, no more and no less? Order does not
+ * matter: both sides are compared sorted, so an added name, a missing one, a renamed one or a repeat
+ * (which must drop one of the three) is refused. The bridge refuses anything else before a turn starts.
+ */
+export function isDraftingTurnTools(value) {
+  if (!Array.isArray(value) || value.length !== DRAFTING_TURN_TOOLS.length) return false;
+  const got = [];
+  for (const name of value) {
+    if (typeof name !== "string") return false;
+    got.push(name);
+  }
+  const want = [...DRAFTING_TURN_TOOLS].sort();
+  got.sort();
+  return got.every((name, at) => name === want[at]);
+}
+
+const MAIL_DRAFT_TURN_TOKEN_RE = /^mdt_[0-9a-f]{64}$/;
+/** An id half of the actor tuple: non-empty, and neither whitespace nor a colon (actor-sig.mjs). */
+const MAIL_DRAFT_ID_RE = /^[^\s:]+$/;
+
+/**
+ * The `crow-mail-draft` block for one drafting turn: this instance's gateway, the turn's own bearer,
+ * and the actor headers the mount verifies. The signature is made HERE, in this process — the same
+ * way the board entry gets its own (crow-server-catalog.mjs) — so the caller must be a process that
+ * holds the gateway's per-boot actor key (`initGatewayActorKey`). A process without it gets a
+ * refusal, never an unsigned block: an unsigned block would only fail at the mount, after a spawn.
+ *
+ * @param {{botId: string, draftId: string, turnId: string, token: string, port?: number|string}} opts
+ * @returns {{url: string, headers: Record<string, string>}}
+ */
+export function mailDraftBlock({ botId, draftId, turnId, token, port } = {}) {
+  const id = (value, field) => {
+    const text = value == null ? "" : String(value);
+    if (!MAIL_DRAFT_ID_RE.test(text)) throw new TypeError(`mailDraftBlock needs a ${field}`);
+    return text;
+  };
+  const bot = id(botId, "botId");
+  const draft = id(draftId, "draftId");
+  const turn = id(turnId, "turnId");
+  const bearer = token == null ? "" : String(token);
+  if (!MAIL_DRAFT_TURN_TOKEN_RE.test(bearer)) throw new TypeError("mailDraftBlock needs a turn token (mdt_ and 32 bytes as hex)");
+  const sig = signMailDraftActor({ botId: bot, draftId: draft, turnId: turn });
+  if (!sig) throw new Error("mailDraftBlock: this process holds no actor key, so the drafting turn's block cannot be signed");
+  // The same loopback-gateway convention as the board entry (crow-server-catalog.mjs).
+  const gatewayPort = Number(port || process.env.CROW_GATEWAY_PORT || 3001);
+  if (!Number.isInteger(gatewayPort) || gatewayPort <= 0 || gatewayPort > 65535) throw new TypeError("mailDraftBlock needs a gateway port");
+  return {
+    url: `http://127.0.0.1:${gatewayPort}/mail-draft/mcp`,
+    headers: {
+      Authorization: "Bearer " + bearer,
+      "X-Crow-Actor-Kind": "mail-draft",
+      "X-Crow-Actor-Id": bot,
+      "X-Crow-Actor-Sig": sig,
+    },
+  };
 }
 
 // The gateway mounts that serve the project tools with a gateway token's authority: routes/mcp.js

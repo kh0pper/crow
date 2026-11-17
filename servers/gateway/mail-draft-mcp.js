@@ -103,9 +103,12 @@ function unauthorized(res) {
  * The auth wrapper `boot/mcp-mounts.js` installs in front of `mountMcpServer(app, "/mail-draft", …)`
  * (and only when mail is on). A request is admitted when BOTH hold:
  *
- *   1. its bearer is a live `mdt_` turn token (`verifyTurnToken`), which names the draft and the turn;
+ *   1. its bearer is a live `mdt_` turn token (`verifyTurnToken`), which names the draft, the turn and
+ *      the bot the turn runs as;
  *   2. `x-crow-actor-kind: mail-draft` with `x-crow-actor-id` and `x-crow-actor-sig`, the signature
- *      computed over `<draftId>:<turnId>` for the bot id the token's turn belongs to.
+ *      computed over `<draftId>:<turnId>` for that same bot: the actor id must equal the token's own
+ *      `botId` before the signature is checked, so another bot's valid signature (for the same draft
+ *      and turn) admits nothing.
  *
  * The guard re-verifies the bearer itself rather than trusting `req.localTokenAuth` alone, so no other
  * token family — and no other path that sets a local-token flag — can open this mount. On success it
@@ -124,9 +127,12 @@ export function mailDraftMountAuth() {
     const kind = headerValue(headers, "x-crow-actor-kind");
     const botId = headerValue(headers, "x-crow-actor-id");
     const sig = headerValue(headers, "x-crow-actor-sig");
+    // The token names the bot its turn runs as: any other actor id is not this turn's caller, whatever
+    // signature it carries.
+    if (botId == null || botId !== turn.botId) return unauthorized(res);
     let signed = false;
     try {
-      signed = kind === ACTOR_KIND && Boolean(botId) && Boolean(sig)
+      signed = kind === ACTOR_KIND && Boolean(sig)
         && verifyMailDraftActorSig({ botId, draftId: turn.draftId, turnId: turn.turnId, sig }) === true;
     } catch {
       signed = false;

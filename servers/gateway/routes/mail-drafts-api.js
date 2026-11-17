@@ -34,9 +34,11 @@
  *
  * Dependencies are the seam: the running supervisor's `withAdapter`/`requestSync` when this process
  * has one, the two attachment readers (`drafts/readers.js`), and — for a test, or for a caller that
- * needs a different clock — whatever `setMailDraftsRuntime` set. A drafting turn is
- * `startDraftingTurn` from `drafts/turn.js` if it was injected, otherwise that module is imported on
- * the first `/turn` request; while it does not exist the answer is 503 `{error:"unavailable"}`.
+ * needs a different clock — whatever `setMailDraftsRuntime` set. A send or schedule gets that bundle; a
+ * drafting turn gets only its clock (`turnDeps`), because a turn never reaches an adapter. A drafting
+ * turn is `startDraftingTurn` from `drafts/turn.js` if it was injected, otherwise that module is
+ * imported on the first `/turn` request; while it does not exist the answer is 503
+ * `{error:"unavailable"}`.
  */
 import { MAIL_ERROR_TEXT } from "../mail/errors.js";
 import { getAccount } from "../mail/store/accounts.js";
@@ -139,6 +141,17 @@ function serviceDeps(db, supervisor) {
     if (typeof runtime[key] === "function") deps[key] = runtime[key];
   }
   return deps;
+}
+
+/**
+ * The deps one drafting turn gets. A turn reads the draft's thread through its own MCP tools and
+ * starts one pi spawn: it never sends, so it gets no adapter, no sync and no key — only the clock the
+ * seam injected. Everything else `startDraftingTurn` needs it imports or defaults itself.
+ *
+ * @returns {{now?: Function}}
+ */
+function turnDeps() {
+  return typeof runtime.now === "function" ? { now: runtime.now } : {};
 }
 
 /* ------------------------------------------------------------------ the bodies */
@@ -325,6 +338,13 @@ export function registerDraftRoutes(router, ctx) {
     return getDraft(db, id);
   };
 
+  /** One frozen draft: 409, and Cancel send when there is a schedule to give up first. */
+  const answerFrozen = (res, draft) => {
+    const body = { error: "frozen", state: draft?.state ?? null };
+    if (draft?.state === "scheduled") body.needsCancel = true;
+    return res.status(409).json(body);
+  };
+
   /** The 500 every unexpected shape answers: the mail API's own internal sentence, nothing else. */
   const internal = (res) => {
     if (res.headersSent) return;
@@ -426,7 +446,10 @@ export function registerDraftRoutes(router, ctx) {
 
   // POST /:id/revisions — the person's own edit. The store's compare-and-set on `expectHash` is the
   // guard, and `cancelSchedule: true` is what returns a scheduled draft to `draft` (so the edit is
-  // never silently lost to a frozen row) and clears the tap seal in the same transaction.
+  // never silently lost to a frozen row) and clears the tap seal in the same transaction. The body
+  // changes words, recipients and attachments only: the head revision's `bcc`, `inReplyTo` and
+  // `references` are carried over (as `mail_draft_propose` carries them), so a hand-edited reply stays
+  // threaded and keeps the audience the card showed.
   router.post(`${base}/:id/revisions`, route("POST /drafts/:id/revisions", async (db, req, res) => {
     const draft = await draftFor(db, req);
     if (!draft) return sendError(res, 404, "not_found");
@@ -435,12 +458,20 @@ export function registerDraftRoutes(router, ctx) {
     const input = readRevisionBody(body);
     if (input == null) return sendError(res, 400, "bad_input");
 
+    const revisions = await listRevisions(db, draft.id);
+    const head = revisions.find((entry) => entry.rev === draft.headRev) ?? null;
+    if (!head) return sendError(res, 404, "not_found");
+
     const outcome = await addRevision(db, draft.id, {
       to: input.to,
       cc: input.cc,
-      bcc: [],
+      // Carried from the head revision, exactly as `mail_draft_propose` does: a hand edit changes the
+      // words, never the audience or the threading. The request body cannot name them (REVISION_KEYS).
+      bcc: head.bcc,
       subject: input.subject,
       body: input.body,
+      inReplyTo: head.inReplyTo,
+      references: head.references,
       attachments: input.attachments,
     }, {
       author: "user",
@@ -456,7 +487,9 @@ export function registerDraftRoutes(router, ctx) {
 
   // POST /:id/turn — one drafting turn over this draft. The card's note box is this route too: the
   // instruction is the person's feedback, and the bot's answer is a revision they read before tapping
-  // anything. A draft no bot may touch is refused before a turn is started.
+  // anything. A draft no bot may touch is refused before a turn is started, and a turn that refuses
+  // while it starts answers by its own code: `frozen` 409 (with the cancel the card needs to offer
+  // when the draft is scheduled), `cloud_drafting_off` and `local_models_only` 403 with the code alone.
   router.post(`${base}/:id/turn`, route("POST /drafts/:id/turn", async (db, req, res) => {
     const draft = await draftFor(db, req);
     if (!draft) return sendError(res, 404, "not_found");
@@ -464,17 +497,28 @@ export function registerDraftRoutes(router, ctx) {
     if (body == null) return sendError(res, 400, "bad_input");
     const input = readTurnBody(body);
     if (input == null) return sendError(res, 400, "bad_input");
-    if (!EDITABLE_STATES.includes(draft.state)) {
-      return res.status(409).json({ error: "frozen", state: draft.state });
-    }
+    if (!EDITABLE_STATES.includes(draft.state)) return answerFrozen(res, draft);
 
     const start = await draftingTurnFor();
     if (typeof start !== "function") return res.status(503).json({ error: "unavailable" });
-    const started = await start(db, serviceDeps(db, supervisorNow()), {
-      draftId: draft.id,
-      instruction: input.instruction,
-    });
-    res.json({ turnId: started?.turnId ?? null });
+    try {
+      const started = await start(db, turnDeps(), {
+        draftId: draft.id,
+        botId: input.botId,
+        instruction: input.instruction,
+      });
+      res.json({ turnId: started?.turnId ?? null });
+    } catch (err) {
+      const code = err && typeof err.code === "string" ? err.code : "";
+      if (code === "frozen") return answerFrozen(res, (await getDraft(db, draft.id)) ?? draft);
+      if (code === "cloud_drafting_off" || code === "local_models_only") {
+        // No sentence exists for either yet: the card owns that copy, so the code goes alone.
+        return res.status(403).json({ error: code });
+      }
+      if (code === "NOT_FOUND") return sendError(res, 404, "not_found");
+      if (code === "BAD_INPUT") return sendError(res, 400, "bad_input");
+      return internal(res);
+    }
   }));
 
   // POST /:id/send — the tap. The hash the card was drawn from is the one thing that may move the
@@ -571,7 +615,6 @@ export function registerDraftRoutes(router, ctx) {
 }
 
 /* ---------------------------------------------------------------- derivation */
-
 /**
  * The first revision of a new draft. A reply or a reply-all starts from `deriveReply`, a forward from
  * `deriveForward` (its quoted body and every thread attachment), and a blank one from nothing at all:

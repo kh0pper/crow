@@ -9,6 +9,13 @@
  * regex learns it. The signed mounts (/board, /secrets, /phone, /artifacts)
  * verify a per-boot actor signature and must stay OUT of the regex.
  *
+ * `/mail-draft` is the third kind of mount: boot installs its own guard
+ * (`app.use("/mail-draft", mailDraftMountAuth())`) in front of mountMcpServer,
+ * so the factory carries no `verify…Actor` — but its credential is a per-turn
+ * token scoped to one draft and one turn (local-token.js), not the owner's, so
+ * it is NOT an owner mount either. It is listed by name below and must stay out
+ * of the regex.
+ *
  * The gateway's root mount ("") is not listed: the loopback rule in
  * isOwnerProjectUrl already covers it.
  */
@@ -29,6 +36,12 @@ const MOUNT_RE = /mountMcpServer\(\s*app\s*,\s*(["'`])((?:(?!\1)[\s\S])*)\1\s*,\
 // verifySecretsActorSig / verifyArtifactsActorSig, wired as `verifyActor: …` on the server factory).
 const SIGNED_RE = /\bverify[A-Za-z]*Actor\b/;
 
+// A mount whose own middleware, installed before mountMcpServer, admits only a credential scoped to
+// one draft and one turn — never the owner's. Explicitly one entry: a new mount here needs its own
+// review, not an inheritance.
+const DRAFT_SCOPED_MOUNTS = Object.freeze(["/mail-draft"]);
+const DRAFT_SCOPED_GUARD = 'app.use("/mail-draft", mailDraftMountAuth())';
+
 /** Every mountMcpServer prefix in the boot sources, with whether its factory verifies a signature. */
 function bootMounts() {
   const mounts = [];
@@ -40,7 +53,13 @@ function bootMounts() {
       const prefix = raw.replace(/\$\{[^}]*\}/g, "client");
       // The root mount is covered by the loopback rule, not by the prefix regex.
       if (prefix === "") continue;
-      mounts.push({ source: rel, raw, prefix, signed: SIGNED_RE.test(m[3] || "") });
+      mounts.push({
+        source: rel,
+        raw,
+        prefix,
+        signed: SIGNED_RE.test(m[3] || ""),
+        draftScoped: DRAFT_SCOPED_MOUNTS.includes(prefix) && src.includes(DRAFT_SCOPED_GUARD),
+      });
     }
   }
   return mounts;
@@ -52,14 +71,20 @@ test("every unsigned gateway mount prefix is an owner mount, every signed one is
   const mounts = bootMounts();
   // The extraction itself: the mounts this repo publishes today.
   for (const prefix of ["/router", "/projects", "/research", "/memory", "/sharing", "/storage", "/blog-mcp", "/wm", "/tools", "/tools-client"]) {
-    assert.ok(mounts.some((m) => m.prefix === prefix && !m.signed), "unsigned mount extracted: " + prefix);
+    assert.ok(mounts.some((m) => m.prefix === prefix && !m.signed && !m.draftScoped), "unsigned mount extracted: " + prefix);
   }
   for (const prefix of ["/board", "/secrets", "/phone", "/artifacts"]) {
     assert.ok(mounts.some((m) => m.prefix === prefix && m.signed), "signed mount extracted: " + prefix);
   }
+  for (const prefix of DRAFT_SCOPED_MOUNTS) {
+    assert.ok(
+      mounts.some((m) => m.prefix === prefix && m.draftScoped),
+      `draft-scoped mount extracted behind its own guard: ${prefix}`,
+    );
+  }
 
-  const unsigned = mounts.filter((m) => !m.signed);
-  const signed = mounts.filter((m) => m.signed);
+  const unsigned = mounts.filter((m) => !m.signed && !m.draftScoped);
+  const signed = mounts.filter((m) => m.signed || m.draftScoped);
   assert.ok(unsigned.length && signed.length, "both kinds of mount are present");
 
   for (const { prefix, source } of unsigned) {
@@ -71,9 +96,12 @@ test("every unsigned gateway mount prefix is an owner mount, every signed one is
   for (const { prefix, source } of signed) {
     for (const suffix of SUFFIXES) {
       const url = `http://gw.example/${prefix.slice(1)}/${suffix}`;
-      assert.equal(isOwnerProjectUrl(url), false, `${source} mounts ${prefix} with a signed actor — ${url} must stay allowed`);
+      assert.equal(isOwnerProjectUrl(url), false, `${source} mounts ${prefix} behind its own credential — ${url} must stay allowed`);
     }
   }
+
+  // The drafting turn's door is not the operator's: its token opens exactly one draft.
+  assert.equal(isOwnerProjectUrl("http://127.0.0.1:3001/mail-draft/mcp"), false);
 });
 
 test("the writer's own mounting of a disallowed url block still disables it", async () => {

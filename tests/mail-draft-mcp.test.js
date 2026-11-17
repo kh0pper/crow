@@ -28,7 +28,7 @@ import {
 } from "../servers/gateway/mail-draft-mcp.js";
 import { SessionManager } from "../servers/gateway/session-manager.js";
 import { mountMcpServer } from "../servers/gateway/routes/mcp.js";
-import { generateBoardToken, generateLocalToken, localTokenAuthMiddleware } from "../servers/gateway/local-token.js";
+import { generateBoardToken, generateLocalToken, localOperatorAuth, localTokenAuthMiddleware } from "../servers/gateway/local-token.js";
 import { initGatewayActorKey, signActor, signBoardActor, signMailDraftActor } from "../scripts/pi-bots/actor-sig.mjs";
 
 const ALEX = "alex@example.com";
@@ -155,7 +155,7 @@ async function newDraft(db, threads, over = {}) {
   }, { now: () => T0 });
   state.seq += 1;
   const turnId = `turn-${state.seq}`;
-  const token = mintTurnToken({ draftId: draft.id, turnId, startHash: draft.headHash, ttlMs: 600_000 });
+  const token = mintTurnToken({ draftId: draft.id, turnId, startHash: draft.headHash, botId: BOT, ttlMs: 600_000 });
   return { draft, token, turnId };
 }
 
@@ -280,6 +280,16 @@ test("the full local token and an unrecognized bearer on /mail-draft/mcp are 401
   await assert.rejects(() => connect("/mail-draft/mcp", {}), "no bearer at all");
 });
 
+test("an instance or OAuth-style session on /mail-draft/mcp is 401", async () => {
+  const turn = await newDraft(state.db, state.threads);
+  // The two credentials a dashboard or OAuth client presents: neither is a turn token, so neither
+  // opens this mount, even with the actor headers a real drafting turn carries.
+  for (const token of ["crow_oauth_" + "a".repeat(48), "5".repeat(64)]) {
+    const headers = headersFor({ token, draftId: turn.draft.id, turnId: turn.turnId });
+    await assert.rejects(() => connect("/mail-draft/mcp", headers), token);
+  }
+});
+
 test("an mdt_ token authenticates nothing on /board/mcp or /memory/mcp", async () => {
   const turn = await newDraft(state.db, state.threads);
   const headers = headersFor({ token: turn.token, draftId: turn.draft.id, turnId: turn.turnId });
@@ -320,6 +330,26 @@ test("a mail-draft signature for another draft or turn is refused", async () => 
   await assert.rejects(() => turnClient(mine, { sig: otherTurn }), "another turn of this draft");
   const otherBot = signMailDraftActor({ botId: "other-bot", draftId: mine.draft.id, turnId: mine.turnId });
   await assert.rejects(() => turnClient(mine, { sig: otherBot }), "another bot");
+});
+
+test("a signature for another bot id is refused even when the token is live", async () => {
+  const turn = await newDraft(state.db, state.threads);
+  // The other bot's OWN valid signature over this draft and turn: the token names the bot the turn
+  // runs as, and the mount checks the actor id against it before the signature.
+  const theirs = signMailDraftActor({ botId: "other-bot", draftId: turn.draft.id, turnId: turn.turnId });
+  assert.match(theirs, /^[0-9a-f]{64}$/, "a real signature for that bot");
+  await assert.rejects(() => turnClient(turn, { botId: "other-bot", sig: theirs }), "another bot's own signature");
+  await assert.rejects(() => turnClient(turn, { botId: "", sig: theirs }), "the actor id is the signature's too");
+  const client = await turnClient(turn);
+  await client.close();
+});
+
+test("claims cannot override the token scope the mount pinned", async () => {
+  const auth = localOperatorAuth("mail-draft", { tokenScope: "board", draftId: "md-0123456789abcdef", turnId: "turn-1" });
+  assert.equal(auth.extra.tokenScope, "mail-draft", "the scope is the guard's, never the claims'");
+  assert.equal(auth.extra.draftId, "md-0123456789abcdef", "the pinned claims still ride along");
+  assert.equal(auth.extra.turnId, "turn-1");
+  assert.equal(localOperatorAuth(null, { tokenScope: "board" }).extra, undefined, "no scope, no claims");
 });
 
 test("a request without actor headers is refused", async () => {

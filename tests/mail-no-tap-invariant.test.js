@@ -3,9 +3,9 @@
 // schedule services.
 //
 //   (a) Every MCP door this Crow mounts — the servers `scripts/server-registry.js` declares, the
-//       gateway's router and the board server — is walked through its own relative imports, and
-//       neither a reachable module's imports nor a tool name it registers may name a mail send or
-//       schedule path.
+//       gateway's router, the board server and the mail draft server — is walked through its own
+//       relative imports, and neither a reachable module's imports nor a tool name it registers may
+//       name a mail send or schedule path.
 //   (b) The only importers of `requestSend` and `scheduleDraft` are `routes/mail-drafts-api.js` and
 //       the tests: the owner taps are the only way into a tap state. The per-turn draft MCP server
 //       (`servers/gateway/mail-draft-mcp.js`, its own task) imports no send service, no schedule
@@ -135,6 +135,8 @@ test("(a) no MCP door the gateway mounts can reach a mail send or schedule path"
     ...entryFiles,
     resolve(REPO, "servers/gateway/router.js"),
     resolve(REPO, "servers/gateway/board-mcp.js"),
+    // The drafting turn's door (plan 3, Task 8a): three read/propose tools, and no way to a tap.
+    DRAFT_MCP,
   ];
   for (const door of doors) {
     assert.ok(statSync(door).isFile(), `${rel(door)} is a real module`);

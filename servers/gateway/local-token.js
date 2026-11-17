@@ -119,7 +119,10 @@ export function localOperatorAuth(tokenScope, claims = null) {
   // `claims` carries what a scoped token proved (Crow Mail's mail-draft mount
   // passes the draft, the turn and the head hash the turn started from), so a
   // tool handler reads them off `authInfo.extra` and never from its arguments.
-  if (tokenScope) auth.extra = { tokenScope, ...(claims && typeof claims === "object" ? claims : {}) };
+  // `tokenScope` is written LAST: it is the caller's own scope, never something a
+  // claims object may restate (a claims object carrying `tokenScope` cannot widen
+  // or change the scope this auth stands for).
+  if (tokenScope) auth.extra = { ...(claims && typeof claims === "object" ? claims : {}), tokenScope };
   return auth;
 }
 

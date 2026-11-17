@@ -94,12 +94,21 @@ export const ACTOR_SIGN_PATH = "/internal/actor-sign";
  * kind could honestly attest; messageFor() has no tuple for it either. Keeping the relay blind
  * to "secrets" means the credential-card door has no off-process signing path at all.
  *
- * "mail-draft" (Crow Mail plan 3, Task 8a) is a v1 kind whose thread slot carries
- * `<draftId>:<turnId>`. It is listed because the kind must be known to a key-less host, while the
- * tuple itself is never a session's or a job's, so the checks below (step 6) still refuse to sign
- * one — the drafting turn mints its signature in this process, beside the token.
+ * "mail-draft" (Crow Mail plan 3, Task 8a) is not here either, and for the same reason: the
+ * drafting turn is spawned in the gateway process, beside the in-memory `mdt_` token its signature
+ * belongs to (drafts/turn.js), so it signs in-process with signMailDraftActor. An off-process host
+ * has no such turn. Because the tuple's thread slot is just text (`<draftId>:<turnId>`), a caller
+ * that names the kind anyway would otherwise get a signature over whatever thread the checks above
+ * resolved — so it is refused outright below (RELAY_REFUSED_KINDS), never signed.
  */
-export const ACTOR_SIGN_KINDS = Object.freeze(["bot", "board", "artifacts", "board-thread", "mail-draft", ...SESSION_ACTOR_KINDS, ...SCOPE_ACTOR_KINDS]);
+export const ACTOR_SIGN_KINDS = Object.freeze(["bot", "board", "artifacts", "board-thread", ...SESSION_ACTOR_KINDS, ...SCOPE_ACTOR_KINDS]);
+
+/**
+ * Kinds a caller may name that this relay must never sign, whatever tuple it presents: 403 for the
+ * whole request, never a signature and never a partial answer. Listed apart from ACTOR_SIGN_KINDS so
+ * the refusal is explicit rather than an "unknown kind" 400.
+ */
+export const RELAY_REFUSED_KINDS = Object.freeze(["mail-draft"]);
 
 const REFUSE_LOG_WINDOW_MS = 3_600_000;
 const REFUSE_LOG_CAP = 64;
@@ -186,7 +195,11 @@ export function actorSignRouter({ createDbClient, deps = {} } = {}) {
     if (typeof botId !== "string" || !BOT_ID_RE.test(botId)) return fail(400, "a valid botId is required");
     if ([sessionId, threadId, gatewayType, jobId].some((v) => v === null || (typeof v === "string" && v.length > 512))) return fail(400, "malformed tuple");
     const kinds = Array.isArray(b.kinds) ? [...new Set(b.kinds)] : null;
-    if (!kinds || !kinds.length || !kinds.every((k) => ACTOR_SIGN_KINDS.includes(k))) return fail(400, "kinds must be a non-empty list of known kinds");
+    if (!kinds || !kinds.length) return fail(400, "kinds must be a non-empty list of known kinds");
+    // A kind this relay never signs, refused before the known-kind check: no signature exists
+    // off-process for it, so the honest answer is 403 rather than "unknown kind".
+    if (kinds.some((k) => RELAY_REFUSED_KINDS.includes(k))) return fail(403, "the signing relay never signs this kind");
+    if (!kinds.every((k) => ACTOR_SIGN_KINDS.includes(k))) return fail(400, "kinds must be a non-empty list of known kinds");
     const wantsSession = kinds.some((k) => SESSION_ACTOR_KINDS.includes(k));
     const wantsScope = kinds.some((k) => SCOPE_ACTOR_KINDS.includes(k));
     if (sessionId !== undefined && sessionId !== "" && !/^[1-9][0-9]{0,15}$/.test(sessionId.trim())) return fail(400, "malformed sessionId");
