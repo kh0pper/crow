@@ -85,11 +85,11 @@ export async function createCoreServer(dbPath) {
 
     // Who is calling the server: the process env names a bot (a pi bot's stdio child, with the
     // engine's CROW_BOT_SESSION marker) or an explicit owner; otherwise unknown. Every server that
-    // scopes by actor gets it — memory and storage included, not only the projects server (which
-    // used to be the only one, leaving the other two to resolve their own env).
+    // scopes by actor gets it — memory, storage, sharing and blog included, not only the projects
+    // server (which used to be the only one, leaving the others to resolve their own env).
     const envActor = actorFromEnv(process.env);
     const targetServer =
-      name === "storage" ? factory(dbPath, { baseActor: envActor })
+      name === "storage" || name === "blog" ? factory(dbPath, { baseActor: envActor })
         : name === "memory" || name === "projects" ? factory(dbPath, { actor: envActor })
           : factory(dbPath);
     const client = new Client({ name: `core-${name}`, version: "0.1.0" });

@@ -52,6 +52,18 @@ function headerActor(extra) {
 }
 
 /**
+ * Did the call's `x-crow-actor-kind` header CLAIM to be a bot? True whether or not it carried a
+ * usable id: a bot claim with no id resolves to unknown (headerActor), but the claim itself still
+ * has to travel (forwardActorMeta) — a server that must fail closed for a bot reads the claim, and
+ * a router that collapsed it to "unknown" would hand an unverifiable bot the operator's own-client
+ * rule.
+ */
+function headerClaimsBot(extra) {
+  const kind = headerValue(extra, "x-crow-actor-kind");
+  return typeof kind === "string" && kind.toLowerCase() === "bot";
+}
+
+/**
  * A bot session with no verifiable bot identity: refused for every project tool. The engine's
  * marker (`CROW_BOT_SESSION`) is on the env, but the actor an env names is not a usable bot (no
  * kind/id, or an id that disagrees with the marker). Frozen so nothing can widen it later.
@@ -127,7 +139,15 @@ export function forwardActorMeta(extra) {
     return { _meta: { "crow/actor": m.kind === "bot" ? { kind: "bot", id: m.id } : m } };
   }
   const h = headerActor(extra);
-  if (h) return { _meta: { "crow/actor": h.kind === "bot" ? { kind: "bot", id: h.id } : { kind: "unknown" } } };
+  if (h) {
+    // A bot header whose id was missing or unusable resolves to unknown, but the bot CLAIM is
+    // forwarded as a claim ({kind:"bot"}, no id): the target still resolves it to unknown
+    // (resolveCallActor never invents an id), and a guard that fails closed for any bot claim
+    // (the blog's owner-only guard) can see it instead of the operator's own-client actor.
+    const claim = h.kind === "bot" ? { kind: "bot", id: h.id }
+      : headerClaimsBot(extra) ? { kind: "bot" } : { kind: "unknown" };
+    return { _meta: { "crow/actor": claim } };
+  }
   return {};
 }
 

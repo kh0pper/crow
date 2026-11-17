@@ -6,6 +6,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createVoiceTurnRunner } from "../servers/gateway/voice/turn.js";
 import { createToolFamilies } from "../servers/gateway/voice/tool-families.js";
+import { addonGrantMap, addonToolGranted } from "../servers/gateway/ai/tool-executor.js";
+
+// The connected add-ons these tests bind, in the shape the executor's grant reads (addonToolGranted).
+const SERVERS = new Map([
+  ["calapp", { status: "connected", tools: [{ name: "ws_cal_create_event" }] }],
+  ["todo", { status: "connected", tools: [{ name: "todo_add_item" }] }],
+  ["mailer", { status: "connected", tools: [{ name: "send_email" }] }],
+]);
 
 const BOTS = {
   kitchen: { bot_id: "kitchen", display_name: "Kitchen", enabled: 1 },
@@ -31,6 +39,7 @@ function harness({ chatTools = ["crow_memory", "crow_delegate", "ws_cal_create_e
     isMemoryTool: (n) => n === "crow_memory",
     botVoiceScope: () => scope,
     connectedAddonTools: () => connected,
+    addonToolGranted: (grants, name) => addonToolGranted(grants, name, SERVERS),
     isExternalSendTool: (n) => n === "send_email",
     escalateKey: "crow-chat/big",
     toolEscalationEnabled: () => escalationOn,
@@ -61,7 +70,10 @@ test("abilitiesOf: a bot with no add-on scope (unbound) reaches every connected 
 });
 
 test("abilitiesOf: a bound bot reaches only the add-on tools it selected", async () => {
-  const h = harness({ scope: { selectedToolNames: new Set(["ws_cal_create_event", "todo_add_item"]) } });
+  const h = harness({ scope: {
+    selectedToolNames: new Set(["ws_cal_create_event", "todo_add_item"]),
+    addonGrants: addonGrantMap(["calapp/ws_cal_create_event", "todo/todo_add_item"]),
+  } });
   assert.deepEqual(ids(await h.runner.abilitiesOf({ db: {}, botId: "kitchen" })), ["calendar", "lists(slower)"]);
 });
 

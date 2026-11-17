@@ -27,6 +27,7 @@ import {
 } from "../../shared/history/write-context.js";
 import { localFirst, satelliteVisible } from "../satellites/tool-entry.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
+import { effectiveCrowMcp, splitEntry } from "../../../scripts/pi-bots/skill-tools.mjs";
 import { createDbClient } from "../../db.js";
 import { isVoiceBotId } from "../../shared/voice-bot.js";
 import { operatorVoiceActor } from "../../shared/project-share-scope.js";
@@ -79,35 +80,100 @@ function botcronNextRun(cronExpression, fromDate = new Date()) {
 const EXECUTABLE_CATEGORIES = new Set(["memory", "projects", "blog", "sharing", "storage", "media"]);
 
 /**
- * Slice B (B3): compute the voice-path tool scope for a bound bot from its
- * def.tools.crow_mcp ("<canonical-server>/<tool>" entries). Returns null when
- * unbound — callers then fall back to the full, unscoped tool set / no policy
- * enforcement (the pre-Slice-B behavior, byte-for-byte).
+ * A selection's ADD-ON grants, keyed by SERVER: `Map<server, Set<tool> | true>`, where `true` is a
+ * bare "<server>" entry — every tool that server exposes. `splitEntry` reads all three spellings pi
+ * reads ("<server>/<tool>", "<server>__<tool>", and the bare server).
  *
- *   selectedToolNames  bare tool names the bot picked (match addon tools by name)
- *   selectedServers    canonical server ids the bot picked under
+ * Keyed by server, not by tool name, because a name is not unique: two connected add-ons can expose
+ * the same one, and a name alone would grant — and dispatch to — the add-on the bot was never given.
+ */
+export function addonGrantMap(crowMcp) {
+  const grants = new Map();
+  for (const raw of Array.isArray(crowMcp) ? crowMcp : []) {
+    if (typeof raw !== "string" || !raw) continue;
+    const pair = splitEntry(raw);
+    if (!pair) { grants.set(raw, true); continue; }   // a bare server: every tool it exposes
+    const [server, tool] = pair;
+    if (!server || !tool) continue;
+    const cur = grants.get(server);
+    if (cur === true) continue;                        // already the whole server
+    if (cur) cur.add(tool); else grants.set(server, new Set([tool]));
+  }
+  return grants;
+}
+
+/**
+ * May the connected add-on `server` serve `tool`? (`server` is the connectedServers key — the same
+ * name a crow_mcp entry names.) A null `grants` is an unbound executor: no gate at all.
+ */
+export function addonGranted(grants, server, tool) {
+  if (!grants) return true;
+  const g = grants.get(server);
+  return g === true || (g instanceof Set && g.has(tool));
+}
+
+/**
+ * The name-shaped form of addonGranted, for a caller that only has the tool NAME the model called (the
+ * voice turn's policy gate). `servers` is the connected add-on map (connectedServers at runtime): the
+ * name is granted when SOME connected server exposing it was given it — the same "skip an ungranted
+ * server and keep looking" rule executeTool applies, so the offer, the gate and the call agree. A tool
+ * name is not unique across add-ons, so one granted exposure is enough and none is a refusal.
+ */
+export function addonToolGranted(grants, tool, servers = connectedServers) {
+  if (!grants) return true;
+  if (typeof tool !== "string" || !tool || !servers) return false;
+  for (const [server, entry] of servers) {
+    if (entry?.status !== "connected") continue;
+    if (!(entry.tools || []).some((t) => t.name === tool)) continue;
+    if (addonGranted(grants, server, tool)) return true;
+  }
+  return false;
+}
+
+/**
+ * Slice B (B3): compute the voice-path tool scope for a bound bot from its EFFECTIVE
+ * crow_mcp — effectiveCrowMcp: the def's stored selection plus the tools its repo skills
+ * grant, minus the owner's declines. That is the list pi spawns with and the list the
+ * advertising code advertises from, so the gate and the advertisement cannot disagree.
+ * Returns null when unbound — callers then fall back to the full, unscoped tool set / no
+ * policy enforcement (the pre-Slice-B behavior, byte-for-byte).
+ *
+ *   selectedToolNames  bare tool names the bot picked by name ("<server>/<tool>" entries only; the voice
+ *                      turn's add-on gate reads addonGrants instead, so a bare server pick is covered)
+ *   selectedServers    server ids the bot picked under, a bare "<server>" entry included
  *   coreCategories     voice categories (A4 map) the bot has ANY selection under;
  *                      core crow_<category> proxies are all-or-nothing (decision 4)
+ *   addonGrants        the ADD-ON side, keyed by (server, tool) — see addonGrantMap
  */
 export function botVoiceScope(botDef) {
   if (!botDef) return null;
-  const crowMcp = (botDef.tools && botDef.tools.crow_mcp) || [];
+  // The union as computed, not as pi would spawn it: effectiveCrowMcp ignores addSkillToolsGuarded's
+  // tool-cap refusal and its voice-def skip (the same reading services/mount.js takes), so with a def
+  // over the model's tool cap, or a voice def that selected repo skills, this scope can grant slightly
+  // more than the spawned tool surface — wider, never narrower. Every call still passes the executor's
+  // own add-on gate, which reads this same map.
+  const crowMcp = effectiveCrowMcp(botDef);
   const selectedToolNames = new Set();
   const selectedServers = new Set();
   const coreCategories = new Set();
   for (const sel of crowMcp) {
-    const s = String(sel);
-    const slash = s.indexOf("/");
-    if (slash < 0) continue;
-    const server = s.slice(0, slash);
-    const tool = s.slice(slash + 1);
-    if (!tool) continue;
+    if (typeof sel !== "string" || !sel) continue;
+    const pair = splitEntry(sel);
+    if (!pair) {
+      // A bare server selection: the whole server, every tool it exposes.
+      selectedServers.add(sel);
+      const cat = voiceCategoryFor(sel);
+      if (cat) coreCategories.add(cat);
+      continue;
+    }
+    const [server, tool] = pair;
+    if (!server || !tool) continue;
     selectedServers.add(server);
     selectedToolNames.add(tool);
     const cat = voiceCategoryFor(server);
     if (cat) coreCategories.add(cat);
   }
-  return { selectedToolNames, selectedServers, coreCategories };
+  return { selectedToolNames, selectedServers, coreCategories, addonGrants: addonGrantMap(crowMcp) };
 }
 
 /** Set of tool names currently advertised by connected addon servers. */
@@ -215,7 +281,10 @@ function resolveToolCategory(action) {
 /**
  * @param {object} [opts]
  * @param {object} [opts.botDef]          bound bot definition — sets the default
- *                                        delegate target (crow_delegate's `bot`).
+ *                                        delegate target (crow_delegate's `bot`), the base actor
+ *                                        the in-process servers are built with, and the add-on
+ *                                        tools this executor may reach (its tools.crow_mcp
+ *                                        selection; an unselected add-on tool is refused).
  * @param {object} [opts.defaultDeliverTo] deliver_to spec to use when crow_delegate
  *                                        is called without one (e.g. the current
  *                                        gateway turn's thread). Falls back to poll.
@@ -268,15 +337,16 @@ export function createToolExecutor(opts = {}) {
   // never reach an owner-only tool (crow_send_message, crow_voice_memo) as the operator.
   const boundBotIsVoice = !!(boundBotId && isVoiceBotId(boundBotId) && !relay);
   const baseActor = boundBotId ? (boundBotIsVoice ? operatorVoiceActor() : { kind: "bot", id: boundBotId }) : undefined;
-  /** The base actor an in-process server of `category` is built with (the project servers and the
-   *  sharing server build all four the same way; every other category gets none). */
-  const baseActorFor = (category) => (category === "projects" || category === "memory" || category === "storage" || category === "sharing" ? baseActor : undefined);
+  /** The base actor an in-process server of `category` is built with (the project servers, the
+   *  sharing server and the blog server build all of them the same way; every other category gets
+   *  none). */
+  const baseActorFor = (category) => (category === "projects" || category === "memory" || category === "storage" || category === "sharing" || category === "blog" ? baseActor : undefined);
   /** The factory OPTIONS that actor means for `category` — the one place the actor→option mapping
-   *  lives: the projects and memory factories take `actor`, the storage and sharing factories take
-   *  `baseActor`. getClient builds servers from this and from nothing else. */
+   *  lives: the projects and memory factories take `actor`, the storage, sharing and blog factories
+   *  take `baseActor`. getClient builds servers from this and from nothing else. */
   const factoryOptionsFor = (category) => {
     if (baseActorFor(category) === undefined) return undefined;
-    return category === "storage" || category === "sharing" ? { baseActor }
+    return category === "storage" || category === "sharing" || category === "blog" ? { baseActor }
       : category === "memory" || category === "projects" ? { actor: baseActor }
         : undefined;
   };
@@ -320,6 +390,19 @@ export function createToolExecutor(opts = {}) {
   const actorMeta = boundBotId
     ? { _meta: { "crow/actor": { kind: "bot", id: boundBotId, name: sanitizeActorName(opts.botDef.display_name ?? boundBotId, boundBotId) } } }
     : opts.peerActor === true ? { _meta: { "crow/actor": { kind: "peer" } } } : {};
+
+  // The add-on tool allowlist gate. The advertised set is already scoped to a bound bot's selection
+  // (getChatTools), but a model can force-call an addon tool it was never offered — directly, or
+  // through the crow_tools proxy — so the selection is enforced again here, on the way in, for BOTH
+  // routes. A relay turn bound to the voice id is gated too (boundBotIsVoice is false for it), which
+  // is the point: relayed words are not the operator's. The refusal names the tool and nothing else.
+  //
+  // The grant is per (server, tool), never per tool NAME: two connected add-ons may expose the same
+  // name, so a name match would both grant and dispatch to an add-on the bot was never given.
+  const addonScope = boundBotId && !boundBotIsVoice ? botVoiceScope(opts.botDef) : null;
+  /** Is this connected add-on's copy of `tool` one the bound bot was given? (unbound ⇒ yes) */
+  const addonAllowed = (server, tool) => addonGranted(addonScope && addonScope.addonGrants, server, tool);
+  const ADDON_NOT_GRANTED = (name) => `Error: this assistant has not been given "${name}". Tell the user it isn't available to this assistant.`;
 
   async function getClient(category) {
     if (clients.has(category)) return clients.get(category);
@@ -465,19 +548,26 @@ export function createToolExecutor(opts = {}) {
 
       // Direct addon tool call (e.g., "crow_tax_prepare_from_documents")
       if (connectedServers) {
+        // Set when this name exists on a connected add-on the bot was NOT given: the refusal below
+        // is the bot's, never a fall-through to a core action that happens to share the name.
+        let ungranted = false;
         for (const [integrationId, entry] of localFirst(connectedServers)) {
           if (entry.status !== "connected" || !entry.client) continue;
           if (!satelliteVisible(entry)) continue; // a peer never reaches a satellite's tools
           const hasTool = entry.tools?.some((t) => t.name === name);
-          if (hasTool) {
-            try {
-              const result = await entry.client.callTool({ name, arguments: args, ...actorMeta });
-              return formatResult(result);
-            } catch (err) {
-              return { result: `Error calling ${name} (${integrationId}): ${err.message}`, isError: true };
-            }
+          if (!hasTool) continue;
+          // The bot was not given THIS add-on's copy of the tool: skip it and keep looking. Another
+          // connected add-on may expose the same name and be the one it was given — the first name
+          // match is never taken for granted.
+          if (!addonAllowed(integrationId, name)) { ungranted = true; continue; }
+          try {
+            const result = await entry.client.callTool({ name, arguments: args, ...actorMeta });
+            return formatResult(result);
+          } catch (err) {
+            return { result: `Error calling ${name} (${integrationId}): ${err.message}`, isError: true };
           }
         }
+        if (ungranted) return { result: ADDON_NOT_GRANTED(name), isError: true };
       }
 
       // Direct tool name (resolve to category)
@@ -765,21 +855,37 @@ export function createToolExecutor(opts = {}) {
     // Normalize params from the formats weaker models produce (shared with the voice confirm gate).
     const { params } = normalizeExternalParams(args);
 
+    // crow_tools is the other way to reach a connected addon tool, and the allowlist is the bot's,
+    // not the wrapper's: an add-on the bot was not given is skipped (the loop below never takes the
+    // first name match), and the refusal is the bot's own, before any call.
+    let ungranted = false;
     for (const [integrationId, entry] of localFirst(connectedServers)) {
       if (entry.status !== "connected" || !entry.client) continue;
       if (!satelliteVisible(entry)) continue; // a peer never reaches a satellite's tools
       const hasTool = entry.tools.some((t) => t.name === action);
-      if (hasTool) {
-        try {
-          const result = await entry.client.callTool({ name: action, arguments: params, ...actorMeta });
-          return formatResult(result);
-        } catch (err) {
-          return { result: `Error calling ${action} (${integrationId}): ${err.message}`, isError: true };
-        }
+      if (!hasTool) continue;
+      if (!addonAllowed(integrationId, action)) { ungranted = true; continue; }
+      try {
+        const result = await entry.client.callTool({ name: action, arguments: params, ...actorMeta });
+        return formatResult(result);
+      } catch (err) {
+        return { result: `Error calling ${action} (${integrationId}): ${err.message}`, isError: true };
       }
     }
+    if (ungranted) return { result: ADDON_NOT_GRANTED(action), isError: true };
 
-    return { result: `Tool "${action}" not found in any connected extension. Available: ${[...connectedServers.entries()].filter(([,e]) => e.status === "connected" && satelliteVisible(e)).map(([id, e]) => `${id}(${e.tools?.length || 0})`).join(", ")}`, isError: true };
+    // The "not found" listing names only the add-ons this caller may reach: a bound bot hears about
+    // the ones it was given (and how many of their tools it holds), never about the rest.
+    const available = [...connectedServers.entries()]
+      .filter(([, e]) => e.status === "connected" && satelliteVisible(e))
+      .flatMap(([id, e]) => {
+        if (!addonScope) return [`${id}(${e.tools?.length || 0})`];
+        const g = addonScope.addonGrants.get(id);
+        if (g === undefined) return [];
+        const n = g === true ? (e.tools?.length || 0) : (e.tools || []).filter((t) => g.has(t.name)).length;
+        return [`${id}(${n})`];
+      });
+    return { result: `Tool "${action}" not found in any connected extension. Available: ${available.join(", ")}`, isError: true };
   }
 
   /**
@@ -1109,8 +1215,9 @@ export function getChatTools(opts = {}) {
       const toolNames = [];
 
       for (const tool of sortedByName(entry.tools)) {
-        // Bound: advertise only addon tools the bot selected (scoped, by name).
-        if (scope && !scope.selectedToolNames.has(tool.name)) continue;
+        // Bound: advertise only this add-on's tools the bot was given — the same (server, tool)
+        // grant the executor enforces on the way in, so the offer and the gate agree.
+        if (scope && !addonGranted(scope.addonGrants, id, tool.name)) continue;
         const isPromoted = PROMOTED_PATTERNS.some((p) => p.test(tool.name));
         if (isPromoted) {
           // Expose as direct tool with real schema — no wrapper needed

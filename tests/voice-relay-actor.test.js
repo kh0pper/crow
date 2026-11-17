@@ -184,6 +184,14 @@ async function sharingServerOf(ex) {
   return server;
 }
 
+/** The in-process blog server an executor built — the same seam, one category over. */
+async function blogServerOf(ex) {
+  await ex.executeTool("crow_discover", { category: "blog", action: "crow_no_such_action" });
+  const server = ex._inProcessServers.get("blog");
+  assert.ok(server, "the executor built its in-process blog server");
+  return server;
+}
+
 const voiceBotDef = () => ({ bot_id: CROW_VOICE_BOT_ID, display_name: "Crow" });
 
 // --- (a) a relay executor bound to the voice id gets the plain bound actor ------------------
@@ -198,12 +206,17 @@ test("a relay executor bound to the voice id holds the plain bound actor, not th
   assert.deepEqual(held, { kind: "bot", id: CROW_VOICE_BOT_ID }, "the plain bound bot actor, nothing else");
   assert.equal(Object.isFrozen(held), false, "and it is not a frozen actor at all");
 
-  // The four in-process project servers are built from the same base actor (the sharing server above is the
-  // one this test could read directly; baseActorFor is where all four take it from).
-  for (const category of ["memory", "projects", "storage", "sharing"]) {
+  // The in-process servers are built from the same base actor (the sharing server above is the one this
+  // test could read directly; baseActorFor is where all of them take it from).
+  for (const category of ["memory", "projects", "storage", "sharing", "blog"]) {
     assert.deepEqual(ex.baseActorFor(category), { kind: "bot", id: CROW_VOICE_BOT_ID }, `${category}: the plain bound bot actor`);
     assert.equal(ex.baseActorFor(category), ex.baseActorFor("memory"), `${category}: the same actor the other servers get`);
   }
+
+  // And the blog server the executor really built holds it too.
+  const blog = await blogServerOf(ex);
+  assert.deepEqual(blog.blog.actor, { kind: "bot", id: CROW_VOICE_BOT_ID }, "the blog server holds the plain bound bot");
+  assert.equal(scope.isOperatorVoice(blog.blog.actor), false);
 });
 
 // --- (b) so the sharing tools refuse it, and no handler runs -------------------------------
@@ -221,6 +234,35 @@ test("a relay executor is refused crow_send_message and crow_voice_memo, and not
   }
 });
 
+// --- (b2) the blog surface is refused a relay executor the same way ------------------------
+
+test("a relay executor is refused crow_blog create_post (no row); the operator's own turn creates the post", async () => {
+  const blogDb = createDbClient(DB_FILE);
+  openDbs.push(blogDb);
+  const posts = async (title) => Number((await blogDb.execute({
+    sql: "SELECT COUNT(*) AS n FROM blog_posts WHERE title = ?", args: [title],
+  })).rows[0].n);
+  const title = "A relayed turn's post " + Date.now().toString(36);
+
+  // The relay turn: the blog server is the plain bound bot, so the create is refused and no row exists.
+  const relay = track(createToolExecutor({ botDef: voiceBotDef(), relay: true }));
+  const blog = await blogServerOf(relay);
+  assert.deepEqual(blog.blog.actor, { kind: "bot", id: CROW_VOICE_BOT_ID }, "the relay turn's blog server is the plain bound bot");
+  const refused = await relay.executeTool("crow_blog", { action: "create_post", params: { title, content: "Relayed words." } });
+  assert.equal(refused.isError, true, refused.result);
+  assert.equal(refused.result, OWNER_ONLY_TEXT, "the fixed owner-only refusal");
+  assert.equal(await posts(title), 0, "no post was written");
+
+  // The control: the operator's own spoken turn (no relay) really creates it.
+  const own = track(createToolExecutor({ botDef: voiceBotDef() }));
+  const ownBlog = await blogServerOf(own);
+  assert.equal(ownBlog.blog.actor, scope.operatorVoiceActor(), "the operator's own turn keeps the frozen actor");
+  const created = await own.executeTool("crow_blog", { action: "create_post", params: { title, content: "The operator's words." } });
+  assert.equal(created.isError, false, created.result);
+  assert.match(created.result, /Created draft/, created.result);
+  assert.equal(await posts(title), 1, "the post was written");
+});
+
 // --- (c) the control: no relay keeps the operator voice actor ------------------------------
 
 test("without relay the voice executor keeps the frozen operator voice actor and its send is delivered", async () => {
@@ -228,9 +270,10 @@ test("without relay the voice executor keeps the frozen operator voice actor and
   const server = await sharingServerOf(ex);
   assert.equal(server.sharing.actor, scope.operatorVoiceActor(), "the frozen operator voice actor is the base");
   assert.equal(scope.isOperatorVoice(server.sharing.actor), true);
-  for (const category of ["memory", "projects", "storage", "sharing"]) {
+  for (const category of ["memory", "projects", "storage", "sharing", "blog"]) {
     assert.equal(ex.baseActorFor(category), scope.operatorVoiceActor(), `${category}: the frozen operator voice actor`);
   }
+  assert.equal((await blogServerOf(ex)).blog.actor, scope.operatorVoiceActor(), "blog: the frozen operator voice actor");
 
   // The real outcome, not just "not the refusal": the handler ran and the send went out over nostr.
   peerCalls = [];
@@ -346,7 +389,7 @@ function realExecutorHarness(bot) {
   const made = [];
   h.deps.createToolExecutor = (o) => {
     const ex = track(createToolExecutor(o));
-    made.push({ relay: o.relay, botId: o.botDef?.bot_id, actors: Object.fromEntries(["memory", "projects", "storage", "sharing"].map((c) => [c, ex.baseActorFor(c)])) });
+    made.push({ relay: o.relay, botId: o.botDef?.bot_id, actors: Object.fromEntries(["memory", "projects", "storage", "sharing", "blog"].map((c) => [c, ex.baseActorFor(c)])) });
     return ex;
   };
   h.made = made;
@@ -362,7 +405,7 @@ test("runner level, real createToolExecutor: a relay turn's sharing actor is the
   const held = relay.made.at(-1);
   assert.equal(held.relay, true, "with the turn's relay flag");
   assert.equal(held.botId, CROW_VOICE_BOT_ID, "bound to the voice bot");
-  for (const category of ["memory", "projects", "storage", "sharing"]) {
+  for (const category of ["memory", "projects", "storage", "sharing", "blog"]) {
     assert.deepEqual(held.actors[category], { kind: "bot", id: CROW_VOICE_BOT_ID }, `${category}: the plain bound bot`);
     assert.notEqual(held.actors[category], scope.operatorVoiceActor(), `${category}: not operator voice`);
   }
@@ -372,7 +415,7 @@ test("runner level, real createToolExecutor: a relay turn's sharing actor is the
   assert.ok(operator.made.length >= 1, "the operator's turn built the real executor too");
   const own = operator.made.at(-1);
   assert.equal(own.relay, false, "with no relay flag");
-  for (const category of ["memory", "projects", "storage", "sharing"]) {
+  for (const category of ["memory", "projects", "storage", "sharing", "blog"]) {
     assert.equal(own.actors[category], scope.operatorVoiceActor(), `${category}: the frozen operator voice actor`);
   }
 });
