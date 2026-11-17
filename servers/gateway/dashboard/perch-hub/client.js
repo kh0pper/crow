@@ -451,6 +451,9 @@ export function perchHubJs(lang = "en") {
   var SEND_FAILED='${tJs("perch.sendFailed", lang)}';
   var DRAFT_MAYBE_SENT='${tJs("perch.draftMaybeSent", lang)}';
   var BOT_START_FAILED='${tJs("perch.botStartFailed", lang)}';
+  /* The restart note the bot board already uses; a send interrupted by a
+     gateway restart reads exactly that sentence. */
+  var BOT_INTERRUPTED='${tJs("botboard.bdInterruptedNote", lang)}';
   var TURN_FAILED='${tJs("perch.turnFailed", lang)}';
   var FILE_QUEUED='${tJs("perch.fileQueued", lang)}';
   var FILE_FAILED='${tJs("perch.fileFailed", lang)}';
@@ -1398,7 +1401,12 @@ export function perchHubJs(lang = "en") {
         var moreOpts=el('perch-launch-more'); if(moreOpts) moreOpts.open=true;
         return refused(CWD_INVALID);
       }
-      if(!r.ok||!r.j||!r.j.sessionId) return refused(START_FAILED);
+      /* The engine's reason rides along (a refused spawn names the model), so
+         the note says WHY instead of a bare "could not start". A response
+         carrying none (a dropped fetch, a shapeless 200) keeps the bare
+         sentence. */
+      var why=r&&r.j?(typeof r.j.detail==='string'&&r.j.detail?r.j.detail:(r.status>=500&&typeof r.j.error==='string'?r.j.error:'')):'';
+      if(!r.ok||!r.j||!r.j.sessionId) return refused(why?START_FAILED+' '+why.slice(0,300):START_FAILED);
       var sid=r.j.sessionId;
       rowIndex[sid]={botId:botId,botName:botName,sessionId:sid,projectId:typeof spawnProject==='number'?spawnProject:null};
       /* The model, applied BEFORE the first message and before the operator
@@ -1966,6 +1974,10 @@ export function perchHubJs(lang = "en") {
          model — or mid-turn). That is not rail chrome: the operator's message
          went nowhere, so say why where they are reading. */
       if(d.reason==='pi_exit'){
+        /* The child died because the gateway was restarting: say that, not
+           pi's exit text (a -1 code says nothing to the operator). Bare, so
+           the note is that sentence alone. */
+        if(d.interrupted===true){ showSendFailure(sid,BOT_INTERRUPTED,true); return; }
         if(lastSent&&lastSent.sid===sid) showSendFailure(sid,d.text||'');
         return;
       }
@@ -3059,7 +3071,12 @@ export function perchHubJs(lang = "en") {
          (pi_gone above all: the bot's child died before the turn started) was
          read as one, flipping the composer to Steer and saying nothing. */
       if(r.status===409&&(code==='turn_in_progress'||!code)){ setTurnInFlight(true); return; }
-      if(code==='pi_gone'){ showSendFailure(mySid,(r.j&&r.j.detail)||code); return; }
+      if(code==='pi_gone'){
+        /* Same death as the stream's pi_exit frame: a restart interruption is
+           named as one, and either path consumes lastSent (one note). */
+        if(r.j&&r.j.interrupted===true){ showSendFailure(mySid,BOT_INTERRUPTED,true); return; }
+        showSendFailure(mySid,(r.j&&r.j.detail)||code); return;
+      }
       /* Strand 2: the session's model can't take this bot's tools. The bot
          DID start, so no "could not start" label — the engine's sentence
          (model, both numbers, the ways out) is the whole note. */

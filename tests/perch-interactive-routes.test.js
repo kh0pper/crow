@@ -469,6 +469,22 @@ test("POST /interactive/:sid/message: pi_gone carries the engine's detail (pi's 
   assert.equal(r2.body.detail, undefined, "no detail key when the engine gave none");
 });
 
+test("POST /interactive/:sid/message: a pi_gone interrupted by a gateway restart carries interrupted:true", async () => {
+  engineImpl.message = async () => {
+    throw Object.assign(engineErr("pi_gone"), { detail: "pi exited (code -1) before responding", interrupted: true });
+  };
+  const r = await postJson("/interactive/sess-1/message", { message: "hi" });
+  assert.equal(r.status, 409);
+  assert.deepEqual(r.body, { error: "pi_gone", detail: "pi exited (code -1) before responding", interrupted: true });
+
+  engineImpl.message = async () => {
+    throw Object.assign(engineErr("pi_gone"), { detail: "pi exited (code 1) before responding" });
+  };
+  const r2 = await postJson("/interactive/sess-1/message", { message: "hi" });
+  assert.equal(r2.status, 409);
+  assert.equal(Object.hasOwn(r2.body, "interrupted"), false, "a plain death is not labelled an interruption");
+});
+
 test("POST /interactive/:sid/message (strand 2): tool_budget is a 422 carrying the engine's refusal text", async () => {
   engineImpl.message = async () => {
     throw Object.assign(engineErr("tool_budget"), { detail: "This session's model (m) accepts at most 128 tools; this bot has 318." });

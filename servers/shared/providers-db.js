@@ -176,6 +176,27 @@ export function addProviderChangeListener(fn) {
   return () => { _providerChangeListeners.delete(fn); };
 }
 
+/**
+ * One cheap change signal for the `providers` table: the row count (a delete
+ * moves it), the newest `updated_at`, the lamport sum (every write bumps it)
+ * and the disabled sum (a flip moves it). Credential columns are never read.
+ *
+ * This is the fingerprint `servers/shared/provider-change-watch.js` polls so
+ * the gateway notices rows written by ANOTHER process — a script or CLI
+ * calling upsertProvider outside the gateway never reaches the in-process
+ * change hook.
+ *
+ * @param {object} db
+ * @returns {Promise<string>}
+ */
+export async function providersFingerprint(db) {
+  const { rows } = await db.execute(
+    "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at),'') AS u, COALESCE(SUM(lamport_ts),0) AS l, COALESCE(SUM(disabled),0) AS d FROM providers",
+  );
+  const r = rows[0] ?? {};
+  return `${r.n ?? 0}|${r.u ?? ""}|${r.l ?? 0}|${r.d ?? 0}`;
+}
+
 async function emitSync(db, op, row) {
   await emitOrQueue(_syncManager, db, "providers", op, row);
   if (_providerChangeHook) {

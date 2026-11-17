@@ -1381,9 +1381,12 @@ export class PiRpc {
     const diag = (opts.stderrDiag === false) ? null
       : createStderrDiag({ label: opts.diagLabel || basename(sessionDir || "") || "bot", emit: (l) => (opts.diagLog || ((x) => console.error(x)))(maskSecrets(l)) });
     this.proc.stderr.on("data", (d) => { this.stderr += d.toString(); if (diag) { try { diag(d); } catch {} } });
-    this.exited = new Promise((res) => this.proc.on("exit", (c) => {
+    this.exited = new Promise((res) => this.proc.on("exit", (c, sig) => {
       if (this._containCleanups.length) this._scheduleContainCleanup();
       this._exitCode = c == null ? -1 : c;
+      // A child killed by a signal reports code null (-1 here): keep WHICH
+      // signal so the exit text can say so instead of a bare -1.
+      this._exitSignal = sig || null;
       // Fail any pending waiters NOW with the real cause instead of leaving
       // them to time out cryptically (a fresh install resolving to a model
       // no provider serves makes pi print "Unknown provider" and exit — the
@@ -1409,7 +1412,10 @@ export class PiRpc {
 
   _exitError(label) {
     const key = this.resolved && this.resolved.key;
-    return new Error("pi exited (code " + this._exitCode + ") before " + (label || "responding") +
+    const why = this._exitSignal
+      ? "pi exited (code " + this._exitCode + ", signal " + this._exitSignal + ") before "
+      : "pi exited (code " + this._exitCode + ") before ";
+    return new Error(why + (label || "responding") +
       " — the model " + key + " may not be available on this instance" +
       " (configure providers in Settings → AI Models). pi said: " + (maskSecrets(this.stderr.trim().slice(-300)) || "(no stderr)"));
   }

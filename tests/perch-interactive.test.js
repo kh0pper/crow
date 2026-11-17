@@ -252,6 +252,7 @@ function makeEngine(o = {}) {
     crowHome: CROW_HOME,
     env,
     bridge,
+    providerModels: o.providerModels,
     now: clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
@@ -657,6 +658,73 @@ test("a child that dies at spawn (unknown provider) refuses the message WITH pi'
   assert.ok(logged && logged.endsWith("END") && logged.length <= s2.sessionId.length + ": pi exited: ".length + 2000,
     "the tail is kept, capped at 2000 chars");
   assert.equal((await engine.get(s.sessionId)).state, "hibernating");
+});
+
+test("a spawn that fails logs WHY, naming the session, instead of leaving only world rebuilt / model warm", async () => {
+  const lines = [];
+  const { engine, state } = makeEngine({ log: (m) => lines.push(String(m)) });
+  // A synchronous getState throw dodges the `.catch(() => null)` and lands in
+  // spawn()'s own catch — the seam the R2 rode-along test uses.
+  state.piScript = (pi) => { pi.getState = () => { throw new Error("get_state boom"); }; };
+  await assert.rejects(() => engine.spawn({ botId: "ghosty" }), /get_state boom/);
+  state.piScript = null;
+  await tick();
+  assert.ok(lines.some((l) => /^perchlive-[0-9a-f]{8}: spawn failed: .*get_state boom$/.test(l)),
+    "the reason reaches the gateway log with the session it belongs to");
+});
+
+test("a wake on a recorded model the bot engine cannot run refuses with the model named", async () => {
+  // The recorded choice is in the catalogue (so the R2b fail-open does not drop
+  // it) but pi cannot be spawned with it: the refusal must name the model
+  // rather than a bare bad_request the drawer shows as "could not start".
+  const { engine, clock, state } = makeEngine({
+    providerModels: () => [{ provider: "crow-c-nowhere", id: "m1" }],
+  });
+  const s = await spawned(engine);
+  state.instances[0].emit({ type: "model_select", model: { provider: "crow-c-nowhere", id: "m1" } });
+  clock.advance(600_001);
+  await tick();
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating", "precondition: the next message wakes a child");
+  await assert.rejects(
+    () => engine.message(s.sessionId, "wake up"),
+    (e) => e.code === "bad_request" && e.detail === 'model "crow-c-nowhere/m1" is not available to the bot engine',
+    "the refusal names the model, so the operator knows what to change"
+  );
+});
+
+test("a SIGTERM exit is flagged as a restart interruption; a plain exit code is not", async () => {
+  const { engine, state } = makeEngine();
+  const a = await spawned(engine, "signalled");
+  const sinkA = await collect(engine, a.sessionId);
+  const piA = state.instances[0];
+  piA._exitSignal = "SIGTERM";
+  piA.exit(-1);                              // a child killed by a signal reports -1
+  await tick();
+  const errsA = sinkA.ofType("error").filter((e) => e.reason === "pi_exit");
+  assert.equal(errsA.length, 1);
+  assert.equal(errsA[0].interrupted, true, "a restart's SIGTERM is named as an interruption");
+
+  const b = await spawned(engine, "killed");
+  const sinkB = await collect(engine, b.sessionId);
+  state.instances[1].exit(137);               // an OOM kill: a code, no signal
+  await tick();
+  const errsB = sinkB.ofType("error").filter((e) => e.reason === "pi_exit");
+  assert.equal(errsB.length, 1);
+  assert.equal(Object.hasOwn(errsB[0], "interrupted"), false, "no interruption key without a signal");
+});
+
+test("a child that dies once stopAll() has begun is flagged interrupted even with no signal", async () => {
+  const { engine, state } = makeEngine();
+  await spawned(engine, "first");
+  const stopping = engine.stopAll();          // the shutdown flag is set before its first await
+  const late = await spawned(engine, "late");
+  const sink = await collect(engine, late.sessionId);
+  state.instances[1].exit(-1);
+  await tick();
+  const errs = sink.ofType("error").filter((e) => e.reason === "pi_exit");
+  assert.equal(errs.length, 1);
+  assert.equal(errs[0].interrupted, true, "the gateway is going down: an exit now is an interruption, not a crash");
+  await stopping;
 });
 
 test("clean completion: meters + audits, emits reply, trims the log, and parks the row", async () => {
