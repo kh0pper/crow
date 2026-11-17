@@ -1248,7 +1248,7 @@ test("the rest of the gesture Learn mapped is not played", async () => {
   await ui.settle();
   ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
   await ui.settle();
-  ui.click("[data-role=sampler] [data-act=pad][data-pad-index=0]");
+  ui.click("[data-role=sampler-pads] [data-act=pad][data-pad-index=0]");
   await ui.settle();
   ui.pedal(DEVICE, [0x90, 36, 100]);
   await ui.settle();
@@ -2295,7 +2295,7 @@ test("in Chrome, an effect button held with the mouse releases when the pointer 
   t.after(() => page.close());
   assert.ok(await waitFor(page, `!!document.querySelector('[data-act=open-clip][data-clip-id=${CLIP}]')`, 20000), "the clip is on the grid");
   await page.evaluate(`document.querySelector('[data-act=open-clip][data-clip-id=${CLIP}]').click()`);
-  const STUTTER = "[data-role=sampler] [data-fx-name=stutter]";
+  const STUTTER = "[data-role=sampler-fx] [data-fx-name=stutter]";
   assert.ok(await waitFor(page, `!!document.querySelector('${STUTTER}')`, 10000), "the pad view shows the effects row");
 
   const fxCalls = async () => (await engineLog(page)).filter((entry) => entry.call === "fxHold" || entry.call === "fxRelease");

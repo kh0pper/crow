@@ -35,6 +35,8 @@ import { createTakeUploads } from "../bundles/studio/server/takes-upload.js";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 import studioPanel from "../bundles/studio/panel/studio.js";
 import { acceptsMessageType, messageNeedsText } from "../bundles/studio/panel/midi-route.js";
+import { SHELL_LAYOUT_SCRIPT } from "../bundles/studio/panel/shell-layout.js";
+import { SHELL_SCRIPT } from "../bundles/studio/panel/shell.js";
 import { encodeWav24, decodeWav } from "../bundles/studio/server/wav.js";
 
 /** The sampler track of the fixture song, and its one bank. */
@@ -635,6 +637,10 @@ async function bootSampler(options = {}) {
   const windowListeners = {};
   const windowStub = {
     crypto: globalThis.crypto,
+    // A laptop's width, its storage and, when a test asks for it, the shell: the
+    // widget layout is what moves the four sampler hosts into their own frames.
+    innerWidth: Number(options.width) || 1280,
+    localStorage: options.storage || null,
     location: { protocol: "http:", host: "127.0.0.1:1", reload() {} },
     atob: globalThis.atob,
     confirm: () => true,
@@ -707,6 +713,19 @@ async function bootSampler(options = {}) {
   assert.notEqual(scriptText, CLIENT_SCRIPT, "the test replaces the Yjs asset URL with the file on disk");
 
   const timers = [];
+  // The page's own two shell scripts, in the order the handler inlines them
+  // (the layout model first, the shell second), before the client runs: the
+  // client is what mounts the shell around its hosts.
+  if (options.shell) {
+    const shellScripts = new Function(
+      "window",
+      "document",
+      `${SHELL_LAYOUT_SCRIPT}\n${SHELL_SCRIPT}`,
+    );
+    shellScripts(windowStub, document);
+    assert.ok(windowStub.StudioShell, "the shell script is evaluated");
+    assert.ok(windowStub.StudioShellLayout, "the layout model script is evaluated");
+  }
   const run = new Function(
     "document",
     "window",
@@ -817,17 +836,36 @@ async function bootSampler(options = {}) {
       click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
       await settle();
     },
-    /** The sampler host, asserted to be the view on screen. */
+    /** The pads host, asserted to be the view on screen. */
     view() {
-      const host = document.querySelector("[data-role=sampler]");
-      assert.ok(host, "the sampler host is on the page");
+      const host = document.querySelector("[data-role=sampler-pads]");
+      assert.ok(host, "the pads host is on the page");
       assert.equal(host.hidden, false, "the pad-and-steps view is open");
       return host;
+    },
+    /** One sampler host by its role, without asserting anything about it. */
+    host(role) {
+      return document.querySelector(`[data-role=${role}]`);
+    },
+    /** One widget's frame, by widget id (the shell's own box). */
+    widgetFrame(id) {
+      const node = document.querySelector(`[data-widget=${id}]`);
+      assert.ok(node, `the ${id} frame is on the page`);
+      return node;
+    },
+    /** One widget frame's empty note, by widget id. */
+    widgetNote(id) {
+      return ui.widgetFrame(id).querySelector(".st-widget-note");
+    },
+    /** The page's own layout model, once the shell script has been evaluated. */
+    layoutApi() {
+      assert.ok(windowStub.StudioShellLayout, "the layout model is on the page");
+      return windowStub.StudioShellLayout;
     },
     /** @returns {object} one pad's button */
     pad(index) {
       const node = document.querySelector(
-        `[data-role=sampler] [data-act=pad][data-pad-index="${index}"]`,
+        `[data-role=sampler-pads] [data-act=pad][data-pad-index="${index}"]`,
       );
       assert.ok(node, `pad ${index} is drawn`);
       return node;
@@ -992,10 +1030,13 @@ test("the pad grid shows bank A with 16 pads", async () => {
   );
   assert.equal(ui.padName(0), "Empty", "an empty pad says so");
 
-  // The selected pad's settings are drawn, and part 2's hosts are left for it.
+  // The selected pad's settings are drawn, and each of the four widgets has its
+  // own host (part 2 fills the three beside the pads).
   assert.ok(view.querySelector("[data-pad-field=gain_db]"), "the pad's settings are drawn");
-  assert.ok(view.querySelector("[data-role=sampler-chop]"), "the chop editor's host is left for part 2");
-  assert.ok(view.querySelector("[data-role=sampler-steps]"), "so is the step sequencer's");
+  assert.ok(ui.document.querySelector("[data-role=sampler-chop]"), "the chop editor has a host of its own");
+  assert.ok(ui.document.querySelector("[data-role=sampler-steps]"), "so does the step sequencer");
+  assert.ok(ui.document.querySelector("[data-role=sampler-fx]"), "and the effects row");
+  assert.equal(view.querySelector("[data-role=sampler-steps]"), null, "the pads host holds no steps");
 });
 
 test("a sampler track gets a pattern from its empty cell", async () => {
@@ -2067,7 +2108,7 @@ test("holding a step and turning cutoff sets a lock", async () => {
   assert.equal(cleared[0].args.at, 2, "on the step that has the lock");
 
   // Lock mode ends with Done, so the next control belongs to the pad again.
-  const done = ui.view().querySelector("[data-act=step-lock-done]");
+  const done = ui.slot("sampler-steps").querySelector("[data-act=step-lock-done]");
   assert.ok(done, "the strip offers Done to leave lock mode");
   done.dispatchEvent(ui.event("click", { bubbles: true }));
   await ui.settle();
@@ -2098,16 +2139,16 @@ test("a long press counts even when the page is too busy to run its timer first"
   // No timer runs: the release comes first.
   ui.release({ timeStamp: 1400 });
   await ui.settle();
-  assert.ok(ui.view().querySelector("[data-role=step-lock]"), "the 400 ms press entered lock mode");
+  assert.ok(ui.slot("sampler-steps").querySelector("[data-role=step-lock]"), "the 400 ms press entered lock mode");
   assert.equal(commands(ui, "step.toggle").length, 0, "and did not toggle the step");
 
   // A short press on a busy page is still a short press.
-  ui.view().querySelector("[data-act=step-lock-done]").dispatchEvent(ui.event("click", {}));
+  ui.slot("sampler-steps").querySelector("[data-act=step-lock-done]").dispatchEvent(ui.event("click", {}));
   await ui.settle();
   ui.step(2).dispatchEvent(at(ui.event("pointerdown", { button: 0, clientX: 0 }), 5000));
   ui.release({ timeStamp: 5100 });
   await ui.settle();
-  assert.equal(ui.view().querySelector("[data-role=step-lock]"), null, "a 100 ms press is not a long press");
+  assert.equal(ui.slot("sampler-steps").querySelector("[data-role=step-lock]"), null, "a 100 ms press is not a long press");
 });
 
 test("a slider changed after the step is released still sets the step's lock", async () => {
@@ -2122,7 +2163,7 @@ test("a slider changed after the step is released still sets the step's lock", a
   ui.release();
   await ui.settle();
 
-  const strip = ui.view().querySelector("[data-role=step-lock]");
+  const strip = ui.slot("sampler-steps").querySelector("[data-role=step-lock]");
   assert.ok(strip, "the press of a quarter second entered lock mode");
   assert.match(String(strip.textContent), /Locking step 3/, "the strip names the step");
   assert.match(
@@ -2167,7 +2208,7 @@ test("a long press does not toggle the step", async () => {
   await ui.settle();
 
   assert.equal(commands(ui, "step.toggle").length, 0, "the long press sent no step.toggle");
-  assert.ok(ui.view().querySelector("[data-role=step-lock]"), "and lock mode is still on");
+  assert.ok(ui.slot("sampler-steps").querySelector("[data-role=step-lock]"), "and lock mode is still on");
 });
 
 test("Done leaves lock mode", async () => {
@@ -2179,12 +2220,12 @@ test("Done leaves lock mode", async () => {
   ui.holdStep(2);
   ui.release();
   await ui.settle();
-  const done = ui.view().querySelector("[data-act=step-lock-done]");
+  const done = ui.slot("sampler-steps").querySelector("[data-act=step-lock-done]");
   assert.ok(done, "the strip offers Done");
   assert.equal(String(done.textContent), "Done");
   done.dispatchEvent(ui.event("click", { bubbles: true }));
   await ui.settle();
-  assert.equal(ui.view().querySelector("[data-role=step-lock]"), null, "Done leaves lock mode");
+  assert.equal(ui.slot("sampler-steps").querySelector("[data-role=step-lock]"), null, "Done leaves lock mode");
 
   // A pad control is the pad's own again.
   const gain = ui.view().querySelector("[data-pad-field=gain_db]");
@@ -2905,17 +2946,17 @@ test("a file imported in Chrome lands on its pad through the real upload", async
   assert.ok(
     await waitFor(
       page,
-      "(function () { var host = document.querySelector('[data-role=sampler]'); return !!host && !host.hidden && !!host.querySelector('[data-act=pad][data-pad-index=\"0\"]'); })()",
+      "(function () { var host = document.querySelector('[data-role=sampler-pads]'); return !!host && !host.hidden && !!host.querySelector('[data-act=pad][data-pad-index=\"0\"]'); })()",
       10000,
     ),
     "the pad view opened with its pads",
   );
-  await page.evaluate("document.querySelector('[data-role=sampler] [data-act=pad][data-pad-index=\"0\"]').click(), true");
+  await page.evaluate("document.querySelector('[data-role=sampler-pads] [data-act=pad][data-pad-index=\"0\"]').click(), true");
 
   // A WAV made in the page: 0.5 s of 440 Hz at 48 kHz, 16-bit mono, handed to
   // the import input as a real File through a DataTransfer.
   const fed = await page.evaluate(`(function () {
-    var input = document.querySelector('[data-role=sampler] input[data-act=sample-import][data-pad-index="0"]');
+    var input = document.querySelector('[data-role=sampler-pads] input[data-act=sample-import][data-pad-index="0"]');
     if (!input) return 'no import input for pad A01';
     var rate = 48000, frames = rate / 2;
     var bytes = new ArrayBuffer(44 + frames * 2);
@@ -2958,7 +2999,7 @@ test("a file imported in Chrome lands on its pad through the real upload", async
   const shown = await waitFor(
     page,
     `(function () {
-      var node = document.querySelector('[data-role=sampler] [data-act=pad][data-pad-index="0"] .st-pad-name');
+      var node = document.querySelector('[data-role=sampler-pads] [data-act=pad][data-pad-index="0"] .st-pad-name');
       var text = node ? node.textContent : '';
       return text && text.indexOf('Uploading') < 0 && text === ${JSON.stringify(sample.name)} ? text : false;
     })()`,
@@ -3133,7 +3174,7 @@ test("a knob turned in lock mode records no motion", async () => {
   // change was that step's lock all the same.
   ui.release();
   await ui.settle();
-  assert.ok(ui.view().querySelector("[data-role=step-lock]"), "holding the step entered lock mode");
+  assert.ok(ui.slot("sampler-steps").querySelector("[data-role=step-lock]"), "holding the step entered lock mode");
 
   const locks = commands(ui, "step.set");
   assert.equal(locks.length, 1, "the change is one step.set");
@@ -3381,7 +3422,7 @@ test("a MIDI knob in lock mode records no motion", async () => {
   await ui.settle();
   ui.release();
   await ui.settle();
-  assert.ok(ui.view().querySelector("[data-role=step-lock]"), "holding the step entered lock mode");
+  assert.ok(ui.slot("sampler-steps").querySelector("[data-role=step-lock]"), "holding the step entered lock mode");
 
   const locks = commands(ui, "step.set");
   assert.equal(locks.length, 1, `the knob move is one step.set, got ${locks.length}`);
@@ -3525,10 +3566,10 @@ async function openSamplerPage(t, { stepOn = false } = {}) {
     if (!open) return false; open.click(); return true;
   })()`), true, "the clip offers its open button");
   assert.ok(
-    await waitFor(page, "!!document.querySelector('[data-role=sampler] [data-act=pad][data-pad-index=\"0\"]')", 10000),
+    await waitFor(page, "!!document.querySelector('[data-role=sampler-pads] [data-act=pad][data-pad-index=\"0\"]')", 10000),
     "the pad view opened",
   );
-  await page.evaluate("document.querySelector('[data-role=sampler] [data-act=pad][data-pad-index=\"0\"]').click(), true");
+  await page.evaluate("document.querySelector('[data-role=sampler-pads] [data-act=pad][data-pad-index=\"0\"]').click(), true");
   assert.ok(await waitFor(page, "!!document.querySelector('[data-act=step][data-at=\"0\"]')", 10000), "the steps drew");
   const snapOf = async () => (await hub.openSong(id)).snapshot;
   const waitSnap = async (check, timeoutMs = 10000) => {
@@ -3548,7 +3589,7 @@ async function openSamplerPage(t, { stepOn = false } = {}) {
   return { page, id, bank, snapOf, waitSnap };
 }
 
-const CUTOFF = "[data-role=sampler] input[data-pad-field=\"filter.cutoff_hz\"][data-pad-index=\"0\"]";
+const CUTOFF = "[data-role=sampler-pads] input[data-pad-field=\"filter.cutoff_hz\"][data-pad-index=\"0\"]";
 
 /** The step at position `at` of pad A01 in pattern a, or undefined when it is off. */
 function stepOf(snap, at) {
@@ -3628,17 +3669,352 @@ test("in Chrome, Escape cancels a rename and nothing is saved", async (t) => {
   assert.equal(entries.filter((entry) => entry.command === "pattern.rename").length, 0, "Escape saved nothing");
 });
 
-test("at phone width the 16 steps fit without scrolling", async (t) => {
+test("at phone width the lane pages eight steps at a finger's size", async (t) => {
   if (!chrome) return t.skip("no headless Chrome available");
   const { page } = await openSamplerPage(t);
   await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
   await pause(200);
-  const fit = await page.evaluate(`(function () {
-    var strip = document.querySelector('.st-step-strip');
-    var one = document.querySelector('[data-act=step][data-at="0"]');
-    var nine = document.querySelector('[data-act=step][data-at="8"]');
-    return { scroll: strip.scrollWidth, client: strip.clientWidth, one: one.offsetTop, nine: nine.offsetTop };
+  // A phone shows one widget at a time under its tabs, and the steps are a
+  // widget of their own: their tab is what puts the strip on the page.
+  await page.evaluate(`(function () {
+    var tab = document.querySelector('[data-widget-tab=steps]');
+    if (tab) tab.click();
+    return true;
   })()`);
-  assert.ok(fit.scroll <= fit.client, `the strip scrolls sideways (${fit.scroll} > ${fit.client})`);
-  assert.ok(fit.nine > fit.one, `step 9 wraps to a second row (${fit.nine} vs ${fit.one})`);
+  await pause(200);
+  // A phone's lane holds eight positions a page (the client pages it by the
+  // same width class), each one a 44 px target, with the pager to reach the
+  // pattern's other eight.
+  const lane = await page.evaluate(`(function () {
+    var strip = document.querySelector('[data-role=sampler-steps] .st-step-strip');
+    var cells = strip.querySelectorAll('[data-act=step]');
+    var pager = document.querySelectorAll('[data-role=sampler-steps] [data-act=step-page]');
+    var small = [];
+    for (var i = 0; i < cells.length; i += 1) {
+      var box = cells[i].getBoundingClientRect();
+      if (box.width < 44 || box.height < 44) small.push(box.width + 'x' + box.height);
+    }
+    return {
+      count: cells.length,
+      from: cells[0].getAttribute('data-at'),
+      last: cells[cells.length - 1].getAttribute('data-at'),
+      oneRow: cells[cells.length - 1].offsetTop === cells[0].offsetTop,
+      pages: pager.length,
+      labels: [].map.call(pager, function (node) { return String(node.textContent); }),
+      small: small
+    };
+  })()`);
+  assert.equal(lane.count, 8, "a phone draws eight step positions, not sixteen");
+  assert.equal(lane.from, "0", "starting at the pattern's first position");
+  assert.equal(lane.last, "7", "and ending at its eighth");
+  assert.equal(lane.oneRow, true, "the eight fit across one row");
+  assert.deepEqual(lane.small, [], `every step is at least 44 px in both directions (${lane.small})`);
+  assert.equal(lane.pages, 2, "a sixteen-position pattern is two pages on a phone");
+  assert.deepEqual(lane.labels, ["1-8", "9-16"], "named for the positions they hold");
+});
+
+// ---- the four sampler widgets (A2) ---------------------------------------
+
+/** A localStorage stand-in the shell's layout model can read and write. */
+function memoryStore() {
+  const values = new Map();
+  return {
+    values,
+    getItem(key) {
+      return values.has(String(key)) ? values.get(String(key)) : null;
+    },
+    setItem(key, value) {
+      values.set(String(key), String(value));
+    },
+    removeItem(key) {
+      values.delete(String(key));
+    },
+  };
+}
+
+/**
+ * Boot the page with the shell mounted around the client: the four sampler
+ * hosts are moved into four frames, exactly as the real page moves them.
+ * @param {object} [options] - as bootSampler, plus `storage` for the layouts
+ * @returns {Promise<object>} the ui bootSampler hands back, plus `storage`
+ */
+async function bootFramed(options = {}) {
+  const storage = options.storage || memoryStore();
+  const ui = await bootSampler({ ...options, shell: true, storage });
+  const until = Date.now() + 4000;
+  while (Date.now() < until) {
+    if (ui.document.querySelector("[data-widget=pads]")) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(ui.document.querySelector("[data-widget=pads]"), "the shell mounted its frames");
+  ui.storage = storage;
+  return ui;
+}
+
+/** The four sampler widgets, in the order the widget table lists them. */
+const SAMPLER_WIDGETS = [
+  ["pads", "sampler-pads"],
+  ["steps", "sampler-steps"],
+  ["chop", "sampler-chop"],
+  ["fx", "sampler-fx"],
+];
+
+test("opening a pattern clip fills all four hosts and the pads widget keeps the selected pad across renders", async () => {
+  const ui = await bootFramed();
+  for (const [id, role] of SAMPLER_WIDGETS) {
+    assert.equal(ui.host(role).hidden, true, `the ${id} host starts hidden`);
+    assert.equal(ui.widgetNote(id).hasAttribute("hidden"), false, `so the ${id} frame shows its note`);
+  }
+
+  await ui.openSampler();
+
+  const frames = new Set();
+  for (const [id, role] of SAMPLER_WIDGETS) {
+    const host = ui.host(role);
+    assert.equal(host.hidden, false, `the ${id} host is drawn`);
+    assert.equal(
+      host.parentNode,
+      ui.widgetFrame(id).querySelector(".st-widget-body"),
+      `the ${id} host is in its own frame`,
+    );
+    frames.add(ui.widgetFrame(id));
+    assert.equal(ui.widgetNote(id).hasAttribute("hidden"), true, `the ${id} note goes while the host has something`);
+  }
+  assert.equal(frames.size, 4, "four hosts, four frames");
+
+  assert.ok(ui.host("sampler-pads").querySelector(".st-sampler-head"), "the pads widget carries the kit header");
+  assert.ok(ui.host("sampler-pads").querySelector(".st-pad-grid"), "and the pad grid");
+  assert.ok(ui.host("sampler-steps").querySelector(".st-steps"), "the steps widget carries the sequencer");
+  assert.ok(ui.host("sampler-chop").querySelector(".st-chop"), "the chop widget carries the chop editor");
+  assert.ok(ui.host("sampler-fx").querySelector(".st-fx"), "the effects widget carries the effects row");
+
+  // Pad 6 is picked, and the page draws the song again: the pads widget is
+  // drawn from the same view state, so the pad it shows is still pad 6.
+  ui.click('[data-role=sampler-pads] [data-act=pad][data-pad-index="5"]');
+  await ui.settle();
+  assert.equal(ui.pad(5).getAttribute("aria-pressed"), "true", "the click selects the pad");
+
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+  assert.equal(ui.pad(5).getAttribute("aria-pressed"), "true", "a render keeps the selected pad");
+  assert.match(String(ui.pad(5).className), /st-pad-sel/);
+  assert.equal(ui.pad(0).getAttribute("aria-pressed"), "false", "and only that one");
+});
+
+test("a note clip hides the four sampler widgets and shows their notes", async () => {
+  const ui = await bootFramed();
+  await ui.openSampler();
+  assert.equal(ui.host("sampler-pads").hidden, false, "the pattern clip filled the pads first");
+
+  await ui.apply("track.add", { id: "keys", name: "Keys" });
+  await ui.apply("clip.write", {
+    clip_id: "c-keys",
+    track_id: "keys",
+    scene_id: SCENE,
+    name: "Chords",
+    length_bars: 1,
+    notes: [{ t: 0, d: 1, p: 60, v: 100 }],
+  });
+  ui.click("[data-act=open-clip][data-clip-id=c-keys]");
+  await ui.settle();
+
+  for (const [id, role] of SAMPLER_WIDGETS) {
+    assert.equal(ui.host(role).hidden, true, `the ${id} host is put away by a note clip`);
+    assert.equal(ui.host(role).childNodes.length, 0, `the ${id} host lets go of what it drew`);
+    const note = ui.widgetNote(id);
+    assert.ok(note, `the ${id} frame has a note of its own`);
+    assert.equal(note.hasAttribute("hidden"), false, `the ${id} note is what its frame shows`);
+  }
+  assert.equal(
+    ui.widgetNote("pads").textContent,
+    "Open a pattern clip on a sampler track to play its pads.",
+    "in the plan's own words",
+  );
+  assert.equal(ui.widgetNote("editor").hasAttribute("hidden"), true, "the editor is the widget a note clip fills");
+});
+
+test("an agent edit re-render does not steal focus from a step button", async () => {
+  const ui = await bootFramed();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+  await ui.apply("step.toggle", stepArgs(bankId, 2));
+
+  // This document only keeps the focus the page ASKS for, so every focus() on a
+  // step button is caught here.
+  const focused = [];
+  const first = ui.step(2);
+  const prototype = Object.getPrototypeOf(first);
+  const original = prototype.focus;
+  prototype.focus = function () {
+    focused.push(this.getAttribute ? this.getAttribute("data-at") : null);
+    return original.call(this);
+  };
+  try {
+    ui.document.activeElement = first;
+    // The agent's edit lands as a command and the page draws the song again.
+    await ui.apply("step.toggle", stepArgs(bankId, 5));
+
+    assert.notEqual(ui.step(2), first, "the step button is drawn again, as a new node");
+    assert.equal(focused.length > 0, true, "the page put the focus back");
+    assert.deepEqual(focused.filter((at) => at !== "2"), [], "and onto the same step and nothing else");
+  } finally {
+    prototype.focus = original;
+    ui.document.activeElement = null;
+  }
+});
+
+test("page-follow re-renders only the steps host", async () => {
+  const doc = await samplerDoc({ lengthSteps: 32 });
+  const ui = await bootFramed({ doc });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  const pads = ui.host("sampler-pads");
+  const steps = ui.host("sampler-steps");
+  const fx = ui.host("sampler-fx");
+  const padBefore = pads.querySelector(".st-pad-grid");
+  const stepBefore = steps.querySelector(".st-steps");
+  const fxBefore = fx.querySelector(".st-fx");
+  assert.ok(padBefore && stepBefore && fxBefore, "all four hosts are drawn");
+
+  // Bar 1 is the first page of a thirty-two step pattern: nothing turns yet.
+  ui.playhead(1, 1, 1);
+  await ui.settle();
+  assert.equal(ui.host("sampler-steps").querySelector(".st-steps"), stepBefore, "the first page keeps its nodes");
+
+  // Bar 2 is the second page: the steps are drawn again, and only the steps.
+  ui.playhead(2, 1, 1);
+  await ui.settle();
+  const stepAfter = ui.host("sampler-steps").querySelector(".st-steps");
+  assert.notEqual(stepAfter, stepBefore, "the steps host was drawn again");
+  assert.equal(stepAfter.parentNode, steps, "in its own host");
+  assert.equal(ui.host("sampler-pads").querySelector(".st-pad-grid"), padBefore, "the pads host kept the very same nodes");
+  assert.equal(ui.host("sampler-fx").querySelector(".st-fx"), fxBefore, "and so did the effects host");
+  assert.equal(ui.host("sampler-chop").hidden, false, "the chop host was left alone too");
+});
+
+test("a widget moved into a separate frame still resolves its pad, step and fx nodes", async () => {
+  const ui = await bootFramed();
+  await ui.openSampler();
+
+  // The layout puts the four sampler widgets in a different order: the steps
+  // first, then the effects, and the pads last. A frame is where a host lives,
+  // never how the page finds it.
+  const api = ui.layoutApi();
+  const key = api.layoutKey("song-1", "compose", "laptop");
+  ui.storage.setItem(key, api.serializeLayout({
+    v: 1,
+    shown: [
+      { id: "steps", size: "l" },
+      { id: "fx", size: "s" },
+      { id: "scene-grid", size: "l" },
+      { id: "pads", size: "m" },
+      { id: "history", size: "s" },
+    ],
+  }));
+  ui.page.__studioShell.refresh();
+  await ui.settle();
+
+  const area = ui.page.querySelector("[data-role=studio-widgets]");
+  assert.deepEqual(
+    [...area.children].map((node) => node.getAttribute("data-widget")).filter(Boolean),
+    ["steps", "fx", "scene-grid", "pads", "history"],
+    "the layout is the one that was saved",
+  );
+  for (const id of ["pads", "steps", "fx"]) {
+    assert.equal(
+      ui.host(`sampler-${id}`).parentNode,
+      ui.widgetFrame(id).querySelector(".st-widget-body"),
+      `the ${id} host still resolves inside its own frame`,
+    );
+  }
+
+  // The nodes the page draws are still the ones it finds: a pad, a step and an
+  // effect all answer from their new places.
+  assert.ok(ui.pad(3), "the pad grid is drawn in the pads frame");
+  const at = ui.step(0);
+  assert.ok(at, "the step strip is drawn in the steps frame");
+  at.dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  const toggles = ui.sent.filter((message) => message.type === "command" && message.command === "step.toggle");
+  assert.equal(toggles.length, 1, "a step in its own frame still sends its step.toggle");
+
+  const stutter = ui.host("sampler-fx").querySelector("[data-act=fx-hold][data-fx-name=stutter]");
+  assert.ok(stutter, "the effects row is drawn in its own frame");
+  stutter.dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.fx, [{ name: "stutter", amount: 1, on: true }], "and its press still holds the effect");
+  ui.release();
+  await ui.settle();
+});
+
+test("the steps widget at size m pages eight positions, and sixteen need a laptop's size l", async () => {
+  const ui = await bootFramed();
+  await ui.openSampler();
+
+  // Compose opens with the steps at size l on a laptop: the whole row, so the
+  // sixteen positions the lane has always drawn, and no pager for one page.
+  assert.equal(ui.widgetFrame("steps").getAttribute("data-size"), "l", "the laptop's steps widget is at size l");
+  assert.equal(ui.steps().length, 16, "sixteen positions fit the whole row");
+  assert.equal(
+    ui.host("sampler-steps").querySelector(".st-step-strip").getAttribute("data-page-size"),
+    "16",
+    "and the strip says which page it holds",
+  );
+  assert.equal(ui.host("sampler-steps").querySelectorAll("[data-act=step-page]").length, 0, "nothing to turn");
+
+  // The layout the operator saved puts the same widget at size m. The shell
+  // reports the size it applied, and the page draws the lane again for the room
+  // the widget now has: sixteen 44 px targets would need 760 px, so a page of the
+  // lane holds eight and the pager reaches the rest.
+  const api = ui.layoutApi();
+  ui.storage.setItem(
+    api.layoutKey("song-1", "compose", "laptop"),
+    api.serializeLayout({
+      v: 1,
+      shown: [
+        { id: "scene-grid", size: "l" },
+        { id: "editor", size: "m" },
+        { id: "pads", size: "m" },
+        { id: "steps", size: "m" },
+        { id: "fx", size: "s" },
+        { id: "history", size: "s" },
+      ],
+    }),
+  );
+  ui.page.__studioShell.refresh();
+  await ui.settle();
+
+  assert.equal(ui.widgetFrame("steps").getAttribute("data-size"), "m", "the widget is at size m");
+  assert.deepEqual(
+    ui.steps().map((node) => node.getAttribute("data-at")),
+    ["0", "1", "2", "3", "4", "5", "6", "7"],
+    "a page of the lane at size m is the first eight positions",
+  );
+  assert.equal(
+    ui.host("sampler-steps").querySelector(".st-step-strip").getAttribute("data-page-size"),
+    "8",
+    "and the strip is laid out in eight columns, not sixteen",
+  );
+  assert.deepEqual(
+    [...ui.host("sampler-steps").querySelectorAll("[data-act=step-page]")].map((node) => String(node.textContent)),
+    ["1-8", "9-16"],
+    "a sixteen-position pattern is two pages at size m",
+  );
+});
+
+test("a tablet draws eight positions a page even with the steps widget at size l", async () => {
+  const ui = await bootFramed({ width: 800 });
+  await ui.openSampler();
+
+  // A tablet's whole row is six of six columns, which is not a laptop's twelve:
+  // sixteen 44 px targets are only drawn where the widget has a laptop's row.
+  assert.equal(ui.widgetFrame("steps").getAttribute("data-size"), "l", "the tablet's default steps widget is at size l");
+  assert.equal(ui.steps().length, 8, "a tablet holds eight positions a page");
+  assert.equal(
+    ui.host("sampler-steps").querySelectorAll("[data-act=step-page]").length,
+    2,
+    "with a pager for the pattern's other eight",
+  );
 });

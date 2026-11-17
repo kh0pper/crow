@@ -14,8 +14,12 @@
  *     only gets the button;
  *   - the step sequencer says where the transport is, on the cells already
  *     drawn, and clears it when the transport stops;
+ *   - a queued step paints the position IT was made for, and the queue a page
+ *     comes back to drops what went stale while no frames ran;
  *   - lock mode's strip lives with the steps (not in the right column), and the
- *     sentence about locking a step is the visible hint while no lock is on.
+ *     sentence about locking a step is the visible hint while no lock is on;
+ *   - a controller's effect hold outlives a tap on the page, and a rebuilt host
+ *     gives the keyboard back to the control it was on.
  */
 
 import { test } from "node:test";
@@ -23,6 +27,8 @@ import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import studioPanel from "../bundles/studio/panel/studio.js";
 import { CLIENT_SCRIPT } from "../bundles/studio/panel/client.js";
+import { MIDI_SCRIPT } from "../bundles/studio/panel/midi.js";
+import { MIDI_ROUTE_SCRIPT } from "../bundles/studio/panel/midi-route.js";
 
 /** The sampler track, its scene and its pattern clip in the fixture songs. */
 const TRACK = "drums";
@@ -126,15 +132,51 @@ async function samplerDoc(options = {}) {
   return doc;
 }
 
+/** @returns {Promise<string>} the id of the song's first bank (the one a pad grid shows) */
+async function firstBankId(doc) {
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const bank = Object.values(snapshot(doc).banks || {})[0];
+  assert.ok(bank, "the sampler track has a bank");
+  return String(bank.id);
+}
+
+/**
+ * One live fx.hold mapping on a note of the fixture controller: the pedal a
+ * MIDI press arrives from.
+ * @param {object} doc
+ * @param {string} [name] - one of the five effects the engine holds
+ * @param {number} [number] - the note the pedal sends
+ * @returns {Promise<object>} the mapping's arguments
+ */
+async function mapFxHold(doc, name = "stutter", number = 60) {
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  await import("../bundles/studio/server/commands/midi.js");
+  const args = {
+    id: "m-fx",
+    device_name: "FCB1010",
+    message: { type: "note", channel: 1, number },
+    action: { kind: "fx.hold", name },
+  };
+  runCommand(doc, "midi.map", args, { author: { kind: "human" } });
+  return args;
+}
+
 // --- the page's browser side ------------------------------------------------
 
-/** A bare `AudioContext`: enough of it for the engine's master bus. */
+/** A bare `AudioContext`: enough of it for the engine's master bus and the
+ * clock the live lights are timed against. */
 function audioContextClass() {
   class FakeAudioContext {
     constructor() {
       this.destination = { id: "destination" };
       this.sampleRate = 48000;
       this.state = "running";
+      // The clock: a hit is heard one output latency after its context frame,
+      // and a test moves currentTime by hand to say when time passes.
+      this.currentTime = 0;
+      this.baseLatency = 0;
+      this.outputLatency = 0.05;
+      FakeAudioContext.instances.push(this);
     }
     createGain() {
       return { gain: { value: 1 }, connect() {} };
@@ -142,8 +184,21 @@ function audioContextClass() {
     resume() {
       return Promise.resolve();
     }
+    /**
+     * The output timestamp: the context time heard right now, and the
+     * performance time (milliseconds) it is heard at. currentTime runs ahead of
+     * what the room hears by the output latency, and a test moves both together.
+     */
+    getOutputTimestamp() {
+      const latency = Number(this.outputLatency) || 0;
+      return {
+        contextTime: Math.max(0, this.currentTime - latency),
+        performanceTime: this.currentTime * 1000,
+      };
+    }
     close() {}
   }
+  FakeAudioContext.instances = [];
   return FakeAudioContext;
 }
 
@@ -158,6 +213,7 @@ function fakeStudioEngine() {
     calls,
     node: { connect() {} },
     positionListener: null,
+    padEventListener: null,
     play() {
       calls.play += 1;
     },
@@ -173,6 +229,9 @@ function fakeStudioEngine() {
     onPosition(listener) {
       engine.positionListener = listener;
     },
+    onPadEvent(listener) {
+      engine.padEventListener = listener;
+    },
     onLaunch() {},
     onError() {},
   };
@@ -181,6 +240,29 @@ function fakeStudioEngine() {
     engine,
     create() {
       return Promise.resolve(engine);
+    },
+  };
+}
+
+/** A Web MIDI fake: one connected controller the test can send bytes from. */
+function fakeMidiAccess() {
+  const inputs = new Map();
+  const port = {
+    id: "port-1",
+    name: "FCB1010",
+    manufacturer: "test",
+    type: "input",
+    state: "connected",
+    onmidimessage: null,
+    send(bytes) {
+      if (typeof port.onmidimessage === "function") port.onmidimessage({ data: Uint8Array.from(bytes) });
+    },
+  };
+  inputs.set(port.id, port);
+  return {
+    access: { inputs, outputs: new Map(), onstatechange: null },
+    send(bytes) {
+      port.send(bytes);
     },
   };
 }
@@ -250,13 +332,22 @@ async function bootSong(options = {}) {
   };
 
   const engineApi = options.engine ? fakeStudioEngine() : null;
+  const AudioContextStub = audioContextClass();
+  const midi = fakeMidiAccess();
+  /** Animation frames the page asked for, run by the test. */
+  const frames = [];
 
   const windowStub = {
     crypto: globalThis.crypto,
     localStorage: makeStorage(),
-    AudioContext: audioContextClass(),
+    AudioContext: AudioContextStub,
     location: { protocol: "http:", host: "127.0.0.1:1", reload() {} },
     atob: globalThis.atob,
+    requestAnimationFrame(fn) {
+      frames.push(fn);
+      return frames.length;
+    },
+    cancelAnimationFrame() {},
     addEventListener(name, handler) {
       (windowListeners[name] ||= []).push(handler);
     },
@@ -291,6 +382,15 @@ async function bootSong(options = {}) {
     },
   });
 
+  /** A Web MIDI stub: present, but only the Connect click ever opens it. */
+  const navigatorStub = {
+    requestMIDIAccess() {
+      return Promise.resolve(midi.access);
+    },
+    locks: null,
+    permissions: null,
+  };
+
   const run = new Function(
     "document",
     "window",
@@ -304,7 +404,7 @@ async function bootSong(options = {}) {
     "clearTimeout",
     "setInterval",
     "clearInterval",
-    scriptText,
+    `${MIDI_ROUTE_SCRIPT}\n${MIDI_SCRIPT}\n${scriptText}`,
   );
   run(
     document,
@@ -313,7 +413,7 @@ async function bootSong(options = {}) {
       return makeSocket();
     },
     fetchStub,
-    {},
+    navigatorStub,
     globalThis.crypto,
     globalThis.atob,
     console,
@@ -388,9 +488,45 @@ async function bootSong(options = {}) {
       }
     },
     /** Push one transport position, the way the engine reports them. */
-    playhead(bar, beat, sixteenth = 1) {
+    playhead(bar, beat, sixteenth = 1, frame) {
       assert.ok(ui.engine.engine.positionListener, "the page follows the engine's position");
-      ui.engine.engine.positionListener({ bar, beat, sixteenth });
+      const position = { bar, beat, sixteenth };
+      if (frame !== undefined && frame !== null) position.frame = frame;
+      ui.engine.engine.positionListener(position);
+    },
+    /** The audio context the page built: the clock the lights read. */
+    audio() {
+      const list = AudioContextStub.instances;
+      assert.ok(list.length > 0, "the page made an audio context");
+      return list[list.length - 1];
+    },
+    /** Run the animation frames the page asked for, once. */
+    runFrames() {
+      const waiting = frames.splice(0, frames.length);
+      for (const fn of waiting) fn(ui.audio().currentTime * 1000);
+      return waiting.length;
+    },
+    /** How many animation frames are waiting to run. */
+    waitingFrames() {
+      return frames.length;
+    },
+    /** Push one report from the engine's pad-event ring. */
+    padEvent(report) {
+      assert.ok(ui.engine, "the page was given an engine");
+      assert.ok(ui.engine.engine.padEventListener, "the page follows the engine's pads");
+      ui.engine.engine.padEventListener(report);
+    },
+    /** One hit on a pad, at the frame its voice starts on. */
+    hit(trackId, bankId, index, v, frame) {
+      ui.padEvent({ frame, track_id: trackId, bank_id: bankId, index, kind: "hit", v });
+    },
+    /** Click Connect controllers: the gesture Web MIDI wants. */
+    connectMidi() {
+      click("[data-act=midi-connect]");
+    },
+    /** Send raw MIDI bytes from the fake controller. */
+    pedal(bytes) {
+      midi.send(bytes);
     },
     /** Press a step and hold it past the long-press threshold. */
     holdStep(at) {
@@ -399,16 +535,18 @@ async function bootSong(options = {}) {
       ui.runTimers();
       return node;
     },
-    /** The sampler host, asserted to be the view on screen. */
+    /** The pads host, asserted to be the view on screen. */
     view() {
-      const host = document.querySelector("[data-role=sampler]");
-      assert.ok(host, "the sampler host is on the page");
+      const host = document.querySelector("[data-role=sampler-pads]");
+      assert.ok(host, "the pads host is on the page");
       assert.equal(host.hidden, false, "the pad-and-steps view is open");
+      const box = document.querySelector("[data-role=sampler]");
+      assert.equal(box.hidden, false, "and the view says it is open");
       return host;
     },
     /** @returns {object} the step button for one position */
     step(at) {
-      const node = document.querySelector(`[data-role=sampler] [data-act=step][data-at="${at}"]`);
+      const node = document.querySelector(`[data-role=sampler-steps] [data-act=step][data-at="${at}"]`);
       assert.ok(node, `step ${at} is drawn`);
       return node;
     },
@@ -420,7 +558,7 @@ async function bootSong(options = {}) {
     },
     /** @returns {object[]} the cells marked as the transport's own */
     nowCells() {
-      return [...document.querySelectorAll("[data-role=sampler] .st-step-now")];
+      return [...document.querySelectorAll("[data-role=sampler-steps] .st-step-now")];
     },
     /** Open a pattern clip: the pad-and-steps view is its editor. */
     async openSampler() {
@@ -468,7 +606,7 @@ test("a sampler track's header opens the pads: a pattern in its first scene when
   const view = ui.view();
   assert.match(String(view.querySelector(".st-sampler-head").textContent), /Beat box/);
   assert.ok(view.querySelector('[data-act=pad][data-pad-index="0"]'), "with its pads drawn");
-  assert.ok(ui.document.querySelector('[data-role=sampler] [data-act=step][data-at="0"]'), "and its steps");
+  assert.ok(ui.document.querySelector('[data-role=sampler-steps] [data-act=step][data-at="0"]'), "and its steps");
 });
 
 test("a sampler track that already has a pattern opens it, and sends nothing", async () => {
@@ -486,7 +624,7 @@ test("a sampler track that already has a pattern opens it, and sends nothing", a
   );
   ui.view();
   assert.ok(
-    ui.document.querySelector('[data-role=sampler] [data-act=step][data-at="0"]'),
+    ui.document.querySelector('[data-role=sampler-steps] [data-act=step][data-at="0"]'),
     "the pattern the track has is the one open",
   );
   const focus = ui.sent.filter((message) => message.type === "focus").pop();
@@ -599,7 +737,7 @@ test("the step sequencer marks where the transport is, and clears it on Stop", a
   ui.click("[data-act=stop]");
   await ui.settle();
   assert.equal(ui.nowCells().length, 0, "the mark goes with the transport");
-  for (const cell of ui.document.querySelectorAll("[data-role=sampler] .st-step")) {
+  for (const cell of ui.document.querySelectorAll("[data-role=sampler-steps] .st-step")) {
     assert.equal(cell.getAttribute("data-now"), "false", "and every cell says it is not the one");
   }
 });
@@ -648,14 +786,15 @@ test("the lock strip sits beside the steps, and the steps say how to lock one", 
   // detached now, so every assertion after the render reads the live one.
   const liveBox = ui.stepsBox();
 
-  // It is drawn with the steps, not up in the right column.
-  const holder = ui.document.querySelector("[data-role=sampler] .st-step-strip").parentElement;
+  // It is drawn with the steps, in the steps host, and not in the pads or the
+  // effects host.
+  const holder = ui.document.querySelector("[data-role=sampler-steps] .st-step-strip").parentElement;
   assert.ok(holder.contains(strip), "the strip is inside the box that holds the step strip");
   assert.ok(liveBox.contains(strip), "and that box is the live steps box");
   assert.ok(holder === liveBox, "which is the steps box itself");
-  const right = ui.document.querySelector(".st-sampler-right");
-  assert.ok([...right.children].includes(strip) === false, "and it is not a child of the right column");
-  assert.ok(right.contains(liveBox), "the steps box is where it always was, in the right column");
+  const stepsHost = ui.document.querySelector("[data-role=sampler-steps]");
+  assert.ok(stepsHost.contains(liveBox), "the steps box is in the steps widget's own host");
+  assert.equal(ui.document.querySelector("[data-role=sampler-pads]").contains(strip), false, "and not in the pads host");
 
   // With the lock on, the hint gives the place to the strip.
   assert.ok(liveBox.querySelector(".st-step-hint") === null, "the hint gives way to the strip");
@@ -670,4 +809,442 @@ test("the lock strip sits beside the steps, and the steps say how to lock one", 
     HINT,
     "and the hint is back under the steps",
   );
+});
+
+// --- the live lights (G9) ---------------------------------------------------
+
+/** The pad button of the grid on screen, by its index. */
+function padAt(ui, index) {
+  return ui.document.querySelector(
+    `[data-role=sampler-pads] [data-act=pad][data-pad-index="${index}"]`,
+  );
+}
+
+/** @returns {number} the strength a pad's flash was given (its --hit value) */
+function hitStrength(node) {
+  return Number(node.style.getPropertyValue("--hit"));
+}
+
+test("a hit flashes exactly that pad, and a harder hit is brighter", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+  // The clock is long past every frame these hits carry.
+  ui.audio().currentTime = 10;
+
+  ui.hit(TRACK, bankId, 3, 127, 48000);
+  ui.runFrames();
+
+  const hard = padAt(ui, 3);
+  assert.ok(hard, "pad 4 is drawn");
+  assert.equal(String(hard.className).includes("st-pad-hit"), true, "the pad the hit names flashes");
+  assert.ok(Math.abs(hitStrength(hard) - 127 / 127) < 0.01, "--hit is v/127");
+  for (const index of [0, 1, 2, 4, 5, 15]) {
+    assert.equal(String(padAt(ui, index).className).includes("st-pad-hit"), false,
+      `pad ${index + 1} does not flash`);
+  }
+
+  // The same frame rate, a softer hit: a smaller --hit and so a dimmer flash.
+  ui.hit(TRACK, bankId, 5, 32, 48000);
+  ui.runFrames();
+  const soft = padAt(ui, 5);
+  assert.equal(String(soft.className).includes("st-pad-hit"), true, "its own pad flashes");
+  assert.ok(Math.abs(hitStrength(soft) - 32 / 127) < 0.01, "--hit is that velocity over 127");
+  assert.ok(hitStrength(soft) < hitStrength(hard), "a harder hit is brighter");
+});
+
+test("a hit waits for the frame it is heard on, output latency included", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+  // 48 kHz and 50 ms of output latency: frame 4800 is 0.1 s of context time.
+  const clock = ui.audio();
+  clock.currentTime = 0;
+  assert.equal(clock.outputLatency, 0.05, "the fake clock has 50 ms of output latency");
+
+  ui.hit(TRACK, bankId, 0, 100, 4800);
+  assert.equal(ui.window.__crowStudioPadQueue.length, 1, "the hit waits in the queue");
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), false, "nothing is painted on arrival");
+
+  clock.currentTime = 0.1;
+  ui.runFrames();
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), false,
+    "it is not painted at its own context time");
+  assert.equal(ui.window.__crowStudioPadQueue.length, 1, "it is still waiting");
+
+  clock.currentTime = 0.149;
+  ui.runFrames();
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), false,
+    "just short of the latency is still too early");
+
+  clock.currentTime = 0.15;
+  ui.runFrames();
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), true,
+    "painted 50 ms after its context time");
+  assert.equal(ui.window.__crowStudioPadQueue.length, 0, "and the queue is empty");
+});
+
+test("the playing step and the pads it starts are painted in one animation frame", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+  const clock = ui.audio();
+  clock.currentTime = 1;
+
+  // One report and the pads its block started share the frame they are heard on.
+  // The Play render already marks step 0 (the position a new run starts on), so
+  // this report is a step further in: step 6, which no render has marked yet.
+  const frame = 48000 * 2;
+  ui.playhead(1, 2, 3, frame);
+  ui.hit(TRACK, bankId, 0, 110, frame);
+
+  clock.currentTime = 1.99;
+  ui.runFrames();
+  const before = ui.nowCells();
+  assert.equal(before.length, 1, "only the step the Play render marked is marked");
+  assert.equal(before[0].getAttribute("data-at"), "0", "the report's step is not painted yet");
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), false, "and no pad either");
+
+  clock.currentTime = 2.05;
+  ui.runFrames();
+  const cells = ui.nowCells();
+  assert.equal(cells.length, 1, "the step is marked");
+  assert.equal(cells[0].getAttribute("data-at"), "6", "step 6 is where the transport is");
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), true,
+    "and the pad it started flashed in that very frame");
+});
+
+test("painting sixteen hits adds or removes no node and leaves the pads alone", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+  ui.audio().currentTime = 10;
+
+  const pads = [...ui.document.querySelectorAll("[data-role=sampler-pads] [data-act=pad]")];
+  assert.equal(pads.length, 16, "sixteen pads are drawn");
+  const focused = pads[0];
+  let focusCalls = 0;
+  focused.focus = function () {
+    focusCalls += 1;
+  };
+  const nodes = ui.document.querySelectorAll("*").length;
+  const boxes = ui.view().children.length;
+
+  for (let index = 0; index < 16; index += 1) ui.hit(TRACK, bankId, index, 40 + index, 48000);
+  ui.runFrames();
+
+  assert.equal(ui.document.querySelectorAll("*").length, nodes, "no node was added or removed");
+  assert.equal(ui.view().children.length, boxes, "the pads host holds the same boxes");
+  assert.equal(focusCalls, 0, "painting never focuses a control");
+  assert.equal(ui.view().contains(focused), true, "the pad that had the keyboard is the same node");
+  for (const pad of pads) {
+    assert.equal(String(pad.className).includes("st-pad-hit"), true, "every hit flashed its own pad");
+  }
+});
+
+test("the queue holds 256 events at most while no animation frame runs", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+  ui.audio().currentTime = 0;
+
+  // A hidden page gets no animation frames: everything waits.
+  for (let index = 0; index < 300; index += 1) ui.hit(TRACK, bankId, index % 16, 100, 48000 * 60);
+
+  assert.equal(ui.window.__crowStudioPadQueue.length, 256, "the queue is capped at 256");
+  assert.equal(ui.waitingFrames(), 1, "one animation frame waits, not one per hit");
+});
+
+test("state events set and clear a pad's light, and a redraw keeps it", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+
+  const state = (code) => ui.padEvent({
+    frame: 0, track_id: TRACK, bank_id: bankId, index: 0, kind: "state", state: code,
+  });
+
+  state(1);
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-on"), true, "state 1 lights the pad as on");
+  assert.equal(padAt(ui, 0).getAttribute("data-light"), "1");
+
+  // A pads-host render builds new buttons: the light map puts the class back.
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-on"), true, "a redraw keeps the light");
+
+  state(2);
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-loop"), true, "state 2 is a loop");
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-on"), false, "and not the on light");
+
+  state(3);
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-held"), true, "state 3 is held");
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-loop"), false, "and not the loop light");
+
+  state(0);
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-held"), false, "state 0 clears the light");
+  assert.equal(padAt(ui, 0).getAttribute("data-light"), "0");
+});
+
+test("a MIDI fx.hold press shows the fx button as pressed", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  await mapFxHold(doc, "stutter", 60);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.connectMidi();
+  await ui.settle();
+
+  const button = ui.document.querySelector("[data-role=sampler-fx] [data-act=fx-hold][data-fx-name=stutter]");
+  assert.ok(button, "the Stutter button is on the page");
+  assert.equal(String(button.className).includes("st-on"), false, "nothing is held yet");
+
+  ui.pedal([0x90, 60, 100]);
+  await ui.settle();
+  assert.equal(String(button.className).includes("st-on"), true, "the pedal's press shows on its button");
+  assert.equal(button.getAttribute("aria-pressed"), "true");
+
+  ui.pedal([0x80, 60, 0]);
+  await ui.settle();
+  assert.equal(String(button.className).includes("st-on"), false, "letting the note go releases it");
+  assert.equal(button.getAttribute("aria-pressed"), "false");
+});
+
+test("a reduced-motion browser gets a colour change with no animation", async () => {
+  const html = await render({ song: "song-1" });
+  const at = html.indexOf("@media (prefers-reduced-motion: reduce)");
+  assert.ok(at >= 0, "the page carries a reduced-motion rule");
+  const block = html.slice(at, at + 500);
+  assert.match(block, /\.st-pad-hit/, "it names the hit flash");
+  assert.match(block, /animation: none/, "and takes the animation away");
+  assert.match(block, /background: #F2A541/, "leaving a colour change");
+
+  const flashAt = html.indexOf(".studio .st-pad.st-pad-hit");
+  assert.ok(flashAt >= 0, "the ordinary rule is there too");
+  const flash = html.slice(flashAt, flashAt + 300);
+  assert.match(flash, /animation: st-pad-flash/, "which does animate");
+  assert.match(html.slice(0, at), /--hit/, "and its strength is --hit");
+});
+
+// --- the fx hold a controller is holding ------------------------------------
+
+test("a tap anywhere on the page does not release a controller's effect", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  await mapFxHold(doc, "stutter", 60);
+  const ui = await bootSong({ doc, engine: true });
+  const holds = [];
+  const releases = [];
+  ui.engine.engine.fxHold = function (name) {
+    holds.push(String(name));
+  };
+  ui.engine.engine.fxRelease = function (name) {
+    releases.push(String(name));
+  };
+  await ui.openSampler();
+  ui.connectMidi();
+  await ui.settle();
+
+  const fxButton = () => ui.document.querySelector(
+    "[data-role=sampler-fx] [data-act=fx-hold][data-fx-name=stutter]",
+  );
+  assert.ok(fxButton(), "the Stutter button is on the page");
+
+  ui.pedal([0x90, 60, 100]);
+  await ui.settle();
+  assert.deepEqual(holds, ["stutter"], "the pedal holds the effect in the engine");
+  assert.equal(fxButton().getAttribute("aria-pressed"), "true", "and its button shows the hold");
+
+  // A finger's release anywhere on the page: it lets go of what a FINGER holds,
+  // and the pedal is still down.
+  ui.release();
+  await ui.settle();
+  assert.deepEqual(releases, [], "nothing was released in the engine");
+  assert.equal(fxButton().getAttribute("aria-pressed"), "true", "the pedal's hold is still on the button");
+
+  ui.pedal([0x80, 60, 0]);
+  await ui.settle();
+  assert.deepEqual(releases, ["stutter"], "letting the note go is what releases it");
+  assert.equal(fxButton().getAttribute("aria-pressed"), "false", "and the button says so");
+});
+
+// --- the step a queued report was made for ----------------------------------
+
+test("two reports waiting in the queue each paint the step they were made for", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+  const clock = ui.audio();
+  clock.currentTime = 1;
+
+  // Two reports arrive before either is heard, one report apart: step 4 (bar 1,
+  // beat 2) and step 6 (bar 1, beat 2, sixteenth 3), both on the page drawn.
+  // Each brings the hit its block started.
+  const firstFrame = 48000 * 2;
+  const secondFrame = 48000 * 2 + 4800;
+  ui.playhead(1, 2, 1, firstFrame);
+  ui.hit(TRACK, bankId, 0, 110, firstFrame);
+  ui.playhead(1, 2, 3, secondFrame);
+  ui.hit(TRACK, bankId, 1, 110, secondFrame);
+
+  clock.currentTime = 2.05;
+  ui.runFrames();
+  const first = ui.nowCells();
+  assert.equal(first.length, 1, "one step is marked");
+  assert.equal(first[0].getAttribute("data-at"), "4", "the step the FIRST report named, not the newest");
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), true, "with the pad that block started");
+  assert.equal(String(padAt(ui, 1).className).includes("st-pad-hit"), false, "and not the later block's pad");
+  assert.equal(ui.window.__crowStudioPadQueue.length, 2, "the later report and its hit are still waiting");
+
+  clock.currentTime = 2.15;
+  ui.runFrames();
+  const second = ui.nowCells();
+  assert.equal(second.length, 1, "still one step marked");
+  assert.equal(second[0].getAttribute("data-at"), "6", "and it is the step the SECOND report named");
+  assert.equal(String(padAt(ui, 1).className).includes("st-pad-hit"), true, "with its own pad");
+  assert.equal(ui.window.__crowStudioPadQueue.length, 0, "and nothing waits any more");
+});
+
+// --- a state's light -------------------------------------------------------
+
+test("a state event lights its pad on arrival, even for a frame still to come", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+  ui.audio().currentTime = 1;
+
+  // A pad's light is a state that stays where the engine left it, not a flash
+  // landing on an instant: it is drawn when the report arrives, so it can lead
+  // the hit it belongs to by up to the output latency.
+  ui.padEvent({
+    frame: 48000 * 90, track_id: TRACK, bank_id: bankId, index: 0, kind: "state", state: 1,
+  });
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-on"), true,
+    "the light is on as soon as the report is in");
+  assert.equal(ui.window.__crowStudioPadQueue.length, 0, "and nothing about it waits for a frame");
+});
+
+// --- the queue a page comes back to ----------------------------------------
+
+test("a page that was not painting drops the hits whose frames are long gone", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+  const clock = ui.audio();
+  clock.currentTime = 1;
+
+  // One hit painted while the page is painting.
+  ui.hit(TRACK, bankId, 2, 100, 48000);
+  clock.currentTime = 1.05;
+  ui.runFrames();
+  assert.equal(String(padAt(ui, 2).className).includes("st-pad-hit"), true, "a hit lands on its frame");
+
+  // The tab is hidden and gets no animation frames: the engine plays on.
+  for (let index = 0; index < 8; index += 1) {
+    ui.hit(TRACK, bankId, 4, 90, Math.round(48000 * (1 + index * 0.1)));
+  }
+  // Back in the foreground: the hit that is being heard now, and the backlog
+  // behind it.
+  clock.currentTime = 3;
+  ui.hit(TRACK, bankId, 5, 90, Math.round(2.95 * clock.sampleRate));
+  ui.runFrames();
+
+  assert.equal(ui.window.__crowStudioPadQueue.length, 0, "nothing waits afterwards");
+  assert.equal(String(padAt(ui, 4).className).includes("st-pad-hit"), false,
+    "the backlog's lights are not all painted in one frame");
+  assert.equal(String(padAt(ui, 5).className).includes("st-pad-hit"), true,
+    "the hit that is being heard now is");
+});
+
+// --- a clock that has not started ------------------------------------------
+
+test("a context that answers no timestamp is timed from its output latency", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+
+  // A context that has not started answers 0 for both the context time and the
+  // performance time: that pairing maps every frame a latency too early.
+  const clock = ui.audio();
+  clock.getOutputTimestamp = function () {
+    return { contextTime: 0, performanceTime: 0 };
+  };
+  clock.currentTime = 1;
+
+  // Frame 48000 is 1 s of context time, and it is heard 50 ms after that.
+  ui.hit(TRACK, bankId, 0, 100, 48000);
+  ui.runFrames();
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), false,
+    "it is not painted at its own context time");
+  assert.equal(ui.window.__crowStudioPadQueue.length, 1, "it waits for the latency the fallback adds");
+
+  clock.currentTime = 1.05;
+  ui.runFrames();
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), true,
+    "and is painted 50 ms after its context time");
+});
+
+// --- the control the keyboard was on ---------------------------------------
+
+test("focus comes back to the effect it was on, not the first one like it", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+
+  const fxButtons = () => [...ui.document.querySelectorAll("[data-role=sampler-fx] [data-act=fx-hold]")];
+  const stutter = ui.document.querySelector(
+    "[data-role=sampler-fx] [data-act=fx-hold][data-fx-name=stutter]",
+  );
+  assert.ok(stutter, "the Stutter button is drawn");
+  assert.notEqual(fxButtons()[0], stutter, "and it is not the first of the effects drawn");
+
+  // This document only keeps the focus the page ASKS for, so every focus() is
+  // caught here.
+  const focused = [];
+  const prototype = Object.getPrototypeOf(stutter);
+  const original = prototype.focus;
+  prototype.focus = function () {
+    focused.push(this.getAttribute ? this.getAttribute("data-fx-name") : null);
+    return original.call(this);
+  };
+  try {
+    ui.document.activeElement = stutter;
+    // A redraw of the song as it is: the effects host is drawn again from it.
+    ui.frame(ui.stateFrame());
+    await ui.settle();
+
+    assert.notEqual(fxButtons().length, 0, "the effects are drawn again");
+    assert.deepEqual(focused, ["stutter"], "the focus went back to the same effect and nowhere else");
+  } finally {
+    prototype.focus = original;
+    ui.document.activeElement = null;
+  }
 });

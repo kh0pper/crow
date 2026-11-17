@@ -401,6 +401,16 @@ const STYLES = `
   .studio button [contenteditable] {
     user-select: text; -webkit-user-select: text; -webkit-touch-callout: default;
   }
+  /* Touch targets (G11): the controls a finger plays are at least 44 px in both
+     directions — a pad, a step, a bank tab and a performance effect. This is the
+     FLOOR, not the size: a control's own rule below may make it bigger (a pad is
+     72 px square), so it comes before those rules and never after them. */
+  .studio .st-pad,
+  .studio .st-step,
+  .studio .st-bank-tabs .st-toggle,
+  .studio .st-fx-btn {
+    min-width: 44px; min-height: 44px;
+  }
   .studio .st-presence { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
   .studio .st-chip { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--st-muted); }
   .studio .st-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--st-human); flex: 0 0 auto; }
@@ -1009,18 +1019,20 @@ const STYLES = `
   /* The pad-and-steps view (the approved design, mockup screen 2): a sampler
      track's clip is a pattern, so opening one shows the kit instead of the
      piano roll. Pads are real buttons, at least 72 px square, and the pad's
-     own settings sit beside them. */
-  .studio .st-sampler {
-    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-panel);
-    display: flex; flex-direction: column; gap: 10px; padding: 12px;
-  }
+     own settings sit under them.
+
+     The view is FOUR widgets since A2 — the pads, the steps, the chop editor
+     and the effects — each with a host of its own that a frame can hold. The
+     wrapper the handler renders around those hosts is only where they start:
+     the shell moves each one into its frame, so the wrapper takes no room and
+     carries no look of its own. */
+  .studio .st-sampler { display: block; }
   .studio .st-sampler[hidden] { display: none; }
+  .studio .st-sampler-host { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .studio .st-sampler-host[hidden] { display: none; }
   .studio .st-sampler-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
   .studio .st-sampler-title { margin: 0; font-size: 15px; font-weight: 700; }
   .studio .st-sampler-meta { font-size: 12px; color: var(--st-muted); }
-  .studio .st-sampler-body { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
-  .studio .st-sampler-pads { flex: 1 1 380px; max-width: 460px; display: flex; flex-direction: column; gap: 10px; }
-  .studio .st-sampler-right { flex: 999 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
   .studio .st-sampler-sub { margin: 0; font-size: 12px; font-weight: 600; color: var(--st-muted); }
   .studio .st-bank-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
   .studio .st-bank-tabs .st-toggle { flex: 0 0 auto; min-width: 44px; }
@@ -1033,6 +1045,28 @@ const STYLES = `
   }
   .studio .st-pad:hover { border-color: var(--st-edge); }
   .studio .st-pad.st-pad-sel { border-color: #FFFFFF; }
+  /* The live lights (G9). A pad the engine reports sounding, looping or held
+     keeps a colour of its own, and a hit flashes it for a moment. Only classes
+     and one custom property change, so the button the finger is on is never
+     rebuilt. The hit's strength is --hit (0..1, the velocity over 127). */
+  .studio .st-pad.st-pad-on { background: #3A3222; }
+  .studio .st-pad.st-pad-loop { background: #1E2C3A; }
+  .studio .st-pad.st-pad-held { background: #3A2A1C; }
+  .studio .st-pad.st-pad-hit {
+    background: #F2A541; border-color: #FFFFFF;
+    animation: st-pad-flash 180ms ease-out;
+  }
+  @keyframes st-pad-flash {
+    0% { box-shadow: inset 0 0 0 4px rgba(255, 255, 255, var(--hit, 0.6)); }
+    100% { box-shadow: inset 0 0 0 4px rgba(255, 255, 255, 0); }
+  }
+  /* A browser asked for less motion gets the colour and no animation at all. */
+  @media (prefers-reduced-motion: reduce) {
+    .studio .st-pad.st-pad-hit {
+      animation: none; background: #F2A541;
+      box-shadow: inset 0 0 0 4px rgba(255, 255, 255, var(--hit, 0.6));
+    }
+  }
   .studio .st-pad-num {
     font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px;
     font-weight: 600; color: var(--st-muted);
@@ -1059,7 +1093,6 @@ const STYLES = `
   }
   .studio .st-pad-check input { width: 20px; height: 20px; accent-color: var(--st-human); }
   .studio .st-resample-target { max-width: 180px; }
-  .studio .st-sampler-slot:empty { display: none; }
   /* The chop editor: the sample's waveform, one marker per slice start, and the
      two ways to chop it plus Assign slices to pads. A marker is dragged on the
      SVG itself, so the whole strip takes no touch scrolling. */
@@ -1125,12 +1158,16 @@ const STYLES = `
   .studio .st-swing { min-width: 160px; }
   .studio .st-steps-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
   .studio .st-step-pages { display: flex; gap: 4px; }
-  .studio .st-step-pages .st-toggle { flex: 0 0 auto; min-width: 56px; font-size: 11px; }
+  .studio .st-step-pages .st-toggle { flex: 0 0 auto; min-width: 56px; min-height: 44px; font-size: 11px; }
   .studio .st-step-locks { font-size: 11px; color: var(--st-muted); }
   .studio .st-step-strip {
-    display: grid; grid-template-columns: repeat(16, minmax(28px, 1fr));
+    display: grid; grid-template-columns: repeat(16, minmax(44px, 1fr));
     gap: 4px; overflow-x: auto;
   }
+  /* A page of eight positions — a phone, or the steps widget at size m — is
+     eight columns, because sixteen columns stay 760 px wide however few cells
+     are in them. The strip carries the page size it was drawn for. */
+  .studio .st-step-strip[data-page-size="8"] { grid-template-columns: repeat(8, minmax(44px, 1fr)); }
   .studio .st-step {
     position: relative; height: 48px; min-height: 48px; padding: 4px 3px;
     border-radius: 6px; border: 1px solid #2F343A; background: #1B1E22;
@@ -1297,7 +1334,11 @@ const STYLES = `
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
-    .studio .st-step-strip { grid-template-columns: repeat(8, minmax(0, 1fr)); overflow-x: hidden; }
+    /* A phone's lane holds eight positions a page (the client pages it by the
+       width class and the widget's size), so eight 44 px targets are the row. A
+       screen too narrow for that scrolls the row rather than shrinking a
+       target. */
+    .studio .st-step-strip { grid-template-columns: repeat(8, minmax(44px, 1fr)); overflow-x: auto; }
     .studio .st-mix-strips { overflow-x: auto; overflow-y: hidden; }
     .studio .st-strip { flex: 0 0 152px; }
     .studio .st-strip-master { flex: 0 0 216px; }
@@ -1466,7 +1507,7 @@ function studioPage({ songId, render, res }) {
           <section class="st-mixer" data-role="mixer" hidden></section>
           <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
-          <section class="st-sampler" data-role="sampler" hidden></section>
+          <section class="st-sampler" data-role="sampler" hidden><div class="st-sampler-host" data-role="sampler-pads" hidden></div><div class="st-sampler-host" data-role="sampler-steps" hidden></div><div class="st-sampler-host" data-role="sampler-chop" hidden></div><div class="st-sampler-host" data-role="sampler-fx" hidden></div></section>
           <section class="st-midi" data-role="midi"></section>
         </main>
         <aside class="st-side">

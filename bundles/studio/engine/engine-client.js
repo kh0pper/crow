@@ -6,9 +6,9 @@
  * glues these sources into ONE module and hands it to
  * `audioWorklet.addModule()`:
  *
- *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
- *       + spessasynth.js + font-voice.js + dynamics.js + faust-host.js
- *       + meter.js + studio-processor.js
+ *     sequencer.js + resample.js + sampler-voice.js + pad-events.js + perf-fx.js
+ *       + sunvox.js + spessasynth.js + font-voice.js + dynamics.js
+ *       + faust-host.js + meter.js + studio-processor.js
  *
  * `resample.js` rides along so the worklet scope has the very same resampler a
  * page does (`StudioResample`), even though the conversion itself happens on
@@ -102,8 +102,9 @@
  * The client's side of the port protocol (the processor's header has the
  * whole list):
  *
- * - `onPosition(listener)` follows `{type:"position", bar, beat, sixteenth}`,
- *   posted at most every 50 ms of audio.
+ * - `onPosition(listener)` follows `{type:"position", bar, beat, sixteenth,
+ *   patterns, frame}`, posted at most every 50 ms of audio; `frame` is the
+ *   context frame of the block the report is for.
  * - `onLaunch(listener)` follows `{type:"launched", track_id, clip_id,
  *   scene_id, bar, frame}`: one report per launch or stop the sequencer
  *   APPLIED, `frame` being the frame of the whole AudioContext (the worklet's
@@ -203,6 +204,15 @@
  *   blocks as `{target, frame, channels}`; it resolves to an unsubscribe. A tap
  *   never changes the mix it copies, and a MASTER tap copies it after the
  *   performance bus, so what it records is what the room hears.
+ * - `onPadEvent(listener)` follows the pads the engine STARTED, one message per
+ *   block, as `{frame, track_id, bank_id, index, kind, v?, state?}`: `kind` is
+ *   `"hit"` (`v` is the effective velocity the voice played at) and `frame` is
+ *   the context frame the voice starts on, in the clock `launched`,
+ *   `nextBarFrame` and a position report use. The engine pushes rather than the
+ *   page polling, so a light can land on the frame the hit is heard. `kind`
+ *   `"state"` (with a `state` code) is a pad whose stored state changed. The
+ *   engine only records while somebody listens: the first subscription posts
+ *   `{type:"pad_events_on", on:true}`.
  * - `fxHold(name, amount)` and `fxRelease(name)` hold or let go one performance
  *   effect (`filter_sweep`, `lofi`, `stutter`, `tape_stop`, `reverb_throw`).
  *   They are live state, never a command or a history step, and they take effect
@@ -243,6 +253,12 @@
     "sequencer.js",
     "resample.js",
     "sampler-voice.js",
+    // The pad-event ring: the hits the processor records for the page's lights,
+    // drained once per block (see "Pad events" in studio-processor.js). Before
+    // the processor that fills it. A source file named here is also served from
+    // the gateway's engine-asset whitelist (`server/web.js`, `ASSET_FILES`),
+    // which is what composes the module a browser page loads.
+    "pad-events.js",
     "perf-fx.js",
     "sunvox.js",
     // The vendored SoundFont synth, before the processor that hosts it: it is
@@ -1023,6 +1039,7 @@
    *                    onLaunch: function(function): function,
    *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
    *                    onTap: function(function): function,
+   *                    onPadEvent: function(function): function,
  *                    onMeter: function(function): function,
  *                    lastMeter: function(): (object|null),
  *                    onMasterLatency: function(function): function,
@@ -1522,6 +1539,10 @@
     const libraryNeededListeners = new Set();
     const libraryPresetsListeners = new Set();
     const tapListeners = new Set();
+    /** Followers of the pads the engine started (see `onPadEvent`). */
+    const padEventListeners = new Set();
+    /** Whether the engine was already asked to record pad events. */
+    let padEventsAsked = false;
     const meterListeners = new Set();
     const masterLatencyListeners = new Set();
     const insertFaultListeners = new Set();
@@ -1675,7 +1696,14 @@
         return;
       }
       if (message.type === "position") {
-        const position = { bar: message.bar, beat: message.beat, sixteenth: message.sixteenth };
+        const position = {
+          bar: message.bar,
+          beat: message.beat,
+          sixteenth: message.sixteenth,
+          // The context frame of the block this position is for, so a caller can
+          // time a light (a pad event carries the same clock) against the grid.
+          frame: message.frame === undefined || message.frame === null ? null : message.frame,
+        };
         for (const listener of listeners) {
           try {
             listener(position);
@@ -1927,6 +1955,33 @@
             listener(tap);
           } catch {
             /* one bad listener must not stop the others hearing about it */
+          }
+        }
+        return;
+      }
+      if (message.type === "pad_events") {
+        // The pads the engine started in one block, in the order they started —
+        // a step, a live press and a controller press arrive in exactly this
+        // shape. Each carries the context frame its voice begins on, so a light
+        // is timed against the audible hit rather than against the message.
+        const entries = Array.isArray(message.events) ? message.events : [];
+        for (const entry of entries) {
+          if (!entry || typeof entry !== "object") continue;
+          const event = {
+            frame: Math.trunc(Number(entry.frame)) || 0,
+            track_id: entry.track_id === undefined || entry.track_id === null ? "" : String(entry.track_id),
+            bank_id: entry.bank_id === undefined || entry.bank_id === null ? "" : String(entry.bank_id),
+            index: Math.trunc(Number(entry.index)) || 0,
+            kind: entry.kind === "state" ? "state" : "hit",
+          };
+          if (event.kind === "state") event.state = Math.trunc(Number(entry.state)) || 0;
+          else event.v = Math.trunc(Number(entry.v)) || 0;
+          for (const listener of padEventListeners) {
+            try {
+              listener(event);
+            } catch {
+              /* one bad listener must not stop the others hearing about it */
+            }
           }
         }
         return;
@@ -2572,6 +2627,33 @@
       },
 
       /**
+       * Follow the pads the engine started: `{frame, track_id, bank_id, index,
+       * kind, v, state?}`, one message per block while something started, in the
+       * order the voices began. `frame` is the AudioContext frame the voice
+       * starts on — the same clock `onLaunch` and `nextBarFrame` report in — and
+       * `v` is the EFFECTIVE velocity the voice played at, so a light can land on
+       * the frame the hit is heard instead of the page asking again and again.
+       * The engine records nothing until the first subscription posts
+       * `pad_events_on`, and then records each block's hits into a preallocated
+       * ring.
+       * @param {(event: {frame: number, track_id: string, bank_id: string,
+       *                  index: number, kind: string, v?: number,
+       *                  state?: number}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onPadEvent(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        padEventListeners.add(listener);
+        if (!padEventsAsked) {
+          padEventsAsked = true;
+          post({ type: "pad_events_on", on: true });
+        }
+        return function unsubscribe() {
+          padEventListeners.delete(listener);
+        };
+      },
+
+      /**
        * Follow the master meter: `{momentary, short_term, integrated,
        * true_peak_db, latency_ms}`, one reading every 100 ms of audio while the
        * song plays and one when it stops. The loudness readings are BS.1770-4
@@ -2722,6 +2804,7 @@
         libraryNeededListeners.clear();
         libraryPresetsListeners.clear();
         tapListeners.clear();
+        padEventListeners.clear();
         meterListeners.clear();
         masterLatencyListeners.clear();
         insertFaultListeners.clear();

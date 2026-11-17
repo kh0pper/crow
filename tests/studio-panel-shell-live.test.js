@@ -591,7 +591,7 @@ test("at laptop width the page renders compose, and Perform brings the MIDI widg
   );
   assert.deepEqual(
     await page.evaluate(VISIBLE_WIDGETS),
-    ["scene-grid", "editor", "history"],
+    ["scene-grid", "editor", "pads", "steps", "fx", "history"],
     "compose's own widgets are the ones on the page",
   );
 
@@ -607,7 +607,7 @@ test("at laptop width the page renders compose, and Perform brings the MIDI widg
   );
   assert.deepEqual(
     await page.evaluate(VISIBLE_WIDGETS),
-    ["scene-grid", "editor", "midi", "history"],
+    ["scene-grid", "pads", "fx", "midi", "history"],
     "switching mode changed which widgets the page shows",
   );
   assert.equal(
@@ -882,6 +882,15 @@ test("inside the real dashboard layout the nav sidebar either is absent or colla
     "one widget area",
   );
 
+  // The mode this device was left in decides which widgets the area holds, and
+  // an earlier case may have left it in another one, so what the nav is held to
+  // is that the area comes out of both moves with the layout it went in with.
+  const before = await page.evaluate(VISIBLE_WIDGETS);
+  assert.ok(
+    before.includes("scene-grid"),
+    `the song's layout is on the page (got ${JSON.stringify(before)})`,
+  );
+
   const hasSidebar = await page.evaluate("!!document.querySelector('.sidebar')");
   if (!hasSidebar) {
     assert.equal(
@@ -936,8 +945,9 @@ test("inside the real dashboard layout the nav sidebar either is absent or colla
     "the session grid is what is open",
   );
   const visible = await page.evaluate(VISIBLE_WIDGETS);
-  assert.ok(
-    visible.includes("scene-grid") && visible.includes("editor"),
-    `the widget area still shows the song's layout (got ${JSON.stringify(visible)})`,
+  assert.deepEqual(
+    visible,
+    before,
+    `the widget area still shows the song's layout (got ${JSON.stringify(visible)}, was ${JSON.stringify(before)})`,
   );
 });

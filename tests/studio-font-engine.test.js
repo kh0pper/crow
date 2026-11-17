@@ -96,6 +96,7 @@ const ASSETS = {
   "sequencer.js": readFileSync(join(ENGINE_DIR, "sequencer.js"), "utf8"),
   "resample.js": readFileSync(join(ENGINE_DIR, "resample.js"), "utf8"),
   "sampler-voice.js": readFileSync(join(ENGINE_DIR, "sampler-voice.js"), "utf8"),
+  "pad-events.js": readFileSync(join(ENGINE_DIR, "pad-events.js"), "utf8"),
   "perf-fx.js": readFileSync(join(ENGINE_DIR, "perf-fx.js"), "utf8"),
   "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
   "spessasynth.js": readFileSync(join(SPESSA_DIR, "spessasynth.js"), "utf8"),
@@ -113,6 +114,7 @@ const NO_FONT_FILES = Object.freeze([
   "sequencer.js",
   "resample.js",
   "sampler-voice.js",
+  "pad-events.js",
   "perf-fx.js",
   "studio-processor.js",
 ]);

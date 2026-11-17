@@ -2,8 +2,9 @@
  * Crow Studio — the shell's layout model, as one inline classic script.
  *
  * The Studio shell is a grid of widgets: the scene grid, the one editor slot,
- * the takes lane, the MIDI lane, the history and the agent box. Which of them
- * are on the page, in what order, and at which size is VIEW STATE and lives
+ * the sampler's four (pads, steps, chop and effects), the takes lane, the MIDI
+ * lane, the history and the agent box. Which of them are on the page, in what
+ * order, and at which size is VIEW STATE and lives
  * here — in this browser, for this song, in this mode and size class. It is
  * never a command, never a history entry and never part of the song document,
  * because a layout in the document would sync to every peer and the agent, and
@@ -63,10 +64,14 @@ export const SHELL_LAYOUT_SCRIPT = [
   "  // Every widget the shell knows, in the order a tray lists them, with the",
   "  // sizes each one may take. The sizes are the plan's: a widget that needs",
   "  // room for a grid or an editor never shrinks to a column.",
-  "  var WIDGET_ORDER = ['scene-grid', 'editor', 'takes', 'midi', 'history', 'agent'];",
+  "  var WIDGET_ORDER = ['scene-grid', 'editor', 'pads', 'steps', 'chop', 'fx', 'takes', 'midi', 'history', 'agent'];",
   "  var WIDGETS = {",
   "    'scene-grid': { sizes: ['m', 'l'] },",
   "    'editor': { sizes: ['m', 'l'] },",
+  "    'pads': { sizes: ['m', 'l'] },",
+  "    'steps': { sizes: ['m', 'l'] },",
+  "    'chop': { sizes: ['m', 'l'] },",
+  "    'fx': { sizes: ['s', 'm'] },",
   "    'takes': { sizes: ['s', 'm', 'l'] },",
   "    'midi': { sizes: ['s', 'm'] },",
   "    'history': { sizes: ['s', 'm'] },",
@@ -77,8 +82,10 @@ export const SHELL_LAYOUT_SCRIPT = [
   "  // in the tray in every mode, so a song arrives with a page the operator can",
   "  // read and a tray they can pull from.",
   "  var DEFAULTS = {",
-  "    compose: [['scene-grid', 'l'], ['editor', 'm'], ['history', 's']],",
-  "    perform: [['scene-grid', 'l'], ['editor', 'm'], ['midi', 's'], ['history', 's']],",
+  "    compose: [",
+  "      ['scene-grid', 'l'], ['editor', 'm'], ['pads', 'm'], ['steps', 'l'], ['fx', 's'], ['history', 's']",
+  "    ],",
+  "    perform: [['scene-grid', 'l'], ['pads', 'l'], ['fx', 'm'], ['midi', 's'], ['history', 's']],",
   "    record: [['scene-grid', 'm'], ['takes', 'l'], ['midi', 's'], ['history', 's']]",
   "  };",
   "",

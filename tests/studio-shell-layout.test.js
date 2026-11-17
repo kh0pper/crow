@@ -116,7 +116,9 @@ test("the emitted script follows the panel's inline rules and exposes one global
 test("the widget table and the modes are the plan's", () => {
   assert.deepEqual(MODES, ["compose", "perform", "record"]);
   assert.deepEqual(SIZE_CLASSES, ["phone", "tablet", "laptop"]);
-  assert.deepEqual(WIDGET_ORDER, ["scene-grid", "editor", "takes", "midi", "history", "agent"]);
+  assert.deepEqual(WIDGET_ORDER, [
+    "scene-grid", "editor", "pads", "steps", "chop", "fx", "takes", "midi", "history", "agent",
+  ]);
   assert.deepEqual(WIDGETS["scene-grid"].sizes, ["m", "l"]);
   assert.deepEqual(WIDGETS.editor.sizes, ["m", "l"]);
   assert.deepEqual(WIDGETS.takes.sizes, ["s", "m", "l"]);
@@ -124,6 +126,25 @@ test("the widget table and the modes are the plan's", () => {
   assert.deepEqual(WIDGETS.history.sizes, ["s", "m"]);
   assert.deepEqual(WIDGETS.agent.sizes, ["s", "m"]);
   assert.equal(TEMPLATE_MAX_BYTES, 8192);
+});
+
+test("WIDGETS holds pads, steps, chop and fx with their sizes", () => {
+  assert.deepEqual(WIDGETS.pads.sizes, ["m", "l"], "the pads take half a row or all of it");
+  assert.deepEqual(WIDGETS.steps.sizes, ["m", "l"], "so do the steps");
+  assert.deepEqual(WIDGETS.chop.sizes, ["m", "l"], "and the chop editor");
+  assert.deepEqual(WIDGETS.fx.sizes, ["s", "m"], "the effects row fits a column");
+  for (const id of ["pads", "steps", "chop", "fx"]) {
+    assert.equal(WIDGET_ORDER.includes(id), true, `${id} is a widget the tray can list`);
+  }
+  assert.deepEqual(
+    WIDGET_ORDER.slice(0, 6),
+    ["scene-grid", "editor", "pads", "steps", "chop", "fx"],
+    "the four sampler widgets sit beside the editor they belong to",
+  );
+
+  const page = new Function("window", SHELL_LAYOUT_SCRIPT + "\nreturn window.StudioShellLayout;")({});
+  assert.deepEqual(page.WIDGETS, WIDGETS, "the page's own table is this one");
+  assert.deepEqual(page.WIDGET_ORDER, WIDGET_ORDER);
 });
 
 test("sizeClassFor puts the boundaries at 640 and 1024", () => {
@@ -139,11 +160,15 @@ test("the default layout of each mode is the plan's, with the agent in the tray"
   assert.deepEqual(defaultLayout("compose", "laptop").shown, [
     { id: "scene-grid", size: "l" },
     { id: "editor", size: "m" },
+    { id: "pads", size: "m" },
+    { id: "steps", size: "l" },
+    { id: "fx", size: "s" },
     { id: "history", size: "s" },
   ]);
   assert.deepEqual(defaultLayout("perform", "laptop").shown, [
     { id: "scene-grid", size: "l" },
-    { id: "editor", size: "m" },
+    { id: "pads", size: "l" },
+    { id: "fx", size: "m" },
     { id: "midi", size: "s" },
     { id: "history", size: "s" },
   ]);
@@ -204,7 +229,36 @@ test("parseLayout drops unknown and duplicate ids and repairs a disallowed size"
   ]);
 });
 
-test("a widget added later is in the tray and not shown", () => {
+test("compose default is scene-grid l, editor m, pads m, steps l, fx s, history s", () => {
+  const compose = defaultLayout("compose", "laptop");
+  const sizes = {};
+  for (const row of compose.shown) sizes[row.id] = row.size;
+  assert.deepEqual(sizes, {
+    "scene-grid": "l",
+    editor: "m",
+    pads: "m",
+    steps: "l",
+    fx: "s",
+    history: "s",
+  });
+  assert.equal(idsOf(compose).includes("chop"), false, "the chop editor starts in the tray");
+  assert.equal(idsOf(compose).includes("agent"), false, "and so does the agent");
+  assert.deepEqual(defaultLayout("compose", "tablet").shown, compose.shown, "a tablet starts from the same set");
+  assert.deepEqual(defaultLayout("compose", "phone").shown, compose.shown);
+
+  const perform = defaultLayout("perform", "laptop");
+  const performSizes = {};
+  for (const row of perform.shown) performSizes[row.id] = row.size;
+  assert.deepEqual(performSizes, {
+    "scene-grid": "l",
+    pads: "l",
+    fx: "m",
+    midi: "s",
+    history: "s",
+  });
+});
+
+test("a saved layout from P1 (no new ids) loads and the four new ids are in the tray, not inserted", () => {
   const saved = JSON.stringify({
     v: 1,
     shown: [
@@ -214,8 +268,30 @@ test("a widget added later is in the tray and not shown", () => {
     ],
   });
   const layout = parseLayout(saved, defaultLayout("compose", "laptop"));
-  assert.equal(idsOf(layout).includes("agent"), false, "a layout saved before the agent existed");
-  assert.deepEqual(trayOf(layout), ["takes", "midi", "agent"], "the tray offers it, in table order");
+  assert.deepEqual(idsOf(layout), ["scene-grid", "editor", "history"], "the page the operator saved is the page they get");
+  const tray = trayOf(layout);
+  for (const id of ["pads", "steps", "chop", "fx"]) {
+    assert.equal(tray.includes(id), true, `${id} is offered by the tray`);
+    assert.equal(idsOf(layout).includes(id), false, `${id} is not put on the page by itself`);
+  }
+  assert.deepEqual(tray, ["pads", "steps", "chop", "fx", "takes", "midi", "agent"], "in table order");
+});
+
+test("an unknown id in a saved layout is dropped", () => {
+  const layout = parseLayout(JSON.stringify({
+    v: 1,
+    shown: [
+      { id: "pads", size: "l" },
+      { id: "sampler-pads", size: "l" },
+      { id: "mystery", size: "s" },
+      { id: "steps", size: "xl" },
+    ],
+  }));
+  assert.deepEqual(idsOf(layout), ["pads", "steps"], "only the ids the table knows survive");
+  assert.deepEqual(layout.shown, [
+    { id: "pads", size: "l" },
+    { id: "steps", size: "m" },
+  ], "and a size the widget may not take becomes its first one");
 });
 
 test("parseLayout hands back a layout of its own, never the fallback it was given", () => {
@@ -225,9 +301,9 @@ test("parseLayout hands back a layout of its own, never the fallback it was give
   layout.shown[0].size = "m";
   assert.deepEqual(fallback, defaultLayout("compose", "laptop"));
 
-  const stored = parseLayout(JSON.stringify(defaultLayout("perform", "laptop")), fallback);
+  const stored = parseLayout(JSON.stringify(defaultLayout("compose", "laptop")), fallback);
   stored.shown[1].size = "l";
-  const again = parseLayout(JSON.stringify(defaultLayout("perform", "laptop")), fallback);
+  const again = parseLayout(JSON.stringify(defaultLayout("compose", "laptop")), fallback);
   assert.equal(sizeOf(again, "editor"), "m");
 
   const page = defaultLayout("record", "laptop");
@@ -237,20 +313,22 @@ test("parseLayout hands back a layout of its own, never the fallback it was give
 });
 
 test("hide then show round-trips a widget into the tray and back at the end", () => {
-  const start = defaultLayout("perform", "laptop");
+  const start = defaultLayout("compose", "laptop");
   const hidden = hideWidget(start, "editor");
-  assert.deepEqual(idsOf(hidden), ["scene-grid", "midi", "history"]);
-  assert.deepEqual(trayOf(hidden), ["editor", "takes", "agent"]);
-  assert.deepEqual(idsOf(start), ["scene-grid", "editor", "midi", "history"], "the original keeps its editor");
+  assert.deepEqual(idsOf(hidden), ["scene-grid", "pads", "steps", "fx", "history"]);
+  assert.deepEqual(trayOf(hidden), ["editor", "chop", "takes", "midi", "agent"]);
+  assert.deepEqual(idsOf(start), ["scene-grid", "editor", "pads", "steps", "fx", "history"], "the original keeps its editor");
 
   const back = showWidget(hidden, "editor");
   assert.deepEqual(back.shown, [
     { id: "scene-grid", size: "l" },
-    { id: "midi", size: "s" },
+    { id: "pads", size: "m" },
+    { id: "steps", size: "l" },
+    { id: "fx", size: "s" },
     { id: "history", size: "s" },
     { id: "editor", size: "m" },
   ]);
-  assert.deepEqual(trayOf(back), ["takes", "agent"]);
+  assert.deepEqual(trayOf(back), ["chop", "takes", "midi", "agent"]);
 
   assert.deepEqual(showWidget(back, "editor").shown, back.shown, "showing a shown widget changes nothing");
   assert.deepEqual(showWidget(back, "mystery").shown, back.shown, "an id no widget has is not shown");
@@ -290,15 +368,15 @@ test("resizeWidget steps the allowed sizes and wraps", () => {
 
 test("moveWidget moves a shown widget and clamps the index", () => {
   const start = defaultLayout("perform", "laptop");
-  assert.deepEqual(idsOf(moveWidget(start, "history", 0)), ["history", "scene-grid", "editor", "midi"]);
-  assert.deepEqual(idsOf(moveWidget(start, "history", 99)), ["scene-grid", "editor", "midi", "history"]);
-  assert.deepEqual(idsOf(moveWidget(start, "scene-grid", -5)), ["scene-grid", "editor", "midi", "history"]);
-  assert.deepEqual(idsOf(moveWidget(start, "scene-grid", 2)), ["editor", "midi", "scene-grid", "history"]);
-  assert.deepEqual(idsOf(moveWidget(start, "editor", 3)), ["scene-grid", "midi", "history", "editor"]);
-  assert.deepEqual(idsOf(start), ["scene-grid", "editor", "midi", "history"], "the argument is untouched");
+  assert.deepEqual(idsOf(moveWidget(start, "history", 0)), ["history", "scene-grid", "pads", "fx", "midi"]);
+  assert.deepEqual(idsOf(moveWidget(start, "history", 99)), ["scene-grid", "pads", "fx", "midi", "history"]);
+  assert.deepEqual(idsOf(moveWidget(start, "scene-grid", -5)), ["scene-grid", "pads", "fx", "midi", "history"]);
+  assert.deepEqual(idsOf(moveWidget(start, "scene-grid", 2)), ["pads", "fx", "scene-grid", "midi", "history"]);
+  assert.deepEqual(idsOf(moveWidget(start, "pads", 3)), ["scene-grid", "fx", "midi", "pads", "history"]);
+  assert.deepEqual(idsOf(start), ["scene-grid", "pads", "fx", "midi", "history"], "the argument is untouched");
 
   const trayed = hideWidget(start, "midi");
-  assert.deepEqual(idsOf(moveWidget(trayed, "midi", 0)), ["scene-grid", "editor", "history"], "a tray widget does not move");
+  assert.deepEqual(idsOf(moveWidget(trayed, "midi", 0)), ["scene-grid", "pads", "fx", "history"], "a tray widget does not move");
 });
 
 test("columnSpan gives a widget its share of the row", () => {
@@ -337,7 +415,9 @@ test("loadLayout returns the song's own key, else the built-in default", () => {
 
   storage.setItem(layoutKey("s1", "perform", "laptop"), JSON.stringify({ v: 1, shown: [{ id: "agent", size: "s" }] }));
   assert.deepEqual(loadLayout(storage, "s1", "perform", "laptop"), { v: 1, shown: [{ id: "agent", size: "s" }] });
-  assert.deepEqual(trayOf(loadLayout(storage, "s1", "perform", "laptop")), ["scene-grid", "editor", "takes", "midi", "history"]);
+  assert.deepEqual(trayOf(loadLayout(storage, "s1", "perform", "laptop")), [
+    "scene-grid", "editor", "pads", "steps", "chop", "fx", "takes", "midi", "history",
+  ]);
 });
 
 test("saveLayout keeps only what a layout may hold", () => {
