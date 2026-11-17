@@ -15,7 +15,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -239,6 +239,18 @@ test("tokenMatches: a fixed-length constant-time compare, equal only for the exa
   assert.equal(tokenMatches("", TOKEN), false);
   assert.equal(tokenMatches(undefined, TOKEN), false);
   assert.equal(tokenMatches(TOKEN, ""), false, "no configured token never matches");
+});
+
+test("parseId: a canonical decimal id, so the entrypoint's listener_uid_is string compare matches", async () => {
+  const { parseId } = await import("../bundles/browser/cdp-relay.mjs");
+  assert.equal(parseId("10"), 10);
+  assert.equal(parseId("0010"), 10, "leading zeros normalise: uid 0010 IS uid 10");
+  assert.equal(parseId(" 0010 "), 10, "surrounding space is trimmed");
+  assert.equal(parseId("0000"), 0);
+  assert.equal(parseId("2147483647"), 2147483647);
+  for (const bad of ["", " ", "-1", "+10", "10x", "10.0", "root", "2147483648", "12345678901", undefined, null, 10]) {
+    assert.equal(parseId(bad), null, JSON.stringify(bad));
+  }
 });
 
 test("/json/version: no bearer or a wrong one gets 401, and only that path exists", async (t) => {
@@ -627,6 +639,61 @@ test("the ready file says the port and the browser, and never the token", async 
   });
 });
 
+test("supervise: a symlink planted at the ready file is replaced, never written through", async (t) => {
+  // The directory is root-owned in the image (the entrypoint creates it 0755), so nothing
+  // on the relay's uid can put a symlink there. This is the belt: even at a path the relay
+  // CAN write (the test's own directory), the writer unlinks, creates O_EXCL|O_NOFOLLOW and
+  // renames, so a symlink is replaced and its target is never opened.
+  const dir = mkdtempSync(join(tmpdir(), "crow-cdp-relay-ready-"));
+  const readyFile = join(dir, "ready");
+  const victim = join(dir, "victim");
+  const tracePath = join(dir, "chromium.log");
+  writeFileSync(join(dir, "token"), TOKEN + "\n", { mode: 0o600 });
+  writeFileSync(victim, "untouched\n", { mode: 0o600 });
+  symlinkSync(victim, readyFile);
+  const child = spawn(process.execPath, [RELAY, "--supervise"], {
+    env: {
+      ...process.env,
+      CDP_PORT: "0",
+      CROW_CDP_TOKEN_FILE: join(dir, "token"),
+      CROW_CDP_READY_FILE: readyFile,
+      CROW_CDP_CHROMIUM_ARGV: JSON.stringify([process.execPath, FIXTURE]),
+      CROW_CDP_RELAY_UID: String(ME_UID),
+      CROW_CDP_RELAY_GID: String(ME_GID),
+      FAKE_CHROME_LOG: tracePath,
+      CROW_CDP_DEBUG: "0",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let logs = "";
+  child.stdout.on("data", (d) => { logs += d; });
+  child.stderr.on("data", (d) => { logs += d; });
+  const exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+  t.after(async () => {
+    try { child.kill("SIGKILL"); } catch { /* gone */ }
+    let chromePid = null;
+    try {
+      const trace = readFileSync(tracePath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+      chromePid = trace.find((r) => r.t === "pid")?.pid ?? null;
+    } catch { /* no trace */ }
+    if (chromePid) { try { process.kill(chromePid, "SIGKILL"); } catch { /* gone */ } }
+    await Promise.race([exited, sleep(3000)]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const deadline = Date.now() + 20000;
+  let ready = null;
+  while (Date.now() < deadline) {
+    try { ready = JSON.parse(readFileSync(readyFile, "utf8")); break; } catch { /* not yet (still the symlink) */ }
+    if (child.exitCode !== null) break;
+    await sleep(100);
+  }
+  assert.ok(ready, "the supervisor wrote its ready file: " + logs);
+  assert.equal(readFileSync(victim, "utf8"), "untouched\n", "the symlink's target was never written through");
+  assert.equal(lstatSync(readyFile).isFile(), true, "what the entrypoint reads is a regular file");
+  assert.equal(ready.browser, "FakeChrome/1.0.0");
+  assert.ok(!readFileSync(readyFile, "utf8").includes(TOKEN));
+});
+
 test("a missing or malformed token at startup is a clear FATAL, not an open port", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "crow-cdp-relay-bad-"));
   const readyFile = join(dir, "ready");
@@ -999,17 +1066,32 @@ test("supervise: no argv, environment or log of any of the three processes carri
 // ---------------------------------------------------------------------------
 // live, opt-in: the real image, the real setpriv, the wall's own verdict
 // ---------------------------------------------------------------------------
+//
+// Opt in with CROW_TEST_BROWSER_IMAGE=<a built browser image> (e.g.
+// browser-crow-browser), run as the invoking NON-ROOT user: root would prove nothing, so
+// the test skips under root. The throwaway container's relay is setpriv'd to THIS user's
+// uid, and every /proc read the wall makes — /proc/<pid>/fd, cwd, exe and cgroup — happens
+// without any privilege. That is the property the uid split exists for. The holder is also
+// containerised, so the wall's container rule must name its compose project for the port
+// to pass (and every other add-on must be refused it). The running crow-browser containers
+// are never inspected, exec'd, stopped or otherwise touched.
 
-test("live (opt-in: root + docker + the bundle image): a setpriv'd relay is readable and is own-uid", async (t) => {
-  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
-  if (!isRoot) { t.skip("needs root: the host must be able to read the container process's /proc"); return; }
-  try { execFileSync("docker", ["info", "--format", "{{.ServerVersion}}"], { stdio: "pipe", timeout: 15000 }); } catch { t.skip("no docker daemon"); return; }
-  const image = process.env.CROW_TEST_BROWSER_IMAGE || "browser-crow-browser";
+test("live (opt-in: CROW_TEST_BROWSER_IMAGE=<built image>, as the invoking non-root user): the setpriv'd relay is readable without root, and its container decides", async (t) => {
+  const image = process.env.CROW_TEST_BROWSER_IMAGE || "";
+  if (!image) { t.skip("opt in: set CROW_TEST_BROWSER_IMAGE to a built browser image"); return; }
+  const myUid = typeof process.getuid === "function" ? process.getuid() : null;
+  const myGid = typeof process.getgid === "function" ? process.getgid() : null;
+  if (myUid === null || myGid === null) { t.skip("no uid/gid on this platform"); return; }
+  if (myUid === 0) {
+    t.skip("run as the invoking non-root user: root reading another uid's /proc would not prove the property");
+    return;
+  }
+  try { execFileSync("docker", ["info", "--format", "{{.ServerVersion}}"], { stdio: "pipe", timeout: 15000 }); } catch { t.skip("no docker daemon (or this user cannot use it)"); return; }
   try { execFileSync("docker", ["image", "inspect", image], { stdio: "pipe", timeout: 15000 }); } catch {
     t.skip(`no ${image} image (set CROW_TEST_BROWSER_IMAGE to a built browser image)`);
     return;
   }
-  const { identifyListener } = await import("../scripts/addon-sandbox/listener-owner.mjs");
+  const { containerIdFromCgroup, identifyListener } = await import("../scripts/addon-sandbox/listener-owner.mjs");
   const probe = net.createServer();
   const port = await new Promise((resolve) => probe.listen(0, "127.0.0.1", () => resolve(probe.address().port)));
   await new Promise((resolve) => probe.close(resolve));
@@ -1017,11 +1099,11 @@ test("live (opt-in: root + docker + the bundle image): a setpriv'd relay is read
   const script = `require("net").createServer(() => {}).listen(${port}, "127.0.0.1", () => console.log("listening"));`
     + "setTimeout(() => process.exit(0), 120000);";
   // A THROWAWAY container from the image, on the host network so its loopback is the
-  // test's, listening on a random port as an unprivileged uid. The running crow-browser
-  // containers are never inspected, exec'd, stopped or otherwise touched.
+  // test's, listening on a random port as THIS user's uid (through setpriv, the way the
+  // relay itself is started).
   const run = spawn("docker", [
     "run", "--rm", "--name", marker, "--network", "host", "--entrypoint", "/usr/bin/setpriv", image,
-    "--reuid", "65534", "--regid", "65534", "--clear-groups", "--inh-caps=-all", "--bounding-set=-all", "--no-new-privs",
+    "--reuid", String(myUid), "--regid", String(myGid), "--clear-groups", "--inh-caps=-all", "--bounding-set=-all", "--no-new-privs",
     "--", "/usr/bin/node", "-e", script, marker,
   ], { stdio: ["ignore", "pipe", "pipe"] });
   let logs = "";
@@ -1047,18 +1129,33 @@ test("live (opt-in: root + docker + the bundle image): a setpriv'd relay is read
     const ready = Date.now() + 30000;
     while (Date.now() < ready && listenInodes(port).length === 0) await sleep(250);
     assert.ok(listenInodes(port).length, "the container's relay is listening on the host's loopback: " + logs);
-    // The three /proc entries the wall reads: all readable from the host for a setpriv'd process.
-    assert.ok(fdTargets(pid).length > 0, "/proc/<pid>/fd is readable");
-    assert.ok(readLink(`/proc/${pid}/cwd`), "/proc/<pid>/cwd is readable");
-    assert.ok(readLink(`/proc/${pid}/exe`), "/proc/<pid>/exe is readable");
-    const r = await identifyListener("127.0.0.1", port, {
-      gatewayUid: 65534,
+    // The four /proc entries the wall reads, ALL read as the invoking user (no root):
+    // fd (to map the socket), cwd and exe (Crow's-own-code rules), cgroup (container rule).
+    assert.ok(fdTargets(pid).length > 0, "/proc/<pid>/fd is readable without root");
+    assert.ok(readLink(`/proc/${pid}/cwd`), "/proc/<pid>/cwd is readable without root");
+    assert.ok(readLink(`/proc/${pid}/exe`), "/proc/<pid>/exe is readable without root");
+    const cgroupText = readText(`/proc/${pid}/cgroup`);
+    assert.ok(cgroupText, "/proc/<pid>/cgroup is readable without root");
+    const containerId = containerIdFromCgroup(cgroupText);
+    const realId = execFileSync("docker", ["inspect", "--format", "{{.Id}}", marker], { encoding: "utf8", timeout: 15000 }).trim();
+    assert.equal(containerId, realId, "the cgroup names the container docker knows");
+
+    const project = "uid-check-" + marker.slice(-6);
+    const ask = (extra = {}) => identifyListener("127.0.0.1", port, {
+      gatewayUid: myUid,
       crowRoots: ["/srv/crow-uid-check-root"],
       selfPids: [process.pid],
       addonId: "browser",
-      addonProjects: new Map(),
+      addonProjects: new Map([[project, "browser"]]),
+      containerProject: (id) => (id === containerId ? project : ""),
+      ...extra,
     });
-    assert.equal(r.kind, "own-uid", JSON.stringify(r));
+    const own = await ask();
+    assert.deepEqual([own.kind, own.container, own.project, own.projectOwner], ["own-uid", containerId, project, "browser"], JSON.stringify(own));
+    // Any other add-on is refused the same port, whatever its allow list says.
+    assert.deepEqual([(await ask({ addonId: "media" })).kind], ["denied"]);
+    // With no container lookup there is no way to name the holder: refused, never passed.
+    assert.deepEqual([(await ask({ containerProject: null })).kind], ["denied"]);
   } finally {
     try { execFileSync("docker", ["rm", "-f", marker], { stdio: "pipe", timeout: 30000 }); } catch { /* gone */ }
   }

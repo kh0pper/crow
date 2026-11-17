@@ -5,7 +5,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
@@ -76,7 +78,14 @@ test("the entrypoint starts the supervisor, waits for its ready file, and keeps 
   assert.match(SHELL, /^RELAY="\$\(dirname "\$0"\)\/cdp-relay\.mjs"$/m, "the relay ships beside the entrypoint");
   assert.match(SHELL, /^node "\$RELAY" --supervise &$/m, "the supervisor is what runs (and re-execs the relay)");
   assert.match(SHELL, /^RELAY_PID=\$!$/m);
-  assert.match(SHELL, /^CDP_READY_FILE=\/tmp\/cdp-relay\.ready$/m);
+  // The ready file lives in a root-owned 0755 directory the relay's uid cannot write to
+  // (directly or through /proc/<relay>/root), never in /tmp.
+  assert.match(SHELL, /^CDP_READY_DIR=\/run\/crow-cdp-ready$/m, "a root-owned directory, outside /tmp");
+  assert.match(SHELL, /^CDP_READY_FILE="\$\{CDP_READY_DIR\}\/cdp-relay\.ready"$/m);
+  assert.doesNotMatch(SHELL, /^CDP_READY_FILE=\/tmp\//m, "never in a world-writable directory");
+  assert.match(SHELL, /^rm -rf "\$CDP_READY_DIR"$/m, "recreated on every start (docker start keeps /run)");
+  assert.match(SHELL, /^install -d -m 755 -o 0 -g 0 "\$CDP_READY_DIR" \\$/m, "root-owned 0755");
+  assert.ok(SHELL.indexOf('install -d -m 755 -o 0 -g 0 "$CDP_READY_DIR"') < SHELL.indexOf('node "$RELAY"'), "created before the supervisor can write it");
   assert.match(SHELL, /\[ -s "\$CDP_READY_FILE" \]/, "readiness is the ready file");
   assert.match(SHELL, /require_loopback "\$\{CDP_PORT\}" cdp-relay/, "the relay must be loopback-only");
   assert.match(SHELL, /require_loopback "\$\{NOVNC_PORT\}" websockify/, "and so must noVNC (unchanged)");
@@ -87,6 +96,26 @@ test("the entrypoint starts the supervisor, waits for its ready file, and keeps 
   assert.doesNotMatch(SHELL, /^"?\$CHROME_PATH"?\s+-/m, "the entrypoint never launches Chromium");
   assert.match(SHELL, /^CHROME_PID="\$\(child_pid_matching "\$RELAY_PID" chrome\)"$/m, "Chromium is found under the supervisor only to check it");
   assert.match(SHELL, /no_tcp_listeners "\$CHROME_PID" \/proc\/net\/tcp \/proc\/net\/tcp6/);
+});
+
+test("the ready file is written by root with O_CREAT|O_EXCL|O_NOFOLLOW, through a temp name and a rename", () => {
+  // Unlink first, create a fresh file under a random temp name (a planted symlink is a
+  // refusal, never followed or truncated), write, then rename — so the entrypoint's loop
+  // sees either nothing or the whole line, in a directory the relay's uid cannot write.
+  assert.match(JS, /rmSync\(readyFile, \{ force: true, recursive: true \}\)/, "the old entry goes first");
+  assert.match(JS, /constants\.O_CREAT \| constants\.O_EXCL \| constants\.O_NOFOLLOW \| constants\.O_WRONLY/);
+  assert.match(JS, /openSync\(temp, constants\.O_CREAT/, "a fresh temp file, never the target itself");
+  assert.match(JS, /renameSync\(temp, readyFile\)/, "renamed into place inside the same directory");
+  assert.match(JS, /const DEFAULT_READY_FILE = "\/run\/crow-cdp-ready\/cdp-relay\.ready";/);
+  assert.doesNotMatch(JS, /\/tmp\/cdp-relay\.ready/, "no default in /tmp");
+  assert.ok((JS.match(/writeReadyFile\(/g) || []).length >= 3, "both modes write through the one safe writer");
+});
+
+test("the relay never shares its port: reusePort is never enabled", () => {
+  // SO_REUSEPORT would let another process of the same uid bind the same address:port and
+  // take a share of the connections, bearer tokens included. One owner of the port, always.
+  assert.doesNotMatch(JS, /reusePort/, "the listener must not be shareable");
+  assert.match(RELAY, /reusePort is deliberately NEVER set/, "and the code says why (the comment is the only mention)");
 });
 
 test("the relay listens as the gateway's uid: the ids are required, and the listener is checked", () => {
@@ -108,8 +137,9 @@ test("the relay listens as the gateway's uid: the ids are required, and the list
 
 test("the token reaches the relay's uid through a 0700 directory, never through an argv or an env value", () => {
   assert.match(SHELL, /^rm -rf \/run\/crow-cdp$/m, "a stale copy from an earlier start never survives");
-  assert.match(SHELL, /^install -d -m 700 -o "\$CROW_RELAY_UID" -g "\$CROW_RELAY_GID" \/run\/crow-cdp \\$/m);
-  assert.match(SHELL, /^install -m 400 -o "\$CROW_RELAY_UID" -g "\$CROW_RELAY_GID" "\$CDP_TOKEN_SRC" \/run\/crow-cdp\/token \\$/m);
+  // `-o +<id>`: a NUMERIC id, so a login name that happens to look like one is never looked up.
+  assert.match(SHELL, /^install -d -m 700 -o "\+\$\{CROW_RELAY_UID\}" -g "\+\$\{CROW_RELAY_GID\}" \/run\/crow-cdp \\$/m);
+  assert.match(SHELL, /^install -m 400 -o "\+\$\{CROW_RELAY_UID\}" -g "\+\$\{CROW_RELAY_GID\}" "\$CDP_TOKEN_SRC" \/run\/crow-cdp\/token \\$/m);
   assert.match(SHELL, /^export CROW_CDP_TOKEN_FILE=\/run\/crow-cdp\/token$/m, "only the path is exported");
   assert.doesNotMatch(SHELL, /export CROW_CDP_TOKEN_FILE="\$CDP_TOKEN_SRC"/, "the root-only mount is not what the relay reads");
   assert.ok(SHELL.indexOf("install -m 400") > SHELL.indexOf("CDP_TOKEN_SRC") - 1);
@@ -156,6 +186,12 @@ test("the manifest bumps to 1.7.0, refreshes the four files, requires the token,
   // The consent text says who answered on 9222 (the Crow user, not root), in both languages.
   assert.match(MANIFEST.install_consent_messages.en, /Crow user/);
   assert.match(MANIFEST.install_consent_messages.es, /usuario de Crow/);
+  // …and what the split does NOT buy: the token is full control of the root Chromium, and
+  // the uid split is identification for the add-on wall, not containment.
+  assert.match(MANIFEST.install_consent_messages.en, /identification, not a separation/);
+  assert.match(MANIFEST.install_consent_messages.es, /identificación, no separación/);
+  assert.match(MANIFEST.install_consent_messages.en, /cookies and logins/);
+  assert.match(MANIFEST.install_consent_messages.es, /cookies y sesiones/);
 });
 
 test("the registry mirrors the manifest exactly (the browser entry is the manifest plus official:true)", () => {
@@ -186,8 +222,11 @@ test("the compose passes the gateway's uid/gid leniently, and the entrypoint is 
 test("every gateway compose run hands the two ids over: composeEnv sets them from its own process", () => {
   const guard = read("servers/gateway/compose-guard.js");
   assert.match(guard, /export function composeIdsEnv\(ids = \{\}\)/, "one place owns the rule");
-  assert.match(guard, /env\.CROW_GATEWAY_UID = String\(uid\)/);
-  assert.match(guard, /env\.CROW_GATEWAY_GID = String\(gid\)/);
+  // BOTH keys always, blank when the id is not one: a missing variable would let the
+  // bundle's .env supply it (possibly another uid).
+  assert.match(guard, /const canonical = \(v\) => \(Number\.isInteger\(v\) && v >= 0 \? String\(v\) : ""\);/);
+  assert.match(guard, /env\.CROW_GATEWAY_UID = canonical\(uid\);/);
+  assert.match(guard, /env\.CROW_GATEWAY_GID = canonical\(gid\);/);
   assert.match(guard, /return Object\.assign\(env, composeIdsEnv\(ids\)\);/, "composeEnv always adds them");
   // The two wrappers every bundle install/start path uses go through composeEnv itself.
   assert.match(read("servers/gateway/bundle-core.js"), /return composeEnvFor\(base, crowHome\)/, "bundle-core wraps it");
@@ -226,4 +265,51 @@ test("the docs say the relay answers as the Crow user, in both languages", () =>
   for (const f of ["docs/guide/browser-automation.md", "docs/es/guide/browser-automation.md"]) {
     assert.doesNotMatch(read(f), /relay runs as root|el relay se ejecuta como root/, f + " no longer says the relay is root's");
   }
+});
+
+test("/tmp is a fresh tmpfs, and the X socket directory is created fresh rather than chmod'ed", () => {
+  // Nothing a same-uid process plants in /tmp survives a `docker start`, and mode=1777
+  // keeps it an ordinary /tmp (sticky, world-writable) for the X socket directory.
+  assert.match(COMPOSE, /^\s+tmpfs:\n\s+- \/tmp:mode=1777$/m, "a tmpfs at /tmp, 1777 semantics");
+  // chmod follows a symlink, and /tmp is writable by every uid in the image: create the
+  // directory fresh (rm -rf, then install -d) and never chmod what is already there.
+  assert.match(SHELL, /^rm -rf \/tmp\/\.X11-unix$/m);
+  assert.match(SHELL, /^install -d -m 1777 -o 0 -g 0 \/tmp\/\.X11-unix/m);
+  assert.doesNotMatch(SHELL, /chmod 1777 \/tmp\/\.X11-unix/, "no chmod of a possibly-planted directory");
+  // The X cookie itself lives in /root, not /tmp, so the tmpfs costs it nothing.
+  assert.match(SHELL, /^export XAUTHORITY=\/root\/\.Xauthority$/m);
+});
+
+test("require_id normalises a uid/gid to canonical decimal, and refuses anything else", () => {
+  // The relay's uid is compared with the kernel's uid column as a STRING (listener_uid_is),
+  // so "0010" must become "10" before it reaches that comparison or setpriv.
+  const start = ENTRYPOINT.indexOf("require_id() {");
+  assert.ok(start > -1, "require_id is defined");
+  const end = ENTRYPOINT.indexOf("\n}\n", start);
+  const fn = ENTRYPOINT.slice(start, end + 2);
+  const dir = mkdtempSync(join(tmpdir(), "crow-cdp-require-id-"));
+  try {
+    const script = join(dir, "check.sh");
+    writeFileSync(script, [
+      'die() { echo "FATAL: $*" >&2; exit 1; }',
+      fn,
+      'require_id CROW_RELAY_UID "$1"',
+      'require_id CROW_RELAY_GID "$2"',
+      'printf "%s:%s\\n" "$CROW_RELAY_UID" "$CROW_RELAY_GID"',
+    ].join("\n") + "\n");
+    const ok = (uid, gid) => execFileSync("bash", [script, uid, gid], { encoding: "utf8" }).trim();
+    assert.equal(ok("0010", "0007"), "10:7", "leading zeros normalise");
+    assert.equal(ok("1000", "1000"), "1000:1000");
+    assert.equal(ok("0", "0"), "0:0", "uid 0 stays a valid id (the relay's own decision is separate)");
+    assert.equal(ok("2147483647", "2147483647"), "2147483647:2147483647");
+    for (const [what, uid, gid] of [
+      ["empty", "", "0"], ["name", "root", "0"], ["negative", "-1", "0"],
+      ["plus", "+10", "0"], ["out of range", "2147483648", "0"], ["gid", "0", ""],
+    ]) {
+      let failed = null;
+      try { ok(uid, gid); } catch (err) { failed = err; }
+      assert.ok(failed, what + " is refused");
+      assert.match(String(failed.stderr || ""), /FATAL: CROW_RELAY_(UID|GID)/, what);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

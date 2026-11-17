@@ -873,13 +873,21 @@ export function composeEnv(base, crowHome, ids = {}) {
  * as (the browser's CDP relay listens as the gateway's uid, so a walled add-on's relay —
  * which runs as that same uid — can reach it). Taken from THIS process unless the caller
  * names ids, and never from an inherited environment.
+ *
+ * BOTH keys are always present. Compose falls back to the bundle's own .env for a variable
+ * the environment does not set, so a key left out here could be supplied by that file —
+ * another uid than the gateway's, which is exactly what the wall refuses. An id that is not
+ * a non-negative integer therefore becomes an empty string: Compose sets the variable to
+ * "", and the browser's entrypoint fails closed on it (its require_id says which variables
+ * to fix).
  */
 export function composeIdsEnv(ids = {}) {
   const env = {};
   const uid = ids.uid ?? (typeof process.getuid === "function" ? process.getuid() : null);
   const gid = ids.gid ?? (typeof process.getgid === "function" ? process.getgid() : null);
-  if (Number.isInteger(uid)) env.CROW_GATEWAY_UID = String(uid);
-  if (Number.isInteger(gid)) env.CROW_GATEWAY_GID = String(gid);
+  const canonical = (v) => (Number.isInteger(v) && v >= 0 ? String(v) : "");
+  env.CROW_GATEWAY_UID = canonical(uid);
+  env.CROW_GATEWAY_GID = canonical(gid);
   return env;
 }
 

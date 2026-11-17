@@ -85,6 +85,14 @@ services:
         target: /run/secrets/crow-cdp-token
         mode: 0400
     init: true
+    # /tmp is a tmpfs: nothing planted there by the relay's uid (or any other process in
+    # the image) survives a `docker start`, and the ready file lives outside it in a
+    # root-owned directory anyway. mode=1777 keeps it an ordinary /tmp (sticky,
+    # world-writable): the X socket directory the entrypoint creates inside it expects
+    # that, and so does anything else that treats /tmp as /tmp. The X locks are cleaned
+    # on every start regardless (the entrypoint removes them by number).
+    tmpfs:
+      - /tmp:mode=1777
     # Chromium gets SIGTERM (the entrypoint forwards it) and time to flush
     # cookies and logins to the profile before anything is killed.
     stop_grace_period: 30s

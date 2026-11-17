@@ -5,7 +5,10 @@
  * The wall asks two questions of docker: which container publishes a loopback
  * port (`publishes`, for the root-owned listener case), and who is behind an
  * address on this computer (`containers` + `subnets` + `addonProjects`, for a
- * listed host that resolves to a container of some compose project).
+ * listed host that resolves to a container of some compose project). A third
+ * comes from the other side: a same-uid listener whose `/proc/<pid>/cgroup`
+ * names a container is looked up by id with `containerProject()`, which answers
+ * that container's compose project label.
  *
  * A compose project is only ever owned by an add-on when one of its containers
  * still carries the compose working_dir of an add-on's bundle folder:
@@ -107,6 +110,33 @@ function ownerOfDir(dir, roots, installed) {
 function labelOf(labels, name) {
   const v = labels && typeof labels === "object" ? labels[name] : null;
   return typeof v === "string" ? v : "";
+}
+
+/**
+ * The compose project label of one container id, from a snapshot: the answer the add-on
+ * wall needs when a same-uid listener turns out to be a containerised process, whose
+ * `/proc/<pid>/cgroup` named the container.
+ *
+ * An id the snapshot does not know (docker cannot be read, the container has exited since
+ * the snapshot) gives `""`, so the caller's own "unlabelled project" refusal applies — the
+ * narrow answer, never a pass. Pure.
+ *
+ * @param {{containers?: object[]}|null} view  a docker-view snapshot
+ * @param {string} id                          the full 64-hex container id
+ * @returns {string}
+ */
+export function containerProject(view, id) {
+  try {
+    const wanted = String(id ?? "").trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(wanted)) return "";
+    const list = view && Array.isArray(view.containers) ? view.containers : [];
+    for (const c of list) {
+      if (!c || typeof c !== "object") continue;
+      if (String(c.id ?? "").trim().toLowerCase() !== wanted) continue;
+      return typeof c.project === "string" ? c.project : "";
+    }
+    return "";
+  } catch { return ""; }
 }
 
 /**

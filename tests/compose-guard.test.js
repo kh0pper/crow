@@ -74,6 +74,29 @@ test("composeEnv: the GATEWAY's uid/gid are named from this process, never from 
   if (uid !== null) assert.equal(B.composeEnv({ PATH: "/usr/bin" }).CROW_GATEWAY_UID, String(uid));
 });
 
+test("composeIdsEnv always sets BOTH ids: an invalid one is an empty string, so the bundle's .env can never supply it", () => {
+  // Compose falls back to the bundle's own .env for a variable the environment does not
+  // set, and that file could name another uid — the wall refuses such a relay. So the keys
+  // are always present; an id that is not a non-negative integer becomes an empty string,
+  // which the browser's entrypoint fails closed on.
+  for (const bad of [NaN, 1.5, -1, "4242", "", true, {}, []]) {
+    const env = G.composeIdsEnv({ uid: bad, gid: bad });
+    assert.deepEqual(env, { CROW_GATEWAY_UID: "", CROW_GATEWAY_GID: "" }, JSON.stringify(bad));
+    assert.deepEqual(Object.keys(env).sort(), ["CROW_GATEWAY_GID", "CROW_GATEWAY_UID"], "both keys exist even when blank");
+  }
+  // A good id next to a bad one keeps the good spelling and blanks the other.
+  assert.deepEqual(G.composeIdsEnv({ uid: 1000, gid: "x" }), { CROW_GATEWAY_UID: "1000", CROW_GATEWAY_GID: "" });
+  // Unset ids still come from this process (the caller naming none is not invalid).
+  const fromProcess = G.composeIdsEnv({});
+  if (typeof process.getuid === "function") assert.equal(fromProcess.CROW_GATEWAY_UID, String(process.getuid()));
+  if (typeof process.getgid === "function") assert.equal(fromProcess.CROW_GATEWAY_GID, String(process.getgid()));
+  // composeEnv carries the blank pair through too, never dropping it.
+  const blank = G.composeEnv({}, CROW_HOME, { uid: NaN, gid: NaN });
+  assert.equal(blank.CROW_GATEWAY_UID, "");
+  assert.equal(blank.CROW_GATEWAY_GID, "");
+  assert.equal(blank.CROW_HOME, G.composeEnv({}, CROW_HOME).CROW_HOME, "the home is unaffected");
+});
+
 // ---- the model check (no docker) ---------------------------------------------------
 
 test("model: privileged, dangerous caps (any case, CAP_ prefix), shared namespaces, unconfined, volumes_from need privileged + consent", () => {

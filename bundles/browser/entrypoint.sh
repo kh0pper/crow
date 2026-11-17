@@ -20,8 +20,12 @@ TOKEN_FILE="${VNC_DIR}/tokens"
 # container at create), never as environment variables.
 TOKEN_SRC=/run/secrets/crow-vnc-token
 CDP_TOKEN_SRC=/run/secrets/crow-cdp-token
-# The relay writes this once Chromium's pipe answers Browser.getVersion.
-CDP_READY_FILE=/tmp/cdp-relay.ready
+# The ROOT supervisor (cdp-relay.mjs --supervise) writes this once Chromium's pipe answers
+# Browser.getVersion. It lives in a root-owned 0755 directory: the relay's uid can write
+# neither it nor its directory (not directly, and not through /proc/<relay>/root), so only
+# root can say "the browser is up".
+CDP_READY_DIR=/run/crow-cdp-ready
+CDP_READY_FILE="${CDP_READY_DIR}/cdp-relay.ready"
 PROFILE_DIR=/root/.config/chromium-crow
 INSTANCE_MARKER="${PROFILE_DIR}/.crow-instance"
 SCREEN="1920x1080x24"
@@ -32,12 +36,17 @@ die() { echo "[crow-browser] FATAL: $*" >&2; exit 1; }
 # require_id NAME VALUE — a decimal id 0..2147483647, or a fatal that says where the
 # value comes from. Never defaulted: a 0 or a 1000 would make the relay listen as a uid
 # the gateway does not have, which is exactly what the add-on wall refuses.
+#
+# The value is NORMALISED in place to canonical decimal ("0010" -> "10"): the relay's uid
+# and the kernel's uid column in /proc/net/tcp are compared as strings by listener_uid_is
+# below, and install/setpriv are given a numeric id, so a leading zero must not survive.
 require_id() {
   local name="$1" value="${2:-}"
   [[ "$value" =~ ^[0-9]{1,10}$ ]] \
     || die "${name} ('${value}') is not a decimal id. Crow's gateway passes it when it runs compose (CROW_GATEWAY_UID / CROW_GATEWAY_GID): the CDP relay must listen as the gateway's own uid so a walled browser add-on can reach it. There is no default."
   [ "$((10#$value))" -le 2147483647 ] \
     || die "${name} ('${value}') is out of range (0..2147483647). Crow's gateway passes it when it runs compose (CROW_GATEWAY_UID / CROW_GATEWAY_GID); a value this large is a typo, not an id."
+  printf -v "$name" '%d' "$((10#$value))"
 }
 
 # --- The uid the CDP relay listens as: the gateway's own (checked before Xvfb) ---
@@ -76,21 +85,30 @@ require_id CROW_RELAY_GID "${CROW_RELAY_GID:-}"
 #     the gateway's uid is what scripts/addon-sandbox/listener-owner.mjs calls
 #     "own-uid": it maps the socket to its holder through /proc/<pid>/fd and
 #     accepts argv '/usr/bin/node /app/cdp-relay.mjs --attach', cwd /app, exe
-#     /usr/bin/node. A root listener has to be a port a container publishes to
-#     pass that check, and host networking publishes nothing — so a walled
-#     browser add-on could not reach its own browser at all before this split.
+#     /usr/bin/node — and, since that holder is containerised, a container whose
+#     compose project is THIS add-on's (the project label names the browser's
+#     bundle folder), so another add-on that lists 9222 is refused it. A root
+#     listener has to be a port a container publishes to pass that check, and host
+#     networking publishes nothing — so a walled browser add-on could not reach its
+#     own browser at all before this split.
 #     The re-exec (never an in-process setuid) is what keeps /proc readable: a
 #     process that changes uid after it starts turns non-dumpable and its
-#     /proc/<pid>/fd, cwd and exe stop being readable, which is a REFUSAL.
+#     /proc/<pid>/fd, cwd, exe (and cgroup) stop being readable, which is a REFUSAL.
 #   - the token: compose mounts it root-only (0400), so it is copied here into a
 #     0700 directory owned by the relay's uid. It is still never a shell
 #     variable, an argv or an environment value; CROW_CDP_TOKEN_FILE is a path.
-# What a same-uid process can see: the relay's /proc entries and that token file.
-# It cannot see Chromium's /proc entries or the profile: those stay root's.
-# What the split keeps out: other uids, other containers, web pages (including
-# pages this browser itself loads), and a bot whose network is unshared. What it
-# does NOT keep out: a process of the gateway's uid that can read the token file
-# (a default (`auto`-tier) bot can, until the CROW_BOT_UID containment work lands).
+# What the split buys — and what it does NOT:
+#   - it is IDENTIFICATION, not containment. The wall can name this listener as the
+#     browser add-on's own (the gateway's uid, inside this add-on's own container) and
+#     refuse it to every other add-on.
+#   - the token is full CDP control of a Chromium that still runs as root: whoever holds
+#     it can read the profile's cookies and saved logins, and can make the browser open
+#     file:// URLs for anything this container can read. The uid split does not contain
+#     the browser, and a process of the gateway's uid that can read the token file has the
+#     browser too (a default (`auto`-tier) bot can, until the CROW_BOT_UID work lands).
+# What the split keeps out: other uids, other containers, web pages (including pages this
+# browser itself loads), and a bot whose network is unshared. Chromium's own /proc entries
+# and the profile stay root's, so the relay's uid cannot read them off the filesystem.
 # An older install's .env may still pass VNC_PASSWORD: it is ignored, and
 # never printed.
 if [ -n "${VNC_PASSWORD:-}" ]; then
@@ -124,9 +142,9 @@ grep -qE '^[A-Za-z0-9_-]{32,256}$' "$CDP_TOKEN_SRC" || die "the CDP token (${CDP
 # path. `rm -rf` first: a `docker start` keeps /run, and a stale copy (or another uid's)
 # must never be what the relay reads.
 rm -rf /run/crow-cdp
-install -d -m 700 -o "$CROW_RELAY_UID" -g "$CROW_RELAY_GID" /run/crow-cdp \
+install -d -m 700 -o "+${CROW_RELAY_UID}" -g "+${CROW_RELAY_GID}" /run/crow-cdp \
   || die "cannot create /run/crow-cdp for uid ${CROW_RELAY_UID}"
-install -m 400 -o "$CROW_RELAY_UID" -g "$CROW_RELAY_GID" "$CDP_TOKEN_SRC" /run/crow-cdp/token \
+install -m 400 -o "+${CROW_RELAY_UID}" -g "+${CROW_RELAY_GID}" "$CDP_TOKEN_SRC" /run/crow-cdp/token \
   || die "cannot give the CDP token to uid ${CROW_RELAY_UID} at /run/crow-cdp/token"
 export CROW_CDP_TOKEN_FILE=/run/crow-cdp/token
 
@@ -251,8 +269,13 @@ require_loopback() {
 
 # --- Clean stale X locks/sockets (root cause of the 2026-05 crash loop) ---
 log "Cleaning stale X locks for display :${DISP_NUM}..."
-rm -f "/tmp/.X${DISP_NUM}-lock" "/tmp/.X11-unix/X${DISP_NUM}" 2>/dev/null || true
-mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+rm -f "/tmp/.X${DISP_NUM}-lock" 2>/dev/null || true
+# /tmp is a fresh tmpfs per container start (compose `tmpfs: /tmp:mode=1777`), so this
+# directory cannot have been planted by anything that ran before. Create it FRESH and
+# never `chmod` an existing one: /tmp is writable by every uid in the image, and chmod
+# follows a symlink planted at /tmp/.X11-unix straight to whatever it names.
+rm -rf /tmp/.X11-unix
+install -d -m 1777 -o 0 -g 0 /tmp/.X11-unix || die "cannot create /tmp/.X11-unix"
 
 # --- A real X cookie, fresh per start (x11vnc and Chromium inherit XAUTHORITY) ---
 export XAUTHORITY=/root/.Xauthority
@@ -350,8 +373,13 @@ export CROW_CDP_READY_FILE="$CDP_READY_FILE"
 # and starts Chromium root. Checked at the top of this script, never defaulted.
 export CROW_CDP_RELAY_UID="$CROW_RELAY_UID"
 export CROW_CDP_RELAY_GID="$CROW_RELAY_GID"
-# docker start keeps /tmp: a ready file from an earlier run of this container would
-# let the readiness loop pass before Chromium has answered.
+# docker start keeps /run: a ready file from an earlier run of this container — or one a
+# process of the relay's uid somehow got there — would let the readiness loop pass before
+# Chromium has answered. The directory itself is recreated root-owned and 0755, so nothing
+# on the relay's uid can create, replace or symlink the file the loop reads.
+rm -rf "$CDP_READY_DIR"
+install -d -m 755 -o 0 -g 0 "$CDP_READY_DIR" \
+  || die "cannot create ${CDP_READY_DIR} for the CDP relay's ready file"
 rm -f "$CDP_READY_FILE"
 
 log "Launching Chromium on a pipe (CDP relay on 127.0.0.1:${CDP_PORT}, as uid ${CROW_RELAY_UID})..."

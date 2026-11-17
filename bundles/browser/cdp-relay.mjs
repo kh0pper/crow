@@ -11,19 +11,26 @@
  *
  * handing it Chromium's pipe on fds 3 and 4 and a one-line report pipe on fd 5. The
  * supervisor listens on NO socket, and writes CROW_CDP_READY_FILE itself once the relay
- * has reported ready (the relay, on the gateway's uid, could not write it).
+ * has reported ready — into a root-owned 0755 directory the relay's uid cannot write to
+ * (directly or through /proc/<relay>/root), so no process on that uid can announce a
+ * browser that is not up.
  *
  * Why the uid split: a browser add-on runs behind a wall, and the wall's listener-owner
- * check (scripts/addon-sandbox/listener-owner.mjs) identifies a loopback port by who
- * holds the socket. A root listener only passes if a running container publishes the port
- * — and this container uses host networking, so it publishes nothing. A listener owned by
- * the GATEWAY's uid is that add-on's own service, provided the process can be identified:
- * /proc/<pid>/fd, /proc/<pid>/cwd and /proc/<pid>/exe must be readable by the gateway, and
- * argv must carry an absolute script path. A process exec'd through setpriv keeps all of
- * that; a process that calls setuid() itself becomes non-dumpable and its /proc entries
- * become unreadable, so this file NEVER drops privileges in-process — it re-execs itself.
- * What a same-uid process can see: this relay's own /proc entries and the token file it
- * reads (0400, owned by that uid). It cannot see Chromium's: that stays root.
+ * check (scripts/addon-sandbox/listener-owner.mjs) identifies a loopback port by who holds
+ * the socket and, for a same-uid holder, by the container that holder runs in. A listener
+ * owned by the GATEWAY's uid inside this add-on's own container is that add-on's own
+ * service, provided the process can be identified: /proc/<pid>/fd, cwd, exe and cgroup must
+ * be readable by the gateway, and argv must carry an absolute script path. A process exec'd
+ * through setpriv keeps all of that; a process that calls setuid() itself becomes
+ * non-dumpable and its /proc entries become unreadable, so this file NEVER drops privileges
+ * in-process — it re-execs itself.
+ *
+ * The split does NOT contain Chromium. The token is full CDP control of a browser that
+ * still runs as root: whoever holds it can read the profile's cookies and saved logins, and
+ * can make the browser open file:// URLs for anything the container can read. What the
+ * split buys is identification — the wall can tell that this listener belongs to the
+ * browser add-on's own container and refuse it to every other add-on — not a boundary
+ * around the browser.
  *
  * Why a relay at all: Chrome DevTools Protocol has no authentication, and under
  * `network_mode: host` a CDP port on 127.0.0.1 is reachable by every process on the
@@ -48,16 +55,18 @@
  * text/continuation, ping/pong, close, mask handling) is smaller than adding a
  * dependency to a security-sensitive hop.
  *
- * What the gate keeps out: other uids, other containers, web pages, and a bot whose
- * network is unshared. It does NOT keep out a same-uid process that can read the
- * bundle `.env` (which holds this token) — that is the CROW_BOT_UID containment arc.
+ * What the gate keeps out: other uids, other containers and web pages. It does NOT keep
+ * out a process of this same uid that can read the token file — and such a process has the
+ * whole root Chromium through that token (cookies, saved logins, file:// reads). The uid
+ * split is an identification for the add-on wall, not a containment boundary; closing that
+ * gap is the CROW_BOT_UID containment arc.
  */
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { constants, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
-import { dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** The longest request head the relay reads; Node answers 431 beyond it. */
@@ -328,8 +337,13 @@ function parsePort(value) {
  * else. `undefined`, an empty string, "root", a negative number or a name all fail, so a
  * compose file that forgot to pass CROW_GATEWAY_UID stops the container instead of
  * silently listening as root.
+ *
+ * The value returned is CANONICAL decimal (a Number): "0010" and "10" are the same uid,
+ * and the entrypoint's `listener_uid_is` compares the kernel's uid column against this
+ * spelling as a string, so a leading zero must never reach setpriv or that comparison.
+ * Exported for the unit test of exactly that.
  */
-function parseId(value) {
+export function parseId(value) {
   const s = typeof value === "string" ? value.trim() : "";
   if (!/^\d{1,10}$/.test(s)) return null;
   const n = Number(s);
@@ -869,6 +883,10 @@ export async function createRelay(config) {
     socket.on("close", () => { clearTimeout(timer); sockets.delete(socket); });
   });
 
+  // reusePort is deliberately NEVER set, here or in the caps: SO_REUSEPORT lets another
+  // process of this same uid bind 127.0.0.1:port too, and the kernel would then hand it a
+  // share of the connections — its clients' CDP commands and their bearer tokens. One
+  // owner of the port, always: this process, or nothing.
   actualPort = await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => resolve(server.address().port));
@@ -973,6 +991,36 @@ function loggers() {
   return { log, debug };
 }
 
+/** The default ready file: inside the root-owned 0755 directory the entrypoint creates. */
+const DEFAULT_READY_FILE = "/run/crow-cdp-ready/cdp-relay.ready";
+
+/**
+ * Write the ready file the way root must: unlink whatever is there, create a FRESH file
+ * under a random temp name with O_CREAT|O_EXCL|O_NOFOLLOW (so a symlink or a name planted
+ * at that path is refused, never followed or truncated), write the body, then rename it
+ * into place inside the same directory. The rename is what makes the entrypoint's
+ * `[ -s "$CDP_READY_FILE" ]` see either nothing or the whole line, and the directory is
+ * root-owned, so no process of the relay's uid can plant or replace it.
+ */
+function writeReadyFile(readyFile, body) {
+  const dir = dirname(readyFile);
+  mkdirSync(dir, { recursive: true });
+  try { rmSync(readyFile, { force: true, recursive: true }); } catch { /* the create below refuses what is left */ }
+  const temp = join(dir, `.${basename(readyFile)}.${randomBytes(8).toString("hex")}.tmp`);
+  let fd;
+  try {
+    fd = openSync(temp, constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW | constants.O_WRONLY, 0o644);
+    writeSync(fd, body);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temp, readyFile);
+  } catch (err) {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* gone */ } }
+    try { rmSync(temp, { force: true }); } catch { /* gone */ }
+    throw err;
+  }
+}
+
 /**
  * The pre-1.7.0 shape (no flag): Chromium is this process's own child, the ready file is
  * written here, and the exit code is Chromium's. The unit tests drive this directly.
@@ -991,11 +1039,10 @@ async function serveInProcess() {
     die(String((err && err.message) || err));
   }
 
-  const readyFile = process.env.CROW_CDP_READY_FILE || "/tmp/cdp-relay.ready";
+  const readyFile = process.env.CROW_CDP_READY_FILE || DEFAULT_READY_FILE;
   const removeReadyFile = () => { try { rmSync(readyFile, { force: true }); } catch { /* gone */ } };
   try {
-    mkdirSync(dirname(readyFile), { recursive: true });
-    writeFileSync(readyFile, JSON.stringify({ pid: process.pid, port: relay.port, browser: String(relay.version.product || "") }) + "\n", { mode: 0o644 });
+    writeReadyFile(readyFile, JSON.stringify({ pid: process.pid, port: relay.port, browser: String(relay.version.product || "") }) + "\n");
   } catch {
     relay.killChromium();
     die(`cannot write the ready file (${readyFile})`);
@@ -1126,7 +1173,7 @@ async function supervise() {
   }
 
   const caps = capsFromEnv();
-  const readyFile = process.env.CROW_CDP_READY_FILE || "/tmp/cdp-relay.ready";
+  const readyFile = process.env.CROW_CDP_READY_FILE || DEFAULT_READY_FILE;
   const chromiumArgv = chromiumCommand();
   debug(`Chromium: ${chromiumArgv[0]}`);
 
@@ -1285,11 +1332,11 @@ async function supervise() {
     failSpawn(1);
     return;
   }
-  // Written here, as root: the relay's uid cannot, and the JSON is the same one the
-  // pre-split relay wrote (pid, port, browser — never the token).
+  // Written here, as root, through the same safe writer: the relay's uid cannot write in
+  // that directory, and the JSON is the same one the pre-split relay wrote (pid, port,
+  // browser — never the token).
   try {
-    mkdirSync(dirname(readyFile), { recursive: true });
-    writeFileSync(readyFile, JSON.stringify({ pid: relay.pid, port: info.port, browser: String(info.browser || "") }) + "\n", { mode: 0o644 });
+    writeReadyFile(readyFile, JSON.stringify({ pid: relay.pid, port: info.port, browser: String(info.browser || "") }) + "\n");
   } catch {
     console.error(`[cdp-relay] FATAL: cannot write the ready file (${readyFile})`);
     failSpawn(1);

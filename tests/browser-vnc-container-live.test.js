@@ -95,7 +95,7 @@ test("the entrypoint in a throwaway container: RFB on a unix socket only, noVNC 
     "--stop-timeout", "30", "-e", `CROW_INSTANCE=${instance}`, "-e", "VNC_PASSWORD=legacy-value", "-e", "VNC_TOKEN=env-token-must-be-ignored",
     "-e", "CROW_RELAY_UID=0", "-e", "CROW_RELAY_GID=0",
     "-v", `${tok}:/run/secrets/crow-vnc-token:ro`, "-v", `${cdpTok}:/run/secrets/crow-cdp-token:ro`,
-    "-v", `${VOL}:/root/.config/chromium-crow", "-v", `${ep}:/app/entrypoint.sh:ro`, IMAGE];
+    "-v", `${VOL}:/root/.config/chromium-crow`, "-v", `${ep}:/app/entrypoint.sh:ro`, IMAGE];
   docker(...runArgs(NAME, "/test/instance-a"));
   const waitReady = async () => {
     let l = "";
@@ -112,6 +112,10 @@ test("the entrypoint in a throwaway container: RFB on a unix socket only, noVNC 
   assert.match(logs, /websockify listens on loopback only \(port 6080\)/);
   assert.match(logs, /cdp-relay listens on loopback only \(port 9222\)/, "the relay is the only listener on the CDP port, and it is loopback");
   assert.match(logs, /listens on no TCP port; the relay is the only listener/, "Chromium itself owns no listener");
+  // The readiness signal the entrypoint waits for is the relay's file in the root-owned
+  // 0755 directory (/run/crow-cdp-ready), never a world-writable /tmp path.
+  assert.equal(inside(`import os, stat\nprint(os.path.exists("/run/crow-cdp-ready/cdp-relay.ready"), oct(stat.S_IMODE(os.stat("/run/crow-cdp-ready").st_mode)))`), "True 0o755", "the ready file is where the entrypoint says it is, in a root-owned 0755 directory");
+  assert.equal(inside(`import os\nprint(os.path.exists("/tmp/cdp-relay.ready"))`), "False", "and it is not in /tmp");
   // The token reached the relay's own uid through a directory only that uid can read.
   assert.equal(inside(`import os, stat\nprint(oct(stat.S_IMODE(os.stat("/run/crow-cdp").st_mode)), oct(stat.S_IMODE(os.stat("/run/crow-cdp/token").st_mode)))`), "0o700 0o400");
 

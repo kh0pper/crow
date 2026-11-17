@@ -31,7 +31,7 @@ import { basename, dirname, join } from "node:path";
 
 import { tailscaleStatusAsync } from "../../servers/shared/self-dial-address.js";
 import { openCheckedBindSource } from "./bind-fd.mjs";
-import { createDockerView } from "./docker-view.mjs";
+import { containerProject, createDockerView } from "./docker-view.mjs";
 import { bridgeSubnetsFromInterfaces, identifyContainerAddr, identifyListener, localOnlySubnets, TTS_PORT_EXCEPTION } from "./listener-owner.mjs";
 import { composePortsFrom, profileFor } from "./profile.mjs";
 import { AddonWallRefused, wrapAddonSpawn } from "./spawn.mjs";
@@ -371,6 +371,9 @@ export function createWallContext({
         addonId: id,
         addonProjects: snap && snap.addonProjects instanceof Map ? snap.addonProjects : new Map(),
         docker: snap ? async () => snap.publishes : null,
+        // A same-uid holder that runs inside a container: which container, and so which
+        // add-on's project, from the same snapshot the other docker answers come from.
+        containerProject: snap ? (containerId) => containerProject(snap, containerId) : null,
         crowRoots: crowRoots(),
         selfPids: [process.pid],
       });
