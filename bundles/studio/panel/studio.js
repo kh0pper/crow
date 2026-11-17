@@ -1087,12 +1087,18 @@ const STYLES = `
   }
   .studio .st-pad-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
   .studio .st-sampler-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-  /* The live pad bar: HOLD and Pause beside the pads, two controls a thumb
-     uses while a pad sounds. Each is a 44 px target that never selects its own
-     label and never opens the browser's menu on a long press (the HOLD press
-     IS a long press). */
+  /* The live pad bar: HOLD, ROLL and Pause beside the pads, three controls a
+     thumb uses while a pad sounds. Each is a 44 px target that never selects
+     its own label and never opens the browser's menu on a long press (the HOLD
+     press IS a long press, and ROLL is held too). */
   .studio .st-pad-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
   .studio .st-pad-bar .st-toggle {
+    flex: 0 0 auto; min-width: 44px; min-height: 44px;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  /* ROLL's interval sits beside its key on the same bar: a 44 px target too, and
+     its own label is never selected or called out. */
+  .studio .st-pad-bar .st-roll-interval {
     flex: 0 0 auto; min-width: 44px; min-height: 44px;
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   }

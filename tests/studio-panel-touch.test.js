@@ -277,6 +277,11 @@ function fakeStudioEngine() {
   const engine = {
     live: [],
     releases: [],
+    // ROLL (C5b): the repeats the page started, the stops it asked for, and how
+    // often it ended them all at once.
+    rolls: [],
+    rollStops: [],
+    rollStopsAll: 0,
     create() {
       return Promise.resolve({
         node: { connect() {} },
@@ -298,6 +303,22 @@ function fakeStudioEngine() {
         },
         liveRelease(trackId, bankId, index) {
           engine.releases.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+        },
+        rollStart(trackId, bankId, index, interval, v) {
+          engine.rolls.push({
+            track_id: String(trackId),
+            bank_id: String(bankId),
+            index: Number(index),
+            interval: String(interval),
+            v: Number(v),
+          });
+          return true;
+        },
+        rollStop(trackId, bankId, index) {
+          engine.rollStops.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+        },
+        rollStopAll() {
+          engine.rollStopsAll += 1;
         },
         loadSample() {
           return Promise.resolve();
@@ -809,4 +830,85 @@ test("a cancelled pad press lets the pad go exactly once", async () => {
   ui.fire("pointerup", {});
   await ui.settle();
   assert.equal(ui.engine.releases.length, 1, "a pad already let go is not released again");
+});
+
+// --- ROLL (C5b): a phone's repeats end with the pointer ----------------------
+
+/** The live bar's ROLL key, as it is drawn right now. */
+function rollKey(ui) {
+  const node = ui.document.querySelector("[data-role=sampler-pads] [data-act=pad-roll]");
+  assert.ok(node, "the pads carry a ROLL key");
+  return node;
+}
+
+/** Hold ROLL down with one finger, the way a phone does. */
+function holdRoll(ui) {
+  const node = rollKey(ui);
+  node.dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  return node;
+}
+
+test("pointercancel and blur stop every roll", async () => {
+  const ui = await bootClient({ sampler: true });
+  await ui.openSampler();
+
+  holdRoll(ui);
+  await ui.settle();
+  for (const index of [0, 1]) {
+    ui.pad(index).dispatchEvent(ui.event("pointerdown", { button: 0 }));
+    await ui.settle();
+  }
+  assert.equal(ui.engine.rolls.length, 2, "two pads roll while the key is held");
+
+  // The browser takes the pointer away (a scroll, a call, a drag off the page).
+  ui.fire("pointercancel", {});
+  await ui.settle();
+  assert.deepEqual(ui.engine.rollStops.map((one) => one.index).sort(), [0, 1],
+    "the cancelled pointer stopped every roll");
+  assert.equal(rollKey(ui).getAttribute("aria-pressed"), "false", "and the key went up with it");
+
+  // A fresh roll, and the window loses the focus: it hears no lift at all.
+  holdRoll(ui);
+  await ui.settle();
+  ui.pad(2).dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.rolls.map((one) => one.index), [0, 1, 2], "pad 3 rolls");
+
+  ui.fire("blur", {});
+  await ui.settle();
+  assert.equal(ui.engine.rollStops.length, 3, "the blur stopped the roll that was left running");
+  assert.equal(ui.engine.rollStops[2].index, 2, "and the one it named is that pad");
+  assert.deepEqual(ui.engine.rollStops.map((one) => one.index).sort(), [0, 1, 2],
+    "every roll this page started has been stopped");
+  assert.equal(rollKey(ui).getAttribute("aria-pressed"), "false", "and the key came up with it");
+});
+
+test("visibilitychange to hidden calls rollStopAll and holds are left held", async () => {
+  const ui = await bootClient({ sampler: true });
+  await ui.openSampler();
+
+  // HOLD armed, so there is a hold for the hidden page to leave alone.
+  ui.click("[data-role=sampler-pads] [data-act=pad-hold]");
+  await ui.settle();
+  const hold = () => ui.document.querySelector("[data-role=sampler-pads] [data-act=pad-hold]");
+  assert.equal(hold().getAttribute("aria-pressed"), "true", "HOLD is armed");
+
+  holdRoll(ui);
+  await ui.settle();
+  ui.pad(0).dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.equal(ui.engine.rolls.length, 1, "a pad is rolling");
+  assert.equal(ui.engine.rollStopsAll, 0, "nothing has ended them all yet");
+
+  // The page goes to the background: the context keeps running and the holds
+  // stay where they are, and only the repeat clock nobody is watching goes.
+  ui.setVisibility("hidden");
+  assert.equal(ui.engine.rollStopsAll, 1, "the hidden page ended every roll at once");
+
+  ui.fire("pointerup", {});
+  await ui.settle();
+  ui.setVisibility("visible");
+  assert.equal(ui.engine.rollStopsAll, 1, "coming back does not end them a second time");
+  assert.equal(hold().getAttribute("aria-pressed"), "true", "the hold was left held");
+  assert.equal(rollKey(ui).getAttribute("aria-pressed"), "false", "while ROLL is up again");
 });

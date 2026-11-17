@@ -229,6 +229,15 @@ function fakeStudioEngine() {
     heldReleases: [],
     pauses: [],
     gatePads: [],
+    // ROLL (C5b): the repeats the page started, the stops it asked for, and how
+    // often it ended them all at once. rollPads is the four-pad limit the engine
+    // keeps, so a fifth press is refused exactly as the real one refuses it; a
+    // pad whose song setting loops is refused before that.
+    rolls: [],
+    rollStops: [],
+    rollStopsAll: 0,
+    rollPads: [],
+    song: null,
     livePad(trackId, bankId, index, v) {
       engine.live.push({
         track_id: String(trackId), bank_id: String(bankId), index: Number(index), v: Number(v),
@@ -253,6 +262,30 @@ function fakeStudioEngine() {
     pauseVoices(on) {
       engine.pauses.push(on === true);
     },
+    rollStart(trackId, bankId, index, interval, v) {
+      const key = `${trackId}/${bankId}/${index}`;
+      const pad = engine.song && engine.song.pads ? engine.song.pads[key] : null;
+      if (pad && (pad.loop === "loop" || pad.loop === "pingpong")) return false;
+      if (!engine.rollPads.includes(key) && engine.rollPads.length >= 4) return false;
+      if (!engine.rollPads.includes(key)) engine.rollPads.push(key);
+      engine.rolls.push({
+        track_id: String(trackId),
+        bank_id: String(bankId),
+        index: Number(index),
+        interval: String(interval),
+        v: Number(v),
+      });
+      return true;
+    },
+    rollStop(trackId, bankId, index) {
+      const key = `${trackId}/${bankId}/${index}`;
+      engine.rollPads = engine.rollPads.filter((one) => one !== key);
+      engine.rollStops.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+    },
+    rollStopAll() {
+      engine.rollStopsAll += 1;
+      engine.rollPads = [];
+    },
     /** Make one pad a Gate pad: the engine latches it and nothing else. */
     gate(trackId, bankId, index) {
       engine.gatePads.push(`${trackId}|${bankId}|${index}`);
@@ -264,8 +297,9 @@ function fakeStudioEngine() {
       calls.stop += 1;
     },
     stopAll() {},
-    setSong() {
+    setSong(song) {
       calls.songs += 1;
+      engine.song = song;
     },
     resetLive() {
       calls.reset += 1;
@@ -2036,12 +2070,21 @@ test("the live bar's controls are 44 px targets that never select their label", 
   const html = await render({ song: "song-1" });
 
   const at = html.indexOf(".studio .st-pad-bar .st-toggle");
-  assert.ok(at >= 0, "the page carries a rule for the live bar's two controls");
+  assert.ok(at >= 0, "the page carries a rule for the live bar's controls");
   const rule = html.slice(at, at + 300);
   assert.match(rule, /min-width: 44px/, "each is at least 44 px wide");
   assert.match(rule, /min-height: 44px/, "and at least 44 px tall");
   assert.match(rule, /-webkit-user-select: none/, "and never selects its own label");
   assert.match(rule, /-webkit-touch-callout: none/, "nor calls out a menu on a long press");
+
+  // The ROLL key's interval sits on the same bar and is a target of its own.
+  const interval = html.indexOf(".studio .st-pad-bar .st-roll-interval");
+  assert.ok(interval >= 0, "the page carries a rule for the ROLL interval");
+  const picker = html.slice(interval, interval + 300);
+  assert.match(picker, /min-width: 44px/, "the picker is at least 44 px wide");
+  assert.match(picker, /min-height: 44px/, "and at least 44 px tall");
+  assert.match(picker, /-webkit-user-select: none/, "and never selects its own label");
+  assert.match(picker, /-webkit-touch-callout: none/, "nor calls out a menu on a long press");
 
   // A held pad is drawn from the stylesheet alone: a steady glow and the lock
   // mark, with no animation (the mark is the lock's body and shackle).
@@ -2049,4 +2092,183 @@ test("the live bar's controls are 44 px targets that never select their label", 
   assert.ok(held >= 0, "a held pad wears a steady glow");
   assert.ok(html.includes(".studio .st-pad-lock {"), "the lock mark has a rule of its own");
   assert.ok(html.includes(".studio .st-pad-lock::before"), "drawn as a body and a shackle");
+});
+
+// --- ROLL (C5b) ------------------------------------------------------------
+
+/** The live bar's ROLL key, asserted to be drawn. */
+function rollButton(ui) {
+  const node = ui.document.querySelector("[data-role=sampler-pads] [data-act=pad-roll]");
+  assert.ok(node, "the pads carry a ROLL button");
+  return node;
+}
+
+/** The interval picker beside it. */
+function rollInterval(ui) {
+  const node = ui.document.querySelector("[data-role=sampler-pads] [data-act=roll-interval]");
+  assert.ok(node, "the ROLL interval picker is drawn");
+  return node;
+}
+
+/** Put a finger on ROLL and leave it there: the key is held, not clicked. */
+function holdRoll(ui) {
+  const node = rollButton(ui);
+  node.dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  return node;
+}
+
+/** Pick one value of the interval picker the way a person does. */
+async function pickInterval(ui, value) {
+  const select = rollInterval(ui);
+  for (const option of [...select.querySelectorAll("option")]) {
+    if (String(option.value) === String(value)) option.selected = true;
+  }
+  select.dispatchEvent(ui.event("change", { target: select }));
+  await ui.settle();
+}
+
+/** The window losing the focus, the way a browser sends it. */
+function blurWindow(ui) {
+  for (const handler of [...(ui.windowListeners.blur || [])]) handler(ui.event("blur", {}));
+}
+
+test("holding ROLL and pressing a pad calls rollStart with the chosen interval; lifting calls rollStop", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+
+  assert.deepEqual(
+    [...rollInterval(ui).querySelectorAll("option")].map((one) => String(one.value)),
+    ["1/4", "1/8", "1/16", "1/32", "1/64"],
+    "the five straight intervals, a quarter to a sixty-fourth",
+  );
+  assert.equal(rollInterval(ui).value, "1/16", "and a sixteenth is the one it starts on");
+
+  // The choice is this page's own live state: nothing is sent for it.
+  await pickInterval(ui, "1/8");
+  assert.equal(ui.commands("pad.set").length, 0, "choosing an interval sends no command");
+
+  const button = holdRoll(ui);
+  await ui.settle();
+  assert.equal(button.getAttribute("aria-pressed"), "true", "the key says it is held");
+
+  pressPad(ui, 0);
+  await ui.settle();
+  assert.deepEqual(ui.engine.engine.rolls,
+    [{ track_id: TRACK, bank_id: bankId, index: 0, interval: "1/8", v: 100 }],
+    "the press started a roll at the chosen interval and the press's velocity");
+  assert.deepEqual(ui.engine.engine.live, [], "a roll is the engine's own clock, not one voice a press");
+
+  ui.release();
+  await ui.settle();
+  assert.deepEqual(ui.engine.engine.rollStops,
+    [{ track_id: TRACK, bank_id: bankId, index: 0 }], "the lift stopped that pad's roll, once");
+  assert.deepEqual(ui.engine.engine.releases, [], "and released no voice of its own");
+  assert.equal(rollButton(ui).getAttribute("aria-pressed"), "false", "the key came up with the pad");
+});
+
+test("a fifth pad shows the toast and starts nothing", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+
+  holdRoll(ui);
+  await ui.settle();
+  for (const index of [0, 1, 2, 3]) {
+    pressPad(ui, index);
+    await ui.settle();
+  }
+  assert.equal(ui.engine.engine.rolls.length, 4, "four pads roll: the engine's own limit");
+
+  pressPad(ui, 4);
+  await ui.settle();
+  assert.equal(ui.engine.engine.rolls.length, 4, "the fifth pad starts nothing");
+  assert.equal(toastText(ui), "Four pads can roll at once", "and the page says why, in those words");
+  assert.deepEqual(ui.engine.engine.live, [], "nothing was played in its place either");
+});
+
+test("a looping pad shows the loop toast and starts nothing", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+
+  // The pad's Loop setting is song data: the engine refuses the roll, and the
+  // page reads that same pad to say which refusal it was (M19).
+  await ui.apply("pad.set", {
+    track_id: TRACK, bank_id: bankId, index: 1, fields: { loop: "loop" },
+  });
+
+  holdRoll(ui);
+  await ui.settle();
+  pressPad(ui, 1);
+  await ui.settle();
+
+  assert.equal(ui.engine.engine.rolls.length, 0, "a looping pad rolls nothing");
+  assert.equal(toastText(ui), "Roll does not work on looping pads", "and the page says which refusal it was");
+  assert.deepEqual(ui.engine.engine.live, [], "nothing was played in its place either");
+
+  // Every other pad still rolls: the refusal is that pad's alone.
+  pressPad(ui, 2);
+  await ui.settle();
+  assert.deepEqual(ui.engine.engine.rolls.map((one) => one.index), [2], "a pad that does not loop still rolls");
+});
+
+test("leaving the ROLL key and a window blur stop every roll", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+
+  holdRoll(ui);
+  await ui.settle();
+  for (const index of [0, 1]) {
+    pressPad(ui, index);
+    await ui.settle();
+  }
+  assert.equal(ui.engine.engine.rolls.length, 2, "two pads roll");
+
+  // A pointer that leaves the key lets it go, and every roll with it.
+  rollButton(ui).dispatchEvent(ui.event("pointerleave", {}));
+  await ui.settle();
+  assert.deepEqual(ui.engine.engine.rollStops.map((one) => one.index).sort(), [0, 1],
+    "leaving the key stopped both rolls");
+  ui.release();
+  await ui.settle();
+  assert.equal(rollButton(ui).getAttribute("aria-pressed"), "false", "and the key is up");
+
+  // The window losing the focus hears no lift at all: the roll that is still
+  // running ends with it.
+  holdRoll(ui);
+  await ui.settle();
+  pressPad(ui, 2);
+  await ui.settle();
+  assert.deepEqual(ui.engine.engine.rolls.map((one) => one.index), [0, 1, 2], "pad 3 rolls");
+
+  blurWindow(ui);
+  await ui.settle();
+  assert.deepEqual(ui.engine.engine.rollStops.map((one) => one.index), [0, 1, 2],
+    "the blur stopped the roll the key was still holding");
+  assert.equal(rollButton(ui).getAttribute("aria-pressed"), "false", "and the key went up with it");
+  assert.deepEqual(ui.engine.engine.holds, [], "the blur latched nothing");
+  assert.equal(ui.engine.engine.rollStops[2].bank_id, bankId, "the stop names that pad's own bank");
+});
+
+test("the ROLL key is not a command: the song is never written by it", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  const before = ui.sent.filter((message) => message.type === "command").length;
+
+  holdRoll(ui);
+  await ui.settle();
+  pressPad(ui, 0);
+  await ui.settle();
+  ui.release();
+  await ui.settle();
+
+  assert.equal(ui.sent.filter((message) => message.type === "command").length, before,
+    "arming, rolling and lifting wrote nothing");
+  assert.equal(ui.commands("pad.set").length, 0, "and no pad setting was touched");
 });
