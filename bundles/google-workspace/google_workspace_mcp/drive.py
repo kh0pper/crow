@@ -12,6 +12,7 @@ from googleapiclient.http import MediaFileUpload
 
 from .auth import get_drive_service
 from .guardrails import handle_google_errors
+from . import outbound_guard
 
 logger = logging.getLogger(__name__)
 
@@ -483,7 +484,16 @@ async def gdrive_transfer_ownership(file_id: str, new_owner_email: str) -> dict:
     SAME Google Workspace domain the transfer is immediate; for consumer/cross-domain the
     recipient must accept first (returns pending_owner=True). IMPORTANT: transferring a
     FOLDER does NOT re-own the files inside it — every item keeps its own owner, so to
-    re-home a whole tree you must transfer each contained file too (walk the tree)."""
+    re-home a whole tree you must transfer each contained file too (walk the tree).
+
+    Google always emails the new owner, so with GWS_OUTBOUND_GUARD on the address must
+    be on GWS_OUTBOUND_ALLOWLIST."""
+    # The transfer email is Google's, not ours: no allowlisted recipient, no call.
+    refusal = outbound_guard.check_recipients(
+        [new_owner_email], "sending an ownership-transfer email"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
     drive = get_drive_service()
     result = await asyncio.to_thread(
         lambda: drive.permissions().create(
@@ -555,8 +565,11 @@ async def gdrive_share(
     Sharing a FOLDER cascades to its contents. notify=False (default) grants silently;
     notify=True sends the 'shared with you' email. Same-domain Workspace users can be added
     silently; consumer/cross-domain recipients require notify=True. Re-checkable afterward
-    via gdrive_get_permissions."""
-    drive = get_drive_service()
+    via gdrive_get_permissions.
+
+    With GWS_OUTBOUND_GUARD on, notify=True must name an address on
+    GWS_OUTBOUND_ALLOWLIST (notify=False sends nothing, so it is never refused).
+    """
     role = role.lower()
     valid = {"reader", "writer", "commenter"}
     if role not in valid:
@@ -564,6 +577,15 @@ async def gdrive_share(
             "success": False,
             "error": f"role must be one of {sorted(valid)}, got '{role}'",
         }
+    # notify=True is the only path here that makes Google send email. Refused before
+    # the client is built, so a blocked share touches nothing at all.
+    if notify:
+        refusal = outbound_guard.check_recipients(
+            [email], "sending a 'shared with you' email"
+        )
+        if refusal:
+            return {"success": False, "error": refusal}
+    drive = get_drive_service()
     result = await asyncio.to_thread(
         lambda: drive.permissions().create(
             fileId=file_id,
@@ -680,18 +702,24 @@ async def gdrive_upload_file(
     folder_id: str,
     name: Optional[str] = None,
     mime_type: Optional[str] = None,
+    convert_to: Optional[str] = None,
 ) -> dict:
     """Upload a local file into a Drive folder as a NEW file.
 
     `name` defaults to the local basename; `mime_type` is guessed from the
-    extension when omitted. To replace the content of an existing file while
-    keeping its id and links, use gdrive_upload_new_version instead.
+    extension when omitted. `convert_to` is a Google-native target MIME type
+    (application/vnd.google-apps.presentation | document | spreadsheet): Drive
+    converts the upload (pptx/docx/xlsx) into that native file. To replace the
+    content of an existing file while keeping its id and links, use
+    gdrive_upload_new_version instead.
     """
     if not os.path.isfile(local_path):
         return {"success": False, "error": f"Local file not found: {local_path}"}
     drive = get_drive_service()
     media = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
     body = {"name": name or os.path.basename(local_path), "parents": [folder_id]}
+    if convert_to:
+        body["mimeType"] = convert_to
     created = await asyncio.to_thread(
         lambda: drive.files().create(
             body=body,

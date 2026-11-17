@@ -285,5 +285,126 @@ class TableSegmentTests(unittest.TestCase):
         self.assertEqual(segments[1][1], [["a", "b"], ["1", "2"]])
 
 
+class InlineLinkParseTests(unittest.TestCase):
+    """[label](url) is a linked span, not literal bracket text."""
+
+    URL = "https://example.com/notes"
+
+    def test_a_link_splits_into_a_linked_span(self):
+        spans = _parse_inline_formatting(f"see [notes]({self.URL}) now")
+        self.assertEqual([s.text for s in spans], ["see ", "notes", " now"])
+        self.assertEqual([s.link for s in spans], [None, self.URL, None])
+
+    def test_stars_around_the_whole_link_format_the_label(self):
+        bold = _parse_inline_formatting(f"**[notes]({self.URL})**")
+        self.assertEqual(len(bold), 1)
+        self.assertTrue(bold[0].bold)
+        self.assertEqual(bold[0].link, self.URL)
+
+        italic = _parse_inline_formatting(f"*[notes]({self.URL})*")
+        self.assertEqual(len(italic), 1)
+        self.assertTrue(italic[0].italic)
+        self.assertEqual(italic[0].link, self.URL)
+
+    def test_a_link_sits_beside_ordinary_bold_text(self):
+        spans = _parse_inline_formatting(f"[notes]({self.URL}) and **bold**")
+        self.assertEqual(spans[0].link, self.URL)
+        self.assertTrue(spans[-1].bold)
+        self.assertIsNone(spans[-1].link)
+
+    def test_a_bare_bracket_is_left_alone(self):
+        spans = _parse_inline_formatting("see [note] here")
+        self.assertEqual([s.text for s in spans], ["see [note] here"])
+        self.assertIsNone(spans[0].link)
+
+    def test_a_relative_target_is_not_a_link(self):
+        spans = _parse_inline_formatting("[notes](/local/path)")
+        self.assertEqual([s.text for s in spans], ["[notes](/local/path)"])
+        self.assertIsNone(spans[0].link)
+
+
+class HyperlinkEmissionTests(unittest.TestCase):
+    """A markdown link becomes a real Docs hyperlink, drawn like one."""
+
+    URL = "https://example.com/notes"
+
+    def _links(self, requests):
+        return [
+            r["updateTextStyle"]
+            for r in requests
+            if "updateTextStyle" in r and "link" in r["updateTextStyle"]["textStyle"]
+        ]
+
+    def test_link_request_carries_url_underline_and_colour(self):
+        requests, _ = markdown_to_docs_requests(f"Go to [notes]({self.URL}) now")
+        links = self._links(requests)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["textStyle"]["link"], {"url": self.URL})
+        self.assertTrue(links[0]["textStyle"]["underline"])
+        self.assertIn("foregroundColor", links[0]["textStyle"])
+        for field in ("link", "underline", "foregroundColor"):
+            self.assertIn(field, links[0]["fields"])
+
+    def test_link_range_covers_the_label_only(self):
+        requests, _ = markdown_to_docs_requests(f"Go to [notes]({self.URL}) now")
+        rng = self._links(requests)[0]["range"]
+        # start_index 1 + "Go to " (6) .. + "notes" (5)
+        self.assertEqual(rng["startIndex"], 7)
+        self.assertEqual(rng["endIndex"], 12)
+
+    def test_the_url_is_not_inserted_as_text(self):
+        requests, _ = markdown_to_docs_requests(f"Go to [notes]({self.URL}) now")
+        inserted = requests[0]["insertText"]["text"]
+        self.assertEqual(inserted, "Go to notes now\n")
+        self.assertNotIn(self.URL, inserted)
+
+    def test_no_link_request_without_a_link(self):
+        requests, _ = markdown_to_docs_requests("plain **bold** text")
+        self.assertEqual(self._links(requests), [])
+
+
+class BulletStripTests(unittest.TestCase):
+    """Text inserted where a bulleted paragraph ended inherits its bullet, and the
+    NORMAL_TEXT reset does not clear it: the reset path strips bullets first, then
+    re-applies the ones the markdown asks for."""
+
+    MD = "- one\n- two"
+
+    def _strip(self, requests):
+        return [r for r in requests if "deleteParagraphBullets" in r]
+
+    def test_the_reset_path_strips_bullets_over_the_whole_range(self):
+        requests, end = markdown_to_docs_requests(self.MD, reset_normal_text=True)
+        strips = self._strip(requests)
+        self.assertEqual(len(strips), 1)
+        self.assertEqual(
+            strips[0]["deleteParagraphBullets"]["range"],
+            {"startIndex": 1, "endIndex": end},
+        )
+
+    def test_strip_comes_before_the_bullets_are_re_applied(self):
+        requests, _ = markdown_to_docs_requests(self.MD, reset_normal_text=True)
+        self.assertLess(
+            _first_index_of(requests, "deleteParagraphBullets"),
+            _first_index_of(requests, "createParagraphBullets"),
+        )
+
+    def test_strip_comes_after_the_normal_text_reset(self):
+        requests, _ = markdown_to_docs_requests("## H\n\nbody", reset_normal_text=True)
+        reset_at = _first_index_of(
+            requests,
+            "updateParagraphStyle",
+            lambda p: p["paragraphStyle"]["namedStyleType"] == "NORMAL_TEXT",
+        )
+        strip_at = _first_index_of(requests, "deleteParagraphBullets")
+        self.assertNotEqual(reset_at, -1)
+        self.assertNotEqual(strip_at, -1)
+        self.assertLess(reset_at, strip_at)
+
+    def test_no_strip_without_the_reset(self):
+        requests, _ = markdown_to_docs_requests(self.MD)
+        self.assertEqual(self._strip(requests), [])
+
+
 if __name__ == "__main__":
     unittest.main()

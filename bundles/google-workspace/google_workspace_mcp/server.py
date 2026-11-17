@@ -79,7 +79,8 @@ async def gdocs_find_replace(
 
 @mcp.tool()
 async def gdocs_append(doc_id: str, markdown: str) -> dict:
-    """Append formatted markdown content to the end of a Google Doc."""
+    """Append formatted markdown content to the end of a Google Doc. GFM pipe tables become native
+    tables, and inline [label](url) links become real hyperlinks (inside table cells too)."""
     return await docs.gdocs_append(doc_id, markdown)
 
 
@@ -118,6 +119,7 @@ async def gdocs_replace_section(doc_id: str, heading: str, markdown: str) -> dic
     """
     Replace content between two headings using safe delete+reinsert.
     Preserves the heading itself; replaces everything until the next same-or-higher-level heading.
+    A section whose last element is a native table is deleted through the table's end.
     """
     return await docs.gdocs_replace_section(doc_id, heading, markdown)
 
@@ -179,11 +181,13 @@ async def gdocs_format_text(
     link_url: Optional[str] = None,
     color_hex: Optional[str] = None,
 ) -> dict:
-    """Apply inline character formatting to existing visible text in a Google Doc — the ONLY gdocs
-    tool that sets a HYPERLINK (find-replace/insert/rewrite cannot). Finds `find` and applies any of
+    """Apply inline character formatting to existing visible text in a Google Doc — the only gdocs
+    tool that styles text in place (find-replace/rewrite cannot). Also finds text inside native
+    table cells. Finds `find` and applies any of
     bold/italic/underline, a link (`link_url`), and/or a text color (`color_hex` like '#1155cc').
     `occurrence`: 0-based match index, or -1 for ALL matches. Adds/removes no text — style only. To
-    turn a bare URL into a labeled link: find-replace the label in, then format_text it with link_url."""
+    turn a bare URL into a labeled link: find-replace the label in, then format_text it with link_url
+    (or just write [label](url) and append/insert it — markdown links render as real hyperlinks)."""
     return await docs.gdocs_format_text(
         doc_id, find, occurrence=occurrence, bold=bold, italic=italic,
         underline=underline, link_url=link_url, color_hex=color_hex,
@@ -277,11 +281,19 @@ async def gdrive_export(file_id: str, local_path: str, mime_type: Optional[str] 
 
 @mcp.tool()
 async def gdrive_upload_file(
-    local_path: str, folder_id: str, name: Optional[str] = None, mime_type: Optional[str] = None
+    local_path: str,
+    folder_id: str,
+    name: Optional[str] = None,
+    mime_type: Optional[str] = None,
+    convert_to: Optional[str] = None,
 ) -> dict:
     """Upload a local file into a Drive folder as a NEW file. name defaults to the local basename.
+    convert_to = a Google-native MIME type (application/vnd.google-apps.presentation | document |
+    spreadsheet) makes Drive convert a pptx/docx/xlsx upload into a native Slides/Doc/Sheet.
     To replace an existing file's content keeping its id and links, use gdrive_upload_new_version."""
-    return await drive.gdrive_upload_file(local_path, folder_id, name=name, mime_type=mime_type)
+    return await drive.gdrive_upload_file(
+        local_path, folder_id, name=name, mime_type=mime_type, convert_to=convert_to
+    )
 
 
 @mcp.tool()
@@ -301,7 +313,7 @@ async def gdrive_rename(file_id: str, new_name: str) -> dict:
 
 @mcp.tool()
 async def gdrive_transfer_ownership(file_id: str, new_owner_email: str) -> dict:
-    """Transfer ownership of a Drive file/folder to another user by email. Same-domain (Workspace) = immediate; consumer/cross-domain = recipient must accept (pending_owner=True). NOTE: transferring a folder does NOT re-own the files inside it — walk the tree and transfer each item to re-home a whole directory."""
+    """Transfer ownership of a Drive file/folder to another user by email. Same-domain (Workspace) = immediate; consumer/cross-domain = recipient must accept (pending_owner=True). NOTE: transferring a folder does NOT re-own the files inside it — walk the tree and transfer each item to re-home a whole directory. Google emails the new owner, so GWS_OUTBOUND_GUARD (when on) requires the address on GWS_OUTBOUND_ALLOWLIST."""
     return await drive.gdrive_transfer_ownership(file_id, new_owner_email)
 
 
@@ -313,7 +325,7 @@ async def gdrive_create_shortcut(target_id: str, parent_id: str, name: str | Non
 
 @mcp.tool()
 async def gdrive_share(file_id: str, email: str, role: str = "writer", notify: bool = False) -> dict:
-    """Share a Drive file/folder with a user by email — ADDS a reader|writer|commenter permission (does NOT transfer ownership; use gdrive_transfer_ownership for that). Sharing a folder cascades to its contents. notify=False (default) grants silently; notify=True sends the 'shared with you' email (required for consumer/cross-domain recipients). Re-checkable via gdrive_get_permissions."""
+    """Share a Drive file/folder with a user by email — ADDS a reader|writer|commenter permission (does NOT transfer ownership; use gdrive_transfer_ownership for that). Sharing a folder cascades to its contents. notify=False (default) grants silently; notify=True sends the 'shared with you' email (required for consumer/cross-domain recipients) and, under GWS_OUTBOUND_GUARD, needs an allowlisted address. Re-checkable via gdrive_get_permissions."""
     return await drive.gdrive_share(file_id, email, role=role, notify=notify)
 
 
@@ -554,6 +566,9 @@ async def gmail_create_filter(
     to_address, subject, query, etc.) and one action (add_labels,
     remove_labels, mark_as_read, archive, forward) are required. Filters
     are immutable in Gmail — to edit one, delete via UI and recreate.
+
+    forward mails a copy of every matching message OUT, so under
+    GWS_OUTBOUND_GUARD the address must be on GWS_OUTBOUND_ALLOWLIST.
     """
     return await gmail.gmail_create_filter(
         add_labels=add_labels, remove_labels=remove_labels,
@@ -613,6 +628,10 @@ async def gcal_create_event(
     Create a Google Calendar event. start/end are RFC3339 timestamps or
     date strings ('2026-04-23' → all-day). send_updates defaults to
     'none' for draft-like behavior; pass 'all' to actually send invites.
+
+    Guests are the outbound path: with GWS_CALENDAR_NO_INVITES on, attendees
+    are refused and nothing is emailed; with GWS_OUTBOUND_GUARD on, every
+    attendee must be on GWS_OUTBOUND_ALLOWLIST.
     """
     return await gcal_mod.gcal_create_event(
         summary=summary, start=start, end=end, calendar_id=calendar_id,
@@ -628,7 +647,7 @@ async def gcal_respond_to_event(
     calendar_id: str = "primary",
     comment: Optional[str] = None,
 ) -> dict:
-    """Respond to a calendar invitation. `response` must be accepted/declined/tentative."""
+    """Respond to a calendar invitation. `response` must be accepted/declined/tentative. The reply emails the organizer, so GWS_CALENDAR_NO_INVITES refuses this tool outright and GWS_OUTBOUND_GUARD requires the organizer on GWS_OUTBOUND_ALLOWLIST."""
     return await gcal_mod.gcal_respond_to_event(
         event_id, response, calendar_id=calendar_id, comment=comment,
     )

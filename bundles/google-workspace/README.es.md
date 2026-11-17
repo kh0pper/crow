@@ -10,8 +10,13 @@ El código procede del proyecto upstream MIT del mismo nombre, incluido desde
 él (ver `LICENSE`): `google_workspace_mcp/` es el servidor, `apps-script-shim/`
 es un ayudante opcional de Apps Script para una herramienta de Forms, y `tests/`
 tiene las pruebas unitarias de Python (`python3 -m unittest discover -s tests`).
-En la copia de Crow solo cambia el empaquetado: estos README están reescritos
-para Crow y las fixtures de las pruebas están limpiadas de datos personales.
+En la copia de Crow solo cambia el empaquetado —estos README están reescritos
+para Crow y las fixtures de las pruebas están limpiadas de datos personales— y
+una serie pequeña de arreglos propios: conversión nativa a Docs/Sheets/Slides al
+subir, enlaces markdown que salen como hipervínculos reales (también dentro de
+celdas de tabla), ediciones de Docs que entienden las tablas, un reemplazo de
+sección que puede terminar en tabla, y los topes de invitaciones y correo de
+abajo.
 
 ## Qué puede hacer
 
@@ -31,7 +36,9 @@ para Crow y las fixtures de las pruebas están limpiadas de datos personales.
 Las protecciones están en el servidor, no en el prompt: no existe una
 herramienta de «reemplazar el documento entero» (las ediciones son quirúrgicas)
 y la única herramienta que envía correo está limitada a una lista blanca que
-está **vacía por defecto**: todo lo demás crea borradores.
+está **vacía por defecto**: todo lo demás crea borradores. Las acciones que hacen
+que *Google* le escriba a otra persona también tienen tope; ver «Qué sale de la
+cuenta» más abajo.
 
 ## Instalación
 
@@ -58,7 +65,35 @@ está **vacía por defecto**: todo lo demás crea borradores.
 Los dos son obligatorios y ninguno tiene valor por defecto, a propósito (ver la
 sección del muro). Opcionales: `GMAIL_SEND_TO_SELF_ALLOWLIST` (separada por
 comas; vacía mantiene el envío apagado), `GOOGLE_BIGQUERY_PROJECT`,
-`GDOCS_DEFAULT_FONT`, `GWS_FORMS_SHIM_SCRIPT_ID`.
+`GDOCS_DEFAULT_FONT`, `GWS_FORMS_SHIM_SCRIPT_ID`, `GWS_OAUTH_SCOPES`,
+`GWS_CALENDAR_NO_INVITES`, `GWS_OUTBOUND_GUARD`, `GWS_OUTBOUND_ALLOWLIST`.
+
+## Qué sale de la cuenta
+
+Tres familias de herramientas pueden hacer que Google le entregue algo a una
+dirección que eligió el asistente y no tú: los invitados de un evento de
+Calendar (y responder a una invitación, que le escribe al organizador), el
+correo de «compartido contigo» de un recurso de Drive o el de una transferencia
+de propiedad, y la dirección de reenvío de un filtro de Gmail. Dos ajustes
+deciden qué puede pasar:
+
+| Ajuste | Por defecto | Efecto |
+|---|---|---|
+| `GWS_CALENDAR_NO_INVITES` | apagado | Los eventos van solo a tu calendario: los invitados se rechazan, Google nunca recibe la orden de escribirle a nadie y responder a una invitación se rechaza. |
+| `GWS_OUTBOUND_GUARD` | **apagado** | Encendido, toda acción de arriba cuyo destinatario no esté en `GWS_OUTBOUND_ALLOWLIST` se rechaza y no se hace ninguna llamada a Google. |
+| `GWS_OUTBOUND_ALLOWLIST` | vacía | Direcciones y dominios a los que se puede escribir, p. ej. `tu@example.com,example.org` (un dominio cubre exactamente ese dominio, sin subdominios). Solo se lee mientras el tope está encendido; vacía entonces significa que no se puede enviar nada. |
+
+El tope viene **apagado** para que una instalación existente siga igual que
+antes; está pensado para un asistente que además lee correo que no controlas,
+donde un mensaje preparado podría convencerlo de invitar o reenviar a un
+desconocido. Encenderlo exige llenar la lista (si no, no se puede enviar nada).
+
+`GWS_OAUTH_SCOPES` reduce aquello para lo que la cuenta está autorizada: sin
+valor se piden todos los permisos, y con valor (p. ej.
+`gmail.readonly,gmail.compose,calendar.events`) se piden solo esos — vale la pena
+para una cuenta con la que un asistente no debería poder borrar cosas. Se aplica
+al paso de autorización y a cada renovación del token, así que cámbialo y vuelve
+a correr `google-workspace-mcp-authorize` a la vez.
 
 ## Dentro del muro de complementos de Crow
 

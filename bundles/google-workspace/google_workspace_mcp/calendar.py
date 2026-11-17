@@ -13,7 +13,9 @@ import logging
 from typing import Optional
 
 from .auth import get_calendar_service
+from .calendar_guard import check_create, invites_blocked
 from .guardrails import handle_google_errors
+from . import outbound_guard
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +143,20 @@ async def gcal_create_event(
     than timestamps, the event is all-day.
     attendees: list of email addresses to invite.
     send_updates: 'none' (default, draft-like), 'all', or 'externalOnly'.
+
+    With GWS_CALENDAR_NO_INVITES on, attendees are refused and nothing is emailed;
+    with GWS_OUTBOUND_GUARD on, every attendee must be on GWS_OUTBOUND_ALLOWLIST.
     """
+    error, send_updates = check_create(attendees, send_updates)
+    if error:
+        return {"success": False, "error": error}
+    # An invitation emails whoever is named, so the guard reads the attendee list.
+    # With no attendees there is nobody for Google to notify (`sendUpdates` alone
+    # has no recipient), so the send_updates value needs no check of its own.
+    refusal = outbound_guard.check_recipients(attendees or [], "inviting attendees")
+    if refusal:
+        return {"success": False, "error": refusal}
+
     service = get_calendar_service()
 
     def _time_field(value: str) -> dict:
@@ -191,7 +206,16 @@ async def gcal_respond_to_event(
     Respond to a calendar invitation as the calendar owner.
 
     response: 'accepted', 'declined', or 'tentative'.
+
+    Refused outright with GWS_CALENDAR_NO_INVITES on (the reply emails the
+    organizer); with GWS_OUTBOUND_GUARD on, the organizer must be allowlisted.
     """
+    if invites_blocked():
+        return {
+            "success": False,
+            "error": "responding to invitations is disabled on this server "
+            "(GWS_CALENDAR_NO_INVITES): it emails the organizer",
+        }
     if response not in ("accepted", "declined", "tentative"):
         return {"success": False, "error": "response must be accepted / declined / tentative"}
 
@@ -211,6 +235,17 @@ async def gcal_respond_to_event(
             break
     if not self_email:
         return {"success": False, "error": "current user is not an attendee of this event"}
+
+    # The reply is emailed to the organizer, so the guard checks that address. The
+    # event read above happens either way; the patch (the side effect) only runs
+    # when the organizer is allowed. An unknown organizer cannot be cleared, so it
+    # is refused rather than assumed safe.
+    organizer = (event.get("organizer") or {}).get("email")
+    refusal = outbound_guard.check_recipients(
+        [organizer or "(unknown organizer)"], "responding to an invitation"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
 
     updated = await asyncio.to_thread(
         lambda: service.events().patch(

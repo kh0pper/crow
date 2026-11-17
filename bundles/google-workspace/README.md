@@ -10,8 +10,11 @@ The source here is the upstream MIT project of the same name, vendored from it
 (see `LICENSE`): `google_workspace_mcp/` is the server, `apps-script-shim/` is
 an optional Apps Script helper for one Forms tool, and `tests/` holds the
 Python unit tests (`python3 -m unittest discover -s tests`). Crow's copy differs
-from upstream in its packaging only: these READMEs are replaced with Crow's own
-and the test fixtures are scrubbed of personal data.
+from upstream in its packaging — these READMEs are Crow's own and the test
+fixtures are scrubbed of personal data — and in a small set of fixes carried on
+top: native Docs/Sheets/Slides conversion on upload, markdown links rendered as
+real hyperlinks (inside table cells too), table-aware Docs edits, a section
+replacement that can end in a table, and the invite/mail guards below.
 
 ## What it can do
 
@@ -31,7 +34,8 @@ and the test fixtures are scrubbed of personal data.
 The guardrails are in the server, not in the prompt: there is no
 "replace the whole document" tool (edits are surgical), and the only tool that
 sends mail is restricted to an allowlist that is **empty by default** —
-everything else writes drafts.
+everything else writes drafts. The actions that make *Google* write to someone
+else are guarded too; see "What leaves the account" below.
 
 ## Setup
 
@@ -58,7 +62,33 @@ everything else writes drafts.
 Both are required and neither has a default, on purpose (see the wall section).
 Optional knobs: `GMAIL_SEND_TO_SELF_ALLOWLIST` (comma-separated; empty keeps
 sending off), `GOOGLE_BIGQUERY_PROJECT`, `GDOCS_DEFAULT_FONT`,
-`GWS_FORMS_SHIM_SCRIPT_ID`.
+`GWS_FORMS_SHIM_SCRIPT_ID`, `GWS_OAUTH_SCOPES`, `GWS_CALENDAR_NO_INVITES`,
+`GWS_OUTBOUND_GUARD`, `GWS_OUTBOUND_ALLOWLIST`.
+
+## What leaves the account
+
+Three families of tool can make Google deliver something to an address the
+assistant chose rather than you: a Calendar event's guests (and replying to an
+invitation, which emails the organizer), a Drive share's notification email or
+an ownership transfer's email, and a Gmail filter's forward address. Two
+switches decide what may happen:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `GWS_CALENDAR_NO_INVITES` | off | Events go on your own calendar only: guests are refused, Google is never asked to email anyone, and replying to an invitation is refused. |
+| `GWS_OUTBOUND_GUARD` | **off** | When on, every action above whose recipient is not on `GWS_OUTBOUND_ALLOWLIST` is refused, and no request is made to Google at all. |
+| `GWS_OUTBOUND_ALLOWLIST` | empty | Addresses and domains that may be written to, e.g. `you@example.com,example.org` (a domain covers exactly that domain, no subdomains). Only read while the guard is on; empty then means nothing may be sent. |
+
+The guard ships **off** so an existing install keeps behaving exactly as before;
+it is meant for an assistant that also reads untrusted mail, where a crafted
+message could otherwise talk it into inviting or forwarding to a stranger.
+Turning it on needs the list filled in (or nothing can be sent at all).
+
+`GWS_OAUTH_SCOPES` narrows what the account is authorized for: unset requests
+the full set, and setting it (e.g. `gmail.readonly,gmail.compose,calendar.events`)
+requests only those — worth doing for an account an assistant should not be able
+to delete things with. It applies to the authorize step and to every token
+refresh, so change it and re-run `google-workspace-mcp-authorize` together.
 
 ## Inside Crow's add-on wall
 

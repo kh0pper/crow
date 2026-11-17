@@ -59,19 +59,30 @@ def _find_text_ranges(doc: dict, text: str) -> list:
     """[(start, end), ...] absolute doc-index ranges for each occurrence of `text` in the
     body, mapping characters back to doc indices (handles matches that span multiple runs)."""
     flat, idxs = [], []
-    for element in doc.get("body", {}).get("content", []):
-        para = element.get("paragraph")
-        if not para:
-            continue
-        for el in para.get("elements", []):
-            tr = el.get("textRun")
-            if not tr:
+
+    def _walk(content_list):
+        # Walk paragraphs AND table cells (cells hold their own content lists)
+        # so text inside native tables is findable/formattable too.
+        for element in content_list:
+            para = element.get("paragraph")
+            if para:
+                for el in para.get("elements", []):
+                    tr = el.get("textRun")
+                    if not tr:
+                        continue
+                    content = tr.get("content", "")
+                    start = el.get("startIndex", 0)
+                    for i, ch in enumerate(content):
+                        flat.append(ch)
+                        idxs.append(start + i)
                 continue
-            content = tr.get("content", "")
-            start = el.get("startIndex", 0)
-            for i, ch in enumerate(content):
-                flat.append(ch)
-                idxs.append(start + i)
+            table = element.get("table")
+            if table:
+                for row in table.get("tableRows", []):
+                    for cell in row.get("tableCells", []):
+                        _walk(cell.get("content", []))
+
+    _walk(doc.get("body", {}).get("content", []))
     s = "".join(flat)
     ranges = []
     if not text:
@@ -566,7 +577,7 @@ async def _insert_markdown_with_tables(
                 offset = 0
                 for span in _parse_inline_formatting(rows[r][c]):
                     span_len = _utf16_len(span.text)
-                    if span.bold or span.italic:
+                    if span.bold or span.italic or span.link:
                         style, fields = {}, []
                         if span.bold:
                             style["bold"] = True
@@ -574,6 +585,9 @@ async def _insert_markdown_with_tables(
                         if span.italic:
                             style["italic"] = True
                             fields.append("italic")
+                        if span.link:
+                            style["link"] = {"url": span.link}
+                            fields.append("link")
                         style_reqs.append(
                             {
                                 "updateTextStyle": {
@@ -713,12 +727,21 @@ async def gdocs_replace_section(doc_id: str, heading: str, markdown: str) -> dic
             "error": f"Section '{heading}' has no content to replace.",
         }
 
-    # Step 1: Delete existing section content (after heading, before next heading)
+    # Step 1: Delete existing section content (after heading, before next heading).
+    # Normally stop one index short to preserve the newline before the next heading. When
+    # the section's last structural element is a table, that index lies inside the table
+    # and the API rejects a partial table deletion, so delete through the table's end
+    # (a table carries no trailing newline paragraph of its own).
+    delete_end = section_end - 1
+    for el in body_content:
+        if "table" in el and el.get("startIndex", 0) < section_end <= el.get("endIndex", 0):
+            delete_end = section_end
+            break
     delete_request = {
         "deleteContentRange": {
             "range": {
                 "startIndex": content_start,
-                "endIndex": section_end - 1,  # Preserve the newline before next heading
+                "endIndex": delete_end,
             }
         }
     }

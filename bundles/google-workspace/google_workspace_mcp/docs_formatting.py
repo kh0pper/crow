@@ -191,10 +191,60 @@ class TextSpan:
     text: str
     bold: bool = False
     italic: bool = False
+    link: str | None = None
+
+
+_INLINE_LINK_RE = re.compile(
+    r"(?<!\!)(\*{1,3})?\[([^\]]+)\]\(([a-zA-Z][a-zA-Z0-9+.-]*:[^)\s]+)\)(\*{1,3})?"
+)
 
 
 def _parse_inline_formatting(text: str) -> list[TextSpan]:
-    """Parse inline markdown formatting into spans."""
+    """Parse inline markdown formatting into spans.
+
+    Links first ([label](scheme:url) becomes a linked span; the label may carry
+    star formatting), then bold/italic stars inside each non-link chunk.
+    """
+    spans: list[TextSpan] = []
+    pos = 0
+    for m in _INLINE_LINK_RE.finditer(text):
+        pre, label, url, post = (
+            m.group(1) or "",
+            m.group(2),
+            m.group(3),
+            m.group(4) or "",
+        )
+        # Stars around the whole link only count when balanced on both sides.
+        wrap_bold = wrap_italic = False
+        consumed_start, consumed_end = m.start(), m.end()
+        if pre == post and pre:
+            wrap_bold = len(pre) >= 2
+            wrap_italic = len(pre) in (1, 3)
+        else:
+            # Unbalanced: leave the stars to the surrounding chunks.
+            consumed_start += len(pre)
+            consumed_end -= len(post)
+        if consumed_start > pos:
+            spans.extend(_parse_star_formatting(text[pos:consumed_start]))
+        for sub in _parse_star_formatting(label):
+            spans.append(
+                TextSpan(
+                    text=sub.text,
+                    bold=sub.bold or wrap_bold,
+                    italic=sub.italic or wrap_italic,
+                    link=url,
+                )
+            )
+        pos = consumed_end
+    if pos == 0:
+        return _parse_star_formatting(text)
+    if pos < len(text):
+        spans.extend(_parse_star_formatting(text[pos:]))
+    return spans
+
+
+def _parse_star_formatting(text: str) -> list[TextSpan]:
+    """Parse bold/italic star markers into spans."""
     if "*" not in text:
         return [TextSpan(text=text)]
 
@@ -380,7 +430,9 @@ def markdown_to_docs_requests(
     definition when namedStyleType is set, so a NORMAL_TEXT reset emitted after
     the styling requests wipes both the heading styles and the character
     formatting of everything it covers. Emission order is therefore:
-    insert -> NORMAL_TEXT reset -> heading styles -> bullets -> font -> runs.
+    insert -> NORMAL_TEXT reset -> bullet strip -> heading styles -> bullets ->
+    font -> runs. (The bullet strip rides with the reset: only an insertion that
+    lands after an existing paragraph can inherit its bullet.)
 
     Returns:
         (requests, end_index) -- list of API requests and the new end index
@@ -461,8 +513,10 @@ def markdown_to_docs_requests(
             span_end = span_start + span_len
             current_offset = span_end
 
-            if span.bold or span.italic:
-                formatting.append((span_start, span_end, span.bold, span.italic))
+            if span.bold or span.italic or span.link:
+                formatting.append(
+                    (span_start, span_end, span.bold, span.italic, span.link)
+                )
 
         line_text = "".join(line_text_parts)
         plain_lines.append(line_text + "\n")
@@ -513,6 +567,20 @@ def markdown_to_docs_requests(
                 }
             }
         )
+        # Text inserted where a bulleted paragraph ended inherits that
+        # paragraph's bullet, and the named-style reset does not clear it.
+        # Strip bullets from the whole range before re-applying the ones
+        # the markdown asks for. Harmless on paragraphs that have none.
+        requests.append(
+            {
+                "deleteParagraphBullets": {
+                    "range": {
+                        "startIndex": start_index,
+                        "endIndex": end_index,
+                    },
+                }
+            }
+        )
 
     # 3. Apply heading styles
     for line_start, line_end, style_name in paragraph_styles:
@@ -560,7 +628,7 @@ def markdown_to_docs_requests(
         )
 
     # 6. Apply inline formatting last, so nothing downstream flattens it
-    for span_start, span_end, is_bold, is_italic in formatting:
+    for span_start, span_end, is_bold, is_italic, link_url in formatting:
         fields = []
         style = {}
         if is_bold:
@@ -569,6 +637,17 @@ def markdown_to_docs_requests(
         if is_italic:
             fields.append("italic")
             style["italic"] = True
+        if link_url:
+            fields.append("link")
+            style["link"] = {"url": link_url}
+            # Docs draws a link as body text until it is also underlined and
+            # coloured, which is what a hand-inserted link looks like.
+            fields.append("underline")
+            style["underline"] = True
+            fields.append("foregroundColor")
+            style["foregroundColor"] = {
+                "color": {"rgbColor": {"red": 0.0667, "green": 0.3333, "blue": 0.8}}
+            }
 
         requests.append(
             {
