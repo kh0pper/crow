@@ -847,11 +847,14 @@ export function usesHostNetwork(model) {
  * The environment every gateway-driven `docker compose` run gets: an ALLOWLIST of the
  * gateway's variables (Compose interpolates `${ANY_VAR}` from it, so passing all of it
  * would let a compose file copy any gateway secret into its container), plus CROW_HOME
- * named explicitly. A bundle's own settings come from its .env, which Compose reads itself.
- * COMPOSE_* never passes (COMPOSE_FILE / _PROJECT_NAME / _PROFILES would change the model).
+ * named explicitly, plus the two ids that name the GATEWAY's uid/gid (CROW_GATEWAY_UID /
+ * CROW_GATEWAY_GID) taken from THIS process — never from `base`, which may be an
+ * operator's inherited environment and could name another uid. A bundle's own settings
+ * come from its .env, which Compose reads itself. COMPOSE_* never passes (COMPOSE_FILE /
+ * _PROJECT_NAME / _PROFILES would change the model).
  */
 const COMPOSE_ENV_KEYS = new Set(["PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "XDG_RUNTIME_DIR", "CROW_GATEWAY_PORT", "CROW_GATEWAY_URL", "CROW_DB_PATH", "CROW_DATA_DIR"]);
-export function composeEnv(base, crowHome) {
+export function composeEnv(base, crowHome, ids = {}) {
   const env = {};
   for (const [k, v] of Object.entries(base || {})) {
     if (COMPOSE_ENV_KEYS.has(k) || /^LC_[A-Z]+$/.test(k) || (/^DOCKER_[A-Z_]+$/.test(k) && k !== "DOCKER_DEFAULT_PLATFORM")) env[k] = v;
@@ -862,6 +865,21 @@ export function composeEnv(base, crowHome) {
   let home = crowHome;
   try { home = realpathSync(crowHome); } catch { if (typeof crowHome === "string" && crowHome) home = resolvePath(crowHome); }
   env.CROW_HOME = home;
+  return Object.assign(env, composeIdsEnv(ids));
+}
+
+/**
+ * The two variables that name the uid/gid a bundle's compose is told to run its own relay
+ * as (the browser's CDP relay listens as the gateway's uid, so a walled add-on's relay —
+ * which runs as that same uid — can reach it). Taken from THIS process unless the caller
+ * names ids, and never from an inherited environment.
+ */
+export function composeIdsEnv(ids = {}) {
+  const env = {};
+  const uid = ids.uid ?? (typeof process.getuid === "function" ? process.getuid() : null);
+  const gid = ids.gid ?? (typeof process.getgid === "function" ? process.getgid() : null);
+  if (Number.isInteger(uid)) env.CROW_GATEWAY_UID = String(uid);
+  if (Number.isInteger(gid)) env.CROW_GATEWAY_GID = String(gid);
   return env;
 }
 

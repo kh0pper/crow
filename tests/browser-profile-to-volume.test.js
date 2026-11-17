@@ -122,7 +122,10 @@ function setup(over = {}) {
   const calls = () => existsSync(join(fake, "calls")) ? readFileSync(join(fake, "calls"), "utf8").trim().split("\n") : [];
   return { run, runAsync, calls, bundle, home, fake, env };
 }
-const ARGS = ["--container", "crow-browser", "--project", "browser", "--source", SOURCE, "--no-tty-guard"];
+// The relay's uid is the owner of the instance home; a root-owned scratch home (a suite run
+// as root) is refused unless the operator says the gateway itself is root.
+const ROOT_FLAG = typeof process.getuid === "function" && process.getuid() === 0 ? ["--allow-root-gateway"] : [];
+const ARGS = ["--container", "crow-browser", "--project", "browser", "--source", SOURCE, "--no-tty-guard", ...ROOT_FLAG];
 const NEXT = "crow-browser-next:browser-20261029-120000";
 const PREV = "crow-browser-prev:browser-20261029-120000";
 const MUTATING = /^(stop|start|cp|tag|build|update|rmi|volume (create|rm)|run|compose .* up|systemd-run)/;

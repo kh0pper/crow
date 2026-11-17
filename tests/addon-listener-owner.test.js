@@ -162,6 +162,52 @@ test("any other process of the same uid, outside this Crow, is the add-on's own 
   assert.equal(r.inode, String(SOCK));
 });
 
+test("the browser's own CDP relay, run as the gateway's uid, is own-uid", async () => {
+  // The relay is re-exec'd through setpriv as the gateway's uid, from the bundle image:
+  // argv names /app/cdp-relay.mjs absolutely, cwd is /app, exe is the image's node. All
+  // three /proc entries are readable because nothing changed uid after the exec.
+  const relay = (over = {}) => fakeProc({
+    tcp: table(v4row("127.0.0.1", PORT, { uid: GW_UID, inode: SOCK })),
+    procs: [{
+      pid: 750,
+      inodes: [SOCK],
+      cwd: "/app",
+      argv: ["/usr/bin/node", "/app/cdp-relay.mjs", "--attach"],
+      exe: "/usr/bin/node",
+      ...over,
+    }],
+  });
+  const ask = (p) => identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, selfPids: [1], crowRoots: ROOTS, ...p });
+  const denyRead = (paths, errCode) => {
+    const base = relay();
+    const fail = () => { throw Object.assign(new Error(errCode), { code: errCode }); };
+    return {
+      ...base,
+      readFile: (path) => (paths.includes(path) ? fail() : base.readFile(path)),
+      readdir: (path) => (paths.includes(path) ? fail() : base.readdir(path)),
+      readlink: (path) => (paths.includes(path) ? fail() : base.readlink(path)),
+    };
+  };
+
+  const ok = await ask(relay());
+  assert.equal(ok.kind, "own-uid");
+  assert.equal(ok.pid, 750);
+  assert.equal(ok.reason, undefined);
+  assert.equal(ok.inode, String(SOCK));
+
+  // An fd directory that cannot be read maps the socket to no process: refused.
+  const blindFds = await ask(denyRead(["/proc/750/fd"], "EACCES"));
+  assert.deepEqual([blindFds.kind, blindFds.reason], ["denied", "unmapped"]);
+
+  // A cwd (or exe) that cannot be read is a refusal too: a process whose uid changed after
+  // it started is non-dumpable, its /proc entries are unreadable, and what it is cannot be
+  // judged — the reason the relay re-execs itself through setpriv instead of calling setuid.
+  for (const path of ["/proc/750/cwd", "/proc/750/exe", "/proc/750/cmdline"]) {
+    const blind = await ask(denyRead([path], "EACCES"));
+    assert.deepEqual([blind.kind, blind.reason], ["denied", "owner check failed"], path);
+  }
+});
+
 test("an inode that maps to no process is refused", async () => {
   const p = fakeProc({
     tcp: table(v4row("127.0.0.1", PORT, { uid: GW_UID, inode: SOCK })),

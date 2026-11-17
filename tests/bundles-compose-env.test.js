@@ -26,3 +26,14 @@ test("an explicit CROW_HOME from the caller does not win over the resolved one",
   assert.equal(env.CROW_HOME, CROW_HOME,
     "the resolved instance home must be authoritative — a stale inherited value is exactly the bug");
 });
+
+test("compose names the gateway's own uid/gid, from this process and never from the caller's env", () => {
+  const base = { PATH: "/usr/bin", CROW_GATEWAY_UID: "4242", CROW_GATEWAY_GID: "4343" };
+  const env = composeEnv(base);
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  const gid = typeof process.getgid === "function" ? process.getgid() : null;
+  if (uid !== null) assert.equal(env.CROW_GATEWAY_UID, String(uid), "from process.getuid(), not base");
+  if (gid !== null) assert.equal(env.CROW_GATEWAY_GID, String(gid), "from process.getgid(), not base");
+  assert.notEqual(env.CROW_GATEWAY_UID, "4242");
+  assert.notEqual(env.CROW_GATEWAY_GID, "4343");
+});

@@ -29,6 +29,21 @@ SCREEN="1920x1080x24"
 log() { echo "[crow-browser] $*"; }
 die() { echo "[crow-browser] FATAL: $*" >&2; exit 1; }
 
+# require_id NAME VALUE — a decimal id 0..2147483647, or a fatal that says where the
+# value comes from. Never defaulted: a 0 or a 1000 would make the relay listen as a uid
+# the gateway does not have, which is exactly what the add-on wall refuses.
+require_id() {
+  local name="$1" value="${2:-}"
+  [[ "$value" =~ ^[0-9]{1,10}$ ]] \
+    || die "${name} ('${value}') is not a decimal id. Crow's gateway passes it when it runs compose (CROW_GATEWAY_UID / CROW_GATEWAY_GID): the CDP relay must listen as the gateway's own uid so a walled browser add-on can reach it. There is no default."
+  [ "$((10#$value))" -le 2147483647 ] \
+    || die "${name} ('${value}') is out of range (0..2147483647). Crow's gateway passes it when it runs compose (CROW_GATEWAY_UID / CROW_GATEWAY_GID); a value this large is a typo, not an id."
+}
+
+# --- The uid the CDP relay listens as: the gateway's own (checked before Xvfb) ---
+require_id CROW_RELAY_UID "${CROW_RELAY_UID:-}"
+require_id CROW_RELAY_GID "${CROW_RELAY_GID:-}"
+
 # The noVNC viewer has no password prompt: it is reached only through the Crow
 # gateway's signed-in /proxy/browser/ route. Loopback alone is NOT a boundary
 # under network_mode: host (any local process, or a web page via ws://127.0.0.1
@@ -51,12 +66,31 @@ die() { echo "[crow-browser] FATAL: $*" >&2; exit 1; }
 # timeout; no header value is ever logged). Chromium gets no
 # --remote-debugging-port and no --remote-allow-origins, so there is no
 # unauthenticated door and no Origin check to disable.
-# What that keeps out: other uids, other containers, web pages (including pages
-# this browser itself loads), and a bot whose network is unshared. What it does
-# NOT keep out: a same-uid process that can read this bundle's .env, which is
-# where the token lives — a default (`auto`-tier) bot can, until the CROW_BOT_UID
-# containment work lands. The token arrives as a 0400 file, is never in any argv,
-# and is stripped from the environment Chromium inherits.
+#
+# TWO uids since 1.7.0, and that split is the point:
+#   - Chromium stays ROOT. /root is 0700 in this image and the profile (cookies,
+#     saved logins) lives at /root/.config/chromium-crow, so it cannot be run as
+#     another user without moving the profile — which is not this change.
+#   - the relay runs as the GATEWAY's uid (`node "$RELAY" --supervise` re-execs
+#     itself through setpriv --reuid/--regid --no-new-privs). A listener owned by
+#     the gateway's uid is what scripts/addon-sandbox/listener-owner.mjs calls
+#     "own-uid": it maps the socket to its holder through /proc/<pid>/fd and
+#     accepts argv '/usr/bin/node /app/cdp-relay.mjs --attach', cwd /app, exe
+#     /usr/bin/node. A root listener has to be a port a container publishes to
+#     pass that check, and host networking publishes nothing — so a walled
+#     browser add-on could not reach its own browser at all before this split.
+#     The re-exec (never an in-process setuid) is what keeps /proc readable: a
+#     process that changes uid after it starts turns non-dumpable and its
+#     /proc/<pid>/fd, cwd and exe stop being readable, which is a REFUSAL.
+#   - the token: compose mounts it root-only (0400), so it is copied here into a
+#     0700 directory owned by the relay's uid. It is still never a shell
+#     variable, an argv or an environment value; CROW_CDP_TOKEN_FILE is a path.
+# What a same-uid process can see: the relay's /proc entries and that token file.
+# It cannot see Chromium's /proc entries or the profile: those stay root's.
+# What the split keeps out: other uids, other containers, web pages (including
+# pages this browser itself loads), and a bot whose network is unshared. What it
+# does NOT keep out: a process of the gateway's uid that can read the token file
+# (a default (`auto`-tier) bot can, until the CROW_BOT_UID containment work lands).
 # An older install's .env may still pass VNC_PASSWORD: it is ignored, and
 # never printed.
 if [ -n "${VNC_PASSWORD:-}" ]; then
@@ -83,6 +117,18 @@ unset VNC_TOKEN_VALUE
 # as an empty file rather than a compose error).
 [ -s "$CDP_TOKEN_SRC" ] || die "the CDP token (${CDP_TOKEN_SRC}) is missing or empty. Crow generates CROW_BROWSER_CDP_TOKEN at install, in this bundle's .env, and compose hands it in as that file; the container does not start without it."
 grep -qE '^[A-Za-z0-9_-]{32,256}$' "$CDP_TOKEN_SRC" || die "the CDP token (${CDP_TOKEN_SRC}) is malformed (32-256 characters of A-Za-z0-9_-). Crow generates it at install; fix this bundle's .env and recreate the container."
+
+# The relay runs as the gateway's uid, so it cannot read the 0400, root-owned file
+# compose mounts. Copy it into a 0700 directory that uid owns; the value still never
+# becomes a shell variable, an argv or an environment value — CROW_CDP_TOKEN_FILE is a
+# path. `rm -rf` first: a `docker start` keeps /run, and a stale copy (or another uid's)
+# must never be what the relay reads.
+rm -rf /run/crow-cdp
+install -d -m 700 -o "$CROW_RELAY_UID" -g "$CROW_RELAY_GID" /run/crow-cdp \
+  || die "cannot create /run/crow-cdp for uid ${CROW_RELAY_UID}"
+install -m 400 -o "$CROW_RELAY_UID" -g "$CROW_RELAY_GID" "$CDP_TOKEN_SRC" /run/crow-cdp/token \
+  || die "cannot give the CDP token to uid ${CROW_RELAY_UID} at /run/crow-cdp/token"
+export CROW_CDP_TOKEN_FILE=/run/crow-cdp/token
 
 # websockify's token lookup that never echoes the token it was handed: stock
 # websockify logs "Token '<value>' not found", which would print a valid token
@@ -146,6 +192,46 @@ no_tcp_listeners() {
   inodes=$(for fd in /proc/"$pid"/fd/*; do readlink "$fd" 2>/dev/null; done | sed -n 's/^socket:\[\([0-9]*\)\]$/\1/p' | sort -u | tr '\n' ' ')
   [ -n "$inodes" ] || return 0
   ! awk -v want=" $inodes" 'FNR > 1 && $4 == "0A" && index(want, " " $10 " ") { found = 1 } END { exit found ? 0 : 1 }' "$@" 2>/dev/null
+}
+
+# listener_uid_is PORT UID TABLE... — true only when something LISTENs on PORT in the
+# given tables and EVERY such listener has uid column ($8) UID. The relay's uid is the
+# whole point of the split: a listener owned by another uid is a relay that would be
+# refused by the add-on wall (or, worse, one that is not ours at all).
+listener_uid_is() {
+  local port="$1" uid="$2"; shift 2
+  local hex owner found=0
+  hex=$(printf '%04X' "$port")
+  while read -r owner; do
+    [ -n "$owner" ] || continue
+    found=1
+    if [ "$owner" != "$uid" ]; then
+      echo "[crow-browser] the listener on port ${port} runs as uid ${owner}, not ${uid}" >&2
+      return 1
+    fi
+  done < <(awk -v p="$hex" 'FNR > 1 && $4 == "0A" { n = split($2, a, ":"); if (a[n] == p) print $8 }' "$@" 2>/dev/null)
+  [ "$found" = 1 ] || { echo "[crow-browser] nothing listens on port ${port}" >&2; return 1; }
+}
+
+# child_pid_matching PARENT REGEX — a child of PARENT whose command line matches REGEX.
+# pgrep does it when procps is in the image; /proc answers the same way when it is not, so
+# a missing pgrep can never turn a healthy container into a fatal one.
+child_pid_matching() {
+  local parent="$1" want="$2" pid found=""
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -P "$parent" -f "$want" 2>/dev/null | head -n 1
+    return 0
+  fi
+  for pid in /proc/[0-9]*; do
+    pid="${pid#/proc/}"
+    # comm comes second and is parenthesised; the processes looked at here have a
+    # one-word comm (chrome, node), so $4 is the ppid.
+    [ "$(awk '{print $4}' "/proc/${pid}/stat" 2>/dev/null)" = "$parent" ] || continue
+    tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | grep -qE "$want" || continue
+    found="$pid"; break
+  done
+  [ -n "$found" ] && printf '%s\n' "$found"
+  return 0
 }
 
 # require_loopback PORT NAME — wait up to 10 s for NAME to listen on PORT, then
@@ -247,26 +333,29 @@ CHROME_PATH=$(find /root/.cache/ms-playwright -name "chrome" -type f 2>/dev/null
 [ -n "$CHROME_PATH" ] || die "Chrome not found in Playwright cache"
 
 # Optional upstream proxy (http://host:port or socks5://host:port). Empty = direct.
-# The relay turns CHROME_PROXY into Chromium's --proxy-server flag (it is the one that
-# execs Chromium now).
+# The relay's supervisor turns CHROME_PROXY into Chromium's --proxy-server flag.
 if [ -n "${CHROME_PROXY:-}" ]; then
   log "Routing through proxy: ${CHROME_PROXY}"
 fi
 
 RELAY="$(dirname "$0")/cdp-relay.mjs"
 [ -f "$RELAY" ] || die "the CDP relay (${RELAY}) is missing from the image: rebuild the browser image"
-# Paths only: the relay reads the token from its 0400 file and strips any
-# token-shaped variable from the environment Chromium inherits.
+# Paths only: the relay reads the token from its 0400 file (CROW_CDP_TOKEN_FILE,
+# set above to the copy the relay's uid owns) and strips any token-shaped variable
+# from the environment Chromium inherits.
 export CHROME_PATH
 export CROW_CHROMIUM_PROFILE="$PROFILE_DIR"
-export CROW_CDP_TOKEN_FILE="$CDP_TOKEN_SRC"
 export CROW_CDP_READY_FILE="$CDP_READY_FILE"
+# The supervisor (this process) reads these, re-execs the relay as CROW_CDP_RELAY_UID
+# and starts Chromium root. Checked at the top of this script, never defaulted.
+export CROW_CDP_RELAY_UID="$CROW_RELAY_UID"
+export CROW_CDP_RELAY_GID="$CROW_RELAY_GID"
 # docker start keeps /tmp: a ready file from an earlier run of this container would
 # let the readiness loop pass before Chromium has answered.
 rm -f "$CDP_READY_FILE"
 
-log "Launching Chromium on a pipe (CDP relay on 127.0.0.1:${CDP_PORT})..."
-node "$RELAY" &
+log "Launching Chromium on a pipe (CDP relay on 127.0.0.1:${CDP_PORT}, as uid ${CROW_RELAY_UID})..."
+node "$RELAY" --supervise &
 RELAY_PID=$!
 
 # Readiness is the relay's ready file: it appears only once Chromium's pipe has
@@ -284,6 +373,17 @@ done
 [ "$ready" = 1 ] || die "the CDP relay did not report ready on 127.0.0.1:${CDP_PORT} within 60s"
 # The relay is the only listener; Chromium itself opens no port at all.
 require_loopback "${CDP_PORT}" cdp-relay
+# …and it is the RELAY's listener, running as the gateway's uid: one on another uid is
+# refused by the add-on wall's owner check, which is why the split exists.
+listener_uid_is "${CDP_PORT}" "$CROW_RELAY_UID" /proc/net/tcp /proc/net/tcp6 \
+  || die "the CDP relay is not running as the gateway's uid (${CROW_RELAY_UID}): a walled browser add-on would be refused its own browser. Refusing to run."
+# Chromium is the supervisor's other child (the relay re-execs through setpriv, so both
+# are children of $RELAY_PID); it must own no TCP listener at all.
+CHROME_PID="$(child_pid_matching "$RELAY_PID" chrome)"
+[ -n "$CHROME_PID" ] || die "cannot find Chromium under the relay (pgrep -P ${RELAY_PID}): the supervisor did not start it"
+no_tcp_listeners "$CHROME_PID" /proc/net/tcp /proc/net/tcp6 \
+  || die "Chromium (pid ${CHROME_PID}) is listening on a TCP port. Refusing to run: it must speak only over the pipe to the relay."
+log "Chromium (pid ${CHROME_PID}) listens on no TCP port; the relay is the only listener."
 
 echo ""
 echo "============================================="

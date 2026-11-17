@@ -33,6 +33,16 @@ services:
       # Which Crow instance this container and its profile belong to (the
       # entrypoint checks the profile's marker against it).
       - CROW_INSTANCE=${CROW_HOME:?CROW_HOME is required}
+      # Since 1.7.0 the CDP relay listens as the GATEWAY's uid (the entrypoint
+      # re-execs it through setpriv; Chromium stays root). The gateway sets both
+      # from its own process when it runs compose. `:-` and not `:?` on purpose:
+      # the boot catch-up that refreshes an installed compose (routes/bundles.js)
+      # checks a file's required vars against the gateway's own environment, so a
+      # `:?` here would hold the compose update for every instance. An unset value
+      # instead reaches the entrypoint, which fails closed with a FATAL that names
+      # CROW_GATEWAY_UID.
+      - CROW_RELAY_UID=${CROW_GATEWAY_UID:-}
+      - CROW_RELAY_GID=${CROW_GATEWAY_GID:-}
       - CDP_PORT=${CROW_BROWSER_CDP_PORT:-9222}
       - NOVNC_PORT=${CROW_BROWSER_VNC_PORT:-6080}
       - CHROME_PROXY=${CROW_BROWSER_PROXY:-}

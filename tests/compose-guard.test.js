@@ -51,6 +51,29 @@ const bundleDir = () => { const d = join(CROW_HOME, "bundles", `fx-${Math.random
 const check = (model, { manifest = {}, consent = false, dir = bundleDir() } = {}) => G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: consent, ctx: CTX });
 const bind = (source, read_only = false) => ({ type: "bind", source, target: "/x", ...(read_only ? { read_only } : {}) });
 
+// ---- the compose environment (no docker) -------------------------------------------
+
+test("composeEnv: the GATEWAY's uid/gid are named from this process, never from the caller's env", () => {
+  // Compose interpolates ${CROW_GATEWAY_UID} from this environment, and the browser's
+  // compose runs its CDP relay as that uid; a value inherited from an operator's shell
+  // could name another user, which is exactly what the add-on wall refuses.
+  const base = { PATH: "/usr/bin", CROW_GATEWAY_UID: "4242", CROW_GATEWAY_GID: "4343" };
+  const env = G.composeEnv(base, CROW_HOME);
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  const gid = typeof process.getgid === "function" ? process.getgid() : null;
+  if (uid !== null) assert.equal(env.CROW_GATEWAY_UID, String(uid));
+  if (gid !== null) assert.equal(env.CROW_GATEWAY_GID, String(gid));
+  assert.notEqual(env.CROW_GATEWAY_UID, "4242");
+  assert.notEqual(env.CROW_GATEWAY_GID, "4343");
+  // An explicit caller (a wrapper naming an instance's ids) wins, including uid 0.
+  assert.deepEqual(G.composeIdsEnv({ uid: 0, gid: 7 }), { CROW_GATEWAY_UID: "0", CROW_GATEWAY_GID: "7" });
+  const explicit = G.composeEnv({}, CROW_HOME, { uid: 0, gid: 7 });
+  assert.equal(explicit.CROW_GATEWAY_UID, "0");
+  assert.equal(explicit.CROW_GATEWAY_GID, "7");
+  // bundles.js and bundle-core.js both wrap this one, so both carry the ids.
+  if (uid !== null) assert.equal(B.composeEnv({ PATH: "/usr/bin" }).CROW_GATEWAY_UID, String(uid));
+});
+
 // ---- the model check (no docker) ---------------------------------------------------
 
 test("model: privileged, dangerous caps (any case, CAP_ prefix), shared namespaces, unconfined, volumes_from need privileged + consent", () => {

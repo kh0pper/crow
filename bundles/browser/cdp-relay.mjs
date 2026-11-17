@@ -2,14 +2,40 @@
 /**
  * crow-browser CDP relay: Chromium on a pipe, one token-gated WebSocket for the host.
  *
+ * TWO PROCESSES, TWO UIDS, ONE PIPE. The entrypoint starts this file with `--supervise`,
+ * as root. That process starts Chromium — which STAYS root, because the image's /root is
+ * 0700 and the profile lives under it — and starts the relay itself as the GATEWAY's uid:
+ *
+ *   setpriv --reuid U --regid G --clear-groups --inh-caps=-all --bounding-set=-all \
+ *           --no-new-privs -- /usr/bin/node /app/cdp-relay.mjs --attach
+ *
+ * handing it Chromium's pipe on fds 3 and 4 and a one-line report pipe on fd 5. The
+ * supervisor listens on NO socket, and writes CROW_CDP_READY_FILE itself once the relay
+ * has reported ready (the relay, on the gateway's uid, could not write it).
+ *
+ * Why the uid split: a browser add-on runs behind a wall, and the wall's listener-owner
+ * check (scripts/addon-sandbox/listener-owner.mjs) identifies a loopback port by who
+ * holds the socket. A root listener only passes if a running container publishes the port
+ * — and this container uses host networking, so it publishes nothing. A listener owned by
+ * the GATEWAY's uid is that add-on's own service, provided the process can be identified:
+ * /proc/<pid>/fd, /proc/<pid>/cwd and /proc/<pid>/exe must be readable by the gateway, and
+ * argv must carry an absolute script path. A process exec'd through setpriv keeps all of
+ * that; a process that calls setuid() itself becomes non-dumpable and its /proc entries
+ * become unreadable, so this file NEVER drops privileges in-process — it re-execs itself.
+ * What a same-uid process can see: this relay's own /proc entries and the token file it
+ * reads (0400, owned by that uid). It cannot see Chromium's: that stays root.
+ *
  * Why a relay at all: Chrome DevTools Protocol has no authentication, and under
  * `network_mode: host` a CDP port on 127.0.0.1 is reachable by every process on the
- * machine (and by a web page via DNS rebinding). So Chromium is started here with
- * `--remote-debugging-pipe` and opens NO port; this relay owns the pipe (fd 3 = its
- * input, fd 4 = its output) and serves the host contract, `127.0.0.1:${CDP_PORT}`,
- * to anyone holding the per-instance `CROW_BROWSER_CDP_TOKEN`. The token is read from
- * the 0400 file compose mounts, is compared in constant time, and never reaches
- * Chromium: not in its argv, and stripped from the env this process hands it.
+ * machine (and by a web page via DNS rebinding). So Chromium runs with
+ * `--remote-debugging-pipe` and opens NO port; the relay owns the pipe (fd 3 = what it
+ * writes to Chromium, fd 4 = what it reads back) and serves the host contract,
+ * `127.0.0.1:${CDP_PORT}`, to anyone holding the per-instance
+ * `CROW_BROWSER_CDP_TOKEN`. The token is read from a 0400 file (compose mounts it root
+ * only; the entrypoint copies it into a directory the relay's uid owns), is compared in
+ * constant time, and never reaches Chromium: not in its argv, and stripped from the env
+ * Chromium inherits. It is never in the relay's argv or in an environment VALUE either —
+ * CROW_CDP_TOKEN_FILE is only a path.
  *
  * A pipe is ONE connection, so the relay multiplexes: each client gets its own flat
  * browser session (`Target.attachToBrowserTarget` → `S_c`), the relay remaps message
@@ -28,10 +54,11 @@
  */
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import { dirname } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** The longest request head the relay reads; Node answers 431 beyond it. */
 export const MAX_HEADER_BYTES = 16 * 1024;
@@ -52,6 +79,27 @@ export const MAX_CLIENT_BUFFER_BYTES = 64 * 1024 * 1024;
 export const CLOSE_TIMEOUT_MS = 10_000;
 /** The token shape Crow mints (hex32 or base64url) — the same rule the entrypoint applies. */
 export const TOKEN_RE = /^[A-Za-z0-9_-]{32,256}$/;
+/** How long the supervisor waits for the relay's one "ready <json>" line (the entrypoint waits 60 s). */
+export const READY_TIMEOUT_MS = 60_000;
+/** The largest ready line the supervisor accepts; anything bigger is a broken relay. */
+const MAX_READY_LINE_BYTES = 4096;
+/** The largest uid/gid accepted (the Linux id_t ceiling): anything else is a typo, not an id. */
+const MAX_ID = 2147483647;
+/** The one privileged helper used to start the relay on another uid (`util-linux`, in the base image). */
+const SETPRIV = "/usr/bin/setpriv";
+/** This script, absolutely, for the supervisor's re-exec (no relative path ever). */
+const SELF = fileURLToPath(import.meta.url);
+/**
+ * The ONLY variables the supervisor gives the relay: a path to start with, the port, the
+ * token's FILE (a path, never the token), the debug flag and the caps. Everything else of
+ * the supervisor's environment stays with the supervisor — and none of these is a secret
+ * except in name, which is why the token's location is a path and the value is in a file.
+ */
+const RELAY_ENV_KEYS = [
+  "PATH", "CDP_PORT", "CROW_CDP_TOKEN_FILE", "CROW_CDP_DEBUG",
+  "CROW_CDP_MAX_FRAME", "CROW_CDP_MAX_CLIENT_BUFFER", "CROW_CDP_MAX_CONNECTIONS", "CROW_CDP_MAX_HEADER",
+  "CROW_CDP_HANDSHAKE_TIMEOUT_MS", "CROW_CDP_CLOSE_TIMEOUT_MS",
+];
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost):(\d{1,5})$/;
@@ -276,6 +324,113 @@ function parsePort(value) {
 }
 
 /**
+ * A uid or gid as this bundle accepts it: a decimal integer in 0..MAX_ID, and nothing
+ * else. `undefined`, an empty string, "root", a negative number or a name all fail, so a
+ * compose file that forgot to pass CROW_GATEWAY_UID stops the container instead of
+ * silently listening as root.
+ */
+function parseId(value) {
+  const s = typeof value === "string" ? value.trim() : "";
+  if (!/^\d{1,10}$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isInteger(n) && n >= 0 && n <= MAX_ID ? n : null;
+}
+
+/** The size caps and timeouts from the environment (never a secret). */
+function capsFromEnv() {
+  const cap = (name, fallback) => {
+    const n = Number(process.env[name]);
+    return Number.isInteger(n) && n > 0 ? n : fallback;
+  };
+  return {
+    maxFrameBytes: cap("CROW_CDP_MAX_FRAME", MAX_FRAME_BYTES),
+    maxClientBuffer: cap("CROW_CDP_MAX_CLIENT_BUFFER", MAX_CLIENT_BUFFER_BYTES),
+    maxConnections: cap("CROW_CDP_MAX_CONNECTIONS", MAX_CONNECTIONS),
+    maxHeaderBytes: cap("CROW_CDP_MAX_HEADER", MAX_HEADER_BYTES),
+    handshakeTimeoutMs: cap("CROW_CDP_HANDSHAKE_TIMEOUT_MS", HANDSHAKE_TIMEOUT_MS),
+    closeTimeoutMs: cap("CROW_CDP_CLOSE_TIMEOUT_MS", CLOSE_TIMEOUT_MS),
+  };
+}
+
+/** The token, read from its 0400 file (never from the environment). */
+function readToken() {
+  const tokenFile = process.env.CROW_CDP_TOKEN_FILE || "/run/secrets/crow-cdp-token";
+  let token = "";
+  try { token = readFileSync(tokenFile, "utf8").trim(); } catch { token = ""; }
+  if (!TOKEN_RE.test(token)) {
+    die(`the CDP token (${tokenFile}) is missing or malformed. Crow generates CROW_BROWSER_CDP_TOKEN at install, in this bundle's .env, and compose hands it in as that file; the relay never opens an ungated port instead.`);
+  }
+  return token;
+}
+
+/** CDP_PORT from the environment, or a fatal. */
+function readPort() {
+  const port = parsePort(process.env.CDP_PORT);
+  if (port === null) die(`CDP_PORT '${process.env.CDP_PORT}' is not a port number`);
+  return port;
+}
+
+/** The Chromium argv: the test seam first, else CHROME_PATH from the entrypoint. */
+function chromiumCommand() {
+  const chromePath = process.env.CHROME_PATH || "";
+  const seam = process.env.CROW_CDP_CHROMIUM_ARGV;
+  if (seam) {
+    try {
+      const parsed = JSON.parse(seam);
+      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("not an argv");
+      return [...parsed.map(String), ...chromiumArguments()];
+    } catch { die("CROW_CDP_CHROMIUM_ARGV is not a JSON argv array"); }
+  }
+  if (!chromePath) die("CHROME_PATH is not set: the entrypoint finds Playwright's Chrome and passes it in");
+  return [chromePath, ...chromiumArguments()];
+}
+
+/**
+ * One line from the relay on fd 5: `ready <json>`. The supervisor's cue that Chromium's
+ * pipe answered and the port is listening — the same evidence the ready FILE records.
+ */
+function readReadyLine(stream, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let buf = "";
+    let done = false;
+    if (!stream) { reject(new Error("the relay has no report pipe (fd 5)")); return; }
+    const finish = (fn, value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      stream.off("data", onData);
+      stream.off("end", onEnd);
+      stream.off("error", onError);
+      fn(value);
+    };
+    const timer = setTimeout(() => finish(reject, new Error(`the relay did not report ready within ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+    if (typeof timer.unref === "function") timer.unref();
+    function onData(chunk) {
+      buf += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      const nl = buf.indexOf("\n");
+      if (nl < 0) {
+        if (buf.length > MAX_READY_LINE_BYTES) finish(reject, new Error("the relay's ready line is too long"));
+        return;
+      }
+      const m = /^ready (\{.*\})$/.exec(buf.slice(0, nl).trim());
+      if (!m) { finish(reject, new Error("the relay's first line on fd 5 was not a ready line")); return; }
+      let info = null;
+      try { info = JSON.parse(m[1]); } catch { info = null; }
+      if (!info || typeof info !== "object" || !Number.isInteger(info.port) || info.port < 1 || info.port > 65535) {
+        finish(reject, new Error("the relay's ready line carried no port"));
+        return;
+      }
+      finish(resolve, info);
+    }
+    function onEnd() { finish(reject, new Error("the relay closed fd 5 without reporting ready")); }
+    function onError() { finish(reject, new Error("the relay's ready pipe failed")); }
+    stream.on("data", onData);
+    stream.once("end", onEnd);
+    stream.once("error", onError);
+  });
+}
+
+/**
  * Start the relay: spawn Chromium on a pipe, wait until the pipe answers
  * `Browser.getVersion`, then listen on 127.0.0.1:`port` for gated clients.
  *
@@ -292,6 +447,7 @@ export async function createRelay(config) {
     token,
     port = 9222,
     chromiumArgv,
+    pipe = null,
     childEnv = process.env,
     log = () => {},
     debug = () => {},
@@ -305,22 +461,38 @@ export async function createRelay(config) {
   } = config || {};
 
   if (!TOKEN_RE.test(String(token || ""))) throw new Error("the CDP token is missing or malformed");
-  if (!Array.isArray(chromiumArgv) || chromiumArgv.length === 0) throw new Error("no Chromium command");
+  // Two ways to own the pipe: spawn Chromium here (the pre-1.7.0 shape, and what the unit
+  // tests drive), or attach to the pipe the supervisor handed over on fds 3 and 4.
+  const pipeMode = !!(pipe && typeof pipe === "object" && pipe.input && pipe.output);
+  if (!pipeMode && (!Array.isArray(chromiumArgv) || chromiumArgv.length === 0)) throw new Error("no Chromium command");
 
-  // Chromium is its own process group (detached): one kill then reaches its renderers and
-  // zygotes, which is what makes "the relay dies, Chromium dies" true on the paths this
-  // process cannot run code on. Belt and braces: Chromium exits on pipe EOF too, and the
-  // entrypoint treats a dead relay as a dead container.
-  const safeEnv = {};
-  for (const [k, v] of Object.entries(childEnv)) if (!SECRET_ENV_RE.test(k)) safeEnv[k] = v;
-  const child = spawn(chromiumArgv[0], chromiumArgv.slice(1), {
-    stdio: ["ignore", "inherit", "inherit", "pipe", "pipe"],
-    detached: true,
-    env: safeEnv,
-  });
+  let child = null;
+  let input;
+  let output;
+  if (pipeMode) {
+    input = pipe.input;
+    output = pipe.output;
+  } else {
+    // Chromium is its own process group (detached): one kill then reaches its renderers and
+    // zygotes, which is what makes "the relay dies, Chromium dies" true on the paths this
+    // process cannot run code on. Belt and braces: Chromium exits on pipe EOF too, and the
+    // supervisor treats a dead relay as a dead container.
+    const safeEnv = {};
+    for (const [k, v] of Object.entries(childEnv)) if (!SECRET_ENV_RE.test(k)) safeEnv[k] = v;
+    child = spawn(chromiumArgv[0], chromiumArgv.slice(1), {
+      stdio: ["ignore", "inherit", "inherit", "pipe", "pipe"],
+      detached: true,
+      env: safeEnv,
+    });
+    input = child.stdio[3];
+    output = child.stdio[4];
+  }
 
-  let childExited = false;
-  const exited = new Promise((resolve) => {
+  let childExited = pipeMode;
+  // In pipe mode the framer's close IS "Chromium is gone": its end of the pipe went away.
+  let resolvePipeClosed = () => {};
+  const pipeClosed = new Promise((resolve) => { resolvePipeClosed = resolve; });
+  const exited = pipeMode ? pipeClosed : new Promise((resolve) => {
     child.once("exit", (code, signal) => { childExited = true; resolve({ code, signal }); });
     child.once("error", (err) => {
       childExited = true;
@@ -331,14 +503,22 @@ export async function createRelay(config) {
 
   let stopping = false;
   function killChromium(signal = "SIGKILL") {
+    if (pipeMode) {
+      // There is no child of ours to signal: the pipe is the whole relationship, and
+      // closing it is exactly what Chromium sees as "the relay is gone".
+      try { input.destroy(); } catch { /* gone */ }
+      try { output.destroy(); } catch { /* gone */ }
+      return;
+    }
     if (!child.pid || childExited) return;
     try { process.kill(-child.pid, signal); return; } catch { /* the group is gone */ }
     try { child.kill(signal); } catch { /* the process is gone */ }
   }
 
-  const input = child.stdio[3];
-  const output = child.stdio[4];
-  if (!input || !output) { killChromium(); throw new Error("Chromium did not get its pipe (fds 3 and 4)"); }
+  if (!input || !output) {
+    killChromium();
+    throw new Error(pipeMode ? "the pipe arrived without both fds (3 and 4)" : "Chromium did not get its pipe (fds 3 and 4)");
+  }
   const framer = createPipeFramer({ input, output, maxFrameBytes });
 
   const relayId = randomBytes(16).toString("hex");
@@ -657,6 +837,8 @@ export async function createRelay(config) {
 
   framer.on("message", fromPipe);
   framer.on("close", (reason) => {
+    // In pipe mode this is how Chromium's fate reaches the relay: the peer end is gone.
+    resolvePipeClosed({ code: reason === "eof" ? 0 : 1, signal: null, reason });
     if (stopping) return;
     // Chromium's output ended: it is gone, or it broke the protocol. Either way this relay
     // has nothing left to serve, and Chromium must not outlive it.
@@ -732,6 +914,7 @@ export async function createRelay(config) {
     version,
     stats,
     child,
+    mode: pipeMode ? "pipe" : "spawn",
     exited,
     shutdown,
     killChromium,
@@ -760,64 +943,50 @@ export function chromiumArguments(env = process.env) {
 }
 
 /**
- * The CLI: read the token, spawn Chromium, serve, and share fate with it.
+ * The CLI. Three modes, and the first two are the container's shape since 1.7.0:
+ *
+ *   --supervise  root: start Chromium (root) and the relay (the gateway's uid), own both,
+ *                and write the ready file once the relay reports in.
+ *   --attach     the gateway's uid: serve 127.0.0.1:${CDP_PORT} from the pipe on fds 3/4
+ *                and report ready on fd 5. Never writes the ready file, never spawns.
+ *   (no flag)    the pre-1.7.0 shape, kept for the unit tests: spawn Chromium here, serve,
+ *                write the ready file, and share fate with Chromium.
  *
  * Env (none of it secret): CDP_PORT, CHROME_PATH, CHROME_PROXY, CROW_CHROMIUM_PROFILE,
- * CROW_CDP_TOKEN_FILE, CROW_CDP_READY_FILE, CROW_CDP_DEBUG, plus the test seams
- * CROW_CDP_CHROMIUM_ARGV (a JSON argv prefix that speaks the pipe) and the size caps
- * CROW_CDP_MAX_FRAME / CROW_CDP_MAX_CLIENT_BUFFER / CROW_CDP_MAX_CONNECTIONS /
- * CROW_CDP_MAX_HEADER / CROW_CDP_HANDSHAKE_TIMEOUT_MS / CROW_CDP_CLOSE_TIMEOUT_MS.
+ * CROW_CDP_TOKEN_FILE, CROW_CDP_READY_FILE, CROW_CDP_DEBUG, CROW_CDP_RELAY_UID /
+ * CROW_CDP_RELAY_GID (the supervisor's), plus the test seams CROW_CDP_CHROMIUM_ARGV (a
+ * JSON argv prefix that speaks the pipe) and the size caps CROW_CDP_MAX_FRAME /
+ * CROW_CDP_MAX_CLIENT_BUFFER / CROW_CDP_MAX_CONNECTIONS / CROW_CDP_MAX_HEADER /
+ * CROW_CDP_HANDSHAKE_TIMEOUT_MS / CROW_CDP_CLOSE_TIMEOUT_MS.
  */
-export async function main() {
+export async function main(argv = process.argv.slice(2)) {
+  if (argv.includes("--supervise")) return supervise();
+  if (argv.includes("--attach")) return attach();
+  return serveInProcess();
+}
+
+/** The debug-aware loggers every mode uses. */
+function loggers() {
   const debugOn = process.env.CROW_CDP_DEBUG === "1";
   const log = (msg) => console.log(`[cdp-relay] ${msg}`);
   const debug = (msg) => { if (debugOn) log(msg); };
+  return { log, debug };
+}
 
-  const tokenFile = process.env.CROW_CDP_TOKEN_FILE || "/run/secrets/crow-cdp-token";
-  let token = "";
-  try { token = readFileSync(tokenFile, "utf8").trim(); } catch { token = ""; }
-  if (!TOKEN_RE.test(token)) {
-    die(`the CDP token (${tokenFile}) is missing or malformed. Crow generates CROW_BROWSER_CDP_TOKEN at install, in this bundle's .env, and compose hands it in as that file; the relay never opens an ungated port instead.`);
-  }
-
-  const port = parsePort(process.env.CDP_PORT);
-  if (port === null) die(`CDP_PORT '${process.env.CDP_PORT}' is not a port number`);
-
-  const chromePath = process.env.CHROME_PATH || "";
-  const seam = process.env.CROW_CDP_CHROMIUM_ARGV;
-  let chromiumArgv;
-  if (seam) {
-    try {
-      const parsed = JSON.parse(seam);
-      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("not an argv");
-      chromiumArgv = [...parsed.map(String), ...chromiumArguments()];
-    } catch { die("CROW_CDP_CHROMIUM_ARGV is not a JSON argv array"); }
-  } else {
-    if (!chromePath) die("CHROME_PATH is not set: the entrypoint finds Playwright's Chrome and passes it in");
-    chromiumArgv = [chromePath, ...chromiumArguments()];
-  }
+/**
+ * The pre-1.7.0 shape (no flag): Chromium is this process's own child, the ready file is
+ * written here, and the exit code is Chromium's. The unit tests drive this directly.
+ */
+async function serveInProcess() {
+  const { log, debug } = loggers();
+  const token = readToken();
+  const port = readPort();
+  const chromiumArgv = chromiumCommand();
   debug(`Chromium: ${chromiumArgv[0]}`);
-
-  const cap = (name, fallback) => {
-    const n = Number(process.env[name]);
-    return Number.isInteger(n) && n > 0 ? n : fallback;
-  };
 
   let relay;
   try {
-    relay = await createRelay({
-      token,
-      port,
-      chromiumArgv,
-      log,
-      debug,
-      maxFrameBytes: cap("CROW_CDP_MAX_FRAME", MAX_FRAME_BYTES),
-      maxClientBuffer: cap("CROW_CDP_MAX_CLIENT_BUFFER", MAX_CLIENT_BUFFER_BYTES),
-      maxConnections: cap("CROW_CDP_MAX_CONNECTIONS", MAX_CONNECTIONS),
-      maxHeaderBytes: cap("CROW_CDP_MAX_HEADER", MAX_HEADER_BYTES),
-      handshakeTimeoutMs: cap("CROW_CDP_HANDSHAKE_TIMEOUT_MS", HANDSHAKE_TIMEOUT_MS),
-      closeTimeoutMs: cap("CROW_CDP_CLOSE_TIMEOUT_MS", CLOSE_TIMEOUT_MS),
-    });
+    relay = await createRelay({ token, port, chromiumArgv, log, debug, ...capsFromEnv() });
   } catch (err) {
     die(String((err && err.message) || err));
   }
@@ -865,6 +1034,268 @@ export async function main() {
   process.on("unhandledRejection", crash);
   // Last resort for any other exit path: never leave Chromium running ungated.
   process.on("exit", () => relay.killChromium());
+}
+
+/**
+ * --attach: the gateway's uid. The pipe is already open (the supervisor passed Chromium's
+ * fds 3 and 4), so this mode wraps them and serves the host contract on the loopback port.
+ * It never spawns, never writes the ready file (it could not: it is not root), and exits
+ * when the pipe closes — Chromium's death is its death.
+ */
+async function attach() {
+  const { log, debug } = loggers();
+  const token = readToken();
+  const port = readPort();
+  // The inherited fds are socketpairs (Node's `pipe` stdio), so a net.Socket can wrap
+  // them: input is the end Chromium reads (we write), output the end it writes (we read).
+  const input = new net.Socket({ fd: 3, readable: true, writable: true });
+  const output = new net.Socket({ fd: 4, readable: true, writable: true });
+
+  let relay;
+  try {
+    relay = await createRelay({ token, port, pipe: { input, output }, log, debug, ...capsFromEnv() });
+  } catch (err) {
+    die(String((err && err.message) || err));
+  }
+
+  const uid = typeof process.getuid === "function" ? process.getuid() : "?";
+  log(`ready on 127.0.0.1:${relay.port} — Chromium ${relay.version.product || "(unknown)"} over a pipe, bearer required, as uid ${uid}`);
+  // One line on fd 5 is the supervisor's cue to write the ready file. It carries the port
+  // and the browser, never the token.
+  try {
+    writeSync(5, `ready ${JSON.stringify({ port: relay.port, browser: String(relay.version.product || "") })}\n`);
+    closeSync(5);
+  } catch {
+    relay.killChromium();
+    die("cannot report ready to the supervisor (fd 5): start this mode through --supervise");
+  }
+
+  let stopping = false;
+  void relay.exited.then(({ code }) => {
+    if (stopping) return;
+    log("the pipe to Chromium closed; exiting with it");
+    process.exit(typeof code === "number" ? code : 1);
+  });
+
+  const stop = async (signal) => {
+    if (stopping) return;
+    stopping = true;
+    log(`${signal}: closing Chromium through the pipe...`);
+    await relay.shutdown(0);
+    log("stopped.");
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => { void stop("SIGTERM"); });
+  process.on("SIGINT", () => { void stop("SIGINT"); });
+  const crash = (err) => {
+    console.error(`[cdp-relay] FATAL: ${(err && err.message) || err}`);
+    relay.killChromium();
+    process.exit(1);
+  };
+  process.on("uncaughtException", crash);
+  process.on("unhandledRejection", crash);
+  // Last resort for any other exit path: close the pipe, which is all this side has to do.
+  process.on("exit", () => relay.killChromium());
+}
+
+/**
+ * --supervise: the root process the entrypoint starts. It owns Chromium (left root: the
+ * image's /root is 0700 and the profile lives there) and the relay (re-exec'd as the
+ * GATEWAY's uid through setpriv), gives the relay Chromium's pipe and a report pipe, and
+ * writes the ready file itself. It listens on no socket of any kind.
+ */
+async function supervise() {
+  const { log, debug } = loggers();
+  const uid = parseId(process.env.CROW_CDP_RELAY_UID);
+  if (uid === null) {
+    die(`CROW_CDP_RELAY_UID ('${String(process.env.CROW_CDP_RELAY_UID ?? "")}') is not a decimal uid between 0 and ${MAX_ID}. Crow's gateway passes it when it runs compose (from CROW_GATEWAY_UID): the relay must listen as the gateway's own uid, and there is no default.`);
+  }
+  const gid = parseId(process.env.CROW_CDP_RELAY_GID);
+  if (gid === null) {
+    die(`CROW_CDP_RELAY_GID ('${String(process.env.CROW_CDP_RELAY_GID ?? "")}') is not a decimal gid between 0 and ${MAX_ID}. Crow's gateway passes it when it runs compose (from CROW_GATEWAY_GID), alongside CROW_CDP_RELAY_UID; there is no default.`);
+  }
+  const euid = typeof process.geteuid === "function" ? process.geteuid() : null;
+  // Root can start the relay on any uid; anything else can only start it on its own, and a
+  // relay on a uid the gateway does not have would be refused by the add-on wall anyway.
+  const drop = euid === 0 && uid !== 0;
+  if (euid === 0) {
+    if (!drop) log("CROW_CDP_RELAY_UID is 0: this gateway runs as root, so the relay runs as root too (no uid split).");
+    else if (!existsSync(SETPRIV)) die(`${SETPRIV} is missing from this image, so the relay cannot be started as uid ${uid}: rebuild the browser image (the Dockerfile asserts it).`);
+  } else if (uid !== euid) {
+    die(`CROW_CDP_RELAY_UID (${uid}) is not this process's uid (${euid}): without root the relay can only run as its own uid, and one on another uid would be refused by the add-on wall.`);
+  }
+
+  const caps = capsFromEnv();
+  const readyFile = process.env.CROW_CDP_READY_FILE || "/tmp/cdp-relay.ready";
+  const chromiumArgv = chromiumCommand();
+  debug(`Chromium: ${chromiumArgv[0]}`);
+
+  // Chromium keeps this process's environment minus every secret-shaped name (the token's
+  // location included), exactly as before the split.
+  const chromeEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!SECRET_ENV_RE.test(k)) chromeEnv[k] = v;
+  const chrome = spawn(chromiumArgv[0], chromiumArgv.slice(1), {
+    stdio: ["ignore", "inherit", "inherit", "pipe", "pipe"],
+    detached: true,
+    env: chromeEnv,
+  });
+  if (!chrome.stdio || !chrome.stdio[3] || !chrome.stdio[4]) {
+    try { chrome.kill("SIGKILL"); } catch { /* gone */ }
+    die("Chromium did not get its pipe (fds 3 and 4), so there is nothing for the relay to attach to");
+  }
+
+  const relayEnv = {};
+  for (const key of RELAY_ENV_KEYS) if (process.env[key] !== undefined) relayEnv[key] = process.env[key];
+
+  const relay = drop
+    ? spawn(SETPRIV, [
+      "--reuid", String(uid), "--regid", String(gid), "--clear-groups",
+      "--inh-caps=-all", "--bounding-set=-all", "--no-new-privs",
+      "--", process.execPath, SELF, "--attach",
+    ], { stdio: ["ignore", "inherit", "inherit", chrome.stdio[3], chrome.stdio[4], "pipe"], env: relayEnv })
+    : spawn(process.execPath, [SELF, "--attach"], {
+      stdio: ["ignore", "inherit", "inherit", chrome.stdio[3], chrome.stdio[4], "pipe"],
+      env: relayEnv,
+    });
+
+  // In this same synchronous tick: the relay is the pipe's only reader from now on. A
+  // net.Socket starts reading the moment it exists, so a listener left on these copies
+  // could swallow a frame that the relay then never sees. Destroy them, attach nothing.
+  for (const stream of [chrome.stdio[3], chrome.stdio[4]]) { try { stream.destroy(); } catch { /* gone */ } }
+
+  let chromeExited = false;
+  let chromeCode = 1;
+  let relayExited = false;
+  let stopping = false;
+  let finished = false;
+  let resolveChromeExit = () => {};
+  const chromeExit = new Promise((resolve) => { resolveChromeExit = resolve; });
+  let resolveRelayExit = () => {};
+  const relayExit = new Promise((resolve) => { resolveRelayExit = resolve; });
+
+  const removeReadyFile = () => { try { rmSync(readyFile, { force: true }); } catch { /* gone */ } };
+  function killChromiumGroup(signal = "SIGKILL") {
+    if (!chrome.pid || chromeExited) return;
+    try { process.kill(-chrome.pid, signal); return; } catch { /* the group is gone */ }
+    try { chrome.kill(signal); } catch { /* the process is gone */ }
+  }
+  function killRelay(signal = "SIGKILL") {
+    if (relayExited) return;
+    try { relay.kill(signal); } catch { /* gone */ }
+  }
+  function finish(code) {
+    if (finished) return;
+    finished = true;
+    removeReadyFile();
+    process.exit(code);
+  }
+  /** Is the process gone (zombie or reaped)? Read from /proc, never from an event. */
+  function chromiumIsGone(pid) {
+    if (!pid) return true;
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const close = stat.lastIndexOf(")");
+      const state = close >= 0 ? stat.slice(close + 2, close + 3) : "";
+      return state === "Z" || state === "X";
+    } catch { return true; }
+  }
+  const failSpawn = (code) => {
+    killChromiumGroup("SIGKILL");
+    killRelay("SIGKILL");
+    finish(code);
+  };
+
+  chrome.once("exit", (code, signal) => {
+    chromeExited = true;
+    chromeCode = code === null ? 1 : code;
+    resolveChromeExit();
+    if (stopping || finished) return;
+    if (relayExited) { finish(chromeCode); return; } // the relay's fate is already settled
+    log(`Chromium exited (${code === null ? "signal" : `code ${code}`}); stopping the relay`);
+    killRelay("SIGTERM");
+    void Promise.race([relayExit, delay(2000)]).then(() => finish(chromeCode));
+  });
+  chrome.once("error", (err) => {
+    if (finished) return;
+    console.error(`[cdp-relay] FATAL: cannot start Chromium (${err && err.code ? err.code : "error"})`);
+    failSpawn(127);
+  });
+  relay.once("exit", (code, signal) => {
+    relayExited = true;
+    resolveRelayExit();
+    if (stopping || finished) return;
+    if (chromeExited) { finish(chromeCode); return; }
+    // Chromium closing its fds is exactly what the relay sees as EOF, so when Chromium died
+    // first its exit event may still be in flight: if the process is already gone, give the
+    // kernel a moment to report its code, and let that code win. If Chromium is still alive,
+    // the relay really did go first — kill the group and answer with the relay's code.
+    const graceMs = chromiumIsGone(chrome.pid) ? 500 : 0;
+    void Promise.race([chromeExit, delay(graceMs)]).then(() => {
+      if (stopping || finished) return;
+      if (chromeExited) { finish(chromeCode); return; }
+      log(`the CDP relay exited (${signal ? `signal ${signal}` : `code ${code}`}); stopping Chromium`);
+      killChromiumGroup("SIGKILL");
+      finish(signal ? 1 : code === null ? 1 : code);
+    });
+  });
+  relay.once("error", (err) => {
+    if (finished) return;
+    console.error(`[cdp-relay] FATAL: cannot start the relay (${err && err.code ? err.code : "error"})`);
+    failSpawn(1);
+  });
+
+  // The graceful path: the relay asks Chromium to close over the pipe (which is what
+  // commits its cookie store), and Chromium's own exit is the signal that it is done. Past
+  // the relay's own close timeout plus 2 s, the group goes.
+  const stop = async (signal) => {
+    if (stopping || finished) return;
+    stopping = true;
+    log(`${signal}: closing Chromium through the relay...`);
+    killRelay("SIGTERM");
+    const budgetMs = caps.closeTimeoutMs + 2000;
+    const how = await Promise.race([chromeExit, delay(budgetMs).then(() => "timeout")]);
+    if (how === "timeout") {
+      log(`Chromium did not close within ${Math.round(budgetMs / 1000)}s — killing it`);
+      killChromiumGroup("SIGKILL");
+    }
+    await Promise.race([relayExit, delay(2000)]);
+    log("stopped.");
+    finish(0);
+  };
+  process.on("SIGTERM", () => { void stop("SIGTERM"); });
+  process.on("SIGINT", () => { void stop("SIGINT"); });
+  const crash = (err) => {
+    console.error(`[cdp-relay] FATAL: ${(err && err.message) || err}`);
+    failSpawn(1);
+  };
+  process.on("uncaughtException", crash);
+  process.on("unhandledRejection", crash);
+  // Last resort for every other exit path: leave neither the browser nor the relay behind.
+  process.on("exit", () => {
+    killChromiumGroup("SIGKILL");
+    killRelay("SIGKILL");
+  });
+
+  let info;
+  try {
+    info = await readReadyLine(relay.stdio[5], READY_TIMEOUT_MS);
+  } catch (err) {
+    const why = String((err && err.message) || err);
+    console.error(`[cdp-relay] FATAL: ${why}`);
+    failSpawn(1);
+    return;
+  }
+  // Written here, as root: the relay's uid cannot, and the JSON is the same one the
+  // pre-split relay wrote (pid, port, browser — never the token).
+  try {
+    mkdirSync(dirname(readyFile), { recursive: true });
+    writeFileSync(readyFile, JSON.stringify({ pid: relay.pid, port: info.port, browser: String(info.browser || "") }) + "\n", { mode: 0o644 });
+  } catch {
+    console.error(`[cdp-relay] FATAL: cannot write the ready file (${readyFile})`);
+    failSpawn(1);
+    return;
+  }
+  log(`ready on 127.0.0.1:${info.port} — Chromium ${info.browser || "(unknown)"} over a pipe, bearer required, relay as uid ${uid}${drop ? "" : " (no uid drop)"}`);
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

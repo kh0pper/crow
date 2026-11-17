@@ -37,12 +37,15 @@ function scratchInstance(t) {
   return { home, bundle, sentinel };
 }
 
+/** The uid the script derives: the owner of the scratch home (0 only when run as root). */
+const ROOT_FLAG = typeof process.getuid === "function" && process.getuid() === 0 ? ["--allow-root-gateway"] : [];
+
 test("--dry-run prints the plan and changes nothing (no docker, no git, no backup)", (t) => {
   const { home, bundle, sentinel } = scratchInstance(t);
   const before = Object.fromEntries(Object.keys(sentinel).map((f) => [f, readFileSync(join(bundle, f), "utf8")]));
   const envBefore = readFileSync(join(bundle, ".env"), "utf8");
 
-  const out = execFileSync("bash", [SCRIPT, home, "browser", "--dry-run"], {
+  const out = execFileSync("bash", [SCRIPT, home, "browser", "--dry-run", ...ROOT_FLAG], {
     encoding: "utf8",
     // No docker and no git on PATH: a dry run must not need either.
     env: { ...process.env, PATH: "/usr/bin:/bin", DOCKER: "/nonexistent/docker", GIT: "/nonexistent/git" },
@@ -53,7 +56,9 @@ test("--dry-run prints the plan and changes nothing (no docker, no git, no backu
   assert.match(out, /bundle dir:\s+\S*bundles\/browser/);
   assert.match(out, /would copy:\s+docker-compose\.yml Dockerfile entrypoint\.sh cdp-relay\.mjs/);
   assert.match(out, /would mint:\s+CROW_BROWSER_CDP_TOKEN/);
-  assert.match(out, /would run:\s+\( cd \S+bundles\/browser && docker compose -p browser up -d --build --force-recreate \)/);
+  // The relay's uid/gid travel with the compose run: CROW_GATEWAY_UID/GID from the home's owner.
+  assert.match(out, new RegExp("would run:\\s+\\( cd \\S+bundles/browser && CROW_HOME=" + home + " CROW_GATEWAY_UID=" + process.getuid() + " CROW_GATEWAY_GID=" + process.getgid() + " docker compose -p browser up -d --build --force-recreate \\)"), "the plan's compose run carries both ids");
+  assert.match(out, /relay uid:gid:\s+\d+:\d+/);
   assert.match(out, /curl -H @<0600 file>/, "the plan says the header travels in a file, not on the command line");
   assert.match(out, /a real run needs --from-sha/, "and that a real run needs the pre-change sha");
   assert.match(out, /dry run: .*nothing changed/);
@@ -67,7 +72,7 @@ test("--dry-run prints the plan and changes nothing (no docker, no git, no backu
 
 test("--dry-run still checks a --from-sha it is given, and refuses a missing instance", (t) => {
   const { home } = scratchInstance(t);
-  const out = execFileSync("bash", [SCRIPT, home, "browser", "--dry-run", "--from-sha", "deadbeef"], {
+  const out = execFileSync("bash", [SCRIPT, home, "browser", "--dry-run", "--from-sha", "deadbeef", ...ROOT_FLAG], {
     encoding: "utf8",
     env: { ...process.env, GIT: "/nonexistent/git" },
     timeout: 30000,
@@ -78,7 +83,7 @@ test("--dry-run still checks a --from-sha it is given, and refuses a missing ins
   const missing = join(home, "nope");
   let failed = null;
   try {
-    execFileSync("bash", [SCRIPT, missing, "browser", "--dry-run"], { encoding: "utf8", timeout: 30000 });
+    execFileSync("bash", [SCRIPT, missing, "browser", "--dry-run", ...ROOT_FLAG], { encoding: "utf8", timeout: 30000 });
   } catch (err) { failed = err; }
   assert.ok(failed, "a missing <crow-home> is refused");
   assert.match(String(failed.stderr || ""), /REFUSED: <crow-home> is not a directory/);
@@ -132,10 +137,30 @@ test("the compose project must be this instance's own: a co-hosted instance's na
   writeFileSync(env, readFileSync(env, "utf8") + "CROW_BROWSER_CONTAINER_NAME=crow-browser-second\n", { mode: 0o600 });
   // The primary's project name is refused for this instance: a wrong -p would replace the primary's browser.
   assert.throws(
-    () => execFileSync("bash", [SCRIPT, home, "browser", "--dry-run"], { encoding: "utf8", timeout: 30000, stdio: "pipe" }),
+    () => execFileSync("bash", [SCRIPT, home, "browser", "--dry-run", ...ROOT_FLAG], { encoding: "utf8", timeout: 30000, stdio: "pipe" }),
     (err) => /not this instance's project \('crow-browser-second'/.test(String(err.stderr)),
   );
   // Its own name is accepted, and the plan names its own container.
-  const out = execFileSync("bash", [SCRIPT, home, "crow-browser-second", "--dry-run"], { encoding: "utf8", timeout: 30000 });
+  const out = execFileSync("bash", [SCRIPT, home, "crow-browser-second", "--dry-run", ...ROOT_FLAG], { encoding: "utf8", timeout: 30000 });
   assert.match(out, /compose -p:\s+crow-browser-second \(service crow-browser-second\)/);
+});
+
+test("both ops scripts carry the relay's uid: from the home's owner, refusing root without the flag", () => {
+  const SOURCE_PV = readFileSync(join(ROOT, "scripts/ops/browser-profile-to-volume.sh"), "utf8");
+  const CODE_PV = SOURCE_PV.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+  // Command blocks, not lines: a compose call continued over lines is still ONE call.
+  const joinLines = (code) => code.replace(/\\\n\s*/g, " ").split("\n");
+  for (const [name, code] of [["browser-cdp-gate.sh", CODE], ["browser-profile-to-volume.sh", CODE_PV]]) {
+    assert.match(code, /stat -c %u "\$INSTANCE_HOME"/, name + " derives the uid from the home's owner");
+    assert.match(code, /stat -c %g "\$INSTANCE_HOME"/, name + " derives the gid too");
+    assert.match(code, /--allow-root-gateway/, name + " has the escape hatch");
+    assert.match(code, /owned by root \(uid 0\)/, name + " refuses a root owner by default");
+    const composeLines = joinLines(code).filter((l) => / compose (-p |--env-file )/.test(l));
+    assert.ok(composeLines.length >= 1, name + " has compose invocations to check");
+    for (const line of composeLines) {
+      const printed = /^\s*(say|note|echo)\b/.test(line);
+      const want = printed ? /CROW_GATEWAY_UID=\$RELAY_UID CROW_GATEWAY_GID=\$RELAY_GID/ : /CROW_GATEWAY_UID="\$RELAY_UID" CROW_GATEWAY_GID="\$RELAY_GID"/;
+      assert.match(line, want, name + ": every compose run and every printed one carries the ids: " + line.trim());
+    }
+  }
 });

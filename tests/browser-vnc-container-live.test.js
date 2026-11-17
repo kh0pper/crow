@@ -88,10 +88,14 @@ test("the entrypoint in a throwaway container: RFB on a unix socket only, noVNC 
   writeFileSync(tok, TOKEN + "\n", { mode: 0o644 });   // readable by the container's root; 0400 in compose
   const cdpTok = join(dir, "cdp-token");
   writeFileSync(cdpTok, CDP_TOKEN + "\n", { mode: 0o644 });
+  // CROW_RELAY_UID/GID: crow's gateway passes them on a real host (the CDP relay listens as
+  // that uid). This throwaway container runs as root and on no network, so 0 is the honest
+  // value here: the entrypoint starts the relay on the uid it is told, root included.
   const runArgs = (name, instance) => ["run", "-d", "--name", name, "--network", "none", "--init", "--shm-size", "1g", "-m", "2g",
     "--stop-timeout", "30", "-e", `CROW_INSTANCE=${instance}`, "-e", "VNC_PASSWORD=legacy-value", "-e", "VNC_TOKEN=env-token-must-be-ignored",
+    "-e", "CROW_RELAY_UID=0", "-e", "CROW_RELAY_GID=0",
     "-v", `${tok}:/run/secrets/crow-vnc-token:ro`, "-v", `${cdpTok}:/run/secrets/crow-cdp-token:ro`,
-    "-v", `${VOL}:/root/.config/chromium-crow`, "-v", `${ep}:/app/entrypoint.sh:ro`, IMAGE];
+    "-v", `${VOL}:/root/.config/chromium-crow", "-v", `${ep}:/app/entrypoint.sh:ro`, IMAGE];
   docker(...runArgs(NAME, "/test/instance-a"));
   const waitReady = async () => {
     let l = "";
@@ -107,6 +111,9 @@ test("the entrypoint in a throwaway container: RFB on a unix socket only, noVNC 
   assert.match(logs, /RFB on a unix socket only/);
   assert.match(logs, /websockify listens on loopback only \(port 6080\)/);
   assert.match(logs, /cdp-relay listens on loopback only \(port 9222\)/, "the relay is the only listener on the CDP port, and it is loopback");
+  assert.match(logs, /listens on no TCP port; the relay is the only listener/, "Chromium itself owns no listener");
+  // The token reached the relay's own uid through a directory only that uid can read.
+  assert.equal(inside(`import os, stat\nprint(oct(stat.S_IMODE(os.stat("/run/crow-cdp").st_mode)), oct(stat.S_IMODE(os.stat("/run/crow-cdp/token").st_mode)))`), "0o700 0o400");
 
   // No TCP listener carries RFB; only noVNC (127.0.0.1:6080) and the CDP relay (127.0.0.1:9222) listen.
   const listen = inside(`

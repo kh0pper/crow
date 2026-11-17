@@ -16,6 +16,10 @@ import { loadCollections } from "./collections.js";
 // Router, db.js, peer-forward, cross-host-auth and the settings registry into the
 // panel's render path (it already imports ./collections.js, so that knot is real).
 import { needsConfigKeys } from "../../../bundles-config.js";
+// The one compose environment every gateway-driven `docker compose` run gets (an
+// allowlist, CROW_HOME, and the gateway's own uid/gid). compose-guard.js is node-builtins
+// plus one leaf module — never routes/bundles.js, which is what this file must avoid.
+import { composeEnv } from "../../../compose-guard.js";
 
 // Respect the instance's CROW_HOME (matches bundles.js / proxy.js resolveCrowHome).
 // Without this, an alternate instance (CROW_HOME=~/.crow-mpa, ~/.crow-finance) reads
@@ -244,14 +248,16 @@ export function fetchBundleStatus(installed) {
         const composePath = join(bundlesDir, id, "docker-compose.yml");
         if (existsSync(composePath)) {
           try {
-            // Same env the installer/start path uses (routes/bundles.js composeEnv):
-            // bundles whose compose file requires `${CROW_HOME:?…}` (workspace,
-            // browser) fail `ps` without it, and a failed `ps` read as "stopped" —
-            // the badge said Stopped while all five Workspace containers ran.
+            // Same env the installer/start path uses (compose-guard's composeEnv through
+            // routes/bundles.js): bundles whose compose file requires `${CROW_HOME:?…}`
+            // (workspace, browser) fail `ps` without it, and a failed `ps` read as
+            // "stopped" — the badge said Stopped while all five Workspace containers ran.
+            // The browser's compose also interpolates ${CROW_GATEWAY_UID} / ${CROW_GATEWAY_GID},
+            // which this process (the gateway) fills in itself.
             const out = execFileSync(composeCmd.cmd, [...composeCmd.prefix, "ps", "--format", "json"], {
               cwd: join(bundlesDir, id),
               timeout: 5000,
-              env: { ...process.env, CROW_HOME: CROW_DIR },
+              env: composeEnv(process.env, CROW_DIR),
             }).toString().trim();
             const containers = out.split("\n").filter(Boolean).map((line) => {
               try { return JSON.parse(line); } catch { return null; }

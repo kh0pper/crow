@@ -10,7 +10,7 @@
 #
 #   scripts/ops/browser-profile-to-volume.sh \
 #     --container crow-browser --project browser \
-#     --source <checkout>/bundles/browser [--domains example.com,example.org] [--dry-run] [--no-tty-guard]
+#     --source <checkout>/bundles/browser [--domains example.com,example.org] [--dry-run] [--no-tty-guard] [--allow-root-gateway]
 #   scripts/ops/browser-profile-to-volume.sh --delete-backup <home>/browser-profile-backup/<stamp>
 #
 # Steps (each refuses loudly; nothing is changed before step 2):
@@ -45,6 +45,12 @@
 # says so and prints the recovery commands. A SIGKILL, an OOM kill or a dead
 # tmux server skip all of that: the deadman covers those.
 #
+# Since bundle 1.7.0 the CDP relay in the container listens as the GATEWAY's uid
+# (Chromium stays root), so every compose run here passes CROW_GATEWAY_UID /
+# CROW_GATEWAY_GID, taken from the owner of <instance home>. A root owner is
+# refused unless --allow-root-gateway is given: a root listener is what the
+# add-on wall will not accept.
+#
 # Test seams (tests/browser-profile-to-volume.test.js): DOCKER (the docker
 # binary), CROW_MIGRATE_NOW (the timestamp), CROW_MIGRATE_CDP_WAIT,
 # CROW_MIGRATE_CLOSE_WAIT and CROW_MIGRATE_DEADMAN_SECS (seconds),
@@ -59,7 +65,7 @@ SERVICE=crow-browser
 # that hold the logins), relative to /root/.config.
 KEY_FILES="chromium-crow/Default/Cookies chromium-crow/Default/Network/Cookies chromium-crow/Default/Login?Data chromium-crow/Local?State chromium-crow/Default/Preferences"
 
-CONTAINER="" PROJECT="" SOURCE="" DOMAINS="" DRY_RUN=0 DELETE_BACKUP="" TTY_GUARD=1
+CONTAINER="" PROJECT="" SOURCE="" DOMAINS="" DRY_RUN=0 DELETE_BACKUP="" TTY_GUARD=1 ALLOW_ROOT_GATEWAY=0
 SYSTEMD_RUN="${CROW_MIGRATE_SYSTEMD_RUN:-systemd-run}"
 SYSTEMCTL="${CROW_MIGRATE_SYSTEMCTL:-systemctl}"
 
@@ -78,6 +84,7 @@ while [ $# -gt 0 ]; do
     --domains) DOMAINS="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --no-tty-guard) TTY_GUARD=0; shift ;;
+    --allow-root-gateway) ALLOW_ROOT_GATEWAY=1; shift ;;
     --delete-backup) DELETE_BACKUP="${2:-}"; [ -n "$DELETE_BACKUP" ] || usage; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown argument: $1" >&2; usage ;;
@@ -134,6 +141,15 @@ BUNDLE_DIR="$(dirname "${COMPOSE_FILE_USED%%,*}")"
 INSTANCE_HOME="$(realpath -m -- "$(dirname "$(dirname "$BUNDLE_DIR")")")"
 ENV_FILE="$BUNDLE_DIR/.env"
 [ -f "$ENV_FILE" ] || fail "no $ENV_FILE"
+# The relay's uid/gid: the owner of <instance home>, i.e. the gateway's own user. They go
+# on every compose run below (an empty value stops the container, by design).
+RELAY_UID="$(stat -c %u "$INSTANCE_HOME" 2>/dev/null)"
+RELAY_GID="$(stat -c %g "$INSTANCE_HOME" 2>/dev/null)"
+[[ "$RELAY_UID" =~ ^[0-9]+$ ]] || fail "cannot read the owner uid of $INSTANCE_HOME (stat -c %u)"
+[[ "$RELAY_GID" =~ ^[0-9]+$ ]] || fail "cannot read the owner gid of $INSTANCE_HOME (stat -c %g)"
+if [ "$RELAY_UID" = 0 ] && [ "$ALLOW_ROOT_GATEWAY" != 1 ]; then
+  fail "$INSTANCE_HOME is owned by root (uid 0), so the CDP relay would listen as root and a walled browser add-on would be refused its own browser. Run Crow as a non-root user, or pass --allow-root-gateway if this instance really is a root gateway."
+fi
 if "$DOCKER" inspect "$CONTAINER" --format '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' | grep -qx "$PROFILE_DIR"; then
   fail "'$CONTAINER' already has a volume on $PROFILE_DIR: nothing to move"
 fi
@@ -145,7 +161,8 @@ POLICY="$("$DOCKER" inspect "$CONTAINER" --format '{{.HostConfig.RestartPolicy.N
 # What the NEW compose would do with this instance's .env (a stand-in token
 # when the .env has none yet: config only renders, it never starts anything).
 render() {
-  ( cd "$BUNDLE_DIR" && CROW_HOME="$INSTANCE_HOME" CROW_BROWSER_VNC_TOKEN="${CROW_BROWSER_VNC_TOKEN:-render-check-only-render-check-only}" \
+  ( cd "$BUNDLE_DIR" && CROW_HOME="$INSTANCE_HOME" CROW_GATEWAY_UID="$RELAY_UID" CROW_GATEWAY_GID="$RELAY_GID" \
+      CROW_BROWSER_VNC_TOKEN="${CROW_BROWSER_VNC_TOKEN:-render-check-only-render-check-only}" \
       "$DOCKER" compose --env-file "$ENV_FILE" -f "$SOURCE/docker-compose.yml" --project-directory "$BUNDLE_DIR" config --format json )
 }
 RENDERED="$(render 2>/dev/null)" || fail "the new compose does not render with $ENV_FILE"
@@ -208,6 +225,7 @@ fi
 
 say "container:  $CONTAINER (project $PROJECT, running=$WAS_RUNNING, restart=$POLICY)"
 say "bundle dir: $BUNDLE_DIR"
+say "relay uid:  $RELAY_UID:$RELAY_GID (the owner of $INSTANCE_HOME; the CDP relay listens as it)"
 say "old image:  kept as $PREV_TAG (the rollback image; prune-proof)"
 say "new image:  built as $NEXT_TAG from $SOURCE BEFORE the old container stops; named $BUILD_NAME only at install"
 say "deadman:    $DEADMAN_UNIT restarts the old container after ${CROW_MIGRATE_DEADMAN_SECS:-900}s unless this run finishes"
@@ -335,7 +353,7 @@ rollback() {
     if [ "$("$DOCKER" inspect "$CONTAINER" --format '{{.Image}}' 2>/dev/null)" != "$IMAGE" ]; then
       note "the recreate already replaced the old container. NOT rolling back automatically."
       note "the profile is in volume $VOLUME and $BACKUP/profile.tar; the old image is $PREV_TAG;"
-      note "the old bundle files are in $BACKUP/bundle-files. Retry: cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME docker compose -p $PROJECT up -d --no-build"
+      note "the old bundle files are in $BACKUP/bundle-files. Retry: cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME CROW_GATEWAY_UID=$RELAY_UID CROW_GATEWAY_GID=$RELAY_GID docker compose -p $PROJECT up -d --no-build"
       disarm_deadman replaced
       note "the deadman ($DEADMAN_UNIT) is disarmed: if you recover by hand with the old image, nothing restarts it behind you."
       cleanup_hint
@@ -465,7 +483,7 @@ RETAGGED=1
 STAGE=recreate
 echo recreate > "$BACKUP/stage"   # the deadman leaves a live run alone from here on
 say "recreating $CONTAINER with the new compose (no rebuild)..."
-( cd "$BUNDLE_DIR" && CROW_HOME="$INSTANCE_HOME" "$DOCKER" compose -p "$PROJECT" up -d --no-build --force-recreate )
+( cd "$BUNDLE_DIR" && CROW_HOME="$INSTANCE_HOME" CROW_GATEWAY_UID="$RELAY_UID" CROW_GATEWAY_GID="$RELAY_GID" "$DOCKER" compose -p "$PROJECT" up -d --no-build --force-recreate )
 STAGE=done
 trap - EXIT INT TERM HUP
 set +e
