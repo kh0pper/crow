@@ -47,6 +47,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { jsonError } from "./_error.js";
 import { stripSecrets } from "../../shared/secret-detect.js";
+import { maskSecrets } from "../../shared/secret-mask.js";
 import { isBodyParserError } from "../body-error-handler.js";
 import { openDeliveredDir, openDeliveredFile, unlinkDelivered } from "../../shared/perch-delivered.js";
 import { SHOT_KEEP } from "../browser-tile/shots.js";
@@ -356,7 +357,9 @@ function mapEngineError(res, err) {
     if (err && err.interrupted === true) extra.interrupted = true;
     return jsonError(res, mapped[0], mapped[1], Object.keys(extra).length ? extra : undefined);
   }
-  return jsonError(res, 500, String((err && err.message) || err));
+  // Unrecognized: the message can quote pi's stderr, a provider error body or
+  // a path, so it is masked and capped like every other display string here.
+  return jsonError(res, 500, maskSecrets(String((err && err.message) || err)).slice(0, 300));
 }
 
 /** Parse a request body's `card_id` into a strict integer, or null if it is

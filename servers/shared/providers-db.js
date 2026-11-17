@@ -178,8 +178,10 @@ export function addProviderChangeListener(fn) {
 
 /**
  * One cheap change signal for the `providers` table: the row count (a delete
- * moves it), the newest `updated_at`, the lamport sum (every write bumps it)
- * and the disabled sum (a flip moves it). Credential columns are never read.
+ * moves it), the newest `updated_at`, the lamport sum (every write bumps it),
+ * the disabled sum (a flip moves it), the highest rowid and the summed id
+ * length (a replaced row moves at least one of those even when the count and
+ * every sum are unchanged). Credential columns are never read.
  *
  * This is the fingerprint `servers/shared/provider-change-watch.js` polls so
  * the gateway notices rows written by ANOTHER process — a script or CLI
@@ -191,10 +193,10 @@ export function addProviderChangeListener(fn) {
  */
 export async function providersFingerprint(db) {
   const { rows } = await db.execute(
-    "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at),'') AS u, COALESCE(SUM(lamport_ts),0) AS l, COALESCE(SUM(disabled),0) AS d FROM providers",
+    "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at),'') AS u, COALESCE(SUM(lamport_ts),0) AS l, COALESCE(SUM(disabled),0) AS d, COALESCE(MAX(rowid),0) AS r, COALESCE(SUM(length(id)),0) AS k FROM providers",
   );
-  const r = rows[0] ?? {};
-  return `${r.n ?? 0}|${r.u ?? ""}|${r.l ?? 0}|${r.d ?? 0}`;
+  const row = rows[0] ?? {};
+  return `${row.n ?? 0}|${row.u ?? ""}|${row.l ?? 0}|${row.d ?? 0}|${row.r ?? 0}|${row.k ?? 0}`;
 }
 
 async function emitSync(db, op, row) {

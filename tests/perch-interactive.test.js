@@ -45,7 +45,7 @@ const DB_FILE = join(dir, "crow.db");
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const LEASE_PATH = join(CROW_HOME, "perch-interactive-leases.json");
 
-let createInteractiveEngine, getInteractiveEngine, _resetInteractiveEngineForTest, _setInteractiveEngineForTest, notifyCardToResident, emitExternalToResident;
+let createInteractiveEngine, getInteractiveEngine, _resetInteractiveEngineForTest, _setInteractiveEngineForTest, notifyCardToResident, emitExternalToResident, markGatewayStopping;
 
 function raw() {
   return new Database(DB_FILE);
@@ -296,6 +296,7 @@ before(async () => {
   _setInteractiveEngineForTest = mod._setInteractiveEngineForTest;
   notifyCardToResident = mod.notifyCardToResident;
   emitExternalToResident = mod.emitExternalToResident;
+  markGatewayStopping = mod.markGatewayStopping;
 });
 
 beforeEach(() => {
@@ -692,7 +693,22 @@ test("a wake on a recorded model the bot engine cannot run refuses with the mode
   );
 });
 
-test("a SIGTERM exit is flagged as a restart interruption; a plain exit code is not", async () => {
+test("control({model}): a switch to a model the bot engine cannot run is refused with the model named, and nothing is written", async () => {
+  const { engine, state } = makeEngine({
+    providerModels: () => [{ provider: "crow-c-nowhere", id: "m1" }],
+  });
+  const s = await spawned(engine);
+  await assert.rejects(
+    () => engine.control(s.sessionId, { principal: "owner", model: { provider: "crow-c-nowhere", modelId: "m1" } }),
+    (e) => e.code === "bad_request" && e.detail === 'model "crow-c-nowhere/m1" is not available to the bot engine',
+    "the drawer is told which model, not a bare bad_request"
+  );
+  assert.equal(state.instances[0].sent.some((m) => m && m.type === "set_model"), false,
+    "the refusal lands before any set_model reaches the child");
+  assert.equal(rowFor(s.threadId).model, null, "no choice is persisted for a model the engine cannot run");
+});
+
+test("a SIGTERM exit is an interruption only once the gateway's own shutdown began", async () => {
   const { engine, state } = makeEngine();
   const a = await spawned(engine, "signalled");
   const sinkA = await collect(engine, a.sessionId);
@@ -702,20 +718,36 @@ test("a SIGTERM exit is flagged as a restart interruption; a plain exit code is 
   await tick();
   const errsA = sinkA.ofType("error").filter((e) => e.reason === "pi_exit");
   assert.equal(errsA.length, 1);
-  assert.equal(errsA[0].interrupted, true, "a restart's SIGTERM is named as an interruption");
+  assert.equal(Object.hasOwn(errsA[0], "interrupted"), false,
+    "nothing announced a shutdown: a reaper's or a hand-typed SIGTERM is an unexpected exit");
 
-  const b = await spawned(engine, "killed");
+  // The gateway's own shutdown announces itself before it kills anything
+  // (index.js's gracefulShutdown calls this). The marker is process-wide.
+  markGatewayStopping();
+
+  const b = await spawned(engine, "restarting");
   const sinkB = await collect(engine, b.sessionId);
-  state.instances[1].exit(137);               // an OOM kill: a code, no signal
+  const piB = state.instances[1];
+  piB._exitSignal = "SIGTERM";
+  piB.exit(-1);
   await tick();
   const errsB = sinkB.ofType("error").filter((e) => e.reason === "pi_exit");
   assert.equal(errsB.length, 1);
-  assert.equal(Object.hasOwn(errsB[0], "interrupted"), false, "no interruption key without a signal");
+  assert.equal(errsB[0].interrupted, true, "a restart's SIGTERM is named as an interruption");
+
+  const c = await spawned(engine, "killed");
+  const sinkC = await collect(engine, c.sessionId);
+  state.instances[2].exit(137);               // an OOM kill: a code, no signal
+  await tick();
+  const errsC = sinkC.ofType("error").filter((e) => e.reason === "pi_exit");
+  assert.equal(errsC.length, 1);
+  assert.equal(Object.hasOwn(errsC[0], "interrupted"), false, "no interruption key without a signal");
 });
 
 test("a child that dies once stopAll() has begun is flagged interrupted even with no signal", async () => {
   const { engine, state } = makeEngine();
-  await spawned(engine, "first");
+  const first = await spawned(engine, "first");
+  const sinkFirst = await collect(engine, first.sessionId);
   const stopping = engine.stopAll();          // the shutdown flag is set before its first await
   const late = await spawned(engine, "late");
   const sink = await collect(engine, late.sessionId);
@@ -724,6 +756,10 @@ test("a child that dies once stopAll() has begun is flagged interrupted even wit
   const errs = sink.ofType("error").filter((e) => e.reason === "pi_exit");
   assert.equal(errs.length, 1);
   assert.equal(errs[0].interrupted, true, "the gateway is going down: an exit now is an interruption, not a crash");
+  // The session that was live when stopAll() began was closed BY it, so its
+  // exit is expected: the chat must not be told pi died on it.
+  assert.equal(sinkFirst.ofType("error").filter((e) => e.reason === "pi_exit").length, 0,
+    "stopAll's own close of a live session emits no pi_exit frame");
   await stopping;
 });
 

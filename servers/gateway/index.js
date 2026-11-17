@@ -949,6 +949,13 @@ function closeAndWait(listener) {
 }
 
 async function gracefulShutdown() {
+  // A child the gateway's own shutdown SIGTERMs is an interruption, not a
+  // crash: say so before anything else, so a per-session engine that sees the
+  // signal reports it that way instead of as an unexpected exit.
+  try {
+    const { markGatewayStopping } = await import("./perch-interactive.js");
+    markGatewayStopping();
+  } catch { /* module missing — never block the exit on it */ }
   if (shuttingDown) return;
   shuttingDown = true;                                           // step 1
   // SIGTERM/SIGINT is an operator or service-manager stop, never a crash.

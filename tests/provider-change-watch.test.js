@@ -63,7 +63,7 @@ test("providersFingerprint moves on insert, on a disabled flip and on delete, an
   const fx = freshDb();
   try {
     const empty = await providersFingerprint(fx.db);
-    assert.equal(empty, "0||0|0");
+    assert.equal(empty, "0||0|0|0|0");
 
     await upsertProvider(fx.db, { ...ROW, apiKey: "sk-test-secret-1" });
     const inserted = await providersFingerprint(fx.db);
@@ -81,6 +81,30 @@ test("providersFingerprint moves on insert, on a disabled flip and on delete, an
     const deleted = await providersFingerprint(fx.db);
     assert.notEqual(deleted, disabled, "a delete moves it");
     assert.equal(deleted, empty, "a hard delete returns to the empty-table fingerprint");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("providersFingerprint still moves when one row is deleted and a different one takes its place at the same timestamps", async () => {
+  const fx = freshDb();
+  try {
+    await upsertProvider(fx.db, { ...ROW, id: "watch-aaa" });
+    await upsertProvider(fx.db, { ...ROW, id: "watch-bbb" });
+    // Pin lamport_ts and updated_at on every row, so the count, the newest
+    // updated_at, the lamport sum and the disabled sum are all unchanged by
+    // the swap below — only the identity of the rows moves.
+    await fx.db.execute("UPDATE providers SET lamport_ts = 7, updated_at = '2026-01-01 00:00:00'");
+    const before = await providersFingerprint(fx.db);
+
+    await fx.db.execute({ sql: "DELETE FROM providers WHERE id = ?", args: ["watch-aaa"] });
+    await upsertProvider(fx.db, { ...ROW, id: "watch-ccc" });   // same id length as the one it replaces
+    await fx.db.execute("UPDATE providers SET lamport_ts = 7, updated_at = '2026-01-01 00:00:00'");
+    const after = await providersFingerprint(fx.db);
+
+    assert.equal(after.split("|").slice(0, 4).join("|"), before.split("|").slice(0, 4).join("|"),
+      "precondition: count, newest updated_at, lamport sum and disabled sum are identical");
+    assert.notEqual(after, before, "a replaced row moves the fingerprint even with no count/timestamp change");
   } finally {
     fx.cleanup();
   }

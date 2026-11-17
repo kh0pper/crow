@@ -406,6 +406,23 @@ test("POST /bots/:id/interactive maps an unrecognized engine throw to a plain 50
   assert.equal(body.error, "disk full");
 });
 
+test("a 500 body is masked and capped: a token-shaped secret never reaches the client, and a long message is cut at 300", async () => {
+  // An unrecognized throw is the one place an engine's own message is echoed
+  // to the client. pi's stderr and a provider's error body can carry a key, so
+  // the body goes through the display mask first.
+  const token = "sk-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4";
+  engineImpl.spawn = async () => { throw new Error("upstream refused key " + token + " for /v1/models"); };
+  const { status, body } = await postJson("/bots/chatty/interactive", {});
+  assert.equal(status, 500);
+  assert.equal(body.error.includes(token), false, "the token is masked out");
+  assert.ok(body.error.includes("[REDACTED]"), "masked with the display marker");
+
+  engineImpl.spawn = async () => { throw new Error("y".repeat(1000)); };
+  const long = await postJson("/bots/chatty/interactive", {});
+  assert.equal(long.status, 500);
+  assert.equal(long.body.error.length, 300, "the message is capped at 300 characters");
+});
+
 test("an err.code that collides with Object.prototype ('constructor') still maps to a clean 500 (fix-round F2)", async () => {
   // Pre-fix, `ERROR_MAP[err.code]` walked the prototype chain: code
   // "constructor" yielded Object's constructor function (truthy, not an
