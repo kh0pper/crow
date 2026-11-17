@@ -344,6 +344,9 @@ const ASSET_FILES = new Map([
   // The pad-event ring the processor fills for the page's lights, part of the
   // worklet module (engine-client.js's SOURCE_FILES) like the rest.
   ["pad-events.js", join("engine", "pad-events.js")],
+  // The ROLL clock (when a rolling pad's next repeat stands), part of the worklet
+  // module too.
+  ["roll-clock.js", join("engine", "roll-clock.js")],
   ["perf-fx.js", join("engine", "perf-fx.js")],
   ["resample-worker.js", join("engine", "resample-worker.js")],
   ["chop.js", join("engine", "chop.js")],

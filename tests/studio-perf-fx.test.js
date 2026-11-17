@@ -1058,6 +1058,7 @@ async function engineTools() {
             "resample.js": readFileSync(join(ENGINE_DIR, "resample.js"), "utf8"),
             "sampler-voice.js": readFileSync(join(ENGINE_DIR, "sampler-voice.js"), "utf8"),
             "pad-events.js": readFileSync(join(ENGINE_DIR, "pad-events.js"), "utf8"),
+            "roll-clock.js": readFileSync(join(ENGINE_DIR, "roll-clock.js"), "utf8"),
             "perf-fx.js": readFileSync(join(ENGINE_DIR, "perf-fx.js"), "utf8"),
             "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
             "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
@@ -1320,7 +1321,15 @@ function engineClientApi() {
  * @returns {{name: string, cls: Function, posts: object[]}}
  */
 function loadProcessorClass() {
-  const names = ["sequencer.js", "resample.js", "sampler-voice.js", "pad-events.js", "perf-fx.js", "studio-processor.js"];
+  const names = [
+    "sequencer.js",
+    "resample.js",
+    "sampler-voice.js",
+    "pad-events.js",
+    "roll-clock.js",
+    "perf-fx.js",
+    "studio-processor.js",
+  ];
   const texts = names.map((name) => readFileSync(join(ENGINE_DIR, name), "utf8"));
   const source = engineClientApi().composeEngineModule(texts);
   const posts = [];

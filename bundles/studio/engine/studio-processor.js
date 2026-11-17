@@ -4,15 +4,16 @@
  * `engine-client.js` concatenates these files into ONE module and loads it with
  * `audioWorklet.addModule()`:
  *
- *     sequencer.js + resample.js + sampler-voice.js + pad-events.js + perf-fx.js
- *       + sunvox.js + spessasynth.js + font-voice.js + dynamics.js
+ *     sequencer.js + resample.js + sampler-voice.js + pad-events.js + roll-clock.js
+ *       + perf-fx.js + sunvox.js + spessasynth.js + font-voice.js + dynamics.js
  *       + faust-host.js + meter.js + studio-processor.js
  *
  * so this file shares a module scope with the vendored SunVox glue (which
  * declares the `SunVoxLib` factory), with the pure sequencer
  * (`StudioSequencer` on `globalThis`), with the sampler's voice DSP
  * (`StudioSamplerVoice`), with the pad-event ring (`StudioPadEvents`), with the
- * performance-effects bus (`StudioPerfFx`) and
+ * ROLL clock (`StudioRollClock`), with the performance-effects bus
+ * (`StudioPerfFx`) and
  * with the SoundFont hosts (`StudioFontVoice`, which drives the vendored
  * synth's `SpessaSynthProcessor`), with Crow's own dynamics (`StudioDynamics`),
  * with the compiled Faust effects' host (`StudioFaustHost`) and with the master
@@ -188,7 +189,26 @@
  *   on every edit, releases nothing that still exists: only a voice whose pad is
  *   gone from the new snapshot, or whose pad no longer names the sample (or
  *   slice) that voice is playing, ends, through the normal release.
- * - **Stop** releases the live state — every loop, every HOLD and the pause —
+ * - **ROLL:** `{type:"roll_start", track_id, bank_id, index, interval, v}`
+ *   repeats one pad at a straight interval (1/4, 1/8, 1/16, 1/32 or 1/64) until
+ *   `{type:"roll_stop", track_id, bank_id, index}`, and at most `MAX_ROLLS`
+ *   (four) pads roll at once. Each repeat is a step-like start —
+ *   `startPad(event, false)` — so it flashes on the page, obeys the mute group
+ *   and follows the pad's own mode: a Normal pad restarts on every repeat and a
+ *   One-shot pad overlaps them (M20). A Gate pad's repeat carries
+ *   `gate_frames` = one interval, so each repeat releases itself on the frame
+ *   the next one starts and its repeats never pile up (M18). The first hit of a
+ *   roll is the press itself. Three things are refused, and the page keeps its
+ *   own count so it knows without asking: a pad with no playable sample, a pad
+ *   whose Loop setting is
+ *   on (its loop is what the operator hears, M19), and a fifth pad while four
+ *   roll. The clock (`roll-clock.js`) is stepped off `this.bpm` at every
+ *   repeat, so a tempo change moves only the repeats after it. While Pause-all
+ *   is on the clock keeps running and every repeat starts paused (M21). Stop
+ *   and `reset_live` clear every roll; an ordinary song change keeps them
+ *   unless their pad or sample is gone.
+ * - **Stop** releases the live state — every loop, every HOLD, every ROLL and
+ *   the pause —
  *   and so does `{type:"reset_live"}`, which the page sends when a DIFFERENT
  *   song opens.
  *   Neither touches the song, and an ordinary song update never sends one.
@@ -661,7 +681,9 @@
  * `{type:"monitor", track_id, on}`, `{type:"live", track_id,
  * bank_id, index, v, on}`, `{type:"hold", track_id, bank_id, index}`,
  * `{type:"release_held", track_id?, bank_id?, index?}`,
- * `{type:"pause_voices", on}`, `{type:"tap", target, on}`,
+ * `{type:"pause_voices", on}`, `{type:"roll_start", track_id, bank_id, index,
+ * interval, v}`, `{type:"roll_stop", track_id, bank_id, index}`,
+ * `{type:"roll_stop_all"}`, `{type:"tap", target, on}`,
  * `{type:"fx", name,
  * amount, on}`, `{type:"looper", action}`, `{type:"looper_buffers", left,
  * right}`, `{type:"looper_take", id}`, `{type:"faust-modules", modules}`,
@@ -918,6 +940,13 @@
    * chain, and past them a stolen voice is simply cut.
    */
   const STOLEN_TAILS_PER_TRACK = 2;
+
+  /**
+   * How many pads may ROLL at once. A roll repeats one pad, so four of them is
+   * four pads' worth of repeats on top of the song: past that the gesture stops
+   * being a performance flourish and starts taking voices from the pattern.
+   */
+  const MAX_ROLLS = 4;
 
   /**
    * `pad-events.js`'s two kind codes, duplicated here: a worklet scope composed
@@ -2313,6 +2342,36 @@
       this.pauseAll = false;
 
       /**
+       * The ROLL clock (`roll-clock.js`, C2a): where each rolling pad's next
+       * repeat stands, in this processor's own frames. `null` in a module
+       * composed without that file (some engine tests build their own file
+       * list), and then a roll is refused and nothing is ever repeated.
+       */
+      this.rollClock =
+        typeof StudioRollClock === "object" && StudioRollClock !== null ? StudioRollClock : null;
+
+      /**
+       * The pads rolling right now, at most `MAX_ROLLS`: one record per pad,
+       * made on the message thread in `rollStart` (a block only reads and steps
+       * them). Live state, never song data.
+       */
+      this.rolls = [];
+
+      /**
+       * The event one ROLL repeat is started with, refilled in
+       * `startRollRepeat`: a repeat allocates nothing of its own.
+       */
+      this.rollEvent = {
+        track_id: "",
+        bank_id: "",
+        index: 0,
+        v: 0,
+        frame: 0,
+        gate_frames: 0,
+        clip_id: "",
+      };
+
+      /**
        * The pad lights' state, one entry per bank: `codes[0]` is the packed
        * state the last block reported and `codes[1]` the one this block holds,
        * two bits per pad (`PAD_STATE_*`). The arrays are allocated in `readKit`
@@ -2801,6 +2860,18 @@
           // stand, and ramping them back up carries on from that very frame. It
           // is never a command and never a history step.
           this.pauseVoices(message.on === true);
+          break;
+        case "roll_start":
+          // ROLL is live state too: repeats of one pad at a straight interval.
+          // The page keeps its own count for its answer; the engine enforces the
+          // same limits here, so a page that asks anyway changes nothing.
+          this.rollStart(message.track_id, message.bank_id, message.index, message.interval, message.v);
+          break;
+        case "roll_stop":
+          this.rollStop(message.track_id, message.bank_id, message.index);
+          break;
+        case "roll_stop_all":
+          this.rollStopAll();
           break;
         case "tap":
           this.setTap(message.target, message.on === true);
@@ -4138,6 +4209,10 @@
       // `syncSlots`), and so a send reaches a return that exists first.
       this.mixer = mixerSpecOf(snapshot);
       this.bpm = bpmOf(snapshot);
+      // A song change runs on every edit, so a roll whose pad still names the
+      // sound it started with keeps rolling; one whose pad or sample the new song
+      // no longer has ends here (M16).
+      this.pruneRolls();
       this.sequencer.setSong(snapshot);
       // The pad map above is the new one, so a Reverse that was flipped while the
       // pad sounds is applied to its voices here, before the block that follows.
@@ -7123,9 +7198,21 @@
           this.setMotion(motions[nextMotion]);
           nextMotion += 1;
         }
+        // A ROLL repeat standing on this frame starts here, before the run that
+        // begins on it is rendered: it is a step-like start that has to sound on
+        // its own frame (see `fireRolls`).
+        if (this.rolls.length > 0) this.fireRolls(cursor);
         let boundary = next < events.length ? Math.min(count, events[next].frame) : count;
         if (nextMotion < motions.length) boundary = Math.min(boundary, motions[nextMotion].frame);
         if (nextClip < clipChanges.length) boundary = Math.min(boundary, clipChanges[nextClip].frame);
+        // A repeat sounds on the frame the roll's clock names, so the run is cut
+        // there too, exactly as it is cut on a step's own frame.
+        if (this.rolls.length > 0) {
+          for (let at = 0; at < this.rolls.length; at += 1) {
+            const untilRepeat = this.rolls[at].clock.nextFrame - this.frame;
+            if (untilRepeat > 0 && untilRepeat < boundary) boundary = untilRepeat;
+          }
+        }
         if (onGrid) {
           // A DISTANCE to the next sub-step, added to the cursor before it is
           // compared with the block-relative event frames.
@@ -8414,6 +8501,65 @@
     }
 
     /**
+     * Start the ROLL repeats that are due on or before one frame of this block.
+     *
+     * A repeat is a step-like start and has to sound on its own frame, so it is
+     * fired at a run boundary that `block()` puts exactly there (see the loop in
+     * `block()`): the voice starts on the frame the clock named, not on the
+     * block's first one.
+     *
+     * The clock's step is worked out from the song's tempo AS IT IS at that
+     * repeat (`StudioRollClock.intervalFrames`), so a tempo change moves only the
+     * repeats after it and no repeat is doubled or dropped. Nothing is allocated
+     * here: the event object is made once and refilled.
+     * @param {number} cursor the block-relative frame being rendered
+     * @returns {void}
+     */
+    fireRolls(cursor) {
+      const clock = this.rollClock;
+      if (!clock) return;
+      const rolls = this.rolls;
+      for (let at = 0; at < rolls.length; at += 1) {
+        const roll = rolls[at];
+        // `while`, not `if`: a repeat can stand before the run's first frame when
+        // the run was cut for another reason, and an interval is at least one
+        // frame, so the clock always moves past the cursor.
+        while (roll.clock.nextFrame - this.frame <= cursor) {
+          const offset = roll.clock.nextFrame - this.frame;
+          if (offset >= 0) this.startRollRepeat(roll, offset);
+          clock.next(roll.clock, clock.intervalFrames(this.bpm, sampleRate, roll.interval));
+        }
+      }
+    }
+
+    /**
+     * One ROLL repeat: a step-like start of the rolling pad.
+     *
+     * `live` is false, so the start is a step's in every way that matters here:
+     * it flashes on the page, it obeys the mute group, its Normal or One-shot pad
+     * restarts or overlaps as that mode says (M20), and a Gate pad gets
+     * `gate_frames` = one interval — the gate a step would carry — so the repeat
+     * releases itself on the frame the next one starts instead of holding until
+     * somebody lets go (M18). The voice belongs to no clip: a roll is a live
+     * gesture, and a scene launch is not its business.
+     * @param {object} roll
+     * @param {number} offset the block-relative frame the repeat sounds on
+     * @returns {void}
+     */
+    startRollRepeat(roll, offset) {
+      const frames = this.rollClock.intervalFrames(this.bpm, sampleRate, roll.interval);
+      const event = this.rollEvent;
+      event.track_id = roll.track_id;
+      event.bank_id = roll.bank_id;
+      event.index = roll.index;
+      event.v = roll.v;
+      event.frame = offset;
+      event.gate_frames = frames;
+      event.clip_id = "";
+      this.startPad(event, false);
+    }
+
+    /**
      * The frames a pad plays inside one loaded sample: its slice when it names
      * one, the whole sample otherwise. A slice's frames are in the sample's own
      * rate (the document's), while the PCM here is at the context's rate, so
@@ -8714,6 +8860,159 @@
     }
 
     /**
+     * ROLL: repeat one pad at a straight interval until `rollStop` — the SP-404's
+     * ROLL key.
+     *
+     * A roll is live state, never song data: it is never a command and never a
+     * history step, and only `rollStop`, the pad or the sample going away, a
+     * Stop or a `reset_live` ends it (M16). At most `MAX_ROLLS` pads roll at
+     * once.
+     *
+     * Each repeat is a step-like start (`startPad(event, false)`, see
+     * `startRollRepeat`), so it reports its hit and its light, obeys the mute
+     * group and follows the pad's own mode: a Normal pad restarts on every repeat
+     * and a One-shot pad overlaps them (M20). A Gate pad's repeat carries
+     * `gate_frames` = one interval, so it releases itself on the frame the next
+     * repeat starts and its repeats never pile up (M18). The first hit of a roll
+     * is the press itself, so the first repeat is one interval after this lands.
+     *
+     * Three things are refused, and the answer says so: a pad the song has no
+     * playable sample for (there is nothing to repeat), a pad whose Loop setting
+     * is on (its loop already is what the operator hears, M19), and a fifth pad
+     * while four roll. A pad that is already rolling is not a fifth: it keeps its
+     * one roll and takes the new interval.
+     * @param {unknown} trackId
+     * @param {unknown} bankId
+     * @param {unknown} index the pad, 0-15
+     * @param {string} interval a name from `StudioRollClock.INTERVALS`
+     * @param {unknown} v the velocity every repeat plays at
+     * @returns {boolean} whether that pad is rolling now
+     */
+    rollStart(trackId, bankId, index, interval, v) {
+      const clock = this.rollClock;
+      if (!clock) return false;
+      const record = this.samplerRecord(asId(trackId));
+      if (!record) return false;
+      const bankIdValue = asId(bankId);
+      const padIndex = Math.trunc(Number(index) || 0);
+      const pad = this.pads.get(padKey(trackId, bankIdValue, padIndex));
+      if (!pad) return false;
+      // A looping pad rolls nothing: its loop is the sound the operator is
+      // already hearing, and a repeat on top of it would double it (M19).
+      if (padLoop(pad.loop) !== "off") return false;
+      const sampleId = asId(pad.sample_id);
+      if (sampleId === "") return false;
+      const stored = this.samples.get(sampleId);
+      if (!stored || stored.frames === 0) {
+        // The pad names a sample this device does not hold: the page can load it,
+        // exactly as a press would ask for it, and there is nothing to repeat
+        // until then.
+        this.reportMissingSample(sampleId);
+        return false;
+      }
+      const range = this.padRange(pad, stored);
+      if (!(range.end > range.start)) return false;
+
+      const key = padKey(trackId, bankIdValue, padIndex);
+      const velocity = Number(v);
+      const pace = typeof interval === "string" ? interval : "";
+      let roll = this.findRoll(key);
+      if (!roll) {
+        if (this.rolls.length >= MAX_ROLLS) return false;
+        roll = {
+          key: key,
+          track_id: asId(trackId),
+          bank_id: bankIdValue,
+          index: padIndex,
+          // The clock is placed below, one interval past this block's first
+          // frame: the press that started the roll is its first hit.
+          clock: clock.create(0),
+          interval: pace,
+          v: Number.isFinite(velocity) ? clamp(velocity, 1, 127) : 127,
+          // The sound the roll was asked for: an edit that repoints the pad at
+          // another sample ends the roll instead of repeating a sound the
+          // operator did not press (see `pruneRolls`).
+          sample_id: sampleId,
+        };
+        this.rolls.push(roll);
+      } else {
+        roll.interval = pace;
+        roll.sample_id = sampleId;
+        if (Number.isFinite(velocity)) roll.v = clamp(velocity, 1, 127);
+      }
+      // The next repeat is one interval from here, whether the pad was already
+      // rolling or not: a new pace is measured from the frame it was asked for.
+      clock.reanchor(roll.clock, this.frame, clock.intervalFrames(this.bpm, sampleRate, roll.interval));
+      return true;
+    }
+
+    /**
+     * End one pad's roll. The repeats stop from the next block on; the voices a
+     * repeat already started are left alone, exactly as a press's voice is when
+     * the finger lifts (a Gate pad's repeat ends its own gate, a One-shot pad
+     * plays to its end).
+     * @param {unknown} trackId
+     * @param {unknown} bankId
+     * @param {unknown} index the pad, 0-15
+     * @returns {void}
+     */
+    rollStop(trackId, bankId, index) {
+      const key = padKey(trackId, bankId, index);
+      for (let at = 0; at < this.rolls.length; at += 1) {
+        if (this.rolls[at].key !== key) continue;
+        this.rolls.splice(at, 1);
+        return;
+      }
+    }
+
+    /**
+     * End every roll. This is what Stop and `reset_live` do (M16); an ordinary
+     * song change never comes here.
+     * @returns {void}
+     */
+    rollStopAll() {
+      if (this.rolls.length > 0) this.rolls.length = 0;
+    }
+
+    /**
+     * @param {string} key a pad's own `<track>/<bank>/<index>` key
+     * @returns {object|null} the roll standing on that pad, or null
+     */
+    findRoll(key) {
+      for (let at = 0; at < this.rolls.length; at += 1) {
+        if (this.rolls[at].key === key) return this.rolls[at];
+      }
+      return null;
+    }
+
+    /**
+     * Drop the rolls the new snapshot has taken away: a pad that is gone, one
+     * that lost its sample, one repointed at another sample, or one that now
+     * loops.
+     *
+     * An ordinary `setSong` runs on every edit, so it leaves every roll whose pad
+     * still names the very sound it started with — an edit that touches something
+     * else never stops a roll (M16).
+     * @returns {void}
+     */
+    pruneRolls() {
+      if (this.rolls.length === 0) return;
+      const kept = [];
+      for (let at = 0; at < this.rolls.length; at += 1) {
+        const roll = this.rolls[at];
+        const pad = this.pads.get(roll.key);
+        if (!pad) continue;
+        if (padLoop(pad.loop) !== "off") continue;
+        const sampleId = asId(pad.sample_id);
+        if (sampleId === "" || sampleId !== roll.sample_id) continue;
+        const stored = this.samples.get(sampleId);
+        if (!stored || stored.frames === 0) continue;
+        kept.push(roll);
+      }
+      this.rolls = kept;
+    }
+
+    /**
      * End one sampler voice through the normal release, latch and all.
      *
      * A HOLD outranks a live release (that is what makes it a hold) but it never
@@ -8770,8 +9069,8 @@
     }
 
     /**
-     * Release the pads' live state: every loop and every HOLD now, through the
-     * normal release.
+     * Release the pads' live state: every loop, every HOLD and every ROLL now,
+     * through the normal release.
      *
      * This is what Stop and `reset_live` (a DIFFERENT song being opened) do, and
      * it is the one place the later live state — ROLL and Pause-all — is
@@ -8785,6 +9084,9 @@
       // frame it stood on, and the loops and holds then go as they always did.
       // An ordinary song update never comes here.
       this.pauseVoices(false);
+      // A ROLL is live state like a loop and a HOLD, so Stop ends every one of
+      // them: the repeats stop before the voices they started are released below.
+      this.rollStopAll();
       for (const record of this.slots) {
         if (!record || !record.sampler) continue;
         for (const voice of record.voices) {

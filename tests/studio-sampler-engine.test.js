@@ -47,6 +47,7 @@ const ASSETS = {
   "resample.js": readFileSync(join(ENGINE_DIR, "resample.js"), "utf8"),
   "sampler-voice.js": readFileSync(join(ENGINE_DIR, "sampler-voice.js"), "utf8"),
   "pad-events.js": readFileSync(join(ENGINE_DIR, "pad-events.js"), "utf8"),
+  "roll-clock.js": readFileSync(join(ENGINE_DIR, "roll-clock.js"), "utf8"),
   "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
   "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
   "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
@@ -421,6 +422,7 @@ const PROCESSOR_MODULE = studioEngine.composeEngineModule([
   ASSETS["resample.js"],
   ASSETS["sampler-voice.js"],
   ASSETS["pad-events.js"],
+  ASSETS["roll-clock.js"],
   readFileSync(join(ENGINE_DIR, "perf-fx.js"), "utf8"),
   ASSETS["sunvox.js"],
   ASSETS["studio-processor.js"],
@@ -4742,4 +4744,416 @@ test("no tempo change and no pad change: the reconcile does no voice scan", asyn
   await new Promise((resolve) => setTimeout(resolve, 20));
   await engine.process(128, 128);
   assertLevel(voice.speed, 1.5, "a tempo change is what makes the reconcile walk the voices", 1e-12);
+});
+
+// --- ROLL: one pad repeated at a straight interval (C2b) ---------------------
+
+/**
+ * Post one ROLL message, the way the panel's ROLL key does.
+ * @param {object} engine a processor from `createProcessor`
+ * @param {number} index the pad, 0-15
+ * @param {string} [interval] a name from `StudioRollClock.INTERVALS`
+ * @param {boolean} [on] whether this is a start or a stop
+ * @returns {void}
+ */
+function rollPad(engine, index, interval = "1/16", on = true) {
+  if (!on) {
+    engine.post({ type: "roll_stop", track_id: "track-1", bank_id: BANK, index });
+    return;
+  }
+  engine.post({ type: "roll_start", track_id: "track-1", bank_id: BANK, index, interval, v: 127 });
+}
+
+/** @returns {number[]} the frame of every hit the page was told about, in order. */
+function hitFrames(messages) {
+  const frames = [];
+  for (const event of allPadEvents(messages)) {
+    if (event.kind === "hit") frames.push(event.frame);
+  }
+  return frames;
+}
+
+test("rollStart repeats the pad at the interval and rollStop ends it on the next block", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0)], frames: 48000 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  // The press is the roll's first hit; the first REPEAT is one interval later.
+  pressPad(engine, 0);
+  rollPad(engine, 0, "1/16");
+  const rolling = await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
+
+  assert.deepEqual(
+    hitFrames(engine.messages),
+    [0, FRAMES_PER_SIXTEENTH],
+    "one repeat, a 16th (6000 frames at 120 bpm) after the press",
+  );
+  // The pad is a one-shot, so its repeat overlaps the press's voice: both sound
+  // from the repeat's own frame on.
+  assertLevel(rolling.left[FRAMES_PER_SIXTEENTH - 1], ONE_VOICE, "the press's voice alone until the repeat", 1e-7);
+  assertLevel(rolling.left[FRAMES_PER_SIXTEENTH], 2 * ONE_VOICE, "the repeat's own frame holds both voices", 1e-7);
+
+  // rollStop ends the repeats: the one that would have landed at 12000 never
+  // sounds, in the block it would have sounded in.
+  rollPad(engine, 0, "1/16", false);
+  await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.deepEqual(
+    hitFrames(engine.messages),
+    [0, FRAMES_PER_SIXTEENTH],
+    "the repeat that would have landed at 12000 is not started after rollStop",
+  );
+});
+
+test("the fifth concurrent rollStart returns false and the four keep rolling", async () => {
+  const pads = [];
+  for (let index = 0; index < 5; index += 1) pads.push(pad("track-1", index));
+  const engine = await createProcessor(kitSong({ pads, frames: 48000 }), [
+    { id: SAMPLE_ID, channels: [constant(48000, 0.5)] },
+  ]);
+
+  for (const index of [0, 1, 2, 3]) {
+    assert.equal(
+      engine.processor.rollStart("track-1", BANK, index, "1/16", 100),
+      true,
+      `pad ${index} has to roll: four pads may roll at once`,
+    );
+  }
+  assert.equal(
+    engine.processor.rollStart("track-1", BANK, 4, "1/16", 100),
+    false,
+    "a fifth pad is refused while four roll",
+  );
+  assert.equal(
+    engine.processor.rollStart("track-1", BANK, 2, "1/16", 100),
+    true,
+    "a pad that already rolls is not a fifth: it keeps its one slot",
+  );
+
+  engine.post({ type: "pad_events_on", on: true });
+  await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  // Pad 2 was asked for again, so only pads 0..3 repeat here; pad 4, refused,
+  // never sounds at all.
+  const repeated = allPadEvents(engine.messages).filter((event) => event.kind === "hit");
+  assert.deepEqual(
+    Array.from(repeated, (event) => event.index).sort(),
+    [0, 1, 2, 3],
+    "the four pads that were accepted keep rolling, and the fifth never starts",
+  );
+});
+
+test("the engine client answers rollStart from the song it was handed", async () => {
+  const song = kitSong({
+    pads: [
+      pad("track-1", 0),
+      pad("track-1", 1),
+      pad("track-1", 2),
+      pad("track-1", 3),
+      pad("track-1", 4),
+      pad("track-1", 5, { loop: "loop" }),
+      pad("track-1", 6, { sample_id: "" }),
+    ],
+    frames: 4800,
+  });
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: Math.round(0.1 * SAMPLE_RATE),
+    sampleRate: SAMPLE_RATE,
+  });
+  let engine = null;
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    await engine.loadSample(SAMPLE_ID, [Float32Array.from(constant(4800, 0.5))], SAMPLE_RATE);
+    engine.setSong(song);
+    await engine.flush();
+
+    // Four pads roll; the fifth, a looping pad, a pad with no sample and a pad
+    // the song does not have are all refused at once, with no round trip.
+    for (const index of [0, 1, 2, 3]) {
+      assert.equal(
+        engine.rollStart("track-1", BANK, index, "1/16", 127),
+        true,
+        `pad ${index} has to roll: four pads may roll at once`,
+      );
+    }
+    assert.equal(engine.rollStart("track-1", BANK, 4, "1/16", 127), false, "a fifth pad is refused");
+    assert.equal(engine.rollStart("track-1", BANK, 5, "1/16", 127), false, "M19 a looping pad is refused");
+    assert.equal(engine.rollStart("track-1", BANK, 6, "1/16", 127), false, "a pad with no sample is refused");
+    assert.equal(
+      engine.rollStart("track-1", BANK, 7, "1/16", 127),
+      false,
+      "a pad the song does not have is refused",
+    );
+
+    // A slot a rollStop frees is free for the next pad, and rollStopAll frees
+    // every one of them.
+    engine.rollStop("track-1", BANK, 0);
+    assert.equal(
+      engine.rollStart("track-1", BANK, 4, "1/16", 127),
+      true,
+      "the slot rollStop freed is free again",
+    );
+    engine.rollStopAll();
+    for (const index of [0, 1, 2, 3]) {
+      assert.equal(
+        engine.rollStart("track-1", BANK, index, "1/16", 127),
+        true,
+        "rollStopAll left every slot free",
+      );
+    }
+  } finally {
+    if (engine) engine.dispose();
+    await releaseWorklet(context);
+  }
+});
+
+test("a pad with no sample returns false", async () => {
+  const song = kitSong({
+    // Pad 0 has no sample at all, and there is no pad 1.
+    pads: [pad("track-1", 0, { sample_id: "" })],
+    frames: 4800,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(4800, 0.5)] }]);
+
+  assert.equal(
+    engine.processor.rollStart("track-1", BANK, 0, "1/16", 127),
+    false,
+    "a pad with no sample has nothing to repeat",
+  );
+  assert.equal(
+    engine.processor.rollStart("track-1", BANK, 1, "1/16", 127),
+    false,
+    "a pad the song does not have is refused the same way",
+  );
+
+  engine.post({ type: "pad_events_on", on: true });
+  const quiet = await engine.process(128, 2 * FRAMES_PER_SIXTEENTH);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.equal(peakOf(quiet.left), 0, "a refused roll never sounds");
+  assert.deepEqual(hitFrames(engine.messages), [], "and it reports no hit");
+});
+
+test("M19 a looping pad returns false", async () => {
+  const song = kitSong({
+    pads: [pad("track-1", 0, { loop: "loop" }), pad("track-1", 1, { loop: "pingpong" })],
+    frames: 4800,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(4800, 0.5)] }]);
+
+  assert.equal(
+    engine.processor.rollStart("track-1", BANK, 0, "1/16", 127),
+    false,
+    "M19 a pad whose Loop is on has no roll: its loop is what the operator hears",
+  );
+  assert.equal(
+    engine.processor.rollStart("track-1", BANK, 1, "1/16", 127),
+    false,
+    "M19 a ping-pong pad is refused the same way",
+  );
+
+  engine.post({ type: "pad_events_on", on: true });
+  const quiet = await engine.process(128, 2 * FRAMES_PER_SIXTEENTH);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.equal(peakOf(quiet.left), 0, "a refused roll starts no voice");
+  assert.deepEqual(hitFrames(engine.messages), [], "and reports no hit");
+});
+
+test("M18 a Gate pad rolled at 1/16 never has more than 2 voices sounding at once", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0, { mode: "gate" })], frames: 48000 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+  rollPad(engine, 0, "1/16");
+
+  const record = recordOf(engine, "track-1");
+  let most = 0;
+  let loudest = 0;
+  for (let block = 0; block < 100; block += 1) {
+    const rendered = await engine.process(128, 128);
+    const sounding = soundingOf(record).length;
+    if (sounding > most) most = sounding;
+    if (peakOf(rendered.left) > loudest) loudest = peakOf(rendered.left);
+  }
+
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  // Two repeats inside the 12800 frames walked (at 6000 and 12000), and each
+  // one's gate is exactly the interval: a repeat releases itself on the frame the
+  // next one starts, so no two of them pile up.
+  assert.ok(hitFrames(engine.messages).length >= 2, "the roll has to have repeated, and it did not");
+  assert.ok(most <= 2, `a Gate pad's repeats must never hold more than 2 voices at once, saw ${most}`);
+  assert.ok(loudest > 0.1, `the repeats have to be audible, peak was ${loudest}`);
+});
+
+test("M20 a Normal pad restarts on each repeat and a One-shot pad overlaps", async () => {
+  const samples = [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }];
+
+  // A Normal pad's repeat takes the voice before it over the 64-frame crossfade,
+  // so the roll's SECOND repeat (at 12000) is the one that meets a sounding voice.
+  const normalSong = kitSong({ pads: [pad("track-1", 0, { mode: "normal" })], frames: 48000 });
+  const normal = await createProcessor(normalSong, samples);
+  rollPad(normal, 0, "1/16");
+  const restarted = await normal.process(128, 2 * FRAMES_PER_SIXTEENTH + 128);
+  assert.deepEqual(normal.errors, [], "the processor must render without a fault");
+  assertLevel(
+    restarted.left[2 * FRAMES_PER_SIXTEENTH - 1],
+    ONE_VOICE,
+    "the first repeat's voice sounds alone until the second repeat",
+  );
+  assertLevel(restarted.left[2 * FRAMES_PER_SIXTEENTH], 2 * ONE_VOICE, "the repeat's own frame still holds both");
+  assertLevel(
+    restarted.left[2 * FRAMES_PER_SIXTEENTH + 64],
+    ONE_VOICE,
+    "and the earlier one has faded 64 frames later",
+  );
+
+  // A One-shot pad's repeat overlaps instead: both voices go on sounding.
+  const oneshot = await createProcessor(kitSong({ pads: [pad("track-1", 0)], frames: 48000 }), samples);
+  rollPad(oneshot, 0, "1/16");
+  const overlapped = await oneshot.process(128, 2 * FRAMES_PER_SIXTEENTH + 128);
+  assert.deepEqual(oneshot.errors, [], "the processor must render without a fault");
+  for (const at of [
+    2 * FRAMES_PER_SIXTEENTH,
+    2 * FRAMES_PER_SIXTEENTH + 63,
+    2 * FRAMES_PER_SIXTEENTH + 64,
+    2 * FRAMES_PER_SIXTEENTH + 127,
+  ]) {
+    assertLevel(overlapped.left[at], 2 * ONE_VOICE, `frame ${at} holds both one-shot voices`);
+  }
+});
+
+test("a tempo change mid-roll changes spacing from the next repeat and double-fires nothing", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0)], frames: 48000 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+  rollPad(engine, 0, "1/16");
+
+  // The first repeat stands a 16th into the song: 6000 frames at 120 bpm.
+  await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
+  assert.deepEqual(hitFrames(engine.messages), [FRAMES_PER_SIXTEENTH], "the first repeat is a 16th in");
+
+  // 140 bpm rounds a 16th to 5143 frames. The repeat the clock had already
+  // placed (12000, from the step it took at 6000) keeps its slot — a tempo change
+  // never moves a hit nor plays one again — and every repeat placed after it is
+  // spaced by the new interval.
+  const faster = JSON.parse(JSON.stringify(song));
+  faster.meta.bpm = 140;
+  engine.post({ type: "song", snapshot: faster });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await engine.process(128, 12000);
+
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  const frames = hitFrames(engine.messages);
+  assert.deepEqual(
+    frames,
+    [6000, 12000, 17143],
+    "the repeats after the change follow the new interval, and none is doubled or dropped",
+  );
+  assert.equal(frames[1] - frames[0], FRAMES_PER_SIXTEENTH, "the hit already placed keeps its spacing");
+  assert.equal(frames[2] - frames[1], 5143, "the next repeat is spaced at the new tempo's 1/16");
+});
+
+test("Stop and resetLive clear all rolls", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0), pad("track-1", 1)], frames: 48000 });
+  const samples = [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }];
+  const engine = await createProcessor(song, samples);
+  engine.post({ type: "pad_events_on", on: true });
+
+  rollPad(engine, 0, "1/16");
+  rollPad(engine, 1, "1/16");
+  await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
+  assert.deepEqual(
+    hitFrames(engine.messages),
+    [FRAMES_PER_SIXTEENTH, FRAMES_PER_SIXTEENTH],
+    "both rolls repeat a 16th in",
+  );
+
+  engine.post({ type: "stop" });
+  for (let block = 0; block < 60; block += 1) await engine.process(128, 128);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.equal(
+    hitFrames(engine.messages).length,
+    2,
+    "Stop clears both rolls: nothing more is repeated while 7680 frames of blocks go on",
+  );
+
+  // The same for opening a DIFFERENT song: resetLive releases the live state.
+  rollPad(engine, 0, "1/16");
+  await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
+  assert.equal(hitFrames(engine.messages).length, 3, "a fresh roll repeats once more");
+  engine.post({ type: "reset_live" });
+  await engine.process(128, 2 * FRAMES_PER_SIXTEENTH + 128);
+  assert.equal(hitFrames(engine.messages).length, 3, "resetLive clears the roll too");
+});
+
+test("an unrelated setSong leaves a roll running", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0), pad("track-1", 1, { gain_db: -6 })], frames: 48000 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  rollPad(engine, 0, "1/16");
+  await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
+  assert.deepEqual(hitFrames(engine.messages), [FRAMES_PER_SIXTEENTH], "the roll repeats once a 16th in");
+
+  // An edit that touches ANOTHER pad is no business of the roll's: `setSong` runs
+  // on every edit, so it must not stop what still exists.
+  const edited = JSON.parse(JSON.stringify(song));
+  edited.pads[padKeyOf(pad("track-1", 1))].gain_db = -12;
+  engine.post({ type: "song", snapshot: edited });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.deepEqual(
+    hitFrames(engine.messages),
+    [FRAMES_PER_SIXTEENTH, 2 * FRAMES_PER_SIXTEENTH],
+    "the roll plays on through an unrelated edit",
+  );
+
+  // A song that takes the roll's pad away ends it, exactly as it ends that pad's
+  // voices.
+  const without = JSON.parse(JSON.stringify(edited));
+  delete without.pads[padKeyOf(pad("track-1", 0))];
+  engine.post({ type: "song", snapshot: without });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await engine.process(128, 2 * FRAMES_PER_SIXTEENTH);
+  assert.deepEqual(
+    hitFrames(engine.messages),
+    [FRAMES_PER_SIXTEENTH, 2 * FRAMES_PER_SIXTEENTH],
+    "a pad the new song no longer has takes its roll with it",
+  );
+});
+
+test("M21 rolls under Pause-all keep their clock and every repeat starts paused, heard on resume", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0)], frames: 48000 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+  engine.post({ type: "pause_voices", on: true });
+  rollPad(engine, 0, "1/16");
+
+  // The clock keeps running: the repeats still land on their own frames, and each
+  // one starts a voice that is paused from its own first frame.
+  const paused = await engine.process(128, 2 * FRAMES_PER_SIXTEENTH + 128);
+  assert.deepEqual(
+    hitFrames(engine.messages),
+    [FRAMES_PER_SIXTEENTH, 2 * FRAMES_PER_SIXTEENTH],
+    "a paused roll keeps its clock: both repeats land on their own frames",
+  );
+  assert.equal(peakOf(paused.left), 0, "every repeat made under Pause-all is silent");
+  const record = recordOf(engine, "track-1");
+  const voices = soundingOf(record).filter((voice) => voice.index === 0);
+  assert.equal(voices.length, 2, "both repeats started a voice");
+  for (const voice of voices) {
+    assert.equal(voice.paused, true, "each repeat's voice is created paused");
+    assert.equal(voice.position, voice.start, "and has not read one frame of its sample");
+  }
+
+  // Resume: every one of them ramps up and is heard.
+  engine.post({ type: "pause_voices", on: false });
+  const lifted = await engine.process(128, 64 + 256);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assertLevel(
+    lifted.left[lifted.left.length - 1],
+    2 * ONE_VOICE,
+    "both paused repeats are heard after the resume",
+    1e-6,
+  );
 });
