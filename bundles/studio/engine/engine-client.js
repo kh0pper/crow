@@ -1407,7 +1407,8 @@
    * The caller arms it on a frame the engine reported (`onLaunch`, Task 2) and
    * stops it on a frame it computes itself (a take's `offset_frames` included,
    * so the compensated take keeps its tail). `splitAt` cuts one recording into
-   * one take segment per loop pass.
+   * one take segment per loop pass. `gatePeriodic` is the punch: the same
+   * stretch of every pass is the only part of a take that holds the input.
    *
    * @param {BaseAudioContext} context
    * @param {{assetBase?: string, assetBytes?: object}} engineOptions
@@ -1417,6 +1418,8 @@
    *                    armAt: function(number): void,
    *                    stopAt: function(number): void,
    *                    splitAt: function(number[]): void,
+   *                    gatePeriodic: function(object): void,
+   *                    gateOff: function(): void,
    *                    onChunk: function(function): function,
    *                    onDone: function(function): function,
    *                    dispose: function(): void}>}
@@ -1520,6 +1523,67 @@
         const list = [];
         for (const value of Array.isArray(frames) ? frames : []) list.push(frameNumber(value, "splitAt"));
         post({ type: "split", frames: list });
+      },
+
+      /**
+       * Punch: from here on, a frame of a take holds the input only inside a
+       * stretch of its pass, and is digital silence outside it. The stretch is
+       * the same on every pass, so the gate is periodic — one range, no cap and
+       * nothing to top up. A gated frame is still counted, so every pass keeps
+       * its full length and its own segment.
+       *
+       * `fromFrames` and `toFrames` are frames into the pass (`beat * fpb`), and
+       * `offsetFrames` is the input delay the take's own offset carries, so the
+       * range is moved onto the frames the input arrives on. A pass is
+       * `loopFrames` long from `anchorFrame`, the take's first context frame.
+       *
+       * `activeFrom` is the first frame the new range may gate (default: the
+       * take's first frame). A page that replaces the range while a take runs
+       * sends the next pass's start, so the pass already running keeps the range
+       * it started with. Values that are not finite, a pass of no frames, or a
+       * range that ends before it begins are refused: that is a caller's bug, not
+       * something to hand the audio thread.
+       *
+       * @param {{anchorFrame: number, loopFrames: number, fromFrames: number,
+       *          toFrames: number, offsetFrames?: number, activeFrom?: number}} spec
+       * @returns {void}
+       */
+      gatePeriodic(spec) {
+        const source = spec && typeof spec === "object" ? spec : {};
+        const anchorFrame = frameNumber(source.anchorFrame, "gatePeriodic");
+        const offsetFrames =
+          source.offsetFrames === undefined ? 0 : frameNumber(source.offsetFrames, "gatePeriodic");
+        const loopFrames = Number(source.loopFrames);
+        const fromFrames = Number(source.fromFrames);
+        const toFrames = Number(source.toFrames);
+        if (!Number.isFinite(loopFrames) || loopFrames <= 0) {
+          throw new Error("StudioEngine: gatePeriodic needs a pass of more than no frames");
+        }
+        if (!Number.isFinite(fromFrames) || !Number.isFinite(toFrames) || !(toFrames > fromFrames)) {
+          throw new Error("StudioEngine: gatePeriodic needs fromFrames before toFrames");
+        }
+        const activeFrom =
+          source.activeFrom === undefined
+            ? anchorFrame + offsetFrames
+            : frameNumber(source.activeFrom, "gatePeriodic");
+        post({
+          type: "gate",
+          anchorFrame: anchorFrame,
+          loopFrames: loopFrames,
+          fromFrames: fromFrames,
+          toFrames: toFrames,
+          offsetFrames: offsetFrames,
+          activeFrom: activeFrom,
+        });
+      },
+
+      /**
+       * Take the gate off again (the next block on): every captured frame is the
+       * input, exactly as a recorder without a gate.
+       * @returns {void}
+       */
+      gateOff() {
+        post({ type: "gate_off" });
       },
 
       /**
@@ -3502,8 +3566,9 @@
       },
 
       /**
-       * Build a recorder on this context: `{armAt, stopAt, splitAt, onChunk,
-       * onDone, dispose}` (see `runRecorder` above for the whole contract).
+       * Build a recorder on this context: `{armAt, stopAt, splitAt, gatePeriodic,
+       * gateOff, onChunk, onDone, dispose}` (see `runRecorder` above for the whole
+       * contract).
        * @param {{input: MediaStream|AudioNode, channels?: number}} options
        * @returns {Promise<object>}
        */
