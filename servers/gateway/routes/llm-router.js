@@ -359,10 +359,25 @@ function sendDoorError(res, t) {
   return res.status(t.status).json({ error: { code: t.code, message: t.message, ...(t.candidates ? { candidates: t.candidates } : {}) } });
 }
 
+/** A beside hold's refusal reason (a render/video job sharing the card). */
+const BESIDE_REASON = "gpu_job_beside";
+
+/**
+ * The system note that says why a start was refused. A beside hold names the
+ * render/video job rather than claiming the box is reserved by somebody.
+ */
+function reservedDegradeNote(err) {
+  const until = err.expires_at || "?";
+  if (err.reason === BESIDE_REASON) {
+    return `Note: a render/video job is using part of the box (${err.owner} until ${until}); the larger model does not fit beside it, answer with what you have.`;
+  }
+  return `Note: the box is reserved (by ${err.owner} until ${until}); the larger model is unavailable, answer with what you have.`;
+}
+
 /** Program-facing door: orchestrator refusals answer 409, as /llm/acquire does. */
 function sendAcquireError(res, err) {
   if (err instanceof ReservedError) {
-    return res.status(409).json({ error: { code: "box_reserved", message: err.message, owner: err.owner, expires_at: err.expires_at } });
+    return res.status(409).json({ error: { code: "box_reserved", message: err.message, owner: err.owner, expires_at: err.expires_at, reason: err.reason } });
   }
   if (err instanceof ServingClassError) {
     return res.status(409).json({ error: { code: "serving_class_refused", message: err.message, serving_class: err.servingClass } });
@@ -745,14 +760,14 @@ async function handleChat(req, res, deps) {
         routeLabel = "degraded(box_reserved)";
         body.messages = [
           ...(Array.isArray(body.messages) ? body.messages : []),
-          { role: "system", content: `Note: the box is reserved (by ${err.owner} until ${err.expires_at || "?"}); the larger model is unavailable, answer with what you have.` },
+          { role: "system", content: reservedDegradeNote(err) },
         ];
       } else {
         const secs = Math.round((Date.parse(err.expires_at || 0) - Date.now()) / 1000);
         const retryAfter = Math.max(60, Number.isFinite(secs) ? secs : 60);
-        console.log(`[llm-router] route=refused(box_reserved) -> ${key} requester=${requester} owner=${err.owner}`);
+        console.log(`[llm-router] route=refused(box_reserved) -> ${key} requester=${requester} owner=${err.owner} reason=${err.reason || "reserved"}`);
         res.setHeader("Retry-After", String(retryAfter));
-        return res.status(503).json({ error: { code: "box_reserved", message: err.message, owner: err.owner, expires_at: err.expires_at, retry_after: retryAfter } });
+        return res.status(503).json({ error: { code: "box_reserved", message: err.message, owner: err.owner, expires_at: err.expires_at, reason: err.reason, retry_after: retryAfter } });
       }
     }
   }
@@ -1000,7 +1015,7 @@ export default function llmRouterRouter(opts = {}) {
       res.json({ ok: warmed !== false, warmed, provider });
     } catch (err) {
       if (err instanceof ReservedError) {
-        return res.status(409).json({ ok: false, error: "box_reserved", owner: err.owner, expires_at: err.expires_at, message: err.message });
+        return res.status(409).json({ ok: false, error: "box_reserved", owner: err.owner, expires_at: err.expires_at, reason: err.reason, message: err.message });
       }
       if (err instanceof ServingClassError) {
         return res.status(409).json({ ok: false, error: "serving_class_refused", serving_class: err.servingClass, message: err.message });

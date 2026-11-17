@@ -22,7 +22,7 @@ import {
   readReservation, isStartAllowed, writeReservation, clearReservation,
   ReservedError, DEFAULT_ALLOW, DEFAULT_MAX_HOLD_MS, reservationPath,
   schedulePath, lockPath, withReservationLock, withReservationLockAsync,
-  activateHold, renewHold, releaseHold, HoldConflictError,
+  activateHold, renewHold, releaseHold, HoldConflictError, startDecision,
   _activateHoldLocked, _renewHoldLocked, _releaseHoldLocked,
 } from "../servers/gateway/box-reservation.js";
 
@@ -565,6 +565,188 @@ test("gpu-job hold renews past 8 h of total span", () => {
     Date.parse(back.expires_at) - T0 > DEFAULT_MAX_HOLD_MS,
     `renewed past 8 h of total span (${Date.parse(back.expires_at) - T0} ms)`,
   );
+});
+
+// --- beside mode: what a start may do while a render/video job shares the box --
+//
+// Everything here is pure: no file, no sysfs. `live` is the sampler's last
+// snapshot, `peak` the provider's declared footprint from the host profile.
+
+const PROFILE = { safety_margin_mb: 8192, ram_floor_mb: 12288, gtt_total_mb: 131072 };
+
+/** A beside hold whose job has booked 50000 mb of GTT and 30000 mb of RAM. */
+function besideReservation(over = {}) {
+  return {
+    owner: "gpujob-7f3a", reason: "render batch", started_at: iso(T0), expires_at: iso(T0 + 3_600_000),
+    allow: ["crow-embed"], corrupt: false, key: "gpujob-7f3a@" + iso(T0),
+    mode: "beside", kind: "gpu-job", booking_id: "bk_0123456789ab", job_id: "job_42",
+    gtt_mb: 50000, host_ram_mb: 30000,
+    gtt_used_at_activation_mb: null, mem_available_at_activation_mb: null,
+    hip_procs: 4,
+    ...over,
+  };
+}
+
+const LIVE = Object.freeze({ gttUsedMb: 20000, gttTotalMb: 131072, memAvailableMb: 110000 });
+const liveAt = (at, over = {}) => ({ ...LIVE, at, ...over });
+// A 35B-class provider: 26000 mb of GTT and of host RAM.
+const PEAK = Object.freeze({ gtt_peak_mb: 26000, host_ram_peak_mb: 26000 });
+
+test("startDecision: exclusive hold behaves like isStartAllowed and ignores live", () => {
+  const boom = new Proxy({}, {
+    get(_t, prop) { throw new Error(`an exclusive hold must never read ${String(prop)}`); },
+  });
+  const exclusive = { owner: "win", expires_at: iso(T0 + 3_600_000), allow: ["crow-embed"], corrupt: false, mode: "exclusive" };
+  assert.deepEqual(
+    startDecision(exclusive, "crow-embed", { peak: boom, live: boom, profile: boom, now: T0 }),
+    { allowed: true, reason: null },
+  );
+  assert.deepEqual(
+    startDecision(exclusive, "crow-chat", { peak: boom, live: boom, profile: boom, now: T0 }),
+    { allowed: false, reason: "reserved" },
+  );
+  // A legacy record has no mode at all; it reads as exclusive.
+  assert.deepEqual(startDecision({ allow: ["crow-embed"], corrupt: false }, "crow-chat", { now: T0 }), { allowed: false, reason: "reserved" });
+  // Undefined live/peak/profile are fine on this path too.
+  assert.deepEqual(startDecision(exclusive, "crow-embed", {}), { allowed: true, reason: null });
+  // No reservation, and a corrupt one (fail closed).
+  assert.deepEqual(startDecision(null, "crow-chat", {}), { allowed: true, reason: null });
+  assert.deepEqual(startDecision({ corrupt: true, allow: [] }, "crow-embed", {}), { allowed: false, reason: "reserved" });
+});
+
+test("startDecision beside: a provider whose peak fits is allowed", () => {
+  const d = startDecision(besideReservation(), "crow-chat", { peak: PEAK, live: liveAt(T0), profile: PROFILE, now: T0 });
+  assert.deepEqual(d, { allowed: true, reason: null });
+});
+
+test("startDecision beside: a provider whose peak does not fit is refused with reason gpu_job_beside", () => {
+  const tooBig = { gtt_peak_mb: 80000, host_ram_peak_mb: 26000 };
+  assert.deepEqual(
+    startDecision(besideReservation(), "crow-chat", { peak: tooBig, live: liveAt(T0), profile: PROFILE, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+  // RAM alone can refuse a start that fits in GTT.
+  const ramHog = { gtt_peak_mb: 1000, host_ram_peak_mb: 100000 };
+  assert.deepEqual(
+    startDecision(besideReservation(), "crow-chat", { peak: ramHog, live: liveAt(T0), profile: PROFILE, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+});
+
+test("startDecision beside: unknown peak is refused", () => {
+  assert.deepEqual(
+    startDecision(besideReservation(), "crow-chat", { peak: null, live: liveAt(T0), profile: PROFILE, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+  assert.deepEqual(
+    startDecision(besideReservation(), "crow-chat", { peak: undefined, live: null, profile: PROFILE, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+});
+
+test("startDecision beside: allow[] providers always start", () => {
+  // No peak, no snapshot, no profile: the allow list alone decides.
+  assert.deepEqual(
+    startDecision(besideReservation(), "crow-embed", { peak: null, live: null, profile: null, now: T0 }),
+    { allowed: true, reason: null },
+  );
+});
+
+test("during the job's load phase a 35B-sized start is refused although live GTT alone would fit", () => {
+  // Activation: the job began when 20000 mb were already in use.
+  const r = besideReservation({ gtt_mb: 90000, gtt_used_at_activation_mb: 20000, host_ram_mb: 30000, mem_available_at_activation_mb: 100000 });
+  // The job is half loaded: 60000 mb in use, 40000 mb of its 90000 still coming.
+  const live = { gttUsedMb: 60000, gttTotalMb: 131072, memAvailableMb: 90000, at: T0 };
+  const budget = live.gttTotalMb - PROFILE.safety_margin_mb;
+  assert.ok(live.gttUsedMb + PEAK.gtt_peak_mb <= budget, "live GTT plus the peak alone would fit");
+  assert.ok(live.gttUsedMb + 50000 + PEAK.gtt_peak_mb > budget, "with the job's remaining growth it does not");
+  assert.deepEqual(
+    startDecision(r, "crow-chat", { peak: PEAK, live, profile: PROFILE, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+  // A provider small enough for the job's final footprint still starts: the
+  // gate sizes the start, it does not refuse every start.
+  const small = { gtt_peak_mb: 5000, host_ram_peak_mb: 2000 };
+  assert.deepEqual(
+    startDecision(r, "crow-embed-small", { peak: small, live, profile: PROFILE, now: T0 }),
+    { allowed: true, reason: null },
+  );
+});
+
+test("stale snapshot refuses beside starts", () => {
+  const now = T0 + 60_000;
+  assert.deepEqual(
+    startDecision(besideReservation(), "crow-chat", { peak: PEAK, live: liveAt(now), profile: PROFILE, now }),
+    { allowed: true, reason: null },
+  );
+  assert.deepEqual(
+    startDecision(besideReservation(), "crow-chat", { peak: PEAK, live: liveAt(now - 14_999), profile: PROFILE, now }),
+    { allowed: true, reason: null },
+  );
+  assert.deepEqual(
+    startDecision(besideReservation(), "crow-chat", { peak: PEAK, live: liveAt(now - 15_001), profile: PROFILE, now }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+  // A snapshot with no usable timestamp is stale by definition.
+  assert.deepEqual(
+    startDecision(besideReservation(), "crow-chat", { peak: PEAK, live: { ...LIVE }, profile: PROFILE, now }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+  // The allow list still wins on a stale snapshot.
+  assert.deepEqual(
+    startDecision(besideReservation(), "crow-embed", { peak: PEAK, live: liveAt(now - 600_000), profile: PROFILE, now }),
+    { allowed: true, reason: null },
+  );
+});
+
+test("activateHold beside records the activation baselines", () => {
+  const h = freshHold();
+  activateHold({
+    owner: "gpujob-7f3a", reason: "render batch", minutes: 20, mode: "beside", kind: "gpu-job",
+    booking_id: "bk_0123456789ab", job_id: "job_42", gtt_mb: 90000, host_ram_mb: 30000, hip_procs: 4,
+    gtt_used_at_activation_mb: 12345, mem_available_at_activation_mb: 67890,
+    path: h.path, now: T0, lock: h.lock,
+  });
+  const r = readReservation({ path: h.path, now: T0 });
+  assert.equal(r.mode, "beside");
+  assert.equal(r.gtt_used_at_activation_mb, 12345);
+  assert.equal(r.mem_available_at_activation_mb, 67890);
+  const raw = JSON.parse(readFileSync(h.path, "utf8"));
+  assert.equal(raw.gtt_used_at_activation_mb, 12345);
+  assert.equal(raw.mem_available_at_activation_mb, 67890);
+  // A record written without the baselines reads them back as null, not 0.
+  const h2 = freshHold();
+  writeFileSync(h2.path, JSON.stringify({
+    owner: "win", reason: "bench", started_at: iso(T0), expires_at: iso(T0 + 1000), allow: [],
+  }));
+  const legacy = readReservation({ path: h2.path, now: T0 });
+  assert.equal(legacy.gtt_used_at_activation_mb, null);
+  assert.equal(legacy.mem_available_at_activation_mb, null);
+  assert.equal(readReservation({ path: join(h2.dir, "corrupt.json"), now: T0 }), null);
+  writeFileSync(join(h2.dir, "corrupt.json"), "{bad");
+  const corrupt = readReservation({ path: join(h2.dir, "corrupt.json"), now: T0 });
+  assert.equal(corrupt.corrupt, true);
+  assert.equal(corrupt.gtt_used_at_activation_mb, null);
+  assert.equal(corrupt.mem_available_at_activation_mb, null);
+});
+
+test("ReservedError carries reason", () => {
+  const plain = new ReservedError({ owner: "win", expires_at: iso(T0) }, "crow-chat");
+  assert.equal(plain.reason, "reserved");
+  assert.match(plain.message, /box reserved by win until /);
+  const beside = new ReservedError(
+    { owner: "gpujob-7f3a", expires_at: iso(T0), job_id: "job_42", decisionReason: "gpu_job_beside" },
+    "crow-chat",
+  );
+  assert.equal(beside.reason, "gpu_job_beside");
+  assert.equal(beside.code, "box_reserved");
+  assert.match(beside.message, /render\/video job/);
+  assert.match(beside.message, /gpujob-7f3a/);
+  assert.match(beside.message, /job_42/);
+  assert.match(beside.message, /crow-chat/);
+  assert.doesNotMatch(beside.message, /box reserved by/);
+  const explicit = new ReservedError({ owner: "win", expires_at: iso(T0) }, "crow-chat", "gpu_job_beside");
+  assert.equal(explicit.reason, "gpu_job_beside", "the third argument wins over the reservation");
 });
 
 test("inner locked functions run under one outer lock without box_lock_timeout", () => {

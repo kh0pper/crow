@@ -85,7 +85,9 @@ import { loadState, saveState, reconcileOnBoot, findRegistryEntries, findRegistr
 import { acquireHostLock } from "./models/native-lock.js";
 import { identityProbe, startModel, stopModel, ensureRuntime, nativeReadinessTimeoutMs } from "./models/runtime.js";
 import { getCachedProbe, reprobe } from "./models/probe.js";
-import { readReservation, isStartAllowed, ReservedError } from "./box-reservation.js";
+import { readReservation, isStartAllowed, ReservedError, startDecision } from "./box-reservation.js";
+import { readHostProfile, providerPeak } from "./models/gpu-peaks.js";
+import { getLiveSnapshot } from "./models/live-sampler.js";
 import { createNoticeState, reservationNotices, sendReservationNotice } from "./box-reservation-notify.js";
 import { enqueueDownload } from "./models/manager.js";
 import { listProvidersAll, upsertProvider } from "../shared/providers-db.js";
@@ -644,6 +646,11 @@ export async function isProviderReady(providerName) {
 // tests never touch the real tmpfs file.
 let _reservationReader = null;
 export function _setReservationReaderForTest(fn) { _reservationReader = fn; }
+// The live counters beside-mode admission needs. `startBlockedBy` stays
+// synchronous, so these come from the sampler's last snapshot; a reader that
+// throws (or a missing snapshot) refuses the beside start, never allows it.
+let _liveMemReader = null;
+export function _setLiveMemReaderForTest(fn) { _liveMemReader = fn; }
 let _noticeState = createNoticeState();
 let _noticeSender = sendReservationNotice;
 export function _setReservationNoticeSenderForTest(fn) { _noticeSender = fn ? (n) => fn(n) : sendReservationNotice; }
@@ -660,11 +667,36 @@ function currentReservation() {
   }
 }
 
-/** The reservation blocking `providerName` from starting right now, else null. */
+/**
+ * The reservation blocking `providerName` from starting right now, else null.
+ *
+ * SYNC, and free of sysfs/child processes: an exclusive hold is decided from
+ * the record alone, exactly as before. A beside hold (a render/video job
+ * sharing the card) asks `startDecision` with the provider's declared peak and
+ * the sampler's last snapshot; a refusal comes back as a COPY of the record
+ * carrying `decisionReason`, so `refuseStart` can report why.
+ */
 function startBlockedBy(providerName) {
   const r = currentReservation();
-  if (!r || isStartAllowed(r, providerName)) return null;
-  return r;
+  if (!r) return null;
+  if (r.mode !== "beside") return isStartAllowed(r, providerName) ? null : r;
+  const decision = startDecision(r, providerName, {
+    peak: providerPeak(providerName),
+    live: currentLiveSnapshot(),
+    profile: readHostProfile(),
+  });
+  if (decision.allowed) return null;
+  return { ...r, decisionReason: decision.reason };
+}
+
+/** The sampler's last snapshot, or null (a throwing reader is no reading). */
+function currentLiveSnapshot() {
+  try {
+    return (_liveMemReader || getLiveSnapshot)();
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] live memory read failed (a beside start cannot be sized): ${err.message}`);
+    return null;
+  }
 }
 
 function emitReservationNotices(input) {
@@ -676,9 +708,13 @@ function emitReservationNotices(input) {
 /** Refuse a start: log with the requester, notify once per reservation, return the error to throw. */
 function refuseStart(reservation, providerName, opts = {}) {
   const requester = opts.requester || "-";
-  console.log(`[gpu-orchestrator] refusing to start ${providerName}: box reserved by ${reservation.owner} until ${reservation.expires_at || "?"} (requested-by=${requester})`);
+  if (reservation.decisionReason === "gpu_job_beside") {
+    console.log(`[gpu-orchestrator] refusing to start ${providerName}: a render/video job is using part of the GPU (${reservation.owner} until ${reservation.expires_at || "?"}) and this start does not fit beside it (requested-by=${requester})`);
+  } else {
+    console.log(`[gpu-orchestrator] refusing to start ${providerName}: box reserved by ${reservation.owner} until ${reservation.expires_at || "?"} (requested-by=${requester})`);
+  }
   emitReservationNotices({ reservation, refused: { provider: providerName, requester } });
-  return new ReservedError(reservation, providerName);
+  return new ReservedError(reservation, providerName, reservation.decisionReason || null);
 }
 
 /** Residency paths never throw — they announce once per reservation and skip. */

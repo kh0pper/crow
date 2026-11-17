@@ -24,9 +24,12 @@
  * Optional fields (the one box calendar, private engineering notes §6.3):
  * `mode` ("exclusive" default, or "beside" for a GPU job that shares the
  * card), `kind`, `booking_id`, `job_id`, and for beside holds `gtt_mb`,
- * `host_ram_mb`, `hip_procs`. A legacy record carries none of them and reads
- * as `mode: "exclusive"` with null v2 fields; a mode string we don't know is
- * treated like any other corrupt record (fail closed).
+ * `host_ram_mb`, `hip_procs`, plus the two activation baselines
+ * `gtt_used_at_activation_mb` / `mem_available_at_activation_mb` (what the
+ * live counters read when the job started, so a start can estimate how much
+ * of the job's own footprint is still to come). A legacy record carries none
+ * of them and reads as `mode: "exclusive"` with null v2 fields; a mode string
+ * we don't know is treated like any other corrupt record (fail closed).
  *
  * Every read-modify-write of the hold file or the calendar file goes under
  * the one lock below, which lives beside the calendar file.
@@ -39,6 +42,8 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { stealStaleLock } from "./models/native-lock.js";
+import { readLiveSnapshotSync } from "./models/live-sampler.js";
+import { DEFAULT_HOST_PROFILE } from "./models/gpu-peaks.js";
 
 /** Casey decision 2 (2026-09-04): a hold longer than this needs `force`. */
 export const DEFAULT_MAX_HOLD_MS = 8 * 60 * 60 * 1000;
@@ -82,6 +87,7 @@ const CORRUPT = Object.freeze({
   allow: Object.freeze([]), corrupt: true, key: "corrupt",
   mode: "exclusive", kind: null, booking_id: null, job_id: null,
   gtt_mb: null, host_ram_mb: null, hip_procs: null,
+  gtt_used_at_activation_mb: null, mem_available_at_activation_mb: null,
 });
 
 // One-entry cache keyed by (path, mtimeMs): the router's hot path reads this
@@ -113,7 +119,9 @@ function optionalNumber(v) {
  * @returns {null | {owner:string, reason:string, started_at:string|null, expires_at:string|null,
  *                   allow:string[], corrupt:boolean, key:string, mode:"exclusive"|"beside",
  *                   kind:string|null, booking_id:string|null, job_id:string|null,
- *                   gtt_mb:number|null, host_ram_mb:number|null, hip_procs:number|null}}
+ *                   gtt_mb:number|null, host_ram_mb:number|null, hip_procs:number|null,
+ *                   gtt_used_at_activation_mb:number|null,
+ *                   mem_available_at_activation_mb:number|null}}
  *   null when there is no file or the record has expired.
  */
 export function readReservation({ now = Date.now(), path = reservationPath() } = {}) {
@@ -148,6 +156,8 @@ export function readReservation({ now = Date.now(), path = reservationPath() } =
     gtt_mb: optionalNumber(raw.gtt_mb),
     host_ram_mb: optionalNumber(raw.host_ram_mb),
     hip_procs: optionalNumber(raw.hip_procs),
+    gtt_used_at_activation_mb: optionalNumber(raw.gtt_used_at_activation_mb),
+    mem_available_at_activation_mb: optionalNumber(raw.mem_available_at_activation_mb),
   });
   _cache = { path, mtimeMs: st.mtimeMs, at: now, value };
   return expireCheck(value, now);
@@ -165,17 +175,98 @@ export function isStartAllowed(reservation, providerName) {
 }
 
 export class ReservedError extends Error {
-  constructor(reservation, providerName) {
+  /**
+   * @param {object|null} reservation
+   * @param {string} [providerName]
+   * @param {null|string} [reason] `"reserved"` (default) or `"gpu_job_beside"`;
+   *   falls back to `reservation.decisionReason` when omitted
+   */
+  constructor(reservation, providerName, reason = null) {
     const owner = (reservation && reservation.owner) || "unknown";
     const until = (reservation && reservation.expires_at) || "?";
-    super(`box reserved by ${owner} until ${until} — refusing to start ${providerName || "a model"}`);
+    const why = reason || (reservation && reservation.decisionReason) || "reserved";
+    if (why === "gpu_job_beside") {
+      const job = reservation && reservation.job_id ? `, job ${reservation.job_id}` : "";
+      super(`a render/video job is using part of the GPU (${owner}${job} until ${until}) — large model starts that do not fit beside it wait; refusing to start ${providerName || "a model"}`);
+    } else {
+      super(`box reserved by ${owner} until ${until} — refusing to start ${providerName || "a model"}`);
+    }
     this.name = "ReservedError";
     this.code = "box_reserved";
     this.http = 503;
     this.owner = owner;
     this.expires_at = reservation && reservation.expires_at ? reservation.expires_at : null;
     this.provider = providerName || null;
+    this.reason = why;
   }
+}
+
+/**
+ * A beside hold's decision cannot be made from a live snapshot older than
+ * this: a stale reading may describe a box that has changed since.
+ */
+export const BESIDE_SNAPSHOT_MAX_AGE_MS = 15_000;
+
+function finiteOrNull(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * May `providerName` start right now, given the box's state?
+ *
+ * - No reservation: yes.
+ * - A corrupt one: no (fail closed), reason "reserved".
+ * - `exclusive`: today's `isStartAllowed` (the `allow[]` list), and NOTHING
+ *   else is read — `live`, `peak` and `profile` may be undefined.
+ * - `beside` (a render/video job sharing the card): an allowed provider
+ *   starts; otherwise the provider's declared peak must fit next to the
+ *   job's REMAINING footprint (its `gtt_mb`/`host_ram_mb` minus what the live
+ *   counters show it has already taken), under the safety margin and above
+ *   the RAM floor. No peak, no snapshot, or a stale snapshot refuses.
+ *
+ * Pure: every input is passed in (no file, no sysfs).
+ *
+ * @param {object|null} reservation as `readReservation` returns it
+ * @param {string} providerName
+ * @param {{peak?: {gtt_peak_mb: number, host_ram_peak_mb: number}|null,
+ *          live?: {gttUsedMb: number, gttTotalMb: number, memAvailableMb: number, at: number}|null,
+ *          profile?: object|null, now?: number}} [inputs]
+ * @returns {{allowed: boolean, reason: null|"reserved"|"gpu_job_beside"}}
+ */
+export function startDecision(reservation, providerName, { peak = null, live = null, profile = null, now = Date.now() } = {}) {
+  if (!reservation) return { allowed: true, reason: null };
+  if (reservation.corrupt) return { allowed: false, reason: "reserved" };
+  if (reservation.mode !== "beside") {
+    return isStartAllowed(reservation, providerName)
+      ? { allowed: true, reason: null }
+      : { allowed: false, reason: "reserved" };
+  }
+  if (providerName && (reservation.allow || []).includes(providerName)) return { allowed: true, reason: null };
+  const refuse = Object.freeze({ allowed: false, reason: "gpu_job_beside" });
+  if (!peak) return refuse;
+  if (!live) return refuse;
+  if (!Number.isFinite(live.at) || now - live.at > BESIDE_SNAPSHOT_MAX_AGE_MS) return refuse;
+  const gttUsed = finiteOrNull(live.gttUsedMb);
+  const gttTotal = finiteOrNull(live.gttTotalMb);
+  const memAvailable = finiteOrNull(live.memAvailableMb);
+  const peakGtt = finiteOrNull(peak.gtt_peak_mb);
+  const peakRam = finiteOrNull(peak.host_ram_peak_mb);
+  if (gttUsed == null || gttTotal == null || memAvailable == null || peakGtt == null || peakRam == null) return refuse;
+  const hostProfile = profile || DEFAULT_HOST_PROFILE;
+  const safetyMargin = finiteOrNull(hostProfile.safety_margin_mb) ?? DEFAULT_HOST_PROFILE.safety_margin_mb;
+  const ramFloor = finiteOrNull(hostProfile.ram_floor_mb) ?? DEFAULT_HOST_PROFILE.ram_floor_mb;
+  const gttHold = optionalNumber(reservation.gtt_mb) ?? 0;
+  const ramHold = optionalNumber(reservation.host_ram_mb) ?? 0;
+  const gttBase = optionalNumber(reservation.gtt_used_at_activation_mb);
+  const ramBase = optionalNumber(reservation.mem_available_at_activation_mb);
+  // What the job still has to take: its declared footprint minus the growth
+  // already visible since activation. Without a baseline, assume none of it
+  // has loaded yet.
+  const remainingGtt = gttBase == null ? gttHold : Math.max(0, gttHold - (gttUsed - gttBase));
+  const remainingRam = ramBase == null ? ramHold : Math.max(0, ramHold - (ramBase - memAvailable));
+  const fitsGtt = gttUsed + remainingGtt + peakGtt <= gttTotal - safetyMargin;
+  const fitsRam = memAvailable - remainingRam - peakRam >= ramFloor;
+  return fitsGtt && fitsRam ? { allowed: true, reason: null } : refuse;
 }
 
 /**
@@ -427,6 +518,7 @@ export function _activateHoldLocked({
   owner, reason = "", minutes = DEFAULT_MINUTES, allow = [], mode = "exclusive",
   kind = null, booking_id = null, job_id = null,
   gtt_mb = null, host_ram_mb = null, hip_procs = null,
+  gtt_used_at_activation_mb = null, mem_available_at_activation_mb = null,
   force = false, takeOver = false, now = Date.now(), path = reservationPath(),
 } = {}) {
   const who = String(owner || "").trim();
@@ -463,6 +555,20 @@ export function _activateHoldLocked({
   };
   for (const [k, v] of Object.entries(strings)) if (v != null) rec[k] = v;
   for (const [k, v] of Object.entries(numbers)) if (v != null) rec[k] = v;
+  // A beside hold records what the live counters read when the job started, so
+  // `startDecision` can tell how much of the job's footprint is still to come.
+  // Anything not supplied is filled from one synchronous read (null when the
+  // counters are unreadable); whatever stays null is simply not written.
+  let gttBase = optionalNumber(gtt_used_at_activation_mb);
+  let ramBase = optionalNumber(mem_available_at_activation_mb);
+  if (mode === "beside" && (gttBase == null || ramBase == null)) {
+    let snapshot = null;
+    try { snapshot = readLiveSnapshotSync(); } catch { snapshot = null; }
+    if (gttBase == null) gttBase = snapshot ? optionalNumber(snapshot.gttUsedMb) : null;
+    if (ramBase == null) ramBase = snapshot ? optionalNumber(snapshot.memAvailableMb) : null;
+  }
+  if (gttBase != null) rec.gtt_used_at_activation_mb = gttBase;
+  if (ramBase != null) rec.mem_available_at_activation_mb = ramBase;
   return writeHoldFile(path, rec);
 }
 

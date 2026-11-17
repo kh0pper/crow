@@ -9,6 +9,9 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as orch from "../servers/gateway/gpu-orchestrator.js";
 import { ReservedError } from "../servers/gateway/box-reservation.js";
 
@@ -16,6 +19,15 @@ const RES = Object.freeze({
   owner: "win", reason: "bench", started_at: "2026-09-04T20:00:00.000Z", expires_at: "2026-09-04T23:00:00.000Z",
   allow: ["crow-embed"], corrupt: false, key: "win@2026-09-04T20:00:00.000Z",
 });
+// A render/video job sharing the card: the beside-mode hold from the calendar.
+const BESIDE = Object.freeze({
+  owner: "gpujob-7f3a", reason: "render batch", started_at: "2026-09-04T20:00:00.000Z", expires_at: "2026-09-04T23:00:00.000Z",
+  allow: ["crow-embed"], corrupt: false, key: "gpujob-7f3a@2026-09-04T20:00:00.000Z",
+  mode: "beside", kind: "gpu-job", booking_id: "bk_0123456789ab", job_id: "job_42",
+  gtt_mb: 50000, host_ram_mb: 30000, hip_procs: 4,
+  gtt_used_at_activation_mb: null, mem_available_at_activation_mb: null,
+});
+const LIVE = Object.freeze({ gttUsedMb: 20000, gttTotalMb: 131072, memAvailableMb: 110000 });
 const cfg = {
   providers: {
     "crow-chat":  { bundleId: "llamacpp-vulkan-qwen36-35b-a3b", baseUrl: "http://127.0.0.1:8003/v1", host: "local" },
@@ -26,8 +38,21 @@ const notReady = async () => false;
 const mustNotStart = async () => { throw new Error("must not start"); };
 
 let logs, origLog;
+let profileDir;
+const ORIGINAL_PROFILE_PATH = process.env.CROW_GPU_HOST_PROFILE_PATH;
+
+/** Write a host profile into a fresh file and point the process at it. */
+function useHostProfile(providers) {
+  const p = join(profileDir, `profile-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+  writeFileSync(p, JSON.stringify({ gtt_total_mb: 131072, safety_margin_mb: 8192, ram_floor_mb: 12288, providers }));
+  process.env.CROW_GPU_HOST_PROFILE_PATH = p;
+  return p;
+}
+
 beforeEach(() => {
+  profileDir = mkdtempSync(join(tmpdir(), "orch-peaks-"));
   orch._setReservationReaderForTest(null);
+  orch._setLiveMemReaderForTest(null);
   orch._resetReservationNoticesForTest();
   // The default notice sender writes a notification row through createDbClient().
   // Every test here trips a notice (deferred residency, refusals), so the sender
@@ -40,7 +65,11 @@ beforeEach(() => {
 afterEach(() => {
   console.log = origLog;
   orch._setReservationReaderForTest(null);
+  orch._setLiveMemReaderForTest(null);
   orch._setReservationNoticeSenderForTest(null);
+  if (ORIGINAL_PROFILE_PATH === undefined) delete process.env.CROW_GPU_HOST_PROFILE_PATH;
+  else process.env.CROW_GPU_HOST_PROFILE_PATH = ORIGINAL_PROFILE_PATH;
+  if (profileDir) rmSync(profileDir, { recursive: true, force: true });
 });
 
 test("reserved + provider not ready + not allowed -> ReservedError; bundleUp never called", async () => {
@@ -138,4 +167,63 @@ test("refusal notices: the first refused start per reservation is handed to the 
   await assert.rejects(() => orch.acquireProvider("crow-chat", opts));
   await new Promise((r) => setTimeout(r, 5)); // fire-and-forget sender
   assert.deepEqual(notices, ["start:", "refused:crow-chat"]);
+});
+
+// --- beside holds: a render/video job sharing the card --------------------
+//
+// An exclusive hold keeps today's rule (allow[] only). A beside hold lets a
+// start through when the provider's declared peak fits next to the job's
+// remaining footprint; otherwise the start is refused with reason
+// "gpu_job_beside" on the same box_reserved path.
+
+test("exclusive holds ignore the sampler", async () => {
+  let liveReads = 0;
+  orch._setLiveMemReaderForTest(() => {
+    liveReads++;
+    throw new Error("an exclusive hold must never read the live snapshot");
+  });
+  useHostProfile({ "crow-chat": { gtt_peak_mb: 1000, host_ram_peak_mb: 1000 } });
+  orch._setReservationReaderForTest(() => RES);
+  let started = 0;
+  const opts = { cfg, probeReadyFn: notReady, bundleUpFn: async () => { started++; }, waitForReadyFn: async () => true, bundleStopFn: async () => {} };
+  await assert.rejects(
+    () => orch.acquireProvider("crow-chat", { ...opts, bundleUpFn: mustNotStart }),
+    (e) => e instanceof ReservedError && e.reason === "reserved",
+  );
+  assert.equal(await orch.acquireProvider("crow-embed", opts), true, "the allow list still decides");
+  assert.equal(started, 1);
+  assert.equal(liveReads, 0, "the live snapshot is a beside-mode input only");
+});
+
+test("beside hold: a provider whose peak fits starts", async () => {
+  useHostProfile({ "crow-chat": { gtt_peak_mb: 26000, host_ram_peak_mb: 26000 } });
+  orch._setReservationReaderForTest(() => BESIDE);
+  orch._setLiveMemReaderForTest(() => ({ ...LIVE, at: Date.now() }));
+  let started = 0;
+  const r = await orch.acquireProvider("crow-chat", {
+    cfg, probeReadyFn: notReady, bundleUpFn: async () => { started++; }, waitForReadyFn: async () => true, bundleStopFn: async () => {},
+  });
+  assert.equal(r, true);
+  assert.equal(started, 1);
+  assert.ok(!logs.some((l) => /refusing/.test(l)), logs.join("\n"));
+});
+
+test("beside hold: refusal is a ReservedError with reason gpu_job_beside", async () => {
+  useHostProfile({ "crow-chat": { gtt_peak_mb: 80000, host_ram_peak_mb: 26000 } });
+  orch._setReservationReaderForTest(() => BESIDE);
+  orch._setLiveMemReaderForTest(() => ({ ...LIVE, at: Date.now() }));
+  let started = 0;
+  await assert.rejects(
+    () => orch.acquireProvider("crow-chat", {
+      cfg, probeReadyFn: notReady, bundleUpFn: async () => { started++; }, waitForReadyFn: async () => true, bundleStopFn: async () => {},
+    }),
+    (e) => e instanceof ReservedError
+      && e.code === "box_reserved"
+      && e.reason === "gpu_job_beside"
+      && e.owner === "gpujob-7f3a"
+      && e.expires_at === BESIDE.expires_at
+      && /render\/video job/.test(e.message),
+  );
+  assert.equal(started, 0, "nothing was started");
+  assert.ok(logs.some((l) => /refusing to start crow-chat/.test(l)), logs.join("\n"));
 });
