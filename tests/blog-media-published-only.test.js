@@ -5,19 +5,28 @@
  *   (a) a storage_files row whose reference_id names such a post,
  *   (b) such a post's cover_image_key, or
  *   (c) a key one of their bodies links (`/blog/media/<key>`, the `storage:<key>`
- *       form the renderer/songbook turn into that path, or its encoded spelling).
+ *       form the renderer/songbook turn into that path, or its encoded spelling —
+ *       per segment AND whole-key).
  *
  * A bare `reference_type = 'blog_post'` row is NOT enough: the upload API
  * accepts it with no reference_id (the blog panel's own cover upload does), so
  * before this fix any caller with storage tools could host arbitrary files
  * publicly, and a draft's images were public before the post was published.
  *
+ * A row of ANOTHER kind is never served, however a public post uses it —
+ * `research_source`/`research_note` stay off the Funnel — and a link only counts
+ * as a WHOLE key: `a/b.pn` is not served because a post links `a/b.png`.
+ *
+ * Owner views are the other half: the draft preview, the editor's live preview
+ * and the Files panel read the AUTHENTICATED storage route (`/storage/file/`),
+ * never a loosened public route. Those pages are asserted at the bottom.
+ *
  * The object store is stubbed through the router's `storage` seam, so no S3 is
  * needed and the assertions are about the DECISION, not the bytes.
  *
- * The last two tests cover the songbook + sunvox-studio pair end to end: the
- * URLs are the ones a song page itself emits (percent-encoded for the SunVox
- * project, raw for the audio, both reaching the key through its post's
+ * The songbook + sunvox-studio tests cover that pair end to end: the URLs are
+ * the ones a song page itself emits (percent-encoded for the SunVox project,
+ * raw for the audio, both reaching the key through its post's
  * `**SunVox:**`/`**Audio:** storage:<key>` lines), fetched through this route.
  */
 import { test, before, after } from "node:test";
@@ -55,11 +64,26 @@ function mediaPath(key) {
 
 async function get(key) {
   const r = await fetch(base + mediaPath(key));
-  return { status: r.status, contentType: r.headers.get("content-type"), text: await r.text() };
+  return {
+    status: r.status,
+    contentType: r.headers.get("content-type"),
+    nosniff: r.headers.get("x-content-type-options"),
+    text: await r.text(),
+  };
 }
 
-function row(s3_key, mime_type, reference_id = null) {
-  return { s3_key, original_name: s3_key.split("/").pop(), mime_type, reference_type: "blog_post", reference_id };
+/** A storage_files row; `extra` can retype it (`reference_type: null` = an
+ *  untyped old inline upload) or move it to another bucket. */
+function row(s3_key, mime_type, reference_id = null, extra = {}) {
+  return {
+    s3_key,
+    original_name: s3_key.split("/").pop(),
+    mime_type,
+    reference_type: "blog_post",
+    reference_id,
+    bucket: "crow-files",
+    ...extra,
+  };
 }
 
 /** A song page's ChordPro body. `crow_create_song` prepends these two metadata
@@ -124,7 +148,7 @@ before(async () => {
   await post("draft-post", {
     status: "draft",
     visibility: "private",
-    content: "![d](/blog/media/inline/draft.png)",
+    content: "![d](/blog/media/inline/draft.png)\n\n![s](storage:inline/draft-stored.png)",
     cover: "cover/draft.png",
   });
   await post("private-post", { status: "published", visibility: "private" });
@@ -142,6 +166,39 @@ before(async () => {
     status: "published",
     visibility: "public",
     content: "![enc](/blog/media/encoded/with%20space.png)",
+  });
+  // A post that links a LONGER key than the one its request names: the shorter
+  // key is a strict prefix of this link, not a link to anything.
+  await post("prefix-post", {
+    status: "published",
+    visibility: "public",
+    content: "![p](/blog/media/prefix/a/b.png)",
+  });
+  // The whole-key percent-encoded spelling (what the songbook emits, %2F and
+  // all) written into the body itself.
+  await post("whole-key-post", {
+    status: "published",
+    visibility: "public",
+    content: "![w](/blog/media/whole%2Fkey%2Fenc%20oded.png)",
+  });
+  // A public post whose body spells a `research_source` key, and whose cover is
+  // another: neither row may be served, whatever the post says.
+  await post("typed-post", {
+    status: "published",
+    visibility: "public",
+    content: "![t](/blog/media/typed/research-source.png)",
+    cover: "typed/cover-source.png",
+  });
+  // The older inline uploads carry no reference_type at all.
+  await post("untyped-post", {
+    status: "published",
+    visibility: "public",
+    content: "![u](/blog/media/untyped/inline.png)",
+  });
+  await post("bucket-post", {
+    status: "published",
+    visibility: "public",
+    content: "![b](/blog/media/bucket/other.png)",
   });
 
   for (const [slug, s] of Object.entries(SONGS)) {
@@ -162,14 +219,26 @@ before(async () => {
     row("wild/lit_%one.png", "image/png"),                                 // linked, with a literal % in the key
     row("inline/publ_c.png", "image/png"),                                 // NOT linked: LIKE `_` would match inline/public.png
     row("inline/p%c.png", "image/png"),                                    // NOT linked: LIKE `%` would match inline/public.png
+    // The prefix probe: a row of its own that nothing but a prefix-match would
+    // have served (the post links `prefix/a/b.png`).
+    row("prefix/a/b.pn", "image/png"),
+    // Linked whole-key encoded from a public post's body.
+    row("whole/key/enc oded.png", "image/png"),
+    // Typed rows a published public post uses — and the route must still refuse.
+    row("typed/research-source.png", "image/png", null, { reference_type: "research_source" }),
+    row("typed/cover-source.png", "image/png", null, { reference_type: "research_note" }),
+    // An UNTYPED (NULL) older inline upload, linked from a public post.
+    row("untyped/inline.png", "image/png", null, { reference_type: null }),
+    // A row in its own bucket, linked from a public post.
+    row("bucket/other.png", "image/webp", null, { bucket: "blog-media-bucket" }),
     // sunvox-studio's saves: reference_type blog_post, NO reference_id.
     ...[...Object.values(SONGS)].flatMap((s) => [row(s.sunvoxKey, "application/octet-stream"), row(s.audioKey, "audio/mpeg")]),
   ];
   for (const f of files) {
     await db.execute({
       sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, bucket, reference_type, reference_id)
-            VALUES (?, ?, ?, 'crow-files', ?, ?)`,
-      args: [f.s3_key, f.original_name, f.mime_type, f.reference_type, f.reference_id],
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [f.s3_key, f.original_name, f.mime_type, f.bucket, f.reference_type, f.reference_id],
     });
     objects.set(f.s3_key, { bytes: Buffer.from(`bytes of ${f.s3_key}`), mime: f.mime_type });
   }
@@ -177,11 +246,12 @@ before(async () => {
 
   const { default: blogPublicRouter } = await import("../servers/gateway/routes/blog-public.js");
   const app = express();
+  app.use(express.json());
   app.use(blogPublicRouter({
     storage: {
       async isAvailable() { return true; },
-      async getObject(key) {
-        requested.push(key);
+      async getObject(key, opts = {}) {
+        requested.push({ key, bucket: opts.bucket || null });
         const o = objects.get(key);
         if (!o) throw new Error("Object not found");
         return { stream: Readable.from([o.bytes]), stat: { size: o.bytes.length } };
@@ -260,8 +330,44 @@ test("a % or _ in a key is literal, never a LIKE wildcard", async () => {
   await expectServed("wild/lit_%one.png", "image/png");
 });
 
+test("a strict prefix of a linked key is not served", async () => {
+  // The post links `/blog/media/prefix/a/b.png`; `prefix/a/b.pn` is its head,
+  // not a link. `instr` alone served it (the substring IS in the content), so
+  // the character after each hit is checked in JS.
+  await expectRefused("prefix/a/b.pn");
+});
+
+test("a whole-key percent-encoded link in a public post's body is served", async () => {
+  // `whole/key/enc oded.png` spelled `whole%2Fkey%2Fenc%20oded.png`, the shape
+  // the songbook emits for a SunVox project.
+  await expectServed("whole/key/enc oded.png", "image/png");
+});
+
+test("a storage row of another kind is never served, however a public post uses it", async () => {
+  // Both rows are `research_source`/`research_note`: linked from a published
+  // public post's body, and used as another's cover_image_key. (b) and (c) are
+  // about a BLOG post's use of a key, not a licence to publish any object.
+  await expectRefused("typed/research-source.png");
+  await expectRefused("typed/cover-source.png");
+});
+
+test("an untyped (NULL reference_type) inline upload linked from a public post is served", async () => {
+  await expectServed("untyped/inline.png", "image/png");
+});
+
+test("every served object is nosniff, and the row's own bucket is the one read", async () => {
+  const plain = await expectServed("inline/public.png", "image/png");
+  assert.equal(plain.nosniff, "nosniff", "a Funnel-public object is never sniffed");
+  assert.deepEqual(requested[requested.length - 1], { key: "inline/public.png", bucket: "crow-files" });
+
+  const moved = await expectServed("bucket/other.png", "image/webp");
+  assert.equal(moved.nosniff, "nosniff");
+  assert.deepEqual(requested[requested.length - 1], { key: "bucket/other.png", bucket: "blog-media-bucket" },
+    "the object is read from its own bucket, not the client's default");
+});
+
 test("every refusal is the same 404 with the same text, and never reaches storage", async () => {
-  const keys = ["unref/orphan.png", "draft-ref/key.png", "private-ref/key.png", "cover/draft.png", "inline/draft.png", "inline/publ_c.png"];
+  const keys = ["unref/orphan.png", "draft-ref/key.png", "private-ref/key.png", "cover/draft.png", "inline/draft.png", "inline/publ_c.png", "prefix/a/b.pn", "typed/research-source.png", "typed/cover-source.png"];
   const seen = [];
   for (const key of keys) {
     const before = requested.length;
@@ -302,5 +408,121 @@ test("a song's SunVox project and audio 404 while its post is a draft or not pub
       assert.equal(await r.text(), "Not found");
       assert.equal(requested.length, before, `${slug}: a refusal must not fetch the object`);
     }
+  }
+});
+
+// --- owner views of unpublished media --------------------------------------
+// The public route above refuses a DRAFT's images — correctly. The owner's own
+// views must still draw them, so they render media against the AUTHENTICATED
+// storage route instead: `GET /storage/file/:key(*)`
+// (servers/gateway/routes/storage-http.js), which is never public and is not
+// the route this file hardens. The public blog pages keep `/blog/media/`.
+
+/** Run a dashboard panel handler with a stub layout and capture what it sends. */
+async function runPanel(panel, req, db) {
+  let sent = null;
+  const res = {
+    headersSent: false,
+    type() { return res; },
+    send(html) { sent = html; res.headersSent = true; return res; },
+    redirectAfterPost(url) { throw new Error(`unexpected redirect to ${url}`); },
+  };
+  const returned = await panel.handler({ method: "GET", body: {}, query: {}, headers: {}, ...req }, res, {
+    db, lang: "en", layout: ({ content }) => content,
+  });
+  // A panel may send the page itself (the blog panel's preview) or RETURN what
+  // the layout produced (the Files panel, whose handler returns layout(...)).
+  const html = sent ?? returned;
+  assert.equal(typeof html, "string", "the panel rendered a page");
+  return html;
+}
+
+/** A db client for a panel test (the fixture client was closed in before()). */
+async function openDb() {
+  const { createDbClient } = await import("../servers/db.js");
+  return createDbClient(DB_PATH);
+}
+
+test("the blog panel's draft preview points a draft's media at the authenticated route", async () => {
+  const { default: blogPanel } = await import("../servers/gateway/dashboard/panels/blog.js");
+  const db = await openDb();
+  try {
+    const html = await runPanel(blogPanel, { query: { preview: String(ids["draft-post"]) } }, db);
+    // Both markdown spellings the editor writes.
+    assert.match(html, /<img[^>]*src="\/storage\/file\/inline\/draft\.png"/, html);
+    assert.match(html, /<img[^>]*src="\/storage\/file\/inline\/draft-stored\.png"/, html);
+    assert.doesNotMatch(html, /\/blog\/media\//, `an unpublished image never points at the public route: ${html}`);
+  } finally {
+    db.close();
+  }
+});
+
+test("the editor's live preview renders the same way (POST /blog/preview)", async () => {
+  const res = await fetch(`${base}/blog/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", cookie: "crow_session=test" },
+    body: JSON.stringify({ markdown: "![a](/blog/media/inline/draft.png)\n\n![b](storage:inline/draft-stored.png)" }),
+  });
+  assert.equal(res.status, 200);
+  const { html } = await res.json();
+  assert.match(html, /src="\/storage\/file\/inline\/draft\.png"/, html);
+  assert.match(html, /src="\/storage\/file\/inline\/draft-stored\.png"/, html);
+  assert.doesNotMatch(html, /\/blog\/media\//, html);
+});
+
+test("the live preview still requires a dashboard session", async () => {
+  const res = await fetch(`${base}/blog/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ markdown: "![a](/blog/media/x.png)" }),
+  });
+  assert.equal(res.status, 401);
+});
+
+test("the public page of a published post still uses /blog/media", async () => {
+  const res = await fetch(`${base}/blog/public-post`);
+  assert.equal(res.status, 200);
+  const html = await res.text();
+  assert.match(html, /src="\/blog\/media\/inline\/public\.png"/, html);
+  assert.doesNotMatch(html, /\/storage\/file\//, `the public page never points at the authenticated route: ${html}`);
+});
+
+test("the owner preview's media base loosens nothing: a path that resolves out is still refused", async () => {
+  // `mediaBase` only swaps the PREFIX of a path the public media route would
+  // itself have served (rewriteMediaSrc / isMediaPathUnder). A reference that
+  // escapes either route is refused exactly as it is on every other path, so a
+  // draft's markdown cannot turn a preview into a same-origin GET on
+  // /dashboard/logout — the trick the image rule exists to stop.
+  const { renderMarkdown, OWNER_MEDIA_BASE } = await import("../servers/blog/renderer.js");
+  for (const src of [
+    "/blog/media/../dashboard/logout",
+    "/blog/media/%2e%2e/dashboard/logout",
+    "/storage/file/../../dashboard/logout",
+    "/storage/file/%2e%2e/x",
+    "/dashboard/logout",
+  ]) {
+    const html = renderMarkdown(`![x](${src})`, { mediaBase: OWNER_MEDIA_BASE });
+    assert.doesNotMatch(html, /<img/i, `${src}: ${html}`);
+    assert.doesNotMatch(html, /(?:dashboard\/logout|%2e)/i, `${src}: ${html}`);
+  }
+  // A cache-busting query travels with the key, exactly as the media route's
+  // own shape allows.
+  assert.match(
+    renderMarkdown("![a](/blog/media/a/b.png?v=1)", { mediaBase: OWNER_MEDIA_BASE }),
+    /src="\/storage\/file\/a\/b\.png\?v=1"/
+  );
+});
+
+test("the Files panel links the authenticated storage route, whatever the file's type", async () => {
+  const { default: filesPanel } = await import("../servers/gateway/dashboard/panels/files.js");
+  const db = await openDb();
+  try {
+    const html = await runPanel(filesPanel, {}, db);
+    // A blog-typed row: the public route would 404 it until the post publishes.
+    assert.match(html, /src="\/storage\/file\/public-ref%2Fkey\.png"/, html);
+    assert.match(html, /src="\/storage\/file\/unref%2Forphan\.png"/, html);
+    assert.doesNotMatch(html, /\/blog\/media\//, `no file card points at the public route: ${html}`);
+  } finally {
+    db.close();
   }
 });

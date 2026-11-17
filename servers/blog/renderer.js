@@ -105,10 +105,16 @@ marked.setOptions({ gfm: true, breaks: true });
  * and a chunk whose parse throws answers its own escaped text — never "": a
  * public page renders what was written.
  * @param {string} markdown
- * @param {{ storageOrigin?: string|null }} [options] `storageOrigin` overrides
- *   the module-wide storage origin for this call only. The gateway sets that
- *   module-wide value once, with the same origin its CSP `img-src` names
- *   (see setRendererStorageOrigin).
+ * @param {{ storageOrigin?: string|null, mediaBase?: string|null }} [options]
+ *   `storageOrigin` overrides the module-wide storage origin for this call only.
+ *   The gateway sets that module-wide value once, with the same origin its CSP
+ *   `img-src` names (see setRendererStorageOrigin). `mediaBase` renders media
+ *   references against another base than the PUBLIC `/blog/media/` route — it
+ *   exists for the OWNER's authenticated previews only (OWNER_MEDIA_BASE, the
+ *   dashboard-only `/storage/file/` route), because a draft's images are
+ *   refused by the public route until the post is published. Omitted, this is
+ *   exactly the renderer it always was: every public page and bot surface keeps
+ *   `/blog/media/`.
  * @returns {string} Safe HTML
  */
 export function renderMarkdown(markdown, options) {
@@ -117,17 +123,18 @@ export function renderMarkdown(markdown, options) {
   const storageOrigin = Object.prototype.hasOwnProperty.call(opts, "storageOrigin")
     ? normalizeOrigin(opts.storageOrigin)
     : rendererStorageOrigin;
+  const mediaBase = normalizeMediaBase(opts.mediaBase);
   // Normalise line endings FIRST, exactly as marked's Lexer#lex does. marked
   // treats a bare `\r` as a line break, so "x\r" + "1) " x N is N container
   // lines to marked — and must be to the cap below too, not one long line.
   const src = String(markdown).replace(/\r\n?/g, "\n");
-  return withImageContext({ policy: "owner", storageOrigin }, () => {
+  return withImageContext({ policy: "owner", storageOrigin, mediaBase }, () => {
     if (src.length <= OWNER_MD_MAX_INPUT) {
-      return sanitizeRendered(renderOwnerHead(src), { imagePolicy: "owner", storageOrigin });
+      return sanitizeRendered(renderOwnerHead(src), { imagePolicy: "owner", storageOrigin, mediaBase });
     }
     // Longer than one chunk: render every chunk that fits the budget, then the
     // WHOLE remainder as plain text (see renderOwnerLongDocument).
-    return renderOwnerLongDocument(src, storageOrigin);
+    return renderOwnerLongDocument(src, storageOrigin, mediaBase);
   });
 }
 
@@ -140,9 +147,10 @@ export function renderMarkdown(markdown, options) {
  * @param {string} src line-ending-normalised document, longer than
  *   OWNER_MD_MAX_INPUT
  * @param {string|null} storageOrigin
+ * @param {string|null} mediaBase
  * @returns {string} Safe HTML
  */
-function renderOwnerLongDocument(src, storageOrigin) {
+function renderOwnerLongDocument(src, storageOrigin, mediaBase) {
   // The budget is measured from HERE, in CPU time — this thread's own where Node
   // exposes process.threadCpuUsage (see cpuNow). Rendering is synchronous and
   // single-threaded, so this is the render's own cost whatever load the box
@@ -152,7 +160,7 @@ function renderOwnerLongDocument(src, storageOrigin) {
   // against the ONE lexer's `tokens.links`, so without this map a link in chunk
   // 3 whose `[y]: …` line sits in chunk 1 renders as its literal text.
   const seedLinks = collectLinkDefinitions(src, ownerMarked);
-  const context = { imagePolicy: "owner", storageOrigin };
+  const context = { imagePolicy: "owner", storageOrigin, mediaBase };
   let html = "";
   /** Where the markdown-rendered part ends — where a tail would begin. */
   let rendered = 0;
@@ -1284,6 +1292,18 @@ const botMarked = new Marked({
 /** The only image path a bot reply may use — the public blog media route. */
 const BOT_IMAGE_PREFIX = "/blog/media/";
 /**
+ * The AUTHENTICATED storage route as a media base — `/storage/file/<key>`
+ * (servers/gateway/routes/storage-http.js, `GET /storage/file/:key(*)`, mounted
+ * behind the gateway's auth middleware in boot/feature-mounts.js). Passed as
+ * renderMarkdown's `mediaBase` by the owner-only previews (the blog panel's
+ * draft preview, its live `POST /blog/preview`), which draw a DRAFT's images:
+ * the public `/blog/media/` route serves a key only while a published public
+ * post uses it, so a preview pointing there would show broken images until
+ * publish day. Never passed by a public page or a bot surface — those keep
+ * `/blog/media/`.
+ */
+export const OWNER_MEDIA_BASE = "/storage/file/";
+/**
  * A published case-study figure — one of the OWNER path's read-only
  * same-origin paths, and NEVER one a bot reply may use.
  *
@@ -1354,7 +1374,23 @@ let rendererStorageOrigin = null;
  * runs inside the parse call, so it reads the policy from here; a render is
  * synchronous, so nesting cannot interleave.
  */
-let imageContext = { policy: "none", storageOrigin: null };
+let imageContext = { policy: "none", storageOrigin: null, mediaBase: null };
+
+/**
+ * The `mediaBase` option as a usable same-origin path prefix, or null (the
+ * public media route). Only a fixed, caller-written prefix is ever accepted: an
+ * absolute path, no `//` after the leading slash, no backslash, no `..`, and no
+ * percent-encoding, query or fragment — none of which a base needs, and each of
+ * which is a way to make a rewritten URL resolve somewhere else.
+ * @param {unknown} base
+ * @returns {string|null}
+ */
+function normalizeMediaBase(base) {
+  if (typeof base !== "string" || !base) return null;
+  if (!base.startsWith("/") || base.slice(1).includes("//")) return null;
+  if (base.includes("\\") || base.includes("..") || /[%?#]/.test(base)) return null;
+  return base.endsWith("/") ? base : base + "/";
+}
 
 /** `http://host:port` / `https://host:port` as the URL parser normalizes it, or null. */
 function normalizeOrigin(origin) {
@@ -1382,9 +1418,9 @@ function withImageContext(context, fn) {
 }
 
 /**
- * True when `path` is a same-origin absolute path under `/blog/media/` and
- * nothing else: no backslash (a browser may read it as a slash), no `//` after
- * the leading slash (protocol-relative), and nothing that resolves out of the
+ * True when `path` is a same-origin absolute path under `prefix` and nothing
+ * else: no backslash (a browser may read it as a slash), no `//` after the
+ * leading slash (protocol-relative), and nothing that resolves out of the
  * prefix.
  *
  * A raw `..` is NOT refused as such. `/blog/media/a/../b` is allowed: the URL
@@ -1404,18 +1440,41 @@ function withImageContext(context, fn) {
  * in which any later parser normalizes or decodes.
  *
  * Used for a same-origin path AND for the pathname of an absolute URL, so both
- * spellings of the media route get exactly the same verdict.
+ * spellings of a route get exactly the same verdict — and for the owner
+ * preview's `mediaBase` (OWNER_MEDIA_BASE), which is judged by these same rules.
  * @param {string} path
+ * @param {string} prefix
  * @returns {boolean}
  */
-function isMediaPath(path) {
-  if (typeof path !== "string" || !path.startsWith(BOT_IMAGE_PREFIX)) return false;
+function isMediaPathUnder(path, prefix) {
+  if (typeof path !== "string" || !path.startsWith(prefix)) return false;
   if (path.includes("\\") || path.slice(1).includes("//")) return false;
   if (/%2e|%2f|%5c/i.test(path)) return false;
   let url;
   try { url = new URL(path, BOT_IMAGE_ORIGIN); } catch { return false; }
   if (url.origin !== BOT_IMAGE_ORIGIN) return false;
-  return url.pathname.startsWith(BOT_IMAGE_PREFIX) && !url.pathname.includes("..");
+  return url.pathname.startsWith(prefix) && !url.pathname.includes("..");
+}
+
+/** `isMediaPathUnder` on the public media route — the bot path's only rule. */
+function isMediaPath(path) {
+  return isMediaPathUnder(path, BOT_IMAGE_PREFIX);
+}
+
+/**
+ * Point a media reference at `mediaBase` instead of the public route — what an
+ * owner preview does so a DRAFT's images draw. Only a path the public media
+ * route would itself have served is rewritten (isMediaPath): a reference that
+ * resolves out of the media route keeps its spelling, so the image rule below
+ * refuses it as it always did, and anything that is not a media path at all is
+ * returned untouched.
+ * @param {string} src
+ * @param {string|null} mediaBase
+ * @returns {string}
+ */
+function rewriteMediaSrc(src, mediaBase) {
+  if (!mediaBase || typeof src !== "string" || !isMediaPath(src)) return src;
+  return mediaBase + src.slice(BOT_IMAGE_PREFIX.length);
 }
 
 /**
@@ -1473,21 +1532,29 @@ function isOwnerPhotoPath(path) {
  * @param {string} src
  * @param {"none"|"bot"|"owner"} policy
  * @param {string|null} storageOrigin
+ * @param {string|null} [mediaBase] the owner preview's authenticated media base
+ *   (OWNER_MEDIA_BASE); null on every public page and every bot surface
  * @returns {boolean}
  */
-function isAllowedImageSrc(src, policy, storageOrigin) {
+function isAllowedImageSrc(src, policy, storageOrigin, mediaBase = null) {
   if (typeof src !== "string" || !src) return false;
   // (a) `/blog/media/…` — the only src a bot reply may use, and the owner's own
   // media route.
   if (isAllowedBotImageSrc(src)) return true;
   if (policy !== "owner") return false;
+  // (a1) the AUTHENTICATED storage route, when this render is an owner preview
+  // that swapped the media base (see rewriteMediaSrc): the same read-only GET,
+  // under the same shape rules as (a) — nothing that resolves out of the prefix,
+  // no encoded separator, no `//`. Only a preview passes a base, so no bot reply
+  // and no public page can reach it.
+  if (mediaBase && isMediaPathUnder(src, mediaBase)) return true;
   // (a2) a read-only owner route, as a same-origin path: a published case-study
   // figure, a KB media file, a meta-glasses note photo on disk.
   if (isOwnerFigurePath(src) || isOwnerKbMediaPath(src) || isOwnerPhotoPath(src)) return true;
   // (d) an inline data: image — no request is made at all.
   if (INLINE_IMAGE.test(src)) return true;
   let url;
-  try { url = new URL(src); } catch { return false; } // relative srcs were judged by (a)/(a2)
+  try { url = new URL(src); } catch { return false; } // relative srcs were judged by (a)/(a1)/(a2)
   if (url.protocol !== "http:" && url.protocol !== "https:") return false;
   // (c) the storage origin (presigned object URLs): exact scheme, host and port.
   if (storageOrigin && url.origin === storageOrigin) return true;
@@ -1505,6 +1572,8 @@ function isAllowedImageSrc(src, policy, storageOrigin) {
   if (isOwnerFigurePath(url.pathname) || isOwnerKbMediaPath(url.pathname) || isOwnerPhotoPath(url.pathname)) {
     return !url.search && !url.hash;
   }
+  // (a1), written out in full: the owner preview's authenticated media base.
+  if (mediaBase && isMediaPathUnder(url.pathname, mediaBase)) return true;
   return isMediaPath(url.pathname);
 }
 
@@ -3804,16 +3873,23 @@ export function renderBotMarkdown(markdown) {
  *   "bot"   — `/blog/media/` images only; links opt out of prefetch AND Drive
  *   "owner" — the owner's rule (see isAllowedImageSrc); links opt out of
  *             prefetch only, so the owner's own navigation stays on Turbo
+ * `mediaBase` (owner previews only) is where a media reference is written to:
+ * the authenticated storage route instead of the public one, for a DRAFT's
+ * images. Null, every reference keeps the public `/blog/media/` prefix — the
+ * public pages and the bot path pass nothing.
  */
-function sanitizeRendered(raw, { imagePolicy = "none", storageOrigin = null } = {}) {
+function sanitizeRendered(raw, { imagePolicy = "none", storageOrigin = null, mediaBase = null } = {}) {
   const bot = imagePolicy === "bot";
   const governed = imagePolicy !== "none";
   const linkAttrs = governed ? (bot ? BOT_LINK_ATTRS : OWNER_LINK_ATTRS) : [];
-  // Rewrite storage: URLs to public blog media route. The same prefix the image
-  // renderer judges at parse time (BOT_IMAGE_PREFIX), so the two cannot drift.
+  const mediaPrefix = mediaBase || BOT_IMAGE_PREFIX;
+  // Rewrite storage: URLs to the media route in force. The same prefix the image
+  // renderer judges at parse time (BOT_IMAGE_PREFIX) unless this is an owner
+  // preview, and the same prefix isAllowedImageSrc accepts below, so the three
+  // cannot drift.
   const processed = raw.replace(
     /(<img\s[^>]*src=")storage:([^"]+)(")/g,
-    (_m, before, key, after) => before + BOT_IMAGE_PREFIX + key + after
+    (_m, before, key, after) => before + mediaPrefix + key + after
   );
   const clean = sanitizeHtml(processed, {
     allowedTags: sanitizeHtml.defaults.allowedTags.concat([
@@ -3898,10 +3974,24 @@ function sanitizeRendered(raw, { imagePolicy = "none", storageOrigin = null } = 
     ...(governed
       ? {
         transformTags: {
+          // An owner preview writes every media reference (a `/blog/media/<key>`
+          // src or href, a `storage:` one already rewritten above) to the
+          // authenticated route, so a DRAFT's images and links draw. A no-op on
+          // every other path: mediaBase is null there, and rewriteMediaSrc
+          // returns its argument unchanged.
+          ...(mediaBase
+            ? {
+              img: (tagName, attribs) => ({
+                tagName,
+                attribs: attribs.src ? { ...attribs, src: rewriteMediaSrc(attribs.src, mediaBase) } : attribs,
+              }),
+            }
+            : {}),
           a: (tagName, attribs) => ({
             tagName,
             attribs: {
               ...attribs,
+              ...(mediaBase && attribs.href ? { href: rewriteMediaSrc(attribs.href, mediaBase) } : {}),
               "data-turbo-prefetch": "false",
               ...(bot ? { "data-turbo": "false" } : {}),
             },
@@ -3909,7 +3999,7 @@ function sanitizeRendered(raw, { imagePolicy = "none", storageOrigin = null } = 
         },
         exclusiveFilter: (frame) => {
           if (frame.tag === "img") {
-            return !isAllowedImageSrc(frame.attribs && frame.attribs.src, imagePolicy, storageOrigin);
+            return !isAllowedImageSrc(frame.attribs && frame.attribs.src, imagePolicy, storageOrigin, mediaBase);
           }
           if (frame.tag === "input") return !isCheckboxInput(frame.attribs);
           return false;

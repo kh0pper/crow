@@ -13,7 +13,7 @@
 
 import { Router } from "express";
 import { createDbClient, escapeLikePattern } from "../../db.js";
-import { renderMarkdown } from "../../blog/renderer.js";
+import { renderMarkdown, OWNER_MEDIA_BASE } from "../../blog/renderer.js";
 import { isChordPro } from "../../blog/chordpro.js";
 import { generateRss, generateAtom } from "../../blog/rss.js";
 import { generatePodcastFeed } from "../../blog/podcast-rss.js";
@@ -509,6 +509,93 @@ function formatDate(dateStr) {
 }
 
 /**
+ * A character that could CONTINUE a storage key. A link match followed by one of
+ * these is a STRICT PREFIX of a longer key's link, not a link to this key — so
+ * `a/b.pn` is not served just because a post links `a/b.png`.
+ *
+ * `-` is in the class because keys carry it; `/` and `.` continue a path or a
+ * filename; `%` continues a percent-encoded character; `~` and `_` continue a
+ * filename a key can be made of. The end of the content is a clean boundary.
+ */
+const KEY_CONTINUES = /[A-Za-z0-9._%/~-]/;
+
+/**
+ * Every spelling of a key a rendered link can carry: the raw key
+ * (`/blog/media/a/b.png`, `storage:a/b.png`), encoded per segment (what the
+ * renderer writes for a key with a space), and encoded whole (what the songbook
+ * writes for a SunVox project, `%2F` and all). A lone surrogate has no
+ * percent-encoded spelling; the raw form stands.
+ * @param {string} key
+ * @returns {string[]}
+ */
+function keySpellings(key) {
+  const spellings = new Set([key]);
+  try {
+    spellings.add(key.split("/").map(encodeURIComponent).join("/"));
+    spellings.add(encodeURIComponent(key));
+  } catch {
+    // Not encodable: the raw spelling above is all there is.
+  }
+  return [...spellings].filter(Boolean);
+}
+
+/**
+ * The strings a post's body must contain for it to be a candidate of `key` — a
+ * media link (`/blog/media/<spelling>`) or the renderer's `storage:<spelling>`
+ * form, in every spelling keySpellings gives.
+ * @param {string} key
+ * @returns {string[]}
+ */
+function linkNeedles(key) {
+  const needles = new Set();
+  for (const spelling of keySpellings(key)) {
+    needles.add(`/blog/media/${spelling}`);
+    needles.add(`storage:${spelling}`);
+  }
+  return [...needles];
+}
+
+/**
+ * True when `content` links one of `needles` and the match is not merely the head
+ * of a longer key (see KEY_CONTINUES).
+ * @param {string} content
+ * @param {string[]} needles
+ * @returns {boolean}
+ */
+function contentLinksAny(content, needles) {
+  const text = String(content || "");
+  for (const needle of needles) {
+    for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
+      const after = text.charAt(at + needle.length);
+      if (after === "" || !KEY_CONTINUES.test(after)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when a PUBLISHED PUBLIC post's body links `key`. The SQL keeps the work
+ * small — `instr` per needle, never LIKE (a `%` or `_` inside a key stays
+ * literal), and no SQL is built from the key text, only plain bound parameters -
+ * while the BOUNDARY of each hit is settled here in JS, because SQL cannot look
+ * at the character after a match.
+ * @param {object} db
+ * @param {string} key
+ * @returns {Promise<boolean>}
+ */
+async function contentLinksKey(db, key) {
+  const needles = linkNeedles(key);
+  if (needles.length === 0) return false;
+  const { rows } = await db.execute({
+    sql: `SELECT content FROM blog_posts
+           WHERE status = 'published' AND visibility = 'public'
+             AND (${needles.map(() => "instr(content, ?) > 0").join(" OR ")})`,
+    args: needles,
+  });
+  return rows.some((row) => contentLinksAny(row.content, needles));
+}
+
+/**
  * @param {object} [deps]
  * @param {{ isAvailable?: Function, getObject?: Function }} [deps.storage]
  *   Test seam for the object store: the suite has no ESM module mocks, and a
@@ -533,7 +620,11 @@ export default function blogPublicRouter({ storage = {} } = {}) {
       return res.status(400).json({ error: "Missing markdown field" });
     }
     try {
-      const html = renderMarkdown(markdown);
+      // OWNER PREVIEW: the editor is drawing a DRAFT, so its media references go
+      // to the authenticated storage route (the public /blog/media route serves
+      // a key only once a published public post uses it). Public pages and bot
+      // rendering never pass a media base.
+      const html = renderMarkdown(markdown, { mediaBase: OWNER_MEDIA_BASE });
       res.json({ html });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -836,50 +927,47 @@ export default function blogPublicRouter({ storage = {} } = {}) {
       //   (b) a published public post's cover_image_key, or
       //   (c) a key one of their bodies links, i.e. the rendered
       //       `/blog/media/<key>`, the `storage:<key>` form the renderer and
-      //       the songbook turn into it, or its percent-encoded spelling.
+      //       the songbook turn into it, or its percent-encoded spelling (per
+      //       segment, and the whole-key form the songbook emits for a SunVox
+      //       project).
       // A bare reference_type = 'blog_post' row proves nothing — the upload
       // API accepts that with no reference_id — so on this Funnel-public route
       // it would let any caller with storage tools host arbitrary files, and
       // would publish a draft's images before the post is published.
-      // `instr`, not LIKE: a `%` or `_` inside a key stays literal, so no key
-      // can ever match another key's link. No SQL is built from the key — the
-      // markers are plain bound parameters. (A key that happens to be a prefix
-      // of a longer linked key matches too; the object served is still that
-      // exact key, and only one that exists in storage_files.)
+      //
+      // And a storage row of another KIND is never served here, however it is
+      // linked: (b) and (c) are about a blog post's USE of a key, not about the
+      // object being harmless, so `research_source`/`research_note` (and any
+      // other type) stays off the public Funnel even when a public post's body
+      // happens to spell its key. Only 'blog_post' — what (a) already requires —
+      // and an UNTYPED row (NULL/'', the older inline uploads) qualify.
       if (!s3Key) return res.status(404).send("Not found");
-      const mediaLink = `/blog/media/${s3Key}`;
-      let encodedLink = mediaLink;
-      try {
-        // Encoded per segment: a whole-key encodeURIComponent would escape the
-        // slashes too, and no rendered link ever contains %2F.
-        encodedLink = "/blog/media/" + s3Key.split("/").map(encodeURIComponent).join("/");
-      } catch {
-        // A lone surrogate has no percent-encoded spelling; the raw form stands.
-      }
-      const allowed = await db.execute({
-        sql: `SELECT sf.mime_type FROM storage_files sf
-              WHERE sf.s3_key = ?
-                AND (
-                  (sf.reference_type = 'blog_post' AND EXISTS (
-                     SELECT 1 FROM blog_posts bp_ref
-                      WHERE CAST(bp_ref.id AS TEXT) = CAST(sf.reference_id AS TEXT)
-                        AND bp_ref.status = 'published' AND bp_ref.visibility = 'public'))
-                  OR EXISTS (
-                     SELECT 1 FROM blog_posts bp_cover
-                      WHERE bp_cover.cover_image_key = sf.s3_key
-                        AND bp_cover.status = 'published' AND bp_cover.visibility = 'public')
-                  OR EXISTS (
-                     SELECT 1 FROM blog_posts bp_content
-                      WHERE bp_content.status = 'published' AND bp_content.visibility = 'public'
-                        AND (instr(bp_content.content, ?) > 0
-                          OR instr(bp_content.content, ?) > 0
-                          OR instr(bp_content.content, ?) > 0))
-                )
-              LIMIT 1`,
-        args: [s3Key, mediaLink, encodedLink, `storage:${s3Key}`],
+      const attached = await db.execute({
+        sql: `SELECT sf.mime_type, sf.bucket,
+                     ((sf.reference_type = 'blog_post' AND EXISTS (
+                        SELECT 1 FROM blog_posts bp_ref
+                         WHERE CAST(bp_ref.id AS TEXT) = CAST(sf.reference_id AS TEXT)
+                           AND bp_ref.status = 'published' AND bp_ref.visibility = 'public'))
+                      OR EXISTS (
+                        SELECT 1 FROM blog_posts bp_cover
+                         WHERE bp_cover.cover_image_key = sf.s3_key
+                           AND bp_cover.status = 'published' AND bp_cover.visibility = 'public'))
+                       AS attached
+                FROM storage_files sf
+               WHERE sf.s3_key = ?
+                 AND (sf.reference_type = 'blog_post'
+                      OR sf.reference_type IS NULL
+                      OR sf.reference_type = '')
+               LIMIT 1`,
+        args: [s3Key],
       });
 
-      if (allowed.rows.length === 0) {
+      if (attached.rows.length === 0) {
+        return res.status(404).send("Not found");
+      }
+      const file = attached.rows[0];
+      const allowed = Number(file.attached) > 0 || (await contentLinksKey(db, s3Key));
+      if (!allowed) {
         return res.status(404).send("Not found");
       }
 
@@ -887,12 +975,21 @@ export default function blogPublicRouter({ storage = {} } = {}) {
         return res.status(503).send("Storage unavailable");
       }
 
-      const { stream, stat } = await storageGetObject(s3Key);
-      const contentType = allowed.rows[0].mime_type || stat.metaData?.["content-type"] || "application/octet-stream";
+      // The row's OWN bucket (an upload may name one): a key is only meaningful
+      // inside the bucket it was stored in. Empty means the client's default.
+      const bucket = file.bucket ? String(file.bucket) : "";
+      const { stream, stat } = bucket
+        ? await storageGetObject(s3Key, { bucket })
+        : await storageGetObject(s3Key);
+      const contentType = file.mime_type || stat.metaData?.["content-type"] || "application/octet-stream";
 
       res.set("Content-Type", contentType);
       res.set("Content-Length", String(stat.size));
       res.set("Cache-Control", "public, max-age=86400");
+      // This is a Funnel-public route: a stored object must never be sniffed
+      // into something the browser would execute (an HTML or SVG upload served
+      // as octet-stream stays a download).
+      res.set("X-Content-Type-Options", "nosniff");
       stream.pipe(res);
     } catch (err) {
       console.error("[blog] Media error:", err);

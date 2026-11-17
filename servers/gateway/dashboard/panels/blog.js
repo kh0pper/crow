@@ -7,7 +7,7 @@ import { csrfInput } from "../shared/csrf.js";
 import { ICON_DEPLOY } from "../shared/empty-state-icons.js";
 import { t, tJs } from "../shared/i18n.js";
 import { getBlogSettings, pageShell } from "../../routes/blog-public.js";
-import { renderMarkdown } from "../../../blog/renderer.js";
+import { renderMarkdown, OWNER_MEDIA_BASE } from "../../../blog/renderer.js";
 
 export default {
   id: "blog",
@@ -97,7 +97,11 @@ export default {
     // GET — show post list (or a draft preview)
     // Preview renders a draft/private post exactly as it would appear on
     // the public blog, so authors can review before publishing. Auth is
-    // already enforced by the dashboard middleware stack.
+    // already enforced by the dashboard middleware stack. The one deliberate
+    // difference: media references render against the AUTHENTICATED storage
+    // route (renderMarkdown's mediaBase), because the public /blog/media route
+    // serves a key only once a published public post uses it — a draft's images
+    // would otherwise be broken exactly where the author is checking them.
     const previewId = req.query.preview;
     if (previewId) {
       const previewResult = await db.execute({
@@ -109,7 +113,7 @@ export default {
         return layout({ title: "Preview", content: `<div class="alert alert-error">Post not found</div>` });
       }
       const previewSettings = await getBlogSettings(db);
-      const postBody = renderMarkdown(post.content);
+      const postBody = renderMarkdown(post.content, { mediaBase: OWNER_MEDIA_BASE });
       const previewTags = (post.tags || "").split(",").map((x) => x.trim()).filter(Boolean);
       const previewTagsHtml = previewTags.length > 0
         ? `<div class="tags" style="margin-top:0.5rem">${previewTags.map((x) => `<span>${escapeHtml(x)}</span>`).join(" ")}</div>`
@@ -207,8 +211,10 @@ export default {
         const previewBtn = `<a href="?preview=${p.id}" target="_blank" rel="noopener" data-turbo="false" class="btn btn-sm btn-secondary">Preview</a>`;
         const deleteBtn = `<form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${tJs("blog.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="${p.id}"><button class="btn btn-sm btn-danger" type="submit">${t("blog.delete", lang)}</button></form>`;
 
+        // The authenticated storage route, not /blog/media: this list shows
+        // DRAFTS and private posts too, whose covers the public route refuses.
         const thumb = p.cover_image_key
-          ? `<img src="/blog/media/${escapeHtml(p.cover_image_key)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:0.5rem">`
+          ? `<img src="/storage/file/${encodeURIComponent(p.cover_image_key)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:0.5rem">`
           : "";
         return [
           `${thumb}<a href="?edit=${p.id}" data-turbo-frame="_top" style="color:var(--crow-text-primary);text-decoration:none">${escapeHtml(p.title)}</a>`,

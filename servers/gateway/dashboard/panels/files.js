@@ -26,10 +26,15 @@ function mimeCategory(mime) {
   return "other";
 }
 
+/**
+ * The link/copy URL a file card shows. Always the AUTHENTICATED storage route:
+ * this panel is the owner's own file manager (it lists drafts' and untyped
+ * uploads too), and the public /blog/media route serves a key only while a
+ * published public post uses it — so a blog-typed file linked there would be a
+ * 404 for everything not yet published.
+ */
 function fileUrl(file) {
-  return file.reference_type === "blog_post"
-    ? `/blog/media/${file.s3_key}`
-    : `/storage/file/${file.s3_key}`;
+  return `/storage/file/${encodeURIComponent(file.s3_key)}`;
 }
 
 export default {
