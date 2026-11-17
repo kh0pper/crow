@@ -11,7 +11,13 @@
  * the CROW_PEER_TOKENS_PATH override, the relay token's move, the
  * `sync-pair-pin --fingerprint` CLI, and a real PiRpc child behind the
  * sandbox (with the old path as the positive control).
+ *
+ * `pi-scratch-home` first: that child's hideFiles come from every Crow home on
+ * the host (the operator's real ~/.crow included), so HOME must be scratch
+ * before bridge.mjs is imported. Its own CROW_HOME cases are set per test and
+ * still win (only an unset CROW_HOME is filled in by the helper).
  */
+import "./helpers/pi-scratch-home.mjs";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

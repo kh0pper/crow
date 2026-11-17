@@ -12,7 +12,12 @@
  *     the gateway log; other stderr does not.
  *
  * PiRpc nodeBin/cliPath seam with a stub child; no real pi.
+ *
+ * `pi-scratch-home` first: even with the sandbox off the spawn builds its
+ * hideFiles from every Crow home on the host (the operator's real ~/.crow
+ * included), so HOME must be scratch before bridge.mjs is imported.
  */
+import "./helpers/pi-scratch-home.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";

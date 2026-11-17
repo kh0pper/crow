@@ -10,7 +10,12 @@
  * scrub carry no canary and no store path, and the real proxy child, spawned
  * the way pi spawns it with the store chmod 000, connects to its relay while
  * holding no canary in its environment and no descriptor on the store.
+ *
+ * `pi-scratch-home` first: the real PiRpc spawned below builds its hideFiles
+ * from every Crow home on the host (the operator's real ~/.crow included), so
+ * HOME must be scratch before bridge.mjs is imported.
  */
+import "./helpers/pi-scratch-home.mjs";
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";

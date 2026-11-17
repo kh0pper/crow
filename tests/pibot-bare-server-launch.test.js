@@ -9,26 +9,19 @@
  * names and NOT the bare entry.
  *
  * Uses the PiRpc nodeBin/cliPath seam with a stub that records its argv, so no real pi
- * is spawned. Asserts the ACTUAL spawn args.
+ * is spawned. Asserts the ACTUAL spawn args. `pi-scratch-home` first: a spawn's
+ * hideFiles come from every Crow home the host has (the operator's real ~/.crow
+ * included), so HOME must be scratch before bridge.mjs is imported.
  */
+import "./helpers/pi-scratch-home.mjs";
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
 const { _resetBareServerToolsForTest } = await import("../scripts/pi-bots/bare-server-tools.mjs");
-// The co-host scan must not read the HOST's /etc (a dev box with a declared extra Crow
-// home would change these spawns): point its /etc half at scratch, empty dirs.
-const SCAN_ROOT = mkdtempSync(join(tmpdir(), "crow-bare-launch-scan-"));
-process.on("exit", () => { try { rmSync(SCAN_ROOT, { recursive: true, force: true }); } catch { /* gone */ } });
-const SCAN_UNITS = join(SCAN_ROOT, "units");
-const SCAN_ENV = join(SCAN_ROOT, "etc-crow");
-mkdirSync(SCAN_UNITS, { recursive: true });
-mkdirSync(SCAN_ENV, { recursive: true });
-const { _setSystemScanDirsForTest } = await import("../servers/shared/secret-values.js");
-_setSystemScanDirsForTest({ unitDirs: [SCAN_UNITS], envFileDirs: [SCAN_ENV] });
 
 beforeEach(() => _resetBareServerToolsForTest());
 

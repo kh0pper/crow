@@ -19,6 +19,20 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// A scratch HOME and CROW_HOME, set BEFORE bridge.mjs is imported (bridge.mjs,
+// mcp_writer.mjs and model_resolver.mjs read HOME/their paths once, at import).
+// Without it a PiRpc spawn reaches the operator's REAL home: the co-host secrets
+// scan (secret-values.js instanceSecretsDirs) enumerates every `$HOME/.crow*` home
+// by design — `npm test` sets CROW_HOME but leaves HOME alone, and a raw
+// `node --test` sets neither — and bridge.mjs builds the spawn's hideFiles from
+// each of those homes. The operator's own `~/.crow/bundles/<id>` entries then
+// decide what the bwrap mask pass sees: a bundle installed as a symlink into
+// another checkout (a link outside the trusted roots of THIS checkout) is listed
+// rather than masked and refuses the spawn. That is why this test passed in one
+// checkout and threw in another. tests/helpers/pi-scratch-home.mjs holds the
+// recipe (scratch HOME/CROW_HOME/CROW_DATA_DIR + the /etc half of the scan).
+await import("./helpers/pi-scratch-home.mjs");
+
 const { buildToolsCsv, PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
 const { applySourceModes } = await import("../servers/gateway/dashboard/panels/bot-builder/def-adapter.js");
 const { getChatTools } = await import("../servers/gateway/ai/tool-executor.js");

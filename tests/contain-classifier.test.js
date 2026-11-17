@@ -8,7 +8,12 @@
  * /llm/p door the operator named — and anything else is dropped, leaving
  * pi-lab to ask every command in a live chat and refuse it unattended.
  * An UNCONTAINED spawn keeps the raw endpoint (asserted end to end below).
+ *
+ * `pi-scratch-home` first: that uncontained PiRpc still builds its hideFiles
+ * from every Crow home on the host (the operator's real ~/.crow included), so
+ * HOME must be scratch before bridge.mjs is imported.
  */
+import "./helpers/pi-scratch-home.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";

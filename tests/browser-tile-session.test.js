@@ -10,8 +10,11 @@
  *
  * One leg spawns a real PiRpc against a stub child (the bot-bash-auto-spawn
  * idiom, sandbox off) to prove the identity env survives the bridge's own
- * env assembly, not just the engine's extraEnv.
+ * env assembly, not just the engine's extraEnv. `pi-scratch-home` first: that
+ * spawn's hideFiles come from every Crow home on the host (the operator's real
+ * ~/.crow included), so HOME must be scratch before bridge.mjs is imported.
  */
+import "./helpers/pi-scratch-home.mjs";
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";

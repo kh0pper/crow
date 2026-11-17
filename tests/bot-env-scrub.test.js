@@ -6,7 +6,12 @@
  * While the scrub is off (operator escape hatch CROW_BOT_ENV_PASSTHROUGH=1) a
  * bot cannot be given a shell: the validator refuses ask/auto/allowlist and
  * the bridge clamps any stored one to deny at spawn.
+ *
+ * `pi-scratch-home` first: the spawn builds its hideFiles from every Crow home
+ * on the host (the operator's real ~/.crow included), so HOME must be scratch
+ * before bridge.mjs is imported.
  */
+import "./helpers/pi-scratch-home.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
