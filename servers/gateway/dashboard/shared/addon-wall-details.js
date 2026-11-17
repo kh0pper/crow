@@ -37,6 +37,62 @@ function readJson(path) {
   }
 }
 
+/** What the decision needs, read once per render: walls on, the home, the add-ons file. */
+function decisionContext({ crowHome, env } = {}) {
+  return {
+    wallsOn: wallsOnForHost(env),
+    crowHome: crowHome || null,
+    mcpAddons: (crowHome && readJson(join(crowHome, "mcp-addons.json"))) || {},
+  };
+}
+
+/**
+ * The rule behind "Wall it again": this add-on is unwalled because the OWNER
+ * (or the Fix-it remedy, or the file they hand-edited) said so, on a host where
+ * walls are on at all.
+ *
+ * Two records can say so. The entry's own `wall` is the decision THIS run got
+ * (source "owner" for any `addon-walls.json` mode — the Fix-it remedy and a
+ * hand edit alike). But that snapshot is only as fresh as the last connect: a
+ * mode written while walls were off here, or before a walls rollout, leaves it
+ * reading "default" (or absent) even though the file — the decision every new
+ * connect obeys — says unwalled. The file is therefore read as well, and only
+ * for an add-on the wall can actually govern.
+ *
+ * With walls off for this computer (the operator's kill switch, or a per-host
+ * default of off) there is nothing to re-arm for any add-on, so every add-on
+ * answers false — the honest answer for that host.
+ */
+function ownerUnwalled(entry, ctx) {
+  if (!ctx || !ctx.wallsOn) return false;
+  if (!entry || typeof entry !== "object" || typeof entry.id !== "string") return false;
+  const wall = entry.wall && typeof entry.wall === "object" ? entry.wall : null;
+  if (wall?.mode === "walled") return false;
+  if (wall?.source === "owner") return true;
+  const canWall = wallable(entry, wall, ctx.mcpAddons || {});
+  return canWall && wallModeOverride(ctx.crowHome, entry.id) === "unwalled";
+}
+
+/**
+ * The ids of the add-ons a decision of the owner's left unwalled — the ones a
+ * surface may link to "Wall it again". Same rule as `addonWallDetails` below,
+ * but no profile is derived and no manifest read, so a health surface can ask
+ * it cheaply and still never point at a button that is not there.
+ */
+export function addonWallOwnerUnwalledIds({ crowHome, entries = [], env = process.env } = {}) {
+  const list = Array.isArray(entries) ? entries : [];
+  const ctx = decisionContext({ crowHome, env });
+  const out = [];
+  for (const entry of list) {
+    if (!entry || typeof entry !== "object" || typeof entry.id !== "string") continue;
+    // A data backend is not walled by this rule, and an entry of no known kind
+    // has no wall story.
+    if (entry.kind !== "addon" && entry.kind !== "builtin") continue;
+    if (ownerUnwalled(entry, ctx)) out.push(entry.id);
+  }
+  return out;
+}
+
 /** `{ [id]: { line, word, wordKey, ownerUnwalled } }` for every connected add-on. */
 export function addonWallDetails({ crowHome, appRoot, entries = [], env = process.env } = {}) {
   if (!crowHome || !appRoot) return {};
@@ -45,13 +101,11 @@ export function addonWallDetails({ crowHome, appRoot, entries = [], env = proces
   const pastDefaultsAll = pastDefaultsDoc && typeof pastDefaultsDoc.defaults === "object" && pastDefaultsDoc.defaults
     ? pastDefaultsDoc.defaults
     : {};
-  const mcpAddons = (crowHome && readJson(join(crowHome, "mcp-addons.json"))) || {};
+  // Walls on for this computer, the home and the add-ons file, decided in one
+  // place so this page and the Nest's rows can never disagree.
+  const ctx = decisionContext({ crowHome, env });
+  const { mcpAddons } = ctx;
   const out = {};
-
-  // Walls on for this computer at all? With them off (the operator's kill switch,
-  // or a per-host default of off) there is nothing to re-arm for any add-on, so
-  // no add-on is offered the button — the honest answer for that host.
-  const wallsOn = wallsOnForHost(env);
 
   for (const entry of list) {
     // A data backend is not walled by this rule, and an entry of no known kind has
@@ -92,22 +146,13 @@ export function addonWallDetails({ crowHome, appRoot, entries = [], env = proces
     }
 
     const wordKey = addonWallWord(entry, { env });
-    // The owner said "run it without the wall" for this add-on: offer it back.
-    //
-    // Two records can say so. The entry's own `wall` is the decision THIS run got
-    // (source "owner" for any `addon-walls.json` mode — the Fix-it remedy and a
-    // hand edit alike). But that snapshot is only as fresh as the last connect: a
-    // mode written while walls were off here, or before a walls rollout, leaves it
-    // reading "default" (or absent) even though the file — the decision every new
-    // connect obeys — says unwalled. The file is therefore read as well, and only
-    // for an add-on the wall can actually govern.
-    const fileUnwalled = wallModeOverride(crowHome, entry.id) === "unwalled";
-    const canWall = wallable(entry, wall, mcpAddons);
+    // The owner said "run it without the wall" for this add-on: offer it back
+    // (see `ownerUnwalled` above for the rule).
     out[entry.id] = {
       line,
       word: wordKey ? { en: wallWord(wordKey, "en"), es: wallWord(wordKey, "es") } : null,
       wordKey: wordKey || null,
-      ownerUnwalled: !walled && wallsOn && (wall?.source === "owner" || (canWall && fileUnwalled)),
+      ownerUnwalled: ownerUnwalled(entry, ctx),
     };
   }
 

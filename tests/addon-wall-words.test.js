@@ -39,7 +39,7 @@ const { deriveProfile, pendingHostFields } = await import("../scripts/addon-sand
 const { _setAddonWallProbeForTest, renderAddonWallStatus } = await import("../servers/gateway/dashboard/shared/addon-wall-status.js");
 const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
 const { extensionsClientJS } = await import("../servers/gateway/dashboard/panels/extensions/client.js");
-const { addonWallDetails } = await import("../servers/gateway/dashboard/shared/addon-wall-details.js");
+const { addonWallDetails, addonWallOwnerUnwalledIds } = await import("../servers/gateway/dashboard/shared/addon-wall-details.js");
 const { readAddonWalls } = await import("../servers/shared/addon-walls-file.js");
 const B = await import("../servers/gateway/routes/bundles.js");
 
@@ -545,6 +545,33 @@ test("the install modal shows the wall line and the host sentence, as text", asy
   assert.equal(box.querySelector(".ext-wall-status-text").textContent, SUMMARY.hostOff.en);
   assert.equal(box.querySelector("script"), null, "text, never markup");
   assert.equal(document.querySelector("#modal-content .ext-install__required") !== null, true, "the rest of the form is untouched");
+});
+
+test("the Nest's rows ask this same rule: the ids it may link to, and only those", () => {
+  const home = wallsHome(
+    { browser: { command: "node", args: ["server/index.js"] }, gmail: { transport: "http", url: "https://gmailmcp.googleapis.com/mcp/v1" } },
+    { browser: "unwalled", gmail: "unwalled" },
+  );
+  try {
+    const entries = [
+      // The owner's file says unwalled, while this run's snapshot still reads "default".
+      browserEntry({ mode: "unwalled", source: "default", profile: null, residuals: [] }),
+      // No local child to wrap, so the wall never governs it, whatever the file says.
+      { id: "gmail", kind: "addon", name: "gmail", status: "connected", wall: { mode: "unwalled", source: "default" } },
+      { id: "notes", kind: "addon", name: "notes", status: "connected", wall: { mode: "walled", source: "walled" } },
+      { id: "orders-db", kind: "backend", name: "orders-db", status: "connected", wall: { mode: "unwalled", source: "owner" } },
+    ];
+    assert.deepEqual(
+      addonWallOwnerUnwalledIds({ crowHome: home, entries, env: WALLED_ENV }),
+      ["browser"],
+      "the file decides the browser; an HTTP add-on is not offered the button, a walled one has nothing to re-arm, a backend is not an add-on",
+    );
+    for (const env of [{}, { CROW_ADDON_WALLS: "off", CROW_ADDON_WALLS_DEFAULT: "walled" }]) {
+      assert.deepEqual(addonWallOwnerUnwalledIds({ crowHome: home, entries, env }), [], `${JSON.stringify(env)}: with walls off there is nothing to re-arm`);
+    }
+  } finally {
+    rmScratch(home);
+  }
 });
 
 test("an installed add-on the owner set unwalled shows its line, its word, and Wall it again", async () => {
