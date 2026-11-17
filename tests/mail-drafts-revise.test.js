@@ -1,13 +1,14 @@
 // Crow Mail's revision loop (plan 3, Task 9): the person's comments on the lines of a draft, the
 // Revise that carries them to the bot, the note the card's note box adds, and the history the card
 // reads. Every test builds the mail tables, the account send columns and the draft tables in a
-// scratch DB (the draft store's own harness), and drives the services with an injected turn.
+// scratch DB (the draft store's own harness), and drives the services with an injected turn; the one
+// exception is the turn's own comment record, which runs the real `startDraftingTurn` against a stub
+// spawn.
 import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS, MAIL_DRAFTS_DDL } from "../servers/shared/mail-schema.js";
 import { MailError } from "../servers/gateway/mail/errors.js";
@@ -16,15 +17,23 @@ import {
   addComment, addRevision, createDraft, getDraft, listComments, listRevisions, transition,
 } from "../servers/gateway/mail/drafts/store.js";
 import {
-  KEEP_USER_EDITS_SENTENCE, REVISE_FEEDBACK_NOTE, _resetTurnCommentIdsForTests,
-  forgetTurnCommentIds, noteTurnCommentIds, queueComment, reviseInstruction, reviseNow, turnCommentIds,
+  KEEP_USER_EDITS_SENTENCE, REVISE_FEEDBACK_NOTE, queueComment, reviseInstruction, reviseNow,
 } from "../servers/gateway/mail/drafts/revise.js";
+import {
+  _resetTurnCommentIdsForTests, forgetTurnCommentIds, noteTurnCommentIds, turnCommentIds,
+} from "../servers/gateway/mail/drafts/turn-comments.js";
+import { _draftingTurnsInFlightForTests, startDraftingTurn } from "../servers/gateway/mail/drafts/turn.js";
+import { verifyTurnToken } from "../servers/gateway/mail/drafts/turn-token.js";
+import { initGatewayActorKey } from "../scripts/pi-bots/actor-sig.mjs";
 import { proposeDraftRevision } from "../servers/gateway/mail-draft-mcp.js";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const TURN_SOURCE = readFileSync(join(HERE, "..", "servers/gateway/mail/drafts/turn.js"), "utf8");
+// The instance paths this file's turn reads (the cloud-drafting setting resolves its instance id
+// through them) are a scratch dir of its own: nothing here can read or write a real Crow home.
+const ROOT = mkdtempSync(join(tmpdir(), "mail-revise-instance-"));
+process.env.CROW_HOME = join(ROOT, "home");
+process.env.CROW_DATA_DIR = join(ROOT, "data");
 
-const dirs = [];
+const dirs = [ROOT];
 after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 beforeEach(() => { _resetTurnCommentIdsForTests(); });
 
@@ -42,6 +51,31 @@ async function freshDb() {
   }
   await db.executeMultiple(MAIL_DRAFTS_DDL);
   return db;
+}
+
+/**
+ * The two settings tables `drafts/turn.js` reads the owner's cloud-drafting switch through (init-db's
+ * own DDL), with the switch on: a turn only starts for a drafting model the switch allows.
+ */
+async function switchCloudDraftingOn(db) {
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS dashboard_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS dashboard_settings_overrides (
+      key TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (key, instance_id)
+    );
+  `);
+  await db.execute({
+    sql: "INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES (?, ?)",
+    args: ["mail.cloud_drafting", "1"],
+  });
 }
 
 async function makeAccount(db) {
@@ -117,6 +151,11 @@ function isCode(code) {
     assert.equal(err.code, code);
     return true;
   };
+}
+
+/** The `mdt_` bearer a turn's MCP block carries (the mount's own header). */
+function bearerOf(opts) {
+  return String(opts.draftingTurn.mcpBlock.headers.Authorization || "").replace(/^Bearer /, "");
 }
 
 /* ------------------------------------------------------------------ the instruction */
@@ -350,7 +389,48 @@ test("the first record for a turn is the one propose reads", () => {
   assert.deepEqual(turnCommentIds("mt-never-noted"), []);
 });
 
-test("a drafting turn records the comments it started with", () => {
-  assert.match(TURN_SOURCE, /noteTurnCommentIds\(/, "the turn records its snapshot at mint time");
-  assert.match(TURN_SOURCE, /forgetTurnCommentIds\(/, "and forgets it when the turn ends");
+test("a drafting turn records the comments it started with, and nothing added while it runs", async () => {
+  const db = await freshDb();
+  await switchCloudDraftingOn(db);
+  const { draft } = await makeDraft(db);
+  const seen = await queueComment(db, draft.id, {
+    rev: 1, lineIndex: 1, quote: "Tuesday works for me.", text: "Say Thursday.",
+  }, { now: () => T0 + 1 });
+
+  // A drafting turn is spawned by the real `startDraftingTurn`; the pi process is the stub below.
+  initGatewayActorKey();
+  const home = mkdtempSync(join(tmpdir(), "crow-mail-turn-home-"));
+  dirs.push(home);
+  const observed = {};
+  const deps = {
+    crowHome: home,
+    loadBot: async () => ({ def: { models: { default: "stub/m1" } } }),
+    setTimeout: () => ({ unref() { /* a day-old dir is never really deleted here */ } }),
+    log: () => {},
+    handleInbound: async (opts) => {
+      const turnId = verifyTurnToken(bearerOf(opts)).turnId;
+      // Read the record while this turn is still running: exactly the comments queued at mint time.
+      observed.turnId = turnId;
+      observed.running = turnCommentIds(turnId);
+      // The person comments on another line while the bot is still writing.
+      const later = await addComment(db, draft.id, { rev: 1, text: "And shorter." }, { now: () => T0 + 2 });
+      observed.later = later.id;
+      observed.afterAdd = turnCommentIds(turnId);
+    },
+  };
+
+  const delivery = process.env.PIBOT_MCP_CONFIG_DELIVERY;
+  process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
+  try {
+    await startDraftingTurn(db, deps, { draftId: draft.id, instruction: "Apply my comments." });
+    await Promise.all(_draftingTurnsInFlightForTests());
+  } finally {
+    if (delivery === undefined) delete process.env.PIBOT_MCP_CONFIG_DELIVERY;
+    else process.env.PIBOT_MCP_CONFIG_DELIVERY = delivery;
+  }
+
+  assert.deepEqual(observed.running, [seen.id], "the turn's record is the comment that was queued at mint time");
+  assert.notEqual(observed.later, seen.id);
+  assert.deepEqual(observed.afterAdd, [seen.id], "a comment added while the turn runs is never in its record");
+  assert.deepEqual(turnCommentIds(observed.turnId), [], "the record is gone once the turn has ended");
 });

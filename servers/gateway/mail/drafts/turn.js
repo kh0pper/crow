@@ -34,7 +34,7 @@ import { dirname, join } from "node:path";
 import { MailError } from "../errors.js";
 import { getAccount } from "../store/accounts.js";
 import { getDraft, listComments } from "./store.js";
-import { forgetTurnCommentIds, noteTurnCommentIds } from "./revise.js";
+import { forgetTurnCommentIds, noteTurnCommentIds } from "./turn-comments.js";
 import { mintTurnToken, revokeTurnToken, TURN_TOKEN_MARGIN_MS } from "./turn-token.js";
 import {
   DRAFTING_TURN_TOOLS, MAIL_DRAFT_TURNS_DIRNAME, isMailDraftDirSegment, mailDraftBlock, resolvedMailDraftTurnDir,

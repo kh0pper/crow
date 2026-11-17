@@ -31,7 +31,7 @@ import { createDbClient } from "../db.js";
 import { localOperatorAuth } from "./local-token.js";
 import { writingRulesBody } from "../shared/writing-rules.js";
 import { getDraft, addRevision, listRevisions, listComments } from "./mail/drafts/store.js";
-import { forgetTurnCommentIds, turnCommentIds } from "./mail/drafts/revise.js";
+import { forgetTurnCommentIds, turnCommentIds } from "./mail/drafts/turn-comments.js";
 import { verifyTurnToken } from "./mail/drafts/turn-token.js";
 import { listThreadMessages, resolveMessageRef } from "./mail/store/reader-queries.js";
 import { getMessage } from "./mail/store/messages.js";

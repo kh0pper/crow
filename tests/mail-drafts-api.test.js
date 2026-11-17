@@ -778,12 +778,26 @@ test("a revise on a scheduled draft is refused with the cancel it needs", async 
   });
   assert.equal(tap.status, 200, tap.text);
 
-  const res = await s.call("POST", `${DRAFTS}/${draft.id}/revise`, { body: {} });
+  const res = await s.call("POST", `${DRAFTS}/${draft.id}/revise`, { body: { expectHash: draft.headHash } });
   assert.equal(res.status, 409, res.text);
   assert.equal(res.json?.error, "frozen");
   assert.equal(res.json?.needsCancel, true);
   assert.equal(res.json?.state, "scheduled");
   assert.deepEqual(s.turns, [], "no turn was started");
+});
+
+test("a revise without the card's hash is refused bad_input, and no turn starts", async () => {
+  const s = await setup({ turn: true });
+  const draft = await newDraft(s);
+  await s.call("POST", `${DRAFTS}/${draft.id}/comments`, { body: { rev: 1, text: "Warmer." } });
+  assert.equal(s.turns.length, 1, "precondition: the comment's own turn ran");
+
+  for (const body of [{}, { chatNote: "And shorter." }, { expectHash: 42 }, { expectHash: null }, { expectHash: "" }]) {
+    const res = await s.call("POST", `${DRAFTS}/${draft.id}/revise`, { body });
+    assert.equal(res.status, 400, JSON.stringify(body) + " -> " + res.text);
+    assert.equal(res.json?.error, "bad_input");
+  }
+  assert.equal(s.turns.length, 1, "the route never falls back to the draft's own head hash");
 });
 
 test("a revise against a stale hash is refused changed", async () => {

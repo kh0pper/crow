@@ -9,8 +9,9 @@
 //   (b) The only importers of `requestSend` and `scheduleDraft` are `routes/mail-drafts-api.js` and
 //       the tests: the owner taps are the only way into a tap state. The per-turn draft MCP server
 //       (`servers/gateway/mail-draft-mcp.js`, its own task) imports no send service, no schedule
-//       service and no seal — while that file does not exist yet, the assertion is vacuously true and
-//       starts applying the day it does.
+//       service and no seal, and nothing reachable from it by import is the bot runtime
+//       (`scripts/pi-bots/bridge.mjs`) — a door that could reach a spawn could reach a tool surface
+//       wider than its three names.
 //   (c) No bot definition, preset or `toolAllowlist` output can carry a name matching
 //       /mail.*(send|schedule)/i: a drafting bot's three tools are read-only or propose-only.
 import { test } from "node:test";
@@ -30,6 +31,7 @@ const SCHEDULE_SERVICE = resolve(REPO, "servers/gateway/mail/send/schedule-servi
 const SEAL = resolve(REPO, "servers/gateway/mail/drafts/seal.js");
 const DRAFT_ROUTES = resolve(REPO, "servers/gateway/routes/mail-drafts-api.js");
 const DRAFT_MCP = resolve(REPO, "servers/gateway/mail-draft-mcp.js");
+const BRIDGE = resolve(REPO, "scripts/pi-bots/bridge.mjs");
 
 /** A tool name that could send or schedule mail, in any spelling a def might use. */
 const TAP_TOOL_NAME = /mail.*(send|schedule)/i;
@@ -193,8 +195,8 @@ test("(b) only the owner draft routes import requestSend and scheduleDraft", () 
   // The two taps by name: the owner route file, and nowhere else outside the services themselves.
   assert.deepEqual(tapImporters.sort(), ["servers/gateway/routes/mail-drafts-api.js"]);
 
-  // The per-turn draft MCP server, once it exists, is a read/propose door: no send, no schedule, and
-  // no seal writer.
+  // The per-turn draft MCP server is a read/propose door: no send, no schedule, no seal writer, and
+  // no path through its imports to the bot runtime behind a drafting turn.
   let draftMcp = null;
   try {
     draftMcp = DRAFT_MCP;
@@ -210,6 +212,12 @@ test("(b) only the owner draft routes import requestSend and scheduleDraft", () 
     const names = importedNames(draftMcp);
     assert.ok(!names.includes("requestSend"), "the draft MCP server names no send tap");
     assert.ok(!names.includes("scheduleDraft"), "the draft MCP server names no schedule tap");
+    // The bot runtime is behind a drafting turn, never behind the door that turn calls: a door that
+    // could reach it could reach a spawn, and with it a tool surface wider than the three names.
+    const closure = importClosure([draftMcp]);
+    assert.ok(closure.files.size > 3, `the draft MCP server's imports were really walked (${closure.files.size} modules)`);
+    assert.equal(closure.files.has(BRIDGE), false,
+      "the draft MCP server's import closure does not reach scripts/pi-bots/bridge.mjs");
   }
 });
 

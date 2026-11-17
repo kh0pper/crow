@@ -277,13 +277,13 @@ function readCommentBody(body) {
   };
 }
 
-/** The revise body, or null: the hash the card was drawn from and the note the person typed. */
+/** The revise body, or null: the hash the card was drawn from, and the note the person typed. */
 function readReviseBody(body) {
   if (!keysWithin(body, REVISE_KEYS)) return null;
-  if (!isStringOrAbsent(body.expectHash)) return null;
+  if (typeof body.expectHash !== "string" || body.expectHash === "") return null;
   if (!isStringOrAbsent(body.chatNote)) return null;
   return {
-    expectHash: typeof body.expectHash === "string" && body.expectHash !== "" ? body.expectHash : null,
+    expectHash: body.expectHash,
     chatNote: typeof body.chatNote === "string" && body.chatNote.trim() !== "" ? body.chatNote : null,
   };
 }
@@ -637,8 +637,9 @@ export function registerDraftRoutes(router, ctx) {
   }));
 
   // POST /:id/revise — Revise: every queued comment in one turn, with the note the person typed in
-  // the card's note box when there is one. A frozen draft is refused with the code alone, and a
-  // scheduled one with the cancel it needs first.
+  // the card's note box when there is one. The hash the card was drawn from is required, as it is for
+  // send and schedule: a revise never falls back to the draft's own head. A frozen draft is refused
+  // with the code alone, and a scheduled one with the cancel it needs first.
   router.post(`${base}/:id/revise`, route("POST /drafts/:id/revise", async (db, req, res) => {
     const draft = await draftFor(db, req);
     if (!draft) return sendError(res, 404, "not_found");
