@@ -988,11 +988,27 @@ function makeInlineMemo() {
 
 /** The memos of the inlineTokens frames open right now, innermost last. */
 let inlineFrames = [];
-/** The memo of the frame being lexed, or a throwaway one outside any frame
- *  (which cannot happen — an inline start() is only ever called from inside
- *  one — and stays correct rather than shared if it ever does). */
+/** The memo of the frame being lexed, or a throwaway one outside any frame.
+ *
+ *  An inline start() hint is only ever called from inside a frame, so the
+ *  fallback is UNREACHABLE today: only botMarked and ownerMarked carry these
+ *  hints, and both always parse through boundedLexer (which pushes a frame
+ *  around every inlineTokens call), while markdownBlocks lexes with the global
+ *  marked, which carries no extension. It is still CORRECT if it ever is
+ *  reached — nothing is remembered from one call to the next, so no answer can
+ *  leak into a source it was not scanned in — but it would rescan the whole
+ *  source on every call, i.e. quadratic, which is precisely the cost the frames
+ *  exist to remove. CROW_MD_DEBUG throws instead of handing out the throwaway
+ *  memo, so a future caller that skips boundedLexer fails a test rather than
+ *  quietly restoring the quadratic. */
 function inlineFrameMemo() {
-  return inlineFrames.length ? inlineFrames[inlineFrames.length - 1] : makeInlineMemo();
+  if (!inlineFrames.length) {
+    if (process.env.CROW_MD_DEBUG) {
+      throw new Error("inlineFrameMemo(): inline start() called outside any inlineTokens frame — the parse did not go through boundedLexer, and the per-frame memo (see makeInlineMemo) is what keeps the inline scan linear");
+    }
+    return makeInlineMemo();
+  }
+  return inlineFrames[inlineFrames.length - 1];
 }
 
 /** Where the inline hint looks for math: `$` (also the first character of
