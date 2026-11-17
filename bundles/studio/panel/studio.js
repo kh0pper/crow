@@ -401,6 +401,16 @@ const STYLES = `
   .studio button [contenteditable] {
     user-select: text; -webkit-user-select: text; -webkit-touch-callout: default;
   }
+  /* Touch targets (G11): the controls a finger plays are at least 44 px in both
+     directions — a pad, a step, a bank tab and a performance effect. This is the
+     FLOOR, not the size: a control's own rule below may make it bigger (a pad is
+     72 px square), so it comes before those rules and never after them. */
+  .studio .st-pad,
+  .studio .st-step,
+  .studio .st-bank-tabs .st-toggle,
+  .studio .st-fx-btn {
+    min-width: 44px; min-height: 44px;
+  }
   .studio .st-presence { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
   .studio .st-chip { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--st-muted); }
   .studio .st-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--st-human); flex: 0 0 auto; }
@@ -1107,7 +1117,7 @@ const STYLES = `
   .studio .st-step-pages .st-toggle { flex: 0 0 auto; min-width: 56px; font-size: 11px; }
   .studio .st-step-locks { font-size: 11px; color: var(--st-muted); }
   .studio .st-step-strip {
-    display: grid; grid-template-columns: repeat(16, minmax(28px, 1fr));
+    display: grid; grid-template-columns: repeat(16, minmax(44px, 1fr));
     gap: 4px; overflow-x: auto;
   }
   .studio .st-step {
@@ -1276,7 +1286,10 @@ const STYLES = `
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
-    .studio .st-step-strip { grid-template-columns: repeat(8, minmax(0, 1fr)); overflow-x: hidden; }
+    /* A phone's lane holds eight positions a page (the client pages it by the
+       same width class), so eight 44 px targets are the row. A screen too
+       narrow for that scrolls the row rather than shrinking a target. */
+    .studio .st-step-strip { grid-template-columns: repeat(8, minmax(44px, 1fr)); overflow-x: auto; }
     .studio .st-mix-strips { overflow-x: auto; overflow-y: hidden; }
     .studio .st-strip { flex: 0 0 152px; }
     .studio .st-strip-master { flex: 0 0 216px; }

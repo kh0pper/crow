@@ -46,6 +46,10 @@ const CONTROL_CLASSES = [
   "st-clip",
 ];
 
+/** The sampler track and the pattern clip the touch tests open. */
+const SAMPLER_TRACK = "drums";
+const SAMPLER_CLIP = "c-beat";
+
 // --- the page's server side -------------------------------------------------
 
 /** A database fake: enough of `execute` for the project picker. */
@@ -265,9 +269,14 @@ function audioContextClass(options = {}) {
   return FakeAudioContext;
 }
 
-/** The engine client stand-in: enough for a Play to start the transport. */
+/**
+ * The engine client stand-in: enough for a Play to start the transport, and a
+ * record of every pad it was asked to play and to let go.
+ */
 function fakeStudioEngine() {
-  return {
+  const engine = {
+    live: [],
+    releases: [],
     create() {
       return Promise.resolve({
         node: { connect() {} },
@@ -281,16 +290,37 @@ function fakeStudioEngine() {
         onPosition() {},
         onLaunch() {},
         onError() {},
+        onSampleNeeded() {
+          return () => {};
+        },
+        livePad(trackId, bankId, index) {
+          engine.live.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+        },
+        liveRelease(trackId, bankId, index) {
+          engine.releases.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+        },
+        loadSample() {
+          return Promise.resolve();
+        },
+        unloadSample() {},
+        nextBarFrame() {
+          return Promise.resolve({ frame: 0, bar: 1 });
+        },
       });
     },
   };
+  return engine;
 }
 
 /**
  * Run the real client against the page the handler renders, with a linkedom
  * document, a stubbed socket and the fake AudioContext above.
  *
- * @param {{Ctx?: Function, visibility?: string}} [options]
+ * `sampler` builds a song with a sampler track and a pattern clip instead of a
+ * note clip, so the pad-and-steps view can be opened; `innerWidth` is the width
+ * the page lays out for (a laptop's 1280 unless a test asks for a phone's).
+ *
+ * @param {{Ctx?: Function, visibility?: string, sampler?: boolean, innerWidth?: number}} [options]
  * @returns {Promise<object>}
  */
 async function bootClient(options = {}) {
@@ -300,16 +330,30 @@ async function bootClient(options = {}) {
   await import("../bundles/studio/server/commands/core.js");
 
   const doc = newSongDoc({ title: "Test song" });
-  runCommand(doc, "track.add", { id: "bass", name: "Bass" });
   runCommand(doc, "scene.add", { id: "verse", name: "Verse" });
-  runCommand(doc, "clip.write", {
-    clip_id: "c1",
-    track_id: "bass",
-    scene_id: "verse",
-    name: "Bass line",
-    length_bars: 1,
-    notes: [{ t: 0, d: 1, p: 60, v: 100 }],
-  });
+  if (options.sampler === true) {
+    // A sampler track's clip is a pattern: opening it is what fills the four
+    // sampler hosts, and its lane of steps is what a phone pages eight at a time.
+    await import("../bundles/studio/server/commands/sampler.js");
+    runCommand(doc, "track.add", { id: SAMPLER_TRACK, name: "Beat box", kind: "sampler" });
+    runCommand(doc, "clip.add_pattern", {
+      clip_id: SAMPLER_CLIP,
+      track_id: SAMPLER_TRACK,
+      scene_id: "verse",
+      name: "Beat",
+      length_steps: 16,
+    });
+  } else {
+    runCommand(doc, "track.add", { id: "bass", name: "Bass" });
+    runCommand(doc, "clip.write", {
+      clip_id: "c1",
+      track_id: "bass",
+      scene_id: "verse",
+      name: "Bass line",
+      length_bars: 1,
+      notes: [{ t: 0, d: 1, p: 60, v: 100 }],
+    });
+  }
 
   const Ctx = options.Ctx || audioContextClass({ baseLatency: 0.01, outputLatency: 0.002 });
 
@@ -350,14 +394,27 @@ async function bootClient(options = {}) {
     for (const handler of current().handlers.message || []) handler({ data: JSON.stringify(message) });
   };
 
+  const engineStub = fakeStudioEngine();
+  /** The page's window listeners, so a test can dispatch what a phone sends. */
+  const windowListeners = {};
+
   const windowStub = {
     crypto: globalThis.crypto,
+    // The width class the page lays out for: a phone under 640 px, a laptop at
+    // 1280 unless a test asks for another width.
+    innerWidth: Number(options.innerWidth) || 1280,
     AudioContext: Ctx,
-    StudioEngine: fakeStudioEngine(),
+    StudioEngine: engineStub,
     location: { protocol: "http:", host: "127.0.0.1:1", reload() {} },
     atob: globalThis.atob,
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(name, handler) {
+      (windowListeners[name] ||= []).push(handler);
+    },
+    removeEventListener(name, handler) {
+      const list = windowListeners[name] || [];
+      const at = list.indexOf(handler);
+      if (at >= 0) list.splice(at, 1);
+    },
   };
 
   const scriptText = CLIENT_SCRIPT.replace(
@@ -413,6 +470,13 @@ async function bootClient(options = {}) {
 
   const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
 
+  /** One DOM event the way a browser sends it: bubbling and cancelable. */
+  const event = (type, props) => {
+    const made = new domWindow.Event(type, { bubbles: true, cancelable: true });
+    for (const [key, value] of Object.entries(props || {})) made[key] = value;
+    return made;
+  };
+
   const click = (selector) => {
     const node = document.querySelector(selector);
     assert.ok(node, `nothing matches ${selector}`);
@@ -438,14 +502,50 @@ async function bootClient(options = {}) {
   return {
     document,
     window: windowStub,
+    windowListeners,
     Ctx,
+    engine: engineStub,
     sent,
     sockets,
     current,
     frame,
     click,
+    event,
     settle,
     setVisibility,
+    /** Send one event to the window, as a phone's pointer would. */
+    fire(type, props) {
+      for (const handler of [...(windowListeners[type] || [])]) handler(event(type, props || {}));
+    },
+    /** Open the fixture's pattern clip: the pad-and-steps view is its editor. */
+    async openSampler() {
+      click(`[data-act=open-clip][data-clip-id=${SAMPLER_CLIP}]`);
+      await settle();
+    },
+    /** One sampler host by its role. */
+    host(role) {
+      return document.querySelector(`[data-role=${role}]`);
+    },
+    /** @returns {object[]} the step buttons drawn right now */
+    steps() {
+      const host = document.querySelector("[data-role=sampler-steps]");
+      assert.ok(host, "the steps host is on the page");
+      return [...host.querySelectorAll("[data-act=step]")];
+    },
+    /** @returns {object[]} the steps lane's page buttons, as drawn right now */
+    pageButtons() {
+      const host = document.querySelector("[data-role=sampler-steps]");
+      assert.ok(host, "the steps host is on the page");
+      return [...host.querySelectorAll("[data-act=step-page]")];
+    },
+    /** @returns {object} one pad's button */
+    pad(index) {
+      const node = document.querySelector(
+        `[data-role=sampler-pads] [data-act=pad][data-pad-index="${index}"]`,
+      );
+      assert.ok(node, `pad ${index} is drawn`);
+      return node;
+    },
   };
 }
 
@@ -534,4 +634,154 @@ test("the latency log keeps a reading from every visibility return", async () =>
   const latest = log[log.length - 1];
   assert.equal(typeof latest.state, "string", "with the context's state");
   assert.equal(typeof latest.at, "string", "and the moment it was taken");
+});
+
+// --- A4: touch targets and the step lane's page size ------------------------
+
+/** The rule (if any) that gives `selector` a 44 px floor in both directions. */
+function touchTargetRule(rules, selector) {
+  return rules.find(
+    (rule) =>
+      rule.selectors.includes(selector) &&
+      /(?:^|;|\s)min-width\s*:\s*44px/.test(rule.body) &&
+      /(?:^|;|\s)min-height\s*:\s*44px/.test(rule.body),
+  ) || null;
+}
+
+test("a pad, a step, a bank tab and an effect button are 44 px targets", async () => {
+  const css = String(styleText(await render({ song: "song-1" })));
+  const rules = cssRules(css);
+
+  // The four controls a finger plays on the pad-and-steps view. Each one keeps
+  // its own minimum in both directions, however big the grid makes it.
+  const controls = [
+    ".studio .st-pad",
+    ".studio .st-step",
+    ".studio .st-bank-tabs .st-toggle",
+    ".studio .st-fx-btn",
+  ];
+  for (const selector of controls) {
+    assert.ok(touchTargetRule(rules, selector), `${selector} carries a 44 px floor in width and height`);
+  }
+
+  // One rule names all four: the floor is a single decision, so a control added
+  // to one of those rows cannot quietly come without it.
+  const shared = rules.find((rule) => controls.every((selector) => rule.selectors.includes(selector)));
+  assert.ok(shared, "one rule gives all four the 44 px floor");
+  assert.match(shared.body, /min-width: 44px/);
+  assert.match(shared.body, /min-height: 44px/);
+
+  // And the lane's own grid is wide enough for those targets: a column is never
+  // narrower than the button it holds, so the row scrolls instead of squeezing.
+  const strips = rules.filter((rule) => rule.selectors.includes(".studio .st-step-strip"));
+  assert.ok(
+    strips.some((rule) => /repeat\(16, minmax\(44px, 1fr\)\)/.test(rule.body)),
+    "a wide lane is sixteen columns of at least 44 px",
+  );
+  assert.ok(
+    strips.some((rule) => /repeat\(8, minmax\(44px, 1fr\)\)/.test(rule.body)),
+    "a phone's lane is eight columns of at least 44 px",
+  );
+});
+
+test("pads, steps and effects never select their label or call out a menu", async () => {
+  const rules = cssRules(String(styleText(await render({ song: "song-1" }))));
+
+  for (const selector of [".studio .st-pad", ".studio .st-step", ".studio .st-fx-btn", ".studio .st-toggle"]) {
+    const locking = rules.filter((rule) => rule.selectors.includes(selector) && locksSelection(rule.body));
+    assert.ok(locking.length > 0, `${selector} is named by a rule that turns selection off`);
+    const complete = locking.some(
+      (rule) =>
+        /-webkit-user-select\s*:\s*none/.test(rule.body) &&
+        /-webkit-touch-callout\s*:\s*none/.test(rule.body),
+    );
+    assert.ok(complete, `${selector} carries -webkit-user-select and -webkit-touch-callout none`);
+  }
+});
+
+test("a phone pages the step lane eight at a time, and a laptop keeps sixteen", async () => {
+  // A phone: eight positions a page, and a pager to reach the rest.
+  const phone = await bootClient({ sampler: true, innerWidth: 390 });
+  await phone.openSampler();
+  assert.deepEqual(
+    phone.steps().map((node) => node.getAttribute("data-at")),
+    ["0", "1", "2", "3", "4", "5", "6", "7"],
+    "the first page is the first eight positions",
+  );
+  const pager = phone.pageButtons();
+  assert.equal(pager.length, 2, "a sixteen-position pattern is two pages on a phone");
+  assert.deepEqual(
+    pager.map((node) => String(node.textContent)),
+    ["1-8", "9-16"],
+    "named for the positions they hold",
+  );
+  assert.equal(pager[0].getAttribute("aria-pressed"), "true", "the first page is the one shown");
+
+  // The second page is positions 9-16, numbered 1-8 within its own page.
+  pager[1].dispatchEvent(phone.event("click", {}));
+  await phone.settle();
+  assert.deepEqual(
+    phone.steps().map((node) => node.getAttribute("data-at")),
+    ["8", "9", "10", "11", "12", "13", "14", "15"],
+    "the second page starts at position 9",
+  );
+  assert.equal(String(phone.steps()[0].textContent), "1", "and counts from one inside it");
+  assert.equal(phone.pageButtons()[1].getAttribute("aria-pressed"), "true", "the pager says which page is shown");
+
+  // A laptop: the sixteen positions it always had, and no pager for one page.
+  const laptop = await bootClient({ sampler: true, innerWidth: 1280 });
+  await laptop.openSampler();
+  assert.equal(laptop.steps().length, 16, "a laptop draws all sixteen positions");
+  assert.equal(laptop.steps()[0].getAttribute("data-at"), "0");
+  assert.equal(laptop.steps()[15].getAttribute("data-at"), "15");
+  assert.equal(laptop.pageButtons().length, 0, "sixteen positions are one page, so there is nothing to turn");
+});
+
+test("a long press on a pad is the press it started, not the browser's menu", async () => {
+  const ui = await bootClient({ sampler: true });
+  await ui.openSampler();
+
+  const onPad = ui.event("contextmenu", {});
+  ui.pad(0).dispatchEvent(onPad);
+  assert.equal(onPad.defaultPrevented, true, "the menu is cancelled on a pad");
+
+  // The label that names the kit keeps its own long press: only the controls a
+  // finger plays cancel the menu.
+  const title = ui.host("sampler-pads").querySelector(".st-sampler-title");
+  assert.ok(title, "the pads host carries the kit's title");
+  const onTitle = ui.event("contextmenu", {});
+  title.dispatchEvent(onTitle);
+  assert.equal(onTitle.defaultPrevented, false, "text elsewhere in the page is left alone");
+});
+
+test("a cancelled pad press lets the pad go exactly once", async () => {
+  const ui = await bootClient({ sampler: true });
+  await ui.openSampler();
+  const pad = ui.pad(0);
+  const bankId = pad.getAttribute("data-bank-id");
+  assert.ok(bankId, "the pad names its bank");
+
+  pad.dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.deepEqual(
+    ui.engine.live,
+    [{ track_id: SAMPLER_TRACK, bank_id: bankId, index: 0 }],
+    "the press played the pad",
+  );
+
+  // A pointer the browser took away (a scroll, a call, a drag off the page) is
+  // a release: the pad's voice is let go once, and only once.
+  ui.fire("pointercancel", {});
+  await ui.settle();
+  assert.deepEqual(
+    ui.engine.releases,
+    [{ track_id: SAMPLER_TRACK, bank_id: bankId, index: 0 }],
+    "the cancelled press sends one liveRelease",
+  );
+
+  // The release and cancel a cancelled pointer is followed by send nothing more.
+  ui.fire("pointercancel", {});
+  ui.fire("pointerup", {});
+  await ui.settle();
+  assert.equal(ui.engine.releases.length, 1, "a pad already let go is not released again");
 });

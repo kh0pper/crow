@@ -3669,7 +3669,7 @@ test("in Chrome, Escape cancels a rename and nothing is saved", async (t) => {
   assert.equal(entries.filter((entry) => entry.command === "pattern.rename").length, 0, "Escape saved nothing");
 });
 
-test("at phone width the 16 steps fit without scrolling", async (t) => {
+test("at phone width the lane pages eight steps at a finger's size", async (t) => {
   if (!chrome) return t.skip("no headless Chrome available");
   const { page } = await openSamplerPage(t);
   await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
@@ -3682,14 +3682,35 @@ test("at phone width the 16 steps fit without scrolling", async (t) => {
     return true;
   })()`);
   await pause(200);
-  const fit = await page.evaluate(`(function () {
+  // A phone's lane holds eight positions a page (the client pages it by the
+  // same width class), each one a 44 px target, with the pager to reach the
+  // pattern's other eight.
+  const lane = await page.evaluate(`(function () {
     var strip = document.querySelector('[data-role=sampler-steps] .st-step-strip');
-    var one = document.querySelector('[data-role=sampler-steps] [data-act=step][data-at="0"]');
-    var nine = document.querySelector('[data-role=sampler-steps] [data-act=step][data-at="8"]');
-    return { scroll: strip.scrollWidth, client: strip.clientWidth, one: one.offsetTop, nine: nine.offsetTop };
+    var cells = strip.querySelectorAll('[data-act=step]');
+    var pager = document.querySelectorAll('[data-role=sampler-steps] [data-act=step-page]');
+    var small = [];
+    for (var i = 0; i < cells.length; i += 1) {
+      var box = cells[i].getBoundingClientRect();
+      if (box.width < 44 || box.height < 44) small.push(box.width + 'x' + box.height);
+    }
+    return {
+      count: cells.length,
+      from: cells[0].getAttribute('data-at'),
+      last: cells[cells.length - 1].getAttribute('data-at'),
+      oneRow: cells[cells.length - 1].offsetTop === cells[0].offsetTop,
+      pages: pager.length,
+      labels: [].map.call(pager, function (node) { return String(node.textContent); }),
+      small: small
+    };
   })()`);
-  assert.ok(fit.scroll <= fit.client, `the strip scrolls sideways (${fit.scroll} > ${fit.client})`);
-  assert.ok(fit.nine > fit.one, `step 9 wraps to a second row (${fit.nine} vs ${fit.one})`);
+  assert.equal(lane.count, 8, "a phone draws eight step positions, not sixteen");
+  assert.equal(lane.from, "0", "starting at the pattern's first position");
+  assert.equal(lane.last, "7", "and ending at its eighth");
+  assert.equal(lane.oneRow, true, "the eight fit across one row");
+  assert.deepEqual(lane.small, [], `every step is at least 44 px in both directions (${lane.small})`);
+  assert.equal(lane.pages, 2, "a sixteen-position pattern is two pages on a phone");
+  assert.deepEqual(lane.labels, ["1-8", "9-16"], "named for the positions they hold");
 });
 
 // ---- the four sampler widgets (A2) ---------------------------------------
