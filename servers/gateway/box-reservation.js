@@ -37,7 +37,7 @@
 
 import {
   readFileSync, statSync, writeFileSync, renameSync, unlinkSync, mkdirSync,
-  openSync, closeSync, writeSync,
+  openSync, closeSync, writeSync, linkSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -273,10 +273,14 @@ function finiteOrNull(v) {
  *
  *   The requirement is the larger of what the live reading already implies
  *   (`used + remaining`) and what is COMMITTED: the booking's whole footprint
- *   plus the admitted peaks, on top of the activation baseline. A provider
+ *   plus the admitted peaks, on top of the activation baseline — or, for a
+ *   hold that recorded no baseline, on top of the live reading. A provider
  *   that was admitted but has not loaded yet, or a snapshot older than its
  *   load, therefore still reserves its room: without that, two starts would be
- *   admitted into the same not-yet-taken space.
+ *   admitted into the same not-yet-taken space. The admitted peaks count
+ *   either way: a hold without a baseline is sized from the counters as they
+ *   read now, and what a provider started beside it has already spoken for is
+ *   still not room for the next start.
  *
  *   A job whose own growth exceeds its booked `gtt_mb` is outgrowing its
  *   booking: every start not on the allow list is refused with
@@ -353,22 +357,22 @@ export function startDecision(reservation, providerName, {
   const remainingGtt = jobGrowthGtt == null ? gttHold : Math.max(0, gttHold - jobGrowthGtt);
   const remainingRam = jobGrowthRam == null ? ramHold : Math.max(0, ramHold - jobGrowthRam);
   // What is already committed, whatever the counters show yet: the baseline
-  // plus the job's whole footprint plus every admitted peak. Once a provider is
-  // admitted its room is spoken for even before it has loaded, so a second
-  // start is never admitted into the same space.
-  const committedGtt = gttBase == null ? null : gttBase + Math.max(gttHold, jobGrowthGtt ?? 0) + admittedGtt;
-  const committedAvail = ramBase == null
-    ? null
-    : ramBase - Math.max(ramHold, jobGrowthRam ?? 0) - admittedRam;
+  // (or, when the hold recorded none, the live reading) plus the job's whole
+  // footprint plus every admitted peak. Once a provider is admitted its room is
+  // spoken for even before it has loaded, so a second start is never admitted
+  // into the same space — with or without an activation baseline.
+  const committedGtt = (gttBase == null ? gttUsed : gttBase)
+    + Math.max(gttHold, jobGrowthGtt ?? 0) + admittedGtt;
+  const committedAvail = (ramBase == null ? memAvailable : ramBase)
+    - Math.max(ramHold, jobGrowthRam ?? 0) - admittedRam;
   // The job is outgrowing its booking: refuse starts that would share the card
   // with it, and say so, so the operator can re-book or extend it. An allow[]
   // provider returned above is never refused here.
   if (!tallyUnknown && gttBase != null && jobGrowthGtt != null && jobGrowthGtt > gttHold) {
     return Object.freeze({ allowed: false, reason: "gpu_job_beside", job_over_budget: true });
   }
-  const requiredGtt = Math.max(gttUsed + remainingGtt, committedGtt ?? -Infinity);
-  const availAfterJob = memAvailable - remainingRam;
-  const effectiveAvail = committedAvail == null ? availAfterJob : Math.min(availAfterJob, committedAvail);
+  const requiredGtt = Math.max(gttUsed + remainingGtt, committedGtt);
+  const effectiveAvail = Math.min(memAvailable - remainingRam, committedAvail);
   const fitsGtt = requiredGtt + peakGtt <= gttTotal - safetyMargin;
   const fitsRam = effectiveAvail - peakRam >= ramFloor;
   return fitsGtt && fitsRam ? { allowed: true, reason: null } : refuse;
@@ -482,8 +486,31 @@ function tryAcquireLockFile(lockFile) {
   const ageMs = lockFileAgeMs(lockFile);
   if (ageMs == null) return tryCreateLockFile(lockFile); // vanished — retry the create
   if (ageMs < STALE_EMPTY_LOCK_MS) return false;
-  stealStaleEmptyLock(lockFile);
+  if (!stealStaleEmptyLock(lockFile)) return false; // a third process took it in the window
   return tryCreateLockFile(lockFile);
+}
+
+/**
+ * Put a staged lock file back where it came from, then drop the extra name.
+ *
+ * `linkSync` never replaces an existing file, so a third process that created a
+ * lock file in the steal window keeps it (EEXIST) and this process is the one
+ * that stands down; a rename back would silently replace their file and hand
+ * the lock to two owners. Returns true when this process's file is the lock
+ * file again, false when someone else's is.
+ */
+function putBackStagedLock(stagingPath, lockFile) {
+  let ours = true;
+  try {
+    linkSync(stagingPath, lockFile);
+  } catch {
+    // EEXIST: a third process created the lock in the window and holds it now.
+    // Anything else (a directory that vanished, a filesystem without hard
+    // links) also leaves no lock file of ours behind.
+    ours = false;
+  }
+  try { unlinkSync(stagingPath); } catch { /* already gone */ }
+  return ours;
 }
 
 /**
@@ -492,7 +519,13 @@ function tryAcquireLockFile(lockFile) {
  * replaced the file between the age check and the rename, so the captured file
  * is re-examined afterwards. If its mtime is younger than
  * STALE_EMPTY_LOCK_MS the file belongs to someone else (a creator mid-write, or
- * a fresh lock) and goes straight back; only a genuinely old file is discarded.
+ * a fresh lock) and goes straight back — through a hard link, so a lock file a
+ * third process created meanwhile is never replaced; on EEXIST the staged copy
+ * is dropped and the lock stays the other process's. Only a genuinely old file
+ * is discarded.
+ *
+ * @returns {boolean} true when the path is free for this process to create its
+ *   own lock file, false when another process's lock file is in place.
  */
 function stealStaleEmptyLock(lockFile) {
   const stagingPath = `${lockFile}.empty.${process.pid}.${Date.now()}`;
@@ -500,16 +533,16 @@ function stealStaleEmptyLock(lockFile) {
   try {
     renameSync(lockFile, stagingPath);
   } catch (err) {
-    if (err && err.code === "ENOENT") return; // another racer got there first
+    if (err && err.code === "ENOENT") return true; // another racer got there first
     throw err;
   }
   let stagedAgeMs = null;
   try { stagedAgeMs = Date.now() - statSync(stagingPath).mtimeMs; } catch { stagedAgeMs = null; }
   if (stagedAgeMs != null && stagedAgeMs < STALE_EMPTY_LOCK_MS) {
-    try { renameSync(stagingPath, lockFile); } catch { /* its owner's problem now */ }
-    return;
+    return putBackStagedLock(stagingPath, lockFile);
   }
   try { unlinkSync(stagingPath); } catch { /* already gone */ }
+  return true;
 }
 
 function releaseLockFile(lockFile) {
@@ -585,6 +618,12 @@ export function withReservationLock(fn, { path, timeoutMs = 5000 } = {}) {
  * The same lock, for gateway code: polls with `setTimeout` so the event loop
  * keeps running while another process (or another request) holds it. `fn` may
  * be async. A blocking acquire must never appear on a request path.
+ *
+ * Critical sections must stay short: the 60 s stale rule takes the lock from a
+ * section that lasts longer (only live readers would see it go), and awaiting
+ * Docker or network work inside `fn` would hand it away in the middle of a
+ * read-modify-write. Read what the section needs before taking the lock and do
+ * the slow work after releasing it.
  *
  * @template T
  * @param {() => T | Promise<T>} fn

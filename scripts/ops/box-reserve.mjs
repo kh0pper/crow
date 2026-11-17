@@ -33,9 +33,14 @@
  * and activates. The new booking is written FIRST, over exactly the bookings
  * this hold preempts (`ignoreIds`), and the activation replaces the old hold
  * in one atomic rename (`takeOver`) — so nothing is destroyed up front, and
- * there is never a moment with no hold at all. Only after both succeed is the
- * overlap marked done or lapsed; if activation fails the new booking is
- * cancelled and every other booking and the old hold are left as they were.
+ * there is never a moment with no hold at all. If the activation fails before
+ * the old hold was replaced, the new booking is cancelled and every other
+ * booking and the old hold are left as they were. If it fails after (the hold
+ * file already names the new booking), the prior hold file is restored byte
+ * for byte — or removed when there was none — and the new booking is
+ * cancelled. Only after the hold is in place is the overlap marked done or
+ * lapsed, best effort: a calendar write that fails there is reported on stderr
+ * and the command still exits 0, because the hold is live either way.
  *
  * A bare `release` (no --owner) frees the current hold when its kind is null
  * (a legacy writer) or "manual", and refuses a gpu-job hold without --force;
@@ -46,6 +51,9 @@
  * the max, calendar corrupt, lock timeout) · 2 usage.
  */
 
+import {
+  readFileSync, renameSync, unlinkSync, writeFileSync,
+} from "node:fs";
 import {
   DEFAULT_MAX_HOLD_MS, HoldConflictError, _releaseHoldLocked, _renewHoldLocked,
   clearReservation, readReservation, reservationPath, schedulePath, withReservationLock,
@@ -224,6 +232,66 @@ function markHoldBookingDone(hold, now) {
   try {
     setBookingStatusLocked(hold.booking_id, "done", { path: schedulePath(), now });
   } catch { /* the calendar may be unreadable; releasing the hold still stands */ }
+}
+
+/** The hold file as it is on disk right now, so it can be put back exactly. */
+function priorHoldRecord(path) {
+  try {
+    return { state: "text", text: readFileSync(path, "utf8") };
+  } catch (err) {
+    return { state: err && err.code === "ENOENT" ? "missing" : "unreadable", text: null };
+  }
+}
+
+/** True when the hold file on disk names `bookingId` as the booking it holds. */
+function holdNamesBooking(path, bookingId) {
+  const file = priorHoldRecord(path);
+  if (file.state !== "text") return false;
+  try {
+    const raw = JSON.parse(file.text);
+    return !!raw && typeof raw === "object" && !Array.isArray(raw) && raw.booking_id === bookingId;
+  } catch {
+    return false;
+  }
+}
+
+/** Put the hold file back exactly as it was (temp + rename), or remove it. */
+function restorePriorHold(path, prior) {
+  if (prior.state === "missing") {
+    try {
+      unlinkSync(path);
+    } catch (err) {
+      if (!(err && err.code === "ENOENT")) throw err;
+    }
+    return;
+  }
+  if (prior.state !== "text") {
+    throw codeError(
+      "hold_restore_failed",
+      `the hold file could not be read before the activation, so ${path} was left as it is`,
+    );
+  }
+  const tmp = `${path}.restore.${process.pid}.${Date.now()}`;
+  writeFileSync(tmp, prior.text, { mode: 0o644 });
+  renameSync(tmp, path);
+}
+
+/**
+ * Activate a booking, with one env-gated test seam.
+ *
+ * Activation writes the hold file and THEN rewrites the calendar, so a calendar
+ * write failure leaves the hold naming a booking the calendar never marked
+ * active. Nothing outside this file can make that second write fail at that
+ * exact point, so CROW_BOX_RESERVE_TEST_FAIL_AFTER_HOLD stops the activation
+ * right after the hold write — the state `hold` has to recover from. It is
+ * never set in normal use.
+ */
+function activateBookingForHold(id, options) {
+  const rec = activateBookingLocked(id, options);
+  if (process.env.CROW_BOX_RESERVE_TEST_FAIL_AFTER_HOLD === "1") {
+    throw codeError("calendar_write_failed", "the calendar write failed after the hold was written (test seam)");
+  }
+  return rec;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +503,11 @@ function holdCmd(args) {
     // and the new hold exist. Booking over them now (`ignoreIds`) and activating
     // with `takeOver` (one atomic rename, no gap) means a failure here leaves
     // the old hold and every booking untouched.
+    //
+    // The activation writes the hold file BEFORE it writes the calendar, so the
+    // prior record is captured here: a calendar write that fails in between
+    // leaves the hold naming a booking that never went live.
+    const prior = priorHoldRecord(holdPath);
     let booking = null;
     let rec = null;
     try {
@@ -455,11 +528,22 @@ function holdCmd(args) {
         path: calPath,
         holdPath,
       });
-      rec = activateBookingLocked(booking.id, {
+      rec = activateBookingForHold(booking.id, {
         owner, now, force, takeOver: true, path: calPath, holdPath,
       });
     } catch (err) {
-      // No ghost booking: a hold that could not activate leaves nothing behind.
+      // No ghost booking and no hold naming one: a hold file that now names the
+      // new booking is put back the way it was (or removed when there was
+      // none), and the new booking is cancelled whatever state it reached.
+      if (booking && holdNamesBooking(holdPath, booking.id)) {
+        try {
+          restorePriorHold(holdPath, prior);
+        } catch (restoreErr) {
+          console.error(
+            `warning: could not restore the previous hold (${(restoreErr && restoreErr.code) || "error"}): ${(restoreErr && restoreErr.message) || restoreErr}`,
+          );
+        }
+      }
       if (booking) {
         try {
           setBookingStatusLocked(booking.id, "cancelled", { path: calPath, now });
@@ -467,8 +551,17 @@ function holdCmd(args) {
       }
       throw err;
     }
+    // The hold is live now, so the overlap is bookkeeping: a calendar write that
+    // fails here is reported and the command still succeeds.
     for (const entry of overlapping) {
-      setBookingStatusLocked(entry.id, entry.owner === owner ? "done" : "lapsed", { path: calPath, now });
+      const status = entry.owner === owner ? "done" : "lapsed";
+      try {
+        setBookingStatusLocked(entry.id, status, { path: calPath, now });
+      } catch (markErr) {
+        console.error(
+          `warning: hold is live but ${entry.id} could not be marked ${status} (${(markErr && markErr.code) || "error"})`,
+        );
+      }
     }
     console.log(`held by ${rec.owner} until ${rec.expires_at} (${holdPath})`);
   });

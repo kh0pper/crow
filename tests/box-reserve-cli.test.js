@@ -27,16 +27,21 @@ function freshPaths() {
   return { holdPath: join(scratch, "reservation.json"), schedPath: join(scratch, "box-schedule.json") };
 }
 
-function runIn(paths, ...args) {
+function runInEnv(paths, env, ...args) {
   const r = spawnSync(process.execPath, [CLI, ...args], {
     env: {
       ...process.env,
       CROW_BOX_RESERVATION_PATH: paths.holdPath,
       CROW_BOX_SCHEDULE_PATH: paths.schedPath,
+      ...env,
     },
     encoding: "utf8",
   });
   return { code: r.status, out: (r.stdout || "").trim(), err: (r.stderr || "").trim() };
+}
+
+function runIn(paths, ...args) {
+  return runInEnv(paths, {}, ...args);
 }
 
 function run(...args) {
@@ -365,4 +370,43 @@ test("a hold that cannot write the hold file leaves the preempted booking booked
     [],
     "the booking that could not activate was cancelled",
   );
+});
+
+test("a failed calendar write after the hold write restores the prior hold", () => {
+  const p = freshPaths();
+  // A live gpu-job hold, which the operator's hold is allowed to preempt.
+  const job = runIn(p, "book", "--owner", "gpujob:abc", "--kind", "gpu-job", "--start", "now", "--minutes", "120");
+  assert.equal(job.code, 0, job.err);
+  const jobId = idOf(job.out);
+  const activated = runIn(p, "hold", "--booking", jobId);
+  assert.equal(activated.code, 0, activated.err);
+  const priorHold = readFileSync(p.holdPath, "utf8");
+
+  // Activation writes the hold file first and the calendar after it, so a
+  // calendar write failure leaves the hold naming a booking that never went
+  // live. The seam stops the activation at exactly that point.
+  const r = runInEnv(p, { CROW_BOX_RESERVE_TEST_FAIL_AFTER_HOLD: "1" },
+    "hold", "--owner", "alex", "--reason", "urgent", "--minutes", "30");
+  assert.equal(r.code, 1);
+  assert.match(r.err, /calendar_write_failed/);
+  assert.equal(readFileSync(p.holdPath, "utf8"), priorHold, "the prior hold is back byte for byte");
+
+  const cal = JSON.parse(runIn(p, "calendar", "--json").out);
+  assert.equal(cal.find((booking) => booking.id === jobId).status, "active", "the preempted job's booking still stands");
+  const mine = cal.filter((booking) => booking.owner === "alex");
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].status, "cancelled", "the booking that could not activate was cancelled");
+  // The hold still names the job's booking, so the box is still spoken for by it.
+  assert.equal(JSON.parse(priorHold).booking_id, jobId);
+});
+
+test("a failed calendar write with no prior hold leaves no hold file", () => {
+  const p = freshPaths();
+  const r = runInEnv(p, { CROW_BOX_RESERVE_TEST_FAIL_AFTER_HOLD: "1" },
+    "hold", "--owner", "alex", "--reason", "urgent", "--minutes", "30");
+  assert.equal(r.code, 1);
+  assert.match(r.err, /calendar_write_failed/);
+  assert.equal(existsSync(p.holdPath), false, "there was no prior hold, so there is none again");
+  const cal = JSON.parse(runIn(p, "calendar", "--json").out);
+  assert.deepEqual(cal.map((booking) => booking.status), ["cancelled"], "no ghost booking");
 });

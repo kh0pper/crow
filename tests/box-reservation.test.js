@@ -900,6 +900,51 @@ test("A admitted, snapshot unchanged, B refused", () => {
   );
 });
 
+// --- a hold with no activation baseline still counts what it admitted ------
+
+test("no activation baseline still counts admitted providers", () => {
+  // No baseline was recorded (an older writer, or the counters were unreadable
+  // at activation): the whole booking is read as still to come, and a provider
+  // admitted beside the hold has spoken for its room even before it loads.
+  const r = besideReservation();
+  assert.equal(r.gtt_used_at_activation_mb, null);
+  assert.equal(r.mem_available_at_activation_mb, null);
+  const live = { gttUsedMb: 20000, gttTotalMb: 131072, memAvailableMb: 110000, at: T0 };
+  const peak = { gtt_peak_mb: 30000, host_ram_peak_mb: 30000 };
+  const budget = live.gttTotalMb - PROFILE.safety_margin_mb; // 122880
+  assert.ok(
+    live.gttUsedMb + r.gtt_mb + peak.gtt_peak_mb <= budget,
+    "on its own the job's booking leaves room for this start",
+  );
+  assert.deepEqual(
+    startDecision(r, "crow-a", { peak, live, profile: PROFILE, now: T0 }),
+    { allowed: true, reason: null },
+  );
+  // 20000 (in use) + 50000 (the job's booking) + 30000 (admitted) + 30000.
+  assert.deepEqual(
+    startDecision(r, "crow-b", { peak, live, profile: PROFILE, admitted: peak, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+  // The same on the RAM side: 110000 - 30000 (booking) - 30000 (admitted)
+  // leaves 50000, so this peak fits until the admitted provider is counted.
+  const ramPeak = { gtt_peak_mb: 1000, host_ram_peak_mb: 50000 };
+  assert.deepEqual(
+    startDecision(r, "crow-c", { peak: ramPeak, live, profile: PROFILE, now: T0 }),
+    { allowed: true, reason: null },
+  );
+  assert.deepEqual(
+    startDecision(r, "crow-d", { peak: ramPeak, live, profile: PROFILE, admitted: peak, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+  // Only the GTT baseline missing is enough: that side is sized from the live
+  // reading, and the admitted peak counts there too.
+  const gttOnly = besideReservation({ gtt_used_at_activation_mb: null, mem_available_at_activation_mb: 110000 });
+  assert.deepEqual(
+    startDecision(gttOnly, "crow-b", { peak, live, profile: PROFILE, admitted: peak, now: T0 }),
+    { allowed: false, reason: "gpu_job_beside" },
+  );
+});
+
 // --- a beside hold without a footprint reserves nothing --------------------
 
 test("a beside hold without a footprint is refused", () => {
