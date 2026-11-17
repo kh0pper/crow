@@ -8,6 +8,7 @@
  */
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   addonWallStatus, addonWallWord, renderAddonWallStatus,
@@ -218,12 +219,12 @@ test("an unknown language falls back to English", () => {
 
 const emptyDb = () => ({ execute: async () => ({ rows: [] }) });
 
-async function card({ env, entries, probe = SANDBOXED } = {}) {
+async function card({ env, entries, probe = SANDBOXED, lang = "en" } = {}) {
   for (const [k, v] of Object.entries(env || {})) process.env[k] = v;
   _setAddonWallProbeForTest(() => probe);
   _setAddonWallEntriesForTest(() => entries || []);
   invalidateHealthCache();
-  const res = await collectHealthSignals(emptyDb(), { lang: "en" });
+  const res = await collectHealthSignals(emptyDb(), { lang });
   return {
     detail: res.details.find((d) => d.id === "addonWalls") || null,
     issue: res.issues.find((i) => i.id === "addonWalls") || null,
@@ -280,4 +281,124 @@ test("the card's words are escaped and translated on request", async () => {
   const detail = res.details.find((d) => d.id === "addonWalls");
   assert.equal(detail.label, NOTICE.label.es);
   assert.equal(detail.value, SUMMARY.killSwitch.es);
+});
+
+// ─── one link per add-on a decision of the owner's left unwalled ───
+
+/** The Nest page rendered from these signals (the real HTML builder). */
+async function nestPage({ env, entries, lang = "en" } = {}) {
+  const { buildNestHTML } = await import("../servers/gateway/dashboard/panels/nest/html.js");
+  const { res } = await card({ env, entries, lang });
+  const html = buildNestHTML({
+    pinnedItems: [], bundles: [], instances: [], trustedInstances: [], peerOverviews: [], ssoEnabled: false,
+    healthSignals: res, fixItHtml: "",
+  }, lang);
+  return { res, html };
+}
+
+test("an add-on the owner unwalled gets a row linking to its Extensions entry", async () => {
+  const entries = [
+    entry("browser", { mode: "unwalled", reason: "your choice", source: "owner" }),
+    entry("notes", walledWall()),
+  ];
+  const { res, html } = await nestPage({ env: WALLED, entries });
+
+  assert.deepEqual(res.links, [
+    { text: `browser: ${WALL_WORDS.owner.en}`, label: NOTICE.action.en, href: "/dashboard/extensions?q=browser" },
+  ], "one row for the add-on the owner freed, none for the walled one, no data backends");
+
+  // The row is plain text plus a link, and it lands on that add-on's Extensions entry.
+  assert.ok(html.includes("<span class=\"nest-health-issue-label\">browser: not walled (your choice)</span>"), html);
+  assert.match(html, /<a class="nest-health-issue-action" href="\/dashboard\/extensions\?q=browser">Check add-ons<\/a>/);
+  assert.ok(!html.includes("?q=notes"), "a walled add-on gets no row");
+});
+
+test("the rows show even when the strip says all good (an owner's choice is not a fault)", async () => {
+  const { buildNestHTML } = await import("../servers/gateway/dashboard/panels/nest/html.js");
+  const html = buildNestHTML({
+    pinnedItems: [], bundles: [], instances: [], trustedInstances: [], peerOverviews: [], ssoEnabled: false, fixItHtml: "",
+    healthSignals: {
+      ok: true, issues: [], details: [],
+      links: [{ text: `browser: ${WALL_WORDS.owner.en}`, label: NOTICE.action.en, href: "/dashboard/extensions?q=browser" }],
+    },
+  }, "en");
+  assert.match(html, /nest-health-allgood/, "the strip is in its all-good state");
+  assert.ok(html.includes("?q=browser"), "...and the owner can still reach the button from the Nest");
+});
+
+test("the rows are translated (es) — id and action label both", async () => {
+  const { res, html } = await nestPage({ env: WALLED, entries: [entry("browser", { mode: "unwalled", source: "owner" })], lang: "es" });
+  assert.deepEqual(res.links, [
+    { text: `browser: ${WALL_WORDS.owner.es}`, label: NOTICE.action.es, href: "/dashboard/extensions?q=browser" },
+  ]);
+  assert.ok(html.includes(`browser: ${WALL_WORDS.owner.es}`), html);
+  assert.ok(html.includes(`>${NOTICE.action.es}</a>`), html);
+});
+
+test("an add-on id is never trusted as markup or as a link off the dashboard", async () => {
+  const { res, html } = await nestPage({
+    env: WALLED,
+    entries: [entry('<script>alert(1)</script>', { mode: "unwalled", source: "owner" })],
+  });
+  assert.equal(res.links.length, 1, "the row is kept (its id is just an id) — and escaped");
+  assert.ok(!html.includes("<script>alert(1)</script>"));
+  assert.ok(html.includes("?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E"), "the id is URL-encoded in the link");
+  for (const l of res.links) assert.ok(l.href.startsWith("/dashboard/extensions?q="), l.href);
+});
+
+test("the Extensions search matches the add-on id, so ?q=<id> finds the card", () => {
+  const src = readFileSync(new URL("../servers/gateway/dashboard/panels/extensions/client.js", import.meta.url), "utf8");
+  assert.match(src, /card\.dataset\.addonId \|\| ""\)\.indexOf\(q\) !== -1/);
+});
+
+// The Extensions entry offers "Wall it again" only to an add-on an owner/Fix-it/
+// file decision left unwalled on a host whose walls are on (ownerUnwalled in
+// addon-wall-details.js). A row elsewhere would be a link to a button that is
+// not there, so the Nest asks the same module and shows a row only where the
+// button exists.
+
+test("walls off for this computer (the release default): no rows at all", async () => {
+  const entries = [
+    entry("browser", { mode: "unwalled", reason: "switched off", source: "default" }),
+    entry("notes", { mode: "unwalled", source: "default" }),
+    // Even an add-on the owner's own decision freed has nothing to re-arm here.
+    entry("mine", { mode: "unwalled", reason: "your choice", source: "owner" }),
+  ];
+  const { res } = await nestPage({ env: OFF, entries });
+  assert.deepEqual(res.links, [], "with walls off the entry offers no button, so no row links to one");
+});
+
+test("the operator's kill switch: no rows either", async () => {
+  const entries = [
+    entry("a", { mode: "unwalled", source: "kill-switch" }),
+    entry("mine", { mode: "unwalled", source: "owner" }),
+  ];
+  const { res } = await card({ env: KILLED, entries });
+  assert.deepEqual(res.links, []);
+});
+
+test("a failed or stopped add-on gets no row", async () => {
+  const entries = [
+    entry("broken", { mode: "refused", source: "refused" }),
+    entry("never-walled", { mode: "unwalled", source: "walled" }),
+    entry("gone", walledWall(), { status: "disconnected" }),
+    entry("errored", walledWall(), { status: "error" }),
+  ];
+  const { res } = await nestPage({ env: WALLED, entries });
+  assert.deepEqual(res.links, [], "none of them is offered the button, so none gets a link");
+  // ...while the card still says what happened to them.
+  assert.ok(res.details.find((d) => d.id === "addonWalls"));
+});
+
+test("a walled host with one owner-unwalled add-on, one walled and one HTTP add-on: exactly one row", async () => {
+  const entries = [
+    entry("browser", { mode: "unwalled", reason: "your choice", source: "owner" }),
+    entry("notes", walledWall()),
+    // No local child to wrap: the wall never governs it, whatever the file says.
+    entry("gmail", { mode: "unwalled", source: "default" }),
+  ];
+  const { res } = await card({ env: WALLED, entries });
+  assert.deepEqual(res.links, [
+    { text: `browser: ${WALL_WORDS.owner.en}`, label: NOTICE.action.en, href: "/dashboard/extensions?q=browser" },
+  ]);
 });

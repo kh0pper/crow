@@ -1,7 +1,7 @@
 /**
  * Nest Panel — Health Signals
  *
- * collectHealthSignals(db, opts) → { ok, issues, details }
+ * collectHealthSignals(db, opts) → { ok, issues, details, links }
  *
  * Each signal is wrapped in try/catch — a failing signal becomes state 'off'
  * and never throws. Results are cached for 30 s (injectable clock for tests).
@@ -21,7 +21,9 @@
  *               (scripts/addon-sandbox/words.mjs). The kill switch, and a wall
  *               that could not be built, are warns; a host whose default is off
  *               is info (strip-only); everything walled is ok. No card when no
- *               add-on runs here and the kill switch is not set.
+ *               add-on runs here and the kill switch is not set. Its rows (links)
+ *               go only to add-ons an owner/Fix-it/file decision left unwalled on
+ *               a host whose walls are on — the ones that offer "Wall it again".
  *   peerTrust — PT-1: a trust lookup that failed closed (warn), a paired but
  *               untrusted row holding a bearer/key, an orphan credential (info)
  *   peers     — paired peer's gateway URL failing /health >=2h (warn, pushed);
@@ -127,7 +129,7 @@ import { docsUrl } from "../../shared/components.js";
 import { readSetting } from "../../settings/registry.js";
 import { isFunnelPublicPath, effectiveFunnelPrefixes } from "../../../funnel.js";
 import { gatewayListenPort } from "../../../listen-port.js";
-import { killSwitchOn } from "../../../../../scripts/addon-sandbox/host-switch.mjs";
+import { killSwitchOn, wallsOnForHost } from "../../../../../scripts/addon-sandbox/host-switch.mjs";
 import { gatewayListenHost } from "../../../listen-host.js";
 import { DEFAULT_INTERVAL_HOURS, MIN_INTERVAL_HOURS, classifyUpdateResult, shouldStartAutoUpdate, git as autoUpdateGit, appRoot as autoUpdateAppRoot } from "../../../auto-update.js";
 import { homePermissionTargets } from "../../../boot/tighten-home-permissions.js";
@@ -135,6 +137,8 @@ import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { botRuntimeActive } from "../bot-runtime-flag.js";
 import { botSandboxProbe, botSandboxStatus } from "../../shared/bot-sandbox-status.js";
 import { addonWallStatus, addonWallEntriesNow } from "../../shared/addon-wall-status.js";
+import { addonWallOwnerUnwalledIds } from "../../shared/addon-wall-details.js";
+import { resolveCrowHome } from "../../../../shared/crow-home.js";
 import { langText, NOTICE } from "../../../../../scripts/addon-sandbox/words.mjs";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
@@ -436,6 +440,16 @@ async function botSandboxSignal(db, lang) {
  * The add-on walls (PR D). The status line the Extensions page shows, in the
  * Nest's own words: one sentence from the shared status module plus a link.
  *
+ * A row of its own (the add-on's name, the shared word for its state, then a
+ * link to its Extensions entry) only goes to an add-on a decision of the
+ * OWNER's left unwalled — the same rule the Extensions entry uses to offer
+ * "Wall it again" (addon-wall-details.js). The buttons live on that entry, so a
+ * row is what puts the button one click away from the Nest; where the entry
+ * offers no button there is nothing to link to, and a row would lead nowhere.
+ * That is why there are no rows on a host whose walls are off (the release
+ * default, or the operator's kill switch), none for an add-on that failed or
+ * stopped, and none for an add-on with no local child the wall could govern.
+ *
  * No card when nothing is running and the kill switch is not set — there is
  * nothing to say about add-ons this host does not have. An info card stays
  * strip-only (the health monitor pushes warn only).
@@ -452,6 +466,26 @@ async function addonWallsSignal(lang) {
   const status = addonWallStatus({ env, entries: list, lang });
   const label = langText(NOTICE.label, lang);
   const href = status.severity === "ok" ? null : "/dashboard/extensions";
+  // One row per bundle add-on an owner/Fix-it/file decision left unwalled, asked
+  // of the module the Extensions entry asks — never a second reading of the
+  // entries, so a row can never point at a "Wall it again" that is not offered.
+  // With walls off for this computer the answer is empty without any file read.
+  let unwalled = new Set();
+  if (wallsOnForHost(env)) {
+    try {
+      unwalled = new Set(addonWallOwnerUnwalledIds({ crowHome: resolveCrowHome(env), entries: list, env }));
+    } catch { unwalled = new Set(); }
+  }
+  // `?q=<id>` is the Extensions page's own search (its filter runs on load and
+  // matches the add-on id), so the row lands on that add-on's card and its
+  // "Wall it again" button.
+  const links = status.entries
+    .filter((e) => e.kind === "addon" && unwalled.has(e.id))
+    .map((e) => ({
+      text: `${e.id}: ${e.word}`,
+      label: langText(NOTICE.action, lang),
+      href: `/dashboard/extensions?q=${encodeURIComponent(e.id)}`,
+    }));
   return {
     id: "addonWalls",
     severity: status.severity === "ok" ? null : status.severity,
@@ -461,6 +495,7 @@ async function addonWallsSignal(lang) {
     issueLabel: href ? status.sentence : undefined,
     actionLabel: href ? langText(NOTICE.action, lang) : undefined,
     actionHref: href || undefined,
+    links,
   };
 }
 
@@ -2639,7 +2674,7 @@ async function integritySignal(lang = "en") {
  *   gateway process has been up (otherwise process.uptime())
  * @param {boolean} [opts.noAuth]  test seam for the Updates card: the gateway's
  *   --no-auth flag (otherwise read from process.argv, like exposureSignal)
- * @returns {Promise<{ok: boolean, issues: Array, details: Array}>}
+ * @returns {Promise<{ok: boolean, issues: Array, details: Array, links: Array}>}
  */
 export async function collectHealthSignals(db, opts = {}) {
   const nowFn = opts.now ?? (() => Date.now());
@@ -2710,9 +2745,19 @@ export async function collectHealthSignals(db, opts = {}) {
       ack: s.ack ?? null,
     }));
 
+  // A signal may also carry `links` ({ text, label, href }): plain text plus a link
+  // of its own (the add-on walls card names each add-on a decision of the owner's
+  // left unwalled, pointing at its Extensions entry, where "Wall it again" is).
+  // Kept apart from `issues` so an info row
+  // shows even when every other signal is fine, and never becomes a notification.
+  const links = present
+    .flatMap((s) => (Array.isArray(s.links) ? s.links : []))
+    .filter((l) => l && typeof l === "object" && typeof l.text === "string" && typeof l.href === "string")
+    .map((l) => ({ text: l.text, label: typeof l.label === "string" ? l.label : "", href: l.href }));
+
   const ok = issues.filter(i => i.severity === "warn").length === 0;
 
-  const result = { ok, issues, details };
+  const result = { ok, issues, details, links };
   _cache = result;
   _cacheTs = ts;
   _cacheLang = lang;

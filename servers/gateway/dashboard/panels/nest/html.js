@@ -146,6 +146,23 @@ function buildHealthStrip(health, lang, flash, flashAddon = null, flashKey = nul
 
   if (!health) return flashHtml;
 
+  // A signal's own rows: plain text plus a link each (the add-on walls card lists
+  // every add-on that is not walled and links to its Extensions entry). Rendered
+  // whatever the strip's overall state is — an add-on the owner left unwalled is
+  // not a fault, but it is still the thing they may want to open. Only an
+  // in-page dashboard link is trusted here; anything else is dropped.
+  const linksHtml = (Array.isArray(health.links) ? health.links : [])
+    .filter((l) => l && typeof l === "object" && typeof l.href === "string" && l.href.startsWith("/dashboard/"))
+    .map((l) => {
+      const text = escapeHtml(String(l.text ?? ""));
+      const label = escapeHtml(String(l.label ?? ""));
+      const href = escapeHtml(l.href);
+      const anchor = label ? ` <a class="nest-health-issue-action" href="${href}">${label}</a>` : "";
+      return `<div class="nest-health-link-row"><span class="nest-health-issue-label">${text}</span>${anchor}</div>`;
+    })
+    .join("");
+  const linksBlock = linksHtml ? `<div class="nest-health-links">${linksHtml}</div>` : "";
+
   // Detail cards
   const detailCards = (health.details || []).map(d => {
     const valClass = `nest-health-detail-value--${d.state || "off"}`;
@@ -197,6 +214,7 @@ function buildHealthStrip(health, lang, flash, flashAddon = null, flashKey = nul
   const warnClass = health.ok ? "nest-health-strip--ok" : "nest-health-strip--warn";
   const stripHtml = `<div class="nest-health-strip ${warnClass}" aria-live="polite" aria-label="${escapeHtml(t("health.stripLabel", lang))}">
     ${bodyHtml}
+    ${linksBlock}
     ${detailsEl}
   </div>`;
 

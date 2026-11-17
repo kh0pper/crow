@@ -149,6 +149,8 @@ An owner's per-add-on choice lives in `<CROW_HOME>/addon-walls.json` (mode `0600
 
 The status word for that choice is **not walled (your choice)**.
 
+**Wall it again** is offered on the add-on's Extensions page (its detail modal) whenever its wall is off by an owner choice, and only then: the entry's own `wall` record is one source (`source: "owner"`), and `addon-walls.json` itself is the other — a `modes` entry written by hand, or by the Fix-it remedy, before this host switched walls on still counts, even though the running child connected under the per-host default and its snapshot says so. Two hosts see no button, deliberately: one whose walls are off altogether (the kill switch, or a per-host default of `off`) — the decision would answer `default` anyway, so a click could not wall anything — and an add-on the wall cannot govern at all (an HTTP add-on has no local child to wrap). The modal's sandbox line comes from the add-on's profile; when no profile can be built the line is left out (never invented) and the button is still shown, because reaching it is the point.
+
 ### A computer with no usable bubblewrap
 
 If bubblewrap is not installed at all, nothing can run walled there, and every add-on's status reads **not walled on this computer; docker reachable** — docker is still reachable from an add-on on such a host, so the line says so. Crow still starts the child with `setpriv --no-new-privs` when setpriv exists.
@@ -162,6 +164,7 @@ A bubblewrap that is installed but cannot start a sandbox here (a refused user n
 - **A host switched off by the kill switch** gets one notice worded for that case the first time it boots a build that carries walls, instead of the per-boot note, so there is one bell rather than two.
 - **A change to `addon-walls.json` that Crow did not write** is reported as one note, "Add-on wall settings were changed outside Crow", and the new settings take effect at the next connect.
 - **Walls off and no kill switch**: nothing is sent. An install that has not switched walls on sees no new bell.
+- **The Nest's health strip** carries the same summary line as the status page, and under it one row per add-on that is not walled: its name and its status word as plain text, then a link to that add-on's Extensions entry (`/dashboard/extensions?q=<id>`, which the page's own search reads and filters to the add-on). That is where **Wall it again** lives, so the row is what puts it one click from the Nest. The rows are shown even when every other signal is fine, since an owner's choice is information, not a fault.
 
 ## Status words
 

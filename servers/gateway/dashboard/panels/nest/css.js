@@ -407,6 +407,21 @@ export function nestCSS() {
     white-space: nowrap;
   }
   .nest-health-issue-action:hover { text-decoration: underline; }
+  /* A signal's own rows: the add-on's name and state as text, the link to its
+     Extensions entry beside it. One per add-on, on the issue line's rhythm. */
+  .nest-health-links {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin-top: 0.4rem;
+  }
+  .nest-health-link-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.85rem;
+  }
   .nest-health-backup-form {
     display: inline;
     margin: 0;
