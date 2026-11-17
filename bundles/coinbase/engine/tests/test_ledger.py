@@ -15,6 +15,7 @@ from crow_coinbase.store import (
 
 XRP = "XRP-USDC"
 BTC = "BTC-USDC"
+FEE = D("0.005")
 
 
 @pytest.fixture
@@ -22,6 +23,11 @@ def store(tmp_path):
     s = Store(tmp_path / "s.db")
     yield s
     s.close()
+
+
+def ocid(owner, n):
+    """A client order id in the engine's `cb-<owner>-...` form."""
+    return f"cb-{owner}-{n:012d}"
 
 
 def make_bot(store, bot_id="b1", product=XRP, quote="100", base="0"):
@@ -34,19 +40,13 @@ def place(store, cid, owner, side, price, size, product=XRP, level=0, status=OPE
     )
 
 
-def fill(store, cid, trade_id, side, size, price, commission="0"):
-    return store.apply_fill(
-        {
-            "trade_id": trade_id,
-            "order_id": "oid-" + cid,
-            "side": side,
-            "size": D(size),
-            "price": D(price),
-            "commission": D(commission),
-            "trade_time": "2026-01-01T00:00:00Z",
-        },
-        cid,
-    )
+def snapshot(store, cid, size, value, fees="0"):
+    """Set an order's absolute fill totals from the exchange's order snapshot.
+
+    `update_order` is the only writer of filled_size / filled_value / fees; the
+    fills table is bookkeeping and never moves a holding.
+    """
+    store.update_order(cid, filled_size=D(size), filled_value=D(value), fees=D(fees))
 
 
 def check(h, quote, base, reserved_quote="0", reserved_base="0"):
@@ -61,7 +61,7 @@ def check(h, quote, base, reserved_quote="0", reserved_base="0"):
 def test_create_bot_starts_with_its_capital(store):
     make_bot(store, "b1", XRP, "100", "50")
 
-    h = Ledger(store).holding("b1")
+    h = Ledger(store, fee_rate=FEE).holding("b1")
 
     assert h == Holding(D("100"), D("50"), D("0"), D("0"))
     assert h.available_quote == D("100")
@@ -70,17 +70,19 @@ def test_create_bot_starts_with_its_capital(store):
 
 def test_fill_moves_holding(store):
     make_bot(store, "b1", XRP, "100", "50")
-    led = Ledger(store)
+    led = Ledger(store, fee_rate=FEE)
 
-    place(store, "cid-buy", "b1", "BUY", "1", "10", level=-1)
-    fill(store, "cid-buy", "t1", "BUY", "10", "1", "0.05")
-    store.update_order("cid-buy", status=FILLED)
+    cid_buy = ocid("b1", 1)
+    place(store, cid_buy, "b1", "BUY", "1", "10", level=-1)
+    snapshot(store, cid_buy, "10", "10", "0.05")
+    store.update_order(cid_buy, status=FILLED)
 
     check(led.holding("b1"), "89.95", "60")
 
-    place(store, "cid-sell", "b1", "SELL", "2", "5", level=1)
-    fill(store, "cid-sell", "t2", "SELL", "5", "2", "0.02")
-    store.update_order("cid-sell", status=FILLED)
+    cid_sell = ocid("b1", 2)
+    place(store, cid_sell, "b1", "SELL", "2", "5", level=1)
+    snapshot(store, cid_sell, "5", "10", "0.02")
+    store.update_order(cid_sell, status=FILLED)
 
     # 89.95 + (5 * 2 - 0.02), base 60 - 5
     check(led.holding("b1"), "99.93", "55")
@@ -88,57 +90,94 @@ def test_fill_moves_holding(store):
 
 def test_open_order_reserves_and_cancel_releases(store):
     make_bot(store, "b1", XRP, "100", "50")
-    led = Ledger(store, fee_rate=D("0.005"))
+    led = Ledger(store, fee_rate=FEE)
 
-    place(store, "cid-buy", "b1", "BUY", "2", "10", level=-1)
+    cid_buy = ocid("b1", 1)
+    place(store, cid_buy, "b1", "BUY", "2", "10", level=-1)
     h = led.holding("b1")
     assert h.quote == D("100")  # a resting order moves nothing between totals
     assert h.reserved_quote == D("20.10")  # 10 * 2 * 1.005, fee included
     assert h.available_quote == D("79.90")
 
-    place(store, "cid-sell", "b1", "SELL", "2", "4", level=1)
+    cid_sell = ocid("b1", 2)
+    place(store, cid_sell, "b1", "SELL", "2", "4", level=1)
     h = led.holding("b1")
     assert h.reserved_quote == D("20.10")
     assert h.reserved_base == D("4")
     assert h.available_base == D("46")
 
-    place(store, "cid-pending", "b1", "BUY", "3", "1", status=PENDING_SUBMIT)
+    cid_pending = ocid("b1", 3)
+    place(store, cid_pending, "b1", "BUY", "3", "1", status=PENDING_SUBMIT)
     h = led.holding("b1")
     assert h.reserved_quote == D("20.10") + D("3.015")  # 1 * 3 * 1.005
     assert h.reserved_base == D("4")
 
     # A partially filled live buy reserves only the remaining size.
-    place(store, "cid-part", "b1", "BUY", "1", "10", level=-2)
-    fill(store, "cid-part", "t1", "BUY", "4", "1", "0.004")
+    cid_part = ocid("b1", 4)
+    place(store, cid_part, "b1", "BUY", "1", "10", level=-2)
+    snapshot(store, cid_part, "4", "4", "0.004")
     h = led.holding("b1")
     assert h.quote == D("100") - D("4") - D("0.004")
     assert h.base == D("54")
     assert h.reserved_quote == D("23.115") + D("6.03")  # 6 left at 1 * 1.005
     assert h.reserved_base == D("4")
 
-    for cid in ("cid-buy", "cid-sell", "cid-pending", "cid-part"):
+    for cid in (cid_buy, cid_sell, cid_pending, cid_part):
         store.update_order(cid, status=CANCELLED)
 
     h = led.holding("b1")
     check(h, "95.996", "54")  # the partial fill stays, every hold is released
 
 
+def test_buy_reservation_depends_on_fee_rate(store):
+    make_bot(store, "b1", XRP, "100", "0")
+    # size 10 at 2: the reservation includes the maker fee.
+    place(store, ocid("b1", 1), "b1", "BUY", "2", "10", level=-1)
+
+    free = Ledger(store, fee_rate=D("0")).holding("b1")
+    assert free.reserved_quote == D("20")
+
+    charged = Ledger(store, fee_rate=FEE).holding("b1")
+    assert charged.reserved_quote == D("20.10")
+
+
+def test_sell_cancelled_after_partial_fill_releases_base(store):
+    make_bot(store, "b1", XRP, "100", "50")
+    led = Ledger(store, fee_rate=FEE)
+
+    cid = ocid("b1", 1)
+    place(store, cid, "b1", "SELL", "2", "10", level=1)
+    snapshot(store, cid, "4", "8", "0.04")
+
+    h = led.holding("b1")
+    assert h.base == D("46")  # 50 - 4 sold
+    assert h.quote == D("107.96")  # 100 + 8 - 0.04 fee
+    assert h.reserved_base == D("6")  # only the unsold 6 is still held
+    assert h.reserved_quote == D("0")
+
+    store.update_order(cid, status=CANCELLED)
+
+    h = led.holding("b1")
+    check(h, "107.96", "46")  # the partial fill stays, the hold is released
+
+
 def test_two_bots_same_product_isolated(store):
     make_bot(store, "b1", XRP, "100", "50")
     make_bot(store, "b2", XRP, "70", "20")
 
-    place(store, "cid-b1", "b1", "BUY", "1", "10", level=-1)
-    fill(store, "cid-b1", "t1", "BUY", "10", "1", "0.01")
-    store.update_order("cid-b1", status=FILLED)
+    cid = ocid("b1", 1)
+    place(store, cid, "b1", "BUY", "1", "10", level=-1)
+    snapshot(store, cid, "10", "10", "0.01")
+    store.update_order(cid, status=FILLED)
 
-    led = Ledger(store)
+    led = Ledger(store, fee_rate=FEE)
     check(led.holding("b1"), "89.99", "60")
     check(led.holding("b2"), "70", "20")
 
 
 def test_holding_filters_by_product_and_requires_it_without_a_bot(store):
     make_bot(store, "b1", XRP, "100", "50")
-    led = Ledger(store)
+    led = Ledger(store, fee_rate=FEE)
 
     with pytest.raises(ValueError):
         led.holding("nobot")  # no bot row and no product to fall back on
@@ -148,19 +187,21 @@ def test_holding_filters_by_product_and_requires_it_without_a_bot(store):
     check(led.holding("ai", XRP), "0", "0")
 
     # A bot's own product is the default; another product's rows are not mixed in.
-    place(store, "cid-btc", "b1", "BUY", "60000", "0.01", product=BTC, level=-1)
-    fill(store, "cid-btc", "t-btc", "BUY", "0.01", "60000", "6")
-    store.update_order("cid-btc", status=FILLED)
+    cid = ocid("b1", 1)
+    place(store, cid, "b1", "BUY", "60000", "0.01", product=BTC, level=-1)
+    snapshot(store, cid, "0.01", "600", "6")
+    store.update_order(cid, status=FILLED)
 
     check(led.holding("b1"), "100", "50")
 
 
 def test_orphan_holding_comes_only_from_its_fills(store):
-    place(store, "cid-o", "orphan", "BUY", "1", "10", level=-1)
-    fill(store, "cid-o", "t1", "BUY", "10", "1", "0.05")
-    store.update_order("cid-o", status=FILLED)
+    cid = ocid("orphan", 1)
+    place(store, cid, "orphan", "BUY", "1", "10", level=-1)
+    snapshot(store, cid, "10", "10", "0.05")
+    store.update_order(cid, status=FILLED)
 
-    h = Ledger(store).holding("orphan", XRP)
+    h = Ledger(store, fee_rate=FEE).holding("orphan", XRP)
 
     assert h.quote == -(D("10") + D("0.05"))  # capital 0, only the fill's cost
     assert h.base == D("10")
@@ -175,17 +216,18 @@ def test_orphan_holding_comes_only_from_its_fills(store):
 
 def test_equity_uses_totals_and_prices(store):
     make_bot(store, "b1", XRP, "100", "50")
-    led = Ledger(store, fee_rate=D("0.005"))
+    led = Ledger(store, fee_rate=FEE)
 
     assert led.equity("b1", {XRP: D("2")}) == D("200")  # 100 + 50 * 2
 
     # A resting order only reserves: totals (and so equity) are unchanged.
-    place(store, "cid-rest", "b1", "BUY", "1", "10", level=-1)
+    place(store, ocid("b1", 1), "b1", "BUY", "1", "10", level=-1)
     assert led.equity("b1", {XRP: D("2")}) == D("200")
 
-    place(store, "cid-take", "b1", "BUY", "1", "10", level=-2)
-    fill(store, "cid-take", "t1", "BUY", "10", "1", "0.05")
-    store.update_order("cid-take", status=FILLED)
+    cid = ocid("b1", 2)
+    place(store, cid, "b1", "BUY", "1", "10", level=-2)
+    snapshot(store, cid, "10", "10", "0.05")
+    store.update_order(cid, status=FILLED)
 
     # quote 89.95, base 60
     assert led.equity("b1", {XRP: D("2")}) == D("209.95")
@@ -194,10 +236,11 @@ def test_equity_uses_totals_and_prices(store):
 
 def test_unallocated_zero_with_resting_order(store):
     make_bot(store, "b1", XRP, "100", "50")
-    place(store, "cid-buy", "b1", "BUY", "1", "10", level=-1)
-    place(store, "cid-sell", "b1", "SELL", "2", "4", level=1)
+    place(store, ocid("b1", 1), "b1", "BUY", "1", "10", level=-1)
+    place(store, ocid("b1", 2), "b1", "SELL", "2", "4", level=1)
 
-    out = Ledger(store).unallocated({"USDC": D("100"), "XRP": D("50")})
+    # Totals include the holds, so a non-zero fee rate changes nothing here.
+    out = Ledger(store, fee_rate=FEE).unallocated({"USDC": D("100"), "XRP": D("50")})
 
     assert out == {"USDC": D("0"), "XRP": D("0")}
 
@@ -205,7 +248,7 @@ def test_unallocated_zero_with_resting_order(store):
 def test_unallocated_per_currency_shared_usdc(store):
     make_bot(store, "x", XRP, "100", "0")
     make_bot(store, "y", BTC, "60", "0")
-    led = Ledger(store)
+    led = Ledger(store, fee_rate=FEE)
 
     out = led.unallocated({"USDC": D("170"), "XRP": D("0"), "BTC": D("0")})
     assert out == {"USDC": D("10"), "XRP": D("0"), "BTC": D("0")}
@@ -218,7 +261,7 @@ def test_unallocated_per_currency_shared_usdc(store):
 
 def test_unallocated_negative_when_exchange_short(store):
     make_bot(store, "b1", XRP, "100", "50")
-    led = Ledger(store)
+    led = Ledger(store, fee_rate=FEE)
 
     out = led.unallocated({"USDC": D("80"), "XRP": D("40")})
     assert out["USDC"] == D("-20")
@@ -235,14 +278,15 @@ def test_unallocated_negative_when_exchange_short(store):
 
 
 def test_unallocated_counts_orphan_owner(store):
-    led = Ledger(store)
+    led = Ledger(store, fee_rate=FEE)
     totals = {"USDC": D("100"), "XRP": D("0")}
     before = led.unallocated(totals)
     assert before == {"USDC": D("100"), "XRP": D("0")}
 
-    place(store, "cid-o", "orphan", "BUY", "1", "10", level=-1)
-    fill(store, "cid-o", "t1", "BUY", "10", "1", "0.05")
-    store.update_order("cid-o", status=FILLED)
+    cid = ocid("orphan", 1)
+    place(store, cid, "orphan", "BUY", "1", "10", level=-1)
+    snapshot(store, cid, "10", "10", "0.05")
+    store.update_order(cid, status=FILLED)
 
     after = led.unallocated(totals)
 

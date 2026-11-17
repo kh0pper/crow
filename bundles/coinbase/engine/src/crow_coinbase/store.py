@@ -7,7 +7,13 @@ write lock up front instead of failing late while upgrading a read lock, and it
 falls back to a `SAVEPOINT` when the caller already holds a transaction: the
 work then joins the caller's transaction and their commit/rollback decides its
 fate.  Every method that writes more than one row, or reads then writes
-(`create_bot`, `apply_fill`, `update_hwm`, ...), runs inside `tx()`.
+(`create_bot`, `record_fill`, `update_hwm`, ...), runs inside `tx()`.
+
+`orders.filled_size`, `orders.filled_value` and `orders.fees` mirror the
+exchange's own order snapshot: `update_order()` is their single writer and
+always sets absolute values.  `record_fill()` only books the `fills` table, so a
+fill seen once through the stream and once through the reconcile loop is
+counted once.
 
 The database runs in WAL mode (readers never block the writer).  Each thread
 gets its own connection through `threading.local`; `Store.conn` is also a valid
@@ -71,7 +77,7 @@ SCHEMA = (
     """CREATE TABLE IF NOT EXISTS fills (
          trade_id TEXT PRIMARY KEY, order_id TEXT, client_order_id TEXT, owner TEXT,
          side TEXT, size TEXT, price TEXT, commission TEXT, trade_time TEXT,
-         recorded_at REAL)""",
+         recorded_at REAL, product TEXT, trade_type TEXT)""",
     """CREATE TABLE IF NOT EXISTS hwm (owner TEXT PRIMARY KEY, value TEXT)""",
     """CREATE TABLE IF NOT EXISTS events (ts REAL, level TEXT, message TEXT)""",
     """CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)""",
@@ -90,10 +96,17 @@ class Store:
         self._lock = threading.Lock()
         self._conns: list[sqlite3.Connection] = []
         self._savepoints = itertools.count(1)
+        self._order_columns: Optional[set[str]] = None
         self._apply_schema()
 
     # ------------------------------------------------ connections
     def _connect(self) -> sqlite3.Connection:
+        # check_same_thread=False: `close()` may run on a different thread than the
+        # one that opened a connection, and it closes every connection from that
+        # closing thread.  Each connection is otherwise only ever used by its own
+        # thread (looked up through `threading.local`).
+        # `timeout` is the one and only place the busy timeout is set (30 s), so a
+        # `BEGIN IMMEDIATE` that finds another writer waits instead of failing.
         db = sqlite3.connect(
             self.path,
             timeout=30,
@@ -102,7 +115,6 @@ class Store:
         )
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA busy_timeout=30000")
         return db
 
     def conn(self) -> sqlite3.Connection:
@@ -125,7 +137,11 @@ class Store:
 
     @contextlib.contextmanager
     def tx(self):
-        """One write transaction: BEGIN IMMEDIATE, or a savepoint when already in one."""
+        """One write transaction: BEGIN IMMEDIATE, or a savepoint when already in one.
+
+        Cleanup never masks the caller's error: a failing ROLLBACK / RELEASE is
+        suppressed so the original exception keeps propagating.
+        """
         db = self.conn()
         if db.in_transaction:
             name = f"crow_sp_{next(self._savepoints)}"
@@ -133,8 +149,10 @@ class Store:
             try:
                 yield db
             except BaseException:
-                db.execute(f"ROLLBACK TO {name}")
-                db.execute(f"RELEASE {name}")
+                with contextlib.suppress(sqlite3.Error):
+                    if db.in_transaction:
+                        db.execute(f"ROLLBACK TO {name}")
+                        db.execute(f"RELEASE {name}")
                 raise
             db.execute(f"RELEASE {name}")
             return
@@ -142,18 +160,35 @@ class Store:
         try:
             yield db
         except BaseException:
-            db.execute("ROLLBACK")
+            with contextlib.suppress(sqlite3.Error):
+                if db.in_transaction:
+                    db.execute("ROLLBACK")
             raise
-        db.execute("COMMIT")
+        try:
+            db.execute("COMMIT")
+        except BaseException:
+            # The transaction is still open: undo it, then report the COMMIT error.
+            with contextlib.suppress(sqlite3.Error):
+                if db.in_transaction:
+                    db.execute("ROLLBACK")
+            raise
 
     def _apply_schema(self) -> None:
-        """Create the tables and seed the single schema_version row (idempotent)."""
+        """Create the tables, seed schema_version and refuse a newer database file."""
         with self.tx() as db:
             for statement in SCHEMA:
                 db.execute(statement)
-            if db.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 0:
+            row = db.execute(
+                "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
                 db.execute(
                     "INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,)
+                )
+            elif int(row[0]) > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"database schema version {int(row[0])} is newer than this "
+                    f"engine's schema version {SCHEMA_VERSION}"
                 )
 
     def schema_version(self) -> int:
@@ -161,6 +196,14 @@ class Store:
             "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
         ).fetchone()
         return int(row[0]) if row else SCHEMA_VERSION
+
+    def order_columns(self) -> set[str]:
+        """The real `orders` column names, read with PRAGMA and cached once."""
+        if self._order_columns is None:
+            self._order_columns = {
+                row[1] for row in self.conn().execute("PRAGMA table_info(orders)")
+            }
+        return self._order_columns
 
     # ------------------------------------------------ bots
     def create_bot(
@@ -243,7 +286,16 @@ class Store:
         basis_per_base: Optional[Decimal] = None,
         note: Optional[str] = None,
     ) -> None:
-        """Record a local order row before it is (or is not) sent to the exchange."""
+        """Record a local order row before it is (or is not) sent to the exchange.
+
+        Client order ids are built as `cb-<owner>-...`; any other prefix for a
+        bot owner would make the reconcile loop attribute the order to the wrong
+        owner.  Orphan orders (owner `orphan`) keep whatever id the exchange
+        showed, so they are exempt.
+        """
+        prefix = f"cb-{owner}-"
+        if owner != "orphan" and not str(cid).startswith(prefix):
+            raise ValueError(f"client order id {cid!r} must start with {prefix!r}")
         now = time.time()
         self.conn().execute(
             "INSERT INTO orders(client_order_id,order_id,owner,source,product,side,"
@@ -270,9 +322,21 @@ class Store:
         )
 
     def update_order(self, cid: str, **fields: Any) -> None:
-        """Patch an order row; Decimals are stored as TEXT and updated_at is bumped."""
+        """Patch an order row; Decimals are stored as TEXT and updated_at is bumped.
+
+        This is the SINGLE writer of `filled_size`, `filled_value` and `fees`:
+        those columns mirror the exchange's order snapshot, so they are set to
+        absolute values here and are never incremented (`record_fill` writes only
+        the `fills` table).  Field names are checked against the real `orders`
+        columns, and `client_order_id` itself is not patchable; an unknown name
+        raises `ValueError` and writes nothing.
+        """
         if not fields:
             return
+        allowed = self.order_columns()
+        for name in fields:
+            if name == "client_order_id" or name not in allowed:
+                raise ValueError(f"cannot update order column: {name!r}")
         fields["updated_at"] = time.time()
         cols = ", ".join(f"{k}=?" for k in fields)
         vals = [str(v) if isinstance(v, Decimal) else v for v in fields.values()]
@@ -306,49 +370,46 @@ class Store:
         return [_order(r) for r in self.conn().execute(q, args)]
 
     # ------------------------------------------------ fills
-    def apply_fill(self, fill: dict, cid: str) -> bool:
-        """Book one exchange fill exactly once and roll it into its order's totals.
+    def record_fill(self, fill: dict, cid: str) -> bool:
+        """Book one exchange fill into `fills` exactly once.
 
-        Returns False (changing nothing) when the trade_id was already booked, and
-        raises KeyError when the client order id is unknown (nothing written).
+        Returns True when a row was inserted and False when the trade_id was
+        already booked (nothing written).  Raises `KeyError` for an unknown
+        client order id (nothing written).  The owner is copied from the order
+        row, so a fill keeps its owner even after that bot's row is gone.
+
+        This never writes `orders`: `filled_size` / `filled_value` / `fees` are
+        the exchange's snapshot and only `update_order` sets them, so a fill seen
+        by both the stream and the reconcile loop is counted once.
         """
-        size, price = D(fill["size"]), D(fill["price"])
-        commission = D(fill["commission"])
         now = time.time()
         with self.tx() as db:
             row = db.execute(
-                "SELECT * FROM orders WHERE client_order_id=?", (cid,)
+                "SELECT owner, product FROM orders WHERE client_order_id=?", (cid,)
             ).fetchone()
             if row is None:
                 raise KeyError(cid)
             cur = db.execute(
                 "INSERT OR IGNORE INTO fills(trade_id,order_id,client_order_id,owner,"
-                "side,size,price,commission,trade_time,recorded_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (
-                    fill["trade_id"],
-                    fill["order_id"],
-                    cid,
-                    row["owner"],
-                    fill["side"],
-                    str(size),
-                    str(price),
-                    str(commission),
-                    fill["trade_time"],
-                    now,
-                ),
+                "side,size,price,commission,trade_time,recorded_at,product,trade_type) "
+                "VALUES(:trade_id,:order_id,:cid,:owner,:side,:size,:price,"
+                ":commission,:trade_time,:recorded_at,:product,:trade_type)",
+                {
+                    "trade_id": fill["trade_id"],
+                    "order_id": fill["order_id"],
+                    "cid": cid,
+                    "owner": row["owner"],
+                    "side": fill["side"],
+                    "size": str(D(fill["size"])),
+                    "price": str(D(fill["price"])),
+                    "commission": str(D(fill["commission"])),
+                    "trade_time": fill["trade_time"],
+                    "recorded_at": now,
+                    "product": fill.get("product") or row["product"],
+                    "trade_type": fill.get("trade_type"),
+                },
             )
-            if cur.rowcount != 1:  # duplicate trade_id: leave the order untouched
-                return False
-            filled_size = D(row["filled_size"] or "0") + size
-            filled_value = D(row["filled_value"] or "0") + size * price
-            fees = D(row["fees"] or "0") + commission
-            db.execute(
-                "UPDATE orders SET filled_size=?, filled_value=?, fees=?, updated_at=? "
-                "WHERE client_order_id=?",
-                (str(filled_size), str(filled_value), str(fees), now, cid),
-            )
-        return True
+            return cur.rowcount == 1
 
     def has_fill(self, trade_id: str) -> bool:
         return (

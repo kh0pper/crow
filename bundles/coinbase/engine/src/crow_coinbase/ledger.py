@@ -46,27 +46,35 @@ EMPTY = Holding(D(0), D(0), D(0), D(0))
 class Ledger:
     """Reads a `Store`; holds no state of its own beyond the fee rate."""
 
-    def __init__(self, store: Store, fee_rate: Decimal = D("0")):
+    def __init__(self, store: Store, *, fee_rate: Decimal):
         self.store = store
         self.fee_rate = D(fee_rate)
 
     # ------------------------------------------------ per (owner, product) totals
-    def _holdings(self) -> dict[tuple[str, str], Holding]:
-        """Every (owner, product) pair: bot capital first, then every order row."""
+    def _holdings(
+        self, owner: Optional[str] = None
+    ) -> dict[tuple[str, str], Holding]:
+        """(owner, product) pairs — all of them, or just *owner*'s — with capital."""
         acc: dict[tuple[str, str], list[Decimal]] = {}
 
-        def slot(owner: str, product: str) -> list[Decimal]:
-            return acc.setdefault((owner, product), [D(0), D(0), D(0), D(0)])
+        def slot(own: str, product: str) -> list[Decimal]:
+            return acc.setdefault((own, product), [D(0), D(0), D(0), D(0)])
 
         # A bot's capital is counted once, on its own product, even when it has
-        # orders in other products.
-        for bot in self.store.list_bots():
+        # orders in other products.  Filtered in SQL: only the owner's own rows
+        # (bots and orders) are read when an owner is given.
+        if owner is None:
+            bots = self.store.list_bots()
+        else:
+            bot = self.store.get_bot(owner)
+            bots = [bot] if bot is not None else []
+        for bot in bots:
             row = slot(bot["id"], bot["product"])
             row[0] += bot["capital_quote"]
             row[1] += bot["capital_base"]
 
         # Owners with no bot row (orphan, ai, a removed bot) start from zero.
-        for o in self.store.orders():
+        for o in self.store.orders(owner=owner):
             row = slot(o["owner"], o["product"])
             filled_size, filled_value, fees = (
                 o["filled_size"],
@@ -101,7 +109,7 @@ class Ledger:
     def holding(self, owner: str, product: Optional[str] = None) -> Holding:
         """The owner's holdings on *product* (default: its bot's own product)."""
         prod = self._product_for(owner, product)
-        return self._holdings().get((owner, prod), EMPTY)
+        return self._holdings(owner).get((owner, prod), EMPTY)
 
     def equity(
         self,
