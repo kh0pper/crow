@@ -3111,6 +3111,202 @@ export function setMdBrScanGuardEnabled(enabled) {
  */
 export const mdBrScanStats = { flattened: 0, brFlattened: 0, charged: 0 };
 
+// ---------------------------------------------------------------------------
+// THE PUNCTUATION MASK PASS — a FIFTH cost in the same inline lexer, on a
+// run of BACKSLASH-ESCAPED PUNCTUATION.
+//
+// Before its main loop, marked's Lexer#inlineTokens masks every
+// `\`+punctuation pair out of a COPY of the whole block, because
+// `\*`/`\_`/`\\` must not be read as emphasis delimiters:
+//
+//   const n = src;
+//   while ((r = rules.inline.anyPunctuation.exec(n)) !== null)
+//     n = n.slice(0, r.index) + "++" + n.slice(anyPunctuation.lastIndex);
+//
+// (`anyPunctuation` is `/\\([\p{P}\p{S}])/gu`.) One masked-string REBUILD per
+// matching pair, i.e. one copy of the block per pair: the block's own length
+// times its pair count. Below ~64 KB V8 hands the slices back as views and the
+// copy is cheap (~1.5 µs per pair, which is why the bot path's 64 KB cap never
+// showed it); from 128 KB up each rebuild really copies the block (~32 µs per
+// pair, flat — 0.25 ns per byte). Measured on this tree (CPU ms of one whole
+// renderMarkdown, owner path at the 128 KB head, bot path at its 64 KB cap):
+//
+//   a block of                    128 KB owner   64 KB bot
+//   `\\` (a run of backslashes)        2,148           66
+//   `\.` `\-` `\!` `\$` `\,`     2,151–2,246        ~66
+//   `\|` `\^` `\%`              (same family)          —
+//   `\\*`                                  3            1   (`*` is a delimiter,
+//     so the delimiter cap already flattened that block)
+//   `\ ` `\\\n` `a\\`                   21–94        13–38
+//     (NO pair — `\`+space, `\`+newline and `\`+letter are no escape, so
+//      nothing matches and there is nothing to charge)
+//
+// …with the mask pass isolated: 128 KB of `\\` = 2,113 ms masked, 3 ms with
+// the mask pass neutered, and the cost per pair flat at 32–33 µs at every
+// density from 1 pair per 100 characters to every character. No other budget
+// sees any of it: a backslash is no delimiter, no protocol word, no `@` and no
+// line break, and `\.`-style pairs (`\.`, `\!`, `\,` — LaTeX and escaped-prose
+// shapes) are unbudgeted while `\*`/`\_` only survive because their delimiter
+// happens to be counted. At the owner cap that is 2.1 s of blocked event loop on
+// a PUBLIC page, so it is charged like the other four.
+//
+// ONE PRICE PER PAIR WAS NOT ENOUGH: marked does not run that pass once per
+// paragraph. inlineTokens RECURSES for the inner text of every emphasis,
+// strong and strikethrough level it opens, and each of those calls runs the
+// mask pass again on its own slice — which is the whole block minus a few
+// characters, for every level. So the real cost is pairs × length × the number
+// of levels a block's delimiters buy, and a block whose body sits just UNDER
+// both the per-block cap and the document budget was admitted and then copied
+// once per level. `"*a " × depth + body + " a*" × depth` with a `\.`+18-letters
+// body (one pair per 20 characters) is 131 KB with 100 delimiters at depth 50:
+// the body alone is 8.6e8 characters copied, under MD_PUNCT_MASK_MAX and 0.85
+// of the document budget, so it used to be lexed — 1,043 ms on the owner path
+// (depth 200: 2–4.4 s, depth 300: 2.8 s; the 64 KB bot cap at depth 200:
+// 1,163 ms). A `> ` blockquote of `***…x body x***…` with 200–500 `*` is the
+// same bypass against one blockquote paragraph: 2,031 ms owner, 1,349 ms bot.
+// Same on main. The charge is therefore multiplied by (1 + d), d being the
+// delimiter count this pre-pass already computes for its d² charge — real
+// prose has d of 0–10, so ordinary content pays 1–11x a number that is itself
+// orders of magnitude below the cap, while an escape flood wrapped in a hundred
+// delimiters is priced at the copies marked really makes and flattened.
+//
+// A block holding ANY non-Latin-1 character is charged 4x more on top: marked's
+// rebuilds are UTF-16 slices, and a `\€` flood measured ~10x slower per
+// character than `\.` — the copy, not the match, dominates. 4x is the
+// conservative side of that calibration: it prices the family without
+// flattening a non-ASCII escape in ordinary prose (a 128 KB prose block costs
+// a few dozen attempts of the 4e6 budget before the weight).
+//
+// The estimate is exact in shape — pairs × block length, which is what marked
+// copies, times those two weights — and computed in ONE linear pass (an
+// `indexOf` walk over the block's backslashes, an ASCII range test for the
+// character after each one, plus one `\u00ff` test for a block that has a pair
+// at all; the Unicode fallback only runs outside ASCII). A block over
+// MD_PUNCT_MASK_MAX, or one the document budget cannot pay for, is flattened to
+// escaped text exactly like the others — its backslashes stay on screen, inert.
+//
+// Ordinary content is nowhere near it: the escape-sparse markdown in this
+// repository tops out at 355,608 (a 19.7 KB document with ~6 pairs), and the
+// pinned backslash documents in tests/md-backslash-flood.test.js (Windows
+// paths, escaped markdown, LaTeX-ish math, regexes in code spans) cost
+// 3,834–5,945,520 unweighted for 0.6–14 KB documents, and the densest of them
+// charges 5,150 of the 4e6 budget attempts with both weights (0.13%) — real
+// prose has d of 0–10 and no non-Latin-1 weight, so the multiplier cannot move
+// it anywhere near the cap. (The block a document is split into matters: the
+// cap is per INLINE BLOCK, so a 128 KB chunk of escaped prose is priced at its
+// own length.)
+// ---------------------------------------------------------------------------
+
+/** `[\p{P}\p{S}]` — the Unicode category class marked's mask regex accepts
+ *  after a backslash, i.e. the characters a markdown escape can hide. Only
+ *  consulted outside ASCII: the ASCII members are exactly the ranges
+ *  isPunctOrSymbolAt tests. */
+const PUNCT_OR_SYMBOL = /[\p{P}\p{S}]/u;
+
+/** True for any character outside Latin-1. A block holding one is charged more
+ *  by punctMaskCost: marked's masked-string rebuilds are UTF-16 slices, so a
+ *  copy of `\€` moves twice the bytes of a copy of `\.`. */
+const NON_LATIN1 = /[^\u0000-\u00ff]/;
+
+/** True when `s[i]` is punctuation or a symbol, i.e. a character
+ *  `/\\([\p{P}\p{S}])/gu` accepts after a backslash (see PUNCT_OR_SYMBOL).
+ *  The ASCII fast path is the same class spelled as four ranges — `!"#$%&'()*+,-./`,
+ *  `:;<=>?@`, `[\\]^_` and `{|}~` — which is every printable ASCII character
+ *  that is neither a letter, a digit nor a space. */
+function isPunctOrSymbolAt(s, i) {
+  const c = s.charCodeAt(i);
+  if (c < 0x80) {
+    return (c >= 0x21 && c <= 0x2f) || (c >= 0x3a && c <= 0x40)
+      || (c >= 0x5b && c <= 0x60) || (c >= 0x7b && c <= 0x7e);
+  }
+  const cp = s.codePointAt(i);
+  return PUNCT_OR_SYMBOL.test(cp > 0xffff ? s.slice(i, i + 2) : s[i]);
+}
+
+/**
+ * What marked's punctuation MASK PASS will copy in `s` (see "THE PUNCTUATION
+ * MASK PASS" above), weighted the way marked really spends it:
+ * `pairs × s.length × (1 + delims) × (non-Latin-1 ? 4 : 1)`.
+ *
+ * `pairs` is counted the way the regex counts them — non-overlapping, left to
+ * right, a backslash followed by a punctuation or symbol character — so a run of
+ * four backslashes is two pairs and a run of three is one, exactly the two
+ * rebuilds marked makes. One pass (`indexOf` per backslash), so it is linear in
+ * the block whatever its shape, and 0 for a block with no backslash at all —
+ * which is every ordinary document.
+ *
+ * `delims` is the block's delimiter count (countDelims, the same `d` the d²
+ * charge uses): marked RE-RUNS this pass for the inner text of every emphasis,
+ * strong and strikethrough level it opens, so a block's pair count is paid once
+ * per level its delimiters can nest — hence the (1 + d) multiplier, which is 1
+ * for prose with no delimiter and 11 for the busiest ordinary paragraph. A
+ * block with non-Latin-1 text costs 4x more per copy (UTF-16 slices; a `\€`
+ * flood measured ~10x per character, so 4x is the conservative side — see the
+ * calibration note in the header above).
+ * @param {string} s one inline block's source
+ * @param {number} delims the block's delimiter count (countDelims)
+ * @returns {number} characters marked's mask pass would copy in it, weighted
+ */
+function punctMaskCost(s, delims) {
+  const n = s.length;
+  let pairs = 0;
+  for (let i = s.indexOf("\\"); i !== -1 && i + 1 < n;) {
+    if (isPunctOrSymbolAt(s, i + 1)) {
+      pairs++;
+      i = s.indexOf("\\", i + 2);
+    } else {
+      i = s.indexOf("\\", i + 1);
+    }
+  }
+  if (pairs === 0) return 0;
+  return pairs * n * (1 + delims) * (NON_LATIN1.test(s) ? 4 : 1);
+}
+
+/** The most the punctuation mask pass may copy for ONE inline block before that
+ *  block is flattened instead of inline-lexed (see punctMaskCost). 1e9 WEIGHTED
+ *  characters is ~245 ms at the measured 0.25 ns per copied byte — in line with
+ *  the ~200 ms worst chunk the other guards leave — and it is reached only by a
+ *  block that is ~6% `\`+punctuation pairs (7,630 of them in a full 128 KB
+ *  block): the pathological shapes above are 2.1e9 (64 KB) to 8.6e9 (128 KB),
+ *  2–9x over, while the densest legitimate document measured here is at 5.9e6,
+ *  170x under. The weight is 1 for a Latin-1 block with no delimiter and only
+ *  ever RAISES a cost, so this cap can only bite earlier than the raw pair count
+ *  would — on a block that also nests delimiters (1 + d) or holds non-Latin-1
+ *  text (4x), i.e. on exactly the shapes the weight is for.
+ *  Exported so the tests can pin the bound they exercise. */
+export const MD_PUNCT_MASK_MAX = 1_000_000_000;
+
+/** What one "attempt" of the document budget is worth in mask-pass bytes: one
+ *  block AT MD_PUNCT_MASK_MAX costs the whole BOT_MD_SQ_BUDGET, so the per-block
+ *  cap and the per-document pool agree about what one expensive block is (an
+ *  attempt is ~12.5 ns of d² work, a copied byte ~0.25 ns, and 250 rounds that
+ *  51x ratio up to keep the charge on the conservative side). */
+const PUNCT_MASK_BYTES_PER_ATTEMPT = 250;
+
+/** The mask guard's switch: false renders with no mask charge and no per-block
+ *  cap, which is what the differential test compares against
+ *  (tests/md-backslash-flood.test.js). */
+let mdPunctMaskGuard = true;
+
+/** @param {boolean} enabled false renders with no punctuation-mask charge or cap */
+export function setMdPunctMaskGuardEnabled(enabled) {
+  mdPunctMaskGuard = enabled !== false;
+}
+
+/**
+ * What the punctuation-mask guard did in the LAST guarded parse: how many inline
+ * blocks were flattened (`flattened`, for any reason — a delimiter flood as much
+ * as a mask flood) and how many of those the mask charge or cap decided
+ * (`maskFlattened`), plus the cost the parse charged (`charged`, in budget
+ * attempts).
+ *
+ * Reset at the start of every guardAndParse call. Read by
+ * tests/md-backslash-flood.test.js, which can only claim a document rendered
+ * byte-identically to the unguarded renderer after establishing that the guard
+ * left it alone: `flattened === 0`.
+ */
+export const mdPunctMaskStats = { flattened: 0, maskFlattened: 0, charged: 0 };
+
 /** The budgets of the linear pre-pass above, plus the link-definition cap that
  *  removes the inline lexer's other per-block scan. Shared by BOTH rendered
  *  paths (bot and owner) because they bound the same inline lexer, and per
@@ -3125,9 +3321,12 @@ export const BOT_MD_BLOCK_DELIMS = 1024;
  *  (~2.4 ns each at 1 MiB) and emailRunScan for the `@` runs (Σrun² + run ×
  *  domain per `@`), the same quadratic reached without a protocol word — PLUS
  *  the characters marked's inline `br` lookahead would scan (brScanCost, ~1.5 ns
- *  each). All four are paid from this one pool, so a document cannot spend 4e6
+ *  each) PLUS the characters its punctuation mask pass would copy
+ *  (punctMaskCost, ~0.25 ns each, at PUNCT_MASK_BYTES_PER_ATTEMPT bytes to the
+ *  attempt). All five are paid from this one pool, so a document cannot spend 4e6
  *  on delimiters and another 4e6 on scans: the worst case is 4e6 attempts of any
- *  kind, ~50 ms of d², ~10 ms of url scan or ~6 ms of br scan. Real prose stays
+ *  kind, ~50 ms of d², ~10 ms of url scan, ~6 ms of br scan or ~250 ms of mask
+ *  copies. Real prose stays
  *  orders of magnitude below it (a 1 MiB post quoting `HTTP` a hundred times
  *  costs ~1e3; forty links cost ~1e3; the contacts document below costs ~2e4; a
  *  128 KB prose chunk's br scan is ~6e3; the 24 KB pinned post in
@@ -3286,6 +3485,9 @@ function guardAndParse(src, instance, seedLinks = null, depthState = null) {
   mdBrScanStats.flattened = 0;
   mdBrScanStats.brFlattened = 0;
   mdBrScanStats.charged = 0;
+  mdPunctMaskStats.flattened = 0;
+  mdPunctMaskStats.maskFlattened = 0;
+  mdPunctMaskStats.charged = 0;
   mdOwnerTextWindowStats.cuts = 0;
   // The cut memo needs no reset here: there is one per INLINE FRAME, and a
   // frame is pushed and popped around every inlineTokens call by boundedLexer
@@ -3310,11 +3512,15 @@ function guardAndParse(src, instance, seedLinks = null, depthState = null) {
     // reached with no protocol word, that urlScanCost cannot see; see "A THIRD
     // quadratic" above), and the characters marked's inline `br` rule would scan
     // in it (brScanCost — the FOURTH quadratic in the same lexer, on a paragraph
-    // of Unicode-whitespace lines; see "A FOURTH QUADRATIC" above). A block is
+    // of Unicode-whitespace lines; see "A FOURTH QUADRATIC" above). A FIFTH,
+    // the copy the punctuation mask pass makes per `\`+punctuation pair, is
+    // charged on top (punctMaskCost, ~0.25 ns per character; see "THE
+    // PUNCTUATION MASK PASS" above). A block is
     // flattened when its delimiter count is over the per-block cap, when its br
-    // scan is over MD_BR_SCAN_MAX, or when what is left of the document budget
-    // cannot pay for all four costs — which also covers one block whose url,
-    // email-run or br scan alone would exceed the whole budget. emailRunScan's
+    // scan is over MD_BR_SCAN_MAX, when its mask cost is over
+    // MD_PUNCT_MASK_MAX, or when what is left of the document budget
+    // cannot pay for all five costs — which also covers one block whose url,
+    // email-run, br or mask cost alone would exceed the whole budget. emailRunScan's
     // per-run caps are an EXTRA trigger alongside them: they only flatten, never
     // admit, and they keep the cost arithmetic small.
     const scan = urlScanCost(entry.src);
@@ -3323,10 +3529,21 @@ function guardAndParse(src, instance, seedLinks = null, depthState = null) {
     // whether the br charge is what decided a block (see mdBrScanStats).
     const before = d * d + scan + email.cost;
     const br = mdBrScanGuard ? brScanCost(entry.src) : 0;
-    const cost = before + br;
+    // …and the punctuation mask pass (see "THE PUNCTUATION MASK PASS" above),
+    // charged in attempts: characters marked would copy masking this block —
+    // times (1 + d), since marked re-runs that pass on the inner text of every
+    // emphasis/strong level, and 4x for non-Latin-1 text — at
+    // PUNCT_MASK_BYTES_PER_ATTEMPT bytes per attempt, so a block at the
+    // per-block cap is worth exactly one document budget.
+    const mask = mdPunctMaskGuard ? punctMaskCost(entry.src, d) : 0;
+    const maskCharge = mask > 0 ? Math.ceil(mask / PUNCT_MASK_BYTES_PER_ATTEMPT) : 0;
+    const cost = before + br + maskCharge;
     if (mdBrScanGuard) mdBrScanStats.charged += br;
+    if (mdPunctMaskGuard) mdPunctMaskStats.charged += maskCharge;
     const brOverCap = br > MD_BR_SCAN_MAX;
-    if (d <= BOT_MD_BLOCK_DELIMS && cost <= budget && !email.flatten && !brOverCap) {
+    const maskOverCap = mask > MD_PUNCT_MASK_MAX;
+    if (d <= BOT_MD_BLOCK_DELIMS && cost <= budget && !email.flatten && !brOverCap
+      && !maskOverCap) {
       budget -= cost;
       continue;
     }
@@ -3334,7 +3551,13 @@ function guardAndParse(src, instance, seedLinks = null, depthState = null) {
     // decided it (see mdBrScanStats.brFlattened).
     const brDecided = brOverCap || (br > 0 && before <= budget && d <= BOT_MD_BLOCK_DELIMS && !email.flatten);
     if (mdBrScanGuard && brDecided) mdBrScanStats.brFlattened++;
+    // The same question for the mask charge, which sits on top of everything
+    // charged before it.
+    const maskDecided = maskOverCap || (mask > 0 && before + br <= budget
+      && d <= BOT_MD_BLOCK_DELIMS && !email.flatten && !brOverCap);
+    if (mdPunctMaskGuard && maskDecided) mdPunctMaskStats.maskFlattened++;
     mdBrScanStats.flattened++;
+    mdPunctMaskStats.flattened++;
     entry.guarded = true;
     for (const token of plainTextTokens(entry.src)) entry.tokens.push(token);
   }
