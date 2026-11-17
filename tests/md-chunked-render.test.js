@@ -15,13 +15,19 @@
 //     link resolves — even though every `[label]: url` definition sits at the
 //     TOP of the document, in the FIRST chunk, and is used from every later one
 //     (marked resolves references against the one lexer's map, so those
-//     definitions are collected document-wide first);
+//     definitions are collected document-wide first). "Fully formatted" is a
+//     property of the CHUNKER, so that assertion runs with the total-time budget
+//     raised out of the way (setOwnerRenderBudgetMs); the SAME document is then
+//     rendered again with the DEFAULT budget to check what the budget promises:
+//     it finishes inside its time bound, and whatever it did not reach is the
+//     WHOLE remainder — the notice, then the rest of the document from a chunk
+//     boundary, nothing dropped;
 //   - the chunk boundaries cover the document EXACTLY: for 30 random documents
 //     of 200 KB-2 MB, joining the chunk sources reproduces the input character
 //     for character (nothing dropped, nothing added, nothing rewritten);
 //   - the TOTAL-TIME BUDGET works: a 1 MiB document of the pathological shapes
-//     (table lines, code/quote, a `1) ` marker run, `_a`) renders in well under
-//     3 s of CPU, and a document big enough to spend
+//     (table lines, code/quote, a `1) ` marker run, `_a`) renders in under 5 s
+//     of CPU, and a document big enough to spend
 //     OWNER_MD_RENDER_BUDGET_MS on any box (8 MiB of the most expensive shape
 //     measured) falls back to the plain-text tail — the notice, then the WHOLE
 //     remainder, starting exactly at a chunk boundary and readable back
@@ -51,6 +57,7 @@ import express from "express";
 import {
   renderMarkdown, ownerMarkdownChunks,
   OWNER_MD_MAX_INPUT, OWNER_MD_MAX_TOTAL_INPUT, OWNER_MD_RENDER_BUDGET_MS,
+  setOwnerRenderBudgetMs,
 } from "../servers/blog/renderer.js";
 
 const rep = (u, n) => u.repeat(Math.ceil(n / u.length)).slice(0, n);
@@ -92,6 +99,31 @@ function isRemainderAtChunkBoundary(src, tail) {
 }
 
 // --- the realistic document ------------------------------------------------
+/** The budget the CHUNKER assertions run under: high enough that no runner's
+ *  speed can turn "the whole document is formatted" into a tail. */
+const FULL_RENDER_BUDGET_MS = 60_000;
+/** A sanity bound on those unbudgeted renders too — a chunking regression that
+ *  reverted to one giant parse would be seconds, and this catches it without
+ *  being a speed test. Measured on the dev box (worst of three runs, budget
+ *  raised): 605 ms at 600 KB and 489 ms at 1 MiB against the 5,000 ms bound —
+ *  and the pre-chunking quadratic was 11-200 s, so the bound sits far below the
+ *  cliff it guards. */
+const FULL_RENDER_BOUND_MS = 5000;
+
+/** renderMarkdown with the total-time budget raised out of the way, for the
+ *  "the whole document is formatted / the last line is on the page" assertions
+ *  — a property of the chunker, not of the runner's speed. The budget is
+ *  restored before returning, so no other test sees it (and the budget's own
+ *  promise is checked separately, with the DEFAULT budget). */
+function renderFully(src) {
+  const restore = setOwnerRenderBudgetMs(FULL_RENDER_BUDGET_MS);
+  try {
+    return renderMarkdown(src);
+  } finally {
+    restore();
+  }
+}
+
 // A document shaped like the owner's lab notes: a title, an index, ONE block of
 // link reference definitions at the very top, then dozens of sections of prose,
 // lists, a table and fenced code — every section linking back through a
@@ -163,12 +195,31 @@ for (const size of [600 * 1024, 1024 * 1024]) {
     const usages = refUseCount(src);
     assert.ok(usages > 300, `the fixture uses many reference links (${usages})`);
 
-    const t0 = cpuMs();
-    const html = renderMarkdown(src);
-    const ms = cpuMs() - t0;
-    t.diagnostic(`${(src.length / 1024).toFixed(0)} KB realistic document: ${ms.toFixed(0)} ms CPU, `
+    // (1) THE CHUNKER, with the total-time budget out of the way. "The whole
+    // document is formatted" is a property of the split — every chunk rendered,
+    // in order, each seeing the whole document's definitions — and it must not
+    // depend on how fast the box is: this document spends the default 1 s CPU
+    // budget on a runner ~3x slower than the dev box, and a budgeted render that
+    // stopped early would fail an assertion about CHUNKING for a reason that has
+    // nothing to do with it. The budget's own promise is checked in (2).
+    assert.equal(OWNER_MD_RENDER_BUDGET_MS, 1000, "the render budget is the default before (1)");
+    const restore = setOwnerRenderBudgetMs(FULL_RENDER_BUDGET_MS);
+    let html;
+    let ms;
+    try {
+      const t0 = cpuMs();
+      html = renderMarkdown(src);
+      ms = cpuMs() - t0;
+    } finally {
+      restore();
+    }
+    assert.equal(OWNER_MD_RENDER_BUDGET_MS, 1000, "and the default again after (1)");
+    t.diagnostic(`${(src.length / 1024).toFixed(0)} KB realistic document, budget raised to `
+      + `${FULL_RENDER_BUDGET_MS} ms: ${ms.toFixed(0)} ms CPU, `
       + `${chunks.length} chunks, ${usages} reference links, ${html.length} chars of HTML`);
-    assert.ok(ms < 3000, `a realistic ${size / 1024} KB document took ${ms.toFixed(0)} ms (bound 3000 ms)`);
+    assert.ok(ms < FULL_RENDER_BOUND_MS,
+      `a realistic ${size / 1024} KB document took ${ms.toFixed(0)} ms with the budget raised `
+      + `(bound ${FULL_RENDER_BOUND_MS} ms)`);
 
     // Nothing was left as plain text: no notice, no tail <pre>.
     assert.ok(!html.includes("md-tail"), "the whole document is formatted: " + html.slice(-300));
@@ -188,6 +239,31 @@ for (const size of [600 * 1024, 1024 * 1024]) {
     assert.match(html, /<pre><code class="language-js">/, "fenced code is a code block");
     assert.match(html, /<li>first bullet with a <code>code span<\/code><\/li>/, "lists are lists");
     assert.match(html, /END-OF-THE-FIELD-NOTES/, "the LAST line is on the page");
+
+    // (2) THE BUDGET's own promise, on the SAME document with the DEFAULT budget:
+    // the render finishes inside its time bound, and if the budget ran out, what
+    // follows the notice is the WHOLE remainder — starting exactly at a chunk
+    // boundary, readable back character for character. Nothing is ever dropped.
+    // Whether it runs out is a property of the box (measured 0.3 s here for
+    // 600 KB, ~1 s on a slow CI runner), which is exactly why (1) does not
+    // depend on it: both outcomes are a pass here, and a BUG (a tail that is not
+    // the remainder, or a render that never stops) fails either way.
+    const tb = cpuMs();
+    const budgeted = renderMarkdown(src);
+    const budgetedMs = cpuMs() - tb;
+    const usedBudget = budgeted.includes(TAIL_NOTICE);
+    t.diagnostic(`${(src.length / 1024).toFixed(0)} KB realistic document, default `
+      + `${OWNER_MD_RENDER_BUDGET_MS} ms budget: ${budgetedMs.toFixed(0)} ms CPU, `
+      + (usedBudget ? "the budget ran out (the tail is the whole remainder)" : "the whole document rendered"));
+    assert.ok(budgetedMs < 3000,
+      `a budgeted ${size / 1024} KB render took ${budgetedMs.toFixed(0)} ms (bound 3000 ms)`);
+    if (usedBudget) {
+      const { text } = tailOf(budgeted);
+      assert.ok(src.endsWith(text), "the tail is the end of the document");
+      assert.ok(isRemainderAtChunkBoundary(src, text),
+        "the tail starts exactly at a chunk boundary (nothing between the HTML and the tail was dropped)");
+      assert.ok(text.length > 0, `the tail is a real remainder (${text.length} chars)`);
+    }
   });
 }
 
@@ -281,7 +357,7 @@ const PATHOLOGICAL = {
   '"_a" delimiters': () => rep("_a", 1024 * 1024),
 };
 
-test("budget: 1 MiB of every pathological shape renders in < 3 s CPU and drops nothing", (t) => {
+test("budget: 1 MiB of every pathological shape renders in < 5 s CPU and drops nothing", (t) => {
   for (const [name, make] of Object.entries(PATHOLOGICAL)) {
     const src = make();
     assert.equal(src.length, 1024 * 1024, `${name}: fixture size`);
@@ -290,7 +366,12 @@ test("budget: 1 MiB of every pathological shape renders in < 3 s CPU and drops n
     const ms = cpuMs() - t0;
     t.diagnostic(`1 MiB of ${name}: ${ms.toFixed(0)} ms CPU, ${html.length} chars of HTML`);
     assert.ok(html.length > 0, `${name}: still rendered`);
-    assert.ok(ms < 3000, `1 MiB of ${name} took ${ms.toFixed(0)} ms CPU (bound 3000 ms)`);
+    // A 1 MiB chunked render costs the 1 s budget plus at most one bounded
+    // chunk, whatever the box: measured here 26-1,003 ms for the four shapes
+    // (table lines are the worst, at the budget). The bound is 5 s — 5x the
+    // worst measured value, and so a CI runner ~3.5x slower than this box stays
+    // inside it — and the cliffs it guards are 4-27 s.
+    assert.ok(ms < 5000, `1 MiB of ${name} took ${ms.toFixed(0)} ms CPU (bound 5000 ms)`);
 
     // Nothing dropped. Either the whole document is formatted (no notice), or
     // the notice is followed by the WHOLE remainder — starting exactly at a
@@ -326,7 +407,16 @@ test("budget: a pathological 8 MiB document shows the notice and keeps the WHOLE
   const html = renderMarkdown(src);
   const ms = cpuMs() - t0;
   t.diagnostic(`8 MiB of one-cell tables: ${ms.toFixed(0)} ms CPU, ${html.length} chars of HTML`);
-  assert.ok(ms < 3000, `the budgeted render took ${ms.toFixed(0)} ms CPU (bound 3000 ms)`);
+  // Budget + one chunk, so the same 5 s bound the 1 MiB chunked renders get is
+  // not enough here: this fixture is 8 MiB, and the CHUNK after the budget is
+  // the most expensive one measured (~250 ms per 128 KB of one-cell tables, so
+  // ~550 ms of it on the dev box). Measured 1,418-1,544 ms across three runs,
+  // and the unbudgeted work would be ~16 s — the bound is 5x the worst measured
+  // value (8,000 ms) and stays well under the ~16 s cliff a lost budget would
+  // cost, though it is above a third of it (see the note on the audit: for a
+  // BUDGETED render the measured cost includes the fixed 1 s budget, which does
+  // not scale with the runner, so 5x measured over-provisions by design).
+  assert.ok(ms < 8000, `the budgeted render took ${ms.toFixed(0)} ms CPU (bound 8000 ms)`);
 
   const { head, text } = tailOf(html);
   // The formatted part is real HTML (tables, wrapped for scroll by the owner
@@ -381,7 +471,7 @@ test("cross-chunk references: the document's FIRST definition wins, and one in a
   ].join("\n");
   assert.ok(src.length > 200 * 1024, `over the chunk size (${src.length})`);
   assert.ok(ownerMarkdownChunks(src).length >= 2, "the document spans several chunks");
-  const html = renderMarkdown(src);
+  const html = renderFully(src);
   assert.match(html, /<a href="\/blog\/first" title="First definition"[^>]*>one<\/a>/, html.slice(-400));
   assert.ok(!html.includes('href="/blog/second"'), "the later duplicate never wins");
   assert.ok(html.includes("[two][fenced]"),
@@ -406,7 +496,7 @@ test('definitions labelled like Object properties ("constructor", "__proto__") r
     "Links: [one][constructor] and [two][__proto__].",
   ].join("\n");
   assert.ok(src.length > OWNER_MD_MAX_INPUT, `the uses land in a later chunk than the definitions (${src.length})`);
-  const html = renderMarkdown(src);
+  const html = renderFully(src);
   assert.match(html, /<a href="\/blog\/ctor"[^>]*>one<\/a>/, "constructor resolves: " + html.slice(-300));
   assert.match(html, /<a href="\/blog\/proto"[^>]*>two<\/a>/, "__proto__ resolves: " + html.slice(-300));
 });
@@ -442,7 +532,14 @@ test("a multi-megabyte line that looks like a link definition renders, and quick
     const ms = cpuMs() - t0;
     t.diagnostic(`${name}: ${(src.length / 1048576).toFixed(1)} MB in ${ms.toFixed(0)} ms CPU`);
     assert.ok(html.length > 0, `${name}: and the page is not empty`);
-    assert.ok(ms < 2000, `${name}: quick (${ms.toFixed(0)} ms CPU, bound 2000 ms)`);
+    // Measured on the dev box (worst of three runs): 137 ms for the unclosed `[`
+    // label and 1,404 ms for the unclosed def title (marked's def tokenizer
+    // walks that line until the stack gives out, which is what the guard
+    // prevents from THROWING — the cliff here is a RangeError, not a duration).
+    // The bound is 7,500 ms: 5x the slower shape's measured cost, so a runner
+    // ~3.5x slower than this box (CI measured ~3.5x on this suite's work) stays
+    // inside it, and nothing about the guard's contract is a time here.
+    assert.ok(ms < 7500, `${name}: quick (${ms.toFixed(0)} ms CPU, bound 7500 ms)`);
   }
 });
 
@@ -459,7 +556,7 @@ test("the last block of a document with no trailing newline is not cut off", (t)
   const setext = head + "```text\n" + code + "```\nHeading\n=======";
   assert.ok(setext.length > OWNER_MD_MAX_INPUT, `the fixture reaches the chunked path (${setext.length})`);
   assert.equal(setext.at(-1), "=", "and it does NOT end with a newline");
-  const setextHtml = renderMarkdown(setext);
+  const setextHtml = renderFully(setext);
   t.diagnostic(`setext tail: ${setextHtml.slice(-160)}`);
   assert.match(setextHtml, /<h1>Heading<\/h1>/, "the setext heading is a heading, not two paragraphs");
   assert.ok(!setextHtml.includes("======="), "and its underline is not shown as text");
@@ -475,7 +572,7 @@ test("the last block of a document with no trailing newline is not cut off", (t)
   // final row as a row of the table.
   assert.match(renderMarkdown("| k | v |\n| - | - |\n| a | b |\n| last | LAST-CELL |"),
     /<td>LAST-CELL<\/td>/, "the reference parse keeps the last row");
-  const tableHtml = renderMarkdown(table);
+  const tableHtml = renderFully(table);
   t.diagnostic(`table tail: ${tableHtml.slice(-200)}`);
   assert.match(tableHtml, /<td>LAST-CELL<\/td>/, "the last row is still a row of the table");
   assert.equal((tableHtml.match(/<tr>/g) || []).length, rowCount + 2, "header + every row, none torn off");
@@ -498,7 +595,7 @@ test("a raw-HTML block straddling the chunk point is never cut open", (t) => {
     const hidden = rep(`${marker} hidden line\n\n`, 40_000);
     const src = head + open + hidden + close + "\nAFTER-THE-BLOCK\n";
     assert.ok(src.length > OWNER_MD_MAX_INPUT, `${name}: reaches the chunked path (${src.length})`);
-    const html = renderMarkdown(src);
+    const html = renderFully(src);
     t.diagnostic(`${name}: ${(html.length / 1024).toFixed(0)} KB of HTML, `
       + (html.includes(marker) ? "hidden text LEAKED" : "no leak"));
     assert.ok(!html.includes(marker), `${name}: its hidden text never reaches the page`);
@@ -534,10 +631,23 @@ after(() => { srv?.close(); rmSync(root, { recursive: true, force: true }); });
 
 test("fileview: a 600 KB .md renders FULLY formatted through the route", async (t) => {
   assert.ok(midDoc.length >= 600 * 1024, `the fixture is a long document (${midDoc.length})`);
-  const t0 = cpuMs();
-  const r = await fetch(base + "/dashboard/fileview?path=" + encodeURIComponent(midMd),
-    { headers: { cookie: "crow_session=good" } });
-  const ms = cpuMs() - t0;
+  // The route renders in THIS process, so the same seam applies: "the whole FILE
+  // is formatted" is a property of the chunked render, not of how fast the box
+  // is, and the route must not answer a plain-text tail for a 600 KB document
+  // (measured 279 ms with the default budget here — a slow runner is what turns
+  // that into a tail). The budget's own promise is checked above.
+  const restore = setOwnerRenderBudgetMs(FULL_RENDER_BUDGET_MS);
+  let r;
+  let ms;
+  try {
+    const t0 = cpuMs();
+    r = await fetch(base + "/dashboard/fileview?path=" + encodeURIComponent(midMd),
+      { headers: { cookie: "crow_session=good" } });
+    ms = cpuMs() - t0;
+  } finally {
+    restore();
+  }
+  assert.equal(OWNER_MD_RENDER_BUDGET_MS, 1000, "the render budget is the default again");
   t.diagnostic(`fileview on a ${midDoc.length}-char file: ${ms.toFixed(0)} ms CPU (incl. the request)`);
   assert.equal(r.status, 200);
   const html = await r.text();

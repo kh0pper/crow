@@ -184,13 +184,16 @@ test("a 199 KB pathological note answers the escaped <pre> as truncated in under
   // Exact: the escaped text of the note, in the fallback <pre>, and nothing else
   // (the note holds no HTML-special characters, so escaping is the identity).
   assert.equal(body.html, ANCHOR + md + "</pre>");
-  // Measured 36 ms on the review box (was ~21 s through renderMarkdown).
+  // Measured 1.9-2.4 ms of wall-clock (worst of three runs — the over-budget
+  // note never reaches marked, the route answers its escaped <pre>), against the
+  // 1,000 ms budget; it was ~21 s through renderMarkdown.
   assert.ok(ms < 1000, `199 KB pathological note answered in ${ms.toFixed(0)} ms (budget 1000)`);
 });
 
 // The budget is about TIME. Each of these bodies is quadratic in marked at 64 KB
 // (~5-22 s, measured), yet at the 8_192-char render cap the whole round trip
-// costs a few hundred milliseconds: that is what makes the cap the right rail.
+// costs a few milliseconds (measured 6.7-11.8 ms over three runs), far under the
+// 1,500 ms bound: that is what makes the cap the right rail.
 test("8_192 chars of every mixed-delimiter body renders in under 1.5 s each", async (t) => {
   for (const pat of ["*a_", "_*a", "**_a", "**a_", "_a_"]) {
     const md = repeatPattern(pat, 8_192);
@@ -209,7 +212,8 @@ test("8_192 chars of every mixed-delimiter body renders in under 1.5 s each", as
 });
 
 // One char over the budget: marked is never called, so the answer is immediate
-// even though the same body at 64 KB would block the loop for ~20 s.
+// even though the same body at 64 KB would block the loop for ~20 s (measured
+// 4.9-9.7 ms of CPU over three runs; the 100 ms bound is ~10x that).
 test("8_193 and 65_535 chars of \"*a_\" answer the escaped <pre> as truncated in under 100 ms", async (t) => {
   for (const len of [8_193, 65_535]) {
     const md = repeatPattern("*a_", len);

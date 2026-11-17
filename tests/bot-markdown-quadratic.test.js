@@ -10,14 +10,18 @@
 // per document, and an over-budget block is rendered as its escaped text.
 //
 // What must stay true:
-//   - any input up to the cap renders in well under a second of CPU, in every
+//   - any input up to the cap renders in about a second of CPU or less, in every
 //     shape an attacker can pour delimiters into (one paragraph, many
-//     paragraphs, list items, table cells, headings), in the `_`+filler shape
-//     the total budget was halved for, and as a flood of link definitions
-//     (which marked scans on every inline block);
+//     paragraphs, list items, table cells, headings); measured 123–143 ms
+//     (worst of three runs) against a 1,000 ms bound, and ~21 s unguarded — so
+//     the bound is ~7x the measurement and ~1/20 of the cliff. The same holds in
+//     the `_`+filler shape the total budget was halved for (the slowest of them:
+//     measured 258–278 ms, bound 2,000 ms), and as a flood of link definitions
+//     (which marked scans on every inline block; measured 110–143 ms, bound
+//     1,000 ms);
 //   - the email-autolink run shapes (`a…@a…`, `HTTP…@a…`, a long `HTTP` run, an
-//     `@` every 4,096 `a`s) stay under 500 ms at the cap while ordinary email
-//     content still autolinks and renders byte-identically;
+//     `@` every 4,096 `a`s) stay under 500 ms at the cap (measured 7 ms, and
+//     1,833 ms before the run-length guard);
 //   - ordinary bot prose renders EXACTLY as it did before the guard (pinned
 //     below: the digest was captured from the renderer before the change),
 //     whether it arrives with LF or CRLF line endings;
@@ -121,7 +125,7 @@ test("many medium blocks (each just under the per-block cap) still bounded", (t)
 // `$&/!{` filler between them. At the old 8e6 budget all eight blocks were
 // inline-lexed and it cost 539 ms (55–67 ns per delimiter pair); 4e6 admits
 // four and flattens four.
-test("the `_` + $&/!{ filler worst shape (8 x ~1,000 delimiters) is < 1000 ms", (t) => {
+test("the `_` + $&/!{ filler worst shape (8 x ~1,000 delimiters) is < 2000 ms", (t) => {
   const note = tracker(t);
   const block = rep("_$&/!{\n", 7 * 1000);
   assert.equal(delims(block), 1000, `one _ per repeat unit (${delims(block)})`);
@@ -131,7 +135,11 @@ test("the `_` + $&/!{ filler worst shape (8 x ~1,000 delimiters) is < 1000 ms", 
   const { html, ms } = timed(src);
   note(ms, "`_` + $&/!{ filler, 8 blocks x 1,000 delimiters");
   assert.ok(html.length > 0, "still rendered");
-  assert.ok(ms < 1000, `filler shape (${src.length} chars) took ${ms.toFixed(0)} ms`);
+  // Measured 258-278 ms on the dev box (worst of three runs): the 4e6 delimiter
+  // budget inline-lexes four blocks and flattens four (the OLD 8e6 budget lexed
+  // all eight for 539 ms, and an unguarded 64 KB of this shape is ~21 s), so
+  // 2,000 ms gives a slow runner room without coming anywhere near the cliff.
+  assert.ok(ms < 2000, `filler shape (${src.length} chars) took ${ms.toFixed(0)} ms`);
 });
 
 // --- random search smoke: 50 seeded 64 KB strings over the delimiter alphabet.
@@ -356,6 +364,9 @@ test("email-autolink runs at the cap are flattened: each < 500 ms", (t) => {
     const { html, ms } = timed(src);
     note(ms, name);
     assert.ok(html.length > 0, `${name}: still rendered (never "")`);
+    // Measured 7 ms (worst of three runs) against 1,833 ms for the same shape
+    // before the run-length guard: 500 ms is ~70x the measurement and ~1/4 of the
+    // cliff, so the bound is neither runner-sensitive nor toothless.
     assert.ok(ms < 500, `${name} took ${ms.toFixed(0)} ms`);
     assert.ok(!/<a[\s>]/.test(html), `${name}: nothing was autolinked`);
   }
