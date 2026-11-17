@@ -93,8 +93,13 @@ export const ACTOR_SIGN_PATH = "/internal/actor-sign";
  * config is built there too. A key-less bot host has no Perch session, so it has nothing this
  * kind could honestly attest; messageFor() has no tuple for it either. Keeping the relay blind
  * to "secrets" means the credential-card door has no off-process signing path at all.
+ *
+ * "mail-draft" (Crow Mail plan 3, Task 8a) is a v1 kind whose thread slot carries
+ * `<draftId>:<turnId>`. It is listed because the kind must be known to a key-less host, while the
+ * tuple itself is never a session's or a job's, so the checks below (step 6) still refuse to sign
+ * one — the drafting turn mints its signature in this process, beside the token.
  */
-export const ACTOR_SIGN_KINDS = Object.freeze(["bot", "board", "artifacts", "board-thread", ...SESSION_ACTOR_KINDS, ...SCOPE_ACTOR_KINDS]);
+export const ACTOR_SIGN_KINDS = Object.freeze(["bot", "board", "artifacts", "board-thread", "mail-draft", ...SESSION_ACTOR_KINDS, ...SCOPE_ACTOR_KINDS]);
 
 const REFUSE_LOG_WINDOW_MS = 3_600_000;
 const REFUSE_LOG_CAP = 64;

@@ -390,6 +390,29 @@ test("rejectFunneled middleware: the Crow-to-Crow sharing API is never funnel-ex
   for (const path of paths) assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
 });
 
+// Crow Mail (plan 3, Task 8a): the drafting turn's MCP mount takes a per-turn token and reads one
+// draft's thread, so it is never reachable from Funnel and never a public prefix. The middleware is
+// the real one, and /mail-draft is not in the allowlist by any spelling.
+test("rejectFunneled middleware: the draft MCP mount is never funnel-exposed", async () => {
+  const server = await startTestApp();
+  const paths = ["/mail-draft/mcp", "/mail-draft/sse", "/mail-draft/messages"];
+  try {
+    const port = server.address().port;
+    for (const path of paths) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+  const { isFunnelPublicPath, PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const path of [...paths, "/mail-draft"]) {
+    assert.equal(isFunnelPublicPath(path), false, path);
+    assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+  }
+  assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => "/mail-draft".startsWith(p)), "/mail-draft is not public");
+});
+
 // The same mount rule as the Perch / apps / widgets APIs: the router installs
 // dashboardAuth on its own prefix, so it is closed wherever it is mounted. This
 // case proves the NETWORK GATE: a bare loopback socket is refused (403) before the

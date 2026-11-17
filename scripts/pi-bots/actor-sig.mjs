@@ -2,7 +2,8 @@
  * Actor-header binding (S2, 2026-10-02).
  *
  * Kinds signed with the one per-boot key (each its own MAC domain, so none
- * replays as another): "bot" (phone), "board", "board-thread", "artifacts", "secrets"
+ * replays as another): "bot" (phone), "board", "board-thread", "artifacts", "secrets",
+ * "mail-draft"
  * over the v1 tuple below, and the session-bound (v2) kind "peer-relay"
  * (the loopback relay to paired peers, item 46 PR-B, below).
  *
@@ -183,6 +184,45 @@ export function signSecretsActor({ botId, threadId, gatewayType } = {}) {
 /** Constant-time check of a presented secrets signature. False without a key. */
 export function verifySecretsActorSig({ botId, threadId, gatewayType, sig } = {}) {
   return verifyActorSig({ kind: "secrets", botId, threadId, gatewayType, sig });
+}
+
+// ---- mail-draft actor headers (Crow Mail plan 3, Task 8a) ----
+//
+// /mail-draft/mcp is a drafting turn's door: the mdt_ turn token names one draft and one turn, and
+// these headers bind the CALLER to the same pair. Same key and MAC as the kinds above; kind
+// "mail-draft", so no phone, board, artifacts or secrets signature replays here, nor this one there.
+// The v1 tuple has no slot for two ids, so the threadId field carries `<draftId>:<turnId>` (the same
+// shape "board" uses for jobId). Neither half may hold a colon or whitespace of its own, so no pair
+// of ids can be spelled two ways.
+
+/** An id half of the mail-draft tuple, or null when it cannot be one. */
+function mailDraftField(v) {
+  const text = v == null ? "" : String(v).trim();
+  return text !== "" && !/[\s:]/.test(text) ? text : null;
+}
+
+/**
+ * The v1 thread field a mail-draft signature binds: `<draftId>:<turnId>`. Two public helpers build
+ * it so signer and verifier can never join differently; null when either id cannot be one half.
+ */
+export function mailDraftActorThread({ draftId, turnId } = {}) {
+  const draft = mailDraftField(draftId);
+  const turn = mailDraftField(turnId);
+  return draft && turn ? `${draft}:${turn}` : null;
+}
+
+/** Signature for a drafting turn's actor headers, or null without a key / bot id / the two ids. */
+export function signMailDraftActor({ botId, draftId, turnId } = {}) {
+  const threadId = mailDraftActorThread({ draftId, turnId });
+  if (!threadId) return null;
+  return signActor({ kind: "mail-draft", botId, threadId, gatewayType: null });
+}
+
+/** Constant-time check of a presented mail-draft signature. False without a key. */
+export function verifyMailDraftActorSig({ botId, draftId, turnId, sig } = {}) {
+  const threadId = mailDraftActorThread({ draftId, turnId });
+  if (!threadId) return false;
+  return verifyActorSig({ kind: "mail-draft", botId, threadId, gatewayType: null, sig });
 }
 
 // ---- session-bound actor headers, v2 (item 46 PR-B) ----
@@ -370,6 +410,8 @@ function messageFor(kind, { botId, sessionId, threadId, gatewayType, jobId, work
     return v3Valid({ kind, botId, scope }) ? v3Message({ kind, botId, scope, threadId, gatewayType }) : null;
   }
   if (kind === "board") return v1Message({ kind, botId, threadId: jobId, gatewayType: null });
+  // mail-draft: the thread slot carries `<draftId>:<turnId>`, gatewayType null (signMailDraftActor).
+  if (kind === "mail-draft") return v1Message({ kind, botId, threadId, gatewayType: null });
   if (kind === "bot" || kind === "artifacts" || kind === "board-thread") return v1Message({ kind, botId, threadId, gatewayType });
   return null;
 }
