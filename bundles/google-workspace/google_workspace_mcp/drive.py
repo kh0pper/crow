@@ -567,8 +567,9 @@ async def gdrive_share(
     silently; consumer/cross-domain recipients require notify=True. Re-checkable afterward
     via gdrive_get_permissions.
 
-    With GWS_OUTBOUND_GUARD on, notify=True must name an address on
-    GWS_OUTBOUND_ALLOWLIST (notify=False sends nothing, so it is never refused).
+    With GWS_OUTBOUND_GUARD on, the grantee must be on GWS_OUTBOUND_ALLOWLIST —
+    whatever `notify` says. Granting someone access is itself the outbound effect
+    (they can now read the file); notify=True only adds Google's email on top.
     """
     role = role.lower()
     valid = {"reader", "writer", "commenter"}
@@ -577,14 +578,12 @@ async def gdrive_share(
             "success": False,
             "error": f"role must be one of {sorted(valid)}, got '{role}'",
         }
-    # notify=True is the only path here that makes Google send email. Refused before
-    # the client is built, so a blocked share touches nothing at all.
-    if notify:
-        refusal = outbound_guard.check_recipients(
-            [email], "sending a 'shared with you' email"
-        )
-        if refusal:
-            return {"success": False, "error": refusal}
+    # The permission itself is the outbound effect, so it is checked whether or not
+    # Google is asked to email the grantee. Refused before the client is built, so a
+    # blocked share touches nothing at all.
+    refusal = outbound_guard.check_recipients([email], "sharing a Drive file")
+    if refusal:
+        return {"success": False, "error": refusal}
     drive = get_drive_service()
     result = await asyncio.to_thread(
         lambda: drive.permissions().create(
@@ -609,6 +608,25 @@ async def gdrive_share(
 _GOOGLE_NATIVE_PREFIX = "application/vnd.google-apps."
 
 _EXPORT_DEFAULT_MIME = "application/pdf"
+
+# gdrive_upload_file's convert_to: the three Google-native targets Drive can convert
+# an upload into, with the short aliases the tool accepts for them. Anything else is
+# refused before the upload starts (Drive would reject an unknown mimeType anyway,
+# but only after the bytes went up, with an error that does not say what is allowed).
+_CONVERT_TO = {
+    "application/vnd.google-apps.document": "application/vnd.google-apps.document",
+    "document": "application/vnd.google-apps.document",
+    "doc": "application/vnd.google-apps.document",
+    "docs": "application/vnd.google-apps.document",
+    "application/vnd.google-apps.spreadsheet": "application/vnd.google-apps.spreadsheet",
+    "spreadsheet": "application/vnd.google-apps.spreadsheet",
+    "sheet": "application/vnd.google-apps.spreadsheet",
+    "sheets": "application/vnd.google-apps.spreadsheet",
+    "application/vnd.google-apps.presentation": "application/vnd.google-apps.presentation",
+    "presentation": "application/vnd.google-apps.presentation",
+    "slides": "application/vnd.google-apps.presentation",
+    "slide": "application/vnd.google-apps.presentation",
+}
 
 
 @handle_google_errors
@@ -707,19 +725,36 @@ async def gdrive_upload_file(
     """Upload a local file into a Drive folder as a NEW file.
 
     `name` defaults to the local basename; `mime_type` is guessed from the
-    extension when omitted. `convert_to` is a Google-native target MIME type
-    (application/vnd.google-apps.presentation | document | spreadsheet): Drive
+    extension when omitted. `convert_to` is a Google-native target — one of the
+    three types Drive can convert into, as the MIME type or the short alias
+    ('document'|'doc'|'docs', 'spreadsheet'|'sheet'|'sheets',
+    'presentation'|'slide'|'slides'); any other value is refused before the upload:
+    application/vnd.google-apps.presentation | document | spreadsheet. Drive
     converts the upload (pptx/docx/xlsx) into that native file. To replace the
     content of an existing file while keeping its id and links, use
     gdrive_upload_new_version instead.
     """
+    target_mime: Optional[str] = None
+    if convert_to is not None and str(convert_to).strip():
+        requested = str(convert_to).strip()
+        target_mime = _CONVERT_TO.get(requested) or _CONVERT_TO.get(requested.lower())
+        if not target_mime:
+            return {
+                "success": False,
+                "error": (
+                    f"convert_to must be a Google-native target: application/vnd.google-apps."
+                    f"document, .spreadsheet or .presentation (or document/doc/docs, "
+                    f"spreadsheet/sheet/sheets, presentation/slide/slides), got "
+                    f"'{requested}'. Omit convert_to to upload the file as-is."
+                ),
+            }
     if not os.path.isfile(local_path):
         return {"success": False, "error": f"Local file not found: {local_path}"}
     drive = get_drive_service()
     media = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
     body = {"name": name or os.path.basename(local_path), "parents": [folder_id]}
-    if convert_to:
-        body["mimeType"] = convert_to
+    if target_mime:
+        body["mimeType"] = target_mime
     created = await asyncio.to_thread(
         lambda: drive.files().create(
             body=body,

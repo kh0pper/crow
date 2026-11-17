@@ -13,8 +13,9 @@ Python unit tests (`python3 -m unittest discover -s tests`). Crow's copy differs
 from upstream in its packaging — these READMEs are Crow's own and the test
 fixtures are scrubbed of personal data — and in a small set of fixes carried on
 top: native Docs/Sheets/Slides conversion on upload, markdown links rendered as
-real hyperlinks (inside table cells too), table-aware Docs edits, a section
-replacement that can end in a table, and the invite/mail guards below.
+real hyperlinks (inside table cells too, and only for http/https/mailto — any
+other scheme stays plain text), table-aware Docs edits, a section replacement
+that can end in a table, and the invite/mail guards below.
 
 ## What it can do
 
@@ -26,7 +27,7 @@ replacement that can end in a table, and the invite/mail guards below.
 | Drive | search, list, copy, move, rename, trash, share, export, read raw file content |
 | Gmail | search and read threads, draft replies, labels and filters — sending is opt-in, to yourself only |
 | Calendar | list calendars and events, create events, respond to invites |
-| Apps Script | read, edit and run a project's script source |
+| Apps Script | read, edit and run a project's script source (edit/run refused while `GWS_OUTBOUND_GUARD` is on) |
 | Forms | read a form's structure, add or edit questions in place; link responses to a sheet through the shim |
 | BigQuery | run SQL, sync a Sheet range into a table, list datasets and tables |
 | Looker Studio | read-only: find assets and audit their sharing |
@@ -67,28 +68,67 @@ sending off), `GOOGLE_BIGQUERY_PROJECT`, `GDOCS_DEFAULT_FONT`,
 
 ## What leaves the account
 
-Three families of tool can make Google deliver something to an address the
-assistant chose rather than you: a Calendar event's guests (and replying to an
-invitation, which emails the organizer), a Drive share's notification email or
-an ownership transfer's email, and a Gmail filter's forward address. Two
-switches decide what may happen:
+Four channels can make Google deliver something to an address the assistant
+chose rather than you, or run code that can. Two switches decide what may
+happen:
+
+- **Calendar** — an event's guests, and replying to an invitation (that emails
+  the organizer);
+- **Drive** — a share, and an ownership transfer. Granting someone access *is*
+  the outbound effect; the "shared with you" email (`notify=true`) only adds
+  Google's notification on top, so with the guard on the grantee is checked
+  whether or not a mail would be sent;
+- **Gmail** — a filter's forward address;
+- **Apps Script** — `apps_script_update_file`, `apps_script_update_content` and
+  `apps_script_run`. Pushed script can send mail (`MailApp`, `GmailApp`), share
+  Drive files, or call any API the token can reach, and this server cannot
+  inspect what it will do. With the guard on, these three tools are refused
+  outright, and so is a caller-supplied `shim_script_id` for
+  `forms_set_destination` other than the one configured in
+  `GWS_FORMS_SHIM_SCRIPT_ID`. `apps_script_get_content` (read-only) still works.
 
 | Setting | Default | Effect |
 |---|---|---|
-| `GWS_CALENDAR_NO_INVITES` | off | Events go on your own calendar only: guests are refused, Google is never asked to email anyone, and replying to an invitation is refused. |
-| `GWS_OUTBOUND_GUARD` | **off** | When on, every action above whose recipient is not on `GWS_OUTBOUND_ALLOWLIST` is refused, and no request is made to Google at all. |
-| `GWS_OUTBOUND_ALLOWLIST` | empty | Addresses and domains that may be written to, e.g. `you@example.com,example.org` (a domain covers exactly that domain, no subdomains). Only read while the guard is on; empty then means nothing may be sent. |
+| `GWS_CALENDAR_NO_INVITES` | off | Events go on the `primary` calendar only: any other `calendar_id` is refused (another calendar has its own owner to notify), guests are refused, Google is never asked to email anyone, and replying to an invitation is refused. |
+| `GWS_OUTBOUND_GUARD` | **off** | When on, every channel above is refused unless its recipient is on `GWS_OUTBOUND_ALLOWLIST`, and no request is made to Google at all. Apps Script's write/run tools are refused regardless of any address. |
+| `GWS_OUTBOUND_ALLOWLIST` | empty | Addresses and domains that may be written to, e.g. `you@example.com,example.org` (a domain covers exactly that domain, no subdomains). Commas separate entries in the Extensions form; a semicolon or a space also works if you set the variable outside it. Only read while the guard is on; empty then means nothing may be sent. |
+
+A recipient has to be **one** well-formed address: a single `@`, ASCII only, no
+spaces and none of `, ; < > " ' ( )`. A value that is really two addresses
+(`x@evil.com,y@example.com`), a display-name form (`Name <x@example.com>`) or two
+`@`s is refused before the allowlist is consulted — it can never be matched by
+the half of it that happens to be allowed.
 
 The guard ships **off** so an existing install keeps behaving exactly as before;
 it is meant for an assistant that also reads untrusted mail, where a crafted
 message could otherwise talk it into inviting or forwarding to a stranger.
 Turning it on needs the list filled in (or nothing can be sent at all).
 
-`GWS_OAUTH_SCOPES` narrows what the account is authorized for: unset requests
-the full set, and setting it (e.g. `gmail.readonly,gmail.compose,calendar.events`)
+### What the guard does not cover
+
+It walls off the channels that *make Google contact someone*; it is not a
+sandbox on the account. In particular it does **not** cover:
+
+- **moving or copying a file into a folder someone else shared with you** — your
+  content lands where they can read it, and no notification is needed for that;
+- **edits and comments on files others own** — a collaborator's file can be
+  changed, or a comment added, with no mail-like call of the kind above.
+
+If that matters for an account, narrow what the account can do with
+`GWS_OAUTH_SCOPES` (below) rather than relying on the guard alone.
+
+`GWS_OAUTH_SCOPES` narrows what the server asks Google for: unset requests the
+full set, and setting it (e.g. `gmail.readonly,gmail.compose,calendar.events`)
 requests only those — worth doing for an account an assistant should not be able
-to delete things with. It applies to the authorize step and to every token
-refresh, so change it and re-run `google-workspace-mcp-authorize` together.
+to delete things with. Every name is checked against the scopes this server knows
+(a short name like `gmail.compose`, or the full
+`https://www.googleapis.com/auth/gmail.compose` URL); an unknown name is a
+startup error naming the bad entry, rather than a scope that lands in the refresh
+and fails later as a confusing "not authenticated". The narrowing applies at the
+**next token refresh** (and at the authorize step): the refresh token already on
+disk keeps the full grant it was issued with, so removing a scope here does not
+take the permission away from Google's grant — revoke the app's access in your
+Google account for that, then authorize again.
 
 ## Inside Crow's add-on wall
 

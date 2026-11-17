@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 
+from . import outbound_guard
 from .auth import get_forms_service, get_script_service
 from .forms_questions import _CHOICE_TYPES, _build_question  # noqa: F401
 from .guardrails import handle_google_errors
@@ -148,8 +149,25 @@ async def forms_set_destination(
     The REST Forms API cannot do this, so the call is delegated to an Apps
     Script shim (FormApp.setDestination) via scripts.run — see _SHIM_SETUP for
     the one-time deployment. `shim_script_id` overrides the GWS_FORMS_SHIM_SCRIPT_ID
-    env var. Verifies the link afterwards by re-reading the form's linkedSheetId."""
-    shim = (shim_script_id or os.environ.get(_SHIM_ENV, "")).strip()
+    env var. Verifies the link afterwards by re-reading the form's linkedSheetId.
+
+    With GWS_OUTBOUND_GUARD on, only the shim configured on this server
+    (GWS_FORMS_SHIM_SCRIPT_ID) may run: a caller-supplied different id would run
+    arbitrary Apps Script, which can send mail or share files.
+    """
+    requested = (shim_script_id or "").strip()
+    configured = os.environ.get(_SHIM_ENV, "").strip()
+    if outbound_guard.guard_enabled() and requested and requested != configured:
+        return {
+            "success": False,
+            "error": (
+                f"shim_script_id '{requested}' is refused while the outbound guard is "
+                f"on (GWS_OUTBOUND_GUARD): Apps Script can send mail or share files, so "
+                f"only the shim configured on this server ({_SHIM_ENV}) may run."
+            ),
+            "data": {"form_id": form_id, "spreadsheet_id": spreadsheet_id},
+        }
+    shim = requested or configured
     if not shim:
         return {
             "success": False,

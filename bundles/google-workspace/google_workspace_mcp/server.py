@@ -288,8 +288,10 @@ async def gdrive_upload_file(
     convert_to: Optional[str] = None,
 ) -> dict:
     """Upload a local file into a Drive folder as a NEW file. name defaults to the local basename.
-    convert_to = a Google-native MIME type (application/vnd.google-apps.presentation | document |
-    spreadsheet) makes Drive convert a pptx/docx/xlsx upload into a native Slides/Doc/Sheet.
+    convert_to = a Google-native target (application/vnd.google-apps.presentation | document |
+    spreadsheet, or the short alias slides/presentation, docs/document, sheets/spreadsheet) makes
+    Drive convert a pptx/docx/xlsx upload into a native Slides/Doc/Sheet; any other convert_to
+    value is refused before the upload starts.
     To replace an existing file's content keeping its id and links, use gdrive_upload_new_version."""
     return await drive.gdrive_upload_file(
         local_path, folder_id, name=name, mime_type=mime_type, convert_to=convert_to
@@ -325,7 +327,7 @@ async def gdrive_create_shortcut(target_id: str, parent_id: str, name: str | Non
 
 @mcp.tool()
 async def gdrive_share(file_id: str, email: str, role: str = "writer", notify: bool = False) -> dict:
-    """Share a Drive file/folder with a user by email — ADDS a reader|writer|commenter permission (does NOT transfer ownership; use gdrive_transfer_ownership for that). Sharing a folder cascades to its contents. notify=False (default) grants silently; notify=True sends the 'shared with you' email (required for consumer/cross-domain recipients) and, under GWS_OUTBOUND_GUARD, needs an allowlisted address. Re-checkable via gdrive_get_permissions."""
+    """Share a Drive file/folder with a user by email — ADDS a reader|writer|commenter permission (does NOT transfer ownership; use gdrive_transfer_ownership for that). Sharing a folder cascades to its contents. notify=False (default) grants silently; notify=True sends the 'shared with you' email (required for consumer/cross-domain recipients). Under GWS_OUTBOUND_GUARD the address must be allowlisted whatever notify says: granting access is itself the outbound effect. Re-checkable via gdrive_get_permissions."""
     return await drive.gdrive_share(file_id, email, role=role, notify=notify)
 
 
@@ -629,9 +631,11 @@ async def gcal_create_event(
     date strings ('2026-04-23' → all-day). send_updates defaults to
     'none' for draft-like behavior; pass 'all' to actually send invites.
 
-    Guests are the outbound path: with GWS_CALENDAR_NO_INVITES on, attendees
-    are refused and nothing is emailed; with GWS_OUTBOUND_GUARD on, every
-    attendee must be on GWS_OUTBOUND_ALLOWLIST.
+    Guests are the outbound path: with GWS_CALENDAR_NO_INVITES on, the event may
+    only go on the 'primary' calendar (any other calendar_id is refused, since
+    writing there can notify its owner) and attendees are refused, with nothing
+    emailed; with GWS_OUTBOUND_GUARD on, every attendee must be on
+    GWS_OUTBOUND_ALLOWLIST.
     """
     return await gcal_mod.gcal_create_event(
         summary=summary, start=start, end=end, calendar_id=calendar_id,
@@ -760,14 +764,16 @@ async def apps_script_update_file(
 ) -> dict:
     """Replace the source of ONE file in an Apps Script project, leaving the manifest and other files untouched
     (fetches current content, swaps the named file, pushes the full set back). `file_name` has NO extension
-    ('Code', not 'Code.gs') — use the name from apps_script_get_content. `file_type` (new files only): SERVER_JS|HTML|JSON."""
+    ('Code', not 'Code.gs') — use the name from apps_script_get_content. `file_type` (new files only): SERVER_JS|HTML|JSON.
+    Refused while GWS_OUTBOUND_GUARD is on: pushed Apps Script can send mail or share files."""
     return await apps_script.apps_script_update_file(script_id, file_name, source, file_type=file_type)
 
 
 @mcp.tool()
 async def apps_script_update_content(script_id: str, files: list) -> dict:
     """Advanced: replace the ENTIRE project file set. `files` = list of {name, type, source}; MUST include the
-    manifest ({"name":"appsscript","type":"JSON","source":"{...}"}). Prefer apps_script_update_file for single edits."""
+    manifest ({"name":"appsscript","type":"JSON","source":"{...}"}). Prefer apps_script_update_file for single edits.
+    Refused while GWS_OUTBOUND_GUARD is on: pushed Apps Script can send mail or share files."""
     return await apps_script.apps_script_update_content(script_id, files)
 
 
@@ -777,7 +783,8 @@ async def apps_script_run(
 ) -> dict:
     """Run a function via scripts.run and return its result. REQUIRES the script deployed as an API Executable and
     its GCP project == this OAuth client's project (often not possible for container-bound scripts without moving
-    them to a standard GCP project). Returns success=False with the structured error on a script-side failure."""
+    them to a standard GCP project). Returns success=False with the structured error on a script-side failure.
+    Refused while the outbound guard is on: a run can send mail or share files."""
     return await apps_script.apps_script_run(script_id, function_name, parameters=parameters, dev_mode=dev_mode)
 
 
@@ -846,7 +853,9 @@ async def forms_set_destination(
     """Link a Google Form's responses into a spreadsheet (the UI's 'Link to Sheets' — creates a 'Form Responses'
     tab there). The REST Forms API can't do this, so the call runs through a one-time-deployed Apps Script shim
     (see apps-script-shim/forms-destination-shim.gs); without the shim configured (GWS_FORMS_SHIM_SCRIPT_ID env or
-    `shim_script_id`) the tool returns the setup instructions instead. Verifies via the form's linkedSheetId."""
+    `shim_script_id`) the tool returns the setup instructions instead. Under GWS_OUTBOUND_GUARD only the shim id
+    configured on this server may run, so a different `shim_script_id` is refused.
+    Verifies via the form's linkedSheetId."""
     return await forms.forms_set_destination(form_id, spreadsheet_id, shim_script_id=shim_script_id)
 
 

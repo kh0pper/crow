@@ -66,6 +66,40 @@ class UploadConvertTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertNotIn("mimeType", self.body(service))
 
+    def test_a_short_alias_is_accepted(self):
+        for alias, expected in (
+            ("slides", SLIDES),
+            ("presentation", SLIDES),
+            ("docs", "application/vnd.google-apps.document"),
+            ("doc", "application/vnd.google-apps.document"),
+            ("sheets", "application/vnd.google-apps.spreadsheet"),
+            ("spreadsheet", "application/vnd.google-apps.spreadsheet"),
+        ):
+            with self.subTest(alias=alias):
+                service = drive_service()
+                result = self.run_upload(service, convert_to=alias)
+                self.assertTrue(result["success"])
+                self.assertEqual(self.body(service)["mimeType"], expected)
+
+    def test_any_other_convert_to_is_refused_before_any_call(self):
+        for bad in (
+            "application/pdf",
+            "application/vnd.google-apps.folder",
+            "application/vnd.google-apps.shortcut",
+            "application/vnd.google-apps.form",
+            "text/html",
+            "docx",
+        ):
+            with self.subTest(convert_to=bad):
+                service = drive_service()
+                with mock.patch.object(drive, "MediaFileUpload") as media:
+                    result = self.run_upload(service, convert_to=bad)
+                self.assertFalse(result["success"])
+                self.assertIn(bad, result["error"])
+                self.assertIn("convert_to", result["error"])
+                service.files().create.assert_not_called()
+                media.assert_not_called()
+
     def test_a_missing_local_file_is_refused_before_any_call(self):
         service = drive_service()
         with mock.patch.object(drive, "get_drive_service", return_value=service):

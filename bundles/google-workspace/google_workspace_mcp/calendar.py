@@ -144,10 +144,12 @@ async def gcal_create_event(
     attendees: list of email addresses to invite.
     send_updates: 'none' (default, draft-like), 'all', or 'externalOnly'.
 
-    With GWS_CALENDAR_NO_INVITES on, attendees are refused and nothing is emailed;
-    with GWS_OUTBOUND_GUARD on, every attendee must be on GWS_OUTBOUND_ALLOWLIST.
+    With GWS_CALENDAR_NO_INVITES on, the event may only go on the 'primary'
+    calendar (any other calendar_id is refused) and attendees are refused, with
+    nothing emailed; with GWS_OUTBOUND_GUARD on, every attendee must be on
+    GWS_OUTBOUND_ALLOWLIST.
     """
-    error, send_updates = check_create(attendees, send_updates)
+    error, send_updates = check_create(calendar_id, attendees, send_updates)
     if error:
         return {"success": False, "error": error}
     # An invitation emails whoever is named, so the guard reads the attendee list.
@@ -208,7 +210,8 @@ async def gcal_respond_to_event(
     response: 'accepted', 'declined', or 'tentative'.
 
     Refused outright with GWS_CALENDAR_NO_INVITES on (the reply emails the
-    organizer); with GWS_OUTBOUND_GUARD on, the organizer must be allowlisted.
+    organizer, and the reply is written on whichever calendar_id is given); with
+    GWS_OUTBOUND_GUARD on, the organizer must be allowlisted.
     """
     if invites_blocked():
         return {

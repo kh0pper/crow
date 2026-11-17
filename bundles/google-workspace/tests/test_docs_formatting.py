@@ -322,6 +322,41 @@ class InlineLinkParseTests(unittest.TestCase):
         self.assertEqual([s.text for s in spans], ["[notes](/local/path)"])
         self.assertIsNone(spans[0].link)
 
+    def test_only_http_https_and_mailto_become_links(self):
+        for url in (
+            "http://example.com/notes",
+            "HTTPS://example.com/notes",
+            "mailto:someone@example.com",
+        ):
+            with self.subTest(url=url):
+                spans = _parse_inline_formatting(f"[notes]({url})")
+                self.assertEqual([s.link for s in spans], [url])
+
+    def test_a_dangerous_scheme_stays_plain_text(self):
+        # A javascript:/file:/data: link in a document someone clicks is a live
+        # hazard, so those stay exactly the text the author typed — no hyperlink.
+        for url in (
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html;base64,PHNjcmlwdD4=",
+            "vbscript:msgbox(1)",
+            "ftp://example.com/notes",
+            "tel:+15550000",
+        ):
+            with self.subTest(url=url):
+                text = f"see [notes]({url}) now"
+                spans = _parse_inline_formatting(text)
+                self.assertEqual("".join(s.text for s in spans), text)
+                for span in spans:
+                    self.assertIsNone(span.link)
+
+    def test_a_dangerous_link_does_not_swallow_a_later_real_one(self):
+        spans = _parse_inline_formatting(
+            "[bad](javascript:alert(1)) then [good](https://example.com/x)"
+        )
+        self.assertEqual([s.link for s in spans], [None, "https://example.com/x"])
+        self.assertEqual(spans[0].text, "[bad](javascript:alert(1)) then ")
+
 
 class HyperlinkEmissionTests(unittest.TestCase):
     """A markdown link becomes a real Docs hyperlink, drawn like one."""
@@ -361,6 +396,12 @@ class HyperlinkEmissionTests(unittest.TestCase):
     def test_no_link_request_without_a_link(self):
         requests, _ = markdown_to_docs_requests("plain **bold** text")
         self.assertEqual(self._links(requests), [])
+
+    def test_a_dangerous_scheme_inserts_literal_text_and_no_link(self):
+        text = "click [here](javascript:alert(1))"
+        requests, _ = markdown_to_docs_requests(text)
+        self.assertEqual(self._links(requests), [])
+        self.assertEqual(requests[0]["insertText"]["text"], text + "\n")
 
 
 class BulletStripTests(unittest.TestCase):

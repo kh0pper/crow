@@ -198,12 +198,25 @@ _INLINE_LINK_RE = re.compile(
     r"(?<!\!)(\*{1,3})?\[([^\]]+)\]\(([a-zA-Z][a-zA-Z0-9+.-]*:[^)\s]+)\)(\*{1,3})?"
 )
 
+# Only these schemes become a hyperlink. A Markdown link is written by whoever
+# wrote the Markdown, which may be a model reading untrusted mail; `javascript:`,
+# `data:` or `file:` in a document someone clicks is a live hazard, so any other
+# scheme is left in the text exactly as typed.
+_LINK_SCHEMES = frozenset({"http", "https", "mailto"})
+
+
+def _link_allowed(url: str) -> bool:
+    """True when `url` uses http, https or mailto (case-insensitive)."""
+    scheme, sep, rest = url.partition(":")
+    return bool(sep) and bool(rest) and scheme.lower() in _LINK_SCHEMES
+
 
 def _parse_inline_formatting(text: str) -> list[TextSpan]:
     """Parse inline markdown formatting into spans.
 
-    Links first ([label](scheme:url) becomes a linked span; the label may carry
-    star formatting), then bold/italic stars inside each non-link chunk.
+    Links first ([label](scheme:url) becomes a linked span, but only for http,
+    https and mailto; another scheme's brackets stay literal text), then
+    bold/italic stars inside each non-link chunk.
     """
     spans: list[TextSpan] = []
     pos = 0
@@ -214,6 +227,10 @@ def _parse_inline_formatting(text: str) -> list[TextSpan]:
             m.group(3),
             m.group(4) or "",
         )
+        if not _link_allowed(url):
+            # Not a link at all: leave the whole match to the star parser, which
+            # keeps [label](scheme:...) as the plain text the author typed.
+            continue
         # Stars around the whole link only count when balanced on both sides.
         wrap_bold = wrap_italic = False
         consumed_start, consumed_end = m.start(), m.end()

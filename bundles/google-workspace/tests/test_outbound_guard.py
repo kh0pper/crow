@@ -52,6 +52,12 @@ class AllowlistTests(unittest.TestCase):
         env = {"GWS_OUTBOUND_ALLOWLIST": "Alex@Example.com, example.org  alex@example.com"}
         self.assertEqual(allowlist(env), ["alex@example.com", "example.org"])
 
+    def test_semicolons_separate_entries_too(self):
+        env = {"GWS_OUTBOUND_ALLOWLIST": "alex@example.com; example.org,second@example.net"}
+        self.assertEqual(
+            allowlist(env), ["alex@example.com", "example.org", "second@example.net"]
+        )
+
     def test_a_leading_at_is_a_domain_entry(self):
         self.assertEqual(allowlist({"GWS_OUTBOUND_ALLOWLIST": "@example.org"}), ["example.org"])
 
@@ -75,6 +81,24 @@ class AllowedRecipientTests(unittest.TestCase):
 
     def test_an_unlisted_address_is_not_allowed(self):
         self.assertFalse(allowed_recipient("someone@example.com", self.ENTRIES))
+
+    def test_one_malformed_recipient_is_never_allowed(self):
+        # Each of these is listed (or matches a listed domain) and must still fail:
+        # the value is not ONE well-formed address, so it is refused before matching.
+        for value in (
+            "x@evil.com,y@example.org",
+            "x@evil.com; y@example.org",
+            "x@evil.com@example.org",
+            "Name <x@example.org>",
+            "\"x\"@example.org",
+            "(x)@example.org",
+            "x @example.org",
+            "x@ex\u00e4mple.org",
+            "@example.org",
+            "x@",
+        ):
+            self.assertFalse(allowed_recipient(value, self.ENTRIES), value)
+            self.assertFalse(allowed_recipient(value, [value.strip().lower()]), value)
 
 
 class CheckRecipientsTests(unittest.TestCase):
@@ -119,6 +143,35 @@ class CheckRecipientsTests(unittest.TestCase):
         )
         self.assertIn("one@example.com", error)
         self.assertIn("two@example.net", error)
+
+    def test_malformed_recipients_are_refused_as_such(self):
+        for value in (
+            "x@evil.com,y@example.com",
+            "x@evil.com; y@example.com",
+            "x@evil.com@example.com",
+            "Name <x@example.com>",
+            "x@ex\u00e4mple.com",
+        ):
+            with self.subTest(value=value):
+                error = check_recipients([value], WHAT, ON_LIST)
+                self.assertIsNotNone(error, value)
+                self.assertIn(value, error)
+                self.assertIn(WHAT, error)
+                self.assertIn("single plain email address", error)
+                self.assertIn("Nothing was sent", error)
+
+    def test_a_malformed_recipient_is_refused_even_when_its_domain_is_listed(self):
+        # The domain example.com IS allowlisted: the malformed value must still fail.
+        error = check_recipients(["x@evil.com,y@example.com"], WHAT, ON_LIST)
+        self.assertIn("x@evil.com,y@example.com", error)
+        self.assertIn("single plain email address", error)
+
+    def test_a_good_recipient_beside_a_malformed_one_still_refuses_the_call(self):
+        error = check_recipients(
+            ["alex@example.com", "Name <x@example.com>"], WHAT, ON_LIST
+        )
+        self.assertIn("Name <x@example.com>", error)
+        self.assertNotIn("alex@example.com is not", error)
 
 
 if __name__ == "__main__":

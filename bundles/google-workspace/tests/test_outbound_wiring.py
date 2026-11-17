@@ -2,8 +2,9 @@
 
 The point of each test: a refused call makes no API call at all, an allowlisted
 (or guard-off) call goes through unchanged, and GWS_CALENDAR_NO_INVITES drops
-invitations entirely. The service objects are mocks, so nothing leaves the
-process.
+invitations and every calendar but `primary`. The Apps Script write/run tools and
+a foreign Forms shim are refused by the outbound guard. The service objects are
+mocks, so nothing leaves the process.
 
 Run with:
     python -m unittest discover -s tests -v
@@ -20,10 +21,16 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from google_workspace_mcp import apps_script as apps_script_mod  # noqa: E402
 from google_workspace_mcp import calendar as gcal_mod  # noqa: E402
-from google_workspace_mcp import drive, gmail  # noqa: E402
+from google_workspace_mcp import drive, forms as forms_mod, gmail  # noqa: E402
 
-GUARD_VARS = ("GWS_OUTBOUND_GUARD", "GWS_OUTBOUND_ALLOWLIST", "GWS_CALENDAR_NO_INVITES")
+GUARD_VARS = (
+    "GWS_OUTBOUND_GUARD",
+    "GWS_OUTBOUND_ALLOWLIST",
+    "GWS_CALENDAR_NO_INVITES",
+    "GWS_FORMS_SHIM_SCRIPT_ID",
+)
 
 GUEST = "someone@example.com"
 OWNER = "alex@example.com"
@@ -32,7 +39,7 @@ ORGANIZER = "organizer@example.net"
 
 @contextlib.contextmanager
 def gws_env(**values):
-    """Pin the three guard knobs for one test; everything else is left alone."""
+    """Pin the guard knobs for one test; everything else is left alone."""
     with mock.patch.dict(os.environ, {k: "" for k in GUARD_VARS}):
         os.environ.update({k: v for k, v in values.items() if v is not None})
         yield
@@ -132,6 +139,33 @@ class CalendarNoInvitesTests(unittest.TestCase):
         self.assertFalse(result["success"])
         service.events().insert.assert_not_called()
 
+    def test_no_invites_refuses_a_calendar_other_than_primary(self):
+        # A secondary/shared calendar has its own owner to notify, so adding an
+        # event there is an outbound write even with no attendees named.
+        service = calendar_service()
+        with gws_env(GWS_CALENDAR_NO_INVITES="1"):
+            result = run_create(service, calendar_id="team@group.calendar.google.com")
+        self.assertFalse(result["success"])
+        self.assertIn("primary", result["error"])
+        self.assertIn("team@group.calendar.google.com", result["error"])
+        service.events().insert.assert_not_called()
+
+    def test_no_invites_is_case_sensitive_about_primary(self):
+        service = calendar_service()
+        with gws_env(GWS_CALENDAR_NO_INVITES="1"):
+            result = run_create(service, calendar_id="Primary")
+        self.assertFalse(result["success"])
+        service.events().insert.assert_not_called()
+
+    def test_the_primary_calendar_still_works_under_no_invites(self):
+        service = calendar_service()
+        with gws_env(GWS_CALENDAR_NO_INVITES="1"):
+            result = run_create(service, calendar_id="primary", send_updates="none")
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            service.events().insert.call_args.kwargs["calendarId"], "primary"
+        )
+
 
 class CalendarRespondTests(unittest.TestCase):
     EVENT = {
@@ -192,9 +226,18 @@ class DriveShareGuardTests(unittest.TestCase):
         with mock.patch.object(drive, "get_drive_service", return_value=service):
             return asyncio.run(drive.gdrive_share("file-1", GUEST, **kwargs))
 
-    def test_silent_share_is_never_refused(self):
+    def test_a_silent_share_is_checked_too(self):
+        # Granting access IS the outbound effect; notify only adds an email on top.
         service = drive_service()
         with gws_env(GWS_OUTBOUND_GUARD="1"):
+            result = self.run_share(service)
+        self.assertFalse(result["success"])
+        self.assertIn(GUEST, result["error"])
+        service.permissions().create.assert_not_called()
+
+    def test_a_silent_share_to_an_allowlisted_address_goes_through_silently(self):
+        service = drive_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=GUEST):
             result = self.run_share(service)
         self.assertTrue(result["success"])
         self.assertFalse(service.permissions().create.call_args.kwargs["sendNotificationEmail"])
@@ -213,6 +256,18 @@ class DriveShareGuardTests(unittest.TestCase):
             result = self.run_share(service, notify=True)
         self.assertTrue(result["success"])
         self.assertTrue(service.permissions().create.call_args.kwargs["sendNotificationEmail"])
+
+    def test_a_malformed_grantee_is_refused_before_any_call(self):
+        # A comma-list whose second half IS allowlisted must not slip through.
+        service = drive_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST="example.com"), \
+                mock.patch.object(drive, "get_drive_service", return_value=service):
+            result = asyncio.run(
+                drive.gdrive_share("file-1", "x@evil.com,y@example.com")
+            )
+        self.assertFalse(result["success"])
+        self.assertIn("x@evil.com,y@example.com", result["error"])
+        service.permissions().create.assert_not_called()
 
 
 class DriveTransferGuardTests(unittest.TestCase):
@@ -290,6 +345,159 @@ class GmailFilterForwardGuardTests(unittest.TestCase):
             result = self.run_filter(service, subject="invoice", archive=True)
         self.assertTrue(result["success"])
         service.users().settings().filters().create.assert_called_once()
+
+
+# --- Apps Script -----------------------------------------------------------
+
+
+def script_service():
+    # Named-attribute stubbing only (see calendar_service): a tool's own getContent /
+    # updateContent / run call must be the first one recorded for it.
+    service = mock.MagicMock()
+    service.projects.return_value.getContent.return_value.execute.return_value = {
+        "scriptId": "script-1",
+        "files": [{"name": "Code", "type": "SERVER_JS", "source": "old"}],
+    }
+    service.projects.return_value.updateContent.return_value.execute.return_value = {
+        "scriptId": "script-1",
+        "files": [{"name": "Code", "type": "SERVER_JS", "source": "new"}],
+    }
+    service.scripts.return_value.run.return_value.execute.return_value = {
+        "response": {"result": "ok"}
+    }
+    return service
+
+
+class AppsScriptGuardTests(unittest.TestCase):
+    MESSAGE = "Apps Script can send mail or share files"
+
+    def run_update_file(self, service):
+        with mock.patch.object(
+            apps_script_mod, "get_script_service", return_value=service
+        ):
+            return asyncio.run(
+                apps_script_mod.apps_script_update_file("script-1", "Code", "x = 1")
+            )
+
+    def run_update_content(self, service):
+        with mock.patch.object(
+            apps_script_mod, "get_script_service", return_value=service
+        ):
+            return asyncio.run(
+                apps_script_mod.apps_script_update_content(
+                    "script-1",
+                    [{"name": "appsscript", "type": "JSON", "source": "{}"}],
+                )
+            )
+
+    def run_script(self, service):
+        with mock.patch.object(
+            apps_script_mod, "get_script_service", return_value=service
+        ):
+            return asyncio.run(apps_script_mod.apps_script_run("script-1", "main"))
+
+    def run_get_content(self, service):
+        with mock.patch.object(
+            apps_script_mod, "get_script_service", return_value=service
+        ):
+            return asyncio.run(apps_script_mod.apps_script_get_content("script-1"))
+
+    def test_every_write_and_run_tool_is_refused_when_the_guard_is_on(self):
+        for runner in (
+            self.run_update_file,
+            self.run_update_content,
+            self.run_script,
+        ):
+            service = script_service()
+            with gws_env(GWS_OUTBOUND_GUARD="1"):
+                result = runner(service)
+            self.assertFalse(result["success"], runner.__name__)
+            self.assertIn(self.MESSAGE, result["error"], runner.__name__)
+            # Refused before any API call: neither a read nor a write happened.
+            service.projects.return_value.getContent.assert_not_called()
+            service.projects.return_value.updateContent.assert_not_called()
+            service.scripts.return_value.run.assert_not_called()
+
+    def test_the_guard_off_leaves_every_tool_unchanged(self):
+        service = script_service()
+        with gws_env():
+            self.assertTrue(self.run_update_file(service)["success"])
+            self.assertTrue(self.run_update_content(service)["success"])
+            self.assertTrue(self.run_script(service)["success"])
+
+    def test_reading_source_stays_available_while_the_guard_is_on(self):
+        service = script_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1"):
+            result = self.run_get_content(service)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["file_count"], 1)
+
+
+# --- Forms shim ------------------------------------------------------------
+
+CONFIGURED_SHIM = "shim-configured"
+
+
+def forms_service(linked_sheet_id="sheet-1"):
+    service = mock.MagicMock()
+    service.forms.return_value.get.return_value.execute.return_value = {
+        "formId": "form-1",
+        "linkedSheetId": linked_sheet_id,
+    }
+    return service
+
+
+class FormsShimGuardTests(unittest.TestCase):
+    MARKER = "GWS_FORMS_SHIM_SCRIPT_ID"
+
+    def run_set(self, script, forms_svc, **kwargs):
+        with mock.patch.object(
+            forms_mod, "get_script_service", return_value=script
+        ), mock.patch.object(forms_mod, "get_forms_service", return_value=forms_svc):
+            return asyncio.run(
+                forms_mod.forms_set_destination("form-1", "sheet-1", **kwargs)
+            )
+
+    def test_a_foreign_shim_is_refused_when_the_guard_is_on(self):
+        script = script_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_FORMS_SHIM_SCRIPT_ID=CONFIGURED_SHIM):
+            result = self.run_set(script, forms_service(), shim_script_id="other-shim")
+        self.assertFalse(result["success"])
+        self.assertIn("other-shim", result["error"])
+        self.assertIn(self.MARKER, result["error"])
+        script.scripts.return_value.run.assert_not_called()
+
+    def test_a_caller_supplied_shim_is_refused_when_none_is_configured(self):
+        script = script_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1"):
+            result = self.run_set(script, forms_service(), shim_script_id="other-shim")
+        self.assertFalse(result["success"])
+        script.scripts.return_value.run.assert_not_called()
+
+    def test_the_configured_shim_still_runs_when_the_guard_is_on(self):
+        script = script_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_FORMS_SHIM_SCRIPT_ID=CONFIGURED_SHIM):
+            result = self.run_set(script, forms_service())
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            script.scripts().run.call_args.kwargs["scriptId"], CONFIGURED_SHIM
+        )
+
+    def test_naming_the_configured_shim_explicitly_is_allowed(self):
+        script = script_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_FORMS_SHIM_SCRIPT_ID=CONFIGURED_SHIM):
+            result = self.run_set(
+                script, forms_service(), shim_script_id=CONFIGURED_SHIM
+            )
+        self.assertTrue(result["success"])
+        script.scripts().run.assert_called_once()
+
+    def test_the_guard_off_accepts_a_caller_supplied_shim(self):
+        script = script_service()
+        with gws_env():
+            result = self.run_set(script, forms_service(), shim_script_id="any-shim")
+        self.assertTrue(result["success"])
+        self.assertEqual(script.scripts().run.call_args.kwargs["scriptId"], "any-shim")
 
 
 if __name__ == "__main__":
