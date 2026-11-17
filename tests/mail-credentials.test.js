@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
-import { MAIL_DDL } from "../servers/shared/mail-schema.js";
+import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS } from "../servers/shared/mail-schema.js";
 import { MAIL_ERROR_TEXT, MailError } from "../servers/gateway/mail/errors.js";
 import { createAccount } from "../servers/gateway/mail/store/accounts.js";
 import {
@@ -39,6 +39,10 @@ const freshHome = () => tmp("crow-mail-cred-home-");
 async function freshDb() {
   const db = createDbClient(join(tmp("crow-mail-cred-db-"), "crow.db"));
   await db.executeMultiple(MAIL_DDL);
+  // The account send columns (plan 3's A3) are ADD COLUMN specs of their own, not part of MAIL_DDL.
+  for (const spec of MAIL_ACCOUNT_SEND_COLUMNS) {
+    await db.execute({ sql: `ALTER TABLE ${spec.table} ADD COLUMN ${spec.column} ${spec.definition}`, args: [] });
+  }
   return db;
 }
 

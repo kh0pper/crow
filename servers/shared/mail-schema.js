@@ -175,3 +175,104 @@ export const MAIL_TABLES = Object.freeze([
   "mail_sync_state",
   "mail_image_allow",
 ]);
+
+// Crow Mail's draft card tables: the draft (one row per card), its immutable revisions (one row per
+// version a bot or the person wrote), the person's comments and the voice note for a revision. These
+// are a separate constant because 0027 executes MAIL_DDL and its approved shape stays exactly as it
+// is: scripts/init-db.js runs this string as "mail draft tables" and
+// scripts/migrations/0030-mail-drafts.mjs runs the same string — one shape, two rails.
+//
+// Epoch-ms times; modes, states, tap actions, revision authors and comment states are validated in
+// the draft store (servers/gateway/mail/drafts/store.js), never by a CHECK. No foreign keys: the
+// store removes one draft's rows itself. mail_draft_revisions and mail_draft_voice rows are written
+// once and never updated, which is what makes a revision the thing the person actually read.
+// LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES): a draft holds the recipients and the body, and a
+// voice note holds the operator's speech, so none of it leaves this instance. Additive, no
+// SCHEMA_GENERATION bump.
+//
+// The three mail_drafts indexes are the ones the send sweep needs: due schedules by state, the
+// ten-second holds by state, and the chat card's lookup by its chat thread. reconcile_count counts
+// the Sent-folder checks run for an `unknown` row.
+export const MAIL_DRAFTS_DDL = `
+  CREATE TABLE IF NOT EXISTS mail_drafts (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    reply_to_mid TEXT,
+    thread_key TEXT,
+    project_id INTEGER,
+    bot_id TEXT,
+    chat_thread_id TEXT,
+    audience TEXT,
+    state TEXT NOT NULL,
+    head_rev INTEGER NOT NULL,
+    head_hash TEXT NOT NULL,
+    due_at INTEGER,
+    hold_until INTEGER,
+    message_id TEXT,
+    claim_token TEXT,
+    claimed_at INTEGER,
+    attempt_at INTEGER,
+    tap_seal TEXT,
+    tap_id TEXT,
+    tap_action TEXT,
+    attach_digest TEXT,
+    reconcile_count INTEGER NOT NULL DEFAULT 0,
+    next_reconcile_at INTEGER,
+    sent_at INTEGER,
+    fail_reason TEXT,
+    notified_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_mail_drafts_state_due ON mail_drafts(state, due_at);
+  CREATE INDEX IF NOT EXISTS idx_mail_drafts_state_hold ON mail_drafts(state, hold_until);
+  CREATE INDEX IF NOT EXISTS idx_mail_drafts_chat_thread ON mail_drafts(chat_thread_id);
+
+  CREATE TABLE IF NOT EXISTS mail_draft_revisions (
+    draft_id TEXT NOT NULL,
+    rev INTEGER NOT NULL,
+    author TEXT NOT NULL,
+    to_json TEXT NOT NULL,
+    cc_json TEXT NOT NULL,
+    bcc_json TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    in_reply_to TEXT,
+    references_json TEXT,
+    attachments_json TEXT NOT NULL,
+    from_json TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    note TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (draft_id, rev)
+  );
+
+  CREATE TABLE IF NOT EXISTS mail_draft_voice (
+    draft_id TEXT NOT NULL,
+    rev INTEGER NOT NULL,
+    voice_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (draft_id, rev)
+  );
+
+  CREATE TABLE IF NOT EXISTS mail_draft_comments (
+    id TEXT PRIMARY KEY,
+    draft_id TEXT NOT NULL,
+    rev INTEGER NOT NULL,
+    line_index INTEGER,
+    quote TEXT,
+    text TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+`;
+
+export const MAIL_DRAFT_TABLES = Object.freeze([
+  "mail_drafts",
+  "mail_draft_revisions",
+  "mail_draft_voice",
+  "mail_draft_comments",
+]);

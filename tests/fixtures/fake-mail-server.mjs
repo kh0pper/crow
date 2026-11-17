@@ -13,7 +13,8 @@
  * ENABLE, no MODSEQ fetch items, a `* SEARCH 1 2 3` answer and an LSUB for the subscription state
  * that rev1 does not carry inline, and a move is its COPY + `\Deleted` + EXPUNGE fallback rather
  * than MOVE. UID MOVE and UID EXPUNGE are answered anyway, for a client that asks for them, and
- * `options.capabilities` advertises more (`MOVE` names the server's own MOVE command) so a test can
+ * `options.capabilities` advertises more (`MOVE` names the server's own MOVE command, `UIDPLUS` makes
+ * an APPEND answer `[APPENDUID <uidvalidity> <uid>]`) so a test can
  * take that path too. `omitUidNext`
  * models the servers that leave UIDNEXT out of a SELECT and answer it only in a STATUS. EXAMINE
  * opens a mailbox read-only, so a flag change inside it is refused; mailbox names go out as
@@ -744,7 +745,9 @@ export async function createFakeImapServer(options = {}) {
         box.messages.push({ uid, raw, flags: new Set(flags), internalDate: new Date() });
         state.appended.push({ mailbox: box.path, flags: [...flags], raw: Buffer.from(raw) });
         notify(box, `* ${box.messages.length} EXISTS`);
-        write(conn, `${tag} OK APPEND completed`);
+        // RFC 4315: with UIDPLUS advertised, an APPEND names the message it created.
+        const appendedUid = advertised.includes("UIDPLUS") ? ` [APPENDUID ${box.uidValidity} ${uid}]` : "";
+        write(conn, `${tag} OK${appendedUid} APPEND completed`);
         return;
       }
 

@@ -107,10 +107,10 @@ test("assertAdapter accepts the fake and names the method an adapter is missing"
   assert.throws(() => assertAdapter({}), (err) => /connect/.test(err.message));
 });
 
-test("the method list is the eleven the plan names, in order", () => {
+test("the method list is the twelve the plan names, in order", () => {
   assert.deepEqual([...ADAPTER_METHODS], [
     "connect", "close", "listFolders", "list", "get", "search", "saveDraft", "send",
-    "setFlags", "move", "watch",
+    "appendToSent", "setFlags", "move", "watch",
   ]);
   assert.ok(Object.isFrozen(ADAPTER_METHODS));
 });
@@ -323,7 +323,8 @@ test("validateOutgoing keeps only the allowed fields, so nothing else can reach 
     attachments: [{ filename: "notes.txt", contentType: "text/plain", content: Buffer.from("x") }],
   }));
   assert.deepEqual(Object.keys(out).sort(), [
-    "attachments", "bcc", "cc", "from", "html", "inReplyTo", "references", "subject", "text", "to",
+    "attachments", "bcc", "cc", "from", "html", "inReplyTo", "messageId", "references", "subject",
+    "text", "to",
   ]);
   assert.deepEqual(out.bcc, [{ name: null, address: "lee@example.com" }]);
   assert.equal(out.inReplyTo, "<parent@example.com>");

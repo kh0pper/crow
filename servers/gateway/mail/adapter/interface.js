@@ -1,5 +1,5 @@
 /**
- * Crow Mail's provider-neutral adapter: the eleven methods a mailbox implementation offers, the shape
+ * Crow Mail's provider-neutral adapter: the twelve methods a mailbox implementation offers, the shape
  * of each answer, and `validateOutgoing` — the one rule an outgoing message passes before any
  * implementation touches it.
  *
@@ -45,6 +45,20 @@
  * Crow has no other flag of its own — and both calls take at most 100 UIDs, so one action is one
  * command line.
  *
+ * The two appends are the contract's writes that create a message rather than change one. `saveDraft`
+ * files the caller's bytes as a `\Draft` in the `\Drafts` folder; `appendToSent` files a copy of a
+ * message that has already gone out as `\Seen` in the `\Sent` folder. Both take their folder from the
+ * same resolution: the mailbox the server flags with the special-use attribute or, when the server
+ * flags none, the one imapflow itself identifies by its name (imapflow reports such a flag with
+ * `specialUseSource: "name"`). A server with neither gives `NOT_FOUND` — with the copy filed nowhere —
+ * rather than a folder Crow picked for itself. Neither is a send: nothing in the contract decides
+ * whether a message leaves Crow.
+ *
+ * A message id is the one header a caller may set: absent, the implementation makes its own (the
+ * IMAP adapter derives it from the From address); present, it is used as given, so the copy Crow
+ * stores and the copy that is transmitted can carry the same one. It passes the same rule as
+ * `inReplyTo` — one `<token>`, no whitespace, no second bracket, no control character.
+ *
  * @typedef {{name: string|null, address: string}} AdapterAddress
  * @typedef {{path: string, name: string, specialUse: string|null, delimiter: string,
  *            selectable: boolean}} AdapterFolder
@@ -57,7 +71,7 @@
  * @typedef {{moved: number}} AdapterMoveResult
  * @typedef {{from: AdapterAddress, to: AdapterAddress[], cc?: AdapterAddress[],
  *            bcc?: AdapterAddress[], subject: string, text: string, html?: string|null,
- *            inReplyTo?: string|null, references?: string[],
+ *            inReplyTo?: string|null, references?: string[], messageId?: string|null,
  *            attachments?: {filename: string, contentType: string,
  *                           content: Buffer|Uint8Array|string}[]}} OutgoingMessage
  */
@@ -74,6 +88,7 @@ export const ADAPTER_METHODS = Object.freeze([
   "search",
   "saveDraft",
   "send",
+  "appendToSent",
   "setFlags",
   "move",
   "watch",
@@ -81,7 +96,8 @@ export const ADAPTER_METHODS = Object.freeze([
 
 /** A field of an OutgoingMessage; anything else in the object is refused (see validateOutgoing). */
 const OUTGOING_KEYS = new Set([
-  "from", "to", "cc", "bcc", "subject", "text", "html", "inReplyTo", "references", "attachments",
+  "from", "to", "cc", "bcc", "subject", "text", "html", "inReplyTo", "references", "messageId",
+  "attachments",
 ]);
 const ATTACHMENT_KEYS = new Set(["filename", "contentType", "content"]);
 const RECIPIENT_KEYS = new Set(["name", "address"]);
@@ -147,8 +163,16 @@ export function assertAdapter(obj) {
  * test runs before that trim, so a trailing `\n` or a leading `\r` is refused instead of being
  * trimmed away and forgotten; anything the strict parser reads back differently — a display name
  * (`Sam <sam@x>`), a group, a second address, or a bare `>` — is refused too.
+ *
+ * Exported because it is the rule for every address the store holds, not only for the ones a message
+ * carries: an account's aliases are compared with an address and shown as one, so they are read back
+ * by the same parser and refused by the same rule.
+ *
+ * @param {unknown} value
+ * @param {string} detail the field a refusal names
+ * @returns {string} the address, lower-cased and trimmed
  */
-function oneAddress(value, detail) {
+export function validateAddress(value, detail) {
   if (typeof value !== "string") fail(detail);
   if (CONTROL_CHARS.test(value)) fail(detail);
   const trimmed = value.trim();
@@ -169,12 +193,12 @@ function cleanName(value, detail) {
 
 /** One recipient: `{name?, address}` (or a bare address string, which is the same thing unnamed). */
 function oneRecipient(entry, detail) {
-  if (typeof entry === "string") return { name: null, address: oneAddress(entry, detail) };
+  if (typeof entry === "string") return { name: null, address: validateAddress(entry, detail) };
   if (entry == null || typeof entry !== "object") fail(detail);
   for (const key of Object.keys(entry)) {
     if (!RECIPIENT_KEYS.has(key)) fail(detail);
   }
-  return { name: cleanName(entry.name, detail), address: oneAddress(entry.address, detail) };
+  return { name: cleanName(entry.name, detail), address: validateAddress(entry.address, detail) };
 }
 
 function addressList(value, detail, { required = false } = {}) {
@@ -264,7 +288,7 @@ export function validateOutgoing(message) {
   }
 
   const validated = {
-    from: { name: cleanName(from.name, "from"), address: oneAddress(from.address, "from") },
+    from: { name: cleanName(from.name, "from"), address: validateAddress(from.address, "from") },
     to: addressList(message.to, "to", { required: true }),
     cc: addressList(message.cc, "cc"),
     bcc: addressList(message.bcc, "bcc"),
@@ -273,6 +297,8 @@ export function validateOutgoing(message) {
     html: message.html == null ? null : bodyPart(message.html, "html"),
     inReplyTo: message.inReplyTo == null ? null : oneMessageId(message.inReplyTo, "inReplyTo"),
     references: idList(message.references, "references", MAX_REFERENCES),
+    // Absent leaves the implementation's own id in place, which is what a first message wants.
+    messageId: message.messageId == null ? null : oneMessageId(message.messageId, "messageId"),
     attachments: attachmentList(message.attachments),
   };
   if (!validated.text && !validated.html) fail("body");

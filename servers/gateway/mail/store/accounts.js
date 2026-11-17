@@ -13,13 +13,29 @@
  *
  * Times are epoch ms from Date.now(). The plan's later stores add to this module's exports; nothing
  * here is special-cased for a caller.
+ *
+ * Three fields carry what an account is for sending (0029's ADD COLUMNs, so a store from before them
+ * reads their defaults): `displayName` is the name that goes on From and is null until the operator
+ * names the account, `aliases` are its other addresses (used by reply-all, stored as a JSON array) and
+ * `sentCopy` says how the Sent copy is kept — `provider` when the provider files it, `append` when Crow
+ * appends it. All three are validated here, like every other column.
+ *
+ * `deleteAccount` runs every hook registered with `onAccountDeleting` before it opens its transaction.
+ * A hook that throws aborts the delete, so a caller that must stop a removal (a scheduled send still
+ * waiting, a secret in flight) refuses it by throwing rather than by racing the cascade.
  */
 import { randomBytes } from "node:crypto";
 import { MailError } from "../errors.js";
+import { validateAddress } from "../adapter/interface.js";
 
 export const MAIL_ACCOUNT_STATUSES = Object.freeze(["active", "auth_failed", "claimed_elsewhere"]);
 export const MAIL_AUTH_KINDS = Object.freeze(["password", "xoauth2"]);
 export const MAIL_SECURITIES = Object.freeze(["ssl", "starttls", "none"]);
+/** How an account's Sent copy is kept: the provider files it, or Crow appends one after a send. */
+export const MAIL_SENT_COPY_VALUES = Object.freeze(["provider", "append"]);
+
+/** The most other addresses one account may carry: reply-all reads them, a person types them. */
+const MAX_ALIASES = 50;
 
 /** A plaintext connection is only defensible to a server on this machine. */
 const PLAINTEXT_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -30,7 +46,7 @@ const DUPLICATE_ADDRESS_RE = /UNIQUE constraint failed: mail_accounts\.address/i
 
 const UPDATE_FIELDS = new Set([
   "label", "status", "statusDetail", "windowDays", "localModelsOnly", "digestOptIn", "digestTime",
-  "lastSyncAt",
+  "lastSyncAt", "displayName", "aliases", "sentCopy",
 ]);
 const SYNC_STATE_FIELDS = new Set([
   "state", "errorCode", "failures", "backoffUntil", "lastSuccessAt", "lastNoticeAt",
@@ -38,7 +54,8 @@ const SYNC_STATE_FIELDS = new Set([
 
 const ACCOUNT_COLUMNS = `id, address, label, provider, imap_host, imap_port, imap_security,
   smtp_host, smtp_port, smtp_security, username, auth_kind, status, status_detail, window_days,
-  local_models_only, digest_opt_in, digest_time, created_at, updated_at, last_sync_at`;
+  local_models_only, digest_opt_in, digest_time, display_name, aliases_json, sent_copy, created_at,
+  updated_at, last_sync_at`;
 
 const SYNC_STATE_COLUMNS = `account_id, state, error_code, failures, backoff_until, last_success_at,
   last_notice_at`;
@@ -149,6 +166,58 @@ function normalizeFlag(value, field) {
   return value ? 1 : 0;
 }
 
+/** A display name is header text: a control character is removed rather than carried to a header. */
+function normalizeDisplayName(value) {
+  if (value == null) return null;
+  if (typeof value !== "string") fail("display_name");
+  // The same characters `validateOutgoing` strips from a From name, and for the same reason: a CR/LF
+  // in it would be a header line, not padding.
+  const name = value.replace(/[\u0000-\u001f\u007f\u0080-\u009f\u2028\u2029]/g, "").trim();
+  if (!name) return null;
+  if (name.length > 120) fail("display_name");
+  return name;
+}
+
+/**
+ * The account's other addresses, each one a clean addr-spec by the rule `validateOutgoing` applies to
+ * an address — the same parser, so a display name, a group, a second address or a control character is
+ * refused rather than read back as something else. Angle brackets and quotes are refused on top of
+ * that: an alias is an address the account answers to, never a header form, and no such address is
+ * ever written with a quoted local part. They are lower-cased and named once, so a reply-all compares
+ * them the way the address column is compared, and they are stored as a JSON array. At most
+ * `MAX_ALIASES`; a longer list is refused whole rather than cut short.
+ */
+function normalizeAliases(value) {
+  if (!Array.isArray(value)) fail("aliases");
+  if (value.length > MAX_ALIASES) fail("aliases");
+  const aliases = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") fail("aliases");
+    if (/["<>]/.test(entry)) fail("aliases");
+    const address = validateAddress(entry, "aliases");
+    if (!aliases.includes(address)) aliases.push(address);
+  }
+  return aliases;
+}
+
+/** `sent_copy` is one of two words; anything else is refused rather than stored and read as one. */
+function normalizeSentCopy(value) {
+  if (!MAIL_SENT_COPY_VALUES.includes(value)) fail("sent_copy");
+  return value;
+}
+
+/** A stored alias list, as the array the Account carries; a row nothing wrote reads as no aliases. */
+function parseAliases(json) {
+  if (typeof json !== "string" || !json) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  return Array.isArray(parsed) ? parsed.filter((entry) => typeof entry === "string") : [];
+}
+
 function normalizeTime(value, field) {
   if (value == null) return null;
   if (!Number.isInteger(value) || value < 0) fail(field);
@@ -180,6 +249,11 @@ function rowToAccount(row) {
     localModelsOnly: Boolean(row.local_models_only),
     digestOptIn: Boolean(row.digest_opt_in),
     digestTime: row.digest_time,
+    displayName: row.display_name ?? null,
+    aliases: parseAliases(row.aliases_json),
+    // A stored value that is not one of the two modes (a hand edit, a restored copy) reads as the
+    // default rather than as a third mode the rest of the code would have to know about.
+    sentCopy: MAIL_SENT_COPY_VALUES.includes(row.sent_copy) ? row.sent_copy : "provider",
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
     lastSyncAt: row.last_sync_at == null ? null : Number(row.last_sync_at),
@@ -203,8 +277,10 @@ function rowToSyncState(row) {
 
 /**
  * Create one account. Only the columns the caller supplies are written; status, window and digest
- * defaults come from MAIL_DDL so the schema stays the single source of truth. A second row with the
- * same address in any case is refused by the UNIQUE COLLATE NOCASE column and surfaces as BAD_INPUT.
+ * defaults come from MAIL_DDL, and the send fields (no display name, no aliases, `provider`) come from
+ * MAIL_ACCOUNT_SEND_COLUMNS' own defaults, so the schema stays the single source of truth — a new
+ * account is named and given its Sent-copy rule by `updateAccount`. A second row with the same address
+ * in any case is refused by the UNIQUE COLLATE NOCASE column and surfaces as BAD_INPUT.
  */
 export async function createAccount(db, input = {}) {
   const address = normalizeAddress(input.address);
@@ -306,6 +382,18 @@ export async function updateAccount(db, id, patch = {}) {
         sets.push("last_sync_at = ?");
         args.push(normalizeTime(value, "last_sync_at"));
         break;
+      case "displayName":
+        sets.push("display_name = ?");
+        args.push(normalizeDisplayName(value));
+        break;
+      case "aliases":
+        sets.push("aliases_json = ?");
+        args.push(JSON.stringify(normalizeAliases(value)));
+        break;
+      case "sentCopy":
+        sets.push("sent_copy = ?");
+        args.push(normalizeSentCopy(value));
+        break;
       default:
         fail("field");
     }
@@ -318,15 +406,53 @@ export async function updateAccount(db, id, patch = {}) {
   return getAccount(db, id);
 }
 
+/* --------------------------------------------------------------- removal hooks */
+
+/**
+ * Every hook registered with `onAccountDeleting`, in the order it was registered. Module state, like
+ * the add-on registries elsewhere: a hook is registered once at boot by the code that must speak before
+ * an account goes. A `Set`, so registering the same function twice (a module loaded twice, a test that
+ * re-registers) is still one hook that runs once.
+ */
+const accountDeletingHooks = new Set();
+
+/**
+ * Register `fn(db, accountId)`, which `deleteAccount` awaits before it opens its transaction. A hook
+ * that throws aborts the delete and nothing is removed, so this is how a caller refuses a removal it
+ * cannot let happen. Answers an unsubscribe function, so a caller (or a test) can take its hook back.
+ *
+ * @param {(db: object, accountId: string) => unknown} fn
+ * @returns {() => void}
+ */
+export function onAccountDeleting(fn) {
+  if (typeof fn !== "function") throw new TypeError("onAccountDeleting needs a function");
+  accountDeletingHooks.add(fn);
+  return () => {
+    accountDeletingHooks.delete(fn);
+  };
+}
+
+/** Drop every registered hook. The seam a test uses between cases; nothing in the app calls it. */
+export function _resetAccountDeletingHooksForTests() {
+  accountDeletingHooks.clear();
+}
+
 /**
  * Remove one account and everything that belongs to it, in one transaction. `mail_messages` goes
  * first so the FTS delete trigger removes the index entries; `mail_messages_fts` is never written
  * directly. The keychain is NOT touched here — the caller owns the secret's lifetime.
  *
+ * The registered removal hooks run first, awaited one after another, while the account and its rows are
+ * still whole; the first one that throws ends the delete with nothing removed. Only then does the
+ * synchronous transaction open — a transaction callback may not await, so a hook cannot run inside it.
+ *
  * @returns {Promise<{messages: number}>} how many message rows were removed
  */
 export async function deleteAccount(db, id) {
   normalizeId(id, "id");
+  for (const hook of [...accountDeletingHooks]) {
+    await hook(db, id);
+  }
   return db.runTransaction((run) => {
     const read = run({ sql: "SELECT COUNT(*) AS n FROM mail_messages WHERE account_id = ?", args: [id] });
     const messages = Number(read.rows[0]?.n ?? 0);

@@ -278,6 +278,23 @@ const STEPS = [
     },
   },
   {
+    name: "appendToSent stores the raw copy in the sent folder with \\Seen",
+    methods: ["appendToSent", "get"],
+    hooks: [],
+    async run({ adapter }) {
+      const raw = rawMessage({ subject: "sent copy", body: "sent body marker" });
+      const copy = await adapter.appendToSent(raw);
+      assert.equal(typeof copy.folderPath, "string");
+      assert.ok(copy.uid == null || Number.isInteger(copy.uid), "uid is a uid or null");
+      if (copy.uid == null) return; // a server without UIDPLUS cannot name the appended message
+      const [stored] = await adapter.get(copy.folderPath, [copy.uid]);
+      assert.ok(stored, "the copy is fetchable at the uid it was appended as");
+      assert.match(stored.raw.toString("utf8"), /sent body marker/);
+      assert.ok(stored.flags.includes("\\Seen"), "the sent copy is marked seen");
+      assert.equal(stored.flags.includes("\\Draft"), false, "and it is not a draft");
+    },
+  },
+  {
     name: "send returns a messageId and the addresses it accepted",
     methods: ["send"],
     hooks: [],

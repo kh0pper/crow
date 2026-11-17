@@ -12,7 +12,7 @@ import {
   SERVICE_CONNECTIONS_DDL, CHAT_PROJECT_COLUMN, KEYCHAIN_CONNECTION_COLUMN, KEYCHAIN_SERVICE_INDEX_DDL,
 } from "../servers/shared/project-services-schema.js";
 import { SATELLITE_DDL } from "../servers/shared/satellite-schema.js";
-import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS } from "../servers/shared/mail-schema.js";
+import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS, MAIL_DRAFTS_DDL } from "../servers/shared/mail-schema.js";
 import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL, NOTE_WITHDRAWAL_COLUMNS } from "../servers/research/provenance-schema.js";
 
 // Ensure data directory exists
@@ -3098,6 +3098,14 @@ await initTable("mail tables", MAIL_DDL);
 for (const spec of MAIL_ACCOUNT_SEND_COLUMNS) {
   await addColumnIfMissing(spec.table, spec.column, spec.definition);
 }
+
+// mail draft tables (plan 3): the draft card's own store — the draft, its immutable revisions, the
+// voice note for a revision and the person's comments (servers/gateway/mail/drafts/*). Epoch-ms
+// times; modes and states are validated in the draft store (no CHECK). LOCAL ONLY (instance-sync
+// LOCAL_ONLY_TABLES): a draft holds the recipients and the body. Same DDL as MAIL_DRAFTS_DDL in
+// servers/shared/mail-schema.js, which scripts/migrations/0030-mail-drafts.mjs also runs — one shape,
+// two rails; additive, no SCHEMA_GENERATION bump. MAIL_DDL is untouched, because 0027 executes it.
+await initTable("mail draft tables", MAIL_DRAFTS_DDL);
 
 // staged_sends: one row per provider draft a bot staged for the operator's yes (spec §12;
 // servers/gateway/staged/store.js). LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES): it holds the

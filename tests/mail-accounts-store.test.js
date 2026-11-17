@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
-import { MAIL_DDL } from "../servers/shared/mail-schema.js";
+import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS } from "../servers/shared/mail-schema.js";
 import { MailError, MAIL_ERROR_CODES, MAIL_ERROR_TEXT, toMailError } from "../servers/gateway/mail/errors.js";
 import {
   MAIL_ACCOUNT_STATUSES, createAccount, getAccount, listAccounts, updateAccount, deleteAccount,
@@ -22,6 +22,10 @@ async function freshDb() {
   dirs.push(dir);
   const db = createDbClient(join(dir, "crow.db"));
   await db.executeMultiple(MAIL_DDL);
+  // The account send columns (plan 3's A3) are ADD COLUMN specs of their own, not part of MAIL_DDL.
+  for (const spec of MAIL_ACCOUNT_SEND_COLUMNS) {
+    await db.execute({ sql: `ALTER TABLE ${spec.table} ADD COLUMN ${spec.column} ${spec.definition}`, args: [] });
+  }
   return db;
 }
 
@@ -224,9 +228,9 @@ test("createAccount lower-cases and trims the address and mints a ma- id", async
   assert.equal(account.createdAt, account.updatedAt);
 
   assert.deepEqual(Object.keys(account).sort(), [
-    "address", "authKind", "createdAt", "digestOptIn", "digestTime", "id", "imap", "label",
-    "lastSyncAt", "localModelsOnly", "provider", "smtp", "status", "statusDetail", "updatedAt",
-    "username", "windowDays",
+    "address", "aliases", "authKind", "createdAt", "digestOptIn", "digestTime", "displayName", "id",
+    "imap", "label", "lastSyncAt", "localModelsOnly", "provider", "sentCopy", "smtp", "status",
+    "statusDetail", "updatedAt", "username", "windowDays",
   ], "the account object is exactly the camelCase shape, with no secret field");
 
   assert.deepEqual(await getAccount(db, account.id), account, "reading it back gives the same object");
